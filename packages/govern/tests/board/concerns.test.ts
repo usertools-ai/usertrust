@@ -1,13 +1,13 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
+	type BoardRequest,
+	detectBias,
 	detectConcerns,
 	detectHallucination,
-	detectBias,
+	detectPolicyViolation,
+	detectResourceAbuse,
 	detectSafety,
 	detectScopeCreep,
-	detectResourceAbuse,
-	detectPolicyViolation,
-	type BoardRequest,
 } from "../../src/board/concerns.js";
 
 // ── Helpers ──
@@ -26,20 +26,16 @@ function makeRequest(overrides: Partial<BoardRequest> = {}): BoardRequest {
 
 describe("detectHallucination", () => {
 	it("flags absolute 'always' claims", () => {
-		const concern = detectHallucination(
-			makeRequest({ description: "This should always work" }),
-		);
+		const concern = detectHallucination(makeRequest({ description: "This should always work" }));
 		expect(concern).not.toBeNull();
-		expect(concern!.type).toBe("hallucination");
-		expect(concern!.severity).toBe("medium");
+		expect(concern?.type).toBe("hallucination");
+		expect(concern?.severity).toBe("medium");
 	});
 
 	it("flags absolute 'never' claims", () => {
-		const concern = detectHallucination(
-			makeRequest({ description: "This will never fail" }),
-		);
+		const concern = detectHallucination(makeRequest({ description: "This will never fail" }));
 		expect(concern).not.toBeNull();
-		expect(concern!.type).toBe("hallucination");
+		expect(concern?.type).toBe("hallucination");
 	});
 
 	it("flags policy override without justification", () => {
@@ -47,7 +43,7 @@ describe("detectHallucination", () => {
 			makeRequest({ decisionType: "policy_override", context: {} }),
 		);
 		expect(concern).not.toBeNull();
-		expect(concern!.severity).toBe("high");
+		expect(concern?.severity).toBe("high");
 	});
 
 	it("allows policy override with justification", () => {
@@ -61,9 +57,7 @@ describe("detectHallucination", () => {
 	});
 
 	it("returns null for benign description", () => {
-		const concern = detectHallucination(
-			makeRequest({ description: "Minor refactoring of utils" }),
-		);
+		const concern = detectHallucination(makeRequest({ description: "Minor refactoring of utils" }));
 		expect(concern).toBeNull();
 	});
 });
@@ -79,8 +73,8 @@ describe("detectBias", () => {
 			}),
 		);
 		expect(concern).not.toBeNull();
-		expect(concern!.type).toBe("bias");
-		expect(concern!.evidence).toContain("worker-alpha");
+		expect(concern?.type).toBe("bias");
+		expect(concern?.evidence).toContain("worker-alpha");
 	});
 
 	it("ignores preferred worker outside scope expansion", () => {
@@ -94,9 +88,7 @@ describe("detectBias", () => {
 	});
 
 	it("returns null when no preferred worker", () => {
-		const concern = detectBias(
-			makeRequest({ decisionType: "scope_expansion" }),
-		);
+		const concern = detectBias(makeRequest({ decisionType: "scope_expansion" }));
 		expect(concern).toBeNull();
 	});
 });
@@ -105,26 +97,20 @@ describe("detectBias", () => {
 
 describe("detectSafety", () => {
 	it("flags 'password' in description", () => {
-		const concern = detectSafety(
-			makeRequest({ description: "Update password hashing" }),
-		);
+		const concern = detectSafety(makeRequest({ description: "Update password hashing" }));
 		expect(concern).not.toBeNull();
-		expect(concern!.type).toBe("safety");
-		expect(concern!.severity).toBe("high");
+		expect(concern?.type).toBe("safety");
+		expect(concern?.severity).toBe("high");
 	});
 
 	it("flags 'secret' in scope", () => {
-		const concern = detectSafety(
-			makeRequest({ scope: [".env.secret", "src/config.ts"] }),
-		);
+		const concern = detectSafety(makeRequest({ scope: [".env.secret", "src/config.ts"] }));
 		expect(concern).not.toBeNull();
-		expect(concern!.type).toBe("safety");
+		expect(concern?.type).toBe("safety");
 	});
 
 	it("flags 'credential' in scope", () => {
-		const concern = detectSafety(
-			makeRequest({ scope: ["credentials.json"] }),
-		);
+		const concern = detectSafety(makeRequest({ scope: ["credentials.json"] }));
 		expect(concern).not.toBeNull();
 	});
 
@@ -136,9 +122,7 @@ describe("detectSafety", () => {
 	});
 
 	it("handles undefined scope", () => {
-		const concern = detectSafety(
-			makeRequest({ scope: undefined, description: "Safe change" }),
-		);
+		const concern = detectSafety(makeRequest({ scope: undefined, description: "Safe change" }));
 		expect(concern).toBeNull();
 	});
 });
@@ -149,8 +133,8 @@ describe("detectScopeCreep", () => {
 	it("flags root-level ** wildcard", () => {
 		const concern = detectScopeCreep(makeRequest({ scope: ["**"] }));
 		expect(concern).not.toBeNull();
-		expect(concern!.type).toBe("scope_creep");
-		expect(concern!.severity).toBe("medium");
+		expect(concern?.type).toBe("scope_creep");
+		expect(concern?.severity).toBe("medium");
 	});
 
 	it("allows scoped ** wildcard", () => {
@@ -162,8 +146,8 @@ describe("detectScopeCreep", () => {
 		const scope = Array.from({ length: 11 }, (_, i) => `file${i}.ts`);
 		const concern = detectScopeCreep(makeRequest({ scope }));
 		expect(concern).not.toBeNull();
-		expect(concern!.severity).toBe("high");
-		expect(concern!.evidence).toContain("11");
+		expect(concern?.severity).toBe("high");
+		expect(concern?.evidence).toContain("11");
 	});
 
 	it("allows scope with 10 or fewer patterns", () => {
@@ -189,9 +173,9 @@ describe("detectResourceAbuse", () => {
 			}),
 		);
 		expect(concern).not.toBeNull();
-		expect(concern!.type).toBe("resource_abuse");
-		expect(concern!.severity).toBe("high");
-		expect(concern!.evidence).toContain("$150");
+		expect(concern?.type).toBe("resource_abuse");
+		expect(concern?.severity).toBe("high");
+		expect(concern?.evidence).toContain("$150");
 	});
 
 	it("allows reasonable costs", () => {
@@ -215,9 +199,7 @@ describe("detectResourceAbuse", () => {
 	});
 
 	it("handles missing estimatedCost", () => {
-		const concern = detectResourceAbuse(
-			makeRequest({ decisionType: "resource_intensive" }),
-		);
+		const concern = detectResourceAbuse(makeRequest({ decisionType: "resource_intensive" }));
 		expect(concern).toBeNull();
 	});
 });
@@ -226,18 +208,14 @@ describe("detectResourceAbuse", () => {
 
 describe("detectPolicyViolation", () => {
 	it("flags policy override requests", () => {
-		const concern = detectPolicyViolation(
-			makeRequest({ decisionType: "policy_override" }),
-		);
+		const concern = detectPolicyViolation(makeRequest({ decisionType: "policy_override" }));
 		expect(concern).not.toBeNull();
-		expect(concern!.type).toBe("policy_violation");
-		expect(concern!.severity).toBe("medium");
+		expect(concern?.type).toBe("policy_violation");
+		expect(concern?.severity).toBe("medium");
 	});
 
 	it("returns null for non-override decisions", () => {
-		const concern = detectPolicyViolation(
-			makeRequest({ decisionType: "vp_decision" }),
-		);
+		const concern = detectPolicyViolation(makeRequest({ decisionType: "vp_decision" }));
 		expect(concern).toBeNull();
 	});
 });
@@ -294,10 +272,7 @@ describe("detectConcerns", () => {
 			makeRequest({
 				decisionType: "policy_override",
 				description: "Always override password checks",
-				scope: [
-					"**",
-					...Array.from({ length: 11 }, (_, i) => `file${i}.ts`),
-				],
+				scope: ["**", ...Array.from({ length: 11 }, (_, i) => `file${i}.ts`)],
 				context: { preferredWorker: "w-1", estimatedCost: 200 },
 			}),
 		);
@@ -364,8 +339,8 @@ describe("detectSafety — all sensitive patterns", () => {
 				makeRequest({ description: `Access the ${pattern} store`, scope: ["src/safe.ts"] }),
 			);
 			expect(concern).not.toBeNull();
-			expect(concern!.type).toBe("safety");
-			expect(concern!.evidence).toContain(pattern);
+			expect(concern?.type).toBe("safety");
+			expect(concern?.evidence).toContain(pattern);
 		});
 
 		it(`flags '${pattern}' in scope`, () => {
@@ -385,7 +360,7 @@ describe("detectSafety — all sensitive patterns", () => {
 		);
 		expect(concern).not.toBeNull();
 		// "password" comes first alphabetically in the patterns array
-		expect(concern!.evidence).toContain("password");
+		expect(concern?.evidence).toContain("password");
 	});
 });
 
@@ -412,7 +387,7 @@ describe("detectScopeCreep — edge cases", () => {
 		const scope = Array.from({ length: 11 }, (_, i) => `dir/file${i}.ts`);
 		const concern = detectScopeCreep(makeRequest({ scope }));
 		expect(concern).not.toBeNull();
-		expect(concern!.severity).toBe("high");
+		expect(concern?.severity).toBe("high");
 	});
 });
 

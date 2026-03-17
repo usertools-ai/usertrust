@@ -122,12 +122,7 @@ export function detectPII(data: unknown): PIIDetection {
 	};
 }
 
-function scanValue(
-	value: unknown,
-	currentPath: string,
-	types: Set<string>,
-	paths: string[],
-): void {
+function scanValue(value: unknown, currentPath: string, types: Set<string>, paths: string[]): void {
 	if (typeof value === "string") {
 		scanString(value, currentPath, types, paths);
 		return;
@@ -150,12 +145,7 @@ function scanValue(
 	}
 }
 
-function scanString(
-	value: string,
-	currentPath: string,
-	types: Set<string>,
-	paths: string[],
-): void {
+function scanString(value: string, currentPath: string, types: Set<string>, paths: string[]): void {
 	for (const pattern of PII_PATTERNS) {
 		if (pattern.test(value)) {
 			types.add(pattern.type);

@@ -65,7 +65,7 @@ export function extractPolicyViolations(events: EntropyEventInput[]): EntropySig
 	let hits = 0;
 
 	for (const e of policyEvents) {
-		const decision = e.data["decision"];
+		const decision = e.data.decision;
 		if (decision === "deny" || decision === "block" || decision === "blocked") {
 			hits++;
 		}
@@ -91,10 +91,10 @@ export function extractBudgetUtilization(events: EntropyEventInput[]): EntropySi
 	let total = 0;
 
 	for (const e of events) {
-		const budget = e.data["budget"];
-		const spent = e.data["spent"];
-		const remaining = e.data["budgetRemaining"];
-		const budgetTotal = e.data["budgetTotal"];
+		const budget = e.data.budget;
+		const spent = e.data.spent;
+		const remaining = e.data.budgetRemaining;
+		const budgetTotal = e.data.budgetTotal;
 
 		if (typeof budget === "number" && typeof spent === "number" && budget > 0) {
 			total++;
@@ -132,21 +132,13 @@ export function extractChainIntegrity(events: EntropyEventInput[]): EntropySigna
 	let total = 0;
 
 	for (const e of events) {
-		if (
-			e.kind.includes("audit") ||
-			e.kind.includes("chain") ||
-			e.kind.includes("verify")
-		) {
+		if (e.kind.includes("audit") || e.kind.includes("chain") || e.kind.includes("verify")) {
 			total++;
-			const valid = e.data["valid"];
-			const degraded = e.data["degraded"];
-			const errors = e.data["errors"];
+			const valid = e.data.valid;
+			const degraded = e.data.degraded;
+			const errors = e.data.errors;
 
-			if (
-				valid === false ||
-				degraded === true ||
-				(Array.isArray(errors) && errors.length > 0)
-			) {
+			if (valid === false || degraded === true || (Array.isArray(errors) && errors.length > 0)) {
 				hits++;
 			}
 		}
@@ -171,9 +163,9 @@ export function extractPiiDetections(events: EntropyEventInput[]): EntropySignal
 	const total = events.length;
 
 	for (const e of events) {
-		const pii = e.data["piiDetected"];
-		const piiCount = e.data["piiCount"];
-		const piiAction = e.data["piiAction"];
+		const pii = e.data.piiDetected;
+		const piiCount = e.data.piiCount;
+		const piiAction = e.data.piiAction;
 
 		if (
 			pii === true ||
@@ -207,11 +199,11 @@ export function extractCircuitBreakerTrips(events: EntropyEventInput[]): Entropy
 		if (
 			e.kind.includes("circuit") ||
 			e.kind.includes("breaker") ||
-			e.data["circuitBreaker"] !== undefined
+			e.data.circuitBreaker !== undefined
 		) {
 			total++;
-			const state = e.data["circuitBreakerState"] ?? e.data["state"];
-			const tripped = e.data["circuitBreakerTripped"] ?? e.data["tripped"];
+			const state = e.data.circuitBreakerState ?? e.data.state;
+			const tripped = e.data.circuitBreakerTripped ?? e.data.tripped;
 
 			if (state === "open" || state === "half-open" || tripped === true) {
 				hits++;
@@ -241,12 +233,12 @@ export function extractPatternMemoryHits(events: EntropyEventInput[]): EntropySi
 		if (
 			e.kind.includes("pattern") ||
 			e.kind.includes("memory") ||
-			e.data["patternMatch"] !== undefined
+			e.data.patternMatch !== undefined
 		) {
 			total++;
-			const match = e.data["patternMatch"];
-			const anomaly = e.data["anomalyDetected"];
-			const recurring = e.data["recurringIssue"];
+			const match = e.data.patternMatch;
+			const anomaly = e.data.anomalyDetected;
+			const recurring = e.data.recurringIssue;
 
 			if (match === true || anomaly === true || recurring === true) {
 				hits++;

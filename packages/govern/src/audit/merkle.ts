@@ -97,9 +97,9 @@ export function buildMerkleTree(leaves: string[]): {
 	while (currentLayer.length > 1) {
 		const nextLayer: string[] = [];
 		for (let i = 0; i < currentLayer.length; i += 2) {
-			const left = currentLayer[i]!;
+			const left = currentLayer[i] as string;
 			if (i + 1 < currentLayer.length) {
-				const right = currentLayer[i + 1]!;
+				const right = currentLayer[i + 1] as string;
 				nextLayer.push(hashInternal(left, right));
 			} else {
 				nextLayer.push(left);
@@ -126,9 +126,7 @@ export function generateInclusionProof(
 	segmentId: string,
 ): MerkleInclusionProof {
 	if (leafIndex < 0 || leafIndex >= leaves.length) {
-		throw new RangeError(
-			`leafIndex ${leafIndex} out of bounds for ${leaves.length} leaves`,
-		);
+		throw new RangeError(`leafIndex ${leafIndex} out of bounds for ${leaves.length} leaves`);
 	}
 
 	const { root, layers } = buildMerkleTree(leaves);
@@ -141,7 +139,7 @@ export function generateInclusionProof(
 	let currentIndex = leafIndex;
 
 	for (let level = 0; level < layers.length - 1; level++) {
-		const layer = layers[level]!;
+		const layer = layers[level] as string[];
 		const layerSize = layer.length;
 
 		if (currentIndex === layerSize - 1 && layerSize % 2 === 1) {
@@ -151,12 +149,12 @@ export function generateInclusionProof(
 
 		if (currentIndex % 2 === 0) {
 			siblings.push({
-				hash: layer[currentIndex + 1]!,
+				hash: layer[currentIndex + 1] as string,
 				position: "right",
 			});
 		} else {
 			siblings.push({
-				hash: layer[currentIndex - 1]!,
+				hash: layer[currentIndex - 1] as string,
 				position: "left",
 			});
 		}
@@ -164,7 +162,7 @@ export function generateInclusionProof(
 		currentIndex = Math.floor(currentIndex / 2);
 	}
 
-	const leafHash = leaves[leafIndex]!;
+	const leafHash = leaves[leafIndex] as string;
 
 	return {
 		version: 1,
@@ -278,14 +276,10 @@ export function generateConsistencyProof(
 	leaves: string[],
 ): MerkleConsistencyProof {
 	if (firstSize < 1 || firstSize > secondSize) {
-		throw new RangeError(
-			`Invalid sizes: firstSize=${firstSize}, secondSize=${secondSize}`,
-		);
+		throw new RangeError(`Invalid sizes: firstSize=${firstSize}, secondSize=${secondSize}`);
 	}
 	if (secondSize > leaves.length) {
-		throw new RangeError(
-			`secondSize ${secondSize} exceeds available leaves ${leaves.length}`,
-		);
+		throw new RangeError(`secondSize ${secondSize} exceeds available leaves ${leaves.length}`);
 	}
 
 	const firstTree = buildMerkleTree(leaves.slice(0, firstSize));
@@ -295,8 +289,8 @@ export function generateConsistencyProof(
 		return {
 			firstSize,
 			secondSize,
-			firstRoot: firstTree.root!,
-			secondRoot: secondTree.root!,
+			firstRoot: firstTree.root as string,
+			secondRoot: secondTree.root as string,
 			proof: [],
 		};
 	}
@@ -308,8 +302,8 @@ export function generateConsistencyProof(
 	return {
 		firstSize,
 		secondSize,
-		firstRoot: firstTree.root!,
-		secondRoot: secondTree.root!,
+		firstRoot: firstTree.root as string,
+		secondRoot: secondTree.root as string,
 		proof,
 	};
 }
@@ -374,13 +368,13 @@ function recomputeRoots(
 		sr = claimedFirstRoot;
 		startIdx = 0;
 	} else {
-		fr = stack[0]!.hash;
-		sr = stack[0]!.hash;
+		fr = (stack[0] as StackEntry).hash;
+		sr = (stack[0] as StackEntry).hash;
 		startIdx = 1;
 	}
 
 	for (let i = startIdx; i < stack.length; i++) {
-		const entry = stack[i]!;
+		const entry = stack[i] as StackEntry;
 		if (entry.side === "right") {
 			sr = hashInternal(sr, entry.hash);
 		} else {

@@ -9,13 +9,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import {
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -90,29 +84,16 @@ function makeOpenAIMock(response?: Record<string, unknown>) {
 	};
 }
 
-function writeVaultConfig(
-	vaultBase: string,
-	config: Record<string, unknown>,
-): void {
+function writeVaultConfig(vaultBase: string, config: Record<string, unknown>): void {
 	const configDir = join(vaultBase, VAULT_DIR);
 	mkdirSync(configDir, { recursive: true });
-	writeFileSync(
-		join(configDir, "govern.config.json"),
-		JSON.stringify(config),
-	);
+	writeFileSync(join(configDir, "govern.config.json"), JSON.stringify(config));
 }
 
-function writePolicyFile(
-	vaultBase: string,
-	relativePath: string,
-	rules: unknown[],
-): void {
+function writePolicyFile(vaultBase: string, relativePath: string, rules: unknown[]): void {
 	const fullDir = join(vaultBase, relativePath.replace(/\/[^/]+$/, ""));
 	mkdirSync(fullDir, { recursive: true });
-	writeFileSync(
-		join(vaultBase, relativePath),
-		JSON.stringify({ rules }),
-	);
+	writeFileSync(join(vaultBase, relativePath), JSON.stringify({ rules }));
 }
 
 // ── E2E Test Suite ──
@@ -290,16 +271,11 @@ describe("govern() — end-to-end integration", () => {
 
 			// Budget decreases with each call
 			expect(r1.governance.budgetRemaining).toBeLessThan(50_000);
-			expect(r2.governance.budgetRemaining).toBeLessThan(
-				r1.governance.budgetRemaining,
-			);
-			expect(r3.governance.budgetRemaining).toBeLessThan(
-				r2.governance.budgetRemaining,
-			);
+			expect(r2.governance.budgetRemaining).toBeLessThan(r1.governance.budgetRemaining);
+			expect(r3.governance.budgetRemaining).toBeLessThan(r2.governance.budgetRemaining);
 
 			// Budget math is exact
-			const totalCost =
-				r1.governance.cost + r2.governance.cost + r3.governance.cost;
+			const totalCost = r1.governance.cost + r2.governance.cost + r3.governance.cost;
 			expect(r3.governance.budgetRemaining).toBe(50_000 - totalCost);
 
 			await governed.destroy();
@@ -318,9 +294,7 @@ describe("govern() — end-to-end integration", () => {
 					name: "block-opus",
 					effect: "deny",
 					enforcement: "hard",
-					conditions: [
-						{ field: "model", operator: "eq", value: "claude-opus-4-6" },
-					],
+					conditions: [{ field: "model", operator: "eq", value: "claude-opus-4-6" }],
 				},
 			]);
 			writeVaultConfig(tmpVault, {
@@ -387,8 +361,7 @@ describe("govern() — end-to-end integration", () => {
 					messages: [
 						{
 							role: "user",
-							content:
-								"Send a message to john.doe@example.com about the project",
+							content: "Send a message to john.doe@example.com about the project",
 						},
 					],
 				}),
@@ -506,17 +479,11 @@ describe("govern() — end-to-end integration", () => {
 			const auditPath = join(tmpVault, VAULT_DIR, "audit", "events.jsonl");
 			expect(existsSync(auditPath)).toBe(true);
 
-			const lines = readFileSync(auditPath, "utf-8")
-				.trim()
-				.split("\n");
+			const lines = readFileSync(auditPath, "utf-8").trim().split("\n");
 			expect(lines.length).toBeGreaterThanOrEqual(1);
 
-			const events = lines.map(
-				(line) => JSON.parse(line) as AuditEvent,
-			);
-			const failureEvent = events.find(
-				(e) => e.kind === "llm_call_failed",
-			);
+			const events = lines.map((line) => JSON.parse(line) as AuditEvent);
+			const failureEvent = events.find((e) => e.kind === "llm_call_failed");
 			expect(failureEvent).toBeDefined();
 			expect(failureEvent?.data.error).toContain("Rate limited");
 
@@ -564,9 +531,7 @@ describe("govern() — end-to-end integration", () => {
 			const lines = readFileSync(auditPath, "utf-8").trim().split("\n");
 			expect(lines.length).toBe(3);
 
-			const events = lines.map(
-				(line) => JSON.parse(line) as AuditEvent & { sequence: number },
-			);
+			const events = lines.map((line) => JSON.parse(line) as AuditEvent & { sequence: number });
 
 			// First event chains from GENESIS_HASH
 			expect(events[0]?.previousHash).toBe(GENESIS_HASH);
@@ -741,9 +706,7 @@ describe("govern() — end-to-end integration", () => {
 					name: "require-pro",
 					effect: "deny",
 					enforcement: "hard",
-					conditions: [
-						{ field: "tier", operator: "eq", value: "free" },
-					],
+					conditions: [{ field: "tier", operator: "eq", value: "free" }],
 				},
 			]);
 			writeVaultConfig(tmpVault, {
@@ -823,12 +786,7 @@ describe("govern() — end-to-end integration", () => {
 
 			const onComplete = vi.fn();
 			const onError = vi.fn();
-			const wrapped = wrapStream(
-				mockStream(),
-				"anthropic",
-				onComplete,
-				onError,
-			);
+			const wrapped = wrapStream(mockStream(), "anthropic", onComplete, onError);
 
 			const chunks: unknown[] = [];
 			for await (const chunk of wrapped) {
@@ -882,9 +840,7 @@ describe("govern() — end-to-end integration", () => {
 			// Different providers, different budgets, different transfer IDs
 			expect(rAnthropic.governance.provider).toBe("anthropic");
 			expect(rOpenAI.governance.provider).toBe("openai");
-			expect(rAnthropic.governance.transferId).not.toBe(
-				rOpenAI.governance.transferId,
-			);
+			expect(rAnthropic.governance.transferId).not.toBe(rOpenAI.governance.transferId);
 			expect(rAnthropic.governance.budgetRemaining).toBeLessThan(50_000);
 			expect(rOpenAI.governance.budgetRemaining).toBeLessThan(30_000);
 
@@ -910,9 +866,7 @@ describe("govern() — end-to-end integration", () => {
 					name: "block-opus",
 					effect: "deny",
 					enforcement: "hard",
-					conditions: [
-						{ field: "model", operator: "eq", value: "claude-opus-4-6" },
-					],
+					conditions: [{ field: "model", operator: "eq", value: "claude-opus-4-6" }],
 				},
 			]);
 			writeVaultConfig(tmpVault, {
@@ -1003,16 +957,9 @@ describe("govern() — end-to-end integration", () => {
 			await governed.destroy();
 
 			// Import the canonicalize function used by the audit writer
-			const { canonicalize } = await import(
-				"../../src/audit/canonical.js"
-			);
+			const { canonicalize } = await import("../../src/audit/canonical.js");
 
-			const auditPath = join(
-				tmpVault,
-				VAULT_DIR,
-				"audit",
-				"events.jsonl",
-			);
+			const auditPath = join(tmpVault, VAULT_DIR, "audit", "events.jsonl");
 			const lines = readFileSync(auditPath, "utf-8").trim().split("\n");
 			expect(lines.length).toBe(2);
 
@@ -1025,9 +972,7 @@ describe("govern() — end-to-end integration", () => {
 				// Recompute hash without the hash field
 				const { hash: _hash, ...eventWithoutHash } = event;
 				const recomputedCanonical = canonicalize(eventWithoutHash);
-				const recomputedHash = createHash("sha256")
-					.update(recomputedCanonical)
-					.digest("hex");
+				const recomputedHash = createHash("sha256").update(recomputedCanonical).digest("hex");
 
 				expect(recomputedHash).toBe(storedHash);
 			}
@@ -1084,9 +1029,7 @@ describe("govern() — end-to-end integration", () => {
 			expect(g.provider).toBe("anthropic");
 
 			// timestamp — ISO 8601
-			expect(g.timestamp).toMatch(
-				/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/,
-			);
+			expect(g.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
 
 			await governed.destroy();
 		});
@@ -1111,8 +1054,7 @@ describe("govern() — end-to-end integration", () => {
 				messages: [
 					{
 						role: "user",
-						content:
-							"My email is test@example.com and SSN is 123-45-6789",
+						content: "My email is test@example.com and SSN is 123-45-6789",
 					},
 				],
 			});
@@ -1162,18 +1104,11 @@ describe("govern() — end-to-end integration", () => {
 			await governed2.destroy();
 
 			// Verify chain continuity
-			const auditPath = join(
-				tmpVault,
-				VAULT_DIR,
-				"audit",
-				"events.jsonl",
-			);
+			const auditPath = join(tmpVault, VAULT_DIR, "audit", "events.jsonl");
 			const lines = readFileSync(auditPath, "utf-8").trim().split("\n");
 			expect(lines.length).toBe(2);
 
-			const events = lines.map(
-				(line) => JSON.parse(line) as AuditEvent,
-			);
+			const events = lines.map((line) => JSON.parse(line) as AuditEvent);
 
 			// Event 1 chains from genesis
 			expect(events[0]?.previousHash).toBe(GENESIS_HASH);

@@ -8,11 +8,11 @@ import { createHash } from "node:crypto";
 import type { Account, Transfer } from "tigerbeetle-node";
 import {
 	AccountFlags,
-	amount_max,
 	CreateAccountError,
 	CreateTransferError,
-	createClient,
 	TransferFlags,
+	amount_max,
+	createClient,
 } from "tigerbeetle-node";
 import { tbId } from "../shared/ids.js";
 
@@ -200,9 +200,7 @@ export class GovernTBClient {
 				this.accountMap.set(userId, accountId);
 				return accountId;
 			}
-			throw new Error(
-				`Failed to create account: ${CreateAccountError[err.result] ?? err.result}`,
-			);
+			throw new Error(`Failed to create account: ${CreateAccountError[err.result] ?? err.result}`);
 		}
 
 		this.accountMap.set(userId, accountId);
@@ -216,9 +214,8 @@ export class GovernTBClient {
 
 	async createTreasury(): Promise<bigint> {
 		if (this.treasuryId) {
-			const accounts = await this.withReconnect(() =>
-				this.client.lookupAccounts([this.treasuryId!]),
-			);
+			const tid = this.treasuryId;
+			const accounts = await this.withReconnect(() => this.client.lookupAccounts([tid]));
 			if (accounts.length > 0) return this.treasuryId;
 		}
 
@@ -243,9 +240,7 @@ export class GovernTBClient {
 		if (errors.length > 0) {
 			const err = errors[0];
 			if (!err) throw new Error("Unknown account/transfer error");
-			throw new Error(
-				`Failed to create treasury: ${CreateAccountError[err.result] ?? err.result}`,
-			);
+			throw new Error(`Failed to create treasury: ${CreateAccountError[err.result] ?? err.result}`);
 		}
 
 		this.treasuryId = accountId;
@@ -329,9 +324,7 @@ export class GovernTBClient {
 		if (errors.length > 0) {
 			const err = errors[0];
 			if (!err) throw new Error("Unknown account/transfer error");
-			throw new Error(
-				`Post transfer failed: ${CreateTransferError[err.result] ?? err.result}`,
-			);
+			throw new Error(`Post transfer failed: ${CreateTransferError[err.result] ?? err.result}`);
 		}
 		return postId;
 	}
@@ -358,9 +351,7 @@ export class GovernTBClient {
 		if (errors.length > 0) {
 			const err = errors[0];
 			if (!err) throw new Error("Unknown account/transfer error");
-			throw new Error(
-				`Void transfer failed: ${CreateTransferError[err.result] ?? err.result}`,
-			);
+			throw new Error(`Void transfer failed: ${CreateTransferError[err.result] ?? err.result}`);
 		}
 		return voidId;
 	}
@@ -405,10 +396,8 @@ export class GovernTBClient {
 	}
 
 	async lookupTransfer(transferId: bigint): Promise<Transfer | null> {
-		const transfers = await this.withReconnect(() =>
-			this.client.lookupTransfers([transferId]),
-		);
-		return transfers.length > 0 ? transfers[0]! : null;
+		const transfers = await this.withReconnect(() => this.client.lookupTransfers([transferId]));
+		return transfers.length > 0 ? (transfers[0] as Transfer) : null;
 	}
 
 	async lookupAccounts(accountIds: bigint[]): Promise<Account[]> {
@@ -420,11 +409,9 @@ export class GovernTBClient {
 		pending: number;
 		total: number;
 	}> {
-		const accounts = await this.withReconnect(() =>
-			this.client.lookupAccounts([accountId]),
-		);
+		const accounts = await this.withReconnect(() => this.client.lookupAccounts([accountId]));
 		if (accounts.length === 0) throw new Error(`Account not found: ${accountId}`);
-		const acct = accounts[0]!;
+		const acct = accounts[0] as Account;
 		const postedBig = acct.credits_posted - acct.debits_posted;
 		if (
 			postedBig > BigInt(Number.MAX_SAFE_INTEGER) ||
@@ -454,9 +441,8 @@ export class GovernTBClient {
 			if (!this.initialized || !this.treasuryId) {
 				return Date.now() - this.startedAt < this.initGraceMs;
 			}
-			const accounts = await this.withReconnect(() =>
-				this.client.lookupAccounts([this.treasuryId!]),
-			);
+			const tid = this.treasuryId;
+			const accounts = await this.withReconnect(() => this.client.lookupAccounts([tid]));
 			return accounts.length > 0;
 		} catch {
 			return false;

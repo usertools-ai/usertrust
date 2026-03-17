@@ -72,10 +72,7 @@ describe("Pattern Memory", () => {
 				{ promptHash, model: "claude-sonnet-4-20250514", cost: 0.003, success: true },
 				vaultPath,
 			);
-			await recordPattern(
-				{ promptHash, model: "gpt-4o", cost: 0.005, success: false },
-				vaultPath,
-			);
+			await recordPattern({ promptHash, model: "gpt-4o", cost: 0.005, success: false }, vaultPath);
 
 			const stats = await getPatternStats(vaultPath);
 			expect(stats.totalEntries).toBe(2);
@@ -95,18 +92,9 @@ describe("Pattern Memory", () => {
 			}
 
 			// gpt-4o: 1/3 success at higher cost
-			await recordPattern(
-				{ promptHash, model: "gpt-4o", cost: 0.01, success: true },
-				vaultPath,
-			);
-			await recordPattern(
-				{ promptHash, model: "gpt-4o", cost: 0.01, success: false },
-				vaultPath,
-			);
-			await recordPattern(
-				{ promptHash, model: "gpt-4o", cost: 0.01, success: false },
-				vaultPath,
-			);
+			await recordPattern({ promptHash, model: "gpt-4o", cost: 0.01, success: true }, vaultPath);
+			await recordPattern({ promptHash, model: "gpt-4o", cost: 0.01, success: false }, vaultPath);
+			await recordPattern({ promptHash, model: "gpt-4o", cost: 0.01, success: false }, vaultPath);
 
 			const suggestion = suggestModel(promptHash, vaultPath);
 			expect(suggestion).toBe("claude-sonnet-4-20250514");
@@ -187,11 +175,7 @@ describe("Pattern Memory", () => {
 			const { join } = await import("node:path");
 			const dir = join(vaultPath, "patterns");
 			await mkdir(dir, { recursive: true });
-			await writeFile(
-				join(dir, "memory.json"),
-				JSON.stringify(entries),
-				"utf-8",
-			);
+			await writeFile(join(dir, "memory.json"), JSON.stringify(entries), "utf-8");
 
 			// Reset cache so it reloads from file
 			_resetPatternCache();

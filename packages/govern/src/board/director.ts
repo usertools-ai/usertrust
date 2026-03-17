@@ -101,10 +101,7 @@ function detectForDirector(request: BoardRequest, focusAreas: ConcernType[]): Co
 /**
  * Determine vote based on concern severities relative to the veto threshold.
  */
-export function determineVote(
-	concerns: Concern[],
-	vetoThreshold: PolicySeverity,
-): DirectorVote {
+export function determineVote(concerns: Concern[], vetoThreshold: PolicySeverity): DirectorVote {
 	const thresholdRank = SEVERITY_RANK[vetoThreshold];
 
 	for (const concern of concerns) {
@@ -123,11 +120,7 @@ export function determineVote(
 /**
  * Generate human-readable reasoning from vote and concerns.
  */
-function generateReasoning(
-	vote: DirectorVote,
-	concerns: Concern[],
-	request: BoardRequest,
-): string {
+function generateReasoning(vote: DirectorVote, concerns: Concern[], request: BoardRequest): string {
 	if (concerns.length === 0) {
 		return `Approved: No concerns detected for ${request.decisionType} decision.`;
 	}

@@ -142,10 +142,7 @@ describe("loadConfig()", () => {
 	it("throws ZodError for invalid budget type", async () => {
 		const vaultDir = join(tmpDir, VAULT_DIR);
 		mkdirSync(vaultDir, { recursive: true });
-		writeFileSync(
-			join(vaultDir, "govern.config.json"),
-			JSON.stringify({ budget: "not-a-number" }),
-		);
+		writeFileSync(join(vaultDir, "govern.config.json"), JSON.stringify({ budget: "not-a-number" }));
 
 		await expect(loadConfig()).rejects.toThrow();
 	});
@@ -164,10 +161,7 @@ describe("loadConfig()", () => {
 	it("throws ZodError for non-integer budget", async () => {
 		const vaultDir = join(tmpDir, VAULT_DIR);
 		mkdirSync(vaultDir, { recursive: true });
-		writeFileSync(
-			join(vaultDir, "govern.config.json"),
-			JSON.stringify({ budget: 100.5 }),
-		);
+		writeFileSync(join(vaultDir, "govern.config.json"), JSON.stringify({ budget: 100.5 }));
 
 		await expect(loadConfig()).rejects.toThrow();
 	});

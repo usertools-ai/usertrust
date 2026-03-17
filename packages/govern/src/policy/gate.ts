@@ -84,10 +84,7 @@ function resolveFieldPath(path: string, context: Record<string, unknown>): unkno
  * Evaluate a single field condition against the evaluation context.
  * Supports all 12 operators from the FieldOperator union.
  */
-function evaluateFieldCondition(
-	fc: FieldCondition,
-	context: Record<string, unknown>,
-): boolean {
+function evaluateFieldCondition(fc: FieldCondition, context: Record<string, unknown>): boolean {
 	const resolved = resolveFieldPath(fc.field, context);
 
 	switch (fc.operator) {
@@ -104,32 +101,16 @@ function evaluateFieldCondition(
 			return resolved !== fc.value;
 
 		case "gt":
-			return (
-				typeof resolved === "number" &&
-				typeof fc.value === "number" &&
-				resolved > fc.value
-			);
+			return typeof resolved === "number" && typeof fc.value === "number" && resolved > fc.value;
 
 		case "gte":
-			return (
-				typeof resolved === "number" &&
-				typeof fc.value === "number" &&
-				resolved >= fc.value
-			);
+			return typeof resolved === "number" && typeof fc.value === "number" && resolved >= fc.value;
 
 		case "lt":
-			return (
-				typeof resolved === "number" &&
-				typeof fc.value === "number" &&
-				resolved < fc.value
-			);
+			return typeof resolved === "number" && typeof fc.value === "number" && resolved < fc.value;
 
 		case "lte":
-			return (
-				typeof resolved === "number" &&
-				typeof fc.value === "number" &&
-				resolved <= fc.value
-			);
+			return typeof resolved === "number" && typeof fc.value === "number" && resolved <= fc.value;
 
 		case "in":
 			return Array.isArray(fc.value) && fc.value.includes(resolved);
@@ -139,9 +120,7 @@ function evaluateFieldCondition(
 
 		case "contains":
 			return (
-				typeof resolved === "string" &&
-				typeof fc.value === "string" &&
-				resolved.includes(fc.value)
+				typeof resolved === "string" && typeof fc.value === "string" && resolved.includes(fc.value)
 			);
 
 		case "regex":
@@ -165,13 +144,8 @@ function evaluateFieldCondition(
  * Test if any scope in the context matches any scope pattern from the rule.
  * Uses minimatch for full glob support (**, *, brace expansion, etc.).
  */
-export function matchesScope(
-	patterns: string[],
-	scopes: string[],
-): boolean {
-	return scopes.some((scope) =>
-		patterns.some((pattern) => minimatch(scope, pattern)),
-	);
+export function matchesScope(patterns: string[], scopes: string[]): boolean {
+	return scopes.some((scope) => patterns.some((pattern) => minimatch(scope, pattern)));
 }
 
 // ---------------------------------------------------------------------------
@@ -290,17 +264,11 @@ function ruleMatches(rule: GateRule, context: PolicyContext): boolean {
  * @param context - Evaluation context with arbitrary fields
  * @returns Policy evaluation result
  */
-export function evaluatePolicy(
-	rules: GateRule[],
-	context: PolicyContext,
-): PolicyResult {
-	const timestamp =
-		(context.timestamp as string | undefined) ?? new Date().toISOString();
+export function evaluatePolicy(rules: GateRule[], context: PolicyContext): PolicyResult {
+	const timestamp = (context.timestamp as string | undefined) ?? new Date().toISOString();
 
 	// Sort by priority (ascending — lower number = higher priority)
-	const sortedRules = [...rules].sort(
-		(a, b) => (a.priority ?? 100) - (b.priority ?? 100),
-	);
+	const sortedRules = [...rules].sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100));
 
 	const matched: RuleMatch[] = [];
 	const hardViolations: RuleMatch[] = [];
@@ -325,9 +293,7 @@ export function evaluatePolicy(
 			const label = rule.id ? `[${rule.id}]` : `[${rule.name}]`;
 			const rationale = rule.description ?? rule.name;
 			const reason =
-				rule.enforcement === "hard"
-					? `${label} ${rationale}`
-					: `[WARN] ${label} ${rationale}`;
+				rule.enforcement === "hard" ? `${label} ${rationale}` : `[WARN] ${label} ${rationale}`;
 
 			reasons.push(reason);
 
@@ -376,7 +342,7 @@ export function loadPolicies(path: string): GateRule[] {
 		if (Array.isArray(parsed)) return parsed as GateRule[];
 		if (parsed !== null && typeof parsed === "object") {
 			const obj = parsed as Record<string, unknown>;
-			if (Array.isArray(obj["rules"])) return obj["rules"] as GateRule[];
+			if (Array.isArray(obj.rules)) return obj.rules as GateRule[];
 		}
 
 		return [];

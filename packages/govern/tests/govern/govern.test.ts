@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
-import { govern, type GovernedClient } from "../../src/govern.js";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { type GovernedClient, govern } from "../../src/govern.js";
 
 // Mock tigerbeetle-node at module level (native module, never loaded in tests)
 vi.mock("tigerbeetle-node", () => ({
@@ -350,10 +350,7 @@ describe("govern()", () => {
 		it("budget opt overrides config file", async () => {
 			const configDir = join(tmpVault, ".usertools");
 			mkdirSync(configDir, { recursive: true });
-			writeFileSync(
-				join(configDir, "govern.config.json"),
-				JSON.stringify({ budget: 10_000 }),
-			);
+			writeFileSync(join(configDir, "govern.config.json"), JSON.stringify({ budget: 10_000 }));
 
 			const mockClient = makeAnthropicMock();
 			const governed = await govern(mockClient, {
@@ -393,9 +390,7 @@ describe("govern()", () => {
 							name: "block-opus",
 							effect: "deny",
 							enforcement: "hard",
-							conditions: [
-								{ field: "model", operator: "eq", value: "claude-opus-4-6" },
-							],
+							conditions: [{ field: "model", operator: "eq", value: "claude-opus-4-6" }],
 						},
 					],
 				}),
@@ -484,9 +479,7 @@ describe("govern()", () => {
 
 			const result = await governed.messages.create({
 				model: "claude-sonnet-4-6",
-				messages: [
-					{ role: "user", content: "My email is test@example.com" },
-				],
+				messages: [{ role: "user", content: "My email is test@example.com" }],
 			});
 
 			// Should succeed despite PII
@@ -559,9 +552,7 @@ describe("govern()", () => {
 				messages: [{ role: "user", content: "Hello" }],
 			});
 
-			expect(result.governance.receiptUrl).toMatch(
-				/^https:\/\/verify\.usertools\.dev\/tx_/,
-			);
+			expect(result.governance.receiptUrl).toMatch(/^https:\/\/verify\.usertools\.dev\/tx_/);
 
 			await governed.destroy();
 		});
@@ -589,9 +580,7 @@ describe("govern()", () => {
 				messages: [{ role: "user", content: "Hello again" }],
 			});
 
-			expect(r2.governance.budgetRemaining).toBeLessThan(
-				r1.governance.budgetRemaining,
-			);
+			expect(r2.governance.budgetRemaining).toBeLessThan(r1.governance.budgetRemaining);
 
 			await governed.destroy();
 		});

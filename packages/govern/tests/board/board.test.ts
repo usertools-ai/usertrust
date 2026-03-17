@@ -1,23 +1,26 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createBoard, determineDecision, type BoardReviewResult } from "../../src/board/board.js";
+import { type BoardReviewResult, createBoard, determineDecision } from "../../src/board/board.js";
+import type { BoardRequest } from "../../src/board/concerns.js";
 import {
 	DIRECTOR_CONFIGS,
+	determineVote,
 	getDirectorConfig,
 	listDirectors,
 	reviewDecision,
-	determineVote,
 } from "../../src/board/director.js";
-import type { BoardRequest } from "../../src/board/concerns.js";
 
 // ── Helpers ──
 
 let testDir: string;
 
 function freshVault(): string {
-	const dir = join(tmpdir(), `govern-board-test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+	const dir = join(
+		tmpdir(),
+		`govern-board-test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+	);
 	mkdirSync(dir, { recursive: true });
 	return dir;
 }
@@ -168,7 +171,10 @@ describe("Director independence", () => {
 // ── Decision Matrix ──
 
 describe("Decision matrix (determineDecision)", () => {
-	function fakeReview(vote: "approve" | "veto" | "abstain", id: string): ReturnType<typeof reviewDecision> {
+	function fakeReview(
+		vote: "approve" | "veto" | "abstain",
+		id: string,
+	): ReturnType<typeof reviewDecision> {
 		return {
 			directorId: id,
 			vote,
@@ -242,12 +248,9 @@ describe("Decision matrix (determineDecision)", () => {
 describe("createBoard", () => {
 	it("reviewNow approves benign request", () => {
 		const board = createBoard(testDir);
-		const result = board.reviewNow(
-			"vp_decision",
-			"agent-1",
-			"Minor refactoring",
-			{ scope: ["src/utils.ts"] },
-		);
+		const result = board.reviewNow("vp_decision", "agent-1", "Minor refactoring", {
+			scope: ["src/utils.ts"],
+		});
 
 		expect(result.decision).toBe("approved");
 		expect(result.reviews).toHaveLength(2);
@@ -355,10 +358,13 @@ describe("Review structure", () => {
 	});
 
 	it("reasoning explains the vote", () => {
-		const review = reviewDecision("director-a", makeRequest({
-			description: "Safe minor change",
-			scope: ["src/utils.ts"],
-		}));
+		const review = reviewDecision(
+			"director-a",
+			makeRequest({
+				description: "Safe minor change",
+				scope: ["src/utils.ts"],
+			}),
+		);
 
 		expect(review.reasoning).toContain("Approved");
 	});
@@ -430,8 +436,8 @@ describe("getDirectorConfig", () => {
 	it("returns config for known director", () => {
 		const config = getDirectorConfig("director-a");
 		expect(config).toBeDefined();
-		expect(config!.id).toBe("director-a");
-		expect(config!.name).toBe("Director Alpha");
+		expect(config?.id).toBe("director-a");
+		expect(config?.name).toBe("Director Alpha");
 	});
 
 	it("returns undefined for unknown director (line 179)", () => {
@@ -442,8 +448,8 @@ describe("getDirectorConfig", () => {
 	it("returns config for director-b", () => {
 		const config = getDirectorConfig("director-b");
 		expect(config).toBeDefined();
-		expect(config!.name).toBe("Director Beta");
-		expect(config!.focusAreas).toContain("bias");
+		expect(config?.name).toBe("Director Beta");
+		expect(config?.focusAreas).toContain("bias");
 	});
 });
 
@@ -601,7 +607,12 @@ describe("determineVote — threshold levels", () => {
 	it("multiple concerns — highest severity determines outcome", () => {
 		const concerns = [
 			{ type: "bias" as const, severity: "low" as const, description: "minor", evidence: "y" },
-			{ type: "safety" as const, severity: "high" as const, description: "critical", evidence: "y" },
+			{
+				type: "safety" as const,
+				severity: "high" as const,
+				description: "critical",
+				evidence: "y",
+			},
 		];
 		expect(determineVote(concerns, "high")).toBe("veto");
 	});
@@ -609,7 +620,12 @@ describe("determineVote — threshold levels", () => {
 	it("multiple medium concerns trigger abstain", () => {
 		const concerns = [
 			{ type: "bias" as const, severity: "medium" as const, description: "a", evidence: "y" },
-			{ type: "scope_creep" as const, severity: "medium" as const, description: "b", evidence: "y" },
+			{
+				type: "scope_creep" as const,
+				severity: "medium" as const,
+				description: "b",
+				evidence: "y",
+			},
 		];
 		expect(determineVote(concerns, "high")).toBe("abstain");
 	});
@@ -711,12 +727,9 @@ describe("Session persistence across board instances", () => {
 describe("Board edge cases — concern coverage", () => {
 	it("request with zero concerns across both directors", () => {
 		const board = createBoard(testDir);
-		const result = board.reviewNow(
-			"vp_decision",
-			"agent-1",
-			"Simple code format fix",
-			{ scope: ["src/utils.ts"] },
-		);
+		const result = board.reviewNow("vp_decision", "agent-1", "Simple code format fix", {
+			scope: ["src/utils.ts"],
+		});
 
 		expect(result.decision).toBe("approved");
 		for (const review of result.reviews) {
@@ -764,12 +777,9 @@ describe("Board edge cases — concern coverage", () => {
 
 	it("escalation reason is undefined when approved", () => {
 		const board = createBoard(testDir);
-		const result = board.reviewNow(
-			"vp_decision",
-			"agent-1",
-			"Simple change",
-			{ scope: ["src/utils.ts"] },
-		);
+		const result = board.reviewNow("vp_decision", "agent-1", "Simple change", {
+			scope: ["src/utils.ts"],
+		});
 
 		expect(result.decision).toBe("approved");
 		expect(result.escalationReason).toBeUndefined();
@@ -780,24 +790,33 @@ describe("Board edge cases — concern coverage", () => {
 
 describe("Director confidence", () => {
 	it("confidence is 1.0 with no concerns", () => {
-		const review = reviewDecision("director-a", makeRequest({
-			description: "Simple refactor",
-			scope: ["src/utils.ts"],
-		}));
+		const review = reviewDecision(
+			"director-a",
+			makeRequest({
+				description: "Simple refactor",
+				scope: ["src/utils.ts"],
+			}),
+		);
 		// Max confidence when no concerns: max(0.5, 1 - 0 * 0.15) = 1.0
 		expect(review.confidence).toBe(1);
 	});
 
 	it("confidence decreases with more concerns", () => {
-		const reviewClean = reviewDecision("director-a", makeRequest({
-			description: "Simple change",
-			scope: ["src/utils.ts"],
-		}));
-		const reviewDirty = reviewDecision("director-a", makeRequest({
-			decisionType: "policy_override",
-			description: "Override always for password key",
-			scope: ["src/auth/credentials.ts"],
-		}));
+		const reviewClean = reviewDecision(
+			"director-a",
+			makeRequest({
+				description: "Simple change",
+				scope: ["src/utils.ts"],
+			}),
+		);
+		const reviewDirty = reviewDecision(
+			"director-a",
+			makeRequest({
+				decisionType: "policy_override",
+				description: "Override always for password key",
+				scope: ["src/auth/credentials.ts"],
+			}),
+		);
 
 		expect(reviewDirty.confidence).toBeLessThan(reviewClean.confidence);
 	});
@@ -805,11 +824,14 @@ describe("Director confidence", () => {
 	it("confidence floors at 0.5", () => {
 		// Even with many concerns, confidence never goes below 0.5
 		// max(0.5, 1 - n * 0.15) → for n >= 4, this floors at 0.5
-		const review = reviewDecision("director-a", makeRequest({
-			decisionType: "policy_override",
-			description: "Override always password token secret credential key",
-			scope: ["src/auth/secrets.ts"],
-		}));
+		const review = reviewDecision(
+			"director-a",
+			makeRequest({
+				decisionType: "policy_override",
+				description: "Override always password token secret credential key",
+				scope: ["src/auth/secrets.ts"],
+			}),
+		);
 		expect(review.confidence).toBeGreaterThanOrEqual(0.5);
 	});
 });
@@ -867,12 +889,9 @@ describe("Board stats — mixed decisions", () => {
 		board.reviewNow("vp_decision", "agent-1", "Safe change", { scope: ["src/utils.ts"] });
 
 		// Blocked or escalated — security-sensitive
-		board.reviewNow(
-			"security_sensitive",
-			"agent-1",
-			"Modify password credentials secret",
-			{ scope: ["src/auth/credentials.ts"] },
-		);
+		board.reviewNow("security_sensitive", "agent-1", "Modify password credentials secret", {
+			scope: ["src/auth/credentials.ts"],
+		});
 
 		const stats = board.getStats();
 		expect(stats.totalReviews).toBe(2);
@@ -893,23 +912,17 @@ describe("reviewNow options", () => {
 
 	it("passes context through to request", () => {
 		const board = createBoard(testDir);
-		const result = board.reviewNow(
-			"resource_intensive",
-			"agent-1",
-			"Heavy operation",
-			{ context: { estimatedCost: 200 } },
-		);
+		const result = board.reviewNow("resource_intensive", "agent-1", "Heavy operation", {
+			context: { estimatedCost: 200 },
+		});
 		expect(result.request.context).toEqual({ estimatedCost: 200 });
 	});
 
 	it("passes scope through to request", () => {
 		const board = createBoard(testDir);
-		const result = board.reviewNow(
-			"vp_decision",
-			"agent-1",
-			"Scoped change",
-			{ scope: ["src/a.ts", "src/b.ts"] },
-		);
+		const result = board.reviewNow("vp_decision", "agent-1", "Scoped change", {
+			scope: ["src/a.ts", "src/b.ts"],
+		});
 		expect(result.request.scope).toEqual(["src/a.ts", "src/b.ts"]);
 	});
 });

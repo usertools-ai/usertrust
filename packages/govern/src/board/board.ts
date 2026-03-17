@@ -234,8 +234,7 @@ export function createBoard(vaultPath: string, opts?: BoardOpts): Board {
 			}
 
 			// Determine final decision
-			const { decision, requiresHumanEscalation, escalationReason } =
-				determineDecision(reviews);
+			const { decision, requiresHumanEscalation, escalationReason } = determineDecision(reviews);
 			const reasoning = combineReasoning(reviews, decision);
 
 			const result: BoardReviewResult = {

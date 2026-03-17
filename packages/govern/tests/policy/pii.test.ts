@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { detectPII, type PIIDetection } from "../../src/policy/pii.js";
+import { type PIIDetection, detectPII } from "../../src/policy/pii.js";
 
 // ===========================================================================
 // Part A: Individual PII patterns

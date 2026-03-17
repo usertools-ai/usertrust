@@ -1,10 +1,10 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-	InsufficientBalanceError,
-	PolicyDeniedError,
-	LedgerUnavailableError,
 	AccountNotFoundError,
 	AuditDegradedError,
+	InsufficientBalanceError,
+	LedgerUnavailableError,
+	PolicyDeniedError,
 	VaultNotInitializedError,
 } from "../../src/shared/errors.js";
 

@@ -45,7 +45,7 @@ export function detectHallucination(request: BoardRequest): Concern | null {
 		};
 	}
 
-	if (request.decisionType === "policy_override" && !request.context["justification"]) {
+	if (request.decisionType === "policy_override" && !request.context.justification) {
 		return {
 			type: "hallucination",
 			severity: "high",
@@ -62,12 +62,12 @@ export function detectHallucination(request: BoardRequest): Concern | null {
  * Triggers when a preferred worker is specified during scope expansion.
  */
 export function detectBias(request: BoardRequest): Concern | null {
-	if (request.context["preferredWorker"] && request.decisionType === "scope_expansion") {
+	if (request.context.preferredWorker && request.decisionType === "scope_expansion") {
 		return {
 			type: "bias",
 			severity: "medium",
 			description: "Potential worker preference bias in scope assignment",
-			evidence: `Preferred worker: ${request.context["preferredWorker"]}`,
+			evidence: `Preferred worker: ${request.context.preferredWorker}`,
 		};
 	}
 
@@ -132,7 +132,7 @@ export function detectScopeCreep(request: BoardRequest): Concern | null {
  */
 export function detectResourceAbuse(request: BoardRequest): Concern | null {
 	if (request.decisionType === "resource_intensive") {
-		const estimatedCost = request.context["estimatedCost"] as number | undefined;
+		const estimatedCost = request.context.estimatedCost as number | undefined;
 		if (estimatedCost !== undefined && estimatedCost > 100) {
 			return {
 				type: "resource_abuse",

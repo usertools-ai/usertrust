@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	type EntropyEventInput,
 	computeEntropyScore,
 	extractBudgetUtilization,
 	extractChainIntegrity,
@@ -7,7 +8,6 @@ import {
 	extractPatternMemoryHits,
 	extractPiiDetections,
 	extractPolicyViolations,
-	type EntropyEventInput,
 } from "../../src/audit/entropy.js";
 
 describe("Entropy — individual signals", () => {
@@ -27,9 +27,7 @@ describe("Entropy — individual signals", () => {
 	});
 
 	it("extractPolicyViolations returns 0 for no policy events", () => {
-		const events: EntropyEventInput[] = [
-			{ kind: "system.start", data: {} },
-		];
+		const events: EntropyEventInput[] = [{ kind: "system.start", data: {} }];
 		const signal = extractPolicyViolations(events);
 		expect(signal.value).toBe(0);
 		expect(signal.hits).toBe(0);
@@ -49,9 +47,7 @@ describe("Entropy — individual signals", () => {
 	});
 
 	it("extractBudgetUtilization returns 0 for no budget events", () => {
-		const events: EntropyEventInput[] = [
-			{ kind: "test", data: { foo: "bar" } },
-		];
+		const events: EntropyEventInput[] = [{ kind: "test", data: { foo: "bar" } }];
 		const signal = extractBudgetUtilization(events);
 		expect(signal.value).toBe(0);
 	});
@@ -108,18 +104,14 @@ describe("Entropy — individual signals", () => {
 
 	it("each signal contributes independently to score", () => {
 		// Only policy violations present
-		const policyOnly: EntropyEventInput[] = [
-			{ kind: "policy.eval", data: { decision: "deny" } },
-		];
+		const policyOnly: EntropyEventInput[] = [{ kind: "policy.eval", data: { decision: "deny" } }];
 		const report = computeEntropyScore(policyOnly);
 		// 1 signal at 1.0, 5 signals at 0 → average = 1/6 → score ~17
 		expect(report.score).toBeGreaterThan(0);
 		expect(report.score).toBeLessThanOrEqual(100);
 
 		// Only PII detections
-		const piiOnly: EntropyEventInput[] = [
-			{ kind: "scan", data: { piiDetected: true } },
-		];
+		const piiOnly: EntropyEventInput[] = [{ kind: "scan", data: { piiDetected: true } }];
 		const piiReport = computeEntropyScore(piiOnly);
 		expect(piiReport.score).toBeGreaterThan(0);
 	});
@@ -261,9 +253,7 @@ describe("Entropy — budget utilization edge cases", () => {
 	});
 
 	it("ignores events with budget=0 (division guard)", () => {
-		const events: EntropyEventInput[] = [
-			{ kind: "spend", data: { budget: 0, spent: 0 } },
-		];
+		const events: EntropyEventInput[] = [{ kind: "spend", data: { budget: 0, spent: 0 } }];
 
 		const signal = extractBudgetUtilization(events);
 		expect(signal.total).toBe(0);
@@ -283,9 +273,7 @@ describe("Entropy — budget utilization edge cases", () => {
 
 describe("Entropy — circuit breaker edge cases", () => {
 	it("detects half-open state", () => {
-		const events: EntropyEventInput[] = [
-			{ kind: "circuit.breaker", data: { state: "half-open" } },
-		];
+		const events: EntropyEventInput[] = [{ kind: "circuit.breaker", data: { state: "half-open" } }];
 
 		const signal = extractCircuitBreakerTrips(events);
 		expect(signal.hits).toBe(1);
@@ -293,9 +281,7 @@ describe("Entropy — circuit breaker edge cases", () => {
 	});
 
 	it("does not count closed state as tripped", () => {
-		const events: EntropyEventInput[] = [
-			{ kind: "circuit.breaker", data: { state: "closed" } },
-		];
+		const events: EntropyEventInput[] = [{ kind: "circuit.breaker", data: { state: "closed" } }];
 
 		const signal = extractCircuitBreakerTrips(events);
 		expect(signal.hits).toBe(0);
@@ -340,9 +326,7 @@ describe("Entropy — pattern memory edge cases", () => {
 
 describe("Entropy — policy violations edge cases", () => {
 	it("counts 'blocked' decision as a violation", () => {
-		const events: EntropyEventInput[] = [
-			{ kind: "policy.eval", data: { decision: "blocked" } },
-		];
+		const events: EntropyEventInput[] = [{ kind: "policy.eval", data: { decision: "blocked" } }];
 
 		const signal = extractPolicyViolations(events);
 		expect(signal.hits).toBe(1);
@@ -352,18 +336,14 @@ describe("Entropy — policy violations edge cases", () => {
 
 describe("Entropy — PII detection edge cases", () => {
 	it("counts piiAction=block as a detection", () => {
-		const events: EntropyEventInput[] = [
-			{ kind: "scan", data: { piiAction: "block" } },
-		];
+		const events: EntropyEventInput[] = [{ kind: "scan", data: { piiAction: "block" } }];
 
 		const signal = extractPiiDetections(events);
 		expect(signal.hits).toBe(1);
 	});
 
 	it("does not count piiCount=0 as a detection", () => {
-		const events: EntropyEventInput[] = [
-			{ kind: "scan", data: { piiCount: 0 } },
-		];
+		const events: EntropyEventInput[] = [{ kind: "scan", data: { piiCount: 0 } }];
 
 		const signal = extractPiiDetections(events);
 		expect(signal.hits).toBe(0);
@@ -382,9 +362,7 @@ describe("Entropy — chain integrity edge cases", () => {
 	});
 
 	it("events matching verify in kind are counted", () => {
-		const events: EntropyEventInput[] = [
-			{ kind: "verify.result", data: { valid: true } },
-		];
+		const events: EntropyEventInput[] = [{ kind: "verify.result", data: { valid: true } }];
 
 		const signal = extractChainIntegrity(events);
 		expect(signal.total).toBe(1);

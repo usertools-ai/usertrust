@@ -56,7 +56,5 @@ export function detectClientKind(client: unknown): LLMClientKind {
 		return "google";
 	}
 
-	throw new Error(
-		"Unsupported LLM client: could not detect Anthropic, OpenAI, or Google SDK",
-	);
+	throw new Error("Unsupported LLM client: could not detect Anthropic, OpenAI, or Google SDK");
 }

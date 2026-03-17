@@ -8,15 +8,16 @@
 
 import { unlinkSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { DEFAULT_RULES, isBudgetExceeded } from "../../src/policy/default-rules.js";
 import {
+	type GateRule,
+	type PolicyContext,
 	evaluatePolicy,
 	isWithinTimeWindow,
 	loadPolicies,
 	matchesScope,
-	type GateRule,
-	type PolicyContext,
 } from "../../src/policy/gate.js";
-import { DEFAULT_RULES, isBudgetExceeded } from "../../src/policy/default-rules.js";
+import type { FieldOperator, PolicyEffect } from "../../src/shared/types.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -216,9 +217,7 @@ describe("operators", () => {
 	describe("in", () => {
 		it("matches when field value is in array", () => {
 			const r = rule({
-				conditions: [
-					{ field: "role", operator: "in", value: ["admin", "manager"] },
-				],
+				conditions: [{ field: "role", operator: "in", value: ["admin", "manager"] }],
 			});
 			expect(evaluatePolicy([r], { role: "admin" }).matched).toHaveLength(1);
 			expect(evaluatePolicy([r], { role: "manager" }).matched).toHaveLength(1);
@@ -226,9 +225,7 @@ describe("operators", () => {
 
 		it("does not match when field value is not in array", () => {
 			const r = rule({
-				conditions: [
-					{ field: "role", operator: "in", value: ["admin", "manager"] },
-				],
+				conditions: [{ field: "role", operator: "in", value: ["admin", "manager"] }],
 			});
 			expect(evaluatePolicy([r], { role: "worker" }).matched).toHaveLength(0);
 		});
@@ -237,18 +234,14 @@ describe("operators", () => {
 	describe("not_in", () => {
 		it("matches when field value is not in array", () => {
 			const r = rule({
-				conditions: [
-					{ field: "provider", operator: "not_in", value: ["blocked-co"] },
-				],
+				conditions: [{ field: "provider", operator: "not_in", value: ["blocked-co"] }],
 			});
 			expect(evaluatePolicy([r], { provider: "openai" }).matched).toHaveLength(1);
 		});
 
 		it("does not match when field value is in array", () => {
 			const r = rule({
-				conditions: [
-					{ field: "provider", operator: "not_in", value: ["blocked-co"] },
-				],
+				conditions: [{ field: "provider", operator: "not_in", value: ["blocked-co"] }],
 			});
 			expect(evaluatePolicy([r], { provider: "blocked-co" }).matched).toHaveLength(0);
 		});
@@ -470,12 +463,7 @@ describe("time-window constraints", () => {
 		const ts = d.toISOString();
 		const day = d.getDay();
 
-		expect(
-			isWithinTimeWindow(
-				[{ daysOfWeek: [day], startHour: 9, endHour: 17 }],
-				ts,
-			),
-		).toBe(true);
+		expect(isWithinTimeWindow([{ daysOfWeek: [day], startHour: 9, endHour: 17 }], ts)).toBe(true);
 	});
 
 	it("does not match outside day-of-week", () => {
@@ -484,24 +472,16 @@ describe("time-window constraints", () => {
 		const day = d.getDay();
 		const otherDay = (day + 3) % 7; // guaranteed different day
 
-		expect(
-			isWithinTimeWindow(
-				[{ daysOfWeek: [otherDay], startHour: 9, endHour: 17 }],
-				ts,
-			),
-		).toBe(false);
+		expect(isWithinTimeWindow([{ daysOfWeek: [otherDay], startHour: 9, endHour: 17 }], ts)).toBe(
+			false,
+		);
 	});
 
 	it("does not match outside hour range", () => {
 		const d = localDate(20); // 8 PM local
 		const ts = d.toISOString();
 
-		expect(
-			isWithinTimeWindow(
-				[{ startHour: 9, endHour: 17 }],
-				ts,
-			),
-		).toBe(false);
+		expect(isWithinTimeWindow([{ startHour: 9, endHour: 17 }], ts)).toBe(false);
 	});
 
 	it("returns true when no time windows specified", () => {
@@ -571,7 +551,7 @@ describe("priority ordering", () => {
 			name: "default",
 			conditions: [{ field: "x", operator: "eq", value: 1 }],
 		});
-		delete (withoutPriority as Record<string, unknown>)["priority"];
+		(withoutPriority as Record<string, unknown>).priority = undefined;
 
 		const result = evaluatePolicy([withoutPriority, withPriority], { x: 1 });
 		// explicit (50) should come before default (100)
@@ -595,7 +575,7 @@ describe("disabled rules", () => {
 
 	it("defaults enabled to true", () => {
 		const r = rule({ conditions: [] });
-		delete (r as Record<string, unknown>)["enabled"];
+		(r as Record<string, unknown>).enabled = undefined;
 		const result = evaluatePolicy([r], {});
 		expect(result.matched).toHaveLength(1);
 	});
@@ -706,12 +686,8 @@ describe("default rules", () => {
 	});
 
 	it("isBudgetExceeded detects overspend", () => {
-		expect(
-			isBudgetExceeded({ budget_remaining: 50, estimated_cost: 100 }),
-		).toBe(true);
-		expect(
-			isBudgetExceeded({ budget_remaining: 200, estimated_cost: 100 }),
-		).toBe(false);
+		expect(isBudgetExceeded({ budget_remaining: 50, estimated_cost: 100 })).toBe(true);
+		expect(isBudgetExceeded({ budget_remaining: 200, estimated_cost: 100 })).toBe(false);
 	});
 
 	it("isBudgetExceeded returns false for non-numeric fields", () => {
@@ -738,43 +714,65 @@ describe("loadPolicies", () => {
 			const rules = loadPolicies(path);
 			expect(rules).toEqual([]);
 		} finally {
-			try { unlinkSync(path); } catch { /* ignore */ }
+			try {
+				unlinkSync(path);
+			} catch {
+				/* ignore */
+			}
 		}
 	});
 
 	it("returns rules from { rules: [...] } JSON file", () => {
 		const path = `/tmp/govern-test-rules-${Date.now()}.json`;
 		try {
-			writeFileSync(path, JSON.stringify({
-				rules: [{
-					name: "test",
-					effect: "deny",
-					enforcement: "hard",
-					conditions: [],
-				}],
-			}));
+			writeFileSync(
+				path,
+				JSON.stringify({
+					rules: [
+						{
+							name: "test",
+							effect: "deny",
+							enforcement: "hard",
+							conditions: [],
+						},
+					],
+				}),
+			);
 			const rules = loadPolicies(path);
 			expect(rules).toHaveLength(1);
 			expect(rules[0]?.name).toBe("test");
 		} finally {
-			try { unlinkSync(path); } catch { /* ignore */ }
+			try {
+				unlinkSync(path);
+			} catch {
+				/* ignore */
+			}
 		}
 	});
 
 	it("returns rules from bare array JSON file", () => {
 		const path = `/tmp/govern-test-array-${Date.now()}.json`;
 		try {
-			writeFileSync(path, JSON.stringify([{
-				name: "bare",
-				effect: "warn",
-				enforcement: "soft",
-				conditions: [],
-			}]));
+			writeFileSync(
+				path,
+				JSON.stringify([
+					{
+						name: "bare",
+						effect: "warn",
+						enforcement: "soft",
+						conditions: [],
+					},
+				]),
+			);
 			const rules = loadPolicies(path);
 			expect(rules).toHaveLength(1);
 			expect(rules[0]?.name).toBe("bare");
 		} finally {
-			try { unlinkSync(path); } catch { /* ignore */ }
+			try {
+				unlinkSync(path);
+			} catch {
+				/* ignore */
+			}
 		}
 	});
 
@@ -785,7 +783,11 @@ describe("loadPolicies", () => {
 			const rules = loadPolicies(path);
 			expect(rules).toEqual([]);
 		} finally {
-			try { unlinkSync(path); } catch { /* ignore */ }
+			try {
+				unlinkSync(path);
+			} catch {
+				/* ignore */
+			}
 		}
 	});
 
@@ -796,19 +798,30 @@ describe("loadPolicies", () => {
 			const rules = loadPolicies(path);
 			expect(rules).toEqual([]);
 		} finally {
-			try { unlinkSync(path); } catch { /* ignore */ }
+			try {
+				unlinkSync(path);
+			} catch {
+				/* ignore */
+			}
 		}
 	});
 
 	it("loads from .yaml extension", () => {
 		const path = `/tmp/govern-test-yaml-${Date.now()}.yaml`;
 		try {
-			writeFileSync(path, `rules:\n  - name: yaml-rule\n    effect: deny\n    enforcement: hard\n    conditions: []\n`);
+			writeFileSync(
+				path,
+				"rules:\n  - name: yaml-rule\n    effect: deny\n    enforcement: hard\n    conditions: []\n",
+			);
 			const rules = loadPolicies(path);
 			expect(rules).toHaveLength(1);
 			expect(rules[0]?.name).toBe("yaml-rule");
 		} finally {
-			try { unlinkSync(path); } catch { /* ignore */ }
+			try {
+				unlinkSync(path);
+			} catch {
+				/* ignore */
+			}
 		}
 	});
 
@@ -819,7 +832,11 @@ describe("loadPolicies", () => {
 			const rules = loadPolicies(path);
 			expect(rules).toEqual([]);
 		} finally {
-			try { unlinkSync(path); } catch { /* ignore */ }
+			try {
+				unlinkSync(path);
+			} catch {
+				/* ignore */
+			}
 		}
 	});
 });
@@ -1107,7 +1124,9 @@ describe("operator edge cases", () => {
 
 		it("matches complex regex patterns", () => {
 			const r = rule({
-				conditions: [{ field: "ip", operator: "regex", value: "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$" }],
+				conditions: [
+					{ field: "ip", operator: "regex", value: "^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$" },
+				],
 			});
 			expect(evaluatePolicy([r], { ip: "192.168.1.1" }).matched).toHaveLength(1);
 			expect(evaluatePolicy([r], { ip: "not-an-ip" }).matched).toHaveLength(0);
@@ -1117,7 +1136,7 @@ describe("operator edge cases", () => {
 	describe("default/unknown operator (line 156)", () => {
 		it("returns false for unknown operator", () => {
 			const r = rule({
-				conditions: [{ field: "x", operator: "unknown_op" as any, value: 1 }],
+				conditions: [{ field: "x", operator: "unknown_op" as unknown as FieldOperator, value: 1 }],
 			});
 			const result = evaluatePolicy([r], { x: 1 });
 			expect(result.matched).toHaveLength(0);
@@ -1191,7 +1210,7 @@ describe("multiple rules — mixed enforcement", () => {
 			conditions: [{ field: "x", operator: "eq", value: 1 }],
 		});
 		// Change effect to something that's not deny/warn
-		(r as any).effect = "allow";
+		(r as unknown as { effect: string }).effect = "allow";
 		const result = evaluatePolicy([r], { x: 1 });
 		// Rule matches, but not a violation (effect is not deny/warn)
 		// Wait — PolicyEffect is "deny" | "warn" only. Let's test that a deny
@@ -1214,7 +1233,7 @@ describe("multiple rules — mixed enforcement", () => {
 			name: "name-only-rule",
 			conditions: [{ field: "bad", operator: "eq", value: true }],
 		});
-		delete (r as any).description;
+		(r as unknown as { description: undefined }).description = undefined;
 		const result = evaluatePolicy([r], { bad: true });
 		expect(result.reasons[0]).toContain("name-only-rule");
 	});
@@ -1250,12 +1269,7 @@ describe("time window — startHour rejection", () => {
 		d.setHours(6, 0, 0, 0); // 6 AM local
 		const ts = d.toISOString();
 
-		expect(
-			isWithinTimeWindow(
-				[{ startHour: 9, endHour: 17 }],
-				ts,
-			),
-		).toBe(false);
+		expect(isWithinTimeWindow([{ startHour: 9, endHour: 17 }], ts)).toBe(false);
 	});
 
 	it("accepts when hour equals startHour", () => {
@@ -1263,12 +1277,7 @@ describe("time window — startHour rejection", () => {
 		d.setHours(9, 0, 0, 0);
 		const ts = d.toISOString();
 
-		expect(
-			isWithinTimeWindow(
-				[{ startHour: 9, endHour: 17 }],
-				ts,
-			),
-		).toBe(true);
+		expect(isWithinTimeWindow([{ startHour: 9, endHour: 17 }], ts)).toBe(true);
 	});
 
 	it("rejects when hour equals endHour (exclusive)", () => {
@@ -1276,12 +1285,7 @@ describe("time window — startHour rejection", () => {
 		d.setHours(17, 0, 0, 0);
 		const ts = d.toISOString();
 
-		expect(
-			isWithinTimeWindow(
-				[{ startHour: 9, endHour: 17 }],
-				ts,
-			),
-		).toBe(false);
+		expect(isWithinTimeWindow([{ startHour: 9, endHour: 17 }], ts)).toBe(false);
 	});
 
 	it("accepts when only daysOfWeek constraint matches", () => {
@@ -1289,12 +1293,7 @@ describe("time window — startHour rejection", () => {
 		const day = d.getDay();
 		const ts = d.toISOString();
 
-		expect(
-			isWithinTimeWindow(
-				[{ daysOfWeek: [day] }],
-				ts,
-			),
-		).toBe(true);
+		expect(isWithinTimeWindow([{ daysOfWeek: [day] }], ts)).toBe(true);
 	});
 });
 
@@ -1327,8 +1326,8 @@ describe("priority sort — both undefined", () => {
 	it("handles both rules with undefined priority (both default to 100)", () => {
 		const r1 = rule({ name: "rule-a", conditions: [] });
 		const r2 = rule({ name: "rule-b", conditions: [] });
-		delete (r1 as Record<string, unknown>)["priority"];
-		delete (r2 as Record<string, unknown>)["priority"];
+		(r1 as Record<string, unknown>).priority = undefined;
+		(r2 as Record<string, unknown>).priority = undefined;
 
 		const result = evaluatePolicy([r1, r2], {});
 		expect(result.matched).toHaveLength(2);
@@ -1337,7 +1336,7 @@ describe("priority sort — both undefined", () => {
 	it("handles one undefined priority against explicit priority", () => {
 		const explicit = rule({ name: "explicit-50", priority: 50, conditions: [] });
 		const implicit = rule({ name: "implicit-100", conditions: [] });
-		delete (implicit as Record<string, unknown>)["priority"];
+		(implicit as Record<string, unknown>).priority = undefined;
 
 		const result = evaluatePolicy([implicit, explicit], {});
 		expect(result.matched).toHaveLength(2);

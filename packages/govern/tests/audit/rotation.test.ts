@@ -33,10 +33,10 @@ describe("Audit Rotation — writeReceipt", () => {
 		});
 
 		expect(receipt).toBeDefined();
-		expect(receipt!.v).toBe(RECEIPT_VERSION);
-		expect(receipt!.kind).toBe("policy");
-		expect(receipt!.actor).toBe("agent-1");
-		expect(receipt!.ts).toBeDefined();
+		expect(receipt?.v).toBe(RECEIPT_VERSION);
+		expect(receipt?.kind).toBe("policy");
+		expect(receipt?.actor).toBe("agent-1");
+		expect(receipt?.ts).toBeDefined();
 	});
 
 	it("receipt file exists on disk", () => {
@@ -48,16 +48,9 @@ describe("Audit Rotation — writeReceipt", () => {
 		});
 
 		expect(receipt).toBeDefined();
-		const receiptId = receipt!.data["receiptId"] as string;
-		const today = new Date().toISOString().split("T")[0]!;
-		const receiptPath = join(
-			tempDir,
-			".usertools",
-			"audit",
-			"system",
-			today,
-			`${receiptId}.json`,
-		);
+		const receiptId = receipt?.data.receiptId as string;
+		const today = new Date().toISOString().split("T")[0] as string;
+		const receiptPath = join(tempDir, ".usertools", "audit", "system", today, `${receiptId}.json`);
 		expect(existsSync(receiptPath)).toBe(true);
 
 		const parsed = JSON.parse(readFileSync(receiptPath, "utf-8"));
@@ -74,7 +67,7 @@ describe("Audit Rotation — writeReceipt", () => {
 		});
 
 		expect(receipt).toBeDefined();
-		expect(receipt!.correlationId).toBe("corr_test_123");
+		expect(receipt?.correlationId).toBe("corr_test_123");
 	});
 
 	it("generates unique receipt IDs", () => {
@@ -87,7 +80,7 @@ describe("Audit Rotation — writeReceipt", () => {
 				data: { n: i },
 			});
 			if (receipt) {
-				ids.add(receipt.data["receiptId"] as string);
+				ids.add(receipt.data.receiptId as string);
 			}
 		}
 		expect(ids.size).toBe(10);
@@ -154,8 +147,8 @@ describe("Audit Rotation — listReceipts", () => {
 		const results = listReceipts(tempDir, "task");
 		expect(results).toHaveLength(2);
 		// Newest first
-		const ts0 = new Date(results[0]!.ts).getTime();
-		const ts1 = new Date(results[1]!.ts).getTime();
+		const ts0 = new Date(results[0]?.ts).getTime();
+		const ts1 = new Date(results[1]?.ts).getTime();
 		expect(ts0).toBeGreaterThanOrEqual(ts1);
 	});
 });
@@ -192,8 +185,8 @@ describe("Audit Rotation — loadIndex", () => {
 
 		const index = loadIndex(tempDir);
 		expect(index).toHaveLength(2);
-		expect(index[0]!.kind).toBe("policy");
-		expect(index[1]!.kind).toBe("system");
+		expect(index[0]?.kind).toBe("policy");
+		expect(index[1]?.kind).toBe("system");
 	});
 
 	it("index is bounded at the configured limit", () => {
@@ -225,7 +218,7 @@ describe("Audit Rotation — loadIndex", () => {
 
 		const index = loadIndex(tempDir);
 		expect(index).toHaveLength(1);
-		const entry = index[0]!;
+		const entry = index[0] as (typeof index)[number];
 		expect(entry.path).toMatch(/^policy\/\d{4}-\d{2}-\d{2}\/rcpt_/);
 		expect(entry.kind).toBe("policy");
 		expect(entry.actor).toBe("a1");
@@ -272,7 +265,7 @@ describe("Audit Rotation — writeReceipt error paths", () => {
 		});
 
 		expect(receipt).toBeDefined();
-		expect("correlationId" in receipt!).toBe(false);
+		expect("correlationId" in (receipt as NonNullable<typeof receipt>)).toBe(false);
 	});
 });
 
@@ -300,18 +293,15 @@ describe("Audit Rotation — listReceipts edge cases", () => {
 			actor: "legacy-actor",
 			data: { receiptId: "rcpt_legacy_001" },
 		};
-		writeFileSync(
-			join(kindDir, "rcpt_legacy_001.json"),
-			JSON.stringify(receipt),
-		);
+		writeFileSync(join(kindDir, "rcpt_legacy_001.json"), JSON.stringify(receipt));
 
 		const results = listReceipts(tempDir, "policy");
 		expect(results).toHaveLength(1);
-		expect(results[0]!.actor).toBe("legacy-actor");
+		expect(results[0]?.actor).toBe("legacy-actor");
 	});
 
 	it("skips invalid JSON files in date directories", () => {
-		const today = new Date().toISOString().split("T")[0]!;
+		const today = new Date().toISOString().split("T")[0] as string;
 		const dateDir = join(tempDir, VAULT_DIR, AUDIT_DIR, "policy", today);
 		mkdirSync(dateDir, { recursive: true });
 
@@ -330,7 +320,7 @@ describe("Audit Rotation — listReceipts edge cases", () => {
 
 		const results = listReceipts(tempDir, "policy");
 		expect(results).toHaveLength(1);
-		expect(results[0]!.actor).toBe("a1");
+		expect(results[0]?.actor).toBe("a1");
 	});
 
 	it("skips invalid JSON files in legacy flat dir", () => {
@@ -352,7 +342,7 @@ describe("Audit Rotation — listReceipts edge cases", () => {
 			data: { n: 1 },
 		});
 
-		const today = new Date().toISOString().split("T")[0]!;
+		const today = new Date().toISOString().split("T")[0] as string;
 		const results = listReceipts(tempDir, "policy", today);
 		expect(results).toHaveLength(1);
 

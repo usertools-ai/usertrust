@@ -55,14 +55,14 @@ class AsyncMutex {
 	private queue: Promise<void> = Promise.resolve();
 
 	async acquire(): Promise<() => void> {
-		let release: () => void;
+		let release: (() => void) | undefined;
 		const next = new Promise<void>((resolve) => {
 			release = resolve;
 		});
 		const prev = this.queue;
 		this.queue = next;
 		await prev;
-		return release!;
+		return release as () => void;
 	}
 }
 
@@ -83,17 +83,14 @@ function acquireProcessLock(
 			const lockData = JSON.parse(content) as { pid: number };
 			if (lockData.pid === process.pid) {
 				console.warn(
-					`[AUDIT] Reclaiming stale same-PID lock (PID ${process.pid}). ` +
-						"Previous process exited without releasing the lock.",
+					`[AUDIT] Reclaiming stale same-PID lock (PID ${process.pid}). Previous process exited without releasing the lock.`,
 				);
 				unlinkSync(candidateLockPath);
 			} else {
 				try {
 					process.kill(lockData.pid, 0);
 					throw new Error(
-						`Audit writer lock held by PID ${lockData.pid}. ` +
-							"Only one process may write to the audit log. " +
-							`Lock file: ${candidateLockPath}`,
+						`Audit writer lock held by PID ${lockData.pid}. Only one process may write to the audit log. Lock file: ${candidateLockPath}`,
 					);
 				} catch (killErr: unknown) {
 					if (killErr instanceof Error && "code" in killErr) {
@@ -102,9 +99,7 @@ function acquireProcessLock(
 							unlinkSync(candidateLockPath);
 						} else if (code === "EPERM") {
 							throw new Error(
-								`Audit writer lock held by PID ${lockData.pid}. ` +
-									"Only one process may write to the audit log. " +
-									`Lock file: ${candidateLockPath}`,
+								`Audit writer lock held by PID ${lockData.pid}. Only one process may write to the audit log. Lock file: ${candidateLockPath}`,
 							);
 						} else {
 							throw killErr;
@@ -115,10 +110,7 @@ function acquireProcessLock(
 				}
 			}
 		} catch (parseErr) {
-			if (
-				parseErr instanceof Error &&
-				parseErr.message.includes("Audit writer lock held")
-			) {
+			if (parseErr instanceof Error && parseErr.message.includes("Audit writer lock held")) {
 				throw parseErr;
 			}
 			try {
@@ -162,10 +154,7 @@ interface CachedTail {
 	sequence: number;
 }
 
-function getLastEvent(
-	logPath: string,
-	cache: Map<string, CachedTail>,
-): CachedTail | null {
+function getLastEvent(logPath: string, cache: Map<string, CachedTail>): CachedTail | null {
 	const cached = cache.get(logPath);
 	if (cached) return cached;
 
@@ -194,8 +183,7 @@ function getLastEvent(
 
 	try {
 		const event = JSON.parse(lastLine) as AuditEvent & { sequence?: number };
-		const sequence =
-			typeof event.sequence === "number" ? event.sequence : lines.length;
+		const sequence = typeof event.sequence === "number" ? event.sequence : lines.length;
 		const tail: CachedTail = { hash: event.hash, sequence };
 		cache.set(logPath, tail);
 		return tail;
@@ -309,10 +297,7 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 			const metaPath = `${logPath}.meta`;
 			const metaFd = openSync(metaPath, "w");
 			try {
-				writeSync(
-					metaFd,
-					JSON.stringify({ lastHash: hash, sequence }),
-				);
+				writeSync(metaFd, JSON.stringify({ lastHash: hash, sequence }));
 				fsyncSync(metaFd);
 			} finally {
 				closeSync(metaFd);

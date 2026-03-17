@@ -74,11 +74,7 @@ export class CircuitBreaker {
 	private lastStateChange: number;
 	private readonly now: () => number;
 
-	constructor(
-		key: string,
-		config?: Partial<CircuitBreakerConfig>,
-		clock?: () => number,
-	) {
+	constructor(key: string, config?: Partial<CircuitBreakerConfig>, clock?: () => number) {
 		this.key = key;
 		this.config = { ...DEFAULT_CONFIG, ...config };
 		this.now = clock ?? Date.now;

@@ -53,7 +53,7 @@ export function verifyChain(logPath: string): ChainVerificationResult {
 	let latestHash = GENESIS_HASH;
 
 	for (let i = 0; i < lines.length; i++) {
-		const line = lines[i]!;
+		const line = lines[i] as string;
 
 		let event: AuditEvent;
 		try {

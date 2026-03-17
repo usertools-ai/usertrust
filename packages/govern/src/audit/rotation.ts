@@ -10,13 +10,7 @@
  * Adapted from Turf governance audit.ts (receipt emission + daily rotation).
  */
 
-import {
-	existsSync,
-	mkdirSync,
-	readFileSync,
-	readdirSync,
-	writeFileSync,
-} from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AUDIT_DIR, RECEIPT_VERSION, VAULT_DIR } from "../shared/constants.js";
 import { governId } from "../shared/ids.js";
@@ -67,11 +61,7 @@ function getIndexPath(auditRoot: string): string {
 
 // ── Index management ──
 
-function updateIndex(
-	auditRoot: string,
-	entry: IndexEntry,
-	indexLimit: number,
-): void {
+function updateIndex(auditRoot: string, entry: IndexEntry, indexLimit: number): void {
 	try {
 		const indexPath = getIndexPath(auditRoot);
 		let index: IndexEntry[] = [];
@@ -120,9 +110,7 @@ export function writeReceipt(
 			kind: input.kind,
 			subsystem: input.subsystem,
 			actor: input.actor,
-			...(input.correlationId !== undefined
-				? { correlationId: input.correlationId }
-				: {}),
+			...(input.correlationId !== undefined ? { correlationId: input.correlationId } : {}),
 			data: {
 				receiptId,
 				...input.data,
@@ -145,9 +133,7 @@ export function writeReceipt(
 				kind: input.kind,
 				ts,
 				actor: input.actor,
-				...(input.correlationId !== undefined
-					? { correlationId: input.correlationId }
-					: {}),
+				...(input.correlationId !== undefined ? { correlationId: input.correlationId } : {}),
 				path: `${input.kind}/${getTodayDate()}/${receiptId}.json`,
 			},
 			indexLimit,
@@ -167,11 +153,7 @@ export function writeReceipt(
  * @param date - Optional date filter (YYYY-MM-DD)
  * @returns Array of receipts, sorted newest-first
  */
-export function listReceipts(
-	vaultPath: string,
-	kind: string,
-	date?: string,
-): AuditReceipt[] {
+export function listReceipts(vaultPath: string, kind: string, date?: string): AuditReceipt[] {
 	const kindDir = join(vaultPath, VAULT_DIR, AUDIT_DIR, kind);
 	if (!existsSync(kindDir)) return [];
 
@@ -203,9 +185,7 @@ export function listReceipts(
 			}
 		}
 
-		return results.sort(
-			(a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime(),
-		);
+		return results.sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
 	} catch {
 		return [];
 	}

@@ -12,7 +12,7 @@ export function tbId(): bigint {
 	buf[5] = Number(now & 0xffn);
 	let id = 0n;
 	for (let i = 0; i < 16; i++) {
-		id = (id << 8n) | BigInt(buf[i]!);
+		id = (id << 8n) | BigInt(buf[i] as number);
 	}
 	return id;
 }

@@ -25,9 +25,7 @@ describe("Merkle — hashLeaf / hashInternal", () => {
 	it("hashLeaf is domain-separated (differs from raw SHA-256)", () => {
 		const data = makeLeaf(0);
 		const leafHash = hashLeaf(data);
-		const rawHash = createHash("sha256")
-			.update(Buffer.from(data, "hex"))
-			.digest("hex");
+		const rawHash = createHash("sha256").update(Buffer.from(data, "hex")).digest("hex");
 		expect(leafHash).not.toBe(rawHash);
 	});
 
@@ -72,7 +70,7 @@ describe("Merkle — buildMerkleTree", () => {
 		expect(layers[1]).toHaveLength(2);
 		// Layer 2 is the root
 		expect(layers[2]).toHaveLength(1);
-		expect(root).toBe(layers[2]![0]);
+		expect(root).toBe(layers[2]?.[0]);
 	});
 
 	it("4 leaves: balanced tree", () => {
@@ -111,7 +109,7 @@ describe("Merkle — inclusion proofs", () => {
 		for (let i = 0; i < leaves.length; i++) {
 			const proof = generateInclusionProof(i, leaves, "seg-1");
 			expect(proof.root).toBe(root);
-			const valid = verifyInclusionProof(proof, root!, leaves.length);
+			const valid = verifyInclusionProof(proof, root as string, leaves.length);
 			expect(valid).toBe(true);
 		}
 	});
@@ -122,7 +120,7 @@ describe("Merkle — inclusion proofs", () => {
 
 		for (let i = 0; i < leaves.length; i++) {
 			const proof = generateInclusionProof(i, leaves, "seg-1");
-			const valid = verifyInclusionProof(proof, root!, leaves.length);
+			const valid = verifyInclusionProof(proof, root as string, leaves.length);
 			expect(valid).toBe(true);
 		}
 	});
@@ -252,7 +250,7 @@ describe("Merkle — inclusion proof for promoted odd leaf", () => {
 
 		// Leaf at index 2 is the promoted odd leaf
 		const proof = generateInclusionProof(2, leaves, "seg-odd");
-		const valid = verifyInclusionProof(proof, root!, leaves.length);
+		const valid = verifyInclusionProof(proof, root as string, leaves.length);
 		expect(valid).toBe(true);
 	});
 
@@ -262,7 +260,7 @@ describe("Merkle — inclusion proof for promoted odd leaf", () => {
 
 		// Test the last (promoted) leaf specifically
 		const proof = generateInclusionProof(6, leaves, "seg-7");
-		const valid = verifyInclusionProof(proof, root!, leaves.length);
+		const valid = verifyInclusionProof(proof, root as string, leaves.length);
 		expect(valid).toBe(true);
 	});
 });

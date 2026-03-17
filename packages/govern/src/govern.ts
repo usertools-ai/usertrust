@@ -32,15 +32,14 @@ import { join } from "node:path";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import { writeReceipt } from "./audit/rotation.js";
 import { detectClientKind } from "./detect.js";
-import { DecayRateCalculator } from "./policy/decay.js";
 import { GovernTBClient, XFER_SPEND } from "./ledger/client.js";
 import { estimateCost, estimateInputTokens } from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
+import { DecayRateCalculator } from "./policy/decay.js";
 import { type GateRule, evaluatePolicy, loadPolicies } from "./policy/gate.js";
 import { detectPII } from "./policy/pii.js";
 import { type ProxyConnection, connectProxy } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
-import { type StreamUsage, createGovernedStream } from "./streaming.js";
 import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
 import { LedgerUnavailableError, PolicyDeniedError } from "./shared/errors.js";
 import { governId } from "./shared/ids.js";
@@ -51,6 +50,7 @@ import type {
 	GovernedResponse,
 	LLMClientKind,
 } from "./shared/types.js";
+import { type StreamUsage, createGovernedStream } from "./streaming.js";
 
 // ── Public types ──
 
@@ -151,9 +151,7 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 		try {
 			engine = createTBEngine(config);
 		} catch (err) {
-			throw new LedgerUnavailableError(
-				err instanceof Error ? err.message : String(err),
-			);
+			throw new LedgerUnavailableError(err instanceof Error ? err.message : String(err));
 		}
 	} else {
 		engine = null;
@@ -273,9 +271,7 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 							budgetRemaining: config.budget - budgetSpent,
 							auditHash,
 							chainPath: join(VAULT_DIR, "audit"),
-							receiptUrl: opts?.proxy != null
-								? `https://verify.usertools.dev/${transferId}`
-								: null,
+							receiptUrl: opts?.proxy != null ? `https://verify.usertools.dev/${transferId}` : null,
 							settled,
 							model,
 							provider: kind,
@@ -301,9 +297,7 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 					budgetRemaining: config.budget - budgetSpent,
 					auditHash,
 					chainPath: join(VAULT_DIR, "audit"),
-					receiptUrl: opts?.proxy != null
-						? `https://verify.usertools.dev/${transferId}`
-						: null,
+					receiptUrl: opts?.proxy != null ? `https://verify.usertools.dev/${transferId}` : null,
 					settled,
 					model,
 					provider: kind,
@@ -394,12 +388,16 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 
 			// i. Daily-rotated audit receipt (non-blocking)
 			if (config.audit.rotation !== "none") {
-				writeReceipt(vaultPath, {
-					kind: "llm_call",
-					subsystem: "govern",
-					actor: "local",
-					data: { model, cost: actualCost, settled, transferId },
-				}, config.audit.indexLimit);
+				writeReceipt(
+					vaultPath,
+					{
+						kind: "llm_call",
+						subsystem: "govern",
+						actor: "local",
+						data: { model, cost: actualCost, settled, transferId },
+					},
+					config.audit.indexLimit,
+				);
 			}
 
 			// i2. Pattern memory

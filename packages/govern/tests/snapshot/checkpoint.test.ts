@@ -3,11 +3,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-	createSnapshot,
-	listSnapshots,
-	restoreSnapshot,
-} from "../../src/snapshot/checkpoint.js";
+import { createSnapshot, listSnapshots, restoreSnapshot } from "../../src/snapshot/checkpoint.js";
 
 describe("Checkpoint / Restore", () => {
 	let tempDir: string;
@@ -31,30 +27,21 @@ describe("Checkpoint / Restore", () => {
 
 		// policies/
 		await mkdir(join(vaultPath, "policies"), { recursive: true });
-		await writeFile(
-			join(vaultPath, "policies", "default.json"),
-			'{"maxBudget": 50000}',
-		);
+		await writeFile(join(vaultPath, "policies", "default.json"), '{"maxBudget": 50000}');
 
 		// patterns/
 		await mkdir(join(vaultPath, "patterns"), { recursive: true });
 		await writeFile(join(vaultPath, "patterns", "memory.json"), "[]");
 
 		// govern.config.json
-		await writeFile(
-			join(vaultPath, "govern.config.json"),
-			'{"version": 1}',
-		);
+		await writeFile(join(vaultPath, "govern.config.json"), '{"version": 1}');
 
 		// leases.json
 		await writeFile(join(vaultPath, "leases.json"), "{}");
 
 		// Excluded directories
 		await mkdir(join(vaultPath, "tigerbeetle"), { recursive: true });
-		await writeFile(
-			join(vaultPath, "tigerbeetle", "data.tb"),
-			"binary-data",
-		);
+		await writeFile(join(vaultPath, "tigerbeetle", "data.tb"), "binary-data");
 
 		await mkdir(join(vaultPath, "dlq"), { recursive: true });
 		await writeFile(join(vaultPath, "dlq", "dead-letter.jsonl"), "error\n");
@@ -110,7 +97,7 @@ describe("Checkpoint / Restore", () => {
 
 			// Verify base64 decoding
 			const decoded = Buffer.from(
-				payload.entries["govern.config.json"]!,
+				payload.entries["govern.config.json"] as string,
 				"base64",
 			).toString("utf-8");
 			expect(decoded).toBe('{"version": 1}');
@@ -125,29 +112,17 @@ describe("Checkpoint / Restore", () => {
 			await createSnapshot(vaultPath, "restore-test");
 
 			// Modify files
-			await writeFile(
-				join(vaultPath, "govern.config.json"),
-				'{"version": 99}',
-			);
-			await writeFile(
-				join(vaultPath, "audit", "chain.jsonl"),
-				"modified-content\n",
-			);
+			await writeFile(join(vaultPath, "govern.config.json"), '{"version": 99}');
+			await writeFile(join(vaultPath, "audit", "chain.jsonl"), "modified-content\n");
 
 			// Restore
 			await restoreSnapshot(vaultPath, "restore-test");
 
 			// Verify restoration
-			const config = await readFile(
-				join(vaultPath, "govern.config.json"),
-				"utf-8",
-			);
+			const config = await readFile(join(vaultPath, "govern.config.json"), "utf-8");
 			expect(config).toBe('{"version": 1}');
 
-			const chain = await readFile(
-				join(vaultPath, "audit", "chain.jsonl"),
-				"utf-8",
-			);
+			const chain = await readFile(join(vaultPath, "audit", "chain.jsonl"), "utf-8");
 			expect(chain).toBe("line1\nline2\n");
 		});
 
@@ -162,10 +137,7 @@ describe("Checkpoint / Restore", () => {
 			await restoreSnapshot(vaultPath, "deleted-dirs");
 
 			// Verify policies/ was recreated
-			const policy = await readFile(
-				join(vaultPath, "policies", "default.json"),
-				"utf-8",
-			);
+			const policy = await readFile(join(vaultPath, "policies", "default.json"), "utf-8");
 			expect(policy).toBe('{"maxBudget": 50000}');
 		});
 	});
@@ -184,15 +156,13 @@ describe("Checkpoint / Restore", () => {
 			const snapshots = await listSnapshots(vaultPath);
 
 			expect(snapshots).toHaveLength(3);
-			expect(snapshots[0]!.name).toBe("alpha");
-			expect(snapshots[1]!.name).toBe("beta");
-			expect(snapshots[2]!.name).toBe("gamma");
+			expect(snapshots[0]?.name).toBe("alpha");
+			expect(snapshots[1]?.name).toBe("beta");
+			expect(snapshots[2]?.name).toBe("gamma");
 
 			// Verify sorted by timestamp
 			for (let i = 1; i < snapshots.length; i++) {
-				expect(snapshots[i]!.timestamp >= snapshots[i - 1]!.timestamp).toBe(
-					true,
-				);
+				expect(snapshots[i]?.timestamp >= snapshots[i - 1]?.timestamp).toBe(true);
 			}
 		});
 
@@ -210,26 +180,17 @@ describe("Checkpoint / Restore", () => {
 			await createSnapshot(vaultPath, "v1");
 
 			// Modify and snapshot "v2"
-			await writeFile(
-				join(vaultPath, "govern.config.json"),
-				'{"version": 2}',
-			);
+			await writeFile(join(vaultPath, "govern.config.json"), '{"version": 2}');
 			await createSnapshot(vaultPath, "v2");
 
 			// Restore v1
 			await restoreSnapshot(vaultPath, "v1");
-			let config = await readFile(
-				join(vaultPath, "govern.config.json"),
-				"utf-8",
-			);
+			let config = await readFile(join(vaultPath, "govern.config.json"), "utf-8");
 			expect(config).toBe('{"version": 1}');
 
 			// Restore v2
 			await restoreSnapshot(vaultPath, "v2");
-			config = await readFile(
-				join(vaultPath, "govern.config.json"),
-				"utf-8",
-			);
+			config = await readFile(join(vaultPath, "govern.config.json"), "utf-8");
 			expect(config).toBe('{"version": 2}');
 		});
 	});
@@ -252,10 +213,7 @@ describe("Checkpoint / Restore", () => {
 			await writeFile(join(vaultPath, "random-file.txt"), "world");
 
 			// Create one included file for reference
-			await writeFile(
-				join(vaultPath, "govern.config.json"),
-				'{"version": 1}',
-			);
+			await writeFile(join(vaultPath, "govern.config.json"), '{"version": 1}');
 
 			const meta = await createSnapshot(vaultPath, "filter-snap");
 
@@ -283,14 +241,8 @@ describe("Checkpoint / Restore", () => {
 			await mkdir(join(vaultPath, "audit", "nested", "deep"), {
 				recursive: true,
 			});
-			await writeFile(
-				join(vaultPath, "audit", "nested", "deep", "event.jsonl"),
-				"nested-data",
-			);
-			await writeFile(
-				join(vaultPath, "audit", "nested", "summary.json"),
-				"{}",
-			);
+			await writeFile(join(vaultPath, "audit", "nested", "deep", "event.jsonl"), "nested-data");
+			await writeFile(join(vaultPath, "audit", "nested", "summary.json"), "{}");
 			await writeFile(join(vaultPath, "audit", "top.jsonl"), "top-data");
 
 			const meta = await createSnapshot(vaultPath, "nested-snap");
@@ -316,7 +268,7 @@ describe("Checkpoint / Restore", () => {
 
 			// Only the valid .json snapshot should be listed
 			expect(snapshots).toHaveLength(1);
-			expect(snapshots[0]!.name).toBe("valid");
+			expect(snapshots[0]?.name).toBe("valid");
 		});
 
 		it("skips subdirectories in snapshots directory (line 185)", async () => {
@@ -328,15 +280,12 @@ describe("Checkpoint / Restore", () => {
 			const snapshotsDir = join(vaultPath, "snapshots");
 			await mkdir(join(snapshotsDir, "subdir"), { recursive: true });
 			// Also put a .json file inside the subdir (should not be found)
-			await writeFile(
-				join(snapshotsDir, "subdir", "nested.json"),
-				'{"meta": {}}',
-			);
+			await writeFile(join(snapshotsDir, "subdir", "nested.json"), '{"meta": {}}');
 
 			const snapshots = await listSnapshots(vaultPath);
 
 			expect(snapshots).toHaveLength(1);
-			expect(snapshots[0]!.name).toBe("real");
+			expect(snapshots[0]?.name).toBe("real");
 		});
 
 		it("skips corrupt snapshot files gracefully", async () => {
@@ -345,24 +294,19 @@ describe("Checkpoint / Restore", () => {
 
 			// Write a corrupt JSON file to snapshots dir
 			const snapshotsDir = join(vaultPath, "snapshots");
-			await writeFile(
-				join(snapshotsDir, "corrupt.json"),
-				"{ not valid json !!!",
-			);
+			await writeFile(join(snapshotsDir, "corrupt.json"), "{ not valid json !!!");
 
 			const snapshots = await listSnapshots(vaultPath);
 
 			// Only the good snapshot should be returned
 			expect(snapshots).toHaveLength(1);
-			expect(snapshots[0]!.name).toBe("good");
+			expect(snapshots[0]?.name).toBe("good");
 		});
 	});
 
 	describe("restoreSnapshot edge cases", () => {
 		it("throws when snapshot does not exist", async () => {
-			await expect(
-				restoreSnapshot(vaultPath, "nonexistent"),
-			).rejects.toThrow();
+			await expect(restoreSnapshot(vaultPath, "nonexistent")).rejects.toThrow();
 		});
 	});
 });

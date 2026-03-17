@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Hoist mock variables so they're available inside the vi.mock factory
 const {
@@ -51,19 +51,19 @@ vi.mock("tigerbeetle-node", () => ({
 }));
 
 import {
-	GovernTBClient,
-	TBTransferError,
-	LEDGER_USERTOKENS,
-	CODE_USER_WALLET,
-	CODE_PLATFORM_TREASURY,
 	CODE_ESCROW,
-	XFER_SPEND,
-	XFER_PURCHASE,
-	XFER_TRANSFER,
-	XFER_REFUND,
-	XFER_ALLOCATION,
-	XFER_TOOL_CALL,
+	CODE_PLATFORM_TREASURY,
+	CODE_USER_WALLET,
+	GovernTBClient,
+	LEDGER_USERTOKENS,
+	TBTransferError,
 	XFER_A2A_DELEGATION,
+	XFER_ALLOCATION,
+	XFER_PURCHASE,
+	XFER_REFUND,
+	XFER_SPEND,
+	XFER_TOOL_CALL,
+	XFER_TRANSFER,
 } from "../../src/ledger/client.js";
 
 /** Reset mockCreateClient to the default implementation (return mockClient). */
@@ -129,9 +129,7 @@ describe("GovernTBClient", () => {
 
 		it("throws on other creation errors", async () => {
 			mockCreateAccounts.mockResolvedValueOnce([{ index: 0, result: 99 }]);
-			await expect(client.createUserWallet("user_4")).rejects.toThrow(
-				"Failed to create account",
-			);
+			await expect(client.createUserWallet("user_4")).rejects.toThrow("Failed to create account");
 		});
 
 		it("throws when error array element is undefined", async () => {
@@ -200,7 +198,7 @@ describe("GovernTBClient", () => {
 				userData64: 7n,
 				userData32: 99,
 			});
-			const transfer = mockCreateTransfers.mock.calls[0]![0][0];
+			const transfer = mockCreateTransfers.mock.calls[0]?.[0][0];
 			expect(transfer.user_data_128).toBe(42n);
 			expect(transfer.user_data_64).toBe(7n);
 			expect(transfer.user_data_32).toBe(99);
@@ -215,7 +213,7 @@ describe("GovernTBClient", () => {
 				amount: 50,
 				code: XFER_SPEND,
 			});
-			const transfer = mockCreateTransfers.mock.calls[0]![0][0];
+			const transfer = mockCreateTransfers.mock.calls[0]?.[0][0];
 			expect(transfer.timeout).toBe(300);
 		});
 	});
@@ -234,22 +232,20 @@ describe("GovernTBClient", () => {
 
 		it("throws when error array element is undefined", async () => {
 			mockCreateTransfers.mockResolvedValueOnce([undefined]);
-			await expect(client.postTransfer(123n)).rejects.toThrow(
-				"Unknown account/transfer error",
-			);
+			await expect(client.postTransfer(123n)).rejects.toThrow("Unknown account/transfer error");
 		});
 
 		it("uses amount_max when no amount provided", async () => {
 			mockCreateTransfers.mockResolvedValueOnce([]);
 			await client.postTransfer(123n);
-			const transfer = mockCreateTransfers.mock.calls[0]![0][0];
+			const transfer = mockCreateTransfers.mock.calls[0]?.[0][0];
 			expect(transfer.amount).toBe((1n << 128n) - 1n);
 		});
 
 		it("uses specified amount when provided", async () => {
 			mockCreateTransfers.mockResolvedValueOnce([]);
 			await client.postTransfer(123n, 42);
-			const transfer = mockCreateTransfers.mock.calls[0]![0][0];
+			const transfer = mockCreateTransfers.mock.calls[0]?.[0][0];
 			expect(transfer.amount).toBe(42n);
 		});
 	});
@@ -268,9 +264,7 @@ describe("GovernTBClient", () => {
 
 		it("throws when error array element is undefined", async () => {
 			mockCreateTransfers.mockResolvedValueOnce([undefined]);
-			await expect(client.voidTransfer(123n)).rejects.toThrow(
-				"Unknown account/transfer error",
-			);
+			await expect(client.voidTransfer(123n)).rejects.toThrow("Unknown account/transfer error");
 		});
 	});
 
@@ -284,7 +278,7 @@ describe("GovernTBClient", () => {
 				code: XFER_PURCHASE,
 			});
 			expect(typeof id).toBe("bigint");
-			const transfer = mockCreateTransfers.mock.calls[0]![0][0];
+			const transfer = mockCreateTransfers.mock.calls[0]?.[0][0];
 			expect(transfer.flags).toBe(0); // no pending flag
 			expect(transfer.pending_id).toBe(0n);
 			expect(transfer.timeout).toBe(0);
@@ -324,7 +318,7 @@ describe("GovernTBClient", () => {
 				transferId: 999n,
 			});
 			expect(id).toBe(999n);
-			const transfer = mockCreateTransfers.mock.calls[0]![0][0];
+			const transfer = mockCreateTransfers.mock.calls[0]?.[0][0];
 			expect(transfer.id).toBe(999n);
 		});
 
@@ -339,16 +333,14 @@ describe("GovernTBClient", () => {
 				userData64: 20n,
 				userData32: 30,
 			});
-			const transfer = mockCreateTransfers.mock.calls[0]![0][0];
+			const transfer = mockCreateTransfers.mock.calls[0]?.[0][0];
 			expect(transfer.user_data_128).toBe(10n);
 			expect(transfer.user_data_64).toBe(20n);
 			expect(transfer.user_data_32).toBe(30);
 		});
 
 		it("retries on connection error via withReconnect", async () => {
-			mockCreateTransfers
-				.mockRejectedValueOnce(new Error("ECONNRESET"))
-				.mockResolvedValueOnce([]);
+			mockCreateTransfers.mockRejectedValueOnce(new Error("ECONNRESET")).mockResolvedValueOnce([]);
 			const id = await client.immediateTransfer({
 				debitAccountId: 1n,
 				creditAccountId: 2n,
@@ -371,7 +363,7 @@ describe("GovernTBClient", () => {
 			mockLookupAccounts.mockResolvedValueOnce([mockAccount]);
 			const accounts = await client.lookupAccounts([1n]);
 			expect(accounts).toHaveLength(1);
-			expect(accounts[0]!.id).toBe(1n);
+			expect(accounts[0]?.id).toBe(1n);
 		});
 
 		it("returns empty array when no accounts found", async () => {
@@ -550,9 +542,7 @@ describe("GovernTBClient", () => {
 
 		it("createTreasury throws when error array element is undefined", async () => {
 			mockCreateAccounts.mockResolvedValueOnce([undefined]);
-			await expect(client.createTreasury()).rejects.toThrow(
-				"Unknown account/transfer error",
-			);
+			await expect(client.createTreasury()).rejects.toThrow("Unknown account/transfer error");
 		});
 	});
 
@@ -563,9 +553,7 @@ describe("GovernTBClient", () => {
 		});
 
 		it("getAccountId throws for unknown user", () => {
-			expect(() => client.getAccountId("unknown")).toThrow(
-				"No TigerBeetle account for user",
-			);
+			expect(() => client.getAccountId("unknown")).toThrow("No TigerBeetle account for user");
 		});
 
 		it("setAccountMapping overwrites previous mapping", () => {
@@ -622,9 +610,7 @@ describe("GovernTBClient", () => {
 		});
 
 		it("retries on ECONNRESET", async () => {
-			mockCreateTransfers
-				.mockRejectedValueOnce(new Error("ECONNRESET"))
-				.mockResolvedValueOnce([]);
+			mockCreateTransfers.mockRejectedValueOnce(new Error("ECONNRESET")).mockResolvedValueOnce([]);
 			const id = await client.voidTransfer(1n);
 			expect(typeof id).toBe("bigint");
 			expect(mockCreateTransfers).toHaveBeenCalledTimes(2);
@@ -687,9 +673,7 @@ describe("GovernTBClient", () => {
 		});
 
 		it("reconnect destroys old client and creates new one", async () => {
-			mockLookupAccounts
-				.mockRejectedValueOnce(new Error("closed"))
-				.mockResolvedValueOnce([]);
+			mockLookupAccounts.mockRejectedValueOnce(new Error("closed")).mockResolvedValueOnce([]);
 			await client.lookupAccounts([1n]);
 			expect(mockDestroy).toHaveBeenCalled();
 			// createClient called: once in constructor, once in reconnect
@@ -880,9 +864,7 @@ describe("GovernTBClient", () => {
 			const err = await promise;
 			expect(err).toBeInstanceOf(Error);
 
-			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringContaining("[govern]"),
-			);
+			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("[govern]"));
 
 			resetCreateClient();
 			warnSpy.mockRestore();
@@ -909,7 +891,7 @@ describe("GovernTBClient", () => {
 
 	describe("constructor options", () => {
 		it("defaults clusterId to 0n", () => {
-			const call = mockCreateClient.mock.calls[0]![0];
+			const call = mockCreateClient.mock.calls[0]?.[0];
 			expect(call.cluster_id).toBe(0n);
 		});
 
@@ -918,7 +900,7 @@ describe("GovernTBClient", () => {
 				addresses: ["3000"],
 				clusterId: 5n,
 			});
-			const lastCall = mockCreateClient.mock.calls[mockCreateClient.mock.calls.length - 1]![0];
+			const lastCall = mockCreateClient.mock.calls[mockCreateClient.mock.calls.length - 1]?.[0];
 			expect(lastCall.cluster_id).toBe(5n);
 			customClient.destroy();
 		});

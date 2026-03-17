@@ -5,14 +5,14 @@
  * lease creation/renewal/expiry, conflict detection, and stale cleanup.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	ScopeManager,
-	scopesOverlap,
 	fileMatchesScope,
+	scopesOverlap,
 	setStoreDir,
 } from "../../src/resilience/scope.js";
 
@@ -23,7 +23,10 @@ import {
 let testDir: string;
 
 beforeEach(() => {
-	testDir = join(tmpdir(), `govern-scope-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+	testDir = join(
+		tmpdir(),
+		`govern-scope-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+	);
 	mkdirSync(testDir, { recursive: true });
 	setStoreDir(testDir);
 });
@@ -62,12 +65,9 @@ describe("scopesOverlap", () => {
 	});
 
 	it("handles multiple patterns in each scope", () => {
-		expect(
-			scopesOverlap(
-				["src/**/*.ts", "lib/**/*.ts"],
-				["tests/**/*.ts", "lib/utils.ts"],
-			),
-		).toBe(true);
+		expect(scopesOverlap(["src/**/*.ts", "lib/**/*.ts"], ["tests/**/*.ts", "lib/utils.ts"])).toBe(
+			true,
+		);
 	});
 
 	it("empty scopes do not overlap", () => {
@@ -124,7 +124,7 @@ describe("ScopeManager", () => {
 
 		const fetched = mgr.getLease(lease.lease_id);
 		expect(fetched).toBeDefined();
-		expect(fetched!.lease_id).toBe(lease.lease_id);
+		expect(fetched?.lease_id).toBe(lease.lease_id);
 	});
 
 	it("releases a lease", () => {
@@ -141,9 +141,7 @@ describe("ScopeManager", () => {
 
 	it("throws when releasing a non-existent lease", () => {
 		const mgr = new ScopeManager();
-		expect(() => mgr.releaseLease("ls_nonexistent")).toThrow(
-			"not found",
-		);
+		expect(() => mgr.releaseLease("ls_nonexistent")).toThrow("not found");
 	});
 
 	it("renews a lease", () => {
@@ -247,7 +245,7 @@ describe("ScopeManager — conflicts", () => {
 
 		const conflicts = mgr.findConflicts(["src/index.ts"]);
 		expect(conflicts).toHaveLength(1);
-		expect(conflicts[0]!.lease.actor).toBe("agent-1");
+		expect(conflicts[0]?.lease.actor).toBe("agent-1");
 	});
 
 	it("findConflicts excludes specified actor", () => {
@@ -304,7 +302,7 @@ describe("ScopeManager — expiry", () => {
 		expect(expired).toBe(1);
 
 		const fetched = mgr.getLease(lease.lease_id);
-		expect(fetched!.status).toBe("expired");
+		expect(fetched?.status).toBe("expired");
 	});
 
 	it("does not expire non-stale leases", () => {
@@ -364,6 +362,6 @@ describe("ScopeManager — expiry", () => {
 
 		const active = mgr.getActiveLeases();
 		expect(active).toHaveLength(1);
-		expect(active[0]!.actor).toBe("agent-1");
+		expect(active[0]?.actor).toBe("agent-1");
 	});
 });

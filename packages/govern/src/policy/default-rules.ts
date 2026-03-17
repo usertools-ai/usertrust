@@ -19,9 +19,7 @@ export const DEFAULT_RULES: GateRule[] = [
 		effect: "deny",
 		enforcement: "hard",
 		severity: "critical",
-		conditions: [
-			{ field: "budget", operator: "lte", value: 0 },
-		],
+		conditions: [{ field: "budget", operator: "lte", value: 0 }],
 	},
 	{
 		id: "warn-high-cost",
@@ -32,23 +30,18 @@ export const DEFAULT_RULES: GateRule[] = [
 		effect: "warn",
 		enforcement: "soft",
 		severity: "medium",
-		conditions: [
-			{ field: "estimated_cost", operator: "gt", value: 1000 },
-		],
+		conditions: [{ field: "estimated_cost", operator: "gt", value: 1000 }],
 	},
 	{
 		id: "block-budget-exhausted",
 		name: "Block if budget exhausted",
-		description:
-			"Deny operation when remaining budget is zero or negative",
+		description: "Deny operation when remaining budget is zero or negative",
 		priority: 2,
 		enabled: true,
 		effect: "deny",
 		enforcement: "hard",
 		severity: "high",
-		conditions: [
-			{ field: "budget_remaining", operator: "lte", value: 0 },
-		],
+		conditions: [{ field: "budget_remaining", operator: "lte", value: 0 }],
 	},
 ];
 
@@ -61,11 +54,9 @@ export const DEFAULT_RULES: GateRule[] = [
  * Usage:
  *   if (isBudgetExceeded(context)) { ... }
  */
-export function isBudgetExceeded(
-	context: Record<string, unknown>,
-): boolean {
-	const remaining = context["budget_remaining"];
-	const estimated = context["estimated_cost"];
+export function isBudgetExceeded(context: Record<string, unknown>): boolean {
+	const remaining = context.budget_remaining;
+	const estimated = context.estimated_cost;
 	if (typeof remaining !== "number" || typeof estimated !== "number") return false;
 	return remaining < estimated;
 }

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import { detectClientKind } from "../../src/detect.js";
 
 describe("detectClientKind", () => {
@@ -42,9 +42,7 @@ describe("detectClientKind", () => {
 	});
 
 	it("throws when chat.completions exists but create is missing", () => {
-		expect(() => detectClientKind({ chat: { completions: {} } })).toThrow(
-			"Unsupported LLM client",
-		);
+		expect(() => detectClientKind({ chat: { completions: {} } })).toThrow("Unsupported LLM client");
 	});
 
 	it("throws when models exists but generateContent is not a function", () => {

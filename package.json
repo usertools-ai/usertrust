@@ -2,9 +2,7 @@
 	"name": "govern-monorepo",
 	"private": true,
 	"type": "module",
-	"workspaces": [
-		"packages/*"
-	],
+	"workspaces": ["packages/*"],
 	"scripts": {
 		"test": "vitest run",
 		"test:watch": "vitest",

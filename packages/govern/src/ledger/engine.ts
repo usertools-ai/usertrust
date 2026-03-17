@@ -6,15 +6,15 @@
  */
 
 import { createHash } from "node:crypto";
-import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CreateTransferError } from "tigerbeetle-node";
+import { DEFAULT_HOLD_TTL_MS } from "../shared/constants.js";
 import { InsufficientBalanceError } from "../shared/errors.js";
 import { fnv1a32 } from "../shared/ids.js";
-import { DEFAULT_HOLD_TTL_MS } from "../shared/constants.js";
 import type { GovernTBClient, TBTransferError } from "./client.js";
 import { XFER_SPEND } from "./client.js";
-import { estimateCost, type ModelRates, PRICING_TABLE } from "./pricing.js";
+import { type ModelRates, PRICING_TABLE, estimateCost } from "./pricing.js";
 
 // ── Types ──
 
@@ -62,7 +62,7 @@ function writeDeadLetter(entry: DLQEntry, dlqPath: string): void {
 		if (!existsSync(dlqPath)) {
 			mkdirSync(dlqPath, { recursive: true });
 		}
-		const line = JSON.stringify(entry) + "\n";
+		const line = `${JSON.stringify(entry)}\n`;
 		const filePath = join(dlqPath, "dead-letter.jsonl");
 		writeFileSync(filePath, line, { flag: "a" });
 	} catch (err) {
@@ -133,9 +133,7 @@ export class GovernEngine {
 				code: XFER_SPEND,
 				timeoutSeconds: holdTimeoutSeconds,
 				userData64: deriveUserId64(p.userId),
-				...(p.metadata?.agentRef
-					? { userData32: fnv1a32(p.metadata.agentRef) }
-					: {}),
+				...(p.metadata?.agentRef ? { userData32: fnv1a32(p.metadata.agentRef) } : {}),
 			});
 		} catch (err) {
 			if (isInsufficientBalanceError(err)) {
@@ -179,14 +177,10 @@ export class GovernEngine {
 					},
 					this.dlqPath,
 				);
-				throw new Error(
-					`Spend settlement ambiguous for transfer ${transferId}`,
-				);
+				throw new Error(`Spend settlement ambiguous for transfer ${transferId}`);
 			}
 			if (voidSucceeded) {
-				throw new Error(
-					"Spend failed: pending transfer voided after post failure",
-				);
+				throw new Error("Spend failed: pending transfer voided after post failure");
 			}
 		}
 	}

@@ -1,9 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
+	FALLBACK_RATE,
+	PRICING_TABLE,
 	estimateCost,
 	estimateInputTokens,
-	PRICING_TABLE,
-	FALLBACK_RATE,
 	getModelRates,
 } from "../../src/ledger/pricing.js";
 
@@ -153,9 +153,7 @@ describe("estimateInputTokens", () => {
 		const messages = [
 			{
 				role: "user",
-				content: [
-					{ type: "text", text: "Hello world!" },
-				],
+				content: [{ type: "text", text: "Hello world!" }],
 			},
 		];
 		// textChars = 12 (text) + 16 (overhead) = 28 → ceil(28/4) = 7 → raw = 7 → ceil(7*1.5) = 11
@@ -164,9 +162,7 @@ describe("estimateInputTokens", () => {
 	});
 
 	it("handles tool_call_id overhead", () => {
-		const messages = [
-			{ role: "tool", tool_call_id: "call_123", content: "result" },
-		];
+		const messages = [{ role: "tool", tool_call_id: "call_123", content: "result" }];
 		// textChars = 6 (content) + 16 (overhead) = 22 → ceil(22/4) = 6 textTokens
 		// blockTokens = 10 (tool_call_id) → raw = 16 → ceil(16*1.5) = 24
 		const tokens = estimateInputTokens(messages);
@@ -198,7 +194,7 @@ describe("estimateInputTokens", () => {
 
 	it("returns 1 for non-array input", () => {
 		// The function checks Array.isArray first
-		const tokens = estimateInputTokens("not an array" as any);
+		const tokens = estimateInputTokens("not an array" as unknown as unknown[]);
 		expect(tokens).toBe(1);
 	});
 
@@ -214,9 +210,7 @@ describe("estimateInputTokens", () => {
 		const messages = [
 			{
 				role: "user",
-				content: [
-					{ type: "image_url", image_url: { url: "https://example.com/img.png" } },
-				],
+				content: [{ type: "image_url", image_url: { url: "https://example.com/img.png" } }],
 			},
 		];
 		// This block is not type "text", so it goes to estimateBlockTokens
@@ -232,9 +226,7 @@ describe("estimateInputTokens", () => {
 		const messages = [
 			{
 				role: "user",
-				content: [
-					{ type: "tool_result", text: "The answer is 42" },
-				],
+				content: [{ type: "tool_result", text: "The answer is 42" }],
 			},
 		];
 		// Goes to estimateBlockTokens since type != "text"
@@ -250,9 +242,7 @@ describe("estimateInputTokens", () => {
 		const messages = [
 			{
 				role: "user",
-				content: [
-					{ type: "tool_result", content: "Result data here" },
-				],
+				content: [{ type: "tool_result", content: "Result data here" }],
 			},
 		];
 		// estimateBlockTokens: typeof block["content"] === "string" → chars += 16
@@ -270,10 +260,7 @@ describe("estimateInputTokens", () => {
 				content: [
 					{
 						type: "tool_result",
-						content: [
-							"string item",
-							{ type: "text", text: "nested text" },
-						],
+						content: ["string item", { type: "text", text: "nested text" }],
 					},
 				],
 			},
@@ -338,9 +325,7 @@ describe("estimateInputTokens", () => {
 	});
 
 	it("handles message with no content property", () => {
-		const messages = [
-			{ role: "user" },
-		];
+		const messages = [{ role: "user" }];
 		// content is undefined → neither string nor Array
 		// textChars = 16 (overhead) → ceil(16/4) = 4 → ceil(4*1.5) = 6
 		const tokens = estimateInputTokens(messages);
@@ -348,9 +333,7 @@ describe("estimateInputTokens", () => {
 	});
 
 	it("handles empty array content", () => {
-		const messages = [
-			{ role: "user", content: [] },
-		];
+		const messages = [{ role: "user", content: [] }];
 		// Array but no blocks → textChars = 16 (overhead) → 6
 		const tokens = estimateInputTokens(messages);
 		expect(tokens).toBe(6);
@@ -360,9 +343,7 @@ describe("estimateInputTokens", () => {
 		const messages = [
 			{
 				role: "user",
-				content: [
-					{ type: "empty_block" },
-				],
+				content: [{ type: "empty_block" }],
 			},
 		];
 		// estimateBlockTokens: no "text", no "content" → chars = 0

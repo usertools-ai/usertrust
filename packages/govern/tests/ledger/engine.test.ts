@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Hoist mock variables so they're available inside vi.mock factories
 const { mockExistsSync, mockMkdirSync, mockWriteFileSync } = vi.hoisted(() => {
@@ -34,10 +34,11 @@ vi.mock("node:fs", async (importOriginal) => {
 	};
 });
 
+import { XFER_SPEND } from "../../src/ledger/client.js";
+import type { GovernTBClient } from "../../src/ledger/client.js";
 import { GovernEngine } from "../../src/ledger/engine.js";
 import type { SpendAction } from "../../src/ledger/engine.js";
 import { InsufficientBalanceError } from "../../src/shared/errors.js";
-import { XFER_SPEND } from "../../src/ledger/client.js";
 
 /** Create a mock GovernTBClient with vi.fn() methods. */
 function createMockTBClient() {
@@ -76,7 +77,7 @@ describe("GovernEngine", () => {
 		mockExistsSync.mockReturnValue(true);
 		mockTB = createMockTBClient();
 		engine = new GovernEngine({
-			tbClient: mockTB as any,
+			tbClient: mockTB as unknown as GovernTBClient,
 			dlqPath: "/tmp/test-dlq",
 		});
 	});
@@ -100,7 +101,7 @@ describe("GovernEngine", () => {
 			expect(mockTB.createPendingTransfer).toHaveBeenCalledOnce();
 
 			// Verify the transfer was created with correct code
-			const call = mockTB.createPendingTransfer.mock.calls[0]![0];
+			const call = mockTB.createPendingTransfer.mock.calls[0]?.[0];
 			expect(call.code).toBe(XFER_SPEND);
 		});
 
@@ -196,7 +197,7 @@ describe("GovernEngine", () => {
 				metadata: { agentRef: "agent_abc" },
 			});
 
-			const call = mockTB.createPendingTransfer.mock.calls[0]![0];
+			const call = mockTB.createPendingTransfer.mock.calls[0]?.[0];
 			expect(call.userData32).toBeDefined();
 			expect(typeof call.userData32).toBe("number");
 		});
@@ -214,7 +215,7 @@ describe("GovernEngine", () => {
 				action: DEFAULT_ACTION,
 			});
 
-			const call = mockTB.createPendingTransfer.mock.calls[0]![0];
+			const call = mockTB.createPendingTransfer.mock.calls[0]?.[0];
 			expect(call.userData32).toBeUndefined();
 		});
 
@@ -335,13 +336,11 @@ describe("GovernEngine", () => {
 			mockTB.postTransfer.mockRejectedValueOnce(new Error("post failed"));
 			mockTB.voidTransfer.mockRejectedValueOnce(new Error("void failed"));
 
-			await expect(engine.postPendingSpend("42")).rejects.toThrow(
-				"Spend settlement ambiguous",
-			);
+			await expect(engine.postPendingSpend("42")).rejects.toThrow("Spend settlement ambiguous");
 
 			expect(mockWriteFileSync).toHaveBeenCalled();
 			// Verify the DLQ entry contains proper data
-			const writtenData = mockWriteFileSync.mock.calls[0]![1] as string;
+			const writtenData = mockWriteFileSync.mock.calls[0]?.[1] as string;
 			const dlqEntry = JSON.parse(writtenData.trim());
 			expect(dlqEntry.source).toBe("engine.postPendingSpend.ambiguous");
 			expect(dlqEntry.transferId).toBe("42");
@@ -352,9 +351,7 @@ describe("GovernEngine", () => {
 			mockTB.postTransfer.mockRejectedValueOnce(new Error("post failed"));
 			mockTB.voidTransfer.mockRejectedValueOnce(new Error("void failed"));
 
-			await expect(engine.postPendingSpend("42")).rejects.toThrow(
-				"Spend settlement ambiguous",
-			);
+			await expect(engine.postPendingSpend("42")).rejects.toThrow("Spend settlement ambiguous");
 
 			expect(mockMkdirSync).toHaveBeenCalledWith("/tmp/test-dlq", { recursive: true });
 		});
@@ -370,9 +367,7 @@ describe("GovernEngine", () => {
 			});
 
 			// The ambiguous error should still be thrown even when DLQ fails
-			await expect(engine.postPendingSpend("42")).rejects.toThrow(
-				"Spend settlement ambiguous",
-			);
+			await expect(engine.postPendingSpend("42")).rejects.toThrow("Spend settlement ambiguous");
 
 			// The DLQ failure should be logged to console.error
 			expect(errorSpy).toHaveBeenCalledWith(
@@ -394,9 +389,7 @@ describe("GovernEngine", () => {
 				throw new Error("permission denied");
 			});
 
-			await expect(engine.postPendingSpend("42")).rejects.toThrow(
-				"Spend settlement ambiguous",
-			);
+			await expect(engine.postPendingSpend("42")).rejects.toThrow("Spend settlement ambiguous");
 
 			expect(errorSpy).toHaveBeenCalledWith(
 				"[govern] Failed to write dead letter:",
@@ -441,16 +434,14 @@ describe("GovernEngine", () => {
 			});
 			await engine.balance("user_1");
 			expect(mockTB.getAccountId).toHaveBeenCalledWith("user_1");
-			expect(mockTB.lookupBalance).toHaveBeenCalledWith(
-				mockTB.getAccountId("user_1"),
-			);
+			expect(mockTB.lookupBalance).toHaveBeenCalledWith(mockTB.getAccountId("user_1"));
 		});
 	});
 
 	describe("configurable hold TTL", () => {
 		it("uses custom hold TTL when provided", async () => {
 			const customEngine = new GovernEngine({
-				tbClient: mockTB as any,
+				tbClient: mockTB as unknown as GovernTBClient,
 				holdTtlMs: 120_000, // 2 minutes
 			});
 
@@ -466,7 +457,7 @@ describe("GovernEngine", () => {
 				action: DEFAULT_ACTION,
 			});
 
-			const call = mockTB.createPendingTransfer.mock.calls[0]![0];
+			const call = mockTB.createPendingTransfer.mock.calls[0]?.[0];
 			expect(call.timeoutSeconds).toBe(120); // 120_000ms / 1000 = 120s
 		});
 
@@ -483,7 +474,7 @@ describe("GovernEngine", () => {
 				action: DEFAULT_ACTION,
 			});
 
-			const call = mockTB.createPendingTransfer.mock.calls[0]![0];
+			const call = mockTB.createPendingTransfer.mock.calls[0]?.[0];
 			expect(call.timeoutSeconds).toBe(300); // 300_000ms / 1000 = 300s
 		});
 	});
@@ -491,7 +482,7 @@ describe("GovernEngine", () => {
 	describe("configurable DLQ path", () => {
 		it("uses default DLQ path when not specified", async () => {
 			const defaultEngine = new GovernEngine({
-				tbClient: mockTB as any,
+				tbClient: mockTB as unknown as GovernTBClient,
 			});
 
 			mockTB.postTransfer.mockRejectedValueOnce(new Error("post failed"));
@@ -502,7 +493,7 @@ describe("GovernEngine", () => {
 			);
 
 			// The default path should be .usertools/dlq
-			const filePath = mockWriteFileSync.mock.calls[0]![0] as string;
+			const filePath = mockWriteFileSync.mock.calls[0]?.[0] as string;
 			expect(filePath).toContain("dlq");
 			expect(filePath).toContain("dead-letter.jsonl");
 		});

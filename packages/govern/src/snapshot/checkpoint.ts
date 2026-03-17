@@ -1,5 +1,5 @@
 import type { Dirent } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join, relative } from "node:path";
 
 // ── Types ──
@@ -111,10 +111,7 @@ function snapshotFilePath(vaultPath: string, name: string): string {
  * Captures audit/, policies/, patterns/, govern.config.json, and leases.json.
  * Excludes tigerbeetle/, snapshots/, and dlq/.
  */
-export async function createSnapshot(
-	vaultPath: string,
-	name: string,
-): Promise<SnapshotMeta> {
+export async function createSnapshot(vaultPath: string, name: string): Promise<SnapshotMeta> {
 	const files = await gatherVaultFiles(vaultPath);
 	const entries: Record<string, string> = {};
 	let totalSize = 0;
@@ -148,10 +145,7 @@ export async function createSnapshot(
  * Restore the vault state from a named snapshot.
  * Overwrites existing files with snapshot contents.
  */
-export async function restoreSnapshot(
-	vaultPath: string,
-	name: string,
-): Promise<void> {
+export async function restoreSnapshot(vaultPath: string, name: string): Promise<void> {
 	const filePath = snapshotFilePath(vaultPath, name);
 	const raw = await readFile(filePath, "utf-8");
 	const payload: SnapshotPayload = JSON.parse(raw) as SnapshotPayload;

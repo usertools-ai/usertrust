@@ -135,13 +135,13 @@ describe("Audit Chain Writer", () => {
 		const lines = content.split("\n");
 
 		// Tamper with first event's data
-		const event = JSON.parse(lines[0]!) as AuditEvent;
+		const event = JSON.parse(lines[0] as string) as AuditEvent;
 		event.data = { n: 999 };
 		lines[0] = JSON.stringify(event);
 		writeFileSync(logPath, `${lines.join("\n")}\n`);
 
 		// Verify — recompute hash of first event and check mismatch
-		const tampered = JSON.parse(lines[0]!) as AuditEvent;
+		const tampered = JSON.parse(lines[0] as string) as AuditEvent;
 		const { hash: storedHash, ...eventWithoutHash } = tampered;
 		const canonical = canonicalize(eventWithoutHash);
 		const computedHash = createHash("sha256").update(canonical).digest("hex");
@@ -170,11 +170,11 @@ describe("Audit Chain Writer", () => {
 		const lines = content.split("\n");
 
 		// Remove the second event — breaks the chain
-		const remaining = [lines[0]!, lines[2]!];
+		const remaining = [lines[0] as string, lines[2] as string];
 		writeFileSync(logPath, `${remaining.join("\n")}\n`);
 
 		// The third event's previousHash should point to second event's hash
-		const third = JSON.parse(remaining[1]!) as AuditEvent;
+		const third = JSON.parse(remaining[1] as string) as AuditEvent;
 		expect(third.previousHash).not.toBe(first.hash);
 	});
 
@@ -371,10 +371,7 @@ describe("Audit Chain Writer — advisory lock", () => {
 		const lockPath = join(tempDir, ".usertools", "audit", ".audit-writer.lock");
 		// Ensure audit dir exists for the lock file
 		mkdirSync(join(tempDir, ".usertools", "audit"), { recursive: true });
-		writeFileSync(
-			lockPath,
-			JSON.stringify({ pid: 999999999, startedAt: "2020-01-01T00:00:00Z" }),
-		);
+		writeFileSync(lockPath, JSON.stringify({ pid: 999999999, startedAt: "2020-01-01T00:00:00Z" }));
 
 		const event = await writer.appendEvent({
 			kind: "test.stale",
@@ -425,10 +422,7 @@ describe("Audit Chain Writer — advisory lock", () => {
 		const lockPath = join(tempDir, ".usertools", "audit", ".audit-writer.lock");
 		mkdirSync(join(tempDir, ".usertools", "audit"), { recursive: true });
 		// PID 1 (launchd/init) always exists and process.kill(1, 0) throws EPERM
-		writeFileSync(
-			lockPath,
-			JSON.stringify({ pid: 1, startedAt: "2020-01-01T00:00:00Z" }),
-		);
+		writeFileSync(lockPath, JSON.stringify({ pid: 1, startedAt: "2020-01-01T00:00:00Z" }));
 
 		await expect(
 			writer.appendEvent({
@@ -444,10 +438,7 @@ describe("Audit Chain Writer — advisory lock", () => {
 		mkdirSync(join(tempDir, ".usertools", "audit"), { recursive: true });
 		// Use the parent process PID — process.kill(ppid, 0) succeeds without error
 		const ppid = process.ppid;
-		writeFileSync(
-			lockPath,
-			JSON.stringify({ pid: ppid, startedAt: "2020-01-01T00:00:00Z" }),
-		);
+		writeFileSync(lockPath, JSON.stringify({ pid: ppid, startedAt: "2020-01-01T00:00:00Z" }));
 
 		await expect(
 			writer.appendEvent({
@@ -465,10 +456,7 @@ describe("Audit Chain Writer — advisory lock", () => {
 		const freshDir = mkdtempSync(join(tmpdir(), "govern-audit-killmock-"));
 		const freshWriter = createAuditWriter(freshDir);
 		const lockPath = join(freshDir, VAULT_DIR, "audit", ".audit-writer.lock");
-		writeFileSync(
-			lockPath,
-			JSON.stringify({ pid: 999999998, startedAt: "2020-01-01T00:00:00Z" }),
-		);
+		writeFileSync(lockPath, JSON.stringify({ pid: 999999998, startedAt: "2020-01-01T00:00:00Z" }));
 
 		const origKill = process.kill.bind(process);
 		process.kill = ((pid: number, signal?: string | number) => {
@@ -499,10 +487,7 @@ describe("Audit Chain Writer — advisory lock", () => {
 		const freshDir = mkdtempSync(join(tmpdir(), "govern-audit-killmock2-"));
 		const freshWriter = createAuditWriter(freshDir);
 		const lockPath = join(freshDir, VAULT_DIR, "audit", ".audit-writer.lock");
-		writeFileSync(
-			lockPath,
-			JSON.stringify({ pid: 999999997, startedAt: "2020-01-01T00:00:00Z" }),
-		);
+		writeFileSync(lockPath, JSON.stringify({ pid: 999999997, startedAt: "2020-01-01T00:00:00Z" }));
 
 		const origKill = process.kill.bind(process);
 		process.kill = ((pid: number, signal?: string | number) => {

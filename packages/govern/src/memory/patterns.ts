@@ -149,10 +149,7 @@ export function suggestModel(promptHash: string, vaultPath?: string): string | n
 	}
 
 	// Group by model, compute success rate / average cost
-	const modelStats = new Map<
-		string,
-		{ successes: number; total: number; totalCost: number }
-	>();
+	const modelStats = new Map<string, { successes: number; total: number; totalCost: number }>();
 
 	for (const entry of matching) {
 		let stats = modelStats.get(entry.model);

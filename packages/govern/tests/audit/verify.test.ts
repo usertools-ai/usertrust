@@ -49,7 +49,7 @@ describe("verifyChain", () => {
 		// Tamper with first event
 		const content = readFileSync(logPath, "utf-8").trim();
 		const lines = content.split("\n");
-		const event = JSON.parse(lines[0]!) as AuditEvent;
+		const event = JSON.parse(lines[0] as string) as AuditEvent;
 		(event.data as Record<string, unknown>).n = 999;
 		lines[0] = JSON.stringify(event);
 		writeFileSync(logPath, `${lines.join("\n")}\n`);
@@ -68,7 +68,7 @@ describe("verifyChain", () => {
 		// Delete the second event
 		const content = readFileSync(logPath, "utf-8").trim();
 		const lines = content.split("\n");
-		const remaining = [lines[0]!, lines[2]!];
+		const remaining = [lines[0] as string, lines[2] as string];
 		writeFileSync(logPath, `${remaining.join("\n")}\n`);
 
 		const result = verifyChain(logPath);

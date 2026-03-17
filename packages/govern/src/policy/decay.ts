@@ -107,10 +107,7 @@ export class DecayRateCalculator {
 	 * @param referenceTime - The reference time (usually Date.now())
 	 * @returns Total decayed value
 	 */
-	calculateWeightedSum(
-		entries: TimestampedEntry[],
-		referenceTime: number = Date.now(),
-	): number {
+	calculateWeightedSum(entries: TimestampedEntry[], referenceTime: number = Date.now()): number {
 		let total = 0;
 
 		for (const entry of entries) {
@@ -165,10 +162,7 @@ export class DecayRateCalculator {
  * @param halfLife - Half-life in milliseconds (default: 1 hour)
  * @returns Total decayed value (weighted sum)
  */
-export function calculateDecayRate(
-	entries: TimestampedEntry[],
-	halfLife: number = 3_600_000,
-): number {
+export function calculateDecayRate(entries: TimestampedEntry[], halfLife = 3_600_000): number {
 	const calc = new DecayRateCalculator({ halfLifeMs: halfLife });
 	return calc.calculateWeightedSum(entries);
 }

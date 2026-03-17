@@ -8,9 +8,9 @@
 import { describe, expect, it } from "vitest";
 import {
 	DecayRateCalculator,
+	type TimestampedEntry,
 	calculateDecayRate,
 	createCostDecayCalculator,
-	type TimestampedEntry,
 } from "../../src/policy/decay.js";
 
 // ===========================================================================
@@ -84,9 +84,7 @@ describe("DecayRateCalculator", () => {
 
 		it("throws on negative elapsed time", () => {
 			const calc = new DecayRateCalculator({ halfLifeMs: 1000 });
-			expect(() => calc.calculate(100, -1)).toThrow(
-				"Elapsed time cannot be negative",
-			);
+			expect(() => calc.calculate(100, -1)).toThrow("Elapsed time cannot be negative");
 		});
 
 		it("marks value as fully decayed below threshold", () => {
@@ -131,9 +129,7 @@ describe("DecayRateCalculator", () => {
 		it("uses full value for future entries", () => {
 			const calc = new DecayRateCalculator({ halfLifeMs: 1000 });
 			const now = Date.now();
-			const entries: TimestampedEntry[] = [
-				{ ts: now + 1000, value: 50 },
-			];
+			const entries: TimestampedEntry[] = [{ ts: now + 1000, value: 50 }];
 
 			const total = calc.calculateWeightedSum(entries, now);
 			expect(total).toBe(50);
@@ -150,18 +146,12 @@ describe("DecayRateCalculator", () => {
 			const now = Date.now();
 
 			// Same value, but one is 5 half-lives old
-			const recentOnly = calc.calculateWeightedSum(
-				[{ ts: now, value: 100 }],
-				now,
-			);
-			const oldOnly = calc.calculateWeightedSum(
-				[{ ts: now - 5000, value: 100 }],
-				now,
-			);
+			const recentOnly = calc.calculateWeightedSum([{ ts: now, value: 100 }], now);
+			const oldOnly = calc.calculateWeightedSum([{ ts: now - 5000, value: 100 }], now);
 
 			expect(recentOnly).toBeGreaterThan(oldOnly);
 			// After 5 half-lives, value should be ~3.125
-			expect(oldOnly).toBeCloseTo(100 * (0.5 ** 5), 5);
+			expect(oldOnly).toBeCloseTo(100 * 0.5 ** 5, 5);
 		});
 	});
 
@@ -206,9 +196,7 @@ describe("DecayRateCalculator", () => {
 describe("calculateDecayRate", () => {
 	it("computes weighted sum with default 1h half-life", () => {
 		const now = Date.now();
-		const entries: TimestampedEntry[] = [
-			{ ts: now, value: 100 },
-		];
+		const entries: TimestampedEntry[] = [{ ts: now, value: 100 }];
 		const rate = calculateDecayRate(entries);
 		// At t=0 relative to now, should be ~100
 		expect(rate).toBeCloseTo(100, 0);
@@ -216,9 +204,7 @@ describe("calculateDecayRate", () => {
 
 	it("applies configurable half-life", () => {
 		const now = Date.now();
-		const entries: TimestampedEntry[] = [
-			{ ts: now - 1000, value: 100 },
-		];
+		const entries: TimestampedEntry[] = [{ ts: now - 1000, value: 100 }];
 		// half-life of 1000ms
 		const rate = calculateDecayRate(entries, 1000);
 		// Should be ~50 (half-life has passed)

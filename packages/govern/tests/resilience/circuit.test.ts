@@ -5,7 +5,7 @@
  * per-key isolation via the registry, and snapshot diagnostics.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	CircuitBreaker,
 	CircuitBreakerRegistry,
@@ -45,11 +45,7 @@ describe("CircuitBreaker", () => {
 
 	it("transitions to half-open after reset timeout", () => {
 		let now = 1000;
-		const cb = new CircuitBreaker(
-			"test",
-			{ failureThreshold: 1, resetTimeoutMs: 500 },
-			() => now,
-		);
+		const cb = new CircuitBreaker("test", { failureThreshold: 1, resetTimeoutMs: 500 }, () => now);
 		cb.recordFailure();
 		expect(cb.getState()).toBe("open");
 
@@ -62,11 +58,7 @@ describe("CircuitBreaker", () => {
 
 	it("allows requests when half-open", () => {
 		let now = 1000;
-		const cb = new CircuitBreaker(
-			"test",
-			{ failureThreshold: 1, resetTimeoutMs: 100 },
-			() => now,
-		);
+		const cb = new CircuitBreaker("test", { failureThreshold: 1, resetTimeoutMs: 100 }, () => now);
 		cb.recordFailure();
 		now = 1100;
 		expect(cb.getState()).toBe("half-open");
@@ -96,11 +88,7 @@ describe("CircuitBreaker", () => {
 
 	it("reopens on failure in half-open", () => {
 		let now = 1000;
-		const cb = new CircuitBreaker(
-			"test",
-			{ failureThreshold: 1, resetTimeoutMs: 100 },
-			() => now,
-		);
+		const cb = new CircuitBreaker("test", { failureThreshold: 1, resetTimeoutMs: 100 }, () => now);
 		cb.recordFailure();
 		now = 1100;
 		expect(cb.getState()).toBe("half-open");
@@ -191,7 +179,7 @@ describe("CircuitBreakerRegistry", () => {
 		b.recordFailure();
 
 		const snaps = reg.allSnapshots();
-		expect(snaps["test"]?.state).toBe("open");
+		expect(snaps.test?.state).toBe("open");
 	});
 
 	it("resetAll closes all breakers", () => {

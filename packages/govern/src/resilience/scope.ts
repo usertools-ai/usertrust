@@ -179,24 +179,18 @@ export class ScopeManager {
 		this.expireStaleInStore(store);
 
 		// Check for scope overlap with other actors' active leases
-		const conflicts = this.findConflictsInStore(
-			store,
-			options.scope,
-			options.actor,
-		);
+		const conflicts = this.findConflictsInStore(store, options.scope, options.actor);
 		if (conflicts.length > 0) {
-			const first = conflicts[0]!;
+			const first = conflicts[0] as LeaseConflict;
 			throw new Error(
 				`Scope overlap with lease ${first.lease.lease_id} ` +
-				`(actor: ${first.lease.actor}, ` +
-				`scope: ${first.lease.scope.join(", ")})`,
+					`(actor: ${first.lease.actor}, ` +
+					`scope: ${first.lease.scope.join(", ")})`,
 			);
 		}
 
 		const now = new Date(this.clock()).toISOString();
-		const expiresAt = new Date(
-			this.clock() + ttlMin * 60_000,
-		).toISOString();
+		const expiresAt = new Date(this.clock() + ttlMin * 60_000).toISOString();
 		const leaseId = generateLeaseId();
 
 		const lease: Lease = {
@@ -226,14 +220,10 @@ export class ScopeManager {
 			throw new Error(`Lease ${leaseId} not found`);
 		}
 		if (lease.status !== "active") {
-			throw new Error(
-				`Lease ${leaseId} is ${lease.status}, cannot renew`,
-			);
+			throw new Error(`Lease ${leaseId} is ${lease.status}, cannot renew`);
 		}
 
-		lease.expires_at = new Date(
-			this.clock() + ttlMin * 60_000,
-		).toISOString();
+		lease.expires_at = new Date(this.clock() + ttlMin * 60_000).toISOString();
 		lease.last_renewed_at = new Date(this.clock()).toISOString();
 		writeLeases(store);
 
@@ -324,10 +314,7 @@ export class ScopeManager {
 		let count = 0;
 
 		for (const lease of Object.values(store)) {
-			if (
-				lease.status === "active" &&
-				new Date(lease.expires_at) < now
-			) {
+			if (lease.status === "active" && new Date(lease.expires_at) < now) {
 				lease.status = "expired";
 				count++;
 			}
