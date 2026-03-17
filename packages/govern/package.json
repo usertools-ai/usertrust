@@ -4,7 +4,7 @@
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
-	"bin": { "govern": "./dist/bin/govern.js" },
+	"bin": { "govern": "./dist/cli/main.js" },
 	"exports": {
 		".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" }
 	},
