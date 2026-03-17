@@ -46,6 +46,7 @@ function loadEvents(vaultPath: string): AuditEvent[] {
 function computeSpent(events: AuditEvent[]): number {
 	let spent = 0;
 	for (const e of events) {
+		if (e.kind !== "llm_call") continue;
 		const cost = e.data.cost;
 		if (typeof cost === "number") {
 			spent += cost;

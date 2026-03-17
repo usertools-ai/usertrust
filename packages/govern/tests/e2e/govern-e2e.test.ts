@@ -289,7 +289,7 @@ describe("govern() — end-to-end integration", () => {
 	describe("4. Policy denial blocks LLM call", () => {
 		it("throws PolicyDeniedError and never calls the LLM", async () => {
 			// Set up vault with policy that blocks claude-opus-4-6
-			writePolicyFile(tmpVault, "policies/default.yml", [
+			writePolicyFile(tmpVault, ".usertools/policies/default.yml", [
 				{
 					name: "block-opus",
 					effect: "deny",
@@ -701,7 +701,7 @@ describe("govern() — end-to-end integration", () => {
 			writeVaultConfig(tmpVault, { budget: 50_000, tier: "pro" });
 
 			// Policy that allows only pro tier
-			writePolicyFile(tmpVault, "policies/default.yml", [
+			writePolicyFile(tmpVault, ".usertools/policies/default.yml", [
 				{
 					name: "require-pro",
 					effect: "deny",
@@ -861,7 +861,7 @@ describe("govern() — end-to-end integration", () => {
 
 	describe("12. Policy + PII combined enforcement", () => {
 		it("policy denial takes precedence (evaluated first)", async () => {
-			writePolicyFile(tmpVault, "policies/default.yml", [
+			writePolicyFile(tmpVault, ".usertools/policies/default.yml", [
 				{
 					name: "block-opus",
 					effect: "deny",

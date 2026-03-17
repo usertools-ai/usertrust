@@ -248,6 +248,39 @@ export class GovernTBClient {
 		return accountId;
 	}
 
+	async ensureEscrowAccount(label: string): Promise<bigint> {
+		const accountId = GovernTBClient.deriveAccountId(label);
+		const account: Account = {
+			id: accountId,
+			debits_pending: 0n,
+			debits_posted: 0n,
+			credits_pending: 0n,
+			credits_posted: 0n,
+			user_data_128: 0n,
+			user_data_64: 0n,
+			user_data_32: 0,
+			reserved: 0,
+			ledger: LEDGER_USERTOKENS,
+			code: CODE_ESCROW,
+			flags: AccountFlags.history,
+			timestamp: 0n,
+		};
+
+		const errors = await this.withReconnect(() => this.client.createAccounts([account]));
+		if (errors.length > 0) {
+			const err = errors[0];
+			if (!err) throw new Error("Unknown account/transfer error");
+			if (err.result === CreateAccountError.exists) {
+				return accountId;
+			}
+			throw new Error(
+				`Failed to create escrow account: ${CreateAccountError[err.result] ?? err.result}`,
+			);
+		}
+
+		return accountId;
+	}
+
 	setAccountMapping(userId: string, accountId: bigint): void {
 		this.accountMap.set(userId, accountId);
 	}

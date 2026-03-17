@@ -119,7 +119,7 @@ describe("GOVERN_DRY_RUN=true", () => {
 		const mockAudit = makeMockAudit();
 
 		// Create a policy file that blocks the model
-		const policiesDir = join(tmpVault, "policies");
+		const policiesDir = join(tmpVault, ".usertools", "policies");
 		mkdirSync(policiesDir, { recursive: true });
 		const { writeFileSync } = await import("node:fs");
 		writeFileSync(

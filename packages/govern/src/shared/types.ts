@@ -12,6 +12,8 @@ export interface GovernanceReceipt {
 	model: string;
 	provider: string;
 	timestamp: string;
+	/** Present and true when the audit chain write failed (failure mode 15.3). */
+	auditDegraded?: boolean;
 }
 
 // ── GovernedResponse — returned by every governed LLM call ──

@@ -1,6 +1,6 @@
 import type { Dirent } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 // ── Types ──
 
@@ -104,6 +104,18 @@ function snapshotFilePath(vaultPath: string, name: string): string {
 	return join(snapshotsDir(vaultPath), `${name}.json`);
 }
 
+function validateSnapshotName(name: string): void {
+	if (
+		name.includes("/") ||
+		name.includes("\\") ||
+		name.includes("..") ||
+		name.includes("\0") ||
+		name.trim() === ""
+	) {
+		throw new Error(`Invalid snapshot name: ${name}`);
+	}
+}
+
 // ── Public API ──
 
 /**
@@ -112,6 +124,7 @@ function snapshotFilePath(vaultPath: string, name: string): string {
  * Excludes tigerbeetle/, snapshots/, and dlq/.
  */
 export async function createSnapshot(vaultPath: string, name: string): Promise<SnapshotMeta> {
+	validateSnapshotName(name);
 	const files = await gatherVaultFiles(vaultPath);
 	const entries: Record<string, string> = {};
 	let totalSize = 0;
@@ -146,12 +159,21 @@ export async function createSnapshot(vaultPath: string, name: string): Promise<S
  * Overwrites existing files with snapshot contents.
  */
 export async function restoreSnapshot(vaultPath: string, name: string): Promise<void> {
+	validateSnapshotName(name);
 	const filePath = snapshotFilePath(vaultPath, name);
 	const raw = await readFile(filePath, "utf-8");
 	const payload: SnapshotPayload = JSON.parse(raw) as SnapshotPayload;
 
 	for (const [relPath, b64Content] of Object.entries(payload.entries)) {
+		if (relPath === "" || relPath === ".") {
+			throw new Error("Invalid empty path in snapshot entry");
+		}
 		const fullPath = join(vaultPath, relPath);
+		const resolvedPath = resolve(fullPath);
+		const resolvedVault = resolve(vaultPath);
+		if (!resolvedPath.startsWith(`${resolvedVault}/`)) {
+			throw new Error(`Path traversal detected in snapshot: ${relPath}`);
+		}
 		const dir = join(fullPath, "..");
 		await mkdir(dir, { recursive: true });
 		const content = Buffer.from(b64Content, "base64");

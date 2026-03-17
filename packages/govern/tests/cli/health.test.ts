@@ -115,7 +115,7 @@ describe("govern health", () => {
 
 		const writer = createAuditWriter(tempDir);
 		await writer.appendEvent({
-			kind: "llm.call",
+			kind: "llm_call",
 			actor: "test",
 			data: { cost: 150 },
 		});

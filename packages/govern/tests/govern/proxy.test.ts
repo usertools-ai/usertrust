@@ -233,7 +233,7 @@ describe("proxy mode", () => {
 		const mockAudit = makeMockAudit();
 
 		const { writeFileSync } = await import("node:fs");
-		const policiesDir = join(tmpVault, "policies");
+		const policiesDir = join(tmpVault, ".usertools", "policies");
 		mkdirSync(policiesDir, { recursive: true });
 		writeFileSync(
 			join(policiesDir, "default.yml"),

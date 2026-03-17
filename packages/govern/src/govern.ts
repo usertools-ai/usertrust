@@ -125,7 +125,7 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 	const vaultPath = vaultBase;
 	const audit: AuditWriter = opts?._audit ?? createAuditWriter(vaultPath);
 
-	const policiesPath = join(vaultPath, config.policies);
+	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
 	const policyRules: GateRule[] = existsSync(policiesPath) ? loadPolicies(policiesPath) : [];
 
 	const breaker = new CircuitBreakerRegistry({
@@ -143,13 +143,13 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 		proxyConn = connectProxy(opts.proxy, opts.key);
 	}
 
-	// 4. Engine (injected for tests, real TB client in production, null in dry-run)
+	// 4. Engine (injected for tests, real TB client in production, null in dry-run/proxy)
 	let engine: GovernEngine | null;
 	if (opts?._engine !== undefined) {
 		engine = opts._engine;
-	} else if (!isDryRun) {
+	} else if (!isDryRun && proxyConn == null) {
 		try {
-			engine = createTBEngine(config);
+			engine = await createTBEngine(config);
 		} catch (err) {
 			throw new LedgerUnavailableError(err instanceof Error ? err.message : String(err));
 		}
@@ -163,7 +163,6 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 	// 6. Track state
 	let destroyed = false;
 	let budgetSpent = 0;
-	let auditDegraded = false;
 
 	// 7. Two-phase intercept
 	async function interceptCall(
@@ -179,14 +178,25 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 		const model = (params.model as string) ?? "unknown";
 		const messages = (params.messages as unknown[]) ?? [];
 
+		// Per-call audit degradation flag (not sticky across calls)
+		let callAuditDegraded = false;
+
 		// a. Circuit breaker check
 		const cb = breaker.get(kind);
 		cb.allowRequest();
 
-		// b. Policy gate
+		// b. Estimate cost (before policy, so cost fields are available in context)
+		const transferId = governId("tx");
+		const estimatedInputTokens = estimateInputTokens(messages);
+		const maxOutputTokens = (params.max_tokens as number) ?? 4096;
+		const estimatedCost = estimateCost(model, estimatedInputTokens, maxOutputTokens);
+
+		// c. Policy gate
 		const policyResult = evaluatePolicy(policyRules, {
 			model,
 			tier: config.tier,
+			estimated_cost: estimatedCost,
+			budget_remaining: config.budget - budgetSpent,
 			...params,
 		});
 		if (policyResult.decision === "deny") {
@@ -195,7 +205,7 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 			throw new PolicyDeniedError(reason);
 		}
 
-		// c. PII check
+		// d. PII check
 		if (config.pii !== "off") {
 			const piiResult = detectPII(messages);
 			if (piiResult.found && config.pii === "block") {
@@ -204,14 +214,20 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 			// "warn" and "redact" modes: continue (redact is not implemented at SDK level)
 		}
 
-		// d. Estimate cost
-		const transferId = governId("tx");
-		const estimatedInputTokens = estimateInputTokens(messages);
-		const maxOutputTokens = (params.max_tokens as number) ?? 4096;
-		const estimatedCost = estimateCost(model, estimatedInputTokens, maxOutputTokens);
-
 		// d2. Failure mode 15.4: TigerBeetle / engine unreachable — PENDING hold
-		if (engine != null && !isDryRun) {
+		if (proxyConn != null && !isDryRun) {
+			try {
+				await proxyConn.spend({
+					model,
+					estimatedCost,
+					actor: "local",
+				});
+			} catch (holdErr) {
+				throw new LedgerUnavailableError(
+					holdErr instanceof Error ? holdErr.message : String(holdErr),
+				);
+			}
+		} else if (engine != null && !isDryRun) {
 			try {
 				await engine.spendPending({
 					transferId,
@@ -246,7 +262,13 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 						budgetSpent += streamCost;
 						cb.recordSuccess();
 
-						if (engine != null && !isDryRun) {
+						if (proxyConn != null && !isDryRun) {
+							try {
+								await proxyConn.settle(transferId, streamCost);
+							} catch {
+								settled = false;
+							}
+						} else if (engine != null && !isDryRun) {
 							try {
 								await engine.postPendingSpend(transferId);
 							} catch {
@@ -254,16 +276,18 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 							}
 						}
 
-						const auditHash = createHash("sha256").update(transferId).digest("hex");
-						await audit
-							.appendEvent({
+						const syntheticHash = createHash("sha256").update(transferId).digest("hex");
+						let auditHash = syntheticHash;
+						try {
+							const auditEvent = await audit.appendEvent({
 								kind: "llm_call",
 								actor: "local",
 								data: { model, cost: streamCost, settled, transferId },
-							})
-							.catch(() => {
-								auditDegraded = true;
 							});
+							auditHash = auditEvent.hash;
+						} catch {
+							callAuditDegraded = true;
+						}
 
 						return {
 							transferId,
@@ -276,11 +300,14 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 							model,
 							provider: kind,
 							timestamp: new Date().toISOString(),
+							...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 						};
 					},
 					(error: unknown) => {
 						cb.recordFailure();
-						if (engine != null && !isDryRun) {
+						if (proxyConn != null && !isDryRun) {
+							proxyConn.void(transferId).catch(() => {});
+						} else if (engine != null && !isDryRun) {
 							engine.voidPendingSpend(transferId).catch(() => {});
 						}
 					},
@@ -302,6 +329,7 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 					model,
 					provider: kind,
 					timestamp: new Date().toISOString(),
+					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 				};
 
 				return { response: governedStream, governance: estimatedGovernance };
@@ -351,7 +379,7 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 						})
 						.catch(() => {
 							// Audit also degraded — nothing more we can do
-							auditDegraded = true;
+							callAuditDegraded = true;
 						});
 				}
 			}
@@ -366,9 +394,10 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 			}
 
 			// h. Audit event — failure mode 15.3: audit write failure
-			const auditHash = createHash("sha256").update(transferId).digest("hex");
-			await audit
-				.appendEvent({
+			const syntheticHash = createHash("sha256").update(transferId).digest("hex");
+			let auditHash = syntheticHash;
+			try {
+				const auditEvent = await audit.appendEvent({
 					kind: "llm_call",
 					actor: "local",
 					data: {
@@ -377,14 +406,15 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 						settled,
 						transferId,
 					},
-				})
-				.catch(() => {
-					// Failure mode 15.3: Audit degraded — do not fail the response
-					auditDegraded = true;
-					process.stderr.write(
-						`[govern] audit degraded: failed to write llm_call event for ${transferId}\n`,
-					);
 				});
+				auditHash = auditEvent.hash;
+			} catch {
+				// Failure mode 15.3: Audit degraded — do not fail the response
+				callAuditDegraded = true;
+				process.stderr.write(
+					`[govern] audit degraded: failed to write llm_call event for ${transferId}\n`,
+				);
+			}
 
 			// i. Daily-rotated audit receipt (non-blocking)
 			if (config.audit.rotation !== "none") {
@@ -424,6 +454,7 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 				model,
 				provider: kind,
 				timestamp: new Date().toISOString(),
+				...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 			};
 
 			return { response, governance };
@@ -457,7 +488,7 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 					data: { model, error: String(err), transferId },
 				})
 				.catch(() => {
-					auditDegraded = true;
+					callAuditDegraded = true;
 				});
 
 			// l. Pattern memory: record failure
@@ -536,7 +567,7 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
  * Uses a simplified two-phase interface: pending transfers are created
  * directly against the TB client using escrow-style debit/credit accounts.
  */
-function createTBEngine(config: GovernConfig): GovernEngine {
+async function createTBEngine(config: GovernConfig): Promise<GovernEngine> {
 	const tbAddresses = config.tigerbeetle.addresses;
 	const tbClusterId = BigInt(config.tigerbeetle.clusterId);
 
@@ -544,6 +575,10 @@ function createTBEngine(config: GovernConfig): GovernEngine {
 		addresses: tbAddresses,
 		clusterId: tbClusterId,
 	});
+
+	// Initialize treasury and escrow accounts
+	await tbClient.createTreasury();
+	await tbClient.ensureEscrowAccount("govern:escrow");
 
 	// Pending transfer ID mapping (governId string -> TB bigint)
 	const pendingMap = new Map<string, bigint>();

@@ -380,7 +380,7 @@ describe("govern()", () => {
 			const configDir = join(tmpVault, ".usertools");
 			mkdirSync(configDir, { recursive: true });
 
-			const policiesDir = join(tmpVault, "policies");
+			const policiesDir = join(tmpVault, ".usertools", "policies");
 			mkdirSync(policiesDir, { recursive: true });
 			writeFileSync(
 				join(policiesDir, "default.yml"),

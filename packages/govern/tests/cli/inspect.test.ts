@@ -121,7 +121,7 @@ describe("govern inspect", () => {
 
 		const writer = createAuditWriter(tempDir);
 		await writer.appendEvent({
-			kind: "llm.call",
+			kind: "llm_call",
 			actor: "test",
 			data: { model: "claude-sonnet", cost: 142 },
 		});

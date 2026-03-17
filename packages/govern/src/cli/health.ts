@@ -93,6 +93,7 @@ export async function run(rootDir?: string): Promise<void> {
 	// Compute budget utilization percentage
 	let spent = 0;
 	for (const e of events) {
+		if (e.kind !== "llm_call") continue;
 		const cost = e.data.cost;
 		if (typeof cost === "number") {
 			spent += cost;
