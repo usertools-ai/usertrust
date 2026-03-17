@@ -108,7 +108,7 @@ describe("Pattern Memory", () => {
 				vaultPath,
 			);
 
-			const suggestion = suggestModel(promptHash);
+			const suggestion = suggestModel(promptHash, vaultPath);
 			expect(suggestion).toBe("claude-sonnet-4-20250514");
 		});
 
@@ -123,7 +123,7 @@ describe("Pattern Memory", () => {
 				vaultPath,
 			);
 
-			const suggestion = suggestModel(hashPrompt("unknown"));
+			const suggestion = suggestModel(hashPrompt("unknown"), vaultPath);
 			expect(suggestion).toBeNull();
 		});
 

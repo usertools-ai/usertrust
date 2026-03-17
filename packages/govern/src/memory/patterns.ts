@@ -25,10 +25,28 @@ const PATTERNS_DIR = "patterns";
 const MEMORY_FILE = "memory.json";
 const MAX_ENTRIES = 10_000;
 
-// ── In-memory cache (lazy-init) ──
+// ── Instance-scoped cache (keyed by vault path) ──
 
-let cache: PatternEntry[] | null = null;
-let initialized = false;
+interface CacheEntry {
+	entries: PatternEntry[];
+	initialized: boolean;
+}
+
+const cacheByVault = new Map<string, CacheEntry>();
+
+function resolveVaultKey(vaultPath?: string): string {
+	return vaultPath ?? VAULT_DIR;
+}
+
+function getCache(vaultPath?: string): CacheEntry {
+	const key = resolveVaultKey(vaultPath);
+	let entry = cacheByVault.get(key);
+	if (entry === undefined) {
+		entry = { entries: [], initialized: false };
+		cacheByVault.set(key, entry);
+	}
+	return entry;
+}
 
 function memoryFilePath(vaultPath?: string): string {
 	const base = vaultPath ?? VAULT_DIR;
@@ -37,31 +55,31 @@ function memoryFilePath(vaultPath?: string): string {
 
 /** Reset internal state — for testing only. */
 export function _resetPatternCache(): void {
-	cache = null;
-	initialized = false;
+	cacheByVault.clear();
 }
 
 // ── Internals ──
 
 async function ensureLoaded(vaultPath?: string): Promise<PatternEntry[]> {
-	if (initialized && cache !== null) {
-		return cache;
+	const cache = getCache(vaultPath);
+	if (cache.initialized) {
+		return cache.entries;
 	}
 	const filePath = memoryFilePath(vaultPath);
 	try {
 		const raw = await readFile(filePath, "utf-8");
 		const parsed: unknown = JSON.parse(raw);
 		if (!Array.isArray(parsed)) {
-			cache = [];
+			cache.entries = [];
 		} else {
-			cache = parsed as PatternEntry[];
+			cache.entries = parsed as PatternEntry[];
 		}
 	} catch {
 		// File doesn't exist or is corrupt — start fresh
-		cache = [];
+		cache.entries = [];
 	}
-	initialized = true;
-	return cache;
+	cache.initialized = true;
+	return cache.entries;
 }
 
 async function persist(entries: PatternEntry[], vaultPath?: string): Promise<void> {
@@ -108,7 +126,8 @@ export async function recordPattern(
 		entries.splice(0, excess);
 	}
 
-	cache = entries;
+	const cache = getCache(vaultPath);
+	cache.entries = entries;
 	await persist(entries, vaultPath);
 }
 
@@ -117,13 +136,14 @@ export async function recordPattern(
  * Returns the model with the best cost-adjusted success ratio, or null if
  * no patterns exist for this prompt hash.
  */
-export function suggestModel(promptHash: string): string | null {
-	if (cache === null || cache.length === 0) {
+export function suggestModel(promptHash: string, vaultPath?: string): string | null {
+	const cache = getCache(vaultPath);
+	if (!cache.initialized || cache.entries.length === 0) {
 		return null;
 	}
 
 	// Filter entries matching this prompt hash
-	const matching = cache.filter((e) => e.promptHash === promptHash);
+	const matching = cache.entries.filter((e) => e.promptHash === promptHash);
 	if (matching.length === 0) {
 		return null;
 	}
