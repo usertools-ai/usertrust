@@ -52,6 +52,12 @@ export const GovernConfigSchema = z.object({
 			indexLimit: z.number().int().default(10_000),
 		})
 		.default({}),
+	tigerbeetle: z
+		.object({
+			addresses: z.array(z.string()).default(["127.0.0.1:3001"]),
+			clusterId: z.number().int().nonnegative().default(0),
+		})
+		.default({}),
 });
 
 export type GovernConfig = z.infer<typeof GovernConfigSchema>;

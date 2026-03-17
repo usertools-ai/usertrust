@@ -761,6 +761,7 @@ describe("govern()", () => {
 				budget: 50_000,
 				vaultBase: tmpVault,
 				proxy: "https://proxy.usertools.ai",
+				_engine: null,
 			});
 
 			await expect(
@@ -785,6 +786,7 @@ describe("govern()", () => {
 				budget: 50_000,
 				vaultBase: tmpVault,
 				proxy: "https://proxy.usertools.ai",
+				_engine: null,
 			});
 
 			const result = await governed.messages.create({

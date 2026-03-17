@@ -30,13 +30,17 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
+import { writeReceipt } from "./audit/rotation.js";
 import { detectClientKind } from "./detect.js";
+import { DecayRateCalculator } from "./policy/decay.js";
+import { GovernTBClient, XFER_SPEND } from "./ledger/client.js";
 import { estimateCost, estimateInputTokens } from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
 import { type GateRule, evaluatePolicy, loadPolicies } from "./policy/gate.js";
 import { detectPII } from "./policy/pii.js";
 import { type ProxyConnection, connectProxy } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
+import { type StreamUsage, createGovernedStream } from "./streaming.js";
 import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
 import { LedgerUnavailableError, PolicyDeniedError } from "./shared/errors.js";
 import { governId } from "./shared/ids.js";
@@ -129,14 +133,31 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 		resetTimeoutMs: config.circuitBreaker.resetTimeout,
 	});
 
+	// Decay-weighted budget calculator (1-hour half-life)
+	const decayCalc = new DecayRateCalculator({ halfLifeMs: 3_600_000 });
+	const spendHistory: Array<{ ts: number; value: number }> = [];
+
 	// 3. Proxy connection (if proxy mode)
 	let proxyConn: ProxyConnection | null = null;
 	if (opts?.proxy) {
 		proxyConn = connectProxy(opts.proxy, opts.key);
 	}
 
-	// 4. Engine (injected for tests, or null in dry-run/proxy modes)
-	const engine: GovernEngine | null = opts?._engine !== undefined ? opts._engine : null;
+	// 4. Engine (injected for tests, real TB client in production, null in dry-run)
+	let engine: GovernEngine | null;
+	if (opts?._engine !== undefined) {
+		engine = opts._engine;
+	} else if (!isDryRun) {
+		try {
+			engine = createTBEngine(config);
+		} catch (err) {
+			throw new LedgerUnavailableError(
+				err instanceof Error ? err.message : String(err),
+			);
+		}
+	} else {
+		engine = null;
+	}
 
 	// 5. Detect client kind
 	const kind: LLMClientKind = detectClientKind(client);
@@ -211,6 +232,87 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 		try {
 			const response = await (originalFn as (...a: unknown[]) => unknown).apply(thisArg, args);
 
+			// e2. Streaming detection: if response is an async iterable, wrap with
+			// token accumulation. Settlement and audit happen when the stream ends.
+			if (
+				response != null &&
+				typeof response === "object" &&
+				Symbol.asyncIterator in (response as Record<symbol, unknown>)
+			) {
+				const stream = response as AsyncIterable<unknown>;
+				const governedStream = createGovernedStream(
+					stream,
+					kind,
+					async (usage: StreamUsage) => {
+						const streamCost = estimateCost(model, usage.inputTokens, usage.outputTokens);
+						budgetSpent += streamCost;
+						cb.recordSuccess();
+
+						if (engine != null && !isDryRun) {
+							try {
+								await engine.postPendingSpend(transferId);
+							} catch {
+								settled = false;
+							}
+						}
+
+						const auditHash = createHash("sha256").update(transferId).digest("hex");
+						await audit
+							.appendEvent({
+								kind: "llm_call",
+								actor: "local",
+								data: { model, cost: streamCost, settled, transferId },
+							})
+							.catch(() => {
+								auditDegraded = true;
+							});
+
+						return {
+							transferId,
+							cost: streamCost,
+							budgetRemaining: config.budget - budgetSpent,
+							auditHash,
+							chainPath: join(VAULT_DIR, "audit"),
+							receiptUrl: opts?.proxy != null
+								? `https://verify.usertools.dev/${transferId}`
+								: null,
+							settled,
+							model,
+							provider: kind,
+							timestamp: new Date().toISOString(),
+						};
+					},
+					(error: unknown) => {
+						cb.recordFailure();
+						if (engine != null && !isDryRun) {
+							engine.voidPendingSpend(transferId).catch(() => {});
+						}
+					},
+				);
+
+				// For streaming responses, return the wrapped stream with an
+				// estimated governance receipt. The actual receipt (with real
+				// token counts) is available via governedStream.governance
+				// after the stream is fully consumed.
+				const auditHash = createHash("sha256").update(transferId).digest("hex");
+				const estimatedGovernance: GovernanceReceipt = {
+					transferId,
+					cost: estimatedCost,
+					budgetRemaining: config.budget - budgetSpent,
+					auditHash,
+					chainPath: join(VAULT_DIR, "audit"),
+					receiptUrl: opts?.proxy != null
+						? `https://verify.usertools.dev/${transferId}`
+						: null,
+					settled,
+					model,
+					provider: kind,
+					timestamp: new Date().toISOString(),
+				};
+
+				return { response: governedStream, governance: estimatedGovernance };
+			}
+
 			// f. Compute actual cost from response usage
 			let actualCost = estimatedCost;
 			if (response != null && typeof response === "object" && "usage" in response) {
@@ -228,8 +330,9 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 				}
 			}
 
-			// Track budget
+			// Track budget (cumulative and decay-weighted)
 			budgetSpent += actualCost;
+			spendHistory.push({ ts: Date.now(), value: actualCost });
 
 			// g. Circuit breaker: record success
 			cb.recordSuccess();
@@ -289,7 +392,17 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 					);
 				});
 
-			// i. Pattern memory
+			// i. Daily-rotated audit receipt (non-blocking)
+			if (config.audit.rotation !== "none") {
+				writeReceipt(vaultPath, {
+					kind: "llm_call",
+					subsystem: "govern",
+					actor: "local",
+					data: { model, cost: actualCost, settled, transferId },
+				}, config.audit.indexLimit);
+			}
+
+			// i2. Pattern memory
 			if (config.patterns.enabled) {
 				const promptHash = createHash("sha256").update(JSON.stringify(messages)).digest("hex");
 				await recordPattern({
@@ -364,11 +477,20 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 		}
 	}
 
-	// 8. Build Proxy based on client kind
+	// 8. Safety net: clean up on process exit if destroy() was never called
+	let beforeExitHandler: (() => void) | null = null;
+
+	// 9. Build Proxy based on client kind
 	function createClientProxy(): GovernedClient<T> {
 		const destroyFn = async (): Promise<void> => {
 			if (destroyed) return;
 			destroyed = true;
+
+			// Remove beforeExit safety net
+			if (beforeExitHandler != null) {
+				process.removeListener("beforeExit", beforeExitHandler);
+				beforeExitHandler = null;
+			}
 
 			// Flush audit writes
 			await audit.flush();
@@ -397,7 +519,79 @@ export async function govern<T>(client: T, opts?: GovernOpts): Promise<GovernedC
 		return buildGoogleProxy(client, interceptCall, destroyFn);
 	}
 
-	return createClientProxy();
+	const governedClient = createClientProxy();
+
+	beforeExitHandler = (): void => {
+		if (!destroyed) {
+			governedClient.destroy().catch(() => {});
+		}
+	};
+	process.on("beforeExit", beforeExitHandler);
+
+	return governedClient;
+}
+
+// ── TigerBeetle engine factory ──
+
+/**
+ * Create a GovernEngine backed by a real TigerBeetle client.
+ * Uses a simplified two-phase interface: pending transfers are created
+ * directly against the TB client using escrow-style debit/credit accounts.
+ */
+function createTBEngine(config: GovernConfig): GovernEngine {
+	const tbAddresses = config.tigerbeetle.addresses;
+	const tbClusterId = BigInt(config.tigerbeetle.clusterId);
+
+	const tbClient = new GovernTBClient({
+		addresses: tbAddresses,
+		clusterId: tbClusterId,
+	});
+
+	// Pending transfer ID mapping (governId string -> TB bigint)
+	const pendingMap = new Map<string, bigint>();
+
+	return {
+		async spendPending(params: {
+			transferId: string;
+			amount: number;
+		}): Promise<{ transferId: string }> {
+			const treasury = tbClient.getTreasuryId();
+			// Use a deterministic escrow account for SDK-local holds
+			const escrowId = GovernTBClient.deriveAccountId("govern:escrow");
+
+			const tbTransferId = await tbClient.createPendingTransfer({
+				debitAccountId: escrowId,
+				creditAccountId: treasury,
+				amount: params.amount,
+				code: XFER_SPEND,
+			});
+
+			pendingMap.set(params.transferId, tbTransferId);
+			return { transferId: params.transferId };
+		},
+
+		async postPendingSpend(transferId: string): Promise<void> {
+			const tbId = pendingMap.get(transferId);
+			if (tbId === undefined) {
+				throw new Error(`No pending transfer found for ${transferId}`);
+			}
+			await tbClient.postTransfer(tbId);
+			pendingMap.delete(transferId);
+		},
+
+		async voidPendingSpend(transferId: string): Promise<void> {
+			const tbId = pendingMap.get(transferId);
+			if (tbId === undefined) {
+				throw new Error(`No pending transfer found for ${transferId}`);
+			}
+			await tbClient.voidTransfer(tbId);
+			pendingMap.delete(transferId);
+		},
+
+		destroy(): void {
+			tbClient.destroy();
+		},
+	};
 }
 
 // ── Proxy builders ──
