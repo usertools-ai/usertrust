@@ -91,12 +91,27 @@ Merkle:   a3f8c1...d92b (root)
 
 ## Config
 
-Create `.usertools/govern.config.json` or use `defineConfig` for TypeScript intellisense:
+Create `.usertools/govern.config.json`:
+
+```json
+{
+  "budget": 50000,
+  "tier": "pro",
+  "pii": "block",
+  "board": { "enabled": true, "vetoThreshold": "high" },
+  "circuitBreaker": { "failureThreshold": 5, "resetTimeout": 60000 },
+  "patterns": { "enabled": true },
+  "audit": { "rotation": "daily", "indexLimit": 10000 }
+}
+```
+
+`defineConfig` is available as a TypeScript type-checking helper for validating config objects in your code. The actual config file must be `govern.config.json` (JSON format):
 
 ```typescript
 import { defineConfig } from "@usertools/govern";
 
-export default defineConfig({
+// Type-check your config object — useful for programmatic overrides
+const config = defineConfig({
   budget: 50_000,
   tier: "pro",
   pii: "block",
