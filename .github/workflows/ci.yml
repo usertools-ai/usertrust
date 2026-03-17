@@ -2,13 +2,18 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  ci:
-    runs-on: ubuntu-latest
+  lint:
+    name: lint
+    runs-on: blacksmith-4vcpu-ubuntu-2204
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -16,11 +21,43 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - name: Lint
-        run: npx biome check .
-      - name: Typecheck
-        run: npx tsc -b
-      - name: Test
-        run: npx vitest run
-      - name: Coverage
-        run: npx vitest run --coverage --coverage.thresholds.lines=88 --coverage.thresholds.branches=82 --coverage.thresholds.functions=85 --coverage.thresholds.statements=88
+      - run: npx biome check .
+
+  typecheck:
+    name: typecheck
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx tsc -b --noEmit
+
+  test:
+    name: test
+    runs-on: blacksmith-4vcpu-ubuntu-2204
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run tests with coverage
+        run: npx vitest run --coverage
+      - name: Check coverage thresholds
+        run: >-
+          npx vitest run --coverage
+          --coverage.thresholds.lines=92
+          --coverage.thresholds.branches=85
+          --coverage.thresholds.functions=90
+          --coverage.thresholds.statements=92
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+          retention-days: 14
