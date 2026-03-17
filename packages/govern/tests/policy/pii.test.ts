@@ -246,3 +246,215 @@ describe("detectPII — paths", () => {
 		expect(result.paths.some((p) => p === "(email)")).toBe(true);
 	});
 });
+
+// ===========================================================================
+// Part D: Additional edge cases for coverage
+// ===========================================================================
+
+describe("detectPII — credit card edge cases", () => {
+	it("does not detect a number that fails Luhn check (line 74)", () => {
+		// 4111111111111112 fails Luhn — differs from valid 4111111111111111 by last digit
+		const result = detectPII({ card: "4111111111111112" });
+		expect(result.types).not.toContain("credit_card");
+	});
+
+	it("does not detect a number that is too short after stripping", () => {
+		const result = detectPII({ card: "4111 1111 1111" });
+		expect(result.types).not.toContain("credit_card");
+	});
+
+	it("does not detect a number that is too long after stripping", () => {
+		// 20+ digits — exceeds 19 digit limit
+		const result = detectPII({ card: "4111 1111 1111 1111 1111" });
+		expect(result.types).not.toContain("credit_card");
+	});
+
+	it("does not detect when candidate has non-digit characters after stripping", () => {
+		// Letters mixed in won't match the initial regex
+		const result = detectPII({ card: "4111-abcd-1111-1111" });
+		expect(result.types).not.toContain("credit_card");
+	});
+
+	it("detects Mastercard (Luhn-valid)", () => {
+		// 5500000000000004 is a Luhn-valid Mastercard test number
+		const result = detectPII({ card: "5500000000000004" });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("credit_card");
+	});
+
+	it("detects Amex (Luhn-valid, 15 digits)", () => {
+		// 378282246310005 is a Luhn-valid Amex test number
+		const result = detectPII({ card: "378282246310005" });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("credit_card");
+	});
+
+	it("does not detect random 16-digit number that fails Luhn", () => {
+		// Random number that fails Luhn: 1234567890123456
+		const result = detectPII({ card: "1234567890123456" });
+		expect(result.types).not.toContain("credit_card");
+	});
+});
+
+describe("detectPII — nested array inside object (line 87)", () => {
+	it("scans nested arrays inside objects", () => {
+		const result = detectPII({
+			users: [
+				{
+					contacts: ["user@example.com", "admin@test.org"],
+				},
+			],
+		});
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("email");
+		expect(result.paths.some((p) => p.includes("users[0].contacts[0]"))).toBe(true);
+	});
+
+	it("scans deeply nested arrays of objects", () => {
+		const result = detectPII({
+			level1: {
+				level2: [
+					{
+						level3: {
+							phones: ["234-567-8901"],
+						},
+					},
+				],
+			},
+		});
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("phone");
+	});
+});
+
+describe("detectPII — null values in arrays", () => {
+	it("handles null values in arrays without crashing", () => {
+		const result = detectPII({
+			items: [null, "user@example.com", null],
+		});
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("email");
+	});
+
+	it("handles undefined values in arrays", () => {
+		const result = detectPII({
+			items: [undefined, "123-45-6789", undefined],
+		});
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("ssn");
+	});
+
+	it("handles all-null array", () => {
+		const result = detectPII({
+			items: [null, null, null],
+		});
+		expect(result.found).toBe(false);
+	});
+});
+
+describe("detectPII — very long strings", () => {
+	it("detects PII embedded in a very long string", () => {
+		const padding = "x".repeat(10000);
+		const result = detectPII({ text: `${padding} user@example.com ${padding}` });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("email");
+	});
+
+	it("handles long strings without PII", () => {
+		const result = detectPII({ text: "a".repeat(5000) });
+		expect(result.found).toBe(false);
+	});
+});
+
+describe("detectPII — SSN-like but invalid", () => {
+	it("does not detect too-few-digit SSN-like pattern", () => {
+		const result = detectPII({ number: "12-34-5678" });
+		expect(result.types).not.toContain("ssn");
+	});
+
+	it("does not detect SSN without dashes", () => {
+		const result = detectPII({ number: "123456789" });
+		expect(result.types).not.toContain("ssn");
+	});
+
+	it("does not detect too-many-digit pattern", () => {
+		const result = detectPII({ number: "1234-56-78901" });
+		expect(result.types).not.toContain("ssn");
+	});
+});
+
+describe("detectPII — IPv4 edge cases", () => {
+	it("does not detect 256.0.0.1 (out of range)", () => {
+		const result = detectPII({ ip: "256.0.0.1" });
+		expect(result.types).not.toContain("ipv4");
+	});
+
+	it("detects 0.0.0.0", () => {
+		const result = detectPII({ ip: "0.0.0.0" });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("ipv4");
+	});
+
+	it("detects 255.255.255.255", () => {
+		const result = detectPII({ ip: "255.255.255.255" });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("ipv4");
+	});
+
+	it("does not detect IPv6 addresses", () => {
+		const result = detectPII({ ip: "2001:0db8:85a3:0000:0000:8a2e:0370:7334" });
+		expect(result.types).not.toContain("ipv4");
+	});
+});
+
+describe("detectPII — mixed types in single string", () => {
+	it("detects multiple PII types in a single string value", () => {
+		const result = detectPII({
+			note: "Contact user@example.com or call 234-567-8901 from IP 10.0.0.1",
+		});
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("email");
+		expect(result.types).toContain("phone");
+		expect(result.types).toContain("ipv4");
+	});
+});
+
+describe("detectPII — top-level array input", () => {
+	it("scans a top-level array", () => {
+		const result = detectPII(["user@example.com", "safe text"]);
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("email");
+		expect(result.paths.some((p) => p.includes("[0]"))).toBe(true);
+	});
+});
+
+describe("detectPII — boolean and number values", () => {
+	it("ignores boolean values", () => {
+		const result = detectPII({ flag: true, other: false });
+		expect(result.found).toBe(false);
+	});
+
+	it("ignores plain number values", () => {
+		const result = detectPII({ count: 42, price: 19.99 });
+		expect(result.found).toBe(false);
+	});
+});
+
+describe("detectPII — empty structures", () => {
+	it("handles empty object", () => {
+		const result = detectPII({});
+		expect(result.found).toBe(false);
+		expect(result.types).toEqual([]);
+		expect(result.paths).toEqual([]);
+	});
+
+	it("handles empty array", () => {
+		const result = detectPII([]);
+		expect(result.found).toBe(false);
+	});
+
+	it("handles empty string", () => {
+		const result = detectPII("");
+		expect(result.found).toBe(false);
+	});
+});

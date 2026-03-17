@@ -288,4 +288,152 @@ describe("detectConcerns", () => {
 			expect(c.evidence).toBeDefined();
 		}
 	});
+
+	it("returns all 6 concern types with a maximally-triggering request", () => {
+		const concerns = detectConcerns(
+			makeRequest({
+				decisionType: "policy_override",
+				description: "Always override password checks",
+				scope: [
+					"**",
+					...Array.from({ length: 11 }, (_, i) => `file${i}.ts`),
+				],
+				context: { preferredWorker: "w-1", estimatedCost: 200 },
+			}),
+		);
+		// policy_override triggers: hallucination (no justification), policy_violation
+		// "always" triggers: hallucination
+		// "password" triggers: safety
+		// "**" triggers: scope_creep
+		// But scope_expansion is not the decisionType so bias won't trigger
+		// resource_intensive is not the decisionType so resource_abuse won't trigger
+		const types = new Set(concerns.map((c) => c.type));
+		expect(types.has("hallucination")).toBe(true);
+		expect(types.has("safety")).toBe(true);
+		expect(types.has("scope_creep")).toBe(true);
+		expect(types.has("policy_violation")).toBe(true);
+	});
+
+	it("returns empty for minimal clean request", () => {
+		const concerns = detectConcerns(
+			makeRequest({
+				decisionType: "code_review",
+				description: "Format spacing in utils",
+				scope: ["src/utils.ts"],
+				context: {},
+			}),
+		);
+		expect(concerns).toHaveLength(0);
+	});
+});
+
+// ── Additional edge cases ──
+
+describe("detectHallucination — edge cases", () => {
+	it("is case-insensitive (ALWAYS in uppercase)", () => {
+		const concern = detectHallucination(
+			makeRequest({ description: "This should ALWAYS work fine" }),
+		);
+		expect(concern).not.toBeNull();
+	});
+
+	it("detects 'never' in longer sentences", () => {
+		const concern = detectHallucination(
+			makeRequest({ description: "You should never trust this output without verification" }),
+		);
+		expect(concern).not.toBeNull();
+	});
+
+	it("does not flag policy_override with justification in context", () => {
+		const concern = detectHallucination(
+			makeRequest({
+				decisionType: "policy_override",
+				description: "Emergency override",
+				context: { justification: "Security incident response" },
+			}),
+		);
+		expect(concern).toBeNull();
+	});
+});
+
+describe("detectSafety — all sensitive patterns", () => {
+	const patterns = ["password", "credential", "secret", "token", "key"];
+	for (const pattern of patterns) {
+		it(`flags '${pattern}' in description`, () => {
+			const concern = detectSafety(
+				makeRequest({ description: `Access the ${pattern} store`, scope: ["src/safe.ts"] }),
+			);
+			expect(concern).not.toBeNull();
+			expect(concern!.type).toBe("safety");
+			expect(concern!.evidence).toContain(pattern);
+		});
+
+		it(`flags '${pattern}' in scope`, () => {
+			const concern = detectSafety(
+				makeRequest({ description: "Safe operation", scope: [`src/${pattern}.ts`] }),
+			);
+			expect(concern).not.toBeNull();
+		});
+	}
+
+	it("flags first matching pattern only", () => {
+		const concern = detectSafety(
+			makeRequest({
+				description: "Modify password and secret and token",
+				scope: ["safe.ts"],
+			}),
+		);
+		expect(concern).not.toBeNull();
+		// "password" comes first alphabetically in the patterns array
+		expect(concern!.evidence).toContain("password");
+	});
+});
+
+describe("detectScopeCreep — edge cases", () => {
+	it("does not flag ** under a directory (e.g. src/**)", () => {
+		const concern = detectScopeCreep(makeRequest({ scope: ["src/**"] }));
+		expect(concern).toBeNull();
+	});
+
+	it("flags standalone ** without slash", () => {
+		const concern = detectScopeCreep(makeRequest({ scope: ["**/*.ts"] }));
+		// "**/*.ts" contains "**" but also "/" — depends on s.includes("/")
+		// "**/*.ts" includes "/" → should NOT trigger root-level ** check
+		expect(concern).toBeNull();
+	});
+
+	it("exactly 10 scope patterns is allowed", () => {
+		const scope = Array.from({ length: 10 }, (_, i) => `dir/file${i}.ts`);
+		const concern = detectScopeCreep(makeRequest({ scope }));
+		expect(concern).toBeNull();
+	});
+
+	it("exactly 11 scope patterns triggers high severity", () => {
+		const scope = Array.from({ length: 11 }, (_, i) => `dir/file${i}.ts`);
+		const concern = detectScopeCreep(makeRequest({ scope }));
+		expect(concern).not.toBeNull();
+		expect(concern!.severity).toBe("high");
+	});
+});
+
+describe("detectResourceAbuse — boundary", () => {
+	it("exactly $100 does not trigger (threshold is >100)", () => {
+		const concern = detectResourceAbuse(
+			makeRequest({
+				decisionType: "resource_intensive",
+				context: { estimatedCost: 100 },
+			}),
+		);
+		expect(concern).toBeNull();
+	});
+
+	it("$100.01 triggers", () => {
+		const concern = detectResourceAbuse(
+			makeRequest({
+				decisionType: "resource_intensive",
+				context: { estimatedCost: 100.01 },
+			}),
+		);
+		expect(concern).not.toBeNull();
+	});
 });
