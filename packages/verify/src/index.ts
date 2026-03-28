@@ -5,10 +5,27 @@
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { buildMerkleTree, verifyChain } from "./verify.js";
+import {
+	type ReceiptData,
+	type TransactionEvent,
+	renderNotFound,
+	renderReceipt,
+} from "./receipt.js";
+import {
+	buildMerkleTree,
+	generateInclusionProof,
+	verifyChain,
+	verifyInclusionProof,
+} from "./verify.js";
 
 export { canonicalize } from "./canonical.js";
 export { GENESIS_HASH } from "./constants.js";
+export {
+	type ReceiptData,
+	type TransactionEvent,
+	renderReceipt,
+	renderNotFound,
+} from "./receipt.js";
 export {
 	verifyChain,
 	buildMerkleTree,
@@ -143,5 +160,113 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 		merkleRoot,
 		firstEvent,
 		lastEvent,
+	};
+}
+
+// ── Single Transaction Verification ──
+
+export interface TransactionVerificationResult {
+	readonly found: boolean;
+	readonly valid: boolean;
+	readonly receipt: string;
+	readonly errors: string[];
+}
+
+/**
+ * Verify a single transaction and return a formatted receipt.
+ *
+ * Finds the event matching `txId` (by `data.transferId`), verifies the
+ * hash chain up to that event, generates a Merkle inclusion proof, and
+ * returns a terminal-formatted receipt string.
+ */
+export function verifyTransaction(vaultPath: string, txId: string): TransactionVerificationResult {
+	const auditDir = join(vaultPath, "audit");
+	const mainLog = join(auditDir, "events.jsonl");
+
+	if (!existsSync(mainLog)) {
+		return {
+			found: false,
+			valid: false,
+			receipt: renderNotFound(txId),
+			errors: [`Audit log not found: ${mainLog}`],
+		};
+	}
+
+	const content = readFileSync(mainLog, "utf-8").trim();
+	if (!content) {
+		return {
+			found: false,
+			valid: false,
+			receipt: renderNotFound(txId),
+			errors: ["Audit log is empty"],
+		};
+	}
+
+	const lines = content.split("\n").filter((l) => l.trim());
+	const events: TransactionEvent[] = [];
+	const parseErrors: string[] = [];
+
+	for (let i = 0; i < lines.length; i++) {
+		try {
+			events.push(JSON.parse(lines[i] as string) as TransactionEvent);
+		} catch {
+			parseErrors.push(`Event ${i + 1}: malformed JSON`);
+		}
+	}
+
+	// Find the target event
+	const targetEvent = events.find((e) => e.data.transferId === txId);
+
+	if (targetEvent === undefined) {
+		return {
+			found: false,
+			valid: false,
+			receipt: renderNotFound(txId),
+			errors: [],
+		};
+	}
+
+	// Verify the full chain
+	const chainResult = verifyChain(mainLog);
+	const chainVerified = chainResult.valid;
+
+	// Build Merkle tree and generate inclusion proof
+	const allHashes = events.map((e) => e.hash);
+	const tree = buildMerkleTree(allHashes);
+	const merkleRoot = tree.root ?? "";
+	const leafIndex = events.indexOf(targetEvent);
+
+	let merkleVerified = false;
+	if (tree.root !== undefined && leafIndex >= 0) {
+		const proof = generateInclusionProof(leafIndex, allHashes, "events.jsonl");
+		merkleVerified = verifyInclusionProof(proof, tree.root, allHashes.length);
+	}
+
+	// Compute cumulative spend up to and including this event
+	let cumulativeSpend = 0;
+	for (const evt of events) {
+		if (evt.data.cost !== undefined && evt.kind === "llm_call") {
+			cumulativeSpend += evt.data.cost;
+		}
+		if (evt === targetEvent) break;
+	}
+
+	const receiptData: ReceiptData = {
+		event: targetEvent,
+		chainLength: events.length,
+		merkleRoot,
+		merkleVerified,
+		chainVerified,
+		cumulativeSpend,
+		verifiedAt: new Date(),
+	};
+
+	const allErrors = [...parseErrors, ...chainResult.errors];
+
+	return {
+		found: true,
+		valid: chainVerified && merkleVerified,
+		receipt: renderReceipt(receiptData),
+		errors: allErrors,
 	};
 }
