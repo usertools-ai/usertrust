@@ -110,7 +110,7 @@ describe("USERTRUST_DRY_RUN=true", () => {
 
 		// Call succeeds without engine
 		expect(result.response).toBeDefined();
-		expect(result.governance.settled).toBe(true);
+		expect(result.receipt.settled).toBe(true);
 
 		await governed.destroy();
 	});
@@ -196,7 +196,7 @@ describe("USERTRUST_DRY_RUN=true", () => {
 		await governed.destroy();
 	});
 
-	it("returns governance receipt with settled: true and calculated cost", async () => {
+	it("returns trust receipt with settled: true and calculated cost", async () => {
 		const mockAudit = makeMockAudit();
 		const mockClient = makeAnthropicMock({
 			id: "msg_456",
@@ -217,11 +217,11 @@ describe("USERTRUST_DRY_RUN=true", () => {
 			messages: [{ role: "user", content: "Hello" }],
 		});
 
-		expect(result.governance.settled).toBe(true);
+		expect(result.receipt.settled).toBe(true);
 		// Cost should be calculated: (100/1000)*30 + (200/1000)*150 = 3 + 30 = 33
-		expect(result.governance.cost).toBe(33);
-		expect(result.governance.cost).toBeGreaterThan(0);
-		expect(result.governance.budgetRemaining).toBeLessThan(50_000);
+		expect(result.receipt.cost).toBe(33);
+		expect(result.receipt.cost).toBeGreaterThan(0);
+		expect(result.receipt.budgetRemaining).toBeLessThan(50_000);
 
 		await governed.destroy();
 	});
@@ -271,8 +271,8 @@ describe("USERTRUST_DRY_RUN=true", () => {
 			});
 
 			// Should succeed as dry-run (no engine)
-			expect(result.governance.settled).toBe(true);
-			expect(result.governance.cost).toBeGreaterThan(0);
+			expect(result.receipt.settled).toBe(true);
+			expect(result.receipt.cost).toBeGreaterThan(0);
 
 			await governed.destroy();
 		} finally {
@@ -303,8 +303,8 @@ describe("USERTRUST_DRY_RUN=true", () => {
 			messages: [{ role: "user", content: "Hello again" }],
 		});
 
-		expect(r2.governance.budgetRemaining).toBeLessThan(r1.governance.budgetRemaining);
-		expect(r2.governance.budgetRemaining).toBe(50_000 - r1.governance.cost - r2.governance.cost);
+		expect(r2.receipt.budgetRemaining).toBeLessThan(r1.receipt.budgetRemaining);
+		expect(r2.receipt.budgetRemaining).toBe(50_000 - r1.receipt.cost - r2.receipt.cost);
 
 		await governed.destroy();
 	});

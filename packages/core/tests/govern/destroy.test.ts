@@ -186,7 +186,7 @@ describe("client.destroy()", () => {
 				model: "claude-sonnet-4-6",
 				messages: [{ role: "user", content: "Hello" }],
 			}),
-		).rejects.toThrow("GovernedClient has been destroyed");
+		).rejects.toThrow("TrustedClient has been destroyed");
 	});
 
 	it("flush is called before release", async () => {

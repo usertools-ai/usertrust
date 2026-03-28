@@ -108,7 +108,7 @@ describe("Failure mode 15.1: LLM succeeds, POST fails", () => {
 		}
 	});
 
-	it("returns response with governance.settled = false", async () => {
+	it("returns response with receipt.settled = false", async () => {
 		const engine = makeMockEngine({
 			postPendingSpend: vi.fn(async () => {
 				throw new Error("POST failed: TigerBeetle timeout");
@@ -137,7 +137,7 @@ describe("Failure mode 15.1: LLM succeeds, POST fails", () => {
 		expect(result.response.id).toBe("msg_123");
 
 		// But settlement failed
-		expect(result.governance.settled).toBe(false);
+		expect(result.receipt.settled).toBe(false);
 
 		// Engine was called: PENDING succeeded, POST failed
 		expect(engine.spendPending).toHaveBeenCalledOnce();
@@ -310,7 +310,7 @@ describe("Failure mode 15.3: Audit write fails after POST", () => {
 		expect(result.response).toBeDefined();
 		expect(result.response.id).toBe("msg_123");
 		// settled is still true because the POST succeeded
-		expect(result.governance.settled).toBe(true);
+		expect(result.receipt.settled).toBe(true);
 
 		await governed.destroy();
 	});
@@ -480,7 +480,7 @@ describe("Failure mode 15.5: Multiple failures combine gracefully", () => {
 		});
 
 		expect(result.response).toBeDefined();
-		expect(result.governance.settled).toBe(false);
+		expect(result.receipt.settled).toBe(false);
 
 		await governed.destroy();
 	});

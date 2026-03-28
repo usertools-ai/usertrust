@@ -3,8 +3,8 @@
 
 import { z } from "zod";
 
-// ── Governance Receipt ──
-export interface GovernanceReceipt {
+// ── Trust Receipt ──
+export interface TrustReceipt {
 	transferId: string;
 	cost: number;
 	budgetRemaining: number;
@@ -19,10 +19,10 @@ export interface GovernanceReceipt {
 	auditDegraded?: boolean;
 }
 
-// ── GovernedResponse — returned by every governed LLM call ──
-export interface GovernedResponse<T> {
+// ── TrustedResponse — returned by every governed LLM call ──
+export interface TrustedResponse<T> {
 	response: T;
-	governance: GovernanceReceipt;
+	receipt: TrustReceipt;
 }
 
 // ── Config schema ──

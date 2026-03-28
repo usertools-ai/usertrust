@@ -40,7 +40,7 @@ describe("usertrust inspect", () => {
 		await run(tempDir);
 
 		const combined = logOutput.join("\n");
-		expect(combined).toContain("usertrust governance vault");
+		expect(combined).toContain("usertrust vault");
 		expect(combined).toContain("Budget:");
 		expect(combined).toContain("50,000");
 	});

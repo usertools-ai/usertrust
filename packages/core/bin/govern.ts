@@ -27,8 +27,8 @@ switch (command) {
 		console.log(`Usage: usertrust <command>
 
 Commands:
-  init       Initialize governance vault
-  inspect    Show governance bank statement
+  init       Initialize trust vault
+  inspect    Show trust bank statement
   health     Show entropy diagnostics
   verify     Verify audit chain integrity
   snapshot   Create/restore vault snapshots

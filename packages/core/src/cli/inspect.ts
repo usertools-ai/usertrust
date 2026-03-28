@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * CLI: usertrust inspect — Show governance bank statement
+ * CLI: usertrust inspect — Show trust bank statement
  *
  * Reads vault state and displays balance, audit chain stats,
  * recent transactions, and Merkle root in a formatted table.
@@ -80,7 +80,7 @@ export async function run(rootDir?: string): Promise<void> {
 	const vaultPath = join(root, VAULT_DIR);
 
 	if (!existsSync(vaultPath)) {
-		console.log("No governance vault found. Run `usertrust init` first.");
+		console.log("No trust vault found. Run `usertrust init` first.");
 		return;
 	}
 
@@ -102,7 +102,7 @@ export async function run(rootDir?: string): Promise<void> {
 
 	// Header
 	console.log("+--------------------------------------------------------------+");
-	console.log(`|  * usertrust governance vault${" ".repeat(32)}|`);
+	console.log(`|  * usertrust vault${" ".repeat(43)}|`);
 	console.log(
 		`${`|  Budget: ${remaining.toLocaleString()} / ${config.budget.toLocaleString()} UT remaining (${pct}%)`.padEnd(
 			63,

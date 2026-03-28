@@ -118,7 +118,7 @@ describe("trust() — end-to-end integration", () => {
 	// ─────────────────────────────────────────────────────────────────────
 
 	describe("1. Full lifecycle — Anthropic client", () => {
-		it("wraps, calls, returns GovernedResponse, and destroys cleanly", async () => {
+		it("wraps, calls, returns TrustedResponse, and destroys cleanly", async () => {
 			const mockClient = makeAnthropicMock();
 			const governed = await trust(mockClient, {
 				dryRun: true,
@@ -132,16 +132,16 @@ describe("trust() — end-to-end integration", () => {
 				messages: [{ role: "user", content: "Explain governance" }],
 			});
 
-			// Verify GovernedResponse shape
+			// Verify TrustedResponse shape
 			expect(result).toHaveProperty("response");
-			expect(result).toHaveProperty("governance");
+			expect(result).toHaveProperty("receipt");
 
 			// Verify response
 			expect(result.response.id).toBe("msg_e2e_001");
 			expect(result.response.content).toBeDefined();
 
-			// Verify governance receipt
-			const g = result.governance;
+			// Verify trust receipt
+			const g = result.receipt;
 			expect(g.transferId).toMatch(/^tx_/);
 			expect(g.cost).toBeGreaterThan(0);
 			expect(g.model).toBe("claude-sonnet-4-6");
@@ -178,7 +178,7 @@ describe("trust() — end-to-end integration", () => {
 
 			// sonnet: input 30/1k, output 150/1k
 			// (100/1000)*30 + (200/1000)*150 = 3 + 30 = 33
-			expect(result.governance.cost).toBe(33);
+			expect(result.receipt.cost).toBe(33);
 
 			await governed.destroy();
 		});
@@ -189,7 +189,7 @@ describe("trust() — end-to-end integration", () => {
 	// ─────────────────────────────────────────────────────────────────────
 
 	describe("2. Full lifecycle — OpenAI client", () => {
-		it("wraps OpenAI-shaped client and returns GovernedResponse", async () => {
+		it("wraps OpenAI-shaped client and returns TrustedResponse", async () => {
 			const mockClient = makeOpenAIMock();
 			const governed = await trust(mockClient, {
 				dryRun: true,
@@ -203,11 +203,11 @@ describe("trust() — end-to-end integration", () => {
 			});
 
 			expect(result.response.id).toBe("chatcmpl-e2e-001");
-			expect(result.governance.provider).toBe("openai");
-			expect(result.governance.model).toBe("gpt-4o");
-			expect(result.governance.settled).toBe(true);
-			expect(result.governance.transferId).toMatch(/^tx_/);
-			expect(result.governance.cost).toBeGreaterThan(0);
+			expect(result.receipt.provider).toBe("openai");
+			expect(result.receipt.model).toBe("gpt-4o");
+			expect(result.receipt.settled).toBe(true);
+			expect(result.receipt.transferId).toMatch(/^tx_/);
+			expect(result.receipt.cost).toBeGreaterThan(0);
 
 			await governed.destroy();
 		});
@@ -233,7 +233,7 @@ describe("trust() — end-to-end integration", () => {
 
 			// gpt-4o: input 25/1k, output 100/1k
 			// (200/1000)*25 + (100/1000)*100 = 5 + 10 = 15
-			expect(result.governance.cost).toBe(15);
+			expect(result.receipt.cost).toBe(15);
 
 			await governed.destroy();
 		});
@@ -270,13 +270,13 @@ describe("trust() — end-to-end integration", () => {
 			});
 
 			// Budget decreases with each call
-			expect(r1.governance.budgetRemaining).toBeLessThan(50_000);
-			expect(r2.governance.budgetRemaining).toBeLessThan(r1.governance.budgetRemaining);
-			expect(r3.governance.budgetRemaining).toBeLessThan(r2.governance.budgetRemaining);
+			expect(r1.receipt.budgetRemaining).toBeLessThan(50_000);
+			expect(r2.receipt.budgetRemaining).toBeLessThan(r1.receipt.budgetRemaining);
+			expect(r3.receipt.budgetRemaining).toBeLessThan(r2.receipt.budgetRemaining);
 
 			// Budget math is exact
-			const totalCost = r1.governance.cost + r2.governance.cost + r3.governance.cost;
-			expect(r3.governance.budgetRemaining).toBe(50_000 - totalCost);
+			const totalCost = r1.receipt.cost + r2.receipt.cost + r3.receipt.cost;
+			expect(r3.receipt.budgetRemaining).toBe(50_000 - totalCost);
 
 			await governed.destroy();
 		});
@@ -415,7 +415,7 @@ describe("trust() — end-to-end integration", () => {
 			});
 
 			expect(result.response).toBeDefined();
-			expect(result.governance.settled).toBe(true);
+			expect(result.receipt.settled).toBe(true);
 
 			await governed.destroy();
 		});
@@ -595,7 +595,7 @@ describe("trust() — end-to-end integration", () => {
 					model: "claude-sonnet-4-6",
 					messages: [{ role: "user", content: "After destroy" }],
 				}),
-			).rejects.toThrow("GovernedClient has been destroyed");
+			).rejects.toThrow("TrustedClient has been destroyed");
 		});
 
 		it("destroy is idempotent — calling twice does not throw", async () => {
@@ -639,7 +639,7 @@ describe("trust() — end-to-end integration", () => {
 			});
 
 			expect(result.response).toBeDefined();
-			expect(result.governance.settled).toBe(true);
+			expect(result.receipt.settled).toBe(true);
 
 			await governed2.destroy();
 
@@ -670,7 +670,7 @@ describe("trust() — end-to-end integration", () => {
 			});
 
 			// Budget is from config, not default
-			expect(result.governance.budgetRemaining).toBeLessThan(10_000);
+			expect(result.receipt.budgetRemaining).toBeLessThan(10_000);
 
 			await governed.destroy();
 		});
@@ -691,8 +691,8 @@ describe("trust() — end-to-end integration", () => {
 			});
 
 			// Budget override wins
-			expect(result.governance.budgetRemaining).toBeGreaterThan(10_000);
-			expect(result.governance.budgetRemaining).toBeLessThan(99_000);
+			expect(result.receipt.budgetRemaining).toBeGreaterThan(10_000);
+			expect(result.receipt.budgetRemaining).toBeLessThan(99_000);
 
 			await governed.destroy();
 		});
@@ -745,7 +745,7 @@ describe("trust() — end-to-end integration", () => {
 			});
 
 			// Default budget is 50,000
-			expect(result.governance.budgetRemaining).toBeLessThan(50_000);
+			expect(result.receipt.budgetRemaining).toBeLessThan(50_000);
 
 			await governed.destroy();
 		});
@@ -838,11 +838,11 @@ describe("trust() — end-to-end integration", () => {
 			});
 
 			// Different providers, different budgets, different transfer IDs
-			expect(rAnthropic.governance.provider).toBe("anthropic");
-			expect(rOpenAI.governance.provider).toBe("openai");
-			expect(rAnthropic.governance.transferId).not.toBe(rOpenAI.governance.transferId);
-			expect(rAnthropic.governance.budgetRemaining).toBeLessThan(50_000);
-			expect(rOpenAI.governance.budgetRemaining).toBeLessThan(30_000);
+			expect(rAnthropic.receipt.provider).toBe("anthropic");
+			expect(rOpenAI.receipt.provider).toBe("openai");
+			expect(rAnthropic.receipt.transferId).not.toBe(rOpenAI.receipt.transferId);
+			expect(rAnthropic.receipt.budgetRemaining).toBeLessThan(50_000);
+			expect(rOpenAI.receipt.budgetRemaining).toBeLessThan(30_000);
 
 			await governedAnthropic.destroy();
 			await governedOpenAI.destroy();
@@ -983,8 +983,8 @@ describe("trust() — end-to-end integration", () => {
 	// 14. Budget from config is enforced across session
 	// ─────────────────────────────────────────────────────────────────────
 
-	describe("14. End-to-end governance receipt completeness", () => {
-		it("every field of GovernanceReceipt is populated correctly", async () => {
+	describe("14. End-to-end trust receipt completeness", () => {
+		it("every field of TrustReceipt is populated correctly", async () => {
 			const governed = await trust(makeAnthropicMock(), {
 				dryRun: true,
 				budget: 50_000,
@@ -997,7 +997,7 @@ describe("trust() — end-to-end integration", () => {
 				messages: [{ role: "user", content: "Full receipt check" }],
 			});
 
-			const g = result.governance;
+			const g = result.receipt;
 
 			// transferId — format: tx_<base36timestamp>_<hex>
 			expect(g.transferId).toMatch(/^tx_[a-z0-9]+_[a-f0-9]+$/);
@@ -1061,7 +1061,7 @@ describe("trust() — end-to-end integration", () => {
 
 			// Should succeed despite PII
 			expect(result.response).toBeDefined();
-			expect(result.governance.settled).toBe(true);
+			expect(result.receipt.settled).toBe(true);
 
 			await governed.destroy();
 		});

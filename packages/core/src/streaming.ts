@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * streaming.ts — Streaming Token Accumulator + GovernedStream Factory
+ * streaming.ts — Streaming Token Accumulator + TrustedStream Factory
  *
  * Per-provider token accumulation for streaming LLM calls. The SDK taps
  * the stream via an async generator that counts tokens without modifying
@@ -15,13 +15,13 @@
  *
  * Usage:
  * ```ts
- * const governed = createGovernedStream(stream, "anthropic", resolveGov, rejectGov);
+ * const governed = createGovernedStream(stream, "anthropic", resolveReceipt, rejectReceipt);
  * for await (const chunk of governed) { process(chunk); }
- * const receipt = await governed.governance;
+ * const receipt = await governed.receipt;
  * ```
  */
 
-import type { GovernanceReceipt, LLMClientKind } from "./shared/types.js";
+import type { LLMClientKind, TrustReceipt } from "./shared/types.js";
 
 // ── Public types ──
 
@@ -31,8 +31,8 @@ export interface StreamUsage {
 }
 
 export interface GovernedStream<T> extends AsyncIterable<T> {
-	/** Resolves with the governance receipt when the stream completes */
-	governance: Promise<GovernanceReceipt>;
+	/** Resolves with the trust receipt when the stream completes */
+	receipt: Promise<TrustReceipt>;
 }
 
 // ── Token extraction ──
@@ -128,46 +128,46 @@ async function* wrapStreamImpl<T>(
 // ── GovernedStream factory ──
 
 /**
- * Creates a GovernedStream: an AsyncIterable that also exposes a `.governance`
- * promise resolving to the GovernanceReceipt after the stream completes.
+ * Creates a GovernedStream: an AsyncIterable that also exposes a `.receipt`
+ * promise resolving to the TrustReceipt after the stream completes.
  *
- * - `resolveGovernance` is called with final usage when the stream ends.
+ * - `resolveReceipt` is called with final usage when the stream ends.
  *   It should POST the actual cost and return the receipt.
- * - `rejectGovernance` is called on stream error. It should VOID the hold.
+ * - `rejectReceipt` is called on stream error. It should VOID the hold.
  */
 export function createGovernedStream<T>(
 	stream: AsyncIterable<T>,
 	kind: LLMClientKind,
-	resolveGovernance: (usage: StreamUsage) => Promise<GovernanceReceipt>,
-	rejectGovernance: (error: unknown) => void,
+	resolveReceipt: (usage: StreamUsage) => Promise<TrustReceipt>,
+	rejectReceipt: (error: unknown) => void,
 ): GovernedStream<T> {
-	let governanceResolve!: (receipt: GovernanceReceipt) => void;
-	let governanceReject!: (error: unknown) => void;
+	let receiptResolve!: (receipt: TrustReceipt) => void;
+	let receiptReject!: (error: unknown) => void;
 
-	const governancePromise = new Promise<GovernanceReceipt>((resolve, reject) => {
-		governanceResolve = resolve;
-		governanceReject = reject;
+	const receiptPromise = new Promise<TrustReceipt>((resolve, reject) => {
+		receiptResolve = resolve;
+		receiptReject = reject;
 	});
 
 	const wrapped = wrapStream(
 		stream,
 		kind,
 		(usage) => {
-			resolveGovernance(usage)
+			resolveReceipt(usage)
 				.then((receipt) => {
-					governanceResolve(receipt);
+					receiptResolve(receipt);
 				})
 				.catch((err: unknown) => {
-					governanceReject(err);
+					receiptReject(err);
 				});
 		},
 		(error) => {
-			rejectGovernance(error);
-			governanceReject(error);
+			rejectReceipt(error);
+			receiptReject(error);
 		},
 	);
 
 	return Object.assign(wrapped, {
-		governance: governancePromise,
+		receipt: receiptPromise,
 	}) as GovernedStream<T>;
 }

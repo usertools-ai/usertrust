@@ -17,7 +17,7 @@ export async function run(rootDir?: string): Promise<void> {
 	const vaultPath = join(root, VAULT_DIR);
 
 	if (!existsSync(vaultPath)) {
-		console.log("No governance vault found. Run `usertrust init` first.");
+		console.log("No trust vault found. Run `usertrust init` first.");
 		return;
 	}
 

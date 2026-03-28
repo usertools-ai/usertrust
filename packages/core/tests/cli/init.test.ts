@@ -90,9 +90,7 @@ describe("usertrust init", () => {
 	it("prints success message", async () => {
 		await run(tempDir);
 
-		expect(console.log).toHaveBeenCalledWith(
-			expect.stringContaining("Initialized governance vault"),
-		);
+		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Initialized trust vault"));
 	});
 
 	it("does not overwrite existing vault", async () => {

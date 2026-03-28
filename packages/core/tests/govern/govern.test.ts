@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type GovernedClient, trust } from "../../src/govern.js";
+import { type TrustedClient, trust } from "../../src/govern.js";
 
 // Mock tigerbeetle-node at module level (native module, never loaded in tests)
 vi.mock("tigerbeetle-node", () => ({
@@ -100,7 +100,7 @@ describe("trust()", () => {
 	// ─── Anthropic ───
 
 	describe("Anthropic client", () => {
-		it("wraps client and returns GovernedResponse", async () => {
+		it("wraps client and returns TrustedResponse", async () => {
 			const mockClient = makeAnthropicMock();
 			const governed = await trust(mockClient, {
 				dryRun: true,
@@ -116,14 +116,14 @@ describe("trust()", () => {
 
 			expect(result.response).toBeDefined();
 			expect(result.response.id).toBe("msg_123");
-			expect(result.governance).toBeDefined();
-			expect(result.governance.transferId).toMatch(/^tx_/);
-			expect(result.governance.cost).toBeGreaterThan(0);
-			expect(result.governance.model).toBe("claude-sonnet-4-6");
-			expect(result.governance.provider).toBe("anthropic");
-			expect(result.governance.settled).toBe(true);
-			expect(result.governance.receiptUrl).toBeNull();
-			expect(result.governance.budgetRemaining).toBeLessThan(50_000);
+			expect(result.receipt).toBeDefined();
+			expect(result.receipt.transferId).toMatch(/^tx_/);
+			expect(result.receipt.cost).toBeGreaterThan(0);
+			expect(result.receipt.model).toBe("claude-sonnet-4-6");
+			expect(result.receipt.provider).toBe("anthropic");
+			expect(result.receipt.settled).toBe(true);
+			expect(result.receipt.receiptUrl).toBeNull();
+			expect(result.receipt.budgetRemaining).toBeLessThan(50_000);
 
 			await governed.destroy();
 		});
@@ -147,7 +147,7 @@ describe("trust()", () => {
 			});
 
 			// cost from actual usage: (100/1000)*30 + (200/1000)*150 = 3 + 30 = 33
-			expect(result.governance.cost).toBe(33);
+			expect(result.receipt.cost).toBe(33);
 
 			await governed.destroy();
 		});
@@ -175,7 +175,7 @@ describe("trust()", () => {
 	// ─── OpenAI ───
 
 	describe("OpenAI client", () => {
-		it("wraps client and returns GovernedResponse", async () => {
+		it("wraps client and returns TrustedResponse", async () => {
 			const mockClient = makeOpenAIMock();
 			const governed = await trust(mockClient, {
 				dryRun: true,
@@ -190,9 +190,9 @@ describe("trust()", () => {
 
 			expect(result.response).toBeDefined();
 			expect(result.response.id).toBe("chatcmpl-123");
-			expect(result.governance.model).toBe("gpt-4o");
-			expect(result.governance.provider).toBe("openai");
-			expect(result.governance.settled).toBe(true);
+			expect(result.receipt.model).toBe("gpt-4o");
+			expect(result.receipt.provider).toBe("openai");
+			expect(result.receipt.settled).toBe(true);
 
 			await governed.destroy();
 		});
@@ -210,7 +210,7 @@ describe("trust()", () => {
 			});
 
 			// cost = (10/1000)*25 + (5/1000)*100 = 0.25 + 0.5 = ceil(0.75) = 1
-			expect(result.governance.cost).toBeGreaterThanOrEqual(1);
+			expect(result.receipt.cost).toBeGreaterThanOrEqual(1);
 
 			await governed.destroy();
 		});
@@ -219,7 +219,7 @@ describe("trust()", () => {
 	// ─── Google ───
 
 	describe("Google client", () => {
-		it("wraps client and returns GovernedResponse", async () => {
+		it("wraps client and returns TrustedResponse", async () => {
 			const mockClient = makeGoogleMock();
 			const governed = await trust(mockClient, {
 				dryRun: true,
@@ -233,8 +233,8 @@ describe("trust()", () => {
 			});
 
 			expect(result.response).toBeDefined();
-			expect(result.governance.model).toBe("gemini-2.5-flash");
-			expect(result.governance.provider).toBe("google");
+			expect(result.receipt.model).toBe("gemini-2.5-flash");
+			expect(result.receipt.provider).toBe("google");
 
 			await governed.destroy();
 		});
@@ -279,7 +279,7 @@ describe("trust()", () => {
 					model: "claude-sonnet-4-6",
 					messages: [{ role: "user", content: "Hello" }],
 				}),
-			).rejects.toThrow("GovernedClient has been destroyed");
+			).rejects.toThrow("TrustedClient has been destroyed");
 		});
 	});
 
@@ -323,7 +323,7 @@ describe("trust()", () => {
 			});
 
 			// Budget is 10,000 from config
-			expect(result.governance.budgetRemaining).toBeLessThan(10_000);
+			expect(result.receipt.budgetRemaining).toBeLessThan(10_000);
 
 			await governed.destroy();
 		});
@@ -342,7 +342,7 @@ describe("trust()", () => {
 			});
 
 			// Default budget is 50,000
-			expect(result.governance.budgetRemaining).toBeLessThan(50_000);
+			expect(result.receipt.budgetRemaining).toBeLessThan(50_000);
 
 			await governed.destroy();
 		});
@@ -365,8 +365,8 @@ describe("trust()", () => {
 				messages: [{ role: "user", content: "Hello" }],
 			});
 
-			expect(result.governance.budgetRemaining).toBeLessThan(99_000);
-			expect(result.governance.budgetRemaining).toBeGreaterThan(10_000);
+			expect(result.receipt.budgetRemaining).toBeLessThan(99_000);
+			expect(result.receipt.budgetRemaining).toBeGreaterThan(10_000);
 
 			await governed.destroy();
 		});
@@ -483,7 +483,7 @@ describe("trust()", () => {
 			});
 
 			// Should succeed despite PII
-			expect(result.governance).toBeDefined();
+			expect(result.receipt).toBeDefined();
 
 			await governed.destroy();
 		});
@@ -513,7 +513,7 @@ describe("trust()", () => {
 				],
 			});
 
-			expect(result.governance).toBeDefined();
+			expect(result.receipt).toBeDefined();
 
 			await governed.destroy();
 		});
@@ -534,7 +534,7 @@ describe("trust()", () => {
 				messages: [{ role: "user", content: "Hello" }],
 			});
 
-			expect(result.governance.receiptUrl).toBeNull();
+			expect(result.receipt.receiptUrl).toBeNull();
 
 			await governed.destroy();
 		});
@@ -552,7 +552,7 @@ describe("trust()", () => {
 				messages: [{ role: "user", content: "Hello" }],
 			});
 
-			expect(result.governance.receiptUrl).toMatch(/^https:\/\/verify\.usertools\.dev\/tx_/);
+			expect(result.receipt.receiptUrl).toMatch(/^https:\/\/verify\.usertools\.dev\/tx_/);
 
 			await governed.destroy();
 		});
@@ -580,7 +580,7 @@ describe("trust()", () => {
 				messages: [{ role: "user", content: "Hello again" }],
 			});
 
-			expect(r2.governance.budgetRemaining).toBeLessThan(r1.governance.budgetRemaining);
+			expect(r2.receipt.budgetRemaining).toBeLessThan(r1.receipt.budgetRemaining);
 
 			await governed.destroy();
 		});
@@ -609,7 +609,7 @@ describe("trust()", () => {
 
 			// Fallback rate: input 30/1k, output 150/1k
 			// (100/1000)*30 + (50/1000)*150 = 3 + 7.5 = ceil(10.5) = 11
-			expect(result.governance.cost).toBe(11);
+			expect(result.receipt.cost).toBe(11);
 
 			await governed.destroy();
 		});
@@ -785,7 +785,7 @@ describe("trust()", () => {
 			});
 
 			// With the stub proxy, settle succeeds, so settled should be true
-			expect(result.governance.settled).toBe(true);
+			expect(result.receipt.settled).toBe(true);
 
 			await governed.destroy();
 		});
@@ -814,7 +814,7 @@ describe("trust()", () => {
 			});
 
 			// Should still have a cost (estimated, not from usage)
-			expect(result.governance.cost).toBeGreaterThan(0);
+			expect(result.receipt.cost).toBeGreaterThan(0);
 
 			await governed.destroy();
 		});
@@ -838,7 +838,7 @@ describe("trust()", () => {
 				messages: [{ role: "user", content: "Hello" }],
 			});
 
-			expect(result.governance.cost).toBeGreaterThan(0);
+			expect(result.receipt.cost).toBeGreaterThan(0);
 
 			await governed.destroy();
 		});

@@ -156,7 +156,7 @@ describe("proxy mode", () => {
 		await governed.destroy();
 	});
 
-	it("governance receipt has receiptUrl (not null) in proxy mode", async () => {
+	it("trust receipt has receiptUrl (not null) in proxy mode", async () => {
 		const mockAudit = makeMockAudit();
 		const mockClient = makeAnthropicMock();
 
@@ -174,8 +174,8 @@ describe("proxy mode", () => {
 			messages: [{ role: "user", content: "Hello" }],
 		});
 
-		expect(result.governance.receiptUrl).not.toBeNull();
-		expect(result.governance.receiptUrl).toMatch(/^https:\/\/verify\.usertools\.dev\/tx_/);
+		expect(result.receipt.receiptUrl).not.toBeNull();
+		expect(result.receipt.receiptUrl).toMatch(/^https:\/\/verify\.usertools\.dev\/tx_/);
 
 		await governed.destroy();
 	});
@@ -197,7 +197,7 @@ describe("proxy mode", () => {
 			messages: [{ role: "user", content: "Hello" }],
 		});
 
-		expect(result.governance.receiptUrl).toBeNull();
+		expect(result.receipt.receiptUrl).toBeNull();
 
 		await governed.destroy();
 	});
@@ -224,7 +224,7 @@ describe("proxy mode", () => {
 		});
 
 		expect(result.response).toBeDefined();
-		expect(result.governance.receiptUrl).not.toBeNull();
+		expect(result.receipt.receiptUrl).not.toBeNull();
 
 		await governed.destroy();
 	});

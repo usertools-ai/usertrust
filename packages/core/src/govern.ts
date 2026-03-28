@@ -23,7 +23,7 @@
  * Usage:
  * ```ts
  * const client = await trust(new Anthropic(), { dryRun: true, budget: 50_000 });
- * const { response, governance } = await client.messages.create({ ... });
+ * const { response, receipt } = await client.messages.create({ ... });
  * await client.destroy();
  * ```
  */
@@ -47,12 +47,7 @@ import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
 import { LedgerUnavailableError, PolicyDeniedError } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
 import { TrustConfigSchema } from "./shared/types.js";
-import type {
-	GovernanceReceipt,
-	GovernedResponse,
-	LLMClientKind,
-	TrustConfig,
-} from "./shared/types.js";
+import type { LLMClientKind, TrustConfig, TrustReceipt, TrustedResponse } from "./shared/types.js";
 import { type StreamUsage, createGovernedStream } from "./streaming.js";
 
 // ── Public types ──
@@ -99,12 +94,12 @@ export interface TrustEngine {
 	destroy?(): void;
 }
 
-/** The governed client: original client shape + `destroy()`. */
-export type GovernedClient<T> = T & { destroy(): Promise<void> };
+/** The trusted client: original client shape + `destroy()`. */
+export type TrustedClient<T> = T & { destroy(): Promise<void> };
 
 // ── trust() ──
 
-export async function trust<T>(client: T, opts?: TrustOpts): Promise<GovernedClient<T>> {
+export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
 	// 1. Load config
 	const vaultBase = opts?.vaultBase ?? process.cwd();
 	const configPath = opts?.configPath ?? join(vaultBase, VAULT_DIR, "usertrust.config.json");
@@ -172,9 +167,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<GovernedCli
 		originalFn: (...args: unknown[]) => unknown,
 		thisArg: unknown,
 		args: unknown[],
-	): Promise<GovernedResponse<unknown>> {
+	): Promise<TrustedResponse<unknown>> {
 		if (destroyed) {
-			throw new Error("GovernedClient has been destroyed");
+			throw new Error("TrustedClient has been destroyed");
 		}
 
 		const params = (args[0] ?? {}) as Record<string, unknown>;
@@ -317,11 +312,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<GovernedCli
 				);
 
 				// For streaming responses, return the wrapped stream with an
-				// estimated governance receipt. The actual receipt (with real
-				// token counts) is available via governedStream.governance
+				// estimated trust receipt. The actual receipt (with real
+				// token counts) is available via governedStream.receipt
 				// after the stream is fully consumed.
 				const auditHash = createHash("sha256").update(transferId).digest("hex");
-				const estimatedGovernance: GovernanceReceipt = {
+				const estimatedReceipt: TrustReceipt = {
 					transferId,
 					cost: estimatedCost,
 					budgetRemaining: config.budget - budgetSpent,
@@ -335,7 +330,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<GovernedCli
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 				};
 
-				return { response: governedStream, governance: estimatedGovernance };
+				return { response: governedStream, receipt: estimatedReceipt };
 			}
 
 			// f. Compute actual cost from response usage
@@ -446,7 +441,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<GovernedCli
 
 			const budgetRemaining = config.budget - budgetSpent;
 
-			const governance: GovernanceReceipt = {
+			const receipt: TrustReceipt = {
 				transferId,
 				cost: actualCost,
 				budgetRemaining,
@@ -460,7 +455,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<GovernedCli
 				...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 			};
 
-			return { response, governance };
+			return { response, receipt };
 		} catch (err) {
 			// j. Circuit breaker: record failure
 			cb.recordFailure();
@@ -513,7 +508,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<GovernedCli
 	let beforeExitHandler: (() => void) | null = null;
 
 	// 9. Build Proxy based on client kind
-	function createClientProxy(): GovernedClient<T> {
+	function createClientProxy(): TrustedClient<T> {
 		const destroyFn = async (): Promise<void> => {
 			if (destroyed) return;
 			destroyed = true;
@@ -638,13 +633,13 @@ type InterceptFn = (
 	originalFn: (...args: unknown[]) => unknown,
 	thisArg: unknown,
 	args: unknown[],
-) => Promise<GovernedResponse<unknown>>;
+) => Promise<TrustedResponse<unknown>>;
 
 function buildAnthropicProxy<T>(
 	client: T,
 	intercept: InterceptFn,
 	destroy: () => Promise<void>,
-): GovernedClient<T> {
+): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const messages = original.messages as Record<string, unknown>;
 	const originalCreate = messages.create as (...args: unknown[]) => unknown;
@@ -668,14 +663,14 @@ function buildAnthropicProxy<T>(
 		},
 	});
 
-	return clientProxy as GovernedClient<T>;
+	return clientProxy as TrustedClient<T>;
 }
 
 function buildOpenAIProxy<T>(
 	client: T,
 	intercept: InterceptFn,
 	destroy: () => Promise<void>,
-): GovernedClient<T> {
+): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const chat = original.chat as Record<string, unknown>;
 	const completions = chat.completions as Record<string, unknown>;
@@ -705,14 +700,14 @@ function buildOpenAIProxy<T>(
 		},
 	});
 
-	return clientProxy as GovernedClient<T>;
+	return clientProxy as TrustedClient<T>;
 }
 
 function buildGoogleProxy<T>(
 	client: T,
 	intercept: InterceptFn,
 	destroy: () => Promise<void>,
-): GovernedClient<T> {
+): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const models = original.models as Record<string, unknown>;
 	const originalGenerate = models.generateContent as (...args: unknown[]) => unknown;
@@ -734,5 +729,5 @@ function buildGoogleProxy<T>(
 		},
 	});
 
-	return clientProxy as GovernedClient<T>;
+	return clientProxy as TrustedClient<T>;
 }

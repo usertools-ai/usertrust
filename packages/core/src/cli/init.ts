@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * CLI: usertrust init — Initialize governance vault
+ * CLI: usertrust init — Initialize trust vault
  *
  * Creates the .usertrust/ directory structure with default config,
  * policy, and .gitignore. Sets permissions to 700 (owner only).
@@ -79,7 +79,7 @@ export async function run(rootDir?: string): Promise<void> {
 	// Set vault permissions to 700 (owner only)
 	chmodSync(vaultPath, 0o700);
 
-	console.log(`Initialized governance vault at ${vaultPath}`);
+	console.log(`Initialized trust vault at ${vaultPath}`);
 	console.log("  Created: audit/, policies/, patterns/, snapshots/, board/, dlq/");
 	console.log("  Config:  usertrust.config.json");
 	console.log("  Policy:  policies/default.yml");

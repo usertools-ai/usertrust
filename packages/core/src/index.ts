@@ -5,15 +5,15 @@
 
 // Core
 export { trust } from "./govern.js";
-export type { TrustOpts, GovernedClient } from "./govern.js";
+export type { TrustOpts, TrustedClient } from "./govern.js";
 
 // Config
 export { loadConfig, defineConfig } from "./config.js";
 
 // Types
 export type {
-	GovernedResponse,
-	GovernanceReceipt,
+	TrustedResponse,
+	TrustReceipt,
 	TrustConfig,
 	PolicyRule,
 	FieldCondition,
