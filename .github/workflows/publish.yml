@@ -41,12 +41,8 @@ jobs:
         run: cd packages/verify && npx tsc
       - name: Publish usertrust
         run: cd packages/core && npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish verify
         run: cd packages/verify && npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Commit version bump
         run: |
           git config user.name "github-actions[bot]"
