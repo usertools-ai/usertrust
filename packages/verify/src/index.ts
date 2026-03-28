@@ -1,4 +1,4 @@
-// @usertools/verify — Standalone Audit Verification (zero dependencies)
+// usertrust-verify — Standalone Audit Verification (zero dependencies)
 
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -34,7 +34,7 @@ export interface VaultVerificationResult {
 }
 
 /**
- * Verify an entire `.usertools` vault directory.
+ * Verify an entire `.usertrust` vault directory.
  *
  * Finds all `events.jsonl` files under `<vaultPath>/audit/`, verifies each
  * chain, computes a Merkle root over all event hashes, and returns a

@@ -3,8 +3,8 @@
  * Sorts object keys alphabetically at every nesting level.
  * Strips undefined values. Preserves null. Arrays keep order.
  *
- * INTENTIONAL DUPLICATION: This is a zero-dep copy for the @usertools/verify
- * package. Do NOT import from @usertools/govern.
+ * INTENTIONAL DUPLICATION: This is a zero-dep copy for the usertrust-verify
+ * package. Do NOT import from usertrust.
  */
 export function canonicalize(value: unknown): string {
 	if (value === null || value === undefined) return JSON.stringify(value);

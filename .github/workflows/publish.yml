@@ -33,14 +33,14 @@ jobs:
         run: npx vitest run
       - name: Version bump
         run: |
-          cd packages/govern && npm version ${{ inputs.version }} --no-git-tag-version
+          cd packages/core && npm version ${{ inputs.version }} --no-git-tag-version
           cd ../verify && npm version ${{ inputs.version }} --no-git-tag-version
       - name: Build govern
-        run: cd packages/govern && npx tsc
+        run: cd packages/core && npx tsc
       - name: Build verify
         run: cd packages/verify && npx tsc
       - name: Publish govern
-        run: cd packages/govern && npm publish --access public --provenance
+        run: cd packages/core && npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Publish verify
@@ -52,5 +52,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add packages/*/package.json
-          git commit -m "release: v$(node -p 'require("./packages/govern/package.json").version')"
+          git commit -m "release: v$(node -p 'require("./packages/core/package.json").version')"
           git push

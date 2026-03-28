@@ -1,8 +1,8 @@
 /**
  * Audit Chain Verifier + Merkle Proofs — Zero-dependency standalone
  *
- * INTENTIONAL DUPLICATION: This is a zero-dep copy for the @usertools/verify
- * package. Do NOT import from @usertools/govern. Only uses Node built-ins.
+ * INTENTIONAL DUPLICATION: This is a zero-dep copy for the usertrust-verify
+ * package. Do NOT import from usertrust. Only uses Node built-ins.
  *
  * Provides:
  * - verifyChain() — linear hash chain verification

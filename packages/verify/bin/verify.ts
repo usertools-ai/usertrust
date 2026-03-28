@@ -4,7 +4,7 @@ import { verifyVault } from "../src/index.js";
 const vaultPath = process.argv[2];
 
 if (!vaultPath) {
-	console.log("Usage: npx @usertools/verify <path-to-.usertools>");
+	console.log("Usage: npx usertrust-verify <path-to-.usertrust>");
 	process.exit(1);
 }
 

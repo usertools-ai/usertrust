@@ -1,4 +1,4 @@
-# @usertools/govern
+# usertrust
 
 Financial governance for AI agents. Every LLM call becomes an immutable, auditable transaction.
 
@@ -13,9 +13,9 @@ const msg = await anthropic.messages.create({
 // Hope nothing goes wrong. No audit trail. No budget enforcement.
 
 // After
-import { govern } from "@usertools/govern";
+import { trust } from "usertrust";
 
-const client = await govern(new Anthropic());
+const client = await trust(new Anthropic());
 const { response, governance } = await client.messages.create({
   model: "claude-sonnet-4-6",
   max_tokens: 1024,
@@ -29,30 +29,30 @@ That's it. One function wraps any supported LLM client. Every call is metered, a
 ## Install
 
 ```bash
-npx @usertools/govern init
+npx usertrust init
 ```
 
-This creates a `.usertools/` vault in your project root with default config, policies, and an empty audit chain.
+This creates a `.usertrust/` vault in your project root with default config, policies, and an empty audit chain.
 
 ## Integration
 
 Works with Anthropic, OpenAI, and Google AI SDKs:
 
 ```typescript
-import { govern } from "@usertools/govern";
+import { trust } from "usertrust";
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 
 // Anthropic
-const anthropic = await govern(new Anthropic());
+const anthropic = await trust(new Anthropic());
 const { response, governance } = await anthropic.messages.create({ ... });
 
 // OpenAI
-const openai = await govern(new OpenAI());
+const openai = await trust(new OpenAI());
 const { response, governance } = await openai.chat.completions.create({ ... });
 
 // With options
-const client = await govern(new Anthropic(), {
+const client = await trust(new Anthropic(), {
   budget: 100_000,
   dryRun: true,
 });
@@ -76,7 +76,7 @@ Every call returns `{ response, governance }` where `governance` is a receipt:
 ## Inspect
 
 ```bash
-npx @usertools/govern inspect
+npx usertrust inspect
 ```
 
 ```
@@ -91,7 +91,7 @@ Merkle:   a3f8c1...d92b (root)
 
 ## Config
 
-Create `.usertools/govern.config.json`:
+Create `.usertrust/usertrust.config.json`:
 
 ```json
 {
@@ -105,10 +105,10 @@ Create `.usertools/govern.config.json`:
 }
 ```
 
-`defineConfig` is available as a TypeScript type-checking helper for validating config objects in your code. The actual config file must be `govern.config.json` (JSON format):
+`defineConfig` is available as a TypeScript type-checking helper for validating config objects in your code. The actual config file must be `usertrust.config.json` (JSON format):
 
 ```typescript
-import { defineConfig } from "@usertools/govern";
+import { defineConfig } from "usertrust";
 
 // Type-check your config object — useful for programmatic overrides
 const config = defineConfig({
@@ -149,12 +149,12 @@ AI agents operate with financial authority. Every LLM call costs money. Without 
 - There is no way to prove what happened after the fact
 - A race condition between two agents can double-spend the same budget
 
-A counter in a database is not a financial ledger. `govern` uses the same double-entry, two-phase commit pattern that banks use. PENDING holds reserve the budget atomically. POST settles. VOID releases. The audit chain is hash-linked and Merkle-provable.
+A counter in a database is not a financial ledger. `usertrust` uses the same double-entry, two-phase commit pattern that banks use. PENDING holds reserve the budget atomically. POST settles. VOID releases. The audit chain is hash-linked and Merkle-provable.
 
 ## Comparison
 
-| Feature | govern | LiteLLM | Portkey | Langfuse |
-|---------|--------|---------|---------|----------|
+| Feature | usertrust | LiteLLM | Portkey | Langfuse |
+|---------|-----------|---------|---------|----------|
 | Financial ledger | TigerBeetle | Counter | Counter | Observation |
 | Two-phase spend | PENDING/POST/VOID | No | No | No |
 | Hash-chained audit | SHA-256 | No | No | No |
@@ -170,7 +170,7 @@ A counter in a database is not a financial ledger. `govern` uses the same double
 When you outgrow local mode, point at the proxy. One line:
 
 ```typescript
-const client = await govern(new Anthropic(), {
+const client = await trust(new Anthropic(), {
   proxy: "https://proxy.usertools.ai",
   key: process.env.USERTOOLS_KEY,
 });
@@ -183,7 +183,7 @@ Same API. Same receipts. Now with cross-agent budget enforcement, centralized au
 Standalone verification with zero dependencies:
 
 ```bash
-npx @usertools/verify .usertools
+npx usertrust-verify .usertrust
 ```
 
 ```
@@ -196,7 +196,7 @@ Last event: 2026-03-16T14:33:21.000Z
 All hashes: valid (847/847)
 ```
 
-The verify package has zero runtime dependencies. It reads JSONL, recomputes SHA-256 hashes, and checks the chain. Anyone can verify a vault without trusting the govern SDK.
+The verify package has zero runtime dependencies. It reads JSONL, recomputes SHA-256 hashes, and checks the chain. Anyone can verify a vault without trusting the usertrust SDK.
 
 ## License
 
