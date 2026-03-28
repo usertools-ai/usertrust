@@ -1,5 +1,8 @@
 #!/usr/bin/env node
-import { verifyVault } from "../src/index.js";
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
+import { verifyVault } from "./index.js";
 
 const vaultPath = process.argv[2];
 
