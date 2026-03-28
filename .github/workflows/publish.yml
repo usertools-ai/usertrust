@@ -19,6 +19,7 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -47,10 +48,17 @@ jobs:
         run: cd packages/verify && npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Commit version bump
+      - name: Commit version bump via PR
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          VERSION=$(node -p 'require("./packages/core/package.json").version')
+          BRANCH="release/v${VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH"
           git add packages/*/package.json
-          git commit -m "release: v$(node -p 'require("./packages/core/package.json").version')"
-          git push
+          git commit -m "release: v${VERSION}"
+          git push -u origin "$BRANCH"
+          gh pr create --title "release: v${VERSION}" --body "Auto-generated version bump after npm publish."
+          gh pr merge "$BRANCH" --squash --admin --subject "release: v${VERSION}"
