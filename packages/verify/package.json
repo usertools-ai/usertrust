@@ -1,6 +1,17 @@
 {
 	"name": "usertrust-verify",
 	"version": "0.1.0",
+	"description": "Zero-dependency verifier for usertrust governance receipts. Validates hash chains, Merkle proofs, and audit trails.",
+	"license": "Apache-2.0",
+	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
+	"homepage": "https://usertrust.ai",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/usertools-ai/usertrust.git",
+		"directory": "packages/verify"
+	},
+	"bugs": "https://github.com/usertools-ai/usertrust/issues",
+	"keywords": ["ai", "governance", "audit", "verify", "hash-chain", "merkle"],
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",

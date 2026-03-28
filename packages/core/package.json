@@ -1,6 +1,30 @@
 {
 	"name": "usertrust",
 	"version": "0.1.0",
+	"description": "Financial governance for AI agents. Every LLM call becomes an immutable, auditable transaction.",
+	"license": "Apache-2.0",
+	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
+	"homepage": "https://usertrust.ai",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/usertools-ai/usertrust.git",
+		"directory": "packages/core"
+	},
+	"bugs": "https://github.com/usertools-ai/usertrust/issues",
+	"keywords": [
+		"ai",
+		"governance",
+		"llm",
+		"audit",
+		"financial",
+		"agent",
+		"budget",
+		"token",
+		"anthropic",
+		"openai",
+		"tigerbeetle",
+		"ledger"
+	],
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
