@@ -35,11 +35,11 @@ jobs:
         run: |
           cd packages/core && npm version ${{ inputs.version }} --no-git-tag-version
           cd ../verify && npm version ${{ inputs.version }} --no-git-tag-version
-      - name: Build govern
+      - name: Build usertrust
         run: cd packages/core && npx tsc
       - name: Build verify
         run: cd packages/verify && npx tsc
-      - name: Publish govern
+      - name: Publish usertrust
         run: cd packages/core && npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
