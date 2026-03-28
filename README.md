@@ -1,4 +1,4 @@
-# usertrust
+# usertrust™
 
 Financial governance for AI agents. Every LLM call becomes an immutable, auditable transaction.
 
@@ -201,3 +201,7 @@ The verify package has zero runtime dependencies. It reads JSONL, recomputes SHA
 ## License
 
 Apache 2.0
+
+---
+
+UserTrust™ is a trademark of Usertools, Inc.

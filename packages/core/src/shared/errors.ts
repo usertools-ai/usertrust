@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 export class InsufficientBalanceError extends Error {
 	public readonly userId: string;
 	public readonly required: number;

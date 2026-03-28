@@ -1,8 +1,9 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * Two-phase spend engine for the usertrust SDK.
  * Implements PENDING -> POST/VOID lifecycle for all governed operations.
- *
- * Extracted from usertools platform TokenEngineImpl.
  */
 
 import { createHash } from "node:crypto";

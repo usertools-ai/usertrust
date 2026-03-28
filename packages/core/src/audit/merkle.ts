@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * Merkle Tree — RFC 6962 domain-separated hashing
  *
@@ -10,8 +13,6 @@
  *
  * Odd leaves are promoted to the next layer (NOT duplicated),
  * avoiding CVE-2012-2459.
- *
- * Merged from usertools-stealth merkle-tree.ts + merkle-proofs.ts.
  */
 
 import { createHash } from "node:crypto";

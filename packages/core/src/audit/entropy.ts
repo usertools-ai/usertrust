@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * Entropy Diagnostics — Governance Health Signal
  *
@@ -13,9 +16,6 @@
  *   6. Pattern memory hits
  *
  * Returns a composite score 0–100 (0 = healthy, 100 = maximum entropy).
- *
- * Adapted from Field Project fermion/neutrino/entropy.ts — signals
- * remapped to SDK vault structure.
  */
 
 // ── Types ──

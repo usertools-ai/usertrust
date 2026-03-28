@@ -1,10 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * Policy Gate — 12 Field Operators
  *
  * Evaluates policy rules against a context to determine allow/deny decisions.
  * Supports both hard (blocking) and soft (warning) enforcement modes.
  *
- * Adapted from Turf policy-gate.ts for the usertrust SDK.
+ * Policy evaluation engine for the usertrust SDK.
  * Uses the shared PolicyRule/FieldCondition types with dot-notation field
  * resolution, glob matching on scope patterns, and time-window constraints.
  *

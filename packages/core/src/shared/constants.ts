@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 export const GENESIS_HASH = "0000000000000000000000000000000000000000000000000000000000000000";
 export const VAULT_DIR = ".usertrust";
 export const AUDIT_DIR = "audit";

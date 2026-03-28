@@ -1,9 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * Pricing table for the top 20 LLM models.
  * All rates are in usertokens per 1,000 LLM tokens.
  * 1 usertoken = $0.0001 (one basis point of a cent).
  *
- * Extracted from usertools platform — canonical pricing source.
+ * Canonical pricing source for supported LLM models.
  */
 
 export interface ModelRates {

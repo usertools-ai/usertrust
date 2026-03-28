@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * Audit Chain Verifier
  *
@@ -5,9 +8,6 @@
  * 1. Each event's hash matches the SHA-256 of its canonical representation
  * 2. Each event's previousHash links to the prior event's hash
  * 3. The first event chains from GENESIS_HASH
- *
- * Adapted from usertools-stealth governance/audit/verifier.ts — removes
- * flushAuditWriter dependency (verifier should NOT flush the writer).
  */
 
 import { createHash } from "node:crypto";

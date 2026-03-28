@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * Audit Rotation — Daily receipt indexing
  *
@@ -6,8 +9,6 @@
  * receipt lookup.
  *
  * Structure: .usertrust/audit/<kind>/<YYYY-MM-DD>/<receiptId>.json
- *
- * Adapted from Turf governance audit.ts (receipt emission + daily rotation).
  */
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";

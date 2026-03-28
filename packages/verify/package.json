@@ -15,7 +15,7 @@
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
-	"bin": { "verify": "./dist/bin/verify.js" },
+	"bin": { "usertrust-verify": "./dist/bin/verify.js" },
 	"scripts": {
 		"build": "tsc",
 		"prepublishOnly": "tsc"

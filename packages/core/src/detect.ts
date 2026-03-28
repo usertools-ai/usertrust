@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * LLM Client Detection — duck typing for Anthropic, OpenAI, and Google SDKs.
  *

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * PII Detector
  *
@@ -8,8 +11,6 @@
  * Pure module — no side effects, no network calls.
  *
  * Detects: email, phone, SSN, credit card (Luhn-validated), IPv4.
- *
- * Adapted from Field Project fermion/src/higgs/pii-detector.ts.
  */
 
 // ---------------------------------------------------------------------------

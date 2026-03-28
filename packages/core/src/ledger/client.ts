@@ -1,7 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * TigerBeetle client wrapper for the usertrust SDK.
- * Extracted from usertools platform — provides account/transfer CRUD
- * with reconnect logic and deterministic account IDs.
+ * Provides account/transfer CRUD with reconnect logic and
+ * deterministic account IDs.
  */
 
 import { createHash } from "node:crypto";

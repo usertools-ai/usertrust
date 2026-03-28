@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * Deterministic JSON canonicalization for hash computation.
  * Sorts object keys alphabetically at every nesting level.

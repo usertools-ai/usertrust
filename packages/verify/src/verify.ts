@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * Audit Chain Verifier + Merkle Proofs — Zero-dependency standalone
  *

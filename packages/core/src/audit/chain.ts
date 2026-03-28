@@ -1,13 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * Audit Chain Writer — SHA-256 hash-chained JSONL
  *
  * Appends audit events to a JSONL log where each event's hash covers
  * the previous event's hash, creating a tamper-evident chain. Single-writer
  * semantics are enforced via advisory file lock + in-process async mutex.
- *
- * Adapted from usertools-stealth governance/audit/writer.ts — removes
- * SurrealDB dual-write, replaces sendAlert with console.warn, replaces
- * writeDeadLetter with local DLQ JSONL.
  */
 
 import { createHash, randomUUID } from "node:crypto";

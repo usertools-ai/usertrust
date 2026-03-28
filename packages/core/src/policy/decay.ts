@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 /**
  * Decay Rate Calculator
  *
@@ -6,8 +9,6 @@
  *
  * The decay model uses: value(t) = initial * e^(-lambda * t)
  * where lambda is the decay constant and t is time elapsed.
- *
- * Adapted from Field Project fermion/src/higgs/decay-rate.ts.
  */
 
 // ---------------------------------------------------------------------------

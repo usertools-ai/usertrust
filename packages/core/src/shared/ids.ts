@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
 import { randomBytes } from "node:crypto";
 
 /** Generate a u128 bigint ID for TigerBeetle (time-based + random) */
