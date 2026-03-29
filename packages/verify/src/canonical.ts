@@ -10,6 +10,17 @@
  * package. Do NOT import from usertrust.
  */
 export function canonicalize(value: unknown): string {
+	// Guard against values that JSON.stringify silently coerces to "null"
+	if (typeof value === "number" && Number.isNaN(value)) {
+		throw new Error("canonicalize: NaN is not allowed in audit data");
+	}
+	if (value === Number.POSITIVE_INFINITY || value === Number.NEGATIVE_INFINITY) {
+		throw new Error("canonicalize: Infinity is not allowed in audit data");
+	}
+	// Convert Date to ISO string to avoid double-quoting divergence
+	if (value instanceof Date) {
+		return JSON.stringify(value.toISOString());
+	}
 	if (value === null || value === undefined) return JSON.stringify(value);
 	if (typeof value !== "object") return JSON.stringify(value);
 	if (Array.isArray(value)) {

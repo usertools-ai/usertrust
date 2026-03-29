@@ -6,11 +6,11 @@
  * Implements PENDING -> POST/VOID lifecycle for all governed operations.
  */
 
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { createHash, createHmac } from "node:crypto";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { CreateTransferError } from "tigerbeetle-node";
-import { DEFAULT_HOLD_TTL_MS } from "../shared/constants.js";
+import { DEFAULT_HOLD_TTL_MS, VAULT_DIR } from "../shared/constants.js";
 import { InsufficientBalanceError } from "../shared/errors.js";
 import { fnv1a32 } from "../shared/ids.js";
 import type { TBTransferError, TrustTBClient } from "./client.js";
@@ -44,7 +44,7 @@ export interface TrustEngineOptions {
 	pricing?: PricingTable;
 	/** Hold timeout in milliseconds (default: 5 minutes) */
 	holdTtlMs?: number;
-	/** DLQ directory path (default: .usertools/dlq/) */
+	/** DLQ directory path (default: .usertrust/dlq/) */
 	dlqPath?: string;
 }
 
@@ -56,16 +56,36 @@ interface DLQEntry {
 	transferId: string;
 	payload: Record<string, unknown>;
 	error: string;
+	hmac?: string;
+}
+
+/** Derive a DLQ integrity key from the vault base path. */
+function deriveDlqKey(dlqPath: string): string {
+	return createHash("sha256").update(`dlq-integrity:${dlqPath}`).digest("hex");
 }
 
 function writeDeadLetter(entry: DLQEntry, dlqPath: string): void {
 	try {
 		if (!existsSync(dlqPath)) {
-			mkdirSync(dlqPath, { recursive: true });
+			mkdirSync(dlqPath, { recursive: true, mode: 0o700 });
 		}
-		const line = `${JSON.stringify(entry)}\n`;
+
+		// Compute HMAC over the entry (excluding the hmac field itself)
+		const key = deriveDlqKey(dlqPath);
+		const hmac = createHmac("sha256", key).update(JSON.stringify(entry)).digest("hex");
+		const sealed: DLQEntry = { ...entry, hmac };
+
+		const line = `${JSON.stringify(sealed)}\n`;
 		const filePath = join(dlqPath, "dead-letter.jsonl");
-		writeFileSync(filePath, line, { flag: "a" });
+
+		// Open with append + create, restricted permissions, then fsync
+		const fd = openSync(filePath, "a", 0o600);
+		try {
+			writeSync(fd, line);
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
 	} catch (err) {
 		console.error("[usertrust] Failed to write dead letter:", err);
 	}
@@ -102,7 +122,7 @@ export class TrustEngine {
 	constructor(opts: TrustEngineOptions) {
 		this.tb = opts.tbClient;
 		this.holdTtlMs = opts.holdTtlMs ?? DEFAULT_HOLD_TTL_MS;
-		this.dlqPath = opts.dlqPath ?? join(".usertrust", "dlq");
+		this.dlqPath = opts.dlqPath ?? join(VAULT_DIR, "dlq");
 	}
 
 	/**
@@ -118,10 +138,8 @@ export class TrustEngine {
 		const userAccount = this.tb.getAccountId(p.userId);
 		const treasury = this.tb.getTreasuryId();
 
-		const bal = await this.tb.lookupBalance(userAccount);
-		if (bal.available < cost) {
-			throw new InsufficientBalanceError(p.userId, cost, bal.available);
-		}
+		// AUD-455: No pre-check — TB enforces debits_must_not_exceed_credits atomically.
+		// A lookupBalance + createPendingTransfer sequence has a TOCTOU race.
 
 		const holdTimeoutSeconds = Math.ceil(this.holdTtlMs / 1000);
 
@@ -138,7 +156,15 @@ export class TrustEngine {
 			});
 		} catch (err) {
 			if (isInsufficientBalanceError(err)) {
-				throw new InsufficientBalanceError(p.userId, cost, 0);
+				// Fresh lookup for accurate error reporting
+				let available = 0;
+				try {
+					const bal = await this.tb.lookupBalance(userAccount);
+					available = bal.available;
+				} catch {
+					// Balance lookup failed — report 0 as fallback
+				}
+				throw new InsufficientBalanceError(p.userId, cost, available);
 			}
 			throw err;
 		}

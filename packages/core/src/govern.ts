@@ -29,8 +29,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { existsSync, mkdirSync } from "node:fs";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import { writeReceipt } from "./audit/rotation.js";
@@ -38,12 +38,14 @@ import { detectClientKind } from "./detect.js";
 import { TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import { estimateCost, estimateInputTokens } from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
-import { DecayRateCalculator } from "./policy/decay.js";
 import { type GateRule, evaluatePolicy, loadPolicies } from "./policy/gate.js";
 import { detectPII } from "./policy/pii.js";
 import { type ProxyConnection, connectProxy } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
+
+/** Base URL for receipt verification links (used in proxy mode). */
+const VERIFY_URL_BASE = "https://verify.usertrust.dev";
 import { LedgerUnavailableError, PolicyDeniedError } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
 import { TrustConfigSchema } from "./shared/types.js";
@@ -91,11 +93,79 @@ export interface TrustEngine {
 	}): Promise<{ transferId: string }>;
 	postPendingSpend(transferId: string): Promise<void>;
 	voidPendingSpend(transferId: string): Promise<void>;
+	/** AUD-461: Void all remaining pending transfers on destroy. */
+	voidAllPending?(): Promise<void>;
 	destroy?(): void;
 }
 
 /** The trusted client: original client shape + `destroy()`. */
 export type TrustedClient<T> = T & { destroy(): Promise<void> };
+
+// ── AUD-453: Async mutex for budget atomicity ──
+// Prevents concurrent interceptCall invocations from racing through
+// the budget-check + PENDING hold sequence.
+
+class AsyncMutex {
+	private queue: Promise<void> = Promise.resolve();
+
+	async acquire(): Promise<() => void> {
+		let release: (() => void) | undefined;
+		const next = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const prev = this.queue;
+		this.queue = next;
+		await prev;
+		return release as () => void;
+	}
+}
+
+// ── AUD-457: Budget persistence helpers ──
+
+interface SpendLedger {
+	budgetSpent: number;
+	updatedAt: string;
+}
+
+async function loadSpendLedger(vaultBase: string): Promise<number> {
+	const ledgerPath = join(vaultBase, VAULT_DIR, "spend-ledger.json");
+	try {
+		const raw = await readFile(ledgerPath, "utf-8");
+		const parsed: unknown = JSON.parse(raw);
+		if (
+			parsed != null &&
+			typeof parsed === "object" &&
+			"budgetSpent" in parsed &&
+			typeof (parsed as SpendLedger).budgetSpent === "number"
+		) {
+			return (parsed as SpendLedger).budgetSpent;
+		}
+	} catch {
+		// No ledger file or corrupt — start from zero
+	}
+	return 0;
+}
+
+async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promise<void> {
+	const dir = join(vaultBase, VAULT_DIR);
+	const ledgerPath = join(dir, "spend-ledger.json");
+	const tmpPath = join(dir, "spend-ledger.json.tmp");
+	const data: SpendLedger = {
+		budgetSpent,
+		updatedAt: new Date().toISOString(),
+	};
+	try {
+		// Ensure vault dir exists
+		if (!existsSync(dir)) {
+			mkdirSync(dir, { recursive: true });
+		}
+		// Atomic write: write tmp then rename
+		await writeFile(tmpPath, JSON.stringify(data), "utf-8");
+		await rename(tmpPath, ledgerPath);
+	} catch {
+		// Best-effort — do not fail the LLM call over ledger persistence
+	}
+}
 
 // ── trust() ──
 
@@ -119,9 +189,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	const isDryRun = opts?.dryRun ?? process.env.USERTRUST_DRY_RUN === "true";
 
+	// AUD-470: Only accept injected _engine/_audit in test environments.
+	// In production, silently ignore them to prevent governance bypass.
+	const isTestEnv = process.env.USERTRUST_TEST === "1" || process.env.NODE_ENV === "test";
+
 	// 2. Initialise subsystems
 	const vaultPath = vaultBase;
-	const audit: AuditWriter = opts?._audit ?? createAuditWriter(vaultPath);
+	const audit: AuditWriter = (isTestEnv ? opts?._audit : undefined) ?? createAuditWriter(vaultPath);
 
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
 	const policyRules: GateRule[] = existsSync(policiesPath) ? loadPolicies(policiesPath) : [];
@@ -131,10 +205,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		resetTimeoutMs: config.circuitBreaker.resetTimeout,
 	});
 
-	// Decay-weighted budget calculator (1-hour half-life)
-	const decayCalc = new DecayRateCalculator({ halfLifeMs: 3_600_000 });
-	const spendHistory: Array<{ ts: number; value: number }> = [];
-
 	// 3. Proxy connection (if proxy mode)
 	let proxyConn: ProxyConnection | null = null;
 	if (opts?.proxy) {
@@ -142,8 +212,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	}
 
 	// 4. Engine (injected for tests, real TB client in production, null in dry-run/proxy)
+	// AUD-470: _engine injection only accepted in test environments
 	let engine: TrustEngine | null;
-	if (opts?._engine !== undefined) {
+	if (isTestEnv && opts?._engine !== undefined) {
 		engine = opts._engine;
 	} else if (!isDryRun && proxyConn == null) {
 		try {
@@ -160,7 +231,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	// 6. Track state
 	let destroyed = false;
-	let budgetSpent = 0;
+	let budgetSpent = await loadSpendLedger(vaultBase); // AUD-457: restore from disk
+	const budgetMutex = new AsyncMutex(); // AUD-453: serialise budget-check + hold
+	let inFlightCount = 0; // AUD-462: track in-flight calls for graceful destroy
 
 	// 7. Two-phase intercept
 	async function interceptCall(
@@ -172,335 +245,373 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			throw new Error("TrustedClient has been destroyed");
 		}
 
-		const params = (args[0] ?? {}) as Record<string, unknown>;
-		const model = (params.model as string) ?? "unknown";
-		const messages = (params.messages as unknown[]) ?? [];
+		// AUD-462: Track in-flight calls so destroy() can wait for them
+		inFlightCount++;
 
-		// Per-call audit degradation flag (not sticky across calls)
-		let callAuditDegraded = false;
-
-		// a. Circuit breaker check
-		const cb = breaker.get(kind);
-		cb.allowRequest();
-
-		// b. Estimate cost (before policy, so cost fields are available in context)
-		const transferId = trustId("tx");
-		const estimatedInputTokens = estimateInputTokens(messages);
-		const maxOutputTokens = (params.max_tokens as number) ?? 4096;
-		const estimatedCost = estimateCost(model, estimatedInputTokens, maxOutputTokens);
-
-		// c. Policy gate
-		const policyResult = evaluatePolicy(policyRules, {
-			model,
-			tier: config.tier,
-			estimated_cost: estimatedCost,
-			budget_remaining: config.budget - budgetSpent,
-			...params,
-		});
-		if (policyResult.decision === "deny") {
-			const reason =
-				policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
-			throw new PolicyDeniedError(reason);
-		}
-
-		// d. PII check
-		if (config.pii !== "off") {
-			const piiResult = detectPII(messages);
-			if (piiResult.found && config.pii === "block") {
-				throw new PolicyDeniedError(`PII detected: ${piiResult.types.join(", ")}`);
-			}
-			// "warn" and "redact" modes: continue (redact is not implemented at SDK level)
-		}
-
-		// d2. Failure mode 15.4: TigerBeetle / engine unreachable — PENDING hold
-		if (proxyConn != null && !isDryRun) {
-			try {
-				await proxyConn.spend({
-					model,
-					estimatedCost,
-					actor: "local",
-				});
-			} catch (holdErr) {
-				throw new LedgerUnavailableError(
-					holdErr instanceof Error ? holdErr.message : String(holdErr),
-				);
-			}
-		} else if (engine != null && !isDryRun) {
-			try {
-				await engine.spendPending({
-					transferId,
-					amount: estimatedCost,
-				});
-			} catch (holdErr) {
-				// Ledger unreachable — do NOT forward to provider
-				throw new LedgerUnavailableError(
-					holdErr instanceof Error ? holdErr.message : String(holdErr),
-				);
-			}
-		}
-
-		// e. Forward to original SDK
-		let settled = true;
 		try {
-			const response = await (originalFn as (...a: unknown[]) => unknown).apply(thisArg, args);
+			const params = (args[0] ?? {}) as Record<string, unknown>;
+			const model = (params.model as string) ?? "unknown";
+			const messages = (params.messages as unknown[]) ?? [];
 
-			// e2. Streaming detection: if response is an async iterable, wrap with
-			// token accumulation. Settlement and audit happen when the stream ends.
-			if (
-				response != null &&
-				typeof response === "object" &&
-				Symbol.asyncIterator in (response as Record<symbol, unknown>)
-			) {
-				const stream = response as AsyncIterable<unknown>;
-				const governedStream = createGovernedStream(
-					stream,
-					kind,
-					async (usage: StreamUsage) => {
-						const streamCost = estimateCost(model, usage.inputTokens, usage.outputTokens);
-						budgetSpent += streamCost;
-						cb.recordSuccess();
+			// Per-call audit degradation flag (not sticky across calls)
+			let callAuditDegraded = false;
 
-						if (proxyConn != null && !isDryRun) {
-							try {
-								await proxyConn.settle(transferId, streamCost);
-							} catch {
-								settled = false;
-							}
-						} else if (engine != null && !isDryRun) {
-							try {
-								await engine.postPendingSpend(transferId);
-							} catch {
-								settled = false;
-							}
-						}
+			// a. Circuit breaker check
+			const cb = breaker.get(kind);
+			cb.allowRequest();
 
-						const syntheticHash = createHash("sha256").update(transferId).digest("hex");
-						let auditHash = syntheticHash;
-						try {
-							const auditEvent = await audit.appendEvent({
-								kind: "llm_call",
-								actor: "local",
-								data: { model, cost: streamCost, settled, transferId },
-							});
-							auditHash = auditEvent.hash;
-						} catch {
-							callAuditDegraded = true;
-						}
+			// b. Estimate cost (before policy, so cost fields are available in context)
+			const transferId = trustId("tx");
+			const estimatedInputTokens = estimateInputTokens(messages);
+			const maxOutputTokens = (params.max_tokens as number) ?? 4096;
+			const estimatedCost = estimateCost(model, estimatedInputTokens, maxOutputTokens);
 
-						return {
-							transferId,
-							cost: streamCost,
-							budgetRemaining: config.budget - budgetSpent,
-							auditHash,
-							chainPath: join(VAULT_DIR, "audit"),
-							receiptUrl: opts?.proxy != null ? `https://verify.usertools.dev/${transferId}` : null,
-							settled,
+			// AUD-453: Acquire mutex to serialise budget-check + PENDING hold.
+			// This prevents concurrent calls from both passing the budget check
+			// and overshooting the budget.
+			const releaseBudgetLock = await budgetMutex.acquire();
+
+			// AUD-460: Track the proxy's transferId separately for settle/void
+			let proxyTransferId: string | undefined;
+
+			try {
+				// c. Policy gate
+				const policyResult = evaluatePolicy(policyRules, {
+					model,
+					tier: config.tier,
+					estimated_cost: estimatedCost,
+					budget_remaining: config.budget - budgetSpent,
+					...params,
+				});
+				if (policyResult.decision === "deny") {
+					const reason =
+						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
+					throw new PolicyDeniedError(reason);
+				}
+
+				// d. PII check
+				if (config.pii !== "off") {
+					const piiResult = detectPII(messages);
+					if (piiResult.found && config.pii === "block") {
+						throw new PolicyDeniedError(`PII detected: ${piiResult.types.join(", ")}`);
+					}
+					// "warn" and "redact" modes: continue (redact is not implemented at SDK level)
+				}
+
+				// d2. Failure mode 15.4: TigerBeetle / engine unreachable — PENDING hold
+				if (proxyConn != null && !isDryRun) {
+					try {
+						// AUD-460: Capture the proxy's returned transferId
+						const proxyResult = await proxyConn.spend({
 							model,
-							provider: kind,
-							timestamp: new Date().toISOString(),
-							...(callAuditDegraded ? { auditDegraded: true as const } : {}),
-						};
-					},
-					(error: unknown) => {
-						cb.recordFailure();
-						if (proxyConn != null && !isDryRun) {
-							proxyConn.void(transferId).catch(() => {});
-						} else if (engine != null && !isDryRun) {
-							engine.voidPendingSpend(transferId).catch(() => {});
-						}
-					},
-				);
+							estimatedCost,
+							actor: "local",
+						});
+						proxyTransferId = proxyResult.transferId;
+					} catch (holdErr) {
+						throw new LedgerUnavailableError(
+							holdErr instanceof Error ? holdErr.message : String(holdErr),
+						);
+					}
+				} else if (engine != null && !isDryRun) {
+					try {
+						await engine.spendPending({
+							transferId,
+							amount: estimatedCost,
+						});
+					} catch (holdErr) {
+						// Ledger unreachable — do NOT forward to provider
+						throw new LedgerUnavailableError(
+							holdErr instanceof Error ? holdErr.message : String(holdErr),
+						);
+					}
+				}
+			} finally {
+				// AUD-453: Release lock after budget check + hold are complete
+				releaseBudgetLock();
+			}
 
-				// For streaming responses, return the wrapped stream with an
-				// estimated trust receipt. The actual receipt (with real
-				// token counts) is available via governedStream.receipt
-				// after the stream is fully consumed.
-				const auditHash = createHash("sha256").update(transferId).digest("hex");
-				const estimatedReceipt: TrustReceipt = {
+			// e. Forward to original SDK
+			let settled = true;
+			try {
+				const response = await (originalFn as (...a: unknown[]) => unknown).apply(thisArg, args);
+
+				// e2. Streaming detection: if response is an async iterable, wrap with
+				// token accumulation. Settlement and audit happen when the stream ends.
+				if (
+					response != null &&
+					typeof response === "object" &&
+					Symbol.asyncIterator in (response as Record<symbol, unknown>)
+				) {
+					const stream = response as AsyncIterable<unknown>;
+					const governedStream = createGovernedStream(
+						stream,
+						kind,
+						async (usage: StreamUsage) => {
+							const streamCost = estimateCost(model, usage.inputTokens, usage.outputTokens);
+							budgetSpent += streamCost;
+							// AUD-457: Persist cumulative spend to disk
+							await persistSpendLedger(vaultBase, budgetSpent);
+							cb.recordSuccess();
+
+							if (proxyConn != null && !isDryRun) {
+								try {
+									// AUD-460: Use the proxy's transferId for settlement
+									await proxyConn.settle(proxyTransferId ?? transferId, streamCost);
+								} catch {
+									settled = false;
+								}
+							} else if (engine != null && !isDryRun) {
+								try {
+									await engine.postPendingSpend(transferId);
+								} catch {
+									settled = false;
+								}
+							}
+
+							const syntheticHash = createHash("sha256").update(transferId).digest("hex");
+							let auditHash = syntheticHash;
+							try {
+								const auditEvent = await audit.appendEvent({
+									kind: "llm_call",
+									actor: "local",
+									data: { model, cost: streamCost, settled, transferId },
+								});
+								auditHash = auditEvent.hash;
+							} catch {
+								callAuditDegraded = true;
+							}
+
+							return {
+								transferId,
+								cost: streamCost,
+								budgetRemaining: config.budget - budgetSpent,
+								auditHash,
+								chainPath: join(VAULT_DIR, "audit"),
+								receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
+								settled,
+								model,
+								provider: kind,
+								timestamp: new Date().toISOString(),
+								...(callAuditDegraded ? { auditDegraded: true as const } : {}),
+								// AUD-456: Flag proxy stub receipts
+								...(proxyConn != null ? { proxyStub: true as const } : {}),
+							};
+						},
+						(error: unknown) => {
+							cb.recordFailure();
+							if (proxyConn != null && !isDryRun) {
+								// AUD-460: Use the proxy's transferId for void
+								proxyConn.void(proxyTransferId ?? transferId).catch(() => {});
+							} else if (engine != null && !isDryRun) {
+								engine.voidPendingSpend(transferId).catch(() => {});
+							}
+						},
+					);
+
+					// AUD-454: For streaming responses, settlement has NOT happened yet.
+					// Set settled: false — the real settlement status will be on
+					// governedStream.receipt after the stream is fully consumed.
+					const auditHash = createHash("sha256").update(transferId).digest("hex");
+					const estimatedReceipt: TrustReceipt = {
+						transferId,
+						cost: estimatedCost,
+						budgetRemaining: config.budget - budgetSpent,
+						auditHash,
+						chainPath: join(VAULT_DIR, "audit"),
+						receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
+						settled: false, // AUD-454: not settled yet — stream hasn't been consumed
+						model,
+						provider: kind,
+						timestamp: new Date().toISOString(),
+						...(callAuditDegraded ? { auditDegraded: true as const } : {}),
+						// AUD-456: Flag proxy stub receipts
+						...(proxyConn != null ? { proxyStub: true as const } : {}),
+					};
+
+					return { response: governedStream, receipt: estimatedReceipt };
+				}
+
+				// f. Compute actual cost from response usage
+				let actualCost = estimatedCost;
+				if (response != null && typeof response === "object" && "usage" in response) {
+					const usage = (response as Record<string, unknown>).usage as Record<
+						string,
+						unknown
+					> | null;
+					if (usage != null) {
+						const inputTokens =
+							(usage.input_tokens as number | undefined) ??
+							(usage.prompt_tokens as number | undefined) ??
+							estimatedInputTokens;
+						const outputTokens =
+							(usage.output_tokens as number | undefined) ??
+							(usage.completion_tokens as number | undefined) ??
+							0;
+						actualCost = estimateCost(model, inputTokens, outputTokens);
+					}
+				}
+
+				// Track budget (cumulative)
+				budgetSpent += actualCost;
+				// AUD-457: Persist cumulative spend to disk
+				await persistSpendLedger(vaultBase, budgetSpent);
+
+				// g. Circuit breaker: record success
+				cb.recordSuccess();
+
+				// g2. Failure mode 15.1: POST fails after LLM success
+				if (engine != null && !isDryRun) {
+					try {
+						await engine.postPendingSpend(transferId);
+					} catch (postErr) {
+						// POST failed — LLM call succeeded but settlement is ambiguous
+						settled = false;
+						await audit
+							.appendEvent({
+								kind: "settlement_ambiguous",
+								actor: "local",
+								data: {
+									model,
+									cost: actualCost,
+									transferId,
+									error: postErr instanceof Error ? postErr.message : String(postErr),
+								},
+							})
+							.catch(() => {
+								// Audit also degraded — nothing more we can do
+								callAuditDegraded = true;
+							});
+					}
+				}
+
+				// g3. Proxy settlement
+				if (proxyConn != null && !isDryRun) {
+					try {
+						// AUD-460: Use the proxy's transferId for settlement
+						await proxyConn.settle(proxyTransferId ?? transferId, actualCost);
+					} catch {
+						settled = false;
+					}
+				}
+
+				// h. Audit event — failure mode 15.3: audit write failure
+				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
+				let auditHash = syntheticHash;
+				try {
+					const auditEvent = await audit.appendEvent({
+						kind: "llm_call",
+						actor: "local",
+						data: {
+							model,
+							cost: actualCost,
+							settled,
+							transferId,
+						},
+					});
+					auditHash = auditEvent.hash;
+				} catch {
+					// Failure mode 15.3: Audit degraded — do not fail the response
+					callAuditDegraded = true;
+					process.stderr.write(
+						`[usertrust] audit degraded: failed to write llm_call event for ${transferId}\n`,
+					);
+				}
+
+				// i. Daily-rotated audit receipt (non-blocking)
+				if (config.audit.rotation !== "none") {
+					writeReceipt(
+						vaultPath,
+						{
+							kind: "llm_call",
+							subsystem: "trust",
+							actor: "local",
+							data: { model, cost: actualCost, settled, transferId },
+						},
+						config.audit.indexLimit,
+					);
+				}
+
+				// i2. Pattern memory
+				if (config.patterns.enabled) {
+					const promptHash = createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+					await recordPattern({
+						promptHash,
+						model,
+						cost: actualCost,
+						success: true,
+					}).catch(() => {});
+				}
+
+				const budgetRemaining = config.budget - budgetSpent;
+
+				const receipt: TrustReceipt = {
 					transferId,
-					cost: estimatedCost,
-					budgetRemaining: config.budget - budgetSpent,
+					cost: actualCost,
+					budgetRemaining,
 					auditHash,
 					chainPath: join(VAULT_DIR, "audit"),
-					receiptUrl: opts?.proxy != null ? `https://verify.usertools.dev/${transferId}` : null,
+					receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
 					settled,
 					model,
 					provider: kind,
 					timestamp: new Date().toISOString(),
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
+					// AUD-456: Flag proxy stub receipts
+					...(proxyConn != null ? { proxyStub: true as const } : {}),
 				};
 
-				return { response: governedStream, receipt: estimatedReceipt };
-			}
+				return { response, receipt };
+			} catch (err) {
+				// j. Circuit breaker: record failure
+				cb.recordFailure();
 
-			// f. Compute actual cost from response usage
-			let actualCost = estimatedCost;
-			if (response != null && typeof response === "object" && "usage" in response) {
-				const usage = (response as Record<string, unknown>).usage as Record<string, unknown> | null;
-				if (usage != null) {
-					const inputTokens =
-						(usage.input_tokens as number | undefined) ??
-						(usage.prompt_tokens as number | undefined) ??
-						estimatedInputTokens;
-					const outputTokens =
-						(usage.output_tokens as number | undefined) ??
-						(usage.completion_tokens as number | undefined) ??
-						0;
-					actualCost = estimateCost(model, inputTokens, outputTokens);
+				// j2. Failure mode 15.2: LLM fails — VOID the pending hold
+				if (engine != null && !isDryRun) {
+					try {
+						await engine.voidPendingSpend(transferId);
+					} catch {
+						// Best-effort void — log and continue
+					}
 				}
-			}
 
-			// Track budget (cumulative and decay-weighted)
-			budgetSpent += actualCost;
-			spendHistory.push({ ts: Date.now(), value: actualCost });
-
-			// g. Circuit breaker: record success
-			cb.recordSuccess();
-
-			// g2. Failure mode 15.1: POST fails after LLM success
-			if (engine != null && !isDryRun) {
-				try {
-					await engine.postPendingSpend(transferId);
-				} catch (postErr) {
-					// POST failed — LLM call succeeded but settlement is ambiguous
-					settled = false;
-					await audit
-						.appendEvent({
-							kind: "settlement_ambiguous",
-							actor: "local",
-							data: {
-								model,
-								cost: actualCost,
-								transferId,
-								error: postErr instanceof Error ? postErr.message : String(postErr),
-							},
-						})
-						.catch(() => {
-							// Audit also degraded — nothing more we can do
-							callAuditDegraded = true;
-						});
+				// j3. Proxy void
+				if (proxyConn != null && !isDryRun) {
+					try {
+						// AUD-460: Use the proxy's transferId for void
+						await proxyConn.void(proxyTransferId ?? transferId);
+					} catch {
+						// Best-effort void
+					}
 				}
-			}
 
-			// g3. Proxy settlement
-			if (proxyConn != null && !isDryRun) {
-				try {
-					await proxyConn.settle(transferId, actualCost);
-				} catch {
-					settled = false;
-				}
-			}
-
-			// h. Audit event — failure mode 15.3: audit write failure
-			const syntheticHash = createHash("sha256").update(transferId).digest("hex");
-			let auditHash = syntheticHash;
-			try {
-				const auditEvent = await audit.appendEvent({
-					kind: "llm_call",
-					actor: "local",
-					data: {
-						model,
-						cost: actualCost,
-						settled,
-						transferId,
-					},
-				});
-				auditHash = auditEvent.hash;
-			} catch {
-				// Failure mode 15.3: Audit degraded — do not fail the response
-				callAuditDegraded = true;
-				process.stderr.write(
-					`[usertrust] audit degraded: failed to write llm_call event for ${transferId}\n`,
-				);
-			}
-
-			// i. Daily-rotated audit receipt (non-blocking)
-			if (config.audit.rotation !== "none") {
-				writeReceipt(
-					vaultPath,
-					{
-						kind: "llm_call",
-						subsystem: "trust",
+				// k. Audit the failure
+				await audit
+					.appendEvent({
+						kind: "llm_call_failed",
 						actor: "local",
-						data: { model, cost: actualCost, settled, transferId },
-					},
-					config.audit.indexLimit,
-				);
-			}
+						data: { model, error: String(err), transferId },
+					})
+					.catch(() => {
+						callAuditDegraded = true;
+					});
 
-			// i2. Pattern memory
-			if (config.patterns.enabled) {
-				const promptHash = createHash("sha256").update(JSON.stringify(messages)).digest("hex");
-				await recordPattern({
-					promptHash,
-					model,
-					cost: actualCost,
-					success: true,
-				}).catch(() => {});
-			}
-
-			const budgetRemaining = config.budget - budgetSpent;
-
-			const receipt: TrustReceipt = {
-				transferId,
-				cost: actualCost,
-				budgetRemaining,
-				auditHash,
-				chainPath: join(VAULT_DIR, "audit"),
-				receiptUrl: opts?.proxy != null ? `https://verify.usertools.dev/${transferId}` : null,
-				settled,
-				model,
-				provider: kind,
-				timestamp: new Date().toISOString(),
-				...(callAuditDegraded ? { auditDegraded: true as const } : {}),
-			};
-
-			return { response, receipt };
-		} catch (err) {
-			// j. Circuit breaker: record failure
-			cb.recordFailure();
-
-			// j2. Failure mode 15.2: LLM fails — VOID the pending hold
-			if (engine != null && !isDryRun) {
-				try {
-					await engine.voidPendingSpend(transferId);
-				} catch {
-					// Best-effort void — log and continue
+				// l. Pattern memory: record failure
+				if (config.patterns.enabled) {
+					const promptHash = createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+					await recordPattern({
+						promptHash,
+						model,
+						cost: 0,
+						success: false,
+					}).catch(() => {});
 				}
+
+				throw err;
 			}
-
-			// j3. Proxy void
-			if (proxyConn != null && !isDryRun) {
-				try {
-					await proxyConn.void(transferId);
-				} catch {
-					// Best-effort void
-				}
-			}
-
-			// k. Audit the failure
-			await audit
-				.appendEvent({
-					kind: "llm_call_failed",
-					actor: "local",
-					data: { model, error: String(err), transferId },
-				})
-				.catch(() => {
-					callAuditDegraded = true;
-				});
-
-			// l. Pattern memory: record failure
-			if (config.patterns.enabled) {
-				const promptHash = createHash("sha256").update(JSON.stringify(messages)).digest("hex");
-				await recordPattern({
-					promptHash,
-					model,
-					cost: 0,
-					success: false,
-				}).catch(() => {});
-			}
-
-			throw err;
+		} finally {
+			// AUD-462: Decrement in-flight count so destroy() knows when it's safe
+			inFlightCount--;
 		}
 	}
 
@@ -513,10 +624,24 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			if (destroyed) return;
 			destroyed = true;
 
+			// AUD-462: Wait up to 5 seconds for in-flight calls to complete.
+			// After the deadline, proceed with teardown anyway.
+			const deadline = Date.now() + 5_000;
+			while (inFlightCount > 0 && Date.now() < deadline) {
+				await new Promise<void>((r) => setTimeout(r, 50));
+			}
+
 			// Remove beforeExit safety net
 			if (beforeExitHandler != null) {
 				process.removeListener("beforeExit", beforeExitHandler);
 				beforeExitHandler = null;
+			}
+
+			// AUD-461: Void any remaining pending transfers (best-effort).
+			// TigerBeetle auto-voids pending transfers after 300s, but
+			// explicit voiding releases holds immediately.
+			if (engine != null && typeof engine.voidAllPending === "function") {
+				await engine.voidAllPending();
 			}
 
 			// Flush audit writes
@@ -617,6 +742,20 @@ async function createTBEngine(config: TrustConfig): Promise<TrustEngine> {
 			}
 			await tbClient.voidTransfer(tbId);
 			pendingMap.delete(transferId);
+		},
+
+		// AUD-461: Void all remaining pending transfers on destroy.
+		// Best-effort — TigerBeetle auto-voids after 300s regardless.
+		async voidAllPending(): Promise<void> {
+			const entries = [...pendingMap.entries()];
+			for (const [trustIdKey, tbTransferId] of entries) {
+				try {
+					await tbClient.voidTransfer(tbTransferId);
+				} catch {
+					// Best-effort — ignore individual void failures
+				}
+				pendingMap.delete(trustIdKey);
+			}
 		},
 
 		destroy(): void {

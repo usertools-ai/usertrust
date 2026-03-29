@@ -552,7 +552,7 @@ describe("trust()", () => {
 				messages: [{ role: "user", content: "Hello" }],
 			});
 
-			expect(result.receipt.receiptUrl).toMatch(/^https:\/\/verify\.usertools\.dev\/tx_/);
+			expect(result.receipt.receiptUrl).toMatch(/^https:\/\/verify\.usertrust\.dev\/tx_/);
 
 			await governed.destroy();
 		});

@@ -1,13 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Hoist mock variables so they're available inside vi.mock factories
-const { mockExistsSync, mockMkdirSync, mockWriteFileSync } = vi.hoisted(() => {
-	return {
-		mockExistsSync: vi.fn(() => true),
-		mockMkdirSync: vi.fn(),
-		mockWriteFileSync: vi.fn(),
-	};
-});
+const { mockExistsSync, mockMkdirSync, mockOpenSync, mockWriteSync, mockFsyncSync, mockCloseSync } =
+	vi.hoisted(() => {
+		return {
+			mockExistsSync: vi.fn(() => true),
+			mockMkdirSync: vi.fn(),
+			mockOpenSync: vi.fn(() => 99), // return a fake fd
+			mockWriteSync: vi.fn(),
+			mockFsyncSync: vi.fn(),
+			mockCloseSync: vi.fn(),
+		};
+	});
 
 // Mock tigerbeetle-node (needed because engine.ts imports CreateTransferError)
 vi.mock("tigerbeetle-node", () => ({
@@ -23,14 +27,17 @@ vi.mock("tigerbeetle-node", () => ({
 	amount_max: (1n << 128n) - 1n,
 }));
 
-// Mock fs for DLQ writes
+// Mock fs for DLQ writes — engine now uses open-write-fsync-close pattern
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("node:fs")>();
 	return {
 		...actual,
 		existsSync: mockExistsSync,
 		mkdirSync: mockMkdirSync,
-		writeFileSync: mockWriteFileSync,
+		openSync: mockOpenSync,
+		writeSync: mockWriteSync,
+		fsyncSync: mockFsyncSync,
+		closeSync: mockCloseSync,
 	};
 });
 
@@ -84,11 +91,7 @@ describe("TrustEngine", () => {
 
 	describe("spendPending", () => {
 		it("creates a PENDING transfer", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
+			// AUD-455: No pre-check — TB enforces atomically
 			mockTB.createPendingTransfer.mockResolvedValueOnce(42n);
 
 			const result = await engine.spendPending({
@@ -99,6 +102,8 @@ describe("TrustEngine", () => {
 			expect(result.pending).toBe(true);
 			expect(result.transferId).toBe("42");
 			expect(mockTB.createPendingTransfer).toHaveBeenCalledOnce();
+			// lookupBalance should NOT be called in the success path
+			expect(mockTB.lookupBalance).not.toHaveBeenCalled();
 
 			// Verify the transfer was created with correct code
 			const call = mockTB.createPendingTransfer.mock.calls[0]?.[0];
@@ -106,11 +111,6 @@ describe("TrustEngine", () => {
 		});
 
 		it("calculates cost using pricing table", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
 			mockTB.createPendingTransfer.mockResolvedValueOnce(42n);
 
 			const result = await engine.spendPending({
@@ -122,45 +122,54 @@ describe("TrustEngine", () => {
 			expect(result.amount).toBe(105);
 		});
 
-		it("throws InsufficientBalanceError when balance too low", async () => {
+		it("throws InsufficientBalanceError when TB rejects due to insufficient balance", async () => {
+			// AUD-455: No pre-check — TB enforces atomically. Simulate TB rejection.
+			const tbErr = new Error("Pending transfer failed: exceeds_credits");
+			Object.assign(tbErr, { name: "TBTransferError", code: 22 });
+			mockTB.createPendingTransfer.mockRejectedValueOnce(tbErr);
+			// Fresh lookup in the error path returns actual balance
 			mockTB.lookupBalance.mockResolvedValueOnce({
 				available: 10,
 				pending: 0,
 				total: 10,
 			});
 
-			await expect(
-				engine.spendPending({ userId: "user_1", action: DEFAULT_ACTION }),
-			).rejects.toThrow(InsufficientBalanceError);
+			const err = await engine
+				.spendPending({ userId: "user_1", action: DEFAULT_ACTION })
+				.catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(InsufficientBalanceError);
+			// Verify the error contains the fresh balance from the lookup
+			expect((err as InsufficientBalanceError).message).toContain("10");
 		});
 
-		it("catches TB insufficient balance error and wraps it", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
-
+		it("catches TB insufficient balance error and wraps it with fresh balance", async () => {
 			// Simulate TB rejecting due to concurrent depletion
 			const tbErr = new Error("Pending transfer failed: exceeds_credits");
 			Object.assign(tbErr, { name: "TBTransferError", code: 22 });
 			mockTB.createPendingTransfer.mockRejectedValueOnce(tbErr);
+			// Fresh lookup in error path
+			mockTB.lookupBalance.mockResolvedValueOnce({
+				available: 500,
+				pending: 0,
+				total: 500,
+			});
 
-			await expect(
-				engine.spendPending({ userId: "user_1", action: DEFAULT_ACTION }),
-			).rejects.toThrow(InsufficientBalanceError);
+			const err = await engine
+				.spendPending({ userId: "user_1", action: DEFAULT_ACTION })
+				.catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(InsufficientBalanceError);
+			expect((err as InsufficientBalanceError).message).toContain("500");
 		});
 
 		it("catches TB overflows_debits error and wraps it", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
-
 			const tbErr = new Error("Pending transfer failed: overflows_debits");
 			Object.assign(tbErr, { name: "TBTransferError", code: 30 });
 			mockTB.createPendingTransfer.mockRejectedValueOnce(tbErr);
+			mockTB.lookupBalance.mockResolvedValueOnce({
+				available: 0,
+				pending: 0,
+				total: 0,
+			});
 
 			await expect(
 				engine.spendPending({ userId: "user_1", action: DEFAULT_ACTION }),
@@ -168,27 +177,36 @@ describe("TrustEngine", () => {
 		});
 
 		it("catches TB overflows_debits_pending error and wraps it", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
-
 			const tbErr = new Error("Pending transfer failed: overflows_debits_pending");
 			Object.assign(tbErr, { name: "TBTransferError", code: 31 });
 			mockTB.createPendingTransfer.mockRejectedValueOnce(tbErr);
+			mockTB.lookupBalance.mockResolvedValueOnce({
+				available: 0,
+				pending: 0,
+				total: 0,
+			});
 
 			await expect(
 				engine.spendPending({ userId: "user_1", action: DEFAULT_ACTION }),
 			).rejects.toThrow(InsufficientBalanceError);
 		});
 
+		it("reports 0 available when balance lookup fails in error path", async () => {
+			const tbErr = new Error("Pending transfer failed: exceeds_credits");
+			Object.assign(tbErr, { name: "TBTransferError", code: 22 });
+			mockTB.createPendingTransfer.mockRejectedValueOnce(tbErr);
+			// Balance lookup also fails
+			mockTB.lookupBalance.mockRejectedValueOnce(new Error("TB unreachable"));
+
+			const err = await engine
+				.spendPending({ userId: "user_1", action: DEFAULT_ACTION })
+				.catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(InsufficientBalanceError);
+			// Falls back to 0 when lookup fails
+			expect((err as InsufficientBalanceError).message).toContain("0");
+		});
+
 		it("includes agentRef as userData32 when provided", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
 			mockTB.createPendingTransfer.mockResolvedValueOnce(42n);
 
 			await engine.spendPending({
@@ -203,11 +221,6 @@ describe("TrustEngine", () => {
 		});
 
 		it("does not include userData32 when no agentRef", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
 			mockTB.createPendingTransfer.mockResolvedValueOnce(42n);
 
 			await engine.spendPending({
@@ -220,12 +233,6 @@ describe("TrustEngine", () => {
 		});
 
 		it("propagates non-balance errors from TB", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
-
 			const tbErr = new Error("Connection refused");
 			mockTB.createPendingTransfer.mockRejectedValueOnce(tbErr);
 
@@ -235,12 +242,6 @@ describe("TrustEngine", () => {
 		});
 
 		it("does not treat non-object errors as balance errors", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
-
 			mockTB.createPendingTransfer.mockRejectedValueOnce(null);
 
 			await expect(
@@ -249,12 +250,6 @@ describe("TrustEngine", () => {
 		});
 
 		it("does not treat errors without code property as balance errors", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
-
 			const err = new Error("some error");
 			// Has name but no code
 			Object.assign(err, { name: "TBTransferError" });
@@ -266,12 +261,6 @@ describe("TrustEngine", () => {
 		});
 
 		it("does not treat errors with wrong name as balance errors", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
-
 			const err = new Error("some error");
 			Object.assign(err, { name: "SomeOtherError", code: 22 });
 			mockTB.createPendingTransfer.mockRejectedValueOnce(err);
@@ -282,11 +271,6 @@ describe("TrustEngine", () => {
 		});
 
 		it("returns correct result shape", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
 			mockTB.createPendingTransfer.mockResolvedValueOnce(42n);
 
 			const result = await engine.spendPending({
@@ -338,31 +322,53 @@ describe("TrustEngine", () => {
 
 			await expect(engine.postPendingSpend("42")).rejects.toThrow("Spend settlement ambiguous");
 
-			expect(mockWriteFileSync).toHaveBeenCalled();
-			// Verify the DLQ entry contains proper data
-			const writtenData = mockWriteFileSync.mock.calls[0]?.[1] as string;
+			// DLQ now uses open-write-fsync-close pattern
+			expect(mockOpenSync).toHaveBeenCalled();
+			expect(mockWriteSync).toHaveBeenCalled();
+			expect(mockFsyncSync).toHaveBeenCalled();
+			expect(mockCloseSync).toHaveBeenCalled();
+			// Verify the DLQ entry contains proper data + HMAC
+			const writtenData = mockWriteSync.mock.calls[0]?.[1] as string;
 			const dlqEntry = JSON.parse(writtenData.trim());
 			expect(dlqEntry.source).toBe("engine.postPendingSpend.ambiguous");
 			expect(dlqEntry.transferId).toBe("42");
+			expect(dlqEntry.hmac).toBeDefined();
+			expect(typeof dlqEntry.hmac).toBe("string");
+			expect(dlqEntry.hmac.length).toBe(64); // SHA-256 hex
 		});
 
-		it("creates DLQ directory if it does not exist", async () => {
+		it("creates DLQ directory with restricted permissions if it does not exist", async () => {
 			mockExistsSync.mockReturnValue(false);
 			mockTB.postTransfer.mockRejectedValueOnce(new Error("post failed"));
 			mockTB.voidTransfer.mockRejectedValueOnce(new Error("void failed"));
 
 			await expect(engine.postPendingSpend("42")).rejects.toThrow("Spend settlement ambiguous");
 
-			expect(mockMkdirSync).toHaveBeenCalledWith("/tmp/test-dlq", { recursive: true });
+			expect(mockMkdirSync).toHaveBeenCalledWith("/tmp/test-dlq", {
+				recursive: true,
+				mode: 0o700,
+			});
 		});
 
-		it("does not throw when DLQ write itself fails (line 63/69)", async () => {
+		it("opens DLQ file with 0o600 permissions", async () => {
+			mockTB.postTransfer.mockRejectedValueOnce(new Error("post failed"));
+			mockTB.voidTransfer.mockRejectedValueOnce(new Error("void failed"));
+
+			await expect(engine.postPendingSpend("42")).rejects.toThrow("Spend settlement ambiguous");
+
+			// Verify openSync was called with append mode and 0o600 permissions
+			const openCall = mockOpenSync.mock.calls[0];
+			expect(openCall?.[1]).toBe("a");
+			expect(openCall?.[2]).toBe(0o600);
+		});
+
+		it("does not throw when DLQ write itself fails", async () => {
 			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 			mockTB.postTransfer.mockRejectedValueOnce(new Error("post failed"));
 			mockTB.voidTransfer.mockRejectedValueOnce(new Error("void failed"));
 
-			// Make the DLQ write throw
-			mockWriteFileSync.mockImplementationOnce(() => {
+			// Make the DLQ open throw
+			mockOpenSync.mockImplementationOnce(() => {
 				throw new Error("disk full");
 			});
 
@@ -378,7 +384,7 @@ describe("TrustEngine", () => {
 			errorSpy.mockRestore();
 		});
 
-		it("does not throw when mkdirSync fails in DLQ (line 63/69)", async () => {
+		it("does not throw when mkdirSync fails in DLQ", async () => {
 			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 			mockExistsSync.mockReturnValue(false);
 			mockTB.postTransfer.mockRejectedValueOnce(new Error("post failed"));
@@ -445,11 +451,6 @@ describe("TrustEngine", () => {
 				holdTtlMs: 120_000, // 2 minutes
 			});
 
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
 			mockTB.createPendingTransfer.mockResolvedValueOnce(42n);
 
 			await customEngine.spendPending({
@@ -462,11 +463,6 @@ describe("TrustEngine", () => {
 		});
 
 		it("uses default hold TTL (5 min) when not specified", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
 			mockTB.createPendingTransfer.mockResolvedValueOnce(42n);
 
 			await engine.spendPending({
@@ -492,8 +488,8 @@ describe("TrustEngine", () => {
 				"Spend settlement ambiguous",
 			);
 
-			// The default path should be .usertrust/dlq
-			const filePath = mockWriteFileSync.mock.calls[0]?.[0] as string;
+			// The default path should be .usertrust/dlq — openSync receives the file path
+			const filePath = mockOpenSync.mock.calls[0]?.[0] as string;
 			expect(filePath).toContain("dlq");
 			expect(filePath).toContain("dead-letter.jsonl");
 		});
@@ -501,11 +497,6 @@ describe("TrustEngine", () => {
 
 	describe("two-phase lifecycle", () => {
 		it("spendPending -> postPendingSpend (success path)", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
 			mockTB.createPendingTransfer.mockResolvedValueOnce(42n);
 			mockTB.postTransfer.mockResolvedValueOnce(100n);
 
@@ -520,11 +511,6 @@ describe("TrustEngine", () => {
 		});
 
 		it("spendPending -> voidPendingSpend (failure path)", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
 			mockTB.createPendingTransfer.mockResolvedValueOnce(42n);
 			mockTB.voidTransfer.mockResolvedValueOnce(101n);
 
@@ -539,11 +525,6 @@ describe("TrustEngine", () => {
 		});
 
 		it("full hold-settle-with-actual-amount flow", async () => {
-			mockTB.lookupBalance.mockResolvedValueOnce({
-				available: 100_000,
-				pending: 0,
-				total: 100_000,
-			});
 			mockTB.createPendingTransfer.mockResolvedValueOnce(42n);
 			mockTB.postTransfer.mockResolvedValueOnce(100n);
 

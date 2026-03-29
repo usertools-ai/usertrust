@@ -90,7 +90,7 @@ function updateIndex(auditRoot: string, entry: IndexEntry, indexLimit: number): 
 /**
  * Write an audit receipt to the daily-rotated directory structure.
  *
- * @param vaultPath - Root vault directory (parent of .usertools/)
+ * @param vaultPath - Root vault directory (parent of .usertrust/)
  * @param input - Receipt data to write
  * @param indexLimit - Maximum index entries (default: 10000)
  * @returns The written receipt, or undefined if the write failed

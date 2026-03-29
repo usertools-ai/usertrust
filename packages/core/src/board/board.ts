@@ -210,7 +210,7 @@ function appendHistory(vaultPath: string, result: BoardReviewResult): void {
 /**
  * Create a Board of Directors instance backed by a vault directory.
  *
- * @param vaultPath — absolute or relative path to `.usertools/` (or custom vault)
+ * @param vaultPath — absolute or relative path to `.usertrust/` (or custom vault)
  * @param opts — optional configuration
  */
 export function createBoard(vaultPath: string, opts?: BoardOpts): Board {

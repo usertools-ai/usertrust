@@ -80,6 +80,40 @@ function resolveFieldPath(path: string, context: Record<string, unknown>): unkno
 }
 
 // ---------------------------------------------------------------------------
+// Regex safety guard (AUD-463)
+// ---------------------------------------------------------------------------
+
+/** Maximum allowed length for regex patterns in policy rules. */
+const MAX_REGEX_LENGTH = 200;
+
+/**
+ * Detects nested quantifiers that can cause catastrophic backtracking (ReDoS).
+ * Matches patterns like `a+*`, `a*+`, `a{2,}*`, `a+{2,}`, etc.
+ */
+const NESTED_QUANTIFIER_RE = /[+*?]\{?\d*,?\d*\}?[+*?]/;
+
+/**
+ * Validate that a regex pattern is safe to compile and execute.
+ *
+ * **Security**: Regex policies must contain trusted input. User-supplied patterns
+ * are constrained to prevent ReDoS (Regular Expression Denial of Service):
+ * - Patterns longer than 200 characters are rejected.
+ * - Patterns containing nested quantifiers (e.g. `a+*`, `x{2,}+`) are rejected.
+ * - Invalid regex syntax is caught and treated as non-matching.
+ *
+ * @returns The compiled RegExp, or null if the pattern is unsafe or invalid.
+ */
+function safeRegExp(pattern: string): RegExp | null {
+	if (pattern.length > MAX_REGEX_LENGTH) return null;
+	if (NESTED_QUANTIFIER_RE.test(pattern)) return null;
+	try {
+		return new RegExp(pattern);
+	} catch {
+		return null;
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Field condition evaluation (12 operators)
 // ---------------------------------------------------------------------------
 
@@ -126,13 +160,12 @@ function evaluateFieldCondition(fc: FieldCondition, context: Record<string, unkn
 				typeof resolved === "string" && typeof fc.value === "string" && resolved.includes(fc.value)
 			);
 
-		case "regex":
+		case "regex": {
 			if (typeof resolved !== "string" || typeof fc.value !== "string") return false;
-			try {
-				return new RegExp(fc.value).test(resolved);
-			} catch {
-				return false;
-			}
+			const re = safeRegExp(fc.value);
+			if (re === null) return false;
+			return re.test(resolved);
+		}
 
 		default:
 			return false;

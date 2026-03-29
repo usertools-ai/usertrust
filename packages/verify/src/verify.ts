@@ -23,6 +23,7 @@ export interface ChainVerificationResult {
 	valid: boolean;
 	eventsVerified: number;
 	errors: string[];
+	skipped: number;
 	latestHash: string;
 	verifiedAt: string;
 }
@@ -42,6 +43,7 @@ export function verifyChain(logPath: string): ChainVerificationResult {
 			valid: true,
 			eventsVerified: 0,
 			errors: [],
+			skipped: 0,
 			latestHash: GENESIS_HASH,
 			verifiedAt: new Date().toISOString(),
 		};
@@ -53,6 +55,7 @@ export function verifyChain(logPath: string): ChainVerificationResult {
 			valid: true,
 			eventsVerified: 0,
 			errors: [],
+			skipped: 0,
 			latestHash: GENESIS_HASH,
 			verifiedAt: new Date().toISOString(),
 		};
@@ -61,6 +64,7 @@ export function verifyChain(logPath: string): ChainVerificationResult {
 	const lines = content.split("\n").filter((l) => l.trim());
 	let expectedPreviousHash = GENESIS_HASH;
 	let latestHash = GENESIS_HASH;
+	let skipped = 0;
 
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i] as string;
@@ -68,11 +72,17 @@ export function verifyChain(logPath: string): ChainVerificationResult {
 		let event: AuditEvent;
 		try {
 			event = JSON.parse(line) as AuditEvent;
-		} catch (parseErr) {
+		} catch (_parseErr) {
 			errors.push(
-				`Event ${i + 1}: malformed JSON — ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`,
+				JSON.stringify({
+					line: i + 1,
+					error: "malformed JSON",
+					raw: line.substring(0, 100),
+				}),
 			);
-			expectedPreviousHash = "";
+			// Do NOT reset expectedPreviousHash — skip the corrupt line
+			// so subsequent intact events can still verify against the chain
+			skipped++;
 			continue;
 		}
 
@@ -102,6 +112,7 @@ export function verifyChain(logPath: string): ChainVerificationResult {
 		valid: errors.length === 0,
 		eventsVerified: lines.length,
 		errors,
+		skipped,
 		latestHash,
 		verifiedAt: new Date().toISOString(),
 	};

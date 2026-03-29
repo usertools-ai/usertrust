@@ -8,9 +8,10 @@
  * Each lease locks a set of glob patterns; overlapping patterns from different
  * actors are rejected.
  *
- * Store path: `.usertools/leases.json`
+ * Store path: `.usertrust/leases.json`
  */
 
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { minimatch } from "minimatch";
@@ -54,39 +55,45 @@ export interface LeaseConflict {
 // Path Resolution
 // ---------------------------------------------------------------------------
 
-let storeDir = join(process.cwd(), VAULT_DIR);
+let moduleStoreDir = join(process.cwd(), VAULT_DIR);
 
 /**
  * Set the store directory path (for testing).
+ *
+ * @deprecated Use the `storeDir` constructor parameter on `ScopeManager` instead.
+ * This function mutates module-level state shared by all ScopeManager instances
+ * that were created without an explicit storeDir.
  */
 export function setStoreDir(dir: string): void {
-	storeDir = dir;
+	moduleStoreDir = dir;
 }
 
 /**
- * Get the current store directory.
+ * Get the current module-level store directory.
+ *
+ * @deprecated Use the `storeDir` constructor parameter on `ScopeManager` instead.
  */
 export function getStoreDir(): string {
-	return storeDir;
+	return moduleStoreDir;
 }
 
-function getLeasesPath(): string {
+// ---------------------------------------------------------------------------
+// File Operations (parameterized by storeDir)
+// ---------------------------------------------------------------------------
+
+function getLeasesPath(storeDir: string): string {
 	return join(storeDir, "leases.json");
 }
 
-function ensureStoreDir(): void {
+function ensureStoreDir(storeDir: string): void {
 	if (!existsSync(storeDir)) {
 		mkdirSync(storeDir, { recursive: true });
 	}
 }
 
-// ---------------------------------------------------------------------------
-// File Operations
-// ---------------------------------------------------------------------------
-
-function readLeases(): LeaseStore {
-	ensureStoreDir();
-	const path = getLeasesPath();
+function readLeases(storeDir: string): LeaseStore {
+	ensureStoreDir(storeDir);
+	const path = getLeasesPath(storeDir);
 	if (!existsSync(path)) {
 		return {};
 	}
@@ -98,18 +105,17 @@ function readLeases(): LeaseStore {
 	}
 }
 
-function writeLeases(store: LeaseStore): void {
-	ensureStoreDir();
-	writeFileSync(getLeasesPath(), JSON.stringify(store, null, "\t"));
+function writeLeases(store: LeaseStore, storeDir: string): void {
+	ensureStoreDir(storeDir);
+	writeFileSync(getLeasesPath(storeDir), JSON.stringify(store, null, "\t"));
 }
 
 // ---------------------------------------------------------------------------
-// ID Generation
+// ID Generation (AUD-466: crypto.randomUUID replaces Math.random)
 // ---------------------------------------------------------------------------
 
 function generateLeaseId(): string {
-	const hex = Math.random().toString(16).substring(2, 10);
-	return `ls_${hex}`;
+	return `ls_${randomUUID().replace(/-/g, "").substring(0, 16)}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,12 +168,28 @@ export function fileMatchesScope(file: string, scope: string[]): boolean {
  *
  * Provides `acquireLease`, `releaseLease`, `findConflicts`, and `expireStale`
  * for coordinating parallel workers operating on overlapping file scopes.
+ *
+ * AUD-465: Accepts an optional `storeDir` constructor parameter to avoid
+ * reliance on module-level mutable state. Falls back to the module-level
+ * `moduleStoreDir` for backward compatibility.
  */
 export class ScopeManager {
 	private readonly clock: () => number;
+	private readonly storeDir: string;
 
-	constructor(clock?: () => number) {
-		this.clock = clock ?? Date.now;
+	/**
+	 * @param optionsOrClock - Either an options object `{ clock?, storeDir? }`
+	 *   or a legacy clock function `() => number` for backward compatibility.
+	 */
+	constructor(optionsOrClock?: (() => number) | { clock?: () => number; storeDir?: string }) {
+		if (typeof optionsOrClock === "function") {
+			// Legacy constructor: ScopeManager(clock)
+			this.clock = optionsOrClock;
+			this.storeDir = moduleStoreDir;
+		} else {
+			this.clock = optionsOrClock?.clock ?? Date.now;
+			this.storeDir = optionsOrClock?.storeDir ?? moduleStoreDir;
+		}
 	}
 
 	/**
@@ -175,7 +197,7 @@ export class ScopeManager {
 	 * Throws if scope overlaps with another actor's active lease.
 	 */
 	acquireLease(options: AcquireLeaseOptions): Lease {
-		const store = readLeases();
+		const store = readLeases(this.storeDir);
 		const ttlMin = options.ttlMin ?? 60;
 
 		// Expire stale leases first
@@ -207,16 +229,31 @@ export class ScopeManager {
 		};
 
 		store[leaseId] = lease;
-		writeLeases(store);
+		writeLeases(store, this.storeDir);
 
 		return lease;
 	}
 
 	/**
 	 * Renew an existing lease, extending its TTL.
+	 *
+	 * AUD-466: When `actor` is provided, verifies the caller matches the lease
+	 * owner to prevent unauthorized renewal by a different actor. Callers SHOULD
+	 * always pass `actor` — omitting it is supported only for backward
+	 * compatibility and will be removed in a future major version.
 	 */
-	renewLease(leaseId: string, ttlMin = 60): Lease {
-		const store = readLeases();
+	renewLease(leaseId: string, actorOrTtl?: string | number, ttlMin?: number): Lease {
+		let actor: string | undefined;
+		let ttl: number;
+
+		if (typeof actorOrTtl === "string") {
+			actor = actorOrTtl;
+			ttl = ttlMin ?? 60;
+		} else {
+			ttl = actorOrTtl ?? 60;
+		}
+
+		const store = readLeases(this.storeDir);
 		const lease = store[leaseId];
 
 		if (!lease) {
@@ -225,27 +262,38 @@ export class ScopeManager {
 		if (lease.status !== "active") {
 			throw new Error(`Lease ${leaseId} is ${lease.status}, cannot renew`);
 		}
+		if (actor !== undefined && lease.actor !== actor) {
+			throw new Error(`Actor "${actor}" cannot renew lease ${leaseId} owned by "${lease.actor}"`);
+		}
 
-		lease.expires_at = new Date(this.clock() + ttlMin * 60_000).toISOString();
+		lease.expires_at = new Date(this.clock() + ttl * 60_000).toISOString();
 		lease.last_renewed_at = new Date(this.clock()).toISOString();
-		writeLeases(store);
+		writeLeases(store, this.storeDir);
 
 		return lease;
 	}
 
 	/**
 	 * Release a lease, marking it as released.
+	 *
+	 * AUD-466: When `actor` is provided, verifies the caller matches the lease
+	 * owner to prevent unauthorized release by a different actor. Callers SHOULD
+	 * always pass `actor` — omitting it is supported only for backward
+	 * compatibility and will be removed in a future major version.
 	 */
-	releaseLease(leaseId: string): Lease {
-		const store = readLeases();
+	releaseLease(leaseId: string, actor?: string): Lease {
+		const store = readLeases(this.storeDir);
 		const lease = store[leaseId];
 
 		if (!lease) {
 			throw new Error(`Lease ${leaseId} not found`);
 		}
+		if (actor !== undefined && lease.actor !== actor) {
+			throw new Error(`Actor "${actor}" cannot release lease ${leaseId} owned by "${lease.actor}"`);
+		}
 
 		lease.status = "released";
-		writeLeases(store);
+		writeLeases(store, this.storeDir);
 
 		return lease;
 	}
@@ -254,7 +302,7 @@ export class ScopeManager {
 	 * Find conflicts for a proposed scope against active leases.
 	 */
 	findConflicts(scope: string[], excludeActor?: string): LeaseConflict[] {
-		const store = readLeases();
+		const store = readLeases(this.storeDir);
 		this.expireStaleInStore(store);
 		return this.findConflictsInStore(store, scope, excludeActor);
 	}
@@ -264,10 +312,10 @@ export class ScopeManager {
 	 * Returns the number of leases expired.
 	 */
 	expireStale(): number {
-		const store = readLeases();
+		const store = readLeases(this.storeDir);
 		const count = this.expireStaleInStore(store);
 		if (count > 0) {
-			writeLeases(store);
+			writeLeases(store, this.storeDir);
 		}
 		return count;
 	}
@@ -276,7 +324,7 @@ export class ScopeManager {
 	 * Get all active leases.
 	 */
 	getActiveLeases(): Lease[] {
-		const store = readLeases();
+		const store = readLeases(this.storeDir);
 		return Object.values(store).filter((l) => l.status === "active");
 	}
 
@@ -284,7 +332,7 @@ export class ScopeManager {
 	 * Get a lease by ID.
 	 */
 	getLease(leaseId: string): Lease | undefined {
-		const store = readLeases();
+		const store = readLeases(this.storeDir);
 		return store[leaseId];
 	}
 

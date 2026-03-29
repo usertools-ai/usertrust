@@ -9,7 +9,8 @@
  * semantics are enforced via advisory file lock + in-process async mutex.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import {
 	closeSync,
 	existsSync,
@@ -67,76 +68,131 @@ class AsyncMutex {
 
 // ── Advisory Lock ──
 
-function acquireProcessLock(
-	logPath: string,
-	locksByDir: Map<string, { fd: number; path: string }>,
-): void {
+/**
+ * Check if a lock file is stale (held by a dead process).
+ * Returns true if stale and cleaned up, false if held by a live process.
+ * Throws if the lock is actively held.
+ */
+function tryCleanStaleLock(candidateLockPath: string): boolean {
+	try {
+		const content = readFileSync(candidateLockPath, "utf-8");
+		const lockData = JSON.parse(content) as { pid: number };
+		if (lockData.pid === process.pid) {
+			console.warn(
+				`[AUDIT] Reclaiming stale same-PID lock (PID ${process.pid}). Previous process exited without releasing the lock.`,
+			);
+			unlinkSync(candidateLockPath);
+			return true;
+		}
+		try {
+			process.kill(lockData.pid, 0);
+			// Process is alive — lock is held
+			throw new Error(
+				`Audit writer lock held by PID ${lockData.pid}. Only one process may write to the audit log. Lock file: ${candidateLockPath}`,
+			);
+		} catch (killErr: unknown) {
+			if (killErr instanceof Error && "code" in killErr) {
+				const code = (killErr as { code?: string }).code;
+				if (code === "ESRCH") {
+					// Process is dead — stale lock
+					unlinkSync(candidateLockPath);
+					return true;
+				}
+				if (code === "EPERM") {
+					throw new Error(
+						`Audit writer lock held by PID ${lockData.pid}. Only one process may write to the audit log. Lock file: ${candidateLockPath}`,
+					);
+				}
+			}
+			throw killErr;
+		}
+	} catch (parseErr) {
+		if (parseErr instanceof Error && parseErr.message.includes("Audit writer lock held")) {
+			throw parseErr;
+		}
+		// Corrupt lock file — remove it
+		try {
+			unlinkSync(candidateLockPath);
+		} catch {
+			/* best effort */
+		}
+		return true;
+	}
+}
+
+function acquireProcessLock(logPath: string, locksByDir: Map<string, { path: string }>): void {
 	const dir = dirname(logPath);
 	if (locksByDir.has(dir)) return;
 
 	const candidateLockPath = `${dir}/.audit-writer.lock`;
 
-	if (existsSync(candidateLockPath)) {
-		try {
-			const content = readFileSync(candidateLockPath, "utf-8");
-			const lockData = JSON.parse(content) as { pid: number };
-			if (lockData.pid === process.pid) {
-				console.warn(
-					`[AUDIT] Reclaiming stale same-PID lock (PID ${process.pid}). Previous process exited without releasing the lock.`,
-				);
-				unlinkSync(candidateLockPath);
-			} else {
-				try {
-					process.kill(lockData.pid, 0);
-					throw new Error(
-						`Audit writer lock held by PID ${lockData.pid}. Only one process may write to the audit log. Lock file: ${candidateLockPath}`,
-					);
-				} catch (killErr: unknown) {
-					if (killErr instanceof Error && "code" in killErr) {
-						const code = (killErr as { code?: string }).code;
-						if (code === "ESRCH") {
-							unlinkSync(candidateLockPath);
-						} else if (code === "EPERM") {
-							throw new Error(
-								`Audit writer lock held by PID ${lockData.pid}. Only one process may write to the audit log. Lock file: ${candidateLockPath}`,
-							);
-						} else {
-							throw killErr;
-						}
-					} else {
-						throw killErr;
-					}
-				}
-			}
-		} catch (parseErr) {
-			if (parseErr instanceof Error && parseErr.message.includes("Audit writer lock held")) {
-				throw parseErr;
-			}
-			try {
-				unlinkSync(candidateLockPath);
-			} catch {
-				/* best effort */
-			}
-		}
-	}
-
-	const fd = openSync(candidateLockPath, "wx");
+	// AUD-458: Use O_WRONLY | O_CREAT | O_EXCL atomically instead of existsSync + openSync('wx').
+	// This eliminates the TOCTOU race where two processes both detect a stale lock,
+	// both unlink, and both try to create — one gets EEXIST.
 	const lockContent = JSON.stringify({
 		pid: process.pid,
 		startedAt: new Date().toISOString(),
 	});
-	writeSync(fd, lockContent);
-	fsyncSync(fd);
-	locksByDir.set(dir, { fd, path: candidateLockPath });
+
+	// First attempt: atomic exclusive create
+	try {
+		const fd = openSync(
+			candidateLockPath,
+			fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
+			0o600,
+		);
+		try {
+			writeSync(fd, lockContent);
+			fsyncSync(fd);
+		} finally {
+			// AUD-459: Close fd immediately — lock semantics rely on file existence, not open fd
+			closeSync(fd);
+		}
+		locksByDir.set(dir, { path: candidateLockPath });
+		return;
+	} catch (err: unknown) {
+		if (!(err instanceof Error && "code" in err && (err as { code?: string }).code === "EEXIST")) {
+			throw err;
+		}
+		// File exists — check if stale
+	}
+
+	// Lock file exists — check if it's stale and clean up if so
+	tryCleanStaleLock(candidateLockPath);
+
+	// Second attempt after stale lock cleanup. If another process raced us and
+	// already re-created the lock, EEXIST here means they won — report as held.
+	try {
+		const fd = openSync(
+			candidateLockPath,
+			fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
+			0o600,
+		);
+		try {
+			writeSync(fd, lockContent);
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		locksByDir.set(dir, { path: candidateLockPath });
+	} catch (retryErr: unknown) {
+		if (
+			retryErr instanceof Error &&
+			"code" in retryErr &&
+			(retryErr as { code?: string }).code === "EEXIST"
+		) {
+			throw new Error(
+				`Audit writer lock acquired by another process during stale lock cleanup. Lock file: ${candidateLockPath}`,
+			);
+		}
+		throw retryErr;
+	}
 }
 
-function releaseLocks(locksByDir: Map<string, { fd: number; path: string }>): void {
+// AUD-459: fd is closed immediately after writing PID content.
+// releaseLocks only needs to unlink the file — no fd to close.
+function releaseLocks(locksByDir: Map<string, { path: string }>): void {
 	for (const [dir, lock] of locksByDir) {
-		try {
-			closeSync(lock.fd);
-		} catch {
-			/* already closed */
-		}
 		try {
 			unlinkSync(lock.path);
 		} catch {
@@ -213,17 +269,24 @@ function writeDeadLetter(
 		payload: unknown;
 		error: string;
 		timestamp: string;
+		hmac?: string;
 	},
 ): void {
 	try {
 		const dlqDir = join(vaultPath, VAULT_DIR, "dlq");
 		if (!existsSync(dlqDir)) {
-			mkdirSync(dlqDir, { recursive: true });
+			mkdirSync(dlqDir, { recursive: true, mode: 0o700 });
 		}
+
+		// AUD-469: Compute HMAC over the entry for integrity protection
+		const key = createHash("sha256").update(`dlq-integrity:${vaultPath}`).digest("hex");
+		const hmac = createHmac("sha256", key).update(JSON.stringify(entry)).digest("hex");
+		const sealed = { ...entry, hmac };
+
 		const dlqPath = join(dlqDir, "dead-letters.jsonl");
-		const fd = openSync(dlqPath, "a");
+		const fd = openSync(dlqPath, "a", 0o600);
 		try {
-			writeSync(fd, `${JSON.stringify(entry)}\n`);
+			writeSync(fd, `${JSON.stringify(sealed)}\n`);
 			fsyncSync(fd);
 		} finally {
 			closeSync(fd);
@@ -239,7 +302,7 @@ function writeDeadLetter(
 /**
  * Create an audit writer instance for the given vault path.
  *
- * The writer appends events to `<vaultPath>/.usertools/audit/events.jsonl`.
+ * The writer appends events to `<vaultPath>/.usertrust/audit/events.jsonl`.
  * Each event's SHA-256 hash covers the previous event's hash, creating a
  * tamper-evident chain. The first event chains from GENESIS_HASH.
  */
@@ -252,7 +315,7 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 
 	const mutex = new AsyncMutex();
 	const lastEventCache = new Map<string, CachedTail>();
-	const locksByDir = new Map<string, { fd: number; path: string }>();
+	const locksByDir = new Map<string, { path: string }>();
 	let degraded = false;
 	let writeFailures = 0;
 

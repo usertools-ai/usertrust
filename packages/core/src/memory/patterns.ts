@@ -28,6 +28,33 @@ const PATTERNS_DIR = "patterns";
 const MEMORY_FILE = "memory.json";
 const MAX_ENTRIES = 10_000;
 
+// ── AsyncMutex (AUD-464) ──
+
+/**
+ * In-process async mutex for serializing pattern memory writes.
+ *
+ * SINGLE-PROCESS CONSTRAINT: This mutex is process-local (in-memory).
+ * It guarantees sequential read-modify-write cycles within a single
+ * Node.js process but provides NO protection across multiple processes.
+ * Pattern memory is process-local, so this is sufficient.
+ */
+class AsyncMutex {
+	private queue: Promise<void> = Promise.resolve();
+
+	async acquire(): Promise<() => void> {
+		let release: (() => void) | undefined;
+		const next = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const prev = this.queue;
+		this.queue = next;
+		await prev;
+		return release as () => void;
+	}
+}
+
+const patternMutex = new AsyncMutex();
+
 // ── Instance-scoped cache (keyed by vault path) ──
 
 interface CacheEntry {
@@ -107,31 +134,39 @@ export function hashPrompt(text: string): string {
 
 /**
  * Record a pattern entry from a completed LLM call.
- * Appends to `.usertools/patterns/memory.json`.
+ * Appends to `.usertrust/patterns/memory.json`.
  * Evicts oldest entries when exceeding 10,000.
+ *
+ * Uses an async mutex to serialize concurrent read-modify-write cycles
+ * and prevent entry loss under concurrent calls (AUD-464).
  */
 export async function recordPattern(
 	entry: Omit<PatternEntry, "timestamp">,
 	vaultPath?: string,
 ): Promise<void> {
-	const entries = await ensureLoaded(vaultPath);
+	const release = await patternMutex.acquire();
+	try {
+		const entries = await ensureLoaded(vaultPath);
 
-	const full: PatternEntry = {
-		...entry,
-		timestamp: new Date().toISOString(),
-	};
+		const full: PatternEntry = {
+			...entry,
+			timestamp: new Date().toISOString(),
+		};
 
-	entries.push(full);
+		entries.push(full);
 
-	// Evict oldest if over capacity
-	if (entries.length > MAX_ENTRIES) {
-		const excess = entries.length - MAX_ENTRIES;
-		entries.splice(0, excess);
+		// Evict oldest if over capacity
+		if (entries.length > MAX_ENTRIES) {
+			const excess = entries.length - MAX_ENTRIES;
+			entries.splice(0, excess);
+		}
+
+		const cache = getCache(vaultPath);
+		cache.entries = entries;
+		await persist(entries, vaultPath);
+	} finally {
+		release();
 	}
-
-	const cache = getCache(vaultPath);
-	cache.entries = entries;
-	await persist(entries, vaultPath);
 }
 
 /**
