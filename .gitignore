@@ -1,4 +1,8 @@
 node_modules/
 dist/
-.usertrust/tigerbeetle/
+.usertrust/
+.usertrust-gate1/
+.usertools/
+.usertools-gate1/
+.worktrees/
 *.tsbuildinfo
