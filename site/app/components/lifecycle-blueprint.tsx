@@ -647,7 +647,7 @@ export function LifecycleBlueprint({
 
 	return (
 		<div className={`relative ${className}`}>
-			<span className="absolute top-3 left-4 text-[10px] font-mono tracking-[0.2em] uppercase select-none text-white/20">
+			<span className="absolute top-3 left-4 text-[10px] tracking-[0.2em] uppercase select-none text-white/20">
 				FIG {FIG[phaseId] ?? "0.0"}
 			</span>
 			<svg

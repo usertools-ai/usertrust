@@ -10,9 +10,7 @@ export function CodeExample() {
 					{/* Left: copy */}
 					<div className="flex flex-col gap-5">
 						<ScrollReveal>
-							<p className="text-xs font-mono font-medium text-ut uppercase tracking-widest">
-								One line
-							</p>
+							<p className="text-xs font-medium text-ut uppercase tracking-widest">One line</p>
 						</ScrollReveal>
 						<ScrollReveal delay={0.1}>
 							<h2 className="text-3xl sm:text-4xl font-bold leading-tight">
@@ -24,8 +22,8 @@ export function CodeExample() {
 						<ScrollReveal delay={0.2}>
 							<p className="text-base text-white/60 leading-relaxed">
 								Your API keys. Your billing. Your provider.{" "}
-								<code className="font-mono text-ut text-sm">trust()</code> adds budget holds and
-								audit trails on top — nothing changes except now you have control.
+								<code className="text-ut text-sm">trust()</code> adds budget holds and audit trails
+								on top — nothing changes except now you have control.
 							</p>
 						</ScrollReveal>
 
@@ -34,8 +32,8 @@ export function CodeExample() {
 							<ul className="flex flex-col gap-3 mt-2">
 								<li className="flex items-start gap-3 text-sm text-white/60">
 									<span className="mt-[7px] w-1.5 h-1.5 rounded-full bg-ut shrink-0" />
-									One <code className="font-mono text-ut text-xs">await trust(client)</code> call —
-									nothing else changes
+									One <code className="text-ut text-xs">await trust(client)</code> call — nothing
+									else changes
 								</li>
 								<li className="flex items-start gap-3 text-sm text-white/60">
 									<span className="mt-[7px] w-1.5 h-1.5 rounded-full bg-ut shrink-0" />
@@ -43,8 +41,8 @@ export function CodeExample() {
 								</li>
 								<li className="flex items-start gap-3 text-sm text-white/60">
 									<span className="mt-[7px] w-1.5 h-1.5 rounded-full bg-ut shrink-0" />
-									Every response includes a{" "}
-									<code className="font-mono text-ut text-xs">receipt</code> with hash-chained proof
+									Every response includes a <code className="text-ut text-xs">receipt</code> with
+									hash-chained proof
 								</li>
 							</ul>
 						</ScrollReveal>
@@ -61,7 +59,7 @@ export function CodeExample() {
 								<span className="w-2.5 h-2.5 rounded-full bg-danger/60" />
 								<span className="w-2.5 h-2.5 rounded-full bg-warning/60" />
 								<span className="w-2.5 h-2.5 rounded-full bg-ut/60" />
-								<span className="ml-3 text-xs text-white/25 font-mono">example.ts</span>
+								<span className="ml-3 text-xs text-white/25">example.ts</span>
 							</div>
 							{/* Code */}
 							<pre className="p-5 text-sm font-mono leading-relaxed overflow-x-auto">

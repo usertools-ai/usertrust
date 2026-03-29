@@ -18,12 +18,10 @@ function FlowConnector({
 		<div className="flex flex-col items-center py-5 sm:py-8">
 			<div className="w-px h-5 bg-gradient-to-b from-white/[0.06] to-white/[0.12]" />
 			<div className="py-2.5 px-4 sm:px-6 text-center">
-				<span className="text-[10px] sm:text-[11px] font-mono tracking-[0.12em] text-white/40 block">
+				<span className="text-[10px] sm:text-[11px] tracking-[0.12em] text-white/40 block">
 					{label}
 				</span>
-				{sublabel && (
-					<span className="text-[9px] font-mono text-white/25 block mt-0.5">{sublabel}</span>
-				)}
+				{sublabel && <span className="text-[9px] text-white/25 block mt-0.5">{sublabel}</span>}
 			</div>
 			<svg width="10" height="16" className="text-white/25" role="img" aria-label="Flow arrow">
 				<path d="M5,0 L5,11 M2,8 L5,14 L8,8" stroke="currentColor" strokeWidth="0.75" fill="none" />
@@ -55,7 +53,7 @@ function ArchAnnotation({
 					</li>
 				))}
 			</ul>
-			<p className="text-xs font-mono text-white/25 mt-1">Must never: {constraint}</p>
+			<p className="text-xs text-white/25 mt-1">Must never: {constraint}</p>
 		</div>
 	);
 }
@@ -72,7 +70,7 @@ export function HowItWorks() {
 					<ScrollReveal>
 						<div className="flex items-center gap-4 mb-3">
 							<div className="h-px flex-1 bg-gradient-to-r from-white/[0.06] to-transparent" />
-							<span className="text-[10px] font-mono tracking-[0.3em] uppercase text-white/40">
+							<span className="text-[10px] tracking-[0.3em] uppercase text-white/40">
 								Under the hood
 							</span>
 							<div className="h-px flex-1 bg-gradient-to-l from-white/[0.06] to-transparent" />
@@ -91,7 +89,7 @@ export function HowItWorks() {
 					</ScrollReveal>
 					{/* Inline flow summary */}
 					<ScrollReveal delay={0.3}>
-						<div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-xs font-mono text-white/30 mt-4">
+						<div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 text-xs text-white/30 mt-4">
 							{["PENDING", "EXECUTE", "POST / VOID", "RECEIPT"].map((label, i) => (
 								<span key={label} className="flex items-center gap-2">
 									<span>{label}</span>
@@ -113,7 +111,7 @@ export function HowItWorks() {
 								<h3 className="text-2xl font-semibold text-white">PENDING</h3>
 								<span className="w-2 h-2 rounded-full bg-warning opacity-25 shrink-0" />
 							</div>
-							<p className="text-xs font-mono tracking-wide uppercase text-white/30 mb-5">
+							<p className="text-xs tracking-wide uppercase text-white/30 mb-5">
 								Budget hold creation
 							</p>
 							<ArchAnnotation
@@ -142,7 +140,7 @@ export function HowItWorks() {
 								<h3 className="text-2xl font-semibold text-white">EXECUTE</h3>
 								<span className="w-2 h-2 rounded-full bg-tim opacity-25 shrink-0" />
 							</div>
-							<p className="text-xs font-mono tracking-wide uppercase text-white/30 mb-5">
+							<p className="text-xs tracking-wide uppercase text-white/30 mb-5">
 								Policy gate + LLM call
 							</p>
 							<ArchAnnotation
@@ -180,7 +178,7 @@ export function HowItWorks() {
 								<h3 className="text-xl font-semibold text-white">POST</h3>
 								<span className="w-1.5 h-1.5 rounded-full bg-ut opacity-25 shrink-0" />
 							</div>
-							<p className="text-xs font-mono tracking-wide uppercase text-white/30 mb-5">
+							<p className="text-xs tracking-wide uppercase text-white/30 mb-5">
 								Settlement on success
 							</p>
 							<ArchAnnotation
@@ -205,7 +203,7 @@ export function HowItWorks() {
 								<h3 className="text-xl font-semibold text-white">VOID</h3>
 								<span className="w-1.5 h-1.5 rounded-full bg-danger opacity-25 shrink-0" />
 							</div>
-							<p className="text-xs font-mono tracking-wide uppercase text-white/30 mb-5">
+							<p className="text-xs tracking-wide uppercase text-white/30 mb-5">
 								Release on failure
 							</p>
 							<ArchAnnotation
@@ -223,7 +221,7 @@ export function HowItWorks() {
 
 				{/* POST ↔ VOID badge */}
 				<div className="flex items-center justify-center py-2 mb-2">
-					<span className="text-[9px] font-mono tracking-[0.1em] text-white/30 border border-white/[0.08] rounded px-2.5 py-1">
+					<span className="text-[9px] tracking-[0.1em] text-white/30 border border-white/[0.08] rounded px-2.5 py-1">
 						POST xor VOID : exactly one outcome per transferId · never both
 					</span>
 				</div>
@@ -244,7 +242,7 @@ export function HowItWorks() {
 								<h3 className="text-2xl font-semibold text-white">RECEIPT</h3>
 								<span className="w-2 h-2 rounded-full bg-mem opacity-25 shrink-0" />
 							</div>
-							<p className="text-xs font-mono tracking-wide uppercase text-white/30 mb-5">
+							<p className="text-xs tracking-wide uppercase text-white/30 mb-5">
 								Hash-chained audit proof
 							</p>
 							<ArchAnnotation
@@ -264,7 +262,7 @@ export function HowItWorks() {
 				<div className="mt-16 sm:mt-24">
 					<div className="flex items-center gap-4 mb-8">
 						<div className="h-px flex-1 bg-gradient-to-r from-white/[0.04] to-transparent" />
-						<span className="text-[10px] font-mono tracking-[0.3em] uppercase text-white/40">
+						<span className="text-[10px] tracking-[0.3em] uppercase text-white/40">
 							Connection Index
 						</span>
 						<div className="h-px flex-1 bg-gradient-to-l from-white/[0.04] to-transparent" />
@@ -302,7 +300,7 @@ export function HowItWorks() {
 								].map((flow) => (
 									<div
 										key={`${flow.from}-${flow.to}`}
-										className="flex items-baseline gap-2 text-[11px] font-mono"
+										className="flex items-baseline gap-2 text-[11px]"
 									>
 										<span className="text-white/45">{flow.from}</span>
 										<span className="text-white/25">→</span>
@@ -329,7 +327,7 @@ export function HowItWorks() {
 										role: "12 operators, PII detection, scope globs",
 									},
 								].map((sys) => (
-									<div key={sys.system} className="flex items-baseline gap-2 text-[11px] font-mono">
+									<div key={sys.system} className="flex items-baseline gap-2 text-[11px]">
 										<span className="text-white/45">{sys.system}</span>
 										<span className="text-white/25">—</span>
 										<span className="text-white/30">{sys.role}</span>
@@ -337,7 +335,7 @@ export function HowItWorks() {
 								))}
 							</div>
 
-							<p className="text-[10px] font-mono text-white/20 text-center mt-8">
+							<p className="text-[10px] text-white/20 text-center mt-8">
 								5 PHASES · 3 STORAGE SYSTEMS · 1 UNIVERSAL JOIN KEY (transferId)
 							</p>
 						</div>

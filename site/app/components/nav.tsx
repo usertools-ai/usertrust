@@ -5,7 +5,7 @@ export function Nav() {
 		<nav className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-6 py-4 bg-brand-bg/80 backdrop-blur-[16px] border-b border-white/[0.06]">
 			<a
 				href="/"
-				className="inline-flex items-center px-4 py-1.5 border border-white/20 rounded-full font-mono text-sm font-medium tracking-tight hover:border-ut/50 hover:text-ut transition-colors duration-200"
+				className="inline-flex items-center px-4 py-1.5 border border-white/20 rounded-full text-sm font-medium tracking-tight hover:border-ut/50 hover:text-ut transition-colors duration-200"
 			>
 				usertrust
 			</a>

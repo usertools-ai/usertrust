@@ -34,7 +34,7 @@ export function CopyCommand() {
 			}}
 			aria-label="Copy install command"
 		>
-			<code data-install-cmd className="font-mono text-sm text-white/80 select-all">
+			<code data-install-cmd className="text-sm text-white/80 select-all">
 				$ npm install usertrust
 			</code>
 			<span className="shrink-0 text-xs font-medium text-white/40 group-hover:text-ut transition-colors duration-200">

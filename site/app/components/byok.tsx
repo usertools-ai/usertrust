@@ -40,7 +40,7 @@ export function BYOK() {
 								style={{ background: "rgba(255,255,255,0.03)" }}
 							>
 								<span className="text-sm font-medium text-white/80">{p.name}</span>
-								<span className="text-xs text-white/35 font-mono">{p.detail}</span>
+								<span className="text-xs text-white/35">{p.detail}</span>
 							</div>
 						))}
 
@@ -49,7 +49,7 @@ export function BYOK() {
 							style={{ background: "rgba(52,211,153,0.04)" }}
 						>
 							<span className="text-sm font-medium text-ut/80">+ more</span>
-							<span className="text-xs text-white/35 font-mono">Any provider</span>
+							<span className="text-xs text-white/35">Any provider</span>
 						</div>
 					</div>
 				</ScrollReveal>
