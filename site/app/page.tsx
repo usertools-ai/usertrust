@@ -1,3 +1,4 @@
+import { BeforeAfter } from "./components/before-after";
 import { BYOK } from "./components/byok";
 import { CodeExample } from "./components/code-example";
 import { CTA } from "./components/cta";
@@ -13,6 +14,7 @@ export default function Home() {
 			<Nav />
 			<Hero />
 			<CodeExample />
+			<BeforeAfter />
 			<Features />
 			<HowItWorks />
 			<BYOK />

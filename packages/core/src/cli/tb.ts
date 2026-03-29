@@ -8,22 +8,46 @@
  * manage the embedded TigerBeetle process lifecycle.
  */
 
-export async function run(): Promise<void> {
+import pc from "picocolors";
+import type { CliOptions } from "./init.js";
+
+export async function run(opts?: CliOptions): Promise<void> {
 	const subcommand = process.argv[3];
+	const json = opts?.json === true;
 
 	switch (subcommand) {
 		case "start":
-			console.log("TigerBeetle start — not yet implemented.");
-			console.log("To run TigerBeetle manually:");
-			console.log(
-				"  tigerbeetle start --addresses=3000 --cache-grid=256MiB ./data/0_0.tigerbeetle",
-			);
+			if (json) {
+				console.log(
+					JSON.stringify({
+						command: "tb",
+						success: false,
+						data: { action: "start", message: "Not yet implemented" },
+					}),
+				);
+			} else {
+				console.log(pc.yellow("TigerBeetle start — not yet implemented."));
+				console.log("To run TigerBeetle manually:");
+				console.log(
+					pc.dim("  tigerbeetle start --addresses=3000 --cache-grid=256MiB ./data/0_0.tigerbeetle"),
+				);
+			}
 			break;
 
 		case "stop":
-			console.log("TigerBeetle stop — not yet implemented.");
-			console.log("To stop TigerBeetle manually:");
-			console.log("  kill $(pgrep tigerbeetle)");
+			if (json) {
+				console.log(
+					JSON.stringify({
+						command: "tb",
+						success: false,
+						data: { action: "stop", message: "Not yet implemented" },
+					}),
+				);
+			} else {
+				console.log(pc.yellow("TigerBeetle stop — not yet implemented."));
+				console.log("To stop TigerBeetle manually:");
+				console.log(pc.dim("  kill $(pgrep tigerbeetle)"));
+			}
 			break;
 
 		case "status": {
@@ -36,16 +60,34 @@ export async function run(): Promise<void> {
 				isRunning = false;
 			}
 
-			if (isRunning) {
-				console.log("TigerBeetle: running");
+			if (json) {
+				console.log(
+					JSON.stringify({
+						command: "tb",
+						success: true,
+						data: { action: "status", running: isRunning },
+					}),
+				);
+			} else if (isRunning) {
+				console.log(`TigerBeetle: ${pc.green("running")}`);
 			} else {
-				console.log("TigerBeetle: not running");
+				console.log(`TigerBeetle: ${pc.dim("not running")}`);
 			}
 			break;
 		}
 
 		default:
-			console.log("Usage: usertrust tb <start|stop|status>");
+			if (json) {
+				console.log(
+					JSON.stringify({
+						command: "tb",
+						success: false,
+						data: { message: "Unknown subcommand. Use: start, stop, status" },
+					}),
+				);
+			} else {
+				console.log("Usage: usertrust tb <start|stop|status>");
+			}
 			break;
 	}
 }

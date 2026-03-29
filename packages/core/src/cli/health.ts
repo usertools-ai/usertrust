@@ -10,6 +10,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import pc from "picocolors";
 import {
 	type EntropyEventInput,
 	type EntropyLevel,
@@ -18,6 +19,7 @@ import {
 import { verifyChain } from "../audit/verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
+import type { CliOptions } from "./init.js";
 
 function loadEvents(vaultPath: string): AuditEvent[] {
 	const logPath = join(vaultPath, "audit", "events.jsonl");
@@ -60,6 +62,17 @@ function levelLabel(level: EntropyLevel): string {
 	}
 }
 
+function coloredLevel(level: EntropyLevel): string {
+	switch (level) {
+		case "low":
+			return pc.green("healthy");
+		case "elevated":
+			return pc.yellow("elevated");
+		case "critical":
+			return pc.red("critical");
+	}
+}
+
 function statusTag(value: number, hits: number): string {
 	if (hits === 0) return "[ok]";
 	if (value < 0.3) return "[low]";
@@ -67,12 +80,30 @@ function statusTag(value: number, hits: number): string {
 	return "[critical]";
 }
 
-export async function run(rootDir?: string): Promise<void> {
+function coloredTag(value: number, hits: number): string {
+	if (hits === 0) return pc.green("[ok]");
+	if (value < 0.3) return pc.green("[low]");
+	if (value < 0.6) return pc.yellow("[elevated]");
+	return pc.red("[critical]");
+}
+
+export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const root = rootDir ?? process.cwd();
 	const vaultPath = join(root, VAULT_DIR);
+	const json = opts?.json === true;
 
 	if (!existsSync(vaultPath)) {
-		console.log("No trust vault found. Run `usertrust init` first.");
+		if (json) {
+			console.log(
+				JSON.stringify({
+					command: "health",
+					success: false,
+					data: { message: "No trust vault found. Run `usertrust init` first." },
+				}),
+			);
+		} else {
+			console.log(`${pc.red("No trust vault found.")} Run \`usertrust init\` first.`);
+		}
 		return;
 	}
 
@@ -104,36 +135,64 @@ export async function run(rootDir?: string): Promise<void> {
 	}
 	const budgetPct = config.budget > 0 ? ((spent / config.budget) * 100).toFixed(1) : "0.0";
 
-	console.log(`Entropy score: ${report.score}/100 (${levelLabel(report.level)})`);
-
-	// Signal 1: Policy violations
+	// Signal values
 	const policySignal = report.signals.find((s) => s.condition === "policy_violations");
 	const policyHits = policySignal?.hits ?? 0;
-	const policyStatus = statusTag(policySignal?.value ?? 0, policyHits);
+	const piiSignal = report.signals.find((s) => s.condition === "pii_detections");
+	const piiHits = piiSignal?.hits ?? 0;
+	const cbSignal = report.signals.find((s) => s.condition === "circuit_breaker_trips");
+	const cbHits = cbSignal?.hits ?? 0;
+	const pmSignal = report.signals.find((s) => s.condition === "pattern_memory_hits");
+	const pmHits = pmSignal?.hits ?? 0;
+
+	if (json) {
+		console.log(
+			JSON.stringify({
+				command: "health",
+				success: true,
+				data: {
+					score: report.score,
+					level: levelLabel(report.level),
+					signals: {
+						policyViolations: policyHits,
+						budgetUtilization: Number.parseFloat(budgetPct),
+						chainIntegrity: verification.valid,
+						piiDetections: piiHits,
+						circuitBreakerTrips: cbHits,
+						patternMemoryHits: pmHits,
+					},
+				},
+			}),
+		);
+		return;
+	}
+
+	console.log(`Entropy score: ${report.score}/100 (${coloredLevel(report.level)})`);
+
+	// Signal 1: Policy violations
+	const policyStatus = coloredTag(policySignal?.value ?? 0, policyHits);
 	console.log(`  Policy violations (30d):  ${policyHits}   ${policyStatus}`);
 
 	// Signal 2: Budget utilization
-	const budgetStatus = Number.parseFloat(budgetPct) > 80 ? "[elevated]" : "[ok]";
+	const budgetStatus =
+		Number.parseFloat(budgetPct) > 80 ? pc.yellow("[elevated]") : pc.green("[ok]");
 	console.log(`  Budget utilization:      ${budgetPct}% ${budgetStatus}`);
 
 	// Signal 3: Chain integrity
-	console.log(`  Chain integrity:         ${chainLabel} ${chainStatus}`);
+	const chainColored = verification.valid
+		? pc.green(`${chainLabel} ${chainStatus}`)
+		: pc.red(`${chainLabel} ${chainStatus}`);
+	console.log(`  Chain integrity:         ${chainColored}`);
 
 	// Signal 4: PII detections
-	const piiSignal = report.signals.find((s) => s.condition === "pii_detections");
-	const piiHits = piiSignal?.hits ?? 0;
-	const piiStatus = statusTag(piiSignal?.value ?? 0, piiHits);
+	const piiStatus = coloredTag(piiSignal?.value ?? 0, piiHits);
 	console.log(`  PII detections (30d):    ${piiHits}   ${piiStatus}`);
 
 	// Signal 5: Circuit breaker trips
-	const cbSignal = report.signals.find((s) => s.condition === "circuit_breaker_trips");
-	const cbHits = cbSignal?.hits ?? 0;
-	const cbStatus = statusTag(cbSignal?.value ?? 0, cbHits);
+	const cbStatus = coloredTag(cbSignal?.value ?? 0, cbHits);
 	console.log(`  Circuit breaker trips:   ${cbHits}   ${cbStatus}`);
 
 	// Signal 6: Pattern memory hits
-	const pmSignal = report.signals.find((s) => s.condition === "pattern_memory_hits");
-	const pmHits = pmSignal?.hits ?? 0;
-	const pmStatus = statusTag(pmSignal?.value ?? 0, pmHits);
+	const pmStatus = coloredTag(pmSignal?.value ?? 0, pmHits);
 	console.log(`  Pattern memory hits:     ${pmHits}   ${pmStatus}`);
 }

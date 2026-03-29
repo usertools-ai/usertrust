@@ -10,7 +10,12 @@
 
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import pc from "picocolors";
 import { VAULT_DIR } from "../shared/constants.js";
+
+export interface CliOptions {
+	json?: boolean;
+}
 
 const DEFAULT_CONFIG = {
 	budget: 50000,
@@ -48,12 +53,23 @@ dlq/
 
 const SUBDIRS = ["audit", "policies", "patterns", "snapshots", "board", "dlq"] as const;
 
-export async function run(rootDir?: string): Promise<void> {
+export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const root = rootDir ?? process.cwd();
 	const vaultPath = join(root, VAULT_DIR);
+	const json = opts?.json === true;
 
 	if (existsSync(vaultPath)) {
-		console.log(`Vault already exists at ${vaultPath}`);
+		if (json) {
+			console.log(
+				JSON.stringify({
+					command: "init",
+					success: false,
+					data: { message: "Vault already exists", path: vaultPath },
+				}),
+			);
+		} else {
+			console.log(pc.yellow(`Vault already exists at ${vaultPath}`));
+		}
 		return;
 	}
 
@@ -79,8 +95,23 @@ export async function run(rootDir?: string): Promise<void> {
 	// Set vault permissions to 700 (owner only)
 	chmodSync(vaultPath, 0o700);
 
-	console.log(`Initialized trust vault at ${vaultPath}`);
-	console.log("  Created: audit/, policies/, patterns/, snapshots/, board/, dlq/");
-	console.log("  Config:  usertrust.config.json");
-	console.log("  Policy:  policies/default.yml");
+	if (json) {
+		console.log(
+			JSON.stringify({
+				command: "init",
+				success: true,
+				data: {
+					path: vaultPath,
+					directories: [...SUBDIRS],
+					config: "usertrust.config.json",
+					policy: "policies/default.yml",
+				},
+			}),
+		);
+	} else {
+		console.log(pc.green(`Initialized trust vault at ${vaultPath}`));
+		console.log(pc.dim("  Created: audit/, policies/, patterns/, snapshots/, board/, dlq/"));
+		console.log(pc.dim("  Config:  usertrust.config.json"));
+		console.log(pc.dim("  Policy:  policies/default.yml"));
+	}
 }

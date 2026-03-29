@@ -10,10 +10,12 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import pc from "picocolors";
 import { buildMerkleTree } from "../audit/merkle.js";
 import { verifyChain } from "../audit/verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
+import type { CliOptions } from "./init.js";
 
 function loadConfig(vaultPath: string): { budget: number } {
 	const configPath = join(vaultPath, "usertrust.config.json");
@@ -75,12 +77,23 @@ function padLeft(s: string, len: number): string {
 	return s.length >= len ? s.slice(0, len) : " ".repeat(len - s.length) + s;
 }
 
-export async function run(rootDir?: string): Promise<void> {
+export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const root = rootDir ?? process.cwd();
 	const vaultPath = join(root, VAULT_DIR);
+	const json = opts?.json === true;
 
 	if (!existsSync(vaultPath)) {
-		console.log("No trust vault found. Run `usertrust init` first.");
+		if (json) {
+			console.log(
+				JSON.stringify({
+					command: "inspect",
+					success: false,
+					data: { message: "No trust vault found. Run `usertrust init` first." },
+				}),
+			);
+		} else {
+			console.log(`${pc.red("No trust vault found.")} Run \`usertrust init\` first.`);
+		}
 		return;
 	}
 
@@ -98,18 +111,49 @@ export async function run(rootDir?: string): Promise<void> {
 	const eventHashes = events.map((e) => e.hash);
 	const { root: merkleRoot } = buildMerkleTree(eventHashes);
 
-	const integrityLabel = verification.valid ? "SHA-256 verified" : "INTEGRITY FAILURE";
+	if (json) {
+		const transactions = events
+			.slice(-10)
+			.reverse()
+			.map((e) => ({
+				time: e.timestamp,
+				model: typeof e.data.model === "string" ? e.data.model : "unknown",
+				cost: typeof e.data.cost === "number" ? e.data.cost : null,
+				receipt: typeof e.data.transferId === "string" ? e.data.transferId : e.id,
+			}));
+
+		console.log(
+			JSON.stringify({
+				command: "inspect",
+				success: true,
+				data: {
+					budget: config.budget,
+					spent,
+					remaining,
+					percentRemaining: Number.parseFloat(pct),
+					chain: {
+						events: verification.eventsVerified,
+						valid: verification.valid,
+						latestHash: verification.latestHash,
+					},
+					merkleRoot: merkleRoot ?? null,
+					transactions,
+				},
+			}),
+		);
+		return;
+	}
 
 	// Header
 	console.log("+--------------------------------------------------------------+");
-	console.log(`|  * usertrust vault${" ".repeat(43)}|`);
+	console.log(`|  ${pc.bold("* usertrust vault")}${" ".repeat(43)}|`);
 	console.log(
 		`${`|  Budget: ${remaining.toLocaleString()} / ${config.budget.toLocaleString()} UT remaining (${pct}%)`.padEnd(
 			63,
 		)}|`,
 	);
 	console.log(
-		`${`|  Chain: ${verification.eventsVerified} events | Integrity: ${integrityLabel}`.padEnd(
+		`${`|  Chain: ${verification.eventsVerified} events | Integrity: ${verification.valid ? "SHA-256 verified" : "INTEGRITY FAILURE"}`.padEnd(
 			63,
 		)}|`,
 	);
@@ -138,4 +182,9 @@ export async function run(rootDir?: string): Promise<void> {
 	}
 
 	console.log("+----------+--------------+--------+---------------------------+");
+
+	// Show integrity status with color below the table
+	if (!verification.valid) {
+		console.log(pc.red("WARNING: Chain integrity check failed!"));
+	}
 }
