@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { AnimatedBlueprint } from "./animated-blueprint";
 import { LifecycleBlueprint } from "./lifecycle-blueprint";
 import { ScrollReveal } from "./scroll-reveal";
@@ -38,7 +39,7 @@ function ArchAnnotation({
 	bullets,
 	constraint,
 }: {
-	description: string;
+	description: ReactNode;
 	bullets: string[];
 	constraint: string;
 }) {
@@ -83,8 +84,8 @@ export function HowItWorks() {
 					</ScrollReveal>
 					<ScrollReveal delay={0.2}>
 						<p className="text-base text-white/60 max-w-2xl mx-auto leading-relaxed">
-							Every trust() call follows the same settlement pattern used by payment networks
-							worldwide. No step may be skipped.
+							Every <code className="font-mono text-ut">trust()</code> call follows the same
+							settlement pattern used by payment networks worldwide. No step may be skipped.
 						</p>
 					</ScrollReveal>
 					{/* Inline flow summary */}
@@ -115,7 +116,13 @@ export function HowItWorks() {
 								Budget hold creation
 							</p>
 							<ArchAnnotation
-								description="Before any LLM call executes, trust() reserves tokens from the user's budget — the same hold pattern banks use for credit card authorizations."
+								description={
+									<>
+										Before any LLM call executes, <code className="font-mono text-ut">trust()</code>{" "}
+										reserves tokens from the user&apos;s budget — the same hold pattern banks use
+										for credit card authorizations.
+									</>
+								}
 								bullets={[
 									"Double-entry debit from AVAILABLE, credit to RESERVED",
 									"Estimated cost calculated from the 20-model pricing table",

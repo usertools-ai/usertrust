@@ -46,7 +46,10 @@ const CODE_LINES: Line[] = [
 	[],
 	[
 		{ text: "const", color: C.kw },
-		{ text: " { response, receipt } = ", color: C.txt },
+		{ text: " { response, receipt } =", color: C.txt },
+	],
+	[
+		{ text: "  ", color: C.txt },
 		{ text: "await", color: C.kw },
 		{ text: " client.", color: C.txt },
 		{ text: "messages.create", color: C.fn },
@@ -68,19 +71,19 @@ const CODE_LINES: Line[] = [
 	[],
 	[
 		{ text: "receipt.auditHash", color: C.txt },
-		{ text: "       // SHA-256 hash-chained audit link", color: C.dim },
+		{ text: "  // hash-chained", color: C.dim },
 	],
 	[
 		{ text: "receipt.cost", color: C.txt },
-		{ text: "            // 0.0032", color: C.dim },
+		{ text: "       // 0.0032", color: C.dim },
 	],
 	[
 		{ text: "receipt.settled", color: C.txt },
-		{ text: "         // true", color: C.dim },
+		{ text: "    // true", color: C.dim },
 	],
 	[
 		{ text: "receipt.model", color: C.txt },
-		{ text: '           // "claude-sonnet-4-20250514"', color: C.dim },
+		{ text: "      // claude-sonnet", color: C.dim },
 	],
 ];
 

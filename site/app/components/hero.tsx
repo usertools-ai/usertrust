@@ -109,7 +109,7 @@ export function Hero() {
 						href="#code"
 						className="inline-flex items-center gap-2 px-5 py-2.5 bg-ut text-brand-bg rounded-lg text-sm font-semibold hover:bg-ut/90 active:scale-[0.98] transition-all duration-150"
 					>
-						See the code
+						Start Trusting
 					</a>
 					<a
 						href="https://github.com/usertools-ai/usertrust"
@@ -121,15 +121,35 @@ export function Hero() {
 					</a>
 				</motion.div>
 
-				{/* License badge — bottom of pane */}
-				<motion.p
+				{/* Badges + license — bottom of pane */}
+				<motion.div
 					initial={{ opacity: 0 }}
 					animate={{ opacity: 1 }}
 					transition={{ duration: 0.6, ease: "easeOut", delay: 0.64 }}
-					className="text-[10px] text-white/25 tracking-wide"
+					className="flex flex-col items-center gap-3"
 				>
-					Open source · Apache 2.0
-				</motion.p>
+					<div className="flex flex-wrap items-center justify-center gap-2">
+						<img
+							src="https://img.shields.io/npm/v/usertrust?style=flat-square&color=10b981&labelColor=1a1a2e"
+							alt="npm version"
+							height={20}
+							className="h-5"
+						/>
+						<img
+							src="https://img.shields.io/npm/dm/usertrust?style=flat-square&color=10b981&labelColor=1a1a2e"
+							alt="npm downloads per month"
+							height={20}
+							className="h-5"
+						/>
+						<img
+							src="https://img.shields.io/github/stars/usertools-ai/usertrust?style=flat-square&color=10b981&labelColor=1a1a2e"
+							alt="GitHub stars"
+							height={20}
+							className="h-5"
+						/>
+					</div>
+					<p className="text-[10px] text-white/25 tracking-wide">Open source · Apache 2.0</p>
+				</motion.div>
 			</div>
 		</section>
 	);

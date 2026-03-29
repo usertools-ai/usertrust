@@ -18,30 +18,6 @@ export function Footer() {
 
 				<div className="flex flex-wrap items-center gap-4 text-sm text-white/30">
 					<a
-						href="https://userbank.ai"
-						target="_blank"
-						rel="noopener noreferrer"
-						className="hover:text-white/70 transition-colors duration-200"
-					>
-						userbank.ai
-					</a>
-					<a
-						href="https://userintel.ai"
-						target="_blank"
-						rel="noopener noreferrer"
-						className="hover:text-white/70 transition-colors duration-200"
-					>
-						userintel.ai
-					</a>
-					<a
-						href="https://usermemory.ai"
-						target="_blank"
-						rel="noopener noreferrer"
-						className="hover:text-white/70 transition-colors duration-200"
-					>
-						usermemory.ai
-					</a>
-					<a
 						href="https://github.com/usertools-ai/usertrust"
 						target="_blank"
 						rel="noopener noreferrer"

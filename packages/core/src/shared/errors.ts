@@ -5,72 +5,119 @@ export class InsufficientBalanceError extends Error {
 	public readonly userId: string;
 	public readonly required: number;
 	public readonly available: number;
+	public readonly hint: string;
+	public readonly docsUrl: string;
 
 	constructor(userId: string, required: number, available: number) {
-		super(`Insufficient balance for user ${userId}: need ${required}, have ${available}`);
+		const hint = "Increase the budget in trust() options or add funds via the ledger.";
+		const docsUrl = "https://usertrust.ai/docs/errors/insufficient-balance";
+		super(
+			`Insufficient balance for user ${userId}: need ${required}, have ${available}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`,
+		);
 		this.name = "InsufficientBalanceError";
 		this.userId = userId;
 		this.required = required;
 		this.available = available;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
 	}
 }
 
 export class PolicyDeniedError extends Error {
 	public readonly reason: string;
+	public readonly hint: string;
+	public readonly docsUrl: string;
 
 	constructor(reason: string) {
-		super(`Policy denied: ${reason}`);
+		const hint =
+			'Check your policy rules in .usertrust/policies/ or use { pii: "warn" } to downgrade PII enforcement.';
+		const docsUrl = "https://usertrust.ai/docs/errors/policy-denied";
+		super(`Policy denied: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
 		this.name = "PolicyDeniedError";
 		this.reason = reason;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
 	}
 }
 
 export class AccountNotFoundError extends Error {
 	public readonly userId: string;
+	public readonly hint: string;
+	public readonly docsUrl: string;
 
 	constructor(userId: string) {
-		super(`Account not found for user: ${userId}`);
+		const hint =
+			'Run "npx usertrust init" to create accounts, or verify the userId matches your config.';
+		const docsUrl = "https://usertrust.ai/docs/errors/account-not-found";
+		super(`Account not found for user: ${userId}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
 		this.name = "AccountNotFoundError";
 		this.userId = userId;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
 	}
 }
 
 export class IdempotencyConflictError extends Error {
 	public readonly key: string;
+	public readonly hint: string;
+	public readonly docsUrl: string;
 
 	constructor(key: string) {
-		super(`Idempotency conflict for key: ${key}`);
+		const hint = "This transfer was already submitted. Use a unique transferId for retries.";
+		const docsUrl = "https://usertrust.ai/docs/errors/idempotency-conflict";
+		super(`Idempotency conflict for key: ${key}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
 		this.name = "IdempotencyConflictError";
 		this.key = key;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
 	}
 }
 
 export class LedgerUnavailableError extends Error {
 	public readonly cause_message: string;
+	public readonly hint: string;
+	public readonly docsUrl: string;
 
 	constructor(reason: string) {
-		super(`Ledger unavailable: ${reason}`);
+		const hint =
+			'Start TigerBeetle with "npx usertrust tb start" or use { dryRun: true } to skip the ledger.';
+		const docsUrl = "https://usertrust.ai/docs/errors/ledger-unavailable";
+		super(`Ledger unavailable: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
 		this.name = "LedgerUnavailableError";
 		this.cause_message = reason;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
 	}
 }
 
 export class AuditDegradedError extends Error {
 	public readonly cause_message: string;
+	public readonly hint: string;
+	public readonly docsUrl: string;
 
 	constructor(reason: string) {
-		super(`Audit degraded: ${reason}`);
+		const hint = "Check disk space and permissions on the .usertrust/audit/ directory.";
+		const docsUrl = "https://usertrust.ai/docs/errors/audit-degraded";
+		super(`Audit degraded: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
 		this.name = "AuditDegradedError";
 		this.cause_message = reason;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
 	}
 }
 
 export class VaultNotInitializedError extends Error {
 	public readonly path: string;
+	public readonly hint: string;
+	public readonly docsUrl: string;
 
 	constructor(path: string) {
-		super(`Vault not initialized at: ${path}`);
+		const hint = 'Run "npx usertrust init" to create the vault directory.';
+		const docsUrl = "https://usertrust.ai/docs/errors/vault-not-initialized";
+		super(`Vault not initialized at: ${path}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
 		this.name = "VaultNotInitializedError";
 		this.path = path;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
 	}
 }

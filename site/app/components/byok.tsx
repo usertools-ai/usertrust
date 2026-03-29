@@ -24,8 +24,9 @@ export function BYOK() {
 					</ScrollReveal>
 					<ScrollReveal delay={0.1}>
 						<p className="text-base text-white/60 leading-relaxed">
-							trust() wraps your existing provider client. No proxy. No routing. No new accounts.
-							Just trust on top of what you already use.
+							<code className="font-mono text-ut">trust()</code> wraps your existing provider
+							client. No proxy. No routing. No new accounts. Just trust on top of what you already
+							use.
 						</p>
 					</ScrollReveal>
 				</div>

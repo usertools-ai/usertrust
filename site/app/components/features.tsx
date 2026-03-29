@@ -99,7 +99,15 @@ export function Features() {
 									</div>
 									<div className="flex flex-col gap-2">
 										<h3 className="font-semibold text-white text-base">{card.title}</h3>
-										<p className="text-sm text-white/50 leading-relaxed">{card.description}</p>
+										<p className="text-sm text-white/50 leading-relaxed">
+											{card.description.split("trust()").map((part, j, arr) => (
+												// biome-ignore lint/suspicious/noArrayIndexKey: static split
+												<span key={j}>
+													{part}
+													{j < arr.length - 1 && <code className="font-mono text-ut">trust()</code>}
+												</span>
+											))}
+										</p>
 									</div>
 								</div>
 							</ScrollReveal>

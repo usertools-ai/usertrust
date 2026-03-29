@@ -1,5 +1,6 @@
 "use client";
 
+import { GovernanceReceipt } from "./governance-receipt";
 import { ScrollReveal } from "./scroll-reveal";
 import { TypewriterCode } from "./typewriter-code";
 
@@ -51,6 +52,11 @@ export function CodeExample() {
 
 					{/* Right: code block — typewriter animation */}
 					<TypewriterCode />
+				</div>
+
+				{/* Governance receipt — what you get back */}
+				<div className="mt-16 lg:mt-24">
+					<GovernanceReceipt />
 				</div>
 			</div>
 		</section>
