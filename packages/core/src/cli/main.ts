@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-const COMMANDS = ["init", "inspect", "health", "verify", "snapshot", "tb"] as const;
+const COMMANDS = ["init", "inspect", "health", "verify", "snapshot", "tb", "completions"] as const;
 
 const argv = process.argv.slice(2);
 const jsonFlag = argv.includes("--json");
@@ -69,6 +69,9 @@ switch (command) {
 	case "tb":
 		await import("./tb.js").then((m) => m.run({ json: jsonFlag }));
 		break;
+	case "completions":
+		await import("./completions.js").then((m) => m.run(positional[1], { json: jsonFlag }));
+		break;
 	default: {
 		if (command && !command.startsWith("-")) {
 			const suggestion = suggestCommand(command);
@@ -81,12 +84,13 @@ switch (command) {
 		console.log(`Usage: usertrust <command>
 
 Commands:
-  init       Initialize trust vault
-  inspect    Show trust bank statement
-  health     Show entropy diagnostics
-  verify     Verify audit chain integrity
-  snapshot   Create/restore vault snapshots
-  tb         Manage TigerBeetle process
+  init          Initialize trust vault
+  inspect       Show trust bank statement
+  health        Show entropy diagnostics
+  verify        Verify audit chain integrity
+  snapshot      Create/restore vault snapshots
+  tb            Manage TigerBeetle process
+  completions   Output shell completion scripts
 
 Options:
   --json     Output machine-readable JSON`);
