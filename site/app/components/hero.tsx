@@ -50,16 +50,6 @@ export function Hero() {
 					boxShadow: "0 0 80px rgba(10,10,26,0.3)",
 				}}
 			>
-				{/* Badge */}
-				<motion.div
-					initial={{ opacity: 0, y: 20 }}
-					animate={{ opacity: 1, y: 0 }}
-					transition={{ duration: 0.6, ease: "easeOut", delay: 0 }}
-					className="inline-flex items-center gap-2 px-4 py-1.5 bg-ut/10 border border-ut/30 rounded-full text-ut text-xs font-medium tracking-wide"
-				>
-					Open source · Apache 2.0
-				</motion.div>
-
 				{/* Headline */}
 				<h1 className="flex flex-col items-center gap-1">
 					<motion.span
@@ -130,6 +120,16 @@ export function Hero() {
 						View on GitHub
 					</a>
 				</motion.div>
+
+				{/* License badge — bottom of pane */}
+				<motion.p
+					initial={{ opacity: 0 }}
+					animate={{ opacity: 1 }}
+					transition={{ duration: 0.6, ease: "easeOut", delay: 0.64 }}
+					className="text-[10px] text-white/25 tracking-wide"
+				>
+					Open source · Apache 2.0
+				</motion.p>
 			</div>
 		</section>
 	);

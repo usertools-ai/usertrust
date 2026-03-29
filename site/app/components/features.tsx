@@ -31,7 +31,7 @@ const cards: { title: string; subtitle: string; description: string; color: Colo
 		title: "Hash-chained audit",
 		subtitle: "SHA-256 · RFC 6962 MERKLE",
 		description:
-			"Every transaction links to its predecessor via SHA-256. Tamper-evident by construction. SOC 2 ready.",
+			"Every transaction links to its predecessor via SHA-256. Tamper-evident by construction.",
 		color: "tim",
 	},
 	{

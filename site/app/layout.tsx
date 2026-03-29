@@ -13,7 +13,10 @@ const usertoolsSans = localFont({
 });
 
 const jetbrainsMono = localFont({
-	src: [{ path: "../public/fonts/JetBrainsMono[wght].woff2", weight: "400 700" }],
+	src: [
+		{ path: "../public/fonts/JetBrainsMono-Regular.woff2", weight: "400" },
+		{ path: "../public/fonts/JetBrainsMono-Bold.woff2", weight: "700" },
+	],
 	variable: "--font-jetbrains",
 	display: "swap",
 });

@@ -20,6 +20,16 @@
 					}
 				}
 			}
+		},
+		{
+			"include": ["site/app/components/typewriter-code.tsx"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noArrayIndexKey": "off"
+					}
+				}
+			}
 		}
 	]
 }
