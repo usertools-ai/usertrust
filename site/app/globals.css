@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+/* Fonts loaded via next/font/local in layout.tsx — CSS variables injected on <html> */
+
+@theme {
+	--color-brand-bg: #0a0a1a;
+	--color-brand-surface: rgba(255, 255, 255, 0.05);
+	--color-brand-surface-hover: rgba(255, 255, 255, 0.08);
+	--color-brand-border: rgba(255, 255, 255, 0.08);
+	--color-brand-border-hover: rgba(255, 255, 255, 0.12);
+
+	--color-ut: #34d399;
+	--color-tim: #6ca0c0;
+	--color-mem: #c084fc;
+	--color-warning: #f59e0b;
+	--color-danger: #ef4444;
+
+	--font-sans: var(--font-usertools), -apple-system, BlinkMacSystemFont, sans-serif;
+	--font-mono: var(--font-jetbrains), "SF Mono", "Cascadia Code", monospace;
+}
+
+/* Ken Burns zoom on hero background */
+@keyframes kenburns {
+	0% {
+		transform: scale(1);
+	}
+	100% {
+		transform: scale(1.08);
+	}
+}
+
+/* Backdrop-filter fallback */
+@supports not (backdrop-filter: blur(1px)) {
+	.glass {
+		background: rgba(10, 10, 26, 0.85) !important;
+	}
+}
+
+/* Mobile: disable ken burns */
+@media (max-width: 767px) {
+	.hero-bg {
+		animation: none !important;
+		background-position: center 30%;
+	}
+}
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+	.hero-bg {
+		animation: none !important;
+	}
+}
+
+/* Smooth scroll */
+html {
+	scroll-behavior: smooth;
+}
