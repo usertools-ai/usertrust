@@ -6,3 +6,26 @@ dist/
 .usertools-gate1/
 .worktrees/
 *.tsbuildinfo
+
+# AI assistant / editor configs
+CLAUDE.md
+.claude/
+.cursorrules
+.copilot/
+
+# Internal docs (plans, specs, research)
+docs/superpowers/
+docs/research/
+
+# Internal scripts
+scripts/gate1-soak.ts
+
+# OS metadata
+.DS_Store
+
+# Environment files
+.env
+.env.*
+
+# Task tracking
+tasks/
