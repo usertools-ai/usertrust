@@ -38,10 +38,10 @@
 		}
 	},
 	"dependencies": {
-		"minimatch": "^10.0.0",
+		"minimatch": "^10.2.4",
 		"picocolors": "^1.1.1",
 		"tigerbeetle-node": "^0.16.0",
-		"yaml": "^2.7.0",
+		"yaml": "^2.8.3",
 		"zod": "^3.23.0"
 	},
 	"scripts": {

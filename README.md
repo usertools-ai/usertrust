@@ -89,6 +89,52 @@ PII:      2 warnings · 0 blocks
 Merkle:   a3f8c1...d92b (root)
 ```
 
+## CLI
+
+All commands support `--json` for machine-readable output.
+
+```bash
+usertrust init          # Create .usertrust/ vault
+usertrust inspect       # Vault bank statement
+usertrust health        # Entropy diagnostics (6 signals, 0-100 score)
+usertrust verify        # Verify audit chain integrity
+usertrust snapshot      # Checkpoint/restore vault state
+usertrust tb            # TigerBeetle process management
+usertrust completions   # Shell completions (bash, zsh, fish)
+```
+
+### JSON output
+
+Every command supports `--json` for scripting and CI:
+
+```bash
+usertrust inspect --json | jq '.data.remaining'
+```
+
+### Shell completions
+
+```bash
+# Bash
+usertrust completions bash > ~/.local/share/bash-completion/completions/usertrust
+
+# Zsh
+usertrust completions zsh > "${fpath[1]}/_usertrust"
+
+# Fish
+usertrust completions fish > ~/.config/fish/completions/usertrust.fish
+```
+
+### Error messages
+
+All errors include fix suggestions and documentation links:
+
+```
+Ledger unavailable: connection refused
+
+  Hint: Start TigerBeetle with "npx usertrust tb start" or use { dryRun: true } to skip the ledger.
+  Docs: https://usertrust.ai/docs/errors/ledger-unavailable
+```
+
 ## Config
 
 Create `.usertrust/usertrust.config.json`:
