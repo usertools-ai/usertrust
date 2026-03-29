@@ -3,28 +3,44 @@
 Financial governance for AI agents. Every LLM call becomes an immutable, auditable transaction.
 
 ```typescript
-// Before
-const anthropic = new Anthropic();
-const msg = await anthropic.messages.create({
-  model: "claude-sonnet-4-6",
-  max_tokens: 1024,
-  messages: [{ role: "user", content: "Analyze this contract" }],
-});
-// Hope nothing goes wrong. No audit trail. No budget enforcement.
-
-// After
 import { trust } from "usertrust";
+import Anthropic from "@anthropic-ai/sdk";
 
-const client = await trust(new Anthropic());
+// dryRun: true — skips TigerBeetle so you can try instantly.
+// Audit chain and policy engine still run.
+const client = await trust(new Anthropic(), { dryRun: true, budget: 50_000 });
+
 const { response, governance } = await client.messages.create({
-  model: "claude-sonnet-4-6",
+  model: "claude-sonnet-4.6",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Analyze this contract" }],
 });
-// Cost: 142 UT · Budget: 49,858 / 50,000 · Receipt: tx_m4k7r2_a1b2c3
+
+console.log(governance);
+
+// REQUIRED — process hangs without this
+await client.destroy();
 ```
 
 That's it. One function wraps any supported LLM client. Every call is metered, audited, and policy-checked.
+
+### Expected Output
+
+The `governance` receipt returned from every call:
+
+```
+{
+  cost: 42,
+  budgetRemaining: 49958,
+  transferId: "tx_m4k7p2_a1b2c3",
+  auditHash: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  settled: true,
+  model: "claude-sonnet-4.6",
+  provider: "anthropic",
+  inputTokens: 12,
+  outputTokens: 28
+}
+```
 
 ## Install
 
@@ -51,10 +67,9 @@ const { response, governance } = await anthropic.messages.create({ ... });
 const openai = await trust(new OpenAI());
 const { response, governance } = await openai.chat.completions.create({ ... });
 
-// With options
+// With options (full mode — requires TigerBeetle)
 const client = await trust(new Anthropic(), {
   budget: 100_000,
-  dryRun: true,
 });
 ```
 
@@ -67,7 +82,7 @@ Every call returns `{ response, governance }` where `governance` is a receipt:
   budgetRemaining: 49_858,
   auditHash: "a3f8...",
   settled: true,
-  model: "claude-sonnet-4-6",
+  model: "claude-sonnet-4.6",
   provider: "anthropic",
   timestamp: "2026-03-16T12:00:00.000Z"
 }

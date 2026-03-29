@@ -26,6 +26,9 @@ scripts/gate1-soak.ts
 # Environment files
 .env
 .env.*
+.env.local
+.env.production
+.env*.local
 
 # Task tracking
 tasks/
