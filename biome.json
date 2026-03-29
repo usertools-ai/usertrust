@@ -6,5 +6,20 @@
 	"linter": {
 		"enabled": true,
 		"rules": { "recommended": true }
-	}
+	},
+	"files": {
+		"ignore": ["**/dist/**", "**/coverage/**", "**/.usertrust/**", "**/.usertrust-gate1/**"]
+	},
+	"overrides": [
+		{
+			"include": ["scripts/**"],
+			"linter": {
+				"rules": {
+					"suspicious": {
+						"noExplicitAny": "off"
+					}
+				}
+			}
+		}
+	]
 }

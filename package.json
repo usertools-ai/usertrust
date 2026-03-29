@@ -11,9 +11,12 @@
 		"typecheck": "tsc -b"
 	},
 	"devDependencies": {
+		"@anthropic-ai/sdk": "^0.78.0",
 		"@biomejs/biome": "^1.9.0",
 		"@types/node": "^25.5.0",
 		"@vitest/coverage-v8": "^4.1.0",
+		"openai": "^5.8.0",
+		"tsx": "^4.19.0",
 		"typescript": "^5.9.0",
 		"vitest": "^4.0.0"
 	}
