@@ -61,4 +61,4 @@ jobs:
           git commit -m "release: v${VERSION}"
           git push -u origin "$BRANCH"
           gh pr create --title "release: v${VERSION}" --body "Auto-generated version bump after npm publish."
-          gh pr merge "$BRANCH" --squash --admin --subject "release: v${VERSION}"
+          gh pr merge "$BRANCH" --squash --auto --subject "release: v${VERSION}"
