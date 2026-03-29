@@ -1,6 +1,6 @@
 {
 	"name": "usertrust-verify",
-	"version": "0.2.1",
+	"version": "0.2.3",
 	"description": "Zero-dependency verifier for usertrust governance receipts. Validates hash chains, Merkle proofs, and audit trails.",
 	"license": "Apache-2.0",
 	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
