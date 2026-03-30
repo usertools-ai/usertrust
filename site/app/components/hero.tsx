@@ -107,7 +107,7 @@ export function Hero() {
 				>
 					<a
 						href="#code"
-						className="inline-flex items-center gap-2 px-5 py-2.5 bg-ut text-brand-bg rounded-lg text-sm font-semibold hover:bg-ut/90 active:scale-[0.98] transition-all duration-150"
+						className="inline-flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] bg-ut text-brand-bg rounded-lg text-sm font-semibold hover:bg-ut/90 active:scale-[0.98] transition-all duration-150"
 					>
 						Start Trusting
 					</a>
@@ -115,7 +115,7 @@ export function Hero() {
 						href="https://github.com/usertools-ai/usertrust"
 						target="_blank"
 						rel="noopener noreferrer"
-						className="inline-flex items-center gap-2 px-5 py-2.5 bg-white/[0.06] border border-white/10 rounded-lg text-sm font-medium text-white/80 hover:bg-white/[0.10] hover:text-white transition-all duration-150"
+						className="inline-flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] bg-white/[0.06] border border-white/10 rounded-lg text-sm font-medium text-white/80 hover:bg-white/[0.10] hover:text-white transition-all duration-150"
 					>
 						View on GitHub
 					</a>

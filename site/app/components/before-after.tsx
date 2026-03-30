@@ -215,7 +215,7 @@ function CodePanel({
 			</div>
 
 			{/* Code lines */}
-			<pre className="p-5 text-sm font-mono leading-relaxed overflow-x-auto">
+			<pre className="p-3 sm:p-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto">
 				<code>
 					{lines.map((line, i) => (
 						// biome-ignore lint/suspicious/noArrayIndexKey: static constant array

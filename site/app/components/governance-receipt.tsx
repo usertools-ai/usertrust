@@ -173,7 +173,7 @@ export function GovernanceReceipt() {
 						<span className="ml-3 text-xs text-white/25">governance receipt</span>
 					</div>
 
-					<pre className="p-5 text-sm font-mono leading-relaxed overflow-x-auto">
+					<pre className="p-3 sm:p-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto">
 						<code>
 							{RECEIPT_LINES.map((line, i) => {
 								const indent = INDENTS[i] ?? 0;

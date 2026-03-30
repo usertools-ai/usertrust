@@ -23,7 +23,7 @@ export function CTA() {
 					<div className="flex flex-wrap items-center justify-center gap-3">
 						<a
 							href="#code"
-							className="inline-flex items-center gap-2.5 px-6 py-3 bg-ut text-brand-bg rounded-lg text-sm font-semibold hover:bg-ut/90 active:scale-[0.98] transition-all duration-150"
+							className="inline-flex items-center justify-center gap-2.5 px-6 py-3 min-h-[44px] bg-ut text-brand-bg rounded-lg text-sm font-semibold hover:bg-ut/90 active:scale-[0.98] transition-all duration-150"
 						>
 							Start Trusting
 						</a>
@@ -32,7 +32,7 @@ export function CTA() {
 							href="https://github.com/usertools-ai/usertrust"
 							target="_blank"
 							rel="noopener noreferrer"
-							className="inline-flex items-center gap-2 px-6 py-3 border border-white/[0.12] rounded-lg text-sm font-medium text-white/80 hover:bg-white/[0.05] hover:text-white hover:border-white/20 transition-all duration-150"
+							className="inline-flex items-center justify-center gap-2 px-6 py-3 min-h-[44px] border border-white/[0.12] rounded-lg text-sm font-medium text-white/80 hover:bg-white/[0.05] hover:text-white hover:border-white/20 transition-all duration-150"
 						>
 							<GitHubIcon className="w-4 h-4" />
 							View on GitHub
