@@ -99,7 +99,7 @@ function flattenLine(line: Line): { char: string; color: string }[] {
 
 export function TypewriterCode() {
 	const ref = useRef<HTMLDivElement>(null);
-	const inView = useInView(ref, { once: true, margin: "0px 0px -80px 0px" });
+	const inView = useInView(ref, { once: true, amount: 0.1 });
 	const [visibleChars, setVisibleChars] = useState(0);
 	const [done, setDone] = useState(false);
 
@@ -159,7 +159,7 @@ export function TypewriterCode() {
 				{/* Invisible full code reserves pane dimensions */}
 				<div className="relative">
 					<pre
-						className="p-5 text-sm font-mono leading-relaxed overflow-x-auto invisible"
+						className="p-3 sm:p-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto invisible"
 						aria-hidden="true"
 					>
 						<code>
@@ -169,7 +169,7 @@ export function TypewriterCode() {
 						</code>
 					</pre>
 					{/* Visible typewriter overlay */}
-					<pre className="p-5 text-sm font-mono leading-relaxed overflow-x-auto absolute inset-0">
+					<pre className="p-3 sm:p-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto absolute inset-0">
 						<code>
 							{rendered.map((c, i) =>
 								c.char === "\n" ? (
