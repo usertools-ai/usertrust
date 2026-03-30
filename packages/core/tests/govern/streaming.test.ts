@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LLMClientKind } from "../../src/shared/types.js";
-import { type StreamUsage, wrapStream } from "../../src/streaming.js";
+import { type StreamCompletion, type StreamUsage, wrapStream } from "../../src/streaming.js";
 
 // ── Helpers ──
 
@@ -64,8 +64,8 @@ describe("wrapStream", () => {
 			await collectAll(wrapped);
 
 			expect(onComplete).toHaveBeenCalledOnce();
-			const usage: StreamUsage = onComplete.mock.calls[0]?.[0] as StreamUsage;
-			expect(usage.inputTokens).toBe(150);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage.inputTokens).toBe(150);
 		});
 
 		it("extracts output_tokens from message_delta", async () => {
@@ -80,8 +80,8 @@ describe("wrapStream", () => {
 			const wrapped = wrapStream(mockStream(chunks), kind, onComplete, onError);
 			await collectAll(wrapped);
 
-			const usage: StreamUsage = onComplete.mock.calls[0]?.[0] as StreamUsage;
-			expect(usage.outputTokens).toBe(75);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage.outputTokens).toBe(75);
 		});
 
 		it("reports combined usage on complete", async () => {
@@ -96,7 +96,11 @@ describe("wrapStream", () => {
 			const wrapped = wrapStream(mockStream(chunks), kind, onComplete, onError);
 			await collectAll(wrapped);
 
-			expect(onComplete).toHaveBeenCalledWith({ inputTokens: 200, outputTokens: 50 });
+			expect(onComplete).toHaveBeenCalledWith({
+				usage: { inputTokens: 200, outputTokens: 50 },
+				chunksDelivered: 3,
+				usageReported: true,
+			});
 			expect(onError).not.toHaveBeenCalled();
 		});
 
@@ -111,9 +115,9 @@ describe("wrapStream", () => {
 			const wrapped = wrapStream(mockStream(chunks), kind, onComplete, onError);
 			await collectAll(wrapped);
 
-			const usage: StreamUsage = onComplete.mock.calls[0]?.[0] as StreamUsage;
-			expect(usage.inputTokens).toBe(0);
-			expect(usage.outputTokens).toBe(0);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage.inputTokens).toBe(0);
+			expect(completion.usage.outputTokens).toBe(0);
 		});
 	});
 
@@ -148,7 +152,11 @@ describe("wrapStream", () => {
 			const wrapped = wrapStream(mockStream(chunks), kind, onComplete, onError);
 			await collectAll(wrapped);
 
-			expect(onComplete).toHaveBeenCalledWith({ inputTokens: 100, outputTokens: 42 });
+			expect(onComplete).toHaveBeenCalledWith({
+				usage: { inputTokens: 100, outputTokens: 42 },
+				chunksDelivered: 2,
+				usageReported: true,
+			});
 		});
 
 		it("returns zero when no usage field present", async () => {
@@ -162,9 +170,9 @@ describe("wrapStream", () => {
 			const wrapped = wrapStream(mockStream(chunks), kind, onComplete, onError);
 			await collectAll(wrapped);
 
-			const usage: StreamUsage = onComplete.mock.calls[0]?.[0] as StreamUsage;
-			expect(usage.inputTokens).toBe(0);
-			expect(usage.outputTokens).toBe(0);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage.inputTokens).toBe(0);
+			expect(completion.usage.outputTokens).toBe(0);
 		});
 	});
 
@@ -204,7 +212,11 @@ describe("wrapStream", () => {
 			const wrapped = wrapStream(mockStream(chunks), kind, onComplete, onError);
 			await collectAll(wrapped);
 
-			expect(onComplete).toHaveBeenCalledWith({ inputTokens: 60, outputTokens: 33 });
+			expect(onComplete).toHaveBeenCalledWith({
+				usage: { inputTokens: 60, outputTokens: 33 },
+				chunksDelivered: 2,
+				usageReported: true,
+			});
 		});
 
 		it("returns zero when no usageMetadata present", async () => {
@@ -215,9 +227,9 @@ describe("wrapStream", () => {
 			const wrapped = wrapStream(mockStream(chunks), kind, onComplete, onError);
 			await collectAll(wrapped);
 
-			const usage: StreamUsage = onComplete.mock.calls[0]?.[0] as StreamUsage;
-			expect(usage.inputTokens).toBe(0);
-			expect(usage.outputTokens).toBe(0);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage.inputTokens).toBe(0);
+			expect(completion.usage.outputTokens).toBe(0);
 		});
 	});
 
@@ -242,7 +254,9 @@ describe("wrapStream", () => {
 			}).rejects.toThrow("Stream error");
 
 			expect(onError).toHaveBeenCalledOnce();
-			expect(onError.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+			const [err, partial] = onError.mock.calls[0] as [Error, StreamCompletion];
+			expect(err).toBeInstanceOf(Error);
+			expect(partial.chunksDelivered).toBe(1);
 			expect(onComplete).not.toHaveBeenCalled();
 		});
 
@@ -282,6 +296,28 @@ describe("wrapStream", () => {
 			expect(collected[0]).toEqual(chunks[0]);
 			expect(collected[1]).toEqual(chunks[1]);
 		});
+
+		it("provides partial usage info on mid-stream error", async () => {
+			const chunks = [
+				{ type: "message_start", message: { usage: { input_tokens: 50 } } },
+				{ type: "content_block_delta", delta: { text: "partial" } },
+				{ type: "content_block_delta", delta: { text: "boom" } },
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(failingStream(chunks, 2), "anthropic", onComplete, onError);
+			try {
+				for await (const _ of wrapped) {
+					/* consume */
+				}
+			} catch {
+				/* expected */
+			}
+			const [, partial] = onError.mock.calls[0] as [unknown, StreamCompletion];
+			expect(partial.chunksDelivered).toBe(2);
+			expect(partial.usage.inputTokens).toBe(50);
+			expect(partial.usageReported).toBe(true);
+		});
 	});
 
 	// ─── Edge cases ───
@@ -294,7 +330,11 @@ describe("wrapStream", () => {
 
 			const collected = await collectAll(wrapped);
 			expect(collected).toEqual([]);
-			expect(onComplete).toHaveBeenCalledWith({ inputTokens: 0, outputTokens: 0 });
+			expect(onComplete).toHaveBeenCalledWith({
+				usage: { inputTokens: 0, outputTokens: 0 },
+				chunksDelivered: 0,
+				usageReported: false,
+			});
 			expect(onError).not.toHaveBeenCalled();
 		});
 
@@ -307,7 +347,11 @@ describe("wrapStream", () => {
 
 			const collected = await collectAll(wrapped);
 			expect(collected).toHaveLength(3);
-			expect(onComplete).toHaveBeenCalledWith({ inputTokens: 0, outputTokens: 0 });
+			expect(onComplete).toHaveBeenCalledWith({
+				usage: { inputTokens: 0, outputTokens: 0 },
+				chunksDelivered: 3,
+				usageReported: false,
+			});
 		});
 
 		it("uses last non-zero value when multiple usage chunks arrive", async () => {
@@ -323,10 +367,50 @@ describe("wrapStream", () => {
 			const wrapped = wrapStream(mockStream(chunks), "anthropic", onComplete, onError);
 			await collectAll(wrapped);
 
-			const usage: StreamUsage = onComplete.mock.calls[0]?.[0] as StreamUsage;
-			expect(usage.inputTokens).toBe(50);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage.inputTokens).toBe(50);
 			// Last output_tokens value wins
-			expect(usage.outputTokens).toBe(25);
+			expect(completion.usage.outputTokens).toBe(25);
+		});
+
+		it("tracks chunksDelivered count", async () => {
+			const chunks = [
+				{ type: "content_block_delta", delta: { text: "a" } },
+				{ type: "content_block_delta", delta: { text: "b" } },
+				{ type: "content_block_delta", delta: { text: "c" } },
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "anthropic", onComplete, onError);
+			await collectAll(wrapped);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.chunksDelivered).toBe(3);
+		});
+
+		it("sets usageReported=false when provider reports no usage", async () => {
+			const chunks = [
+				{ type: "content_block_delta", delta: { text: "Hello" } },
+				{ type: "content_block_delta", delta: { text: " world" } },
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "anthropic", onComplete, onError);
+			await collectAll(wrapped);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usageReported).toBe(false);
+		});
+
+		it("sets usageReported=true when provider reports usage", async () => {
+			const chunks = [
+				{ type: "message_start", message: { usage: { input_tokens: 100 } } },
+				{ type: "message_delta", usage: { output_tokens: 20 } },
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "anthropic", onComplete, onError);
+			await collectAll(wrapped);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usageReported).toBe(true);
 		});
 	});
 });

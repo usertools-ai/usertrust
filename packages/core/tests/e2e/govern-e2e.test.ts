@@ -796,8 +796,9 @@ describe("trust() — end-to-end integration", () => {
 			expect(chunks).toHaveLength(4);
 			expect(onComplete).toHaveBeenCalledOnce();
 			expect(onComplete).toHaveBeenCalledWith({
-				inputTokens: 100,
-				outputTokens: 25,
+				usage: { inputTokens: 100, outputTokens: 25 },
+				chunksDelivered: 4,
+				usageReported: true,
 			});
 			expect(onError).not.toHaveBeenCalled();
 		});

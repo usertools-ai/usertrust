@@ -17,6 +17,10 @@ export interface TrustReceipt {
 	timestamp: string;
 	/** Present and true when the audit chain write failed (failure mode 15.3). */
 	auditDegraded?: boolean;
+	/** Whether cost came from provider-reported usage or the pre-call estimate. */
+	usageSource?: "provider" | "estimated";
+	/** Number of chunks delivered to the consumer (streaming calls only). */
+	chunksDelivered?: number;
 }
 
 // ── TrustedResponse — returned by every governed LLM call ──

@@ -50,7 +50,7 @@ import { LedgerUnavailableError, PolicyDeniedError } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
 import { TrustConfigSchema } from "./shared/types.js";
 import type { LLMClientKind, TrustConfig, TrustReceipt, TrustedResponse } from "./shared/types.js";
-import { type StreamUsage, createGovernedStream } from "./streaming.js";
+import { type StreamCompletion, createGovernedStream } from "./streaming.js";
 
 // ── Public types ──
 
@@ -138,7 +138,10 @@ async function loadSpendLedger(vaultBase: string): Promise<number> {
 			"budgetSpent" in parsed &&
 			typeof (parsed as SpendLedger).budgetSpent === "number"
 		) {
-			return (parsed as SpendLedger).budgetSpent;
+			const value = (parsed as SpendLedger).budgetSpent;
+			if (Number.isFinite(value) && value >= 0) {
+				return value;
+			}
 		}
 	} catch {
 		// No ledger file or corrupt — start from zero
@@ -234,6 +237,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	let budgetSpent = await loadSpendLedger(vaultBase); // AUD-457: restore from disk
 	const budgetMutex = new AsyncMutex(); // AUD-453: serialise budget-check + hold
 	let inFlightCount = 0; // AUD-462: track in-flight calls for graceful destroy
+	let inFlightStreamCount = 0; // AUD-462: track in-flight streams (consumed after interceptCall returns)
+	let inFlightHoldTotal = 0; // Track estimated cost of in-flight pending holds
 
 	// 7. Two-phase intercept
 	async function interceptCall(
@@ -280,7 +285,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					model,
 					tier: config.tier,
 					estimated_cost: estimatedCost,
-					budget_remaining: config.budget - budgetSpent,
+					budget_remaining: config.budget - budgetSpent - inFlightHoldTotal,
 					...params,
 				});
 				if (policyResult.decision === "deny") {
@@ -326,6 +331,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						);
 					}
 				}
+
+				// Track in-flight hold cost for accurate budget calculations
+				inFlightHoldTotal += estimatedCost;
 			} finally {
 				// AUD-453: Release lock after budget check + hold are complete
 				releaseBudgetLock();
@@ -347,8 +355,25 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					const governedStream = createGovernedStream(
 						stream,
 						kind,
-						async (usage: StreamUsage) => {
-							const streamCost = estimateCost(model, usage.inputTokens, usage.outputTokens);
+						async (completion: StreamCompletion) => {
+							// Determine cost: use provider usage if reported, else fall back to estimate
+							let streamCost: number;
+							let usageSource: "provider" | "estimated";
+							if (completion.usageReported) {
+								streamCost = estimateCost(
+									model,
+									completion.usage.inputTokens,
+									completion.usage.outputTokens,
+								);
+								usageSource = "provider";
+							} else {
+								streamCost = estimatedCost;
+								usageSource = "estimated";
+							}
+
+							// Release in-flight hold
+							inFlightHoldTotal -= estimatedCost;
+
 							budgetSpent += streamCost;
 							// AUD-457: Persist cumulative spend to disk
 							await persistSpendLedger(vaultBase, budgetSpent);
@@ -358,14 +383,48 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								try {
 									// AUD-460: Use the proxy's transferId for settlement
 									await proxyConn.settle(proxyTransferId ?? transferId, streamCost);
-								} catch {
+								} catch (postErr) {
 									settled = false;
+									await audit
+										.appendEvent({
+											kind: "settlement_ambiguous",
+											actor: "local",
+											data: {
+												model,
+												cost: streamCost,
+												transferId,
+												error:
+													postErr instanceof Error
+														? postErr.message.slice(0, 200)
+														: String(postErr).slice(0, 200),
+											},
+										})
+										.catch(() => {
+											callAuditDegraded = true;
+										});
 								}
 							} else if (engine != null && !isDryRun) {
 								try {
 									await engine.postPendingSpend(transferId);
-								} catch {
+								} catch (postErr) {
 									settled = false;
+									await audit
+										.appendEvent({
+											kind: "settlement_ambiguous",
+											actor: "local",
+											data: {
+												model,
+												cost: streamCost,
+												transferId,
+												error:
+													postErr instanceof Error
+														? postErr.message.slice(0, 200)
+														: String(postErr).slice(0, 200),
+											},
+										})
+										.catch(() => {
+											callAuditDegraded = true;
+										});
 								}
 							}
 
@@ -375,17 +434,24 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								const auditEvent = await audit.appendEvent({
 									kind: "llm_call",
 									actor: "local",
-									data: { model, cost: streamCost, settled, transferId },
+									data: {
+										model,
+										cost: streamCost,
+										settled,
+										transferId,
+										usageSource,
+										chunksDelivered: completion.chunksDelivered,
+									},
 								});
 								auditHash = auditEvent.hash;
 							} catch {
 								callAuditDegraded = true;
 							}
 
-							return {
+							const streamReceipt: TrustReceipt = {
 								transferId,
 								cost: streamCost,
-								budgetRemaining: config.budget - budgetSpent,
+								budgetRemaining: config.budget - budgetSpent - inFlightHoldTotal,
 								auditHash,
 								chainPath: join(VAULT_DIR, "audit"),
 								receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
@@ -393,19 +459,49 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								model,
 								provider: kind,
 								timestamp: new Date().toISOString(),
+								usageSource,
+								chunksDelivered: completion.chunksDelivered,
 								...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 								// AUD-456: Flag proxy stub receipts
 								...(proxyConn != null ? { proxyStub: true as const } : {}),
 							};
+							inFlightStreamCount--;
+							return streamReceipt;
 						},
-						(error: unknown) => {
+						(error: unknown, partial: StreamCompletion) => {
+							// Release in-flight hold
+							inFlightHoldTotal -= estimatedCost;
+
 							cb.recordFailure();
+
+							// Best-effort audit of partial delivery
+							audit
+								.appendEvent({
+									kind: "stream_partial_delivery",
+									actor: "local",
+									data: {
+										transferId,
+										model,
+										chunksDelivered: partial.chunksDelivered,
+										partialInputTokens: partial.usage.inputTokens,
+										partialOutputTokens: partial.usage.outputTokens,
+										usageReported: partial.usageReported,
+										error:
+											error instanceof Error
+												? error.message.slice(0, 200)
+												: String(error).slice(0, 200),
+									},
+								})
+								.catch(() => {});
+
 							if (proxyConn != null && !isDryRun) {
 								// AUD-460: Use the proxy's transferId for void
 								proxyConn.void(proxyTransferId ?? transferId).catch(() => {});
 							} else if (engine != null && !isDryRun) {
 								engine.voidPendingSpend(transferId).catch(() => {});
 							}
+
+							inFlightStreamCount--;
 						},
 					);
 
@@ -416,7 +512,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					const estimatedReceipt: TrustReceipt = {
 						transferId,
 						cost: estimatedCost,
-						budgetRemaining: config.budget - budgetSpent,
+						budgetRemaining: config.budget - budgetSpent - inFlightHoldTotal,
 						auditHash,
 						chainPath: join(VAULT_DIR, "audit"),
 						receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
@@ -429,6 +525,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						...(proxyConn != null ? { proxyStub: true as const } : {}),
 					};
 
+					inFlightStreamCount++;
 					return { response: governedStream, receipt: estimatedReceipt };
 				}
 
@@ -451,6 +548,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						actualCost = estimateCost(model, inputTokens, outputTokens);
 					}
 				}
+
+				// Release in-flight hold (non-streaming success)
+				inFlightHoldTotal -= estimatedCost;
 
 				// Track budget (cumulative)
 				budgetSpent += actualCost;
@@ -543,7 +643,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					}).catch(() => {});
 				}
 
-				const budgetRemaining = config.budget - budgetSpent;
+				const budgetRemaining = config.budget - budgetSpent - inFlightHoldTotal;
 
 				const receipt: TrustReceipt = {
 					transferId,
@@ -563,6 +663,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				return { response, receipt };
 			} catch (err) {
+				// Release in-flight hold (non-streaming failure)
+				inFlightHoldTotal -= estimatedCost;
+
 				// j. Circuit breaker: record failure
 				cb.recordFailure();
 
@@ -627,7 +730,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// AUD-462: Wait up to 5 seconds for in-flight calls to complete.
 			// After the deadline, proceed with teardown anyway.
 			const deadline = Date.now() + 5_000;
-			while (inFlightCount > 0 && Date.now() < deadline) {
+			while ((inFlightCount > 0 || inFlightStreamCount > 0) && Date.now() < deadline) {
 				await new Promise<void>((r) => setTimeout(r, 50));
 			}
 

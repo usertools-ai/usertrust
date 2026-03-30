@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { TrustReceipt } from "../../src/shared/types.js";
-import { type StreamUsage, createGovernedStream } from "../../src/streaming.js";
+import {
+	type StreamCompletion,
+	type StreamUsage,
+	createGovernedStream,
+} from "../../src/streaming.js";
 
 // ── Helpers ──
 
@@ -48,8 +52,8 @@ async function collectAll<T>(stream: AsyncIterable<T>): Promise<T[]> {
 describe("createGovernedStream", () => {
 	it("receipt promise resolves with receipt after stream completes", async () => {
 		const receipt = makeReceipt({ cost: 100 });
-		const resolveReceipt = vi.fn(async (_usage: StreamUsage) => receipt);
-		const rejectReceipt = vi.fn();
+		const resolveReceipt = vi.fn(async (_completion: StreamCompletion) => receipt);
+		const rejectReceipt = vi.fn((_error: unknown, _partial: StreamCompletion) => {});
 
 		const chunks = [
 			{ type: "message_start", message: { usage: { input_tokens: 50 } } },
@@ -75,8 +79,8 @@ describe("createGovernedStream", () => {
 	});
 
 	it("receipt promise rejects if stream errors", async () => {
-		const resolveReceipt = vi.fn(async (_usage: StreamUsage) => makeReceipt());
-		const rejectReceipt = vi.fn();
+		const resolveReceipt = vi.fn(async (_completion: StreamCompletion) => makeReceipt());
+		const rejectReceipt = vi.fn((_error: unknown, _partial: StreamCompletion) => {});
 
 		const chunks = [
 			{ type: "content_block_delta", delta: { text: "partial" } },
@@ -107,8 +111,8 @@ describe("createGovernedStream", () => {
 
 	it("yields all chunks unchanged", async () => {
 		const receipt = makeReceipt();
-		const resolveReceipt = vi.fn(async () => receipt);
-		const rejectReceipt = vi.fn();
+		const resolveReceipt = vi.fn(async (_completion: StreamCompletion) => receipt);
+		const rejectReceipt = vi.fn((_error: unknown, _partial: StreamCompletion) => {});
 
 		const chunks = [
 			{ choices: [{ delta: { content: "Part 1" } }] },
@@ -129,13 +133,13 @@ describe("createGovernedStream", () => {
 
 	it("factory wires onComplete to resolveReceipt callback with usage", async () => {
 		const receipt = makeReceipt({ cost: 77 });
-		const resolveReceipt = vi.fn(async (usage: StreamUsage) => {
+		const resolveReceipt = vi.fn(async (completion: StreamCompletion) => {
 			// Verify the usage was passed through
-			expect(usage.inputTokens).toBe(200);
-			expect(usage.outputTokens).toBe(50);
+			expect(completion.usage.inputTokens).toBe(200);
+			expect(completion.usage.outputTokens).toBe(50);
 			return receipt;
 		});
-		const rejectReceipt = vi.fn();
+		const rejectReceipt = vi.fn((_error: unknown, _partial: StreamCompletion) => {});
 
 		const chunks = [
 			{ type: "message_start", message: { usage: { input_tokens: 200 } } },
@@ -154,16 +158,20 @@ describe("createGovernedStream", () => {
 		const result = await governed.receipt;
 
 		expect(resolveReceipt).toHaveBeenCalledOnce();
-		expect(resolveReceipt).toHaveBeenCalledWith({ inputTokens: 200, outputTokens: 50 });
+		expect(resolveReceipt).toHaveBeenCalledWith({
+			usage: { inputTokens: 200, outputTokens: 50 },
+			chunksDelivered: 3,
+			usageReported: true,
+		});
 		expect(result.cost).toBe(77);
 		expect(rejectReceipt).not.toHaveBeenCalled();
 	});
 
 	it("receipt rejects if resolveReceipt throws", async () => {
-		const resolveReceipt = vi.fn(async () => {
+		const resolveReceipt = vi.fn(async (_completion: StreamCompletion) => {
 			throw new Error("POST failed");
 		});
-		const rejectReceipt = vi.fn();
+		const rejectReceipt = vi.fn((_error: unknown, _partial: StreamCompletion) => {});
 
 		const chunks = [{ type: "content_block_delta", delta: { text: "data" } }];
 
@@ -181,8 +189,8 @@ describe("createGovernedStream", () => {
 
 	it("works with Google provider chunks", async () => {
 		const receipt = makeReceipt({ provider: "google", model: "gemini-2.5-flash" });
-		const resolveReceipt = vi.fn(async () => receipt);
-		const rejectReceipt = vi.fn();
+		const resolveReceipt = vi.fn(async (_completion: StreamCompletion) => receipt);
+		const rejectReceipt = vi.fn((_error: unknown, _partial: StreamCompletion) => {});
 
 		const chunks = [
 			{ candidates: [{ content: { parts: [{ text: "Hello" }] } }] },
@@ -204,13 +212,17 @@ describe("createGovernedStream", () => {
 
 		const result = await governed.receipt;
 		expect(result.provider).toBe("google");
-		expect(resolveReceipt).toHaveBeenCalledWith({ inputTokens: 30, outputTokens: 15 });
+		expect(resolveReceipt).toHaveBeenCalledWith({
+			usage: { inputTokens: 30, outputTokens: 15 },
+			chunksDelivered: 2,
+			usageReported: true,
+		});
 	});
 
 	it("handles empty stream gracefully", async () => {
 		const receipt = makeReceipt({ cost: 0 });
-		const resolveReceipt = vi.fn(async () => receipt);
-		const rejectReceipt = vi.fn();
+		const resolveReceipt = vi.fn(async (_completion: StreamCompletion) => receipt);
+		const rejectReceipt = vi.fn((_error: unknown, _partial: StreamCompletion) => {});
 
 		const governed = createGovernedStream(mockStream([]), "openai", resolveReceipt, rejectReceipt);
 
@@ -219,6 +231,10 @@ describe("createGovernedStream", () => {
 
 		const result = await governed.receipt;
 		expect(result.cost).toBe(0);
-		expect(resolveReceipt).toHaveBeenCalledWith({ inputTokens: 0, outputTokens: 0 });
+		expect(resolveReceipt).toHaveBeenCalledWith({
+			usage: { inputTokens: 0, outputTokens: 0 },
+			chunksDelivered: 0,
+			usageReported: false,
+		});
 	});
 });

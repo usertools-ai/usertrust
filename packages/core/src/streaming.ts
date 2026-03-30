@@ -30,6 +30,12 @@ export interface StreamUsage {
 	outputTokens: number;
 }
 
+export interface StreamCompletion {
+	usage: StreamUsage;
+	chunksDelivered: number;
+	usageReported: boolean;
+}
+
 export interface GovernedStream<T> extends AsyncIterable<T> {
 	/** Resolves with the trust receipt when the stream completes */
 	receipt: Promise<TrustReceipt>;
@@ -94,8 +100,8 @@ function extractTokensFromChunk(chunk: unknown, kind: LLMClientKind): StreamUsag
 export function wrapStream<T>(
 	stream: AsyncIterable<T>,
 	kind: LLMClientKind,
-	onComplete: (usage: StreamUsage) => void,
-	onError: (error: unknown) => void,
+	onComplete: (completion: StreamCompletion) => void,
+	onError: (error: unknown, partial: StreamCompletion) => void,
 ): AsyncIterable<T> {
 	return wrapStreamImpl(stream, kind, onComplete, onError);
 }
@@ -103,24 +109,33 @@ export function wrapStream<T>(
 async function* wrapStreamImpl<T>(
 	stream: AsyncIterable<T>,
 	kind: LLMClientKind,
-	onComplete: (usage: StreamUsage) => void,
-	onError: (error: unknown) => void,
+	onComplete: (completion: StreamCompletion) => void,
+	onError: (error: unknown, partial: StreamCompletion) => void,
 ): AsyncGenerator<T> {
 	let inputTokens = 0;
 	let outputTokens = 0;
+	let chunksDelivered = 0;
+	let usageReported = false;
 
 	try {
 		for await (const chunk of stream) {
 			const tokens = extractTokensFromChunk(chunk, kind);
 			// Use latest non-zero value (providers report cumulative or final)
-			if (tokens.inputTokens > 0) inputTokens = tokens.inputTokens;
-			if (tokens.outputTokens > 0) outputTokens = tokens.outputTokens;
+			if (tokens.inputTokens > 0) {
+				inputTokens = tokens.inputTokens;
+				usageReported = true;
+			}
+			if (tokens.outputTokens > 0) {
+				outputTokens = tokens.outputTokens;
+				usageReported = true;
+			}
 
 			yield chunk;
+			chunksDelivered++;
 		}
-		onComplete({ inputTokens, outputTokens });
+		onComplete({ usage: { inputTokens, outputTokens }, chunksDelivered, usageReported });
 	} catch (err) {
-		onError(err);
+		onError(err, { usage: { inputTokens, outputTokens }, chunksDelivered, usageReported });
 		throw err;
 	}
 }
@@ -138,8 +153,8 @@ async function* wrapStreamImpl<T>(
 export function createGovernedStream<T>(
 	stream: AsyncIterable<T>,
 	kind: LLMClientKind,
-	resolveReceipt: (usage: StreamUsage) => Promise<TrustReceipt>,
-	rejectReceipt: (error: unknown) => void,
+	resolveReceipt: (completion: StreamCompletion) => Promise<TrustReceipt>,
+	rejectReceipt: (error: unknown, partial: StreamCompletion) => void,
 ): GovernedStream<T> {
 	let receiptResolve!: (receipt: TrustReceipt) => void;
 	let receiptReject!: (error: unknown) => void;
@@ -152,8 +167,8 @@ export function createGovernedStream<T>(
 	const wrapped = wrapStream(
 		stream,
 		kind,
-		(usage) => {
-			resolveReceipt(usage)
+		(completion) => {
+			resolveReceipt(completion)
 				.then((receipt) => {
 					receiptResolve(receipt);
 				})
@@ -161,8 +176,8 @@ export function createGovernedStream<T>(
 					receiptReject(err);
 				});
 		},
-		(error) => {
-			rejectReceipt(error);
+		(error, partial) => {
+			rejectReceipt(error, partial);
 			receiptReject(error);
 		},
 	);
