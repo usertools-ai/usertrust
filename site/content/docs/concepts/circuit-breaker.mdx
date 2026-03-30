@@ -1,0 +1,113 @@
+---
+title: Circuit Breaker
+description: Per-provider failure isolation with configurable thresholds and automatic recovery.
+---
+
+usertrust includes a per-provider circuit breaker that prevents cascading failures when an LLM provider is experiencing issues. If a provider fails repeatedly, the breaker trips open and fast-fails subsequent requests until the provider recovers.
+
+## Three States
+
+The circuit breaker follows the standard state machine:
+
+```
+CLOSED → (failures hit threshold) → OPEN → (timeout expires) → HALF-OPEN → (successes) → CLOSED
+                                       ↑                            │
+                                       └──── (failure) ─────────────┘
+```
+
+| State | Behavior |
+|-------|----------|
+| **Closed** | Requests pass through normally. Failures are counted. |
+| **Open** | All requests are immediately rejected with `CircuitOpenError`. No calls reach the provider. |
+| **Half-Open** | A limited number of requests are allowed through as probes. Successes move toward closed; a failure returns to open. |
+
+## CircuitBreaker
+
+```typescript
+const breaker = new CircuitBreaker("anthropic", {
+  failureThreshold: 5,           // trips after 5 consecutive failures
+  resetTimeoutMs: 60_000,        // try again after 60 seconds
+  halfOpenSuccessThreshold: 2,   // 2 successes to fully close
+});
+
+breaker.allowRequest();   // throws CircuitOpenError if open
+breaker.recordSuccess();  // decrements toward closed
+breaker.recordFailure();  // increments toward open
+breaker.reset();          // force close
+```
+
+### Request Flow
+
+1. Call `allowRequest()` before forwarding to the provider
+2. If the breaker is open and the timeout has not expired, `CircuitOpenError` is thrown
+3. If the timeout has expired, the breaker transitions to half-open and allows the request
+4. On success, call `recordSuccess()` -- in half-open, this counts toward the success threshold
+5. On failure, call `recordFailure()` -- in half-open, this immediately returns to open
+
+## CircuitBreakerRegistry
+
+The registry manages breakers for multiple providers. Each provider key gets its own independent breaker instance.
+
+```typescript
+const registry = new CircuitBreakerRegistry({
+  failureThreshold: 5,
+  resetTimeout: 60_000,
+});
+
+// Get or create a breaker for a provider
+const breaker = registry.get("anthropic");
+
+// Snapshot all breakers
+const all = registry.allSnapshots();
+// { anthropic: { state: "closed", ... }, openai: { state: "open", ... } }
+
+// Reset all breakers
+registry.resetAll();
+```
+
+## CircuitBreakerSnapshot
+
+The snapshot provides a read-only view of a breaker's current state:
+
+```typescript
+interface CircuitBreakerSnapshot {
+  state: "closed" | "open" | "half-open";
+  consecutiveFailures: number;
+  halfOpenSuccesses: number;
+  lastFailureTime: number | null;
+  lastStateChange: number;
+}
+```
+
+## CircuitOpenError
+
+When a request is rejected by an open breaker, a `CircuitOpenError` is thrown. It extends `Error` and includes the breaker key for identification:
+
+```typescript
+try {
+  breaker.allowRequest();
+} catch (err) {
+  if (err instanceof CircuitOpenError) {
+    console.log(err.breakerKey); // "anthropic"
+    // Fall back to a different provider or queue the request
+  }
+}
+```
+
+## Configuration
+
+Set circuit breaker thresholds in `usertrust.config.json`:
+
+```json
+{
+  "circuitBreaker": {
+    "failureThreshold": 5,
+    "resetTimeout": 60000
+  }
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `circuitBreaker.failureThreshold` | number | `5` | Consecutive failures before the breaker trips open |
+| `circuitBreaker.resetTimeout` | number | `60000` | Milliseconds before an open breaker transitions to half-open |

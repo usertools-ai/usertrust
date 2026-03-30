@@ -1,0 +1,144 @@
+---
+title: Quickstart
+description: Install usertrust and make your first governed LLM call in 2 minutes.
+---
+
+## Install
+
+```bash
+npm install usertrust
+```
+
+## Initialize the Vault
+
+```bash
+npx usertrust init
+```
+
+This creates the `.usertrust/` directory with the default config, policy rules, and audit chain.
+
+## Wrap Your Client
+
+`trust()` is an async factory that returns a Proxy-wrapped client. It works with Anthropic, OpenAI, and Google SDKs via duck typing — no provider imports needed.
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+import { trust } from "usertrust";
+
+// trust() is async — it sets up the ledger + audit chain
+const client = await trust(new Anthropic(), {
+  budget: 50_000,   // 50,000 usertokens ($5.00)
+  dryRun: true,     // skip TigerBeetle for quick testing
+});
+
+// Returns { response, governance } — NOT response._governance
+const { response, governance } = await client.messages.create({
+  model: "claude-sonnet-4-6",
+  max_tokens: 1024,
+  messages: [{ role: "user", content: "Hello" }],
+});
+
+console.log(response.content);
+console.log(governance); // TrustReceipt with cost, budgetRemaining, auditHash
+
+// REQUIRED — process hangs without this
+await client.destroy();
+```
+
+<Callout type="warn">
+Always call `client.destroy()` when done. It releases the TigerBeetle connection, advisory locks, and pending transfers.
+</Callout>
+
+## What Happens Under the Hood
+
+Every governed call executes a two-phase spend:
+
+1. **PENDING** — Reserve tokens atomically before the LLM call
+2. **Forward** — Call the real SDK method
+3. **POST** — Settle the hold on success
+4. **VOID** — Release the hold on failure
+
+This is the same pattern banks use for credit card authorization holds.
+
+## The Governance Receipt
+
+Every call returns a `TrustReceipt`:
+
+```ts
+{
+  transferId: "tx_m4k7z_a1b2c3",
+  cost: 342,                    // usertokens spent
+  budgetRemaining: 49_658,      // tokens left
+  auditHash: "a1b2c3d4...",     // SHA-256 hash in the chain
+  chainPath: ".usertrust/audit/events.jsonl",
+  settled: true,                // POST succeeded
+  model: "claude-sonnet-4-6",
+  provider: "anthropic",
+  timestamp: "2025-01-15T...",
+}
+```
+
+## Supported Providers
+
+usertrust detects your SDK by structural shape:
+
+| Provider | Detection | Method Intercepted |
+|----------|-----------|-------------------|
+| Anthropic | `client.messages.create` | `messages.create()` |
+| OpenAI | `client.chat.completions.create` | `chat.completions.create()` |
+| Google | `client.models.generateContent` | `models.generateContent()` |
+
+```ts
+// OpenAI
+import OpenAI from "openai";
+const client = await trust(new OpenAI(), { budget: 50_000 });
+const { response } = await client.chat.completions.create({ ... });
+
+// Google
+import { GoogleGenAI } from "@google/genai";
+const client = await trust(new GoogleGenAI({ apiKey }), { budget: 50_000 });
+const { response } = await client.models.generateContent({ ... });
+```
+
+## Streaming
+
+Streaming works transparently. The governance receipt resolves when the stream completes:
+
+```ts
+const { response, governance } = await client.messages.create({
+  model: "claude-sonnet-4-6",
+  max_tokens: 1024,
+  messages: [{ role: "user", content: "Hello" }],
+  stream: true,
+});
+
+// Consume the stream
+for await (const event of response) {
+  process.stdout.write(event.type);
+}
+
+// Receipt is available after stream ends
+const receipt = await governance;
+```
+
+## Dry-Run Mode
+
+Skip TigerBeetle entirely while keeping the audit chain and policy engine active:
+
+```ts
+const client = await trust(new Anthropic(), {
+  dryRun: true,    // or set USERTRUST_DRY_RUN=true
+  budget: 50_000,
+});
+```
+
+Use dry-run in CI, tests, and local development.
+
+## Next Steps
+
+<Cards>
+  <Card title="Two-Phase Spend" description="Deep dive into the banking hold pattern" href="/docs/concepts/two-phase-spend" />
+  <Card title="Configuration" description="Budget, tiers, PII, board, circuit breaker" href="/docs/api/config" />
+  <Card title="Policy Engine" description="Define rules for cost, scope, and time" href="/docs/policy/rules" />
+  <Card title="CLI Commands" description="Inspect vault, check health, verify chain" href="/docs/cli" />
+</Cards>

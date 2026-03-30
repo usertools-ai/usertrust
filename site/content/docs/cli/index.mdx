@@ -1,0 +1,102 @@
+---
+title: CLI Reference
+description: Command reference for the usertrust CLI — init, inspect, health, verify, snapshot, tb.
+---
+
+All CLI commands are available via `npx usertrust`.
+
+### Installation
+
+```bash
+npm install usertrust
+```
+
+The CLI is available as `npx usertrust`.
+
+### usertrust init
+
+Creates the `.usertrust/` vault directory with default config, policy rules, and audit chain.
+
+```bash
+npx usertrust init
+```
+
+Creates:
+
+```
+.usertrust/
+├── usertrust.config.json
+├── audit/
+│   ├── events.jsonl
+│   └── index.json
+├── board/
+│   ├── session.json
+│   └── history.jsonl
+├── policies/
+│   └── default.yml
+├── patterns/
+│   └── memory.json
+├── leases.json
+├── snapshots/
+├── dlq/
+│   └── dead-letters.jsonl
+└── tigerbeetle/
+```
+
+### usertrust inspect
+
+Shows a vault bank statement — budget, spend, remaining balance, recent transactions.
+
+```bash
+npx usertrust inspect
+npx usertrust inspect --json   # machine-readable output
+```
+
+### usertrust health
+
+Entropy diagnostics with 6 signals, scoring 0-100:
+
+```bash
+npx usertrust health
+npx usertrust health --json
+```
+
+6 entropy signals measured for governance health diagnostics.
+
+### usertrust verify
+
+Verifies the integrity of the SHA-256 hash-chained audit trail:
+
+```bash
+npx usertrust verify
+npx usertrust verify --json
+```
+
+Checks:
+- Every event's hash covers the previous event's hash
+- Chain starts from GENESIS_HASH (64 zeros)
+- No gaps or tampering in the sequence
+
+### usertrust snapshot
+
+Create and restore vault state checkpoints:
+
+```bash
+npx usertrust snapshot           # create a snapshot
+npx usertrust snapshot --list    # list available snapshots
+npx usertrust snapshot --restore <name>  # restore from snapshot
+```
+
+### usertrust tb
+
+TigerBeetle process management:
+
+```bash
+npx usertrust tb start    # start TigerBeetle
+npx usertrust tb stop     # stop TigerBeetle
+npx usertrust tb status   # check if running
+```
+
+### Global Options
+
+- `--json` — Machine-readable JSON output for all commands

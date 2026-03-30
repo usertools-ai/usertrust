@@ -1,0 +1,189 @@
+---
+title: Errors
+description: Seven domain error classes with structured hints and documentation URLs.
+---
+
+usertrust defines seven domain-specific error classes. All extend `Error` and include structured `hint` and `docsUrl` properties for actionable diagnostics.
+
+## Catching Errors
+
+```typescript
+import {
+  InsufficientBalanceError,
+  PolicyDeniedError,
+  LedgerUnavailableError,
+} from "usertrust";
+
+try {
+  const { response, receipt } = await client.messages.create({
+    model: "claude-sonnet-4-6",
+    max_tokens: 1024,
+    messages: [{ role: "user", content: "Hello" }],
+  });
+} catch (err) {
+  if (err instanceof InsufficientBalanceError) {
+    console.log(`Need ${err.required} UT, have ${err.available} UT`);
+    console.log(err.hint);
+  }
+  if (err instanceof PolicyDeniedError) {
+    console.log(`Blocked: ${err.reason}`);
+  }
+  if (err instanceof LedgerUnavailableError) {
+    console.log(`TigerBeetle down: ${err.cause_message}`);
+  }
+}
+```
+
+Every error class follows the same pattern: a descriptive message, a `hint` with a suggested fix, and a `docsUrl` pointing to detailed documentation.
+
+---
+
+## InsufficientBalanceError
+
+Thrown when the requested LLM call would exceed the remaining budget.
+
+```typescript
+class InsufficientBalanceError extends Error {
+  readonly userId: string;
+  readonly required: number;    // usertokens needed
+  readonly available: number;   // usertokens remaining
+  readonly hint: string;
+  readonly docsUrl: string;
+}
+```
+
+**When it fires:** During the PENDING hold phase, before the LLM call is forwarded to the provider. No tokens are consumed.
+
+**Hint:** `"Increase the budget in trust() options or add funds via the ledger."`
+
+---
+
+## PolicyDeniedError
+
+Thrown when a policy rule or PII detector blocks the request.
+
+```typescript
+class PolicyDeniedError extends Error {
+  readonly reason: string;
+  readonly hint: string;
+  readonly docsUrl: string;
+}
+```
+
+**When it fires:** During policy evaluation, before the LLM call. The `reason` field describes which rule or PII type triggered the denial.
+
+**Hint:** `'Check your policy rules in .usertrust/policies/ or use { pii: "warn" } to downgrade PII enforcement.'`
+
+---
+
+## AccountNotFoundError
+
+Thrown when the TigerBeetle account for the given user does not exist.
+
+```typescript
+class AccountNotFoundError extends Error {
+  readonly userId: string;
+  readonly hint: string;
+  readonly docsUrl: string;
+}
+```
+
+**When it fires:** During ledger initialization or the first spend attempt.
+
+**Hint:** `'Run "npx usertrust init" to create accounts, or verify the userId matches your config.'`
+
+---
+
+## IdempotencyConflictError
+
+Thrown when a transfer with the same ID has already been submitted to TigerBeetle.
+
+```typescript
+class IdempotencyConflictError extends Error {
+  readonly key: string;
+  readonly hint: string;
+  readonly docsUrl: string;
+}
+```
+
+**When it fires:** During the PENDING hold phase, if the generated `transferId` collides with an existing transfer.
+
+**Hint:** `"This transfer was already submitted. Use a unique transferId for retries."`
+
+---
+
+## LedgerUnavailableError
+
+Thrown when TigerBeetle is unreachable. The LLM call is **not** forwarded to the provider.
+
+```typescript
+class LedgerUnavailableError extends Error {
+  readonly cause_message: string;
+  readonly hint: string;
+  readonly docsUrl: string;
+}
+```
+
+**When it fires:** Before any LLM call, during the connection check or PENDING hold attempt. This is failure mode 15.4 -- no tokens are at risk because no hold was placed.
+
+**Hint:** `'Start TigerBeetle with "npx usertrust tb start" or use { dryRun: true } to skip the ledger.'`
+
+<Callout type="warn">
+When TigerBeetle is unreachable, usertrust refuses to forward the request. This is by design -- without a ledger, budget enforcement is impossible.
+</Callout>
+
+---
+
+## AuditDegradedError
+
+Thrown (or flagged) when the audit chain write fails after the LLM call and ledger settlement both succeed.
+
+```typescript
+class AuditDegradedError extends Error {
+  readonly cause_message: string;
+  readonly hint: string;
+  readonly docsUrl: string;
+}
+```
+
+**When it fires:** After the LLM call succeeds and the ledger POST settles. This is failure mode 15.3. The response is still returned to the caller with `auditDegraded: true` on the receipt. The failed event is written to the dead-letter queue.
+
+**Hint:** `"Check disk space and permissions on the .usertrust/audit/ directory."`
+
+<Callout type="info">
+usertrust never fails the user on audit degradation. If the LLM call succeeded and the ledger settled, the response is always returned.
+</Callout>
+
+---
+
+## VaultNotInitializedError
+
+Thrown when the `.usertrust/` vault directory does not exist.
+
+```typescript
+class VaultNotInitializedError extends Error {
+  readonly path: string;
+  readonly hint: string;
+  readonly docsUrl: string;
+}
+```
+
+**When it fires:** During `trust()` initialization, before any LLM calls.
+
+**Hint:** `'Run "npx usertrust init" to create the vault directory.'`
+
+---
+
+## Error Summary
+
+| Error | Failure Mode | LLM Call Forwarded? | Tokens At Risk? |
+|-------|-------------|--------------------|-----------------|
+| `InsufficientBalanceError` | Pre-call | No | No |
+| `PolicyDeniedError` | Pre-call | No | No |
+| `AccountNotFoundError` | Pre-call | No | No |
+| `IdempotencyConflictError` | Pre-call | No | No |
+| `LedgerUnavailableError` | 15.4 | No | No |
+| `AuditDegradedError` | 15.3 | Yes (succeeded) | No (settled) |
+| `VaultNotInitializedError` | Pre-call | No | No |
+
+All pre-call errors are thrown before any interaction with the LLM provider. No tokens are consumed and no budget is affected.

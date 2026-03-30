@@ -1,0 +1,150 @@
+---
+title: Merkle Proofs
+description: RFC 6962 domain-separated Merkle tree for public verifiability of the audit trail.
+---
+
+usertrust builds an RFC 6962 Merkle tree over the audit chain, enabling two forms of cryptographic proof:
+
+- **Inclusion proofs** -- prove a specific event exists in the tree
+- **Consistency proofs** -- prove a newer tree is a valid extension of an older tree
+
+These proofs can be verified by any third party without access to the full audit log.
+
+## Domain Separation
+
+Following RFC 6962 (Certificate Transparency), usertrust uses domain-separated hashing to prevent second-preimage attacks:
+
+| Node Type | Prefix | Computation |
+|-----------|--------|-------------|
+| Leaf | `0x00` | `SHA-256(0x00 \|\| data)` |
+| Internal | `0x01` | `SHA-256(0x01 \|\| left \|\| right)` |
+
+The prefix byte ensures a leaf hash can never collide with an internal node hash, even if the data happens to be the concatenation of two other hashes.
+
+```typescript
+hashLeaf(data: string): string
+// SHA-256(0x00 || data)
+
+hashInternal(left: string, right: string): string
+// SHA-256(0x01 || left || right)
+```
+
+## Odd Leaf Promotion
+
+When the number of leaves is odd, the unpaired leaf is **promoted** to the next layer -- it is **not** duplicated. This avoids CVE-2012-2459, where duplicating odd leaves allows an attacker to construct two different leaf sets that produce the same Merkle root.
+
+```
+Leaves: [A, B, C]
+
+Layer 0: [A, B, C]
+Layer 1: [hash(A, B), C]      // C promoted, not duplicated
+Layer 2: [hash(hash(A,B), C)] // root
+```
+
+## Building the Tree
+
+```typescript
+buildMerkleTree(leaves: string[]): {
+  root: string | undefined;
+  layers: string[][];
+}
+```
+
+Returns the Merkle root and all intermediate layers. If the input is empty, `root` is `undefined`. A single leaf returns its `hashLeaf` value as the root.
+
+## Inclusion Proofs
+
+An inclusion proof demonstrates that a specific audit event (identified by its leaf index) is part of the Merkle tree with a known root.
+
+```typescript
+generateInclusionProof(
+  leafIndex: number,
+  leaves: string[],
+  segmentId: string,
+): MerkleInclusionProof
+
+verifyInclusionProof(
+  proof: MerkleInclusionProof,
+  publishedRoot: string,
+  publishedTreeSize: number,
+): boolean
+```
+
+The proof contains the sibling hashes needed to recompute the path from the leaf to the root. A verifier walks the path, hashing at each level, and checks that the result matches the published root.
+
+### MerkleInclusionProof
+
+```typescript
+interface MerkleInclusionProof {
+  segmentId: string;
+  leafIndex: number;
+  leafHash: string;
+  treeSize: number;
+  rootHash: string;
+  siblings: MerkleSibling[];
+}
+```
+
+## Consistency Proofs
+
+A consistency proof demonstrates that a Merkle tree of size `N` is a prefix of a Merkle tree of size `M` (where `M > N`). This proves the audit log was only appended to -- no events were modified or removed.
+
+```typescript
+generateConsistencyProof(
+  firstSize: number,
+  secondSize: number,
+  leaves: string[],
+): MerkleConsistencyProof
+
+verifyConsistencyProof(
+  proof: MerkleConsistencyProof,
+): boolean
+```
+
+### MerkleConsistencyProof
+
+```typescript
+interface MerkleConsistencyProof {
+  firstSize: number;
+  secondSize: number;
+  firstRoot: string;
+  secondRoot: string;
+  proof: MerkleSibling[];
+}
+```
+
+## The MerkleSibling Type
+
+Each sibling in a proof path indicates its hash and whether it should be placed on the left or right when computing the parent:
+
+```typescript
+interface MerkleSibling {
+  hash: string;
+  position: "left" | "right";
+}
+```
+
+When recomputing the path upward, the verifier places the sibling on the indicated side and the current hash on the other side, then computes `hashInternal(left, right)`.
+
+## Putting It Together
+
+A typical verification flow:
+
+1. Obtain the published Merkle root (e.g., from a transparency log or signed receipt)
+2. Request an inclusion proof for a specific audit event
+3. Verify the proof against the published root
+
+```typescript
+import { buildMerkleTree, generateInclusionProof, verifyInclusionProof } from "usertrust";
+
+// Build tree from audit event hashes
+const leaves = auditEvents.map(e => e.hash);
+const tree = buildMerkleTree(leaves);
+
+// Generate proof for event at index 42
+const proof = generateInclusionProof(42, leaves, "segment-001");
+
+// Verify against published root
+const valid = verifyInclusionProof(proof, tree.root!, leaves.length);
+// true if event 42 is genuinely part of the tree
+```

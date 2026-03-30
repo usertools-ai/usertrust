@@ -1,0 +1,126 @@
+---
+title: Policy Engine
+description: Rule-based governance with 12 field operators, scope globs, and time windows.
+---
+
+The policy engine evaluates every governed LLM call against a set of rules before the call is forwarded to the provider. Rules are defined in YAML or JSON and support field matching, scope globs, time windows, and priority ordering.
+
+## Enforcement Levels
+
+Each rule specifies an enforcement level that determines what happens when the rule matches:
+
+| Enforcement | Effect |
+|-------------|--------|
+| **hard** | Deny the request. Throws `PolicyDeniedError`. |
+| **soft** | Allow the request with warnings. The governance receipt includes the matched rule and reason. |
+
+## PolicyResult
+
+Every policy evaluation returns a structured result:
+
+```typescript
+interface PolicyResult {
+  decision: "allow" | "deny";
+  hasWarnings: boolean;
+  matched: RuleMatch[];
+  hardViolations: RuleMatch[];
+  softViolations: RuleMatch[];
+  reasons: string[];
+  evaluatedAt: string;
+}
+```
+
+## Rule Structure
+
+A policy rule specifies conditions, scope, enforcement, and optional time windows:
+
+```yaml
+# .usertrust/policies/default.yml
+rules:
+  - name: block-expensive-models
+    description: Deny requests to opus-class models in production
+    enforcement: hard
+    priority: 10
+    scopes: ["production/*"]
+    conditions:
+      - field: model
+        operator: contains
+        value: "opus"
+    timeWindow:
+      daysOfWeek: [1, 2, 3, 4, 5]  # Mon-Fri
+      startHour: 9
+      endHour: 17
+```
+
+## Operators
+
+The policy engine supports 12 field operators for matching conditions. Each operator compares a field value (resolved via dot-notation) against the rule's expected value.
+
+| Operator | Description |
+|----------|-------------|
+| `exists` | Field is present |
+| `not_exists` | Field is absent |
+| `eq` | Equal (strict) |
+| `neq` | Not equal |
+| `gt` | Greater than |
+| `gte` | Greater than or equal |
+| `lt` | Less than |
+| `lte` | Less than or equal |
+| `in` | Value is in array |
+| `not_in` | Value is not in array |
+| `contains` | String contains substring |
+| `regex` | Matches regular expression |
+
+See [Policy Operators](/docs/policy/operators) for detailed usage and examples of each operator.
+
+## Scope Matching
+
+Scopes use [minimatch](https://github.com/isaacs/minimatch) glob patterns to target specific contexts:
+
+```yaml
+scopes: ["production/*"]          # all production sub-scopes
+scopes: ["development/**"]        # development and all nested scopes
+scopes: ["*/billing"]             # billing scope in any environment
+```
+
+If a rule has no `scopes` field, it matches all scopes.
+
+## Time Windows
+
+Rules can be restricted to specific days and hours:
+
+```yaml
+timeWindow:
+  daysOfWeek: [1, 2, 3, 4, 5]    # 0=Sunday, 6=Saturday
+  startHour: 9                     # 24-hour format
+  endHour: 17
+```
+
+A rule with a time window only matches during the specified period. Outside the window, the rule is skipped entirely.
+
+## Priority
+
+Rules are evaluated in priority order. Lower numbers are evaluated first (higher priority):
+
+| Priority | Convention |
+|----------|-----------|
+| 1-10 | Critical safety rules |
+| 10-50 | Cost and budget rules |
+| 50-100 | Operational rules |
+| 100 | Default priority |
+
+If multiple rules match, all hard violations result in denial. Soft violations accumulate as warnings.
+
+## Default Rules
+
+usertrust ships with three built-in rules:
+
+1. **zero-budget** -- Deny if the account has zero remaining budget (hard)
+2. **high-cost** -- Warn on requests estimated above a configurable threshold (soft)
+3. **budget-exhausted** -- Deny if estimated cost exceeds remaining budget (hard)
+
+## Further Reading
+
+- [Policy Rules](/docs/policy/rules) -- Full rule definition reference
+- [Policy Operators](/docs/policy/operators) -- Detailed operator documentation with examples
+- [PII Detection](/docs/policy/pii) -- Built-in PII detection and redaction

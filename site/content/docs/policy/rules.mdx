@@ -1,0 +1,90 @@
+---
+title: Policy Rules
+description: Define governance rules in YAML with enforcement levels, severity, scopes, and time windows.
+---
+
+### Rule Format
+
+Rules are defined in YAML (or JSON) and loaded from `.usertrust/policies/default.yml` by default.
+
+```yaml
+- name: block-expensive-models
+  effect: deny
+  enforcement: hard
+  severity: high
+  priority: 50
+  conditions:
+    - field: model
+      operator: in
+      value:
+        - claude-opus-4-6
+        - gpt-5.4
+  scopePatterns:
+    - "production/*"
+  timeWindows:
+    - daysOfWeek: [1, 2, 3, 4, 5]
+      startHour: 9
+      endHour: 17
+```
+
+### Rule Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| name | string | yes | — | Unique rule identifier |
+| effect | `"deny"` or `"warn"` | yes | — | What happens when matched |
+| enforcement | `"hard"` or `"soft"` | yes | — | Hard = block, Soft = allow with warnings |
+| severity | `"critical" \| "high" \| "medium" \| "low" \| "info"` | no | — | Severity level |
+| priority | number | no | 100 | Lower = higher priority |
+| enabled | boolean | no | true | Toggle rule on/off |
+| conditions | FieldCondition[] | yes | — | Conditions to match (ALL must match) |
+| scopePatterns | string[] | no | — | Minimatch glob patterns |
+| timeWindows | TimeWindow[] | no | — | Time-based restrictions |
+
+### Enforcement
+
+- **Hard** — Returns `decision: "deny"`. The LLM call is blocked.
+- **Soft** — Returns `decision: "allow"` with `hasWarnings: true`. The call proceeds but warnings are logged.
+
+### Scope Matching
+
+Uses minimatch glob patterns against the request's scope array:
+
+```yaml
+scopePatterns:
+  - "production/**"    # matches production/api, production/chat/v2
+  - "staging/*"        # matches staging/test but not staging/a/b
+```
+
+### Time Windows
+
+Restrict when a rule is active:
+
+```yaml
+timeWindows:
+  - daysOfWeek: [1, 2, 3, 4, 5]   # Mon-Fri (0=Sun, 6=Sat)
+    startHour: 9                     # 9 AM
+    endHour: 17                      # 5 PM
+```
+
+### Default Rules
+
+Three rules ship by default:
+
+1. **zero-budget** — Block if budget is 0 (hard deny)
+2. **high-cost** — Warn on estimated cost > 1000 UT (soft warn)
+3. **budget-exhausted** — Block if remaining budget < estimated cost (hard deny)
+
+### PolicyResult
+
+```typescript
+interface PolicyResult {
+  decision: "allow" | "deny";
+  hasWarnings: boolean;
+  matched: RuleMatch[];
+  hardViolations: RuleMatch[];
+  softViolations: RuleMatch[];
+  reasons: string[];
+  evaluatedAt: string;
+}
+```

@@ -1,0 +1,86 @@
+---
+title: Pattern Memory
+description: SHA-256 prompt hash routing for cost-optimal model selection.
+---
+
+Pattern memory tracks the cost and success rate of LLM calls by prompt hash and model, enabling cost-optimal model selection over time. It learns which models perform best for which types of prompts without ever storing the prompts themselves.
+
+## Privacy by Construction
+
+Pattern memory never stores raw prompts. Every prompt is reduced to a SHA-256 hash before recording. The original text cannot be recovered from the hash. This is not a policy -- it is enforced by the API design.
+
+Each record contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `promptHash` | string | SHA-256 hash of the prompt content |
+| `model` | string | Model used for the call |
+| `cost` | number | Usertokens spent |
+| `success` | boolean | Whether the call succeeded |
+| `timestamp` | string | ISO 8601 timestamp |
+
+## Model Suggestion
+
+The `suggestModel()` function scores each model that has been used for a given prompt hash:
+
+```
+score = successRate / avgCost
+```
+
+Higher scores indicate models that reliably succeed at lower cost. A model with a 95% success rate and an average cost of 50 usertokens scores higher than one with 98% success at 200 usertokens.
+
+If no patterns exist for a prompt hash, `suggestModel()` returns `null`.
+
+## API
+
+```typescript
+import {
+  recordPattern,
+  suggestModel,
+  hashPrompt,
+  getPatternStats,
+} from "usertrust";
+
+// Hash a prompt (SHA-256, irreversible)
+const hash = hashPrompt("Summarize this document...");
+
+// Get a model suggestion based on historical patterns
+const suggested = suggestModel(hash);
+// "claude-haiku-4-5" or null if no data exists
+
+// Record the outcome of a call
+await recordPattern({
+  promptHash: hash,
+  model: "claude-haiku-4-5",
+  cost: 42,
+  success: true,
+});
+
+// Get aggregate statistics
+const stats = await getPatternStats();
+// { totalEntries, uniqueModels, hitCount }
+```
+
+## Storage
+
+Patterns are stored in `.usertrust/patterns/memory.json`. The file is capped at **10,000 entries**. When the cap is reached, the oldest entries are evicted first (FIFO).
+
+A process-local async mutex serializes writes to prevent concurrent corruption.
+
+## Configuration
+
+```json
+{
+  "patterns": {
+    "enabled": true,
+    "feedProxy": false
+  }
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `patterns.enabled` | boolean | `true` | Enable or disable pattern recording |
+| `patterns.feedProxy` | boolean | `false` | Forward pattern data to a remote proxy for aggregation |
+
+When `patterns.enabled` is `false`, `recordPattern()` is a no-op and `suggestModel()` always returns `null`.

@@ -1,0 +1,49 @@
+---
+title: usertrust
+description: Budget holds, audit trails, and spend limits for every LLM call.
+---
+
+usertrust wraps any LLM client (Anthropic, OpenAI, Google) with a JS Proxy so every AI call becomes an immutable, auditable, double-entry financial transaction.
+
+Keep your keys. Keep your billing. Add `trust` in one line.
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+import { trust } from "usertrust";
+
+const client = await trust(new Anthropic(), { budget: 50_000 });
+```
+
+## Core Guarantees
+
+- **Two-phase spend lifecycle** — Every LLM call follows `PENDING hold → LLM call → POST (success) or VOID (failure)`. The same pattern banks use for credit card holds.
+- **SHA-256 hash-chained audit trail** — Append-only JSONL. Each event chains from the previous via deterministic canonicalization. Tamper-evident by construction.
+- **Merkle proofs (RFC 6962)** — Domain-separated hashing with inclusion and consistency proofs for public verifiability.
+- **Real double-entry accounting** — TigerBeetle ledger with 7 transfer codes. Not a counter.
+- **Duck-typed client detection** — Works with any Anthropic, OpenAI, or Google SDK. No direct imports.
+
+## Explore the Docs
+
+<Cards>
+  <Card title="Quickstart" description="Install and make your first governed LLM call in 2 minutes" href="/docs/quickstart" />
+  <Card title="Two-Phase Spend" description="How the banking hold pattern keeps your budget atomic" href="/docs/concepts/two-phase-spend" />
+  <Card title="API Reference" description="trust(), defineConfig(), error classes, types" href="/docs/api/trust" />
+  <Card title="CLI Commands" description="init, inspect, health, verify, snapshot, tb" href="/docs/cli" />
+  <Card title="Policy Engine" description="12 operators, YAML rules, scope globs, time windows" href="/docs/policy/rules" />
+  <Card title="Standalone Verifier" description="Zero-dependency vault verification" href="/docs/verify" />
+</Cards>
+
+## Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Runtime | Node 22, ESM |
+| Language | TypeScript 5.9 (strict, noUncheckedIndexedAccess) |
+| Ledger | TigerBeetle |
+| Validation | Zod |
+| Policy | YAML + minimatch |
+| Test | Vitest (979 tests, 2.09:1 test-to-source ratio) |
+
+## License
+
+Apache 2.0 — [View on GitHub](https://github.com/usertools-ai/usertrust)

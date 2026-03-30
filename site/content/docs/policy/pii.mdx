@@ -1,0 +1,62 @@
+---
+title: PII Detection
+description: Automatic detection of email, phone, SSN, credit card, and IP address patterns.
+---
+
+### Configuration
+
+Set the `pii` field in `usertrust.config.json`:
+
+```json
+{
+  "pii": "warn"
+}
+```
+
+| Mode | Behavior |
+|------|----------|
+| `"redact"` | Replace PII with `[REDACTED]` before forwarding to LLM |
+| `"warn"` | Allow but log a warning (default) |
+| `"block"` | Throw `PolicyDeniedError` |
+| `"off"` | Disable PII detection |
+
+### Detected Types
+
+| Type | Pattern | Example |
+|------|---------|---------|
+| Email | RFC 5322 simplified | `user@example.com` |
+| Phone | US/international formats | `+1-555-123-4567` |
+| SSN | XXX-XX-XXXX (dashes required) | `123-45-6789` |
+| Credit Card | 13-19 digits, Luhn-validated | `4111111111111111` |
+| IPv4 | 0-255.0-255.0-255.0-255 | `192.168.1.1` |
+
+### PIIDetection Result
+
+```typescript
+interface PIIDetection {
+  found: boolean;
+  types: string[];    // ["email", "ssn", ...]
+  paths: string[];    // dot-paths where PII was found
+}
+```
+
+### Function
+
+```typescript
+function detectPII(data: unknown): PIIDetection;
+```
+
+Recursively walks objects and arrays, checking string values against all PII patterns.
+
+### Example
+
+```typescript
+import { detectPII } from "usertrust";
+
+const result = detectPII({
+  messages: [
+    { role: "user", content: "My email is test@example.com and SSN is 123-45-6789" }
+  ]
+});
+// { found: true, types: ["email", "ssn"], paths: ["messages.0.content"] }
+```

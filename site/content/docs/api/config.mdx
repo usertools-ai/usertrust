@@ -1,0 +1,215 @@
+---
+title: Configuration
+description: defineConfig(), loadConfig(), and the full usertrust.config.json schema.
+---
+
+usertrust configuration lives in a JSON file at `.usertrust/usertrust.config.json`. The `defineConfig()` helper provides TypeScript intellisense for authoring configs, and `loadConfig()` reads and validates the file at runtime.
+
+## defineConfig()
+
+```typescript
+function defineConfig(config: TrustConfig): TrustConfig
+```
+
+A type-checking identity function. It validates the config through the Zod schema and returns it unchanged. Use it in scripts or documentation to get autocompletion, but the actual config file is always JSON (not TypeScript).
+
+```typescript
+import { defineConfig } from "usertrust";
+
+// Type-checked — IDE shows errors for invalid fields
+const config = defineConfig({
+  budget: 100_000,
+  tier: "pro",
+  pii: "block",
+  board: { enabled: true, vetoThreshold: "high" },
+  circuitBreaker: { failureThreshold: 3, resetTimeout: 30_000 },
+  patterns: { enabled: true, feedProxy: false },
+  audit: { rotation: "daily", indexLimit: 10_000 },
+  tigerbeetle: { addresses: ["127.0.0.1:3001"], clusterId: 0 },
+  policies: "./policies/default.yml",
+});
+```
+
+## loadConfig()
+
+```typescript
+async function loadConfig(
+  overrides?: Partial<TrustConfig>,
+  vaultBase?: string
+): Promise<TrustConfig>
+```
+
+Reads `.usertrust/usertrust.config.json` from disk, merges any runtime overrides on top, and validates the result through the Zod schema. Returns a fully resolved `TrustConfig`.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `overrides` | `undefined` | Partial config to merge on top of the file values. `undefined` values are skipped. |
+| `vaultBase` | `process.cwd()` | Base directory containing the `.usertrust/` vault. |
+
+If the config file does not exist, `loadConfig()` uses Zod defaults for all fields except `budget`, which is required.
+
+## Full Schema
+
+```typescript
+const TrustConfigSchema = z.object({
+  budget: z.number().int().positive(),
+  tier: z.enum(["free", "mini", "pro", "mega", "ultra"]).default("mini"),
+  proxy: z.string().url().optional(),
+  key: z.string().optional(),
+  policies: z.string().default("./policies/default.yml"),
+  pii: z.enum(["redact", "warn", "block", "off"]).default("warn"),
+  board: z.object({
+    enabled: z.boolean().default(false),
+    vetoThreshold: z.enum(["low", "medium", "high", "critical"]).default("high"),
+  }).default({}),
+  circuitBreaker: z.object({
+    failureThreshold: z.number().int().default(5),
+    resetTimeout: z.number().int().default(60_000),
+  }).default({}),
+  patterns: z.object({
+    enabled: z.boolean().default(true),
+    feedProxy: z.boolean().default(false),
+  }).default({}),
+  audit: z.object({
+    rotation: z.enum(["daily", "weekly", "none"]).default("daily"),
+    indexLimit: z.number().int().default(10_000),
+  }).default({}),
+  tigerbeetle: z.object({
+    addresses: z.array(z.string()).default(["127.0.0.1:3001"]),
+    clusterId: z.number().int().nonnegative().default(0),
+  }).default({}),
+});
+```
+
+## Example Config File
+
+```json
+{
+  "budget": 100000,
+  "tier": "pro",
+  "pii": "block",
+  "policies": "./policies/default.yml",
+  "board": {
+    "enabled": true,
+    "vetoThreshold": "high"
+  },
+  "circuitBreaker": {
+    "failureThreshold": 3,
+    "resetTimeout": 30000
+  },
+  "patterns": {
+    "enabled": true,
+    "feedProxy": false
+  },
+  "audit": {
+    "rotation": "daily",
+    "indexLimit": 10000
+  },
+  "tigerbeetle": {
+    "addresses": ["127.0.0.1:3001"],
+    "clusterId": 0
+  }
+}
+```
+
+## Field Reference
+
+### budget
+
+**Required.** Total usertoken budget for the client. 1 UT = $0.0001. A budget of `100_000` equals $10.00.
+
+### tier
+
+Default: `"mini"`. Classification tier for the client.
+
+| Tier | Intended Use |
+|------|-------------|
+| `free` | Testing and experiments |
+| `mini` | Small projects, prototyping |
+| `pro` | Production workloads |
+| `mega` | High-throughput applications |
+| `ultra` | Enterprise deployments |
+
+### proxy / key
+
+Optional. When `proxy` is set to a URL, receipts include a `receiptUrl` for remote verification. The `key` is sent as an API key to authenticate with the proxy.
+
+### policies
+
+Default: `"./policies/default.yml"`. Path to the YAML policy rules file, resolved relative to the vault directory. See the [Policy Engine](/docs/policy/rules) docs for rule syntax.
+
+### pii
+
+Default: `"warn"`. PII detection mode applied to all outgoing prompts.
+
+| Mode | Behavior |
+|------|----------|
+| `redact` | Replace detected PII with `[REDACTED]` before sending to the provider |
+| `warn` | Allow the request but attach a warning to the receipt |
+| `block` | Throw a `PolicyDeniedError` if PII is detected |
+| `off` | Disable PII detection entirely |
+
+Detected PII types: email addresses, phone numbers, SSNs, credit card numbers (Luhn-validated), and IPv4 addresses.
+
+### board
+
+Default: `{ enabled: false, vetoThreshold: "high" }`.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Enable the Board of Directors heuristic review |
+| `vetoThreshold` | `"high"` | Minimum concern severity to trigger a veto (`low`, `medium`, `high`, `critical`) |
+
+When enabled, two directors (Alpha and Beta) review every LLM response using pure heuristic pattern matching. See [Board of Directors](/docs/concepts/board-of-directors).
+
+### circuitBreaker
+
+Default: `{ failureThreshold: 5, resetTimeout: 60_000 }`.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `failureThreshold` | `5` | Consecutive failures before the circuit opens |
+| `resetTimeout` | `60_000` | Milliseconds before the circuit transitions to half-open |
+
+Circuit breakers are per-provider. An open circuit for OpenAI does not affect Anthropic calls.
+
+### patterns
+
+Default: `{ enabled: true, feedProxy: false }`.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` | Enable pattern memory for cost-based model routing |
+| `feedProxy` | `false` | Send pattern data to the proxy for aggregate analysis |
+
+Pattern memory stores SHA-256 hashes of prompts (never raw text) mapped to model, cost, and success rate. Capped at 10,000 entries with FIFO eviction.
+
+### audit
+
+Default: `{ rotation: "daily", indexLimit: 10_000 }`.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `rotation` | `"daily"` | Receipt rotation schedule (`daily`, `weekly`, `none`) |
+| `indexLimit` | `10_000` | Maximum entries in the bounded receipt index |
+
+Receipts are organized into date-based directories under `.usertrust/audit/`.
+
+### tigerbeetle
+
+Default: `{ addresses: ["127.0.0.1:3001"], clusterId: 0 }`.
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `addresses` | `["127.0.0.1:3001"]` | TigerBeetle cluster addresses |
+| `clusterId` | `0` | TigerBeetle cluster ID |
+
+<Callout type="info">
+In dry-run mode (`dryRun: true` or `USERTRUST_DRY_RUN=true`), TigerBeetle is skipped entirely. The audit chain and policy engine still run.
+</Callout>
+
+## Environment Variables
+
+| Variable | Effect |
+|----------|--------|
+| `USERTRUST_DRY_RUN=true` | Enable dry-run mode globally, equivalent to `{ dryRun: true }` |

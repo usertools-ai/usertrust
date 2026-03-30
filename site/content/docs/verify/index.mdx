@@ -1,0 +1,88 @@
+---
+title: usertrust-verify
+description: Zero-dependency standalone vault verifier with Merkle proof support.
+---
+
+### Purpose
+
+`usertrust-verify` is an intentionally standalone package with **zero dependencies** (Node built-ins only). It duplicates canonicalization, chain verification, and Merkle proof functions from `usertrust` by design — so it can verify vaults independently of the main SDK.
+
+### Installation
+
+```bash
+npm install usertrust-verify
+```
+
+### CLI Usage
+
+```bash
+npx usertrust-verify .usertrust
+```
+
+Verifies the entire vault: hash chain integrity, event sequence, and Merkle root.
+
+### Programmatic API
+
+#### verifyVault
+
+```typescript
+import { verifyVault } from "usertrust-verify";
+
+const result = verifyVault(".usertrust");
+```
+
+```typescript
+interface VaultVerificationResult {
+  valid: boolean;
+  errors: string[];
+  chainLength: number;
+  validHashes: number;
+  merkleRoot: string | null;
+  firstEvent: string | null;
+  lastEvent: string | null;
+}
+```
+
+#### verifyTransaction
+
+```typescript
+import { verifyTransaction } from "usertrust-verify";
+
+const result = verifyTransaction(".usertrust", "tx_m4k7z_a1b2c3");
+```
+
+```typescript
+interface TransactionVerificationResult {
+  found: boolean;
+  valid: boolean;
+  receipt: string;
+  errors: string[];
+}
+```
+
+### Re-exported Functions
+
+All Merkle proof functions are also available:
+
+```typescript
+import {
+  verifyChain,
+  buildMerkleTree,
+  hashLeaf,
+  hashInternal,
+  generateInclusionProof,
+  verifyInclusionProof,
+  generateConsistencyProof,
+  verifyConsistencyProof,
+  canonicalize,
+  GENESIS_HASH,
+} from "usertrust-verify";
+```
+
+### Why Zero Dependencies?
+
+The verifier must be trustworthy independently of the SDK it verifies. Adding dependencies would create a supply-chain attack surface and defeat the purpose of independent verification.
+
+<Callout type="info">
+This package intentionally duplicates code from `usertrust`. Do not refactor into shared imports — the duplication is a security feature.
+</Callout>

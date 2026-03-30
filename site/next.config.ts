@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { createMDX } from "fumadocs-mdx/next";
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
@@ -10,13 +11,10 @@ const nextConfig: NextConfig = {
 				destination: "https://github.com/usertools-ai/usertrust",
 				permanent: false,
 			},
-			{
-				source: "/docs",
-				destination: "https://github.com/usertools-ai/usertrust#readme",
-				permanent: false,
-			},
 		];
 	},
 };
 
-export default nextConfig;
+const withMDX = createMDX();
+
+export default withMDX(nextConfig);

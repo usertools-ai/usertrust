@@ -1,0 +1,118 @@
+---
+title: Board of Directors
+description: Two-director democratic oversight with heuristic concern detection — no LLM calls.
+---
+
+The Board of Directors provides a democratic oversight layer for governed LLM calls. Two directors with complementary focus areas review operations and can approve, veto, or escalate them.
+
+<Callout type="info">
+The board uses pure heuristic pattern matching -- not LLM calls. The six concern detectors are deterministic functions that run in microseconds, not seconds.
+</Callout>
+
+## Two Directors
+
+Each director covers a distinct set of concerns:
+
+| Director | Focus Areas |
+|----------|-------------|
+| **Director Alpha** | hallucination, safety, policy_violation |
+| **Director Beta** | bias, scope_creep, resource_abuse |
+
+This split ensures no single point of failure in oversight. Both directors evaluate every operation independently.
+
+## Six Concern Types
+
+The board detects six categories of concern using heuristic pattern matching:
+
+| Concern | Description |
+|---------|-------------|
+| `hallucination` | Response contains claims inconsistent with the prompt or known patterns |
+| `bias` | Response exhibits demographic, ideological, or statistical bias patterns |
+| `safety` | Content touches safety-sensitive domains (medical, legal, financial advice) |
+| `scope_creep` | Operation exceeds the declared scope or context boundaries |
+| `resource_abuse` | Unusually high cost, token count, or request frequency |
+| `policy_violation` | Operation violates an active policy rule |
+
+## Decision Matrix
+
+After both directors cast their votes, the board resolves the outcome:
+
+| Director Alpha | Director Beta | Outcome |
+|---------------|--------------|---------|
+| APPROVE | APPROVE | **approved** |
+| VETO | VETO | **blocked** |
+| VETO | APPROVE | **escalated** |
+| APPROVE | VETO | **escalated** |
+| ABSTAIN | ABSTAIN | **escalated** |
+| APPROVE | ABSTAIN | **escalated** |
+| ABSTAIN | APPROVE | **escalated** |
+
+A unanimous veto blocks the operation. Any disagreement or abstention results in escalation, which can trigger human review depending on your configuration.
+
+## Board API
+
+```typescript
+const board = createBoard(vaultPath, { maxHistory: 100 });
+
+const result = board.reviewNow("spend", "user-123", "Large model request", {
+  scope: ["production"],
+  context: { model: "claude-opus-4-6", estimatedCost: 5000 },
+});
+```
+
+### BoardReviewResult
+
+```typescript
+interface BoardReviewResult {
+  decision: "approved" | "blocked" | "escalated";
+  reasoning: string;
+  requiresHumanEscalation: boolean;
+  reviews: DirectorReview[];
+  concerns: DetectedConcern[];
+  timestamp: string;
+}
+```
+
+### BoardStats
+
+```typescript
+interface BoardStats {
+  totalReviews: number;
+  approved: number;
+  blocked: number;
+  escalated: number;
+  concernCounts: Record<string, number>;
+}
+```
+
+## Configuration
+
+Enable the board and set the veto sensitivity in `usertrust.config.json`:
+
+```json
+{
+  "board": {
+    "enabled": true,
+    "vetoThreshold": "medium"
+  }
+}
+```
+
+| Option | Values | Default |
+|--------|--------|---------|
+| `board.enabled` | `true`, `false` | `false` |
+| `board.vetoThreshold` | `low`, `medium`, `high`, `critical` | `medium` |
+
+The veto threshold controls how aggressively the directors flag concerns. At `low`, only severe issues trigger a veto. At `critical`, even marginal concerns can block an operation.
+
+## Board History
+
+Board decisions are persisted to `.usertrust/board/`:
+
+```
+.usertrust/board/
+  session.json       # current board session state
+  history.jsonl      # append-only review history
+```
+
+The history is capped at `maxHistory` entries (default: 100) and can be inspected via the CLI or programmatically.

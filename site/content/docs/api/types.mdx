@@ -1,0 +1,308 @@
+---
+title: Types
+description: Core TypeScript types exported by usertrust.
+---
+
+All types are exported from the `usertrust` package entry point. The SDK uses TypeScript 5.9 strict mode with `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes`.
+
+## Client Types
+
+### TrustOpts
+
+Options passed to `trust()`. See [trust()](/docs/api/trust) for full documentation.
+
+```typescript
+interface TrustOpts {
+  configPath?: string;
+  proxy?: string;
+  key?: string;
+  budget?: number;
+  tier?: string;
+  dryRun?: boolean;
+  vaultBase?: string;
+}
+```
+
+### TrustedClient\<T\>
+
+The governed client returned by `trust()`. Same shape as the original LLM client plus `destroy()`.
+
+```typescript
+type TrustedClient<T> = T & { destroy(): Promise<void> };
+```
+
+### TrustedResponse\<T\>
+
+The return type of every intercepted LLM call.
+
+```typescript
+interface TrustedResponse<T> {
+  response: T;
+  receipt: TrustReceipt;
+}
+```
+
+### TrustReceipt
+
+Governance metadata returned with every LLM call. See [trust()](/docs/api/trust) for field descriptions.
+
+```typescript
+interface TrustReceipt {
+  transferId: string;
+  cost: number;
+  budgetRemaining: number;
+  auditHash: string;
+  chainPath: string;
+  receiptUrl: string | null;
+  settled: boolean;
+  model: string;
+  provider: string;
+  timestamp: string;
+  auditDegraded?: boolean;
+}
+```
+
+### LLMClientKind
+
+The three supported provider types, detected via duck typing.
+
+```typescript
+type LLMClientKind = "anthropic" | "openai" | "google";
+```
+
+---
+
+## Config Types
+
+### TrustConfig
+
+The full configuration schema. See [Configuration](/docs/api/config) for field-level documentation.
+
+```typescript
+type TrustConfig = {
+  budget: number;
+  tier: "free" | "mini" | "pro" | "mega" | "ultra";
+  proxy?: string;
+  key?: string;
+  policies: string;
+  pii: "redact" | "warn" | "block" | "off";
+  board: {
+    enabled: boolean;
+    vetoThreshold: "low" | "medium" | "high" | "critical";
+  };
+  circuitBreaker: {
+    failureThreshold: number;
+    resetTimeout: number;
+  };
+  patterns: {
+    enabled: boolean;
+    feedProxy: boolean;
+  };
+  audit: {
+    rotation: "daily" | "weekly" | "none";
+    indexLimit: number;
+  };
+  tigerbeetle: {
+    addresses: string[];
+    clusterId: number;
+  };
+};
+```
+
+---
+
+## Policy Types
+
+### PolicyRule
+
+A single policy rule evaluated by the gate engine.
+
+```typescript
+interface PolicyRule {
+  name: string;
+  effect: PolicyEffect;
+  enforcement: PolicyEnforcement;
+  severity?: PolicySeverity;
+  conditions: FieldCondition[];
+}
+```
+
+### FieldCondition
+
+A single condition within a policy rule. Uses dot-notation field resolution and one of 12 operators.
+
+```typescript
+interface FieldCondition {
+  field: string;
+  operator: FieldOperator;
+  value?: unknown;
+}
+```
+
+### FieldOperator
+
+The 12 field operators supported by the policy gate.
+
+```typescript
+type FieldOperator =
+  | "exists"
+  | "not_exists"
+  | "eq"
+  | "neq"
+  | "gt"
+  | "gte"
+  | "lt"
+  | "lte"
+  | "in"
+  | "not_in"
+  | "contains"
+  | "regex";
+```
+
+| Operator | Description | Example Value |
+|----------|-------------|--------------|
+| `exists` | Field is present and not `undefined` | (none) |
+| `not_exists` | Field is absent or `undefined` | (none) |
+| `eq` | Strict equality | `"gpt-4o"` |
+| `neq` | Not equal | `"test"` |
+| `gt` | Greater than (numeric) | `1000` |
+| `gte` | Greater than or equal | `500` |
+| `lt` | Less than (numeric) | `100` |
+| `lte` | Less than or equal | `50` |
+| `in` | Value is in the given array | `["gpt-4o", "gpt-4o-mini"]` |
+| `not_in` | Value is not in the given array | `["deprecated-model"]` |
+| `contains` | String contains substring | `"password"` |
+| `regex` | Matches regular expression | `"^claude-.*"` |
+
+### PolicyEffect
+
+```typescript
+type PolicyEffect = "deny" | "warn";
+```
+
+- `deny` -- Block the request and throw a `PolicyDeniedError`.
+- `warn` -- Allow the request but attach a warning to the receipt.
+
+### PolicyEnforcement
+
+```typescript
+type PolicyEnforcement = "hard" | "soft";
+```
+
+- `hard` -- The rule is enforced strictly. A `deny` effect blocks the call.
+- `soft` -- The rule generates warnings but does not block.
+
+### PolicySeverity
+
+```typescript
+type PolicySeverity = "critical" | "high" | "medium" | "low" | "info";
+```
+
+Used by the Board of Directors to determine whether a concern warrants a veto, based on the configured `vetoThreshold`.
+
+---
+
+## Audit Types
+
+### AuditEvent
+
+A single entry in the SHA-256 hash-chained audit log.
+
+```typescript
+interface AuditEvent {
+  id: string;                         // Unique event ID
+  timestamp: string;                  // ISO 8601 timestamp
+  previousHash: string;               // Hash of the previous event (or GENESIS_HASH)
+  hash: string;                       // SHA-256 hash of this event
+  kind: string;                       // Event type (e.g., "spend", "settlement_ambiguous")
+  actor: string;                      // Actor identifier
+  data: Record<string, unknown>;      // Event-specific payload
+}
+```
+
+Each event's `hash` covers the `previousHash`, forming an append-only chain. The first event chains from `GENESIS_HASH` (64 zero characters). Tampering with any event breaks all subsequent hashes.
+
+---
+
+## Board Types
+
+### BoardDecision
+
+The outcome of a Board of Directors review.
+
+```typescript
+type BoardDecision = "approved" | "blocked" | "escalated";
+```
+
+| Decision | Meaning |
+|----------|---------|
+| `approved` | Both directors approve, or one approves and one abstains |
+| `blocked` | Both directors veto unanimously |
+| `escalated` | One vetoes and one approves, or both abstain |
+
+### ConcernType
+
+The six concern categories detected by the board's heuristic detectors.
+
+```typescript
+type ConcernType =
+  | "hallucination"
+  | "bias"
+  | "safety"
+  | "scope_creep"
+  | "resource_abuse"
+  | "policy_violation";
+```
+
+Director Alpha covers: `hallucination`, `safety`, `policy_violation`. Director Beta covers: `bias`, `scope_creep`, `resource_abuse`.
+
+### DirectorVote
+
+An individual director's vote on a review.
+
+```typescript
+type DirectorVote = "approve" | "veto" | "abstain";
+```
+
+---
+
+## Streaming Types
+
+### GovernedStream\<T\>
+
+An async iterable that wraps the native LLM stream, adding a `receipt` promise that resolves when the stream completes.
+
+```typescript
+interface GovernedStream<T> extends AsyncIterable<T> {
+  receipt: Promise<TrustReceipt>;
+}
+```
+
+Usage:
+
+```typescript
+const stream = await client.messages.create({
+  model: "claude-sonnet-4-6",
+  max_tokens: 1024,
+  messages: [{ role: "user", content: "Hello" }],
+  stream: true,
+});
+
+for await (const chunk of stream) {
+  // Process chunks as usual
+}
+
+// Governance receipt resolves after the stream finishes
+const receipt = await stream.receipt;
+```
+
+### StreamUsage
+
+Internal token accumulation from stream chunks.
+
+```typescript
+interface StreamUsage {
+  inputTokens: number;
+  outputTokens: number;
+}
+```

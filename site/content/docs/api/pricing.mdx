@@ -1,0 +1,138 @@
+---
+title: Pricing
+description: Usertoken costs per model, estimation functions, and the fallback rate.
+---
+
+All costs in the usertrust SDK are denominated in **usertokens** (UT).
+
+**1 UT = $0.0001** (one basis point of a cent).
+
+A budget of `100_000` UT equals $10.00. A budget of `1_000_000` UT equals $100.00.
+
+## Pricing Table
+
+The SDK includes a 20-model pricing table in `ledger/pricing.ts`. Rates are in usertokens per 1,000 LLM tokens.
+
+### Anthropic
+
+| Model | Input (per 1K tokens) | Output (per 1K tokens) |
+|-------|----------------------|----------------------|
+| `claude-sonnet-4-6` | 30 | 150 |
+| `claude-haiku-4-5` | 10 | 50 |
+| `claude-opus-4-6` | 50 | 250 |
+
+### OpenAI
+
+| Model | Input (per 1K tokens) | Output (per 1K tokens) |
+|-------|----------------------|----------------------|
+| `gpt-4o` | 25 | 100 |
+| `gpt-4o-mini` | 1.5 | 6 |
+| `gpt-5.4` | 25 | 150 |
+| `o3` | 20 | 80 |
+| `o4-mini` | 5.5 | 22 |
+
+### Google Gemini
+
+| Model | Input (per 1K tokens) | Output (per 1K tokens) |
+|-------|----------------------|----------------------|
+| `gemini-2.5-flash` | 3 | 25 |
+| `gemini-2.5-pro` | 12.5 | 100 |
+| `gemini-3.1-pro` | 20 | 120 |
+
+### Other Providers
+
+| Model | Provider | Input (per 1K tokens) | Output (per 1K tokens) |
+|-------|----------|----------------------|----------------------|
+| `mistral-large` | Mistral | 5 | 15 |
+| `deepseek-chat` | DeepSeek | 2.8 | 4.2 |
+| `deepseek-reasoner` | DeepSeek | 2.8 | 4.2 |
+| `grok-3` | xAI | 30 | 150 |
+| `llama-4-maverick` | Meta (Bedrock) | 2.4 | 9.7 |
+| `command-a` | Cohere | 25 | 100 |
+| `sonar-pro` | Perplexity | 30 | 150 |
+| `qwen-72b` | Alibaba | 2.9 | 3.9 |
+| `nova-pro` | Amazon | 8 | 32 |
+
+<Callout type="info">
+Rates reflect the SDK's built-in table. Check `packages/core/src/ledger/pricing.ts` for the canonical source.
+</Callout>
+
+## Fallback Rate
+
+Models not in the pricing table use **sonnet-class pricing** as a conservative fallback:
+
+| Direction | Rate (per 1K tokens) |
+|-----------|---------------------|
+| Input | 30 UT |
+| Output | 150 UT |
+
+This ensures unknown models are never free. The fallback is intentionally high to avoid under-billing.
+
+## Model Matching
+
+`getModelRates()` first attempts an exact match against the pricing table. If no exact match is found, it tries prefix matching (longest key first) to handle versioned model names. If neither matches, the fallback rate is used.
+
+```typescript
+getModelRates("claude-sonnet-4-6")         // exact match → { 30, 150 }
+getModelRates("claude-sonnet-4-6-20260301") // prefix match → { 30, 150 }
+getModelRates("unknown-model")              // fallback → { 30, 150 }
+```
+
+## Functions
+
+### getModelRates()
+
+```typescript
+function getModelRates(model: string): ModelRates
+```
+
+Look up the input and output rates for a model. Falls back to prefix matching, then to the fallback rate.
+
+### estimateCost()
+
+```typescript
+function estimateCost(model: string, inputTokens: number, outputTokens: number): number
+```
+
+Calculate the cost in usertokens for a model call given actual token counts. The result is always at least 1 (floor to prevent zero-amount transfers in TigerBeetle).
+
+```typescript
+// 1,000 input tokens + 500 output tokens on claude-sonnet-4-6
+estimateCost("claude-sonnet-4-6", 1000, 500)
+// → Math.max(1, Math.ceil((1000/1000 * 30) + (500/1000 * 150)))
+// → Math.max(1, Math.ceil(30 + 75))
+// → 105 UT
+```
+
+### estimateInputTokens()
+
+```typescript
+function estimateInputTokens(messages: unknown[]): number
+```
+
+Estimate the input token count from a messages array before the LLM call. Uses a heuristic of approximately 4 characters per token with a 1.5x safety margin so the PENDING hold exceeds actual cost in the majority of cases.
+
+This function handles:
+- String content and multi-part content blocks
+- Nested arrays (tool result payloads)
+- Per-message overhead (role, structure)
+- Tool-call overhead
+
+Returns at least 1.
+
+## ModelRates
+
+```typescript
+interface ModelRates {
+  inputPer1k: number;   // usertokens per 1,000 input tokens
+  outputPer1k: number;  // usertokens per 1,000 output tokens
+}
+```
+
+## Cost Estimation Flow
+
+During the [two-phase spend lifecycle](/docs/concepts/two-phase-spend), costs are estimated twice:
+
+1. **Before the call (PENDING):** `estimateInputTokens()` produces a conservative input estimate. Combined with `max_tokens` for the output estimate, `estimateCost()` calculates the hold amount. The 1.5x safety margin means the hold usually exceeds actual cost.
+
+2. **After the call (POST):** Actual token counts from the provider response (or accumulated from stream chunks) produce the real cost. The difference between the hold and the actual cost is released back to the available budget.

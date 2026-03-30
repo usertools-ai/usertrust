@@ -8,12 +8,16 @@
 		"start": "next start"
 	},
 	"dependencies": {
+		"@tailwindcss/postcss": "^4.2.2",
+		"@types/mdx": "^2.0.13",
+		"fumadocs-core": "^15.8.5",
+		"fumadocs-mdx": "^14.2.11",
+		"fumadocs-ui": "^15.8.5",
+		"motion": "^12.12.1",
 		"next": "^15.3.3",
 		"react": "^19.1.0",
 		"react-dom": "^19.1.0",
-		"motion": "^12.12.1",
-		"tailwindcss": "^4.2.2",
-		"@tailwindcss/postcss": "^4.2.2"
+		"tailwindcss": "^4.2.2"
 	},
 	"devDependencies": {
 		"@types/node": "^22.15.0",

@@ -1,0 +1,78 @@
+---
+title: Field Operators
+description: 12 field operators for policy conditions — equality, comparison, membership, pattern matching.
+---
+
+### Condition Format
+
+```typescript
+interface FieldCondition {
+  field: string;       // dot-notation path (e.g., "model", "cost.estimated")
+  operator: FieldOperator;
+  value?: unknown;     // not needed for exists/not_exists
+}
+```
+
+### Presence
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `exists` | Field is present and not null/undefined | `{ field: "scope", operator: "exists" }` |
+| `not_exists` | Field is absent or null/undefined | `{ field: "proxy", operator: "not_exists" }` |
+
+### Equality
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `eq` | Strict equality | `{ field: "model", operator: "eq", value: "claude-sonnet-4-6" }` |
+| `neq` | Not equal | `{ field: "tier", operator: "neq", value: "free" }` |
+
+### Comparison (numeric)
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `gt` | Greater than | `{ field: "cost.estimated", operator: "gt", value: 1000 }` |
+| `gte` | Greater than or equal | `{ field: "budget", operator: "gte", value: 0 }` |
+| `lt` | Less than | `{ field: "budgetRemaining", operator: "lt", value: 100 }` |
+| `lte` | Less than or equal | `{ field: "max_tokens", operator: "lte", value: 4096 }` |
+
+### Membership
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `in` | Value is in the array | `{ field: "model", operator: "in", value: ["gpt-4o", "gpt-4o-mini"] }` |
+| `not_in` | Value is not in the array | `{ field: "model", operator: "not_in", value: ["claude-opus-4-6"] }` |
+
+### Pattern Matching
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `contains` | String contains substring | `{ field: "model", operator: "contains", value: "opus" }` |
+| `regex` | Regex match (safe: max 200 chars, no nested quantifiers) | `{ field: "model", operator: "regex", value: "^claude-.*" }` |
+
+### Dot-Notation Field Resolution
+
+Fields support dot-notation for nested objects:
+
+```yaml
+conditions:
+  - field: messages.0.role
+    operator: eq
+    value: system
+```
+
+### Full YAML Example
+
+```yaml
+- name: limit-opus-in-prod
+  effect: deny
+  enforcement: hard
+  severity: high
+  conditions:
+    - field: model
+      operator: contains
+      value: opus
+    - field: cost.estimated
+      operator: gt
+      value: 500
+```

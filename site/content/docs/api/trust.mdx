@@ -1,0 +1,218 @@
+---
+title: trust()
+description: The core API — wraps any LLM client with governed spend, audit, and policy.
+---
+
+`trust()` is the single entry point for the usertrust SDK. It takes any supported LLM client, wraps it in a JS Proxy, and returns a governed client where every API call becomes an audited, budget-enforced financial transaction.
+
+## Signature
+
+```typescript
+async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>>
+```
+
+`trust()` is async because it initializes the vault, loads config, connects to TigerBeetle (unless dry-run), and sets up the audit chain before returning the governed client.
+
+## TrustOpts
+
+```typescript
+interface TrustOpts {
+  configPath?: string;    // Path to usertrust.config.json
+  proxy?: string;         // Remote proxy URL — receipts include a verify URL
+  key?: string;           // API key for the proxy
+  budget?: number;        // Token budget override (in usertokens)
+  tier?: string;          // Tier override (free | mini | pro | mega | ultra)
+  dryRun?: boolean;       // Skip TigerBeetle — audit chain + policy still run
+  vaultBase?: string;     // Vault directory override (default: process.cwd())
+}
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `configPath` | `.usertrust/usertrust.config.json` | Path to the config file. Resolved relative to `vaultBase`. |
+| `proxy` | `undefined` | When set, receipts include a `receiptUrl` for remote verification. |
+| `key` | `undefined` | API key sent to the proxy for authentication. |
+| `budget` | Config value or `10_000` | Total usertoken budget for this client. Overrides the config file value. |
+| `tier` | `"mini"` | Tier classification. Overrides the config file value. |
+| `dryRun` | `false` | Skip TigerBeetle entirely. Also enabled by `USERTRUST_DRY_RUN=true` env var. Useful for CI and testing. |
+| `vaultBase` | `process.cwd()` | Base directory containing the `.usertrust/` vault. |
+
+<Callout type="info">
+The internal `_engine` and `_audit` options exist for testing only. They inject mock subsystems and are not part of the public API.
+</Callout>
+
+## TrustedClient\<T\>
+
+```typescript
+type TrustedClient<T> = T & { destroy(): Promise<void> };
+```
+
+The returned client has the exact same shape as the original LLM client, plus a `destroy()` method. You call the same methods you already use (`messages.create`, `chat.completions.create`, etc.) and get governed responses back.
+
+<Callout type="warn">
+Always call `destroy()` when you are done with the client. Without it, the process will hang due to open TigerBeetle connections and file locks.
+</Callout>
+
+## Return Value
+
+Every intercepted LLM call returns `{ response, receipt }` instead of the raw provider response:
+
+```typescript
+const { response, receipt } = await client.messages.create({
+  model: "claude-sonnet-4-6",
+  max_tokens: 1024,
+  messages: [{ role: "user", content: "Hello" }],
+});
+```
+
+The `response` is the original, unmodified provider response. The `receipt` is a `TrustReceipt` with governance metadata.
+
+## TrustReceipt
+
+```typescript
+interface TrustReceipt {
+  transferId: string;         // Universal join key across ledger, audit, receipts
+  cost: number;               // Actual cost in usertokens
+  budgetRemaining: number;    // Remaining budget after this call
+  auditHash: string;          // SHA-256 hash of the audit event
+  chainPath: string;          // Path to the audit chain JSONL file
+  receiptUrl: string | null;  // Verify URL (null in local mode)
+  settled: boolean;           // true if POST succeeded; false on failure mode 15.1
+  model: string;              // Model used for the call
+  provider: string;           // "anthropic" | "openai" | "google"
+  timestamp: string;          // ISO 8601 timestamp
+  auditDegraded?: boolean;    // true if audit write failed after POST (mode 15.3)
+}
+```
+
+The `transferId` is the universal join key. Use it to correlate entries across the TigerBeetle ledger, the audit chain, and receipt files.
+
+## Provider Detection
+
+`trust()` identifies the LLM SDK by structural shape (duck typing). It never imports provider SDKs directly.
+
+| Provider | Detection Shape | Intercepted Method |
+|----------|----------------|-------------------|
+| Anthropic | `client.messages.create` exists | `messages.create()` |
+| OpenAI | `client.chat.completions.create` exists | `chat.completions.create()` |
+| Google | `client.models.generateContent` exists | `models.generateContent()` |
+
+If the client does not match any known shape, `trust()` throws an error at initialization time.
+
+## Streaming
+
+Streaming is transparent. When you pass `stream: true` to the provider, usertrust returns a `GovernedStream` that yields chunks identically to the native stream. The governance receipt resolves asynchronously after the stream completes:
+
+```typescript
+const stream = await client.messages.create({
+  model: "claude-sonnet-4-6",
+  max_tokens: 1024,
+  messages: [{ role: "user", content: "Write a poem" }],
+  stream: true,
+});
+
+for await (const chunk of stream) {
+  process.stdout.write(chunk.delta?.text ?? "");
+}
+
+// Receipt resolves after the stream finishes
+const receipt = await stream.receipt;
+console.log(`Cost: ${receipt.cost} UT`);
+```
+
+Token counts are accumulated per-provider from stream chunks:
+- **Anthropic**: `message_start` (input tokens), `message_delta` (output tokens)
+- **OpenAI**: `usage` field on the final chunk
+- **Google**: `usageMetadata` field
+
+## Examples
+
+### Anthropic
+
+```typescript
+import Anthropic from "@anthropic-ai/sdk";
+import { trust } from "usertrust";
+
+const client = await trust(new Anthropic(), {
+  budget: 50_000,
+  dryRun: true,
+});
+
+const { response, receipt } = await client.messages.create({
+  model: "claude-sonnet-4-6",
+  max_tokens: 1024,
+  messages: [{ role: "user", content: "Explain double-entry accounting" }],
+});
+
+console.log(response.content[0].text);
+console.log(`Cost: ${receipt.cost} UT, remaining: ${receipt.budgetRemaining}`);
+
+await client.destroy();
+```
+
+### OpenAI
+
+```typescript
+import OpenAI from "openai";
+import { trust } from "usertrust";
+
+const client = await trust(new OpenAI(), { budget: 30_000 });
+
+const { response, receipt } = await client.chat.completions.create({
+  model: "gpt-4o",
+  messages: [{ role: "user", content: "What is a Merkle tree?" }],
+});
+
+console.log(response.choices[0].message.content);
+console.log(`Settled: ${receipt.settled}, hash: ${receipt.auditHash}`);
+
+await client.destroy();
+```
+
+### Google
+
+```typescript
+import { GoogleGenAI } from "@google/genai";
+import { trust } from "usertrust";
+
+const client = await trust(new GoogleGenAI({ apiKey: "..." }), {
+  budget: 20_000,
+});
+
+const { response, receipt } = await client.models.generateContent({
+  model: "gemini-2.5-pro",
+  contents: "Explain hash chains",
+});
+
+console.log(response.text);
+console.log(`Transfer: ${receipt.transferId}`);
+
+await client.destroy();
+```
+
+### Streaming (Anthropic)
+
+```typescript
+import Anthropic from "@anthropic-ai/sdk";
+import { trust } from "usertrust";
+
+const client = await trust(new Anthropic(), { budget: 50_000 });
+
+const stream = await client.messages.create({
+  model: "claude-sonnet-4-6",
+  max_tokens: 2048,
+  messages: [{ role: "user", content: "Write a short story" }],
+  stream: true,
+});
+
+for await (const event of stream) {
+  if (event.type === "content_block_delta") {
+    process.stdout.write(event.delta.text);
+  }
+}
+
+const receipt = await stream.receipt;
+console.log(`\n\nCost: ${receipt.cost} UT`);
+
+await client.destroy();
+```

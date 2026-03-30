@@ -21,6 +21,9 @@ export function Nav() {
 					<a href="#how" className="hover:text-white transition-colors duration-200">
 						How it works
 					</a>
+					<a href="/docs" className="hover:text-white transition-colors duration-200">
+						Docs
+					</a>
 				</div>
 
 				<a

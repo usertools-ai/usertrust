@@ -1,0 +1,107 @@
+---
+title: Audit Trail
+description: SHA-256 hash-chained, append-only audit log for every governed LLM call.
+---
+
+Every governed LLM call produces an immutable audit event. Events are written to an append-only JSONL file where each event's SHA-256 hash covers the previous event's hash, forming a tamper-evident chain.
+
+## Hash Chain Mechanics
+
+Each audit event contains a `previousHash` field pointing to the hash of the preceding event. The event's own `hash` is computed over the deterministic canonicalization of the entire event (including `previousHash`). This creates a linear chain where modifying any event invalidates every subsequent hash.
+
+```
+Event 0: hash = SHA-256(canonical({ ...data, previousHash: GENESIS_HASH }))
+Event 1: hash = SHA-256(canonical({ ...data, previousHash: event0.hash }))
+Event 2: hash = SHA-256(canonical({ ...data, previousHash: event1.hash }))
+```
+
+The first event chains from `GENESIS_HASH` -- 64 zero characters (`"0000...0000"`).
+
+## Deterministic Canonicalization
+
+To ensure the same event always produces the same hash regardless of property insertion order or serialization quirks, usertrust applies deterministic canonicalization before hashing:
+
+- Object keys are **sorted** recursively
+- `undefined` values are **stripped** (keys with `undefined` are omitted)
+- The result is JSON-stringified with no whitespace
+
+This means `{ b: 1, a: 2 }` and `{ a: 2, b: 1 }` produce identical hashes.
+
+## AuditEvent Structure
+
+Each event in the chain follows this shape:
+
+```typescript
+interface AuditEvent {
+  id: string;
+  timestamp: string;
+  previousHash: string;
+  hash: string;
+  kind: string;
+  actor: string;
+  data: Record<string, unknown>;
+}
+```
+
+Events are stored as JSONL (one JSON object per line) in `.usertrust/audit/events.jsonl`. A sidecar file (`events.jsonl.meta`) tracks the last hash and sequence number for fast appends without re-reading the entire chain.
+
+## Multi-Process Safety
+
+The audit writer uses two concurrency mechanisms:
+
+- **Advisory file lock** -- Prevents multiple processes from writing to the same chain simultaneously
+- **Async mutex** -- Serializes writes within a single process to handle concurrent governed calls
+
+This ensures chain integrity even when multiple Node processes or concurrent async operations write to the same vault.
+
+## Dead-Letter Queue
+
+If an audit write fails after the LLM call and ledger settlement have already succeeded, usertrust does **not** throw an error. Instead:
+
+1. The failed event is written to `.usertrust/dlq/dead-letters.jsonl` (fsync'd for durability)
+2. The response is returned with an `auditDegraded` flag on the governance receipt
+3. The dead-letter entry can be replayed into the chain later
+
+<Callout type="warn">
+The dead-letter queue is a safety net, not normal operation. If events accumulate in the DLQ, investigate the underlying write failure (disk full, permissions, corrupt chain).
+</Callout>
+
+## Rotation
+
+Audit receipts can be rotated on a daily or weekly schedule to prevent unbounded file growth. Configuration options:
+
+| Option | Values | Default |
+|--------|--------|---------|
+| `audit.rotation` | `daily`, `weekly`, `none` | `none` |
+| `audit.indexLimit` | number | `10000` |
+
+Rotated receipts are stored in kind-specific subdirectories under `.usertrust/audit/`:
+
+```
+.usertrust/audit/
+  events.jsonl           # main hash chain (never rotated)
+  events.jsonl.meta      # last hash + sequence sidecar
+  index.json             # bounded receipt index
+  spend/2025-01-15/      # daily-rotated spend receipts
+  spend/2025-01-16/
+```
+
+The bounded index (`index.json`) keeps the most recent entries up to `indexLimit`, evicting oldest-first.
+
+## Verification
+
+The chain can be verified independently using either the built-in CLI or the standalone zero-dependency verifier:
+
+```bash
+# Built-in CLI
+npx usertrust verify
+
+# Standalone verifier (zero dependencies)
+npx usertrust-verify .usertrust
+```
+
+Both tools re-compute every hash from GENESIS_HASH forward and confirm each event's `hash` matches the expected value. Any tampered, reordered, or missing event breaks the chain.
+
+<Callout type="info">
+The standalone `usertrust-verify` package intentionally duplicates all canonicalization and hashing logic from `usertrust`. It has zero dependencies -- only Node built-ins (`node:crypto`, `node:fs`, `node:path`). This ensures the verifier cannot be compromised by a supply-chain attack on `usertrust` itself.
+</Callout>

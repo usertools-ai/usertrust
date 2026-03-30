@@ -1,4 +1,6 @@
 @import "tailwindcss";
+@import "fumadocs-ui/css/neutral.css";
+@import "fumadocs-ui/css/preset.css";
 
 /* Fonts loaded via next/font/local in layout.tsx — CSS variables injected on <html> */
 
@@ -17,6 +19,30 @@
 
 	--font-sans: var(--font-usertools), -apple-system, BlinkMacSystemFont, sans-serif;
 	--font-mono: var(--font-jetbrains), "SF Mono", "Cascadia Code", monospace;
+}
+
+/*
+ * Fumadocs dark theme overrides — match brand palette.
+ * fd- variables are namespaced so no collision with brand-* vars.
+ */
+.dark,
+:root {
+	--color-fd-background: #0a0a1a;
+	--color-fd-foreground: hsl(0, 0%, 92%);
+	--color-fd-muted: rgba(255, 255, 255, 0.05);
+	--color-fd-muted-foreground: hsla(0, 0%, 70%, 0.8);
+	--color-fd-popover: #0f0f2a;
+	--color-fd-popover-foreground: hsl(0, 0%, 87%);
+	--color-fd-card: #0f0f2a;
+	--color-fd-card-foreground: hsl(0, 0%, 98%);
+	--color-fd-border: rgba(255, 255, 255, 0.08);
+	--color-fd-primary: #34d399;
+	--color-fd-primary-foreground: #0a0a1a;
+	--color-fd-secondary: rgba(255, 255, 255, 0.05);
+	--color-fd-secondary-foreground: hsl(0, 0%, 92%);
+	--color-fd-accent: rgba(255, 255, 255, 0.08);
+	--color-fd-accent-foreground: hsl(0, 0%, 90%);
+	--color-fd-ring: #34d399;
 }
 
 /* Ken Burns zoom on hero background */
