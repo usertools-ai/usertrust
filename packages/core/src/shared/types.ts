@@ -39,6 +39,7 @@ export const TrustConfigSchema = z.object({
 	key: z.string().optional(),
 	policies: z.string().default("./policies/default.yml"),
 	pii: z.enum(["redact", "warn", "block", "off"]).default("warn"),
+	injection: z.enum(["block", "warn", "off"]).default("warn"),
 	board: z
 		.object({
 			enabled: z.boolean().default(false),
@@ -172,4 +173,26 @@ export interface ActionDescriptor {
 export interface GovernedActionResult<T> {
 	result: T;
 	receipt: TrustReceipt;
+}
+
+// ── Injection Detection types ──
+
+/** Result of prompt injection detection scan. */
+export interface InjectionDetection {
+	/** Whether a prompt injection attempt was detected. */
+	detected: boolean;
+	/** Confidence score from 0.0 (clean) to 1.0 (certain injection). */
+	score: number;
+	/** Names of matched detection patterns (e.g., ["keyword_combo", "role_boundary"]). */
+	patterns: string[];
+	/** Dot-paths where injections were found (e.g., ["messages[0].content(keyword_combo)"]). */
+	paths: string[];
+}
+
+/** Canary token for prompt leak detection. */
+export interface CanaryToken {
+	/** Random hex token (32 chars). */
+	token: string;
+	/** HTML comment marker embedding the token. */
+	marker: string;
 }
