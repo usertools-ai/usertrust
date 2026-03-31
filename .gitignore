@@ -30,5 +30,10 @@ scripts/gate1-soak.ts
 .env.production
 .env*.local
 
+# Internal CI / review tooling (not part of the public OSS project)
+.github/codex/
+scripts/codex-review.sh
+scripts/preflight.sh
+
 # Task tracking
 tasks/
