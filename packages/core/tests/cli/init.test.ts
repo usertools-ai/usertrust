@@ -9,7 +9,14 @@ vi.mock("@clack/prompts", () => ({
 	outro: vi.fn(),
 	text: vi.fn(),
 	confirm: vi.fn(),
-	log: { info: vi.fn(), success: vi.fn(), warn: vi.fn(), error: vi.fn(), step: vi.fn(), message: vi.fn() },
+	log: {
+		info: vi.fn(),
+		success: vi.fn(),
+		warn: vi.fn(),
+		error: vi.fn(),
+		step: vi.fn(),
+		message: vi.fn(),
+	},
 	spinner: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })),
 	isCancel: vi.fn(() => false),
 }));
@@ -43,9 +50,9 @@ describe("usertrust init (interactive)", () => {
 	it("creates vault with one API key and recommended rates", async () => {
 		vi.mocked(clack.text)
 			.mockResolvedValueOnce("sk-ant-api03-testkey123") // first key
-			.mockResolvedValueOnce("")                         // empty = done
-			.mockResolvedValueOnce("50");                      // budget
-		vi.mocked(clack.confirm).mockResolvedValueOnce(true);  // recommended rates
+			.mockResolvedValueOnce("") // empty = done
+			.mockResolvedValueOnce("50"); // budget
+		vi.mocked(clack.confirm).mockResolvedValueOnce(true); // recommended rates
 
 		await run(tempDir);
 
@@ -114,6 +121,29 @@ describe("usertrust init (interactive)", () => {
 		// Second init — should warn
 		await run(tempDir);
 		expect(clack.log.warn).toHaveBeenCalled();
+	});
+
+	it("--reconfigure overwrites existing vault", async () => {
+		// First init
+		vi.mocked(clack.text)
+			.mockResolvedValueOnce("sk-ant-api03-testkey123")
+			.mockResolvedValueOnce("")
+			.mockResolvedValueOnce("50");
+		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
+		await run(tempDir);
+
+		// Reconfigure with different budget
+		vi.mocked(clack.text)
+			.mockResolvedValueOnce("sk-ant-api03-newkey456")
+			.mockResolvedValueOnce("")
+			.mockResolvedValueOnce("200");
+		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
+		await run(tempDir, { reconfigure: true });
+
+		const config = JSON.parse(
+			readFileSync(join(tempDir, ".usertrust", "usertrust.config.json"), "utf-8"),
+		);
+		expect(config.budget).toBe(2_000_000); // $200 × 10,000
 	});
 
 	it("converts dollar budget to usertokens", async () => {
