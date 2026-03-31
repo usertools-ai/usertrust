@@ -1,13 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import {
-	createPrivateKey,
-	createPublicKey,
-	generateKeyPairSync,
-	sign,
-	verify,
-} from "node:crypto";
+import { createPrivateKey, createPublicKey, generateKeyPairSync, sign, verify } from "node:crypto";
 import { canonicalize } from "../audit/canonical.js";
 import type { SkillManifest } from "../shared/types.js";
 
