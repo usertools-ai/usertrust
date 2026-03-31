@@ -106,6 +106,27 @@ export class AuditDegradedError extends Error {
 	}
 }
 
+export class CredentialAccessDeniedError extends Error {
+	public readonly credentialName: string;
+	public readonly reason: string;
+	public readonly hint: string;
+	public readonly docsUrl: string;
+
+	constructor(credentialName: string, reason: string) {
+		const hint =
+			"Check the credential scope in .usertrust/credentials.enc or update the scope with `usertrust secret add --scope`.";
+		const docsUrl = "https://usertrust.ai/docs/errors/credential-access-denied";
+		super(
+			`Credential access denied for ${credentialName}: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`,
+		);
+		this.name = "CredentialAccessDeniedError";
+		this.credentialName = credentialName;
+		this.reason = reason;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
+	}
+}
+
 export class VaultNotInitializedError extends Error {
 	public readonly path: string;
 	public readonly hint: string;
@@ -138,6 +159,24 @@ export class SkillVerificationError extends Error {
 		this.name = "SkillVerificationError";
 		this.skillId = skillId;
 		this.reason = reason;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
+	}
+}
+
+export class VaultKeyMissingError extends Error {
+	public readonly envVar: string;
+	public readonly hint: string;
+	public readonly docsUrl: string;
+
+	constructor(envVar: string) {
+		const hint = `Set the ${envVar} environment variable to the vault master key.`;
+		const docsUrl = "https://usertrust.ai/docs/errors/vault-key-missing";
+		super(
+			`Vault master key not set: ${envVar} is not defined\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`,
+		);
+		this.name = "VaultKeyMissingError";
+		this.envVar = envVar;
 		this.hint = hint;
 		this.docsUrl = docsUrl;
 	}
