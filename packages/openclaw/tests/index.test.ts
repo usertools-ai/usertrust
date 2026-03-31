@@ -196,4 +196,60 @@ describe("openclaw plugin entry point", () => {
 			await shutdown();
 		});
 	});
+
+	describe("wrapStreamFn end-to-end", () => {
+		it("governed stream from wrapStreamFn yields all events", async () => {
+			const mod = await import("../src/index.js");
+			const registerFn = mod.default;
+
+			let capturedPlugin: {
+				wrapStreamFn: (
+					fn: (...args: unknown[]) => AsyncIterable<unknown>,
+					config: { budget: number; dryRun: boolean },
+				) => (...args: unknown[]) => AsyncIterable<unknown>;
+			} | null = null;
+			const api = {
+				registerTool: vi.fn(),
+				registerProvider: vi.fn((p: unknown) => {
+					capturedPlugin = p as typeof capturedPlugin;
+				}),
+				registerChannel: vi.fn(),
+				registerHttpRoute: vi.fn(),
+			};
+
+			registerFn(api);
+
+			const events = [
+				{ type: "start" as const },
+				{ type: "text_delta" as const, text: "hello" },
+				{
+					type: "done" as const,
+					stopReason: "stop" as const,
+					usage: { inputTokens: 50, outputTokens: 20 },
+				},
+			];
+
+			const mockStreamFn = async function* () {
+				for (const e of events) yield e;
+			};
+
+			const wrapped = capturedPlugin?.wrapStreamFn(mockStreamFn, {
+				budget: 100_000,
+				dryRun: true,
+			});
+
+			const collected: unknown[] = [];
+			const stream = wrapped?.("claude-sonnet-4-6", {
+				messages: [{ role: "user", content: "hi" }],
+				model: "claude-sonnet-4-6",
+			});
+			if (stream) {
+				for await (const event of stream) {
+					collected.push(event);
+				}
+			}
+
+			expect(collected).toHaveLength(3);
+		});
+	});
 });
