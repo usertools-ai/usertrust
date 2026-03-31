@@ -23,7 +23,13 @@ export type {
 	ActionKind,
 	ActionDescriptor,
 	GovernedActionResult,
+	InjectionDetection,
+	CanaryToken,
 } from "./shared/types.js";
+
+// Injection detection
+export { detectInjection } from "./policy/injection.js";
+export { generateCanary, injectCanary, detectCanaryLeak } from "./policy/canary.js";
 
 // Errors
 export {

@@ -40,6 +40,7 @@ import { estimateCost, estimateInputTokens } from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES } from "./policy/default-rules.js";
 import { type GateRule, evaluatePolicy, loadPolicies } from "./policy/gate.js";
+import { detectInjection } from "./policy/injection.js";
 import { detectPII, redactPII } from "./policy/pii.js";
 import { type ProxyConnection, connectProxy } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
@@ -320,7 +321,31 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// "warn" and "redact" modes: continue (redact is not implemented at SDK level)
 				}
 
-				// d2. Failure mode 15.4: TigerBeetle / engine unreachable — PENDING hold
+				// d2. Injection detection
+				if (config.injection !== "off") {
+					const injectionResult = detectInjection(messages);
+					if (injectionResult.detected) {
+						if (config.injection === "block") {
+							throw new PolicyDeniedError(
+								`Prompt injection detected: ${injectionResult.patterns.join(", ")}`,
+							);
+						}
+						// warn: log to audit trail (non-fatal)
+						await audit
+							.appendEvent({
+								kind: "injection_detected",
+								actor: "local",
+								data: {
+									patterns: injectionResult.patterns,
+									score: injectionResult.score,
+									model,
+								},
+							})
+							.catch(() => {});
+					}
+				}
+
+				// e. Failure mode 15.4: TigerBeetle / engine unreachable — PENDING hold
 				if (proxyConn != null && !isDryRun) {
 					try {
 						// AUD-460: Capture the proxy's returned transferId
@@ -846,6 +871,31 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						throw new PolicyDeniedError(
 							`PII detected in action params: ${piiResult.types.join(", ")}`,
 						);
+					}
+				}
+
+				// d2. Injection detection on action params
+				if (config.injection !== "off" && action.params != null) {
+					const injectionResult = detectInjection(action.params);
+					if (injectionResult.detected) {
+						if (config.injection === "block") {
+							throw new PolicyDeniedError(
+								`Injection detected in action params: ${injectionResult.patterns.join(", ")}`,
+							);
+						}
+						// warn: log to audit trail (non-fatal)
+						await audit
+							.appendEvent({
+								kind: "injection_detected",
+								actor: action.actor ?? "local",
+								data: {
+									patterns: injectionResult.patterns,
+									score: injectionResult.score,
+									actionName: action.name,
+									actionKind: action.kind,
+								},
+							})
+							.catch(() => {});
 					}
 				}
 
