@@ -36,7 +36,7 @@ jobs:
           echo "::error::Releases must be triggered from the master branch."
           exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
