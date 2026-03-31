@@ -2,13 +2,24 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-const COMMANDS = ["init", "inspect", "health", "verify", "snapshot", "tb", "pricing", "completions"] as const;
+const COMMANDS = [
+	"init",
+	"inspect",
+	"health",
+	"verify",
+	"snapshot",
+	"tb",
+	"pricing",
+	"completions",
+] as const;
 
 const argv = process.argv.slice(2);
 const jsonFlag = argv.includes("--json");
 const skipVerify = argv.includes("--skip-verify");
 const reconfigure = argv.includes("--reconfigure");
-const positional = argv.filter((a) => a !== "--json" && a !== "--skip-verify" && a !== "--reconfigure");
+const positional = argv.filter(
+	(a) => a !== "--json" && a !== "--skip-verify" && a !== "--reconfigure",
+);
 const command = positional[0];
 
 /** Simple Levenshtein distance — two-row DP, no dependency needed. */

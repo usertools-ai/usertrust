@@ -90,19 +90,14 @@ const PROVIDER_MODEL_MAP: Record<string, string[]> = {
 export function modelsForProvider(provider: string): string[] {
 	const prefixes = PROVIDER_MODEL_MAP[provider];
 	if (!prefixes) return [];
-	return Object.keys(PRICING_TABLE).filter((model) =>
-		prefixes.some((p) => model.startsWith(p)),
-	);
+	return Object.keys(PRICING_TABLE).filter((model) => prefixes.some((p) => model.startsWith(p)));
 }
 
 /**
  * Look up rates by model string. Falls back to prefix matching,
  * then FALLBACK_RATE for unknown models.
  */
-export function getModelRates(
-	model: string,
-	customRates?: Record<string, ModelRates>,
-): ModelRates {
+export function getModelRates(model: string, customRates?: Record<string, ModelRates>): ModelRates {
 	if (customRates) {
 		const custom = customRates[model];
 		if (custom) return custom;

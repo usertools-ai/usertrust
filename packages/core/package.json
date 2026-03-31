@@ -49,9 +49,7 @@
 		"build": "tsc",
 		"prepublishOnly": "tsc"
 	},
-	"files": [
-		"dist"
-	],
+	"files": ["dist"],
 	"peerDependencies": {
 		"@anthropic-ai/sdk": ">=0.30.0",
 		"openai": ">=4.70.0"
