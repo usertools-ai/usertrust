@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AuditWriter } from "../../src/audit/chain.js";
 import type { TrustEngine } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
 import type { Governor } from "../../src/headless.js";
+import { VAULT_DIR } from "../../src/shared/constants.js";
 
 // Mock tigerbeetle-node (native module, never loaded in tests)
 vi.mock("tigerbeetle-node", () => ({
@@ -338,5 +340,488 @@ describe("headless governor", () => {
 
 		// Both should be voided
 		expect(engine.voidedIds).toHaveLength(2);
+	});
+
+	// ── Proxy mode tests ──
+
+	it("authorize/settle use proxy paths when proxy is set", async () => {
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			proxy: "https://proxy.example.com",
+			key: "test-key",
+		});
+
+		const auth = await gov.authorize({
+			model: "claude-sonnet-4-6",
+			estimatedInputTokens: 100,
+			maxOutputTokens: 500,
+		});
+
+		// Proxy stub returns a proxy_ prefixed transferId
+		expect(auth.proxyTransferId).toMatch(/^proxy_/);
+		expect(auth.transferId).toMatch(/^tx_/);
+
+		const receipt = await gov.settle(auth, {
+			inputTokens: 80,
+			outputTokens: 200,
+		});
+
+		// Proxy mode sets proxyStub and receiptUrl
+		expect(receipt.proxyStub).toBe(true);
+		expect(receipt.receiptUrl).toContain(auth.transferId);
+		expect(receipt.settled).toBe(true);
+
+		await gov.destroy();
+	});
+
+	it("abort uses proxy void path when proxy is set", async () => {
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			proxy: "https://proxy.example.com",
+		});
+
+		const auth = await gov.authorize({ model: "gpt-4o" });
+		const budgetBefore = gov.budgetRemaining();
+
+		await gov.abort(auth, new Error("test error"));
+
+		// Budget should be restored after abort
+		expect(gov.budgetRemaining()).toBeGreaterThan(budgetBefore);
+
+		await gov.destroy();
+	});
+
+	it("destroy voids active proxy authorizations", async () => {
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			proxy: "https://proxy.example.com",
+		});
+
+		// Authorize but don't settle
+		await gov.authorize({ model: "claude-sonnet-4-6" });
+		await gov.authorize({ model: "gpt-4o" });
+
+		// Should not throw — proxy void is best-effort
+		await gov.destroy();
+	});
+
+	// ── Engine POST failure in settle() ──
+
+	it("settle sets settled=false and writes settlement_ambiguous on engine POST failure", async () => {
+		const auditEvents: { kind: string }[] = [];
+		const mockAudit: AuditWriter = {
+			appendEvent: vi.fn(async (input) => {
+				auditEvents.push({ kind: input.kind });
+				return {
+					id: randomUUID(),
+					timestamp: new Date().toISOString(),
+					previousHash: "0".repeat(64),
+					hash: "a".repeat(64),
+					kind: input.kind,
+					actor: input.actor,
+					data: input.data,
+				};
+			}),
+			getWriteFailures: () => 0,
+			isDegraded: () => false,
+			flush: async () => {},
+			release: () => {},
+		};
+
+		const failingEngine: TrustEngine = {
+			async spendPending(params) {
+				return { transferId: params.transferId };
+			},
+			async postPendingSpend(_transferId) {
+				throw new Error("TigerBeetle POST failed");
+			},
+			async voidPendingSpend() {},
+			async voidAllPending() {},
+			destroy() {},
+		};
+
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			_engine: failingEngine,
+			_audit: mockAudit,
+		});
+
+		const auth = await gov.authorize({
+			model: "claude-sonnet-4-6",
+			estimatedInputTokens: 100,
+			maxOutputTokens: 500,
+		});
+
+		const receipt = await gov.settle(auth, {
+			inputTokens: 80,
+			outputTokens: 200,
+		});
+
+		expect(receipt.settled).toBe(false);
+		expect(auditEvents.some((e) => e.kind === "settlement_ambiguous")).toBe(true);
+
+		await gov.destroy();
+	});
+
+	// ── Engine VOID failure in abort() ──
+
+	it("abort completes even when engine voidPendingSpend throws (best-effort)", async () => {
+		const failingEngine: TrustEngine = {
+			async spendPending(params) {
+				return { transferId: params.transferId };
+			},
+			async postPendingSpend() {},
+			async voidPendingSpend() {
+				throw new Error("VOID failed");
+			},
+			async voidAllPending() {},
+			destroy() {},
+		};
+
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			_engine: failingEngine,
+		});
+
+		const auth = await gov.authorize({ model: "gpt-4o" });
+
+		// Should NOT throw even though void fails
+		await gov.abort(auth, new Error("LLM error"));
+
+		// Budget should still be restored
+		expect(gov.budgetRemaining()).toBe(100_000);
+
+		await gov.destroy();
+	});
+
+	// ── Audit degraded path ──
+
+	it("settle returns auditDegraded=true when audit.appendEvent throws", async () => {
+		let appendCallCount = 0;
+		const degradedAudit: AuditWriter = {
+			appendEvent: vi.fn(async (input) => {
+				appendCallCount++;
+				// Let the settlement_ambiguous audit through but fail on the main llm_call audit
+				if (input.kind === "llm_call") {
+					throw new Error("Disk full");
+				}
+				return {
+					id: randomUUID(),
+					timestamp: new Date().toISOString(),
+					previousHash: "0".repeat(64),
+					hash: "b".repeat(64),
+					kind: input.kind,
+					actor: input.actor,
+					data: input.data,
+				};
+			}),
+			getWriteFailures: () => 0,
+			isDegraded: () => false,
+			flush: async () => {},
+			release: () => {},
+		};
+
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+			_audit: degradedAudit,
+		});
+
+		const auth = await gov.authorize({
+			model: "claude-sonnet-4-6",
+			estimatedInputTokens: 50,
+		});
+
+		const receipt = await gov.settle(auth);
+
+		expect(receipt.auditDegraded).toBe(true);
+		expect(appendCallCount).toBeGreaterThan(0);
+
+		await gov.destroy();
+	});
+
+	// ── Audit degraded in settle() POST failure path ──
+
+	it("settle returns auditDegraded=true when settlement_ambiguous audit also throws", async () => {
+		const degradedAudit: AuditWriter = {
+			appendEvent: vi.fn(async () => {
+				throw new Error("All writes fail");
+			}),
+			getWriteFailures: () => 0,
+			isDegraded: () => false,
+			flush: async () => {},
+			release: () => {},
+		};
+
+		const failingEngine: TrustEngine = {
+			async spendPending(params) {
+				return { transferId: params.transferId };
+			},
+			async postPendingSpend() {
+				throw new Error("POST failed");
+			},
+			async voidPendingSpend() {},
+			async voidAllPending() {},
+			destroy() {},
+		};
+
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			_engine: failingEngine,
+			_audit: degradedAudit,
+		});
+
+		const auth = await gov.authorize({
+			model: "claude-sonnet-4-6",
+			estimatedInputTokens: 50,
+		});
+
+		const receipt = await gov.settle(auth);
+
+		expect(receipt.settled).toBe(false);
+		expect(receipt.auditDegraded).toBe(true);
+
+		await gov.destroy();
+	});
+
+	// ── Pattern memory recording ──
+
+	it("recordPattern is called on settle when patterns are enabled", async () => {
+		// Spy on the actual recordPattern function
+		const patterns = await import("../../src/memory/patterns.js");
+		const spy = vi.spyOn(patterns, "recordPattern").mockResolvedValue(undefined);
+
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+		});
+
+		// Verify config has patterns enabled (default)
+		expect(gov.config.patterns.enabled).toBe(true);
+
+		const auth = await gov.authorize({
+			model: "claude-sonnet-4-6",
+			estimatedInputTokens: 100,
+			maxOutputTokens: 500,
+		});
+
+		await gov.settle(auth, {
+			inputTokens: 80,
+			outputTokens: 200,
+		});
+
+		expect(spy).toHaveBeenCalledOnce();
+		expect(spy).toHaveBeenCalledWith(
+			expect.objectContaining({
+				model: "claude-sonnet-4-6",
+				success: true,
+			}),
+		);
+
+		spy.mockRestore();
+		await gov.destroy();
+	});
+
+	// ── PII detection blocking ──
+
+	it("authorize throws PolicyDeniedError when PII detected in block mode", async () => {
+		// Create a config file with pii: "block"
+		const configDir = join(vaultBase, VAULT_DIR);
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(
+			join(configDir, "usertrust.config.json"),
+			JSON.stringify({
+				budget: 100_000,
+				pii: "block",
+			}),
+		);
+
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+		});
+
+		expect(gov.config.pii).toBe("block");
+
+		await expect(
+			gov.authorize({
+				model: "claude-sonnet-4-6",
+				messages: [{ role: "user", content: "My email is test@example.com" }],
+			}),
+		).rejects.toThrow("PII detected");
+
+		await gov.destroy();
+	});
+
+	// ── Policy denial ──
+
+	it("authorize throws PolicyDeniedError when budget is exhausted", async () => {
+		// Create a config with policy rules that deny when budget_remaining < estimated_cost
+		const configDir = join(vaultBase, VAULT_DIR);
+		const policiesDir = join(configDir, "policies");
+		mkdirSync(policiesDir, { recursive: true });
+		writeFileSync(
+			join(policiesDir, "default.yml"),
+			`- name: budget_exhausted
+  effect: deny
+  enforcement: hard
+  conditions:
+    - field: budget_remaining
+      operator: lte
+      value: 0
+`,
+		);
+		writeFileSync(
+			join(configDir, "usertrust.config.json"),
+			JSON.stringify({
+				budget: 1,
+				policies: "./policies/default.yml",
+			}),
+		);
+
+		const gov = await createGovernor({
+			dryRun: true,
+			vaultBase,
+		});
+
+		// First authorize uses up most of the tiny budget
+		const auth1 = await gov.authorize({
+			model: "claude-sonnet-4-6",
+			estimatedInputTokens: 100,
+			maxOutputTokens: 500,
+		});
+		await gov.settle(auth1, { inputTokens: 100, outputTokens: 500 });
+
+		// Budget should now be exhausted — next authorize should be denied
+		await expect(
+			gov.authorize({
+				model: "claude-sonnet-4-6",
+				estimatedInputTokens: 100,
+				maxOutputTokens: 500,
+			}),
+		).rejects.toThrow("Policy denied");
+
+		await gov.destroy();
+	});
+
+	// ── Budget persistence ──
+
+	it("persist spend-ledger.json after settle", async () => {
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+		});
+
+		const auth = await gov.authorize({
+			model: "claude-sonnet-4-6",
+			estimatedInputTokens: 100,
+			maxOutputTokens: 500,
+		});
+
+		await gov.settle(auth, { inputTokens: 100, outputTokens: 500 });
+
+		const ledgerPath = join(vaultBase, VAULT_DIR, "spend-ledger.json");
+		expect(existsSync(ledgerPath)).toBe(true);
+
+		const ledgerData = JSON.parse(readFileSync(ledgerPath, "utf-8"));
+		expect(ledgerData.budgetSpent).toBeGreaterThan(0);
+		expect(typeof ledgerData.updatedAt).toBe("string");
+
+		await gov.destroy();
+	});
+
+	// ── Destroyed governor ──
+
+	it("settle throws after governor is destroyed", async () => {
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+		});
+
+		const auth = await gov.authorize({ model: "claude-sonnet-4-6" });
+		await gov.destroy();
+
+		// settle should throw because auth was voided during destroy
+		await expect(gov.settle(auth)).rejects.toThrow("not active");
+	});
+
+	it("abort is no-op after governor is destroyed", async () => {
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+		});
+
+		const auth = await gov.authorize({ model: "claude-sonnet-4-6" });
+		await gov.destroy();
+
+		// abort should be idempotent (auth was voided during destroy)
+		await gov.abort(auth, new Error("test"));
+	});
+
+	// ── Config loading from file ──
+
+	it("loads config from file when configPath is provided", async () => {
+		const configDir = join(vaultBase, VAULT_DIR);
+		mkdirSync(configDir, { recursive: true });
+
+		const configFile = join(configDir, "custom-config.json");
+		writeFileSync(
+			configFile,
+			JSON.stringify({
+				budget: 75_000,
+				tier: "pro",
+				pii: "off",
+			}),
+		);
+
+		const gov = await createGovernor({
+			dryRun: true,
+			vaultBase,
+			configPath: configFile,
+		});
+
+		expect(gov.config.budget).toBe(75_000);
+		expect(gov.config.tier).toBe("pro");
+		expect(gov.config.pii).toBe("off");
+		expect(gov.budgetRemaining()).toBe(75_000);
+
+		await gov.destroy();
+	});
+
+	it("config file budget can be overridden by opts.budget", async () => {
+		const configDir = join(vaultBase, VAULT_DIR);
+		mkdirSync(configDir, { recursive: true });
+
+		const configFile = join(configDir, "usertrust.config.json");
+		writeFileSync(
+			configFile,
+			JSON.stringify({
+				budget: 50_000,
+				tier: "pro",
+			}),
+		);
+
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 200_000,
+			vaultBase,
+		});
+
+		expect(gov.config.budget).toBe(200_000);
+		expect(gov.config.tier).toBe("pro");
+
+		await gov.destroy();
 	});
 });

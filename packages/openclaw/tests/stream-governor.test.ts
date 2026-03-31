@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createGovernor } from "../../core/src/headless.js";
 import type { Governor } from "../../core/src/headless.js";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { wrapCompleteWithGovernance, wrapStreamWithGovernance } from "../src/stream-governor.js";
 import type { StreamContext, StreamEvent, StreamFn } from "../src/types.js";
 
