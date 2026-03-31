@@ -1,10 +1,10 @@
-name: Publish
+name: Release
 
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version bump (patch, minor, major)"
+        description: "Version bump type"
         required: true
         default: "patch"
         type: choice
@@ -12,53 +12,129 @@ on:
           - patch
           - minor
           - major
+      dry_run:
+        description: "Dry run (skip npm publish)"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  publish:
-    runs-on: ubuntu-latest # TODO: switch to blacksmith-4vcpu-ubuntu-2204 once registered
+  release:
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
-      pull-requests: write
     steps:
+      # ── Validate branch ──
+      - name: Ensure release from master
+        if: github.ref != 'refs/heads/master'
+        run: |
+          echo "::error::Releases must be triggered from the master branch."
+          exit 1
+
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
           cache: npm
+
       - run: npm ci
+
+      # ── Quality gate ──
       - name: Typecheck
-        run: npx tsc -b
+        run: npx tsc -b --noEmit
+
       - name: Test
         run: npx vitest run
-      - name: Version bump
+
+      # ── Version bump (all packages in lockstep) ──
+      - name: Bump versions
+        id: version
         run: |
-          cd packages/core && npm version ${{ inputs.version }} --no-git-tag-version
-          cd ../verify && npm version ${{ inputs.version }} --no-git-tag-version
+          cd packages/core && npm version ${{ inputs.version }} --no-git-tag-version && cd ../..
+          cd packages/verify && npm version ${{ inputs.version }} --no-git-tag-version && cd ../..
+          cd packages/openclaw && npm version ${{ inputs.version }} --no-git-tag-version && cd ../..
+          VERSION=$(node -p 'require("./packages/core/package.json").version')
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "### Release v${VERSION}" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Build ──
       - name: Build usertrust
         run: cd packages/core && npx tsc
-      - name: Build verify
+
+      - name: Build usertrust-verify
         run: cd packages/verify && npx tsc
+
+      - name: Build @usertrust/openclaw
+        run: cd packages/openclaw && npx tsc
+
+      # ── Verify builds ──
+      - name: Verify dist directories exist
+        run: |
+          for pkg in core verify openclaw; do
+            if [ ! -d "packages/${pkg}/dist" ]; then
+              echo "::error::packages/${pkg}/dist not found after build"
+              exit 1
+            fi
+            echo "✓ packages/${pkg}/dist exists ($(find packages/${pkg}/dist -name '*.js' | wc -l) JS files)"
+          done
+
+      # ── Publish with provenance ──
       - name: Publish usertrust
+        if: ${{ !inputs.dry_run }}
         run: cd packages/core && npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Publish verify
+
+      - name: Publish usertrust-verify
+        if: ${{ !inputs.dry_run }}
         run: cd packages/verify && npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - name: Commit version bump via PR
+
+      - name: Publish @usertrust/openclaw
+        if: ${{ !inputs.dry_run }}
+        run: cd packages/openclaw && npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Dry run summary
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "### Dry run — skipped npm publish" >> "$GITHUB_STEP_SUMMARY"
+          echo "Would have published:" >> "$GITHUB_STEP_SUMMARY"
+          echo "- usertrust@${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- usertrust-verify@${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- @usertrust/openclaw@${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── Tag + commit version bump ──
+      - name: Commit and tag
+        if: ${{ !inputs.dry_run }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packages/*/package.json
+          git commit -m "release: v${VERSION}"
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+          git push origin master --follow-tags
+
+      # ── GitHub Release ──
+      - name: Create GitHub Release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION=$(node -p 'require("./packages/core/package.json").version')
-          BRANCH="release/v${VERSION}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$BRANCH"
-          git add packages/*/package.json
-          git commit -m "release: v${VERSION}"
-          git push -u origin "$BRANCH"
-          gh pr create --title "release: v${VERSION}" --body "Auto-generated version bump after npm publish."
-          gh pr merge "$BRANCH" --squash --auto --subject "release: v${VERSION}"
+          VERSION="${{ steps.version.outputs.version }}"
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --generate-notes \
+            --latest
