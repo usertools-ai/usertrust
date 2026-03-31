@@ -147,7 +147,7 @@ interface ScanState {
 function scanString(value: string, currentPath: string, state: ScanState): void {
 	const normalized = value
 		.normalize("NFKC")
-		.replace(/[\u200B-\u200D\uFEFF\u00AD\u200E\u200F]/g, "")
+		.replace(/\u200B|\u200C|\u200D|\uFEFF|\u00AD|\u200E|\u200F/g, "")
 		.toLowerCase();
 
 	if (checkKeywordCombo(normalized)) {
