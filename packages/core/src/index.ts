@@ -7,6 +7,10 @@
 export { trust } from "./govern.js";
 export type { TrustOpts, TrustedClient } from "./govern.js";
 
+// Headless governance (non-SDK integrations)
+export { createGovernor } from "./headless.js";
+export type { Governor, Authorization, AuthorizeParams, SettleParams } from "./headless.js";
+
 // Config
 export { loadConfig, defineConfig } from "./config.js";
 

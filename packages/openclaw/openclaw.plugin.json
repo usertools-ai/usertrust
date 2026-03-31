@@ -1,0 +1,59 @@
+{
+	"id": "usertrust",
+	"name": "usertrust",
+	"description": "Financial governance for AI agents. Every LLM call becomes an immutable, auditable transaction with budget enforcement, policy gates, and hash-chained audit trails.",
+	"kind": "provider",
+	"configSchema": {
+		"type": "object",
+		"additionalProperties": false,
+		"properties": {
+			"budget": {
+				"type": "number",
+				"description": "Token budget in usertokens. 1 usertoken = $0.0001."
+			},
+			"tier": {
+				"type": "string",
+				"enum": ["free", "mini", "pro", "mega", "ultra"],
+				"description": "Budget tier for policy evaluation."
+			},
+			"dryRun": {
+				"type": "boolean",
+				"description": "Skip TigerBeetle ledger — audit-chain-only mode."
+			},
+			"configPath": {
+				"type": "string",
+				"description": "Path to usertrust.config.json. Defaults to .usertrust/usertrust.config.json."
+			},
+			"proxy": {
+				"type": "string",
+				"description": "Remote governance proxy URL."
+			},
+			"proxyKey": {
+				"type": "string",
+				"description": "API key for the governance proxy."
+			}
+		},
+		"required": ["budget"]
+	},
+	"uiHints": {
+		"budget": {
+			"label": "Token Budget",
+			"placeholder": "100000"
+		},
+		"tier": {
+			"label": "Budget Tier",
+			"placeholder": "pro"
+		},
+		"dryRun": {
+			"label": "Dry Run Mode"
+		},
+		"proxy": {
+			"label": "Proxy URL",
+			"placeholder": "https://proxy.usertools.ai"
+		},
+		"proxyKey": {
+			"label": "Proxy API Key",
+			"sensitive": true
+		}
+	}
+}

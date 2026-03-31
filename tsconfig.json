@@ -1,4 +1,8 @@
 {
 	"files": [],
-	"references": [{ "path": "packages/core" }, { "path": "packages/verify" }]
+	"references": [
+		{ "path": "packages/core" },
+		{ "path": "packages/verify" },
+		{ "path": "packages/openclaw" }
+	]
 }
