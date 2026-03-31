@@ -3,7 +3,10 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { type TrustedClient, trust } from "../../src/govern.js";
+import { PolicyDeniedError } from "../../src/shared/errors.js";
+import type { AuditEvent } from "../../src/shared/types.js";
 
 // Mock tigerbeetle-node at module level (native module, never loaded in tests)
 vi.mock("tigerbeetle-node", () => ({
@@ -839,6 +842,85 @@ describe("trust()", () => {
 			});
 
 			expect(result.receipt.cost).toBeGreaterThan(0);
+
+			await governed.destroy();
+		});
+	});
+
+	// ─── DEFAULT_RULES fallback ───
+
+	describe("DEFAULT_RULES fallback", () => {
+		it("denies second call when budget exhausted and no policy file (block-budget-exhausted default rule)", async () => {
+			// budget=1 is the minimum allowed. First call succeeds and exhausts the budget.
+			// Second call is denied by the block-budget-exhausted default rule.
+			const createFn = vi.fn(async () => ({
+				id: "msg_123",
+				model: "claude-sonnet-4-6",
+				usage: { input_tokens: 10, output_tokens: 5 },
+			}));
+			const mockClient = { messages: { create: createFn } };
+
+			const governed = await trust(mockClient, {
+				dryRun: true,
+				budget: 1,
+				vaultBase: tmpVault,
+			});
+
+			// First call succeeds (budget_remaining=1 passes policy)
+			const r1 = await governed.messages.create({
+				model: "claude-sonnet-4-6",
+				max_tokens: 1024,
+				messages: [{ role: "user", content: "Hello" }],
+			});
+			expect(r1.response).toBeDefined();
+			expect(r1.receipt.budgetRemaining).toBeLessThanOrEqual(0);
+
+			// Second call denied by DEFAULT_RULES block-budget-exhausted
+			await expect(
+				governed.messages.create({
+					model: "claude-sonnet-4-6",
+					messages: [{ role: "user", content: "Hello again" }],
+				}),
+			).rejects.toThrow(PolicyDeniedError);
+
+			// The original create was called only once (first call)
+			expect(createFn).toHaveBeenCalledOnce();
+
+			await governed.destroy();
+		});
+	});
+
+	// ─── auditHash AUDIT_DEGRADED sentinel ───
+
+	describe("auditHash AUDIT_DEGRADED sentinel", () => {
+		it("sets auditHash to AUDIT_DEGRADED when audit writer throws", async () => {
+			const mockAudit: AuditWriter = {
+				appendEvent: vi.fn(async () => {
+					throw new Error("Audit disk full");
+				}),
+				getWriteFailures: vi.fn(() => 0),
+				isDegraded: vi.fn(() => false),
+				flush: vi.fn(async () => {}),
+				release: vi.fn(),
+			};
+
+			const mockClient = makeAnthropicMock();
+
+			const governed = await trust(mockClient, {
+				dryRun: true,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				_audit: mockAudit,
+			});
+
+			const result = await governed.messages.create({
+				model: "claude-sonnet-4-6",
+				max_tokens: 1024,
+				messages: [{ role: "user", content: "Hello" }],
+			});
+
+			expect(result.receipt.auditHash).toBe("AUDIT_DEGRADED");
+			expect(result.receipt.auditDegraded).toBe(true);
 
 			await governed.destroy();
 		});

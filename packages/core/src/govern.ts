@@ -38,8 +38,9 @@ import { detectClientKind } from "./detect.js";
 import { TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import { estimateCost, estimateInputTokens } from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
+import { DEFAULT_RULES } from "./policy/default-rules.js";
 import { type GateRule, evaluatePolicy, loadPolicies } from "./policy/gate.js";
-import { detectPII } from "./policy/pii.js";
+import { detectPII, redactPII } from "./policy/pii.js";
 import { type ProxyConnection, connectProxy } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
@@ -216,7 +217,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	const audit: AuditWriter = (isTestEnv ? opts?._audit : undefined) ?? createAuditWriter(vaultPath);
 
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
-	const policyRules: GateRule[] = existsSync(policiesPath) ? loadPolicies(policiesPath) : [];
+	const loadedRules = existsSync(policiesPath) ? loadPolicies(policiesPath) : [];
+	const policyRules: GateRule[] = loadedRules.length > 0 ? loadedRules : DEFAULT_RULES;
 
 	const breaker = new CircuitBreakerRegistry({
 		failureThreshold: config.circuitBreaker.failureThreshold,
@@ -387,10 +389,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								usageSource = "estimated";
 							}
 
-							// Release in-flight hold
-							inFlightHoldTotal -= estimatedCost;
-
-							budgetSpent += streamCost;
+							// Release in-flight hold and commit budget under mutex
+							{
+								const releaseLock = await budgetMutex.acquire();
+								inFlightHoldTotal -= estimatedCost;
+								budgetSpent += streamCost;
+								releaseLock();
+							}
 							// AUD-457: Persist cumulative spend to disk
 							await persistSpendLedger(vaultBase, budgetSpent);
 							cb.recordSuccess();
@@ -447,17 +452,25 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							const syntheticHash = createHash("sha256").update(transferId).digest("hex");
 							let auditHash = syntheticHash;
 							try {
+								const auditEventData: Record<string, unknown> = {
+									model,
+									cost: streamCost,
+									settled,
+									transferId,
+									usageSource,
+									chunksDelivered: completion.chunksDelivered,
+								};
+								if (config.pii === "warn" || config.pii === "redact") {
+									const piiResult = redactPII(messages);
+									if (piiResult.detection.found) {
+										auditEventData.piiDetected = piiResult.detection.types;
+										auditEventData.piiPaths = piiResult.detection.paths;
+									}
+								}
 								const auditEvent = await audit.appendEvent({
 									kind: "llm_call",
 									actor: "local",
-									data: {
-										model,
-										cost: streamCost,
-										settled,
-										transferId,
-										usageSource,
-										chunksDelivered: completion.chunksDelivered,
-									},
+									data: auditEventData,
 								});
 								auditHash = auditEvent.hash;
 							} catch {
@@ -468,7 +481,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								transferId,
 								cost: streamCost,
 								budgetRemaining: config.budget - budgetSpent - inFlightHoldTotal,
-								auditHash,
+								auditHash: callAuditDegraded ? "AUDIT_DEGRADED" : auditHash,
 								chainPath: join(VAULT_DIR, "audit"),
 								receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
 								settled,
@@ -484,9 +497,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							inFlightStreamCount--;
 							return streamReceipt;
 						},
-						(error: unknown, partial: StreamCompletion) => {
-							// Release in-flight hold
-							inFlightHoldTotal -= estimatedCost;
+						async (error: unknown, partial: StreamCompletion) => {
+							// Release in-flight hold under mutex
+							{
+								const releaseLock = await budgetMutex.acquire();
+								inFlightHoldTotal -= estimatedCost;
+								releaseLock();
+							}
 
 							cb.recordFailure();
 
@@ -502,10 +519,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 										partialInputTokens: partial.usage.inputTokens,
 										partialOutputTokens: partial.usage.outputTokens,
 										usageReported: partial.usageReported,
-										error:
-											error instanceof Error
-												? error.message.slice(0, 200)
-												: String(error).slice(0, 200),
+										error: (() => {
+											const raw = error instanceof Error ? error.message : String(error);
+											return config.pii === "warn" || config.pii === "redact"
+												? (redactPII(raw).data as string).slice(0, 200)
+												: raw.slice(0, 200);
+										})(),
 									},
 								})
 								.catch(() => {});
@@ -524,12 +543,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// AUD-454: For streaming responses, settlement has NOT happened yet.
 					// Set settled: false — the real settlement status will be on
 					// governedStream.receipt after the stream is fully consumed.
-					const auditHash = createHash("sha256").update(transferId).digest("hex");
+					const streamEstimateHash = createHash("sha256").update(transferId).digest("hex");
 					const estimatedReceipt: TrustReceipt = {
 						transferId,
 						cost: estimatedCost,
 						budgetRemaining: config.budget - budgetSpent - inFlightHoldTotal,
-						auditHash,
+						auditHash: callAuditDegraded ? "AUDIT_DEGRADED" : streamEstimateHash,
 						chainPath: join(VAULT_DIR, "audit"),
 						receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
 						settled: false, // AUD-454: not settled yet — stream hasn't been consumed
@@ -565,11 +584,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					}
 				}
 
-				// Release in-flight hold (non-streaming success)
-				inFlightHoldTotal -= estimatedCost;
-
-				// Track budget (cumulative)
-				budgetSpent += actualCost;
+				// Release in-flight hold and commit budget under mutex
+				{
+					const releaseLock = await budgetMutex.acquire();
+					inFlightHoldTotal -= estimatedCost;
+					budgetSpent += actualCost;
+					releaseLock();
+				}
 				// AUD-457: Persist cumulative spend to disk
 				await persistSpendLedger(vaultBase, budgetSpent);
 
@@ -606,8 +627,25 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					try {
 						// AUD-460: Use the proxy's transferId for settlement
 						await proxyConn.settle(proxyTransferId ?? transferId, actualCost);
-					} catch {
+					} catch (postErr) {
 						settled = false;
+						await audit
+							.appendEvent({
+								kind: "settlement_ambiguous",
+								actor: "local",
+								data: {
+									model,
+									cost: actualCost,
+									transferId,
+									error:
+										postErr instanceof Error
+											? postErr.message.slice(0, 200)
+											: String(postErr).slice(0, 200),
+								},
+							})
+							.catch(() => {
+								callAuditDegraded = true;
+							});
 					}
 				}
 
@@ -615,15 +653,23 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
 				let auditHash = syntheticHash;
 				try {
+					const auditData: Record<string, unknown> = {
+						model,
+						cost: actualCost,
+						settled,
+						transferId,
+					};
+					if (config.pii === "warn" || config.pii === "redact") {
+						const piiResult = redactPII(messages);
+						if (piiResult.detection.found) {
+							auditData.piiDetected = piiResult.detection.types;
+							auditData.piiPaths = piiResult.detection.paths;
+						}
+					}
 					const auditEvent = await audit.appendEvent({
 						kind: "llm_call",
 						actor: "local",
-						data: {
-							model,
-							cost: actualCost,
-							settled,
-							transferId,
-						},
+						data: auditData,
 					});
 					auditHash = auditEvent.hash;
 				} catch {
@@ -665,7 +711,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					transferId,
 					cost: actualCost,
 					budgetRemaining,
-					auditHash,
+					auditHash: callAuditDegraded ? "AUDIT_DEGRADED" : auditHash,
 					chainPath: join(VAULT_DIR, "audit"),
 					receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
 					settled,
@@ -679,8 +725,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				return { response, receipt };
 			} catch (err) {
-				// Release in-flight hold (non-streaming failure)
-				inFlightHoldTotal -= estimatedCost;
+				// Release in-flight hold under mutex (non-streaming failure)
+				{
+					const releaseLock = await budgetMutex.acquire();
+					inFlightHoldTotal -= estimatedCost;
+					releaseLock();
+				}
 
 				// j. Circuit breaker: record failure
 				cb.recordFailure();
@@ -709,7 +759,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					.appendEvent({
 						kind: "llm_call_failed",
 						actor: "local",
-						data: { model, error: String(err), transferId },
+						data: {
+							model,
+							error:
+								config.pii === "warn" || config.pii === "redact"
+									? (redactPII(String(err)).data as string).slice(0, 200)
+									: String(err),
+							transferId,
+						},
 					})
 					.catch(() => {
 						callAuditDegraded = true;
@@ -827,21 +884,23 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// f. Execute the action
 			// Guard against double-decrement of inFlightHoldTotal (AUD-465)
 			let holdReleased = false;
-			function releaseHold(): void {
+			async function releaseHoldAndCommit(cost?: number): Promise<void> {
 				if (!holdReleased) {
 					holdReleased = true;
+					const releaseLock = await budgetMutex.acquire();
 					inFlightHoldTotal -= action.cost;
+					if (cost !== undefined) {
+						budgetSpent += cost;
+					}
+					releaseLock();
 				}
 			}
 
 			try {
 				const result = await execute();
 
-				// Release in-flight hold
-				releaseHold();
-
-				// Track budget
-				budgetSpent += action.cost;
+				// Release in-flight hold and commit budget under mutex
+				await releaseHoldAndCommit(action.cost);
 				await persistSpendLedger(vaultBase, budgetSpent);
 
 				// g. Circuit breaker: record success
@@ -878,12 +937,41 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (proxyConn != null && !isDryRun) {
 					try {
 						await proxyConn.settle(proxyTransferId ?? transferId, action.cost);
-					} catch {
+					} catch (postErr) {
 						settled = false;
+						await audit
+							.appendEvent({
+								kind: "settlement_ambiguous",
+								actor,
+								data: {
+									actionKind: action.kind,
+									actionName: action.name,
+									cost: action.cost,
+									transferId,
+									error:
+										postErr instanceof Error
+											? postErr.message.slice(0, 200)
+											: String(postErr).slice(0, 200),
+								},
+							})
+							.catch(() => {
+								callAuditDegraded = true;
+							});
 					}
 				}
 
-				// i. Audit event
+				// i. Prepare params for audit — redact PII if configured
+				let auditParams: Record<string, unknown> | undefined;
+				if (action.params != null) {
+					if (config.pii === "warn" || config.pii === "redact") {
+						const redacted = redactPII(action.params);
+						auditParams = redacted.data as Record<string, unknown>;
+					} else {
+						auditParams = action.params;
+					}
+				}
+
+				// i2. Audit event
 				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
 				let auditHash = syntheticHash;
 				try {
@@ -895,7 +983,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							cost: action.cost,
 							settled,
 							transferId,
-							...(action.params != null ? { params: action.params } : {}),
+							...(auditParams != null ? { params: auditParams } : {}),
 						},
 					});
 					auditHash = auditEvent.hash;
@@ -920,6 +1008,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								cost: action.cost,
 								settled,
 								transferId,
+								...(auditParams != null ? { params: auditParams } : {}),
 							},
 						},
 						config.audit.indexLimit,
@@ -932,7 +1021,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					transferId,
 					cost: action.cost,
 					budgetRemaining,
-					auditHash,
+					auditHash: callAuditDegraded ? "AUDIT_DEGRADED" : auditHash,
 					chainPath: join(VAULT_DIR, "audit"),
 					receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
 					settled,
@@ -947,7 +1036,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				return { result, receipt };
 			} catch (err) {
 				// Release in-flight hold (AUD-465: guard prevents double-decrement)
-				releaseHold();
+				await releaseHoldAndCommit();
 
 				// Circuit breaker: record failure
 				cb.recordFailure();
@@ -976,7 +1065,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						actor,
 						data: {
 							actionName: action.name,
-							error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+							error: (() => {
+								const raw = err instanceof Error ? err.message : String(err);
+								return config.pii === "warn" || config.pii === "redact"
+									? (redactPII(raw).data as string).slice(0, 200)
+									: raw.slice(0, 200);
+							})(),
 							transferId,
 						},
 					})

@@ -5,8 +5,30 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
+import type { ProxyConnection } from "../../src/proxy.js";
 import { LedgerUnavailableError } from "../../src/shared/errors.js";
 import type { AuditEvent } from "../../src/shared/types.js";
+
+// Hoist mock proxy so it's available in vi.mock factory
+const { mockConnectProxy } = vi.hoisted(() => {
+	return {
+		mockConnectProxy: vi.fn(),
+	};
+});
+
+// Mock proxy module so we can control settle() behavior
+vi.mock("../../src/proxy.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../../src/proxy.js")>();
+	return {
+		...actual,
+		connectProxy: (...args: unknown[]) => {
+			if (mockConnectProxy.getMockImplementation()) {
+				return mockConnectProxy(...args);
+			}
+			return actual.connectProxy(args[0] as string, args[1] as string | undefined);
+		},
+	};
+});
 
 // Mock tigerbeetle-node (native module, never loaded in tests)
 vi.mock("tigerbeetle-node", () => ({
@@ -481,6 +503,77 @@ describe("Failure mode 15.5: Multiple failures combine gracefully", () => {
 
 		expect(result.response).toBeDefined();
 		expect(result.receipt.settled).toBe(false);
+
+		await governed.destroy();
+	});
+});
+
+describe("Proxy settlement failure writes settlement_ambiguous audit event", () => {
+	let tmpVault: string;
+
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+
+	afterEach(() => {
+		mockConnectProxy.mockReset();
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {
+			// cleanup best-effort
+		}
+	});
+
+	it("logs settlement_ambiguous when proxy settle() throws", async () => {
+		// Create a mock proxy where settle() throws
+		const mockProxy: ProxyConnection = {
+			url: "https://proxy.usertools.ai",
+			key: "pk_test",
+			spend: vi.fn(async () => ({
+				transferId: "proxy_test_123",
+				estimatedCost: 100,
+			})),
+			settle: vi.fn(async () => {
+				throw new Error("Proxy settlement network error");
+			}),
+			void: vi.fn(async () => {}),
+			destroy: vi.fn(),
+		};
+
+		mockConnectProxy.mockImplementation(() => mockProxy);
+
+		const mockAudit = makeMockAudit();
+		const mockClient = makeAnthropicMock();
+
+		const governed = await trust(mockClient, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			proxy: "https://proxy.usertools.ai",
+			_engine: null,
+			_audit: mockAudit,
+		});
+
+		const result = await governed.messages.create({
+			model: "claude-sonnet-4-6",
+			max_tokens: 1024,
+			messages: [{ role: "user", content: "Hello" }],
+		});
+
+		// LLM call succeeded but settlement failed
+		expect(result.response).toBeDefined();
+		expect(result.receipt.settled).toBe(false);
+
+		// Verify settlement_ambiguous audit event was written
+		const appendCalls = (mockAudit.appendEvent as ReturnType<typeof vi.fn>).mock.calls;
+		const ambiguousCall = appendCalls.find(
+			(call: unknown[]) => (call[0] as AppendEventInput).kind === "settlement_ambiguous",
+		);
+		expect(ambiguousCall).toBeDefined();
+		const ambiguousData = (ambiguousCall?.[0] as AppendEventInput).data;
+		expect(ambiguousData.error).toContain("Proxy settlement network error");
+		expect(ambiguousData.model).toBe("claude-sonnet-4-6");
+		expect(ambiguousData.transferId).toMatch(/^tx_/);
 
 		await governed.destroy();
 	});
