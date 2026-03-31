@@ -21,6 +21,8 @@ export interface TrustReceipt {
 	usageSource?: "provider" | "estimated";
 	/** Number of chunks delivered to the consumer (streaming calls only). */
 	chunksDelivered?: number;
+	/** Action kind for governed non-LLM actions. Absent for LLM calls (backward compat). */
+	actionKind?: ActionKind;
 }
 
 // ── TrustedResponse — returned by every governed LLM call ──
@@ -128,3 +130,28 @@ export type DirectorVote = "approve" | "veto" | "abstain";
 
 // ── LLM Client detection ──
 export type LLMClientKind = "anthropic" | "openai" | "google";
+
+// ── Action Governance types ──
+
+/** Extensible union for governed action types. */
+export type ActionKind = "llm_call" | "tool_use" | "file_access" | "shell_command" | "api_request";
+
+/** Descriptor for a governed action. */
+export interface ActionDescriptor {
+	/** The kind of action being governed. */
+	kind: ActionKind;
+	/** Human-readable name (e.g., "file_read", "curl", tool name). */
+	name: string;
+	/** Estimated cost in usertokens. Required for budget enforcement. */
+	cost: number;
+	/** Arbitrary parameters for policy evaluation and audit logging. */
+	params?: Record<string, unknown>;
+	/** Actor identity (defaults to "local"). */
+	actor?: string;
+}
+
+/** Result wrapper for governed actions. */
+export interface GovernedActionResult<T> {
+	result: T;
+	receipt: TrustReceipt;
+}

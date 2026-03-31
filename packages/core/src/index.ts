@@ -20,6 +20,9 @@ export type {
 	BoardDecision,
 	AuditEvent,
 	LLMClientKind,
+	ActionKind,
+	ActionDescriptor,
+	GovernedActionResult,
 } from "./shared/types.js";
 
 // Errors
