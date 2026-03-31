@@ -27,7 +27,7 @@
 	},
 	"files": ["dist", "openclaw.plugin.json"],
 	"dependencies": {
-		"usertrust": "workspace:*"
+		"usertrust": "*"
 	},
 	"peerDependencies": {
 		"@mariozechner/pi-ai": ">=0.1.0"
