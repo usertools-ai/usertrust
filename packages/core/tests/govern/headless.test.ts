@@ -77,7 +77,7 @@ describe("headless governor", () => {
 	});
 
 	afterEach(() => {
-		delete process.env.USERTRUST_TEST; // biome-ignore lint/performance/noDelete: env cleanup requires delete
+		process.env.USERTRUST_TEST = "";
 		try {
 			rmSync(vaultBase, { recursive: true, force: true });
 		} catch {

@@ -73,7 +73,7 @@ describe("wrapStreamWithGovernance", () => {
 	});
 
 	afterEach(async () => {
-		delete process.env.USERTRUST_TEST; // biome-ignore lint/performance/noDelete: env cleanup requires delete
+		process.env.USERTRUST_TEST = "";
 		await gov.destroy();
 		try {
 			rmSync(vaultBase, { recursive: true, force: true });
@@ -221,7 +221,7 @@ describe("wrapCompleteWithGovernance", () => {
 	});
 
 	afterEach(async () => {
-		delete process.env.USERTRUST_TEST; // biome-ignore lint/performance/noDelete: env cleanup requires delete
+		process.env.USERTRUST_TEST = "";
 		await gov.destroy();
 		try {
 			rmSync(vaultBase, { recursive: true, force: true });
