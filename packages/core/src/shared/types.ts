@@ -108,6 +108,22 @@ export const TrustConfigSchema = z.object({
 			requireSignature: z.boolean().default(true),
 		})
 		.default({}),
+	vault: z
+		.object({
+			enabled: z.boolean().default(false),
+			masterKeyEnv: z.string().default("USERTRUST_VAULT_KEY"),
+			auditAccess: z.boolean().default(true),
+			defaultScope: z
+				.object({
+					agents: z.array(z.string()).default([]),
+					actions: z
+						.array(z.enum(["llm_call", "tool_use", "file_access", "shell_command", "api_request"]))
+						.default([]),
+					expiresAt: z.string().datetime().nullable().default(null),
+				})
+				.default({}),
+		})
+		.default({}),
 });
 
 export type TrustConfig = z.infer<typeof TrustConfigSchema>;
@@ -286,3 +302,39 @@ export const SkillManifestSchema = z.object({
 	signature: z.string().regex(/^[a-f0-9]{128}$/, "Must be a hex-encoded 64-byte Ed25519 signature"),
 	publicKey: z.string().regex(/^[a-f0-9]{64}$/, "Must be hex-encoded Ed25519 public key"),
 });
+
+// ── Credential Vault types ──
+
+/** Scope constraining when/how a credential can be accessed. */
+export interface CredentialScope {
+	/** Agents allowed to access this credential (empty = all). */
+	agents: string[];
+	/** Action kinds allowed to use this credential (empty = all). */
+	actions: ActionKind[];
+	/** Expiration timestamp (ISO 8601). Null = no expiry. */
+	expiresAt: string | null;
+}
+
+/** A stored credential entry (decrypted form). */
+export interface CredentialEntry {
+	/** Unique credential name (e.g., "OPENAI_API_KEY"). */
+	name: string;
+	/** The secret value. */
+	value: string;
+	/** Access scope constraints. */
+	scope: CredentialScope;
+	/** ISO 8601 timestamp when the credential was stored. */
+	createdAt: string;
+	/** ISO 8601 timestamp when the credential was last rotated. */
+	rotatedAt: string;
+}
+
+/** Result of a credential access attempt. */
+export interface CredentialAccessResult {
+	/** Whether access was granted. */
+	granted: boolean;
+	/** The credential value (only present if granted). */
+	value?: string;
+	/** Reason for denial (only present if denied). */
+	reason?: string;
+}

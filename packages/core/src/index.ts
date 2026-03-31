@@ -32,6 +32,9 @@ export type {
 	SkillPermission,
 	SkillManifest,
 	SkillVerification,
+	CredentialScope,
+	CredentialEntry,
+	CredentialAccessResult,
 } from "./shared/types.js";
 
 // Injection detection
@@ -43,6 +46,11 @@ export { validateManifest, createUnsignedManifest, hashManifest } from "./supply
 export { generateKeyPair, signManifest, verifySignature } from "./supply-chain/sign.js";
 export { checkPermissions, enforceSkillLoad } from "./supply-chain/permissions.js";
 
+// Credential Vault
+export { createVaultStore } from "./vault/store.js";
+export type { VaultStore } from "./vault/store.js";
+export { checkScope } from "./vault/scope.js";
+
 // Errors
 export {
 	InsufficientBalanceError,
@@ -51,4 +59,6 @@ export {
 	AuditDegradedError,
 	VaultNotInitializedError,
 	SkillVerificationError,
+	VaultKeyMissingError,
+	CredentialAccessDeniedError,
 } from "./shared/errors.js";
