@@ -73,7 +73,7 @@ jobs:
       - name: Build usertrust-verify
         run: cd packages/verify && npx tsc
 
-      - name: Build @usertrust/openclaw
+      - name: Build usertrust-openclaw
         run: cd packages/openclaw && npx tsc
 
       # ── Verify builds ──
@@ -100,7 +100,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish @usertrust/openclaw
+      - name: Publish usertrust-openclaw
         if: ${{ !inputs.dry_run }}
         run: cd packages/openclaw && npm publish --access public --provenance
         env:
@@ -113,7 +113,7 @@ jobs:
           echo "Would have published:" >> "$GITHUB_STEP_SUMMARY"
           echo "- usertrust@${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
           echo "- usertrust-verify@${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- @usertrust/openclaw@${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- usertrust-openclaw@${{ steps.version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
 
       # ── Tag + commit version bump ──
       - name: Commit and tag
