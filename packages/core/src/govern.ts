@@ -49,7 +49,14 @@ const VERIFY_URL_BASE = "https://verify.usertrust.dev";
 import { LedgerUnavailableError, PolicyDeniedError } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
 import { TrustConfigSchema } from "./shared/types.js";
-import type { LLMClientKind, TrustConfig, TrustReceipt, TrustedResponse } from "./shared/types.js";
+import type {
+	ActionDescriptor,
+	GovernedActionResult,
+	LLMClientKind,
+	TrustConfig,
+	TrustReceipt,
+	TrustedResponse,
+} from "./shared/types.js";
 import { type StreamCompletion, createGovernedStream } from "./streaming.js";
 
 // ── Public types ──
@@ -98,8 +105,14 @@ export interface TrustEngine {
 	destroy?(): void;
 }
 
-/** The trusted client: original client shape + `destroy()`. */
-export type TrustedClient<T> = T & { destroy(): Promise<void> };
+/** The trusted client: original client shape + governance methods. */
+export type TrustedClient<T> = T & {
+	destroy(): Promise<void>;
+	governAction<R>(
+		action: ActionDescriptor,
+		execute: () => Promise<R>,
+	): Promise<GovernedActionResult<R>>;
+};
 
 // ── AUD-453: Async mutex for budget atomicity ──
 // Prevents concurrent interceptCall invocations from racing through
@@ -721,6 +734,263 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		}
 	}
 
+	// 7b. Action governance — simplified pipeline for non-LLM actions
+	async function governActionImpl<R>(
+		action: ActionDescriptor,
+		execute: () => Promise<R>,
+	): Promise<GovernedActionResult<R>> {
+		if (destroyed) {
+			throw new Error("TrustedClient has been destroyed");
+		}
+
+		// AUD-466: Validate cost to prevent budget inflation via negative values
+		if (!Number.isFinite(action.cost) || action.cost < 0) {
+			throw new Error(
+				`action.cost must be a non-negative finite number, got ${String(action.cost)}`,
+			);
+		}
+
+		inFlightCount++;
+		let callAuditDegraded = false;
+
+		try {
+			const actor = action.actor ?? "local";
+			const transferId = trustId("tx");
+
+			// a. Circuit breaker check (keyed by action kind)
+			const cb = breaker.get(action.kind as unknown as LLMClientKind);
+			cb.allowRequest();
+
+			// b. Acquire mutex for budget atomicity
+			const releaseBudgetLock = await budgetMutex.acquire();
+			let proxyTransferId: string | undefined;
+
+			try {
+				// c. Policy gate — action fields available in context
+				// AUD-467: Caller params spread FIRST so governance fields cannot be shadowed
+				const policyResult = evaluatePolicy(policyRules, {
+					...(action.params ?? {}),
+					action_kind: action.kind,
+					action_name: action.name,
+					estimated_cost: action.cost,
+					budget_remaining: config.budget - budgetSpent - inFlightHoldTotal,
+					tier: config.tier,
+				});
+				if (policyResult.decision === "deny") {
+					const reason =
+						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
+					throw new PolicyDeniedError(reason);
+				}
+
+				// d. PII check on action params
+				if (config.pii !== "off" && action.params != null) {
+					const piiResult = detectPII(action.params);
+					if (piiResult.found && config.pii === "block") {
+						throw new PolicyDeniedError(
+							`PII detected in action params: ${piiResult.types.join(", ")}`,
+						);
+					}
+				}
+
+				// e. PENDING hold
+				if (proxyConn != null && !isDryRun) {
+					try {
+						const proxyResult = await proxyConn.spend({
+							model: action.name,
+							estimatedCost: action.cost,
+							actor,
+						});
+						proxyTransferId = proxyResult.transferId;
+					} catch (holdErr) {
+						throw new LedgerUnavailableError(
+							holdErr instanceof Error ? holdErr.message : String(holdErr),
+						);
+					}
+				} else if (engine != null && !isDryRun) {
+					try {
+						await engine.spendPending({
+							transferId,
+							amount: action.cost,
+						});
+					} catch (holdErr) {
+						throw new LedgerUnavailableError(
+							holdErr instanceof Error ? holdErr.message : String(holdErr),
+						);
+					}
+				}
+
+				inFlightHoldTotal += action.cost;
+			} finally {
+				releaseBudgetLock();
+			}
+
+			// f. Execute the action
+			// Guard against double-decrement of inFlightHoldTotal (AUD-465)
+			let holdReleased = false;
+			function releaseHold(): void {
+				if (!holdReleased) {
+					holdReleased = true;
+					inFlightHoldTotal -= action.cost;
+				}
+			}
+
+			try {
+				const result = await execute();
+
+				// Release in-flight hold
+				releaseHold();
+
+				// Track budget
+				budgetSpent += action.cost;
+				await persistSpendLedger(vaultBase, budgetSpent);
+
+				// g. Circuit breaker: record success
+				cb.recordSuccess();
+
+				// h. POST settlement
+				let settled = true;
+				if (engine != null && !isDryRun) {
+					try {
+						await engine.postPendingSpend(transferId);
+					} catch (postErr) {
+						settled = false;
+						await audit
+							.appendEvent({
+								kind: "settlement_ambiguous",
+								actor,
+								data: {
+									actionKind: action.kind,
+									actionName: action.name,
+									cost: action.cost,
+									transferId,
+									error:
+										postErr instanceof Error
+											? postErr.message.slice(0, 200)
+											: String(postErr).slice(0, 200),
+								},
+							})
+							.catch(() => {
+								callAuditDegraded = true;
+							});
+					}
+				}
+
+				if (proxyConn != null && !isDryRun) {
+					try {
+						await proxyConn.settle(proxyTransferId ?? transferId, action.cost);
+					} catch {
+						settled = false;
+					}
+				}
+
+				// i. Audit event
+				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
+				let auditHash = syntheticHash;
+				try {
+					const auditEvent = await audit.appendEvent({
+						kind: action.kind,
+						actor,
+						data: {
+							actionName: action.name,
+							cost: action.cost,
+							settled,
+							transferId,
+							...(action.params != null ? { params: action.params } : {}),
+						},
+					});
+					auditHash = auditEvent.hash;
+				} catch {
+					// Failure mode 15.3: Audit degraded — do not fail the response
+					callAuditDegraded = true;
+					process.stderr.write(
+						`[usertrust] audit degraded: failed to write ${action.kind} event for ${transferId}\n`,
+					);
+				}
+
+				// j. Daily-rotated receipt
+				if (config.audit.rotation !== "none") {
+					writeReceipt(
+						vaultPath,
+						{
+							kind: action.kind,
+							subsystem: "trust",
+							actor,
+							data: {
+								actionName: action.name,
+								cost: action.cost,
+								settled,
+								transferId,
+							},
+						},
+						config.audit.indexLimit,
+					);
+				}
+
+				const budgetRemaining = config.budget - budgetSpent - inFlightHoldTotal;
+
+				const receipt: TrustReceipt = {
+					transferId,
+					cost: action.cost,
+					budgetRemaining,
+					auditHash,
+					chainPath: join(VAULT_DIR, "audit"),
+					receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
+					settled,
+					model: action.name,
+					provider: action.kind,
+					timestamp: new Date().toISOString(),
+					actionKind: action.kind,
+					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
+					...(proxyConn != null ? { proxyStub: true as const } : {}),
+				};
+
+				return { result, receipt };
+			} catch (err) {
+				// Release in-flight hold (AUD-465: guard prevents double-decrement)
+				releaseHold();
+
+				// Circuit breaker: record failure
+				cb.recordFailure();
+
+				// VOID the pending hold
+				if (engine != null && !isDryRun) {
+					try {
+						await engine.voidPendingSpend(transferId);
+					} catch {
+						// Best-effort void
+					}
+				}
+
+				if (proxyConn != null && !isDryRun) {
+					try {
+						await proxyConn.void(proxyTransferId ?? transferId);
+					} catch {
+						// Best-effort void
+					}
+				}
+
+				// Audit the failure
+				await audit
+					.appendEvent({
+						kind: `${action.kind}_failed`,
+						actor,
+						data: {
+							actionName: action.name,
+							error: err instanceof Error ? err.message.slice(0, 200) : String(err).slice(0, 200),
+							transferId,
+						},
+					})
+					.catch(() => {
+						callAuditDegraded = true;
+					});
+
+				throw err;
+			}
+		} finally {
+			inFlightCount--;
+		}
+	}
+
 	// 8. Safety net: clean up on process exit if destroy() was never called
 	let beforeExitHandler: (() => void) | null = null;
 
@@ -768,13 +1038,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		};
 
 		if (kind === "anthropic") {
-			return buildAnthropicProxy(client, interceptCall, destroyFn);
+			return buildAnthropicProxy(client, interceptCall, destroyFn, governActionImpl);
 		}
 		if (kind === "openai") {
-			return buildOpenAIProxy(client, interceptCall, destroyFn);
+			return buildOpenAIProxy(client, interceptCall, destroyFn, governActionImpl);
 		}
 		// google
-		return buildGoogleProxy(client, interceptCall, destroyFn);
+		return buildGoogleProxy(client, interceptCall, destroyFn, governActionImpl);
 	}
 
 	const governedClient = createClientProxy();
@@ -880,10 +1150,16 @@ type InterceptFn = (
 	args: unknown[],
 ) => Promise<TrustedResponse<unknown>>;
 
+type GovernActionFn = <R>(
+	action: ActionDescriptor,
+	execute: () => Promise<R>,
+) => Promise<GovernedActionResult<R>>;
+
 function buildAnthropicProxy<T>(
 	client: T,
 	intercept: InterceptFn,
 	destroy: () => Promise<void>,
+	governAction: GovernActionFn,
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const messages = original.messages as Record<string, unknown>;
@@ -904,6 +1180,7 @@ function buildAnthropicProxy<T>(
 		get(target, prop, receiver) {
 			if (prop === "messages") return messagesProxy;
 			if (prop === "destroy") return destroy;
+			if (prop === "governAction") return governAction;
 			return Reflect.get(target, prop, receiver);
 		},
 	});
@@ -915,6 +1192,7 @@ function buildOpenAIProxy<T>(
 	client: T,
 	intercept: InterceptFn,
 	destroy: () => Promise<void>,
+	governAction: GovernActionFn,
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const chat = original.chat as Record<string, unknown>;
@@ -941,6 +1219,7 @@ function buildOpenAIProxy<T>(
 		get(target, prop, receiver) {
 			if (prop === "chat") return chatProxy;
 			if (prop === "destroy") return destroy;
+			if (prop === "governAction") return governAction;
 			return Reflect.get(target, prop, receiver);
 		},
 	});
@@ -952,6 +1231,7 @@ function buildGoogleProxy<T>(
 	client: T,
 	intercept: InterceptFn,
 	destroy: () => Promise<void>,
+	governAction: GovernActionFn,
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const models = original.models as Record<string, unknown>;
@@ -970,6 +1250,7 @@ function buildGoogleProxy<T>(
 		get(target, prop, receiver) {
 			if (prop === "models") return modelsProxy;
 			if (prop === "destroy") return destroy;
+			if (prop === "governAction") return governAction;
 			return Reflect.get(target, prop, receiver);
 		},
 	});
