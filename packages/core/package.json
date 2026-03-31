@@ -35,6 +35,14 @@
 		".": {
 			"import": "./dist/index.js",
 			"types": "./dist/index.d.ts"
+		},
+		"./headless": {
+			"import": "./dist/headless.js",
+			"types": "./dist/headless.d.ts"
+		},
+		"./pricing": {
+			"import": "./dist/ledger/pricing.js",
+			"types": "./dist/ledger/pricing.d.ts"
 		}
 	},
 	"dependencies": {

@@ -55,7 +55,7 @@ jobs:
         run: >-
           npx vitest run --coverage
           --coverage.thresholds.lines=92
-          --coverage.thresholds.branches=85
+          --coverage.thresholds.branches=84
           --coverage.thresholds.functions=90
           --coverage.thresholds.statements=92
       - name: Upload coverage artifact

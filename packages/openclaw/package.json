@@ -1,0 +1,40 @@
+{
+	"name": "@usertrust/openclaw",
+	"version": "1.0.0",
+	"description": "usertrust governance plugin for OpenClaw. Budget enforcement, audit trails, and policy gates for every LLM call — zero code changes.",
+	"license": "Apache-2.0",
+	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
+	"homepage": "https://usertrust.ai",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/usertools-ai/usertrust.git",
+		"directory": "packages/openclaw"
+	},
+	"bugs": "https://github.com/usertools-ai/usertrust/issues",
+	"keywords": ["openclaw", "usertrust", "ai", "governance", "budget", "audit", "llm", "plugin"],
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"exports": {
+		".": {
+			"import": "./dist/index.js",
+			"types": "./dist/index.d.ts"
+		}
+	},
+	"scripts": {
+		"build": "tsc",
+		"prepublishOnly": "tsc"
+	},
+	"files": ["dist", "openclaw.plugin.json"],
+	"dependencies": {
+		"usertrust": "*"
+	},
+	"peerDependencies": {
+		"@mariozechner/pi-ai": ">=0.1.0"
+	},
+	"peerDependenciesMeta": {
+		"@mariozechner/pi-ai": {
+			"optional": true
+		}
+	}
+}
