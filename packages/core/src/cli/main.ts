@@ -2,11 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-const COMMANDS = ["init", "inspect", "health", "verify", "snapshot", "tb", "completions"] as const;
+const COMMANDS = ["init", "inspect", "health", "verify", "snapshot", "tb", "pricing", "completions"] as const;
 
 const argv = process.argv.slice(2);
 const jsonFlag = argv.includes("--json");
-const positional = argv.filter((a) => a !== "--json");
+const skipVerify = argv.includes("--skip-verify");
+const reconfigure = argv.includes("--reconfigure");
+const positional = argv.filter((a) => a !== "--json" && a !== "--skip-verify" && a !== "--reconfigure");
 const command = positional[0];
 
 /** Simple Levenshtein distance — two-row DP, no dependency needed. */
@@ -52,7 +54,9 @@ export { levenshtein, suggestCommand, COMMANDS };
 
 switch (command) {
 	case "init":
-		await import("./init.js").then((m) => m.run(undefined, { json: jsonFlag }));
+		await import("./init.js").then((m) =>
+			m.run(undefined, { json: jsonFlag, skipVerify, reconfigure }),
+		);
 		break;
 	case "inspect":
 		await import("./inspect.js").then((m) => m.run(undefined, { json: jsonFlag }));
@@ -68,6 +72,9 @@ switch (command) {
 		break;
 	case "tb":
 		await import("./tb.js").then((m) => m.run({ json: jsonFlag }));
+		break;
+	case "pricing":
+		await import("./pricing.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
 	case "completions":
 		await import("./completions.js").then((m) => m.run(positional[1], { json: jsonFlag }));
@@ -90,6 +97,7 @@ Commands:
   verify        Verify audit chain integrity
   snapshot      Create/restore vault snapshots
   tb            Manage TigerBeetle process
+  pricing       Show current rate configuration
   completions   Output shell completion scripts
 
 Options:
