@@ -121,3 +121,24 @@ export class VaultNotInitializedError extends Error {
 		this.docsUrl = docsUrl;
 	}
 }
+
+export class SkillVerificationError extends Error {
+	public readonly skillId: string;
+	public readonly reason: string;
+	public readonly hint: string;
+	public readonly docsUrl: string;
+
+	constructor(skillId: string, reason: string) {
+		const hint =
+			"Verify the skill manifest is signed by a trusted publisher, or add the publisher to supplyChain.trustedPublishers.";
+		const docsUrl = "https://usertrust.ai/docs/errors/skill-verification";
+		super(
+			`Skill verification failed for ${skillId}: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`,
+		);
+		this.name = "SkillVerificationError";
+		this.skillId = skillId;
+		this.reason = reason;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
+	}
+}
