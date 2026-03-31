@@ -230,6 +230,11 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			const model = (modelResult as string).trim();
 			if (model === "") break;
 
+			if (!/^[a-z0-9][a-z0-9._-]{0,127}$/i.test(model)) {
+				clack.log.warn("Invalid model name.");
+				continue;
+			}
+
 			const inputResult = await clack.text({
 				message: `${model} input rate ($/1M tokens):`,
 			});
@@ -328,9 +333,10 @@ function createVault(vaultPath: string, data: VaultData): void {
 
 	// Write .env with API keys
 	if (data.keys && Object.keys(data.keys).length > 0) {
-		const envLines = Object.entries(data.keys).map(
-			([provider, key]) => `${envVarName(provider)}=${key}`,
-		);
+		const envLines = Object.entries(data.keys).map(([provider, key]) => {
+			const escaped = key.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+			return `${envVarName(provider)}="${escaped}"`;
+		});
 		writeFileSync(join(vaultPath, ".env"), `${envLines.join("\n")}\n`, {
 			encoding: "utf-8",
 			mode: 0o600,

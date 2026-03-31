@@ -80,8 +80,8 @@ describe("usertrust init (interactive)", () => {
 		expect(existsSync(envPath)).toBe(true);
 
 		const envContent = readFileSync(envPath, "utf-8");
-		expect(envContent).toContain("ANTHROPIC_API_KEY=sk-ant-api03-testkey123");
-		expect(envContent).toContain("OPENAI_API_KEY=sk-proj-openai-key456");
+		expect(envContent).toContain('ANTHROPIC_API_KEY="sk-ant-api03-testkey123"');
+		expect(envContent).toContain('OPENAI_API_KEY="sk-proj-openai-key456"');
 	});
 
 	it("writes .gitignore with .env entry", async () => {
