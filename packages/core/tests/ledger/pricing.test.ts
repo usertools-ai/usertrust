@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
 	FALLBACK_RATE,
 	PRICING_TABLE,
+	PRICING_TABLE_VERSION,
 	estimateCost,
 	estimateInputTokens,
 	getModelRates,
+	modelsForProvider,
 } from "../../src/ledger/pricing.js";
 
 describe("PRICING_TABLE", () => {
@@ -350,5 +352,77 @@ describe("estimateInputTokens", () => {
 		// fallback: JSON.stringify({ type: "empty_block" }) → some chars
 		const tokens = estimateInputTokens(messages);
 		expect(tokens).toBeGreaterThan(1);
+	});
+});
+
+describe("PRICING_TABLE_VERSION", () => {
+	it("is a date string", () => {
+		expect(PRICING_TABLE_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+	});
+});
+
+describe("getModelRates with customRates", () => {
+	it("prefers custom rate over PRICING_TABLE", () => {
+		const custom = { "claude-sonnet-4-6": { inputPer1k: 25, outputPer1k: 120 } };
+		const rates = getModelRates("claude-sonnet-4-6", custom);
+		expect(rates.inputPer1k).toBe(25);
+		expect(rates.outputPer1k).toBe(120);
+	});
+
+	it("falls back to PRICING_TABLE when model not in customRates", () => {
+		const custom = { "claude-sonnet-4-6": { inputPer1k: 25, outputPer1k: 120 } };
+		const rates = getModelRates("gpt-4o", custom);
+		expect(rates.inputPer1k).toBe(25); // gpt-4o PRICING_TABLE rate
+		expect(rates.outputPer1k).toBe(100); // gpt-4o PRICING_TABLE rate
+	});
+
+	it("falls back to PRICING_TABLE when customRates is undefined", () => {
+		const rates = getModelRates("claude-sonnet-4-6", undefined);
+		expect(rates.inputPer1k).toBe(30);
+		expect(rates.outputPer1k).toBe(150);
+	});
+});
+
+describe("modelsForProvider", () => {
+	it("returns Anthropic models", () => {
+		const models = modelsForProvider("anthropic");
+		expect(models).toContain("claude-sonnet-4-6");
+		expect(models).toContain("claude-haiku-4-5");
+		expect(models).toContain("claude-opus-4-6");
+		expect(models).not.toContain("gpt-4o");
+	});
+
+	it("returns OpenAI models", () => {
+		const models = modelsForProvider("openai");
+		expect(models).toContain("gpt-4o");
+		expect(models).toContain("gpt-5.4");
+		expect(models).not.toContain("claude-sonnet-4-6");
+	});
+
+	it("returns Google models", () => {
+		const models = modelsForProvider("google");
+		expect(models).toContain("gemini-2.5-flash");
+		expect(models).not.toContain("gpt-4o");
+	});
+
+	it("returns empty array for unknown provider", () => {
+		const models = modelsForProvider("unknown-provider");
+		expect(models).toEqual([]);
+	});
+});
+
+describe("estimateCost with customRates", () => {
+	it("uses custom rates when provided", () => {
+		const custom = { "claude-sonnet-4-6": { inputPer1k: 25, outputPer1k: 120 } };
+		// 1000 input * 25/1k + 500 output * 120/1k = 25 + 60 = 85
+		const cost = estimateCost("claude-sonnet-4-6", 1000, 500, custom);
+		expect(cost).toBe(85);
+	});
+
+	it("falls back to PRICING_TABLE when no custom rate for model", () => {
+		const custom = { "gpt-4o": { inputPer1k: 20, outputPer1k: 80 } };
+		// claude-sonnet-4-6 not in custom, uses PRICING_TABLE: 30 + 75 = 105
+		const cost = estimateCost("claude-sonnet-4-6", 1000, 500, custom);
+		expect(cost).toBe(105);
 	});
 });
