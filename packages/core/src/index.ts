@@ -21,6 +21,10 @@ export type {
 	TrustConfig,
 	PolicyRule,
 	FieldCondition,
+	FieldOperator,
+	PolicyEffect,
+	PolicyEnforcement,
+	PolicySeverity,
 	BoardDecision,
 	AuditEvent,
 	LLMClientKind,
@@ -55,6 +59,8 @@ export { checkScope } from "./vault/scope.js";
 export {
 	InsufficientBalanceError,
 	PolicyDeniedError,
+	AccountNotFoundError,
+	IdempotencyConflictError,
 	LedgerUnavailableError,
 	AuditDegradedError,
 	VaultNotInitializedError,
@@ -62,3 +68,41 @@ export {
 	VaultKeyMissingError,
 	CredentialAccessDeniedError,
 } from "./shared/errors.js";
+
+// Streaming
+export type { GovernedStream } from "./streaming.js";
+
+// PII detection
+export { detectPII } from "./policy/pii.js";
+export type { PIIDetection } from "./policy/pii.js";
+
+// Pattern memory
+export { hashPrompt, recordPattern, suggestModel, getPatternStats } from "./memory/patterns.js";
+
+// Merkle proofs
+export {
+	buildMerkleTree,
+	generateInclusionProof,
+	verifyInclusionProof,
+	generateConsistencyProof,
+	verifyConsistencyProof,
+	hashLeaf,
+	hashInternal,
+} from "./audit/merkle.js";
+export type {
+	MerkleInclusionProof,
+	MerkleConsistencyProof,
+	MerkleSibling,
+} from "./audit/merkle.js";
+
+// Pricing
+export { getModelRates, estimateCost, estimateInputTokens } from "./ledger/pricing.js";
+export type { ModelRates } from "./ledger/pricing.js";
+
+// Board
+export { createBoard } from "./board/board.js";
+export type { BoardStats, BoardReviewResult } from "./board/board.js";
+
+// Circuit breaker
+export { CircuitBreaker, CircuitBreakerRegistry, CircuitOpenError } from "./resilience/circuit.js";
+export type { CircuitBreakerSnapshot } from "./resilience/circuit.js";

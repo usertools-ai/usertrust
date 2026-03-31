@@ -3,7 +3,7 @@ title: PII Detection
 description: Automatic detection of email, phone, SSN, credit card, and IP address patterns.
 ---
 
-### Configuration
+## Configuration
 
 Set the `pii` field in `usertrust.config.json`:
 
@@ -20,7 +20,7 @@ Set the `pii` field in `usertrust.config.json`:
 | `"block"` | Throw `PolicyDeniedError` |
 | `"off"` | Disable PII detection |
 
-### Detected Types
+## Detected Types
 
 | Type | Pattern | Example |
 |------|---------|---------|
@@ -30,7 +30,7 @@ Set the `pii` field in `usertrust.config.json`:
 | Credit Card | 13-19 digits, Luhn-validated | `4111111111111111` |
 | IPv4 | 0-255.0-255.0-255.0-255 | `192.168.1.1` |
 
-### PIIDetection Result
+## PIIDetection Result
 
 ```typescript
 interface PIIDetection {
@@ -40,7 +40,7 @@ interface PIIDetection {
 }
 ```
 
-### Function
+## Function
 
 ```typescript
 function detectPII(data: unknown): PIIDetection;
@@ -48,7 +48,7 @@ function detectPII(data: unknown): PIIDetection;
 
 Recursively walks objects and arrays, checking string values against all PII patterns.
 
-### Example
+## Example
 
 ```typescript
 import { detectPII } from "usertrust";

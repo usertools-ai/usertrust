@@ -104,19 +104,19 @@ If the client does not match any known shape, `trust()` throws an error at initi
 Streaming is transparent. When you pass `stream: true` to the provider, usertrust returns a `GovernedStream` that yields chunks identically to the native stream. The governance receipt resolves asynchronously after the stream completes:
 
 ```typescript
-const stream = await client.messages.create({
+const { response } = await client.messages.create({
   model: "claude-sonnet-4-6",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Write a poem" }],
   stream: true,
 });
 
-for await (const chunk of stream) {
+for await (const chunk of response) {
   process.stdout.write(chunk.delta?.text ?? "");
 }
 
 // Receipt resolves after the stream finishes
-const receipt = await stream.receipt;
+const receipt = await response.receipt;
 console.log(`Cost: ${receipt.cost} UT`);
 ```
 
@@ -198,20 +198,20 @@ import { trust } from "usertrust";
 
 const client = await trust(new Anthropic(), { budget: 50_000 });
 
-const stream = await client.messages.create({
+const { response } = await client.messages.create({
   model: "claude-sonnet-4-6",
   max_tokens: 2048,
   messages: [{ role: "user", content: "Write a short story" }],
   stream: true,
 });
 
-for await (const event of stream) {
+for await (const event of response) {
   if (event.type === "content_block_delta") {
     process.stdout.write(event.delta.text);
   }
 }
 
-const receipt = await stream.receipt;
+const receipt = await response.receipt;
 console.log(`\n\nCost: ${receipt.cost} UT`);
 
 await client.destroy();

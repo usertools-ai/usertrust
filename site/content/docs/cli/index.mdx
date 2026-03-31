@@ -5,7 +5,7 @@ description: Command reference for the usertrust CLI — init, inspect, health, 
 
 All CLI commands are available via `npx usertrust`.
 
-### Installation
+## Installation
 
 ```bash
 npm install usertrust
@@ -13,7 +13,7 @@ npm install usertrust
 
 The CLI is available as `npx usertrust`.
 
-### usertrust init
+## usertrust init
 
 Creates the `.usertrust/` vault directory with default config, policy rules, and audit chain.
 
@@ -43,7 +43,7 @@ Creates:
 └── tigerbeetle/
 ```
 
-### usertrust inspect
+## usertrust inspect
 
 Shows a vault bank statement — budget, spend, remaining balance, recent transactions.
 
@@ -52,7 +52,7 @@ npx usertrust inspect
 npx usertrust inspect --json   # machine-readable output
 ```
 
-### usertrust health
+## usertrust health
 
 Entropy diagnostics with 6 signals, scoring 0-100:
 
@@ -63,7 +63,7 @@ npx usertrust health --json
 
 6 entropy signals measured for governance health diagnostics.
 
-### usertrust verify
+## usertrust verify
 
 Verifies the integrity of the SHA-256 hash-chained audit trail:
 
@@ -77,7 +77,7 @@ Checks:
 - Chain starts from GENESIS_HASH (64 zeros)
 - No gaps or tampering in the sequence
 
-### usertrust snapshot
+## usertrust snapshot
 
 Create and restore vault state checkpoints:
 
@@ -87,7 +87,7 @@ npx usertrust snapshot --list    # list available snapshots
 npx usertrust snapshot --restore <name>  # restore from snapshot
 ```
 
-### usertrust tb
+## usertrust tb
 
 TigerBeetle process management:
 
@@ -97,6 +97,21 @@ npx usertrust tb stop     # stop TigerBeetle
 npx usertrust tb status   # check if running
 ```
 
-### Global Options
+## usertrust completions
+
+Generate shell completion scripts:
+
+```bash
+# Bash
+npx usertrust completions bash > ~/.local/share/bash-completion/completions/usertrust
+
+# Zsh
+npx usertrust completions zsh > "${fpath[1]}/_usertrust"
+
+# Fish
+npx usertrust completions fish > ~/.config/fish/completions/usertrust.fish
+```
+
+## Global Options
 
 - `--json` — Machine-readable JSON output for all commands

@@ -3,17 +3,17 @@ title: usertrust-verify
 description: Zero-dependency standalone vault verifier with Merkle proof support.
 ---
 
-### Purpose
+## Purpose
 
 `usertrust-verify` is an intentionally standalone package with **zero dependencies** (Node built-ins only). It duplicates canonicalization, chain verification, and Merkle proof functions from `usertrust` by design — so it can verify vaults independently of the main SDK.
 
-### Installation
+## Installation
 
 ```bash
 npm install usertrust-verify
 ```
 
-### CLI Usage
+## CLI Usage
 
 ```bash
 npx usertrust-verify .usertrust
@@ -21,9 +21,9 @@ npx usertrust-verify .usertrust
 
 Verifies the entire vault: hash chain integrity, event sequence, and Merkle root.
 
-### Programmatic API
+## Programmatic API
 
-#### verifyVault
+### verifyVault
 
 ```typescript
 import { verifyVault } from "usertrust-verify";
@@ -43,7 +43,7 @@ interface VaultVerificationResult {
 }
 ```
 
-#### verifyTransaction
+### verifyTransaction
 
 ```typescript
 import { verifyTransaction } from "usertrust-verify";
@@ -60,7 +60,7 @@ interface TransactionVerificationResult {
 }
 ```
 
-### Re-exported Functions
+## Re-exported Functions
 
 All Merkle proof functions are also available:
 
@@ -79,7 +79,7 @@ import {
 } from "usertrust-verify";
 ```
 
-### Why Zero Dependencies?
+## Why Zero Dependencies?
 
 The verifier must be trustworthy independently of the SDK it verifies. Adding dependencies would create a supply-chain attack surface and defeat the purpose of independent verification.
 

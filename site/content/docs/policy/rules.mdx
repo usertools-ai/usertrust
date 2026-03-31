@@ -3,7 +3,7 @@ title: Policy Rules
 description: Define governance rules in YAML with enforcement levels, severity, scopes, and time windows.
 ---
 
-### Rule Format
+## Rule Format
 
 Rules are defined in YAML (or JSON) and loaded from `.usertrust/policies/default.yml` by default.
 
@@ -27,7 +27,7 @@ Rules are defined in YAML (or JSON) and loaded from `.usertrust/policies/default
       endHour: 17
 ```
 
-### Rule Fields
+## Rule Fields
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
@@ -41,12 +41,12 @@ Rules are defined in YAML (or JSON) and loaded from `.usertrust/policies/default
 | scopePatterns | string[] | no | — | Minimatch glob patterns |
 | timeWindows | TimeWindow[] | no | — | Time-based restrictions |
 
-### Enforcement
+## Enforcement
 
 - **Hard** — Returns `decision: "deny"`. The LLM call is blocked.
 - **Soft** — Returns `decision: "allow"` with `hasWarnings: true`. The call proceeds but warnings are logged.
 
-### Scope Matching
+## Scope Matching
 
 Uses minimatch glob patterns against the request's scope array:
 
@@ -56,7 +56,7 @@ scopePatterns:
   - "staging/*"        # matches staging/test but not staging/a/b
 ```
 
-### Time Windows
+## Time Windows
 
 Restrict when a rule is active:
 
@@ -67,7 +67,7 @@ timeWindows:
     endHour: 17                      # 5 PM
 ```
 
-### Default Rules
+## Default Rules
 
 Three rules ship by default:
 
@@ -75,7 +75,7 @@ Three rules ship by default:
 2. **high-cost** — Warn on estimated cost > 1000 UT (soft warn)
 3. **budget-exhausted** — Block if remaining budget < estimated cost (hard deny)
 
-### PolicyResult
+## PolicyResult
 
 ```typescript
 interface PolicyResult {
