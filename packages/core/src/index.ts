@@ -25,11 +25,19 @@ export type {
 	GovernedActionResult,
 	InjectionDetection,
 	CanaryToken,
+	SkillPermission,
+	SkillManifest,
+	SkillVerification,
 } from "./shared/types.js";
 
 // Injection detection
 export { detectInjection } from "./policy/injection.js";
 export { generateCanary, injectCanary, detectCanaryLeak } from "./policy/canary.js";
+
+// Supply Chain
+export { validateManifest, createUnsignedManifest, hashManifest } from "./supply-chain/manifest.js";
+export { generateKeyPair, signManifest, verifySignature } from "./supply-chain/sign.js";
+export { checkPermissions, enforceSkillLoad } from "./supply-chain/permissions.js";
 
 // Errors
 export {
@@ -38,4 +46,5 @@ export {
 	LedgerUnavailableError,
 	AuditDegradedError,
 	VaultNotInitializedError,
+	SkillVerificationError,
 } from "./shared/errors.js";

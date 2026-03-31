@@ -88,6 +88,26 @@ export const TrustConfigSchema = z.object({
 			}),
 		)
 		.optional(),
+	supplyChain: z
+		.object({
+			enabled: z.boolean().default(false),
+			trustedPublishers: z.array(z.string()).default([]),
+			allowedPermissions: z
+				.array(
+					z.enum([
+						"llm_call",
+						"tool_use",
+						"file_read",
+						"file_write",
+						"shell_command",
+						"network_access",
+						"credential_access",
+					]),
+				)
+				.default(["llm_call", "tool_use", "file_read"]),
+			requireSignature: z.boolean().default(true),
+		})
+		.default({}),
 });
 
 export type TrustConfig = z.infer<typeof TrustConfigSchema>;
@@ -196,3 +216,73 @@ export interface CanaryToken {
 	/** HTML comment marker embedding the token. */
 	marker: string;
 }
+
+// ── Supply Chain types ──
+
+/** Permission an agent skill can request. */
+export type SkillPermission =
+	| "llm_call"
+	| "tool_use"
+	| "file_read"
+	| "file_write"
+	| "shell_command"
+	| "network_access"
+	| "credential_access";
+
+/** A signed skill manifest declaring identity, permissions, and integrity. */
+export interface SkillManifest {
+	/** Schema version for forward compatibility. */
+	version: 1;
+	/** Unique skill identifier (e.g., "acme/summarizer"). */
+	id: string;
+	/** Human-readable skill name. */
+	name: string;
+	/** Skill author or publisher. */
+	publisher: string;
+	/** Permissions the skill requires at runtime. */
+	permissions: SkillPermission[];
+	/** SHA-256 hash of the skill's entry point source code. */
+	entryHash: string;
+	/** ISO 8601 timestamp of when the manifest was signed. */
+	signedAt: string;
+	/** Ed25519 signature of the canonical manifest (hex-encoded). */
+	signature: string;
+	/** Ed25519 public key of the signer (hex-encoded). */
+	publicKey: string;
+}
+
+/** Result of verifying a skill manifest. */
+export interface SkillVerification {
+	/** Whether the manifest signature is valid. */
+	valid: boolean;
+	/** Whether all declared permissions are allowed by policy. */
+	permissionsAllowed: boolean;
+	/** Permissions that were denied by policy. */
+	deniedPermissions: SkillPermission[];
+	/** SHA-256 hash of the manifest for audit inclusion. */
+	manifestHash: string;
+	/** Error message if verification failed. */
+	error?: string;
+}
+
+export const SkillManifestSchema = z.object({
+	version: z.literal(1),
+	id: z.string().regex(/^[a-z0-9_-]+\/[a-z0-9_-]+$/, "Skill ID must be publisher/name format"),
+	name: z.string().min(1).max(128),
+	publisher: z.string().min(1).max(64),
+	permissions: z.array(
+		z.enum([
+			"llm_call",
+			"tool_use",
+			"file_read",
+			"file_write",
+			"shell_command",
+			"network_access",
+			"credential_access",
+		]),
+	),
+	entryHash: z.string().regex(/^[a-f0-9]{64}$/, "Must be a SHA-256 hex hash"),
+	signedAt: z.string().datetime(),
+	signature: z.string().regex(/^[a-f0-9]{128}$/, "Must be a hex-encoded 64-byte Ed25519 signature"),
+	publicKey: z.string().regex(/^[a-f0-9]{64}$/, "Must be hex-encoded Ed25519 public key"),
+});
