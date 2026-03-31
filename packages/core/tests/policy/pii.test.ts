@@ -7,7 +7,12 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { type PIIDetection, detectPII } from "../../src/policy/pii.js";
+import {
+	type PIIDetection,
+	type RedactedData,
+	detectPII,
+	redactPII,
+} from "../../src/policy/pii.js";
 
 // ===========================================================================
 // Part A: Individual PII patterns
@@ -456,5 +461,250 @@ describe("detectPII — empty structures", () => {
 	it("handles empty string", () => {
 		const result = detectPII("");
 		expect(result.found).toBe(false);
+	});
+});
+
+// ===========================================================================
+// Part E: Secret pattern detection
+// ===========================================================================
+
+describe("detectPII — api_key", () => {
+	it("detects OpenAI-style sk- key", () => {
+		const result = detectPII({ key: "sk-proj-abc123def456ghi789jkl" });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("api_key");
+	});
+
+	it("detects Anthropic-style sk-ant- key", () => {
+		const result = detectPII({ key: "sk-ant-api03-abc123def456ghi789jklmno" });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("api_key");
+	});
+
+	it("does not detect short sk- strings", () => {
+		const result = detectPII({ key: "sk-short" });
+		expect(result.types).not.toContain("api_key");
+	});
+});
+
+describe("detectPII — aws_key", () => {
+	it("detects a standard AWS access key", () => {
+		const result = detectPII({ key: "AKIAIOSFODNN7EXAMPLE" });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("aws_key");
+	});
+
+	it("does not detect AKIA alone", () => {
+		const result = detectPII({ key: "AKIA" });
+		expect(result.types).not.toContain("aws_key");
+	});
+});
+
+describe("detectPII — github_token", () => {
+	it("detects ghp_ personal access token", () => {
+		const result = detectPII({ token: "ghp_ABCDEFghijklmnopqrstuv1234" });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("github_token");
+	});
+
+	it("detects github_pat_ fine-grained token", () => {
+		const result = detectPII({ token: "github_pat_ABCDEFghijklmnopqrstuv1234" });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("github_token");
+	});
+
+	it("does not detect short ghp_ strings", () => {
+		const result = detectPII({ token: "ghp_short" });
+		expect(result.types).not.toContain("github_token");
+	});
+});
+
+describe("detectPII — api_key (Stripe-style underscore prefix)", () => {
+	// Construct test keys programmatically to avoid GitHub push protection
+	const livePrefix = ["sk", "live", ""].join("_");
+	const testPrefix = ["sk", "test", ""].join("_");
+
+	it("detects Stripe-style live secret key", () => {
+		const result = detectPII({ key: `${livePrefix}xxxxxxxxxxxxxxxxxxxxxxxxxxx` });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("api_key");
+	});
+
+	it("detects Stripe-style test secret key", () => {
+		const result = detectPII({ key: `${testPrefix}xxxxxxxxxxxxxxxxxxxxxxxxxxx` });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("api_key");
+	});
+});
+
+describe("detectPII — jwt", () => {
+	it("detects a raw JWT token", () => {
+		const result = detectPII({
+			token:
+				"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U",
+		});
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("jwt");
+	});
+
+	it("does not detect a short JWT-like string", () => {
+		const result = detectPII({ token: "eyJhbGci.short.x" });
+		expect(result.types).not.toContain("jwt");
+	});
+});
+
+describe("detectPII — private_key", () => {
+	it("detects a PEM RSA private key header", () => {
+		const result = detectPII({
+			key: "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAK...",
+		});
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("private_key");
+	});
+
+	it("detects a generic PEM private key header", () => {
+		const result = detectPII({
+			key: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADA...",
+		});
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("private_key");
+	});
+
+	it("does not detect PEM public key", () => {
+		const result = detectPII({
+			key: "-----BEGIN PUBLIC KEY-----\nMIIBIjANBg...",
+		});
+		expect(result.types).not.toContain("private_key");
+	});
+});
+
+describe("detectPII — generic_secret (npm token)", () => {
+	it("detects npm token", () => {
+		const result = detectPII({
+			token: "npm_abcdefghijklmnopqrstuvwxyz0123456789",
+		});
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("generic_secret");
+	});
+});
+
+describe("detectPII — api_key does not double-fire with generic_secret", () => {
+	it("sk- key tagged as api_key only, not generic_secret", () => {
+		const result = detectPII({ key: "sk-proj-abc123def456ghi789jkl" });
+		expect(result.types).toContain("api_key");
+		expect(result.types).not.toContain("generic_secret");
+	});
+});
+
+describe("detectPII — bearer_token", () => {
+	it("detects Bearer JWT token", () => {
+		const result = detectPII({
+			header: "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abc123",
+		});
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("bearer_token");
+	});
+
+	it("does not detect Bearer with short token", () => {
+		const result = detectPII({ header: "Bearer short" });
+		expect(result.types).not.toContain("bearer_token");
+	});
+});
+
+describe("detectPII — generic_secret", () => {
+	it("detects GitLab personal access token", () => {
+		const result = detectPII({ token: "glpat-xxxxxxxxxxxxxxxxxxxx" });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("generic_secret");
+	});
+
+	it("detects Slack bot token", () => {
+		const result = detectPII({ token: "xoxb-12345-67890-abcdef" });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("generic_secret");
+	});
+
+	it("detects long hex string (64+ chars)", () => {
+		const hex = "a1b2c3d4e5f6".repeat(6);
+		const result = detectPII({ secret: hex });
+		expect(result.found).toBe(true);
+		expect(result.types).toContain("generic_secret");
+	});
+
+	it("does not detect short random strings", () => {
+		const result = detectPII({ value: "hello-world-123" });
+		expect(result.types).not.toContain("generic_secret");
+	});
+});
+
+// ===========================================================================
+// Part F: redactPII
+// ===========================================================================
+
+describe("redactPII", () => {
+	it("returns unchanged data when no PII is found", () => {
+		const input = { name: "John", age: 30, active: true };
+		const result = redactPII(input);
+		expect(result.data).toEqual(input);
+		expect(result.detection.found).toBe(false);
+	});
+
+	it("redacts an email address", () => {
+		const result = redactPII({ email: "user@example.com" });
+		expect((result.data as Record<string, unknown>).email).toBe("[REDACTED:email]");
+		expect(result.detection.found).toBe(true);
+		expect(result.detection.types).toContain("email");
+	});
+
+	it("redacts nested objects", () => {
+		const result = redactPII({
+			user: {
+				profile: {
+					email: "user@example.com",
+				},
+			},
+		});
+		const data = result.data as Record<string, Record<string, Record<string, unknown>>>;
+		expect(data.user.profile.email).toBe("[REDACTED:email]");
+	});
+
+	it("redacts values inside arrays", () => {
+		const result = redactPII({
+			emails: ["user@example.com", "admin@test.org"],
+		});
+		const data = result.data as Record<string, string[]>;
+		expect(data.emails[0]).toBe("[REDACTED:email]");
+		expect(data.emails[1]).toBe("[REDACTED:email]");
+	});
+
+	it("lists multiple PII types in one redaction placeholder", () => {
+		const result = redactPII({
+			note: "Call 234-567-8901 or email user@example.com",
+		});
+		const data = result.data as Record<string, string>;
+		expect(data.note).toContain("REDACTED:");
+		expect(data.note).toContain("email");
+		expect(data.note).toContain("phone");
+	});
+
+	it("redacts API keys", () => {
+		const result = redactPII({ key: "sk-proj-abc123def456ghi789jkl" });
+		const data = result.data as Record<string, string>;
+		expect(data.key).toContain("REDACTED:");
+		expect(data.key).toContain("api_key");
+	});
+
+	it("passes through non-string values unchanged", () => {
+		const result = redactPII({
+			count: 42,
+			flag: true,
+			empty: null,
+			email: "user@example.com",
+		});
+		const data = result.data as Record<string, unknown>;
+		expect(data.count).toBe(42);
+		expect(data.flag).toBe(true);
+		expect(data.empty).toBe(null);
+		expect(data.email).toBe("[REDACTED:email]");
 	});
 });

@@ -587,4 +587,100 @@ describe("governAction() — action governance pipeline", () => {
 			await governed.destroy();
 		});
 	});
+
+	// ─────────────────────────────────────────────────────────────────────
+	// 13. PII redaction in audit writes
+	// ─────────────────────────────────────────────────────────────────────
+
+	describe("13. PII redaction in audit writes", () => {
+		it("redacts PII in action params for audit in warn mode", async () => {
+			writeVaultConfig(tmpVault, { budget: 10_000, pii: "warn" });
+
+			const governed = await trust(makeAnthropicMock(), {
+				dryRun: true,
+				vaultBase: tmpVault,
+			});
+
+			await governed.governAction(
+				{
+					kind: "tool_use",
+					name: "send_data",
+					cost: 10,
+					params: { userEmail: "test@example.com", safeField: "hello" },
+				},
+				async () => "ok",
+			);
+
+			await governed.destroy();
+
+			const events = readAuditEvents(tmpVault);
+			const actionEvent = events.find((e) => e.kind === "tool_use");
+			expect(actionEvent).toBeDefined();
+
+			const ae = actionEvent as AuditEvent;
+			const params = ae.data.params as Record<string, unknown>;
+			expect(params.userEmail).toBe("[REDACTED:email]");
+			expect(params.safeField).toBe("hello");
+		});
+
+		it("redacts PII in action params for audit in redact mode", async () => {
+			writeVaultConfig(tmpVault, { budget: 10_000, pii: "redact" });
+
+			const governed = await trust(makeAnthropicMock(), {
+				dryRun: true,
+				vaultBase: tmpVault,
+			});
+
+			await governed.governAction(
+				{
+					kind: "tool_use",
+					name: "send_data",
+					cost: 10,
+					params: { ssn: "My SSN is 123-45-6789", safeField: "world" },
+				},
+				async () => "ok",
+			);
+
+			await governed.destroy();
+
+			const events = readAuditEvents(tmpVault);
+			const actionEvent = events.find((e) => e.kind === "tool_use");
+			expect(actionEvent).toBeDefined();
+
+			const ae = actionEvent as AuditEvent;
+			const params = ae.data.params as Record<string, unknown>;
+			expect(params.ssn).toBe("[REDACTED:ssn]");
+			expect(params.safeField).toBe("world");
+		});
+
+		it("does NOT redact params when pii is off", async () => {
+			writeVaultConfig(tmpVault, { budget: 10_000, pii: "off" });
+
+			const governed = await trust(makeAnthropicMock(), {
+				dryRun: true,
+				vaultBase: tmpVault,
+			});
+
+			await governed.governAction(
+				{
+					kind: "tool_use",
+					name: "send_data",
+					cost: 10,
+					params: { userEmail: "test@example.com", safeField: "hello" },
+				},
+				async () => "ok",
+			);
+
+			await governed.destroy();
+
+			const events = readAuditEvents(tmpVault);
+			const actionEvent = events.find((e) => e.kind === "tool_use");
+			expect(actionEvent).toBeDefined();
+
+			const ae = actionEvent as AuditEvent;
+			const params = ae.data.params as Record<string, unknown>;
+			expect(params.userEmail).toBe("test@example.com");
+			expect(params.safeField).toBe("hello");
+		});
+	});
 });
