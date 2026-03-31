@@ -152,9 +152,9 @@ describe("headless governor — proxy failure branches", () => {
 
 		proxySpendShouldFail = true;
 
-		await expect(
-			gov.authorize({ model: "claude-sonnet-4-6" }),
-		).rejects.toThrow("Ledger unavailable");
+		await expect(gov.authorize({ model: "claude-sonnet-4-6" })).rejects.toThrow(
+			"Ledger unavailable",
+		);
 
 		await gov.destroy();
 	});

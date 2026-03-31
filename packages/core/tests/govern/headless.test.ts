@@ -970,9 +970,9 @@ describe("headless governor", () => {
 			_engine: failingEngine,
 		});
 
-		await expect(
-			gov.authorize({ model: "claude-sonnet-4-6" }),
-		).rejects.toThrow("Ledger unavailable");
+		await expect(gov.authorize({ model: "claude-sonnet-4-6" })).rejects.toThrow(
+			"Ledger unavailable",
+		);
 
 		await gov.destroy();
 	});
@@ -996,9 +996,7 @@ describe("headless governor", () => {
 			_engine: failingEngine,
 		});
 
-		await expect(
-			gov.authorize({ model: "claude-sonnet-4-6" }),
-		).rejects.toThrow("string error");
+		await expect(gov.authorize({ model: "claude-sonnet-4-6" })).rejects.toThrow("string error");
 
 		await gov.destroy();
 	});
