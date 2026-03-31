@@ -2,14 +2,44 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Mock @clack/prompts before importing init
+vi.mock("@clack/prompts", () => ({
+	intro: vi.fn(),
+	outro: vi.fn(),
+	text: vi.fn(),
+	confirm: vi.fn(),
+	log: {
+		info: vi.fn(),
+		success: vi.fn(),
+		warn: vi.fn(),
+		error: vi.fn(),
+		step: vi.fn(),
+		message: vi.fn(),
+	},
+	spinner: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })),
+	isCancel: vi.fn(() => false),
+}));
+
+// Mock key validation to avoid network calls
+vi.mock("../../src/cli/validate-key.js", () => ({
+	detectProvider: vi.fn((key: string) => {
+		if (key.startsWith("sk-ant-")) return "anthropic";
+		if (key.startsWith("sk-")) return "openai";
+		return null;
+	}),
+	validateKey: vi.fn().mockResolvedValue({ valid: true }),
+	maskKey: vi.fn((key: string) => `${key.slice(0, 8)}••••••••`),
+}));
+
+import * as clack from "@clack/prompts";
 import { run } from "../../src/cli/init.js";
 
-describe("usertrust init", () => {
+describe("usertrust init (interactive)", () => {
 	let tempDir: string;
 
 	beforeEach(() => {
 		tempDir = mkdtempSync(join(tmpdir(), "trust-init-"));
-		vi.spyOn(console, "log").mockImplementation(() => {});
 	});
 
 	afterEach(() => {
@@ -17,89 +47,129 @@ describe("usertrust init", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("creates the .usertrust directory structure", async () => {
-		await run(tempDir);
+	it("creates vault with one API key and recommended rates", async () => {
+		vi.mocked(clack.text)
+			.mockResolvedValueOnce("sk-ant-api03-testkey123") // first key
+			.mockResolvedValueOnce("") // empty = done
+			.mockResolvedValueOnce("50"); // budget
+		vi.mocked(clack.confirm).mockResolvedValueOnce(true); // recommended rates
 
-		const vaultPath = join(tempDir, ".usertrust");
-		expect(existsSync(vaultPath)).toBe(true);
-		expect(existsSync(join(vaultPath, "audit"))).toBe(true);
-		expect(existsSync(join(vaultPath, "policies"))).toBe(true);
-		expect(existsSync(join(vaultPath, "patterns"))).toBe(true);
-		expect(existsSync(join(vaultPath, "snapshots"))).toBe(true);
-		expect(existsSync(join(vaultPath, "board"))).toBe(true);
-		expect(existsSync(join(vaultPath, "dlq"))).toBe(true);
-	});
-
-	it("writes default usertrust.config.json", async () => {
 		await run(tempDir);
 
 		const configPath = join(tempDir, ".usertrust", "usertrust.config.json");
 		expect(existsSync(configPath)).toBe(true);
 
 		const config = JSON.parse(readFileSync(configPath, "utf-8"));
-		expect(config.budget).toBe(50000);
-		expect(config.tier).toBe("mini");
-		expect(config.pii).toBe("warn");
-		expect(config.board.enabled).toBe(false);
-		expect(config.board.vetoThreshold).toBe("high");
-		expect(config.circuitBreaker.failureThreshold).toBe(5);
-		expect(config.circuitBreaker.resetTimeout).toBe(60000);
-		expect(config.patterns.enabled).toBe(true);
-		expect(config.patterns.feedProxy).toBe(false);
-		expect(config.audit.rotation).toBe("daily");
-		expect(config.audit.indexLimit).toBe(10000);
+		expect(config.budget).toBe(500_000); // $50 × 10,000
+		expect(config.providers).toHaveLength(1);
+		expect(config.providers[0].name).toBe("anthropic");
+		expect(config.pricing).toBe("recommended");
 	});
 
-	it("writes default policies/default.yml", async () => {
+	it("creates .env with API keys", async () => {
+		vi.mocked(clack.text)
+			.mockResolvedValueOnce("sk-ant-api03-testkey123")
+			.mockResolvedValueOnce("sk-proj-openai-key456")
+			.mockResolvedValueOnce("")
+			.mockResolvedValueOnce("100");
+		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
+
 		await run(tempDir);
 
-		const policyPath = join(tempDir, ".usertrust", "policies", "default.yml");
-		expect(existsSync(policyPath)).toBe(true);
+		const envPath = join(tempDir, ".usertrust", ".env");
+		expect(existsSync(envPath)).toBe(true);
 
-		const content = readFileSync(policyPath, "utf-8");
-		expect(content).toContain("block-zero-budget");
-		expect(content).toContain("warn-high-cost");
-		expect(content).toContain("effect: deny");
-		expect(content).toContain("effect: warn");
-		expect(content).toContain("budget_remaining");
-		expect(content).toContain("estimated_cost");
+		const envContent = readFileSync(envPath, "utf-8");
+		expect(envContent).toContain('ANTHROPIC_API_KEY="sk-ant-api03-testkey123"');
+		expect(envContent).toContain('OPENAI_API_KEY="sk-proj-openai-key456"');
 	});
 
-	it("writes .gitignore", async () => {
+	it("writes .gitignore with .env entry", async () => {
+		vi.mocked(clack.text)
+			.mockResolvedValueOnce("sk-ant-api03-testkey123")
+			.mockResolvedValueOnce("")
+			.mockResolvedValueOnce("50");
+		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
+
 		await run(tempDir);
 
-		const gitignorePath = join(tempDir, ".usertrust", ".gitignore");
-		expect(existsSync(gitignorePath)).toBe(true);
-
-		const content = readFileSync(gitignorePath, "utf-8");
-		expect(content).toContain("tigerbeetle/");
-		expect(content).toContain("*.tigerbeetle");
-		expect(content).toContain("dlq/");
+		const gitignore = readFileSync(join(tempDir, ".usertrust", ".gitignore"), "utf-8");
+		expect(gitignore).toContain(".env");
 	});
 
 	it("sets vault permissions to 700", async () => {
+		vi.mocked(clack.text)
+			.mockResolvedValueOnce("sk-ant-api03-testkey123")
+			.mockResolvedValueOnce("")
+			.mockResolvedValueOnce("50");
+		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
+
 		await run(tempDir);
 
-		const vaultPath = join(tempDir, ".usertrust");
-		const stats = statSync(vaultPath);
-		// 0o700 = owner read/write/execute only
-		const mode = stats.mode & 0o777;
-		expect(mode).toBe(0o700);
+		const stats = statSync(join(tempDir, ".usertrust"));
+		expect(stats.mode & 0o777).toBe(0o700);
 	});
 
-	it("prints success message", async () => {
+	it("does not overwrite existing vault without --reconfigure", async () => {
+		vi.mocked(clack.text)
+			.mockResolvedValueOnce("sk-ant-api03-testkey123")
+			.mockResolvedValueOnce("")
+			.mockResolvedValueOnce("50");
+		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
 		await run(tempDir);
 
-		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Initialized trust vault"));
+		// Second init — should warn
+		await run(tempDir);
+		expect(clack.log.warn).toHaveBeenCalled();
 	});
 
-	it("does not overwrite existing vault", async () => {
+	it("--reconfigure overwrites existing vault", async () => {
+		// First init
+		vi.mocked(clack.text)
+			.mockResolvedValueOnce("sk-ant-api03-testkey123")
+			.mockResolvedValueOnce("")
+			.mockResolvedValueOnce("50");
+		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
 		await run(tempDir);
-		vi.mocked(console.log).mockClear();
 
-		// Run again — should detect existing vault
+		// Reconfigure with different budget
+		vi.mocked(clack.text)
+			.mockResolvedValueOnce("sk-ant-api03-newkey456")
+			.mockResolvedValueOnce("")
+			.mockResolvedValueOnce("200");
+		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
+		await run(tempDir, { reconfigure: true });
+
+		const config = JSON.parse(
+			readFileSync(join(tempDir, ".usertrust", "usertrust.config.json"), "utf-8"),
+		);
+		expect(config.budget).toBe(2_000_000); // $200 × 10,000
+	});
+
+	it("converts dollar budget to usertokens", async () => {
+		vi.mocked(clack.text)
+			.mockResolvedValueOnce("sk-ant-api03-testkey123")
+			.mockResolvedValueOnce("")
+			.mockResolvedValueOnce("100.50"); // $100.50
+		vi.mocked(clack.confirm).mockResolvedValueOnce(true);
+
 		await run(tempDir);
 
-		expect(console.log).toHaveBeenCalledWith(expect.stringContaining("already exists"));
+		const config = JSON.parse(
+			readFileSync(join(tempDir, ".usertrust", "usertrust.config.json"), "utf-8"),
+		);
+		expect(config.budget).toBe(1_005_000); // $100.50 × 10,000
+	});
+
+	it("--json flag produces non-interactive output with defaults", async () => {
+		await run(tempDir, { json: true });
+
+		const configPath = join(tempDir, ".usertrust", "usertrust.config.json");
+		expect(existsSync(configPath)).toBe(true);
+
+		const config = JSON.parse(readFileSync(configPath, "utf-8"));
+		expect(config.budget).toBe(50_000); // default
+		expect(config.providers).toEqual([]);
+		expect(config.pricing).toBe("recommended");
 	});
 });

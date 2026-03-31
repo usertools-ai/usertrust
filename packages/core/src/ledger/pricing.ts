@@ -62,17 +62,47 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	"nova-pro": { inputPer1k: 8, outputPer1k: 32 },
 };
 
+/** Date the PRICING_TABLE rates were last verified against provider pricing pages. */
+export const PRICING_TABLE_VERSION = "2026-03-29";
+
 /** Pre-sorted entries for prefix matching (longest key first). */
 const SORTED_TABLE = Object.entries(PRICING_TABLE).sort((a, b) => b[0].length - a[0].length);
 
 /** Fallback rate for unknown models (sonnet-class pricing). */
 export const FALLBACK_RATE: ModelRates = { inputPer1k: 30, outputPer1k: 150 };
 
+/** Maps provider names to their model key prefixes in PRICING_TABLE. */
+const PROVIDER_MODEL_MAP: Record<string, string[]> = {
+	anthropic: ["claude-"],
+	openai: ["gpt-", "o3", "o4-"],
+	google: ["gemini-"],
+	mistral: ["mistral-"],
+	deepseek: ["deepseek-"],
+	xai: ["grok-"],
+	meta: ["llama-"],
+	cohere: ["command-"],
+	perplexity: ["sonar-"],
+	alibaba: ["qwen-"],
+	amazon: ["nova-"],
+};
+
+/** Return all PRICING_TABLE model keys that belong to a given provider. */
+export function modelsForProvider(provider: string): string[] {
+	const prefixes = PROVIDER_MODEL_MAP[provider];
+	if (!prefixes) return [];
+	return Object.keys(PRICING_TABLE).filter((model) => prefixes.some((p) => model.startsWith(p)));
+}
+
 /**
  * Look up rates by model string. Falls back to prefix matching,
  * then FALLBACK_RATE for unknown models.
  */
-export function getModelRates(model: string): ModelRates {
+export function getModelRates(model: string, customRates?: Record<string, ModelRates>): ModelRates {
+	if (customRates) {
+		const custom = customRates[model];
+		if (custom) return custom;
+	}
+
 	const exact = PRICING_TABLE[model];
 	if (exact) return exact;
 
@@ -88,8 +118,13 @@ export function getModelRates(model: string): ModelRates {
  * Estimate cost in usertokens for a model call.
  * Returns at least 1 (floor to prevent zero-amount transfers).
  */
-export function estimateCost(model: string, inputTokens: number, outputTokens: number): number {
-	const rates = getModelRates(model);
+export function estimateCost(
+	model: string,
+	inputTokens: number,
+	outputTokens: number,
+	customRates?: Record<string, ModelRates>,
+): number {
+	const rates = getModelRates(model, customRates);
 	const inputCost = (inputTokens / 1000) * rates.inputPer1k;
 	const outputCost = (outputTokens / 1000) * rates.outputPer1k;
 	return Math.max(1, Math.ceil(inputCost + outputCost));

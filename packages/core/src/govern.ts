@@ -190,6 +190,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		});
 	}
 
+	const customRates = config.pricing === "custom" ? config.customRates : undefined;
+
 	const isDryRun = opts?.dryRun ?? process.env.USERTRUST_DRY_RUN === "true";
 
 	// AUD-470: Only accept injected _engine/_audit in test environments.
@@ -269,7 +271,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const transferId = trustId("tx");
 			const estimatedInputTokens = estimateInputTokens(messages);
 			const maxOutputTokens = (params.max_tokens as number) ?? 4096;
-			const estimatedCost = estimateCost(model, estimatedInputTokens, maxOutputTokens);
+			const estimatedCost = estimateCost(model, estimatedInputTokens, maxOutputTokens, customRates);
 
 			// AUD-453: Acquire mutex to serialise budget-check + PENDING hold.
 			// This prevents concurrent calls from both passing the budget check
@@ -364,6 +366,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									model,
 									completion.usage.inputTokens,
 									completion.usage.outputTokens,
+									customRates,
 								);
 								usageSource = "provider";
 							} else {
@@ -545,7 +548,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							(usage.output_tokens as number | undefined) ??
 							(usage.completion_tokens as number | undefined) ??
 							0;
-						actualCost = estimateCost(model, inputTokens, outputTokens);
+						actualCost = estimateCost(model, inputTokens, outputTokens, customRates);
 					}
 				}
 

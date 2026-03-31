@@ -38,6 +38,7 @@
 		}
 	},
 	"dependencies": {
+		"@clack/prompts": "^1.1.0",
 		"minimatch": "^10.2.4",
 		"picocolors": "^1.1.1",
 		"tigerbeetle-node": "^0.16.0",

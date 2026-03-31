@@ -8,6 +8,32 @@ import { VAULT_DIR } from "./shared/constants.js";
 import { TrustConfigSchema } from "./shared/types.js";
 import type { TrustConfig } from "./shared/types.js";
 
+/** Valid env var name: starts with letter or underscore, alphanumeric + underscore only. */
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/** Parse a simple KEY=VALUE .env file. Only sets vars not already in process.env. */
+function loadEnvFile(content: string): void {
+	for (const line of content.split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed === "" || trimmed.startsWith("#")) continue;
+		const eqIdx = trimmed.indexOf("=");
+		if (eqIdx === -1) continue;
+		const key = trimmed.slice(0, eqIdx);
+		if (!ENV_KEY_RE.test(key)) continue;
+		let value = trimmed.slice(eqIdx + 1);
+		// Strip surrounding quotes (single or double)
+		if (
+			(value.startsWith('"') && value.endsWith('"')) ||
+			(value.startsWith("'") && value.endsWith("'"))
+		) {
+			value = value.slice(1, -1);
+		}
+		if (process.env[key] === undefined) {
+			process.env[key] = value;
+		}
+	}
+}
+
 /**
  * Load trust config from `.usertrust/usertrust.config.json`, merged with
  * optional runtime overrides. Returns a validated TrustConfig.
@@ -20,6 +46,14 @@ export async function loadConfig(
 	vaultBase?: string,
 ): Promise<TrustConfig> {
 	const base = vaultBase ?? process.cwd();
+
+	// Load .usertrust/.env if it exists (API keys from init wizard)
+	const envPath = join(base, VAULT_DIR, ".env");
+	if (existsSync(envPath)) {
+		const envContent = await readFile(envPath, "utf-8");
+		loadEnvFile(envContent);
+	}
+
 	const configPath = join(base, VAULT_DIR, "usertrust.config.json");
 	let raw: Record<string, unknown> = {};
 	if (existsSync(configPath)) {

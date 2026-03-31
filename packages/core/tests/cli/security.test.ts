@@ -53,7 +53,7 @@ describe("vault security", () => {
 	it("default config template contains no API key placeholders", async () => {
 		// Run the init command to create the vault
 		const { run } = await import("../../src/cli/init.js");
-		await run(tmpDir);
+		await run(tmpDir, { json: true });
 
 		const configPath = join(tmpDir, ".usertrust", "usertrust.config.json");
 		expect(existsSync(configPath)).toBe(true);
@@ -75,7 +75,7 @@ describe("vault security", () => {
 
 	it(".gitignore in vault excludes tigerbeetle/ but includes audit/", async () => {
 		const { run } = await import("../../src/cli/init.js");
-		await run(tmpDir);
+		await run(tmpDir, { json: true });
 
 		const gitignorePath = join(tmpDir, ".usertrust", ".gitignore");
 		expect(existsSync(gitignorePath)).toBe(true);
@@ -91,7 +91,7 @@ describe("vault security", () => {
 
 	it(".gitignore excludes dead-letter queue", async () => {
 		const { run } = await import("../../src/cli/init.js");
-		await run(tmpDir);
+		await run(tmpDir, { json: true });
 
 		const gitignorePath = join(tmpDir, ".usertrust", ".gitignore");
 		const gitignoreContent = readFileSync(gitignorePath, "utf-8");
@@ -102,7 +102,7 @@ describe("vault security", () => {
 
 	it("vault directory is created with 700 permissions (owner-only)", async () => {
 		const { run } = await import("../../src/cli/init.js");
-		await run(tmpDir);
+		await run(tmpDir, { json: true });
 
 		const vaultPath = join(tmpDir, ".usertrust");
 		const { statSync } = await import("node:fs");
@@ -115,7 +115,7 @@ describe("vault security", () => {
 
 	it("default policy file does not contain secrets", async () => {
 		const { run } = await import("../../src/cli/init.js");
-		await run(tmpDir);
+		await run(tmpDir, { json: true });
 
 		const policyPath = join(tmpDir, ".usertrust", "policies", "default.yml");
 		expect(existsSync(policyPath)).toBe(true);
@@ -133,7 +133,7 @@ describe("vault security", () => {
 		const { run } = await import("../../src/cli/init.js");
 
 		// First init
-		await run(tmpDir);
+		await run(tmpDir, { json: true });
 
 		// Modify the config to detect if it gets overwritten
 		const configPath = join(tmpDir, ".usertrust", "usertrust.config.json");
@@ -141,7 +141,7 @@ describe("vault security", () => {
 		writeFileSync(configPath, JSON.stringify({ budget: 99999, modified: true }));
 
 		// Second init — should NOT overwrite
-		await run(tmpDir);
+		await run(tmpDir, { json: true });
 
 		const content = readFileSync(configPath, "utf-8");
 		const parsed = JSON.parse(content) as Record<string, unknown>;

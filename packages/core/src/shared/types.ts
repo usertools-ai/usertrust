@@ -67,6 +67,24 @@ export const TrustConfigSchema = z.object({
 			clusterId: z.number().int().nonnegative().default(0),
 		})
 		.default({}),
+	providers: z
+		.array(
+			z.object({
+				name: z.string(),
+				models: z.array(z.string()).default([]),
+			}),
+		)
+		.default([]),
+	pricing: z.enum(["recommended", "custom"]).default("recommended"),
+	customRates: z
+		.record(
+			z.string(),
+			z.object({
+				inputPer1k: z.number().finite().nonnegative(),
+				outputPer1k: z.number().finite().nonnegative(),
+			}),
+		)
+		.optional(),
 });
 
 export type TrustConfig = z.infer<typeof TrustConfigSchema>;
