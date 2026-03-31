@@ -764,13 +764,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 			try {
 				// c. Policy gate — action fields available in context
+				// AUD-467: Caller params spread FIRST so governance fields cannot be shadowed
 				const policyResult = evaluatePolicy(policyRules, {
+					...(action.params ?? {}),
 					action_kind: action.kind,
 					action_name: action.name,
 					estimated_cost: action.cost,
 					budget_remaining: config.budget - budgetSpent - inFlightHoldTotal,
 					tier: config.tier,
-					...(action.params ?? {}),
 				});
 				if (policyResult.decision === "deny") {
 					const reason =
@@ -896,7 +897,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					});
 					auditHash = auditEvent.hash;
 				} catch {
+					// Failure mode 15.3: Audit degraded — do not fail the response
 					callAuditDegraded = true;
+					process.stderr.write(
+						`[usertrust] audit degraded: failed to write ${action.kind} event for ${transferId}\n`,
+					);
 				}
 
 				// j. Daily-rotated receipt

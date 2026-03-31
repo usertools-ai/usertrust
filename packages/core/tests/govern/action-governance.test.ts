@@ -539,4 +539,52 @@ describe("governAction() — action governance pipeline", () => {
 			await governed.destroy();
 		});
 	});
+
+	// ─────────────────────────────────────────────────────────────────────
+	// 12. AUD-467: Policy context field shadowing prevention
+	// ─────────────────────────────────────────────────────────────────────
+
+	describe("12. Policy context field shadowing (AUD-467)", () => {
+		it("governance fields cannot be overridden by action.params", async () => {
+			writePolicyFile(tmpVault, ".usertrust/policies/default.yml", [
+				{
+					name: "block-budget-exhausted",
+					effect: "deny",
+					enforcement: "hard",
+					conditions: [{ field: "budget_remaining", operator: "lte", value: 0 }],
+				},
+			]);
+			writeVaultConfig(tmpVault, {
+				budget: 100,
+				policies: "./policies/default.yml",
+			});
+
+			const governed = await trust(makeAnthropicMock(), {
+				dryRun: true,
+				budget: 100,
+				vaultBase: tmpVault,
+			});
+
+			// First call exhausts budget
+			await governed.governAction(
+				{ kind: "tool_use", name: "normal", cost: 100 },
+				async () => "ok",
+			);
+
+			// Second call tries to shadow budget_remaining with a large value
+			await expect(
+				governed.governAction(
+					{
+						kind: "tool_use",
+						name: "exploit",
+						cost: 50,
+						params: { budget_remaining: 999999 },
+					},
+					async () => "should not run",
+				),
+			).rejects.toThrow("Policy denied");
+
+			await governed.destroy();
+		});
+	});
 });
