@@ -39,7 +39,9 @@ function makeConfig(overrides?: Partial<TrustConfig["vault"]>): TrustConfig {
 }
 
 /** Simple audit writer mock that records all appended events. */
-function mockAuditWriter(): AuditWriter & { events: Array<{ kind: string; data: Record<string, unknown> }> } {
+function mockAuditWriter(): AuditWriter & {
+	events: Array<{ kind: string; data: Record<string, unknown> }>;
+} {
 	const events: Array<{ kind: string; data: Record<string, unknown> }> = [];
 	return {
 		events,
@@ -80,6 +82,7 @@ describe("VaultStore", () => {
 			// Cleanup best-effort
 		}
 		if (originalEnv === undefined) {
+			// biome-ignore lint/performance/noDelete: must remove env var, not set to "undefined" string
 			delete process.env.USERTRUST_VAULT_KEY;
 		} else {
 			process.env.USERTRUST_VAULT_KEY = originalEnv;
@@ -306,9 +309,7 @@ describe("VaultStore", () => {
 		await store.rotate("ROTATE_TS_KEY", "new-value");
 		const after = await store.list();
 
-		expect(new Date(after[0].rotatedAt).getTime()).toBeGreaterThan(
-			new Date(createdAt).getTime(),
-		);
+		expect(new Date(after[0].rotatedAt).getTime()).toBeGreaterThan(new Date(createdAt).getTime());
 		store.destroy();
 	});
 
@@ -367,9 +368,9 @@ describe("VaultStore", () => {
 		await store.add("WIPE_KEY", "secret");
 		store.destroy();
 
-		await expect(
-			store.get("WIPE_KEY", { agent: "agent-1", action: "llm_call" }),
-		).rejects.toThrow("VaultStore has been destroyed");
+		await expect(store.get("WIPE_KEY", { agent: "agent-1", action: "llm_call" })).rejects.toThrow(
+			"VaultStore has been destroyed",
+		);
 	});
 
 	// ─────────────────────────────────────────────────────────────────────
@@ -486,6 +487,7 @@ describe("VaultStore", () => {
 	// ─────────────────────────────────────────────────────────────────────
 
 	it("missing vault key throws VaultKeyMissingError", async () => {
+		// biome-ignore lint/performance/noDelete: must remove env var, not set to "undefined" string
 		delete process.env.USERTRUST_VAULT_KEY;
 
 		await expect(

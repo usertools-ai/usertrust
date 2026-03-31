@@ -155,11 +155,7 @@ export async function createVaultStore(opts: {
 
 	// ── VaultStore implementation ──
 
-	async function add(
-		name: string,
-		value: string,
-		scope?: Partial<CredentialScope>,
-	): Promise<void> {
+	async function add(name: string, value: string, scope?: Partial<CredentialScope>): Promise<void> {
 		if (destroyed) throw new Error("VaultStore has been destroyed");
 
 		const now = new Date().toISOString();
