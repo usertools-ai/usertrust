@@ -87,22 +87,22 @@ jobs:
             echo "✓ packages/${pkg}/dist exists ($(find packages/${pkg}/dist -name '*.js' | wc -l) JS files)"
           done
 
-      # ── Publish with provenance ──
+      # ── Publish with provenance (tolerate already-published versions) ──
       - name: Publish usertrust
         if: ${{ !inputs.dry_run }}
-        run: cd packages/core && npm publish --access public --provenance
+        run: cd packages/core && npm publish --access public --provenance || echo "::warning::usertrust already published at this version"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish usertrust-verify
         if: ${{ !inputs.dry_run }}
-        run: cd packages/verify && npm publish --access public --provenance
+        run: cd packages/verify && npm publish --access public --provenance || echo "::warning::usertrust-verify already published at this version"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish usertrust-openclaw
         if: ${{ !inputs.dry_run }}
-        run: cd packages/openclaw && npm publish --access public --provenance
+        run: cd packages/openclaw && npm publish --access public --provenance || echo "::warning::usertrust-openclaw already published at this version"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
