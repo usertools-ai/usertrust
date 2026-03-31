@@ -119,8 +119,6 @@ describe("checkScope()", () => {
 			actions: ["llm_call"],
 			expiresAt: new Date(Date.now() - 60_000).toISOString(),
 		};
-		expect(checkScope(expiredScope, { agent: "agent-1", action: "llm_call" }).allowed).toBe(
-			false,
-		);
+		expect(checkScope(expiredScope, { agent: "agent-1", action: "llm_call" }).allowed).toBe(false);
 	});
 });

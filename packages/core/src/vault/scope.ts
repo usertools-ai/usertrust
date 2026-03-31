@@ -21,7 +21,10 @@ export function checkScope(
 ): { allowed: boolean; reason?: string } {
 	// Check agent scope
 	if (scope.agents.length > 0 && !scope.agents.includes(accessor.agent)) {
-		return { allowed: false, reason: `Agent "${accessor.agent}" is not in the allowed agents list` };
+		return {
+			allowed: false,
+			reason: `Agent "${accessor.agent}" is not in the allowed agents list`,
+		};
 	}
 
 	// Check action scope

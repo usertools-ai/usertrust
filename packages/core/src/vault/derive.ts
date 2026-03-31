@@ -19,7 +19,12 @@ import { randomBytes, scryptSync } from "node:crypto";
  */
 export function deriveKey(passphrase: string, salt: Buffer): Buffer {
 	// maxmem must cover 128 * N * r = 128 MiB for N=2^17, r=8.
-	return scryptSync(passphrase, salt, 32, { N: 2 ** 17, r: 8, p: 1, maxmem: 256 * 1024 * 1024 }) as Buffer;
+	return scryptSync(passphrase, salt, 32, {
+		N: 2 ** 17,
+		r: 8,
+		p: 1,
+		maxmem: 256 * 1024 * 1024,
+	}) as Buffer;
 }
 
 /**
