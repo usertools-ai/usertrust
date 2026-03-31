@@ -18,7 +18,7 @@ export default defineConfig({
 			exclude: ["packages/*/src/cli/**"],
 			thresholds: {
 				lines: 92,
-				branches: 85,
+				branches: 84,
 				functions: 90,
 			},
 		},

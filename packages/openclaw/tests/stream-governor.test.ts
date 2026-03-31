@@ -267,4 +267,100 @@ describe("wrapCompleteWithGovernance", () => {
 		// Budget restored after abort
 		expect(gov.budgetRemaining()).toBe(budgetBefore);
 	});
+
+	it("wraps a completion without usage (falls back to estimated)", async () => {
+		const completeFn = vi.fn(async () => ({
+			content: "Hello!",
+		}));
+
+		const governed = wrapCompleteWithGovernance(completeFn, gov);
+		const context: StreamContext = {
+			messages: [{ role: "user", content: "Hi" }],
+			model: "claude-sonnet-4-6",
+			maxTokens: 2000,
+			temperature: 0.7,
+		};
+
+		const result = await governed("claude-sonnet-4-6", context);
+
+		expect(result.content).toBe("Hello!");
+		expect(gov.budgetRemaining()).toBeLessThan(100_000);
+	});
+});
+
+describe("wrapStreamWithGovernance with maxTokens/temperature", () => {
+	let vaultBase: string;
+	let gov: Governor;
+
+	beforeEach(async () => {
+		vaultBase = makeTmpVault();
+		process.env.USERTRUST_TEST = "1";
+		gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+		});
+	});
+
+	afterEach(async () => {
+		process.env.USERTRUST_TEST = "";
+		await gov.destroy();
+		try {
+			rmSync(vaultBase, { recursive: true, force: true });
+		} catch {
+			// cleanup
+		}
+	});
+
+	it("passes maxTokens and temperature through authorize params", async () => {
+		const events: StreamEvent[] = [
+			{ type: "start" },
+			{
+				type: "done",
+				stopReason: "stop",
+				usage: { inputTokens: 10, outputTokens: 5 },
+			},
+		];
+
+		const governed = wrapStreamWithGovernance(mockStreamFn(events), gov);
+		const context: StreamContext = {
+			messages: [{ role: "user", content: "Hi" }],
+			model: "claude-sonnet-4-6",
+			maxTokens: 1000,
+			temperature: 0.5,
+		};
+
+		const collected: StreamEvent[] = [];
+		for await (const event of governed("claude-sonnet-4-6", context)) {
+			collected.push(event);
+		}
+
+		expect(collected).toHaveLength(2);
+		expect(gov.budgetRemaining()).toBeLessThan(100_000);
+	});
+
+	it("handles stream without usage reporting (falls back to estimated)", async () => {
+		const events: StreamEvent[] = [
+			{ type: "start" },
+			{ type: "text_delta", text: "hello" },
+			{ type: "text_end" },
+		];
+
+		// Stream ends without a done event that has usage
+		const noUsageStreamFn: StreamFn = async function* () {
+			for (const e of events) yield e;
+		};
+
+		const governed = wrapStreamWithGovernance(noUsageStreamFn, gov);
+		const context: StreamContext = {
+			messages: [{ role: "user", content: "Hi" }],
+			model: "claude-sonnet-4-6",
+		};
+
+		for await (const _event of governed("claude-sonnet-4-6", context)) {
+			// consume
+		}
+
+		expect(gov.budgetRemaining()).toBeLessThan(100_000);
+	});
 });

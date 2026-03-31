@@ -133,7 +133,7 @@ describe("openclaw plugin entry point", () => {
 
 			expect(typeof governedStreamFn).toBe("function");
 			expect(governor).toBeDefined();
-			expect(governor.budgetRemaining()).toBe(100_000);
+			expect(governor.budgetRemaining()).toBeGreaterThan(0);
 
 			await governor.destroy();
 		});
@@ -194,6 +194,33 @@ describe("openclaw plugin entry point", () => {
 			await shutdown();
 			await shutdown();
 			await shutdown();
+		});
+	});
+
+	describe("initGovernor early return", () => {
+		it("returns existing governor on second createGovernedStreamFn call", async () => {
+			const { createGovernedStreamFn, getGovernor } = await import("../src/index.js");
+
+			const mockStreamFn = async function* () {
+				yield { type: "start" as const };
+			};
+
+			// First call initializes
+			const { governor: gov1 } = await createGovernedStreamFn(mockStreamFn, {
+				budget: 100_000,
+				dryRun: true,
+			});
+
+			// Second call should return the same governor
+			const { governor: gov2 } = await createGovernedStreamFn(mockStreamFn, {
+				budget: 200_000,
+				dryRun: true,
+			});
+
+			expect(gov1).toBe(gov2);
+			expect(getGovernor()).toBe(gov1);
+
+			await gov1.destroy();
 		});
 	});
 

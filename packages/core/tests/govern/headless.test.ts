@@ -950,4 +950,56 @@ describe("headless governor", () => {
 
 		await gov.destroy();
 	});
+
+	// ── Engine spendPending failure ──
+
+	it("authorize throws LedgerUnavailableError when engine.spendPending fails", async () => {
+		const failingEngine: TrustEngine = {
+			async spendPending() {
+				throw new Error("TB connection refused");
+			},
+			async postPendingSpend() {},
+			async voidPendingSpend() {},
+			async voidAllPending() {},
+			destroy() {},
+		};
+
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			_engine: failingEngine,
+		});
+
+		await expect(
+			gov.authorize({ model: "claude-sonnet-4-6" }),
+		).rejects.toThrow("Ledger unavailable");
+
+		await gov.destroy();
+	});
+
+	// ── Engine spendPending failure with non-Error thrown ──
+
+	it("authorize wraps non-Error from engine.spendPending", async () => {
+		const failingEngine: TrustEngine = {
+			async spendPending() {
+				throw "string error";
+			},
+			async postPendingSpend() {},
+			async voidPendingSpend() {},
+			async voidAllPending() {},
+			destroy() {},
+		};
+
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			_engine: failingEngine,
+		});
+
+		await expect(
+			gov.authorize({ model: "claude-sonnet-4-6" }),
+		).rejects.toThrow("string error");
+
+		await gov.destroy();
+	});
 });
