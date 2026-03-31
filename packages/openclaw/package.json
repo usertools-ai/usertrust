@@ -1,6 +1,6 @@
 {
 	"name": "usertrust-openclaw",
-	"version": "1.2.1",
+	"version": "1.2.2",
 	"description": "usertrust governance plugin for OpenClaw. Budget enforcement, audit trails, and policy gates for every LLM call — zero code changes.",
 	"license": "Apache-2.0",
 	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
