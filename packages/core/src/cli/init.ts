@@ -136,6 +136,10 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			}
 
 			provider = (providerResult as string).trim().toLowerCase();
+			if (!/^[a-z][a-z0-9-]{0,31}$/.test(provider)) {
+				clack.log.warn("Provider name must be lowercase alphanumeric (max 32 chars).");
+				continue;
+			}
 		}
 
 		// Validate key unless --skip-verify
@@ -163,6 +167,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		message: "Monthly budget: $",
 		placeholder: "50",
 		validate: (value) => {
+			if (!value) return "Enter a positive number";
 			const cleaned = value.replace(/[$,]/g, "");
 			if (Number.isNaN(Number(cleaned)) || Number(cleaned) <= 0) {
 				return "Enter a positive number";
@@ -205,9 +210,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			for (const model of models) {
 				const rates = PRICING_TABLE[model];
 				if (!rates) continue;
-				clack.log.step(
-					`  ${model}: input=${rates.inputPer1k}/1k, output=${rates.outputPer1k}/1k`,
-				);
+				clack.log.step(`  ${model}: input=${rates.inputPer1k}/1k, output=${rates.outputPer1k}/1k`);
 			}
 		}
 
@@ -248,6 +251,16 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			const inputPerM = Number(inputResult);
 			const outputPerM = Number(outputResult);
 
+			if (
+				!Number.isFinite(inputPerM) ||
+				inputPerM < 0 ||
+				!Number.isFinite(outputPerM) ||
+				outputPerM < 0
+			) {
+				clack.log.warn("Rates must be non-negative numbers. Skipping.");
+				continue;
+			}
+
 			// Convert $/1M to usertokens/1K: $X per 1M = X*10 usertokens per 1K
 			customRates[model] = {
 				inputPer1k: inputPerM * 10,
@@ -263,7 +276,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		budget: budgetUsertokens,
 		providers,
 		pricing,
-		customRates,
+		...(customRates !== undefined ? { customRates } : {}),
 		keys,
 	});
 
@@ -318,7 +331,7 @@ function createVault(vaultPath: string, data: VaultData): void {
 		const envLines = Object.entries(data.keys).map(
 			([provider, key]) => `${envVarName(provider)}=${key}`,
 		);
-		writeFileSync(join(vaultPath, ".env"), envLines.join("\n") + "\n", {
+		writeFileSync(join(vaultPath, ".env"), `${envLines.join("\n")}\n`, {
 			encoding: "utf-8",
 			mode: 0o600,
 		});

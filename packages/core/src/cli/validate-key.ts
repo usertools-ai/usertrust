@@ -30,7 +30,7 @@ const PROVIDER_ENDPOINTS: Record<
 	},
 	google: {
 		url: "https://generativelanguage.googleapis.com/v1/models",
-		headers: () => ({}),
+		headers: (key) => ({ "x-goog-api-key": key }),
 	},
 };
 
@@ -43,17 +43,12 @@ export function detectProvider(key: string): string | null {
 }
 
 /** Validate an API key against the provider's models endpoint. */
-export async function validateKey(
-	key: string,
-	provider: string,
-): Promise<KeyValidationResult> {
+export async function validateKey(key: string, provider: string): Promise<KeyValidationResult> {
 	const endpoint = PROVIDER_ENDPOINTS[provider];
 	if (!endpoint) return { valid: true };
 
 	try {
-		const url =
-			provider === "google" ? `${endpoint.url}?key=${key}` : endpoint.url;
-		const resp = await fetch(url, {
+		const resp = await fetch(endpoint.url, {
 			method: "GET",
 			headers: endpoint.headers(key),
 			signal: AbortSignal.timeout(3000),

@@ -80,8 +80,8 @@ export const TrustConfigSchema = z.object({
 		.record(
 			z.string(),
 			z.object({
-				inputPer1k: z.number(),
-				outputPer1k: z.number(),
+				inputPer1k: z.number().finite().nonnegative(),
+				outputPer1k: z.number().finite().nonnegative(),
 			}),
 		)
 		.optional(),

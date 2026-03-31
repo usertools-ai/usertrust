@@ -8,6 +8,9 @@ import { VAULT_DIR } from "./shared/constants.js";
 import { TrustConfigSchema } from "./shared/types.js";
 import type { TrustConfig } from "./shared/types.js";
 
+/** Valid env var name: starts with letter or underscore, alphanumeric + underscore only. */
+const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 /** Parse a simple KEY=VALUE .env file. Only sets vars not already in process.env. */
 function loadEnvFile(content: string): void {
 	for (const line of content.split("\n")) {
@@ -16,7 +19,15 @@ function loadEnvFile(content: string): void {
 		const eqIdx = trimmed.indexOf("=");
 		if (eqIdx === -1) continue;
 		const key = trimmed.slice(0, eqIdx);
-		const value = trimmed.slice(eqIdx + 1);
+		if (!ENV_KEY_RE.test(key)) continue;
+		let value = trimmed.slice(eqIdx + 1);
+		// Strip surrounding quotes (single or double)
+		if (
+			(value.startsWith('"') && value.endsWith('"')) ||
+			(value.startsWith("'") && value.endsWith("'"))
+		) {
+			value = value.slice(1, -1);
+		}
 		if (process.env[key] === undefined) {
 			process.env[key] = value;
 		}
