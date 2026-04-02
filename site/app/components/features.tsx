@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback, useRef } from "react";
 import { ScrollReveal } from "./scroll-reveal";
 
 const colorStyles = {
@@ -117,6 +118,28 @@ const cards: { title: string; subtitle: string; description: string; color: Colo
 	},
 ];
 
+function SpotlightCard({ children, className }: { children: React.ReactNode; className: string }) {
+	const ref = useRef<HTMLDivElement>(null);
+
+	const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+		const card = ref.current;
+		if (!card) return;
+		const rect = card.getBoundingClientRect();
+		card.style.setProperty("--mouse-x", `${e.clientX - rect.left}px`);
+		card.style.setProperty("--mouse-y", `${e.clientY - rect.top}px`);
+	}, []);
+
+	return (
+		<div
+			ref={ref}
+			onMouseMove={handleMouseMove}
+			className={`spotlight-card ${className}`}
+		>
+			{children}
+		</div>
+	);
+}
+
 export function Features() {
 	return (
 		<section id="features" className="relative py-24 sm:py-32 px-6">
@@ -146,7 +169,7 @@ export function Features() {
 						const s = colorStyles[card.color];
 						return (
 							<ScrollReveal key={card.title} delay={i * 0.1}>
-								<div
+								<SpotlightCard
 									className={`group flex flex-col gap-4 p-6 rounded-xl border border-white/[0.06] ${s.border} ${s.glow} hover:bg-white/[0.02] hover:-translate-y-0.5 transition-all duration-300`}
 								>
 									<div className="flex items-center gap-2.5">
@@ -171,7 +194,7 @@ export function Features() {
 											))}
 										</p>
 									</div>
-								</div>
+								</SpotlightCard>
 							</ScrollReveal>
 						);
 					})}

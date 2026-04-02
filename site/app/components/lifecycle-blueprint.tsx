@@ -645,6 +645,14 @@ export function LifecycleBlueprint({
 	const Drawing = DRAWINGS[phaseId];
 	if (!Drawing) return null;
 
+	const phaseColors: Record<string, string> = {
+		pending: "rgba(245,158,11,0.7)",   // warning amber
+		execute: "rgba(108,160,192,0.7)",  // tim blue
+		post: "rgba(52,211,153,0.7)",      // ut green
+		void: "rgba(239,68,68,0.7)",       // danger red
+		receipt: "rgba(192,132,252,0.7)",  // mem purple
+	};
+
 	return (
 		<div className={`relative ${className}`}>
 			<span className="absolute top-3 left-4 text-[10px] tracking-[0.2em] uppercase select-none text-white/20">
@@ -655,7 +663,7 @@ export function LifecycleBlueprint({
 				fill="none"
 				xmlns="http://www.w3.org/2000/svg"
 				className="w-full h-auto"
-				style={{ color: "rgba(255,255,255,0.7)" }}
+				style={{ color: phaseColors[phaseId] ?? "rgba(255,255,255,0.7)" }}
 				role="img"
 				aria-label={`Blueprint diagram for ${phaseId} phase`}
 			>

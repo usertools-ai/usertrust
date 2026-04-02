@@ -70,7 +70,7 @@ export function Nav() {
 					className={`inline-flex items-center px-4 py-2.5 border rounded-full text-sm font-medium tracking-tight transition-all duration-300 ${
 						scrolled
 							? "border-ut/30 text-ut shadow-[0_0_20px_rgba(52,211,153,0.1)]"
-							: "border-white/20 hover:border-ut/50 hover:text-ut"
+							: "border-white/20 hover:border-ut/50 hover:text-ut animate-[pulse-glow_4s_ease-in-out_infinite]"
 					}`}
 				>
 					usertrust
@@ -82,11 +82,14 @@ export function Nav() {
 							<a
 								key={link.href}
 								href={link.href}
-								className={`hover:text-white transition-colors duration-200 ${
+								className={`relative hover:text-white transition-colors duration-200 ${
 									activeSection === link.href ? "text-ut" : ""
 								}`}
 							>
 								{link.label}
+								{activeSection === link.href && (
+									<span className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full bg-ut" />
+								)}
 							</a>
 						))}
 					</div>

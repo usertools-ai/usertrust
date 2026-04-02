@@ -2,7 +2,8 @@ import { GitHubIcon } from "./github-icon";
 
 export function Footer() {
 	return (
-		<footer className="border-t border-white/[0.06]">
+		<footer className="relative">
+			<div className="h-px bg-gradient-to-r from-transparent via-ut/15 to-transparent" />
 			<div className="max-w-5xl mx-auto px-6 py-12">
 				<div className="grid grid-cols-2 sm:grid-cols-4 gap-8 mb-10">
 					{/* Brand column */}
@@ -16,24 +17,24 @@ export function Footer() {
 					{/* Product */}
 					<div className="flex flex-col gap-2.5">
 						<span className="text-xs font-medium text-white/50 uppercase tracking-wider">Product</span>
-						<a href="#features" className="text-sm text-white/30 hover:text-white/70 transition-colors duration-200">Features</a>
-						<a href="#how" className="text-sm text-white/30 hover:text-white/70 transition-colors duration-200">How it works</a>
-						<a href="#code" className="text-sm text-white/30 hover:text-white/70 transition-colors duration-200">Quick start</a>
-						<a href="/docs" className="text-sm text-white/30 hover:text-white/70 transition-colors duration-200">Docs</a>
+						<a href="#features" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">Features</a>
+						<a href="#how" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">How it works</a>
+						<a href="#code" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">Quick start</a>
+						<a href="/docs" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">Docs</a>
 					</div>
 
 					{/* Resources */}
 					<div className="flex flex-col gap-2.5">
 						<span className="text-xs font-medium text-white/50 uppercase tracking-wider">Resources</span>
-						<a href="https://github.com/usertools-ai/usertrust" target="_blank" rel="noopener noreferrer" className="text-sm text-white/30 hover:text-white/70 transition-colors duration-200">GitHub</a>
-						<a href="https://www.npmjs.com/package/usertrust" target="_blank" rel="noopener noreferrer" className="text-sm text-white/30 hover:text-white/70 transition-colors duration-200">npm</a>
-						<a href="https://github.com/usertools-ai/usertrust/blob/master/LICENSE" target="_blank" rel="noopener noreferrer" className="text-sm text-white/30 hover:text-white/70 transition-colors duration-200">License</a>
+						<a href="https://github.com/usertools-ai/usertrust" target="_blank" rel="noopener noreferrer" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">GitHub</a>
+						<a href="https://www.npmjs.com/package/usertrust" target="_blank" rel="noopener noreferrer" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">npm</a>
+						<a href="https://github.com/usertools-ai/usertrust/blob/master/LICENSE" target="_blank" rel="noopener noreferrer" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">License</a>
 					</div>
 
 					{/* Company */}
 					<div className="flex flex-col gap-2.5">
 						<span className="text-xs font-medium text-white/50 uppercase tracking-wider">Company</span>
-						<a href="https://usertools.ai" target="_blank" rel="noopener noreferrer" className="text-sm text-white/30 hover:text-white/70 transition-colors duration-200">Usertools</a>
+						<a href="https://usertools.ai" target="_blank" rel="noopener noreferrer" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">Usertools</a>
 					</div>
 				</div>
 
@@ -45,15 +46,23 @@ export function Footer() {
 							usertools.ai
 						</a>
 					</p>
-					<a
-						href="https://github.com/usertools-ai/usertrust"
-						target="_blank"
-						rel="noopener noreferrer"
-						className="flex items-center gap-1.5 text-xs text-white/20 hover:text-white/50 transition-colors duration-200"
-					>
-						<GitHubIcon className="w-3.5 h-3.5" />
-						Star on GitHub
-					</a>
+					<div className="flex items-center gap-4">
+						<a
+							href="#"
+							className="text-xs text-white/20 hover:text-ut transition-colors duration-200"
+						>
+							Back to top ↑
+						</a>
+						<a
+							href="https://github.com/usertools-ai/usertrust"
+							target="_blank"
+							rel="noopener noreferrer"
+							className="flex items-center gap-1.5 text-xs text-white/20 hover:text-white/50 transition-colors duration-200"
+						>
+							<GitHubIcon className="w-3.5 h-3.5" />
+							Star on GitHub
+						</a>
+					</div>
 				</div>
 			</div>
 		</footer>

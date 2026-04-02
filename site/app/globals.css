@@ -194,3 +194,78 @@ html {
     animation: none !important;
   }
 }
+
+/* Spotlight card — mouse-following radial highlight */
+.spotlight-card {
+  position: relative;
+  overflow: hidden;
+}
+.spotlight-card::before {
+  content: '';
+  position: absolute;
+  width: 300px;
+  height: 300px;
+  background: radial-gradient(circle, rgba(52,211,153,0.06) 0%, transparent 70%);
+  border-radius: 50%;
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+  left: var(--mouse-x, -200px);
+  top: var(--mouse-y, -200px);
+  transition: opacity 0.3s;
+  opacity: 0;
+  z-index: 1;
+}
+.spotlight-card:hover::before {
+  opacity: 1;
+}
+
+/* Animated underline for links */
+.animated-underline {
+  position: relative;
+  text-decoration: none;
+}
+.animated-underline::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: -2px;
+  width: 0;
+  height: 1px;
+  background: currentColor;
+  transition: width 0.3s ease;
+}
+.animated-underline:hover::after {
+  width: 100%;
+}
+
+/* Stagger children animation */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.stagger-children > * {
+  animation: fade-up 0.4s ease-out both;
+}
+.stagger-children > *:nth-child(1) { animation-delay: 0ms; }
+.stagger-children > *:nth-child(2) { animation-delay: 60ms; }
+.stagger-children > *:nth-child(3) { animation-delay: 120ms; }
+.stagger-children > *:nth-child(4) { animation-delay: 180ms; }
+.stagger-children > *:nth-child(5) { animation-delay: 240ms; }
+.stagger-children > *:nth-child(6) { animation-delay: 300ms; }
+
+/* Glow ring — for special stat highlights */
+@keyframes glow-ring {
+  0%, 100% { box-shadow: 0 0 0 2px rgba(52,211,153,0.1), 0 0 20px rgba(52,211,153,0.05); }
+  50% { box-shadow: 0 0 0 2px rgba(52,211,153,0.2), 0 0 30px rgba(52,211,153,0.1); }
+}
+.glow-ring {
+  animation: glow-ring 3s ease-in-out infinite;
+}
+
+/* Reduced motion: disable Wave 3 animations */
+@media (prefers-reduced-motion: reduce) {
+  .spotlight-card::before { display: none; }
+  .stagger-children > * { animation: none; }
+  .glow-ring { animation: none; }
+}

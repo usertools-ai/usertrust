@@ -49,8 +49,11 @@ export function SocialProof() {
 					{stats.map((stat) => (
 						<div key={stat.label} className="flex flex-col items-center gap-1.5 text-center">
 							{stat.display !== undefined ? (
-								<span className="font-mono text-2xl sm:text-3xl font-bold text-ut tabular-nums">
-									{stat.display}
+								<span className="relative inline-flex items-center justify-center">
+									<span className="absolute inset-0 rounded-full glow-ring" style={{ margin: "-8px" }} />
+									<span className="font-mono text-2xl sm:text-3xl font-bold text-ut tabular-nums">
+										{stat.display}
+									</span>
 								</span>
 							) : (
 								<AnimatedNumber target={stat.value} suffix={stat.suffix} />
@@ -62,7 +65,7 @@ export function SocialProof() {
 					))}
 				</div>
 				{/* Subtle bottom divider */}
-				<div className="mt-12 sm:mt-16 h-px bg-gradient-to-r from-transparent via-white/[0.06] to-transparent" />
+				<div className="mt-12 sm:mt-16 h-px bg-gradient-to-r from-transparent via-ut/10 to-transparent" />
 			</div>
 		</section>
 	);

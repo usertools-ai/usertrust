@@ -1,6 +1,6 @@
 "use client";
 
-import { motion, useScroll, useTransform } from "motion/react";
+import { AnimatePresence, motion, useScroll, useTransform } from "motion/react";
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
 import { CopyCommand } from "./copy-command";
@@ -30,9 +30,24 @@ function usePackageStats() {
 	return { downloads, stars };
 }
 
+const taglines = [
+	"Budget holds, audit trails, and spend limits for every LLM call.",
+	"Your API keys. Your billing. Your provider. We add the trust layer.",
+	"Like a credit card hold — but for AI spend. Settled or voided, never lost.",
+	"Hash-chained receipts. Tamper-evident by construction. Zero vendor lock-in.",
+];
+
 export function Hero() {
 	const sectionRef = useRef<HTMLElement>(null);
 	const { downloads, stars } = usePackageStats();
+	const [taglineIndex, setTaglineIndex] = useState(0);
+
+	useEffect(() => {
+		const interval = setInterval(() => {
+			setTaglineIndex((prev) => (prev + 1) % taglines.length);
+		}, 4000);
+		return () => clearInterval(interval);
+	}, []);
 
 	const { scrollYProgress } = useScroll({
 		target: sectionRef,
@@ -108,10 +123,19 @@ export function Hero() {
 					initial={{ opacity: 0, y: 20 }}
 					animate={{ opacity: 1, y: 0 }}
 					transition={{ duration: 0.6, ease: "easeOut", delay: 0.32 }}
-					className="max-w-lg text-base sm:text-lg text-white/70 leading-relaxed"
+					className="max-w-lg text-base sm:text-lg text-white/70 leading-relaxed h-[3.5em] sm:h-[3em] flex items-center justify-center"
 				>
-					Budget holds, audit trails, and spend limits for every LLM call. Keep your keys, keep your
-					billing. Add trust in one line.
+					<AnimatePresence mode="wait">
+						<motion.span
+							key={taglineIndex}
+							initial={{ opacity: 0, y: 8 }}
+							animate={{ opacity: 1, y: 0 }}
+							exit={{ opacity: 0, y: -8 }}
+							transition={{ duration: 0.4, ease: "easeInOut" }}
+						>
+							{taglines[taglineIndex]}
+						</motion.span>
+					</AnimatePresence>
 				</motion.p>
 
 				{/* Install command */}

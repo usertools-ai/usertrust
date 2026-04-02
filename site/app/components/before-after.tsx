@@ -216,25 +216,32 @@ function CodePanel({
 			</div>
 
 			{/* Code lines */}
-			<pre className="p-3 sm:p-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto">
-				<code>
-					{lines.map((line, i) => (
-						// biome-ignore lint/suspicious/noArrayIndexKey: static constant array
-						<span key={`line-${i}`} className="flex">
-							{line.added && !isBefore ? (
-								<span className="w-1 shrink-0 rounded-full bg-ut mr-3" />
-							) : (
-								<span className="w-1 shrink-0 mr-3" />
-							)}
-							<span
-								className={line.added && !isBefore ? "bg-ut/[0.10] -mx-1 px-1 rounded" : undefined}
-							>
-								{line.tokens.length > 0 ? renderTokens(line.tokens) : "\u00A0"}
-							</span>
-						</span>
+			<div className="flex">
+				<div className="shrink-0 py-3 sm:py-5 pl-3 sm:pl-5 pr-2 text-right select-none border-r border-white/[0.04]">
+					{lines.map((_, i) => (
+						<div key={`ln-${i}`} className="text-xs sm:text-sm leading-relaxed text-white/10">{i + 1}</div>
 					))}
-				</code>
-			</pre>
+				</div>
+				<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto flex-1">
+					<code>
+						{lines.map((line, i) => (
+							// biome-ignore lint/suspicious/noArrayIndexKey: static constant array
+							<span key={`line-${i}`} className="flex">
+								{line.added && !isBefore ? (
+									<span className="w-1 shrink-0 rounded-full bg-ut mr-3" />
+								) : (
+									<span className="w-1 shrink-0 mr-3" />
+								)}
+								<span
+									className={line.added && !isBefore ? "bg-ut/[0.10] -mx-1 px-1 rounded" : undefined}
+								>
+									{line.tokens.length > 0 ? renderTokens(line.tokens) : "\u00A0"}
+								</span>
+							</span>
+						))}
+					</code>
+				</pre>
+			</div>
 		</div>
 	);
 }

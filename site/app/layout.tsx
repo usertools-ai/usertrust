@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
 import { ScrollProgress } from "./components/scroll-progress";
+import { NoiseOverlay } from "./components/noise-overlay";
 import "./globals.css";
 
 const usertoolsSans = localFont({
@@ -81,6 +82,7 @@ export default function RootLayout({
 		<html lang="en" className={`${usertoolsSans.variable} ${jetbrainsMono.variable}`}>
 			<body className="bg-brand-bg text-white font-sans antialiased overflow-x-hidden">
 				<ScrollProgress />
+				<NoiseOverlay />
 				{children}
 				<script
 					type="application/ld+json"
