@@ -51,7 +51,7 @@ The registry manages breakers for multiple providers. Each provider key gets its
 ```typescript
 const registry = new CircuitBreakerRegistry({
   failureThreshold: 5,
-  resetTimeout: 60_000,
+  resetTimeoutMs: 60_000,
 });
 
 // Get or create a breaker for a provider

@@ -281,19 +281,19 @@ interface GovernedStream<T> extends AsyncIterable<T> {
 Usage:
 
 ```typescript
-const stream = await client.messages.create({
+const { response } = await client.messages.create({
   model: "claude-sonnet-4-6",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Hello" }],
   stream: true,
 });
 
-for await (const chunk of stream) {
+for await (const chunk of response) {
   // Process chunks as usual
 }
 
 // Governance receipt resolves after the stream finishes
-const receipt = await stream.receipt;
+const receipt = await response.receipt;
 ```
 
 ### StreamUsage

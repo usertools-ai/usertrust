@@ -41,15 +41,15 @@ rules:
     description: Deny requests to opus-class models in production
     enforcement: hard
     priority: 10
-    scopes: ["production/*"]
+    scopePatterns: ["production/*"]
     conditions:
       - field: model
         operator: contains
         value: "opus"
-    timeWindow:
-      daysOfWeek: [1, 2, 3, 4, 5]  # Mon-Fri
-      startHour: 9
-      endHour: 17
+    timeWindows:
+      - daysOfWeek: [1, 2, 3, 4, 5]  # Mon-Fri
+        startHour: 9
+        endHour: 17
 ```
 
 ## Operators
@@ -78,22 +78,22 @@ See [Policy Operators](/docs/policy/operators) for detailed usage and examples o
 Scopes use [minimatch](https://github.com/isaacs/minimatch) glob patterns to target specific contexts:
 
 ```yaml
-scopes: ["production/*"]          # all production sub-scopes
-scopes: ["development/**"]        # development and all nested scopes
-scopes: ["*/billing"]             # billing scope in any environment
+scopePatterns: ["production/*"]          # all production sub-scopes
+scopePatterns: ["development/**"]        # development and all nested scopes
+scopePatterns: ["*/billing"]             # billing scope in any environment
 ```
 
-If a rule has no `scopes` field, it matches all scopes.
+If a rule has no `scopePatterns` field, it matches all scopes.
 
 ## Time Windows
 
 Rules can be restricted to specific days and hours:
 
 ```yaml
-timeWindow:
-  daysOfWeek: [1, 2, 3, 4, 5]    # 0=Sunday, 6=Saturday
-  startHour: 9                     # 24-hour format
-  endHour: 17
+timeWindows:
+  - daysOfWeek: [1, 2, 3, 4, 5]    # 0=Sunday, 6=Saturday
+    startHour: 9                     # 24-hour format
+    endHour: 17
 ```
 
 A rule with a time window only matches during the specified period. Outside the window, the rule is skipped entirely.

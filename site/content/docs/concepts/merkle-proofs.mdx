@@ -80,7 +80,7 @@ interface MerkleInclusionProof {
   leafIndex: number;
   leafHash: string;
   treeSize: number;
-  rootHash: string;
+  root: string;
   siblings: MerkleSibling[];
 }
 ```
@@ -109,7 +109,7 @@ interface MerkleConsistencyProof {
   secondSize: number;
   firstRoot: string;
   secondRoot: string;
-  proof: MerkleSibling[];
+  proof: string[];
 }
 ```
 

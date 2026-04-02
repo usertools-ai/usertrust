@@ -44,10 +44,12 @@ After both directors cast their votes, the board resolves the outcome:
 | VETO | APPROVE | **escalated** |
 | APPROVE | VETO | **escalated** |
 | ABSTAIN | ABSTAIN | **escalated** |
-| APPROVE | ABSTAIN | **escalated** |
-| ABSTAIN | APPROVE | **escalated** |
+| VETO | ABSTAIN | **blocked** |
+| ABSTAIN | VETO | **blocked** |
+| APPROVE | ABSTAIN | **approved** |
+| ABSTAIN | APPROVE | **approved** |
 
-A unanimous veto blocks the operation. Any disagreement or abstention results in escalation, which can trigger human review depending on your configuration.
+A unanimous veto blocks the operation. A veto with abstention also blocks. Any veto-approve disagreement or double abstention results in escalation. An approval with abstention is treated as approved.
 
 ## Board API
 
@@ -68,8 +70,7 @@ interface BoardReviewResult {
   reasoning: string;
   requiresHumanEscalation: boolean;
   reviews: DirectorReview[];
-  concerns: DetectedConcern[];
-  timestamp: string;
+  decidedAt: string;
 }
 ```
 
@@ -81,7 +82,6 @@ interface BoardStats {
   approved: number;
   blocked: number;
   escalated: number;
-  concernCounts: Record<string, number>;
 }
 ```
 
@@ -93,7 +93,7 @@ Enable the board and set the veto sensitivity in `usertrust.config.json`:
 {
   "board": {
     "enabled": true,
-    "vetoThreshold": "medium"
+    "vetoThreshold": "high"
   }
 }
 ```
@@ -101,7 +101,7 @@ Enable the board and set the veto sensitivity in `usertrust.config.json`:
 | Option | Values | Default |
 |--------|--------|---------|
 | `board.enabled` | `true`, `false` | `false` |
-| `board.vetoThreshold` | `low`, `medium`, `high`, `critical` | `medium` |
+| `board.vetoThreshold` | `low`, `medium`, `high`, `critical` | `high` |
 
 The veto threshold controls how aggressively the directors flag concerns. At `low`, only severe issues trigger a veto. At `critical`, even marginal concerns can block an operation.
 

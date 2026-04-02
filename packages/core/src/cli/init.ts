@@ -104,7 +104,6 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const keys: Record<string, string> = {};
 	const providers: Array<{ name: string; models: string[] }> = [];
 
-	// biome-ignore lint/correctness/noConstantCondition: intentional loop
 	while (true) {
 		const keyResult = await clack.text({
 			message:
@@ -215,7 +214,6 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		}
 
 		// Allow editing individual models
-		// biome-ignore lint/correctness/noConstantCondition: intentional loop
 		while (true) {
 			const modelResult = await clack.text({
 				message: "Model to edit (empty = accept all):",
