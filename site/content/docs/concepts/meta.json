@@ -4,7 +4,6 @@
 		"two-phase-spend",
 		"audit-trail",
 		"merkle-proofs",
-		"board-of-directors",
 		"policy-engine",
 		"pattern-memory",
 		"circuit-breaker"

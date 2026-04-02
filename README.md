@@ -159,7 +159,6 @@ Create `.usertrust/usertrust.config.json`:
   "budget": 50000,
   "tier": "pro",
   "pii": "block",
-  "board": { "enabled": true, "vetoThreshold": "high" },
   "circuitBreaker": { "failureThreshold": 5, "resetTimeout": 60000 },
   "patterns": { "enabled": true },
   "audit": { "rotation": "daily", "indexLimit": 10000 }
@@ -176,7 +175,6 @@ const config = defineConfig({
   budget: 50_000,
   tier: "pro",
   pii: "block",
-  board: { enabled: true, vetoThreshold: "high" },
   circuitBreaker: { failureThreshold: 5, resetTimeout: 60_000 },
   patterns: { enabled: true },
   audit: { rotation: "daily", indexLimit: 10_000 },
@@ -194,8 +192,6 @@ const config = defineConfig({
 **Policy engine** — 12 field operators (`eq`, `gt`, `in`, `regex`, etc.) with soft/hard enforcement. Block specific models, cap costs, require approvals.
 
 **PII detection** — Luhn-validated credit card numbers, SSN patterns, email addresses, phone numbers, IPv4 addresses. Block or warn before data leaves your network.
-
-**Board of Directors** — Heuristic AI oversight layer. Risk and Compliance directors vote on high-stakes operations. Configurable veto thresholds.
 
 **Circuit breakers** — Per-provider failure isolation. When a provider starts failing, the breaker opens and requests fail fast instead of cascading.
 

@@ -21,7 +21,6 @@ const config = defineConfig({
   budget: 100_000,
   tier: "pro",
   pii: "block",
-  board: { enabled: true, vetoThreshold: "high" },
   circuitBreaker: { failureThreshold: 3, resetTimeout: 30_000 },
   patterns: { enabled: true, feedProxy: false },
   audit: { rotation: "daily", indexLimit: 10_000 },
@@ -58,10 +57,6 @@ const TrustConfigSchema = z.object({
   key: z.string().optional(),
   policies: z.string().default("./policies/default.yml"),
   pii: z.enum(["redact", "warn", "block", "off"]).default("warn"),
-  board: z.object({
-    enabled: z.boolean().default(false),
-    vetoThreshold: z.enum(["low", "medium", "high", "critical"]).default("high"),
-  }).default({}),
   circuitBreaker: z.object({
     failureThreshold: z.number().int().default(5),
     resetTimeout: z.number().int().default(60_000),
@@ -89,10 +84,6 @@ const TrustConfigSchema = z.object({
   "tier": "pro",
   "pii": "block",
   "policies": "./policies/default.yml",
-  "board": {
-    "enabled": true,
-    "vetoThreshold": "high"
-  },
   "circuitBreaker": {
     "failureThreshold": 3,
     "resetTimeout": 30000
@@ -150,17 +141,6 @@ Default: `"warn"`. PII detection mode applied to all outgoing prompts.
 | `off` | Disable PII detection entirely |
 
 Detected PII types: email addresses, phone numbers, SSNs, credit card numbers (Luhn-validated), and IPv4 addresses.
-
-### board
-
-Default: `{ enabled: false, vetoThreshold: "high" }`.
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `enabled` | `false` | Enable the Board of Directors heuristic review |
-| `vetoThreshold` | `"high"` | Minimum concern severity to trigger a veto (`low`, `medium`, `high`, `critical`) |
-
-When enabled, two directors (Alpha and Beta) review every LLM response using pure heuristic pattern matching. See [Board of Directors](/docs/concepts/board-of-directors).
 
 ### circuitBreaker
 
