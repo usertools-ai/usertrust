@@ -142,3 +142,55 @@ html {
   height: 1px;
   background: linear-gradient(90deg, transparent, rgba(52,211,153,0.15), transparent);
 }
+
+/* Orb float animation */
+@keyframes orb-float {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(30px, -25px); }
+  50% { transform: translate(-20px, 15px); }
+  75% { transform: translate(10px, -10px); }
+}
+
+/* Shimmer effect for cards */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+.shimmer-border {
+  position: relative;
+}
+.shimmer-border::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(52,211,153,0.1) 25%,
+    rgba(108,160,192,0.1) 50%,
+    rgba(192,132,252,0.1) 75%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 8s linear infinite;
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  padding: 1px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+.shimmer-border:hover::after {
+  opacity: 1;
+}
+
+/* Reduced motion: disable all custom animations */
+@media (prefers-reduced-motion: reduce) {
+  .gradient-orbs,
+  [style*="animation"] {
+    animation: none !important;
+  }
+}

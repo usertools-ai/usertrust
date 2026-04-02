@@ -37,14 +37,48 @@ const colorStyles = {
 
 type ColorKey = keyof typeof colorStyles;
 
-const cards: { title: string; subtitle: string; description: string; color: ColorKey; icon: string }[] = [
+const ICONS = [
+	// Two-phase settlement (swap/exchange arrows)
+	<svg key="swap" viewBox="0 0 16 16" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+		<path d="M2 5h12M10 2l3 3-3 3" />
+		<path d="M14 11H2M6 8l-3 3 3 3" />
+	</svg>,
+	// Policy engine (shield with check)
+	<svg key="shield" viewBox="0 0 16 16" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+		<path d="M8 1.5L2.5 4v4c0 3.5 2.5 5.5 5.5 6.5 3-1 5.5-3 5.5-6.5V4L8 1.5z" />
+		<path d="M5.5 8l2 2 3.5-3.5" />
+	</svg>,
+	// Hash-chained audit (chain links)
+	<svg key="chain" viewBox="0 0 16 16" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+		<rect x="1" y="5" width="5" height="6" rx="1" />
+		<rect x="10" y="5" width="5" height="6" rx="1" />
+		<path d="M6 8h4" />
+	</svg>,
+	// Bring your own keys (key)
+	<svg key="key" viewBox="0 0 16 16" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+		<circle cx="5" cy="8" r="3" />
+		<path d="M8 8h6M12 6v4" />
+	</svg>,
+	// Apache 2.0 licensed (open lock)
+	<svg key="lock" viewBox="0 0 16 16" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+		<rect x="3" y="7" width="10" height="7" rx="1.5" />
+		<path d="M5.5 7V5a2.5 2.5 0 015 0" />
+	</svg>,
+	// Three lines to ship (terminal/code brackets)
+	<svg key="code" viewBox="0 0 16 16" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+		<path d="M4 4L1 8l3 4" />
+		<path d="M12 4l3 4-3 4" />
+		<path d="M10 2L6 14" />
+	</svg>,
+];
+
+const cards: { title: string; subtitle: string; description: string; color: ColorKey }[] = [
 	{
 		title: "Two-phase settlement",
 		subtitle: "PENDING → POST / VOID",
 		description:
 			"Budget held before execution. Settled on success. Voided on failure. Like a credit card hold at a gas pump.",
 		color: "ut",
-		icon: "⇄",
 	},
 	{
 		title: "Policy engine",
@@ -52,7 +86,6 @@ const cards: { title: string; subtitle: string; description: string; color: Colo
 		description:
 			"Spend limits, model allowlists, PII blocking, rate limits. Enforced before the call — not after.",
 		color: "mem",
-		icon: "⊘",
 	},
 	{
 		title: "Hash-chained audit",
@@ -60,7 +93,6 @@ const cards: { title: string; subtitle: string; description: string; color: Colo
 		description:
 			"Every transaction links to its predecessor via SHA-256. Tamper-evident by construction.",
 		color: "tim",
-		icon: "#",
 	},
 	{
 		title: "Bring your own keys",
@@ -68,7 +100,6 @@ const cards: { title: string; subtitle: string; description: string; color: Colo
 		description:
 			"Keep your API keys. Keep your billing. trust() wraps your existing client — nothing changes.",
 		color: "warning",
-		icon: "⚿",
 	},
 	{
 		title: "Apache 2.0 licensed",
@@ -76,7 +107,6 @@ const cards: { title: string; subtitle: string; description: string; color: Colo
 		description:
 			"Run locally with JSON receipts. No account needed. No SaaS dependency. Read every line of code.",
 		color: "danger",
-		icon: "◇",
 	},
 	{
 		title: "Three lines to ship",
@@ -84,7 +114,6 @@ const cards: { title: string; subtitle: string; description: string; color: Colo
 		description:
 			"No config files, no dashboard setup, no SDK initialization ceremony. One function call.",
 		color: "ut",
-		icon: "→",
 	},
 ];
 
@@ -121,8 +150,8 @@ export function Features() {
 									className={`group flex flex-col gap-4 p-6 rounded-xl border border-white/[0.06] ${s.border} ${s.glow} hover:bg-white/[0.02] hover:-translate-y-0.5 transition-all duration-300`}
 								>
 									<div className="flex items-center gap-2.5">
-										<span className={`text-sm font-mono ${s.label} opacity-40`}>
-											{card.icon}
+										<span className={`${s.label} opacity-50`}>
+											{ICONS[i]}
 										</span>
 										<span
 											className={`text-[10px] tracking-[0.12em] uppercase ${s.label} opacity-60`}

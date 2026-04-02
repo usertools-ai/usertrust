@@ -40,7 +40,7 @@ export function BYOK() {
 						{providers.map((p) => (
 							<div
 								key={p.name}
-								className="flex items-center gap-2.5 px-4 py-2.5 rounded-xl border border-white/[0.08] hover:border-white/20 hover:shadow-[0_0_20px_rgba(255,255,255,0.04)] hover:-translate-y-0.5 transition-all duration-300"
+								className="shimmer-border flex items-center gap-2.5 px-4 py-2.5 rounded-xl border border-white/[0.08] hover:border-white/20 hover:shadow-[0_0_20px_rgba(255,255,255,0.04)] hover:-translate-y-0.5 transition-all duration-300"
 								style={{ background: "rgba(255,255,255,0.03)" }}
 							>
 								<span className="text-sm font-medium text-white/80">{p.name}</span>
@@ -49,7 +49,7 @@ export function BYOK() {
 						))}
 
 						<div
-							className="flex items-center gap-2.5 px-4 py-2.5 rounded-xl border border-ut/20 hover:border-ut/40 hover:shadow-[0_0_25px_rgba(52,211,153,0.1)] hover:-translate-y-0.5 transition-all duration-300"
+							className="shimmer-border flex items-center gap-2.5 px-4 py-2.5 rounded-xl border border-ut/20 hover:border-ut/40 hover:shadow-[0_0_25px_rgba(52,211,153,0.1)] hover:-translate-y-0.5 transition-all duration-300"
 							style={{ background: "rgba(52,211,153,0.04)" }}
 						>
 							<span className="text-sm font-medium text-ut/80">+ more</span>
