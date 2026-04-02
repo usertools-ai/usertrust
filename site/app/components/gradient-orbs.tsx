@@ -28,9 +28,14 @@ const orbs = [
 
 export function GradientOrbs() {
 	return (
-		<div className="fixed inset-0 pointer-events-none overflow-hidden" style={{ zIndex: 0 }} aria-hidden="true">
+		<div
+			className="fixed inset-0 pointer-events-none overflow-hidden"
+			style={{ zIndex: 0 }}
+			aria-hidden="true"
+		>
 			{orbs.map((orb, i) => (
 				<motion.div
+					// biome-ignore lint/suspicious/noArrayIndexKey: static constant array
 					key={`orb-${i}`}
 					className="absolute rounded-full"
 					style={{

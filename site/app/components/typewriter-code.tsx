@@ -160,7 +160,9 @@ export function TypewriterCode() {
 					<div className="flex invisible" aria-hidden="true">
 						<div className="shrink-0 py-3 sm:py-5 pl-3 sm:pl-5 pr-2 text-right select-none border-r border-white/[0.04]">
 							{CODE_LINES.map((_, i) => (
-								<div key={`ln-${i}`} className="text-xs sm:text-sm leading-relaxed text-white/15">{i + 1}</div>
+								<div key={`ln-${i}`} className="text-xs sm:text-sm leading-relaxed text-white/15">
+									{i + 1}
+								</div>
 							))}
 						</div>
 						<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-hidden flex-1">
@@ -175,7 +177,9 @@ export function TypewriterCode() {
 					<div className="flex absolute inset-0">
 						<div className="shrink-0 py-3 sm:py-5 pl-3 sm:pl-5 pr-2 text-right select-none border-r border-white/[0.04]">
 							{CODE_LINES.map((_, i) => (
-								<div key={`vln-${i}`} className="text-xs sm:text-sm leading-relaxed text-white/15">{i + 1}</div>
+								<div key={`vln-${i}`} className="text-xs sm:text-sm leading-relaxed text-white/15">
+									{i + 1}
+								</div>
 							))}
 						</div>
 						<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-hidden flex-1">

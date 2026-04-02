@@ -28,7 +28,7 @@ export function Nav() {
 					}
 				}
 			},
-			{ rootMargin: "-40% 0px -55% 0px" }
+			{ rootMargin: "-40% 0px -55% 0px" },
 		);
 		for (const section of sections) observer.observe(section);
 		return () => observer.disconnect();
@@ -59,11 +59,13 @@ export function Nav() {
 	];
 
 	return (
-		<nav className={`fixed top-0 left-0 right-0 z-50 border-b transition-all duration-300 ${
-			scrolled
-				? "bg-brand-bg/60 backdrop-blur-[20px] border-white/[0.10]"
-				: "bg-brand-bg/80 backdrop-blur-[16px] border-white/[0.06]"
-		}`}>
+		<nav
+			className={`fixed top-0 left-0 right-0 z-50 border-b transition-all duration-300 ${
+				scrolled
+					? "bg-brand-bg/60 backdrop-blur-[20px] border-white/[0.10]"
+					: "bg-brand-bg/80 backdrop-blur-[16px] border-white/[0.06]"
+			}`}
+		>
 			<div className="flex items-center justify-between px-6 py-4">
 				<a
 					href="/"

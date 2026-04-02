@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
-import { ScrollProgress } from "./components/scroll-progress";
 import { NoiseOverlay } from "./components/noise-overlay";
+import { ScrollProgress } from "./components/scroll-progress";
 import "./globals.css";
 
 const usertoolsSans = localFont({

@@ -16,7 +16,10 @@ export function BYOK() {
 			<div className="max-w-5xl mx-auto flex flex-col items-center gap-10 text-center">
 				<div className="flex flex-col gap-4 max-w-lg">
 					<ScrollReveal>
-						<h2 className="text-3xl sm:text-4xl font-bold leading-tight" style={{ textShadow: "0 0 40px rgba(52,211,153,0.1)" }}>
+						<h2
+							className="text-3xl sm:text-4xl font-bold leading-tight"
+							style={{ textShadow: "0 0 40px rgba(52,211,153,0.1)" }}
+						>
 							Your keys. Your billing.
 							<br />
 							Our trust layer.
