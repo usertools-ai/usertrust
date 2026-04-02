@@ -59,7 +59,7 @@ export function Hero() {
 						className="font-mono text-6xl sm:text-7xl md:text-8xl font-bold text-ut leading-none tracking-tight"
 						style={{
 							textShadow:
-								"0 0 60px rgba(52,211,153,0.4), 0 0 120px rgba(52,211,153,0.15), 0 0 80px rgba(0,0,0,0.8), 0 4px 40px rgba(0,0,0,0.6)",
+								"0 0 60px rgba(52,211,153,0.5), 0 0 120px rgba(52,211,153,0.2), 0 0 80px rgba(0,0,0,0.8), 0 4px 40px rgba(0,0,0,0.6)",
 						}}
 					>
 						trust()
@@ -82,7 +82,7 @@ export function Hero() {
 					initial={{ opacity: 0, y: 20 }}
 					animate={{ opacity: 1, y: 0 }}
 					transition={{ duration: 0.6, ease: "easeOut", delay: 0.32 }}
-					className="max-w-lg text-base sm:text-lg text-white/60 leading-relaxed"
+					className="max-w-lg text-base sm:text-lg text-white/70 leading-relaxed"
 				>
 					Budget holds, audit trails, and spend limits for every LLM call. Keep your keys, keep your
 					billing. Add trust in one line.
@@ -107,7 +107,7 @@ export function Hero() {
 				>
 					<a
 						href="#code"
-						className="inline-flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] bg-ut text-brand-bg rounded-lg text-sm font-semibold hover:bg-ut/90 active:scale-[0.98] transition-all duration-150"
+						className="inline-flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] bg-ut text-brand-bg rounded-lg text-sm font-semibold hover:bg-ut/90 active:scale-[0.98] transition-all duration-150 shadow-[0_0_20px_rgba(52,211,153,0.3),0_0_60px_rgba(52,211,153,0.1)]"
 					>
 						Start Trusting
 					</a>
@@ -122,6 +122,7 @@ export function Hero() {
 				</motion.div>
 
 				{/* Badges + license — bottom of pane */}
+				<div className="w-16 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent" />
 				<motion.div
 					initial={{ opacity: 0 }}
 					animate={{ opacity: 1 }}
