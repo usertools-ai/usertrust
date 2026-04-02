@@ -205,24 +205,25 @@ export function GovernanceReceipt() {
 						)}
 					</div>
 
-					<pre className="p-3 sm:p-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto">
+					<pre className="p-3 sm:p-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-hidden">
 						<code>
-							{RECEIPT_LINES.slice(0, visibleLines).map((line, i) => {
+							{RECEIPT_LINES.map((line, i) => {
 								const indent = INDENTS[i] ?? 0;
+								const visible = i < visibleLines;
 								return (
 									// biome-ignore lint/suspicious/noArrayIndexKey: static constant array
-									<span key={`line-${i}`}>
+									<span key={`line-${i}`} className={`transition-opacity duration-200 ${visible ? "opacity-100" : "opacity-0"}`}>
 										{i > 0 && <br />}
 										{indent > 0 && (
 											<span className="text-transparent select-none">{"  ".repeat(indent)}</span>
 										)}
 										{renderLine(line)}
+										{!done && i === visibleLines - 1 && (
+											<span className="inline-block w-[2px] h-[1em] bg-ut/70 ml-px animate-pulse align-text-bottom" />
+										)}
 									</span>
 								);
 							})}
-							{!done && (
-								<span className="inline-block w-[2px] h-[1em] bg-ut/70 ml-px animate-pulse align-text-bottom" />
-							)}
 						</code>
 					</pre>
 				</div>

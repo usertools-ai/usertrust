@@ -111,7 +111,7 @@ export function HowItWorks() {
 				</div>
 
 				{/* ── PENDING (wide: blueprint left, annotation right) ── */}
-				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 items-start mb-2">
+				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 items-center mb-2">
 					<AnimatedBlueprint phaseId="pending">
 						<LifecycleBlueprint phaseId="pending" />
 					</AnimatedBlueprint>
@@ -149,7 +149,7 @@ export function HowItWorks() {
 				/>
 
 				{/* ── EXECUTE (wide reversed: annotation left, blueprint right) ── */}
-				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 items-start mb-2">
+				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 items-center mb-2">
 					<div className="order-2 lg:order-1">
 						<ScrollReveal>
 							<div className="flex items-center gap-2.5 mb-1">
@@ -248,7 +248,7 @@ export function HowItWorks() {
 				/>
 
 				{/* ── RECEIPT (wide: blueprint left, annotation right) ── */}
-				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 items-start">
+				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 items-center">
 					<AnimatedBlueprint phaseId="receipt">
 						<LifecycleBlueprint phaseId="receipt" />
 					</AnimatedBlueprint>
