@@ -35,4 +35,4 @@ All contributions are made under the [Apache License 2.0](./LICENSE). By submitt
 
 ## Code of conduct
 
-Be respectful. Be constructive. We are building something together.
+This project follows the [Contributor Covenant v2.1](./CODE_OF_CONDUCT.md). By participating, you agree to uphold these standards.
