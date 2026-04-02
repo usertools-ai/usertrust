@@ -34,6 +34,7 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import { writeReceipt } from "./audit/rotation.js";
+import { type Board, createBoard } from "./board/board.js";
 import { detectClientKind } from "./detect.js";
 import { TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import { estimateCost, estimateInputTokens } from "./ledger/pricing.js";
@@ -53,6 +54,7 @@ import { trustId } from "./shared/ids.js";
 import { TrustConfigSchema } from "./shared/types.js";
 import type {
 	ActionDescriptor,
+	BoardDecision,
 	GovernedActionResult,
 	LLMClientKind,
 	TrustConfig,
@@ -92,6 +94,11 @@ export interface TrustOpts {
 	 * @internal
 	 */
 	_audit?: AuditWriter;
+	/**
+	 * Inject a mock/test board. When set, used instead of real board.
+	 * @internal
+	 */
+	_board?: Board | null;
 }
 
 /** Minimal engine interface for two-phase spend lifecycle. */
@@ -247,6 +254,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		engine = null;
 	}
 
+	// 4b. Board of Directors (heuristic review, no LLM calls)
+	// AUD-470: _board injection only accepted in test environments
+	const board: Board | null =
+		isTestEnv && opts?._board !== undefined
+			? opts._board
+			: config.board.enabled
+				? createBoard(join(vaultPath, VAULT_DIR), { vetoThreshold: config.board.vetoThreshold })
+				: null;
+
 	// 5. Detect client kind
 	const kind: LLMClientKind = detectClientKind(client);
 
@@ -288,6 +304,51 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const estimatedInputTokens = estimateInputTokens(messages);
 			const maxOutputTokens = (params.max_tokens as number) ?? 4096;
 			const estimatedCost = estimateCost(model, estimatedInputTokens, maxOutputTokens, customRates);
+
+			// Board decision — declared before mutex (board is advisory, not financial)
+			let boardDecision: BoardDecision | undefined;
+
+			// c2. Board of Directors review (before budget mutex — heuristic only, no budget side effects)
+			if (board != null) {
+				try {
+					const boardResult = board.reviewNow("llm_call", "local", model, {
+						context: {
+							model,
+							estimatedCost,
+							budgetRemaining: config.budget - budgetSpent - inFlightHoldTotal,
+						},
+					});
+					boardDecision = boardResult.decision;
+
+					if (boardResult.decision === "blocked") {
+						throw new PolicyDeniedError(`Board of Directors blocked: ${boardResult.reasoning}`);
+					}
+
+					// Escalated: log to audit but allow — callers check receipt.boardDecision
+					if (boardResult.decision === "escalated") {
+						await audit
+							.appendEvent({
+								kind: "board_escalated",
+								actor: "local",
+								data: {
+									model,
+									reasoning: boardResult.reasoning,
+									requiresHumanEscalation: boardResult.requiresHumanEscalation,
+								},
+							})
+							.catch(() => {
+								callAuditDegraded = true;
+							});
+					}
+				} catch (boardErr) {
+					// Re-throw PolicyDeniedError (board blocked), swallow I/O failures
+					if (boardErr instanceof PolicyDeniedError) {
+						throw boardErr;
+					}
+					// Board I/O failure — continue without review
+					// (board is advisory, not authoritative for budget)
+				}
+			}
 
 			// AUD-453: Acquire mutex to serialise budget-check + PENDING hold.
 			// This prevents concurrent calls from both passing the budget check
@@ -518,6 +579,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 								// AUD-456: Flag proxy stub receipts
 								...(proxyConn != null ? { proxyStub: true as const } : {}),
+								...(boardDecision !== undefined ? { boardDecision } : {}),
 							};
 							inFlightStreamCount--;
 							return streamReceipt;
@@ -583,6 +645,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 						// AUD-456: Flag proxy stub receipts
 						...(proxyConn != null ? { proxyStub: true as const } : {}),
+						...(boardDecision !== undefined ? { boardDecision } : {}),
 					};
 
 					inFlightStreamCount++;
@@ -746,6 +809,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					// AUD-456: Flag proxy stub receipts
 					...(proxyConn != null ? { proxyStub: true as const } : {}),
+					...(boardDecision !== undefined ? { boardDecision } : {}),
 				};
 
 				return { response, receipt };

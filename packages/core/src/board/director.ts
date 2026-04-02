@@ -147,14 +147,18 @@ function generateReasoning(vote: DirectorVote, concerns: Concern[], request: Boa
 /**
  * A Director reviews a request independently.
  */
-export function reviewDecision(directorId: string, request: BoardRequest): DirectorReview {
+export function reviewDecision(
+	directorId: string,
+	request: BoardRequest,
+	vetoThresholdOverride?: PolicySeverity,
+): DirectorReview {
 	const config = DIRECTOR_CONFIGS[directorId];
 	if (!config) {
 		throw new Error(`Unknown director: ${directorId}`);
 	}
 
 	const concerns = detectForDirector(request, config.focusAreas);
-	const vote = determineVote(concerns, config.vetoThreshold);
+	const vote = determineVote(concerns, vetoThresholdOverride ?? config.vetoThreshold);
 	const reasoning = generateReasoning(vote, concerns, request);
 	const confidence = Math.max(0.5, 1 - concerns.length * 0.15);
 

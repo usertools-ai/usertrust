@@ -23,6 +23,8 @@ export interface TrustReceipt {
 	chunksDelivered?: number;
 	/** Action kind for governed non-LLM actions. Absent for LLM calls (backward compat). */
 	actionKind?: ActionKind;
+	/** Board of Directors decision. Absent when board is disabled. */
+	boardDecision?: BoardDecision;
 }
 
 // ── TrustedResponse — returned by every governed LLM call ──

@@ -18,7 +18,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join } from "node:path";
 import { VAULT_DIR } from "../shared/constants.js";
 import { trustId } from "../shared/ids.js";
-import type { BoardDecision } from "../shared/types.js";
+import type { BoardDecision, PolicySeverity } from "../shared/types.js";
 import type { BoardRequest } from "./concerns.js";
 import type { DirectorReview } from "./director.js";
 import { listDirectors, reviewDecision } from "./director.js";
@@ -45,6 +45,8 @@ interface BoardSession {
 export interface BoardOpts {
 	/** Maximum completed reviews to keep in the session file (default 100) */
 	maxHistory?: number | undefined;
+	/** Override the veto threshold for all Directors (default: per-Director config) */
+	vetoThreshold?: PolicySeverity | undefined;
 }
 
 export interface Board {
@@ -215,6 +217,7 @@ function appendHistory(vaultPath: string, result: BoardReviewResult): void {
  */
 export function createBoard(vaultPath: string, opts?: BoardOpts): Board {
 	const maxHistory = opts?.maxHistory ?? 100;
+	const vetoThreshold = opts?.vetoThreshold;
 
 	return {
 		reviewNow(decisionType, actor, description, options) {
@@ -233,7 +236,7 @@ export function createBoard(vaultPath: string, opts?: BoardOpts): Board {
 			const directors = listDirectors();
 			const reviews: DirectorReview[] = [];
 			for (const director of directors) {
-				reviews.push(reviewDecision(director.id, request));
+				reviews.push(reviewDecision(director.id, request, vetoThreshold));
 			}
 
 			// Determine final decision
