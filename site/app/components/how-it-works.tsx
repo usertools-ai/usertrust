@@ -17,16 +17,25 @@ function FlowConnector({
 }) {
 	return (
 		<div className="flex flex-col items-center py-5 sm:py-8">
-			<div className="w-px h-5 bg-gradient-to-b from-white/[0.06] to-white/[0.12]" />
+			<div className="w-px h-5 bg-gradient-to-b from-white/[0.06] to-ut/20" />
 			<div className="py-2.5 px-4 sm:px-6 text-center">
 				<span className="text-[10px] sm:text-[11px] tracking-[0.12em] text-white/40 block">
 					{label}
 				</span>
 				{sublabel && <span className="text-[9px] text-white/25 block mt-0.5">{sublabel}</span>}
 			</div>
-			<svg width="10" height="16" className="text-white/25" role="img" aria-label="Flow arrow">
-				<path d="M5,0 L5,11 M2,8 L5,14 L8,8" stroke="currentColor" strokeWidth="0.75" fill="none" />
-			</svg>
+			<div className="relative">
+				<svg width="10" height="16" className="text-ut/40" role="img" aria-label="Flow arrow">
+					<path d="M5,0 L5,11 M2,8 L5,14 L8,8" stroke="currentColor" strokeWidth="0.75" fill="none" />
+				</svg>
+				<div
+					className="absolute inset-0 rounded-full"
+					style={{
+						background: "radial-gradient(circle, rgba(52,211,153,0.15) 0%, transparent 70%)",
+						animation: "pulse-glow 3s ease-in-out infinite",
+					}}
+				/>
+			</div>
 		</div>
 	);
 }
@@ -102,7 +111,7 @@ export function HowItWorks() {
 				</div>
 
 				{/* ── PENDING (wide: blueprint left, annotation right) ── */}
-				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 items-start mb-2">
+				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 items-center mb-2">
 					<AnimatedBlueprint phaseId="pending">
 						<LifecycleBlueprint phaseId="pending" />
 					</AnimatedBlueprint>
@@ -140,7 +149,7 @@ export function HowItWorks() {
 				/>
 
 				{/* ── EXECUTE (wide reversed: annotation left, blueprint right) ── */}
-				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 items-start mb-2">
+				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 items-center mb-2">
 					<div className="order-2 lg:order-1">
 						<ScrollReveal>
 							<div className="flex items-center gap-2.5 mb-1">
@@ -228,7 +237,7 @@ export function HowItWorks() {
 
 				{/* POST ↔ VOID badge */}
 				<div className="flex items-center justify-center py-2 mb-2">
-					<span className="text-[9px] tracking-[0.1em] text-white/30 border border-white/[0.08] rounded px-2.5 py-1">
+					<span className="text-[9px] tracking-[0.1em] text-white/30 border border-ut/10 rounded px-2.5 py-1 shadow-[0_0_15px_rgba(52,211,153,0.05)]">
 						POST xor VOID : exactly one outcome per transferId · never both
 					</span>
 				</div>
@@ -239,7 +248,7 @@ export function HowItWorks() {
 				/>
 
 				{/* ── RECEIPT (wide: blueprint left, annotation right) ── */}
-				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 items-start">
+				<div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 items-center">
 					<AnimatedBlueprint phaseId="receipt">
 						<LifecycleBlueprint phaseId="receipt" />
 					</AnimatedBlueprint>
@@ -268,11 +277,11 @@ export function HowItWorks() {
 				{/* ── CONNECTION INDEX ── */}
 				<div className="mt-16 sm:mt-24">
 					<div className="flex items-center gap-4 mb-8">
-						<div className="h-px flex-1 bg-gradient-to-r from-white/[0.04] to-transparent" />
+						<div className="h-px flex-1 bg-gradient-to-r from-ut/8 to-transparent" />
 						<span className="text-[10px] tracking-[0.3em] uppercase text-white/40">
 							Connection Index
 						</span>
-						<div className="h-px flex-1 bg-gradient-to-l from-white/[0.04] to-transparent" />
+						<div className="h-px flex-1 bg-gradient-to-l from-ut/8 to-transparent" />
 					</div>
 
 					<ScrollReveal>
@@ -342,7 +351,7 @@ export function HowItWorks() {
 								))}
 							</div>
 
-							<p className="text-[10px] text-white/20 text-center mt-8">
+							<p className="text-[10px] text-ut/25 text-center mt-8">
 								5 PHASES · 3 STORAGE SYSTEMS · 1 UNIVERSAL JOIN KEY (transferId)
 							</p>
 						</div>

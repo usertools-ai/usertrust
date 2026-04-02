@@ -1,5 +1,7 @@
 "use client";
 
+import { useInView } from "motion/react";
+import { useEffect, useRef, useState } from "react";
 import { ScrollReveal } from "./scroll-reveal";
 
 const C = {
@@ -122,6 +124,28 @@ function renderLine(tokens: JsonToken[]) {
 }
 
 export function GovernanceReceipt() {
+	const codeRef = useRef<HTMLDivElement>(null);
+	const inView = useInView(codeRef, { once: true, amount: 0.3 });
+	const [visibleLines, setVisibleLines] = useState(0);
+
+	useEffect(() => {
+		if (!inView) return;
+		let i = 0;
+		const total = RECEIPT_LINES.length;
+
+		function tick() {
+			i++;
+			setVisibleLines(i);
+			if (i < total) {
+				setTimeout(tick, 40 + Math.random() * 40);
+			}
+		}
+
+		setTimeout(tick, 400);
+	}, [inView]);
+
+	const done = visibleLines >= RECEIPT_LINES.length;
+
 	return (
 		<div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
 			{/* Left: description */}
@@ -162,29 +186,41 @@ export function GovernanceReceipt() {
 			{/* Right: receipt JSON block */}
 			<ScrollReveal delay={0.15} className="lg:order-1">
 				<div
+					ref={codeRef}
 					className="rounded-xl border border-white/[0.08] overflow-hidden"
 					style={{ background: "rgba(255,255,255,0.03)" }}
 				>
 					{/* Window chrome */}
-					<div className="flex items-center gap-1.5 px-4 py-3 border-b border-white/[0.06]">
-						<span className="w-2.5 h-2.5 rounded-full bg-danger/60" />
-						<span className="w-2.5 h-2.5 rounded-full bg-warning/60" />
-						<span className="w-2.5 h-2.5 rounded-full bg-ut/60" />
-						<span className="ml-3 text-xs text-white/25">governance receipt</span>
+					<div className="flex items-center justify-between px-4 py-3 border-b border-white/[0.06]">
+						<div className="flex items-center gap-1.5">
+							<span className="w-2.5 h-2.5 rounded-full bg-danger/60" />
+							<span className="w-2.5 h-2.5 rounded-full bg-warning/60" />
+							<span className="w-2.5 h-2.5 rounded-full bg-ut/60" />
+							<span className="ml-3 text-xs text-white/25">governance receipt</span>
+						</div>
+						{done && (
+							<span className="text-[10px] text-ut/50 font-medium uppercase tracking-wider">
+								settled
+							</span>
+						)}
 					</div>
 
-					<pre className="p-3 sm:p-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto">
+					<pre className="p-3 sm:p-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-hidden">
 						<code>
 							{RECEIPT_LINES.map((line, i) => {
 								const indent = INDENTS[i] ?? 0;
+								const visible = i < visibleLines;
 								return (
 									// biome-ignore lint/suspicious/noArrayIndexKey: static constant array
-									<span key={`line-${i}`}>
+									<span key={`line-${i}`} className={`transition-opacity duration-200 ${visible ? "opacity-100" : "opacity-0"}`}>
 										{i > 0 && <br />}
 										{indent > 0 && (
 											<span className="text-transparent select-none">{"  ".repeat(indent)}</span>
 										)}
 										{renderLine(line)}
+										{!done && i === visibleLines - 1 && (
+											<span className="inline-block w-[2px] h-[1em] bg-ut/70 ml-px animate-pulse align-text-bottom" />
+										)}
 									</span>
 								);
 							})}

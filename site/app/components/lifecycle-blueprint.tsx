@@ -645,9 +645,39 @@ export function LifecycleBlueprint({
 	const Drawing = DRAWINGS[phaseId];
 	if (!Drawing) return null;
 
+	const phaseColors: Record<string, string> = {
+		pending: "rgba(245,158,11,0.9)",
+		execute: "rgba(108,160,192,0.9)",
+		post: "rgba(52,211,153,0.9)",
+		void: "rgba(239,68,68,0.9)",
+		receipt: "rgba(192,132,252,0.9)",
+	};
+
+	const phaseBg: Record<string, string> = {
+		pending: "rgba(245,158,11,0.04)",
+		execute: "rgba(108,160,192,0.04)",
+		post: "rgba(52,211,153,0.04)",
+		void: "rgba(239,68,68,0.04)",
+		receipt: "rgba(192,132,252,0.04)",
+	};
+
+	const phaseBorder: Record<string, string> = {
+		pending: "rgba(245,158,11,0.15)",
+		execute: "rgba(108,160,192,0.15)",
+		post: "rgba(52,211,153,0.15)",
+		void: "rgba(239,68,68,0.15)",
+		receipt: "rgba(192,132,252,0.15)",
+	};
+
 	return (
-		<div className={`relative ${className}`}>
-			<span className="absolute top-3 left-4 text-[10px] tracking-[0.2em] uppercase select-none text-white/20">
+		<div
+			className={`relative rounded-xl p-4 ${className}`}
+			style={{
+				background: phaseBg[phaseId] ?? "transparent",
+				border: `1px solid ${phaseBorder[phaseId] ?? "rgba(255,255,255,0.06)"}`,
+			}}
+		>
+			<span className="absolute top-3 left-4 text-[10px] tracking-[0.2em] uppercase select-none text-white/25">
 				FIG {FIG[phaseId] ?? "0.0"}
 			</span>
 			<svg
@@ -655,7 +685,7 @@ export function LifecycleBlueprint({
 				fill="none"
 				xmlns="http://www.w3.org/2000/svg"
 				className="w-full h-auto"
-				style={{ color: "rgba(255,255,255,0.7)" }}
+				style={{ color: phaseColors[phaseId] ?? "rgba(255,255,255,0.9)" }}
 				role="img"
 				aria-label={`Blueprint diagram for ${phaseId} phase`}
 			>

@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { ScrollReveal } from "./scroll-reveal";
 
 const C = {
@@ -215,30 +216,39 @@ function CodePanel({
 			</div>
 
 			{/* Code lines */}
-			<pre className="p-3 sm:p-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto">
-				<code>
-					{lines.map((line, i) => (
-						// biome-ignore lint/suspicious/noArrayIndexKey: static constant array
-						<span key={`line-${i}`} className="flex">
-							{line.added && !isBefore ? (
-								<span className="w-1 shrink-0 rounded-full bg-ut mr-3" />
-							) : (
-								<span className="w-1 shrink-0 mr-3" />
-							)}
-							<span
-								className={line.added && !isBefore ? "bg-ut/[0.10] -mx-1 px-1 rounded" : undefined}
-							>
-								{line.tokens.length > 0 ? renderTokens(line.tokens) : "\u00A0"}
-							</span>
-						</span>
+			<div className="flex">
+				<div className="shrink-0 py-3 sm:py-5 pl-3 sm:pl-5 pr-2 text-right select-none border-r border-white/[0.04]">
+					{lines.map((_, i) => (
+						<div key={`ln-${i}`} className="text-xs sm:text-sm leading-relaxed text-white/10">{i + 1}</div>
 					))}
-				</code>
-			</pre>
+				</div>
+				<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto flex-1">
+					<code>
+						{lines.map((line, i) => (
+							// biome-ignore lint/suspicious/noArrayIndexKey: static constant array
+							<span key={`line-${i}`} className="flex">
+								{line.added && !isBefore ? (
+									<span className="w-1 shrink-0 rounded-full bg-ut mr-3" />
+								) : (
+									<span className="w-1 shrink-0 mr-3" />
+								)}
+								<span
+									className={line.added && !isBefore ? "bg-ut/[0.10] -mx-1 px-1 rounded" : undefined}
+								>
+									{line.tokens.length > 0 ? renderTokens(line.tokens) : "\u00A0"}
+								</span>
+							</span>
+						))}
+					</code>
+				</pre>
+			</div>
 		</div>
 	);
 }
 
 export function BeforeAfter() {
+	const [activeTab, setActiveTab] = useState<"before" | "after">("after");
+
 	return (
 		<section className="relative py-24 sm:py-32 px-6">
 			<div className="max-w-5xl mx-auto">
@@ -261,9 +271,35 @@ export function BeforeAfter() {
 					</ScrollReveal>
 				</div>
 
+				{/* Mobile tab toggle */}
+				<div className="flex lg:hidden items-center justify-center gap-1 mb-6 p-1 rounded-lg border border-white/[0.08] bg-white/[0.02] max-w-xs mx-auto">
+					<button
+						type="button"
+						onClick={() => setActiveTab("before")}
+						className={`flex-1 px-4 py-2 rounded-md text-xs font-semibold uppercase tracking-wider transition-all duration-200 ${
+							activeTab === "before"
+								? "bg-white/[0.08] text-white"
+								: "text-white/40 hover:text-white/60"
+						}`}
+					>
+						Before
+					</button>
+					<button
+						type="button"
+						onClick={() => setActiveTab("after")}
+						className={`flex-1 px-4 py-2 rounded-md text-xs font-semibold uppercase tracking-wider transition-all duration-200 ${
+							activeTab === "after"
+								? "bg-ut/20 text-ut"
+								: "text-white/40 hover:text-white/60"
+						}`}
+					>
+						After
+					</button>
+				</div>
+
 				{/* Code panels */}
 				<div className="grid lg:grid-cols-2 gap-6 lg:gap-8">
-					<ScrollReveal delay={0.15}>
+					<ScrollReveal delay={0.15} className={activeTab === "after" ? "hidden lg:block" : ""}>
 						<CodePanel
 							lines={BEFORE_LINES}
 							label="Without usertrust"
@@ -271,7 +307,7 @@ export function BeforeAfter() {
 							variant="before"
 						/>
 					</ScrollReveal>
-					<ScrollReveal delay={0.25}>
+					<ScrollReveal delay={0.25} className={activeTab === "before" ? "hidden lg:block" : ""}>
 						<CodePanel
 							lines={AFTER_LINES}
 							label="With usertrust"

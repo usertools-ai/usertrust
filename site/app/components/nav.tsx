@@ -5,8 +5,34 @@ import { GitHubIcon } from "./github-icon";
 
 export function Nav() {
 	const [open, setOpen] = useState(false);
+	const [scrolled, setScrolled] = useState(false);
+	const [activeSection, setActiveSection] = useState("");
 	const menuRef = useRef<HTMLDivElement>(null);
 	const buttonRef = useRef<HTMLButtonElement>(null);
+
+	// Scroll detection
+	useEffect(() => {
+		const onScroll = () => setScrolled(window.scrollY > 20);
+		window.addEventListener("scroll", onScroll, { passive: true });
+		return () => window.removeEventListener("scroll", onScroll);
+	}, []);
+
+	// Active section tracking
+	useEffect(() => {
+		const sections = document.querySelectorAll("section[id]");
+		const observer = new IntersectionObserver(
+			(entries) => {
+				for (const entry of entries) {
+					if (entry.isIntersecting) {
+						setActiveSection(`#${entry.target.id}`);
+					}
+				}
+			},
+			{ rootMargin: "-40% 0px -55% 0px" }
+		);
+		for (const section of sections) observer.observe(section);
+		return () => observer.disconnect();
+	}, []);
 
 	// Close on outside click
 	useEffect(() => {
@@ -33,11 +59,19 @@ export function Nav() {
 	];
 
 	return (
-		<nav className="fixed top-0 left-0 right-0 z-50 bg-brand-bg/80 backdrop-blur-[16px] border-b border-white/[0.06]">
+		<nav className={`fixed top-0 left-0 right-0 z-50 border-b transition-all duration-300 ${
+			scrolled
+				? "bg-brand-bg/60 backdrop-blur-[20px] border-white/[0.10]"
+				: "bg-brand-bg/80 backdrop-blur-[16px] border-white/[0.06]"
+		}`}>
 			<div className="flex items-center justify-between px-6 py-4">
 				<a
 					href="/"
-					className="inline-flex items-center px-4 py-2.5 border border-white/20 rounded-full text-sm font-medium tracking-tight hover:border-ut/50 hover:text-ut transition-colors duration-200"
+					className={`inline-flex items-center px-4 py-2.5 border rounded-full text-sm font-medium tracking-tight transition-all duration-300 ${
+						scrolled
+							? "border-ut/30 text-ut shadow-[0_0_20px_rgba(52,211,153,0.1)]"
+							: "border-white/20 hover:border-ut/50 hover:text-ut animate-[pulse-glow_4s_ease-in-out_infinite]"
+					}`}
 				>
 					usertrust
 				</a>
@@ -48,9 +82,14 @@ export function Nav() {
 							<a
 								key={link.href}
 								href={link.href}
-								className="hover:text-white transition-colors duration-200"
+								className={`relative hover:text-white transition-colors duration-200 ${
+									activeSection === link.href ? "text-ut" : ""
+								}`}
 							>
 								{link.label}
+								{activeSection === link.href && (
+									<span className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full bg-ut" />
+								)}
 							</a>
 						))}
 					</div>
@@ -151,7 +190,9 @@ export function Nav() {
 								key={link.href}
 								href={link.href}
 								onClick={() => setOpen(false)}
-								className="block px-3 py-2.5 text-sm text-white/60 font-medium rounded-lg hover:text-white hover:bg-white/[0.06] transition-colors duration-200"
+								className={`block px-3 py-2.5 text-sm font-medium rounded-lg hover:text-white hover:bg-white/[0.06] transition-colors duration-200 ${
+									activeSection === link.href ? "text-ut" : "text-white/60"
+								}`}
 							>
 								{link.label}
 							</a>

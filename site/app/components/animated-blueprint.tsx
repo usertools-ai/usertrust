@@ -42,6 +42,9 @@ export function AnimatedBlueprint({ phaseId, className, children }: AnimatedBlue
 				.bp-visible svg text {
 					opacity: inherit;
 				}
+				.bp-visible {
+					filter: drop-shadow(0 0 30px rgba(52,211,153,0.12)) drop-shadow(0 0 60px rgba(52,211,153,0.06));
+				}
 			`}</style>
 			<div
 				ref={ref}

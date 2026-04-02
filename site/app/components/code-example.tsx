@@ -29,6 +29,23 @@ export function CodeExample() {
 							</p>
 						</ScrollReveal>
 
+						<ScrollReveal delay={0.25}>
+							<div className="flex flex-wrap items-center gap-2 mt-1">
+								{["Anthropic", "OpenAI", "Google", "xAI"].map((p, i) => (
+									<span
+										key={p}
+										className={`text-[10px] uppercase tracking-wider px-2.5 py-1 rounded-md border transition-all duration-200 ${
+											i === 0
+												? "border-ut/30 text-ut bg-ut/[0.06]"
+												: "border-white/[0.06] text-white/30 hover:border-white/15 hover:text-white/50"
+										}`}
+									>
+										{p}
+									</span>
+								))}
+							</div>
+						</ScrollReveal>
+
 						{/* Micro-features list */}
 						<ScrollReveal delay={0.3}>
 							<ul className="flex flex-col gap-3 mt-2">
