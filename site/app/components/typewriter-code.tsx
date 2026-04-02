@@ -160,13 +160,22 @@ export function TypewriterCode() {
 					<div className="flex invisible" aria-hidden="true">
 						<div className="shrink-0 py-3 sm:py-5 pl-3 sm:pl-5 pr-2 text-right select-none border-r border-white/[0.04]">
 							{CODE_LINES.map((_, i) => (
-								<div key={`ln-${i}`} className="text-xs sm:text-sm leading-relaxed text-white/15">{i + 1}</div>
+								// biome-ignore lint/suspicious/noArrayIndexKey: static line numbers
+								<div key={`ln-${i}`} className="text-xs sm:text-sm leading-relaxed text-white/15">
+									{i + 1}
+								</div>
 							))}
 						</div>
 						<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-hidden flex-1">
 							<code>
 								{allChars.current.map((c, i) =>
-									c.char === "\n" ? <br key={`h${i}`} /> : <span key={`h${i}`}>{c.char}</span>,
+									c.char === "\n" ? (
+										// biome-ignore lint/suspicious/noArrayIndexKey: character-level rendering
+										<br key={`h${i}`} />
+									) : (
+										// biome-ignore lint/suspicious/noArrayIndexKey: character-level rendering
+										<span key={`h${i}`}>{c.char}</span>
+									),
 								)}
 							</code>
 						</pre>
@@ -175,15 +184,20 @@ export function TypewriterCode() {
 					<div className="flex absolute inset-0">
 						<div className="shrink-0 py-3 sm:py-5 pl-3 sm:pl-5 pr-2 text-right select-none border-r border-white/[0.04]">
 							{CODE_LINES.map((_, i) => (
-								<div key={`vln-${i}`} className="text-xs sm:text-sm leading-relaxed text-white/15">{i + 1}</div>
+								// biome-ignore lint/suspicious/noArrayIndexKey: static line numbers
+								<div key={`vln-${i}`} className="text-xs sm:text-sm leading-relaxed text-white/15">
+									{i + 1}
+								</div>
 							))}
 						</div>
 						<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-hidden flex-1">
 							<code>
 								{rendered.map((c, i) =>
 									c.char === "\n" ? (
+										// biome-ignore lint/suspicious/noArrayIndexKey: character-level rendering
 										<br key={`t${i}`} />
 									) : (
+										// biome-ignore lint/suspicious/noArrayIndexKey: character-level rendering
 										<span key={`t${i}`} className={c.color}>
 											{c.char}
 										</span>

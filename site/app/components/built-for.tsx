@@ -27,9 +27,7 @@ export function BuiltFor() {
 			<div className="max-w-5xl mx-auto">
 				<div className="text-center mb-12">
 					<ScrollReveal>
-						<p className="text-xs font-medium text-ut uppercase tracking-widest mb-4">
-							Built for
-						</p>
+						<p className="text-xs font-medium text-ut uppercase tracking-widest mb-4">Built for</p>
 					</ScrollReveal>
 					<ScrollReveal delay={0.1}>
 						<h2 className="text-3xl sm:text-4xl font-bold leading-tight">
@@ -42,12 +40,8 @@ export function BuiltFor() {
 					{useCases.map((uc, i) => (
 						<ScrollReveal key={uc.role} delay={i * 0.1}>
 							<div className="group flex flex-col gap-2 p-5 rounded-xl border border-white/[0.06] hover:border-ut/20 hover:bg-white/[0.02] hover:shadow-[0_0_25px_rgba(52,211,153,0.06)] hover:-translate-y-0.5 transition-all duration-300 h-full">
-								<span className="text-sm font-semibold text-white">
-									{uc.role}
-								</span>
-								<span className="text-xs text-white/40 leading-relaxed">
-									{uc.detail}
-								</span>
+								<span className="text-sm font-semibold text-white">{uc.role}</span>
+								<span className="text-xs text-white/40 leading-relaxed">{uc.detail}</span>
 							</div>
 						</ScrollReveal>
 					))}

@@ -16,25 +16,79 @@ export function Footer() {
 
 					{/* Product */}
 					<div className="flex flex-col gap-2.5">
-						<span className="text-xs font-medium text-white/50 uppercase tracking-wider">Product</span>
-						<a href="#features" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">Features</a>
-						<a href="#how" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">How it works</a>
-						<a href="#code" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">Quick start</a>
-						<a href="/docs" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">Docs</a>
+						<span className="text-xs font-medium text-white/50 uppercase tracking-wider">
+							Product
+						</span>
+						<a
+							href="#features"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+						>
+							Features
+						</a>
+						<a
+							href="#how"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+						>
+							How it works
+						</a>
+						<a
+							href="#code"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+						>
+							Quick start
+						</a>
+						<a
+							href="/docs"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+						>
+							Docs
+						</a>
 					</div>
 
 					{/* Resources */}
 					<div className="flex flex-col gap-2.5">
-						<span className="text-xs font-medium text-white/50 uppercase tracking-wider">Resources</span>
-						<a href="https://github.com/usertools-ai/usertrust" target="_blank" rel="noopener noreferrer" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">GitHub</a>
-						<a href="https://www.npmjs.com/package/usertrust" target="_blank" rel="noopener noreferrer" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">npm</a>
-						<a href="https://github.com/usertools-ai/usertrust/blob/master/LICENSE" target="_blank" rel="noopener noreferrer" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">License</a>
+						<span className="text-xs font-medium text-white/50 uppercase tracking-wider">
+							Resources
+						</span>
+						<a
+							href="https://github.com/usertools-ai/usertrust"
+							target="_blank"
+							rel="noopener noreferrer"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+						>
+							GitHub
+						</a>
+						<a
+							href="https://www.npmjs.com/package/usertrust"
+							target="_blank"
+							rel="noopener noreferrer"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+						>
+							npm
+						</a>
+						<a
+							href="https://github.com/usertools-ai/usertrust/blob/master/LICENSE"
+							target="_blank"
+							rel="noopener noreferrer"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+						>
+							License
+						</a>
 					</div>
 
 					{/* Company */}
 					<div className="flex flex-col gap-2.5">
-						<span className="text-xs font-medium text-white/50 uppercase tracking-wider">Company</span>
-						<a href="https://usertools.ai" target="_blank" rel="noopener noreferrer" className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200">Usertools</a>
+						<span className="text-xs font-medium text-white/50 uppercase tracking-wider">
+							Company
+						</span>
+						<a
+							href="https://usertools.ai"
+							target="_blank"
+							rel="noopener noreferrer"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+						>
+							Usertools
+						</a>
 					</div>
 				</div>
 
@@ -42,17 +96,23 @@ export function Footer() {
 				<div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 pt-6 border-t border-white/[0.04]">
 					<p className="text-xs text-white/20">
 						usertrust · part of{" "}
-						<a href="https://usertools.ai" target="_blank" rel="noopener noreferrer" className="text-white/30 hover:text-ut transition-colors duration-200">
+						<a
+							href="https://usertools.ai"
+							target="_blank"
+							rel="noopener noreferrer"
+							className="text-white/30 hover:text-ut transition-colors duration-200"
+						>
 							usertools.ai
 						</a>
 					</p>
 					<div className="flex items-center gap-4">
-						<a
-							href="#"
+						<button
+							type="button"
+							onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
 							className="text-xs text-white/20 hover:text-ut transition-colors duration-200"
 						>
 							Back to top ↑
-						</a>
+						</button>
 						<a
 							href="https://github.com/usertools-ai/usertrust"
 							target="_blank"

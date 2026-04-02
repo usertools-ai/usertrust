@@ -219,7 +219,10 @@ function CodePanel({
 			<div className="flex">
 				<div className="shrink-0 py-3 sm:py-5 pl-3 sm:pl-5 pr-2 text-right select-none border-r border-white/[0.04]">
 					{lines.map((_, i) => (
-						<div key={`ln-${i}`} className="text-xs sm:text-sm leading-relaxed text-white/10">{i + 1}</div>
+						// biome-ignore lint/suspicious/noArrayIndexKey: static line numbers
+						<div key={`ln-${i}`} className="text-xs sm:text-sm leading-relaxed text-white/10">
+							{i + 1}
+						</div>
 					))}
 				</div>
 				<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto flex-1">
@@ -233,7 +236,9 @@ function CodePanel({
 									<span className="w-1 shrink-0 mr-3" />
 								)}
 								<span
-									className={line.added && !isBefore ? "bg-ut/[0.10] -mx-1 px-1 rounded" : undefined}
+									className={
+										line.added && !isBefore ? "bg-ut/[0.10] -mx-1 px-1 rounded" : undefined
+									}
 								>
 									{line.tokens.length > 0 ? renderTokens(line.tokens) : "\u00A0"}
 								</span>
@@ -288,9 +293,7 @@ export function BeforeAfter() {
 						type="button"
 						onClick={() => setActiveTab("after")}
 						className={`flex-1 px-4 py-2 rounded-md text-xs font-semibold uppercase tracking-wider transition-all duration-200 ${
-							activeTab === "after"
-								? "bg-ut/20 text-ut"
-								: "text-white/40 hover:text-white/60"
+							activeTab === "after" ? "bg-ut/20 text-ut" : "text-white/40 hover:text-white/60"
 						}`}
 					>
 						After

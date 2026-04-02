@@ -11,7 +11,12 @@ export function CTA() {
 					<div className="flex flex-col gap-4">
 						<div className="w-16 h-px bg-gradient-to-r from-transparent via-ut/20 to-transparent mx-auto" />
 						<ScrollReveal>
-							<h2 className="text-4xl sm:text-5xl font-bold leading-tight" style={{ textShadow: "0 0 60px rgba(52,211,153,0.12)" }}>Try it in 30 seconds</h2>
+							<h2
+								className="text-4xl sm:text-5xl font-bold leading-tight"
+								style={{ textShadow: "0 0 60px rgba(52,211,153,0.12)" }}
+							>
+								Try it in 30 seconds
+							</h2>
 						</ScrollReveal>
 						<ScrollReveal delay={0.1}>
 							<p className="text-base text-white/60 leading-relaxed">

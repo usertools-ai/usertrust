@@ -18,7 +18,7 @@ function AnimatedNumber({ target, suffix = "" }: { target: number; suffix?: stri
 			const elapsed = now - startTime;
 			const progress = Math.min(elapsed / duration, 1);
 			// Ease out cubic
-			const eased = 1 - Math.pow(1 - progress, 3);
+			const eased = 1 - (1 - progress) ** 3;
 			start = Math.round(eased * target);
 			setValue(start);
 			if (progress < 1) requestAnimationFrame(tick);
@@ -29,7 +29,8 @@ function AnimatedNumber({ target, suffix = "" }: { target: number; suffix?: stri
 
 	return (
 		<span ref={ref} className="font-mono text-2xl sm:text-3xl font-bold text-white tabular-nums">
-			{value.toLocaleString()}{suffix}
+			{value.toLocaleString()}
+			{suffix}
 		</span>
 	);
 }
@@ -50,7 +51,10 @@ export function SocialProof() {
 						<div key={stat.label} className="flex flex-col items-center gap-1.5 text-center">
 							{stat.display !== undefined ? (
 								<span className="relative inline-flex items-center justify-center">
-									<span className="absolute inset-0 rounded-full glow-ring" style={{ margin: "-8px" }} />
+									<span
+										className="absolute inset-0 rounded-full glow-ring"
+										style={{ margin: "-8px" }}
+									/>
 									<span className="font-mono text-2xl sm:text-3xl font-bold text-ut tabular-nums">
 										{stat.display}
 									</span>
@@ -58,9 +62,7 @@ export function SocialProof() {
 							) : (
 								<AnimatedNumber target={stat.value} suffix={stat.suffix} />
 							)}
-							<span className="text-xs text-white/40 uppercase tracking-wider">
-								{stat.label}
-							</span>
+							<span className="text-xs text-white/40 uppercase tracking-wider">{stat.label}</span>
 						</div>
 					))}
 				</div>

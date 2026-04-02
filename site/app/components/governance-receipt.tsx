@@ -211,8 +211,11 @@ export function GovernanceReceipt() {
 								const indent = INDENTS[i] ?? 0;
 								const visible = i < visibleLines;
 								return (
-									// biome-ignore lint/suspicious/noArrayIndexKey: static constant array
-									<span key={`line-${i}`} className={`transition-opacity duration-200 ${visible ? "opacity-100" : "opacity-0"}`}>
+									<span
+										// biome-ignore lint/suspicious/noArrayIndexKey: static constant array
+										key={`line-${i}`}
+										className={`transition-opacity duration-200 ${visible ? "opacity-100" : "opacity-0"}`}
+									>
 										{i > 0 && <br />}
 										{indent > 0 && (
 											<span className="text-transparent select-none">{"  ".repeat(indent)}</span>

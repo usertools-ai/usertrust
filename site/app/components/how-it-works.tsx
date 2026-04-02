@@ -26,7 +26,12 @@ function FlowConnector({
 			</div>
 			<div className="relative">
 				<svg width="10" height="16" className="text-ut/40" role="img" aria-label="Flow arrow">
-					<path d="M5,0 L5,11 M2,8 L5,14 L8,8" stroke="currentColor" strokeWidth="0.75" fill="none" />
+					<path
+						d="M5,0 L5,11 M2,8 L5,14 L8,8"
+						stroke="currentColor"
+						strokeWidth="0.75"
+						fill="none"
+					/>
 				</svg>
 				<div
 					className="absolute inset-0 rounded-full"
