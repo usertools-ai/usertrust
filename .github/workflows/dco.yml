@@ -1,0 +1,30 @@
+name: DCO
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check DCO sign-off
+        uses: gsactions/commit-message-checker@v2
+        with:
+          pattern: 'Signed-off-by: .+ <.+>'
+          error: |
+            All commits must include a DCO sign-off line:
+              Signed-off-by: Your Name <your@email.com>
+
+            Add it with: git commit -s --amend
+            See CONTRIBUTING.md for details.
+          excludeTitle: true
+          excludeDescription: true
+          checkAllCommitMessages: true
+          accessToken: ${{ secrets.GITHUB_TOKEN }}
