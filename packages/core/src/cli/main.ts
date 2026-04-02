@@ -11,6 +11,8 @@ const COMMANDS = [
 	"tb",
 	"pricing",
 	"completions",
+	"secret",
+	"skill",
 ] as const;
 
 const argv = process.argv.slice(2);
@@ -90,6 +92,12 @@ switch (command) {
 	case "completions":
 		await import("./completions.js").then((m) => m.run(positional[1], { json: jsonFlag }));
 		break;
+	case "secret":
+		await import("./secret.js").then((m) => m.run(undefined, { json: jsonFlag }));
+		break;
+	case "skill":
+		await import("./skill.js").then((m) => m.run(undefined, { json: jsonFlag }));
+		break;
 	default: {
 		if (command && !command.startsWith("-")) {
 			const suggestion = suggestCommand(command);
@@ -110,6 +118,8 @@ Commands:
   tb            Manage TigerBeetle process
   pricing       Show current rate configuration
   completions   Output shell completion scripts
+  secret        Manage vault credentials
+  skill         Verify skill manifests
 
 Options:
   --json     Output machine-readable JSON`);
