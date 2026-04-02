@@ -106,13 +106,12 @@ export function Footer() {
 						</a>
 					</p>
 					<div className="flex items-center gap-4">
-						<button
-							type="button"
-							onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+						<a
+							href="#top"
 							className="text-xs text-white/20 hover:text-ut transition-colors duration-200"
 						>
 							Back to top ↑
-						</button>
+						</a>
 						<a
 							href="https://github.com/usertools-ai/usertrust"
 							target="_blank"
