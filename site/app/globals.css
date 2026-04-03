@@ -103,6 +103,17 @@ html {
 	color: white;
 }
 
+/* Scan line animation — before panel */
+@keyframes scan {
+	0%,
+	100% {
+		top: 0;
+	}
+	50% {
+		top: 100%;
+	}
+}
+
 /* Pulse glow animation */
 @keyframes pulse-glow {
 	0%,
