@@ -24,7 +24,7 @@ const jetbrainsMono = localFont({
 });
 
 export const metadata: Metadata = {
-	title: "usertrust — Financial governance in 30 seconds",
+	title: "usertrust — AI financial governance in 30 seconds",
 	description:
 		"One-line SDK wrapper that turns every AI agent LLM call into an auditable, budget-enforced financial transaction. Open source.",
 	keywords: [
@@ -43,20 +43,20 @@ export const metadata: Metadata = {
 	metadataBase: new URL("https://usertrust.ai"),
 	alternates: { canonical: "/" },
 	openGraph: {
-		title: "usertrust — Financial governance in 30 seconds",
+		title: "usertrust — AI financial governance in 30 seconds",
 		description:
 			"One-line SDK wrapper that turns every AI agent LLM call into an auditable, budget-enforced financial transaction. Open source.",
 		url: "https://usertrust.ai",
 		siteName: "UserTrust",
-		images: [{ url: "/og.png" }],
+		images: [{ url: "/og", width: 1200, height: 630, type: "image/png" }],
 		type: "website",
 	},
 	twitter: {
 		card: "summary_large_image",
-		title: "usertrust — Financial governance in 30 seconds",
+		title: "usertrust — AI financial governance in 30 seconds",
 		description:
 			"One-line SDK wrapper that turns every AI agent LLM call into an auditable, budget-enforced financial transaction. Open source.",
-		images: ["/og.png"],
+		images: [{ url: "/og", width: 1200, height: 630 }],
 	},
 	icons: { icon: "/favicon.svg" },
 };
@@ -70,7 +70,8 @@ const jsonLd = {
 	offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
 	author: { "@type": "Organization", name: "Usertools Inc" },
 	url: "https://usertrust.ai",
-	description: "Budget holds, audit trails, and spend limits for every LLM call.",
+	description:
+		"AI financial governance in 30 seconds. Budget holds, audit trails, and spend limits for every LLM call.",
 };
 
 export default function RootLayout({
