@@ -1,9 +1,17 @@
+/**
+ * headless-proxy.test.ts
+ *
+ * AUD-456: Proxy mode has been removed from the public API.
+ * These tests verify that attempting to use proxy mode throws
+ * a clear error, and that the headless governor works without proxy.
+ */
 import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AuditWriter } from "../../src/audit/chain.js";
+import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
+import type { AuditEvent } from "../../src/shared/types.js";
 
 // Mock tigerbeetle-node
 vi.mock("tigerbeetle-node", () => ({
@@ -26,52 +34,42 @@ vi.mock("tigerbeetle-node", () => ({
 	amount_max: 0xffffffffffffffffffffffffffffffffn,
 }));
 
-// Mock proxy to create a failing proxy for settle/spend
-let proxySettleShouldFail = false;
-let proxySpendShouldFail = false;
-vi.mock("../../src/proxy.js", () => ({
-	connectProxy: vi.fn((_url: string, _key?: string) => ({
-		url: _url,
-		key: _key,
-		spend: vi.fn(async (params: { estimatedCost: number }) => {
-			if (proxySpendShouldFail) {
-				throw new Error("Proxy spend failed");
-			}
-			return {
-				transferId: `proxy_${Date.now().toString(36)}`,
-				estimatedCost: params.estimatedCost,
-			};
-		}),
-		settle: vi.fn(async () => {
-			if (proxySettleShouldFail) {
-				throw new Error("Proxy settle failed");
-			}
-		}),
-		void: vi.fn(async () => {}),
-		destroy: vi.fn(),
-	})),
-}));
-
 function makeTmpVault(): string {
 	const dir = join(tmpdir(), `headless-proxy-test-${randomUUID()}`);
 	mkdirSync(dir, { recursive: true });
 	return dir;
 }
 
-describe("headless governor — proxy failure branches", () => {
+function makeMockAudit(): AuditWriter {
+	return {
+		appendEvent: vi.fn(
+			async (input: AppendEventInput): Promise<AuditEvent> => ({
+				id: randomUUID(),
+				timestamp: new Date().toISOString(),
+				previousHash: "0".repeat(64),
+				hash: "a".repeat(64),
+				kind: input.kind,
+				actor: input.actor,
+				data: input.data,
+			}),
+		),
+		getWriteFailures: vi.fn(() => 0),
+		isDegraded: vi.fn(() => false),
+		flush: vi.fn(async () => {}),
+		release: vi.fn(),
+	};
+}
+
+describe("headless governor — AUD-456 proxy mode removed", () => {
 	let vaultBase: string;
 
 	beforeEach(() => {
 		vaultBase = makeTmpVault();
 		process.env.USERTRUST_TEST = "1";
-		proxySettleShouldFail = false;
-		proxySpendShouldFail = false;
 	});
 
 	afterEach(() => {
 		process.env.USERTRUST_TEST = "";
-		proxySettleShouldFail = false;
-		proxySpendShouldFail = false;
 		try {
 			rmSync(vaultBase, { recursive: true, force: true });
 		} catch {
@@ -79,14 +77,52 @@ describe("headless governor — proxy failure branches", () => {
 		}
 	});
 
-	it("settle sets settled=false when proxy settle throws", async () => {
+	it("createGovernor throws when proxy option is provided", async () => {
+		const { createGovernor } = await import("../../src/headless.js");
+
+		await expect(
+			createGovernor({
+				budget: 100_000,
+				vaultBase,
+				proxy: "https://proxy.example.com",
+				key: "test-key",
+			}),
+		).rejects.toThrow("proxy mode is not yet implemented");
+	});
+
+	it("createGovernor throws with AUD-456 reference in error message", async () => {
+		const { createGovernor } = await import("../../src/headless.js");
+
+		await expect(
+			createGovernor({
+				budget: 100_000,
+				vaultBase,
+				proxy: "https://proxy.example.com",
+			}),
+		).rejects.toThrow("AUD-456");
+	});
+
+	it("error message suggests dryRun as alternative", async () => {
+		const { createGovernor } = await import("../../src/headless.js");
+
+		await expect(
+			createGovernor({
+				budget: 100_000,
+				vaultBase,
+				proxy: "https://proxy.example.com",
+			}),
+		).rejects.toThrow("dryRun");
+	});
+
+	it("headless governor works normally without proxy", async () => {
+		const mockAudit = makeMockAudit();
 		const { createGovernor } = await import("../../src/headless.js");
 
 		const gov = await createGovernor({
 			budget: 100_000,
+			dryRun: true,
 			vaultBase,
-			proxy: "https://proxy.example.com",
-			key: "test-key",
+			_audit: mockAudit,
 		});
 
 		const auth = await gov.authorize({
@@ -95,66 +131,16 @@ describe("headless governor — proxy failure branches", () => {
 			maxOutputTokens: 500,
 		});
 
-		// Enable proxy settle failure
-		proxySettleShouldFail = true;
+		expect(auth.transferId).toMatch(/^tx_/);
+		expect(auth.estimatedCost).toBeGreaterThan(0);
 
 		const receipt = await gov.settle(auth, {
 			inputTokens: 80,
 			outputTokens: 200,
 		});
 
-		expect(receipt.settled).toBe(false);
-
-		await gov.destroy();
-	});
-
-	it("settle sets auditDegraded when proxy settle + audit both fail", async () => {
-		const degradedAudit: AuditWriter = {
-			appendEvent: vi.fn(async () => {
-				throw new Error("Audit write failed");
-			}),
-			getWriteFailures: () => 0,
-			isDegraded: () => false,
-			flush: async () => {},
-			release: () => {},
-		};
-
-		const { createGovernor } = await import("../../src/headless.js");
-
-		const gov = await createGovernor({
-			budget: 100_000,
-			vaultBase,
-			proxy: "https://proxy.example.com",
-			_audit: degradedAudit,
-		});
-
-		const auth = await gov.authorize({ model: "gpt-4o" });
-
-		// Enable proxy settle failure — triggers audit write which also fails
-		proxySettleShouldFail = true;
-
-		const receipt = await gov.settle(auth);
-
-		expect(receipt.settled).toBe(false);
-		expect(receipt.auditDegraded).toBe(true);
-
-		await gov.destroy();
-	});
-
-	it("authorize throws LedgerUnavailableError when proxy.spend fails", async () => {
-		const { createGovernor } = await import("../../src/headless.js");
-
-		const gov = await createGovernor({
-			budget: 100_000,
-			vaultBase,
-			proxy: "https://proxy.example.com",
-		});
-
-		proxySpendShouldFail = true;
-
-		await expect(gov.authorize({ model: "claude-sonnet-4-6" })).rejects.toThrow(
-			"Ledger unavailable",
-		);
+		expect(receipt.settled).toBe(true);
+		expect(receipt.cost).toBeGreaterThan(0);
 
 		await gov.destroy();
 	});
