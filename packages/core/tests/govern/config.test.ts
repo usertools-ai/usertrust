@@ -209,6 +209,63 @@ describe("loadConfig()", () => {
 
 		await expect(loadConfig()).rejects.toThrow();
 	});
+
+	it("loads .env file and sets unset env vars", async () => {
+		const vaultDir = join(tmpDir, VAULT_DIR);
+		mkdirSync(vaultDir, { recursive: true });
+		writeFileSync(
+			join(vaultDir, ".env"),
+			[
+				"# Comment line",
+				"",
+				"TEST_TRUST_ENV_A=hello",
+				'TEST_TRUST_ENV_B="quoted-value"',
+				"TEST_TRUST_ENV_C='single-quoted'",
+				"INVALID LINE WITHOUT EQUALS",
+				"123BAD=invalid-key-start",
+				"TEST_TRUST_ENV_D=value-with=equals",
+			].join("\n"),
+		);
+		writeFileSync(join(vaultDir, "usertrust.config.json"), JSON.stringify({ budget: 1000 }));
+
+		// Pre-set one var to verify it's not overwritten
+		process.env.TEST_TRUST_ENV_A = "original";
+
+		try {
+			await loadConfig();
+
+			// Already-set var preserved
+			expect(process.env.TEST_TRUST_ENV_A).toBe("original");
+			// New vars set
+			expect(process.env.TEST_TRUST_ENV_B).toBe("quoted-value");
+			expect(process.env.TEST_TRUST_ENV_C).toBe("single-quoted");
+			// Value with embedded equals
+			expect(process.env.TEST_TRUST_ENV_D).toBe("value-with=equals");
+		} finally {
+			process.env.TEST_TRUST_ENV_A = undefined;
+			process.env.TEST_TRUST_ENV_B = undefined;
+			process.env.TEST_TRUST_ENV_C = undefined;
+			process.env.TEST_TRUST_ENV_D = undefined;
+		}
+	});
+
+	it("works with custom vaultBase parameter", async () => {
+		const customBase = makeTmpDir();
+		const vaultDir = join(customBase, VAULT_DIR);
+		mkdirSync(vaultDir, { recursive: true });
+		writeFileSync(
+			join(vaultDir, "usertrust.config.json"),
+			JSON.stringify({ budget: 42_000, tier: "pro" }),
+		);
+
+		try {
+			const config = await loadConfig(undefined, customBase);
+			expect(config.budget).toBe(42_000);
+			expect(config.tier).toBe("pro");
+		} finally {
+			rmSync(customBase, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("defineConfig()", () => {

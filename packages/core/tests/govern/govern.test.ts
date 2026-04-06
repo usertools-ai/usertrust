@@ -542,22 +542,15 @@ describe("trust()", () => {
 			await governed.destroy();
 		});
 
-		it("is populated when proxy is set", async () => {
-			const governed = await trust(makeAnthropicMock(), {
-				dryRun: true,
-				budget: 50_000,
-				vaultBase: tmpVault,
-				proxy: "https://proxy.usertools.ai",
-			});
-
-			const result = await governed.messages.create({
-				model: "claude-sonnet-4-6",
-				messages: [{ role: "user", content: "Hello" }],
-			});
-
-			expect(result.receipt.receiptUrl).toMatch(/^https:\/\/verify\.usertrust\.dev\/tx_/);
-
-			await governed.destroy();
+		it("throws when proxy is set (AUD-456: proxy mode removed)", async () => {
+			await expect(
+				trust(makeAnthropicMock(), {
+					dryRun: true,
+					budget: 50_000,
+					vaultBase: tmpVault,
+					proxy: "https://proxy.usertools.ai",
+				}),
+			).rejects.toThrow("proxy mode is not yet implemented");
 		});
 	});
 
@@ -740,57 +733,37 @@ describe("trust()", () => {
 		});
 	});
 
-	// ─── Proxy void on LLM failure (line 335) ───
+	// ─── AUD-456: Proxy mode removed ───
 
-	describe("proxy void on LLM failure", () => {
-		it("calls proxyConn.void when LLM fails in proxy mode (line 335)", async () => {
+	describe("proxy mode removed (AUD-456)", () => {
+		it("trust() throws when proxy option is set (void path)", async () => {
 			const mockClient = makeAnthropicMock(undefined, async () => {
 				throw new Error("LLM rate limited");
 			});
 
-			const governed = await trust(mockClient, {
-				dryRun: false,
-				budget: 50_000,
-				vaultBase: tmpVault,
-				proxy: "https://proxy.usertools.ai",
-				_engine: null,
-			});
-
 			await expect(
-				governed.messages.create({
-					model: "claude-sonnet-4-6",
-					messages: [{ role: "user", content: "Hello" }],
+				trust(mockClient, {
+					dryRun: false,
+					budget: 50_000,
+					vaultBase: tmpVault,
+					proxy: "https://proxy.usertools.ai",
+					_engine: null,
 				}),
-			).rejects.toThrow("LLM rate limited");
-
-			await governed.destroy();
+			).rejects.toThrow("proxy mode is not yet implemented");
 		});
-	});
 
-	// ─── Proxy settlement path (lines 263-269) ───
-
-	describe("proxy settlement in non-dryRun mode", () => {
-		it("exercises proxy settle path when dryRun=false with proxy", async () => {
+		it("trust() throws when proxy option is set (settle path)", async () => {
 			const mockClient = makeAnthropicMock();
 
-			const governed = await trust(mockClient, {
-				dryRun: false,
-				budget: 50_000,
-				vaultBase: tmpVault,
-				proxy: "https://proxy.usertools.ai",
-				_engine: null,
-			});
-
-			const result = await governed.messages.create({
-				model: "claude-sonnet-4-6",
-				max_tokens: 1024,
-				messages: [{ role: "user", content: "Hello" }],
-			});
-
-			// With the stub proxy, settle succeeds, so settled should be true
-			expect(result.receipt.settled).toBe(true);
-
-			await governed.destroy();
+			await expect(
+				trust(mockClient, {
+					dryRun: false,
+					budget: 50_000,
+					vaultBase: tmpVault,
+					proxy: "https://proxy.usertools.ai",
+					_engine: null,
+				}),
+			).rejects.toThrow("AUD-456");
 		});
 	});
 

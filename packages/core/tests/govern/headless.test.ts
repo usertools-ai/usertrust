@@ -342,70 +342,37 @@ describe("headless governor", () => {
 		expect(engine.voidedIds).toHaveLength(2);
 	});
 
-	// ── Proxy mode tests ──
+	// ── AUD-456: Proxy mode removed ──
 
-	it("authorize/settle use proxy paths when proxy is set", async () => {
-		const gov = await createGovernor({
-			budget: 100_000,
-			vaultBase,
-			proxy: "https://proxy.example.com",
-			key: "test-key",
-		});
-
-		const auth = await gov.authorize({
-			model: "claude-sonnet-4-6",
-			estimatedInputTokens: 100,
-			maxOutputTokens: 500,
-		});
-
-		// Proxy stub returns a proxy_ prefixed transferId
-		expect(auth.proxyTransferId).toMatch(/^proxy_/);
-		expect(auth.transferId).toMatch(/^tx_/);
-
-		const receipt = await gov.settle(auth, {
-			inputTokens: 80,
-			outputTokens: 200,
-		});
-
-		// Proxy mode sets proxyStub and receiptUrl
-		expect(receipt.proxyStub).toBe(true);
-		expect(receipt.receiptUrl).toContain(auth.transferId);
-		expect(receipt.settled).toBe(true);
-
-		await gov.destroy();
+	it("createGovernor throws when proxy is set (AUD-456)", async () => {
+		await expect(
+			createGovernor({
+				budget: 100_000,
+				vaultBase,
+				proxy: "https://proxy.example.com",
+				key: "test-key",
+			}),
+		).rejects.toThrow("proxy mode is not yet implemented");
 	});
 
-	it("abort uses proxy void path when proxy is set", async () => {
-		const gov = await createGovernor({
-			budget: 100_000,
-			vaultBase,
-			proxy: "https://proxy.example.com",
-		});
-
-		const auth = await gov.authorize({ model: "gpt-4o" });
-		const budgetBefore = gov.budgetRemaining();
-
-		await gov.abort(auth, new Error("test error"));
-
-		// Budget should be restored after abort
-		expect(gov.budgetRemaining()).toBeGreaterThan(budgetBefore);
-
-		await gov.destroy();
+	it("createGovernor throws with AUD-456 reference when proxy is set", async () => {
+		await expect(
+			createGovernor({
+				budget: 100_000,
+				vaultBase,
+				proxy: "https://proxy.example.com",
+			}),
+		).rejects.toThrow("AUD-456");
 	});
 
-	it("destroy voids active proxy authorizations", async () => {
-		const gov = await createGovernor({
-			budget: 100_000,
-			vaultBase,
-			proxy: "https://proxy.example.com",
-		});
-
-		// Authorize but don't settle
-		await gov.authorize({ model: "claude-sonnet-4-6" });
-		await gov.authorize({ model: "gpt-4o" });
-
-		// Should not throw — proxy void is best-effort
-		await gov.destroy();
+	it("createGovernor error suggests dryRun when proxy is set", async () => {
+		await expect(
+			createGovernor({
+				budget: 100_000,
+				vaultBase,
+				proxy: "https://proxy.example.com",
+			}),
+		).rejects.toThrow("dryRun");
 	});
 
 	// ── Engine POST failure in settle() ──
@@ -825,31 +792,16 @@ describe("headless governor", () => {
 		await gov.destroy();
 	});
 
-	// ── Proxy settle failure branch ──
+	// ── AUD-456: Proxy settle failure branch removed ──
 
-	it("settle sets settled=false when proxy settle throws", async () => {
-		// Proxy mode is a stub — but the settle path still exercises the branch
-		// when proxy is configured. The stub currently succeeds, so we test
-		// the structure to confirm proxy receipts are correct.
-		const gov = await createGovernor({
-			budget: 100_000,
-			vaultBase,
-			proxy: "https://proxy.example.com",
-		});
-
-		const auth = await gov.authorize({ model: "claude-sonnet-4-6" });
-		const receipt = await gov.settle(auth, {
-			inputTokens: 50,
-			outputTokens: 100,
-			usageSource: "provider",
-		});
-
-		// Proxy stub succeeds, so settled should be true
-		expect(receipt.settled).toBe(true);
-		expect(receipt.usageSource).toBe("provider");
-		expect(receipt.provider).toBe("headless");
-
-		await gov.destroy();
+	it("createGovernor rejects proxy option (AUD-456)", async () => {
+		await expect(
+			createGovernor({
+				budget: 100_000,
+				vaultBase,
+				proxy: "https://proxy.example.com",
+			}),
+		).rejects.toThrow("proxy mode is not yet implemented");
 	});
 
 	// ── PII in warn mode (non-blocking branch) ──

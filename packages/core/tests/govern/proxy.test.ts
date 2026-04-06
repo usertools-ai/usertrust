@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { trust } from "../../src/govern.js";
-import { type ProxyConnection, connectProxy } from "../../src/proxy.js";
+import { connectProxy } from "../../src/proxy.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
 // Mock tigerbeetle-node (native module, never loaded in tests)
@@ -73,51 +73,27 @@ function makeMockAudit(): AuditWriter {
 	};
 }
 
-// ── connectProxy() unit tests ──
+// ── AUD-456: connectProxy() throws ──
 
-describe("connectProxy()", () => {
-	it("returns a ProxyConnection with url and key", () => {
-		const conn = connectProxy("https://proxy.usertools.ai", "pk_test_123");
-		expect(conn.url).toBe("https://proxy.usertools.ai");
-		expect(conn.key).toBe("pk_test_123");
+describe("connectProxy() — AUD-456", () => {
+	it("throws 'proxy mode not yet implemented'", () => {
+		expect(() => connectProxy("https://proxy.usertools.ai", "pk_test_123")).toThrow(
+			"proxy mode is not yet implemented",
+		);
 	});
 
-	it("key is undefined when not provided", () => {
-		const conn = connectProxy("https://proxy.usertools.ai");
-		expect(conn.url).toBe("https://proxy.usertools.ai");
-		expect(conn.key).toBeUndefined();
+	it("throws without a key too", () => {
+		expect(() => connectProxy("https://proxy.usertools.ai")).toThrow("AUD-456");
 	});
 
-	it("spend returns a proxy transfer ID", async () => {
-		const conn = connectProxy("https://proxy.usertools.ai", "pk_test_123");
-		const result = await conn.spend({
-			model: "claude-sonnet-4-6",
-			estimatedCost: 100,
-			actor: "local",
-		});
-		expect(result.transferId).toMatch(/^proxy_/);
-		expect(result.estimatedCost).toBe(100);
-	});
-
-	it("settle is a no-op (stub)", async () => {
-		const conn = connectProxy("https://proxy.usertools.ai");
-		await expect(conn.settle("proxy_abc", 50)).resolves.toBeUndefined();
-	});
-
-	it("void is a no-op (stub)", async () => {
-		const conn = connectProxy("https://proxy.usertools.ai");
-		await expect(conn.void("proxy_abc")).resolves.toBeUndefined();
-	});
-
-	it("destroy is a no-op (stub)", () => {
-		const conn = connectProxy("https://proxy.usertools.ai");
-		expect(() => conn.destroy()).not.toThrow();
+	it("error message mentions dryRun as an alternative", () => {
+		expect(() => connectProxy("https://proxy.usertools.ai")).toThrow("dryRun");
 	});
 });
 
-// ── proxy mode integration tests ──
+// ── AUD-456: trust({ proxy }) throws ──
 
-describe("proxy mode", () => {
+describe("trust({ proxy }) — AUD-456", () => {
 	let tmpVault: string;
 
 	beforeEach(() => {
@@ -132,31 +108,38 @@ describe("proxy mode", () => {
 		}
 	});
 
-	it("trust({ proxy }) does not create local TB client", async () => {
+	it("trust() throws when proxy option is provided", async () => {
 		const mockAudit = makeMockAudit();
 		const mockClient = makeAnthropicMock();
 
-		const governed = await trust(mockClient, {
-			dryRun: true,
-			budget: 50_000,
-			vaultBase: tmpVault,
-			proxy: "https://proxy.usertools.ai",
-			_audit: mockAudit,
-		});
-
-		const result = await governed.messages.create({
-			model: "claude-sonnet-4-6",
-			max_tokens: 1024,
-			messages: [{ role: "user", content: "Hello" }],
-		});
-
-		// Call succeeds
-		expect(result.response).toBeDefined();
-
-		await governed.destroy();
+		await expect(
+			trust(mockClient, {
+				dryRun: true,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				proxy: "https://proxy.usertools.ai",
+				_audit: mockAudit,
+			}),
+		).rejects.toThrow("proxy mode is not yet implemented");
 	});
 
-	it("trust receipt has receiptUrl (not null) in proxy mode", async () => {
+	it("trust() throws when proxy and key options are provided", async () => {
+		const mockAudit = makeMockAudit();
+		const mockClient = makeAnthropicMock();
+
+		await expect(
+			trust(mockClient, {
+				dryRun: true,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				proxy: "https://proxy.usertools.ai",
+				key: "pk_live_abc123",
+				_audit: mockAudit,
+			}),
+		).rejects.toThrow("AUD-456");
+	});
+
+	it("trust() works normally without proxy option", async () => {
 		const mockAudit = makeMockAudit();
 		const mockClient = makeAnthropicMock();
 
@@ -164,7 +147,6 @@ describe("proxy mode", () => {
 			dryRun: true,
 			budget: 50_000,
 			vaultBase: tmpVault,
-			proxy: "https://proxy.usertools.ai",
 			_audit: mockAudit,
 		});
 
@@ -174,8 +156,8 @@ describe("proxy mode", () => {
 			messages: [{ role: "user", content: "Hello" }],
 		});
 
-		expect(result.receipt.receiptUrl).not.toBeNull();
-		expect(result.receipt.receiptUrl).toMatch(/^https:\/\/verify\.usertrust\.dev\/tx_/);
+		expect(result.response).toBeDefined();
+		expect(result.receipt.receiptUrl).toBeNull();
 
 		await governed.destroy();
 	});
@@ -198,108 +180,6 @@ describe("proxy mode", () => {
 		});
 
 		expect(result.receipt.receiptUrl).toBeNull();
-
-		await governed.destroy();
-	});
-
-	it("trust({ proxy, key }) passes key to proxy connection", async () => {
-		const mockAudit = makeMockAudit();
-		const mockClient = makeAnthropicMock();
-
-		// This test verifies the key is passed through by checking
-		// the governed client works with proxy+key opts set
-		const governed = await trust(mockClient, {
-			dryRun: true,
-			budget: 50_000,
-			vaultBase: tmpVault,
-			proxy: "https://proxy.usertools.ai",
-			key: "pk_live_abc123",
-			_audit: mockAudit,
-		});
-
-		const result = await governed.messages.create({
-			model: "claude-sonnet-4-6",
-			max_tokens: 1024,
-			messages: [{ role: "user", content: "Hello" }],
-		});
-
-		expect(result.response).toBeDefined();
-		expect(result.receipt.receiptUrl).not.toBeNull();
-
-		await governed.destroy();
-	});
-
-	it("proxy mode still evaluates policy gate", async () => {
-		const mockAudit = makeMockAudit();
-
-		const { writeFileSync } = await import("node:fs");
-		const policiesDir = join(tmpVault, ".usertrust", "policies");
-		mkdirSync(policiesDir, { recursive: true });
-		writeFileSync(
-			join(policiesDir, "default.yml"),
-			JSON.stringify({
-				rules: [
-					{
-						name: "block-opus",
-						effect: "deny",
-						enforcement: "hard",
-						conditions: [{ field: "model", operator: "eq", value: "claude-opus-4-6" }],
-					},
-				],
-			}),
-		);
-
-		const configDir = join(tmpVault, ".usertrust");
-		mkdirSync(configDir, { recursive: true });
-		writeFileSync(
-			join(configDir, "usertrust.config.json"),
-			JSON.stringify({
-				budget: 50_000,
-				policies: "./policies/default.yml",
-			}),
-		);
-
-		const createFn = vi.fn(async () => ({ id: "msg" }));
-		const mockClient = { messages: { create: createFn } };
-
-		const governed = await trust(mockClient, {
-			dryRun: true,
-			vaultBase: tmpVault,
-			proxy: "https://proxy.usertools.ai",
-			_audit: mockAudit,
-		});
-
-		await expect(
-			governed.messages.create({
-				model: "claude-opus-4-6",
-				messages: [{ role: "user", content: "Hello" }],
-			}),
-		).rejects.toThrow("Policy denied");
-
-		expect(createFn).not.toHaveBeenCalled();
-
-		await governed.destroy();
-	});
-
-	it("proxy mode still writes audit chain", async () => {
-		const mockAudit = makeMockAudit();
-		const mockClient = makeAnthropicMock();
-
-		const governed = await trust(mockClient, {
-			dryRun: true,
-			budget: 50_000,
-			vaultBase: tmpVault,
-			proxy: "https://proxy.usertools.ai",
-			_audit: mockAudit,
-		});
-
-		await governed.messages.create({
-			model: "claude-sonnet-4-6",
-			max_tokens: 1024,
-			messages: [{ role: "user", content: "Hello" }],
-		});
-
-		expect(mockAudit.appendEvent).toHaveBeenCalled();
 
 		await governed.destroy();
 	});
