@@ -42,7 +42,7 @@ import { DEFAULT_RULES } from "./policy/default-rules.js";
 import { type GateRule, evaluatePolicy, loadPolicies } from "./policy/gate.js";
 import { detectInjection } from "./policy/injection.js";
 import { detectPII, redactPII } from "./policy/pii.js";
-import { type ProxyConnection, connectProxy } from "./proxy.js";
+import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
 
@@ -66,9 +66,16 @@ import { type StreamCompletion, createGovernedStream } from "./streaming.js";
 export interface TrustOpts {
 	/** Path to usertrust.config.json. Defaults to `.usertrust/usertrust.config.json`. */
 	configPath?: string;
-	/** Remote proxy URL. When set, receipts include a verify URL. */
+	/**
+	 * Remote proxy URL.
+	 * @deprecated AUD-456: Proxy mode is not yet implemented. Passing this option
+	 * will throw an error. Use dryRun mode for testing.
+	 */
 	proxy?: string;
-	/** API key for the proxy. */
+	/**
+	 * API key for the proxy.
+	 * @deprecated AUD-456: Proxy mode is not yet implemented.
+	 */
 	key?: string;
 	/** Token budget override. */
 	budget?: number;
@@ -226,11 +233,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		resetTimeoutMs: config.circuitBreaker.resetTimeout,
 	});
 
-	// 3. Proxy connection (if proxy mode)
-	let proxyConn: ProxyConnection | null = null;
+	// 3. AUD-456: Proxy mode removed — throw early with clear error
 	if (opts?.proxy) {
-		proxyConn = connectProxy(opts.proxy, opts.key);
+		throw new Error(
+			"usertrust: proxy mode is not yet implemented (AUD-456). " +
+				"Use dryRun mode for testing, or connect a real TigerBeetle instance for production.",
+		);
 	}
+	// AUD-456: proxyConn is always null now — proxy mode throws above.
+	// Cast keeps dead code paths type-safe for future re-enablement.
+	const proxyConn = null as ProxyConnection | null;
 
 	// 4. Engine (injected for tests, real TB client in production, null in dry-run/proxy)
 	// AUD-470: _engine injection only accepted in test environments
@@ -296,6 +308,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 			// AUD-460: Track the proxy's transferId separately for settle/void
 			let proxyTransferId: string | undefined;
+
+			// AUD-468: Track whether the in-flight hold has been released, so
+			// the catch handlers below can't double-decrement inFlightHoldTotal
+			// (mirrors the AUD-465 guard used in governActionImpl).
+			let holdActive = false;
+			async function releaseInFlightHold(): Promise<void> {
+				if (!holdActive) return;
+				holdActive = false;
+				const releaseLock = await budgetMutex.acquire();
+				inFlightHoldTotal -= estimatedCost;
+				releaseLock();
+			}
 
 			try {
 				// c. Policy gate
@@ -376,6 +400,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				// Track in-flight hold cost for accurate budget calculations
 				inFlightHoldTotal += estimatedCost;
+				holdActive = true; // AUD-468: arm the guard
 			} finally {
 				// AUD-453: Release lock after budget check + hold are complete
 				releaseBudgetLock();
@@ -415,9 +440,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							}
 
 							// Release in-flight hold and commit budget under mutex
-							{
+							// AUD-468: holdActive guard prevents double-release if the
+							// outer catch also fires (e.g. from a synchronous exception
+							// during stream construction).
+							if (holdActive) {
+								holdActive = false;
 								const releaseLock = await budgetMutex.acquire();
 								inFlightHoldTotal -= estimatedCost;
+								budgetSpent += streamCost;
+								releaseLock();
+							} else {
+								// Hold already released — still need to record the spend.
+								const releaseLock = await budgetMutex.acquire();
 								budgetSpent += streamCost;
 								releaseLock();
 							}
@@ -524,11 +558,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						},
 						async (error: unknown, partial: StreamCompletion) => {
 							// Release in-flight hold under mutex
-							{
-								const releaseLock = await budgetMutex.acquire();
-								inFlightHoldTotal -= estimatedCost;
-								releaseLock();
-							}
+							// AUD-468: holdActive guard prevents double-release.
+							await releaseInFlightHold();
 
 							cb.recordFailure();
 
@@ -610,7 +641,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				}
 
 				// Release in-flight hold and commit budget under mutex
-				{
+				// AUD-468: Mark hold released before the commit so that any
+				// throw in the post-commit window (audit/persist/etc.) cannot
+				// double-decrement inFlightHoldTotal via the outer catch.
+				if (holdActive) {
+					holdActive = false;
 					const releaseLock = await budgetMutex.acquire();
 					inFlightHoldTotal -= estimatedCost;
 					budgetSpent += actualCost;
@@ -751,11 +786,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				return { response, receipt };
 			} catch (err) {
 				// Release in-flight hold under mutex (non-streaming failure)
-				{
-					const releaseLock = await budgetMutex.acquire();
-					inFlightHoldTotal -= estimatedCost;
-					releaseLock();
-				}
+				// AUD-468: Use the guarded release — this is a no-op if the
+				// success path already released the hold, preventing
+				// inFlightHoldTotal from drifting negative on post-commit throws.
+				await releaseInFlightHold();
 
 				// j. Circuit breaker: record failure
 				cb.recordFailure();

@@ -400,6 +400,72 @@ describe("wrapStream", () => {
 			expect(completion.usageReported).toBe(false);
 		});
 
+		it("falls back to zero when Anthropic usage fields are missing", async () => {
+			const chunks = [
+				// message_start with usage object but no input_tokens
+				{ type: "message_start", message: { usage: {} } },
+				// message_delta with usage object but no output_tokens
+				{ type: "message_delta", usage: {} },
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "anthropic", onComplete, onError);
+			await collectAll(wrapped);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage.inputTokens).toBe(0);
+			expect(completion.usage.outputTokens).toBe(0);
+			expect(completion.usageReported).toBe(false);
+		});
+
+		it("falls back to zero when OpenAI usage fields are missing", async () => {
+			const chunks = [
+				{ choices: [{ delta: { content: "Hi" } }] },
+				// usage object exists but no prompt_tokens or completion_tokens
+				{ choices: [], usage: {} },
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "openai", onComplete, onError);
+			await collectAll(wrapped);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage.inputTokens).toBe(0);
+			expect(completion.usage.outputTokens).toBe(0);
+		});
+
+		it("falls back to zero when Google usageMetadata fields are missing", async () => {
+			const chunks = [
+				// usageMetadata object exists but no promptTokenCount or candidatesTokenCount
+				{ candidates: [], usageMetadata: {} },
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "google", onComplete, onError);
+			await collectAll(wrapped);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage.inputTokens).toBe(0);
+			expect(completion.usage.outputTokens).toBe(0);
+		});
+
+		it("handles Anthropic message_start with non-object message", async () => {
+			const chunks = [{ type: "message_start", message: "not an object" }];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "anthropic", onComplete, onError);
+			await collectAll(wrapped);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage.inputTokens).toBe(0);
+		});
+
+		it("handles Anthropic message_delta with non-object usage", async () => {
+			const chunks = [{ type: "message_delta", usage: "not an object" }];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "anthropic", onComplete, onError);
+			await collectAll(wrapped);
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage.outputTokens).toBe(0);
+		});
+
 		it("sets usageReported=true when provider reports usage", async () => {
 			const chunks = [
 				{ type: "message_start", message: { usage: { input_tokens: 100 } } },

@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
-import type { ProxyConnection } from "../../src/proxy.js";
 import { LedgerUnavailableError } from "../../src/shared/errors.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
@@ -508,7 +507,7 @@ describe("Failure mode 15.5: Multiple failures combine gracefully", () => {
 	});
 });
 
-describe("Proxy settlement failure writes settlement_ambiguous audit event", () => {
+describe("AUD-456: Proxy mode removed", () => {
 	let tmpVault: string;
 
 	beforeEach(() => {
@@ -516,7 +515,6 @@ describe("Proxy settlement failure writes settlement_ambiguous audit event", () 
 	});
 
 	afterEach(() => {
-		mockConnectProxy.mockReset();
 		try {
 			rmSync(tmpVault, { recursive: true, force: true });
 		} catch {
@@ -524,57 +522,19 @@ describe("Proxy settlement failure writes settlement_ambiguous audit event", () 
 		}
 	});
 
-	it("logs settlement_ambiguous when proxy settle() throws", async () => {
-		// Create a mock proxy where settle() throws
-		const mockProxy: ProxyConnection = {
-			url: "https://proxy.usertools.ai",
-			key: "pk_test",
-			spend: vi.fn(async () => ({
-				transferId: "proxy_test_123",
-				estimatedCost: 100,
-			})),
-			settle: vi.fn(async () => {
-				throw new Error("Proxy settlement network error");
-			}),
-			void: vi.fn(async () => {}),
-			destroy: vi.fn(),
-		};
-
-		mockConnectProxy.mockImplementation(() => mockProxy);
-
+	it("trust() throws when proxy option is set", async () => {
 		const mockAudit = makeMockAudit();
 		const mockClient = makeAnthropicMock();
 
-		const governed = await trust(mockClient, {
-			dryRun: false,
-			budget: 50_000,
-			vaultBase: tmpVault,
-			proxy: "https://proxy.usertools.ai",
-			_engine: null,
-			_audit: mockAudit,
-		});
-
-		const result = await governed.messages.create({
-			model: "claude-sonnet-4-6",
-			max_tokens: 1024,
-			messages: [{ role: "user", content: "Hello" }],
-		});
-
-		// LLM call succeeded but settlement failed
-		expect(result.response).toBeDefined();
-		expect(result.receipt.settled).toBe(false);
-
-		// Verify settlement_ambiguous audit event was written
-		const appendCalls = (mockAudit.appendEvent as ReturnType<typeof vi.fn>).mock.calls;
-		const ambiguousCall = appendCalls.find(
-			(call: unknown[]) => (call[0] as AppendEventInput).kind === "settlement_ambiguous",
-		);
-		expect(ambiguousCall).toBeDefined();
-		const ambiguousData = (ambiguousCall?.[0] as AppendEventInput).data;
-		expect(ambiguousData.error).toContain("Proxy settlement network error");
-		expect(ambiguousData.model).toBe("claude-sonnet-4-6");
-		expect(ambiguousData.transferId).toMatch(/^tx_/);
-
-		await governed.destroy();
+		await expect(
+			trust(mockClient, {
+				dryRun: false,
+				budget: 50_000,
+				vaultBase: tmpVault,
+				proxy: "https://proxy.usertools.ai",
+				_engine: null,
+				_audit: mockAudit,
+			}),
+		).rejects.toThrow("proxy mode is not yet implemented");
 	});
 });
