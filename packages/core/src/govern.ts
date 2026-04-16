@@ -309,6 +309,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// AUD-460: Track the proxy's transferId separately for settle/void
 			let proxyTransferId: string | undefined;
 
+			// AUD-468: Track whether the in-flight hold has been released, so
+			// the catch handlers below can't double-decrement inFlightHoldTotal
+			// (mirrors the AUD-465 guard used in governActionImpl).
+			let holdActive = false;
+			async function releaseInFlightHold(): Promise<void> {
+				if (!holdActive) return;
+				holdActive = false;
+				const releaseLock = await budgetMutex.acquire();
+				inFlightHoldTotal -= estimatedCost;
+				releaseLock();
+			}
+
 			try {
 				// c. Policy gate
 				const policyResult = evaluatePolicy(policyRules, {
@@ -388,6 +400,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				// Track in-flight hold cost for accurate budget calculations
 				inFlightHoldTotal += estimatedCost;
+				holdActive = true; // AUD-468: arm the guard
 			} finally {
 				// AUD-453: Release lock after budget check + hold are complete
 				releaseBudgetLock();
@@ -427,9 +440,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							}
 
 							// Release in-flight hold and commit budget under mutex
-							{
+							// AUD-468: holdActive guard prevents double-release if the
+							// outer catch also fires (e.g. from a synchronous exception
+							// during stream construction).
+							if (holdActive) {
+								holdActive = false;
 								const releaseLock = await budgetMutex.acquire();
 								inFlightHoldTotal -= estimatedCost;
+								budgetSpent += streamCost;
+								releaseLock();
+							} else {
+								// Hold already released — still need to record the spend.
+								const releaseLock = await budgetMutex.acquire();
 								budgetSpent += streamCost;
 								releaseLock();
 							}
@@ -536,11 +558,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						},
 						async (error: unknown, partial: StreamCompletion) => {
 							// Release in-flight hold under mutex
-							{
-								const releaseLock = await budgetMutex.acquire();
-								inFlightHoldTotal -= estimatedCost;
-								releaseLock();
-							}
+							// AUD-468: holdActive guard prevents double-release.
+							await releaseInFlightHold();
 
 							cb.recordFailure();
 
@@ -622,7 +641,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				}
 
 				// Release in-flight hold and commit budget under mutex
-				{
+				// AUD-468: Mark hold released before the commit so that any
+				// throw in the post-commit window (audit/persist/etc.) cannot
+				// double-decrement inFlightHoldTotal via the outer catch.
+				if (holdActive) {
+					holdActive = false;
 					const releaseLock = await budgetMutex.acquire();
 					inFlightHoldTotal -= estimatedCost;
 					budgetSpent += actualCost;
@@ -763,11 +786,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				return { response, receipt };
 			} catch (err) {
 				// Release in-flight hold under mutex (non-streaming failure)
-				{
-					const releaseLock = await budgetMutex.acquire();
-					inFlightHoldTotal -= estimatedCost;
-					releaseLock();
-				}
+				// AUD-468: Use the guarded release — this is a no-op if the
+				// success path already released the hold, preventing
+				// inFlightHoldTotal from drifting negative on post-commit throws.
+				await releaseInFlightHold();
 
 				// j. Circuit breaker: record failure
 				cb.recordFailure();

@@ -369,3 +369,87 @@ describe("AUD-457 — budget persistence", () => {
 		expect(raw.budgetSpent).toBe(r1.receipt.cost + r2.receipt.cost);
 	});
 });
+
+// ── AUD-468: in-flight hold accounting must not go negative on policy deny ──
+//
+// Regression: previously the outer catch in interceptCall decremented
+// inFlightHoldTotal by estimatedCost without checking whether the hold
+// had actually been incremented. A policy-deny throw before the increment
+// would cause inFlightHoldTotal to drift negative, inflating subsequent
+// budgetRemaining beyond the configured budget.
+describe("AUD-468 — inFlightHoldTotal stays accurate on early failure", () => {
+	let tmpVault: string;
+
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+		// Write a deny-everything policy
+		const dir = join(tmpVault, ".usertrust");
+		const polDir = join(dir, "policies");
+		mkdirSync(polDir, { recursive: true });
+	});
+
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {
+			// cleanup best-effort
+		}
+	});
+
+	it("policy deny followed by allowed call does not inflate budgetRemaining", async () => {
+		const { writeFileSync } = await import("node:fs");
+		const polPath = join(tmpVault, ".usertrust", "policies", "default.yml");
+		writeFileSync(
+			polPath,
+			JSON.stringify({
+				rules: [
+					{
+						name: "block-opus",
+						effect: "deny",
+						enforcement: "hard",
+						conditions: [{ field: "model", operator: "eq", value: "claude-opus-4-6" }],
+					},
+				],
+			}),
+		);
+		writeFileSync(
+			join(tmpVault, ".usertrust", "usertrust.config.json"),
+			JSON.stringify({ budget: 500_000, policies: "./policies/default.yml" }),
+		);
+
+		const mockAudit = makeMockAudit();
+		const mockClient = makeAnthropicMock();
+
+		const governed = await trust(mockClient, {
+			dryRun: true,
+			vaultBase: tmpVault,
+			_audit: mockAudit,
+		});
+
+		// Force several policy denials — each should decrement inFlightHoldTotal
+		// by what was never added.
+		for (let i = 0; i < 3; i++) {
+			await expect(
+				governed.messages.create({
+					model: "claude-opus-4-6",
+					max_tokens: 1024,
+					messages: [{ role: "user", content: "Hello" }],
+				}),
+			).rejects.toThrow("Policy denied");
+		}
+
+		// Then make an allowed call — its receipt should report
+		// budgetRemaining <= configured budget (i.e. the in-flight account
+		// has not drifted negative).
+		const ok = await governed.messages.create({
+			model: "claude-sonnet-4-6",
+			max_tokens: 1024,
+			messages: [{ role: "user", content: "Hello" }],
+		});
+
+		expect(ok.receipt.budgetRemaining).toBeLessThanOrEqual(500_000);
+		expect(ok.receipt.budgetRemaining).toBe(500_000 - ok.receipt.cost);
+
+		await governed.destroy();
+	});
+});
