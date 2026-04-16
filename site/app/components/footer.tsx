@@ -4,7 +4,7 @@ export function Footer() {
 	return (
 		<footer className="relative">
 			<div className="h-px bg-gradient-to-r from-transparent via-ut/15 to-transparent" />
-			<div className="max-w-5xl mx-auto px-6 py-12">
+			<div className="safe-x safe-bottom max-w-5xl mx-auto px-6 py-12">
 				<div className="grid grid-cols-2 sm:grid-cols-4 gap-8 mb-10">
 					{/* Brand column */}
 					<div className="col-span-2 sm:col-span-1 flex flex-col gap-3">

@@ -8,7 +8,8 @@
 html {
 	-webkit-text-size-adjust: 100%;
 	text-size-adjust: 100%;
-	scroll-padding-top: 5rem; /* sticky nav height */
+	/* Nav height (5rem) + notch inset — keeps anchored sections visible under fixed nav on notched iPhones */
+	scroll-padding-top: calc(5rem + env(safe-area-inset-top, 0px));
 	scroll-behavior: smooth;
 }
 

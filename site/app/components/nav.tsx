@@ -82,7 +82,7 @@ export function Nav() {
 
 	return (
 		<nav
-			className={`safe-top fixed top-0 left-0 right-0 z-50 border-b transition-all duration-300 ${
+			className={`safe-top safe-x fixed top-0 left-0 right-0 z-50 border-b transition-all duration-300 ${
 				scrolled
 					? "bg-brand-bg/60 backdrop-blur-[20px] border-white/[0.10]"
 					: "bg-brand-bg/80 backdrop-blur-[16px] border-white/[0.06]"
