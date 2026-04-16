@@ -11,16 +11,7 @@
 		"directory": "packages/openclaw"
 	},
 	"bugs": "https://github.com/usertools-ai/usertrust/issues",
-	"keywords": [
-		"openclaw",
-		"usertrust",
-		"ai",
-		"governance",
-		"budget",
-		"audit",
-		"llm",
-		"plugin"
-	],
+	"keywords": ["openclaw", "usertrust", "ai", "governance", "budget", "audit", "llm", "plugin"],
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -35,10 +26,7 @@
 		"prepublishOnly": "tsc",
 		"demo": "tsx demo/runaway-agent.ts"
 	},
-	"files": [
-		"dist",
-		"openclaw.plugin.json"
-	],
+	"files": ["dist", "openclaw.plugin.json"],
 	"dependencies": {
 		"usertrust": "*"
 	},

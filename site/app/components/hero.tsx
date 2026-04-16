@@ -59,7 +59,7 @@ export function Hero() {
 	return (
 		<section
 			ref={sectionRef}
-			className="relative min-h-screen flex flex-col items-center justify-start text-center px-6 pt-[18vh]"
+			className="relative min-h-screen min-h-[100dvh] flex flex-col items-center justify-start text-center px-6 pt-28 sm:pt-[18vh]"
 			style={{ zIndex: 1 }}
 		>
 			{/* Bliss background — scroll-fades */}
@@ -83,7 +83,7 @@ export function Hero() {
 
 			{/* Hero content — glass pane */}
 			<div
-				className="relative z-10 max-w-3xl mx-auto flex flex-col items-center gap-6 px-8 py-10 sm:px-12 sm:py-14 rounded-2xl border border-white/[0.08]"
+				className="relative z-10 max-w-3xl mx-auto flex flex-col items-center gap-6 px-6 py-10 sm:px-12 sm:py-14 rounded-2xl border border-white/[0.08]"
 				style={{
 					background: "rgba(10,10,26,0.35)",
 					backdropFilter: "blur(24px)",
@@ -157,7 +157,7 @@ export function Hero() {
 				>
 					<a
 						href="#code"
-						className="inline-flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] bg-ut text-brand-bg rounded-lg text-sm font-semibold hover:bg-ut/90 active:scale-[0.98] transition-all duration-150 shadow-[0_0_20px_rgba(52,211,153,0.3),0_0_60px_rgba(52,211,153,0.1)]"
+						className="inline-flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] bg-ut text-brand-bg rounded-lg text-sm font-semibold hover:bg-ut/90 active:scale-[0.98] transition-all duration-150 shadow-[0_0_20px_rgba(52,211,153,0.3),0_0_60px_rgba(52,211,153,0.1)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/70 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 					>
 						Start Trusting
 					</a>
@@ -165,7 +165,7 @@ export function Hero() {
 						href="https://github.com/usertools-ai/usertrust"
 						target="_blank"
 						rel="noopener noreferrer"
-						className="inline-flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] bg-white/[0.06] border border-white/10 rounded-lg text-sm font-medium text-white/80 hover:bg-white/[0.10] hover:text-white transition-all duration-150"
+						className="inline-flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] bg-white/[0.06] border border-white/10 rounded-lg text-sm font-medium text-white/80 hover:bg-white/[0.10] hover:text-white transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 					>
 						View on GitHub
 					</a>
@@ -237,7 +237,9 @@ export function Hero() {
 							</span>
 						))}
 					</div>
-					<p className="text-[10px] text-white/25 tracking-wide">Open source · Apache 2.0</p>
+					<p className="text-[11px] sm:text-[10px] text-white/25 tracking-wide">
+						Open source · Apache 2.0
+					</p>
 				</motion.div>
 			</div>
 		</section>

@@ -4,7 +4,7 @@ export function Footer() {
 	return (
 		<footer className="relative">
 			<div className="h-px bg-gradient-to-r from-transparent via-ut/15 to-transparent" />
-			<div className="max-w-5xl mx-auto px-6 py-12">
+			<div className="safe-x safe-bottom max-w-5xl mx-auto px-6 py-12">
 				<div className="grid grid-cols-2 sm:grid-cols-4 gap-8 mb-10">
 					{/* Brand column */}
 					<div className="col-span-2 sm:col-span-1 flex flex-col gap-3">
@@ -21,25 +21,25 @@ export function Footer() {
 						</span>
 						<a
 							href="#features"
-							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 						>
 							Features
 						</a>
 						<a
 							href="#how"
-							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 						>
 							How it works
 						</a>
 						<a
 							href="#code"
-							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 						>
 							Quick start
 						</a>
 						<a
 							href="/docs"
-							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 						>
 							Docs
 						</a>
@@ -54,7 +54,7 @@ export function Footer() {
 							href="https://github.com/usertools-ai/usertrust"
 							target="_blank"
 							rel="noopener noreferrer"
-							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 						>
 							GitHub
 						</a>
@@ -62,7 +62,7 @@ export function Footer() {
 							href="https://www.npmjs.com/package/usertrust"
 							target="_blank"
 							rel="noopener noreferrer"
-							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 						>
 							npm
 						</a>
@@ -70,7 +70,7 @@ export function Footer() {
 							href="https://github.com/usertools-ai/usertrust/blob/master/LICENSE"
 							target="_blank"
 							rel="noopener noreferrer"
-							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 						>
 							License
 						</a>
@@ -85,7 +85,7 @@ export function Footer() {
 							href="https://usertools.ai"
 							target="_blank"
 							rel="noopener noreferrer"
-							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200"
+							className="animated-underline text-sm text-white/30 hover:text-white/70 transition-colors duration-200 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 						>
 							Usertools
 						</a>
@@ -100,7 +100,7 @@ export function Footer() {
 							href="https://usertools.ai"
 							target="_blank"
 							rel="noopener noreferrer"
-							className="text-white/30 hover:text-ut transition-colors duration-200"
+							className="text-white/30 hover:text-ut transition-colors duration-200 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 						>
 							usertools.ai
 						</a>
@@ -108,7 +108,7 @@ export function Footer() {
 					<div className="flex items-center gap-4">
 						<a
 							href="#top"
-							className="text-xs text-white/20 hover:text-ut transition-colors duration-200"
+							className="text-xs text-white/20 hover:text-ut transition-colors duration-200 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 						>
 							Back to top ↑
 						</a>
@@ -116,7 +116,7 @@ export function Footer() {
 							href="https://github.com/usertools-ai/usertrust"
 							target="_blank"
 							rel="noopener noreferrer"
-							className="flex items-center gap-1.5 text-xs text-white/20 hover:text-white/50 transition-colors duration-200"
+							className="flex items-center gap-1.5 text-xs text-white/20 hover:text-white/50 transition-colors duration-200 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 						>
 							<GitHubIcon className="w-3.5 h-3.5" />
 							Star on GitHub

@@ -19,10 +19,10 @@ function FlowConnector({
 		<div className="flex flex-col items-center py-5 sm:py-8">
 			<div className="w-px h-5 bg-gradient-to-b from-white/[0.06] to-ut/20" />
 			<div className="py-2.5 px-4 sm:px-6 text-center">
-				<span className="text-[10px] sm:text-[11px] tracking-[0.12em] text-white/40 block">
-					{label}
-				</span>
-				{sublabel && <span className="text-[9px] text-white/25 block mt-0.5">{sublabel}</span>}
+				<span className="text-[11px] tracking-[0.12em] text-white/40 block">{label}</span>
+				{sublabel && (
+					<span className="text-[10px] sm:text-[9px] text-white/25 block mt-0.5">{sublabel}</span>
+				)}
 			</div>
 			<div className="relative">
 				<svg width="10" height="16" className="text-ut/40" role="img" aria-label="Flow arrow">
@@ -242,7 +242,7 @@ export function HowItWorks() {
 
 				{/* POST ↔ VOID badge */}
 				<div className="flex items-center justify-center py-2 mb-2">
-					<span className="text-[9px] tracking-[0.1em] text-white/30 border border-ut/10 rounded px-2.5 py-1 shadow-[0_0_15px_rgba(52,211,153,0.05)]">
+					<span className="text-[10px] sm:text-[9px] tracking-[0.1em] text-white/30 border border-ut/10 rounded px-2.5 py-1 shadow-[0_0_15px_rgba(52,211,153,0.05)]">
 						POST xor VOID : exactly one outcome per transferId · never both
 					</span>
 				</div>
@@ -356,7 +356,7 @@ export function HowItWorks() {
 								))}
 							</div>
 
-							<p className="text-[10px] text-ut/25 text-center mt-8">
+							<p className="text-[11px] sm:text-[10px] text-ut/25 text-center mt-8">
 								5 PHASES · 3 STORAGE SYSTEMS · 1 UNIVERSAL JOIN KEY (transferId)
 							</p>
 						</div>

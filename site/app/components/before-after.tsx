@@ -1,6 +1,6 @@
 "use client";
 
-import { AnimatePresence, motion, useInView } from "motion/react";
+import { AnimatePresence, motion, useInView, useReducedMotion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { ScrollReveal } from "./scroll-reveal";
 
@@ -199,7 +199,7 @@ function CodePanel({
 					<span className="ml-3 text-xs text-white/30">{filename}</span>
 				</div>
 				<span
-					className={`text-[10px] font-bold uppercase tracking-wider ${
+					className={`text-[11px] sm:text-[10px] font-bold uppercase tracking-wider ${
 						isBefore ? "text-danger/60" : "text-ut"
 					}`}
 				>
@@ -217,7 +217,7 @@ function CodePanel({
 						</div>
 					))}
 				</div>
-				<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-hidden flex-1">
+				<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto flex-1 min-w-0">
 					<code>
 						{lines.map((line, i) => (
 							// biome-ignore lint/suspicious/noArrayIndexKey: static code lines
@@ -242,7 +242,7 @@ function CodePanel({
 
 			{/* Status bar */}
 			<div
-				className={`flex items-center justify-between px-4 py-2 border-t border-white/[0.04] text-[10px] ${
+				className={`flex items-center justify-between gap-3 px-4 py-2 border-t border-white/[0.04] text-[11px] sm:text-[10px] ${
 					isBefore ? "text-white/20" : "text-ut/40"
 				}`}
 			>
@@ -268,6 +268,7 @@ function CodePanel({
 export function BeforeAfter() {
 	const sectionRef = useRef<HTMLDivElement>(null);
 	const inView = useInView(sectionRef, { once: true, amount: 0.2 });
+	const prefersReducedMotion = useReducedMotion();
 	const [showAfter, setShowAfter] = useState(false);
 
 	// Auto-flip from Before to After after 2s of being in view
@@ -276,6 +277,10 @@ export function BeforeAfter() {
 		const timer = setTimeout(() => setShowAfter(true), 2000);
 		return () => clearTimeout(timer);
 	}, [inView]);
+
+	const transition = prefersReducedMotion
+		? { duration: 0 }
+		: { duration: 0.5, ease: "easeInOut" as const };
 
 	return (
 		<section className="relative py-24 sm:py-32 px-6">
@@ -308,7 +313,8 @@ export function BeforeAfter() {
 						<button
 							type="button"
 							onClick={() => setShowAfter(false)}
-							className={`px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all duration-300 ${
+							aria-pressed={!showAfter}
+							className={`px-4 py-2 min-h-[44px] rounded-lg text-xs font-bold uppercase tracking-wider transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg ${
 								!showAfter
 									? "bg-danger/10 border border-danger/30 text-danger/80 shadow-[0_0_20px_rgba(239,68,68,0.1)]"
 									: "border border-white/[0.06] text-white/30 hover:text-white/50"
@@ -320,13 +326,15 @@ export function BeforeAfter() {
 							animate={{ x: showAfter ? 4 : -4 }}
 							transition={{ type: "spring", stiffness: 300, damping: 20 }}
 							className="text-white/20 text-lg"
+							aria-hidden="true"
 						>
 							→
 						</motion.span>
 						<button
 							type="button"
 							onClick={() => setShowAfter(true)}
-							className={`px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all duration-300 ${
+							aria-pressed={showAfter}
+							className={`px-4 py-2 min-h-[44px] rounded-lg text-xs font-bold uppercase tracking-wider transition-all duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg ${
 								showAfter
 									? "bg-ut/10 border border-ut/30 text-ut shadow-[0_0_20px_rgba(52,211,153,0.1)]"
 									: "border border-white/[0.06] text-white/30 hover:text-white/50"
@@ -343,10 +351,14 @@ export function BeforeAfter() {
 						{!showAfter ? (
 							<motion.div
 								key="before"
-								initial={{ opacity: 0, scale: 0.97, y: 10 }}
+								initial={prefersReducedMotion ? false : { opacity: 0, scale: 0.97, y: 10 }}
 								animate={{ opacity: 1, scale: 1, y: 0 }}
-								exit={{ opacity: 0, scale: 1.02, filter: "brightness(2)" }}
-								transition={{ duration: 0.5, ease: "easeInOut" }}
+								exit={
+									prefersReducedMotion
+										? { opacity: 0 }
+										: { opacity: 0, scale: 1.02, filter: "brightness(2)" }
+								}
+								transition={transition}
 								className="relative rounded-xl border border-danger/20 overflow-hidden"
 								style={{
 									background: "rgba(239,68,68,0.02)",
@@ -374,10 +386,10 @@ export function BeforeAfter() {
 						) : (
 							<motion.div
 								key="after"
-								initial={{ opacity: 0, scale: 0.97, y: 10 }}
+								initial={prefersReducedMotion ? false : { opacity: 0, scale: 0.97, y: 10 }}
 								animate={{ opacity: 1, scale: 1, y: 0 }}
-								exit={{ opacity: 0, scale: 0.97, y: -10 }}
-								transition={{ duration: 0.4, ease: "easeInOut" }}
+								exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.97, y: -10 }}
+								transition={transition}
 								className="relative rounded-xl border border-ut/20"
 								style={{
 									background: "rgba(52,211,153,0.03)",

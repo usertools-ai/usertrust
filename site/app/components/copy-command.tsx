@@ -27,7 +27,7 @@ export function CopyCommand() {
 		<button
 			type="button"
 			onClick={handleCopy}
-			className="gradient-border group relative flex w-full items-center justify-between gap-4 rounded-xl border border-white/[0.06] px-5 py-3.5 cursor-pointer hover:border-ut/30 hover:shadow-[0_0_20px_rgba(52,211,153,0.1)] transition-all duration-200"
+			className="gradient-border group relative flex w-full items-center justify-between gap-4 rounded-xl border border-white/[0.06] px-5 py-3.5 min-h-[44px] cursor-pointer hover:border-ut/30 hover:shadow-[0_0_20px_rgba(52,211,153,0.1)] transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 			style={{
 				background: "rgba(255,255,255,0.04)",
 				backdropFilter: "blur(24px)",

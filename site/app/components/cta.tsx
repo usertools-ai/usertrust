@@ -30,7 +30,7 @@ export function CTA() {
 						<div className="flex flex-wrap items-center justify-center gap-3">
 							<a
 								href="#code"
-								className="inline-flex items-center justify-center gap-2.5 px-6 py-3 min-h-[44px] bg-ut text-brand-bg rounded-lg text-sm font-semibold hover:bg-ut/90 active:scale-[0.98] transition-all duration-150 shadow-[0_0_30px_rgba(52,211,153,0.3),0_0_80px_rgba(52,211,153,0.12)] hover:shadow-[0_0_40px_rgba(52,211,153,0.4),0_0_100px_rgba(52,211,153,0.2)]"
+								className="inline-flex items-center justify-center gap-2.5 px-6 py-3 min-h-[44px] bg-ut text-brand-bg rounded-lg text-sm font-semibold hover:bg-ut/90 active:scale-[0.98] transition-all duration-150 shadow-[0_0_30px_rgba(52,211,153,0.3),0_0_80px_rgba(52,211,153,0.12)] hover:shadow-[0_0_40px_rgba(52,211,153,0.4),0_0_100px_rgba(52,211,153,0.2)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/70 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 							>
 								Start Trusting
 							</a>
@@ -39,7 +39,7 @@ export function CTA() {
 								href="https://github.com/usertools-ai/usertrust"
 								target="_blank"
 								rel="noopener noreferrer"
-								className="inline-flex items-center justify-center gap-2 px-6 py-3 min-h-[44px] border border-white/[0.12] rounded-lg text-sm font-medium text-white/80 hover:bg-white/[0.05] hover:text-white hover:border-white/20 hover:shadow-[0_0_20px_rgba(255,255,255,0.04)] transition-all duration-200"
+								className="inline-flex items-center justify-center gap-2 px-6 py-3 min-h-[44px] border border-white/[0.12] rounded-lg text-sm font-medium text-white/80 hover:bg-white/[0.05] hover:text-white hover:border-white/20 hover:shadow-[0_0_20px_rgba(255,255,255,0.04)] transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ut/60 focus-visible:ring-offset-2 focus-visible:ring-offset-brand-bg"
 							>
 								<GitHubIcon className="w-4 h-4" />
 								View on GitHub
