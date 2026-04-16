@@ -67,6 +67,7 @@ export {
 	SkillVerificationError,
 	VaultKeyMissingError,
 	CredentialAccessDeniedError,
+	AnomalyError,
 } from "./shared/errors.js";
 
 // Streaming
@@ -106,3 +107,21 @@ export type { BoardStats, BoardReviewResult } from "./board/board.js";
 // Circuit breaker
 export { CircuitBreaker, CircuitBreakerRegistry, CircuitOpenError } from "./resilience/circuit.js";
 export type { CircuitBreakerSnapshot } from "./resilience/circuit.js";
+
+// Streaming anomaly governance
+export { createAnomalyDetector, resolveAnomalyConfig } from "./anomaly/detector.js";
+export type { AnomalyDetector } from "./anomaly/detector.js";
+export type {
+	AnomalyChunkEvent,
+	AnomalyConfig,
+	AnomalyDetectorOptions,
+	AnomalyDetectorState,
+	AnomalyEvent,
+	AnomalyInjectionEvent,
+	AnomalyKind,
+	AnomalyVerdict,
+	InjectionCascadeConfig,
+	ResolvedAnomalyConfig,
+	SpendVelocityConfig,
+	TokenRateConfig,
+} from "./anomaly/types.js";

@@ -48,7 +48,8 @@ import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
-import { LedgerUnavailableError, PolicyDeniedError } from "./shared/errors.js";
+import { createAnomalyDetector } from "./anomaly/detector.js";
+import { AnomalyError, LedgerUnavailableError, PolicyDeniedError } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
 import { TrustConfigSchema } from "./shared/types.js";
 import type {
@@ -59,7 +60,7 @@ import type {
 	TrustReceipt,
 	TrustedResponse,
 } from "./shared/types.js";
-import { type StreamCompletion, createGovernedStream } from "./streaming.js";
+import { type ChunkObservation, type StreamCompletion, createGovernedStream } from "./streaming.js";
 
 // ── Public types ──
 
@@ -270,6 +271,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	let inFlightStreamCount = 0; // AUD-462: track in-flight streams (consumed after interceptCall returns)
 	let inFlightHoldTotal = 0; // Track estimated cost of in-flight pending holds
 
+	// Streaming anomaly detector — shared across calls so injection-cascade
+	// can track signals across the conversation. Disabled when config.anomaly.enabled=false.
+	const anomalyDetector = createAnomalyDetector(config.anomaly, { provider: kind });
+
 	// 7. Two-phase intercept
 	async function interceptCall(
 		originalFn: (...args: unknown[]) => unknown,
@@ -366,6 +371,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								},
 							})
 							.catch(() => {});
+						// Feed the anomaly detector so cascading injections trip the breaker.
+						anomalyDetector.observe({
+							kind: "injection",
+							patterns: injectionResult.patterns,
+						});
 					}
 				}
 
@@ -593,6 +603,45 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							}
 
 							inFlightStreamCount--;
+						},
+						// onChunk: streaming anomaly detector hook. Observe each chunk;
+						// if a signal trips, throw AnomalyError to abort the stream.
+						// The thrown error propagates through wrapStream's onError above
+						// → existing VOID flow runs → upstream caller sees AnomalyError.
+						(obs: ChunkObservation) => {
+							if (!config.anomaly.enabled) return;
+							anomalyDetector.observe({
+								kind: "chunk",
+								deltaTokens: obs.deltaTokens,
+								cumulativeInputTokens: obs.cumulativeInputTokens,
+								cumulativeOutputTokens: obs.cumulativeOutputTokens,
+							});
+							const verdict = anomalyDetector.check();
+							if (verdict.tripped) {
+								// Append hash-chained anomaly_detected audit event.
+								// Best-effort: do not block the abort if audit fails.
+								audit
+									.appendEvent({
+										kind: "anomaly_detected",
+										actor: "local",
+										data: {
+											anomalyKind: verdict.kind,
+											message: verdict.message,
+											metric: verdict.metric,
+											threshold: verdict.threshold,
+											model,
+											transferId,
+											provider: kind,
+										},
+									})
+									.catch(() => {});
+								throw new AnomalyError(
+									verdict.kind,
+									verdict.message,
+									verdict.metric,
+									verdict.threshold,
+								);
+							}
 						},
 					);
 
