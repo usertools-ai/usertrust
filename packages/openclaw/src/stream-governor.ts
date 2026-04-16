@@ -47,7 +47,17 @@ async function* governedStream(
 	context: StreamContext,
 	options?: Record<string, unknown>,
 ): AsyncGenerator<StreamEvent> {
-	// 1. Authorize — budget check, policy gate, PENDING hold
+	// 1a. Pre-flight budget check.
+	// In dry-run mode (no TigerBeetle) the engine cannot enforce balance,
+	// so we explicitly refuse calls when budget_remaining ≤ 0. This matches
+	// the behaviour users expect from a "budget" config: hit zero, get cut off.
+	if (governor.budgetRemaining() <= 0) {
+		throw new Error(
+			`usertrust: budget exhausted (${governor.budgetRemaining()} remaining); call denied`,
+		);
+	}
+
+	// 1b. Authorize — policy gate, PENDING hold
 	const auth: Authorization = await governor.authorize({
 		model,
 		messages: context.messages,
@@ -106,7 +116,14 @@ export function wrapCompleteWithGovernance<
 		context: StreamContext,
 		options?: Record<string, unknown>,
 	): Promise<T> => {
-		// 1. Authorize
+		// 1a. Pre-flight budget check (see governedStream for rationale).
+		if (governor.budgetRemaining() <= 0) {
+			throw new Error(
+				`usertrust: budget exhausted (${governor.budgetRemaining()} remaining); call denied`,
+			);
+		}
+
+		// 1b. Authorize
 		const auth = await governor.authorize({
 			model,
 			messages: context.messages,
