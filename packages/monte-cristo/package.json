@@ -1,0 +1,44 @@
+{
+	"name": "usertrust-monte-cristo",
+	"version": "0.1.0",
+	"description": "Monte Carlo simulation foundation for usertrust governance — budget projection, policy what-if, risk quantification.",
+	"license": "Apache-2.0",
+	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
+	"homepage": "https://usertrust.ai",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/usertools-ai/usertrust.git",
+		"directory": "packages/monte-cristo"
+	},
+	"bugs": "https://github.com/usertools-ai/usertrust/issues",
+	"keywords": ["monte-carlo", "simulation", "governance", "ai", "risk", "distributions"],
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"exports": {
+		".": {
+			"import": "./dist/index.js",
+			"types": "./dist/index.d.ts"
+		},
+		"./rng": {
+			"import": "./dist/rng/xoshiro256.js",
+			"types": "./dist/rng/xoshiro256.d.ts"
+		},
+		"./distributions": {
+			"import": "./dist/distributions/index.js",
+			"types": "./dist/distributions/index.d.ts"
+		},
+		"./simulator": {
+			"import": "./dist/simulator/index.js",
+			"types": "./dist/simulator/index.d.ts"
+		}
+	},
+	"scripts": {
+		"build": "tsc",
+		"prepublishOnly": "tsc"
+	},
+	"files": ["dist", "README.md"],
+	"publishConfig": {
+		"access": "public"
+	}
+}
