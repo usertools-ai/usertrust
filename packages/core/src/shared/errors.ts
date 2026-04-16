@@ -164,6 +164,32 @@ export class SkillVerificationError extends Error {
 	}
 }
 
+export class AnomalyError extends Error {
+	public readonly kind: "token_rate" | "spend_velocity" | "injection_cascade";
+	public readonly metric: number;
+	public readonly threshold: number;
+	public readonly hint: string;
+	public readonly docsUrl: string;
+
+	constructor(
+		kind: "token_rate" | "spend_velocity" | "injection_cascade",
+		message: string,
+		metric: number,
+		threshold: number,
+	) {
+		const hint =
+			"The streaming circuit breaker tripped on anomalous behavior. Tune anomaly thresholds in config or call detector.reset() to clear the trip.";
+		const docsUrl = "https://usertrust.ai/docs/errors/anomaly-detected";
+		super(`Anomaly detected (${kind}): ${message}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
+		this.name = "AnomalyError";
+		this.kind = kind;
+		this.metric = metric;
+		this.threshold = threshold;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
+	}
+}
+
 export class VaultKeyMissingError extends Error {
 	public readonly envVar: string;
 	public readonly hint: string;

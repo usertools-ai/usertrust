@@ -93,17 +93,38 @@ function extractTokensFromChunk(chunk: unknown, kind: LLMClientKind): StreamUsag
 // ── Stream wrapper ──
 
 /**
+ * Per-chunk hook called after token extraction but before yielding the chunk
+ * to the consumer. Throwing from this hook aborts the stream — onError will
+ * fire with the thrown value (this is how the anomaly detector trips a
+ * circuit breaker mid-stream).
+ *
+ * `delta` reflects the change in tokens compared to the previous chunk
+ * (cumulative reporting is normalised to a delta here).
+ */
+export interface ChunkObservation {
+	chunk: unknown;
+	deltaTokens: number;
+	cumulativeInputTokens: number;
+	cumulativeOutputTokens: number;
+}
+
+export type ChunkHook = (obs: ChunkObservation) => void;
+
+/**
  * Wraps a provider stream with token counting.
  * Yields all chunks unchanged. Calls onComplete with accumulated usage
- * when the stream ends, or onError on failure.
+ * when the stream ends, or onError on failure. An optional `onChunk` hook
+ * fires per chunk and can throw to abort the stream (used by the anomaly
+ * detector to trip a circuit breaker mid-stream).
  */
 export function wrapStream<T>(
 	stream: AsyncIterable<T>,
 	kind: LLMClientKind,
 	onComplete: (completion: StreamCompletion) => void,
 	onError: (error: unknown, partial: StreamCompletion) => void,
+	onChunk?: ChunkHook,
 ): AsyncIterable<T> {
-	return wrapStreamImpl(stream, kind, onComplete, onError);
+	return wrapStreamImpl(stream, kind, onComplete, onError, onChunk);
 }
 
 async function* wrapStreamImpl<T>(
@@ -111,6 +132,7 @@ async function* wrapStreamImpl<T>(
 	kind: LLMClientKind,
 	onComplete: (completion: StreamCompletion) => void,
 	onError: (error: unknown, partial: StreamCompletion) => void,
+	onChunk?: ChunkHook,
 ): AsyncGenerator<T> {
 	let inputTokens = 0;
 	let outputTokens = 0;
@@ -120,14 +142,28 @@ async function* wrapStreamImpl<T>(
 	try {
 		for await (const chunk of stream) {
 			const tokens = extractTokensFromChunk(chunk, kind);
+			let deltaInput = 0;
+			let deltaOutput = 0;
 			// Use latest non-zero value (providers report cumulative or final)
 			if (tokens.inputTokens > 0) {
+				deltaInput = Math.max(0, tokens.inputTokens - inputTokens);
 				inputTokens = tokens.inputTokens;
 				usageReported = true;
 			}
 			if (tokens.outputTokens > 0) {
+				deltaOutput = Math.max(0, tokens.outputTokens - outputTokens);
 				outputTokens = tokens.outputTokens;
 				usageReported = true;
+			}
+
+			// Run hook BEFORE yielding so a throw aborts before the consumer sees it.
+			if (onChunk != null) {
+				onChunk({
+					chunk,
+					deltaTokens: deltaInput + deltaOutput,
+					cumulativeInputTokens: inputTokens,
+					cumulativeOutputTokens: outputTokens,
+				});
 			}
 
 			yield chunk;
@@ -155,6 +191,7 @@ export function createGovernedStream<T>(
 	kind: LLMClientKind,
 	resolveReceipt: (completion: StreamCompletion) => Promise<TrustReceipt>,
 	rejectReceipt: (error: unknown, partial: StreamCompletion) => void,
+	onChunk?: ChunkHook,
 ): GovernedStream<T> {
 	let receiptResolve!: (receipt: TrustReceipt) => void;
 	let receiptReject!: (error: unknown) => void;
@@ -180,6 +217,7 @@ export function createGovernedStream<T>(
 			rejectReceipt(error, partial);
 			receiptReject(error);
 		},
+		onChunk,
 	);
 
 	return Object.assign(wrapped, {

@@ -124,6 +124,31 @@ export const TrustConfigSchema = z.object({
 				.default({}),
 		})
 		.default({}),
+	anomaly: z
+		.object({
+			enabled: z.boolean().default(false),
+			tokenRate: z
+				.object({
+					thresholdTokPerSec: z.number().positive().default(500),
+					windowMs: z.number().int().positive().default(2_000),
+					consecutiveWindows: z.number().int().positive().default(3),
+				})
+				.default({}),
+			spendVelocity: z
+				.object({
+					thresholdDollarsPerMin: z.number().positive().default(1.0),
+					windowMs: z.number().int().positive().default(10_000),
+				})
+				.default({}),
+			injectionCascade: z
+				.object({
+					eventCount: z.number().int().positive().default(3),
+					windowMs: z.number().int().positive().default(60_000),
+				})
+				.default({}),
+			cooldownMs: z.number().int().nonnegative().default(30_000),
+		})
+		.default({}),
 });
 
 export type TrustConfig = z.infer<typeof TrustConfigSchema>;
