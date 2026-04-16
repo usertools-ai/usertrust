@@ -165,7 +165,7 @@ export function TypewriterCode() {
 								</div>
 							))}
 						</div>
-						<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-hidden flex-1">
+						<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto flex-1 min-w-0">
 							<code>
 								{allChars.current.map((c, i) =>
 									c.char === "\n" ? <br key={`h${i}`} /> : <span key={`h${i}`}>{c.char}</span>,
@@ -182,7 +182,7 @@ export function TypewriterCode() {
 								</div>
 							))}
 						</div>
-						<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-hidden flex-1">
+						<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto flex-1 min-w-0">
 							<code>
 								{rendered.map((c, i) =>
 									c.char === "\n" ? (

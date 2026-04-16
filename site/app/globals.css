@@ -4,6 +4,32 @@
 
 /* Fonts loaded via next/font/local in layout.tsx — CSS variables injected on <html> */
 
+/* Mobile baseline — iOS Safari text-size stability, nav-offset scroll anchoring */
+html {
+	-webkit-text-size-adjust: 100%;
+	text-size-adjust: 100%;
+	scroll-padding-top: 5rem; /* sticky nav height */
+	scroll-behavior: smooth;
+}
+
+body {
+	-webkit-tap-highlight-color: transparent;
+}
+
+/* iPhone notch / Dynamic Island safe-area utilities — opt-in per component */
+@supports (padding: env(safe-area-inset-top)) {
+	.safe-top {
+		padding-top: env(safe-area-inset-top);
+	}
+	.safe-bottom {
+		padding-bottom: env(safe-area-inset-bottom);
+	}
+	.safe-x {
+		padding-left: env(safe-area-inset-left);
+		padding-right: env(safe-area-inset-right);
+	}
+}
+
 @theme {
 	--color-brand-bg: #0a0a1a;
 	--color-brand-surface: rgba(255, 255, 255, 0.05);
@@ -75,11 +101,6 @@
 	.hero-bg {
 		animation: none !important;
 	}
-}
-
-/* Smooth scroll */
-html {
-	scroll-behavior: smooth;
 }
 
 /* Custom scrollbar */

@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import { NoiseOverlay } from "./components/noise-overlay";
 import { ScrollProgress } from "./components/scroll-progress";
@@ -58,7 +58,23 @@ export const metadata: Metadata = {
 			"One-line SDK wrapper that turns every AI agent LLM call into an auditable, budget-enforced financial transaction. Open source.",
 		images: [{ url: "/og", width: 1200, height: 630 }],
 	},
-	icons: { icon: "/favicon.svg" },
+	icons: {
+		icon: "/favicon.svg",
+		apple: "/favicon.svg",
+	},
+	appleWebApp: {
+		title: "usertrust",
+		capable: true,
+		statusBarStyle: "black-translucent",
+	},
+};
+
+export const viewport: Viewport = {
+	width: "device-width",
+	initialScale: 1,
+	viewportFit: "cover",
+	themeColor: "#0a0a1a",
+	colorScheme: "dark",
 };
 
 const jsonLd = {
