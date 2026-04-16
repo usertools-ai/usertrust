@@ -37,6 +37,7 @@ import type { Governor } from "usertrust";
 import { wrapCompleteWithGovernance, wrapStreamWithGovernance } from "./stream-governor.js";
 import type {
 	OpenClawPluginApi,
+	ProviderPlugin,
 	StreamContext,
 	StreamEvent,
 	StreamFn,
@@ -45,7 +46,12 @@ import type {
 
 // Re-export for consumers
 export { wrapStreamWithGovernance, wrapCompleteWithGovernance } from "./stream-governor.js";
-export { createAccumulator, extractUsageFromEvent } from "./token-extractor.js";
+export {
+	createAccumulator,
+	extractUsageFromEvent,
+	extractUsageFromProviderChunk,
+	extractTextDeltaLength,
+} from "./token-extractor.js";
 export type {
 	StreamEvent,
 	StreamFn,
@@ -53,6 +59,7 @@ export type {
 	StreamUsage,
 	UsertrustPluginConfig,
 	GovernedStreamMeta,
+	ProviderPlugin,
 } from "./types.js";
 
 /** Active governor instance — singleton per plugin lifecycle. */
@@ -93,13 +100,46 @@ export default function register(api: OpenClawPluginApi): void {
 }
 
 /**
+ * Factory: build an OpenClaw `ProviderPlugin` bound to a usertrust config.
+ *
+ * Use this when programmatically wiring usertrust into an OpenClaw runtime
+ * (rather than going through the auto-discovery `register()` default).
+ * The returned plugin's `wrapStreamFn` follows OpenClaw's middleware shape:
+ * `(next: StreamFn) => StreamFn`.
+ *
+ * Init is lazy — the governor is created on the first wrapped call, not
+ * at plugin construction time. This matches OpenClaw's lifecycle (plugins
+ * register synchronously; governance needs async init).
+ *
+ * ```ts
+ * import { createUsertrustPlugin } from "usertrust-openclaw";
+ *
+ * const plugin = createUsertrustPlugin({ budget: 100_000, dryRun: true });
+ * const wrapped = plugin.wrapStreamFn!(rawStreamFn);
+ * for await (const event of wrapped(model, context)) { ... }
+ * ```
+ */
+export function createUsertrustPlugin(config: UsertrustPluginConfig): ProviderPlugin {
+	const getGovernor = lazyGovernor(config);
+
+	return {
+		id: "usertrust",
+		label: "usertrust Governance",
+		wrapStreamFn(next: StreamFn): StreamFn {
+			return (model, context, options) =>
+				governedStreamLazy(getGovernor, next, model, context, options);
+		},
+	};
+}
+
+/**
  * Programmatic API for non-OpenClaw usage.
  *
  * Use this when integrating usertrust governance into a custom
  * pi-ai setup without the full OpenClaw plugin system.
  *
  * ```ts
- * import { createGovernedStreamFn } from "@usertrust/openclaw";
+ * import { createGovernedStreamFn } from "usertrust-openclaw";
  *
  * const governed = await createGovernedStreamFn(myStreamFn, {
  *   budget: 100_000,
@@ -159,6 +199,7 @@ function initGovernor(config: UsertrustPluginConfig): Promise<Governor> {
 			...(config.configPath != null ? { configPath: config.configPath } : {}),
 			...(config.proxy != null ? { proxy: config.proxy } : {}),
 			...(config.proxyKey != null ? { key: config.proxyKey } : {}),
+			...(config.vaultBase != null ? { vaultBase: config.vaultBase } : {}),
 		}).then((gov) => {
 			governor = gov;
 			return gov;

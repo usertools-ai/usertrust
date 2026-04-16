@@ -23,7 +23,8 @@
 	},
 	"scripts": {
 		"build": "tsc",
-		"prepublishOnly": "tsc"
+		"prepublishOnly": "tsc",
+		"demo": "tsx demo/runaway-agent.ts"
 	},
 	"files": ["dist", "openclaw.plugin.json"],
 	"dependencies": {

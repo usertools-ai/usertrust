@@ -106,6 +106,8 @@ export interface UsertrustPluginConfig {
 	configPath?: string;
 	proxy?: string;
 	proxyKey?: string;
+	/** Vault directory (audit chain, spend ledger). Defaults to cwd. */
+	vaultBase?: string;
 }
 
 // ── Stream Function Types ──
@@ -129,4 +131,25 @@ export interface GovernedStreamMeta {
 	transferId: string;
 	estimatedCost: number;
 	model: string;
+}
+
+// ── OpenClaw ProviderPlugin shape ──
+
+/**
+ * The plugin shape that OpenClaw's plugin loader expects.
+ *
+ * Mirrors `ProviderPlugin` from openclaw/src/plugins/types.ts. The two
+ * primary integration hooks are `wrapStreamFn` (middleware-style wrap of
+ * an existing stream function) and `createStreamFn` (custom factory).
+ *
+ * We only implement `wrapStreamFn` — middleware is the path of least
+ * surprise for governance: budget check → forward → settle.
+ */
+export interface ProviderPlugin {
+	id: string;
+	label: string;
+	/** Middleware: receives an existing stream fn, returns a wrapped one. */
+	wrapStreamFn?: (next: StreamFn) => StreamFn;
+	/** Optional: provide a fully custom stream fn. We do not use this. */
+	createStreamFn?: () => StreamFn;
 }
