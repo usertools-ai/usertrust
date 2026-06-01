@@ -66,6 +66,12 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "### Release v${VERSION}" >> "$GITHUB_STEP_SUMMARY"
 
+      # ── Re-format package.json after bump (biome) ──
+      # npm version produces multi-line keywords/files arrays that fail biome.
+      # Auto-format so master stays lint-clean after release.
+      - name: Format package.json after bump
+        run: npx biome check . --write
+
       # ── Build ──
       - name: Build usertrust
         run: cd packages/core && npx tsc
