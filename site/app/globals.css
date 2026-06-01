@@ -77,6 +77,13 @@
 	}
 }
 
+/* Promote the hero background to its own GPU layer only where Ken Burns runs */
+@media (min-width: 768px) and (prefers-reduced-motion: no-preference) {
+	.hero-bg {
+		will-change: transform;
+	}
+}
+
 /* Smooth scroll */
 html {
 	scroll-behavior: smooth;
@@ -122,30 +129,6 @@ html {
 	}
 	50% {
 		opacity: 1;
-	}
-}
-
-/* Gradient shift animation */
-@keyframes gradient-shift {
-	0% {
-		background-position: 0% 50%;
-	}
-	50% {
-		background-position: 100% 50%;
-	}
-	100% {
-		background-position: 0% 50%;
-	}
-}
-
-/* Float animation */
-@keyframes float {
-	0%,
-	100% {
-		transform: translateY(0);
-	}
-	50% {
-		transform: translateY(-6px);
 	}
 }
 
@@ -237,6 +220,8 @@ html {
 	);
 	background-size: 200% 100%;
 	animation: shimmer 8s linear infinite;
+	/* Hold the animation paused while hidden — only runs during hover */
+	animation-play-state: paused;
 	-webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
 	-webkit-mask-composite: xor;
 	mask-composite: exclude;
@@ -247,12 +232,15 @@ html {
 }
 .shimmer-border:hover::after {
 	opacity: 1;
+	animation-play-state: running;
 }
 
-/* Reduced motion: disable all custom animations */
+/* Reduced motion: disable decorative + utility animations.
+   (Gradient orbs are JS-driven and gated via useReducedMotion in the component.) */
 @media (prefers-reduced-motion: reduce) {
-	.gradient-orbs,
-	[style*="animation"] {
+	.shimmer-border::after,
+	.glow-ring,
+	[class*="animate-"] {
 		animation: none !important;
 	}
 }
@@ -312,6 +300,28 @@ html {
 	}
 }
 
+/* Hero entrance — CSS-driven so above-the-fold content paints on the first
+   frame instead of waiting for JS hydration (keeps LCP off the hydration path).
+   Mirrors the motion fade-up used elsewhere. Per-element delay set inline. */
+@keyframes hero-rise {
+	from {
+		opacity: 0;
+		transform: translateY(20px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+.hero-rise {
+	animation: hero-rise 0.6s ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+	.hero-rise {
+		animation: none;
+	}
+}
+
 .stagger-children > * {
 	animation: fade-up 0.4s ease-out both;
 }
@@ -334,18 +344,22 @@ html {
 	animation-delay: 300ms;
 }
 
-/* Glow ring — for special stat highlights */
+/* Glow ring — breathing emerald halo for the highlighted stat.
+   Pulses opacity (compositor) over a static shadow instead of animating
+   box-shadow (paint) every frame. */
 @keyframes glow-ring {
 	0%,
 	100% {
-		box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.1), 0 0 20px rgba(52, 211, 153, 0.05);
+		opacity: 0.5;
 	}
 	50% {
-		box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.2), 0 0 30px rgba(52, 211, 153, 0.1);
+		opacity: 1;
 	}
 }
 .glow-ring {
+	box-shadow: 0 0 0 2px rgba(52, 211, 153, 0.18), 0 0 30px rgba(52, 211, 153, 0.1);
 	animation: glow-ring 3s ease-in-out infinite;
+	will-change: opacity;
 }
 
 /* Reduced motion: disable Wave 3 animations */

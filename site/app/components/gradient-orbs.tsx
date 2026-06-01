@@ -1,6 +1,6 @@
 "use client";
 
-import { motion } from "motion/react";
+import { motion, useReducedMotion } from "motion/react";
 
 const orbs = [
 	{
@@ -27,6 +27,7 @@ const orbs = [
 ];
 
 export function GradientOrbs() {
+	const reduce = useReducedMotion();
 	return (
 		<div
 			className="fixed inset-0 pointer-events-none overflow-hidden"
@@ -45,16 +46,18 @@ export function GradientOrbs() {
 						top: orb.y,
 						background: `radial-gradient(circle, ${orb.color} 0%, transparent 70%)`,
 						filter: "blur(80px)",
+						willChange: reduce ? undefined : "transform",
 					}}
-					animate={{
-						x: [0, 30, -20, 10, 0],
-						y: [0, -25, 15, -10, 0],
-					}}
-					transition={{
-						duration: orb.duration,
-						repeat: Number.POSITIVE_INFINITY,
-						ease: "easeInOut",
-					}}
+					animate={reduce ? undefined : { x: [0, 30, -20, 10, 0], y: [0, -25, 15, -10, 0] }}
+					transition={
+						reduce
+							? undefined
+							: {
+									duration: orb.duration,
+									repeat: Number.POSITIVE_INFINITY,
+									ease: "easeInOut",
+								}
+					}
 				/>
 			))}
 		</div>

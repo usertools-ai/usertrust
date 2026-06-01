@@ -1,5 +1,3 @@
-"use client";
-
 import { GovernanceReceipt } from "./governance-receipt";
 import { ScrollReveal } from "./scroll-reveal";
 import { TypewriterCode } from "./typewriter-code";

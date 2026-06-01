@@ -1,5 +1,3 @@
-"use client";
-
 import type { ReactNode } from "react";
 import { AnimatedBlueprint } from "./animated-blueprint";
 import { LifecycleBlueprint } from "./lifecycle-blueprint";
@@ -34,10 +32,9 @@ function FlowConnector({
 					/>
 				</svg>
 				<div
-					className="absolute inset-0 rounded-full"
+					className="absolute inset-0 rounded-full animate-[pulse-glow_3s_ease-in-out_infinite]"
 					style={{
 						background: "radial-gradient(circle, rgba(52,211,153,0.15) 0%, transparent 70%)",
-						animation: "pulse-glow 3s ease-in-out infinite",
 					}}
 				/>
 			</div>

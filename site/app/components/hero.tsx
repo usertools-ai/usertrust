@@ -1,34 +1,10 @@
 "use client";
 
-import { AnimatePresence, motion, useScroll, useTransform } from "motion/react";
+import { PKG_VERSION } from "@/lib/version";
+import { AnimatePresence, motion, useReducedMotion, useScroll, useTransform } from "motion/react";
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
 import { CopyCommand } from "./copy-command";
-
-function usePackageStats() {
-	const [downloads, setDownloads] = useState<string>("—");
-	const [stars, setStars] = useState<string>("—");
-
-	useEffect(() => {
-		fetch("https://api.npmjs.org/downloads/point/last-month/usertrust")
-			.then((r) => r.json())
-			.then((d) => {
-				const n = d.downloads as number;
-				setDownloads(n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
-			})
-			.catch(() => {});
-
-		fetch("https://api.github.com/repos/usertools-ai/usertrust")
-			.then((r) => r.json())
-			.then((d) => {
-				const n = d.stargazers_count as number;
-				setStars(n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
-			})
-			.catch(() => {});
-	}, []);
-
-	return { downloads, stars };
-}
 
 const taglines = [
 	"Budget holds, audit trails, and spend limits for every LLM call.",
@@ -37,17 +13,18 @@ const taglines = [
 	"Hash-chained receipts. Tamper-evident by construction. Zero vendor lock-in.",
 ];
 
-export function Hero() {
+export function Hero({ downloads, stars }: { downloads: string; stars: string }) {
 	const sectionRef = useRef<HTMLElement>(null);
-	const { downloads, stars } = usePackageStats();
+	const reduce = useReducedMotion();
 	const [taglineIndex, setTaglineIndex] = useState(0);
 
 	useEffect(() => {
+		if (reduce) return;
 		const interval = setInterval(() => {
 			setTaglineIndex((prev) => (prev + 1) % taglines.length);
 		}, 4000);
 		return () => clearInterval(interval);
-	}, []);
+	}, [reduce]);
 
 	const { scrollYProgress } = useScroll({
 		target: sectionRef,
@@ -67,7 +44,7 @@ export function Hero() {
 				className="hero-bg absolute inset-0 overflow-hidden"
 				style={{
 					animation: "kenburns 20s ease-in-out infinite alternate",
-					opacity: bgOpacity,
+					opacity: reduce ? 1 : bgOpacity,
 				}}
 				aria-hidden="true"
 			>
@@ -93,67 +70,58 @@ export function Hero() {
 			>
 				{/* Headline */}
 				<h1 className="flex flex-col items-center gap-1">
-					<motion.span
-						initial={{ opacity: 0, y: 20 }}
-						animate={{ opacity: 1, y: 0 }}
-						transition={{ duration: 0.6, ease: "easeOut", delay: 0.1 }}
-						className="font-mono text-6xl sm:text-7xl md:text-8xl font-bold text-ut leading-none tracking-tight"
+					<span
+						className="hero-rise font-mono text-6xl sm:text-7xl md:text-8xl font-bold text-ut leading-none tracking-tight"
 						style={{
 							textShadow:
 								"0 0 60px rgba(52,211,153,0.5), 0 0 120px rgba(52,211,153,0.2), 0 0 80px rgba(0,0,0,0.8), 0 4px 40px rgba(0,0,0,0.6)",
+							animationDelay: "0.05s",
 						}}
 					>
 						trust()
-					</motion.span>
-					<motion.span
-						initial={{ opacity: 0, y: 20 }}
-						animate={{ opacity: 1, y: 0 }}
-						transition={{ duration: 0.6, ease: "easeOut", delay: 0.2 }}
-						className="text-4xl sm:text-5xl md:text-6xl font-bold text-white leading-tight"
+					</span>
+					<span
+						className="hero-rise text-4xl sm:text-5xl md:text-6xl font-bold text-white leading-tight"
 						style={{
 							textShadow: "0 0 80px rgba(0,0,0,0.8), 0 4px 40px rgba(0,0,0,0.6)",
+							animationDelay: "0.12s",
 						}}
 					>
 						your AI spend
-					</motion.span>
+					</span>
 				</h1>
 
 				{/* Subhead */}
-				<motion.p
-					initial={{ opacity: 0, y: 20 }}
-					animate={{ opacity: 1, y: 0 }}
-					transition={{ duration: 0.6, ease: "easeOut", delay: 0.32 }}
-					className="max-w-lg text-base sm:text-lg text-white/70 leading-relaxed h-[3.5em] sm:h-[3em] flex items-center justify-center"
+				<p
+					className="hero-rise max-w-lg text-base sm:text-lg text-white/70 leading-relaxed h-[3.5em] sm:h-[3em] flex items-center justify-center"
+					style={{ animationDelay: "0.22s" }}
 				>
-					<AnimatePresence mode="wait">
-						<motion.span
-							key={taglineIndex}
-							initial={{ opacity: 0, y: 8 }}
-							animate={{ opacity: 1, y: 0 }}
-							exit={{ opacity: 0, y: -8 }}
-							transition={{ duration: 0.4, ease: "easeInOut" }}
-						>
-							{taglines[taglineIndex]}
-						</motion.span>
-					</AnimatePresence>
-				</motion.p>
+					{reduce ? (
+						<span>{taglines[0]}</span>
+					) : (
+						<AnimatePresence mode="wait">
+							<motion.span
+								key={taglineIndex}
+								initial={{ opacity: 0, y: 8 }}
+								animate={{ opacity: 1, y: 0 }}
+								exit={{ opacity: 0, y: -8 }}
+								transition={{ duration: 0.4, ease: "easeInOut" }}
+							>
+								{taglines[taglineIndex]}
+							</motion.span>
+						</AnimatePresence>
+					)}
+				</p>
 
 				{/* Install command */}
-				<motion.div
-					initial={{ opacity: 0, y: 20 }}
-					animate={{ opacity: 1, y: 0 }}
-					transition={{ duration: 0.6, ease: "easeOut", delay: 0.44 }}
-					className="w-full max-w-md"
-				>
+				<div className="hero-rise w-full max-w-md" style={{ animationDelay: "0.32s" }}>
 					<CopyCommand />
-				</motion.div>
+				</div>
 
 				{/* CTA links */}
-				<motion.div
-					initial={{ opacity: 0, y: 20 }}
-					animate={{ opacity: 1, y: 0 }}
-					transition={{ duration: 0.6, ease: "easeOut", delay: 0.54 }}
-					className="flex flex-wrap items-center justify-center gap-3"
+				<div
+					className="hero-rise flex flex-wrap items-center justify-center gap-3"
+					style={{ animationDelay: "0.42s" }}
 				>
 					<a
 						href="#code"
@@ -169,21 +137,19 @@ export function Hero() {
 					>
 						View on GitHub
 					</a>
-				</motion.div>
+				</div>
 
 				{/* Badges + license — bottom of pane */}
 				<div className="w-16 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent" />
-				<motion.div
-					initial={{ opacity: 0 }}
-					animate={{ opacity: 1 }}
-					transition={{ duration: 0.6, ease: "easeOut", delay: 0.64 }}
-					className="flex flex-col items-center gap-3"
+				<div
+					className="hero-rise flex flex-col items-center gap-3"
+					style={{ animationDelay: "0.52s" }}
 				>
 					<div className="flex flex-wrap items-center justify-center gap-2">
 						{[
 							{
 								label: "npm",
-								value: "v1.2.2",
+								value: `v${PKG_VERSION}`,
 								logo: (
 									<svg
 										viewBox="0 0 16 16"
@@ -233,12 +199,14 @@ export function Hero() {
 									{badge.logo}
 									{badge.label}
 								</span>
-								<span className="bg-ut text-black px-2 py-1">{badge.value}</span>
+								<span className="bg-ut text-black px-2 py-1 text-center tabular-nums">
+									{badge.value}
+								</span>
 							</span>
 						))}
 					</div>
 					<p className="text-[10px] text-white/25 tracking-wide">Open source · Apache 2.0</p>
-				</motion.div>
+				</div>
 			</div>
 		</section>
 	);

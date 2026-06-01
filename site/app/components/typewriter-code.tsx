@@ -57,7 +57,7 @@ const CODE_LINES: Line[] = [
 	],
 	[
 		{ text: "  model: ", color: C.txt },
-		{ text: '"claude-sonnet-4-20250514"', color: C.str },
+		{ text: '"claude-sonnet-4-6"', color: C.str },
 		{ text: ",", color: C.txt },
 	],
 	[

@@ -1,5 +1,3 @@
-"use client";
-
 import { ScrollReveal } from "./scroll-reveal";
 
 const providers = [
