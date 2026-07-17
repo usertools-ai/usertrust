@@ -38,7 +38,9 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	}
 
 	const subcommand = process.argv[3];
-	const name = process.argv[4];
+	// Positional name = first arg after the subcommand that is not a flag.
+	const name = process.argv.slice(4).find((a) => !a.startsWith("--"));
+	const force = process.argv.includes("--force");
 
 	switch (subcommand) {
 		case "create": {
@@ -95,7 +97,23 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				}
 				return;
 			}
-			await restoreSnapshot(vaultPath, name);
+			try {
+				await restoreSnapshot(vaultPath, name, { forceLedgerDesync: force });
+			} catch (e) {
+				const msg = e instanceof Error ? e.message : String(e);
+				if (json) {
+					console.log(
+						JSON.stringify({
+							command: "snapshot",
+							success: false,
+							data: { action: "restore", name, error: msg },
+						}),
+					);
+				} else {
+					console.log(`${pc.red("Restore refused:")} ${msg}`);
+				}
+				return;
+			}
 			if (json) {
 				console.log(
 					JSON.stringify({

@@ -30,7 +30,15 @@ const ENV_VAR_MAP: Record<string, string> = {
 };
 
 const DEFAULT_POLICY = `rules:
-  - name: block-zero-budget
+  - name: block-budget-overshoot
+    effect: deny
+    enforcement: hard
+    conditions:
+      - field: budget_remaining_after
+        operator: lt
+        value: 0
+
+  - name: block-budget-exhausted
     effect: deny
     enforcement: hard
     conditions:

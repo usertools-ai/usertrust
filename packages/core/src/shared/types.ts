@@ -62,6 +62,10 @@ export const TrustConfigSchema = z.object({
 		.object({
 			rotation: z.enum(["daily", "weekly", "none"]).default("daily"),
 			indexLimit: z.number().int().default(10_000),
+			// P3-AUDIT-FAILCLOSED: when true, a failed CRITICAL audit write aborts the
+			// call (deny) instead of settling an unaudited spend. Default false keeps the
+			// legacy fail-open behavior (degraded receipt, money still moves).
+			failClosed: z.boolean().default(false),
 		})
 		.default({}),
 	tigerbeetle: z
@@ -90,8 +94,15 @@ export const TrustConfigSchema = z.object({
 		.optional(),
 	supplyChain: z
 		.object({
-			enabled: z.boolean().default(false),
+			// SC-3: fail-closed by default. A skill with no registered signing key
+			// or a bad signature is rejected out of the box; operators opt out
+			// explicitly by setting enabled:false.
+			enabled: z.boolean().default(true),
 			trustedPublishers: z.array(z.string()).default([]),
+			// SC-1 trust anchor: publisher -> hex-encoded 32-byte Ed25519 public keys
+			// the operator vouches for (array = rotation-friendly). Identity is anchored
+			// by these keys, NOT by the key embedded in an attacker-controlled manifest.
+			publisherKeys: z.record(z.string(), z.array(z.string().regex(/^[a-f0-9]{64}$/))).default({}),
 			allowedPermissions: z
 				.array(
 					z.enum([
@@ -302,6 +313,12 @@ export interface SkillVerification {
 	deniedPermissions: SkillPermission[];
 	/** SHA-256 hash of the manifest for audit inclusion. */
 	manifestHash: string;
+	/**
+	 * Whether the loaded skill source bytes were re-hashed and matched the signed
+	 * `entryHash` (SC-2). False when no source was supplied — an executor MUST treat
+	 * `false` as "integrity unverified, do not execute".
+	 */
+	integrityVerified: boolean;
 	/** Error message if verification failed. */
 	error?: string;
 }

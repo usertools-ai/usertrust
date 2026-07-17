@@ -86,36 +86,39 @@ describe("checkPermissions", () => {
 
 describe("enforceSkillLoad", () => {
 	it("succeeds for valid signed manifest with allowed permissions", () => {
-		const { manifest } = makeSignedManifest({ permissions: ["llm_call"] });
-		const config = makeConfig();
+		const { manifest, publicKey } = makeSignedManifest({ permissions: ["llm_call"] });
+		const config = makeConfig({ publisherKeys: { acme: [publicKey] } });
 		const result = enforceSkillLoad(manifest, config);
 		expect(result.valid).toBe(true);
 		expect(result.permissionsAllowed).toBe(true);
 	});
 
 	it("fails for invalid signature", () => {
-		const { manifest } = makeSignedManifest();
+		const { manifest, publicKey } = makeSignedManifest();
 		const tampered = { ...manifest, signature: "ff".repeat(64) };
-		const config = makeConfig();
+		const config = makeConfig({ publisherKeys: { acme: [publicKey] } });
 		const result = enforceSkillLoad(tampered, config);
 		expect(result.valid).toBe(false);
 		expect(result.error).toContain("Invalid manifest signature");
 	});
 
 	it("fails for disallowed permissions even with valid signature", () => {
-		const { manifest } = makeSignedManifest({ permissions: ["shell_command"] });
-		const config = makeConfig();
+		const { manifest, publicKey } = makeSignedManifest({ permissions: ["shell_command"] });
+		const config = makeConfig({ publisherKeys: { acme: [publicKey] } });
 		const result = enforceSkillLoad(manifest, config);
 		expect(result.valid).toBe(false);
 		expect(result.error).toContain("Denied permissions");
 	});
 
 	it("succeeds when publisher is trusted (all permissions allowed)", () => {
-		const { manifest } = makeSignedManifest({
+		const { manifest, publicKey } = makeSignedManifest({
 			publisher: "trusted-co",
 			permissions: ["shell_command", "credential_access"],
 		});
-		const config = makeConfig({ trustedPublishers: ["trusted-co"] });
+		const config = makeConfig({
+			trustedPublishers: ["trusted-co"],
+			publisherKeys: { "trusted-co": [publicKey] },
+		});
 		const result = enforceSkillLoad(manifest, config);
 		expect(result.valid).toBe(true);
 		expect(result.permissionsAllowed).toBe(true);
@@ -131,8 +134,8 @@ describe("enforceSkillLoad", () => {
 	});
 
 	it("with empty trustedPublishers list enforces permissions", () => {
-		const { manifest } = makeSignedManifest({ permissions: ["shell_command"] });
-		const config = makeConfig({ trustedPublishers: [] });
+		const { manifest, publicKey } = makeSignedManifest({ permissions: ["shell_command"] });
+		const config = makeConfig({ trustedPublishers: [], publisherKeys: { acme: [publicKey] } });
 		const result = enforceSkillLoad(manifest, config);
 		expect(result.valid).toBe(false);
 		expect(result.deniedPermissions).toContain("shell_command");
@@ -155,34 +158,42 @@ describe("enforceSkillLoad", () => {
 	});
 
 	it("untrusted publisher with restricted permissions blocked", () => {
-		const { manifest } = makeSignedManifest({
+		const { manifest, publicKey } = makeSignedManifest({
 			publisher: "untrusted",
 			permissions: ["credential_access"],
 		});
-		const config = makeConfig({ trustedPublishers: ["acme"] });
+		const config = makeConfig({
+			trustedPublishers: ["acme"],
+			publisherKeys: { untrusted: [publicKey] },
+		});
 		const result = enforceSkillLoad(manifest, config);
 		expect(result.valid).toBe(false);
 		expect(result.deniedPermissions).toContain("credential_access");
 	});
 
 	it("trusted publisher with any permissions allowed", () => {
-		const { manifest } = makeSignedManifest({
+		const { manifest, publicKey } = makeSignedManifest({
 			publisher: "acme",
 			permissions: ["credential_access", "network_access", "shell_command"],
 		});
-		const config = makeConfig({ trustedPublishers: ["acme"] });
+		const config = makeConfig({
+			trustedPublishers: ["acme"],
+			publisherKeys: { acme: [publicKey] },
+		});
 		const result = enforceSkillLoad(manifest, config);
 		expect(result.valid).toBe(true);
 		expect(result.permissionsAllowed).toBe(true);
 		expect(result.deniedPermissions).toEqual([]);
 	});
 
-	it("config defaults work (enabled:false, default allowed permissions)", () => {
+	it("config defaults work (enabled:true fail-closed default, default allowed permissions)", () => {
 		const config = TrustConfigSchema.parse({ budget: 1000 });
-		expect(config.supplyChain.enabled).toBe(false);
+		// SC-3: supply chain is fail-closed by default.
+		expect(config.supplyChain.enabled).toBe(true);
 		expect(config.supplyChain.allowedPermissions).toEqual(["llm_call", "tool_use", "file_read"]);
 		expect(config.supplyChain.requireSignature).toBe(true);
 		expect(config.supplyChain.trustedPublishers).toEqual([]);
+		expect(config.supplyChain.publisherKeys).toEqual({});
 	});
 });
 
@@ -197,7 +208,7 @@ describe("full pipeline", () => {
 			entrySource: 'export function run() { return "ok"; }',
 		});
 		const signed = signManifest(unsigned, keys.privateKey);
-		const config = makeConfig();
+		const config = makeConfig({ publisherKeys: { acme: [signed.publicKey] } });
 		const result = enforceSkillLoad(signed, config);
 		expect(result.valid).toBe(true);
 		expect(result.permissionsAllowed).toBe(true);
@@ -215,7 +226,7 @@ describe("full pipeline", () => {
 		});
 		const signed = signManifest(unsigned, keys.privateKey);
 		const tampered = { ...signed, name: "Evil Plugin" };
-		const config = makeConfig();
+		const config = makeConfig({ publisherKeys: { acme: [signed.publicKey] } });
 		const result = enforceSkillLoad(tampered, config);
 		expect(result.valid).toBe(false);
 		expect(result.error).toContain("Invalid manifest signature");
@@ -236,11 +247,12 @@ describe("enforceSkillLoad — enabled guard", () => {
 
 describe("enforceSkillLoad — trusted publisher forgery prevention", () => {
 	it("requires valid signature for trusted publisher even with requireSignature:false", () => {
-		const { manifest } = makeSignedManifest({ publisher: "trusted-co" });
+		const { manifest, publicKey } = makeSignedManifest({ publisher: "trusted-co" });
 		const tampered = { ...manifest, signature: "ff".repeat(64) };
 		const config = makeConfig({
 			requireSignature: false,
 			trustedPublishers: ["trusted-co"],
+			publisherKeys: { "trusted-co": [publicKey] },
 		});
 		const result = enforceSkillLoad(tampered, config);
 		expect(result.valid).toBe(false);
@@ -248,13 +260,14 @@ describe("enforceSkillLoad — trusted publisher forgery prevention", () => {
 	});
 
 	it("allows trusted publisher with valid signature and requireSignature:false", () => {
-		const { manifest } = makeSignedManifest({
+		const { manifest, publicKey } = makeSignedManifest({
 			publisher: "trusted-co",
 			permissions: ["shell_command", "credential_access"],
 		});
 		const config = makeConfig({
 			requireSignature: false,
 			trustedPublishers: ["trusted-co"],
+			publisherKeys: { "trusted-co": [publicKey] },
 		});
 		const result = enforceSkillLoad(manifest, config);
 		expect(result.valid).toBe(true);
@@ -266,12 +279,12 @@ describe("verifySignature — malformed input", () => {
 	it("returns false for malformed signature (too short)", () => {
 		const { manifest } = makeSignedManifest();
 		const malformed = { ...manifest, signature: "aa" };
-		expect(verifySignature(malformed)).toBe(false);
+		expect(verifySignature(malformed, [malformed.publicKey])).toBe(false);
 	});
 
 	it("returns false for empty signature", () => {
 		const { manifest } = makeSignedManifest();
 		const malformed = { ...manifest, signature: "" };
-		expect(verifySignature(malformed)).toBe(false);
+		expect(verifySignature(malformed, [malformed.publicKey])).toBe(false);
 	});
 });

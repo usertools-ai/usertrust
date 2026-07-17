@@ -10,13 +10,13 @@ import Anthropic from "@anthropic-ai/sdk";
 // Audit chain and policy engine still run.
 const client = await trust(new Anthropic(), { dryRun: true, budget: 50_000 });
 
-const { response, governance } = await client.messages.create({
-  model: "claude-sonnet-4.6",
+const { response, receipt } = await client.messages.create({
+  model: "claude-sonnet-4-6",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Analyze this contract" }],
 });
 
-console.log(governance);
+console.log(receipt);
 
 // REQUIRED — process hangs without this
 await client.destroy();
@@ -26,7 +26,7 @@ That's it. One function wraps any supported LLM client. Every call is metered, a
 
 ### Expected Output
 
-The `governance` receipt returned from every call:
+The `receipt` returned from every call:
 
 ```
 {
@@ -35,7 +35,7 @@ The `governance` receipt returned from every call:
   transferId: "tx_m4k7p2_a1b2c3",
   auditHash: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   settled: true,
-  model: "claude-sonnet-4.6",
+  model: "claude-sonnet-4-6",
   provider: "anthropic",
   inputTokens: 12,
   outputTokens: 28
@@ -61,11 +61,11 @@ import OpenAI from "openai";
 
 // Anthropic
 const anthropic = await trust(new Anthropic());
-const { response, governance } = await anthropic.messages.create({ ... });
+const { response, receipt } = await anthropic.messages.create({ ... });
 
 // OpenAI
 const openai = await trust(new OpenAI());
-const { response, governance } = await openai.chat.completions.create({ ... });
+const { response, receipt } = await openai.chat.completions.create({ ... });
 
 // With options (full mode — requires TigerBeetle)
 const client = await trust(new Anthropic(), {
@@ -73,7 +73,7 @@ const client = await trust(new Anthropic(), {
 });
 ```
 
-Every call returns `{ response, governance }` where `governance` is a receipt:
+Every call returns `{ response, receipt }`:
 
 ```typescript
 {
@@ -82,7 +82,7 @@ Every call returns `{ response, governance }` where `governance` is a receipt:
   budgetRemaining: 49_858,
   auditHash: "a3f8...",
   settled: true,
-  model: "claude-sonnet-4.6",
+  model: "claude-sonnet-4-6",
   provider: "anthropic",
   timestamp: "2026-03-16T12:00:00.000Z"
 }

@@ -96,6 +96,11 @@ export class TrustTBClient {
 				}),
 			);
 		}, 30_000);
+		// Do not let the health-check timer keep the Node event loop alive. Without
+		// this, a process that forgets to call destroy() can never exit — and the
+		// beforeExit cleanup net (which only fires on an otherwise-empty loop) never
+		// runs. The timer still fires while the loop is busy.
+		this.healthCheckInterval.unref?.();
 	}
 
 	private isConnectionError(err: unknown): boolean {
@@ -281,6 +286,59 @@ export class TrustTBClient {
 			);
 		}
 
+		return accountId;
+	}
+
+	/**
+	 * Create a per-session budget wallet that TigerBeetle balance-enforces.
+	 *
+	 * The account carries `debits_must_not_exceed_credits` and is seeded with
+	 * `seedCredits` usertokens via an ALLOCATION transfer from the treasury (the
+	 * mint). Any pending debit against this wallet is atomically REJECTED by TB
+	 * once cumulative (debits_pending + debits_posted) would exceed the seed —
+	 * surfaced by createPendingTransfer as a {@link TBTransferError}.
+	 *
+	 * Returns a FRESH, non-deterministic account id (tbId()) every call, so
+	 * re-initialising across processes never double-funds a shared deterministic
+	 * account (which would inflate the enforced budget on every restart).
+	 */
+	async createFundedBudgetWallet(seedCredits: number): Promise<bigint> {
+		const treasury = this.getTreasuryId(); // throws if treasury not initialized
+		const accountId = tbId();
+		const account: Account = {
+			id: accountId,
+			debits_pending: 0n,
+			debits_posted: 0n,
+			credits_pending: 0n,
+			credits_posted: 0n,
+			user_data_128: 0n,
+			user_data_64: 0n,
+			user_data_32: 0,
+			reserved: 0,
+			ledger: LEDGER_USERTOKENS,
+			code: CODE_USER_WALLET,
+			flags: AccountFlags.debits_must_not_exceed_credits | AccountFlags.history,
+			timestamp: 0n,
+		};
+		const errors = await this.withReconnect(() => this.client.createAccounts([account]));
+		if (errors.length > 0) {
+			const err = errors[0];
+			if (!err) throw new Error("Unknown account/transfer error");
+			throw new Error(
+				`Failed to create budget wallet: ${CreateAccountError[err.result] ?? err.result}`,
+			);
+		}
+		// Fund from the treasury mint. The account id is fresh, so this seeding
+		// transfer runs exactly once per wallet.
+		const seed = Number.isFinite(seedCredits) && seedCredits > 0 ? Math.floor(seedCredits) : 0;
+		if (seed > 0) {
+			await this.immediateTransfer({
+				debitAccountId: treasury,
+				creditAccountId: accountId,
+				amount: seed,
+				code: XFER_ALLOCATION,
+			});
+		}
 		return accountId;
 	}
 

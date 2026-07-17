@@ -660,15 +660,12 @@ describe("headless governor", () => {
 			vaultBase,
 		});
 
-		// First authorize uses up most of the tiny budget
-		const auth1 = await gov.authorize({
-			model: "claude-sonnet-4-6",
-			estimatedInputTokens: 100,
-			maxOutputTokens: 500,
-		});
-		await gov.settle(auth1, { inputTokens: 100, outputTokens: 500 });
-
-		// Budget should now be exhausted — next authorize should be denied
+		// STRENGTHENED (harden/core-promises): DEFAULT_RULES are now ALWAYS merged
+		// (mergePolicies), so a call whose estimated cost would overshoot the
+		// 1-usertoken budget is denied PRE-spend by block-budget-overshoot
+		// (budget_remaining_after < 0) — earlier and stronger than the prior
+		// post-settle denial. The custom budget_exhausted rule from the policies
+		// file is concatenated on top and remains active.
 		await expect(
 			gov.authorize({
 				model: "claude-sonnet-4-6",

@@ -68,16 +68,36 @@ class AsyncMutex {
 
 // ── Advisory Lock ──
 
+interface LockEntry {
+	path: string;
+	writerId: string;
+}
+
+/**
+ * Dirs currently locked by a LIVE writer in THIS process → dir → writerId.
+ *
+ * A same-PID lock file is only safe to reclaim when NO live writer in this
+ * process owns the dir (i.e. the lock is from a crashed prior instance or a
+ * recycled PID). This registry is what distinguishes a crashed writer from a
+ * live sibling — reclaiming a live sibling's lock would fork the chain, which
+ * is exactly the vulnerability the advisory lock exists to prevent.
+ */
+const inProcessLockOwners = new Map<string, string>();
+
 /**
  * Check if a lock file is stale (held by a dead process).
  * Returns true if stale and cleaned up, false if held by a live process.
  * Throws if the lock is actively held.
  */
-function tryCleanStaleLock(candidateLockPath: string): boolean {
+function tryCleanStaleLock(candidateLockPath: string, dir: string): boolean {
 	try {
 		const content = readFileSync(candidateLockPath, "utf-8");
 		const lockData = JSON.parse(content) as { pid: number };
-		if (lockData.pid === process.pid) {
+		if (lockData.pid === process.pid && !inProcessLockOwners.has(dir)) {
+			// Same PID but no live writer registered for this dir → the lock is
+			// from a crashed prior instance (the registry is cleared on release)
+			// or a recycled PID. A live sibling is caught earlier by the registry
+			// guard in acquireProcessLock, which throws before we ever get here.
 			console.warn(
 				`[AUDIT] Reclaiming stale same-PID lock (PID ${process.pid}). Previous process exited without releasing the lock.`,
 			);
@@ -120,9 +140,23 @@ function tryCleanStaleLock(candidateLockPath: string): boolean {
 	}
 }
 
-function acquireProcessLock(logPath: string, locksByDir: Map<string, { path: string }>): void {
+function acquireProcessLock(
+	logPath: string,
+	locksByDir: Map<string, LockEntry>,
+	writerId: string,
+): void {
 	const dir = dirname(logPath);
 	if (locksByDir.has(dir)) return;
+
+	// AUD-471: A live writer already holds this dir in THIS process → refuse.
+	// The advisory lock guarantees exactly one writer per vault per process;
+	// reclaiming a live sibling's lock (same-PID) would fork the chain because
+	// each writer keeps an independent tail cache.
+	if (inProcessLockOwners.has(dir)) {
+		throw new Error(
+			`Audit writer lock held by another writer in this process (dir ${dir}). Only one writer per vault per process.`,
+		);
+	}
 
 	const candidateLockPath = `${dir}/.audit-writer.lock`;
 
@@ -131,6 +165,7 @@ function acquireProcessLock(logPath: string, locksByDir: Map<string, { path: str
 	// both unlink, and both try to create — one gets EEXIST.
 	const lockContent = JSON.stringify({
 		pid: process.pid,
+		writerId,
 		startedAt: new Date().toISOString(),
 	});
 
@@ -148,7 +183,8 @@ function acquireProcessLock(logPath: string, locksByDir: Map<string, { path: str
 			// AUD-459: Close fd immediately — lock semantics rely on file existence, not open fd
 			closeSync(fd);
 		}
-		locksByDir.set(dir, { path: candidateLockPath });
+		locksByDir.set(dir, { path: candidateLockPath, writerId });
+		inProcessLockOwners.set(dir, writerId);
 		return;
 	} catch (err: unknown) {
 		if (!(err instanceof Error && "code" in err && (err as { code?: string }).code === "EEXIST")) {
@@ -158,7 +194,7 @@ function acquireProcessLock(logPath: string, locksByDir: Map<string, { path: str
 	}
 
 	// Lock file exists — check if it's stale and clean up if so
-	tryCleanStaleLock(candidateLockPath);
+	tryCleanStaleLock(candidateLockPath, dir);
 
 	// Second attempt after stale lock cleanup. If another process raced us and
 	// already re-created the lock, EEXIST here means they won — report as held.
@@ -174,7 +210,8 @@ function acquireProcessLock(logPath: string, locksByDir: Map<string, { path: str
 		} finally {
 			closeSync(fd);
 		}
-		locksByDir.set(dir, { path: candidateLockPath });
+		locksByDir.set(dir, { path: candidateLockPath, writerId });
+		inProcessLockOwners.set(dir, writerId);
 	} catch (retryErr: unknown) {
 		if (
 			retryErr instanceof Error &&
@@ -191,14 +228,41 @@ function acquireProcessLock(logPath: string, locksByDir: Map<string, { path: str
 
 // AUD-459: fd is closed immediately after writing PID content.
 // releaseLocks only needs to unlink the file — no fd to close.
-function releaseLocks(locksByDir: Map<string, { path: string }>): void {
+function releaseLocks(locksByDir: Map<string, LockEntry>): void {
 	for (const [dir, lock] of locksByDir) {
 		try {
 			unlinkSync(lock.path);
 		} catch {
 			/* already removed */
 		}
+		// Clear the live-writer registration so a subsequent same-process writer
+		// (or a snapshot restore via withAuditWriterLock) can acquire the dir.
+		if (inProcessLockOwners.get(dir) === lock.writerId) {
+			inProcessLockOwners.delete(dir);
+		}
 		locksByDir.delete(dir);
+	}
+}
+
+/**
+ * Run `fn` while holding the audit writer's advisory lock for the vault whose
+ * audit log is `logPath`. Acquires the same in-process live-writer registration
+ * + on-disk lock that {@link createAuditWriter} uses, so a live writer on the
+ * same vault in this process is refused. Use this to mutate the audit log
+ * outside the writer (e.g. snapshot restore) without risking a forked chain.
+ * The lock is always released, even if `fn` throws.
+ */
+export async function withAuditWriterLock<T>(
+	logPath: string,
+	fn: () => Promise<T> | T,
+): Promise<T> {
+	const locksByDir = new Map<string, LockEntry>();
+	const writerId = randomUUID();
+	acquireProcessLock(logPath, locksByDir, writerId);
+	try {
+		return await fn();
+	} finally {
+		releaseLocks(locksByDir);
 	}
 }
 
@@ -313,16 +377,17 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 	}
 	const logPath = join(auditDir, "events.jsonl");
 
+	const writerId = randomUUID();
 	const mutex = new AsyncMutex();
 	const lastEventCache = new Map<string, CachedTail>();
-	const locksByDir = new Map<string, { path: string }>();
+	const locksByDir = new Map<string, LockEntry>();
 	let degraded = false;
 	let writeFailures = 0;
 
 	async function appendEvent(input: AppendEventInput): Promise<AuditEvent> {
 		const release = await mutex.acquire();
 		try {
-			acquireProcessLock(logPath, locksByDir);
+			acquireProcessLock(logPath, locksByDir, writerId);
 
 			const last = getLastEvent(logPath, lastEventCache);
 			const previousHash = last?.hash ?? GENESIS_HASH;
@@ -346,9 +411,18 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 				hash,
 			};
 
+			// HARDEN: persist the CANONICAL bytes, not JSON.stringify output. The
+			// hash pre-image is `canonicalize(event)`; the verifier recomputes
+			// `sha256(canonicalize(persisted − hash))`. For any value with a
+			// `toJSON` (e.g. Buffer) `JSON.stringify` diverges from `canonicalize`,
+			// which would make an untampered event verify as TAMPERED. canonicalize
+			// is idempotent over its own output, so the bytes hashed equal the bytes
+			// persisted and the verify pkg stays in lockstep (hash format unchanged).
+			const persisted = canonicalize(fullEvent);
+
 			const fd = openSync(logPath, "a");
 			try {
-				writeSync(fd, `${JSON.stringify(fullEvent)}\n`);
+				writeSync(fd, `${persisted}\n`);
 				fsyncSync(fd);
 			} finally {
 				closeSync(fd);

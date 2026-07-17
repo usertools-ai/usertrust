@@ -39,6 +39,15 @@ describe("Checkpoint / Restore", () => {
 		// leases.json
 		await writeFile(join(vaultPath, "leases.json"), "{}");
 
+		// spend-ledger.json (money mirror — captured so restore rolls it back with audit)
+		await writeFile(join(vaultPath, "spend-ledger.json"), '{"budgetSpent":100,"updatedAt":"t"}');
+
+		// audit meta head anchor (for auditHead forensics)
+		await writeFile(
+			join(vaultPath, "audit", "events.jsonl.meta"),
+			'{"lastHash":"abc","sequence":2}',
+		);
+
 		// Excluded directories
 		await mkdir(join(vaultPath, "tigerbeetle"), { recursive: true });
 		await writeFile(join(vaultPath, "tigerbeetle", "data.tb"), "binary-data");
@@ -61,7 +70,11 @@ describe("Checkpoint / Restore", () => {
 			expect(meta.files).toContain("patterns/memory.json");
 			expect(meta.files).toContain("usertrust.config.json");
 			expect(meta.files).toContain("leases.json");
+			expect(meta.files).toContain("spend-ledger.json");
 			expect(meta.size).toBeGreaterThan(0);
+			// Forensic head anchors captured.
+			expect(meta.budgetSpent).toBe(100);
+			expect(meta.auditHead).toEqual({ lastHash: "abc", sequence: 2 });
 		});
 
 		it("excludes tigerbeetle/ and snapshots/ directories", async () => {
@@ -111,12 +124,14 @@ describe("Checkpoint / Restore", () => {
 			// Take snapshot
 			await createSnapshot(vaultPath, "restore-test");
 
-			// Modify files
+			// Modify files (including the money mirror moving forward)
 			await writeFile(join(vaultPath, "usertrust.config.json"), '{"version": 99}');
 			await writeFile(join(vaultPath, "audit", "chain.jsonl"), "modified-content\n");
+			await writeFile(join(vaultPath, "spend-ledger.json"), '{"budgetSpent":300,"updatedAt":"t2"}');
 
-			// Restore
-			await restoreSnapshot(vaultPath, "restore-test");
+			// Restore. A live tigerbeetle/ dir is present (populateVault), so audit rollback
+			// requires explicit acknowledgment that TB will not be file-rolled-back.
+			await restoreSnapshot(vaultPath, "restore-test", { forceLedgerDesync: true });
 
 			// Verify restoration
 			const config = await readFile(join(vaultPath, "usertrust.config.json"), "utf-8");
@@ -124,6 +139,17 @@ describe("Checkpoint / Restore", () => {
 
 			const chain = await readFile(join(vaultPath, "audit", "chain.jsonl"), "utf-8");
 			expect(chain).toBe("line1\nline2\n");
+
+			// Money mirror rolled back together with the audit chain.
+			const ledger = await readFile(join(vaultPath, "spend-ledger.json"), "utf-8");
+			expect(JSON.parse(ledger).budgetSpent).toBe(100);
+		});
+
+		it("refuses to roll back audit while a live tigerbeetle store is present (no --force)", async () => {
+			await populateVault();
+			await createSnapshot(vaultPath, "tb-guard");
+			// tigerbeetle/ present + audit captured → guard 2 must refuse without acknowledgment.
+			await expect(restoreSnapshot(vaultPath, "tb-guard")).rejects.toThrow(/TigerBeetle|force/i);
 		});
 
 		it("restores files even if directories were deleted", async () => {
@@ -133,8 +159,8 @@ describe("Checkpoint / Restore", () => {
 			// Delete the policies directory
 			await rm(join(vaultPath, "policies"), { recursive: true, force: true });
 
-			// Restore
-			await restoreSnapshot(vaultPath, "deleted-dirs");
+			// Restore (tigerbeetle/ present → acknowledge desync)
+			await restoreSnapshot(vaultPath, "deleted-dirs", { forceLedgerDesync: true });
 
 			// Verify policies/ was recreated
 			const policy = await readFile(join(vaultPath, "policies", "default.json"), "utf-8");
@@ -183,13 +209,13 @@ describe("Checkpoint / Restore", () => {
 			await writeFile(join(vaultPath, "usertrust.config.json"), '{"version": 2}');
 			await createSnapshot(vaultPath, "v2");
 
-			// Restore v1
-			await restoreSnapshot(vaultPath, "v1");
+			// Restore v1 (tigerbeetle/ present → acknowledge desync)
+			await restoreSnapshot(vaultPath, "v1", { forceLedgerDesync: true });
 			let config = await readFile(join(vaultPath, "usertrust.config.json"), "utf-8");
 			expect(config).toBe('{"version": 1}');
 
 			// Restore v2
-			await restoreSnapshot(vaultPath, "v2");
+			await restoreSnapshot(vaultPath, "v2", { forceLedgerDesync: true });
 			config = await readFile(join(vaultPath, "usertrust.config.json"), "utf-8");
 			expect(config).toBe('{"version": 2}');
 		});

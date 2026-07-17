@@ -78,7 +78,7 @@ describe("verifySignature", () => {
 			entrySource: "export default {}",
 		});
 		const signed = signManifest(unsigned, privateKey);
-		expect(verifySignature(signed)).toBe(true);
+		expect(verifySignature(signed, [signed.publicKey])).toBe(true);
 	});
 
 	it("returns false for tampered manifest (changed name)", () => {
@@ -92,7 +92,7 @@ describe("verifySignature", () => {
 		});
 		const signed = signManifest(unsigned, privateKey);
 		const tampered = { ...signed, name: "Tampered" };
-		expect(verifySignature(tampered)).toBe(false);
+		expect(verifySignature(tampered, [tampered.publicKey])).toBe(false);
 	});
 
 	it("returns false for tampered manifest (changed permissions)", () => {
@@ -106,7 +106,7 @@ describe("verifySignature", () => {
 		});
 		const signed = signManifest(unsigned, privateKey);
 		const tampered = { ...signed, permissions: ["llm_call", "shell_command"] as const };
-		expect(verifySignature(tampered)).toBe(false);
+		expect(verifySignature(tampered, [tampered.publicKey])).toBe(false);
 	});
 
 	it("returns false for tampered manifest (changed entryHash)", () => {
@@ -120,7 +120,24 @@ describe("verifySignature", () => {
 		});
 		const signed = signManifest(unsigned, privateKey);
 		const tampered = { ...signed, entryHash: "b".repeat(64) };
-		expect(verifySignature(tampered)).toBe(false);
+		expect(verifySignature(tampered, [tampered.publicKey])).toBe(false);
+	});
+
+	it("returns false when the signing key is not in the registered trustedKeys (SC-1)", () => {
+		const { privateKey } = generateKeyPair();
+		const other = generateKeyPair();
+		const unsigned = createUnsignedManifest({
+			id: "acme/test",
+			name: "Test",
+			publisher: "acme",
+			permissions: ["llm_call"],
+			entrySource: "export default {}",
+		});
+		const signed = signManifest(unsigned, privateKey);
+		// Signature is cryptographically valid, but the key is not registered → reject.
+		expect(verifySignature(signed, [other.publicKey])).toBe(false);
+		// Empty registry always fails closed.
+		expect(verifySignature(signed, [])).toBe(false);
 	});
 
 	it("returns false for wrong public key", () => {
@@ -135,7 +152,7 @@ describe("verifySignature", () => {
 		});
 		const signed = signManifest(unsigned, keys1.privateKey);
 		const tampered = { ...signed, publicKey: keys2.publicKey };
-		expect(verifySignature(tampered)).toBe(false);
+		expect(verifySignature(tampered, [tampered.publicKey])).toBe(false);
 	});
 });
 
@@ -150,7 +167,7 @@ describe("round-trip", () => {
 			entrySource: 'console.log("hello world");',
 		});
 		const signed = signManifest(unsigned, privateKey);
-		expect(verifySignature(signed)).toBe(true);
+		expect(verifySignature(signed, [signed.publicKey])).toBe(true);
 	});
 
 	it("create -> sign -> tamper -> verify fails", () => {
@@ -164,6 +181,6 @@ describe("round-trip", () => {
 		});
 		const signed = signManifest(unsigned, privateKey);
 		const tampered = { ...signed, publisher: "evil-corp" };
-		expect(verifySignature(tampered)).toBe(false);
+		expect(verifySignature(tampered, [tampered.publicKey])).toBe(false);
 	});
 });

@@ -247,12 +247,12 @@ describe("CLI --json flag", () => {
 			const result = parseJsonOutput(logOutput) as {
 				command: string;
 				success: boolean;
-				data: { valid: boolean; eventsVerified: number; latestHash: string };
+				data: { valid: boolean; chainLength: number; merkleRoot: string | null };
 			};
 			expect(result.command).toBe("verify");
 			expect(result.success).toBe(true);
 			expect(result.data.valid).toBe(true);
-			expect(result.data.eventsVerified).toBe(0);
+			expect(result.data.chainLength).toBe(0);
 		});
 
 		it("outputs JSON with events after writing to chain", async () => {
@@ -268,10 +268,10 @@ describe("CLI --json flag", () => {
 			await run(tempDir, { json: true });
 
 			const result = parseJsonOutput(logOutput) as {
-				data: { valid: boolean; eventsVerified: number };
+				data: { valid: boolean; chainLength: number };
 			};
 			expect(result.data.valid).toBe(true);
-			expect(result.data.eventsVerified).toBe(2);
+			expect(result.data.chainLength).toBe(2);
 		});
 
 		it("contains no ANSI escape codes in JSON output", async () => {

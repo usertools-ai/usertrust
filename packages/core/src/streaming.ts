@@ -139,6 +139,11 @@ async function* wrapStreamImpl<T>(
 	let chunksDelivered = 0;
 	let usageReported = false;
 
+	// P4-STREAM-LEAK: settlement runs in `finally` so that a consumer who breaks
+	// out of the `for await` early (which drives generator `.return()`) settles the
+	// consumed cost EXACTLY like a normal end-of-stream — the hold is released, the
+	// audit event is written, and `.receipt` resolves. Only a thrown error voids.
+	let errored = false;
 	try {
 		for await (const chunk of stream) {
 			const tokens = extractTokensFromChunk(chunk, kind);
@@ -169,10 +174,17 @@ async function* wrapStreamImpl<T>(
 			yield chunk;
 			chunksDelivered++;
 		}
-		onComplete({ usage: { inputTokens, outputTokens }, chunksDelivered, usageReported });
 	} catch (err) {
+		errored = true;
 		onError(err, { usage: { inputTokens, outputTokens }, chunksDelivered, usageReported });
 		throw err;
+	} finally {
+		// Normal completion AND early termination (consumer break → generator
+		// `.return()`) both settle here. A thrown error already ran `onError` and set
+		// `errored`, so it is the only path that skips settlement (it voids instead).
+		if (!errored) {
+			onComplete({ usage: { inputTokens, outputTokens }, chunksDelivered, usageReported });
+		}
 	}
 }
 

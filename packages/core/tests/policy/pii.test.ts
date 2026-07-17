@@ -75,8 +75,16 @@ describe("detectPII — SSN", () => {
 		expect(result.types).toContain("ssn");
 	});
 
-	it("does not detect SSN without dashes (avoids false positives)", () => {
+	it("detects a bare, structurally-valid SSN without dashes", () => {
+		// Hardening (Finding 7): bare 9-digit SSNs that pass SSA structural
+		// validation are now detected (over-redaction is the safe direction).
 		const result = detectPII({ number: "123456789" });
+		expect(result.types).toContain("ssn");
+	});
+
+	it("does not detect a structurally-invalid bare 9-digit number", () => {
+		// Invalid area (000) keeps random 9-digit identifiers from matching.
+		const result = detectPII({ number: "000000000" });
 		expect(result.types).not.toContain("ssn");
 	});
 
@@ -377,8 +385,10 @@ describe("detectPII — SSN-like but invalid", () => {
 		expect(result.types).not.toContain("ssn");
 	});
 
-	it("does not detect SSN without dashes", () => {
-		const result = detectPII({ number: "123456789" });
+	it("does not detect a bare 9-digit run with an invalid SSN area (666)", () => {
+		// Hardening (Finding 7): bare valid SSNs are detected, but structural
+		// validation still excludes reserved areas (666/000/9xx).
+		const result = detectPII({ number: "666456789" });
 		expect(result.types).not.toContain("ssn");
 	});
 

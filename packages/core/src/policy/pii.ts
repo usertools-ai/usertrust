@@ -47,9 +47,29 @@ function isPhoneNumber(value: string): boolean {
 	return /(?:\+?\d{1,3}[-.\s()]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/.test(stripped);
 }
 
-/** US SSN: XXX-XX-XXXX (with dashes required to avoid false positives) */
+/**
+ * US SSN. High-confidence dashed form `XXX-XX-XXXX`, OR a bare/space-separated
+ * 9-digit sequence that passes SSA structural validation (area 001-899 except
+ * 666, group 01-99, serial 0001-9999). Structural validation keeps the bare
+ * form from matching arbitrary 9-digit identifiers, and the word boundaries stop
+ * it firing inside longer digit runs (phone/credit-card numbers).
+ */
 function isSSN(value: string): boolean {
-	return /\b\d{3}-\d{2}-\d{4}\b/.test(value);
+	if (/\b\d{3}-\d{2}-\d{4}\b/.test(value)) return true;
+
+	// Bare or single-space-separated: 123456789 or 123 45 6789. Require standalone.
+	const bare = value.match(/\b(\d{3})[ ]?(\d{2})[ ]?(\d{4})\b/g);
+	if (!bare) return false;
+	for (const candidate of bare) {
+		const digits = candidate.replace(/ /g, "");
+		const area = Number(digits.slice(0, 3));
+		const group = Number(digits.slice(3, 5));
+		const serial = Number(digits.slice(5, 9));
+		if (area >= 1 && area <= 899 && area !== 666 && group >= 1 && group <= 99 && serial >= 1) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /** IPv4 address: 0-255.0-255.0-255.0-255 */
@@ -232,6 +252,29 @@ export function redactPII(data: unknown): RedactedData {
 	}
 	const redacted = redactValue(data);
 	return { data: redacted, detection };
+}
+
+/**
+ * Redact PII from an LLM request's message array for OUTBOUND transmission.
+ *
+ * Contract:
+ * - **Pure**: does not mutate `messages`; deep-clones and returns a new value.
+ * - Redacts only string values that match a PII pattern, replacing them with
+ *   `[REDACTED:<types>]` (same placeholder as {@link redactPII}).
+ * - Non-string / non-PII values are returned structurally unchanged.
+ * - Never touches sibling request fields — callers apply this to the message
+ *   array ONLY, then rebuild `params` with the redacted messages.
+ * - Returns the detection metadata so the caller can audit what was redacted.
+ *
+ * Intended caller (GOVERN), when `config.pii === "redact"`:
+ *   const { data: safeMessages } = redactMessages(messages);
+ *   const safeArgs = [{ ...params, messages: safeMessages }, ...args.slice(1)];
+ *   await originalFn.apply(thisArg, safeArgs);
+ *
+ * @returns `{ data: <redacted messages>, detection }`
+ */
+export function redactMessages(messages: unknown): RedactedData {
+	return redactPII(messages);
 }
 
 /** Return matched PII type names for a string value. */

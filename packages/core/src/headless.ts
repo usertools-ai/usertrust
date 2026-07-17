@@ -37,22 +37,28 @@
  * ```
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { CreateTransferError } from "tigerbeetle-node";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import { writeReceipt } from "./audit/rotation.js";
 import type { TrustEngine, TrustOpts } from "./govern.js";
-import { TrustTBClient, XFER_SPEND } from "./ledger/client.js";
+import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import { estimateCost, estimateInputTokens } from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
+import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import { type GateRule, evaluatePolicy, loadPolicies } from "./policy/gate.js";
 import { detectPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
 import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
-import { LedgerUnavailableError, PolicyDeniedError } from "./shared/errors.js";
+import {
+	InsufficientBalanceError,
+	LedgerUnavailableError,
+	PolicyDeniedError,
+} from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
 import { TrustConfigSchema } from "./shared/types.js";
 import type { TrustConfig, TrustReceipt } from "./shared/types.js";
@@ -188,25 +194,70 @@ async function loadSpendLedger(vaultBase: string): Promise<number> {
 async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promise<void> {
 	const dir = join(vaultBase, VAULT_DIR);
 	const ledgerPath = join(dir, "spend-ledger.json");
-	const tmpPath = join(dir, "spend-ledger.json.tmp");
-	const data: SpendLedger = {
-		budgetSpent,
-		updatedAt: new Date().toISOString(),
-	};
+	// AUD-457 hardening (RECON #4): UNIQUE tmp path per write. A fixed
+	// `spend-ledger.json.tmp` lets two concurrent writers clobber each other's
+	// staging file, so a half-written record can be renamed into place. A pid +
+	// uuid suffix isolates every writer's staging file.
+	const tmpPath = join(dir, `spend-ledger.json.${process.pid}.${randomUUID()}.tmp`);
 	try {
+		// Ensure vault dir exists
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true });
 		}
+		// MONOTONIC guard (RECON #4): cumulative spend must never regress on disk.
+		// A stale/racing writer carrying a lower budgetSpent must not "un-spend"
+		// money that another writer (a concurrent settle, another process, or a
+		// prior run) already recorded. Skip the write if the persisted value is
+		// already >= ours.
+		const existing = await loadSpendLedger(vaultBase);
+		if (existing > budgetSpent) {
+			return;
+		}
+		const data: SpendLedger = {
+			budgetSpent,
+			updatedAt: new Date().toISOString(),
+		};
+		// Atomic write: write UNIQUE tmp then rename over the target.
 		await writeFile(tmpPath, JSON.stringify(data), "utf-8");
 		await rename(tmpPath, ledgerPath);
 	} catch {
-		// Best-effort — do not fail the LLM call over ledger persistence
+		// Best-effort — do not fail the LLM call over ledger persistence. Clean up
+		// our unique staging file if the rename never happened.
+		await unlink(tmpPath).catch(() => {});
 	}
 }
 
-// ── TigerBeetle engine factory (same as govern.ts) ──
+// ── TigerBeetle engine factory (mirrors govern.ts) ──
 
-async function createTBEngine(config: TrustConfig): Promise<TrustEngine> {
+/** TigerBeetle codes that mean "this debit would exceed the account's credits". */
+function isTBInsufficientBalance(err: unknown): boolean {
+	if (!(err instanceof TBTransferError)) return false;
+	return (
+		err.code === CreateTransferError.exceeds_credits ||
+		err.code === CreateTransferError.overflows_debits ||
+		err.code === CreateTransferError.overflows_debits_pending
+	);
+}
+
+/**
+ * Create a balance-enforcing TrustEngine backed by a real TigerBeetle client.
+ *
+ * P1-LEDGER-ENFORCE (RECON #3): the holding account is created with
+ * `debits_must_not_exceed_credits` and FUNDED with `seedBudget` usertokens, so a
+ * pending debit (hold) whose cumulative amount would exceed the remaining budget
+ * is REJECTED atomically by TigerBeetle. That rejection is surfaced as an
+ * {@link InsufficientBalanceError}, which the governor re-throws as a hard budget
+ * DENY (never as a ledger outage).
+ *
+ * NOTE (cross-domain): RECON #3 designates `createLedgerEngine` /
+ * `createFundedBudgetWallet` (LEDGER-owned, in `ledger/engine.ts`) as the eventual
+ * home for this factory. Those symbols do not yet exist on disk, so this
+ * HEADLESS-local factory implements the same funded-enforcing contract using the
+ * existing `TrustTBClient` primitives — identical to the GOVERN-local factory in
+ * `govern.ts`. When LEDGER ships `createLedgerEngine`, BOTH `trust()` and
+ * `createGovernor()` should switch to it in lockstep.
+ */
+async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<TrustEngine> {
 	const tbAddresses = config.tigerbeetle.addresses;
 	const tbClusterId = BigInt(config.tigerbeetle.clusterId);
 
@@ -215,8 +266,15 @@ async function createTBEngine(config: TrustConfig): Promise<TrustEngine> {
 		clusterId: tbClusterId,
 	});
 
+	// Treasury (unconstrained) funds a per-session enforcing holding wallet.
 	await tbClient.createTreasury();
-	await tbClient.ensureEscrowAccount("trust:escrow");
+	const treasury = tbClient.getTreasuryId();
+
+	// Enforcing holding wallet (debits_must_not_exceed_credits), funded with the
+	// remaining session budget so cumulative pending debits cannot exceed it.
+	// A FRESH account id per session prevents double-funding a deterministic
+	// account across restarts (which would inflate the TB-enforced budget).
+	const holdingId = await tbClient.createFundedBudgetWallet(seedBudget);
 
 	const pendingMap = new Map<string, bigint>();
 
@@ -225,26 +283,33 @@ async function createTBEngine(config: TrustConfig): Promise<TrustEngine> {
 			transferId: string;
 			amount: number;
 		}): Promise<{ transferId: string }> {
-			const treasury = tbClient.getTreasuryId();
-			const escrowId = TrustTBClient.deriveAccountId("trust:escrow");
-
-			const tbTransferId = await tbClient.createPendingTransfer({
-				debitAccountId: escrowId,
-				creditAccountId: treasury,
-				amount: params.amount,
-				code: XFER_SPEND,
-			});
-
-			pendingMap.set(params.transferId, tbTransferId);
-			return { transferId: params.transferId };
+			try {
+				const tbTransferId = await tbClient.createPendingTransfer({
+					debitAccountId: holdingId,
+					creditAccountId: treasury,
+					amount: params.amount,
+					code: XFER_SPEND,
+				});
+				pendingMap.set(params.transferId, tbTransferId);
+				return { transferId: params.transferId };
+			} catch (err) {
+				// Over-budget reservation → TB rejects the pending debit. Surface as a
+				// budget error so the governor reports a hard DENY, not an outage.
+				if (isTBInsufficientBalance(err)) {
+					throw new InsufficientBalanceError("trust:hold", params.amount, seedBudget);
+				}
+				throw err;
+			}
 		},
 
-		async postPendingSpend(transferId: string): Promise<void> {
+		async postPendingSpend(transferId: string, actualAmount?: number): Promise<void> {
 			const tbId = pendingMap.get(transferId);
 			if (tbId === undefined) {
 				throw new Error(`No pending transfer found for ${transferId}`);
 			}
-			await tbClient.postTransfer(tbId);
+			// Post the ACTUAL consumed amount (≤ the reserved estimate); omitting it
+			// posts the full pending amount.
+			await tbClient.postTransfer(tbId, actualAmount);
 			pendingMap.delete(transferId);
 		},
 
@@ -312,7 +377,14 @@ export async function createGovernor(opts?: TrustOpts): Promise<Governor> {
 	const audit: AuditWriter = (isTestEnv ? opts?._audit : undefined) ?? createAuditWriter(vaultPath);
 
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
-	const policyRules: GateRule[] = existsSync(policiesPath) ? loadPolicies(policiesPath) : [];
+	const loadedRules = existsSync(policiesPath) ? loadPolicies(policiesPath) : [];
+	// P1-CUSTOM-POLICY-REPLACES (RECON #2): platform DEFAULT_RULES are ALWAYS
+	// enforced (parity with trust()). mergePolicies is a safe concat — a custom
+	// policy file can only ADD deny/warn rules, never remove the
+	// budget/overshoot/exhausted guarantees. Before this, headless dropped the
+	// defaults entirely when no policies file existed, so authorize() granted
+	// unbounded spend with no budget gate at all.
+	const policyRules: GateRule[] = mergePolicies(DEFAULT_RULES, loadedRules);
 
 	const breaker = new CircuitBreakerRegistry({
 		failureThreshold: config.circuitBreaker.failureThreshold,
@@ -330,13 +402,19 @@ export async function createGovernor(opts?: TrustOpts): Promise<Governor> {
 	// Cast keeps dead code paths type-safe for future re-enablement.
 	const proxyConn = null as ProxyConnection | null;
 
+	// AUD-457: restore cumulative spend from disk BEFORE building the engine so the
+	// enforcing holding account can be seeded with the REMAINING budget.
+	let budgetSpent = await loadSpendLedger(vaultBase);
+
 	// 4. Engine
 	let engine: TrustEngine | null;
 	if (isTestEnv && opts?._engine !== undefined) {
 		engine = opts._engine;
 	} else if (!isDryRun && proxyConn == null) {
 		try {
-			engine = await createTBEngine(config);
+			// P1-LEDGER-ENFORCE (RECON #3): seed the enforcing holding account with the
+			// remaining budget so TigerBeetle atomically REJECTS an over-budget hold.
+			engine = await createTBEngine(config, Math.max(0, config.budget - budgetSpent));
 		} catch (err) {
 			throw new LedgerUnavailableError(err instanceof Error ? err.message : String(err));
 		}
@@ -346,10 +424,36 @@ export async function createGovernor(opts?: TrustOpts): Promise<Governor> {
 
 	// 5. State
 	let destroyed = false;
-	let budgetSpent = await loadSpendLedger(vaultBase);
 	const budgetMutex = new AsyncMutex();
 	let inFlightHoldTotal = 0;
 	const activeAuths = new Map<string, Authorization>();
+
+	// Finding-2 (RECON #4): serialized, monotonic spend-ledger persistence.
+	// budgetSpent only ever increases (settle adds actualCost >= 0; authorize and
+	// abort never mutate it). Persisting OUTSIDE the budget mutex means two
+	// concurrent settles can race the read-check-write inside persistSpendLedger:
+	// a settle carrying a LOWER cumulative can rename its file AFTER a settle
+	// carrying a HIGHER one, regressing the on-disk total and silently
+	// under-counting spend on restart (→ overspend). Serializing persistence on a
+	// dedicated mutex and refusing to write a value that does not exceed the last
+	// value we persisted closes that same-instance race atomically. The disk-read
+	// guard + unique tmp inside persistSpendLedger remain as the cross-instance /
+	// prior-run defence.
+	const persistMutex = new AsyncMutex();
+	let lastPersistedSpent = budgetSpent;
+	async function persistSpend(): Promise<void> {
+		const release = await persistMutex.acquire();
+		try {
+			// Read the LIVE cumulative under the persist mutex — never a stale
+			// snapshot captured at an earlier call site.
+			const current = budgetSpent;
+			if (current <= lastPersistedSpent) return;
+			lastPersistedSpent = current;
+			await persistSpendLedger(vaultBase, current);
+		} finally {
+			release();
+		}
+	}
 
 	// 6. Governor implementation
 	const governor: Governor = {
@@ -379,14 +483,20 @@ export async function createGovernor(opts?: TrustOpts): Promise<Governor> {
 			let proxyTransferId: string | undefined;
 
 			try {
-				// Policy gate — caller params spread FIRST so governance
-				// fields cannot be shadowed (prevents budget_remaining injection).
+				// Policy gate — caller params spread FIRST so trusted governance
+				// fields (tier/estimated_cost/budget_remaining/budget_remaining_after)
+				// CANNOT be shadowed by attacker-controlled params.
+				// P1-BUDGET-PREFLIGHT (RECON #1): budget_remaining_after is the derived
+				// field the block-budget-overshoot default rule compares against zero to
+				// deny a single overshooting call PRE-spend. As a HARD rule it fails
+				// CLOSED if omitted, so it MUST be supplied on every evaluation.
 				const policyResult = evaluatePolicy(policyRules, {
 					...(params.params ?? {}),
 					model,
 					tier: config.tier,
 					estimated_cost: estCost,
 					budget_remaining: config.budget - budgetSpent - inFlightHoldTotal,
+					budget_remaining_after: config.budget - budgetSpent - inFlightHoldTotal - estCost,
 				});
 				if (policyResult.decision === "deny") {
 					const reason =
@@ -420,6 +530,14 @@ export async function createGovernor(opts?: TrustOpts): Promise<Governor> {
 					try {
 						await engine.spendPending({ transferId, amount: estCost });
 					} catch (holdErr) {
+						// P1-LEDGER-ENFORCE: an over-budget reservation is rejected
+						// atomically by the ledger. Surface it as a hard budget DENY —
+						// NOT as "ledger unavailable" (which would misreport a budget cap
+						// as an outage).
+						if (holdErr instanceof InsufficientBalanceError) {
+							throw holdErr;
+						}
+						// Genuine ledger outage — do NOT forward to provider.
 						throw new LedgerUnavailableError(
 							holdErr instanceof Error ? holdErr.message : String(holdErr),
 						);
@@ -478,7 +596,8 @@ export async function createGovernor(opts?: TrustOpts): Promise<Governor> {
 			} finally {
 				releaseLock();
 			}
-			await persistSpendLedger(vaultBase, budgetSpent);
+			// Finding-2 (RECON #4): serialized monotonic persist — never regresses.
+			await persistSpend();
 
 			// Circuit breaker: success
 			const cb = breaker.get("headless" as never);
@@ -511,7 +630,9 @@ export async function createGovernor(opts?: TrustOpts): Promise<Governor> {
 				}
 			} else if (engine != null && !isDryRun) {
 				try {
-					await engine.postPendingSpend(auth.transferId);
+					// Post the ACTUAL consumed cost (RECON #3) — which may be less than
+					// the reserved estimate.
+					await engine.postPendingSpend(auth.transferId, actualCost);
 				} catch (postErr) {
 					settled = false;
 					await audit

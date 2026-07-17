@@ -824,22 +824,24 @@ describe("trust()", () => {
 
 	describe("DEFAULT_RULES fallback", () => {
 		it("denies second call when budget exhausted and no policy file (block-budget-exhausted default rule)", async () => {
-			// budget=1 is the minimum allowed. First call succeeds and exhausts the budget.
-			// Second call is denied by the block-budget-exhausted default rule.
+			// The first call's ESTIMATE (max_tokens 1024) fits inside budget 50_000, so
+			// the block-budget-overshoot preflight allows it. The mock then reports a
+			// huge ACTUAL usage that drives the committed spend past the budget, so the
+			// second call is denied by the DEFAULT_RULES budget guards (no policy file).
 			const createFn = vi.fn(async () => ({
 				id: "msg_123",
 				model: "claude-sonnet-4-6",
-				usage: { input_tokens: 10, output_tokens: 5 },
+				usage: { input_tokens: 10, output_tokens: 1_000_000 },
 			}));
 			const mockClient = { messages: { create: createFn } };
 
 			const governed = await trust(mockClient, {
 				dryRun: true,
-				budget: 1,
+				budget: 50_000,
 				vaultBase: tmpVault,
 			});
 
-			// First call succeeds (budget_remaining=1 passes policy)
+			// First call succeeds (estimate fits budget), but actual usage exhausts it.
 			const r1 = await governed.messages.create({
 				model: "claude-sonnet-4-6",
 				max_tokens: 1024,
@@ -848,7 +850,7 @@ describe("trust()", () => {
 			expect(r1.response).toBeDefined();
 			expect(r1.receipt.budgetRemaining).toBeLessThanOrEqual(0);
 
-			// Second call denied by DEFAULT_RULES block-budget-exhausted
+			// Second call denied by DEFAULT_RULES (budget now exhausted / overshoot).
 			await expect(
 				governed.messages.create({
 					model: "claude-sonnet-4-6",
