@@ -35,26 +35,51 @@ interface AuditEvent {
 	[key: string]: unknown;
 }
 
+interface Anchor {
+	lastHash: string;
+	sequence: number;
+}
+
+/**
+ * Read the `.meta` head anchor sidecar. Fail-closed:
+ *  - absent → `null` (unanchored / legacy vault; allowed)
+ *  - present but unparseable or missing `lastHash`/`sequence` → `{ corrupt: true }`
+ */
+export function readAnchor(metaPath: string): Anchor | { corrupt: true } | null {
+	if (!existsSync(metaPath)) return null;
+	try {
+		const parsed = JSON.parse(readFileSync(metaPath, "utf-8")) as Record<string, unknown>;
+		if (typeof parsed.lastHash === "string" && typeof parsed.sequence === "number") {
+			return { lastHash: parsed.lastHash, sequence: parsed.sequence };
+		}
+		return { corrupt: true };
+	} catch {
+		return { corrupt: true };
+	}
+}
+
 export function verifyChain(logPath: string): ChainVerificationResult {
 	const errors: string[] = [];
 
-	if (!existsSync(logPath)) {
-		return {
-			valid: true,
-			eventsVerified: 0,
-			errors: [],
-			skipped: 0,
-			latestHash: GENESIS_HASH,
-			verifiedAt: new Date().toISOString(),
-		};
+	const anchorRaw = readAnchor(`${logPath}.meta`);
+	let anchor: Anchor | null = null;
+	if (anchorRaw !== null) {
+		if ("corrupt" in anchorRaw) {
+			errors.push("Audit anchor (.meta) present but corrupt");
+		} else {
+			anchor = anchorRaw;
+		}
 	}
 
-	const content = readFileSync(logPath, "utf-8").trim();
-	if (!content) {
+	const content = existsSync(logPath) ? readFileSync(logPath, "utf-8").trim() : "";
+	if (content === "") {
+		if (anchor && anchor.sequence > 0) {
+			errors.push(`Audit log missing/empty but anchor records ${anchor.sequence} event(s)`);
+		}
 		return {
-			valid: true,
+			valid: errors.length === 0,
 			eventsVerified: 0,
-			errors: [],
+			errors,
 			skipped: 0,
 			latestHash: GENESIS_HASH,
 			verifiedAt: new Date().toISOString(),
@@ -106,6 +131,19 @@ export function verifyChain(logPath: string): ChainVerificationResult {
 
 		expectedPreviousHash = storedHash;
 		latestHash = storedHash;
+	}
+
+	if (anchor) {
+		if (latestHash !== anchor.lastHash) {
+			errors.push(
+				`anchor mismatch: expected last hash ${anchor.lastHash}, got ${latestHash} (tail truncation)`,
+			);
+		}
+		if (lines.length !== anchor.sequence) {
+			errors.push(
+				`anchor mismatch: expected ${anchor.sequence} event(s), found ${lines.length} (truncation/deletion)`,
+			);
+		}
 	}
 
 	return {

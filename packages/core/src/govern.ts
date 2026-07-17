@@ -28,17 +28,18 @@
  * ```
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { CreateTransferError } from "tigerbeetle-node";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import { writeReceipt } from "./audit/rotation.js";
 import { detectClientKind } from "./detect.js";
-import { TrustTBClient, XFER_SPEND } from "./ledger/client.js";
+import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import { estimateCost, estimateInputTokens } from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
-import { DEFAULT_RULES } from "./policy/default-rules.js";
+import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import { type GateRule, evaluatePolicy, loadPolicies } from "./policy/gate.js";
 import { detectInjection } from "./policy/injection.js";
 import { detectPII, redactPII } from "./policy/pii.js";
@@ -49,7 +50,13 @@ import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
 import { createAnomalyDetector } from "./anomaly/detector.js";
-import { AnomalyError, LedgerUnavailableError, PolicyDeniedError } from "./shared/errors.js";
+import {
+	AnomalyError,
+	AuditDegradedError,
+	InsufficientBalanceError,
+	LedgerUnavailableError,
+	PolicyDeniedError,
+} from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
 import { TrustConfigSchema } from "./shared/types.js";
 import type {
@@ -108,7 +115,11 @@ export interface TrustEngine {
 		transferId: string;
 		amount: number;
 	}): Promise<{ transferId: string }>;
-	postPendingSpend(transferId: string): Promise<void>;
+	/**
+	 * Settle a PENDING hold. `actualAmount` posts the true consumed cost (which may
+	 * be less than the reserved estimate); omitting it posts the full pending amount.
+	 */
+	postPendingSpend(transferId: string, actualAmount?: number): Promise<void>;
 	voidPendingSpend(transferId: string): Promise<void>;
 	/** AUD-461: Void all remaining pending transfers on destroy. */
 	voidAllPending?(): Promise<void>;
@@ -175,21 +186,35 @@ async function loadSpendLedger(vaultBase: string): Promise<number> {
 async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promise<void> {
 	const dir = join(vaultBase, VAULT_DIR);
 	const ledgerPath = join(dir, "spend-ledger.json");
-	const tmpPath = join(dir, "spend-ledger.json.tmp");
-	const data: SpendLedger = {
-		budgetSpent,
-		updatedAt: new Date().toISOString(),
-	};
+	// AUD-457 hardening (RECON #4): UNIQUE tmp path per write. A fixed
+	// `spend-ledger.json.tmp` lets two concurrent writers clobber each other's
+	// staging file, so a half-written record can be renamed into place. A pid +
+	// uuid suffix isolates every writer's staging file.
+	const tmpPath = join(dir, `spend-ledger.json.${process.pid}.${randomUUID()}.tmp`);
 	try {
 		// Ensure vault dir exists
 		if (!existsSync(dir)) {
 			mkdirSync(dir, { recursive: true });
 		}
-		// Atomic write: write tmp then rename
+		// MONOTONIC guard (RECON #4): cumulative spend must never regress on disk.
+		// A stale/racing writer carrying a lower budgetSpent must not "un-spend"
+		// money that another writer already recorded. Skip the write if the
+		// persisted value is already >= ours.
+		const existing = await loadSpendLedger(vaultBase);
+		if (existing > budgetSpent) {
+			return;
+		}
+		const data: SpendLedger = {
+			budgetSpent,
+			updatedAt: new Date().toISOString(),
+		};
+		// Atomic write: write UNIQUE tmp then rename over the target.
 		await writeFile(tmpPath, JSON.stringify(data), "utf-8");
 		await rename(tmpPath, ledgerPath);
 	} catch {
-		// Best-effort — do not fail the LLM call over ledger persistence
+		// Best-effort — do not fail the LLM call over ledger persistence. Clean up
+		// our unique staging file if the rename never happened.
+		await unlink(tmpPath).catch(() => {});
 	}
 }
 
@@ -227,7 +252,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
 	const loadedRules = existsSync(policiesPath) ? loadPolicies(policiesPath) : [];
-	const policyRules: GateRule[] = loadedRules.length > 0 ? loadedRules : DEFAULT_RULES;
+	// P1-CUSTOM-POLICY-REPLACES (RECON #2): platform DEFAULT_RULES are ALWAYS
+	// enforced. mergePolicies is a safe concat — a custom policy file can only ADD
+	// deny/warn rules, never remove the budget/overshoot/exhausted guarantees. The
+	// gate is deny-wins with no "allow" effect, so appended user rules cannot weaken
+	// a default deny.
+	const policyRules: GateRule[] = mergePolicies(DEFAULT_RULES, loadedRules);
 
 	const breaker = new CircuitBreakerRegistry({
 		failureThreshold: config.circuitBreaker.failureThreshold,
@@ -245,6 +275,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// Cast keeps dead code paths type-safe for future re-enablement.
 	const proxyConn = null as ProxyConnection | null;
 
+	// AUD-457: restore cumulative spend from disk BEFORE building the engine so the
+	// enforcing holding account can be seeded with the REMAINING budget.
+	let budgetSpent = await loadSpendLedger(vaultBase);
+
 	// 4. Engine (injected for tests, real TB client in production, null in dry-run/proxy)
 	// AUD-470: _engine injection only accepted in test environments
 	let engine: TrustEngine | null;
@@ -252,7 +286,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		engine = opts._engine;
 	} else if (!isDryRun && proxyConn == null) {
 		try {
-			engine = await createTBEngine(config);
+			// P1-LEDGER-ENFORCE (RECON #3): seed the enforcing holding account with the
+			// remaining budget so TigerBeetle atomically REJECTS an over-budget hold.
+			engine = await createTBEngine(config, Math.max(0, config.budget - budgetSpent));
 		} catch (err) {
 			throw new LedgerUnavailableError(err instanceof Error ? err.message : String(err));
 		}
@@ -265,7 +301,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	// 6. Track state
 	let destroyed = false;
-	let budgetSpent = await loadSpendLedger(vaultBase); // AUD-457: restore from disk
 	const budgetMutex = new AsyncMutex(); // AUD-453: serialise budget-check + hold
 	let inFlightCount = 0; // AUD-462: track in-flight calls for graceful destroy
 	let inFlightStreamCount = 0; // AUD-462: track in-flight streams (consumed after interceptCall returns)
@@ -291,10 +326,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		try {
 			const params = (args[0] ?? {}) as Record<string, unknown>;
 			const model = (params.model as string) ?? "unknown";
-			const messages = (params.messages as unknown[]) ?? [];
+			// P3-PROVIDER-BLINDSPOT: normalize the prompt-bearing payload across
+			// providers (Anthropic/OpenAI `messages` + `system`, Google `contents`) so
+			// PII/injection scanning, token estimation, redaction, and pattern hashing
+			// all see the actual prompt — not an empty `messages` array on Google calls.
+			const promptParts = extractPromptParts(params, kind);
 
 			// Per-call audit degradation flag (not sticky across calls)
 			let callAuditDegraded = false;
+
+			// P3-PII-REDACT-EGRESS: `forwardArgs` is what we actually send to the
+			// provider. In redact mode it becomes a redacted deep clone so PII never
+			// egresses; block mode throws before any egress. Default: forward verbatim.
+			let forwardArgs = args;
 
 			// a. Circuit breaker check
 			const cb = breaker.get(kind);
@@ -302,7 +346,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 			// b. Estimate cost (before policy, so cost fields are available in context)
 			const transferId = trustId("tx");
-			const estimatedInputTokens = estimateInputTokens(messages);
+			const estimatedInputTokens = estimateInputTokens(promptParts);
 			const maxOutputTokens = (params.max_tokens as number) ?? 4096;
 			const estimatedCost = estimateCost(model, estimatedInputTokens, maxOutputTokens, customRates);
 
@@ -328,12 +372,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 			try {
 				// c. Policy gate
+				// P1-PARAM-SHADOW: caller `params` are spread FIRST so trusted
+				// governance fields (tier/estimated_cost/budget_remaining/
+				// budget_remaining_after) CANNOT be shadowed by request-supplied keys.
+				// P1-BUDGET-PREFLIGHT: budget_remaining_after is the derived field the
+				// single-field gate compares against zero to deny a single overshooting
+				// call (the `block-budget-overshoot` default rule).
 				const policyResult = evaluatePolicy(policyRules, {
+					...params,
 					model,
 					tier: config.tier,
 					estimated_cost: estimatedCost,
 					budget_remaining: config.budget - budgetSpent - inFlightHoldTotal,
-					...params,
+					budget_remaining_after: config.budget - budgetSpent - inFlightHoldTotal - estimatedCost,
 				});
 				if (policyResult.decision === "deny") {
 					const reason =
@@ -341,18 +392,25 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					throw new PolicyDeniedError(reason);
 				}
 
-				// d. PII check
+				// d. PII check + redact-egress
 				if (config.pii !== "off") {
-					const piiResult = detectPII(messages);
+					const piiResult = detectPII(promptParts);
 					if (piiResult.found && config.pii === "block") {
+						// block mode: throw BEFORE any egress.
 						throw new PolicyDeniedError(`PII detected: ${piiResult.types.join(", ")}`);
 					}
-					// "warn" and "redact" modes: continue (redact is not implemented at SDK level)
+					if (config.pii === "redact" && piiResult.found) {
+						// redact mode: forward a redacted DEEP CLONE so PII never egresses.
+						// redactPII is pure — the caller's original object is never mutated.
+						const redactedBody = redactPII(params).data as Record<string, unknown>;
+						forwardArgs = [redactedBody, ...args.slice(1)];
+					}
+					// "warn" mode: continue, no transform (audit copy is redacted later).
 				}
 
 				// d2. Injection detection
 				if (config.injection !== "off") {
-					const injectionResult = detectInjection(messages);
+					const injectionResult = detectInjection(promptParts);
 					if (injectionResult.detected) {
 						if (config.injection === "block") {
 							throw new PolicyDeniedError(
@@ -401,7 +459,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							amount: estimatedCost,
 						});
 					} catch (holdErr) {
-						// Ledger unreachable — do NOT forward to provider
+						// P1-LEDGER-ENFORCE: an over-budget reservation is rejected
+						// atomically by the ledger. Surface it as a hard budget DENY —
+						// NOT as "ledger unavailable" (which would misreport a budget cap
+						// as an outage). This throws out of the budget-section try, runs
+						// its finally (releases the budget lock), and propagates without
+						// a hold to void — exactly mirroring the policy-deny control flow.
+						if (holdErr instanceof InsufficientBalanceError) {
+							throw holdErr;
+						}
+						// Genuine ledger outage — do NOT forward to provider.
 						throw new LedgerUnavailableError(
 							holdErr instanceof Error ? holdErr.message : String(holdErr),
 						);
@@ -416,10 +483,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				releaseBudgetLock();
 			}
 
-			// e. Forward to original SDK
+			// e. Forward to original SDK. P3-PII-REDACT-EGRESS: forwardArgs is the
+			// redacted clone in redact mode, or the original args otherwise.
 			let settled = true;
 			try {
-				const response = await (originalFn as (...a: unknown[]) => unknown).apply(thisArg, args);
+				const response = await (originalFn as (...a: unknown[]) => unknown).apply(
+					thisArg,
+					forwardArgs,
+				);
 
 				// e2. Streaming detection: if response is an async iterable, wrap with
 				// token accumulation. Settlement and audit happen when the stream ends.
@@ -495,7 +566,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								}
 							} else if (engine != null && !isDryRun) {
 								try {
-									await engine.postPendingSpend(transferId);
+									// Post the ACTUAL consumed cost (RECON #3).
+									await engine.postPendingSpend(transferId, streamCost);
 								} catch (postErr) {
 									settled = false;
 									await audit
@@ -530,7 +602,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									chunksDelivered: completion.chunksDelivered,
 								};
 								if (config.pii === "warn" || config.pii === "redact") {
-									const piiResult = redactPII(messages);
+									const piiResult = redactPII(promptParts);
 									if (piiResult.detection.found) {
 										auditEventData.piiDetected = piiResult.detection.types;
 										auditEventData.piiPaths = piiResult.detection.paths;
@@ -544,6 +616,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								auditHash = auditEvent.hash;
 							} catch {
 								callAuditDegraded = true;
+							}
+
+							// P3-AUDIT-FAILCLOSED (streaming): chunks were already delivered,
+							// so the strongest post-delivery signal is to REJECT `.receipt`.
+							// Decrement the stream counter first so destroy() never blocks.
+							if (config.audit.failClosed && (callAuditDegraded || audit.isDegraded())) {
+								inFlightStreamCount--;
+								throw new AuditDegradedError(
+									`audit unavailable (writeFailures=${audit.getWriteFailures()}) for ${transferId}`,
+								);
 							}
 
 							const streamReceipt: TrustReceipt = {
@@ -689,10 +771,56 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					}
 				}
 
-				// Release in-flight hold and commit budget under mutex
-				// AUD-468: Mark hold released before the commit so that any
-				// throw in the post-commit window (audit/persist/etc.) cannot
-				// double-decrement inFlightHoldTotal via the outer catch.
+				// h. Audit the llm_call FIRST (P3-AUDIT-FAILCLOSED). The settlement-
+				// defining event is written BEFORE the irreversible budget commit and
+				// POST, so a fail-closed deployment never settles an unaudited spend.
+				// The event carries settled:true optimistically; a later POST failure
+				// appends the settlement_ambiguous correction and flips receipt.settled.
+				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
+				let auditHash = syntheticHash;
+				let llmAuditFailed = false;
+				try {
+					const auditData: Record<string, unknown> = {
+						model,
+						cost: actualCost,
+						settled: true,
+						transferId,
+					};
+					if (config.pii === "warn" || config.pii === "redact") {
+						const piiResult = redactPII(promptParts);
+						if (piiResult.detection.found) {
+							auditData.piiDetected = piiResult.detection.types;
+							auditData.piiPaths = piiResult.detection.paths;
+						}
+					}
+					const auditEvent = await audit.appendEvent({
+						kind: "llm_call",
+						actor: "local",
+						data: auditData,
+					});
+					auditHash = auditEvent.hash;
+				} catch {
+					// Failure mode 15.3: Audit degraded — mark + warn.
+					llmAuditFailed = true;
+					callAuditDegraded = true;
+					process.stderr.write(
+						`[usertrust] audit degraded: failed to write llm_call event for ${transferId}\n`,
+					);
+				}
+
+				// P3-AUDIT-FAILCLOSED: under failClosed a failed llm_call audit ABORTS the
+				// call before any money moves. Throwing here routes to the outer catch,
+				// which VOIDs the hold (once) and never POSTs — the internal ledger holds
+				// no unaudited spend, and the caller is told the call failed.
+				if (config.audit.failClosed && llmAuditFailed) {
+					throw new AuditDegradedError(
+						`audit unavailable (writeFailures=${audit.getWriteFailures()}) for ${transferId}`,
+					);
+				}
+
+				// Release in-flight hold and commit budget under mutex — money moves only
+				// AFTER the spend is audited. AUD-468: mark hold released before the commit
+				// so a later throw cannot double-decrement inFlightHoldTotal via the catch.
 				if (holdActive) {
 					holdActive = false;
 					const releaseLock = await budgetMutex.acquire();
@@ -709,7 +837,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// g2. Failure mode 15.1: POST fails after LLM success
 				if (engine != null && !isDryRun) {
 					try {
-						await engine.postPendingSpend(transferId);
+						// Post the ACTUAL consumed cost (RECON #3).
+						await engine.postPendingSpend(transferId, actualCost);
 					} catch (postErr) {
 						// POST failed — LLM call succeeded but settlement is ambiguous
 						settled = false;
@@ -758,34 +887,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					}
 				}
 
-				// h. Audit event — failure mode 15.3: audit write failure
-				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
-				let auditHash = syntheticHash;
-				try {
-					const auditData: Record<string, unknown> = {
-						model,
-						cost: actualCost,
-						settled,
-						transferId,
-					};
-					if (config.pii === "warn" || config.pii === "redact") {
-						const piiResult = redactPII(messages);
-						if (piiResult.detection.found) {
-							auditData.piiDetected = piiResult.detection.types;
-							auditData.piiPaths = piiResult.detection.paths;
-						}
-					}
-					const auditEvent = await audit.appendEvent({
-						kind: "llm_call",
-						actor: "local",
-						data: auditData,
-					});
-					auditHash = auditEvent.hash;
-				} catch {
-					// Failure mode 15.3: Audit degraded — do not fail the response
-					callAuditDegraded = true;
-					process.stderr.write(
-						`[usertrust] audit degraded: failed to write llm_call event for ${transferId}\n`,
+				// P3-AUDIT-FAILCLOSED belt-and-suspenders: if ANY audit write during this
+				// call degraded the writer (including best-effort advisory writes), refuse
+				// to report success under failClosed so the caller cannot silently proceed.
+				if (config.audit.failClosed && (callAuditDegraded || audit.isDegraded())) {
+					throw new AuditDegradedError(
+						`audit unavailable (writeFailures=${audit.getWriteFailures()}) for ${transferId}`,
 					);
 				}
 
@@ -805,7 +912,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				// i2. Pattern memory
 				if (config.patterns.enabled) {
-					const promptHash = createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+					const promptHash = createHash("sha256").update(JSON.stringify(promptParts)).digest("hex");
 					await recordPattern({
 						promptHash,
 						model,
@@ -882,7 +989,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				// l. Pattern memory: record failure
 				if (config.patterns.enabled) {
-					const promptHash = createHash("sha256").update(JSON.stringify(messages)).digest("hex");
+					const promptHash = createHash("sha256").update(JSON.stringify(promptParts)).digest("hex");
 					await recordPattern({
 						promptHash,
 						model,
@@ -932,13 +1039,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 			try {
 				// c. Policy gate — action fields available in context
-				// AUD-467: Caller params spread FIRST so governance fields cannot be shadowed
+				// AUD-467: Caller params spread FIRST so governance fields cannot be shadowed.
+				// P1-BUDGET-PREFLIGHT: budget_remaining_after is the derived field the
+				// block-budget-overshoot default rule compares against zero (a HARD rule
+				// that fails CLOSED if the governor omits it — so it MUST be supplied).
 				const policyResult = evaluatePolicy(policyRules, {
 					...(action.params ?? {}),
 					action_kind: action.kind,
 					action_name: action.name,
 					estimated_cost: action.cost,
 					budget_remaining: config.budget - budgetSpent - inFlightHoldTotal,
+					budget_remaining_after: config.budget - budgetSpent - inFlightHoldTotal - action.cost,
 					tier: config.tier,
 				});
 				if (policyResult.decision === "deny") {
@@ -1003,6 +1114,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							amount: action.cost,
 						});
 					} catch (holdErr) {
+						// P1-LEDGER-ENFORCE: over-budget reservation → hard budget DENY,
+						// not a ledger-outage misreport.
+						if (holdErr instanceof InsufficientBalanceError) {
+							throw holdErr;
+						}
 						throw new LedgerUnavailableError(
 							holdErr instanceof Error ? holdErr.message : String(holdErr),
 						);
@@ -1032,7 +1148,57 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			try {
 				const result = await execute();
 
-				// Release in-flight hold and commit budget under mutex
+				// i. Prepare params for audit — redact PII if configured.
+				let auditParams: Record<string, unknown> | undefined;
+				if (action.params != null) {
+					if (config.pii === "warn" || config.pii === "redact") {
+						const redacted = redactPII(action.params);
+						auditParams = redacted.data as Record<string, unknown>;
+					} else {
+						auditParams = action.params;
+					}
+				}
+
+				// i2. Audit the action FIRST (P3-AUDIT-FAILCLOSED). The settlement-
+				// defining event precedes the budget commit + POST, so a fail-closed
+				// deployment never settles an unaudited action. settled:true is
+				// optimistic; a later POST failure appends settlement_ambiguous.
+				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
+				let auditHash = syntheticHash;
+				let actionAuditFailed = false;
+				try {
+					const auditEvent = await audit.appendEvent({
+						kind: action.kind,
+						actor,
+						data: {
+							actionName: action.name,
+							cost: action.cost,
+							settled: true,
+							transferId,
+							...(auditParams != null ? { params: auditParams } : {}),
+						},
+					});
+					auditHash = auditEvent.hash;
+				} catch {
+					// Failure mode 15.3: Audit degraded — mark + warn.
+					actionAuditFailed = true;
+					callAuditDegraded = true;
+					process.stderr.write(
+						`[usertrust] audit degraded: failed to write ${action.kind} event for ${transferId}\n`,
+					);
+				}
+
+				// P3-AUDIT-FAILCLOSED: under failClosed a failed action audit ABORTS the
+				// call before any money moves — the outer catch VOIDs the hold (once) and
+				// never POSTs.
+				if (config.audit.failClosed && actionAuditFailed) {
+					throw new AuditDegradedError(
+						`audit unavailable (writeFailures=${audit.getWriteFailures()}) for ${transferId}`,
+					);
+				}
+
+				// Release in-flight hold and commit budget under mutex — money moves only
+				// AFTER the action is audited.
 				await releaseHoldAndCommit(action.cost);
 				await persistSpendLedger(vaultBase, budgetSpent);
 
@@ -1043,7 +1209,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				let settled = true;
 				if (engine != null && !isDryRun) {
 					try {
-						await engine.postPendingSpend(transferId);
+						// Post the ACTUAL cost (RECON #3).
+						await engine.postPendingSpend(transferId, action.cost);
 					} catch (postErr) {
 						settled = false;
 						await audit
@@ -1093,38 +1260,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					}
 				}
 
-				// i. Prepare params for audit — redact PII if configured
-				let auditParams: Record<string, unknown> | undefined;
-				if (action.params != null) {
-					if (config.pii === "warn" || config.pii === "redact") {
-						const redacted = redactPII(action.params);
-						auditParams = redacted.data as Record<string, unknown>;
-					} else {
-						auditParams = action.params;
-					}
-				}
-
-				// i2. Audit event
-				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
-				let auditHash = syntheticHash;
-				try {
-					const auditEvent = await audit.appendEvent({
-						kind: action.kind,
-						actor,
-						data: {
-							actionName: action.name,
-							cost: action.cost,
-							settled,
-							transferId,
-							...(auditParams != null ? { params: auditParams } : {}),
-						},
-					});
-					auditHash = auditEvent.hash;
-				} catch {
-					// Failure mode 15.3: Audit degraded — do not fail the response
-					callAuditDegraded = true;
-					process.stderr.write(
-						`[usertrust] audit degraded: failed to write ${action.kind} event for ${transferId}\n`,
+				// P3-AUDIT-FAILCLOSED belt-and-suspenders: refuse to report success if any
+				// audit write during this call degraded the writer under failClosed.
+				if (config.audit.failClosed && (callAuditDegraded || audit.isDegraded())) {
+					throw new AuditDegradedError(
+						`audit unavailable (writeFailures=${audit.getWriteFailures()}) for ${transferId}`,
 					);
 				}
 
@@ -1286,14 +1426,62 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	return governedClient;
 }
 
-// ── TigerBeetle engine factory ──
+// ── Provider-aware prompt extraction (P3-PROVIDER-BLINDSPOT) ──
 
 /**
- * Create a TrustEngine backed by a real TigerBeetle client.
- * Uses a simplified two-phase interface: pending transfers are created
- * directly against the TB client using escrow-style debit/credit accounts.
+ * Normalize the prompt-bearing payload across providers so PII/injection scanning
+ * and token estimation cover ALL shapes, not just Anthropic/OpenAI `messages`:
+ *   - Anthropic/OpenAI: `params.messages` (+ Anthropic top-level `system` string)
+ *   - Google:           `params.contents` (the prompt lives here, not `messages`)
+ *
+ * Without this, a Google `generateContent({ model, contents })` call has an empty
+ * `messages` array, so every PII/injection scan sees nothing and PII egresses.
  */
-async function createTBEngine(config: TrustConfig): Promise<TrustEngine> {
+function extractPromptParts(params: Record<string, unknown>, kind: LLMClientKind): unknown[] {
+	if (kind === "google") {
+		const contents = params.contents;
+		if (Array.isArray(contents)) return contents;
+		return contents != null ? [contents] : [];
+	}
+	const messages = params.messages;
+	const parts: unknown[] = Array.isArray(messages) ? [...messages] : [];
+	if (typeof params.system === "string") {
+		parts.push({ role: "system", content: params.system });
+	}
+	return parts;
+}
+
+// ── TigerBeetle engine factory ──
+
+/** TigerBeetle codes that mean "this debit would exceed the account's credits". */
+function isTBInsufficientBalance(err: unknown): boolean {
+	if (!(err instanceof TBTransferError)) return false;
+	return (
+		err.code === CreateTransferError.exceeds_credits ||
+		err.code === CreateTransferError.overflows_debits ||
+		err.code === CreateTransferError.overflows_debits_pending
+	);
+}
+
+/**
+ * Create a balance-enforcing TrustEngine backed by a real TigerBeetle client.
+ *
+ * P1-LEDGER-ENFORCE: the holding account is created with
+ * `debits_must_not_exceed_credits` and FUNDED with `seedBudget` usertokens, so a
+ * pending debit (hold) whose cumulative amount would exceed the remaining budget
+ * is REJECTED atomically by TigerBeetle. That rejection is surfaced as an
+ * {@link InsufficientBalanceError}, which the governor re-throws as a hard budget
+ * DENY (never as a ledger outage). The prior escrow account had no enforcing flag
+ * and no funding, so `spendPending` could never reject an over-budget hold.
+ *
+ * NOTE (cross-domain): RECON #3 designates `createLedgerEngine` /
+ * `createFundedBudgetWallet` (LEDGER-owned, in `ledger/engine.ts`) as the eventual
+ * home for this factory. Those symbols do not yet exist on disk, so this
+ * GOVERN-local factory implements the same funded-enforcing contract using the
+ * existing `TrustTBClient` primitives. When LEDGER ships `createLedgerEngine`,
+ * this factory is a drop-in replacement (identical `TrustEngine` shape).
+ */
+async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<TrustEngine> {
 	const tbAddresses = config.tigerbeetle.addresses;
 	const tbClusterId = BigInt(config.tigerbeetle.clusterId);
 
@@ -1302,9 +1490,15 @@ async function createTBEngine(config: TrustConfig): Promise<TrustEngine> {
 		clusterId: tbClusterId,
 	});
 
-	// Initialize treasury and escrow accounts
+	// Treasury (unconstrained) funds a per-session enforcing holding wallet.
 	await tbClient.createTreasury();
-	await tbClient.ensureEscrowAccount("trust:escrow");
+	const treasury = tbClient.getTreasuryId();
+
+	// Enforcing holding wallet (debits_must_not_exceed_credits), funded with the
+	// remaining session budget so cumulative pending debits cannot exceed it.
+	// A FRESH account id per session prevents double-funding a deterministic
+	// account across restarts (which would inflate the TB-enforced budget).
+	const holdingId = await tbClient.createFundedBudgetWallet(seedBudget);
 
 	// Pending transfer ID mapping (trustId string -> TB bigint)
 	const pendingMap = new Map<string, bigint>();
@@ -1314,27 +1508,33 @@ async function createTBEngine(config: TrustConfig): Promise<TrustEngine> {
 			transferId: string;
 			amount: number;
 		}): Promise<{ transferId: string }> {
-			const treasury = tbClient.getTreasuryId();
-			// Use a deterministic escrow account for SDK-local holds
-			const escrowId = TrustTBClient.deriveAccountId("trust:escrow");
-
-			const tbTransferId = await tbClient.createPendingTransfer({
-				debitAccountId: escrowId,
-				creditAccountId: treasury,
-				amount: params.amount,
-				code: XFER_SPEND,
-			});
-
-			pendingMap.set(params.transferId, tbTransferId);
-			return { transferId: params.transferId };
+			try {
+				const tbTransferId = await tbClient.createPendingTransfer({
+					debitAccountId: holdingId,
+					creditAccountId: treasury,
+					amount: params.amount,
+					code: XFER_SPEND,
+				});
+				pendingMap.set(params.transferId, tbTransferId);
+				return { transferId: params.transferId };
+			} catch (err) {
+				// Over-budget reservation → TB rejects the pending debit. Surface as a
+				// budget error so the governor reports a hard DENY, not an outage.
+				if (isTBInsufficientBalance(err)) {
+					throw new InsufficientBalanceError("trust:hold", params.amount, seedBudget);
+				}
+				throw err;
+			}
 		},
 
-		async postPendingSpend(transferId: string): Promise<void> {
+		async postPendingSpend(transferId: string, actualAmount?: number): Promise<void> {
 			const tbId = pendingMap.get(transferId);
 			if (tbId === undefined) {
 				throw new Error(`No pending transfer found for ${transferId}`);
 			}
-			await tbClient.postTransfer(tbId);
+			// Post the ACTUAL consumed amount (≤ the reserved estimate); omitting it
+			// posts the full pending amount.
+			await tbClient.postTransfer(tbId, actualAmount);
 			pendingMap.delete(transferId);
 		},
 

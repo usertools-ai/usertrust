@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { verifyTransaction, verifyVault } from "./index.js";
+import { exitCodeFor, verifyTransaction, verifyVault } from "./index.js";
 
 const args = process.argv.slice(2);
 
@@ -53,3 +53,6 @@ if (result.lastEvent) console.log(`Last event: ${result.lastEvent}`);
 if (result.chainLength > 0) {
 	console.log(`All hashes: valid (${result.validHashes}/${result.chainLength})`);
 }
+
+// Exit nonzero on a FAILED verdict so CI gates fail on a tampered vault.
+process.exit(exitCodeFor(result));

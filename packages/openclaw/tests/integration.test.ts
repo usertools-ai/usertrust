@@ -182,10 +182,16 @@ describe("createUsertrustPlugin (factory)", () => {
 		expect(gov?.budgetRemaining()).toBe(100_000);
 	});
 
-	it("denies further calls once the budget is exhausted", async () => {
-		// 240 usertokens per call (claude-sonnet-4-6 at 500/1500 tokens),
-		// budget 480 → exactly 2 calls then 0 remaining → 3rd call denied.
-		const plugin = createUsertrustPlugin({ budget: 480, dryRun: true, vaultBase });
+	it("denies calls once the shared budget cannot cover another call (pre-spend, no overshoot)", async () => {
+		// Each call SETTLES 240 usertokens (sonnet at 500/1500), but pre-spend
+		// enforcement decides on the ESTIMATE — and openclaw sends no maxTokens, so
+		// the estimate assumes the full 4096-token output (~614/call). A call is
+		// denied once its estimate exceeds the remaining budget, so a call can never
+		// overshoot. The exact number that fit is estimate-dependent, so assert the
+		// invariant (some succeed, then denied, never overshoot) — not a fixed count.
+		const BUDGET = 3000;
+		const SETTLED_PER_CALL = 240;
+		const plugin = createUsertrustPlugin({ budget: BUDGET, dryRun: true, vaultBase });
 
 		const rawStreamFn: StreamFn = async function* () {
 			yield { type: "start" as const };
@@ -202,23 +208,32 @@ describe("createUsertrustPlugin (factory)", () => {
 			model: "claude-sonnet-4-6",
 		};
 
-		// First two calls should succeed
-		// biome-ignore lint/style/noNonNullAssertion: guarded above
-		for await (const _e of wrapped!("claude-sonnet-4-6", ctx)) {
-			// drain
-		}
-		// biome-ignore lint/style/noNonNullAssertion: guarded above
-		for await (const _e of wrapped!("claude-sonnet-4-6", ctx)) {
-			// drain
-		}
-
-		// Third should be cut off
-		await expect(async () => {
-			// biome-ignore lint/style/noNonNullAssertion: guarded above
+		const drain = async () => {
+			// biome-ignore lint/style/noNonNullAssertion: guarded by the test setup
 			for await (const _e of wrapped!("claude-sonnet-4-6", ctx)) {
 				// drain
 			}
-		}).rejects.toThrow(/budget exhausted/);
+		};
+
+		let succeeded = 0;
+		let denied: unknown;
+		for (let i = 0; i < 40; i++) {
+			try {
+				await drain();
+				succeeded++;
+			} catch (e) {
+				denied = e;
+				break;
+			}
+		}
+
+		// At least one call went through, then a later call was denied pre-spend
+		// with a budget error — and the total settled spend never overshot the
+		// budget (the real guarantee: never spend past the cap).
+		expect(succeeded).toBeGreaterThanOrEqual(1);
+		expect(denied).toBeInstanceOf(Error);
+		expect((denied as Error).message).toMatch(/budget/i);
+		expect(succeeded * SETTLED_PER_CALL).toBeLessThanOrEqual(BUDGET);
 	});
 
 	it("settles the hold on early consumer-side termination (break)", async () => {

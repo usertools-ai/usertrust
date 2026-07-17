@@ -20,6 +20,10 @@ describe("usertrust verify", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		// The verify CLI now sets process.exitCode = 1 on a FAILED/missing-vault
+		// verdict; reset it so the failure verdict does not leak into the vitest
+		// worker's final exit code.
+		process.exitCode = 0;
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -55,7 +59,7 @@ describe("usertrust verify", () => {
 		const combined = logOutput.join("\n");
 		expect(combined).toContain("Chain verified");
 		expect(combined).toContain("3 events");
-		expect(combined).toContain("Latest hash:");
+		expect(combined).toContain("Merkle root:");
 	});
 
 	it("reports failure for tampered chain", async () => {

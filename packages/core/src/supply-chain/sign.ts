@@ -81,10 +81,19 @@ export function signManifest(
 }
 
 /**
- * Verifies the Ed25519 signature on a signed manifest.
+ * Verifies the Ed25519 signature on a signed manifest against the REGISTERED
+ * public key(s) for the claimed publisher. The key embedded in the manifest is
+ * NOT trusted as an authority: it is accepted only if it is one of `trustedKeys`.
+ * Passing an empty `trustedKeys` list always fails closed.
  */
-export function verifySignature(manifest: SkillManifest): boolean {
+export function verifySignature(manifest: SkillManifest, trustedKeys: string[]): boolean {
 	try {
+		// Trust anchor: the manifest's key must be one the operator registered for
+		// this publisher. A self-signed key from an attacker is rejected here.
+		if (!trustedKeys.includes(manifest.publicKey)) {
+			return false;
+		}
+
 		const payload = computeSigningPayload(
 			{
 				version: manifest.version,

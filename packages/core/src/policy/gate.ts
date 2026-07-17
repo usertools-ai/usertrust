@@ -86,26 +86,107 @@ function resolveFieldPath(path: string, context: Record<string, unknown>): unkno
 /** Maximum allowed length for regex patterns in policy rules. */
 const MAX_REGEX_LENGTH = 200;
 
+/** Maximum input length the regex engine is allowed to scan (defense-in-depth). */
+const MAX_REGEX_INPUT = 4096;
+
 /**
- * Detects nested quantifiers that can cause catastrophic backtracking (ReDoS).
- * Matches patterns like `a+*`, `a*+`, `a{2,}*`, `a+{2,}`, etc.
+ * Adjacent nested quantifiers, e.g. `a+*`, `a*+`, `a{2,}*`, `a+{2,}`.
  */
-const NESTED_QUANTIFIER_RE = /[+*?]\{?\d*,?\d*\}?[+*?]/;
+const ADJACENT_QUANTIFIER_RE = /[+*?]\{?\d*,?\d*\}?[+*?]/;
+
+/**
+ * Structural catastrophic-backtracking guard.
+ *
+ * Rejects a group `( ... )` that is immediately followed by an unbounded
+ * quantifier (`*`, `+`, or `{n,}`) when the group body itself contains a
+ * quantifier (`*` `+` `?` `{`) or an alternation (`|`). This is the canonical
+ * shape of exponential backtracking: `(a+)+`, `(.*)*`, `(\d+)+`, `(a|a)*`,
+ * `(a|ab)*`, etc. Escaped parens (`\(`) and character classes (`[...]`) are
+ * handled by tracking escape/class state so real group boundaries are matched.
+ *
+ * Conservative by design: it may reject some benign patterns, but policy
+ * regexes are operator-authored config, so over-rejection is acceptable and
+ * fails safe (safeRegExp returns null → condition is non-matching).
+ */
+function hasNestedQuantifiedGroup(pattern: string): boolean {
+	// Per open group, whether its body so far contains a quantifier/alternation.
+	const bodyHasAmbiguity: boolean[] = [];
+	let escaped = false;
+	let inClass = false; // inside a [...] character class
+
+	for (let i = 0; i < pattern.length; i++) {
+		const c = pattern[i];
+
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (c === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (inClass) {
+			if (c === "]") inClass = false;
+			continue;
+		}
+		if (c === "[") {
+			inClass = true;
+			continue;
+		}
+
+		if (c === "(") {
+			bodyHasAmbiguity.push(false);
+			continue;
+		}
+
+		if (c === "|" || c === "*" || c === "+" || c === "?" || c === "{") {
+			// Mark the innermost open group's body as ambiguous.
+			if (bodyHasAmbiguity.length > 0) {
+				bodyHasAmbiguity[bodyHasAmbiguity.length - 1] = true;
+			}
+		}
+
+		if (c === ")") {
+			const ambiguous = bodyHasAmbiguity.pop() ?? false;
+			// Look at the quantifier applied to this group.
+			const next = pattern[i + 1];
+			const unboundedQuantifier =
+				next === "*" ||
+				next === "+" ||
+				(next === "{" &&
+					/^\{\d*,\d*\}/.test(pattern.slice(i + 1)) &&
+					!/^\{\d+\}/.test(pattern.slice(i + 1))); // {n,} or {n,m}/{,m}, not {n}
+			if (ambiguous && unboundedQuantifier) return true;
+			// Propagate ambiguity outward: a quantified group is itself ambiguous
+			// content for any enclosing group.
+			if (
+				bodyHasAmbiguity.length > 0 &&
+				(next === "*" || next === "+" || next === "?" || next === "{")
+			) {
+				bodyHasAmbiguity[bodyHasAmbiguity.length - 1] = true;
+			}
+		}
+	}
+	return false;
+}
 
 /**
  * Validate that a regex pattern is safe to compile and execute.
  *
- * **Security**: Regex policies must contain trusted input. User-supplied patterns
- * are constrained to prevent ReDoS (Regular Expression Denial of Service):
+ * **Security** (AUD-463): prevents ReDoS (Regular Expression Denial of Service).
  * - Patterns longer than 200 characters are rejected.
- * - Patterns containing nested quantifiers (e.g. `a+*`, `x{2,}+`) are rejected.
+ * - Adjacent nested quantifiers (`a+*`, `x{2,}+`) are rejected.
+ * - A quantified group whose body contains a quantifier/alternation
+ *   (`(a+)+`, `(.*)*`, `(\d+)+`, `(a|a)*`) is rejected structurally at compile
+ *   time — this eliminates the exponential-backtracking class deterministically.
  * - Invalid regex syntax is caught and treated as non-matching.
  *
  * @returns The compiled RegExp, or null if the pattern is unsafe or invalid.
  */
 function safeRegExp(pattern: string): RegExp | null {
 	if (pattern.length > MAX_REGEX_LENGTH) return null;
-	if (NESTED_QUANTIFIER_RE.test(pattern)) return null;
+	if (ADJACENT_QUANTIFIER_RE.test(pattern)) return null;
+	if (hasNestedQuantifiedGroup(pattern)) return null;
 	try {
 		return new RegExp(pattern);
 	} catch {
@@ -118,10 +199,26 @@ function safeRegExp(pattern: string): RegExp | null {
 // ---------------------------------------------------------------------------
 
 /**
+ * Tri-state result of evaluating a single condition:
+ * - `true`  — the condition is satisfied.
+ * - `false` — the field is present and comparable but does NOT satisfy.
+ * - `"indeterminate"` — the field is missing or the wrong type, so the
+ *   comparison cannot be evaluated. Numeric operators produce this instead of
+ *   silently returning `false`; `ruleMatches` decides the safe direction based
+ *   on enforcement (hard rules fail closed, soft rules stay lenient).
+ */
+type CondResult = boolean | "indeterminate";
+
+/**
  * Evaluate a single field condition against the evaluation context.
  * Supports all 12 operators from the FieldOperator union.
+ *
+ * Numeric operators (`gt`/`gte`/`lt`/`lte`) return `"indeterminate"` when the
+ * field is absent or non-numeric — the distinction between "present but does not
+ * satisfy" (`false`) and "cannot be evaluated" (`"indeterminate"`) is what lets
+ * hard rules fail closed instead of silently allowing an unbounded operation.
  */
-function evaluateFieldCondition(fc: FieldCondition, context: Record<string, unknown>): boolean {
+function evaluateFieldCondition(fc: FieldCondition, context: Record<string, unknown>): CondResult {
 	const resolved = resolveFieldPath(fc.field, context);
 
 	switch (fc.operator) {
@@ -138,16 +235,20 @@ function evaluateFieldCondition(fc: FieldCondition, context: Record<string, unkn
 			return resolved !== fc.value;
 
 		case "gt":
-			return typeof resolved === "number" && typeof fc.value === "number" && resolved > fc.value;
+			if (typeof resolved !== "number" || typeof fc.value !== "number") return "indeterminate";
+			return resolved > fc.value;
 
 		case "gte":
-			return typeof resolved === "number" && typeof fc.value === "number" && resolved >= fc.value;
+			if (typeof resolved !== "number" || typeof fc.value !== "number") return "indeterminate";
+			return resolved >= fc.value;
 
 		case "lt":
-			return typeof resolved === "number" && typeof fc.value === "number" && resolved < fc.value;
+			if (typeof resolved !== "number" || typeof fc.value !== "number") return "indeterminate";
+			return resolved < fc.value;
 
 		case "lte":
-			return typeof resolved === "number" && typeof fc.value === "number" && resolved <= fc.value;
+			if (typeof resolved !== "number" || typeof fc.value !== "number") return "indeterminate";
+			return resolved <= fc.value;
 
 		case "in":
 			return Array.isArray(fc.value) && fc.value.includes(resolved);
@@ -164,7 +265,11 @@ function evaluateFieldCondition(fc: FieldCondition, context: Record<string, unkn
 			if (typeof resolved !== "string" || typeof fc.value !== "string") return false;
 			const re = safeRegExp(fc.value);
 			if (re === null) return false;
-			return re.test(resolved);
+			// Layer B (defense-in-depth): bound the scanned input so even a
+			// structural miss cannot be fed an unbounded string.
+			const input =
+				resolved.length > MAX_REGEX_INPUT ? resolved.slice(0, MAX_REGEX_INPUT) : resolved;
+			return re.test(input);
 		}
 
 		default:
@@ -264,9 +369,20 @@ function ruleMatches(rule: GateRule, context: PolicyContext): boolean {
 	const enabled = rule.enabled ?? true;
 	if (!enabled) return false;
 
+	// Hard rules fail CLOSED: a condition that cannot be evaluated (a missing or
+	// mistyped guarded field) is treated as satisfied so the guard still fires,
+	// rather than silently allowing an unbounded/ungoverned operation. Soft rules
+	// stay lenient (indeterminate → unmet) to preserve warning-only behavior.
+	const failClosed = rule.enforcement === "hard";
+
 	// All field conditions must match
 	for (const fc of rule.conditions) {
-		if (!evaluateFieldCondition(fc, context)) return false;
+		const res = evaluateFieldCondition(fc, context);
+		if (res === "indeterminate") {
+			if (failClosed) continue;
+			return false;
+		}
+		if (!res) return false;
 	}
 
 	// Scope matching (if rule has scope patterns)

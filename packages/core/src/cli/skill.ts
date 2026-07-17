@@ -19,9 +19,10 @@ export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise
 	const { json, positional } = parseFlags();
 	const jsonOut = opts?.json ?? json;
 
-	// positional: ["skill", "verify", path]
+	// positional: ["skill", "verify", manifestPath, entryPath?]
 	const action = positional[1];
 	const manifestPath = positional[2];
+	const entryPath = positional[3];
 
 	if (action !== "verify") {
 		const msg = action
@@ -85,9 +86,33 @@ export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise
 		return;
 	}
 
-	const sigValid = verifySignature(manifest);
 	const config = await loadConfig(undefined, process.cwd());
-	const result = enforceSkillLoad(manifest, config);
+	const registeredKeys = config.supplyChain.publisherKeys[manifest.publisher] ?? [];
+	const sigValid = verifySignature(manifest, registeredKeys);
+
+	// Read the entry-point source when a path is supplied so the signed entryHash
+	// is re-verified against real bytes (SC-2). Without it, integrity is "not checked".
+	let entrySource: Buffer | undefined;
+	if (entryPath) {
+		try {
+			entrySource = readFileSync(entryPath);
+		} catch {
+			const err = `Entry file not found: ${entryPath}`;
+			if (jsonOut)
+				console.log(
+					JSON.stringify({ command: "skill verify", success: false, data: { error: err } }),
+				);
+			else console.log(pc.red(err));
+			return;
+		}
+	}
+
+	const result = enforceSkillLoad(manifest, config, entrySource);
+	const integrityStatus = entrySource
+		? result.error?.includes("entryHash")
+			? "TAMPERED"
+			: "verified"
+		: "not checked";
 
 	const output = {
 		id: manifest.id,
@@ -96,15 +121,16 @@ export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise
 		permissionsAllowed: result.permissionsAllowed,
 		deniedPermissions: result.deniedPermissions,
 		manifestHash: result.manifestHash,
+		integrity: integrityStatus,
 	};
 
 	if (jsonOut) {
-		const success = sigValid && result.permissionsAllowed;
+		const success = result.valid;
 		console.log(
 			JSON.stringify({
 				command: "skill verify",
 				success,
-				data: success ? output : { ...output, error: "Verification failed" },
+				data: success ? output : { ...output, error: result.error ?? "Verification failed" },
 			}),
 		);
 	} else {
@@ -114,6 +140,13 @@ export async function run(_unused?: unknown, opts?: { json?: boolean }): Promise
 		console.log(
 			`${pc.bold("Permissions:")} ${result.permissionsAllowed ? pc.green("allowed") : pc.red(`denied: ${result.deniedPermissions.join(", ")}`)}`,
 		);
+		const integrityColor =
+			integrityStatus === "verified"
+				? pc.green(integrityStatus)
+				: integrityStatus === "TAMPERED"
+					? pc.red(integrityStatus)
+					: pc.dim(integrityStatus);
+		console.log(`${pc.bold("Integrity:")} ${integrityColor}`);
 		console.log(`${pc.bold("Manifest hash:")} ${result.manifestHash}`);
 	}
 }

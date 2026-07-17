@@ -171,25 +171,15 @@ describe("Action governance — E2E integration", () => {
 	// ─────────────────────────────────────────────────────────────────────
 
 	describe("2. Shared budget enforcement", () => {
-		it("action fails when LLM call exhausts the shared budget", async () => {
-			// Write a policy with the budget-exhausted rule so the gate
-			// denies when budget_remaining drops to zero or below.
-			writePolicyFile(tmpVault, ".usertrust/policies/default.yml", [
-				{
-					name: "block-budget-exhausted",
-					effect: "deny",
-					enforcement: "hard",
-					conditions: [{ field: "budget_remaining", operator: "lte", value: 0 }],
-				},
-			]);
-			writeVaultConfig(tmpVault, {
-				budget: 500,
-				policies: "./policies/default.yml",
-			});
+		it("enforces the shared budget across LLM calls and actions, pre-spend (no overshoot)", async () => {
+			// Default rules (merged in for every vault) include block-budget-overshoot,
+			// which denies a call PRE-spend when its estimated cost would drive the
+			// remaining budget below zero — so a single call can never overshoot.
+			writeVaultConfig(tmpVault, { budget: 500 });
 
-			// Use a mock with high token usage so the LLM call costs >= budget.
+			// A mock whose usage would cost >= the whole budget.
 			// Sonnet pricing: input 30/1k, output 150/1k.
-			// 10000 input + 2000 output → (10000/1000)*30 + (2000/1000)*150 = 300 + 300 = 600.
+			// 10000 input + 2000 output → (10000/1000)*30 + (2000/1000)*150 = 600.
 			const expensiveMock = makeAnthropicMock({
 				id: "msg_expensive",
 				type: "message",
@@ -204,18 +194,26 @@ describe("Action governance — E2E integration", () => {
 				vaultBase: tmpVault,
 			});
 
-			// LLM call succeeds (budget_remaining = 500 > 0 at pre-call check)
-			const llmResult = await governed.messages.create({
-				model: "claude-sonnet-4-6",
-				max_tokens: 4096,
-				messages: [{ role: "user", content: "Write a long essay" }],
-			});
+			// 1. The over-budget LLM call is DENIED pre-spend — the overshoot the old
+			//    code allowed (budgetRemaining going negative) can no longer happen.
+			await expect(
+				governed.messages.create({
+					model: "claude-sonnet-4-6",
+					max_tokens: 4096,
+					messages: [{ role: "user", content: "Write a long essay" }],
+				}),
+			).rejects.toThrow(PolicyDeniedError);
 
-			// LLM cost should be 600, exhausting the budget of 500
-			expect(llmResult.receipt.cost).toBe(600);
-			expect(llmResult.receipt.budgetRemaining).toBeLessThan(0);
+			// 2. A denied call consumes no budget, so a within-budget action still
+			//    succeeds against the full shared pool (no phantom spend).
+			const firstAction = await governed.governAction(
+				{ kind: "tool_use", name: "curl", cost: 400 },
+				async () => ({ ok: true }),
+			);
+			expect(firstAction.result.ok).toBe(true);
 
-			// Governed action should fail — budget_remaining is now <= 0
+			// 3. Now 400 of 500 is spent; a further action that would exceed the
+			//    shared remaining budget is denied pre-spend as well.
 			await expect(
 				governed.governAction({ kind: "tool_use", name: "curl", cost: 300 }, async () => ({
 					ok: true,

@@ -35,30 +35,44 @@ const VERBS = [
 	"forget about",
 ];
 
-const OBJECTS = [
-	"instructions",
-	"rules",
-	"guidelines",
-	"system prompt",
-	"previous instructions",
-	"above instructions",
-	"context",
-	"constraints",
-];
-
-/** Pre-computed lowercased injection phrases (verb + " " + object). */
-const KEYWORD_COMBOS: string[] = [];
-for (const verb of VERBS) {
-	for (const obj of OBJECTS) {
-		KEYWORD_COMBOS.push(`${verb} ${obj}`);
-	}
+function escapeRegExp(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Injection intent regex: a directive verb, then up to a few OPTIONAL filler
+ * words (all/any/the/your/those/these/prior/previous/preceding/earlier/above/
+ * following/original/system/of/to), then a target noun. The filler window lets
+ * "ignore ALL previous instructions" and "disregard all prior instructions"
+ * match where the old literal "verb object" substrings did not.
+ *
+ * Filler is bounded to `{0,4}` and every alternative is a literal, so the
+ * pattern is linear-time and cannot itself become a ReDoS vector. Homoglyph and
+ * heavy-obfuscation evasions remain explicitly out of scope.
+ */
+const VERB_ALT = VERBS.map(escapeRegExp).join("|");
+const OBJECT_ALT = [
+	"instructions",
+	"instruction",
+	"rules",
+	"guidelines",
+	"directives",
+	"system prompt",
+	"system message",
+	"prompt",
+	"context",
+	"constraints",
+	"restrictions",
+].join("|");
+const FILLER =
+	"(?:all|any|the|your|those|these|prior|previous|preceding|earlier|above|following|original|system|of|to)";
+const INJECTION_INTENT_RE = new RegExp(
+	`(?:${VERB_ALT})\\s+(?:${FILLER}\\s+){0,4}(?:${OBJECT_ALT})`,
+	"i",
+);
+
 function checkKeywordCombo(lower: string): boolean {
-	for (const combo of KEYWORD_COMBOS) {
-		if (lower.includes(combo)) return true;
-	}
-	return false;
+	return INJECTION_INTENT_RE.test(lower);
 }
 
 // ---------------------------------------------------------------------------

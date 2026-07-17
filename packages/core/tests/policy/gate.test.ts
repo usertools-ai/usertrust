@@ -153,8 +153,12 @@ describe("operators", () => {
 			expect(evaluatePolicy([r], { cost: 50 }).matched).toHaveLength(0);
 		});
 
-		it("does not match non-numeric fields", () => {
+		it("does not match non-numeric fields (soft rule stays lenient)", () => {
+			// Numeric operators are indeterminate on non-numeric input. Under SOFT
+			// enforcement that stays lenient (no match); hard rules fail closed and
+			// are covered separately in tests/harden/fail-closed.test.ts.
 			const r = rule({
+				enforcement: "soft",
 				conditions: [{ field: "cost", operator: "gt", value: 100 }],
 			});
 			const result = evaluatePolicy([r], { cost: "150" });
@@ -680,6 +684,8 @@ describe("default rules", () => {
 			budget: 50000,
 			estimated_cost: 100,
 			budget_remaining: 50000,
+			// governor-supplied derived field: budget_remaining - estimated_cost
+			budget_remaining_after: 49900,
 		});
 		expect(result.decision).toBe("allow");
 		expect(result.hasWarnings).toBe(false);
@@ -944,22 +950,28 @@ describe("operator edge cases", () => {
 	});
 
 	describe("gt — edge cases", () => {
-		it("returns false for non-numeric field (string)", () => {
+		// Soft rules: numeric operators are indeterminate on missing/mistyped
+		// fields and stay lenient. Hard fail-closed is covered in
+		// tests/harden/fail-closed.test.ts.
+		it("does not match non-numeric field (string) under soft enforcement", () => {
 			const r = rule({
+				enforcement: "soft",
 				conditions: [{ field: "cost", operator: "gt", value: 10 }],
 			});
 			expect(evaluatePolicy([r], { cost: "twenty" }).matched).toHaveLength(0);
 		});
 
-		it("returns false for non-numeric value", () => {
+		it("does not match non-numeric value under soft enforcement", () => {
 			const r = rule({
+				enforcement: "soft",
 				conditions: [{ field: "cost", operator: "gt", value: "10" as unknown as number }],
 			});
 			expect(evaluatePolicy([r], { cost: 20 }).matched).toHaveLength(0);
 		});
 
-		it("returns false for undefined field", () => {
+		it("does not match undefined field under soft enforcement", () => {
 			const r = rule({
+				enforcement: "soft",
 				conditions: [{ field: "cost", operator: "gt", value: 10 }],
 			});
 			expect(evaluatePolicy([r], {}).matched).toHaveLength(0);
@@ -997,8 +1009,11 @@ describe("operator edge cases", () => {
 			expect(evaluatePolicy([r], { balance: 0 }).matched).toHaveLength(0);
 		});
 
-		it("handles non-numeric field", () => {
+		it("handles non-numeric field (soft rule stays lenient)", () => {
+			// Indeterminate under soft enforcement → no match. Hard fail-closed is
+			// covered in tests/harden/fail-closed.test.ts.
 			const r = rule({
+				enforcement: "soft",
 				conditions: [{ field: "balance", operator: "lt", value: 100 }],
 			});
 			expect(evaluatePolicy([r], { balance: "fifty" }).matched).toHaveLength(0);

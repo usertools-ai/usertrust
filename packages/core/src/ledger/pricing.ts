@@ -125,8 +125,14 @@ export function estimateCost(
 	customRates?: Record<string, ModelRates>,
 ): number {
 	const rates = getModelRates(model, customRates);
-	const inputCost = (inputTokens / 1000) * rates.inputPer1k;
-	const outputCost = (outputTokens / 1000) * rates.outputPer1k;
+	// Defend against non-finite/negative token counts (garbage `max_tokens`, or
+	// provider usage that reports a negative/NaN value): any count that is not a
+	// finite number >= 0 is treated as 0. A NaN would otherwise poison budget
+	// state permanently; a negative would collapse a real cost to the floor of 1.
+	const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
+	const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
+	const inputCost = (inTok / 1000) * rates.inputPer1k;
+	const outputCost = (outTok / 1000) * rates.outputPer1k;
 	return Math.max(1, Math.ceil(inputCost + outputCost));
 }
 

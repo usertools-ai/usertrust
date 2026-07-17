@@ -1000,15 +1000,24 @@ describe("verifyVault", () => {
 		}
 	});
 
-	it("picks up rotated segment files (.jsonl files besides events.jsonl)", () => {
-		const mainLines = buildChain([{ kind: "llm_call", actor: "local", data: { segment: "main" } }]);
-		writeChainToVault(vaultPath, mainLines);
-
-		const rotatedLines = buildChain([
+	it("picks up rotated segment files as ONE continuous chain (not independent segments)", () => {
+		// A legitimately rotated vault is a single continuous chain split across
+		// files: the older event lives in a rotated segment, the newer event in
+		// the live log, chained from it (sequences 1..2). The anchor records the
+		// global tail. (Two independently GENESIS-rooted segments — the old, weak
+		// fixture — must NOT verify; that vulnerability is what this replaces.)
+		const lines = buildChain([
 			{ kind: "llm_call", actor: "local", data: { segment: "rotated" } },
+			{ kind: "llm_call", actor: "local", data: { segment: "main" } },
 		]);
-		const rotatedPath = join(vaultPath, "audit", "events-2026-03-15.jsonl");
-		writeFileSync(rotatedPath, `${rotatedLines.join("\n")}\n`);
+		const auditDir = join(vaultPath, "audit");
+		writeFileSync(join(auditDir, "events-2026-03-15.jsonl"), `${at(lines, 0)}\n`);
+		writeFileSync(join(auditDir, "events.jsonl"), `${at(lines, 1)}\n`);
+		const last = JSON.parse(at(lines, 1)) as { hash: string };
+		writeFileSync(
+			join(auditDir, "events.jsonl.meta"),
+			JSON.stringify({ lastHash: last.hash, sequence: 2 }),
+		);
 
 		const result = verifyVault(vaultPath);
 		expect(result.valid).toBe(true);

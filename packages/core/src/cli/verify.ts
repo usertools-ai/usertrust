@@ -4,13 +4,15 @@
 /**
  * CLI: usertrust verify — Verify audit chain integrity
  *
- * Calls verifyChain() on the local vault's audit log and displays the result.
+ * Calls verifyVault() on the local vault (anchored to the `.meta` head, spans
+ * rotated segments) and displays the result. Sets a nonzero process exit code
+ * on a FAILED verdict so CI gates fail on a tampered vault.
  */
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
-import { verifyChain } from "../audit/verify.js";
+import { verifyVault } from "../audit/verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
 
@@ -31,11 +33,13 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		} else {
 			console.log(`${pc.red("No trust vault found.")} Run \`usertrust init\` first.`);
 		}
+		// A missing vault is a failed verification for CI purposes.
+		process.exitCode = 1;
 		return;
 	}
 
-	const logPath = join(vaultPath, "audit", "events.jsonl");
-	const result = verifyChain(logPath);
+	const result = verifyVault(vaultPath);
+	const verifiedAt = new Date().toISOString();
 
 	if (json) {
 		console.log(
@@ -44,26 +48,29 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				success: result.valid,
 				data: {
 					valid: result.valid,
-					eventsVerified: result.eventsVerified,
+					chainLength: result.chainLength,
 					errors: result.errors,
-					latestHash: result.latestHash,
-					verifiedAt: result.verifiedAt,
+					merkleRoot: result.merkleRoot,
+					verifiedAt,
 				},
 			}),
 		);
+		if (!result.valid) process.exitCode = 1;
 		return;
 	}
 
 	if (result.valid) {
-		console.log(pc.green(`Chain verified: ${result.eventsVerified} events, all hashes valid.`));
-		console.log(`Latest hash: ${pc.dim(result.latestHash)}`);
+		console.log(pc.green(`Chain verified: ${result.chainLength} events, all hashes valid.`));
+		if (result.merkleRoot) console.log(`Merkle root: ${pc.dim(result.merkleRoot)}`);
 	} else {
 		console.log(pc.red(`Chain verification FAILED: ${result.errors.length} error(s) found.`));
-		console.log(`Events checked: ${result.eventsVerified}`);
+		console.log(`Events checked: ${result.chainLength}`);
 		for (const err of result.errors) {
 			console.log(pc.red(`  - ${err}`));
 		}
+		// Use process.exitCode (not process.exit) so buffered stdout flushes.
+		process.exitCode = 1;
 	}
 
-	console.log(pc.dim(`Verified at: ${result.verifiedAt}`));
+	console.log(pc.dim(`Verified at: ${verifiedAt}`));
 }
