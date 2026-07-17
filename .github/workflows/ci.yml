@@ -36,7 +36,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx tsc -b --noEmit
+      - run: npx tsc -b
 
   test:
     name: test
