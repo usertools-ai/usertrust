@@ -50,7 +50,7 @@ jobs:
 
       # ── Quality gate ──
       - name: Typecheck
-        run: npx tsc -b --noEmit
+        run: npx tsc -b
 
       - name: Test
         run: npx vitest run
