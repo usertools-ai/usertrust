@@ -1,0 +1,12 @@
+{
+	"name": "usertrust-server",
+	"version": "1.3.0",
+	"description": "Self-hostable HTTP control plane for the usertrust governance kernel",
+	"license": "Apache-2.0",
+	"type": "module",
+	"main": "dist/index.js",
+	"bin": { "usertrust-server": "dist/cli/main.js" },
+	"exports": { ".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" } },
+	"scripts": { "build": "tsc -b" },
+	"dependencies": { "usertrust": "*", "zod": "^3.23.0" }
+}

@@ -1,0 +1,17 @@
+{
+	"name": "usertrust",
+	"owner": { "name": "usertrust" },
+	"description": "usertrust governance plugins for Claude Code",
+	"version": "1.3.0",
+	"plugins": [
+		{
+			"name": "usertrust-claude-code",
+			"source": "./packages/claude-code-plugin",
+			"description": "Ledger-backed governance for Claude Code: two-phase spend authorization on every tool call, fail-closed deny, settlement on completion",
+			"version": "1.3.0",
+			"license": "Apache-2.0",
+			"category": "security",
+			"tags": ["governance", "budget", "audit", "claude-code", "security"]
+		}
+	]
+}

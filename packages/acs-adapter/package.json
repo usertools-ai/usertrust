@@ -1,0 +1,11 @@
+{
+	"name": "usertrust-acs-adapter",
+	"version": "1.3.0",
+	"description": "ACS/AGT composite-evaluator adapter: external policy decides, the usertrust ledger reserves",
+	"license": "Apache-2.0",
+	"type": "module",
+	"main": "dist/index.js",
+	"exports": { ".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" } },
+	"scripts": { "build": "tsc -b" },
+	"dependencies": { "usertrust": "*" }
+}
