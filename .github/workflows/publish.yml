@@ -17,6 +17,11 @@ on:
         required: false
         default: false
         type: boolean
+      republish:
+        description: "Republish committed versions (skip bump/tag/release — for recovering a failed publish)"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: release
@@ -55,13 +60,17 @@ jobs:
       - name: Test
         run: npx vitest run
 
-      # ── Version bump (all packages in lockstep) ──
+      # ── Version bump (all packages in lockstep; skipped in republish mode) ──
       - name: Bump versions
         id: version
         run: |
-          cd packages/core && npm version ${{ inputs.version }} --no-git-tag-version && cd ../..
-          cd packages/verify && npm version ${{ inputs.version }} --no-git-tag-version && cd ../..
-          cd packages/openclaw && npm version ${{ inputs.version }} --no-git-tag-version && cd ../..
+          if [ "${{ inputs.republish }}" = "true" ]; then
+            echo "Republish mode — using committed versions, no bump"
+          else
+            cd packages/core && npm version ${{ inputs.version }} --no-git-tag-version && cd ../..
+            cd packages/verify && npm version ${{ inputs.version }} --no-git-tag-version && cd ../..
+            cd packages/openclaw && npm version ${{ inputs.version }} --no-git-tag-version && cd ../..
+          fi
           VERSION=$(node -p 'require("./packages/core/package.json").version')
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "### Release v${VERSION}" >> "$GITHUB_STEP_SUMMARY"
@@ -70,6 +79,7 @@ jobs:
       # npm version produces multi-line keywords/files arrays that fail biome.
       # Auto-format so master stays lint-clean after release.
       - name: Format package.json after bump
+        if: ${{ !inputs.republish }}
         run: npx biome check . --write
 
       # ── Build ──
@@ -93,24 +103,27 @@ jobs:
             echo "✓ packages/${pkg}/dist exists ($(find packages/${pkg}/dist -name '*.js' | wc -l) JS files)"
           done
 
-      # ── Publish with provenance (tolerate already-published versions) ──
-      - name: Publish usertrust
+      # ── Publish with provenance ──
+      # Skips a version that is genuinely already on the registry; any other
+      # publish failure (auth, network, provenance) FAILS the job. A dead
+      # NPM_TOKEN previously surfaced as E404 and was swallowed by a blanket
+      # `|| echo warning` — never tolerate errors you haven't identified.
+      - name: Publish packages
         if: ${{ !inputs.dry_run }}
-        run: cd packages/core && npm publish --access public --provenance || echo "::warning::usertrust already published at this version"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish usertrust-verify
-        if: ${{ !inputs.dry_run }}
-        run: cd packages/verify && npm publish --access public --provenance || echo "::warning::usertrust-verify already published at this version"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish usertrust-openclaw
-        if: ${{ !inputs.dry_run }}
-        run: cd packages/openclaw && npm publish --access public --provenance || echo "::warning::usertrust-openclaw already published at this version"
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for entry in core:usertrust verify:usertrust-verify openclaw:usertrust-openclaw; do
+            dir="${entry%%:*}"; pkg="${entry##*:}"
+            version=$(node -p "require('./packages/${dir}/package.json').version")
+            if [ -n "$(npm view "${pkg}@${version}" version 2>/dev/null || true)" ]; then
+              echo "::notice::${pkg}@${version} already on npm — skipping"
+            else
+              echo "Publishing ${pkg}@${version}"
+              (cd "packages/${dir}" && npm publish --access public --provenance)
+            fi
+          done
 
       - name: Dry run summary
         if: ${{ inputs.dry_run }}
@@ -123,7 +136,7 @@ jobs:
 
       # ── Tag + commit version bump ──
       - name: Commit and tag
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && !inputs.republish }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           git config user.name "github-actions[bot]"
@@ -135,7 +148,7 @@ jobs:
 
       # ── GitHub Release ──
       - name: Create GitHub Release
-        if: ${{ !inputs.dry_run }}
+        if: ${{ !inputs.dry_run && !inputs.republish }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
