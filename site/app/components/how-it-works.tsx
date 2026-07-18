@@ -1,5 +1,3 @@
-"use client";
-
 import type { ReactNode } from "react";
 import { AnimatedBlueprint } from "./animated-blueprint";
 import { LifecycleBlueprint } from "./lifecycle-blueprint";

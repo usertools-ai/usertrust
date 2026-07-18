@@ -1,6 +1,8 @@
 import { ImageResponse } from "next/og";
 
-export const runtime = "edge";
+// Deterministic, request-independent image — pre-render at build time and serve
+// as a static, CDN-immutable asset (no per-request function invocation).
+export const dynamic = "force-static";
 
 export async function GET() {
 	return new ImageResponse(

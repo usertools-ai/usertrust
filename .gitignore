@@ -38,3 +38,4 @@ scripts/preflight.sh
 
 # Task tracking
 tasks/
+.vercel/

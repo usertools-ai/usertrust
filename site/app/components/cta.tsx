@@ -1,5 +1,3 @@
-"use client";
-
 import { GitHubIcon } from "./github-icon";
 import { ScrollReveal } from "./scroll-reveal";
 

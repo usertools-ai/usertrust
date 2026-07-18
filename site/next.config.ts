@@ -4,6 +4,13 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
 	outputFileTracingRoot: resolve(import.meta.dirname),
+	images: {
+		formats: ["image/avif", "image/webp"],
+	},
+	experimental: {
+		// Tree-shake barrel imports so only used animations/components ship.
+		optimizePackageImports: ["motion", "fumadocs-ui"],
+	},
 	async redirects() {
 		return [
 			{
