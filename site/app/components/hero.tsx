@@ -6,11 +6,14 @@ import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
 import { CopyCommand } from "./copy-command";
 
+// Longest tagline first: the largest text paint happens at first render, so
+// later rotations never produce a bigger paint area and LCP stays anchored to
+// the initial (server-rendered, CSS-revealed) tagline instead of a rotation.
 const taglines = [
+	"Hash-chained receipts. Tamper-evident by construction. Zero vendor lock-in.",
 	"Budget holds, audit trails, and spend limits for every LLM call.",
 	"Your API keys. Your billing. Your provider. We add the trust layer.",
 	"Like a credit card hold — but for AI spend. Settled or voided, never lost.",
-	"Hash-chained receipts. Tamper-evident by construction. Zero vendor lock-in.",
 ];
 
 export function Hero({ downloads, stars }: { downloads: string; stars: string }) {
@@ -18,10 +21,29 @@ export function Hero({ downloads, stars }: { downloads: string; stars: string })
 	const [taglineIndex, setTaglineIndex] = useState(0);
 
 	useEffect(() => {
-		const interval = setInterval(() => {
-			setTaglineIndex((prev) => (prev + 1) % taglines.length);
-		}, 4000);
-		return () => clearInterval(interval);
+		// Rotation starts on first interaction. LCP finalizes at first input, so
+		// the rotating (and re-wrapping) taglines can never supersede the initial
+		// server-rendered paint as the LCP candidate — and a page nobody is
+		// engaging with doesn't churn.
+		let interval: ReturnType<typeof setInterval> | undefined;
+		const start = () => {
+			if (interval) return;
+			interval = setInterval(() => {
+				setTaglineIndex((prev) => (prev + 1) % taglines.length);
+			}, 4000);
+		};
+		const opts = { once: true, passive: true } as const;
+		window.addEventListener("pointerdown", start, opts);
+		window.addEventListener("pointermove", start, opts);
+		window.addEventListener("keydown", start, opts);
+		window.addEventListener("scroll", start, opts);
+		return () => {
+			if (interval) clearInterval(interval);
+			window.removeEventListener("pointerdown", start);
+			window.removeEventListener("pointermove", start);
+			window.removeEventListener("keydown", start);
+			window.removeEventListener("scroll", start);
+		};
 	}, []);
 
 	const { scrollYProgress } = useScroll({
@@ -60,9 +82,10 @@ export function Hero({ downloads, stars }: { downloads: string; stars: string })
 			<div
 				className="relative z-10 max-w-3xl mx-auto flex flex-col items-center gap-6 px-8 py-10 sm:px-12 sm:py-14 rounded-2xl border border-white/[0.08]"
 				style={{
-					background: "rgba(10,10,26,0.35)",
-					backdropFilter: "blur(24px)",
-					WebkitBackdropFilter: "blur(24px)",
+					// No backdrop-filter here: blurring the Ken Burns background forces a
+					// full re-blur every animation frame — the higher-alpha fill reads the
+					// same and costs nothing.
+					background: "rgba(10,10,26,0.62)",
 					boxShadow: "0 0 80px rgba(10,10,26,0.3)",
 				}}
 			>
@@ -94,7 +117,7 @@ export function Hero({ downloads, stars }: { downloads: string; stars: string })
 					className="hero-rise max-w-lg text-base sm:text-lg text-white/70 leading-relaxed h-[3.5em] sm:h-[3em] flex items-center justify-center"
 					style={{ animationDelay: "0.22s" }}
 				>
-					<AnimatePresence mode="wait">
+					<AnimatePresence mode="wait" initial={false}>
 						<motion.span
 							key={taglineIndex}
 							initial={{ opacity: 0, y: 8 }}

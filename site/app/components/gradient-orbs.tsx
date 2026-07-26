@@ -1,7 +1,3 @@
-"use client";
-
-import { motion, useReducedMotion } from "motion/react";
-
 const orbs = [
 	{
 		color: "rgba(52,211,153,0.08)",
@@ -26,8 +22,12 @@ const orbs = [
 	},
 ];
 
+// Server component: no motion, no filter. A radial gradient is already soft —
+// the old blur(80px) on top of it was invisible duplication that forced huge
+// blurred layers to re-rasterize on every frame of the JS-driven drift.
+// Drift now runs on the compositor via the CSS `orb-float` keyframes
+// (transform-only); prefers-reduced-motion is handled in globals.css.
 export function GradientOrbs() {
-	const reduce = useReducedMotion();
 	return (
 		<div
 			className="fixed inset-0 pointer-events-none overflow-hidden"
@@ -35,29 +35,18 @@ export function GradientOrbs() {
 			aria-hidden="true"
 		>
 			{orbs.map((orb, i) => (
-				<motion.div
+				<div
 					// biome-ignore lint/suspicious/noArrayIndexKey: static constant array
 					key={`orb-${i}`}
-					className="absolute rounded-full"
+					className="orb absolute rounded-full"
 					style={{
 						width: orb.size,
 						height: orb.size,
 						left: orb.x,
 						top: orb.y,
 						background: `radial-gradient(circle, ${orb.color} 0%, transparent 70%)`,
-						filter: "blur(80px)",
-						willChange: reduce ? undefined : "transform",
+						animationDuration: `${orb.duration}s`,
 					}}
-					animate={reduce ? undefined : { x: [0, 30, -20, 10, 0], y: [0, -25, 15, -10, 0] }}
-					transition={
-						reduce
-							? undefined
-							: {
-									duration: orb.duration,
-									repeat: Number.POSITIVE_INFINITY,
-									ease: "easeInOut",
-								}
-					}
 				/>
 			))}
 		</div>
