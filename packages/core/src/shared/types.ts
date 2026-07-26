@@ -3,6 +3,27 @@
 
 import { z } from "zod";
 
+// ── Endpoint classification (M2 local-model governance) ──
+
+/** Settlement scope of an endpoint: local (self-hosted) or cloud (metered provider). */
+export type EndpointClass = "local" | "cloud";
+
+/** Best-effort runtime label for a local endpoint (receipt/UX metadata only). */
+export type LocalRuntime = "ollama" | "vllm" | "lmstudio" | "openai-compat" | "unknown";
+
+/** Result of endpoint classification — selects the settlement regime for a call. */
+export interface EndpointInfo {
+	class: EndpointClass;
+	runtime: LocalRuntime;
+	baseURL?: string | undefined;
+}
+
+/** Denomination of a settled cost: real-dollar proxy or nominal bookkeeping units. */
+export type CostBasis = "usd-proxy" | "nominal";
+
+/** Where the applied rates came from during resolution. */
+export type RateSource = "table" | "custom" | "local-model" | "local-default" | "fallback";
+
 // ── Trust Receipt ──
 export interface TrustReceipt {
 	transferId: string;
@@ -23,6 +44,10 @@ export interface TrustReceipt {
 	chunksDelivered?: number;
 	/** Action kind for governed non-LLM actions. Absent for LLM calls (backward compat). */
 	actionKind?: ActionKind;
+	/** Endpoint classification for this call. Absent on pre-M2 receipts. */
+	endpoint?: { class: EndpointClass; runtime: LocalRuntime };
+	/** Metering provenance: denomination and rate origin of the settled cost. */
+	meter?: { costBasis: CostBasis; rateSource: RateSource; computeMs?: number };
 }
 
 // ── TrustedResponse — returned by every governed LLM call ──
@@ -32,6 +57,13 @@ export interface TrustedResponse<T> {
 }
 
 // ── Config schema ──
+
+/** Per-1k-token rate pair (usertokens). Shared by customRates and local.* rates. */
+const RateSchema = z.object({
+	inputPer1k: z.number().finite().nonnegative(),
+	outputPer1k: z.number().finite().nonnegative(),
+});
+
 export const TrustConfigSchema = z.object({
 	budget: z.number().int().positive(),
 	tier: z.enum(["free", "mini", "pro", "mega", "ultra"]).default("mini"),
@@ -83,15 +115,53 @@ export const TrustConfigSchema = z.object({
 		)
 		.default([]),
 	pricing: z.enum(["recommended", "custom"]).default("recommended"),
-	customRates: z
-		.record(
-			z.string(),
+	customRates: z.record(z.string(), RateSchema).optional(),
+	/**
+	 * Endpoint matchers consumed by classifyEndpoint(). First match wins.
+	 * match forms: scheme URL ("http://gpu-box:8000", matched by origin),
+	 * leading-star hostname suffix ("*.gpu.internal"), or bare hostname ("gpu-box").
+	 */
+	endpoints: z
+		.array(
 			z.object({
-				inputPer1k: z.number().finite().nonnegative(),
-				outputPer1k: z.number().finite().nonnegative(),
+				match: z.string().min(1),
+				class: z.enum(["local", "cloud"]).default("local"),
+				runtime: z
+					.enum(["ollama", "vllm", "lmstudio", "openai-compat", "unknown"])
+					.default("unknown"),
 			}),
 		)
-		.optional(),
+		.default([]),
+	/** Local (zero-marginal-cost) settlement scope. */
+	local: z
+		.object({
+			/** Loopback hosts (localhost/127.0.0.1/[::1]) classify as local without config. */
+			autoDetectLoopback: z.boolean().default(true),
+			/**
+			 * Rate applied to any local-scope model with no local.models match. Default {0,0}:
+			 * with the >=1 floor, every local call settles at exactly 1 nominal usertoken.
+			 */
+			defaultRate: RateSchema.default({ inputPer1k: 0, outputPer1k: 0 }),
+			/**
+			 * Denomination of local rates: "nominal" (bookkeeping units) or "amortized-usd"
+			 * (operator's GPU-chargeback rate; 1 usertoken = $0.0001 as usual).
+			 */
+			rateClass: z.enum(["nominal", "amortized-usd"]).default("nominal"),
+			/**
+			 * Per-model local rates. Keys: exact model strings or trailing-* globs
+			 * ("llama3.3*", "*"). Exact match beats glob; longest glob wins.
+			 */
+			models: z.record(z.string(), RateSchema).default({}),
+			/** Inject stream_options:{include_usage:true} into local openai-kind streams. */
+			injectUsageOptions: z.boolean().default(true),
+		})
+		.default({}),
+	/**
+	 * Cloud-scope policy when a model misses customRates, PRICING_TABLE, and prefix match.
+	 * "fallback" = silent sonnet-class rate (legacy) · "warn" = same rate + one-time warn +
+	 * receipt.meter.rateSource "fallback" · "deny" = PolicyDeniedError before the PENDING hold.
+	 */
+	unknownModelPolicy: z.enum(["fallback", "warn", "deny"]).default("warn"),
 	supplyChain: z
 		.object({
 			// SC-3: fail-closed by default. A skill with no registered signing key
@@ -141,6 +211,10 @@ export const TrustConfigSchema = z.object({
 			tokenRate: z
 				.object({
 					thresholdTokPerSec: z.number().positive().default(500),
+					/** Local-scope threshold (fast local GPU inference legitimately exceeds 500). */
+					localThresholdTokPerSec: z.number().positive().default(5000),
+					/** Per-model threshold overrides. Keys: exact model or trailing-* glob. */
+					perModel: z.record(z.string(), z.number().positive()).default({}),
 					windowMs: z.number().int().positive().default(2_000),
 					consecutiveWindows: z.number().int().positive().default(3),
 				})
@@ -148,6 +222,8 @@ export const TrustConfigSchema = z.object({
 			spendVelocity: z
 				.object({
 					thresholdDollarsPerMin: z.number().positive().default(1.0),
+					/** Local-scope velocity threshold in nominal usertokens per minute. */
+					localThresholdUsertokensPerMin: z.number().positive().default(10_000),
 					windowMs: z.number().int().positive().default(10_000),
 				})
 				.default({}),

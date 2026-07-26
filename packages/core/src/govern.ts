@@ -35,9 +35,15 @@ import { join } from "node:path";
 import { CreateTransferError } from "tigerbeetle-node";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import { writeReceipt } from "./audit/rotation.js";
-import { detectClientKind } from "./detect.js";
+import { classifyEndpoint, detectClientKind } from "./detect.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
-import { estimateCost, estimateInputTokens } from "./ledger/pricing.js";
+import {
+	type RateResolution,
+	costFromRates,
+	estimateInputTokens,
+	resolveRates,
+	warnUnknownModel,
+} from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import { type GateRule, evaluatePolicy, loadPolicies } from "./policy/gate.js";
@@ -61,6 +67,7 @@ import { trustId } from "./shared/ids.js";
 import { TrustConfigSchema } from "./shared/types.js";
 import type {
 	ActionDescriptor,
+	EndpointInfo,
 	GovernedActionResult,
 	LLMClientKind,
 	TrustConfig,
@@ -96,6 +103,13 @@ export interface TrustOpts {
 	dryRun?: boolean;
 	/** Vault directory override (default: cwd). */
 	vaultBase?: string;
+	/**
+	 * Explicit endpoint classification override (M2) — wins over config.endpoints
+	 * matchers and loopback autodetect. TRUSTED-OPERATOR input, same trust
+	 * boundary as budget/customRates: never derive it from end-user or request
+	 * data (A10).
+	 */
+	endpoint?: Partial<EndpointInfo> | undefined;
 	/**
 	 * Inject a mock/test engine. When set, used instead of TigerBeetle.
 	 * Primarily for testing failure modes.
@@ -152,6 +166,92 @@ class AsyncMutex {
 		await prev;
 		return release as () => void;
 	}
+}
+
+// ── M2 unknown-model policy (A5) ──
+
+/** USD value of one usertoken: 1 usertoken = $0.0001 (one basis point of a cent). */
+const USERTOKENS_PER_DOLLAR = 10_000;
+
+/**
+ * Enforce config.unknownModelPolicy at AUTHORIZE time (A5). Only cloud-scope
+ * resolutions can be unknown — local scope always resolves to local rates.
+ * "deny" throws before any PENDING hold; "warn" logs once per model string per
+ * process via the shared warnUnknownModel helper (receipts carry
+ * meter.rateSource "fallback" regardless of warn dedup); "fallback" is silent.
+ */
+function enforceUnknownModelPolicy(
+	model: string,
+	resolution: RateResolution,
+	config: TrustConfig,
+): void {
+	if (!resolution.unknown) return;
+	if (config.unknownModelPolicy === "deny") {
+		throw new PolicyDeniedError(`unknown_model: ${model} not in pricing table`);
+	}
+	if (config.unknownModelPolicy === "warn") {
+		warnUnknownModel(model);
+	}
+}
+
+/**
+ * A4: build forward-args for a local openai stream call with
+ * stream_options.include_usage merged in. The caller's other stream_options
+ * fields survive; an explicit include_usage (true OR false) is respected —
+ * only a missing/null value injects. Returns null when no injection applies.
+ */
+function withInjectedUsageOptions(args: unknown[]): unknown[] | null {
+	const params = (args[0] ?? {}) as Record<string, unknown>;
+	if (params.stream !== true) return null;
+	const rawOptions = params.stream_options;
+	const streamOptions =
+		rawOptions != null && typeof rawOptions === "object"
+			? (rawOptions as Record<string, unknown>)
+			: undefined;
+	if (streamOptions?.include_usage != null) return null;
+	return [
+		{ ...params, stream_options: { ...streamOptions, include_usage: true } },
+		...args.slice(1),
+	];
+}
+
+/** Message shapes an OpenAI-compat server emits when it rejects an unknown field. */
+const STREAM_OPTIONS_REJECTION_RE =
+	/stream_options|include_usage|unrecognized|unknown.{0,20}(field|argument|parameter|option)/i;
+
+/**
+ * A4 retry heuristic: does `err` plausibly indicate that the server rejected the
+ * injected `stream_options.include_usage`? We only retry-without-injection for
+ * these — a blanket retry on ANY error would double the provider call on
+ * transient failures (ECONNRESET, timeouts, 5xx) and mask the real root cause,
+ * so everything else rethrows the ORIGINAL error immediately. Matches the
+ * rejection message on the error, its nested `error.message`, or a cheaply
+ * reachable `response` body; or an HTTP-shaped 400/422 status on the error
+ * object. Tradeoff: a server that rejects the field with an opaque 500 and no
+ * telltale text is NOT retried — acceptable, since include_usage is widely
+ * supported and the caller still receives the original error.
+ */
+function looksLikeStreamOptionsRejection(err: unknown): boolean {
+	if (err == null || typeof err !== "object") {
+		return err instanceof Error && STREAM_OPTIONS_REJECTION_RE.test(err.message);
+	}
+	const e = err as Record<string, unknown>;
+	const status = e.status ?? e.statusCode;
+	if (status === 400 || status === 422) return true;
+	const candidates: unknown[] = [e.message, e.body];
+	if (err instanceof Error) candidates.push(err.message);
+	const nested = e.error;
+	if (nested != null && typeof nested === "object") {
+		candidates.push((nested as Record<string, unknown>).message);
+	}
+	const response = e.response;
+	if (typeof response === "string") {
+		candidates.push(response);
+	} else if (response != null && typeof response === "object") {
+		const r = response as Record<string, unknown>;
+		candidates.push(r.data, r.body);
+	}
+	return candidates.some((c) => typeof c === "string" && STREAM_OPTIONS_REJECTION_RE.test(c));
 }
 
 // ── AUD-457: Budget persistence helpers ──
@@ -238,8 +338,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		});
 	}
 
-	const customRates = config.pricing === "custom" ? config.customRates : undefined;
-
 	const isDryRun = opts?.dryRun ?? process.env.USERTRUST_DRY_RUN === "true";
 
 	// AUD-470: Only accept injected _engine/_audit in test environments.
@@ -296,8 +394,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		engine = null;
 	}
 
-	// 5. Detect client kind
+	// 5. Detect client kind (transport) + classify the endpoint (settlement
+	// regime, M2). classifyEndpoint runs BESIDE detectClientKind — the endpoint
+	// class, not the model string, picks local vs cloud metering (A3: this scope
+	// is captured once here and used verbatim at every authorize/settle below).
 	const kind: LLMClientKind = detectClientKind(client);
+	const endpoint: EndpointInfo = classifyEndpoint(client, config, opts?.endpoint);
 
 	// 6. Track state
 	let destroyed = false;
@@ -308,7 +410,31 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 	// Streaming anomaly detector — shared across calls so injection-cascade
 	// can track signals across the conversation. Disabled when config.anomaly.enabled=false.
-	const anomalyDetector = createAnomalyDetector(config.anomaly, { provider: kind });
+	// M2 seam fix: the injected costCalculator prices spend-velocity with the
+	// SAME scoped rates as settlement, using the observed event's
+	// model/endpointClass (the detector is shared while the model varies per
+	// call). Denominations differ by design: cloud events → DOLLARS against
+	// thresholdDollarsPerMin; local events → nominal usertokens against
+	// localThresholdUsertokensPerMin, WITHOUT the per-call >=1 settlement floor.
+	// Settlement floors per call; the anomaly signal measures flow — so a
+	// default {0,0}-rate local stream contributes 0 and can never false-trip
+	// spend_velocity (rejected-merge design note, pinned by Task 3 tests).
+	const anomalyDetector = createAnomalyDetector(config.anomaly, {
+		provider: kind,
+		costCalculator: (calcModel, inputTokens, outputTokens, event) => {
+			const scope = event?.endpointClass ?? "cloud";
+			const resolution = resolveRates(event?.model ?? calcModel, scope, config);
+			if (scope === "local") {
+				const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
+				const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
+				return (
+					(inTok / 1000) * resolution.rates.inputPer1k +
+					(outTok / 1000) * resolution.rates.outputPer1k
+				);
+			}
+			return costFromRates(resolution.rates, inputTokens, outputTokens) / USERTOKENS_PER_DOLLAR;
+		},
+	});
 
 	// 7. Two-phase intercept
 	async function interceptCall(
@@ -344,11 +470,21 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const cb = breaker.get(kind);
 			cb.allowRequest();
 
-			// b. Estimate cost (before policy, so cost fields are available in context)
+			// b. Estimate cost (before policy, so cost fields are available in context).
+			// M2: rates resolve within the endpoint scope CAPTURED AT AUTHORIZE (A3) —
+			// this one resolution prices the hold, both settlement paths, and the
+			// receipt's meter provenance. unknownModelPolicy is enforced here, at
+			// authorize time, before any PENDING hold (A5).
 			const transferId = trustId("tx");
 			const estimatedInputTokens = estimateInputTokens(promptParts);
 			const maxOutputTokens = (params.max_tokens as number) ?? 4096;
-			const estimatedCost = estimateCost(model, estimatedInputTokens, maxOutputTokens, customRates);
+			const rateResolution = resolveRates(model, endpoint.class, config);
+			enforceUnknownModelPolicy(model, rateResolution, config);
+			const estimatedCost = costFromRates(
+				rateResolution.rates,
+				estimatedInputTokens,
+				maxOutputTokens,
+			);
 
 			// AUD-453: Acquire mutex to serialise budget-check + PENDING hold.
 			// This prevents concurrent calls from both passing the budget check
@@ -483,14 +619,44 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				releaseBudgetLock();
 			}
 
+			// e0. M2 usage injection (A4): for local openai streams, opt in to the
+			// server's final usage chunk (Ollama emits /v1 streaming usage ONLY when
+			// stream_options.include_usage is set). The merge preserves the caller's
+			// other stream_options fields and respects an explicit include_usage.
+			// The resulting usage chunk is FORWARDED to the consumer unmodified
+			// (transparent middleware).
+			let preInjectionArgs: unknown[] | null = null;
+			if (kind === "openai" && endpoint.class === "local" && config.local.injectUsageOptions) {
+				const injected = withInjectedUsageOptions(forwardArgs);
+				if (injected != null) {
+					preInjectionArgs = forwardArgs;
+					forwardArgs = injected;
+				}
+			}
+
 			// e. Forward to original SDK. P3-PII-REDACT-EGRESS: forwardArgs is the
 			// redacted clone in redact mode, or the original args otherwise.
 			let settled = true;
 			try {
-				const response = await (originalFn as (...a: unknown[]) => unknown).apply(
-					thisArg,
-					forwardArgs,
-				);
+				let response: unknown;
+				try {
+					response = await (originalFn as (...a: unknown[]) => unknown).apply(thisArg, forwardArgs);
+				} catch (callErr) {
+					// A4: some OpenAI-compat servers reject unknown stream_options. When
+					// WE injected them AND the error plausibly says so (message/HTTP-status
+					// heuristic), retry ONCE without the injection; the retried stream
+					// simply settles on the estimate if no usage tail arrives (A7). Any
+					// other error — transient network failures, unrelated 5xx — rethrows
+					// the ORIGINAL immediately rather than duplicating compute and masking
+					// the root cause.
+					if (preInjectionArgs == null || !looksLikeStreamOptionsRejection(callErr)) {
+						throw callErr;
+					}
+					response = await (originalFn as (...a: unknown[]) => unknown).apply(
+						thisArg,
+						preInjectionArgs,
+					);
+				}
 
 				// e2. Streaming detection: if response is an async iterable, wrap with
 				// token accumulation. Settlement and audit happen when the stream ends.
@@ -504,15 +670,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						stream,
 						kind,
 						async (completion: StreamCompletion) => {
-							// Determine cost: use provider usage if reported, else fall back to estimate
+							// Determine cost: use provider usage if reported, else fall back to
+							// estimate. A3: priced with the rate resolution captured at
+							// authorize; A11: costFromRates floors at 1 even for 0/0 usage.
 							let streamCost: number;
 							let usageSource: "provider" | "estimated";
 							if (completion.usageReported) {
-								streamCost = estimateCost(
-									model,
+								streamCost = costFromRates(
+									rateResolution.rates,
 									completion.usage.inputTokens,
 									completion.usage.outputTokens,
-									customRates,
 								);
 								usageSource = "provider";
 							} else {
@@ -600,6 +767,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									transferId,
 									usageSource,
 									chunksDelivered: completion.chunksDelivered,
+									// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
+									endpointClass: endpoint.class,
+									costBasis: rateResolution.costBasis,
+									rateSource: rateResolution.rateSource,
 								};
 								if (config.pii === "warn" || config.pii === "redact") {
 									const piiResult = redactPII(promptParts);
@@ -641,6 +812,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								timestamp: new Date().toISOString(),
 								usageSource,
 								chunksDelivered: completion.chunksDelivered,
+								// M2 provenance (A6: computeMs omitted — no compute-time source here).
+								endpoint: { class: endpoint.class, runtime: endpoint.runtime },
+								meter: {
+									costBasis: rateResolution.costBasis,
+									rateSource: rateResolution.rateSource,
+								},
 								...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 								// AUD-456: Flag proxy stub receipts
 								...(proxyConn != null ? { proxyStub: true as const } : {}),
@@ -697,6 +874,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								deltaTokens: obs.deltaTokens,
 								cumulativeInputTokens: obs.cumulativeInputTokens,
 								cumulativeOutputTokens: obs.cumulativeOutputTokens,
+								// M2: stamp the per-call scope so the SHARED detector prices
+								// this event with the same scoped rates as settlement.
+								model,
+								endpointClass: endpoint.class,
 							});
 							const verdict = anomalyDetector.check();
 							if (verdict.tripped) {
@@ -742,6 +923,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						model,
 						provider: kind,
 						timestamp: new Date().toISOString(),
+						// M2: authorize-time scope, already fixed for the eventual settle (A3).
+						endpoint: { class: endpoint.class, runtime: endpoint.runtime },
+						meter: {
+							costBasis: rateResolution.costBasis,
+							rateSource: rateResolution.rateSource,
+						},
 						...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 						// AUD-456: Flag proxy stub receipts
 						...(proxyConn != null ? { proxyStub: true as const } : {}),
@@ -751,8 +938,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					return { response: governedStream, receipt: estimatedReceipt };
 				}
 
-				// f. Compute actual cost from response usage
+				// f. Compute actual cost from response usage. A3: priced with the rate
+				// resolution captured at authorize. costFromRates clamps NaN/negative
+				// counts (A7) and floors at 1 even for 0/0 provider usage (A11).
 				let actualCost = estimatedCost;
+				let usageSource: "provider" | "estimated" = "estimated";
 				if (response != null && typeof response === "object" && "usage" in response) {
 					const usage = (response as Record<string, unknown>).usage as Record<
 						string,
@@ -767,7 +957,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							(usage.output_tokens as number | undefined) ??
 							(usage.completion_tokens as number | undefined) ??
 							0;
-						actualCost = estimateCost(model, inputTokens, outputTokens, customRates);
+						actualCost = costFromRates(rateResolution.rates, inputTokens, outputTokens);
+						usageSource = "provider";
 					}
 				}
 
@@ -785,6 +976,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						cost: actualCost,
 						settled: true,
 						transferId,
+						usageSource,
+						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
+						endpointClass: endpoint.class,
+						costBasis: rateResolution.costBasis,
+						rateSource: rateResolution.rateSource,
 					};
 					if (config.pii === "warn" || config.pii === "redact") {
 						const piiResult = redactPII(promptParts);
@@ -934,6 +1130,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					model,
 					provider: kind,
 					timestamp: new Date().toISOString(),
+					usageSource,
+					// M2 provenance (A6: computeMs omitted — no compute-time source here).
+					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
+					meter: {
+						costBasis: rateResolution.costBasis,
+						rateSource: rateResolution.rateSource,
+					},
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					// AUD-456: Flag proxy stub receipts
 					...(proxyConn != null ? { proxyStub: true as const } : {}),

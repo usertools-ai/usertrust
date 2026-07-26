@@ -87,6 +87,10 @@ async function* governedStream(
 				: {}),
 			chunksDelivered: usage.chunksDelivered,
 			usageSource: usage.usageReported ? "provider" : "estimated",
+			// Ollama-native eval_duration (when the stream carried it) flows to
+			// receipt.meter.computeMs. Spread keeps the key OMITTED when absent —
+			// never `computeMs: undefined` (plan A6).
+			...(usage.computeMs != null ? { computeMs: usage.computeMs } : {}),
 		});
 	} catch (err) {
 		// 4. Abort — VOID the hold (catch abort errors to preserve original)

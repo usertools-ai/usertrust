@@ -46,7 +46,13 @@ import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import { writeReceipt } from "./audit/rotation.js";
 import type { TrustEngine, TrustOpts } from "./govern.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
-import { estimateCost, estimateInputTokens } from "./ledger/pricing.js";
+import {
+	costFromRates,
+	estimateCost,
+	estimateInputTokens,
+	resolveRates,
+	warnUnknownModel,
+} from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import { type GateRule, evaluatePolicy, loadPolicies } from "./policy/gate.js";
@@ -61,9 +67,27 @@ import {
 } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
 import { TrustConfigSchema } from "./shared/types.js";
-import type { TrustConfig, TrustReceipt } from "./shared/types.js";
+import type { EndpointInfo, TrustConfig, TrustReceipt } from "./shared/types.js";
 
 // ── Public types ──
+
+/**
+ * Options for createGovernor(): TrustOpts plus a governor-wide default
+ * endpoint scope (M2 local-model governance).
+ */
+export interface GovernorOpts extends TrustOpts {
+	/**
+	 * Governor-wide default endpoint scope for rate resolution. Applies to every
+	 * authorize() call that does not carry its own per-call `endpoint` override
+	 * (A3). Omitted → cloud scope (`{ class: "cloud", runtime: "unknown" }`),
+	 * which preserves pre-M2 metering exactly.
+	 *
+	 * SECURITY (A10): endpoint scope is a TRUSTED-OPERATOR decision — never wire
+	 * it to end-user/request input. It sits on the same trust boundary as
+	 * budget/customRates: whoever sets it already controls billing entirely.
+	 */
+	endpoint?: Partial<EndpointInfo> | undefined;
+}
 
 /** Handle returned by authorize(), passed to settle() or abort(). */
 export interface Authorization {
@@ -74,6 +98,12 @@ export interface Authorization {
 	proxyTransferId?: string | undefined;
 	/** @internal Timestamp when authorization was created. */
 	createdAt: number;
+	/**
+	 * @internal Endpoint scope captured at authorize (A3). settle()/abort() use
+	 * THIS scope — never a later governor-level value. Always the NORMALIZED
+	 * full shape (normalizeEndpoint output), unlike the Partial caller inputs.
+	 */
+	endpoint?: EndpointInfo | undefined;
 }
 
 /** Parameters for authorizing an LLM call. */
@@ -90,6 +120,16 @@ export interface AuthorizeParams {
 	params?: Record<string, unknown> | undefined;
 	/** Actor identity. Defaults to "local". */
 	actor?: string | undefined;
+	/**
+	 * Per-call endpoint scope override — wins over the governor-wide default
+	 * (A3). The effective scope is captured on the Authorization and governs
+	 * settle()/abort() and the receipt's endpoint/meter fields.
+	 *
+	 * SECURITY (A10): trusted-operator input only — never derive from
+	 * end-user/request data. Partial: omitted fields normalize (class →
+	 * "cloud", runtime → "unknown") — fail-expensive.
+	 */
+	endpoint?: Partial<EndpointInfo> | undefined;
 }
 
 /** Parameters for settling an authorized call. */
@@ -102,6 +142,12 @@ export interface SettleParams {
 	chunksDelivered?: number | undefined;
 	/** Whether usage came from the provider or our estimate. */
 	usageSource?: "provider" | "estimated" | undefined;
+	/**
+	 * Wall-clock compute duration in milliseconds (local runtimes report it,
+	 * e.g. Ollama eval_duration). Flows to receipt.meter.computeMs. Non-finite
+	 * or negative values are dropped (A6: the field is then omitted entirely).
+	 */
+	computeMs?: number | undefined;
 }
 
 /** Headless governance engine for non-SDK integrations. */
@@ -144,6 +190,21 @@ export interface Governor {
 // ── Verify URL base ──
 
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
+
+// ── M2 endpoint scope helpers ──
+
+/**
+ * Normalize a (possibly partial, e.g. untyped-JS-caller) endpoint shape into a
+ * full EndpointInfo. Missing class defaults to "cloud" — the fail-EXPENSIVE
+ * safe default — and missing runtime to "unknown".
+ */
+function normalizeEndpoint(endpoint: Partial<EndpointInfo> | undefined): EndpointInfo {
+	return {
+		class: endpoint?.class ?? "cloud",
+		runtime: endpoint?.runtime ?? "unknown",
+		...(endpoint?.baseURL !== undefined ? { baseURL: endpoint.baseURL } : {}),
+	};
+}
 
 // ── Async mutex (same as govern.ts AUD-453) ──
 
@@ -350,7 +411,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
  * lifecycle. This is designed for systems like OpenClaw that make raw
  * LLM calls via streaming libraries (pi-ai) rather than SDK clients.
  */
-export async function createGovernor(opts?: TrustOpts): Promise<Governor> {
+export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// 1. Load config
 	const vaultBase = opts?.vaultBase ?? process.cwd();
 	const configPath = opts?.configPath ?? join(vaultBase, VAULT_DIR, "usertrust.config.json");
@@ -369,6 +430,9 @@ export async function createGovernor(opts?: TrustOpts): Promise<Governor> {
 	}
 
 	const customRates = config.pricing === "custom" ? config.customRates : undefined;
+	// M2: governor-wide default endpoint scope; per-call AuthorizeParams.endpoint
+	// overrides it (A3). Defaults to cloud — pre-M2 metering exactly.
+	const defaultEndpoint = normalizeEndpoint(opts?.endpoint);
 	const isDryRun = opts?.dryRun ?? process.env.USERTRUST_DRY_RUN === "true";
 	const isTestEnv = process.env.USERTRUST_TEST === "1" || process.env.NODE_ENV === "test";
 
@@ -472,11 +536,32 @@ export async function createGovernor(opts?: TrustOpts): Promise<Governor> {
 			const cb = breaker.get("headless" as never);
 			cb.allowRequest();
 
+			// M2: effective endpoint scope — per-call override wins over the
+			// governor-wide default (A3). Captured on the Authorization below so
+			// settle() meters with the AUTHORIZE-time scope.
+			const endpoint =
+				params.endpoint !== undefined ? normalizeEndpoint(params.endpoint) : defaultEndpoint;
+
+			// Scope-aware rate resolution. resolveRates never throws;
+			// unknownModelPolicy is enforced HERE, at authorize time. `unknown` is
+			// only ever true for cloud scope — local misses resolve to
+			// "local-default" by definition (A5), so local calls never deny/warn.
+			const rateInfo = resolveRates(model, endpoint.class, config);
+			if (rateInfo.unknown) {
+				if (config.unknownModelPolicy === "deny") {
+					throw new PolicyDeniedError(`unknown_model: ${model} not in pricing table`);
+				}
+				if (config.unknownModelPolicy === "warn") {
+					// Shared once-per-process helper — identical wording to trust() (F5).
+					warnUnknownModel(model);
+				}
+			}
+
 			// Estimate cost
 			const transferId = trustId("tx");
 			const estInputTokens = params.estimatedInputTokens ?? estimateInputTokens(messages);
 			const maxOutputTokens = params.maxOutputTokens ?? 4096;
-			const estCost = estimateCost(model, estInputTokens, maxOutputTokens, customRates);
+			const estCost = costFromRates(rateInfo.rates, estInputTokens, maxOutputTokens);
 
 			// Acquire mutex for budget atomicity (AUD-453)
 			const releaseBudgetLock = await budgetMutex.acquire();
@@ -555,6 +640,7 @@ export async function createGovernor(opts?: TrustOpts): Promise<Governor> {
 				model,
 				proxyTransferId,
 				createdAt: Date.now(),
+				endpoint,
 			};
 			activeAuths.set(transferId, auth);
 			return auth;
@@ -571,15 +657,19 @@ export async function createGovernor(opts?: TrustOpts): Promise<Governor> {
 			const model = auth.model;
 			let callAuditDegraded = false;
 
+			// A3: settlement meters with the endpoint scope CAPTURED AT AUTHORIZE —
+			// SettleParams carries no endpoint field by design.
+			const endpoint = auth.endpoint ?? defaultEndpoint;
+			const rateInfo = resolveRates(model, endpoint.class, config);
+
 			// Determine actual cost
 			let actualCost: number;
 			let usageSource: "provider" | "estimated";
 			if (params?.inputTokens != null || params?.outputTokens != null) {
-				actualCost = estimateCost(
-					model,
+				actualCost = costFromRates(
+					rateInfo.rates,
 					params.inputTokens ?? 0,
 					params.outputTokens ?? 0,
-					customRates,
 				);
 				usageSource = params.usageSource ?? "provider";
 			} else {
@@ -719,6 +809,18 @@ export async function createGovernor(opts?: TrustOpts): Promise<Governor> {
 				provider: "headless",
 				timestamp: new Date().toISOString(),
 				usageSource,
+				// M2: endpoint classification + metering provenance (A6: computeMs is
+				// OMITTED, never undefined, when absent/invalid).
+				endpoint: { class: endpoint.class, runtime: endpoint.runtime },
+				meter: {
+					costBasis: rateInfo.costBasis,
+					rateSource: rateInfo.rateSource,
+					...(params?.computeMs != null &&
+					Number.isFinite(params.computeMs) &&
+					params.computeMs >= 0
+						? { computeMs: params.computeMs }
+						: {}),
+				},
 				...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
 				...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 				...(proxyConn != null ? { proxyStub: true as const } : {}),
