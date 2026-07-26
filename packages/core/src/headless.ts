@@ -86,7 +86,7 @@ export interface GovernorOpts extends TrustOpts {
 	 * it to end-user/request input. It sits on the same trust boundary as
 	 * budget/customRates: whoever sets it already controls billing entirely.
 	 */
-	endpoint?: EndpointInfo | undefined;
+	endpoint?: Partial<EndpointInfo> | undefined;
 }
 
 /** Handle returned by authorize(), passed to settle() or abort(). */
@@ -100,7 +100,8 @@ export interface Authorization {
 	createdAt: number;
 	/**
 	 * @internal Endpoint scope captured at authorize (A3). settle()/abort() use
-	 * THIS scope — never a later governor-level value.
+	 * THIS scope — never a later governor-level value. Always the NORMALIZED
+	 * full shape (normalizeEndpoint output), unlike the Partial caller inputs.
 	 */
 	endpoint?: EndpointInfo | undefined;
 }
@@ -125,9 +126,10 @@ export interface AuthorizeParams {
 	 * settle()/abort() and the receipt's endpoint/meter fields.
 	 *
 	 * SECURITY (A10): trusted-operator input only — never derive from
-	 * end-user/request data.
+	 * end-user/request data. Partial: omitted fields normalize (class →
+	 * "cloud", runtime → "unknown") — fail-expensive.
 	 */
-	endpoint?: EndpointInfo | undefined;
+	endpoint?: Partial<EndpointInfo> | undefined;
 }
 
 /** Parameters for settling an authorized call. */
