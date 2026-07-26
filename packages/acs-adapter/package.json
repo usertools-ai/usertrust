@@ -1,11 +1,32 @@
 {
 	"name": "usertrust-acs-adapter",
-	"version": "1.3.0",
+	"version": "1.4.0",
 	"description": "ACS/AGT composite-evaluator adapter: external policy decides, the usertrust ledger reserves",
 	"license": "Apache-2.0",
+	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
+	"homepage": "https://usertrust.ai",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/usertools-ai/usertrust.git",
+		"directory": "packages/acs-adapter"
+	},
+	"bugs": "https://github.com/usertools-ai/usertrust/issues",
+	"keywords": ["ai", "governance", "agent", "acs", "agt", "policy", "adapter"],
 	"type": "module",
 	"main": "dist/index.js",
-	"exports": { ".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" } },
-	"scripts": { "build": "tsc -b" },
-	"dependencies": { "usertrust": "*" }
+	"types": "dist/index.d.ts",
+	"exports": {
+		".": {
+			"import": "./dist/index.js",
+			"types": "./dist/index.d.ts"
+		}
+	},
+	"scripts": {
+		"build": "tsc -b",
+		"prepublishOnly": "tsc -b"
+	},
+	"files": ["dist"],
+	"dependencies": {
+		"usertrust": "*"
+	}
 }
