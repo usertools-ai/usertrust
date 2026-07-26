@@ -86,7 +86,7 @@ export interface GovernorOpts extends TrustOpts {
 	 * it to end-user/request input. It sits on the same trust boundary as
 	 * budget/customRates: whoever sets it already controls billing entirely.
 	 */
-	endpoint?: EndpointInfo;
+	endpoint?: EndpointInfo | undefined;
 }
 
 /** Handle returned by authorize(), passed to settle() or abort(). */

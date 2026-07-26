@@ -109,7 +109,7 @@ export interface TrustOpts {
 	 * boundary as budget/customRates: never derive it from end-user or request
 	 * data (A10).
 	 */
-	endpoint?: Partial<EndpointInfo>;
+	endpoint?: Partial<EndpointInfo> | undefined;
 	/**
 	 * Inject a mock/test engine. When set, used instead of TigerBeetle.
 	 * Primarily for testing failure modes.
