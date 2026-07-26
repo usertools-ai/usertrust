@@ -29,6 +29,16 @@ const ENV_VAR_MAP: Record<string, string> = {
 	google: "GOOGLE_API_KEY",
 };
 
+// ── Local inference presets (M2 local-model governance) ──
+
+type LocalPreset = "ollama" | "lmstudio" | "vllm";
+
+const LOCAL_PRESET_URLS: Record<LocalPreset, string> = {
+	ollama: "http://localhost:11434",
+	lmstudio: "http://localhost:1234",
+	vllm: "http://localhost:8000",
+};
+
 const DEFAULT_POLICY = `rules:
   - name: block-budget-overshoot
     effect: deny
@@ -59,6 +69,28 @@ const SUBDIRS = ["audit", "policies", "patterns", "snapshots", "board", "dlq"] a
 
 function envVarName(provider: string): string {
 	return ENV_VAR_MAP[provider] ?? `${provider.toUpperCase()}_API_KEY`;
+}
+
+/**
+ * Probe an OpenAI-compatible endpoint for its installed model list.
+ * Best-effort: global fetch with a 500ms AbortController timeout; any
+ * failure (endpoint down, non-200, bad JSON) returns an empty list and
+ * the wizard proceeds without a model list.
+ */
+async function probeLocalModels(base: string): Promise<string[]> {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), 500);
+	try {
+		const res = await fetch(`${base}/v1/models`, { signal: controller.signal });
+		if (!res.ok) return [];
+		const body = (await res.json()) as { data?: Array<{ id?: unknown }> };
+		if (!Array.isArray(body.data)) return [];
+		return body.data.map((entry) => entry.id).filter((id): id is string => typeof id === "string");
+	} catch {
+		return [];
+	} finally {
+		clearTimeout(timer);
+	}
 }
 
 export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
@@ -282,12 +314,76 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		}
 	}
 
-	// Step 4: Create vault
+	// Step 4: Local inference — Ollama / LM Studio / vLLM endpoint presets.
+	// The chosen endpoint classifies as LOCAL scope: calls settle at nominal
+	// local rates (default {0,0} + the >=1 floor = 1 usertoken per call)
+	// instead of frontier fallback rates.
+	let endpoints: VaultData["endpoints"];
+	let localModels: Record<string, ModelRates> | undefined;
+
+	// Opt-in confirm gate before the runtime picker (Task 7 integration fix):
+	// declining (the default) reproduces the pre-M2 prompt sequence exactly —
+	// the picker below (clack.select, a prompt primitive the pre-M2 wizard
+	// never used) is only reached on explicit opt-in, so existing interactive
+	// flows and their pinned tests observe an unchanged wizard.
+	const wantsLocal = await clack.confirm({
+		message: "Configure local inference (Ollama / LM Studio / vLLM)?",
+		initialValue: false,
+	});
+	if (clack.isCancel(wantsLocal)) {
+		clack.log.warn("Setup cancelled.");
+		return;
+	}
+
+	if (wantsLocal === true) {
+		const localChoice = await clack.select({
+			message: "Pick your local runtime:",
+			options: [
+				{ value: "skip", label: "Skip — cloud providers only" },
+				{ value: "ollama", label: `Ollama (${LOCAL_PRESET_URLS.ollama})` },
+				{ value: "lmstudio", label: `LM Studio (${LOCAL_PRESET_URLS.lmstudio})` },
+				{ value: "vllm", label: `vLLM (${LOCAL_PRESET_URLS.vllm})` },
+			],
+			initialValue: "skip",
+		});
+
+		if (clack.isCancel(localChoice)) {
+			clack.log.warn("Setup cancelled.");
+			return;
+		}
+
+		if (localChoice !== "skip") {
+			const runtime = localChoice as LocalPreset;
+			const base = LOCAL_PRESET_URLS[runtime];
+			endpoints = [{ match: base, class: "local", runtime }];
+
+			const s = clack.spinner();
+			s.start(`Probing ${base}/v1/models...`);
+			const models = await probeLocalModels(base);
+			if (models.length > 0) {
+				s.stop(`Found ${models.length} model${models.length === 1 ? "" : "s"} at ${base}`);
+				// {0,0} suggested rates: with the >=1 cost floor, every call to these
+				// models settles at exactly 1 nominal usertoken. Raise the rates later
+				// for GPU-amortized showback (local.rateClass: "amortized-usd").
+				localModels = {};
+				for (const model of models) {
+					clack.log.step(`  ${model}`);
+					localModels[model] = { inputPer1k: 0, outputPer1k: 0 };
+				}
+			} else {
+				s.stop("No response — endpoint saved without a model list");
+			}
+		}
+	}
+
+	// Step 5: Create vault
 	createVault(vaultPath, {
 		budget: budgetUsertokens,
 		providers,
 		pricing,
 		...(customRates !== undefined ? { customRates } : {}),
+		...(endpoints !== undefined ? { endpoints } : {}),
+		...(localModels !== undefined ? { localModels } : {}),
 		keys,
 	});
 
@@ -300,6 +396,10 @@ interface VaultData {
 	pricing: "recommended" | "custom";
 	customRates?: Record<string, ModelRates>;
 	keys?: Record<string, string>;
+	/** Local inference endpoint matchers (consumed by classifyEndpoint). */
+	endpoints?: Array<{ match: string; class: "local"; runtime: LocalPreset }>;
+	/** Detected local models, written to local.models with {0,0} nominal rates. */
+	localModels?: Record<string, ModelRates>;
 }
 
 function createVault(vaultPath: string, data: VaultData): void {
@@ -325,6 +425,16 @@ function createVault(vaultPath: string, data: VaultData): void {
 
 	if (data.customRates && Object.keys(data.customRates).length > 0) {
 		config.customRates = data.customRates;
+	}
+
+	if (data.endpoints && data.endpoints.length > 0) {
+		config.endpoints = data.endpoints;
+	}
+
+	if (data.localModels && Object.keys(data.localModels).length > 0) {
+		// All other local.* keys are zod-defaulted (autoDetectLoopback: true,
+		// defaultRate {0,0}, rateClass "nominal", injectUsageOptions: true).
+		config.local = { models: data.localModels };
 	}
 
 	// Write config

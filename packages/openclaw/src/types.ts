@@ -9,6 +9,8 @@
  * the packages at compile time.
  */
 
+import type { EndpointClass, LocalRuntime } from "usertrust";
+
 // ── pi-ai Stream Events ──
 
 export interface StreamUsage {
@@ -108,6 +110,18 @@ export interface UsertrustPluginConfig {
 	proxyKey?: string;
 	/** Vault directory (audit chain, spend ledger). Defaults to cwd. */
 	vaultBase?: string;
+	/**
+	 * Explicit endpoint scope for this OpenClaw runtime (M2). TRUSTED-OPERATOR
+	 * declaration: the headless/OpenClaw path has no client baseURL to sniff, so
+	 * core's config.endpoints[] URL matchers do NOT apply here (design decision 6)
+	 * — declare `{ class: "local" }` yourself or every call meters as cloud
+	 * (frontier fallback pricing for local models + strict cloud anomaly thresholds).
+	 */
+	endpoint?: {
+		class: EndpointClass;
+		runtime?: LocalRuntime;
+		baseURL?: string;
+	};
 }
 
 // ── Stream Function Types ──

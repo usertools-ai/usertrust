@@ -200,6 +200,22 @@ function initGovernor(config: UsertrustPluginConfig): Promise<Governor> {
 			...(config.proxy != null ? { proxy: config.proxy } : {}),
 			...(config.proxyKey != null ? { key: config.proxyKey } : {}),
 			...(config.vaultBase != null ? { vaultBase: config.vaultBase } : {}),
+			// M2: forward the operator's endpoint declaration into the headless
+			// governor (GovernorOpts.endpoint). Without this, every OpenClaw call
+			// defaults to cloud scope — local models would meter at frontier
+			// fallback and inherit strict cloud anomaly thresholds. runtime defaults
+			// to "unknown"; baseURL is omitted (never undefined) when absent.
+			...(config.endpoint != null
+				? {
+						endpoint: {
+							class: config.endpoint.class,
+							runtime: config.endpoint.runtime ?? "unknown",
+							...(config.endpoint.baseURL !== undefined
+								? { baseURL: config.endpoint.baseURL }
+								: {}),
+						},
+					}
+				: {}),
 		}).then((gov) => {
 			governor = gov;
 			return gov;

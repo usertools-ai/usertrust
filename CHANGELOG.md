@@ -5,6 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+**Loopback/local endpoints now settle at nominal local rates instead of silently
+billing frontier fallback.** Before, a free `llama3.3:70b` call against
+`http://localhost:11434/v1` was priced like an unknown cloud model at
+sonnet-class `FALLBACK_RATE` — and a streamed call settled on the pre-call
+estimate (~615 usertokens of fake dollars per $0 stream). Local endpoints are
+now classified as their own settlement scope and meter at `local.defaultRate`
+(default `{0,0}` + the per-call `>=1` floor = exactly 1 nominal usertoken per
+call), so free inference stays **inside** budget, anomaly, and audit governance
+instead of being exempted from it.
+
+### Added
+
+- **First-class local-model governance (M2).** `classifyEndpoint()` labels every
+  governed call `local` or `cloud` from the client's `baseURL` (explicit
+  `endpoints[]` matchers, loopback autodetect, per-call override), and the
+  scoped `resolveRates()` resolver prices every costing site accordingly. Local
+  scope structurally cannot reach `FALLBACK_RATE`.
+- New config surface (all keys zod-defaulted — existing configs parse
+  unchanged): `endpoints[]` matchers (origin URL, `*.host` suffix, or bare
+  hostname), `local` block (`autoDetectLoopback`, `defaultRate`, `rateClass`
+  `"nominal" | "amortized-usd"` for GPU-amortized showback, per-model `models`
+  with trailing-`*` globs, `injectUsageOptions`), and `unknownModelPolicy`
+  (`"fallback" | "warn" | "deny"`, default `"warn"`) for cloud-scope models
+  missing from the pricing table — `"warn"` is cost-identical to the old silent
+  behavior but logs once per model and stamps the receipt.
+- Receipts carry `endpoint` (`class`/`runtime`) and `meter` (`costBasis`
+  `"usd-proxy" | "nominal"`, `rateSource`, optional `computeMs`) so the
+  settlement regime and rate provenance of every call are auditable.
+- Server-truth streaming usage for local endpoints:
+  `stream_options: { include_usage: true }` is auto-injected into local
+  OpenAI-compatible streams (gated by `local.injectUsageOptions`; the usage
+  chunk is forwarded to the consumer unmodified; one retry without the
+  injection if a server rejects it).
+- Local-calibrated anomaly governance: `tokenRate.localThresholdTokPerSec`
+  (default 5000), `tokenRate.perModel` glob overrides,
+  `spendVelocity.localThresholdUsertokensPerMin` (default 10000) — local
+  velocity verdicts are denominated in usertokens, never fake dollars; the
+  detector now prices events with the same scoped resolver as settlement.
+- Headless governor endpoint scope: `TrustOpts.endpoint` (governor default),
+  `AuthorizeParams.endpoint` (per-call override, captured at authorize),
+  `SettleParams.computeMs` → `receipt.meter.computeMs`.
+- OpenClaw: Ollama-native chunk extraction (`prompt_eval_count`/`eval_count`,
+  `eval_duration` → `computeMs`) alongside the OpenAI-compatible family.
+- OpenClaw: `UsertrustPluginConfig.endpoint` (`class`, optional `runtime`/
+  `baseURL`) declares the runtime's settlement scope — the headless path has no
+  client baseURL to classify, so operators set `{ class: "local" }` to meter
+  local models at local rates instead of cloud frontier fallback.
+- `usertrust init` "Local inference" wizard step: Ollama/LM Studio/vLLM
+  presets, optional `GET /v1/models` probe, writes `endpoints[]` +
+  `local.models` entries.
+- `examples/ollama-local-governance`: runnable before/after demo (`npx tsx
+  run.ts`), falls back to an inline mock OpenAI-compatible server when Ollama
+  is absent.
+
+### Changed
+
+- OpenAI and Google streaming usage accumulation is now replace-with-latest
+  (usage-bearing chunks carry cumulative snapshots — e.g. vLLM
+  `continuous_usage_stats` — which summing would multiply-count). Anthropic
+  stays additive (`message_start` + `message_delta` are genuinely incremental).
+
+### Security
+
+- Endpoint classification (config matchers, overrides, loopback autodetect) is
+  a **trusted-operator decision** — never wire it to end-user or request input.
+  In server/multi-tenant deployments set `local.autoDetectLoopback: false` and
+  classify via explicit `endpoints[]` config: loopback inside a container can
+  be a forwarding sidecar to a paid API. This is the same trust boundary as
+  `budget`/`customRates` — the config author already controls billing entirely.
+  Note that a compromised local server can under-report usage; receipts expose
+  `usageSource` and `meter.rateSource` precisely so that this is auditable.
+- `endpoints[]` matching never uses raw string prefixing: scheme entries match
+  by URL origin equality, killing `http://gpu-box:8000.evil.com` /
+  `...@evil.com` bypass shapes; malformed `baseURL`s classify as cloud
+  (fail-expensive).
+
 ## [1.0.0] - 2026-03-29
 
 First stable release.

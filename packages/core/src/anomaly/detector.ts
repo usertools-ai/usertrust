@@ -15,10 +15,13 @@
  *   - After cooldownMs the detector auto-resets; reset() can be called manually.
  *
  * Defaults are tuned conservatively (500 tok/s sustained, $1/min, 3 injections in 60s).
- * Detection is opt-in (anomaly.enabled=true) — when off, observe/check are no-ops.
+ * Local-scope events (event.endpointClass === "local", stamped by govern.ts) use
+ * local-calibrated thresholds: 5000 tok/s (perModel glob overrides first) and
+ * 10_000 nominal usertokens/min. Detection is opt-in (anomaly.enabled=true) —
+ * when off, observe/check are no-ops.
  */
 
-import { estimateCost } from "../ledger/pricing.js";
+import { costFromRates, estimateCost } from "../ledger/pricing.js";
 import {
 	type InjectionCascadeSignal,
 	createInjectionCascadeSignal,
@@ -62,10 +65,46 @@ export function resolveAnomalyConfig(cfg?: AnomalyConfig): ResolvedAnomalyConfig
 /** USD value of one usertoken. 1 usertoken = $0.0001 (one basis point of a cent). */
 const USERTOKENS_PER_DOLLAR = 10_000;
 
-function defaultCostCalculator(model: string, inputTokens: number, outputTokens: number): number {
-	// estimateCost returns usertokens; convert to dollars.
+function defaultCostCalculator(
+	model: string,
+	inputTokens: number,
+	outputTokens: number,
+	event?: AnomalyChunkEvent,
+): number {
+	if (event?.endpointClass === "local") {
+		// Local scope without an injected calculator: price in nominal usertokens at
+		// the shipped default local rate {0,0}. costFromRates floors at 1, so the
+		// cumulative cost is a constant and spend-velocity stays flat — token_rate is
+		// the primary local signal. govern.ts injects a config-aware calculator that
+		// prices via resolveRates (operator-set local rates enable velocity showback).
+		return costFromRates({ inputPer1k: 0, outputPer1k: 0 }, inputTokens, outputTokens);
+	}
+	// estimateCost returns usertokens; convert to dollars (cloud usd-proxy scope).
 	const usertokens = estimateCost(model, inputTokens, outputTokens);
 	return usertokens / USERTOKENS_PER_DOLLAR;
+}
+
+/** Verdict text for a token-rate result; names non-legacy thresholds (local/perModel). */
+function tokenRateMessage(r: {
+	metric: number;
+	threshold: number;
+	thresholdLabel: string;
+}): string {
+	const base = `tokens/s ${r.metric.toFixed(1)} >= ${r.threshold}`;
+	return r.thresholdLabel === "thresholdTokPerSec" ? base : `${base} (${r.thresholdLabel})`;
+}
+
+/** Verdict text for a spend-velocity result; never fakes dollars for nominal spend. */
+function spendVelocityMessage(r: {
+	metric: number;
+	threshold: number;
+	unit: "dollars" | "usertokens";
+	thresholdLabel: string;
+}): string {
+	if (r.unit === "usertokens") {
+		return `usertokens/min ${r.metric.toFixed(1)} >= ${r.threshold} (${r.thresholdLabel})`;
+	}
+	return `$/min ${r.metric.toFixed(4)} >= ${r.threshold}`;
 }
 
 export interface AnomalyDetector {
@@ -111,9 +150,16 @@ export function createAnomalyDetector(
 
 	function observeChunk(ev: AnomalyChunkEvent): void {
 		const t = ev.at ?? now();
-		tokenRate.observe(ev.deltaTokens, t);
-		const dollars = costCalculator(model, ev.cumulativeInputTokens, ev.cumulativeOutputTokens);
-		spendVelocity.observe(dollars, t);
+		// Per-event scope: the event's model/endpointClass (stamped by govern.ts)
+		// override options.model / the default cloud scope when present (M2).
+		tokenRate.observe(ev.deltaTokens, t, ev);
+		const cost = costCalculator(
+			ev.model ?? model,
+			ev.cumulativeInputTokens,
+			ev.cumulativeOutputTokens,
+			ev,
+		);
+		spendVelocity.observe(cost, t, ev.endpointClass ?? "cloud");
 	}
 
 	function observeInjection(ev: AnomalyInjectionEvent): void {
@@ -144,22 +190,12 @@ export function createAnomalyDetector(
 		// Check signals in priority order: token-rate first (cheapest), spend-velocity, then injection.
 		const tr = tokenRate.check(t);
 		if (tr.tripped) {
-			return markTripped(
-				"token_rate",
-				`tokens/s ${tr.metric.toFixed(1)} >= ${tr.threshold}`,
-				tr.metric,
-				tr.threshold,
-			);
+			return markTripped("token_rate", tokenRateMessage(tr), tr.metric, tr.threshold);
 		}
 
 		const sv = spendVelocity.check(t);
 		if (sv.tripped) {
-			return markTripped(
-				"spend_velocity",
-				`$/min ${sv.metric.toFixed(4)} >= ${sv.threshold}`,
-				sv.metric,
-				sv.threshold,
-			);
+			return markTripped("spend_velocity", spendVelocityMessage(sv), sv.metric, sv.threshold);
 		}
 
 		const ic = injectionCascade.check(t);
@@ -184,7 +220,7 @@ export function createAnomalyDetector(
 				return {
 					tripped: true,
 					kind,
-					message: `tokens/s ${r.metric.toFixed(1)} >= ${r.threshold}`,
+					message: tokenRateMessage(r),
 					metric: r.metric,
 					threshold: r.threshold,
 				};
@@ -194,7 +230,7 @@ export function createAnomalyDetector(
 				return {
 					tripped: true,
 					kind,
-					message: `$/min ${r.metric.toFixed(4)} >= ${r.threshold}`,
+					message: spendVelocityMessage(r),
 					metric: r.metric,
 					threshold: r.threshold,
 				};

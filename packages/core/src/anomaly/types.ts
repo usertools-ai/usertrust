@@ -11,7 +11,7 @@
  * `anomaly_detected` audit event.
  */
 
-import type { LLMClientKind } from "../shared/types.js";
+import type { EndpointClass, LLMClientKind } from "../shared/types.js";
 
 // ── Anomaly kinds ──
 
@@ -24,6 +24,10 @@ export type AnomalyKind = "token_rate" | "spend_velocity" | "injection_cascade";
 export interface TokenRateConfig {
 	/** Threshold tokens-per-second above which a window is "hot". Default 500. */
 	thresholdTokPerSec?: number;
+	/** Local-scope threshold tokens-per-second (M2). Default 5000. */
+	localThresholdTokPerSec?: number | undefined;
+	/** Per-model threshold overrides. Keys: exact model or trailing-* glob (M2). */
+	perModel?: Record<string, number> | undefined;
 	/** Window size in milliseconds. Default 2000. */
 	windowMs?: number;
 	/** Number of consecutive hot windows required to trip. Default 3. */
@@ -34,6 +38,8 @@ export interface TokenRateConfig {
 export interface SpendVelocityConfig {
 	/** Maximum dollars per minute (rolling). Default 1.00. */
 	thresholdDollarsPerMin?: number;
+	/** Local-scope threshold in nominal usertokens per minute (M2). Default 10000. */
+	localThresholdUsertokensPerMin?: number | undefined;
 	/** Rolling window in milliseconds. Default 10000. */
 	windowMs?: number;
 }
@@ -57,11 +63,19 @@ export interface AnomalyConfig {
 	cooldownMs?: number;
 }
 
-/** Resolved (defaulted) config used internally. */
+/**
+ * Resolved (defaulted) config used internally.
+ *
+ * Legacy fields are fully defaulted; the M2 local-scope fields
+ * (localThresholdTokPerSec, perModel, localThresholdUsertokensPerMin) stay
+ * optional here and are defaulted at the signal when absent.
+ */
 export interface ResolvedAnomalyConfig {
 	enabled: boolean;
-	tokenRate: Required<TokenRateConfig>;
-	spendVelocity: Required<SpendVelocityConfig>;
+	tokenRate: Required<Omit<TokenRateConfig, "localThresholdTokPerSec" | "perModel">> &
+		Pick<TokenRateConfig, "localThresholdTokPerSec" | "perModel">;
+	spendVelocity: Required<Omit<SpendVelocityConfig, "localThresholdUsertokensPerMin">> &
+		Pick<SpendVelocityConfig, "localThresholdUsertokensPerMin">;
 	injectionCascade: Required<InjectionCascadeConfig>;
 	cooldownMs: number;
 }
@@ -79,6 +93,10 @@ export interface AnomalyChunkEvent {
 	cumulativeOutputTokens: number;
 	/** Wall-clock timestamp. Defaults to Date.now() if omitted. */
 	at?: number;
+	/** Model of the call this chunk belongs to. Overrides options.model when present (M2). */
+	model?: string | undefined;
+	/** Endpoint scope of the call this chunk belongs to. Default scope: cloud (M2). */
+	endpointClass?: EndpointClass | undefined;
 }
 
 /** Out-of-band injection event (fired when detect.injection finds something). */
@@ -112,8 +130,19 @@ export interface AnomalyDetectorOptions {
 	provider?: LLMClientKind;
 	/** Model name being observed (used for cost calculation in spend-velocity). */
 	model?: string;
-	/** Override the cost calculator (for testing). Returns dollars for given tokens. */
-	costCalculator?: (model: string, inputTokens: number, outputTokens: number) => number;
+	/**
+	 * Override the cost calculator. Returns the cost for the given cumulative tokens —
+	 * dollars for cloud-scope events, nominal usertokens for local-scope events.
+	 * The observed chunk event is passed as the optional 4th argument so an injected
+	 * calculator can price per-event (scoped by event.model/event.endpointClass); 3-arg
+	 * implementations remain assignable (backward compatible).
+	 */
+	costCalculator?: (
+		model: string,
+		inputTokens: number,
+		outputTokens: number,
+		event?: AnomalyChunkEvent,
+	) => number;
 	/** Time source override (for deterministic tests). */
 	now?: () => number;
 }

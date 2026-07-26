@@ -14,11 +14,19 @@ export type { Governor, Authorization, AuthorizeParams, SettleParams } from "./h
 // Config
 export { loadConfig, defineConfig } from "./config.js";
 
+// Endpoint classification
+export { classifyEndpoint } from "./detect.js";
+
 // Types
 export type {
 	TrustedResponse,
 	TrustReceipt,
 	TrustConfig,
+	EndpointClass,
+	EndpointInfo,
+	LocalRuntime,
+	CostBasis,
+	RateSource,
 	PolicyRule,
 	FieldCondition,
 	FieldOperator,
@@ -97,8 +105,13 @@ export type {
 } from "./audit/merkle.js";
 
 // Pricing
-export { getModelRates, estimateCost, estimateInputTokens } from "./ledger/pricing.js";
-export type { ModelRates } from "./ledger/pricing.js";
+export {
+	getModelRates,
+	estimateCost,
+	estimateInputTokens,
+	resolveRates,
+} from "./ledger/pricing.js";
+export type { ModelRates, RateResolution } from "./ledger/pricing.js";
 
 // Board
 export { createBoard } from "./board/board.js";

@@ -9,6 +9,8 @@
  * Canonical pricing source for supported LLM models.
  */
 
+import type { CostBasis, EndpointClass, RateSource, TrustConfig } from "../shared/types.js";
+
 export interface ModelRates {
 	inputPer1k: number;
 	outputPer1k: number;
@@ -88,6 +90,9 @@ const PROVIDER_MODEL_MAP: Record<string, string[]> = {
 
 /** Return all PRICING_TABLE model keys that belong to a given provider. */
 export function modelsForProvider(provider: string): string[] {
+	// Object.hasOwn guards against inherited Object.prototype keys: a provider
+	// name like "constructor" must resolve to nothing, not Object's constructor.
+	if (!Object.hasOwn(PROVIDER_MODEL_MAP, provider)) return [];
 	const prefixes = PROVIDER_MODEL_MAP[provider];
 	if (!prefixes) return [];
 	return Object.keys(PRICING_TABLE).filter((model) => prefixes.some((p) => model.startsWith(p)));
@@ -98,13 +103,20 @@ export function modelsForProvider(provider: string): string[] {
  * then FALLBACK_RATE for unknown models.
  */
 export function getModelRates(model: string, customRates?: Record<string, ModelRates>): ModelRates {
-	if (customRates) {
+	// Object.hasOwn guards both direct lookups against inherited Object.prototype
+	// members: a model string like "constructor"/"__proto__"/"toString" would
+	// otherwise resolve to a Function/object, survive the truthiness check, and
+	// yield NaN cost (NaN then defeats the Math.max(1, ...) floor and poisons the
+	// ledger). Prefix matching below is already own-key-only (SORTED_TABLE).
+	if (customRates && Object.hasOwn(customRates, model)) {
 		const custom = customRates[model];
 		if (custom) return custom;
 	}
 
-	const exact = PRICING_TABLE[model];
-	if (exact) return exact;
+	if (Object.hasOwn(PRICING_TABLE, model)) {
+		const exact = PRICING_TABLE[model];
+		if (exact) return exact;
+	}
 
 	// Prefix match — longest key first prevents partial matches
 	for (const [key, rates] of SORTED_TABLE) {
@@ -112,6 +124,47 @@ export function getModelRates(model: string, customRates?: Record<string, ModelR
 	}
 
 	return FALLBACK_RATE;
+}
+
+/** Models already warned about — unknownModelPolicy "warn" fires once per model per process. */
+const warnedUnknownModels = new Set<string>();
+
+/**
+ * Emit the once-per-process cloud-scope "unknown model" warning for
+ * unknownModelPolicy "warn". Shared by trust() and createGovernor() so both
+ * governance paths log identical text and share a single dedup set. Idempotent
+ * per model string; the receipt's meter.rateSource "fallback" marker is set by
+ * the caller independently of this dedup.
+ */
+export function warnUnknownModel(model: string): void {
+	if (warnedUnknownModels.has(model)) return;
+	warnedUnknownModels.add(model);
+	console.warn(
+		`[usertrust] unknown model "${model}": metering at FALLBACK_RATE (sonnet-class); add it to customRates or set unknownModelPolicy`,
+	);
+}
+
+/**
+ * Compute usertoken cost from explicit rates.
+ * Applies the same non-finite/negative clamp and >=1 floor as estimateCost —
+ * the floor is per-call and load-bearing (zero-amount ledger transfers are
+ * invalid; it is what makes a {0,0}-rate local call settle at exactly 1
+ * nominal usertoken).
+ */
+export function costFromRates(
+	rates: ModelRates,
+	inputTokens: number,
+	outputTokens: number,
+): number {
+	// Defend against non-finite/negative token counts (garbage `max_tokens`, or
+	// provider usage that reports a negative/NaN value): any count that is not a
+	// finite number >= 0 is treated as 0. A NaN would otherwise poison budget
+	// state permanently; a negative would collapse a real cost to the floor of 1.
+	const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
+	const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
+	const inputCost = (inTok / 1000) * rates.inputPer1k;
+	const outputCost = (outTok / 1000) * rates.outputPer1k;
+	return Math.max(1, Math.ceil(inputCost + outputCost));
 }
 
 /**
@@ -124,16 +177,123 @@ export function estimateCost(
 	outputTokens: number,
 	customRates?: Record<string, ModelRates>,
 ): number {
-	const rates = getModelRates(model, customRates);
-	// Defend against non-finite/negative token counts (garbage `max_tokens`, or
-	// provider usage that reports a negative/NaN value): any count that is not a
-	// finite number >= 0 is treated as 0. A NaN would otherwise poison budget
-	// state permanently; a negative would collapse a real cost to the floor of 1.
-	const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
-	const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
-	const inputCost = (inTok / 1000) * rates.inputPer1k;
-	const outputCost = (outTok / 1000) * rates.outputPer1k;
-	return Math.max(1, Math.ceil(inputCost + outputCost));
+	return costFromRates(getModelRates(model, customRates), inputTokens, outputTokens);
+}
+
+// ── Scoped rate resolution (M2 local-model governance) ──
+
+/** A matched model-pattern entry: the pattern key that won and its value. */
+export interface ModelPatternMatch<T> {
+	pattern: string;
+	value: T;
+}
+
+/**
+ * Match a model string against a record keyed by exact models or TRAILING-star
+ * globs ("llama3.3*"; "*" matches everything). Exact match beats any glob;
+ * among globs the longest prefix wins. This is the model-pattern matcher (A2) —
+ * hostname patterns use a different leading-star syntax, implemented in detect.ts.
+ *
+ * Used by local.models, anomaly tokenRate.perModel.
+ */
+export function matchModelPattern<T>(
+	model: string,
+	patterns: Record<string, T>,
+): ModelPatternMatch<T> | undefined {
+	// Object.hasOwn guards against inherited Object.prototype keys
+	// (model "constructor" must not resolve to a Function).
+	if (Object.hasOwn(patterns, model)) {
+		return { pattern: model, value: patterns[model] as T };
+	}
+	let best: ModelPatternMatch<T> | undefined;
+	let bestLen = -1;
+	for (const [pattern, value] of Object.entries(patterns)) {
+		if (!pattern.endsWith("*")) continue;
+		const prefix = pattern.slice(0, -1);
+		if (model.startsWith(prefix) && prefix.length > bestLen) {
+			best = { pattern, value };
+			bestLen = prefix.length;
+		}
+	}
+	return best;
+}
+
+/** Result of scope-aware rate resolution. */
+export interface RateResolution {
+	rates: ModelRates;
+	scope: EndpointClass;
+	costBasis: CostBasis;
+	rateSource: RateSource;
+	/** true when cloud scope missed table+custom+prefix and fell back. */
+	unknown: boolean;
+}
+
+/**
+ * Resolve rates for a model within an endpoint scope. Never throws —
+ * unknownModelPolicy enforcement lives in the callers (govern/headless).
+ *
+ * Local scope: local.models exact match → longest trailing-* glob →
+ * local.defaultRate (rateSource "local-default"). NEVER FALLBACK_RATE, never
+ * the cloud table, never `unknown: true` (A5). costBasis is "usd-proxy" when
+ * local.rateClass is "amortized-usd", else "nominal".
+ *
+ * Cloud scope: delegates to the existing getModelRates(model, customRates)
+ * semantics, including the callers' pricing==="custom" gate on customRates;
+ * costBasis "usd-proxy"; unknown=true iff the result came from FALLBACK_RATE.
+ */
+export function resolveRates(
+	model: string,
+	scope: EndpointClass,
+	config: TrustConfig,
+): RateResolution {
+	if (scope === "local") {
+		const costBasis: CostBasis =
+			config.local.rateClass === "amortized-usd" ? "usd-proxy" : "nominal";
+		const match = matchModelPattern(model, config.local.models);
+		if (match !== undefined) {
+			return { rates: match.value, scope, costBasis, rateSource: "local-model", unknown: false };
+		}
+		return {
+			rates: config.local.defaultRate,
+			scope,
+			costBasis,
+			rateSource: "local-default",
+			unknown: false,
+		};
+	}
+
+	// Cloud scope — mirrors getModelRates(model, customRates) exactly, including
+	// the pricing==="custom" gate applied at the existing govern/headless call sites.
+	// Object.hasOwn guards both lookups so a model string like "constructor"/
+	// "__proto__" resolves to FALLBACK_RATE, never an inherited prototype member.
+	const customRates = config.pricing === "custom" ? config.customRates : undefined;
+	if (customRates && Object.hasOwn(customRates, model)) {
+		const custom = customRates[model];
+		if (custom) {
+			return { rates: custom, scope, costBasis: "usd-proxy", rateSource: "custom", unknown: false };
+		}
+	}
+
+	if (Object.hasOwn(PRICING_TABLE, model)) {
+		const exact = PRICING_TABLE[model];
+		if (exact) {
+			return { rates: exact, scope, costBasis: "usd-proxy", rateSource: "table", unknown: false };
+		}
+	}
+
+	for (const [key, rates] of SORTED_TABLE) {
+		if (model.startsWith(key)) {
+			return { rates, scope, costBasis: "usd-proxy", rateSource: "table", unknown: false };
+		}
+	}
+
+	return {
+		rates: FALLBACK_RATE,
+		scope,
+		costBasis: "usd-proxy",
+		rateSource: "fallback",
+		unknown: true,
+	};
 }
 
 /**

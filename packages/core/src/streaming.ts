@@ -9,9 +9,14 @@
  * the yielded data.
  *
  * Provider-specific extraction:
- *   - Anthropic: message_start (input_tokens), message_delta (output_tokens)
- *   - OpenAI: usage field on final chunk (prompt_tokens, completion_tokens)
- *   - Google: usageMetadata field (promptTokenCount, candidatesTokenCount)
+ *   - Anthropic: message_start (input_tokens), message_delta (output_tokens) —
+ *     incremental fields on distinct chunk types, accumulated as before.
+ *   - OpenAI: usage field (prompt_tokens, completion_tokens) — REPLACE-WITH-LATEST:
+ *     every usage-bearing chunk is an absolute snapshot. vLLM's
+ *     continuous_usage_stats stamps RUNNING totals on every chunk, so summing
+ *     would multiply-count (M2 design decision 5.2 / plan Task 2).
+ *   - Google: usageMetadata field (promptTokenCount, candidatesTokenCount) —
+ *     same replace-with-latest snapshot semantics.
  *
  * Usage:
  * ```ts
@@ -43,51 +48,64 @@ export interface GovernedStream<T> extends AsyncIterable<T> {
 
 // ── Token extraction ──
 
-function extractTokensFromChunk(chunk: unknown, kind: LLMClientKind): StreamUsage {
+/** Anthropic chunks carry incremental fields on distinct chunk types. */
+function extractAnthropicTokens(chunk: unknown): StreamUsage {
 	if (chunk == null || typeof chunk !== "object") {
 		return { inputTokens: 0, outputTokens: 0 };
 	}
 
 	const c = chunk as Record<string, unknown>;
 
-	if (kind === "anthropic") {
-		if (c.type === "message_start" && c.message != null && typeof c.message === "object") {
-			const msg = c.message as Record<string, unknown>;
-			if (msg.usage != null && typeof msg.usage === "object") {
-				const usage = msg.usage as Record<string, number>;
-				return { inputTokens: usage.input_tokens ?? 0, outputTokens: 0 };
-			}
+	if (c.type === "message_start" && c.message != null && typeof c.message === "object") {
+		const msg = c.message as Record<string, unknown>;
+		if (msg.usage != null && typeof msg.usage === "object") {
+			const usage = msg.usage as Record<string, number>;
+			return { inputTokens: usage.input_tokens ?? 0, outputTokens: 0 };
 		}
-		if (c.type === "message_delta") {
-			if (c.usage != null && typeof c.usage === "object") {
-				const usage = c.usage as Record<string, number>;
-				return { inputTokens: 0, outputTokens: usage.output_tokens ?? 0 };
-			}
-		}
-		return { inputTokens: 0, outputTokens: 0 };
 	}
+	if (c.type === "message_delta") {
+		if (c.usage != null && typeof c.usage === "object") {
+			const usage = c.usage as Record<string, number>;
+			return { inputTokens: 0, outputTokens: usage.output_tokens ?? 0 };
+		}
+	}
+	return { inputTokens: 0, outputTokens: 0 };
+}
+
+/** A7 sanitation: non-finite or negative provider counts are clamped to 0. */
+function sanitizeCount(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * Extract an ABSOLUTE usage snapshot from an OpenAI/Google chunk, or null when
+ * the chunk carries no usage object at all. A present-but-empty usage object IS
+ * a snapshot (explicit zeros count as reported usage — A11).
+ */
+function extractUsageSnapshot(chunk: unknown, kind: "openai" | "google"): StreamUsage | null {
+	if (chunk == null || typeof chunk !== "object") return null;
+	const c = chunk as Record<string, unknown>;
 
 	if (kind === "openai") {
 		if (c.usage != null && typeof c.usage === "object") {
-			const usage = c.usage as Record<string, number>;
+			const usage = c.usage as Record<string, unknown>;
 			return {
-				inputTokens: usage.prompt_tokens ?? 0,
-				outputTokens: usage.completion_tokens ?? 0,
+				inputTokens: sanitizeCount(usage.prompt_tokens),
+				outputTokens: sanitizeCount(usage.completion_tokens),
 			};
 		}
-		return { inputTokens: 0, outputTokens: 0 };
+		return null;
 	}
 
 	// google
 	if (c.usageMetadata != null && typeof c.usageMetadata === "object") {
-		const meta = c.usageMetadata as Record<string, number>;
+		const meta = c.usageMetadata as Record<string, unknown>;
 		return {
-			inputTokens: meta.promptTokenCount ?? 0,
-			outputTokens: meta.candidatesTokenCount ?? 0,
+			inputTokens: sanitizeCount(meta.promptTokenCount),
+			outputTokens: sanitizeCount(meta.candidatesTokenCount),
 		};
 	}
-
-	return { inputTokens: 0, outputTokens: 0 };
+	return null;
 }
 
 // ── Stream wrapper ──
@@ -146,19 +164,36 @@ async function* wrapStreamImpl<T>(
 	let errored = false;
 	try {
 		for await (const chunk of stream) {
-			const tokens = extractTokensFromChunk(chunk, kind);
 			let deltaInput = 0;
 			let deltaOutput = 0;
-			// Use latest non-zero value (providers report cumulative or final)
-			if (tokens.inputTokens > 0) {
-				deltaInput = Math.max(0, tokens.inputTokens - inputTokens);
-				inputTokens = tokens.inputTokens;
-				usageReported = true;
-			}
-			if (tokens.outputTokens > 0) {
-				deltaOutput = Math.max(0, tokens.outputTokens - outputTokens);
-				outputTokens = tokens.outputTokens;
-				usageReported = true;
+			if (kind === "openai" || kind === "google") {
+				// M2 REPLACE-WITH-LATEST (design decision 5.2 / plan Task 2): each
+				// usage-bearing chunk is an absolute snapshot, assigned wholesale.
+				// Fixes double-counting under vLLM continuous_usage_stats (running
+				// totals on every chunk); a decreasing final total takes the last
+				// chunk's values (A7); explicit zeros count as reported usage (A11).
+				const snapshot = extractUsageSnapshot(chunk, kind);
+				if (snapshot != null) {
+					deltaInput = Math.max(0, snapshot.inputTokens - inputTokens);
+					deltaOutput = Math.max(0, snapshot.outputTokens - outputTokens);
+					inputTokens = snapshot.inputTokens;
+					outputTokens = snapshot.outputTokens;
+					usageReported = true;
+				}
+			} else {
+				// Anthropic: message_start carries input, message_delta carries output —
+				// genuinely incremental chunk types; keep the latest non-zero value.
+				const tokens = extractAnthropicTokens(chunk);
+				if (tokens.inputTokens > 0) {
+					deltaInput = Math.max(0, tokens.inputTokens - inputTokens);
+					inputTokens = tokens.inputTokens;
+					usageReported = true;
+				}
+				if (tokens.outputTokens > 0) {
+					deltaOutput = Math.max(0, tokens.outputTokens - outputTokens);
+					outputTokens = tokens.outputTokens;
+					usageReported = true;
+				}
 			}
 
 			// Run hook BEFORE yielding so a throw aborts before the consumer sees it.
