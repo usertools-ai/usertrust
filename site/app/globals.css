@@ -192,6 +192,13 @@ html {
 	}
 }
 
+/* Compositor-only orb drift (duration set inline per orb).
+   No filter here — the radial gradient supplies the softness. */
+.orb {
+	animation: orb-float 25s ease-in-out infinite;
+	will-change: transform;
+}
+
 /* Shimmer effect for cards */
 @keyframes shimmer {
 	0% {
@@ -235,11 +242,11 @@ html {
 	animation-play-state: running;
 }
 
-/* Reduced motion: disable decorative + utility animations.
-   (Gradient orbs are JS-driven and gated via useReducedMotion in the component.) */
+/* Reduced motion: disable decorative + utility animations. */
 @media (prefers-reduced-motion: reduce) {
 	.shimmer-border::after,
 	.glow-ring,
+	.orb,
 	[class*="animate-"] {
 		animation: none !important;
 	}
