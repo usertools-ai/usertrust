@@ -8,6 +8,7 @@ import { AuditTable } from "./audit-table.js";
 import { FilterBar } from "./filter-bar.js";
 import { RowPanel } from "./row-panel.js";
 import { useLedger } from "./store.js";
+import { SummaryStrip } from "./summary-strip.js";
 
 export type View = "audit" | "trends";
 
@@ -20,7 +21,7 @@ export function App(): React.JSX.Element {
 
 	return (
 		<div className="mx-auto flex h-screen max-w-[1400px] flex-col gap-3 p-4">
-			{/* Task 12: <SummaryStrip summary={summary} live={live} /> */}
+			<SummaryStrip summary={summary} live={live} />
 			<nav className="flex gap-2">
 				{(["audit", "trends"] as const).map((v) => (
 					<button
@@ -42,10 +43,6 @@ export function App(): React.JSX.Element {
 				<div>trends (Task 13) — {filtered.length} rows</div>
 			)}
 			{open && <RowPanel row={open} onClose={() => setOpen(null)} />}
-			{/* placeholder uses to satisfy lint until Task 12: */}
-			<span className="hidden">
-				{summary?.vaultPath} {String(live)}
-			</span>
 		</div>
 	);
 }
