@@ -340,6 +340,40 @@ export interface PolicyContext extends Record<string, unknown> {
 	timeWindows?: TimeWindow[];
 	/** Optional timestamp override (defaults to now) */
 	timestamp?: string;
+
+	/**
+	 * Budget telemetry for the cost center funding this call. Both fields are
+	 * OPTIONAL and purely additive: they let the existing numeric operators
+	 * express a degradation ladder, so no new operator and no evaluator change
+	 * is involved. Populate them from `getBudgetStatus()` at the call site.
+	 *
+	 * ```ts
+	 * // deny frontier models below 30% of the allocation
+	 * { effect: "deny", enforcement: "hard", conditions: [
+	 *     { field: "budgetFractionRemaining", operator: "exists" },
+	 *     { field: "budgetFractionRemaining", operator: "lt", value: 0.3 },
+	 *     { field: "model", operator: "in", value: ["claude-opus-4-6"] } ] }
+	 * // escalate to a human under 12h of runway (warn + soft = non-blocking)
+	 * { effect: "warn", enforcement: "soft", conditions: [
+	 *     { field: "budgetRunwayHours", operator: "lt", value: 12 } ] }
+	 * ```
+	 *
+	 * IMPORTANT — absent fields are NOT neutral for hard rules. A numeric
+	 * operator on a missing field is `"indeterminate"`, which hard rules treat
+	 * as fail-closed (the condition is skipped and the guard still fires), so a
+	 * HARD budget tier DENIES any context that never populated these fields.
+	 * Lead such a rule with an `exists` condition (as above) when it must only
+	 * apply to budget-aware call sites; soft rules already stay lenient.
+	 */
+
+	/** 0..1 share of the cost center's allocation still available. */
+	budgetFractionRemaining?: number;
+	/**
+	 * Hours until projected exhaustion at the current burn rate. A naive linear
+	 * extrapolation — noisy early in a period, so prefer it for escalation
+	 * rather than irreversible action.
+	 */
+	budgetRunwayHours?: number;
 }
 
 /**
