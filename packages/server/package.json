@@ -31,6 +31,6 @@
 	"files": ["dist"],
 	"dependencies": {
 		"usertrust": "*",
-		"zod": "^3.23.0"
+		"zod": "^4.4.3"
 	}
 }
