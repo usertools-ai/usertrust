@@ -16,7 +16,12 @@ export default defineConfig({
 		coverage: {
 			provider: "v8",
 			include: ["packages/*/src/**/*.ts"],
-			exclude: ["packages/*/src/cli/**", "packages/ui/src/app/**"],
+			exclude: [
+				"packages/*/src/cli/**",
+				"packages/ui/src/app/**",
+				// Bin entry — argv parsing + browser open; runtime-smoke-tested, not unit-testable
+				"packages/ui/src/server/main.ts",
+			],
 			thresholds: {
 				lines: 92,
 				branches: 84,
