@@ -4,17 +4,19 @@
 /**
  * CLI: usertrust anchor — external audit anchoring
  *
- * init    Mint the vault's anchor identity (Ed25519 key OUTSIDE the vault)
- * now     One snapshot → sign → mirror → publish cycle
- * status  Last anchor, unanchored tail, outbox depth
- * export  Print mirror records (JSONL) for pull-mode shipping
- * rotate  Cross-signed key rotation (spec §6)
- * resume  Re-seed a lost mirror from the store's newest record
+ * init           Mint the vault's anchor identity (Ed25519 key OUTSIDE the vault)
+ * now            One snapshot → sign → mirror → publish cycle
+ * status         Last anchor, unanchored tail, outbox depth
+ * export         Print mirror records (JSONL) for pull-mode shipping
+ * export-bundle  Records + transparency-log receipts as one auditor artifact
+ * doctor         Probe what this identity can delete/overwrite in the store
+ * rotate         Cross-signed key rotation (spec §6)
+ * resume         Re-seed a lost mirror from the store's newest record
  *
  * Spec: docs/superpowers/specs/2026-07-26-external-anchoring-design.md
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
 import {
@@ -28,22 +30,81 @@ import {
 	resumeAnchorMirror,
 	type SinkConfig,
 } from "../audit/anchor.js";
+import { type DoctorReport, doctorFileSink, doctorS3Sink } from "../audit/anchor-doctor.js";
 import { parseAnchorsContent } from "../audit/anchor-verify.js";
+import { DEFAULT_REKOR_URL } from "../audit/rekor.js";
+import { parseRekorReceipt, type RekorReceipt } from "../audit/rekor-verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
+
+const REKOR_FLAG = "--sink-rekor";
+const S3_KEYS = new Set(["bucket", "region", "prefix", "endpoint"]);
+/** Same cap the verify CLI enforces on `--bundle` — never export what it refuses. */
+const MAX_BUNDLE_ITEMS = 10_000;
 
 function sinksFromArgs(args: string[]): SinkConfig[] {
 	const sinks: SinkConfig[] = [];
 	for (let i = 0; i < args.length; i++) {
-		if (args[i] === "--sink-file" && args[i + 1] !== undefined) {
+		const arg = args[i] as string;
+		if (arg === "--sink-file" && args[i + 1] !== undefined) {
 			sinks.push({ type: "file", path: args[i + 1] as string });
 			i++;
-		} else if (args[i] === "--sink-url" && args[i + 1] !== undefined) {
+		} else if (arg === "--sink-url" && args[i + 1] !== undefined) {
 			sinks.push({ type: "https", url: args[i + 1] as string });
 			i++;
+		} else if (arg === "--sink-s3" && args[i + 1] !== undefined) {
+			sinks.push(s3SinkFromSpec(args[i + 1] as string));
+			i++;
+		} else if (arg === REKOR_FLAG) {
+			// Delta D8: this flag never consumes the token after it, so
+			// `--sink-rekor --sink-file /mnt/worm/a.jsonl` keeps its file sink. A
+			// URL parked there was meant as the log address, and defaulting to
+			// the public log instead would publish somewhere the operator never
+			// named — refuse rather than reinterpret.
+			const stray = args[i + 1];
+			if (stray !== undefined && /^https?:\/\//.test(stray)) {
+				throw new Error(`${REKOR_FLAG} takes no separate value — use ${REKOR_FLAG}=<url>`);
+			}
+			sinks.push({ type: "rekor" });
+		} else if (arg.startsWith(`${REKOR_FLAG}=`)) {
+			const url = arg.slice(REKOR_FLAG.length + 1);
+			if (url === "") throw new Error(`${REKOR_FLAG}=<url> requires a URL`);
+			sinks.push({ type: "rekor", url });
 		}
 	}
 	return sinks;
+}
+
+/** `bucket=B,region=R[,prefix=P][,endpoint=E]` — every key is explicit, none inferred. */
+function s3SinkFromSpec(spec: string): SinkConfig {
+	const fields: Record<string, string> = {};
+	for (const part of spec.split(",")) {
+		if (part.trim() === "") continue;
+		const eq = part.indexOf("=");
+		if (eq <= 0) {
+			throw new Error(`--sink-s3: expected key=value, got "${part.slice(0, 60)}"`);
+		}
+		const key = part.slice(0, eq).trim();
+		const value = part.slice(eq + 1).trim();
+		if (!S3_KEYS.has(key)) {
+			throw new Error(
+				`--sink-s3: unknown key "${key.slice(0, 40)}" (bucket, region, prefix, endpoint)`,
+			);
+		}
+		if (value === "") throw new Error(`--sink-s3: ${key} requires a value`);
+		fields[key] = value;
+	}
+	const { bucket, region, prefix, endpoint } = fields;
+	if (bucket === undefined || region === undefined) {
+		throw new Error("--sink-s3 requires bucket=<name>,region=<region>");
+	}
+	return {
+		type: "s3",
+		bucket,
+		region,
+		...(prefix !== undefined ? { prefix } : {}),
+		...(endpoint !== undefined ? { endpoint } : {}),
+	};
 }
 
 function flagValue(args: string[], flag: string): string | undefined {
@@ -66,6 +127,172 @@ function emitterConfig(args: string[]): AnchoringConfig {
 		sinks: sinksFromArgs(args),
 		...(retries !== undefined ? { publishRetries: retries } : {}),
 	};
+}
+
+// ── doctor ──
+
+/** A sink the doctor cannot probe without writing to someone else's store. */
+function notProbed(sink: string, detail: string): DoctorReport {
+	return { sink, checks: [{ name: "probe", status: "info", detail }], failed: false };
+}
+
+async function doctorReports(args: string[]): Promise<DoctorReport[]> {
+	const sinks = sinksFromArgs(args);
+	if (sinks.length === 0) {
+		throw new Error(
+			"anchor doctor: no sink configured — pass --sink-file, --sink-s3, --sink-url or --sink-rekor",
+		);
+	}
+	const reports: DoctorReport[] = [];
+	for (const sink of sinks) {
+		switch (sink.type) {
+			case "file":
+				reports.push(doctorFileSink(sink.path));
+				break;
+			case "s3":
+				reports.push(
+					await doctorS3Sink({
+						bucket: sink.bucket,
+						region: sink.region,
+						...(sink.prefix !== undefined ? { prefix: sink.prefix } : {}),
+						...(sink.endpoint !== undefined ? { endpoint: sink.endpoint } : {}),
+					}),
+				);
+				break;
+			case "https":
+				reports.push(
+					notProbed(
+						`https:${sink.url}`,
+						"not probed: an ingest endpoint is append-only for this credential by " +
+							"construction — probe the store BEHIND it with its own credentials",
+					),
+				);
+				break;
+			case "rekor":
+				reports.push(
+					notProbed(
+						`rekor:${sink.url ?? DEFAULT_REKOR_URL}`,
+						"not probed: a transparency log is append-only by construction — its " +
+							"inclusion receipts under audit/anchors/rekor/ are the evidence",
+					),
+				);
+				break;
+			case "command":
+				reports.push(
+					notProbed(
+						`command:${sink.argv[0] ?? ""}`,
+						"not probed: the store behind a command " +
+							"sink is opaque from here — probe it with its own tooling",
+					),
+				);
+				break;
+		}
+	}
+	return reports;
+}
+
+function printDoctor(reports: DoctorReport[]): void {
+	const paint = { pass: pc.green, fail: pc.red, info: pc.yellow } as const;
+	console.log(pc.bold("anchor doctor — permission probe (NOT proof of immutability)"));
+	for (const report of reports) {
+		console.log("");
+		console.log(report.sink);
+		for (const check of report.checks) {
+			console.log(
+				`  ${paint[check.status](check.status.toUpperCase())} ${check.name}: ${check.detail}`,
+			);
+		}
+	}
+	console.log("");
+	console.log("Each verdict describes what these credentials could do at this location right now.");
+	console.log("Durable immutability comes from the store's own configuration (S3 Object Lock");
+	console.log("retention, POSIX directory permissions, an appliance's WORM mode).");
+}
+
+// ── export-bundle ──
+
+interface BundleResult {
+	/** The one line stdout gets, or null when nothing may be emitted (delta D9). */
+	bundle: string | null;
+	errors: string[];
+}
+
+/**
+ * Build the auditor bundle `{v:1, records, rekorReceipts}` consumed by
+ * `usertrust verify --bundle`.
+ *
+ * Fail-closed by construction (delta D9): a bundle is what an auditor receives
+ * INSTEAD of the vault, so a partial one — records present, a receipt quietly
+ * dropped because its file did not parse — is worse than no bundle at all. Every
+ * failure path returns `bundle: null`, and callers print diagnostics to stderr
+ * so stdout is either one complete bundle or empty.
+ */
+function buildBundle(root: string, args: string[]): BundleResult {
+	const errors: string[] = [];
+	try {
+		const sinceRaw = flagValue(args, "--since") ?? "0";
+		if (!/^(0|[1-9][0-9]*)$/.test(sinceRaw)) {
+			return { bundle: null, errors: [`export-bundle: --since must be an integer >= 0`] };
+		}
+		const since = Number.parseInt(sinceRaw, 10);
+
+		const mirrorPath = join(anchorsDir(root), "anchors.jsonl");
+		if (!existsSync(mirrorPath)) {
+			return { bundle: null, errors: ["export-bundle: no anchor mirror found"] };
+		}
+		const mirror = parseAnchorsContent(readFileSync(mirrorPath, "utf-8"));
+		for (const err of mirror.errors) errors.push(`export-bundle: mirror: ${err}`);
+
+		const records = mirror.records
+			.filter((r) => r.anchorSeq > since)
+			.sort((a, b) => a.anchorSeq - b.anchorSeq);
+		const receipts = readReceipts(root, errors)
+			.filter((r) => r.anchorSeq > since)
+			.sort((a, b) => a.anchorSeq - b.anchorSeq);
+		for (const [what, count] of [
+			["records", records.length],
+			["rekorReceipts", receipts.length],
+		] as const) {
+			if (count > MAX_BUNDLE_ITEMS) {
+				errors.push(
+					`export-bundle: ${count} ${what} exceeds the ${MAX_BUNDLE_ITEMS} cap the verifier ` +
+						"accepts — export in slices with --since",
+				);
+			}
+		}
+		if (errors.length > 0) return { bundle: null, errors };
+		return { bundle: JSON.stringify({ v: 1, records, rekorReceipts: receipts }), errors };
+	} catch (err) {
+		errors.push(`export-bundle: ${err instanceof Error ? err.message : String(err)}`);
+		return { bundle: null, errors };
+	}
+}
+
+/** Every receipt the Rekor sink persisted; unparseable ones become errors, never gaps. */
+function readReceipts(root: string, errors: string[]): RekorReceipt[] {
+	const dir = join(anchorsDir(root), "rekor");
+	if (!existsSync(dir)) return [];
+	const receipts: RekorReceipt[] = [];
+	for (const name of readdirSync(dir)
+		.filter((f) => f.endsWith(".json"))
+		.sort()) {
+		let raw: string;
+		try {
+			raw = readFileSync(join(dir, name), "utf-8");
+		} catch (err) {
+			errors.push(
+				`export-bundle: ${name}: unreadable (${err instanceof Error ? err.message : String(err)})`,
+			);
+			continue;
+		}
+		const { receipt, error } = parseRekorReceipt(raw);
+		if (receipt === null) {
+			errors.push(`export-bundle: ${name}: ${error}`);
+			continue;
+		}
+		receipts.push(receipt);
+	}
+	return receipts;
 }
 
 export async function run(args: string[] = [], opts?: CliOptions): Promise<void> {
@@ -248,6 +475,39 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				if (errors.length > 0) process.exitCode = 1;
 				return;
 			}
+			case "export-bundle": {
+				const { bundle, errors } = buildBundle(root, args);
+				if (bundle === null) {
+					for (const err of errors) {
+						console.error(err);
+					}
+					console.error("export-bundle: refusing to emit a partial bundle");
+					process.exitCode = 1;
+					return;
+				}
+				// Deliberately NOT wrapped in the {command, success, data} envelope
+				// under --json: a bundle is an interchange artifact fed straight to
+				// `usertrust verify --bundle -`, not a status report.
+				console.log(bundle);
+				return;
+			}
+			case "doctor": {
+				const reports = await doctorReports(args);
+				const failed = reports.some((r) => r.failed);
+				if (json) {
+					console.log(
+						JSON.stringify({
+							command: "anchor doctor",
+							success: !failed,
+							data: { failed, reports },
+						}),
+					);
+				} else {
+					printDoctor(reports);
+				}
+				if (failed) process.exitCode = 1;
+				return;
+			}
 			case "rotate": {
 				const identity = readAnchorIdentity(root);
 				if (identity === null) {
@@ -356,14 +616,22 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				return;
 			}
 			default: {
-				console.log(`Usage: usertrust anchor <init|now|status|export|rotate|resume>
+				console.log(`Usage: usertrust anchor <init|now|status|export|export-bundle|doctor|rotate|resume>
 
-  init   [--key-file <path>]                 Mint identity + Ed25519 key (outside the vault)
-  now    [--sink-file <p>] [--sink-url <u>]  Snapshot, sign, mirror, publish
-  status                                     Last anchor, unanchored tail, outbox
-  export [--since <anchorSeq>]               Print mirror records (pull-mode shipping)
-  rotate [--key-file <path>]                 Cross-signed key rotation
-  resume --latest <record.json|->            Re-seed a lost mirror from the store`);
+  init          [--key-file <path>]     Mint identity + Ed25519 key (outside the vault)
+  now           [sink flags]            Snapshot, sign, mirror, publish
+  status                                Last anchor, unanchored tail, outbox
+  export        [--since <anchorSeq>]   Print mirror records (pull-mode shipping)
+  export-bundle [--since <anchorSeq>]   Records + Rekor receipts for \`verify --bundle\`
+  doctor        [sink flags]            What can this identity delete/overwrite in the store?
+  rotate        [--key-file <path>]     Cross-signed key rotation
+  resume        --latest <record|->     Re-seed a lost mirror from the store
+
+Sink flags:
+  --sink-file <path>                    Append-only file store
+  --sink-url <url>                      Ingest endpoint (POST per record)
+  --sink-s3 bucket=B,region=R[,prefix=P][,endpoint=E]
+  --sink-rekor[=<url>]                  Rekor transparency log (default ${DEFAULT_REKOR_URL})`);
 				if (action !== undefined) process.exitCode = 1;
 				return;
 			}
