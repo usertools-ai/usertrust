@@ -91,6 +91,13 @@ export interface AnchorEvaluationOptions {
 	readonly expectedVaultId?: string;
 	/** Injectable clock for tests. Defaults to Date.now(). */
 	readonly nowMs?: number;
+	/**
+	 * Witness-attested integration time (ms) for the NEWEST anchor, from a
+	 * transparency-log receipt the caller already verified. When present it
+	 * replaces the operator-claimed timestamp as the input to --max-anchor-age:
+	 * it is the one time in the record the vault operator cannot choose.
+	 */
+	readonly attestedTimeMs?: number;
 }
 
 export interface AnchorEvaluationInput {
@@ -134,7 +141,12 @@ function nullIfNaN(n: number): number | null {
 
 // ── Reason-code classes (see spec §7.2) ──
 
-const INVALID_REASONS = new Set(["malformed-anchor", "range-invalid", "sig-invalid"]);
+const INVALID_REASONS = new Set([
+	"malformed-anchor",
+	"range-invalid",
+	"sig-invalid",
+	"rekor-receipt-invalid",
+]);
 const NON_FAIL_REASONS = new Set(["no-trust-material", "witness-unreachable"]);
 
 // ── Strict parsing ──
@@ -743,7 +755,12 @@ const STATE_SEVERITY: Record<AnchorState, number> = {
 	ANCHOR_MISMATCH: 5,
 };
 
-function worseState(a: AnchorState, b: AnchorState): AnchorState {
+/**
+ * The more severe of two states. Exported so callers layering evidence ON TOP
+ * of the state machine (the glue's Rekor receipts) escalate by the SAME
+ * severity ordering the machine itself uses, rather than hardcoding one.
+ */
+export function worseAnchorState(a: AnchorState, b: AnchorState): AnchorState {
 	return (STATE_SEVERITY[a] ?? 0) >= (STATE_SEVERITY[b] ?? 0) ? a : b;
 }
 
@@ -791,7 +808,7 @@ export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvalu
 		let finalState = state;
 		if (witnessFailed) {
 			reasons.push("witness-unreachable");
-			finalState = worseState(finalState, "ANCHOR_UNVERIFIABLE");
+			finalState = worseAnchorState(finalState, "ANCHOR_UNVERIFIABLE");
 			errors.push(`witness-unreachable: ${input.witness.error ?? "anchor URL fetch failed"}`);
 		}
 		let witness: { requested: boolean; status: WitnessStatus; error?: string };
@@ -954,10 +971,19 @@ export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvalu
 	const latest = [...records].sort((a, b) => b.treeSize - a.treeSize)[0];
 	if (latest !== undefined) {
 		const ts = Date.parse(latest.timestamp);
-		if (Number.isFinite(ts) && ts > nowMs) {
+		// A witness-attested integration time supersedes the operator's claim:
+		// the caller verified a transparency-log receipt binding this anchor to a
+		// time the vault operator did not choose, which is exactly the input the
+		// operator-claimed path lacks.
+		const attestedMs =
+			opts.attestedTimeMs !== undefined && Number.isSafeInteger(opts.attestedTimeMs)
+				? opts.attestedTimeMs
+				: null;
+		if (attestedMs === null && Number.isFinite(ts) && ts > nowMs) {
 			// Operator-claimed time is in the auditor's future — clock gaming
 			// (buyer-rejection §5.13). --max-unanchored-events is the
-			// clock-independent control.
+			// clock-independent control. Not raised on the attested path: there
+			// the operator's claim drives no policy, so it is not evidence.
 			warnings.push("future-timestamp");
 		}
 		const tail = Math.max(0, observed - latest.treeSize);
@@ -967,14 +993,17 @@ export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvalu
 			);
 			return finish("ANCHOR_STALE", records);
 		}
+		const ageBasisMs = attestedMs ?? ts;
 		if (
 			opts.maxAnchorAgeMs !== undefined &&
-			Number.isFinite(ts) &&
-			nowMs - ts > opts.maxAnchorAgeMs &&
+			Number.isFinite(ageBasisMs) &&
+			nowMs - ageBasisMs > opts.maxAnchorAgeMs &&
 			observed > latest.treeSize
 		) {
 			errors.push(
-				"stale: newest anchor is older than the supplied --max-anchor-age (operator-claimed time)",
+				attestedMs === null
+					? "stale: newest anchor is older than the supplied --max-anchor-age (operator-claimed time)"
+					: "stale: newest anchor is older than the supplied --max-anchor-age (witness-attested time)",
 			);
 			return finish("ANCHOR_STALE", records);
 		}

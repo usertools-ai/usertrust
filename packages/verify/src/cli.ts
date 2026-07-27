@@ -35,6 +35,9 @@ Options:
   --anchor <file|->              Caller-fetched anchor artifact (repeatable; - = stdin)
   --anchors <file>               Anchor history file (JSONL; repeatable)
   --anchor-url <url>             Opt-in: fetch one anchor artifact over HTTPS
+  --bundle <file|->              Auditor bundle {v,records,rekorReceipts} (usertrust anchor export-bundle)
+  --rekor-receipts <file|->      Transparency-log receipt(s), JSON or JSONL (repeatable)
+  --rekor-pubkey <pem-file>      PINNED transparency-log public key (repeatable)
   --pubkey <pem-file>            PINNED genesis root public key (out-of-band)
   --successor-pin <pem-file>     Pinned rotation-successor key (repeatable)
   --vault-id <uuid>              Expected vaultId
@@ -59,6 +62,57 @@ function parseDurationMs(raw: string): number {
 function readArtifact(pathOrDash: string): string {
 	if (pathOrDash === "-") return readFileSync(0, "utf-8");
 	return readFileSync(pathOrDash, "utf-8");
+}
+
+const MAX_PEM_BYTES = 16 * 1024;
+const MAX_BUNDLE_ITEMS = 10_000;
+const BUNDLE_KEYS = new Set(["v", "records", "rekorReceipts"]);
+
+function readPinnedPem(path: string): string {
+	const pem = readFileSync(path, "utf-8");
+	if (Buffer.byteLength(pem, "utf8") > MAX_PEM_BYTES) {
+		console.error(`--rekor-pubkey ${path}: PEM exceeds 16 KiB`);
+		process.exit(1);
+	}
+	return pem;
+}
+
+/**
+ * Strict parse of an auditor bundle: `{v:1, records, rekorReceipts?}`. A bundle
+ * is untrusted transport, so unknown top-level fields are rejected rather than
+ * ignored — a field the CLI silently drops is one an exporter can use to carry
+ * evidence the verifier never looks at. Element shapes are NOT validated here:
+ * records and receipts are re-serialized and go through the same strict parsers
+ * every other input does.
+ */
+function parseBundle(raw: string): { anchorsRaw: string; receiptsRaw: string[] } {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		throw new Error("--bundle: not valid JSON");
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error("--bundle: not an object");
+	}
+	const obj = parsed as Record<string, unknown>;
+	for (const key of Object.keys(obj)) {
+		if (!BUNDLE_KEYS.has(key)) throw new Error(`--bundle: unknown field "${key.slice(0, 80)}"`);
+	}
+	if (obj.v !== 1) throw new Error("--bundle: unsupported version (expected 1)");
+	if (!Array.isArray(obj.records)) throw new Error("--bundle: records must be an array");
+	if (obj.records.length > MAX_BUNDLE_ITEMS) {
+		throw new Error(`--bundle: records exceeds the ${MAX_BUNDLE_ITEMS} cap`);
+	}
+	const receipts = obj.rekorReceipts ?? [];
+	if (!Array.isArray(receipts)) throw new Error("--bundle: rekorReceipts must be an array");
+	if (receipts.length > MAX_BUNDLE_ITEMS) {
+		throw new Error(`--bundle: rekorReceipts exceeds the ${MAX_BUNDLE_ITEMS} cap`);
+	}
+	return {
+		anchorsRaw: obj.records.map((record) => JSON.stringify(record)).join("\n"),
+		receiptsRaw: receipts.map((receipt) => JSON.stringify(receipt)),
+	};
 }
 
 function fetchAnchorUrl(url: string): Promise<{ ok: boolean; body?: string; error?: string }> {
@@ -88,6 +142,9 @@ function fetchAnchorUrl(url: string): Promise<{ ok: boolean; body?: string; erro
 let vaultPath: string | undefined;
 let txId: string | undefined;
 const anchorFiles: string[] = [];
+const rekorReceiptFiles: string[] = [];
+const rekorPubkeyFiles: string[] = [];
+let bundleFile: string | undefined;
 let anchorUrl: string | undefined;
 let pubkeyFile: string | undefined;
 const successorPinFiles: string[] = [];
@@ -108,6 +165,9 @@ for (let i = 0; i < args.length; i++) {
 	if (arg === "--tx") txId = next();
 	else if (arg === "--anchor" || arg === "--anchors") anchorFiles.push(next());
 	else if (arg === "--anchor-url") anchorUrl = next();
+	else if (arg === "--rekor-receipts") rekorReceiptFiles.push(next());
+	else if (arg === "--rekor-pubkey") rekorPubkeyFiles.push(next());
+	else if (arg === "--bundle") bundleFile = next();
 	else if (arg === "--pubkey") pubkeyFile = next();
 	else if (arg === "--successor-pin") successorPinFiles.push(next());
 	else if (arg === "--vault-id") vaultId = next();
@@ -138,11 +198,24 @@ const anchorMode =
 	anchorFiles.length > 0 ||
 	anchorUrl !== undefined ||
 	pubkeyFile !== undefined ||
+	bundleFile !== undefined ||
+	rekorReceiptFiles.length > 0 ||
 	requireAnchor ||
 	requireExternalAnchor;
 
 async function buildAnchorParams(): Promise<AnchorVerifyParams> {
 	const externalAnchorsRaw: string[] = anchorFiles.map(readArtifact);
+	const rekorReceiptsRaw: string[] = rekorReceiptFiles.map(readArtifact);
+	if (bundleFile !== undefined) {
+		try {
+			const bundle = parseBundle(readArtifact(bundleFile));
+			externalAnchorsRaw.push(bundle.anchorsRaw);
+			rekorReceiptsRaw.push(...bundle.receiptsRaw);
+		} catch (err) {
+			console.error(err instanceof Error ? err.message : String(err));
+			process.exit(1);
+		}
+	}
 	let witness: WitnessInput = { requested: false };
 	if (anchorUrl !== undefined) {
 		const fetched = await fetchAnchorUrl(anchorUrl);
@@ -179,6 +252,8 @@ async function buildAnchorParams(): Promise<AnchorVerifyParams> {
 			: undefined;
 	return {
 		externalAnchorsRaw,
+		rekorReceiptsRaw,
+		rekorLogPubkeysPem: rekorPubkeyFiles.map(readPinnedPem),
 		...(trust !== undefined ? { trust } : {}),
 		witness,
 		...(maxAnchorAgeMs !== undefined ? { maxAnchorAgeMs } : {}),
@@ -202,6 +277,14 @@ function printAnchorSection(result: AnchoredVaultVerificationResult): void {
 		);
 	}
 	console.log(`Unanchored tail: ${a.unanchoredTail.events} event(s)`);
+	if (a.rekor !== undefined) {
+		const attested =
+			a.rekor.latestAttestedTimeMs === null
+				? ""
+				: `, attested ${new Date(a.rekor.latestAttestedTimeMs).toISOString()}`;
+		const failed = a.rekor.receiptsFailed > 0 ? `, ${a.rekor.receiptsFailed} FAILED` : "";
+		console.log(`Rekor: ${a.rekor.receiptsVerified} receipt(s) verified${failed}${attested}`);
+	}
 	if (a.witness.requested) {
 		console.log(`Witness: ${a.witness.status}${a.witness.error ? ` (${a.witness.error})` : ""}`);
 	}
