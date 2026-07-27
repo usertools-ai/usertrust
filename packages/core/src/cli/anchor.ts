@@ -39,6 +39,8 @@ import type { CliOptions } from "./init.js";
 
 const REKOR_FLAG = "--sink-rekor";
 const S3_KEYS = new Set(["bucket", "region", "prefix", "endpoint"]);
+/** Sink flags that take the following argv token as their operand. */
+const VALUE_SINK_FLAGS = new Set(["--sink-file", "--sink-url", "--sink-s3"]);
 /** Same cap the verify CLI enforces on `--bundle` — never export what it refuses. */
 const MAX_BUNDLE_ITEMS = 10_000;
 
@@ -46,15 +48,21 @@ function sinksFromArgs(args: string[]): SinkConfig[] {
 	const sinks: SinkConfig[] = [];
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i] as string;
-		if (arg === "--sink-file" && args[i + 1] !== undefined) {
-			sinks.push({ type: "file", path: args[i + 1] as string });
+		if (VALUE_SINK_FLAGS.has(arg)) {
+			// A missing operand used to drop the flag on the floor, so
+			// `anchor now --sink-s3` ran with ZERO sinks, published nowhere and
+			// still exited 0 — a skipped publication an operator would only
+			// discover at audit time. Refuse the run instead.
+			const value = args[i + 1];
+			if (value === undefined) throw new Error(`${arg} requires a value`);
 			i++;
-		} else if (arg === "--sink-url" && args[i + 1] !== undefined) {
-			sinks.push({ type: "https", url: args[i + 1] as string });
-			i++;
-		} else if (arg === "--sink-s3" && args[i + 1] !== undefined) {
-			sinks.push(s3SinkFromSpec(args[i + 1] as string));
-			i++;
+			if (arg === "--sink-file") {
+				sinks.push({ type: "file", path: value });
+			} else if (arg === "--sink-url") {
+				sinks.push({ type: "https", url: value });
+			} else {
+				sinks.push(s3SinkFromSpec(value));
+			}
 		} else if (arg === REKOR_FLAG) {
 			// Delta D8: this flag never consumes the token after it, so
 			// `--sink-rekor --sink-file /mnt/worm/a.jsonl` keeps its file sink. A
@@ -111,6 +119,18 @@ function flagValue(args: string[], flag: string): string | undefined {
 	const idx = args.indexOf(flag);
 	if (idx === -1 || args[idx + 1] === undefined) return undefined;
 	return args[idx + 1];
+}
+
+/**
+ * `--since <anchorSeq>`, or null when the operand is not a non-negative
+ * integer. Both `export` and `export-bundle` validate here: a bare parseInt
+ * turns `--since abc` into NaN, every `anchorSeq > NaN` comparison is false,
+ * and the command prints nothing while exiting 0 — indistinguishable from a
+ * vault with nothing left to ship.
+ */
+function sinceFromArgs(args: string[]): number | null {
+	const raw = flagValue(args, "--since") ?? "0";
+	return /^(0|[1-9][0-9]*)$/.test(raw) ? Number.parseInt(raw, 10) : null;
 }
 
 function emitterConfig(args: string[]): AnchoringConfig {
@@ -215,6 +235,8 @@ interface BundleResult {
 	/** The one line stdout gets, or null when nothing may be emitted (delta D9). */
 	bundle: string | null;
 	errors: string[];
+	/** Non-fatal notices for stderr — the bundle is still complete without them. */
+	warnings: string[];
 }
 
 /**
@@ -226,19 +248,30 @@ interface BundleResult {
  * dropped because its file did not parse — is worse than no bundle at all. Every
  * failure path returns `bundle: null`, and callers print diagnostics to stderr
  * so stdout is either one complete bundle or empty.
+ *
+ * A receipt whose record is absent from the mirror is the one exception, and it
+ * is not a parse failure: `anchor resume` re-seeds the mirror from the store's
+ * newest record alone, leaving the receipts for every earlier anchor on disk
+ * with nothing to pair against. Shipping them would hard-fail the verifier
+ * ("receipt for unknown anchorSeq"), so they are excluded with a warning and
+ * the bundle stays valid.
  */
 function buildBundle(root: string, args: string[]): BundleResult {
 	const errors: string[] = [];
+	const warnings: string[] = [];
 	try {
-		const sinceRaw = flagValue(args, "--since") ?? "0";
-		if (!/^(0|[1-9][0-9]*)$/.test(sinceRaw)) {
-			return { bundle: null, errors: [`export-bundle: --since must be an integer >= 0`] };
+		const since = sinceFromArgs(args);
+		if (since === null) {
+			return {
+				bundle: null,
+				errors: ["export-bundle: --since must be an integer >= 0"],
+				warnings,
+			};
 		}
-		const since = Number.parseInt(sinceRaw, 10);
 
 		const mirrorPath = join(anchorsDir(root), "anchors.jsonl");
 		if (!existsSync(mirrorPath)) {
-			return { bundle: null, errors: ["export-bundle: no anchor mirror found"] };
+			return { bundle: null, errors: ["export-bundle: no anchor mirror found"], warnings };
 		}
 		const mirror = parseAnchorsContent(readFileSync(mirrorPath, "utf-8"));
 		for (const err of mirror.errors) errors.push(`export-bundle: mirror: ${err}`);
@@ -246,9 +279,20 @@ function buildBundle(root: string, args: string[]): BundleResult {
 		const records = mirror.records
 			.filter((r) => r.anchorSeq > since)
 			.sort((a, b) => a.anchorSeq - b.anchorSeq);
-		const receipts = readReceipts(root, errors)
+		const found = readReceipts(root, errors)
 			.filter((r) => r.anchorSeq > since)
 			.sort((a, b) => a.anchorSeq - b.anchorSeq);
+		if (errors.length > 0) return { bundle: null, errors, warnings };
+
+		const bundledSeqs = new Set(records.map((r) => r.anchorSeq));
+		const receipts = found.filter((r) => {
+			if (bundledSeqs.has(r.anchorSeq)) return true;
+			warnings.push(
+				`export-bundle: excluding receipt for anchorSeq ${r.anchorSeq} (no matching record ` +
+					"in mirror — re-fetch the full history to include it)",
+			);
+			return false;
+		});
 		for (const [what, count] of [
 			["records", records.length],
 			["rekorReceipts", receipts.length],
@@ -260,15 +304,24 @@ function buildBundle(root: string, args: string[]): BundleResult {
 				);
 			}
 		}
-		if (errors.length > 0) return { bundle: null, errors };
-		return { bundle: JSON.stringify({ v: 1, records, rekorReceipts: receipts }), errors };
+		if (errors.length > 0) return { bundle: null, errors, warnings };
+		return {
+			bundle: JSON.stringify({ v: 1, records, rekorReceipts: receipts }),
+			errors,
+			warnings,
+		};
 	} catch (err) {
 		errors.push(`export-bundle: ${err instanceof Error ? err.message : String(err)}`);
-		return { bundle: null, errors };
+		return { bundle: null, errors, warnings };
 	}
 }
 
-/** Every receipt the Rekor sink persisted; unparseable ones become errors, never gaps. */
+/**
+ * Every receipt the Rekor sink persisted; unparseable ones become errors, never
+ * gaps. Any `*.json` under the receipts directory is a candidate and each one is
+ * keyed by the `anchorSeq` INSIDE it — the filename is an index for humans, not
+ * a fact about the receipt.
+ */
 function readReceipts(root: string, errors: string[]): RekorReceipt[] {
 	const dir = join(anchorsDir(root), "rekor");
 	if (!existsSync(dir)) return [];
@@ -456,7 +509,12 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				return;
 			}
 			case "export": {
-				const since = Number.parseInt(flagValue(args, "--since") ?? "0", 10);
+				const since = sinceFromArgs(args);
+				if (since === null) {
+					console.error("export: --since must be an integer >= 0");
+					process.exitCode = 1;
+					return;
+				}
 				const mirrorPath = join(anchorsDir(root), "anchors.jsonl");
 				if (!existsSync(mirrorPath)) {
 					console.error("No anchor mirror found.");
@@ -476,7 +534,10 @@ export async function run(args: string[] = [], opts?: CliOptions): Promise<void>
 				return;
 			}
 			case "export-bundle": {
-				const { bundle, errors } = buildBundle(root, args);
+				const { bundle, errors, warnings } = buildBundle(root, args);
+				for (const warning of warnings) {
+					console.error(warning);
+				}
 				if (bundle === null) {
 					for (const err of errors) {
 						console.error(err);

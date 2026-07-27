@@ -5,17 +5,23 @@
  * HARDEN — `anchor doctor`, the S3/Rekor sink flags, and `anchor export-bundle`
  * (plan T6 + deltas D8/D9/D10).
  *
- * Two properties are worth more than the surface area they sit on:
+ * These properties are worth more than the surface area they sit on:
  *
  *   1. `--sink-rekor` NEVER consumes the token after it. A flag that swallows
  *      the next argv entry turns `--sink-rekor --sink-file /mnt/worm/a.jsonl`
  *      into a run with NO file sink, and the operator would only find out at
  *      audit time (D8).
- *   2. `export-bundle` is all-or-nothing on stdout. A bundle is what an auditor
+ *   2. A sink flag whose value is missing is fatal. The mirror-image failure of
+ *      (1): `anchor now --sink-s3` parsing to zero sinks means the anchor is
+ *      signed, mirrored locally, published NOWHERE, and reported as success.
+ *   3. `export-bundle` is all-or-nothing on stdout. A bundle is what an auditor
  *      receives INSTEAD of the vault, so a partial one — records present,
  *      receipts silently dropped because a file failed to parse — is worse than
  *      no bundle at all. Any parse error means diagnostics on stderr, exit 1,
  *      and not one byte on stdout (D9).
+ *   4. …with exactly one exception, which is not a parse failure: receipts
+ *      orphaned by `anchor resume` are excluded with a warning, because
+ *      including them would make the verifier reject the whole bundle.
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -23,6 +29,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { anchorsDir } from "../../../src/audit/anchor.js";
 import type { AnchorRecord } from "../../../src/audit/anchor-verify.js";
+import type { RekorReceipt } from "../../../src/audit/rekor-verify.js";
 import { verifyVaultWithAnchors } from "../../../src/audit/verify.js";
 import { run as anchorRun } from "../../../src/cli/anchor.js";
 import {
@@ -81,7 +88,7 @@ const doctorJson = (o: CliOutput): DoctorJson => JSON.parse(o.out.at(-1) as stri
 interface Bundle {
 	v: number;
 	records: AnchorRecord[];
-	rekorReceipts: unknown[];
+	rekorReceipts: RekorReceipt[];
 }
 
 /** A vault with two anchors in its local mirror. */
@@ -314,5 +321,95 @@ describe("HARDEN: usage text", () => {
 		expect(usage).toMatch(/doctor/);
 		expect(usage).toMatch(/--sink-s3/);
 		expect(usage).toMatch(/--sink-rekor/);
+	});
+});
+
+describe("HARDEN: a sink flag with no value never degrades into publishing nowhere", () => {
+	// `anchor now --sink-s3` used to parse to ZERO sinks: the record was signed
+	// and mirrored locally, nothing was published, and the exit code said 0. The
+	// operator finds out at audit time, which is the worst possible moment.
+	const flags = ["--sink-file", "--sink-url", "--sink-s3"] as const;
+	flags.forEach((flag, i) => {
+		it(`${18 + i}. \`anchor now ${flag}\` with a missing value exits 1`, async () => {
+			const o = await cli(["now", flag], true);
+
+			const parsed = JSON.parse(o.out.at(-1) as string);
+			expect(parsed.success).toBe(false);
+			expect(parsed.data.message).toBe(`${flag} requires a value`);
+			expect(process.exitCode).toBe(1);
+		});
+	});
+});
+
+describe("HARDEN: `anchor export` --since", () => {
+	it("21. a non-numeric --since is refused, not silently read as NaN", async () => {
+		const { s } = await twoAnchorVault();
+		process.chdir(s.root);
+
+		const o = await cli(["export", "--since", "abc"]);
+
+		// NaN made every `anchorSeq > since` false, so the command printed no
+		// records and exited 0 — indistinguishable from "nothing left to ship".
+		expect(o.out).toEqual([]);
+		expect(o.err.join("\n")).toMatch(/--since/);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("22. a valid --since still filters normally", async () => {
+		const { s } = await twoAnchorVault();
+		process.chdir(s.root);
+
+		const o = await cli(["export", "--since", "1"]);
+
+		expect(o.out.map((line) => (JSON.parse(line) as AnchorRecord).anchorSeq)).toEqual([2]);
+		expect(process.exitCode).toBe(0);
+	});
+});
+
+describe("HARDEN: export-bundle never ships a receipt the verifier would reject", () => {
+	it("23. a receipt with no record in the mirror is excluded with a stderr warning", async () => {
+		const { s, records } = await twoAnchorVault();
+		placeReceipt(s.root, 1, JSON.stringify(makeRekorReceipt(records[0] as AnchorRecord).receipt));
+		placeReceipt(s.root, 2, JSON.stringify(makeRekorReceipt(records[1] as AnchorRecord).receipt));
+		// The shape `anchor resume` leaves behind: receipts on disk for anchors
+		// whose records are no longer in the re-seeded mirror. Bundling one makes
+		// the verifier hard-fail with "receipt for unknown anchorSeq".
+		const orphan: RekorReceipt = {
+			...makeRekorReceipt(records[1] as AnchorRecord).receipt,
+			anchorSeq: 3,
+		};
+		placeReceipt(s.root, 3, JSON.stringify(orphan));
+		process.chdir(s.root);
+
+		const o = await cli(["export-bundle"]);
+
+		const bundle = JSON.parse(o.out[0] as string) as Bundle;
+		expect(bundle.records.map((r) => r.anchorSeq)).toEqual([1, 2]);
+		expect(bundle.rekorReceipts.map((r) => r.anchorSeq)).toEqual([1, 2]);
+		expect(o.err.join("\n")).toContain(
+			"export-bundle: excluding receipt for anchorSeq 3 (no matching record in mirror — " +
+				"re-fetch the full history to include it)",
+		);
+		// Expected after a resume, so it is a warning and not a failure (D9's
+		// fail-closed rule covers PARSE errors, which this is not).
+		expect(process.exitCode).toBe(0);
+	});
+
+	it("24. receipts are keyed by the anchorSeq inside them, not by their filename", async () => {
+		const { s, records } = await twoAnchorVault();
+		const dir = join(anchorsDir(s.root), "rekor");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "000000000002.a1b2c3d4.json"),
+			JSON.stringify(makeRekorReceipt(records[1] as AnchorRecord).receipt),
+		);
+		process.chdir(s.root);
+
+		const o = await cli(["export-bundle"]);
+
+		const bundle = JSON.parse(o.out[0] as string) as Bundle;
+		expect(bundle.rekorReceipts.map((r) => r.anchorSeq)).toEqual([2]);
+		expect(o.err).toEqual([]);
+		expect(process.exitCode).toBe(0);
 	});
 });
