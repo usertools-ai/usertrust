@@ -14,6 +14,7 @@ const COMMANDS = [
 	"completions",
 	"secret",
 	"skill",
+	"ui",
 ] as const;
 
 const argv = process.argv.slice(2);
@@ -104,6 +105,11 @@ switch (command) {
 	case "skill":
 		await import("./skill.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
+	case "ui": {
+		const rest = argv.slice(argv.indexOf("ui") + 1).filter((a) => a !== "--json");
+		await import("./ui.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
+		break;
+	}
 	default: {
 		if (command && !command.startsWith("-")) {
 			const suggestion = suggestCommand(command);
@@ -127,6 +133,7 @@ Commands:
   completions   Output shell completion scripts
   secret        Manage vault credentials
   skill         Verify skill manifests
+  ui            Open the visual ledger (local web UI)
 
 Options:
   --json     Output machine-readable JSON`);

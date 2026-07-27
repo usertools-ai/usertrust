@@ -3,7 +3,7 @@
 
 /**
  * Loopback-only HTTP server over a usertrust vault. Read-only except
- * POST /api/export. Static SPA assets are wired in Task 14. GET /api/tail
+ * POST /api/export. Non-API routes serve the prebuilt SPA. GET /api/tail
  * streams SSE: appended events are incrementally verified (linkage AND a
  * full hash recompute via usertrust-verify's canonicalize); any mismatch,
  * parse failure, or file shrink triggers a full reload + `resync` event.
@@ -17,11 +17,13 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { type PersistedAuditEvent, VAULT_DIR, exportMarkdown } from "usertrust";
 import { canonicalize, verifyTransaction } from "usertrust-verify";
 import { toLedgerRows } from "../shared/rows.js";
 import { type LedgerState, ROW_CAP, loadState } from "./state.js";
+import { serveStatic } from "./static.js";
 import { watchLedger } from "./tail.js";
 
 /** Amendment A5: maximum accepted /api/export request body, in bytes. */
@@ -43,8 +45,13 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 	res.end(payload);
 }
 
-export async function createUiServer(rootDir: string, opts?: { port?: number }): Promise<UiServer> {
+export async function createUiServer(
+	rootDir: string,
+	opts?: { port?: number; appDir?: string },
+): Promise<UiServer> {
 	const vaultPath = join(rootDir, VAULT_DIR);
+	// Compiled location is dist/server/ — the built SPA sits beside it in dist/app/.
+	const appDir = opts?.appDir ?? join(dirname(fileURLToPath(import.meta.url)), "..", "app");
 	let state: LedgerState = loadState(vaultPath);
 	let port = 0;
 
@@ -222,9 +229,8 @@ export async function createUiServer(rootDir: string, opts?: { port?: number }):
 			sendJson(res, 404, { error: "not found" });
 			return;
 		}
-		// Non-API routes: static SPA (Task 14). Until then, 404.
-		res.writeHead(404, { "content-type": "text/plain" });
-		res.end("usertrust-ui");
+		// Non-API routes: the prebuilt SPA, with index.html fallback for client routing.
+		serveStatic(appDir, url.pathname, res);
 	};
 
 	const server = createServer(handler);

@@ -14,6 +14,10 @@
 	"keywords": ["ai", "governance", "audit", "ledger", "ui", "dashboard"],
 	"type": "module",
 	"bin": { "usertrust-ui": "./dist/server/main.js" },
+	"exports": {
+		".": "./dist/server/server.js",
+		"./package.json": "./package.json"
+	},
 	"scripts": {
 		"build": "tsc && vite build",
 		"prepublishOnly": "tsc && vite build"
