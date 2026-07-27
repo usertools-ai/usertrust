@@ -113,7 +113,7 @@ usertrust init          # Create .usertrust/ vault
 usertrust inspect       # Vault bank statement
 usertrust health        # Entropy diagnostics (6 signals, 0-100 score)
 usertrust verify        # Verify audit chain integrity (+ external anchors)
-usertrust anchor        # External anchoring: init|now|status|export|rotate|resume
+usertrust anchor        # External anchoring: init|now|status|doctor|export|export-bundle|rotate|resume
 usertrust snapshot      # Checkpoint/restore vault state
 usertrust tb            # TigerBeetle process management
 usertrust completions   # Shell completions (bash, zsh, fish)
@@ -190,7 +190,7 @@ const config = defineConfig({
 
 **Merkle proofs (RFC 6962)** — Inclusion and consistency proofs for public verifiability. Any third party can verify a specific event existed in the chain.
 
-**External anchoring** — Ed25519-signed chain-head checkpoints pushed to an append-only store the vault operator cannot rewrite (S3 Object Lock, protected git branch, SIEM). Even a fully re-hashed, internally-consistent rewrite fails verification against the externally-held root. See the [anchoring guide](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md).
+**External anchoring** — Ed25519-signed chain-head checkpoints pushed to an append-only store the vault operator cannot rewrite (S3 Object Lock, protected git branch, SIEM). Even a fully re-hashed, internally-consistent rewrite fails verification against the externally-held root. Ships a native SigV4 S3 sink (no AWS SDK), an experimental [Rekor](https://docs.sigstore.dev/logging/overview/) transparency-log witness that publishes digests only, `anchor doctor` to probe whether the writer identity can actually delete or overwrite in the store, and `anchor export-bundle` to hand an auditor the records and receipts in one file. See the [anchoring guide](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md).
 
 **Policy engine** — 12 field operators (`eq`, `gt`, `in`, `regex`, etc.) with soft/hard enforcement. Block specific models, cap costs, require approvals.
 
@@ -263,6 +263,10 @@ With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/
 ```bash
 usertrust anchor init                                     # once: mint identity, pin the key
 usertrust anchor now --sink-file /mnt/worm/anchors.jsonl  # from cron/CI, or in-process
+
+# or publish straight to S3, after checking the store really refuses deletes
+usertrust anchor doctor --sink-s3 bucket=audit-anchors,region=us-east-1
+usertrust anchor now    --sink-s3 bucket=audit-anchors,region=us-east-1
 
 npx usertrust-verify .usertrust --anchors anchors.jsonl --pubkey root.pem --require-external-anchor
 ```
