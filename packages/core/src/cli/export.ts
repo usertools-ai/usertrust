@@ -45,7 +45,13 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 			console.log(JSON.stringify({ command: "export", success: true, data: result }));
 		} else {
 			console.log(`Exported ${result.written} receipt note(s) to ${result.outDir}`);
-			console.log(`Chain integrity: ${result.chainValid ? "verified" : pc.red("BROKEN")}`);
+			if (result.chainValid && result.vaultValid) {
+				console.log("Chain integrity: verified");
+			} else {
+				console.log(`Chain integrity: ${pc.red("BROKEN")}`);
+				const reason = result.vaultErrors[0];
+				if (reason) console.log(`  ${pc.red(reason)}`);
+			}
 			console.log(
 				"Open the folder as (or inside) an Obsidian vault; Receipts.base is the table view.",
 			);

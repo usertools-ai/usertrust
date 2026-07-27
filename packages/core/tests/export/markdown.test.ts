@@ -109,6 +109,21 @@ describe("exportMarkdown", () => {
 		expect(existsSync(join(outDir, "receipts", "evil.md"))).toBe(false);
 	});
 
+	it("reports vault-level failures the parsed-chain walk cannot see (tail truncation)", async () => {
+		const logPath = join(vaultPath, "audit", "events.jsonl");
+		const content = readFileSync(logPath, "utf-8");
+		// Tear the last event mid-line: the parsed chain stays valid, but the
+		// .meta anchor records 2 events and flags the truncation.
+		(await import("node:fs")).writeFileSync(logPath, content.slice(0, content.length - 60));
+
+		const result = exportMarkdown(vaultPath, outDir);
+		expect(result.chainValid).toBe(true);
+		expect(result.vaultValid).toBe(false);
+		expect(result.vaultErrors.length).toBeGreaterThan(0);
+		const indexNote = readFileSync(join(outDir, "Ledger Index.md"), "utf-8");
+		expect(indexNote).toContain("Vault verification: FAILED");
+	});
+
 	it("stamps after-break integrity past a tamper point", async () => {
 		const logPath = join(vaultPath, "audit", "events.jsonl");
 		const lines = readFileSync(logPath, "utf-8").trim().split("\n");

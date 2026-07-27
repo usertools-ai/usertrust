@@ -13,12 +13,17 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { type PersistedAuditEvent, deriveChainIntegrity, readLedgerEvents } from "../audit/read.js";
+import { verifyVault } from "../audit/verify.js";
 
 export interface ExportResult {
 	written: number;
 	outDir: string;
+	/** Parsed-chain walk verdict (hash linkage over readable events). */
 	chainValid: boolean;
 	breakIndex: number | null;
+	/** Full vault verification (segments, malformed lines, .meta anchor). */
+	vaultValid: boolean;
+	vaultErrors: string[];
 }
 
 const UT_TO_USD = 0.0001;
@@ -120,6 +125,10 @@ const BASE_VIEW = `views:
 export function exportMarkdown(vaultPath: string, outDir: string): ExportResult {
 	const events = readLedgerEvents(vaultPath);
 	const integrity = deriveChainIntegrity(events);
+	// Parsed-chain walk alone misses vault-level failures (torn trailing line,
+	// tail truncation vs the .meta anchor, sequence gaps) — run the full vault
+	// verification too so an export from a tampered vault says so.
+	const vault = verifyVault(vaultPath);
 	const anchor = anchorState(vaultPath);
 
 	mkdirSync(join(outDir, "receipts"), { recursive: true });
@@ -144,6 +153,9 @@ export function exportMarkdown(vaultPath: string, outDir: string): ExportResult 
 	index.push(
 		`- Chain integrity: ${integrity.valid ? "verified" : `BROKEN at seq ${(events[integrity.breakIndex ?? 0]?.sequence ?? integrity.breakIndex ?? 0).toString()}`}`,
 	);
+	index.push(
+		`- Vault verification: ${vault.valid ? "passed" : `FAILED — ${vault.errors[0] ?? "unknown error"}`}`,
+	);
 	index.push(`- Anchor state: ${anchor}`);
 	index.push(`- Vault: ${vaultPath}`);
 	const newest = events.at(-1);
@@ -151,5 +163,12 @@ export function exportMarkdown(vaultPath: string, outDir: string): ExportResult 
 	index.push("");
 	writeFileSync(join(outDir, "Ledger Index.md"), index.join("\n"), "utf-8");
 
-	return { written, outDir, chainValid: integrity.valid, breakIndex: integrity.breakIndex };
+	return {
+		written,
+		outDir,
+		chainValid: integrity.valid,
+		breakIndex: integrity.breakIndex,
+		vaultValid: vault.valid,
+		vaultErrors: vault.errors,
+	};
 }
