@@ -6,6 +6,7 @@ export default defineConfig({
 			// Resolve workspace packages to source for tests (dist/ may not exist in CI)
 			usertrust: resolve(__dirname, "packages/core/src/index.ts"),
 			"usertrust/headless": resolve(__dirname, "packages/core/src/headless.ts"),
+			"usertrust-verify": resolve(__dirname, "packages/verify/src/index.ts"),
 		},
 	},
 	test: {
@@ -15,7 +16,7 @@ export default defineConfig({
 		coverage: {
 			provider: "v8",
 			include: ["packages/*/src/**/*.ts"],
-			exclude: ["packages/*/src/cli/**"],
+			exclude: ["packages/*/src/cli/**", "packages/ui/src/app/**"],
 			thresholds: {
 				lines: 92,
 				branches: 84,

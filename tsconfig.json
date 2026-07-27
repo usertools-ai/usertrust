@@ -5,6 +5,7 @@
 		{ "path": "packages/verify" },
 		{ "path": "packages/monte-cristo" },
 		{ "path": "packages/server" },
-		{ "path": "packages/acs-adapter" }
+		{ "path": "packages/acs-adapter" },
+		{ "path": "packages/ui" }
 	]
 }
