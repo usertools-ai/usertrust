@@ -33,9 +33,19 @@ export function SummaryStrip(props: {
 	return (
 		<div className="flex flex-col gap-2">
 			{!s.chain.valid && (
-				<div className="rounded border border-[var(--danger)] bg-[var(--danger)]/10 px-3 py-2 text-sm text-[var(--danger)]">
-					⚠ CHAIN INTEGRITY FAILURE — tampering or corruption detected
-					{s.chain.breakIndex !== null && ` (break at row ${s.chain.breakIndex + 1})`}
+				<div className="flex flex-col gap-1 rounded border border-[var(--danger)] bg-[var(--danger)]/10 px-3 py-2 text-sm text-[var(--danger)]">
+					<span>
+						⚠ CHAIN INTEGRITY FAILURE — tampering or corruption detected
+						{s.chain.breakIndex !== null && ` (break at chain position ${s.chain.breakIndex + 1})`}
+					</span>
+					{s.chain.errors.slice(0, 3).map((err) => (
+						<span key={err} className="font-mono text-xs opacity-90">
+							{err}
+						</span>
+					))}
+					{s.chain.errors.length > 3 && (
+						<span className="text-xs opacity-75">…and {s.chain.errors.length - 3} more</span>
+					)}
 				</div>
 			)}
 			{s.truncated && (

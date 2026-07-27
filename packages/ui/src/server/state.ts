@@ -26,7 +26,7 @@ function anchorState(vaultPath: string): "unanchored" | "present" {
 		: "unanchored";
 }
 
-export function loadState(vaultPath: string): LedgerState {
+export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerState {
 	const events = readLedgerEvents(vaultPath);
 	const integrity = deriveChainIntegrity(events);
 	const vault = verifyVault(vaultPath);
@@ -37,8 +37,8 @@ export function loadState(vaultPath: string): LedgerState {
 		if (e.kind === "llm_call" && typeof e.data.cost === "number") spentUt += e.data.cost;
 	}
 
-	const truncated = events.length > ROW_CAP;
-	const visible = truncated ? events.slice(-ROW_CAP) : events;
+	const truncated = events.length > rowCap;
+	const visible = truncated ? events.slice(-rowCap) : events;
 	// Integrity indexes are relative to the full ordered list; re-derive for the slice.
 	const offset = events.length - visible.length;
 	const sliceIntegrity =

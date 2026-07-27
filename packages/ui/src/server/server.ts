@@ -114,11 +114,6 @@ export async function createUiServer(
 		broadcast("summary", state.summary);
 	}
 
-	const stopWatching = watchLedger(vaultPath, () => state.byteOffset, {
-		onGrow: handleGrow,
-		onResync: handleResync,
-	});
-
 	const handler = (req: IncomingMessage, res: ServerResponse): void => {
 		// Amendment A3: on every response, including errors.
 		res.setHeader("x-content-type-options", "nosniff");
@@ -245,6 +240,13 @@ export async function createUiServer(
 	});
 	const address = server.address();
 	port = typeof address === "object" && address !== null ? address.port : 0;
+
+	// Watch only once the bind succeeded — a failed bind must not leak an
+	// fs.watch handle (createUiServer throws and close() is never reachable).
+	const stopWatching = watchLedger(vaultPath, () => state.byteOffset, {
+		onGrow: handleGrow,
+		onResync: handleResync,
+	});
 
 	return {
 		server,

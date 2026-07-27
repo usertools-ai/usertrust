@@ -47,7 +47,13 @@ export function useLedger(): LedgerData {
 		source.addEventListener("error", () => setData((d) => ({ ...d, live: false })));
 		source.addEventListener("rows", (e) => {
 			const fresh = JSON.parse((e as MessageEvent).data) as LedgerRow[];
-			setData((d) => ({ ...d, rows: [...d.rows, ...fresh] }));
+			setData((d) => {
+				// Dedup by id: an SSE frame can race the open-triggered resync
+				// fetch and redeliver rows the fetch already returned.
+				const seen = new Set(d.rows.map((r) => r.id));
+				const novel = fresh.filter((r) => !seen.has(r.id));
+				return novel.length > 0 ? { ...d, rows: [...d.rows, ...novel] } : d;
+			});
 		});
 		source.addEventListener("summary", (e) => {
 			const summary = JSON.parse((e as MessageEvent).data) as SummaryPayload;
