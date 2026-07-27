@@ -1,0 +1,309 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
+/**
+ * Synthetic transparency-log fixtures for the Rekor receipt corpus.
+ *
+ * The Merkle primitives here are an INDEPENDENT reference implementation of
+ * RFC 6962 §2.1 (MTH) and §2.1.1 (PATH) — deliberately recursive and
+ * deliberately NOT sharing code with src/audit/merkle.ts or the RFC 9162
+ * index-walk verifier under test. A verifier checked against its own algorithm
+ * proves nothing; the property test drives this reference against
+ * verifyIndexInclusion for every (treeSize <= 20, index) pair.
+ */
+
+import {
+	createHash,
+	createPublicKey,
+	sign as cryptoSign,
+	generateKeyPairSync,
+	type KeyObject,
+	randomBytes,
+} from "node:crypto";
+import { type AnchorRecord, anchorPayloadHash } from "../../../src/audit/anchor-verify.js";
+import { canonicalize } from "../../../src/audit/canonical.js";
+import type { RekorReceipt } from "../../../src/audit/rekor-verify.js";
+
+const LEAF_PREFIX = Buffer.from([0x00]);
+const NODE_PREFIX = Buffer.from([0x01]);
+
+/** RFC 6962 leaf hash: sha256(0x00 || entry). */
+export function leafHash(entry: Buffer): Buffer {
+	return createHash("sha256").update(LEAF_PREFIX).update(entry).digest();
+}
+
+function nodeHash(left: Buffer, right: Buffer): Buffer {
+	return createHash("sha256").update(NODE_PREFIX).update(left).update(right).digest();
+}
+
+/** Largest power of two strictly less than n (n > 1). */
+function splitPoint(n: number): number {
+	let k = 1;
+	while (k * 2 < n) k *= 2;
+	return k;
+}
+
+/** RFC 6962 §2.1 MTH(D[n]) over raw entries. */
+export function mth(leaves: readonly Buffer[]): Buffer {
+	if (leaves.length === 0) return createHash("sha256").digest();
+	if (leaves.length === 1) return leafHash(leaves[0] as Buffer);
+	const k = splitPoint(leaves.length);
+	return nodeHash(mth(leaves.slice(0, k)), mth(leaves.slice(k)));
+}
+
+/**
+ * RFC 6962 §2.1.1 PATH(m, D[n]) — the audit path for leaf m, leaf->root order.
+ * PATH(m, D[1]) = {}; with k = largest power of two < n,
+ * m < k  => PATH(m, D[0:k]) : MTH(D[k:n]),
+ * m >= k => PATH(m - k, D[k:n]) : MTH(D[0:k]).
+ */
+export function inclusionPath(m: number, leaves: readonly Buffer[]): Buffer[] {
+	const n = leaves.length;
+	if (n === 1) return [];
+	const k = splitPoint(n);
+	if (m < k) return [...inclusionPath(m, leaves.slice(0, k)), mth(leaves.slice(k))];
+	return [...inclusionPath(m - k, leaves.slice(k)), mth(leaves.slice(0, k))];
+}
+
+/**
+ * Build a signed note (checkpoint) exactly as the verifier parses it:
+ * `<origin>\n<treeSize>\n<base64 root>\n\n— <origin> <base64(keyhint || DER sig)>\n`
+ * The signature covers the 3 body lines INCLUDING their trailing LF.
+ *
+ * `extraSignatureLines` are emitted BEFORE the log's own signature, which is
+ * where a witness co-signature sits on a real checkpoint — and which position
+ * matters: a verifier that only ever looked at the first line would miss the
+ * one signature that counts.
+ */
+export function signedNote(
+	origin: string,
+	treeSize: number,
+	root: Buffer,
+	signKey: KeyObject,
+	keyhint: Buffer = Buffer.from([0xde, 0xad, 0xbe, 0xef]),
+	extraSignatureLines: readonly string[] = [],
+): string {
+	const body = `${origin}\n${treeSize}\n${root.toString("base64")}\n`;
+	const der = cryptoSign("sha256", Buffer.from(body, "utf8"), {
+		key: signKey,
+		dsaEncoding: "der",
+	});
+	const noteSig = Buffer.concat([keyhint, der]).toString("base64");
+	// The signature line names a KEY, not the origin: a production origin is
+	// `"<host> - <treeID>"` and a note's key name may not contain spaces, so the
+	// log signs `— <host> <sig>` under either origin form.
+	const separator = origin.indexOf(" - ");
+	const keyName = separator === -1 ? origin : origin.slice(0, separator);
+	const signatures = [...extraSignatureLines, `— ${keyName} ${noteSig}`];
+	return `${body}\n${signatures.join("\n")}\n`;
+}
+
+/** A well-formed signature line that no pinned key will ever verify. */
+export function bogusSignatureLine(name = "witness.example.org"): string {
+	return `— ${name} ${randomBytes(76).toString("base64")}`;
+}
+
+/** The log's ID the way Rekor derives it: sha256 of the log key's SPKI DER. */
+export function logIdFor(signKey: KeyObject): string {
+	// @types/node 26 dropped KeyObject from createPublicKey's input union; Node
+	// derives the public key from a private KeyObject at runtime (documented).
+	const pub = createPublicKey(signKey as unknown as Parameters<typeof createPublicKey>[0]);
+	return createHash("sha256")
+		.update(pub.export({ type: "spki", format: "der" }) as Buffer)
+		.digest("hex");
+}
+
+/** Sorted-key JSON — the SET payload form the verifier reconstructs. */
+function sortedKeyStringify(value: Record<string, string | number>): string {
+	const fields = Object.keys(value)
+		.sort()
+		.map((key) => `${JSON.stringify(key)}:${JSON.stringify(value[key])}`);
+	return `{${fields.join(",")}}`;
+}
+
+/**
+ * The log's signed entry timestamp: an ECDSA signature over the sorted-key JSON
+ * of `{body, integratedTime, logID, logIndex}`. This is the ONLY signature that
+ * covers integratedTime, which is what makes it the thing an attacker who can
+ * edit a receipt cannot reproduce — the checkpoint says nothing about time.
+ */
+export function signedEntryTimestamp(
+	fields: { body: string; integratedTime: number; logID: string; logIndex: number },
+	signKey: KeyObject,
+): string {
+	const payload = sortedKeyStringify({ ...fields });
+	return cryptoSign("sha256", Buffer.from(payload, "utf8"), {
+		key: signKey,
+		dsaEncoding: "der",
+	}).toString("base64");
+}
+
+export interface SyntheticLogOptions {
+	/**
+	 * Emit the origin form a PRODUCTION Rekor checkpoint uses,
+	 * `"<host> - <treeID>"`, instead of the bare host.
+	 */
+	treeId?: string;
+	/** Witness co-signatures to carry alongside the log's own. */
+	extraSignatureLines?: readonly string[];
+}
+
+export interface SyntheticLog {
+	treeSize: number;
+	rootHex: string;
+	checkpoint: string;
+	/** The origin actually signed into the checkpoint. */
+	origin: string;
+	/** 64-hex log identity, part of every SET payload this log signs. */
+	logId: string;
+	pathFor(index: number): string[];
+	/** A signed entry timestamp from THIS log's key, over these exact fields. */
+	setFor(fields: { body: string; integratedTime: number; logIndex: number }): string;
+}
+
+/** A whole synthetic log: root, a signed checkpoint over it, and audit paths. */
+export function makeSyntheticLog(
+	entries: readonly Buffer[],
+	signKey: KeyObject,
+	origin: string,
+	opts: SyntheticLogOptions = {},
+): SyntheticLog {
+	const root = mth(entries);
+	const signedOrigin = opts.treeId === undefined ? origin : `${origin} - ${opts.treeId}`;
+	const logId = logIdFor(signKey);
+	return {
+		treeSize: entries.length,
+		rootHex: root.toString("hex"),
+		origin: signedOrigin,
+		logId,
+		checkpoint: signedNote(
+			signedOrigin,
+			entries.length,
+			root,
+			signKey,
+			undefined,
+			opts.extraSignatureLines ?? [],
+		),
+		pathFor: (index: number): string[] =>
+			inclusionPath(index, entries).map((h) => h.toString("hex")),
+		setFor: (fields): string => signedEntryTimestamp({ ...fields, logID: logId }, signKey),
+	};
+}
+
+/** Stand-in for the record signer's public key inside the logged entry body. */
+const FIXTURE_RECORD_PUBKEY_PEM = generateKeyPairSync("ed25519").publicKey.export({
+	type: "spki",
+	format: "pem",
+}) as string;
+
+/** The hashedrekord entry body the Rekor sink (T3) proposes for a record. */
+export function hashedRekordEntry(record: AnchorRecord, publicKeyPem: string): Buffer {
+	return Buffer.from(
+		canonicalize({
+			apiVersion: "0.0.1",
+			kind: "hashedrekord",
+			spec: {
+				data: { hash: { algorithm: "sha256", value: anchorPayloadHash(record) } },
+				signature: {
+					content: record.sig,
+					publicKey: { content: Buffer.from(publicKeyPem, "utf8").toString("base64") },
+				},
+			},
+		}),
+		"utf8",
+	);
+}
+
+export interface RekorFixtureOptions {
+	logSize?: number;
+	logIndex?: number;
+	origin?: string;
+	url?: string;
+	integratedTime?: number;
+	publicKeyPem?: string;
+	/** Emit the production origin form `"<host> - <treeID>"`. */
+	treeId?: string;
+	/** Witness co-signature lines carried ahead of the log's own signature. */
+	extraSignatureLines?: readonly string[];
+	/**
+	 * Emit the signed entry timestamp (default true). A log that omits it still
+	 * proves INCLUSION — it just cannot attest when, which is what a receipt
+	 * built with `withSet: false` exists to exercise.
+	 */
+	withSet?: boolean;
+}
+
+export interface RekorFixture {
+	receipt: RekorReceipt;
+	logPubkeyPem: string;
+	logPrivateKey: KeyObject;
+	logId: string;
+	entryBody: Buffer;
+	/** Deep copy with `mutate` applied — the adversarial-mutation driver. */
+	tamper(mutate: (receipt: RekorReceipt) => void): RekorReceipt;
+}
+
+/**
+ * A complete, verifying receipt for a REAL anchor record: the record's entry is
+ * planted at `logIndex` in a synthetic log of `logSize` entries, and both the
+ * checkpoint and the signed entry timestamp are signed by a freshly generated
+ * P-256 log key. The SET is emitted by default so the happy path exercises
+ * attested time; `withSet: false` models a log that does not offer one.
+ */
+export function makeRekorReceipt(
+	record: AnchorRecord,
+	opts: RekorFixtureOptions = {},
+): RekorFixture {
+	const url = opts.url ?? "https://rekor.sigstore.dev";
+	const origin = opts.origin ?? new URL(url).host;
+	const logSize = opts.logSize ?? 8;
+	const logIndex = opts.logIndex ?? logSize - 1;
+	const entry = hashedRekordEntry(record, opts.publicKeyPem ?? FIXTURE_RECORD_PUBKEY_PEM);
+	const entries: Buffer[] = [];
+	for (let i = 0; i < logSize; i++) {
+		entries.push(i === logIndex ? entry : randomBytes(48));
+	}
+	const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
+	const log = makeSyntheticLog(entries, privateKey, origin, {
+		...(opts.treeId === undefined ? {} : { treeId: opts.treeId }),
+		...(opts.extraSignatureLines === undefined
+			? {}
+			: { extraSignatureLines: opts.extraSignatureLines }),
+	});
+	const entryBody = entry.toString("base64");
+	const integratedTime = opts.integratedTime ?? 1_760_000_000;
+	const receipt: RekorReceipt = {
+		v: 1,
+		vaultId: record.vaultId,
+		anchorSeq: record.anchorSeq,
+		artifactHash: anchorPayloadHash(record),
+		entryBody,
+		log: {
+			url,
+			logIndex,
+			treeSize: logSize,
+			rootHash: log.rootHex,
+			hashes: log.pathFor(logIndex),
+			checkpoint: log.checkpoint,
+			integratedTime,
+			...(opts.withSet === false
+				? {}
+				: {
+						logID: log.logId,
+						signedEntryTimestamp: log.setFor({ body: entryBody, integratedTime, logIndex }),
+					}),
+		},
+	};
+	return {
+		receipt,
+		logPubkeyPem: publicKey.export({ type: "spki", format: "pem" }) as string,
+		logPrivateKey: privateKey,
+		logId: log.logId,
+		entryBody: entry,
+		tamper: (mutate: (receipt: RekorReceipt) => void): RekorReceipt => {
+			const copy = JSON.parse(JSON.stringify(receipt)) as RekorReceipt;
+			mutate(copy);
+			return copy;
+		},
+	};
+}

@@ -99,12 +99,14 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// The import lint above is structurally blind to vendored source (a
 		// vendored crypto file IS a sibling file). This budget is a tripwire:
 		// growing past it requires consciously editing this number — at which
-		// point the reviewer asks what was added. Current size ~2.6k lines.
+		// point the reviewer asks what was added. Raised from 3200 for the
+		// Phase-2 anchoring work (rekor-verify.ts, ~490 lines of node:crypto-only
+		// receipt verification — no vendored source). Current size ~3.3k lines.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(3200);
+		expect(total).toBeLessThan(4200);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {

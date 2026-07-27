@@ -35,9 +35,11 @@ import {
 	readAnchorMirror,
 	type WitnessInput,
 	type WitnessStatus,
+	worseAnchorState,
 } from "./anchor-verify.js";
 import { canonicalize } from "./canonical.js";
 import { buildMerkleTree } from "./merkle.js";
+import { parseRekorReceipt, type RekorVerification, verifyRekorReceipt } from "./rekor-verify.js";
 
 export type { AnchorRecord, AnchorSource, AnchorState, AnchorTrust, WitnessInput };
 
@@ -376,6 +378,14 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 export interface AnchorVerifyParams {
 	/** Raw contents of caller-fetched anchor artifacts (single JSON or JSONL). */
 	readonly externalAnchorsRaw?: readonly string[] | undefined;
+	/** Raw transparency-log receipts: one receipt JSON, or JSONL of receipts. */
+	readonly rekorReceiptsRaw?: readonly string[] | undefined;
+	/**
+	 * Caller-pinned transparency-log keys. Supplying none is only meaningful for
+	 * the one log whose key ships with the verifier (rekor.sigstore.dev); any
+	 * other log without a pin is refused rather than trusted.
+	 */
+	readonly rekorLogPubkeysPem?: readonly string[] | undefined;
 	/** Caller-pinned trust material — NEVER read from the vault under audit. */
 	readonly trust?: AnchorTrust | undefined;
 	readonly witness?: WitnessInput | undefined;
@@ -383,6 +393,14 @@ export interface AnchorVerifyParams {
 	readonly maxUnanchoredEvents?: number | undefined;
 	readonly expectedVaultId?: string | undefined;
 	readonly nowMs?: number | undefined;
+}
+
+export interface RekorReport {
+	receiptsVerified: number;
+	receiptsFailed: number;
+	/** Max attested time among verified receipts of the NEWEST anchor (ms). */
+	latestAttestedTimeMs: number | null;
+	errors: string[];
 }
 
 export interface AnchoringReport {
@@ -399,11 +417,127 @@ export interface AnchoringReport {
 	witness: { requested: boolean; status: WitnessStatus; error?: string };
 	reasons: string[];
 	warnings: string[];
+	/** Present only when transparency-log receipts were supplied. */
+	rekor?: RekorReport;
 }
 
 export interface AnchoredVaultVerificationResult extends VaultVerificationResult {
 	anchorState: AnchorState;
 	anchoring: AnchoringReport;
+}
+
+/**
+ * Split one raw receipt artifact into receipt documents. A file may hold a
+ * single (possibly pretty-printed) receipt or JSONL of many, so the whole-file
+ * parse is tried first and line-splitting is the fallback — the reverse would
+ * shred a pretty-printed receipt into unparseable fragments.
+ *
+ * IDENTICAL in packages/core/src/audit/verify.ts.
+ */
+function splitReceiptDocuments(raw: string): string[] {
+	const trimmed = raw.trim();
+	if (trimmed.length === 0) return [];
+	try {
+		JSON.parse(trimmed);
+		return [trimmed];
+	} catch {
+		return trimmed
+			.split("\n")
+			.map((line) => line.trim())
+			.filter((line) => line.length > 0);
+	}
+}
+
+/**
+ * Verify every supplied transparency-log receipt against the anchor record it
+ * names. Receipts are OPTIONAL evidence, but supplied evidence is not
+ * advisory: a receipt is only ever presented to strengthen a claim, so one
+ * that does not verify fails the vault closed rather than being dropped.
+ *
+ * Records are matched by anchorSeq with the external copy governing (the same
+ * precedence the evaluator's merge uses). A receipt may bind to ANY record at
+ * its anchorSeq: committed-equal twins differ in exactly the timestamp and
+ * signature a receipt commits to, so the emitter's published twin must not
+ * depend on which copy the auditor happened to fetch first.
+ *
+ * IDENTICAL in packages/core/src/audit/verify.ts.
+ */
+function verifySuppliedRekorReceipts(
+	receiptsRaw: readonly string[],
+	externalRecords: readonly AnchorRecord[],
+	mirrorRecords: readonly AnchorRecord[],
+	logPubkeysPem: readonly string[],
+): RekorReport | null {
+	if (receiptsRaw.length === 0) return null;
+	const bySeq = new Map<number, AnchorRecord[]>();
+	for (const record of [...externalRecords, ...mirrorRecords]) {
+		const twins = bySeq.get(record.anchorSeq);
+		if (twins === undefined) {
+			bySeq.set(record.anchorSeq, [record]);
+		} else {
+			twins.push(record);
+		}
+	}
+	// The NEWEST anchor by the evaluator's own rule (largest treeSize, earliest
+	// anchorSeq on a tie) — only its receipts may speak for freshness.
+	const merged = [...bySeq.keys()]
+		.sort((a, b) => a - b)
+		.map((seq) => (bySeq.get(seq) as AnchorRecord[])[0] as AnchorRecord);
+	const latestSeq = [...merged].sort((a, b) => b.treeSize - a.treeSize)[0]?.anchorSeq ?? null;
+
+	const errors: string[] = [];
+	let receiptsVerified = 0;
+	let receiptsFailed = 0;
+	let latestAttestedTimeMs: number | null = null;
+	for (const raw of receiptsRaw) {
+		const documents = splitReceiptDocuments(raw);
+		if (documents.length === 0) {
+			// A receipts artifact that holds no receipts is a supply failure, not an
+			// absence of evidence: the caller passed --rekor-receipts, so an empty
+			// file means the receipt they meant to present never made it here.
+			receiptsFailed++;
+			errors.push("rekor-receipt-invalid: receipts artifact contained no receipts");
+			continue;
+		}
+		for (const document of documents) {
+			const parsed = parseRekorReceipt(document);
+			if (parsed.receipt === null) {
+				receiptsFailed++;
+				errors.push(parsed.error as string);
+				continue;
+			}
+			const receipt = parsed.receipt;
+			const candidates = bySeq.get(receipt.anchorSeq) ?? [];
+			if (candidates.length === 0) {
+				receiptsFailed++;
+				errors.push(`rekor-receipt-invalid: receipt for unknown anchorSeq ${receipt.anchorSeq}`);
+				continue;
+			}
+			let verified: RekorVerification | null = null;
+			let firstErrors: string[] = [];
+			for (const candidate of candidates) {
+				const result = verifyRekorReceipt(receipt, candidate, logPubkeysPem);
+				if (result.ok) {
+					verified = result;
+					break;
+				}
+				if (firstErrors.length === 0) firstErrors = result.errors;
+			}
+			if (verified === null) {
+				receiptsFailed++;
+				errors.push(...firstErrors);
+				continue;
+			}
+			receiptsVerified++;
+			if (receipt.anchorSeq === latestSeq && verified.attestedTimeMs !== null) {
+				latestAttestedTimeMs =
+					latestAttestedTimeMs === null
+						? verified.attestedTimeMs
+						: Math.max(latestAttestedTimeMs, verified.attestedTimeMs);
+			}
+		}
+	}
+	return { receiptsVerified, receiptsFailed, latestAttestedTimeMs, errors };
 }
 
 /**
@@ -425,6 +559,12 @@ export function verifyVaultWithAnchors(
 		externalErrors.push(...parsed.errors);
 	}
 	const mirror = readAnchorMirror(vaultPath);
+	const rekor = verifySuppliedRekorReceipts(
+		params.rekorReceiptsRaw ?? [],
+		externalRecords,
+		mirror.records,
+		params.rekorLogPubkeysPem ?? [],
+	);
 	const evaluation = evaluateAnchoredVault({
 		orderedHashes: gatherOrderedEventHashes(vaultPath),
 		externalAnchors: externalRecords,
@@ -440,21 +580,32 @@ export function verifyVaultWithAnchors(
 				: {}),
 			...(params.expectedVaultId !== undefined ? { expectedVaultId: params.expectedVaultId } : {}),
 			...(params.nowMs !== undefined ? { nowMs: params.nowMs } : {}),
+			...(rekor !== null && rekor.latestAttestedTimeMs !== null
+				? { attestedTimeMs: rekor.latestAttestedTimeMs }
+				: {}),
 		},
 	});
+	// A broken receipt is ANCHOR_INVALID (fail-closed), escalated by the state
+	// machine's own severity ordering so MISMATCH still outranks it.
+	const rekorFailed = rekor !== null && rekor.receiptsFailed > 0;
 	return {
 		...base,
-		valid: base.valid && evaluation.anchorsValid,
-		errors: [...base.errors, ...evaluation.errors],
-		anchorState: evaluation.anchorState,
+		valid: base.valid && evaluation.anchorsValid && !rekorFailed,
+		errors: [...base.errors, ...evaluation.errors, ...(rekor?.errors ?? [])],
+		anchorState: rekorFailed
+			? worseAnchorState(evaluation.anchorState, "ANCHOR_INVALID")
+			: evaluation.anchorState,
 		anchoring: {
 			anchorSource: evaluation.anchorSource,
 			anchorCount: evaluation.anchorCount,
 			latestAnchor: evaluation.latestAnchor,
 			unanchoredTail: evaluation.unanchoredTail,
 			witness: evaluation.witness,
-			reasons: evaluation.reasons,
+			reasons: rekorFailed
+				? [...new Set([...evaluation.reasons, "rekor-receipt-invalid"])]
+				: evaluation.reasons,
 			warnings: evaluation.warnings,
+			...(rekor !== null ? { rekor } : {}),
 		},
 	};
 }

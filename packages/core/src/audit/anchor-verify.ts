@@ -91,6 +91,13 @@ export interface AnchorEvaluationOptions {
 	readonly expectedVaultId?: string;
 	/** Injectable clock for tests. Defaults to Date.now(). */
 	readonly nowMs?: number;
+	/**
+	 * Witness-attested integration time (ms) for the NEWEST anchor, from a
+	 * transparency-log receipt the caller already verified. When present it
+	 * replaces the operator-claimed timestamp as the input to --max-anchor-age:
+	 * it is the one time in the record the vault operator cannot choose.
+	 */
+	readonly attestedTimeMs?: number;
 }
 
 export interface AnchorEvaluationInput {
@@ -134,7 +141,12 @@ function nullIfNaN(n: number): number | null {
 
 // ── Reason-code classes (see spec §7.2) ──
 
-const INVALID_REASONS = new Set(["malformed-anchor", "range-invalid", "sig-invalid"]);
+const INVALID_REASONS = new Set([
+	"malformed-anchor",
+	"range-invalid",
+	"sig-invalid",
+	"rekor-receipt-invalid",
+]);
 const NON_FAIL_REASONS = new Set(["no-trust-material", "witness-unreachable"]);
 
 // ── Strict parsing ──
@@ -160,6 +172,22 @@ function isSafePositiveInt(n: unknown): n is number {
 	return typeof n === "number" && Number.isSafeInteger(n) && n >= 1;
 }
 
+// Matching control characters is the entire point here — they are what gets
+// removed from anything echoed back to a terminal.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the intent
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
+
+/**
+ * An untrusted field NAME on its way into an error string. Control characters
+ * are stripped before truncation: these strings are printed to a terminal, and
+ * an escape sequence inside a key would let the party under audit repaint the
+ * line its own verdict is printed on.
+ */
+function clipKey(key: string): string {
+	const scrubbed = key.replace(CONTROL_CHARS, "");
+	return scrubbed.length <= 80 ? scrubbed : `${scrubbed.slice(0, 80)}...`;
+}
+
 /**
  * Strict parse of a single anchor record. Unknown fields, missing fields, and
  * range violations are all rejected (fail-closed — spec §3 strict-parse rules;
@@ -183,7 +211,7 @@ export function parseAnchorRecord(raw: string): {
 	const obj = parsed as Record<string, unknown>;
 	for (const key of Object.keys(obj)) {
 		if (!RECORD_KEYS.has(key)) {
-			return { record: null, error: `malformed-anchor: unknown field "${key}"` };
+			return { record: null, error: `malformed-anchor: unknown field "${clipKey(key)}"` };
 		}
 	}
 	if (obj.v !== 1) {
@@ -231,7 +259,10 @@ export function parseAnchorRecord(raw: string): {
 		const rotObj = rot as Record<string, unknown>;
 		for (const key of Object.keys(rotObj)) {
 			if (!ROTATION_KEYS.has(key)) {
-				return { record: null, error: `malformed-anchor: unknown rotation field "${key}"` };
+				return {
+					record: null,
+					error: `malformed-anchor: unknown rotation field "${clipKey(key)}"`,
+				};
 			}
 		}
 		if (typeof rotObj.nextKeyId !== "string" || !KEY_ID.test(rotObj.nextKeyId)) {
@@ -743,7 +774,12 @@ const STATE_SEVERITY: Record<AnchorState, number> = {
 	ANCHOR_MISMATCH: 5,
 };
 
-function worseState(a: AnchorState, b: AnchorState): AnchorState {
+/**
+ * The more severe of two states. Exported so callers layering evidence ON TOP
+ * of the state machine (the glue's Rekor receipts) escalate by the SAME
+ * severity ordering the machine itself uses, rather than hardcoding one.
+ */
+export function worseAnchorState(a: AnchorState, b: AnchorState): AnchorState {
 	return (STATE_SEVERITY[a] ?? 0) >= (STATE_SEVERITY[b] ?? 0) ? a : b;
 }
 
@@ -791,7 +827,7 @@ export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvalu
 		let finalState = state;
 		if (witnessFailed) {
 			reasons.push("witness-unreachable");
-			finalState = worseState(finalState, "ANCHOR_UNVERIFIABLE");
+			finalState = worseAnchorState(finalState, "ANCHOR_UNVERIFIABLE");
 			errors.push(`witness-unreachable: ${input.witness.error ?? "anchor URL fetch failed"}`);
 		}
 		let witness: { requested: boolean; status: WitnessStatus; error?: string };
@@ -954,10 +990,21 @@ export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvalu
 	const latest = [...records].sort((a, b) => b.treeSize - a.treeSize)[0];
 	if (latest !== undefined) {
 		const ts = Date.parse(latest.timestamp);
+		// A witness-attested integration time supersedes the operator's claim:
+		// the caller verified a transparency-log receipt binding this anchor to a
+		// time the vault operator did not choose, which is exactly the input the
+		// operator-claimed path lacks.
+		const attestedMs =
+			opts.attestedTimeMs !== undefined && Number.isSafeInteger(opts.attestedTimeMs)
+				? opts.attestedTimeMs
+				: null;
 		if (Number.isFinite(ts) && ts > nowMs) {
 			// Operator-claimed time is in the auditor's future — clock gaming
-			// (buyer-rejection §5.13). --max-unanchored-events is the
-			// clock-independent control.
+			// (buyer-rejection §5.13). Raised even when an attested time supersedes
+			// it below: a forward-dated claim is evidence about the operator whether
+			// or not a witness also spoke, and suppressing it on the attested path
+			// would let a receipt LAUNDER the very signal it was supplied to
+			// corroborate. --max-unanchored-events stays the clock-independent control.
 			warnings.push("future-timestamp");
 		}
 		const tail = Math.max(0, observed - latest.treeSize);
@@ -967,14 +1014,17 @@ export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvalu
 			);
 			return finish("ANCHOR_STALE", records);
 		}
+		const ageBasisMs = attestedMs ?? ts;
 		if (
 			opts.maxAnchorAgeMs !== undefined &&
-			Number.isFinite(ts) &&
-			nowMs - ts > opts.maxAnchorAgeMs &&
+			Number.isFinite(ageBasisMs) &&
+			nowMs - ageBasisMs > opts.maxAnchorAgeMs &&
 			observed > latest.treeSize
 		) {
 			errors.push(
-				"stale: newest anchor is older than the supplied --max-anchor-age (operator-claimed time)",
+				attestedMs === null
+					? "stale: newest anchor is older than the supplied --max-anchor-age (operator-claimed time)"
+					: "stale: newest anchor is older than the supplied --max-anchor-age (witness-attested time)",
 			);
 			return finish("ANCHOR_STALE", records);
 		}
