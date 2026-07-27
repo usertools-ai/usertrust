@@ -76,6 +76,16 @@ export {
 	type TransactionEvent,
 } from "./receipt.js";
 export {
+	parseRekorReceipt,
+	parseSignedNote,
+	REKOR_PROD_PUBKEY_PEM,
+	type RekorReceipt,
+	type RekorVerification,
+	type SignedNote,
+	verifyIndexInclusion,
+	verifyRekorReceipt,
+} from "./rekor-verify.js";
+export {
 	buildMerkleTree,
 	type ChainVerificationResult,
 	generateConsistencyProof,
