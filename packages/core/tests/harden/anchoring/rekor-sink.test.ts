@@ -15,18 +15,29 @@
  * its own verifier rejects would ship silent, undetectable evidence loss.
  */
 
-import { generateKeyPairSync, randomBytes } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAnchorEmitter, createSink, readAnchorIdentity } from "../../../src/audit/anchor.js";
 import { type AnchorRecord, anchorPayloadHash } from "../../../src/audit/anchor-verify.js";
 import { canonicalize } from "../../../src/audit/canonical.js";
 import { type HttpTransport, rekorSink, s3Sink } from "../../../src/audit/rekor.js";
-import { parseRekorReceipt, verifyRekorReceipt } from "../../../src/audit/rekor-verify.js";
+import {
+	parseRekorReceipt,
+	type RekorReceipt,
+	verifyRekorReceipt,
+} from "../../../src/audit/rekor-verify.js";
 import { hashPayload } from "../../../src/audit/sigv4.js";
 import { VAULT_DIR } from "../../../src/shared/constants.js";
-import { type AnchoredSetup, anchorOnce, cleanupAll, makeAnchoredVault } from "./fixtures.js";
+import {
+	type AnchoredSetup,
+	anchorOnce,
+	appendEvents,
+	cleanupAll,
+	makeAnchoredVault,
+	rotateOnce,
+} from "./fixtures.js";
 import { makeSyntheticLog } from "./rekor-fixtures.js";
 
 afterEach(() => {
@@ -71,8 +82,19 @@ function stubCreds(): void {
 	vi.stubEnv("AWS_SESSION_TOKEN", "");
 }
 
-const receiptPath = (root: string, anchorSeq: number): string =>
-	join(root, VAULT_DIR, "audit", "anchors", "rekor", `${String(anchorSeq).padStart(12, "0")}.json`);
+/** The sink's per-log receipt name: `<seq12>.<8 hex of sha256(log url)>.json`. */
+const receiptPath = (root: string, anchorSeq: number, logUrl = REKOR_URL): string =>
+	join(
+		root,
+		VAULT_DIR,
+		"audit",
+		"anchors",
+		"rekor",
+		`${String(anchorSeq).padStart(12, "0")}.${createHash("sha256")
+			.update(logUrl, "utf8")
+			.digest("hex")
+			.slice(0, 8)}.json`,
+	);
 
 /**
  * A synthetic Rekor 201. The log is modelled honestly: it stores its OWN
@@ -96,13 +118,15 @@ function rekorAccepted(
 	);
 	const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
 	const log = makeSyntheticLog(entries, privateKey, opts.origin ?? new URL(REKOR_URL).host);
+	const storedB64 = stored.toString("base64");
+	const integratedTime = opts.integratedTime ?? 1_760_000_111;
 	return {
 		body: JSON.stringify({
 			"24296fb24b8ad77a51a1f0e4e0f0c0f2c8a1f0d0e2b3a4c5d6e7f8091a2b3c4d5": {
 				apiVersion: "0.0.1",
-				body: stored.toString("base64"),
-				integratedTime: opts.integratedTime ?? 1_760_000_111,
-				logID: "c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d",
+				body: storedB64,
+				integratedTime,
+				logID: log.logId,
 				logIndex: 90_000_000,
 				verification: {
 					inclusionProof: {
@@ -112,11 +136,13 @@ function rekorAccepted(
 						rootHash: log.rootHex,
 						treeSize: logSize,
 					},
-					signedEntryTimestamp: "MEUCIQD0000000000000000000000000000000000000000000000000000",
+					// The log's real signature over integratedTime — the only reason
+					// the receipt this produces can attest a time at all.
+					signedEntryTimestamp: log.setFor({ body: storedB64, integratedTime, logIndex }),
 				},
 			},
 		}),
-		storedB64: stored.toString("base64"),
+		storedB64,
 		logPubkeyPem: publicKey.export({ type: "spki", format: "pem" }) as string,
 	};
 }
@@ -373,6 +399,176 @@ describe("rekor anchor sink (hashedrekord witness)", () => {
 		expect(calls).toHaveLength(1);
 		expect(existsSync(receiptPath(setup.root, 1))).toBe(true);
 		expect(emitter.status().outboxDepth).toBe(0);
+	});
+});
+
+describe("rekor sink: P2 review remediation (409 / response binding / URL / keys / per-log)", () => {
+	it("FIX C: a 409 redelivery resolves when the local receipt already witnesses the record", async () => {
+		const { setup, record } = await anchored();
+		let attempt = 0;
+		const { transport, calls } = fakeTransport((call) => {
+			attempt++;
+			return attempt === 1
+				? { status: 201, body: rekorAccepted(call.body).body }
+				: { status: 409, body: "entry already exists" };
+		});
+		const sink = rekorSink(setup.root, REKOR_URL, transport);
+
+		await sink.publish(record);
+		// The honest 409: a crash between writing the receipt and clearing the
+		// outbox, so the emitter redelivers a record the log already holds. The
+		// evidence is on disk; refusing forever would wedge the outbox over an
+		// entry we can already prove.
+		await expect(sink.publish(record)).resolves.toBeUndefined();
+		expect(calls).toHaveLength(2);
+		expect(existsSync(receiptPath(setup.root, record.anchorSeq))).toBe(true);
+	});
+
+	it("FIX C: a 409 with no local receipt still rejects — a duplicate is not evidence", async () => {
+		const { setup, record } = await anchored();
+		const { transport } = fakeTransport(() => ({ status: 409, body: "entry already exists" }));
+
+		await expect(rekorSink(setup.root, REKOR_URL, transport).publish(record)).rejects.toThrow(
+			/duplicate without local receipt/,
+		);
+		expect(existsSync(receiptPath(setup.root, record.anchorSeq))).toBe(false);
+	});
+
+	it("FIX C: a receipt for a DIFFERENT record does not satisfy this record's 409", async () => {
+		const { setup, record } = await anchored();
+		const { transport } = fakeTransport((call) => ({
+			status: 201,
+			body: rekorAccepted(call.body).body,
+		}));
+		await rekorSink(setup.root, REKOR_URL, transport).publish(record);
+
+		// Anchor #2 is a different record; the receipt on disk is #1's.
+		await appendEvents(setup.root, 2, 4);
+		const second = await anchorOnce(setup);
+		const { transport: conflicting } = fakeTransport(() => ({ status: 409, body: "" }));
+		await expect(rekorSink(setup.root, REKOR_URL, conflicting).publish(second)).rejects.toThrow(
+			/duplicate without local receipt/,
+		);
+	});
+
+	it("FIX D: a 201 describing somebody else's entry is refused and writes no receipt", async () => {
+		const { setup, record } = await anchored();
+		/** A well-formed 201 built from a proposal we did NOT send. */
+		const publishWithForgedProposal = (
+			mutate: (proposal: Record<string, unknown>) => void,
+		): Promise<void> => {
+			const { transport } = fakeTransport((call) => {
+				const proposal = JSON.parse(call.body.toString("utf8")) as Record<string, unknown>;
+				mutate(proposal);
+				return {
+					status: 201,
+					body: rekorAccepted(Buffer.from(JSON.stringify(proposal), "utf8")).body,
+				};
+			});
+			return rekorSink(setup.root, REKOR_URL, transport).publish(record);
+		};
+		type Spec = {
+			data: { hash: { value: string } };
+			signature: { content: string };
+		};
+
+		// The log answers with an entry that is internally perfect — valid
+		// inclusion proof, signed checkpoint — for a different artifact.
+		await expect(
+			publishWithForgedProposal((proposal) => {
+				(proposal.spec as Spec).data.hash.value = randomBytes(32).toString("hex");
+			}),
+		).rejects.toThrow(/not this record's/);
+
+		// Same shape, right artifact, somebody else's signature: without the
+		// signature binding, anyone could log the (public) payload hash of our
+		// anchor and hand us back the receipt.
+		await expect(
+			publishWithForgedProposal((proposal) => {
+				(proposal.spec as Spec).signature.content = randomBytes(64).toString("base64");
+			}),
+		).rejects.toThrow(/not this record's/);
+
+		expect(existsSync(receiptPath(setup.root, record.anchorSeq))).toBe(false);
+	});
+
+	it("FIX E: a plaintext log URL is refused at construction, before any record is offered", async () => {
+		const setup = await makeAnchoredVault(1);
+		const { transport, calls } = fakeTransport(() => ({ status: 201, body: "" }));
+
+		expect(() => rekorSink(setup.root, "http://attacker.example", transport)).toThrow(
+			/rekor sink: endpoint must be https/,
+		);
+		expect(() => rekorSink(setup.root, "rekor.example.test", transport)).toThrow(
+			/rekor sink: endpoint must include a scheme/,
+		);
+		// Loopback stays reachable for a dev log instance, as for the s3 sink.
+		expect(() => rekorSink(setup.root, "http://127.0.0.1:3000", transport)).not.toThrow();
+		expect(calls).toHaveLength(0);
+	});
+
+	it("FIX F: a record redelivered after a rotation proposes the key that SIGNED it", async () => {
+		const setup = await makeAnchoredVault(3);
+		const record = await anchorOnce(setup);
+		const genesisSpki = readAnchorIdentity(setup.root)?.publicKeySpki as string;
+
+		await rotateOnce(setup);
+		const identity = readAnchorIdentity(setup.root);
+		expect(identity?.publicKeySpki).not.toBe(genesisSpki);
+		expect(identity?.keyHistory?.map((k) => k.keyId)).toContain(record.keyId);
+
+		const { transport, calls } = fakeTransport((call) => ({
+			status: 201,
+			body: rekorAccepted(call.body).body,
+		}));
+		await rekorSink(setup.root, REKOR_URL, transport).publish(record);
+
+		const entry = JSON.parse((calls[0] as Call).body.toString("utf8")) as {
+			spec: { signature: { publicKey: { content: string } } };
+		};
+		const pem = Buffer.from(entry.spec.signature.publicKey.content, "base64").toString("utf8");
+		// The pre-rotation record is still signed by the pre-rotation key. Logging
+		// the live key beside that signature would put a permanently unverifiable
+		// entry in an append-only log.
+		expect(pem).toBe(`-----BEGIN PUBLIC KEY-----\n${genesisSpki}\n-----END PUBLIC KEY-----\n`);
+	});
+
+	it("FIX F: a keyId absent from the history is refused rather than guessed at", async () => {
+		const { setup, record } = await anchored();
+		const { transport, calls } = fakeTransport(() => ({ status: 201, body: "" }));
+		const foreign = { ...record, keyId: `sha256:${"9".repeat(64)}` };
+
+		await expect(rekorSink(setup.root, REKOR_URL, transport).publish(foreign)).rejects.toThrow(
+			/no public key for keyId/,
+		);
+		expect(calls).toHaveLength(0);
+	});
+
+	it("FIX G: two logs produce two receipt files for one record, not one overwrite", async () => {
+		const { setup, record } = await anchored();
+		const SECOND_URL = "https://rekor2.example.test";
+		for (const url of [REKOR_URL, SECOND_URL]) {
+			const { transport } = fakeTransport((call) => ({
+				status: 201,
+				body: rekorAccepted(call.body, { origin: new URL(url).host }).body,
+			}));
+			await rekorSink(setup.root, url, transport).publish(record);
+		}
+
+		const dir = join(setup.root, VAULT_DIR, "audit", "anchors", "rekor");
+		const names = readdirSync(dir)
+			.filter((f) => f.endsWith(".json"))
+			.sort();
+		// Two witnesses configured, two independent attestations kept. Keying by
+		// anchorSeq alone silently left the operator with one.
+		expect(names).toHaveLength(2);
+		expect(existsSync(receiptPath(setup.root, record.anchorSeq, REKOR_URL))).toBe(true);
+		expect(existsSync(receiptPath(setup.root, record.anchorSeq, SECOND_URL))).toBe(true);
+		const urls = names.map(
+			(name) =>
+				(parseRekorReceipt(readFileSync(join(dir, name), "utf-8")).receipt as RekorReceipt).log.url,
+		);
+		expect([...urls].sort()).toEqual([REKOR_URL, SECOND_URL].sort());
 	});
 });
 

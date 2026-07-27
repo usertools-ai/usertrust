@@ -243,13 +243,21 @@ host=file`) is a possible future refinement; today, split the runs instead if th
 matters. Supplying `--rekor-pubkey` material that turns out to be empty or unusable is an error,
 never a silent fall back to the embedded key.
 
-**Attested time.** A verified receipt upgrades `--max-anchor-age` from the operator-claimed
-`timestamp` field to the log's `integratedTime`. Staleness is then measured against a third
-party's clock, so backdating records no longer buys freshness. Without receipts, keep preferring
-`--max-unanchored-events`: event counts are not clock-dependent.
+**Attested time.** Staleness is measured against the log's **signed entry timestamp** (SET) — the
+log's own signature over `{body, integratedTime, logID, logIndex}`, and the only signature that
+covers `integratedTime` at all. When a receipt carries a SET that verifies under the same pinned
+log key as the checkpoint, `--max-anchor-age` is measured against that time instead of the
+operator-claimed `timestamp` field, so backdating records no longer buys freshness. Receipts
+*without* a SET still prove inclusion, but fall back to operator-claimed time for freshness: an
+unsigned `integratedTime` is a number the party under audit could have chosen. A SET that is
+present and does **not** verify fails the receipt closed — supplied evidence has to verify. A
+forward-dated operator `timestamp` still raises the `future-timestamp` warning whether or not a
+witness also attested the anchor. Without receipts, keep preferring `--max-unanchored-events`:
+event counts are not clock-dependent.
 
-**Checkpoint-replay caveat.** Offline verification proves the entry was included in the log *at
-`integratedTime`*, under a checkpoint signed by the pinned key. It does **not** prove that
+**Checkpoint-replay caveat.** Offline verification proves the entry was included in the log — *at
+`integratedTime`* only when a SET vouches for that time — under a checkpoint signed by the pinned
+key. It does **not** prove that
 checkpoint is consistent with the log's current head — a forked or rewound log would need a
 consistency proof against a checkpoint you fetched yourself. Read a receipt as "the log attested
 this at time T", not "the log is honest today"; for the public instance, the witness and monitor

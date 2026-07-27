@@ -14,6 +14,7 @@
 
 import {
 	createHash,
+	createPublicKey,
 	sign as cryptoSign,
 	generateKeyPairSync,
 	type KeyObject,
@@ -102,6 +103,41 @@ export function bogusSignatureLine(name = "witness.example.org"): string {
 	return `— ${name} ${randomBytes(76).toString("base64")}`;
 }
 
+/** The log's ID the way Rekor derives it: sha256 of the log key's SPKI DER. */
+export function logIdFor(signKey: KeyObject): string {
+	// @types/node 26 dropped KeyObject from createPublicKey's input union; Node
+	// derives the public key from a private KeyObject at runtime (documented).
+	const pub = createPublicKey(signKey as unknown as Parameters<typeof createPublicKey>[0]);
+	return createHash("sha256")
+		.update(pub.export({ type: "spki", format: "der" }) as Buffer)
+		.digest("hex");
+}
+
+/** Sorted-key JSON — the SET payload form the verifier reconstructs. */
+function sortedKeyStringify(value: Record<string, string | number>): string {
+	const fields = Object.keys(value)
+		.sort()
+		.map((key) => `${JSON.stringify(key)}:${JSON.stringify(value[key])}`);
+	return `{${fields.join(",")}}`;
+}
+
+/**
+ * The log's signed entry timestamp: an ECDSA signature over the sorted-key JSON
+ * of `{body, integratedTime, logID, logIndex}`. This is the ONLY signature that
+ * covers integratedTime, which is what makes it the thing an attacker who can
+ * edit a receipt cannot reproduce — the checkpoint says nothing about time.
+ */
+export function signedEntryTimestamp(
+	fields: { body: string; integratedTime: number; logID: string; logIndex: number },
+	signKey: KeyObject,
+): string {
+	const payload = sortedKeyStringify({ ...fields });
+	return cryptoSign("sha256", Buffer.from(payload, "utf8"), {
+		key: signKey,
+		dsaEncoding: "der",
+	}).toString("base64");
+}
+
 export interface SyntheticLogOptions {
 	/**
 	 * Emit the origin form a PRODUCTION Rekor checkpoint uses,
@@ -118,7 +154,11 @@ export interface SyntheticLog {
 	checkpoint: string;
 	/** The origin actually signed into the checkpoint. */
 	origin: string;
+	/** 64-hex log identity, part of every SET payload this log signs. */
+	logId: string;
 	pathFor(index: number): string[];
+	/** A signed entry timestamp from THIS log's key, over these exact fields. */
+	setFor(fields: { body: string; integratedTime: number; logIndex: number }): string;
 }
 
 /** A whole synthetic log: root, a signed checkpoint over it, and audit paths. */
@@ -130,10 +170,12 @@ export function makeSyntheticLog(
 ): SyntheticLog {
 	const root = mth(entries);
 	const signedOrigin = opts.treeId === undefined ? origin : `${origin} - ${opts.treeId}`;
+	const logId = logIdFor(signKey);
 	return {
 		treeSize: entries.length,
 		rootHex: root.toString("hex"),
 		origin: signedOrigin,
+		logId,
 		checkpoint: signedNote(
 			signedOrigin,
 			entries.length,
@@ -144,6 +186,7 @@ export function makeSyntheticLog(
 		),
 		pathFor: (index: number): string[] =>
 			inclusionPath(index, entries).map((h) => h.toString("hex")),
+		setFor: (fields): string => signedEntryTimestamp({ ...fields, logID: logId }, signKey),
 	};
 }
 
@@ -182,12 +225,19 @@ export interface RekorFixtureOptions {
 	treeId?: string;
 	/** Witness co-signature lines carried ahead of the log's own signature. */
 	extraSignatureLines?: readonly string[];
+	/**
+	 * Emit the signed entry timestamp (default true). A log that omits it still
+	 * proves INCLUSION — it just cannot attest when, which is what a receipt
+	 * built with `withSet: false` exists to exercise.
+	 */
+	withSet?: boolean;
 }
 
 export interface RekorFixture {
 	receipt: RekorReceipt;
 	logPubkeyPem: string;
 	logPrivateKey: KeyObject;
+	logId: string;
 	entryBody: Buffer;
 	/** Deep copy with `mutate` applied — the adversarial-mutation driver. */
 	tamper(mutate: (receipt: RekorReceipt) => void): RekorReceipt;
@@ -195,8 +245,10 @@ export interface RekorFixture {
 
 /**
  * A complete, verifying receipt for a REAL anchor record: the record's entry is
- * planted at `logIndex` in a synthetic log of `logSize` entries, and the
- * checkpoint is signed by a freshly generated P-256 log key.
+ * planted at `logIndex` in a synthetic log of `logSize` entries, and both the
+ * checkpoint and the signed entry timestamp are signed by a freshly generated
+ * P-256 log key. The SET is emitted by default so the happy path exercises
+ * attested time; `withSet: false` models a log that does not offer one.
  */
 export function makeRekorReceipt(
 	record: AnchorRecord,
@@ -218,12 +270,14 @@ export function makeRekorReceipt(
 			? {}
 			: { extraSignatureLines: opts.extraSignatureLines }),
 	});
+	const entryBody = entry.toString("base64");
+	const integratedTime = opts.integratedTime ?? 1_760_000_000;
 	const receipt: RekorReceipt = {
 		v: 1,
 		vaultId: record.vaultId,
 		anchorSeq: record.anchorSeq,
 		artifactHash: anchorPayloadHash(record),
-		entryBody: entry.toString("base64"),
+		entryBody,
 		log: {
 			url,
 			logIndex,
@@ -231,13 +285,20 @@ export function makeRekorReceipt(
 			rootHash: log.rootHex,
 			hashes: log.pathFor(logIndex),
 			checkpoint: log.checkpoint,
-			integratedTime: opts.integratedTime ?? 1_760_000_000,
+			integratedTime,
+			...(opts.withSet === false
+				? {}
+				: {
+						logID: log.logId,
+						signedEntryTimestamp: log.setFor({ body: entryBody, integratedTime, logIndex }),
+					}),
 		},
 	};
 	return {
 		receipt,
 		logPubkeyPem: publicKey.export({ type: "spki", format: "pem" }) as string,
 		logPrivateKey: privateKey,
+		logId: log.logId,
 		entryBody: entry,
 		tamper: (mutate: (receipt: RekorReceipt) => void): RekorReceipt => {
 			const copy = JSON.parse(JSON.stringify(receipt)) as RekorReceipt;

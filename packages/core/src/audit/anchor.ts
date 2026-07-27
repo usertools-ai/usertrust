@@ -154,6 +154,14 @@ export interface AnchorIdentity {
 	 * (spec §5.1). Absent on a fresh identity (first anchor allowed).
 	 */
 	lastAnchorSeq?: number;
+	/**
+	 * Every key this vault has ever anchored under, oldest first, INCLUDING the
+	 * genesis key. `keyId`/`publicKeySpki` above are the current epoch; this is
+	 * what lets a witness sink propose the key that actually signed a record
+	 * when an old record is redelivered after a rotation. Absent on identities
+	 * minted before key history existed — callers fall back to the current key.
+	 */
+	keyHistory?: { keyId: string; publicKeySpki: string }[];
 }
 
 /**
@@ -273,6 +281,7 @@ export function initAnchorIdentity(
 		keyId,
 		publicKeySpki,
 		createdAt: new Date().toISOString(),
+		keyHistory: [{ keyId, publicKeySpki }],
 	};
 	writeIdentityFile(rootDir, identity);
 	// Touch the mirror so "mirror file missing" (accidental loss / partial
@@ -1073,7 +1082,12 @@ export function mintSuccessorKey(vaultId: string): {
 	};
 }
 
-/** Update identity.json after a successful rotation emission. */
+/**
+ * Update identity.json after a successful rotation emission. The superseded key
+ * is APPENDED to the history rather than replaced: records signed under it may
+ * still be sitting in the outbox, and a witness sink must be able to name the
+ * key that actually signed each one long after the epoch moved on.
+ */
 export function recordRotatedIdentity(
 	rootDir: string,
 	next: { keyId: string; publicKeySpki: string },
@@ -1082,10 +1096,16 @@ export function recordRotatedIdentity(
 	if (identity === null) {
 		throw new Error("No anchor identity to rotate");
 	}
+	// An identity minted before key history seeds one from its current epoch, so
+	// the pre-rotation key is not lost by upgrading mid-life.
+	const history = identity.keyHistory ?? [
+		{ keyId: identity.keyId, publicKeySpki: identity.publicKeySpki },
+	];
 	const updated: AnchorIdentity = {
 		...identity,
 		keyId: next.keyId,
 		publicKeySpki: next.publicKeySpki,
+		keyHistory: [...history.filter((entry) => entry.keyId !== next.keyId), next],
 	};
 	writeIdentityFile(rootDir, updated);
 }

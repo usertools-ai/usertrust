@@ -49,6 +49,7 @@ import {
 	leafHash,
 	makeRekorReceipt,
 	mth,
+	signedEntryTimestamp,
 	signedNote,
 } from "./rekor-fixtures.js";
 
@@ -382,6 +383,74 @@ describe("HARDEN: adversarial receipt mutations (every one must fail closed)", (
 	});
 });
 
+describe("HARDEN: attested time is only ever a SIGNED time (P2 review, FIX A)", () => {
+	it("40. editing integratedTime alone now fails — the SET is the only signature over it", () => {
+		const f = makeRekorReceipt(record, { integratedTime: 1_700_000_042 });
+		expect(verifyRekorReceipt(f.receipt, record, [f.logPubkeyPem]).attestedTimeMs).toBe(
+			1_700_000_042_000,
+		);
+
+		// Everything else in the receipt is untouched: the inclusion proof still
+		// reconstructs the root and the checkpoint still verifies. The ONLY thing
+		// standing between an operator and a freely chosen "witness-attested" time
+		// is a signature they do not hold the key for.
+		const backdated = f.tamper((r) => {
+			r.log.integratedTime = 1_600_000_000;
+		});
+		const result = verifyRekorReceipt(backdated, record, [f.logPubkeyPem]);
+		expect(result.ok).toBe(false);
+		expect(result.attestedTimeMs).toBeNull();
+		expect(result.errors.join(" | ")).toContain("signedEntryTimestamp does not verify");
+	});
+
+	it("41. re-signing the backdated time with the attacker's own key does not help either", () => {
+		const f = makeRekorReceipt(record, { integratedTime: 1_700_000_042 });
+		const foreign = generateKeyPairSync("ec", { namedCurve: "P-256" });
+		const forged = f.tamper((r) => {
+			r.log.integratedTime = 1_600_000_000;
+			r.log.signedEntryTimestamp = signedEntryTimestamp(
+				{
+					body: r.entryBody,
+					integratedTime: r.log.integratedTime,
+					logID: r.log.logID as string,
+					logIndex: r.log.logIndex,
+				},
+				foreign.privateKey,
+			);
+		});
+		const result = verifyRekorReceipt(forged, record, [f.logPubkeyPem]);
+		expect(result.ok).toBe(false);
+		expect(result.errors.join(" | ")).toContain("signedEntryTimestamp does not verify");
+	});
+
+	it("42. the SET covers the logID, not just the time", () => {
+		const f = makeRekorReceipt(record);
+		const swapped = f.tamper((r) => {
+			r.log.logID = randomBytes(32).toString("hex");
+		});
+		expect(verifyRekorReceipt(swapped, record, [f.logPubkeyPem]).ok).toBe(false);
+	});
+
+	it("43. a receipt with NO SET proves inclusion and attests no time", () => {
+		const f = makeRekorReceipt(record, { integratedTime: 1_700_000_042, withSet: false });
+		const result = verifyRekorReceipt(f.receipt, record, [f.logPubkeyPem]);
+
+		// Inclusion is a separate claim and it still holds — a log that emits no
+		// signed entry timestamp is not a broken receipt, just a quieter one.
+		expect(result.errors).toEqual([]);
+		expect(result.ok).toBe(true);
+		expect(result.attestedTimeMs).toBeNull();
+		// And it is not a loophole: with no SET, integratedTime buys nothing at all.
+		const rewritten = f.tamper((r) => {
+			r.log.integratedTime = 1;
+		});
+		const after = verifyRekorReceipt(rewritten, record, [f.logPubkeyPem]);
+		expect(after.ok).toBe(true);
+		expect(after.attestedTimeMs).toBeNull();
+		expect(pkgVerifyRekorReceipt(f.receipt, record, [f.logPubkeyPem])).toEqual(result);
+	});
+});
+
 describe("HARDEN: trust pinning for custom logs (plan-review D4)", () => {
 	it("21. the embedded production key is data, not a dependency: P-256 and only for rekor.sigstore.dev", () => {
 		expect(REKOR_PROD_PUBKEY_PEM).toContain("-----BEGIN PUBLIC KEY-----");
@@ -608,6 +677,39 @@ describe("HARDEN: strict receipt parsing", () => {
 		rejects((r) => {
 			(r.log as Record<string, unknown>).integratedTime = 0;
 		}, "log.integratedTime");
+	});
+
+	it("44. rejects an integratedTime whose milliseconds leave the ECMAScript Date range", () => {
+		// `integratedTime * 1000` is printed as an ISO timestamp downstream, and
+		// toISOString throws past ±8.64e15 ms — an attacker-chosen number must not
+		// be able to crash the verdict it appears in.
+		rejects((r) => {
+			(r.log as Record<string, unknown>).integratedTime = 8_640_000_000_000;
+		}, "log.integratedTime");
+		rejects((r) => {
+			(r.log as Record<string, unknown>).integratedTime = Number.MAX_SAFE_INTEGER;
+		}, "log.integratedTime");
+		// The boundary value itself still parses.
+		const ok = base();
+		(ok.log as Record<string, unknown>).integratedTime = 8_639_999_999_999;
+		expect(parseRekorReceipt(JSON.stringify(ok)).error).toBeNull();
+	});
+
+	it("45. rejects malformed SET material, and a SET with no logID to verify it against", () => {
+		rejects((r) => {
+			(r.log as Record<string, unknown>).logID = "not-hex";
+		}, "log.logID");
+		rejects((r) => {
+			(r.log as Record<string, unknown>).signedEntryTimestamp = "x".repeat(1100);
+		}, "log.signedEntryTimestamp");
+		rejects((r) => {
+			(r.log as Record<string, unknown>).signedEntryTimestamp = "not base64!!";
+		}, "log.signedEntryTimestamp");
+		// The logID is inside the payload the SET signs, so a SET without one can
+		// never be checked by anyone — it is refused, not silently ignored.
+		rejects((r) => {
+			delete (r.log as Record<string, unknown>).logID;
+		}, "requires log.logID");
 	});
 
 	it("26. error strings never echo untrusted blobs (plan-review D5)", () => {

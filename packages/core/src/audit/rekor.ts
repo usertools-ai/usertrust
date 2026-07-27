@@ -26,13 +26,22 @@
  * transport and assert on bytes.
  */
 
-import { closeSync, fsyncSync, mkdirSync, openSync, writeSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	closeSync,
+	fsyncSync,
+	mkdirSync,
+	openSync,
+	readdirSync,
+	readFileSync,
+	writeSync,
+} from "node:fs";
 import { join } from "node:path";
 // Cyclic by design: anchor.ts builds these sinks from SinkConfig, and the Rekor
 // sink needs the vault's identity + anchors directory. Both bindings are
 // function declarations used only at publish time, so the cycle never observes
 // a partially initialized module.
-import { type AnchorSink, anchorsDir, readAnchorIdentity } from "./anchor.js";
+import { type AnchorIdentity, type AnchorSink, anchorsDir, readAnchorIdentity } from "./anchor.js";
 import { type AnchorRecord, anchorPayloadHash } from "./anchor-verify.js";
 import { canonicalize } from "./canonical.js";
 import { parseRekorReceipt, type RekorReceipt } from "./rekor-verify.js";
@@ -49,6 +58,9 @@ const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 const MAX_ENTRY_BODY_BYTES = 64 * 1024;
 const MAX_CHECKPOINT_BYTES = 8 * 1024;
 const MAX_INCLUSION_PATH = 64;
+const MAX_SET_BYTES = 1024;
+/** Matches the receipt parser's bound: `* 1000` must stay a valid Date. */
+const MAX_INTEGRATED_TIME = 8_640_000_000_000;
 
 /**
  * Injectable HTTP transport — the sinks' only impure edge. Structurally
@@ -108,22 +120,24 @@ function credentialsFromEnv(): SigV4Credentials | null {
 // ── S3 sink ──
 
 /**
- * Endpoint for an S3-compatible store. Plaintext is refused off-loopback:
+ * Endpoint rule for BOTH sinks. Plaintext is refused off-loopback: for S3,
  * SigV4 authenticates the request but does not encrypt it, so an http endpoint
- * on the network would put the credential-bearing headers on the wire. Loopback
- * is allowed for dev MinIO/LocalStack.
+ * on the network would put the credential-bearing headers on the wire; for
+ * Rekor, an http log URL lets anyone on the path answer for the witness — and
+ * a sink that accepts a forged 201 files forged evidence. Loopback is allowed
+ * for dev MinIO/LocalStack and local log instances.
  */
-function parseEndpoint(endpoint: string): URL {
+export function parseEndpoint(endpoint: string, sinkName = "s3 sink"): URL {
 	let url: URL;
 	try {
 		url = new URL(endpoint);
 	} catch {
-		throw new Error(`s3 sink: endpoint must include a scheme, got "${endpoint.slice(0, 60)}"`);
+		throw new Error(`${sinkName}: endpoint must include a scheme, got "${endpoint.slice(0, 60)}"`);
 	}
 	const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1";
 	if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
 		throw new Error(
-			`s3 sink: endpoint must be https (http is allowed only for localhost/127.0.0.1), got "${url.protocol}//${url.host}"`,
+			`${sinkName}: endpoint must be https (http is allowed only for localhost/127.0.0.1), got "${url.protocol}//${url.host}"`,
 		);
 	}
 	return url;
@@ -251,6 +265,9 @@ interface AcceptedEntry {
 	rootHash: string;
 	hashes: string[];
 	checkpoint: string;
+	/** The log's signature over integratedTime — absent on logs that omit it. */
+	signedEntryTimestamp?: string;
+	logID?: string;
 }
 
 function asObject(value: unknown): Record<string, unknown> | null {
@@ -298,11 +315,17 @@ function parseAcceptedEntry(raw: string): { entry: AcceptedEntry | null; error: 
 	if (decoded.length > MAX_ENTRY_BODY_BYTES) return bad("entry.body exceeds 64 KiB decoded");
 	if (!isSafeIntAtLeast(entry.logIndex, 0))
 		return bad("entry.logIndex must be a safe integer >= 0");
-	if (!isSafeIntAtLeast(entry.integratedTime, 1)) {
-		return bad("entry.integratedTime must be a safe integer > 0");
+	// Same bound the receipt parser enforces: a receipt we write must be one we
+	// can read back, and `integratedTime * 1000` has to stay a printable Date.
+	if (!isSafeIntAtLeast(entry.integratedTime, 1) || entry.integratedTime >= MAX_INTEGRATED_TIME) {
+		return bad(`entry.integratedTime must be a safe integer > 0 and < ${MAX_INTEGRATED_TIME}`);
+	}
+	if (entry.logID !== undefined && (typeof entry.logID !== "string" || !HEX64.test(entry.logID))) {
+		return bad("entry.logID must be 64 lowercase hex characters");
 	}
 
-	const proof = asObject(asObject(entry.verification)?.inclusionProof);
+	const verification = asObject(entry.verification);
+	const proof = asObject(verification?.inclusionProof);
 	if (proof === null) return bad("entry.verification.inclusionProof is missing");
 	// The proof's own index — NOT the entry's global logIndex, which counts
 	// across the whole log rather than the tree this proof is against.
@@ -331,6 +354,26 @@ function parseAcceptedEntry(raw: string): { entry: AcceptedEntry | null; error: 
 		return bad("inclusionProof.checkpoint must be a non-empty LF-only string of at most 8 KiB");
 	}
 
+	// The signed entry timestamp is what makes integratedTime worth anything to
+	// an auditor, so it is captured whenever the log offers one — but a SET with
+	// no logID cannot be verified by anybody (the logID is inside the payload it
+	// signs), and filing evidence nobody can check is the failure this module
+	// exists to avoid.
+	const set = verification?.signedEntryTimestamp;
+	if (set !== undefined) {
+		if (
+			typeof set !== "string" ||
+			set === "" ||
+			!BASE64.test(set) ||
+			Buffer.byteLength(set, "utf8") > MAX_SET_BYTES
+		) {
+			return bad("verification.signedEntryTimestamp must be base64 of at most 1 KiB");
+		}
+		if (entry.logID === undefined) {
+			return bad("verification.signedEntryTimestamp present without entry.logID");
+		}
+	}
+
 	return {
 		entry: {
 			body: entry.body,
@@ -340,6 +383,8 @@ function parseAcceptedEntry(raw: string): { entry: AcceptedEntry | null; error: 
 			rootHash: proof.rootHash,
 			hashes: proof.hashes as string[],
 			checkpoint: proof.checkpoint,
+			...(typeof set === "string" ? { signedEntryTimestamp: set } : {}),
+			...(typeof entry.logID === "string" ? { logID: entry.logID } : {}),
 		},
 		error: null,
 	};
@@ -347,8 +392,17 @@ function parseAcceptedEntry(raw: string): { entry: AcceptedEntry | null; error: 
 
 // ── Receipt persistence ──
 
-export function rekorReceiptPath(rootDir: string, anchorSeq: number): string {
-	return join(anchorsDir(rootDir), "rekor", `${seq12(anchorSeq)}.json`);
+/**
+ * `<seq12>.<8 hex of sha256(log url)>.json` — one receipt per (anchor, LOG).
+ * Keying by anchorSeq alone made two rekor sinks silently overwrite each
+ * other's evidence: the second witness's receipt replaced the first's, and the
+ * operator ended up with fewer independent attestations than they configured.
+ * Readers glob `*.json` in this directory, so pre-existing `<seq12>.json`
+ * receipts keep being found.
+ */
+export function rekorReceiptPath(rootDir: string, anchorSeq: number, logUrl: string): string {
+	const tag = createHash("sha256").update(logUrl, "utf8").digest("hex").slice(0, 8);
+	return join(anchorsDir(rootDir), "rekor", `${seq12(anchorSeq)}.${tag}.json`);
 }
 
 /** Fsync'd receipt write — the same durability the outbox and mirror get. */
@@ -362,7 +416,7 @@ function writeReceipt(rootDir: string, receipt: RekorReceipt): void {
 	}
 	const dir = join(anchorsDir(rootDir), "rekor");
 	mkdirSync(dir, { recursive: true });
-	const fd = openSync(rekorReceiptPath(rootDir, receipt.anchorSeq), "w", 0o600);
+	const fd = openSync(rekorReceiptPath(rootDir, receipt.anchorSeq, receipt.log.url), "w", 0o600);
 	try {
 		writeSync(fd, serialized);
 		fsyncSync(fd);
@@ -371,23 +425,115 @@ function writeReceipt(rootDir: string, receipt: RekorReceipt): void {
 	}
 }
 
+/**
+ * Do the bytes a log stored commit to THIS record — our payload hash AND our
+ * signature? Reused for the 201 response and for receipts already on disk; in
+ * both cases the alternative is filing evidence about someone else's entry.
+ * Decoded bytes are compared, never base64 spellings, since base64 is not
+ * canonical and equivalent encodings are the same signature.
+ */
+function entryBindsRecord(entryBodyBase64: string, record: AnchorRecord): boolean {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(Buffer.from(entryBodyBase64, "base64").toString("utf8"));
+	} catch {
+		return false;
+	}
+	const spec = asObject(asObject(parsed)?.spec);
+	if (spec === null) return false;
+	const hash = asObject(asObject(spec.data)?.hash);
+	const signature = asObject(spec.signature);
+	if (hash === null || signature === null || typeof signature.content !== "string") return false;
+	if (hash.value !== anchorPayloadHash(record)) return false;
+	const logged = Buffer.from(signature.content, "base64");
+	const ours = Buffer.from(record.sig, "base64");
+	return ours.length > 0 && logged.equals(ours);
+}
+
+/**
+ * A receipt already on disk from THIS log that witnesses THIS record. Every
+ * `*.json` in the directory is considered, because the filename is a
+ * convenience and the receipt's own contents are the evidence — a receipt is
+ * only accepted when it names the record, carries its payload hash, and its
+ * stored entry binds the record's signature.
+ */
+function findBindingReceipt(rootDir: string, record: AnchorRecord, logUrl: string): boolean {
+	const dir = join(anchorsDir(rootDir), "rekor");
+	let names: string[];
+	try {
+		names = readdirSync(dir).filter((f) => f.endsWith(".json"));
+	} catch {
+		return false;
+	}
+	for (const name of names.sort()) {
+		let raw: string;
+		try {
+			raw = readFileSync(join(dir, name), "utf-8");
+		} catch {
+			continue;
+		}
+		const { receipt } = parseRekorReceipt(raw);
+		if (receipt === null) continue;
+		if (
+			receipt.vaultId === record.vaultId &&
+			receipt.anchorSeq === record.anchorSeq &&
+			receipt.log.url === logUrl &&
+			receipt.artifactHash === anchorPayloadHash(record) &&
+			entryBindsRecord(receipt.entryBody, record)
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/**
+ * The public key to PROPOSE for a record, resolved from the record's OWN key
+ * epoch rather than from whatever key the vault holds today. A record minted
+ * before a rotation and redelivered after it is still signed by the old key, so
+ * proposing the live key would log a public key that does not verify the
+ * signature sitting beside it — a permanently wrong entry in an append-only
+ * log. Identities predating key history keep the old behavior; once a history
+ * exists, a keyId absent from it is refused rather than guessed at.
+ */
+function spkiForRecord(identity: AnchorIdentity, record: AnchorRecord): string {
+	if (identity.keyHistory === undefined) return identity.publicKeySpki;
+	const known = [
+		...identity.keyHistory,
+		{ keyId: identity.keyId, publicKeySpki: identity.publicKeySpki },
+	];
+	const match = known.find((entry) => entry.keyId === record.keyId);
+	if (match === undefined) {
+		throw new Error(
+			`rekor sink: no public key for keyId ${record.keyId} in this vault's key history`,
+		);
+	}
+	return match.publicKeySpki;
+}
+
 // ── Rekor sink ──
 
 /**
  * Publish a record's payload hash to a Rekor transparency log and persist the
  * inclusion receipt next to the mirror.
  *
- * Any non-201 rejects, 409 included: a duplicate means an entry we cannot see
- * already exists, and fabricating a receipt from a Location header would mean
- * filing evidence about bytes we never verified (delta D1). The emitter's
- * retry/outbox path is the recovery mechanism, and re-proposing the same entry
- * is idempotent at the log.
+ * A 409 means the log already holds an entry for this proposal, which happens
+ * on exactly one honest path: a crash between writing the receipt and clearing
+ * the outbox, so the emitter redelivers a record that IS already witnessed.
+ * That case is resolved from the receipt we already hold — never from the 409
+ * itself, which carries no evidence. A 409 with no such receipt is a duplicate
+ * we cannot account for, and fabricating one from a Location header would mean
+ * filing evidence about bytes we never saw (delta D1), so it rejects and the
+ * outbox keeps the record for a human.
  */
 export function rekorSink(
 	rootDir: string,
 	url: string = DEFAULT_REKOR_URL,
 	transport: HttpTransport = httpTransport,
 ): AnchorSink {
+	// Same rule as the S3 sink, applied at CONSTRUCTION so a plaintext log URL
+	// fails before a record is ever offered to it.
+	parseEndpoint(url, "rekor sink");
 	const base = url.replace(/\/+$/, "");
 	return {
 		name: `rekor:${base}`,
@@ -396,7 +542,10 @@ export function rekorSink(
 			if (identity === null) {
 				throw new Error("rekor sink: no anchor identity — run `usertrust anchor init` first");
 			}
-			const proposal = Buffer.from(buildHashedRekordEntry(record, identity.publicKeySpki), "utf8");
+			const proposal = Buffer.from(
+				buildHashedRekordEntry(record, spkiForRecord(identity, record)),
+				"utf8",
+			);
 			const res = await transport({
 				method: "POST",
 				url: `${base}${REKOR_ENTRIES_PATH}`,
@@ -406,12 +555,28 @@ export function rekorSink(
 				},
 				body: proposal,
 			});
+			if (res.status === 409) {
+				if (findBindingReceipt(rootDir, record, base)) return;
+				throw new Error(
+					"rekor sink: HTTP 409 (duplicate without local receipt — fetch the entry manually)",
+				);
+			}
 			if (res.status !== 201) {
 				throw new Error(`rekor sink: HTTP ${res.status}${snippet(res.body)}`);
 			}
 			const { entry, error } = parseAcceptedEntry(res.body);
 			if (entry === null) {
 				throw new Error(`rekor sink: invalid 201 response: ${error}`);
+			}
+			// A well-formed 201 is not yet OUR 201: the receipt is built from the
+			// log's bytes, so a response describing somebody else's entry would be
+			// persisted as evidence for this record and only fall apart at audit
+			// time. Bind it to the record before trusting a single field of it.
+			if (!entryBindsRecord(entry.body, record)) {
+				throw new Error(
+					"rekor sink: 201 response describes an entry that is not this record's " +
+						"(payload hash or signature mismatch)",
+				);
 			}
 			writeReceipt(rootDir, {
 				v: 1,
@@ -429,6 +594,10 @@ export function rekorSink(
 					hashes: entry.hashes,
 					checkpoint: entry.checkpoint,
 					integratedTime: entry.integratedTime,
+					...(entry.signedEntryTimestamp !== undefined
+						? { signedEntryTimestamp: entry.signedEntryTimestamp }
+						: {}),
+					...(entry.logID !== undefined ? { logID: entry.logID } : {}),
 				},
 			});
 		},

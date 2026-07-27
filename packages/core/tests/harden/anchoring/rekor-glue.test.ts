@@ -238,6 +238,62 @@ describe("HARDEN: attested-time staleness (clock gaming defeated)", () => {
 	});
 });
 
+describe("HARDEN: an UNSIGNED integratedTime is not attested time (P2 review, FIX A)", () => {
+	it("13. a receipt with no SET verifies, but freshness falls back to the operator's clock", async () => {
+		const s = await makeAnchoredVault(3);
+		const record = await anchorOnce(s);
+		await appendEvents(s.root, 2, 4);
+		const nowMs = Date.parse(record.timestamp) + 1000;
+		// Exactly test 9's stale receipt, minus the log's signature over its time.
+		const f = makeRekorReceipt(record, {
+			integratedTime: Math.floor(nowMs / 1000) - 30 * 86_400,
+			withSet: false,
+		});
+
+		const result = verify(s, {
+			maxAnchorAgeMs: 60_000,
+			nowMs,
+			rekorReceiptsRaw: [JSON.stringify(f.receipt)],
+			rekorLogPubkeysPem: [f.logPubkeyPem],
+		});
+
+		// The inclusion evidence is good, so the vault is not failed; but a number
+		// no one signed cannot age it out either — that would let anyone holding a
+		// receipt editor decide the verdict.
+		expect(result.anchorState).toBe("ANCHORED_VERIFIED");
+		expect(result.anchoring.rekor?.receiptsVerified).toBe(1);
+		expect(result.anchoring.rekor?.receiptsFailed).toBe(0);
+		expect(result.anchoring.rekor?.latestAttestedTimeMs).toBeNull();
+	});
+
+	it("14. a forward-dated operator timestamp still warns when a witness attests the time", async () => {
+		const s = await makeAnchoredVault(3);
+		const record = await anchorOnce(s);
+		// The auditor's clock sits BEHIND the operator's claim — the clock-gaming
+		// signal (buyer-rejection §5.13).
+		const nowMs = Date.parse(record.timestamp) - 60_000;
+		const f = makeRekorReceipt(record, { integratedTime: Math.floor(nowMs / 1000) - 10 });
+
+		const withoutReceipt = verify(s, { nowMs });
+		expect(withoutReceipt.anchoring.warnings).toContain("future-timestamp");
+
+		const attested = verify(s, {
+			nowMs,
+			rekorReceiptsRaw: [JSON.stringify(f.receipt)],
+			rekorLogPubkeysPem: [f.logPubkeyPem],
+		});
+
+		// A receipt corroborates the anchor; it does not erase what the operator
+		// claimed. Suppressing the warning here would let a receipt LAUNDER the
+		// forward-dated timestamp it was supplied to corroborate.
+		expect(attested.anchorState).toBe("ANCHORED_VERIFIED");
+		expect(attested.anchoring.warnings).toContain("future-timestamp");
+		expect(attested.anchoring.rekor?.latestAttestedTimeMs).toBe(
+			f.receipt.log.integratedTime * 1000,
+		);
+	});
+});
+
 describe("HARDEN: core ↔ verify pkg behavior parity on the receipt path (D12)", () => {
 	it("12. identical inputs produce deep-equal results and exit codes in both glues", async () => {
 		const s = await makeAnchoredVault(3);

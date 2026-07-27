@@ -23,9 +23,13 @@
  * SEPARATE receipt files: the anchor record schema is frozen, and a
  * transparency log must never become a field inside the thing it witnesses.
  *
- * Offline scope: a verified receipt proves the entry was included in the log at
- * `integratedTime` under a pinned key. It does NOT prove the log's current head
- * is consistent with that checkpoint — that needs a witness/consistency query,
+ * Offline scope: a verified receipt proves the entry was included in the log
+ * under a pinned key. WHEN it was included is a separate, weaker claim:
+ * `integratedTime` is covered by no signature of its own, so it counts as
+ * attested only when the log's signed entry timestamp (SET) over it verifies
+ * under the same pinned keyring — otherwise the receipt proves inclusion and
+ * says nothing about time. Neither claim proves the log's current head is
+ * consistent with that checkpoint; that needs a witness/consistency query,
  * which stays out of the zero-dependency verifier by design.
  */
 
@@ -57,8 +61,20 @@ export interface RekorReceipt {
 		hashes: string[];
 		/** Signed note (checkpoint) over treeSize + rootHash. */
 		checkpoint: string;
-		/** Unix seconds the log attests it integrated the entry. */
+		/**
+		 * Unix seconds the log CLAIMS it integrated the entry. Signed by nothing
+		 * on its own — only the SET below turns it into an attested time.
+		 */
 		integratedTime: number;
+		/**
+		 * base64 ECDSA signature over the sorted-key JSON of
+		 * `{body, integratedTime, logID, logIndex}` — the log's only signature
+		 * covering integratedTime. Optional: a log that does not emit one still
+		 * yields a valid INCLUSION proof, just no attested time.
+		 */
+		signedEntryTimestamp?: string;
+		/** 64-hex log identity, part of the SET payload. Required with a SET. */
+		logID?: string;
 	};
 }
 
@@ -77,7 +93,11 @@ export interface SignedNote {
 
 export interface RekorVerification {
 	ok: boolean;
-	/** Witness-attested time in ms — the input to staleness policy when present. */
+	/**
+	 * Witness-attested time in ms — the input to staleness policy when present.
+	 * Non-null ONLY when a signed entry timestamp verified: an unsigned
+	 * integratedTime is a number the party under audit could have chosen.
+	 */
 	attestedTimeMs: number | null;
 	errors: string[];
 }
@@ -111,6 +131,13 @@ const MAX_ENTRY_BODY_BYTES = 64 * 1024;
 const MAX_CHECKPOINT_BYTES = 8 * 1024;
 const MAX_INCLUSION_PATH = 64;
 const MAX_PEM_BYTES = 16 * 1024;
+const MAX_SET_BYTES = 1024;
+/**
+ * Exclusive upper bound on integratedTime, in SECONDS: `* 1000` must stay
+ * inside the ±8.64e15 ms ECMAScript Date range, or every downstream
+ * `new Date(ms).toISOString()` throws RangeError on attacker-chosen input.
+ */
+const MAX_INTEGRATED_TIME = 8_640_000_000_000;
 
 const HEX64 = /^[0-9a-f]{64}$/;
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
@@ -132,6 +159,8 @@ const LOG_KEYS = new Set([
 	"hashes",
 	"checkpoint",
 	"integratedTime",
+	"signedEntryTimestamp",
+	"logID",
 ]);
 
 // ── Small helpers ──
@@ -172,6 +201,19 @@ function logHost(url: string): string | null {
 
 function nodeHash(left: Buffer, right: Buffer): Buffer {
 	return createHash("sha256").update(NODE_PREFIX).update(left).update(right).digest();
+}
+
+/**
+ * Sorted-key JSON of a FLAT object of strings and safe integers — the exact
+ * bytes a Rekor SET is computed over. Over this charset (base64, lowercase hex,
+ * integers) it is byte-identical to RFC 8785 JCS; a general JCS implementation
+ * would buy nothing here and cost the verifier its zero-dependency property.
+ */
+function sortedKeyStringify(value: Record<string, string | number>): string {
+	const fields = Object.keys(value)
+		.sort()
+		.map((key) => `${JSON.stringify(key)}:${JSON.stringify(value[key])}`);
+	return `{${fields.join(",")}}`;
 }
 
 // ── Signed notes (checkpoints) ──
@@ -360,8 +402,29 @@ export function parseRekorReceipt(raw: string): {
 	) {
 		return bad("log.checkpoint must be a non-empty string of at most 8 KiB");
 	}
-	if (!isSafeIntAtLeast(log.integratedTime, 1)) {
-		return bad("log.integratedTime must be a safe integer > 0");
+	// Bounded in SECONDS so `integratedTime * 1000` cannot leave the Date range
+	// and turn a printed verdict into a RangeError on attacker-chosen input.
+	if (!isSafeIntAtLeast(log.integratedTime, 1) || log.integratedTime >= MAX_INTEGRATED_TIME) {
+		return bad(`log.integratedTime must be a safe integer > 0 and < ${MAX_INTEGRATED_TIME}`);
+	}
+	if (log.logID !== undefined && (typeof log.logID !== "string" || !HEX64.test(log.logID))) {
+		return bad("log.logID must be 64 lowercase hex characters");
+	}
+	if (log.signedEntryTimestamp !== undefined) {
+		if (
+			typeof log.signedEntryTimestamp !== "string" ||
+			log.signedEntryTimestamp.length === 0 ||
+			!BASE64.test(log.signedEntryTimestamp) ||
+			Buffer.byteLength(log.signedEntryTimestamp, "utf8") > MAX_SET_BYTES
+		) {
+			return bad("log.signedEntryTimestamp must be base64 of at most 1 KiB");
+		}
+		// The logID is part of the payload the SET signs, so a SET without one
+		// is unverifiable by construction — and unverifiable supplied evidence
+		// is a rejection, never a receipt that quietly proves less than it looks.
+		if (log.logID === undefined) {
+			return bad("log.signedEntryTimestamp requires log.logID");
+		}
 	}
 	return { receipt: obj as unknown as RekorReceipt, error: null };
 }
@@ -453,8 +516,10 @@ function resolveLogKeyring(
  *
  * The order below is the binding chain, and it is deliberate: cheap identity
  * and hash checks first, then the entry decode, then the inclusion walk, and
- * only then the signature — so a receipt for the wrong record can never cost an
- * ECDSA verification, and a failure always names the earliest broken link.
+ * only then the signatures — so a receipt for the wrong record can never cost
+ * an ECDSA verification, and a failure always names the earliest broken link.
+ * `ok` is the INCLUSION verdict; `attestedTimeMs` is the strictly weaker time
+ * claim, and only a verifying signed entry timestamp produces it.
  */
 export function verifyRekorReceipt(
 	receipt: RekorReceipt,
@@ -533,6 +598,32 @@ export function verifyRekorReceipt(
 		return fail("log.checkpoint signature does not verify under any pinned log public key");
 	}
 
-	// 8 — every link held, so the log's integration time is witness-attested.
+	// 8 — inclusion holds. TIME is a separate claim: the checkpoint signs the
+	// tree, not when this entry entered it, so integratedTime is worth exactly
+	// as much as the signed entry timestamp over it. No SET (or no logID to
+	// build its payload from) means an honest "included, time unknown" — the
+	// caller then falls back to the operator-claimed timestamp knowing it is
+	// operator-claimed. A SET that is PRESENT and does not verify is different
+	// in kind: supplied evidence that fails is a forgery attempt, not an
+	// absence, so it fails the whole receipt closed.
+	const set = receipt.log.signedEntryTimestamp;
+	const logID = receipt.log.logID;
+	if (set === undefined || logID === undefined) {
+		return { ok: true, attestedTimeMs: null, errors };
+	}
+	const setPayload = sortedKeyStringify({
+		body: receipt.entryBody,
+		integratedTime: receipt.log.integratedTime,
+		logID,
+		logIndex: receipt.log.logIndex,
+	});
+	const setSigned = keyring.keys.some((pem) => {
+		const key = publicKeyFromPem(pem);
+		if (key === null) return false;
+		return verifySignatureRaw("ecdsa-p256", setPayload, key, set);
+	});
+	if (!setSigned) return fail("signedEntryTimestamp does not verify");
+
+	// 9 — every link held AND the log signed the time, so it is witness-attested.
 	return { ok: true, attestedTimeMs: receipt.log.integratedTime * 1000, errors };
 }

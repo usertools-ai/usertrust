@@ -276,6 +276,16 @@ async function parseAnchorFlags(argv: string[]): Promise<AnchorFlags> {
 	};
 }
 
+/**
+ * A witness-attested time on its way to a terminal. The receipt parser bounds
+ * integratedTime, but this value also arrives from library callers, and
+ * `toISOString()` throws RangeError outside ±8.64e15 ms — printing raw
+ * milliseconds beats crashing the verifier over a number it already distrusts.
+ */
+function formatAttestedMs(ms: number): string {
+	return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : `${ms} ms`;
+}
+
 export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const root = rootDir ?? process.cwd();
 	const vaultPath = join(root, VAULT_DIR);
@@ -358,7 +368,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			const attested =
 				rekor.latestAttestedTimeMs === null
 					? ""
-					: `, attested ${new Date(rekor.latestAttestedTimeMs).toISOString()}`;
+					: `, attested ${formatAttestedMs(rekor.latestAttestedTimeMs)}`;
 			const failed = rekor.receiptsFailed > 0 ? `, ${rekor.receiptsFailed} FAILED` : "";
 			console.log(`Rekor: ${rekor.receiptsVerified} receipt(s) verified${failed}${attested}`);
 		}

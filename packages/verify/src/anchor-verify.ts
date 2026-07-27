@@ -998,11 +998,13 @@ export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvalu
 			opts.attestedTimeMs !== undefined && Number.isSafeInteger(opts.attestedTimeMs)
 				? opts.attestedTimeMs
 				: null;
-		if (attestedMs === null && Number.isFinite(ts) && ts > nowMs) {
+		if (Number.isFinite(ts) && ts > nowMs) {
 			// Operator-claimed time is in the auditor's future — clock gaming
-			// (buyer-rejection §5.13). --max-unanchored-events is the
-			// clock-independent control. Not raised on the attested path: there
-			// the operator's claim drives no policy, so it is not evidence.
+			// (buyer-rejection §5.13). Raised even when an attested time supersedes
+			// it below: a forward-dated claim is evidence about the operator whether
+			// or not a witness also spoke, and suppressing it on the attested path
+			// would let a receipt LAUNDER the very signal it was supplied to
+			// corroborate. --max-unanchored-events stays the clock-independent control.
 			warnings.push("future-timestamp");
 		}
 		const tail = Math.max(0, observed - latest.treeSize);

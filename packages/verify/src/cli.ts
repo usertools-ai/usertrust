@@ -274,6 +274,16 @@ async function buildAnchorParams(): Promise<AnchorVerifyParams> {
 	};
 }
 
+/**
+ * A witness-attested time on its way to a terminal. The receipt parser bounds
+ * integratedTime, but this value also arrives from library callers, and
+ * `toISOString()` throws RangeError outside ±8.64e15 ms — printing raw
+ * milliseconds beats crashing the verifier over a number it already distrusts.
+ */
+function formatAttestedMs(ms: number): string {
+	return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : `${ms} ms`;
+}
+
 function printAnchorSection(result: AnchoredVaultVerificationResult): void {
 	const a = result.anchoring;
 	if (result.anchorState === "UNANCHORED") {
@@ -293,7 +303,7 @@ function printAnchorSection(result: AnchoredVaultVerificationResult): void {
 		const attested =
 			a.rekor.latestAttestedTimeMs === null
 				? ""
-				: `, attested ${new Date(a.rekor.latestAttestedTimeMs).toISOString()}`;
+				: `, attested ${formatAttestedMs(a.rekor.latestAttestedTimeMs)}`;
 		const failed = a.rekor.receiptsFailed > 0 ? `, ${a.rekor.receiptsFailed} FAILED` : "";
 		console.log(`Rekor: ${a.rekor.receiptsVerified} receipt(s) verified${failed}${attested}`);
 	}
