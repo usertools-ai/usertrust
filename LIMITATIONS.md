@@ -9,24 +9,29 @@ moves, this document moves with it.
 
 ## 1. The governance surface is the wrapped SDK methods — nothing else
 
-`trust()` intercepts exactly three entry points:
+`trust()` governs a specific set of SDK methods, not "the network." Governed
+today:
 
-- Anthropic: `client.messages.create()`
-- OpenAI: `client.chat.completions.create()`
+- Anthropic: `client.messages.create()`, `client.messages.stream()`, and
+  `client.beta.messages.{create,stream,parse}()`
+- OpenAI: `client.chat.completions.create()` and `client.responses.create()`
 - Google: `client.models.generateContent()`
 
-Streaming through those methods (`stream: true`) is governed, including mid-stream
-anomaly cutoff. Everything else on the client bypasses governance, audit, and
-budget enforcement entirely: Anthropic's `client.messages.stream()` helper and
-`client.beta.*`, OpenAI's Responses API and legacy `client.completions.create()`,
-and any other alternative surface.
+Streaming through any governed method is governed end to end, including
+mid-stream anomaly cutoff and settle-or-void on completion. A few alternative
+surfaces are still ungoverned pass-throughs — they reach the provider without a
+budget hold, policy check, or audit entry: OpenAI's `responses.stream()` /
+`responses.parse()` helpers and legacy `completions.create()`, Anthropic's
+`messages.batches` and `beta.models` / `beta.files`, and Google's alternative
+methods. usertrust never pretends to govern these — the exact, current boundary
+is enumerated at the source in `packages/core/src/detect.ts`.
 
 **Why:** usertrust detects clients by duck typing and wraps them with a JS Proxy.
 That is what makes it a one-line integration with zero SDK dependencies across
-SDK versions — and it means the governed surface is a specific set of methods,
-not "the network." If your code relies on an ungoverned method, route it through
-a governed entry point or bring your own controls. The exact boundary is
-documented at the source in `packages/core/src/detect.ts`.
+SDK versions — and it means the governed surface is a set of methods we
+explicitly cover, not an interception of all traffic. If your code relies on an
+ungoverned method, route it through a governed entry point or bring your own
+controls.
 
 ## 2. Endpoint classification is a trusted-operator decision
 
