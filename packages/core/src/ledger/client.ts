@@ -46,6 +46,9 @@ export const XFER_REFUND = 4;
 export const XFER_ALLOCATION = 5;
 export const XFER_TOOL_CALL = 6;
 export const XFER_A2A_DELEGATION = 7;
+/** Cost-center budget returned to its parent. Distinct from XFER_REFUND, which
+ * reverses a purchase — a reclaim reverses a delegation, not a sale. */
+export const XFER_BUDGET_RECLAIM = 8;
 
 export interface TrustTBClientOptions {
 	addresses: string[];
