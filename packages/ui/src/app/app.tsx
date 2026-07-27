@@ -9,6 +9,7 @@ import { FilterBar } from "./filter-bar.js";
 import { RowPanel } from "./row-panel.js";
 import { useLedger } from "./store.js";
 import { SummaryStrip } from "./summary-strip.js";
+import { Trends } from "./trends.js";
 
 export type View = "audit" | "trends";
 
@@ -40,7 +41,10 @@ export function App(): React.JSX.Element {
 					<AuditTable rows={filtered} onOpen={setOpen} />
 				</>
 			) : (
-				<div>trends (Task 13) — {filtered.length} rows</div>
+				<>
+					<FilterBar rows={rows} filters={filters} onChange={setFilters} />
+					<Trends rows={filtered} />
+				</>
 			)}
 			{open && <RowPanel row={open} onClose={() => setOpen(null)} />}
 		</div>
