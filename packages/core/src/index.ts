@@ -43,6 +43,25 @@ export { verifyChain, verifyVault } from "./audit/verify.js";
 export type { BoardReviewResult, BoardStats } from "./board/board.js";
 // Board
 export { createBoard } from "./board/board.js";
+export type {
+	AllocateResult,
+	BudgetAuditWriter,
+	BudgetStatus,
+	ReclaimResult,
+} from "./budget/allocation.js";
+// Agent budgets — delegate a bounded allocation to a named cost center, reclaim
+// what it did not spend, and read its runway. `getBudgetStatus` is the read an
+// agent framework wires as a `get_budget()` tool; it is a plain async function
+// with no framework coupling. Neither allocate nor reclaim is safe to
+// blind-retry — see the module doc comment.
+export {
+	allocateBudget,
+	costCenterUserId,
+	getBudgetStatus,
+	reclaimBudget,
+} from "./budget/allocation.js";
+export type { Runway, RunwayInput } from "./budget/runway.js";
+export { computeRunway } from "./budget/runway.js";
 // Config
 export { defineConfig, loadConfig } from "./config.js";
 // Endpoint classification
