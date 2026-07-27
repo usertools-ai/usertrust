@@ -3,6 +3,8 @@
 
 import { useMemo, useState } from "react";
 import { EMPTY_FILTERS, type FilterState, applyFilters } from "../shared/filters.js";
+import { AuditTable } from "./audit-table.js";
+import { FilterBar } from "./filter-bar.js";
 import { useLedger } from "./store.js";
 
 export type View = "audit" | "trends";
@@ -29,15 +31,17 @@ export function App(): React.JSX.Element {
 				))}
 			</nav>
 			{view === "audit" ? (
-				<div>audit table (Task 10) — {filtered.length} rows</div>
+				<>
+					<FilterBar rows={rows} filters={filters} onChange={setFilters} />
+					<AuditTable rows={filtered} onOpen={() => {}} />
+				</>
 			) : (
 				<div>trends (Task 13) — {filtered.length} rows</div>
 			)}
-			{/* placeholder uses to satisfy lint until later tasks: */}
+			{/* placeholder uses to satisfy lint until Task 12: */}
 			<span className="hidden">
-				{summary?.vaultPath} {String(live)} {JSON.stringify(filters.search)}
+				{summary?.vaultPath} {String(live)}
 			</span>
-			<span className="hidden">{String(typeof setFilters === "function")}</span>
 		</div>
 	);
 }
