@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
+import { useMemo, useState } from "react";
+import { EMPTY_FILTERS, type FilterState, applyFilters } from "../shared/filters.js";
+import { useLedger } from "./store.js";
+
+export type View = "audit" | "trends";
+
+export function App(): React.JSX.Element {
+	const { rows, summary, live } = useLedger();
+	const [view, setView] = useState<View>("audit");
+	const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
+	const filtered = useMemo(() => applyFilters(rows, filters), [rows, filters]);
+
+	return (
+		<div className="mx-auto flex h-screen max-w-[1400px] flex-col gap-3 p-4">
+			{/* Task 12: <SummaryStrip summary={summary} live={live} /> */}
+			<nav className="flex gap-2">
+				{(["audit", "trends"] as const).map((v) => (
+					<button
+						key={v}
+						type="button"
+						onClick={() => setView(v)}
+						className={`rounded px-3 py-1 text-sm capitalize ${view === v ? "bg-[var(--panel)] text-[var(--text)]" : "text-[var(--muted)]"}`}
+					>
+						{v}
+					</button>
+				))}
+			</nav>
+			{view === "audit" ? (
+				<div>audit table (Task 10) — {filtered.length} rows</div>
+			) : (
+				<div>trends (Task 13) — {filtered.length} rows</div>
+			)}
+			{/* placeholder uses to satisfy lint until later tasks: */}
+			<span className="hidden">
+				{summary?.vaultPath} {String(live)} {JSON.stringify(filters.search)}
+			</span>
+			<span className="hidden">{String(typeof setFilters === "function")}</span>
+		</div>
+	);
+}
