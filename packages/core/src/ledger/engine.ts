@@ -6,10 +6,11 @@
  * Implements PENDING -> POST/VOID lifecycle for all governed operations.
  */
 
-import { createHash, createHmac } from "node:crypto";
+import { createHash } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import { CreateTransferError } from "tigerbeetle-node";
+import { canonicalize } from "../audit/canonical.js";
 import { DEFAULT_HOLD_TTL_MS, VAULT_DIR } from "../shared/constants.js";
 import { InsufficientBalanceError } from "../shared/errors.js";
 import { fnv1a32 } from "../shared/ids.js";
@@ -56,12 +57,8 @@ interface DLQEntry {
 	transferId: string;
 	payload: Record<string, unknown>;
 	error: string;
-	hmac?: string;
-}
-
-/** Derive a DLQ integrity key from the vault base path. */
-function deriveDlqKey(dlqPath: string): string {
-	return createHash("sha256").update(`dlq-integrity:${dlqPath}`).digest("hex");
+	checksum?: string;
+	checksumAlg?: string;
 }
 
 function writeDeadLetter(entry: DLQEntry, dlqPath: string): void {
@@ -70,10 +67,12 @@ function writeDeadLetter(entry: DLQEntry, dlqPath: string): void {
 			mkdirSync(dlqPath, { recursive: true, mode: 0o700 });
 		}
 
-		// Compute HMAC over the entry (excluding the hmac field itself)
-		const key = deriveDlqKey(dlqPath);
-		const hmac = createHmac("sha256", key).update(JSON.stringify(entry)).digest("hex");
-		const sealed: DLQEntry = { ...entry, hmac };
+		// F3: best-effort corruption-detection checksum — NOT tamper-evidence.
+		// The old HMAC key was derived from the DLQ path (forgeable from
+		// public inputs), and any real key readable at write time is equally
+		// readable by an attacker with host access. See audit/chain.ts.
+		const checksum = createHash("sha256").update(canonicalize(entry)).digest("hex");
+		const sealed: DLQEntry = { ...entry, checksum, checksumAlg: "sha256" };
 
 		const line = `${JSON.stringify(sealed)}\n`;
 		const filePath = join(dlqPath, "dead-letter.jsonl");

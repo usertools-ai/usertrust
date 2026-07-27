@@ -112,7 +112,8 @@ All commands support `--json` for machine-readable output.
 usertrust init          # Create .usertrust/ vault
 usertrust inspect       # Vault bank statement
 usertrust health        # Entropy diagnostics (6 signals, 0-100 score)
-usertrust verify        # Verify audit chain integrity
+usertrust verify        # Verify audit chain integrity (+ external anchors)
+usertrust anchor        # External anchoring: init|now|status|export|rotate|resume
 usertrust snapshot      # Checkpoint/restore vault state
 usertrust tb            # TigerBeetle process management
 usertrust completions   # Shell completions (bash, zsh, fish)
@@ -189,6 +190,8 @@ const config = defineConfig({
 
 **Merkle proofs (RFC 6962)** — Inclusion and consistency proofs for public verifiability. Any third party can verify a specific event existed in the chain.
 
+**External anchoring** — Ed25519-signed chain-head checkpoints pushed to an append-only store the vault operator cannot rewrite (S3 Object Lock, protected git branch, SIEM). Even a fully re-hashed, internally-consistent rewrite fails verification against the externally-held root. See the [anchoring guide](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md).
+
 **Policy engine** — 12 field operators (`eq`, `gt`, `in`, `regex`, etc.) with soft/hard enforcement. Block specific models, cap costs, require approvals.
 
 **PII detection** — Luhn-validated credit card numbers, SSN patterns, email addresses, phone numbers, IPv4 addresses. Block or warn before data leaves your network.
@@ -254,6 +257,15 @@ All hashes: valid (847/847)
 ```
 
 The verify package has zero runtime dependencies. It reads JSONL, recomputes SHA-256 hashes, and checks the chain. Anyone can verify a vault without trusting the usertrust SDK.
+
+With [external anchoring](https://github.com/usertools-ai/usertrust/blob/master/docs/anchoring.md) enabled, verification goes further: the auditor fetches signed checkpoints from an append-only store the operator cannot rewrite and pins the public key out-of-band — so even a fully re-hashed rewrite of the vault fails:
+
+```bash
+usertrust anchor init                                     # once: mint identity, pin the key
+usertrust anchor now --sink-file /mnt/worm/anchors.jsonl  # from cron/CI, or in-process
+
+npx usertrust-verify .usertrust --anchors anchors.jsonl --pubkey root.pem --require-external-anchor
+```
 
 ## License
 
