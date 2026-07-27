@@ -171,9 +171,31 @@ export function RowPanel(props: { row: LedgerRow; onClose(): void }): React.JSX.
 		};
 	}, []);
 
+	const panelRef = useRef<HTMLElement>(null);
+
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent): void => {
-			if (e.key === "Escape") onClose();
+			if (e.key === "Escape") {
+				onClose();
+				return;
+			}
+			// aria-modal promises modality: keep Tab cycling inside the panel.
+			if (e.key === "Tab" && panelRef.current) {
+				const focusables = panelRef.current.querySelectorAll<HTMLElement>(
+					"button, [href], input, [tabindex]:not([tabindex='-1'])",
+				);
+				if (focusables.length === 0) return;
+				const first = focusables[0] as HTMLElement;
+				const last = focusables[focusables.length - 1] as HTMLElement;
+				const active = document.activeElement;
+				if (e.shiftKey && (active === first || !panelRef.current.contains(active))) {
+					e.preventDefault();
+					last.focus();
+				} else if (!e.shiftKey && (active === last || !panelRef.current.contains(active))) {
+					e.preventDefault();
+					first.focus();
+				}
+			}
 		};
 		document.addEventListener("keydown", onKey);
 		return () => document.removeEventListener("keydown", onKey);
@@ -211,6 +233,7 @@ export function RowPanel(props: { row: LedgerRow; onClose(): void }): React.JSX.
 				onClick={onClose}
 			/>
 			<aside
+				ref={panelRef}
 				className="rp-panel"
 				role="dialog"
 				aria-modal="true"

@@ -138,14 +138,14 @@ body::after {
 	animation: row-flash 1.2s ease-out;
 }
 
+/* Staggered opacity only — transforms don't apply to inline boxes in the
+   receipt <pre>, and thermal print is an appear, not a slide. */
 @keyframes print-line {
 	from {
 		opacity: 0;
-		transform: translateY(-2px);
 	}
 	to {
 		opacity: 1;
-		transform: none;
 	}
 }
 
