@@ -169,9 +169,17 @@ depth, and a `degraded` flag; scheduled emitters also surface `lastEmitError`.
 
 ## Rekor transparency-log witness (EXPERIMENTAL)
 
-> **EXPERIMENTAL.** The sink is exercised against synthetic responses only — the live Rekor API
-> is untested in CI — and the entry `apiVersion` is pinned to `0.0.1`. Treat it as an additional
-> witness alongside an append-only store, not as a replacement for one.
+> **EXPERIMENTAL — does not yet work against the public `rekor.sigstore.dev`.** The sink is
+> exercised against synthetic responses only (the live API is untested in CI), the entry
+> `apiVersion` is pinned to `0.0.1`, and there is a **known incompatibility**: anchor records are
+> signed with pure Ed25519, while a `hashedrekord` entry asks the log to verify a signature given
+> only the artifact's sha256 digest — something pure Ed25519 cannot do (the log expects `ed25519ph`
+> or an algorithm that signs a prehash). Proposals to the public log are therefore rejected today.
+> Closing this needs signing-algorithm agility in the anchor record schema, which is deliberately
+> out of scope here. What ships now is the complete, tested verification path — receipt schema,
+> signed-note checkpoints, RFC 9162 inclusion, SET-verified attested time — plus a sink that works
+> against any log accepting these entries. Treat Rekor as an additional witness alongside an
+> append-only store, never as a replacement for one.
 
 A public transparency log is the strongest form of "the operator cannot un-publish it": the
 witness is a third party with its own Merkle tree, its own signing key, and its own monitors.
