@@ -158,9 +158,13 @@ describe("Action governance — E2E integration", () => {
 				.split("\n")
 				.map((line) => JSON.parse(line) as AuditEvent);
 
-			expect(events.length).toBe(2);
-			expect(events[0]?.kind).toBe("llm_call");
-			expect(events[1]?.kind).toBe("tool_use");
+			// Task 1: a usage_divergence event trails a settlement whenever provider
+			// usage diverges from the max_tokens-ceiling estimate — filter to the
+			// settlement events this test asserts on.
+			const settlementEvents = events.filter((e) => e.kind !== "usage_divergence");
+			expect(settlementEvents.length).toBe(2);
+			expect(settlementEvents[0]?.kind).toBe("llm_call");
+			expect(settlementEvents[1]?.kind).toBe("tool_use");
 
 			await governed.destroy();
 		});
@@ -270,10 +274,13 @@ describe("Action governance — E2E integration", () => {
 				.split("\n")
 				.map((line) => JSON.parse(line) as AuditEvent & { sequence: number });
 
-			// (a) All 4 events are present
-			expect(events.length).toBe(4);
+			// (a) All 4 settlement events are present. Task 1: a usage_divergence event
+			// trails each settlement that diverges from the max_tokens-ceiling estimate;
+			// the hash chain below still covers the FULL (validly chained) event set.
+			const settlementEvents = events.filter((e) => e.kind !== "usage_divergence");
+			expect(settlementEvents.length).toBe(4);
 
-			// (b) Hash chain is unbroken
+			// (b) Hash chain is unbroken across every event (settlement + divergence)
 			expect(events[0]?.previousHash).toBe(GENESIS_HASH);
 			for (let i = 1; i < events.length; i++) {
 				expect(events[i]?.previousHash).toBe(events[i - 1]?.hash);
@@ -292,7 +299,7 @@ describe("Action governance — E2E integration", () => {
 			}
 
 			// (c) Action events have actionName in data
-			const kinds = events.map((e) => e.kind);
+			const kinds = settlementEvents.map((e) => e.kind);
 			expect(kinds).toEqual(["llm_call", "tool_use", "llm_call", "shell_command"]);
 
 			const actionEvents = events.filter(

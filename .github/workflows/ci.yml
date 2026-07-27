@@ -1,5 +1,10 @@
 name: CI
 
+# Least-privilege default for every job (fork PRs already get a read-only
+# token; this shrinks the blast radius on push-to-master runs too).
+permissions:
+  contents: read
+
 on:
   push:
     branches: [master]
@@ -65,3 +70,67 @@ jobs:
           name: coverage-report
           path: coverage/
           retention-days: 14
+
+  tb-integration:
+    name: tb-integration
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    # Additive job: runs in parallel with lint/typecheck/test and gates none of them
+    # (nothing `needs:` it). It stands up a real single-node TigerBeetle cluster and
+    # runs the env-gated integration test that the normal `test` job self-skips
+    # (USERTRUST_TB_ADDRESS unset there). A failure here is a real hard-budget
+    # enforcement failure, so this job is allowed to fail the workflow.
+    env:
+      # Pin the TigerBeetle server to the SAME version as tigerbeetle-node in
+      # packages/core (0.16.77). The client must never be newer than the server, so
+      # bump this in lockstep whenever tigerbeetle-node is upgraded — never `latest`.
+      TIGERBEETLE_VERSION: "0.16.77"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Download TigerBeetle static binary
+        # The statically-linked binary avoids the Docker seccomp/io_uring + memlock
+        # pitfalls on ubuntu-latest. If this version-pinned release URL is ever
+        # unavailable, fall back to the pinned container image instead:
+        #   docker run --security-opt seccomp=unconfined --cap-add IPC_LOCK \
+        #     -v "$PWD/data:/data" ghcr.io/tigerbeetle/tigerbeetle:${TIGERBEETLE_VERSION} \
+        #     format --cluster=0 --replica=0 --replica-count=1 --development /data/0_0.tigerbeetle
+        #   docker run -d -p 3000:3000 --security-opt seccomp=unconfined --cap-add IPC_LOCK \
+        #     -v "$PWD/data:/data" ghcr.io/tigerbeetle/tigerbeetle:${TIGERBEETLE_VERSION} \
+        #     start --addresses=0.0.0.0:3000 --development /data/0_0.tigerbeetle
+        run: |
+          curl -fsSLo tigerbeetle.zip \
+            "https://github.com/tigerbeetle/tigerbeetle/releases/download/${TIGERBEETLE_VERSION}/tigerbeetle-x86_64-linux.zip"
+          # Supply-chain pin: verify the exact release asset before executing it.
+          # Recompute when bumping TIGERBEETLE_VERSION:
+          #   curl -fsSL <url> | shasum -a 256
+          echo "90a64d093c737415c8e83388e1342ff7a39b9a743bf6f7585e745e37fc7faf46  tigerbeetle.zip" | sha256sum -c -
+          unzip -o tigerbeetle.zip
+          chmod +x ./tigerbeetle
+          ./tigerbeetle version
+      - name: Format TigerBeetle data file
+        run: ./tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development ./0_0.tigerbeetle
+      - name: Start TigerBeetle and wait for port 3000
+        run: |
+          nohup ./tigerbeetle start --addresses=3000 --development ./0_0.tigerbeetle > tigerbeetle.log 2>&1 &
+          echo "Waiting for TigerBeetle to accept connections on port 3000..."
+          for _ in $(seq 1 60); do
+            if (exec 3<>/dev/tcp/127.0.0.1/3000) 2>/dev/null; then
+              echo "TigerBeetle is up."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::TigerBeetle did not start within 60s"
+          cat tigerbeetle.log || true
+          exit 1
+      - name: Run TigerBeetle integration test
+        env:
+          # The gated test writes this into tigerbeetle.addresses; "3000" resolves to
+          # 127.0.0.1:3000, matching the server's --addresses=3000 bind above.
+          USERTRUST_TB_ADDRESS: "3000"
+        run: npx vitest run packages/core/tests/integration/tigerbeetle.tb.test.ts

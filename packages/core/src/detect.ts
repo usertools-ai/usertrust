@@ -7,17 +7,23 @@
  * Uses structural checks (duck typing) to identify which SDK a client object
  * belongs to, without requiring the SDK packages as dependencies.
  *
- * **Governance boundary:** only the following methods are intercepted and governed:
- * - Anthropic: `client.messages.create()`
- * - OpenAI: `client.chat.completions.create()`
+ * **Governance boundary:** the following methods are intercepted and governed:
+ * - Anthropic: `client.messages.create()`, `client.messages.stream()`,
+ *   `client.beta.messages.create()`, `client.beta.messages.stream()`
+ * - OpenAI: `client.chat.completions.create()`, and `client.responses.create()`
+ *   when present (feature-detected — the Responses API postdates the peer-range
+ *   floor, so older clients simply lack it and it stays a pass-through)
  * - Google: `client.models.generateContent()`
  *
- * Alternative methods (e.g., `client.messages.stream`, `client.beta.*`, streaming
- * APIs, `client.completions.create`) are **NOT** intercepted and will bypass
- * governance, audit, and budget enforcement. This is a known limitation of
- * duck-typed proxy interception. Callers relying on ungoverned methods should
- * implement their own budget and audit controls or wrap calls through the
- * governed entry points above.
+ * Remaining ungoverned surfaces (feature-detected pass-throughs, or shapes that do
+ * not mirror `create`): `client.messages.batches`, `client.beta.messages.batches`,
+ * `client.beta.models`, `client.beta.files`, the OpenAI Responses non-create
+ * methods (`client.responses.retrieve/cancel/delete`), the OpenAI `client.beta.*`
+ * namespace (assistants/threads/realtime — a different shape from Anthropic beta),
+ * and the legacy `client.completions.create`. These are **NOT** intercepted and
+ * bypass governance, audit, and budget enforcement. Callers relying on ungoverned
+ * methods should implement their own budget and audit controls or wrap calls
+ * through the governed entry points above.
  */
 
 import type { EndpointInfo, LLMClientKind, LocalRuntime, TrustConfig } from "./shared/types.js";
@@ -25,14 +31,20 @@ import type { EndpointInfo, LLMClientKind, LocalRuntime, TrustConfig } from "./s
 /**
  * Detect which LLM SDK a client belongs to by inspecting its shape.
  *
- * Governance boundary: only the following methods are intercepted and governed:
- * - Anthropic: `client.messages.create()`
- * - OpenAI: `client.chat.completions.create()`
+ * Governance boundary: the following methods are intercepted and governed:
+ * - Anthropic: `client.messages.create()`, `client.messages.stream()`,
+ *   `client.beta.messages.create()`, `client.beta.messages.stream()`
+ * - OpenAI: `client.chat.completions.create()`, and `client.responses.create()`
+ *   when present (feature-detected — the Responses API postdates the peer-range
+ *   floor, so older clients simply lack it and it stays a pass-through)
  * - Google: `client.models.generateContent()`
  *
- * Alternative methods (e.g., `client.messages.stream`, `client.beta.*`, streaming APIs)
- * are NOT intercepted and will bypass governance, audit, and budget enforcement.
- * This is a known limitation of duck-typed proxy interception.
+ * Remaining ungoverned pass-throughs: `client.messages.batches`,
+ * `client.beta.messages.batches`, `client.beta.models`, `client.beta.files`, the
+ * OpenAI Responses non-create methods (`client.responses.retrieve/cancel/delete`),
+ * the OpenAI `client.beta.*` namespace (assistants/threads/realtime), and the
+ * legacy `client.completions.create`. These bypass governance, audit, and budget
+ * enforcement (they do not mirror the `create` request/response shape).
  *
  * @throws {Error} if the client does not match any known SDK shape
  */
