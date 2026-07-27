@@ -3,8 +3,10 @@
 
 import { useMemo, useState } from "react";
 import { EMPTY_FILTERS, type FilterState, applyFilters } from "../shared/filters.js";
+import type { LedgerRow } from "../shared/rows.js";
 import { AuditTable } from "./audit-table.js";
 import { FilterBar } from "./filter-bar.js";
+import { RowPanel } from "./row-panel.js";
 import { useLedger } from "./store.js";
 
 export type View = "audit" | "trends";
@@ -13,6 +15,7 @@ export function App(): React.JSX.Element {
 	const { rows, summary, live } = useLedger();
 	const [view, setView] = useState<View>("audit");
 	const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
+	const [open, setOpen] = useState<LedgerRow | null>(null);
 	const filtered = useMemo(() => applyFilters(rows, filters), [rows, filters]);
 
 	return (
@@ -33,11 +36,12 @@ export function App(): React.JSX.Element {
 			{view === "audit" ? (
 				<>
 					<FilterBar rows={rows} filters={filters} onChange={setFilters} />
-					<AuditTable rows={filtered} onOpen={() => {}} />
+					<AuditTable rows={filtered} onOpen={setOpen} />
 				</>
 			) : (
 				<div>trends (Task 13) — {filtered.length} rows</div>
 			)}
+			{open && <RowPanel row={open} onClose={() => setOpen(null)} />}
 			{/* placeholder uses to satisfy lint until Task 12: */}
 			<span className="hidden">
 				{summary?.vaultPath} {String(live)}
