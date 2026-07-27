@@ -75,6 +75,7 @@ jobs:
             cd packages/openclaw && npm version ${{ inputs.version }} --no-git-tag-version && cd ../..
             cd packages/server && npm version ${{ inputs.version }} --no-git-tag-version && cd ../..
             cd packages/acs-adapter && npm version ${{ inputs.version }} --no-git-tag-version && cd ../..
+            cd packages/ui && npm version ${{ inputs.version }} --no-git-tag-version && cd ../..
           fi
           VERSION=$(node -p 'require("./packages/core/package.json").version')
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -103,10 +104,14 @@ jobs:
       - name: Build usertrust-acs-adapter
         run: cd packages/acs-adapter && npx tsc -b
 
+      # ui ships a bundled front end, so it needs vite as well as tsc.
+      - name: Build usertrust-ui
+        run: cd packages/ui && npm run build
+
       # ── Verify builds ──
       - name: Verify dist directories exist
         run: |
-          for pkg in core verify openclaw server acs-adapter; do
+          for pkg in core verify openclaw server acs-adapter ui; do
             if [ ! -d "packages/${pkg}/dist" ]; then
               echo "::error::packages/${pkg}/dist not found after build"
               exit 1
@@ -125,7 +130,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
-          for entry in core:usertrust verify:usertrust-verify openclaw:usertrust-openclaw server:usertrust-server acs-adapter:usertrust-acs-adapter; do
+          for entry in core:usertrust verify:usertrust-verify openclaw:usertrust-openclaw server:usertrust-server acs-adapter:usertrust-acs-adapter ui:usertrust-ui; do
             dir="${entry%%:*}"; pkg="${entry##*:}"
             version=$(node -p "require('./packages/${dir}/package.json').version")
             if [ -n "$(npm view "${pkg}@${version}" version 2>/dev/null || true)" ]; then
