@@ -7,6 +7,7 @@ const COMMANDS = [
 	"inspect",
 	"health",
 	"verify",
+	"export",
 	"anchor",
 	"snapshot",
 	"tb",
@@ -14,6 +15,7 @@ const COMMANDS = [
 	"completions",
 	"secret",
 	"skill",
+	"ui",
 ] as const;
 
 const argv = process.argv.slice(2);
@@ -81,6 +83,11 @@ switch (command) {
 	case "verify":
 		await import("./verify.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
+	case "export": {
+		const rest = argv.slice(argv.indexOf("export") + 1).filter((a) => a !== "--json");
+		await import("./export.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
+		break;
+	}
 	case "anchor":
 		await import("./anchor.js").then((m) => m.run(positional.slice(1), { json: jsonFlag }));
 		break;
@@ -102,6 +109,11 @@ switch (command) {
 	case "skill":
 		await import("./skill.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
+	case "ui": {
+		const rest = argv.slice(argv.indexOf("ui") + 1).filter((a) => a !== "--json");
+		await import("./ui.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
+		break;
+	}
 	default: {
 		if (command && !command.startsWith("-")) {
 			const suggestion = suggestCommand(command);
@@ -118,6 +130,7 @@ Commands:
   inspect       Show trust bank statement
   health        Show entropy diagnostics
   verify        Verify audit chain integrity
+  export        Export receipts as markdown (Obsidian-ready)
   anchor        External audit anchoring (signed checkpoints)
   snapshot      Create/restore vault snapshots
   tb            Manage TigerBeetle process
@@ -125,6 +138,7 @@ Commands:
   completions   Output shell completion scripts
   secret        Manage vault credentials
   skill         Verify skill manifests
+  ui            Open the visual ledger (local web UI)
 
 Options:
   --json     Output machine-readable JSON`);

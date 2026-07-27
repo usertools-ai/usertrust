@@ -5,5 +5,6 @@
 		"rootDir": "src",
 		"composite": true
 	},
-	"include": ["src"]
+	"include": ["src/server", "src/shared"],
+	"references": [{ "path": "../core" }, { "path": "../verify" }]
 }

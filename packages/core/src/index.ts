@@ -35,6 +35,11 @@ export {
 	verifyConsistencyProof,
 	verifyInclusionProof,
 } from "./audit/merkle.js";
+export type { ChainIntegrity, PersistedAuditEvent } from "./audit/read.js";
+// Vault reading (shared by CLI + usertrust-ui)
+export { deriveChainIntegrity, loadBudgetConfig, readLedgerEvents } from "./audit/read.js";
+export type { ChainVerificationResult, VaultVerificationResult } from "./audit/verify.js";
+export { verifyChain, verifyVault } from "./audit/verify.js";
 export type { BoardReviewResult, BoardStats } from "./board/board.js";
 // Board
 export { createBoard } from "./board/board.js";
@@ -42,6 +47,9 @@ export { createBoard } from "./board/board.js";
 export { defineConfig, loadConfig } from "./config.js";
 // Endpoint classification
 export { classifyEndpoint } from "./detect.js";
+export type { ExportResult } from "./export/markdown.js";
+// Markdown / Obsidian export
+export { exportMarkdown } from "./export/markdown.js";
 export type { TrustedClient, TrustOpts } from "./govern.js";
 // Core
 export { trust } from "./govern.js";
@@ -67,6 +75,7 @@ export { detectPII } from "./policy/pii.js";
 export type { CircuitBreakerSnapshot } from "./resilience/circuit.js";
 // Circuit breaker
 export { CircuitBreaker, CircuitBreakerRegistry, CircuitOpenError } from "./resilience/circuit.js";
+export { VAULT_DIR } from "./shared/constants.js";
 // Errors
 export {
 	AccountNotFoundError,

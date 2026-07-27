@@ -6,6 +6,7 @@ export default defineConfig({
 			// Resolve workspace packages to source for tests (dist/ may not exist in CI)
 			usertrust: resolve(__dirname, "packages/core/src/index.ts"),
 			"usertrust/headless": resolve(__dirname, "packages/core/src/headless.ts"),
+			"usertrust-verify": resolve(__dirname, "packages/verify/src/index.ts"),
 		},
 	},
 	test: {
@@ -18,7 +19,13 @@ export default defineConfig({
 			// CLI entrypoints are process-level scripts (parse argv, print,
 			// process.exit) — excluded from unit coverage. verify's CLI is a
 			// single file rather than a cli/ directory.
-			exclude: ["packages/*/src/cli/**", "packages/verify/src/cli.ts"],
+			exclude: [
+				"packages/*/src/cli/**",
+				"packages/verify/src/cli.ts",
+				"packages/ui/src/app/**",
+				// Bin entry — argv parsing + browser open; runtime-smoke-tested, not unit-testable
+				"packages/ui/src/server/main.ts",
+			],
 			thresholds: {
 				lines: 92,
 				branches: 84,
