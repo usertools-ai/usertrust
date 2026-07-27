@@ -8,7 +8,7 @@
  * verifier sees, or the zero-dependency guarantee of packages/verify.
  */
 
-import { readFileSync, readdirSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { verifyVault as pkgVerifyVault } from "../../../../verify/src/index.js";

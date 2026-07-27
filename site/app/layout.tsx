@@ -74,11 +74,7 @@ const jsonLd = {
 		"AI financial governance in 30 seconds. Budget holds, audit trails, and spend limits for every LLM call.",
 };
 
-export default function RootLayout({
-	children,
-}: {
-	children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
 	return (
 		<html lang="en" className={`${usertoolsSans.variable} ${jetbrainsMono.variable}`}>
 			<body className="bg-brand-bg text-white font-sans antialiased overflow-x-hidden">

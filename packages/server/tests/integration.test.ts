@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { hashKey } from "../src/config.js";
-import { type UsertrustServer, createUsertrustServer } from "../src/server.js";
+import { createUsertrustServer, type UsertrustServer } from "../src/server.js";
 
 const KEY = "ut_integration_key";
 

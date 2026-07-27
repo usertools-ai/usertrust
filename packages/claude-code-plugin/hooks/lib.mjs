@@ -13,7 +13,7 @@
 // without touching the parent's or a sibling's in-flight holds. The agent id is
 // also stored inside each file so a whole-session sweep can recover it without
 // re-splitting the (ambiguous, "__"-containing) filename.
-import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 

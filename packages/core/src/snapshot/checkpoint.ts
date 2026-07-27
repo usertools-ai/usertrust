@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { existsSync } from "node:fs";
 import type { Dirent } from "node:fs";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { withAuditWriterLock } from "../audit/chain.js";
 
@@ -235,7 +235,7 @@ export async function restoreSnapshot(
 
 	const entries = Object.entries(payload.entries);
 	const rollsBackAudit = entries.some(([p]) => p.startsWith("audit/"));
-	const hasLedger = Object.prototype.hasOwnProperty.call(payload.entries, "spend-ledger.json");
+	const hasLedger = Object.hasOwn(payload.entries, "spend-ledger.json");
 
 	// Desync guard 1: a snapshot that rolls the audit chain back MUST carry the money
 	// mirror, or restoring audit alone deletes spend events whose money still exists.

@@ -1,5 +1,5 @@
-import { mkdtemp, readFile, readdir } from "node:fs/promises";
-import { type Server, createServer } from "node:http";
+import { mkdtemp, readdir, readFile } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";

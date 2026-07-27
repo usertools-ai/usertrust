@@ -4,15 +4,13 @@
 // usertrust-verify — Standalone Audit Verification (zero dependencies)
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import {
 	type AnchorRecord,
 	type AnchorSource,
 	type AnchorState,
 	type AnchorTrust,
-	type WitnessInput,
-	type WitnessStatus,
 	dedupeAnchorSet,
 	evaluateAnchoredVault,
 	gatherOrderedEventHashes,
@@ -20,14 +18,16 @@ import {
 	publicKeyFromSpkiBase64,
 	readAnchorMirror,
 	verifyInclusionAgainstAnchor,
+	type WitnessInput,
+	type WitnessStatus,
 } from "./anchor-verify.js";
 import { canonicalize } from "./canonical.js";
 import { GENESIS_HASH } from "./constants.js";
 import {
 	type ReceiptData,
-	type TransactionEvent,
 	renderNotFound,
 	renderReceipt,
+	type TransactionEvent,
 } from "./receipt.js";
 import {
 	buildMerkleTree,
@@ -37,28 +37,6 @@ import {
 	verifyInclusionProof,
 } from "./verify.js";
 
-export { canonicalize } from "./canonical.js";
-export { GENESIS_HASH } from "./constants.js";
-export {
-	type ReceiptData,
-	type TransactionEvent,
-	renderReceipt,
-	renderNotFound,
-} from "./receipt.js";
-export {
-	verifyChain,
-	buildMerkleTree,
-	hashLeaf,
-	hashInternal,
-	generateInclusionProof,
-	verifyInclusionProof,
-	generateConsistencyProof,
-	verifyConsistencyProof,
-	type ChainVerificationResult,
-	type MerkleSibling,
-	type MerkleInclusionProof,
-	type MerkleConsistencyProof,
-} from "./verify.js";
 export {
 	type AnchorChainResult,
 	type AnchorEvaluation,
@@ -69,8 +47,6 @@ export {
 	type AnchorSource,
 	type AnchorState,
 	type AnchorTrust,
-	type WitnessInput,
-	type WitnessStatus,
 	anchorPayloadHash,
 	anchorSigningPreimage,
 	committedFieldsEqual,
@@ -88,7 +64,31 @@ export {
 	verifyAnchorSignature,
 	verifyInclusionAgainstAnchor,
 	verifySignatureRaw,
+	type WitnessInput,
+	type WitnessStatus,
 } from "./anchor-verify.js";
+export { canonicalize } from "./canonical.js";
+export { GENESIS_HASH } from "./constants.js";
+export {
+	type ReceiptData,
+	renderNotFound,
+	renderReceipt,
+	type TransactionEvent,
+} from "./receipt.js";
+export {
+	buildMerkleTree,
+	type ChainVerificationResult,
+	generateConsistencyProof,
+	generateInclusionProof,
+	hashInternal,
+	hashLeaf,
+	type MerkleConsistencyProof,
+	type MerkleInclusionProof,
+	type MerkleSibling,
+	verifyChain,
+	verifyConsistencyProof,
+	verifyInclusionProof,
+} from "./verify.js";
 
 // ── Vault Verification ──
 

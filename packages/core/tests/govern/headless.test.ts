@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuditWriter } from "../../src/audit/chain.js";
 import type { TrustEngine } from "../../src/govern.js";
-import { createGovernor } from "../../src/headless.js";
 import type { Governor } from "../../src/headless.js";
+import { createGovernor } from "../../src/headless.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 
 // Mock tigerbeetle-node (native module, never loaded in tests)

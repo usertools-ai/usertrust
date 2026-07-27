@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type { TrustReceipt } from "../../src/shared/types.js";
 import {
+	createGovernedStream,
 	type StreamCompletion,
 	type StreamUsage,
-	createGovernedStream,
 } from "../../src/streaming.js";
 
 // ── Helpers ──

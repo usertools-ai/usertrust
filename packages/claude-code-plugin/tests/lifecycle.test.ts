@@ -1,5 +1,5 @@
 import { mkdtemp, readdir, writeFile } from "node:fs/promises";
-import { type Server, createServer } from "node:http";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -159,6 +159,7 @@ describe("post-tool-use hook", () => {
 		expect(post.code).toBe(0);
 		const settles = requests.filter((r) => r.path === "/v1/settle");
 		expect(settles).toHaveLength(1);
+		// biome-ignore lint/correctness/noUnsafeOptionalChaining: settles[0] guaranteed present by the toHaveLength(1) assertion above
 		expect((settles[0]?.body as { transferId: string }).transferId).toBe("tx_scoped");
 		// main's hold is still present; only agent-A's was settled and cleared.
 		expect(await readdir(stateDir)).toEqual(["sess__main__tu_main.json"]);

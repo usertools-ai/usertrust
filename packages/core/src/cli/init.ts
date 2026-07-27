@@ -12,8 +12,8 @@
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as clack from "@clack/prompts";
-import { PRICING_TABLE, PRICING_TABLE_VERSION, modelsForProvider } from "../ledger/pricing.js";
 import type { ModelRates } from "../ledger/pricing.js";
+import { modelsForProvider, PRICING_TABLE, PRICING_TABLE_VERSION } from "../ledger/pricing.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import { detectProvider, maskKey, validateKey } from "./validate-key.js";
 

@@ -13,8 +13,8 @@ import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { verifyTransaction as pkgVerifyTransaction } from "../../../../verify/src/index.js";
-import { anchorPayloadHash } from "../../../src/audit/anchor-verify.js";
 import { createAnchorEmitter } from "../../../src/audit/anchor.js";
+import { anchorPayloadHash } from "../../../src/audit/anchor-verify.js";
 import { canonicalize } from "../../../src/audit/canonical.js";
 import { exitCodeForAnchored } from "../../../src/audit/verify.js";
 import {

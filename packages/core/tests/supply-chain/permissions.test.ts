@@ -3,8 +3,8 @@
 
 import { describe, expect, it } from "vitest";
 import { SkillVerificationError } from "../../src/shared/errors.js";
-import { TrustConfigSchema } from "../../src/shared/types.js";
 import type { SkillManifest, TrustConfig } from "../../src/shared/types.js";
+import { TrustConfigSchema } from "../../src/shared/types.js";
 import { createUnsignedManifest } from "../../src/supply-chain/manifest.js";
 import { checkPermissions, enforceSkillLoad } from "../../src/supply-chain/permissions.js";
 import { generateKeyPair, signManifest, verifySignature } from "../../src/supply-chain/sign.js";

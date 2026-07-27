@@ -18,8 +18,9 @@ vi.mock("tigerbeetle-node", () => ({
 	createClient: vi.fn(),
 	AccountFlags: { debits_must_not_exceed_credits: 1 << 2, history: 1 << 5 },
 	TransferFlags: { pending: 1, post_pending_transfer: 2, void_pending_transfer: 4 },
-	CreateAccountError: { exists: 1 },
-	CreateTransferError: {
+	CreateAccountStatus: { created: 4294967295, exists: 1 },
+	CreateTransferStatus: {
+		created: 4294967295,
 		exceeds_credits: 22,
 		overflows_debits: 30,
 		overflows_debits_pending: 31,
@@ -41,10 +42,10 @@ vi.mock("node:fs", async (importOriginal) => {
 	};
 });
 
-import { XFER_SPEND } from "../../src/ledger/client.js";
 import type { TrustTBClient } from "../../src/ledger/client.js";
-import { TrustEngine } from "../../src/ledger/engine.js";
+import { XFER_SPEND } from "../../src/ledger/client.js";
 import type { SpendAction } from "../../src/ledger/engine.js";
+import { TrustEngine } from "../../src/ledger/engine.js";
 import { InsufficientBalanceError } from "../../src/shared/errors.js";
 
 /** Create a mock TrustTBClient with vi.fn() methods. */

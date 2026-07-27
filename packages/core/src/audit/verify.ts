@@ -20,7 +20,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { GENESIS_HASH } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
@@ -29,12 +29,12 @@ import {
 	type AnchorSource,
 	type AnchorState,
 	type AnchorTrust,
-	type WitnessInput,
-	type WitnessStatus,
 	evaluateAnchoredVault,
 	gatherOrderedEventHashes,
 	parseAnchorsContent,
 	readAnchorMirror,
+	type WitnessInput,
+	type WitnessStatus,
 } from "./anchor-verify.js";
 import { canonicalize } from "./canonical.js";
 import { buildMerkleTree } from "./merkle.js";

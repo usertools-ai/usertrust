@@ -12,9 +12,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
 import {
+	computeEntropyScore,
 	type EntropyEventInput,
 	type EntropyLevel,
-	computeEntropyScore,
 } from "../audit/entropy.js";
 import { verifyChain } from "../audit/verify.js";
 import { VAULT_DIR } from "../shared/constants.js";

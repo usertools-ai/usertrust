@@ -11,7 +11,7 @@
  * Structure: .usertrust/audit/<kind>/<YYYY-MM-DD>/<receiptId>.json
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { AUDIT_DIR, RECEIPT_VERSION, VAULT_DIR } from "../shared/constants.js";
 import { trustId } from "../shared/ids.js";

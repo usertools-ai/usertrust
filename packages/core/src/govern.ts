@@ -32,21 +32,21 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { CreateTransferError } from "tigerbeetle-node";
+import { CreateTransferStatus } from "tigerbeetle-node";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import { writeReceipt } from "./audit/rotation.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
-	type RateResolution,
 	costFromRates,
 	estimateInputTokens,
+	type RateResolution,
 	resolveRates,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
-import { type GateRule, evaluatePolicy, loadPolicies } from "./policy/gate.js";
+import { evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
 import { detectInjection } from "./policy/injection.js";
 import { detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
@@ -55,6 +55,7 @@ import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
+
 import { createAnomalyDetector } from "./anomaly/detector.js";
 import {
 	AnomalyError,
@@ -64,17 +65,17 @@ import {
 	PolicyDeniedError,
 } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
-import { TrustConfigSchema } from "./shared/types.js";
 import type {
 	ActionDescriptor,
 	EndpointInfo,
 	GovernedActionResult,
 	LLMClientKind,
 	TrustConfig,
-	TrustReceipt,
 	TrustedResponse,
+	TrustReceipt,
 } from "./shared/types.js";
-import { type ChunkObservation, type StreamCompletion, createGovernedStream } from "./streaming.js";
+import { TrustConfigSchema } from "./shared/types.js";
+import { type ChunkObservation, createGovernedStream, type StreamCompletion } from "./streaming.js";
 
 // ── Public types ──
 
@@ -125,10 +126,7 @@ export interface TrustOpts {
 
 /** Minimal engine interface for two-phase spend lifecycle. */
 export interface TrustEngine {
-	spendPending(params: {
-		transferId: string;
-		amount: number;
-	}): Promise<{ transferId: string }>;
+	spendPending(params: { transferId: string; amount: number }): Promise<{ transferId: string }>;
 	/**
 	 * Settle a PENDING hold. `actualAmount` posts the true consumed cost (which may
 	 * be less than the reserved estimate); omitting it posts the full pending amount.
@@ -2160,9 +2158,9 @@ function extractAnthropicStreamUsage(event: unknown): {
 function isTBInsufficientBalance(err: unknown): boolean {
 	if (!(err instanceof TBTransferError)) return false;
 	return (
-		err.code === CreateTransferError.exceeds_credits ||
-		err.code === CreateTransferError.overflows_debits ||
-		err.code === CreateTransferError.overflows_debits_pending
+		err.code === CreateTransferStatus.exceeds_credits ||
+		err.code === CreateTransferStatus.overflows_debits ||
+		err.code === CreateTransferStatus.overflows_debits_pending
 	);
 }
 

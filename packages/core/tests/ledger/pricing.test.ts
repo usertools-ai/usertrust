@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
-	FALLBACK_RATE,
-	PRICING_TABLE,
-	PRICING_TABLE_VERSION,
 	estimateCost,
 	estimateInputTokens,
+	FALLBACK_RATE,
 	getModelRates,
 	modelsForProvider,
+	PRICING_TABLE,
+	PRICING_TABLE_VERSION,
 } from "../../src/ledger/pricing.js";
 
 describe("PRICING_TABLE", () => {

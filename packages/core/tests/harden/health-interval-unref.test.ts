@@ -10,8 +10,13 @@ vi.mock("tigerbeetle-node", () => ({
 	})),
 	AccountFlags: { debits_must_not_exceed_credits: 1 << 2, history: 1 << 5 },
 	TransferFlags: { pending: 1, post_pending_transfer: 2, void_pending_transfer: 4 },
-	CreateAccountError: { exists: 1 },
-	CreateTransferError: { exceeds_credits: 22, overflows_debits: 30, overflows_debits_pending: 31 },
+	CreateAccountStatus: { created: 4294967295, exists: 1 },
+	CreateTransferStatus: {
+		created: 4294967295,
+		exceeds_credits: 22,
+		overflows_debits: 30,
+		overflows_debits_pending: 31,
+	},
 	amount_max: (1n << 128n) - 1n,
 }));
 

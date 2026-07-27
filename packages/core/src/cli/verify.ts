@@ -19,10 +19,10 @@ import pc from "picocolors";
 import { parseAnchorsContent } from "../audit/anchor-verify.js";
 import {
 	type AnchorVerifyParams,
-	type WitnessInput,
 	exitCodeForAnchored,
 	verifyVault,
 	verifyVaultWithAnchors,
+	type WitnessInput,
 } from "../audit/verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";

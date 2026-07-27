@@ -10,10 +10,10 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
 import {
 	closeSync,
 	existsSync,
+	constants as fsConstants,
 	fsyncSync,
 	mkdirSync,
 	openSync,

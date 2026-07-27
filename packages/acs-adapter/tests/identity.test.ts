@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
-	IdentityMismatchError,
 	actionIdentity,
 	assertApprovalMatches,
 	bindApproval,
 	canonicalJson,
+	IdentityMismatchError,
 } from "../src/identity.js";
 
 describe("canonicalJson", () => {

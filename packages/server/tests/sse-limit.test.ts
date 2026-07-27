@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { ServerConfig } from "../src/config.js";
 import { hashKey } from "../src/config.js";
-import { type UsertrustServer, createUsertrustServer } from "../src/server.js";
+import { createUsertrustServer, type UsertrustServer } from "../src/server.js";
 import { createFakeGovernor } from "./helpers/fake-governor.js";
 
 const KEY_A = "ut_sse_tenant_a";

@@ -17,10 +17,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
-import { parseAnchorsContent } from "../audit/anchor-verify.js";
 import {
 	type AnchoringConfig,
-	type SinkConfig,
 	anchorsDir,
 	createAnchorEmitter,
 	initAnchorIdentity,
@@ -28,7 +26,9 @@ import {
 	readAnchorIdentity,
 	recordRotatedIdentity,
 	resumeAnchorMirror,
+	type SinkConfig,
 } from "../audit/anchor.js";
+import { parseAnchorsContent } from "../audit/anchor-verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
 

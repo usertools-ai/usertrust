@@ -11,7 +11,15 @@
 		"directory": "packages/server"
 	},
 	"bugs": "https://github.com/usertools-ai/usertrust/issues",
-	"keywords": ["ai", "governance", "llm", "agent", "server", "self-hosted", "control-plane"],
+	"keywords": [
+		"ai",
+		"governance",
+		"llm",
+		"agent",
+		"server",
+		"self-hosted",
+		"control-plane"
+	],
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -28,7 +36,9 @@
 		"build": "tsc -b",
 		"prepublishOnly": "tsc -b"
 	},
-	"files": ["dist"],
+	"files": [
+		"dist"
+	],
 	"dependencies": {
 		"usertrust": "*",
 		"zod": "^3.23.0"

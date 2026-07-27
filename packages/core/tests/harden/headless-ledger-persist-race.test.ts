@@ -22,7 +22,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
@@ -43,8 +43,8 @@ vi.mock("tigerbeetle-node", () => ({
 		post_pending_transfer: 4,
 		void_pending_transfer: 8,
 	},
-	CreateTransferError: { exists: 1, exceeds_credits: 34 },
-	CreateAccountError: { exists: 1 },
+	CreateTransferStatus: { created: 4294967295, exists: 1, exceeds_credits: 34 },
+	CreateAccountStatus: { created: 4294967295, exists: 1 },
 	amount_max: 0xffffffffffffffffffffffffffffffffn,
 }));
 
