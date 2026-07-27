@@ -60,6 +60,7 @@ import {
 } from "./anchor-verify.js";
 import { canonicalize } from "./canonical.js";
 import { buildMerkleTree } from "./merkle.js";
+import { DEFAULT_REKOR_URL, rekorSink, s3Sink } from "./rekor.js";
 
 // ── Config types (spec §5.4) ──
 
@@ -79,7 +80,11 @@ export type AnchorSignerConfig =
 export type SinkConfig =
 	| { type: "file"; path: string }
 	| { type: "https"; url: string; headers?: Record<string, string> }
-	| { type: "command"; argv: string[] };
+	| { type: "command"; argv: string[] }
+	/** S3-compatible object store, one object per record, SigV4-signed. */
+	| { type: "s3"; bucket: string; region: string; prefix?: string; endpoint?: string }
+	/** Rekor transparency log (EXPERIMENTAL). Defaults to rekor.sigstore.dev. */
+	| { type: "rekor"; url?: string };
 
 export interface AnchorSink {
 	readonly name: string;
@@ -420,7 +425,12 @@ function commandSink(argv: string[]): AnchorSink {
 	};
 }
 
-export function createSink(config: SinkConfig | AnchorSink): AnchorSink {
+/**
+ * `rootDir` is optional so existing callers keep working: only the Rekor sink
+ * needs it, because inclusion receipts are persisted into the vault alongside
+ * the mirror.
+ */
+export function createSink(config: SinkConfig | AnchorSink, rootDir?: string): AnchorSink {
 	// Already an AnchorSink instance (custom/test sink) — pass through.
 	if ("publish" in config && typeof config.publish === "function") {
 		return config;
@@ -433,6 +443,18 @@ export function createSink(config: SinkConfig | AnchorSink): AnchorSink {
 			return httpsSink(cfg.url, cfg.headers);
 		case "command":
 			return commandSink(cfg.argv);
+		case "s3":
+			return s3Sink({
+				bucket: cfg.bucket,
+				region: cfg.region,
+				...(cfg.prefix !== undefined ? { prefix: cfg.prefix } : {}),
+				...(cfg.endpoint !== undefined ? { endpoint: cfg.endpoint } : {}),
+			});
+		case "rekor":
+			if (rootDir === undefined) {
+				throw new Error("rekor sink requires rootDir");
+			}
+			return rekorSink(rootDir, cfg.url ?? DEFAULT_REKOR_URL);
 	}
 }
 
@@ -613,7 +635,7 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 	const identity: AnchorIdentity = maybeIdentity;
 	const vaultId = identity.vaultId;
 	const signer = resolveSigner(config.signer, vaultId);
-	const sinks = (config.sinks ?? []).map(createSink);
+	const sinks = (config.sinks ?? []).map((sink) => createSink(sink, rootDir));
 	const retries = config.publishRetries ?? 5;
 
 	let anchorSkips = 0;
