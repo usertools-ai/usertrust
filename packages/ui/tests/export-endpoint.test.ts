@@ -75,4 +75,11 @@ describe("POST /api/export", () => {
 		expect(res.status).toBe(400);
 		expect(existsSync(join(tempDir, ".usertrust", "exfil"))).toBe(false);
 	});
+
+	it("400s a case-variant vault path (case-insensitive filesystems)", async () => {
+		ui = await createUiServer(tempDir, { port: 0 });
+		const res = await post(JSON.stringify({ outDir: ".USERTRUST/exfil" }));
+		expect(res.status).toBe(400);
+		expect(existsSync(join(tempDir, ".usertrust", "exfil"))).toBe(false);
+	});
 });

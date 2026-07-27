@@ -205,7 +205,12 @@ export async function createUiServer(
 					const rootResolved = resolve(rootDir);
 					const vaultResolved = resolve(vaultPath);
 					const insideRoot = outDir === rootResolved || outDir.startsWith(rootResolved + sep);
-					const insideVault = outDir === vaultResolved || outDir.startsWith(vaultResolved + sep);
+					// Vault exclusion compares case-insensitively: on case-insensitive
+					// filesystems (darwin/win32) ".USERTRUST" IS the vault. Folding only
+					// the deny-side check widens the deny set, never the allow set.
+					const outFolded = outDir.toLowerCase();
+					const vaultFolded = vaultResolved.toLowerCase();
+					const insideVault = outFolded === vaultFolded || outFolded.startsWith(vaultFolded + sep);
 					if (!insideRoot || insideVault) {
 						sendJson(res, 400, {
 							error: "outDir must resolve inside the project root, outside the vault",
