@@ -9,6 +9,13 @@ export interface LedgerData {
 	rows: LedgerRow[];
 	summary: SummaryPayload | null;
 	live: boolean;
+	/**
+	 * Ephemeral UI state (P6): ids that just arrived over SSE, kept for
+	 * ~1.6s so the table can one-shot flash them. Never persisted — reset
+	 * on resync, pruned by per-batch timers so virtualization remounts
+	 * cannot re-trigger the flash.
+	 */
+	liveIds: Set<string>;
 }
 
 async function fetchAll(): Promise<{ rows: LedgerRow[]; summary: SummaryPayload }> {
@@ -19,14 +26,22 @@ async function fetchAll(): Promise<{ rows: LedgerRow[]; summary: SummaryPayload 
 }
 
 export function useLedger(): LedgerData {
-	const [data, setData] = useState<LedgerData>({ rows: [], summary: null, live: false });
+	const [data, setData] = useState<LedgerData>({
+		rows: [],
+		summary: null,
+		live: false,
+		liveIds: new Set(),
+	});
 
 	useEffect(() => {
 		let cancelled = false;
+		const flashTimers = new Set<ReturnType<typeof setTimeout>>();
 		const resync = (): void => {
 			fetchAll()
 				.then(({ rows, summary }) => {
-					if (!cancelled) setData((d) => ({ ...d, rows, summary }));
+					// liveIds is flash state for SSE arrivals only — a resync
+					// replaces the row set wholesale, so it starts clean.
+					if (!cancelled) setData((d) => ({ ...d, rows, summary, liveIds: new Set<string>() }));
 				})
 				.catch((err: unknown) => {
 					// Amendment A6: never leave an unhandled rejection; drop the
@@ -52,8 +67,25 @@ export function useLedger(): LedgerData {
 				// fetch and redeliver rows the fetch already returned.
 				const seen = new Set(d.rows.map((r) => r.id));
 				const novel = fresh.filter((r) => !seen.has(r.id));
-				return novel.length > 0 ? { ...d, rows: [...d.rows, ...novel] } : d;
+				if (novel.length === 0) return d;
+				const liveIds = new Set(d.liveIds);
+				for (const r of novel) liveIds.add(r.id);
+				return { ...d, rows: [...d.rows, ...novel], liveIds };
 			});
+			// One-shot flash (P6): drop this batch's ids once the row-flash
+			// animation window has passed, so remounted virtual rows stay quiet.
+			const ids = fresh.map((r) => r.id);
+			const timer = setTimeout(() => {
+				flashTimers.delete(timer);
+				setData((d) => {
+					if (d.liveIds.size === 0) return d;
+					const liveIds = new Set(d.liveIds);
+					let changed = false;
+					for (const id of ids) changed = liveIds.delete(id) || changed;
+					return changed ? { ...d, liveIds } : d;
+				});
+			}, 1600);
+			flashTimers.add(timer);
 		});
 		source.addEventListener("summary", (e) => {
 			const summary = JSON.parse((e as MessageEvent).data) as SummaryPayload;
@@ -63,6 +95,7 @@ export function useLedger(): LedgerData {
 
 		return () => {
 			cancelled = true;
+			for (const timer of flashTimers) clearTimeout(timer);
 			source.close();
 		};
 	}, []);

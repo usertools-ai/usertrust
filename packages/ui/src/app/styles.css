@@ -1,17 +1,169 @@
 @import "tailwindcss";
 
+/*
+ * terminal-thermal foundation — "The Ledger Is a Receipt"
+ * These tokens are the ONLY colors in the app. Green (--verify) is EARNED
+ * by verification: verified/integrity badges, the Verify button, the
+ * VERIFIED verdict, and focus rings. Chart marks are --chart, never green.
+ * Font weights 400/500/700 are imported in main.tsx (@fontsource, bundled).
+ */
+
 :root {
-	--bg: #0a0a0b;
-	--panel: #131316;
-	--border: #26262b;
-	--text: #e7e7ea;
-	--muted: #8b8b93;
-	--accent: #4ade80;
-	--danger: #f87171;
+	/* substrate — matches site brand (#0a0a1a bg, #0f0f2a cards) */
+	--bg: #0a0a1a;
+	--panel: #0f0f2a;
+	--panel-2: #14143a; /* hover wash / raised */
+	--border: #23234a;
+	--text: #e8e8f0;
+	--muted: #9a9ab0; /* contrast-bumped from #8b8b93 */
+	--faint: #6a6a88;
+	/* semantics — green is EARNED by verification only */
+	--verify: #4ade80; /* verified badges, integrity, VERIFIED verdict, live dot */
+	--amber: #fbbf24; /* pending */
+	--danger: #f87171; /* failed, integrity failure */
+	--chart: #7c8cf8; /* ALL chart marks — never green */
+	--chart-dim: #3d478f;
+	--shadow: 0 8px 24px rgb(0 0 0 / 0.5);
+	--scrim: rgb(5 5 16 / 0.55);
+	--font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+	--font-sans: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+	color-scheme: dark;
 }
 
 body {
 	background: var(--bg);
 	color: var(--text);
-	font-family: ui-sans-serif, system-ui, sans-serif;
+	font-family: var(--font-mono);
+}
+
+/* grain — fixed paper-texture layer beneath the app surface (no blend mode) */
+body::after {
+	content: "";
+	position: fixed;
+	inset: 0;
+	z-index: 0;
+	background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+	opacity: 0.02;
+	pointer-events: none;
+}
+
+/* all app content rides above the grain */
+#root {
+	position: relative;
+	z-index: 1;
+}
+
+/* scrollbars — thin, quiet */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: var(--border) transparent;
+}
+
+::-webkit-scrollbar {
+	width: 8px;
+	height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+	background: var(--border);
+	border-radius: 4px;
+}
+
+::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+::selection {
+	/* plain fallback first; color-mix wins where supported */
+	background: var(--verify);
+	background: color-mix(in oklab, var(--verify) 30%, transparent);
+}
+
+:focus-visible {
+	outline: 1.5px solid var(--verify);
+	outline-offset: 2px;
+}
+
+/* receipt texture — punched tear-off edge */
+.perforation {
+	height: 10px;
+	background-color: var(--panel);
+	background-image: radial-gradient(
+		circle at 5px 5px,
+		var(--bg) 3px,
+		transparent 3px
+	);
+	background-size: 14px 10px;
+	background-repeat: repeat-x;
+	border-radius: 0 0 6px 6px;
+}
+
+/* motion — exactly three moments: load reveal, live-row flash, thermal print */
+
+@keyframes reveal {
+	from {
+		opacity: 0;
+		transform: translateY(6px);
+	}
+}
+
+.reveal {
+	animation: reveal 320ms ease-out both;
+}
+
+.reveal-1 {
+	animation-delay: 0ms;
+}
+
+.reveal-2 {
+	animation-delay: 60ms;
+}
+
+.reveal-3 {
+	animation-delay: 120ms;
+}
+
+@keyframes row-flash {
+	0% {
+		/* plain fallback first; color-mix wins where supported */
+		background-color: var(--panel-2);
+		background-color: color-mix(in oklab, var(--verify) 16%, transparent);
+	}
+	100% {
+		background-color: transparent;
+	}
+}
+
+.row-live {
+	animation: row-flash 1.2s ease-out;
+}
+
+/* Staggered opacity only — transforms don't apply to inline boxes in the
+   receipt <pre>, and thermal print is an appear, not a slide. */
+@keyframes print-line {
+	from {
+		opacity: 0;
+	}
+	to {
+		opacity: 1;
+	}
+}
+
+.receipt-line {
+	opacity: 0;
+	animation: print-line 100ms steps(2, end) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation: none !important;
+		transition: none !important;
+	}
+
+	/* the animation carried this reveal — restore visibility without it */
+	.receipt-line {
+		opacity: 1;
+	}
 }
