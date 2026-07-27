@@ -17,12 +17,15 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
-import { join } from "node:path";
-import { type PersistedAuditEvent, VAULT_DIR } from "usertrust";
+import { join, resolve, sep } from "node:path";
+import { type PersistedAuditEvent, VAULT_DIR, exportMarkdown } from "usertrust";
 import { canonicalize, verifyTransaction } from "usertrust-verify";
 import { toLedgerRows } from "../shared/rows.js";
 import { type LedgerState, ROW_CAP, loadState } from "./state.js";
 import { watchLedger } from "./tail.js";
+
+/** Amendment A5: maximum accepted /api/export request body, in bytes. */
+const EXPORT_BODY_CAP = 64 * 1024;
 
 export interface UiServer {
 	server: Server;
@@ -151,6 +154,62 @@ export async function createUiServer(rootDir: string, opts?: { port?: number }):
 			res.write(": connected\n\n");
 			clients.add(res);
 			req.on("close", () => clients.delete(res));
+			return;
+		}
+		if (url.pathname === "/api/export" && req.method === "POST") {
+			// Amendment A5: JSON bodies only.
+			const contentType = req.headers["content-type"];
+			if (contentType === undefined || !contentType.toLowerCase().startsWith("application/json")) {
+				sendJson(res, 415, { error: "content-type must be application/json" });
+				return;
+			}
+			const chunks: Buffer[] = [];
+			let received = 0;
+			let overCap = false;
+			req.on("data", (chunk: Buffer) => {
+				if (overCap) return;
+				received += chunk.length;
+				// Amendment A5: cap the request body; flush the 413 before
+				// destroying so the client reliably sees the status.
+				if (received > EXPORT_BODY_CAP) {
+					overCap = true;
+					const payload = JSON.stringify({ error: "request body too large" });
+					res.writeHead(413, {
+						"content-type": "application/json",
+						"content-length": Buffer.byteLength(payload),
+					});
+					res.end(payload, () => req.destroy());
+					return;
+				}
+				chunks.push(chunk);
+			});
+			req.on("end", () => {
+				if (overCap) return;
+				try {
+					const raw = Buffer.concat(chunks).toString("utf-8");
+					const body = JSON.parse(raw || "{}") as { outDir?: string };
+					if (typeof body.outDir !== "string" || body.outDir.length === 0) {
+						sendJson(res, 400, { error: "outDir required" });
+						return;
+					}
+					const outDir = resolve(rootDir, body.outDir);
+					// Amendment A5: containment — the resolved outDir must stay
+					// inside the project root and out of the vault interior.
+					const rootResolved = resolve(rootDir);
+					const vaultResolved = resolve(vaultPath);
+					const insideRoot = outDir === rootResolved || outDir.startsWith(rootResolved + sep);
+					const insideVault = outDir === vaultResolved || outDir.startsWith(vaultResolved + sep);
+					if (!insideRoot || insideVault) {
+						sendJson(res, 400, {
+							error: "outDir must resolve inside the project root, outside the vault",
+						});
+						return;
+					}
+					sendJson(res, 200, exportMarkdown(vaultPath, outDir));
+				} catch (err) {
+					sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+				}
+			});
 			return;
 		}
 		if (url.pathname.startsWith("/api/verify/") && req.method === "GET") {
