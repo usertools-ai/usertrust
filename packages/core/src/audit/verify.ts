@@ -24,8 +24,22 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import { GENESIS_HASH } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
+import {
+	type AnchorRecord,
+	type AnchorSource,
+	type AnchorState,
+	type AnchorTrust,
+	type WitnessInput,
+	type WitnessStatus,
+	evaluateAnchoredVault,
+	gatherOrderedEventHashes,
+	parseAnchorsContent,
+	readAnchorMirror,
+} from "./anchor-verify.js";
 import { canonicalize } from "./canonical.js";
 import { buildMerkleTree } from "./merkle.js";
+
+export type { AnchorRecord, AnchorSource, AnchorState, AnchorTrust, WitnessInput };
 
 export interface ChainVerificationResult {
 	valid: boolean;
@@ -355,4 +369,123 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 		firstEvent,
 		lastEvent,
 	};
+}
+
+// ── Anchored Vault Verification (spec §7) ──
+
+export interface AnchorVerifyParams {
+	/** Raw contents of caller-fetched anchor artifacts (single JSON or JSONL). */
+	readonly externalAnchorsRaw?: readonly string[] | undefined;
+	/** Caller-pinned trust material — NEVER read from the vault under audit. */
+	readonly trust?: AnchorTrust | undefined;
+	readonly witness?: WitnessInput | undefined;
+	readonly maxAnchorAgeMs?: number | undefined;
+	readonly maxUnanchoredEvents?: number | undefined;
+	readonly expectedVaultId?: string | undefined;
+	readonly nowMs?: number | undefined;
+}
+
+export interface AnchoringReport {
+	anchorSource: AnchorSource;
+	anchorCount: number;
+	latestAnchor: {
+		anchorSeq: number;
+		treeSize: number;
+		lastHash: string;
+		keyId: string;
+		timestamp: string;
+	} | null;
+	unanchoredTail: { events: number; sinceTimestampMs: number | null };
+	witness: { requested: boolean; status: WitnessStatus; error?: string };
+	reasons: string[];
+	warnings: string[];
+}
+
+export interface AnchoredVaultVerificationResult extends VaultVerificationResult {
+	anchorState: AnchorState;
+	anchoring: AnchoringReport;
+}
+
+/**
+ * verifyVault + the spec §7.2 anchor state machine. Existing chain semantics
+ * are UNCHANGED (verifyVault runs as-is); anchor evaluation is layered on
+ * top additively. IDENTICAL function body in packages/core/src/audit/verify.ts
+ * — the anchor differential test pins the two.
+ */
+export function verifyVaultWithAnchors(
+	vaultPath: string,
+	params: AnchorVerifyParams = {},
+): AnchoredVaultVerificationResult {
+	const base = verifyVault(vaultPath);
+	const externalRecords: AnchorRecord[] = [];
+	const externalErrors: string[] = [];
+	for (const raw of params.externalAnchorsRaw ?? []) {
+		const parsed = parseAnchorsContent(raw);
+		externalRecords.push(...parsed.records);
+		externalErrors.push(...parsed.errors);
+	}
+	const mirror = readAnchorMirror(vaultPath);
+	const evaluation = evaluateAnchoredVault({
+		orderedHashes: gatherOrderedEventHashes(vaultPath),
+		externalAnchors: externalRecords,
+		externalErrors,
+		mirrorAnchors: mirror.records,
+		mirrorErrors: mirror.errors,
+		trust: params.trust ?? null,
+		witness: params.witness ?? { requested: false },
+		opts: {
+			...(params.maxAnchorAgeMs !== undefined ? { maxAnchorAgeMs: params.maxAnchorAgeMs } : {}),
+			...(params.maxUnanchoredEvents !== undefined
+				? { maxUnanchoredEvents: params.maxUnanchoredEvents }
+				: {}),
+			...(params.expectedVaultId !== undefined ? { expectedVaultId: params.expectedVaultId } : {}),
+			...(params.nowMs !== undefined ? { nowMs: params.nowMs } : {}),
+		},
+	});
+	return {
+		...base,
+		valid: base.valid && evaluation.anchorsValid,
+		errors: [...base.errors, ...evaluation.errors],
+		anchorState: evaluation.anchorState,
+		anchoring: {
+			anchorSource: evaluation.anchorSource,
+			anchorCount: evaluation.anchorCount,
+			latestAnchor: evaluation.latestAnchor,
+			unanchoredTail: evaluation.unanchoredTail,
+			witness: evaluation.witness,
+			reasons: evaluation.reasons,
+			warnings: evaluation.warnings,
+		},
+	};
+}
+
+/**
+ * Exit-code policy for anchored verification. Exit codes stay 0/1
+ * (constraints §4.3); `--require-anchor` and `--require-external-anchor` are
+ * new INPUTS, not changed defaults.
+ */
+export function exitCodeForAnchored(
+	result: {
+		valid: boolean;
+		anchorState: AnchorState;
+		anchoring: { anchorSource: AnchorSource };
+	},
+	opts?: { requireAnchor?: boolean; requireExternalAnchor?: boolean },
+): number {
+	if (!result.valid) return 1;
+	if (
+		opts?.requireAnchor === true &&
+		(result.anchorState === "UNANCHORED" ||
+			result.anchorState === "ANCHOR_UNVERIFIABLE" ||
+			result.anchorState === "ANCHOR_STALE")
+	) {
+		return 1;
+	}
+	if (
+		opts?.requireExternalAnchor === true &&
+		(result.anchorState !== "ANCHORED_VERIFIED" || result.anchoring.anchorSource !== "external")
+	) {
+		return 1;
+	}
+	return 0;
 }

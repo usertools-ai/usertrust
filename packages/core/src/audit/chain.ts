@@ -9,7 +9,7 @@
  * semantics are enforced via advisory file lock + in-process async mutex.
  */
 
-import { createHash, createHmac, randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import {
 	closeSync,
@@ -333,7 +333,8 @@ function writeDeadLetter(
 		payload: unknown;
 		error: string;
 		timestamp: string;
-		hmac?: string;
+		checksum?: string;
+		checksumAlg?: string;
 	},
 ): void {
 	try {
@@ -342,10 +343,24 @@ function writeDeadLetter(
 			mkdirSync(dlqDir, { recursive: true, mode: 0o700 });
 		}
 
-		// AUD-469: Compute HMAC over the entry for integrity protection
-		const key = createHash("sha256").update(`dlq-integrity:${vaultPath}`).digest("hex");
-		const hmac = createHmac("sha256", key).update(JSON.stringify(entry)).digest("hex");
-		const sealed = { ...entry, hmac };
+		// AUD-469 / F3: best-effort corruption-detection checksum — NOT
+		// tamper-evidence. Any key readable by this writer is readable by an
+		// attacker with the same host access, so a keyed MAC here would only
+		// imply integrity it cannot provide (the old HMAC key was derived from
+		// the vault path — forgeable from public inputs). Tamper-evidence for
+		// audit data lives in the hash chain + external anchoring.
+		let checksumSource: string;
+		try {
+			checksumSource = canonicalize(entry);
+		} catch {
+			// canonicalize throws on NaN/Infinity — but a payload carrying NaN
+			// is exactly the kind of failure a dead letter must still record.
+			// JSON.stringify coerces them to null (the pre-checksum behavior);
+			// the entry must be persisted, never dropped.
+			checksumSource = JSON.stringify(entry);
+		}
+		const checksum = createHash("sha256").update(checksumSource).digest("hex");
+		const sealed = { ...entry, checksum, checksumAlg: "sha256" };
 
 		const dlqPath = join(dlqDir, "dead-letters.jsonl");
 		const fd = openSync(dlqPath, "a", 0o600);

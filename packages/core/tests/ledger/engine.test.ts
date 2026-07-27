@@ -327,14 +327,17 @@ describe("TrustEngine", () => {
 			expect(mockWriteSync).toHaveBeenCalled();
 			expect(mockFsyncSync).toHaveBeenCalled();
 			expect(mockCloseSync).toHaveBeenCalled();
-			// Verify the DLQ entry contains proper data + HMAC
+			// Verify the DLQ entry contains proper data + corruption checksum
+			// (F3: the path-derived "integrity" HMAC was replaced with an
+			// honest best-effort checksum — no key, no integrity claim)
 			const writtenData = mockWriteSync.mock.calls[0]?.[1] as string;
 			const dlqEntry = JSON.parse(writtenData.trim());
 			expect(dlqEntry.source).toBe("engine.postPendingSpend.ambiguous");
 			expect(dlqEntry.transferId).toBe("42");
-			expect(dlqEntry.hmac).toBeDefined();
-			expect(typeof dlqEntry.hmac).toBe("string");
-			expect(dlqEntry.hmac.length).toBe(64); // SHA-256 hex
+			expect(dlqEntry.checksum).toBeDefined();
+			expect(typeof dlqEntry.checksum).toBe("string");
+			expect(dlqEntry.checksum.length).toBe(64); // SHA-256 hex
+			expect(dlqEntry.checksumAlg).toBe("sha256");
 		});
 
 		it("creates DLQ directory with restricted permissions if it does not exist", async () => {

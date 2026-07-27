@@ -8,6 +8,7 @@ const COMMANDS = [
 	"health",
 	"verify",
 	"export",
+	"anchor",
 	"snapshot",
 	"tb",
 	"pricing",
@@ -87,6 +88,9 @@ switch (command) {
 		await import("./export.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
 		break;
 	}
+	case "anchor":
+		await import("./anchor.js").then((m) => m.run(positional.slice(1), { json: jsonFlag }));
+		break;
 	case "snapshot":
 		await import("./snapshot.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
@@ -127,6 +131,7 @@ Commands:
   health        Show entropy diagnostics
   verify        Verify audit chain integrity
   export        Export receipts as markdown (Obsidian-ready)
+  anchor        External audit anchoring (signed checkpoints)
   snapshot      Create/restore vault snapshots
   tb            Manage TigerBeetle process
   pricing       Show current rate configuration
