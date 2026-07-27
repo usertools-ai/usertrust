@@ -8,45 +8,15 @@
  * recent transactions, and Merkle root in a formatted table.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
 import { buildMerkleTree } from "../audit/merkle.js";
+import { loadBudgetConfig, readLedgerEvents } from "../audit/read.js";
 import { verifyChain } from "../audit/verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
 import type { CliOptions } from "./init.js";
-
-function loadConfig(vaultPath: string): { budget: number } {
-	const configPath = join(vaultPath, "usertrust.config.json");
-	if (!existsSync(configPath)) {
-		return { budget: 0 };
-	}
-	try {
-		const raw = readFileSync(configPath, "utf-8");
-		const config = JSON.parse(raw) as { budget?: number };
-		return { budget: typeof config.budget === "number" ? config.budget : 0 };
-	} catch {
-		return { budget: 0 };
-	}
-}
-
-function loadEvents(vaultPath: string): AuditEvent[] {
-	const logPath = join(vaultPath, "audit", "events.jsonl");
-	if (!existsSync(logPath)) return [];
-
-	try {
-		const content = readFileSync(logPath, "utf-8").trim();
-		if (!content) return [];
-
-		return content
-			.split("\n")
-			.filter((l) => l.trim())
-			.map((line) => JSON.parse(line) as AuditEvent);
-	} catch {
-		return [];
-	}
-}
 
 function computeSpent(events: AuditEvent[]): number {
 	let spent = 0;
@@ -97,8 +67,8 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		return;
 	}
 
-	const config = loadConfig(vaultPath);
-	const events = loadEvents(vaultPath);
+	const config = loadBudgetConfig(vaultPath);
+	const events = readLedgerEvents(vaultPath);
 	const spent = computeSpent(events);
 	const remaining = config.budget - spent;
 	const pct = config.budget > 0 ? ((remaining / config.budget) * 100).toFixed(1) : "0.0";

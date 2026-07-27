@@ -104,6 +104,13 @@ export type {
 	MerkleSibling,
 } from "./audit/merkle.js";
 
+// Vault reading (shared by CLI + usertrust-ui)
+export { readLedgerEvents, loadBudgetConfig, deriveChainIntegrity } from "./audit/read.js";
+export type { PersistedAuditEvent, ChainIntegrity } from "./audit/read.js";
+export { verifyChain, verifyVault } from "./audit/verify.js";
+export type { ChainVerificationResult, VaultVerificationResult } from "./audit/verify.js";
+export { VAULT_DIR } from "./shared/constants.js";
+
 // Pricing
 export {
 	getModelRates,
