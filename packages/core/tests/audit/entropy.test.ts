@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-	type EntropyEventInput,
 	computeEntropyScore,
+	type EntropyEventInput,
 	extractBudgetUtilization,
 	extractChainIntegrity,
 	extractCircuitBreakerTrips,

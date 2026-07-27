@@ -197,103 +197,101 @@ describe("Anomaly governance integration", () => {
 		await governed.destroy();
 	});
 
-	it(
-		"runaway stream trips token-rate anomaly: VOID + AnomalyError + audit event emitted",
-		{ timeout: 15_000 },
-		async () => {
-			// Anomaly opts go through the config file (TrustOpts has no anomaly field —
-			// it would expand the public surface). Write a config file with low
-			// thresholds so a synthetic runaway stream trips immediately.
-			const fs = await import("node:fs");
-			const path = await import("node:path");
-			const vaultDir = path.join(tmpVault, ".usertrust");
-			fs.mkdirSync(vaultDir, { recursive: true });
-			fs.writeFileSync(
-				path.join(vaultDir, "usertrust.config.json"),
-				JSON.stringify({
-					budget: 50_000_000,
-					anomaly: {
-						enabled: true,
-						tokenRate: {
-							thresholdTokPerSec: 10, // any rate will trip
-							windowMs: 100,
-							consecutiveWindows: 1,
-						},
-						// Disable the other signals so we know which one tripped.
-						spendVelocity: { thresholdDollarsPerMin: 1_000_000 },
-						injectionCascade: { eventCount: 1_000_000 },
-						cooldownMs: 60_000,
+	it("runaway stream trips token-rate anomaly: VOID + AnomalyError + audit event emitted", {
+		timeout: 15_000,
+	}, async () => {
+		// Anomaly opts go through the config file (TrustOpts has no anomaly field —
+		// it would expand the public surface). Write a config file with low
+		// thresholds so a synthetic runaway stream trips immediately.
+		const fs = await import("node:fs");
+		const path = await import("node:path");
+		const vaultDir = path.join(tmpVault, ".usertrust");
+		fs.mkdirSync(vaultDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(vaultDir, "usertrust.config.json"),
+			JSON.stringify({
+				budget: 50_000_000,
+				anomaly: {
+					enabled: true,
+					tokenRate: {
+						thresholdTokPerSec: 10, // any rate will trip
+						windowMs: 100,
+						consecutiveWindows: 1,
 					},
-				}),
-			);
+					// Disable the other signals so we know which one tripped.
+					spendVelocity: { thresholdDollarsPerMin: 1_000_000 },
+					injectionCascade: { eventCount: 1_000_000 },
+					cooldownMs: 60_000,
+				},
+			}),
+		);
 
-			const engine2 = makeMockEngine();
-			const audit2 = makeMockAudit();
-			// Delay 30ms between chunks so two 100ms windows complete with high tokens.
-			const mockClient2 = makeRunawayStreamMock(30, 1_000, 30);
+		const engine2 = makeMockEngine();
+		const audit2 = makeMockAudit();
+		// Delay 30ms between chunks so two 100ms windows complete with high tokens.
+		const mockClient2 = makeRunawayStreamMock(30, 1_000, 30);
 
-			const governed2 = await trust(mockClient2, {
-				vaultBase: tmpVault,
-				_engine: engine2,
-				_audit: audit2,
-			});
+		const governed2 = await trust(mockClient2, {
+			vaultBase: tmpVault,
+			_engine: engine2,
+			_audit: audit2,
+		});
 
-			const result = await governed2.messages.create({
-				model: "claude-sonnet-4-6",
-				max_tokens: 1024,
-				messages: [{ role: "user", content: "Tell me a story" }],
-			});
+		const result = await governed2.messages.create({
+			model: "claude-sonnet-4-6",
+			max_tokens: 1024,
+			messages: [{ role: "user", content: "Tell me a story" }],
+		});
 
-			// Attach a no-op catch to the receipt promise immediately so the rejection
-			// (which fires synchronously when the stream throws) is handled before
-			// node's unhandledRejection sniffer fires.
-			const receiptP = (result.response as { receipt: Promise<unknown> }).receipt;
-			receiptP.catch(() => {});
+		// Attach a no-op catch to the receipt promise immediately so the rejection
+		// (which fires synchronously when the stream throws) is handled before
+		// node's unhandledRejection sniffer fires.
+		const receiptP = (result.response as { receipt: Promise<unknown> }).receipt;
+		receiptP.catch(() => {});
 
-			const stream = result.response as AsyncIterable<unknown>;
-			let caught: unknown = null;
-			try {
-				for await (const _chunk of stream) {
-					// consume
-				}
-			} catch (err) {
-				caught = err;
+		const stream = result.response as AsyncIterable<unknown>;
+		let caught: unknown = null;
+		try {
+			for await (const _chunk of stream) {
+				// consume
 			}
+		} catch (err) {
+			caught = err;
+		}
 
-			// Stream should have aborted with AnomalyError
-			expect(caught).toBeInstanceOf(AnomalyError);
-			if (caught instanceof AnomalyError) {
-				expect(caught.kind).toBe("token_rate");
-				expect(caught.metric).toBeGreaterThan(0);
-			}
+		// Stream should have aborted with AnomalyError
+		expect(caught).toBeInstanceOf(AnomalyError);
+		if (caught instanceof AnomalyError) {
+			expect(caught.kind).toBe("token_rate");
+			expect(caught.metric).toBeGreaterThan(0);
+		}
 
-			// Wait for async callbacks (audit + void)
-			await new Promise<void>((r) => setTimeout(r, 100));
+		// Wait for async callbacks (audit + void)
+		await new Promise<void>((r) => setTimeout(r, 100));
 
-			// Audit should contain anomaly_detected event
-			const calls = (audit2.appendEvent as ReturnType<typeof vi.fn>).mock.calls as Array<
-				[AppendEventInput]
-			>;
-			const anomalyEvent = calls.find(([e]) => e.kind === "anomaly_detected");
-			expect(anomalyEvent).toBeDefined();
-			if (anomalyEvent) {
-				const data = anomalyEvent[0].data as Record<string, unknown>;
-				expect(data.anomalyKind).toBe("token_rate");
-				expect(typeof data.metric).toBe("number");
-				expect(typeof data.threshold).toBe("number");
-			}
+		// Audit should contain anomaly_detected event
+		const calls = (audit2.appendEvent as ReturnType<typeof vi.fn>).mock.calls as Array<
+			[AppendEventInput]
+		>;
+		const anomalyEvent = calls.find(([e]) => e.kind === "anomaly_detected");
+		expect(anomalyEvent).toBeDefined();
+		if (anomalyEvent) {
+			const data = anomalyEvent[0].data as Record<string, unknown>;
+			expect(data.anomalyKind).toBe("token_rate");
+			expect(typeof data.metric).toBe("number");
+			expect(typeof data.threshold).toBe("number");
+		}
 
-			// VOID should have been called (PENDING hold released)
-			expect(engine2.voidPendingSpend).toHaveBeenCalledOnce();
-			// POST should NOT have been called
-			expect(engine2.postPendingSpend).not.toHaveBeenCalled();
+		// VOID should have been called (PENDING hold released)
+		expect(engine2.voidPendingSpend).toHaveBeenCalledOnce();
+		// POST should NOT have been called
+		expect(engine2.postPendingSpend).not.toHaveBeenCalled();
 
-			// Receipt promise should reject
-			await expect(receiptP).rejects.toBeInstanceOf(AnomalyError);
+		// Receipt promise should reject
+		await expect(receiptP).rejects.toBeInstanceOf(AnomalyError);
 
-			await governed2.destroy();
-		},
-	);
+		await governed2.destroy();
+	});
 
 	it("normal stream does NOT trip when anomaly is enabled with normal thresholds", async () => {
 		const fs = await import("node:fs");

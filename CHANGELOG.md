@@ -127,6 +127,35 @@ instead of being exempted from it.
   `...@evil.com` bypass shapes; malformed `baseURL`s classify as cloud
   (fail-expensive).
 
+### Dependencies
+
+- Adopted major upgrades across the toolchain and runtime deps. **Governance
+  behavior is unchanged** — verified by the full suite (1957 passing, 4
+  TigerBeetle-integration tests self-skipping without a live server) plus
+  `tsc -b`, type-tests, and `biome check` all clean:
+  - `tigerbeetle-node` 0.16 → **0.17.9**. Ledger client migrated to the 0.17
+    API: `CreateAccountError`/`CreateTransferError` enums → `CreateAccountStatus`/
+    `CreateTransferStatus`, and the per-event result shape is now
+    `{ timestamp, status }` (success is `status === created`). Two-phase
+    pending/post/void and `debits_must_not_exceed_credits` hard-budget
+    enforcement are byte-for-byte unchanged. CI TigerBeetle server pinned to
+    0.17.9 (sha256 recomputed).
+  - `zod` 3 → **4.4.3**. Config object schemas migrated from `.default({})` to
+    `.prefault({})` to preserve zod 3's re-parse-inner-defaults behavior (zod 4's
+    `.default({})` skips inner defaults); parsed config output is identical.
+  - `@anthropic-ai/sdk` → **0.115** and `openai` → **6.49**. SDK majors verified
+    safe against the governance surface (streaming usage accumulation, tool-call
+    and responses paths); no adapter changes required.
+  - `@biomejs/biome` 1.9 → **2.5.5**. `biome.json` migrated to the v2 schema
+    (`linter.rules.preset: "recommended"` — the migrator's silent
+    `preset: "none"` downgrade was caught and corrected; `files.includes` with
+    negated globs; CSS/SVG excluded, since Biome 2 cannot parse Tailwind v4
+    `@theme`). Formatting reflow is purely mechanical (import sorting, JSON).
+  - `@types/node` → **26**. One types-only regression fixed in money-path Ed25519
+    signing (`createPublicKey` dropped `KeyObject` from its input union in v26,
+    though Node still derives a public key from a private `KeyObject` at runtime);
+    resolved with a types-only assertion — the runtime call is unchanged.
+
 ## [1.0.0] - 2026-03-29
 
 First stable release.

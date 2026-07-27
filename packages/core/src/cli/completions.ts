@@ -92,7 +92,7 @@ _usertrust() {
         '1:command:->command' \\
         '*::arg:->args'
 
-    case "\$state" in
+    case "$state" in
         command)
             _describe 'usertrust command' commands
             _values 'flags' \${global_flags}

@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ServerConfig } from "../src/config.js";
 import { hashKey } from "../src/config.js";
 import * as api from "../src/index.js";
-import { type UsertrustServer, createUsertrustServer } from "../src/server.js";
-import { type FakeGovernorHandle, createFakeGovernor } from "./helpers/fake-governor.js";
+import { createUsertrustServer, type UsertrustServer } from "../src/server.js";
+import { createFakeGovernor, type FakeGovernorHandle } from "./helpers/fake-governor.js";
 
 const KEY = "ut_srv_key";
 

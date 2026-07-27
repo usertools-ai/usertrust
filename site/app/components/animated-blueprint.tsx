@@ -46,6 +46,7 @@ export function AnimatedBlueprint({ phaseId, className, children }: AnimatedBlue
 					filter: drop-shadow(0 0 30px rgba(52,211,153,0.12)) drop-shadow(0 0 60px rgba(52,211,153,0.06));
 				}
 			`}</style>
+			{/* biome-ignore lint/a11y/useAriaPropsSupportedByRole: decorative animation wrapper; aria-label retained to give the visual an accessible name */}
 			<div
 				ref={ref}
 				className={inView ? "bp-visible" : "bp-hidden"}

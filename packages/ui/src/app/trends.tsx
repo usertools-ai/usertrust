@@ -4,9 +4,9 @@
 import { useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import {
-	type KeyTotal,
 	costByKind,
 	costByModel,
+	type KeyTotal,
 	spendOverTime,
 	statTiles,
 } from "../shared/aggregate.js";

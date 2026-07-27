@@ -13,8 +13,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuditWriter } from "../../src/audit/chain.js";
 import { VaultKeyMissingError } from "../../src/shared/errors.js";
-import { TrustConfigSchema } from "../../src/shared/types.js";
 import type { TrustConfig } from "../../src/shared/types.js";
+import { TrustConfigSchema } from "../../src/shared/types.js";
 import { createVaultStore } from "../../src/vault/store.js";
 
 // ── Helpers ──

@@ -1,0 +1,101 @@
+---
+title: Agent Governance Toolkit
+description: Run AGT's stateless policy decisions on top of usertrust's stateful enforcement — pre-spend holds, double-entry settlement, and offline-verifiable receipts.
+---
+
+Microsoft's [Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit) (AGT) and usertrust sit on opposite sides of the same boundary. AGT's Agent Control Specification defines a deliberately stateless, deterministic policy runtime: it evaluates an action and returns a verdict, and its spec assigns every stateful obligation — enforcing the verdict, holding budget state, persisting audit records, resolving approvals — to the host. usertrust is that stateful side: a budget ledger with two-phase holds, settlement, and receipts your finance team can verify offline.
+
+So the honest comparison is not "which one" — it is "which layer". If AGT decides, something still has to enforce, meter, and account. Run them together.
+
+## Run Them Together
+
+AGT's own integration docs describe a composite-evaluator pattern for pairing its stateless decision layer with an external budget ledger: the policy decides first, and only allowed actions consume a reservation. `usertrust-acs-adapter` implements that slot with the usertrust ledger behind it.
+
+```ts
+import { createGovernor } from "usertrust/headless";
+import { CompositeEvaluator, type PolicyDecider } from "usertrust-acs-adapter";
+
+// 1. Your stateless decision layer — bridge to your AGT policy
+//    evaluation, or any decider returning an ACS-style verdict.
+const policy: PolicyDecider = async (action, { inputIdentity, budgets }) => {
+	const verdict = await evaluateWithAgt(action, budgets); // your AGT bridge
+	return { decision: verdict.decision, reason: verdict.reason };
+};
+
+// 2. The stateful enforcement layer — budget ledger, settlement, receipts.
+const governor = await createGovernor({ budget: 100_000 });
+const composite = new CompositeEvaluator({ policy, governor });
+
+// 3. Decision first, then an atomic PENDING hold.
+//    A denied action never consumes a reservation.
+const result = await composite.evaluate({
+	kind: "model_call",
+	model: "claude-sonnet-4-6",
+	estimatedInputTokens: 500,
+	maxOutputTokens: 4096,
+});
+
+if (result.authorization) {
+	try {
+		const response = await callModel(/* ... */);
+		// 4. POST the hold at actual usage. The receipt is offline-verifiable.
+		const receipt = await composite.settle(result, {
+			inputTokens: response.usage.input_tokens,
+			outputTokens: response.usage.output_tokens,
+		});
+	} catch (err) {
+		// 5. VOID the hold — reserved tokens return to the budget.
+		await composite.abort(result, err);
+		throw err;
+	}
+}
+```
+
+The adapter speaks AGT's decision vocabulary in both directions: a malformed policy verdict fails closed (deny) with a reserved `runtime_error:*` reason, and a ledger budget denial comes back as `budget_cost_usd_exceeded` — so the decision layer sees a coherent picture.
+
+## Where Each Layer Stops
+
+Every AGT-side statement below links to the exact line in AGT's own specs and design records, pinned to commit `179843b`.
+
+| Concern | AGT (decision layer) | usertrust (enforcement layer) |
+| --- | --- | --- |
+| Role | Stateless policy verdicts (allow / warn / deny / escalate / transform); enforcement is a documented host obligation | Stateful enforcement: ledger holds, settlement, audit, receipts |
+| Budget check timing | Post-action cost governance; its ADR accepts a one-action overshoot | Pre-spend `PENDING` hold; an over-budget call is denied before it executes |
+| Stream governance | Evaluates assembled snapshots; token/chunk-level enforcement is outside its model | Per-chunk hook can cut a stream off mid-flight on anomaly signals |
+| Audit | SHA-256 hash-linked entry chain; several decision-context fields sit outside the canonical hash in spec v1.0 | SHA-256 hash chain + RFC 6962 Merkle proofs + zero-dependency offline verifier |
+| Spend accounting | In-process budget tracking over host-supplied cost estimates and counters | Double-entry two-phase TigerBeetle ledger (`PENDING → POST / VOID`), 7 transfer codes |
+| Local models | n/a in the materials cited on this page | Nominal metering for local endpoints (v1.5.0) |
+
+## Budget Timing: Post-Action vs Pre-Spend
+
+AGT's cost-governance ADR is candid about its post-action design. Among the tradeoffs it lists: "the action that crosses the hard cap still executes (one action overshoot)" ([ADR-0012, line 115](https://github.com/microsoft/agent-governance-toolkit/blob/179843b16eadd48bc9666c05f33a38f009542be1/docs/adr/0012-cost-governance-observability-policies.md#L115)). That is a reasonable tradeoff for an observability-first design — cost data is measured, not estimated — but it means the budget is a rearview mirror at the moment it matters most.
+
+usertrust checks before the money moves. `authorize()` evaluates the policy gate against `budget_remaining_after` — the balance as it would be *after* this call — and denies a single overshooting call pre-spend. If the policy gate passes, the `PENDING` hold itself is enforced by TigerBeetle: the holding account is created with `debits_must_not_exceed_credits`, so an over-budget reservation is rejected atomically by the ledger and surfaced as a hard deny, never forwarded to the provider. See [Two-Phase Spend](/docs/concepts/two-phase-spend).
+
+## Streams: Assemble-Then-Judge vs Mid-Stream Cutoff
+
+AGT's specification is explicit that it evaluates whole snapshots: a host must assemble streamed output before the post-call intervention point, and "Enforcement at the token or chunk level is outside this model" ([Agent Control Specification §18, line 406](https://github.com/microsoft/agent-governance-toolkit/blob/179843b16eadd48bc9666c05f33a38f009542be1/policy-engine/spec/SPECIFICATION.md#L406)). By the time the verdict lands, the stream has already been paid for.
+
+usertrust governs the stream while it is running. The streaming wrapper fires a hook on every chunk, and the anomaly detector (token-rate, spend-velocity, and injection-cascade signals) can throw from that hook to abort the stream mid-flight and trip the circuit breaker. The pending hold is then voided — a runaway stream stops costing you tokens at the chunk where it was caught, not at the end.
+
+## Audit: What the Hash Actually Covers
+
+Both projects hash-chain their audit logs with SHA-256. The difference is what the hash covers and who can check it.
+
+AGT's audit spec (v1.0) keeps its canonical hash over a fixed field set for chain compatibility, and places newer decision-context fields — `policy_version`, `approver_did`, `arguments_hash` — outside it. The spec says so plainly: "a tampering party can mutate them without invalidating `entry_hash`" ([AUDIT-COMPLIANCE-1.0 §4.3.1, line 251](https://github.com/microsoft/agent-governance-toolkit/blob/179843b16eadd48bc9666c05f33a38f009542be1/docs/specs/AUDIT-COMPLIANCE-1.0.md#L251)), and instructs verifiers not to rely on those fields for tamper detection in v1.0. Spec v1.1 plans to close this.
+
+AGT's limitations doc also draws its own scope line: it is an "audit trail of actions", not an "audit trail of outcomes" ([LIMITATIONS.md, line 135](https://github.com/microsoft/agent-governance-toolkit/blob/179843b16eadd48bc9666c05f33a38f009542be1/docs/LIMITATIONS.md#L135)).
+
+usertrust's audit chain records settled outcomes — actual tokens, actual cost, `settled` status — because settlement is the event. Every event chains from the previous via deterministic canonicalization, Merkle roots follow RFC 6962 with inclusion and consistency proofs, and [`usertrust-verify`](/docs/verify) is a zero-dependency verifier: an auditor can check the whole vault offline, with no usertrust install and nothing to trust but the math.
+
+## Spend Accounting: Who Holds the Ledger
+
+AGT v5 removed a set of Public Preview surfaces precisely because they implied enforcement that did not exist — in its own words, "the ledger always admitted, slashing and quarantine recorded events but enforced nothing" ([BREAKING_CHANGES.md, lines 228–229](https://github.com/microsoft/agent-governance-toolkit/blob/179843b16eadd48bc9666c05f33a38f009542be1/BREAKING_CHANGES.md#L228-L229)). That cleanup is to AGT's credit, and it sharpened the architecture: the ledger is not AGT's job. Its SpendGuard integration guide makes the same point in table form, listing compliance evidence for its in-process `CostGuard` as "None" while pointing at an external cryptographically-audited ledger for that role ([spendguard-integration.md, line 27](https://github.com/microsoft/agent-governance-toolkit/blob/179843b16eadd48bc9666c05f33a38f009542be1/docs/integrations/spendguard-integration.md#L27)).
+
+usertrust is built as that ledger role, natively: real double-entry accounting in TigerBeetle, seven transfer codes, and a two-phase lifecycle where every token is either settled or voided — never lost in limbo. For local models, where there is no provider invoice, v1.5.0 meters calls in nominal usertokens so the same ledger, anomaly signals, and receipts govern your fleet's local endpoints too.
+
+## Scope and Disclosure
+
+Comparisons on this page reference the Agent Governance Toolkit at commit [`179843b`](https://github.com/microsoft/agent-governance-toolkit/tree/179843b16eadd48bc9666c05f33a38f009542be1) (v5.0.0), retrieved 2026-07-26, and usertrust v1.5.0. Every AGT-side claim links to the exact line at that commit. AGT moves fast; if a statement here has gone stale, [open an issue](https://github.com/usertools-ai/usertrust/issues).
+
+The Agent Governance Toolkit is MIT-licensed. `usertrust-acs-adapter` adapts its documented decision vocabulary and composite-evaluator integration point under that license — see the usertrust repository `NOTICE` file for attribution. Microsoft and Agent Governance Toolkit are referenced for identification purposes only; usertrust is an independent project of Usertools, Inc. and is not affiliated with, endorsed by, or sponsored by Microsoft.

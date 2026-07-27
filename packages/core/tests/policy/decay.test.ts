@@ -7,10 +7,10 @@
 
 import { describe, expect, it } from "vitest";
 import {
-	DecayRateCalculator,
-	type TimestampedEntry,
 	calculateDecayRate,
 	createCostDecayCalculator,
+	DecayRateCalculator,
+	type TimestampedEntry,
 } from "../../src/policy/decay.js";
 
 // ===========================================================================

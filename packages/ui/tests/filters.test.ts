@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { EMPTY_FILTERS, applyFilters, isFiltering } from "../src/shared/filters.js";
+import { applyFilters, EMPTY_FILTERS, isFiltering } from "../src/shared/filters.js";
 import type { LedgerRow } from "../src/shared/rows.js";
 
 function row(overrides: Partial<LedgerRow>): LedgerRow {

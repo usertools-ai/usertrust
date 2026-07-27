@@ -16,13 +16,13 @@
 
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type PersistedAuditEvent, VAULT_DIR, exportMarkdown } from "usertrust";
+import { exportMarkdown, type PersistedAuditEvent, VAULT_DIR } from "usertrust";
 import { canonicalize, verifyTransaction } from "usertrust-verify";
 import { toLedgerRows } from "../shared/rows.js";
-import { type LedgerState, ROW_CAP, loadState } from "./state.js";
+import { type LedgerState, loadState, ROW_CAP } from "./state.js";
 import { serveStatic } from "./static.js";
 import { watchLedger } from "./tail.js";
 

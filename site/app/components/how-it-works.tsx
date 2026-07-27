@@ -6,13 +6,7 @@ import { ScrollReveal } from "./scroll-reveal";
 /* ------------------------------------------------------------------ */
 /*  Flow connector — vertical arrow between pipeline stages            */
 /* ------------------------------------------------------------------ */
-function FlowConnector({
-	label,
-	sublabel,
-}: {
-	label: string;
-	sublabel?: string;
-}) {
+function FlowConnector({ label, sublabel }: { label: string; sublabel?: string }) {
 	return (
 		<div className="flex flex-col items-center py-5 sm:py-8">
 			<div className="w-px h-5 bg-gradient-to-b from-white/[0.06] to-ut/20" />

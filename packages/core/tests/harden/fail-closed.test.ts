@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { type GateRule, evaluatePolicy } from "../../src/policy/gate.js";
+import { evaluatePolicy, type GateRule } from "../../src/policy/gate.js";
 
 describe("hard numeric rules fail closed on missing/mistyped fields", () => {
 	const hardRule: GateRule = {

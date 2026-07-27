@@ -5,12 +5,12 @@ import { describe, expect, it } from "vitest";
 import { sampleNormal, sampleUniform } from "../../src/distributions/index.js";
 import { Xoshiro256 } from "../../src/rng/xoshiro256.js";
 import {
-	type SimulationComplete,
-	type SimulationProgress,
 	computePercentiles,
 	percentileFromSorted,
 	runSimulation,
 	runSimulationStreaming,
+	type SimulationComplete,
+	type SimulationProgress,
 } from "../../src/simulator/index.js";
 
 describe("runSimulation", () => {

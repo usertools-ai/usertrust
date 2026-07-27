@@ -12,7 +12,7 @@
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { type PersistedAuditEvent, deriveChainIntegrity, readLedgerEvents } from "../audit/read.js";
+import { deriveChainIntegrity, type PersistedAuditEvent, readLedgerEvents } from "../audit/read.js";
 import { verifyVault } from "../audit/verify.js";
 
 export interface ExportResult {

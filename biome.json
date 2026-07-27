@@ -5,21 +5,26 @@
 	},
 	"linter": {
 		"enabled": true,
-		"rules": { "recommended": true }
+		"rules": {
+			"preset": "recommended"
+		}
 	},
 	"files": {
-		"ignore": [
-			"**/dist/**",
-			"**/coverage/**",
-			"**/.usertrust/**",
-			"**/.usertrust-gate1/**",
-			"**/.source/**",
-			"**/.next/**"
+		"includes": [
+			"**",
+			"!**/dist",
+			"!**/coverage",
+			"!**/.usertrust",
+			"!**/.usertrust-gate1",
+			"!**/.source",
+			"!**/.next",
+			"!**/*.css",
+			"!**/*.svg"
 		]
 	},
 	"overrides": [
 		{
-			"include": ["scripts/**"],
+			"includes": ["**/scripts/**"],
 			"linter": {
 				"rules": {
 					"suspicious": {
@@ -29,7 +34,11 @@
 			}
 		},
 		{
-			"include": ["site/app/components/typewriter-code.tsx"],
+			"includes": [
+				"**/site/app/components/typewriter-code.tsx",
+				"**/site/app/components/before-after.tsx",
+				"**/site/app/components/governance-receipt.tsx"
+			],
 			"linter": {
 				"rules": {
 					"suspicious": {

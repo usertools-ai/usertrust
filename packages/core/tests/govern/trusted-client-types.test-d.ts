@@ -17,9 +17,8 @@ import type { TrustedClient } from "../../src/govern.js";
 import type { TrustReceipt } from "../../src/shared/types.js";
 
 type Assert<T extends true> = T;
-type IsExact<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
-	? true
-	: false;
+type IsExact<A, B> =
+	(<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 type Extends<A, B> = A extends B ? true : false;
 
 // ── Fake client shapes (no SDK import — usertrust is provider-agnostic) ──

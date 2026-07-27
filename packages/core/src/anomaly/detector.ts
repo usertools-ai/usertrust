@@ -23,19 +23,19 @@
 
 import { costFromRates, estimateCost } from "../ledger/pricing.js";
 import {
-	type InjectionCascadeSignal,
 	createInjectionCascadeSignal,
+	type InjectionCascadeSignal,
 	resolveInjectionCascadeConfig,
 } from "./signals/injection-cascade.js";
 import {
-	type SpendVelocitySignal,
 	createSpendVelocitySignal,
 	resolveSpendVelocityConfig,
+	type SpendVelocitySignal,
 } from "./signals/spend-velocity.js";
 import {
-	type TokenRateSignal,
 	createTokenRateSignal,
 	resolveTokenRateConfig,
+	type TokenRateSignal,
 } from "./signals/token-rate.js";
 import type {
 	AnomalyChunkEvent,

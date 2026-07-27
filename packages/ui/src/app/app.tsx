@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { useMemo, useState } from "react";
-import { EMPTY_FILTERS, type FilterState, applyFilters } from "../shared/filters.js";
+import { applyFilters, EMPTY_FILTERS, type FilterState } from "../shared/filters.js";
 import type { LedgerRow } from "../shared/rows.js";
 import { AuditTable } from "./audit-table.js";
 import { FilterBar } from "./filter-bar.js";

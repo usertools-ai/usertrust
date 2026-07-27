@@ -10,12 +10,12 @@ import { unlinkSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_RULES, isBudgetExceeded } from "../../src/policy/default-rules.js";
 import {
-	type GateRule,
-	type PolicyContext,
 	evaluatePolicy,
+	type GateRule,
 	isWithinTimeWindow,
 	loadPolicies,
 	matchesScope,
+	type PolicyContext,
 } from "../../src/policy/gate.js";
 import type { FieldOperator, PolicyEffect } from "../../src/shared/types.js";
 

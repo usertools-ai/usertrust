@@ -13,25 +13,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { verifyVaultWithAnchors as pkgVerifyVaultWithAnchors } from "../../../../verify/src/index.js";
 import {
-	type AnchorRecord,
-	type AnchorTrust,
-	anchorPayloadHash,
-	gatherOrderedEventHashes,
-	parseAnchorsContent,
-} from "../../../src/audit/anchor-verify.js";
-import {
 	createAnchorEmitter,
 	initAnchorIdentity,
 	mintSuccessorKey,
 	readAnchorIdentity,
 	recordRotatedIdentity,
 } from "../../../src/audit/anchor.js";
+import {
+	type AnchorRecord,
+	type AnchorTrust,
+	anchorPayloadHash,
+	gatherOrderedEventHashes,
+	parseAnchorsContent,
+} from "../../../src/audit/anchor-verify.js";
 import { canonicalize } from "../../../src/audit/canonical.js";
 import { createAuditWriter } from "../../../src/audit/chain.js";
 import { buildMerkleTree } from "../../../src/audit/merkle.js";
 import {
-	type AnchorVerifyParams,
 	type AnchoredVaultVerificationResult,
+	type AnchorVerifyParams,
 	verifyVaultWithAnchors,
 } from "../../../src/audit/verify.js";
 import { GENESIS_HASH, VAULT_DIR } from "../../../src/shared/constants.js";

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createAuditWriter } from "../../core/src/audit/chain.js";
-import { type UiServer, createUiServer } from "../src/server/server.js";
+import { createUiServer, type UiServer } from "../src/server/server.js";
 
 describe("GET /api/verify/:txId", () => {
 	let tempDir: string;

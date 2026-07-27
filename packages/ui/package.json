@@ -11,9 +11,18 @@
 		"directory": "packages/ui"
 	},
 	"bugs": "https://github.com/usertools-ai/usertrust/issues",
-	"keywords": ["ai", "governance", "audit", "ledger", "ui", "dashboard"],
+	"keywords": [
+		"ai",
+		"governance",
+		"audit",
+		"ledger",
+		"ui",
+		"dashboard"
+	],
 	"type": "module",
-	"bin": { "usertrust-ui": "./dist/server/main.js" },
+	"bin": {
+		"usertrust-ui": "./dist/server/main.js"
+	},
 	"exports": {
 		".": "./dist/server/server.js",
 		"./package.json": "./package.json"
@@ -22,7 +31,9 @@
 		"build": "tsc && vite build",
 		"prepublishOnly": "tsc && vite build"
 	},
-	"files": ["dist"],
+	"files": [
+		"dist"
+	],
 	"dependencies": {
 		"usertrust": "*",
 		"usertrust-verify": "*"

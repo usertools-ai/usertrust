@@ -66,7 +66,7 @@ function suggestCommand(input: string): string | undefined {
 	return bestDist <= 3 ? best : undefined;
 }
 
-export { levenshtein, suggestCommand, COMMANDS };
+export { COMMANDS, levenshtein, suggestCommand };
 
 switch (command) {
 	case "init":

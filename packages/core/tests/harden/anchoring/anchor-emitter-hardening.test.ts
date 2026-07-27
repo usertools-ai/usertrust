@@ -11,13 +11,13 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { parseAnchorsContent } from "../../../src/audit/anchor-verify.js";
 import {
 	type AnchorSink,
 	createAnchorEmitter,
 	initAnchorIdentity,
 	readAnchorIdentity,
 } from "../../../src/audit/anchor.js";
+import { parseAnchorsContent } from "../../../src/audit/anchor-verify.js";
 import {
 	anchorOnce,
 	appendEvents,

@@ -8,9 +8,9 @@
 
 import { describe, expect, it } from "vitest";
 import {
+	detectPII,
 	type PIIDetection,
 	type RedactedData,
-	detectPII,
 	redactPII,
 } from "../../src/policy/pii.js";
 

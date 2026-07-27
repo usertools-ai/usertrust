@@ -5,8 +5,8 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { VAULT_DIR } from "./shared/constants.js";
-import { TrustConfigSchema } from "./shared/types.js";
 import type { TrustConfig } from "./shared/types.js";
+import { TrustConfigSchema } from "./shared/types.js";
 
 /** Valid env var name: starts with letter or underscore, alphanumeric + underscore only. */
 const ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;

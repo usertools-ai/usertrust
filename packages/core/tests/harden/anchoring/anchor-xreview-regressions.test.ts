@@ -10,20 +10,20 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	parseAnchorRecord as pkgParseAnchorRecord,
 	verifyTransaction as pkgVerifyTransaction,
 } from "../../../../verify/src/index.js";
-import { anchorPayloadHash, parseAnchorRecord } from "../../../src/audit/anchor-verify.js";
 import {
 	createAnchorEmitter,
 	initAnchorIdentity,
 	readAnchorIdentity,
 	resumeAnchorMirror,
 } from "../../../src/audit/anchor.js";
+import { anchorPayloadHash, parseAnchorRecord } from "../../../src/audit/anchor-verify.js";
 import { canonicalize } from "../../../src/audit/canonical.js";
 import { createAuditWriter } from "../../../src/audit/chain.js";
 import { exitCodeForAnchored } from "../../../src/audit/verify.js";

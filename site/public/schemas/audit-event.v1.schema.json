@@ -1,0 +1,49 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://usertrust.ai/schemas/audit-event.v1.schema.json",
+	"title": "AuditEvent",
+	"description": "One persisted line of the usertrust hash-chained audit log ('<vault>/.usertrust/audit/events.jsonl' plus rotated '*.jsonl' segments). Each line is one event serialized as canonical JSON: object keys sorted alphabetically at every nesting level, undefined stripped, null preserved, array order kept. The event's hash is the SHA-256 of its canonical JSON with the 'hash' field removed; 'previousHash' links to the prior event's hash, and the first event in a vault chains from the genesis hash (64 zeros). Unknown fields are permitted: any extra field is part of the hash pre-image, so verifiers hash the full line minus 'hash' rather than a fixed field list.",
+	"type": "object",
+	"required": ["id", "timestamp", "previousHash", "hash", "kind", "actor", "data", "sequence"],
+	"properties": {
+		"id": {
+			"type": "string",
+			"format": "uuid",
+			"description": "Random UUID identifying the event."
+		},
+		"timestamp": {
+			"type": "string",
+			"format": "date-time",
+			"description": "ISO 8601 timestamp when the event was appended."
+		},
+		"previousHash": {
+			"type": "string",
+			"pattern": "^[a-f0-9]{64}$",
+			"description": "SHA-256 hash (hex) of the previous event in the chain. The first event in a vault uses the genesis hash: 64 zeros."
+		},
+		"hash": {
+			"type": "string",
+			"pattern": "^[a-f0-9]{64}$",
+			"description": "SHA-256 hash (hex) of this event's canonical JSON with the 'hash' field removed. Recompute it to verify the line; any edit to any field changes it."
+		},
+		"kind": {
+			"type": "string",
+			"description": "Event kind. Open-ended; kinds emitted today include 'llm_call', 'stream_partial_delivery', 'anomaly_detected', and 'settlement_ambiguous'."
+		},
+		"actor": {
+			"type": "string",
+			"description": "Actor identity that produced the event (defaults to 'local')."
+		},
+		"data": {
+			"type": "object",
+			"description": "Event payload. Open-ended by design: each kind carries its own fields, and all of them are covered by the hash.",
+			"additionalProperties": true
+		},
+		"sequence": {
+			"type": "integer",
+			"minimum": 1,
+			"description": "1-based global sequence number, continuous across rotated segments. Gaps indicate segment or event deletion. Legacy segments written before sequence numbering omit this field; the verifier accepts them, but every line the current writer persists includes it."
+		}
+	},
+	"additionalProperties": true
+}

@@ -248,6 +248,7 @@ describe("Streaming governance integration", () => {
 		);
 		expect(partialCall).toBeDefined();
 
+		// biome-ignore lint/correctness/noUnsafeOptionalChaining: partialCall guaranteed defined by the toBeDefined() assertion above
 		const partialData = (partialCall?.[0] as AppendEventInput).data;
 		expect(partialData.chunksDelivered).toBe(2);
 		expect(partialData.partialInputTokens).toBe(50);

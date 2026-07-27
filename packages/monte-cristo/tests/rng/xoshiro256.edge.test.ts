@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { Xoshiro256, createRng, hashInputs } from "../../src/rng/xoshiro256.js";
+import { createRng, hashInputs, Xoshiro256 } from "../../src/rng/xoshiro256.js";
 
 describe("Xoshiro256 array-state seeding", () => {
 	it("seeds from a 4-word state and is deterministic", () => {

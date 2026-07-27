@@ -40,12 +40,7 @@ function writeVaultConfig(
 	);
 }
 
-function makeSignedManifest(
-	opts: {
-		permissions?: string[];
-		publisher?: string;
-	} = {},
-) {
+function makeSignedManifest(opts: { permissions?: string[]; publisher?: string } = {}) {
 	const kp = generateKeyPair();
 	const unsigned = createUnsignedManifest({
 		id: "acme/summarizer",
