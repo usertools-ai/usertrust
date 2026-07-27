@@ -1,0 +1,43 @@
+---
+title: JSON Schemas
+description: Published JSON Schemas for trust receipts and audit chain events, with stable $ids.
+---
+
+usertrust publishes JSON Schema (draft 2020-12) definitions for its two public interop shapes: the receipt returned by every governed call, and one persisted line of the hash-chained audit log. The `$id` URLs are stable — pin them in validators, CI checks, or any tool that consumes receipts or audit logs.
+
+| Schema | `$id` | Describes |
+|--------|-------|-----------|
+| Trust Receipt v1 | [receipt.v1.schema.json](https://usertrust.ai/schemas/receipt.v1.schema.json) | The `TrustReceipt` returned by every governed call |
+| Audit Event v1 | [audit-event.v1.schema.json](https://usertrust.ai/schemas/audit-event.v1.schema.json) | One line of the audit chain (`.usertrust/audit/*.jsonl`) |
+
+## Versioning
+
+- **v1 is frozen.** Once published, a versioned schema never changes meaning. Description wording may improve; the validated shape does not.
+- **Changes ship as a new version.** Additive or breaking changes become `receipt.v2.schema.json` at a new URL. v1 URLs keep working and keep meaning the same thing.
+- **Both schemas are open.** Receipts may carry additional diagnostic fields, and audit events may carry extra fields that are covered by the chain hash. Validators must ignore unknown fields, not reject them.
+
+## Validating a receipt
+
+With [ajv](https://ajv.js.org/) v8 (`npm install ajv ajv-formats`):
+
+```typescript
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
+
+const schema = await fetch("https://usertrust.ai/schemas/receipt.v1.schema.json").then((r) =>
+  r.json(),
+);
+
+const ajv = addFormats(new Ajv2020());
+const validate = ajv.compile(schema);
+
+if (!validate(receipt)) {
+  console.error(validate.errors);
+}
+```
+
+No validator handy? The schemas are plain static JSON — fetch one and read `required` / `properties` directly. String formats (`date-time`, `uuid`) are annotations; `ajv-formats` enforces them, other validators may not.
+
+<Callout type="info">
+Schema validation checks shape, not integrity. To prove an audit log is untampered — hash chain, sequence continuity, Merkle root — run the zero-dependency [usertrust-verify](/docs/verify) package against the vault. It works offline.
+</Callout>

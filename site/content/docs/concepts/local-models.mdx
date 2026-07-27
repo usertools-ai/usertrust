@@ -1,0 +1,96 @@
+---
+title: Local Models
+description: How usertrust classifies local endpoints and meters Ollama, vLLM, and LM Studio at nominal rates.
+---
+
+usertrust governs local (self-hosted) inference with the same two-phase spend, audit chain, and receipts as cloud calls. The *endpoint* -- not the model string -- picks the settlement regime: a call to Ollama on localhost settles at nominal local rates, a call to a paid API settles at cloud rates. Renaming a local model (`ollama cp llama3.2 gpt-4o`) cannot change the regime in either direction.
+
+Free inference stays inside governance, not exempt from it.
+
+## Endpoint Classification
+
+Every governed client is classified `local` or `cloud` by inspecting its `baseURL`. Classification runs in a fixed order -- the first rule that applies wins:
+
+1. **Explicit override** -- an override passed by the caller wins over everything.
+2. **No readable `baseURL`** -- absent or malformed URLs classify as cloud. Never throws.
+3. **`endpoints[]` matchers** -- first matching config entry wins.
+4. **Loopback autodetect** -- `localhost`, `127.0.0.1`, `::1`, and the IPv4-mapped IPv6 loopback classify as local when `local.autoDetectLoopback` is `true` (the default). The port hints the runtime: `11434` = ollama, `1234` = lmstudio, `8000` = vllm, anything else = openai-compat.
+5. **Cloud default** -- anything unmatched is cloud.
+
+The default is **fail-expensive** by design: over-charging free inference at cloud rates is recoverable; under-charging a paid endpoint is not.
+
+### Endpoint Matchers
+
+Each `endpoints[]` entry matches the client's `baseURL` in exactly one of three forms -- never raw string prefixing:
+
+| Form | Example | Semantics |
+|------|---------|-----------|
+| Scheme URL | `http://gpu-box:8000` | Origin equality; path, query, and trailing slash ignored |
+| Leading star | `*.gpu.internal` | Hostname suffix; matches `a.gpu.internal`, not `gpu.internal` itself |
+| Bare hostname | `gpu-box` | Case-insensitive hostname equality, any port |
+
+```jsonc
+// .usertrust/usertrust.config.json
+{
+	"budget": 500000,
+	"endpoints": [
+		{ "match": "http://gpu-box:8000", "class": "local", "runtime": "vllm" },
+		{ "match": "*.gpu.internal", "class": "local" }
+	]
+}
+```
+
+Origin equality is deliberate: prefix matching would let `http://gpu-box:8000.evil.com` or `http://gpu-box:8000@evil.com` classify as local. Origin comparison kills both shapes.
+
+## Nominal Metering
+
+Local-scope rate resolution never touches the cloud pricing table:
+
+1. `local.models` exact match
+2. Longest trailing-star glob (`"llama3.3*"`, `"*"`)
+3. `local.defaultRate` -- `{ inputPer1k: 0, outputPer1k: 0 }` by default
+
+Every call cost is floored at 1 usertoken -- zero-amount ledger transfers are invalid -- so a `{0,0}`-rate local call settles at **exactly 1 nominal usertoken**. Real token counts are still metered: for local OpenAI-compatible streams, `stream_options: { include_usage: true }` is auto-injected (`local.injectUsageOptions`, default `true`) so settlement uses server-truth counts instead of estimates.
+
+### Why Budgets Still Bind
+
+Nominal metering is not an exemption. Every local call still places a PENDING hold, settles at least 1 usertoken, and lands on the audit chain -- so runaway loops burn budget, anomaly governance still fires, and every call has a receipt. The receipt carries the provenance:
+
+| Receipt field | Local value |
+|---------------|-------------|
+| `endpoint` | `{ class: "local", runtime: "ollama" \| "vllm" \| "lmstudio" \| "openai-compat" }` |
+| `meter.costBasis` | `"nominal"` (or `"usd-proxy"` with `rateClass: "amortized-usd"`) |
+| `meter.rateSource` | `"local-model"` or `"local-default"` |
+| `usageSource` | `"provider"` or `"estimated"` |
+
+For GPU showback, set `local.rateClass: "amortized-usd"` and per-model rates in `local.models` -- local calls then settle at your amortized chargeback rate (1 usertoken = $0.0001, as usual) instead of the nominal floor.
+
+## unknownModelPolicy
+
+Only cloud-scope calls can hit an unknown model -- local scope always resolves to local rates. When a model misses `customRates`, the pricing table, and prefix matching, `unknownModelPolicy` decides:
+
+| Policy | Behavior |
+|--------|----------|
+| `"fallback"` | Silent sonnet-class fallback rate (legacy behavior) |
+| `"warn"` (default) | Same rate, one-time console warning per model per process, `meter.rateSource: "fallback"` on the receipt |
+| `"deny"` | `PolicyDeniedError` thrown before any PENDING hold is placed |
+
+## Security Posture
+
+Endpoint classification -- config matchers, overrides, and loopback autodetect -- is a **trusted-operator decision**. Never wire it to end-user or request input. This is the same trust boundary as `budget` and `customRates`: the config author already controls billing entirely.
+
+<Callout type="warn">
+In server and multi-tenant deployments, set `local.autoDetectLoopback: false` and classify via explicit `endpoints[]` config. Loopback inside a container can be a forwarding sidecar to a paid API.
+</Callout>
+
+A compromised local server can under-report usage. Receipts expose `usageSource` and `meter.rateSource` precisely so that this is auditable.
+
+## Try It
+
+The [`examples/ollama-local-governance`](https://github.com/usertools-ai/usertrust/tree/master/examples/ollama-local-governance) demo shows the before/after -- frontier fallback billing vs. nominal local settlement -- plus the model-spoofing defense. It works against a live Ollama on `localhost:11434` or an inline mock server, in `dryRun` mode against throwaway temp vaults. No TigerBeetle needed.
+
+```sh
+npm install
+cd examples/ollama-local-governance
+npx tsx run.ts
+```

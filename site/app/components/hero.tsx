@@ -10,8 +10,8 @@ import { CopyCommand } from "./copy-command";
 // later rotations never produce a bigger paint area and LCP stays anchored to
 // the initial (server-rendered, CSS-revealed) tagline instead of a rotation.
 const taglines = [
-	"Hash-chained receipts. Tamper-evident by construction. Zero vendor lock-in.",
-	"Budget holds, audit trails, and spend limits for every LLM call.",
+	"Hash-chained receipts with Merkle proofs — verifiable offline, zero dependencies.",
+	"Ollama and local models, governed with real receipts at nominal rates.",
 	"Your API keys. Your billing. Your provider. We add the trust layer.",
 	"Like a credit card hold — but for AI spend. Settled or voided, never lost.",
 ];

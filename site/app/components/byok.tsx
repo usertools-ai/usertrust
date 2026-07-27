@@ -6,6 +6,9 @@ const providers = [
 	{ name: "Google", detail: "Gemini SDK" },
 	{ name: "xAI", detail: "Grok SDK" },
 	{ name: "Groq", detail: "Fast inference" },
+	{ name: "Ollama", detail: "Local models" },
+	{ name: "vLLM", detail: "Your GPUs" },
+	{ name: "LM Studio", detail: "Local models" },
 ];
 
 export function BYOK() {
@@ -18,7 +21,7 @@ export function BYOK() {
 							className="text-3xl sm:text-4xl font-bold leading-tight"
 							style={{ textShadow: "0 0 40px rgba(52,211,153,0.1)" }}
 						>
-							Your keys. Your billing.
+							Your keys. Your billing. Your GPUs.
 							<br />
 							Our trust layer.
 						</h2>
@@ -26,8 +29,9 @@ export function BYOK() {
 					<ScrollReveal delay={0.1}>
 						<p className="text-base text-white/60 leading-relaxed">
 							<code className="font-mono text-ut">trust()</code> wraps your existing provider
-							client. No proxy. No routing. No new accounts. Just trust on top of what you already
-							use.
+							client. No proxy. No routing. No new accounts. Local endpoints — Ollama, vLLM, LM
+							Studio — get classified and metered at nominal rates, with the same receipts as every
+							cloud call.
 						</p>
 					</ScrollReveal>
 				</div>
