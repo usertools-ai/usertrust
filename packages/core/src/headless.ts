@@ -46,7 +46,6 @@ import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import { writeReceipt } from "./audit/rotation.js";
 import type { TrustEngine, TrustOpts } from "./govern.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
-import { computeDivergence } from "./ledger/divergence.js";
 import {
 	costFromRates,
 	estimateCost,
@@ -678,16 +677,6 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				usageSource = "estimated";
 			}
 
-			// Task 1: divergence signal (provider usage vs the authorize-time estimate).
-			// The Authorization keeps only estimatedCost, which is exactly the baseline
-			// computeDivergence needs. Built by omission unless usageSource === "provider".
-			const divergence = computeDivergence(
-				auth.estimatedCost,
-				actualCost,
-				usageSource,
-				config.divergence.factor,
-			);
-
 			// AUD-453: Acquire mutex for budget atomicity — prevents concurrent
 			// settle() calls from corrupting inFlightHoldTotal or budgetSpent.
 			const releaseLock = await budgetMutex.acquire();
@@ -778,26 +767,6 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				callAuditDegraded = true;
 			}
 
-			// Task 1: emit a hash-chained usage_divergence event when flagged (numbers +
-			// ids only, never raw usage bodies). Best-effort — a write failure never
-			// blocks settlement. This settle path is single-shot (activeAuths gate above),
-			// so the event cannot double-emit.
-			if (divergence?.flagged && config.divergence.audit) {
-				await audit
-					.appendEvent({
-						kind: "usage_divergence",
-						actor: "local",
-						data: {
-							transferId: auth.transferId,
-							model,
-							estimatedCost: divergence.estimatedCost,
-							actualCost: divergence.actualCost,
-							ratio: divergence.ratio,
-						},
-					})
-					.catch(() => {});
-			}
-
 			// Daily-rotated receipt
 			if (config.audit.rotation !== "none") {
 				writeReceipt(
@@ -840,7 +809,6 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				provider: "headless",
 				timestamp: new Date().toISOString(),
 				usageSource,
-				...(divergence !== undefined ? { divergence } : {}),
 				// M2: endpoint classification + metering provenance (A6: computeMs is
 				// OMITTED, never undefined, when absent/invalid).
 				endpoint: { class: endpoint.class, runtime: endpoint.runtime },

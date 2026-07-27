@@ -9,21 +9,26 @@
  *
  * **Governance boundary:** the following methods are intercepted and governed:
  * - Anthropic: `client.messages.create()`, `client.messages.stream()`,
- *   `client.beta.messages.create()`, `client.beta.messages.stream()`
+ *   `client.messages.parse()`, `client.beta.messages.create()`,
+ *   `client.beta.messages.stream()`, `client.beta.messages.parse()`
  * - OpenAI: `client.chat.completions.create()`, and `client.responses.create()`
  *   when present (feature-detected — the Responses API postdates the peer-range
- *   floor, so older clients simply lack it and it stays a pass-through)
+ *   floor, so older clients simply lack it and it stays a pass-through). A streaming
+ *   `responses.create({ stream: true })` is governed; the `responses.stream()`
+ *   convenience helper is NOT (see below).
  * - Google: `client.models.generateContent()`
  *
  * Remaining ungoverned surfaces (feature-detected pass-throughs, or shapes that do
  * not mirror `create`): `client.messages.batches`, `client.beta.messages.batches`,
  * `client.beta.models`, `client.beta.files`, the OpenAI Responses non-create
- * methods (`client.responses.retrieve/cancel/delete`), the OpenAI `client.beta.*`
- * namespace (assistants/threads/realtime — a different shape from Anthropic beta),
- * and the legacy `client.completions.create`. These are **NOT** intercepted and
- * bypass governance, audit, and budget enforcement. Callers relying on ungoverned
- * methods should implement their own budget and audit controls or wrap calls
- * through the governed entry points above.
+ * methods (`client.responses.retrieve/cancel/delete`, plus the
+ * `client.responses.stream()` and `client.responses.parse()` helpers — both drive
+ * the SDK's raw client internally and so bypass the governed `create`), the OpenAI
+ * `client.beta.*` namespace (assistants/threads/realtime — a different shape from
+ * Anthropic beta), and the legacy `client.completions.create`. These are **NOT**
+ * intercepted and bypass governance, audit, and budget enforcement. Callers relying
+ * on ungoverned methods should implement their own budget and audit controls or wrap
+ * calls through the governed entry points above.
  */
 
 import type { EndpointInfo, LLMClientKind, LocalRuntime, TrustConfig } from "./shared/types.js";
@@ -33,17 +38,22 @@ import type { EndpointInfo, LLMClientKind, LocalRuntime, TrustConfig } from "./s
  *
  * Governance boundary: the following methods are intercepted and governed:
  * - Anthropic: `client.messages.create()`, `client.messages.stream()`,
- *   `client.beta.messages.create()`, `client.beta.messages.stream()`
+ *   `client.messages.parse()`, `client.beta.messages.create()`,
+ *   `client.beta.messages.stream()`, `client.beta.messages.parse()`
  * - OpenAI: `client.chat.completions.create()`, and `client.responses.create()`
  *   when present (feature-detected — the Responses API postdates the peer-range
- *   floor, so older clients simply lack it and it stays a pass-through)
+ *   floor, so older clients simply lack it and it stays a pass-through). A streaming
+ *   `responses.create({ stream: true })` is governed; the `responses.stream()`
+ *   helper is NOT.
  * - Google: `client.models.generateContent()`
  *
  * Remaining ungoverned pass-throughs: `client.messages.batches`,
  * `client.beta.messages.batches`, `client.beta.models`, `client.beta.files`, the
- * OpenAI Responses non-create methods (`client.responses.retrieve/cancel/delete`),
- * the OpenAI `client.beta.*` namespace (assistants/threads/realtime), and the
- * legacy `client.completions.create`. These bypass governance, audit, and budget
+ * OpenAI Responses non-create methods (`client.responses.retrieve/cancel/delete`,
+ * plus the `client.responses.stream()` and `client.responses.parse()` helpers,
+ * which drive the SDK's raw client and bypass the governed `create`), the OpenAI
+ * `client.beta.*` namespace (assistants/threads/realtime), and the legacy
+ * `client.completions.create`. These bypass governance, audit, and budget
  * enforcement (they do not mirror the `create` request/response shape).
  *
  * @throws {Error} if the client does not match any known SDK shape

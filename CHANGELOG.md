@@ -70,7 +70,19 @@ instead of being exempted from it.
     `.abort()` / async iteration preserved) with a `.receipt` promise attached;
     settlement is driven by non-consuming emitter listeners so it never competes
     with the caller's own consumption. The governed `stream()` authorizes before
-    forwarding, so callers `await` the returned handle.
+    forwarding, so callers `await` the returned handle. A clean stream close with no
+    `finalMessage` settles at estimate (the hold never dangles), and a consumer
+    `abort()` settles the partial usage as an early exit rather than voiding or
+    tripping the circuit breaker. Governance never silently swallows a stream
+    failure: a genuine stream error rejects `.receipt`, so any consumer that
+    `await`s `.receipt` (or the stream's own `done()`/`finalMessage()`) observes it.
+    The one exception is a pure fire-and-forget consumer that never awaits
+    `.receipt`, registers no `error` handler, and never awaits the stream — for that
+    caller the error is not surfaced; await `.receipt` or attach an error handler.
+  - Anthropic `client.messages.parse()` and `client.beta.messages.parse()` are
+    governed: the underlying create runs through the two-phase lifecycle exactly
+    once, then the SDK's parse transform is applied and the parsed message is
+    returned with a `.receipt` attached.
   - Anthropic `client.beta.messages.create()` and `client.beta.messages.stream()`
     are governed identically to the stable surface. `beta.models`, `beta.files`,
     and `beta.messages.batches` remain documented pass-throughs.
@@ -78,20 +90,14 @@ instead of being exempted from it.
     and streaming, when present (feature-detected against the `openai >=4.70.0`
     peer floor, which predates the Responses API). Prompt/PII/injection/estimation
     coverage reads Responses `input`/`instructions`; streaming usage is read from
-    the terminal `response.completed` event (`event.response.usage.{input_tokens,
-    output_tokens}`). The chat-completions-only `stream_options.include_usage`
-    opt-in is never injected into Responses params.
-- **Usage-divergence receipt flag.** `TrustReceipt.divergence` (optional) records
-  how far provider-reported cost strayed from the pre-call estimate:
-  `{ ratio, estimatedCost, actualCost, flagged }` where `ratio = actualCost /
-  estimatedCost` and `flagged` is true when the ratio falls outside
-  `[1/factor, factor]`. Present only when settlement used provider-reported usage
-  (a provider under-reporting far below the estimate is the under-reporting-server
-  signal; far above catches estimate blowouts / misconfigured rates). New
-  zod-defaulted `divergence` config block (`factor` default 4, `audit` default
-  true); when flagged and `audit` is on, a hash-chained `usage_divergence` audit
-  event (ids + numbers only, no prompt/usage bodies) is appended at every settle
-  site. Exported `computeDivergence` helper.
+    the terminal event — `response.completed`, and equally the terminal
+    `response.incomplete` / `response.failed` events, at
+    `event.response.usage.{input_tokens,output_tokens}`. The chat-completions-only
+    `stream_options.include_usage` opt-in is never injected into Responses params.
+    The `client.responses.stream()` and `client.responses.parse()` convenience
+    helpers are **not** governed — they drive the SDK's raw client internally and so
+    bypass the governed `create`; use `responses.create({ stream: true })` for a
+    governed stream.
 - **Real-TigerBeetle CI validation.** A new non-gating `tb-integration` CI job
   stands up a real single-node TigerBeetle cluster (pinned to the
   `tigerbeetle-node` version) and runs the two-phase hard-budget invariant

@@ -22,12 +22,13 @@
 
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
+import { VAULT_DIR } from "../../src/shared/constants.js";
 import type { AuditEvent, TrustReceipt } from "../../src/shared/types.js";
 
 // ── TigerBeetle native-module mock (never loaded in unit tests) ──
@@ -59,6 +60,18 @@ interface FakeStreamOpts {
 	error?: Error;
 	/** A9 mode 6: emit a late `abort` AFTER `finalMessage` (abort/complete race). */
 	alsoAbortAfterFinal?: boolean;
+	/**
+	 * F6: emit `end` WITHOUT a preceding `finalMessage` — the real MessageStream's
+	 * clean-SSE-close-without-message_stop shape (receivedMessages empty →
+	 * `_emitFinal` emits nothing, only `end` fires).
+	 */
+	endWithoutFinal?: boolean;
+	/**
+	 * R1: milliseconds to wait BETWEEN streamEvents. Spacing events out lets the
+	 * token-rate anomaly detector accumulate real per-window rates (a synchronous
+	 * burst never trips it), so a runaway stream can trip a mid-stream governance abort.
+	 */
+	chunkDelayMs?: number;
 }
 
 /**
@@ -72,6 +85,8 @@ class FakeMessageStream extends EventEmitter {
 	private readonly errorAfter: number | undefined;
 	private readonly err: Error;
 	private readonly alsoAbortAfterFinal: boolean;
+	private readonly endWithoutFinal: boolean;
+	private readonly chunkDelayMs: number;
 	private aborted = false;
 	private terminal = false;
 	private readonly donePromise: Promise<unknown>;
@@ -85,16 +100,18 @@ class FakeMessageStream extends EventEmitter {
 		this.errorAfter = opts.errorAfter;
 		this.err = opts.error ?? new Error("Stream interrupted");
 		this.alsoAbortAfterFinal = opts.alsoAbortAfterFinal ?? false;
+		this.endWithoutFinal = opts.endWithoutFinal ?? false;
+		this.chunkDelayMs = opts.chunkDelayMs ?? 0;
 		this.donePromise = new Promise((res, rej) => {
 			this.doneResolve = res;
 			this.doneReject = rej;
 		});
 		this.donePromise.catch(() => {});
 		// Self-drive on a macrotask so ALL listeners (governance + caller) attach first.
-		setTimeout(() => this.drive(), 0);
+		setTimeout(() => void this.drive(), 0);
 	}
 
-	private drive(): void {
+	private async drive(): Promise<void> {
 		if (this.aborted || this.terminal) return;
 		let emitted = 0;
 		for (const ev of this.evs) {
@@ -108,9 +125,20 @@ class FakeMessageStream extends EventEmitter {
 			}
 			this.emit("streamEvent", ev, {});
 			emitted++;
+			// A governance abort inside the streamEvent handler flips `aborted` — bail
+			// before the next delay so we don't emit past a mid-stream cutoff.
+			if (this.chunkDelayMs > 0 && !this.aborted) {
+				await new Promise<void>((r) => setTimeout(r, this.chunkDelayMs));
+			}
 		}
 		if (this.aborted) return;
 		this.terminal = true;
+		if (this.endWithoutFinal) {
+			// F6: clean close, no finalMessage — only `end` fires (endPromise resolves).
+			this.doneResolve(undefined);
+			this.emit("end");
+			return;
+		}
 		this.emit("finalMessage", this.finalMsg);
 		this.doneResolve(this.finalMsg);
 		this.emit("end");
@@ -244,10 +272,6 @@ describe("Anthropic messages.stream governance (A1/A2)", () => {
 		expect(receipt.usageSource).toBe("provider");
 		expect(receipt.chunksDelivered).toBe(3);
 		expect(receipt.cost).toBeGreaterThan(0);
-		// Task 1 divergence flag rides along on the stream receipt.
-		expect(receipt.divergence).toBeDefined();
-		expect(receipt.divergence?.actualCost).toBe(receipt.cost);
-		expect(Number.isFinite(receipt.divergence?.ratio ?? Number.NaN)).toBe(true);
 
 		await governed.destroy();
 	});
@@ -656,7 +680,10 @@ describe("A9 — ledger-mutation count across the six-mode consumption matrix", 
 		await governed.destroy();
 	});
 
-	it("caller abort → void exactly once, never posts", async () => {
+	it("caller abort → settle partial exactly once, never voids (F9)", async () => {
+		// F9: a consumer abort is an early EXIT, not a provider failure — it settles the
+		// partial usage rather than voiding the hold (mirroring the generic
+		// break-out-of-for-await path). Exactly one ledger mutation, and it's a POST.
 		const { engine, governed } = await makeGoverned(
 			() => new FakeMessageStream({ events: PROVIDER_EVENTS, final: PROVIDER_FINAL }),
 		);
@@ -664,12 +691,13 @@ describe("A9 — ledger-mutation count across the six-mode consumption matrix", 
 			abort: () => void;
 			receipt: Promise<TrustReceipt>;
 		};
-		void stream.receipt.catch(() => {});
 		stream.abort();
+		const receipt = await stream.receipt;
 		await flush();
 
-		expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
-		expect(engine.postPendingSpend).not.toHaveBeenCalled();
+		expect(receipt.settled).toBe(true);
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
 		await governed.destroy();
 	});
 
@@ -688,7 +716,8 @@ describe("A9 — ledger-mutation count across the six-mode consumption matrix", 
 		await stream.receipt;
 		await flush();
 
-		// finalizeOnce: settle claimed first, the late abort's void is refused.
+		// finalizeOnce: the finalMessage settle claimed the gate first, so the late
+		// abort's own settle attempt is refused — still exactly one POST, never a void.
 		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
 		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
 		await governed.destroy();
@@ -756,5 +785,472 @@ describe("A3 fallback — stream() returns a NON-emitter (feature-detect miss)",
 		const startedAt = Date.now();
 		await governed.destroy();
 		expect(Date.now() - startedAt).toBeLessThan(1_000);
+	});
+});
+
+describe("F3 — finalMessage per-field usage merge (partial usage keeps accumulated counters)", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {}
+	});
+
+	async function streamReceipt(opts: FakeStreamOpts): Promise<TrustReceipt> {
+		const engine = makeMockEngine();
+		const client = {
+			messages: { create: vi.fn(), stream: vi.fn(() => new FakeMessageStream(opts)) },
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+		const stream = (await governed.messages.stream(STREAM_PARAMS)) as {
+			receipt: Promise<TrustReceipt>;
+		};
+		const receipt = await stream.receipt;
+		await governed.destroy();
+		return receipt;
+	}
+
+	it("a finalMessage with output_tokens: null keeps the 2000 output accumulated from streamEvent", async () => {
+		// streamEvents accumulate 500 input / 2000 output.
+		const ACC_EVENTS = [
+			{ type: "message_start", message: { usage: { input_tokens: 500 } } },
+			{ type: "message_delta", usage: { output_tokens: 2000 } },
+		];
+
+		// finalMessage reports input but a NULL output — the accumulated 2000 output
+		// must survive the per-field merge (the bug zeroed it → settled 500/0).
+		const merged = await streamReceipt({
+			events: ACC_EVENTS,
+			final: { id: "m", usage: { input_tokens: 500, output_tokens: null } },
+		});
+		// Authoritative target: a finalMessage carrying the FULL 500/2000.
+		const full = await streamReceipt({
+			events: ACC_EVENTS,
+			final: { id: "m", usage: { input_tokens: 500, output_tokens: 2000 } },
+		});
+		// What the bug produced: a genuine 500/0 settle (no accumulated output).
+		const zeroed = await streamReceipt({
+			events: [{ type: "message_start", message: { usage: { input_tokens: 500 } } }],
+			final: { id: "m", usage: { input_tokens: 500, output_tokens: 0 } },
+		});
+
+		expect(merged.usageSource).toBe("provider");
+		// Merged prices identically to the full 500/2000 report...
+		expect(merged.cost).toBe(full.cost);
+		// ...and strictly above the 500/0 the bug would have settled.
+		expect(merged.cost).toBeGreaterThan(zeroed.cost);
+	});
+
+	it("a finalMessage with input_tokens: null keeps the accumulated input counter", async () => {
+		const ACC_EVENTS = [
+			{ type: "message_start", message: { usage: { input_tokens: 500 } } },
+			{ type: "message_delta", usage: { output_tokens: 2000 } },
+		];
+		// Mirror case: null INPUT field, real output — accumulated 500 input survives.
+		const merged = await streamReceipt({
+			events: ACC_EVENTS,
+			final: { id: "m", usage: { input_tokens: null, output_tokens: 2000 } },
+		});
+		const full = await streamReceipt({
+			events: ACC_EVENTS,
+			final: { id: "m", usage: { input_tokens: 500, output_tokens: 2000 } },
+		});
+
+		expect(merged.usageSource).toBe("provider");
+		expect(merged.cost).toBe(full.cost);
+	});
+});
+
+describe("F6 — clean 'end' with no finalMessage settles at estimate (no dangling hold)", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {}
+	});
+
+	it("settles once at estimate and releases the hold when only 'end' fires", async () => {
+		const engine = makeMockEngine();
+		const client = {
+			messages: {
+				create: vi.fn(),
+				// message_start + a delta, then a CLEAN close with NO finalMessage (no
+				// message_stop) — the real MessageStream emits only 'end' here.
+				stream: vi.fn(
+					() => new FakeMessageStream({ events: PROVIDER_EVENTS, endWithoutFinal: true }),
+				),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const stream = (await governed.messages.stream(STREAM_PARAMS)) as {
+			receipt: Promise<TrustReceipt>;
+		};
+		const receipt = await stream.receipt;
+
+		// The 'end' catch-all settles at ESTIMATE (never voids), so the hold releases.
+		expect(receipt.settled).toBe(true);
+		expect(receipt.usageSource).toBe("estimated");
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+
+		// No leak: destroy drains promptly rather than spinning to its 5s deadline.
+		await flush();
+		const startedAt = Date.now();
+		await governed.destroy();
+		expect(Date.now() - startedAt).toBeLessThan(1_000);
+	});
+});
+
+describe("F9 — consumer aborts do not trip the circuit breaker", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {}
+	});
+
+	it("five consecutive aborts settle partial and leave the breaker CLOSED", async () => {
+		const engine = makeMockEngine();
+		const client = {
+			messages: {
+				create: vi.fn(),
+				stream: vi.fn(
+					() => new FakeMessageStream({ events: PROVIDER_EVENTS, final: PROVIDER_FINAL }),
+				),
+			},
+		};
+		// Budget generous enough for 5 aborted (estimate-settled) streams + a 6th.
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 1_000_000_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		// The default circuit-breaker failureThreshold is 5. Under the old behavior each
+		// abort recorded a FAILURE, so the 5th would open the breaker and the 6th
+		// stream() would throw CircuitOpenError. F9 settles aborts as successes.
+		for (let i = 0; i < 5; i++) {
+			const s = (await governed.messages.stream(STREAM_PARAMS)) as {
+				abort: () => void;
+				receipt: Promise<TrustReceipt>;
+			};
+			s.abort();
+			await s.receipt;
+			await flush();
+		}
+
+		// Breaker still closed: a 6th stream authorizes and settles normally.
+		const sixth = (await governed.messages.stream(STREAM_PARAMS)) as {
+			receipt: Promise<TrustReceipt>;
+		};
+		const receipt = await sixth.receipt;
+		expect(receipt.settled).toBe(true);
+
+		// Every abort settled (POSTed); none voided.
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(engine.postPendingSpend).toHaveBeenCalledTimes(6);
+
+		await governed.destroy();
+	});
+});
+
+describe("F4 — messages.parse / beta.messages.parse are governed (no crash, settle once)", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {}
+	});
+
+	const RAW_MESSAGE = {
+		id: "msg_parse",
+		type: "message",
+		role: "assistant",
+		content: [{ type: "text", text: '{"answer":42}' }],
+		usage: { input_tokens: 30, output_tokens: 12 },
+	};
+
+	// The SDK's real parse() is `create(params).then(parseMessage)`; when create is the
+	// governed proxy it returns a { response, receipt } wrapper the SDK parser crashes
+	// on. A raw parse() that mirrors the SDK exercises exactly that path.
+	function makeClientWithParse() {
+		const rawCreate = vi.fn(async () => RAW_MESSAGE);
+		const rawParse = vi.fn(function (
+			this: { create: (p: unknown) => Promise<unknown> },
+			params: unknown,
+		) {
+			return this.create(params).then((m) => {
+				// The SDK's parseMessage would do `(m as Message).content.map(...)` here.
+				(m as { content: unknown[] }).content.map((b) => b);
+				return m;
+			});
+		});
+		const messages = { create: rawCreate, stream: vi.fn(), parse: rawParse };
+		const client: Record<string, unknown> = {
+			messages,
+			beta: { messages: { create: rawCreate, stream: vi.fn(), parse: rawParse } },
+		};
+		return client;
+	}
+
+	const PARSE_PARAMS = {
+		model: "claude-sonnet-4-6",
+		max_tokens: 256,
+		messages: [{ role: "user", content: "Give me the answer." }],
+		output_config: { format: { type: "json_schema", parse: (c: string) => JSON.parse(c) } },
+	};
+
+	it("stable messages.parse returns a parsed Message with a receipt and settles once", async () => {
+		const engine = makeMockEngine();
+		const governed = await trust(makeClientWithParse(), {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const parsed = (await (
+			governed as unknown as {
+				messages: { parse: (p: unknown) => Promise<Record<string, unknown>> };
+			}
+		).messages.parse(PARSE_PARAMS)) as {
+			content: { type: string; text: string }[];
+			parsed_output: unknown;
+			receipt: TrustReceipt;
+		};
+
+		// A real SDK-shaped Message (NOT a { response, receipt } wrapper).
+		expect(Array.isArray(parsed.content)).toBe(true);
+		expect(parsed.content[0].text).toBe('{"answer":42}');
+		// The structured-output transform ran (caller-provided format.parse).
+		expect(parsed.parsed_output).toEqual({ answer: 42 });
+		// The governed create settled exactly once and the receipt rode along.
+		expect(parsed.receipt.settled).toBe(true);
+		expect(engine.spendPending).toHaveBeenCalledOnce();
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+
+		await governed.destroy();
+	});
+
+	it("beta.messages.parse is governed identically (no crash, settle once)", async () => {
+		const engine = makeMockEngine();
+		const governed = await trust(makeClientWithParse(), {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const parsed = (await (
+			governed as unknown as {
+				beta: { messages: { parse: (p: unknown) => Promise<Record<string, unknown>> } };
+			}
+		).beta.messages.parse(PARSE_PARAMS)) as {
+			content: { type: string; text: string }[];
+			parsed_output: unknown;
+			receipt: TrustReceipt;
+		};
+
+		expect(parsed.content[0].text).toBe('{"answer":42}');
+		expect(parsed.parsed_output).toEqual({ answer: 42 });
+		expect(parsed.receipt.settled).toBe(true);
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+
+		await governed.destroy();
+	});
+});
+
+describe("F8 — governance never silently swallows a stream failure", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {}
+	});
+
+	it("a consumer awaiting `.receipt` sees a genuine mid-stream error (rejection)", async () => {
+		const engine = makeMockEngine();
+		const client = {
+			messages: {
+				create: vi.fn(),
+				stream: vi.fn(
+					() =>
+						new FakeMessageStream({
+							events: PROVIDER_EVENTS,
+							errorAfter: 2,
+							error: new Error("boom upstream"),
+						}),
+				),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const stream = (await governed.messages.stream(STREAM_PARAMS)) as {
+			receipt: Promise<TrustReceipt>;
+		};
+
+		// The error is NOT swallowed: awaiting `.receipt` rejects with the provider error.
+		await expect(stream.receipt).rejects.toThrow(/boom upstream/);
+		// A genuine failure voids (never posts).
+		expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.postPendingSpend).not.toHaveBeenCalled();
+
+		await governed.destroy();
+	});
+
+	it("the happy path still resolves `.receipt` to a settled receipt", async () => {
+		const engine = makeMockEngine();
+		const client = {
+			messages: {
+				create: vi.fn(),
+				stream: vi.fn(
+					() => new FakeMessageStream({ events: PROVIDER_EVENTS, final: PROVIDER_FINAL }),
+				),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const stream = (await governed.messages.stream(STREAM_PARAMS)) as {
+			receipt: Promise<TrustReceipt>;
+		};
+		await expect(stream.receipt).resolves.toMatchObject({ settled: true });
+
+		await governed.destroy();
+	});
+});
+
+describe("R1 — anomaly cutoff on messages.stream matches the generic path (void + breaker failure)", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {}
+	});
+
+	// Anomaly opts only travel through the config file (TrustOpts has no anomaly
+	// field). Low token-rate thresholds so a runaway stream trips immediately.
+	function writeAnomalyConfig(vaultBase: string): void {
+		const dir = join(vaultBase, VAULT_DIR);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "usertrust.config.json"),
+			JSON.stringify({
+				budget: 50_000_000,
+				anomaly: {
+					enabled: true,
+					tokenRate: { thresholdTokPerSec: 10, windowMs: 100, consecutiveWindows: 1 },
+					spendVelocity: { thresholdDollarsPerMin: 1_000_000 },
+					injectionCascade: { eventCount: 1_000_000 },
+					cooldownMs: 60_000,
+				},
+			}),
+		);
+	}
+
+	// A runaway stream: 1000 output tokens per delta, spaced 30ms apart so multiple
+	// 100ms token-rate windows complete and trip the detector mid-stream.
+	function runawayEvents(): unknown[] {
+		const evs: unknown[] = [{ type: "message_start", message: { usage: { input_tokens: 50 } } }];
+		let cumulative = 0;
+		for (let i = 0; i < 12; i++) {
+			cumulative += 1000;
+			evs.push({ type: "content_block_delta", delta: { text: "x".repeat(1000) } });
+			evs.push({ type: "message_delta", usage: { output_tokens: cumulative } });
+		}
+		return evs;
+	}
+
+	it("a token-rate anomaly mid-stream VOIDs the hold and records a breaker FAILURE", async () => {
+		writeAnomalyConfig(tmpVault);
+		const engine = makeMockEngine();
+		const audit = makeMockAudit();
+		const client = {
+			messages: {
+				create: vi.fn(),
+				stream: vi.fn(() => new FakeMessageStream({ events: runawayEvents(), chunkDelayMs: 30 })),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: audit,
+		});
+
+		const stream = (await governed.messages.stream(STREAM_PARAMS)) as {
+			receipt: Promise<TrustReceipt>;
+		};
+		void stream.receipt.catch(() => {});
+
+		// Wait for the self-driven runaway stream to trip the anomaly + void the hold.
+		const deadline = Date.now() + 3_000;
+		while (
+			(engine.voidPendingSpend as ReturnType<typeof vi.fn>).mock.calls.length === 0 &&
+			Date.now() < deadline
+		) {
+			await flush(30);
+		}
+
+		// Same outcome as the generic createGovernedStream anomaly path: VOID once, never
+		// POST — the containment + breaker-failure signal is NOT lost on messages.stream.
+		expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.postPendingSpend).not.toHaveBeenCalled();
+
+		// The anomaly was detected + audited.
+		const calls = (audit.appendEvent as ReturnType<typeof vi.fn>).mock.calls as Array<
+			[AppendEventInput]
+		>;
+		expect(calls.some(([e]) => e.kind === "anomaly_detected")).toBe(true);
+
+		await governed.destroy();
 	});
 });

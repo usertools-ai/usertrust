@@ -37,7 +37,6 @@ import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import { writeReceipt } from "./audit/rotation.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
-import { computeDivergence } from "./ledger/divergence.js";
 import {
 	type RateResolution,
 	costFromRates,
@@ -141,8 +140,50 @@ export interface TrustEngine {
 	destroy?(): void;
 }
 
-/** The trusted client: original client shape + governance methods. */
-export type TrustedClient<T> = T & {
+// ── F5: governed-surface type rewrites ────────────────────────────────────────
+// The runtime proxy makes Anthropic `messages.stream` / `beta.messages.stream`
+// ASYNC (they authorize before forwarding) and hangs a `.receipt` promise off the
+// returned MessageStream; `messages.parse` / `beta.messages.parse` return the
+// parsed message with a settled `.receipt`. These mapped types make the EXPORTED
+// TrustedClient type match that runtime contract, so a consumer using the old sync
+// `const s = client.messages.stream(...)` pattern gets a compile error. Clients
+// without a top-level `messages` (OpenAI/Google) pass through unchanged.
+
+/** `stream` becomes `(...args) => Promise<MessageStream & { receipt: Promise<TrustReceipt> }>`. */
+type GovernedStreamMethod<F> = F extends (...args: infer A) => infer R
+	? (...args: A) => Promise<Awaited<R> & { receipt: Promise<TrustReceipt> }>
+	: F;
+
+/** `parse` becomes `(...args) => Promise<ParsedMessage & { receipt: TrustReceipt }>`. */
+type GovernedParseMethod<F> = F extends (...args: infer A) => infer R
+	? (...args: A) => Promise<Awaited<R> & { receipt: TrustReceipt }>
+	: F;
+
+/** Rewrite `stream`/`parse` on a `messages` resource; leave `create`/everything else. */
+type GovernedMessages<M> = M extends object
+	? Omit<M, "stream" | "parse"> &
+			("stream" extends keyof M ? { stream: GovernedStreamMethod<M["stream"]> } : unknown) &
+			("parse" extends keyof M ? { parse: GovernedParseMethod<M["parse"]> } : unknown)
+	: M;
+
+/** Rewrite `beta.messages` when present; otherwise leave `beta` untouched. */
+type GovernedBeta<B> = B extends { messages: infer BM }
+	? Omit<B, "messages"> & { messages: GovernedMessages<BM> }
+	: B;
+
+/**
+ * Rewrite only the Anthropic `messages` / `beta.messages` surfaces. A client
+ * without a `messages` resource (OpenAI, Google) is returned unchanged — its
+ * governed `create`/`responses` shapes are unaffected by this rewrite.
+ */
+type GovernedShape<T> = T extends { messages: infer M }
+	? Omit<T, "messages" | "beta"> & { messages: GovernedMessages<M> } & (T extends { beta: infer B }
+				? { beta: GovernedBeta<B> }
+				: unknown)
+	: T;
+
+/** The trusted client: governed client shape (F5) + governance methods. */
+export type TrustedClient<T> = GovernedShape<T> & {
 	destroy(): Promise<void>;
 	governAction<R>(
 		action: ActionDescriptor,
@@ -490,7 +531,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// authorize time, before any PENDING hold (A5).
 			const transferId = trustId("tx");
 			const estimatedInputTokens = estimateInputTokens(promptParts);
-			const maxOutputTokens = (params.max_tokens as number) ?? 4096;
+			// F1: size the output estimate to the caller's ACTUAL cap. Responses callers
+			// set `max_output_tokens`; chat.completions set `max_tokens`. Read the
+			// Responses field first, then chat, then the 4096 default — each only when it
+			// is a finite positive number (a 0/negative/NaN cap never shrinks the hold).
+			const finitePositiveCap = (value: unknown): number | undefined =>
+				typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+			const maxOutputTokens =
+				finitePositiveCap(params.max_output_tokens) ?? finitePositiveCap(params.max_tokens) ?? 4096;
 			const rateResolution = resolveRates(model, endpoint.class, config);
 			enforceUnknownModelPolicy(model, rateResolution, config);
 			const estimatedCost = costFromRates(
@@ -664,36 +712,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// void); every later signal returns false and MUST NOT mutate the ledger.
 			// Every terminal path routes through it: the non-stream settle + its
 			// outer-catch void, the stream onComplete/onError closures below, and
-			// (Tasks 2/3) any new surface's emitter/iterator/error/abort listeners. The
-			// divergence audit fires only from a granted "settle" branch, so a duplicate
-			// terminal signal can neither double-settle nor double-emit divergence.
+			// (Tasks 2/3) any new surface's emitter/iterator/error/abort listeners. A
+			// duplicate terminal signal can neither double-settle nor double-void.
 			let finalizeState: "pending" | "settled" | "voided" = "pending";
 			function finalizeOnce(outcome: "settle" | "void"): boolean {
 				if (finalizeState !== "pending") return false;
 				finalizeState = outcome === "settle" ? "settled" : "voided";
 				return true;
-			}
-
-			// Task 1: divergence audit emitter. Best-effort, mirrors anomaly_detected —
-			// numbers + ids only, never raw prompt/usage bodies; a write failure never
-			// blocks settlement. Emitted only from inside a granted settle branch.
-			async function emitDivergenceAudit(divergence: TrustReceipt["divergence"]): Promise<void> {
-				if (divergence === undefined || !divergence.flagged || !config.divergence.audit) {
-					return;
-				}
-				await audit
-					.appendEvent({
-						kind: "usage_divergence",
-						actor: "local",
-						data: {
-							transferId,
-							model,
-							estimatedCost: divergence.estimatedCost,
-							actualCost: divergence.actualCost,
-							ratio: divergence.ratio,
-						},
-					})
-					.catch(() => {});
 			}
 
 			// Estimate-priced stream receipt (settled:false). Serves as the initial
@@ -725,8 +750,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			};
 
 			// Terminal stream settlement (A2 settle branch). Idempotent via
-			// finalizeOnce: budget commit + ledger POST + llm_call audit + divergence
-			// audit happen AT MOST ONCE per hold. Tasks 2/3 reuse this verbatim — the
+			// finalizeOnce: budget commit + ledger POST + llm_call audit happen AT MOST
+			// ONCE per hold. Tasks 2/3 reuse this verbatim — the
 			// Anthropic MessageStream 'finalMessage' listener and any new stream surface
 			// call it with a StreamCompletion built from final usage. Does NOT touch
 			// inFlightStreamCount — the caller (createGovernedStream wiring, or a new
@@ -824,14 +849,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					}
 				}
 
-				// Task 1: divergence signal (provider stream usage vs pre-call estimate).
-				const divergence = computeDivergence(
-					estimatedCost,
-					streamCost,
-					usageSource,
-					config.divergence.factor,
-				);
-
 				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
 				let auditHash = syntheticHash;
 				try {
@@ -864,11 +881,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					callAuditDegraded = true;
 				}
 
-				// Task 1: emit the divergence audit from inside the granted settle branch
-				// (after the settlement-defining llm_call event, so the chain reads
-				// llm_call → usage_divergence and it can never double-emit).
-				await emitDivergenceAudit(divergence);
-
 				// P3-AUDIT-FAILCLOSED (streaming): chunks were already delivered, so the
 				// strongest post-delivery signal is to REJECT `.receipt`. The caller's
 				// finally decrements inFlightStreamCount so destroy() never blocks.
@@ -890,7 +902,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					provider: kind,
 					timestamp: new Date().toISOString(),
 					usageSource,
-					...(divergence !== undefined ? { divergence } : {}),
 					chunksDelivered: completion.chunksDelivered,
 					// M2 provenance (A6: computeMs omitted — no compute-time source here).
 					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
@@ -984,11 +995,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					inFlightStreamCount--;
 				};
 
-				// `.receipt`: resolves with the settled receipt, rejects on void /
-				// failClosed. Built BEFORE the feature-detect branch so BOTH the emitter
-				// path and the non-emitter fallback expose a live `.receipt` the caller can
-				// await for the settled outcome. Pre-attach a catch so an ignored `.receipt`
-				// never surfaces as an unhandled rejection.
+				// `.receipt`: resolves with the settled receipt, rejects on a genuine
+				// stream error / failClosed. Built BEFORE the feature-detect branch so BOTH
+				// the emitter path and the non-emitter fallback expose a live `.receipt` the
+				// caller can await for the settled outcome. F8: governance never SILENTLY
+				// swallows a stream failure — a consumer who awaits `.receipt` always sees
+				// the error (the pre-attached catch below is a SEPARATE branch: promises are
+				// multicast, so it silences the unhandled-rejection ONLY for a fire-and-forget
+				// consumer that never awaits `.receipt`, never registers an error handler, and
+				// never calls done()/finalMessage() — that narrow gap is documented).
 				let receiptResolve!: (r: TrustReceipt) => void;
 				let receiptReject!: (e: unknown) => void;
 				const receiptPromise = new Promise<TrustReceipt>((res, rej) => {
@@ -1035,6 +1050,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				let accInput = 0;
 				let accOutput = 0;
 				let accUsageReported = false;
+				// R1: set TRUE before governance calls emitter.abort() on an anomaly trip,
+				// so the 'abort' handler can distinguish a governance cutoff (void + breaker
+				// failure) from a genuine consumer abort (F9 settle-partial).
+				let anomalyAbort = false;
 				const partial = (): StreamCompletion => ({
 					usage: { inputTokens: accInput, outputTokens: accOutput },
 					chunksDelivered,
@@ -1083,41 +1102,40 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								},
 							})
 							.catch(() => {});
-						// A1 best-effort mid-stream cutoff (full parity deferred): abort →
-						// 'abort' event → finalizeStreamVoid. finalizeOnce keeps it safe if a
+						// A1 best-effort mid-stream cutoff (full parity deferred). R1: flag
+						// this as a GOVERNANCE abort BEFORE aborting so the 'abort' handler
+						// VOIDs + records a breaker failure — same ledger + breaker outcome as
+						// the generic createGovernedStream anomaly path (which throws
+						// AnomalyError → finalizeStreamVoid). finalizeOnce keeps it safe if a
 						// finalMessage is already in flight.
+						anomalyAbort = true;
 						if (typeof emitter.abort === "function") emitter.abort();
 					}
 				});
 
 				emitter.on("finalMessage", (msg: unknown) => {
 					// A3: usage-extraction failure after a successful stream settles at
-					// ESTIMATE, never voids. Prefer finalMessage.usage; fall back to the
-					// tokens accumulated from streamEvent; else settle on the estimate.
+					// ESTIMATE, never voids. F3: MERGE per-field — a finalMessage that
+					// carries only one field (or null for the other) keeps the counter
+					// accumulated from streamEvent for the MISSING field, rather than
+					// zeroing it. Reported when EITHER source carried a real number;
+					// otherwise settle on the estimate.
 					const finalUsage = readFinalMessageUsage(msg);
-					let completion: StreamCompletion;
-					if (finalUsage.reported) {
-						completion = {
-							usage: {
-								inputTokens: finalUsage.inputTokens,
-								outputTokens: finalUsage.outputTokens,
-							},
-							chunksDelivered,
-							usageReported: true,
-						};
-					} else if (accUsageReported) {
-						completion = {
-							usage: { inputTokens: accInput, outputTokens: accOutput },
-							chunksDelivered,
-							usageReported: true,
-						};
-					} else {
-						completion = {
-							usage: { inputTokens: 0, outputTokens: 0 },
-							chunksDelivered,
-							usageReported: false,
-						};
-					}
+					const usageReported = finalUsage.reported || accUsageReported;
+					const completion: StreamCompletion = usageReported
+						? {
+								usage: {
+									inputTokens: finalUsage.inputTokens ?? accInput,
+									outputTokens: finalUsage.outputTokens ?? accOutput,
+								},
+								chunksDelivered,
+								usageReported: true,
+							}
+						: {
+								usage: { inputTokens: 0, outputTokens: 0 },
+								chunksDelivered,
+								usageReported: false,
+							};
 					finalizeStreamSettle(completion)
 						.then(receiptResolve, receiptReject)
 						.finally(releaseStreamCount);
@@ -1133,8 +1151,52 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// path will resolve, even though that settle's async is still in flight.
 					if (finalizeState === "voided") receiptReject(error);
 				};
+
+				// F9: a consumer-initiated abort surfaces as the SDK's 'abort' event
+				// (APIUserAbortError), distinct from the provider-failure 'error' event. It
+				// is an early EXIT, not a failure: settle at the PARTIAL accumulated usage
+				// (mirroring the generic governed-stream break-out-of-for-await path) instead
+				// of voiding, and never record a circuit-breaker failure — a caller who
+				// aborts N streams must not trip the breaker. finalizeStreamSettle records
+				// success. The `pending` guard makes a LATE abort after a real terminal a
+				// clean no-op: without it the no-op settle would resolve `.receipt` with a
+				// stale estimate, racing (and beating) the winning terminal's async settle.
+				const settlePartialVia = (): void => {
+					if (finalizeState !== "pending") return;
+					finalizeStreamSettle(partial())
+						.then(receiptResolve, receiptReject)
+						.finally(releaseStreamCount);
+				};
+
 				emitter.on("error", (err: unknown) => voidVia(err ?? new Error("stream error")));
-				emitter.on("abort", (err: unknown) => voidVia(err ?? new Error("stream aborted")));
+				// R1: a GOVERNANCE anomaly cutoff (anomalyAbort) is a provider-side FAILURE —
+				// void the hold + record a breaker failure, matching the generic path. A
+				// genuine consumer abort is an early exit — settle the partial usage (F9).
+				emitter.on("abort", (err: unknown) => {
+					if (anomalyAbort) {
+						voidVia(err ?? new Error("anomaly cutoff"));
+					} else {
+						settlePartialVia();
+					}
+				});
+
+				// F6: the real MessageStream emits NO 'finalMessage' on a clean SSE close
+				// that lacks a message_stop (receivedMessages stays empty → _emitFinal emits
+				// nothing) — only 'end' fires. Without an 'end' catch-all the PENDING hold
+				// would dangle until the TigerBeetle 300s timeout. When 'end' is the SOLE
+				// terminal (gate still pending) settle at ESTIMATE so the hold releases; on
+				// every other terminal ('end' always fires last, after the winning settle/
+				// void) the guard makes this a no-op that must NOT touch `.receipt`.
+				emitter.on("end", () => {
+					if (finalizeState !== "pending") return;
+					finalizeStreamSettle({
+						usage: { inputTokens: 0, outputTokens: 0 },
+						chunksDelivered,
+						usageReported: false,
+					})
+						.then(receiptResolve, receiptReject)
+						.finally(releaseStreamCount);
+				});
 
 				attachReceipt();
 
@@ -1284,16 +1346,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					}
 				}
 
-				// Task 1: divergence signal (provider usage vs the pre-call estimate).
-				// Built by omission unless usageSource === "provider" with a positive
-				// estimate; the audit event fires below from inside the settle branch.
-				const divergence = computeDivergence(
-					estimatedCost,
-					actualCost,
-					usageSource,
-					config.divergence.factor,
-				);
-
 				// h. Audit the llm_call FIRST (P3-AUDIT-FAILCLOSED). The settlement-
 				// defining event is written BEFORE the irreversible budget commit and
 				// POST, so a fail-closed deployment never settles an unaudited spend.
@@ -1351,10 +1403,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// the claim exists so a post-commit throw routes to the outer catch WITHOUT
 				// double-voiding an already-settled hold.
 				finalizeOnce("settle");
-				// Task 1: emit the divergence audit from inside the granted settle branch
-				// (after the settlement-defining llm_call event above), so it can never
-				// double-emit.
-				await emitDivergenceAudit(divergence);
 
 				// Release in-flight hold and commit budget under mutex — money moves only
 				// AFTER the spend is audited. AUD-468: mark hold released before the commit
@@ -1473,7 +1521,6 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					provider: kind,
 					timestamp: new Date().toISOString(),
 					usageSource,
-					...(divergence !== undefined ? { divergence } : {}),
 					// M2 provenance (A6: computeMs omitted — no compute-time source here).
 					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
 					meter: {
@@ -2046,13 +2093,15 @@ export function extractPromptParts(
 
 /**
  * A1/A3: read provider usage off an Anthropic final Message (the `finalMessage`
- * event payload). Returns `reported: false` when the usage object is absent or
- * carries no finite, non-negative token counts, so the caller settles at ESTIMATE
- * rather than voiding a billable success (A3).
+ * event payload). Each field is returned PER-FIELD: a finite, non-negative count
+ * when present, else `undefined` (so the caller can fall back to the counter it
+ * accumulated from streamEvent for THAT field, rather than zeroing it — F3).
+ * `reported` is true when at least one field carried a real number; when false the
+ * caller settles at ESTIMATE rather than voiding a billable success (A3).
  */
 function readFinalMessageUsage(msg: unknown): {
-	inputTokens: number;
-	outputTokens: number;
+	inputTokens: number | undefined;
+	outputTokens: number | undefined;
 	reported: boolean;
 } {
 	if (msg != null && typeof msg === "object") {
@@ -2070,11 +2119,11 @@ function readFinalMessageUsage(msg: unknown): {
 					? u.output_tokens
 					: undefined;
 			if (inTok !== undefined || outTok !== undefined) {
-				return { inputTokens: inTok ?? 0, outputTokens: outTok ?? 0, reported: true };
+				return { inputTokens: inTok, outputTokens: outTok, reported: true };
 			}
 		}
 	}
-	return { inputTokens: 0, outputTokens: 0, reported: false };
+	return { inputTokens: undefined, outputTokens: undefined, reported: false };
 }
 
 /**
@@ -2238,6 +2287,69 @@ type GovernActionFn = <R>(
 ) => Promise<GovernedActionResult<R>>;
 
 /**
+ * F4: mirror the Anthropic SDK's `parseMessage` / `parseBetaMessage` transform for a
+ * governed `messages.parse()` / `beta.messages.parse()`. The SDK's `parse()` is
+ * `this.create(params).then((m) => parseMessage(m, params))` — routed through our
+ * proxy, `this.create` is the GOVERNED create, which returns a `{ response, receipt }`
+ * wrapper the SDK parser crashes on (`wrapper.content` is undefined) AFTER the spend
+ * has already settled. So the proxy runs the governed create itself and applies the
+ * transform to the raw Message here.
+ *
+ * Faithful to the SDK for the modern `parsed_output` API: each `text` block gains a
+ * NON-ENUMERABLE `parsed_output` (parsed via the caller-provided
+ * `output_config.format.parse` when structured outputs are requested, else `JSON.parse`,
+ * else null), and the message carries the first text block's `parsed_output` at the top
+ * level. Reads the deprecated beta `output_format` too, so ONE transform covers the
+ * stable and beta surfaces (stable params simply lack `output_format`). A structured
+ * parse failure throws, matching the SDK. The deprecated per-block `parsed` getter is
+ * intentionally not reproduced (superseded by `parsed_output`).
+ */
+function applyAnthropicParseTransform(message: unknown, params: unknown): unknown {
+	if (message == null || typeof message !== "object") return message;
+	const p = (params ?? {}) as Record<string, unknown>;
+	const outputConfig = p.output_config as { format?: unknown } | null | undefined;
+	const format = (p.output_format ?? outputConfig?.format) as
+		| { type?: unknown; parse?: unknown }
+		| null
+		| undefined;
+	const hasSchema = format != null && typeof format === "object" && format.type === "json_schema";
+	const parseText = (text: string): unknown => {
+		if (!hasSchema) return null;
+		try {
+			return typeof format?.parse === "function"
+				? (format.parse as (c: string) => unknown)(text)
+				: JSON.parse(text);
+		} catch (err) {
+			throw new Error(`Failed to parse structured output: ${err}`);
+		}
+	};
+
+	const msg = message as Record<string, unknown>;
+	let firstParsed: unknown = null;
+	const content = Array.isArray(msg.content)
+		? msg.content.map((block) => {
+				if (
+					block != null &&
+					typeof block === "object" &&
+					(block as { type?: unknown }).type === "text"
+				) {
+					const parsed = parseText(String((block as { text?: unknown }).text ?? ""));
+					if (firstParsed === null) firstParsed = parsed;
+					const parsedBlock = { ...(block as Record<string, unknown>) };
+					Object.defineProperty(parsedBlock, "parsed_output", {
+						value: parsed,
+						enumerable: false,
+					});
+					return parsedBlock;
+				}
+				return block;
+			})
+		: msg.content;
+
+	return { ...msg, content, parsed_output: firstParsed };
+}
+
+/**
  * A1/A5: build a governed proxy over an Anthropic `messages` resource (stable or
  * beta — both share the create/stream shape). `create` routes through
  * interceptCall (surface "create"). `stream`, when present as a function (A5
@@ -2246,8 +2358,10 @@ type GovernActionFn = <R>(
  * `messages.create({stream:true}).withResponse()` runs against the un-proxied
  * create and never re-enters the governed create trap. The governed `stream` is
  * async (it authorizes before forwarding), so callers `await` the handle, then use
- * `.on()` / `.finalMessage()` / `.abort()` / `.receipt`. Everything else
- * (countTokens, batches, parse, …) falls through to Reflect.get untouched.
+ * `.on()` / `.finalMessage()` / `.abort()` / `.receipt`. `parse`, when present (A5
+ * feature-detect), routes its create through governance and applies the SDK parse
+ * transform (F4). Everything else (countTokens, batches, …) falls through to
+ * Reflect.get untouched.
  */
 function buildAnthropicMessagesProxy(
 	messages: Record<string, unknown>,
@@ -2260,6 +2374,8 @@ function buildAnthropicMessagesProxy(
 		typeof messages.stream === "function"
 			? (messages.stream as (...args: unknown[]) => unknown)
 			: undefined;
+	// A5/F4: feature-detect `parse` the same way — absent on older SDKs.
+	const hasParse = typeof messages.parse === "function";
 
 	return new Proxy(messages, {
 		get(target, prop, receiver) {
@@ -2270,6 +2386,27 @@ function buildAnthropicMessagesProxy(
 				return async (...args: unknown[]) => {
 					const { response } = await intercept(originalStream, target, args, "stream-helper");
 					return response;
+				};
+			}
+			if (prop === "parse" && hasParse) {
+				// F4: run the governed create ONCE, then apply the SDK parse transform to
+				// the settled Message and hand back the parsed Message (SDK-shaped) with
+				// the settlement receipt attached.
+				return async (...args: unknown[]) => {
+					const { response, receipt } = await intercept(originalCreate, target, args);
+					const parsed = applyAnthropicParseTransform(response, args[0]);
+					if (parsed != null && typeof parsed === "object") {
+						try {
+							Object.defineProperty(parsed, "receipt", {
+								value: receipt,
+								enumerable: true,
+								configurable: true,
+							});
+						} catch {
+							// non-extensible parsed object — skip
+						}
+					}
+					return parsed;
 				};
 			}
 			return Reflect.get(target, prop, receiver);
@@ -2283,7 +2420,7 @@ function buildAnthropicMessagesProxy(
  * getter that throws, or a beta.messages without a create function) so the caller
  * falls back to raw Reflect.get and NOTHING throws at wrap time (peerDep-range
  * compatibility). beta.models / beta.files / beta.messages.batches stay documented
- * pass-throughs — only create/stream on beta.messages are governed.
+ * pass-throughs — create, stream, and parse on beta.messages are governed.
  */
 function buildAnthropicBetaProxy(
 	original: Record<string, unknown>,
@@ -2329,8 +2466,8 @@ function buildAnthropicProxy<T>(
 	// Stable messages: governed `create` + (feature-detected) `stream`.
 	const messagesProxy = buildAnthropicMessagesProxy(messages, intercept);
 
-	// beta.messages.create/stream — governed identically when present (A5); a client
-	// without `beta` yields undefined and `beta` stays a raw pass-through.
+	// beta.messages.create/stream/parse — governed identically when present (A5); a
+	// client without `beta` yields undefined and `beta` stays a raw pass-through.
 	const betaProxy = buildAnthropicBetaProxy(original, intercept);
 
 	const clientProxy = new Proxy(original, {

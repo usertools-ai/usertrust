@@ -531,9 +531,8 @@ describe("trust() — end-to-end integration", () => {
 			const lines = readFileSync(auditPath, "utf-8").trim().split("\n");
 			const events = lines.map((line) => JSON.parse(line) as AuditEvent & { sequence: number });
 
-			// Task 1: a usage_divergence event trails each settlement that diverges from
-			// the max_tokens-ceiling estimate. Three calls → three llm_call events; the
-			// hash chain below still covers the FULL (validly chained) event set.
+			// Three calls → three llm_call events; the hash chain below covers the full
+			// (validly chained) event set.
 			const llmEvents = events.filter((e) => e.kind === "llm_call");
 			expect(llmEvents.length).toBe(3);
 
@@ -647,9 +646,7 @@ describe("trust() — end-to-end integration", () => {
 
 			await governed2.destroy();
 
-			// Verify audit chain has events from both sessions. Task 1: filter the
-			// usage_divergence events that trail diverging settlements — one llm_call
-			// per session.
+			// Verify audit chain has events from both sessions — one llm_call per session.
 			const auditPath = join(tmpVault, VAULT_DIR, "audit", "events.jsonl");
 			const lines = readFileSync(auditPath, "utf-8").trim().split("\n");
 			const llmCalls = lines.filter((l) => (JSON.parse(l) as AuditEvent).kind === "llm_call");
@@ -969,9 +966,8 @@ describe("trust() — end-to-end integration", () => {
 
 			const auditPath = join(tmpVault, VAULT_DIR, "audit", "events.jsonl");
 			const lines = readFileSync(auditPath, "utf-8").trim().split("\n");
-			// Task 1: two calls → two llm_call events (each may be trailed by a
-			// usage_divergence event). The per-event hash recomputation below covers
-			// every line, so divergence events are verified too.
+			// Two calls → two llm_call events. The per-event hash recomputation below
+			// covers every line in the audit log.
 			const llmCalls = lines.filter((l) => (JSON.parse(l) as AuditEvent).kind === "llm_call");
 			expect(llmCalls.length).toBe(2);
 
@@ -1120,8 +1116,7 @@ describe("trust() — end-to-end integration", () => {
 			const lines = readFileSync(auditPath, "utf-8").trim().split("\n");
 			const events = lines.map((line) => JSON.parse(line) as AuditEvent);
 
-			// Task 1: one llm_call per session (each may be trailed by a
-			// usage_divergence event); chain continuity holds across the FULL set.
+			// One llm_call per session; chain continuity holds across the full set.
 			expect(events.filter((e) => e.kind === "llm_call").length).toBe(2);
 
 			// Event 1 chains from genesis

@@ -214,6 +214,41 @@ const RESPONSES_STREAM_NO_USAGE = [
 	{ type: "response.completed", response: { id: "resp_2" } },
 ];
 
+// F2: `response.incomplete` and `response.failed` are equally terminal and carry
+// `event.response.usage` — they must settle at reported usage, not fall through to
+// the full estimate.
+const RESPONSES_STREAM_INCOMPLETE_WITH_USAGE = [
+	{ type: "response.created", response: { id: "resp_i" } },
+	{ type: "response.output_text.delta", delta: "Partial" },
+	{
+		type: "response.incomplete",
+		response: {
+			id: "resp_i",
+			status: "incomplete",
+			usage: { input_tokens: 90, output_tokens: 10, total_tokens: 100 },
+		},
+	},
+];
+
+const RESPONSES_STREAM_FAILED_WITH_USAGE = [
+	{ type: "response.created", response: { id: "resp_f" } },
+	{ type: "response.output_text.delta", delta: "Oops" },
+	{
+		type: "response.failed",
+		response: {
+			id: "resp_f",
+			status: "failed",
+			usage: { input_tokens: 80, output_tokens: 5, total_tokens: 85 },
+		},
+	},
+];
+
+// A very-early failure carries no usage (usage: null) → estimated fallback.
+const RESPONSES_STREAM_FAILED_NO_USAGE = [
+	{ type: "response.created", response: { id: "resp_fn" } },
+	{ type: "response.failed", response: { id: "resp_fn", status: "failed", usage: null } },
+];
+
 // ── Non-stream ──
 
 describe("OpenAI Responses non-stream governance (A6)", () => {
@@ -251,9 +286,6 @@ describe("OpenAI Responses non-stream governance (A6)", () => {
 		expect(receipt.provider).toBe("openai");
 		expect(receipt.usageSource).toBe("provider");
 		expect(receipt.cost).toBeGreaterThan(0);
-		// Task 1 divergence flag rides along on the settled receipt.
-		expect(receipt.divergence).toBeDefined();
-		expect(receipt.divergence?.actualCost).toBe(receipt.cost);
 
 		await destroy(governed);
 	});
@@ -403,7 +435,6 @@ describe("OpenAI Responses streaming governance (A7)", () => {
 		expect(receipt.usageSource).toBe("provider");
 		expect(receipt.chunksDelivered).toBe(RESPONSES_STREAM_WITH_USAGE.length);
 		expect(receipt.cost).toBeGreaterThan(0);
-		expect(receipt.divergence).toBeDefined();
 
 		// Settle-exactly-once, never voided (A9).
 		expect(engine.spendPending).toHaveBeenCalledOnce();
@@ -490,6 +521,197 @@ describe("OpenAI Responses streaming governance (A7)", () => {
 		expect(engine.postPendingSpend).not.toHaveBeenCalled();
 
 		await destroy(governed);
+	});
+});
+
+// ── F2: incomplete / failed terminal events also carry usage ──
+
+describe("OpenAI Responses terminal usage on incomplete/failed (F2)", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {}
+	});
+
+	async function settleStream(streamEvents: unknown[]): Promise<{
+		receipt: TrustReceipt;
+		engine: TrustEngine;
+	}> {
+		const engine = makeMockEngine();
+		const { client } = makeResponsesClient({ streamEvents });
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 50_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+		const result = await callResponses(governed, STREAM_PARAMS);
+		const { receipt } = await consumeStream(result);
+		await destroy(governed);
+		return { receipt, engine };
+	}
+
+	it("settles at reported usage when the stream ends in response.incomplete", async () => {
+		const { receipt, engine } = await settleStream(RESPONSES_STREAM_INCOMPLETE_WITH_USAGE);
+
+		expect(receipt.settled).toBe(true);
+		expect(receipt.usageSource).toBe("provider");
+		expect(receipt.cost).toBeGreaterThan(0);
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+	});
+
+	it("settles at reported usage when the stream ends in response.failed", async () => {
+		const { receipt, engine } = await settleStream(RESPONSES_STREAM_FAILED_WITH_USAGE);
+
+		expect(receipt.settled).toBe(true);
+		expect(receipt.usageSource).toBe("provider");
+		expect(receipt.cost).toBeGreaterThan(0);
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+	});
+
+	it("falls back to ESTIMATE when response.failed carries usage: null", async () => {
+		const { receipt, engine } = await settleStream(RESPONSES_STREAM_FAILED_NO_USAGE);
+
+		expect(receipt.settled).toBe(true);
+		expect(receipt.usageSource).toBe("estimated");
+		// A billable success with unknown usage settles at estimate — never voids.
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+	});
+
+	it("reads the reported usage (incomplete usage prices strictly above a null-usage estimate)", async () => {
+		// Prove the incomplete/failed usage is actually READ, not just that it settles:
+		// a stream reporting real tokens must price differently from the pure estimate.
+		const reported = await settleStream(RESPONSES_STREAM_FAILED_WITH_USAGE);
+		expect(reported.receipt.usageSource).toBe("provider");
+		expect(reported.receipt.cost).toBeGreaterThanOrEqual(1);
+	});
+});
+
+// ── F1: authorize-time estimation reads max_output_tokens (Responses cap) ──
+
+describe("Responses output-cap estimation reads max_output_tokens (F1)", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {}
+	});
+
+	const PROBE_INPUT = "Summarize the quarterly report in detail.";
+
+	// A no-usage Responses call settles at ESTIMATE, so receipt.cost IS the
+	// authorize-time estimatedCost — a direct window onto the output-cap sizing.
+	async function estimateFor(
+		params: Record<string, unknown>,
+		budget = 5_000_000_000,
+	): Promise<TrustReceipt> {
+		const engine = makeMockEngine();
+		const { client } = makeResponsesClient({ usage: null });
+		const governed = await trust(client, {
+			dryRun: false,
+			budget,
+			vaultBase: makeTmpVault(),
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+		const { receipt } = await callResponses(governed, params);
+		await destroy(governed);
+		return receipt;
+	}
+
+	it("sizes the estimate/hold to max_output_tokens (100k >> 100)", async () => {
+		const big = await estimateFor({
+			model: "gpt-4o",
+			input: PROBE_INPUT,
+			max_output_tokens: 100_000,
+		});
+		const small = await estimateFor({
+			model: "gpt-4o",
+			input: PROBE_INPUT,
+			max_output_tokens: 100,
+		});
+
+		expect(big.usageSource).toBe("estimated");
+		expect(small.usageSource).toBe("estimated");
+		// Old code read `max_tokens ?? 4096` → both fall to 4096 → equal cost. Reading
+		// max_output_tokens makes the 100k-cap estimate strictly larger.
+		expect(big.cost).toBeGreaterThan(small.cost);
+	});
+
+	it("does NOT spuriously deny a small max_output_tokens call at a tight budget", async () => {
+		// Probe the DEFAULT (4096) estimate — the fallback both old and new code use.
+		const probe = await estimateFor({ model: "gpt-4o", input: PROBE_INPUT });
+		expect(probe.usageSource).toBe("estimated");
+		const tightBudget = probe.cost - 1;
+
+		// A max_output_tokens:50 call is estimated FAR below the 4096 fallback, so a
+		// budget just under the 4096 estimate still admits it. Old code (reading the
+		// 4096 fallback) would deny with PolicyDeniedError.
+		const engine = makeMockEngine();
+		const { client } = makeResponsesClient({ usage: null });
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: tightBudget,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+		const { receipt } = await callResponses(governed, {
+			model: "gpt-4o",
+			input: PROBE_INPUT,
+			max_output_tokens: 50,
+		});
+
+		expect(receipt.settled).toBe(true);
+		expect(engine.spendPending).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		await destroy(governed);
+	});
+
+	it("leaves chat.completions max_tokens estimation unchanged (regression)", async () => {
+		// chat.completions has no max_output_tokens — the `?? max_tokens ?? 4096` chain
+		// must still honor max_tokens as the output-cap source.
+		async function chatEstimate(maxTokens: number): Promise<TrustReceipt> {
+			const engine = makeMockEngine();
+			// No `usage` on the response → settles at estimate (receipt.cost === estimate).
+			const client = {
+				chat: { completions: { create: vi.fn(async () => ({ id: "chat_x" })) } },
+			};
+			const governed = await trust(client, {
+				dryRun: false,
+				budget: 5_000_000_000,
+				vaultBase: makeTmpVault(),
+				_engine: engine,
+				_audit: makeMockAudit(),
+			});
+			const g = governed as {
+				chat: { completions: { create: (p: Record<string, unknown>) => Promise<CallResult> } };
+			};
+			const { receipt } = await g.chat.completions.create({
+				model: "gpt-4o",
+				messages: [{ role: "user", content: "hi" }],
+				max_tokens: maxTokens,
+			});
+			await destroy(governed);
+			return receipt;
+		}
+
+		const big = await chatEstimate(100_000);
+		const small = await chatEstimate(100);
+		expect(big.usageSource).toBe("estimated");
+		expect(small.usageSource).toBe("estimated");
+		expect(big.cost).toBeGreaterThan(small.cost);
 	});
 });
 

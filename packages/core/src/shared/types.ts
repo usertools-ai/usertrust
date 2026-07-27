@@ -40,19 +40,6 @@ export interface TrustReceipt {
 	auditDegraded?: boolean;
 	/** Whether cost came from provider-reported usage or the pre-call estimate. */
 	usageSource?: "provider" | "estimated";
-	/**
-	 * Settlement divergence signal: how far provider-reported cost strayed from
-	 * the pre-call estimate. Present (built by omission, never undefined) ONLY
-	 * when usageSource === "provider" and the estimate was positive.
-	 */
-	divergence?: {
-		/** actualCost / estimatedCost — finite, >= 0. */
-		ratio: number;
-		estimatedCost: number;
-		actualCost: number;
-		/** true when ratio is outside [1/factor, factor]; factor = config.divergence.factor. */
-		flagged: boolean;
-	};
 	/** Number of chunks delivered to the consumer (streaming calls only). */
 	chunksDelivered?: number;
 	/** Action kind for governed non-LLM actions. Absent for LLM calls (backward compat). */
@@ -175,19 +162,6 @@ export const TrustConfigSchema = z.object({
 	 * receipt.meter.rateSource "fallback" · "deny" = PolicyDeniedError before the PENDING hold.
 	 */
 	unknownModelPolicy: z.enum(["fallback", "warn", "deny"]).default("warn"),
-	/**
-	 * Settlement divergence flagging: compares provider-reported cost against the
-	 * pre-call estimate and flags settlements that diverge beyond `factor` (or its
-	 * reciprocal). Defaulted so existing configs parse unchanged.
-	 */
-	divergence: z
-		.object({
-			/** Flag when actual/estimate (or its reciprocal) exceeds this. */
-			factor: z.number().positive().default(4),
-			/** Emit a hash-chained "usage_divergence" audit event when flagged. */
-			audit: z.boolean().default(true),
-		})
-		.default({}),
 	supplyChain: z
 		.object({
 			// SC-3: fail-closed by default. A skill with no registered signing key

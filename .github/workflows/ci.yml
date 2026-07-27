@@ -41,7 +41,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npx tsc -b
+      # `npm run typecheck` = `tsc -b` + `tsc -p packages/core/tsconfig.type-tests.json`
+      # so the F5 TrustedClient type-surface guard (trusted-client-types.test-d.ts)
+      # actually gates CI — a bare `tsc -b` never compiles the .test-d.ts.
+      - run: npm run typecheck
 
   test:
     name: test

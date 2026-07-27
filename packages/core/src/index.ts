@@ -112,7 +112,6 @@ export {
 	resolveRates,
 } from "./ledger/pricing.js";
 export type { ModelRates, RateResolution } from "./ledger/pricing.js";
-export { computeDivergence } from "./ledger/divergence.js";
 
 // Board
 export { createBoard } from "./board/board.js";
