@@ -35,6 +35,13 @@ export interface ReceiptData {
 	readonly chainVerified: boolean;
 	readonly cumulativeSpend: number;
 	readonly verifiedAt: Date;
+	/**
+	 * Honest Merkle-row label. "INCLUSION VERIFIED" may ONLY be passed when
+	 * the proof was checked against a verified EXTERNAL anchor root — never
+	 * from a root recomputed out of the same events (the retired F1 path).
+	 * Absent → the truthful unanchored default is rendered.
+	 */
+	readonly merkleLabel?: string | undefined;
 }
 
 // ── Formatting helpers ──
@@ -243,7 +250,11 @@ export function renderReceipt(data: ReceiptData): string {
 	lines.push(row(`${dotted("  Hash", truncHash(event.hash), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Prev", truncHash(event.previousHash), WIDTH - 1)} `));
 
-	const merkleStatus = merkleVerified ? "INCLUSION VERIFIED" : "INCLUSION FAILED";
+	// AC-5.3: without an external anchor the truthful claim is chain
+	// consistency, not inclusion — the old unconditional "INCLUSION VERIFIED"
+	// came from a self-referential proof and is retired.
+	const merkleStatus =
+		data.merkleLabel ?? (merkleVerified ? "CHAIN CONSISTENT (UNANCHORED)" : "INCLUSION FAILED");
 	lines.push(row(`${dotted("  Merkle", merkleStatus, WIDTH - 1)} `));
 
 	lines.push(blank());

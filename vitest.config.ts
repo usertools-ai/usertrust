@@ -15,7 +15,10 @@ export default defineConfig({
 		coverage: {
 			provider: "v8",
 			include: ["packages/*/src/**/*.ts"],
-			exclude: ["packages/*/src/cli/**"],
+			// CLI entrypoints are process-level scripts (parse argv, print,
+			// process.exit) — excluded from unit coverage. verify's CLI is a
+			// single file rather than a cli/ directory.
+			exclude: ["packages/*/src/cli/**", "packages/verify/src/cli.ts"],
 			thresholds: {
 				lines: 92,
 				branches: 84,

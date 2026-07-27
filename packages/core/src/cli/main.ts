@@ -7,6 +7,7 @@ const COMMANDS = [
 	"inspect",
 	"health",
 	"verify",
+	"anchor",
 	"snapshot",
 	"tb",
 	"pricing",
@@ -80,6 +81,9 @@ switch (command) {
 	case "verify":
 		await import("./verify.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
+	case "anchor":
+		await import("./anchor.js").then((m) => m.run(positional.slice(1), { json: jsonFlag }));
+		break;
 	case "snapshot":
 		await import("./snapshot.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
@@ -114,6 +118,7 @@ Commands:
   inspect       Show trust bank statement
   health        Show entropy diagnostics
   verify        Verify audit chain integrity
+  anchor        External audit anchoring (signed checkpoints)
   snapshot      Create/restore vault snapshots
   tb            Manage TigerBeetle process
   pricing       Show current rate configuration

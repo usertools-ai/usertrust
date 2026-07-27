@@ -52,6 +52,16 @@ const INCLUDED_PATHS = new Set([
 /** Never captured: advisory lock file living inside audit/. */
 const NEVER_CAPTURE = new Set([".audit-writer.lock"]);
 
+/**
+ * Never captured NOR restored: external-anchoring state (mirror of the
+ * append-only anchor store, identity.json with the durable anchorSeq
+ * high-water, outbox). This bookkeeping is MONOTONIC by contract — rolling it
+ * back with a snapshot would make the emitter re-mint anchorSeqs the store
+ * already holds, publishing divergent records at occupied positions:
+ * permanent, undeletable fork evidence that condemns an honest vault.
+ */
+const ANCHORS_REL_DIR = "audit/anchors";
+
 const LOCK_FILE_NAME = ".audit-writer.lock";
 
 // ── Internals ──
@@ -73,6 +83,8 @@ async function collectFiles(basePath: string, currentPath: string): Promise<stri
 		const relPath = relative(basePath, fullPath);
 
 		if (entry.isDirectory()) {
+			// Anchoring state is monotonic — never snapshot it (see ANCHORS_REL_DIR).
+			if (relPath === ANCHORS_REL_DIR) continue;
 			const nested = await collectFiles(basePath, fullPath);
 			results.push(...nested);
 		} else if (entry.isFile()) {
@@ -257,6 +269,11 @@ export async function restoreSnapshot(
 				}
 				// Never restore an advisory lock captured by an older snapshot.
 				if (relPath.split("/").pop() === LOCK_FILE_NAME) continue;
+				// Never restore anchoring state, even from snapshots captured
+				// before this exclusion existed — rolling back the anchorSeq
+				// high-water re-mints occupied store positions (permanent fork
+				// evidence). The live anchors/ dir stays as-is.
+				if (relPath === ANCHORS_REL_DIR || relPath.startsWith(`${ANCHORS_REL_DIR}/`)) continue;
 
 				const fullPath = join(vaultPath, relPath);
 				const resolvedPath = resolve(fullPath);
