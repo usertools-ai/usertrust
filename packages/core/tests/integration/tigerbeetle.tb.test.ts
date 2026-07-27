@@ -31,9 +31,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { trust } from "../../src/govern.js";
 import { estimateCost, estimateInputTokens } from "../../src/ledger/pricing.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
-import { InsufficientBalanceError } from "../../src/shared/errors.js";
+import { InsufficientBalanceError, PolicyDeniedError } from "../../src/shared/errors.js";
 
 const TB_ADDRESS = process.env.USERTRUST_TB_ADDRESS;
+
+/** A correct hard budget stop — pre-spend policy denial or the ledger's atomic rejection. */
+const isHardDenial = (err: unknown): boolean =>
+	err instanceof InsufficientBalanceError || err instanceof PolicyDeniedError;
 
 // ── Fixtures ──
 // A single, fixed call shape so budgets can be sized to the exact PENDING hold.
@@ -129,27 +133,71 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — two-phase hard-budget invaria
 		}
 	});
 
-	it("rejects an over-budget hold with InsufficientBalanceError without calling the provider", async () => {
+	it("hard-refuses a sequential over-budget call pre-spend and keeps the real ledger consistent", async () => {
 		// The funded wallet holds EXACTLY one reservation. Call 1 settles at its
-		// (smaller) actual cost, so the real ledger now has less than a full hold
-		// free; call 2's hold no longer fits and TigerBeetle rejects it atomically —
-		// surfaced as InsufficientBalanceError BEFORE the provider is ever called.
+		// (smaller) actual cost, leaving real remaining = HOLD - ACTUAL_COST, which is
+		// below a full hold. Call 2's hold no longer fits, so it is hard-refused
+		// BEFORE the provider is ever called. NOTE: for a SEQUENTIAL over-budget call
+		// the pre-spend policy gate (block-budget-overshoot, a non-disable-able default
+		// rule) denies first — that is correct defense-in-depth. The atomic ledger
+		// (debits_must_not_exceed_credits) is the backstop for what per-call policy
+		// cannot catch: concurrent/cross-process holds — proven in the next test.
 		const create = vi.fn(async () => okResponse());
 		const governed = await trust(anthropicClient(create), { vaultBase: makeVault(HOLD) });
 		try {
 			const r1 = await governed.messages.create({ ...CALL });
 			expect(r1.receipt.settled).toBe(true);
-			// actual < reserved hold → the settlement genuinely moved the ledger below
-			// a full hold's worth of remaining budget (this is what makes call 2 fail).
 			expect(r1.receipt.cost).toBeLessThan(HOLD);
+			// The REAL ledger tracked the settle to the exact usertoken.
+			expect(r1.receipt.budgetRemaining).toBe(HOLD - ACTUAL_COST);
 			expect(create).toHaveBeenCalledTimes(1);
 
-			await expect(governed.messages.create({ ...CALL })).rejects.toBeInstanceOf(
-				InsufficientBalanceError,
+			// Hard governance refusal — pre-spend policy denial or the ledger's atomic
+			// rejection; either is a correct hard stop. What matters: money never moved.
+			const denied = await governed.messages.create({ ...CALL }).then(
+				() => null,
+				(e: unknown) => e,
 			);
-
-			// (b) The provider was never invoked for the rejected call — money never moved.
+			expect(denied).not.toBeNull();
+			expect(isHardDenial(denied)).toBe(true);
 			expect(create).toHaveBeenCalledTimes(1);
+		} finally {
+			await governed.destroy();
+		}
+	});
+
+	it("bounds total spend under concurrent holds — the atomic-ledger ceiling", async () => {
+		// The scenario only the real ledger can enforce: N calls authorized
+		// concurrently, each individually within budget, collectively far over it.
+		// Per-call policy evaluated across interleaved holds cannot guarantee the
+		// ceiling on its own; TigerBeetle's debits_must_not_exceed_credits does,
+		// atomically. We assert the INVARIANT (bounded, never exceeded) rather than
+		// which specific calls win — so the test is deterministic, not flaky.
+		const CAPACITY = 2; // exactly two holds fit
+		const create = vi.fn(async () => okResponse());
+		const governed = await trust(anthropicClient(create), {
+			vaultBase: makeVault(HOLD * CAPACITY),
+		});
+		try {
+			const results = await Promise.allSettled(
+				Array.from({ length: 5 }, () => governed.messages.create({ ...CALL })),
+			);
+			const settled = results.filter((r) => r.status === "fulfilled");
+			const rejected = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+
+			// Ceiling held: no more than CAPACITY calls ever reached the provider or
+			// settled, and every rejection is a hard governance denial.
+			expect(create.mock.calls.length).toBeLessThanOrEqual(CAPACITY);
+			expect(settled.length).toBeLessThanOrEqual(CAPACITY);
+			expect(rejected.length).toBeGreaterThanOrEqual(5 - CAPACITY);
+			for (const r of rejected) expect(isHardDenial(r.reason)).toBe(true);
+
+			// Total settled cost never exceeded the funded budget on the real ledger.
+			const totalSettled = settled.reduce(
+				(sum, r) => sum + (r.value as { receipt: { cost: number } }).receipt.cost,
+				0,
+			);
+			expect(totalSettled).toBeLessThanOrEqual(HOLD * CAPACITY);
 		} finally {
 			await governed.destroy();
 		}
