@@ -10,8 +10,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-	ScopeManager,
 	fileMatchesScope,
+	ScopeManager,
 	scopesOverlap,
 	setStoreDir,
 } from "../../src/resilience/scope.js";

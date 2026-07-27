@@ -28,7 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
-import { type TrustEngine, extractPromptParts, trust } from "../../src/govern.js";
+import { extractPromptParts, type TrustEngine, trust } from "../../src/govern.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import { PolicyDeniedError } from "../../src/shared/errors.js";
 import type { AuditEvent, TrustReceipt } from "../../src/shared/types.js";

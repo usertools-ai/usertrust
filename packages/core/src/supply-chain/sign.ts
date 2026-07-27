@@ -61,7 +61,10 @@ export function signManifest(
 		format: "der",
 		type: "pkcs8",
 	});
-	const pubKeyObj = createPublicKey(privKeyObj);
+	// Node derives the public key from a private KeyObject at runtime (documented
+	// behavior of createPublicKey). @types/node 26 dropped KeyObject from the input
+	// union, so this is a types-only assertion — the runtime call is unchanged.
+	const pubKeyObj = createPublicKey(privKeyObj as unknown as Parameters<typeof createPublicKey>[0]);
 	const pubKeyDerActual = pubKeyObj.export({ type: "spki", format: "der" });
 	const publicKeyHex = (pubKeyDerActual as Buffer).subarray(12).toString("hex");
 

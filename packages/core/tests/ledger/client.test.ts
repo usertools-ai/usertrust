@@ -41,8 +41,9 @@ vi.mock("tigerbeetle-node", () => ({
 	createClient: mockCreateClient,
 	AccountFlags: { debits_must_not_exceed_credits: 1 << 2, history: 1 << 5 },
 	TransferFlags: { pending: 1, post_pending_transfer: 2, void_pending_transfer: 4 },
-	CreateAccountError: { exists: 1 },
-	CreateTransferError: {
+	CreateAccountStatus: { created: 4294967295, exists: 1 },
+	CreateTransferStatus: {
+		created: 4294967295,
 		exceeds_credits: 22,
 		overflows_debits: 30,
 		overflows_debits_pending: 31,
@@ -122,13 +123,13 @@ describe("TrustTBClient", () => {
 		});
 
 		it("handles account-already-exists gracefully", async () => {
-			mockCreateAccounts.mockResolvedValueOnce([{ index: 0, result: 1 }]); // exists
+			mockCreateAccounts.mockResolvedValueOnce([{ status: 1 }]); // exists
 			const id = await client.createUserWallet("user_3");
 			expect(typeof id).toBe("bigint");
 		});
 
 		it("throws on other creation errors", async () => {
-			mockCreateAccounts.mockResolvedValueOnce([{ index: 0, result: 99 }]);
+			mockCreateAccounts.mockResolvedValueOnce([{ status: 99 }]);
 			await expect(client.createUserWallet("user_4")).rejects.toThrow("Failed to create account");
 		});
 
@@ -163,7 +164,7 @@ describe("TrustTBClient", () => {
 		});
 
 		it("throws TBTransferError on failure", async () => {
-			mockCreateTransfers.mockResolvedValueOnce([{ index: 0, result: 22 }]);
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 22 }]);
 			await expect(
 				client.createPendingTransfer({
 					debitAccountId: 1n,
@@ -226,7 +227,7 @@ describe("TrustTBClient", () => {
 		});
 
 		it("throws on failure", async () => {
-			mockCreateTransfers.mockResolvedValueOnce([{ index: 0, result: 5 }]);
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 5 }]);
 			await expect(client.postTransfer(123n)).rejects.toThrow("Post transfer failed");
 		});
 
@@ -258,7 +259,7 @@ describe("TrustTBClient", () => {
 		});
 
 		it("throws on failure", async () => {
-			mockCreateTransfers.mockResolvedValueOnce([{ index: 0, result: 5 }]);
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 5 }]);
 			await expect(client.voidTransfer(123n)).rejects.toThrow("Void transfer failed");
 		});
 
@@ -285,7 +286,7 @@ describe("TrustTBClient", () => {
 		});
 
 		it("throws TBTransferError on failure", async () => {
-			mockCreateTransfers.mockResolvedValueOnce([{ index: 0, result: 22 }]);
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 22 }]);
 			await expect(
 				client.immediateTransfer({
 					debitAccountId: 1n,
@@ -536,7 +537,7 @@ describe("TrustTBClient", () => {
 		});
 
 		it("createTreasury throws on creation errors", async () => {
-			mockCreateAccounts.mockResolvedValueOnce([{ index: 0, result: 99 }]);
+			mockCreateAccounts.mockResolvedValueOnce([{ status: 99 }]);
 			await expect(client.createTreasury()).rejects.toThrow("Failed to create treasury");
 		});
 

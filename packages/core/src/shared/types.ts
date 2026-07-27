@@ -77,19 +77,19 @@ export const TrustConfigSchema = z.object({
 			enabled: z.boolean().default(false),
 			vetoThreshold: z.enum(["low", "medium", "high", "critical"]).default("high"),
 		})
-		.default({}),
+		.prefault({}),
 	circuitBreaker: z
 		.object({
 			failureThreshold: z.number().int().default(5),
 			resetTimeout: z.number().int().default(60_000),
 		})
-		.default({}),
+		.prefault({}),
 	patterns: z
 		.object({
 			enabled: z.boolean().default(true),
 			feedProxy: z.boolean().default(false),
 		})
-		.default({}),
+		.prefault({}),
 	audit: z
 		.object({
 			rotation: z.enum(["daily", "weekly", "none"]).default("daily"),
@@ -99,13 +99,13 @@ export const TrustConfigSchema = z.object({
 			// legacy fail-open behavior (degraded receipt, money still moves).
 			failClosed: z.boolean().default(false),
 		})
-		.default({}),
+		.prefault({}),
 	tigerbeetle: z
 		.object({
 			addresses: z.array(z.string()).default(["127.0.0.1:3001"]),
 			clusterId: z.number().int().nonnegative().default(0),
 		})
-		.default({}),
+		.prefault({}),
 	providers: z
 		.array(
 			z.object({
@@ -155,7 +155,7 @@ export const TrustConfigSchema = z.object({
 			/** Inject stream_options:{include_usage:true} into local openai-kind streams. */
 			injectUsageOptions: z.boolean().default(true),
 		})
-		.default({}),
+		.prefault({}),
 	/**
 	 * Cloud-scope policy when a model misses customRates, PRICING_TABLE, and prefix match.
 	 * "fallback" = silent sonnet-class rate (legacy) · "warn" = same rate + one-time warn +
@@ -188,7 +188,7 @@ export const TrustConfigSchema = z.object({
 				.default(["llm_call", "tool_use", "file_read"]),
 			requireSignature: z.boolean().default(true),
 		})
-		.default({}),
+		.prefault({}),
 	vault: z
 		.object({
 			enabled: z.boolean().default(false),
@@ -202,9 +202,9 @@ export const TrustConfigSchema = z.object({
 						.default([]),
 					expiresAt: z.string().datetime().nullable().default(null),
 				})
-				.default({}),
+				.prefault({}),
 		})
-		.default({}),
+		.prefault({}),
 	anomaly: z
 		.object({
 			enabled: z.boolean().default(false),
@@ -218,7 +218,7 @@ export const TrustConfigSchema = z.object({
 					windowMs: z.number().int().positive().default(2_000),
 					consecutiveWindows: z.number().int().positive().default(3),
 				})
-				.default({}),
+				.prefault({}),
 			spendVelocity: z
 				.object({
 					thresholdDollarsPerMin: z.number().positive().default(1.0),
@@ -226,16 +226,16 @@ export const TrustConfigSchema = z.object({
 					localThresholdUsertokensPerMin: z.number().positive().default(10_000),
 					windowMs: z.number().int().positive().default(10_000),
 				})
-				.default({}),
+				.prefault({}),
 			injectionCascade: z
 				.object({
 					eventCount: z.number().int().positive().default(3),
 					windowMs: z.number().int().positive().default(60_000),
 				})
-				.default({}),
+				.prefault({}),
 			cooldownMs: z.number().int().nonnegative().default(30_000),
 		})
-		.default({}),
+		.prefault({}),
 });
 
 export type TrustConfig = z.infer<typeof TrustConfigSchema>;

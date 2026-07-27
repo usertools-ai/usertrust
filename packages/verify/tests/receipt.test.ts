@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
 	type ReceiptData,
-	type TransactionEvent,
 	renderNotFound,
 	renderReceipt,
+	type TransactionEvent,
 } from "../src/receipt.js";
 
 // ── Fixture factories ──

@@ -32,8 +32,8 @@
  *     5. Return governed stream to OpenClaw
  */
 
-import { createGovernor } from "usertrust";
 import type { Governor } from "usertrust";
+import { createGovernor } from "usertrust";
 import { wrapCompleteWithGovernance, wrapStreamWithGovernance } from "./stream-governor.js";
 import type {
 	OpenClawPluginApi,
@@ -45,21 +45,21 @@ import type {
 } from "./types.js";
 
 // Re-export for consumers
-export { wrapStreamWithGovernance, wrapCompleteWithGovernance } from "./stream-governor.js";
+export { wrapCompleteWithGovernance, wrapStreamWithGovernance } from "./stream-governor.js";
 export {
 	createAccumulator,
+	extractTextDeltaLength,
 	extractUsageFromEvent,
 	extractUsageFromProviderChunk,
-	extractTextDeltaLength,
 } from "./token-extractor.js";
 export type {
-	StreamEvent,
-	StreamFn,
-	StreamContext,
-	StreamUsage,
-	UsertrustPluginConfig,
 	GovernedStreamMeta,
 	ProviderPlugin,
+	StreamContext,
+	StreamEvent,
+	StreamFn,
+	StreamUsage,
+	UsertrustPluginConfig,
 } from "./types.js";
 
 /** Active governor instance — singleton per plugin lifecycle. */

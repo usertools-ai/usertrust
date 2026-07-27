@@ -11,7 +11,15 @@
 		"directory": "packages/acs-adapter"
 	},
 	"bugs": "https://github.com/usertools-ai/usertrust/issues",
-	"keywords": ["ai", "governance", "agent", "acs", "agt", "policy", "adapter"],
+	"keywords": [
+		"ai",
+		"governance",
+		"agent",
+		"acs",
+		"agt",
+		"policy",
+		"adapter"
+	],
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -25,7 +33,9 @@
 		"build": "tsc -b",
 		"prepublishOnly": "tsc -b"
 	},
-	"files": ["dist"],
+	"files": [
+		"dist"
+	],
 	"dependencies": {
 		"usertrust": "*"
 	}

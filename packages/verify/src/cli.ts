@@ -15,14 +15,14 @@
 import { readFileSync } from "node:fs";
 import { parseAnchorsContent } from "./anchor-verify.js";
 import {
-	type AnchorVerifyParams,
 	type AnchoredVaultVerificationResult,
-	type WitnessInput,
+	type AnchorVerifyParams,
 	exitCodeFor,
 	exitCodeForAnchored,
 	verifyTransaction,
 	verifyVault,
 	verifyVaultWithAnchors,
+	type WitnessInput,
 } from "./index.js";
 
 const args = process.argv.slice(2);

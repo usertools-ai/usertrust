@@ -1,9 +1,9 @@
 "use client";
 
-import { PKG_VERSION } from "@/lib/version";
 import { AnimatePresence, motion, useScroll, useTransform } from "motion/react";
 import Image from "next/image";
 import { useEffect, useRef, useState } from "react";
+import { PKG_VERSION } from "@/lib/version";
 import { CopyCommand } from "./copy-command";
 
 // Longest tagline first: the largest text paint happens at first render, so

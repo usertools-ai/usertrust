@@ -18,12 +18,6 @@ import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-	keyIdFromKeyObject,
-	publicKeyFromPem,
-	publicKeyFromSpkiBase64,
-	verifySignatureRaw,
-} from "../../../src/audit/anchor-verify.js";
-import {
 	createAnchorEmitter,
 	createSink,
 	defaultKeyPath,
@@ -33,6 +27,12 @@ import {
 	resolveSigner,
 	resumeAnchorMirror,
 } from "../../../src/audit/anchor.js";
+import {
+	keyIdFromKeyObject,
+	publicKeyFromPem,
+	publicKeyFromSpkiBase64,
+	verifySignatureRaw,
+} from "../../../src/audit/anchor-verify.js";
 import { canonicalize } from "../../../src/audit/canonical.js";
 import { VAULT_DIR } from "../../../src/shared/constants.js";
 import {

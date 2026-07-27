@@ -188,6 +188,7 @@ function SpotlightCard({ children, className }: { children: React.ReactNode; cla
 	}, []);
 
 	return (
+		// biome-ignore lint/a11y/noStaticElementInteractions: decorative pointer-tracking spotlight; no semantic interaction to expose
 		<div ref={ref} onMouseMove={handleMouseMove} className={`spotlight-card ${className}`}>
 			{children}
 		</div>

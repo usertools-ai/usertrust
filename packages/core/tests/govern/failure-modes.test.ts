@@ -197,6 +197,7 @@ describe("Failure mode 15.1: LLM succeeds, POST fails", () => {
 			(call: unknown[]) => (call[0] as AppendEventInput).kind === "settlement_ambiguous",
 		);
 		expect(ambiguousCall).toBeDefined();
+		// biome-ignore lint/correctness/noUnsafeOptionalChaining: ambiguousCall guaranteed defined by the toBeDefined() assertion above
 		const ambiguousData = (ambiguousCall?.[0] as AppendEventInput).data;
 		expect(ambiguousData.error).toContain("POST failed");
 

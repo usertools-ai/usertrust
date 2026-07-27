@@ -13,7 +13,7 @@ import { mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { GENESIS_HASH, canonicalize, verifyVault } from "../../src/index.js";
+import { canonicalize, GENESIS_HASH, verifyVault } from "../../src/index.js";
 
 interface Ev {
 	kind: string;

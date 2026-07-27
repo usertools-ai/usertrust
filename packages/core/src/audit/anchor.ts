@@ -29,15 +29,15 @@ import {
 	generateKeyPairSync,
 	randomUUID,
 } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
 import {
 	closeSync,
 	existsSync,
+	constants as fsConstants,
 	fsyncSync,
 	mkdirSync,
 	openSync,
-	readFileSync,
 	readdirSync,
+	readFileSync,
 	realpathSync,
 	renameSync,
 	unlinkSync,
@@ -319,7 +319,10 @@ export function resolveSigner(config: AnchorSignerConfig, vaultId?: string): Res
 		);
 	}
 	const privateKey = createPrivateKey(pem);
-	const publicKey = createPublicKey(privateKey);
+	// @types/node 26 dropped KeyObject from createPublicKey's input union; Node
+	// derives the public key from a private KeyObject at runtime (documented) —
+	// types-only assertion, runtime call unchanged.
+	const publicKey = createPublicKey(privateKey as unknown as Parameters<typeof createPublicKey>[0]);
 	return {
 		keyId: keyIdFromKeyObject(publicKey),
 		sign: async (preimage) =>

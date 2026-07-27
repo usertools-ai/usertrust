@@ -7,7 +7,6 @@
 // simulator. Governance-specific simulators (token spend, policy what-if,
 // risk scenarios) consume these foundations.
 
-export { Xoshiro256, createRng, hashInputs } from "./rng/xoshiro256.js";
 export {
 	rateToBetaParams,
 	sampleBeta,
@@ -16,12 +15,13 @@ export {
 	sampleTriangular,
 	sampleUniform,
 } from "./distributions/index.js";
+export { createRng, hashInputs, Xoshiro256 } from "./rng/xoshiro256.js";
 export {
 	computePercentiles,
+	type Percentiles,
 	percentileFromSorted,
 	runSimulation,
 	runSimulationStreaming,
-	type Percentiles,
 	type SimulationComplete,
 	type SimulationEvent,
 	type SimulationProgress,

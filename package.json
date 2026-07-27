@@ -2,7 +2,9 @@
 	"name": "usertrust-monorepo",
 	"private": true,
 	"type": "module",
-	"workspaces": ["packages/*"],
+	"workspaces": [
+		"packages/*"
+	],
 	"scripts": {
 		"test": "vitest run",
 		"test:watch": "vitest",
@@ -12,11 +14,11 @@
 		"typecheck:types": "tsc -p packages/core/tsconfig.type-tests.json"
 	},
 	"devDependencies": {
-		"@anthropic-ai/sdk": "^0.78.0",
-		"@biomejs/biome": "^1.9.0",
-		"@types/node": "^25.5.0",
+		"@anthropic-ai/sdk": "^0.115.0",
+		"@biomejs/biome": "^2.5.5",
+		"@types/node": "^26.1.1",
 		"@vitest/coverage-v8": "^4.1.0",
-		"openai": "^5.8.0",
+		"openai": "^6.49.0",
 		"tsx": "^4.19.0",
 		"typescript": "^5.9.0",
 		"vitest": "^4.0.0"

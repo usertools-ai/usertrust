@@ -11,7 +11,14 @@
 		"directory": "packages/monte-cristo"
 	},
 	"bugs": "https://github.com/usertools-ai/usertrust/issues",
-	"keywords": ["monte-carlo", "simulation", "governance", "ai", "risk", "distributions"],
+	"keywords": [
+		"monte-carlo",
+		"simulation",
+		"governance",
+		"ai",
+		"risk",
+		"distributions"
+	],
 	"type": "module",
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -37,7 +44,10 @@
 		"build": "tsc",
 		"prepublishOnly": "tsc"
 	},
-	"files": ["dist", "README.md"],
+	"files": [
+		"dist",
+		"README.md"
+	],
 	"publishConfig": {
 		"access": "public"
 	}

@@ -49,15 +49,17 @@
 		"@clack/prompts": "^1.1.0",
 		"minimatch": "^10.2.4",
 		"picocolors": "^1.1.1",
-		"tigerbeetle-node": "^0.16.0",
+		"tigerbeetle-node": "^0.17.9",
 		"yaml": "^2.8.3",
-		"zod": "^3.23.0"
+		"zod": "^4.4.3"
 	},
 	"scripts": {
 		"build": "tsc",
 		"prepublishOnly": "tsc"
 	},
-	"files": ["dist"],
+	"files": [
+		"dist"
+	],
 	"peerDependencies": {
 		"@anthropic-ai/sdk": ">=0.30.0",
 		"openai": ">=4.70.0"

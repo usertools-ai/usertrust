@@ -42,8 +42,8 @@ vi.mock("tigerbeetle-node", () => ({
 		post_pending_transfer: 4,
 		void_pending_transfer: 8,
 	},
-	CreateTransferError: { exists: 1, exceeds_credits: 34 },
-	CreateAccountError: { exists: 1 },
+	CreateTransferStatus: { created: 4294967295, exists: 1, exceeds_credits: 34 },
+	CreateAccountStatus: { created: 4294967295, exists: 1 },
 	amount_max: 0xffffffffffffffffffffffffffffffffn,
 }));
 

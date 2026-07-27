@@ -9,14 +9,14 @@
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { CreateTransferError } from "tigerbeetle-node";
+import { CreateTransferStatus } from "tigerbeetle-node";
 import { canonicalize } from "../audit/canonical.js";
 import { DEFAULT_HOLD_TTL_MS, VAULT_DIR } from "../shared/constants.js";
 import { InsufficientBalanceError } from "../shared/errors.js";
 import { fnv1a32 } from "../shared/ids.js";
 import type { TBTransferError, TrustTBClient } from "./client.js";
 import { XFER_SPEND } from "./client.js";
-import { type ModelRates, PRICING_TABLE, estimateCost } from "./pricing.js";
+import { estimateCost, type ModelRates, PRICING_TABLE } from "./pricing.js";
 
 // ── Types ──
 
@@ -114,9 +114,9 @@ function isInsufficientBalanceError(err: unknown): err is TBTransferError {
 	const e = err as { code: number; name: string };
 	return (
 		e.name === "TBTransferError" &&
-		(e.code === CreateTransferError.exceeds_credits ||
-			e.code === CreateTransferError.overflows_debits ||
-			e.code === CreateTransferError.overflows_debits_pending)
+		(e.code === CreateTransferStatus.exceeds_credits ||
+			e.code === CreateTransferStatus.overflows_debits ||
+			e.code === CreateTransferStatus.overflows_debits_pending)
 	);
 }
 

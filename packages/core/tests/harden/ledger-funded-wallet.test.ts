@@ -19,7 +19,7 @@ const { store, mockClient } = vi.hoisted(() => {
 	const mockClient = {
 		createAccounts: vi.fn(async (accts: { id: bigint; flags: number }[]) => {
 			for (const a of accts) {
-				if (store.has(a.id)) return [{ index: 0, result: 1 /* exists */ }];
+				if (store.has(a.id)) return [{ status: 1 /* exists */ }];
 				store.set(a.id, {
 					flags: a.flags,
 					credits_posted: 0n,
@@ -41,14 +41,14 @@ const { store, mockClient } = vi.hoisted(() => {
 				for (const t of xs) {
 					const debit = store.get(t.debit_account_id);
 					const credit = store.get(t.credit_account_id);
-					if (!debit || !credit) return [{ index: 0, result: 40 /* account not found */ }];
+					if (!debit || !credit) return [{ status: 40 /* account not found */ }];
 					if (t.flags & PENDING) {
 						// Pending debit: enforce the flag on the debited account.
 						if (
 							(debit.flags & DMNEC) !== 0 &&
 							debit.debits_pending + debit.debits_posted + t.amount > debit.credits_posted
 						) {
-							return [{ index: 0, result: EXCEEDS_CREDITS }];
+							return [{ status: EXCEEDS_CREDITS }];
 						}
 						debit.debits_pending += t.amount;
 					} else {
@@ -87,8 +87,13 @@ vi.mock("tigerbeetle-node", () => ({
 	createClient: vi.fn(() => mockClient),
 	AccountFlags: { debits_must_not_exceed_credits: 1 << 2, history: 1 << 5 },
 	TransferFlags: { pending: 1, post_pending_transfer: 2, void_pending_transfer: 4 },
-	CreateAccountError: { exists: 1 },
-	CreateTransferError: { exceeds_credits: 22, overflows_debits: 30, overflows_debits_pending: 31 },
+	CreateAccountStatus: { created: 4294967295, exists: 1 },
+	CreateTransferStatus: {
+		created: 4294967295,
+		exceeds_credits: 22,
+		overflows_debits: 30,
+		overflows_debits_pending: 31,
+	},
 	amount_max: (1n << 128n) - 1n,
 }));
 

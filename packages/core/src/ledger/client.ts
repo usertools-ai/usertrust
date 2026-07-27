@@ -11,11 +11,11 @@ import { createHash } from "node:crypto";
 import type { Account, Transfer } from "tigerbeetle-node";
 import {
 	AccountFlags,
-	CreateAccountError,
-	CreateTransferError,
-	TransferFlags,
 	amount_max,
+	CreateAccountStatus,
+	CreateTransferStatus,
 	createClient,
+	TransferFlags,
 } from "tigerbeetle-node";
 import { tbId } from "../shared/ids.js";
 
@@ -200,15 +200,16 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const errors = await this.withReconnect(() => this.client.createAccounts([account]));
-		if (errors.length > 0) {
-			const err = errors[0];
-			if (!err) throw new Error("Unknown account/transfer error");
-			if (err.result === CreateAccountError.exists) {
-				this.accountMap.set(userId, accountId);
-				return accountId;
+		const results = await this.withReconnect(() => this.client.createAccounts([account]));
+		if (results.length > 0) {
+			const res = results[0];
+			if (!res) throw new Error("Unknown account/transfer error");
+			// `exists` is treated as success — the wallet is already present.
+			if (res.status !== CreateAccountStatus.created && res.status !== CreateAccountStatus.exists) {
+				throw new Error(
+					`Failed to create account: ${CreateAccountStatus[res.status] ?? res.status}`,
+				);
 			}
-			throw new Error(`Failed to create account: ${CreateAccountError[err.result] ?? err.result}`);
 		}
 
 		this.accountMap.set(userId, accountId);
@@ -244,11 +245,15 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const errors = await this.withReconnect(() => this.client.createAccounts([account]));
-		if (errors.length > 0) {
-			const err = errors[0];
-			if (!err) throw new Error("Unknown account/transfer error");
-			throw new Error(`Failed to create treasury: ${CreateAccountError[err.result] ?? err.result}`);
+		const results = await this.withReconnect(() => this.client.createAccounts([account]));
+		if (results.length > 0) {
+			const res = results[0];
+			if (!res) throw new Error("Unknown account/transfer error");
+			if (res.status !== CreateAccountStatus.created) {
+				throw new Error(
+					`Failed to create treasury: ${CreateAccountStatus[res.status] ?? res.status}`,
+				);
+			}
 		}
 
 		this.treasuryId = accountId;
@@ -274,16 +279,16 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const errors = await this.withReconnect(() => this.client.createAccounts([account]));
-		if (errors.length > 0) {
-			const err = errors[0];
-			if (!err) throw new Error("Unknown account/transfer error");
-			if (err.result === CreateAccountError.exists) {
-				return accountId;
+		const results = await this.withReconnect(() => this.client.createAccounts([account]));
+		if (results.length > 0) {
+			const res = results[0];
+			if (!res) throw new Error("Unknown account/transfer error");
+			// `exists` is treated as success — the escrow account is already present.
+			if (res.status !== CreateAccountStatus.created && res.status !== CreateAccountStatus.exists) {
+				throw new Error(
+					`Failed to create escrow account: ${CreateAccountStatus[res.status] ?? res.status}`,
+				);
 			}
-			throw new Error(
-				`Failed to create escrow account: ${CreateAccountError[err.result] ?? err.result}`,
-			);
 		}
 
 		return accountId;
@@ -320,13 +325,15 @@ export class TrustTBClient {
 			flags: AccountFlags.debits_must_not_exceed_credits | AccountFlags.history,
 			timestamp: 0n,
 		};
-		const errors = await this.withReconnect(() => this.client.createAccounts([account]));
-		if (errors.length > 0) {
-			const err = errors[0];
-			if (!err) throw new Error("Unknown account/transfer error");
-			throw new Error(
-				`Failed to create budget wallet: ${CreateAccountError[err.result] ?? err.result}`,
-			);
+		const results = await this.withReconnect(() => this.client.createAccounts([account]));
+		if (results.length > 0) {
+			const res = results[0];
+			if (!res) throw new Error("Unknown account/transfer error");
+			if (res.status !== CreateAccountStatus.created) {
+				throw new Error(
+					`Failed to create budget wallet: ${CreateAccountStatus[res.status] ?? res.status}`,
+				);
+			}
 		}
 		// Fund from the treasury mint. The account id is fresh, so this seeding
 		// transfer runs exactly once per wallet.
@@ -384,14 +391,16 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const errors = await this.withReconnect(() => this.client.createTransfers([transfer]));
-		if (errors.length > 0) {
-			const err = errors[0];
-			if (!err) throw new Error("Unknown account/transfer error");
-			throw new TBTransferError(
-				err.result,
-				`Pending transfer failed: ${CreateTransferError[err.result] ?? err.result}`,
-			);
+		const results = await this.withReconnect(() => this.client.createTransfers([transfer]));
+		if (results.length > 0) {
+			const res = results[0];
+			if (!res) throw new Error("Unknown account/transfer error");
+			if (res.status !== CreateTransferStatus.created) {
+				throw new TBTransferError(
+					res.status,
+					`Pending transfer failed: ${CreateTransferStatus[res.status] ?? res.status}`,
+				);
+			}
 		}
 		return transferId;
 	}
@@ -414,11 +423,13 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const errors = await this.withReconnect(() => this.client.createTransfers([transfer]));
-		if (errors.length > 0) {
-			const err = errors[0];
-			if (!err) throw new Error("Unknown account/transfer error");
-			throw new Error(`Post transfer failed: ${CreateTransferError[err.result] ?? err.result}`);
+		const results = await this.withReconnect(() => this.client.createTransfers([transfer]));
+		if (results.length > 0) {
+			const res = results[0];
+			if (!res) throw new Error("Unknown account/transfer error");
+			if (res.status !== CreateTransferStatus.created) {
+				throw new Error(`Post transfer failed: ${CreateTransferStatus[res.status] ?? res.status}`);
+			}
 		}
 		return postId;
 	}
@@ -441,11 +452,13 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const errors = await this.withReconnect(() => this.client.createTransfers([transfer]));
-		if (errors.length > 0) {
-			const err = errors[0];
-			if (!err) throw new Error("Unknown account/transfer error");
-			throw new Error(`Void transfer failed: ${CreateTransferError[err.result] ?? err.result}`);
+		const results = await this.withReconnect(() => this.client.createTransfers([transfer]));
+		if (results.length > 0) {
+			const res = results[0];
+			if (!res) throw new Error("Unknown account/transfer error");
+			if (res.status !== CreateTransferStatus.created) {
+				throw new Error(`Void transfer failed: ${CreateTransferStatus[res.status] ?? res.status}`);
+			}
 		}
 		return voidId;
 	}
@@ -477,14 +490,16 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const errors = await this.withReconnect(() => this.client.createTransfers([transfer]));
-		if (errors.length > 0) {
-			const err = errors[0];
-			if (!err) throw new Error("Unknown account/transfer error");
-			throw new TBTransferError(
-				err.result,
-				`Transfer failed: ${CreateTransferError[err.result] ?? err.result}`,
-			);
+		const results = await this.withReconnect(() => this.client.createTransfers([transfer]));
+		if (results.length > 0) {
+			const res = results[0];
+			if (!res) throw new Error("Unknown account/transfer error");
+			if (res.status !== CreateTransferStatus.created) {
+				throw new TBTransferError(
+					res.status,
+					`Transfer failed: ${CreateTransferStatus[res.status] ?? res.status}`,
+				);
+			}
 		}
 		return transferId;
 	}

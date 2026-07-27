@@ -3,7 +3,7 @@
 
 import { describe, expect, it } from "vitest";
 import { DEFAULT_RULES, mergePolicies } from "../../src/policy/default-rules.js";
-import { type GateRule, evaluatePolicy } from "../../src/policy/gate.js";
+import { evaluatePolicy, type GateRule } from "../../src/policy/gate.js";
 
 describe("mergePolicies (safe concat — defaults always enforced)", () => {
 	it("keeps enforcement defaults when a user supplies unrelated rules", () => {

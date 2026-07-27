@@ -3,9 +3,9 @@
 
 import { describe, expect, it } from "vitest";
 import {
-	FALLBACK_RATE,
 	costFromRates,
 	estimateCost,
+	FALLBACK_RATE,
 	getModelRates,
 	matchModelPattern,
 	resolveRates,

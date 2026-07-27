@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import pc from "picocolors";
-import { PRICING_TABLE, PRICING_TABLE_VERSION, modelsForProvider } from "../ledger/pricing.js";
+import { modelsForProvider, PRICING_TABLE, PRICING_TABLE_VERSION } from "../ledger/pricing.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { TrustConfig } from "../shared/types.js";
 import { TrustConfigSchema } from "../shared/types.js";

@@ -26,15 +26,15 @@
  * root key (and optional rotation-successor pins) out-of-band.
  */
 
-import { type KeyObject, createHash, createPublicKey, verify as cryptoVerify } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { createHash, createPublicKey, verify as cryptoVerify, type KeyObject } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { GENESIS_HASH } from "../shared/constants.js";
 import { canonicalize } from "./canonical.js";
 import {
-	type MerkleInclusionProof,
 	buildMerkleTree,
 	generateConsistencyProof,
+	type MerkleInclusionProof,
 	verifyConsistencyProof,
 	verifyInclusionProof,
 } from "./merkle.js";

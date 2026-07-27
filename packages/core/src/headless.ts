@@ -41,7 +41,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { CreateTransferError } from "tigerbeetle-node";
+import { CreateTransferStatus } from "tigerbeetle-node";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import { writeReceipt } from "./audit/rotation.js";
 import type { TrustEngine, TrustOpts } from "./govern.js";
@@ -55,7 +55,7 @@ import {
 } from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
-import { type GateRule, evaluatePolicy, loadPolicies } from "./policy/gate.js";
+import { evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
 import { detectPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
@@ -66,8 +66,8 @@ import {
 	PolicyDeniedError,
 } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
-import { TrustConfigSchema } from "./shared/types.js";
 import type { EndpointInfo, TrustConfig, TrustReceipt } from "./shared/types.js";
+import { TrustConfigSchema } from "./shared/types.js";
 
 // ── Public types ──
 
@@ -294,9 +294,9 @@ async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promi
 function isTBInsufficientBalance(err: unknown): boolean {
 	if (!(err instanceof TBTransferError)) return false;
 	return (
-		err.code === CreateTransferError.exceeds_credits ||
-		err.code === CreateTransferError.overflows_debits ||
-		err.code === CreateTransferError.overflows_debits_pending
+		err.code === CreateTransferStatus.exceeds_credits ||
+		err.code === CreateTransferStatus.overflows_debits ||
+		err.code === CreateTransferStatus.overflows_debits_pending
 	);
 }
 
