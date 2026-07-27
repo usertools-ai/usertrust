@@ -529,9 +529,12 @@ describe("trust() — end-to-end integration", () => {
 			expect(existsSync(auditPath)).toBe(true);
 
 			const lines = readFileSync(auditPath, "utf-8").trim().split("\n");
-			expect(lines.length).toBe(3);
-
 			const events = lines.map((line) => JSON.parse(line) as AuditEvent & { sequence: number });
+
+			// Three calls → three llm_call events; the hash chain below covers the full
+			// (validly chained) event set.
+			const llmEvents = events.filter((e) => e.kind === "llm_call");
+			expect(llmEvents.length).toBe(3);
 
 			// First event chains from GENESIS_HASH
 			expect(events[0]?.previousHash).toBe(GENESIS_HASH);
@@ -555,8 +558,8 @@ describe("trust() — end-to-end integration", () => {
 				expect(events[i]?.sequence).toBe(i + 1);
 			}
 
-			// All events are llm_call kind
-			for (const event of events) {
+			// All settlement events are llm_call kind
+			for (const event of llmEvents) {
 				expect(event.kind).toBe("llm_call");
 				expect(event.actor).toBe("local");
 				expect(event.data.model).toBe("claude-sonnet-4-6");
@@ -643,10 +646,11 @@ describe("trust() — end-to-end integration", () => {
 
 			await governed2.destroy();
 
-			// Verify audit chain has events from both sessions
+			// Verify audit chain has events from both sessions — one llm_call per session.
 			const auditPath = join(tmpVault, VAULT_DIR, "audit", "events.jsonl");
 			const lines = readFileSync(auditPath, "utf-8").trim().split("\n");
-			expect(lines.length).toBe(2);
+			const llmCalls = lines.filter((l) => (JSON.parse(l) as AuditEvent).kind === "llm_call");
+			expect(llmCalls.length).toBe(2);
 		});
 	});
 
@@ -962,7 +966,10 @@ describe("trust() — end-to-end integration", () => {
 
 			const auditPath = join(tmpVault, VAULT_DIR, "audit", "events.jsonl");
 			const lines = readFileSync(auditPath, "utf-8").trim().split("\n");
-			expect(lines.length).toBe(2);
+			// Two calls → two llm_call events. The per-event hash recomputation below
+			// covers every line in the audit log.
+			const llmCalls = lines.filter((l) => (JSON.parse(l) as AuditEvent).kind === "llm_call");
+			expect(llmCalls.length).toBe(2);
 
 			for (const line of lines) {
 				const event = JSON.parse(line) as AuditEvent & {
@@ -1107,15 +1114,18 @@ describe("trust() — end-to-end integration", () => {
 			// Verify chain continuity
 			const auditPath = join(tmpVault, VAULT_DIR, "audit", "events.jsonl");
 			const lines = readFileSync(auditPath, "utf-8").trim().split("\n");
-			expect(lines.length).toBe(2);
-
 			const events = lines.map((line) => JSON.parse(line) as AuditEvent);
+
+			// One llm_call per session; chain continuity holds across the full set.
+			expect(events.filter((e) => e.kind === "llm_call").length).toBe(2);
 
 			// Event 1 chains from genesis
 			expect(events[0]?.previousHash).toBe(GENESIS_HASH);
 
-			// Event 2 chains from event 1
-			expect(events[1]?.previousHash).toBe(events[0]?.hash);
+			// Each subsequent event chains from the previous one
+			for (let i = 1; i < events.length; i++) {
+				expect(events[i]?.previousHash).toBe(events[i - 1]?.hash);
+			}
 		});
 	});
 });

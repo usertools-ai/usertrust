@@ -55,7 +55,10 @@ jobs:
 
       # ── Quality gate ──
       - name: Typecheck
-        run: npx tsc -b
+        # `npm run typecheck` also compiles the F5 type-surface guard
+        # (packages/core/tsconfig.type-tests.json) so a broken TrustedClient type
+        # can't publish; a bare `tsc -b` would skip the .test-d.ts.
+        run: npm run typecheck
 
       - name: Test
         run: npx vitest run

@@ -140,8 +140,50 @@ export interface TrustEngine {
 	destroy?(): void;
 }
 
-/** The trusted client: original client shape + governance methods. */
-export type TrustedClient<T> = T & {
+// ── F5: governed-surface type rewrites ────────────────────────────────────────
+// The runtime proxy makes Anthropic `messages.stream` / `beta.messages.stream`
+// ASYNC (they authorize before forwarding) and hangs a `.receipt` promise off the
+// returned MessageStream; `messages.parse` / `beta.messages.parse` return the
+// parsed message with a settled `.receipt`. These mapped types make the EXPORTED
+// TrustedClient type match that runtime contract, so a consumer using the old sync
+// `const s = client.messages.stream(...)` pattern gets a compile error. Clients
+// without a top-level `messages` (OpenAI/Google) pass through unchanged.
+
+/** `stream` becomes `(...args) => Promise<MessageStream & { receipt: Promise<TrustReceipt> }>`. */
+type GovernedStreamMethod<F> = F extends (...args: infer A) => infer R
+	? (...args: A) => Promise<Awaited<R> & { receipt: Promise<TrustReceipt> }>
+	: F;
+
+/** `parse` becomes `(...args) => Promise<ParsedMessage & { receipt: TrustReceipt }>`. */
+type GovernedParseMethod<F> = F extends (...args: infer A) => infer R
+	? (...args: A) => Promise<Awaited<R> & { receipt: TrustReceipt }>
+	: F;
+
+/** Rewrite `stream`/`parse` on a `messages` resource; leave `create`/everything else. */
+type GovernedMessages<M> = M extends object
+	? Omit<M, "stream" | "parse"> &
+			("stream" extends keyof M ? { stream: GovernedStreamMethod<M["stream"]> } : unknown) &
+			("parse" extends keyof M ? { parse: GovernedParseMethod<M["parse"]> } : unknown)
+	: M;
+
+/** Rewrite `beta.messages` when present; otherwise leave `beta` untouched. */
+type GovernedBeta<B> = B extends { messages: infer BM }
+	? Omit<B, "messages"> & { messages: GovernedMessages<BM> }
+	: B;
+
+/**
+ * Rewrite only the Anthropic `messages` / `beta.messages` surfaces. A client
+ * without a `messages` resource (OpenAI, Google) is returned unchanged — its
+ * governed `create`/`responses` shapes are unaffected by this rewrite.
+ */
+type GovernedShape<T> = T extends { messages: infer M }
+	? Omit<T, "messages" | "beta"> & { messages: GovernedMessages<M> } & (T extends { beta: infer B }
+				? { beta: GovernedBeta<B> }
+				: unknown)
+	: T;
+
+/** The trusted client: governed client shape (F5) + governance methods. */
+export type TrustedClient<T> = GovernedShape<T> & {
 	destroy(): Promise<void>;
 	governAction<R>(
 		action: ActionDescriptor,
@@ -441,6 +483,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		originalFn: (...args: unknown[]) => unknown,
 		thisArg: unknown,
 		args: unknown[],
+		// A1: which provider surface this call arrived through. "create" is the
+		// default request/response (and create-stream) path. "stream-helper" is the
+		// Anthropic messages.stream / beta.messages.stream convenience helper, whose
+		// forwarded call returns a self-driving MessageStream we settle via
+		// NON-CONSUMING emitter events instead of routing through
+		// createGovernedStream (A1) — consuming its single-owner async iterator would
+		// steal it from the caller. "openai-responses" (Task 3, A6) is the OpenAI
+		// Responses API (create, stream and non-stream): it shares the create request/
+		// response lifecycle and the generic createGovernedStream streaming path (A7),
+		// but MUST NOT receive the chat.completions-only stream_options.include_usage
+		// injection (A6) — the surface flag suppresses it below.
+		surfaceKind: "create" | "stream-helper" | "openai-responses" = "create",
 	): Promise<TrustedResponse<unknown>> {
 		if (destroyed) {
 			throw new Error("TrustedClient has been destroyed");
@@ -477,7 +531,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// authorize time, before any PENDING hold (A5).
 			const transferId = trustId("tx");
 			const estimatedInputTokens = estimateInputTokens(promptParts);
-			const maxOutputTokens = (params.max_tokens as number) ?? 4096;
+			// F1: size the output estimate to the caller's ACTUAL cap. Responses callers
+			// set `max_output_tokens`; chat.completions set `max_tokens`. Read the
+			// Responses field first, then chat, then the 4096 default — each only when it
+			// is a finite positive number (a 0/negative/NaN cap never shrinks the hold).
+			const finitePositiveCap = (value: unknown): number | undefined =>
+				typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+			const maxOutputTokens =
+				finitePositiveCap(params.max_output_tokens) ?? finitePositiveCap(params.max_tokens) ?? 4096;
 			const rateResolution = resolveRates(model, endpoint.class, config);
 			enforceUnknownModelPolicy(model, rateResolution, config);
 			const estimatedCost = costFromRates(
@@ -624,9 +685,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// stream_options.include_usage is set). The merge preserves the caller's
 			// other stream_options fields and respects an explicit include_usage.
 			// The resulting usage chunk is FORWARDED to the consumer unmodified
-			// (transparent middleware).
+			// (transparent middleware). Task 3/A6: the OpenAI Responses API is EXCLUDED
+			// — stream_options.include_usage is chat.completions-only; Responses carries
+			// usage automatically on the terminal `response.completed` event, and
+			// injecting the param would be an unknown field on the Responses request.
 			let preInjectionArgs: unknown[] | null = null;
-			if (kind === "openai" && endpoint.class === "local" && config.local.injectUsageOptions) {
+			if (
+				kind === "openai" &&
+				surfaceKind !== "openai-responses" &&
+				endpoint.class === "local" &&
+				config.local.injectUsageOptions
+			) {
 				const injected = withInjectedUsageOptions(forwardArgs);
 				if (injected != null) {
 					preInjectionArgs = forwardArgs;
@@ -637,6 +706,503 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// e. Forward to original SDK. P3-PII-REDACT-EGRESS: forwardArgs is the
 			// redacted clone in redact mode, or the original args otherwise.
 			let settled = true;
+
+			// A2: one idempotent finalize gate per hold. The FIRST terminal signal for
+			// this authorization wins and claims the single ledger outcome (settle XOR
+			// void); every later signal returns false and MUST NOT mutate the ledger.
+			// Every terminal path routes through it: the non-stream settle + its
+			// outer-catch void, the stream onComplete/onError closures below, and
+			// (Tasks 2/3) any new surface's emitter/iterator/error/abort listeners. A
+			// duplicate terminal signal can neither double-settle nor double-void.
+			let finalizeState: "pending" | "settled" | "voided" = "pending";
+			function finalizeOnce(outcome: "settle" | "void"): boolean {
+				if (finalizeState !== "pending") return false;
+				finalizeState = outcome === "settle" ? "settled" : "voided";
+				return true;
+			}
+
+			// Estimate-priced stream receipt (settled:false). Serves as the initial
+			// handle returned to the caller AND the idempotent fallback a duplicate
+			// stream terminal returns after the hold was already resolved.
+			const buildEstimatedStreamReceipt = (): TrustReceipt => {
+				const streamEstimateHash = createHash("sha256").update(transferId).digest("hex");
+				return {
+					transferId,
+					cost: estimatedCost,
+					budgetRemaining: config.budget - budgetSpent - inFlightHoldTotal,
+					auditHash: callAuditDegraded ? "AUDIT_DEGRADED" : streamEstimateHash,
+					chainPath: join(VAULT_DIR, "audit"),
+					receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
+					settled: false, // AUD-454: not settled yet — stream hasn't been consumed
+					model,
+					provider: kind,
+					timestamp: new Date().toISOString(),
+					// M2: authorize-time scope, already fixed for the eventual settle (A3).
+					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
+					meter: {
+						costBasis: rateResolution.costBasis,
+						rateSource: rateResolution.rateSource,
+					},
+					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
+					// AUD-456: Flag proxy stub receipts
+					...(proxyConn != null ? { proxyStub: true as const } : {}),
+				};
+			};
+
+			// Terminal stream settlement (A2 settle branch). Idempotent via
+			// finalizeOnce: budget commit + ledger POST + llm_call audit happen AT MOST
+			// ONCE per hold. Tasks 2/3 reuse this verbatim — the
+			// Anthropic MessageStream 'finalMessage' listener and any new stream surface
+			// call it with a StreamCompletion built from final usage. Does NOT touch
+			// inFlightStreamCount — the caller (createGovernedStream wiring, or a new
+			// surface's listener) owns that counter.
+			let streamSettledReceipt: TrustReceipt | undefined;
+			const finalizeStreamSettle = async (completion: StreamCompletion): Promise<TrustReceipt> => {
+				if (!finalizeOnce("settle")) {
+					// A duplicate terminal (e.g. 'finalMessage' after 'end', or a settle
+					// racing an abort-void): never mutate the ledger again.
+					return streamSettledReceipt ?? buildEstimatedStreamReceipt();
+				}
+
+				// Determine cost: use provider usage if reported, else fall back to
+				// estimate. A3: priced with the rate resolution captured at authorize;
+				// A11: costFromRates floors at 1 even for 0/0 usage.
+				let streamCost: number;
+				let usageSource: "provider" | "estimated";
+				if (completion.usageReported) {
+					streamCost = costFromRates(
+						rateResolution.rates,
+						completion.usage.inputTokens,
+						completion.usage.outputTokens,
+					);
+					usageSource = "provider";
+				} else {
+					streamCost = estimatedCost;
+					usageSource = "estimated";
+				}
+
+				// Release in-flight hold and commit budget under mutex.
+				// AUD-468: holdActive guard prevents double-release.
+				if (holdActive) {
+					holdActive = false;
+					const releaseLock = await budgetMutex.acquire();
+					inFlightHoldTotal -= estimatedCost;
+					budgetSpent += streamCost;
+					releaseLock();
+				} else {
+					// Hold already released — still need to record the spend.
+					const releaseLock = await budgetMutex.acquire();
+					budgetSpent += streamCost;
+					releaseLock();
+				}
+				// AUD-457: Persist cumulative spend to disk
+				await persistSpendLedger(vaultBase, budgetSpent);
+				cb.recordSuccess();
+
+				if (proxyConn != null && !isDryRun) {
+					try {
+						// AUD-460: Use the proxy's transferId for settlement
+						await proxyConn.settle(proxyTransferId ?? transferId, streamCost);
+					} catch (postErr) {
+						settled = false;
+						await audit
+							.appendEvent({
+								kind: "settlement_ambiguous",
+								actor: "local",
+								data: {
+									model,
+									cost: streamCost,
+									transferId,
+									error:
+										postErr instanceof Error
+											? postErr.message.slice(0, 200)
+											: String(postErr).slice(0, 200),
+								},
+							})
+							.catch(() => {
+								callAuditDegraded = true;
+							});
+					}
+				} else if (engine != null && !isDryRun) {
+					try {
+						// Post the ACTUAL consumed cost (RECON #3).
+						await engine.postPendingSpend(transferId, streamCost);
+					} catch (postErr) {
+						settled = false;
+						await audit
+							.appendEvent({
+								kind: "settlement_ambiguous",
+								actor: "local",
+								data: {
+									model,
+									cost: streamCost,
+									transferId,
+									error:
+										postErr instanceof Error
+											? postErr.message.slice(0, 200)
+											: String(postErr).slice(0, 200),
+								},
+							})
+							.catch(() => {
+								callAuditDegraded = true;
+							});
+					}
+				}
+
+				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
+				let auditHash = syntheticHash;
+				try {
+					const auditEventData: Record<string, unknown> = {
+						model,
+						cost: streamCost,
+						settled,
+						transferId,
+						usageSource,
+						chunksDelivered: completion.chunksDelivered,
+						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
+						endpointClass: endpoint.class,
+						costBasis: rateResolution.costBasis,
+						rateSource: rateResolution.rateSource,
+					};
+					if (config.pii === "warn" || config.pii === "redact") {
+						const piiResult = redactPII(promptParts);
+						if (piiResult.detection.found) {
+							auditEventData.piiDetected = piiResult.detection.types;
+							auditEventData.piiPaths = piiResult.detection.paths;
+						}
+					}
+					const auditEvent = await audit.appendEvent({
+						kind: "llm_call",
+						actor: "local",
+						data: auditEventData,
+					});
+					auditHash = auditEvent.hash;
+				} catch {
+					callAuditDegraded = true;
+				}
+
+				// P3-AUDIT-FAILCLOSED (streaming): chunks were already delivered, so the
+				// strongest post-delivery signal is to REJECT `.receipt`. The caller's
+				// finally decrements inFlightStreamCount so destroy() never blocks.
+				if (config.audit.failClosed && (callAuditDegraded || audit.isDegraded())) {
+					throw new AuditDegradedError(
+						`audit unavailable (writeFailures=${audit.getWriteFailures()}) for ${transferId}`,
+					);
+				}
+
+				const streamReceipt: TrustReceipt = {
+					transferId,
+					cost: streamCost,
+					budgetRemaining: config.budget - budgetSpent - inFlightHoldTotal,
+					auditHash: callAuditDegraded ? "AUDIT_DEGRADED" : auditHash,
+					chainPath: join(VAULT_DIR, "audit"),
+					receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
+					settled,
+					model,
+					provider: kind,
+					timestamp: new Date().toISOString(),
+					usageSource,
+					chunksDelivered: completion.chunksDelivered,
+					// M2 provenance (A6: computeMs omitted — no compute-time source here).
+					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
+					meter: {
+						costBasis: rateResolution.costBasis,
+						rateSource: rateResolution.rateSource,
+					},
+					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
+					// AUD-456: Flag proxy stub receipts
+					...(proxyConn != null ? { proxyStub: true as const } : {}),
+				};
+				streamSettledReceipt = streamReceipt;
+				return streamReceipt;
+			};
+
+			// Terminal stream void (A2 void branch). Idempotent via finalizeOnce:
+			// releases the hold and voids the ledger AT MOST ONCE. Tasks 2/3 reuse this
+			// for the Anthropic MessageStream 'error'/'abort' listeners and any new
+			// stream surface's error path. Does NOT touch inFlightStreamCount.
+			const finalizeStreamVoid = async (
+				error: unknown,
+				partial: StreamCompletion,
+			): Promise<void> => {
+				if (!finalizeOnce("void")) return;
+
+				// Release in-flight hold under mutex (AUD-468: guarded).
+				await releaseInFlightHold();
+
+				cb.recordFailure();
+
+				// Best-effort audit of partial delivery
+				audit
+					.appendEvent({
+						kind: "stream_partial_delivery",
+						actor: "local",
+						data: {
+							transferId,
+							model,
+							chunksDelivered: partial.chunksDelivered,
+							partialInputTokens: partial.usage.inputTokens,
+							partialOutputTokens: partial.usage.outputTokens,
+							usageReported: partial.usageReported,
+							error: (() => {
+								const raw = error instanceof Error ? error.message : String(error);
+								return config.pii === "warn" || config.pii === "redact"
+									? (redactPII(raw).data as string).slice(0, 200)
+									: raw.slice(0, 200);
+							})(),
+						},
+					})
+					.catch(() => {});
+
+				if (proxyConn != null && !isDryRun) {
+					// AUD-460: Use the proxy's transferId for void
+					proxyConn.void(proxyTransferId ?? transferId).catch(() => {});
+				} else if (engine != null && !isDryRun) {
+					engine.voidPendingSpend(transferId).catch(() => {});
+				}
+			};
+
+			// A1: settle an Anthropic MessageStream (messages.stream /
+			// beta.messages.stream) via its MULTICAST event emitter, never by consuming
+			// its single-owner async iterator (that belongs to the caller). The stream
+			// self-drives, so finalMessage/error/abort fire even if the caller never
+			// consumes (A4); the TigerBeetle PENDING 300s timeout (see destroy() and
+			// createPendingTransfer) is the last-resort backstop for a hold whose
+			// terminal event never arrives. finalizeOnce makes the six-mode consumption
+			// matrix safe: settle XOR void, exactly one ledger mutation.
+			const settleViaMessageStream = (streamObj: unknown): TrustedResponse<unknown> => {
+				// The initial handle: estimate-priced, settled:false — identical to the
+				// generic stream path. The caller reads the real receipt off `.receipt`.
+				const estimatedReceipt = buildEstimatedStreamReceipt();
+
+				const emitter =
+					streamObj != null && typeof streamObj === "object"
+						? (streamObj as {
+								on?: (event: string, listener: (...a: unknown[]) => void) => unknown;
+								abort?: () => void;
+							})
+						: null;
+
+				// This closure OWNS inFlightStreamCount for the stream's lifetime; the
+				// finalize* gates never touch it. Release it EXACTLY ONCE no matter how
+				// many terminal events fire (finalMessage-then-abort race, error-after-
+				// end, …) so destroy() never blocks and the counter never drifts.
+				inFlightStreamCount++;
+				let streamCountReleased = false;
+				const releaseStreamCount = (): void => {
+					if (streamCountReleased) return;
+					streamCountReleased = true;
+					inFlightStreamCount--;
+				};
+
+				// `.receipt`: resolves with the settled receipt, rejects on a genuine
+				// stream error / failClosed. Built BEFORE the feature-detect branch so BOTH
+				// the emitter path and the non-emitter fallback expose a live `.receipt` the
+				// caller can await for the settled outcome. F8: governance never SILENTLY
+				// swallows a stream failure — a consumer who awaits `.receipt` always sees
+				// the error (the pre-attached catch below is a SEPARATE branch: promises are
+				// multicast, so it silences the unhandled-rejection ONLY for a fire-and-forget
+				// consumer that never awaits `.receipt`, never registers an error handler, and
+				// never calls done()/finalMessage() — that narrow gap is documented).
+				let receiptResolve!: (r: TrustReceipt) => void;
+				let receiptReject!: (e: unknown) => void;
+				const receiptPromise = new Promise<TrustReceipt>((res, rej) => {
+					receiptResolve = res;
+					receiptReject = rej;
+				});
+				receiptPromise.catch(() => {});
+
+				// Expose `.receipt` on the returned stream object (best-effort — a frozen or
+				// non-object stream simply omits it; the terminal events still settle
+				// governance).
+				const attachReceipt = (): void => {
+					if (streamObj == null || typeof streamObj !== "object") return;
+					try {
+						Object.assign(streamObj as object, { receipt: receiptPromise });
+					} catch {
+						// non-extensible target — skip
+					}
+				};
+
+				// A3: a helper that connected is a billable SUCCESS. If the forwarded
+				// object is not an event-emitter MessageStream (feature-detect miss / an
+				// SDK too old to return one), we cannot tap emitter events — settle at
+				// ESTIMATE now so the hold never dangles, resolve `.receipt` from that
+				// background settle (mirroring the finalMessage path), and hand the object
+				// back raw.
+				if (emitter == null || typeof emitter.on !== "function") {
+					finalizeStreamSettle({
+						usage: { inputTokens: 0, outputTokens: 0 },
+						chunksDelivered: 0,
+						usageReported: false,
+					})
+						.then(receiptResolve, receiptReject)
+						.finally(releaseStreamCount);
+					attachReceipt();
+					return { response: streamObj, receipt: estimatedReceipt };
+				}
+
+				// Non-consuming chunk accounting: streamEvent is multicast, so tapping it
+				// does not steal the caller's iterator. Mirrors the wrapStream tap so
+				// partial-void audits and a usage-less finalMessage both carry real
+				// numbers, and (best-effort, A1) trips the shared anomaly detector.
+				let chunksDelivered = 0;
+				let accInput = 0;
+				let accOutput = 0;
+				let accUsageReported = false;
+				// R1: set TRUE before governance calls emitter.abort() on an anomaly trip,
+				// so the 'abort' handler can distinguish a governance cutoff (void + breaker
+				// failure) from a genuine consumer abort (F9 settle-partial).
+				let anomalyAbort = false;
+				const partial = (): StreamCompletion => ({
+					usage: { inputTokens: accInput, outputTokens: accOutput },
+					chunksDelivered,
+					usageReported: accUsageReported,
+				});
+
+				emitter.on("streamEvent", (event: unknown) => {
+					chunksDelivered++;
+					const tokens = extractAnthropicStreamUsage(event);
+					let deltaTokens = 0;
+					if (tokens.inputTokens > accInput) {
+						deltaTokens += tokens.inputTokens - accInput;
+						accInput = tokens.inputTokens;
+						accUsageReported = true;
+					}
+					if (tokens.outputTokens > accOutput) {
+						deltaTokens += tokens.outputTokens - accOutput;
+						accOutput = tokens.outputTokens;
+						accUsageReported = true;
+					}
+					if (!config.anomaly.enabled) return;
+					anomalyDetector.observe({
+						kind: "chunk",
+						deltaTokens,
+						cumulativeInputTokens: accInput,
+						cumulativeOutputTokens: accOutput,
+						// M2: stamp the per-call scope so the SHARED detector prices this
+						// event with the same scoped rates as settlement.
+						model,
+						endpointClass: endpoint.class,
+					});
+					const verdict = anomalyDetector.check();
+					if (verdict.tripped) {
+						audit
+							.appendEvent({
+								kind: "anomaly_detected",
+								actor: "local",
+								data: {
+									anomalyKind: verdict.kind,
+									message: verdict.message,
+									metric: verdict.metric,
+									threshold: verdict.threshold,
+									model,
+									transferId,
+									provider: kind,
+								},
+							})
+							.catch(() => {});
+						// A1 best-effort mid-stream cutoff (full parity deferred). R1: flag
+						// this as a GOVERNANCE abort BEFORE aborting so the 'abort' handler
+						// VOIDs + records a breaker failure — same ledger + breaker outcome as
+						// the generic createGovernedStream anomaly path (which throws
+						// AnomalyError → finalizeStreamVoid). finalizeOnce keeps it safe if a
+						// finalMessage is already in flight.
+						anomalyAbort = true;
+						if (typeof emitter.abort === "function") emitter.abort();
+					}
+				});
+
+				emitter.on("finalMessage", (msg: unknown) => {
+					// A3: usage-extraction failure after a successful stream settles at
+					// ESTIMATE, never voids. F3: MERGE per-field — a finalMessage that
+					// carries only one field (or null for the other) keeps the counter
+					// accumulated from streamEvent for the MISSING field, rather than
+					// zeroing it. Reported when EITHER source carried a real number;
+					// otherwise settle on the estimate.
+					const finalUsage = readFinalMessageUsage(msg);
+					const usageReported = finalUsage.reported || accUsageReported;
+					const completion: StreamCompletion = usageReported
+						? {
+								usage: {
+									inputTokens: finalUsage.inputTokens ?? accInput,
+									outputTokens: finalUsage.outputTokens ?? accOutput,
+								},
+								chunksDelivered,
+								usageReported: true,
+							}
+						: {
+								usage: { inputTokens: 0, outputTokens: 0 },
+								chunksDelivered,
+								usageReported: false,
+							};
+					finalizeStreamSettle(completion)
+						.then(receiptResolve, receiptReject)
+						.finally(releaseStreamCount);
+				});
+
+				const voidVia = (error: unknown): void => {
+					// finalizeStreamVoid claims finalizeOnce("void") SYNCHRONOUSLY at its
+					// top, so finalizeState reflects the outcome the moment it returns.
+					finalizeStreamVoid(error, partial()).finally(releaseStreamCount);
+					// Only surface the void on `.receipt` when THIS terminal actually won
+					// the gate. A late abort after a settle is a ledger no-op (finalizeOnce
+					// already granted "settle") — it must not reject a receipt the settle
+					// path will resolve, even though that settle's async is still in flight.
+					if (finalizeState === "voided") receiptReject(error);
+				};
+
+				// F9: a consumer-initiated abort surfaces as the SDK's 'abort' event
+				// (APIUserAbortError), distinct from the provider-failure 'error' event. It
+				// is an early EXIT, not a failure: settle at the PARTIAL accumulated usage
+				// (mirroring the generic governed-stream break-out-of-for-await path) instead
+				// of voiding, and never record a circuit-breaker failure — a caller who
+				// aborts N streams must not trip the breaker. finalizeStreamSettle records
+				// success. The `pending` guard makes a LATE abort after a real terminal a
+				// clean no-op: without it the no-op settle would resolve `.receipt` with a
+				// stale estimate, racing (and beating) the winning terminal's async settle.
+				const settlePartialVia = (): void => {
+					if (finalizeState !== "pending") return;
+					finalizeStreamSettle(partial())
+						.then(receiptResolve, receiptReject)
+						.finally(releaseStreamCount);
+				};
+
+				emitter.on("error", (err: unknown) => voidVia(err ?? new Error("stream error")));
+				// R1: a GOVERNANCE anomaly cutoff (anomalyAbort) is a provider-side FAILURE —
+				// void the hold + record a breaker failure, matching the generic path. A
+				// genuine consumer abort is an early exit — settle the partial usage (F9).
+				emitter.on("abort", (err: unknown) => {
+					if (anomalyAbort) {
+						voidVia(err ?? new Error("anomaly cutoff"));
+					} else {
+						settlePartialVia();
+					}
+				});
+
+				// F6: the real MessageStream emits NO 'finalMessage' on a clean SSE close
+				// that lacks a message_stop (receivedMessages stays empty → _emitFinal emits
+				// nothing) — only 'end' fires. Without an 'end' catch-all the PENDING hold
+				// would dangle until the TigerBeetle 300s timeout. When 'end' is the SOLE
+				// terminal (gate still pending) settle at ESTIMATE so the hold releases; on
+				// every other terminal ('end' always fires last, after the winning settle/
+				// void) the guard makes this a no-op that must NOT touch `.receipt`.
+				emitter.on("end", () => {
+					if (finalizeState !== "pending") return;
+					finalizeStreamSettle({
+						usage: { inputTokens: 0, outputTokens: 0 },
+						chunksDelivered,
+						usageReported: false,
+					})
+						.then(receiptResolve, receiptReject)
+						.finally(releaseStreamCount);
+				});
+
+				attachReceipt();
+
+				return { response: streamObj, receipt: estimatedReceipt };
+			};
+
 			try {
 				let response: unknown;
 				try {
@@ -658,6 +1224,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					);
 				}
 
+				// A1: Anthropic messages.stream / beta.messages.stream helper. The
+				// forwarded call returned a MessageStream (event-emitter + AsyncIterable)
+				// owned by the CALLER. Settle via its multicast emitter — this branch
+				// runs BEFORE the generic Symbol.asyncIterator path because a
+				// MessageStream matches that check too but must NEVER be routed through
+				// createGovernedStream (that would steal the caller's single async
+				// iterator, A1). A synchronous throw from stream() (bad params, connect
+				// failure before the object is returned) never reaches here — it lands in
+				// the outer catch, which voids the still-PENDING hold once.
+				if (surfaceKind === "stream-helper") {
+					return settleViaMessageStream(response);
+				}
+
 				// e2. Streaming detection: if response is an async iterable, wrap with
 				// token accumulation. Settlement and audit happen when the stream ends.
 				if (
@@ -669,199 +1248,25 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					const governedStream = createGovernedStream(
 						stream,
 						kind,
-						async (completion: StreamCompletion) => {
-							// Determine cost: use provider usage if reported, else fall back to
-							// estimate. A3: priced with the rate resolution captured at
-							// authorize; A11: costFromRates floors at 1 even for 0/0 usage.
-							let streamCost: number;
-							let usageSource: "provider" | "estimated";
-							if (completion.usageReported) {
-								streamCost = costFromRates(
-									rateResolution.rates,
-									completion.usage.inputTokens,
-									completion.usage.outputTokens,
-								);
-								usageSource = "provider";
-							} else {
-								streamCost = estimatedCost;
-								usageSource = "estimated";
-							}
-
-							// Release in-flight hold and commit budget under mutex
-							// AUD-468: holdActive guard prevents double-release if the
-							// outer catch also fires (e.g. from a synchronous exception
-							// during stream construction).
-							if (holdActive) {
-								holdActive = false;
-								const releaseLock = await budgetMutex.acquire();
-								inFlightHoldTotal -= estimatedCost;
-								budgetSpent += streamCost;
-								releaseLock();
-							} else {
-								// Hold already released — still need to record the spend.
-								const releaseLock = await budgetMutex.acquire();
-								budgetSpent += streamCost;
-								releaseLock();
-							}
-							// AUD-457: Persist cumulative spend to disk
-							await persistSpendLedger(vaultBase, budgetSpent);
-							cb.recordSuccess();
-
-							if (proxyConn != null && !isDryRun) {
-								try {
-									// AUD-460: Use the proxy's transferId for settlement
-									await proxyConn.settle(proxyTransferId ?? transferId, streamCost);
-								} catch (postErr) {
-									settled = false;
-									await audit
-										.appendEvent({
-											kind: "settlement_ambiguous",
-											actor: "local",
-											data: {
-												model,
-												cost: streamCost,
-												transferId,
-												error:
-													postErr instanceof Error
-														? postErr.message.slice(0, 200)
-														: String(postErr).slice(0, 200),
-											},
-										})
-										.catch(() => {
-											callAuditDegraded = true;
-										});
-								}
-							} else if (engine != null && !isDryRun) {
-								try {
-									// Post the ACTUAL consumed cost (RECON #3).
-									await engine.postPendingSpend(transferId, streamCost);
-								} catch (postErr) {
-									settled = false;
-									await audit
-										.appendEvent({
-											kind: "settlement_ambiguous",
-											actor: "local",
-											data: {
-												model,
-												cost: streamCost,
-												transferId,
-												error:
-													postErr instanceof Error
-														? postErr.message.slice(0, 200)
-														: String(postErr).slice(0, 200),
-											},
-										})
-										.catch(() => {
-											callAuditDegraded = true;
-										});
-								}
-							}
-
-							const syntheticHash = createHash("sha256").update(transferId).digest("hex");
-							let auditHash = syntheticHash;
+						async (completion: StreamCompletion): Promise<TrustReceipt> => {
+							// A2: route the createGovernedStream terminal through the shared
+							// idempotent settle gate. The finally decrements the stream counter on
+							// BOTH the receipt return and the failClosed throw.
 							try {
-								const auditEventData: Record<string, unknown> = {
-									model,
-									cost: streamCost,
-									settled,
-									transferId,
-									usageSource,
-									chunksDelivered: completion.chunksDelivered,
-									// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
-									endpointClass: endpoint.class,
-									costBasis: rateResolution.costBasis,
-									rateSource: rateResolution.rateSource,
-								};
-								if (config.pii === "warn" || config.pii === "redact") {
-									const piiResult = redactPII(promptParts);
-									if (piiResult.detection.found) {
-										auditEventData.piiDetected = piiResult.detection.types;
-										auditEventData.piiPaths = piiResult.detection.paths;
-									}
-								}
-								const auditEvent = await audit.appendEvent({
-									kind: "llm_call",
-									actor: "local",
-									data: auditEventData,
-								});
-								auditHash = auditEvent.hash;
-							} catch {
-								callAuditDegraded = true;
-							}
-
-							// P3-AUDIT-FAILCLOSED (streaming): chunks were already delivered,
-							// so the strongest post-delivery signal is to REJECT `.receipt`.
-							// Decrement the stream counter first so destroy() never blocks.
-							if (config.audit.failClosed && (callAuditDegraded || audit.isDegraded())) {
+								return await finalizeStreamSettle(completion);
+							} finally {
 								inFlightStreamCount--;
-								throw new AuditDegradedError(
-									`audit unavailable (writeFailures=${audit.getWriteFailures()}) for ${transferId}`,
-								);
 							}
-
-							const streamReceipt: TrustReceipt = {
-								transferId,
-								cost: streamCost,
-								budgetRemaining: config.budget - budgetSpent - inFlightHoldTotal,
-								auditHash: callAuditDegraded ? "AUDIT_DEGRADED" : auditHash,
-								chainPath: join(VAULT_DIR, "audit"),
-								receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
-								settled,
-								model,
-								provider: kind,
-								timestamp: new Date().toISOString(),
-								usageSource,
-								chunksDelivered: completion.chunksDelivered,
-								// M2 provenance (A6: computeMs omitted — no compute-time source here).
-								endpoint: { class: endpoint.class, runtime: endpoint.runtime },
-								meter: {
-									costBasis: rateResolution.costBasis,
-									rateSource: rateResolution.rateSource,
-								},
-								...(callAuditDegraded ? { auditDegraded: true as const } : {}),
-								// AUD-456: Flag proxy stub receipts
-								...(proxyConn != null ? { proxyStub: true as const } : {}),
-							};
-							inFlightStreamCount--;
-							return streamReceipt;
 						},
 						async (error: unknown, partial: StreamCompletion) => {
-							// Release in-flight hold under mutex
-							// AUD-468: holdActive guard prevents double-release.
-							await releaseInFlightHold();
-
-							cb.recordFailure();
-
-							// Best-effort audit of partial delivery
-							audit
-								.appendEvent({
-									kind: "stream_partial_delivery",
-									actor: "local",
-									data: {
-										transferId,
-										model,
-										chunksDelivered: partial.chunksDelivered,
-										partialInputTokens: partial.usage.inputTokens,
-										partialOutputTokens: partial.usage.outputTokens,
-										usageReported: partial.usageReported,
-										error: (() => {
-											const raw = error instanceof Error ? error.message : String(error);
-											return config.pii === "warn" || config.pii === "redact"
-												? (redactPII(raw).data as string).slice(0, 200)
-												: raw.slice(0, 200);
-										})(),
-									},
-								})
-								.catch(() => {});
-
-							if (proxyConn != null && !isDryRun) {
-								// AUD-460: Use the proxy's transferId for void
-								proxyConn.void(proxyTransferId ?? transferId).catch(() => {});
-							} else if (engine != null && !isDryRun) {
-								engine.voidPendingSpend(transferId).catch(() => {});
+							// A2: route the createGovernedStream error terminal through the shared
+							// idempotent void gate. The finally decrements the stream counter exactly
+							// as the success path does.
+							try {
+								await finalizeStreamVoid(error, partial);
+							} finally {
+								inFlightStreamCount--;
 							}
-
-							inFlightStreamCount--;
 						},
 						// onChunk: streaming anomaly detector hook. Observe each chunk;
 						// if a signal trips, throw AnomalyError to abort the stream.
@@ -909,30 +1314,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					);
 
 					// AUD-454: For streaming responses, settlement has NOT happened yet.
-					// Set settled: false — the real settlement status will be on
-					// governedStream.receipt after the stream is fully consumed.
-					const streamEstimateHash = createHash("sha256").update(transferId).digest("hex");
-					const estimatedReceipt: TrustReceipt = {
-						transferId,
-						cost: estimatedCost,
-						budgetRemaining: config.budget - budgetSpent - inFlightHoldTotal,
-						auditHash: callAuditDegraded ? "AUDIT_DEGRADED" : streamEstimateHash,
-						chainPath: join(VAULT_DIR, "audit"),
-						receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
-						settled: false, // AUD-454: not settled yet — stream hasn't been consumed
-						model,
-						provider: kind,
-						timestamp: new Date().toISOString(),
-						// M2: authorize-time scope, already fixed for the eventual settle (A3).
-						endpoint: { class: endpoint.class, runtime: endpoint.runtime },
-						meter: {
-							costBasis: rateResolution.costBasis,
-							rateSource: rateResolution.rateSource,
-						},
-						...(callAuditDegraded ? { auditDegraded: true as const } : {}),
-						// AUD-456: Flag proxy stub receipts
-						...(proxyConn != null ? { proxyStub: true as const } : {}),
-					};
+					// The initial handle carries settled:false at the estimate — the real
+					// settlement status lands on governedStream.receipt after consumption.
+					const estimatedReceipt = buildEstimatedStreamReceipt();
 
 					inFlightStreamCount++;
 					return { response: governedStream, receipt: estimatedReceipt };
@@ -1013,6 +1397,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						`audit unavailable (writeFailures=${audit.getWriteFailures()}) for ${transferId}`,
 					);
 				}
+
+				// A2: claim the single settle outcome for this hold BEFORE money moves.
+				// Always granted here (no other terminal path runs for a non-stream call);
+				// the claim exists so a post-commit throw routes to the outer catch WITHOUT
+				// double-voiding an already-settled hold.
+				finalizeOnce("settle");
 
 				// Release in-flight hold and commit budget under mutex — money moves only
 				// AFTER the spend is audited. AUD-468: mark hold released before the commit
@@ -1153,22 +1543,31 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// j. Circuit breaker: record failure
 				cb.recordFailure();
 
-				// j2. Failure mode 15.2: LLM fails — VOID the pending hold
-				if (engine != null && !isDryRun) {
-					try {
-						await engine.voidPendingSpend(transferId);
-					} catch {
-						// Best-effort void — log and continue
+				// j2/j3. VOID the pending hold — but ONLY if this hold has not already
+				// claimed a settle outcome (A2). A pre-commit throw (provider/transport
+				// error, PII/policy deny, failClosed-before-commit) reaches here with the
+				// hold still PENDING → finalizeOnce("void") is granted and the ledger is
+				// voided. A post-commit throw (failClosed belt-and-suspenders) already
+				// settled the spend → the claim is refused and no spurious void is issued
+				// against an already-posted transfer.
+				if (finalizeOnce("void")) {
+					// Failure mode 15.2: LLM fails — VOID the pending hold
+					if (engine != null && !isDryRun) {
+						try {
+							await engine.voidPendingSpend(transferId);
+						} catch {
+							// Best-effort void — log and continue
+						}
 					}
-				}
 
-				// j3. Proxy void
-				if (proxyConn != null && !isDryRun) {
-					try {
-						// AUD-460: Use the proxy's transferId for void
-						await proxyConn.void(proxyTransferId ?? transferId);
-					} catch {
-						// Best-effort void
+					// Proxy void
+					if (proxyConn != null && !isDryRun) {
+						try {
+							// AUD-460: Use the proxy's transferId for void
+							await proxyConn.void(proxyTransferId ?? transferId);
+						} catch {
+							// Best-effort void
+						}
 					}
 				}
 
@@ -1640,18 +2039,119 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
  * Without this, a Google `generateContent({ model, contents })` call has an empty
  * `messages` array, so every PII/injection scan sees nothing and PII egresses.
  */
-function extractPromptParts(params: Record<string, unknown>, kind: LLMClientKind): unknown[] {
+/**
+ * Normalize the prompt-bearing payload across providers into a flat parts array
+ * that PII/injection scanning, token estimation, redaction, and pattern hashing
+ * all consume. Exported for the A8 byte-exact regression test (kept internal to
+ * the package — not re-exported from index.ts).
+ *
+ * Branch order is load-bearing (A8): the OpenAI Responses branch is shape-
+ * discriminated (`kind === "openai"` AND no `messages` key) and placed so it can
+ * NEVER preempt the chat.completions / Anthropic `messages` branch — every
+ * chat.completions or Anthropic call carries `messages` and skips it, so existing
+ * extraction stays byte-unchanged.
+ */
+export function extractPromptParts(
+	params: Record<string, unknown>,
+	kind: LLMClientKind,
+): unknown[] {
 	if (kind === "google") {
 		const contents = params.contents;
 		if (Array.isArray(contents)) return contents;
 		return contents != null ? [contents] : [];
 	}
+
+	// A8: OpenAI Responses API uses `input`/`instructions`, not `messages`. Wrap the
+	// input so BOTH the token estimator (which walks a message's `content`) and the
+	// recursive PII/injection scanners (which deep-walk every string) cover it,
+	// whether `input` is a plain string, a message array, or a content-part array.
+	if (kind === "openai" && params.messages === undefined) {
+		const parts: unknown[] = [];
+		const input = params.input;
+		if (typeof input === "string") {
+			parts.push({ role: "user", content: input });
+		} else if (Array.isArray(input)) {
+			parts.push({ role: "user", content: input });
+		} else if (input != null && typeof input === "object") {
+			parts.push({ role: "user", content: [input] });
+		}
+		if (typeof params.instructions === "string") {
+			parts.push({ role: "system", content: params.instructions });
+		}
+		return parts;
+	}
+
 	const messages = params.messages;
 	const parts: unknown[] = Array.isArray(messages) ? [...messages] : [];
 	if (typeof params.system === "string") {
 		parts.push({ role: "system", content: params.system });
 	}
 	return parts;
+}
+
+// ── Anthropic MessageStream helpers (Task 2, A1/A3) ──
+
+/**
+ * A1/A3: read provider usage off an Anthropic final Message (the `finalMessage`
+ * event payload). Each field is returned PER-FIELD: a finite, non-negative count
+ * when present, else `undefined` (so the caller can fall back to the counter it
+ * accumulated from streamEvent for THAT field, rather than zeroing it — F3).
+ * `reported` is true when at least one field carried a real number; when false the
+ * caller settles at ESTIMATE rather than voiding a billable success (A3).
+ */
+function readFinalMessageUsage(msg: unknown): {
+	inputTokens: number | undefined;
+	outputTokens: number | undefined;
+	reported: boolean;
+} {
+	if (msg != null && typeof msg === "object") {
+		const usage = (msg as Record<string, unknown>).usage;
+		if (usage != null && typeof usage === "object") {
+			const u = usage as Record<string, unknown>;
+			const inTok =
+				typeof u.input_tokens === "number" && Number.isFinite(u.input_tokens) && u.input_tokens >= 0
+					? u.input_tokens
+					: undefined;
+			const outTok =
+				typeof u.output_tokens === "number" &&
+				Number.isFinite(u.output_tokens) &&
+				u.output_tokens >= 0
+					? u.output_tokens
+					: undefined;
+			if (inTok !== undefined || outTok !== undefined) {
+				return { inputTokens: inTok, outputTokens: outTok, reported: true };
+			}
+		}
+	}
+	return { inputTokens: undefined, outputTokens: undefined, reported: false };
+}
+
+/**
+ * A1: incremental token extraction from a raw Anthropic stream event, for the
+ * non-consuming messages.stream tap. Kept local to govern.ts (Task 2 does not
+ * touch streaming.ts); mirrors streaming.ts extractAnthropicTokens — message_start
+ * carries input_tokens, message_delta carries cumulative output_tokens.
+ */
+function extractAnthropicStreamUsage(event: unknown): {
+	inputTokens: number;
+	outputTokens: number;
+} {
+	if (event == null || typeof event !== "object") return { inputTokens: 0, outputTokens: 0 };
+	const c = event as Record<string, unknown>;
+	if (c.type === "message_start" && c.message != null && typeof c.message === "object") {
+		const msg = c.message as Record<string, unknown>;
+		if (msg.usage != null && typeof msg.usage === "object") {
+			const usage = msg.usage as Record<string, unknown>;
+			const inTok = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
+			return { inputTokens: inTok > 0 ? inTok : 0, outputTokens: 0 };
+		}
+	}
+	if (c.type === "message_delta" && c.usage != null && typeof c.usage === "object") {
+		const usage = c.usage as Record<string, unknown>;
+		const outTok = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
+		return { inputTokens: 0, outputTokens: outTok > 0 ? outTok : 0 };
+	}
+	return { inputTokens: 0, outputTokens: 0 };
 }
 
 // ── TigerBeetle engine factory ──
@@ -1778,12 +2278,181 @@ type InterceptFn = (
 	originalFn: (...args: unknown[]) => unknown,
 	thisArg: unknown,
 	args: unknown[],
+	surfaceKind?: "create" | "stream-helper" | "openai-responses",
 ) => Promise<TrustedResponse<unknown>>;
 
 type GovernActionFn = <R>(
 	action: ActionDescriptor,
 	execute: () => Promise<R>,
 ) => Promise<GovernedActionResult<R>>;
+
+/**
+ * F4: mirror the Anthropic SDK's `parseMessage` / `parseBetaMessage` transform for a
+ * governed `messages.parse()` / `beta.messages.parse()`. The SDK's `parse()` is
+ * `this.create(params).then((m) => parseMessage(m, params))` — routed through our
+ * proxy, `this.create` is the GOVERNED create, which returns a `{ response, receipt }`
+ * wrapper the SDK parser crashes on (`wrapper.content` is undefined) AFTER the spend
+ * has already settled. So the proxy runs the governed create itself and applies the
+ * transform to the raw Message here.
+ *
+ * Faithful to the SDK for the modern `parsed_output` API: each `text` block gains a
+ * NON-ENUMERABLE `parsed_output` (parsed via the caller-provided
+ * `output_config.format.parse` when structured outputs are requested, else `JSON.parse`,
+ * else null), and the message carries the first text block's `parsed_output` at the top
+ * level. Reads the deprecated beta `output_format` too, so ONE transform covers the
+ * stable and beta surfaces (stable params simply lack `output_format`). A structured
+ * parse failure throws, matching the SDK. The deprecated per-block `parsed` getter is
+ * intentionally not reproduced (superseded by `parsed_output`).
+ */
+function applyAnthropicParseTransform(message: unknown, params: unknown): unknown {
+	if (message == null || typeof message !== "object") return message;
+	const p = (params ?? {}) as Record<string, unknown>;
+	const outputConfig = p.output_config as { format?: unknown } | null | undefined;
+	const format = (p.output_format ?? outputConfig?.format) as
+		| { type?: unknown; parse?: unknown }
+		| null
+		| undefined;
+	const hasSchema = format != null && typeof format === "object" && format.type === "json_schema";
+	const parseText = (text: string): unknown => {
+		if (!hasSchema) return null;
+		try {
+			return typeof format?.parse === "function"
+				? (format.parse as (c: string) => unknown)(text)
+				: JSON.parse(text);
+		} catch (err) {
+			throw new Error(`Failed to parse structured output: ${err}`);
+		}
+	};
+
+	const msg = message as Record<string, unknown>;
+	let firstParsed: unknown = null;
+	const content = Array.isArray(msg.content)
+		? msg.content.map((block) => {
+				if (
+					block != null &&
+					typeof block === "object" &&
+					(block as { type?: unknown }).type === "text"
+				) {
+					const parsed = parseText(String((block as { text?: unknown }).text ?? ""));
+					if (firstParsed === null) firstParsed = parsed;
+					const parsedBlock = { ...(block as Record<string, unknown>) };
+					Object.defineProperty(parsedBlock, "parsed_output", {
+						value: parsed,
+						enumerable: false,
+					});
+					return parsedBlock;
+				}
+				return block;
+			})
+		: msg.content;
+
+	return { ...msg, content, parsed_output: firstParsed };
+}
+
+/**
+ * A1/A5: build a governed proxy over an Anthropic `messages` resource (stable or
+ * beta — both share the create/stream shape). `create` routes through
+ * interceptCall (surface "create"). `stream`, when present as a function (A5
+ * feature-detect), routes through interceptCall (surface "stream-helper") bound to
+ * the RAW `messages` target (A5) so the helper's internal
+ * `messages.create({stream:true}).withResponse()` runs against the un-proxied
+ * create and never re-enters the governed create trap. The governed `stream` is
+ * async (it authorizes before forwarding), so callers `await` the handle, then use
+ * `.on()` / `.finalMessage()` / `.abort()` / `.receipt`. `parse`, when present (A5
+ * feature-detect), routes its create through governance and applies the SDK parse
+ * transform (F4). Everything else (countTokens, batches, …) falls through to
+ * Reflect.get untouched.
+ */
+function buildAnthropicMessagesProxy(
+	messages: Record<string, unknown>,
+	intercept: InterceptFn,
+): Record<string, unknown> {
+	const originalCreate = messages.create as (...args: unknown[]) => unknown;
+	// A5: feature-detect `stream` as a FUNCTION before wrapping it — an older SDK
+	// without the helper leaves it absent and it stays a raw pass-through.
+	const originalStream =
+		typeof messages.stream === "function"
+			? (messages.stream as (...args: unknown[]) => unknown)
+			: undefined;
+	// A5/F4: feature-detect `parse` the same way — absent on older SDKs.
+	const hasParse = typeof messages.parse === "function";
+
+	return new Proxy(messages, {
+		get(target, prop, receiver) {
+			if (prop === "create") {
+				return (...args: unknown[]) => intercept(originalCreate, target, args);
+			}
+			if (prop === "stream" && originalStream !== undefined) {
+				return async (...args: unknown[]) => {
+					const { response } = await intercept(originalStream, target, args, "stream-helper");
+					return response;
+				};
+			}
+			if (prop === "parse" && hasParse) {
+				// F4: run the governed create ONCE, then apply the SDK parse transform to
+				// the settled Message and hand back the parsed Message (SDK-shaped) with
+				// the settlement receipt attached.
+				return async (...args: unknown[]) => {
+					const { response, receipt } = await intercept(originalCreate, target, args);
+					const parsed = applyAnthropicParseTransform(response, args[0]);
+					if (parsed != null && typeof parsed === "object") {
+						try {
+							Object.defineProperty(parsed, "receipt", {
+								value: receipt,
+								enumerable: true,
+								configurable: true,
+							});
+						} catch {
+							// non-extensible parsed object — skip
+						}
+					}
+					return parsed;
+				};
+			}
+			return Reflect.get(target, prop, receiver);
+		},
+	});
+}
+
+/**
+ * A5: build a governed proxy over `client.beta` when it exposes a create-shaped
+ * `beta.messages`. Returns undefined on any miss (no beta, non-object beta, a beta
+ * getter that throws, or a beta.messages without a create function) so the caller
+ * falls back to raw Reflect.get and NOTHING throws at wrap time (peerDep-range
+ * compatibility). beta.models / beta.files / beta.messages.batches stay documented
+ * pass-throughs — create, stream, and parse on beta.messages are governed.
+ */
+function buildAnthropicBetaProxy(
+	original: Record<string, unknown>,
+	intercept: InterceptFn,
+): Record<string, unknown> | undefined {
+	let beta: unknown;
+	try {
+		beta = original.beta;
+	} catch {
+		return undefined;
+	}
+	if (beta == null || typeof beta !== "object") return undefined;
+	const betaObj = beta as Record<string, unknown>;
+	const betaMessages = betaObj.messages;
+	if (
+		betaMessages == null ||
+		typeof betaMessages !== "object" ||
+		typeof (betaMessages as Record<string, unknown>).create !== "function"
+	) {
+		return undefined;
+	}
+	const betaMessagesProxy = buildAnthropicMessagesProxy(
+		betaMessages as Record<string, unknown>,
+		intercept,
+	);
+	return new Proxy(betaObj, {
+		get(target, prop, receiver) {
+			if (prop === "messages") return betaMessagesProxy;
+			return Reflect.get(target, prop, receiver);
+		},
+	});
+}
 
 function buildAnthropicProxy<T>(
 	client: T,
@@ -1793,22 +2462,18 @@ function buildAnthropicProxy<T>(
 ): TrustedClient<T> {
 	const original = client as Record<string, unknown>;
 	const messages = original.messages as Record<string, unknown>;
-	const originalCreate = messages.create as (...args: unknown[]) => unknown;
 
-	// Proxy on the messages object: intercept `create`
-	const messagesProxy = new Proxy(messages, {
-		get(target, prop, receiver) {
-			if (prop === "create") {
-				return (...args: unknown[]) => intercept(originalCreate, target, args);
-			}
-			return Reflect.get(target, prop, receiver);
-		},
-	});
+	// Stable messages: governed `create` + (feature-detected) `stream`.
+	const messagesProxy = buildAnthropicMessagesProxy(messages, intercept);
 
-	// Proxy on the client: intercept `messages` to return our proxy, add `destroy`
+	// beta.messages.create/stream/parse — governed identically when present (A5); a
+	// client without `beta` yields undefined and `beta` stays a raw pass-through.
+	const betaProxy = buildAnthropicBetaProxy(original, intercept);
+
 	const clientProxy = new Proxy(original, {
 		get(target, prop, receiver) {
 			if (prop === "messages") return messagesProxy;
+			if (prop === "beta" && betaProxy !== undefined) return betaProxy;
 			if (prop === "destroy") return destroy;
 			if (prop === "governAction") return governAction;
 			return Reflect.get(target, prop, receiver);
@@ -1816,6 +2481,44 @@ function buildAnthropicProxy<T>(
 	});
 
 	return clientProxy as TrustedClient<T>;
+}
+
+/**
+ * Task 3 (A5): build a governed proxy over `client.responses` when the OpenAI SDK
+ * exposes a create-shaped Responses API. Returns undefined on any miss (no
+ * `responses`, non-object `responses`, a getter that throws, or a `responses`
+ * without a `create` function) so the caller falls back to raw Reflect.get and
+ * NOTHING throws at wrap time — the peer range (`openai >=4.70.0`) predates the
+ * Responses API (~4.87), so older clients must keep working untouched.
+ *
+ * `responses.create` routes through interceptCall on the SEPARATE "openai-responses"
+ * surface (A6: no stream_options.include_usage injection; A7: streaming still flows
+ * through the generic createGovernedStream path). `this` binds to the RAW `responses`
+ * object. Everything else (retrieve / cancel / delete / …) stays a pass-through.
+ */
+function buildOpenAIResponsesProxy(
+	original: Record<string, unknown>,
+	intercept: InterceptFn,
+): Record<string, unknown> | undefined {
+	let responses: unknown;
+	try {
+		responses = original.responses;
+	} catch {
+		return undefined;
+	}
+	if (responses == null || typeof responses !== "object") return undefined;
+	const responsesObj = responses as Record<string, unknown>;
+	if (typeof responsesObj.create !== "function") return undefined;
+	const originalCreate = responsesObj.create as (...args: unknown[]) => unknown;
+
+	return new Proxy(responsesObj, {
+		get(target, prop, receiver) {
+			if (prop === "create") {
+				return (...args: unknown[]) => intercept(originalCreate, target, args, "openai-responses");
+			}
+			return Reflect.get(target, prop, receiver);
+		},
+	});
 }
 
 function buildOpenAIProxy<T>(
@@ -1845,9 +2548,14 @@ function buildOpenAIProxy<T>(
 		},
 	});
 
+	// responses.create — governed when present (A5); an older client without the
+	// Responses API yields undefined and `responses` stays a raw pass-through.
+	const responsesProxy = buildOpenAIResponsesProxy(original, intercept);
+
 	const clientProxy = new Proxy(original, {
 		get(target, prop, receiver) {
 			if (prop === "chat") return chatProxy;
+			if (prop === "responses" && responsesProxy !== undefined) return responsesProxy;
 			if (prop === "destroy") return destroy;
 			if (prop === "governAction") return governAction;
 			return Reflect.get(target, prop, receiver);

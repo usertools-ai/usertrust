@@ -11,10 +11,15 @@
  * Provider-specific extraction:
  *   - Anthropic: message_start (input_tokens), message_delta (output_tokens) —
  *     incremental fields on distinct chunk types, accumulated as before.
- *   - OpenAI: usage field (prompt_tokens, completion_tokens) — REPLACE-WITH-LATEST:
- *     every usage-bearing chunk is an absolute snapshot. vLLM's
- *     continuous_usage_stats stamps RUNNING totals on every chunk, so summing
- *     would multiply-count (M2 design decision 5.2 / plan Task 2).
+ *   - OpenAI chat.completions: usage field (prompt_tokens, completion_tokens) —
+ *     REPLACE-WITH-LATEST: every usage-bearing chunk is an absolute snapshot.
+ *     vLLM's continuous_usage_stats stamps RUNNING totals on every chunk, so
+ *     summing would multiply-count (M2 design decision 5.2 / plan Task 2).
+ *   - OpenAI Responses (Task 3, A6/A7): usage arrives ONLY on the terminal
+ *     `response.completed` event, nested at `event.response.usage.{input_tokens,
+ *     output_tokens}` — a SEPARATE field map from chat.completions, keyed on the
+ *     structurally disjoint Responses event shape (no top-level `usage`, no
+ *     `include_usage` opt-in). A terminal event lacking usage settles at ESTIMATE.
  *   - Google: usageMetadata field (promptTokenCount, candidatesTokenCount) —
  *     same replace-with-latest snapshot semantics.
  *
@@ -87,6 +92,35 @@ function extractUsageSnapshot(chunk: unknown, kind: "openai" | "google"): Stream
 	const c = chunk as Record<string, unknown>;
 
 	if (kind === "openai") {
+		// Task 3 (A6/A7): OpenAI Responses API. Usage rides on the TERMINAL event,
+		// nested as `event.response.usage.{input_tokens,output_tokens}`. All three
+		// terminal types carry it: `response.completed`, and — equally terminal —
+		// `response.incomplete` (max_output_tokens / content filter) and
+		// `response.failed`. This shape is structurally disjoint from a chat.completions
+		// chunk (which carries a TOP-LEVEL `usage` with prompt_tokens/completion_tokens
+		// and never a `response.*` type), so the two field maps stay separate and never
+		// collide. A terminal event WITHOUT usage (an early failure, or a local runtime
+		// that omits it) yields null → settles at ESTIMATE (A7), never a false zero-cost
+		// snapshot.
+		if (
+			c.type === "response.completed" ||
+			c.type === "response.incomplete" ||
+			c.type === "response.failed"
+		) {
+			const resp = c.response;
+			if (resp != null && typeof resp === "object") {
+				const usage = (resp as Record<string, unknown>).usage;
+				if (usage != null && typeof usage === "object") {
+					const u = usage as Record<string, unknown>;
+					return {
+						inputTokens: sanitizeCount(u.input_tokens),
+						outputTokens: sanitizeCount(u.output_tokens),
+					};
+				}
+			}
+			return null;
+		}
+		// chat.completions absolute snapshot (prompt_tokens/completion_tokens).
 		if (c.usage != null && typeof c.usage === "object") {
 			const usage = c.usage as Record<string, unknown>;
 			return {

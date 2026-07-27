@@ -60,6 +60,50 @@ instead of being exempted from it.
 - `examples/ollama-local-governance`: runnable before/after demo (`npx tsx
   run.ts`), falls back to an inline mock OpenAI-compatible server when Ollama
   is absent.
+- **Governed surfaces expanded — previously-ungoverned SDK entry points now run
+  inside the two-phase spend lifecycle (authorize → PENDING hold → settle/void),
+  audit, and budget enforcement.** All wraps are feature-detected: a client on an
+  older peer-range SDK that lacks a surface falls through to a raw pass-through
+  and nothing throws at wrap time.
+  - Anthropic `client.messages.stream()` is now governed. The original
+    `MessageStream` is returned unchanged (all of `.on()` / `.finalMessage()` /
+    `.abort()` / async iteration preserved) with a `.receipt` promise attached;
+    settlement is driven by non-consuming emitter listeners so it never competes
+    with the caller's own consumption. The governed `stream()` authorizes before
+    forwarding, so callers `await` the returned handle. A clean stream close with no
+    `finalMessage` settles at estimate (the hold never dangles), and a consumer
+    `abort()` settles the partial usage as an early exit rather than voiding or
+    tripping the circuit breaker. Governance never silently swallows a stream
+    failure: a genuine stream error rejects `.receipt`, so any consumer that
+    `await`s `.receipt` (or the stream's own `done()`/`finalMessage()`) observes it.
+    The one exception is a pure fire-and-forget consumer that never awaits
+    `.receipt`, registers no `error` handler, and never awaits the stream — for that
+    caller the error is not surfaced; await `.receipt` or attach an error handler.
+  - Anthropic `client.messages.parse()` and `client.beta.messages.parse()` are
+    governed: the underlying create runs through the two-phase lifecycle exactly
+    once, then the SDK's parse transform is applied and the parsed message is
+    returned with a `.receipt` attached.
+  - Anthropic `client.beta.messages.create()` and `client.beta.messages.stream()`
+    are governed identically to the stable surface. `beta.models`, `beta.files`,
+    and `beta.messages.batches` remain documented pass-throughs.
+  - OpenAI `client.responses.create()` (Responses API) is governed, non-stream
+    and streaming, when present (feature-detected against the `openai >=4.70.0`
+    peer floor, which predates the Responses API). Prompt/PII/injection/estimation
+    coverage reads Responses `input`/`instructions`; streaming usage is read from
+    the terminal event — `response.completed`, and equally the terminal
+    `response.incomplete` / `response.failed` events, at
+    `event.response.usage.{input_tokens,output_tokens}`. The chat-completions-only
+    `stream_options.include_usage` opt-in is never injected into Responses params.
+    The `client.responses.stream()` and `client.responses.parse()` convenience
+    helpers are **not** governed — they drive the SDK's raw client internally and so
+    bypass the governed `create`; use `responses.create({ stream: true })` for a
+    governed stream.
+- **Real-TigerBeetle CI validation.** A new non-gating `tb-integration` CI job
+  stands up a real single-node TigerBeetle cluster (pinned to the
+  `tigerbeetle-node` version) and runs the two-phase hard-budget invariant
+  end-to-end against the live ledger. The integration test self-skips
+  (`describe.skipIf(!process.env.USERTRUST_TB_ADDRESS)`) so the normal test job
+  stays green with no cluster.
 
 ### Changed
 

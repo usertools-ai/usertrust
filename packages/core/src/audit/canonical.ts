@@ -14,7 +14,7 @@ export function canonicalize(value: unknown): string {
 	if (value === Number.POSITIVE_INFINITY || value === Number.NEGATIVE_INFINITY) {
 		throw new Error("canonicalize: Infinity is not allowed in audit data");
 	}
-	// Convert Date to ISO string to avoid double-quoting divergence
+	// Convert Date to ISO string (JSON.stringify would otherwise double-quote it)
 	if (value instanceof Date) {
 		return JSON.stringify(value.toISOString());
 	}
