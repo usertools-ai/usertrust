@@ -14,7 +14,7 @@ import { Trends } from "./trends.js";
 export type View = "audit" | "trends";
 
 export function App(): React.JSX.Element {
-	const { rows, summary, live } = useLedger();
+	const { rows, summary, live, liveIds } = useLedger();
 	const [view, setView] = useState<View>("audit");
 	const [filters, setFilters] = useState<FilterState>(EMPTY_FILTERS);
 	const [open, setOpen] = useState<LedgerRow | null>(null);
@@ -23,28 +23,30 @@ export function App(): React.JSX.Element {
 	return (
 		<div className="mx-auto flex h-screen max-w-[1400px] flex-col gap-3 p-4">
 			<SummaryStrip summary={summary} live={live} />
-			<nav className="flex gap-2">
+			<nav
+				aria-label="view"
+				className="reveal reveal-2 inline-flex gap-0.5 self-start rounded-md border border-[var(--border)] bg-[var(--panel)] p-0.5"
+			>
 				{(["audit", "trends"] as const).map((v) => (
 					<button
 						key={v}
 						type="button"
 						onClick={() => setView(v)}
-						className={`rounded px-3 py-1 text-sm capitalize ${view === v ? "bg-[var(--panel)] text-[var(--text)]" : "text-[var(--muted)]"}`}
+						aria-pressed={view === v}
+						className={`rounded px-3 py-1 text-xs uppercase tracking-wider transition-colors duration-100 ${view === v ? "bg-[var(--panel-2)] text-[var(--text)]" : "text-[var(--muted)] hover:text-[var(--text)]"}`}
 					>
 						{v}
 					</button>
 				))}
 			</nav>
+			{/* P6: reveal stays on chrome — the table/scroll surface never animates */}
+			<div className="reveal reveal-3">
+				<FilterBar rows={rows} filters={filters} onChange={setFilters} />
+			</div>
 			{view === "audit" ? (
-				<>
-					<FilterBar rows={rows} filters={filters} onChange={setFilters} />
-					<AuditTable rows={filtered} onOpen={setOpen} />
-				</>
+				<AuditTable rows={filtered} liveIds={liveIds} onOpen={setOpen} />
 			) : (
-				<>
-					<FilterBar rows={rows} filters={filters} onChange={setFilters} />
-					<Trends rows={filtered} />
-				</>
+				<Trends rows={filtered} />
 			)}
 			{open && <RowPanel row={open} onClose={() => setOpen(null)} />}
 		</div>
