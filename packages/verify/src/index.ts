@@ -432,6 +432,11 @@ export interface TransactionVerificationResult {
 	readonly valid: boolean;
 	readonly receipt: string;
 	readonly errors: string[];
+	/** Present when anchor inputs were supplied: the §7.2 vault-level state,
+	 * so CLI strict gates (--require-anchor / --require-external-anchor) can
+	 * be enforced in --tx mode too. */
+	readonly anchorState?: AnchorState | undefined;
+	readonly anchoring?: AnchoringReport | undefined;
 }
 
 /**
@@ -511,6 +516,8 @@ export function verifyTransaction(
 	let merkleVerified: boolean;
 	let merkleLabel: string;
 	let anchorsValid = true;
+	let anchorState: AnchorState | undefined;
+	let anchoring: AnchoringReport | undefined;
 	const anchorErrors: string[] = [];
 
 	if (anchorParams === undefined) {
@@ -522,6 +529,8 @@ export function verifyTransaction(
 		// "INCLUSION VERIFIED", whatever the single-event proof says.
 		const vaultResult = verifyVaultWithAnchors(vaultPath, anchorParams);
 		anchorsValid = vaultResult.valid;
+		anchorState = vaultResult.anchorState;
+		anchoring = vaultResult.anchoring;
 		anchorErrors.push(...vaultResult.anchoring.reasons.map((r) => `anchor: ${r}`));
 		const state = vaultResult.anchorState;
 		if (state === "ANCHORED_VERIFIED" || state === "ANCHOR_STALE") {
@@ -616,5 +625,7 @@ export function verifyTransaction(
 		valid: chainVerified && merkleVerified && anchorsValid,
 		receipt: renderReceipt(receiptData),
 		errors: allErrors,
+		...(anchorState !== undefined ? { anchorState } : {}),
+		...(anchoring !== undefined ? { anchoring } : {}),
 	};
 }

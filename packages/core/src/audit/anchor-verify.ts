@@ -207,8 +207,15 @@ export function parseAnchorRecord(raw: string): {
 	if (typeof obj.merkleRoot !== "string" || !HEX64.test(obj.merkleRoot)) {
 		return { record: null, error: "malformed-anchor: merkleRoot must be 64-hex" };
 	}
-	if (typeof obj.timestamp !== "string" || obj.timestamp.length === 0) {
-		return { record: null, error: "malformed-anchor: missing timestamp" };
+	if (
+		typeof obj.timestamp !== "string" ||
+		obj.timestamp.length === 0 ||
+		!Number.isFinite(Date.parse(obj.timestamp))
+	) {
+		// A signed-but-unparseable timestamp would make the --max-anchor-age
+		// staleness gate silently fail open (Date.parse → NaN) — an
+		// adversary-controlled bypass of the caller's freshness policy.
+		return { record: null, error: "malformed-anchor: timestamp must be a parseable date-time" };
 	}
 	if (typeof obj.keyId !== "string" || !KEY_ID.test(obj.keyId)) {
 		return { record: null, error: "malformed-anchor: keyId must be sha256:<64-hex>" };
@@ -489,6 +496,20 @@ export function verifyAnchorChain(
 	let epochKey: KeyObject | null = rootKey;
 	let prev: AnchorRecord | null = null;
 
+	// A partial history may legitimately START in a later key epoch — the
+	// documented lone-checkpoint bind (§7.5) fetched after a rotation. When
+	// the first record's key is a caller-TRUSTED key (root or successor pin),
+	// adopt it as the starting epoch instead of condemning the unprovable
+	// prefix; an untrusted key stays fail-closed (sig-invalid below).
+	const firstRecord = ordered[0];
+	if (firstRecord !== undefined && firstRecord.anchorSeq !== 1 && firstRecord.keyId !== rootKeyId) {
+		const pinnedStart = knownKeys.get(firstRecord.keyId);
+		if (pinnedStart !== undefined) {
+			epochKeyId = firstRecord.keyId;
+			epochKey = pinnedStart;
+		}
+	}
+
 	for (let i = 0; i < ordered.length; i++) {
 		const r = ordered[i] as AnchorRecord;
 
@@ -509,7 +530,13 @@ export function verifyAnchorChain(
 			mismatchReasons.push("anchor-chain-gap");
 		}
 		if (prev !== null && r.anchorSeq === prev.anchorSeq + 1) {
-			if (r.prevAnchorHash !== anchorPayloadHash(prev)) {
+			// The predecessor may exist as several benign committed-equal twins
+			// (differing only in timestamp/sig — racing-emitter duplicates), and
+			// timestamp IS part of the signing pre-image: the successor
+			// legitimately links to WHICHEVER twin its emitter had as the mirror
+			// tail, so linkage accepts any twin's payload hash.
+			const prevTwins = [prev, ...(droppedBySeq.get(prev.anchorSeq) ?? [])];
+			if (!prevTwins.some((t) => r.prevAnchorHash === anchorPayloadHash(t))) {
 				errors.push(
 					`anchor-chain-gap: anchorSeq ${r.anchorSeq} prevAnchorHash does not link to its predecessor`,
 				);

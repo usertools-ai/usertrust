@@ -71,7 +71,16 @@ function writeDeadLetter(entry: DLQEntry, dlqPath: string): void {
 		// The old HMAC key was derived from the DLQ path (forgeable from
 		// public inputs), and any real key readable at write time is equally
 		// readable by an attacker with host access. See audit/chain.ts.
-		const checksum = createHash("sha256").update(canonicalize(entry)).digest("hex");
+		let checksumSource: string;
+		try {
+			checksumSource = canonicalize(entry);
+		} catch {
+			// canonicalize throws on NaN/Infinity — but a payload carrying NaN
+			// (e.g. a NaN amount) is exactly why the operation failed and MUST
+			// still be dead-lettered. JSON.stringify coerces them to null.
+			checksumSource = JSON.stringify(entry);
+		}
+		const checksum = createHash("sha256").update(checksumSource).digest("hex");
 		const sealed: DLQEntry = { ...entry, checksum, checksumAlg: "sha256" };
 
 		const line = `${JSON.stringify(sealed)}\n`;

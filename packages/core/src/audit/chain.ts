@@ -349,7 +349,17 @@ function writeDeadLetter(
 		// imply integrity it cannot provide (the old HMAC key was derived from
 		// the vault path — forgeable from public inputs). Tamper-evidence for
 		// audit data lives in the hash chain + external anchoring.
-		const checksum = createHash("sha256").update(canonicalize(entry)).digest("hex");
+		let checksumSource: string;
+		try {
+			checksumSource = canonicalize(entry);
+		} catch {
+			// canonicalize throws on NaN/Infinity — but a payload carrying NaN
+			// is exactly the kind of failure a dead letter must still record.
+			// JSON.stringify coerces them to null (the pre-checksum behavior);
+			// the entry must be persisted, never dropped.
+			checksumSource = JSON.stringify(entry);
+		}
+		const checksum = createHash("sha256").update(checksumSource).digest("hex");
 		const sealed = { ...entry, checksum, checksumAlg: "sha256" };
 
 		const dlqPath = join(dlqDir, "dead-letters.jsonl");

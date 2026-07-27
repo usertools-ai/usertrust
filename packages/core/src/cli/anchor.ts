@@ -56,10 +56,15 @@ function emitterConfig(args: string[]): AnchoringConfig {
 	const keyFile = flagValue(args, "--key-file");
 	const retriesRaw = flagValue(args, "--publish-retries");
 	const retries = retriesRaw !== undefined ? Number.parseInt(retriesRaw, 10) : undefined;
+	if (retriesRaw !== undefined && (!Number.isSafeInteger(retries) || (retries as number) < 1)) {
+		// Silently ignoring a bad value would fall back to the default and
+		// mask the operator's intent — fail loudly instead.
+		throw new Error(`Invalid --publish-retries: ${retriesRaw} (integer >= 1 required)`);
+	}
 	return {
 		signer: { type: "pem", ...(keyFile !== undefined ? { file: keyFile } : {}) },
 		sinks: sinksFromArgs(args),
-		...(retries !== undefined && Number.isFinite(retries) ? { publishRetries: retries } : {}),
+		...(retries !== undefined ? { publishRetries: retries } : {}),
 	};
 }
 

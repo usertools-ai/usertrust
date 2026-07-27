@@ -38,20 +38,25 @@ import {
 	openSync,
 	readFileSync,
 	readdirSync,
+	realpathSync,
+	renameSync,
 	unlinkSync,
 	writeFileSync,
 	writeSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import {
 	type AnchorRecord,
 	anchorPayloadHash,
+	anchorSigningPreimage,
 	gatherOrderedEventHashes,
 	keyIdFromKeyObject,
 	parseAnchorRecord,
 	parseAnchorsContent,
+	publicKeyFromSpkiBase64,
+	verifySignatureRaw,
 } from "./anchor-verify.js";
 import { canonicalize } from "./canonical.js";
 import { buildMerkleTree } from "./merkle.js";
@@ -146,13 +151,30 @@ export interface AnchorIdentity {
 	lastAnchorSeq?: number;
 }
 
+/**
+ * Atomic identity.json write: temp file + fsync + rename. A bare in-place
+ * writeFileSync could be truncated by a crash mid-write, wedging the vault
+ * between "no anchor identity" (emitter) and "identity already exists" (init).
+ */
+function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
+	const path = join(anchorsDir(rootDir), "identity.json");
+	const tmp = `${path}.tmp-${process.pid}`;
+	const fd = openSync(tmp, "w", 0o600);
+	try {
+		writeSync(fd, JSON.stringify(identity, null, "\t"));
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+	renameSync(tmp, path);
+}
+
 /** Persist the durable anchorSeq high-water (never decreases). */
 function bumpAnchorHighWater(rootDir: string, anchorSeq: number): void {
 	const identity = readAnchorIdentity(rootDir);
 	if (identity === null) return;
 	if ((identity.lastAnchorSeq ?? 0) >= anchorSeq) return;
-	const updated: AnchorIdentity = { ...identity, lastAnchorSeq: anchorSeq };
-	writeFileSync(join(anchorsDir(rootDir), "identity.json"), JSON.stringify(updated, null, "\t"));
+	writeIdentityFile(rootDir, { ...identity, lastAnchorSeq: anchorSeq });
 }
 
 export function anchorsDir(rootDir: string): string {
@@ -178,6 +200,29 @@ export function defaultKeyPath(vaultId: string): string {
 }
 
 /**
+ * Resolve a path to its canonical absolute form, realpath-ing the deepest
+ * EXISTING ancestor so symlinked parents (macOS /var → /private/var) compare
+ * equal even when the leaf doesn't exist yet.
+ */
+function realResolve(p: string): string {
+	const abs = resolve(p);
+	let base = abs;
+	const suffix: string[] = [];
+	while (!existsSync(base)) {
+		const parent = join(base, "..");
+		if (parent === base) break;
+		suffix.unshift(base.slice(parent.length + (parent.endsWith(sep) ? 0 : 1)));
+		base = parent;
+	}
+	try {
+		base = realpathSync(base);
+	} catch {
+		/* keep the resolved form */
+	}
+	return suffix.length === 0 ? base : join(base, ...suffix);
+}
+
+/**
  * Mint the vault's anchor identity: Ed25519 keypair (private key OUTSIDE the
  * vault, mode 0600), `identity.json`, and an empty mirror file. Returns the
  * public PEM + keyId for out-of-band pinning. Idempotent: refuses to
@@ -200,9 +245,15 @@ export function initAnchorIdentity(
 		"base64",
 	);
 
-	const keyFile = opts?.keyFile ?? defaultKeyPath(vaultId);
+	// Canonicalize BOTH sides before comparing: a relative --key-file (e.g.
+	// ".usertrust/keys/anchor.pem") would never match an absolute prefix, and
+	// symlinked temp dirs (macOS /var → /private/var) would defeat a plain
+	// resolve() comparison — either way silently landing the signing key
+	// inside the vault it vouches for (AC-6.2).
+	const keyFile = realResolve(opts?.keyFile ?? defaultKeyPath(vaultId));
 	const keyDir = join(keyFile, "..");
-	if (keyFile.startsWith(join(rootDir, VAULT_DIR))) {
+	const vaultAbs = realResolve(join(rootDir, VAULT_DIR));
+	if (keyFile === vaultAbs || keyFile.startsWith(vaultAbs + sep)) {
 		throw new Error("Refusing to write the anchor private key inside the vault (AC-6.2)");
 	}
 	mkdirSync(keyDir, { recursive: true, mode: 0o700 });
@@ -218,7 +269,7 @@ export function initAnchorIdentity(
 		publicKeySpki,
 		createdAt: new Date().toISOString(),
 	};
-	writeFileSync(identityPath, JSON.stringify(identity, null, "\t"));
+	writeIdentityFile(rootDir, identity);
 	// Touch the mirror so "mirror file missing" (accidental loss / partial
 	// restore) is distinguishable from "fresh vault, no anchors yet".
 	const mirrorPath = join(dir, "anchors.jsonl");
@@ -425,7 +476,7 @@ function tryAcquireAnchorLock(dir: string): (() => void) | null {
 	};
 	const first = attempt();
 	if (first !== null) return first;
-	// Stale-lock detection: same pattern as the audit writer lock.
+	// Stale-lock detection: same liveness check as the audit writer lock.
 	try {
 		const existing = JSON.parse(readFileSync(lockPath, "utf-8")) as { pid?: number };
 		if (typeof existing.pid === "number" && existing.pid !== process.pid) {
@@ -445,14 +496,20 @@ function tryAcquireAnchorLock(dir: string): (() => void) | null {
 		} else {
 			return null;
 		}
-		unlinkSync(lockPath);
 	} catch {
-		// Corrupt lock file — remove and retry once.
-		try {
-			unlinkSync(lockPath);
-		} catch {
-			return null;
-		}
+		// Corrupt lock file — also reclaimed, but only via the atomic rename
+		// below so a concurrent reclaimer cannot double-acquire.
+	}
+	// ATOMIC reclaim: exactly one contender wins the rename; the loser's
+	// rename throws (ENOENT) and backs off. A bare check-then-unlink would let
+	// a slow contender delete the winner's freshly created lock (TOCTOU) and
+	// admit two emitters — the exact race the lock exists to prevent.
+	try {
+		const reclaimPath = `${lockPath}.reclaim-${process.pid}-${Date.now()}`;
+		renameSync(lockPath, reclaimPath);
+		unlinkSync(reclaimPath);
+	} catch {
+		return null;
 	}
 	return attempt();
 }
@@ -509,6 +566,18 @@ function outboxPath(dir: string, anchorSeq: number): string {
 	return join(dir, "outbox", `${String(anchorSeq).padStart(12, "0")}.json`);
 }
 
+/** Fsync'd outbox write — the record's durable delivery intent. */
+function writeOutboxEntry(dir: string, record: AnchorRecord): void {
+	mkdirSync(join(dir, "outbox"), { recursive: true });
+	const fd = openSync(outboxPath(dir, record.anchorSeq), "w", 0o600);
+	try {
+		writeSync(fd, canonicalize(record));
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+}
+
 function readMeta(
 	rootDir: string,
 ): { lastHash: string; sequence: number } | "absent" | "unreadable" {
@@ -550,6 +619,17 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 	let lastEmitError: string | null = null;
 	let timer: ReturnType<typeof setInterval> | null = null;
 	const inFlight = new Set<Promise<void>>();
+
+	/** Mirror append: the canonical bytes the record hash covers, fsync'd. */
+	function appendToMirror(record: AnchorRecord): void {
+		const fd = openSync(join(dir, "anchors.jsonl"), "a", 0o600);
+		try {
+			writeSync(fd, `${canonicalize(record)}\n`);
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+	}
 	// Serialize publish cycles so an overlapping cycle cannot interleave the
 	// outbox drain and double-publish a record.
 	let publishChain: Promise<void> = Promise.resolve();
@@ -696,7 +776,38 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 					reason: "mirror-corrupt (repair the mirror, then `usertrust anchor resume`)",
 				};
 			}
-			const tail = mirror.records.at(-1) ?? null;
+			let tail = mirror.records.at(-1) ?? null;
+
+			// Self-heal: a crash between the outbox write and the mirror append
+			// leaves a fully minted record in the outbox that the mirror lacks.
+			// Re-append it (validated: ours, signed by our key, contiguous)
+			// instead of wedging or re-minting the seq — re-minting would
+			// publish divergent content at an occupied position (permanent fork
+			// evidence in the append-only store).
+			for (const orphan of pendingOutboxRecords(dir).filter(
+				(o) => o.anchorSeq > (mirror.records.at(-1)?.anchorSeq ?? 0),
+			)) {
+				const expectedPrev = tail === null ? GENESIS_HASH : anchorPayloadHash(tail);
+				const idKey = publicKeyFromSpkiBase64(liveIdentity.publicKeySpki);
+				const orphanOk =
+					orphan.vaultId === vaultId &&
+					orphan.anchorSeq === (tail?.anchorSeq ?? 0) + 1 &&
+					orphan.prevAnchorHash === expectedPrev &&
+					idKey !== null &&
+					verifySignatureRaw("ed25519", anchorSigningPreimage(orphan), idKey, orphan.sig);
+				if (!orphanOk) {
+					degraded = true;
+					return {
+						emitted: false,
+						reason:
+							"outbox-orphan-invalid (inspect audit/anchors/outbox, then `usertrust anchor resume`)",
+					};
+				}
+				appendToMirror(orphan);
+				bumpAnchorHighWater(rootDir, orphan.anchorSeq);
+				tail = orphan;
+			}
+
 			// Durable high-water lives outside the mirror: an emptied mirror
 			// (tail null) with a prior anchor recorded must NOT restart at 1.
 			const durableHighWater = liveIdentity.lastAnchorSeq ?? 0;
@@ -718,6 +829,17 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 				return {
 					emitted: false,
 					reason: `stale-signer-key: signer ${signer.keyId} is not the current epoch key ${expectedKeyId} — point USERTRUST_ANCHOR_KEY/--key-file at the post-rotation private key`,
+				};
+			}
+			// Vault-behind guard (symmetric to mirror-behind): an events head
+			// BELOW the anchored treeSize means the event log was rolled back
+			// (partial restore) — emitting would publish a decreasing-treeSize
+			// anchor: permanent rollback evidence from an honest accident.
+			if (tail !== null && snap.sequence < tail.treeSize) {
+				degraded = true;
+				return {
+					emitted: false,
+					reason: `vault-behind-anchors: events head ${snap.sequence} < anchored treeSize ${tail.treeSize} — restore the newer events before anchoring`,
 				};
 			}
 			if (tail !== null && tail.treeSize === snap.sequence && rotation === undefined) {
@@ -745,20 +867,17 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 			if (check.record === null) {
 				throw new Error(`emitter produced an invalid record: ${check.error}`);
 			}
-			// Mirror append (canonical bytes — the same bytes the hash covers).
-			const mirrorPath = join(dir, "anchors.jsonl");
-			const fd = openSync(mirrorPath, "a", 0o600);
-			try {
-				writeSync(fd, `${canonicalize(record)}\n`);
-				fsyncSync(fd);
-			} finally {
-				closeSync(fd);
-			}
-			// Bump the durable high-water AFTER the mirror append is fsync'd, so
-			// a crash leaves high-water ≤ mirror tail (never ahead).
+			// Durability order: outbox FIRST (fsync'd delivery intent), then the
+			// mirror append, then the high-water bump. A crash after only the
+			// outbox write is self-healed above (orphan re-appended to the
+			// mirror); the reverse order would strand a mirrored-but-never-
+			// published record — a permanent anchor-chain gap in the store that
+			// verifies as tampering.
+			writeOutboxEntry(dir, record);
+			appendToMirror(record);
+			// High-water AFTER the mirror append is fsync'd, so a crash leaves
+			// high-water ≤ mirror tail (never ahead of what exists).
 			bumpAnchorHighWater(rootDir, record.anchorSeq);
-			mkdirSync(join(dir, "outbox"), { recursive: true });
-			writeFileSync(outboxPath(dir, record.anchorSeq), canonicalize(record), { mode: 0o600 });
 			trackPublish(record);
 			return { emitted: true, record };
 		} finally {
@@ -860,6 +979,27 @@ export function resumeAnchorMirror(rootDir: string, latestRecordRaw: string): An
 			`resume: record vaultId ${record.vaultId} does not match this vault (${identity.vaultId})`,
 		);
 	}
+	// The record becomes the trusted mirror tail (next emission links its
+	// prevAnchorHash to it), so it MUST be provably ours: signed under the
+	// CURRENT identity key, or a rotation handoff INTO the current key.
+	// vaultId alone is public (printed by `anchor status`) — accepting any
+	// well-formed record would let a stale/forged file seed a fork.
+	const idKey = publicKeyFromSpkiBase64(identity.publicKeySpki);
+	const sigOk =
+		idKey !== null &&
+		record.keyId === identity.keyId &&
+		verifySignatureRaw("ed25519", anchorSigningPreimage(record), idKey, record.sig);
+	const handoffOk = record.rotation !== undefined && record.rotation.nextKeyId === identity.keyId;
+	if (!sigOk && !handoffOk) {
+		throw new Error(
+			"resume: record does not verify under this vault's current anchor key — fetch the STORE'S newest record",
+		);
+	}
+	if ((identity.lastAnchorSeq ?? 0) > record.anchorSeq) {
+		throw new Error(
+			`resume: durable high-water ${identity.lastAnchorSeq} exceeds the supplied record (${record.anchorSeq}) — fetch the store's newest record`,
+		);
+	}
 	const dir = anchorsDir(rootDir);
 	const mirror = readMirrorRecords(dir);
 	const tail = mirror.records.at(-1);
@@ -922,5 +1062,5 @@ export function recordRotatedIdentity(
 		keyId: next.keyId,
 		publicKeySpki: next.publicKeySpki,
 	};
-	writeFileSync(join(anchorsDir(rootDir), "identity.json"), JSON.stringify(updated, null, "\t"));
+	writeIdentityFile(rootDir, updated);
 }

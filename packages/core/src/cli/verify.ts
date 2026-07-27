@@ -27,9 +27,13 @@ import {
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
 
-function parseDurationMs(raw: string): number | undefined {
+function parseDurationMs(raw: string): number {
 	const m = /^(\d+)(ms|s|m|h|d)?$/.exec(raw);
-	if (m === null) return undefined;
+	if (m === null) {
+		// Silently dropping the policy would quietly disable the staleness
+		// gate — the exact fail-open the unknown-flag rejection exists to stop.
+		throw new Error(`Invalid --max-anchor-age: ${raw} (use e.g. 500ms, 30s, 15m, 1h, 7d)`);
+	}
 	const n = Number.parseInt(m[1] as string, 10);
 	const mult = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[2] ?? "ms"] as number;
 	return n * mult;
@@ -43,7 +47,12 @@ interface AnchorFlags {
 }
 
 const KNOWN_VERIFY_FLAGS = new Set([
+	// Global flags main.ts accepts for every subcommand — rejecting them here
+	// would break existing `usertrust verify --skip-verify`-style invocations.
 	"--json",
+	"--skip-verify",
+	"--reconfigure",
+	// Anchor flags.
 	"--anchor",
 	"--anchors",
 	"--anchor-url",
@@ -103,10 +112,21 @@ async function parseAnchorFlags(argv: string[]): Promise<AnchorFlags> {
 		else if (arg === "--require-external-anchor") requireExternalAnchor = true;
 		else if (arg === "--max-anchor-age") {
 			const v = next();
-			if (v !== undefined) maxAnchorAgeMs = parseDurationMs(v);
+			if (v === undefined) throw new Error("--max-anchor-age requires a value");
+			maxAnchorAgeMs = parseDurationMs(v);
 		} else if (arg === "--max-unanchored-events") {
 			const v = next();
-			if (v !== undefined) maxUnanchoredEvents = Number.parseInt(v, 10);
+			maxUnanchoredEvents = Number.parseInt(v ?? "", 10);
+			// parseInt("1O0") === 1 (partial parse) and NaN comparisons are always
+			// false — either typo would silently weaken the staleness gate.
+			// Require the WHOLE value to be a non-negative integer.
+			if (
+				!/^\d+$/.test(v ?? "") ||
+				!Number.isSafeInteger(maxUnanchoredEvents) ||
+				maxUnanchoredEvents < 0
+			) {
+				throw new Error(`Invalid --max-unanchored-events: ${v} (non-negative integer required)`);
+			}
 		} else if (arg === "--vault-id") vaultId = next();
 		else if (arg.startsWith("--") && !KNOWN_VERIFY_FLAGS.has(arg)) {
 			// Reject unknown flags rather than silently ignoring them — a typoed
@@ -120,9 +140,13 @@ async function parseAnchorFlags(argv: string[]): Promise<AnchorFlags> {
 	let witness: WitnessInput = { requested: false };
 	if (anchorUrl !== undefined) {
 		const fetched = await fetchAnchorUrl(anchorUrl);
+		// Empty/fully-unparseable body = witness unreachable (inconclusive).
+		// A body with ANY cleanly parsed records IS evidence — keep it whole;
+		// embedded parse errors fail closed downstream instead of discarding
+		// the rollback proof the valid records carry.
 		const parsed =
 			fetched.ok && fetched.body !== undefined ? parseAnchorsContent(fetched.body) : null;
-		if (parsed !== null && parsed.records.length > 0 && parsed.errors.length === 0) {
+		if (parsed !== null && parsed.records.length > 0) {
 			externalAnchorsRaw.push(fetched.body as string);
 			witness = { requested: true, ok: true };
 		} else {

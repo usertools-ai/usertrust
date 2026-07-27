@@ -114,8 +114,20 @@ for (let i = 0; i < args.length; i++) {
 	else if (arg === "--require-anchor") requireAnchor = true;
 	else if (arg === "--require-external-anchor") requireExternalAnchor = true;
 	else if (arg === "--max-anchor-age") maxAnchorAgeMs = parseDurationMs(next());
-	else if (arg === "--max-unanchored-events") maxUnanchoredEvents = Number.parseInt(next(), 10);
-	else if (arg === "--help" || arg === "-h") usage();
+	else if (arg === "--max-unanchored-events") {
+		const rawEvents = next();
+		maxUnanchoredEvents = Number.parseInt(rawEvents, 10);
+		// parseInt("1O0") === 1 (partial parse) and NaN comparisons are always
+		// false — either typo would silently weaken the staleness gate.
+		if (
+			!/^\d+$/.test(rawEvents) ||
+			!Number.isSafeInteger(maxUnanchoredEvents) ||
+			maxUnanchoredEvents < 0
+		) {
+			console.error("Invalid --max-unanchored-events: must be a non-negative integer");
+			process.exit(1);
+		}
+	} else if (arg === "--help" || arg === "-h") usage();
 	else if (!arg.startsWith("--")) vaultPath = arg;
 	else usage();
 }
@@ -134,13 +146,16 @@ async function buildAnchorParams(): Promise<AnchorVerifyParams> {
 	let witness: WitnessInput = { requested: false };
 	if (anchorUrl !== undefined) {
 		const fetched = await fetchAnchorUrl(anchorUrl);
-		// AC-2.4: a 2xx with an empty or unparseable body is NOT a consulted
-		// witness — treat it as unreachable (inconclusive), never a hard fail,
-		// and never let it launder mirror-only evidence into anchorSource
-		// "external". Only a cleanly-parsing body counts.
+		// AC-2.4: a 2xx with an empty or fully-unparseable body is NOT a
+		// consulted witness — treat it as unreachable (inconclusive) and never
+		// let it launder mirror-only evidence into anchorSource "external".
+		// But a body with ANY cleanly parsed records IS evidence: keep the
+		// whole body (embedded parse errors fail closed downstream) — throwing
+		// away 50 valid records over one truncated line would discard the very
+		// rollback proof the witness exists to provide.
 		const parsed =
 			fetched.ok && fetched.body !== undefined ? parseAnchorsContent(fetched.body) : null;
-		if (parsed !== null && parsed.records.length > 0 && parsed.errors.length === 0) {
+		if (parsed !== null && parsed.records.length > 0) {
 			externalAnchorsRaw.push(fetched.body as string);
 			witness = { requested: true, ok: true };
 		} else {
@@ -207,7 +222,19 @@ if (txId !== undefined) {
 	console.log(result.receipt);
 	// Exit 0: verified, 1: tampered/corrupted, 2: not found
 	if (!result.found) process.exit(2);
-	process.exit(result.valid ? 0 : 1);
+	if (!result.valid) process.exit(1);
+	// Strict gates apply in --tx mode too — the flags turned anchorMode on,
+	// so silently ignoring them here would let an UNANCHORED receipt pass a
+	// --require-external-anchor pipeline.
+	if (result.anchorState !== undefined && result.anchoring !== undefined) {
+		process.exit(
+			exitCodeForAnchored(
+				{ valid: true, anchorState: result.anchorState, anchoring: result.anchoring },
+				{ requireAnchor, requireExternalAnchor },
+			),
+		);
+	}
+	process.exit(0);
 }
 
 // ── Full vault verification ──
