@@ -68,10 +68,22 @@ const MAX_PEM_BYTES = 16 * 1024;
 const MAX_BUNDLE_ITEMS = 10_000;
 const BUNDLE_KEYS = new Set(["v", "records", "rekorReceipts"]);
 
+/**
+ * Read one pinned log key. A file that carries no usable PEM is a usage error,
+ * not an empty pin: the verifier discards unusable entries, so accepting one
+ * here would leave the caller believing they pinned a key while the receipt was
+ * checked against something else entirely.
+ */
 function readPinnedPem(path: string): string {
 	const pem = readFileSync(path, "utf-8");
 	if (Buffer.byteLength(pem, "utf8") > MAX_PEM_BYTES) {
 		console.error(`--rekor-pubkey ${path}: PEM exceeds 16 KiB`);
+		process.exit(1);
+	}
+	if (pem.trim().length === 0 || !pem.includes("-----BEGIN PUBLIC KEY-----")) {
+		console.error(
+			`--rekor-pubkey ${path}: not a PEM public key (-----BEGIN PUBLIC KEY----- missing)`,
+		);
 		process.exit(1);
 	}
 	return pem;

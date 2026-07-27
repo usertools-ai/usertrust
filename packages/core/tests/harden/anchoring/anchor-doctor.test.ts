@@ -256,6 +256,33 @@ describe("doctorS3Sink", () => {
 		);
 	});
 
+	it("refuses a plaintext endpoint before a single credential-bearing request leaves (P2-2)", async () => {
+		stubCreds("SESSIONTOKENSECRET");
+		const { transport, calls } = scriptedTransport([]);
+
+		// The doctor signs its probes exactly like the sink does, so an http
+		// endpoint off loopback would put the authorization header on the wire —
+		// and a diagnostic command is where an attacker-suggested URL gets pasted.
+		await expect(
+			doctorS3Sink({ ...S3_CFG, endpoint: "http://attacker.example" }, transport),
+		).rejects.toThrow(/endpoint must be https/);
+		expect(calls).toHaveLength(0);
+	});
+
+	it("still allows a loopback endpoint, matching the sink's rule for dev MinIO", async () => {
+		stubCreds();
+		const { transport, calls } = scriptedTransport([
+			{ status: 200 },
+			{ status: 403 },
+			{ status: 403 },
+		]);
+
+		const report = await doctorS3Sink({ ...S3_CFG, endpoint: "http://localhost:9000" }, transport);
+
+		expect(calls[0]?.url).toMatch(/^http:\/\/localhost:9000\/b\/anchors\/doctor-probe\//);
+		expect(check(report, "delete-denied").status).toBe("pass");
+	});
+
 	it("reports info and stops when the probe object cannot be written at all", async () => {
 		stubCreds();
 		const { transport, calls } = scriptedTransport([

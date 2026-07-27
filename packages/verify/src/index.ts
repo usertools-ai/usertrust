@@ -436,7 +436,16 @@ function verifySuppliedRekorReceipts(
 	let receiptsFailed = 0;
 	let latestAttestedTimeMs: number | null = null;
 	for (const raw of receiptsRaw) {
-		for (const document of splitReceiptDocuments(raw)) {
+		const documents = splitReceiptDocuments(raw);
+		if (documents.length === 0) {
+			// A receipts artifact that holds no receipts is a supply failure, not an
+			// absence of evidence: the caller passed --rekor-receipts, so an empty
+			// file means the receipt they meant to present never made it here.
+			receiptsFailed++;
+			errors.push("rekor-receipt-invalid: receipts artifact contained no receipts");
+			continue;
+		}
+		for (const document of documents) {
 			const parsed = parseRekorReceipt(document);
 			if (parsed.receipt === null) {
 				receiptsFailed++;

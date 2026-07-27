@@ -172,6 +172,22 @@ function isSafePositiveInt(n: unknown): n is number {
 	return typeof n === "number" && Number.isSafeInteger(n) && n >= 1;
 }
 
+// Matching control characters is the entire point here — they are what gets
+// removed from anything echoed back to a terminal.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the intent
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
+
+/**
+ * An untrusted field NAME on its way into an error string. Control characters
+ * are stripped before truncation: these strings are printed to a terminal, and
+ * an escape sequence inside a key would let the party under audit repaint the
+ * line its own verdict is printed on.
+ */
+function clipKey(key: string): string {
+	const scrubbed = key.replace(CONTROL_CHARS, "");
+	return scrubbed.length <= 80 ? scrubbed : `${scrubbed.slice(0, 80)}...`;
+}
+
 /**
  * Strict parse of a single anchor record. Unknown fields, missing fields, and
  * range violations are all rejected (fail-closed — spec §3 strict-parse rules;
@@ -195,7 +211,7 @@ export function parseAnchorRecord(raw: string): {
 	const obj = parsed as Record<string, unknown>;
 	for (const key of Object.keys(obj)) {
 		if (!RECORD_KEYS.has(key)) {
-			return { record: null, error: `malformed-anchor: unknown field "${key}"` };
+			return { record: null, error: `malformed-anchor: unknown field "${clipKey(key)}"` };
 		}
 	}
 	if (obj.v !== 1) {
@@ -243,7 +259,10 @@ export function parseAnchorRecord(raw: string): {
 		const rotObj = rot as Record<string, unknown>;
 		for (const key of Object.keys(rotObj)) {
 			if (!ROTATION_KEYS.has(key)) {
-				return { record: null, error: `malformed-anchor: unknown rotation field "${key}"` };
+				return {
+					record: null,
+					error: `malformed-anchor: unknown rotation field "${clipKey(key)}"`,
+				};
 			}
 		}
 		if (typeof rotObj.nextKeyId !== "string" || !KEY_ID.test(rotObj.nextKeyId)) {

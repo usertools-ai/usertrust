@@ -68,6 +68,11 @@ export function inclusionPath(m: number, leaves: readonly Buffer[]): Buffer[] {
  * Build a signed note (checkpoint) exactly as the verifier parses it:
  * `<origin>\n<treeSize>\n<base64 root>\n\n— <origin> <base64(keyhint || DER sig)>\n`
  * The signature covers the 3 body lines INCLUDING their trailing LF.
+ *
+ * `extraSignatureLines` are emitted BEFORE the log's own signature, which is
+ * where a witness co-signature sits on a real checkpoint — and which position
+ * matters: a verifier that only ever looked at the first line would miss the
+ * one signature that counts.
  */
 export function signedNote(
 	origin: string,
@@ -75,6 +80,7 @@ export function signedNote(
 	root: Buffer,
 	signKey: KeyObject,
 	keyhint: Buffer = Buffer.from([0xde, 0xad, 0xbe, 0xef]),
+	extraSignatureLines: readonly string[] = [],
 ): string {
 	const body = `${origin}\n${treeSize}\n${root.toString("base64")}\n`;
 	const der = cryptoSign("sha256", Buffer.from(body, "utf8"), {
@@ -82,13 +88,36 @@ export function signedNote(
 		dsaEncoding: "der",
 	});
 	const noteSig = Buffer.concat([keyhint, der]).toString("base64");
-	return `${body}\n— ${origin} ${noteSig}\n`;
+	// The signature line names a KEY, not the origin: a production origin is
+	// `"<host> - <treeID>"` and a note's key name may not contain spaces, so the
+	// log signs `— <host> <sig>` under either origin form.
+	const separator = origin.indexOf(" - ");
+	const keyName = separator === -1 ? origin : origin.slice(0, separator);
+	const signatures = [...extraSignatureLines, `— ${keyName} ${noteSig}`];
+	return `${body}\n${signatures.join("\n")}\n`;
+}
+
+/** A well-formed signature line that no pinned key will ever verify. */
+export function bogusSignatureLine(name = "witness.example.org"): string {
+	return `— ${name} ${randomBytes(76).toString("base64")}`;
+}
+
+export interface SyntheticLogOptions {
+	/**
+	 * Emit the origin form a PRODUCTION Rekor checkpoint uses,
+	 * `"<host> - <treeID>"`, instead of the bare host.
+	 */
+	treeId?: string;
+	/** Witness co-signatures to carry alongside the log's own. */
+	extraSignatureLines?: readonly string[];
 }
 
 export interface SyntheticLog {
 	treeSize: number;
 	rootHex: string;
 	checkpoint: string;
+	/** The origin actually signed into the checkpoint. */
+	origin: string;
 	pathFor(index: number): string[];
 }
 
@@ -97,12 +126,22 @@ export function makeSyntheticLog(
 	entries: readonly Buffer[],
 	signKey: KeyObject,
 	origin: string,
+	opts: SyntheticLogOptions = {},
 ): SyntheticLog {
 	const root = mth(entries);
+	const signedOrigin = opts.treeId === undefined ? origin : `${origin} - ${opts.treeId}`;
 	return {
 		treeSize: entries.length,
 		rootHex: root.toString("hex"),
-		checkpoint: signedNote(origin, entries.length, root, signKey),
+		origin: signedOrigin,
+		checkpoint: signedNote(
+			signedOrigin,
+			entries.length,
+			root,
+			signKey,
+			undefined,
+			opts.extraSignatureLines ?? [],
+		),
 		pathFor: (index: number): string[] =>
 			inclusionPath(index, entries).map((h) => h.toString("hex")),
 	};
@@ -139,6 +178,10 @@ export interface RekorFixtureOptions {
 	url?: string;
 	integratedTime?: number;
 	publicKeyPem?: string;
+	/** Emit the production origin form `"<host> - <treeID>"`. */
+	treeId?: string;
+	/** Witness co-signature lines carried ahead of the log's own signature. */
+	extraSignatureLines?: readonly string[];
 }
 
 export interface RekorFixture {
@@ -169,7 +212,12 @@ export function makeRekorReceipt(
 		entries.push(i === logIndex ? entry : randomBytes(48));
 	}
 	const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
-	const log = makeSyntheticLog(entries, privateKey, origin);
+	const log = makeSyntheticLog(entries, privateKey, origin, {
+		...(opts.treeId === undefined ? {} : { treeId: opts.treeId }),
+		...(opts.extraSignatureLines === undefined
+			? {}
+			: { extraSignatureLines: opts.extraSignatureLines }),
+	});
 	const receipt: RekorReceipt = {
 		v: 1,
 		vaultId: record.vaultId,

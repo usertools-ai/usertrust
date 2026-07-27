@@ -23,7 +23,11 @@ import {
 	verifyIndexInclusion as pkgVerifyIndexInclusion,
 	verifyRekorReceipt as pkgVerifyRekorReceipt,
 } from "../../../../verify/src/index.js";
-import { type AnchorRecord, anchorPayloadHash } from "../../../src/audit/anchor-verify.js";
+import {
+	type AnchorRecord,
+	anchorPayloadHash,
+	parseAnchorRecord,
+} from "../../../src/audit/anchor-verify.js";
 import {
 	parseRekorReceipt,
 	parseSignedNote,
@@ -39,6 +43,7 @@ import {
 	makeAnchoredVault,
 } from "./fixtures.js";
 import {
+	bogusSignatureLine,
 	hashedRekordEntry,
 	inclusionPath,
 	leafHash,
@@ -134,7 +139,8 @@ describe("HARDEN: signed-note checkpoint parsing", () => {
 		expect(parsed?.rootHashHex).toBe(root.toString("hex"));
 		expect(parsed?.body).toBe(`rekor.sigstore.dev\n42\n${root.toString("base64")}\n`);
 		// The 4-byte key hint is advisory and stripped; the rest is the DER sig.
-		expect((parsed?.sig.length ?? 0) > 8).toBe(true);
+		expect(parsed?.sigs).toHaveLength(1);
+		expect((parsed?.sigs[0]?.length ?? 0) > 8).toBe(true);
 	});
 
 	it("5. rejects CRLF, wrong line counts, short roots, and malformed signature lines", () => {
@@ -148,8 +154,10 @@ describe("HARDEN: signed-note checkpoint parsing", () => {
 		expect(parseSignedNote("origin\n9\n")).toBeNull();
 		// No blank separator line.
 		expect(parseSignedNote(good.replace("\n\n—", "\n—"))).toBeNull();
-		// A second signature line is not the accepted shape.
-		expect(parseSignedNote(`${good}${good.split("\n")[4] as string}\n`)).toBeNull();
+		// Witness co-signatures are the accepted shape; a malformed one is not.
+		expect(parseSignedNote(`${good}${bogusSignatureLine()}\n`)?.sigs).toHaveLength(2);
+		expect(parseSignedNote(`${good}not-a-signature-line\n`)).toBeNull();
+		expect(parseSignedNote(`${good}\n`)).toBeNull();
 		// Non-numeric / oversized tree size.
 		expect(parseSignedNote(good.replace("\n9\n", "\nnine\n"))).toBeNull();
 		// Root that does not decode to 32 bytes.
@@ -394,6 +402,135 @@ describe("HARDEN: trust pinning for custom logs (plan-review D4)", () => {
 		// It got as far as the signature check — the embedded key WAS consulted.
 		expect(result.errors.join(" | ")).toContain("signature does not verify");
 		expect(result.errors.join(" | ")).not.toContain("custom log requires");
+	});
+});
+
+describe("HARDEN: a supplied keyring that all got discarded is never the embedded key (P1-1)", () => {
+	const REFUSAL = "refusing to fall back to the embedded key";
+	const EMBEDDED_PATH = "does not verify under any pinned log public key";
+
+	it("31. an empty --rekor-pubkey entry refuses instead of silently reverting to the embedded key", () => {
+		// The dangerous case: the log host IS the one the embedded key speaks for,
+		// so a fallback here would verify under a key the auditor never chose and
+		// pass a merge gate they believed they had pinned.
+		const f = makeRekorReceipt(record, { url: "https://rekor.sigstore.dev" });
+		const result = verifyRekorReceipt(f.receipt, record, [""]);
+
+		expect(result.ok).toBe(false);
+		expect(result.errors.join(" | ")).toContain(REFUSAL);
+		expect(result.errors.join(" | ")).not.toContain(EMBEDDED_PATH);
+		// Both packages refuse identically — this is a merge gate, not a nicety.
+		expect(pkgVerifyRekorReceipt(f.receipt, record, [""])).toEqual(result);
+	});
+
+	it("32. a PEM over the 16 KiB cap is discarded material, not an absent pin", () => {
+		const f = makeRekorReceipt(record, { url: "https://rekor.sigstore.dev" });
+		const oversized = `${"x".repeat(17 * 1024)}\n`;
+		const result = verifyRekorReceipt(f.receipt, record, [oversized]);
+
+		expect(result.ok).toBe(false);
+		expect(result.errors.join(" | ")).toContain(REFUSAL);
+		expect(result.errors.join(" | ")).not.toContain(EMBEDDED_PATH);
+		// The blob itself is never echoed back.
+		expect(result.errors.join(" | ")).not.toContain("xxxx");
+	});
+
+	it("33. supplying NOTHING still reaches the embedded key, and a real pin still verifies", () => {
+		const f = makeRekorReceipt(record, { url: "https://rekor.sigstore.dev" });
+		// Unchanged behavior: no material supplied ⇒ the embedded key is consulted.
+		expect(verifyRekorReceipt(f.receipt, record, []).errors.join(" | ")).toContain(EMBEDDED_PATH);
+		expect(verifyRekorReceipt(f.receipt, record, [f.logPubkeyPem]).ok).toBe(true);
+		// A custom log with discarded material names the supply failure, which is
+		// the more useful truth than "no pin for this host".
+		const custom = makeRekorReceipt(record, { url: "https://log.example.org" });
+		expect(verifyRekorReceipt(custom.receipt, record, [""]).errors.join(" | ")).toContain(REFUSAL);
+	});
+});
+
+describe("HARDEN: live-Rekor checkpoint shapes (P2-1)", () => {
+	it("34. the production origin form `<host> - <treeID>` verifies", () => {
+		const f = makeRekorReceipt(record, { treeId: "2605736670972794746" });
+		expect(f.receipt.log.checkpoint.split("\n")[0]).toBe(
+			"rekor.sigstore.dev - 2605736670972794746",
+		);
+		expect(verifyRekorReceipt(f.receipt, record, [f.logPubkeyPem]).errors).toEqual([]);
+		expect(verifyRekorReceipt(f.receipt, record, [f.logPubkeyPem]).ok).toBe(true);
+	});
+
+	it("35. a witness co-signed checkpoint verifies on the signature the auditor pinned", () => {
+		// The log's own signature is emitted LAST, behind a witness line no pinned
+		// key verifies — a verifier that stopped at the first line would fail here.
+		const f = makeRekorReceipt(record, {
+			treeId: "2605736670972794746",
+			extraSignatureLines: [bogusSignatureLine()],
+		});
+		expect(parseSignedNote(f.receipt.log.checkpoint)?.sigs).toHaveLength(2);
+		expect(verifyRekorReceipt(f.receipt, record, [f.logPubkeyPem]).ok).toBe(true);
+	});
+
+	it("36. zero signatures verifying under the keyring still fails closed", () => {
+		const f = makeRekorReceipt(record);
+		const foreign = generateKeyPairSync("ec", { namedCurve: "P-256" });
+		const cosignedByStrangers = f.tamper((r) => {
+			r.log.checkpoint = signedNote(
+				"rekor.sigstore.dev",
+				r.log.treeSize,
+				Buffer.from(r.log.rootHash, "hex"),
+				foreign.privateKey,
+				undefined,
+				[bogusSignatureLine()],
+			);
+		});
+		const result = verifyRekorReceipt(cosignedByStrangers, record, [f.logPubkeyPem]);
+		expect(result.ok).toBe(false);
+		expect(result.errors.join(" | ")).toContain("signature does not verify");
+	});
+
+	it("37. the origin still has to NAME the log.url host — prefix, never suffix", () => {
+		for (const origin of ["rekor.sigstore.dev.evil.net", "evil.example.org"]) {
+			const f = makeRekorReceipt(record, { origin, treeId: "2605736670972794746" });
+			const result = verifyRekorReceipt(f.receipt, record, [f.logPubkeyPem]);
+			expect(result.ok).toBe(false);
+			expect(result.errors.join(" | ")).toContain("origin");
+		}
+		// And the treeID half is not a place to hide the host either.
+		const smuggled = makeRekorReceipt(record, {
+			origin: "evil.example.org",
+			treeId: "rekor.sigstore.dev",
+		});
+		expect(verifyRekorReceipt(smuggled.receipt, record, [smuggled.logPubkeyPem]).ok).toBe(false);
+	});
+});
+
+describe("HARDEN: error strings are terminal-safe (P2-3)", () => {
+	const ESCAPE = "\u001b[2K\rANCHOR STATE: VERIFIED";
+
+	it("38. a receipt field name carrying terminal escapes is stripped, not echoed", () => {
+		const obj = JSON.parse(JSON.stringify(makeRekorReceipt(record).receipt)) as Record<
+			string,
+			unknown
+		>;
+		obj[ESCAPE] = 1;
+		const { receipt, error } = parseRekorReceipt(JSON.stringify(obj));
+
+		expect(receipt).toBeNull();
+		expect(error).toContain("unknown field");
+		expect(error).not.toContain("\u001b");
+		expect(error).not.toContain("\r");
+		// The readable remainder still names what was wrong.
+		expect(error).toContain("ANCHOR STATE: VERIFIED");
+	});
+
+	it("39. the same holds for an anchor record's unknown-field echo", () => {
+		const { record: parsed, error } = parseAnchorRecord(JSON.stringify({ [ESCAPE]: 1 }));
+
+		expect(parsed).toBeNull();
+		expect(error).toContain("unknown field");
+		expect(error).not.toContain("\u001b");
+		expect(error).not.toContain("\r");
+		// A very long key is truncated as well, so the echo cannot fill a screen.
+		const long = parseAnchorRecord(JSON.stringify({ [`${"k".repeat(400)}`]: 1 })).error as string;
+		expect(long.length).toBeLessThan(160);
 	});
 });
 

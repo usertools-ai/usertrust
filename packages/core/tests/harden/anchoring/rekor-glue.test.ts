@@ -130,7 +130,27 @@ describe("HARDEN: Rekor receipts in verifyVaultWithAnchors", () => {
 		);
 	});
 
-	it("7. JSONL input: several receipts for one anchor verify, newest attested time wins (D11)", async () => {
+	it("7. a receipts artifact holding no receipts fails closed (P2-5)", async () => {
+		const s = await makeAnchoredVault(3);
+		await anchorOnce(s);
+
+		// The caller asked for receipt evidence and handed over a blank file. That
+		// is a missing receipt, not an absence of a claim — treating it as "no
+		// receipts supplied" would silently drop the evidence they meant to show.
+		const result = verify(s, { rekorReceiptsRaw: ["  \n"] });
+
+		expect(result.anchorState).toBe("ANCHOR_INVALID");
+		expect(result.valid).toBe(false);
+		expect(result.anchoring.reasons).toContain("rekor-receipt-invalid");
+		expect(result.anchoring.rekor?.receiptsVerified).toBe(0);
+		expect(result.anchoring.rekor?.receiptsFailed).toBe(1);
+		expect(result.errors.some((e) => e.includes("receipts artifact contained no receipts"))).toBe(
+			true,
+		);
+		expect(exitCodeForAnchored(result)).toBe(1);
+	});
+
+	it("8. JSONL input: several receipts for one anchor verify, newest attested time wins (D11)", async () => {
 		const s = await makeAnchoredVault(3);
 		const record = await anchorOnce(s);
 		const older = makeRekorReceipt(record, { integratedTime: ATTESTED_SECONDS });
@@ -148,7 +168,7 @@ describe("HARDEN: Rekor receipts in verifyVaultWithAnchors", () => {
 });
 
 describe("HARDEN: attested-time staleness (clock gaming defeated)", () => {
-	it("8. a stale ATTESTED time makes a fresh operator timestamp ANCHOR_STALE", async () => {
+	it("9. a stale ATTESTED time makes a fresh operator timestamp ANCHOR_STALE", async () => {
 		const s = await makeAnchoredVault(3);
 		const record = await anchorOnce(s);
 		// Unanchored tail: --max-anchor-age only bites once the vault has moved on.
@@ -175,7 +195,7 @@ describe("HARDEN: attested-time staleness (clock gaming defeated)", () => {
 		).toBe(true);
 	});
 
-	it("9. a fresh ATTESTED time rescues an anchor whose operator timestamp looks stale", async () => {
+	it("10. a fresh ATTESTED time rescues an anchor whose operator timestamp looks stale", async () => {
 		const s = await makeAnchoredVault(3);
 		const record = await anchorOnce(s);
 		await appendEvents(s.root, 2, 4);
@@ -195,7 +215,7 @@ describe("HARDEN: attested-time staleness (clock gaming defeated)", () => {
 		expect(attested.anchoring.rekor?.receiptsVerified).toBe(1);
 	});
 
-	it("10. only the NEWEST anchor's receipt drives freshness", async () => {
+	it("11. only the NEWEST anchor's receipt drives freshness", async () => {
 		const s = await makeAnchoredVault(3);
 		const first = await anchorOnce(s);
 		await appendEvents(s.root, 3, 4);
@@ -219,7 +239,7 @@ describe("HARDEN: attested-time staleness (clock gaming defeated)", () => {
 });
 
 describe("HARDEN: core ↔ verify pkg behavior parity on the receipt path (D12)", () => {
-	it("11. identical inputs produce deep-equal results and exit codes in both glues", async () => {
+	it("12. identical inputs produce deep-equal results and exit codes in both glues", async () => {
 		const s = await makeAnchoredVault(3);
 		const record = await anchorOnce(s);
 		await appendEvents(s.root, 2, 4);

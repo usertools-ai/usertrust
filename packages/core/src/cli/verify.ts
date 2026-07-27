@@ -76,10 +76,21 @@ function readArtifact(pathOrDash: string): string {
 	return pathOrDash === "-" ? readFileSync(0, "utf-8") : readFileSync(pathOrDash, "utf-8");
 }
 
+/**
+ * Read one pinned log key. A file that carries no usable PEM is a usage error,
+ * not an empty pin: the verifier discards unusable entries, so accepting one
+ * here would leave the caller believing they pinned a key while the receipt was
+ * checked against something else entirely.
+ */
 function readPinnedPem(path: string): string {
 	const pem = readFileSync(path, "utf-8");
 	if (Buffer.byteLength(pem, "utf8") > MAX_PEM_BYTES) {
 		throw new Error(`--rekor-pubkey ${path}: PEM exceeds 16 KiB`);
+	}
+	if (pem.trim().length === 0 || !pem.includes("-----BEGIN PUBLIC KEY-----")) {
+		throw new Error(
+			`--rekor-pubkey ${path}: not a PEM public key (-----BEGIN PUBLIC KEY----- missing)`,
+		);
 	}
 	return pem;
 }

@@ -68,8 +68,11 @@ export interface SignedNote {
 	rootHashHex: string;
 	/** EXACTLY the bytes the log signs: 3 body lines including the trailing LF. */
 	body: string;
-	/** Note signature with the 4-byte key hint stripped off the front. */
-	sig: Buffer;
+	/**
+	 * Note signatures, each with its 4-byte key hint stripped off the front. A
+	 * checkpoint carries the log's own signature plus one per co-signing witness.
+	 */
+	sigs: Buffer[];
 }
 
 export interface RekorVerification {
@@ -112,6 +115,10 @@ const MAX_PEM_BYTES = 16 * 1024;
 const HEX64 = /^[0-9a-f]{64}$/;
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 const UINT = /^(0|[1-9][0-9]*)$/;
+// Matching control characters is the entire point here — they are what gets
+// removed from anything echoed back to a terminal.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the intent
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
 
 const LEAF_PREFIX = Buffer.from([0x00]);
 const NODE_PREFIX = Buffer.from([0x01]);
@@ -129,9 +136,16 @@ const LOG_KEYS = new Set([
 
 // ── Small helpers ──
 
-/** Untrusted values are never echoed whole into an error string. */
+/**
+ * Untrusted values are never echoed whole into an error string. Control
+ * characters are stripped BEFORE truncation, because these strings are printed
+ * to a terminal: an escape sequence or a bare CR inside a field name would let
+ * the party under audit repaint the line its own verdict is printed on, and
+ * truncating first would leave a half-consumed escape behind.
+ */
 function clip(value: string): string {
-	return value.length <= 80 ? value : `${value.slice(0, 80)}...`;
+	const scrubbed = value.replace(CONTROL_CHARS, "");
+	return scrubbed.length <= 80 ? scrubbed : `${scrubbed.slice(0, 80)}...`;
 }
 
 function asObject(value: unknown): Record<string, unknown> | null {
@@ -164,19 +178,24 @@ function nodeHash(left: Buffer, right: Buffer): Buffer {
 
 /**
  * Parse a signed note:
- *   <origin>\n<treeSize>\n<base64 rootHash>\n\n— <keyname> <base64 sig>\n
+ *   <origin>\n<treeSize>\n<base64 rootHash>\n\n— <keyname> <base64 sig>\n...
  * Strictly LF-only and strictly this shape — a note is a signed artifact, so
  * accepting variants would mean verifying a signature over bytes we did not
  * actually parse. The signature payload is `4-byte keyhint || DER signature`;
  * the hint identifies which key the log used and is ADVISORY only, because the
  * auditor pins the key out-of-band. Only its 4 bytes are skipped.
+ *
+ * ONE OR MORE signature lines are accepted: a production checkpoint is signed by
+ * the log and co-signed by its witnesses, and every line must still be
+ * well-formed. Which of them (if any) speaks for the auditor is decided later,
+ * against the pinned keyring — never here.
  */
 export function parseSignedNote(note: string): SignedNote | null {
 	if (note.length === 0 || Buffer.byteLength(note, "utf8") > MAX_CHECKPOINT_BYTES) return null;
 	if (note.includes("\r")) return null;
 	const lines = note.split("\n");
-	if (lines.length === 6 && lines[5] === "") lines.pop();
-	if (lines.length !== 5) return null;
+	if (lines.length > 5 && lines[lines.length - 1] === "") lines.pop();
+	if (lines.length < 5) return null;
 	const origin = lines[0] as string;
 	const sizeLine = lines[1] as string;
 	const rootB64 = lines[2] as string;
@@ -187,19 +206,36 @@ export function parseSignedNote(note: string): SignedNote | null {
 	if (!BASE64.test(rootB64)) return null;
 	const root = Buffer.from(rootB64, "base64");
 	if (root.length !== 32) return null;
-	const parts = (lines[4] as string).split(" ");
-	if (parts.length !== 3 || parts[0] !== "—" || (parts[1] as string).length === 0) return null;
-	const sigField = parts[2] as string;
-	if (!BASE64.test(sigField)) return null;
-	const raw = Buffer.from(sigField, "base64");
-	if (raw.length <= 4) return null;
+	const sigs: Buffer[] = [];
+	for (const line of lines.slice(4)) {
+		const parts = line.split(" ");
+		if (parts.length !== 3 || parts[0] !== "—" || (parts[1] as string).length === 0) return null;
+		const sigField = parts[2] as string;
+		if (!BASE64.test(sigField)) return null;
+		const raw = Buffer.from(sigField, "base64");
+		if (raw.length <= 4) return null;
+		sigs.push(raw.subarray(4));
+	}
 	return {
 		origin,
 		treeSize,
 		rootHashHex: root.toString("hex"),
 		body: `${origin}\n${sizeLine}\n${rootB64}\n`,
-		sig: raw.subarray(4),
+		sigs,
 	};
+}
+
+/**
+ * Does a checkpoint's signed origin name the host the receipt says it came from?
+ * A production Rekor checkpoint's origin is `"<host> - <treeID>"`, while the
+ * signed-note format also permits the bare host; both identify the same log, so
+ * only the part before the first " - " is compared. The comparison stays exact
+ * on that part — a suffix rule would let evil.example.org.attacker.net pass.
+ */
+function originNamesHost(origin: string, host: string): boolean {
+	const separator = origin.indexOf(" - ");
+	const named = separator === -1 ? origin : origin.slice(0, separator);
+	return named.toLowerCase() === host;
 }
 
 // ── RFC 9162 inclusion ──
@@ -380,6 +416,12 @@ function checkHashedRekordEntry(
  * Which key(s) may speak for this log. Supplying no key is only meaningful for
  * the one log whose key ships with the verifier; for anything else, an unpinned
  * receipt would be self-certifying, so it is refused rather than trusted.
+ *
+ * A caller who supplied material that ALL got discarded (empty file, oversized
+ * blob) is not a caller who supplied nothing: silently falling back to the
+ * embedded key there would verify a rekor.sigstore.dev receipt under a key the
+ * auditor never chose, and pass a merge gate the auditor thought they had
+ * pinned. Discarded-everything is refused instead.
  */
 function resolveLogKeyring(
 	host: string,
@@ -389,6 +431,13 @@ function resolveLogKeyring(
 		(pem) => pem.length > 0 && Buffer.byteLength(pem, "utf8") <= MAX_PEM_BYTES,
 	);
 	if (supplied.length > 0) return { keys: supplied, error: null };
+	if (logPubkeysPem.length > 0) {
+		return {
+			keys: [],
+			error:
+				"supplied --rekor-pubkey material is empty or invalid — refusing to fall back to the embedded key",
+		};
+	}
 	if (host === REKOR_PROD_HOST) return { keys: [REKOR_PROD_PUBKEY_PEM], error: null };
 	return {
 		keys: [],
@@ -457,7 +506,7 @@ export function verifyRekorReceipt(
 	if (host === null) return fail("log.url is not an http(s) URL");
 	const note = parseSignedNote(receipt.log.checkpoint);
 	if (note === null) return fail("log.checkpoint is not a parseable signed note");
-	if (note.origin.toLowerCase() !== host) {
+	if (!originNamesHost(note.origin, host)) {
 		return fail(`log.checkpoint origin ${clip(note.origin)} is not the log.url host ${clip(host)}`);
 	}
 	if (note.treeSize !== receipt.log.treeSize) {
@@ -469,13 +518,16 @@ export function verifyRekorReceipt(
 		return fail("log.checkpoint root hash does not match log.rootHash");
 	}
 
-	// 7 — and must be signed by a key the AUDITOR pinned.
+	// 7 — and must be signed by a key the AUDITOR pinned. A co-signed checkpoint
+	// carries one signature per witness, and the auditor pins only the parties
+	// they trust: ONE line verifying under ONE pinned key is the whole claim.
 	const keyring = resolveLogKeyring(host, logPubkeysPem);
 	if (keyring.error !== null) return fail(keyring.error);
-	const sigBase64 = note.sig.toString("base64");
+	const sigsBase64 = note.sigs.map((sig) => sig.toString("base64"));
 	const signed = keyring.keys.some((pem) => {
 		const key = publicKeyFromPem(pem);
-		return key !== null && verifySignatureRaw("ecdsa-p256", note.body, key, sigBase64);
+		if (key === null) return false;
+		return sigsBase64.some((sig) => verifySignatureRaw("ecdsa-p256", note.body, key, sig));
 	});
 	if (!signed) {
 		return fail("log.checkpoint signature does not verify under any pinned log public key");

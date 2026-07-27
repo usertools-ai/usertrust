@@ -324,6 +324,14 @@ function probeTarget(cfg: S3ProbeConfig, prefix: string): ProbeTarget {
 	return { host, path: `/${encoded}`, url: `https://${host}/${encoded}`, key };
 }
 
+/**
+ * Endpoint for an S3-compatible store, under the SAME rule as the sink
+ * (rekor.ts / s3-sink): plaintext is refused off-loopback. The doctor's probes
+ * are SigV4-signed like any other request, so an http endpoint on the network
+ * would put the credential-bearing headers on the wire — and a diagnostic
+ * command is exactly where an operator would paste an attacker-suggested URL.
+ * Loopback stays allowed for dev MinIO/LocalStack.
+ */
 function parseEndpoint(endpoint: string): URL {
 	let url: URL;
 	try {
@@ -331,8 +339,11 @@ function parseEndpoint(endpoint: string): URL {
 	} catch {
 		throw new Error(`s3 doctor: endpoint must include a scheme, got "${endpoint.slice(0, 60)}"`);
 	}
-	if (url.protocol !== "https:" && url.protocol !== "http:") {
-		throw new Error(`s3 doctor: endpoint scheme must be http(s), got "${url.protocol}"`);
+	const loopback = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+	if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+		throw new Error(
+			`s3 doctor: endpoint must be https (http is allowed only for localhost/127.0.0.1), got "${url.protocol}//${url.host}"`,
+		);
 	}
 	return url;
 }

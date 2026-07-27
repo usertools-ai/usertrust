@@ -234,6 +234,15 @@ usertrust-verify .usertrust --anchors anchors.jsonl --pubkey root.pem \
   --rekor-receipts receipts.jsonl --rekor-pubkey rekor-internal.pem
 ```
 
+**Keyring scope.** The keyring is flat: any pinned key may vouch for any log host appearing in the
+receipt set, and a checkpoint carrying several signatures (a log plus its witnesses) passes as soon
+as *one* of them verifies under *one* pinned key. So pin only keys you would trust to attest
+inclusion for any receipt in the run — pinning a partner's internal log key alongside
+rekor.sigstore.dev lets either key speak for either host. Host-scoped pinning (`--rekor-pubkey
+host=file`) is a possible future refinement; today, split the runs instead if the distinction
+matters. Supplying `--rekor-pubkey` material that turns out to be empty or unusable is an error,
+never a silent fall back to the embedded key.
+
 **Attested time.** A verified receipt upgrades `--max-anchor-age` from the operator-claimed
 `timestamp` field to the log's `integratedTime`. Staleness is then measured against a third
 party's clock, so backdating records no longer buys freshness. Without receipts, keep preferring
