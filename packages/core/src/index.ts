@@ -111,6 +111,10 @@ export { verifyChain, verifyVault } from "./audit/verify.js";
 export type { ChainVerificationResult, VaultVerificationResult } from "./audit/verify.js";
 export { VAULT_DIR } from "./shared/constants.js";
 
+// Markdown / Obsidian export
+export { exportMarkdown } from "./export/markdown.js";
+export type { ExportResult } from "./export/markdown.js";
+
 // Pricing
 export {
 	getModelRates,
