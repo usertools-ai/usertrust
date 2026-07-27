@@ -4,6 +4,7 @@
 		"two-phase-spend",
 		"audit-trail",
 		"merkle-proofs",
+		"local-models",
 		"policy-engine",
 		"pattern-memory",
 		"circuit-breaker"

@@ -6,8 +6,8 @@ const useCases = [
 		detail: "Ship with spend controls from day one",
 	},
 	{
-		role: "Enterprise teams",
-		detail: "Audit-ready governance without vendor lock-in",
+		role: "Fleet operators",
+		detail: "Govern agent fleets from one control plane — budgets and audit per tenant",
 	},
 	{
 		role: "Agent builders",
