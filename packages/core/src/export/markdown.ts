@@ -67,7 +67,7 @@ function noteFor(
 	const model = typeof e.data.model === "string" ? e.data.model : undefined;
 	const cost = typeof e.data.cost === "number" ? e.data.cost : undefined;
 	const fm: string[] = ["---"];
-	fm.push(`ts: ${e.timestamp}`);
+	fm.push(`ts: ${yamlString(e.timestamp)}`);
 	fm.push(`kind: ${yamlString(e.kind)}`);
 	fm.push(`actor: ${yamlString(e.actor)}`);
 	if (model) {
@@ -82,8 +82,8 @@ function noteFor(
 	if (typeof e.data.transferId === "string")
 		fm.push(`transfer_id: ${yamlString(e.data.transferId)}`);
 	if (typeof e.sequence === "number") fm.push(`seq: ${e.sequence}`);
-	fm.push(`hash: ${e.hash}`);
-	fm.push(`previous_hash: ${e.previousHash}`);
+	fm.push(`hash: ${yamlString(e.hash)}`);
+	fm.push(`previous_hash: ${yamlString(e.previousHash)}`);
 	fm.push(`integrity: ${integrityFor(index, breakIndex)}`);
 	fm.push(`anchor_state: ${anchor}`);
 	fm.push("---");
