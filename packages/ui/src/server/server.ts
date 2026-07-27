@@ -19,7 +19,7 @@ import { readFileSync } from "node:fs";
 import { type IncomingMessage, type Server, type ServerResponse, createServer } from "node:http";
 import { join } from "node:path";
 import { type PersistedAuditEvent, VAULT_DIR } from "usertrust";
-import { canonicalize } from "usertrust-verify";
+import { canonicalize, verifyTransaction } from "usertrust-verify";
 import { toLedgerRows } from "../shared/rows.js";
 import { type LedgerState, ROW_CAP, loadState } from "./state.js";
 import { watchLedger } from "./tail.js";
@@ -151,6 +151,12 @@ export async function createUiServer(rootDir: string, opts?: { port?: number }):
 			res.write(": connected\n\n");
 			clients.add(res);
 			req.on("close", () => clients.delete(res));
+			return;
+		}
+		if (url.pathname.startsWith("/api/verify/") && req.method === "GET") {
+			const txId = decodeURIComponent(url.pathname.slice("/api/verify/".length));
+			const result = verifyTransaction(vaultPath, txId);
+			sendJson(res, result.found ? 200 : 404, result);
 			return;
 		}
 		if (url.pathname.startsWith("/api/")) {
