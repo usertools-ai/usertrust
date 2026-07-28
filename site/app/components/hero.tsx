@@ -59,6 +59,11 @@ export function Hero({ downloads, stars }: { downloads: string; stars: string })
 			// 100dvh, not 100vh: iOS Safari measures vh against the viewport with the
 			// toolbar retracted, so a 100vh hero is taller than what is on screen and
 			// the page jerks as the toolbar hides.
+			//
+			// No vh fallback, deliberately. dvh is Safari 15.4+, while the emitted
+			// stylesheet already uses @property and color-mix() — Tailwind v4's own
+			// floor, Safari 16.4+. Any engine that can parse this CSS supports dvh, and
+			// Lightning CSS strips a paired vh declaration as provably dead.
 			className="relative min-h-[100dvh] flex flex-col items-center justify-start text-center safe-x pt-[18dvh]"
 			style={{ zIndex: 1 }}
 		>
