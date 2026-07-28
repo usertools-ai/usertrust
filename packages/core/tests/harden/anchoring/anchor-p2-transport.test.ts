@@ -63,6 +63,34 @@ describe("default transport (localhost http dev allowance)", () => {
 		expect(seen.auth).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE\//);
 	});
 
+	it("s3 doctor probes an http:// loopback endpoint through the real transport", async () => {
+		const seen: string[] = [];
+		let answered = 0;
+		const port = await startServer((req, res) => {
+			seen.push(req.method ?? "");
+			// The probe object is written, then the store refuses both mutations —
+			// the shape an append-only sink is supposed to have.
+			const status = answered++ === 0 ? 200 : 403;
+			req.resume();
+			req.on("end", () => {
+				res.writeHead(status);
+				res.end();
+			});
+		});
+		vi.stubEnv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE");
+		vi.stubEnv("AWS_SECRET_ACCESS_KEY", "secret");
+
+		const rep = await doctorS3Sink({
+			bucket: "probe-bucket",
+			region: "us-east-1",
+			endpoint: `http://127.0.0.1:${port}`,
+		});
+
+		expect(seen).toEqual(["PUT", "DELETE", "PUT"]);
+		expect(rep.checks.map((c) => c.name)).toEqual(["delete-denied", "overwrite-denied"]);
+		expect(rep.checks.every((c) => c.status === "pass")).toBe(true);
+	});
+
 	it("rekor sink surfaces a non-201 through the real transport without leaking headers", async () => {
 		const s = await makeAnchoredVault(2);
 		const record = await anchorOnce(s);

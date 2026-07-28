@@ -89,6 +89,22 @@ function readPinnedPem(path: string): string {
 	return pem;
 }
 
+// Matching control characters is the entire point here — they are what gets
+// removed from anything echoed back to a terminal.
+// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the intent
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
+
+/**
+ * An untrusted field NAME on its way into an error string. Control characters
+ * are stripped before truncation: these strings are printed to a terminal, and
+ * an escape sequence inside a key would let the party under audit repaint the
+ * line its own verdict is printed on.
+ */
+function clipKey(key: string): string {
+	const scrubbed = key.replace(CONTROL_CHARS, "");
+	return scrubbed.length <= 80 ? scrubbed : `${scrubbed.slice(0, 80)}...`;
+}
+
 /**
  * Strict parse of an auditor bundle: `{v:1, records, rekorReceipts?}`. A bundle
  * is untrusted transport, so unknown top-level fields are rejected rather than
@@ -109,7 +125,7 @@ function parseBundle(raw: string): { anchorsRaw: string; receiptsRaw: string[] }
 	}
 	const obj = parsed as Record<string, unknown>;
 	for (const key of Object.keys(obj)) {
-		if (!BUNDLE_KEYS.has(key)) throw new Error(`--bundle: unknown field "${key.slice(0, 80)}"`);
+		if (!BUNDLE_KEYS.has(key)) throw new Error(`--bundle: unknown field "${clipKey(key)}"`);
 	}
 	if (obj.v !== 1) throw new Error("--bundle: unsupported version (expected 1)");
 	if (!Array.isArray(obj.records)) throw new Error("--bundle: records must be an array");
