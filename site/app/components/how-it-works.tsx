@@ -70,7 +70,7 @@ function ArchAnnotation({
 /* ------------------------------------------------------------------ */
 export function HowItWorks() {
 	return (
-		<section id="how" className="relative py-24 sm:py-32 px-4 sm:px-6">
+		<section id="how" className="relative py-24 sm:py-32 px-4 sm:safe-x">
 			<div className="max-w-5xl mx-auto">
 				{/* Header */}
 				<div className="text-center mb-12 sm:mb-20">

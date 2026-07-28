@@ -4,7 +4,7 @@ import { TypewriterCode } from "./typewriter-code";
 
 export function CodeExample() {
 	return (
-		<section id="code" className="relative py-24 sm:py-32 px-6">
+		<section id="code" className="relative py-24 sm:py-32 safe-x">
 			<div className="max-w-5xl mx-auto">
 				<div className="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
 					{/* Left: copy */}

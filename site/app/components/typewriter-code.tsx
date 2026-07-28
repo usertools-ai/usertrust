@@ -165,7 +165,13 @@ export function TypewriterCode() {
 								</div>
 							))}
 						</div>
-						<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-hidden flex-1">
+						<pre
+							// The sizer is what gives the absolutely-positioned overlay below its
+							// height, so its overflow has to match the overlay's: a clipping sizer
+							// under a scrolling overlay is short by the scrollbar's height and the
+							// last code line lands outside the box.
+							className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto min-w-0 flex-1"
+						>
 							<code>
 								{allChars.current.map((c, i) =>
 									c.char === "\n" ? <br key={`h${i}`} /> : <span key={`h${i}`}>{c.char}</span>,
@@ -182,7 +188,13 @@ export function TypewriterCode() {
 								</div>
 							))}
 						</div>
-						<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-hidden flex-1">
+						<pre
+							// The gutter is a sibling, so scrolling here and not on the rounded
+							// shell keeps the line numbers pinned while the code moves. min-w-0
+							// because a flex item is otherwise sized to its content: the panel
+							// would widen past a 375px viewport instead of scrolling inside it.
+							className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto min-w-0 flex-1"
+						>
 							<code>
 								{rendered.map((c, i) =>
 									c.char === "\n" ? (

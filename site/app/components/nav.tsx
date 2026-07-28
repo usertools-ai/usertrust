@@ -51,6 +51,53 @@ export function Nav() {
 		return () => document.removeEventListener("mousedown", handleClick);
 	}, [open]);
 
+	/*
+	 * Lock the page behind the open menu. Without this the body scrolls under the
+	 * dropdown on iOS and the menu appears to drift; the `[overscroll-behavior:contain]`
+	 * on the dropdown stops the scroll chaining back to the body once the menu's own
+	 * list hits its end. The previous inline value is restored rather than cleared, so
+	 * a lock owned by something else outlives this one.
+	 */
+	useEffect(() => {
+		if (!open) return;
+		const previous = document.body.style.overflow;
+		document.body.style.overflow = "hidden";
+		return () => {
+			document.body.style.overflow = previous;
+		};
+	}, [open]);
+
+	/*
+	 * Close on the way up to desktop. The dropdown is `md:hidden`, so crossing the
+	 * breakpoint while open hides the menu but leaves `open` true — and with it the body
+	 * scroll lock, on a viewport with no visible way to release it.
+	 */
+	useEffect(() => {
+		const mq = window.matchMedia("(min-width: 768px)");
+		const onChange = (e: MediaQueryListEvent) => {
+			if (e.matches) setOpen(false);
+		};
+		mq.addEventListener("change", onChange);
+		return () => mq.removeEventListener("change", onChange);
+	}, []);
+
+	/*
+	 * Escape closes, and focus returns to the button that opened it — otherwise a
+	 * keyboard user who dismisses the menu is left with focus on a removed node and
+	 * tabbing restarts from the top of the document.
+	 */
+	useEffect(() => {
+		if (!open) return;
+		function handleKey(e: KeyboardEvent) {
+			if (e.key === "Escape") {
+				setOpen(false);
+				buttonRef.current?.focus();
+			}
+		}
+		document.addEventListener("keydown", handleKey);
+		return () => document.removeEventListener("keydown", handleKey);
+	}, [open]);
+
 	const links = [
 		{ href: "#code", label: "Code" },
 		{ href: "#features", label: "Features" },
@@ -66,10 +113,10 @@ export function Nav() {
 					: "bg-brand-bg/80 backdrop-blur-[16px] border-white/[0.06]"
 			}`}
 		>
-			<div className="flex items-center justify-between px-6 py-4">
+			<div className="flex items-center justify-between safe-x py-4">
 				<a
 					href="/"
-					className={`inline-flex items-center px-4 py-2.5 border rounded-full text-sm font-medium tracking-tight transition-all duration-300 ${
+					className={`focus-ring inline-flex min-h-[44px] items-center px-4 py-2.5 border rounded-full text-sm font-medium tracking-tight transition-all duration-300 ${
 						scrolled
 							? "border-ut/30 text-ut shadow-[0_0_20px_rgba(52,211,153,0.1)]"
 							: "border-white/20 hover:border-ut/50 hover:text-ut animate-[pulse-glow_4s_ease-in-out_infinite]"
@@ -84,13 +131,20 @@ export function Nav() {
 							<a
 								key={link.href}
 								href={link.href}
-								className={`relative hover:text-white transition-colors duration-200 ${
+								className={`focus-ring relative inline-flex min-h-[44px] items-center hover:text-white transition-colors duration-200 ${
 									activeSection === link.href ? "text-ut" : ""
 								}`}
 							>
 								{link.label}
 								{activeSection === link.href && (
-									<span className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full bg-ut" />
+									/*
+									 * `bottom-1.5`, not `-bottom-1.5`: the link box is 44px tall for the
+									 * touch target while its text line is only 20px, so an offset measured
+									 * outside the box lands 12px below the label instead of under it. This
+									 * value is tied to the `min-h-[44px]` above — change one and the dot
+									 * detaches from the word it marks.
+									 */
+									<span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full bg-ut" />
 								)}
 							</a>
 						))}
@@ -100,7 +154,7 @@ export function Nav() {
 						href="https://github.com/usertools-ai/usertrust"
 						target="_blank"
 						rel="noopener noreferrer"
-						className="inline-flex items-center gap-2 px-3.5 py-1.5 bg-white/[0.06] border border-white/10 rounded-lg text-sm font-medium hover:bg-white/[0.10] hover:border-white/20 transition-all duration-200"
+						className="focus-ring inline-flex min-h-[44px] items-center gap-2 px-3.5 py-1.5 bg-white/[0.06] border border-white/10 rounded-lg text-sm font-medium hover:bg-white/[0.10] hover:border-white/20 transition-all duration-200"
 					>
 						<GitHubIcon className="w-4 h-4" />
 						GitHub
@@ -111,9 +165,17 @@ export function Nav() {
 						ref={buttonRef}
 						type="button"
 						onClick={() => setOpen((prev) => !prev)}
-						className="md:hidden inline-flex items-center justify-center w-10 h-10 rounded-lg border border-white/10 bg-white/[0.06] hover:bg-white/[0.10] transition-colors duration-200"
+						className="focus-ring md:hidden inline-flex items-center justify-center w-11 h-11 rounded-lg border border-white/10 bg-white/[0.06] hover:bg-white/[0.10] transition-colors duration-200"
 						aria-label={open ? "Close menu" : "Open menu"}
 						aria-expanded={open}
+						/*
+						 * Only while the menu exists: the dropdown is conditionally rendered, so a
+						 * constant aria-controls would be an IDREF resolving to nothing whenever
+						 * the menu is closed — validators flag it and assistive tech ignores it.
+						 * `undefined` omits the attribute entirely; `aria-expanded` alone is a
+						 * complete disclosure pattern in the meantime.
+						 */
+						aria-controls={open ? "mobile-menu" : undefined}
 					>
 						<svg
 							width="18"
@@ -180,11 +242,20 @@ export function Nav() {
 				</div>
 			</div>
 
-			{/* Mobile dropdown */}
+			{/*
+			 * Mobile dropdown. No `pb-4` here on purpose: `.safe-bottom` owns the bottom
+			 * padding with a 1rem floor, and stacking both just doubles the padding —
+			 * `.safe-bottom` is unlayered while Tailwind's `pb-4` sits in `@layer utilities`,
+			 * so the safe-area value wins the cascade either way. `max-h` plus
+			 * `overflow-y-auto` keep the menu reachable when the viewport is short enough that
+			 * four 44px links and the header exceed it, and `[overscroll-behavior:contain]` is
+			 * what stops that inner scroll chaining out to the locked body.
+			 */}
 			{open && (
 				<div
 					ref={menuRef}
-					className="md:hidden border-t border-white/[0.06] bg-brand-bg/95 backdrop-blur-[16px] px-6 pb-4 pt-2"
+					id="mobile-menu"
+					className="md:hidden safe-bottom safe-x border-t border-white/[0.06] bg-brand-bg/95 backdrop-blur-[16px] pt-2 [overscroll-behavior:contain] max-h-[calc(100dvh-4.81rem)] overflow-y-auto"
 				>
 					<div className="flex flex-col gap-1">
 						{links.map((link) => (
@@ -192,7 +263,7 @@ export function Nav() {
 								key={link.href}
 								href={link.href}
 								onClick={() => setOpen(false)}
-								className={`block px-3 py-2.5 text-sm font-medium rounded-lg hover:text-white hover:bg-white/[0.06] transition-colors duration-200 ${
+								className={`focus-ring flex min-h-[44px] items-center px-3 py-2.5 text-sm font-medium rounded-lg hover:text-white hover:bg-white/[0.06] transition-colors duration-200 ${
 									activeSection === link.href ? "text-ut" : "text-white/60"
 								}`}
 							>

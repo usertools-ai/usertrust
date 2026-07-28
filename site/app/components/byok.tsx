@@ -13,7 +13,7 @@ const providers = [
 
 export function BYOK() {
 	return (
-		<section className="relative py-24 sm:py-28 px-6 border-t border-b border-white/[0.06]">
+		<section className="relative py-24 sm:py-28 safe-x border-t border-b border-white/[0.06]">
 			<div className="max-w-5xl mx-auto flex flex-col items-center gap-10 text-center">
 				<div className="flex flex-col gap-4 max-w-lg">
 					<ScrollReveal>
