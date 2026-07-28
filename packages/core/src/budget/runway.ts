@@ -137,3 +137,27 @@ export function computeRunway(input: RunwayInput): Runway {
 
 	return { remaining, fractionRemaining, burnRatePerHour, projectedExhaustionMs, onPace };
 }
+
+/**
+ * Hours of runway left, or `null` when there is no projection.
+ *
+ * This is the ONLY safe way to derive `budgetRunwayHours` for a `PolicyContext`.
+ * The obvious inline conversion — `(runway.projectedExhaustionMs - nowMs) / 3.6e6`
+ * — coerces the `null` case (nothing spent yet, so nothing to extrapolate from)
+ * to a large NEGATIVE number, and a `budgetRunwayHours lt 12` escalation rule
+ * then fires on a cost center that is merely idle. Null in, null out: an absent
+ * field is the honest input for "unknown", and the policy layer already treats
+ * it as such.
+ *
+ * A projection at or before `nowMs` (the budget is already exhausted) clamps to
+ * `0`. Negative hours would be meaningless and would order wrongly against any
+ * threshold a caller sets.
+ *
+ * @throws Error when `nowMs` is not finite — same contract as {@link computeRunway}.
+ */
+export function runwayHours(runway: Runway, nowMs: number): number | null {
+	if (!Number.isFinite(nowMs)) throw new Error("runway: nowMs must be finite");
+	const { projectedExhaustionMs } = runway;
+	if (projectedExhaustionMs === null) return null;
+	return Math.max(0, (projectedExhaustionMs - nowMs) / MS_PER_HOUR);
+}

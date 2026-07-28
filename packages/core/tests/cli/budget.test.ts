@@ -302,6 +302,110 @@ describe("usertrust budget — flag validation", () => {
 		}
 	});
 
+	// Date.parse is far looser than "ISO-8601": it reads "1000" as the year 1000
+	// and "Dec 25" as a date. A typo'd --period-start 1000 stretches the elapsed
+	// window by a millennium, turning a real 180 UT/h burn into 1e-4 UT/h — a
+	// governance read that fails open, exactly like the parseInt("1O0") case.
+	it("rejects a period bound that parses but is not a full ISO-8601 timestamp", async () => {
+		makeVault();
+
+		for (const flag of ["--period-start", "--period-end"]) {
+			for (const bad of [
+				"1000",
+				"2026",
+				"1",
+				"Dec 25",
+				"Mar 2026",
+				"2026-07",
+				" 2026-07-27",
+				"2026-07-27 ",
+				"2026/07/27",
+				"07/27/2026",
+			]) {
+				logOutput = [];
+				process.exitCode = 0;
+				await run(tempDir, { json: false }, [
+					"--cost-center",
+					"research",
+					"--allocated",
+					"1000",
+					flag,
+					bad,
+				]);
+				expect(logOutput.join("\n")).toMatch(new RegExp(`Invalid ${flag}`));
+				expect(process.exitCode).toBe(1);
+			}
+		}
+	});
+
+	it("accepts the ISO-8601 forms callers actually pass", async () => {
+		makeVault();
+		setBalance(750);
+
+		for (const good of [
+			"2026-07-27",
+			"2026-07-27T09:00",
+			"2026-07-27T09:00:00",
+			"2026-07-27T09:00:00.500",
+			"2026-07-27T09:00:00Z",
+			"2026-07-27T09:00:00.500Z",
+			"2026-07-27T09:00:00+02:00",
+			"2026-07-27 09:00:00Z",
+		]) {
+			logOutput = [];
+			process.exitCode = 0;
+			await run(tempDir, { json: true }, [
+				"--cost-center",
+				"research",
+				"--allocated",
+				"1000",
+				"--period-start",
+				good,
+			]);
+			expect(jsonOut().success).toBe(true);
+			expect(process.exitCode).toBe(0);
+		}
+	});
+
+	// A start after now makes the elapsed window zero, so the burn rate is 0 and
+	// there is no projection: a hard-burning cost center would read as idle.
+	it("rejects a --period-start in the future", async () => {
+		makeVault();
+		setBalance(750);
+
+		await run(tempDir, { json: false }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+			"--period-start",
+			new Date(NOW + HOUR).toISOString(),
+		]);
+
+		expect(logOutput.join("\n")).toMatch(/Invalid --period-start/);
+		expect(logOutput.join("\n")).toMatch(/future/);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("accepts a --period-end in the future — a bounded period has not ended yet", async () => {
+		makeVault();
+		setBalance(750);
+
+		await run(tempDir, { json: true }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+			"--period-start",
+			FIVE_HOURS_AGO,
+			"--period-end",
+			new Date(NOW + 24 * HOUR).toISOString(),
+		]);
+
+		expect(jsonOut().success).toBe(true);
+		expect(process.exitCode).toBe(0);
+	});
+
 	it("refuses to swallow the next flag as a missing value", async () => {
 		makeVault();
 
@@ -320,6 +424,132 @@ describe("usertrust budget — flag validation", () => {
 
 		expect(logOutput.join("\n")).toMatch(/costCenter must match/);
 		expect(process.exitCode).toBe(1);
+	});
+});
+
+/**
+ * Every "invalid value" message quotes what the caller passed, and the caller may
+ * be an agent. picocolors wraps a string in SGR codes but does not sanitize it, so
+ * an unsanitized message hands raw OSC/CSI bytes straight to the terminal of
+ * whoever ran the command: `\x1b]0;pwned\x07` retitles the window, `\x1b[2J`
+ * clears it.
+ *
+ * The human branch is asserted against the injected sequences rather than
+ * against the ESC byte alone: picocolors legitimately emits SGR codes when
+ * colour is enabled, and an SGR code is not an injection. The `--json` branch is
+ * never colourised, so the stronger "no ESC anywhere" assertion holds outright
+ * there.
+ */
+describe("usertrust budget — terminal safety", () => {
+	/** ESC and BEL by name — a raw control byte in a source file is invisible. */
+	const ESC = "\u001b";
+	const BEL = "\u0007";
+	/** An OSC title-set + BEL, a screen clear, and a CSI cursor move. */
+	const ESCAPES = `${ESC}]0;pwned${BEL}${ESC}[2J${ESC}[1;1H`;
+
+	/** The injected control sequences, none of which may survive into output. */
+	function expectNoInjection(output: string): void {
+		expect(output).not.toContain(`${ESC}]`);
+		expect(output).not.toContain(`${ESC}[2J`);
+		expect(output).not.toContain(`${ESC}[1;1H`);
+		expect(output).not.toContain(BEL);
+	}
+
+	it("neutralises an OSC/CSI payload in an --allocated value", async () => {
+		makeVault();
+
+		await run(tempDir, { json: false }, ["--cost-center", "research", "--allocated", ESCAPES]);
+
+		const combined = logOutput.join("\n");
+		expect(combined).toMatch(/Invalid --allocated/);
+		expectNoInjection(combined);
+		// Swept, not dropped: the operator still sees that something was passed.
+		expect(combined).toContain("?");
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("neutralises an OSC/CSI payload in a period bound", async () => {
+		makeVault();
+
+		for (const flag of ["--period-start", "--period-end"]) {
+			logOutput = [];
+			process.exitCode = 0;
+			await run(tempDir, { json: false }, [
+				"--cost-center",
+				"research",
+				"--allocated",
+				"1000",
+				flag,
+				`2026-07-27${ESCAPES}`,
+			]);
+			expectNoInjection(logOutput.join("\n"));
+			expect(process.exitCode).toBe(1);
+		}
+	});
+
+	it("neutralises an OSC/CSI payload in an unknown flag", async () => {
+		await run(tempDir, { json: false }, [`--${ESCAPES}`, "x"]);
+
+		const combined = logOutput.join("\n");
+		expect(combined).toMatch(/Unknown flag/);
+		expectNoInjection(combined);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("truncates an over-long value instead of flooding the screen", async () => {
+		makeVault();
+
+		await run(tempDir, { json: false }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"9".repeat(5000),
+		]);
+
+		const combined = logOutput.join("\n");
+		expect(combined).toContain("...");
+		expect(combined.length).toBeLessThan(400);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("keeps the --json failure branch parseable and escape-free", async () => {
+		makeVault();
+
+		await run(tempDir, { json: true }, ["--cost-center", "research", "--allocated", ESCAPES]);
+
+		const line = logOutput.find((l) => l.startsWith("{")) as string;
+		const parsed = JSON.parse(line) as {
+			command: string;
+			success: boolean;
+			data: { message: string };
+		};
+		expect(parsed.command).toBe("budget");
+		expect(parsed.success).toBe(false);
+		expect(parsed.data.message).toMatch(/Invalid --allocated/);
+		// The JSON branch is never colourised, so no ESC byte is legitimate here.
+		expect(line).not.toContain(ESC);
+		expect(parsed.data.message).not.toContain(ESC);
+		expectNoInjection(line);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("still round-trips a successful --json payload unchanged", async () => {
+		makeVault();
+		setBalance(750);
+
+		await run(tempDir, { json: true }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+			"--period-start",
+			FIVE_HOURS_AGO,
+		]);
+
+		const out = jsonOut();
+		expect(out.success).toBe(true);
+		expect(Object.keys(out.data).sort()).toEqual(DATA_KEYS);
+		expect(out.data.costCenter).toBe("research");
 	});
 });
 

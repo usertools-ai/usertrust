@@ -366,12 +366,33 @@ export interface PolicyContext extends Record<string, unknown> {
 	 * apply to budget-aware call sites; soft rules already stay lenient.
 	 */
 
-	/** 0..1 share of the cost center's allocation still available. */
+	/**
+	 * 0..1 share of the cost center's allocation still available.
+	 *
+	 * ⚠️ WARNING — A TIER ON THIS FIELD CANNOT FIRE YET. Nothing in this
+	 * repository debits a cost-center wallet: the metering path spends from a
+	 * per-session funded holding account, not from the wallet `allocateBudget`
+	 * funds. `getBudgetStatus` therefore reports `fractionRemaining: 1` for a
+	 * cost center whose agent is genuinely burning budget, so a
+	 * `budgetFractionRemaining lt 0.3` rule never matches — a governance control
+	 * that fails open. These primitives ship AHEAD of their metering consumer;
+	 * do not rely on the tier until the spend path debits the cost-center wallet.
+	 * See the module doc comment in `budget/allocation.ts`.
+	 */
 	budgetFractionRemaining?: number;
 	/**
 	 * Hours until projected exhaustion at the current burn rate. A naive linear
 	 * extrapolation — noisy early in a period, so prefer it for escalation
 	 * rather than irreversible action.
+	 *
+	 * Derive it with `runwayHours(runway, nowMs)` from `budget/runway.js`, and
+	 * leave the field ABSENT when that returns null. Computing it inline as
+	 * `(runway.projectedExhaustionMs - nowMs) / 3.6e6` coerces the not-projectable
+	 * case to a large negative number, which makes every `lt` threshold match and
+	 * escalates a budget that is merely idle.
+	 *
+	 * The metering warning on {@link PolicyContext.budgetFractionRemaining}
+	 * applies to this field too.
 	 */
 	budgetRunwayHours?: number;
 }

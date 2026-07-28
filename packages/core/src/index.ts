@@ -61,7 +61,10 @@ export {
 	reclaimBudget,
 } from "./budget/allocation.js";
 export type { Runway, RunwayInput } from "./budget/runway.js";
-export { computeRunway } from "./budget/runway.js";
+// `runwayHours` is the safe derivation of a `budgetRunwayHours` policy field —
+// the naive `(projectedExhaustionMs - nowMs) / 3.6e6` turns "not projectable"
+// into a large negative number and fires escalation rules on an idle budget.
+export { computeRunway, runwayHours } from "./budget/runway.js";
 // Config
 export { defineConfig, loadConfig } from "./config.js";
 // Endpoint classification

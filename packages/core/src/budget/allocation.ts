@@ -4,6 +4,18 @@
 /**
  * allocation.ts — cost-center allocation and reclaim over the TigerBeetle ledger
  *
+ * ⚠️ WARNING — THESE PRIMITIVES SHIP AHEAD OF THEIR METERING CONSUMER. Nothing in
+ * this repository debits a cost-center wallet yet. The metering path spends from
+ * a per-session funded holding account (`createFundedBudgetWallet` in `govern.ts`,
+ * mirrored in `headless.ts`), never from the wallet {@link allocateBudget} funds.
+ * So for a cost center whose agent is genuinely burning budget,
+ * {@link getBudgetStatus} still reports `spent: 0` and `fractionRemaining: 1`,
+ * and a policy tier written against `budgetFractionRemaining` (see `policy/gate.ts`)
+ * would NEVER trip — a governance control that fails open, silently. Allocate,
+ * reclaim, and read are correct and safe to use for delegation and reporting; do
+ * NOT wire a policy tier to them until the spend path debits the cost-center
+ * wallet.
+ *
  * A cost center is a sub-wallet of its parent, nothing more. Its ledger identity
  * is the derived user id `parent::costCenter` (see {@link costCenterUserId}),
  * which hashes to a TigerBeetle account exactly as any other wallet does.
@@ -46,7 +58,7 @@
 import { CreateTransferStatus } from "tigerbeetle-node";
 import type { AppendEventInput } from "../audit/chain.js";
 import type { TBTransferError } from "../ledger/client.js";
-import { TrustTBClient, XFER_BUDGET_RECLAIM, XFER_SPEND } from "../ledger/client.js";
+import { TrustTBClient, XFER_BUDGET_GRANT, XFER_BUDGET_RECLAIM } from "../ledger/client.js";
 import { InsufficientBalanceError } from "../shared/errors.js";
 import { computeRunway, type Runway } from "./runway.js";
 
@@ -60,11 +72,16 @@ const MAX_DERIVED_ID_LENGTH = 200;
 /**
  * A cost center's ledger identity is a derived sub-wallet of its parent.
  *
- * Neither part may contain `:`, so the first `::` splits the derived id
- * unambiguously and no two distinct `(parentUserId, costCenter)` pairs can
- * collide. Both patterns also exclude whitespace, control characters, and ANSI
- * escapes, which keeps the id safe to embed in an audit event and in terminal
- * output.
+ * `::` IS A RESERVED SEPARATOR IN WALLET IDS, and that reservation — enforced by
+ * `TrustTBClient.createUserWallet`, which refuses it to ordinary callers — is
+ * what makes this derivation collision-free. Without it, an integrator wallet
+ * literally named `acme::billing` would hash to the same TigerBeetle account as
+ * `costCenterUserId("acme", "billing")`, and a reclaim on that cost center would
+ * sweep the integrator's balance into `acme`. Given the reservation, and because
+ * neither part below may contain `:`, the first `::` splits the derived id
+ * unambiguously and no two distinct `(parentUserId, costCenter)` pairs collide.
+ * Both patterns also exclude whitespace, control characters, and ANSI escapes,
+ * which keeps the id safe to embed in an audit event and in terminal output.
  *
  * @throws Error when either part is missing, over-long, or outside its charset.
  */
@@ -91,20 +108,33 @@ export interface BudgetAuditWriter {
 	appendEvent(input: AppendEventInput): Promise<unknown>;
 }
 
-export interface AllocateResult {
-	costCenterUserId: string;
-	transferId: string;
-	allocated: number;
+/**
+ * Whether this operation landed in the audit chain.
+ *
+ * `audited` is true only when an `auditWriter` was supplied AND its append
+ * succeeded. It exists because omitting the writer would otherwise be invisible:
+ * an unaudited allocation and a successfully audited one would be byte-identical
+ * results, while the Global Constraint on this work is that a delegation MUST be
+ * provable. `auditFailed` narrows an `audited: false` to the case where a writer
+ * was supplied and threw — the money still moved, and the caller must surface it.
+ */
+interface AuditOutcome {
+	/** True only when a writer was supplied and the append succeeded. */
+	audited: boolean;
 	/** True when the transfer committed but its audit event could not be written. */
 	auditFailed?: boolean;
 }
 
-export interface ReclaimResult {
+export interface AllocateResult extends AuditOutcome {
+	costCenterUserId: string;
+	transferId: string;
+	allocated: number;
+}
+
+export interface ReclaimResult extends AuditOutcome {
 	reclaimed: number;
 	/** Null when nothing moved — an empty cost center or a lost race. */
 	transferId: string | null;
-	/** True when the transfer committed but its audit event could not be written. */
-	auditFailed?: boolean;
 }
 
 export interface BudgetStatus {
@@ -183,7 +213,9 @@ async function costCenterBalance(tb: TrustTBClient, accountId: bigint): Promise<
  * Called only after a transfer has committed. The transfer is authoritative: a
  * failed append must not unwind it, must not retry it, and must not surface as a
  * rejection that a caller could mistake for "the money did not move". The
- * `auditFailed` flag on the result is the channel instead.
+ * {@link AuditOutcome} on the result is the channel instead — and it
+ * distinguishes "no writer was supplied" from "the append succeeded", which a
+ * lone `auditFailed` flag could not.
  */
 async function appendBudgetEvent(
 	auditWriter: BudgetAuditWriter | undefined,
@@ -192,17 +224,17 @@ async function appendBudgetEvent(
 	costCenter: string,
 	amount: number,
 	childUserId: string,
-): Promise<boolean> {
-	if (!auditWriter) return false;
+): Promise<AuditOutcome> {
+	if (!auditWriter) return { audited: false };
 	try {
 		await auditWriter.appendEvent({
 			kind,
 			actor: parentUserId,
 			data: { costCenter, amount, costCenterUserId: childUserId },
 		});
-		return false;
+		return { audited: true };
 	} catch {
-		return true;
+		return { audited: false, auditFailed: true };
 	}
 }
 
@@ -242,7 +274,10 @@ export async function allocateBudget(
 
 	const { parentAccount, childAccount } = resolveAccounts(tb, p.parentUserId, childUserId);
 
-	const createdAccount = await tb.createUserWallet(childUserId);
+	// `{ derived: true }` declares the id is an already-derived `parent::costCenter`.
+	// `::` is reserved: ordinary callers are refused it precisely so this namespace
+	// cannot collide with an integrator's own wallet — see createUserWallet.
+	const createdAccount = await tb.createUserWallet(childUserId, { derived: true });
 	// An explicit `setAccountMapping` override would make allocation fund an
 	// account that reclaim and status — which always derive — never read.
 	if (createdAccount !== childAccount) {
@@ -257,7 +292,11 @@ export async function allocateBudget(
 			debitAccountId: parentAccount,
 			creditAccountId: childAccount,
 			amount,
-			code: XFER_SPEND,
+			// NOT XFER_SPEND (which plan delta D9 called for): the metering path uses
+			// that code for real consumption, so reconciliation summing XFER_SPEND
+			// debits would count a delegation twice — once moving into the cost
+			// center, and again when the cost center spends it.
+			code: XFER_BUDGET_GRANT,
 		});
 	} catch (err) {
 		if (isInsufficientBalanceError(err)) {
@@ -275,7 +314,7 @@ export async function allocateBudget(
 		throw err;
 	}
 
-	const auditFailed = await appendBudgetEvent(
+	const audit = await appendBudgetEvent(
 		p.auditWriter,
 		"budget_allocated",
 		p.parentUserId,
@@ -288,7 +327,7 @@ export async function allocateBudget(
 		costCenterUserId: childUserId,
 		transferId: transferId.toString(),
 		allocated: amount,
-		...(auditFailed ? { auditFailed: true } : {}),
+		...audit,
 	};
 }
 
@@ -320,7 +359,9 @@ export async function reclaimBudget(
 	const { parentAccount, childAccount } = resolveAccounts(tb, p.parentUserId, childUserId);
 
 	const available = await costCenterBalance(tb, childAccount);
-	if (available <= 0) return { reclaimed: 0, transferId: null };
+	// Nothing moved, so there is nothing to audit — `audited: false` is the honest
+	// report, not a failure.
+	if (available <= 0) return { reclaimed: 0, transferId: null, audited: false };
 
 	let transferId: bigint;
 	try {
@@ -332,11 +373,11 @@ export async function reclaimBudget(
 		});
 	} catch (err) {
 		// The balance went stale between the read and the transfer. Benign.
-		if (isInsufficientBalanceError(err)) return { reclaimed: 0, transferId: null };
+		if (isInsufficientBalanceError(err)) return { reclaimed: 0, transferId: null, audited: false };
 		throw err;
 	}
 
-	const auditFailed = await appendBudgetEvent(
+	const audit = await appendBudgetEvent(
 		p.auditWriter,
 		"budget_reclaimed",
 		p.parentUserId,
@@ -348,7 +389,7 @@ export async function reclaimBudget(
 	return {
 		reclaimed: available,
 		transferId: transferId.toString(),
-		...(auditFailed ? { auditFailed: true } : {}),
+		...audit,
 	};
 }
 

@@ -27,7 +27,12 @@ import {
 	reclaimBudget,
 } from "../../src/budget/allocation.js";
 import { computeRunway } from "../../src/budget/runway.js";
-import { TrustTBClient, XFER_BUDGET_RECLAIM, XFER_SPEND } from "../../src/ledger/client.js";
+import {
+	TrustTBClient,
+	XFER_BUDGET_GRANT,
+	XFER_BUDGET_RECLAIM,
+	XFER_SPEND,
+} from "../../src/ledger/client.js";
 import { InsufficientBalanceError } from "../../src/shared/errors.js";
 
 const PARENT = "user_1";
@@ -183,19 +188,22 @@ describe("allocateBudget", () => {
 			amount: 500,
 		});
 
-		expect(mockTB.createUserWallet).toHaveBeenCalledWith(CHILD);
+		// `{ derived: true }` is the opt-in past the reserved-`::` guard on ordinary
+		// wallet ids — without it the cost-center wallet cannot be created at all.
+		expect(mockTB.createUserWallet).toHaveBeenCalledWith(CHILD, { derived: true });
 		expect(mockTB.immediateTransfer).toHaveBeenCalledOnce();
 		const call = mockTB.immediateTransfer.mock.calls[0]?.[0];
 		expect(call).toEqual({
 			debitAccountId: PARENT_ACCOUNT,
 			creditAccountId: CHILD_ACCOUNT,
 			amount: 500,
-			code: XFER_SPEND,
+			code: XFER_BUDGET_GRANT,
 		});
 		expect(result).toEqual({
 			costCenterUserId: CHILD,
 			transferId: "42",
 			allocated: 500,
+			audited: false,
 		});
 	});
 
@@ -431,7 +439,17 @@ describe("allocateBudget", () => {
 		expect(Object.keys(event.data).sort()).toEqual(["amount", "costCenter", "costCenterUserId"]);
 	});
 
-	it("emits no audit event when no writer is supplied", async () => {
+	// The allocation direction must NOT reuse the metering path's spend code:
+	// reconciliation summing XFER_SPEND debits would count a delegation twice,
+	// once moving into the cost center and again when the cost center spends it.
+	it("moves the grant under a code distinct from a metered spend", () => {
+		expect(XFER_BUDGET_GRANT).not.toBe(XFER_SPEND);
+		expect(XFER_BUDGET_GRANT).not.toBe(XFER_BUDGET_RECLAIM);
+	});
+
+	// Money must not move with no audit AND no signal: without an explicit
+	// `audited`, an unaudited allocation is byte-identical to an audited one.
+	it("reports audited: false when no writer is supplied, and emits no event", async () => {
 		mockTB.immediateTransfer.mockResolvedValueOnce(42n);
 
 		const result = await allocateBudget(asClient(mockTB), {
@@ -440,6 +458,22 @@ describe("allocateBudget", () => {
 			amount: 500,
 		});
 
+		expect(result.audited).toBe(false);
+		expect(result.auditFailed).toBeUndefined();
+	});
+
+	it("reports audited: true when the append lands in the chain", async () => {
+		mockTB.immediateTransfer.mockResolvedValueOnce(42n);
+		const audit = createMockAuditWriter();
+
+		const result = await allocateBudget(asClient(mockTB), {
+			parentUserId: PARENT,
+			costCenter: COST_CENTER,
+			amount: 500,
+			auditWriter: audit,
+		});
+
+		expect(result.audited).toBe(true);
 		expect(result.auditFailed).toBeUndefined();
 	});
 
@@ -458,6 +492,7 @@ describe("allocateBudget", () => {
 
 		expect(result.transferId).toBe("42");
 		expect(result.allocated).toBe(500);
+		expect(result.audited).toBe(false);
 		expect(result.auditFailed).toBe(true);
 		expect(mockTB.immediateTransfer).toHaveBeenCalledOnce();
 	});
@@ -500,10 +535,11 @@ describe("reclaimBudget", () => {
 			amount: 320,
 			code: XFER_BUDGET_RECLAIM,
 		});
-		expect(result).toEqual({ reclaimed: 320, transferId: "77" });
+		expect(result).toEqual({ reclaimed: 320, transferId: "77", audited: false });
 	});
 
 	it("uses a transfer code distinct from allocation", () => {
+		expect(XFER_BUDGET_RECLAIM).not.toBe(XFER_BUDGET_GRANT);
 		expect(XFER_BUDGET_RECLAIM).not.toBe(XFER_SPEND);
 	});
 
@@ -527,7 +563,7 @@ describe("reclaimBudget", () => {
 			costCenter: COST_CENTER,
 		});
 
-		expect(result).toEqual({ reclaimed: 0, transferId: null });
+		expect(result).toEqual({ reclaimed: 0, transferId: null, audited: false });
 		expect(mockTB.immediateTransfer).not.toHaveBeenCalled();
 	});
 
@@ -547,7 +583,7 @@ describe("reclaimBudget", () => {
 		});
 
 		expect(first.reclaimed).toBe(320);
-		expect(second).toEqual({ reclaimed: 0, transferId: null });
+		expect(second).toEqual({ reclaimed: 0, transferId: null, audited: false });
 		expect(mockTB.immediateTransfer).toHaveBeenCalledOnce();
 	});
 
@@ -559,7 +595,7 @@ describe("reclaimBudget", () => {
 			costCenter: COST_CENTER,
 		});
 
-		expect(result).toEqual({ reclaimed: 0, transferId: null });
+		expect(result).toEqual({ reclaimed: 0, transferId: null, audited: false });
 		expect(mockTB.lookupBalance).not.toHaveBeenCalled();
 		expect(mockTB.immediateTransfer).not.toHaveBeenCalled();
 	});
@@ -577,7 +613,7 @@ describe("reclaimBudget", () => {
 			costCenter: COST_CENTER,
 		});
 
-		expect(result).toEqual({ reclaimed: 0, transferId: null });
+		expect(result).toEqual({ reclaimed: 0, transferId: null, audited: false });
 	});
 
 	it("treats every balance-rejection code as the benign race", async () => {
@@ -591,7 +627,7 @@ describe("reclaimBudget", () => {
 				costCenter: COST_CENTER,
 			});
 
-			expect(result).toEqual({ reclaimed: 0, transferId: null });
+			expect(result).toEqual({ reclaimed: 0, transferId: null, audited: false });
 		}
 	});
 
@@ -622,7 +658,7 @@ describe("reclaimBudget", () => {
 		mockTB.immediateTransfer.mockResolvedValueOnce(77n);
 		const audit = createMockAuditWriter();
 
-		await reclaimBudget(asClient(mockTB), {
+		const result = await reclaimBudget(asClient(mockTB), {
 			parentUserId: PARENT,
 			costCenter: COST_CENTER,
 			auditWriter: audit,
@@ -633,6 +669,22 @@ describe("reclaimBudget", () => {
 			actor: PARENT,
 			data: { costCenter: COST_CENTER, amount: 320, costCenterUserId: CHILD },
 		});
+		expect(result.audited).toBe(true);
+		expect(result.auditFailed).toBeUndefined();
+	});
+
+	it("reports audited: false when money moves with no writer supplied", async () => {
+		mockTB.lookupBalance.mockResolvedValueOnce({ available: 320, pending: 0, total: 320 });
+		mockTB.immediateTransfer.mockResolvedValueOnce(77n);
+
+		const result = await reclaimBudget(asClient(mockTB), {
+			parentUserId: PARENT,
+			costCenter: COST_CENTER,
+		});
+
+		expect(result.reclaimed).toBe(320);
+		expect(result.audited).toBe(false);
+		expect(result.auditFailed).toBeUndefined();
 	});
 
 	it("reports auditFailed without re-transferring when the audit append throws", async () => {
@@ -649,6 +701,7 @@ describe("reclaimBudget", () => {
 
 		expect(result.reclaimed).toBe(320);
 		expect(result.transferId).toBe("77");
+		expect(result.audited).toBe(false);
 		expect(result.auditFailed).toBe(true);
 		expect(mockTB.immediateTransfer).toHaveBeenCalledOnce();
 	});

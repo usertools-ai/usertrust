@@ -67,6 +67,32 @@ interface BudgetFlags {
 	periodEndMs: number | undefined;
 }
 
+/** Longest argv value echoed back in an error; the rest is dropped. */
+const MAX_ECHOED_LENGTH = 120;
+
+/**
+ * Make an argv value safe to echo into the operator's terminal.
+ *
+ * Every "invalid value" message below quotes what the caller passed, and the
+ * caller may be an agent. picocolors wraps a string in SGR codes but does not
+ * sanitize it, so `--allocated $'\x1b]0;pwned\x07\x1b[2J'` would emit a real OSC
+ * title-set and a screen-clear into the terminal of whoever ran the command.
+ * C0 controls, DEL, and the C1 range collapse to `?`, and an over-long value is
+ * truncated so a megabyte of argv cannot flood the screen either.
+ *
+ * Only the human branch needs this — `JSON.stringify` escapes control characters
+ * itself — but the sweep happens where the message is built, so both branches
+ * carry the same sanitized text.
+ */
+function forDisplay(raw: string): string {
+	let out = "";
+	for (const ch of raw) {
+		const code = ch.codePointAt(0) as number;
+		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : ch;
+	}
+	return out.length > MAX_ECHOED_LENGTH ? `${out.slice(0, MAX_ECHOED_LENGTH)}...` : out;
+}
+
 /**
  * Take a flag's value, refusing the flag that follows it.
  *
@@ -85,20 +111,52 @@ function parseAllocated(raw: string): number {
 	// always false — either typo would quietly report a budget nobody granted.
 	// Require the WHOLE value to be a non-negative integer.
 	if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value)) {
-		throw new Error(`Invalid --allocated: ${raw} (non-negative integer required)`);
+		throw new Error(`Invalid --allocated: ${forDisplay(raw)} (non-negative integer required)`);
 	}
 	return value;
 }
 
+/**
+ * Full ISO-8601 date, optionally with a time, and optionally with an offset.
+ *
+ * `Date.parse` is far looser than "ISO-8601": it reads `1000` as the year 1000,
+ * `Dec 25` as this year's Christmas, and pads whitespace away. A typo'd
+ * `--period-start 1000` therefore stretches the elapsed window by a millennium
+ * and turns a real 180 UT/h burn into 1e-4 UT/h — a governance read that
+ * fails open, the same bug class as the `parseInt("1O0")` one above. Requiring
+ * the shape as well as parseability is what makes the flag mean what it says.
+ */
+const ISO_8601 = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?)?$/;
+
 function parseIsoMs(flag: string, raw: string): number {
 	const ms = Date.parse(raw);
-	if (!Number.isFinite(ms)) {
-		throw new Error(`Invalid ${flag}: ${raw} (ISO-8601 timestamp required)`);
+	if (!ISO_8601.test(raw) || !Number.isFinite(ms)) {
+		throw new Error(
+			`Invalid ${flag}: ${forDisplay(raw)} (ISO-8601 timestamp required, e.g. 2026-07-27T09:00:00Z)`,
+		);
 	}
 	return ms;
 }
 
-function parseBudgetFlags(argv: string[]): BudgetFlags {
+/**
+ * Parse `--period-start`, refusing a start that has not happened yet.
+ *
+ * The elapsed window is `max(0, now - start)`, so a future start makes it zero,
+ * and a zero window reports a burn rate of 0 UT/h with no projection. A cost
+ * center burning hard would read as idle. A start in the future is a typo, not
+ * a window.
+ */
+function parsePeriodStartMs(raw: string, nowMs: number): number {
+	const ms = parseIsoMs("--period-start", raw);
+	if (ms > nowMs) {
+		throw new Error(
+			`Invalid --period-start: ${forDisplay(raw)} is in the future (it would report a zero burn rate)`,
+		);
+	}
+	return ms;
+}
+
+function parseBudgetFlags(argv: string[], nowMs: number): BudgetFlags {
 	let costCenter: string | undefined;
 	let allocated: number | undefined;
 	let periodStartMs: number | undefined;
@@ -109,12 +167,13 @@ function parseBudgetFlags(argv: string[]): BudgetFlags {
 		const next = (): string | undefined => argv[++i];
 		if (arg === "--cost-center") costCenter = requireValue(arg, next());
 		else if (arg === "--allocated") allocated = parseAllocated(requireValue(arg, next()));
-		else if (arg === "--period-start") periodStartMs = parseIsoMs(arg, requireValue(arg, next()));
+		else if (arg === "--period-start")
+			periodStartMs = parsePeriodStartMs(requireValue(arg, next()), nowMs);
 		else if (arg === "--period-end") periodEndMs = parseIsoMs(arg, requireValue(arg, next()));
 		else if (arg.startsWith("--") && !KNOWN_BUDGET_FLAGS.has(arg)) {
 			// Reject unknown flags rather than ignoring them — a typoed --allocted
 			// must not silently report the runway of an allocation nobody set.
-			throw new Error(`Unknown flag: ${arg}`);
+			throw new Error(`Unknown flag: ${forDisplay(arg)}`);
 		}
 	}
 
@@ -160,9 +219,13 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		process.exitCode = 1;
 	};
 
+	// Read once, before parsing: `--period-start` is validated against it and the
+	// same instant is the `nowMs` the runway is computed from.
+	const nowMs = Date.now();
+
 	let flags: BudgetFlags;
 	try {
-		flags = parseBudgetFlags(args ?? process.argv.slice(2));
+		flags = parseBudgetFlags(args ?? process.argv.slice(2), nowMs);
 	} catch (err) {
 		fail(err instanceof Error ? err.message : String(err));
 		return;
@@ -176,7 +239,6 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		return;
 	}
 
-	const nowMs = Date.now();
 	let tb: TrustTBClient | undefined;
 	let status: BudgetStatus;
 	try {

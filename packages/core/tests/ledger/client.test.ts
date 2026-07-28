@@ -47,6 +47,8 @@ vi.mock("tigerbeetle-node", () => ({
 		exceeds_credits: 22,
 		overflows_debits: 30,
 		overflows_debits_pending: 31,
+		// The real binding's value — a transfer with this id already committed.
+		exists: 46,
 	},
 	amount_max: (1n << 128n) - 1n,
 }));
@@ -147,6 +149,39 @@ describe("TrustTBClient", () => {
 			const id = await client.createUserWallet("user_reconnect");
 			expect(typeof id).toBe("bigint");
 			expect(mockCreateAccounts).toHaveBeenCalledTimes(2);
+		});
+
+		// `::` is the separator costCenterUserId derives with, and deriveAccountId
+		// hashes derived and ordinary ids identically — so an ordinary wallet named
+		// `acme::billing` would SHARE an account with the `billing` cost center of
+		// `acme`, and reclaiming that cost center would sweep this wallet into `acme`.
+		it("refuses an ordinary wallet id containing the reserved separator", async () => {
+			await expect(client.createUserWallet("acme::billing")).rejects.toThrow(/reserved/);
+			await expect(client.createUserWallet("a::b::c")).rejects.toThrow(/reserved/);
+			expect(mockCreateAccounts).not.toHaveBeenCalled();
+		});
+
+		it("still accepts every ordinary id that does not use the separator", async () => {
+			mockCreateAccounts.mockResolvedValue([]);
+			for (const userId of ["acme-billing", "acme:billing", "a.b@c.com", "user_1"]) {
+				const id = await client.createUserWallet(userId);
+				expect(id).toBe(TrustTBClient.deriveAccountId(userId));
+			}
+		});
+
+		it("creates a derived cost-center wallet only under the explicit opt-in", async () => {
+			mockCreateAccounts.mockResolvedValueOnce([]);
+			const id = await client.createUserWallet("acme::billing", { derived: true });
+			expect(id).toBe(TrustTBClient.deriveAccountId("acme::billing"));
+		});
+
+		it("refuses an opt-in id that is not a well-formed `parent::costCenter`", async () => {
+			for (const bad of ["acme", "a::b::c", "::billing", "acme::", "a:x::b"]) {
+				await expect(client.createUserWallet(bad, { derived: true })).rejects.toThrow(
+					/derived wallet id/,
+				);
+			}
+			expect(mockCreateAccounts).not.toHaveBeenCalled();
 		});
 	});
 
@@ -350,6 +385,44 @@ describe("TrustTBClient", () => {
 			});
 			expect(typeof id).toBe("bigint");
 			expect(mockCreateTransfers).toHaveBeenCalledTimes(2);
+		});
+
+		// The id is generated OUTSIDE the withReconnect closure, so the retry
+		// resubmits the same id and TigerBeetle answers `exists`. Throwing there
+		// would report failure for money that actually moved — and a caller
+		// retrying that "failure" would double-spend.
+		it("treats `exists` on a reconnect retry as the committed transfer it is", async () => {
+			mockCreateTransfers
+				.mockRejectedValueOnce(new Error("connection refused"))
+				.mockResolvedValueOnce([{ status: 46 }]);
+
+			const id = await client.immediateTransfer({
+				debitAccountId: 1n,
+				creditAccountId: 2n,
+				amount: 500,
+				code: XFER_PURCHASE,
+				transferId: 4242n,
+			});
+
+			expect(id).toBe(4242n);
+			expect(mockCreateTransfers).toHaveBeenCalledTimes(2);
+			// Same id on both attempts — that identity is what makes `exists` proof.
+			expect(mockCreateTransfers.mock.calls[0]?.[0][0].id).toBe(4242n);
+			expect(mockCreateTransfers.mock.calls[1]?.[0][0].id).toBe(4242n);
+		});
+
+		// `exists` means every field matched; a mismatch is a distinct code and is
+		// still a hard failure.
+		it("still throws when the id exists with different terms", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 39 }]); // exists_with_different_amount
+			await expect(
+				client.immediateTransfer({
+					debitAccountId: 1n,
+					creditAccountId: 2n,
+					amount: 500,
+					code: XFER_PURCHASE,
+				}),
+			).rejects.toThrow(TBTransferError);
 		});
 	});
 

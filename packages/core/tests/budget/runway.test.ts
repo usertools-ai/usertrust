@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { describe, expect, it } from "vitest";
-import { computeRunway } from "../../src/budget/runway.js";
+import { computeRunway, type Runway, runwayHours } from "../../src/budget/runway.js";
 
 const HOUR = 3_600_000;
 const T0 = 1_800_000_000_000;
@@ -234,5 +234,58 @@ describe("computeRunway", () => {
 		const snapshot = { ...input };
 		expect(computeRunway(input)).toEqual(computeRunway(input));
 		expect(input).toEqual(snapshot);
+	});
+});
+
+describe("runwayHours", () => {
+	/** A Runway with only the field runwayHours reads, so each case is explicit. */
+	function runway(projectedExhaustionMs: number | null): Runway {
+		return {
+			remaining: 0,
+			fractionRemaining: 0,
+			burnRatePerHour: 0,
+			projectedExhaustionMs,
+			onPace: null,
+		};
+	}
+
+	it("converts a projection into hours from now", () => {
+		expect(runwayHours(runway(T0 + 12 * HOUR), T0)).toBe(12);
+		expect(runwayHours(runway(T0 + 90 * 60_000), T0)).toBe(1.5);
+	});
+
+	// The whole reason this function exists: the naive inline conversion,
+	// (projectedExhaustionMs - nowMs) / 3.6e6, coerces null to a large NEGATIVE
+	// number, so a `budgetRunwayHours lt 12` rule escalates a merely-idle budget.
+	it("returns null when the runway is not projectable", () => {
+		expect(runwayHours(runway(null), T0)).toBeNull();
+	});
+
+	it("never returns a negative — an already-exhausted projection clamps to 0", () => {
+		expect(runwayHours(runway(T0 - 5 * HOUR), T0)).toBe(0);
+		expect(runwayHours(runway(T0), T0)).toBe(0);
+	});
+
+	it("reads a real computeRunway result end to end", () => {
+		// 250 UT spent over 5h => 50 UT/h, 750 remaining => 15h of runway.
+		const spending = computeRunway({
+			allocated: 1000,
+			spent: 250,
+			periodStartMs: T0,
+			nowMs: T0 + 5 * HOUR,
+		});
+		expect(runwayHours(spending, T0 + 5 * HOUR)).toBeCloseTo(15);
+
+		// Nothing spent yet: no burn rate, so no projection, so no runway figure.
+		const idle = computeRunway({ allocated: 1000, spent: 0, periodStartMs: T0, nowMs: T0 + HOUR });
+		expect(idle.projectedExhaustionMs).toBeNull();
+		expect(runwayHours(idle, T0 + HOUR)).toBeNull();
+	});
+
+	it("rejects a non-finite clock, matching computeRunway's contract", () => {
+		expect(() => runwayHours(runway(T0 + HOUR), Number.NaN)).toThrow("nowMs must be finite");
+		expect(() => runwayHours(runway(T0 + HOUR), Number.POSITIVE_INFINITY)).toThrow(
+			"nowMs must be finite",
+		);
 	});
 });

@@ -49,6 +49,28 @@ export const XFER_A2A_DELEGATION = 7;
 /** Cost-center budget returned to its parent. Distinct from XFER_REFUND, which
  * reverses a purchase — a reclaim reverses a delegation, not a sale. */
 export const XFER_BUDGET_RECLAIM = 8;
+/**
+ * Budget delegated from a parent wallet into one of its cost centers.
+ *
+ * Deliberately NOT XFER_SPEND: a grant moves usertokens between two wallets the
+ * same owner controls and consumes nothing. Reconciliation that sums XFER_SPEND
+ * debits would otherwise count a delegated budget twice — once moving into the
+ * cost center, and again when the cost center actually spends it.
+ */
+export const XFER_BUDGET_GRANT = 9;
+
+/**
+ * Reserved separator in wallet ids.
+ *
+ * `budget/allocation.ts` derives a cost center's ledger identity as
+ * `parent::costCenter`, and {@link TrustTBClient.deriveAccountId} hashes derived
+ * and ordinary ids identically. An ordinary wallet literally named
+ * `acme::billing` would therefore share one TigerBeetle account with the
+ * `billing` cost center of `acme`, and a reclaim on that cost center would sweep
+ * the wallet's balance into `acme`. Reserving the separator is what makes the
+ * derivation collision-free.
+ */
+const RESERVED_ID_SEPARATOR = "::";
 
 export interface TrustTBClientOptions {
 	addresses: string[];
@@ -182,7 +204,35 @@ export class TrustTBClient {
 		return BigInt(`0x${hash.slice(0, 32)}`);
 	}
 
-	async createUserWallet(userId: string): Promise<bigint> {
+	/**
+	 * Create (or return) the balance-enforced wallet for a user id.
+	 *
+	 * `::` IS RESERVED — see {@link RESERVED_ID_SEPARATOR}. An ordinary caller
+	 * passing `acme::billing` is refused rather than handed the account that the
+	 * `billing` cost center of `acme` derives to, because sharing that account
+	 * would let `reclaimBudget("acme", "billing")` sweep the caller's balance into
+	 * `acme`. The budget path opts in with `{ derived: true }` and reaches this
+	 * only through `costCenterUserId`, whose charsets exclude `:` on both sides —
+	 * so exactly one `(parent, costCenter)` pair maps to each derived id.
+	 *
+	 * @param opts.derived Declares the id is an already-derived `parent::costCenter`.
+	 */
+	async createUserWallet(userId: string, opts?: { derived?: boolean }): Promise<bigint> {
+		const parts = userId.split(RESERVED_ID_SEPARATOR);
+		if (opts?.derived === true) {
+			// Belt to allocation.ts's braces: a derived id is exactly two parts and
+			// neither part may carry a colon of its own.
+			if (parts.length !== 2 || parts.some((part) => part === "" || part.includes(":"))) {
+				throw new Error(
+					`Invalid derived wallet id: expected exactly one "${RESERVED_ID_SEPARATOR}" separating a non-empty parent from a non-empty cost center`,
+				);
+			}
+		} else if (parts.length > 1) {
+			throw new Error(
+				`Invalid userId: "${RESERVED_ID_SEPARATOR}" is reserved for derived cost-center wallets (parent::costCenter)`,
+			);
+		}
+
 		const existing = this.accountMap.get(userId);
 		if (existing) return existing;
 
@@ -497,7 +547,18 @@ export class TrustTBClient {
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
-			if (res.status !== CreateTransferStatus.created) {
+			// `exists` IS SUCCESS HERE. The transfer id is generated above, OUTSIDE the
+			// withReconnect closure, so a retry after a connection error resubmits the
+			// same unique id; TigerBeetle deduplicates on it and answers `exists`, which
+			// it returns only when every field of the submitted transfer matches the one
+			// already committed (a mismatch is a distinct exists_with_different_* code
+			// that still throws). Receiving it is therefore proof our transfer landed.
+			// Throwing would report failure for money that moved — and a caller retrying
+			// that "failure" would double-allocate.
+			if (
+				res.status !== CreateTransferStatus.created &&
+				res.status !== CreateTransferStatus.exists
+			) {
 				throw new TBTransferError(
 					res.status,
 					`Transfer failed: ${CreateTransferStatus[res.status] ?? res.status}`,
