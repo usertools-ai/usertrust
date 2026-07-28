@@ -314,7 +314,23 @@ export class TrustTBClient {
 		return accountId;
 	}
 
+	/**
+	 * Create (or return) the escrow account for a label.
+	 *
+	 * `::` IS RESERVED — see {@link RESERVED_ID_SEPARATOR}. Escrow labels are hashed
+	 * through the same {@link TrustTBClient.deriveAccountId} namespace as wallets, so
+	 * without this check `ensureEscrowAccount("acme::billing")` would resolve to the
+	 * `billing` cost center of `acme`: TigerBeetle answers `exists` for the already
+	 * created wallet, this returns that wallet's id, and escrow would then debit a
+	 * cost center's budget. The reservation must hold at EVERY door into the
+	 * namespace, not just {@link TrustTBClient.createUserWallet}.
+	 */
 	async ensureEscrowAccount(label: string): Promise<bigint> {
+		if (label.includes(RESERVED_ID_SEPARATOR)) {
+			throw new Error(
+				`Invalid escrow label: "${RESERVED_ID_SEPARATOR}" is reserved for derived cost-center wallets (parent::costCenter)`,
+			);
+		}
 		const accountId = TrustTBClient.deriveAccountId(label);
 		const account: Account = {
 			id: accountId,
@@ -448,7 +464,19 @@ export class TrustTBClient {
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
-			if (res.status !== CreateTransferStatus.created) {
+			// `exists` IS SUCCESS HERE. transferId is generated above, OUTSIDE the
+			// withReconnect closure, so a retry after a connection error resubmits the
+			// same unique id; TigerBeetle deduplicates on it and answers `exists` only
+			// when every field of the submitted transfer matches the one already
+			// committed (a mismatch is a distinct exists_with_different_* code that
+			// still throws). Receiving it is therefore proof the reservation landed.
+			// Throwing would report a failed reservation against funds TB is already
+			// holding pending — nobody would ever post or void them, and the hold would
+			// sit on the wallet until its timeout expires.
+			if (
+				res.status !== CreateTransferStatus.created &&
+				res.status !== CreateTransferStatus.exists
+			) {
 				throw new TBTransferError(
 					res.status,
 					`Pending transfer failed: ${CreateTransferStatus[res.status] ?? res.status}`,
@@ -480,7 +508,19 @@ export class TrustTBClient {
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
-			if (res.status !== CreateTransferStatus.created) {
+			// `exists` IS SUCCESS HERE. postId is generated above, OUTSIDE the
+			// withReconnect closure, so a retry after a connection error resubmits the
+			// same unique id; TigerBeetle deduplicates on it and answers `exists` only
+			// when every field of the submitted transfer matches the one already
+			// committed (a mismatch is a distinct exists_with_different_* code that
+			// still throws). Receiving it is therefore proof the debit settled.
+			// Throwing would report a failed settlement for money that moved — and the
+			// governor, seeing failure, would void a pending transfer that is already
+			// posted, leaving the ledger holding a debit its accounting does not.
+			if (
+				res.status !== CreateTransferStatus.created &&
+				res.status !== CreateTransferStatus.exists
+			) {
 				throw new Error(`Post transfer failed: ${CreateTransferStatus[res.status] ?? res.status}`);
 			}
 		}
@@ -509,7 +549,18 @@ export class TrustTBClient {
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
-			if (res.status !== CreateTransferStatus.created) {
+			// `exists` IS SUCCESS HERE. voidId is generated above, OUTSIDE the
+			// withReconnect closure, so a retry after a connection error resubmits the
+			// same unique id; TigerBeetle deduplicates on it and answers `exists` only
+			// when every field of the submitted transfer matches the one already
+			// committed (a mismatch is a distinct exists_with_different_* code that
+			// still throws). Receiving it is therefore proof the hold was released.
+			// Throwing would fail the caller's cleanup path over a reservation TB has
+			// already returned, and a retry could only ever fail again.
+			if (
+				res.status !== CreateTransferStatus.created &&
+				res.status !== CreateTransferStatus.exists
+			) {
 				throw new Error(`Void transfer failed: ${CreateTransferStatus[res.status] ?? res.status}`);
 			}
 		}
