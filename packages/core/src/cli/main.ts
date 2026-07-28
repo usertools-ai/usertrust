@@ -12,6 +12,7 @@ const COMMANDS = [
 	"snapshot",
 	"tb",
 	"pricing",
+	"budget",
 	"completions",
 	"secret",
 	"skill",
@@ -100,6 +101,12 @@ switch (command) {
 	case "pricing":
 		await import("./pricing.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
+	case "budget": {
+		// Forwarded verbatim (global flags included) — budget.js accepts them.
+		const rest = argv.slice(argv.indexOf("budget") + 1);
+		await import("./budget.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
+		break;
+	}
 	case "completions":
 		await import("./completions.js").then((m) => m.run(positional[1], { json: jsonFlag }));
 		break;
@@ -135,6 +142,7 @@ Commands:
   snapshot      Create/restore vault snapshots
   tb            Manage TigerBeetle process
   pricing       Show current rate configuration
+  budget        Show a cost center's balance and runway
   completions   Output shell completion scripts
   secret        Manage vault credentials
   skill         Verify skill manifests

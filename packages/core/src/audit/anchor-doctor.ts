@@ -194,7 +194,7 @@ function overwriteProbe(probe: string): DoctorCheck {
  */
 export async function doctorS3Sink(
 	cfg: S3ProbeConfig,
-	transport: HttpTransport = httpsTransport,
+	transport: HttpTransport = httpTransport,
 ): Promise<DoctorReport> {
 	const prefix = (cfg.prefix ?? "anchors").replace(/^\/+|\/+$/g, "");
 	const sink = `s3:${cfg.bucket}/${prefix}`;
@@ -380,14 +380,20 @@ function s3Request(
 	return transport({ method, url: target.url, headers: { ...extra, ...signed }, body: payload });
 }
 
-/** Default transport. `http://` endpoints (dev MinIO) require an injected one. */
-async function httpsTransport(opts: {
+/**
+ * Default transport. `http://` is reachable so the loopback endpoints
+ * `parseEndpoint` allows (dev MinIO/LocalStack) are actually probed rather than
+ * degrading to "cannot probe" against a scheme the same module permits.
+ */
+async function httpTransport(opts: {
 	method: string;
 	url: string;
 	headers: Record<string, string>;
 	body: Buffer;
 }): Promise<{ status: number; body: string; headers: Record<string, string> }> {
-	const { request } = await import("node:https");
+	const { request } = await (opts.url.startsWith("http://")
+		? import("node:http")
+		: import("node:https"));
 	return new Promise((resolve, reject) => {
 		const req = request(
 			opts.url,

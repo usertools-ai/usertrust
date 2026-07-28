@@ -43,6 +43,28 @@ export { verifyChain, verifyVault } from "./audit/verify.js";
 export type { BoardReviewResult, BoardStats } from "./board/board.js";
 // Board
 export { createBoard } from "./board/board.js";
+export type {
+	AllocateResult,
+	BudgetAuditWriter,
+	BudgetStatus,
+	ReclaimResult,
+} from "./budget/allocation.js";
+// Agent budgets — delegate a bounded allocation to a named cost center, reclaim
+// what it did not spend, and read its runway. `getBudgetStatus` is the read an
+// agent framework wires as a `get_budget()` tool; it is a plain async function
+// with no framework coupling. Neither allocate nor reclaim is safe to
+// blind-retry — see the module doc comment.
+export {
+	allocateBudget,
+	costCenterUserId,
+	getBudgetStatus,
+	reclaimBudget,
+} from "./budget/allocation.js";
+export type { Runway, RunwayInput } from "./budget/runway.js";
+// `runwayHours` is the safe derivation of a `budgetRunwayHours` policy field —
+// the naive `(projectedExhaustionMs - nowMs) / 3.6e6` turns "not projectable"
+// into a large negative number and fires escalation rules on an idle budget.
+export { computeRunway, runwayHours } from "./budget/runway.js";
 // Config
 export { defineConfig, loadConfig } from "./config.js";
 // Endpoint classification
@@ -56,6 +78,10 @@ export { trust } from "./govern.js";
 export type { Authorization, AuthorizeParams, Governor, SettleParams } from "./headless.js";
 // Headless governance (non-SDK integrations)
 export { createGovernor } from "./headless.js";
+// The ledger client is the required first argument of every budget entry point
+// above. Without it at the root those functions can be imported but never
+// called: the argument is unnameable and unconstructible outside this package.
+export { TrustTBClient } from "./ledger/client.js";
 export type { ModelRates, RateResolution } from "./ledger/pricing.js";
 // Pricing
 export {
