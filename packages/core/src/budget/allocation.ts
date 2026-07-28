@@ -123,6 +123,12 @@ interface AuditOutcome {
 	audited: boolean;
 	/** True when the transfer committed but its audit event could not be written. */
 	auditFailed?: boolean;
+	/**
+	 * The writer's failure message. Present only alongside `auditFailed`, and
+	 * carried so a caller can log WHY the delegation went unproven — a bare flag
+	 * leaves an operator with a committed transfer and nothing to diagnose.
+	 */
+	auditFailureReason?: string;
 }
 
 export interface AllocateResult extends AuditOutcome {
@@ -167,20 +173,23 @@ function isInsufficientBalanceError(err: unknown): err is TBTransferError {
 /**
  * Resolve the parent and cost-center accounts, refusing a self-transfer.
  *
- * The cost-center account is derived rather than looked up so that reclaim and
- * status work in a process that never created the wallet — `getAccountId` reads
- * an in-memory map that only survives within the process that called
- * `createUserWallet`.
+ * BOTH ids are derived, never looked up. `getAccountId` reads an in-process map
+ * that is populated only by a `createUserWallet` call in this same process, so a
+ * lookup rejects before any ledger I/O on a freshly constructed client — even
+ * when the wallet exists in TigerBeetle. `deriveAccountId` is the same pure
+ * SHA-256 of `wallet:${userId}` that `createUserWallet` derives from, so the
+ * derived id IS the account the wallet was created as, in any process. A parent
+ * wallet that genuinely does not exist then fails at commit inside TigerBeetle:
+ * loudly, at the ledger, rather than before reaching it.
  *
  * A derived id that collides with its own parent would produce a transfer that
  * debits and credits one account: a no-op that reports as a funded allocation.
  */
 function resolveAccounts(
-	tb: TrustTBClient,
 	parentUserId: string,
 	childUserId: string,
 ): { parentAccount: bigint; childAccount: bigint } {
-	const parentAccount = tb.getAccountId(parentUserId);
+	const parentAccount = TrustTBClient.deriveAccountId(parentUserId);
 	const childAccount = TrustTBClient.deriveAccountId(childUserId);
 	if (childAccount === parentAccount) {
 		throw new Error("budget: cost center resolves to the parent account");
@@ -216,6 +225,11 @@ async function costCenterBalance(tb: TrustTBClient, accountId: bigint): Promise<
  * {@link AuditOutcome} on the result is the channel instead — and it
  * distinguishes "no writer was supplied" from "the append succeeded", which a
  * lone `auditFailed` flag could not.
+ *
+ * `BudgetAuditWriter` is a public interface, so the thrown value comes from
+ * consumer code and is never discarded: it is warned to the console AND carried
+ * on the outcome. Silence here would leave a committed transfer with no record
+ * of which allocation lost its event, and no reason for the loss.
  */
 async function appendBudgetEvent(
 	auditWriter: BudgetAuditWriter | undefined,
@@ -233,8 +247,15 @@ async function appendBudgetEvent(
 			data: { costCenter, amount, costCenterUserId: childUserId },
 		});
 		return { audited: true };
-	} catch {
-		return { audited: false, auditFailed: true };
+	} catch (err) {
+		const auditFailureReason = err instanceof Error ? err.message : String(err);
+		console.warn("[BUDGET] Transfer committed but its audit event was not written", {
+			kind,
+			costCenterUserId: childUserId,
+			amount,
+			error: auditFailureReason,
+		});
+		return { audited: false, auditFailed: true, auditFailureReason };
 	}
 }
 
@@ -272,7 +293,7 @@ export async function allocateBudget(
 		throw new Error("budget: amount must be a positive integer");
 	}
 
-	const { parentAccount, childAccount } = resolveAccounts(tb, p.parentUserId, childUserId);
+	const { parentAccount, childAccount } = resolveAccounts(p.parentUserId, childUserId);
 
 	// `{ derived: true }` declares the id is an already-derived `parent::costCenter`.
 	// `::` is reserved: ordinary callers are refused it precisely so this namespace
@@ -356,7 +377,7 @@ export async function reclaimBudget(
 	},
 ): Promise<ReclaimResult> {
 	const childUserId = costCenterUserId(p.parentUserId, p.costCenter);
-	const { parentAccount, childAccount } = resolveAccounts(tb, p.parentUserId, childUserId);
+	const { parentAccount, childAccount } = resolveAccounts(p.parentUserId, childUserId);
 
 	const available = await costCenterBalance(tb, childAccount);
 	// Nothing moved, so there is nothing to audit — `audited: false` is the honest

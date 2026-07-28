@@ -64,6 +64,7 @@ describe("computeRunway", () => {
 			{ allocated: 0, spent: 0, periodStartMs: T0, nowMs: T0 },
 			{ allocated: -5, spent: -5, periodStartMs: T0, nowMs: T0 - HOUR },
 			{ allocated: 100, spent: 500, periodStartMs: T0, nowMs: T0 + HOUR },
+			{ allocated: 1000, spent: Number.NaN, periodStartMs: T0, nowMs: T0 + HOUR },
 		]) {
 			const r = computeRunway(input);
 			for (const v of [r.remaining, r.fractionRemaining, r.burnRatePerHour]) {
@@ -91,13 +92,54 @@ describe("computeRunway", () => {
 		expect(r.fractionRemaining).toBe(0);
 	});
 
-	it("coerces non-finite spent to 0", () => {
+	// A non-finite spend is unusable, and the fail-closed reading of an unusable
+	// spend is "fully consumed" — the opposite direction from `allocated`.
+	it("reads a non-finite spent as fully consumed, not as untouched", () => {
 		for (const spent of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
 			const r = computeRunway({ allocated: 100, spent, periodStartMs: T0, nowMs: T0 + HOUR });
-			expect(r.remaining).toBe(100);
-			expect(r.fractionRemaining).toBe(1);
-			expect(r.burnRatePerHour).toBe(0);
-			expect(r.projectedExhaustionMs).toBeNull();
+			expect(r.remaining).toBe(0);
+			expect(r.fractionRemaining).toBe(0);
+			expect(Number.isFinite(r.burnRatePerHour)).toBe(true);
+			expect(r.projectedExhaustionMs).toBe(T0 + HOUR);
+		}
+	});
+
+	// The failure this guards: `spent = costTotal / callCount` with a zero call
+	// count yields NaN, and a NaN spend that read as 0 would hand a hard
+	// `budgetFractionRemaining lt 0.3` tier a full 1.0 and never fire.
+	it("does not make a NaN spend indistinguishable from a zero spend", () => {
+		const broken = computeRunway({
+			allocated: 1000,
+			spent: 0 / 0,
+			periodStartMs: T0,
+			periodEndMs: T0 + 24 * HOUR,
+			nowMs: T0 + HOUR,
+		});
+		const untouched = computeRunway({
+			allocated: 1000,
+			spent: 0,
+			periodStartMs: T0,
+			periodEndMs: T0 + 24 * HOUR,
+			nowMs: T0 + HOUR,
+		});
+		expect(broken).not.toEqual(untouched);
+		expect(broken.fractionRemaining).toBe(0);
+		expect(broken.fractionRemaining).toBeLessThan(0.3);
+		expect(untouched.fractionRemaining).toBe(1);
+	});
+
+	it("keeps a non-finite spent finite in every field, including burn rate", () => {
+		for (const allocated of [0, 100, Number.MAX_VALUE]) {
+			const r = computeRunway({
+				allocated,
+				spent: Number.NaN,
+				periodStartMs: T0,
+				nowMs: T0 + HOUR,
+			});
+			for (const v of [r.remaining, r.fractionRemaining, r.burnRatePerHour]) {
+				expect(Number.isFinite(v)).toBe(true);
+			}
+			expect(Number.isInteger(r.projectedExhaustionMs)).toBe(true);
 		}
 	});
 
@@ -209,6 +251,67 @@ describe("computeRunway", () => {
 		});
 		expect(r.projectedExhaustionMs).toBe(T0 + 2 * HOUR);
 		expect(r.onPace).toBe(true);
+	});
+
+	// ── D2: an exhausted budget is never on pace ──
+
+	it("reports an exhausted budget as off pace after the period has ended", () => {
+		const r = computeRunway({
+			allocated: 1000,
+			spent: 1000,
+			periodStartMs: T0,
+			periodEndMs: T0 + 24 * HOUR,
+			nowMs: T0 + 48 * HOUR,
+		});
+		expect(r.remaining).toBe(0);
+		expect(r.fractionRemaining).toBe(0);
+		// Exhaustion projects to `now`, which is past periodEnd — the raw
+		// comparison would read that as "the budget lasted".
+		expect(r.projectedExhaustionMs).toBe(T0 + 48 * HOUR);
+		expect(r.onPace).toBe(false);
+	});
+
+	it("reports an exhausted budget as off pace while the period is still open", () => {
+		const r = computeRunway({
+			allocated: 1000,
+			spent: 1000,
+			periodStartMs: T0,
+			periodEndMs: T0 + 24 * HOUR,
+			nowMs: T0 + HOUR,
+		});
+		expect(r.remaining).toBe(0);
+		expect(r.onPace).toBe(false);
+	});
+
+	it("still reports a healthy budget as on pace past the period end", () => {
+		// 10 UT over 48h => ~0.21 UT/h, 990 remaining => ~4752h of runway.
+		const r = computeRunway({
+			allocated: 1000,
+			spent: 10,
+			periodStartMs: T0,
+			periodEndMs: T0 + 24 * HOUR,
+			nowMs: T0 + 48 * HOUR,
+		});
+		expect(r.remaining).toBe(990);
+		expect(r.onPace).toBe(true);
+	});
+
+	it("keeps onPace null for an exhausted budget with no usable period end", () => {
+		const openEnded = computeRunway({
+			allocated: 1000,
+			spent: 1000,
+			periodStartMs: T0,
+			nowMs: T0 + 48 * HOUR,
+		});
+		expect(openEnded.onPace).toBeNull();
+		const inverted = computeRunway({
+			allocated: 1000,
+			spent: 1000,
+			periodStartMs: T0,
+			periodEndMs: T0 - HOUR,
+			nowMs: T0 + 48 * HOUR,
+		});
+		expect(inverted.onPace).toBeNull();
 	});
 
 	it("clamps fractionRemaining to 0 when spend exceeds the allocation", () => {

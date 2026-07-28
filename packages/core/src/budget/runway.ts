@@ -64,13 +64,39 @@ export interface Runway {
 	 * For a bounded period: true when projected exhaustion is at or after
 	 * periodEnd (i.e. the budget lasts). null when there is no period end or
 	 * no projection.
+	 *
+	 * An exhausted budget is never on pace. `remaining` of 0 projects exhaustion
+	 * to `now`, so once `now` drifts past `periodEnd` the raw comparison would
+	 * turn true again and report every fully-spent cost center from a closed
+	 * period as healthy. `remaining` of 0 therefore forces false regardless of
+	 * the clock; only the genuinely-unknown cases stay null.
 	 */
 	onPace: boolean | null;
 }
 
-/** Non-finite or negative amounts normalize to 0; finite non-negative pass through. */
-function normalizeAmount(value: number): number {
+/** Non-finite or negative allocations normalize to 0; finite positive pass through. */
+function normalizeAllocated(value: number): number {
 	return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * A non-finite spend normalizes to `allocated`, not to 0.
+ *
+ * The asymmetry with {@link normalizeAllocated} is deliberate: both directions
+ * are the fail-CLOSED one. An unusable allocation must not fabricate headroom,
+ * so it reads as "nothing was granted". An unusable spend must not fabricate an
+ * untouched budget — coercing NaN to 0 makes a broken figure (a caller deriving
+ * `spent = costTotal / callCount` with a zero call count, say) byte-identical to
+ * a cost center that has spent nothing, and a `budgetFractionRemaining lt 0.3`
+ * tier then never fires on it. Assume the worst instead: fully consumed.
+ *
+ * A negative spend is a different case — an over-funded cost center holding more
+ * than it was allocated, not a broken figure — and clamps to 0. `allocated` is
+ * already normalized finite, so the result is always finite (see TOTALITY).
+ */
+function normalizeSpent(value: number, allocated: number): number {
+	if (!Number.isFinite(value)) return allocated;
+	return value > 0 ? value : 0;
 }
 
 function clamp01(value: number): number {
@@ -95,7 +121,9 @@ function projectExhaustion(
  * Compute remaining budget, burn rate, and projected exhaustion for a cost center.
  *
  * Input normalization is exact and total:
- *  - non-finite or negative `allocated` / `spent` → `0`
+ *  - non-finite or negative `allocated` → `0`
+ *  - non-finite `spent` → `allocated`, i.e. fully consumed; negative `spent` → `0`
+ *    (see `normalizeSpent` for why the two amounts coerce in opposite directions)
  *  - non-finite `periodStartMs` or `nowMs` → throws (a bad clock is a caller bug,
  *    and silently substituting a value would fabricate a runway)
  *  - non-finite `periodEndMs` → treated as absent (open-ended, `onPace` is null)
@@ -111,8 +139,8 @@ export function computeRunway(input: RunwayInput): Runway {
 		throw new Error("runway: periodStartMs and nowMs must be finite");
 	}
 
-	const allocated = normalizeAmount(input.allocated);
-	const spent = normalizeAmount(input.spent);
+	const allocated = normalizeAllocated(input.allocated);
+	const spent = normalizeSpent(input.spent, allocated);
 	const periodEndMs =
 		input.periodEndMs !== undefined &&
 		Number.isFinite(input.periodEndMs) &&
@@ -130,10 +158,12 @@ export function computeRunway(input: RunwayInput): Runway {
 	const burnRatePerHour = Number.isFinite(rawBurnRate) ? rawBurnRate : Number.MAX_VALUE;
 
 	const projectedExhaustionMs = projectExhaustion(remaining, burnRatePerHour, nowMs);
+	// `remaining > 0` is not redundant with the comparison: an exhausted budget
+	// projects to `now`, which overtakes `periodEnd` once the period closes.
 	const onPace =
 		periodEndMs === undefined || projectedExhaustionMs === null
 			? null
-			: projectedExhaustionMs >= periodEndMs;
+			: remaining > 0 && projectedExhaustionMs >= periodEndMs;
 
 	return { remaining, fractionRemaining, burnRatePerHour, projectedExhaustionMs, onPace };
 }

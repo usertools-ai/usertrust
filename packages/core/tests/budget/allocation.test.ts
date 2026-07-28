@@ -38,17 +38,27 @@ import { InsufficientBalanceError } from "../../src/shared/errors.js";
 const PARENT = "user_1";
 const COST_CENTER = "research";
 const CHILD = `${PARENT}::${COST_CENTER}`;
-const PARENT_ACCOUNT = 111n;
-/** Derived with the same static the implementation uses — never hardcoded. */
+/** Both derived with the same static the implementation uses — never hardcoded. */
+const PARENT_ACCOUNT = TrustTBClient.deriveAccountId(PARENT);
 const CHILD_ACCOUNT = TrustTBClient.deriveAccountId(CHILD);
 
 const HOUR = 3_600_000;
 const T0 = 1_800_000_000_000;
 
-/** Create a mock TrustTBClient with vi.fn() methods. */
+/**
+ * Create a mock TrustTBClient with vi.fn() methods.
+ *
+ * `getAccountId` THROWS, exactly as a real client does in a process that never
+ * called `createUserWallet` — its `accountMap` is per-process and nothing in src
+ * populates it for a parent id. A fake that answered the lookup would let this
+ * whole suite pass while every allocate and reclaim rejected before any ledger
+ * I/O in production. Both accounts must be derived; nothing here may be looked up.
+ */
 function createMockTBClient() {
 	return {
-		getAccountId: vi.fn(() => PARENT_ACCOUNT),
+		getAccountId: vi.fn((userId: string): bigint => {
+			throw new Error(`No TigerBeetle account for user: ${userId}`);
+		}),
 		getTreasuryId: vi.fn(() => 1n),
 		lookupBalance: vi.fn(),
 		createPendingTransfer: vi.fn(),
@@ -83,6 +93,23 @@ function createMockAuditWriter() {
 /** Cast helper — the mock implements only the slice of the client this module uses. */
 function asClient(mock: MockTB): TrustTBClient {
 	return mock as unknown as TrustTBClient;
+}
+
+/**
+ * Run `fn` with console.warn silenced, returning what it printed alongside the result.
+ *
+ * The calls are copied out before `mockRestore` runs, which clears them.
+ */
+async function captureWarnings<T>(
+	fn: () => Promise<T>,
+): Promise<{ result: T; warnings: unknown[][] }> {
+	const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+	try {
+		const result = await fn();
+		return { result, warnings: warn.mock.calls.map((call) => [...call] as unknown[]) };
+	} finally {
+		warn.mockRestore();
+	}
 }
 
 describe("costCenterUserId", () => {
@@ -371,16 +398,21 @@ describe("allocateBudget", () => {
 
 	// D8: a cost center that resolves to its own parent would let a transfer debit
 	// and credit the same account — a no-op that reports as a funded allocation.
+	// Both ids are derived, so the collision is forced at the derivation itself:
+	// no pair of real inputs reaches this guard through a 128-bit SHA-256 space.
 	it("refuses to transfer when the cost center resolves to the parent account", async () => {
-		mockTB.getAccountId.mockReturnValueOnce(CHILD_ACCOUNT);
-
-		await expect(
-			allocateBudget(asClient(mockTB), {
-				parentUserId: PARENT,
-				costCenter: COST_CENTER,
-				amount: 500,
-			}),
-		).rejects.toThrow("budget: cost center resolves to the parent account");
+		const derive = vi.spyOn(TrustTBClient, "deriveAccountId").mockReturnValue(CHILD_ACCOUNT);
+		try {
+			await expect(
+				allocateBudget(asClient(mockTB), {
+					parentUserId: PARENT,
+					costCenter: COST_CENTER,
+					amount: 500,
+				}),
+			).rejects.toThrow("budget: cost center resolves to the parent account");
+		} finally {
+			derive.mockRestore();
+		}
 		expect(mockTB.immediateTransfer).not.toHaveBeenCalled();
 		expect(mockTB.createUserWallet).not.toHaveBeenCalled();
 	});
@@ -483,12 +515,14 @@ describe("allocateBudget", () => {
 		const audit = createMockAuditWriter();
 		audit.appendEvent.mockRejectedValueOnce(new Error("audit disk full"));
 
-		const result = await allocateBudget(asClient(mockTB), {
-			parentUserId: PARENT,
-			costCenter: COST_CENTER,
-			amount: 500,
-			auditWriter: audit,
-		});
+		const { result } = await captureWarnings(() =>
+			allocateBudget(asClient(mockTB), {
+				parentUserId: PARENT,
+				costCenter: COST_CENTER,
+				amount: 500,
+				auditWriter: audit,
+			}),
+		);
 
 		expect(result.transferId).toBe("42");
 		expect(result.allocated).toBe(500);
@@ -509,6 +543,69 @@ describe("allocateBudget", () => {
 		});
 
 		expect(result.auditFailed).toBeUndefined();
+	});
+
+	// A2: `BudgetAuditWriter` is public, so the thrown value is consumer code's.
+	// Discarding it leaves a committed grant whose lost event names neither the
+	// cost center nor the amount nor a reason.
+	it("warns with the event kind, cost center and amount when the audit append throws", async () => {
+		mockTB.immediateTransfer.mockResolvedValueOnce(42n);
+		const audit = createMockAuditWriter();
+		audit.appendEvent.mockRejectedValueOnce(new Error("audit disk full"));
+
+		const { result, warnings } = await captureWarnings(() =>
+			allocateBudget(asClient(mockTB), {
+				parentUserId: PARENT,
+				costCenter: COST_CENTER,
+				amount: 500,
+				auditWriter: audit,
+			}),
+		);
+
+		expect(warnings).toHaveLength(1);
+		expect(String(warnings[0]?.[0])).toContain("audit event was not written");
+		expect(warnings[0]?.[1]).toEqual({
+			kind: "budget_allocated",
+			costCenterUserId: CHILD,
+			amount: 500,
+			error: "audit disk full",
+		});
+		expect(result.auditFailureReason).toBe("audit disk full");
+	});
+
+	it("carries a non-Error audit rejection through as its string form", async () => {
+		mockTB.immediateTransfer.mockResolvedValueOnce(42n);
+		const audit = createMockAuditWriter();
+		audit.appendEvent.mockRejectedValueOnce("writer exploded");
+
+		const { result } = await captureWarnings(() =>
+			allocateBudget(asClient(mockTB), {
+				parentUserId: PARENT,
+				costCenter: COST_CENTER,
+				amount: 500,
+				auditWriter: audit,
+			}),
+		);
+
+		expect(result.auditFailed).toBe(true);
+		expect(result.auditFailureReason).toBe("writer exploded");
+	});
+
+	it("leaves auditFailureReason unset and warns nothing on a successful append", async () => {
+		mockTB.immediateTransfer.mockResolvedValueOnce(42n);
+		const audit = createMockAuditWriter();
+
+		const { result, warnings } = await captureWarnings(() =>
+			allocateBudget(asClient(mockTB), {
+				parentUserId: PARENT,
+				costCenter: COST_CENTER,
+				amount: 500,
+				auditWriter: audit,
+			}),
+		);
+
+		expect(result.auditFailureReason).toBeUndefined();
+		expect(warnings).toHaveLength(0);
 	});
 });
 
@@ -693,11 +790,13 @@ describe("reclaimBudget", () => {
 		const audit = createMockAuditWriter();
 		audit.appendEvent.mockRejectedValueOnce(new Error("audit disk full"));
 
-		const result = await reclaimBudget(asClient(mockTB), {
-			parentUserId: PARENT,
-			costCenter: COST_CENTER,
-			auditWriter: audit,
-		});
+		const { result } = await captureWarnings(() =>
+			reclaimBudget(asClient(mockTB), {
+				parentUserId: PARENT,
+				costCenter: COST_CENTER,
+				auditWriter: audit,
+			}),
+		);
 
 		expect(result.reclaimed).toBe(320);
 		expect(result.transferId).toBe("77");
@@ -706,12 +805,42 @@ describe("reclaimBudget", () => {
 		expect(mockTB.immediateTransfer).toHaveBeenCalledOnce();
 	});
 
-	it("refuses to transfer when the cost center resolves to the parent account", async () => {
-		mockTB.getAccountId.mockReturnValueOnce(CHILD_ACCOUNT);
+	// A2: the reclaim direction must report the same way — the amount warned is the
+	// amount that actually moved, not a caller-supplied figure.
+	it("warns with the event kind, cost center and amount when the audit append throws", async () => {
+		mockTB.lookupBalance.mockResolvedValueOnce({ available: 320, pending: 0, total: 320 });
+		mockTB.immediateTransfer.mockResolvedValueOnce(77n);
+		const audit = createMockAuditWriter();
+		audit.appendEvent.mockRejectedValueOnce(new Error("chain sealed"));
 
-		await expect(
-			reclaimBudget(asClient(mockTB), { parentUserId: PARENT, costCenter: COST_CENTER }),
-		).rejects.toThrow("budget: cost center resolves to the parent account");
+		const { result, warnings } = await captureWarnings(() =>
+			reclaimBudget(asClient(mockTB), {
+				parentUserId: PARENT,
+				costCenter: COST_CENTER,
+				auditWriter: audit,
+			}),
+		);
+
+		expect(warnings).toHaveLength(1);
+		expect(String(warnings[0]?.[0])).toContain("audit event was not written");
+		expect(warnings[0]?.[1]).toEqual({
+			kind: "budget_reclaimed",
+			costCenterUserId: CHILD,
+			amount: 320,
+			error: "chain sealed",
+		});
+		expect(result.auditFailureReason).toBe("chain sealed");
+	});
+
+	it("refuses to transfer when the cost center resolves to the parent account", async () => {
+		const derive = vi.spyOn(TrustTBClient, "deriveAccountId").mockReturnValue(CHILD_ACCOUNT);
+		try {
+			await expect(
+				reclaimBudget(asClient(mockTB), { parentUserId: PARENT, costCenter: COST_CENTER }),
+			).rejects.toThrow("budget: cost center resolves to the parent account");
+		} finally {
+			derive.mockRestore();
+		}
 		expect(mockTB.immediateTransfer).not.toHaveBeenCalled();
 	});
 
@@ -720,6 +849,71 @@ describe("reclaimBudget", () => {
 			reclaimBudget(asClient(mockTB), { parentUserId: PARENT, costCenter: "a::b" }),
 		).rejects.toThrow(/costCenter/);
 		expect(mockTB.lookupBalance).not.toHaveBeenCalled();
+	});
+});
+
+// A1: the whole money path is dead in a fresh process if either account is looked
+// up. `accountMap` is per-process and nothing in src populates it for a parent id,
+// so a lookup rejects with "No TigerBeetle account for user" BEFORE any transfer —
+// a wallet that exists in TigerBeetle is unreachable. Both ids must be derived.
+describe("fresh client with an empty accountMap", () => {
+	let mockTB: MockTB;
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mockTB = createMockTBClient();
+	});
+
+	it("allocates without consulting the client account map", async () => {
+		mockTB.createUserWallet.mockResolvedValueOnce(TrustTBClient.deriveAccountId("local::research"));
+		mockTB.immediateTransfer.mockResolvedValueOnce(42n);
+
+		const result = await allocateBudget(asClient(mockTB), {
+			parentUserId: "local",
+			costCenter: "research",
+			amount: 500,
+		});
+
+		expect(result.allocated).toBe(500);
+		expect(mockTB.getAccountId).not.toHaveBeenCalled();
+		expect(mockTB.immediateTransfer).toHaveBeenCalledWith({
+			debitAccountId: TrustTBClient.deriveAccountId("local"),
+			creditAccountId: TrustTBClient.deriveAccountId("local::research"),
+			amount: 500,
+			code: XFER_BUDGET_GRANT,
+		});
+	});
+
+	it("reclaims without consulting the client account map", async () => {
+		mockTB.lookupBalance.mockResolvedValueOnce({ available: 320, pending: 0, total: 320 });
+		mockTB.immediateTransfer.mockResolvedValueOnce(77n);
+
+		const result = await reclaimBudget(asClient(mockTB), {
+			parentUserId: "local",
+			costCenter: "research",
+		});
+
+		expect(result.reclaimed).toBe(320);
+		expect(mockTB.getAccountId).not.toHaveBeenCalled();
+		expect(mockTB.immediateTransfer).toHaveBeenCalledWith({
+			debitAccountId: TrustTBClient.deriveAccountId("local::research"),
+			creditAccountId: TrustTBClient.deriveAccountId("local"),
+			amount: 320,
+			code: XFER_BUDGET_RECLAIM,
+		});
+	});
+
+	// The parent account is credited at the id its wallet was CREATED as — the same
+	// pure hash `createUserWallet` derives from. A parent that truly has no wallet
+	// then fails inside TigerBeetle at commit, not before any I/O.
+	it("credits the parent at the id createUserWallet would have derived", async () => {
+		mockTB.lookupBalance.mockResolvedValueOnce({ available: 320, pending: 0, total: 320 });
+		mockTB.immediateTransfer.mockResolvedValueOnce(77n);
+
+		await reclaimBudget(asClient(mockTB), { parentUserId: PARENT, costCenter: COST_CENTER });
+
+		const call = mockTB.immediateTransfer.mock.calls[0]?.[0] as { creditAccountId: bigint };
+		expect(call.creditAccountId).toBe(PARENT_ACCOUNT);
 	});
 });
 
@@ -837,9 +1031,6 @@ describe("getBudgetStatus", () => {
 	});
 
 	it("does not require the parent to be in the client account map", async () => {
-		mockTB.getAccountId.mockImplementationOnce(() => {
-			throw new Error("No TigerBeetle account for user: user_1");
-		});
 		mockTB.lookupBalance.mockResolvedValueOnce({ available: 750, pending: 0, total: 750 });
 
 		const status = await getBudgetStatus(asClient(mockTB), {
@@ -851,6 +1042,7 @@ describe("getBudgetStatus", () => {
 		});
 
 		expect(status.balance).toBe(750);
+		expect(mockTB.getAccountId).not.toHaveBeenCalled();
 	});
 
 	it("rejects an invalid cost-center name before any ledger I/O", async () => {
