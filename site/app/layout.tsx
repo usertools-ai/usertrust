@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import { NoiseOverlay } from "./components/noise-overlay";
 import { ScrollProgress } from "./components/scroll-progress";
@@ -59,6 +59,23 @@ export const metadata: Metadata = {
 		images: [{ url: "/og", width: 1200, height: 630 }],
 	},
 	icons: { icon: "/favicon.svg" },
+};
+
+/*
+ * `viewportFit: "cover"` is what makes `env(safe-area-inset-*)` resolve to real
+ * values on iOS; without it they are 0px and every safe-area utility in
+ * globals.css silently does nothing. themeColor paints the iOS status bar and
+ * Android chrome to match the page rather than flashing white on load.
+ *
+ * themeColor and colorScheme belong here, not on `metadata` — both carry
+ * `@deprecated Use the new viewport configuration instead` on `Metadata`.
+ */
+export const viewport: Viewport = {
+	width: "device-width",
+	initialScale: 1,
+	viewportFit: "cover",
+	themeColor: "#0a0a1a",
+	colorScheme: "dark",
 };
 
 const jsonLd = {
