@@ -64,6 +64,7 @@ const DATA_KEYS = [
 	"costCenter",
 	"fractionRemaining",
 	"onPace",
+	"parent",
 	"projectedExhaustionMs",
 	"remaining",
 	"spent",
@@ -71,6 +72,8 @@ const DATA_KEYS = [
 
 let tempDir: string;
 let logOutput: string[];
+/** Restored per test: the parent wallet falls back to this variable, so a real one leaks in. */
+let savedParentEnv: string | undefined;
 
 function makeVault(): void {
 	mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
@@ -98,6 +101,8 @@ beforeEach(() => {
 	tempDir = mkdtempSync(join(tmpdir(), "trust-budget-cli-"));
 	logOutput = [];
 	ledger.accounts = [];
+	savedParentEnv = process.env.USERTRUST_USER_ID;
+	delete process.env.USERTRUST_USER_ID;
 	vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
 		logOutput.push(args.map(String).join(" "));
 	});
@@ -111,6 +116,8 @@ beforeEach(() => {
 afterEach(() => {
 	vi.useRealTimers();
 	vi.restoreAllMocks();
+	if (savedParentEnv === undefined) delete process.env.USERTRUST_USER_ID;
+	else process.env.USERTRUST_USER_ID = savedParentEnv;
 	// The command sets process.exitCode on a failure verdict; reset it so a
 	// deliberate failure does not leak into the vitest worker's own exit code.
 	process.exitCode = 0;
@@ -227,6 +234,45 @@ describe("usertrust budget — flag validation", () => {
 		expect(process.exitCode).toBe(1);
 	});
 
+	// A dropped dash matches no comparison in the parser, and letting it fall
+	// through drops its VALUE on the next iteration too: the window would default
+	// to now and the command would exit 0 reporting a 0.00 UT/hour burn.
+	it("rejects a single-dash flag instead of dropping it and its value", async () => {
+		makeVault();
+		setBalance(500);
+
+		await run(tempDir, { json: false }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+			"-period-start",
+			FIVE_HOURS_AGO,
+		]);
+
+		expect(logOutput.join("\n")).toMatch(/Unknown flag: -period-start/);
+		expect(logOutput.join("\n")).not.toMatch(/Burn rate/);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("rejects a bare positional argument", async () => {
+		makeVault();
+		setBalance(500);
+
+		await run(tempDir, { json: false }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+			"research",
+		]);
+
+		expect(logOutput.join("\n")).toMatch(/Unexpected argument: research/);
+		expect(logOutput.join("\n")).toMatch(/Usage: usertrust budget/);
+		expect(logOutput.join("\n")).not.toMatch(/Burn rate/);
+		expect(process.exitCode).toBe(1);
+	});
+
 	it("accepts the global flags main.ts passes to every subcommand", async () => {
 		makeVault();
 		setBalance(750);
@@ -283,6 +329,25 @@ describe("usertrust budget — flag validation", () => {
 		}
 	});
 
+	// 0 sends computeRunway down its `allocated <= 0` branch: fractionRemaining 0
+	// and an exhaustion projection of "now". Against a cost center holding 750 UT
+	// the report contradicts itself — "Balance: 750 UT" over "Remaining: 0 UT
+	// (0.0%)" and an exhaustion date of this instant.
+	it("rejects a zero --allocated rather than reporting an exhausted budget", async () => {
+		makeVault();
+		setBalance(750);
+
+		for (const bad of ["0", "00", "0000"]) {
+			logOutput = [];
+			process.exitCode = 0;
+			await run(tempDir, { json: false }, ["--cost-center", "research", "--allocated", bad]);
+			expect(logOutput.join("\n")).toMatch(/Invalid --allocated/);
+			expect(logOutput.join("\n")).toMatch(/positive integer/);
+			expect(logOutput.join("\n")).not.toMatch(/Balance/);
+			expect(process.exitCode).toBe(1);
+		}
+	});
+
 	it("rejects a period bound that Date.parse cannot read", async () => {
 		makeVault();
 
@@ -314,6 +379,12 @@ describe("usertrust budget — flag validation", () => {
 				"1000",
 				"2026",
 				"1",
+				// Date.parse("0") is 1 Jan 2000 and Date.parse("5") is May 2001 — both
+				// finite, so shape is the only thing that catches them. A caller passing
+				// `--period-start 0` to mean "the start of the period" would otherwise
+				// open a ~26-year window and report a hard burn as 0.00 UT/hour.
+				"0",
+				"5",
 				"Dec 25",
 				"Mar 2026",
 				"2026-07",
@@ -321,6 +392,8 @@ describe("usertrust budget — flag validation", () => {
 				"2026-07-27 ",
 				"2026/07/27",
 				"07/27/2026",
+				// An epoch-ms value is not an ISO-8601 instant, however real it looks.
+				"1800000000000",
 			]) {
 				logOutput = [];
 				process.exitCode = 0;
@@ -343,14 +416,15 @@ describe("usertrust budget — flag validation", () => {
 		setBalance(750);
 
 		for (const good of [
-			"2026-07-27",
-			"2026-07-27T09:00",
-			"2026-07-27T09:00:00",
-			"2026-07-27T09:00:00.500",
+			"2026-07-27T09:00Z",
 			"2026-07-27T09:00:00Z",
+			"2026-07-27T09:00:00.5Z",
 			"2026-07-27T09:00:00.500Z",
 			"2026-07-27T09:00:00+02:00",
+			"2026-07-27T09:00:00-05:00",
 			"2026-07-27 09:00:00Z",
+			// 2024 is a leap year; 2026 is not (see the impossible-date cases below).
+			"2024-02-29T00:00:00Z",
 		]) {
 			logOutput = [];
 			process.exitCode = 0;
@@ -364,6 +438,58 @@ describe("usertrust budget — flag validation", () => {
 			]);
 			expect(jsonOut().success).toBe(true);
 			expect(process.exitCode).toBe(0);
+		}
+	});
+
+	// A zone-less datetime is read in the HOST's timezone and a bare date at UTC
+	// midnight, so one string names two different instants on two machines and the
+	// window it opens is off by up to a day — which scales the burn rate by the
+	// same factor. An instant has to say which zone it is in.
+	it("rejects a period bound with no explicit timezone", async () => {
+		makeVault();
+
+		for (const flag of ["--period-start", "--period-end"]) {
+			for (const bad of [
+				"2026-07-27",
+				"2026-07-27T09:00",
+				"2026-07-27T09:00:00",
+				"2026-07-27T09:00:00.500",
+			]) {
+				logOutput = [];
+				process.exitCode = 0;
+				await run(tempDir, { json: false }, [
+					"--cost-center",
+					"research",
+					"--allocated",
+					"1000",
+					flag,
+					bad,
+				]);
+				expect(logOutput.join("\n")).toMatch(new RegExp(`Invalid ${flag}`));
+				expect(logOutput.join("\n")).toMatch(/explicit timezone/);
+				expect(process.exitCode).toBe(1);
+			}
+		}
+	});
+
+	// Date.parse rolls an impossible day over rather than failing: 2026-02-30 comes
+	// back as 2 March, a window silently two days wider than the one asked for.
+	it("rejects a period bound naming a date that does not exist", async () => {
+		makeVault();
+
+		for (const bad of ["2026-02-30T00:00:00Z", "2026-02-29T00:00:00Z", "2026-04-31T00:00:00Z"]) {
+			logOutput = [];
+			process.exitCode = 0;
+			await run(tempDir, { json: false }, [
+				"--cost-center",
+				"research",
+				"--allocated",
+				"1000",
+				"--period-start",
+				bad,
+			]);
+			expect(logOutput.join("\n")).toMatch(/Invalid --period-start/);
+			expect(process.exitCode).toBe(1);
 		}
 	});
 
@@ -406,6 +532,57 @@ describe("usertrust budget — flag validation", () => {
 		expect(process.exitCode).toBe(0);
 	});
 
+	// computeRunway keeps a period end only when it is strictly after the start, so
+	// swapped bounds are silently DISCARDED and `onPace` prints "n/a" — the same
+	// output as a legitimately open-ended allocation, and the one answer the flag
+	// was passed to rule out.
+	it("rejects a --period-end that is not strictly after --period-start", async () => {
+		makeVault();
+		setBalance(750);
+		const earlier = new Date(NOW - 10 * HOUR).toISOString();
+
+		// Swapped bounds, in both argument orders, plus a zero-length period.
+		for (const argv of [
+			["--period-start", FIVE_HOURS_AGO, "--period-end", earlier],
+			["--period-end", earlier, "--period-start", FIVE_HOURS_AGO],
+			["--period-start", FIVE_HOURS_AGO, "--period-end", FIVE_HOURS_AGO],
+		]) {
+			logOutput = [];
+			process.exitCode = 0;
+			await run(tempDir, { json: false }, [
+				"--cost-center",
+				"research",
+				"--allocated",
+				"1000",
+				...argv,
+			]);
+			expect(logOutput.join("\n")).toMatch(/Invalid --period-end/);
+			expect(logOutput.join("\n")).toMatch(/not after --period-start/);
+			expect(logOutput.join("\n")).not.toMatch(/On pace/);
+			expect(process.exitCode).toBe(1);
+		}
+	});
+
+	// With no --period-start the window opens at `now`, so a past end is inverted
+	// against it and would be discarded just as silently.
+	it("rejects a past --period-end when no --period-start was given", async () => {
+		makeVault();
+		setBalance(750);
+
+		await run(tempDir, { json: false }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+			"--period-end",
+			FIVE_HOURS_AGO,
+		]);
+
+		expect(logOutput.join("\n")).toMatch(/Invalid --period-end/);
+		expect(logOutput.join("\n")).toMatch(/no --period-start was given/);
+		expect(process.exitCode).toBe(1);
+	});
+
 	it("refuses to swallow the next flag as a missing value", async () => {
 		makeVault();
 
@@ -423,6 +600,161 @@ describe("usertrust budget — flag validation", () => {
 		await run(tempDir, { json: false }, ["--cost-center", "team/research", "--allocated", "1000"]);
 
 		expect(logOutput.join("\n")).toMatch(/costCenter must match/);
+		expect(process.exitCode).toBe(1);
+	});
+});
+
+/**
+ * The parent wallet decides which account the balance is read from, and reading the
+ * wrong one is not an error: `costCenterBalance` reports a wallet that does not
+ * exist as an implicit 0 by design. A cost center funded under `acct_42` therefore
+ * prints a confident "Balance: 0 UT / Spent: 1000 UT" when the command resolves a
+ * different parent — so the parent must be settable, and must be visible in both
+ * output branches.
+ */
+describe("usertrust budget — parent wallet", () => {
+	it("defaults to local and says so in both output branches", async () => {
+		makeVault();
+		setBalance(750);
+
+		await run(tempDir, { json: true }, ["--cost-center", "research", "--allocated", "1000"]);
+		expect(jsonOut().data.parent).toBe("local");
+
+		logOutput = [];
+		await run(tempDir, { json: false }, ["--cost-center", "research", "--allocated", "1000"]);
+		expect(logOutput.join("\n")).toMatch(/Parent wallet:\s+local/);
+		expect(process.exitCode).toBe(0);
+	});
+
+	it("reads the parent from --parent and echoes the resolved id", async () => {
+		makeVault();
+		setBalance(1000);
+
+		await run(tempDir, { json: true }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+			"--parent",
+			"acct_42",
+		]);
+		expect(jsonOut().data.parent).toBe("acct_42");
+		expect(jsonOut().success).toBe(true);
+
+		logOutput = [];
+		await run(tempDir, { json: false }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+			"--parent",
+			"acct_42",
+		]);
+		expect(logOutput.join("\n")).toMatch(/Parent wallet:\s+acct_42/);
+		expect(process.exitCode).toBe(0);
+	});
+
+	it("takes --parent over the environment", async () => {
+		makeVault();
+		setBalance(750);
+		process.env.USERTRUST_USER_ID = "from-env";
+
+		await run(tempDir, { json: true }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+			"--parent",
+			"from-flag",
+		]);
+
+		expect(jsonOut().data.parent).toBe("from-flag");
+		expect(process.exitCode).toBe(0);
+	});
+
+	it("falls back to the environment when no --parent is given", async () => {
+		makeVault();
+		setBalance(750);
+		process.env.USERTRUST_USER_ID = "from-env";
+
+		await run(tempDir, { json: true }, ["--cost-center", "research", "--allocated", "1000"]);
+
+		expect(jsonOut().data.parent).toBe("from-env");
+		expect(process.exitCode).toBe(0);
+	});
+
+	// `export USERTRUST_USER_ID=$SOME_UNSET_VAR` in a container entrypoint sets the
+	// variable to "". `??` substitutes for null/undefined only, so the empty string
+	// used to reach the derivation and fail there, quoting an internal id charset at
+	// an operator who never set the variable.
+	it("treats an empty or whitespace-only environment value as unset", async () => {
+		makeVault();
+		setBalance(750);
+
+		for (const empty of ["", " ", "\t\n"]) {
+			logOutput = [];
+			process.exitCode = 0;
+			process.env.USERTRUST_USER_ID = empty;
+			await run(tempDir, { json: true }, ["--cost-center", "research", "--allocated", "1000"]);
+			expect(jsonOut().success).toBe(true);
+			expect(jsonOut().data.parent).toBe("local");
+			expect(process.exitCode).toBe(0);
+		}
+	});
+
+	it("rejects a --parent outside the wallet-id charset, naming the flag", async () => {
+		makeVault();
+
+		await run(tempDir, { json: false }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+			"--parent",
+			"acct 42",
+		]);
+
+		expect(logOutput.join("\n")).toMatch(/Invalid --parent: acct 42/);
+		expect(logOutput.join("\n")).not.toMatch(/parentUserId must match/);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("rejects a non-empty but invalid environment value, naming the variable", async () => {
+		makeVault();
+		process.env.USERTRUST_USER_ID = "acct 42";
+
+		await run(tempDir, { json: false }, ["--cost-center", "research", "--allocated", "1000"]);
+
+		expect(logOutput.join("\n")).toMatch(/Invalid \$USERTRUST_USER_ID: acct 42/);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("requires a value for --parent rather than swallowing the next flag", async () => {
+		makeVault();
+
+		await run(tempDir, { json: false }, ["--parent", "--cost-center", "research"]);
+
+		expect(logOutput.join("\n")).toMatch(/--parent requires a value/);
+		expect(process.exitCode).toBe(1);
+	});
+
+	// `-x` matches the wallet charset, so a single-dash token would otherwise bind
+	// as the parent id and the command would confidently report on `-x::research`.
+	it("refuses a single-dash token as the --parent value", async () => {
+		makeVault();
+
+		await run(tempDir, { json: false }, ["--parent", "-x", "--cost-center", "research"]);
+
+		expect(logOutput.join("\n")).toMatch(/--parent requires a value/);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("refuses a single-dash token as the --cost-center value", async () => {
+		makeVault();
+
+		await run(tempDir, { json: false }, ["--cost-center", "-x", "--allocated", "1000"]);
+
+		expect(logOutput.join("\n")).toMatch(/--cost-center requires a value/);
 		expect(process.exitCode).toBe(1);
 	});
 });
@@ -611,5 +943,32 @@ describe("usertrust budget — human output", () => {
 describe("usertrust budget — dispatch", () => {
 	it("is a registered command so `did you mean` can suggest it", () => {
 		expect(COMMANDS).toContain("budget");
+	});
+
+	// main.ts always passes the stripped `rest`, but the documented argv fallback
+	// still sees the `budget` subcommand token — which the catch-all unknown-argument
+	// guard would reject, making the default path fail every time it was taken.
+	it("drops the subcommand token when falling back to process.argv", async () => {
+		makeVault();
+		const argv = process.argv;
+		process.argv = [
+			"node",
+			"usertrust",
+			"budget",
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+		];
+		try {
+			await run(tempDir, { json: true });
+		} finally {
+			process.argv = argv;
+		}
+
+		const payload = JSON.parse(logOutput.join("\n"));
+		expect(payload.success).toBe(true);
+		expect(payload.data.costCenter).toBe("research");
+		expect(process.exitCode).not.toBe(1);
 	});
 });

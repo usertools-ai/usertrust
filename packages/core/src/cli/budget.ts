@@ -4,8 +4,8 @@
 /**
  * CLI: usertrust budget — read one cost center's balance and runway
  *
- * `usertrust budget --cost-center <name> --allocated <int> [--period-start <iso>]
- * [--period-end <iso>] [--json]`
+ * `usertrust budget --cost-center <name> --allocated <int> [--parent <id>]
+ * [--period-start <iso>] [--period-end <iso>] [--json]`
  *
  * EXPLICIT COST CENTER, NEVER ENUMERATION. There is no cost-center registry: a
  * cost center exists only as a derived sub-wallet, so "list every cost center" is
@@ -26,10 +26,14 @@
  * fabricate a rate. See the projection-honesty note on `Runway` — the estimate is
  * a naive linear extrapolation and must not drive irreversible decisions.
  *
- * IDENTITY. The parent wallet is `$USERTRUST_USER_ID`, defaulting to `local`.
- * The derived cost-center id is deliberately absent from the output: the payload
- * carries no ledger account ids, no vault paths, and no chain metadata, so it is
- * safe to hand an agent verbatim as the result of a `get_budget()` tool call.
+ * IDENTITY. The parent wallet is `--parent`, else `$USERTRUST_USER_ID`, else
+ * `local`, and the resolved id is echoed in both output branches. It has to be:
+ * a cost center read against the wrong parent is not an error but an implicit
+ * zero balance (see `costCenterBalance`), so an unseen parent turns a funded cost
+ * center into a confident "Balance: 0 UT". The DERIVED cost-center id stays
+ * absent from the output — the payload carries no ledger account ids, no vault
+ * paths, and no chain metadata, so it is safe to hand an agent verbatim as the
+ * result of a `get_budget()` tool call.
  */
 
 import { existsSync } from "node:fs";
@@ -42,10 +46,13 @@ import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
 
 const USAGE =
-	"Usage: usertrust budget --cost-center <name> --allocated <int> [--period-start <iso>] [--period-end <iso>] [--json]";
+	"Usage: usertrust budget --cost-center <name> --allocated <int> [--parent <id>] [--period-start <iso>] [--period-end <iso>] [--json]";
 
-/** Parent wallet the cost center hangs off, when the environment does not name one. */
+/** Parent wallet the cost center hangs off, when neither the flag nor the environment names one. */
 const DEFAULT_PARENT_USER_ID = "local";
+
+/** Environment fallback for the parent wallet, overridden by `--parent`. */
+const PARENT_ENV_VAR = "USERTRUST_USER_ID";
 
 const KNOWN_BUDGET_FLAGS = new Set([
 	// Global flags main.ts passes to every subcommand — rejecting them here would
@@ -55,12 +62,14 @@ const KNOWN_BUDGET_FLAGS = new Set([
 	"--reconfigure",
 	// Budget flags.
 	"--cost-center",
+	"--parent",
 	"--allocated",
 	"--period-start",
 	"--period-end",
 ]);
 
 interface BudgetFlags {
+	parentUserId: string;
 	costCenter: string;
 	allocated: number;
 	periodStartMs: number | undefined;
@@ -99,40 +108,117 @@ function forDisplay(raw: string): string {
  * `--cost-center --allocated 5` would otherwise bind `--allocated` as the cost
  * center: it matches the cost-center charset, so the derivation accepts it and
  * the command silently reads a wallet nobody named.
+ *
+ * A SINGLE dash is refused for the same reason: `-x` also matches the wallet
+ * charset, so `--parent -x` would read `-x::research` rather than reject a
+ * dropped dash. No value this command accepts — an id, a cost center, a count,
+ * an ISO instant — legitimately begins with `-`.
  */
 function requireValue(flag: string, raw: string | undefined): string {
-	if (raw === undefined || raw.startsWith("--")) throw new Error(`${flag} requires a value`);
+	if (raw === undefined || raw.startsWith("-")) throw new Error(`${flag} requires a value`);
 	return raw;
+}
+
+/**
+ * Mirrors PARENT_USER_ID_PATTERN in budget/allocation.ts, which stays authoritative
+ * — `costCenterUserId` still rejects anything this misses. Checking here buys only
+ * the message: the deep check can quote nothing but its own regex, which is noise
+ * to an operator who never set the value it is complaining about.
+ */
+const PARENT_USER_ID = /^[a-zA-Z0-9._@-]{1,128}$/;
+
+function parseParent(source: string, raw: string): string {
+	if (!PARENT_USER_ID.test(raw)) {
+		throw new Error(
+			`Invalid ${source}: ${forDisplay(raw)} (1-128 characters, letters/digits/. _ @ - only)`,
+		);
+	}
+	return raw;
+}
+
+/**
+ * Resolve the parent wallet: `--parent`, else the environment, else `local`.
+ *
+ * An environment variable set to the empty string — `export USERTRUST_USER_ID=$UNSET`
+ * in a container entrypoint — means the operator named no parent, so it takes the
+ * documented default. Passing "" through (as `??` does, since it substitutes for
+ * null/undefined only) fails the derivation instead, quoting an id charset at
+ * someone who never set an id.
+ */
+function resolveParentUserId(fromFlag: string | undefined): string {
+	if (fromFlag !== undefined) return fromFlag;
+	const fromEnv = process.env[PARENT_ENV_VAR];
+	if (fromEnv === undefined || fromEnv.trim() === "") return DEFAULT_PARENT_USER_ID;
+	// Deliberately validated untrimmed: ` acct_42 ` is a different wallet from
+	// `acct_42`, and quietly trimming into the second one is how a read lands on
+	// a wallet nobody named.
+	return parseParent(`$${PARENT_ENV_VAR}`, fromEnv);
 }
 
 function parseAllocated(raw: string): number {
 	const value = Number.parseInt(raw, 10);
 	// parseInt("1O0") === 1 (partial parse, capital O) and NaN comparisons are
 	// always false — either typo would quietly report a budget nobody granted.
-	// Require the WHOLE value to be a non-negative integer.
-	if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value)) {
-		throw new Error(`Invalid --allocated: ${forDisplay(raw)} (non-negative integer required)`);
+	// Require the WHOLE value to be an integer, and a POSITIVE one: 0 sends
+	// computeRunway down its `allocated <= 0` branch, which reports
+	// fractionRemaining 0 and projects exhaustion at `now`, so a cost center
+	// holding 750 UT prints "Balance: 750 UT" over "Remaining: 0 UT (0.0%)" and
+	// an exhaustion date of this instant — a report that contradicts itself.
+	if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value <= 0) {
+		throw new Error(`Invalid --allocated: ${forDisplay(raw)} (positive integer required)`);
 	}
 	return value;
 }
 
 /**
- * Full ISO-8601 date, optionally with a time, and optionally with an offset.
+ * A full ISO-8601 INSTANT: date, time, and an explicit UTC offset. Nothing looser.
  *
  * `Date.parse` is far looser than "ISO-8601": it reads `1000` as the year 1000,
- * `Dec 25` as this year's Christmas, and pads whitespace away. A typo'd
- * `--period-start 1000` therefore stretches the elapsed window by a millennium
- * and turns a real 180 UT/h burn into 1e-4 UT/h — a governance read that
- * fails open, the same bug class as the `parseInt("1O0")` one above. Requiring
- * the shape as well as parseability is what makes the flag mean what it says.
+ * `0` as 1 January 2000, `5` as May 2001, `Dec 25` as this year's Christmas, and
+ * pads whitespace away. A `--period-start 0` meant as "the start of the period"
+ * therefore opens a ~26-year window and turns a real 450-UT-in-an-hour burn into
+ * 0.00 UT/hour with an exhaustion date centuries out — a governance read that
+ * fails open, the same bug class as the `parseInt("1O0")` one above.
+ *
+ * The offset is REQUIRED and a bare date is refused because both are silently
+ * wrong rather than loudly wrong: a zone-less datetime is read in the HOST's
+ * timezone and a bare date at UTC midnight, so one string names two different
+ * instants on two machines and the window it opens is off by up to a day — which
+ * scales the burn rate by the same factor.
  */
-const ISO_8601 = /^\d{4}-\d{2}-\d{2}([T ]\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})?)?$/;
+const ISO_8601_INSTANT =
+	/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+/**
+ * Whether `year-month-day` is a date that exists.
+ *
+ * `Date.parse` rolls an impossible day over instead of failing: 2026-02-30 comes
+ * back as 2 March, a window silently two days wider than the one asked for. An
+ * out-of-range month, time, or offset needs no check here — for those it does
+ * return NaN.
+ */
+function isRealDate(year: number, month: number, day: number): boolean {
+	if (!Number.isInteger(month) || month < 1 || month > 12) return false;
+	const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+	const maxDay = month === 2 && leap ? 29 : (DAYS_IN_MONTH[month - 1] ?? 0);
+	return day >= 1 && day <= maxDay;
+}
 
 function parseIsoMs(flag: string, raw: string): number {
-	const ms = Date.parse(raw);
-	if (!ISO_8601.test(raw) || !Number.isFinite(ms)) {
+	const parts = ISO_8601_INSTANT.exec(raw);
+	// The space separator is normalized to `T` so the value is read by the spec's
+	// ISO parser rather than by V8's legacy heuristics; the shape is already fixed
+	// by the match, so the substitution is exact.
+	const ms = parts === null ? Number.NaN : Date.parse(raw.replace(" ", "T"));
+	if (
+		parts === null ||
+		!isRealDate(Number(parts[1]), Number(parts[2]), Number(parts[3])) ||
+		!Number.isFinite(ms)
+	) {
 		throw new Error(
-			`Invalid ${flag}: ${forDisplay(raw)} (ISO-8601 timestamp required, e.g. 2026-07-27T09:00:00Z)`,
+			`Invalid ${flag}: ${forDisplay(raw)} (ISO-8601 instant with an explicit timezone required, e.g. 2026-07-27T09:00:00Z)`,
 		);
 	}
 	return ms;
@@ -157,23 +243,38 @@ function parsePeriodStartMs(raw: string, nowMs: number): number {
 }
 
 function parseBudgetFlags(argv: string[], nowMs: number): BudgetFlags {
+	let parent: string | undefined;
 	let costCenter: string | undefined;
 	let allocated: number | undefined;
-	let periodStartMs: number | undefined;
-	let periodEndMs: number | undefined;
+	// The raw text travels with the parsed value so the cross-check below can quote
+	// the bounds back in the form the caller typed them.
+	let periodStart: { raw: string; ms: number } | undefined;
+	let periodEnd: { raw: string; ms: number } | undefined;
 
 	for (let i = 0; i < argv.length; i++) {
 		const arg = argv[i] as string;
-		const next = (): string | undefined => argv[++i];
-		if (arg === "--cost-center") costCenter = requireValue(arg, next());
-		else if (arg === "--allocated") allocated = parseAllocated(requireValue(arg, next()));
-		else if (arg === "--period-start")
-			periodStartMs = parsePeriodStartMs(requireValue(arg, next()), nowMs);
-		else if (arg === "--period-end") periodEndMs = parseIsoMs(arg, requireValue(arg, next()));
-		else if (arg.startsWith("--") && !KNOWN_BUDGET_FLAGS.has(arg)) {
-			// Reject unknown flags rather than ignoring them — a typoed --allocted
-			// must not silently report the runway of an allocation nobody set.
-			throw new Error(`Unknown flag: ${forDisplay(arg)}`);
+		const next = (): string => requireValue(arg, argv[++i]);
+		if (arg === "--cost-center") costCenter = next();
+		else if (arg === "--parent") parent = parseParent(arg, next());
+		else if (arg === "--allocated") allocated = parseAllocated(next());
+		else if (arg === "--period-start") {
+			const raw = next();
+			periodStart = { raw, ms: parsePeriodStartMs(raw, nowMs) };
+		} else if (arg === "--period-end") {
+			const raw = next();
+			periodEnd = { raw, ms: parseIsoMs(arg, raw) };
+		} else if (!KNOWN_BUDGET_FLAGS.has(arg)) {
+			// Reject EVERYTHING unrecognised, not just `--`-prefixed: a dropped dash
+			// (`-period-start 2026-07-01T00:00:00Z`) matches no comparison above, and
+			// falling through drops its VALUE on the next iteration too — the window
+			// then defaults to now and the command exits 0 reporting a 0.00 UT/hour
+			// burn, which is exactly what this guard exists to prevent. A bare
+			// positional is the same failure with no dash at all.
+			throw new Error(
+				arg.startsWith("-")
+					? `Unknown flag: ${forDisplay(arg)}. ${USAGE}`
+					: `Unexpected argument: ${forDisplay(arg)}. ${USAGE}`,
+			);
 		}
 	}
 
@@ -184,7 +285,30 @@ function parseBudgetFlags(argv: string[], nowMs: number): BudgetFlags {
 		throw new Error(`Missing required flag(s): ${missing.join(", ")}. ${USAGE}`);
 	}
 
-	return { costCenter, allocated, periodStartMs, periodEndMs };
+	// An end at or before the start is DISCARDED downstream — computeRunway keeps a
+	// period end only when it is strictly after the start — and `onPace` comes back
+	// null, printing "n/a": indistinguishable from a legitimately open-ended
+	// allocation. Swapped bounds must fail instead, because "unknown" is the one
+	// answer the flag was passed to rule out. Without `--period-start` the window
+	// opens at `now`, so that is the bound the end has to clear.
+	if (periodEnd !== undefined) {
+		const startMs = periodStart?.ms ?? nowMs;
+		if (periodEnd.ms <= startMs) {
+			throw new Error(
+				periodStart === undefined
+					? `Invalid --period-end: ${forDisplay(periodEnd.raw)} is not after now, and no --period-start was given`
+					: `Invalid --period-end: ${forDisplay(periodEnd.raw)} is not after --period-start ${forDisplay(periodStart.raw)}`,
+			);
+		}
+	}
+
+	return {
+		parentUserId: resolveParentUserId(parent),
+		costCenter,
+		allocated,
+		periodStartMs: periodStart?.ms,
+		periodEndMs: periodEnd?.ms,
+	};
 }
 
 /**
@@ -202,6 +326,18 @@ function formatExhaustion(ms: number | null): string {
 
 function field(label: string, value: string): string {
 	return `  ${`${label}:`.padEnd(22)}${value}`;
+}
+
+/**
+ * Argv fallback for a direct `run()` with no explicit args.
+ *
+ * `main.ts` always passes the already-stripped `rest`, but the bare argv still
+ * carries the `budget` subcommand token, which the catch-all unknown-argument
+ * guard would reject — the fallback would fail every time it was used.
+ */
+function processArgs(): string[] {
+	const argv = process.argv.slice(2);
+	return argv[0] === "budget" ? argv.slice(1) : argv;
 }
 
 export async function run(rootDir?: string, opts?: CliOptions, args?: string[]): Promise<void> {
@@ -225,7 +361,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 
 	let flags: BudgetFlags;
 	try {
-		flags = parseBudgetFlags(args ?? process.argv.slice(2), nowMs);
+		flags = parseBudgetFlags(args ?? processArgs(), nowMs);
 	} catch (err) {
 		fail(err instanceof Error ? err.message : String(err));
 		return;
@@ -248,7 +384,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 			clusterId: BigInt(config.tigerbeetle.clusterId),
 		});
 		status = await getBudgetStatus(tb, {
-			parentUserId: process.env.USERTRUST_USER_ID ?? DEFAULT_PARENT_USER_ID,
+			parentUserId: flags.parentUserId,
 			costCenter: flags.costCenter,
 			allocated: flags.allocated,
 			// No --period-start means a zero-length window, hence a zero burn rate.
@@ -277,6 +413,10 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 				success: true,
 				data: {
 					costCenter: flags.costCenter,
+					// The wallet the balance was read from. A cost center under the wrong
+					// parent reads as an implicit 0, so `balance` cannot be checked by a
+					// caller who cannot see which wallet produced it.
+					parent: flags.parentUserId,
 					balance,
 					allocated: flags.allocated,
 					spent,
@@ -293,6 +433,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 
 	const pct = (runway.fractionRemaining * 100).toFixed(1);
 	console.log(`${pc.bold("Cost center:")} ${flags.costCenter}`);
+	console.log(field("Parent wallet", flags.parentUserId));
 	console.log(field("Allocated", `${flags.allocated} UT`));
 	console.log(field("Spent", `${spent} UT`));
 	console.log(field("Balance", `${balance} UT`));
