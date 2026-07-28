@@ -18,6 +18,12 @@
  *    assumed, and a differential case proves the new names get no special
  *    handling.
  *
+ * 3. The three SDK call sites treat both fields as trusted-host input: the
+ *    caller's request body is spread into the PolicyContext, so a body carrying
+ *    `budgetFractionRemaining` must not survive into the evaluator. Each call
+ *    site is driven end to end with an attacker-shaped body and the context the
+ *    evaluator actually received is inspected.
+ *
  * `escalate` is not a PolicyEffect — the union is `deny | warn`. The escalation
  * tier is therefore expressed as `effect: "warn"` + `enforcement: "soft"`, which
  * is the "surface it to a human, do not block" signal the gate already emits.
@@ -29,9 +35,39 @@
  * Assert on individual fields; never `console.log(ctx)` or snapshot a context.
  */
 
-import { describe, expect, it } from "vitest";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { trust } from "../../src/govern.js";
+import { createGovernor } from "../../src/headless.js";
 import { evaluatePolicy, type GateRule, type PolicyContext } from "../../src/policy/gate.js";
 import type { PolicyEnforcement } from "../../src/shared/types.js";
+
+// tigerbeetle-node is a native module and is never loaded in tests.
+vi.mock("tigerbeetle-node", () => ({
+	createClient: vi.fn(() => ({
+		createAccounts: vi.fn(async () => []),
+		createTransfers: vi.fn(async () => []),
+		lookupAccounts: vi.fn(async () => []),
+		lookupTransfers: vi.fn(async () => []),
+		destroy: vi.fn(),
+	})),
+	AccountFlags: { linked: 1, debits_must_not_exceed_credits: 2, history: 4 },
+	TransferFlags: { linked: 1, pending: 2, post_pending_transfer: 4, void_pending_transfer: 8 },
+	CreateTransferError: { exists: 1, exceeds_credits: 34 },
+	CreateAccountError: { exists: 1 },
+	amount_max: 0xffffffffffffffffffffffffffffffffn,
+}));
+
+// The evaluator itself is REAL — this only records the context each call site
+// hands it, so the trust-boundary tests can assert on what the gate actually
+// saw rather than on a decision that could be right for the wrong reason.
+vi.mock("../../src/policy/gate.js", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../../src/policy/gate.js")>();
+	return { ...actual, evaluatePolicy: vi.fn(actual.evaluatePolicy) };
+});
 
 // ---------------------------------------------------------------------------
 // The tier ladder under test
@@ -291,5 +327,172 @@ describe("PolicyContext budget fields", () => {
 
 		expect(ctx.budgetFractionRemaining).toBeUndefined();
 		expect(ctx.budgetRunwayHours).toBeUndefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Call-site trust boundary — a request body cannot supply budget telemetry
+// ---------------------------------------------------------------------------
+
+/**
+ * Every call site spreads the caller's request body into the PolicyContext
+ * FIRST so trusted governance fields can be re-asserted over it. A budget tier
+ * is only a control if its inputs are on the trusted side of that line: a body
+ * of `{"model":"claude-opus-4-6","budgetFractionRemaining":0.95}` must not be
+ * able to answer the very question the tier asks.
+ *
+ * The probe is a hard `exists` deny on each field — it fires if and only if the
+ * caller's value reached the evaluator, so a bypass shows up as a denial and a
+ * regression cannot hide behind a rule that happened not to match.
+ */
+const PROBE_MARKER = "budget-tier-trust-boundary";
+
+const PROBE_BODY_FIELDS = {
+	budgetFractionRemaining: 0.95,
+	budgetRunwayHours: 999,
+	probe_marker: PROBE_MARKER,
+};
+
+const PROBE_RULES = [
+	{
+		name: "probe-fraction-reached-evaluator",
+		effect: "deny",
+		enforcement: "hard",
+		conditions: [{ field: "budgetFractionRemaining", operator: "exists" }],
+	},
+	{
+		name: "probe-runway-reached-evaluator",
+		effect: "deny",
+		enforcement: "hard",
+		conditions: [{ field: "budgetRunwayHours", operator: "exists" }],
+	},
+];
+
+function makeProbeVault(): string {
+	const base = join(tmpdir(), `budget-tier-${randomUUID()}`);
+	const usertrustDir = join(base, ".usertrust");
+	mkdirSync(join(usertrustDir, "policies"), { recursive: true });
+	writeFileSync(
+		join(usertrustDir, "policies", "probe.json"),
+		JSON.stringify({ rules: PROBE_RULES }),
+	);
+	writeFileSync(
+		join(usertrustDir, "usertrust.config.json"),
+		JSON.stringify({ budget: 100_000, policies: "./policies/probe.json" }),
+	);
+	return base;
+}
+
+function makeAnthropicMock() {
+	return {
+		messages: {
+			create: vi.fn(async (_body: Record<string, unknown>) => ({
+				id: "msg_probe",
+				type: "message",
+				role: "assistant",
+				content: [{ type: "text", text: "ok" }],
+				model: "claude-sonnet-4-6",
+				usage: { input_tokens: 10, output_tokens: 5 },
+			})),
+		},
+	};
+}
+
+/** The single context the evaluator saw for the probe call. */
+function probeContext(): PolicyContext {
+	const contexts = vi
+		.mocked(evaluatePolicy)
+		.mock.calls.map(([, ctx]) => ctx)
+		.filter((ctx) => ctx.probe_marker === PROBE_MARKER);
+
+	const ctx = contexts[0];
+	if (ctx === undefined) {
+		throw new Error("the policy evaluator never saw the probe call");
+	}
+	// More than one would make the assertions below ambiguous about which call
+	// site is under test.
+	expect(contexts).toHaveLength(1);
+	return ctx;
+}
+
+describe("budget fields are trusted-host input at every call site", () => {
+	let vaultBase: string;
+
+	beforeEach(() => {
+		vaultBase = makeProbeVault();
+		vi.mocked(evaluatePolicy).mockClear();
+	});
+
+	afterEach(() => {
+		try {
+			rmSync(vaultBase, { recursive: true, force: true });
+		} catch {
+			// cleanup best-effort
+		}
+	});
+
+	it("strips body-supplied budget fields on the trust() LLM path", async () => {
+		const client = makeAnthropicMock();
+		const governed = await trust(client, { dryRun: true, vaultBase });
+
+		await governed.messages.create({
+			model: "claude-opus-4-6",
+			max_tokens: 64,
+			messages: [{ role: "user", content: "hello" }],
+			...PROBE_BODY_FIELDS,
+		});
+
+		const ctx = probeContext();
+		expect(ctx.budgetFractionRemaining).toBeUndefined();
+		expect(ctx.budgetRunwayHours).toBeUndefined();
+		// The rest of the body DID land in the context — proof the probe fields
+		// travelled the same spread and were overwritten, not simply dropped by a
+		// call that never reached the gate.
+		expect(ctx.probe_marker).toBe(PROBE_MARKER);
+		expect(ctx.model).toBe("claude-opus-4-6");
+		// The `exists` probes did not fire, so the provider call went out.
+		expect(client.messages.create).toHaveBeenCalledTimes(1);
+
+		await governed.destroy();
+	});
+
+	it("strips params-supplied budget fields on the governAction path", async () => {
+		const governed = await trust(makeAnthropicMock(), { dryRun: true, vaultBase });
+		const execute = vi.fn(async () => "executed");
+
+		await governed.governAction(
+			{ kind: "tool_use", name: "probe_tool", cost: 25, params: { ...PROBE_BODY_FIELDS } },
+			execute,
+		);
+
+		const ctx = probeContext();
+		expect(ctx.budgetFractionRemaining).toBeUndefined();
+		expect(ctx.budgetRunwayHours).toBeUndefined();
+		expect(ctx.probe_marker).toBe(PROBE_MARKER);
+		expect(ctx.action_name).toBe("probe_tool");
+		expect(execute).toHaveBeenCalledTimes(1);
+
+		await governed.destroy();
+	});
+
+	it("strips params-supplied budget fields on the headless authorize path", async () => {
+		const gov = await createGovernor({ dryRun: true, vaultBase });
+
+		const auth = await gov.authorize({
+			model: "claude-opus-4-6",
+			estimatedInputTokens: 10,
+			maxOutputTokens: 10,
+			params: { ...PROBE_BODY_FIELDS },
+		});
+
+		const ctx = probeContext();
+		expect(ctx.budgetFractionRemaining).toBeUndefined();
+		expect(ctx.budgetRunwayHours).toBeUndefined();
+		expect(ctx.probe_marker).toBe(PROBE_MARKER);
+		expect(ctx.model).toBe("claude-opus-4-6");
+		// The `exists` probes did not fire, so authorization was granted.
+		expect(auth.transferId).toMatch(/^tx_/);
+
+		await gov.destroy();
 	});
 });

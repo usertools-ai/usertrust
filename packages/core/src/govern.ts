@@ -580,6 +580,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					estimated_cost: estimatedCost,
 					budget_remaining: config.budget - budgetSpent - inFlightHoldTotal,
 					budget_remaining_after: config.budget - budgetSpent - inFlightHoldTotal - estimatedCost,
+					// P1-BUDGET-TIER-SHADOW: the budget tier fields are trusted-host input.
+					// This path knows no cost-center allocation, so the honest value is
+					// ABSENT — and asserting it here is what stops a request body from
+					// supplying its own `budgetFractionRemaining` and satisfying a tier
+					// that guards frontier spend. An `exists`-guarded rule then simply
+					// does not match; it never matches an attacker's number.
+					budgetFractionRemaining: undefined,
+					budgetRunwayHours: undefined,
 				});
 				if (policyResult.decision === "deny") {
 					const reason =
@@ -1651,6 +1659,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					budget_remaining: config.budget - budgetSpent - inFlightHoldTotal,
 					budget_remaining_after: config.budget - budgetSpent - inFlightHoldTotal - action.cost,
 					tier: config.tier,
+					// P1-BUDGET-TIER-SHADOW: trusted-host input, asserted ABSENT here so
+					// `action.params` cannot inject a budget tier's own inputs. See the
+					// same assertion on the LLM path above.
+					budgetFractionRemaining: undefined,
+					budgetRunwayHours: undefined,
 				});
 				if (policyResult.decision === "deny") {
 					const reason =

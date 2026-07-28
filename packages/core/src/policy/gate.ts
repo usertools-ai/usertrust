@@ -345,7 +345,29 @@ export interface PolicyContext extends Record<string, unknown> {
 	 * Budget telemetry for the cost center funding this call. Both fields are
 	 * OPTIONAL and purely additive: they let the existing numeric operators
 	 * express a degradation ladder, so no new operator and no evaluator change
-	 * is involved. Populate them from `getBudgetStatus()` at the call site.
+	 * is involved.
+	 *
+	 * TRUSTED HOST INPUT ONLY. They are governance inputs, so only the host that
+	 * owns the allocation may write them — never a request body. `trust()` and
+	 * `createGovernor()` spread the caller's LLM params into the context and then
+	 * re-assert BOTH fields as `undefined`, so a client posting
+	 * `{"budgetFractionRemaining": 0.95}` cannot make a budget tier look
+	 * satisfied; those SDK paths know no cost-center allocation, so the honest
+	 * value there is "absent". A host that does know the allocation reads it
+	 * itself and calls `evaluatePolicy` with a context it built:
+	 *
+	 * ```ts
+	 * const status = await getBudgetStatus(tb, {
+	 *   parentUserId, costCenter, allocated, periodStartMs,
+	 * });
+	 * const hours = runwayHours(status.runway, nowMs); // null when not projectable
+	 * evaluatePolicy(rules, {
+	 *   model,
+	 *   budgetFractionRemaining: status.runway.fractionRemaining,
+	 *   // omit rather than coerce: null means "no projection", not "0 hours left"
+	 *   ...(hours === null ? {} : { budgetRunwayHours: hours }),
+	 * });
+	 * ```
 	 *
 	 * ```ts
 	 * // deny frontier models below 30% of the allocation
@@ -367,7 +389,14 @@ export interface PolicyContext extends Record<string, unknown> {
 	 */
 
 	/**
-	 * 0..1 share of the cost center's allocation still available.
+	 * 0..1 share of the cost center's allocation still available —
+	 * `getBudgetStatus(...).runway.fractionRemaining`, already clamped to 0..1 by
+	 * `computeRunway`. It is nested under `runway`; the `BudgetStatus` root
+	 * carries only `costCenterUserId`, `balance`, and `runway`.
+	 *
+	 * Declared `| undefined` so a call site under `exactOptionalPropertyTypes`
+	 * can write the field explicitly as `undefined` to overwrite an untrusted
+	 * inbound value; `exists` reads the result as absent either way.
 	 *
 	 * ⚠️ WARNING — A TIER ON THIS FIELD CANNOT FIRE YET. Nothing in this
 	 * repository debits a cost-center wallet: the metering path spends from a
@@ -379,22 +408,26 @@ export interface PolicyContext extends Record<string, unknown> {
 	 * do not rely on the tier until the spend path debits the cost-center wallet.
 	 * See the module doc comment in `budget/allocation.ts`.
 	 */
-	budgetFractionRemaining?: number;
+	budgetFractionRemaining?: number | undefined;
 	/**
 	 * Hours until projected exhaustion at the current burn rate. A naive linear
 	 * extrapolation — noisy early in a period, so prefer it for escalation
 	 * rather than irreversible action.
 	 *
-	 * Derive it with `runwayHours(runway, nowMs)` from `budget/runway.js`, and
-	 * leave the field ABSENT when that returns null. Computing it inline as
-	 * `(runway.projectedExhaustionMs - nowMs) / 3.6e6` coerces the not-projectable
-	 * case to a large negative number, which makes every `lt` threshold match and
-	 * escalates a budget that is merely idle.
+	 * There is no hours field on `BudgetStatus`: derive it with
+	 * `runwayHours(status.runway, nowMs)` from `budget/runway.js`, and leave the
+	 * field ABSENT when that returns null. `Runway` exposes only
+	 * `projectedExhaustionMs: number | null`, and computing hours inline as
+	 * `(projectedExhaustionMs - nowMs) / 3.6e6` coerces the not-projectable case
+	 * — `null`, which is what a period with nothing spent yet reports — to a
+	 * large negative number, which makes every `lt` threshold match and escalates
+	 * a budget that is merely idle.
 	 *
-	 * The metering warning on {@link PolicyContext.budgetFractionRemaining}
-	 * applies to this field too.
+	 * `| undefined` for the same reason as
+	 * {@link PolicyContext.budgetFractionRemaining}, and the metering warning
+	 * there applies to this field too.
 	 */
-	budgetRunwayHours?: number;
+	budgetRunwayHours?: number | undefined;
 }
 
 /**

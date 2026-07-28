@@ -582,6 +582,14 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					estimated_cost: estCost,
 					budget_remaining: config.budget - budgetSpent - inFlightHoldTotal,
 					budget_remaining_after: config.budget - budgetSpent - inFlightHoldTotal - estCost,
+					// P1-BUDGET-TIER-SHADOW: the budget tier fields are trusted-host input.
+					// The governor knows no cost-center allocation, so the honest value is
+					// ABSENT — and asserting it here is what stops `params.params` from
+					// supplying its own `budgetFractionRemaining` and satisfying a tier
+					// that guards frontier spend. An `exists`-guarded rule then simply
+					// does not match; it never matches an attacker's number.
+					budgetFractionRemaining: undefined,
+					budgetRunwayHours: undefined,
 				});
 				if (policyResult.decision === "deny") {
 					const reason =
