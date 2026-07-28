@@ -757,6 +757,71 @@ describe("usertrust budget — parent wallet", () => {
 		expect(logOutput.join("\n")).toMatch(/--cost-center requires a value/);
 		expect(process.exitCode).toBe(1);
 	});
+
+	it("points at the inline form rather than leaving the operator guessing", async () => {
+		makeVault();
+
+		await run(tempDir, { json: false }, ["--parent", "-cc-", "--cost-center", "research"]);
+
+		expect(logOutput.join("\n")).toMatch(/write --parent=-cc- to pass it literally/);
+		expect(process.exitCode).toBe(1);
+	});
+
+	// `-cc-` is a legal parent id and a legal cost center. The space-separated form
+	// cannot accept it without also accepting a dropped dash, so `=` is the way in.
+	it("accepts a leading-dash parent through --parent=", async () => {
+		makeVault();
+		setBalance(750);
+
+		await run(tempDir, { json: true }, [
+			"--parent=-cc-",
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+		]);
+
+		const out = jsonOut();
+		expect(out.success).toBe(true);
+		expect(out.data.parent).toBe("-cc-");
+		expect(process.exitCode).toBe(0);
+	});
+
+	it("accepts a leading-dash cost center through --cost-center=", async () => {
+		makeVault();
+		setBalance(750);
+
+		await run(tempDir, { json: true }, ["--cost-center=-cc-", "--allocated", "1000"]);
+
+		const out = jsonOut();
+		expect(out.success).toBe(true);
+		expect(out.data.costCenter).toBe("-cc-");
+		expect(process.exitCode).toBe(0);
+	});
+
+	it("rejects an inline form with no value", async () => {
+		makeVault();
+
+		await run(tempDir, { json: false }, ["--cost-center=", "--allocated", "1000"]);
+
+		expect(logOutput.join("\n")).toMatch(/--cost-center requires a value/);
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("still rejects an unknown flag written in the inline form", async () => {
+		makeVault();
+
+		await run(tempDir, { json: false }, [
+			"--nope=1",
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+		]);
+
+		expect(logOutput.join("\n")).toMatch(/Unknown flag: --nope/);
+		expect(process.exitCode).toBe(1);
+	});
 });
 
 /**

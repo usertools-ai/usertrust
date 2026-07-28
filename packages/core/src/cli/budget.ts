@@ -111,11 +111,15 @@ function forDisplay(raw: string): string {
  *
  * A SINGLE dash is refused for the same reason: `-x` also matches the wallet
  * charset, so `--parent -x` would read `-x::research` rather than reject a
- * dropped dash. No value this command accepts — an id, a cost center, a count,
- * an ISO instant — legitimately begins with `-`.
+ * dropped dash. `-cc-` IS a legal cost center, so the refusal costs reach —
+ * hence `--flag=value`, which binds unambiguously and is the way to name one.
+ * The message says so rather than leaving the operator to guess.
  */
-function requireValue(flag: string, raw: string | undefined): string {
-	if (raw === undefined || raw.startsWith("-")) throw new Error(`${flag} requires a value`);
+function requireValue(flag: string, raw: string | undefined, inline: boolean): string {
+	if (raw === undefined || raw === "") throw new Error(`${flag} requires a value`);
+	if (!inline && raw.startsWith("-")) {
+		throw new Error(`${flag} requires a value (write ${flag}=${raw} to pass it literally)`);
+	}
 	return raw;
 }
 
@@ -252,8 +256,15 @@ function parseBudgetFlags(argv: string[], nowMs: number): BudgetFlags {
 	let periodEnd: { raw: string; ms: number } | undefined;
 
 	for (let i = 0; i < argv.length; i++) {
-		const arg = argv[i] as string;
-		const next = (): string => requireValue(arg, argv[++i]);
+		const token = argv[i] as string;
+		// `--flag=value` is split here so the rest of the loop sees one shape. The
+		// inline form is the only way to pass a value beginning with `-`: bound by
+		// `=`, it cannot be a dropped dash, so `requireValue`'s refusal is lifted.
+		const eq = token.startsWith("--") ? token.indexOf("=") : -1;
+		const arg = eq > 2 ? token.slice(0, eq) : token;
+		const inline = eq > 2 ? token.slice(eq + 1) : undefined;
+		const next = (): string =>
+			inline === undefined ? requireValue(arg, argv[++i], false) : requireValue(arg, inline, true);
 		if (arg === "--cost-center") costCenter = next();
 		else if (arg === "--parent") parent = parseParent(arg, next());
 		else if (arg === "--allocated") allocated = parseAllocated(next());
