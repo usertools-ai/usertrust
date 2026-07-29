@@ -23,7 +23,11 @@ import {
 	readAnchorIdentity,
 	resumeAnchorMirror,
 } from "../../../src/audit/anchor.js";
-import { anchorPayloadHash, parseAnchorRecord } from "../../../src/audit/anchor-verify.js";
+import {
+	type AnchorRecord,
+	anchorPayloadHash,
+	parseAnchorRecord,
+} from "../../../src/audit/anchor-verify.js";
 import { canonicalize } from "../../../src/audit/canonical.js";
 import { createAuditWriter } from "../../../src/audit/chain.js";
 import { exitCodeForAnchored } from "../../../src/audit/verify.js";
@@ -379,6 +383,115 @@ describe("finding 11: resume validates the supplied record cryptographically", (
 		await anchorOnce(s); // high-water 2
 		unlinkSync(join(s.vaultPath, "audit", "anchors", "anchors.jsonl"));
 		expect(() => resumeAnchorMirror(s.root, canonicalize(r1))).toThrow(/high-water/);
+	});
+
+	it("rejects a forged rotation handoff naming the victim's key as the successor", async () => {
+		const s = await makeAnchoredVault(3);
+		const r1 = await anchorOnce(s);
+		const victimKeyId = readAnchorIdentity(s.root)?.keyId;
+		expect(victimKeyId).toBeDefined();
+		const attacker = await makeAnchoredVault(1);
+		// A rotation record naming the victim's CURRENT key as the successor.
+		// The payload is r1's, so `forged.keyId` is the VICTIM's key — it IS in
+		// the victim's keyHistory and the lookup SUCCEEDS. What kills the forgery
+		// is the Ed25519 check that follows: the attacker's signature does not
+		// verify under the key the record names as its signer.
+		const { sig: _sig, ...payload } = r1;
+		const forged = signRecord(
+			{
+				...payload,
+				rotation: {
+					nextKeyId: victimKeyId as string,
+					nextPublicKeySpki: readAnchorIdentity(attacker.root)?.publicKeySpki as string,
+				},
+			},
+			attacker.keyFile,
+		);
+		unlinkSync(join(s.vaultPath, "audit", "anchors", "anchors.jsonl"));
+		expect(() => resumeAnchorMirror(s.root, canonicalize(forged))).toThrow(
+			/does not verify under this vault's current anchor key/,
+		);
+	});
+
+	it("rejects a handoff whose signer key is absent from the vault's key history", async () => {
+		const s = await makeAnchoredVault(3);
+		const r1 = await anchorOnce(s);
+		const victimKeyId = readAnchorIdentity(s.root)?.keyId as string;
+		const attacker = await makeAnchoredVault(1);
+		const attackerIdentity = readAnchorIdentity(attacker.root);
+		// Same handoff shape, but the record also CLAIMS the attacker's keyId — a
+		// key this vault has never anchored under. The keyHistory lookup returns
+		// undefined, so there is no key to verify against; that branch must fail
+		// closed rather than fall through to an unauthenticated accept.
+		const { sig: _sig, ...payload } = r1;
+		const forged = signRecord(
+			{
+				...payload,
+				keyId: attackerIdentity?.keyId as string,
+				rotation: {
+					nextKeyId: victimKeyId,
+					nextPublicKeySpki: attackerIdentity?.publicKeySpki as string,
+				},
+			},
+			attacker.keyFile,
+		);
+		unlinkSync(join(s.vaultPath, "audit", "anchors", "anchors.jsonl"));
+		expect(() => resumeAnchorMirror(s.root, canonicalize(forged))).toThrow(
+			/does not verify under this vault's current anchor key/,
+		);
+	});
+
+	it("rejects a rotation block grafted onto a genuine record (rotation is inside the pre-image)", async () => {
+		const s = await makeAnchoredVault(3);
+		const r1 = await anchorOnce(s);
+		const attacker = await makeAnchoredVault(1);
+		// Anchor records are public, so an attacker starts from a GENUINE one and
+		// only adds a handoff INTO this vault's current keyId — deliberately NOT
+		// re-signed, because the whole point is that r1's own signature no longer
+		// covers the modified content. Nothing else stops this: the signer is in
+		// keyHistory and the record sits AT the high-water, so if `rotation` ever
+		// left the signing pre-image the graft would resume clean and publish an
+		// attacker-chosen nextPublicKeySpki for this vault's current keyId as the
+		// mirror tail. anchorSigningPreimage — canonicalize(record − sig) — is
+		// what forbids that, and it lives in anchor-verify.ts, a file mirrored
+		// into packages/verify and therefore under independent change pressure.
+		const grafted: AnchorRecord = {
+			...r1,
+			rotation: {
+				nextKeyId: readAnchorIdentity(s.root)?.keyId as string,
+				nextPublicKeySpki: readAnchorIdentity(attacker.root)?.publicKeySpki as string,
+			},
+		};
+		unlinkSync(join(s.vaultPath, "audit", "anchors", "anchors.jsonl"));
+		expect(() => resumeAnchorMirror(s.root, canonicalize(grafted))).toThrow(
+			/does not verify under this vault's current anchor key/,
+		);
+	});
+
+	it("still accepts a genuine rotation handoff signed by the superseded key", async () => {
+		const s = await makeAnchoredVault(3);
+		await anchorOnce(s);
+		await rotateOnce(s); // rotation record is signed by the OLD key
+		const rotationRecord = storeRecords(s).at(-1);
+		expect(rotationRecord?.rotation).toBeDefined();
+		unlinkSync(join(s.vaultPath, "audit", "anchors", "anchors.jsonl"));
+		const resumed = resumeAnchorMirror(s.root, canonicalize(rotationRecord as AnchorRecord));
+		expect(resumed.anchorSeq).toBe(rotationRecord?.anchorSeq);
+	});
+
+	it("fails closed on a handoff when the identity predates keyHistory", async () => {
+		const s = await makeAnchoredVault(3);
+		await anchorOnce(s);
+		await rotateOnce(s);
+		const rotationRecord = storeRecords(s).at(-1);
+		// Simulate a pre-keyHistory identity: strip the field entirely.
+		const idPath = join(s.vaultPath, "audit", "anchors", "identity.json");
+		const { keyHistory: _kh, ...legacy } = JSON.parse(readFileSync(idPath, "utf-8"));
+		writeFileSync(idPath, JSON.stringify(legacy));
+		unlinkSync(join(s.vaultPath, "audit", "anchors", "anchors.jsonl"));
+		expect(() => resumeAnchorMirror(s.root, canonicalize(rotationRecord as AnchorRecord))).toThrow(
+			/does not verify under this vault's current anchor key/,
+		);
 	});
 });
 
