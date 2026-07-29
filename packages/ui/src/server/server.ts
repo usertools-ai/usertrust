@@ -138,7 +138,23 @@ export async function createUiServer(
 			}
 		}
 
-		const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
+		// Node accepts an absolute-form request target (RFC 9112 §3.2.2) and hands
+		// it to the handler verbatim in `req.url`, so a client controls the whole
+		// string `new URL` parses — `GET http://foo:999999/`, `http://%/`,
+		// `http://[::1/` all throw here. Unguarded, that throw escapes the handler
+		// with no response written: the connection hangs and, since nothing in
+		// `packages/ui` installs an `uncaughtException` handler, the process dies.
+		// The Host guard above does not cover this — the Host *header* is
+		// independent of the request *target*, and a real loopback Host walks
+		// straight through it. This runs before every route, so it is the only
+		// place the whole surface can be closed at once.
+		let url: URL;
+		try {
+			url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
+		} catch {
+			sendJson(res, 400, { error: "malformed request target" });
+			return;
+		}
 		if (url.pathname === "/api/summary" && req.method === "GET") {
 			sendJson(res, 200, state.summary);
 			return;
@@ -220,7 +236,23 @@ export async function createUiServer(
 			return;
 		}
 		if (url.pathname.startsWith("/api/verify/") && req.method === "GET") {
-			const txId = decodeURIComponent(url.pathname.slice("/api/verify/".length));
+			// `decodeURIComponent` throws URIError on malformed percent-encoding
+			// (`%`, `%zz`, `%E0%A4%A`). `new URL` does NOT reject those — it carries
+			// an invalid escape through to `pathname` untouched — so the guard above
+			// cannot stand in for this one, and this one cannot stand in for that:
+			// they cover disjoint inputs and both are required. Unwrapped inside a
+			// request handler, this throw escapes to the top level and terminates the
+			// usertrust-ui process. The catch stays around this call alone:
+			// `verifyTransaction` reports found/valid through its result object rather
+			// than by throwing, so widening the catch would relabel a genuine server
+			// fault (an unreadable vault) as a client 400.
+			let txId: string;
+			try {
+				txId = decodeURIComponent(url.pathname.slice("/api/verify/".length));
+			} catch {
+				sendJson(res, 400, { error: "malformed percent-encoding in transaction id" });
+				return;
+			}
 			const result = verifyTransaction(vaultPath, txId);
 			sendJson(res, result.found ? 200 : 404, result);
 			return;
