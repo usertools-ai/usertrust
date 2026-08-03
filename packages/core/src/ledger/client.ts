@@ -72,6 +72,13 @@ export const XFER_BUDGET_GRANT = 9;
  */
 const RESERVED_ID_SEPARATOR = "::";
 
+// Domain tag for cost-center account derivation. Versioned so a future encoding change can
+// coexist; deliberately NOT "wallet:"-prefixed — prefix disjointness from deriveAccountId's
+// preimages is the entire separation mechanism (flags cannot distinguish cost-center wallets).
+// Any future domain tag must be prefix-free against every existing tag, or two domains could
+// share preimages. The KAT suite pins these bytes: changing them breaks every known answer.
+const COST_CENTER_DOMAIN_TAG = Buffer.from("usertrust:cost-center:v1", "utf8");
+
 export interface TrustTBClientOptions {
 	addresses: string[];
 	clusterId?: bigint;
@@ -202,6 +209,30 @@ export class TrustTBClient {
 	static deriveAccountId(userId: string): bigint {
 		const hash = createHash("sha256").update(`wallet:${userId}`).digest("hex");
 		return BigInt(`0x${hash.slice(0, 32)}`);
+	}
+
+	/**
+	 * Cost-center account ids hash the (parent, costCenter) TUPLE — domain-separated from the
+	 * "wallet:" namespace and length-prefixed with UTF-8 byte lengths — never a joined string.
+	 * Pure and total over strings: no validation, no Unicode normalization (both live at the
+	 * doors); normalizing here would alias two byte strings to one account. The length prefixes
+	 * are what make ("ab","c") ≠ ("a","bc") regardless of charset, which is what lets parent ids
+	 * contain ":" (issue #64). Length prefixes count UTF-8 BYTES. Code-unit counts would be
+	 * injective too, but a reimplementation reading "length" the other way derives different ids
+	 * for every multibyte parent — silent cross-implementation divergence, which the multibyte
+	 * KAT in the test suite pins shut.
+	 */
+	static deriveCostCenterAccountId(parentUserId: string, costCenter: string): bigint {
+		const parent = Buffer.from(parentUserId, "utf8");
+		const cc = Buffer.from(costCenter, "utf8");
+		const lenParent = Buffer.alloc(4);
+		lenParent.writeUInt32BE(parent.length);
+		const lenCc = Buffer.alloc(4);
+		lenCc.writeUInt32BE(cc.length);
+		const digest = createHash("sha256")
+			.update(Buffer.concat([COST_CENTER_DOMAIN_TAG, lenParent, parent, lenCc, cc]))
+			.digest("hex");
+		return BigInt(`0x${digest.slice(0, 32)}`);
 	}
 
 	/**

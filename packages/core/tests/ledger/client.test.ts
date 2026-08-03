@@ -108,6 +108,55 @@ describe("TrustTBClient", () => {
 		});
 	});
 
+	describe("deriveCostCenterAccountId — tuple domain separation", () => {
+		// Known answers computed OUTSIDE the implementation (spec: sha256("usertrust:cost-center:v1"
+		// ‖ u32be(|p|) ‖ p ‖ u32be(|c|) ‖ c), first 16 bytes). Spelled out, never imported, so this
+		// suite polices the derivation instead of following it — including any domain-tag change.
+		it("matches the pinned known answer for (acme, billing)", () => {
+			expect(TrustTBClient.deriveCostCenterAccountId("acme", "billing")).toBe(
+				153698412649693138325753473963527840061n,
+			);
+		});
+		it("matches the pinned known answer for a colon-bearing parent", () => {
+			expect(TrustTBClient.deriveCostCenterAccountId("acct:123", "research")).toBe(
+				112969331358731418235272055848009854886n,
+			);
+		});
+		it("is disjoint from the wallet namespace", () => {
+			// 339169140118482546062612604151268776219n = sha256("wallet:acme::billing") first 128
+			// bits, spelled out so this proof does not follow a change in either derivation.
+			const id = TrustTBClient.deriveCostCenterAccountId("acme", "billing");
+			expect(id).not.toBe(339169140118482546062612604151268776219n);
+			expect(id).not.toBe(TrustTBClient.deriveAccountId("acme"));
+			expect(id).not.toBe(TrustTBClient.deriveAccountId("billing"));
+			expect(id).not.toBe(TrustTBClient.deriveAccountId("acme::billing"));
+		});
+		it("length prefixes make boundary shifts distinct", () => {
+			const d = TrustTBClient.deriveCostCenterAccountId.bind(TrustTBClient);
+			expect(d("ab", "c")).not.toBe(d("a", "bc"));
+			expect(d("a:", "b")).not.toBe(d("a", ":b"));
+			expect(d("a::b", "c")).not.toBe(d("a", "b::c"));
+			expect(d("a", "")).not.toBe(d("", "a"));
+		});
+		it("is byte-exact: no Unicode normalization, UTF-8 byte-length prefixes", () => {
+			const d = TrustTBClient.deriveCostCenterAccountId.bind(TrustTBClient);
+			// NFC "é" (2 bytes, \u00e9) vs NFD "é" (3 bytes, "e" + \u0301 combining
+			// acute): canonically equivalent, different bytes, MUST derive different ids --
+			// normalizing would alias two byte strings to one account. Written with explicit
+			// \u escapes, not the literal glyph, so the NFC/NFD distinction survives any
+			// encoding-lossy round trip through an editor, terminal, or diff tool.
+			expect(d("\u00e9", "x")).not.toBe(d("e\u0301", "x"));
+			// Pins the BYTE-length prefix: a code-unit prefix writes 1 for "é" and derives
+			// 68069851642113482633497729179357140435n instead. Computed outside the implementation.
+			expect(d("\u00e9", "x")).toBe(7822644739665374224199629721231252559n);
+		});
+		it("is pure and total over strings — validation lives at the doors, not here", () => {
+			// Deterministic on any input, hostile or not (mirrors deriveAccountId's contract).
+			const d = TrustTBClient.deriveCostCenterAccountId.bind(TrustTBClient);
+			expect(d("\x00\x1b[2J", ":::")).toBe(d("\x00\x1b[2J", ":::"));
+		});
+	});
+
 	describe("createUserWallet", () => {
 		it("creates account and returns account ID", async () => {
 			mockCreateAccounts.mockResolvedValueOnce([]);
