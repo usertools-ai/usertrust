@@ -147,28 +147,123 @@ wallet.
 broad catch swallows `exists_with_different_flags`, i.e. an account missing its
 `debits_must_not_exceed_credits` enforcement. No catch is strictly better than a broad one.
 
-**`::` is a reserved separator in the wallet-id namespace.**
-`deriveAccountId(userId)` is `SHA-256("wallet:" + userId)`. Three kinds of name hash into that one
-namespace: derived cost-center ids (`parent::costCenter`), ordinary wallet ids, and **escrow
-labels** — `ensureEscrowAccount` derives from the raw label, so `ensureEscrowAccount("alice")` and
+**Ordinary wallet ids and escrow labels share one namespace, and collide only safely.**
+`deriveAccountId(userId)` is `SHA-256("wallet:" + userId)`, read as a u128 from the digest's first 16
+bytes. Two kinds of name hash into that one namespace: ordinary wallet ids and **escrow labels** —
+`ensureEscrowAccount` derives from the raw label, so `ensureEscrowAccount("alice")` and
 `createUserWallet("alice")` compute the same account id, and collide *safely* only because their
-differing flags make TigerBeetle answer `exists_with_different_flags`. `::` is therefore refused at
-*every* door: `createUserWallet` (unless `{ derived: true }`) and `ensureEscrowAccount`.
+differing flags (escrow carries no `debits_must_not_exceed_credits`) make TigerBeetle answer
+`exists_with_different_flags` rather than silently sharing a balance.
 
-The `{ derived: true }` guard has **three** clauses, not two: exactly two parts, neither part empty,
-and **neither part containing a `:` of its own**. The third is load-bearing. `"a:::b".split("::")`
-is `["a", ":b"]` — two non-empty parts, which satisfies the first two clauses — and that id is
-reachable from parent `a` + cost center `:b` *and* from parent `a:` + cost center `b`: two owners,
-one account.
+Cost-center ids are **no longer** a third member of this namespace, which is why `createUserWallet`
+no longer takes a `{ derived: true }` opt-in: it takes one argument. See the next invariant for what
+replaced that reservation — and the one after it for why `::` is still refused anyway, on entirely
+different grounds.
 
-What makes the first `::` split unambiguous in the first place is that `PARENT_USER_ID_PATTERN` and
-`COST_CENTER_PATTERN` both **exclude `:`**. Those charsets are a security boundary, not input
-cosmetics. Widen either to support namespaced tenant ids (`acme:eu`) and the derivation stops being
-injective, reopening exactly the sweep below. Namespaced ids need a different derivation — hash the
-`(parent, costCenter)` tuple rather than a joined string — never a wider charset.
-*Prevents:* an integrator wallet literally named `acme::billing` sharing a TigerBeetle account with
-the `billing` cost center of `acme`, so `reclaimBudget("acme", "billing")` sweeps a stranger's
-balance.
+**`::` is QUARANTINED out of the `wallet:` namespace — a legacy-name refusal, not a derivation
+reservation.** Every id that hashes through `deriveAccountId` refuses it: `createUserWallet`,
+`ensureEscrowAccount`, and (via the shared `parentUserIdRefusal` in `shared/ids.ts`) every
+`parentUserId` reaching `createCostCenterWallet` or `costCenterUserId`. A **single** `:` stays legal
+everywhere a parent id is — `acct:123`, `acme:eu:prod` — which is what issue #64 actually asked for.
+Only the doubled separator is quarantined.
+*Prevents:* on a cluster upgraded from v2.x, an unreclaimed cost center still occupies
+`deriveAccountId("parent::cc")` — the account the retired joined-string derivation funded — carrying
+`CODE_USER_WALLET` and **exactly** an ordinary wallet's flags. Without the refusal, v3
+`createUserWallet("parent::cc")` hashes straight onto it and TigerBeetle answers bare `exists`, not
+`exists_with_different_flags`; the door reads that as success per the `exists` IS SUCCESS invariant
+above, and a brand-new wallet silently **adopts** the stranded legacy balance under a different
+owner's name. Nothing errors on either side. The documented reclaim-before-upgrade migration does
+not close this on its own: a hold that was pending at upgrade time and is voided afterwards returns
+its funds to the legacy account, re-stranding a balance in an account a clean migration had already
+emptied.
+*Why refusal rather than a read-fallback or a migration framework:* a legacy read-fallback would
+have to resolve `parent::cc` in two namespaces at once, reintroducing exactly the ambiguity the tuple
+hash removed; a migration framework is heavyweight for names that were **never legal** — `::` was
+refused at these same doors on every released version before v3, so quarantining it costs no
+existing caller anything.
+*Escrow's flags differ from a wallet's today*, so `ensureEscrowAccount("parent::cc")` would in fact
+hit `exists_with_different_flags` and throw. The refusal is there anyway, because that is a property
+of the current account codes and not of the names: an escrow account created with wallet flags — or
+a legacy one predating the current escrow flags — turns the mismatch back into a bare `exists`. The
+quarantine holds at *every* door into the namespace, not only where a flag mismatch happens to save
+us.
+*The CLI mirrors it.* `cli/budget.ts` carries `LEGACY_COST_CENTER_SEPARATOR` beside its
+`PARENT_USER_ID` charset mirror, both held byte-identical to `shared/ids.ts` by the source-parity
+test. The charset alone is **not** the rule: `::` matches `PARENT_USER_ID_PATTERN` and is refused
+anyway, so a CLI mirroring only the regex would admit parent ids the ledger rejects. Both refusal
+messages are deliberately distinct for the same reason — quoting the charset at an operator who
+passed `acme::billing` describes a rule that plainly admits their id.
+
+**Cost-center account ids hash the `(parent, costCenter)` TUPLE, in a domain of their own.**
+`TrustTBClient.deriveCostCenterAccountId(parentUserId, costCenter)` is
+
+```
+sha256( "usertrust:cost-center:v1" ‖ u32be(byteLen(parent)) ‖ parent ‖ u32be(byteLen(cc)) ‖ cc )
+```
+
+read big-endian as a u128 from the digest's **first 16 BYTES**. Bytes, not hex characters: the
+implementation spells that as `digest("hex").slice(0, 32)`, and 32 hex chars *are* the first 16
+bytes — a reimplementation that sliced 16 hex characters would build every account id out of 8 bytes
+of entropy. Nothing joins the pair into a string, and no cost-center account is the hash of any
+single name. The known answers in `packages/core/tests/ledger/client.test.ts` are spelled out rather
+than recomputed from the static, so an edit to the tag, the prefix width, or the truncation point
+breaks that suite instead of being silently absorbed by it.
+
+*The domain tag is the entire separation mechanism, and it must stay prefix-disjoint from
+`"wallet:"`.* Cost-center wallets and ordinary wallets carry identical flags and the same
+`CODE_USER_WALLET`, so TigerBeetle cannot tell them apart; `exists_with_different_flags` protects
+nothing here. Neither tag being a prefix of the other is what makes the two preimage sets disjoint.
+*Prevents:* a `"wallet:"`-prefixed cost-center tag, under which a caller-chosen `userId` could
+reproduce a cost center's preimage exactly — `createUserWallet` would be answered `exists`, not
+`exists_with_different_flags`, and two owners would share one balance-enforced wallet in silence.
+*Policy for any future tag* (a `v2` encoding, or a second derived namespace): it must be prefix-free
+against every existing tag, or two domains can share preimages.
+
+*Length prefixes count UTF-8 BYTES.* The prefixes are what make `("ab","c")` and `("a","bc")`
+distinct regardless of charset — which is exactly why `PARENT_USER_ID_PATTERN` may now admit `:`
+(issue #64) where the retired joined-string derivation could not. Code-unit counts would be
+injective too, so this is not a correctness choice *within* one implementation; it is an interop one.
+*Prevents:* a second implementation — another-language SDK, an external auditor's tool — reading
+"length" as code units, and deriving a different account for every multibyte parent: silent
+cross-implementation divergence, money in two places, no error anywhere. The multibyte known answer
+pins the byte reading shut.
+
+*The derivation is pure and total over strings; validation lives at the doors.* It never validates
+and never normalizes: NFC `"é"` and NFD `"é"` are canonically equivalent, byte-different, and derive
+different ids on purpose — normalizing here would alias two byte strings onto one account. ASCII is
+*door* policy, not a property of the hash: `createCostCenterWallet` and `costCenterUserId` each
+enforce `parentUserIdRefusal` / `COST_CENTER_PATTERN` from `shared/ids.ts` (authoritative), which is
+what keeps a control character out of a wallet the audit trail then quotes. `parentUserIdRefusal` is
+the *single* parent rule — `PARENT_USER_ID_PATTERN` **and** no `::` — and it returns the reason
+rather than a boolean so each door can prefix its own wording without re-deciding the rule.
+`cli/budget.ts` carries a display-side mirror of **both** halves, held byte-identical by a
+source-parity test — widen the charset in `shared/ids.ts` and copy it across, or the CLI refuses ids
+the ledger accepts. That drift was introduced once already during the issue-#64 work, which is why
+the parity test exists.
+
+*One static, three call sites.* Creation (`createCostCenterWallet`), the transfer path
+(`resolveAccounts`, for `allocateBudget` and `reclaimBudget`), and the read path (`getBudgetStatus`,
+which bypasses `resolveAccounts` because a read has no parent account to resolve and no
+self-transfer to refuse) must all go through `deriveCostCenterAccountId`. `createCostCenterWallet`
+deliberately writes no `accountMap` entry: the id is derived, never looked up, and a cache would
+only be a second source of truth that a client in another process does not share.
+*Prevents:* one of the three drifting from the others — a hand-rolled join, a second hash, a cached
+id — so allocation funds an account that reclaim and status never read: every cost center reporting
+a zero balance forever, a governance read that fails open.
+
+*The `parent::costCenter` string is a display and audit label, never an account id.*
+`costCenterUserId` builds it and `data.costCenterUserId` carries it into the audit chain; no money is
+derived from it. What it must still be is **injective** over legal pairs, and it is because
+`COST_CENTER_PATTERN` stays colon-free and non-empty: the cost center is exactly the label's maximal
+colon-free suffix, so the pair reads back uniquely. That is the only reason the parent may now carry
+`:` and the cost center may not — do not widen `COST_CENTER_PATTERN`.
+*Prevents:* parent `a` + cost center `:b` and parent `a:` + cost center `b` both rendering as
+`a:::b` — two cost centers, different accounts, different money, one label, so the chain cannot say
+whose budget moved. (Under the retired joined-string derivation the same ambiguity was worse: it put
+both pairs on one *account*.)
+
+*128-bit truncation is a ~64-bit birthday bound*, the same bound `deriveAccountId` already accepts:
+a collision needs on the order of 2^64 distinct cost centers, which no plausible deployment reaches.
 
 **1 usertoken = $0.0001 USD, everywhere.** All pricing rates are usertokens per 1,000 LLM tokens.
 This constant is duplicated in `packages/verify` on purpose.
@@ -180,17 +275,26 @@ This constant is duplicated in `packages/verify` on purpose.
 are invalid. The floor is what makes a `{0,0}`-rate local call settle at exactly 1 nominal
 usertoken.
 
-**Budget account ids are derived, never looked up.** `resolveAccounts` uses the pure
-`TrustTBClient.deriveAccountId`. Never route a money path through `getAccountId`.
+**Budget account ids are derived, never looked up.** `resolveAccounts` derives *both* with pure
+statics — `TrustTBClient.deriveAccountId` for the parent, `TrustTBClient.deriveCostCenterAccountId`
+for the child. Never route a money path through `getAccountId`.
 *Prevents:* `getAccountId` reads an in-process map populated only by a `createUserWallet` call in
 the *same* process, so it rejects on a freshly constructed client even when the wallet exists in
-TigerBeetle. A derived id colliding with its own parent is refused — it would debit and credit one
-account and report a no-op as a funded allocation.
+TigerBeetle. A child id colliding with its own parent is still refused — it would debit and credit
+one account and report a no-op as a funded allocation. Now that the two ids live in disjoint hash
+domains that takes a truncated-hash collision rather than a punctuation trick; the guard stays
+because it costs one comparison.
 *Deliberate consequence, worth stating out loud:* `setAccountMapping` is a public setter that the
-budget path now **ignores** — parent and cost center are both derived — while `ledger/engine.ts`
-still **honours** it through `getAccountId`. One setter, honoured on one money path and ignored on
-the other. On the cost-center id the divergence is at least loud: allocation compares
-`createUserWallet`'s answer against the derived id and throws. On the parent id it is silent.
+budget path **ignores** — both ids are derived, and `createCostCenterWallet` never reads or writes
+`accountMap` at all — while `ledger/engine.ts` still **honours** it through `getAccountId`. One
+setter, honoured on one money path and ignored on the other, and on the parent id that divergence is
+silent.
+*What the allocation cross-check is, honestly:* `allocateBudget` compares `createCostCenterWallet`'s
+returned id against `resolveAccounts`' derived child id and throws on a mismatch. Both sides now call
+the same static, so it cannot fire against the real client — its residual value is against a
+substituted or subclassed `tb` whose creation path answers with some other id, which is exactly what
+the mocked-client test for it does. Keep it; do not read it as a live guard against
+`setAccountMapping`.
 
 **No check-then-act on the allocation path.** Allocation never reads the parent balance before
 transferring; TigerBeetle's atomic `debits_must_not_exceed_credits` rejection *is* the check.
@@ -401,9 +505,9 @@ timezone — `Date.parse` alone is not enough. The unknown-argument guard is a c
 `--`-prefix match. The resolved wallet is echoed in both output modes, and **every echoed value goes
 through `forDisplay` first** — an echoed flag value is argv, the caller may be an agent, and
 picocolors adds SGR codes without sanitizing anything it wraps.
-*Prevents:* `--parent -x` silently reporting on wallet `-x::research`; `--period-start 0` passing
-`Date.parse` as Jan 2000 and turning a one-hour window into 26 years; and a rejected flag value
-turning its own error message into a terminal-repaint on the operator who typed it.
+*Prevents:* `--parent -x` silently reporting on the cost center `-x::research`; `--period-start 0`
+passing `Date.parse` as Jan 2000 and turning a one-hour window into 26 years; and a rejected flag
+value turning its own error message into a terminal-repaint on the operator who typed it.
 
 ### Client detection
 
@@ -655,6 +759,7 @@ These look like defects and are not. Flagging them wastes review cycles.
 | **`finalizeOnce` and the "redundant" idempotence checks around it** | Six stream consumption modes plus abort/error/end can all reach a terminal path. The gate is what makes exactly one of them win. |
 | **The Board of Directors being heuristic pattern-matching rather than LLM-backed** | Intentional. `board/` makes **no** model calls. Do not "improve" it by adding one. |
 | **TigerBeetle status handling that treats `exists` as success** | Correct — see the invariant above. Changing it to throw reports a failed settlement for money that already moved. |
+| **`allocateBudget` comparing `createCostCenterWallet`'s id against `resolveAccounts`' derived id** | Not "comparing a function to itself". Both sides call `deriveCostCenterAccountId`, so the throw is unreachable in this repo *by design*; it is the assertion that keeps them on one static, and it fires against a substituted or subclassed `tb`. Deleting it lets allocation fund an account reclaim and status never read. |
 | **`biome-ignore lint/suspicious/noControlCharactersInRegex`** | The control-character strip is a terminal-injection defense; the regex must match control characters. |
 | **Asserting `undefined` for policy-context fields "that could just be omitted"** | Explicit `undefined` after the spread is what stops a request body from supplying the value. Omitting the assertion reintroduces the shadow. |
 | **The settle-vs-void asymmetry on streams** | Enumerated above. Each branch is a separate, deliberate decision. |

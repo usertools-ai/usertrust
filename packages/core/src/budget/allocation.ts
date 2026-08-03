@@ -16,11 +16,15 @@
  * NOT wire a policy tier to them until the spend path debits the cost-center
  * wallet.
  *
- * A cost center is a sub-wallet of its parent, nothing more. Its ledger identity
- * is the derived user id `parent::costCenter` (see {@link costCenterUserId}),
- * which hashes to a TigerBeetle account exactly as any other wallet does.
- * Allocation and reclaim are plain immediate transfers between the two accounts.
- * There is no cost-center registry and no new ledger schema.
+ * A cost center is a sub-wallet of its parent, nothing more. Its TigerBeetle
+ * account is `TrustTBClient.deriveCostCenterAccountId(parent, costCenter)` — a
+ * domain-separated, length-prefixed hash of the TUPLE, in a namespace disjoint
+ * from the `wallet:` preimages that ordinary wallet ids and escrow labels share.
+ * The `parent::costCenter` string ({@link costCenterUserId}) is the display and
+ * audit label ONLY; no account is derived from it, so no wallet an integrator can
+ * name reaches a cost center's money. Allocation and reclaim are plain immediate
+ * transfers between the two accounts. There is no cost-center registry and no new
+ * ledger schema.
  *
  * LEDGER INVARIANT (what makes `spent` meaningful): a cost-center wallet receives
  * funds ONLY via {@link allocateBudget} from its parent, and spends only outward.
@@ -60,37 +64,54 @@ import type { AppendEventInput } from "../audit/chain.js";
 import type { TBTransferError } from "../ledger/client.js";
 import { TrustTBClient, XFER_BUDGET_GRANT, XFER_BUDGET_RECLAIM } from "../ledger/client.js";
 import { InsufficientBalanceError } from "../shared/errors.js";
+import { COST_CENTER_PATTERN, parentUserIdRefusal } from "../shared/ids.js";
 import { computeRunway, type Runway } from "./runway.js";
 
 // ── Identity ──
 
-const PARENT_USER_ID_PATTERN = /^[a-zA-Z0-9._@-]{1,128}$/;
-const COST_CENTER_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
+/**
+ * Display-label separator only — the account id does not depend on this string.
+ * Cost-center accounts come from the tuple hash, so changing this would rename the
+ * audit label (breaking vault continuity) without moving a single usertoken.
+ */
 const SEPARATOR = "::";
 const MAX_DERIVED_ID_LENGTH = 200;
 
 /**
- * A cost center's ledger identity is a derived sub-wallet of its parent.
+ * The DISPLAY and AUDIT label for a cost center: `parent::costCenter`.
  *
- * `::` IS A RESERVED SEPARATOR IN WALLET IDS, and that reservation — enforced by
- * `TrustTBClient.createUserWallet`, which refuses it to ordinary callers — is
- * what makes this derivation collision-free. Without it, an integrator wallet
- * literally named `acme::billing` would hash to the same TigerBeetle account as
- * `costCenterUserId("acme", "billing")`, and a reclaim on that cost center would
- * sweep the integrator's balance into `acme`. Given the reservation, and because
- * neither part below may contain `:`, the first `::` splits the derived id
- * unambiguously and no two distinct `(parentUserId, costCenter)` pairs collide.
- * Both patterns also exclude whitespace, control characters, and ANSI escapes,
- * which keeps the id safe to embed in an audit event and in terminal output.
+ * NOT an account id, and not a preimage of one — the money lives at
+ * `TrustTBClient.deriveCostCenterAccountId(parentUserId, costCenter)`, whose
+ * domain-separated preimage no wallet id or escrow label can reach. What this label
+ * must still be is INJECTIVE over legal pairs: it is the identity an operator reads
+ * and the one `data.costCenterUserId` carries into the audit chain, so two distinct
+ * cost centers sharing a label would make the chain ambiguous even though their
+ * balances never mix. It is injective because `COST_CENTER_PATTERN` is colon-free
+ * and non-empty: the cost center is exactly the label's maximal colon-free suffix,
+ * which reads the tuple back uniquely. That is the whole reason the parent may now
+ * carry a single `:` (issue #64) and the cost center may not. Both patterns also
+ * exclude whitespace, control characters, and ANSI escapes, which keeps the label
+ * safe to embed in an audit event and in terminal output.
  *
- * @throws Error when either part is missing, over-long, or outside its charset.
+ * The parent may NOT carry `::`, and that is a separate rule from the charset —
+ * `parentUserIdRefusal` in `shared/ids.ts` is the authoritative source for both, and
+ * returns a distinct reason for each so this door can say which one fired. A `::`
+ * parent would make the tuple's own `deriveAccountId(parentUserId)` land on an
+ * unreclaimed pre-v3 cost-center account, so allocation would debit stranded legacy
+ * money as though it were the parent's.
+ *
+ * @throws Error when either part is missing, over-long, outside its charset, or (for
+ * the parent) inside the quarantined `::` namespace.
  */
 export function costCenterUserId(parentUserId: string, costCenter: string): string {
-	if (typeof parentUserId !== "string" || !PARENT_USER_ID_PATTERN.test(parentUserId)) {
-		throw new Error("budget: parentUserId must match /^[a-zA-Z0-9._@-]{1,128}$/");
+	// The messages quote the patterns rather than restating them: a hand-copied
+	// charset is one edit away from describing a rule the code no longer enforces.
+	const parentRefusal = parentUserIdRefusal(parentUserId);
+	if (parentRefusal !== null) {
+		throw new Error(`budget: parentUserId ${parentRefusal}`);
 	}
 	if (typeof costCenter !== "string" || !COST_CENTER_PATTERN.test(costCenter)) {
-		throw new Error("budget: costCenter must match /^[a-zA-Z0-9._-]{1,64}$/");
+		throw new Error(`budget: costCenter must match ${COST_CENTER_PATTERN.source}`);
 	}
 	const derived = `${parentUserId}${SEPARATOR}${costCenter}`;
 	// Unreachable through the patterns above (128 + 2 + 64 = 194). Kept so that
@@ -176,21 +197,25 @@ function isInsufficientBalanceError(err: unknown): err is TBTransferError {
  * BOTH ids are derived, never looked up. `getAccountId` reads an in-process map
  * that is populated only by a `createUserWallet` call in this same process, so a
  * lookup rejects before any ledger I/O on a freshly constructed client — even
- * when the wallet exists in TigerBeetle. `deriveAccountId` is the same pure
- * SHA-256 of `wallet:${userId}` that `createUserWallet` derives from, so the
+ * when the wallet exists in TigerBeetle. Each id here is the same pure hash its
+ * creation door derives from — `deriveAccountId` (SHA-256 of `wallet:${userId}`)
+ * for the parent, `deriveCostCenterAccountId` (the tuple) for the child — so a
  * derived id IS the account the wallet was created as, in any process. A parent
  * wallet that genuinely does not exist then fails at commit inside TigerBeetle:
  * loudly, at the ledger, rather than before reaching it.
  *
- * A derived id that collides with its own parent would produce a transfer that
- * debits and credits one account: a no-op that reports as a funded allocation.
+ * The two hashes live in disjoint domains, so a child colliding with its own
+ * parent now takes a 128-bit truncated-hash collision rather than a punctuation
+ * trick. The guard stays anyway: it costs one comparison, and what it refuses is a
+ * transfer that debits and credits one account — a no-op reported as a funded
+ * allocation.
  */
 function resolveAccounts(
 	parentUserId: string,
-	childUserId: string,
+	costCenter: string,
 ): { parentAccount: bigint; childAccount: bigint } {
 	const parentAccount = TrustTBClient.deriveAccountId(parentUserId);
-	const childAccount = TrustTBClient.deriveAccountId(childUserId);
+	const childAccount = TrustTBClient.deriveCostCenterAccountId(parentUserId, costCenter);
 	if (childAccount === parentAccount) {
 		throw new Error("budget: cost center resolves to the parent account");
 	}
@@ -264,8 +289,8 @@ async function appendBudgetEvent(
 /**
  * Move `amount` UT from a parent wallet into one of its cost centers.
  *
- * The cost-center wallet is created on demand. `createUserWallet` already treats
- * TigerBeetle's `exists` status as success and resolves with the existing
+ * The cost-center wallet is created on demand. `createCostCenterWallet` already
+ * treats TigerBeetle's `exists` status as success and resolves with the existing
  * account id, so an already-created wallet needs no handling here — and every
  * rejection it does raise (`exists_with_different_flags` above all, which means
  * the account is missing its balance enforcement) is a real failure that must
@@ -293,14 +318,15 @@ export async function allocateBudget(
 		throw new Error("budget: amount must be a positive integer");
 	}
 
-	const { parentAccount, childAccount } = resolveAccounts(p.parentUserId, childUserId);
+	const { parentAccount, childAccount } = resolveAccounts(p.parentUserId, p.costCenter);
 
-	// `{ derived: true }` declares the id is an already-derived `parent::costCenter`.
-	// `::` is reserved: ordinary callers are refused it precisely so this namespace
-	// cannot collide with an integrator's own wallet — see createUserWallet.
-	const createdAccount = await tb.createUserWallet(childUserId, { derived: true });
-	// An explicit `setAccountMapping` override would make allocation fund an
-	// account that reclaim and status — which always derive — never read.
+	// The pair reaches the ledger door AS A PAIR — nothing joins it into an id. That
+	// is what keeps creation and resolveAccounts on the one static, which is what the
+	// cross-check below depends on.
+	const createdAccount = await tb.createCostCenterWallet(p.parentUserId, p.costCenter);
+	// A creation path answering with anything but the derived id — poisoned, or
+	// hashing a different preimage than resolveAccounts does — would make allocation
+	// fund an account that reclaim and status, which always derive, never read.
 	if (createdAccount !== childAccount) {
 		throw new Error("budget: cost center account id does not match its derived id");
 	}
@@ -377,7 +403,7 @@ export async function reclaimBudget(
 	},
 ): Promise<ReclaimResult> {
 	const childUserId = costCenterUserId(p.parentUserId, p.costCenter);
-	const { parentAccount, childAccount } = resolveAccounts(p.parentUserId, childUserId);
+	const { parentAccount, childAccount } = resolveAccounts(p.parentUserId, p.costCenter);
 
 	const available = await costCenterBalance(tb, childAccount);
 	// Nothing moved, so there is nothing to audit — `audited: false` is the honest
@@ -436,8 +462,13 @@ export async function getBudgetStatus(
 		nowMs?: number;
 	},
 ): Promise<BudgetStatus> {
+	// Read-only: with no transfer there is no parent account to resolve and no
+	// self-transfer to refuse, so this deliberately bypasses `resolveAccounts` — at
+	// the price of being the second place the child id is derived. It must stay on
+	// the SAME static, or status reads an account allocation never funded and every
+	// cost center reports a zero balance: a governance read that fails open.
 	const childUserId = costCenterUserId(p.parentUserId, p.costCenter);
-	const childAccount = TrustTBClient.deriveAccountId(childUserId);
+	const childAccount = TrustTBClient.deriveCostCenterAccountId(p.parentUserId, p.costCenter);
 	const balance = await costCenterBalance(tb, childAccount);
 
 	return {

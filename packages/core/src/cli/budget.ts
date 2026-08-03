@@ -124,17 +124,37 @@ function requireValue(flag: string, raw: string | undefined, inline: boolean): s
 }
 
 /**
- * Mirrors PARENT_USER_ID_PATTERN in budget/allocation.ts, which stays authoritative
- * — `costCenterUserId` still rejects anything this misses. Checking here buys only
+ * Mirrors PARENT_USER_ID_PATTERN in shared/ids.ts, which stays authoritative —
+ * `costCenterUserId` still rejects anything this misses. Checking here buys only
  * the message: the deep check can quote nothing but its own regex, which is noise
- * to an operator who never set the value it is complaining about.
+ * to an operator who never set the value it is complaining about. Kept honest by
+ * a source-parity test in tests/cli/budget.test.ts.
  */
-const PARENT_USER_ID = /^[a-zA-Z0-9._@-]{1,128}$/;
+const PARENT_USER_ID = /^[a-zA-Z0-9._@:-]{1,128}$/;
+
+/**
+ * Mirrors LEGACY_COST_CENTER_SEPARATOR in shared/ids.ts, the second half of the
+ * authoritative parent rule and the half the charset above cannot express: `::`
+ * is quarantined because on a cluster upgraded from v2.x that name still points
+ * at an unreclaimed cost-center account, and a v3 wallet hashing onto it adopts
+ * the stranded balance. Same parity test pins both halves — widen or rename
+ * either one in shared/ids.ts and copy it across, or the CLI and the ledger
+ * disagree about which ids are legal.
+ */
+const LEGACY_COST_CENTER_SEPARATOR = "::";
 
 function parseParent(source: string, raw: string): string {
 	if (!PARENT_USER_ID.test(raw)) {
 		throw new Error(
-			`Invalid ${source}: ${forDisplay(raw)} (1-128 characters, letters/digits/. _ @ - only)`,
+			`Invalid ${source}: ${forDisplay(raw)} (1-128 characters, letters/digits/. _ @ : - only)`,
+		);
+	}
+	// Distinct from the charset message on purpose: `::` passes the charset above,
+	// so an operator shown that regex would read it as admitting the id they just
+	// had refused and conclude the CLI is broken.
+	if (raw.includes(LEGACY_COST_CENTER_SEPARATOR)) {
+		throw new Error(
+			`Invalid ${source}: ${forDisplay(raw)} ("::" is reserved for pre-v3 cost-center accounts)`,
 		);
 	}
 	return raw;
