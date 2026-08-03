@@ -208,21 +208,26 @@ describe("TrustTBClient", () => {
 			expect(mockCreateAccounts).toHaveBeenCalledTimes(2);
 		});
 
-		// `::` is no longer reserved: the real cost-center account space is
-		// domain-separated (deriveCostCenterAccountId, disjoint from this
-		// method's "wallet:" preimage), so an ordinary wallet named `acme::billing`
-		// can never reach it, whatever punctuation the id contains.
-		it("accepts an ordinary wallet id containing `::`", async () => {
-			mockCreateAccounts.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
-			const id1 = await client.createUserWallet("acme::billing");
-			expect(id1).toBe(TrustTBClient.deriveAccountId("acme::billing"));
-			const id2 = await client.createUserWallet("a::b::c");
-			expect(id2).toBe(TrustTBClient.deriveAccountId("a::b::c"));
+		// QUARANTINE, not the retired derivation reservation. On a cluster upgraded
+		// from v2.x an unreclaimed cost center still occupies
+		// deriveAccountId("acme::billing") with CODE_USER_WALLET and an ordinary
+		// wallet's flags, so this call would be answered bare `exists` — not
+		// exists_with_different_flags — and adopt that stranded balance as a new
+		// owner's wallet, silently. Refuse the name and it stays unadoptable.
+		it("refuses an ordinary wallet id containing `::`", async () => {
+			await expect(client.createUserWallet("acme::billing")).rejects.toThrow(
+				/"::" is reserved for pre-v3 cost-center accounts/,
+			);
+			await expect(client.createUserWallet("a::b::c")).rejects.toThrow(/Invalid userId/);
+			// Refused at the door — TigerBeetle never sees the legacy account id.
+			expect(mockCreateAccounts).not.toHaveBeenCalled();
 		});
 
+		// Single `:` is what issue #64 asked for and is untouched by the quarantine —
+		// only the doubled separator names a pre-v3 cost-center account.
 		it("still accepts every ordinary id that does not use the separator", async () => {
 			mockCreateAccounts.mockResolvedValue([]);
-			for (const userId of ["acme-billing", "acme:billing", "a.b@c.com", "user_1"]) {
+			for (const userId of ["acme-billing", "acme:billing", "a:b:c", "a.b@c.com", "user_1"]) {
 				const id = await client.createUserWallet(userId);
 				expect(id).toBe(TrustTBClient.deriveAccountId(userId));
 			}
@@ -368,6 +373,23 @@ describe("TrustTBClient", () => {
 			);
 		});
 
+		// The quarantine reaches parent ids through the shared `parentUserIdRefusal`,
+		// and names itself distinctly from the charset message: `acme::x` PASSES
+		// PARENT_USER_ID_PATTERN, so quoting that regex at the operator would read as
+		// admitting the id it just refused. The failure being prevented is one level
+		// down — deriveAccountId("acme::x") is an unreclaimed pre-v3 cost-center
+		// account on an upgraded cluster, and allocation debits the parent by that id.
+		it("refuses a `::`-bearing parent id, distinctly from the charset refusal", async () => {
+			await expect(client.createCostCenterWallet("acme::x", "research")).rejects.toThrow(
+				/Invalid parentUserId: must not contain "::" \(reserved for pre-v3 cost-center accounts\)/,
+			);
+			// Same door, different reason — the two messages must not be confusable.
+			await expect(client.createCostCenterWallet("acme\x1b[2J", "research")).rejects.toThrow(
+				/Invalid parentUserId: must match/,
+			);
+			expect(mockCreateAccounts).not.toHaveBeenCalled();
+		});
+
 		it("accepts both parts at their pattern boundaries", async () => {
 			for (const [parent, cc] of [
 				["p", "c"],
@@ -405,10 +427,14 @@ describe("TrustTBClient", () => {
 	// Ordinary wallet ids and escrow labels are still hashed through the SAME
 	// `wallet:` namespace as each other (deriveAccountId), and collide safely
 	// only because their differing account flags make TigerBeetle answer
-	// `exists_with_different_flags` rather than silently sharing a balance. The
-	// real cost-center account space is domain-separated
-	// (deriveCostCenterAccountId) and unreachable from either door, `::` or not
-	// — that disjointness, not a reserved separator, is what these pin now.
+	// `exists_with_different_flags` rather than silently sharing a balance.
+	//
+	// `parent::costCenter`-shaped names are QUARANTINED out of that namespace at
+	// both doors. Not because v3 derives anything from them — the real
+	// cost-center space is the domain-separated tuple hash, unreachable from
+	// either door — but because on a cluster upgraded from v2.x those exact names
+	// still address unreclaimed legacy cost-center accounts, which a v3 wallet
+	// would hash onto and adopt.
 	describe("wallet/escrow shared namespace", () => {
 		// Spelled out rather than imported from budget/allocation.ts so this proof
 		// does not silently follow a change in the derivation it is meant to police.
@@ -416,29 +442,34 @@ describe("TrustTBClient", () => {
 		const COST_CENTER = "billing";
 		const DERIVED = `${PARENT}::${COST_CENTER}`;
 
-		it("accepts a `parent::costCenter`-shaped id from an ordinary createUserWallet caller", async () => {
-			mockCreateAccounts.mockResolvedValueOnce([]);
-			const id = await client.createUserWallet(DERIVED);
-			expect(id).toBe(TrustTBClient.deriveAccountId(DERIVED));
-			// Can never collide with the REAL cost-center account, which lives in the
-			// domain-separated tuple-hash namespace instead.
-			expect(id).not.toBe(TrustTBClient.deriveCostCenterAccountId(PARENT, COST_CENTER));
+		// The legacy account is flag-identical to an ordinary wallet, so TigerBeetle
+		// would answer bare `exists` and this door would read that as success —
+		// handing back a stranded cost center's balance under a new owner's name.
+		it("refuses a `parent::costCenter`-shaped id at the createUserWallet door", async () => {
+			await expect(client.createUserWallet(DERIVED)).rejects.toThrow(
+				/"::" is reserved for pre-v3 cost-center accounts/,
+			);
+			expect(mockCreateAccounts).not.toHaveBeenCalled();
 		});
 
-		// The other door into deriveAccountId. The real cost-center account comes
-		// from deriveCostCenterAccountId's domain-separated preimage, so an escrow
-		// label — however it is punctuated — can never resolve to it.
-		it("accepts a `parent::costCenter`-shaped label from an ordinary ensureEscrowAccount caller", async () => {
-			mockCreateAccounts.mockResolvedValueOnce([]);
-			const id = await client.ensureEscrowAccount(DERIVED);
-			expect(id).toBe(TrustTBClient.deriveAccountId(DERIVED));
-			expect(id).not.toBe(TrustTBClient.deriveCostCenterAccountId(PARENT, COST_CENTER));
+		// The other door into deriveAccountId, refused for the same reason. Escrow's
+		// flags differ from a wallet's TODAY, so this particular label would hit
+		// exists_with_different_flags — but that is a property of the current account
+		// codes, not of the names, and the quarantine holds at every door rather than
+		// only where a flag mismatch happens to save us.
+		it("refuses a `parent::costCenter`-shaped label at the ensureEscrowAccount door", async () => {
+			await expect(client.ensureEscrowAccount(DERIVED)).rejects.toThrow(
+				/Invalid escrow label: "::" is reserved for pre-v3 cost-center accounts/,
+			);
+			expect(mockCreateAccounts).not.toHaveBeenCalled();
 		});
 
-		it("still accepts ordinary escrow labels", async () => {
-			mockCreateAccounts.mockResolvedValueOnce([]);
+		it("still accepts ordinary escrow labels, single colon included", async () => {
+			mockCreateAccounts.mockResolvedValue([]);
 			const id = await client.ensureEscrowAccount("escrow:session-1");
 			expect(id).toBe(TrustTBClient.deriveAccountId("escrow:session-1"));
+			const plain = await client.ensureEscrowAccount("session-1");
+			expect(plain).toBe(TrustTBClient.deriveAccountId("session-1"));
 		});
 
 		// The cost-center wallet for the SAME pair is a different account entirely, and

@@ -119,7 +119,12 @@ instead of being exempted from it.
   balances stranded: downgrade to 2.x, reclaim, then upgrade again. There is
   deliberately no read-time fallback to the legacy account: reading it would
   collide with an ordinary wallet literally named `parent::costCenter`, which
-  is the exact ambiguity this change removes.
+  is the exact ambiguity this change removes. For the same reason v3 continues
+  to refuse `::` in wallet ids, escrow labels, and parent ids — a quarantine of
+  the legacy namespace, so that a stranded pre-v3 cost-center account (including
+  one re-funded by a pending hold voided after the upgrade) cannot be silently
+  adopted by a new wallet name that hashes onto it; a single `:` remains legal
+  (#64).
 - OpenAI and Google streaming usage accumulation is now replace-with-latest
   (usage-bearing chunks carry cumulative snapshots — e.g. vLLM
   `continuous_usage_stats` — which summing would multiply-count). Anthropic

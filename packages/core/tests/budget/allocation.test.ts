@@ -168,19 +168,37 @@ describe("costCenterUserId", () => {
 		expect(() => costCenterUserId("p".repeat(129), COST_CENTER)).toThrow(/parentUserId/);
 	});
 
-	// Half-flips, both sides asserted together on purpose. The COST CENTER may still
-	// carry no colon: it is the label's maximal colon-free suffix, which is the only
-	// thing that keeps `parent::costCenter` readable back into its two parts. The
-	// PARENT may, because account ids no longer come from this label at all — they
-	// come from the length-prefixed tuple hash, which no colon can make ambiguous.
-	it("rejects an embedded `::` in the cost center but allows it in the parent", () => {
+	// Both sides asserted together on purpose. The COST CENTER may carry no colon at
+	// all: it is the label's maximal colon-free suffix, which is the only thing that
+	// keeps `parent::costCenter` readable back into its two parts. The PARENT may not
+	// carry `::` either, for an unrelated reason — `deriveAccountId("user::sub")` is
+	// where an unreclaimed pre-v3 cost center sits on an upgraded cluster, so
+	// allocating from that parent debits stranded legacy money as if it were his.
+	it("rejects an embedded `::` in either part", () => {
 		expect(() => costCenterUserId(PARENT, "a::b")).toThrow(/costCenter/);
-		expect(costCenterUserId("user::sub", COST_CENTER)).toBe(`user::sub::${COST_CENTER}`);
+		expect(() => costCenterUserId("user::sub", COST_CENTER)).toThrow(
+			/parentUserId must not contain "::" \(reserved for pre-v3 cost-center accounts\)/,
+		);
 	});
 
+	// The quarantine message must be distinguishable from the charset message: `::`
+	// SATISFIES PARENT_USER_ID_PATTERN, so an operator shown that regex would read it
+	// as admitting the id that was just refused.
+	it("names the `::` quarantine distinctly from the charset refusal", () => {
+		expect(() => costCenterUserId("user::sub", COST_CENTER)).toThrow(
+			/parentUserId must not contain/,
+		);
+		expect(() => costCenterUserId("\u001b[31muser", COST_CENTER)).toThrow(
+			/parentUserId must match/,
+		);
+	});
+
+	// Single `:` is exactly what issue #64 asked for and the quarantine leaves it
+	// alone — only the doubled separator names a legacy account.
 	it("rejects a bare colon in the cost center but allows it in the parent", () => {
 		expect(() => costCenterUserId(PARENT, "a:b")).toThrow(/costCenter/);
 		expect(costCenterUserId("user:1", COST_CENTER)).toBe(`user:1::${COST_CENTER}`);
+		expect(costCenterUserId("acme:eu:prod", COST_CENTER)).toBe(`acme:eu:prod::${COST_CENTER}`);
 	});
 
 	it("rejects a slash in the cost center", () => {
@@ -328,6 +346,23 @@ describe("allocateBudget", () => {
 				allocateBudget(asClient(mockTB), { parentUserId, costCenter: COST_CENTER, amount: 500 }),
 			).rejects.toThrow(/parentUserId/);
 		}
+		expect(mockTB.createCostCenterWallet).not.toHaveBeenCalled();
+		expect(mockTB.immediateTransfer).not.toHaveBeenCalled();
+	});
+
+	// The quarantine has to hold on the MONEY path, not just in `costCenterUserId`'s
+	// unit tests: `resolveAccounts` derives the parent account with
+	// `deriveAccountId(parentUserId)`, so a `::` parent on an upgraded cluster would
+	// debit an unreclaimed pre-v3 cost-center account and report it as the parent's
+	// allocation.
+	it("rejects a `::`-bearing parent before any ledger I/O", async () => {
+		await expect(
+			allocateBudget(asClient(mockTB), {
+				parentUserId: "acme::billing",
+				costCenter: COST_CENTER,
+				amount: 500,
+			}),
+		).rejects.toThrow(/parentUserId must not contain "::"/);
 		expect(mockTB.createCostCenterWallet).not.toHaveBeenCalled();
 		expect(mockTB.immediateTransfer).not.toHaveBeenCalled();
 	});
@@ -901,6 +936,17 @@ describe("reclaimBudget", () => {
 			reclaimBudget(asClient(mockTB), { parentUserId: PARENT, costCenter: "a::b" }),
 		).rejects.toThrow(/costCenter/);
 		expect(mockTB.lookupBalance).not.toHaveBeenCalled();
+	});
+
+	// Reclaim CREDITS the parent account, so a `::` parent is the mirror-image
+	// hazard of allocation's: on an upgraded cluster it would sweep a cost center's
+	// balance into an unreclaimed pre-v3 account instead of the operator's wallet.
+	it("rejects a `::`-bearing parent before any ledger I/O", async () => {
+		await expect(
+			reclaimBudget(asClient(mockTB), { parentUserId: "acme::billing", costCenter: COST_CENTER }),
+		).rejects.toThrow(/parentUserId must not contain "::"/);
+		expect(mockTB.lookupBalance).not.toHaveBeenCalled();
+		expect(mockTB.immediateTransfer).not.toHaveBeenCalled();
 	});
 });
 

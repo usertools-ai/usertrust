@@ -64,7 +64,7 @@ import type { AppendEventInput } from "../audit/chain.js";
 import type { TBTransferError } from "../ledger/client.js";
 import { TrustTBClient, XFER_BUDGET_GRANT, XFER_BUDGET_RECLAIM } from "../ledger/client.js";
 import { InsufficientBalanceError } from "../shared/errors.js";
-import { COST_CENTER_PATTERN, PARENT_USER_ID_PATTERN } from "../shared/ids.js";
+import { COST_CENTER_PATTERN, parentUserIdRefusal } from "../shared/ids.js";
 import { computeRunway, type Runway } from "./runway.js";
 
 // ── Identity ──
@@ -89,17 +89,26 @@ const MAX_DERIVED_ID_LENGTH = 200;
  * balances never mix. It is injective because `COST_CENTER_PATTERN` is colon-free
  * and non-empty: the cost center is exactly the label's maximal colon-free suffix,
  * which reads the tuple back uniquely. That is the whole reason the parent may now
- * carry `:` (issue #64) and the cost center may not. Both patterns also exclude
- * whitespace, control characters, and ANSI escapes, which keeps the label safe to
- * embed in an audit event and in terminal output.
+ * carry a single `:` (issue #64) and the cost center may not. Both patterns also
+ * exclude whitespace, control characters, and ANSI escapes, which keeps the label
+ * safe to embed in an audit event and in terminal output.
  *
- * @throws Error when either part is missing, over-long, or outside its charset.
+ * The parent may NOT carry `::`, and that is a separate rule from the charset —
+ * `parentUserIdRefusal` in `shared/ids.ts` is the authoritative source for both, and
+ * returns a distinct reason for each so this door can say which one fired. A `::`
+ * parent would make the tuple's own `deriveAccountId(parentUserId)` land on an
+ * unreclaimed pre-v3 cost-center account, so allocation would debit stranded legacy
+ * money as though it were the parent's.
+ *
+ * @throws Error when either part is missing, over-long, outside its charset, or (for
+ * the parent) inside the quarantined `::` namespace.
  */
 export function costCenterUserId(parentUserId: string, costCenter: string): string {
 	// The messages quote the patterns rather than restating them: a hand-copied
 	// charset is one edit away from describing a rule the code no longer enforces.
-	if (typeof parentUserId !== "string" || !PARENT_USER_ID_PATTERN.test(parentUserId)) {
-		throw new Error(`budget: parentUserId must match ${PARENT_USER_ID_PATTERN.source}`);
+	const parentRefusal = parentUserIdRefusal(parentUserId);
+	if (parentRefusal !== null) {
+		throw new Error(`budget: parentUserId ${parentRefusal}`);
 	}
 	if (typeof costCenter !== "string" || !COST_CENTER_PATTERN.test(costCenter)) {
 		throw new Error(`budget: costCenter must match ${COST_CENTER_PATTERN.source}`);

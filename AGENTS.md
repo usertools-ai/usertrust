@@ -155,11 +155,44 @@ bytes. Two kinds of name hash into that one namespace: ordinary wallet ids and *
 differing flags (escrow carries no `debits_must_not_exceed_credits`) make TigerBeetle answer
 `exists_with_different_flags` rather than silently sharing a balance.
 
-Cost-center ids are **no longer** a third member of this namespace, which is why neither door into it
-— `createUserWallet` nor `ensureEscrowAccount` — refuses `::` any more, and why `createUserWallet`
-no longer takes a `{ derived: true }` opt-in: it takes one argument. A wallet literally named
-`acme::billing` is now just a wallet, unreachable from any cost center's money. See the next
-invariant for what replaced that reservation.
+Cost-center ids are **no longer** a third member of this namespace, which is why `createUserWallet`
+no longer takes a `{ derived: true }` opt-in: it takes one argument. See the next invariant for what
+replaced that reservation — and the one after it for why `::` is still refused anyway, on entirely
+different grounds.
+
+**`::` is QUARANTINED out of the `wallet:` namespace — a legacy-name refusal, not a derivation
+reservation.** Every id that hashes through `deriveAccountId` refuses it: `createUserWallet`,
+`ensureEscrowAccount`, and (via the shared `parentUserIdRefusal` in `shared/ids.ts`) every
+`parentUserId` reaching `createCostCenterWallet` or `costCenterUserId`. A **single** `:` stays legal
+everywhere a parent id is — `acct:123`, `acme:eu:prod` — which is what issue #64 actually asked for.
+Only the doubled separator is quarantined.
+*Prevents:* on a cluster upgraded from v2.x, an unreclaimed cost center still occupies
+`deriveAccountId("parent::cc")` — the account the retired joined-string derivation funded — carrying
+`CODE_USER_WALLET` and **exactly** an ordinary wallet's flags. Without the refusal, v3
+`createUserWallet("parent::cc")` hashes straight onto it and TigerBeetle answers bare `exists`, not
+`exists_with_different_flags`; the door reads that as success per the `exists` IS SUCCESS invariant
+above, and a brand-new wallet silently **adopts** the stranded legacy balance under a different
+owner's name. Nothing errors on either side. The documented reclaim-before-upgrade migration does
+not close this on its own: a hold that was pending at upgrade time and is voided afterwards returns
+its funds to the legacy account, re-stranding a balance in an account a clean migration had already
+emptied.
+*Why refusal rather than a read-fallback or a migration framework:* a legacy read-fallback would
+have to resolve `parent::cc` in two namespaces at once, reintroducing exactly the ambiguity the tuple
+hash removed; a migration framework is heavyweight for names that were **never legal** — `::` was
+refused at these same doors on every released version before v3, so quarantining it costs no
+existing caller anything.
+*Escrow's flags differ from a wallet's today*, so `ensureEscrowAccount("parent::cc")` would in fact
+hit `exists_with_different_flags` and throw. The refusal is there anyway, because that is a property
+of the current account codes and not of the names: an escrow account created with wallet flags — or
+a legacy one predating the current escrow flags — turns the mismatch back into a bare `exists`. The
+quarantine holds at *every* door into the namespace, not only where a flag mismatch happens to save
+us.
+*The CLI mirrors it.* `cli/budget.ts` carries `LEGACY_COST_CENTER_SEPARATOR` beside its
+`PARENT_USER_ID` charset mirror, both held byte-identical to `shared/ids.ts` by the source-parity
+test. The charset alone is **not** the rule: `::` matches `PARENT_USER_ID_PATTERN` and is refused
+anyway, so a CLI mirroring only the regex would admit parent ids the ledger rejects. Both refusal
+messages are deliberately distinct for the same reason — quoting the charset at an operator who
+passed `acme::billing` describes a rule that plainly admits their id.
 
 **Cost-center account ids hash the `(parent, costCenter)` TUPLE, in a domain of their own.**
 `TrustTBClient.deriveCostCenterAccountId(parentUserId, costCenter)` is
@@ -199,12 +232,14 @@ pins the byte reading shut.
 and never normalizes: NFC `"é"` and NFD `"é"` are canonically equivalent, byte-different, and derive
 different ids on purpose — normalizing here would alias two byte strings onto one account. ASCII is
 *door* policy, not a property of the hash: `createCostCenterWallet` and `costCenterUserId` each
-enforce `PARENT_USER_ID_PATTERN` / `COST_CENTER_PATTERN` from `shared/ids.ts` (authoritative), which
-is what keeps a control character out of a wallet the audit trail then quotes. `cli/budget.ts`
-carries a display-side mirror of the parent pattern, held byte-identical by a source-parity test —
-widen the charset in `shared/ids.ts` and copy it across, or the CLI refuses ids the ledger accepts.
-That drift was introduced once already during the issue-#64 work, which is why the parity test
-exists.
+enforce `parentUserIdRefusal` / `COST_CENTER_PATTERN` from `shared/ids.ts` (authoritative), which is
+what keeps a control character out of a wallet the audit trail then quotes. `parentUserIdRefusal` is
+the *single* parent rule — `PARENT_USER_ID_PATTERN` **and** no `::` — and it returns the reason
+rather than a boolean so each door can prefix its own wording without re-deciding the rule.
+`cli/budget.ts` carries a display-side mirror of **both** halves, held byte-identical by a
+source-parity test — widen the charset in `shared/ids.ts` and copy it across, or the CLI refuses ids
+the ledger accepts. That drift was introduced once already during the issue-#64 work, which is why
+the parity test exists.
 
 *One static, three call sites.* Creation (`createCostCenterWallet`), the transfer path
 (`resolveAccounts`, for `allocateBudget` and `reclaimBudget`), and the read path (`getBudgetStatus`,

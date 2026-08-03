@@ -17,7 +17,12 @@ import {
 	createClient,
 	TransferFlags,
 } from "tigerbeetle-node";
-import { COST_CENTER_PATTERN, PARENT_USER_ID_PATTERN, tbId } from "../shared/ids.js";
+import {
+	COST_CENTER_PATTERN,
+	LEGACY_COST_CENTER_SEPARATOR,
+	parentUserIdRefusal,
+	tbId,
+} from "../shared/ids.js";
 
 /** Typed error carrying the numeric TB error code for structured matching. */
 export class TBTransferError extends Error {
@@ -225,19 +230,30 @@ export class TrustTBClient {
 	/**
 	 * Create (or return) the balance-enforced wallet for a user id.
 	 *
-	 * `::` is no longer refused here. The real cost-center account space comes
-	 * from {@link TrustTBClient.deriveCostCenterAccountId}, which hashes the
-	 * `(parent, costCenter)` pair through a domain-separated preimage
-	 * (`COST_CENTER_DOMAIN_TAG`, prefix-disjoint from this method's `"wallet:"`
-	 * tag) — so no string an ordinary caller can pass, `::`-laden or not, can
-	 * ever reach it. That domain separation is what makes the derivation
-	 * collision-free now, not a reserved separator.
+	 * `::` IS QUARANTINED — see {@link LEGACY_COST_CENTER_SEPARATOR}. Not as the
+	 * retired derivation reservation: the tuple hash killed that, and no string
+	 * passed here is a preimage of any account
+	 * {@link TrustTBClient.deriveCostCenterAccountId} produces. It is refused
+	 * because on a cluster upgraded from v2.x an unreclaimed legacy cost center
+	 * still SITS at `deriveAccountId("parent::cc")` with `CODE_USER_WALLET` and
+	 * an ordinary wallet's flags. Without this refusal `createUserWallet`
+	 * hashes straight onto it, TigerBeetle answers `exists` (not
+	 * `exists_with_different_flags` — the flags match exactly), this method
+	 * reads that as success, and the caller's brand-new wallet silently adopts a
+	 * stranded cost center's balance. A pending hold voided after the upgrade
+	 * re-strands funds there even on a cleanly reclaimed cluster, which is why
+	 * the migration alone is not enough.
+	 *
+	 * Single `:` stays legal (issue #64) — `acct:123` is a wallet id like any
+	 * other. Only the doubled separator is quarantined, and it was refused here
+	 * on every released version before v3, so nothing legal is lost.
 	 *
 	 * Ordinary wallet ids and escrow labels still hash through the SAME
 	 * `"wallet:"` namespace as each other — see
-	 * {@link TrustTBClient.ensureEscrowAccount} — and collide safely only
-	 * because their differing account flags make TigerBeetle answer
-	 * `exists_with_different_flags` rather than silently sharing a balance.
+	 * {@link TrustTBClient.ensureEscrowAccount}, which carries the same refusal
+	 * for the same reason — and collide safely only because their differing
+	 * account flags make TigerBeetle answer `exists_with_different_flags` rather
+	 * than silently sharing a balance.
 	 *
 	 * There is no `{ derived: true }` opt-in any more: it retired with its last
 	 * caller. A cost-center account is reachable only by handing the PAIR to
@@ -245,6 +261,12 @@ export class TrustTBClient {
 	 * it is punctuated, and whatever flag accompanies it — is a preimage of one.
 	 */
 	async createUserWallet(userId: string): Promise<bigint> {
+		if (userId.includes(LEGACY_COST_CENTER_SEPARATOR)) {
+			throw new Error(
+				`Invalid userId: "${LEGACY_COST_CENTER_SEPARATOR}" is reserved for pre-v3 cost-center accounts and may not name a wallet`,
+			);
+		}
+
 		const existing = this.accountMap.get(userId);
 		if (existing) return existing;
 
@@ -297,17 +319,22 @@ export class TrustTBClient {
 	 * Validation here is a BELT to the budget path's braces: the derivation is total
 	 * over strings, so nothing but this door keeps a control character out of a wallet
 	 * that the audit trail then quotes. ASCII is door policy, not a property of the
-	 * derivation.
+	 * derivation. The parent rule comes from `parentUserIdRefusal` — one authoritative
+	 * source shared with `budget/allocation.ts` — so the `::` quarantine that
+	 * {@link TrustTBClient.createUserWallet} applies to wallet ids reaches parent ids
+	 * here without a second copy of the rule.
 	 *
 	 * Deliberately does NOT write `accountMap`: the id is derived, never looked up, and
 	 * a cache would only be a second source of truth that a client in another process
 	 * does not share.
 	 *
-	 * @throws Error when either part is outside its charset, or TigerBeetle refuses.
+	 * @throws Error when either part is outside its charset, when the parent is inside
+	 * the quarantined `::` namespace, or when TigerBeetle refuses.
 	 */
 	async createCostCenterWallet(parentUserId: string, costCenter: string): Promise<bigint> {
-		if (typeof parentUserId !== "string" || !PARENT_USER_ID_PATTERN.test(parentUserId)) {
-			throw new Error(`Invalid parentUserId: must match ${PARENT_USER_ID_PATTERN.source}`);
+		const parentRefusal = parentUserIdRefusal(parentUserId);
+		if (parentRefusal !== null) {
+			throw new Error(`Invalid parentUserId: ${parentRefusal}`);
 		}
 		if (typeof costCenter !== "string" || !COST_CENTER_PATTERN.test(costCenter)) {
 			throw new Error(`Invalid costCenter: must match ${COST_CENTER_PATTERN.source}`);
@@ -393,18 +420,32 @@ export class TrustTBClient {
 	/**
 	 * Create (or return) the escrow account for a label.
 	 *
-	 * `::` is no longer refused here. Escrow labels hash through the same
-	 * {@link TrustTBClient.deriveAccountId} `"wallet:"` namespace as ordinary
-	 * wallets — see {@link TrustTBClient.createUserWallet} — and collide safely
-	 * only because their differing account flags (escrow carries no
-	 * `debits_must_not_exceed_credits`) make TigerBeetle answer
-	 * `exists_with_different_flags` rather than silently sharing a balance. The
-	 * real cost-center account space is unreachable from here regardless: it
+	 * `::` IS QUARANTINED here too — see {@link LEGACY_COST_CENTER_SEPARATOR}.
+	 * Escrow labels hash through the same {@link TrustTBClient.deriveAccountId}
+	 * `"wallet:"` namespace as ordinary wallets, so
+	 * `ensureEscrowAccount("parent::cc")` lands on exactly the account an
+	 * unreclaimed pre-v3 cost center still occupies on an upgraded cluster. The
+	 * flags differ there (escrow carries no `debits_must_not_exceed_credits`),
+	 * so THIS door would be told `exists_with_different_flags` and throw — but
+	 * the quarantine holds at every door into the namespace rather than at the
+	 * ones where a flag mismatch happens to save us, because that is a property
+	 * of today's account codes and not of the names. A future escrow account
+	 * created with wallet flags, or a legacy account created before the escrow
+	 * flags settled, turns the flag mismatch back into a bare `exists` — and an
+	 * `exists` read as success is a stranded legacy balance adopted as escrow.
+	 *
+	 * The real cost-center account space is unreachable from here regardless: it
 	 * comes from {@link TrustTBClient.deriveCostCenterAccountId}, a
-	 * domain-separated preimage disjoint from `"wallet:"`, so no escrow label
-	 * can ever resolve to a cost center's wallet.
+	 * domain-separated preimage disjoint from `"wallet:"`. Single `:` stays
+	 * legal — `escrow:session-1` is an ordinary label.
 	 */
 	async ensureEscrowAccount(label: string): Promise<bigint> {
+		if (label.includes(LEGACY_COST_CENTER_SEPARATOR)) {
+			throw new Error(
+				`Invalid escrow label: "${LEGACY_COST_CENTER_SEPARATOR}" is reserved for pre-v3 cost-center accounts and may not name an escrow account`,
+			);
+		}
+
 		const accountId = TrustTBClient.deriveAccountId(label);
 		const account: Account = {
 			id: accountId,

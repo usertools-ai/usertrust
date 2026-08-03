@@ -699,6 +699,48 @@ describe("usertrust budget — parent wallet", () => {
 		expect(process.exitCode).toBe(0);
 	});
 
+	// A single `:` is legal; `::` is quarantined. On a cluster upgraded from v2.x
+	// `acct::ops` still addresses an unreclaimed pre-v3 cost-center account, and the
+	// budget commands would report on — and reclaim into — stranded legacy money. The
+	// message must not be the charset one: `::` satisfies the charset.
+	it("refuses a `::`-bearing --parent id with a message that names the quarantine", async () => {
+		makeVault();
+		setBalance(750);
+
+		await run(tempDir, { json: true }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+			"--parent",
+			"acct::ops",
+		]);
+
+		const out = jsonOut();
+		expect(out.success).toBe(false);
+		expect(out.data.message).toMatch(/"::" is reserved for pre-v3 cost-center accounts/);
+		// The charset message would read as ADMITTING `acct::ops` — it matches the
+		// charset. Asserting its absence is what keeps the two refusals distinct.
+		expect(out.data.message).not.toMatch(/1-128 characters/);
+		expect(process.exitCode).toBe(1);
+	});
+
+	// The environment path reaches the same door, and it is the likelier one to carry
+	// a stale v2-era `parent::costCenter` value out of a container entrypoint.
+	it("refuses a `::`-bearing parent from the environment", async () => {
+		makeVault();
+		setBalance(750);
+		process.env.USERTRUST_USER_ID = "acct::ops";
+
+		await run(tempDir, { json: true }, ["--cost-center", "research", "--allocated", "1000"]);
+
+		const out = jsonOut();
+		expect(out.success).toBe(false);
+		expect(out.data.message).toMatch(/\$USERTRUST_USER_ID/);
+		expect(out.data.message).toMatch(/"::" is reserved for pre-v3 cost-center accounts/);
+		expect(process.exitCode).toBe(1);
+	});
+
 	it("takes --parent over the environment", async () => {
 		makeVault();
 		setBalance(750);
@@ -1111,22 +1153,27 @@ describe("usertrust budget — dispatch", () => {
 });
 
 /**
- * `PARENT_USER_ID` in cli/budget.ts is a deliberate DISPLAY-SIDE mirror of the
- * authoritative `PARENT_USER_ID_PATTERN` in shared/ids.ts (see the comment above
- * each): the CLI checks early only to quote a useful message, and `costCenterUserId`
- * still enforces the real charset downstream. A module-private regex can't be
- * imported and compared by reference, so this test reads both sources as text and
- * extracts the declaration lines instead — string identity is exactly what "mirror"
- * has to mean, and this is what stops the two from drifting apart silently again
- * (the failure this test exists to catch: the issue-#64 work introduced a `:` in
- * shared/ids.ts without introducing it in the CLI mirror, so `--parent acct:123` was
- * refused at the door the ledger itself would have accepted).
+ * `PARENT_USER_ID` and `LEGACY_COST_CENTER_SEPARATOR` in cli/budget.ts are deliberate
+ * DISPLAY-SIDE mirrors of the authoritative `PARENT_USER_ID_PATTERN` and
+ * `LEGACY_COST_CENTER_SEPARATOR` in shared/ids.ts (see the comment above each): the
+ * CLI checks early only to quote a useful message, and `costCenterUserId` still
+ * enforces the real rule downstream. Module-private constants can't be imported and
+ * compared by reference, so this test reads both sources as text and extracts the
+ * declaration lines instead — string identity is exactly what "mirror" has to mean,
+ * and this is what stops the two from drifting apart silently again (the failure this
+ * test exists to catch: the issue-#64 work introduced a `:` in shared/ids.ts without
+ * introducing it in the CLI mirror, so `--parent acct:123` was refused at the door the
+ * ledger itself would have accepted).
+ *
+ * Both halves of the rule are pinned. The charset alone is not the rule: `::` matches
+ * the pattern and is quarantined anyway, so a CLI that mirrored only the regex would
+ * accept parent ids the ledger refuses — the same drift, one layer down.
  */
 describe("usertrust budget — parent-id pattern parity with shared/ids.ts", () => {
 	const budgetSourcePath = fileURLToPath(new URL("../../src/cli/budget.ts", import.meta.url));
 	const idsSourcePath = fileURLToPath(new URL("../../src/shared/ids.ts", import.meta.url));
 
-	/** Pull the regex literal out of a `const NAME = /pattern/;` declaration line. */
+	/** Pull the literal out of a `const NAME = <literal>;` declaration line. */
 	function extractPattern(sourcePath: string, declaration: RegExp): string {
 		const source = readFileSync(sourcePath, "utf-8");
 		const match = declaration.exec(source);
@@ -1152,6 +1199,25 @@ describe("usertrust budget — parent-id pattern parity with shared/ids.ts", () 
 				"PARENT_USER_ID_PATTERN. shared/ids.ts is authoritative — fix cli/budget.ts to " +
 				"match it verbatim (or, if the charset itself is changing, edit shared/ids.ts " +
 				"first and then copy the new literal into cli/budget.ts).",
+		).toBe(authoritative);
+	});
+
+	it("keeps the CLI mirror of the quarantined separator byte-identical too", () => {
+		const mirrored = extractPattern(
+			budgetSourcePath,
+			/^const LEGACY_COST_CENTER_SEPARATOR = (".*");$/m,
+		);
+		const authoritative = extractPattern(
+			idsSourcePath,
+			/^export const LEGACY_COST_CENTER_SEPARATOR = (".*");$/m,
+		);
+
+		expect(
+			mirrored,
+			"cli/budget.ts's LEGACY_COST_CENTER_SEPARATOR has drifted from shared/ids.ts's. " +
+				"shared/ids.ts is authoritative — the CLI must refuse exactly the substring the " +
+				"ledger quarantines, or `--parent` accepts ids `costCenterUserId` then rejects " +
+				"(or, worse, refuses ones it would accept).",
 		).toBe(authoritative);
 	});
 });
