@@ -707,8 +707,22 @@ Real, verified, and worth knowing before you touch the surrounding code.
 - **`package-lock.json` lags the package versions.** The release workflow commits only
   `packages/*/package.json`, so the lockfile records the previous version numbers. Harmless in
   practice; do not "fix" it by hand mid-PR.
-- **`packageManager` says pnpm; everything else is npm.** The root carries `package-lock.json` and
-  no `pnpm-lock.yaml`, and CI runs `npm ci`. Use npm.
+- **`packageManager` is npm — keep it npm.** The *name* is what matters: Dependabot selects its
+  updater from this field, and while it declared pnpm (with no root `pnpm-lock.yaml`) it produced
+  manifest-only bumps whose stale `package-lock.json` failed `npm ci` in every CI job (#60, #69).
+  The pinned version+hash is regenerated with `corepack use npm@<version>` — bump it freely, just
+  never change the name back. `dependabot.yml` also ignores TypeScript semver-majors — a TS major
+  is a deliberate compiler migration, never a weekly bump. That ignore is updater-wide (evaluated
+  before grouping), and it also mutes the security-update PR in the one case where a fix ships
+  only in an ignored major (the Dependabot alert still fires; in-major fixes are unaffected).
+- **Vercel builds `site/` with pnpm, not npm.** `site/` carries two lockfiles, and production
+  installs from the one the pre-merge gate never tests: the deploy log shows `Detected
+  pnpm-lock.yaml` → `pnpm run build`, while the gate above runs `npm ci` against
+  `site/package-lock.json`. They are different trees — the pnpm lockfile resolves with
+  `autoInstallPeers: true`, so an unmet peer passes silently there and hard-fails under npm — and
+  the dependency graph reads the pnpm file as authoritative: 29 of the repo's 40 open Dependabot
+  alerts point at it. Dependabot updates both in tandem (#65, #70). Deleting the pnpm lockfile
+  flips production to npm — a deliberate deploy-behavior change; never do it casually.
 - **`server` pins zod 3 while `core` pins zod 4.** In a git worktree without its own
   `node_modules`, resolution walks up to the hoisted zod 4 and `packages/server/src/wire.ts` fails
   to compile (`z.record` arity). That is a worktree artifact, not a real failure — run typechecks
