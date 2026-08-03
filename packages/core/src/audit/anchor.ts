@@ -1023,7 +1023,25 @@ export function resumeAnchorMirror(rootDir: string, latestRecordRaw: string): An
 		idKey !== null &&
 		record.keyId === identity.keyId &&
 		verifySignatureRaw("ed25519", anchorSigningPreimage(record), idKey, record.sig);
-	const handoffOk = record.rotation !== undefined && record.rotation.nextKeyId === identity.keyId;
+	// A rotation handoff is signed by the SUPERSEDED key, so it cannot verify
+	// under the current epoch key. Authenticate it against the key that actually
+	// signed it, looked up in this vault's own key history. The hole this closes
+	// was an UNVERIFIED accept, not an unsigned field: the old code matched
+	// `record.rotation.nextKeyId` against the current keyId and accepted the
+	// record on that alone, never checking `record.sig` at all — so anyone who
+	// knows the public vaultId (`anchor status` prints it) could self-sign a
+	// record naming that keyId as its successor and seed a fork off it.
+	// `rotation` IS covered by the signature — anchorSigningPreimage is
+	// canonicalize(record − sig) — which is what stops the block from being
+	// grafted onto a genuine record. Do not narrow that pre-image.
+	let handoffOk = false;
+	if (!sigOk && record.rotation !== undefined && record.rotation.nextKeyId === identity.keyId) {
+		const signer = identity.keyHistory?.find((entry) => entry.keyId === record.keyId);
+		const signerKey = signer === undefined ? null : publicKeyFromSpkiBase64(signer.publicKeySpki);
+		handoffOk =
+			signerKey !== null &&
+			verifySignatureRaw("ed25519", anchorSigningPreimage(record), signerKey, record.sig);
+	}
 	if (!sigOk && !handoffOk) {
 		throw new Error(
 			"resume: record does not verify under this vault's current anchor key — fetch the STORE'S newest record",
