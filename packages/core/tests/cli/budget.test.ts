@@ -1118,9 +1118,9 @@ describe("usertrust budget — dispatch", () => {
  * imported and compared by reference, so this test reads both sources as text and
  * extracts the declaration lines instead — string identity is exactly what "mirror"
  * has to mean, and this is what stops the two from drifting apart silently again
- * (the failure this test exists to catch: issue #64 shipped a `:` to shared/ids.ts
- * without shipping it to the CLI mirror, so `--parent acct:123` was refused at the
- * door the ledger itself would have accepted).
+ * (the failure this test exists to catch: the issue-#64 work introduced a `:` in
+ * shared/ids.ts without introducing it in the CLI mirror, so `--parent acct:123` was
+ * refused at the door the ledger itself would have accepted).
  */
 describe("usertrust budget — parent-id pattern parity with shared/ids.ts", () => {
 	const budgetSourcePath = fileURLToPath(new URL("../../src/cli/budget.ts", import.meta.url));
