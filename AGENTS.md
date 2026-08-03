@@ -828,10 +828,6 @@ Real, verified, and worth knowing before you touch the surrounding code.
   the dependency graph reads the pnpm file as authoritative: 29 of the repo's 40 open Dependabot
   alerts point at it. Dependabot updates both in tandem (#65, #70). Deleting the pnpm lockfile
   flips production to npm — a deliberate deploy-behavior change; never do it casually.
-- **`server` pins zod 3 while `core` pins zod 4.** In a git worktree without its own
-  `node_modules`, resolution walks up to the hoisted zod 4 and `packages/server/src/wire.ts` fails
-  to compile (`z.record` arity). That is a worktree artifact, not a real failure — run typechecks
-  from a checkout with its own installed dependencies.
 - **`biome.json` has a `**/scripts/**` lint override for a directory that no longer exists.** Nine
   of the pre-existing warnings are `suppressions/unused` — inline `biome-ignore` comments for rules
   the config already disables. Three sit in two `site/app/components/` files (`before-after.tsx`
