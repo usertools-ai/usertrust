@@ -9,7 +9,7 @@ export const AuthorizeRequestSchema = z.object({
 	estimatedInputTokens: z.number().int().nonnegative().optional(),
 	maxOutputTokens: z.number().int().positive().optional(),
 	messages: z.array(z.unknown()).optional(),
-	params: z.record(z.unknown()).optional(),
+	params: z.record(z.string(), z.unknown()).optional(),
 	actor: z.string().optional(),
 });
 

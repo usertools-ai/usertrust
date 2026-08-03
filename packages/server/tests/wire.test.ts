@@ -20,6 +20,20 @@ describe("request schemas", () => {
 		).toThrow();
 	});
 
+	it("parses params as a string-keyed record and rejects non-record values", () => {
+		// Pins the zod-4 `z.record(z.string(), z.unknown())` arity migration:
+		// zod 3's `z.record(V)` inferred string keys by default; zod 4 requires
+		// the key schema explicitly. These cases confirm zod-3 acceptance
+		// semantics carried over exactly.
+		expect(AuthorizeRequestSchema.parse({ model: "m", params: {} }).params).toEqual({});
+		expect(AuthorizeRequestSchema.parse({ model: "m", params: { a: 1 } }).params).toEqual({
+			a: 1,
+		});
+		expect(() => AuthorizeRequestSchema.parse({ model: "m", params: "x" })).toThrow();
+		expect(() => AuthorizeRequestSchema.parse({ model: "m", params: [] })).toThrow();
+		expect(() => AuthorizeRequestSchema.parse({ model: "m", params: null })).toThrow();
+	});
+
 	it("accepts settle and abort by transferId", () => {
 		expect(SettleRequestSchema.parse({ transferId: "tx_1", outputTokens: 5 }).transferId).toBe(
 			"tx_1",
