@@ -47,7 +47,7 @@
 	},
 	"dependencies": {
 		"@clack/prompts": "^1.1.0",
-		"minimatch": "^10.2.4",
+		"minimatch": "^10.2.6",
 		"picocolors": "^1.1.1",
 		"tigerbeetle-node": "^0.17.9",
 		"yaml": "^2.8.3",
