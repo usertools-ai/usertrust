@@ -696,6 +696,13 @@ Real, verified, and worth knowing before you touch the surrounding code.
   errors there surface only at release time.
 - **`site/` is not typechecked or built by CI** — only linted. Its `tsconfig.json` is standalone and
   has neither `noUncheckedIndexedAccess` nor `exactOptionalPropertyTypes`.
+  **A green CI run says nothing about whether the site builds.** `site/` is not a workspace and
+  carries its own `package-lock.json`, so a root `npm ci` leaves `site/node_modules` empty and
+  nothing in the pipeline ever compiles it. Any change under `site/` — a dependency bump above all —
+  must be verified with `cd site && npm ci && npx next build` before merge. This is not theoretical:
+  a Dependabot PR raised `fumadocs-mdx` to a version whose peer range demands a **major** bump of
+  `fumadocs-core`, passed all four CI jobs, merged, and broke the production deploy. The failure
+  surfaced at `vercel --prod`, after the release had shipped.
 - **`packages/claude-code-plugin` is typechecked by nothing** (no tsconfig, no `src/`).
 - **`package-lock.json` lags the package versions.** The release workflow commits only
   `packages/*/package.json`, so the lockfile records the previous version numbers. Harmless in
