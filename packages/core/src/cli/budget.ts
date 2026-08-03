@@ -124,17 +124,18 @@ function requireValue(flag: string, raw: string | undefined, inline: boolean): s
 }
 
 /**
- * Mirrors PARENT_USER_ID_PATTERN in budget/allocation.ts, which stays authoritative
- * — `costCenterUserId` still rejects anything this misses. Checking here buys only
+ * Mirrors PARENT_USER_ID_PATTERN in shared/ids.ts, which stays authoritative —
+ * `costCenterUserId` still rejects anything this misses. Checking here buys only
  * the message: the deep check can quote nothing but its own regex, which is noise
- * to an operator who never set the value it is complaining about.
+ * to an operator who never set the value it is complaining about. Kept honest by
+ * a source-parity test in tests/cli/budget.test.ts.
  */
-const PARENT_USER_ID = /^[a-zA-Z0-9._@-]{1,128}$/;
+const PARENT_USER_ID = /^[a-zA-Z0-9._@:-]{1,128}$/;
 
 function parseParent(source: string, raw: string): string {
 	if (!PARENT_USER_ID.test(raw)) {
 		throw new Error(
-			`Invalid ${source}: ${forDisplay(raw)} (1-128 characters, letters/digits/. _ @ - only)`,
+			`Invalid ${source}: ${forDisplay(raw)} (1-128 characters, letters/digits/. _ @ : - only)`,
 		);
 	}
 	return raw;

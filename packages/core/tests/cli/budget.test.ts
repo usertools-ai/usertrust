@@ -14,9 +14,10 @@
  * promises `loadConfig` awaits, and nothing on this path waits for a timer.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /** Fake ledger state, mutated per test before the command runs. */
@@ -654,6 +655,50 @@ describe("usertrust budget — parent wallet", () => {
 		expect(process.exitCode).toBe(0);
 	});
 
+	// Issue #64: account ids come from the length-prefixed tuple hash
+	// `TrustTBClient.deriveCostCenterAccountId`, which no colon on either side of
+	// `--parent` can make ambiguous — so the CLI door must admit it, not just the
+	// authoritative `PARENT_USER_ID_PATTERN` in shared/ids.ts.
+	it("accepts a colon-bearing --parent id", async () => {
+		makeVault();
+		setBalance(750);
+
+		await run(tempDir, { json: true }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+			"--parent",
+			"acct:123",
+		]);
+
+		const out = jsonOut();
+		expect(out.success).toBe(true);
+		expect(out.data.parent).toBe("acct:123");
+		expect(process.exitCode).toBe(0);
+	});
+
+	// The inline `=` form is the only way to pass a value beginning with `-`, but a
+	// leading `:` needs no such escape — this exercises the inline form's parsing
+	// path specifically (`eq` splitting, `inline` value) with a colon-bearing id.
+	it("accepts a colon-bearing --parent id through the inline form", async () => {
+		makeVault();
+		setBalance(750);
+
+		await run(tempDir, { json: true }, [
+			"--parent=:x",
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+		]);
+
+		const out = jsonOut();
+		expect(out.success).toBe(true);
+		expect(out.data.parent).toBe(":x");
+		expect(process.exitCode).toBe(0);
+	});
+
 	it("takes --parent over the environment", async () => {
 		makeVault();
 		setBalance(750);
@@ -715,6 +760,10 @@ describe("usertrust budget — parent wallet", () => {
 		]);
 
 		expect(logOutput.join("\n")).toMatch(/Invalid --parent: acct 42/);
+		// The charset in the message must list `:` now that colon-bearing parent ids
+		// (issue #64) are admitted — a stale message would send an operator hunting
+		// for a character that is actually allowed.
+		expect(logOutput.join("\n")).toContain("(1-128 characters, letters/digits/. _ @ : - only)");
 		expect(logOutput.join("\n")).not.toMatch(/parentUserId must match/);
 		expect(process.exitCode).toBe(1);
 	});
@@ -861,6 +910,29 @@ describe("usertrust budget — terminal safety", () => {
 		expect(combined).toMatch(/Invalid --allocated/);
 		expectNoInjection(combined);
 		// Swept, not dropped: the operator still sees that something was passed.
+		expect(combined).toContain("?");
+		expect(process.exitCode).toBe(1);
+	});
+
+	// Widening PARENT_USER_ID to admit `:` (issue #64) must not widen it into
+	// admitting control bytes: ESC and BEL are still outside the charset, so this
+	// still fails validation, and the failure message must still echo through
+	// `forDisplay` rather than the raw argv.
+	it("neutralises an OSC/CSI payload in a --parent value", async () => {
+		makeVault();
+
+		await run(tempDir, { json: false }, [
+			"--cost-center",
+			"research",
+			"--allocated",
+			"1000",
+			"--parent",
+			ESCAPES,
+		]);
+
+		const combined = logOutput.join("\n");
+		expect(combined).toMatch(/Invalid --parent/);
+		expectNoInjection(combined);
 		expect(combined).toContain("?");
 		expect(process.exitCode).toBe(1);
 	});
@@ -1035,5 +1107,51 @@ describe("usertrust budget — dispatch", () => {
 		expect(payload.success).toBe(true);
 		expect(payload.data.costCenter).toBe("research");
 		expect(process.exitCode).not.toBe(1);
+	});
+});
+
+/**
+ * `PARENT_USER_ID` in cli/budget.ts is a deliberate DISPLAY-SIDE mirror of the
+ * authoritative `PARENT_USER_ID_PATTERN` in shared/ids.ts (see the comment above
+ * each): the CLI checks early only to quote a useful message, and `costCenterUserId`
+ * still enforces the real charset downstream. A module-private regex can't be
+ * imported and compared by reference, so this test reads both sources as text and
+ * extracts the declaration lines instead — string identity is exactly what "mirror"
+ * has to mean, and this is what stops the two from drifting apart silently again
+ * (the failure this test exists to catch: issue #64 shipped a `:` to shared/ids.ts
+ * without shipping it to the CLI mirror, so `--parent acct:123` was refused at the
+ * door the ledger itself would have accepted).
+ */
+describe("usertrust budget — parent-id pattern parity with shared/ids.ts", () => {
+	const budgetSourcePath = fileURLToPath(new URL("../../src/cli/budget.ts", import.meta.url));
+	const idsSourcePath = fileURLToPath(new URL("../../src/shared/ids.ts", import.meta.url));
+
+	/** Pull the regex literal out of a `const NAME = /pattern/;` declaration line. */
+	function extractPattern(sourcePath: string, declaration: RegExp): string {
+		const source = readFileSync(sourcePath, "utf-8");
+		const match = declaration.exec(source);
+		if (match === null) {
+			throw new Error(
+				`${sourcePath}: could not find a line matching ${declaration.source} — did the ` +
+					"declaration move or get renamed?",
+			);
+		}
+		return match[1] as string;
+	}
+
+	it("keeps the CLI mirror byte-identical to the authoritative pattern", () => {
+		const mirrored = extractPattern(budgetSourcePath, /^const PARENT_USER_ID = (\/.*\/);$/m);
+		const authoritative = extractPattern(
+			idsSourcePath,
+			/^export const PARENT_USER_ID_PATTERN = (\/.*\/);$/m,
+		);
+
+		expect(
+			mirrored,
+			"cli/budget.ts's PARENT_USER_ID has drifted from shared/ids.ts's " +
+				"PARENT_USER_ID_PATTERN. shared/ids.ts is authoritative — fix cli/budget.ts to " +
+				"match it verbatim (or, if the charset itself is changing, edit shared/ids.ts " +
+				"first and then copy the new literal into cli/budget.ts).",
+		).toBe(authoritative);
 	});
 });
