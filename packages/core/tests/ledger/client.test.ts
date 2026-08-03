@@ -41,7 +41,14 @@ vi.mock("tigerbeetle-node", () => ({
 	createClient: mockCreateClient,
 	AccountFlags: { debits_must_not_exceed_credits: 1 << 2, history: 1 << 5 },
 	TransferFlags: { pending: 1, post_pending_transfer: 2, void_pending_transfer: 4 },
-	CreateAccountStatus: { created: 4294967295, exists: 1 },
+	CreateAccountStatus: {
+		created: 4294967295,
+		exists: 1,
+		// The real binding's values. Only bare `exists` is success; these two stand in
+		// for the rest of the family, which every door must refuse.
+		exists_with_different_flags: 15,
+		exists_with_different_ledger: 19,
+	},
 	CreateTransferStatus: {
 		created: 4294967295,
 		exceeds_credits: 22,
@@ -53,6 +60,7 @@ vi.mock("tigerbeetle-node", () => ({
 	amount_max: (1n << 128n) - 1n,
 }));
 
+import { AccountFlags, CreateAccountStatus } from "tigerbeetle-node";
 import {
 	CODE_ESCROW,
 	CODE_PLATFORM_TREASURY,
@@ -231,6 +239,169 @@ describe("TrustTBClient", () => {
 				);
 			}
 			expect(mockCreateAccounts).not.toHaveBeenCalled();
+		});
+	});
+
+	describe("createCostCenterWallet", () => {
+		// The KATs are spelled out, never recomputed from the static: this suite is a
+		// door test, and a door that follows its own derivation proves nothing. Same
+		// answers as the derivation KAT suite above, on purpose.
+		const ACME_BILLING = 153698412649693138325753473963527840061n;
+		const ACCT123_RESEARCH = 112969331358731418235272055848009854886n;
+
+		it("returns the derived id on the created path", async () => {
+			mockCreateAccounts.mockResolvedValueOnce([{ status: CreateAccountStatus.created }]);
+			await expect(client.createCostCenterWallet("acme", "billing")).resolves.toBe(ACME_BILLING);
+			expect(mockCreateAccounts.mock.calls[0]?.[0][0].id).toBe(ACME_BILLING);
+		});
+
+		// `exists` IS SUCCESS, and the id is what makes that safe: it is derived from
+		// the tuple, so the account that already exists is the account this call asked
+		// for. Asserting the id on this path is what proves it — a door that returned a
+		// cached or colliding id here would hand back someone else's balance.
+		it("returns the same derived id on the exists path", async () => {
+			mockCreateAccounts.mockResolvedValueOnce([{ status: CreateAccountStatus.exists }]);
+			await expect(client.createCostCenterWallet("acme", "billing")).resolves.toBe(ACME_BILLING);
+		});
+
+		it("is idempotent across sequential calls", async () => {
+			mockCreateAccounts
+				.mockResolvedValueOnce([{ status: CreateAccountStatus.created }])
+				.mockResolvedValueOnce([{ status: CreateAccountStatus.exists }]);
+			await expect(client.createCostCenterWallet("acme", "billing")).resolves.toBe(ACME_BILLING);
+			await expect(client.createCostCenterWallet("acme", "billing")).resolves.toBe(ACME_BILLING);
+			// No in-process short-circuit: the second call still reaches TigerBeetle.
+			expect(mockCreateAccounts).toHaveBeenCalledTimes(2);
+		});
+
+		it("tolerates an empty result array", async () => {
+			mockCreateAccounts.mockResolvedValueOnce([]);
+			await expect(client.createCostCenterWallet("acme", "billing")).resolves.toBe(ACME_BILLING);
+		});
+
+		// Balance enforcement is the whole point of a budget wallet: without
+		// debits_must_not_exceed_credits a cost center can overspend its allocation.
+		it("creates a balance-enforced user wallet on the usertokens ledger", async () => {
+			mockCreateAccounts.mockResolvedValueOnce([{ status: CreateAccountStatus.created }]);
+			await client.createCostCenterWallet("acme", "billing");
+			const account = mockCreateAccounts.mock.calls[0]?.[0][0];
+			expect(account.flags).toBe(
+				AccountFlags.debits_must_not_exceed_credits | AccountFlags.history,
+			);
+			expect(account.code).toBe(CODE_USER_WALLET);
+			expect(account.ledger).toBe(LEDGER_USERTOKENS);
+		});
+
+		// An account that exists with different flags is an account missing its
+		// enforcement — accepting it would hand back an unenforced wallet.
+		it("rejects exists_with_different_flags", async () => {
+			mockCreateAccounts.mockResolvedValueOnce([
+				{ status: CreateAccountStatus.exists_with_different_flags },
+			]);
+			await expect(client.createCostCenterWallet("acme", "billing")).rejects.toThrow(
+				"Failed to create cost-center wallet",
+			);
+		});
+
+		// Representative of every OTHER `exists_with_different_*`: only bare `exists`
+		// is success, and the enumeration is not "anything that starts with exists".
+		it("rejects a non-flags exists_with_different_* status", async () => {
+			mockCreateAccounts.mockResolvedValueOnce([
+				{ status: CreateAccountStatus.exists_with_different_ledger },
+			]);
+			await expect(client.createCostCenterWallet("acme", "billing")).rejects.toThrow(
+				"Failed to create cost-center wallet",
+			);
+		});
+
+		it("rejects any other non-ok status", async () => {
+			mockCreateAccounts.mockResolvedValueOnce([{ status: 99 }]);
+			await expect(client.createCostCenterWallet("acme", "billing")).rejects.toThrow(
+				"Failed to create cost-center wallet",
+			);
+		});
+
+		it("throws when the result element is undefined", async () => {
+			mockCreateAccounts.mockResolvedValueOnce([undefined]);
+			await expect(client.createCostCenterWallet("acme", "billing")).rejects.toThrow(
+				"Unknown account/transfer error",
+			);
+		});
+
+		// Belt to the budget path's braces. The derivation is total over strings, so
+		// nothing below is refused by the hash — the door is the only thing between a
+		// control character and an audit event that quotes it.
+		it("refuses inputs outside the patterns before reaching TigerBeetle", async () => {
+			await expect(client.createCostCenterWallet("acme\x1b[2J", "billing")).rejects.toThrow(
+				/parentUserId/,
+			);
+			await expect(client.createCostCenterWallet("", "billing")).rejects.toThrow(/parentUserId/);
+			await expect(client.createCostCenterWallet("p".repeat(129), "billing")).rejects.toThrow(
+				/parentUserId/,
+			);
+			await expect(client.createCostCenterWallet("acme", "bad cc!")).rejects.toThrow(/costCenter/);
+			await expect(client.createCostCenterWallet("acme", "")).rejects.toThrow(/costCenter/);
+			await expect(client.createCostCenterWallet("acme", "c".repeat(65))).rejects.toThrow(
+				/costCenter/,
+			);
+			// A cost center may not carry a colon: the display label's injectivity is
+			// what makes the maximal colon-free suffix recover the tuple.
+			await expect(client.createCostCenterWallet("acme", "a:b")).rejects.toThrow(/costCenter/);
+			expect(mockCreateAccounts).not.toHaveBeenCalled();
+		});
+
+		// The types do not reach a JS caller, and `PATTERN.test(undefined)` matches the
+		// STRING "undefined" — so the typeof guard is what refuses these, not the regex.
+		it("refuses non-string inputs a JS caller can still pass", async () => {
+			await expect(
+				client.createCostCenterWallet(null as unknown as string, "billing"),
+			).rejects.toThrow(/parentUserId/);
+			await expect(client.createCostCenterWallet("acme", 123 as unknown as string)).rejects.toThrow(
+				/costCenter/,
+			);
+			expect(mockCreateAccounts).not.toHaveBeenCalled();
+		});
+
+		// Issue #64: the tuple hash is length-prefixed, so a colon in the parent can no
+		// longer make two tuples collide — the door admits it.
+		it("admits a colon-bearing parent id", async () => {
+			mockCreateAccounts.mockResolvedValueOnce([{ status: CreateAccountStatus.created }]);
+			await expect(client.createCostCenterWallet("acct:123", "research")).resolves.toBe(
+				ACCT123_RESEARCH,
+			);
+		});
+
+		it("accepts both parts at their pattern boundaries", async () => {
+			for (const [parent, cc] of [
+				["p", "c"],
+				["p".repeat(128), "c"],
+				["p", "c".repeat(64)],
+				["p".repeat(128), "c".repeat(64)],
+			] as const) {
+				mockCreateAccounts.mockResolvedValueOnce([{ status: CreateAccountStatus.created }]);
+				await expect(client.createCostCenterWallet(parent, cc)).resolves.toBe(
+					TrustTBClient.deriveCostCenterAccountId(parent, cc),
+				);
+			}
+		});
+
+		// ASCII is DOOR POLICY, not a property of the derivation: the static derives
+		// "é" fine and deterministically, and the door still refuses it. Loosening the
+		// pattern is therefore a policy decision, not a derivation change.
+		it("refuses a multibyte parent the derivation itself handles fine", async () => {
+			expect(typeof TrustTBClient.deriveCostCenterAccountId("é", "billing")).toBe("bigint");
+			await expect(client.createCostCenterWallet("é", "billing")).rejects.toThrow(/parentUserId/);
+			expect(mockCreateAccounts).not.toHaveBeenCalled();
+		});
+
+		// The id is derived, never looked up — so caching it would only create a second
+		// source of truth that a fresh client in another process would not share.
+		it("writes nothing to the in-process account map", async () => {
+			mockCreateAccounts.mockResolvedValueOnce([{ status: CreateAccountStatus.created }]);
+			await client.createCostCenterWallet("acme", "billing");
+			for (const name of ["acme", "billing", "acme::billing"]) {
+				expect(() => client.getAccountId(name)).toThrow(/No TigerBeetle account/);
+			}
 		});
 	});
 

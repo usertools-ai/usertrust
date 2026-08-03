@@ -60,12 +60,11 @@ import type { AppendEventInput } from "../audit/chain.js";
 import type { TBTransferError } from "../ledger/client.js";
 import { TrustTBClient, XFER_BUDGET_GRANT, XFER_BUDGET_RECLAIM } from "../ledger/client.js";
 import { InsufficientBalanceError } from "../shared/errors.js";
+import { COST_CENTER_PATTERN, PARENT_USER_ID_PATTERN } from "../shared/ids.js";
 import { computeRunway, type Runway } from "./runway.js";
 
 // ── Identity ──
 
-const PARENT_USER_ID_PATTERN = /^[a-zA-Z0-9._@-]{1,128}$/;
-const COST_CENTER_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
 const SEPARATOR = "::";
 const MAX_DERIVED_ID_LENGTH = 200;
 

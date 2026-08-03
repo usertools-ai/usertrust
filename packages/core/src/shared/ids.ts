@@ -25,6 +25,26 @@ export function trustId(prefix: string): string {
 	return `${prefix}_${Date.now().toString(36)}_${randomBytes(4).toString("hex")}`;
 }
 
+/**
+ * The charsets a cost center's two identity parts must match — the AUTHORITATIVE
+ * copies; `cli/budget.ts` carries a deliberate display-side mirror, kept honest by a
+ * source-parity test. They live here, beside `tbId`, because both the ledger door
+ * (`ledger/client.ts`) and the budget path (`budget/allocation.ts`) validate against
+ * them and neither may import the other.
+ *
+ * Both exclude whitespace, control characters, and ANSI escapes, which keeps the
+ * derived display label safe to embed in an audit event and in terminal output.
+ *
+ * `COST_CENTER_PATTERN` is colon-free, and that is a security boundary rather than
+ * input cosmetics: it is what keeps the `parent::costCenter` display label injective —
+ * the cost center is the label's maximal colon-free suffix. `PARENT_USER_ID_PATTERN`
+ * admits `:` (issue #64) because account ids come from the length-prefixed tuple hash
+ * `TrustTBClient.deriveCostCenterAccountId`, which no colon on either side can make
+ * ambiguous.
+ */
+export const PARENT_USER_ID_PATTERN = /^[a-zA-Z0-9._@:-]{1,128}$/;
+export const COST_CENTER_PATTERN = /^[a-zA-Z0-9._-]{1,64}$/;
+
 /** FNV-1a 32-bit hash */
 export function fnv1a32(str: string): number {
 	let hash = 0x811c9dc5;

@@ -140,14 +140,19 @@ describe("costCenterUserId", () => {
 		expect(() => costCenterUserId("p".repeat(129), COST_CENTER)).toThrow(/parentUserId/);
 	});
 
-	it("rejects an embedded `::` in either part so the derived id stays unambiguous", () => {
+	// Half-flips, both sides asserted together on purpose. The COST CENTER may still
+	// carry no colon: it is the label's maximal colon-free suffix, which is the only
+	// thing that keeps `parent::costCenter` readable back into its two parts. The
+	// PARENT may, because account ids no longer come from this label at all — they
+	// come from the length-prefixed tuple hash, which no colon can make ambiguous.
+	it("rejects an embedded `::` in the cost center but allows it in the parent", () => {
 		expect(() => costCenterUserId(PARENT, "a::b")).toThrow(/costCenter/);
-		expect(() => costCenterUserId("user::sub", COST_CENTER)).toThrow(/parentUserId/);
+		expect(costCenterUserId("user::sub", COST_CENTER)).toBe(`user::sub::${COST_CENTER}`);
 	});
 
-	it("rejects a bare colon in either part", () => {
+	it("rejects a bare colon in the cost center but allows it in the parent", () => {
 		expect(() => costCenterUserId(PARENT, "a:b")).toThrow(/costCenter/);
-		expect(() => costCenterUserId("user:1", COST_CENTER)).toThrow(/parentUserId/);
+		expect(costCenterUserId("user:1", COST_CENTER)).toBe(`user:1::${COST_CENTER}`);
 	});
 
 	it("rejects a slash in the cost center", () => {

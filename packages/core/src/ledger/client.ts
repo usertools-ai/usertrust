@@ -17,7 +17,7 @@ import {
 	createClient,
 	TransferFlags,
 } from "tigerbeetle-node";
-import { tbId } from "../shared/ids.js";
+import { COST_CENTER_PATTERN, PARENT_USER_ID_PATTERN, tbId } from "../shared/ids.js";
 
 /** Typed error carrying the numeric TB error code for structured matching. */
 export class TBTransferError extends Error {
@@ -297,6 +297,70 @@ export class TrustTBClient {
 		}
 
 		this.accountMap.set(userId, accountId);
+		return accountId;
+	}
+
+	/**
+	 * Create (or return) the balance-enforced wallet for a cost center.
+	 *
+	 * The id comes from {@link TrustTBClient.deriveCostCenterAccountId} — the tuple is
+	 * never joined into a string, so no `(parent, costCenter)` pair can reach another
+	 * pair's account and no ordinary wallet id can reach any of them. That determinism
+	 * is exactly what licenses `exists` as success: the account TigerBeetle reports is
+	 * the account this call asked for, so a retry after a socket reset is a no-op
+	 * rather than a second wallet. Every `exists_with_different_*` stays a hard failure
+	 * — `exists_with_different_flags` is an account missing its
+	 * `debits_must_not_exceed_credits` enforcement, which a blanket `try/catch` around
+	 * this call would silently accept.
+	 *
+	 * Validation here is a BELT to the budget path's braces: the derivation is total
+	 * over strings, so nothing but this door keeps a control character out of a wallet
+	 * that the audit trail then quotes. ASCII is door policy, not a property of the
+	 * derivation.
+	 *
+	 * Deliberately does NOT write `accountMap`: the id is derived, never looked up, and
+	 * a cache would only be a second source of truth that a client in another process
+	 * does not share.
+	 *
+	 * @throws Error when either part is outside its charset, or TigerBeetle refuses.
+	 */
+	async createCostCenterWallet(parentUserId: string, costCenter: string): Promise<bigint> {
+		if (typeof parentUserId !== "string" || !PARENT_USER_ID_PATTERN.test(parentUserId)) {
+			throw new Error(`Invalid parentUserId: must match ${PARENT_USER_ID_PATTERN.source}`);
+		}
+		if (typeof costCenter !== "string" || !COST_CENTER_PATTERN.test(costCenter)) {
+			throw new Error(`Invalid costCenter: must match ${COST_CENTER_PATTERN.source}`);
+		}
+
+		const accountId = TrustTBClient.deriveCostCenterAccountId(parentUserId, costCenter);
+		const account: Account = {
+			id: accountId,
+			debits_pending: 0n,
+			debits_posted: 0n,
+			credits_pending: 0n,
+			credits_posted: 0n,
+			user_data_128: 0n,
+			user_data_64: 0n,
+			user_data_32: 0,
+			reserved: 0,
+			ledger: LEDGER_USERTOKENS,
+			code: CODE_USER_WALLET,
+			flags: AccountFlags.debits_must_not_exceed_credits | AccountFlags.history,
+			timestamp: 0n,
+		};
+
+		const results = await this.withReconnect(() => this.client.createAccounts([account]));
+		if (results.length > 0) {
+			const res = results[0];
+			if (!res) throw new Error("Unknown account/transfer error");
+			// `exists` is treated as success — the wallet is already present.
+			if (res.status !== CreateAccountStatus.created && res.status !== CreateAccountStatus.exists) {
+				throw new Error(
+					`Failed to create cost-center wallet: ${CreateAccountStatus[res.status] ?? res.status}`,
+				);
+			}
+		}
+
 		return accountId;
 	}
 
