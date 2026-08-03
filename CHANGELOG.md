@@ -107,6 +107,19 @@ instead of being exempted from it.
 
 ### Changed
 
+- **BREAKING: cost-center account ids now derive from the `(parentUserId,
+  costCenter)` tuple** — a domain-separated, length-prefixed SHA-256 — instead
+  of hashing the joined `parent::costCenter` string. This removes the reserved
+  `::` separator and lets parent wallet ids contain `:` (#64), but it changes
+  where cost-center money lives: a cost center funded on v2.x sits in an
+  account this version no longer derives, so `getBudgetStatus` reports it as
+  balance 0 (reading as fully spent) and `reclaimBudget` moves nothing —
+  silently, on both paths. **Reclaim every live cost center with
+  `reclaimBudget` on v2.x before upgrading.** If you have already upgraded with
+  balances stranded: downgrade to 2.x, reclaim, then upgrade again. There is
+  deliberately no read-time fallback to the legacy account: reading it would
+  collide with an ordinary wallet literally named `parent::costCenter`, which
+  is the exact ambiguity this change removes.
 - OpenAI and Google streaming usage accumulation is now replace-with-latest
   (usage-bearing chunks carry cumulative snapshots — e.g. vLLM
   `continuous_usage_stats` — which summing would multiply-count). Anthropic
