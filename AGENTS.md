@@ -820,14 +820,21 @@ Real, verified, and worth knowing before you touch the surrounding code.
   is a deliberate compiler migration, never a weekly bump. That ignore is updater-wide (evaluated
   before grouping), and it also mutes the security-update PR in the one case where a fix ships
   only in an ignored major (the Dependabot alert still fires; in-major fixes are unaffected).
-- **Vercel builds `site/` with pnpm, not npm.** `site/` carries two lockfiles, and production
-  installs from the one the pre-merge gate never tests: the deploy log shows `Detected
-  pnpm-lock.yaml` → `pnpm run build`, while the gate above runs `npm ci` against
-  `site/package-lock.json`. They are different trees — the pnpm lockfile resolves with
-  `autoInstallPeers: true`, so an unmet peer passes silently there and hard-fails under npm — and
-  the dependency graph reads the pnpm file as authoritative: 29 of the repo's 40 open Dependabot
-  alerts point at it. Dependabot updates both in tandem (#65, #70). Deleting the pnpm lockfile
-  flips production to npm — a deliberate deploy-behavior change; never do it casually.
+- **Vercel builds `site/` with npm.** `site/` carries exactly one lockfile — `package-lock.json` —
+  so Vercel's lockfile detection falls through to npm, and production installs the same tree the
+  pre-merge gate above tests. The preview that made the flip logged `Skipping build cache since
+  Package Manager changed from "pnpm" to "npm"` → `Running "npm run build"`; the production build
+  before it logged `Detected pnpm-lock.yaml` → `Running "pnpm run build"`. That history is why the
+  alert backlog looks the way it does: until 2026-08 `site/` carried both lockfiles and production
+  installed from the pnpm one the gate never tested — `autoInstallPeers: true` let unmet peers pass
+  silently there that the npm tree hard-fails on, and the dependency graph read the pnpm file as
+  authoritative, attributing 29 of the repo's 40 open Dependabot alerts to a tree nothing shipped.
+  Two differences from the gate survive the flip: Vercel installs with `npm install`, not `npm ci`,
+  so a lockfile that has drifted from `package.json` is repaired in production where the gate
+  hard-fails on it; and the linux builder resolves a few more platform-specific optional deps than a
+  macOS `npm ci` (290 packages vs 285). Note also that the Vercel project's Root Directory is
+  `site`, so a CLI deploy runs from the **repo root** — `vercel deploy` from inside `site/` fails
+  looking for `site/site`.
 - **`biome.json` has a `**/scripts/**` lint override for a directory that no longer exists.** Nine
   of the pre-existing warnings are `suppressions/unused` — inline `biome-ignore` comments for rules
   the config already disables. Three sit in two `site/app/components/` files (`before-after.tsx`
