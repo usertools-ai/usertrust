@@ -205,7 +205,14 @@ export function GovernanceReceipt() {
 						)}
 					</div>
 
-					<pre className="p-3 sm:p-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-hidden">
+					<pre
+						// The rounded shell above keeps overflow-hidden — it is what clips the
+						// content to the rounded border — so the scroll container has to be this
+						// element instead. At
+						// 375px the receipt's longest lines are otherwise clipped unreachably
+						// rather than merely off-screen.
+						className="p-3 sm:p-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto"
+					>
 						<code>
 							{RECEIPT_LINES.map((line, i) => {
 								const indent = INDENTS[i] ?? 0;

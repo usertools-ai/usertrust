@@ -197,7 +197,7 @@ function SpotlightCard({ children, className }: { children: React.ReactNode; cla
 
 export function Features() {
 	return (
-		<section id="features" className="relative py-24 sm:py-32 px-6">
+		<section id="features" className="relative py-24 sm:py-32 safe-x">
 			<div className="max-w-5xl mx-auto flex flex-col gap-12">
 				{/* Header */}
 				<div className="flex flex-col gap-4 max-w-xl">

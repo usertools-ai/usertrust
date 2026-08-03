@@ -56,7 +56,15 @@ export function Hero({ downloads, stars }: { downloads: string; stars: string })
 	return (
 		<section
 			ref={sectionRef}
-			className="relative min-h-screen flex flex-col items-center justify-start text-center px-6 pt-[18vh]"
+			// 100dvh, not 100vh: iOS Safari measures vh against the viewport with the
+			// toolbar retracted, so a 100vh hero is taller than what is on screen and
+			// the page jerks as the toolbar hides.
+			//
+			// No vh fallback, deliberately. dvh is Safari 15.4+, while the emitted
+			// stylesheet already uses @property and color-mix() — Tailwind v4's own
+			// floor, Safari 16.4+. Any engine that can parse this CSS supports dvh, and
+			// Lightning CSS strips a paired vh declaration as provably dead.
+			className="relative min-h-[100dvh] flex flex-col items-center justify-start text-center safe-x pt-[18dvh]"
 			style={{ zIndex: 1 }}
 		>
 			{/* Bliss background — scroll-fades */}
@@ -142,7 +150,7 @@ export function Hero({ downloads, stars }: { downloads: string; stars: string })
 				>
 					<a
 						href="#code"
-						className="inline-flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] bg-ut text-brand-bg rounded-lg text-sm font-semibold hover:bg-ut/90 active:scale-[0.98] transition-all duration-150 shadow-[0_0_20px_rgba(52,211,153,0.3),0_0_60px_rgba(52,211,153,0.1)]"
+						className="focus-ring inline-flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] bg-ut text-brand-bg rounded-lg text-sm font-semibold hover:bg-ut/90 active:scale-[0.98] transition-all duration-150 shadow-[0_0_20px_rgba(52,211,153,0.3),0_0_60px_rgba(52,211,153,0.1)]"
 					>
 						Start Trusting
 					</a>
@@ -150,7 +158,7 @@ export function Hero({ downloads, stars }: { downloads: string; stars: string })
 						href="https://github.com/usertools-ai/usertrust"
 						target="_blank"
 						rel="noopener noreferrer"
-						className="inline-flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] bg-white/[0.06] border border-white/10 rounded-lg text-sm font-medium text-white/80 hover:bg-white/[0.10] hover:text-white transition-all duration-150"
+						className="focus-ring inline-flex items-center justify-center gap-2 px-5 py-2.5 min-h-[44px] bg-white/[0.06] border border-white/10 rounded-lg text-sm font-medium text-white/80 hover:bg-white/[0.10] hover:text-white transition-all duration-150"
 					>
 						View on GitHub
 					</a>

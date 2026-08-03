@@ -21,7 +21,7 @@ const useCases = [
 
 export function BuiltFor() {
 	return (
-		<section className="relative py-20 sm:py-24 px-6">
+		<section className="relative py-20 sm:py-24 safe-x">
 			<div className="max-w-5xl mx-auto">
 				<div className="text-center mb-12">
 					<ScrollReveal>

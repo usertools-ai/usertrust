@@ -1,6 +1,6 @@
 "use client";
 
-import { AnimatePresence, motion, useInView } from "motion/react";
+import { AnimatePresence, motion, useInView, useReducedMotion } from "motion/react";
 import { useEffect, useRef, useState } from "react";
 import { ScrollReveal } from "./scroll-reveal";
 
@@ -217,7 +217,13 @@ function CodePanel({
 						</div>
 					))}
 				</div>
-				<pre className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-hidden flex-1">
+				<pre
+					// The gutter is a sibling, so scrolling here and not on the rounded shell
+					// keeps the line numbers pinned while the code moves. min-w-0 because a
+					// flex item is otherwise sized to its content: the panel would widen past
+					// a 375px viewport instead of scrolling inside it.
+					className="py-3 sm:py-5 px-3 sm:px-5 text-xs sm:text-sm font-mono leading-relaxed overflow-x-auto min-w-0 flex-1"
+				>
 					<code>
 						{lines.map((line, i) => (
 							// biome-ignore lint/suspicious/noArrayIndexKey: static code lines
@@ -269,6 +275,25 @@ export function BeforeAfter() {
 	const sectionRef = useRef<HTMLDivElement>(null);
 	const inView = useInView(sectionRef, { once: true, amount: 0.2 });
 	const [showAfter, setShowAfter] = useState(false);
+	/*
+	 * The panel swap is a full-panel scale plus a brightness flash, and it also
+	 * fires on its own after 2s — motion the reader never asked for. Under
+	 * prefers-reduced-motion the duration drops to 0 so the panels still swap,
+	 * they just do not travel.
+	 *
+	 * useReducedMotion rather than matchMedia in render: matchMedia does not exist
+	 * on the server, so reading it during render would throw there and hydrate
+	 * mismatched here.
+	 *
+	 * Two things the hook does NOT do, in motion@12: it does not react to the OS
+	 * setting changing mid-session (it snapshots once via useState — upstream's own
+	 * TODO), and it returns null on the server rather than a boolean. Neither bites:
+	 * null is falsy, so SSR renders the full duration, and `transition` is never
+	 * serialized into the DOM, so there is nothing for hydration to disagree about.
+	 * If mid-session reactivity is ever wanted, it needs a real listener — do not
+	 * assume the hook already provides one.
+	 */
+	const shouldReduceMotion = useReducedMotion();
 
 	// Auto-flip from Before to After after 2s of being in view
 	useEffect(() => {
@@ -278,7 +303,7 @@ export function BeforeAfter() {
 	}, [inView]);
 
 	return (
-		<section className="relative py-24 sm:py-32 px-6">
+		<section className="relative py-24 sm:py-32 safe-x">
 			<div className="max-w-5xl mx-auto" ref={sectionRef}>
 				{/* Section header */}
 				<div className="text-center mb-14">
@@ -304,11 +329,17 @@ export function BeforeAfter() {
 
 				{/* Animated toggle pills */}
 				<ScrollReveal delay={0.3}>
+					{/*
+					 * The pills are a two-state toggle, not navigation: without aria-pressed a
+					 * screen reader announces two ordinary buttons and never says which panel
+					 * is currently on screen — including after the 2s auto-flip moves it.
+					 */}
 					<div className="flex items-center justify-center gap-2 mb-8">
 						<button
 							type="button"
+							aria-pressed={!showAfter}
 							onClick={() => setShowAfter(false)}
-							className={`px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all duration-300 ${
+							className={`focus-ring inline-flex min-h-[44px] items-center justify-center px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all duration-300 ${
 								!showAfter
 									? "bg-danger/10 border border-danger/30 text-danger/80 shadow-[0_0_20px_rgba(239,68,68,0.1)]"
 									: "border border-white/[0.06] text-white/30 hover:text-white/50"
@@ -318,15 +349,20 @@ export function BeforeAfter() {
 						</button>
 						<motion.span
 							animate={{ x: showAfter ? 4 : -4 }}
-							transition={{ type: "spring", stiffness: 300, damping: 20 }}
+							transition={
+								shouldReduceMotion
+									? { duration: 0 }
+									: { type: "spring", stiffness: 300, damping: 20 }
+							}
 							className="text-white/20 text-lg"
 						>
 							→
 						</motion.span>
 						<button
 							type="button"
+							aria-pressed={showAfter}
 							onClick={() => setShowAfter(true)}
-							className={`px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all duration-300 ${
+							className={`focus-ring inline-flex min-h-[44px] items-center justify-center px-4 py-2 rounded-lg text-xs font-bold uppercase tracking-wider transition-all duration-300 ${
 								showAfter
 									? "bg-ut/10 border border-ut/30 text-ut shadow-[0_0_20px_rgba(52,211,153,0.1)]"
 									: "border border-white/[0.06] text-white/30 hover:text-white/50"
@@ -346,7 +382,7 @@ export function BeforeAfter() {
 								initial={{ opacity: 0, scale: 0.97, y: 10 }}
 								animate={{ opacity: 1, scale: 1, y: 0 }}
 								exit={{ opacity: 0, scale: 1.02, filter: "brightness(2)" }}
-								transition={{ duration: 0.5, ease: "easeInOut" }}
+								transition={{ duration: shouldReduceMotion ? 0 : 0.5, ease: "easeInOut" }}
 								className="relative rounded-xl border border-danger/20 overflow-hidden"
 								style={{
 									background: "rgba(239,68,68,0.02)",
@@ -377,7 +413,7 @@ export function BeforeAfter() {
 								initial={{ opacity: 0, scale: 0.97, y: 10 }}
 								animate={{ opacity: 1, scale: 1, y: 0 }}
 								exit={{ opacity: 0, scale: 0.97, y: -10 }}
-								transition={{ duration: 0.4, ease: "easeInOut" }}
+								transition={{ duration: shouldReduceMotion ? 0 : 0.4, ease: "easeInOut" }}
 								className="relative rounded-xl border border-ut/20"
 								style={{
 									background: "rgba(52,211,153,0.03)",

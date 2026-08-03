@@ -84,14 +84,30 @@
 	}
 }
 
-/* Smooth scroll */
+/* Document scrolling */
 html {
 	scroll-behavior: smooth;
+	/*
+	 * The nav is `fixed top-0`, so an anchor jump lands underneath it without
+	 * this. 5rem clears the real header: the bar is py-4 (2rem) around a logo
+	 * pill, which this pass grew to a 44px tap target (2.75rem), plus the 1px border-b: 77px ≈ 4.81rem.
+	 * The nav dropdown's max-h subtracts the same figure — keep them in step. Re-measure
+	 * if the nav padding changes — a value shorter than the header silently
+	 * reintroduces the bug.
+	 */
+	scroll-padding-top: 5rem;
 }
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
 	width: 6px;
+	/*
+	 * `width` styles the vertical bar only. The code panels scroll horizontally
+	 * (overflow-x-auto), and without a height they get the ~15px platform default
+	 * on Windows and Linux Chrome. macOS overlay scrollbars hide it, so this does
+	 * not reproduce locally.
+	 */
+	height: 6px;
 }
 ::-webkit-scrollbar-track {
 	background: transparent;
@@ -380,4 +396,48 @@ html {
 	.glow-ring {
 		animation: none;
 	}
+}
+
+/*
+ * Inert unless `viewportFit: "cover"` is set in layout.tsx — iOS resolves
+ * env(safe-area-inset-*) to 0px otherwise. max() keeps a floor on devices with
+ * no inset (all of Android, desktop).
+ */
+@utility safe-bottom {
+	padding-bottom: max(1rem, env(safe-area-inset-bottom));
+}
+
+/*
+ * One focus treatment for every interactive element. :focus-visible rather than
+ * :focus so a mouse click leaves no ring behind, while keyboard and
+ * switch-control users get an unmissable one. The offset lifts the ring clear of
+ * the element's own border on the dark background.
+ *
+ * No border-radius here: setting it would change the element's real shape on
+ * focus, not round the outline. Modern engines already follow the element's own
+ * radius when drawing an outline.
+ */
+.focus-ring:focus-visible {
+	outline: 2px solid var(--color-ut);
+	outline-offset: 2px;
+}
+
+/*
+ * Horizontal safe-area inset, a drop-in for `px-6`. `viewport-fit: cover`
+ * extends the layout viewport under the display cutout, so in landscape on a
+ * notched device the inset is ~44-59px against 24px of content padding, and
+ * `body` carries `overflow-x-hidden` — occluded content is unreachable rather
+ * than merely clipped. Both insets are 0 in portrait and on any device without a
+ * cutout, where `max()` resolves to the same 1.5rem `px-6` gave.
+ *
+ * This belongs on the SECTION, never on `body`. A section's full-bleed
+ * decoration is `absolute inset-0`, which resolves against the padding box and
+ * so still reaches both screen edges; padding `body` instead shrinks the box the
+ * section itself is laid out in, letting the page background show as bars beside
+ * the hero image on exactly the devices this exists for. The fixed nav carries
+ * it directly, since a fixed element resolves against the viewport.
+ */
+@utility safe-x {
+	padding-left: max(1.5rem, env(safe-area-inset-left));
+	padding-right: max(1.5rem, env(safe-area-inset-right));
 }
