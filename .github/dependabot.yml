@@ -15,6 +15,12 @@ updates:
       prefix: "deps"
       prefix-development: "deps(dev)"
     open-pull-requests-limit: 10
+    ignore:
+      # A TypeScript major is a deliberate compiler migration, never a weekly bump (#60, #69).
+      # update-types is load-bearing: a bare dependency-name ignores ALL updates for the
+      # package, including security updates. Do not "simplify" it away.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: github-actions
     directory: /
