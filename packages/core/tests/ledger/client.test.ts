@@ -228,19 +228,12 @@ describe("TrustTBClient", () => {
 			}
 		});
 
-		it("creates a derived cost-center wallet only under the explicit opt-in", async () => {
-			mockCreateAccounts.mockResolvedValueOnce([]);
-			const id = await client.createUserWallet("acme::billing", { derived: true });
-			expect(id).toBe(TrustTBClient.deriveAccountId("acme::billing"));
-		});
-
-		it("refuses an opt-in id that is not a well-formed `parent::costCenter`", async () => {
-			for (const bad of ["acme", "a::b::c", "::billing", "acme::", "a:x::b"]) {
-				await expect(client.createUserWallet(bad, { derived: true })).rejects.toThrow(
-					/derived wallet id/,
-				);
-			}
-			expect(mockCreateAccounts).not.toHaveBeenCalled();
+		// The `{ derived: true }` opt-in is gone with its last caller. There is nothing
+		// left for a string-typed flag to mean: a cost-center account is reached only by
+		// passing the PAIR to createCostCenterWallet, and no single string is a preimage
+		// of one. This method takes one argument again.
+		it("takes no options object", () => {
+			expect(client.createUserWallet.length).toBe(1);
 		});
 	});
 
@@ -448,10 +441,14 @@ describe("TrustTBClient", () => {
 			expect(id).toBe(TrustTBClient.deriveAccountId("escrow:session-1"));
 		});
 
-		it("creates a derived cost-center wallet under the explicit `{ derived: true }` opt-in", async () => {
+		// The cost-center wallet for the SAME pair is a different account entirely, and
+		// the two doors cannot be talked into swapping: one takes a string, the other a
+		// pair, and neither derivation shares a preimage with the other.
+		it("creates the cost-center wallet at the tuple id, not the label's", async () => {
 			mockCreateAccounts.mockResolvedValueOnce([]);
-			const id = await client.createUserWallet(DERIVED, { derived: true });
-			expect(id).toBe(TrustTBClient.deriveAccountId(DERIVED));
+			const id = await client.createCostCenterWallet(PARENT, COST_CENTER);
+			expect(id).toBe(TrustTBClient.deriveCostCenterAccountId(PARENT, COST_CENTER));
+			expect(id).not.toBe(TrustTBClient.deriveAccountId(DERIVED));
 		});
 	});
 

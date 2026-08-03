@@ -239,28 +239,12 @@ export class TrustTBClient {
 	 * because their differing account flags make TigerBeetle answer
 	 * `exists_with_different_flags` rather than silently sharing a balance.
 	 *
-	 * `{ derived: true }` survives for one remaining caller: `allocation.ts`'s
-	 * legacy `costCenterUserId("parent", "costCenter")` path still joins the
-	 * pair into a `parent::costCenter` string and hashes it through this SAME
-	 * `"wallet:"` namespace — not through
-	 * {@link TrustTBClient.deriveCostCenterAccountId} — so until that caller is
-	 * retired, an ordinary wallet named `acme::billing` still lands on the same
-	 * account `costCenterUserId("acme", "billing")` funds today.
-	 *
-	 * @param opts.derived Declares the id is an already-derived `parent::costCenter`.
+	 * There is no `{ derived: true }` opt-in any more: it retired with its last
+	 * caller. A cost-center account is reachable only by handing the PAIR to
+	 * {@link TrustTBClient.createCostCenterWallet}, so no single string — however
+	 * it is punctuated, and whatever flag accompanies it — is a preimage of one.
 	 */
-	async createUserWallet(userId: string, opts?: { derived?: boolean }): Promise<bigint> {
-		if (opts?.derived === true) {
-			// Belt to allocation.ts's braces: a derived id is exactly two parts and
-			// neither part may carry a colon of its own.
-			const parts = userId.split("::");
-			if (parts.length !== 2 || parts.some((part) => part === "" || part.includes(":"))) {
-				throw new Error(
-					'Invalid derived wallet id: expected exactly one "::" separating a non-empty parent from a non-empty cost center',
-				);
-			}
-		}
-
+	async createUserWallet(userId: string): Promise<bigint> {
 		const existing = this.accountMap.get(userId);
 		if (existing) return existing;
 

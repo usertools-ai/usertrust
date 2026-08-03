@@ -37,10 +37,19 @@ import { InsufficientBalanceError } from "../../src/shared/errors.js";
 
 const PARENT = "user_1";
 const COST_CENTER = "research";
+/** The display/audit label. No account id is derived from it any more. */
 const CHILD = `${PARENT}::${COST_CENTER}`;
-/** Both derived with the same static the implementation uses — never hardcoded. */
+/**
+ * The PARENT account is derived with the same static the implementation uses: this
+ * suite polices the wiring, not the wallet hash. The CHILD account is spelled out
+ * instead — it is the id this change moves, and a fixture recomputed from the
+ * implementation would follow a regression in the derivation rather than catch it.
+ * Same spec as the KAT suite in `tests/ledger/client.test.ts`
+ * (sha256("usertrust:cost-center:v1" ‖ u32be(|p|) ‖ p ‖ u32be(|c|) ‖ c), first 16
+ * bytes), computed outside src.
+ */
 const PARENT_ACCOUNT = TrustTBClient.deriveAccountId(PARENT);
-const CHILD_ACCOUNT = TrustTBClient.deriveAccountId(CHILD);
+const CHILD_ACCOUNT = 121007886255115536666701565033995618887n;
 
 const HOUR = 3_600_000;
 const T0 = 1_800_000_000_000;
@@ -68,6 +77,9 @@ function createMockTBClient() {
 		lookupTransfer: vi.fn(),
 		// Non-empty by default: the cost-center wallet exists.
 		lookupAccounts: vi.fn(async () => [{}]),
+		createCostCenterWallet: vi.fn(async () => CHILD_ACCOUNT),
+		// Retained on the mock surface only so the suite can prove the money path never
+		// reaches it: the wallet-namespace door is not part of allocation any more.
 		createUserWallet: vi.fn(async () => CHILD_ACCOUNT),
 		createTreasury: vi.fn(),
 		setTreasuryId: vi.fn(),
@@ -111,6 +123,22 @@ async function captureWarnings<T>(
 		warn.mockRestore();
 	}
 }
+
+describe("cost-center account identity", () => {
+	// The whole point of the change: the account a cost center's money lives in is the
+	// tuple hash, and the `parent::costCenter` label is no longer a preimage of ANY
+	// account. Both alternatives are spelled out so this proof cannot follow a change
+	// in either derivation.
+	it("is the tuple hash, never the label's wallet account", () => {
+		expect(CHILD_ACCOUNT).toBe(TrustTBClient.deriveCostCenterAccountId(PARENT, COST_CENTER));
+		// sha256("wallet:user_1::research"), first 128 bits — the account the retired
+		// joined-string derivation funded, and the one an ordinary wallet named
+		// `user_1::research` still lands on.
+		expect(CHILD_ACCOUNT).not.toBe(195432381428127027762980276717845140591n);
+		expect(CHILD_ACCOUNT).not.toBe(TrustTBClient.deriveAccountId(CHILD));
+		expect(CHILD_ACCOUNT).not.toBe(PARENT_ACCOUNT);
+	});
+});
 
 describe("costCenterUserId", () => {
 	it("derives `parent::costCenter`", () => {
@@ -220,9 +248,12 @@ describe("allocateBudget", () => {
 			amount: 500,
 		});
 
-		// `{ derived: true }` is the opt-in past the reserved-`::` guard on ordinary
-		// wallet ids — without it the cost-center wallet cannot be created at all.
-		expect(mockTB.createUserWallet).toHaveBeenCalledWith(CHILD, { derived: true });
+		// The TUPLE reaches the ledger door, never the joined label: creation and
+		// resolveAccounts must hash the same two strings through the same static, or the
+		// cross-check below would fire on every allocation. `createUserWallet` — the
+		// wallet-namespace door — has no part in the money path any more.
+		expect(mockTB.createCostCenterWallet).toHaveBeenCalledWith(PARENT, COST_CENTER);
+		expect(mockTB.createUserWallet).not.toHaveBeenCalled();
 		expect(mockTB.immediateTransfer).toHaveBeenCalledOnce();
 		const call = mockTB.immediateTransfer.mock.calls[0]?.[0];
 		expect(call).toEqual({
@@ -248,7 +279,7 @@ describe("allocateBudget", () => {
 			amount: 500,
 		});
 
-		const created = mockTB.createUserWallet.mock.invocationCallOrder[0] as number;
+		const created = mockTB.createCostCenterWallet.mock.invocationCallOrder[0] as number;
 		const transferred = mockTB.immediateTransfer.mock.invocationCallOrder[0] as number;
 		expect(created).toBeLessThan(transferred);
 	});
@@ -277,7 +308,7 @@ describe("allocateBudget", () => {
 				}),
 			).rejects.toThrow("budget: amount must be a positive integer");
 		}
-		expect(mockTB.createUserWallet).not.toHaveBeenCalled();
+		expect(mockTB.createCostCenterWallet).not.toHaveBeenCalled();
 		expect(mockTB.immediateTransfer).not.toHaveBeenCalled();
 	});
 
@@ -287,7 +318,17 @@ describe("allocateBudget", () => {
 				allocateBudget(asClient(mockTB), { parentUserId: PARENT, costCenter, amount: 500 }),
 			).rejects.toThrow(/costCenter/);
 		}
-		expect(mockTB.createUserWallet).not.toHaveBeenCalled();
+		expect(mockTB.createCostCenterWallet).not.toHaveBeenCalled();
+		expect(mockTB.immediateTransfer).not.toHaveBeenCalled();
+	});
+
+	it("rejects an invalid parent id before any ledger I/O", async () => {
+		for (const parentUserId of ["acct 42", "acct\n42", "", "p".repeat(129)]) {
+			await expect(
+				allocateBudget(asClient(mockTB), { parentUserId, costCenter: COST_CENTER, amount: 500 }),
+			).rejects.toThrow(/parentUserId/);
+		}
+		expect(mockTB.createCostCenterWallet).not.toHaveBeenCalled();
 		expect(mockTB.immediateTransfer).not.toHaveBeenCalled();
 	});
 
@@ -369,11 +410,11 @@ describe("allocateBudget", () => {
 		expect(mockTB.lookupBalance).not.toHaveBeenCalled();
 	});
 
-	// D10: `createUserWallet` absorbs CreateAccountStatus.exists internally and
+	// D10: `createCostCenterWallet` absorbs CreateAccountStatus.exists internally and
 	// resolves with the existing id, so an already-created wallet is observationally
 	// identical to a fresh one. There is no rejection to catch here.
 	it("proceeds normally when the cost-center wallet already exists", async () => {
-		mockTB.createUserWallet.mockResolvedValueOnce(CHILD_ACCOUNT);
+		mockTB.createCostCenterWallet.mockResolvedValueOnce(CHILD_ACCOUNT);
 		mockTB.immediateTransfer.mockResolvedValueOnce(43n);
 
 		const result = await allocateBudget(asClient(mockTB), {
@@ -387,8 +428,8 @@ describe("allocateBudget", () => {
 	});
 
 	it("propagates a wallet-creation failure that is NOT `exists` and issues no transfer", async () => {
-		mockTB.createUserWallet.mockRejectedValueOnce(
-			new Error("Failed to create account: exists_with_different_flags"),
+		mockTB.createCostCenterWallet.mockRejectedValueOnce(
+			new Error("Failed to create cost-center wallet: exists_with_different_flags"),
 		);
 
 		await expect(
@@ -402,11 +443,14 @@ describe("allocateBudget", () => {
 	});
 
 	// D8: a cost center that resolves to its own parent would let a transfer debit
-	// and credit the same account — a no-op that reports as a funded allocation.
-	// Both ids are derived, so the collision is forced at the derivation itself:
-	// no pair of real inputs reaches this guard through a 128-bit SHA-256 space.
+	// and credit the same account — a no-op that reports as a funded allocation. The
+	// two ids are now hashed in DISJOINT domains, so the guard is unreachable short of
+	// a 128-bit truncated-hash collision; the spy targets the cost-center static
+	// because that is the only one of the two whose output the guard compares.
 	it("refuses to transfer when the cost center resolves to the parent account", async () => {
-		const derive = vi.spyOn(TrustTBClient, "deriveAccountId").mockReturnValue(CHILD_ACCOUNT);
+		const derive = vi
+			.spyOn(TrustTBClient, "deriveCostCenterAccountId")
+			.mockReturnValue(PARENT_ACCOUNT);
 		try {
 			await expect(
 				allocateBudget(asClient(mockTB), {
@@ -419,13 +463,14 @@ describe("allocateBudget", () => {
 			derive.mockRestore();
 		}
 		expect(mockTB.immediateTransfer).not.toHaveBeenCalled();
-		expect(mockTB.createUserWallet).not.toHaveBeenCalled();
+		expect(mockTB.createCostCenterWallet).not.toHaveBeenCalled();
 	});
 
 	it("refuses to transfer when the created wallet id differs from the derived id", async () => {
-		// A poisoned accountMap (setAccountMapping) would make allocate fund an
-		// account that reclaim and status never read.
-		mockTB.createUserWallet.mockResolvedValueOnce(999n);
+		// A creation path that answers with anything but the tuple id — poisoned, or
+		// simply hashing a different preimage than resolveAccounts does — would make
+		// allocate fund an account that reclaim and status never read.
+		mockTB.createCostCenterWallet.mockResolvedValueOnce(999n);
 
 		await expect(
 			allocateBudget(asClient(mockTB), {
@@ -838,7 +883,9 @@ describe("reclaimBudget", () => {
 	});
 
 	it("refuses to transfer when the cost center resolves to the parent account", async () => {
-		const derive = vi.spyOn(TrustTBClient, "deriveAccountId").mockReturnValue(CHILD_ACCOUNT);
+		const derive = vi
+			.spyOn(TrustTBClient, "deriveCostCenterAccountId")
+			.mockReturnValue(PARENT_ACCOUNT);
 		try {
 			await expect(
 				reclaimBudget(asClient(mockTB), { parentUserId: PARENT, costCenter: COST_CENTER }),
@@ -870,7 +917,9 @@ describe("fresh client with an empty accountMap", () => {
 	});
 
 	it("allocates without consulting the client account map", async () => {
-		mockTB.createUserWallet.mockResolvedValueOnce(TrustTBClient.deriveAccountId("local::research"));
+		mockTB.createCostCenterWallet.mockResolvedValueOnce(
+			TrustTBClient.deriveCostCenterAccountId("local", "research"),
+		);
 		mockTB.immediateTransfer.mockResolvedValueOnce(42n);
 
 		const result = await allocateBudget(asClient(mockTB), {
@@ -883,7 +932,7 @@ describe("fresh client with an empty accountMap", () => {
 		expect(mockTB.getAccountId).not.toHaveBeenCalled();
 		expect(mockTB.immediateTransfer).toHaveBeenCalledWith({
 			debitAccountId: TrustTBClient.deriveAccountId("local"),
-			creditAccountId: TrustTBClient.deriveAccountId("local::research"),
+			creditAccountId: TrustTBClient.deriveCostCenterAccountId("local", "research"),
 			amount: 500,
 			code: XFER_BUDGET_GRANT,
 		});
@@ -901,7 +950,7 @@ describe("fresh client with an empty accountMap", () => {
 		expect(result.reclaimed).toBe(320);
 		expect(mockTB.getAccountId).not.toHaveBeenCalled();
 		expect(mockTB.immediateTransfer).toHaveBeenCalledWith({
-			debitAccountId: TrustTBClient.deriveAccountId("local::research"),
+			debitAccountId: TrustTBClient.deriveCostCenterAccountId("local", "research"),
 			creditAccountId: TrustTBClient.deriveAccountId("local"),
 			amount: 320,
 			code: XFER_BUDGET_RECLAIM,
@@ -951,6 +1000,26 @@ describe("getBudgetStatus", () => {
 				nowMs: T0 + 5 * HOUR,
 			}),
 		);
+	});
+
+	// This path derives the child account itself instead of going through
+	// resolveAccounts, which is exactly how it can drift: were it still hashing the
+	// `parent::costCenter` label it would read a DIFFERENT account than allocateBudget
+	// funds, and every status would report a zero balance against a funded cost center
+	// — a governance read that fails open, silently.
+	it("reads the same tuple-derived account allocateBudget funds", async () => {
+		mockTB.lookupBalance.mockResolvedValueOnce({ available: 750, pending: 0, total: 750 });
+
+		await getBudgetStatus(asClient(mockTB), {
+			parentUserId: PARENT,
+			costCenter: COST_CENTER,
+			allocated: 1000,
+			periodStartMs: T0,
+			nowMs: T0 + HOUR,
+		});
+
+		expect(mockTB.lookupAccounts).toHaveBeenCalledWith([CHILD_ACCOUNT]);
+		expect(mockTB.lookupBalance).toHaveBeenCalledWith(CHILD_ACCOUNT);
 	});
 
 	it("derives spent as allocated minus balance", async () => {
@@ -1060,5 +1129,104 @@ describe("getBudgetStatus", () => {
 			}),
 		).rejects.toThrow(/costCenter/);
 		expect(mockTB.lookupAccounts).not.toHaveBeenCalled();
+	});
+});
+
+/**
+ * Issue #64: a namespaced tenant id (`acct:123`) is legal for a parent now. The whole
+ * money path is exercised, not just the charset, because a parent id is only as legal
+ * as the narrowest door it passes through — and because the three entry points derive
+ * the child account at three different places, any one of which could still be hashing
+ * a joined string.
+ */
+describe("colon-bearing parent id end-to-end", () => {
+	const NS_PARENT = "acct:123";
+	const NS_COST_CENTER = "ops";
+	const NS_CHILD = `${NS_PARENT}::${NS_COST_CENTER}`;
+	const NS_PARENT_ACCOUNT = TrustTBClient.deriveAccountId(NS_PARENT);
+	/** Spelled out to the same spec as the other fixtures, computed outside src. */
+	const NS_CHILD_ACCOUNT = 160742871849986625332418382313225136092n;
+
+	let mockTB: MockTB;
+
+	beforeEach(() => {
+		vi.clearAllMocks();
+		mockTB = createMockTBClient();
+		mockTB.createCostCenterWallet.mockResolvedValue(NS_CHILD_ACCOUNT);
+	});
+
+	it("keeps the account out of reach of any wallet id, and of neighbouring pairs", () => {
+		expect(TrustTBClient.deriveCostCenterAccountId(NS_PARENT, NS_COST_CENTER)).toBe(
+			NS_CHILD_ACCOUNT,
+		);
+		// An integrator wallet literally named `acct:123::ops` hashes in the `wallet:`
+		// namespace and lands nowhere near this account — the sweep the retired
+		// joined-string derivation made possible.
+		expect(NS_CHILD_ACCOUNT).not.toBe(TrustTBClient.deriveAccountId(NS_CHILD));
+		// And it is the LENGTH PREFIXES, not the punctuation rules, that keep legal
+		// pairs apart: all three of these concatenate to the same bytes, and a
+		// prefix-free derivation would alias them onto one account.
+		expect(TrustTBClient.deriveCostCenterAccountId("acct:12", "3ops")).not.toBe(NS_CHILD_ACCOUNT);
+		expect(TrustTBClient.deriveCostCenterAccountId("acct", "123ops")).not.toBe(NS_CHILD_ACCOUNT);
+	});
+
+	it("allocates into the tuple account and labels the audit event with the parent", async () => {
+		mockTB.immediateTransfer.mockResolvedValueOnce(42n);
+		const audit = createMockAuditWriter();
+
+		const result = await allocateBudget(asClient(mockTB), {
+			parentUserId: NS_PARENT,
+			costCenter: NS_COST_CENTER,
+			amount: 500,
+			auditWriter: audit,
+		});
+
+		expect(mockTB.createCostCenterWallet).toHaveBeenCalledWith(NS_PARENT, NS_COST_CENTER);
+		expect(mockTB.immediateTransfer).toHaveBeenCalledWith({
+			debitAccountId: NS_PARENT_ACCOUNT,
+			creditAccountId: NS_CHILD_ACCOUNT,
+			amount: 500,
+			code: XFER_BUDGET_GRANT,
+		});
+		expect(result.costCenterUserId).toBe(NS_CHILD);
+		expect(audit.appendEvent).toHaveBeenCalledWith({
+			kind: "budget_allocated",
+			actor: NS_PARENT,
+			data: { costCenter: NS_COST_CENTER, amount: 500, costCenterUserId: NS_CHILD },
+		});
+	});
+
+	it("reclaims out of the same account it allocated into", async () => {
+		mockTB.lookupBalance.mockResolvedValueOnce({ available: 320, pending: 0, total: 320 });
+		mockTB.immediateTransfer.mockResolvedValueOnce(77n);
+
+		const result = await reclaimBudget(asClient(mockTB), {
+			parentUserId: NS_PARENT,
+			costCenter: NS_COST_CENTER,
+		});
+
+		expect(mockTB.immediateTransfer).toHaveBeenCalledWith({
+			debitAccountId: NS_CHILD_ACCOUNT,
+			creditAccountId: NS_PARENT_ACCOUNT,
+			amount: 320,
+			code: XFER_BUDGET_RECLAIM,
+		});
+		expect(result.reclaimed).toBe(320);
+	});
+
+	it("reads that same account back through getBudgetStatus", async () => {
+		mockTB.lookupBalance.mockResolvedValueOnce({ available: 750, pending: 0, total: 750 });
+
+		const status = await getBudgetStatus(asClient(mockTB), {
+			parentUserId: NS_PARENT,
+			costCenter: NS_COST_CENTER,
+			allocated: 1000,
+			periodStartMs: T0,
+			nowMs: T0 + HOUR,
+		});
+
+		expect(mockTB.lookupAccounts).toHaveBeenCalledWith([NS_CHILD_ACCOUNT]);
+		expect(status.costCenterUserId).toBe(NS_CHILD);
+		expect(status.balance).toBe(750);
 	});
 });
