@@ -408,14 +408,26 @@ async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promi
 }
 
 // ── Cost-center envelope plumbing ─────────────────────────────────────────────
+//
+// SHARED WITH `headless.ts`, ON PURPOSE. The helpers below are `export`ed for one
+// consumer — `createGovernor()` — and for one reason: both governors must resolve,
+// gate on, refuse and report the SAME envelope by the SAME arithmetic. A third
+// copy alongside the two `createTBEngine` copies is exactly the drift AGENTS.md
+// records as a hazard, and here it would be a MONEY drift: D1's throw, A2's
+// pre-gate refusal, A7's unfloored `budget_remaining_after` and D5's label re-wrap
+// each decide whether a spend happens and which wallet it names. One copy, one
+// answer. Nothing here reaches the package's public API — `index.ts` re-exports by
+// name and `dist/govern.js` is not an exported subpath — so this widens the module
+// surface, not the product's.
 
 /**
  * What an active `withCostCenter` scope resolves to for THIS governor: the
  * envelope account money moves from, and the label everything human-readable
  * quotes. Derived once per call, at the governor's entry point, and then carried
- * by closure — see {@link resolveEnvelope}.
+ * by closure (`trust()`) or on the `Authorization` handle (`createGovernor()`) —
+ * see {@link resolveEnvelope}.
  */
-interface ResolvedEnvelope {
+export interface ResolvedEnvelope {
 	attribution: CostCenterAttribution;
 	/** The (parent, costCenter) tuple hash. The only thing money is keyed on. */
 	accountId: bigint;
@@ -449,7 +461,7 @@ const ENVELOPE_FUNDING_HINT =
  * `getBudgetStatus` keeps reporting a full balance, and every tier keyed on it
  * fails open. Nothing in the system would report that; only the loud throw does.
  */
-function resolveEnvelope(
+export function resolveEnvelope(
 	attribution: CostCenterAttribution | undefined,
 	parentUserId: string | undefined,
 ): ResolvedEnvelope | undefined {
@@ -486,7 +498,7 @@ function resolveEnvelope(
  * way out. The ledger's own `required`/`available` numbers are carried through
  * unchanged: they are the only figures TigerBeetle actually decided on.
  */
-function asEnvelopeBalanceError(
+export function asEnvelopeBalanceError(
 	err: InsufficientBalanceError,
 	label: string,
 ): InsufficientBalanceError {
@@ -517,7 +529,7 @@ function envelopeFraction(remaining: number, allocated: number): number {
  * envelope has actually paid out, the same clamp `getBudgetStatus` and
  * `budgetContext` apply.
  */
-function envelopeTierFields(
+export function envelopeTierFields(
 	attribution: CostCenterAttribution,
 	remaining: number,
 	nowMs: number,
@@ -599,7 +611,7 @@ async function readEnvelopeBalance(
  * @throws LedgerUnavailableError when an attributed call's envelope balance cannot
  * be read. No hold is placed and the policy gate is never reached.
  */
-async function preflightEnvelopeRemaining(
+export async function preflightEnvelopeRemaining(
 	engine: TrustEngine | null,
 	isDryRun: boolean,
 	envelope: ResolvedEnvelope | undefined,
@@ -621,7 +633,7 @@ async function preflightEnvelopeRemaining(
  * degrading a report must not unwind or re-decide a settlement. A failure omits
  * the block.
  */
-async function snapshotEnvelopeRemaining(
+export async function snapshotEnvelopeRemaining(
 	engine: TrustEngine | null,
 	isDryRun: boolean,
 	envelope: ResolvedEnvelope | undefined,
@@ -640,7 +652,7 @@ async function snapshotEnvelopeRemaining(
  * receipt is a report, and degrading a report must not unwind money that already
  * committed.
  */
-function envelopeReceiptBudget(
+export function envelopeReceiptBudget(
 	envelope: ResolvedEnvelope | undefined,
 	remaining: number | undefined,
 ): TrustReceipt["budget"] | undefined {
