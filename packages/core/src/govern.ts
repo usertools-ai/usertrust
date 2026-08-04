@@ -901,20 +901,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				maxOutputTokens,
 			);
 
-			// Attributed calls only: ONE batched read of the envelope's live
-			// `available`, for the policy numbers below. Deliberately OUTSIDE the
-			// budget mutex — it is a report, not a decision, so serialising every
-			// governed call behind a ledger round trip would buy nothing. A read that
-			// goes stale between here and the hold can only under-deny, and the hold
-			// itself is rejected atomically by TigerBeetle either way.
-			// A2: it is also BEFORE the mutex and before the gate because a read that
-			// FAILED refuses the call outright — no lock taken, no policy evaluation
-			// recorded, no hold attempted.
-			const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
-
 			// AUD-453: Acquire mutex to serialise budget-check + PENDING hold.
-			// This prevents concurrent calls from both passing the budget check
-			// and overshooting the budget.
+			// This prevents concurrent calls from both passing the budget check and
+			// overshooting the budget. The attributed-envelope preflight read is taken
+			// INSIDE this lock (top of the try below), so a concurrent hold to the same
+			// envelope cannot land between the read and the gate — see the note there.
 			const releaseBudgetLock = await budgetMutex.acquire();
 
 			// AUD-460: Track the proxy's transferId separately for settle/void
@@ -936,6 +927,26 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			}
 
 			try {
+				// Attributed calls only: ONE batched read of the envelope's live
+				// `available`, for the policy numbers below. Taken INSIDE the budget mutex
+				// — the same lock that serialises the hold — and BEFORE the gate, so this
+				// call's own hold lands only after the read and a CONCURRENT attributed
+				// call to the SAME envelope cannot slip its hold between this read and the
+				// gate. When the read was OUTSIDE the lock, two such calls both read the
+				// pre-hold balance and the second bypassed a hard scarcity tier
+				// (`budgetFractionRemaining` / `budgetRunwayHours`) the ledger cannot
+				// enforce — TigerBeetle's atomic `debits_must_not_exceed_credits` rejects an
+				// OVERSHOOT but never a fractional/runway tier. Serialising the read under
+				// the hold's lock makes the gate describe the wallet the hold will debit,
+				// exactly as the SESSION path already does (its check reads in-process
+				// counters mutated under this same mutex). Cross-process (multi-governor)
+				// concurrency still relies on TB atomicity — overshoot only — the same
+				// limitation the session path has.
+				// A2: a read that FAILS refuses the call outright — the finally below
+				// releases the mutex and the ledger-unavailable error propagates before the
+				// gate is evaluated or any hold is attempted.
+				const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
+
 				// c. Policy gate
 				// P1-PARAM-SHADOW: caller `params` are spread FIRST so trusted
 				// governance fields (tier/estimated_cost/budget_remaining/
@@ -2114,17 +2125,26 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const cb = breaker.get(action.kind as unknown as LLMClientKind);
 			cb.allowRequest();
 
-			// Attributed only, and outside the mutex for the same reason as the LLM
-			// path: a report, never a decision — and, per A2, a report whose FAILURE
-			// refuses the action before the gate rather than gating it on the session
-			// wallet its hold would not have touched.
-			const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
-
-			// b. Acquire mutex for budget atomicity
+			// b. Acquire mutex for budget atomicity. The attributed-envelope preflight
+			// read is taken INSIDE this lock (top of the try below) so a concurrent hold
+			// to the same envelope cannot land between the read and the gate — see there.
 			const releaseBudgetLock = await budgetMutex.acquire();
 			let proxyTransferId: string | undefined;
 
 			try {
+				// Attributed only: ONE batched read of the envelope's live `available`,
+				// taken INSIDE the budget mutex and BEFORE the gate, so this action's own
+				// hold lands only after the read and a CONCURRENT attributed action on the
+				// SAME envelope cannot slip its hold between the read and the gate. Outside
+				// the lock, both would read the pre-hold balance and the second would bypass
+				// a hard scarcity tier (`budgetFractionRemaining` / `budgetRunwayHours`) the
+				// ledger cannot enforce — TB rejects an OVERSHOOT, never a fractional/runway
+				// tier. Same in-mutex serialisation the SESSION path already has;
+				// cross-process concurrency still relies on TB atomicity (overshoot only).
+				// A2: a read that FAILS refuses the action — the finally below releases the
+				// mutex and the error propagates before the gate or any hold.
+				const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
+
 				// c. Policy gate — action fields available in context
 				// AUD-467: Caller params spread FIRST so governance fields cannot be shadowed.
 				// P1-BUDGET-PREFLIGHT: budget_remaining_after is the derived field the

@@ -757,21 +757,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const maxOutputTokens = params.maxOutputTokens ?? 4096;
 			const estCost = costFromRates(rateInfo.rates, estInputTokens, maxOutputTokens);
 
-			// Attributed calls only: ONE batched read of the envelope's live
-			// `available`, for the policy numbers below. Deliberately OUTSIDE the
-			// budget mutex — it is a report, not a decision, so serialising every
-			// authorize behind a ledger round trip would buy nothing. A read that goes
-			// stale between here and the hold can only under-deny, and TigerBeetle
-			// rejects the hold atomically either way.
-			// A2: it is also BEFORE the mutex and before the gate because a read that
-			// FAILED refuses the call outright — no lock taken, no policy evaluation
-			// recorded, no hold attempted. The full rationale lives with the helper in
-			// `govern.ts`; the short version is that gating on the SESSION wallet while
-			// the hold debits the ENVELOPE would clear a call against a wallet the money
-			// never came from, in the one record an auditor reads.
-			const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
-
-			// Acquire mutex for budget atomicity (AUD-453)
+			// Acquire mutex for budget atomicity (AUD-453). The attributed-envelope
+			// preflight read is taken INSIDE this lock (top of the try below) so a
+			// concurrent hold to the same envelope cannot land between the read and the
+			// gate — see the note there.
 			const releaseBudgetLock = await budgetMutex.acquire();
 			let proxyTransferId: string | undefined;
 			// Set below, at the point the hold actually lands on the envelope wallet.
@@ -782,6 +771,27 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			let envelopeDebited = false;
 
 			try {
+				// Attributed calls only: ONE batched read of the envelope's live
+				// `available`, for the policy numbers below. Taken INSIDE the budget mutex
+				// — the same lock that serialises the hold — and BEFORE the gate, so this
+				// call's own hold lands only after the read and a CONCURRENT attributed
+				// authorize on the SAME envelope cannot slip its hold between this read and
+				// the gate. When the read was OUTSIDE the lock, both read the pre-hold
+				// balance and the second bypassed a hard scarcity tier
+				// (`budgetFractionRemaining` / `budgetRunwayHours`) the ledger cannot
+				// enforce — TigerBeetle rejects an OVERSHOOT, never a fractional/runway
+				// tier. Serialising the read under the hold's lock makes the gate describe
+				// the wallet the hold will debit, exactly as the SESSION path already does.
+				// Cross-process (multi-governor) concurrency still relies on TB atomicity —
+				// overshoot only — the same limitation the session path has. The full
+				// rationale lives with the helper in `govern.ts`.
+				// A2: a read that FAILS refuses the call outright — the finally below
+				// releases the mutex and the ledger-unavailable error propagates before the
+				// gate is evaluated or any hold is attempted; gating on the SESSION wallet
+				// while the hold debits the ENVELOPE would clear the call against a wallet
+				// the money never came from, in the one record an auditor reads.
+				const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
+
 				// Policy gate — caller params spread FIRST so trusted governance
 				// fields (tier/estimated_cost/budget_remaining/budget_remaining_after)
 				// CANNOT be shadowed by attacker-controlled params.

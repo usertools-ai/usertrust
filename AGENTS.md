@@ -555,17 +555,27 @@ Two consequences that are easy to "tidy" into bugs:
   deny, so flooring the field at zero would structurally disarm that rule — on attributed calls
   first, and it would fork one field's semantics across the two paths.
 - **An attributed call whose envelope balance cannot be read is REFUSED**, with the
-  ledger-unavailable classification, *before* the gate: no mutex taken, `evaluatePolicy` never runs,
-  no hold attempted. Not a fall back to the session numbers — the overshoot rule would then clear
-  the call against a wallet its money never came from, in the one record an auditor reads. Not
-  "continue with the fields absent" either — an indeterminate `budget_remaining_after` makes that
-  same hard rule deny anyway, naming the wrong cause. Refusing costs almost no availability: the
-  preflight and the hold share one TigerBeetle transport, under the client's own reconnect
-  machinery, so a read that genuinely failed means the hold was doomed too.
+  ledger-unavailable classification, *before* the gate: `evaluatePolicy` never runs and no hold is
+  attempted. The read now runs INSIDE the budget mutex (see the paragraph below), so the refusal
+  releases the lock on its way out — but the gate and the hold are still never reached. Not a fall
+  back to the session numbers — the overshoot rule would then clear the call against a wallet its
+  money never came from, in the one record an auditor reads. Not "continue with the fields absent"
+  either — an indeterminate `budget_remaining_after` makes that same hard rule deny anyway, naming
+  the wrong cause. Refusing costs almost no availability: the preflight and the hold share one
+  TigerBeetle transport, under the client's own reconnect machinery, so a read that genuinely failed
+  means the hold was doomed too.
 
-The preflight itself is a *report*, not a check-then-act: it is taken outside the budget mutex, a
-stale answer can only under-deny, and TigerBeetle's atomic `debits_must_not_exceed_credits`
-rejection of the hold remains the whole enforcement.
+The preflight is a *report* that feeds the policy tiers, and it is taken INSIDE the budget mutex —
+the same lock that serialises the hold. That is what lets the envelope's fractional/runway tiers
+(`budgetFractionRemaining`, `budgetRunwayHours`) be enforced under single-governor concurrency: a
+concurrent attributed call to the same envelope cannot slip its hold between this read and the gate,
+so the second call gates on a balance that already reflects the first hold — exactly as the session
+path's budget check reads in-process counters mutated under this same mutex. Cross-governor
+(multi-process) concurrency still relies only on TigerBeetle's atomic `debits_must_not_exceed_credits`
+rejection of the hold — an OVERSHOOT, never a fractional/runway tier — the same limitation the
+session path has, and a stale cross-process read can still only under-deny. Moving the read under the
+lock is not check-then-act: the money decision stays the hold's atomic rejection; the read only makes
+the policy record consistent with the wallet the hold will debit.
 
 **Policy regexes are structurally ReDoS-guarded.** Patterns over 200 characters, with adjacent
 nested quantifiers (`a+*`), or with a quantified group whose body contains a quantifier or
