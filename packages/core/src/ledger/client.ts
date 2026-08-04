@@ -71,6 +71,39 @@ export const XFER_BUDGET_GRANT = 9;
 // share preimages. The KAT suite pins these bytes: changing them breaks every known answer.
 const COST_CENTER_DOMAIN_TAG = Buffer.from("usertrust:cost-center:v1", "utf8");
 
+/**
+ * Per-account available/pending/total balance, shared by {@link TrustTBClient.lookupBalance}
+ * and {@link TrustTBClient.lookupBalances} so the overflow guards live in exactly ONE
+ * place. Module-private: nothing outside this file computes a balance from raw `Account`
+ * fields, which is the documented anti-pattern — the guards below are what stand between a
+ * corrupted TB response and a `NaN`/silently-wrapped balance reaching budget arithmetic.
+ */
+function accountBalance(acct: Account): {
+	available: number;
+	pending: number;
+	total: number;
+} {
+	const postedBig = acct.credits_posted - acct.debits_posted;
+	if (postedBig > BigInt(Number.MAX_SAFE_INTEGER) || postedBig < -BigInt(Number.MAX_SAFE_INTEGER)) {
+		throw new Error(
+			`[TB] Balance overflow: ${postedBig.toString()} exceeds Number.MAX_SAFE_INTEGER`,
+		);
+	}
+	const pendingBig = acct.debits_pending;
+	if (pendingBig > BigInt(Number.MAX_SAFE_INTEGER)) {
+		throw new Error(
+			`[TB] Pending overflow: ${pendingBig.toString()} exceeds Number.MAX_SAFE_INTEGER`,
+		);
+	}
+	const posted = Number(postedBig);
+	const pending = Number(acct.debits_pending);
+	return {
+		available: Math.max(0, posted - pending),
+		pending,
+		total: Math.max(0, posted),
+	};
+}
+
 export interface TrustTBClientOptions {
 	addresses: string[];
 	clusterId?: bigint;
@@ -750,29 +783,39 @@ export class TrustTBClient {
 	}> {
 		const accounts = await this.withReconnect(() => this.client.lookupAccounts([accountId]));
 		if (accounts.length === 0) throw new Error(`Account not found: ${accountId}`);
-		const acct = accounts[0] as Account;
-		const postedBig = acct.credits_posted - acct.debits_posted;
-		if (
-			postedBig > BigInt(Number.MAX_SAFE_INTEGER) ||
-			postedBig < -BigInt(Number.MAX_SAFE_INTEGER)
-		) {
-			throw new Error(
-				`[TB] Balance overflow: ${postedBig.toString()} exceeds Number.MAX_SAFE_INTEGER`,
-			);
+		return accountBalance(accounts[0] as Account);
+	}
+
+	/**
+	 * Batched {@link TrustTBClient.lookupBalance}: one `lookupAccounts` round trip for
+	 * every account in `accountIds`, sharing the exact same per-account computation (and
+	 * its overflow guards) via {@link accountBalance} — never a hand-rolled second copy.
+	 *
+	 * Two deliberate differences from the single-account method, both required by its
+	 * callers (budget/context.ts's envelope reads): a missing account is ABSENT from the
+	 * returned map rather than throwing — "never allocated" and "fully reclaimed" are the
+	 * same observable state with no registry, so the caller's implicit-zero reading is
+	 * `balances.get(id) ?? 0`, never a per-account try/catch; and only the `available`
+	 * figure is returned, since that is all any caller of the batch path needs.
+	 *
+	 * Results are matched to requests by `Account.id`, never by array position — TB is not
+	 * documented to preserve request order, and index-matching would silently mispair
+	 * balances the moment it didn't.
+	 *
+	 * Duplicate input ids are deduped before the round trip: TigerBeetle is queried once
+	 * per unique id, which is also what keeps this to exactly ONE `lookupAccounts` call
+	 * regardless of how many times a caller repeats an id. Empty input short-circuits
+	 * before any I/O — there is nothing to look up and no reason to open a round trip.
+	 */
+	async lookupBalances(accountIds: bigint[]): Promise<Map<bigint, number>> {
+		if (accountIds.length === 0) return new Map();
+		const uniqueIds = [...new Set(accountIds)];
+		const accounts = await this.withReconnect(() => this.client.lookupAccounts(uniqueIds));
+		const balances = new Map<bigint, number>();
+		for (const acct of accounts as Account[]) {
+			balances.set(acct.id, accountBalance(acct).available);
 		}
-		const pendingBig = acct.debits_pending;
-		if (pendingBig > BigInt(Number.MAX_SAFE_INTEGER)) {
-			throw new Error(
-				`[TB] Pending overflow: ${pendingBig.toString()} exceeds Number.MAX_SAFE_INTEGER`,
-			);
-		}
-		const posted = Number(postedBig);
-		const pending = Number(acct.debits_pending);
-		return {
-			available: Math.max(0, posted - pending),
-			pending,
-			total: Math.max(0, posted),
-		};
+		return balances;
 	}
 
 	async ping(): Promise<boolean> {
