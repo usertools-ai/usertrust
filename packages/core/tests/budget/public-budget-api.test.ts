@@ -26,4 +26,13 @@ describe("public budget API surface", () => {
 		expect(typeof usertrust.TrustTBClient).toBe("function");
 		expect(typeof usertrust.TrustTBClient?.prototype).toBe("object");
 	});
+
+	// Same guard, extended to the scarcity surface this PR adds: withCostCenter is the
+	// attribution scope a caller wraps a governed call in, and budgetContext is the
+	// pull-side read across every envelope it holds. Both take (or, for withCostCenter,
+	// close over) the same `TrustTBClient` already asserted constructible above.
+	it("exports withCostCenter and budgetContext from the package root", () => {
+		expect(typeof usertrust.withCostCenter).toBe("function");
+		expect(typeof usertrust.budgetContext).toBe("function");
+	});
 });
