@@ -429,6 +429,19 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			}
 		},
 
+		/**
+		 * Delegate verbatim to the client's batch read. MF1: this four-line
+		 * delegation is the whole reason the governor can see an envelope at all.
+		 * Implementing it only on mocks — which the first cut of the threading did —
+		 * leaves every unit test green while PRODUCTION ships attributed calls with
+		 * no envelope-scoped policy numbers and no receipt snapshot: the same
+		 * mock-shadows-production shape AGENTS.md records for the dead budget API.
+		 * A test drives the preflight through THIS factory for that reason.
+		 */
+		async lookupBalances(accountIds: bigint[]): Promise<Map<bigint, number>> {
+			return await tbClient.lookupBalances(accountIds);
+		},
+
 		async postPendingSpend(transferId: string, actualAmount?: number): Promise<void> {
 			const tbId = pendingMap.get(transferId);
 			if (tbId === undefined) {

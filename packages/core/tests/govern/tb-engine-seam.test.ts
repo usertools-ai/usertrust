@@ -188,11 +188,12 @@ vi.mock("tigerbeetle-node", () => ({
 	amount_max: (1n << 128n) - 1n,
 }));
 
+import { withCostCenter } from "../../src/budget/attribution.js";
 import { createTBEngine, trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
-import { TBTransferError } from "../../src/ledger/client.js";
-import { InsufficientBalanceError } from "../../src/shared/errors.js";
-import { TrustConfigSchema } from "../../src/shared/types.js";
+import { TBTransferError, TrustTBClient } from "../../src/ledger/client.js";
+import { InsufficientBalanceError, PolicyDeniedError } from "../../src/shared/errors.js";
+import { TrustConfigSchema, type TrustReceipt } from "../../src/shared/types.js";
 
 const CONFIG = TrustConfigSchema.parse({ budget: 100_000 });
 
@@ -471,6 +472,133 @@ describe("createGovernor — the headless copy of the factory", () => {
 		expect(store.get(holdingWallet())?.debits_posted).toBeGreaterThan(0n);
 
 		await governor.destroy();
+	});
+});
+
+// ── The envelope preflight, through the REAL factory ──
+//
+// MF1. The governor reads an envelope's balance through `TrustEngine.lookupBalances`,
+// and the first cut of the threading implemented that method on TEST MOCKS ONLY. Every
+// unit suite stayed green while production shipped attributed calls with no
+// envelope-scoped policy numbers, no `budgetFractionRemaining`/`budgetRunwayHours`,
+// and no `receipt.budget` — the visibility half of this feature dead on arrival, and
+// the same mock-shadows-production shape AGENTS.md records for the budget API that
+// once shipped fully exported with an unconstructable argument.
+//
+// So these two drive the preflight through `createTBEngine` itself — no `_engine`
+// injection anywhere — against the stateful TigerBeetle fake above. A factory that
+// stops delegating `lookupBalances` fails HERE, not silently in production.
+
+describe("envelope preflight through the real createTBEngine (MF1)", () => {
+	const PARENT = "acme";
+	const COST_CENTER = "research";
+	const ENVELOPE = TrustTBClient.deriveCostCenterAccountId(PARENT, COST_CENTER);
+	const SCOPE_OPTS = { allocated: 10_000, periodStartMs: Date.UTC(2026, 7, 3, 0, 0, 0) };
+	const PARAMS = {
+		model: "claude-sonnet-4-6",
+		max_tokens: 64,
+		messages: [{ role: "user", content: "hello" }],
+	};
+
+	let tmpVault: string;
+
+	beforeEach(() => {
+		tmpVault = join(tmpdir(), `tb-engine-seam-${randomUUID()}`);
+		mkdirSync(tmpVault, { recursive: true });
+	});
+
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+	});
+
+	/** A funded envelope wallet, as `allocateBudget` would have left it. */
+	function fundEnvelope(credits: bigint): void {
+		store.set(ENVELOPE, {
+			flags: DMNEC,
+			credits_posted: credits,
+			debits_posted: 0n,
+			debits_pending: 0n,
+		});
+	}
+
+	function anthropicMock() {
+		return {
+			messages: {
+				create: vi.fn(async () => ({
+					id: "msg_1",
+					type: "message",
+					role: "assistant",
+					content: [{ type: "text", text: "ok" }],
+					model: "claude-sonnet-4-6",
+					usage: { input_tokens: 10, output_tokens: 5 },
+				})),
+			},
+		};
+	}
+
+	it("holds against the envelope and reports its post-settle balance on the receipt", async () => {
+		reset();
+		fundEnvelope(10_000n);
+		const governed = await trust(anthropicMock(), {
+			budget: 100_000,
+			vaultBase: tmpVault,
+			parentUserId: PARENT,
+			_audit: makeMockAudit(),
+		});
+
+		const { receipt } = (await withCostCenter(
+			COST_CENTER,
+			() => governed.messages.create(PARAMS),
+			SCOPE_OPTS,
+		)) as { receipt: TrustReceipt };
+
+		// The money went where the scope said it should.
+		expect(holds).toHaveLength(1);
+		expect(holds[0]?.debit).toBe(ENVELOPE);
+		expect(store.get(holdingWallet())?.debits_pending).toBe(0n);
+		expect(store.get(holdingWallet())?.debits_posted).toBe(0n);
+
+		// And the receipt saw it, which is only possible if the factory delegated
+		// lookupBalances to the real client.
+		const env = store.get(ENVELOPE);
+		if (env === undefined) throw new Error("the envelope account vanished");
+		const remaining = Number(env.credits_posted - env.debits_posted - env.debits_pending);
+		expect(env.debits_posted).toBeGreaterThan(0n);
+		expect(receipt.budget).toEqual({
+			costCenter: COST_CENTER,
+			remaining,
+			fraction: remaining / SCOPE_OPTS.allocated,
+		});
+
+		await governed.destroy();
+	});
+
+	it("gates the call on the envelope's real balance, denying pre-hold when it is short", async () => {
+		reset();
+		fundEnvelope(3n);
+		const client = anthropicMock();
+		const governed = await trust(client, {
+			budget: 100_000,
+			vaultBase: tmpVault,
+			parentUserId: PARENT,
+			_audit: makeMockAudit(),
+		});
+
+		// Three usertokens in the envelope against a much larger estimate. The
+		// SESSION wallet holds 100_000, so a governor that fell back to session
+		// numbers — or never read the envelope at all — would authorise this.
+		await expect(
+			withCostCenter(COST_CENTER, () => governed.messages.create(PARAMS), SCOPE_OPTS),
+		).rejects.toBeInstanceOf(PolicyDeniedError);
+
+		expect(holds).toHaveLength(0);
+		expect(client.messages.create).not.toHaveBeenCalled();
+
+		await governed.destroy();
 	});
 });
 

@@ -8,8 +8,18 @@ export class InsufficientBalanceError extends Error {
 	public readonly hint: string;
 	public readonly docsUrl: string;
 
-	constructor(userId: string, required: number, available: number) {
-		const hint = "Increase the budget in trust() options or add funds via the ledger.";
+	/**
+	 * `hint` is overridable because the default advice is WRONG for a cost-center
+	 * envelope: raising `trust({ budget })` funds the session holding wallet, which
+	 * an attributed call never debits, so an operator who follows it watches the
+	 * same call fail again with a bigger number in the config. The governor passes
+	 * the envelope remedy (`allocateBudget`) when it re-wraps a rejected attributed
+	 * hold; every other caller omits the argument and gets today's string
+	 * byte-for-byte.
+	 */
+	constructor(userId: string, required: number, available: number, hintOverride?: string) {
+		const hint =
+			hintOverride ?? "Increase the budget in trust() options or add funds via the ledger.";
 		const docsUrl = "https://usertrust.ai/docs/errors/insufficient-balance";
 		super(
 			`Insufficient balance for user ${userId}: need ${required}, have ${available}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`,

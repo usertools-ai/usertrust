@@ -350,11 +350,15 @@ export interface PolicyContext extends Record<string, unknown> {
 	 * TRUSTED HOST INPUT ONLY. They are governance inputs, so only the host that
 	 * owns the allocation may write them — never a request body. `trust()` and
 	 * `createGovernor()` spread the caller's LLM params into the context and then
-	 * re-assert BOTH fields as `undefined`, so a client posting
+	 * re-assert BOTH fields, so a client posting
 	 * `{"budgetFractionRemaining": 0.95}` cannot make a budget tier look
-	 * satisfied; those SDK paths know no cost-center allocation, so the honest
-	 * value there is "absent". A host that does know the allocation reads it
-	 * itself and calls `evaluatePolicy` with a context it built:
+	 * satisfied. What they re-assert depends on the call: one made inside a
+	 * `withCostCenter(cc, fn, { allocated, periodStartMs })` scope carries the live
+	 * envelope numbers (see {@link PolicyContext.cost_center}); every other call
+	 * re-asserts explicit `undefined`, because without a scope the SDK genuinely
+	 * does not know which allocation funds the call and "absent" is the honest
+	 * answer. A host that owns the allocation itself can still read it and call
+	 * `evaluatePolicy` with a context it built:
 	 *
 	 * ```ts
 	 * const status = await getBudgetStatus(tb, {
@@ -398,15 +402,24 @@ export interface PolicyContext extends Record<string, unknown> {
 	 * can write the field explicitly as `undefined` to overwrite an untrusted
 	 * inbound value; `exists` reads the result as absent either way.
 	 *
-	 * ⚠️ WARNING — A TIER ON THIS FIELD CANNOT FIRE YET. Nothing in this
-	 * repository debits a cost-center wallet: the metering path spends from a
-	 * per-session funded holding account, not from the wallet `allocateBudget`
-	 * funds. `getBudgetStatus` therefore reports `fractionRemaining: 1` for a
-	 * cost center whose agent is genuinely burning budget, so a
-	 * `budgetFractionRemaining lt 0.3` rule never matches — a governance control
-	 * that fails open. These primitives ship AHEAD of their metering consumer;
-	 * do not rely on the tier until the spend path debits the cost-center wallet.
-	 * See the module doc comment in `budget/allocation.ts`.
+	 * WHERE THE NUMBER COMES FROM, and what it is worth. A governed call made
+	 * inside `withCostCenter(cc, fn, { allocated, periodStartMs })` populates this
+	 * from the envelope's LIVE ledger balance read at authorize, divided by the
+	 * `allocated` the scope declared and clamped to 0..1. That is what makes a
+	 * `budgetFractionRemaining lt 0.3` rule a real pre-spend control: the metering
+	 * path now debits the `(parent, costCenter)` wallet `allocateBudget` funds, so
+	 * the balance actually falls as the agent burns it.
+	 *
+	 * It is still ABSENT — explicitly `undefined` — for a call outside any scope,
+	 * for one whose scope declared no `allocated` (there is no cost-center
+	 * registry, so the SDK does not know the envelope's size and will not invent
+	 * one), and in dry-run. Absent is fail-closed for a hard rule, so lead a tier
+	 * that must apply only to attributed traffic with an `exists` guard, exactly as
+	 * the example above does.
+	 *
+	 * The one thing it is NOT is a number the caller chose: see the trust-boundary
+	 * paragraph above, and {@link PolicyContext.cost_center} for why the
+	 * attribution behind it cannot be forged either.
 	 */
 	budgetFractionRemaining?: number | undefined;
 	/**
@@ -424,10 +437,45 @@ export interface PolicyContext extends Record<string, unknown> {
 	 * a budget that is merely idle.
 	 *
 	 * `| undefined` for the same reason as
-	 * {@link PolicyContext.budgetFractionRemaining}, and the metering warning
-	 * there applies to this field too.
+	 * {@link PolicyContext.budgetFractionRemaining}, and populated from the same
+	 * place: `computeRunway` over the scope's declared allocation and period plus
+	 * the envelope's live balance, on an attributed call. `runwayHours` answers
+	 * `null` for "not projectable"; this field's convention for unknown is
+	 * explicit `undefined`, so the governor converts. The two conventions are
+	 * deliberate and per-surface — `budgetContext()`'s `EnvelopeStatus.runwayHours`
+	 * keeps `null`, matching `Runway` itself. Do not unify them.
 	 */
 	budgetRunwayHours?: number | undefined;
+
+	/**
+	 * The cost center funding this call — the `withCostCenter(cc, …)` scope the
+	 * governed call executed inside, or `undefined` when it ran inside none.
+	 *
+	 * snake_case is deliberate and matches this context's other governance fields
+	 * (`estimated_cost`, `budget_remaining`, `action_kind`) — a rule file reads
+	 * `cost_center`, while every TypeScript surface spells the same thing
+	 * `costCenter` (A11). Do not "unify" the two.
+	 *
+	 * TRUSTED HOST INPUT ONLY, and structurally so: its value comes from the
+	 * caller's own async execution context, never from the request body. All three
+	 * SDK call sites spread the caller's params first and then re-assert this field
+	 * — including asserting `undefined` when no scope is active — so a body carrying
+	 * `{"cost_center": "research"}` cannot make a rule believe a call it never
+	 * attributed is spending someone else's envelope.
+	 *
+	 * ENVELOPE-SCOPED SIBLINGS: when this field is set on a call that will actually
+	 * place a ledger hold, `budget_remaining` / `budget_remaining_after` above
+	 * describe THAT ENVELOPE rather than the session budget, and
+	 * {@link PolicyContext.budgetFractionRemaining} /
+	 * {@link PolicyContext.budgetRunwayHours} are populated from it whenever the
+	 * scope supplied allocation metadata. The gate and the hold therefore always
+	 * name the same wallet: an attributed call whose envelope balance cannot be
+	 * read is refused with a ledger-unavailable error BEFORE this context is ever
+	 * built, rather than being cleared against a session wallet its money would not
+	 * have come from. A rule that must apply only to attributed traffic should lead
+	 * with `{ field: "cost_center", operator: "exists" }`.
+	 */
+	cost_center?: string | undefined;
 }
 
 /**

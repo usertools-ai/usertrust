@@ -49,6 +49,30 @@ export interface TrustReceipt {
 	endpoint?: { class: EndpointClass; runtime: LocalRuntime };
 	/** Metering provenance: denomination and rate origin of the settled cost. */
 	meter?: { costBasis: CostBasis; rateSource: RateSource; computeMs?: number };
+	/**
+	 * Cost-center envelope snapshot — the PUSH half of visibility (the pull half is
+	 * `budgetContext()`). Present only when the call ran inside a `withCostCenter`
+	 * scope AND settled AND the post-settle ledger read answered.
+	 *
+	 * OBSERVATIONAL, NEVER AUTHORITATIVE (A8), and the same contract
+	 * `budget/context.ts` documents: `remaining` is the envelope's ledger
+	 * `available` READ AFTER this call settled, so it races every concurrent
+	 * settlement against the same envelope by design. It is "what the envelope
+	 * holds now", never "what this call cost" (that is `cost`) and never anything a
+	 * verifier can recompute — it is not part of the hash chain and `packages/verify`
+	 * never sees this shape.
+	 *
+	 * ABSENT is not an error signal: an unattributed call, an unsettled (estimated)
+	 * stream handle, and a snapshot read that failed all omit it. The read is
+	 * deliberately allowed to fail silently — a receipt is a report, and degrading a
+	 * report must never unwind or re-decide money that already committed.
+	 */
+	budget?: {
+		costCenter: string;
+		remaining: number;
+		/** Omitted when the scope carried no `allocated` metadata (D4). */
+		fraction?: number;
+	};
 }
 
 // ── TrustedResponse — returned by every governed LLM call ──
