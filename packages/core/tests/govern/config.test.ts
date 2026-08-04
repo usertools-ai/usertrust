@@ -202,6 +202,30 @@ describe("loadConfig()", () => {
 		expect(config.audit.indexLimit).toBe(50_000);
 	});
 
+	it("refuses a malformed parentUserId written into the config file", async () => {
+		const vaultDir = join(tmpDir, VAULT_DIR);
+		mkdirSync(vaultDir, { recursive: true });
+		writeFileSync(
+			join(vaultDir, "usertrust.config.json"),
+			JSON.stringify({ budget: 1000, parentUserId: "acme::billing" }),
+		);
+
+		await expect(loadConfig()).rejects.toThrow();
+	});
+
+	it("loads a valid parentUserId from the config file", async () => {
+		const vaultDir = join(tmpDir, VAULT_DIR);
+		mkdirSync(vaultDir, { recursive: true });
+		writeFileSync(
+			join(vaultDir, "usertrust.config.json"),
+			JSON.stringify({ budget: 1000, parentUserId: "acme-team" }),
+		);
+
+		const config = await loadConfig();
+
+		expect(config.parentUserId).toBe("acme-team");
+	});
+
 	it("handles malformed JSON gracefully (throws)", async () => {
 		const vaultDir = join(tmpDir, VAULT_DIR);
 		mkdirSync(vaultDir, { recursive: true });
@@ -312,5 +336,48 @@ describe("defineConfig()", () => {
 				budget: -1,
 			} as never),
 		).toThrow();
+	});
+});
+
+// ── parentUserId: the governor's envelope identity ──
+//
+// Cost-center envelope accounts hash the (parentUserId, costCenter) tuple, so a
+// governor that spends from an envelope needs a parent id. The field is OPTIONAL
+// and validated by the one authoritative rule (`parentUserIdRefusal`): a config
+// that never mentions it must keep parsing exactly as before, and a malformed one
+// must be refused where it is written — not later, at the first hold, with money
+// already in flight.
+
+describe("TrustConfigSchema — parentUserId", () => {
+	it("accepts a single-colon parent id (issue #64)", () => {
+		const config = defineConfig({ budget: 1000, parentUserId: "acme:eu:prod" } as never);
+		expect(config.parentUserId).toBe("acme:eu:prod");
+	});
+
+	it("leaves configs that never mention it byte-identical", () => {
+		const before = defineConfig({ budget: 1000, tier: "pro" } as never);
+		expect(before.parentUserId).toBeUndefined();
+		// The optional field must not materialise a key — a config round-tripped
+		// through the schema is what an operator diffs against their file.
+		expect(Object.hasOwn(before, "parentUserId")).toBe(false);
+	});
+
+	it("refuses the quarantined `::` separator, and says so", () => {
+		let caught: unknown;
+		try {
+			defineConfig({ budget: 1000, parentUserId: "acme::billing" } as never);
+		} catch (e) {
+			caught = e;
+		}
+		expect(caught).toBeInstanceOf(Error);
+		// The refusal must name the quarantine — quoting the charset at an operator
+		// who passed `acme::billing` describes a rule that plainly admits their id.
+		expect((caught as Error).message).toContain("::");
+		expect((caught as Error).message).toContain("parentUserId");
+	});
+
+	it("refuses an id outside the parent charset", () => {
+		expect(() => defineConfig({ budget: 1000, parentUserId: "acme billing" } as never)).toThrow();
+		expect(() => defineConfig({ budget: 1000, parentUserId: "" } as never)).toThrow();
 	});
 });

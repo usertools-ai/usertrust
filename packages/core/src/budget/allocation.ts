@@ -4,17 +4,19 @@
 /**
  * allocation.ts — cost-center allocation and reclaim over the TigerBeetle ledger
  *
- * ⚠️ WARNING — THESE PRIMITIVES SHIP AHEAD OF THEIR METERING CONSUMER. Nothing in
- * this repository debits a cost-center wallet yet. The metering path spends from
- * a per-session funded holding account (`createFundedBudgetWallet` in `govern.ts`,
- * mirrored in `headless.ts`), never from the wallet {@link allocateBudget} funds.
- * So for a cost center whose agent is genuinely burning budget,
- * {@link getBudgetStatus} still reports `spent: 0` and `fractionRemaining: 1`,
- * and a policy tier written against `budgetFractionRemaining` (see `policy/gate.ts`)
- * would NEVER trip — a governance control that fails open, silently. Allocate,
- * reclaim, and read are correct and safe to use for delegation and reporting; do
- * NOT wire a policy tier to them until the spend path debits the cost-center
- * wallet.
+ * THE METERING CONSUMER EXISTS — but only for ATTRIBUTED traffic. A governed call
+ * made inside a `withCostCenter(cc, fn)` scope (see `budget/attribution.ts`) places
+ * its PENDING hold against the wallet {@link allocateBudget} funds, so
+ * {@link getBudgetStatus} reports that cost center's real `spent` and a policy tier
+ * on `budgetFractionRemaining` (see `policy/gate.ts`) trips on real burn.
+ *
+ * Calls made OUTSIDE every scope still spend from the per-session funded holding
+ * account (`createFundedBudgetWallet` in `govern.ts`, mirrored in `headless.ts`) —
+ * that path is unchanged and deliberately so. The consequence to keep in mind:
+ * these figures measure attributed spend, so an agent that never opens a scope
+ * still reports `spent: 0` here while burning the session budget. That is a gap in
+ * INSTRUMENTATION, not in enforcement — the session wallet's own
+ * `debits_must_not_exceed_credits` bounds it either way.
  *
  * A cost center is a sub-wallet of its parent, nothing more. Its TigerBeetle
  * account is `TrustTBClient.deriveCostCenterAccountId(parent, costCenter)` — a

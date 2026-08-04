@@ -19,11 +19,21 @@
 import type {
 	AllocateResult,
 	BudgetAuditWriter,
+	BudgetContext,
 	BudgetStatus,
+	EnvelopeDescriptor,
+	EnvelopeStatus,
 	ReclaimResult,
 	Runway,
 } from "usertrust";
-import { allocateBudget, getBudgetStatus, reclaimBudget, TrustTBClient } from "usertrust";
+import {
+	allocateBudget,
+	budgetContext,
+	getBudgetStatus,
+	reclaimBudget,
+	TrustTBClient,
+	withCostCenter,
+} from "usertrust";
 
 type Assert<T extends true> = T;
 type Extends<A, B> = A extends B ? true : false;
@@ -57,3 +67,21 @@ export const _status: Promise<BudgetStatus> = getBudgetStatus(tb, {
 });
 
 export type _StatusCarriesRunway = Assert<Extends<Awaited<typeof _status>, { runway: Runway }>>;
+
+// The scarcity read API: EnvelopeDescriptor is constructible by a consumer without
+// importing anything else — the whole point of the F1 guard extended to this surface.
+declare const envelopes: EnvelopeDescriptor[];
+
+export const _context: Promise<BudgetContext> = budgetContext(tb, "acme", envelopes, Date.now());
+
+export type _ContextCarriesEnvelopes = Assert<
+	Extends<Awaited<typeof _context>, { parent: { remaining: number }; envelopes: EnvelopeStatus[] }>
+>;
+
+// withCostCenter closes over the same TrustTBClient-holding governor a caller already
+// constructed above; its own signature takes no TrustTBClient, so this asserts only
+// that the scope runs `fn` and returns its value, sync and with options both accepted.
+export const _withCostCenter: number = withCostCenter("billing", () => 42, {
+	allocated: 1_000,
+	periodStartMs: 0,
+});

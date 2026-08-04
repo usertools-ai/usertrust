@@ -923,6 +923,176 @@ describe("TrustTBClient", () => {
 		});
 	});
 
+	describe("lookupBalances", () => {
+		// Batch math must equal the single-account helper's answer for the SAME
+		// account data — both paths share one module-private computation, so this
+		// pins that they cannot silently diverge. Each account's reference answer
+		// is taken from a SEPARATE, isolated lookupBalance() call (its own mock
+		// queue entry) so this test does not depend on lookupBalances existing yet.
+		it("matches lookupBalance's answer for account 1, via the batch path", async () => {
+			const account = {
+				id: 1n,
+				credits_posted: 1000n,
+				debits_posted: 200n,
+				debits_pending: 50n,
+				credits_pending: 0n,
+			};
+			mockLookupAccounts.mockResolvedValueOnce([account]);
+			const single = await client.lookupBalance(1n);
+
+			mockLookupAccounts.mockResolvedValueOnce([account]);
+			const batch = await client.lookupBalances([1n]);
+			expect(batch.get(1n)).toBe(single.available);
+		});
+
+		it("matches lookupBalance's answer for account 2 (pending exceeds posted), via the batch path", async () => {
+			const account = {
+				id: 2n,
+				credits_posted: 100n,
+				debits_posted: 0n,
+				debits_pending: 200n,
+				credits_pending: 0n,
+			};
+			mockLookupAccounts.mockResolvedValueOnce([account]);
+			const single = await client.lookupBalance(2n);
+
+			mockLookupAccounts.mockResolvedValueOnce([account]);
+			const batch = await client.lookupBalances([2n]);
+			expect(batch.get(2n)).toBe(single.available);
+		});
+
+		it("omits accounts TigerBeetle does not return, rather than throwing", async () => {
+			mockLookupAccounts.mockResolvedValueOnce([
+				{
+					id: 1n,
+					credits_posted: 500n,
+					debits_posted: 0n,
+					debits_pending: 0n,
+					credits_pending: 0n,
+				},
+			]);
+			const balances = await client.lookupBalances([1n, 999n]);
+			expect(balances.has(1n)).toBe(true);
+			expect(balances.has(999n)).toBe(false);
+			expect(balances.size).toBe(1);
+		});
+
+		it("matches results by Account.id, never by array index", async () => {
+			// TB returns accounts in a DIFFERENT order than requested.
+			mockLookupAccounts.mockResolvedValueOnce([
+				{
+					id: 2n,
+					credits_posted: 300n,
+					debits_posted: 0n,
+					debits_pending: 0n,
+					credits_pending: 0n,
+				},
+				{
+					id: 1n,
+					credits_posted: 700n,
+					debits_posted: 0n,
+					debits_pending: 0n,
+					credits_pending: 0n,
+				},
+			]);
+			const balances = await client.lookupBalances([1n, 2n]);
+			expect(balances.get(1n)).toBe(700);
+			expect(balances.get(2n)).toBe(300);
+		});
+
+		it("returns an empty map with zero I/O for empty input", async () => {
+			const balances = await client.lookupBalances([]);
+			expect(balances.size).toBe(0);
+			expect(mockLookupAccounts).not.toHaveBeenCalled();
+		});
+
+		it("dedupes duplicate input ids into a single round trip", async () => {
+			mockLookupAccounts.mockResolvedValueOnce([
+				{
+					id: 1n,
+					credits_posted: 500n,
+					debits_posted: 0n,
+					debits_pending: 0n,
+					credits_pending: 0n,
+				},
+			]);
+			const balances = await client.lookupBalances([1n, 1n, 1n]);
+			expect(mockLookupAccounts).toHaveBeenCalledOnce();
+			expect(mockLookupAccounts).toHaveBeenCalledWith([1n]);
+			expect(balances.get(1n)).toBe(500);
+		});
+
+		it("makes exactly one lookupAccounts round trip regardless of input size", async () => {
+			mockLookupAccounts.mockResolvedValueOnce([
+				{
+					id: 1n,
+					credits_posted: 100n,
+					debits_posted: 0n,
+					debits_pending: 0n,
+					credits_pending: 0n,
+				},
+				{
+					id: 2n,
+					credits_posted: 200n,
+					debits_posted: 0n,
+					debits_pending: 0n,
+					credits_pending: 0n,
+				},
+				{
+					id: 3n,
+					credits_posted: 300n,
+					debits_posted: 0n,
+					debits_pending: 0n,
+					credits_pending: 0n,
+				},
+			]);
+			await client.lookupBalances([1n, 2n, 3n]);
+			expect(mockLookupAccounts).toHaveBeenCalledTimes(1);
+		});
+
+		// The overflow guards live in the shared helper — exercised here through the
+		// batch path to prove they are not duplicated-and-diverged, not skipped.
+		it("throws on balance overflow exceeding MAX_SAFE_INTEGER through the batch path", async () => {
+			mockLookupAccounts.mockResolvedValueOnce([
+				{
+					id: 1n,
+					credits_posted: BigInt(Number.MAX_SAFE_INTEGER) + 100n,
+					debits_posted: 0n,
+					debits_pending: 0n,
+					credits_pending: 0n,
+				},
+			]);
+			await expect(client.lookupBalances([1n])).rejects.toThrow("Balance overflow");
+		});
+
+		it("throws on pending overflow exceeding MAX_SAFE_INTEGER through the batch path", async () => {
+			mockLookupAccounts.mockResolvedValueOnce([
+				{
+					id: 1n,
+					credits_posted: 1000n,
+					debits_posted: 0n,
+					debits_pending: BigInt(Number.MAX_SAFE_INTEGER) + 100n,
+					credits_pending: 0n,
+				},
+			]);
+			await expect(client.lookupBalances([1n])).rejects.toThrow("Pending overflow");
+		});
+
+		it("clamps available to 0 when pending exceeds posted, through the batch path", async () => {
+			mockLookupAccounts.mockResolvedValueOnce([
+				{
+					id: 1n,
+					credits_posted: 100n,
+					debits_posted: 0n,
+					debits_pending: 200n,
+					credits_pending: 0n,
+				},
+			]);
+			const balances = await client.lookupBalances([1n]);
+			expect(balances.get(1n)).toBe(0);
+		});
+	});
+
 	describe("lookupTransfer", () => {
 		it("returns transfer when found", async () => {
 			const mockTransfer = { id: 100n, amount: 500n };

@@ -58,7 +58,7 @@ are not.
 | Anchoring | `audit/{anchor,anchor-verify,anchor-doctor,rekor,rekor-verify,sigv4}.ts` |
 | Policy | `policy/{gate,default-rules,pii,injection,canary,decay}.ts` |
 | Board | `board/{board,director,concerns}.ts` |
-| Budget | `budget/{allocation,runway}.ts` |
+| Budget | `budget/{allocation,attribution,context,runway}.ts` |
 | Runtime | `resilience/{circuit,scope}.ts`, `memory/patterns.ts`, `snapshot/checkpoint.ts` |
 | Other | `anomaly/`, `export/`, `supply-chain/`, `vault/`, `shared/`, `cli/` |
 
@@ -82,8 +82,11 @@ are not.
 4. **Policy gate.** `evaluatePolicy(mergePolicies(DEFAULT_RULES, userRules), context)`. Then PII
    (`warn` / `redact` / `block`), then injection detection.
 5. **PENDING hold.** `engine.spendPending({ transferId, amount: estimatedCost })` creates a
-   TigerBeetle pending transfer debiting a funded, `debits_must_not_exceed_credits` holding wallet
-   and crediting the treasury. Over-budget is rejected *by the ledger*, atomically, and surfaces as
+   TigerBeetle pending transfer debiting a funded, `debits_must_not_exceed_credits` wallet and
+   crediting the treasury. Which wallet is `params.debitAccountId ?? holdingId`: the per-session
+   holding wallet by default, the `(parent, cost center)` **envelope** wallet on an attributed call
+   (see the attribution invariant below). Both carry that same flag, so the enforcement claim is
+   identical either way. Over-budget is rejected *by the ledger*, atomically, and surfaces as
    `InsufficientBalanceError`. Mutex released.
 6. **Forward** to the provider.
 7. **Extract usage**, compute the actual cost via `costFromRates`.
@@ -241,15 +244,18 @@ source-parity test — widen the charset in `shared/ids.ts` and copy it across, 
 the ledger accepts. That drift was introduced once already during the issue-#64 work, which is why
 the parity test exists.
 
-*One static, three call sites.* Creation (`createCostCenterWallet`), the transfer path
-(`resolveAccounts`, for `allocateBudget` and `reclaimBudget`), and the read path (`getBudgetStatus`,
-which bypasses `resolveAccounts` because a read has no parent account to resolve and no
-self-transfer to refuse) must all go through `deriveCostCenterAccountId`. `createCostCenterWallet`
-deliberately writes no `accountMap` entry: the id is derived, never looked up, and a cache would
-only be a second source of truth that a client in another process does not share.
-*Prevents:* one of the three drifting from the others — a hand-rolled join, a second hash, a cached
-id — so allocation funds an account that reclaim and status never read: every cost center reporting
-a zero balance forever, a governance read that fails open.
+*One static, five call sites.* Creation (`createCostCenterWallet`), the transfer path
+(`resolveAccounts`, for `allocateBudget` and `reclaimBudget`), the per-envelope read path
+(`getBudgetStatus`, which bypasses `resolveAccounts` because a read has no parent account to
+resolve and no self-transfer to refuse), the batched read path (`budgetContext`, same reasoning),
+and the spend path (`resolveEnvelope` in `govern.ts`, shared by both governors) must all go through
+`deriveCostCenterAccountId`. `createCostCenterWallet` deliberately writes no `accountMap` entry: the
+id is derived, never looked up, and a cache would only be a second source of truth that a client in
+another process does not share.
+*Prevents:* one of the five drifting from the others — a hand-rolled join, a second hash, a cached
+id — so allocation funds an account that reclaim, status and the hold never read: every cost center
+reporting a zero balance forever, a governance read that fails open, and — now that
+`resolveEnvelope` is on the list — a PENDING hold debiting an account nobody allocated to.
 
 *The `parent::costCenter` string is a display and audit label, never an account id.*
 `costCenterUserId` builds it and `data.costCenterUserId` carries it into the audit chain; no money is
@@ -264,6 +270,97 @@ both pairs on one *account*.)
 
 *128-bit truncation is a ~64-bit birthday bound*, the same bound `deriveAccountId` already accepts:
 a collision needs on the order of 2^64 distinct cost centers, which no plausible deployment reaches.
+
+**Cost-center attribution comes from CODE STRUCTURE, never from request content.** A governed call
+debits a cost-center envelope only because it executed inside a `withCostCenter(cc, fn, opts?)`
+scope (`budget/attribution.ts`), carried by the repo's one `AsyncLocalStorage`. That scope is
+*dynamic, not lexical* — a helper the callback calls, and any continuation awaited inside it, is
+attributed too, which is the whole reason attribution rides ALS rather than a threaded parameter.
+Both halves of the envelope id are structural, never caller text: `cc` comes from the scope and is
+validated against `COST_CENTER_PATTERN` at scope entry, pre-I/O; `parentUserId` is declared once, on
+`TrustConfigSchema` and `TrustOpts` (`GovernorOpts` inherits it), is validated by
+`parentUserIdRefusal` at parse time, and is **operator-trusted** on the same boundary as `budget`
+and `customRates` — whoever constructs a governor already holds the TigerBeetle client. Never derive
+either half from end-user or request data, and never add a request-body path into `cost_center`: all
+three policy sites re-assert it *after* the caller-params spread, `undefined` included (see the
+re-assertion table below). An active scope with no `parentUserId` **throws** in `resolveEnvelope`,
+at the governor's entry point, before the circuit breaker and before any I/O. There is deliberately
+no fallback to the session holding wallet.
+*Prevents:* an agent relabelling its own calls onto the fattest envelope and draining a budget that
+was never delegated to it — which is the entire reason to attribute spend at all. The
+silent-fallback variant is quieter and no better: the caller believes the spend came out of the
+envelope, the envelope's balance never moves, `getBudgetStatus` keeps reporting a full allocation,
+and every policy tier keyed on `budgetFractionRemaining` fails open. Nothing in the system reports
+that; only the throw does.
+
+*One ALS read per call, at the governor's synchronous entry point — closure or handle capture
+everywhere after.* The storage is module-private, and there are exactly **three** legitimate
+`getCurrentCostCenter()` call sites: `interceptCall` and `governActionImpl` in `govern.ts`, and
+`authorize` in `headless.ts`. Each is the top of an entry point the caller invokes synchronously
+from inside its own scope, so the caller's async context is still the current one there. Everything
+downstream reads that single capture — `trust()` by closure (the five `MessageStream` emitter
+listeners, `createGovernedStream`'s completion/error/chunk callbacks, the non-stream settle, the
+outer-catch void), `createGovernor()` off its own internal per-call record. Same propagation shape as
+`rateResolution` under "price once", for the same reason.
+*Prevents:* a read from inside a terminal silently answering with a *later, unrelated* call's scope,
+or with nothing — never loudly. `AsyncLocalStorage` follows a chain of async continuations; it does
+**not** follow an `EventEmitter` listener from its `on()`-time context into its `emit()`-time
+context, because `emit()` runs listeners synchronously in whatever context called `emit()`, and the
+SDK's SSE-pump ticks fire strictly after the entry point has returned.
+`tests/budget/attribution.test.ts` pins exactly that as a negative case. Headless is the starker
+version of the same rule: `settle()` routinely runs on a different task, after the scope has exited,
+so there is no store to read at all — `authorize` stores an immutable capture in `activeAuths`,
+keyed by `transferId`, and `settle`/`abort` read the attribution from **that**, which is what
+guarantees an attributed hold gets an attributed settle.
+*Not from the `Authorization` handle*, which is the caller's own object: `activeAuths` holds that
+same reference, so establishing `has(transferId)` and then reading `auth.costCenter`/`auth.envelope`
+let a caller relabel the settle/abort audit record and the receipt between the two phases — and,
+since the receipt's balance snapshot reads whatever account the envelope names, put an arbitrary
+account's balance on a receipt. `Authorization.costCenter` / `.envelope` remain on the handle as
+reporting, frozen, and the governor never reads them back.
+
+*The session's own accounting tracks SESSION-WALLET money only.* `budgetSpent` and the in-flight
+hold total describe the per-session holding wallet — they gate every unattributed call, they are
+what `receipt.budgetRemaining` reports, and `budgetSpent` is persisted and re-seeds that wallet as
+`max(0, budget − budgetSpent)` on the next run. An attributed hold debits the envelope and never
+touches the holding wallet, so both governors skip those counters (and the persist) for it, on the
+increment and the matching release alike.
+*Prevents:* charging the session for money it never paid — unattributed calls hard-denied against a
+wallet TigerBeetle would still have held against, attributed receipts reporting a session remaining
+decremented by envelope money, and the shortfall surviving the restart. Fail-closed, so it is a
+silent over-deny rather than a loss, which is exactly why nothing else reports it. The flag is
+recorded where the hold actually lands, not inferred from the scope: a dry-run or engine-less
+attributed call places no envelope hold at all, and the session numbers stay its only — and honest —
+accounting, matching the numbers its policy gate saw.
+
+*Every audit record an attributed call emits carries `costCenter`, from that same capture* — not
+from params, and on the failure terminals as well as the settle ones (`llm_call`, `<action.kind>`,
+`llm_call_failed`, `<action.kind>_failed`, `stream_partial_delivery`, `settlement_ambiguous`,
+`injection_detected`, `anomaly_detected`). An attributed hold must leave an attributed forensic
+trail whichever way it ends. Unattributed calls spread an empty object, so their records stay
+byte-identical to what they were before envelopes existed.
+
+*One field, two spellings, deliberately.* The policy context spells it `cost_center` — snake_case,
+beside `estimated_cost`, `budget_remaining` and `action_kind`, because a rule file is what reads it
+— while every TypeScript surface spells the same thing `costCenter`: the audit data above,
+`TrustReceipt.budget.costCenter`, `EnvelopeStatus.costCenter`, and `withCostCenter`'s own argument.
+`policy/gate.ts` states this where the field is declared. Do not "unify" them.
+
+*The two visibility surfaces are OBSERVATIONS, never authority.* `receipt.budget` (push, on settled
+receipts only) and `budgetContext()`'s `EnvelopeStatus` (pull, batched) both report the envelope's
+ledger `available` **read at call time**, so both race every concurrent settlement against the same
+envelope — by design, exactly as any balance read races the ledger it reads from. Neither says what
+*this* call cost (that is `receipt.cost`), and neither is verifier-derivable: `TrustReceipt` is
+never persisted into the vault and `packages/verify` never sees either shape, so nothing recomputes
+these numbers from the chain. The attribution *label* is in the chain (the `costCenter` field on the
+records above); the balance snapshot is not, and must never be presented as if it were.
+`EnvelopeStatus.remaining` is the **raw ledger balance**, not `allocated − spent`: `spent` is
+derived back out of it as `max(0, allocated − remaining)`, so the two agree only under the ledger
+invariant that a cost-center wallet is funded solely via `allocateBudget`. Fund one any other way
+and `remaining` stays honest while `spent`, `fraction` and `runwayHours` silently do not.
+`receipt.budget` is also allowed to be simply ABSENT — unattributed call, unsettled (estimated)
+stream handle, or a post-settle read that did not answer. That read failing is deliberately silent:
+a receipt is a report, and degrading a report must never unwind or re-decide committed money.
 
 **1 usertoken = $0.0001 USD, everywhere.** All pricing rates are usertokens per 1,000 LLM tokens.
 This constant is duplicated in `packages/verify` on purpose.
@@ -428,8 +525,8 @@ not assume they are the same:
 
 | Call site | Re-asserted after the spread |
 |---|---|
-| `govern.ts` — LLM path | `model`, `tier`, `estimated_cost`, `budget_remaining`, `budget_remaining_after`, `budgetFractionRemaining`, `budgetRunwayHours` |
-| `govern.ts` — `governAction` | `action_kind`, `action_name`, `estimated_cost`, `budget_remaining`, `budget_remaining_after`, `tier`, `budgetFractionRemaining`, `budgetRunwayHours` (**no `model`**) |
+| `govern.ts` — LLM path | `model`, `tier`, `estimated_cost`, `budget_remaining`, `budget_remaining_after`, `budgetFractionRemaining`, `budgetRunwayHours`, `cost_center` |
+| `govern.ts` — `governAction` | `action_kind`, `action_name`, `estimated_cost`, `budget_remaining`, `budget_remaining_after`, `tier`, `budgetFractionRemaining`, `budgetRunwayHours`, `cost_center` (**no `model`**) |
 | `headless.ts` — `authorize` | same set as the LLM path |
 
 The obligation runs in **both** directions. New governance field on `PolicyContext` → re-assert it
@@ -440,6 +537,45 @@ that spreads last, or that re-asserts a subset, is the failure below.
 a hard deny rule. Asserting `undefined` means the rule simply does not match — fail closed, rather
 than matching a number the caller chose. (An `exists`-guard alone makes this *worse*: only the
 attacker's request satisfies it.)
+
+**Four of those fields are ENVELOPE-SCOPED on a call that actually places an envelope hold — the
+gate always describes the wallet the hold will debit.** A set `cost_center` is necessary but not
+sufficient. On a call inside a `withCostCenter` scope that will actually place a ledger hold,
+`budget_remaining` is that envelope's live TigerBeetle `available` (one batched read at
+authorize), and `budgetFractionRemaining` / `budgetRunwayHours` are computed from it against the
+`{ allocated, periodStartMs }` the scope declared — or are explicitly `undefined` when it declared
+none, because there is no cost-center registry and the SDK will not invent an envelope's size.
+Every other call keeps the session numbers, unchanged: unattributed, dry-run and no-engine calls
+place no envelope hold, so there is no envelope truth to be had.
+
+Two consequences that are easy to "tidy" into bugs:
+
+- **`budget_remaining_after` is UNFLOORED on both paths.** It is `budget_remaining − estimate` and
+  it must be allowed to go negative. `block-budget-overshoot` is the non-disableable hard `lt 0`
+  deny, so flooring the field at zero would structurally disarm that rule — on attributed calls
+  first, and it would fork one field's semantics across the two paths.
+- **An attributed call whose envelope balance cannot be read is REFUSED**, with the
+  ledger-unavailable classification, *before* the gate: `evaluatePolicy` never runs and no hold is
+  attempted. The read now runs INSIDE the budget mutex (see the paragraph below), so the refusal
+  releases the lock on its way out — but the gate and the hold are still never reached. Not a fall
+  back to the session numbers — the overshoot rule would then clear the call against a wallet its
+  money never came from, in the one record an auditor reads. Not "continue with the fields absent"
+  either — an indeterminate `budget_remaining_after` makes that same hard rule deny anyway, naming
+  the wrong cause. Refusing costs almost no availability: the preflight and the hold share one
+  TigerBeetle transport, under the client's own reconnect machinery, so a read that genuinely failed
+  means the hold was doomed too.
+
+The preflight is a *report* that feeds the policy tiers, and it is taken INSIDE the budget mutex —
+the same lock that serialises the hold. That is what lets the envelope's fractional/runway tiers
+(`budgetFractionRemaining`, `budgetRunwayHours`) be enforced under single-governor concurrency: a
+concurrent attributed call to the same envelope cannot slip its hold between this read and the gate,
+so the second call gates on a balance that already reflects the first hold — exactly as the session
+path's budget check reads in-process counters mutated under this same mutex. Cross-governor
+(multi-process) concurrency still relies only on TigerBeetle's atomic `debits_must_not_exceed_credits`
+rejection of the hold — an OVERSHOOT, never a fractional/runway tier — the same limitation the
+session path has, and a stale cross-process read can still only under-deny. Moving the read under the
+lock is not check-then-act: the money decision stays the hold's atomic rejection; the read only makes
+the policy record consistent with the wallet the hold will debit.
 
 **Policy regexes are structurally ReDoS-guarded.** Patterns over 200 characters, with adjacent
 nested quantifiers (`a+*`), or with a quantified group whose body contains a quantifier or
@@ -780,6 +916,10 @@ Real, verified, and worth knowing before you touch the surrounding code.
   which is what the runtime actually uses. The live engine is built by a `createTBEngine` factory
   that is **duplicated** between `govern.ts` and `headless.ts` — change both in lockstep.
   `createLedgerEngine`, promised in comments in both files, does not exist anywhere in the repo.
+  That lockstep is now mechanically pinned: `tests/harden/engine-factory-parity.test.ts` extracts
+  `createTBEngine`, `isTBInsufficientBalance` and `isTBDebitAccountNotFound` from both files, strips
+  comments and blank lines (the two copies carry deliberately different prose), and requires the
+  code to be identical. Fix a failure there by copying the edit across, never by relaxing the test.
 - **`packages/core/bin/govern.ts` is dead code** — outside `include: ["src"]` and outside
   `files: ["dist"]`. The live CLI is `src/cli/main.ts`.
 - **Remote-governance ("proxy") mode is removed.** `connectProxy()` always throws and `TrustOpts.proxy`
@@ -793,9 +933,15 @@ Real, verified, and worth knowing before you touch the surrounding code.
   carrying the authorize-time resolution the way `trust()` does. Same inputs, so the same answer
   today; but the guarantee rests on `resolveRates` staying a pure function of
   `(model, endpointClass, config)`, whereas on the `trust()` path it rests on nothing at all.
-- **The `core/src/budget/` primitives ship ahead of their consumer.** Nothing in the repo debits a
-  cost-center wallet yet, so `getBudgetStatus` reports `spent: 0` for a burning agent and a policy
-  tier keyed on `budgetFractionRemaining` would fail open.
+- **The `core/src/budget/` primitives now have a consumer, but only for ATTRIBUTED traffic.** A
+  governed call made inside a `withCostCenter(cc, fn)` scope places its PENDING hold against the
+  very wallet `allocateBudget` funds, so `getBudgetStatus` and `budgetContext` report that cost
+  center's real `spent`, and a policy tier keyed on `budgetFractionRemaining` trips on real burn —
+  the gap this bullet used to record is closed for that traffic. A call made outside every scope
+  still spends from the per-session funded holding wallet, unchanged and deliberately so, which
+  means an agent that never opens a scope still reads as `spent: 0` while it burns the session
+  budget. That residue is an INSTRUMENTATION gap, not an enforcement one: the session wallet's own
+  `debits_must_not_exceed_credits` bounds that spend either way.
 - **`packages/openclaw` is not typechecked by CI.** It is absent from the root `tsconfig.json`
   references and is not `composite`, so neither `tsc -b` nor `npm run typecheck` covers it. Type
   errors there surface only at release time.

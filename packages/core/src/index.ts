@@ -60,6 +60,17 @@ export {
 	getBudgetStatus,
 	reclaimBudget,
 } from "./budget/allocation.js";
+// Attribution — `withCostCenter(cc, fn)` routes every governed call `fn` makes to a
+// cost-center envelope via `node:async_hooks` `AsyncLocalStorage`, from code structure
+// rather than request content. `getCurrentCostCenter` stays module-internal (D8): only
+// `govern.ts`/`headless.ts` read it, at exactly one point per call.
+export { withCostCenter } from "./budget/attribution.js";
+export type { BudgetContext, EnvelopeDescriptor, EnvelopeStatus } from "./budget/context.js";
+// The scarcity READ API — an agent's own pull-side view across every envelope it
+// holds, in one ledger round trip. See the module doc comment for how this differs
+// from `getBudgetStatus` (batched, and never a per-envelope registry read) and for
+// the observational (never verifier-derivable) contract its numbers carry.
+export { budgetContext } from "./budget/context.js";
 export type { Runway, RunwayInput } from "./budget/runway.js";
 // `runwayHours` is the safe derivation of a `budgetRunwayHours` policy field —
 // the naive `(projectedExhaustionMs - nowMs) / 3.6e6` turns "not projectable"

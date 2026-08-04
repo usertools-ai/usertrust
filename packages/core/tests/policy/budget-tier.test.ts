@@ -40,6 +40,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { withCostCenter } from "../../src/budget/attribution.js";
 import { trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
 import { evaluatePolicy, type GateRule, type PolicyContext } from "../../src/policy/gate.js";
@@ -494,5 +495,162 @@ describe("budget fields are trusted-host input at every call site", () => {
 		expect(auth.transferId).toMatch(/^tx_/);
 
 		await gov.destroy();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The tier stops shadow-boxing: an ATTRIBUTED call actually fires it
+// ---------------------------------------------------------------------------
+
+/**
+ * Until envelopes, `budgetFractionRemaining` could not fire on ANY SDK-governed
+ * call. Both `trust()` call sites and headless `authorize` asserted it explicitly
+ * `undefined` — honestly, because nothing in the repo debited a cost-center wallet
+ * — so the `exists` guard the gate's own doc comment recommends never matched, and
+ * a tier written exactly as documented was a rule that could only ever be dead
+ * code. (Worse for a host that built the context itself: `getBudgetStatus`
+ * reported `fractionRemaining: 1` for a genuinely burning agent, so the tier
+ * failed OPEN.)
+ *
+ * A call inside `withCostCenter(cc, fn, { allocated, periodStartMs })` now carries
+ * the envelope's LIVE ledger balance into the field. These three pin the whole
+ * behaviour change: the tier fires on an attributed call below the threshold,
+ * stays quiet on one above it, and — because the `exists` guard is still doing its
+ * job — leaves unattributed traffic exactly as it was.
+ */
+const ENVELOPE_TIER_RULE = {
+	id: "envelope-tier-frontier",
+	name: "frontier-model-below-30pct",
+	effect: "deny",
+	enforcement: "hard",
+	severity: "high",
+	conditions: [
+		{ field: "budgetFractionRemaining", operator: "exists" },
+		{ field: "budgetFractionRemaining", operator: "lt", value: 0.3 },
+		{ field: "model", operator: "in", value: ["claude-opus-4-6"] },
+	],
+};
+
+const ENVELOPE_PARENT = "acme";
+const ENVELOPE_COST_CENTER = "research";
+/** 10_000 allocated: `remaining` below 3_000 is what has to trip the rule. */
+const ENVELOPE_SCOPE = { allocated: 10_000, periodStartMs: Date.UTC(2026, 7, 3, 0, 0, 0) };
+
+function makeTierVault(): string {
+	const base = join(tmpdir(), `budget-tier-envelope-${randomUUID()}`);
+	const usertrustDir = join(base, ".usertrust");
+	mkdirSync(join(usertrustDir, "policies"), { recursive: true });
+	writeFileSync(
+		join(usertrustDir, "policies", "tier.json"),
+		JSON.stringify({ rules: [ENVELOPE_TIER_RULE] }),
+	);
+	writeFileSync(
+		join(usertrustDir, "usertrust.config.json"),
+		JSON.stringify({ budget: 1_000_000, policies: "./policies/tier.json" }),
+	);
+	return base;
+}
+
+/** An engine whose envelope read answers `remaining` for every account asked for. */
+function makeEnvelopeEngine(remaining: number) {
+	return {
+		spendPending: vi.fn(async (p: { transferId: string }) => ({ transferId: p.transferId })),
+		postPendingSpend: vi.fn(async () => {}),
+		voidPendingSpend: vi.fn(async () => {}),
+		lookupBalances: vi.fn(async (ids: bigint[]) => new Map(ids.map((id) => [id, remaining]))),
+		destroy: vi.fn(),
+	};
+}
+
+const FRONTIER_CALL = {
+	model: "claude-opus-4-6",
+	max_tokens: 64,
+	messages: [{ role: "user", content: "hello" }],
+};
+
+describe("an envelope-scoped tier fires on an attributed call", () => {
+	let vaultBase: string;
+
+	beforeEach(() => {
+		vaultBase = makeTierVault();
+		vi.mocked(evaluatePolicy).mockClear();
+	});
+
+	afterEach(() => {
+		try {
+			rmSync(vaultBase, { recursive: true, force: true });
+		} catch {
+			// cleanup best-effort
+		}
+	});
+
+	it("DENIES a frontier call at 20% of the envelope — the case that could not fire before", async () => {
+		const engine = makeEnvelopeEngine(2_000);
+		const client = makeAnthropicMock();
+		const governed = await trust(client, {
+			vaultBase,
+			parentUserId: ENVELOPE_PARENT,
+			_engine: engine,
+		});
+
+		await expect(
+			withCostCenter(
+				ENVELOPE_COST_CENTER,
+				() => governed.messages.create(FRONTIER_CALL),
+				ENVELOPE_SCOPE,
+			),
+		).rejects.toThrow(/Policy denied/);
+
+		// The number came off the ledger, not off the request body.
+		const ctx = vi.mocked(evaluatePolicy).mock.calls.at(-1)?.[1];
+		expect(ctx?.budgetFractionRemaining).toBeCloseTo(0.2);
+		// A hard deny is a PRE-spend deny: no hold, no provider call.
+		expect(engine.spendPending).not.toHaveBeenCalled();
+		expect(client.messages.create).not.toHaveBeenCalled();
+
+		await governed.destroy();
+	});
+
+	it("stays quiet on the same call when the envelope is at 90%", async () => {
+		const engine = makeEnvelopeEngine(9_000);
+		const client = makeAnthropicMock();
+		const governed = await trust(client, {
+			vaultBase,
+			parentUserId: ENVELOPE_PARENT,
+			_engine: engine,
+		});
+
+		await withCostCenter(
+			ENVELOPE_COST_CENTER,
+			() => governed.messages.create(FRONTIER_CALL),
+			ENVELOPE_SCOPE,
+		);
+
+		const ctx = vi.mocked(evaluatePolicy).mock.calls.at(-1)?.[1];
+		expect(ctx?.budgetFractionRemaining).toBeCloseTo(0.9);
+		expect(client.messages.create).toHaveBeenCalledTimes(1);
+
+		await governed.destroy();
+	});
+
+	it("leaves UNATTRIBUTED traffic untouched — the `exists` guard still holds it back", async () => {
+		const engine = makeEnvelopeEngine(2_000);
+		const client = makeAnthropicMock();
+		const governed = await trust(client, {
+			vaultBase,
+			parentUserId: ENVELOPE_PARENT,
+			_engine: engine,
+		});
+
+		await governed.messages.create(FRONTIER_CALL);
+
+		const ctx = vi.mocked(evaluatePolicy).mock.calls.at(-1)?.[1];
+		// No scope, no envelope, no number to gate on — asserted absent, never
+		// guessed, and never taken from the request body.
+		expect(ctx?.budgetFractionRemaining).toBeUndefined();
+		expect(engine.lookupBalances).not.toHaveBeenCalled();
+		expect(client.messages.create).toHaveBeenCalledTimes(1);
+
+		await governed.destroy();
 	});
 });

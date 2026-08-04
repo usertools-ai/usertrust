@@ -35,6 +35,9 @@ import { join } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import { writeReceipt } from "./audit/rotation.js";
+import { costCenterUserId } from "./budget/allocation.js";
+import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
+import { computeRunway, runwayHours } from "./budget/runway.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
@@ -98,6 +101,16 @@ export interface TrustOpts {
 	/** Tier override. */
 	tier?: string;
 	/**
+	 * This governor's ledger identity — the parent half of the
+	 * `(parentUserId, costCenter)` tuple every cost-center envelope account is
+	 * derived from. Overrides `parentUserId` in the config file, and is validated
+	 * by the same rule at construction (see `TrustConfigSchema.parentUserId`).
+	 *
+	 * SECURITY: TRUSTED-OPERATOR input, same boundary as budget/customRates —
+	 * never derive it from end-user or request data.
+	 */
+	parentUserId?: string | undefined;
+	/**
 	 * Dry-run mode — skips TigerBeetle, audit-chain-only.
 	 * Also enabled by USERTRUST_DRY_RUN=true env var.
 	 */
@@ -126,7 +139,20 @@ export interface TrustOpts {
 
 /** Minimal engine interface for two-phase spend lifecycle. */
 export interface TrustEngine {
-	spendPending(params: { transferId: string; amount: number }): Promise<{ transferId: string }>;
+	/**
+	 * Reserve `amount` as a PENDING debit.
+	 *
+	 * `debitAccountId` is an ALREADY-DERIVED cost-center envelope account: the
+	 * derivation stays in the governor, beside the other authorize-time captures,
+	 * so `TrustTBClient.deriveCostCenterAccountId` keeps the small, audited
+	 * call-site count the "one static" invariant depends on. Omitted → the
+	 * session holding wallet, i.e. exactly the pre-envelope behaviour.
+	 */
+	spendPending(params: {
+		transferId: string;
+		amount: number;
+		debitAccountId?: bigint | undefined;
+	}): Promise<{ transferId: string }>;
 	/**
 	 * Settle a PENDING hold. `actualAmount` posts the true consumed cost (which may
 	 * be less than the reserved estimate); omitting it posts the full pending amount.
@@ -135,6 +161,29 @@ export interface TrustEngine {
 	voidPendingSpend(transferId: string): Promise<void>;
 	/** AUD-461: Void all remaining pending transfers on destroy. */
 	voidAllPending?(): Promise<void>;
+	/**
+	 * Read `available` for each account, missing accounts ABSENT from the map — the
+	 * batch semantics of `TrustTBClient.lookupBalances`, which this delegates to
+	 * verbatim in both factories. It is the governor's ONLY window onto a
+	 * cost-center envelope's balance: the TigerBeetle client lives inside the engine
+	 * closure, so without this seam the policy gate could not see the envelope it is
+	 * about to authorize a spend from, and a settled receipt could not report it.
+	 *
+	 * REPORTING ONLY — never enforcement. Nothing decides whether money may move
+	 * from what this returns; TigerBeetle's atomic rejection of the hold is the
+	 * whole enforcement, so a stale read can only under-deny and no check-then-act
+	 * enters the money path.
+	 *
+	 * OPTIONAL only because the interface predates it and an injected test engine
+	 * may omit it. BOTH `createTBEngine` factories implement it — an engine that
+	 * places an attributed hold and cannot report the envelope it debited is
+	 * refused at authorize with `LedgerUnavailableError`, exactly like a read that
+	 * threw (A2). Falling back to session-scoped numbers is NOT an option: the
+	 * overshoot rule would then clear the call against the holding wallet while the
+	 * hold debits the envelope, and the policy record would name a wallet the money
+	 * never came from.
+	 */
+	lookupBalances?(accountIds: bigint[]): Promise<Map<bigint, number>>;
 	destroy?(): void;
 }
 
@@ -358,6 +407,265 @@ async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promi
 	}
 }
 
+// ── Cost-center envelope plumbing ─────────────────────────────────────────────
+//
+// SHARED WITH `headless.ts`, ON PURPOSE. The helpers below are `export`ed for one
+// consumer — `createGovernor()` — and for one reason: both governors must resolve,
+// gate on, refuse and report the SAME envelope by the SAME arithmetic. A third
+// copy alongside the two `createTBEngine` copies is exactly the drift AGENTS.md
+// records as a hazard, and here it would be a MONEY drift: D1's throw, A2's
+// pre-gate refusal, A7's unfloored `budget_remaining_after` and D5's label re-wrap
+// each decide whether a spend happens and which wallet it names. One copy, one
+// answer. Nothing here reaches the package's public API — `index.ts` re-exports by
+// name and `dist/govern.js` is not an exported subpath — so this widens the module
+// surface, not the product's.
+
+/**
+ * What an active `withCostCenter` scope resolves to for THIS governor: the
+ * envelope account money moves from, and the label everything human-readable
+ * quotes. Derived once per call, at the governor's entry point, and then carried
+ * by closure (`trust()`) or on the `Authorization` handle (`createGovernor()`) —
+ * see {@link resolveEnvelope}.
+ */
+export interface ResolvedEnvelope {
+	attribution: CostCenterAttribution;
+	/** The (parent, costCenter) tuple hash. The only thing money is keyed on. */
+	accountId: bigint;
+	/** `parent::costCenter` — display and audit only, never an account id. */
+	label: string;
+}
+
+/**
+ * The remedy an exhausted ENVELOPE actually needs.
+ *
+ * `InsufficientBalanceError`'s default hint ("Increase the budget in trust()
+ * options…") is not merely unhelpful here, it is wrong: `trust({ budget })` funds
+ * the per-session holding wallet, and an attributed call never debits that wallet.
+ * An operator who follows the default advice raises a number that cannot affect the
+ * rejection and watches the identical call fail again.
+ */
+const ENVELOPE_FUNDING_HINT =
+	"Fund this cost center with allocateBudget(parent, costCenter, amount) — or reclaim from " +
+	"another envelope. Raising the trust()/createGovernor() budget funds the session wallet, " +
+	"which an attributed call never debits.";
+
+/**
+ * Resolve the active scope into the envelope this call will debit, or `undefined`
+ * when no scope is active.
+ *
+ * D1 — an active scope with no governor identity THROWS, at the top of the
+ * governor's entry point, before any I/O: no hold, no audit record, no provider
+ * call. The alternative — quietly falling back to the session holding wallet — is
+ * the failure this whole feature exists to prevent: the caller asked for the spend
+ * to come out of a specific envelope, the envelope is never touched, its
+ * `getBudgetStatus` keeps reporting a full balance, and every tier keyed on it
+ * fails open. Nothing in the system would report that; only the loud throw does.
+ */
+export function resolveEnvelope(
+	attribution: CostCenterAttribution | undefined,
+	parentUserId: string | undefined,
+): ResolvedEnvelope | undefined {
+	if (attribution === undefined) return undefined;
+	if (parentUserId === undefined) {
+		throw new Error(
+			`usertrust: withCostCenter("${attribution.costCenter}") is active but this governor has ` +
+				"no parentUserId. A cost-center envelope account is derived from the " +
+				"(parentUserId, costCenter) tuple, so an attributed call cannot be routed without " +
+				"it — and spending it from the session wallet instead would silently un-enforce the " +
+				"envelope. Pass parentUserId to trust()/createGovernor(), or set it in " +
+				"usertrust.config.json.",
+		);
+	}
+	return {
+		attribution,
+		// DERIVE, NEVER LOOK UP (AGENTS.md, Money): the one static, the same one
+		// allocation, reclaim, status and budgetContext go through. Never
+		// `getAccountId`, never a cache, never a hand-rolled join.
+		accountId: TrustTBClient.deriveCostCenterAccountId(parentUserId, attribution.costCenter),
+		// Built by the one builder, which also re-validates both halves — cheap,
+		// pure, and it keeps the label's injectivity argument in a single place.
+		label: costCenterUserId(parentUserId, attribution.costCenter),
+	};
+}
+
+/**
+ * Re-present a ledger rejection of an ATTRIBUTED hold in the caller's own terms.
+ *
+ * The engine names the envelope by its derived account id, because the
+ * `parent::costCenter` label is the governor's and the engine has no parent. An
+ * operator reading a 39-digit account id learns nothing actionable, so the governor
+ * — which does hold both halves — swaps in the label and the envelope remedy on the
+ * way out. The ledger's own `required`/`available` numbers are carried through
+ * unchanged: they are the only figures TigerBeetle actually decided on.
+ */
+export function asEnvelopeBalanceError(
+	err: InsufficientBalanceError,
+	label: string,
+): InsufficientBalanceError {
+	return new InsufficientBalanceError(label, err.required, err.available, ENVELOPE_FUNDING_HINT);
+}
+
+/**
+ * 0..1 share of an envelope still available. Mirrors `budget/context.ts`'s clamp
+ * semantics (A5) exactly — `allocated <= 0` is "no headroom" (`0`), never a
+ * division by zero, and an over-funded envelope clamps at 1 rather than reporting
+ * more than a full budget.
+ */
+function envelopeFraction(remaining: number, allocated: number): number {
+	if (!(allocated > 0)) return 0;
+	return Math.min(1, Math.max(0, remaining / allocated));
+}
+
+/**
+ * The two envelope-scoped POLICY tier fields, from the scope's D4 allocation
+ * metadata plus the live balance. Both are explicitly `undefined` when the scope
+ * carried no metadata: there is no cost-center registry, so the governor genuinely
+ * does not know the envelope's size, and a fabricated number is worse than an
+ * absent one (a hard tier then fails closed and fires; a soft tier stays lenient —
+ * the documented indeterminate split, unchanged).
+ *
+ * `spent` is derived from the LIVE balance rather than tracked in process, because
+ * the envelope is shared across processes: `allocated − remaining` is what the
+ * envelope has actually paid out, the same clamp `getBudgetStatus` and
+ * `budgetContext` apply.
+ */
+export function envelopeTierFields(
+	attribution: CostCenterAttribution,
+	remaining: number,
+	nowMs: number,
+): { budgetFractionRemaining: number | undefined; budgetRunwayHours: number | undefined } {
+	const { allocated, periodStartMs } = attribution;
+	if (allocated === undefined || periodStartMs === undefined) {
+		return { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
+	}
+	const runway = computeRunway({
+		allocated,
+		spent: Math.max(0, allocated - remaining),
+		periodStartMs,
+		periodEndMs: attribution.periodEndMs,
+		nowMs,
+	});
+	const hours = runwayHours(runway, nowMs);
+	return {
+		budgetFractionRemaining: envelopeFraction(remaining, allocated),
+		// `runwayHours` answers `null` for "not projectable"; the POLICY convention
+		// for unknown is explicit `undefined` (A6). Two surfaces, two pre-existing
+		// conventions — `budget/context.ts` keeps the `null` one. Do not unify them.
+		budgetRunwayHours: hours ?? undefined,
+	};
+}
+
+/**
+ * The envelope's live `available` — one batched read, missing account read as `0`
+ * (never-allocated and fully-reclaimed are the same observable state, the
+ * implicit-zero equivalence `budget/allocation.ts` documents).
+ *
+ * REPORTS, never decides: TigerBeetle's atomic rejection of the hold is the whole
+ * enforcement, so a stale answer can only under-deny and no check-then-act enters
+ * the money path. Rejects when the engine cannot answer — the two callers below
+ * differ precisely in what they do with that rejection.
+ */
+async function readEnvelopeBalance(
+	engine: TrustEngine,
+	envelope: ResolvedEnvelope,
+): Promise<number> {
+	const read = engine.lookupBalances;
+	if (read == null) {
+		throw new Error(
+			"this TrustEngine cannot read balances (no lookupBalances) — an attributed hold " +
+				"would debit an envelope nothing can report on",
+		);
+	}
+	const balances = await read.call(engine, [envelope.accountId]);
+	return balances.get(envelope.accountId) ?? 0;
+}
+
+/**
+ * The authorize-time preflight: the envelope number the policy gate is about to
+ * be gated on, or `undefined` when this call places no envelope hold at all —
+ * unattributed, dry-run, or a governor with no engine. Those three place no hold
+ * anywhere, so there is no envelope truth to be had and nothing for the session
+ * numbers to contradict; the gate keeps describing exactly what it did before
+ * envelopes existed.
+ *
+ * A2 (corrected) — an ATTRIBUTED call whose envelope cannot be read is REFUSED
+ * here, before the policy gate, with the existing ledger-unavailable
+ * classification. It is the one place in this file where a failed *report* stops a
+ * call, and the reasoning is specific:
+ *
+ *  - Falling back to the SESSION numbers is what the first draft did, and it is
+ *    unsound: `block-budget-overshoot` would then evaluate the holding wallet
+ *    while the hold debits the envelope, and the policy record would say a call
+ *    was cleared against a wallet it never touched. Mixed semantics in the one
+ *    record an auditor reads.
+ *  - Continuing with the fields ABSENT is not "continuing" at all — the hard
+ *    `block-budget-overshoot` rule treats an indeterminate `budget_remaining_after`
+ *    as fail-closed and denies, so the caller gets a policy denial that names the
+ *    wrong cause.
+ *  - Refusing costs almost no availability: the preflight and the hold share one
+ *    TigerBeetle transport (and the client's own reconnect machinery has already
+ *    run underneath), so a read that genuinely failed means the hold was doomed
+ *    anyway. What it buys is an honest classification — the ledger is unreachable,
+ *    and that is what the caller is told.
+ *
+ * @throws LedgerUnavailableError when an attributed call's envelope balance cannot
+ * be read. No hold is placed and the policy gate is never reached.
+ */
+export async function preflightEnvelopeRemaining(
+	engine: TrustEngine | null,
+	isDryRun: boolean,
+	envelope: ResolvedEnvelope | undefined,
+): Promise<number | undefined> {
+	if (envelope === undefined || isDryRun || engine == null) return undefined;
+	try {
+		return await readEnvelopeBalance(engine, envelope);
+	} catch (err) {
+		throw new LedgerUnavailableError(
+			`cannot read cost-center envelope ${envelope.label} to authorize an attributed call: ` +
+				(err instanceof Error ? err.message : String(err)),
+		);
+	}
+}
+
+/**
+ * The post-settle snapshot read (D7). Same read, opposite failure policy: it NEVER
+ * throws, because it runs after the money committed and a receipt is a report —
+ * degrading a report must not unwind or re-decide a settlement. A failure omits
+ * the block.
+ */
+export async function snapshotEnvelopeRemaining(
+	engine: TrustEngine | null,
+	isDryRun: boolean,
+	envelope: ResolvedEnvelope | undefined,
+): Promise<number | undefined> {
+	if (envelope === undefined || isDryRun || engine == null) return undefined;
+	try {
+		return await readEnvelopeBalance(engine, envelope);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * D7 — the post-settle envelope snapshot a settled receipt carries, or `undefined`
+ * when the call was unattributed or the read did not answer. Never throws: a
+ * receipt is a report, and degrading a report must not unwind money that already
+ * committed.
+ */
+export function envelopeReceiptBudget(
+	envelope: ResolvedEnvelope | undefined,
+	remaining: number | undefined,
+): TrustReceipt["budget"] | undefined {
+	if (envelope === undefined || remaining === undefined) return undefined;
+	const { costCenter, allocated } = envelope.attribution;
+	return {
+		costCenter,
+		remaining,
+		// Omitted rather than guessed when the scope stated no allocation (D4).
+		...(allocated === undefined ? {} : { fraction: envelopeFraction(remaining, allocated) }),
+	};
+}
+
 // ── trust() ──
 
 export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>> {
@@ -371,10 +679,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		config = TrustConfigSchema.parse({
 			...(raw as Record<string, unknown>),
 			...(opts?.budget !== undefined ? { budget: opts.budget } : {}),
+			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
 		});
 	} else {
 		config = TrustConfigSchema.parse({
 			budget: opts?.budget ?? DEFAULT_BUDGET,
+			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
 		});
 	}
 
@@ -502,6 +812,52 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		inFlightCount++;
 
 		try {
+			// ── The ONE AsyncLocalStorage read for this call (ALS discipline) ──
+			// Read HERE, at the top of the governor's synchronous entry point, while
+			// the CALLER's async context is still the current one, and carried by
+			// closure from here on. Every terminal below — the five MessageStream
+			// emitter listeners, createGovernedStream's onComplete/onError, the
+			// non-stream settle, the outer-catch void — runs LATER, on the SDK's SSE
+			// pump tick or the consumer's `for await` tick, in a context this call
+			// never owned. `getCurrentCostCenter()` there would silently answer with a
+			// later call's scope, or with nothing, and would never fail loudly. Same
+			// propagation shape as `rateResolution` ("price once", A3), for the same
+			// reason. `budget/attribution.ts` documents the mechanics and its suite
+			// pins the emitter-tick hazard as a negative case.
+			const attribution = getCurrentCostCenter();
+			const envelope = resolveEnvelope(attribution, config.parentUserId);
+			// Spread into every audit record this call emits (A1: an attributed hold
+			// must leave an attributed forensic trail on the settle AND the void
+			// terminals). Empty when unattributed, so those records stay byte-identical
+			// to what they were before envelopes — and one object decides for all of
+			// them rather than a dozen conditionals drifting apart.
+			const costCenterAudit: { costCenter?: string } =
+				envelope === undefined ? {} : { costCenter: envelope.attribution.costCenter };
+
+			// ── SESSION accounting tracks SESSION-WALLET money only ──
+			// `budgetSpent` and `inFlightHoldTotal` describe the per-session HOLDING
+			// wallet: they gate every unattributed call, they are what
+			// `receipt.budgetRemaining` reports, and `persistSpendLedger` carries
+			// `budgetSpent` across restarts as the `max(0, budget - budgetSpent)` seed of
+			// that wallet. An ATTRIBUTED hold debits the `(parent, costCenter)` envelope
+			// and never touches the holding wallet, so counting it here charges the
+			// session for money it did not pay: unattributed calls are eventually
+			// hard-denied against a wallet TigerBeetle would still have held against, and
+			// the shortfall survives the restart. Fail-closed — over-deny, never loss —
+			// but silent, which is why it is a bug and not a conservative default.
+			// Set at the point the hold actually lands on the envelope, NOT from the
+			// scope: a dry-run or engine-less attributed call places no envelope hold at
+			// all, so the session numbers stay its only — and honest — accounting,
+			// exactly as they are the only numbers its policy gate saw.
+			let envelopeDebited = false;
+			/** This call's SESSION-wallet share of an amount: all of it, or none. */
+			const sessionShare = (amount: number): number => (envelopeDebited ? 0 : amount);
+			/** AUD-457 persistence, skipped when the session total did not move. */
+			const persistSessionSpend = async (): Promise<void> => {
+				if (envelopeDebited) return;
+				await persistSpendLedger(vaultBase, budgetSpent);
+			};
+
 			const params = (args[0] ?? {}) as Record<string, unknown>;
 			const model = (params.model as string) ?? "unknown";
 			// P3-PROVIDER-BLINDSPOT: normalize the prompt-bearing payload across
@@ -546,8 +902,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			);
 
 			// AUD-453: Acquire mutex to serialise budget-check + PENDING hold.
-			// This prevents concurrent calls from both passing the budget check
-			// and overshooting the budget.
+			// This prevents concurrent calls from both passing the budget check and
+			// overshooting the budget. The attributed-envelope preflight read is taken
+			// INSIDE this lock (top of the try below), so a concurrent hold to the same
+			// envelope cannot land between the read and the gate — see the note there.
 			const releaseBudgetLock = await budgetMutex.acquire();
 
 			// AUD-460: Track the proxy's transferId separately for settle/void
@@ -561,11 +919,34 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (!holdActive) return;
 				holdActive = false;
 				const releaseLock = await budgetMutex.acquire();
-				inFlightHoldTotal -= estimatedCost;
+				// `sessionShare` on BOTH sides: an attributed hold that skipped the
+				// increment must skip the matching decrement, or `inFlightHoldTotal`
+				// drifts negative and hands the session more headroom than its budget.
+				inFlightHoldTotal -= sessionShare(estimatedCost);
 				releaseLock();
 			}
 
 			try {
+				// Attributed calls only: ONE batched read of the envelope's live
+				// `available`, for the policy numbers below. Taken INSIDE the budget mutex
+				// — the same lock that serialises the hold — and BEFORE the gate, so this
+				// call's own hold lands only after the read and a CONCURRENT attributed
+				// call to the SAME envelope cannot slip its hold between this read and the
+				// gate. When the read was OUTSIDE the lock, two such calls both read the
+				// pre-hold balance and the second bypassed a hard scarcity tier
+				// (`budgetFractionRemaining` / `budgetRunwayHours`) the ledger cannot
+				// enforce — TigerBeetle's atomic `debits_must_not_exceed_credits` rejects an
+				// OVERSHOOT but never a fractional/runway tier. Serialising the read under
+				// the hold's lock makes the gate describe the wallet the hold will debit,
+				// exactly as the SESSION path already does (its check reads in-process
+				// counters mutated under this same mutex). Cross-process (multi-governor)
+				// concurrency still relies on TB atomicity — overshoot only — the same
+				// limitation the session path has.
+				// A2: a read that FAILS refuses the call outright — the finally below
+				// releases the mutex and the ledger-unavailable error propagates before the
+				// gate is evaluated or any hold is attempted.
+				const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
+
 				// c. Policy gate
 				// P1-PARAM-SHADOW: caller `params` are spread FIRST so trusted
 				// governance fields (tier/estimated_cost/budget_remaining/
@@ -573,21 +954,48 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// P1-BUDGET-PREFLIGHT: budget_remaining_after is the derived field the
 				// single-field gate compares against zero to deny a single overshooting
 				// call (the `block-budget-overshoot` default rule).
+				//
+				// ENVELOPE SCOPING: an ATTRIBUTED call is gated on THE ENVELOPE ITS HOLD
+				// WILL DEBIT — `budget_remaining` is that envelope's live ledger
+				// `available`, so `block-budget-exhausted` and `block-budget-overshoot`
+				// become pre-spend guards on the cost center, ahead of the ledger's own
+				// atomic rejection. The gate and the hold therefore always describe the
+				// SAME wallet; the case where they could disagree (an unreadable
+				// envelope) refused the call above rather than reaching here (A2).
+				// `budget_remaining_after` is deliberately UNFLOORED on both paths: it
+				// must be allowed to go NEGATIVE, because `block-budget-overshoot` is a
+				// non-disableable hard `lt 0` deny and flooring it at zero would
+				// structurally disarm that rule on every attributed call.
+				// The session numbers still stand for a call that places no hold at all
+				// (unattributed, dry-run, no engine) — unchanged, and honest, because
+				// nothing debits an envelope on those paths either.
+				const sessionRemaining = config.budget - budgetSpent - inFlightHoldTotal;
+				const gateRemaining = envelopeRemaining ?? sessionRemaining;
+				// P1-BUDGET-TIER-SHADOW: the budget tier fields are trusted-host input,
+				// and asserting them here is what stops a request body from supplying its
+				// own `budgetFractionRemaining` and satisfying a tier that guards frontier
+				// spend. They are now REAL for an attributed call whose scope stated its
+				// allocation (D4) — the case this path could not describe before — and
+				// stay explicitly `undefined` for every other call, where the honest value
+				// is ABSENT: an `exists`-guarded rule then simply does not match, and a
+				// hard rule without that guard fires. Never an attacker's number.
+				const tierFields =
+					envelope !== undefined && envelopeRemaining !== undefined
+						? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
+						: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
 				const policyResult = evaluatePolicy(policyRules, {
 					...params,
 					model,
 					tier: config.tier,
 					estimated_cost: estimatedCost,
-					budget_remaining: config.budget - budgetSpent - inFlightHoldTotal,
-					budget_remaining_after: config.budget - budgetSpent - inFlightHoldTotal - estimatedCost,
-					// P1-BUDGET-TIER-SHADOW: the budget tier fields are trusted-host input.
-					// This path knows no cost-center allocation, so the honest value is
-					// ABSENT — and asserting it here is what stops a request body from
-					// supplying its own `budgetFractionRemaining` and satisfying a tier
-					// that guards frontier spend. An `exists`-guarded rule then simply
-					// does not match; it never matches an attacker's number.
-					budgetFractionRemaining: undefined,
-					budgetRunwayHours: undefined,
+					budget_remaining: gateRemaining,
+					budget_remaining_after: gateRemaining - estimatedCost,
+					budgetFractionRemaining: tierFields.budgetFractionRemaining,
+					budgetRunwayHours: tierFields.budgetRunwayHours,
+					// Structurally un-forgeable: this comes from the caller's own async
+					// execution context, which no request body can reach. Asserted after
+					// the spread like every other trusted field, `undefined` included.
+					cost_center: envelope?.attribution.costCenter,
 				});
 				if (policyResult.decision === "deny") {
 					const reason =
@@ -629,6 +1037,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									patterns: injectionResult.patterns,
 									score: injectionResult.score,
 									model,
+									...costCenterAudit,
 								},
 							})
 							.catch(() => {});
@@ -660,6 +1069,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						await engine.spendPending({
 							transferId,
 							amount: estimatedCost,
+							// Attributed → the envelope pays. Unattributed → the key is
+							// OMITTED, not passed as undefined, so the engine's default
+							// (the session holding wallet) is reached by exactly the path
+							// it was before envelopes existed.
+							...(envelope !== undefined ? { debitAccountId: envelope.accountId } : {}),
 						});
 					} catch (holdErr) {
 						// P1-LEDGER-ENFORCE: an over-budget reservation is rejected
@@ -669,17 +1083,26 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// its finally (releases the budget lock), and propagates without
 						// a hold to void — exactly mirroring the policy-deny control flow.
 						if (holdErr instanceof InsufficientBalanceError) {
-							throw holdErr;
+							// An attributed rejection is re-presented in the caller's terms:
+							// the `parent::costCenter` label instead of a derived account id,
+							// and the remedy that actually funds an envelope.
+							throw envelope === undefined
+								? holdErr
+								: asEnvelopeBalanceError(holdErr, envelope.label);
 						}
 						// Genuine ledger outage — do NOT forward to provider.
 						throw new LedgerUnavailableError(
 							holdErr instanceof Error ? holdErr.message : String(holdErr),
 						);
 					}
+					// The hold landed. Record WHICH wallet it debited — every session
+					// counter below is conditioned on this one answer.
+					envelopeDebited = envelope !== undefined;
 				}
 
-				// Track in-flight hold cost for accurate budget calculations
-				inFlightHoldTotal += estimatedCost;
+				// Track in-flight hold cost for accurate budget calculations — the
+				// SESSION wallet's share of it, which is nothing once the envelope paid.
+				inFlightHoldTotal += sessionShare(estimatedCost);
 				holdActive = true; // AUD-468: arm the guard
 			} finally {
 				// AUD-453: Release lock after budget check + hold are complete
@@ -792,17 +1215,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (holdActive) {
 					holdActive = false;
 					const releaseLock = await budgetMutex.acquire();
-					inFlightHoldTotal -= estimatedCost;
-					budgetSpent += streamCost;
+					inFlightHoldTotal -= sessionShare(estimatedCost);
+					budgetSpent += sessionShare(streamCost);
 					releaseLock();
 				} else {
 					// Hold already released — still need to record the spend.
 					const releaseLock = await budgetMutex.acquire();
-					budgetSpent += streamCost;
+					budgetSpent += sessionShare(streamCost);
 					releaseLock();
 				}
-				// AUD-457: Persist cumulative spend to disk
-				await persistSpendLedger(vaultBase, budgetSpent);
+				// AUD-457: Persist cumulative spend to disk (session spend only — an
+				// envelope's burn is the ledger's to report, and writing it here would
+				// shrink the next run's holding-wallet seed by money it never paid).
+				await persistSessionSpend();
 				cb.recordSuccess();
 
 				if (proxyConn != null && !isDryRun) {
@@ -823,6 +1248,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 										postErr instanceof Error
 											? postErr.message.slice(0, 200)
 											: String(postErr).slice(0, 200),
+									...costCenterAudit,
 								},
 							})
 							.catch(() => {
@@ -847,6 +1273,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 										postErr instanceof Error
 											? postErr.message.slice(0, 200)
 											: String(postErr).slice(0, 200),
+									...costCenterAudit,
 								},
 							})
 							.catch(() => {
@@ -869,6 +1296,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						endpointClass: endpoint.class,
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
+						...costCenterAudit,
 					};
 					if (config.pii === "warn" || config.pii === "redact") {
 						const piiResult = redactPII(promptParts);
@@ -896,6 +1324,22 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					);
 				}
 
+				// D7: the envelope snapshot is read AFTER the POST, so it reports what
+				// the cost center actually holds now rather than in-memory arithmetic
+				// that drifts the moment another process spends from the same envelope.
+				// It observes; it never decides. A read that fails omits the block —
+				// this runs after the money committed, and a report must never unwind
+				// or re-decide a settlement. It is a POST-SETTLEMENT observation, so it
+				// is attached ONLY when `settled` — an ambiguous settlement (POST
+				// rejected) may still be pending and be posted or voided later, making
+				// the balance transient; we do not even read the ledger for it then.
+				const streamBudget = settled
+					? envelopeReceiptBudget(
+							envelope,
+							await snapshotEnvelopeRemaining(engine, isDryRun, envelope),
+						)
+					: undefined;
+
 				const streamReceipt: TrustReceipt = {
 					transferId,
 					cost: streamCost,
@@ -915,6 +1359,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
 					},
+					...(streamBudget !== undefined ? { budget: streamBudget } : {}),
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					// AUD-456: Flag proxy stub receipts
 					...(proxyConn != null ? { proxyStub: true as const } : {}),
@@ -950,6 +1395,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							partialInputTokens: partial.usage.inputTokens,
 							partialOutputTokens: partial.usage.outputTokens,
 							usageReported: partial.usageReported,
+							...costCenterAudit,
 							error: (() => {
 								const raw = error instanceof Error ? error.message : String(error);
 								return config.pii === "warn" || config.pii === "redact"
@@ -1105,6 +1551,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									model,
 									transferId,
 									provider: kind,
+									...costCenterAudit,
 								},
 							})
 							.catch(() => {});
@@ -1306,6 +1753,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 											model,
 											transferId,
 											provider: kind,
+											...costCenterAudit,
 										},
 									})
 									.catch(() => {});
@@ -1371,6 +1819,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						endpointClass: endpoint.class,
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
+						...costCenterAudit,
 					};
 					if (config.pii === "warn" || config.pii === "redact") {
 						const piiResult = redactPII(promptParts);
@@ -1416,12 +1865,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (holdActive) {
 					holdActive = false;
 					const releaseLock = await budgetMutex.acquire();
-					inFlightHoldTotal -= estimatedCost;
-					budgetSpent += actualCost;
+					inFlightHoldTotal -= sessionShare(estimatedCost);
+					budgetSpent += sessionShare(actualCost);
 					releaseLock();
 				}
-				// AUD-457: Persist cumulative spend to disk
-				await persistSpendLedger(vaultBase, budgetSpent);
+				// AUD-457: Persist cumulative spend to disk (session spend only).
+				await persistSessionSpend();
 
 				// g. Circuit breaker: record success
 				cb.recordSuccess();
@@ -1443,6 +1892,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									cost: actualCost,
 									transferId,
 									error: postErr instanceof Error ? postErr.message : String(postErr),
+									...costCenterAudit,
 								},
 							})
 							.catch(() => {
@@ -1471,6 +1921,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 										postErr instanceof Error
 											? postErr.message.slice(0, 200)
 											: String(postErr).slice(0, 200),
+									...costCenterAudit,
 								},
 							})
 							.catch(() => {
@@ -1496,7 +1947,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							kind: "llm_call",
 							subsystem: "trust",
 							actor: "local",
-							data: { model, cost: actualCost, settled, transferId },
+							data: { model, cost: actualCost, settled, transferId, ...costCenterAudit },
 						},
 						config.audit.indexLimit,
 					);
@@ -1514,6 +1965,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				}
 
 				const budgetRemaining = config.budget - budgetSpent - inFlightHoldTotal;
+				// D7 (see the streaming settle above for the full rationale): a
+				// post-settle observation of the envelope, omitted when it cannot be read
+				// AND when the settlement is ambiguous — a settled:false receipt must not
+				// carry a snapshot the contract defines as post-settlement.
+				const settledBudget = settled
+					? envelopeReceiptBudget(
+							envelope,
+							await snapshotEnvelopeRemaining(engine, isDryRun, envelope),
+						)
+					: undefined;
 
 				const receipt: TrustReceipt = {
 					transferId,
@@ -1533,6 +1994,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
 					},
+					...(settledBudget !== undefined ? { budget: settledBudget } : {}),
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					// AUD-456: Flag proxy stub receipts
 					...(proxyConn != null ? { proxyStub: true as const } : {}),
@@ -1589,6 +2051,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									? (redactPII(String(err)).data as string).slice(0, 200)
 									: String(err),
 							transferId,
+							...costCenterAudit,
 						},
 					})
 					.catch(() => {
@@ -1634,6 +2097,27 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		let callAuditDegraded = false;
 
 		try {
+			// governAction is its OWN governor entry point — a caller invokes it
+			// directly, synchronously, from inside its own `withCostCenter` scope — so
+			// it takes its own single ALS read here and carries the capture through
+			// its terminals, exactly as `interceptCall` does. See the ALS-discipline
+			// note there for why a later read would be wrong.
+			const attribution = getCurrentCostCenter();
+			const envelope = resolveEnvelope(attribution, config.parentUserId);
+			const costCenterAudit: { costCenter?: string } =
+				envelope === undefined ? {} : { costCenter: envelope.attribution.costCenter };
+
+			// Session accounting is SESSION-WALLET-only here for exactly the reasons the
+			// LLM path documents at length — an attributed action's hold debits the
+			// envelope, so charging the session for it over-denies later unattributed
+			// traffic and persists that shortfall across restarts.
+			let envelopeDebited = false;
+			const sessionShare = (amount: number): number => (envelopeDebited ? 0 : amount);
+			const persistSessionSpend = async (): Promise<void> => {
+				if (envelopeDebited) return;
+				await persistSpendLedger(vaultBase, budgetSpent);
+			};
+
 			const actor = action.actor ?? "local";
 			const transferId = trustId("tx");
 
@@ -1641,29 +2125,59 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const cb = breaker.get(action.kind as unknown as LLMClientKind);
 			cb.allowRequest();
 
-			// b. Acquire mutex for budget atomicity
+			// b. Acquire mutex for budget atomicity. The attributed-envelope preflight
+			// read is taken INSIDE this lock (top of the try below) so a concurrent hold
+			// to the same envelope cannot land between the read and the gate — see there.
 			const releaseBudgetLock = await budgetMutex.acquire();
 			let proxyTransferId: string | undefined;
 
 			try {
+				// Attributed only: ONE batched read of the envelope's live `available`,
+				// taken INSIDE the budget mutex and BEFORE the gate, so this action's own
+				// hold lands only after the read and a CONCURRENT attributed action on the
+				// SAME envelope cannot slip its hold between the read and the gate. Outside
+				// the lock, both would read the pre-hold balance and the second would bypass
+				// a hard scarcity tier (`budgetFractionRemaining` / `budgetRunwayHours`) the
+				// ledger cannot enforce — TB rejects an OVERSHOOT, never a fractional/runway
+				// tier. Same in-mutex serialisation the SESSION path already has;
+				// cross-process concurrency still relies on TB atomicity (overshoot only).
+				// A2: a read that FAILS refuses the action — the finally below releases the
+				// mutex and the error propagates before the gate or any hold.
+				const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
+
 				// c. Policy gate — action fields available in context
 				// AUD-467: Caller params spread FIRST so governance fields cannot be shadowed.
 				// P1-BUDGET-PREFLIGHT: budget_remaining_after is the derived field the
 				// block-budget-overshoot default rule compares against zero (a HARD rule
-				// that fails CLOSED if the governor omits it — so it MUST be supplied).
+				// that fails CLOSED if the governor omits it — so it MUST be supplied),
+				// and it is UNFLOORED here for the same reason as on the LLM path: it has
+				// to be able to go negative or that rule can never fire.
+				// ENVELOPE SCOPING: identical to the LLM path — an attributed action is
+				// gated on the envelope its hold will debit, never on the session wallet.
+				const sessionRemaining = config.budget - budgetSpent - inFlightHoldTotal;
+				const gateRemaining = envelopeRemaining ?? sessionRemaining;
+				const tierFields =
+					envelope !== undefined && envelopeRemaining !== undefined
+						? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
+						: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
 				const policyResult = evaluatePolicy(policyRules, {
 					...(action.params ?? {}),
 					action_kind: action.kind,
 					action_name: action.name,
 					estimated_cost: action.cost,
-					budget_remaining: config.budget - budgetSpent - inFlightHoldTotal,
-					budget_remaining_after: config.budget - budgetSpent - inFlightHoldTotal - action.cost,
+					budget_remaining: gateRemaining,
+					budget_remaining_after: gateRemaining - action.cost,
 					tier: config.tier,
-					// P1-BUDGET-TIER-SHADOW: trusted-host input, asserted ABSENT here so
-					// `action.params` cannot inject a budget tier's own inputs. See the
+					// P1-BUDGET-TIER-SHADOW: trusted-host input, asserted after the spread
+					// so `action.params` cannot inject a budget tier's own inputs. REAL for
+					// an attributed action whose scope stated its allocation (D4), and
+					// explicitly `undefined` otherwise — never a caller's number. See the
 					// same assertion on the LLM path above.
-					budgetFractionRemaining: undefined,
-					budgetRunwayHours: undefined,
+					budgetFractionRemaining: tierFields.budgetFractionRemaining,
+					budgetRunwayHours: tierFields.budgetRunwayHours,
+					// Structurally un-forgeable: it comes from this call's own async
+					// execution context, which `action.params` cannot reach.
+					cost_center: envelope?.attribution.costCenter,
 				});
 				if (policyResult.decision === "deny") {
 					const reason =
@@ -1700,6 +2214,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									score: injectionResult.score,
 									actionName: action.name,
 									actionKind: action.kind,
+									...costCenterAudit,
 								},
 							})
 							.catch(() => {});
@@ -1725,20 +2240,32 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						await engine.spendPending({
 							transferId,
 							amount: action.cost,
+							// Attributed → the envelope pays. Unattributed → the key is
+							// OMITTED, not passed as undefined, so the engine's default (the
+							// session holding wallet) is reached by exactly the path it was
+							// before envelopes existed.
+							...(envelope !== undefined ? { debitAccountId: envelope.accountId } : {}),
 						});
 					} catch (holdErr) {
 						// P1-LEDGER-ENFORCE: over-budget reservation → hard budget DENY,
 						// not a ledger-outage misreport.
 						if (holdErr instanceof InsufficientBalanceError) {
-							throw holdErr;
+							// An attributed rejection is re-presented in the caller's terms:
+							// the `parent::costCenter` label instead of a derived account id,
+							// and the remedy that actually funds an envelope.
+							throw envelope === undefined
+								? holdErr
+								: asEnvelopeBalanceError(holdErr, envelope.label);
 						}
 						throw new LedgerUnavailableError(
 							holdErr instanceof Error ? holdErr.message : String(holdErr),
 						);
 					}
+					// The hold landed — record which wallet it debited.
+					envelopeDebited = envelope !== undefined;
 				}
 
-				inFlightHoldTotal += action.cost;
+				inFlightHoldTotal += sessionShare(action.cost);
 			} finally {
 				releaseBudgetLock();
 			}
@@ -1750,9 +2277,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (!holdReleased) {
 					holdReleased = true;
 					const releaseLock = await budgetMutex.acquire();
-					inFlightHoldTotal -= action.cost;
+					// `sessionShare` on both sides: skipping the increment obliges us to
+					// skip the decrement, or the counter drifts negative.
+					inFlightHoldTotal -= sessionShare(action.cost);
 					if (cost !== undefined) {
-						budgetSpent += cost;
+						budgetSpent += sessionShare(cost);
 					}
 					releaseLock();
 				}
@@ -1788,6 +2317,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							cost: action.cost,
 							settled: true,
 							transferId,
+							...costCenterAudit,
 							...(auditParams != null ? { params: auditParams } : {}),
 						},
 					});
@@ -1813,7 +2343,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// Release in-flight hold and commit budget under mutex — money moves only
 				// AFTER the action is audited.
 				await releaseHoldAndCommit(action.cost);
-				await persistSpendLedger(vaultBase, budgetSpent);
+				await persistSessionSpend();
 
 				// g. Circuit breaker: record success
 				cb.recordSuccess();
@@ -1839,6 +2369,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 										postErr instanceof Error
 											? postErr.message.slice(0, 200)
 											: String(postErr).slice(0, 200),
+									...costCenterAudit,
 								},
 							})
 							.catch(() => {
@@ -1865,6 +2396,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 										postErr instanceof Error
 											? postErr.message.slice(0, 200)
 											: String(postErr).slice(0, 200),
+									...costCenterAudit,
 								},
 							})
 							.catch(() => {
@@ -1894,6 +2426,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								cost: action.cost,
 								settled,
 								transferId,
+								...costCenterAudit,
 								...(auditParams != null ? { params: auditParams } : {}),
 							},
 						},
@@ -1902,6 +2435,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				}
 
 				const budgetRemaining = config.budget - budgetSpent - inFlightHoldTotal;
+				// D7 (see the LLM path for the full rationale): a post-settle observation
+				// of the envelope, omitted when it cannot be read AND when the settlement
+				// is ambiguous. It reports; it never re-decides a settlement that already
+				// committed, and it is never attached to a settled:false receipt.
+				const actionBudget = settled
+					? envelopeReceiptBudget(
+							envelope,
+							await snapshotEnvelopeRemaining(engine, isDryRun, envelope),
+						)
+					: undefined;
 
 				const receipt: TrustReceipt = {
 					transferId,
@@ -1915,6 +2458,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					provider: action.kind,
 					timestamp: new Date().toISOString(),
 					actionKind: action.kind,
+					...(actionBudget !== undefined ? { budget: actionBudget } : {}),
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					...(proxyConn != null ? { proxyStub: true as const } : {}),
 				};
@@ -1958,6 +2502,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									: raw.slice(0, 200);
 							})(),
 							transferId,
+							...costCenterAudit,
 						},
 					})
 					.catch(() => {
@@ -2177,6 +2722,12 @@ function isTBInsufficientBalance(err: unknown): boolean {
 	);
 }
 
+/** TigerBeetle's answer when the account being debited does not exist at all. */
+function isTBDebitAccountNotFound(err: unknown): boolean {
+	if (!(err instanceof TBTransferError)) return false;
+	return err.code === CreateTransferStatus.debit_account_not_found;
+}
+
 /**
  * Create a balance-enforcing TrustEngine backed by a real TigerBeetle client.
  *
@@ -2194,6 +2745,17 @@ function isTBInsufficientBalance(err: unknown): boolean {
  * GOVERN-local factory implements the same funded-enforcing contract using the
  * existing `TrustTBClient` primitives. When LEDGER ships `createLedgerEngine`,
  * this factory is a drop-in replacement (identical `TrustEngine` shape).
+ *
+ * LOCKSTEP: `headless.ts` carries a duplicate of this factory and every change
+ * here belongs there verbatim (AGENTS.md, Known drift). `tests/harden/
+ * engine-factory-parity.test.ts` compares the two as source text and fails on a
+ * one-sided edit.
+ *
+ * @internal Exported (below, on its own line) for that seam's tests only —
+ * `index.ts` does not re-export it, so it is not part of the published API. The
+ * headless copy is deliberately NOT exported: `usertrust/headless` IS a package
+ * entry point, and a test-only export there would ship an engine factory to
+ * consumers.
  */
 async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<TrustEngine> {
 	const tbAddresses = config.tigerbeetle.addresses;
@@ -2221,10 +2783,15 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 		async spendPending(params: {
 			transferId: string;
 			amount: number;
+			debitAccountId?: bigint | undefined;
 		}): Promise<{ transferId: string }> {
+			// An ATTRIBUTED hold names its own debit account — the cost-center
+			// envelope the governor derived at authorize. Unattributed holds keep
+			// debiting the session holding wallet, unchanged.
+			const debitAccountId = params.debitAccountId ?? holdingId;
 			try {
 				const tbTransferId = await tbClient.createPendingTransfer({
-					debitAccountId: holdingId,
+					debitAccountId,
 					creditAccountId: treasury,
 					amount: params.amount,
 					code: XFER_SPEND,
@@ -2235,10 +2802,67 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 				// Over-budget reservation → TB rejects the pending debit. Surface as a
 				// budget error so the governor reports a hard DENY, not an outage.
 				if (isTBInsufficientBalance(err)) {
+					// An ATTRIBUTED hold is rejected by the ENVELOPE's own
+					// `debits_must_not_exceed_credits`, so the envelope is the account that
+					// has to be named. Reporting `trust:hold` and the session seed names an
+					// account the hold never touched and prints an `available` that is
+					// routinely GREATER than `required` — a 999-usertoken estimate against a
+					// 10-usertoken envelope under a governor seeded at 100000 reads as an SDK
+					// bug rather than an exhausted cost center, and names no envelope for the
+					// operator to top up.
+					// The balance is re-read AFTER the rejection, so it REPORTS rather than
+					// decides: TigerBeetle's atomic rejection remains the whole enforcement
+					// and no check-then-act enters the money path (budget/allocation.ts does
+					// exactly this on its own rejection path). A failed read reports 0 rather
+					// than fabricating headroom, and never changes the classification.
+					if (params.debitAccountId !== undefined) {
+						let available = 0;
+						try {
+							available = (await tbClient.lookupBalance(params.debitAccountId)).available;
+						} catch {
+							// Reporting only — a failed read must not mask the budget DENY.
+						}
+						throw new InsufficientBalanceError(
+							`envelope:${params.debitAccountId}`,
+							params.amount,
+							available,
+						);
+					}
+					// UNATTRIBUTED holds keep today's answer exactly, down to adding no
+					// ledger round trip: the seed is a number this factory already holds.
 					throw new InsufficientBalanceError("trust:hold", params.amount, seedBudget);
+				}
+				// A never-allocated envelope has no account at all, and TB answers
+				// `debit_account_not_found`. For an ENVELOPE that is a budget answer,
+				// not an outage: no account and a zero balance are the same state
+				// (budget/allocation.ts reads a missing cost-center account as zero,
+				// because never-allocated and fully-reclaimed are indistinguishable).
+				// Classifying it as a ledger outage would tell the caller the ledger
+				// is down when the truth is "this envelope has no funds" — and would
+				// let a retry loop hammer a spend that can never succeed.
+				// The envelope is named by its derived account id: the label
+				// `parent::costCenter` lives in the governor, never here.
+				// UNATTRIBUTED holds keep today's classification exactly. The session
+				// wallet is one THIS factory created moments ago, so its absence
+				// really is an outage.
+				if (params.debitAccountId !== undefined && isTBDebitAccountNotFound(err)) {
+					throw new InsufficientBalanceError(`envelope:${params.debitAccountId}`, params.amount, 0);
 				}
 				throw err;
 			}
+		},
+
+		/**
+		 * Delegate verbatim to the client's batch read. MF1: this four-line
+		 * delegation is the whole reason the governor can see an envelope at all.
+		 * Implementing it only on mocks — which the first cut of the threading did —
+		 * leaves every unit test green while PRODUCTION ships attributed calls with
+		 * no envelope-scoped policy numbers and no receipt snapshot: the same
+		 * mock-shadows-production shape AGENTS.md records for the dead budget API.
+		 * A test drives the preflight through THIS factory for that reason.
+		 */
+		async lookupBalances(accountIds: bigint[]): Promise<Map<bigint, number>> {
+			return await tbClient.lookupBalances(accountIds);
 		},
 
 		async postPendingSpend(transferId: string, actualAmount?: number): Promise<void> {
@@ -2280,6 +2904,11 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 		},
 	};
 }
+
+// The export sits on its own line on purpose: `export async function …` runs the
+// declaration to 101 columns, Biome wraps it, and the wrapped signature no longer
+// matches headless.ts's copy — which the parity suite compares as source text.
+export { createTBEngine };
 
 // ── Proxy builders ──
 // Each builder intercepts only the `create` / `generateContent` call and

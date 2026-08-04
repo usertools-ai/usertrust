@@ -2,6 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { z } from "zod";
+import { parentUserIdRefusal } from "./ids.js";
 
 // ── Endpoint classification (M2 local-model governance) ──
 
@@ -48,6 +49,30 @@ export interface TrustReceipt {
 	endpoint?: { class: EndpointClass; runtime: LocalRuntime };
 	/** Metering provenance: denomination and rate origin of the settled cost. */
 	meter?: { costBasis: CostBasis; rateSource: RateSource; computeMs?: number };
+	/**
+	 * Cost-center envelope snapshot — the PUSH half of visibility (the pull half is
+	 * `budgetContext()`). Present only when the call ran inside a `withCostCenter`
+	 * scope AND settled AND the post-settle ledger read answered.
+	 *
+	 * OBSERVATIONAL, NEVER AUTHORITATIVE (A8), and the same contract
+	 * `budget/context.ts` documents: `remaining` is the envelope's ledger
+	 * `available` READ AFTER this call settled, so it races every concurrent
+	 * settlement against the same envelope by design. It is "what the envelope
+	 * holds now", never "what this call cost" (that is `cost`) and never anything a
+	 * verifier can recompute — it is not part of the hash chain and `packages/verify`
+	 * never sees this shape.
+	 *
+	 * ABSENT is not an error signal: an unattributed call, an unsettled (estimated)
+	 * stream handle, and a snapshot read that failed all omit it. The read is
+	 * deliberately allowed to fail silently — a receipt is a report, and degrading a
+	 * report must never unwind or re-decide money that already committed.
+	 */
+	budget?: {
+		costCenter: string;
+		remaining: number;
+		/** Omitted when the scope carried no `allocated` metadata (D4). */
+		fraction?: number;
+	};
 }
 
 // ── TrustedResponse — returned by every governed LLM call ──
@@ -69,6 +94,36 @@ export const TrustConfigSchema = z.object({
 	tier: z.enum(["free", "mini", "pro", "mega", "ultra"]).default("mini"),
 	proxy: z.string().url().optional(),
 	key: z.string().optional(),
+	/**
+	 * The parent half of the `(parentUserId, costCenter)` tuple every cost-center
+	 * envelope account is derived from — this governor's ledger identity.
+	 *
+	 * OPTIONAL, and it must stay optional: a governor that never spends from an
+	 * envelope needs no identity, and every config written before envelopes
+	 * existed keeps parsing to exactly the same object it did before (no key
+	 * materialises, no default is invented).
+	 *
+	 * Validated HERE, by the one authoritative rule `parentUserIdRefusal` — the
+	 * same charset-plus-`::`-quarantine that `createCostCenterWallet` and
+	 * `costCenterUserId` enforce at the ledger doors. Refusing at parse time is
+	 * what keeps the refusal off the money path: a malformed identity surfaces
+	 * when the operator writes it, not at the first attributed hold with a call
+	 * already in flight and the caller believing governance came up clean.
+	 *
+	 * TRUSTED-OPERATOR input, on the same boundary as budget/customRates —
+	 * whoever constructs a governor already holds the TigerBeetle client. Never
+	 * derive it from end-user or request data: attribution that request content
+	 * can steer is an agent relabelling its calls onto the fattest envelope.
+	 */
+	parentUserId: z
+		.string()
+		.superRefine((value, ctx) => {
+			const refusal = parentUserIdRefusal(value);
+			if (refusal !== null) {
+				ctx.addIssue(`parentUserId ${refusal}`);
+			}
+		})
+		.optional(),
 	policies: z.string().default("./policies/default.yml"),
 	pii: z.enum(["redact", "warn", "block", "off"]).default("warn"),
 	injection: z.enum(["block", "warn", "off"]).default("warn"),
