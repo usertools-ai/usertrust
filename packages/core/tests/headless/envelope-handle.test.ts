@@ -30,15 +30,17 @@
 
 import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { getCurrentCostCenter, withCostCenter } from "../../src/budget/attribution.js";
-import type { TrustEngine } from "../../src/govern.js";
-import { createGovernor, type Governor } from "../../src/headless.js";
+import type { ResolvedEnvelope, TrustEngine } from "../../src/govern.js";
+import { type Authorization, createGovernor, type Governor } from "../../src/headless.js";
 import { TrustTBClient } from "../../src/ledger/client.js";
 import { evaluatePolicy, type PolicyContext } from "../../src/policy/gate.js";
+import { VAULT_DIR } from "../../src/shared/constants.js";
 import { InsufficientBalanceError, LedgerUnavailableError } from "../../src/shared/errors.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
@@ -149,6 +151,20 @@ function auditData(audit: AuditHandle, kind: string): Record<string, unknown> {
 		);
 	}
 	return event.data as Record<string, unknown>;
+}
+
+/**
+ * The cumulative session spend persisted to disk, or `undefined` when no ledger
+ * was ever written. That file is what seeds the next run's holding wallet with
+ * `max(0, budget - budgetSpent)`, which is why envelope money must never reach it.
+ */
+async function readPersistedSpend(vaultBase: string): Promise<number | undefined> {
+	try {
+		const raw = await readFile(join(vaultBase, VAULT_DIR, "spend-ledger.json"), "utf-8");
+		return (JSON.parse(raw) as { budgetSpent: number }).budgetSpent;
+	} catch {
+		return undefined;
+	}
 }
 
 /** The context the (real) evaluator saw for the most recent gate call. */
@@ -599,6 +615,275 @@ describe("headless settle and abort attribute from the handle, not the store", (
 
 		const data = auditData(audit, "llm_call_failed");
 		expect("costCenter" in data).toBe(false);
+
+		await gov.destroy();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The handle is CALLER-OWNED; the attribution the governor reads is not
+// ---------------------------------------------------------------------------
+//
+// Whole-branch review, finding 2. `activeAuths.set(transferId, auth)` stores the
+// caller's own object, and `settle()`/`abort()` established liveness with
+// `has(transferId)` and then read `auth.costCenter` / `auth.envelope` off that same
+// caller-mutable object. Money never moved wrong — `postPendingSpend` is
+// transferId-bound and the hold was placed at authorize — but AGENTS.md's rule is
+// that EVERY audit record comes from the authorize-time capture and never from
+// caller input, and a relabelled `llm_call` / `llm_call_failed` is exactly the
+// record an auditor reconstructs a cost center's history from. The second-order
+// effect is worse than the label: `snapshotEnvelopeRemaining` reads whatever
+// account the envelope names, so a forged `auth.envelope` turns the receipt's
+// budget block into an arbitrary account's balance.
+//
+// `trust()` was already immune — its attribution is a closure `const`. This pins
+// the same immutability for the handle-based governor.
+
+describe("headless settle and abort read an INTERNAL capture, not the caller's handle", () => {
+	let vaultBase: string;
+
+	const FORGED_COST_CENTER = "marketing";
+	const FORGED_ID = TrustTBClient.deriveCostCenterAccountId(PARENT, FORGED_COST_CENTER);
+	const FORGED_LABEL = `${PARENT}::${FORGED_COST_CENTER}`;
+
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `headless-envelope-forge-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+		process.env.USERTRUST_TEST = "1";
+		vi.mocked(evaluatePolicy).mockClear();
+	});
+
+	afterEach(() => {
+		process.env.USERTRUST_TEST = "";
+		try {
+			rmSync(vaultBase, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+	});
+
+	async function governorWith(engine: EngineHandle, audit: AuditHandle): Promise<Governor> {
+		return await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: audit,
+		});
+	}
+
+	/** The relabelling a caller can attempt between authorize and settle/abort. */
+	function forge(auth: Authorization): void {
+		auth.costCenter = FORGED_COST_CENTER;
+		auth.envelope = {
+			attribution: {
+				costCenter: FORGED_COST_CENTER,
+				allocated: 1_000_000,
+				periodStartMs: SCOPE_OPTS.periodStartMs,
+			},
+			accountId: FORGED_ID,
+			label: FORGED_LABEL,
+		};
+	}
+
+	it("IGNORES a handle relabelled between authorize and settle", async () => {
+		const engine = makeMockEngine({ balance: 4_000 });
+		const audit = makeMockAudit();
+		const gov = await governorWith(engine, audit);
+
+		const auth = await withCostCenter(COST_CENTER, () => gov.authorize(AUTHORIZE), SCOPE_OPTS);
+		forge(auth);
+
+		const receipt = await gov.settle(auth, { inputTokens: 80, outputTokens: 200 });
+
+		// The record still names the envelope the hold actually debited.
+		expect(auditData(audit, "llm_call").costCenter).toBe(COST_CENTER);
+		expect(receipt.budget?.costCenter).toBe(COST_CENTER);
+		// And the D7 snapshot read THAT envelope's account — not the arbitrary
+		// account the forged handle named.
+		expect(engine.lookupBalances?.mock.calls.at(-1)?.[0]).toEqual([ENVELOPE_ID]);
+		expect(receipt.budget?.remaining).toBe(4_000);
+
+		await gov.destroy();
+	});
+
+	it("IGNORES a handle relabelled between authorize and abort", async () => {
+		const engine = makeMockEngine({ balance: 4_000 });
+		const audit = makeMockAudit();
+		const gov = await governorWith(engine, audit);
+
+		const auth = await withCostCenter(COST_CENTER, () => gov.authorize(AUTHORIZE), SCOPE_OPTS);
+		forge(auth);
+
+		await gov.abort(auth, new Error("provider exploded"));
+
+		expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
+		expect(auditData(audit, "llm_call_failed").costCenter).toBe(COST_CENTER);
+
+		await gov.destroy();
+	});
+
+	it("cannot be relabelled by mutating the envelope object the handle exposes", async () => {
+		// The narrower attack: not replacing `auth.envelope`, but editing the object
+		// in place — which would reach the governor too if the handle and the
+		// governor's capture were the same mutable object.
+		const engine = makeMockEngine({ balance: 4_000 });
+		const audit = makeMockAudit();
+		const gov = await governorWith(engine, audit);
+
+		const auth = await withCostCenter(COST_CENTER, () => gov.authorize(AUTHORIZE), SCOPE_OPTS);
+
+		expect(Object.isFrozen(auth.envelope)).toBe(true);
+		expect(Object.isFrozen(auth.envelope?.attribution)).toBe(true);
+		expect(() => {
+			(auth.envelope as ResolvedEnvelope).accountId = FORGED_ID;
+		}).toThrow(TypeError);
+
+		const receipt = await gov.settle(auth, { inputTokens: 80, outputTokens: 200 });
+
+		expect(receipt.budget?.costCenter).toBe(COST_CENTER);
+		expect(engine.lookupBalances?.mock.calls.at(-1)?.[0]).toEqual([ENVELOPE_ID]);
+
+		await gov.destroy();
+	});
+
+	it("still refuses a settle for an authorization that is no longer active", async () => {
+		// The liveness/one-shot semantics are unchanged by the capture lookup: the
+		// first terminal claims the entry, the second is refused.
+		const engine = makeMockEngine({ balance: 4_000 });
+		const gov = await governorWith(engine, makeMockAudit());
+
+		const auth = await withCostCenter(COST_CENTER, () => gov.authorize(AUTHORIZE), SCOPE_OPTS);
+		await gov.settle(auth, { inputTokens: 80, outputTokens: 200 });
+
+		await expect(gov.settle(auth, { inputTokens: 80, outputTokens: 200 })).rejects.toThrow(
+			/is not active/,
+		);
+		// abort stays idempotent-silent rather than throwing.
+		await expect(gov.abort(auth)).resolves.toBeUndefined();
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+
+		await gov.destroy();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Session accounting tracks SESSION-WALLET money only
+// ---------------------------------------------------------------------------
+//
+// Whole-branch review, finding 3. `inFlightHoldTotal` and `budgetSpent` are the
+// SESSION holding wallet's accounting — the numbers `budgetRemaining()`, the
+// receipt, the unattributed policy gate and the restart seed
+// (`max(0, budget - budgetSpent)`) are all computed from. An ATTRIBUTED hold
+// debits the ENVELOPE wallet and never touches the session wallet, so moving those
+// counters for it charges the session for money it did not pay: unattributed calls
+// eventually hard-deny against a wallet TigerBeetle would still have held against,
+// and every attributed receipt reports a session `budgetRemaining` decremented by
+// envelope money. Fail-closed, but unrecorded and wrong.
+
+describe("headless session accounting excludes envelope spend", () => {
+	let vaultBase: string;
+
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `headless-envelope-session-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+		process.env.USERTRUST_TEST = "1";
+		vi.mocked(evaluatePolicy).mockClear();
+	});
+
+	afterEach(() => {
+		process.env.USERTRUST_TEST = "";
+		try {
+			rmSync(vaultBase, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+	});
+
+	it("leaves the session budget untouched by an attributed call, and gates the next unattributed call on it", async () => {
+		const engine = makeMockEngine({ balance: 50_000 });
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const attributed = await withCostCenter(
+			COST_CENTER,
+			() => gov.authorize(AUTHORIZE),
+			SCOPE_OPTS,
+		);
+		// The hold went to the envelope, so the session wallet has no in-flight
+		// exposure to report.
+		expect(gov.budgetRemaining()).toBe(100_000);
+
+		const attributedReceipt = await gov.settle(attributed, {
+			inputTokens: 80,
+			outputTokens: 200,
+		});
+		expect(attributedReceipt.cost).toBeGreaterThan(0);
+		// A settled attributed receipt reports SESSION headroom, which this spend did
+		// not consume — the envelope's own number is `receipt.budget`.
+		expect(attributedReceipt.budgetRemaining).toBe(100_000);
+		expect(attributedReceipt.budget?.remaining).toBe(50_000);
+
+		// Mixed traffic: the unattributed call that follows is gated on a session
+		// remaining the envelope spend never moved.
+		const unattributed = await gov.authorize(AUTHORIZE);
+		expect(lastPolicyContext().budget_remaining).toBe(100_000);
+
+		const unattributedReceipt = await gov.settle(unattributed, {
+			inputTokens: 80,
+			outputTokens: 200,
+		});
+		expect(unattributedReceipt.budgetRemaining).toBe(100_000 - unattributedReceipt.cost);
+		// Only the session-wallet spend is persisted, because only it survives a
+		// restart as `max(0, budget - budgetSpent)` seeding of the holding wallet.
+		expect(await readPersistedSpend(vaultBase)).toBe(unattributedReceipt.cost);
+
+		await gov.destroy();
+	});
+
+	it("never persists a spend ledger for an attributed-only session", async () => {
+		const engine = makeMockEngine({ balance: 50_000 });
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const auth = await withCostCenter(COST_CENTER, () => gov.authorize(AUTHORIZE), SCOPE_OPTS);
+		await gov.settle(auth, { inputTokens: 80, outputTokens: 200 });
+
+		// Nothing to record: the session wallet paid nothing. A ledger written here
+		// would shrink the next run's holding-wallet seed by envelope money.
+		expect(await readPersistedSpend(vaultBase)).toBeUndefined();
+
+		await gov.destroy();
+	});
+
+	it("restores the in-flight hold on an attributed abort without moving session numbers", async () => {
+		const engine = makeMockEngine({ balance: 50_000 });
+		const gov = await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const auth = await withCostCenter(COST_CENTER, () => gov.authorize(AUTHORIZE), SCOPE_OPTS);
+		await gov.abort(auth, new Error("provider exploded"));
+
+		// The increment was skipped, so the matching decrement must be too — an
+		// asymmetric release would drive `inFlightHoldTotal` negative and hand the
+		// session MORE headroom than its budget.
+		expect(gov.budgetRemaining()).toBe(100_000);
 
 		await gov.destroy();
 	});

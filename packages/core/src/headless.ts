@@ -132,27 +132,65 @@ export interface Authorization {
 	 * for an unattributed call, which debits the session holding wallet exactly as
 	 * it did before envelopes existed.
 	 *
-	 * READ-ONLY REPORTING for the caller; for the governor it is the settle path's
-	 * ONLY source of truth about attribution. Writing to it does not re-route
-	 * anything — the hold is already placed by the time a caller sees this handle.
+	 * REPORTING ONLY, and the governor does not read it back. Writing to it
+	 * re-routes nothing and relabels nothing: the hold is already placed by the time
+	 * a caller sees this handle, and `settle()`/`abort()` take the attribution from
+	 * the governor's own internal capture keyed by `transferId` — see
+	 * {@link Authorization.envelope}.
 	 */
 	costCenter?: string | undefined;
 	/**
 	 * @internal The resolved envelope — derived account id, `parent::costCenter`
 	 * label, and the scope's D4 allocation metadata — captured ONCE at authorize.
+	 * FROZEN, and the same frozen object the governor keeps internally.
 	 *
-	 * WHY IT LIVES ON THE HANDLE. `trust()` carries attribution by closure because
-	 * its terminals are closures; `createGovernor()` has none — `settle()` and
-	 * `abort()` are separate calls that routinely run on a different task, after
-	 * the `withCostCenter` scope has exited, so there is NO AsyncLocalStorage
-	 * context to read at settle time and a `getCurrentCostCenter()` call there
-	 * would answer with a later, unrelated call's scope or with nothing at all,
-	 * silently. The handle IS this governor's per-call state, and settle/abort read
-	 * only `auth.*` for the same reason `endpoint` is captured here rather than
-	 * re-derived: capture beats re-resolution, and here re-resolution would also
-	 * mean a `resolveEnvelope` throw landing AFTER the money posted.
+	 * WHY THE GOVERNOR DOES NOT READ IT BACK. `trust()` carries attribution by
+	 * closure because its terminals are closures; `createGovernor()` has none —
+	 * `settle()` and `abort()` are separate calls that routinely run on a different
+	 * task, after the `withCostCenter` scope has exited, so there is NO
+	 * AsyncLocalStorage context to read at settle time and a
+	 * `getCurrentCostCenter()` call there would answer with a later, unrelated
+	 * call's scope or with nothing at all, silently. But the HANDLE is not the
+	 * answer either: it is the caller's own object, and `settle()` established only
+	 * that its `transferId` is live. Reading `auth.costCenter`/`auth.envelope` after
+	 * that let a caller relabel the settle/abort audit record and the receipt's
+	 * budget block between the two phases — and, because
+	 * `snapshotEnvelopeRemaining` reads whatever account the envelope names, put an
+	 * arbitrary account's balance on the receipt. So the governor keeps its own
+	 * immutable capture (`AuthorizationCapture` below) keyed by `transferId` and
+	 * reads attribution from THAT; this field exists so the caller can see what
+	 * their call was attributed to, and it is frozen so an in-place edit fails
+	 * loudly rather than looking like it worked.
 	 */
 	envelope?: ResolvedEnvelope | undefined;
+}
+
+/**
+ * @internal The governor's OWN per-call record, keyed by `transferId` in
+ * `activeAuths` — never the caller's `Authorization` object.
+ *
+ * Everything here is decided at authorize, inside the governor, and is
+ * unreachable from caller code afterwards. That is the whole point: an audit
+ * record must come from the authorize-time capture, never from caller input
+ * (AGENTS.md, Audit), and the caller holds a live reference to the handle for the
+ * entire authorize→settle window.
+ */
+interface AuthorizationCapture {
+	readonly proxyTransferId: string | undefined;
+	/** The scope's cost center, or `undefined` for an unattributed call. */
+	readonly costCenter: string | undefined;
+	/** The frozen envelope the hold debited, or `undefined` when unattributed. */
+	readonly envelope: ResolvedEnvelope | undefined;
+	/**
+	 * Whether this hold moved the SESSION wallet's accounting
+	 * (`inFlightHoldTotal`, and `budgetSpent` on settle). False exactly when the
+	 * hold debited a cost-center envelope instead. Recorded here rather than
+	 * re-derived at settle so the release can never be asymmetric with the
+	 * increment — a decrement without its matching increment drives
+	 * `inFlightHoldTotal` negative and hands the session more headroom than its
+	 * budget.
+	 */
+	readonly sessionAccounted: boolean;
 }
 
 /** Parameters for authorizing an LLM call. */
@@ -628,7 +666,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	let destroyed = false;
 	const budgetMutex = new AsyncMutex();
 	let inFlightHoldTotal = 0;
-	const activeAuths = new Map<string, Authorization>();
+	// Keyed by transferId, holding the GOVERNOR's capture — not the caller's handle.
+	const activeAuths = new Map<string, AuthorizationCapture>();
 
 	// Finding-2 (RECON #4): serialized, monotonic spend-ledger persistence.
 	// budgetSpent only ever increases (settle adds actualCost >= 0; authorize and
@@ -734,6 +773,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// Acquire mutex for budget atomicity (AUD-453)
 			const releaseBudgetLock = await budgetMutex.acquire();
 			let proxyTransferId: string | undefined;
+			// Set below, at the point the hold actually lands on the envelope wallet.
+			// Deliberately NOT `envelope !== undefined`: a dry-run or engine-less
+			// attributed call places no envelope hold at all, so the session numbers
+			// remain the only — and the honest — accounting for it, exactly as they are
+			// the only numbers its policy gate saw.
+			let envelopeDebited = false;
 
 			try {
 				// Policy gate — caller params spread FIRST so trusted governance
@@ -847,12 +892,39 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							holdErr instanceof Error ? holdErr.message : String(holdErr),
 						);
 					}
+					// The hold landed. Record WHICH wallet it debited, for the session
+					// accounting below and for the release on settle/abort.
+					envelopeDebited = envelope !== undefined;
 				}
 
-				inFlightHoldTotal += estCost;
+				// SESSION accounting tracks SESSION-WALLET money only. An attributed hold
+				// debits the `(parentUserId, costCenter)` envelope, so counting it here
+				// would reserve session headroom against money the session wallet never
+				// pays — every later unattributed call gated on a smaller number than the
+				// wallet actually holds, and (via `budgetSpent` on settle) that shortfall
+				// persisted into the next run's holding-wallet seed. The envelope's own
+				// `debits_must_not_exceed_credits` is what bounds an attributed call, and
+				// the policy gate above is already scoped to it.
+				if (!envelopeDebited) {
+					inFlightHoldTotal += estCost;
+				}
 			} finally {
 				releaseBudgetLock();
 			}
+
+			// ONE capture, frozen, shared by the handle and the governor's own record.
+			// Frozen so an in-place edit of the object the caller can see fails loudly
+			// instead of looking like it worked; `attribution` is rebuilt frozen rather
+			// than trusted to have arrived that way, so the guarantee is local to this
+			// file.
+			const captured: ResolvedEnvelope | undefined =
+				envelope === undefined
+					? undefined
+					: Object.freeze({
+							attribution: Object.freeze({ ...envelope.attribution }),
+							accountId: envelope.accountId,
+							label: envelope.label,
+						});
 
 			const auth: Authorization = {
 				transferId,
@@ -861,21 +933,37 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				proxyTransferId,
 				createdAt: Date.now(),
 				endpoint,
-				// The capture, spread-omitted so an unattributed handle keeps exactly the
-				// shape it had before envelopes (exactOptionalPropertyTypes: writing
+				// Spread-omitted so an unattributed handle keeps exactly the shape it had
+				// before envelopes (exactOptionalPropertyTypes: writing
 				// `costCenter: undefined` is a DIFFERENT type from omitting the key).
-				// From here on, `settle()` and `abort()` read only these two fields —
-				// never the store, which by then belongs to whoever is running.
-				...(envelope !== undefined
-					? { costCenter: envelope.attribution.costCenter, envelope }
+				// Reporting only — the governor reads the capture below, never this.
+				...(captured !== undefined
+					? { costCenter: captured.attribution.costCenter, envelope: captured }
 					: {}),
 			};
-			activeAuths.set(transferId, auth);
+			// The GOVERNOR's record. Keyed by transferId and unreachable from caller
+			// code, so `settle()`/`abort()` can never be handed a different cost center
+			// than the one the hold was placed against.
+			activeAuths.set(
+				transferId,
+				Object.freeze({
+					proxyTransferId,
+					costCenter: captured?.attribution.costCenter,
+					envelope: captured,
+					sessionAccounted: !envelopeDebited,
+				}),
+			);
 			return auth;
 		},
 
 		async settle(auth: Authorization, params?: SettleParams): Promise<TrustReceipt> {
-			if (!activeAuths.has(auth.transferId)) {
+			// One `get` where there used to be `has` + a read off the caller's object:
+			// the presence check and the attribution now come from the same internal
+			// record, so liveness and provenance cannot disagree. Semantics are
+			// unchanged — the first terminal claims the entry, every later one is
+			// refused.
+			const capture = activeAuths.get(auth.transferId);
+			if (capture === undefined) {
 				throw new Error(
 					`Authorization ${auth.transferId} is not active (already settled or aborted)`,
 				);
@@ -888,14 +976,14 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// A1 — forensic continuity: an attributed hold leaves an attributed record
 			// on every terminal, so this spreads onto BOTH `settlement_ambiguous`
 			// records, the `llm_call` event and the rotated receipt below. It comes from
-			// the HANDLE — the authorize-time capture — never from a store read and
-			// never from `params`: by the time settle runs there is usually no
-			// `withCostCenter` scope at all, and `SettleParams` is caller input that must
-			// not be able to relabel a spend after the fact. Unattributed calls spread an
-			// empty object, so those payloads stay byte-identical to what they were
-			// before envelopes.
+			// the GOVERNOR'S CAPTURE — never from a store read, never from `params`, and
+			// never from the handle: by the time settle runs there is usually no
+			// `withCostCenter` scope at all, and everything the caller can reach
+			// (`auth`, `SettleParams`) is caller input that must not be able to relabel a
+			// spend after the fact. Unattributed calls spread an empty object, so those
+			// payloads stay byte-identical to what they were before envelopes.
 			const costCenterAudit: { costCenter?: string } =
-				auth.costCenter === undefined ? {} : { costCenter: auth.costCenter };
+				capture.costCenter === undefined ? {} : { costCenter: capture.costCenter };
 
 			// A3: settlement meters with the endpoint scope CAPTURED AT AUTHORIZE —
 			// SettleParams carries no endpoint field by design.
@@ -917,17 +1005,25 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				usageSource = "estimated";
 			}
 
-			// AUD-453: Acquire mutex for budget atomicity — prevents concurrent
-			// settle() calls from corrupting inFlightHoldTotal or budgetSpent.
-			const releaseLock = await budgetMutex.acquire();
-			try {
-				inFlightHoldTotal -= auth.estimatedCost;
-				budgetSpent += actualCost;
-			} finally {
-				releaseLock();
+			// SESSION accounting, skipped in full when the ENVELOPE paid: this hold was
+			// never counted into `inFlightHoldTotal`, so releasing it here would drive
+			// that counter negative, and `budgetSpent` must not absorb envelope money it
+			// would then persist into the next run's holding-wallet seed. The flag is the
+			// authorize-time record, so the release can never be asymmetric with the
+			// increment.
+			if (capture.sessionAccounted) {
+				// AUD-453: Acquire mutex for budget atomicity — prevents concurrent
+				// settle() calls from corrupting inFlightHoldTotal or budgetSpent.
+				const releaseLock = await budgetMutex.acquire();
+				try {
+					inFlightHoldTotal -= auth.estimatedCost;
+					budgetSpent += actualCost;
+				} finally {
+					releaseLock();
+				}
+				// Finding-2 (RECON #4): serialized monotonic persist — never regresses.
+				await persistSpend();
 			}
-			// Finding-2 (RECON #4): serialized monotonic persist — never regresses.
-			await persistSpend();
 
 			// Circuit breaker: success
 			const cb = breaker.get("headless" as never);
@@ -1046,12 +1142,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// drifts the moment another process spends from the same envelope. It
 			// observes; it never decides. A read that fails OMITS the block — this runs
 			// after the money committed, and a report must never unwind or re-decide a
-			// settlement. Both arguments come from the handle (`auth.envelope`), which
-			// is why a settle running outside every `withCostCenter` scope — the normal
-			// case for this governor — still names the right envelope.
+			// settlement. Both arguments come from the governor's capture, which is why
+			// a settle running outside every `withCostCenter` scope — the normal case for
+			// this governor — still names the right envelope, and why a caller cannot
+			// point this read at an account their call never touched.
 			const settledBudget = envelopeReceiptBudget(
-				auth.envelope,
-				await snapshotEnvelopeRemaining(engine, isDryRun, auth.envelope),
+				capture.envelope,
+				await snapshotEnvelopeRemaining(engine, isDryRun, capture.envelope),
 			);
 
 			const receipt: TrustReceipt = {
@@ -1088,18 +1185,26 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		},
 
 		async abort(auth: Authorization, error?: unknown): Promise<void> {
-			if (!activeAuths.has(auth.transferId)) {
+			// Same lookup as settle, and the same reason: liveness and attribution come
+			// from one internal record. Still idempotent-silent, unlike settle.
+			const capture = activeAuths.get(auth.transferId);
+			if (capture === undefined) {
 				// Already settled or aborted — idempotent
 				return;
 			}
 			activeAuths.delete(auth.transferId);
 
-			// AUD-453: Acquire mutex for budget atomicity
-			const releaseLock = await budgetMutex.acquire();
-			try {
-				inFlightHoldTotal -= auth.estimatedCost;
-			} finally {
-				releaseLock();
+			// Only the session wallet's own in-flight exposure is released here; an
+			// attributed hold never added to it (see authorize), and the VOID below is
+			// what returns the envelope's funds.
+			if (capture.sessionAccounted) {
+				// AUD-453: Acquire mutex for budget atomicity
+				const releaseLock = await budgetMutex.acquire();
+				try {
+					inFlightHoldTotal -= auth.estimatedCost;
+				} finally {
+					releaseLock();
+				}
 			}
 
 			// Circuit breaker: failure
@@ -1125,8 +1230,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// A1: an attributed hold leaves an attributed record on the VOID terminal
 			// too — forensic continuity, so an auditor reconstructing a cost center's
 			// history sees the calls that were held against it and released, not only
-			// the ones that settled. Read from the handle, like settle: abort commonly
-			// runs from a `catch` block outside the `withCostCenter` scope entirely.
+			// the ones that settled. Read from the capture, like settle: abort commonly
+			// runs from a `catch` block outside the `withCostCenter` scope entirely, and
+			// the handle it is handed there is caller-owned.
 			await audit
 				.appendEvent({
 					kind: "llm_call_failed",
@@ -1141,7 +1247,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 									? String(error).slice(0, 200)
 									: "aborted",
 						source: "headless",
-						...(auth.costCenter === undefined ? {} : { costCenter: auth.costCenter }),
+						...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
 					},
 				})
 				.catch(() => {});
@@ -1152,10 +1258,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			destroyed = true;
 
 			// Void all active authorizations (engine + proxy paths)
-			for (const [txId, auth] of activeAuths) {
+			for (const [txId, capture] of activeAuths) {
 				if (proxyConn != null && !isDryRun) {
 					try {
-						await proxyConn.void(auth.proxyTransferId ?? txId);
+						await proxyConn.void(capture.proxyTransferId ?? txId);
 					} catch {
 						// Best-effort void
 					}

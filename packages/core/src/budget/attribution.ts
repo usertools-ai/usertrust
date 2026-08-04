@@ -117,7 +117,33 @@ export function withCostCenter<T>(costCenter: string, fn: () => T, opts?: CostCe
 		}
 	}
 
-	const store: CostCenterAttribution = Object.freeze({ costCenter, ...opts });
+	// BUILT FIELD BY FIELD, NEVER SPREAD. `opts` is METADATA about the envelope;
+	// the positional `costCenter` above — the only one validated against
+	// COST_CENTER_PATTERN — is what decides WHICH envelope a governed call debits.
+	// A blanket `{ costCenter, ...opts }` puts the spread AFTER the validated field,
+	// so a `costCenter` key riding on `opts` silently wins, and TypeScript never
+	// objects: its excess-property check fires only for object LITERALS, so any
+	// variable of a wider shape passes. `EnvelopeDescriptor` (`budgetContext`'s
+	// argument, `{ costCenter, allocated, periodStartMs, periodEndMs? }`) is exactly
+	// such a shape — structurally assignable to `CostCenterScopeOpts` and carrying
+	// its own `costCenter` — so `withCostCenter("research", fn, someDescriptor)`
+	// would type-check and reroute the entire spend: the descriptor's envelope
+	// debited, its label in the audit chain, its balance in the policy gate.
+	// Enumerating the three known fields also means no UNKNOWN key can enter the
+	// store at all, so nothing downstream can ever read caller data out of it.
+	const store: CostCenterAttribution = Object.freeze({
+		costCenter,
+		...(opts === undefined
+			? {}
+			: {
+					allocated: opts.allocated,
+					periodStartMs: opts.periodStartMs,
+					// Spread-omission, not `periodEndMs: undefined`: absent means an
+					// open-ended period, and under exactOptionalPropertyTypes the two are
+					// different types.
+					...(opts.periodEndMs === undefined ? {} : { periodEndMs: opts.periodEndMs }),
+				}),
+	});
 	return costCenterStorage.run(store, fn);
 }
 

@@ -3,7 +3,12 @@
 
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
-import { getCurrentCostCenter, withCostCenter } from "../../src/budget/attribution.js";
+import {
+	type CostCenterScopeOpts,
+	getCurrentCostCenter,
+	withCostCenter,
+} from "../../src/budget/attribution.js";
+import type { EnvelopeDescriptor } from "../../src/budget/context.js";
 
 // The two existing costCenter charset-door messages this scope's own message must
 // stay textually distinct from — ledger/client.ts:340 and budget/allocation.ts:114.
@@ -326,5 +331,87 @@ describe("withCostCenter — opts (D4) are carried onto the store", () => {
 			expect(store?.periodStartMs).toBeUndefined();
 			expect(store?.periodEndMs).toBeUndefined();
 		});
+	});
+});
+
+// ---------------------------------------------------------------------------
+// The store is built field-by-field, never by spreading `opts`
+// ---------------------------------------------------------------------------
+//
+// Whole-branch review, finding 1. `opts` is METADATA about the envelope; the
+// costCenter that decides WHICH envelope is debited is the positional argument,
+// and it is the only one validated against COST_CENTER_PATTERN above. A blanket
+// `{ costCenter, ...opts }` puts the spread AFTER the validated field, so any
+// `costCenter` key riding along on `opts` silently wins — and TypeScript's
+// excess-property check does not fire for a non-literal argument, so the compiler
+// never sees it either. `EnvelopeDescriptor` (the shape `budgetContext()` takes,
+// `{ costCenter, allocated, periodStartMs, periodEndMs? }`) is structurally
+// assignable to `CostCenterScopeOpts`, so the natural mistake —
+// `withCostCenter("research", fn, oneOfMyDescriptors)` — type-checks and reroutes
+// the whole spend: wrong envelope debited, wrong audit label, wrong policy gate.
+// Attribution must come from CODE STRUCTURE, and the positional argument is that
+// structure.
+
+describe("withCostCenter — opts can never decide the attribution", () => {
+	it("IGNORES a costCenter key riding on opts and keeps the validated positional", () => {
+		const opts = {
+			allocated: 500,
+			periodStartMs: 1_700_000_000_000,
+			costCenter: "hijacked",
+		} as CostCenterScopeOpts;
+
+		withCostCenter(
+			"research",
+			() => {
+				const store = getCurrentCostCenter();
+				expect(store?.costCenter).toBe("research");
+				expect(store?.allocated).toBe(500);
+			},
+			opts,
+		);
+	});
+
+	it("keeps a stray key on opts out of the store entirely", () => {
+		const opts = {
+			allocated: 500,
+			periodStartMs: 1_700_000_000_000,
+			parentUserId: "someone-elses-parent",
+			accountId: 42,
+		} as CostCenterScopeOpts;
+
+		withCostCenter(
+			"research",
+			() => {
+				const store = getCurrentCostCenter();
+				// Only the three known metadata fields, plus the positional costCenter.
+				expect(Object.keys(store ?? {}).sort()).toEqual([
+					"allocated",
+					"costCenter",
+					"periodStartMs",
+				]);
+				expect(store).not.toHaveProperty("parentUserId");
+				expect(store).not.toHaveProperty("accountId");
+			},
+			opts,
+		);
+	});
+
+	it("attributes an EnvelopeDescriptor passed as opts to the POSITIONAL cost center", () => {
+		// No cast and no `@ts-expect-error`: this is the mistake as a caller makes
+		// it. `EnvelopeDescriptor` carries its own `costCenter`, and passing one as
+		// the scope's metadata must not re-route the spend to it.
+		const descriptor: EnvelopeDescriptor = {
+			costCenter: "marketing",
+			allocated: 9_000,
+			periodStartMs: 1_700_000_000_000,
+		};
+
+		withCostCenter(
+			"research",
+			() => {
+				expect(getCurrentCostCenter()?.costCenter).toBe("research");
+			},
+			descriptor,
+		);
 	});
 });

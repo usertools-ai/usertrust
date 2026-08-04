@@ -300,7 +300,7 @@ everywhere after.* The storage is module-private, and there are exactly **three*
 from inside its own scope, so the caller's async context is still the current one there. Everything
 downstream reads that single capture — `trust()` by closure (the five `MessageStream` emitter
 listeners, `createGovernedStream`'s completion/error/chunk callbacks, the non-stream settle, the
-outer-catch void), `createGovernor()` off `Authorization.envelope`. Same propagation shape as
+outer-catch void), `createGovernor()` off its own internal per-call record. Same propagation shape as
 `rateResolution` under "price once", for the same reason.
 *Prevents:* a read from inside a terminal silently answering with a *later, unrelated* call's scope,
 or with nothing — never loudly. `AsyncLocalStorage` follows a chain of async continuations; it does
@@ -309,8 +309,29 @@ context, because `emit()` runs listeners synchronously in whatever context calle
 SDK's SSE-pump ticks fire strictly after the entry point has returned.
 `tests/budget/attribution.test.ts` pins exactly that as a negative case. Headless is the starker
 version of the same rule: `settle()` routinely runs on a different task, after the scope has exited,
-so there is no store to read at all — it reads `auth.envelope`, which is what guarantees an
-attributed hold gets an attributed settle.
+so there is no store to read at all — `authorize` stores an immutable capture in `activeAuths`,
+keyed by `transferId`, and `settle`/`abort` read the attribution from **that**, which is what
+guarantees an attributed hold gets an attributed settle.
+*Not from the `Authorization` handle*, which is the caller's own object: `activeAuths` holds that
+same reference, so establishing `has(transferId)` and then reading `auth.costCenter`/`auth.envelope`
+let a caller relabel the settle/abort audit record and the receipt between the two phases — and,
+since the receipt's balance snapshot reads whatever account the envelope names, put an arbitrary
+account's balance on a receipt. `Authorization.costCenter` / `.envelope` remain on the handle as
+reporting, frozen, and the governor never reads them back.
+
+*The session's own accounting tracks SESSION-WALLET money only.* `budgetSpent` and the in-flight
+hold total describe the per-session holding wallet — they gate every unattributed call, they are
+what `receipt.budgetRemaining` reports, and `budgetSpent` is persisted and re-seeds that wallet as
+`max(0, budget − budgetSpent)` on the next run. An attributed hold debits the envelope and never
+touches the holding wallet, so both governors skip those counters (and the persist) for it, on the
+increment and the matching release alike.
+*Prevents:* charging the session for money it never paid — unattributed calls hard-denied against a
+wallet TigerBeetle would still have held against, attributed receipts reporting a session remaining
+decremented by envelope money, and the shortfall surviving the restart. Fail-closed, so it is a
+silent over-deny rather than a loss, which is exactly why nothing else reports it. The flag is
+recorded where the hold actually lands, not inferred from the scope: a dry-run or engine-less
+attributed call places no envelope hold at all, and the session numbers stay its only — and honest —
+accounting, matching the numbers its policy gate saw.
 
 *Every audit record an attributed call emits carries `costCenter`, from that same capture* — not
 from params, and on the failure terminals as well as the settle ones (`llm_call`, `<action.kind>`,

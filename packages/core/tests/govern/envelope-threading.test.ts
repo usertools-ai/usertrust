@@ -40,6 +40,7 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdirSync, rmSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -48,6 +49,7 @@ import { getCurrentCostCenter, withCostCenter } from "../../src/budget/attributi
 import { type TrustEngine, trust } from "../../src/govern.js";
 import { TrustTBClient } from "../../src/ledger/client.js";
 import { evaluatePolicy, type PolicyContext } from "../../src/policy/gate.js";
+import { VAULT_DIR } from "../../src/shared/constants.js";
 import { InsufficientBalanceError, LedgerUnavailableError } from "../../src/shared/errors.js";
 import type { AuditEvent, TrustReceipt } from "../../src/shared/types.js";
 
@@ -185,6 +187,20 @@ function auditData(audit: AuditHandle, kind: string): Record<string, unknown> {
 		);
 	}
 	return event.data as Record<string, unknown>;
+}
+
+/**
+ * The cumulative session spend persisted to disk, or `undefined` when no ledger
+ * was ever written. That file is what seeds the next run's holding wallet with
+ * `max(0, budget - budgetSpent)`, which is why envelope money must never reach it.
+ */
+async function readPersistedSpend(vaultBase: string): Promise<number | undefined> {
+	try {
+		const raw = await readFile(join(vaultBase, VAULT_DIR, "spend-ledger.json"), "utf-8");
+		return (JSON.parse(raw) as { budgetSpent: number }).budgetSpent;
+	} catch {
+		return undefined;
+	}
 }
 
 /** The context the (real) evaluator saw for the most recent gate call. */
@@ -760,6 +776,36 @@ describe("governAction attribution", () => {
 		await governed.destroy();
 	});
 
+	it("keeps an attributed ACTION out of the session budget (mixed traffic)", async () => {
+		const engine = makeMockEngine({ balance: 50_000 });
+		const governed = await trust(makeAnthropicMock(), {
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const attributed = await withCostCenter(
+			COST_CENTER,
+			() =>
+				governed.governAction({ kind: "tool_use", name: "search", cost: 250 }, async () => "ok"),
+			SCOPE_OPTS,
+		);
+		expect(attributed.receipt.budgetRemaining).toBe(100_000);
+
+		const unattributed = await governed.governAction(
+			{ kind: "tool_use", name: "search", cost: 250 },
+			async () => "ok",
+		);
+		// The unattributed action was gated on a session remaining the envelope
+		// spend never moved, and only its own cost came off it.
+		expect(lastPolicyContext().budget_remaining).toBe(100_000);
+		expect(unattributed.receipt.budgetRemaining).toBe(100_000 - 250);
+
+		await governed.destroy();
+	});
+
 	it("leaves an unattributed action exactly as it was", async () => {
 		const engine = makeMockEngine({ balance: 3_000 });
 		const audit = makeMockAudit();
@@ -783,6 +829,154 @@ describe("governAction attribution", () => {
 		expect(ctx.budget_remaining).toBe(100_000);
 		expect(auditData(audit, "tool_use").costCenter).toBeUndefined();
 		expect(receipt.budget).toBeUndefined();
+
+		await governed.destroy();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Session accounting tracks SESSION-WALLET money only
+// ---------------------------------------------------------------------------
+//
+// Whole-branch review, finding 3. `budgetSpent` and `inFlightHoldTotal` describe
+// the per-session HOLDING wallet: they gate every unattributed call, they are what
+// `receipt.budgetRemaining` reports, and `persistSpendLedger` carries `budgetSpent`
+// across restarts as the `max(0, budget - budgetSpent)` seed of that wallet. An
+// attributed hold debits the `(parent, costCenter)` ENVELOPE and never touches the
+// holding wallet, so moving those counters for it charges the session for money it
+// did not pay. The drift is fail-closed — over-deny, never loss — but silent: the
+// session eventually hard-denies unattributed calls against a wallet TigerBeetle
+// would still have held against, and it survives a restart, and nothing reports it.
+
+describe("session accounting excludes envelope spend", () => {
+	let vaultBase: string;
+
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `envelope-session-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+		vi.mocked(evaluatePolicy).mockClear();
+	});
+
+	afterEach(() => {
+		try {
+			rmSync(vaultBase, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+	});
+
+	it("keeps an attributed LLM call out of the session budget, and gates the next unattributed call on it", async () => {
+		const engine = makeMockEngine({ balance: 50_000 });
+		const governed = await trust(makeAnthropicMock(), {
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const attributed = (await withCostCenter(
+			COST_CENTER,
+			() => governed.messages.create(PARAMS),
+			SCOPE_OPTS,
+		)) as { receipt: TrustReceipt };
+
+		expect(attributed.receipt.cost).toBeGreaterThan(0);
+		// A settled attributed receipt still reports SESSION headroom — the envelope's
+		// own number is `receipt.budget` — and this spend did not consume any of it.
+		expect(attributed.receipt.budgetRemaining).toBe(100_000);
+		expect(attributed.receipt.budget?.remaining).toBe(50_000);
+
+		const unattributed = (await governed.messages.create(PARAMS)) as { receipt: TrustReceipt };
+
+		// THE PIN: the unattributed call is gated on a session remaining the
+		// attributed spend never moved.
+		expect(lastPolicyContext().budget_remaining).toBe(100_000);
+		expect(unattributed.receipt.budgetRemaining).toBe(100_000 - unattributed.receipt.cost);
+		// Only session-wallet spend is persisted, because only it belongs in the next
+		// run's `max(0, budget - budgetSpent)` holding-wallet seed.
+		expect(await readPersistedSpend(vaultBase)).toBe(unattributed.receipt.cost);
+
+		await governed.destroy();
+	});
+
+	it("keeps an attributed STREAM settle out of the session budget", async () => {
+		const engine = makeMockEngine({ balance: 6_000 });
+		const stream = new ManualMessageStream();
+		const client = {
+			messages: { create: vi.fn(), stream: vi.fn(() => stream) },
+		};
+		const governed = await trust(client, {
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const handle = (await withCostCenter(
+			COST_CENTER,
+			() => governed.messages.stream(PARAMS),
+			SCOPE_OPTS,
+		)) as ManualMessageStream & { receipt: Promise<TrustReceipt> };
+
+		stream.emit("finalMessage", { usage: { input_tokens: 10, output_tokens: 5 } });
+		stream.emit("end");
+		const receipt = await handle.receipt;
+
+		// The stream terminal commits the spend on its own path (finalizeStreamSettle);
+		// it must skip the session commit for the same reason the non-stream settle does.
+		expect(receipt.settled).toBe(true);
+		expect(receipt.budgetRemaining).toBe(100_000);
+		expect(await readPersistedSpend(vaultBase)).toBeUndefined();
+
+		await governed.destroy();
+	});
+
+	it("never persists a spend ledger for an attributed-only session", async () => {
+		const engine = makeMockEngine({ balance: 50_000 });
+		const governed = await trust(makeAnthropicMock(), {
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		await withCostCenter(COST_CENTER, () => governed.messages.create(PARAMS), SCOPE_OPTS);
+
+		// Nothing to record: the session wallet paid nothing. A ledger written here
+		// would shrink the next run's holding-wallet seed by envelope money — and
+		// `loadSpendLedger` has no way to tell the two apart.
+		expect(await readPersistedSpend(vaultBase)).toBeUndefined();
+
+		await governed.destroy();
+	});
+
+	it("restores nothing to the session on an attributed VOID terminal", async () => {
+		const engine = makeMockEngine({ balance: 50_000 });
+		const client = makeAnthropicMock();
+		// Only the FIRST (attributed) call fails; the unattributed readout below has
+		// to reach its own settle.
+		client.messages.create.mockRejectedValueOnce(new Error("provider exploded"));
+		const governed = await trust(client, {
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		await expect(
+			withCostCenter(COST_CENTER, () => governed.messages.create(PARAMS), SCOPE_OPTS),
+		).rejects.toThrow(/provider exploded/);
+
+		// The increment was skipped, so the matching decrement must be too: an
+		// asymmetric release drives `inFlightHoldTotal` negative and hands the session
+		// MORE headroom than its budget. An unattributed call is the readout.
+		const { receipt } = (await governed.messages.create(PARAMS)) as { receipt: TrustReceipt };
+		expect(lastPolicyContext().budget_remaining).toBe(100_000);
+		expect(receipt.budgetRemaining).toBe(100_000 - receipt.cost);
 
 		await governed.destroy();
 	});

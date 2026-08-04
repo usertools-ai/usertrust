@@ -834,6 +834,30 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const costCenterAudit: { costCenter?: string } =
 				envelope === undefined ? {} : { costCenter: envelope.attribution.costCenter };
 
+			// ── SESSION accounting tracks SESSION-WALLET money only ──
+			// `budgetSpent` and `inFlightHoldTotal` describe the per-session HOLDING
+			// wallet: they gate every unattributed call, they are what
+			// `receipt.budgetRemaining` reports, and `persistSpendLedger` carries
+			// `budgetSpent` across restarts as the `max(0, budget - budgetSpent)` seed of
+			// that wallet. An ATTRIBUTED hold debits the `(parent, costCenter)` envelope
+			// and never touches the holding wallet, so counting it here charges the
+			// session for money it did not pay: unattributed calls are eventually
+			// hard-denied against a wallet TigerBeetle would still have held against, and
+			// the shortfall survives the restart. Fail-closed — over-deny, never loss —
+			// but silent, which is why it is a bug and not a conservative default.
+			// Set at the point the hold actually lands on the envelope, NOT from the
+			// scope: a dry-run or engine-less attributed call places no envelope hold at
+			// all, so the session numbers stay its only — and honest — accounting,
+			// exactly as they are the only numbers its policy gate saw.
+			let envelopeDebited = false;
+			/** This call's SESSION-wallet share of an amount: all of it, or none. */
+			const sessionShare = (amount: number): number => (envelopeDebited ? 0 : amount);
+			/** AUD-457 persistence, skipped when the session total did not move. */
+			const persistSessionSpend = async (): Promise<void> => {
+				if (envelopeDebited) return;
+				await persistSpendLedger(vaultBase, budgetSpent);
+			};
+
 			const params = (args[0] ?? {}) as Record<string, unknown>;
 			const model = (params.model as string) ?? "unknown";
 			// P3-PROVIDER-BLINDSPOT: normalize the prompt-bearing payload across
@@ -904,7 +928,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (!holdActive) return;
 				holdActive = false;
 				const releaseLock = await budgetMutex.acquire();
-				inFlightHoldTotal -= estimatedCost;
+				// `sessionShare` on BOTH sides: an attributed hold that skipped the
+				// increment must skip the matching decrement, or `inFlightHoldTotal`
+				// drifts negative and hands the session more headroom than its budget.
+				inFlightHoldTotal -= sessionShare(estimatedCost);
 				releaseLock();
 			}
 
@@ -1057,10 +1084,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							holdErr instanceof Error ? holdErr.message : String(holdErr),
 						);
 					}
+					// The hold landed. Record WHICH wallet it debited — every session
+					// counter below is conditioned on this one answer.
+					envelopeDebited = envelope !== undefined;
 				}
 
-				// Track in-flight hold cost for accurate budget calculations
-				inFlightHoldTotal += estimatedCost;
+				// Track in-flight hold cost for accurate budget calculations — the
+				// SESSION wallet's share of it, which is nothing once the envelope paid.
+				inFlightHoldTotal += sessionShare(estimatedCost);
 				holdActive = true; // AUD-468: arm the guard
 			} finally {
 				// AUD-453: Release lock after budget check + hold are complete
@@ -1173,17 +1204,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (holdActive) {
 					holdActive = false;
 					const releaseLock = await budgetMutex.acquire();
-					inFlightHoldTotal -= estimatedCost;
-					budgetSpent += streamCost;
+					inFlightHoldTotal -= sessionShare(estimatedCost);
+					budgetSpent += sessionShare(streamCost);
 					releaseLock();
 				} else {
 					// Hold already released — still need to record the spend.
 					const releaseLock = await budgetMutex.acquire();
-					budgetSpent += streamCost;
+					budgetSpent += sessionShare(streamCost);
 					releaseLock();
 				}
-				// AUD-457: Persist cumulative spend to disk
-				await persistSpendLedger(vaultBase, budgetSpent);
+				// AUD-457: Persist cumulative spend to disk (session spend only — an
+				// envelope's burn is the ledger's to report, and writing it here would
+				// shrink the next run's holding-wallet seed by money it never paid).
+				await persistSessionSpend();
 				cb.recordSuccess();
 
 				if (proxyConn != null && !isDryRun) {
@@ -1816,12 +1849,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (holdActive) {
 					holdActive = false;
 					const releaseLock = await budgetMutex.acquire();
-					inFlightHoldTotal -= estimatedCost;
-					budgetSpent += actualCost;
+					inFlightHoldTotal -= sessionShare(estimatedCost);
+					budgetSpent += sessionShare(actualCost);
 					releaseLock();
 				}
-				// AUD-457: Persist cumulative spend to disk
-				await persistSpendLedger(vaultBase, budgetSpent);
+				// AUD-457: Persist cumulative spend to disk (session spend only).
+				await persistSessionSpend();
 
 				// g. Circuit breaker: record success
 				cb.recordSuccess();
@@ -2054,6 +2087,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const costCenterAudit: { costCenter?: string } =
 				envelope === undefined ? {} : { costCenter: envelope.attribution.costCenter };
 
+			// Session accounting is SESSION-WALLET-only here for exactly the reasons the
+			// LLM path documents at length — an attributed action's hold debits the
+			// envelope, so charging the session for it over-denies later unattributed
+			// traffic and persists that shortfall across restarts.
+			let envelopeDebited = false;
+			const sessionShare = (amount: number): number => (envelopeDebited ? 0 : amount);
+			const persistSessionSpend = async (): Promise<void> => {
+				if (envelopeDebited) return;
+				await persistSpendLedger(vaultBase, budgetSpent);
+			};
+
 			const actor = action.actor ?? "local";
 			const transferId = trustId("tx");
 
@@ -2188,9 +2232,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							holdErr instanceof Error ? holdErr.message : String(holdErr),
 						);
 					}
+					// The hold landed — record which wallet it debited.
+					envelopeDebited = envelope !== undefined;
 				}
 
-				inFlightHoldTotal += action.cost;
+				inFlightHoldTotal += sessionShare(action.cost);
 			} finally {
 				releaseBudgetLock();
 			}
@@ -2202,9 +2248,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (!holdReleased) {
 					holdReleased = true;
 					const releaseLock = await budgetMutex.acquire();
-					inFlightHoldTotal -= action.cost;
+					// `sessionShare` on both sides: skipping the increment obliges us to
+					// skip the decrement, or the counter drifts negative.
+					inFlightHoldTotal -= sessionShare(action.cost);
 					if (cost !== undefined) {
-						budgetSpent += cost;
+						budgetSpent += sessionShare(cost);
 					}
 					releaseLock();
 				}
@@ -2266,7 +2314,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// Release in-flight hold and commit budget under mutex — money moves only
 				// AFTER the action is audited.
 				await releaseHoldAndCommit(action.cost);
-				await persistSpendLedger(vaultBase, budgetSpent);
+				await persistSessionSpend();
 
 				// g. Circuit breaker: record success
 				cb.recordSuccess();
