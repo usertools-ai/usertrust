@@ -1145,11 +1145,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// settlement. Both arguments come from the governor's capture, which is why
 			// a settle running outside every `withCostCenter` scope — the normal case for
 			// this governor — still names the right envelope, and why a caller cannot
-			// point this read at an account their call never touched.
-			const settledBudget = envelopeReceiptBudget(
-				capture.envelope,
-				await snapshotEnvelopeRemaining(engine, isDryRun, capture.envelope),
-			);
+			// point this read at an account their call never touched. It is a
+			// POST-SETTLEMENT observation, so it is attached ONLY when `settled` — an
+			// ambiguous settlement (POST rejected) leaves the transfer possibly still
+			// pending, so the balance is transient; we do not even read the ledger then.
+			const settledBudget = settled
+				? envelopeReceiptBudget(
+						capture.envelope,
+						await snapshotEnvelopeRemaining(engine, isDryRun, capture.envelope),
+					)
+				: undefined;
 
 			const receipt: TrustReceipt = {
 				transferId: auth.transferId,

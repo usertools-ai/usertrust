@@ -519,6 +519,38 @@ describe("attributed calls spend from the cost-center envelope", () => {
 		await governed.destroy();
 	});
 
+	it("OMITS the budget block on an AMBIGUOUS settlement (settled:false), without a post-settle read", async () => {
+		const engine = makeMockEngine({ balance: 4_000 });
+		// The POST after the audit fails: the transfer may still be pending and be
+		// posted or voided later, so the envelope balance is transient. `receipt.budget`
+		// is a POST-SETTLEMENT observation (D7/A8) — a receipt marked settled:false must
+		// not carry it, and the ambiguous path must not even read the ledger for it.
+		engine.postPendingSpend.mockRejectedValueOnce(new Error("tb: postTransfer socket reset"));
+		const audit = makeMockAudit();
+		const governed = await trust(makeAnthropicMock(), {
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: audit,
+		});
+
+		const { receipt } = (await withCostCenter(
+			COST_CENTER,
+			() => governed.messages.create(PARAMS),
+			SCOPE_OPTS,
+		)) as { receipt: TrustReceipt };
+
+		expect(receipt.settled).toBe(false);
+		expect(receipt.budget).toBeUndefined();
+		// The ambiguous settlement is still an attributed forensic record.
+		expect(auditData(audit, "settlement_ambiguous").costCenter).toBe(COST_CENTER);
+		// Only the authorize-time preflight ran — no pointless post-settle snapshot.
+		expect(engine.lookupBalances).toHaveBeenCalledTimes(1);
+
+		await governed.destroy();
+	});
+
 	it("carries the attribution into the VOID terminal's audit record (A1)", async () => {
 		const engine = makeMockEngine({ balance: 4_000 });
 		const audit = makeMockAudit();
@@ -669,6 +701,45 @@ describe("stream settlement survives the scope exit", () => {
 
 		await governed.destroy();
 	});
+
+	it("OMITS the budget block on an AMBIGUOUS stream settlement (settled:false)", async () => {
+		const engine = makeMockEngine({ balance: 6_000 });
+		engine.postPendingSpend.mockRejectedValueOnce(new Error("tb: postTransfer socket reset"));
+		const audit = makeMockAudit();
+		const stream = new ManualMessageStream();
+		const client = {
+			messages: {
+				create: vi.fn(),
+				stream: vi.fn(() => stream),
+			},
+		};
+		const governed = await trust(client, {
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: audit,
+		});
+
+		const handle = (await withCostCenter(
+			COST_CENTER,
+			() => governed.messages.stream(PARAMS),
+			SCOPE_OPTS,
+		)) as ManualMessageStream & { receipt: Promise<TrustReceipt> };
+
+		stream.emit("streamEvent", { type: "message_start", message: { usage: { input_tokens: 10 } } });
+		stream.emit("finalMessage", { usage: { input_tokens: 10, output_tokens: 5 } });
+		stream.emit("end");
+
+		const receipt = await handle.receipt;
+
+		expect(receipt.settled).toBe(false);
+		expect(receipt.budget).toBeUndefined();
+		expect(auditData(audit, "settlement_ambiguous").costCenter).toBe(COST_CENTER);
+		expect(engine.lookupBalances).toHaveBeenCalledTimes(1);
+
+		await governed.destroy();
+	});
 });
 
 // ---------------------------------------------------------------------------
@@ -719,6 +790,32 @@ describe("governAction attribution", () => {
 
 		expect(auditData(audit, "tool_use").costCenter).toBe(COST_CENTER);
 		expect(receipt.budget).toMatchObject({ costCenter: COST_CENTER, remaining: 3_000 });
+
+		await governed.destroy();
+	});
+
+	it("OMITS the budget block on an AMBIGUOUS action settlement (settled:false)", async () => {
+		const engine = makeMockEngine({ balance: 3_000 });
+		engine.postPendingSpend.mockRejectedValueOnce(new Error("tb: postTransfer socket reset"));
+		const audit = makeMockAudit();
+		const governed = await trust(makeAnthropicMock(), {
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: audit,
+		});
+
+		const { receipt } = await withCostCenter(
+			COST_CENTER,
+			() => governed.governAction({ kind: "tool_use", name: "search", cost: 25 }, async () => "ok"),
+			SCOPE_OPTS,
+		);
+
+		expect(receipt.settled).toBe(false);
+		expect(receipt.budget).toBeUndefined();
+		expect(auditData(audit, "settlement_ambiguous").costCenter).toBe(COST_CENTER);
+		expect(engine.lookupBalances).toHaveBeenCalledTimes(1);
 
 		await governed.destroy();
 	});

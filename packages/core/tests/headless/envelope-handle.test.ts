@@ -587,6 +587,26 @@ describe("headless settle and abort attribute from the handle, not the store", (
 		await gov.destroy();
 	});
 
+	it("OMITS the budget block on an AMBIGUOUS settlement (settled:false), without a post-settle read", async () => {
+		const engine = makeMockEngine({ balance: 4_000 });
+		// The POST after the audit fails: the transfer may still be pending and be
+		// posted or voided later, so the envelope balance is transient. `receipt.budget`
+		// is a POST-SETTLEMENT observation (D7/A8) — a receipt marked settled:false must
+		// not carry it, and the ambiguous path must not even read the ledger for it.
+		engine.postPendingSpend.mockRejectedValueOnce(new Error("tb: postTransfer socket reset"));
+		const gov = await governorWith(engine, makeMockAudit());
+
+		const auth = await withCostCenter(COST_CENTER, () => gov.authorize(AUTHORIZE), SCOPE_OPTS);
+		const receipt = await gov.settle(auth, { inputTokens: 80, outputTokens: 200 });
+
+		expect(receipt.settled).toBe(false);
+		expect(receipt.budget).toBeUndefined();
+		// Only the authorize-time preflight ran — no pointless post-settle snapshot.
+		expect(engine.lookupBalances).toHaveBeenCalledTimes(1);
+
+		await gov.destroy();
+	});
+
 	it("carries the attribution into the abort terminal's record (A1)", async () => {
 		const engine = makeMockEngine({ balance: 4_000 });
 		const audit = makeMockAudit();

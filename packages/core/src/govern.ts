@@ -1318,11 +1318,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// that drifts the moment another process spends from the same envelope.
 				// It observes; it never decides. A read that fails omits the block —
 				// this runs after the money committed, and a report must never unwind
-				// or re-decide a settlement.
-				const streamBudget = envelopeReceiptBudget(
-					envelope,
-					await snapshotEnvelopeRemaining(engine, isDryRun, envelope),
-				);
+				// or re-decide a settlement. It is a POST-SETTLEMENT observation, so it
+				// is attached ONLY when `settled` — an ambiguous settlement (POST
+				// rejected) may still be pending and be posted or voided later, making
+				// the balance transient; we do not even read the ledger for it then.
+				const streamBudget = settled
+					? envelopeReceiptBudget(
+							envelope,
+							await snapshotEnvelopeRemaining(engine, isDryRun, envelope),
+						)
+					: undefined;
 
 				const streamReceipt: TrustReceipt = {
 					transferId,
@@ -1950,11 +1955,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				const budgetRemaining = config.budget - budgetSpent - inFlightHoldTotal;
 				// D7 (see the streaming settle above for the full rationale): a
-				// post-settle observation of the envelope, omitted when it cannot be read.
-				const settledBudget = envelopeReceiptBudget(
-					envelope,
-					await snapshotEnvelopeRemaining(engine, isDryRun, envelope),
-				);
+				// post-settle observation of the envelope, omitted when it cannot be read
+				// AND when the settlement is ambiguous — a settled:false receipt must not
+				// carry a snapshot the contract defines as post-settlement.
+				const settledBudget = settled
+					? envelopeReceiptBudget(
+							envelope,
+							await snapshotEnvelopeRemaining(engine, isDryRun, envelope),
+						)
+					: undefined;
 
 				const receipt: TrustReceipt = {
 					transferId,
@@ -2407,12 +2416,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				const budgetRemaining = config.budget - budgetSpent - inFlightHoldTotal;
 				// D7 (see the LLM path for the full rationale): a post-settle observation
-				// of the envelope, omitted when it cannot be read. It reports; it never
-				// re-decides a settlement that already committed.
-				const actionBudget = envelopeReceiptBudget(
-					envelope,
-					await snapshotEnvelopeRemaining(engine, isDryRun, envelope),
-				);
+				// of the envelope, omitted when it cannot be read AND when the settlement
+				// is ambiguous. It reports; it never re-decides a settlement that already
+				// committed, and it is never attached to a settled:false receipt.
+				const actionBudget = settled
+					? envelopeReceiptBudget(
+							envelope,
+							await snapshotEnvelopeRemaining(engine, isDryRun, envelope),
+						)
+					: undefined;
 
 				const receipt: TrustReceipt = {
 					transferId,
