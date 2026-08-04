@@ -127,7 +127,7 @@ export interface Authorization {
 	 */
 	endpoint?: EndpointInfo | undefined;
 	/**
-	 * The cost-center envelope this call's PENDING hold debits, captured from the
+	 * The cost-center this call's PENDING hold debits, captured from the
 	 * `withCostCenter` scope that was active when `authorize()` was called. Absent
 	 * for an unattributed call, which debits the session holding wallet exactly as
 	 * it did before envelopes existed.
@@ -136,33 +136,15 @@ export interface Authorization {
 	 * re-routes nothing and relabels nothing: the hold is already placed by the time
 	 * a caller sees this handle, and `settle()`/`abort()` take the attribution from
 	 * the governor's own internal capture keyed by `transferId` — see
-	 * {@link Authorization.envelope}.
+	 * {@link AuthorizationCapture}, which is where the resolved envelope lives too.
+	 *
+	 * A plain string on purpose. The resolved envelope's `accountId` is a bigint,
+	 * which `JSON.stringify` cannot serialize, so it is kept OFF this public handle
+	 * and only on the internal capture — an attributed handle stays JSON-serializable
+	 * for an integration that logs or transports it, exactly like an unattributed one.
+	 * `settle()`/`abort()` never need the account from here anyway.
 	 */
 	costCenter?: string | undefined;
-	/**
-	 * @internal The resolved envelope — derived account id, `parent::costCenter`
-	 * label, and the scope's D4 allocation metadata — captured ONCE at authorize.
-	 * FROZEN, and the same frozen object the governor keeps internally.
-	 *
-	 * WHY THE GOVERNOR DOES NOT READ IT BACK. `trust()` carries attribution by
-	 * closure because its terminals are closures; `createGovernor()` has none —
-	 * `settle()` and `abort()` are separate calls that routinely run on a different
-	 * task, after the `withCostCenter` scope has exited, so there is NO
-	 * AsyncLocalStorage context to read at settle time and a
-	 * `getCurrentCostCenter()` call there would answer with a later, unrelated
-	 * call's scope or with nothing at all, silently. But the HANDLE is not the
-	 * answer either: it is the caller's own object, and `settle()` established only
-	 * that its `transferId` is live. Reading `auth.costCenter`/`auth.envelope` after
-	 * that let a caller relabel the settle/abort audit record and the receipt's
-	 * budget block between the two phases — and, because
-	 * `snapshotEnvelopeRemaining` reads whatever account the envelope names, put an
-	 * arbitrary account's balance on the receipt. So the governor keeps its own
-	 * immutable capture (`AuthorizationCapture` below) keyed by `transferId` and
-	 * reads attribution from THAT; this field exists so the caller can see what
-	 * their call was attributed to, and it is frozen so an in-place edit fails
-	 * loudly rather than looking like it worked.
-	 */
-	envelope?: ResolvedEnvelope | undefined;
 }
 
 /**
@@ -179,7 +161,26 @@ interface AuthorizationCapture {
 	readonly proxyTransferId: string | undefined;
 	/** The scope's cost center, or `undefined` for an unattributed call. */
 	readonly costCenter: string | undefined;
-	/** The frozen envelope the hold debited, or `undefined` when unattributed. */
+	/**
+	 * The frozen envelope the hold debited, or `undefined` when unattributed. Its
+	 * `accountId` is a bigint, which is the second reason it lives HERE and never on
+	 * the public `Authorization`: keeping it off the handle leaves that handle
+	 * JSON-serializable, and the governor never needs the account from
+	 * caller-reachable state anyway.
+	 *
+	 * WHY THE GOVERNOR READS THIS, NEVER THE HANDLE. `trust()` carries attribution by
+	 * closure because its terminals are closures; `createGovernor()` has none —
+	 * `settle()`/`abort()` are separate calls that routinely run on a different task,
+	 * after the `withCostCenter` scope has exited, so there is NO AsyncLocalStorage
+	 * context to read at settle time and a `getCurrentCostCenter()` call there would
+	 * answer with a later, unrelated call's scope or with nothing at all, silently.
+	 * And the handle is the caller's own object: reading an envelope back off it would
+	 * let a caller relabel the settle/abort audit record and the receipt's budget
+	 * block between the two phases — and, because `snapshotEnvelopeRemaining` reads
+	 * whatever account the envelope names, put an arbitrary account's balance on the
+	 * receipt. So this immutable capture, keyed by `transferId`, is the single source
+	 * of settle-time attribution.
+	 */
 	readonly envelope: ResolvedEnvelope | undefined;
 	/**
 	 * Whether this hold moved the SESSION wallet's accounting
@@ -248,7 +249,7 @@ export interface Governor {
 	 * cost-center envelope: the hold debits the `(parentUserId, cc)` wallet, the
 	 * policy gate is evaluated against THAT envelope's live balance, and the
 	 * attribution is captured on the returned handle. Attribution is read here and
-	 * only here — see {@link Authorization.envelope}.
+	 * only here — see {@link AuthorizationCapture}.
 	 */
 	authorize(params: AuthorizeParams): Promise<Authorization>;
 
@@ -936,10 +937,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// Spread-omitted so an unattributed handle keeps exactly the shape it had
 				// before envelopes (exactOptionalPropertyTypes: writing
 				// `costCenter: undefined` is a DIFFERENT type from omitting the key).
-				// Reporting only — the governor reads the capture below, never this.
-				...(captured !== undefined
-					? { costCenter: captured.attribution.costCenter, envelope: captured }
-					: {}),
+				// Reporting only — the governor reads the capture below, never this. ONLY
+				// the serializable cost-center string rides the handle; the resolved
+				// envelope (bigint account id) stays on the internal capture, so an
+				// attributed handle is still `JSON.stringify`-able for a caller that logs
+				// or transports it.
+				...(captured !== undefined ? { costCenter: captured.attribution.costCenter } : {}),
 			};
 			// The GOVERNOR's record. Keyed by transferId and unreachable from caller
 			// code, so `settle()`/`abort()` can never be handed a different cost center

@@ -486,11 +486,13 @@ describe("headless authorize — request-body cost-center forgery", () => {
 			SCOPE_OPTS,
 		);
 
-		// The handle carries the SCOPE's truth, never the body's claim.
+		// The handle carries the SCOPE's truth, never the body's claim. The account id
+		// itself no longer rides the public handle (it is a bigint, kept on the
+		// governor's internal capture) — the debit account is asserted on the engine.
 		expect(auth.costCenter).toBe(COST_CENTER);
-		expect(auth.envelope?.accountId).toBe(ENVELOPE_ID);
-		expect(auth.envelope?.accountId).not.toBe(ATTACKER_ENVELOPE_ID);
+		expect(auth.costCenter).not.toBe(ATTACKER_COST_CENTER);
 		expect(engine.spendPending.mock.calls[0]?.[0]).toMatchObject({ debitAccountId: ENVELOPE_ID });
+		expect(engine.spendPending.mock.calls[0]?.[0].debitAccountId).not.toBe(ATTACKER_ENVELOPE_ID);
 
 		const ctx = lastPolicyContext();
 		expect(ctx.cost_center).toBe(COST_CENTER);

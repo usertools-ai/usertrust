@@ -36,7 +36,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { getCurrentCostCenter, withCostCenter } from "../../src/budget/attribution.js";
-import type { ResolvedEnvelope, TrustEngine } from "../../src/govern.js";
+import type { TrustEngine } from "../../src/govern.js";
 import { type Authorization, createGovernor, type Governor } from "../../src/headless.js";
 import { TrustTBClient } from "../../src/ledger/client.js";
 import { evaluatePolicy, type PolicyContext } from "../../src/policy/gate.js";
@@ -224,8 +224,28 @@ describe("headless authorize routes attributed holds to the envelope", () => {
 		// The handle carries the capture forward — this is the ONLY thing settle and
 		// abort will have to go on.
 		expect(auth.costCenter).toBe(COST_CENTER);
-		expect(auth.envelope?.accountId).toBe(ENVELOPE_ID);
-		expect(auth.envelope?.label).toBe(ENVELOPE_LABEL);
+
+		await gov.destroy();
+	});
+
+	it("returns a JSON-serializable handle for an ATTRIBUTED authorization", async () => {
+		// Regression pin (Codex P2). An attributed handle used to carry the resolved
+		// envelope, whose `accountId` is a bigint — so `JSON.stringify(auth)` threw
+		// "Do not know how to serialize a BigInt" for exactly the attributed case,
+		// while an unattributed handle serialized fine. Integrations that log or
+		// transport the handle broke the moment a call was attributed. The envelope now
+		// lives only on the governor's internal capture; the handle keeps the string.
+		const engine = makeMockEngine({ balance: 5_000 });
+		const gov = await governorWith(engine, makeMockAudit());
+
+		const auth = await withCostCenter(COST_CENTER, () => gov.authorize(AUTHORIZE), SCOPE_OPTS);
+
+		expect(() => JSON.stringify(auth)).not.toThrow();
+		const roundTripped = JSON.parse(JSON.stringify(auth)) as { costCenter?: string };
+		expect(roundTripped.costCenter).toBe(COST_CENTER);
+		// costCenter survives as reporting; the bigint account id is NOT on the handle.
+		expect(auth.costCenter).toBe(COST_CENTER);
+		expect("envelope" in auth).toBe(false);
 
 		await gov.destroy();
 	});
@@ -644,17 +664,22 @@ describe("headless settle and abort attribute from the handle, not the store", (
 // The handle is CALLER-OWNED; the attribution the governor reads is not
 // ---------------------------------------------------------------------------
 //
-// Whole-branch review, finding 2. `activeAuths.set(transferId, auth)` stores the
-// caller's own object, and `settle()`/`abort()` established liveness with
-// `has(transferId)` and then read `auth.costCenter` / `auth.envelope` off that same
-// caller-mutable object. Money never moved wrong — `postPendingSpend` is
-// transferId-bound and the hold was placed at authorize — but AGENTS.md's rule is
-// that EVERY audit record comes from the authorize-time capture and never from
-// caller input, and a relabelled `llm_call` / `llm_call_failed` is exactly the
-// record an auditor reconstructs a cost center's history from. The second-order
-// effect is worse than the label: `snapshotEnvelopeRemaining` reads whatever
-// account the envelope names, so a forged `auth.envelope` turns the receipt's
-// budget block into an arbitrary account's balance.
+// Whole-branch review, finding 2. `activeAuths` once stored the caller's own
+// object, and `settle()`/`abort()` established liveness with `has(transferId)` and
+// then read attribution off that same caller-mutable handle. Money never moved
+// wrong — `postPendingSpend` is transferId-bound and the hold was placed at
+// authorize — but AGENTS.md's rule is that EVERY audit record comes from the
+// authorize-time capture and never from caller input, and a relabelled `llm_call` /
+// `llm_call_failed` is exactly the record an auditor reconstructs a cost center's
+// history from. The governor now keeps its OWN immutable capture keyed by
+// `transferId` and reads attribution from THAT, so mutating the handle's
+// `costCenter` between the two phases changes nothing below.
+//
+// The resolved envelope is no longer even exposed on the handle: its `accountId` is
+// a bigint (kept on the internal capture, which is also what keeps the handle
+// JSON-serializable), so the second-order attack the original finding named — a
+// forged `auth.envelope` pointing `snapshotEnvelopeRemaining` at an arbitrary
+// account's balance — has no surface left at all.
 //
 // `trust()` was already immune — its attribution is a closure `const`. This pins
 // the same immutability for the handle-based governor.
@@ -663,8 +688,6 @@ describe("headless settle and abort read an INTERNAL capture, not the caller's h
 	let vaultBase: string;
 
 	const FORGED_COST_CENTER = "marketing";
-	const FORGED_ID = TrustTBClient.deriveCostCenterAccountId(PARENT, FORGED_COST_CENTER);
-	const FORGED_LABEL = `${PARENT}::${FORGED_COST_CENTER}`;
 
 	beforeEach(() => {
 		vaultBase = join(tmpdir(), `headless-envelope-forge-${randomUUID()}`);
@@ -692,18 +715,13 @@ describe("headless settle and abort read an INTERNAL capture, not the caller's h
 		});
 	}
 
-	/** The relabelling a caller can attempt between authorize and settle/abort. */
+	/**
+	 * The relabelling a caller can attempt between authorize and settle/abort. The
+	 * resolved envelope is no longer on the handle, so `costCenter` — a plain,
+	 * reporting-only string — is the entire remaining relabel surface.
+	 */
 	function forge(auth: Authorization): void {
 		auth.costCenter = FORGED_COST_CENTER;
-		auth.envelope = {
-			attribution: {
-				costCenter: FORGED_COST_CENTER,
-				allocated: 1_000_000,
-				periodStartMs: SCOPE_OPTS.periodStartMs,
-			},
-			accountId: FORGED_ID,
-			label: FORGED_LABEL,
-		};
 	}
 
 	it("IGNORES a handle relabelled between authorize and settle", async () => {
@@ -743,21 +761,19 @@ describe("headless settle and abort read an INTERNAL capture, not the caller's h
 		await gov.destroy();
 	});
 
-	it("cannot be relabelled by mutating the envelope object the handle exposes", async () => {
-		// The narrower attack: not replacing `auth.envelope`, but editing the object
-		// in place — which would reach the governor too if the handle and the
-		// governor's capture were the same mutable object.
+	it("exposes no resolved envelope on the handle to mutate in the first place", async () => {
+		// The narrower attack the original finding named — editing the exposed envelope
+		// object in place so a forged account reaches the governor — has no surface now:
+		// the resolved envelope (a bigint account id) is never put on the caller-owned
+		// handle at all. The settle below still reads the D7 snapshot from the internal
+		// capture's envelope, naming the account the hold actually debited.
 		const engine = makeMockEngine({ balance: 4_000 });
 		const audit = makeMockAudit();
 		const gov = await governorWith(engine, audit);
 
 		const auth = await withCostCenter(COST_CENTER, () => gov.authorize(AUTHORIZE), SCOPE_OPTS);
 
-		expect(Object.isFrozen(auth.envelope)).toBe(true);
-		expect(Object.isFrozen(auth.envelope?.attribution)).toBe(true);
-		expect(() => {
-			(auth.envelope as ResolvedEnvelope).accountId = FORGED_ID;
-		}).toThrow(TypeError);
+		expect("envelope" in auth).toBe(false);
 
 		const receipt = await gov.settle(auth, { inputTokens: 80, outputTokens: 200 });
 
