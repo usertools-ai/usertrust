@@ -2,6 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { z } from "zod";
+import { parentUserIdRefusal } from "./ids.js";
 
 // ── Endpoint classification (M2 local-model governance) ──
 
@@ -69,6 +70,36 @@ export const TrustConfigSchema = z.object({
 	tier: z.enum(["free", "mini", "pro", "mega", "ultra"]).default("mini"),
 	proxy: z.string().url().optional(),
 	key: z.string().optional(),
+	/**
+	 * The parent half of the `(parentUserId, costCenter)` tuple every cost-center
+	 * envelope account is derived from — this governor's ledger identity.
+	 *
+	 * OPTIONAL, and it must stay optional: a governor that never spends from an
+	 * envelope needs no identity, and every config written before envelopes
+	 * existed keeps parsing to exactly the same object it did before (no key
+	 * materialises, no default is invented).
+	 *
+	 * Validated HERE, by the one authoritative rule `parentUserIdRefusal` — the
+	 * same charset-plus-`::`-quarantine that `createCostCenterWallet` and
+	 * `costCenterUserId` enforce at the ledger doors. Refusing at parse time is
+	 * what keeps the refusal off the money path: a malformed identity surfaces
+	 * when the operator writes it, not at the first attributed hold with a call
+	 * already in flight and the caller believing governance came up clean.
+	 *
+	 * TRUSTED-OPERATOR input, on the same boundary as budget/customRates —
+	 * whoever constructs a governor already holds the TigerBeetle client. Never
+	 * derive it from end-user or request data: attribution that request content
+	 * can steer is an agent relabelling its calls onto the fattest envelope.
+	 */
+	parentUserId: z
+		.string()
+		.superRefine((value, ctx) => {
+			const refusal = parentUserIdRefusal(value);
+			if (refusal !== null) {
+				ctx.addIssue(`parentUserId ${refusal}`);
+			}
+		})
+		.optional(),
 	policies: z.string().default("./policies/default.yml"),
 	pii: z.enum(["redact", "warn", "block", "off"]).default("warn"),
 	injection: z.enum(["block", "warn", "off"]).default("warn"),

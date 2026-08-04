@@ -74,6 +74,10 @@ import { TrustConfigSchema } from "./shared/types.js";
 /**
  * Options for createGovernor(): TrustOpts plus a governor-wide default
  * endpoint scope (M2 local-model governance).
+ *
+ * The envelope identity `parentUserId` is INHERITED from TrustOpts — one field
+ * and one validation rule across both governors, so a cost center derives the
+ * same account whichever one holds the client.
  */
 export interface GovernorOpts extends TrustOpts {
 	/**
@@ -300,6 +304,12 @@ function isTBInsufficientBalance(err: unknown): boolean {
 	);
 }
 
+/** TigerBeetle's answer when the account being debited does not exist at all. */
+function isTBDebitAccountNotFound(err: unknown): boolean {
+	if (!(err instanceof TBTransferError)) return false;
+	return err.code === CreateTransferStatus.debit_account_not_found;
+}
+
 /**
  * Create a balance-enforcing TrustEngine backed by a real TigerBeetle client.
  *
@@ -317,6 +327,13 @@ function isTBInsufficientBalance(err: unknown): boolean {
  * existing `TrustTBClient` primitives — identical to the GOVERN-local factory in
  * `govern.ts`. When LEDGER ships `createLedgerEngine`, BOTH `trust()` and
  * `createGovernor()` should switch to it in lockstep.
+ *
+ * LOCKSTEP: this is a duplicate of `govern.ts`'s factory and every change there
+ * belongs here verbatim (AGENTS.md, Known drift). `tests/harden/
+ * engine-factory-parity.test.ts` compares the two as source text and fails on a
+ * one-sided edit. It stays UNEXPORTED — `usertrust/headless` is a package entry
+ * point, so exporting it would ship an engine factory to consumers; the seam
+ * tests drive `govern.ts`'s copy by name and this one through `createGovernor()`.
  */
 async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<TrustEngine> {
 	const tbAddresses = config.tigerbeetle.addresses;
@@ -343,10 +360,15 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 		async spendPending(params: {
 			transferId: string;
 			amount: number;
+			debitAccountId?: bigint | undefined;
 		}): Promise<{ transferId: string }> {
+			// An ATTRIBUTED hold names its own debit account — the cost-center
+			// envelope the governor derived at authorize. Unattributed holds keep
+			// debiting the session holding wallet, unchanged.
+			const debitAccountId = params.debitAccountId ?? holdingId;
 			try {
 				const tbTransferId = await tbClient.createPendingTransfer({
-					debitAccountId: holdingId,
+					debitAccountId,
 					creditAccountId: treasury,
 					amount: params.amount,
 					code: XFER_SPEND,
@@ -357,7 +379,51 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 				// Over-budget reservation → TB rejects the pending debit. Surface as a
 				// budget error so the governor reports a hard DENY, not an outage.
 				if (isTBInsufficientBalance(err)) {
+					// An ATTRIBUTED hold is rejected by the ENVELOPE's own
+					// `debits_must_not_exceed_credits`, so the envelope is the account that
+					// has to be named. Reporting `trust:hold` and the session seed names an
+					// account the hold never touched and prints an `available` that is
+					// routinely GREATER than `required` — a 999-usertoken estimate against a
+					// 10-usertoken envelope under a governor seeded at 100000 reads as an SDK
+					// bug rather than an exhausted cost center, and names no envelope for the
+					// operator to top up.
+					// The balance is re-read AFTER the rejection, so it REPORTS rather than
+					// decides: TigerBeetle's atomic rejection remains the whole enforcement
+					// and no check-then-act enters the money path (budget/allocation.ts does
+					// exactly this on its own rejection path). A failed read reports 0 rather
+					// than fabricating headroom, and never changes the classification.
+					if (params.debitAccountId !== undefined) {
+						let available = 0;
+						try {
+							available = (await tbClient.lookupBalance(params.debitAccountId)).available;
+						} catch {
+							// Reporting only — a failed read must not mask the budget DENY.
+						}
+						throw new InsufficientBalanceError(
+							`envelope:${params.debitAccountId}`,
+							params.amount,
+							available,
+						);
+					}
+					// UNATTRIBUTED holds keep today's answer exactly, down to adding no
+					// ledger round trip: the seed is a number this factory already holds.
 					throw new InsufficientBalanceError("trust:hold", params.amount, seedBudget);
+				}
+				// A never-allocated envelope has no account at all, and TB answers
+				// `debit_account_not_found`. For an ENVELOPE that is a budget answer,
+				// not an outage: no account and a zero balance are the same state
+				// (budget/allocation.ts reads a missing cost-center account as zero,
+				// because never-allocated and fully-reclaimed are indistinguishable).
+				// Classifying it as a ledger outage would tell the caller the ledger
+				// is down when the truth is "this envelope has no funds" — and would
+				// let a retry loop hammer a spend that can never succeed.
+				// The envelope is named by its derived account id: the label
+				// `parent::costCenter` lives in the governor, never here.
+				// UNATTRIBUTED holds keep today's classification exactly. The session
+				// wallet is one THIS factory created moments ago, so its absence
+				// really is an outage.
+				if (params.debitAccountId !== undefined && isTBDebitAccountNotFound(err)) {
+					throw new InsufficientBalanceError(`envelope:${params.debitAccountId}`, params.amount, 0);
 				}
 				throw err;
 			}
@@ -422,10 +488,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		config = TrustConfigSchema.parse({
 			...(raw as Record<string, unknown>),
 			...(opts?.budget !== undefined ? { budget: opts.budget } : {}),
+			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
 		});
 	} else {
 		config = TrustConfigSchema.parse({
 			budget: opts?.budget ?? DEFAULT_BUDGET,
+			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
 		});
 	}
 
