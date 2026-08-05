@@ -1056,6 +1056,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 			// POST settlement
 			let settled = true;
+			// D4: set only when the engine capped the post at the reserved hold.
+			let postedCost: number | undefined;
 			if (proxyConn != null && !isDryRun) {
 				try {
 					await proxyConn.settle(auth.proxyTransferId ?? auth.transferId, actualCost);
@@ -1082,9 +1084,28 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				}
 			} else if (engine != null && !isDryRun) {
 				try {
-					// Post the ACTUAL consumed cost (RECON #3) — which may be less than
-					// the reserved estimate.
-					await engine.postPendingSpend(auth.transferId, actualCost);
+					// Post the ACTUAL consumed cost (RECON #3), capped by the engine at
+					// the reserved hold; a truncation comes back as `shortfall`.
+					const postResult = await engine.postPendingSpend(auth.transferId, actualCost);
+					if (postResult != null && postResult.shortfall > 0) {
+						postedCost = postResult.posted;
+						await audit
+							.appendEvent({
+								kind: "settlement_shortfall",
+								actor: "local",
+								data: {
+									model,
+									actual: actualCost,
+									posted: postResult.posted,
+									shortfall: postResult.shortfall,
+									transferId: auth.transferId,
+									...costCenterAudit,
+								},
+							})
+							.catch(() => {
+								callAuditDegraded = true;
+							});
+					}
 				} catch (postErr) {
 					settled = false;
 					await audit
@@ -1206,6 +1227,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						: {}),
 				},
 				...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
+				...(postedCost !== undefined ? { postedCost } : {}),
 				...(settledBudget !== undefined ? { budget: settledBudget } : {}),
 				...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 				...(proxyConn != null ? { proxyStub: true as const } : {}),
