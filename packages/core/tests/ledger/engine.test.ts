@@ -23,7 +23,7 @@ vi.mock("tigerbeetle-node", () => ({
 		created: 4294967295,
 		exceeds_credits: 22,
 		overflows_debits: 30,
-		overflows_debits_pending: 31,
+		overflows_debits_pending: 47,
 		exceeds_pending_transfer_amount: 31,
 	},
 	amount_max: (1n << 128n) - 1n,
@@ -181,7 +181,7 @@ describe("TrustEngine", () => {
 
 		it("catches TB overflows_debits_pending error and wraps it", async () => {
 			const tbErr = new Error("Pending transfer failed: overflows_debits_pending");
-			Object.assign(tbErr, { name: "TBTransferError", code: 31 });
+			Object.assign(tbErr, { name: "TBTransferError", code: 47 });
 			mockTB.createPendingTransfer.mockRejectedValueOnce(tbErr);
 			mockTB.lookupBalance.mockResolvedValueOnce({
 				available: 0,

@@ -349,9 +349,9 @@ accounting, matching the numbers its policy gate saw.
 *Every audit record an attributed call emits carries `costCenter`, from that same capture* — not
 from params, and on the failure terminals as well as the settle ones (`llm_call`, `<action.kind>`,
 `llm_call_failed`, `<action.kind>_failed`, `stream_partial_delivery`, `settlement_ambiguous`,
-`injection_detected`, `anomaly_detected`). An attributed hold must leave an attributed forensic
-trail whichever way it ends. Unattributed calls spread an empty object, so their records stay
-byte-identical to what they were before envelopes existed.
+`settlement_shortfall`, `injection_detected`, `anomaly_detected`). An attributed hold must leave an
+attributed forensic trail whichever way it ends. Unattributed calls spread an empty object, so their
+records stay byte-identical to what they were before envelopes existed.
 
 *One field, two spellings, deliberately.* The policy context spells it `cost_center` — snake_case,
 beside `estimated_cost`, `budget_remaining` and `action_kind`, because a rule file is what reads it

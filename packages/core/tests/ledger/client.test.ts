@@ -51,9 +51,9 @@ vi.mock("tigerbeetle-node", () => ({
 	},
 	CreateTransferStatus: {
 		created: 4294967295,
-		exceeds_credits: 22,
-		overflows_debits: 30,
-		overflows_debits_pending: 31,
+		exceeds_credits: 54,
+		overflows_debits: 51,
+		overflows_debits_pending: 47,
 		// The real binding's value (spec D2): a post above the pending transfer's
 		// amount, which real TigerBeetle rejects rather than caps. Real TS numeric
 		// enums generate a reverse (value -> name) mapping too, which client.ts's
