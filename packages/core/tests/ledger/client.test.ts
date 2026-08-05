@@ -54,13 +54,20 @@ vi.mock("tigerbeetle-node", () => ({
 		exceeds_credits: 22,
 		overflows_debits: 30,
 		overflows_debits_pending: 31,
+		// The real binding's value (spec D2): a post above the pending transfer's
+		// amount, which real TigerBeetle rejects rather than caps. Real TS numeric
+		// enums generate a reverse (value -> name) mapping too, which client.ts's
+		// error messages rely on (`CreateTransferStatus[res.status]`) — mirror it
+		// here so this plain mock object behaves the same way.
+		exceeds_pending_transfer_amount: 31,
+		31: "exceeds_pending_transfer_amount",
 		// The real binding's value — a transfer with this id already committed.
 		exists: 46,
 	},
 	amount_max: (1n << 128n) - 1n,
 }));
 
-import { AccountFlags, CreateAccountStatus } from "tigerbeetle-node";
+import { AccountFlags, CreateAccountStatus, CreateTransferStatus } from "tigerbeetle-node";
 import {
 	CODE_ESCROW,
 	CODE_PLATFORM_TREASURY,
@@ -600,6 +607,22 @@ describe("TrustTBClient", () => {
 		it("throws on failure", async () => {
 			mockCreateTransfers.mockResolvedValueOnce([{ status: 5 }]);
 			await expect(client.postTransfer(123n)).rejects.toThrow("Post transfer failed");
+		});
+
+		it("rejects a post above the pending amount with a code-carrying TBTransferError", async () => {
+			// Real TigerBeetle REJECTS (never caps) a post above the pending transfer's
+			// amount. The code must be structurally matchable so the engine layer can
+			// recover (spec D2) — a plain Error string is not.
+			mockCreateTransfers.mockResolvedValueOnce([
+				{ status: CreateTransferStatus.exceeds_pending_transfer_amount },
+			]);
+			const err = await client.postTransfer(123n, 84).catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(TBTransferError);
+			expect((err as TBTransferError).code).toBe(
+				CreateTransferStatus.exceeds_pending_transfer_amount,
+			);
+			expect((err as TBTransferError).message).toContain("Post transfer failed:");
+			expect((err as TBTransferError).message).toContain("exceeds_pending_transfer_amount");
 		});
 
 		it("throws when error array element is undefined", async () => {

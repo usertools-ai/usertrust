@@ -669,7 +669,10 @@ export class TrustTBClient {
 				res.status !== CreateTransferStatus.created &&
 				res.status !== CreateTransferStatus.exists
 			) {
-				throw new Error(`Post transfer failed: ${CreateTransferStatus[res.status] ?? res.status}`);
+				throw new TBTransferError(
+					res.status,
+					`Post transfer failed: ${CreateTransferStatus[res.status] ?? res.status}`,
+				);
 			}
 		}
 		return postId;
