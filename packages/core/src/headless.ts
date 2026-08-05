@@ -73,7 +73,7 @@ import {
 } from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
-import { evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
+import { derivePolicyHint, evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
 import { detectPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
@@ -755,7 +755,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const rateInfo = resolveRates(model, endpoint.class, config);
 			if (rateInfo.unknown) {
 				if (config.unknownModelPolicy === "deny") {
-					throw new PolicyDeniedError(`unknown_model: ${model} not in pricing table`);
+					throw new PolicyDeniedError(
+						`unknown_model: ${model} not in pricing table`,
+						"Add the model to customRates in trust() options, or use a model from the built-in pricing table.",
+					);
 				}
 				if (config.unknownModelPolicy === "warn") {
 					// Shared once-per-process helper — identical wording to trust() (F5).
@@ -860,14 +863,17 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				if (policyResult.decision === "deny") {
 					const reason =
 						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
-					throw new PolicyDeniedError(reason);
+					throw new PolicyDeniedError(reason, derivePolicyHint(policyResult));
 				}
 
 				// PII check
 				if (config.pii !== "off" && messages.length > 0) {
 					const piiResult = detectPII(messages);
 					if (piiResult.found && config.pii === "block") {
-						throw new PolicyDeniedError(`PII detected: ${piiResult.types.join(", ")}`);
+						throw new PolicyDeniedError(
+							`PII detected: ${piiResult.types.join(", ")}`,
+							'PII enforcement blocked this call. Use { pii: "warn" } to log instead, or { pii: "redact" } to strip PII before egress.',
+						);
 					}
 				}
 

@@ -43,7 +43,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withCostCenter } from "../../src/budget/attribution.js";
 import { trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
-import { evaluatePolicy, type GateRule, type PolicyContext } from "../../src/policy/gate.js";
+import {
+	derivePolicyHint,
+	evaluatePolicy,
+	type GateRule,
+	type PolicyContext,
+} from "../../src/policy/gate.js";
 import type { PolicyEnforcement } from "../../src/shared/types.js";
 
 // tigerbeetle-node is a native module and is never loaded in tests.
@@ -652,5 +657,44 @@ describe("an envelope-scoped tier fires on an attributed call", () => {
 		expect(client.messages.create).toHaveBeenCalledTimes(1);
 
 		await governed.destroy();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Class-aware denial hints (D6)
+// ---------------------------------------------------------------------------
+
+describe("class-aware denial hints (D6)", () => {
+	it("a budget-tier denial derives the budget remedy hint", () => {
+		const result = evaluatePolicy([DENY_FRONTIER_BELOW_30], {
+			budgetFractionRemaining: 0.1,
+			model: "claude-opus-4-6",
+		});
+
+		expect(result.decision).toBe("deny");
+		expect(derivePolicyHint(result)).toContain("allocateBudget");
+	});
+
+	it("a non-budget denial derives no override (falls back to the default hint)", () => {
+		const rule: GateRule = {
+			id: "no-frontier",
+			name: "no-frontier",
+			effect: "deny",
+			enforcement: "hard",
+			conditions: [{ field: "model", operator: "eq", value: "claude-opus-4-6" }],
+		};
+		const result = evaluatePolicy([rule], { model: "claude-opus-4-6" });
+
+		expect(result.decision).toBe("deny");
+		expect(derivePolicyHint(result)).toBeUndefined();
+	});
+
+	it("RuleMatch carries the violated rule's condition fields", () => {
+		const result = evaluatePolicy([DENY_FRONTIER_BELOW_30], {
+			budgetFractionRemaining: 0.1,
+			model: "claude-opus-4-6",
+		});
+
+		expect(result.hardViolations[0]?.fields).toContain("budgetFractionRemaining");
 	});
 });

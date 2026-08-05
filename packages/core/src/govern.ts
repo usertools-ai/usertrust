@@ -49,7 +49,7 @@ import {
 } from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
-import { evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
+import { derivePolicyHint, evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
 import { detectInjection } from "./policy/injection.js";
 import { detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
@@ -284,7 +284,10 @@ function enforceUnknownModelPolicy(
 ): void {
 	if (!resolution.unknown) return;
 	if (config.unknownModelPolicy === "deny") {
-		throw new PolicyDeniedError(`unknown_model: ${model} not in pricing table`);
+		throw new PolicyDeniedError(
+			`unknown_model: ${model} not in pricing table`,
+			"Add the model to customRates in trust() options, or use a model from the built-in pricing table.",
+		);
 	}
 	if (config.unknownModelPolicy === "warn") {
 		warnUnknownModel(model);
@@ -1008,7 +1011,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (policyResult.decision === "deny") {
 					const reason =
 						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
-					throw new PolicyDeniedError(reason);
+					throw new PolicyDeniedError(reason, derivePolicyHint(policyResult));
 				}
 
 				// d. PII check + redact-egress
@@ -1016,7 +1019,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					const piiResult = detectPII(promptParts);
 					if (piiResult.found && config.pii === "block") {
 						// block mode: throw BEFORE any egress.
-						throw new PolicyDeniedError(`PII detected: ${piiResult.types.join(", ")}`);
+						throw new PolicyDeniedError(
+							`PII detected: ${piiResult.types.join(", ")}`,
+							'PII enforcement blocked this call. Use { pii: "warn" } to log instead, or { pii: "redact" } to strip PII before egress.',
+						);
 					}
 					if (config.pii === "redact" && piiResult.found) {
 						// redact mode: forward a redacted DEEP CLONE so PII never egresses.
@@ -1034,6 +1040,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						if (config.injection === "block") {
 							throw new PolicyDeniedError(
 								`Prompt injection detected: ${injectionResult.patterns.join(", ")}`,
+								'Injection enforcement blocked this call. Use { injection: "warn" } to log instead of block.',
 							);
 						}
 						// warn: log to audit trail (non-fatal)
@@ -2236,7 +2243,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (policyResult.decision === "deny") {
 					const reason =
 						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
-					throw new PolicyDeniedError(reason);
+					throw new PolicyDeniedError(reason, derivePolicyHint(policyResult));
 				}
 
 				// d. PII check on action params
@@ -2245,6 +2252,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					if (piiResult.found && config.pii === "block") {
 						throw new PolicyDeniedError(
 							`PII detected in action params: ${piiResult.types.join(", ")}`,
+							'PII enforcement blocked this call. Use { pii: "warn" } to log instead, or { pii: "redact" } to strip PII before egress.',
 						);
 					}
 				}
@@ -2256,6 +2264,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						if (config.injection === "block") {
 							throw new PolicyDeniedError(
 								`Injection detected in action params: ${injectionResult.patterns.join(", ")}`,
+								'Injection enforcement blocked this call. Use { injection: "warn" } to log instead of block.',
 							);
 						}
 						// warn: log to audit trail (non-fatal)

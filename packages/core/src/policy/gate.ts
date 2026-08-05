@@ -40,6 +40,8 @@ export interface RuleMatch {
 	enforcement: PolicyEnforcement;
 	/** Severity if set */
 	severity: PolicySeverity | undefined;
+	/** Field names of the rule's conditions — lets a throw site classify the denial. */
+	fields: string[];
 }
 
 export interface PolicyResult {
@@ -57,6 +59,31 @@ export interface PolicyResult {
 	reasons: string[];
 	/** Evaluation timestamp */
 	evaluatedAt: string;
+}
+
+/** Policy-context fields whose rules deny for BUDGET reasons, not content reasons. */
+const BUDGET_HINT_FIELDS = new Set([
+	"budget_remaining",
+	"budget_remaining_after",
+	"budgetFractionRemaining",
+	"budgetRunwayHours",
+	"estimated_cost",
+]);
+
+/**
+ * Class-aware operator remedy for a gate denial (D6). Returns `undefined` when no
+ * hard violation is budget-classed — the error's default hint then applies. PII
+ * and injection denials never reach here: they throw from their own detector
+ * sites, which pass their own class hints.
+ */
+export function derivePolicyHint(result: PolicyResult): string | undefined {
+	const budgetHit = result.hardViolations.some((v) =>
+		v.fields.some((f) => BUDGET_HINT_FIELDS.has(f)),
+	);
+	if (budgetHit) {
+		return "A budget rule denied this call: check the envelope's allocation (allocateBudget) and your budgetFractionRemaining / budgetRunwayHours tiers.";
+	}
+	return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +598,7 @@ export function evaluatePolicy(rules: GateRule[], context: PolicyContext): Polic
 			effect: rule.effect,
 			enforcement: rule.enforcement,
 			severity: rule.severity,
+			fields: rule.conditions.map((fc) => fc.field),
 		};
 
 		matched.push(match);
