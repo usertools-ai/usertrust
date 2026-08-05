@@ -1154,6 +1154,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// stream and non-stream terminals are mutually exclusive for one hold, so
 			// they share this the same way they share `settled`.
 			let postedCost: number | undefined;
+			// D4 event-order buffer for the STREAM terminal: the truncation is learned at
+			// POST time but the `settlement_shortfall` event may only be appended AFTER
+			// this call's `llm_call`, so it is parked here and drained below.
+			let streamShortfall: { posted: number; shortfall: number } | undefined;
 
 			// A2: one idempotent finalize gate per hold. The FIRST terminal signal for
 			// this authorization wins and claims the single ledger outcome (settle XOR
@@ -1281,22 +1285,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						const postResult = await engine.postPendingSpend(transferId, streamCost);
 						if (postResult != null && postResult.shortfall > 0) {
 							postedCost = postResult.posted;
-							await audit
-								.appendEvent({
-									kind: "settlement_shortfall",
-									actor: "local",
-									data: {
-										model,
-										actual: streamCost,
-										posted: postResult.posted,
-										shortfall: postResult.shortfall,
-										transferId,
-										...costCenterAudit,
-									},
-								})
-								.catch(() => {
-									callAuditDegraded = true;
-								});
+							// EVENT ORDER: captured here, APPENDED after `llm_call` below.
+							// `verifyTransaction` resolves a transfer by the FIRST chain event
+							// whose `data.transferId` matches, so a shortfall written ahead of
+							// its `llm_call` would render this settled call as PENDING with no
+							// cost. The correction must annotate the settlement, never precede it.
+							streamShortfall = { posted: postResult.posted, shortfall: postResult.shortfall };
 						}
 					} catch (postErr) {
 						settled = false;
@@ -1352,6 +1346,29 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					auditHash = auditEvent.hash;
 				} catch {
 					callAuditDegraded = true;
+				}
+
+				// D4: the truncation correction, appended AFTER the `llm_call` it
+				// annotates (see the capture at the POST above). Still advisory — a chain
+				// that cannot take it degrades the receipt and NEVER unwinds a settlement
+				// that already committed.
+				if (streamShortfall !== undefined) {
+					await audit
+						.appendEvent({
+							kind: "settlement_shortfall",
+							actor: "local",
+							data: {
+								model,
+								actual: streamCost,
+								posted: streamShortfall.posted,
+								shortfall: streamShortfall.shortfall,
+								transferId,
+								...costCenterAudit,
+							},
+						})
+						.catch(() => {
+							callAuditDegraded = true;
+						});
 				}
 
 				// P3-AUDIT-FAILCLOSED (streaming): chunks were already delivered, so the

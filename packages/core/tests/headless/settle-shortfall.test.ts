@@ -23,13 +23,14 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import type { TrustEngine } from "../../src/govern.js";
 import { createGovernor, type Governor } from "../../src/headless.js";
+import { VAULT_DIR } from "../../src/shared/constants.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
 // tigerbeetle-node is a native module and is never loaded in unit tests.
@@ -114,6 +115,26 @@ function makeMockAudit(opts: { failOnCall?: number } = {}): AuditHandle {
 
 function shortfallEvents(audit: AuditHandle): AppendEventInput[] {
 	return audit.events.filter((e) => e.kind === "settlement_shortfall");
+}
+
+/**
+ * Read the REAL hash-linked chain — not a mock's call log. `verifyTransaction`
+ * resolves a transfer by the FIRST event whose `data.transferId` matches
+ * (packages/verify/src/index.ts), so the on-disk ORDER is the contract: a
+ * `settlement_shortfall` written ahead of its `llm_call` renders a settled call
+ * as PENDING with no cost.
+ */
+function readChain(vaultBase: string): AuditEvent[] {
+	const chainPath = join(vaultBase, VAULT_DIR, "audit", "events.jsonl");
+	return readFileSync(chainPath, "utf-8")
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line) as AuditEvent);
+}
+
+/** Index of the first chain event of `kind` carrying `transferId`, or -1. */
+function chainIndexOf(events: AuditEvent[], kind: string, transferId: string): number {
+	return events.findIndex((e) => e.kind === kind && e.data?.transferId === transferId);
 }
 
 // ── Tests ──
@@ -206,12 +227,33 @@ describe("headless settlement_shortfall threading", () => {
 		await gov.destroy();
 	});
 
+	it("writes llm_call BEFORE settlement_shortfall on the real chain", async () => {
+		const engine = makeMockEngine(async () => ({ posted: POSTED, shortfall: SHORTFALL }));
+		// No `_audit`: this test needs the REAL writer so the on-disk order is what
+		// is asserted, exactly as `verifyTransaction` will read it.
+		const gov = await createGovernor({ budget: 100_000, vaultBase, _engine: engine });
+
+		const auth = await gov.authorize(AUTHORIZE);
+		const receipt = await gov.settle(auth, { inputTokens: 80, outputTokens: 200 });
+
+		expect(receipt.postedCost).toBe(POSTED);
+		const events = readChain(vaultBase);
+		const llmCallIdx = chainIndexOf(events, "llm_call", auth.transferId);
+		const shortfallIdx = chainIndexOf(events, "settlement_shortfall", auth.transferId);
+		expect(llmCallIdx).toBeGreaterThanOrEqual(0);
+		expect(shortfallIdx).toBeGreaterThanOrEqual(0);
+		expect(llmCallIdx).toBeLessThan(shortfallIdx);
+
+		await gov.destroy();
+	});
+
 	it("audit-append failure on the shortfall event degrades without unsettling", async () => {
 		const engine = makeMockEngine(async () => ({ posted: POSTED, shortfall: SHORTFALL }));
-		// Headless settle POSTs (and appends settlement_shortfall) BEFORE it appends
-		// llm_call — the reverse order from trust()'s non-stream path — so the
-		// shortfall append is call #1 here, and llm_call is call #2.
-		const audit = makeMockAudit({ failOnCall: 1 });
+		// Headless settle appends llm_call FIRST and the settlement_shortfall
+		// correction AFTER it — the same order as trust()'s non-stream path, and the
+		// order `verifyTransaction` depends on — so llm_call is call #1 here and the
+		// shortfall append is call #2.
+		const audit = makeMockAudit({ failOnCall: 2 });
 		const gov = await governorWith(engine, audit);
 
 		const auth = await gov.authorize(AUTHORIZE);

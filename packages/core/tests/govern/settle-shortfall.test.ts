@@ -26,12 +26,13 @@
 
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import { type TrustEngine, trust } from "../../src/govern.js";
+import { VAULT_DIR } from "../../src/shared/constants.js";
 import type { AuditEvent, TrustReceipt } from "../../src/shared/types.js";
 
 // tigerbeetle-node is a native module and is never loaded in unit tests.
@@ -140,6 +141,39 @@ class ManualMessageStream extends EventEmitter {
 
 function shortfallEvents(audit: AuditHandle): AppendEventInput[] {
 	return audit.events.filter((e) => e.kind === "settlement_shortfall");
+}
+
+/**
+ * Read the REAL hash-linked chain — not a mock's call log. `verifyTransaction`
+ * resolves a transfer by the FIRST event whose `data.transferId` matches
+ * (packages/verify/src/index.ts), so the on-disk ORDER is the contract: a
+ * `settlement_shortfall` written ahead of its `llm_call` renders a settled call
+ * as PENDING with no cost. These helpers pin the order at the byte level.
+ */
+function readChain(vaultBase: string): AuditEvent[] {
+	const chainPath = join(vaultBase, VAULT_DIR, "audit", "events.jsonl");
+	return readFileSync(chainPath, "utf-8")
+		.trim()
+		.split("\n")
+		.map((line) => JSON.parse(line) as AuditEvent);
+}
+
+/** Index of the first chain event of `kind` carrying `transferId`, or -1. */
+function chainIndexOf(events: AuditEvent[], kind: string, transferId: string): number {
+	return events.findIndex((e) => e.kind === kind && e.data?.transferId === transferId);
+}
+
+/**
+ * The one assertion this file exists to protect: `llm_call` FIRST, then the
+ * shortfall correction that annotates it.
+ */
+function expectLlmCallBeforeShortfall(vaultBase: string, transferId: string): void {
+	const events = readChain(vaultBase);
+	const llmCallIdx = chainIndexOf(events, "llm_call", transferId);
+	const shortfallIdx = chainIndexOf(events, "settlement_shortfall", transferId);
+	expect(llmCallIdx).toBeGreaterThanOrEqual(0);
+	expect(shortfallIdx).toBeGreaterThanOrEqual(0);
+	expect(llmCallIdx).toBeLessThan(shortfallIdx);
 }
 
 // ── Tests ──
@@ -255,6 +289,24 @@ describe("settlement_shortfall — non-streaming settle", () => {
 
 		await governed.destroy();
 	});
+
+	it("writes llm_call BEFORE settlement_shortfall on the real chain", async () => {
+		const engine = makeMockEngine(async () => ({ posted: POSTED, shortfall: SHORTFALL }));
+		// No `_audit`: this test needs the REAL writer so the on-disk order is what
+		// is asserted, exactly as `verifyTransaction` will read it.
+		const governed = await trust(makeAnthropicMock(), {
+			budget: 100_000,
+			vaultBase,
+			_engine: engine,
+		});
+
+		const { receipt } = (await governed.messages.create(PARAMS)) as { receipt: TrustReceipt };
+
+		expect(receipt.postedCost).toBe(POSTED);
+		expectLlmCallBeforeShortfall(vaultBase, receipt.transferId);
+
+		await governed.destroy();
+	});
 });
 
 describe("settlement_shortfall — streaming settle", () => {
@@ -324,6 +376,28 @@ describe("settlement_shortfall — streaming settle", () => {
 		expect(receipt.settled).toBe(true);
 		expect(Object.hasOwn(receipt, "postedCost")).toBe(false);
 		expect(shortfallEvents(audit)).toHaveLength(0);
+
+		await governed.destroy();
+	});
+
+	it("writes llm_call BEFORE settlement_shortfall on the real chain", async () => {
+		const engine = makeMockEngine(async () => ({ posted: POSTED, shortfall: SHORTFALL }));
+		const stream = new ManualMessageStream();
+		// No `_audit`: the REAL writer, so the assertion is about bytes on disk.
+		const governed = await trust(
+			{ messages: { create: vi.fn(), stream: vi.fn(() => stream) } },
+			{ budget: 100_000, vaultBase, _engine: engine },
+		);
+
+		const handle = (await governed.messages.stream(PARAMS)) as ManualMessageStream & {
+			receipt: Promise<TrustReceipt>;
+		};
+		stream.emit("finalMessage", { usage: { input_tokens: 10, output_tokens: 5 } });
+		stream.emit("end");
+		const receipt = await handle.receipt;
+
+		expect(receipt.postedCost).toBe(POSTED);
+		expectLlmCallBeforeShortfall(vaultBase, receipt.transferId);
 
 		await governed.destroy();
 	});

@@ -1064,6 +1064,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			let settled = true;
 			// D4: set only when the engine capped the post at the reserved hold.
 			let postedCost: number | undefined;
+			// D4 event-order buffer: the truncation is learned at POST time but the
+			// `settlement_shortfall` event may only be appended AFTER this call's
+			// `llm_call`, so it is parked here and drained below.
+			let shortfallRecord: { posted: number; shortfall: number } | undefined;
 			if (proxyConn != null && !isDryRun) {
 				try {
 					await proxyConn.settle(auth.proxyTransferId ?? auth.transferId, actualCost);
@@ -1095,22 +1099,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					const postResult = await engine.postPendingSpend(auth.transferId, actualCost);
 					if (postResult != null && postResult.shortfall > 0) {
 						postedCost = postResult.posted;
-						await audit
-							.appendEvent({
-								kind: "settlement_shortfall",
-								actor: "local",
-								data: {
-									model,
-									actual: actualCost,
-									posted: postResult.posted,
-									shortfall: postResult.shortfall,
-									transferId: auth.transferId,
-									...costCenterAudit,
-								},
-							})
-							.catch(() => {
-								callAuditDegraded = true;
-							});
+						// EVENT ORDER: captured here, APPENDED after `llm_call` below.
+						// `verifyTransaction` resolves a transfer by the FIRST chain event whose
+						// `data.transferId` matches, so a shortfall written ahead of its
+						// `llm_call` would render this settled call as PENDING with no cost. The
+						// correction must annotate the settlement, never precede it.
+						shortfallRecord = { posted: postResult.posted, shortfall: postResult.shortfall };
 					}
 				} catch (postErr) {
 					settled = false;
@@ -1156,6 +1150,29 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				auditHash = auditEvent.hash;
 			} catch {
 				callAuditDegraded = true;
+			}
+
+			// D4: the truncation correction, appended AFTER the `llm_call` it annotates
+			// (see the capture at the POST above). Still advisory — a chain that cannot
+			// take it degrades the receipt and NEVER unwinds a settlement that already
+			// committed.
+			if (shortfallRecord !== undefined) {
+				await audit
+					.appendEvent({
+						kind: "settlement_shortfall",
+						actor: "local",
+						data: {
+							model,
+							actual: actualCost,
+							posted: shortfallRecord.posted,
+							shortfall: shortfallRecord.shortfall,
+							transferId: auth.transferId,
+							...costCenterAudit,
+						},
+					})
+					.catch(() => {
+						callAuditDegraded = true;
+					});
 			}
 
 			// Daily-rotated receipt
