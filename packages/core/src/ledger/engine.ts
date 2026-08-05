@@ -202,8 +202,10 @@ export class TrustEngine {
 	 * Optionally pass actual amount if less than the hold.
 	 */
 	async postPendingSpend(transferId: string, actualAmount?: number): Promise<void> {
+		let posted = false;
 		try {
 			await this.tb.postTransfer(BigInt(transferId), actualAmount);
+			posted = true;
 		} catch (err) {
 			// Actual cost priced above the reserved hold: TigerBeetle rejects the
 			// post outright (it never caps). The call itself succeeded, so voiding
@@ -212,31 +214,41 @@ export class TrustEngine {
 			// stateless (no held-amount tracking survives it), so the cap is
 			// reactive here; the governor-side factories precompute it (spec D1).
 			if (isExceedsPendingAmount(err)) {
-				await this.tb.postTransfer(BigInt(transferId), undefined);
-				return;
+				try {
+					await this.tb.postTransfer(BigInt(transferId), undefined);
+					posted = true;
+				} catch {
+					// The RECOVERY post failed too. Leaving this error to escape would
+					// skip the void attempt and the dead letter below while the transfer
+					// is still pending — the hold outlives the call with no record. Its
+					// state is exactly as ambiguous as a first-post failure, so it falls
+					// through into the SAME handling rather than getting its own.
+				}
 			}
-			// Post may have succeeded on TB but timed out — try to void
-			let voidSucceeded = false;
-			try {
-				await this.tb.voidTransfer(BigInt(transferId));
-				voidSucceeded = true;
-			} catch {
-				// Both post and void failed — transfer state is ambiguous
-				writeDeadLetter(
-					{
-						timestamp: new Date().toISOString(),
-						source: "engine.postPendingSpend.ambiguous",
-						transferId,
-						payload: { actualAmount },
-						error: "Both post and void failed — transfer state ambiguous",
-					},
-					this.dlqPath,
-				);
-				throw new Error(`Spend settlement ambiguous for transfer ${transferId}`);
-			}
-			if (voidSucceeded) {
-				throw new Error("Spend failed: pending transfer voided after post failure");
-			}
+		}
+		if (posted) return;
+
+		// Post may have succeeded on TB but timed out — try to void
+		let voidSucceeded = false;
+		try {
+			await this.tb.voidTransfer(BigInt(transferId));
+			voidSucceeded = true;
+		} catch {
+			// Both post and void failed — transfer state is ambiguous
+			writeDeadLetter(
+				{
+					timestamp: new Date().toISOString(),
+					source: "engine.postPendingSpend.ambiguous",
+					transferId,
+					payload: { actualAmount },
+					error: "Both post and void failed — transfer state ambiguous",
+				},
+				this.dlqPath,
+			);
+			throw new Error(`Spend settlement ambiguous for transfer ${transferId}`);
+		}
+		if (voidSucceeded) {
+			throw new Error("Spend failed: pending transfer voided after post failure");
 		}
 	}
 
