@@ -43,6 +43,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withCostCenter } from "../../src/budget/attribution.js";
 import { trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
+import { DEFAULT_RULES } from "../../src/policy/default-rules.js";
 import {
 	derivePolicyHint,
 	evaluatePolicy,
@@ -696,5 +697,23 @@ describe("class-aware denial hints (D6)", () => {
 		});
 
 		expect(result.hardViolations[0]?.fields).toContain("budgetFractionRemaining");
+	});
+
+	it("a rule without a description renders its identifier once, not twice", () => {
+		const rule = {
+			id: "scarcity-brake",
+			name: "scarcity-brake",
+			effect: "deny",
+			enforcement: "hard",
+			conditions: [{ field: "budgetFractionRemaining", operator: "lt", value: 0.3 }],
+		} as const;
+		const result = evaluatePolicy([rule], { budgetFractionRemaining: 0.1 });
+		expect(result.reasons[0]).toBe("[scarcity-brake]"); // was "[scarcity-brake] scarcity-brake"
+	});
+
+	it("a rule with a description keeps the full label + rationale", () => {
+		// DEFAULT_RULES all carry descriptions — pin one stays unchanged.
+		const result = evaluatePolicy(DEFAULT_RULES, { budget_remaining_after: -1 });
+		expect(result.reasons[0]).toMatch(/^\[block-budget-overshoot\] Deny pre-spend/);
 	});
 });

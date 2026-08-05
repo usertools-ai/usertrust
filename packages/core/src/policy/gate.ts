@@ -607,9 +607,12 @@ export function evaluatePolicy(rules: GateRule[], context: PolicyContext): Polic
 		const isViolation = rule.effect === "deny" || rule.effect === "warn";
 		if (isViolation) {
 			const label = rule.id ? `[${rule.id}]` : `[${rule.name}]`;
-			const rationale = rule.description ?? rule.name;
-			const reason =
-				rule.enforcement === "hard" ? `${label} ${rationale}` : `[WARN] ${label} ${rationale}`;
+			// A description-less rule would render its identifier twice
+			// ("[scarcity-brake] scarcity-brake"): the rationale falls back to
+			// rule.name, which the label already shows unless a distinct id exists.
+			const rationale = rule.description ?? ((rule.id ?? rule.name) === rule.name ? "" : rule.name);
+			const body = rationale === "" ? label : `${label} ${rationale}`;
+			const reason = rule.enforcement === "hard" ? body : `[WARN] ${body}`;
 
 			reasons.push(reason);
 
