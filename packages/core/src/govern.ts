@@ -286,7 +286,7 @@ function enforceUnknownModelPolicy(
 	if (config.unknownModelPolicy === "deny") {
 		throw new PolicyDeniedError(
 			`unknown_model: ${model} not in pricing table`,
-			"Add the model to customRates in trust() options, or use a model from the built-in pricing table.",
+			'Set pricing: "custom" with a customRates entry for this model in usertrust.config.json, or use a model from the built-in pricing table.',
 		);
 	}
 	if (config.unknownModelPolicy === "warn") {
@@ -1011,7 +1011,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (policyResult.decision === "deny") {
 					const reason =
 						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
-					throw new PolicyDeniedError(reason, derivePolicyHint(policyResult));
+					throw new PolicyDeniedError(
+						reason,
+						derivePolicyHint(policyResult, envelope !== undefined),
+					);
 				}
 
 				// d. PII check + redact-egress
@@ -2260,7 +2263,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (policyResult.decision === "deny") {
 					const reason =
 						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
-					throw new PolicyDeniedError(reason, derivePolicyHint(policyResult));
+					throw new PolicyDeniedError(
+						reason,
+						derivePolicyHint(policyResult, envelope !== undefined),
+					);
 				}
 
 				// d. PII check on action params
@@ -2269,7 +2275,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					if (piiResult.found && config.pii === "block") {
 						throw new PolicyDeniedError(
 							`PII detected in action params: ${piiResult.types.join(", ")}`,
-							'PII enforcement blocked this call. Use { pii: "warn" } to log instead, or { pii: "redact" } to strip PII before egress.',
+							'PII enforcement blocked this action. Use { pii: "warn" } to log instead of block; on governed actions { pii: "redact" } redacts only the audit copy — the action itself runs on the original input.',
 						);
 					}
 				}

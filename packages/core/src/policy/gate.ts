@@ -75,15 +75,23 @@ const BUDGET_HINT_FIELDS = new Set([
  * hard violation is budget-classed — the error's default hint then applies. PII
  * and injection denials never reach here: they throw from their own detector
  * sites, which pass their own class hints.
+ *
+ * `attributed` is the caller's own truth about whether an ENVELOPE is in scope for
+ * the denied call, and it selects between two remedies that are not
+ * interchangeable. An attributed call's hold debits the cost center's wallet, so
+ * `allocateBudget` can move it. An UNATTRIBUTED call's hold debits the session
+ * holding wallet, which no envelope funds — prescribing `allocateBudget` there
+ * sends an operator to a lever that provably cannot lift this denial. Pass
+ * `envelope !== undefined` from the gate call site; never guess it from the rule.
  */
-export function derivePolicyHint(result: PolicyResult): string | undefined {
+export function derivePolicyHint(result: PolicyResult, attributed: boolean): string | undefined {
 	const budgetHit = result.hardViolations.some((v) =>
 		v.fields.some((f) => BUDGET_HINT_FIELDS.has(f)),
 	);
-	if (budgetHit) {
-		return "A budget rule denied this call: check the envelope's allocation (allocateBudget) and your budgetFractionRemaining / budgetRunwayHours tiers.";
-	}
-	return undefined;
+	if (!budgetHit) return undefined;
+	return attributed
+		? "A budget rule denied this call: check the envelope's allocation (allocateBudget) and your budgetFractionRemaining / budgetRunwayHours tiers."
+		: "A budget rule denied this call: increase the budget in trust() options or reduce the call's max_tokens, and review your budget_remaining / budget_remaining_after tiers.";
 }
 
 // ---------------------------------------------------------------------------
