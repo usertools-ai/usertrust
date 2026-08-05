@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Budget envelopes: spend routing, per-envelope caps, and scarcity visibility
+  (#79, previously unlisted).** `withCostCenter(costCenter, fn, opts?)`
+  (`budget/attribution.ts`) attributes a governed call's spend to a
+  `(parentUserId, costCenter)` envelope by CODE STRUCTURE — an
+  `AsyncLocalStorage` scope, never anything a request body can carry. An
+  attributed hold debits the envelope's own ledger-derived account
+  (`allocateBudget` / `reclaimBudget`), so TigerBeetle's atomic
+  `debits_must_not_exceed_credits` enforces the per-envelope cap the same way
+  it already enforced the session wallet's. `getBudgetStatus` and the batched
+  `budgetContext()` read the envelope's live balance; the gate's
+  `budgetFractionRemaining` / `budgetRunwayHours` turn that into pre-spend
+  policy tiers, and settled receipts carry the same numbers under
+  `receipt.budget` as a post-settle snapshot. Both surfaces are OBSERVATIONS,
+  never authority — see the Money invariants in `AGENTS.md`.
+- **Settle-shortfall hardening.** The PENDING hold's size is a heuristic
+  estimate (chars/4 tokens × a 1.5x safety margin), so real usage can price
+  above the reserve. TigerBeetle rejects — never caps — a settle POST above
+  its pending transfer's amount, which previously left the call reporting
+  `settled: false` with the hold stranded PENDING until `destroy()` or the
+  300s TigerBeetle timeout, and the wallet ultimately charged nothing for a
+  call that succeeded. Both `createTBEngine` factories (`govern.ts`,
+  `headless.ts`) now cap the post at the reserved amount themselves and audit
+  the truncation as a `settlement_shortfall` event; `ledger/engine.ts` reaches
+  the same outcome reactively (catches `exceeds_pending_transfer_amount`,
+  re-posts with the amount omitted so TigerBeetle posts the full hold).
+  `TrustReceipt.postedCost` is now populated whenever the post was capped
+  (`receipt.cost − receipt.postedCost` is the shortfall); `receipt.cost` stays
+  the true metered cost, and `settled` stays `true`.
+- **Class-aware denial hints.** A hard policy denial whose triggering rule
+  conditions any budget-scoped field (`budget_remaining`,
+  `budget_remaining_after`, `budgetFractionRemaining`, `budgetRunwayHours`,
+  `estimated_cost`) now surfaces a budget-specific remedy pointing at
+  `allocateBudget` and the fraction/runway tiers (`derivePolicyHint`), instead
+  of the rule's generic description.
+
+### Fixed
+
+- A policy rule with no `description` no longer renders its identifier twice
+  in the denial reason (`[scarcity-brake] scarcity-brake` is now
+  `[scarcity-brake]`).
+
+## [3.0.0] - 2026-08-03
+
 **Loopback/local endpoints now settle at nominal local rates instead of silently
 billing frontier fallback.** Before, a free `llama3.3:70b` call against
 `http://localhost:11434/v1` was priced like an unknown cloud model at

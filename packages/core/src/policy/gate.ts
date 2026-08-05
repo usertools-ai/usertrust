@@ -447,6 +447,16 @@ export interface PolicyContext extends Record<string, unknown> {
 	 * The one thing it is NOT is a number the caller chose: see the trust-boundary
 	 * paragraph above, and {@link PolicyContext.cost_center} for why the
 	 * attribution behind it cannot be forged either.
+	 *
+	 * OPERATOR NOTE — this is a lagging number, twice over. It is computed before
+	 * the call's own hold and excludes its estimated cost (only
+	 * `budget_remaining_after` is estimate-inclusive), and `receipt.budget` /
+	 * `budgetContext()` are post-settle snapshots, so any dashboard built on
+	 * either one reads one call behind the gate. In practice: an `lt` tier
+	 * starts denying with the call *after* the one whose settle crossed the
+	 * threshold, not the crossing call itself — a fraction sitting exactly on
+	 * the boundary still reads as inside it under `lt`. Write `lte` where the
+	 * tier must also catch that edge call.
 	 */
 	budgetFractionRemaining?: number | undefined;
 	/**
