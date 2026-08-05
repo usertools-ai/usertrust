@@ -24,6 +24,7 @@ vi.mock("tigerbeetle-node", () => ({
 		exceeds_credits: 22,
 		overflows_debits: 30,
 		overflows_debits_pending: 31,
+		exceeds_pending_transfer_amount: 31,
 	},
 	amount_max: (1n << 128n) - 1n,
 }));
@@ -42,8 +43,9 @@ vi.mock("node:fs", async (importOriginal) => {
 	};
 });
 
+import { CreateTransferStatus } from "tigerbeetle-node";
 import type { TrustTBClient } from "../../src/ledger/client.js";
-import { XFER_SPEND } from "../../src/ledger/client.js";
+import { TBTransferError, XFER_SPEND } from "../../src/ledger/client.js";
 import type { SpendAction } from "../../src/ledger/engine.js";
 import { TrustEngine } from "../../src/ledger/engine.js";
 import { InsufficientBalanceError } from "../../src/shared/errors.js";
@@ -541,6 +543,27 @@ describe("TrustEngine", () => {
 			// Actual cost was less
 			await engine.postPendingSpend(result.transferId, 80);
 			expect(mockTB.postTransfer).toHaveBeenCalledWith(42n, 80);
+		});
+
+		it("recovers an above-hold settle by re-posting the full pending amount, never voiding", async () => {
+			mockTB.createPendingTransfer.mockResolvedValueOnce(42n);
+			// First post (actual 200 > hold 105) → TB rejects with status 31.
+			mockTB.postTransfer.mockRejectedValueOnce(
+				new TBTransferError(
+					CreateTransferStatus.exceeds_pending_transfer_amount,
+					"Post transfer failed: exceeds_pending_transfer_amount",
+				),
+			);
+			// Recovery re-post (amount omitted → amount_max → full pending amount).
+			mockTB.postTransfer.mockResolvedValueOnce(101n);
+
+			const result = await engine.spendPending({ userId: "user_1", action: DEFAULT_ACTION });
+			await engine.postPendingSpend(result.transferId, 200);
+
+			expect(mockTB.postTransfer).toHaveBeenNthCalledWith(1, 42n, 200);
+			expect(mockTB.postTransfer).toHaveBeenNthCalledWith(2, 42n, undefined);
+			// The old behavior voided the hold (settling ZERO for a successful call).
+			expect(mockTB.voidTransfer).not.toHaveBeenCalled();
 		});
 	});
 });

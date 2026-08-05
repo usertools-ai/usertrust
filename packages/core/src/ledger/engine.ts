@@ -120,6 +120,16 @@ function isInsufficientBalanceError(err: unknown): err is TBTransferError {
 	);
 }
 
+/** TigerBeetle's rejection of a post whose amount exceeds the pending transfer's. */
+function isExceedsPendingAmount(err: unknown): err is TBTransferError {
+	if (err == null || typeof err !== "object") return false;
+	if (!("code" in err) || !("name" in err)) return false;
+	const e = err as { code: number; name: string };
+	return (
+		e.name === "TBTransferError" && e.code === CreateTransferStatus.exceeds_pending_transfer_amount
+	);
+}
+
 // ── Engine ──
 
 export class TrustEngine {
@@ -195,6 +205,16 @@ export class TrustEngine {
 		try {
 			await this.tb.postTransfer(BigInt(transferId), actualAmount);
 		} catch (err) {
+			// Actual cost priced above the reserved hold: TigerBeetle rejects the
+			// post outright (it never caps). The call itself succeeded, so voiding
+			// would settle ZERO for real spend — instead re-post with the amount
+			// omitted, which posts the full pending (= held) amount. This engine is
+			// stateless (no held-amount tracking survives it), so the cap is
+			// reactive here; the governor-side factories precompute it (spec D1).
+			if (isExceedsPendingAmount(err)) {
+				await this.tb.postTransfer(BigInt(transferId), undefined);
+				return;
+			}
 			// Post may have succeeded on TB but timed out — try to void
 			let voidSucceeded = false;
 			try {
