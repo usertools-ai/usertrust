@@ -1143,6 +1143,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// e. Forward to original SDK. P3-PII-REDACT-EGRESS: forwardArgs is the
 			// redacted clone in redact mode, or the original args otherwise.
 			let settled = true;
+			// D4: set only when the engine capped the post at the reserved hold. The
+			// stream and non-stream terminals are mutually exclusive for one hold, so
+			// they share this the same way they share `settled`.
+			let postedCost: number | undefined;
 
 			// A2: one idempotent finalize gate per hold. The FIRST terminal signal for
 			// this authorization wins and claims the single ledger outcome (settle XOR
@@ -1265,8 +1269,28 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					}
 				} else if (engine != null && !isDryRun) {
 					try {
-						// Post the ACTUAL consumed cost (RECON #3).
-						await engine.postPendingSpend(transferId, streamCost);
+						// Post the ACTUAL consumed cost (RECON #3), capped by the engine
+						// at the reserved hold; a truncation comes back as `shortfall`.
+						const postResult = await engine.postPendingSpend(transferId, streamCost);
+						if (postResult != null && postResult.shortfall > 0) {
+							postedCost = postResult.posted;
+							await audit
+								.appendEvent({
+									kind: "settlement_shortfall",
+									actor: "local",
+									data: {
+										model,
+										actual: streamCost,
+										posted: postResult.posted,
+										shortfall: postResult.shortfall,
+										transferId,
+										...costCenterAudit,
+									},
+								})
+								.catch(() => {
+									callAuditDegraded = true;
+								});
+						}
 					} catch (postErr) {
 						settled = false;
 						await audit
@@ -1367,6 +1391,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
 					},
+					...(postedCost !== undefined ? { postedCost } : {}),
 					...(streamBudget !== undefined ? { budget: streamBudget } : {}),
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					// AUD-456: Flag proxy stub receipts
@@ -1886,8 +1911,28 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// g2. Failure mode 15.1: POST fails after LLM success
 				if (engine != null && !isDryRun) {
 					try {
-						// Post the ACTUAL consumed cost (RECON #3).
-						await engine.postPendingSpend(transferId, actualCost);
+						// Post the ACTUAL consumed cost (RECON #3), capped by the engine
+						// at the reserved hold; a truncation comes back as `shortfall`.
+						const postResult = await engine.postPendingSpend(transferId, actualCost);
+						if (postResult != null && postResult.shortfall > 0) {
+							postedCost = postResult.posted;
+							await audit
+								.appendEvent({
+									kind: "settlement_shortfall",
+									actor: "local",
+									data: {
+										model,
+										actual: actualCost,
+										posted: postResult.posted,
+										shortfall: postResult.shortfall,
+										transferId,
+										...costCenterAudit,
+									},
+								})
+								.catch(() => {
+									callAuditDegraded = true;
+								});
+						}
 					} catch (postErr) {
 						// POST failed — LLM call succeeded but settlement is ambiguous
 						settled = false;
@@ -2002,6 +2047,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
 					},
+					...(postedCost !== undefined ? { postedCost } : {}),
 					...(settledBudget !== undefined ? { budget: settledBudget } : {}),
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					// AUD-456: Flag proxy stub receipts
