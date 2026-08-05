@@ -35,14 +35,15 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { AccountFlags, CreateTransferStatus } from "tigerbeetle-node";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
-const DMNEC = 1 << 2; // AccountFlags.debits_must_not_exceed_credits
-const DEBIT_ACCOUNT_NOT_FOUND = 21; // CreateTransferStatus.debit_account_not_found
+const DMNEC = AccountFlags.debits_must_not_exceed_credits;
+const DEBIT_ACCOUNT_NOT_FOUND = CreateTransferStatus.debit_account_not_found;
 
-const { store, created, pendings, holds, mockClient } = vi.hoisted(() => {
+const { store, created, pendings, holds, mockClient, tb } = vi.hoisted(() => {
 	interface Acct {
 		flags: number;
 		credits_posted: bigint;
@@ -54,16 +55,24 @@ const { store, created, pendings, holds, mockClient } = vi.hoisted(() => {
 		credit: bigint;
 		amount: bigint;
 	}
-	const S = {
-		exceeds_credits: 22,
-		debit_account_not_found: 21,
-		credit_account_not_found: 23,
-		pending_transfer_not_found: 40,
+	/**
+	 * The INSTALLED tigerbeetle-node enums, filled in by the module mock below —
+	 * a `vi.hoisted` block cannot await the import itself, and the fake's handlers
+	 * only read these at call time, long after the mock factory has run.
+	 *
+	 * Hand-copied constants are what let the previous fake answer 22 for
+	 * `exceeds_credits`, the code the real database uses for
+	 * `credit_account_not_found`. Production branches on specific numbers
+	 * (`isTBInsufficientBalance`, `isTBDebitAccountNotFound`), so a mis-copied
+	 * status makes the seam agree with itself and disagree with TigerBeetle.
+	 */
+	const tb = {} as {
+		AccountFlags: typeof AccountFlags;
+		TransferFlags: typeof import("tigerbeetle-node").TransferFlags;
+		CreateAccountStatus: typeof import("tigerbeetle-node").CreateAccountStatus;
+		CreateTransferStatus: typeof CreateTransferStatus;
+		amount_max: bigint;
 	};
-	const DMNEC_FLAG = 1 << 2;
-	const PENDING_FLAG = 1;
-	const POST_FLAG = 2;
-	const VOID_FLAG = 4;
 
 	const store = new Map<bigint, Acct>();
 	/** Account ids in creation order: [treasury, holding wallet, …]. */
@@ -76,7 +85,7 @@ const { store, created, pendings, holds, mockClient } = vi.hoisted(() => {
 	const mockClient = {
 		createAccounts: vi.fn(async (accts: { id: bigint; flags: number }[]) => {
 			for (const a of accts) {
-				if (store.has(a.id)) return [{ status: 1 /* exists */ }];
+				if (store.has(a.id)) return [{ status: tb.CreateAccountStatus.exists }];
 				store.set(a.id, {
 					flags: a.flags,
 					credits_posted: 0n,
@@ -98,6 +107,13 @@ const { store, created, pendings, holds, mockClient } = vi.hoisted(() => {
 					flags: number;
 				}[],
 			) => {
+				const S = tb.CreateTransferStatus;
+				const {
+					pending: PENDING_FLAG,
+					post_pending_transfer: POST_FLAG,
+					void_pending_transfer: VOID_FLAG,
+				} = tb.TransferFlags;
+				const DMNEC_FLAG = tb.AccountFlags.debits_must_not_exceed_credits;
 				for (const t of xs) {
 					// Post/void resolve their accounts from the original pending transfer
 					// (the client sends 0n for both account ids on those).
@@ -107,11 +123,21 @@ const { store, created, pendings, holds, mockClient } = vi.hoisted(() => {
 						const debit = store.get(orig.debit);
 						const credit = store.get(orig.credit);
 						if (!debit || !credit) return [{ status: S.debit_account_not_found }];
+						// `amount_max` is TigerBeetle's "post the whole pending amount"
+						// sentinel, and is what the client sends when no actual amount is
+						// given. Everything else is a literal request.
+						const requested = t.amount === tb.amount_max ? orig.amount : t.amount;
+						// Real TigerBeetle REJECTS a post above the pending amount — it does
+						// not cap. (The previous fake capped, modelling semantics the
+						// database does not have.) The rejection lands BEFORE the pending
+						// debit is released, so a rejected post leaves the hold untouched.
+						if ((t.flags & POST_FLAG) !== 0 && requested > orig.amount) {
+							return [{ status: S.exceeds_pending_transfer_amount }];
+						}
 						debit.debits_pending -= orig.amount;
 						if (t.flags & POST_FLAG) {
-							const posted = t.amount < orig.amount ? t.amount : orig.amount;
-							debit.debits_posted += posted;
-							credit.credits_posted += posted;
+							debit.debits_posted += requested;
+							credit.credits_posted += requested;
 						}
 						pendings.delete(t.pending_id);
 						continue;
@@ -164,29 +190,21 @@ const { store, created, pendings, holds, mockClient } = vi.hoisted(() => {
 		lookupTransfers: vi.fn(async () => []),
 		destroy: vi.fn(),
 	};
-	return { store, created, pendings, holds, mockClient };
+	return { store, created, pendings, holds, mockClient, tb };
 });
 
-vi.mock("tigerbeetle-node", () => ({
-	createClient: vi.fn(() => mockClient),
-	AccountFlags: { linked: 1, debits_must_not_exceed_credits: 1 << 2, history: 1 << 5 },
-	TransferFlags: {
-		pending: 1,
-		post_pending_transfer: 2,
-		void_pending_transfer: 4,
-		linked: 8,
-	},
-	CreateAccountStatus: { created: 4294967295, exists: 1 },
-	CreateTransferStatus: {
-		created: 4294967295,
-		exists: 1,
-		exceeds_credits: 22,
-		overflows_debits: 30,
-		overflows_debits_pending: 31,
-		debit_account_not_found: 21,
-	},
-	amount_max: (1n << 128n) - 1n,
-}));
+// Only `createClient` is faked. Every enum and sentinel comes from the INSTALLED
+// package, so the fake's status codes, account flags and transfer flags are the
+// ones production compares against rather than a self-consistent fiction.
+vi.mock("tigerbeetle-node", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("tigerbeetle-node")>();
+	tb.AccountFlags = actual.AccountFlags;
+	tb.TransferFlags = actual.TransferFlags;
+	tb.CreateAccountStatus = actual.CreateAccountStatus;
+	tb.CreateTransferStatus = actual.CreateTransferStatus;
+	tb.amount_max = actual.amount_max;
+	return { ...actual, createClient: vi.fn(() => mockClient) };
+});
 
 import { withCostCenter } from "../../src/budget/attribution.js";
 import { createTBEngine, trust } from "../../src/govern.js";
@@ -404,6 +422,51 @@ describe("createTBEngine — rejection classification (D5)", () => {
 		expect(balanceErr.required).toBe(999);
 		expect(balanceErr.available).toBe(0);
 		expect(mockClient.lookupAccounts).toHaveBeenCalledWith([envelope]);
+		engine.destroy?.();
+	});
+});
+
+describe("createTBEngine — settle is capped at the reserved hold (D1)", () => {
+	it("caps an above-hold settle at the reserved amount and reports the shortfall", async () => {
+		reset();
+		// Hold 78, actual 84. TigerBeetle REJECTS a post above the pending amount
+		// (`exceeds_pending_transfer_amount`) rather than capping, so the factory has
+		// to truncate before it asks — and hand the governor the 6-usertoken
+		// shortfall to audit.
+		const engine = await createTBEngine(CONFIG, 10_000);
+
+		await engine.spendPending({ transferId: "t-over", amount: 78 });
+		const result = await engine.postPendingSpend("t-over", 84);
+
+		expect(result).toEqual({ posted: 78, shortfall: 6 });
+		expect(store.get(holdingWallet())?.debits_posted).toBe(78n);
+		expect(store.get(holdingWallet())?.debits_pending).toBe(0n);
+		engine.destroy?.();
+	});
+
+	it("below-hold settle still posts the actual amount with zero shortfall", async () => {
+		reset();
+		const engine = await createTBEngine(CONFIG, 10_000);
+
+		await engine.spendPending({ transferId: "t-under", amount: 78 });
+		const result = await engine.postPendingSpend("t-under", 30);
+
+		expect(result).toEqual({ posted: 30, shortfall: 0 });
+		expect(store.get(holdingWallet())?.debits_posted).toBe(30n);
+		expect(store.get(holdingWallet())?.debits_pending).toBe(0n);
+		engine.destroy?.();
+	});
+
+	it("omitting the actual amount posts the whole hold, unchanged", async () => {
+		reset();
+		const engine = await createTBEngine(CONFIG, 10_000);
+
+		await engine.spendPending({ transferId: "t-full", amount: 78 });
+		const result = await engine.postPendingSpend("t-full");
+
+		expect(result).toEqual({ posted: 78, shortfall: 0 });
+		expect(store.get(holdingWallet())?.debits_posted).toBe(78n);
+		expect(store.get(holdingWallet())?.debits_pending).toBe(0n);
 		engine.destroy?.();
 	});
 });

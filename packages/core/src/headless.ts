@@ -450,7 +450,11 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 	// account across restarts (which would inflate the TB-enforced budget).
 	const holdingId = await tbClient.createFundedBudgetWallet(seedBudget);
 
-	const pendingMap = new Map<string, bigint>();
+	// Pending transfer mapping (trustId string -> TB id + the reserved amount).
+	// heldAmount is what postPendingSpend caps against: TigerBeetle REJECTS a post
+	// above the pending amount (exceeds_pending_transfer_amount) — it never caps —
+	// so the truncation must happen here, where the reserve is known (spec D1).
+	const pendingMap = new Map<string, { tbId: bigint; heldAmount: number }>();
 
 	return {
 		async spendPending(params: {
@@ -469,7 +473,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					amount: params.amount,
 					code: XFER_SPEND,
 				});
-				pendingMap.set(params.transferId, tbTransferId);
+				pendingMap.set(params.transferId, { tbId: tbTransferId, heldAmount: params.amount });
 				return { transferId: params.transferId };
 			} catch (err) {
 				// Over-budget reservation → TB rejects the pending debit. Surface as a
@@ -538,31 +542,39 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			return await tbClient.lookupBalances(accountIds);
 		},
 
-		async postPendingSpend(transferId: string, actualAmount?: number): Promise<void> {
-			const tbId = pendingMap.get(transferId);
-			if (tbId === undefined) {
+		async postPendingSpend(
+			transferId: string,
+			actualAmount?: number,
+			// biome-ignore lint/suspicious/noConfusingVoidType: matches the TrustEngine interface, where `void` is load-bearing (see the declaration in govern.ts).
+		): Promise<{ posted: number; shortfall: number } | void> {
+			const entry = pendingMap.get(transferId);
+			if (entry === undefined) {
 				throw new Error(`No pending transfer found for ${transferId}`);
 			}
-			// Post the ACTUAL consumed amount (≤ the reserved estimate); omitting it
-			// posts the full pending amount.
-			await tbClient.postTransfer(tbId, actualAmount);
+			// Post at most the RESERVED amount; the truncation (shortfall) is
+			// returned for the governor to audit. Omitting actualAmount still posts
+			// the full pending amount (amount_max), unchanged.
+			const posted =
+				actualAmount != null ? Math.min(actualAmount, entry.heldAmount) : entry.heldAmount;
+			await tbClient.postTransfer(entry.tbId, actualAmount != null ? posted : undefined);
 			pendingMap.delete(transferId);
+			return { posted, shortfall: actualAmount != null ? actualAmount - posted : 0 };
 		},
 
 		async voidPendingSpend(transferId: string): Promise<void> {
-			const tbId = pendingMap.get(transferId);
-			if (tbId === undefined) {
+			const entry = pendingMap.get(transferId);
+			if (entry === undefined) {
 				throw new Error(`No pending transfer found for ${transferId}`);
 			}
-			await tbClient.voidTransfer(tbId);
+			await tbClient.voidTransfer(entry.tbId);
 			pendingMap.delete(transferId);
 		},
 
 		async voidAllPending(): Promise<void> {
 			const entries = [...pendingMap.entries()];
-			for (const [trustIdKey, tbTransferId] of entries) {
+			for (const [trustIdKey, entry] of entries) {
 				try {
-					await tbClient.voidTransfer(tbTransferId);
+					await tbClient.voidTransfer(entry.tbId);
 				} catch {
 					// Best-effort
 				}
