@@ -28,10 +28,12 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readLedgerEvents } from "../../src/audit/read.js";
 import { trust } from "../../src/govern.js";
 import { estimateCost, estimateInputTokens } from "../../src/ledger/pricing.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import { InsufficientBalanceError, PolicyDeniedError } from "../../src/shared/errors.js";
+import type { TrustReceipt } from "../../src/shared/types.js";
 
 const TB_ADDRESS = process.env.USERTRUST_TB_ADDRESS;
 
@@ -56,6 +58,13 @@ const HOLD = estimateCost(MODEL, estimateInputTokens(MESSAGES), MAX_TOKENS);
 // settle permanently frees less than a full hold on the real ledger.
 const USAGE = { input_tokens: 100, output_tokens: 50 };
 const ACTUAL_COST = estimateCost(MODEL, USAGE.input_tokens, USAGE.output_tokens);
+
+// The mirror image: provider-reported usage → a SETTLED cost strictly ABOVE the
+// reserved hold. The input side of the estimate is a chars/4×1.5 heuristic, so
+// real usage can price above what was reserved. TigerBeetle REJECTS (never caps)
+// a post above its pending transfer, so the settle must be capped at the hold.
+const USAGE_OVER = { input_tokens: 5000, output_tokens: 1024 };
+const ACTUAL_OVER = estimateCost(MODEL, USAGE_OVER.input_tokens, USAGE_OVER.output_tokens);
 
 // ── Helpers ──
 
@@ -92,6 +101,11 @@ function okResponse(): Record<string, unknown> {
 		model: MODEL,
 		usage: { ...USAGE },
 	};
+}
+
+/** The same response, reporting the usage that prices ABOVE the reserved hold. */
+function overResponse(): Record<string, unknown> {
+	return { ...okResponse(), usage: { ...USAGE_OVER } };
 }
 
 const CALL = { model: MODEL, max_tokens: MAX_TOKENS, messages: MESSAGES } as const;
@@ -131,6 +145,54 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — two-phase hard-budget invaria
 		} finally {
 			await governed.destroy();
 		}
+	});
+
+	it("caps a settle above the reserved hold at the hold and audits the shortfall", async () => {
+		// The fixture's premise, asserted rather than assumed.
+		expect(ACTUAL_OVER).toBeGreaterThan(HOLD);
+
+		// The wallet is funded with EXACTLY one hold, so the capped post consumes the
+		// session wallet down to zero and there is no headroom an uncapped post could
+		// have hidden in.
+		const vaultBase = makeVault(HOLD);
+		const create = vi.fn(async () => overResponse());
+		const governed = await trust(anthropicClient(create), { vaultBase });
+		try {
+			const { receipt } = (await governed.messages.create({ ...CALL })) as {
+				receipt: TrustReceipt;
+			};
+
+			// Against a REAL cluster, `settled: true` IS the ledger assertion: TB rejects
+			// a post above its pending transfer (exceeds_pending_transfer_amount), so an
+			// uncapped settle of ACTUAL_OVER could only have come back settled:false with
+			// a `settlement_ambiguous` event. It committed, at `postedCost` — the exact
+			// held amount, no more (which would be impossible) and no less (which is what
+			// a void would have made of it).
+			expect(receipt.settled).toBe(true);
+			expect(receipt.usageSource).toBe("provider");
+			// The receipt keeps the TRUE metered cost; the ledger's number sits beside it.
+			expect(receipt.cost).toBe(ACTUAL_OVER);
+			expect(receipt.postedCost).toBe(HOLD);
+			expect(create).toHaveBeenCalledTimes(1);
+		} finally {
+			await governed.destroy();
+		}
+
+		// The gap is on the REAL chain — the persisted events.jsonl, not an injected
+		// writer — exactly once, and carrying both sides of the truncation.
+		const events = readLedgerEvents(join(vaultBase, VAULT_DIR));
+		const shortfalls = events.filter((e) => e.kind === "settlement_shortfall");
+		expect(shortfalls).toHaveLength(1);
+		expect(shortfalls[0]?.data).toMatchObject({
+			model: MODEL,
+			actual: ACTUAL_OVER,
+			posted: HOLD,
+			shortfall: ACTUAL_OVER - HOLD,
+		});
+		// An unattributed hold debits the session wallet, so no cost center is named.
+		expect(shortfalls[0]?.data).not.toHaveProperty("costCenter");
+		// A capped settle is a SETTLED one — nothing about it is ambiguous.
+		expect(events.filter((e) => e.kind === "settlement_ambiguous")).toHaveLength(0);
 	});
 
 	it("hard-refuses a sequential over-budget call pre-spend and keeps the real ledger consistent", async () => {

@@ -31,6 +31,7 @@ import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readLedgerEvents } from "../../src/audit/read.js";
 import { allocateBudget, getBudgetStatus, reclaimBudget } from "../../src/budget/allocation.js";
 import { withCostCenter } from "../../src/budget/attribution.js";
 import { budgetContext } from "../../src/budget/context.js";
@@ -39,6 +40,7 @@ import { TrustTBClient, XFER_PURCHASE } from "../../src/ledger/client.js";
 import { estimateCost, estimateInputTokens } from "../../src/ledger/pricing.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import { InsufficientBalanceError, PolicyDeniedError } from "../../src/shared/errors.js";
+import type { TrustReceipt } from "../../src/shared/types.js";
 
 const TB_ADDRESS = process.env.USERTRUST_TB_ADDRESS;
 
@@ -78,6 +80,13 @@ const HOLD = estimateCost(MODEL, estimateInputTokens(MESSAGES), MAX_TOKENS);
 const USAGE = { input_tokens: 100, output_tokens: 50 };
 const ACTUAL_COST = estimateCost(MODEL, USAGE.input_tokens, USAGE.output_tokens);
 
+// Provider-reported usage → a SETTLED cost strictly ABOVE the reserved hold: the
+// input side of the estimate is a chars/4×1.5 heuristic, so real usage can price
+// above it (spec: settle-shortfall hardening). The settle must cap at HOLD, keep
+// settled:true, and audit the shortfall — never strand the hold or void real spend.
+const USAGE_OVER = { input_tokens: 5000, output_tokens: 1024 };
+const ACTUAL_OVER = estimateCost(MODEL, USAGE_OVER.input_tokens, USAGE_OVER.output_tokens);
+
 // The envelope is funded with exactly one hold's worth — the same boundary
 // tigerbeetle.tb.test.ts's sequential-over-budget test uses, applied to the
 // cost-center wallet instead of the session wallet.
@@ -90,6 +99,9 @@ const PARENT_FUND = ENVELOPE_ALLOCATED;
 const SESSION_BUDGET = 1_000_000;
 
 const COST_CENTER = "research";
+// A cost center of its own for the overrun case: `(parent, costCenter)` IS the
+// envelope's account id, and both tests may run against one long-lived cluster.
+const COST_CENTER_OVER = "research-overrun";
 
 // ── Helpers ──
 
@@ -126,6 +138,11 @@ function okResponse(): Record<string, unknown> {
 		model: MODEL,
 		usage: { ...USAGE },
 	};
+}
+
+/** The same response, reporting the usage that prices ABOVE the reserved hold. */
+function overResponse(): Record<string, unknown> {
+	return { ...okResponse(), usage: { ...USAGE_OVER } };
 }
 
 const CALL = { model: MODEL, max_tokens: MAX_TOKENS, messages: MESSAGES } as const;
@@ -267,6 +284,120 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — cost-center envelope spend cy
 				} finally {
 					await governed.destroy();
 				}
+			} finally {
+				tb.destroy();
+			}
+		},
+	);
+
+	it(
+		"caps a settle ABOVE the reserved hold at the hold, audits the shortfall once, " +
+			"and leaves nothing pending on the real envelope",
+		async () => {
+			// The fixture's premise, asserted rather than assumed: a pricing-table
+			// change that made the estimate generous again would quietly turn this into
+			// a duplicate of the test above instead of failing.
+			expect(ACTUAL_OVER).toBeGreaterThan(HOLD);
+
+			// A fresh parent per run, as above — `(parent, costCenter)` IS the envelope
+			// account, and this file's two tests share one cluster.
+			const PARENT = `envelope-tb-over-${randomUUID()}`;
+
+			const tb = new TrustTBClient({ addresses: [TB_ADDRESS as string], clusterId: 0n });
+			try {
+				// ── Fund parent, allocate exactly one hold's worth ──
+				const treasury = await tb.createTreasury();
+				const parentAccountId = await tb.createUserWallet(PARENT);
+				await tb.immediateTransfer({
+					debitAccountId: treasury,
+					creditAccountId: parentAccountId,
+					amount: PARENT_FUND,
+					code: XFER_PURCHASE,
+				});
+				const allocation = await allocateBudget(tb, {
+					parentUserId: PARENT,
+					costCenter: COST_CENTER_OVER,
+					amount: ENVELOPE_ALLOCATED,
+				});
+				expect(allocation.allocated).toBe(ENVELOPE_ALLOCATED);
+
+				const vaultBase = makeVault(SESSION_BUDGET);
+				const periodStartMs = Date.now();
+				const create = vi.fn(async () => overResponse());
+				const governed = await trust(anthropicClient(create), { vaultBase, parentUserId: PARENT });
+				try {
+					const { receipt } = (await withCostCenter(
+						COST_CENTER_OVER,
+						() => governed.messages.create({ ...CALL }),
+						{ allocated: ENVELOPE_ALLOCATED, periodStartMs },
+					)) as { receipt: TrustReceipt };
+
+					// Against a REAL cluster this single assertion is the whole proof that
+					// the engine capped: TigerBeetle REJECTS (never caps) a post above its
+					// pending transfer, so an uncapped settle of ACTUAL_OVER would have come
+					// back settled:false with a `settlement_ambiguous` event instead.
+					expect(receipt.settled).toBe(true);
+					// The receipt keeps the TRUE metered cost — the ledger's number sits
+					// beside it in postedCost rather than overwriting it.
+					expect(receipt.cost).toBe(ACTUAL_OVER);
+					expect(receipt.postedCost).toBe(HOLD);
+					expect(create).toHaveBeenCalledTimes(1);
+					// D7 post-settle snapshot: one hold allocated, one hold consumed.
+					expect(receipt.budget).toEqual({
+						costCenter: COST_CENTER_OVER,
+						remaining: 0,
+						fraction: 0,
+					});
+
+					// ── Both read surfaces agree with the real ledger ──
+					const status = await getBudgetStatus(tb, {
+						parentUserId: PARENT,
+						costCenter: COST_CENTER_OVER,
+						allocated: ENVELOPE_ALLOCATED,
+						periodStartMs,
+					});
+					expect(status.balance).toBe(0);
+					expect(status.runway.remaining).toBe(0);
+
+					const ctx = await budgetContext(tb, PARENT, [
+						{ costCenter: COST_CENTER_OVER, allocated: ENVELOPE_ALLOCATED, periodStartMs },
+					]);
+					expect(ctx.envelopes[0]?.spent).toBe(HOLD);
+					expect(ctx.envelopes[0]?.remaining).toBe(0);
+				} finally {
+					await governed.destroy();
+				}
+
+				// ── The hold was POSTED, not stranded ──
+				// destroy() voids every hold still pending, so a hold left behind would
+				// come BACK here as a full refund (balance === HOLD) — the exact signature
+				// of the pre-capping behaviour this test exists to keep out. Read through a
+				// FRESH client — a connection that took no part in the session.
+				const verifier = new TrustTBClient({ addresses: [TB_ADDRESS as string], clusterId: 0n });
+				try {
+					const afterDestroy = await getBudgetStatus(verifier, {
+						parentUserId: PARENT,
+						costCenter: COST_CENTER_OVER,
+						allocated: ENVELOPE_ALLOCATED,
+						periodStartMs,
+					});
+					expect(afterDestroy.balance).toBe(0);
+				} finally {
+					verifier.destroy();
+				}
+
+				// ── The gap is on the REAL chain, exactly once ──
+				const events = readLedgerEvents(join(vaultBase, VAULT_DIR));
+				const shortfalls = events.filter((e) => e.kind === "settlement_shortfall");
+				expect(shortfalls).toHaveLength(1);
+				expect(shortfalls[0]?.data).toMatchObject({
+					costCenter: COST_CENTER_OVER,
+					actual: ACTUAL_OVER,
+					posted: HOLD,
+					shortfall: ACTUAL_OVER - HOLD,
+				});
+				// A capped settle is a SETTLED one — nothing about it is ambiguous.
+				expect(events.filter((e) => e.kind === "settlement_ambiguous")).toHaveLength(0);
 			} finally {
 				tb.destroy();
 			}
