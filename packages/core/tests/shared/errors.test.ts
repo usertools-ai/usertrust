@@ -32,12 +32,21 @@ describe("domain errors", () => {
 		expect(err.name).toBe("PolicyDeniedError");
 		expect(err).toBeInstanceOf(Error);
 		expect(err.hint).toBe(
-			'Check your policy rules in .usertrust/policies/ or use { pii: "warn" } to downgrade PII enforcement.',
+			'Check your policy rules in .usertrust/policies/default.yml or use { pii: "warn" } to downgrade PII enforcement.',
 		);
 		expect(err.docsUrl).toBe("https://usertrust.ai/docs/errors/policy-denied");
 		expect(err.message).toContain("Policy denied: blocked by rule X");
 		expect(err.message).toContain("\n\n  Hint: ");
 		expect(err.message).toContain("\n  Docs: https://usertrust.ai/docs/errors/policy-denied");
+	});
+
+	it("PolicyDeniedError hint is overridable per denial class", () => {
+		// Mirrors InsufficientBalanceError's hintOverride (errors.ts): the static
+		// hint gives PII advice on budget denials, which is wrong for that class.
+		const err = new PolicyDeniedError("[budget-tier] low runway", "Fund it: allocateBudget(...)");
+		expect(err.hint).toBe("Fund it: allocateBudget(...)");
+		expect(err.message).toContain("\n\n  Hint: Fund it: allocateBudget(...)");
+		expect(err.reason).toBe("[budget-tier] low runway");
 	});
 
 	it("AccountNotFoundError has userId", () => {

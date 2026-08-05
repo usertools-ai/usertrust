@@ -38,9 +38,16 @@ export class PolicyDeniedError extends Error {
 	public readonly hint: string;
 	public readonly docsUrl: string;
 
-	constructor(reason: string) {
+	/**
+	 * `hint` is overridable because the default advice is WRONG for a budget or
+	 * scarcity denial: it names a PII downgrade that has nothing to do with the
+	 * rule that fired. The governor derives a class-aware remedy at the throw
+	 * site; every caller that omits the argument gets the default string.
+	 */
+	constructor(reason: string, hintOverride?: string) {
 		const hint =
-			'Check your policy rules in .usertrust/policies/ or use { pii: "warn" } to downgrade PII enforcement.';
+			hintOverride ??
+			'Check your policy rules in .usertrust/policies/default.yml or use { pii: "warn" } to downgrade PII enforcement.';
 		const docsUrl = "https://usertrust.ai/docs/errors/policy-denied";
 		super(`Policy denied: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
 		this.name = "PolicyDeniedError";
