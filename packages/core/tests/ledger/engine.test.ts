@@ -23,7 +23,8 @@ vi.mock("tigerbeetle-node", () => ({
 		created: 4294967295,
 		exceeds_credits: 22,
 		overflows_debits: 30,
-		overflows_debits_pending: 31,
+		overflows_debits_pending: 47,
+		exceeds_pending_transfer_amount: 31,
 	},
 	amount_max: (1n << 128n) - 1n,
 }));
@@ -42,8 +43,9 @@ vi.mock("node:fs", async (importOriginal) => {
 	};
 });
 
+import { CreateTransferStatus } from "tigerbeetle-node";
 import type { TrustTBClient } from "../../src/ledger/client.js";
-import { XFER_SPEND } from "../../src/ledger/client.js";
+import { TBTransferError, XFER_SPEND } from "../../src/ledger/client.js";
 import type { SpendAction } from "../../src/ledger/engine.js";
 import { TrustEngine } from "../../src/ledger/engine.js";
 import { InsufficientBalanceError } from "../../src/shared/errors.js";
@@ -179,7 +181,7 @@ describe("TrustEngine", () => {
 
 		it("catches TB overflows_debits_pending error and wraps it", async () => {
 			const tbErr = new Error("Pending transfer failed: overflows_debits_pending");
-			Object.assign(tbErr, { name: "TBTransferError", code: 31 });
+			Object.assign(tbErr, { name: "TBTransferError", code: 47 });
 			mockTB.createPendingTransfer.mockRejectedValueOnce(tbErr);
 			mockTB.lookupBalance.mockResolvedValueOnce({
 				available: 0,
@@ -315,6 +317,72 @@ describe("TrustEngine", () => {
 				"pending transfer voided after post failure",
 			);
 			expect(mockTB.voidTransfer).toHaveBeenCalledWith(42n);
+		});
+
+		// ── Status-31 recovery: re-post the FULL pending amount ──
+		//
+		// TigerBeetle REJECTS (never caps) a post above the pending transfer. The
+		// LLM call already happened, so voiding would settle ZERO for real spend —
+		// the engine re-posts with the amount omitted, which posts the held amount.
+		// That recovery post is a network call like any other and can fail; when it
+		// does, the transfer is in exactly the same ambiguous state as a first-post
+		// failure and MUST route into the same void → DLQ handling.
+
+		it("recovers a status-31 rejection by re-posting the full pending amount", async () => {
+			mockTB.postTransfer.mockRejectedValueOnce(
+				new TBTransferError(
+					CreateTransferStatus.exceeds_pending_transfer_amount,
+					"exceeds pending transfer amount",
+				),
+			);
+			mockTB.postTransfer.mockResolvedValueOnce(100n);
+
+			await expect(engine.postPendingSpend("42", 5000)).resolves.toBeUndefined();
+
+			expect(mockTB.postTransfer).toHaveBeenNthCalledWith(1, 42n, 5000);
+			expect(mockTB.postTransfer).toHaveBeenNthCalledWith(2, 42n, undefined);
+			expect(mockTB.voidTransfer).not.toHaveBeenCalled();
+		});
+
+		it("voids and throws when the status-31 recovery re-post itself fails", async () => {
+			mockTB.postTransfer.mockRejectedValueOnce(
+				new TBTransferError(
+					CreateTransferStatus.exceeds_pending_transfer_amount,
+					"exceeds pending transfer amount",
+				),
+			);
+			mockTB.postTransfer.mockRejectedValueOnce(new Error("recovery post failed"));
+			mockTB.voidTransfer.mockResolvedValueOnce(101n);
+
+			// The recovery failure must NOT escape as its own raw error: that would
+			// skip the void attempt and leave the hold outstanding.
+			await expect(engine.postPendingSpend("42", 5000)).rejects.toThrow(
+				"Spend failed: pending transfer voided after post failure",
+			);
+			expect(mockTB.voidTransfer).toHaveBeenCalledWith(42n);
+		});
+
+		it("dead-letters when the status-31 recovery re-post AND the void both fail", async () => {
+			mockTB.postTransfer.mockRejectedValueOnce(
+				new TBTransferError(
+					CreateTransferStatus.exceeds_pending_transfer_amount,
+					"exceeds pending transfer amount",
+				),
+			);
+			mockTB.postTransfer.mockRejectedValueOnce(new Error("recovery post failed"));
+			mockTB.voidTransfer.mockRejectedValueOnce(new Error("void failed"));
+
+			await expect(engine.postPendingSpend("42", 5000)).rejects.toThrow(
+				"Spend settlement ambiguous",
+			);
+
+			const writtenData = mockWriteSync.mock.calls[0]?.[1] as string;
+			const dlqEntry = JSON.parse(writtenData.trim());
+			expect(dlqEntry.source).toBe("engine.postPendingSpend.ambiguous");
+			expect(dlqEntry.transferId).toBe("42");
+			// The DLQ carries the ORIGINAL requested amount — the one an operator
+			// needs to reconcile against, not the omitted recovery argument.
+			expect(dlqEntry.payload.actualAmount).toBe(5000);
 		});
 
 		it("writes to DLQ when both post and void fail", async () => {
@@ -541,6 +609,27 @@ describe("TrustEngine", () => {
 			// Actual cost was less
 			await engine.postPendingSpend(result.transferId, 80);
 			expect(mockTB.postTransfer).toHaveBeenCalledWith(42n, 80);
+		});
+
+		it("recovers an above-hold settle by re-posting the full pending amount, never voiding", async () => {
+			mockTB.createPendingTransfer.mockResolvedValueOnce(42n);
+			// First post (actual 200 > hold 105) → TB rejects with status 31.
+			mockTB.postTransfer.mockRejectedValueOnce(
+				new TBTransferError(
+					CreateTransferStatus.exceeds_pending_transfer_amount,
+					"Post transfer failed: exceeds_pending_transfer_amount",
+				),
+			);
+			// Recovery re-post (amount omitted → amount_max → full pending amount).
+			mockTB.postTransfer.mockResolvedValueOnce(101n);
+
+			const result = await engine.spendPending({ userId: "user_1", action: DEFAULT_ACTION });
+			await engine.postPendingSpend(result.transferId, 200);
+
+			expect(mockTB.postTransfer).toHaveBeenNthCalledWith(1, 42n, 200);
+			expect(mockTB.postTransfer).toHaveBeenNthCalledWith(2, 42n, undefined);
+			// The old behavior voided the hold (settling ZERO for a successful call).
+			expect(mockTB.voidTransfer).not.toHaveBeenCalled();
 		});
 	});
 });

@@ -93,7 +93,10 @@ are not.
 8. **Audit first.** The `llm_call` event is appended to the hash chain **before** the budget commit
    and before the ledger POST, so a `failClosed` deployment never settles an unaudited spend.
 9. **Settle.** `finalizeOnce("settle")` claims the single terminal outcome, then the budget commits
-   and `engine.postPendingSpend(transferId, actualCost)` posts the actual (≤ reserved) amount.
+   and `engine.postPendingSpend(transferId, actualCost)` posts `min(actual, reserved)` — TigerBeetle
+   REJECTS (never caps) a post above the pending amount, so the factories cap it and return the
+   truncation, which the governor audits as `settlement_shortfall` and reports as
+   `receipt.postedCost`. `receipt.cost` stays the true metered cost.
 10. **Or void.** Any failure path routes to `finalizeOnce("void")` → `voidPendingSpend`.
 
 `destroy()` waits up to 5s for in-flight work, voids all remaining pending transfers, flushes and
@@ -131,6 +134,16 @@ settle-then-void leaving the ledger holding a debit its accounting does not.
   circuit-breaker failure.
 - A governance anomaly cutoff voids.
 - A post-commit `failClosed` throw must **not** void an already-posted transfer.
+
+**Settle never exceeds the hold — and never silently fails because of it.** The hold's input side
+is a chars/4 × 1.5 heuristic (`pricing.ts`), so real usage CAN price above the reserve. Both
+`createTBEngine` factories cap the post at the reserved amount (`pendingMap` carries
+`heldAmount`) and return `{ posted, shortfall }`; `ledger/engine.ts` reaches the same semantics
+reactively (status-31 → re-post via `amount_max`). A shortfall is recorded as a
+`settlement_shortfall` audit event and `receipt.postedCost`; `settled` stays true.
+*Prevents:* the pre-hardening behavior — TigerBeetle rejecting the post, the call reporting
+`settled:false` with the hold stranded PENDING until destroy/300s timeout, and the wallet
+ultimately charged ZERO for a successful call while receipt and chain recorded the full cost.
 
 **TigerBeetle `exists` IS SUCCESS.**
 On `createTransfers`/`createAccounts`, `CreateTransferStatus.exists` / `CreateAccountStatus.exists`
@@ -336,9 +349,9 @@ accounting, matching the numbers its policy gate saw.
 *Every audit record an attributed call emits carries `costCenter`, from that same capture* — not
 from params, and on the failure terminals as well as the settle ones (`llm_call`, `<action.kind>`,
 `llm_call_failed`, `<action.kind>_failed`, `stream_partial_delivery`, `settlement_ambiguous`,
-`injection_detected`, `anomaly_detected`). An attributed hold must leave an attributed forensic
-trail whichever way it ends. Unattributed calls spread an empty object, so their records stay
-byte-identical to what they were before envelopes existed.
+`settlement_shortfall`, `injection_detected`, `anomaly_detected`). An attributed hold must leave an
+attributed forensic trail whichever way it ends. Unattributed calls spread an empty object, so their
+records stay byte-identical to what they were before envelopes existed.
 
 *One field, two spellings, deliberately.* The policy context spells it `cost_center` — snake_case,
 beside `estimated_cost`, `budget_remaining` and `action_kind`, because a rule file is what reads it
@@ -576,6 +589,15 @@ rejection of the hold — an OVERSHOOT, never a fractional/runway tier — the s
 session path has, and a stale cross-process read can still only under-deny. Moving the read under the
 lock is not check-then-act: the money decision stays the hold's atomic rejection; the read only makes
 the policy record consistent with the wallet the hold will debit.
+
+**`budgetFractionRemaining` is computed before the call's own hold, and excludes its estimated
+cost** — only `budget_remaining_after` is estimate-inclusive, so the fraction/runway tiers gate on
+the balance as it stood before this call, never on where this call's own spend would leave it.
+`receipt.budget` and `budgetContext()` are likewise POST-SETTLE snapshots, so any monitoring surface
+built on either one reads one call behind the gate. The practical consequence: an `lt` tier denies
+starting with the call *after* the one whose settle actually crossed the threshold, not the crossing
+call itself — a fraction that lands exactly on the boundary is read by `lt` as still inside it. Use
+`lte` where the tier must also catch that edge call.
 
 **Policy regexes are structurally ReDoS-guarded.** Patterns over 200 characters, with adjacent
 nested quantifiers (`a+*`), or with a quantified group whose body contains a quantifier or

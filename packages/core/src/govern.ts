@@ -49,7 +49,7 @@ import {
 } from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
-import { evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
+import { derivePolicyHint, evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
 import { detectInjection } from "./policy/injection.js";
 import { detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
@@ -154,10 +154,18 @@ export interface TrustEngine {
 		debitAccountId?: bigint | undefined;
 	}): Promise<{ transferId: string }>;
 	/**
-	 * Settle a PENDING hold. `actualAmount` posts the true consumed cost (which may
-	 * be less than the reserved estimate); omitting it posts the full pending amount.
+	 * Settle a PENDING hold. `actualAmount` is CAPPED at the reserved amount —
+	 * TigerBeetle rejects (never caps) a post above the pending transfer — and the
+	 * truncation is reported back as `shortfall` for the governor to audit as
+	 * `settlement_shortfall`. Omitting `actualAmount` posts the full pending
+	 * amount. An engine that returns `void` (injected test engines) is treated as
+	 * posted-in-full with zero shortfall.
 	 */
-	postPendingSpend(transferId: string, actualAmount?: number): Promise<void>;
+	postPendingSpend(
+		transferId: string,
+		actualAmount?: number,
+		// biome-ignore lint/suspicious/noConfusingVoidType: load-bearing — an injected engine declaring `Promise<void>` must stay assignable, and `void` is the only member type that accepts it; `undefined` would reject every one.
+	): Promise<{ posted: number; shortfall: number } | void>;
 	voidPendingSpend(transferId: string): Promise<void>;
 	/** AUD-461: Void all remaining pending transfers on destroy. */
 	voidAllPending?(): Promise<void>;
@@ -276,7 +284,10 @@ function enforceUnknownModelPolicy(
 ): void {
 	if (!resolution.unknown) return;
 	if (config.unknownModelPolicy === "deny") {
-		throw new PolicyDeniedError(`unknown_model: ${model} not in pricing table`);
+		throw new PolicyDeniedError(
+			`unknown_model: ${model} not in pricing table`,
+			'Set pricing: "custom" with a customRates entry for this model in usertrust.config.json, or use a model from the built-in pricing table.',
+		);
 	}
 	if (config.unknownModelPolicy === "warn") {
 		warnUnknownModel(model);
@@ -1000,7 +1011,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (policyResult.decision === "deny") {
 					const reason =
 						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
-					throw new PolicyDeniedError(reason);
+					throw new PolicyDeniedError(
+						reason,
+						derivePolicyHint(policyResult, envelope !== undefined),
+					);
 				}
 
 				// d. PII check + redact-egress
@@ -1008,7 +1022,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					const piiResult = detectPII(promptParts);
 					if (piiResult.found && config.pii === "block") {
 						// block mode: throw BEFORE any egress.
-						throw new PolicyDeniedError(`PII detected: ${piiResult.types.join(", ")}`);
+						throw new PolicyDeniedError(
+							`PII detected: ${piiResult.types.join(", ")}`,
+							'PII enforcement blocked this call. Use { pii: "warn" } to log instead, or { pii: "redact" } to strip PII before egress.',
+						);
 					}
 					if (config.pii === "redact" && piiResult.found) {
 						// redact mode: forward a redacted DEEP CLONE so PII never egresses.
@@ -1026,6 +1043,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						if (config.injection === "block") {
 							throw new PolicyDeniedError(
 								`Prompt injection detected: ${injectionResult.patterns.join(", ")}`,
+								'Injection enforcement blocked this call. Use { injection: "warn" } to log instead of block.',
 							);
 						}
 						// warn: log to audit trail (non-fatal)
@@ -1135,6 +1153,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// e. Forward to original SDK. P3-PII-REDACT-EGRESS: forwardArgs is the
 			// redacted clone in redact mode, or the original args otherwise.
 			let settled = true;
+			// D4: set only when the engine capped the post at the reserved hold. The
+			// stream and non-stream terminals are mutually exclusive for one hold, so
+			// they share this the same way they share `settled`.
+			let postedCost: number | undefined;
+			// D4 event-order buffer for the STREAM terminal: the truncation is learned at
+			// POST time but the `settlement_shortfall` event may only be appended AFTER
+			// this call's `llm_call`, so it is parked here and drained below.
+			let streamShortfall: { posted: number; shortfall: number } | undefined;
 
 			// A2: one idempotent finalize gate per hold. The FIRST terminal signal for
 			// this authorization wins and claims the single ledger outcome (settle XOR
@@ -1257,8 +1283,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					}
 				} else if (engine != null && !isDryRun) {
 					try {
-						// Post the ACTUAL consumed cost (RECON #3).
-						await engine.postPendingSpend(transferId, streamCost);
+						// Post the ACTUAL consumed cost (RECON #3), capped by the engine
+						// at the reserved hold; a truncation comes back as `shortfall`.
+						const postResult = await engine.postPendingSpend(transferId, streamCost);
+						if (postResult != null && postResult.shortfall > 0) {
+							postedCost = postResult.posted;
+							// EVENT ORDER: captured here, APPENDED after `llm_call` below.
+							// `verifyTransaction` resolves a transfer by the FIRST chain event
+							// whose `data.transferId` matches, so a shortfall written ahead of
+							// its `llm_call` would render this settled call as PENDING with no
+							// cost. The correction must annotate the settlement, never precede it.
+							streamShortfall = { posted: postResult.posted, shortfall: postResult.shortfall };
+						}
 					} catch (postErr) {
 						settled = false;
 						await audit
@@ -1315,6 +1351,29 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					callAuditDegraded = true;
 				}
 
+				// D4: the truncation correction, appended AFTER the `llm_call` it
+				// annotates (see the capture at the POST above). Still advisory — a chain
+				// that cannot take it degrades the receipt and NEVER unwinds a settlement
+				// that already committed.
+				if (streamShortfall !== undefined) {
+					await audit
+						.appendEvent({
+							kind: "settlement_shortfall",
+							actor: "local",
+							data: {
+								model,
+								actual: streamCost,
+								posted: streamShortfall.posted,
+								shortfall: streamShortfall.shortfall,
+								transferId,
+								...costCenterAudit,
+							},
+						})
+						.catch(() => {
+							callAuditDegraded = true;
+						});
+				}
+
 				// P3-AUDIT-FAILCLOSED (streaming): chunks were already delivered, so the
 				// strongest post-delivery signal is to REJECT `.receipt`. The caller's
 				// finally decrements inFlightStreamCount so destroy() never blocks.
@@ -1359,6 +1418,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
 					},
+					...(postedCost !== undefined ? { postedCost } : {}),
 					...(streamBudget !== undefined ? { budget: streamBudget } : {}),
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					// AUD-456: Flag proxy stub receipts
@@ -1878,8 +1938,28 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// g2. Failure mode 15.1: POST fails after LLM success
 				if (engine != null && !isDryRun) {
 					try {
-						// Post the ACTUAL consumed cost (RECON #3).
-						await engine.postPendingSpend(transferId, actualCost);
+						// Post the ACTUAL consumed cost (RECON #3), capped by the engine
+						// at the reserved hold; a truncation comes back as `shortfall`.
+						const postResult = await engine.postPendingSpend(transferId, actualCost);
+						if (postResult != null && postResult.shortfall > 0) {
+							postedCost = postResult.posted;
+							await audit
+								.appendEvent({
+									kind: "settlement_shortfall",
+									actor: "local",
+									data: {
+										model,
+										actual: actualCost,
+										posted: postResult.posted,
+										shortfall: postResult.shortfall,
+										transferId,
+										...costCenterAudit,
+									},
+								})
+								.catch(() => {
+									callAuditDegraded = true;
+								});
+						}
 					} catch (postErr) {
 						// POST failed — LLM call succeeded but settlement is ambiguous
 						settled = false;
@@ -1994,6 +2074,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
 					},
+					...(postedCost !== undefined ? { postedCost } : {}),
 					...(settledBudget !== undefined ? { budget: settledBudget } : {}),
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					// AUD-456: Flag proxy stub receipts
@@ -2182,7 +2263,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (policyResult.decision === "deny") {
 					const reason =
 						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
-					throw new PolicyDeniedError(reason);
+					throw new PolicyDeniedError(
+						reason,
+						derivePolicyHint(policyResult, envelope !== undefined),
+					);
 				}
 
 				// d. PII check on action params
@@ -2191,6 +2275,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					if (piiResult.found && config.pii === "block") {
 						throw new PolicyDeniedError(
 							`PII detected in action params: ${piiResult.types.join(", ")}`,
+							'PII enforcement blocked this action. Use { pii: "warn" } to log instead of block; on governed actions { pii: "redact" } redacts only the audit copy — the action itself runs on the original input.',
 						);
 					}
 				}
@@ -2202,6 +2287,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						if (config.injection === "block") {
 							throw new PolicyDeniedError(
 								`Injection detected in action params: ${injectionResult.patterns.join(", ")}`,
+								'Injection enforcement blocked this call. Use { injection: "warn" } to log instead of block.',
 							);
 						}
 						// warn: log to audit trail (non-fatal)
@@ -2776,8 +2862,11 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 	// account across restarts (which would inflate the TB-enforced budget).
 	const holdingId = await tbClient.createFundedBudgetWallet(seedBudget);
 
-	// Pending transfer ID mapping (trustId string -> TB bigint)
-	const pendingMap = new Map<string, bigint>();
+	// Pending transfer mapping (trustId string -> TB id + the reserved amount).
+	// heldAmount is what postPendingSpend caps against: TigerBeetle REJECTS a post
+	// above the pending amount (exceeds_pending_transfer_amount) — it never caps —
+	// so the truncation must happen here, where the reserve is known (spec D1).
+	const pendingMap = new Map<string, { tbId: bigint; heldAmount: number }>();
 
 	return {
 		async spendPending(params: {
@@ -2796,7 +2885,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					amount: params.amount,
 					code: XFER_SPEND,
 				});
-				pendingMap.set(params.transferId, tbTransferId);
+				pendingMap.set(params.transferId, { tbId: tbTransferId, heldAmount: params.amount });
 				return { transferId: params.transferId };
 			} catch (err) {
 				// Over-budget reservation → TB rejects the pending debit. Surface as a
@@ -2865,23 +2954,31 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			return await tbClient.lookupBalances(accountIds);
 		},
 
-		async postPendingSpend(transferId: string, actualAmount?: number): Promise<void> {
-			const tbId = pendingMap.get(transferId);
-			if (tbId === undefined) {
+		async postPendingSpend(
+			transferId: string,
+			actualAmount?: number,
+			// biome-ignore lint/suspicious/noConfusingVoidType: matches the TrustEngine interface, where `void` is load-bearing (see the declaration in govern.ts).
+		): Promise<{ posted: number; shortfall: number } | void> {
+			const entry = pendingMap.get(transferId);
+			if (entry === undefined) {
 				throw new Error(`No pending transfer found for ${transferId}`);
 			}
-			// Post the ACTUAL consumed amount (≤ the reserved estimate); omitting it
-			// posts the full pending amount.
-			await tbClient.postTransfer(tbId, actualAmount);
+			// Post at most the RESERVED amount; the truncation (shortfall) is
+			// returned for the governor to audit. Omitting actualAmount still posts
+			// the full pending amount (amount_max), unchanged.
+			const posted =
+				actualAmount != null ? Math.min(actualAmount, entry.heldAmount) : entry.heldAmount;
+			await tbClient.postTransfer(entry.tbId, actualAmount != null ? posted : undefined);
 			pendingMap.delete(transferId);
+			return { posted, shortfall: actualAmount != null ? actualAmount - posted : 0 };
 		},
 
 		async voidPendingSpend(transferId: string): Promise<void> {
-			const tbId = pendingMap.get(transferId);
-			if (tbId === undefined) {
+			const entry = pendingMap.get(transferId);
+			if (entry === undefined) {
 				throw new Error(`No pending transfer found for ${transferId}`);
 			}
-			await tbClient.voidTransfer(tbId);
+			await tbClient.voidTransfer(entry.tbId);
 			pendingMap.delete(transferId);
 		},
 
@@ -2889,9 +2986,9 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 		// Best-effort — TigerBeetle auto-voids after 300s regardless.
 		async voidAllPending(): Promise<void> {
 			const entries = [...pendingMap.entries()];
-			for (const [trustIdKey, tbTransferId] of entries) {
+			for (const [trustIdKey, entry] of entries) {
 				try {
-					await tbClient.voidTransfer(tbTransferId);
+					await tbClient.voidTransfer(entry.tbId);
 				} catch {
 					// Best-effort — ignore individual void failures
 				}

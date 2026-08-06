@@ -73,7 +73,7 @@ import {
 } from "./ledger/pricing.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
-import { evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
+import { derivePolicyHint, evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
 import { detectPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
@@ -450,7 +450,11 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 	// account across restarts (which would inflate the TB-enforced budget).
 	const holdingId = await tbClient.createFundedBudgetWallet(seedBudget);
 
-	const pendingMap = new Map<string, bigint>();
+	// Pending transfer mapping (trustId string -> TB id + the reserved amount).
+	// heldAmount is what postPendingSpend caps against: TigerBeetle REJECTS a post
+	// above the pending amount (exceeds_pending_transfer_amount) — it never caps —
+	// so the truncation must happen here, where the reserve is known (spec D1).
+	const pendingMap = new Map<string, { tbId: bigint; heldAmount: number }>();
 
 	return {
 		async spendPending(params: {
@@ -469,7 +473,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					amount: params.amount,
 					code: XFER_SPEND,
 				});
-				pendingMap.set(params.transferId, tbTransferId);
+				pendingMap.set(params.transferId, { tbId: tbTransferId, heldAmount: params.amount });
 				return { transferId: params.transferId };
 			} catch (err) {
 				// Over-budget reservation → TB rejects the pending debit. Surface as a
@@ -538,31 +542,39 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			return await tbClient.lookupBalances(accountIds);
 		},
 
-		async postPendingSpend(transferId: string, actualAmount?: number): Promise<void> {
-			const tbId = pendingMap.get(transferId);
-			if (tbId === undefined) {
+		async postPendingSpend(
+			transferId: string,
+			actualAmount?: number,
+			// biome-ignore lint/suspicious/noConfusingVoidType: matches the TrustEngine interface, where `void` is load-bearing (see the declaration in govern.ts).
+		): Promise<{ posted: number; shortfall: number } | void> {
+			const entry = pendingMap.get(transferId);
+			if (entry === undefined) {
 				throw new Error(`No pending transfer found for ${transferId}`);
 			}
-			// Post the ACTUAL consumed amount (≤ the reserved estimate); omitting it
-			// posts the full pending amount.
-			await tbClient.postTransfer(tbId, actualAmount);
+			// Post at most the RESERVED amount; the truncation (shortfall) is
+			// returned for the governor to audit. Omitting actualAmount still posts
+			// the full pending amount (amount_max), unchanged.
+			const posted =
+				actualAmount != null ? Math.min(actualAmount, entry.heldAmount) : entry.heldAmount;
+			await tbClient.postTransfer(entry.tbId, actualAmount != null ? posted : undefined);
 			pendingMap.delete(transferId);
+			return { posted, shortfall: actualAmount != null ? actualAmount - posted : 0 };
 		},
 
 		async voidPendingSpend(transferId: string): Promise<void> {
-			const tbId = pendingMap.get(transferId);
-			if (tbId === undefined) {
+			const entry = pendingMap.get(transferId);
+			if (entry === undefined) {
 				throw new Error(`No pending transfer found for ${transferId}`);
 			}
-			await tbClient.voidTransfer(tbId);
+			await tbClient.voidTransfer(entry.tbId);
 			pendingMap.delete(transferId);
 		},
 
 		async voidAllPending(): Promise<void> {
 			const entries = [...pendingMap.entries()];
-			for (const [trustIdKey, tbTransferId] of entries) {
+			for (const [trustIdKey, entry] of entries) {
 				try {
-					await tbClient.voidTransfer(tbTransferId);
+					await tbClient.voidTransfer(entry.tbId);
 				} catch {
 					// Best-effort
 				}
@@ -743,7 +755,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const rateInfo = resolveRates(model, endpoint.class, config);
 			if (rateInfo.unknown) {
 				if (config.unknownModelPolicy === "deny") {
-					throw new PolicyDeniedError(`unknown_model: ${model} not in pricing table`);
+					throw new PolicyDeniedError(
+						`unknown_model: ${model} not in pricing table`,
+						'Set pricing: "custom" with a customRates entry for this model in usertrust.config.json, or use a model from the built-in pricing table.',
+					);
 				}
 				if (config.unknownModelPolicy === "warn") {
 					// Shared once-per-process helper — identical wording to trust() (F5).
@@ -848,14 +863,20 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				if (policyResult.decision === "deny") {
 					const reason =
 						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
-					throw new PolicyDeniedError(reason);
+					throw new PolicyDeniedError(
+						reason,
+						derivePolicyHint(policyResult, envelope !== undefined),
+					);
 				}
 
 				// PII check
 				if (config.pii !== "off" && messages.length > 0) {
 					const piiResult = detectPII(messages);
 					if (piiResult.found && config.pii === "block") {
-						throw new PolicyDeniedError(`PII detected: ${piiResult.types.join(", ")}`);
+						throw new PolicyDeniedError(
+							`PII detected: ${piiResult.types.join(", ")}`,
+							'PII enforcement blocked this call. Use { pii: "warn" } to log instead of block; the headless governor does not redact egress — redaction is the integrating host\'s responsibility.',
+						);
 					}
 				}
 
@@ -1044,6 +1065,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 			// POST settlement
 			let settled = true;
+			// D4: set only when the engine capped the post at the reserved hold.
+			let postedCost: number | undefined;
+			// D4 event-order buffer: the truncation is learned at POST time but the
+			// `settlement_shortfall` event may only be appended AFTER this call's
+			// `llm_call`, so it is parked here and drained below.
+			let shortfallRecord: { posted: number; shortfall: number } | undefined;
 			if (proxyConn != null && !isDryRun) {
 				try {
 					await proxyConn.settle(auth.proxyTransferId ?? auth.transferId, actualCost);
@@ -1070,9 +1097,18 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				}
 			} else if (engine != null && !isDryRun) {
 				try {
-					// Post the ACTUAL consumed cost (RECON #3) — which may be less than
-					// the reserved estimate.
-					await engine.postPendingSpend(auth.transferId, actualCost);
+					// Post the ACTUAL consumed cost (RECON #3), capped by the engine at
+					// the reserved hold; a truncation comes back as `shortfall`.
+					const postResult = await engine.postPendingSpend(auth.transferId, actualCost);
+					if (postResult != null && postResult.shortfall > 0) {
+						postedCost = postResult.posted;
+						// EVENT ORDER: captured here, APPENDED after `llm_call` below.
+						// `verifyTransaction` resolves a transfer by the FIRST chain event whose
+						// `data.transferId` matches, so a shortfall written ahead of its
+						// `llm_call` would render this settled call as PENDING with no cost. The
+						// correction must annotate the settlement, never precede it.
+						shortfallRecord = { posted: postResult.posted, shortfall: postResult.shortfall };
+					}
 				} catch (postErr) {
 					settled = false;
 					await audit
@@ -1117,6 +1153,29 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				auditHash = auditEvent.hash;
 			} catch {
 				callAuditDegraded = true;
+			}
+
+			// D4: the truncation correction, appended AFTER the `llm_call` it annotates
+			// (see the capture at the POST above). Still advisory — a chain that cannot
+			// take it degrades the receipt and NEVER unwinds a settlement that already
+			// committed.
+			if (shortfallRecord !== undefined) {
+				await audit
+					.appendEvent({
+						kind: "settlement_shortfall",
+						actor: "local",
+						data: {
+							model,
+							actual: actualCost,
+							posted: shortfallRecord.posted,
+							shortfall: shortfallRecord.shortfall,
+							transferId: auth.transferId,
+							...costCenterAudit,
+						},
+					})
+					.catch(() => {
+						callAuditDegraded = true;
+					});
 			}
 
 			// Daily-rotated receipt
@@ -1194,6 +1253,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						: {}),
 				},
 				...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
+				...(postedCost !== undefined ? { postedCost } : {}),
 				...(settledBudget !== undefined ? { budget: settledBudget } : {}),
 				...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 				...(proxyConn != null ? { proxyStub: true as const } : {}),

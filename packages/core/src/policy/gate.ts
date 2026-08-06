@@ -40,6 +40,8 @@ export interface RuleMatch {
 	enforcement: PolicyEnforcement;
 	/** Severity if set */
 	severity: PolicySeverity | undefined;
+	/** Field names of the rule's conditions — lets a throw site classify the denial. */
+	fields: string[];
 }
 
 export interface PolicyResult {
@@ -57,6 +59,39 @@ export interface PolicyResult {
 	reasons: string[];
 	/** Evaluation timestamp */
 	evaluatedAt: string;
+}
+
+/** Policy-context fields whose rules deny for BUDGET reasons, not content reasons. */
+const BUDGET_HINT_FIELDS = new Set([
+	"budget_remaining",
+	"budget_remaining_after",
+	"budgetFractionRemaining",
+	"budgetRunwayHours",
+	"estimated_cost",
+]);
+
+/**
+ * Class-aware operator remedy for a gate denial (D6). Returns `undefined` when no
+ * hard violation is budget-classed — the error's default hint then applies. PII
+ * and injection denials never reach here: they throw from their own detector
+ * sites, which pass their own class hints.
+ *
+ * `attributed` is the caller's own truth about whether an ENVELOPE is in scope for
+ * the denied call, and it selects between two remedies that are not
+ * interchangeable. An attributed call's hold debits the cost center's wallet, so
+ * `allocateBudget` can move it. An UNATTRIBUTED call's hold debits the session
+ * holding wallet, which no envelope funds — prescribing `allocateBudget` there
+ * sends an operator to a lever that provably cannot lift this denial. Pass
+ * `envelope !== undefined` from the gate call site; never guess it from the rule.
+ */
+export function derivePolicyHint(result: PolicyResult, attributed: boolean): string | undefined {
+	const budgetHit = result.hardViolations.some((v) =>
+		v.fields.some((f) => BUDGET_HINT_FIELDS.has(f)),
+	);
+	if (!budgetHit) return undefined;
+	return attributed
+		? "A budget rule denied this call: check the envelope's allocation (allocateBudget) and your budgetFractionRemaining / budgetRunwayHours tiers."
+		: "A budget rule denied this call: increase the budget in trust() options or reduce the call's max_tokens, and review your budget_remaining / budget_remaining_after tiers.";
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +455,16 @@ export interface PolicyContext extends Record<string, unknown> {
 	 * The one thing it is NOT is a number the caller chose: see the trust-boundary
 	 * paragraph above, and {@link PolicyContext.cost_center} for why the
 	 * attribution behind it cannot be forged either.
+	 *
+	 * OPERATOR NOTE — this is a lagging number, twice over. It is computed before
+	 * the call's own hold and excludes its estimated cost (only
+	 * `budget_remaining_after` is estimate-inclusive), and `receipt.budget` /
+	 * `budgetContext()` are post-settle snapshots, so any dashboard built on
+	 * either one reads one call behind the gate. In practice: an `lt` tier
+	 * starts denying with the call *after* the one whose settle crossed the
+	 * threshold, not the crossing call itself — a fraction sitting exactly on
+	 * the boundary still reads as inside it under `lt`. Write `lte` where the
+	 * tier must also catch that edge call.
 	 */
 	budgetFractionRemaining?: number | undefined;
 	/**
@@ -571,6 +616,7 @@ export function evaluatePolicy(rules: GateRule[], context: PolicyContext): Polic
 			effect: rule.effect,
 			enforcement: rule.enforcement,
 			severity: rule.severity,
+			fields: rule.conditions.map((fc) => fc.field),
 		};
 
 		matched.push(match);
@@ -579,9 +625,12 @@ export function evaluatePolicy(rules: GateRule[], context: PolicyContext): Polic
 		const isViolation = rule.effect === "deny" || rule.effect === "warn";
 		if (isViolation) {
 			const label = rule.id ? `[${rule.id}]` : `[${rule.name}]`;
-			const rationale = rule.description ?? rule.name;
-			const reason =
-				rule.enforcement === "hard" ? `${label} ${rationale}` : `[WARN] ${label} ${rationale}`;
+			// A description-less rule would render its identifier twice
+			// ("[scarcity-brake] scarcity-brake"): the rationale falls back to
+			// rule.name, which the label already shows unless a distinct id exists.
+			const rationale = rule.description ?? ((rule.id ?? rule.name) === rule.name ? "" : rule.name);
+			const body = rationale === "" ? label : `${label} ${rationale}`;
+			const reason = rule.enforcement === "hard" ? body : `[WARN] ${body}`;
 
 			reasons.push(reason);
 

@@ -43,7 +43,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { withCostCenter } from "../../src/budget/attribution.js";
 import { trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
-import { evaluatePolicy, type GateRule, type PolicyContext } from "../../src/policy/gate.js";
+import { DEFAULT_RULES } from "../../src/policy/default-rules.js";
+import {
+	derivePolicyHint,
+	evaluatePolicy,
+	type GateRule,
+	type PolicyContext,
+} from "../../src/policy/gate.js";
 import type { PolicyEnforcement } from "../../src/shared/types.js";
 
 // tigerbeetle-node is a native module and is never loaded in tests.
@@ -652,5 +658,199 @@ describe("an envelope-scoped tier fires on an attributed call", () => {
 		expect(client.messages.create).toHaveBeenCalledTimes(1);
 
 		await governed.destroy();
+	});
+
+	it("an ATTRIBUTED denial's hint prescribes the envelope lever that can actually move it", async () => {
+		const engine = makeEnvelopeEngine(2_000);
+		const governed = await trust(makeAnthropicMock(), {
+			vaultBase,
+			parentUserId: ENVELOPE_PARENT,
+			_engine: engine,
+		});
+
+		const err = await budgetDenialFrom(() =>
+			withCostCenter(
+				ENVELOPE_COST_CENTER,
+				() => governed.messages.create(FRONTIER_CALL),
+				ENVELOPE_SCOPE,
+			),
+		);
+
+		// This hold WOULD have debited the envelope, so funding the envelope is a
+		// remedy that exists.
+		expect(err.hint).toContain("allocateBudget");
+
+		await governed.destroy();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Denial-hint ATTRIBUTION: the remedy must match the wallet that was gated
+// ---------------------------------------------------------------------------
+
+/**
+ * An UNATTRIBUTED call places its hold on the SESSION holding wallet — no
+ * envelope exists for `allocateBudget` to fund, so the envelope remedy is not
+ * merely unhelpful, it is unreachable. These pin that all three gate call sites
+ * pass their own local truth about whether an envelope is in scope.
+ *
+ * The rule under test here is the platform default `block-budget-overshoot`
+ * (`budget_remaining_after lt 0`), which is BUDGET-classed and, unlike the tier
+ * rules above, needs no envelope to fire — exactly the unattributed case.
+ */
+const SESSION_HINT =
+	"A budget rule denied this call: increase the budget in trust() options or reduce the call's max_tokens, and review your budget_remaining / budget_remaining_after tiers.";
+
+/** Run `fn`, require a PolicyDeniedError, and return it. */
+async function budgetDenialFrom(fn: () => Promise<unknown>): Promise<{ hint: string }> {
+	try {
+		await fn();
+	} catch (err) {
+		return err as { hint: string };
+	}
+	throw new Error("expected a budget denial, but the call resolved");
+}
+
+describe("budget denial hints follow the wallet that was gated", () => {
+	let vaultBase: string;
+
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `budget-hint-${randomUUID()}`);
+		mkdirSync(join(vaultBase, ".usertrust"), { recursive: true });
+		// No policies file: the platform DEFAULT_RULES always apply, and
+		// `block-budget-overshoot` is the one that fires on a starved session.
+		writeFileSync(
+			join(vaultBase, ".usertrust", "usertrust.config.json"),
+			JSON.stringify({ budget: 1 }),
+		);
+		vi.mocked(evaluatePolicy).mockClear();
+	});
+
+	afterEach(() => {
+		try {
+			rmSync(vaultBase, { recursive: true, force: true });
+		} catch {
+			// cleanup best-effort
+		}
+	});
+
+	it("trust() LLM path: an unattributed overshoot names the session lever", async () => {
+		const governed = await trust(makeAnthropicMock(), { dryRun: true, vaultBase });
+
+		const err = await budgetDenialFrom(() => governed.messages.create(FRONTIER_CALL));
+
+		expect(err.hint).toBe(SESSION_HINT);
+		expect(err.hint).not.toContain("allocateBudget");
+
+		await governed.destroy();
+	});
+
+	it("governAction path: an unattributed overshoot names the session lever", async () => {
+		const governed = await trust(makeAnthropicMock(), { dryRun: true, vaultBase });
+		const execute = vi.fn(async () => "executed");
+
+		const err = await budgetDenialFrom(() =>
+			governed.governAction(
+				{ kind: "tool_use", name: "expensive_tool", cost: 5_000, params: {} },
+				execute,
+			),
+		);
+
+		expect(err.hint).toBe(SESSION_HINT);
+		expect(err.hint).not.toContain("allocateBudget");
+		expect(execute).not.toHaveBeenCalled();
+
+		await governed.destroy();
+	});
+
+	it("headless authorize: an unattributed overshoot names the session lever", async () => {
+		const gov = await createGovernor({ dryRun: true, vaultBase });
+
+		const err = await budgetDenialFrom(() =>
+			gov.authorize({
+				model: "claude-opus-4-6",
+				estimatedInputTokens: 5_000,
+				maxOutputTokens: 5_000,
+			}),
+		);
+
+		expect(err.hint).toBe(SESSION_HINT);
+		expect(err.hint).not.toContain("allocateBudget");
+
+		await gov.destroy();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Class-aware denial hints (D6)
+// ---------------------------------------------------------------------------
+
+describe("class-aware denial hints (D6)", () => {
+	it("an ATTRIBUTED budget-tier denial derives the envelope remedy hint", () => {
+		const result = evaluatePolicy([DENY_FRONTIER_BELOW_30], {
+			budgetFractionRemaining: 0.1,
+			model: "claude-opus-4-6",
+		});
+
+		expect(result.decision).toBe("deny");
+		expect(derivePolicyHint(result, true)).toContain("allocateBudget");
+	});
+
+	// An unattributed call has no envelope: its hold debits the SESSION holding
+	// wallet, which `allocateBudget` cannot fund. Prescribing envelope funding
+	// there sends the operator to a lever that provably cannot move this denial.
+	it("an UNATTRIBUTED budget denial prescribes the session lever, not allocateBudget", () => {
+		const result = evaluatePolicy([DENY_FRONTIER_BELOW_30], {
+			budgetFractionRemaining: 0.1,
+			model: "claude-opus-4-6",
+		});
+
+		expect(result.decision).toBe("deny");
+		expect(derivePolicyHint(result, false)).toBe(
+			"A budget rule denied this call: increase the budget in trust() options or reduce the call's max_tokens, and review your budget_remaining / budget_remaining_after tiers.",
+		);
+		expect(derivePolicyHint(result, false)).not.toContain("allocateBudget");
+	});
+
+	it("a non-budget denial derives no override on either branch", () => {
+		const rule: GateRule = {
+			id: "no-frontier",
+			name: "no-frontier",
+			effect: "deny",
+			enforcement: "hard",
+			conditions: [{ field: "model", operator: "eq", value: "claude-opus-4-6" }],
+		};
+		const result = evaluatePolicy([rule], { model: "claude-opus-4-6" });
+
+		expect(result.decision).toBe("deny");
+		expect(derivePolicyHint(result, true)).toBeUndefined();
+		expect(derivePolicyHint(result, false)).toBeUndefined();
+	});
+
+	it("RuleMatch carries the violated rule's condition fields", () => {
+		const result = evaluatePolicy([DENY_FRONTIER_BELOW_30], {
+			budgetFractionRemaining: 0.1,
+			model: "claude-opus-4-6",
+		});
+
+		expect(result.hardViolations[0]?.fields).toContain("budgetFractionRemaining");
+	});
+
+	it("a rule without a description renders its identifier once, not twice", () => {
+		const rule = {
+			id: "scarcity-brake",
+			name: "scarcity-brake",
+			effect: "deny",
+			enforcement: "hard",
+			conditions: [{ field: "budgetFractionRemaining", operator: "lt", value: 0.3 }],
+		} as const;
+		const result = evaluatePolicy([rule], { budgetFractionRemaining: 0.1 });
+		expect(result.reasons[0]).toBe("[scarcity-brake]"); // was "[scarcity-brake] scarcity-brake"
+	});
+
+	it("a rule with a description keeps the full label + rationale", () => {
+		// DEFAULT_RULES all carry descriptions — pin one stays unchanged.
+		const result = evaluatePolicy(DEFAULT_RULES, { budget_remaining_after: -1 });
+		expect(result.reasons[0]).toMatch(/^\[block-budget-overshoot\] Deny pre-spend/);
 	});
 });

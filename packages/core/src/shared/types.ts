@@ -29,6 +29,14 @@ export type RateSource = "table" | "custom" | "local-model" | "local-default" | 
 export interface TrustReceipt {
 	transferId: string;
 	cost: number;
+	/**
+	 * Ledger amount actually POSTED when it differs from `cost`: the settle was
+	 * capped at the reserved hold (`cost - postedCost` = the shortfall, audited as
+	 * `settlement_shortfall`). Absent when the post matched `cost`. `cost` stays
+	 * the true metered cost — the receipt, hash chain, and ledger reconcile
+	 * through this field rather than by overwriting any of them.
+	 */
+	postedCost?: number;
 	budgetRemaining: number;
 	auditHash: string;
 	chainPath: string;
