@@ -1,6 +1,6 @@
 {
 	"name": "usertrust-ui",
-	"version": "3.0.0",
+	"version": "3.1.0",
 	"description": "Local web UI for usertrust vaults: filterable audit ledger, live tail, trends, verification.",
 	"license": "Apache-2.0",
 	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
