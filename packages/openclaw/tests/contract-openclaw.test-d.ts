@@ -11,8 +11,8 @@
  * own project and is compiled by exactly one thing:
  *
  *   .github/workflows/ci.yml, job `openclaw-contract`
- *     npm install --no-save --package-lock=false --ignore-scripts \
- *       openclaw@"$OPENCLAW_CONTRACT_VERSION"
+ *     source packages/openclaw/openclaw-contract.env
+ *     npm install --no-save --ignore-scripts openclaw@"$OPENCLAW_CONTRACT_VERSION"
  *     USERTRUST_OPENCLAW_CONTRACT=1 npx tsc -p packages/openclaw/tsconfig.contract-openclaw.json
  *
  * `tsc` has no notion of "skip this file if a package is missing", which is the

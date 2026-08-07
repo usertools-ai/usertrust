@@ -100,7 +100,7 @@ if (CONTRACT_MODE && INSTALLED == null) {
 		`usertrust: USERTRUST_OPENCLAW_CONTRACT=1 but openclaw is NOT INSTALLED. This mode exists ` +
 			`to prove the host contract against openclaw@${PINNED}; skipping would make the proof ` +
 			`vacuous. Install it out-of-tree first:\n` +
-			`  npm install --no-save --package-lock=false --ignore-scripts openclaw@${PINNED}`,
+			`  npm install --no-save --ignore-scripts openclaw@${PINNED}`,
 	);
 }
 if (CONTRACT_MODE && INSTALLED !== PINNED) {
@@ -126,7 +126,7 @@ if (!CONTRACT_MODE && INSTALLED !== PINNED) {
 			`  USERTRUST_OPENCLAW_CONTRACT=1, where an absent or mismatched openclaw is a HARD\n` +
 			`  FAILURE. Nothing is being waved through; the proof just happens there. To run it here:\n` +
 			`    source packages/openclaw/openclaw-contract.env\n` +
-			`    npm install --no-save --package-lock=false --ignore-scripts openclaw@"$OPENCLAW_CONTRACT_VERSION"\n` +
+			`    npm install --no-save --ignore-scripts openclaw@"$OPENCLAW_CONTRACT_VERSION"\n` +
 			`    USERTRUST_OPENCLAW_CONTRACT=1 npx vitest run packages/openclaw/tests/contract.test.ts\n\n`,
 	);
 }
