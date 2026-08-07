@@ -37,7 +37,25 @@ vi.mock("tigerbeetle-node", () => ({
 }));
 
 import { createUsertrustPlugin } from "../src/index.js";
-import type { StreamContext, StreamEvent, StreamFn } from "../src/types.js";
+import type { Context, StreamEvent, StreamFn } from "../src/types.js";
+import {
+	asHostStream,
+	doneEvent,
+	makeAssistantMessage,
+	makeContext,
+	makeModel,
+	makeUsage,
+	startEvent,
+	streamOf,
+	textDelta,
+} from "./host-fixtures.js";
+
+/** The hook context openclaw hands `wrapStreamFn`, with the inner fn on it. */
+function wrapCtx(streamFn: StreamFn) {
+	return { provider: "anthropic", modelId: "claude-sonnet-4-6", streamFn };
+}
+
+const MODEL = makeModel();
 
 function makeTmpVault(): string {
 	const dir = join(tmpdir(), `openclaw-integration-test-${randomUUID()}`);
@@ -73,48 +91,34 @@ describe("createUsertrustPlugin (factory)", () => {
 		expect(typeof plugin.wrapStreamFn).toBe("function");
 	});
 
-	it("wrapStreamFn(next) returns a callable stream function", () => {
+	it("wrapStreamFn(ctx) returns a callable stream function", () => {
 		const plugin = createUsertrustPlugin({ budget: 100_000, dryRun: true, vaultBase });
 
-		const rawStreamFn: StreamFn = async function* () {
-			yield { type: "start" as const };
-		};
-
-		const wrapped = plugin.wrapStreamFn?.(rawStreamFn);
+		const wrapped = plugin.wrapStreamFn?.(wrapCtx(streamOf([startEvent()])));
 		expect(typeof wrapped).toBe("function");
 	});
 
 	it("wrapped stream forwards all events from the inner streamFn", async () => {
 		const plugin = createUsertrustPlugin({ budget: 100_000, dryRun: true, vaultBase });
 
+		const partial = makeAssistantMessage();
 		const events: StreamEvent[] = [
-			{ type: "start" },
-			{ type: "text_start" },
-			{ type: "text_delta", text: "hello " },
-			{ type: "text_delta", text: "world" },
-			{ type: "text_end" },
-			{
-				type: "done",
-				stopReason: "stop",
-				usage: { inputTokens: 10, outputTokens: 5 },
-			},
+			startEvent(),
+			{ type: "text_start", contentIndex: 0, partial },
+			textDelta("hello "),
+			textDelta("world"),
+			{ type: "text_end", contentIndex: 0, content: "hello world", partial },
+			doneEvent(makeUsage(10, 5)),
 		];
 
-		const rawStreamFn: StreamFn = async function* () {
-			for (const e of events) yield e;
-		};
-
-		const wrapped = plugin.wrapStreamFn?.(rawStreamFn);
+		const wrapped = plugin.wrapStreamFn?.(wrapCtx(streamOf(events)));
 		expect(wrapped).toBeDefined();
 
-		const ctx: StreamContext = {
-			messages: [{ role: "user", content: "hi" }],
-			model: "claude-sonnet-4-6",
-		};
+		const ctx: Context = makeContext();
 
 		const collected: StreamEvent[] = [];
 		// biome-ignore lint/style/noNonNullAssertion: guarded by expect above
-		for await (const event of wrapped!("claude-sonnet-4-6", ctx)) {
+		for await (const event of await wrapped!(MODEL, ctx)) {
 			collected.push(event);
 		}
 
@@ -131,17 +135,11 @@ describe("createUsertrustPlugin (factory)", () => {
 		expect(getGovernor()).toBeNull();
 
 		// First call should trigger init
-		const rawStreamFn: StreamFn = async function* () {
-			yield { type: "start" as const };
-		};
-		const wrapped = plugin.wrapStreamFn?.(rawStreamFn);
-		const ctx: StreamContext = {
-			messages: [{ role: "user", content: "hi" }],
-			model: "claude-sonnet-4-6",
-		};
+		const wrapped = plugin.wrapStreamFn?.(wrapCtx(streamOf([startEvent()])));
+		const ctx: Context = makeContext();
 
 		// biome-ignore lint/style/noNonNullAssertion: guarded above
-		for await (const _e of wrapped!("claude-sonnet-4-6", ctx)) {
+		for await (const _e of await wrapped!(MODEL, ctx)) {
 			// drain
 		}
 
@@ -151,26 +149,26 @@ describe("createUsertrustPlugin (factory)", () => {
 	it("propagates errors from the inner streamFn and aborts the hold", async () => {
 		const plugin = createUsertrustPlugin({ budget: 100_000, dryRun: true, vaultBase });
 
-		const rawStreamFn: StreamFn = async function* () {
-			yield { type: "start" as const };
-			throw new Error("upstream_failure");
-		};
+		const rawStreamFn: StreamFn = () =>
+			asHostStream(
+				(async function* () {
+					yield startEvent();
+					throw new Error("upstream_failure");
+				})(),
+			);
 
 		// Trigger lazy init by calling once with a successful no-op — but
 		// we can't, since first call may also be the failing one. Instead,
 		// snapshot budget AFTER first authorize completes by routing through
 		// a separate channel: just compare delta within this test.
-		const wrapped = plugin.wrapStreamFn?.(rawStreamFn);
-		const ctx: StreamContext = {
-			messages: [{ role: "user", content: "hi" }],
-			model: "claude-sonnet-4-6",
-		};
+		const wrapped = plugin.wrapStreamFn?.(wrapCtx(rawStreamFn));
+		const ctx: Context = makeContext();
 
 		const { getGovernor } = await import("../src/index.js");
 
 		await expect(async () => {
 			// biome-ignore lint/style/noNonNullAssertion: guarded above
-			for await (const _e of wrapped!("claude-sonnet-4-6", ctx)) {
+			for await (const _e of await wrapped!(MODEL, ctx)) {
 				// drain
 			}
 		}).rejects.toThrow("upstream_failure");
@@ -193,24 +191,14 @@ describe("createUsertrustPlugin (factory)", () => {
 		const SETTLED_PER_CALL = 240;
 		const plugin = createUsertrustPlugin({ budget: BUDGET, dryRun: true, vaultBase });
 
-		const rawStreamFn: StreamFn = async function* () {
-			yield { type: "start" as const };
-			yield {
-				type: "done" as const,
-				stopReason: "stop" as const,
-				usage: { inputTokens: 500, outputTokens: 1500 },
-			};
-		};
-
-		const wrapped = plugin.wrapStreamFn?.(rawStreamFn);
-		const ctx: StreamContext = {
-			messages: [{ role: "user", content: "hi" }],
-			model: "claude-sonnet-4-6",
-		};
+		const wrapped = plugin.wrapStreamFn?.(
+			wrapCtx(streamOf([startEvent(), doneEvent(makeUsage(500, 1500))])),
+		);
+		const ctx: Context = makeContext();
 
 		const drain = async () => {
 			// biome-ignore lint/style/noNonNullAssertion: guarded by the test setup
-			for await (const _e of wrapped!("claude-sonnet-4-6", ctx)) {
+			for await (const _e of await wrapped!(MODEL, ctx)) {
 				// drain
 			}
 		};
@@ -240,26 +228,22 @@ describe("createUsertrustPlugin (factory)", () => {
 		const plugin = createUsertrustPlugin({ budget: 100_000, dryRun: true, vaultBase });
 
 		// A stream that produces many chunks and never gets to `done`
-		const rawStreamFn: StreamFn = async function* () {
-			yield { type: "start" as const };
-			for (let i = 0; i < 100; i++) {
-				yield { type: "text_delta" as const, text: `chunk-${i}` };
-			}
-			yield {
-				type: "done" as const,
-				stopReason: "stop" as const,
-				usage: { inputTokens: 10, outputTokens: 100 },
-			};
-		};
+		const rawStreamFn: StreamFn = () =>
+			asHostStream(
+				(async function* () {
+					yield startEvent();
+					for (let i = 0; i < 100; i++) {
+						yield textDelta(`chunk-${i}`);
+					}
+					yield doneEvent(makeUsage(10, 100));
+				})(),
+			);
 
-		const wrapped = plugin.wrapStreamFn?.(rawStreamFn);
-		const ctx: StreamContext = {
-			messages: [{ role: "user", content: "hi" }],
-			model: "claude-sonnet-4-6",
-		};
+		const wrapped = plugin.wrapStreamFn?.(wrapCtx(rawStreamFn));
+		const ctx: Context = makeContext();
 
 		// biome-ignore lint/style/noNonNullAssertion: guarded above
-		const iter = wrapped!("claude-sonnet-4-6", ctx)[Symbol.asyncIterator]();
+		const iter = (await wrapped!(MODEL, ctx))[Symbol.asyncIterator]();
 		await iter.next(); // consume one chunk
 		// Caller drops the iterator without consuming `done`. The async
 		// generator's `return()` will run the finally block — abort path.

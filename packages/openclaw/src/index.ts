@@ -36,11 +36,13 @@ import type { Governor } from "usertrust";
 import { createGovernor } from "usertrust";
 import { wrapCompleteWithGovernance, wrapStreamWithGovernance } from "./stream-governor.js";
 import type {
+	AssistantMessageEventStreamLike,
+	Context,
+	Model,
 	OpenClawPluginApi,
 	ProviderPlugin,
-	StreamContext,
-	StreamEvent,
 	StreamFn,
+	StreamOptions,
 	UsertrustPluginConfig,
 } from "./types.js";
 
@@ -53,12 +55,21 @@ export {
 	extractUsageFromProviderChunk,
 } from "./token-extractor.js";
 export type {
+	AssistantMessage,
+	AssistantMessageEventStreamLike,
+	Context,
 	GovernedStreamMeta,
+	Message,
+	Model,
 	ProviderPlugin,
+	ProviderWrapStreamFnContext,
 	StreamContext,
 	StreamEvent,
 	StreamFn,
+	StreamOptions,
 	StreamUsage,
+	ToolResultMessage,
+	Usage,
 	UsertrustPluginConfig,
 } from "./types.js";
 
@@ -72,31 +83,17 @@ let governor: Governor | null = null;
  * governance engine and registers the stream wrapper.
  */
 export default function register(api: OpenClawPluginApi): void {
-	// Config is injected by OpenClaw from openclaw.json → plugins.entries.usertrust.config
-	// We register a hook that initializes on first use (lazy)
-	// since config isn't available at register time in all OpenClaw versions.
+	// OpenClaw delivers openclaw.json → plugins.entries.usertrust.config on the
+	// api object as `pluginConfig`, at register() time. It is NOT a second
+	// argument to any hook.
+	const config = api.pluginConfig as UsertrustPluginConfig | undefined;
+	if (config == null) {
+		throw new Error(
+			"usertrust: plugin config missing — set plugins.entries.usertrust.config.budget in openclaw.json",
+		);
+	}
 
-	const plugin = {
-		id: "usertrust",
-		label: "usertrust Governance",
-
-		/**
-		 * wrapStreamFn — the core integration point.
-		 *
-		 * OpenClaw calls this with the existing stream function.
-		 * We return a wrapped version that adds governance.
-		 */
-		wrapStreamFn(originalStreamFn: StreamFn, config: UsertrustPluginConfig): StreamFn {
-			// Lazy-initialize governor on first call
-			const getGovernor = lazyGovernor(config);
-
-			return (model, context, options) => {
-				return governedStreamLazy(getGovernor, originalStreamFn, model, context, options);
-			};
-		},
-	};
-
-	api.registerProvider(plugin);
+	api.registerProvider(createUsertrustPlugin(config));
 }
 
 /**
@@ -104,8 +101,8 @@ export default function register(api: OpenClawPluginApi): void {
  *
  * Use this when programmatically wiring usertrust into an OpenClaw runtime
  * (rather than going through the auto-discovery `register()` default).
- * The returned plugin's `wrapStreamFn` follows OpenClaw's middleware shape:
- * `(next: StreamFn) => StreamFn`.
+ * The returned plugin's `wrapStreamFn` follows OpenClaw's provider-hook shape:
+ * one context argument carrying the inner `streamFn`.
  *
  * Init is lazy — the governor is created on the first wrapped call, not
  * at plugin construction time. This matches OpenClaw's lifecycle (plugins
@@ -115,8 +112,8 @@ export default function register(api: OpenClawPluginApi): void {
  * import { createUsertrustPlugin } from "usertrust-openclaw";
  *
  * const plugin = createUsertrustPlugin({ budget: 100_000, dryRun: true });
- * const wrapped = plugin.wrapStreamFn!(rawStreamFn);
- * for await (const event of wrapped(model, context)) { ... }
+ * const wrapped = plugin.wrapStreamFn!({ provider, modelId, streamFn: rawStreamFn });
+ * for await (const event of wrapped!(model, context)) { ... }
  * ```
  */
 export function createUsertrustPlugin(config: UsertrustPluginConfig): ProviderPlugin {
@@ -125,7 +122,12 @@ export function createUsertrustPlugin(config: UsertrustPluginConfig): ProviderPl
 	return {
 		id: "usertrust",
 		label: "usertrust Governance",
-		wrapStreamFn(next: StreamFn): StreamFn {
+		// `auth` is required by OpenClaw's ProviderPlugin contract. usertrust
+		// governs someone else's provider credentials and holds none of its own.
+		auth: [],
+		wrapStreamFn(ctx): StreamFn | undefined {
+			const next = ctx.streamFn;
+			if (next == null) return undefined;
 			return (model, context, options) =>
 				governedStreamLazy(getGovernor, next, model, context, options);
 		},
@@ -236,14 +238,31 @@ function lazyGovernor(config: UsertrustPluginConfig): () => Promise<Governor> {
 	};
 }
 
-async function* governedStreamLazy(
+/**
+ * Governor init is async but the wrap seam is synchronous, so both halves of
+ * the stream surface (iteration and `result()`) read from the same lazily
+ * created inner stream.
+ */
+function governedStreamLazy(
 	getGovernor: () => Promise<Governor>,
 	streamFn: StreamFn,
-	model: string,
-	context: StreamContext,
-	options?: Record<string, unknown>,
-): AsyncGenerator<StreamEvent> {
-	const gov = await getGovernor();
-	const governed = wrapStreamWithGovernance(streamFn, gov);
-	yield* governed(model, context, options);
+	model: Model,
+	context: Context,
+	options?: StreamOptions,
+): AssistantMessageEventStreamLike {
+	const inner = getGovernor().then((gov) =>
+		wrapStreamWithGovernance(streamFn, gov)(model, context, options),
+	);
+	// Consumers still see the rejection through their own await; this only
+	// stops an init failure from surfacing as an unhandled rejection.
+	inner.catch(() => {});
+
+	return {
+		async *[Symbol.asyncIterator]() {
+			yield* await inner;
+		},
+		async result() {
+			return (await inner).result();
+		},
+	};
 }

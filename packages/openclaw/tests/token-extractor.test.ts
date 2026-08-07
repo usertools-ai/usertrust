@@ -5,94 +5,101 @@ import {
 	extractUsageFromEvent,
 	extractUsageFromProviderChunk,
 } from "../src/token-extractor.js";
-import type { DoneEvent, ErrorEvent, StreamEvent, TextDeltaEvent } from "../src/types.js";
+import type { ErrorEvent, StreamEvent } from "../src/types.js";
+import {
+	doneEvent,
+	errorEvent,
+	makeAssistantMessage,
+	makeUsage,
+	startEvent,
+	textDelta,
+} from "./host-fixtures.js";
 
 describe("extractUsageFromEvent", () => {
 	it("extracts usage from done event", () => {
-		const event: DoneEvent = {
-			type: "done",
-			stopReason: "stop",
-			usage: { inputTokens: 100, outputTokens: 50 },
-		};
-
-		const usage = extractUsageFromEvent(event);
-		expect(usage).toEqual({ inputTokens: 100, outputTokens: 50 });
+		const usage = extractUsageFromEvent(doneEvent(makeUsage(100, 50)));
+		expect(usage).toEqual({
+			inputTokens: 100,
+			outputTokens: 50,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+		});
 	});
 
-	it("extracts usage from error event with usage", () => {
-		const event: ErrorEvent = {
-			type: "error",
-			error: new Error("test"),
-			usage: { inputTokens: 80, outputTokens: 30 },
-		};
-
-		const usage = extractUsageFromEvent(event);
-		expect(usage).toEqual({ inputTokens: 80, outputTokens: 30 });
+	it("extracts usage from error event", () => {
+		const usage = extractUsageFromEvent(errorEvent(makeUsage(80, 30)));
+		expect(usage).toEqual({
+			inputTokens: 80,
+			outputTokens: 30,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+		});
 	});
 
-	it("returns null for error event without usage", () => {
-		const event: ErrorEvent = {
-			type: "error",
-			error: new Error("test"),
-		};
-
+	it("returns null for a malformed error event carrying no assistant message", () => {
+		const event = { type: "error", reason: "error" } as unknown as ErrorEvent;
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("returns null for text delta events", () => {
-		const event: TextDeltaEvent = {
-			type: "text_delta",
-			text: "hello",
-		};
-
-		expect(extractUsageFromEvent(event)).toBeNull();
+		expect(extractUsageFromEvent(textDelta("hello"))).toBeNull();
 	});
 
 	it("returns null for start events", () => {
-		const event: StreamEvent = { type: "start" };
-		expect(extractUsageFromEvent(event)).toBeNull();
+		expect(extractUsageFromEvent(startEvent())).toBeNull();
 	});
 });
 
 describe("extractUsageFromEvent edge cases", () => {
+	const partial = makeAssistantMessage();
+
 	it("returns null for text_start events", () => {
-		const event: StreamEvent = { type: "text_start" };
+		const event: StreamEvent = { type: "text_start", contentIndex: 0, partial };
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("returns null for text_end events", () => {
-		const event: StreamEvent = { type: "text_end" };
+		const event: StreamEvent = { type: "text_end", contentIndex: 0, content: "hi", partial };
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("returns null for thinking_delta events", () => {
-		const event: StreamEvent = { type: "thinking_delta", text: "reasoning..." };
+		const event: StreamEvent = {
+			type: "thinking_delta",
+			contentIndex: 0,
+			delta: "reasoning...",
+			partial,
+		};
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("returns null for toolcall_start events", () => {
-		const event: StreamEvent = { type: "toolcall_start", name: "search", id: "tc_1" };
+		const event: StreamEvent = { type: "toolcall_start", contentIndex: 0, partial };
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("returns null for toolcall_delta events", () => {
-		const event: StreamEvent = { type: "toolcall_delta", args: '{"q":"test"}' };
+		const event: StreamEvent = {
+			type: "toolcall_delta",
+			contentIndex: 0,
+			delta: '{"q":"test"}',
+			partial,
+		};
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("returns null for toolcall_end events", () => {
-		const event: StreamEvent = { type: "toolcall_end" };
+		const event: StreamEvent = {
+			type: "toolcall_end",
+			contentIndex: 0,
+			toolCall: { type: "toolCall", id: "tc_1", name: "search", arguments: {} },
+			partial,
+		};
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("clamps excessively large token counts", () => {
-		const event: DoneEvent = {
-			type: "done",
-			stopReason: "stop",
-			usage: { inputTokens: 999_999_999, outputTokens: 999_999_999 },
-		};
-
-		const usage = extractUsageFromEvent(event);
+		const usage = extractUsageFromEvent(doneEvent(makeUsage(999_999_999, 999_999_999)));
 		expect(usage).not.toBeNull();
 		// MAX_TOKENS is 2_000_000, so these should be clamped
 		expect(usage?.inputTokens).toBeLessThanOrEqual(2_000_000);
@@ -100,31 +107,14 @@ describe("extractUsageFromEvent edge cases", () => {
 	});
 
 	it("clamps negative token counts to zero", () => {
-		const event: DoneEvent = {
-			type: "done",
-			stopReason: "stop",
-			usage: { inputTokens: -100, outputTokens: -50 },
-		};
-
-		const usage = extractUsageFromEvent(event);
+		const usage = extractUsageFromEvent(doneEvent(makeUsage(-100, -50)));
 		expect(usage).not.toBeNull();
 		expect(usage?.inputTokens).toBe(0);
 		expect(usage?.outputTokens).toBe(0);
 	});
 
 	it("preserves cache token fields from done events", () => {
-		const event: DoneEvent = {
-			type: "done",
-			stopReason: "stop",
-			usage: {
-				inputTokens: 100,
-				outputTokens: 50,
-				cacheReadTokens: 30,
-				cacheWriteTokens: 10,
-			},
-		};
-
-		const usage = extractUsageFromEvent(event);
+		const usage = extractUsageFromEvent(doneEvent(makeUsage(100, 50, 30, 10)));
 		expect(usage).not.toBeNull();
 		expect(usage?.cacheReadTokens).toBe(30);
 		expect(usage?.cacheWriteTokens).toBe(10);
@@ -132,19 +122,17 @@ describe("extractUsageFromEvent edge cases", () => {
 });
 
 describe("createAccumulator", () => {
+	const partial = makeAssistantMessage();
+
 	it("accumulates usage from a stream of events", () => {
 		const acc = createAccumulator();
 
-		acc.update({ type: "start" });
-		acc.update({ type: "text_start" });
-		acc.update({ type: "text_delta", text: "Hello" });
-		acc.update({ type: "text_delta", text: " world" });
-		acc.update({ type: "text_end" });
-		acc.update({
-			type: "done",
-			stopReason: "stop",
-			usage: { inputTokens: 120, outputTokens: 45 },
-		});
+		acc.update(startEvent());
+		acc.update({ type: "text_start", contentIndex: 0, partial });
+		acc.update(textDelta("Hello"));
+		acc.update(textDelta(" world"));
+		acc.update({ type: "text_end", contentIndex: 0, content: "Hello world", partial });
+		acc.update(doneEvent(makeUsage(120, 45)));
 
 		const result = acc.result();
 		expect(result.inputTokens).toBe(120);
@@ -156,8 +144,8 @@ describe("createAccumulator", () => {
 	it("reports usageReported = false when no done event", () => {
 		const acc = createAccumulator();
 
-		acc.update({ type: "start" });
-		acc.update({ type: "text_delta", text: "Hello" });
+		acc.update(startEvent());
+		acc.update(textDelta("Hello"));
 
 		const result = acc.result();
 		expect(result.inputTokens).toBe(0);
@@ -169,16 +157,7 @@ describe("createAccumulator", () => {
 	it("handles cache token fields", () => {
 		const acc = createAccumulator();
 
-		acc.update({
-			type: "done",
-			stopReason: "stop",
-			usage: {
-				inputTokens: 100,
-				outputTokens: 50,
-				cacheReadTokens: 30,
-				cacheWriteTokens: 10,
-			},
-		});
+		acc.update(doneEvent(makeUsage(100, 50, 30, 10)));
 
 		const result = acc.result();
 		expect(result.inputTokens).toBe(100);
@@ -196,12 +175,12 @@ describe("createAccumulator", () => {
 		expect(result.usageReported).toBe(false);
 	});
 
-	it("handles error event without usage field", () => {
+	it("handles a malformed error event with no assistant message", () => {
 		const acc = createAccumulator();
 
-		acc.update({ type: "start" });
-		acc.update({ type: "text_delta", text: "partial" });
-		acc.update({ type: "error", error: new Error("stream broke") } as ErrorEvent);
+		acc.update(startEvent());
+		acc.update(textDelta("partial"));
+		acc.update({ type: "error", reason: "error" } as unknown as ErrorEvent);
 
 		const result = acc.result();
 		expect(result.inputTokens).toBe(0);
@@ -213,12 +192,8 @@ describe("createAccumulator", () => {
 	it("handles error event with usage field", () => {
 		const acc = createAccumulator();
 
-		acc.update({ type: "start" });
-		acc.update({
-			type: "error",
-			error: new Error("partial failure"),
-			usage: { inputTokens: 60, outputTokens: 25 },
-		} as ErrorEvent);
+		acc.update(startEvent());
+		acc.update(errorEvent(makeUsage(60, 25)));
 
 		const result = acc.result();
 		expect(result.inputTokens).toBe(60);
@@ -376,8 +351,8 @@ describe("extractTextDeltaLength", () => {
 		expect(extractTextDeltaLength(undefined)).toBe(0);
 	});
 
-	it("counts pi-ai text_delta length", () => {
-		expect(extractTextDeltaLength({ type: "text_delta", text: "hello" })).toBe(5);
+	it("counts host text_delta length off `delta`", () => {
+		expect(extractTextDeltaLength({ type: "text_delta", contentIndex: 0, delta: "hello" })).toBe(5);
 	});
 
 	it("counts Anthropic content_block_delta length", () => {

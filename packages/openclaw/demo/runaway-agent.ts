@@ -19,7 +19,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createUsertrustPlugin } from "../src/index.js";
-import type { StreamContext, StreamEvent, StreamFn } from "../src/types.js";
+import type {
+	AssistantMessage,
+	AssistantMessageEventStreamLike,
+	Context,
+	Model,
+	StreamEvent,
+	StreamFn,
+} from "../src/types.js";
 
 // ── 1. Tiny budget — 1,200 usertokens (~$0.50 at typical rates) ──
 const BUDGET = 1_200;
@@ -33,29 +40,70 @@ console.log("  agent:         buggy loop, ~250 usertokens per call");
 console.log("");
 
 // ── 2. The "runaway" mock streamFn — pretends to be a real LLM stream ──
-const runawayStreamFn: StreamFn = async function* (_model, _ctx) {
-	yield { type: "start" } as StreamEvent;
-	yield { type: "text_start" } as StreamEvent;
-	for (let i = 0; i < 25; i++) {
-		yield { type: "text_delta", text: `tok-${i} ` } as StreamEvent;
-	}
-	yield { type: "text_end" } as StreamEvent;
-	yield {
-		type: "done",
+const MODEL: Model = {
+	id: "claude-sonnet-4-6",
+	name: "Claude Sonnet 4.6",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.com",
+	reasoning: false,
+	input: ["text"],
+	cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+	contextWindow: 200_000,
+	maxTokens: 8192,
+};
+
+function finalMessage(input: number, output: number): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: MODEL.api,
+		provider: MODEL.provider,
+		model: MODEL.id,
+		usage: {
+			input,
+			output,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: input + output,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
 		stopReason: "stop",
-		usage: { inputTokens: 500, outputTokens: 1500 }, // ~240 usertokens / call
-	} as StreamEvent;
+		timestamp: Date.now(),
+	};
+}
+
+const runawayStreamFn: StreamFn = (): AssistantMessageEventStreamLike => {
+	// ~240 usertokens / call
+	const message = finalMessage(500, 1500);
+	const events = (async function* (): AsyncGenerator<StreamEvent> {
+		yield { type: "start", partial: message };
+		yield { type: "text_start", contentIndex: 0, partial: message };
+		for (let i = 0; i < 25; i++) {
+			yield { type: "text_delta", contentIndex: 0, delta: `tok-${i} ` };
+		}
+		yield { type: "text_end", contentIndex: 0, content: "", partial: message };
+		yield { type: "done", reason: "stop", message };
+	})();
+
+	return {
+		[Symbol.asyncIterator]: () => events[Symbol.asyncIterator](),
+		result: async () => message,
+	};
 };
 
 // ── 3. Wire the governance plugin ──
 const plugin = createUsertrustPlugin({ budget: BUDGET, dryRun: true, vaultBase });
-const governedStream = plugin.wrapStreamFn?.(runawayStreamFn);
+const governedStream = plugin.wrapStreamFn?.({
+	provider: MODEL.provider,
+	modelId: MODEL.id,
+	streamFn: runawayStreamFn,
+});
 if (!governedStream) throw new Error("plugin missing wrapStreamFn");
 
 // ── 4. Run the agent loop. Each iteration costs ~$0.10 — it gets ~5 calls. ──
-const ctx: StreamContext = {
-	messages: [{ role: "user", content: "do the thing forever" }],
-	model: "claude-sonnet-4-6",
+const ctx: Context = {
+	messages: [{ role: "user", content: "do the thing forever", timestamp: Date.now() }],
 };
 
 let call = 0;
@@ -64,7 +112,7 @@ while (!cutoff && call < 40) {
 	call += 1;
 	try {
 		let chunks = 0;
-		for await (const _e of governedStream("claude-sonnet-4-6", ctx)) {
+		for await (const _e of await governedStream(MODEL, ctx)) {
 			chunks += 1;
 		}
 		console.log(`  call #${String(call).padStart(2)}  OK     chunks=${chunks}  → call settled`);
