@@ -255,10 +255,24 @@ describe("construction-time call site — createUsertrustPlugin/register, not la
 					costCenters: validConfig({ parentUserId: "agent-parent-forwarded" }),
 				},
 			);
-			// budgetContext([]) with a configured parentUserId returns [] quietly
-			// (Task 2 contract) rather than throwing "no parentUserId" — the
-			// cheapest observable proof the id actually reached createGovernor.
-			await expect(governor.budgetContext([])).resolves.toEqual([]);
+			// `budgetContext([])` is NOT discriminating: with `dryRun: true` and an
+			// EMPTY envelopes array, core's `Governor.budgetContext`
+			// (packages/core/src/headless.ts) returns `[]` on every path — the
+			// `parentUserId === undefined` early exit fires identically to the
+			// isDryRun short-circuit reached after a no-op validation loop over
+			// zero envelopes. A forwarding regression would still pass that
+			// assertion. A non-empty array with a descriptor whose `costCenter`
+			// fails core's charset only reaches (and throws from) core's
+			// `assertDistinctValidCostCenters` door if `parentUserId` was actually
+			// forwarded into `createGovernor` — with no `parentUserId`, the early
+			// exit in headless.ts skips that validation entirely and returns `[]`
+			// regardless of the descriptor's shape. This is the cheapest
+			// observable proof the id actually reached `createGovernor`.
+			await expect(
+				governor.budgetContext([
+					{ costCenter: "bad cost center!", allocated: 1, periodStartMs: 0 },
+				]),
+			).rejects.toThrow(/costCenter must match/);
 		} finally {
 			// `shutdown()`, not `governor.destroy()` — this test's config differs
 			// from every other describe block's, so leaving the module-singleton
