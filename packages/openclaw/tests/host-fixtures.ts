@@ -84,6 +84,25 @@ export function toolResult(
 	};
 }
 
+/**
+ * The assistant turn that ISSUED `toolNames` — the message a trailing
+ * tool-result run correlates back to. Ids follow `toolResult`'s `call_<name>`
+ * convention, so a correlated pair is the default and every mismatch a test
+ * wants has to be written out explicitly.
+ */
+export function assistantToolCalls(...toolNames: string[]): Message {
+	return {
+		...makeAssistantMessage(),
+		content: toolNames.map((name) => ({
+			type: "toolCall" as const,
+			id: `call_${name}`,
+			name,
+			arguments: {},
+		})),
+		stopReason: "toolUse",
+	};
+}
+
 // ── events ──
 
 export function startEvent(): StreamEvent {

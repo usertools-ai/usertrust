@@ -5,7 +5,8 @@
  * stream-governor.ts — Governed Stream Wrapper for the OpenClaw/pi-ai seam
  *
  * Wraps a host stream function with usertrust governance:
- *   1. Before stream: authorize (budget check, PENDING hold)
+ *   1. Before stream: attribute (which envelope pays — `attribution.ts`), then
+ *      authorize (budget check, PENDING hold)
  *   2. During stream: forward events, accumulate token usage
  *   3. After stream: EXACTLY ONE terminal ledger action per authorization —
  *      settle with the provider's usage once a `done` event has been seen,
@@ -24,7 +25,9 @@
  * exposes `result()`, so the wrapper is a proxy rather than a generator.
  */
 
-import type { Authorization, Governor, SettleParams } from "usertrust";
+import type { Authorization, AuthorizeParams, Governor, SettleParams } from "usertrust";
+import { withCostCenter } from "usertrust";
+import { deriveAttribution } from "./attribution.js";
 import type { AccumulatedUsage } from "./token-extractor.js";
 import { createAccumulator } from "./token-extractor.js";
 import type {
@@ -32,12 +35,30 @@ import type {
 	AssistantMessageEventStreamLike,
 	Context,
 	ErrorEvent,
+	FrozenCostCenters,
 	Model,
 	StreamEvent,
 	StreamFn,
 	StreamOptions,
 	Usage,
 } from "./types.js";
+
+/**
+ * Per-wrapper governance options. Both wrappers take the same bag, so a
+ * capability added for one is never quietly missing from the other.
+ */
+export interface GovernanceOptions {
+	/**
+	 * The operator's validated, deep-frozen cost-center config
+	 * (`normalizeCostCenters`). Absent → no attribution is derived at all and
+	 * both wrappers behave exactly as they did before envelopes existed.
+	 *
+	 * SECURITY: this is the ONLY source of cost-center strings. Nothing derived
+	 * from a message, a tool name, or any other request content ever reaches
+	 * `withCostCenter`.
+	 */
+	costCenters?: FrozenCostCenters | undefined;
+}
 
 /** A promise plus its settlers, pre-marked as handled to avoid stray rejections. */
 interface Deferred<T> {
@@ -85,7 +106,11 @@ function createDeferred<T>(): Deferred<T> {
  *   - Settles with actual token usage on completion
  *   - Voids the hold on error
  */
-export function wrapStreamWithGovernance(streamFn: StreamFn, governor: Governor): StreamFn {
+export function wrapStreamWithGovernance(
+	streamFn: StreamFn,
+	governor: Governor,
+	opts?: GovernanceOptions,
+): StreamFn {
 	return (
 		model: Model,
 		context: Context,
@@ -95,7 +120,7 @@ export function wrapStreamWithGovernance(streamFn: StreamFn, governor: Governor)
 		// has to resolve from that SAME run — so the inner stream's final message
 		// is handed over through a deferred the generator settles.
 		const final = createDeferred<AssistantMessage>();
-		const events = governedStream(streamFn, governor, model, context, options, final);
+		const events = governedStream(streamFn, governor, model, context, options, final, opts);
 		let consumed = false;
 
 		return {
@@ -134,34 +159,17 @@ async function* governedStream(
 	context: Context,
 	options: StreamOptions | undefined,
 	final: Deferred<AssistantMessage>,
+	opts: GovernanceOptions | undefined,
 ): AsyncGenerator<StreamEvent> {
-	// 1a. Pre-flight budget check.
-	// In dry-run mode (no TigerBeetle) the engine cannot enforce balance,
-	// so we explicitly refuse calls when budget_remaining ≤ 0. This matches
-	// the behaviour users expect from a "budget" config: hit zero, get cut off.
-	if (governor.budgetRemaining() <= 0) {
-		const denial = new Error(
-			`usertrust: budget exhausted (${governor.budgetRemaining()} remaining); call denied`,
-		);
-		final.reject(denial);
-		throw denial;
-	}
-
-	// 1b. Authorize — policy gate, PENDING hold.
-	// A policy DENY is a terminal path like any other: `final` must be settled
-	// here, or a consumer that iterates AND awaits `result()` sees the iteration
-	// reject while `result()` hangs forever. There is no hold to abort yet, so
-	// this needs its own try rather than the streaming one below.
+	// 1. Attribute, pre-flight, authorize (see `authorizeGoverned`).
+	// A denial — from the pre-flight or from the policy gate — is a terminal
+	// path like any other: `final` must be settled here, or a consumer that
+	// iterates AND awaits `result()` sees the iteration reject while `result()`
+	// hangs forever. There is no hold to abort yet, so this needs its own try
+	// rather than the streaming one below.
 	let auth: Authorization;
 	try {
-		auth = await governor.authorize({
-			model: model.id,
-			messages: context.messages,
-			...(options?.maxTokens != null ? { maxOutputTokens: options.maxTokens } : {}),
-			params: {
-				...(options?.temperature != null ? { temperature: options.temperature } : {}),
-			},
-		});
+		auth = await authorizeGoverned(governor, model, context, options, opts);
 	} catch (err) {
 		final.reject(err);
 		throw err;
@@ -254,6 +262,65 @@ async function* governedStream(
 }
 
 /**
+ * The single place a governed call is attributed, pre-flighted and authorized.
+ * Both wrappers go through it, so the streaming and completion paths can never
+ * drift into gating or attributing the same call differently.
+ *
+ * ALS DISCIPLINE. `withCostCenter` wraps `governor.authorize()` and NOTHING
+ * else. Its scope has already exited by the time the caller's `await` resolves,
+ * which is the point: `settle()`/`abort()` run later, from a `finally` or an
+ * entirely different task, and they read the governor's own authorize-time
+ * capture rather than an AsyncLocalStorage store that is long gone. Nothing in
+ * this package ever calls `getCurrentCostCenter()`.
+ */
+async function authorizeGoverned(
+	governor: Governor,
+	model: Model,
+	context: Context,
+	options: StreamOptions | undefined,
+	opts: GovernanceOptions | undefined,
+): Promise<Authorization> {
+	const costCenters = opts?.costCenters;
+	// Stateless and per-call: derived from this call's own context every time,
+	// so nothing survives a previous call to go stale on a later one.
+	const active =
+		costCenters !== undefined ? deriveAttribution(context.messages, costCenters) : undefined;
+
+	// Pre-flight budget check — the SESSION wallet's gate. In dry-run mode (no
+	// TigerBeetle) the engine cannot enforce a balance, so we explicitly refuse
+	// calls when budget_remaining ≤ 0. This matches the behaviour users expect
+	// from a "budget" config: hit zero, get cut off.
+	//
+	// SKIPPED for an ATTRIBUTED call. The session wallet is not the wallet that
+	// pays it, so denying here would make an operator's independently funded
+	// envelope unreachable the moment the session ran dry — a budget the
+	// operator allocated and can never spend. `authorize()` gates the envelope
+	// the hold will actually debit, atomically, which is the real enforcement.
+	if (active === undefined && governor.budgetRemaining() <= 0) {
+		throw new Error(
+			`usertrust: budget exhausted (${governor.budgetRemaining()} remaining); call denied`,
+		);
+	}
+
+	const params: AuthorizeParams = {
+		model: model.id,
+		messages: context.messages,
+		...(options?.maxTokens != null ? { maxOutputTokens: options.maxTokens } : {}),
+		params: {
+			...(options?.temperature != null ? { temperature: options.temperature } : {}),
+		},
+	};
+
+	if (active === undefined || costCenters === undefined) return governor.authorize(params);
+
+	// `envelopes[active]` is the metadata half (D4): without it the governor
+	// knows WHICH envelope to debit but not how large it is, and the policy
+	// tier fields come back `undefined`. `deriveAttribution` only ever returns
+	// a validated `envelopes` key, so this lookup always hits.
+	return withCostCenter(active, () => governor.authorize(params), costCenters.envelopes[active]);
+}
+
+/**
  * The single place accumulated stream usage becomes `SettleParams`.
  *
  * Omitting the token fields is what selects the ESTIMATE — `settle()` reads
@@ -324,24 +391,12 @@ async function abortForFailureEvent(
 export function wrapCompleteWithGovernance<T extends { usage?: Usage }>(
 	completeFn: (model: Model, context: Context, options?: StreamOptions) => Promise<T>,
 	governor: Governor,
+	opts?: GovernanceOptions,
 ): (model: Model, context: Context, options?: StreamOptions) => Promise<T> {
 	return async (model: Model, context: Context, options?: StreamOptions): Promise<T> => {
-		// 1a. Pre-flight budget check (see governedStream for rationale).
-		if (governor.budgetRemaining() <= 0) {
-			throw new Error(
-				`usertrust: budget exhausted (${governor.budgetRemaining()} remaining); call denied`,
-			);
-		}
-
-		// 1b. Authorize
-		const auth = await governor.authorize({
-			model: model.id,
-			messages: context.messages,
-			...(options?.maxTokens != null ? { maxOutputTokens: options.maxTokens } : {}),
-			params: {
-				...(options?.temperature != null ? { temperature: options.temperature } : {}),
-			},
-		});
+		// 1. Attribute, pre-flight, authorize — the SAME derivation the streaming
+		// path uses, from this call's own context.
+		const auth = await authorizeGoverned(governor, model, context, options, opts);
 
 		try {
 			// 2. Execute

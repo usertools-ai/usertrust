@@ -34,6 +34,7 @@
 
 import type { Governor } from "usertrust";
 import { createGovernor, parentUserIdRefusal, withCostCenter } from "usertrust";
+import type { GovernanceOptions } from "./stream-governor.js";
 import { wrapCompleteWithGovernance, wrapStreamWithGovernance } from "./stream-governor.js";
 import type {
 	AssistantMessageEventStreamLike,
@@ -49,6 +50,8 @@ import type {
 } from "./types.js";
 
 // Re-export for consumers
+export { deriveAttribution } from "./attribution.js";
+export type { GovernanceOptions } from "./stream-governor.js";
 export { wrapCompleteWithGovernance, wrapStreamWithGovernance } from "./stream-governor.js";
 export {
 	createAccumulator,
@@ -321,7 +324,9 @@ export function createUsertrustPlugin(config: UsertrustPluginConfig): ProviderPl
 			const next = ctx.streamFn;
 			if (next == null) return undefined;
 			return (model, context, options) =>
-				governedStreamLazy(getGovernor, next, model, context, options);
+				governedStreamLazy(getGovernor, next, model, context, options, {
+					costCenters: frozenCostCenters,
+				});
 		},
 	};
 }
@@ -356,7 +361,13 @@ export async function createGovernedStreamFn(
 	const frozenCostCenters =
 		config.costCenters !== undefined ? normalizeCostCenters(config.costCenters) : undefined;
 	const gov = await initGovernor(config, frozenCostCenters);
-	const governedStreamFn = wrapStreamWithGovernance(streamFn, gov);
+	// This path builds its OWN wrapper rather than going through
+	// `createUsertrustPlugin`, so it needs the same opts bag explicitly —
+	// otherwise the programmatic entry point would silently ignore a
+	// `costCenters` config it just finished validating.
+	const governedStreamFn = wrapStreamWithGovernance(streamFn, gov, {
+		costCenters: frozenCostCenters,
+	});
 	return { governedStreamFn, governor: gov };
 }
 
@@ -491,10 +502,11 @@ function governedStreamLazy(
 	streamFn: StreamFn,
 	model: Model,
 	context: Context,
-	options?: StreamOptions,
+	options: StreamOptions | undefined,
+	opts: GovernanceOptions,
 ): AssistantMessageEventStreamLike {
 	const inner = getGovernor().then((gov) =>
-		wrapStreamWithGovernance(streamFn, gov)(model, context, options),
+		wrapStreamWithGovernance(streamFn, gov, opts)(model, context, options),
 	);
 	// Consumers still see the rejection through their own await; this only
 	// stops an init failure from surfacing as an unhandled rejection.
