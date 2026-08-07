@@ -25,9 +25,22 @@
  * exposes `result()`, so the wrapper is a proxy rather than a generator.
  */
 
-import type { Authorization, AuthorizeParams, Governor, SettleParams } from "usertrust";
+import type {
+	Authorization,
+	AuthorizeParams,
+	EnvelopeStatus,
+	Governor,
+	SettleParams,
+	TrustReceipt,
+} from "usertrust";
 import { withCostCenter } from "usertrust";
 import { deriveAttribution } from "./attribution.js";
+import {
+	envelopeDescriptorsFrom,
+	estimationMessages,
+	formatScarcityBlock,
+	injectScarcityBlock,
+} from "./scarcity-block.js";
 import type { AccumulatedUsage } from "./token-extractor.js";
 import { createAccumulator } from "./token-extractor.js";
 import type {
@@ -58,6 +71,15 @@ export interface GovernanceOptions {
 	 * `withCostCenter`.
 	 */
 	costCenters?: FrozenCostCenters | undefined;
+
+	/**
+	 * Fires with the `TrustReceipt` after a successful `settle()` — the wrapper
+	 * used to discard it. Fire-and-forget (see `fireOnReceipt`): a synchronous
+	 * throw and a returned rejection are both isolated, and the callback never
+	 * delays stream termination — `result()`/the settle path have already moved
+	 * on by the time it runs.
+	 */
+	onReceipt?: ((receipt: TrustReceipt) => void | Promise<void>) | undefined;
 }
 
 /** A promise plus its settlers, pre-marked as handled to avoid stray rejections. */
@@ -161,15 +183,21 @@ async function* governedStream(
 	final: Deferred<AssistantMessage>,
 	opts: GovernanceOptions | undefined,
 ): AsyncGenerator<StreamEvent> {
-	// 1. Attribute, pre-flight, authorize (see `authorizeGoverned`).
+	// 1. Attribute, pre-flight, authorize, inject scarcity (see `authorizeGoverned`).
 	// A denial — from the pre-flight or from the policy gate — is a terminal
 	// path like any other: `final` must be settled here, or a consumer that
 	// iterates AND awaits `result()` sees the iteration reject while `result()`
 	// hangs forever. There is no hold to abort yet, so this needs its own try
 	// rather than the streaming one below.
 	let auth: Authorization;
+	// The scarcity block (when injected) is delivered on `Context.systemPrompt`
+	// — a COPY, never the caller's own object — so every downstream use of
+	// `context` in this generator reads `forwardedContext`, not the parameter.
+	let forwardedContext: Context;
 	try {
-		auth = await authorizeGoverned(governor, model, context, options, opts);
+		const authorized = await authorizeGoverned(governor, model, context, options, opts);
+		auth = authorized.auth;
+		forwardedContext = authorized.context;
 	} catch (err) {
 		final.reject(err);
 		throw err;
@@ -195,7 +223,7 @@ async function* governedStream(
 	let failure: ErrorEvent | undefined;
 
 	try {
-		const stream = await streamFn(model, context, options);
+		const stream = await streamFn(model, forwardedContext, options);
 		// Hold on to the host's final-message promise, but do NOT wire it to
 		// `final` yet: it settles when the PROVIDER stream ends, which is before
 		// `governor.settle()` runs. Resolving here would let a `result()`-only
@@ -222,8 +250,9 @@ async function* governedStream(
 		}
 
 		// 3b. Settle — POST actual cost.
-		await governor.settle(auth, settleParamsFor(accumulator.result()));
+		const receipt = await governor.settle(auth, settleParamsFor(accumulator.result()));
 		terminated = true;
+		fireOnReceipt(opts, receipt);
 
 		// Governance is done and the money path succeeded — only now may
 		// `result()` report the host's final message.
@@ -250,7 +279,7 @@ async function* governedStream(
 				// rather than voiding (AGENTS.md, "The settle/void asymmetry is
 				// deliberate") — at the provider's usage if a `done` event already
 				// carried it, otherwise at the ESTIMATE.
-				await settleAbandoned(governor, auth, accumulator.result());
+				await settleAbandoned(governor, auth, accumulator.result(), opts);
 			}
 		}
 		// `result()` must never be left pending. The abandonment path has no final
@@ -261,10 +290,19 @@ async function* governedStream(
 	}
 }
 
+/** What {@link authorizeGoverned} hands back: the hold, and the context every
+ * downstream use (the streamFn/completeFn call) must read instead of the
+ * caller's original — the scarcity block, when injected, lives on its copy. */
+interface GovernedAuthorization {
+	auth: Authorization;
+	context: Context;
+}
+
 /**
- * The single place a governed call is attributed, pre-flighted and authorized.
- * Both wrappers go through it, so the streaming and completion paths can never
- * drift into gating or attributing the same call differently.
+ * The single place a governed call is attributed, pre-flighted, scarcity-
+ * injected and authorized. Both wrappers go through it, so the streaming and
+ * completion paths can never drift into gating, attributing, or injecting the
+ * same call differently.
  *
  * ALS DISCIPLINE. `withCostCenter` wraps `governor.authorize()` and NOTHING
  * else. Its scope has already exited by the time the caller's `await` resolves,
@@ -279,7 +317,7 @@ async function authorizeGoverned(
 	context: Context,
 	options: StreamOptions | undefined,
 	opts: GovernanceOptions | undefined,
-): Promise<Authorization> {
+): Promise<GovernedAuthorization> {
 	const costCenters = opts?.costCenters;
 	// Stateless and per-call: derived from this call's own context every time,
 	// so nothing survives a previous call to go stale on a later one.
@@ -302,22 +340,88 @@ async function authorizeGoverned(
 		);
 	}
 
+	// Scarcity injection (A8: reporting only — never gates, delays, or throws
+	// into the money path; see `readScarcityBlock`). `costCenters === undefined`
+	// means the operator never configured envelopes, so there is nothing to
+	// read — same as before this feature existed, byte-identical behavior.
+	const block = costCenters !== undefined ? await readScarcityBlock(governor, costCenters) : null;
+	const forwardedContext = injectScarcityBlock(context, block);
+
 	const params: AuthorizeParams = {
 		model: model.id,
-		messages: context.messages,
+		// Estimation honesty (contract-notes §4): `authorize()` only ever sees
+		// this array, never `Context.systemPrompt` — so the FULL effective
+		// system prompt (pre-existing + the scarcity block just injected above)
+		// has to be represented here, or the pre-call hold under-covers what
+		// the stream call is about to actually send.
+		messages: estimationMessages(forwardedContext),
 		...(options?.maxTokens != null ? { maxOutputTokens: options.maxTokens } : {}),
 		params: {
 			...(options?.temperature != null ? { temperature: options.temperature } : {}),
 		},
 	};
 
-	if (active === undefined || costCenters === undefined) return governor.authorize(params);
+	const auth =
+		active === undefined || costCenters === undefined
+			? await governor.authorize(params)
+			: // `envelopes[active]` is the metadata half (D4): without it the governor
+				// knows WHICH envelope to debit but not how large it is, and the policy
+				// tier fields come back `undefined`. `deriveAttribution` only ever
+				// returns a validated `envelopes` key, so this lookup always hits.
+				await withCostCenter(
+					active,
+					() => governor.authorize(params),
+					costCenters.envelopes[active],
+				);
 
-	// `envelopes[active]` is the metadata half (D4): without it the governor
-	// knows WHICH envelope to debit but not how large it is, and the policy
-	// tier fields come back `undefined`. `deriveAttribution` only ever returns
-	// a validated `envelopes` key, so this lookup always hits.
-	return withCostCenter(active, () => governor.authorize(params), costCenters.envelopes[active]);
+	return { auth, context: forwardedContext };
+}
+
+/**
+ * Read + format the per-turn scarcity block. REPORTING ONLY (A8): every
+ * failure leg — `scarcityContext: false` (skips the read entirely), an
+ * empty/failed `budgetContext` read, or a throw from the formatter itself —
+ * degrades to `null` rather than gating, delaying, or throwing into the money
+ * path. The two try/catches are separate (rather than one wrapping both calls)
+ * so each failure mode stays independently observable and testable: a read
+ * failure and a formatter failure are different bugs in different code.
+ */
+async function readScarcityBlock(
+	governor: Governor,
+	costCenters: FrozenCostCenters,
+): Promise<string | null> {
+	if (!costCenters.scarcityContext) return null;
+
+	let statuses: EnvelopeStatus[];
+	try {
+		statuses = await governor.budgetContext(envelopeDescriptorsFrom(costCenters));
+	} catch {
+		return null;
+	}
+
+	try {
+		return formatScarcityBlock(statuses);
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Fire `opts.onReceipt` fire-and-forget. Neither a synchronous throw nor a
+ * returned rejection may propagate into the governed stream — the settle that
+ * produced `receipt` already committed — and the callback must never delay
+ * stream termination, so this is never awaited.
+ */
+function fireOnReceipt(opts: GovernanceOptions | undefined, receipt: TrustReceipt): void {
+	const cb = opts?.onReceipt;
+	if (cb === undefined) return;
+	try {
+		void Promise.resolve(cb(receipt)).catch(() => {
+			// Returned rejection — isolated, same as the synchronous throw below.
+		});
+	} catch {
+		// Synchronous throw from the callback itself — isolated.
+	}
 }
 
 /**
@@ -354,9 +458,11 @@ async function settleAbandoned(
 	governor: Governor,
 	auth: Authorization,
 	usage: AccumulatedUsage,
+	opts: GovernanceOptions | undefined,
 ): Promise<void> {
 	try {
-		await governor.settle(auth, settleParamsFor(usage));
+		const receipt = await governor.settle(auth, settleParamsFor(usage));
+		fireOnReceipt(opts, receipt);
 	} catch (err) {
 		// The hold would otherwise dangle PENDING until destroy/timeout.
 		await governor.abort(auth, err).catch(() => {});
@@ -394,16 +500,22 @@ export function wrapCompleteWithGovernance<T extends { usage?: Usage }>(
 	opts?: GovernanceOptions,
 ): (model: Model, context: Context, options?: StreamOptions) => Promise<T> {
 	return async (model: Model, context: Context, options?: StreamOptions): Promise<T> => {
-		// 1. Attribute, pre-flight, authorize — the SAME derivation the streaming
-		// path uses, from this call's own context.
-		const auth = await authorizeGoverned(governor, model, context, options, opts);
+		// 1. Attribute, pre-flight, authorize, inject scarcity — the SAME
+		// derivation the streaming path uses, from this call's own context.
+		const { auth, context: forwardedContext } = await authorizeGoverned(
+			governor,
+			model,
+			context,
+			options,
+			opts,
+		);
 
 		try {
 			// 2. Execute
-			const result = await completeFn(model, context, options);
+			const result = await completeFn(model, forwardedContext, options);
 
 			// 3. Settle with actual usage if available
-			await governor.settle(auth, {
+			const receipt = await governor.settle(auth, {
 				...(result.usage != null
 					? {
 							inputTokens: result.usage.input,
@@ -412,6 +524,7 @@ export function wrapCompleteWithGovernance<T extends { usage?: Usage }>(
 						}
 					: { usageSource: "estimated" as const }),
 			});
+			fireOnReceipt(opts, receipt);
 
 			return result;
 		} catch (err) {

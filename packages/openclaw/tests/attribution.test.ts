@@ -78,7 +78,17 @@ const CC: FrozenCostCenters = normalizeCostCenters({
 	},
 });
 
-/** Same map with NO `default` — the "unattributed rather than fall back" config. */
+/**
+ * Same map with NO `default` — the "unattributed rather than fall back" config.
+ *
+ * `scarcityContext: false`: this fixture pins ATTRIBUTION routing (this file's
+ * Part 2), which is orthogonal to per-turn scarcity injection (Ship 2 Task 6)
+ * — the block reads every configured envelope on every governed call the
+ * operator enables it for, independent of any one call's own attribution. Left
+ * at its `true` default here, every `lookupBalances` assertion below would be
+ * pinning Task 6's behavior instead of Task 5's; turned off, this file stays
+ * about what it says it's about.
+ */
 const CC_NO_DEFAULT: FrozenCostCenters = normalizeCostCenters({
 	parentUserId: PARENT,
 	tools: { web_search: "research", read_file: "verification" },
@@ -86,6 +96,7 @@ const CC_NO_DEFAULT: FrozenCostCenters = normalizeCostCenters({
 		research: { allocated: 10_000, periodStartMs: PERIOD_START },
 		verification: { allocated: 5_000, periodStartMs: PERIOD_START },
 	},
+	scarcityContext: false,
 });
 
 // ── Part 1: deriveAttribution (pure) ──
