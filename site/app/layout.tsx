@@ -1,7 +1,7 @@
+import { Analytics } from "@vercel/analytics/next";
 import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import { NoiseOverlay } from "./components/noise-overlay";
-import { ScrollProgress } from "./components/scroll-progress";
 import "./globals.css";
 
 const usertoolsSans = localFont({
@@ -12,6 +12,9 @@ const usertoolsSans = localFont({
 	],
 	variable: "--font-usertools",
 	display: "swap",
+	// Font-loading doctrine: preload display + mono only. Sans is prose voice,
+	// first used below the fold — preloading it would compete with the LCP.
+	preload: false,
 });
 
 const jetbrainsMono = localFont({
@@ -23,17 +26,31 @@ const jetbrainsMono = localFont({
 	display: "swap",
 });
 
+// Display voice — Khand, lowercase verdicts, every headline on the page.
+// Self-hosted woff2, deliberately not TigerBeetle's Big Shoulders.
+const khand = localFont({
+	src: [
+		{ path: "../public/fonts/Khand-SemiBold.woff2", weight: "600" },
+		{ path: "../public/fonts/Khand-Bold.woff2", weight: "700" },
+	],
+	variable: "--font-khand",
+	display: "swap",
+});
+
+const description =
+	"financial governance for AI agents. every governed LLM call becomes an immutable ledger transaction — with a receipt anyone can verify.";
+
 export const metadata: Metadata = {
-	title: "usertrust — AI financial governance in 30 seconds",
-	description:
-		"One-line SDK wrapper that turns every AI agent LLM call into an auditable, budget-enforced financial transaction. Open source.",
+	title: "usertrust — keep the receipts.",
+	description,
 	keywords: [
 		"AI governance",
 		"LLM spend",
 		"budget holds",
 		"audit trail",
+		"receipts",
+		"verifiable audit",
 		"usertrust",
-		"trust",
 		"AI finance",
 		"agent governance",
 		"OpenAI",
@@ -43,19 +60,17 @@ export const metadata: Metadata = {
 	metadataBase: new URL("https://usertrust.ai"),
 	alternates: { canonical: "/" },
 	openGraph: {
-		title: "usertrust — AI financial governance in 30 seconds",
-		description:
-			"One-line SDK wrapper that turns every AI agent LLM call into an auditable, budget-enforced financial transaction. Open source.",
+		title: "usertrust — keep the receipts.",
+		description,
 		url: "https://usertrust.ai",
-		siteName: "UserTrust",
+		siteName: "usertrust",
 		images: [{ url: "/og", width: 1200, height: 630, type: "image/png" }],
 		type: "website",
 	},
 	twitter: {
 		card: "summary_large_image",
-		title: "usertrust — AI financial governance in 30 seconds",
-		description:
-			"One-line SDK wrapper that turns every AI agent LLM call into an auditable, budget-enforced financial transaction. Open source.",
+		title: "usertrust — keep the receipts.",
+		description,
 		images: [{ url: "/og", width: 1200, height: 630 }],
 	},
 	icons: { icon: "/favicon.svg" },
@@ -81,21 +96,22 @@ export const viewport: Viewport = {
 const jsonLd = {
 	"@context": "https://schema.org",
 	"@type": "SoftwareApplication",
-	name: "UserTrust",
+	name: "usertrust",
 	applicationCategory: "DeveloperApplication",
 	license: "https://www.apache.org/licenses/LICENSE-2.0",
 	offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
 	author: { "@type": "Organization", name: "Usertools Inc" },
 	url: "https://usertrust.ai",
-	description:
-		"AI financial governance in 30 seconds. Budget holds, audit trails, and spend limits for every LLM call.",
+	description,
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
 	return (
-		<html lang="en" className={`${usertoolsSans.variable} ${jetbrainsMono.variable}`}>
+		<html
+			lang="en"
+			className={`${usertoolsSans.variable} ${jetbrainsMono.variable} ${khand.variable}`}
+		>
 			<body className="bg-brand-bg text-white font-sans antialiased overflow-x-hidden">
-				<ScrollProgress />
 				<NoiseOverlay />
 				{children}
 				<script
@@ -103,6 +119,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 					// biome-ignore lint/security/noDangerouslySetInnerHtml: JSON-LD structured data requires this pattern
 					dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
 				/>
+				<Analytics />
 			</body>
 		</html>
 	);

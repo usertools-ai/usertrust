@@ -5,7 +5,6 @@ import { CodeExample } from "./components/code-example";
 import { CTA } from "./components/cta";
 import { Features } from "./components/features";
 import { Footer } from "./components/footer";
-import { GradientOrbs } from "./components/gradient-orbs";
 import { GridBackground } from "./components/grid-background";
 import { Hero } from "./components/hero";
 import { HowItWorks } from "./components/how-it-works";
@@ -41,7 +40,6 @@ export default async function Home() {
 	return (
 		<>
 			<GridBackground />
-			<GradientOrbs />
 			<Nav />
 			<Hero downloads={downloads} stars={stars} />
 			<SocialProof />

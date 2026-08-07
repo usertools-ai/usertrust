@@ -17,8 +17,24 @@
 	--color-warning: #f59e0b;
 	--color-danger: #ef4444;
 
+	/* ── Receipts redesign (2026-08) ───────────────────────────────────── */
+	/* Thermal paper — the ONLY light surfaces on the page (15.6:1 ink-on-paper). */
+	--color-paper: #f2efe6;
+	--color-ink: #16161e;
+	/* On-paper semantic accents — ink-tinted dark variants. The bright dark-ground
+	   accents (--color-ut, --color-warning, --color-danger, --color-tim) are
+	   FORBIDDEN as text on paper (1.67–3.27:1, Codex-verified failures).
+	   All four validated ≥4.5:1 on --color-paper by the contrast gate (Step 13). */
+	--color-paper-emerald: #0b6b4f;
+	--color-paper-amber: #7a4d00;
+	--color-paper-red: #a11212;
+	--color-paper-steel: #33566e;
+
 	--font-sans: var(--font-usertools), -apple-system, BlinkMacSystemFont, sans-serif;
 	--font-mono: var(--font-jetbrains), "SF Mono", "Cascadia Code", monospace;
+
+	/* Display voice — Khand. Tailwind emits this as the `font-display` utility. */
+	--font-display: var(--font-khand), var(--font-usertools), -apple-system, sans-serif;
 }
 
 /*
@@ -86,7 +102,6 @@
 
 /* Document scrolling */
 html {
-	scroll-behavior: smooth;
 	/*
 	 * The nav is `fixed top-0`, so an anchor jump lands underneath it without
 	 * this. 5rem clears the real header: the bar is py-4 (2rem) around a logo
@@ -96,6 +111,14 @@ html {
 	 * reintroduces the bug.
 	 */
 	scroll-padding-top: 5rem;
+}
+
+/* Smooth scrolling is motion — reduced-motion users get instant anchor jumps
+   (motion doctrine #5: finished states, not disabled features). */
+@media (prefers-reduced-motion: no-preference) {
+	html {
+		scroll-behavior: smooth;
+	}
 }
 
 /* Custom scrollbar */
@@ -176,45 +199,6 @@ html {
 	pointer-events: none;
 }
 
-/* Glow utilities */
-.glow-ut {
-	box-shadow: 0 0 20px rgba(52, 211, 153, 0.15), 0 0 60px rgba(52, 211, 153, 0.08);
-}
-.glow-ut-strong {
-	box-shadow: 0 0 30px rgba(52, 211, 153, 0.25), 0 0 80px rgba(52, 211, 153, 0.12), 0 0 120px
-		rgba(52, 211, 153, 0.06);
-}
-
-/* Section divider */
-.section-divider {
-	height: 1px;
-	background: linear-gradient(90deg, transparent, rgba(52, 211, 153, 0.15), transparent);
-}
-
-/* Orb float animation */
-@keyframes orb-float {
-	0%,
-	100% {
-		transform: translate(0, 0);
-	}
-	25% {
-		transform: translate(30px, -25px);
-	}
-	50% {
-		transform: translate(-20px, 15px);
-	}
-	75% {
-		transform: translate(10px, -10px);
-	}
-}
-
-/* Compositor-only orb drift (duration set inline per orb).
-   No filter here — the radial gradient supplies the softness. */
-.orb {
-	animation: orb-float 25s ease-in-out infinite;
-	will-change: transform;
-}
-
 /* Shimmer effect for cards */
 @keyframes shimmer {
 	0% {
@@ -262,7 +246,6 @@ html {
 @media (prefers-reduced-motion: reduce) {
 	.shimmer-border::after,
 	.glow-ring,
-	.orb,
 	[class*="animate-"] {
 		animation: none !important;
 	}
@@ -311,18 +294,6 @@ html {
 	width: 100%;
 }
 
-/* Stagger children animation */
-@keyframes fade-up {
-	from {
-		opacity: 0;
-		transform: translateY(12px);
-	}
-	to {
-		opacity: 1;
-		transform: translateY(0);
-	}
-}
-
 /* Hero entrance — CSS-driven so above-the-fold content paints on the first
    frame instead of waiting for JS hydration (keeps LCP off the hydration path).
    Mirrors the motion fade-up used elsewhere. Per-element delay set inline. */
@@ -343,28 +314,6 @@ html {
 	.hero-rise {
 		animation: none;
 	}
-}
-
-.stagger-children > * {
-	animation: fade-up 0.4s ease-out both;
-}
-.stagger-children > *:nth-child(1) {
-	animation-delay: 0ms;
-}
-.stagger-children > *:nth-child(2) {
-	animation-delay: 60ms;
-}
-.stagger-children > *:nth-child(3) {
-	animation-delay: 120ms;
-}
-.stagger-children > *:nth-child(4) {
-	animation-delay: 180ms;
-}
-.stagger-children > *:nth-child(5) {
-	animation-delay: 240ms;
-}
-.stagger-children > *:nth-child(6) {
-	animation-delay: 300ms;
 }
 
 /* Glow ring — breathing emerald halo for the highlighted stat.
@@ -389,9 +338,6 @@ html {
 @media (prefers-reduced-motion: reduce) {
 	.spotlight-card::before {
 		display: none;
-	}
-	.stagger-children > * {
-		animation: none;
 	}
 	.glow-ring {
 		animation: none;
@@ -440,4 +386,105 @@ html {
 @utility safe-x {
 	padding-left: max(1.5rem, env(safe-area-inset-left));
 	padding-right: max(1.5rem, env(safe-area-inset-right));
+}
+
+/* ── Receipts design system (2026-08 redesign) ─────────────────────────── */
+
+/* Thermal-paper surface — warm, slightly dimmed against pure white so paper
+   reads as artifact, lifted off the dark ground by shadow, never by border. */
+.paper-surface {
+	background: var(--color-paper);
+	color: var(--color-ink);
+	box-shadow: 0 1px 0 rgba(22, 22, 30, 0.08), 0 14px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* Punch-hole perforation strip (receipt top/bottom edges): transparent holes
+   punched out of paper on a 14px rhythm. */
+.perforation {
+	height: 12px;
+	background-image: radial-gradient(circle at 6px 6px, transparent 0 4px, var(--color-paper) 4.5px);
+	background-size: 14px 12px;
+	background-repeat: repeat-x;
+}
+
+/* Mono provenance stub — "captured v3.1.0 · TigerBeetle 0.17.9 · 2026-08-07".
+   Ink-tinted (paper-* accents are labels/graphics, never fine print). */
+.provenance-stub {
+	font-family: var(--font-mono);
+	font-size: 0.6875rem;
+	letter-spacing: 0.04em;
+	color: color-mix(in srgb, var(--color-ink) 64%, var(--color-paper));
+}
+
+/* THE HERO PRINT — pure-CSS print-head sweep, present in initial HTML (no
+   hydration dependency, no flash-reprint). The element's DEFAULT state is the
+   finished print; mask + animation exist only inside no-preference, so
+   reduced-motion users get the printed receipt instantly. */
+@media (prefers-reduced-motion: no-preference) {
+	.print-sweep {
+		-webkit-mask-image: linear-gradient(to bottom, #000 0 55%, transparent 72%);
+		mask-image: linear-gradient(to bottom, #000 0 55%, transparent 72%);
+		-webkit-mask-size: 100% 300%;
+		mask-size: 100% 300%;
+		animation: print-sweep 1.4s cubic-bezier(0.65, 0, 0.35, 1) 0.15s both;
+	}
+}
+@keyframes print-sweep {
+	from {
+		-webkit-mask-position: 0 100%;
+		mask-position: 0 100%;
+	}
+	to {
+		-webkit-mask-position: 0 0;
+		mask-position: 0 0;
+	}
+}
+
+/* Stamp slam — CSS voice of the motion-v12 spring in stamp.tsx. Fires once;
+   reduced-motion renders the final state statically (component's job). */
+@keyframes stamp-in {
+	0% {
+		opacity: 0;
+		transform: scale(1.6) rotate(-8deg);
+	}
+	60% {
+		opacity: 1;
+		transform: scale(0.94) rotate(-3deg);
+	}
+	100% {
+		opacity: 1;
+		transform: scale(1) rotate(-4deg);
+	}
+}
+
+/* Hairline rules drawing in (docket tiles, receipt field rules).
+   Apply with `transform-origin: left` on the element. */
+@keyframes hairline-draw {
+	from {
+		transform: scaleX(0);
+	}
+	to {
+		transform: scaleX(1);
+	}
+}
+
+/* "copied · $0.00" chit — pop in, hold, fade. 1.6s total (copy-chip.tsx). */
+@keyframes chit-pop {
+	0% {
+		opacity: 0;
+		transform: translateY(4px) scale(0.92);
+	}
+	12% {
+		opacity: 1;
+		transform: translateY(0) scale(1.03);
+	}
+	20%,
+	82% {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+	}
+	100% {
+		opacity: 0;
+		transform: translateY(-4px) scale(1);
+	}
 }
