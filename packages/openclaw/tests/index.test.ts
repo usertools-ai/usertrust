@@ -188,22 +188,20 @@ describe("openclaw plugin entry point", () => {
 	});
 
 	describe("initGovernor early return", () => {
-		it("returns existing governor on second createGovernedStreamFn call", async () => {
+		it("returns existing governor on second createGovernedStreamFn call with the SAME config", async () => {
 			const { createGovernedStreamFn, getGovernor } = await import("../src/index.js");
 
 			const mockStreamFn = streamOf([startEvent()]);
+			const config = { budget: 100_000, dryRun: true };
 
 			// First call initializes
-			const { governor: gov1 } = await createGovernedStreamFn(mockStreamFn, {
-				budget: 100_000,
-				dryRun: true,
-			});
+			const { governor: gov1 } = await createGovernedStreamFn(mockStreamFn, config);
 
-			// Second call should return the same governor
-			const { governor: gov2 } = await createGovernedStreamFn(mockStreamFn, {
-				budget: 200_000,
-				dryRun: true,
-			});
+			// Second call, SAME config, should return the same governor — a
+			// DIFFERENT config now rejects instead of silently reusing the first
+			// instance's governor (Task 4, `tests/cost-centers-config.test.ts`'s
+			// "governor config-mismatch guard" suite).
+			const { governor: gov2 } = await createGovernedStreamFn(mockStreamFn, config);
 
 			expect(gov1).toBe(gov2);
 			expect(getGovernor()).toBe(gov1);

@@ -321,6 +321,57 @@ export interface GovernedStreamMeta {
 	model: string;
 }
 
+/**
+ * One operator-declared spending envelope within `costCenters.envelopes`.
+ * Mirrors core's `EnvelopeDescriptor` minus `costCenter` (the envelope's key
+ * in the map already carries that).
+ */
+export interface EnvelopeConfig {
+	allocated: number;
+	periodStartMs: number;
+	periodEndMs?: number;
+}
+
+/**
+ * Operator-declared tool→cost-center attribution config (spec shape, as
+ * written in openclaw.json — unvalidated). Lives on
+ * `UsertrustPluginConfig.costCenters`; `normalizeCostCenters` (index.ts)
+ * validates it against core's canonical doors and returns the deep-frozen
+ * {@link FrozenCostCenters} every wrapper actually reads.
+ *
+ * SECURITY: `tools` values and `default` are the ONLY strings that ever reach
+ * `withCostCenter` (see the design's attribution security model) — both are
+ * OPERATOR config, never request content, so no agent-controlled text can
+ * author or relabel a cost center.
+ */
+export interface CostCentersConfig {
+	/** → `GovernorOpts.parentUserId`. Required — the envelope account identity. */
+	parentUserId: string;
+	/** toolName → costCenter. Every value must be an `envelopes` key. */
+	tools: Record<string, string>;
+	/** Fallback cost center for unmapped/no tool-result runs. Must be an `envelopes` key. */
+	default?: string;
+	envelopes: Record<string, EnvelopeConfig>;
+	/** Inject the per-turn scarcity block. Default `true` when `costCenters` is present. */
+	scarcityContext?: boolean;
+}
+
+/**
+ * The validated, normalized, deep-frozen form of {@link CostCentersConfig} —
+ * the ONLY shape any wrapper may read. Producing it is `normalizeCostCenters`'s
+ * entire job: a caller's later mutation of the raw object it built config from
+ * can never change routing, because nothing downstream holds a reference to
+ * that raw object. `scarcityContext` is normalized to its default (`true`) so
+ * no reader re-derives the default-when-absent rule.
+ */
+export type FrozenCostCenters = Readonly<{
+	parentUserId: string;
+	tools: Readonly<Record<string, string>>;
+	default?: string;
+	envelopes: Readonly<Record<string, Readonly<EnvelopeConfig>>>;
+	scarcityContext: boolean;
+}>;
+
 /** Configuration passed to the plugin from openclaw.json. */
 export interface UsertrustPluginConfig {
 	budget: number;
@@ -343,6 +394,13 @@ export interface UsertrustPluginConfig {
 		runtime?: LocalRuntime;
 		baseURL?: string;
 	};
+	/**
+	 * Operator-declared tool→cost-center attribution + per-turn scarcity
+	 * injection (Ship 2). Absent → no attribution, no scarcity block, byte-
+	 * identical behavior to before this config existed. Validated + normalized
+	 * by `normalizeCostCenters` at plugin CONSTRUCTION time, never lazily.
+	 */
+	costCenters?: CostCentersConfig;
 }
 
 // ── OpenClaw plugin registration ──
