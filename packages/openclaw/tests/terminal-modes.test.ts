@@ -15,6 +15,12 @@
  * (token-extractor.ts `extractUsageFromEvent`), so there is no provider usage to
  * settle with. That asymmetry — settle the partial, do not void — is the
  * documented one in AGENTS.md, "The settle/void asymmetry is deliberate."
+ *
+ * Where those two axes CROSS — the consumer breaks immediately after a terminal
+ * event — the terminal event the loop observed wins, not the unwind: break after
+ * `done` settles at the provider's usage (it was captured before the `yield`),
+ * break after `error` aborts. Otherwise a failed call gets charged, and a fully
+ * served one gets charged at the estimate.
  */
 
 import { randomUUID } from "node:crypto";
@@ -200,6 +206,51 @@ describe("stream terminal modes", () => {
 
 		// A voided call has no successful final message to report.
 		await expect(withTimeout(stream.result())).rejects.toThrow("boom");
+	});
+
+	it("aborts exactly once when the consumer breaks right after the error event", async () => {
+		// The terminal event and the abandonment collide: the consumer sees the
+		// `error` event and leaves, so the generator unwinds at the `yield` and
+		// never reaches the post-loop branch. What the loop already OBSERVED still
+		// decides the hold — a call the provider reported as failed is voided, not
+		// charged at the estimate.
+		const events: StreamEvent[] = [startEvent(), textDelta("partial"), errorEvent(makeUsage(9, 3))];
+		const governed = wrapStreamWithGovernance(streamOf(events), gov);
+		const stream = await governed(model, makeContext());
+
+		for await (const event of stream) {
+			if (event.type === "error") break;
+		}
+
+		expect(terminalCount()).toBe(1);
+		expect(abort).toHaveBeenCalledOnce();
+		expect(settle).not.toHaveBeenCalled();
+
+		// Same rejection as the drain-to-end error path: there is no successful
+		// final message either way.
+		await expect(withTimeout(stream.result())).rejects.toThrow("boom");
+	});
+
+	it("settles at the provider usage when the consumer breaks right after `done`", async () => {
+		// `for await (…) { if (e.type === "done") break; }` is an ordinary consumer
+		// shape. The accumulator already captured the provider's tokens from that
+		// event, so settling at the ESTIMATE here would systematically overcharge a
+		// fully served call — holds are sized above expected actuals.
+		const events: StreamEvent[] = [startEvent(), textDelta("hi"), doneEvent(makeUsage(120, 45))];
+		const governed = wrapStreamWithGovernance(streamOf(events), gov);
+
+		for await (const event of await governed(model, makeContext())) {
+			if (event.type === "done") break;
+		}
+
+		expect(terminalCount()).toBe(1);
+		expect(settle).toHaveBeenCalledOnce();
+		expect(settleParams()).toMatchObject({
+			inputTokens: 120,
+			outputTokens: 45,
+			usageSource: "provider",
+			chunksDelivered: 3,
+		});
 	});
 
 	it("settles at the estimate when the stream closes without any terminal event", async () => {
