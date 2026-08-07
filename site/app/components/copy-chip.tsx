@@ -33,7 +33,7 @@ export default function CopyChip({ text, label }: { text: string; label?: string
 		<button
 			type="button"
 			onClick={handleCopy}
-			aria-label={`Copy ${text}`}
+			aria-label={`Copy ${label ?? text}`}
 			className="focus-ring group relative inline-flex min-h-[44px] cursor-pointer items-center gap-3 rounded-lg border border-white/10 bg-white/[0.06] px-4 py-2.5 font-mono text-sm text-white/85 transition-colors hover:border-ut/30"
 		>
 			<span aria-hidden="true" className="text-ut/60">
