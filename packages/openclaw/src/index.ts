@@ -63,6 +63,7 @@ export {
 export type {
 	AssistantMessage,
 	AssistantMessageEventStreamLike,
+	CacheRetention,
 	Context,
 	CostCentersConfig,
 	EnvelopeConfig,
@@ -71,6 +72,14 @@ export type {
 	Message,
 	Model,
 	ProviderPlugin,
+	ProviderResponse,
+	// The OPEN options bag. `package.json` publishes exactly ONE export subpath
+	// (`.` → `dist/index.js`), so a name missing from this list is unreachable
+	// for every consumer — `src/types.js` is not importable from outside. That
+	// made the documented escape hatch for provider-specific knobs
+	// (`reasoning` / `thinkingBudgets`, which cannot be named on `StreamOptions`
+	// because the two hosts' thinking enums disagree) a dead reference.
+	ProviderStreamOptions,
 	ProviderWrapStreamFnContext,
 	StreamContext,
 	StreamEvent,
@@ -78,6 +87,7 @@ export type {
 	StreamOptions,
 	StreamUsage,
 	ToolResultMessage,
+	Transport,
 	Usage,
 	UsertrustPluginConfig,
 } from "./types.js";

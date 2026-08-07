@@ -40,18 +40,29 @@ import type {
 	ToolResultMessage as PiToolResult,
 	Usage as PiUsage,
 } from "@mariozechner/pi-ai";
+// Deliberately the PACKAGE ENTRY POINT — see the entry-point block below.
+import type {
+	CacheRetention as EntryCacheRetention,
+	ProviderResponse as EntryProviderResponse,
+	ProviderStreamOptions as EntryProviderStreamOptions,
+	StreamOptions as EntryStreamOptions,
+	Transport as EntryTransport,
+} from "../src/index.js";
 import type {
 	AssistantMessage,
 	AssistantMessageEventStreamLike,
+	CacheRetention,
 	Context,
 	Message,
 	Model,
 	OpenClawPluginApi,
+	ProviderResponse,
 	ProviderStreamOptions,
 	StreamEvent,
 	StreamFn,
 	StreamOptions,
 	ToolResultMessage,
+	Transport,
 	Usage,
 } from "../src/types.js";
 
@@ -194,6 +205,43 @@ export const _providerOptionsAreOpen: ProviderStreamOptions = {
 	reasoning: "high",
 	thinkingBudgets: { low: 1024 },
 	someProviderSpecificKnob: true,
+};
+
+// ── the PACKAGE ENTRY POINT, not the module the mirrors live in ──
+
+/**
+ * Everything above imports from `../src/types.js`. **No consumer can do that.**
+ * `package.json` publishes exactly ONE export subpath (`.` → `dist/index.js`),
+ * so a type that `src/types.ts` exports but `src/index.ts` does not re-export
+ * is unreachable outside this package — and no assertion written against
+ * `src/types.js` can see the difference. That blind spot is precisely how
+ * `ProviderStreamOptions` shipped as a documented escape hatch that failed
+ * TS2614 at the entry point.
+ *
+ * These assertions therefore import from the ENTRY POINT and pin that the
+ * published surface is the same type as the internal one. Anything a doc
+ * comment or a README tells a consumer to import belongs here.
+ */
+export type _EntryProviderStreamOptions = Assert<
+	IsExact<EntryProviderStreamOptions, ProviderStreamOptions>
+>;
+export type _EntryStreamOptions = Assert<IsExact<EntryStreamOptions, StreamOptions>>;
+export type _EntryTransport = Assert<IsExact<EntryTransport, Transport>>;
+export type _EntryCacheRetention = Assert<IsExact<EntryCacheRetention, CacheRetention>>;
+export type _EntryProviderResponse = Assert<IsExact<EntryProviderResponse, ProviderResponse>>;
+
+/**
+ * And the reason the escape hatch exists at all, exercised as a VALUE through
+ * the entry point: `reasoning` cannot be a named field on `StreamOptions`
+ * (openclaw's thinking enum carries `"max"`/`"off"`, pi-ai's carries neither),
+ * so a caller who needs it types the literal as `ProviderStreamOptions`.
+ * Against a bare `StreamOptions` this same literal is a TS2353 excess-property
+ * error — which is the whole point of the alias being reachable.
+ */
+export const _entryEscapeHatchIsUsable: EntryProviderStreamOptions = {
+	maxTokens: 64,
+	reasoning: "high",
+	thinkingBudgets: { low: 1024 },
 };
 
 // ── plugin registration + config delivery ──
