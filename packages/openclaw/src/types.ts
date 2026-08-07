@@ -6,15 +6,21 @@
  *
  * The plugin must compile and ship without either host package installed at
  * runtime, so every host shape it touches is mirrored here. The mirrors are
- * NOT freehand: they are pinned to
+ * NOT freehand: they are type-asserted against the pinned host packages, in
+ * two halves, because only one of the two is ever installed.
  *
- *   - openclaw 2026.7.1-2         (plugin registration + the llm-core stream contract)
- *   - @mariozechner/pi-ai 0.73.1  (programmatic pi-ai callers)
+ *   - @mariozechner/pi-ai (exact devDependency; programmatic pi-ai callers)
+ *     `tests/contract.test-d.ts`, compiled on EVERY push by
+ *       npx tsc -p packages/openclaw/tsconfig.type-tests.json
+ *     which `npm run typecheck` runs.
  *
- * and `tests/contract.test-d.ts` type-asserts each one against the pinned
- * packages. Never hand-edit a mirror without re-running the gate:
+ *   - openclaw (optional peer, NOT installed by `npm ci`; plugin registration
+ *     plus the llm-core stream contract). Version pinned in exactly one place,
+ *     `openclaw-contract.env`. `tests/contract-openclaw.test-d.ts`, compiled by
+ *     the `openclaw-contract` CI job after an out-of-tree install:
+ *       npx tsc -p packages/openclaw/tsconfig.contract-openclaw.json
  *
- *   npx tsc -p packages/openclaw/tsconfig.type-tests.json
+ * Never hand-edit a mirror without re-running BOTH.
  *
  * Where the two hosts differ, the mirror carries the shape that is assignable
  * in BOTH directions at the wrap seam (openclaw hands us a stream fn and takes

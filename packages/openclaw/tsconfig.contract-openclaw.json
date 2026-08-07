@@ -5,7 +5,12 @@
 		"declaration": false,
 		"declarationMap": false,
 		"sourceMap": false,
-		"composite": false
+		"composite": false,
+		"types": ["node"]
 	},
-	"include": ["tests/contract.test-d.ts", "tests/host-fixtures.ts"]
+	"include": [
+		"tests/contract-openclaw.test-d.ts",
+		"tests/contract.test.ts",
+		"tests/host-fixtures.ts"
+	]
 }

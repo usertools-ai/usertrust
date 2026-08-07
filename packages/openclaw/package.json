@@ -34,7 +34,8 @@
 		"build": "tsc",
 		"prepublishOnly": "tsc",
 		"demo": "tsx demo/runaway-agent.ts",
-		"typecheck:contract": "tsc -p tsconfig.type-tests.json"
+		"typecheck:contract": "tsc -p tsconfig.type-tests.json",
+		"typecheck:contract:openclaw": "tsc -p tsconfig.contract-openclaw.json"
 	},
 	"openclaw": {
 		"compat": {
@@ -61,7 +62,6 @@
 		}
 	},
 	"devDependencies": {
-		"@mariozechner/pi-ai": "0.73.1",
-		"openclaw": "2026.7.1-2"
+		"@mariozechner/pi-ai": "0.73.1"
 	}
 }

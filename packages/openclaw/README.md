@@ -191,14 +191,37 @@ matching ledger allocation reports honest-but-empty scarcity, never a shortfall.
 
 ### Compatibility
 
-Pinned against `openclaw@2026.7.1-2` and `@mariozechner/pi-ai@0.73.1` (exact `devDependencies`);
-declared as optional peers at `openclaw >=2026.7.1-0` / `@mariozechner/pi-ai >=0.12.0`. Both are
-type-only at runtime — neither is required to build or ship the plugin.
+Both hosts are declared as optional peers — `openclaw >=2026.7.1-0` and
+`@mariozechner/pi-ai >=0.12.0` — and both are type-only: neither is required to build, ship, or run
+the plugin.
+
+The contract is *proven* against an exact version of each, and the two are proven differently
+because only one of them is installed:
+
+| Host | Pinned as | Contract gate |
+|---|---|---|
+| `@mariozechner/pi-ai` | exact `devDependency` (`0.73.1`) | `tests/contract.test-d.ts`, compiled by `npm run typecheck` on **every push** |
+| `openclaw` | `openclaw-contract.env` — **the only place the version appears** | `tests/contract-openclaw.test-d.ts` + `tests/contract.test.ts`, run by the `openclaw-contract` CI job after an out-of-tree install |
+
+openclaw is not a `devDependency` because it is a full agent CLI: pulling its tree into every
+`npm ci`, for four type-only imports in two test files, cost far more than proving the contract once
+per run in a job of its own. `npm ci` does not install optional peers, so no other job sees it. Run
+that job's gates locally with:
+
+```bash
+source packages/openclaw/openclaw-contract.env
+npm install --no-save --ignore-scripts openclaw@"$OPENCLAW_CONTRACT_VERSION"
+USERTRUST_OPENCLAW_CONTRACT=1 npx tsc -p packages/openclaw/tsconfig.contract-openclaw.json
+USERTRUST_OPENCLAW_CONTRACT=1 npx vitest run packages/openclaw/tests/contract.test.ts
+```
+
+`USERTRUST_OPENCLAW_CONTRACT=1` is what makes an absent or mismatched openclaw a hard failure;
+without it the host-smoke suite skips itself with a notice naming that job.
 
 The `-0` on the openclaw peer floor is load-bearing, not a typo. OpenClaw ships its releases with
-a numeric build suffix (`latest` is currently `2026.7.1-2`), which node-semver treats as a
-*prerelease*; a prerelease version never satisfies a release-only range, so `>=2026.7.1` would
-exclude the very build this package pins. `>=2026.7.1-0` admits it. The separate
+a numeric build suffix, which node-semver treats as a *prerelease*; a prerelease version never
+satisfies a release-only range, so `>=2026.7.1` would exclude the very build this package pins.
+`>=2026.7.1-0` admits it. The separate
 `openclaw.compat.pluginApi` range deliberately keeps the plain `>=2026.7.1` form: the host strips
 the `-N` suffix before comparing, so that check is unaffected.
 

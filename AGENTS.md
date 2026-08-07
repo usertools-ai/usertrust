@@ -978,9 +978,22 @@ Real, verified, and worth knowing before you touch the surrounding code.
   means an agent that never opens a scope still reads as `spent: 0` while it burns the session
   budget. That residue is an INSTRUMENTATION gap, not an enforcement one: the session wallet's own
   `debits_must_not_exceed_credits` bounds that spend either way.
-- **`packages/openclaw` is not typechecked by CI.** It is absent from the root `tsconfig.json`
-  references and is not `composite`, so neither `tsc -b` nor `npm run typecheck` covers it. Type
-  errors there surface only at release time.
+- **`packages/openclaw/src` is still not typechecked by CI.** The package is absent from the root
+  `tsconfig.json` references and is not `composite`, so `tsc -b` does not cover it. What *is*
+  covered: `npm run typecheck` now also runs `tsc -p packages/openclaw/tsconfig.type-tests.json`,
+  which compiles the host-contract type assertions and, through them, `src/types.ts`. Errors
+  anywhere else under `src/` still surface only at release time (`cd packages/openclaw && npx tsc`).
+- **The openclaw host contract is split across two CI jobs, because openclaw is not installed.**
+  `openclaw` is an OPTIONAL PEER of `packages/openclaw`, never a devDependency, and `npm ci` does
+  not install optional peers — so no ordinary job has it on disk. The pi-ai half of the contract
+  (`tests/contract.test-d.ts`) compiles in `typecheck` on every push. The openclaw half
+  (`tests/contract-openclaw.test-d.ts` + the `contract.test.ts` host smoke) runs only in the
+  required `openclaw-contract` job, which installs the pinned version out-of-tree and sets
+  `USERTRUST_OPENCLAW_CONTRACT=1` — the flag that turns an absent or mismatched openclaw from a
+  loud skip into a hard failure. **The pin lives in exactly one file,
+  `packages/openclaw/openclaw-contract.env`; never inline the version anywhere else.** The split is
+  two tsconfigs rather than one conditional include because `tsc` cannot skip a file whose import
+  does not resolve.
 - **`site/` is not typechecked or built by CI** — only linted. Its `tsconfig.json` is standalone and
   has neither `noUncheckedIndexedAccess` nor `exactOptionalPropertyTypes`.
   **A green CI run says nothing about whether the site builds.** `site/` is not a workspace and

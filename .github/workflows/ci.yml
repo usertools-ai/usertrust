@@ -41,9 +41,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # `npm run typecheck` = `tsc -b` + `tsc -p packages/core/tsconfig.type-tests.json`
-      # so the F5 TrustedClient type-surface guard (trusted-client-types.test-d.ts)
-      # actually gates CI — a bare `tsc -b` never compiles the .test-d.ts.
+      # `npm run typecheck` = `tsc -b` + the two type-test projects
+      # (packages/core, packages/openclaw), because a bare `tsc -b` never compiles
+      # a .test-d.ts. That is what makes the F5 TrustedClient type-surface guard
+      # (trusted-client-types.test-d.ts) and the pi-ai half of the openclaw host
+      # contract (packages/openclaw/tests/contract.test-d.ts) gate every push. The
+      # openclaw half of that contract needs a package `npm ci` does not install;
+      # it is proven in the `openclaw-contract` job instead.
       - run: npm run typecheck
 
   test:
@@ -73,6 +77,68 @@ jobs:
           name: coverage-report
           path: coverage/
           retention-days: 14
+
+  openclaw-contract:
+    name: openclaw-contract
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    # The proving ground for the openclaw half of the host contract.
+    #
+    # openclaw is NOT a dependency of this repo. It is declared as an OPTIONAL
+    # PEER of packages/openclaw (the plugin's real relationship to its host), and
+    # `npm ci` does not install optional peers — so no other job in this workflow
+    # has openclaw on disk, and none of them can prove anything about it. This
+    # job installs the pinned version out-of-tree and runs the two gates that
+    # need it. A failure here is a real contract drift, so it fails the workflow.
+    #
+    # The pin lives in exactly one file, sourced below. Never inline the version.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install the pinned openclaw host (out-of-tree)
+        # --no-save: this install is a test fixture, not a dependency. Verified
+        # locally from a clean `npm ci` tree: package.json, packages/*/package.json
+        # and package-lock.json all come out BYTE-IDENTICAL, which the next step
+        # re-checks rather than trusting.
+        # --ignore-scripts: openclaw's tree carries native postinstalls (node-pty
+        # and friends) that this job never executes; only its .d.ts files matter.
+        #
+        # NOT `--package-lock=false`. That flag makes arborist rebuild the ideal
+        # tree from scratch instead of the lockfile, and npm 10.9.2 then crashes
+        # resolving this repo's peer sets:
+        #   TypeError: Cannot read properties of null (reading 'edgesOut')
+        #     at #loadPeerSet (@npmcli/arborist/lib/arborist/build-ideal-tree.js)
+        # It is a deterministic arborist bug, not an environment quirk — it
+        # reproduces on a tree straight out of `npm ci`. `--no-save` alone achieves
+        # what the flag was there for.
+        run: |
+          source packages/openclaw/openclaw-contract.env
+          npm install --no-save --ignore-scripts openclaw@"$OPENCLAW_CONTRACT_VERSION"
+      - name: Assert the fixture install left no tracked file behind
+        # The whole point of an out-of-tree install: if this ever starts rewriting
+        # package-lock.json, the pin has silently become a dependency again and
+        # this job must say so instead of passing.
+        run: git diff --exit-code -- package.json package-lock.json 'packages/*/package.json'
+      - name: Type-level contract vs. the pinned host
+        # tsconfig.contract-openclaw.json, not tsconfig.type-tests.json: `tsc` has
+        # no way to skip a file whose import cannot resolve, so the openclaw
+        # assertions live in their own project and their own .test-d.ts. The pi-ai
+        # half stays in tsconfig.type-tests.json, which `npm run typecheck` runs on
+        # every push. Between the two, every assertion runs somewhere in CI.
+        env:
+          USERTRUST_OPENCLAW_CONTRACT: "1"
+        run: npx tsc -p packages/openclaw/tsconfig.contract-openclaw.json
+      - name: Host smoke test vs. the pinned host
+        # USERTRUST_OPENCLAW_CONTRACT=1 makes an absent or version-mismatched
+        # openclaw a HARD failure in contract.test.ts. Without it the suite skips
+        # itself, which is right everywhere else and worthless here.
+        env:
+          USERTRUST_OPENCLAW_CONTRACT: "1"
+        run: npx vitest run packages/openclaw/tests/contract.test.ts
 
   tb-integration:
     name: tb-integration
@@ -132,9 +198,20 @@ jobs:
           echo "::error::TigerBeetle did not start within 60s"
           cat tigerbeetle.log || true
           exit 1
-      - name: Run TigerBeetle integration test
+      - name: Run TigerBeetle integration tests
         env:
-          # The gated test writes this into tigerbeetle.addresses; "3000" resolves to
+          # The gated tests write this into tigerbeetle.addresses; "3000" resolves to
           # 127.0.0.1:3000, matching the server's --addresses=3000 bind above.
           USERTRUST_TB_ADDRESS: "3000"
-        run: npx vitest run packages/core/tests/integration/tigerbeetle.tb.test.ts
+        # Every real-cluster suite in the repo, named explicitly rather than by
+        # directory: `packages/openclaw/tests/envelope-integration.test.ts` does not
+        # live under any integration/ folder, and a glob over
+        # `packages/core/tests/integration/` would have silently kept missing it and
+        # `budget-envelope.tb.test.ts`. Each one self-skips when USERTRUST_TB_ADDRESS
+        # is unset, which is why the ordinary `test` job never runs them — this job
+        # is the only place a hard-budget or envelope-accounting failure can surface.
+        run: >-
+          npx vitest run
+          packages/core/tests/integration/tigerbeetle.tb.test.ts
+          packages/core/tests/integration/budget-envelope.tb.test.ts
+          packages/openclaw/tests/envelope-integration.test.ts
