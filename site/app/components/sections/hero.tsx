@@ -28,8 +28,12 @@ export default function Hero() {
 		<section className="relative z-[1] mx-auto grid min-h-[100dvh] w-full max-w-6xl items-center gap-12 safe-x pt-28 pb-16 lg:grid-cols-[1.15fr_0.85fr] lg:gap-16 lg:pt-20">
 			{/* Left — display headline (LCP candidate; no entrance animation: renders in the first paint) */}
 			<div>
-				{/* biome-ignore format: one line keeps className= alongside the closing tag so the facts scanner never sees it alone */}
-				<h1 className="font-display font-bold lowercase leading-[0.92] tracking-tight text-white text-[clamp(3.5rem,11vw,10rem)]">keep the<br />receipts<span className="text-ut">.</span></h1>
+				<h1 className="font-display font-bold lowercase leading-[0.92] tracking-tight text-white text-[clamp(3.5rem,11vw,10rem)]">
+					keep the
+					<br />
+					receipts
+					<span className="text-ut">.</span>
+				</h1>
 				<p className="mt-6 max-w-md text-base leading-relaxed text-white/70 sm:text-lg">
 					one line wraps your LLM client. every governed call becomes a ledger transaction — with a
 					receipt anyone can verify.

@@ -7,11 +7,24 @@
  *
  * Line-based scan of site/app/components/sections/*.tsx:
  *   1. lines with no digits pass;
- *   2. lines matching ALLOWLIST pass (attribute/property assignments, raw
+ *   2. a line that is nothing but a bare heading tag — closing (`</h1>`
+ *      through `</h6>`) or a zero-attribute opening tag (`<h3` or `<h5>`),
+ *      each with optional surrounding whitespace and nothing else — passes.
+ *      Biome always isolates a closing tag onto its own line when the
+ *      matching opening tag is too long to share it, and isolates a
+ *      zero-attribute opening tag the same way when a long child forces the
+ *      wrap or when enough attributes force one-per-line layout; either way
+ *      the heading-level digit ends up alone with no other code around it.
+ *      This is anchored to the WHOLE line, so it never exempts heading TEXT —
+ *      a line like `<h2>99 problems</h2>` still falls through to step 4 —
+ *      and never exempts an opening tag that carries attributes (`<h3
+ *      className="...">` already rides through ALLOWLIST via its own
+ *      `className=` syntax, so no broader opening-tag rule is needed);
+ *   3. lines matching ALLOWLIST pass (attribute/property assignments, raw
  *      CSS values, Tailwind utility classes, import statements, any
  *      expression reading fixtures: facts. / receipt. / chain. / transcript.,
  *      and any line carrying a `data-code-sample` marker);
- *   3. on remaining lines, every digit token (e.g. "9", "20+", "$5.00",
+ *   4. on remaining lines, every digit token (e.g. "9", "20+", "$5.00",
  *      "50,000") must be in the sanctioned set — built from facts.json values
  *      plus ALWAYS_SANCTIONED — or the build fails with file:line.
  *
@@ -114,6 +127,26 @@ if (!existsSync(sectionsDir)) {
 	process.exit(0);
 }
 
+// Biome always isolates a closing tag onto its own line when the matching
+// opening tag is too long to share the line — so `</h1>` through `</h6>`
+// routinely end up alone on a line whose only "digit" is the heading level.
+// The equivalent OPENING-tag-only shape is included too: verified that Biome
+// produces a bare `<h3` line (no `>`, no attributes) when a heading has
+// enough attributes to force one-per-line wrapping, and a bare
+// `<h5>` line (immediate close, no attributes) when a single long child
+// expression forces the tag onto its own line. Both are real, reachable
+// artifacts of the >=100-char line-width formatter, not hypothetical.
+//
+// Anchored to the WHOLE line (never a substring), and the opening-tag branch
+// requires NOTHING between the tag name and the optional `>` — so it only
+// ever matches a heading tag with zero attributes on that line. The instant
+// an attribute appears (e.g. `<h3 className="...">`), this regex no longer
+// matches and the line falls through to ALLOWLIST, which already exempts it
+// via the `className\s*[=:]` fragment. A line carrying heading TEXT with a
+// rogue digit, e.g. `<h2>99 problems</h2>`, never matches either — it still
+// falls through to the digit-token check below.
+const BARE_HEADING_TAG_LINE = /^\s*<\/?h[1-6]>?\s*$/;
+
 const violations: string[] = [];
 for (const name of readdirSync(sectionsDir)
 	.filter((f) => f.endsWith(".tsx"))
@@ -123,6 +156,7 @@ for (const name of readdirSync(sectionsDir)
 		.split("\n")
 		.forEach((line, idx) => {
 			if (!/\d/.test(line)) return;
+			if (BARE_HEADING_TAG_LINE.test(line)) return;
 			if (ALLOWLIST.test(line)) return;
 			const rogue = (line.match(TOKEN) ?? []).filter((tok) => !sanctioned.has(tok));
 			if (rogue.length > 0) {

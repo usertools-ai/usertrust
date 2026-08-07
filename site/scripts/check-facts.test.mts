@@ -129,3 +129,87 @@ test("digit literals on a data-code-sample line are exempt", () => {
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("a standalone bare closing heading tag line passes (Biome's own line-wrap artifact)", () => {
+	const dir = mkdtempSync(join(tmpdir(), "check-facts-heading-close-"));
+	try {
+		writeFileSync(
+			join(dir, "docket.tsx"),
+			[
+				"export default function Docket() {",
+				"\treturn (",
+				'\t\t<h3 className="font-display font-bold lowercase leading-[0.92] tracking-tight text-white">',
+				"\t\t\tthe docket",
+				"\t\t</h3>",
+				"\t);",
+				"}",
+				"",
+			].join("\n"),
+		);
+		const r = runChecker(dir);
+		assert.equal(
+			r.status,
+			0,
+			`expected a bare </h3> line (Biome always isolates a long opening tag's closer) to pass, got:\n${r.stderr}`,
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("a standalone bare opening heading tag line passes (Biome's multi-attribute wrap artifact)", () => {
+	const dir = mkdtempSync(join(tmpdir(), "check-facts-heading-open-"));
+	try {
+		writeFileSync(
+			join(dir, "docket.tsx"),
+			[
+				"export default function Docket() {",
+				"\treturn (",
+				"\t\t<h3",
+				'\t\t\tclassName="font-display font-bold lowercase leading-[0.92] tracking-tight text-white"',
+				'\t\t\tdata-testid="docket-heading"',
+				'\t\t\tid="docket-heading-anchor"',
+				"\t\t>",
+				"\t\t\tthe docket",
+				"\t\t</h3>",
+				"\t);",
+				"}",
+				"",
+			].join("\n"),
+		);
+		const r = runChecker(dir);
+		assert.equal(
+			r.status,
+			0,
+			`expected a bare <h3 line with no attributes (Biome breaks 3+ attributes one-per-line) to pass, got:\n${r.stderr}`,
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("a rogue digit in heading TEXT still fails even with the closing-tag exemption in place", () => {
+	const dir = mkdtempSync(join(tmpdir(), "check-facts-heading-text-"));
+	try {
+		writeFileSync(
+			join(dir, "docket.tsx"),
+			[
+				"export default function Docket() {",
+				"\treturn (",
+				"\t\t<h2>99 problems</h2>",
+				"\t);",
+				"}",
+				"",
+			].join("\n"),
+		);
+		const r = runChecker(dir);
+		assert.notEqual(
+			r.status,
+			0,
+			`a rogue digit in heading text must still fail the gate, got:\n${r.stderr}`,
+		);
+		assert.match(r.stderr, /docket\.tsx:3/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
