@@ -97,10 +97,14 @@ export function deriveAttribution(
 		const { toolCallId, toolName } = result;
 		if (typeof toolCallId !== "string" || typeof toolName !== "string") continue;
 		if (issued.get(toolCallId) !== toolName) continue;
-		// `Object.hasOwn`, never `in` and never a bare lookup: `tools` is a plain
-		// object, so a tool named `toString` would otherwise resolve to
-		// Object.prototype's function and be handed to `withCostCenter` as a
-		// cost center. Every own value is a validated `envelopes` key.
+		// `Object.hasOwn`, never `in` and never a bare lookup. `normalizeCostCenters`
+		// builds `tools` with a NULL prototype, which is the write-side half of the
+		// same rule — a tool named `__proto__` gets a real own key instead of being
+		// eaten by `Object.prototype`'s setter. This is the read-side half, and it
+		// stays correct either way: a tool named `toString` or `constructor` matches
+		// nothing, rather than resolving to an inherited function and being handed
+		// to `withCostCenter` as a cost center. Every own value is a validated
+		// `envelopes` key.
 		if (Object.hasOwn(costCenters.tools, toolName)) return costCenters.tools[toolName];
 	}
 

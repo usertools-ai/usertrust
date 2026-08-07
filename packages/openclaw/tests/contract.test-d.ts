@@ -47,8 +47,10 @@ import type {
 	Message,
 	Model,
 	OpenClawPluginApi,
+	ProviderStreamOptions,
 	StreamEvent,
 	StreamFn,
+	StreamOptions,
 	ToolResultMessage,
 	Usage,
 } from "../src/types.js";
@@ -143,6 +145,56 @@ export type _StreamResultIsFinalMessage = Assert<
 
 // pi-ai's `StreamFunction` is the synchronous-return variant of the same shape.
 export type _PiStreamFunctionAccepted = Assert<Extends<PiStreamFunction, StreamFn>>;
+
+// ── per-call options: the host's surface, and it is OPEN ──
+
+/** The options bag the pinned pi-ai stream function actually takes. */
+type PiStreamOptions = NonNullable<Parameters<PiStreamFunction>[2]>;
+
+export type _PiOptionsAccepted = Assert<Extends<PiStreamOptions, StreamOptions>>;
+export type _OptionsForwardableToPi = Assert<Extends<StreamOptions, PiStreamOptions>>;
+
+/**
+ * Excess-property checking is invisible to a type-level `Extends` assertion —
+ * it fires only on a FRESH object literal — so the mirror's surface has to be
+ * asserted with a VALUE. A field the host declares and the mirror drops is not
+ * an assignability failure; it is a caller who cannot write
+ * `stream(model, ctx, { headers })` without a cast.
+ *
+ * Every field below is declared on the pinned `StreamOptions`
+ * (`pi-ai/dist/types.d.ts:24-85`, `openclaw/dist/types-CFIUY_La.d.ts:50-119`).
+ */
+export const _hostOptionFieldsAreWritable: StreamOptions = {
+	temperature: 0.2,
+	maxTokens: 1024,
+	stop: ["\n\n"],
+	apiKey: "sk-test",
+	transport: "sse",
+	cacheRetention: "long",
+	sessionId: "session-1",
+	promptCacheKey: "cache-1",
+	headers: { "x-usertrust-trace": "1" },
+	timeoutMs: 30_000,
+	maxRetries: 2,
+	maxRetryDelayMs: 60_000,
+	metadata: { user_id: "u-1" },
+};
+
+/**
+ * And the OPEN half. The host's own escape hatch for provider-specific extras
+ * is `ProviderStreamOptions = StreamOptions & Record<string, unknown>`
+ * (`pi-ai/dist/types.d.ts:86`, `openclaw/dist/types-CFIUY_La.d.ts:123`), which
+ * is not decoration: the pinned agent loop spreads its WHOLE config into the
+ * bag — `streamFunction(config.model, llmContext, { ...config, apiKey, signal })`
+ * (`openclaw/dist/proxy-BzhBz8iM.js:356-360`) — so the values that reach a
+ * stream fn at runtime always carry keys no interface declares.
+ */
+export const _providerOptionsAreOpen: ProviderStreamOptions = {
+	maxTokens: 64,
+	reasoning: "high",
+	thinkingBudgets: { low: 1024 },
+	someProviderSpecificKnob: true,
+};
 
 // ── plugin registration + config delivery ──
 

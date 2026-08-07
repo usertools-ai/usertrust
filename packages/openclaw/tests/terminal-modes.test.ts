@@ -4,11 +4,12 @@
 /**
  * terminal-modes.test.ts — exactly one terminal ledger action per authorization.
  *
- * A stream can end six ways: normal completion, close-without-a-terminal-event,
- * a terminal `error` event, a thrown provider error, a consumer `break`, and an
- * explicit `iterator.return()`. Each must produce EXACTLY ONE of
- * `governor.settle` / `governor.abort` — never zero (a leaked PENDING hold) and
- * never two (AGENTS.md, "Exactly one ledger mutation per hold").
+ * A stream can end seven ways: normal completion, close-without-a-terminal-event,
+ * a terminal `error` event with `reason: "error"`, the SAME event with
+ * `reason: "aborted"`, a thrown provider error, a consumer `break`, and an
+ * explicit `iterator.return()`. Each must produce EXACTLY ONE ledger mutation —
+ * never zero (a leaked PENDING hold) and never two (AGENTS.md, "Exactly one
+ * ledger mutation per hold").
  *
  * The clean-but-early paths (break / return / close-without-done) settle at the
  * ESTIMATE: the accumulator only learns tokens from terminal events
@@ -16,11 +17,17 @@
  * settle with. That asymmetry — settle the partial, do not void — is the
  * documented one in AGENTS.md, "The settle/void asymmetry is deliberate."
  *
- * Where those two axes CROSS — the consumer breaks immediately after a terminal
- * event — the terminal event the loop observed wins, not the unwind: break after
- * `done` settles at the provider's usage (it was captured before the `yield`),
- * break after `error` aborts. Otherwise a failed call gets charged, and a fully
- * served one gets charged at the estimate.
+ * VOIDING IS NARROW. Only two things void a hold: a THROW, and an `error` event
+ * whose `reason` is `"error"`. `reason: "aborted"` is the caller's own
+ * AbortSignal, not a provider failure — the provider served real tokens up to
+ * the cancellation and attaches them to the event — so it settles the partial
+ * like every other clean-but-early path.
+ *
+ * Where the two axes CROSS — the consumer breaks immediately after a terminal
+ * event — the terminal event wins, not the unwind, and it wins STRUCTURALLY:
+ * governance runs before the terminal event is ever yielded, so by the time a
+ * consumer can break, the ledger action has already been taken. (It has to run
+ * there anyway; see `host-loop.test.ts` for the deadlock that forced it.)
  */
 
 import { randomUUID } from "node:crypto";
@@ -33,6 +40,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { wrapStreamWithGovernance } from "../src/stream-governor.js";
 import type { StreamEvent, StreamFn } from "../src/types.js";
 import {
+	abortedEvent,
 	asHostStream,
 	doneEvent,
 	errorEvent,
@@ -42,6 +50,7 @@ import {
 	startEvent,
 	streamOf,
 	textDelta,
+	withTimeout,
 } from "./host-fixtures.js";
 
 vi.mock("tigerbeetle-node", () => ({
@@ -88,20 +97,6 @@ function throwingStreamFn(): StreamFn {
 				throw new Error("provider_exploded");
 			})(),
 		);
-}
-
-async function withTimeout<T>(promise: Promise<T>, ms = 500): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			promise,
-			new Promise<never>((_resolve, reject) => {
-				timer = setTimeout(() => reject(new Error("promise never settled")), ms);
-			}),
-		]);
-	} finally {
-		if (timer !== undefined) clearTimeout(timer);
-	}
 }
 
 describe("stream terminal modes", () => {
@@ -204,8 +199,15 @@ describe("stream terminal modes", () => {
 		expect(abort).toHaveBeenCalledOnce();
 		expect(settle).not.toHaveBeenCalled();
 
-		// A voided call has no successful final message to report.
-		await expect(withTimeout(stream.result())).rejects.toThrow("boom");
+		// …and `result()` RESOLVES with the terminal assistant message, because
+		// that is what the pinned stream class does: `extractResult` returns
+		// `event.error` for an error event (`pi-ai/dist/utils/event-stream.js:66-74`)
+		// and OpenClaw consumes it as the terminal assistant turn, branching on
+		// `message.stopReason` afterwards (`dist/proxy-BzhBz8iM.js:264`). The VOID
+		// is what protects the money; rejecting here would only misreport the turn.
+		const failed = await withTimeout(stream.result());
+		expect(failed.stopReason).toBe("error");
+		expect(failed.errorMessage).toBe("boom");
 	});
 
 	it("aborts exactly once when the consumer breaks right after the error event", async () => {
@@ -226,9 +228,11 @@ describe("stream terminal modes", () => {
 		expect(abort).toHaveBeenCalledOnce();
 		expect(settle).not.toHaveBeenCalled();
 
-		// Same rejection as the drain-to-end error path: there is no successful
-		// final message either way.
-		await expect(withTimeout(stream.result())).rejects.toThrow("boom");
+		// Same resolution as the drain-to-end error path — the break changes
+		// nothing, because governance now finishes BEFORE the terminal event is
+		// yielded rather than after the loop unwinds.
+		const failed = await withTimeout(stream.result());
+		expect(failed.stopReason).toBe("error");
 	});
 
 	it("settles at the provider usage when the consumer breaks right after `done`", async () => {
@@ -253,11 +257,64 @@ describe("stream terminal modes", () => {
 		});
 	});
 
+	it("settles the PARTIAL usage when the stream ends on a consumer-abort event", async () => {
+		// The seventh mode, and the one that used to be folded into "terminal
+		// error event". `reason: "aborted"` is not a provider failure — it is the
+		// CALLER's own AbortSignal, and every pinned provider derives the reason
+		// from `signal?.aborted` while attaching the usage accumulated so far
+		// (`pi-ai/dist/providers/anthropic.js:500-517`). Those tokens were really
+		// spent, so this SETTLES the partial. Voiding would let any consumer
+		// cancel its way out of paying for work the provider actually did.
+		const events: StreamEvent[] = [
+			startEvent(),
+			textDelta("partial"),
+			abortedEvent(makeUsage(9, 3)),
+		];
+		const governed = wrapStreamWithGovernance(streamOf(events), gov);
+		const stream = await governed(model, makeContext());
+
+		const collected: StreamEvent[] = [];
+		for await (const event of stream) collected.push(event);
+
+		// The event is forwarded unchanged, exactly as the failure event is.
+		expect(collected).toHaveLength(3);
+		expect(collected[2]).toMatchObject({ type: "error", reason: "aborted" });
+
+		expect(terminalCount()).toBe(1);
+		expect(settle).toHaveBeenCalledOnce();
+		expect(abort).not.toHaveBeenCalled();
+		expect(settleParams()).toMatchObject({
+			inputTokens: 9,
+			outputTokens: 3,
+			usageSource: "provider",
+			chunksDelivered: 3,
+		});
+
+		const aborted = await withTimeout(stream.result());
+		expect(aborted.stopReason).toBe("aborted");
+	});
+
+	it("settles the PARTIAL when the consumer breaks right after the abort event", async () => {
+		const events: StreamEvent[] = [startEvent(), abortedEvent(makeUsage(9, 3))];
+		const governed = wrapStreamWithGovernance(streamOf(events), gov);
+		const stream = await governed(model, makeContext());
+
+		for await (const event of stream) {
+			if (event.type === "error") break;
+		}
+
+		expect(terminalCount()).toBe(1);
+		expect(settle).toHaveBeenCalledOnce();
+		expect(abort).not.toHaveBeenCalled();
+		expect(settleParams()).toMatchObject({ inputTokens: 9, outputTokens: 3 });
+	});
+
 	it("settles at the estimate when the stream closes without any terminal event", async () => {
 		const events: StreamEvent[] = [startEvent(), textDelta("orphaned")];
 		const governed = wrapStreamWithGovernance(streamOf(events), gov);
+		const stream = await governed(model, makeContext());
 
-		for await (const _event of await governed(model, makeContext())) {
+		for await (const _event of stream) {
 			// drain to natural end — no `done`, no `error`
 		}
 
@@ -265,6 +322,40 @@ describe("stream terminal modes", () => {
 		expect(settle).toHaveBeenCalledOnce();
 		expect(settleParams().usageSource).toBe("estimated");
 		expect(settleParams()).not.toHaveProperty("inputTokens");
+
+		// `result()` is TERMINATED explicitly rather than left adopting the
+		// provider's own promise, which on this path is never resolved at all:
+		// `EventStream.end()` resolves it only when handed an explicit result
+		// (`pi-ai/dist/utils/event-stream.js:33-43`). Adopting it would mark the
+		// deferred settled while it hung forever.
+		await expect(withTimeout(stream.result())).rejects.toThrow(/closed without a terminal event/);
+	});
+
+	it("still takes exactly one ledger action when the settle fails on a terminal event", async () => {
+		// The settle is the last thing that can throw on the `done` path, and it
+		// now runs BEFORE the terminal event is yielded — so its failure unwinds
+		// THROUGH the generator's own catch. That catch must not void a hold the
+		// terminal-event handler has already voided.
+		settle.mockRejectedValue(new Error("settle_unavailable"));
+		const events: StreamEvent[] = [startEvent(), doneEvent(makeUsage(120, 45))];
+		const governed = wrapStreamWithGovernance(streamOf(events), gov);
+		const stream = await governed(model, makeContext());
+
+		const collected: StreamEvent[] = [];
+		await expect(async () => {
+			for await (const event of stream) collected.push(event);
+		}).rejects.toThrow("settle_unavailable");
+
+		// The consumer still saw the provider's terminal event — the failure is
+		// ours, not a reason to hide it — and then the iteration threw.
+		expect(collected.map((e) => e.type)).toEqual(["start", "done"]);
+
+		// Two CALLS, one MUTATION: the settle rejected and moved nothing, so the
+		// compensating void is the sole action the ledger actually took. Anything
+		// more than one abort would be the double-void this guard exists to catch.
+		expect(settle).toHaveBeenCalledOnce();
+		expect(abort).toHaveBeenCalledOnce();
+		await expect(withTimeout(stream.result())).rejects.toThrow("settle_unavailable");
 	});
 
 	it("settles exactly once at provider usage on normal completion", async () => {

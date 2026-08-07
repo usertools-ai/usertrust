@@ -8,14 +8,12 @@
  *   1. Before stream: attribute (which envelope pays — `attribution.ts`), then
  *      authorize (budget check, PENDING hold)
  *   2. During stream: forward events, accumulate token usage
- *   3. After stream: EXACTLY ONE terminal ledger action per authorization —
- *      settle with the provider's usage once a `done` event has been seen,
- *      settle at the ESTIMATE when the stream ends with no terminal event at
- *      all (including a consumer who walked away mid-stream), abort when it
- *      fails (a throw, or an in-band `error` event). The terminal event the
- *      loop OBSERVED decides the action, not where the generator happened to
- *      unwind — a consumer that breaks straight after `done`/`error` gets the
- *      same treatment as one that drains to the end.
+ *   3. On the terminal event: EXACTLY ONE terminal ledger action per
+ *      authorization — settle with the provider's usage on `done`, settle the
+ *      PARTIAL usage on a consumer abort (`error` with `reason: "aborted"`),
+ *      abort/void on a provider failure (a throw, or `error` with
+ *      `reason: "error"`), and settle at the ESTIMATE when the stream ends with
+ *      no terminal event at all (including a consumer who walked away).
  *
  * The full path→action matrix, including what `result()` does on each, is in
  * contract-notes §6 and pinned by `tests/terminal-modes.test.ts`.
@@ -23,6 +21,33 @@
  * The wrapped function has the same signature AND the same surface as the
  * original — the pinned boundary is not a bare `AsyncIterable`, it also
  * exposes `result()`, so the wrapper is a proxy rather than a generator.
+ *
+ * ── TWO PINNED-HOST BEHAVIOURS THIS FILE IS SHAPED BY ──
+ *
+ * (a) The host awaits `result()` from INSIDE its loop body. `openclaw`
+ *     `dist/proxy-BzhBz8iM.js:395-408` (`streamAssistantResponse`):
+ *
+ *         case "done":
+ *         case "error": {
+ *           const finalMessage = removeNonExecutableToolCalls(await response.result());
+ *           …
+ *           return finalMessage;        // ← returns from inside the for-await
+ *         }
+ *
+ *     so the host is suspended in the loop body, holding the generator at its
+ *     terminal `yield`, when it blocks on `result()`. The pinned stream class
+ *     survives that because `EventStream.push()` resolves the final-result
+ *     promise BEFORE delivering the terminal event to the waiting consumer
+ *     (`pi-ai/dist/utils/event-stream.js:20-31`). Governance therefore has to
+ *     FINISH, and `final` has to be settled, BEFORE the terminal `yield` —
+ *     anything deferred past it can never run, because nothing will resume us.
+ *
+ * (b) `result()` upstream is PASSIVE — it returns a promise and consumes
+ *     nothing (`event-stream.js:60-62`), so a caller may await it and iterate
+ *     afterwards and still see every event. Ours cannot be passive: nothing
+ *     else pumps governance for a `result()`-only consumer. It drains, and
+ *     therefore it REPLAYS what that drain captured to any iterator that
+ *     arrives later, rather than silently eating the stream.
  */
 
 import type {
@@ -47,6 +72,7 @@ import type {
 	AssistantMessage,
 	AssistantMessageEventStreamLike,
 	Context,
+	DoneEvent,
 	ErrorEvent,
 	FrozenCostCenters,
 	Model,
@@ -143,22 +169,88 @@ export function wrapStreamWithGovernance(
 		// is handed over through a deferred the generator settles.
 		const final = createDeferred<AssistantMessage>();
 		const events = governedStream(streamFn, governor, model, context, options, final, opts);
-		let consumed = false;
+
+		// Exactly one of the two entry points may drive `events`, and WHICH one
+		// claimed it decides how the other is served.
+		let claimed = false;
+		// Set only when `result()` claimed it — i.e. a hidden drain owns the
+		// generator and a later iterator has to be served from the replay log.
+		let drain: Promise<void> | undefined;
+		const replayed: StreamEvent[] = [];
+		let replayEnded = false;
+		let replayFailure: { error: unknown } | undefined;
+		// Swapped-and-resolved on every append so a replaying iterator can wait
+		// for the next event without polling.
+		let nextTick = createDeferred<void>();
+
+		function announce(): void {
+			const tick = nextTick;
+			nextTick = createDeferred<void>();
+			tick.resolve();
+		}
+
+		/**
+		 * Serve an iterator that arrived after `result()` claimed the generator.
+		 * Upstream `result()` consumes nothing, so this consumer is entitled to
+		 * the whole stream — including a mid-stream throw, which the drain
+		 * recorded rather than swallowed.
+		 */
+		async function* replay(): AsyncGenerator<StreamEvent> {
+			let i = 0;
+			for (;;) {
+				const event = replayed[i];
+				if (event !== undefined) {
+					i++;
+					yield event;
+					continue;
+				}
+				if (replayEnded) {
+					if (replayFailure !== undefined) throw replayFailure.error;
+					return;
+				}
+				await nextTick.promise;
+			}
+		}
 
 		return {
 			[Symbol.asyncIterator](): AsyncIterator<StreamEvent> {
-				consumed = true;
+				if (!claimed) {
+					claimed = true;
+					return events[Symbol.asyncIterator]();
+				}
+				// A `result()`-driven drain owns the generator — replay into it.
+				if (drain !== undefined) return replay()[Symbol.asyncIterator]();
+				// A SECOND iterator on a stream already being iterated. An async
+				// generator returns itself, so this picks up where the first left
+				// off, exactly as it always has.
 				return events[Symbol.asyncIterator]();
 			},
 			async result(): Promise<AssistantMessage> {
 				// A `result()`-only consumer never iterates, so drain the governed
 				// stream here — otherwise neither governance nor `final` ever runs.
-				if (!consumed) {
-					consumed = true;
-					try {
-						for await (const _event of events) {
-							// drain
+				if (!claimed) {
+					claimed = true;
+					drain = (async () => {
+						try {
+							for await (const event of events) {
+								replayed.push(event);
+								announce();
+							}
+						} catch (err) {
+							replayFailure = { error: err };
+							throw err;
+						} finally {
+							replayEnded = true;
+							announce();
 						}
+					})();
+					// A consumer may never await the drain (it can iterate the replay
+					// instead), so pre-mark the rejection leg handled.
+					drain.catch(() => {});
+				}
+				if (drain !== undefined) {
+					try {
+						await drain;
 					} catch (err) {
 						// The governed run settles `final` on every terminal path, so
 						// this is normally the same rejection arriving twice. Rethrow
@@ -213,15 +305,6 @@ async function* governedStream(
 	// without reaching any branch — from one that already terminated.
 	let terminated = false;
 
-	// A terminal `error` event does NOT throw — per contract-notes §3 the host
-	// yields it like any other event and the iteration simply ends. Declared
-	// OUTSIDE the try so the `finally` can consult it too: a consumer that breaks
-	// (or calls `iterator.return()`) immediately AFTER the error event unwinds the
-	// generator at the `yield` and never reaches the post-loop branch. What the
-	// loop already observed still decides the hold, so a call the provider
-	// reported as failed is voided rather than charged at the estimate.
-	let failure: ErrorEvent | undefined;
-
 	try {
 		const stream = await streamFn(model, forwardedContext, options);
 		// Hold on to the host's final-message promise, but do NOT wire it to
@@ -235,58 +318,141 @@ async function* governedStream(
 
 		for await (const event of stream) {
 			accumulator.update(event);
-			if (event.type === "error") failure = event;
-			yield event;
-		}
 
-		if (failure !== undefined) {
-			// 3a. The provider reported failure in-band — VOID, same as a throw.
-			// The iteration itself does not rethrow — the consumer already saw the
-			// event — but there is no successful message for `result()` to report.
-			const err = await abortForFailureEvent(governor, auth, failure);
+			if (event.type !== "done" && event.type !== "error") {
+				yield event;
+				continue;
+			}
+
+			// 3. TERMINAL EVENT. Governance runs, and `final` is settled, BEFORE
+			// the yield — see (a) in the file header. The pinned host awaits
+			// `result()` while it is suspended handling this very event, so a
+			// settle deferred until after the yield would wait for a resumption
+			// that can never come, and the agent turn would hang forever.
+			//
+			// Finalising here also makes "the terminal event the loop OBSERVED
+			// decides the action" STRUCTURAL rather than a flag consulted from the
+			// `finally`: by the time the consumer can break, it is already decided.
+			const failed = await finalizeTerminal(
+				governor,
+				auth,
+				event,
+				accumulator.result(),
+				providerResult,
+				final,
+				opts,
+			);
 			terminated = true;
-			final.reject(err);
+			// The consumer still sees the event — a settle failure is ours, not a
+			// reason to hide the provider's own terminal event from the caller.
+			yield event;
+			if (failed !== undefined) throw failed.error;
 			return;
 		}
 
-		// 3b. Settle — POST actual cost.
+		// 4. The stream closed with NO terminal event at all. Settle at the
+		// ESTIMATE, then TERMINATE `result()` explicitly.
+		//
+		// It must not adopt `providerResult` here: the pinned `EventStream.end()`
+		// resolves its final-result promise only when handed an explicit result
+		// (`event-stream.js:33-43`), and a stream that reaches this branch was
+		// ended without one. Adopting it would mark `final` settled while it hangs
+		// forever — invisible to the `!final.settled` guard below, and a hard hang
+		// at the host's post-loop `await response.result()`
+		// (`proxy-BzhBz8iM.js:411`).
 		const receipt = await governor.settle(auth, settleParamsFor(accumulator.result()));
 		terminated = true;
 		fireOnReceipt(opts, receipt);
-
-		// Governance is done and the money path succeeded — only now may
-		// `result()` report the host's final message.
-		final.resolve(providerResult);
+		final.reject(new Error("usertrust: provider stream closed without a terminal event"));
 	} catch (err) {
-		// 4. Abort — VOID the hold (catch abort errors to preserve original).
-		// Reachable only before `terminated` flips: the settle above is the last
-		// thing that can throw, and a settle that rejected mutated nothing.
-		await governor.abort(auth, err).catch(() => {});
-		terminated = true;
-		final.reject(err);
+		// 5. Abort — VOID the hold (catch abort errors to preserve original).
+		// Guarded by `terminated` because a settle that failed on the terminal
+		// event above rethrows THROUGH here after already voiding the hold; a
+		// second abort would be a second ledger action for one authorization.
+		if (!terminated) {
+			await governor.abort(auth, err).catch(() => {});
+			terminated = true;
+			final.reject(err);
+		}
 		throw err;
 	} finally {
-		// 5. Abandonment — the consumer walked away, unwinding the generator at a
-		// `yield` without reaching any branch above. The hold is still open, and
-		// what the loop OBSERVED before the unwind decides its fate.
+		// 6. Abandonment — the consumer walked away, unwinding the generator at a
+		// `yield` without reaching any branch above. Reachable ONLY before a
+		// terminal event was seen (one would have flipped `terminated` before its
+		// own yield), so this is always the no-terminal-event case: a clean early
+		// termination, not a failure, and it SETTLES the partial rather than
+		// voiding (AGENTS.md, "The settle/void asymmetry is deliberate") — at the
+		// ESTIMATE, because usage only ever arrives on a terminal event.
 		if (!terminated) {
-			if (failure !== undefined) {
-				// The provider had already reported failure in-band; the consumer just
-				// left before the loop ended. VOID, exactly as the 3a branch would.
-				final.reject(await abortForFailureEvent(governor, auth, failure));
-			} else {
-				// A clean early termination, not a failure, so it SETTLES the partial
-				// rather than voiding (AGENTS.md, "The settle/void asymmetry is
-				// deliberate") — at the provider's usage if a `done` event already
-				// carried it, otherwise at the ESTIMATE.
-				await settleAbandoned(governor, auth, accumulator.result(), opts);
-			}
+			await settleAbandoned(governor, auth, accumulator.result(), opts);
 		}
 		// `result()` must never be left pending. The abandonment path has no final
 		// assistant message to hand back, so it rejects.
 		if (!final.settled) {
 			final.reject(new Error("usertrust: stream abandoned before completion"));
 		}
+	}
+}
+
+/**
+ * Take the single terminal ledger action for a `done` / `error` event and
+ * settle `final` with what the pinned stream class would have reported.
+ *
+ * NEVER THROWS — it runs before a `yield`, and its caller decides whether the
+ * generator rethrows. Returns the error to rethrow (a failed settle), or
+ * `undefined` when the run ends cleanly.
+ *
+ * Two things here are pinned host behaviour, not choices:
+ *
+ *  - **`reason: "aborted"` SETTLES, it does not void.** That event is the
+ *    CALLER's `AbortSignal` firing, not a provider failure — every pinned
+ *    provider derives it from `signal?.aborted` and attaches the usage it had
+ *    accumulated so far (`pi-ai/dist/providers/anthropic.js:500-517`,
+ *    `openclaw/dist/openai-transport-stream-B0WkSqXp.js:757-772`). Those tokens
+ *    were really spent, so voiding them would let any consumer cancel its way
+ *    out of paying for work the provider actually did. Only `reason: "error"`
+ *    is a failure.
+ *
+ *  - **`result()` RESOLVES on an in-band error event, it does not reject.** The
+ *    pinned `AssistantMessageEventStream`'s `extractResult` returns
+ *    `event.error` for it (`event-stream.js:66-74`), and OpenClaw consumes that
+ *    AssistantMessage as the terminal assistant turn, branching on
+ *    `message.stopReason` afterwards (`proxy-BzhBz8iM.js:264`). Rejecting would
+ *    convert an ordinary failed turn into a thrown agent-loop error. Rejection
+ *    stays reserved for THROWN failures, where there is no message at all.
+ */
+async function finalizeTerminal(
+	governor: Governor,
+	auth: Authorization,
+	event: DoneEvent | ErrorEvent,
+	usage: AccumulatedUsage,
+	providerResult: Promise<AssistantMessage>,
+	final: Deferred<AssistantMessage>,
+	opts: GovernanceOptions | undefined,
+): Promise<{ error: unknown } | undefined> {
+	if (event.type === "error" && event.reason === "error") {
+		const err = new Error(
+			`usertrust: provider stream ended with error: ${event.error.errorMessage ?? event.reason}`,
+		);
+		await governor.abort(auth, err).catch(() => {});
+		final.resolve(event.error);
+		return undefined;
+	}
+
+	try {
+		const receipt = await governor.settle(auth, settleParamsFor(usage));
+		fireOnReceipt(opts, receipt);
+		// `done` reports the PROVIDER's own `result()` — a stream wrapper may have
+		// post-processed the message, and by the pinned push-before-deliver
+		// ordering it is already resolved by the time we see the event. An abort
+		// has no such promise to wait on (the provider `end()`s without one), so
+		// it reports the partial message the event itself carried.
+		final.resolve(event.type === "done" ? providerResult : event.error);
+		return undefined;
+	} catch (err) {
+		await governor.abort(auth, err).catch(() => {});
+		final.reject(err);
+		return { error: err };
 	}
 }
 
@@ -467,24 +633,6 @@ async function settleAbandoned(
 		// The hold would otherwise dangle PENDING until destroy/timeout.
 		await governor.abort(auth, err).catch(() => {});
 	}
-}
-
-/**
- * Void the hold for a stream the provider ended with an in-band `error` event,
- * and return the error `result()` should reject with. Shared by the post-loop
- * branch and the `finally`, so the two cannot drift into treating the same
- * observed failure differently. Never throws — the `finally` calls it too.
- */
-async function abortForFailureEvent(
-	governor: Governor,
-	auth: Authorization,
-	failure: ErrorEvent,
-): Promise<Error> {
-	const err = new Error(
-		`usertrust: provider stream ended with error: ${failure.error.errorMessage ?? failure.reason}`,
-	);
-	await governor.abort(auth, err).catch(() => {});
-	return err;
 }
 
 /**

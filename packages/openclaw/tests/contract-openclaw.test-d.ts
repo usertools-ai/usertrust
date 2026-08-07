@@ -45,6 +45,7 @@ import type {
 	AssistantMessageEvent as OcEvent,
 	Message as OcMessage,
 	Model as OcModel,
+	ProviderStreamOptions as OcProviderStreamOptions,
 	StreamFunction as OcStreamFunction,
 	ToolCall as OcToolCall,
 	ToolResultMessage as OcToolResult,
@@ -57,9 +58,11 @@ import type {
 	Model,
 	OpenClawPluginApi,
 	ProviderPlugin,
+	ProviderStreamOptions,
 	ProviderWrapStreamFnContext,
 	StreamEvent,
 	StreamFn,
+	StreamOptions,
 	ToolResultMessage,
 	Usage,
 } from "../src/types.js";
@@ -147,6 +150,54 @@ export type _ModelForwardable = Assert<Extends<Model, OcModel>>;
 export type _HostStreamFnAccepted = Assert<Extends<OcStreamFn, StreamFn>>;
 export type _OurStreamFnReturnable = Assert<Extends<StreamFn, OcStreamFn>>;
 export type _OcStreamFunctionAccepted = Assert<Extends<OcStreamFunction, StreamFn>>;
+
+// ── per-call options: the host's surface, and it is OPEN ──
+
+/** The options bag openclaw's own stream fn takes, read off the seam itself. */
+type OcStreamOptions = NonNullable<Parameters<OcStreamFn>[2]>;
+
+export type _OcOptionsAccepted = Assert<Extends<OcStreamOptions, StreamOptions>>;
+export type _OptionsForwardableToOc = Assert<Extends<StreamOptions, OcStreamOptions>>;
+
+/**
+ * The mirror's named fields must be fields the HOST actually declares — not
+ * invented ones — and a caller must be able to write them as a fresh object
+ * literal. Asserted with a VALUE, because excess-property checking fires only
+ * on a fresh literal and is therefore invisible to the `Extends` assertions
+ * above: a field the mirror drops breaks callers without breaking either
+ * direction of assignability.
+ */
+export const _mirrorFieldsExistOnHost: OcStreamOptions = {
+	temperature: 0.2,
+	maxTokens: 1024,
+	stop: ["\n\n"],
+	apiKey: "sk-test",
+	transport: "sse",
+	cacheRetention: "long",
+	sessionId: "session-1",
+	promptCacheKey: "cache-1",
+	headers: { "x-usertrust-trace": "1" },
+	timeoutMs: 30_000,
+	maxRetries: 2,
+	maxRetryDelayMs: 60_000,
+	metadata: { user_id: "u-1" },
+};
+
+/** …and the same literal has to be writable against the mirror. */
+export const _hostOptionFieldsAreWritable: StreamOptions = _mirrorFieldsExistOnHost;
+
+/**
+ * The OPEN half. `ProviderStreamOptions` is the host's own escape hatch, and
+ * the pinned agent loop depends on it: it spreads its WHOLE config into the bag
+ * (`dist/proxy-BzhBz8iM.js:356-360`), so the value that reaches a stream fn at
+ * runtime always carries keys no interface declares.
+ */
+export const _providerOptionsAreOpen: ProviderStreamOptions = {
+	maxTokens: 64,
+	reasoning: "high",
+	someProviderSpecificKnob: true,
+};
+export type _OcProviderOptionsAccepted = Assert<Extends<OcProviderStreamOptions, StreamOptions>>;
 
 // ── plugin registration + config delivery ──
 

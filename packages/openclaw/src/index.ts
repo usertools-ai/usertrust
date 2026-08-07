@@ -105,6 +105,17 @@ const KNOWN_COST_CENTERS_FIELDS = new Set([
 const KNOWN_ENVELOPE_FIELDS = new Set(["allocated", "periodStartMs", "periodEndMs"]);
 
 /**
+ * An empty string-keyed map with NO prototype — the only kind safe to build by
+ * assignment from operator-supplied keys. See `normalizeCostCenters`'s doc for
+ * why (`__proto__` is a legal key on both maps, and a plain object silently
+ * eats it). Membership is still read with `Object.hasOwn`, which works
+ * identically on a null-prototype object.
+ */
+function emptyMap<T>(): Record<string, T> {
+	return Object.create(null) as Record<string, T>;
+}
+
+/**
  * Validates AND normalizes `UsertrustPluginConfig.costCenters` into a
  * deep-frozen {@link FrozenCostCenters} — the ONLY shape any wrapper reads
  * downstream. Called at plugin CONSTRUCTION time (`createUsertrustPlugin`,
@@ -125,6 +136,18 @@ const KNOWN_ENVELOPE_FIELDS = new Set(["allocated", "periodStartMs", "periodEndM
  * inherited from `Object.prototype` (`toString`, `constructor`, …), which
  * would let an operator config accidentally — or an attacker deliberately —
  * route spend to a phantom "envelope" that was never declared.
+ *
+ * And every map this builds is NULL-PROTOTYPE ({@link emptyMap}), which is the
+ * WRITE-side half of that same rule. `__proto__` is a legal cost-center string
+ * (core's `COST_CENTER_PATTERN` is `/^[a-zA-Z0-9._-]{1,64}$/`), a legal tool
+ * name, and a genuine own property when it arrives via `JSON.parse`. Assigning
+ * it into an ordinary object invokes `Object.prototype`'s `__proto__` SETTER
+ * instead of creating the key: a string value is silently discarded, and an
+ * object value silently re-points the map's prototype. Either way the entry
+ * disappears with no error, attribution falls through to `default`, and a
+ * correlated call debits the wrong envelope. A null-prototype map has no such
+ * setter to inherit, so the assignment creates the own key it looks like it
+ * creates.
  *
  * @throws Error — config-shaped, naming the offending field — on any
  * malformed shape.
@@ -161,7 +184,7 @@ export function normalizeCostCenters(cc: unknown): FrozenCostCenters {
 		);
 	}
 
-	const envelopes: Record<string, EnvelopeConfig> = {};
+	const envelopes = emptyMap<EnvelopeConfig>();
 	for (const key of envelopeKeys) {
 		const entry = rawEnvelopes[key];
 		if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
@@ -186,15 +209,23 @@ export function normalizeCostCenters(cc: unknown): FrozenCostCenters {
 		withCostCenter(key, () => {}, metadata);
 		envelopes[key] = metadata;
 	}
-	const frozenEnvelopes = Object.freeze(
-		Object.fromEntries(Object.entries(envelopes).map(([k, v]) => [k, Object.freeze({ ...v })])),
-	) as Readonly<Record<string, Readonly<EnvelopeConfig>>>;
+	// Built by assignment into a null-prototype map, NOT `Object.fromEntries`:
+	// the result is read back with `Object.hasOwn` and indexed by operator-
+	// supplied keys, so it has to stay free of an inherited `__proto__` accessor
+	// for exactly the reason the source map does.
+	const envelopeCopies = emptyMap<Readonly<EnvelopeConfig>>();
+	for (const [k, v] of Object.entries(envelopes)) {
+		envelopeCopies[k] = Object.freeze({ ...v });
+	}
+	const frozenEnvelopes = Object.freeze(envelopeCopies) as Readonly<
+		Record<string, Readonly<EnvelopeConfig>>
+	>;
 
 	if (raw.tools === null || typeof raw.tools !== "object" || Array.isArray(raw.tools)) {
 		throw new Error("usertrust: costCenters.tools must be an object");
 	}
 	const rawTools = raw.tools as Record<string, unknown>;
-	const tools: Record<string, string> = {};
+	const tools = emptyMap<string>();
 	for (const toolName of Object.keys(rawTools)) {
 		const target = rawTools[toolName];
 		if (typeof target !== "string" || !Object.hasOwn(frozenEnvelopes, target)) {
@@ -204,7 +235,11 @@ export function normalizeCostCenters(cc: unknown): FrozenCostCenters {
 		}
 		tools[toolName] = target;
 	}
-	const frozenTools = Object.freeze({ ...tools });
+	// `Object.freeze(tools)`, never `Object.freeze({ ...tools })`: spreading into
+	// an object LITERAL would hand the frozen map back an `Object.prototype`, and
+	// with it the `__proto__` accessor this whole map was built to avoid. Nothing
+	// mutates `tools` after this point, so there is no copy to make.
+	const frozenTools = Object.freeze(tools);
 
 	if (raw.default !== undefined) {
 		if (typeof raw.default !== "string" || !Object.hasOwn(frozenEnvelopes, raw.default)) {

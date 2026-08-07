@@ -283,17 +283,78 @@ export interface Model {
 	headers?: Record<string, string>;
 }
 
+/** Preferred wire transport for providers that support more than one. */
+export type Transport = "sse" | "websocket" | "websocket-cached" | "auto";
+
+/** Prompt-cache retention preference; providers map it to their own values. */
+export type CacheRetention = "none" | "short" | "long";
+
+/** The HTTP response summary `StreamOptions.onResponse` is handed. */
+export interface ProviderResponse {
+	status: number;
+	headers: Record<string, string>;
+}
+
 /**
  * Per-call knobs. `maxTokens` and `temperature` live HERE, not on `Context` —
  * they are what the pre-call hold estimates against.
+ *
+ * This mirrors the pinned host's `StreamOptions` FIELD FOR FIELD
+ * (`openclaw/dist/types-CFIUY_La.d.ts:50-119`,
+ * `pi-ai/dist/types.d.ts:24-85`), and that completeness is load-bearing rather
+ * than tidiness. A field the host declares and the mirror drops is not an
+ * assignability failure — extra optional properties never break assignability
+ * in either direction — so nothing about the wrap seam complains. What breaks
+ * is the EXCESS-PROPERTY check on a caller's object literal: with `headers`
+ * missing here, `governed(model, ctx, { headers })` stops compiling for a
+ * caller passing something the host has always supported, and their only way
+ * out is a cast. The contract tests therefore assert this surface with VALUES,
+ * not just `Extends`, because a type-level assertion cannot see it.
+ *
+ * `signal` is the one field with governance meaning: when it fires, the pinned
+ * providers end the stream with `{ type: "error", reason: "aborted" }` carrying
+ * the partial usage, which `stream-governor.ts` SETTLES rather than voids.
  */
 export interface StreamOptions {
 	temperature?: number;
 	maxTokens?: number;
+	/** Stop sequences, mapped to each provider's native field. openclaw only. */
 	stop?: string[];
 	signal?: AbortSignal;
 	apiKey?: string;
+	transport?: Transport;
+	cacheRetention?: CacheRetention;
+	sessionId?: string;
+	/** Cache-affinity key distinct from session identity. openclaw only. */
+	promptCacheKey?: string;
+	/** Inspect or replace the provider payload before it is sent. */
+	onPayload?: (payload: unknown, model: Model) => unknown | Promise<unknown>;
+	/** Fires after the HTTP response arrives, before its body is consumed. */
+	onResponse?: (response: ProviderResponse, model: Model) => void | Promise<void>;
+	/** Extra HTTP headers, merged with (and able to override) provider defaults. */
+	headers?: Record<string, string>;
+	timeoutMs?: number;
+	maxRetries?: number;
+	maxRetryDelayMs?: number;
+	/** Provider-extracted request metadata (Anthropic reads `user_id`, …). */
+	metadata?: Record<string, unknown>;
 }
+
+/**
+ * The OPEN options bag, mirroring the host's own alias
+ * (`openclaw/dist/types-CFIUY_La.d.ts:123`, `pi-ai/dist/types.d.ts:86`):
+ *
+ *     type ProviderStreamOptions = StreamOptions & Record<string, unknown>;
+ *
+ * Not decoration. The pinned agent loop spreads its WHOLE config into the bag
+ * it hands a stream fn — `streamFunction(config.model, llmContext, { ...config,
+ * apiKey, signal })` (`openclaw/dist/proxy-BzhBz8iM.js:356-360`) — so the value
+ * that actually arrives at runtime always carries keys no interface declares.
+ * Callers with provider-specific knobs (including `reasoning` /
+ * `thinkingBudgets`, whose enums differ between the two hosts and so are not
+ * mirrored — contract-notes §7) type their literal as this.
+ */
+export type ProviderStreamOptions = StreamOptions & Record<string, unknown>;
 
 /**
  * The stream function shape on both sides of the wrap seam: the host hands one

@@ -17,6 +17,7 @@ import {
 	startEvent,
 	streamOf,
 	textDelta,
+	withTimeout,
 } from "./host-fixtures.js";
 
 // Mock tigerbeetle-node
@@ -65,24 +66,6 @@ function mockFailingStreamFn(errorAfter: number): StreamFn {
 }
 
 const model = makeModel();
-
-/**
- * Guard against a promise that never settles. A hung `result()` would otherwise
- * show up as an opaque test-suite timeout instead of a named assertion failure.
- */
-async function withTimeout<T>(promise: Promise<T>, ms = 500): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			promise,
-			new Promise<never>((_resolve, reject) => {
-				timer = setTimeout(() => reject(new Error("promise never settled")), ms);
-			}),
-		]);
-	} finally {
-		if (timer !== undefined) clearTimeout(timer);
-	}
-}
 
 /** Iterate a governed stream to exhaustion, discarding the events. */
 function drain(stream: AsyncIterable<StreamEvent>): Promise<void> {

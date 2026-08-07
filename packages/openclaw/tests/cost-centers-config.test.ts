@@ -137,6 +137,60 @@ describe("normalizeCostCenters — construction-time validation", () => {
 		).toThrow(/default.*envelopes key/);
 	});
 
+	// ── "__proto__" is a LEGAL key on both maps, and must behave like any other ──
+	//
+	// `COST_CENTER_PATTERN` is `/^[a-zA-Z0-9._-]{1,64}$/` (core `shared/ids.ts:47`),
+	// which accepts `__proto__` — so core's own charset door lets it through. And
+	// `JSON.parse` creates `__proto__` as a genuine OWN property, so an operator's
+	// config file can carry one. Plain-object assignment (`map[key] = value`) hits
+	// `Object.prototype`'s `__proto__` SETTER instead of creating that own key:
+	// a string value is silently discarded, an object value silently re-points the
+	// map's prototype. Either way the entry vanishes and routing falls through to
+	// `default` — the wrong wallet, with no error anywhere.
+	//
+	// The key is read back through this constant rather than as `map.__proto__`,
+	// which is the ACCESSOR both tests are asserting the absence of.
+	const PROTO = "__proto__";
+
+	it("keeps a tool literally named `__proto__` mapped to its envelope", () => {
+		const cfg = JSON.parse(
+			`{"parentUserId":"agent-1","tools":{"__proto__":"research","web_search":"research"},
+			 "default":"verification","envelopes":{"research":{"allocated":500,"periodStartMs":0},
+			 "verification":{"allocated":200,"periodStartMs":0}}}`,
+		) as unknown;
+		// The key really is an own property of what the operator handed us.
+		expect(Object.hasOwn((cfg as { tools: object }).tools, PROTO)).toBe(true);
+
+		const normalized = normalizeCostCenters(cfg);
+
+		expect(Object.hasOwn(normalized.tools, PROTO)).toBe(true);
+		expect(normalized.tools[PROTO]).toBe("research");
+		// Nothing was smuggled onto the map's prototype in the process.
+		expect(Object.getPrototypeOf(normalized.tools)).toBe(null);
+		// The sibling mapping is untouched.
+		expect(normalized.tools.web_search).toBe("research");
+	});
+
+	it("keeps an envelope literally named `__proto__`, without re-pointing the map's prototype", () => {
+		const cfg = JSON.parse(
+			`{"parentUserId":"agent-1","tools":{"web_search":"__proto__"},"default":"__proto__",
+			 "envelopes":{"__proto__":{"allocated":500,"periodStartMs":0},
+			 "other":{"allocated":10,"periodStartMs":0}}}`,
+		) as unknown;
+
+		const normalized = normalizeCostCenters(cfg);
+
+		expect(Object.hasOwn(normalized.envelopes, PROTO)).toBe(true);
+		expect(normalized.envelopes[PROTO]).toMatchObject({ allocated: 500, periodStartMs: 0 });
+		// The prototype must still be null — NOT the envelope metadata object,
+		// which is what `envelopes["__proto__"] = metadata` would have made it.
+		expect(Object.getPrototypeOf(normalized.envelopes)).toBe(null);
+		expect(Object.keys(normalized.envelopes).sort()).toEqual(["__proto__", "other"]);
+		// And the mapping that references it resolves.
+		expect(normalized.tools.web_search).toBe("__proto__");
+		expect(normalized.default).toBe("__proto__");
+	});
+
 	it("validates every envelopes KEY's charset via core's withCostCenter door, with core's message", () => {
 		const cfg = validConfig({
 			envelopes: { "bad key!": { allocated: 500, periodStartMs: 0 } },

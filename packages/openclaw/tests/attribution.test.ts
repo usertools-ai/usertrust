@@ -99,6 +99,25 @@ const CC_NO_DEFAULT: FrozenCostCenters = normalizeCostCenters({
 	scarcityContext: false,
 });
 
+/**
+ * A config that MAPS the string `__proto__` — legal on both maps: it satisfies
+ * core's `COST_CENTER_PATTERN` (`/^[a-zA-Z0-9._-]{1,64}$/`), and `JSON.parse`
+ * gives it to us as a genuine own property. Built through the real door so the
+ * row below is read against whatever `normalizeCostCenters` actually produced.
+ */
+const CC_PROTO: FrozenCostCenters = normalizeCostCenters({
+	parentUserId: PARENT,
+	// COMPUTED key, deliberately: `{ __proto__: "research" }` written as a plain
+	// literal is the object-literal prototype-setter form and creates no own
+	// property at all. `{ ["__proto__"]: … }` creates the real key.
+	tools: { ["__proto__"]: "research", web_search: "research" },
+	default: "general",
+	envelopes: {
+		research: { allocated: 10_000, periodStartMs: PERIOD_START },
+		general: { allocated: 1_000, periodStartMs: PERIOD_START },
+	},
+});
+
 // ── Part 1: deriveAttribution (pure) ──
 
 /** `messages` is `unknown[]`, so a row may hold deliberately malformed entries. */
@@ -313,6 +332,22 @@ const ROWS: Row[] = [
 		name: 'a tool named "constructor" does not resolve through Object.prototype',
 		messages: [userMessage("go"), assistantToolCalls("constructor"), toolResult("constructor")],
 		expected: "general",
+	},
+	{
+		name: 'an UNMAPPED tool named "__proto__" falls back to default like any other',
+		messages: [userMessage("go"), assistantToolCalls("__proto__"), toolResult("__proto__")],
+		expected: "general",
+	},
+	{
+		// The inverse hazard, and the expensive one: `__proto__` is a legal tool
+		// name AND a legal cost-center string (`COST_CENTER_PATTERN` accepts it),
+		// so an operator can map it. If normalization drops the entry — which
+		// plain `map["__proto__"] = value` does, silently — this correlated call
+		// falls through to `default` and debits the WRONG wallet with no error.
+		name: 'a MAPPED tool named "__proto__" routes to its configured envelope',
+		messages: [userMessage("go"), assistantToolCalls("__proto__"), toolResult("__proto__")],
+		expected: "research",
+		cc: CC_PROTO,
 	},
 
 	// — malformed input is SKIPPED, never thrown on —
