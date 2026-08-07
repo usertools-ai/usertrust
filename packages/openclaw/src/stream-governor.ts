@@ -7,8 +7,13 @@
  * Wraps a host stream function with usertrust governance:
  *   1. Before stream: authorize (budget check, PENDING hold)
  *   2. During stream: forward events, accumulate token usage
- *   3. After stream: settle with actual cost
- *   4. On error: abort (VOID the hold)
+ *   3. After stream: EXACTLY ONE terminal ledger action per authorization —
+ *      settle with the provider's usage on a clean `done`, settle at the
+ *      ESTIMATE when the stream ends early (no terminal event, or the consumer
+ *      walked away), abort when it fails (a throw, or an in-band `error` event)
+ *
+ * The full path→action matrix, including what `result()` does on each, is in
+ * contract-notes §6 and pinned by `tests/terminal-modes.test.ts`.
  *
  * The wrapped function has the same signature AND the same surface as the
  * original — the pinned boundary is not a bare `AsyncIterable`, it also
@@ -21,6 +26,7 @@ import type {
 	AssistantMessage,
 	AssistantMessageEventStreamLike,
 	Context,
+	ErrorEvent,
 	Model,
 	StreamEvent,
 	StreamFn,
@@ -159,6 +165,13 @@ async function* governedStream(
 	// 2. Stream with token accumulation
 	const accumulator = createAccumulator();
 
+	// Exactly one terminal ledger action per authorization (AGENTS.md, "Money").
+	// The flag flips only once a settle or an abort has actually been issued, so
+	// the `finally` guard below can tell an ABANDONED stream — the consumer
+	// `break`s or calls `iterator.return()`, unwinding the generator at `yield`
+	// without reaching any branch — from one that already terminated.
+	let terminated = false;
+
 	try {
 		const stream = await streamFn(model, context, options);
 		// Hold on to the host's final-message promise, but do NOT wire it to
@@ -170,12 +183,33 @@ async function* governedStream(
 		// Nothing awaits it until adoption, so pre-mark it handled.
 		providerResult.catch(() => {});
 
+		// A terminal `error` event does NOT throw — per contract-notes §3 the host
+		// yields it like any other event and the iteration simply ends. Remember it
+		// so the post-loop branch voids instead of settling.
+		let failure: ErrorEvent | undefined;
+
 		for await (const event of stream) {
 			accumulator.update(event);
+			if (event.type === "error") failure = event;
 			yield event;
 		}
 
-		// 3. Settle — POST actual cost
+		if (failure !== undefined) {
+			// 3a. The provider reported failure in-band — VOID, same as a throw.
+			const err = new Error(
+				`usertrust: provider stream ended with error: ${
+					failure.error.errorMessage ?? failure.reason
+				}`,
+			);
+			await governor.abort(auth, err).catch(() => {});
+			terminated = true;
+			// The iteration itself does not rethrow — the consumer already saw the
+			// event — but there is no successful message for `result()` to report.
+			final.reject(err);
+			return;
+		}
+
+		// 3b. Settle — POST actual cost.
 		const usage = accumulator.result();
 
 		await governor.settle(auth, {
@@ -189,25 +223,54 @@ async function* governedStream(
 			// never `computeMs: undefined` (plan A6).
 			...(usage.computeMs != null ? { computeMs: usage.computeMs } : {}),
 		});
+		terminated = true;
 
 		// Governance is done and the money path succeeded — only now may
 		// `result()` report the host's final message.
 		final.resolve(providerResult);
 	} catch (err) {
-		// 4. Abort — VOID the hold (catch abort errors to preserve original)
+		// 4. Abort — VOID the hold (catch abort errors to preserve original).
+		// Reachable only before `terminated` flips: the settle above is the last
+		// thing that can throw, and a settle that rejected mutated nothing.
 		await governor.abort(auth, err).catch(() => {});
+		terminated = true;
 		final.reject(err);
 		throw err;
 	} finally {
-		// A consumer that `break`s (or otherwise calls `return()` on the iterator)
-		// unwinds the generator without reaching either branch above. `result()`
-		// must never be left pending, so settle it here as a last resort.
-		// NOTE: this guard settles the DEFERRED only — it deliberately does not
-		// touch the hold. Aborting/settling governance on abandonment is Task 3's
-		// terminal-mode work.
+		// 5. Abandonment — the consumer walked away mid-stream. That is a clean
+		// early termination, not a failure, so it SETTLES the partial rather than
+		// voiding (AGENTS.md, "The settle/void asymmetry is deliberate"), and at
+		// the ESTIMATE: usage only ever arrives on a terminal event, so a stream
+		// abandoned before one carries no provider tokens to settle with.
+		if (!terminated) {
+			await settleAtEstimate(governor, auth, accumulator.result().chunksDelivered);
+		}
+		// `result()` must never be left pending. The abandonment path has no final
+		// assistant message to hand back, so it rejects.
 		if (!final.settled) {
 			final.reject(new Error("usertrust: stream abandoned before completion"));
 		}
+	}
+}
+
+/**
+ * Settle an abandoned stream's hold at the pre-call estimate, falling back to an
+ * abort if the ledger refuses the settle. Nothing here may throw: it runs in the
+ * generator's `finally`, where an escaping error would replace the consumer's
+ * own control flow (a `break`, an outer `throw`) with a governance error.
+ */
+async function settleAtEstimate(
+	governor: Governor,
+	auth: Authorization,
+	chunksDelivered: number,
+): Promise<void> {
+	try {
+		// Omitting the token fields is what selects the estimate — `settle()` reads
+		// `auth.estimatedCost` when neither inputTokens nor outputTokens is given.
+		await governor.settle(auth, { chunksDelivered, usageSource: "estimated" });
+	} catch (err) {
+		// The hold would otherwise dangle PENDING until destroy/timeout.
+		await governor.abort(auth, err).catch(() => {});
 	}
 }
 
