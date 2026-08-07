@@ -375,6 +375,20 @@ and `remaining` stays honest while `spent`, `fraction` and `runwayHours` silentl
 stream handle, or a post-settle read that did not answer. That read failing is deliberately silent:
 a receipt is a report, and degrading a report must never unwind or re-decide committed money.
 
+**The `withCostCenter` scope itself stays operator-authored even where the `cc` string is
+selected by agent activity.** `packages/openclaw`'s `deriveAttribution` (`src/attribution.ts`)
+picks *which* operator-declared cost center a call's `withCostCenter` scope opens by reading the
+trailing, correlated, non-error tool-result run out of the caller-supplied context — never from
+message text — but the only strings it can ever return are values already present in the
+plugin's frozen `tools`/`default` config, both validated at construction through this same
+`withCostCenter` door (§ above) before any call runs. The scope-opens-from-code-structure
+invariant is intact: what changed is that the code choosing the argument now reads agent
+activity instead of being hardcoded, and that choice is bounded to envelopes the operator
+explicitly delegated. Full security-model treatment — the bounded-delegation argument, the
+plugin-vs-programmatic evidence-trust boundary, and the documented residual — lives in
+`packages/openclaw/README.md`'s "Security model" section (verbatim from the ship's design spec),
+not duplicated here.
+
 **1 usertoken = $0.0001 USD, everywhere.** All pricing rates are usertokens per 1,000 LLM tokens.
 This constant is duplicated in `packages/verify` on purpose.
 

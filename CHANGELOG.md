@@ -43,6 +43,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `estimated_cost`) now surfaces a budget-specific remedy pointing at
   `allocateBudget` and the fraction/runway tiers (`derivePolicyHint`), instead
   of the rule's generic description.
+- **`usertrust-openclaw`: operator-declared tool→envelope attribution and
+  per-turn scarcity injection.** A new `costCenters` plugin config
+  (`parentUserId`, `tools`, `default`, `envelopes`, `scarcityContext`) routes
+  each governed call's spend to a named, operator-capped budget envelope,
+  selected STATELESSLY per call from the caller-supplied context's trailing,
+  correlated, non-error tool-result run (`deriveAttribution`,
+  `src/attribution.ts`) — structured-field matching only, never message text.
+  Validated once at plugin construction through core's own
+  `parentUserIdRefusal` and `withCostCenter` doors, normalized into a
+  deep-frozen config every wrapper reads. When enabled, a
+  `[usertrust scarcity] research: 34% left (~2.1h runway) · …` block is
+  appended to each call's system prompt from a live batched read of the
+  configured envelopes (`Governor.budgetContext`, core), on a copy of the
+  caller's context — never gating, delaying, or throwing into the money path
+  on a read failure. Fixes a pre-existing money bug in the same pass: the
+  stream wrapper now guarantees exactly one settle/abort on every terminal
+  mode (completion, thrown error, error event, consumer break/return,
+  close-without-`done`), where it previously leaked the PENDING hold on an
+  early consumer `break`. See `packages/openclaw/README.md` for the full
+  attribution rule and the security-model carve-out.
 
 ### Fixed
 
