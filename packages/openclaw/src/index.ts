@@ -32,7 +32,7 @@
  *     5. Return governed stream to OpenClaw
  */
 
-import type { Governor } from "usertrust";
+import type { Governor, TrustOpts } from "usertrust";
 import { createGovernor, parentUserIdRefusal, withCostCenter } from "usertrust";
 import type { GovernanceOptions } from "./stream-governor.js";
 import { wrapCompleteWithGovernance, wrapStreamWithGovernance } from "./stream-governor.js";
@@ -357,18 +357,59 @@ export function createUsertrustPlugin(config: UsertrustPluginConfig): ProviderPl
 export async function createGovernedStreamFn(
 	streamFn: StreamFn,
 	config: UsertrustPluginConfig,
+	options?: GovernedStreamFnOptions,
 ): Promise<{ governedStreamFn: StreamFn; governor: Governor }> {
 	const frozenCostCenters =
 		config.costCenters !== undefined ? normalizeCostCenters(config.costCenters) : undefined;
-	const gov = await initGovernor(config, frozenCostCenters);
+	const gov = await initGovernor(config, frozenCostCenters, options?.engine);
 	// This path builds its OWN wrapper rather than going through
 	// `createUsertrustPlugin`, so it needs the same opts bag explicitly —
 	// otherwise the programmatic entry point would silently ignore a
 	// `costCenters` config it just finished validating.
 	const governedStreamFn = wrapStreamWithGovernance(streamFn, gov, {
 		costCenters: frozenCostCenters,
+		...(options?.onReceipt !== undefined ? { onReceipt: options.onReceipt } : {}),
 	});
 	return { governedStreamFn, governor: gov };
+}
+
+/**
+ * Non-JSON options for {@link createGovernedStreamFn} — everything a programmatic
+ * caller can hand the wrapper that could never come from `openclaw.json`.
+ *
+ * They are a SEPARATE argument rather than fields on `UsertrustPluginConfig` for
+ * three reasons: `openclaw.plugin.json` declares the config
+ * `additionalProperties: false`, so a function-valued key there would be refused
+ * by the manifest the plugin path is validated against; the config is
+ * canonical-JSON fingerprinted to decide governor identity, and `JSON.stringify`
+ * flattens every function to nothing (two distinct engines would fingerprint
+ * identically); and the plugin path — the one an operator configures — must keep
+ * exactly the surface the manifest describes.
+ */
+export interface GovernedStreamFnOptions {
+	/**
+	 * Fires with the `TrustReceipt` after each successful `settle()`. Forwarded
+	 * verbatim to {@link GovernanceOptions.onReceipt}, including its isolation
+	 * and fire-and-forget guarantees.
+	 */
+	onReceipt?: GovernanceOptions["onReceipt"];
+	/**
+	 * TEST/ADVANCED: the `TrustEngine` the governor spends through, instead of a
+	 * TigerBeetle client — core's own `GovernorOpts._engine`, forwarded. This is
+	 * how a test drives the real attribution path (envelope holds, receipt budget
+	 * snapshots, `budgetContext` reads) with no cluster, the same seam core's
+	 * headless tests use.
+	 *
+	 * NOT a governance bypass: core accepts an injected engine only under
+	 * `USERTRUST_TEST=1` / `NODE_ENV=test` (AUD-470) and ignores it in production,
+	 * so passing one from shipped code buys nothing.
+	 *
+	 * It deliberately does NOT participate in the governor fingerprint — the
+	 * governor is a module singleton, so the FIRST caller's engine is the one the
+	 * process uses; a later call with the same config reuses that governor, engine
+	 * included. Call `shutdown()` between engines.
+	 */
+	engine?: TrustOpts["_engine"];
 }
 
 /**
@@ -407,6 +448,7 @@ let governorFingerprint: string | null = null;
 function initGovernor(
 	config: UsertrustPluginConfig,
 	frozenCostCenters?: FrozenCostCenters,
+	engine?: TrustOpts["_engine"],
 ): Promise<Governor> {
 	const fingerprint = fingerprintConfig(config, frozenCostCenters);
 
@@ -461,6 +503,11 @@ function initGovernor(
 		// `normalizeCostCenters` at construction time, never re-read off the
 		// caller's raw (possibly since-mutated) `config.costCenters`.
 		...(frozenCostCenters != null ? { parentUserId: frozenCostCenters.parentUserId } : {}),
+		// TEST/ADVANCED seam (`GovernedStreamFnOptions.engine`). Core honours it
+		// only in a test environment; everywhere else it is ignored, so this
+		// spread cannot weaken a shipped governor. `null` is a MEANINGFUL value
+		// there ("no engine"), so the key is forwarded whenever it was given.
+		...(engine !== undefined ? { _engine: engine } : {}),
 	})
 		.then((gov) => {
 			governor = gov;
