@@ -55,6 +55,60 @@ test("digits rendered from facts.json and sanctioned display strings pass", () =
 	}
 });
 
+test("a rogue digit is still caught on a line using allowlist keywords as ordinary prose words", () => {
+	const dir = mkdtempSync(join(tmpdir(), "check-facts-prose-"));
+	try {
+		writeFileSync(
+			join(dir, "docket.tsx"),
+			[
+				"export default function Docket() {",
+				"\treturn (",
+				"\t\t<p>The stroke width from the top-tier duration study reached 9999 times.</p>",
+				"\t);",
+				"}",
+				"",
+			].join("\n"),
+		);
+		const r = runChecker(dir);
+		assert.notEqual(
+			r.status,
+			0,
+			`bare words like "stroke"/"width"/"from"/"top-"/"duration" must not exempt prose from the rogue-digit check, got:\n${r.stderr}`,
+		);
+		assert.match(r.stderr, /docket\.tsx:3/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("genuine SVG attributes, Tailwind utility classes, and CSS units pass regardless of value", () => {
+	const dir = mkdtempSync(join(tmpdir(), "check-facts-css-"));
+	try {
+		writeFileSync(
+			join(dir, "docket.tsx"),
+			[
+				"export default function Docket() {",
+				'\tconst classes = cn("top-24 z-10 duration-300 delay-150");',
+				"\treturn (",
+				'\t\t<svg className={classes} style={{ marginTop: "24px", width: "50%" }}>',
+				'\t\t\t<rect width="24" height="16" stroke="#34d399" strokeWidth="2" />',
+				"\t\t</svg>",
+				"\t);",
+				"}",
+				"",
+			].join("\n"),
+		);
+		const r = runChecker(dir);
+		assert.equal(
+			r.status,
+			0,
+			`expected structural CSS/SVG/Tailwind digits to pass, got:\n${r.stderr}`,
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("digit literals on a data-code-sample line are exempt", () => {
 	const dir = mkdtempSync(join(tmpdir(), "check-facts-code-sample-"));
 	try {

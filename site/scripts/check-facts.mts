@@ -7,7 +7,8 @@
  *
  * Line-based scan of site/app/components/sections/*.tsx:
  *   1. lines with no digits pass;
- *   2. lines matching ALLOWLIST pass (attributes, CSS values, imports, any
+ *   2. lines matching ALLOWLIST pass (attribute/property assignments, raw
+ *      CSS values, Tailwind utility classes, import statements, any
  *      expression reading fixtures: facts. / receipt. / chain. / transcript.,
  *      and any line carrying a `data-code-sample` marker);
  *   3. on remaining lines, every digit token (e.g. "9", "20+", "$5.00",
@@ -16,6 +17,14 @@
  *
  * Sanctioned tokens are matched as WHOLE tokens (never substrings), so "22"
  * does not ride through on a sanctioned "2".
+ *
+ * Every ALLOWLIST fragment requires actual code syntax around the token — an
+ * `=`/`:` assignment, an import statement, a digit glued to its CSS unit, or
+ * a Tailwind utility's `-digit`/`-[` suffix — never a bare English word or
+ * character. A bare `duration`, `width`, `from`, etc. would silently exempt
+ * ordinary marketing-copy prose (e.g. "the settlement duration is 5 days")
+ * from the lint, hiding exactly the rogue digit literals this gate exists to
+ * catch. Do not loosen a fragment back to a plain substring match.
  *
  * Usage: tsx scripts/check-facts.mts [sectionsDir]   (dir override for tests)
  * Exit 0 when sectionsDir does not exist yet (pre-section-build phase).
@@ -30,8 +39,31 @@ const sectionsDir = process.argv[2]
 	: join(SITE_ROOT, "app", "components", "sections");
 const factsPath = join(SITE_ROOT, "app", "evidence", "facts.json");
 
-const ALLOWLIST =
-	/aria-|className|key=|width|height|viewBox|stroke|d=|delay|duration|top-|z-|px|rem|%|#[0-9a-f]|import|from|facts\.|receipt\.|chain\.|transcript\.|data-code-sample/;
+const ALLOWLIST = new RegExp(
+	[
+		// import statements: `import facts from "../../evidence/facts.json";`
+		String.raw`^\s*import\b`,
+		// JSX/SVG attribute or CSS-in-JS property assignments (name directly
+		// followed by = or :) — never bare, so prose mentioning "width" or
+		// "stroke" without the assignment syntax is not exempted.
+		String.raw`\b(?:aria-[\w-]+|className|key|width|height|viewBox|stroke(?:[A-Z]\w*)?|d|cx|cy|r|x1?|y1?|x2|y2|rx|ry|points|transform|delay|duration)\s*[=:]`,
+		// fixture/facts-derived expressions
+		String.raw`\b(?:facts|receipt|chain|transcript)\.`,
+		// explicit code-sample exemption (consumed by Task 7)
+		"data-code-sample",
+		// hex colors
+		"#[0-9a-f]",
+		// raw CSS values: a digit glued directly to its unit, never bare "px"/
+		// "rem"/"%" (those match inside ordinary words like "premium").
+		String.raw`\d+(?:\.\d+)?(?:px|rem|em|vh|vw|deg|ms)\b`,
+		String.raw`\d+(?:\.\d+)?%`,
+		// Tailwind utility classes: known CSS-property prefix + "-" + a digit
+		// or arbitrary-value bracket, e.g. "top-24", "z-10", "duration-300",
+		// "delay-150" — the trailing dash alone is not enough ("top-tier" is
+		// prose), so a digit/bracket must follow it.
+		String.raw`\b(?:top|bottom|left|right|inset|z|duration|delay|w|h|p|m|px|py|pt|pb|pl|pr|mx|my|mt|mb|ml|mr|gap|rounded|opacity|scale|rotate|stroke|translate-x|translate-y)-(?:\d|\[)`,
+	].join("|"),
+);
 
 /**
  * Digit tokens that are protocol/product names or fixed display strings, not
