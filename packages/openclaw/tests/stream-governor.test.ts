@@ -66,6 +66,33 @@ function mockFailingStreamFn(errorAfter: number): StreamFn {
 
 const model = makeModel();
 
+/**
+ * Guard against a promise that never settles. A hung `result()` would otherwise
+ * show up as an opaque test-suite timeout instead of a named assertion failure.
+ */
+async function withTimeout<T>(promise: Promise<T>, ms = 500): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => reject(new Error("promise never settled")), ms);
+			}),
+		]);
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+	}
+}
+
+/** Iterate a governed stream to exhaustion, discarding the events. */
+function drain(stream: AsyncIterable<StreamEvent>): Promise<void> {
+	return (async () => {
+		for await (const _event of stream) {
+			// consume
+		}
+	})();
+}
+
 // ── Tests ──
 
 describe("wrapStreamWithGovernance", () => {
@@ -327,5 +354,134 @@ describe("wrapStreamWithGovernance with maxTokens/temperature", () => {
 		}
 
 		expect(gov.budgetRemaining()).toBeLessThan(100_000);
+	});
+});
+
+/**
+ * `result()` is backed by a deferred. It MUST settle on every terminal path of
+ * the governed run — otherwise the host's normal pattern (iterate for UI events,
+ * await `result()` for the final message) hangs forever, or worse, reports a
+ * successful assistant message for a call governance actually voided.
+ */
+describe("wrapStreamWithGovernance result() settlement", () => {
+	let vaultBase: string;
+	let gov: Governor;
+
+	beforeEach(async () => {
+		vaultBase = makeTmpVault();
+		process.env.USERTRUST_TEST = "1";
+		gov = await createGovernor({ dryRun: true, budget: 100_000, vaultBase });
+	});
+
+	afterEach(async () => {
+		process.env.USERTRUST_TEST = "";
+		vi.restoreAllMocks();
+		await gov.destroy();
+		try {
+			rmSync(vaultBase, { recursive: true, force: true });
+		} catch {
+			// cleanup
+		}
+	});
+
+	const okEvents: StreamEvent[] = [startEvent(), textDelta("hi"), doneEvent(makeUsage(10, 5))];
+
+	it("rejects result() on a policy DENY when the consumer also iterates", async () => {
+		vi.spyOn(gov, "authorize").mockRejectedValue(new Error("policy_denied"));
+
+		const governed = wrapStreamWithGovernance(mockStreamFn(okEvents), gov);
+		const stream = await governed(model, makeContext());
+
+		// Iterating first marks the stream consumed, so `result()` cannot fall
+		// back to its own drain — the governed run has to settle the deferred.
+		await expect(drain(stream)).rejects.toThrow("policy_denied");
+		await expect(withTimeout(stream.result())).rejects.toThrow("policy_denied");
+	});
+
+	it("rejects result() on a policy DENY for a result()-only consumer", async () => {
+		vi.spyOn(gov, "authorize").mockRejectedValue(new Error("policy_denied"));
+
+		const governed = wrapStreamWithGovernance(mockStreamFn(okEvents), gov);
+		const stream = await governed(model, makeContext());
+
+		await expect(withTimeout(stream.result())).rejects.toThrow("policy_denied");
+	});
+
+	it("rejects result() when the budget is exhausted and the consumer also iterates", async () => {
+		vi.spyOn(gov, "budgetRemaining").mockReturnValue(0);
+
+		const governed = wrapStreamWithGovernance(mockStreamFn(okEvents), gov);
+		const stream = await governed(model, makeContext());
+
+		await expect(drain(stream)).rejects.toThrow("budget exhausted");
+		await expect(withTimeout(stream.result())).rejects.toThrow("budget exhausted");
+	});
+
+	it("rejects result() when settle fails after the provider stream succeeded", async () => {
+		vi.spyOn(gov, "settle").mockRejectedValue(new Error("settle_failed"));
+
+		const governed = wrapStreamWithGovernance(mockStreamFn(okEvents), gov);
+		const stream = await governed(model, makeContext());
+
+		// The provider's own `result()` resolves as soon as its stream ends —
+		// well before settle runs. `result()` must not report that success.
+		await expect(drain(stream)).rejects.toThrow("settle_failed");
+		await expect(withTimeout(stream.result())).rejects.toThrow("settle_failed");
+	});
+
+	it("surfaces a settle failure to a result()-only consumer instead of swallowing it", async () => {
+		vi.spyOn(gov, "settle").mockRejectedValue(new Error("settle_failed"));
+
+		const governed = wrapStreamWithGovernance(mockStreamFn(okEvents), gov);
+		const stream = await governed(model, makeContext());
+
+		await expect(withTimeout(stream.result())).rejects.toThrow("settle_failed");
+	});
+
+	it("rejects result() when the provider stream itself fails mid-flight", async () => {
+		const governed = wrapStreamWithGovernance(mockFailingStreamFn(2), gov);
+		const stream = await governed(model, makeContext());
+
+		await expect(drain(stream)).rejects.toThrow("stream_failed");
+		await expect(withTimeout(stream.result())).rejects.toThrow("stream_failed");
+	});
+
+	it("rejects result() when the consumer abandons the stream early", async () => {
+		const governed = wrapStreamWithGovernance(mockStreamFn(okEvents), gov);
+		const stream = await governed(model, makeContext());
+
+		for await (const _event of stream) {
+			break; // caller walks away before `done`
+		}
+
+		await expect(withTimeout(stream.result())).rejects.toThrow("abandoned before completion");
+	});
+
+	it("resolves result() with the host's final message, and only after settle", async () => {
+		const order: string[] = [];
+		vi.spyOn(gov, "settle").mockImplementation(async () => {
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			order.push("settle");
+		});
+
+		const finalMessage = makeAssistantMessage(makeUsage(10, 5));
+		const streamFn: StreamFn = () =>
+			asHostStream(
+				(async function* () {
+					for (const event of okEvents) yield event;
+				})(),
+				finalMessage,
+			);
+
+		const governed = wrapStreamWithGovernance(streamFn, gov);
+		const stream = await governed(model, makeContext());
+
+		const iteration = drain(stream);
+		const got = await withTimeout(stream.result());
+		order.push("result");
+		await iteration;
+
+		expect(got).toBe(finalMessage);
+		expect(order).toEqual(["settle", "result"]);
 	});
 });
