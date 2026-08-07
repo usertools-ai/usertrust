@@ -488,3 +488,33 @@ html {
 		transform: translateY(-4px) scale(1);
 	}
 }
+
+/* ── Receipt kit (shared components) ─────────────────────────── */
+
+/* Dotted leader between a receipt row's label and value */
+.dotted-leader {
+	flex: 1 1 auto;
+	min-width: 1.25rem;
+	border-bottom: 1px dotted color-mix(in srgb, var(--color-ink) 35%, transparent);
+	transform: translateY(-0.2em);
+}
+
+/* Steel-tinted row highlight for annotated receipt fields.
+   Graphic-only accent (>=3:1); row text stays ink — steel is never text on paper. */
+.receipt-row-highlight {
+	background: color-mix(in srgb, var(--color-paper-steel) 12%, transparent);
+	outline: 1px dashed color-mix(in srgb, var(--color-paper-steel) 45%, transparent);
+	outline-offset: 2px;
+}
+
+/* Drives the "copied · $0.00" chit in copy-chip.tsx off the chit-pop keyframe
+   declared above (1.6s pop -> hold -> fade, timed to CopyChip's setTimeout).
+   Not redefined here — this class only wires the animation to an element. */
+.chit {
+	animation: chit-pop 1.6s linear both;
+}
+@media (prefers-reduced-motion: reduce) {
+	.chit {
+		animation: none;
+	}
+}
