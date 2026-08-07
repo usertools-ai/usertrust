@@ -1,0 +1,22 @@
+{
+	"receipt": {
+		"transferId": "tx_msjhkokr_2d360a8e",
+		"cost": {
+			"estimated": 39,
+			"actual": 30
+		},
+		"budgetRemaining": 49970,
+		"auditHash": "81ac80f065845215a90c4371712f922c5ffe6041b0e710ed1c218d23aeaa18c0",
+		"settled": true,
+		"model": "claude-sonnet-4-6",
+		"provider": "anthropic",
+		"timestamp": "2026-08-07T21:58:11.392Z"
+	},
+	"provenance": {
+		"usertrustVersion": "3.1.0",
+		"tigerbeetleVersion": null,
+		"mode": "dry-run",
+		"commit": "d61256b",
+		"capturedAt": "2026-08-07T21:58:11.392Z"
+	}
+}

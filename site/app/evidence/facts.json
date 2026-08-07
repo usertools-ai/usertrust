@@ -1,0 +1,53 @@
+{
+	"generatedAt": "2026-08-07T21:58:11.755Z",
+	"commit": "d61256b",
+	"usertrustVersion": "3.1.0",
+	"tigerbeetleVersion": "0.17.9",
+	"facts": {
+		"transferCodes": {
+			"value": 9,
+			"source": "packages/core/src/ledger/client.ts — count of `export const XFER_*`"
+		},
+		"policyOperators": {
+			"value": 12,
+			"source": "packages/core/src/shared/types.ts — FieldOperator union members"
+		},
+		"verifierRuntimeDeps": {
+			"value": 0,
+			"source": "packages/verify/package.json — dependencies key count"
+		},
+		"modelCount": {
+			"value": "20+",
+			"numeric": 20,
+			"source": "packages/core/src/ledger/pricing.ts — PRICING_TABLE keys"
+		},
+		"license": {
+			"value": "Apache 2.0",
+			"source": "packages/core/package.json — license: Apache-2.0"
+		},
+		"commandsToFirstReceipt": {
+			"value": 2,
+			"source": "README quickstart — `npm install usertrust` · `npx usertrust init`"
+		},
+		"quickstartMinutes": {
+			"value": 2,
+			"source": "docs quickstart — stated duration (dry-run path)"
+		},
+		"filmDurationSeconds": {
+			"value": 44,
+			"source": "fallback: 44 (ffprobe unavailable at capture time; sizzle.mp4 measured 44.4s)"
+		},
+		"usertokensPerFiveDollars": {
+			"value": 50000,
+			"source": "packages/core/src/shared/constants.ts — DEFAULT_BUDGET = 50_000 usertokens ($5 starter budget)"
+		},
+		"caseFileCalls": {
+			"value": 47,
+			"source": "CASE FILE 001 incident narrative (fixed copy)"
+		},
+		"caseFileDollars": {
+			"value": 500,
+			"source": "CASE FILE 001 incident narrative (fixed copy)"
+		}
+	}
+}

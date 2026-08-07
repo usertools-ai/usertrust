@@ -1,0 +1,13 @@
+{
+	"command": "npx usertrust-verify .usertrust",
+	"lines": [
+		"Vault integrity: VERIFIED (UNANCHORED — internal consistency only)",
+		"Chain length: 9 events",
+		"Merkle root: afc0209c285ab3d10ccb217cac0bee1acd795bdffea586efbbb21e770c4467f1",
+		"Hash algorithm: SHA-256",
+		"First event: 2026-08-07T21:58:11.318Z",
+		"Last event: 2026-08-07T21:58:11.613Z",
+		"All hashes: valid (9/9)"
+	],
+	"exitCode": 0
+}
