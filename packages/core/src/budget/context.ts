@@ -132,6 +132,95 @@ function clampFraction(value: number): number {
 }
 
 /**
+ * The amplification guard, on its own so a second batch reader enforces the SAME cap
+ * with the SAME message rather than re-typing {@link MAX_ENVELOPES} at its own door.
+ * Cheapest check first: it runs before any per-entry work.
+ *
+ * @throws Error when `envelopes.length` exceeds {@link MAX_ENVELOPES}.
+ */
+export function assertEnvelopeCap(envelopes: EnvelopeDescriptor[]): void {
+	if (envelopes.length > MAX_ENVELOPES) {
+		throw new Error(
+			`budgetContext: envelopes.length (${envelopes.length}) exceeds the ${MAX_ENVELOPES} cap`,
+		);
+	}
+}
+
+/**
+ * Per-descriptor validation: every `costCenter` passes {@link costCenterUserId}'s door
+ * (reused, never a second charset check), and no two descriptors name the same envelope
+ * — two entries would resolve to one account, so a duplicate can only mean caller
+ * confusion, never two distinct envelopes to report.
+ *
+ * Split from {@link assertEnvelopeCap} because the two doors are not adjacent for every
+ * caller: `budgetContext` below refuses a bad `parentUserId` between them, and
+ * `Governor.budgetContext` returns quietly when the governor has no `parentUserId` at
+ * all (there is nothing to validate a cost center against).
+ *
+ * @throws Error when any `costCenter` (or `parentUserId`) fails {@link costCenterUserId},
+ * or when `envelopes` contains a duplicate `costCenter`.
+ */
+export function assertDistinctValidCostCenters(
+	parentUserId: string,
+	envelopes: EnvelopeDescriptor[],
+): void {
+	const seen = new Set<string>();
+	for (const envelope of envelopes) {
+		// Throws pre-I/O on an invalid costCenter (or, redundantly but harmlessly, on
+		// an already-checked parentUserId).
+		costCenterUserId(parentUserId, envelope.costCenter);
+		if (seen.has(envelope.costCenter)) {
+			throw new Error(`budgetContext: duplicate costCenter descriptor: "${envelope.costCenter}"`);
+		}
+		seen.add(envelope.costCenter);
+	}
+}
+
+/**
+ * The ONE place one envelope's scarcity numbers are computed, given its ledger
+ * `remaining` and the batch's single clock reading. Every clamp semantic documented on
+ * {@link EnvelopeStatus} lives here and nowhere else — a second reader of the same
+ * ledger balances (`Governor.budgetContext`) calls this rather than repeating the
+ * arithmetic, so `spent`/`fraction`/`runwayHours` can never drift between the two
+ * surfaces.
+ *
+ * `remaining` is the caller's truth: `0` stands for "no TigerBeetle account", which is
+ * exactly what `lookupBalances` omitting an id means.
+ *
+ * @throws Error (from `computeRunway`) when `periodStartMs` or `nowMs` is not finite —
+ * a bad clock is a caller bug, and substituting a value would fabricate a runway.
+ */
+export function envelopeStatusFrom(
+	descriptor: EnvelopeDescriptor,
+	remaining: number,
+	nowMs: number,
+): EnvelopeStatus {
+	const allocated = safeAllocated(descriptor.allocated);
+	const spent = Math.max(0, allocated - remaining);
+	const fraction = allocated <= 0 ? 0 : clampFraction(remaining / allocated);
+
+	// Reused, not reimplemented: computeRunway/runwayHours already own the burn-rate
+	// and projection math (and its own TOTALITY guarantees) — this call exists only
+	// to get runwayHours, since remaining/spent/fraction above are already final.
+	const runway = computeRunway({
+		allocated,
+		spent,
+		periodStartMs: descriptor.periodStartMs,
+		periodEndMs: descriptor.periodEndMs,
+		nowMs,
+	});
+
+	return {
+		costCenter: descriptor.costCenter,
+		allocated,
+		spent,
+		remaining,
+		fraction,
+		runwayHours: runwayHours(runway, nowMs),
+	};
+}
+
+/**
  * Read the parent's balance and every requested envelope's scarcity, in one round trip.
  *
  * VALIDATION DOORS, all pre-I/O (A3): `parentUserId` is refused by the same
@@ -160,27 +249,14 @@ export async function budgetContext(
 	envelopes: EnvelopeDescriptor[],
 	nowMs?: number,
 ): Promise<BudgetContext> {
-	if (envelopes.length > MAX_ENVELOPES) {
-		throw new Error(
-			`budgetContext: envelopes.length (${envelopes.length}) exceeds the ${MAX_ENVELOPES} cap`,
-		);
-	}
+	assertEnvelopeCap(envelopes);
 
 	const parentRefusal = parentUserIdRefusal(parentUserId);
 	if (parentRefusal !== null) {
 		throw new Error(`budget: parentUserId ${parentRefusal}`);
 	}
 
-	const seen = new Set<string>();
-	for (const envelope of envelopes) {
-		// Throws pre-I/O on an invalid costCenter (or, redundantly but harmlessly, on
-		// the parentUserId already checked above).
-		costCenterUserId(parentUserId, envelope.costCenter);
-		if (seen.has(envelope.costCenter)) {
-			throw new Error(`budgetContext: duplicate costCenter descriptor: "${envelope.costCenter}"`);
-		}
-		seen.add(envelope.costCenter);
-	}
+	assertDistinctValidCostCenters(parentUserId, envelopes);
 
 	// ONE clock read for the whole batch — every envelope's runway is computed against
 	// the same instant, so two envelopes in one response never disagree about "now".
@@ -196,32 +272,9 @@ export async function budgetContext(
 	// the implicit-zero reading below, for the parent exactly as for every envelope.
 	const balances = await tb.lookupBalances([parentAccount, ...childAccounts]);
 
-	const envelopeStatuses: EnvelopeStatus[] = envelopes.map((envelope, i) => {
-		const remaining = balances.get(childAccounts[i] as bigint) ?? 0;
-		const allocated = safeAllocated(envelope.allocated);
-		const spent = Math.max(0, allocated - remaining);
-		const fraction = allocated <= 0 ? 0 : clampFraction(remaining / allocated);
-
-		// Reused, not reimplemented: computeRunway/runwayHours already own the burn-rate
-		// and projection math (and its own TOTALITY guarantees) — this call exists only
-		// to get runwayHours, since remaining/spent/fraction above are already final.
-		const runway = computeRunway({
-			allocated,
-			spent,
-			periodStartMs: envelope.periodStartMs,
-			periodEndMs: envelope.periodEndMs,
-			nowMs: clock,
-		});
-
-		return {
-			costCenter: envelope.costCenter,
-			allocated,
-			spent,
-			remaining,
-			fraction,
-			runwayHours: runwayHours(runway, clock),
-		};
-	});
+	const envelopeStatuses: EnvelopeStatus[] = envelopes.map((envelope, i) =>
+		envelopeStatusFrom(envelope, balances.get(childAccounts[i] as bigint) ?? 0, clock),
+	);
 
 	return {
 		parent: { remaining: balances.get(parentAccount) ?? 0 },
