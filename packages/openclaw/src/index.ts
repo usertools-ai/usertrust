@@ -34,6 +34,7 @@
 
 import type { Governor, TrustOpts } from "usertrust";
 import { createGovernor, parentUserIdRefusal, withCostCenter } from "usertrust";
+import { fingerprintConfig } from "./fingerprint.js";
 import type { GovernanceOptions } from "./stream-governor.js";
 import { wrapCompleteWithGovernance, wrapStreamWithGovernance } from "./stream-governor.js";
 import type {
@@ -226,31 +227,6 @@ export function normalizeCostCenters(cc: unknown): FrozenCostCenters {
 	});
 }
 
-/**
- * Canonical-JSON fingerprint of the config that determines the module-
- * singleton governor's identity — key order never matters, so two
- * semantically identical configs written with different key orders
- * fingerprint the same.
- */
-function fingerprintConfig(
-	config: UsertrustPluginConfig,
-	frozenCostCenters?: FrozenCostCenters,
-): string {
-	return JSON.stringify(sortKeysDeep({ ...config, costCenters: frozenCostCenters }));
-}
-
-function sortKeysDeep(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(sortKeysDeep);
-	if (value !== null && typeof value === "object") {
-		const out: Record<string, unknown> = {};
-		for (const key of Object.keys(value as Record<string, unknown>).sort()) {
-			out[key] = sortKeysDeep((value as Record<string, unknown>)[key]);
-		}
-		return out;
-	}
-	return value;
-}
-
 function configMismatchError(): Error {
 	return new Error(
 		"usertrust: plugin already initialized with a DIFFERENT config — the governor is a " +
@@ -439,9 +415,13 @@ export async function shutdown(): Promise<void> {
 let initPromise: Promise<Governor> | null = null;
 
 /**
- * Canonical-JSON fingerprint of whichever config CLAIMED the singleton
+ * {@link fingerprintConfig} digest of whichever config CLAIMED the singleton
  * governor — set the moment an init starts, cleared on `shutdown()` and on a
  * failed init. See `initGovernor` for the three lifecycle legs.
+ *
+ * A DIGEST, not the config JSON, because this variable outlives the call that
+ * set it by the whole process lifetime and the JSON contains `proxyKey`. See
+ * `fingerprint.ts`.
  */
 let governorFingerprint: string | null = null;
 

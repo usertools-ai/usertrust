@@ -405,6 +405,27 @@ describe("deriveAttribution", () => {
 		});
 	}
 
+	// The doc contract says a host that drifts from the pinned shape "must
+	// degrade to `default` rather than throw INTO the money path". Every ENTRY
+	// is narrowed before it is read; these pin the ARRAY itself, which a host
+	// handing us a context with no `messages` at all supplies as `undefined`.
+	const NON_ARRAYS: [name: string, value: unknown][] = [
+		["undefined", undefined],
+		["null", null],
+		["a string", "web_search"],
+		["a number", 7],
+		["a bare object", { 0: toolResult("web_search"), length: 1 }],
+	];
+	for (const [name, value] of NON_ARRAYS) {
+		it(`degrades to default when messages is ${name}, never throwing into the money path`, () => {
+			expect(deriveAttribution(value as unknown[], CC)).toBe("general");
+		});
+	}
+
+	it("degrades to UNATTRIBUTED on a non-array when the operator wrote no default", () => {
+		expect(deriveAttribution(undefined as unknown as unknown[], CC_NO_DEFAULT)).toBeUndefined();
+	});
+
 	it("never mutates the context it reads", () => {
 		const messages: Message[] = [
 			userMessage("go"),

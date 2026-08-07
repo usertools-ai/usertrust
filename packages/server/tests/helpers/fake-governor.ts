@@ -1,6 +1,7 @@
 import type {
 	Authorization,
 	AuthorizeParams,
+	EnvelopeStatus,
 	Governor,
 	SettleParams,
 	TrustReceipt,
@@ -73,6 +74,15 @@ export function createFakeGovernor(
 		},
 		budgetRemaining(): number {
 			return budget;
+		},
+		/**
+		 * No ledger and no `parentUserId`, so there are no envelopes to report on —
+		 * the same empty answer the real governor gives for a dry-run or identity-less
+		 * one. Faking scarcity numbers here would put invented percentages into a
+		 * server test's assertions as though they came from TigerBeetle.
+		 */
+		async budgetContext(): Promise<EnvelopeStatus[]> {
+			return [];
 		},
 		// biome-ignore lint/suspicious/noExplicitAny: minimal config for tests
 		config: {} as any,

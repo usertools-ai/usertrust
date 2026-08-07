@@ -49,7 +49,7 @@ import type { FrozenCostCenters } from "./types.js";
  * `messages` is `unknown[]`, not `Message[]`, deliberately: in programmatic
  * mode the caller supplies the array directly, and a host that drifts from the
  * pinned contract must degrade to `default` rather than throw INTO the money
- * path. Every entry is narrowed before it is read.
+ * path. The array itself is narrowed first, then every entry in it.
  *
  * @returns the mapped cost center, else the config's `default`, else
  * `undefined` (unattributed — the call bills the session wallet).
@@ -59,6 +59,16 @@ export function deriveAttribution(
 	costCenters: FrozenCostCenters,
 ): string | undefined {
 	const fallback = costCenters.default;
+
+	// 0. The ARRAY itself, before any entry. Every entry below is narrowed, but
+	//    `messages` is `unknown[]` by declaration only: a host that drops the
+	//    field, or a programmatic caller that forwards a context it never built,
+	//    hands us `undefined` — and `undefined.length` would throw INTO the
+	//    money path, which is exactly what the degrade-to-`default` contract
+	//    above exists to prevent. Non-arrays with a `length` (a string, a
+	//    hand-rolled array-like) are refused here too, so nothing indexes an
+	//    object that only LOOKS iterable.
+	if (!Array.isArray(messages)) return fallback;
 
 	// 1. The TRAILING run. Walking backwards from the end is what makes it
 	//    trailing: the first entry that is not a tool-result message ends the
