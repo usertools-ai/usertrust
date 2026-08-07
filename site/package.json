@@ -4,8 +4,10 @@
 	"type": "module",
 	"scripts": {
 		"dev": "next dev --turbopack",
+		"prebuild": "tsx scripts/check-facts.mts",
 		"build": "next build",
-		"start": "next start"
+		"start": "next start",
+		"test": "node --import tsx --test scripts/check-facts.test.mts"
 	},
 	"dependencies": {
 		"@tailwindcss/postcss": "^4.2.2",
@@ -24,6 +26,7 @@
 		"@types/node": "^22.15.0",
 		"@types/react": "^19.1.0",
 		"@types/react-dom": "^19.1.0",
+		"tsx": "^4.23.11",
 		"typescript": "^5.9.0"
 	}
 }
