@@ -192,8 +192,15 @@ matching ledger allocation reports honest-but-empty scarcity, never a shortfall.
 ### Compatibility
 
 Pinned against `openclaw@2026.7.1-2` and `@mariozechner/pi-ai@0.73.1` (exact `devDependencies`);
-declared as optional peers at `openclaw >=2026.7.1` / `@mariozechner/pi-ai >=0.12.0`. Both are
+declared as optional peers at `openclaw >=2026.7.1-0` / `@mariozechner/pi-ai >=0.12.0`. Both are
 type-only at runtime — neither is required to build or ship the plugin.
+
+The `-0` on the openclaw peer floor is load-bearing, not a typo. OpenClaw ships its releases with
+a numeric build suffix (`latest` is currently `2026.7.1-2`), which node-semver treats as a
+*prerelease*; a prerelease version never satisfies a release-only range, so `>=2026.7.1` would
+exclude the very build this package pins. `>=2026.7.1-0` admits it. The separate
+`openclaw.compat.pluginApi` range deliberately keeps the plain `>=2026.7.1` form: the host strips
+the `-N` suffix before comparing, so that check is unaffected.
 
 ## License
 
