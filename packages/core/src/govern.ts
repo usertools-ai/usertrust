@@ -47,6 +47,12 @@ import {
 	resolveRates,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
+import {
+	fromAnthropicUsage,
+	fromProviderResponse,
+	sanitizeUsage,
+	type UsageWireShape,
+} from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import { derivePolicyHint, evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
@@ -1222,18 +1228,34 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// Determine cost: use provider usage if reported, else fall back to
 				// estimate. A3: priced with the rate resolution captured at authorize;
 				// A11: costFromRates floors at 1 even for 0/0 usage.
+				//
+				// D5 — ONE sanitized snapshot. `sanitizeUsage` is the single gate the
+				// four tiers pass through before they reach either `costFromRates` or
+				// (Task 5) record emission, so the money and the record can never derive
+				// from different objects, and a non-finite provider count can never
+				// reach audit canonicalization. It also enforces the provenance rule:
+				// a "provider" label survives only when input AND output are usable
+				// counts, so a stream that reported neither cannot be published as
+				// provider-sourced.
+				const usageSnapshot = sanitizeUsage({
+					inputTokens: completion.usage.inputTokens,
+					outputTokens: completion.usage.outputTokens,
+					cacheReadTokens: completion.usage.cacheReadTokens,
+					cacheWriteTokens: completion.usage.cacheWriteTokens,
+					source: completion.usageReported ? "provider" : "estimated",
+				});
 				let streamCost: number;
-				let usageSource: "provider" | "estimated";
-				if (completion.usageReported) {
+				const usageSource: "provider" | "estimated" = usageSnapshot.source;
+				if (usageSnapshot.source === "provider") {
 					streamCost = costFromRates(
 						rateResolution.rates,
-						completion.usage.inputTokens,
-						completion.usage.outputTokens,
+						usageSnapshot.inputTokens,
+						usageSnapshot.outputTokens,
+						usageSnapshot.cacheReadTokens,
+						usageSnapshot.cacheWriteTokens,
 					);
-					usageSource = "provider";
 				} else {
 					streamCost = estimatedCost;
-					usageSource = "estimated";
 				}
 
 				// Release in-flight hold and commit budget under mutex.
@@ -1544,7 +1566,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// back raw.
 				if (emitter == null || typeof emitter.on !== "function") {
 					finalizeStreamSettle({
-						usage: { inputTokens: 0, outputTokens: 0 },
+						usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
 						chunksDelivered: 0,
 						usageReported: false,
 					})
@@ -1561,13 +1583,24 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				let chunksDelivered = 0;
 				let accInput = 0;
 				let accOutput = 0;
+				// D2/D4: the cache tiers accumulate alongside input/output. They do NOT
+				// set accUsageReported on their own — D5 provenance needs input AND
+				// output — but they are real billed tokens, so a partial settle carries
+				// them.
+				let accCacheRead = 0;
+				let accCacheWrite = 0;
 				let accUsageReported = false;
 				// R1: set TRUE before governance calls emitter.abort() on an anomaly trip,
 				// so the 'abort' handler can distinguish a governance cutoff (void + breaker
 				// failure) from a genuine consumer abort (F9 settle-partial).
 				let anomalyAbort = false;
 				const partial = (): StreamCompletion => ({
-					usage: { inputTokens: accInput, outputTokens: accOutput },
+					usage: {
+						inputTokens: accInput,
+						outputTokens: accOutput,
+						cacheReadTokens: accCacheRead,
+						cacheWriteTokens: accCacheWrite,
+					},
 					chunksDelivered,
 					usageReported: accUsageReported,
 				});
@@ -1586,6 +1619,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						accOutput = tokens.outputTokens;
 						accUsageReported = true;
 					}
+					if (tokens.cacheReadTokens > accCacheRead) accCacheRead = tokens.cacheReadTokens;
+					if (tokens.cacheWriteTokens > accCacheWrite) accCacheWrite = tokens.cacheWriteTokens;
 					if (!config.anomaly.enabled) return;
 					anomalyDetector.observe({
 						kind: "chunk",
@@ -1640,12 +1675,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								usage: {
 									inputTokens: finalUsage.inputTokens ?? accInput,
 									outputTokens: finalUsage.outputTokens ?? accOutput,
+									cacheReadTokens: finalUsage.cacheReadTokens ?? accCacheRead,
+									cacheWriteTokens: finalUsage.cacheWriteTokens ?? accCacheWrite,
 								},
 								chunksDelivered,
 								usageReported: true,
 							}
 						: {
-								usage: { inputTokens: 0, outputTokens: 0 },
+								usage: {
+									inputTokens: 0,
+									outputTokens: 0,
+									cacheReadTokens: 0,
+									cacheWriteTokens: 0,
+								},
 								chunksDelivered,
 								usageReported: false,
 							};
@@ -1703,7 +1745,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				emitter.on("end", () => {
 					if (finalizeState !== "pending") return;
 					finalizeStreamSettle({
-						usage: { inputTokens: 0, outputTokens: 0 },
+						usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
 						chunksDelivered,
 						usageReported: false,
 					})
@@ -1839,25 +1881,37 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// f. Compute actual cost from response usage. A3: priced with the rate
 				// resolution captured at authorize. costFromRates clamps NaN/negative
 				// counts (A7) and floors at 1 even for 0/0 provider usage (A11).
+				//
+				// D2/D4/D5: the response is read into ONE sanitized four-tier snapshot.
+				// Three things changed here:
+				//   - the cache tiers are priced instead of being silently dropped
+				//     (Anthropic reports them disjoint, so they were billed at ZERO);
+				//   - Google's ROOT `usageMetadata` is read at all — the old
+				//     `"usage" in response` test is FALSE for every real Gemini
+				//     response, so every Gemini call settled at the estimate;
+				//   - the estimate is no longer substituted for a missing provider
+				//     count while still claiming `usageSource: "provider"`. D5: provider
+				//     provenance requires provider-reported input AND output; anything
+				//     less settles at the estimate and is LABELLED estimated.
+				const usageShape: UsageWireShape =
+					kind === "google"
+						? "gemini"
+						: kind === "anthropic"
+							? "anthropic"
+							: surfaceKind === "openai-responses"
+								? "openai-responses"
+								: "openai-completions";
+				const usageSnapshot = fromProviderResponse(response, usageShape);
 				let actualCost = estimatedCost;
-				let usageSource: "provider" | "estimated" = "estimated";
-				if (response != null && typeof response === "object" && "usage" in response) {
-					const usage = (response as Record<string, unknown>).usage as Record<
-						string,
-						unknown
-					> | null;
-					if (usage != null) {
-						const inputTokens =
-							(usage.input_tokens as number | undefined) ??
-							(usage.prompt_tokens as number | undefined) ??
-							estimatedInputTokens;
-						const outputTokens =
-							(usage.output_tokens as number | undefined) ??
-							(usage.completion_tokens as number | undefined) ??
-							0;
-						actualCost = costFromRates(rateResolution.rates, inputTokens, outputTokens);
-						usageSource = "provider";
-					}
+				const usageSource: "provider" | "estimated" = usageSnapshot.source;
+				if (usageSnapshot.source === "provider") {
+					actualCost = costFromRates(
+						rateResolution.rates,
+						usageSnapshot.inputTokens,
+						usageSnapshot.outputTokens,
+						usageSnapshot.cacheReadTokens,
+						usageSnapshot.cacheWriteTokens,
+					);
 				}
 
 				// h. Audit the llm_call FIRST (P3-AUDIT-FAILCLOSED). The settlement-
@@ -2744,6 +2798,8 @@ export function extractPromptParts(
 function readFinalMessageUsage(msg: unknown): {
 	inputTokens: number | undefined;
 	outputTokens: number | undefined;
+	cacheReadTokens: number | undefined;
+	cacheWriteTokens: number | undefined;
 	reported: boolean;
 } {
 	if (msg != null && typeof msg === "object") {
@@ -2760,12 +2816,36 @@ function readFinalMessageUsage(msg: unknown): {
 				u.output_tokens >= 0
 					? u.output_tokens
 					: undefined;
+			// D2/D4: the cache tiers come from the ONE Anthropic extractor, which also
+			// folds the nested `cache_creation` TTL breakdown into the write tier.
+			//
+			// F3 applies PER TIER, and per tier separately: a finalMessage that names
+			// only the read counter must not zero an accumulated WRITE counter. Each
+			// tier is therefore reported only when the payload actually names one of
+			// its fields; otherwise it stays `undefined` and the caller keeps what the
+			// streamEvent tap accumulated. Zeroing a real, already-billed cache tier
+			// because the final payload was partial is an understatement.
+			const cacheTiers = fromAnthropicUsage(u);
+			const readNamed = "cache_read_input_tokens" in u;
+			const writeNamed = "cache_creation_input_tokens" in u || "cache_creation" in u;
 			if (inTok !== undefined || outTok !== undefined) {
-				return { inputTokens: inTok, outputTokens: outTok, reported: true };
+				return {
+					inputTokens: inTok,
+					outputTokens: outTok,
+					cacheReadTokens: readNamed ? cacheTiers.cacheReadTokens : undefined,
+					cacheWriteTokens: writeNamed ? cacheTiers.cacheWriteTokens : undefined,
+					reported: true,
+				};
 			}
 		}
 	}
-	return { inputTokens: undefined, outputTokens: undefined, reported: false };
+	return {
+		inputTokens: undefined,
+		outputTokens: undefined,
+		cacheReadTokens: undefined,
+		cacheWriteTokens: undefined,
+		reported: false,
+	};
 }
 
 /**
@@ -2777,23 +2857,40 @@ function readFinalMessageUsage(msg: unknown): {
 function extractAnthropicStreamUsage(event: unknown): {
 	inputTokens: number;
 	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
 } {
-	if (event == null || typeof event !== "object") return { inputTokens: 0, outputTokens: 0 };
+	const none = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+	if (event == null || typeof event !== "object") return none;
 	const c = event as Record<string, unknown>;
 	if (c.type === "message_start" && c.message != null && typeof c.message === "object") {
 		const msg = c.message as Record<string, unknown>;
 		if (msg.usage != null && typeof msg.usage === "object") {
 			const usage = msg.usage as Record<string, unknown>;
 			const inTok = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
-			return { inputTokens: inTok > 0 ? inTok : 0, outputTokens: 0 };
+			// D2: the SDK's three input counters are DISJOINT — the cache tiers are
+			// pure addition, never subtracted out of input_tokens.
+			const tiers = fromAnthropicUsage(usage);
+			return {
+				inputTokens: inTok > 0 ? inTok : 0,
+				outputTokens: 0,
+				cacheReadTokens: tiers.cacheReadTokens,
+				cacheWriteTokens: tiers.cacheWriteTokens,
+			};
 		}
 	}
 	if (c.type === "message_delta" && c.usage != null && typeof c.usage === "object") {
 		const usage = c.usage as Record<string, unknown>;
 		const outTok = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
-		return { inputTokens: 0, outputTokens: outTok > 0 ? outTok : 0 };
+		const tiers = fromAnthropicUsage(usage);
+		return {
+			inputTokens: 0,
+			outputTokens: outTok > 0 ? outTok : 0,
+			cacheReadTokens: tiers.cacheReadTokens,
+			cacheWriteTokens: tiers.cacheWriteTokens,
+		};
 	}
-	return { inputTokens: 0, outputTokens: 0 };
+	return none;
 }
 
 // ── TigerBeetle engine factory ──

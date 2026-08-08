@@ -71,10 +71,31 @@ function makeOpenAIMock(response?: Record<string, unknown>) {
 	};
 }
 
+/**
+ * A `@google/genai` `GenerateContentResponse`, real shape (spec D4 row 3).
+ *
+ * The previous mock here carried `usage: { input_tokens, output_tokens }` — a
+ * shape the Google SDK has never emitted. It made the Google non-stream path
+ * look covered while core actually read nothing (`"usage" in response` is FALSE
+ * for a real Gemini response), so every Gemini call silently settled at the
+ * ESTIMATE and the mock could not have caught it.
+ *
+ * The real object (genai.d.ts:4658 / :4801) carries `usageMetadata` at the
+ * ROOT: `promptTokenCount` (INCLUSIVE of `cachedContentTokenCount`),
+ * `candidatesTokenCount`, `thoughtsTokenCount` (billed as output, NOT inside
+ * candidates), and `totalTokenCount`.
+ */
 function makeGoogleMock(response?: Record<string, unknown>) {
 	const defaultResponse = {
+		candidates: [{ content: { role: "model", parts: [{ text: "Hello from Gemini" }] } }],
+		modelVersion: "gemini-2.5-flash",
+		responseId: "resp_gemini_1",
 		text: "Hello from Gemini",
-		usage: { input_tokens: 10, output_tokens: 5 },
+		usageMetadata: {
+			promptTokenCount: 10,
+			candidatesTokenCount: 5,
+			totalTokenCount: 15,
+		},
 	};
 	return {
 		models: {
@@ -238,6 +259,318 @@ describe("trust()", () => {
 			expect(result.response).toBeDefined();
 			expect(result.receipt.model).toBe("gemini-2.5-flash");
 			expect(result.receipt.provider).toBe("google");
+
+			await governed.destroy();
+		});
+
+		it("reads the ROOT usageMetadata (the real SDK shape) instead of settling at estimate", async () => {
+			// Pre-fix: core tested only `"usage" in response`, which is FALSE for every
+			// real Gemini response, so this settled at the ESTIMATE and reported
+			// usageSource "estimated". gemini-2.5-flash: input 3 / output 25 per 1k.
+			// (10/1000)*3 + (5/1000)*25 = 0.03 + 0.125 = ceil(0.155) → the 1-usertoken floor.
+			const mockClient = makeGoogleMock();
+			const governed = await trust(mockClient, {
+				dryRun: true,
+				budget: 50_000,
+				vaultBase: tmpVault,
+			});
+
+			const result = await governed.models.generateContent({
+				model: "gemini-2.5-flash",
+				messages: [{ role: "user", content: "Hello" }],
+			});
+
+			expect(result.receipt.usageSource).toBe("provider");
+			expect(result.receipt.cost).toBe(1);
+
+			await governed.destroy();
+		});
+	});
+
+	// ─── Four-tier usage extraction (spec D2/D4 — non-stream core boundary) ───
+
+	describe("four-tier usage extraction (non-stream)", () => {
+		it("prices all four Anthropic tiers — the severed-at-zero regression pin", async () => {
+			// claude-sonnet-4-6: input 30 / output 150 / cacheRead 3 / cacheWrite 37.5.
+			// The Anthropic SDK reports the three input counters DISJOINT, so
+			// `input_tokens` is fresh-only and the cache counters are pure addition.
+			//
+			//   PRE-FIX  (cache tiers dropped on the floor):
+			//     (100/1000)*30 + (200/1000)*150 = 3 + 30            =  33
+			//   POST-FIX (D2 pass-through + D1 rates):
+			//     33 + (10000/1000)*3 + (2000/1000)*37.5 = 33 + 30 + 75 = 138
+			//
+			// 138/33 ≈ 4.2× — the understatement this ship exists to kill. A cache-read
+			// heavy day (the 1.14B-read scenario) lands at the 7–8× in the spec.
+			const preFixCost = 33;
+			const postFixCost = 138;
+			expect(postFixCost).toBeGreaterThan(preFixCost);
+
+			const mockClient = makeAnthropicMock({
+				id: "msg_cache",
+				model: "claude-sonnet-4-6",
+				usage: {
+					input_tokens: 100,
+					output_tokens: 200,
+					cache_read_input_tokens: 10_000,
+					cache_creation_input_tokens: 2_000,
+				},
+			});
+			const governed = await trust(mockClient, {
+				dryRun: true,
+				budget: 5_000_000,
+				vaultBase: tmpVault,
+			});
+
+			const result = await governed.messages.create({
+				model: "claude-sonnet-4-6",
+				max_tokens: 1024,
+				messages: [{ role: "user", content: "Hello" }],
+			});
+
+			expect(result.receipt.usageSource).toBe("provider");
+			expect(result.receipt.cost).toBe(postFixCost);
+			expect(result.receipt.cost).not.toBe(preFixCost);
+
+			await governed.destroy();
+		});
+
+		it("sums the nested Anthropic cache_creation TTL breakdown into the write tier", async () => {
+			// 1500 + 500 = 2000 write tokens: 3 + 30 + 0 + 75 = 108.
+			const mockClient = makeAnthropicMock({
+				id: "msg_nested",
+				model: "claude-sonnet-4-6",
+				usage: {
+					input_tokens: 100,
+					output_tokens: 200,
+					cache_read_input_tokens: 0,
+					cache_creation: {
+						ephemeral_5m_input_tokens: 1_500,
+						ephemeral_1h_input_tokens: 500,
+					},
+				},
+			});
+			const governed = await trust(mockClient, {
+				dryRun: true,
+				budget: 5_000_000,
+				vaultBase: tmpVault,
+			});
+
+			const result = await governed.messages.create({
+				model: "claude-sonnet-4-6",
+				max_tokens: 1024,
+				messages: [{ role: "user", content: "Hello" }],
+			});
+
+			expect(result.receipt.cost).toBe(108);
+
+			await governed.destroy();
+		});
+
+		it("subtracts the inclusive cached read out of OpenAI completions prompt_tokens", async () => {
+			// gpt-4o: input 25 / output 100 / cacheRead 12.5. `prompt_tokens` is
+			// INCLUSIVE of prompt_tokens_details.cached_tokens, so fresh input is
+			// 5000 - 4000 = 1000:
+			//   (1000/1000)*25 + (100/1000)*100 + (4000/1000)*12.5 = 25 + 10 + 50 = 85
+			// Double-counting the read (no subtraction) would price 125 + 10 + 50 = 185.
+			const mockClient = makeOpenAIMock({
+				id: "chatcmpl-cache",
+				choices: [{ message: { role: "assistant", content: "Hi" } }],
+				usage: {
+					prompt_tokens: 5_000,
+					completion_tokens: 100,
+					prompt_tokens_details: { cached_tokens: 4_000 },
+				},
+			});
+			const governed = await trust(mockClient, {
+				dryRun: true,
+				budget: 5_000_000,
+				vaultBase: tmpVault,
+			});
+
+			const result = await governed.chat.completions.create({
+				model: "gpt-4o",
+				max_tokens: 1024,
+				messages: [{ role: "user", content: "Hello" }],
+			});
+
+			expect(result.receipt.usageSource).toBe("provider");
+			expect(result.receipt.cost).toBe(85);
+
+			await governed.destroy();
+		});
+
+		it("prices the Gemini cache read and bills thinking tokens as output", async () => {
+			// gemini-2.5-flash: input 3 / output 25 / cacheRead 0.3.
+			// promptTokenCount INCLUDES cachedContentTokenCount → fresh input 1000;
+			// thoughtsTokenCount is NOT inside candidatesTokenCount → output 500.
+			//   (1000/1000)*3 + (500/1000)*25 + (9000/1000)*0.3 = 3 + 12.5 + 2.7 = 18.2 → 19
+			const mockClient = makeGoogleMock({
+				candidates: [{ content: { role: "model", parts: [{ text: "Hi" }] } }],
+				text: "Hi",
+				usageMetadata: {
+					promptTokenCount: 10_000,
+					cachedContentTokenCount: 9_000,
+					candidatesTokenCount: 100,
+					thoughtsTokenCount: 400,
+					totalTokenCount: 10_500,
+				},
+			});
+			const governed = await trust(mockClient, {
+				dryRun: true,
+				budget: 5_000_000,
+				vaultBase: tmpVault,
+			});
+
+			const result = await governed.models.generateContent({
+				model: "gemini-2.5-flash",
+				messages: [{ role: "user", content: "Hello" }],
+			});
+
+			expect(result.receipt.usageSource).toBe("provider");
+			expect(result.receipt.cost).toBe(19);
+
+			await governed.destroy();
+		});
+
+		it("clamps a cached read larger than the reported prompt count at zero fresh input", async () => {
+			// A proxy reporting cached_tokens > prompt_tokens must never produce a
+			// negative fresh count: (0/1000)*25 + (10/1000)*100 + (6000/1000)*12.5 = 76.
+			const mockClient = makeOpenAIMock({
+				id: "chatcmpl-clamp",
+				choices: [{ message: { role: "assistant", content: "Hi" } }],
+				usage: {
+					prompt_tokens: 5_000,
+					completion_tokens: 10,
+					prompt_tokens_details: { cached_tokens: 6_000 },
+				},
+			});
+			const governed = await trust(mockClient, {
+				dryRun: true,
+				budget: 5_000_000,
+				vaultBase: tmpVault,
+			});
+
+			const result = await governed.chat.completions.create({
+				model: "gpt-4o",
+				max_tokens: 1024,
+				messages: [{ role: "user", content: "Hello" }],
+			});
+
+			expect(result.receipt.cost).toBe(76);
+
+			await governed.destroy();
+		});
+
+		it("still reads an OpenAI-compat server that answers in input_tokens/output_tokens", async () => {
+			// Regression pin: core's old `??` chain read `input_tokens` BEFORE
+			// `prompt_tokens`, so a compat runtime answering chat.completions in the
+			// Anthropic/Responses field names still metered. The shape dispatch must
+			// keep that working rather than demoting the settle to an estimate.
+			// gpt-4o: (1000/1000)*25 + (200/1000)*100 = 25 + 20 = 45.
+			const mockClient = makeOpenAIMock({
+				id: "chatcmpl-compat",
+				choices: [{ message: { role: "assistant", content: "Hi" } }],
+				usage: { input_tokens: 1_000, output_tokens: 200 },
+			});
+			const governed = await trust(mockClient, {
+				dryRun: true,
+				budget: 5_000_000,
+				vaultBase: tmpVault,
+			});
+
+			const result = await governed.chat.completions.create({
+				model: "gpt-4o",
+				max_tokens: 1024,
+				messages: [{ role: "user", content: "Hello" }],
+			});
+
+			expect(result.receipt.usageSource).toBe("provider");
+			expect(result.receipt.cost).toBe(45);
+
+			await governed.destroy();
+		});
+
+		// ── D5 provenance: substituted input ⇒ "estimated", never "provider" ──
+
+		it('labels a settle "estimated" when the provider reported no input count', async () => {
+			// Pre-fix (govern.ts:1850): `usage.input_tokens ?? usage.prompt_tokens ??
+			// estimatedInputTokens` — core substituted its OWN estimate for the missing
+			// half and still stamped usageSource "provider". D5 kills that mislabel:
+			// provider provenance requires provider-reported input AND output.
+			const mockClient = makeAnthropicMock({
+				id: "msg_half",
+				model: "claude-sonnet-4-6",
+				usage: { output_tokens: 50 },
+			});
+			const governed = await trust(mockClient, {
+				dryRun: true,
+				budget: 5_000_000,
+				vaultBase: tmpVault,
+			});
+
+			const result = await governed.messages.create({
+				model: "claude-sonnet-4-6",
+				max_tokens: 1024,
+				messages: [{ role: "user", content: "Hello" }],
+			});
+
+			expect(result.receipt.usageSource).toBe("estimated");
+			// The settle falls back to the authorize-time estimate, which is sized at
+			// max_tokens (1024 output) — strictly ABOVE the half-provider blend the old
+			// code produced. Overstatement is the fail-safe direction (D1).
+			expect(result.receipt.cost).toBeGreaterThan(
+				// what the pre-fix blend would have charged for 50 output tokens
+				Math.ceil((50 / 1000) * 150),
+			);
+
+			await governed.destroy();
+		});
+
+		it('labels a settle "estimated" when the provider reported no output count', async () => {
+			const mockClient = makeAnthropicMock({
+				id: "msg_half_out",
+				model: "claude-sonnet-4-6",
+				usage: { input_tokens: 100, cache_read_input_tokens: 5_000 },
+			});
+			const governed = await trust(mockClient, {
+				dryRun: true,
+				budget: 5_000_000,
+				vaultBase: tmpVault,
+			});
+
+			const result = await governed.messages.create({
+				model: "claude-sonnet-4-6",
+				max_tokens: 1024,
+				messages: [{ role: "user", content: "Hello" }],
+			});
+
+			expect(result.receipt.usageSource).toBe("estimated");
+
+			await governed.destroy();
+		});
+
+		it('keeps "provider" when the provider reports explicit zeros (a zero IS data)', async () => {
+			const mockClient = makeAnthropicMock({
+				id: "msg_zero",
+				model: "claude-sonnet-4-6",
+				usage: { input_tokens: 0, output_tokens: 0 },
+			});
+			const governed = await trust(mockClient, {
+				dryRun: true,
+				budget: 5_000_000,
+				vaultBase: tmpVault,
+			});
+
+			const result = await governed.messages.create({
+				model: "claude-sonnet-4-6",
+				max_tokens: 1024,
+				messages: [{ role: "user", content: "Hello" }],
+			});
+
+			expect(result.receipt.usageSource).toBe("provider");
+			// A11: the per-call floor still applies to a 0/0 provider settle.
+			expect(result.receipt.cost).toBe(1);
 
 			await governed.destroy();
 		});

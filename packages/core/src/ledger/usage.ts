@@ -289,3 +289,101 @@ export function fromGeminiUsage(metadata: unknown): NormalizedUsage {
 		source: prompt != null && (candidates != null || thoughts != null) ? "provider" : "estimated",
 	});
 }
+
+/**
+ * Which D2 row a payload belongs to. This is the SOURCE identity, not the
+ * provider name: "openai" is two rows (completions vs Responses) with different
+ * field maps, and the pi-ai adapters are a third family that never reaches this
+ * module at all (they are already disjoint — see the header).
+ */
+export type UsageWireShape = "anthropic" | "openai-completions" | "openai-responses" | "gemini";
+
+/**
+ * Pick the D2 row from the field names actually present, falling back to the
+ * caller's hint.
+ *
+ * Shape wins over the hint because the hint is derived from the CLIENT
+ * (`detectClientKind` + the intercepted surface), and an OpenAI-compatible
+ * server behind an OpenAI client is free to answer in a different dialect. The
+ * dispatch is unambiguous exactly where it matters: the two "pass through" vs
+ * "subtract" families use disjoint cache field names
+ * (`cache_read_input_tokens` vs `input_tokens_details.cached_tokens`), so a
+ * payload that could be read either way carries no cache tokens and both
+ * readings agree.
+ */
+function detectWireShape(container: Record<string, unknown>, hint: UsageWireShape): UsageWireShape {
+	if (
+		"promptTokenCount" in container ||
+		"candidatesTokenCount" in container ||
+		"cachedContentTokenCount" in container ||
+		"thoughtsTokenCount" in container
+	) {
+		return "gemini";
+	}
+	if (
+		"prompt_tokens" in container ||
+		"completion_tokens" in container ||
+		"prompt_tokens_details" in container
+	) {
+		return "openai-completions";
+	}
+	if ("input_tokens_details" in container || "output_tokens_details" in container) {
+		return "openai-responses";
+	}
+	if (
+		"cache_read_input_tokens" in container ||
+		"cache_creation_input_tokens" in container ||
+		"cache_creation" in container
+	) {
+		return "anthropic";
+	}
+	// A bare `input_tokens`/`output_tokens` pair with no cache detail anywhere.
+	// Anthropic and the Responses API share these names, and with no cache fields
+	// present the pass-through and subtracting readings produce identical numbers,
+	// so either row is correct — pick by hint. The `openai-completions` hint lands
+	// here too: core's old `??` chain read `input_tokens` before `prompt_tokens`,
+	// and some OpenAI-compatible servers do answer chat.completions in those
+	// names. Falling through to the completions extractor (which looks only for
+	// `prompt_tokens`) would read nothing and demote a real settle to an estimate.
+	if ("input_tokens" in container || "output_tokens" in container) {
+		return hint === "anthropic" ? "anthropic" : "openai-responses";
+	}
+	return hint;
+}
+
+/**
+ * D4 row 3 — read a NON-STREAM provider response into the one snapshot.
+ *
+ * Finds the usage container, picks the D2 row, and delegates. Two containers
+ * exist in the wild and core previously read only the first:
+ *
+ *   - `response.usage` — Anthropic, OpenAI completions, OpenAI Responses.
+ *   - `response.usageMetadata` — Google. It sits at the ROOT of a
+ *     `GenerateContentResponse` (genai.d.ts:4658), so the old
+ *     `"usage" in response` test was FALSE for every real Gemini call and every
+ *     one of them silently settled at the estimate.
+ *
+ * When neither container is a usable object the result is an all-zero snapshot
+ * with `source: "estimated"` — the caller must then fall back to its estimate
+ * and must NOT publish a usage record (D5).
+ */
+export function fromProviderResponse(response: unknown, hint: UsageWireShape): NormalizedUsage {
+	const r = asRecord(response);
+	const usage = readObject(r, "usage");
+	const metadata = readObject(r, "usageMetadata");
+	// Prefer the container the hint expects; fall back to the other one so a
+	// misdetected client still meters off real numbers.
+	const container = hint === "gemini" ? (metadata ?? usage) : (usage ?? metadata);
+	if (container === undefined) return sanitizeUsage(null);
+
+	switch (detectWireShape(container, hint)) {
+		case "gemini":
+			return fromGeminiUsage(container);
+		case "openai-completions":
+			return fromOpenAICompletionsUsage(container);
+		case "openai-responses":
+			return fromOpenAIResponsesUsage(container);
+		default:
+			return fromAnthropicUsage(container);
+	}
+}

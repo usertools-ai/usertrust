@@ -103,12 +103,13 @@ export {
 } from "./ledger/pricing.js";
 // Usage normalization (spec D2/D5): the one place provider usage becomes the
 // four-tier disjoint snapshot that both cost and record emission derive from.
-export type { NormalizedUsage, RawUsageCandidate } from "./ledger/usage.js";
+export type { NormalizedUsage, RawUsageCandidate, UsageWireShape } from "./ledger/usage.js";
 export {
 	fromAnthropicUsage,
 	fromGeminiUsage,
 	fromOpenAICompletionsUsage,
 	fromOpenAIResponsesUsage,
+	fromProviderResponse,
 	sanitizeUsage,
 } from "./ledger/usage.js";
 // Pattern memory
