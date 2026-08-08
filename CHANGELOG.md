@@ -66,6 +66,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `TrustedClient` types: governed `messages.create` / `beta.messages.create` now
+  type as `Promise<{ response, receipt }>`, matching the runtime envelope — the
+  documented `const { response, receipt } = await client.messages.create(...)`
+  pattern now compiles, per-overload. On the streaming overload
+  (`stream: true`, and the streaming half of the base-overload union),
+  `response` is the governed stream wrapper — `GovernedStream<T>`, an async
+  iterable with a settled-`.receipt` promise — not the SDK's raw `Stream`
+  (which the runtime never returns from governed `create`; the envelope's own
+  `receipt` is the pre-settlement estimate). Types-only; no runtime change.
 - A policy rule with no `description` no longer renders its identifier twice
   in the denial reason (`[scarcity-brake] scarcity-brake` is now
   `[scarcity-brake]`).
