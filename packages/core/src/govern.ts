@@ -2909,34 +2909,40 @@ function readFinalMessageUsage(msg: unknown): {
 		const usage = (msg as Record<string, unknown>).usage;
 		if (usage != null && typeof usage === "object") {
 			const u = usage as Record<string, unknown>;
-			const inTok =
-				typeof u.input_tokens === "number" && Number.isFinite(u.input_tokens) && u.input_tokens >= 0
-					? u.input_tokens
-					: undefined;
-			const outTok =
-				typeof u.output_tokens === "number" &&
-				Number.isFinite(u.output_tokens) &&
-				u.output_tokens >= 0
-					? u.output_tokens
-					: undefined;
+			const isUsableCount = (value: unknown): value is number =>
+				typeof value === "number" && Number.isFinite(value) && value >= 0;
+			const inTok = isUsableCount(u.input_tokens) ? u.input_tokens : undefined;
+			const outTok = isUsableCount(u.output_tokens) ? u.output_tokens : undefined;
 			// D2/D4: the cache tiers come from the ONE Anthropic extractor, which also
 			// folds the nested `cache_creation` TTL breakdown into the write tier.
 			//
 			// F3 applies PER TIER, and per tier separately: a finalMessage that names
 			// only the read counter must not zero an accumulated WRITE counter. Each
-			// tier is therefore reported only when the payload actually names one of
-			// its fields; otherwise it stays `undefined` and the caller keeps what the
-			// streamEvent tap accumulated. Zeroing a real, already-billed cache tier
-			// because the final payload was partial is an understatement.
+			// tier is therefore reported only when the payload actually carries a
+			// USABLE value for one of its fields (same discipline as inTok/outTok
+			// above) — not merely when the key is present. A `null`/NaN counter is
+			// present-but-unusable, and gating on presence alone would zero an
+			// accumulated tier the streamEvent tap already billed (understatement).
+			// When a tier is not usable it stays `undefined` and the caller keeps
+			// what the streamEvent tap accumulated.
 			const cacheTiers = fromAnthropicUsage(u);
-			const readNamed = "cache_read_input_tokens" in u;
-			const writeNamed = "cache_creation_input_tokens" in u || "cache_creation" in u;
+			const readUsable = isUsableCount(u.cache_read_input_tokens);
+			const breakdownRaw = u.cache_creation;
+			const breakdown =
+				breakdownRaw != null && typeof breakdownRaw === "object"
+					? (breakdownRaw as Record<string, unknown>)
+					: undefined;
+			const breakdownUsable =
+				breakdown != null &&
+				(isUsableCount(breakdown.ephemeral_5m_input_tokens) ||
+					isUsableCount(breakdown.ephemeral_1h_input_tokens));
+			const writeUsable = isUsableCount(u.cache_creation_input_tokens) || breakdownUsable;
 			if (inTok !== undefined || outTok !== undefined) {
 				return {
 					inputTokens: inTok,
 					outputTokens: outTok,
-					cacheReadTokens: readNamed ? cacheTiers.cacheReadTokens : undefined,
-					cacheWriteTokens: writeNamed ? cacheTiers.cacheWriteTokens : undefined,
+					cacheReadTokens: readUsable ? cacheTiers.cacheReadTokens : undefined,
+					cacheWriteTokens: writeUsable ? cacheTiers.cacheWriteTokens : undefined,
 					reported: true,
 				};
 			}

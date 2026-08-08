@@ -1406,16 +1406,65 @@ describe("cache tiers survive the MessageStream accumulator", () => {
 		await governed.destroy();
 	});
 
+	it("keeps the accumulated READ tier when finalMessage carries cache_read_input_tokens: null", async () => {
+		// Bug: the gate was `"cache_read_input_tokens" in u` — true even when the
+		// value is `null`, a present-but-unusable counter. That zeroed the 9000
+		// read tokens the streamEvent tap already accumulated and billed
+		// (understatement). Fixed: gate on a USABLE value (typeof number, finite,
+		// >= 0), so a null counter falls back to the accumulated 9000 exactly as
+		// if the key had been omitted entirely — same math as the sibling
+		// omitted-WRITE-tier test above.
+		// 3 + 30 + (9000/1000)*3 + (1000/1000)*37.5 = 97.5 → 98.
+		const client = {
+			messages: {
+				create: vi.fn(),
+				stream: vi.fn(
+					() =>
+						new FakeMessageStream({
+							events: CACHE_EVENTS,
+							final: {
+								id: "msg_c4",
+								usage: {
+									input_tokens: 100,
+									output_tokens: 200,
+									cache_read_input_tokens: null,
+								},
+							},
+						}),
+				),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 5_000_000,
+			vaultBase: tmpVault,
+			_engine: makeMockEngine(),
+			_audit: makeMockAudit(),
+		});
+
+		const stream = (await governed.messages.stream(STREAM_PARAMS)) as FakeMessageStream & {
+			receipt: Promise<TrustReceipt>;
+		};
+		const receipt = await stream.receipt;
+
+		expect(receipt.cost).toBe(98);
+
+		await governed.destroy();
+	});
+
 	it("carries the cache tiers into a consumer-abort partial settle", async () => {
 		// F9: an abort settles at the PARTIAL accumulated usage. The cache tokens were
 		// already read and billed by the provider, so they must ride along.
 		const engine = makeMockEngine();
-		const stream0 = new FakeMessageStream({ events: [], final: undefined });
-		void stream0;
 		const client = {
 			messages: {
 				create: vi.fn(),
-				stream: vi.fn(() => new FakeMessageStream({ events: CACHE_EVENTS, chunkDelayMs: 5 })),
+				// Neighbouring runaway test (R1) uses the same 30ms spacing — 5ms left
+				// only a ~2ms margin against `flush(8)` below, a timing-tight flake risk
+				// on slow CI. message_start (the only event the abort needs to have
+				// landed) still fires on the very first macrotask, well before either
+				// the 8ms flush or the 30ms delay to the second event.
+				stream: vi.fn(() => new FakeMessageStream({ events: CACHE_EVENTS, chunkDelayMs: 30 })),
 			},
 		};
 		const governed = await trust(client, {

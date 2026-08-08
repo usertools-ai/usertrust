@@ -77,9 +77,14 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	// ── OpenAI ──
 	// Cached-input reads are published per model and the discount varies WITHIN
 	// the family: gpt-5.4 reads at 0.1x, o3/o4-mini at 0.25x, the 4o family at
-	// 0.5x. OpenAI publishes no separate cache-WRITE rate — writes bill at the
-	// standard input price — so cacheWritePer1k is omitted and the D1 fallback
-	// reproduces the published behaviour exactly.
+	// 0.5x. None of the entries below publish a separate cache-WRITE rate —
+	// every one predates gpt-5.6 — so cacheWritePer1k is omitted and the D1
+	// fallback (price at inputPer1k) reproduces the published behaviour
+	// exactly. This is a claim about THIS table, not about OpenAI generally:
+	// OpenAI's prompt-caching guide documents `cache_write_tokens`, billed at
+	// 1.25x the uncached input rate, for gpt-5.6 and later model families. Any
+	// gpt-5.6+ entry added here MUST carry an explicit cacheWritePer1k, or its
+	// writes will silently misprice at the (now wrong) inputPer1k fallback.
 	"gpt-4o": { inputPer1k: 25, outputPer1k: 100, cacheReadPer1k: 12.5 },
 	"gpt-4o-mini": { inputPer1k: 1.5, outputPer1k: 6, cacheReadPer1k: 0.75 },
 	"gpt-5.4": { inputPer1k: 25, outputPer1k: 150, cacheReadPer1k: 2.5 },

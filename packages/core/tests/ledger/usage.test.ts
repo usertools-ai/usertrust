@@ -106,6 +106,29 @@ describe("sanitizeUsage", () => {
 		expectSafeSnapshot(u);
 	});
 
+	it("normalizes a provider-reported -0 to +0 (Object.is discipline)", () => {
+		// `-0 < 0` is false and `Math.ceil(-0) === -0`, so a naive guard lets a
+		// negative-zero provider count through. `-0 >= 0` is true and `-0` is a
+		// "finite integer" by every practical measure, but `Object.is(-0, 0)` is
+		// false — the "finite ints >= 0" invariant is meant in that stricter
+		// sense, and `-0` residue in a snapshot would (harmlessly, but
+		// incorrectly) survive `JSON.stringify` only by accident. A real
+		// provider payload reaches this shape through JSON decoding, not a
+		// hand-written literal, so round-trip the value through JSON.parse.
+		const raw = {
+			inputTokens: JSON.parse("-0"),
+			outputTokens: 5,
+			cacheReadTokens: JSON.parse("-0"),
+			cacheWriteTokens: JSON.parse("-0"),
+			source: "provider" as const,
+		};
+		const u = sanitizeUsage(raw);
+		expect(Object.is(u.inputTokens, 0)).toBe(true);
+		expect(Object.is(u.cacheReadTokens, 0)).toBe(true);
+		expect(Object.is(u.cacheWriteTokens, 0)).toBe(true);
+		expectSafeSnapshot(u);
+	});
+
 	it("defaults every absent field to 0 and an absent source to estimated", () => {
 		expect(sanitizeUsage({})).toEqual({
 			inputTokens: 0,

@@ -91,7 +91,11 @@ export interface RawUsageCandidate {
  */
 function readCount(value: unknown): number | null {
 	if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
-	return Math.ceil(value);
+	// `-0 < 0` is false and `Math.ceil(-0) === -0`, so a provider-reported `-0`
+	// would otherwise survive into the snapshot, breaching "finite ints >= 0"
+	// in the `Object.is` sense (D5). `+ 0` normalizes `-0` to `+0` without
+	// affecting any other value.
+	return Math.ceil(value) + 0;
 }
 
 /** Read a nested object field, or `undefined` when it is not an object. */
