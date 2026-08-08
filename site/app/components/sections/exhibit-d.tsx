@@ -1,6 +1,7 @@
 import chainSliceJson from "@/evidence/chain-slice.json";
 import type { ChainSlice } from "@/evidence/types";
 import { computeMerkleGeometry } from "@/lib/exhibit-d";
+import StageTag from "../stage-tag";
 import ExhibitDDom from "./exhibit-d-dom";
 import ExhibitDRibbon from "./exhibit-d-ribbon";
 import ExhibitDStatic from "./exhibit-d-static";
@@ -122,6 +123,10 @@ export default function ExhibitD() {
 	return (
 		<section id="exhibit-d" className="safe-x relative mx-auto max-w-6xl py-24 md:py-32">
 			<p className="font-mono text-xs uppercase tracking-[0.3em] text-white/40">exhibit d</p>
+			<div className="mt-3 flex items-center gap-1.5">
+				<StageTag stage="RECORD" />
+				<StageTag stage="ANCHOR" />
+			</div>
 			<h2 className="font-display mt-4 lowercase leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
 				tamper with one byte. break the whole chain.
 			</h2>

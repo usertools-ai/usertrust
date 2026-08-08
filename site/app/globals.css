@@ -64,42 +64,10 @@
 	--color-fd-ring: #34d399;
 }
 
-/* Ken Burns zoom on hero background */
-@keyframes kenburns {
-	0% {
-		transform: scale(1);
-	}
-	100% {
-		transform: scale(1.08);
-	}
-}
-
 /* Backdrop-filter fallback */
 @supports not (backdrop-filter: blur(1px)) {
 	.glass {
 		background: rgba(10, 10, 26, 0.85) !important;
-	}
-}
-
-/* Mobile: disable ken burns */
-@media (max-width: 767px) {
-	.hero-bg {
-		animation: none !important;
-		background-position: center 30%;
-	}
-}
-
-/* Reduced motion */
-@media (prefers-reduced-motion: reduce) {
-	.hero-bg {
-		animation: none !important;
-	}
-}
-
-/* Promote the hero background to its own GPU layer only where Ken Burns runs */
-@media (min-width: 768px) and (prefers-reduced-motion: no-preference) {
-	.hero-bg {
-		will-change: transform;
 	}
 }
 

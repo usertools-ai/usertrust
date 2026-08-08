@@ -4,6 +4,7 @@ import receiptLedgerJson from "@/evidence/receipt-ledger.json";
 import type { CapturedReceipt, ChainSlice, EvidenceFacts } from "@/evidence/types";
 import { chainSeqFor, receiptJsonLines, tokenClass } from "../../lib/receipt-json";
 import { usdFromUsertokens } from "../receipt/format";
+import StageTag from "../stage-tag";
 import TerminalFrame from "../terminal-frame";
 import ExhibitAAnnotations, { type Annotation } from "./exhibit-a-annotations";
 
@@ -34,6 +35,9 @@ export default function ExhibitA() {
 		<section id="exhibit-a" className="relative py-24 sm:py-32 safe-x">
 			<div className="mx-auto max-w-6xl">
 				<p className="font-mono text-xs uppercase tracking-widest text-white/40">exhibit a</p>
+				<div className="mt-3 flex items-center gap-1.5">
+					<StageTag stage="RECORD" />
+				</div>
 				<h2 className="mt-4 max-w-3xl font-display text-[clamp(2.5rem,6vw,4.5rem)] leading-[0.95] tracking-tight text-white">
 					every governed call returns evidence.
 				</h2>

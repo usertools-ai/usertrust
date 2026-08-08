@@ -3,7 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { GitHubIcon } from "./github-icon";
 
-export function Nav() {
+// "1.2k"-style compact mono counter. Trailing ".0" is dropped (1.0k -> 1k).
+function fmtCompact(n: number): string {
+	return n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n);
+}
+
+export function Nav({ stars, downloads }: { stars: number | null; downloads: number | null }) {
 	const [open, setOpen] = useState(false);
 	const [scrolled, setScrolled] = useState(false);
 	const [activeSection, setActiveSection] = useState("");
@@ -98,11 +103,11 @@ export function Nav() {
 		return () => document.removeEventListener("keydown", handleKey);
 	}, [open]);
 
+	// Addendum F (2026-08-08): the film section was dropped — no #film link.
 	const links = [
-		{ href: "#code", label: "Code" },
-		{ href: "#features", label: "Features" },
-		{ href: "#how", label: "How it works" },
-		{ href: "/docs", label: "Docs" },
+		{ href: "#docket", label: "the docket" },
+		{ href: "#exhibit-a", label: "exhibits" },
+		{ href: "/docs", label: "docs" },
 	];
 
 	return (
@@ -114,16 +119,30 @@ export function Nav() {
 			}`}
 		>
 			<div className="flex items-center justify-between safe-x py-4">
-				<a
-					href="/"
-					className={`focus-ring inline-flex min-h-[44px] items-center px-4 py-2.5 border rounded-full text-sm font-medium tracking-tight transition-all duration-300 ${
-						scrolled
-							? "border-ut/30 text-ut shadow-[0_0_20px_rgba(52,211,153,0.1)]"
-							: "border-white/20 hover:border-ut/50 hover:text-ut animate-[pulse-glow_4s_ease-in-out_infinite]"
-					}`}
-				>
-					usertrust
-				</a>
+				<div className="flex items-center gap-4">
+					{/*
+					 * First focusable element on the page: the dossier's escape hatch for
+					 * people who came for numbers, not scenography. Visually subtle mono;
+					 * focus-visible makes it prominent (the shared .focus-ring outline plus
+					 * a color flip to emerald).
+					 */}
+					<a
+						href="#docket"
+						className="focus-ring inline-flex min-h-[44px] items-center font-mono text-[11px] text-white/35 hover:text-white/70 focus-visible:text-ut transition-colors duration-200"
+					>
+						skip to the facts ↓
+					</a>
+					<a
+						href="/"
+						className={`focus-ring inline-flex min-h-[44px] items-center px-4 py-2.5 border rounded-full text-sm font-medium tracking-tight transition-all duration-300 ${
+							scrolled
+								? "border-ut/30 text-ut shadow-[0_0_20px_rgba(52,211,153,0.1)]"
+								: "border-white/20 hover:border-ut/50 hover:text-ut"
+						}`}
+					>
+						usertrust
+					</a>
+				</div>
 
 				<div className="flex items-center gap-6">
 					<div className="hidden md:flex items-center gap-5 text-sm text-white/60 font-medium">
@@ -150,6 +169,32 @@ export function Nav() {
 						))}
 					</div>
 
+					{/* Mono counters — omitted entirely on fetch failure, never rendered as 0. */}
+					{(stars !== null || downloads !== null) && (
+						<div className="hidden lg:flex items-center gap-4 font-mono text-xs text-white/45">
+							{stars !== null && (
+								<a
+									href="https://github.com/usertools-ai/usertrust"
+									target="_blank"
+									rel="noopener noreferrer"
+									className="focus-ring inline-flex min-h-[44px] items-center hover:text-white/80 transition-colors duration-200"
+								>
+									★ {fmtCompact(stars)}
+								</a>
+							)}
+							{downloads !== null && (
+								<a
+									href="https://www.npmjs.com/package/usertrust"
+									target="_blank"
+									rel="noopener noreferrer"
+									className="focus-ring inline-flex min-h-[44px] items-center hover:text-white/80 transition-colors duration-200"
+								>
+									↓ {fmtCompact(downloads)}/mo
+								</a>
+							)}
+						</div>
+					)}
+
 					<a
 						href="https://github.com/usertools-ai/usertrust"
 						target="_blank"
@@ -168,13 +213,6 @@ export function Nav() {
 						className="focus-ring md:hidden inline-flex items-center justify-center w-11 h-11 rounded-lg border border-white/10 bg-white/[0.06] hover:bg-white/[0.10] transition-colors duration-200"
 						aria-label={open ? "Close menu" : "Open menu"}
 						aria-expanded={open}
-						/*
-						 * Only while the menu exists: the dropdown is conditionally rendered, so a
-						 * constant aria-controls would be an IDREF resolving to nothing whenever
-						 * the menu is closed — validators flag it and assistive tech ignores it.
-						 * `undefined` omits the attribute entirely; `aria-expanded` alone is a
-						 * complete disclosure pattern in the meantime.
-						 */
 						aria-controls={open ? "mobile-menu" : undefined}
 					>
 						<svg
@@ -244,12 +282,9 @@ export function Nav() {
 
 			{/*
 			 * Mobile dropdown. No `pb-4` here on purpose: `.safe-bottom` owns the bottom
-			 * padding with a 1rem floor, and stacking both just doubles the padding —
-			 * `.safe-bottom` is unlayered while Tailwind's `pb-4` sits in `@layer utilities`,
-			 * so the safe-area value wins the cascade either way. `max-h` plus
-			 * `overflow-y-auto` keep the menu reachable when the viewport is short enough that
-			 * four 44px links and the header exceed it, and `[overscroll-behavior:contain]` is
-			 * what stops that inner scroll chaining out to the locked body.
+			 * padding with a 1rem floor. `max-h` plus `overflow-y-auto` keep the menu
+			 * reachable on short viewports, and `[overscroll-behavior:contain]` stops the
+			 * inner scroll chaining out to the locked body.
 			 */}
 			{open && (
 				<div

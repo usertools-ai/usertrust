@@ -144,11 +144,7 @@ export default function OpenLedger() {
 					    centered above the usertools attribution line. */}
 					<div className="flex flex-col items-center gap-2 text-center">
 						{/* biome-ignore lint/performance/noImgElement: tiny static footer mark, not an LCP candidate */}
-						<img
-							src="/brand/mascot-mark.png"
-							alt="the usertrust mascot"
-							className="h-8 w-auto"
-						/>
+						<img src="/brand/mascot-mark.png" alt="the usertrust mascot" className="h-8 w-auto" />
 						<p className="font-mono text-xs text-white/40">governance wins.</p>
 					</div>
 

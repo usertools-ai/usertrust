@@ -5,6 +5,7 @@ import factsJson from "@/evidence/facts.json";
 import type { EvidenceFacts } from "@/evidence/types";
 import { raceDefaults } from "@/lib/budget-race";
 import { REPLAY_VIDEO, THROWN_DENIAL } from "@/lib/exhibit-c-data";
+import StageTag from "../stage-tag";
 import TerminalFrame from "../terminal-frame";
 import CaseFile from "./case-file";
 import ExhibitCRace from "./exhibit-c-race";
@@ -39,6 +40,9 @@ export default function ExhibitC() {
 		<section id="exhibit-c" className="relative py-24 sm:py-32 safe-x">
 			<div className="mx-auto max-w-6xl">
 				<p className="font-mono text-xs uppercase tracking-widest text-white/40">exhibit c</p>
+				<div className="mt-3 flex items-center gap-1.5">
+					<StageTag stage="ENFORCE" />
+				</div>
 				<h2 className="mt-4 font-display font-bold lowercase leading-[0.95] tracking-tight text-white text-[clamp(2.5rem,6vw,4.5rem)]">
 					hold. settle. or void.
 				</h2>

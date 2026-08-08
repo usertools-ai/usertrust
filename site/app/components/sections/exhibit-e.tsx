@@ -2,6 +2,7 @@ import factsJson from "@/evidence/facts.json";
 import type { EvidenceFacts, VerifyTranscript } from "@/evidence/types";
 import verifyTranscriptJson from "@/evidence/verify-transcript.json";
 import CopyChip from "../copy-chip";
+import StageTag from "../stage-tag";
 import TerminalFrame from "../terminal-frame";
 import ExhibitETranscript from "./exhibit-e-transcript";
 
@@ -28,6 +29,9 @@ export default function ExhibitE() {
 	return (
 		<section id="exhibit-e" className="safe-x relative mx-auto max-w-6xl py-24 md:py-32">
 			<p className="font-mono text-xs uppercase tracking-[0.3em] text-white/40">exhibit e</p>
+			<div className="mt-3 flex items-center gap-1.5">
+				<StageTag stage="VERIFY" />
+			</div>
 			<h2 className="font-display mt-4 lowercase leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
 				don&rsquo;t take our word for it.
 			</h2>

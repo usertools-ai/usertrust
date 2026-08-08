@@ -1,10 +1,4 @@
-import { BeforeAfter } from "./components/before-after";
-import { BuiltFor } from "./components/built-for";
-import { BYOK } from "./components/byok";
-import { CodeExample } from "./components/code-example";
-import { Features } from "./components/features";
 import { GridBackground } from "./components/grid-background";
-import { HowItWorks } from "./components/how-it-works";
 import { Nav } from "./components/nav";
 import Docket from "./components/sections/docket";
 import ExhibitA from "./components/sections/exhibit-a";
@@ -17,13 +11,37 @@ import ExhibitG from "./components/sections/exhibit-g";
 import HardenStrip from "./components/sections/harden-strip";
 import Hero from "./components/sections/hero";
 import OpenLedger from "./components/sections/open-ledger";
-import { SocialProof } from "./components/social-proof";
 
-export default function Home() {
+/*
+ * Fetched once on the server, ISR 1h. Parallelized with a hard 2s timeout per
+ * call so a slow upstream can never stall the render, and failures resolve to
+ * null — the Nav omits a null counter entirely rather than showing 0.
+ */
+async function getPackageStats(): Promise<{ stars: number | null; downloads: number | null }> {
+	const [downloads, stars] = await Promise.all([
+		fetch("https://api.npmjs.org/downloads/point/last-month/usertrust", {
+			next: { revalidate: 3600 },
+			signal: AbortSignal.timeout(2000),
+		})
+			.then(async (r) => (r.ok ? ((await r.json()).downloads as number) : null))
+			.catch(() => null),
+		fetch("https://api.github.com/repos/usertools-ai/usertrust", {
+			next: { revalidate: 3600 },
+			headers: { Accept: "application/vnd.github+json" },
+			signal: AbortSignal.timeout(2000),
+		})
+			.then(async (r) => (r.ok ? ((await r.json()).stargazers_count as number) : null))
+			.catch(() => null),
+	]);
+	return { downloads, stars };
+}
+
+export default async function Home() {
+	const { stars, downloads } = await getPackageStats();
 	return (
 		<>
 			<GridBackground />
-			<Nav />
+			<Nav stars={stars} downloads={downloads} />
 			<Hero />
 			<Docket />
 			<ExhibitA />
@@ -34,13 +52,6 @@ export default function Home() {
 			<ExhibitF />
 			<ExhibitG />
 			<HardenStrip />
-			<SocialProof />
-			<CodeExample />
-			<BeforeAfter />
-			<Features />
-			<HowItWorks />
-			<BYOK />
-			<BuiltFor />
 			<OpenLedger />
 		</>
 	);
