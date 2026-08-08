@@ -209,7 +209,15 @@ export interface TrustEngine {
 // settled `.receipt`. These mapped types make the EXPORTED TrustedClient type
 // match that runtime contract, so a consumer using the old bare-`Message` or
 // sync `const s = client.messages.stream(...)` patterns gets a compile error.
-// Clients without a top-level `messages` (OpenAI/Google) pass through unchanged.
+//
+// The same envelope rewrite covers the other two providers' governed `create`
+// surfaces: OpenAI `chat.completions.create` and (feature-detected)
+// `responses.create` via buildOpenAIProxy, and Google `models.generateContent`
+// via buildGoogleProxy. Neither is a special case — both route through the same
+// interceptCall, and a streaming call on either reaches the GENERIC
+// `Symbol.asyncIterator` branch that returns createGovernedStream's wrapper, not
+// the Anthropic `stream-helper` graft. Everything else on those resources is
+// ungoverned (see detect.ts's boundary block) and passes through untouched.
 
 /** `stream` becomes `(...args) => Promise<MessageStream & { receipt: Promise<TrustReceipt> }>`. */
 type GovernedStreamMethod<F> = F extends (...args: infer A) => infer R
@@ -286,21 +294,182 @@ type GovernedMessages<M> = M extends object
 			("parse" extends keyof M ? { parse: GovernedParseMethod<M["parse"]> } : unknown)
 	: M;
 
-/** Rewrite `beta.messages` when present; otherwise leave `beta` untouched. */
-type GovernedBeta<B> = B extends { messages: infer BM }
-	? Omit<B, "messages"> & { messages: GovernedMessages<BM> }
-	: B;
+/**
+ * A callable member — a GUARD, never a value type. `detectClientKind` keys every
+ * provider branch on `typeof x === "function"`, not on the key merely being
+ * present, and these types must agree with it exactly. `never[]` parameters put
+ * this at the top of the function lattice, so every function matches and every
+ * non-function (a string stub, a nested object) does not.
+ */
+type AnyMethod = (...args: never[]) => unknown;
 
 /**
- * Rewrite only the Anthropic `messages` / `beta.messages` surfaces. A client
- * without a `messages` resource (OpenAI, Google) is returned unchanged — its
- * governed `create`/`responses` shapes are unaffected by this rewrite.
+ * True when `X` is callable. The bracket wrapping is load-bearing: it stops the
+ * conditional distributing, so a union answers once for the whole union.
+ *
+ * This is the NEGATIVE half of the runtime's shape tests, and it needs its own
+ * type because TypeScript has no "object but not callable" constraint to write
+ * positively. Every namespace the runtime walks is gated on
+ * `typeof x === "object"` — `detectClientKind`, `buildOpenAIResponsesProxy` and
+ * `buildAnthropicBetaProxy` all do it — and a FUNCTION OBJECT (a callable that
+ * also carries properties) answers `"function"` there, not `"object"`. Yet a
+ * function object with the right properties satisfies `X extends { create: … }`
+ * happily, so the positive structural guard alone selects surfaces the runtime
+ * skips entirely.
  */
-type GovernedShape<T> = T extends { messages: infer M }
-	? Omit<T, "messages" | "beta"> & { messages: GovernedMessages<M> } & (T extends { beta: infer B }
-				? { beta: GovernedBeta<B> }
-				: unknown)
-	: T;
+type IsCallable<X> = [X] extends [AnyMethod] ? true : false;
+
+/**
+ * Rewrite `beta.messages` when present; otherwise leave `beta` untouched.
+ * Both levels are excluded when callable, mirroring buildAnthropicBetaProxy,
+ * which returns undefined — leaving `beta` a whole raw pass-through — unless
+ * `beta` AND `beta.messages` are both non-callable objects.
+ */
+type GovernedBeta<B> =
+	IsCallable<B> extends true
+		? B
+		: B extends { messages: infer BM }
+			? IsCallable<BM> extends true
+				? B
+				: Omit<B, "messages"> & { messages: GovernedMessages<BM> }
+			: B;
+
+/**
+ * Rewrite `create` on an OpenAI `chat.completions` resource. `parse`, `stream`,
+ * `runTools`, `retrieve` / `update` / `list` / `delete` and the legacy top-level
+ * `completions` are all UNGOVERNED (detect.ts's boundary block) and survive the
+ * `Omit` untouched — they drive the SDK's raw client and never reach interceptCall.
+ */
+type GovernedChatCompletions<CC> = CC extends { create: infer C extends AnyMethod }
+	? Omit<CC, "create"> & { create: GovernedCreateMethod<C> }
+	: CC;
+
+/** Rewrite `chat.completions` when present; the rest of `chat` is left alone. */
+type GovernedChat<C> = C extends { completions: infer CC }
+	? Omit<C, "completions"> & { completions: GovernedChatCompletions<CC> }
+	: C;
+
+/**
+ * Rewrite ONLY `create` on an OpenAI `responses` resource. The guard is the
+ * type-level twin of buildOpenAIResponsesProxy's
+ * `typeof responsesObj.create !== "function"` bail-out: on that miss the runtime
+ * installs no proxy and the WHOLE resource stays a raw pass-through, so a
+ * non-callable `create` must leave `R` intact rather than rewrite the rest of it.
+ * `stream` / `parse` / `retrieve` / `cancel` / `delete` / `compact` are ungoverned.
+ */
+type GovernedResponses<R> =
+	IsCallable<R> extends true
+		? R
+		: R extends { create: infer C extends AnyMethod }
+			? Omit<R, "create"> & { create: GovernedCreateMethod<C> }
+			: R;
+
+/**
+ * Rewrite ONLY `generateContent` on a Google `models` resource. `generateContentStream`
+ * stays raw: buildGoogleProxy traps the one method and lets everything else fall
+ * through `Reflect.get`, so a rewrite here would advertise a `.receipt` that never
+ * arrives on the streaming shortcut users actually reach for.
+ */
+type GovernedGoogleModels<G> = G extends { generateContent: infer C extends AnyMethod }
+	? Omit<G, "generateContent"> & { generateContent: GovernedCreateMethod<C> }
+	: G;
+
+// ── Provider selection: the type-level twin of detectClientKind ──
+// Each predicate is the full runtime test, both halves: the namespace is a
+// NON-CALLABLE object, and the governed method on it is callable. `detect.ts`
+// spells this `typeof ns === "object" && typeof ns.method === "function"`.
+
+/** detect.ts's Anthropic test: `messages` a non-callable object, `create` callable. */
+type IsAnthropicClient<T> = T extends { messages: infer M }
+	? IsCallable<M> extends true
+		? false
+		: M extends { create: AnyMethod }
+			? true
+			: false
+	: false;
+
+/** detect.ts's OpenAI test — `chat` AND `chat.completions` are both checked for object-ness. */
+type IsOpenAIClient<T> = T extends { chat: infer C }
+	? IsCallable<C> extends true
+		? false
+		: C extends { completions: infer CC }
+			? IsCallable<CC> extends true
+				? false
+				: CC extends { create: AnyMethod }
+					? true
+					: false
+			: false
+	: false;
+
+/** detect.ts's Google test: `models` a non-callable object, `generateContent` callable. */
+type IsGoogleClient<T> = T extends { models: infer G }
+	? IsCallable<G> extends true
+		? false
+		: G extends { generateContent: AnyMethod }
+			? true
+			: false
+	: false;
+
+// ── Namespace re-add parts ──
+// Every rewritten namespace is put back through a homomorphic mapped type over a
+// key set derived from `keyof T`, never a hand-written `{ ns: … }` intersection.
+// Three things that buys, all of which a literal intersection silently breaks:
+// a namespace the client does not declare stays ABSENT rather than becoming a
+// phantom property for a surface no proxy installs (an OpenAI client older than
+// the Responses API — ~4.87, under the `>=4.70.0` peer floor — has no `responses`
+// at all); an OPTIONAL namespace stays optional, where re-adding it as required,
+// or as `X | undefined`, is a different type under `exactOptionalPropertyTypes`
+// and breaks assignability for every consumer holding the original client type;
+// and `readonly` survives, which real `@google/genai` declares on `models`.
+
+type GovernedMessagesPart<T, K extends keyof T = Extract<keyof T, "messages">> = {
+	[P in K]: GovernedMessages<T[P]>;
+};
+type GovernedBetaPart<T, K extends keyof T = Extract<keyof T, "beta">> = {
+	[P in K]: GovernedBeta<T[P]>;
+};
+type GovernedChatPart<T, K extends keyof T = Extract<keyof T, "chat">> = {
+	[P in K]: GovernedChat<T[P]>;
+};
+type GovernedResponsesPart<T, K extends keyof T = Extract<keyof T, "responses">> = {
+	[P in K]: GovernedResponses<T[P]>;
+};
+type GovernedModelsPart<T, K extends keyof T = Extract<keyof T, "models">> = {
+	[P in K]: GovernedGoogleModels<T[P]>;
+};
+
+/**
+ * Rewrite the governed surfaces of whichever provider `detectClientKind` would
+ * pick — and only that provider's. The branches are EXCLUSIVE and ordered exactly
+ * as detect.ts:61: Anthropic, else OpenAI (carrying `responses` with it), else
+ * Google. A client matching none passes through unchanged; detectClientKind
+ * throws on it at runtime.
+ * *Prevents:* a hybrid client — an in-house facade exposing both an Anthropic and
+ * an OpenAI shape — typed as if both were governed, when `trust()` installs exactly
+ * ONE provider proxy and the loser's `create` is never intercepted. A receipt
+ * advertised on a surface no proxy wraps is the one lie this type must not tell.
+ * That is also why selection runs through the predicates above rather than a bare
+ * structural `extends`: a client whose `chat` is a function object is skipped by
+ * the runtime and falls through to Google, and the type must fall through with it.
+ */
+type GovernedShapeOf<T> =
+	IsAnthropicClient<T> extends true
+		? Omit<T, "messages" | "beta"> & GovernedMessagesPart<T> & GovernedBetaPart<T>
+		: IsOpenAIClient<T> extends true
+			? Omit<T, "chat" | "responses"> & GovernedChatPart<T> & GovernedResponsesPart<T>
+			: IsGoogleClient<T> extends true
+				? Omit<T, "models"> & GovernedModelsPart<T>
+				: T;
+
+/**
+ * `T extends unknown` is a no-op for a single client type and DISTRIBUTES over a
+ * union one. It is required because the predicates above are not naked-`T`
+ * conditionals: `IsOpenAIClient<A | B>` would collapse to `boolean` and fail
+ * `extends true`, silently returning a union client unrewritten. Distributing
+ * first makes each member pick its own provider branch, which is what `trust()`
+ * does anyway — it detects one kind per actual client.
+ */
+type GovernedShape<T> = T extends unknown ? GovernedShapeOf<T> : never;
 
 /** The trusted client: governed client shape (F5) + governance methods. */
 export type TrustedClient<T> = GovernedShape<T> & {
