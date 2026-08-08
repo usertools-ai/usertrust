@@ -801,3 +801,33 @@ html {
 		animation: none;
 	}
 }
+
+/* Exhibit G — attack-corpus rows reveal once on approach (IO stagger via
+   InView). Server/no-JS markup carries NO data-inview attribute, so the
+   rows can never be hidden from users without JS; InView sets "true" once
+   and never unsets it, so the stagger fires once per pageview.
+   Reduced-motion renders the finished table (finished states, not
+   disabled features). */
+@keyframes attack-row-in {
+	from {
+		opacity: 0;
+		transform: translateY(6px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+[data-inview="false"] .attack-row {
+	opacity: 0;
+}
+[data-inview="true"] .attack-row {
+	animation: attack-row-in 0.35s ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+	[data-inview="false"] .attack-row,
+	[data-inview="true"] .attack-row {
+		opacity: 1;
+		animation: none;
+	}
+}

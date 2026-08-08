@@ -15,6 +15,8 @@ import ExhibitC from "./components/sections/exhibit-c";
 import ExhibitD from "./components/sections/exhibit-d";
 import ExhibitE from "./components/sections/exhibit-e";
 import ExhibitF from "./components/sections/exhibit-f";
+import ExhibitG from "./components/sections/exhibit-g";
+import HardenStrip from "./components/sections/harden-strip";
 import Hero from "./components/sections/hero";
 import { SocialProof } from "./components/social-proof";
 
@@ -31,6 +33,8 @@ export default function Home() {
 			<ExhibitD />
 			<ExhibitE />
 			<ExhibitF />
+			<ExhibitG />
+			<HardenStrip />
 			<SocialProof />
 			<CodeExample />
 			<BeforeAfter />
