@@ -612,12 +612,21 @@ html {
 /* ── THE GOVERNANCE DIE (Exhibit B set-piece, Addendum C4) ──────────────────
    Emerald circuit pulses: layered SVG strokes animated by stroke-dashoffset —
    glow comes from stacked strokes and low-opacity rects, never from filter
-   or backdrop-filter. The dasharray period is 14 + 220 = 234 and each cycle
-   shifts exactly -234, so the loop is seamless on every path length.
-   Paused by default; the client wrapper (exhibit-b-die.tsx) flips
-   data-active="true" in view via IntersectionObserver, so pulses never run
-   offscreen. Reduced motion: animation removed, traces render as a static
-   glow (solid strokes at reduced opacity). */
+   or backdrop-filter. Fires ONCE (no `infinite`) per the sitewide motion
+   doctrine — set-pieces fire once per pageview, and nothing loops except
+   muted desktop-only ambient video paused offscreen; see the docket's
+   `hairline-draw` (also `both`, no `infinite`) for the same idiom. The
+   dasharray period is 14 + 220 = 234 and the keyframe shifts exactly -234
+   over that single cycle, so the frozen end frame (fill-mode: both) lands
+   back on the exact registration the trace started from — a seamless
+   settle, not a jump, on every path length. Paused by default; the client
+   wrapper (exhibit-b-die.tsx) flips data-active="true" the first time the
+   figure is in view via IntersectionObserver, which starts that one pass.
+   Later scroll-out/scroll-in toggles play-state on an already-finished
+   animation, which is inert — browsers do not replay a completed animation
+   by resuming it, so the pulse never re-fires. Reduced motion: animation
+   removed, traces render as a static glow (solid strokes at reduced
+   opacity). */
 @keyframes die-pulse {
 	to {
 		stroke-dashoffset: -234;
@@ -676,7 +685,7 @@ html {
 	stroke: #34d399;
 	stroke-width: 2px;
 	stroke-dasharray: 14 220;
-	animation: die-pulse 1.8s linear infinite;
+	animation: die-pulse 1.8s linear both;
 	animation-play-state: paused;
 }
 /* Output trace pulses brighter: a short bright core dash rides at the head
@@ -686,7 +695,7 @@ html {
 	stroke: #d1fae5;
 	stroke-width: 2px;
 	stroke-dasharray: 6 228;
-	animation: die-pulse 1.8s linear infinite;
+	animation: die-pulse 1.8s linear both;
 	animation-play-state: paused;
 }
 /* Per-trace stagger — negative delays put pulses mid-path immediately. */
@@ -699,7 +708,8 @@ html {
 .die-delay-c {
 	animation-delay: -1500ms;
 }
-/* IO gate: the wrapper flips data-active; pulses run only in view. */
+/* IO gate: the wrapper flips data-active on first intersection, which
+   starts the single pass described above — no repeated re-firing. */
 .die-figure[data-active="true"] .die-trace-pulse,
 .die-figure[data-active="true"] .die-trace-pulse-bright {
 	animation-play-state: running;
