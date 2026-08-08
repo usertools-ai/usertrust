@@ -79,6 +79,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the denial reason (`[scarcity-brake] scarcity-brake` is now
   `[scarcity-brake]`).
 
+### Security
+
+- **Merkle inclusion proofs now validate PATH TOPOLOGY against
+  `(leafIndex, treeSize)`.** `verifyInclusionProof` previously folded whatever
+  siblings it was handed and compared the result to the published root. It
+  never derived what the path *should* look like for the claimed position, so
+  a proof could assert any `leafIndex` it liked and still verify — a forged
+  index rode an otherwise-valid fold, and where two sibling hashes are equal
+  (identical leaves) flipping a sibling's side refolded to the very same root,
+  which no amount of hashing can catch. The verifier now derives the expected
+  per-level orientation from `(leafIndex, treeSize)` under the tree's
+  odd-node-promotion semantics, requires the supplied sibling count and every
+  `position` to match it exactly, and rejects non-safe-integer or
+  out-of-range indices and sizes before hashing. `packages/core` and
+  `usertrust-verify` changed in lockstep and are covered by a differential
+  suite that drives both verifiers directly. Every field of the proof is read
+  exactly once and the fold walks a materialized array plus the derived
+  orientation, so a hand-built object with a re-reading `position` getter or an
+  overridden array iterator cannot pass validation on one path and fold
+  another.
+
+  **Compatibility.** Every proof `generateInclusionProof` produces still
+  verifies — exhaustively pinned for all leaves of every tree sized 1..33.
+  `leafIndex` is ZERO-BASED and is now authenticated: a caller that treated
+  it as informational, dropped it during (de)serialization, or stored a
+  one-based sequence number will start failing verification. That is the fix
+  working, not a regression.
+
 ## [3.0.0] - 2026-08-03
 
 **Loopback/local endpoints now settle at nominal local rates instead of silently
