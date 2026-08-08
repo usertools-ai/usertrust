@@ -9,6 +9,7 @@ import { GridBackground } from "./components/grid-background";
 import { HowItWorks } from "./components/how-it-works";
 import { Nav } from "./components/nav";
 import Docket from "./components/sections/docket";
+import ExhibitA from "./components/sections/exhibit-a";
 import Hero from "./components/sections/hero";
 import { SocialProof } from "./components/social-proof";
 
@@ -19,6 +20,7 @@ export default function Home() {
 			<Nav />
 			<Hero />
 			<Docket />
+			<ExhibitA />
 			<SocialProof />
 			<CodeExample />
 			<BeforeAfter />

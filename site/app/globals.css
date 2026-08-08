@@ -588,3 +588,23 @@ html {
 		transform: none !important;
 	}
 }
+
+/*
+ * Exhibit A — evidence-terminal crosslink. The island
+ * (exhibit-a-annotations.tsx) toggles data-annotation-active on the
+ * server-rendered JSON lines; the highlight is a white wash + steel inset
+ * bar — data inks on dark per Addendum C. Scoped under .receipt-terminal so
+ * a future data-line elsewhere is unaffected.
+ */
+.receipt-terminal [data-line] {
+	transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+.receipt-terminal [data-line][data-annotation-active="true"] {
+	background-color: rgba(255, 255, 255, 0.07);
+	box-shadow: inset 2px 0 0 0 var(--color-tim);
+}
+@media (prefers-reduced-motion: reduce) {
+	.receipt-terminal [data-line] {
+		transition: none;
+	}
+}

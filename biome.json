@@ -46,6 +46,16 @@
 					}
 				}
 			}
+		},
+		{
+			"includes": ["**/site/app/components/sections/exhibit-a-annotations.tsx"],
+			"linter": {
+				"rules": {
+					"a11y": {
+						"noStaticElementInteractions": "off"
+					}
+				}
+			}
 		}
 	]
 }
