@@ -75,6 +75,7 @@ export default function CopyChip({
 			</span>
 			<span>{label ?? text}</span>
 			<span
+				aria-hidden="true"
 				className={
 					isPaper
 						? "text-xs text-ink/64 transition-colors group-hover:text-ink"

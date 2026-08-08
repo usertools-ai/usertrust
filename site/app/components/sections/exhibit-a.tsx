@@ -104,7 +104,11 @@ export default function ExhibitA() {
 							<pre>
 								<code>
 									{receiptLines.map((line) => (
-										<span key={line.key} data-line={line.key} className="block rounded-sm px-1">
+										<span
+											key={line.key}
+											data-line={line.key}
+											className="block rounded-sm px-1 py-px"
+										>
 											{"  ".repeat(line.indent)}
 											{line.tokens.map((tok) => (
 												<span

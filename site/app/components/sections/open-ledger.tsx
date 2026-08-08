@@ -167,7 +167,7 @@ export default function OpenLedger() {
 								href="https://usertools.ai"
 								target="_blank"
 								rel="noopener noreferrer"
-								className="focus-ring text-white/90 hover:text-ut transition-colors duration-200"
+								className="focus-ring underline decoration-white/50 underline-offset-4 text-white/90 hover:text-ut transition-colors duration-200"
 							>
 								usertools.ai
 							</a>
