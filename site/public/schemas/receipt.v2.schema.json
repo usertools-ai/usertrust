@@ -77,7 +77,7 @@
 		},
 		"usage": {
 			"type": "object",
-			"description": "NEW in v2. The four-tier DISJOINT token split this cost was metered from. Present iff usageSource is 'provider' — an estimated settle has no reported counts, so this is omitted outright rather than zero-filled, to avoid inviting a recompute of a cost that was never derived from token counts. inputTokens is fresh (non-cached) prompt tokens only; cacheReadTokens and cacheWriteTokens are separate tiers, so the four fields sum to the call's billable tokens with nothing double-counted. Together with meter.appliedRates this is the whole reconciliation surface: ceil(sum(counts x rates / 1000)), floored at 1, reproduces cost exactly.",
+			"description": "NEW in v2. The four-tier DISJOINT token split this cost was metered from. Present iff usageSource is 'provider' — an estimated settle has no reported counts, so this is omitted outright rather than zero-filled, to avoid inviting a recompute of a cost that was never derived from token counts. inputTokens is fresh (non-cached) prompt tokens only; cacheReadTokens and cacheWriteTokens are separate tiers, so the four fields sum to the call's billable tokens with nothing double-counted. Together with pricing.appliedRates this is the whole reconciliation surface: ceil(sum(counts x rates / 1000)), floored at 1, reproduces cost exactly. Multiply THEN divide: (tokens * ratePer1k) / 1000, not (tokens / 1000) * ratePer1k, which can differ by a whole usertoken after the ceil.",
 			"required": ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"],
 			"properties": {
 				"inputTokens": {
