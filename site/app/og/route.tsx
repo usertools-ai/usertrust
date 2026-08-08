@@ -19,8 +19,17 @@ const PAPER_EMERALD = "#0b6b4f"; // on-paper emerald — #34d399 is forbidden as
 
 export async function GET() {
 	const dots = Array.from({ length: 22 }, (_, i) => i);
-	// Two-register mascot cutout (Addendum G): white face/gloves read clean
-	// against the dark ground here — never place this mark on the paper card.
+	// Two-register mascot cutout — supersedes this brief's original Step
+	// 2b/Addendum A framed-still mark. Traceable to two local SDD docs (not
+	// committed to the public repo, but verifiable in this worktree):
+	// .superpowers/sdd/2026-08-07-receipts-site-redesign/progress.md:77
+	// ("Addendum G (Cam 2026-08-08): ... Task 16 dispatch note: OG uses
+	// mascot-full.png cutout on dark ground, NOT the framed-still branch.")
+	// and task-14c-brief.md/-report.md, which produced this exact asset
+	// (site/public/brand/mascot-full.png, 441x1024 transparent two-tone
+	// cutout). White face/gloves read clean against the dark ground here —
+	// never place this mark on the paper card.
+	//
 	// Loaded via fs.readFile (Next's own opengraph-image.tsx pattern), not
 	// `fetch(new URL(..., import.meta.url))`: for .png specifically, webpack's
 	// asset-module heuristic rewrites that literal pattern into a bundled
