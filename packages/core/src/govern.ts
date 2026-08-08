@@ -78,7 +78,12 @@ import type {
 	TrustReceipt,
 } from "./shared/types.js";
 import { TrustConfigSchema } from "./shared/types.js";
-import { type ChunkObservation, createGovernedStream, type StreamCompletion } from "./streaming.js";
+import {
+	type ChunkObservation,
+	createGovernedStream,
+	type GovernedStream,
+	type StreamCompletion,
+} from "./streaming.js";
 
 // ── Public types ──
 
@@ -217,6 +222,20 @@ type GovernedParseMethod<F> = F extends (...args: infer A) => infer R
 	: F;
 
 /**
+ * The `response` inside a governed `create` envelope. The runtime discriminates
+ * on `Symbol.asyncIterator in response` (interceptCall): an iterable provider
+ * response is wrapped by `createGovernedStream(...)` and the WRAPPER goes into
+ * the envelope — an `AsyncIterable` with a `.receipt` promise, NOT the SDK's
+ * raw `Stream` (no `tee()`/`controller`/`toReadableStream()`). On that path the
+ * envelope's own `receipt` is the ESTIMATED receipt; the settled one arrives on
+ * `response.receipt` — which `GovernedStream` already expresses. Non-iterable
+ * responses pass through unchanged. Distributes over the base overload's union,
+ * so `Stream<RawMessageStreamEvent> | Message` becomes
+ * `GovernedStream<RawMessageStreamEvent> | Message`.
+ */
+type GovernedResponseOf<T> = T extends AsyncIterable<infer E> ? GovernedStream<E> : T;
+
+/**
  * `create` becomes `(...args) => Promise<{ response, receipt }>`, per overload.
  * The Anthropic SDK declares three `create` overloads (non-streaming, streaming,
  * base); a bare `F extends (...args) => R` conditional infers only the LAST one,
@@ -224,7 +243,9 @@ type GovernedParseMethod<F> = F extends (...args: infer A) => infer R
  * The cascade matches the overload list positionally (3, then 2, then 1) and
  * rewrites each signature, preserving its response type inside the envelope —
  * matching the runtime, where interceptCall resolves BOTH paths with
- * `{ response, receipt }` (see the `create` trap in buildAnthropicMessagesProxy).
+ * `{ response, receipt }` (see the `create` trap in buildAnthropicMessagesProxy;
+ * on the streaming path `response` is createGovernedStream's wrapper, mapped by
+ * GovernedResponseOf above).
  * A single-signature `create` unifies into the 3-pattern as three identical
  * signatures, which resolves identically at every call site. Scoped to the SDK's
  * current 3-overload shape; the real-SDK block in
@@ -237,20 +258,24 @@ type GovernedCreateMethod<F> = F extends {
 	(...args: infer A3): infer R3;
 }
 	? {
-			(...args: A1): Promise<{ response: Awaited<R1>; receipt: TrustReceipt }>;
-			(...args: A2): Promise<{ response: Awaited<R2>; receipt: TrustReceipt }>;
-			(...args: A3): Promise<{ response: Awaited<R3>; receipt: TrustReceipt }>;
+			(...args: A1): Promise<{ response: GovernedResponseOf<Awaited<R1>>; receipt: TrustReceipt }>;
+			(...args: A2): Promise<{ response: GovernedResponseOf<Awaited<R2>>; receipt: TrustReceipt }>;
+			(...args: A3): Promise<{ response: GovernedResponseOf<Awaited<R3>>; receipt: TrustReceipt }>;
 		}
 	: F extends {
 				(...args: infer A1): infer R1;
 				(...args: infer A2): infer R2;
 			}
 		? {
-				(...args: A1): Promise<{ response: Awaited<R1>; receipt: TrustReceipt }>;
-				(...args: A2): Promise<{ response: Awaited<R2>; receipt: TrustReceipt }>;
+				(
+					...args: A1
+				): Promise<{ response: GovernedResponseOf<Awaited<R1>>; receipt: TrustReceipt }>;
+				(
+					...args: A2
+				): Promise<{ response: GovernedResponseOf<Awaited<R2>>; receipt: TrustReceipt }>;
 			}
 		: F extends (...args: infer A) => infer R
-			? (...args: A) => Promise<{ response: Awaited<R>; receipt: TrustReceipt }>
+			? (...args: A) => Promise<{ response: GovernedResponseOf<Awaited<R>>; receipt: TrustReceipt }>
 			: F;
 
 /** Rewrite `create`/`stream`/`parse` on a `messages` resource; leave everything else. */

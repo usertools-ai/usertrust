@@ -19,11 +19,15 @@
  */
 
 import type Anthropic from "@anthropic-ai/sdk";
-import type { BetaMessage } from "@anthropic-ai/sdk/resources/beta/messages/messages";
+import type {
+	BetaMessage,
+	BetaRawMessageStreamEvent,
+} from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import type { Message, RawMessageStreamEvent } from "@anthropic-ai/sdk/resources/messages/messages";
 import type { Stream } from "@anthropic-ai/sdk/streaming";
 import type { TrustedClient } from "../../src/govern.js";
 import type { TrustReceipt } from "../../src/shared/types.js";
+import type { GovernedStream } from "../../src/streaming.js";
 
 type Assert<T extends true> = T;
 type IsExact<A, B> =
@@ -107,20 +111,29 @@ export type _CountTokensPreserved = Assert<
 	IsExact<ReturnType<GovAnthropic["messages"]["countTokens"]>, Promise<{ input_tokens: number }>>
 >;
 
-// ── overloaded create: each overload rewrites, streaming keeps its response type ──
+// ── overloaded create: each overload rewrites per call site ──
 // Mirrors the real SDK's 3-overload shape (non-streaming / streaming / base).
+// The streaming overload's response is AsyncIterable-shaped so it exercises the
+// GovernedResponseOf branch: the runtime wraps an iterable provider response in
+// createGovernedStream's wrapper (AsyncIterable + `.receipt` promise) — the raw
+// SDK stream members (`tee()` etc.) do NOT exist on the governed response.
 // Acceptance criterion is per-CALL-SITE resolved result correctness, so every
 // assertion below is over `typeof` of an actual call expression — never over the
 // whole overloaded function type (ReturnType/IsExact only see the last overload).
 
+interface FakeSdkEventStream {
+	[Symbol.asyncIterator](): AsyncIterator<{ delta: string }>;
+	tee(): [FakeSdkEventStream, FakeSdkEventStream];
+}
+
 interface OverloadedAnthropicMock {
 	messages: {
 		create(params: { model: string; stream?: false }): Promise<{ kind: "msg" }>;
-		create(params: { model: string; stream: true }): Promise<{ kind: "stream" }>;
+		create(params: { model: string; stream: true }): Promise<FakeSdkEventStream>;
 		create(params: {
 			model: string;
 			stream?: boolean;
-		}): Promise<{ kind: "msg" } | { kind: "stream" }>;
+		}): Promise<{ kind: "msg" } | FakeSdkEventStream>;
 		stream(params: { model: string }): FakeMessageStreamHandle;
 	};
 }
@@ -141,8 +154,16 @@ const overloadStreamingCall = () => govOverloaded.messages.create({ model: "m", 
 export type _OverloadStreaming = Assert<
 	IsExact<
 		Awaited<ReturnType<typeof overloadStreamingCall>>,
-		{ response: { kind: "stream" }; receipt: TrustReceipt }
+		{ response: GovernedStream<{ delta: string }>; receipt: TrustReceipt }
 	>
+>;
+export type _OverloadStreamingHasNoRawMembers = Assert<
+	Extends<
+		Awaited<ReturnType<typeof overloadStreamingCall>>["response"],
+		{ tee: unknown }
+	> extends true
+		? false
+		: true
 >;
 
 const overloadWidenedCall = () =>
@@ -150,17 +171,22 @@ const overloadWidenedCall = () =>
 export type _OverloadWidened = Assert<
 	IsExact<
 		Awaited<ReturnType<typeof overloadWidenedCall>>,
-		{ response: { kind: "msg" } | { kind: "stream" }; receipt: TrustReceipt }
+		{ response: { kind: "msg" } | GovernedStream<{ delta: string }>; receipt: TrustReceipt }
 	>
 >;
 
 // ── REAL SDK: the published surface, per call site ──
-// The governed `response` must be EXACTLY what the same call on the raw SDK
-// would have resolved to (`Awaited<APIPromise<T>>` carries the SDK's
-// `_request_id` graft — the runtime awaits that promise, so the graft is the
-// honest type). Parity is asserted per call site against the raw client, then
-// the concrete SDK shape is pinned with `Extends`. If upstream adds a fourth
-// `create` overload or reshapes these types, this block breaks loudly.
+// Non-streaming: the governed `response` must be EXACTLY what the same call on
+// the raw SDK would have resolved to (`Awaited<APIPromise<T>>` carries the
+// SDK's `_request_id` graft — the runtime awaits that promise, so the graft is
+// the honest type); parity is asserted against the raw client, then the
+// concrete SDK shape is pinned with `Extends`.
+// Streaming: the governed `response` is NOT the SDK's raw `Stream` — the
+// runtime wraps it in createGovernedStream's wrapper, so the type is
+// `GovernedStream<RawMessageStreamEvent>` (AsyncIterable + settled-`.receipt`
+// promise; the envelope's own `receipt` is the estimate).
+// If upstream adds a fourth `create` overload or reshapes these types, this
+// block breaks loudly.
 
 type GovRealAnthropic = TrustedClient<Anthropic>;
 declare const rawAnthropic: Anthropic;
@@ -180,12 +206,8 @@ export type _RealNonStreamingIsMessage = Assert<
 	Extends<Awaited<ReturnType<typeof realGovNonStreaming>>["response"], Message>
 >;
 
-// The second RequestOptions argument must survive the rewrite.
-const realRawStreaming = () =>
-	rawAnthropic.messages.create(
-		{ model: "m", max_tokens: 1, messages: [], stream: true },
-		{ maxRetries: 0 },
-	);
+// The second RequestOptions argument must survive the rewrite. The response is
+// the governed wrapper, never the raw SDK Stream (no tee()/controller).
 const realGovStreaming = () =>
 	govRealAnthropic.messages.create(
 		{ model: "m", max_tokens: 1, messages: [], stream: true },
@@ -194,11 +216,16 @@ const realGovStreaming = () =>
 export type _RealStreamingEnvelope = Assert<
 	IsExact<
 		Awaited<ReturnType<typeof realGovStreaming>>,
-		{ response: Awaited<ReturnType<typeof realRawStreaming>>; receipt: TrustReceipt }
+		{ response: GovernedStream<RawMessageStreamEvent>; receipt: TrustReceipt }
 	>
 >;
-export type _RealStreamingIsStream = Assert<
-	Extends<Awaited<ReturnType<typeof realGovStreaming>>["response"], Stream<RawMessageStreamEvent>>
+export type _RealStreamingIsNotRawStream = Assert<
+	Extends<
+		Awaited<ReturnType<typeof realGovStreaming>>["response"],
+		Stream<RawMessageStreamEvent>
+	> extends true
+		? false
+		: true
 >;
 export type _RealStreamingIsNotMessage = Assert<
 	Extends<Awaited<ReturnType<typeof realGovStreaming>>["response"], Message> extends true
@@ -206,9 +233,9 @@ export type _RealStreamingIsNotMessage = Assert<
 		: true
 >;
 
-// Widened `stream: boolean` resolves the base overload: the union envelope.
-const realRawWidened = () =>
-	rawAnthropic.messages.create({ model: "m", max_tokens: 1, messages: [], stream: widenedFlag });
+// Widened `stream: boolean` resolves the base overload: the union envelope,
+// with the streaming half mapped to the governed wrapper and the message half
+// kept at raw-SDK parity.
 const realGovWidened = () =>
 	govRealAnthropic.messages.create({
 		model: "m",
@@ -219,11 +246,13 @@ const realGovWidened = () =>
 export type _RealWidenedEnvelope = Assert<
 	IsExact<
 		Awaited<ReturnType<typeof realGovWidened>>,
-		{ response: Awaited<ReturnType<typeof realRawWidened>>; receipt: TrustReceipt }
+		{
+			response:
+				| GovernedStream<RawMessageStreamEvent>
+				| Awaited<ReturnType<typeof realRawNonStreaming>>;
+			receipt: TrustReceipt;
+		}
 	>
->;
-export type _RealWidenedIsUnion = Assert<
-	Extends<Stream<RawMessageStreamEvent> | Message, Awaited<ReturnType<typeof realRawWidened>>>
 >;
 
 // beta.messages.create mirrors messages.create (GovernedBeta reuses GovernedMessages).
@@ -239,6 +268,14 @@ export type _RealBetaEnvelope = Assert<
 >;
 export type _RealBetaIsBetaMessage = Assert<
 	Extends<Awaited<ReturnType<typeof realGovBeta>>["response"], BetaMessage>
+>;
+const realGovBetaStreaming = () =>
+	govRealAnthropic.beta.messages.create({ model: "m", max_tokens: 1, messages: [], stream: true });
+export type _RealBetaStreamingEnvelope = Assert<
+	IsExact<
+		Awaited<ReturnType<typeof realGovBetaStreaming>>,
+		{ response: GovernedStream<BetaRawMessageStreamEvent>; receipt: TrustReceipt }
+	>
 >;
 
 // ── governance methods grafted on ──
