@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import type { TrustReceipt } from "usertrust";
 import { InsufficientBalanceError } from "usertrust";
-import type { Authorization, AuthorizeParams, Governor, SettleParams } from "usertrust/headless";
+import type {
+	Authorization,
+	AuthorizeParams,
+	EnvelopeStatus,
+	Governor,
+	SettleParams,
+} from "usertrust/headless";
 import type { PolicyDecider } from "./composite.js";
 import { CompositeEvaluator } from "./composite.js";
 
@@ -69,6 +75,15 @@ export function createMockGovernor(opts: { budget?: number } = {}): { governor: 
 		},
 		budgetRemaining(): number {
 			return budget;
+		},
+		/**
+		 * No ledger and no `parentUserId`, so there are no envelopes to report on —
+		 * the same empty answer the real governor gives for a dry-run or identity-less
+		 * one. Faking scarcity numbers here would put a demo's invented percentages in
+		 * front of a model as though they came from TigerBeetle.
+		 */
+		async budgetContext(): Promise<EnvelopeStatus[]> {
+			return [];
 		},
 		// biome-ignore lint/suspicious/noExplicitAny: mock config, never read by the adapter
 		config: {} as any,

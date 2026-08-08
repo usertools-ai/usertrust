@@ -45,6 +45,17 @@ import { CreateTransferStatus } from "tigerbeetle-node";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import { writeReceipt } from "./audit/rotation.js";
 import { getCurrentCostCenter } from "./budget/attribution.js";
+// The money math and the validation doors are IMPORTED from `budget/context.ts`,
+// never re-implemented: `budgetContext()` below is a second reader of the same
+// ledger balances, and a private clamp/runway copy here would let the pull-side
+// report and the standalone `budgetContext` disagree about the same envelope.
+import {
+	assertDistinctValidCostCenters,
+	assertEnvelopeCap,
+	type EnvelopeDescriptor,
+	type EnvelopeStatus,
+	envelopeStatusFrom,
+} from "./budget/context.js";
 // The cost-center envelope helpers are SHARED with `govern.ts`, not copied from
 // it (see the block comment above `ResolvedEnvelope` there). D1's throw, A2's
 // pre-gate refusal, A7's unfloored arithmetic and D5's label re-wrap all decide
@@ -88,6 +99,12 @@ import type { EndpointInfo, TrustConfig, TrustReceipt } from "./shared/types.js"
 import { TrustConfigSchema } from "./shared/types.js";
 
 // ── Public types ──
+
+// Re-exported so an integration typing a `budgetContext()` call has both shapes at
+// the SAME entry point as the `Governor` it calls — `usertrust/headless` is a
+// package entry point in its own right, and a plugin should not have to reach into
+// the root export for the argument type of a method it can already see here.
+export type { EnvelopeDescriptor, EnvelopeStatus } from "./budget/context.js";
 
 /**
  * Options for createGovernor(): TrustOpts plus a governor-wide default
@@ -273,6 +290,34 @@ export interface Governor {
 
 	/** Graceful shutdown — voids all pending holds, flushes audit. */
 	destroy(): Promise<void>;
+
+	/**
+	 * The pull-side scarcity read across this governor's own envelopes — what an
+	 * integration puts in front of the model so it can spend like it knows what
+	 * things cost. Batched: exactly ONE ledger round trip for the whole array,
+	 * answered in descriptor order.
+	 *
+	 * REPORTING ONLY (A8). Nothing here gates, delays, or decides a spend, and
+	 * the numbers are snapshots that can race a concurrent settlement — the same
+	 * observational contract `budget/context.ts` documents at length.
+	 *
+	 * TWO LAYERS, deliberately not the same layer:
+	 *  - Pre-I/O validation THROWS — the `MAX_ENVELOPES` cap, the
+	 *    per-descriptor cost-center door and duplicate rejection are caller/config
+	 *    bugs, and answering `[]` would hide a misconfiguration forever.
+	 *  - Every READ failure is quiet: dryRun, no engine, an engine without
+	 *    `lookupBalances`, a rejected lookup, or a governor with no
+	 *    `parentUserId` all answer `[]`.
+	 *
+	 * `envelopes` is CALLER TRUTH for reporting only. There is no cost-center
+	 * registry, so `allocated` and the period bounds come from the caller's own
+	 * bookkeeping — a descriptor neither creates nor funds an envelope
+	 * (`allocateBudget` does).
+	 *
+	 * @throws Error when `envelopes.length` exceeds the cap, a `costCenter` fails
+	 * validation, or two descriptors name the same one — all before any ledger I/O.
+	 */
+	budgetContext(envelopes: EnvelopeDescriptor[]): Promise<EnvelopeStatus[]>;
 
 	/** Estimate cost in usertokens for a model call. */
 	estimateCost(model: string, inputTokens: number, outputTokens: number): number;
@@ -1366,6 +1411,62 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			if (proxyConn != null) {
 				proxyConn.destroy();
 			}
+		},
+
+		/**
+		 * REPORTING ONLY, and the failure policy is the whole design (A8).
+		 *
+		 * This is the MIRROR of `snapshotEnvelopeRemaining`: same read, never throws,
+		 * because nothing downstream decides anything from it. It is deliberately the
+		 * OPPOSITE of `preflightEnvelopeRemaining` (A2), which REFUSES an attributed
+		 * authorize when the same read fails — there the number feeds the policy gate,
+		 * so degrading it would clear a call against a wallet the money never came
+		 * from. Here the number goes into a scarcity hint a model reads; an
+		 * unreachable ledger must cost the caller a paragraph of prose, never a
+		 * denied or delayed call. DO NOT UNIFY THE TWO.
+		 *
+		 * Only the awaited `lookupBalances` is inside the catch. The pre-I/O doors
+		 * above it are caller bugs and throw, and the `envelopeStatusFrom` mapping
+		 * below it stays OUTSIDE — a non-finite `periodStartMs` propagates exactly as
+		 * it does from core `budgetContext`, rather than collapsing every envelope's
+		 * report into an empty array the caller cannot diagnose.
+		 */
+		async budgetContext(envelopes: EnvelopeDescriptor[]): Promise<EnvelopeStatus[]> {
+			// Cheapest door first, and the only one that needs no ledger identity.
+			assertEnvelopeCap(envelopes);
+
+			// No parentUserId ⇒ no envelope account is derivable. Unlike `authorize()`'s
+			// D1 throw, nothing is about to spend here, so there is nothing to refuse:
+			// a governor with no ledger identity simply has no envelopes to report on.
+			// It also has to be settled BEFORE the per-descriptor door, which validates
+			// each cost center against a parent.
+			const parentUserId = config.parentUserId;
+			if (parentUserId === undefined) return [];
+
+			assertDistinctValidCostCenters(parentUserId, envelopes);
+
+			// dryRun has no engine at all; an injected engine may predate `lookupBalances`.
+			if (isDryRun || engine == null || engine.lookupBalances === undefined) return [];
+
+			// ONE clock read for the whole batch, so two envelopes in one response never
+			// disagree about "now" — the same rule core `budgetContext` follows.
+			const clock = Date.now();
+			const accountIds = envelopes.map((envelope) =>
+				TrustTBClient.deriveCostCenterAccountId(parentUserId, envelope.costCenter),
+			);
+
+			let balances: Map<bigint, number>;
+			try {
+				balances = await engine.lookupBalances(accountIds);
+			} catch {
+				return [];
+			}
+
+			// An id the ledger omitted reads as 0 — never-allocated and fully-reclaimed
+			// are the same observable state.
+			return envelopes.map((envelope, i) =>
+				envelopeStatusFrom(envelope, balances.get(accountIds[i] as bigint) ?? 0, clock),
+			);
 		},
 
 		estimateCost(model: string, inputTokens: number, outputTokens: number): number {

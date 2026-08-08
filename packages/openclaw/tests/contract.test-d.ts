@@ -1,0 +1,252 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Usertools, Inc.
+
+/**
+ * Contract test — `src/types.ts` mirrors vs. the PINNED `@mariozechner/pi-ai`,
+ * plus every assertion that reads only our own mirror.
+ *
+ * These are compile-time assertions. `tsc -b` never compiles this file (the
+ * package tsconfig's `rootDir: "src"` excludes `tests/`), so the real gate is
+ *
+ *   npx tsc -p packages/openclaw/tsconfig.type-tests.json
+ *
+ * which `npm run typecheck` runs — meaning this file compiles on EVERY push.
+ *
+ * Pin: `@mariozechner/pi-ai` 0.73.1 — the surface programmatic pi-ai callers
+ * hand the wrapper. An exact devDependency, imported type-only: nothing here
+ * reaches runtime and the package is not required to build or ship the plugin.
+ *
+ * The **openclaw** half of the same contract lives in
+ * `contract-openclaw.test-d.ts`, compiled by the `openclaw-contract` CI job
+ * after an out-of-tree install of the pinned host. openclaw is not a
+ * devDependency (see `../openclaw-contract.env`), and `tsc` cannot conditionally
+ * include a file, so the split is two projects rather than one. Every assertion
+ * runs in CI; they just run in two different jobs.
+ *
+ * Variance, and why each direction is asserted:
+ *   - Events flow host → us, so the host's event union must be assignable to
+ *     ours (`Extends<Host, Ours>`).
+ *   - Fields the money/attribution paths read by name are pinned with exact
+ *     equality — a rename upstream has to fail this compile, not production.
+ */
+
+import type {
+	AssistantMessage as PiAssistantMessage,
+	Context as PiContext,
+	AssistantMessageEvent as PiEvent,
+	Message as PiMessage,
+	Model as PiModel,
+	StreamFunction as PiStreamFunction,
+	ToolResultMessage as PiToolResult,
+	Usage as PiUsage,
+} from "@mariozechner/pi-ai";
+// Deliberately the PACKAGE ENTRY POINT — see the entry-point block below.
+import type {
+	CacheRetention as EntryCacheRetention,
+	ProviderResponse as EntryProviderResponse,
+	ProviderStreamOptions as EntryProviderStreamOptions,
+	StreamOptions as EntryStreamOptions,
+	Transport as EntryTransport,
+} from "../src/index.js";
+import type {
+	AssistantMessage,
+	AssistantMessageEventStreamLike,
+	CacheRetention,
+	Context,
+	Message,
+	Model,
+	OpenClawPluginApi,
+	ProviderResponse,
+	ProviderStreamOptions,
+	StreamEvent,
+	StreamFn,
+	StreamOptions,
+	ToolResultMessage,
+	Transport,
+	Usage,
+} from "../src/types.js";
+
+type Assert<T extends true> = T;
+type IsExact<A, B> =
+	(<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+type Extends<A, B> = A extends B ? true : false;
+
+// ── (2) tool-RESULT message: role, name field, correlation id, error flag ──
+
+export type _ToolResultRoleIsToolResult = Assert<IsExact<ToolResultMessage["role"], "toolResult">>;
+export type _PiToolResultRole = Assert<IsExact<PiToolResult["role"], "toolResult">>;
+
+// The tool NAME lives on `toolName`, at the top level of the message.
+export type _ToolNameIsString = Assert<IsExact<ToolResultMessage["toolName"], string>>;
+export type _PiToolName = Assert<IsExact<PiToolResult["toolName"], string>>;
+
+// Correlation back to the preceding assistant turn's `ToolCall.id`.
+export type _ToolCallIdIsString = Assert<IsExact<ToolResultMessage["toolCallId"], string>>;
+export type _PiToolCallId = Assert<IsExact<PiToolResult["toolCallId"], string>>;
+
+// `isError` is REQUIRED (not optional) on both hosts — excluded results are
+// distinguishable without inspecting any text.
+export type _IsErrorRequiredBoolean = Assert<IsExact<ToolResultMessage["isError"], boolean>>;
+export type _PiIsErrorRequired = Assert<IsExact<PiToolResult["isError"], boolean>>;
+
+// pi-ai's tool results are accepted by the mirror.
+export type _PiToolResultAssignable = Assert<Extends<PiToolResult, ToolResultMessage>>;
+
+// The message union has exactly three roles — there is no system-role message.
+export type _MessageRoles = Assert<IsExact<Message["role"], "user" | "assistant" | "toolResult">>;
+export type _PiMessageRoles = Assert<
+	IsExact<PiMessage["role"], "user" | "assistant" | "toolResult">
+>;
+export type _PiMessagesAssignable = Assert<Extends<PiMessage, Message>>;
+
+// ── (3) done / error terminal events and where usage lives ──
+
+export type _PiEventTypes = Assert<IsExact<StreamEvent["type"], PiEvent["type"]>>;
+
+// The terminal discriminant is `reason`, not `stopReason`.
+export type _DoneReason = Assert<
+	IsExact<Extract<StreamEvent, { type: "done" }>["reason"], "stop" | "length" | "toolUse">
+>;
+export type _PiDoneReason = Assert<
+	IsExact<Extract<PiEvent, { type: "done" }>["reason"], "stop" | "length" | "toolUse">
+>;
+export type _ErrorReason = Assert<
+	IsExact<Extract<StreamEvent, { type: "error" }>["reason"], "aborted" | "error">
+>;
+
+// Usage is nested on the terminal assistant message, NOT on the event.
+export type _PiDoneCarriesMessage = Assert<
+	IsExact<Extract<PiEvent, { type: "done" }>["message"], PiAssistantMessage>
+>;
+export type _PiUsageOnMessage = Assert<IsExact<PiAssistantMessage["usage"], PiUsage>>;
+
+// Token counts are `input`/`output`, not `inputTokens`/`outputTokens`.
+export type _UsageInput = Assert<IsExact<Usage["input"], number>>;
+export type _UsageOutput = Assert<IsExact<Usage["output"], number>>;
+export type _PiUsageFields = Assert<Extends<PiUsage, Usage>>;
+
+// Whole-union acceptance: pi-ai's events flow through the mirror.
+export type _PiEventsAssignable = Assert<Extends<PiEvent, StreamEvent>>;
+
+// ── (4) system-prompt surface ──
+
+// `Context.systemPrompt` is the delivery surface; injection has nowhere else
+// to go because `Message` carries no system role (asserted above).
+export type _SystemPromptIsOptionalString = Assert<
+	IsExact<Context["systemPrompt"], string | undefined>
+>;
+export type _PiSystemPrompt = Assert<IsExact<PiContext["systemPrompt"], string | undefined>>;
+export type _PiContextAccepted = Assert<Extends<PiContext, Context>>;
+
+// ── (5) `model` is an OBJECT at the wrapper boundary, not a string ──
+
+export type _ModelIdIsString = Assert<IsExact<Model["id"], string>>;
+export type _PiModelIdIsString = Assert<IsExact<PiModel<"anthropic-messages">["id"], string>>;
+
+// ── stream surface: richer than AsyncIterable ──
+
+// A bare async iterable is NOT a valid return at this boundary — `result()`
+// has to be forwarded too, which is why the wrapper is a proxy.
+export type _BareIterableIsInsufficient = Assert<
+	IsExact<Extends<AsyncIterable<StreamEvent>, AssistantMessageEventStreamLike>, false>
+>;
+export type _StreamResultIsFinalMessage = Assert<
+	IsExact<ReturnType<AssistantMessageEventStreamLike["result"]>, Promise<AssistantMessage>>
+>;
+
+// pi-ai's `StreamFunction` is the synchronous-return variant of the same shape.
+export type _PiStreamFunctionAccepted = Assert<Extends<PiStreamFunction, StreamFn>>;
+
+// ── per-call options: the host's surface, and it is OPEN ──
+
+/** The options bag the pinned pi-ai stream function actually takes. */
+type PiStreamOptions = NonNullable<Parameters<PiStreamFunction>[2]>;
+
+export type _PiOptionsAccepted = Assert<Extends<PiStreamOptions, StreamOptions>>;
+export type _OptionsForwardableToPi = Assert<Extends<StreamOptions, PiStreamOptions>>;
+
+/**
+ * Excess-property checking is invisible to a type-level `Extends` assertion —
+ * it fires only on a FRESH object literal — so the mirror's surface has to be
+ * asserted with a VALUE. A field the host declares and the mirror drops is not
+ * an assignability failure; it is a caller who cannot write
+ * `stream(model, ctx, { headers })` without a cast.
+ *
+ * Every field below is declared on the pinned `StreamOptions`
+ * (`pi-ai/dist/types.d.ts:24-85`, `openclaw/dist/types-CFIUY_La.d.ts:50-119`).
+ */
+export const _hostOptionFieldsAreWritable: StreamOptions = {
+	temperature: 0.2,
+	maxTokens: 1024,
+	stop: ["\n\n"],
+	apiKey: "sk-test",
+	transport: "sse",
+	cacheRetention: "long",
+	sessionId: "session-1",
+	promptCacheKey: "cache-1",
+	headers: { "x-usertrust-trace": "1" },
+	timeoutMs: 30_000,
+	maxRetries: 2,
+	maxRetryDelayMs: 60_000,
+	metadata: { user_id: "u-1" },
+};
+
+/**
+ * And the OPEN half. The host's own escape hatch for provider-specific extras
+ * is `ProviderStreamOptions = StreamOptions & Record<string, unknown>`
+ * (`pi-ai/dist/types.d.ts:86`, `openclaw/dist/types-CFIUY_La.d.ts:123`), which
+ * is not decoration: the pinned agent loop spreads its WHOLE config into the
+ * bag — `streamFunction(config.model, llmContext, { ...config, apiKey, signal })`
+ * (`openclaw/dist/proxy-BzhBz8iM.js:356-360`) — so the values that reach a
+ * stream fn at runtime always carry keys no interface declares.
+ */
+export const _providerOptionsAreOpen: ProviderStreamOptions = {
+	maxTokens: 64,
+	reasoning: "high",
+	thinkingBudgets: { low: 1024 },
+	someProviderSpecificKnob: true,
+};
+
+// ── the PACKAGE ENTRY POINT, not the module the mirrors live in ──
+
+/**
+ * Everything above imports from `../src/types.js`. **No consumer can do that.**
+ * `package.json` publishes exactly ONE export subpath (`.` → `dist/index.js`),
+ * so a type that `src/types.ts` exports but `src/index.ts` does not re-export
+ * is unreachable outside this package — and no assertion written against
+ * `src/types.js` can see the difference. That blind spot is precisely how
+ * `ProviderStreamOptions` shipped as a documented escape hatch that failed
+ * TS2614 at the entry point.
+ *
+ * These assertions therefore import from the ENTRY POINT and pin that the
+ * published surface is the same type as the internal one. Anything a doc
+ * comment or a README tells a consumer to import belongs here.
+ */
+export type _EntryProviderStreamOptions = Assert<
+	IsExact<EntryProviderStreamOptions, ProviderStreamOptions>
+>;
+export type _EntryStreamOptions = Assert<IsExact<EntryStreamOptions, StreamOptions>>;
+export type _EntryTransport = Assert<IsExact<EntryTransport, Transport>>;
+export type _EntryCacheRetention = Assert<IsExact<EntryCacheRetention, CacheRetention>>;
+export type _EntryProviderResponse = Assert<IsExact<EntryProviderResponse, ProviderResponse>>;
+
+/**
+ * And the reason the escape hatch exists at all, exercised as a VALUE through
+ * the entry point: `reasoning` cannot be a named field on `StreamOptions`
+ * (openclaw's thinking enum carries `"max"`/`"off"`, pi-ai's carries neither),
+ * so a caller who needs it types the literal as `ProviderStreamOptions`.
+ * Against a bare `StreamOptions` this same literal is a TS2353 excess-property
+ * error — which is the whole point of the alias being reachable.
+ */
+export const _entryEscapeHatchIsUsable: EntryProviderStreamOptions = {
+	maxTokens: 64,
+	reasoning: "high",
+	thinkingBudgets: { low: 1024 },
+};
+
+// ── plugin registration + config delivery ──
+
+// Config arrives on the api object, not as a hook argument.
+export type _PluginConfigOnApi = Assert<
+	IsExact<OpenClawPluginApi["pluginConfig"], Record<string, unknown> | undefined>
+>;

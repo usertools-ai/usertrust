@@ -1,0 +1,11 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"declaration": false,
+		"declarationMap": false,
+		"sourceMap": false,
+		"composite": false
+	},
+	"include": ["tests/contract.test-d.ts", "tests/host-fixtures.ts"]
+}

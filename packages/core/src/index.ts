@@ -127,6 +127,13 @@ export {
 	VaultKeyMissingError,
 	VaultNotInitializedError,
 } from "./shared/errors.js";
+// The AUTHORITATIVE parent-id door, exported so an integration that validates its
+// own operator config refuses exactly what the ledger doors refuse — charset AND
+// the `::` quarantine, with the reason each door already prints. A copy of the
+// pattern outside this package is a rule that drifts silently: it would accept an
+// id `createGovernor()` then rejects, or (worse) admit a `::` parent whose account
+// derivation lands on stranded pre-v3 cost-center money.
+export { parentUserIdRefusal } from "./shared/ids.js";
 // Types
 export type {
 	ActionDescriptor,

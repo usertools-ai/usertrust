@@ -10,7 +10,7 @@
 		"test:watch": "vitest",
 		"lint": "biome check .",
 		"lint:fix": "biome check --write .",
-		"typecheck": "tsc -b && tsc -p packages/core/tsconfig.type-tests.json",
+		"typecheck": "tsc -b && tsc -p packages/core/tsconfig.type-tests.json && tsc -p packages/openclaw/tsconfig.type-tests.json",
 		"typecheck:types": "tsc -p packages/core/tsconfig.type-tests.json"
 	},
 	"devDependencies": {

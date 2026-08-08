@@ -22,7 +22,20 @@ import {
 	extractTextDeltaLength,
 	extractUsageFromProviderChunk,
 } from "../src/token-extractor.js";
-import type { StreamContext, StreamEvent, StreamFn } from "../src/types.js";
+import type {
+	AssistantMessageEventStreamLike,
+	Context,
+	StreamEvent,
+	StreamFn,
+} from "../src/types.js";
+import {
+	asHostStream,
+	doneEvent,
+	makeContext,
+	makeModel,
+	makeUsage,
+	textDelta,
+} from "./host-fixtures.js";
 
 /** A realistic Ollama /api/chat final chunk (values from a llama3.3 run). */
 const ollamaFinalChunk = {
@@ -205,10 +218,10 @@ describe("createAccumulator — Ollama-native capture", () => {
 		expect(result.computeMs).toBe(4709);
 	});
 
-	it("omits computeMs entirely for pi-ai event streams (A6 discipline)", () => {
+	it("omits computeMs entirely for host event streams (A6 discipline)", () => {
 		const acc = createAccumulator();
-		acc.update({ type: "text_delta", text: "hi" });
-		acc.update({ type: "done", stopReason: "stop", usage: { inputTokens: 10, outputTokens: 5 } });
+		acc.update(textDelta("hi"));
+		acc.update(doneEvent(makeUsage(10, 5)));
 
 		const result = acc.result();
 		expect(result.usageReported).toBe(true);
@@ -260,15 +273,17 @@ function fakeGovernor(): { governor: Governor; settle: ReturnType<typeof vi.fn> 
 }
 
 function streamOf(chunks: unknown[]): StreamFn {
-	return (_model: string, _context: StreamContext, _options?: Record<string, unknown>) =>
-		(async function* () {
-			for (const chunk of chunks) {
-				yield chunk as StreamEvent;
-			}
-		})();
+	return (): AssistantMessageEventStreamLike =>
+		asHostStream(
+			(async function* () {
+				for (const chunk of chunks) {
+					yield chunk as StreamEvent;
+				}
+			})(),
+		);
 }
 
-const context: StreamContext = { messages: [{ role: "user", content: "hi" }], model: "m" };
+const context: Context = makeContext();
 
 describe("stream-governor — computeMs forwarding", () => {
 	it("forwards accumulated computeMs into governor.settle()", async () => {
@@ -279,7 +294,7 @@ describe("stream-governor — computeMs forwarding", () => {
 		);
 
 		const events: StreamEvent[] = [];
-		for await (const event of governed("llama3.3:70b", context)) {
+		for await (const event of await governed(makeModel("llama3.3:70b"), context)) {
 			events.push(event);
 		}
 
@@ -297,14 +312,11 @@ describe("stream-governor — computeMs forwarding", () => {
 	it("omits computeMs from settle params when the stream never carried one", async () => {
 		const { governor, settle } = fakeGovernor();
 		const governed = wrapStreamWithGovernance(
-			streamOf([
-				{ type: "text_delta", text: "hi" },
-				{ type: "done", stopReason: "stop", usage: { inputTokens: 10, outputTokens: 5 } },
-			]),
+			streamOf([textDelta("hi"), doneEvent(makeUsage(10, 5))]),
 			governor,
 		);
 
-		for await (const _event of governed("claude-sonnet-4-6", context)) {
+		for await (const _event of await governed(makeModel(), context)) {
 			// drain
 		}
 

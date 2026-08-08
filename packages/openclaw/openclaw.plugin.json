@@ -31,6 +31,55 @@
 			"proxyKey": {
 				"type": "string",
 				"description": "API key for the governance proxy."
+			},
+			"costCenters": {
+				"type": "object",
+				"additionalProperties": false,
+				"description": "Operator-declared tool→cost-center attribution + per-turn scarcity injection (Ship 2). Absent: no attribution, no scarcity block.",
+				"properties": {
+					"parentUserId": {
+						"type": "string",
+						"pattern": "^(?!.*::)[a-zA-Z0-9._@:-]{1,128}$",
+						"description": "Envelope account identity — forwarded to createGovernor as parentUserId. A single ':' is legal (e.g. 'acct:123'); '::' is reserved for pre-v3 cost-center accounts and refused."
+					},
+					"tools": {
+						"type": "object",
+						"additionalProperties": { "type": "string" },
+						"description": "toolName -> costCenter. Every value must name a key in envelopes."
+					},
+					"default": {
+						"type": "string",
+						"description": "Fallback cost center for unmapped tools / no tool-result run. Must name a key in envelopes."
+					},
+					"envelopes": {
+						"type": "object",
+						"maxProperties": 128,
+						"propertyNames": { "pattern": "^[a-zA-Z0-9._-]{1,64}$" },
+						"additionalProperties": {
+							"type": "object",
+							"additionalProperties": false,
+							"properties": {
+								"allocated": {
+									"type": "number",
+									"minimum": 0,
+									"description": "Envelope size, in usertokens."
+								},
+								"periodStartMs": { "type": "number", "description": "Epoch ms." },
+								"periodEndMs": {
+									"type": "number",
+									"description": "Epoch ms. Absent means an open-ended period."
+								}
+							},
+							"required": ["allocated", "periodStartMs"]
+						},
+						"description": "costCenter -> { allocated, periodStartMs, periodEndMs? }. At most 128 entries; each key must match ^[a-zA-Z0-9._-]{1,64}$."
+					},
+					"scarcityContext": {
+						"type": "boolean",
+						"description": "Inject the per-turn scarcity block into the system prompt. Default true when costCenters is present."
+					}
+				},
+				"required": ["parentUserId", "tools", "envelopes"]
 			}
 		},
 		"required": ["budget"]

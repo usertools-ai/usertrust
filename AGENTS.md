@@ -375,6 +375,20 @@ and `remaining` stays honest while `spent`, `fraction` and `runwayHours` silentl
 stream handle, or a post-settle read that did not answer. That read failing is deliberately silent:
 a receipt is a report, and degrading a report must never unwind or re-decide committed money.
 
+**The `withCostCenter` scope itself stays operator-authored even where the `cc` string is
+selected by agent activity.** `packages/openclaw`'s `deriveAttribution` (`src/attribution.ts`)
+picks *which* operator-declared cost center a call's `withCostCenter` scope opens by reading the
+trailing, correlated, non-error tool-result run out of the caller-supplied context — never from
+message text — but the only strings it can ever return are values already present in the
+plugin's frozen `tools`/`default` config, both validated at construction through this same
+`withCostCenter` door (§ above) before any call runs. The scope-opens-from-code-structure
+invariant is intact: what changed is that the code choosing the argument now reads agent
+activity instead of being hardcoded, and that choice is bounded to envelopes the operator
+explicitly delegated. Full security-model treatment — the bounded-delegation argument, the
+plugin-vs-programmatic evidence-trust boundary, and the documented residual — lives in
+`packages/openclaw/README.md`'s "Security model" section (verbatim from the ship's design spec),
+not duplicated here.
+
 **1 usertoken = $0.0001 USD, everywhere.** All pricing rates are usertokens per 1,000 LLM tokens.
 This constant is duplicated in `packages/verify` on purpose.
 
@@ -964,9 +978,22 @@ Real, verified, and worth knowing before you touch the surrounding code.
   means an agent that never opens a scope still reads as `spent: 0` while it burns the session
   budget. That residue is an INSTRUMENTATION gap, not an enforcement one: the session wallet's own
   `debits_must_not_exceed_credits` bounds that spend either way.
-- **`packages/openclaw` is not typechecked by CI.** It is absent from the root `tsconfig.json`
-  references and is not `composite`, so neither `tsc -b` nor `npm run typecheck` covers it. Type
-  errors there surface only at release time.
+- **`packages/openclaw/src` is still not typechecked by CI.** The package is absent from the root
+  `tsconfig.json` references and is not `composite`, so `tsc -b` does not cover it. What *is*
+  covered: `npm run typecheck` now also runs `tsc -p packages/openclaw/tsconfig.type-tests.json`,
+  which compiles the host-contract type assertions and, through them, `src/types.ts`. Errors
+  anywhere else under `src/` still surface only at release time (`cd packages/openclaw && npx tsc`).
+- **The openclaw host contract is split across two CI jobs, because openclaw is not installed.**
+  `openclaw` is an OPTIONAL PEER of `packages/openclaw`, never a devDependency, and `npm ci` does
+  not install optional peers — so no ordinary job has it on disk. The pi-ai half of the contract
+  (`tests/contract.test-d.ts`) compiles in `typecheck` on every push. The openclaw half
+  (`tests/contract-openclaw.test-d.ts` + the `contract.test.ts` host smoke) runs only in the
+  required `openclaw-contract` job, which installs the pinned version out-of-tree and sets
+  `USERTRUST_OPENCLAW_CONTRACT=1` — the flag that turns an absent or mismatched openclaw from a
+  loud skip into a hard failure. **The pin lives in exactly one file,
+  `packages/openclaw/openclaw-contract.env`; never inline the version anywhere else.** The split is
+  two tsconfigs rather than one conditional include because `tsc` cannot skip a file whose import
+  does not resolve.
 - **`site/` is not typechecked or built by CI** — only linted. Its `tsconfig.json` is standalone and
   has neither `noUncheckedIndexedAccess` nor `exactOptionalPropertyTypes`.
   **A green CI run says nothing about whether the site builds.** `site/` is not a workspace and
