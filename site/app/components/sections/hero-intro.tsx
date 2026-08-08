@@ -42,12 +42,16 @@ export default function HeroIntro() {
 
 	return (
 		<div aria-hidden="true" className="absolute inset-0 -z-10 overflow-hidden">
-			{/* Poster layer: first frame pre-video, final mascot frame once settled/static */}
+			{/* Poster layer: first frame pre-video, final mascot frame once settled/static.
+			    Hero framing shift: transform-only pan/zoom on md:+ so the mascot's head
+			    clears the fixed nav with headroom and the figure rests right of center.
+			    Both media layers below carry IDENTICAL transform classes — divergence here
+			    reintroduces the settle-swap jump this shift exists to remove. */}
 			{/* biome-ignore lint/performance/noImgElement: decorative full-bleed backdrop swapped via plain src, not the LCP candidate (the headline is) */}
 			<img
 				src={settled ? "/intro/intro-poster.jpg" : "/intro/intro-first.jpg"}
 				alt=""
-				className="absolute inset-0 h-full w-full object-cover"
+				className="absolute inset-0 h-full w-full object-cover md:scale-[1.2] md:translate-x-[13%] md:translate-y-[16%] 2xl:scale-[1.3]"
 			/>
 			{mountVideo && (
 				<video
@@ -57,7 +61,7 @@ export default function HeroIntro() {
 					autoPlay
 					preload="none"
 					onEnded={() => setSettled(true)}
-					className="absolute inset-0 h-full w-full object-cover"
+					className="absolute inset-0 h-full w-full object-cover md:scale-[1.2] md:translate-x-[13%] md:translate-y-[16%] 2xl:scale-[1.3]"
 				>
 					{INTRO_VIDEO_SOURCES.map((source) => (
 						<source key={source.type} src={source.src} type={source.type} />
