@@ -1,6 +1,6 @@
 ---
 title: Pricing
-description: Usertoken costs per model, estimation functions, and the fallback rate.
+description: Usertoken costs per model across all four tiers, estimation functions, and the fallback rate.
 ---
 
 All costs in the usertrust SDK are denominated in **usertokens** (UT).
@@ -11,38 +11,60 @@ A budget of `100_000` UT equals $10.00. A budget of `1_000_000` UT equals $100.0
 
 ## Pricing Table
 
-The SDK includes a 20-model pricing table in `ledger/pricing.ts`. Rates are in usertokens per 1,000 LLM tokens.
+The SDK includes a 20-model pricing table in `ledger/pricing.ts`, current as of
+`PRICING_TABLE_VERSION = "2026-08-08"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
+Rates are in usertokens per 1,000 LLM tokens, across **four tiers**: input (fresh prompt tokens),
+output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation prompt tokens). A
+`—` means the provider publishes no rate for that tier — it is **not** free; see
+[Cache tiers and the fallback invariant](#cache-tiers-and-the-fallback-invariant) below.
 
 ### Anthropic
 
-| Model | Input (per 1K tokens) | Output (per 1K tokens) |
-|-------|----------------------|----------------------|
-| `claude-sonnet-4-6` | 30 | 150 |
-| `claude-haiku-4-5` | 10 | 50 |
-| `claude-opus-4-6` | 50 | 250 |
+| Model | Input | Output | Cache Read | Cache Write |
+|-------|------:|-------:|-----------:|------------:|
+| `claude-sonnet-4-6` | 30 | 150 | 3 | 37.5 |
+| `claude-haiku-4-5` | 10 | 50 | 1 | 12.5 |
+| `claude-opus-4-6` | 50 | 250 | 5 | 62.5 |
+
+Anthropic publishes cache-read at 0.1x base input and 5-minute cache-write at 1.25x. The 1-hour
+write premium (2x) collapses to the 5-minute rate — see [Documented
+approximations](#documented-approximations) — operators with 1h-heavy workloads should override via
+`customRates`.
 
 ### OpenAI
 
-| Model | Input (per 1K tokens) | Output (per 1K tokens) |
-|-------|----------------------|----------------------|
-| `gpt-4o` | 25 | 100 |
-| `gpt-4o-mini` | 1.5 | 6 |
-| `gpt-5.4` | 25 | 150 |
-| `o3` | 20 | 80 |
-| `o4-mini` | 5.5 | 22 |
+| Model | Input | Output | Cache Read | Cache Write |
+|-------|------:|-------:|-----------:|------------:|
+| `gpt-4o` | 25 | 100 | 12.5 | — |
+| `gpt-4o-mini` | 1.5 | 6 | 0.75 | — |
+| `gpt-5.4` | 25 | 150 | 2.5 | — |
+| `o3` | 20 | 80 | 5 | — |
+| `o4-mini` | 11 | 44 | 2.75 | — |
+
+The cached-input discount varies **within** the OpenAI family — `gpt-5.4` reads at 0.1x, `o3`/
+`o4-mini` at 0.25x — so there is no single family-level multiplier. OpenAI publishes no separate
+cache-write rate; writes bill at the standard input price, which is exactly what the fallback
+invariant reproduces by leaving `cacheWritePer1k` unset.
 
 ### Google Gemini
 
-| Model | Input (per 1K tokens) | Output (per 1K tokens) |
-|-------|----------------------|----------------------|
-| `gemini-2.5-flash` | 3 | 25 |
-| `gemini-2.5-pro` | 12.5 | 100 |
-| `gemini-3.1-pro` | 20 | 120 |
+| Model | Input | Output | Cache Read | Cache Write |
+|-------|------:|-------:|-----------:|------------:|
+| `gemini-2.5-flash` | 3 | 25 | 0.3 | — |
+| `gemini-2.5-pro` | 12.5 | 100 | 1.25 | — |
+| `gemini-3.1-pro` | 20 | 120 | 2 | — |
+
+Context-cache reads are 0.1x base input. Cache *creation* bills as ordinary input plus an hourly
+storage charge this per-token model doesn't carry, so `cacheWritePer1k` is omitted rather than
+guessed — see [Documented approximations](#documented-approximations).
 
 ### Other Providers
 
-| Model | Provider | Input (per 1K tokens) | Output (per 1K tokens) |
-|-------|----------|----------------------|----------------------|
+No cache-tier pricing is currently published for these models; both cache columns fall back to
+the input rate.
+
+| Model | Provider | Input | Output |
+|-------|----------|------:|-------:|
 | `mistral-large` | Mistral | 5 | 15 |
 | `deepseek-chat` | DeepSeek | 2.8 | 4.2 |
 | `deepseek-reasoner` | DeepSeek | 2.8 | 4.2 |
@@ -57,6 +79,28 @@ The SDK includes a 20-model pricing table in `ledger/pricing.ts`. Rates are in u
 Rates reflect the SDK's built-in table. Check `packages/core/src/ledger/pricing.ts` for the canonical source.
 </Callout>
 
+## Cache tiers and the fallback invariant
+
+`ModelRates` carries two optional fields beyond `inputPer1k`/`outputPer1k`:
+
+```typescript
+interface ModelRates {
+  inputPer1k: number;
+  outputPer1k: number;
+  cacheReadPer1k?: number;  // absent ⇒ prices at inputPer1k, never 0
+  cacheWritePer1k?: number; // absent ⇒ prices at inputPer1k, never 0
+}
+```
+
+**Absent means "no published rate," not "free."** `costFromRates` resolves an absent (or
+non-finite/negative) cache rate to the model's `inputPer1k` — this is the one and only rate
+resolution site in the SDK. A model that omits `cacheWritePer1k` still bills cache-write tokens,
+at the same rate as fresh input.
+
+This is deliberately fail-safe: understating a bill is the dangerous direction (a budget that
+looks fuller than the real invoice), so an unmodeled cache tier defaults to the *conservative*
+price, never to zero. Never treat an absent field as a discount.
+
 ## Fallback Rate
 
 Models not in the pricing table use **sonnet-class pricing** as a conservative fallback:
@@ -66,7 +110,10 @@ Models not in the pricing table use **sonnet-class pricing** as a conservative f
 | Input | 30 UT |
 | Output | 150 UT |
 
-This ensures unknown models are never free. The fallback is intentionally high to avoid under-billing.
+This ensures unknown models are never free. The fallback is intentionally high to avoid
+under-billing, and is deliberately two-tier: an unrecognized model isn't known to be
+Anthropic-shaped, so attaching a cache discount here would silently under-bill it. Its cache
+tokens route through the same fallback invariant above and price at 30 UT/1k.
 
 ## Model Matching
 
@@ -86,7 +133,33 @@ getModelRates("unknown-model")              // fallback → { 30, 150 }
 function getModelRates(model: string): ModelRates
 ```
 
-Look up the input and output rates for a model. Falls back to prefix matching, then to the fallback rate.
+Look up the four-tier rates for a model. Falls back to prefix matching, then to the fallback rate.
+
+### costFromRates()
+
+```typescript
+function costFromRates(
+  rates: ModelRates,
+  inputTokens: number,
+  outputTokens: number,
+  cacheReadTokens?: number,  // default 0
+  cacheWriteTokens?: number, // default 0
+): number
+```
+
+Compute usertoken cost across all four tiers from an explicit `ModelRates`. The four counts are
+expected to be **disjoint** — cached tokens must already be separated out of `inputTokens` before
+this is called, or they are double-counted. Absent cache rates resolve to `inputPer1k` (see [Cache
+tiers and the fallback invariant](#cache-tiers-and-the-fallback-invariant)); the result is floored
+at 1 usertoken, same as `estimateCost()`.
+
+```typescript
+// 1,000 fresh input + 500 output + 2,000 cache-read tokens on claude-sonnet-4-6
+costFromRates(getModelRates("claude-sonnet-4-6"), 1000, 500, 2000, 0)
+// → Math.max(1, Math.ceil((1000/1000 * 30) + (500/1000 * 150) + (2000/1000 * 3)))
+// → Math.max(1, Math.ceil(30 + 75 + 6))
+// → 111 UT
+```
 
 ### estimateCost()
 
@@ -94,7 +167,9 @@ Look up the input and output rates for a model. Falls back to prefix matching, t
 function estimateCost(model: string, inputTokens: number, outputTokens: number): number
 ```
 
-Calculate the cost in usertokens for a model call given actual token counts. The result is always at least 1 (floor to prevent zero-amount transfers in TigerBeetle).
+Two-tier convenience wrapper around `costFromRates()` for callers that don't have a cache split —
+`cacheReadTokens`/`cacheWriteTokens` default to 0. The result is always at least 1 (floor to
+prevent zero-amount transfers in TigerBeetle).
 
 ```typescript
 // 1,000 input tokens + 500 output tokens on claude-sonnet-4-6
@@ -118,21 +193,62 @@ This function handles:
 - Per-message overhead (role, structure)
 - Tool-call overhead
 
-Returns at least 1.
+Returns at least 1. This estimate never models cache state — see [Documented
+approximations](#documented-approximations).
 
 ## ModelRates
 
 ```typescript
 interface ModelRates {
-  inputPer1k: number;   // usertokens per 1,000 input tokens
-  outputPer1k: number;  // usertokens per 1,000 output tokens
+  inputPer1k: number;        // usertokens per 1,000 fresh input tokens
+  outputPer1k: number;       // usertokens per 1,000 output tokens
+  cacheReadPer1k?: number;   // usertokens per 1,000 cache-hit tokens; absent ⇒ inputPer1k
+  cacheWritePer1k?: number;  // usertokens per 1,000 cache-creation tokens; absent ⇒ inputPer1k
 }
 ```
+
+### PRICING_TABLE_VERSION
+
+```typescript
+const PRICING_TABLE_VERSION: string  // e.g. "2026-08-08"
+```
+
+Date-stamped version of the built-in `PRICING_TABLE`, bumped whenever any entry's rates change.
+Recorded on every settled receipt (`receipt.meter.pricingTableVersion`) alongside the resolved
+rates (`receipt.meter.appliedRates`) so a metered cost can be reproduced exactly against the table
+version that priced it, independent of the SDK version currently installed.
+
+## Hold sizing and the cache-write premium
+
+The PENDING hold reserves the input leg at `max(inputPer1k, effectiveCacheWriteRate(rates))`, not
+`inputPer1k` alone. A cache write can price *above* plain input — Anthropic's 5-minute write is
+1.25x, the 1-hour write 2x — so sizing the hold off `inputPer1k` alone understates the reserve for
+any call that turns out to write to cache. This applies at both hold-sizing sites (the governed
+`authorize()` path and the headless `authorize()` path).
+
+**Consequence:** holds on cache-writing workloads run roughly 25% fatter than an input-only hold
+would size them. Warm (cache-hit-heavy) calls settle well below the hold and release the
+difference — this is conservative, not wasted budget. A caller supplying an exact
+`estimatedInputTokens` for a call that turns out cache-cold can still see the settle capped at the
+hold (`settlement_shortfall`, see `AGENTS.md`'s Money invariants) if the actual write premium
+exceeds even the widened reserve.
+
+## Documented approximations
+
+Reconciliation against a provider's own invoice is **approximate**, not exact — a receipt's `cost`
+exactly reproduces usertrust's own configured metered cost (counts × `appliedRates`, per-call
+`ceil`, 1-UT floor), but not necessarily the provider's bill line-for-line, because:
+
+Per-TTL write premium collapsed (1h = 2× billed as 1.25×; `customRates` override for 1h-heavy
+workloads); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
+hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not modeled — fixed
+per-model rates by design; per-call `ceil` + 1-UT floor differs from provider-side aggregation.
+Estimates never model cache state.
 
 ## Cost Estimation Flow
 
 During the [two-phase spend lifecycle](/docs/concepts/two-phase-spend), costs are estimated twice:
 
-1. **Before the call (PENDING):** `estimateInputTokens()` produces a conservative input estimate. Combined with `max_tokens` for the output estimate, `estimateCost()` calculates the hold amount. The 1.5x safety margin means the hold usually exceeds actual cost.
+1. **Before the call (PENDING):** `estimateInputTokens()` produces a conservative input estimate. Combined with `max_tokens` for the output estimate and the cache-write premium guard above, the SDK calculates the hold amount. The 1.5x safety margin (plus the write-premium guard) means the hold usually exceeds actual cost.
 
-2. **After the call (POST):** Actual token counts from the provider response (or accumulated from stream chunks) produce the real cost. The difference between the hold and the actual cost is released back to the available budget.
+2. **After the call (POST):** Actual token counts from the provider response (or accumulated from stream chunks), split into all four tiers, produce the real cost via `costFromRates()`. The difference between the hold and the actual cost is released back to the available budget.

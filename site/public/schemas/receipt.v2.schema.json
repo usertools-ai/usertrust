@@ -1,0 +1,208 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://usertrust.ai/schemas/receipt.v2.schema.json",
+	"title": "TrustReceipt",
+	"description": "The receipt returned by every governed call in usertrust. Each receipt links a two-phase ledger transfer (PENDING → POST/VOID) to its hash-chained audit event. v2 is additive over v1 (per the site's versioning policy: v1 stays frozen forever): it adds `usage` (the four-tier disjoint token split) and widens `meter` with `appliedRates` and `pricingTableVersion`, so a metered cost can be independently recomputed from the record alone. Receipts may carry additional diagnostic fields beyond this schema (e.g. proxy stub markers); v2 validators must ignore unknown fields rather than reject them.",
+	"type": "object",
+	"required": [
+		"transferId",
+		"cost",
+		"budgetRemaining",
+		"auditHash",
+		"chainPath",
+		"receiptUrl",
+		"settled",
+		"model",
+		"provider",
+		"timestamp"
+	],
+	"properties": {
+		"transferId": {
+			"type": "string",
+			"description": "Unique id of the two-phase ledger transfer (PENDING → POST/VOID) this receipt settles. Typically of the form 'tx_<base36 time>_<8 hex chars>'."
+		},
+		"cost": {
+			"type": "number",
+			"description": "Cost of the call in usertokens. Denomination is given by meter.costBasis when present: 'usd-proxy' (1 usertoken = $0.0001) or 'nominal' (bookkeeping units for local endpoints). On a streaming estimated receipt this is the pre-call estimate until the stream settles."
+		},
+		"budgetRemaining": {
+			"type": "number",
+			"description": "Budget remaining after this call, in usertokens: configured budget minus settled spend minus in-flight holds."
+		},
+		"auditHash": {
+			"description": "SHA-256 hex digest linking this receipt to the audit chain. Usually the hash of the audit event written for this call; on a streaming estimated receipt it is a placeholder digest until settlement. The sentinel 'AUDIT_DEGRADED' when the audit write failed (see auditDegraded).",
+			"oneOf": [
+				{
+					"type": "string",
+					"pattern": "^[a-f0-9]{64}$"
+				},
+				{
+					"const": "AUDIT_DEGRADED"
+				}
+			]
+		},
+		"chainPath": {
+			"type": "string",
+			"description": "Vault-relative path to the audit chain directory (currently '.usertrust/audit')."
+		},
+		"receiptUrl": {
+			"type": ["string", "null"],
+			"description": "Hosted receipt URL. Currently always null: the only code path that populates it requires proxy mode, which was removed under AUD-456 and fails fast today. Retained for forward compatibility."
+		},
+		"settled": {
+			"type": "boolean",
+			"description": "Whether the pending ledger hold was settled (POST). False when settlement failed (settlement_ambiguous) or, for streaming calls, on the estimated receipt issued before the stream is consumed."
+		},
+		"model": {
+			"type": "string",
+			"description": "Model id the call was made with. For governed non-LLM actions, the action name (e.g. 'file_read', 'curl')."
+		},
+		"provider": {
+			"type": "string",
+			"description": "Provider/client kind (e.g. 'anthropic', 'openai', 'google'). For governed non-LLM actions, the action kind; 'headless' for headless metering."
+		},
+		"timestamp": {
+			"type": "string",
+			"format": "date-time",
+			"description": "ISO 8601 timestamp when the receipt was issued."
+		},
+		"auditDegraded": {
+			"type": "boolean",
+			"description": "Present and true when the audit chain write failed (failure mode 15.3). The failed event is written to the dead-letter queue."
+		},
+		"usageSource": {
+			"type": "string",
+			"enum": ["provider", "estimated"],
+			"description": "Whether cost came from provider-reported usage or the pre-call estimate."
+		},
+		"usage": {
+			"type": "object",
+			"description": "NEW in v2. The four-tier DISJOINT token split this cost was metered from. Present iff usageSource is 'provider' — an estimated settle has no reported counts, so this is omitted outright rather than zero-filled, to avoid inviting a recompute of a cost that was never derived from token counts. inputTokens is fresh (non-cached) prompt tokens only; cacheReadTokens and cacheWriteTokens are separate tiers, so the four fields sum to the call's billable tokens with nothing double-counted. Together with meter.appliedRates this is the whole reconciliation surface: ceil(sum(counts x rates / 1000)), floored at 1, reproduces cost exactly.",
+			"required": ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"],
+			"properties": {
+				"inputTokens": {
+					"type": "integer",
+					"minimum": 0,
+					"description": "Fresh (non-cached) prompt tokens."
+				},
+				"outputTokens": {
+					"type": "integer",
+					"minimum": 0,
+					"description": "Completion tokens, including provider-billed thinking tokens."
+				},
+				"cacheReadTokens": {
+					"type": "integer",
+					"minimum": 0,
+					"description": "Cache-hit prompt tokens."
+				},
+				"cacheWriteTokens": {
+					"type": "integer",
+					"minimum": 0,
+					"description": "Cache-creation prompt tokens."
+				}
+			},
+			"additionalProperties": false
+		},
+		"chunksDelivered": {
+			"type": "number",
+			"minimum": 0,
+			"description": "Number of chunks delivered to the consumer (streaming calls only)."
+		},
+		"actionKind": {
+			"type": "string",
+			"enum": ["llm_call", "tool_use", "file_access", "shell_command", "api_request"],
+			"description": "Action kind for governed non-LLM actions. Absent for LLM calls (backward compatibility)."
+		},
+		"endpoint": {
+			"type": "object",
+			"description": "Endpoint classification for this call. Absent on pre-M2 receipts.",
+			"required": ["class", "runtime"],
+			"properties": {
+				"class": {
+					"type": "string",
+					"enum": ["local", "cloud"],
+					"description": "Settlement scope of the endpoint: local (self-hosted) or cloud (metered provider)."
+				},
+				"runtime": {
+					"type": "string",
+					"enum": ["ollama", "vllm", "lmstudio", "openai-compat", "unknown"],
+					"description": "Best-effort runtime label for a local endpoint (receipt/UX metadata only)."
+				}
+			},
+			"additionalProperties": false
+		},
+		"meter": {
+			"type": "object",
+			"description": "Metering provenance: denomination and rate origin of the settled cost. Absent on pre-M2 receipts. Widened in v2 with appliedRates and pricingTableVersion.",
+			"required": ["costBasis", "rateSource"],
+			"properties": {
+				"costBasis": {
+					"type": "string",
+					"enum": ["usd-proxy", "nominal"],
+					"description": "Denomination of the settled cost: real-dollar proxy or nominal bookkeeping units."
+				},
+				"rateSource": {
+					"type": "string",
+					"enum": ["table", "custom", "local-model", "local-default", "fallback"],
+					"description": "Where the applied rates came from during resolution."
+				},
+				"computeMs": {
+					"type": "number",
+					"minimum": 0,
+					"description": "Compute wall-time in milliseconds. Present only when a compute-time source was available."
+				},
+				"appliedRates": {
+					"type": "object",
+					"description": "NEW in v2. The four RESOLVED per-1k rates the cost was computed with. 'Resolved' means AFTER the cache-rate fallback invariant: an absent cache tier in the pricing table appears here as inputPer1k, never as a missing field or 0, because that is what the operator was actually charged for it. Only present on receipts emitted by a settle that ran the D5 record-surface changes.",
+					"required": ["inputPer1k", "outputPer1k", "cacheReadPer1k", "cacheWritePer1k"],
+					"properties": {
+						"inputPer1k": { "type": "number", "minimum": 0 },
+						"outputPer1k": { "type": "number", "minimum": 0 },
+						"cacheReadPer1k": { "type": "number", "minimum": 0 },
+						"cacheWritePer1k": { "type": "number", "minimum": 0 }
+					},
+					"additionalProperties": false
+				},
+				"pricingTableVersion": {
+					"type": "string",
+					"description": "NEW in v2. Date-stamped version of the built-in pricing table (PRICING_TABLE_VERSION) the appliedRates came from, e.g. '2026-08-08'."
+				}
+			},
+			"additionalProperties": false
+		}
+	},
+	"additionalProperties": true,
+	"examples": [
+		{
+			"transferId": "tx_mdl3k9q2_1f3c9d2e",
+			"cost": 111,
+			"budgetRemaining": 49889,
+			"auditHash": "9b3c2f6e8a1d4c5b7e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d",
+			"chainPath": ".usertrust/audit",
+			"receiptUrl": null,
+			"settled": true,
+			"model": "claude-sonnet-4-6",
+			"provider": "anthropic",
+			"timestamp": "2026-08-08T12:00:00.000Z",
+			"usageSource": "provider",
+			"usage": {
+				"inputTokens": 1000,
+				"outputTokens": 500,
+				"cacheReadTokens": 2000,
+				"cacheWriteTokens": 0
+			},
+			"endpoint": { "class": "cloud", "runtime": "unknown" },
+			"meter": {
+				"costBasis": "usd-proxy",
+				"rateSource": "table",
+				"appliedRates": {
+					"inputPer1k": 30,
+					"outputPer1k": 150,
+					"cacheReadPer1k": 3,
+					"cacheWritePer1k": 37.5
+				},
+				"pricingTableVersion": "2026-08-08"
+			}
+		}
+	]
+}
