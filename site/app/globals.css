@@ -50,9 +50,9 @@
 	--color-fd-foreground: hsl(0, 0%, 92%);
 	--color-fd-muted: rgba(255, 255, 255, 0.05);
 	--color-fd-muted-foreground: hsla(0, 0%, 70%, 0.8);
-	--color-fd-popover: #0f0f2a;
+	--color-fd-popover: #10101f;
 	--color-fd-popover-foreground: hsl(0, 0%, 87%);
-	--color-fd-card: #0f0f2a;
+	--color-fd-card: #10101f;
 	--color-fd-card-foreground: hsl(0, 0%, 98%);
 	--color-fd-border: rgba(255, 255, 255, 0.08);
 	--color-fd-primary: #34d399;

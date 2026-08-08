@@ -134,6 +134,26 @@ const client = await trust(new Anthropic(), {
 
 Use dry-run in CI, tests, and local development.
 
+## Verify the Chain
+
+Every governed call appends a SHA-256-hashed event to `.usertrust/audit/events.jsonl`. The standalone verifier checks the whole chain — it has zero runtime dependencies and works without usertrust installed:
+
+```bash
+npx usertrust-verify .usertrust
+```
+
+This is real output — the transcript below is captured from the release build:
+
+```txt
+Vault integrity: VERIFIED (UNANCHORED — internal consistency only)
+Chain length: 9 events
+Merkle root: 7c7ef4c824e1d1f02c37010a3f604bd10c7db739723d450d6e4576ff8503a6b8
+Hash algorithm: SHA-256
+First event: 2026-08-08T00:31:12.036Z
+Last event: 2026-08-08T00:31:12.107Z
+All hashes: valid (9/9)
+```
+
 ## Next Steps
 
 <Cards>
