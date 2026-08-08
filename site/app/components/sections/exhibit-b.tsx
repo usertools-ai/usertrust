@@ -1,5 +1,6 @@
 import factsJson from "@/evidence/facts.json";
 import type { EvidenceFacts } from "@/evidence/types";
+import TerminalFrame from "../terminal-frame";
 import ExhibitBDie from "./exhibit-b-die";
 import ExhibitBTabs from "./exhibit-b-tabs";
 
@@ -92,20 +93,25 @@ export default function ExhibitB() {
 					{"your keys. your billing. your evidence."}
 				</p>
 
-				{/* GOVERNED SURFACES — the boundary, stated precisely. A two-column
-				    manifest with its own header/footer bars exceeds TerminalFrame's
-				    {title, children} shape (the header alone would need to be a
-				    ReactNode, not a string), so the contract's exact classes are
-				    kept inline rather than importing the component (documented in
-				    the retrofit report). Outer overflow-hidden clips the rounded
-				    corners; the inner overflow-x-auto scrolls the manifest on
-				    narrow viewports without breaking that clip. */}
-				<div className="mt-16 overflow-hidden rounded-xl border border-white/10 bg-terminal">
-					<div className="overflow-x-auto">
-						<div className="min-w-[40rem] font-mono text-[13px] leading-relaxed">
-							<p className="flex h-9 items-center border-b border-white/[0.06] px-4 text-[11px] uppercase tracking-[0.12em] text-white/50">
-								governed surfaces
-							</p>
+				{/* GOVERNED SURFACES — the boundary, stated precisely. Renders through
+				    the shared TerminalFrame with a plain string title ("governed
+				    surfaces"). The frame always pads its body (p-4 md:p-5); this
+				    surface wants that padding on nothing but the 2-col grid's own
+				    column padding and the footer's px-4, so the outer child cancels
+				    the frame's body padding with a matching negative margin
+				    (-m-4/md:-m-5) — same technique as bleeding a full-width divider
+				    out of a padded card. min-w-[40rem] and the negative margin are
+				    kept on two DIFFERENT boxes (min-width on the inner box, un-
+				    negated) rather than one: a negative margin and a min-width on
+				    the SAME box over-constrain the layout, and browsers resolve
+				    that by honoring the margin and letting content wrap instead of
+				    forcing the intended horizontal scroll (verified in-browser at
+				    390px). The outer box owns the bleed and the fresh
+				    overflow-x-auto scroll context; the inner box owns min-w-[40rem]
+				    with zero margin, so oversized content overflows it cleanly. */}
+				<TerminalFrame className="mt-16" title="governed surfaces">
+					<div className="-m-4 overflow-x-auto md:-m-5">
+						<div className="min-w-[40rem]">
 							<div className="grid grid-cols-2">
 								<div className="border-r border-white/[0.06]">
 									<SurfaceColumn title="governed" titleClass="text-ut" groups={GOVERNED} />
@@ -123,7 +129,7 @@ export default function ExhibitB() {
 							</p>
 						</div>
 					</div>
-				</div>
+				</TerminalFrame>
 			</div>
 		</section>
 	);

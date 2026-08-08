@@ -65,7 +65,7 @@ export default function HardenStrip() {
 				<figure className="mt-12 max-w-3xl">
 					<blockquote
 						cite={AGENTS_URL}
-						className="overflow-hidden rounded-xl border border-white/10 bg-terminal p-4 font-mono text-[13px] leading-relaxed text-white/80 md:p-5"
+						className="overflow-hidden rounded-xl border border-white/10 bg-terminal p-4 font-mono text-[14px] leading-relaxed text-white/80 md:p-5"
 					>
 						<p>{PARITY_QUOTE_CONTEXT}</p>
 						<p className="mt-4 text-white">{PARITY_QUOTE_RULE}</p>

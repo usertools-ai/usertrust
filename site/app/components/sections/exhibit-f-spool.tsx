@@ -44,7 +44,7 @@ function opsInLine(line: PolicyLine): PolicyOp[] {
  * w-64 print-spool column) stays a small receipt-style chit matching the
  * chit stack above it, not a full TerminalFrame: its 9–10px type and p-3
  * padding are scaled to the print-spool illustration, not the page's
- * code-surface body copy, and forcing the 13px contract onto it would
+ * code-surface body copy, and forcing the 14px contract onto it would
  * overpower that narrow column.
  */
 export default function ExhibitFSpool() {

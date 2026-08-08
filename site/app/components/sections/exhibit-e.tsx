@@ -56,7 +56,7 @@ export default function ExhibitE() {
 				{/* terminal: the captured workspace-verifier transcript */}
 				<div>
 					<div className="mb-3 flex items-center justify-between gap-4">
-						<span className="font-mono text-[11px] uppercase tracking-[0.12em] text-white/50">
+						<span className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/50">
 							usertrust-verify
 						</span>
 						<CopyChip text={transcript.command} label="copy verify command" />

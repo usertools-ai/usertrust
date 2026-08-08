@@ -23,18 +23,11 @@ import { ROW_STAGGER_MS } from "./lib/exhibit-g-corpus";
  * can't fit a h-9 title-bar row without clipping against the frame's
  * rounded, clipped edge.
  *
- * The corpus table keeps the shared TerminalFrame contract's exact classes
- * inline instead: its title bar is two pieces (filename + row count,
- * `justify-between`), which is a ReactNode, not the single string
- * TerminalFrame's `title` prop accepts — so the container/title-bar/body
- * classes are hand-applied here rather than composed through the component
- * (documented in the retrofit report; this file's classes are the reference
- * the shared component (site/app/components/terminal-frame.tsx) was built
- * to match verbatim: container `overflow-hidden rounded-xl border
- * border-white/10 bg-terminal`, title bar `flex h-9 items-center border-b
- * border-white/[0.06] px-4 font-mono text-[11px] uppercase
- * tracking-[0.12em] text-white/50`, body `p-4 md:p-5 font-mono text-[13px]
- * leading-relaxed overflow-x-auto`).
+ * The corpus table renders through the same shared TerminalFrame: its
+ * title bar is two pieces (filename + row count, `justify-between`), passed
+ * as a ReactNode `title` — TerminalFrame's title accepts any ReactNode, not
+ * just a string, precisely so a bar like this one composes through the
+ * component instead of duplicating its classes beside it.
  */
 interface AttackRow {
 	name: string;
@@ -83,15 +76,19 @@ export default function ExhibitG() {
 			</p>
 
 			{/* terminal-styled corpus table — every row links to the real test file */}
-			<div className="mt-10 overflow-hidden rounded-xl border border-white/10 bg-terminal">
-				<div className="flex h-9 items-center justify-between gap-4 border-b border-white/[0.06] px-4 font-mono text-[11px] uppercase tracking-[0.12em] text-white/50">
-					<span className="min-w-0 truncate">
-						packages/core/tests/harden/anchoring/anchor-corpus.test.ts
-					</span>
-					<span className="shrink-0">{corpus.attacks.length} rows</span>
-				</div>
+			<TerminalFrame
+				className="mt-10"
+				title={
+					<div className="flex w-full items-center justify-between gap-4">
+						<span className="min-w-0 truncate">
+							packages/core/tests/harden/anchoring/anchor-corpus.test.ts
+						</span>
+						<span className="shrink-0">{corpus.attacks.length} rows</span>
+					</div>
+				}
+			>
 				<InView>
-					<ol className="list-none overflow-x-auto p-4 font-mono text-[13px] leading-relaxed md:p-5">
+					<ol className="list-none">
 						{corpus.attacks.map((attack, i) => (
 							<li
 								key={attack.name}
@@ -116,12 +113,12 @@ export default function ExhibitG() {
 						))}
 					</ol>
 				</InView>
-			</div>
+			</TerminalFrame>
 
 			{/* reproduction block — the corpus is one command sequence away */}
 			<div className="mt-8 max-w-2xl">
 				<div className="mb-3 flex items-center justify-between gap-4">
-					<span className="font-mono text-[11px] uppercase tracking-[0.12em] text-white/50">
+					<span className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/50">
 						reproduce it yourself
 					</span>
 					<CopyChip text={REPRO_COMMAND} label="copy reproduction commands" />

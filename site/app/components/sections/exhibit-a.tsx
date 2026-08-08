@@ -65,24 +65,30 @@ export default function ExhibitA() {
 						</pre>
 					</TerminalFrame>
 
-					{/* The evidence — the SDK's actual return value, annotated. Custom
-					    title bar (traffic-light dots) and provenance footer exceed
-					    TerminalFrame's {title, children} shape, so the contract's exact
-					    classes are kept inline here rather than importing the component
-					    (documented in the retrofit report). */}
+					{/* The evidence — the SDK's actual return value, annotated. Renders
+					    through the shared TerminalFrame: the traffic-light-dots title
+					    bar is a ReactNode title, and the provenance line is the frame's
+					    footer slot (its own classes, not the frame's — see
+					    terminal-frame.tsx on why footers stay per-surface). */}
 					<ExhibitAAnnotations annotations={ANNOTATIONS}>
-						<div className="receipt-terminal overflow-hidden rounded-xl border border-white/10 bg-terminal shadow-[0_14px_40px_rgba(0,0,0,0.5)]">
-							{/* Title bar */}
-							<div className="flex h-9 items-center gap-2 border-b border-white/[0.06] px-4">
-								<span aria-hidden="true" className="h-2 w-2 rounded-full bg-white/15" />
-								<span aria-hidden="true" className="h-2 w-2 rounded-full bg-white/15" />
-								<span aria-hidden="true" className="h-2 w-2 rounded-full bg-white/15" />
-								<span className="ml-2 font-mono text-[11px] uppercase tracking-[0.12em] text-white/50">
-									receipt · returned from every governed call
-								</span>
-							</div>
+						<TerminalFrame
+							className="receipt-terminal shadow-[0_14px_40px_rgba(0,0,0,0.5)]"
+							title={
+								<div className="flex items-center gap-2">
+									<span aria-hidden="true" className="h-2 w-2 rounded-full bg-white/15" />
+									<span aria-hidden="true" className="h-2 w-2 rounded-full bg-white/15" />
+									<span aria-hidden="true" className="h-2 w-2 rounded-full bg-white/15" />
+									<span className="ml-2">receipt · returned from every governed call</span>
+								</div>
+							}
+							footer={
+								<div className="border-t border-white/10 px-5 py-2.5 font-mono text-[12px] tracking-wide text-white/40">
+									{provenanceLine}
+								</div>
+							}
+						>
 							{/* The receipt JSON — line-keyed spans the island targets. */}
-							<pre className="overflow-x-auto p-4 font-mono text-[13px] leading-relaxed md:p-5">
+							<pre>
 								<code>
 									{receiptLines.map((line) => (
 										<span key={line.key} data-line={line.key} className="block rounded-sm px-1">
@@ -102,11 +108,7 @@ export default function ExhibitA() {
 									))}
 								</code>
 							</pre>
-							{/* Provenance footer — from the fixture's provenance object. */}
-							<div className="border-t border-white/10 px-5 py-2.5 font-mono text-[10px] tracking-wide text-white/40">
-								{provenanceLine}
-							</div>
-						</div>
+						</TerminalFrame>
 					</ExhibitAAnnotations>
 				</div>
 			</div>
