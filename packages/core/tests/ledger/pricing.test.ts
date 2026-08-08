@@ -473,7 +473,7 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 	"gemini-3.1-pro": { inputPer1k: 20, outputPer1k: 120, cacheReadPer1k: 2 },
 
 	// No published cache pricing for these models — both cache fields omitted.
-	"mistral-large": { inputPer1k: 20, outputPer1k: 60 },
+	"mistral-large": { inputPer1k: 5, outputPer1k: 15 },
 	"deepseek-chat": { inputPer1k: 2.8, outputPer1k: 4.2 },
 	"deepseek-reasoner": { inputPer1k: 2.8, outputPer1k: 4.2 },
 	"grok-3": { inputPer1k: 30, outputPer1k: 150 },
@@ -481,7 +481,7 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 	"command-a": { inputPer1k: 25, outputPer1k: 100 },
 	"sonar-pro": { inputPer1k: 30, outputPer1k: 150 },
 	"qwen-72b": { inputPer1k: 2.9, outputPer1k: 3.9 },
-	"nova-pro": { inputPer1k: 8, outputPer1k: 40 },
+	"nova-pro": { inputPer1k: 8, outputPer1k: 32 },
 };
 
 describe("PRICING_TABLE rates audit (D1)", () => {
@@ -528,6 +528,24 @@ describe("PRICING_TABLE rates audit (D1)", () => {
 		// $1.10 / $4.40 per MTok. Understatement is the dangerous direction.
 		expect(PRICING_TABLE["o4-mini"]?.inputPer1k).toBe(11);
 		expect(PRICING_TABLE["o4-mini"]?.outputPer1k).toBe(44);
+	});
+
+	it("keeps nova-pro and mistral-large at their real published rates", () => {
+		// Regression guard for two bad "corrections" made during the 2026-08-08 audit
+		// and caught in review. Both overstated the rate, so budgets depleted faster
+		// than the invoice and receipts recomputed against a rate that does not exist.
+		//
+		//   nova-pro      — Amazon Bedrock on-demand is $0.80 in / $3.20 out per MTok
+		//                   (= 8 / 32), NOT $4.00 out. The audit briefly wrote 40.
+		//   mistral-large — `mistral-large-latest` resolves to Mistral Large 3, which
+		//                   Mistral's own /pricing/api lists at $0.50 in / $1.50 out
+		//                   (= 5 / 15). The $2/$6 figure the audit briefly wrote is
+		//                   the retired Mistral Large 2 rate, still quoted in a stale
+		//                   FAQ line on the marketing pricing page.
+		//
+		// In both cases the pre-existing table value was already correct.
+		expect(PRICING_TABLE["nova-pro"]).toStrictEqual({ inputPer1k: 8, outputPer1k: 32 });
+		expect(PRICING_TABLE["mistral-large"]).toStrictEqual({ inputPer1k: 5, outputPer1k: 15 });
 	});
 
 	it("keeps FALLBACK_RATE two-tier so unknown models price cache at input rate", () => {

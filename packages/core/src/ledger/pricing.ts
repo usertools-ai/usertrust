@@ -85,9 +85,11 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	"gemini-3.1-pro": { inputPer1k: 20, outputPer1k: 120, cacheReadPer1k: 2 },
 
 	// ── Mistral ──
-	// Base was 5/15 before the 2026-08-08 audit; published rate is $2/$6 per MTok.
+	// `mistral-large-latest` resolves to Mistral Large 3, listed at $0.50 in /
+	// $1.50 out per MTok on Mistral's own /pricing/api. (The $2/$6 figure still
+	// quoted in the marketing FAQ is the retired Large 2 rate — do not use it.)
 	// No caching discount published.
-	"mistral-large": { inputPer1k: 20, outputPer1k: 60 },
+	"mistral-large": { inputPer1k: 5, outputPer1k: 15 },
 
 	// ── DeepSeek ──
 	// No cache pricing resolvable for these alias keys (see task report).
@@ -110,8 +112,8 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	"qwen-72b": { inputPer1k: 2.9, outputPer1k: 3.9 },
 
 	// ── Amazon ──
-	// Output was 32 before the 2026-08-08 audit; published rate is $4.00 per MTok.
-	"nova-pro": { inputPer1k: 8, outputPer1k: 40 },
+	// Bedrock on-demand: $0.80 in / $3.20 out per MTok. No cache pricing published.
+	"nova-pro": { inputPer1k: 8, outputPer1k: 32 },
 };
 
 /**
