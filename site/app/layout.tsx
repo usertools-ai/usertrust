@@ -102,7 +102,8 @@ const jsonLd = {
 	offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
 	author: { "@type": "Organization", name: "Usertools Inc" },
 	url: "https://usertrust.ai",
-	description,
+	description:
+		"keep the receipts. One line wraps your LLM client — every governed call becomes a ledger transaction with a receipt anyone can verify: budget holds, a tamper-evident audit chain, and an independent verifier with zero runtime dependencies.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

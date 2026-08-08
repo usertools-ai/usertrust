@@ -1,128 +1,164 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { ImageResponse } from "next/og";
 
 // Deterministic, request-independent image — pre-render at build time and serve
 // as a static, CDN-immutable asset (no per-request function invocation).
 export const dynamic = "force-static";
 
+// Design tokens, inlined: this route renders via satori and never sees
+// globals.css. Satori supports flexbox only; any element with more than one
+// child needs an explicit display:flex. woff2 is unsupported, so the bundled
+// default font renders all text (accepted — matches the previous route).
+const GROUND = "#0a0a1a";
+const PAPER = "#f2efe6";
+const INK = "#16161e";
+const INK_DIM = "rgba(22, 22, 30, 0.55)";
+const RULE = "rgba(22, 22, 30, 0.3)";
+const PAPER_EMERALD = "#0b6b4f"; // on-paper emerald — #34d399 is forbidden as ink on paper
+
 export async function GET() {
+	const dots = Array.from({ length: 22 }, (_, i) => i);
+	// Two-register mascot cutout (Addendum G): white face/gloves read clean
+	// against the dark ground here — never place this mark on the paper card.
+	// Loaded via fs.readFile (Next's own opengraph-image.tsx pattern), not
+	// `fetch(new URL(..., import.meta.url))`: for .png specifically, webpack's
+	// asset-module heuristic rewrites that literal pattern into a bundled
+	// public path string ("/_next/static/media/...") instead of a resolvable
+	// URL, which breaks force-static build-time prerendering with "Failed to
+	// parse URL". Slicing to the buffer's own range (not the pool) yields a
+	// true ArrayBuffer, which satori's <img src> accepts.
+	const mascotFile = await readFile(join(process.cwd(), "app/og/mascot-full.png"));
+	const mascotBytes = mascotFile.buffer.slice(
+		mascotFile.byteOffset,
+		mascotFile.byteOffset + mascotFile.byteLength,
+	);
 	return new ImageResponse(
 		<div
 			style={{
+				position: "relative",
 				width: "100%",
 				height: "100%",
 				display: "flex",
-				flexDirection: "column",
 				alignItems: "center",
 				justifyContent: "center",
-				background: "#0a0a1a",
-				position: "relative",
+				background: GROUND,
 			}}
 		>
-			{/* Bliss-like gradient background */}
+			{/* Thermal-paper receipt card */}
 			<div
 				style={{
-					position: "absolute",
-					bottom: 0,
-					left: 0,
-					right: 0,
-					height: "45%",
-					background:
-						"linear-gradient(180deg, #0a0a1a 0%, #0f2a1a 30%, #1a4a2a 50%, #2d6b3a 70%, #1a4a2a 85%, #0a0a1a 100%)",
-				}}
-			/>
-			{/* Sky gradient */}
-			<div
-				style={{
-					position: "absolute",
-					top: 0,
-					left: 0,
-					right: 0,
-					height: "60%",
-					background: "linear-gradient(180deg, #0a1a3a 0%, #0f2a4a 40%, #1a3a5a 70%, #0a0a1a 100%)",
-				}}
-			/>
-
-			{/* Content */}
-			<div
-				style={{
+					position: "relative",
 					display: "flex",
 					flexDirection: "column",
-					alignItems: "center",
-					justifyContent: "center",
-					gap: "16px",
-					position: "relative",
-					zIndex: 1,
+					width: 640,
+					padding: "56px 56px",
+					background: PAPER,
+					transform: "rotate(-1deg)",
+					boxShadow: "0 24px 80px rgba(0, 0, 0, 0.55)",
 				}}
 			>
-				{/* Open source badge */}
+				{/* Top perforation — punched holes in the ground color */}
+				<div
+					style={{
+						position: "absolute",
+						top: -9,
+						left: 0,
+						right: 0,
+						display: "flex",
+						justifyContent: "space-between",
+						padding: "0 18px",
+					}}
+				>
+					{dots.map((i) => (
+						<div
+							key={`t${i}`}
+							style={{ width: 16, height: 16, borderRadius: 9999, background: GROUND }}
+						/>
+					))}
+				</div>
+
+				{/* Wordmark */}
 				<div
 					style={{
 						display: "flex",
-						padding: "6px 16px",
-						borderRadius: "999px",
-						border: "1px solid rgba(52,211,153,0.3)",
-						fontSize: "14px",
-						color: "rgba(52,211,153,0.8)",
-						letterSpacing: "0.05em",
+						justifyContent: "center",
+						fontSize: 30,
+						fontWeight: 700,
+						letterSpacing: "0.14em",
+						color: INK,
+						fontFamily: "monospace",
 					}}
 				>
-					Open source · Apache 2.0
+					usertrust
 				</div>
 
-				{/* Main title */}
+				<div style={{ marginTop: 30, borderTop: `2px dashed ${RULE}` }} />
+
+				{/* Headline — pinned two-line break; period is on-paper emerald */}
 				<div
 					style={{
 						display: "flex",
 						flexDirection: "column",
-						alignItems: "center",
-						gap: "4px",
+						marginTop: 34,
+						fontSize: 88,
+						fontWeight: 800,
+						lineHeight: 1,
+						letterSpacing: "-0.02em",
+						color: INK,
 					}}
 				>
-					<span
-						style={{
-							fontSize: "72px",
-							fontWeight: 700,
-							color: "#34d399",
-							fontFamily: "monospace",
-							letterSpacing: "-0.02em",
-						}}
-					>
-						trust()
-					</span>
-					<span
-						style={{
-							fontSize: "56px",
-							fontWeight: 700,
-							color: "#ffffff",
-							letterSpacing: "-0.01em",
-						}}
-					>
-						your AI spend
-					</span>
+					<span>keep the</span>
+					<div style={{ display: "flex" }}>
+						<span>receipts</span>
+						<span style={{ color: PAPER_EMERALD }}>.</span>
+					</div>
 				</div>
 
-				{/* Install command */}
+				<div style={{ marginTop: 34, borderTop: `2px dashed ${RULE}` }} />
+
+				{/* Mono footer */}
 				<div
 					style={{
 						display: "flex",
-						padding: "10px 24px",
-						borderRadius: "12px",
-						border: "1px solid rgba(255,255,255,0.1)",
-						background: "rgba(255,255,255,0.04)",
-						fontSize: "18px",
+						marginTop: 28,
+						fontSize: 26,
 						fontFamily: "monospace",
-						color: "rgba(255,255,255,0.6)",
-						letterSpacing: "0.02em",
+						color: INK,
 					}}
 				>
-					<span style={{ color: "rgba(52,211,153,0.6)" }}>$</span>
-					<span style={{ marginLeft: "8px" }}>npm install usertrust</span>
+					<span style={{ color: INK_DIM }}>$</span>
+					<span style={{ marginLeft: 12 }}>npm install usertrust</span>
+				</div>
+
+				{/* Bottom perforation */}
+				<div
+					style={{
+						position: "absolute",
+						bottom: -9,
+						left: 0,
+						right: 0,
+						display: "flex",
+						justifyContent: "space-between",
+						padding: "0 18px",
+					}}
+				>
+					{dots.map((i) => (
+						<div
+							key={`b${i}`}
+							style={{ width: 16, height: 16, borderRadius: 9999, background: GROUND }}
+						/>
+					))}
 				</div>
 			</div>
+
+			{/* Mascot cutout — dark ground, right of the card (Addendum G) */}
+			<div style={{ display: "flex", position: "absolute", right: 72, bottom: 64 }}>
+				{/* biome-ignore lint/a11y/useAltText: satori OG renderer, decorative */}
+				{/* biome-ignore lint/performance/noImgElement: satori renders via <img>, not next/image */}
+				<img src={mascotBytes as unknown as string} height={220} style={{ opacity: 0.9 }} />
+			</div>
 		</div>,
-		{
-			width: 1200,
-			height: 630,
-		},
+		{ width: 1200, height: 630 },
 	);
 }
