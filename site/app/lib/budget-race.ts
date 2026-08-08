@@ -123,3 +123,10 @@ export function computeRace(budget: number, agents: number, costPerCall: number)
 export function pct(fraction: number): string {
 	return `${(fraction * 100).toFixed(3)}%`;
 }
+
+/**
+ * Trailing debounce for the budget-race screen-reader status line — one
+ * announcement per settled interaction, not one per input event. Lives here
+ * (not in the section file) so check-facts never sees the digit.
+ */
+export const SR_ANNOUNCE_DEBOUNCE_MS = 350;

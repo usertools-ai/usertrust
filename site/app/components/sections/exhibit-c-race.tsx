@@ -1,8 +1,14 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { formatUsertokens, usdFromUsertokens } from "@/components/receipt/format";
-import { computeRace, pct, raceBounds, raceDefaults } from "@/lib/budget-race";
+import {
+	computeRace,
+	pct,
+	raceBounds,
+	raceDefaults,
+	SR_ANNOUNCE_DEBOUNCE_MS,
+} from "@/lib/budget-race";
 import { THROWN_DENIAL } from "@/lib/exhibit-c-data";
 
 type Mode = "none" | "holds";
@@ -38,8 +44,16 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 	// Pure, deterministic math — identical on server and client, so hydration
 	// enhances the precomputed markup in place.
 	const race = computeRace(budget, agents, costPerCall);
-	const scale = Math.max(race.settledTotal, budget);
 	const holdsMode = mode === "holds";
+	const srStatus = holdsMode
+		? `two-phase holds: ${fmt(race.heldTotal)} held of ${fmt(budget)}, ${fmt(race.available)} available${race.firstBlocked ? `, ${race.firstBlocked.label} blocked` : ""}`
+		: `without holds: ${fmt(race.settledTotal)} settled against a ${fmt(budget)} budget${race.overshoot > 0 ? `, ${fmt(race.overshoot)} over` : ""}`;
+	const [announced, setAnnounced] = useState(srStatus);
+	useEffect(() => {
+		const t = setTimeout(() => setAnnounced(srStatus), SR_ANNOUNCE_DEBOUNCE_MS);
+		return () => clearTimeout(t);
+	}, [srStatus]);
+	const scale = Math.max(race.settledTotal, budget);
 	const okHolds = race.holds.filter((h) => !h.blocked);
 
 	return (
@@ -285,11 +299,10 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 				</p>
 			)}
 
-			{/* Screen-reader status — values snap; announce the state, not a stream. */}
+			{/* Screen-reader status — debounced: one announcement per settled
+			    interaction, not one per input event (accessibility hardening pass). */}
 			<p aria-live="polite" className="sr-only">
-				{holdsMode
-					? `two-phase holds: ${fmt(race.heldTotal)} held of ${fmt(budget)}, ${fmt(race.available)} available${race.firstBlocked ? `, ${race.firstBlocked.label} blocked` : ""}`
-					: `without holds: ${fmt(race.settledTotal)} settled against a ${fmt(budget)} budget${race.overshoot > 0 ? `, ${fmt(race.overshoot)} over` : ""}`}
+				{announced}
 			</p>
 		</div>
 	);
