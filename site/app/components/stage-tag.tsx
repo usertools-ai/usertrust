@@ -1,6 +1,9 @@
 /**
  * Trust-ladder stage tag (Addendum D3): ENFORCE → RECORD → ANCHOR → VERIFY.
- * 11px mono uppercase tracked chip with the emerald-8% border. Server
+ * 12px mono uppercase tracked chip (the Addendum H1 floor — this comment
+ * documented the pre-sweep 11px long after the chip was bumped, which is
+ * exactly how a floor regression gets re-introduced) with the emerald-8%
+ * border. Server
  * component — a static finished state, no motion, so reduced-motion needs no
  * branch. Dark ground only: emerald is a data ink on dark, never on paper.
  */

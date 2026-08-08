@@ -60,6 +60,24 @@ export function finalLineText(lines: string[], finalChars: number): string {
 /** Placeholder for a blank captured line — preserves its line-box height. */
 export const NBSP = "\u00A0";
 
+/**
+ * One rendered transcript line, in px: TerminalFrame's body is 14px mono at
+ * `leading-relaxed` (1.625), so 22.75px. Kept here with the other section
+ * digits \u2014 check-facts scans the section file, not this module.
+ */
+const TRANSCRIPT_LINE_PX = 22.75;
+
+/**
+ * The CLS reservation for the terminal, derived from the transcript the
+ * frame will actually hold. The island types its way to this height, so the
+ * frame must reserve it up front \u2014 but a hardcoded `min-h-[16rem]` (256px)
+ * over a 7-line fixture left ~96px of permanently empty terminal under the
+ * finished output, reading as a broken frame rather than a reservation.
+ */
+export function transcriptMinHeightPx(lines: string[]): number {
+	return lines.length * TRANSCRIPT_LINE_PX;
+}
+
 export interface TranscriptLineTokens {
 	/** The label up to and including its colon (steel), or "" when the line carries no key. */
 	key: string;

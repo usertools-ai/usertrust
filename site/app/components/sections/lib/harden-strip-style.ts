@@ -13,5 +13,8 @@
  */
 export function statValueClassName(label: string): string {
 	const color = label === "shared verifier lines" ? "text-ut" : "text-white/90";
-	return `font-mono text-4xl leading-none md:text-5xl ${color}`;
+	// mt-auto bottom-aligns the numeral inside its equal-height grid cell, so a
+	// label that wraps to two lines at 390 ("AGENTS.MD INVARIANTS") no longer
+	// pushes its numeral one line-height below its row-mates.
+	return `mt-auto font-mono text-4xl leading-none md:text-5xl ${color}`;
 }

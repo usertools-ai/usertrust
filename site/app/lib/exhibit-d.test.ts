@@ -122,10 +122,19 @@ test("splitFirstChar isolates the lead character for the tamper <mark>", () => {
 test("card/prevHash/arrow class builders switch on their boolean state", () => {
 	assert.match(cardStateClassName(false), /border-brand-border/);
 	assert.match(cardStateClassName(true), /border-danger\/60/);
-	assert.equal(prevHashClassName(false), "text-white/40");
-	assert.equal(prevHashClassName(true), "text-danger");
-	assert.match(chainArrowClassName(false), /text-white\/30/);
-	assert.match(chainArrowClassName(true), /text-danger/);
+	// Addendum H2: 12px card ink clears 4.5:1 — white/40 measured 3.77-3.80:1.
+	assert.equal(prevHashClassName(false), "text-white/70");
+	assert.equal(prevHashClassName(true), "text-danger-ink");
+	assert.match(chainArrowClassName(false), /text-white\/50/);
+	assert.match(chainArrowClassName(true), /text-danger-ink/);
+});
+
+test("small-size danger roles use the danger-ink token, never the /80 alpha step", () => {
+	// text-danger/80 at 12px measured 3.52-3.64:1 on the real grounds; the
+	// lighter danger-ink is the sanctioned <16px red (globals.css @theme).
+	for (const cls of [prevHashClassName(true), chainArrowClassName(true)]) {
+		assert.doesNotMatch(cls, /text-danger\/\d/);
+	}
 });
 
 // ---------------------------------------------------------------------------

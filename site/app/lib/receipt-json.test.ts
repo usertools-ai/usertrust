@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chainSeqFor, jsonLines } from "./receipt-json";
+import { chainSeqFor, jsonLines, tokenClass } from "./receipt-json";
+
+test("punctuation ink clears the 14px contrast floor (H2)", () => {
+	// white/40 on bg-terminal #0d0d20 measures 3.81:1 at the frame's 14px body
+	// size; white/60 measures 7.21:1. The token lives here, not in the section.
+	assert.equal(tokenClass("punct", false), "text-white/60");
+	assert.equal(tokenClass("key", false), "text-tim");
+	assert.equal(tokenClass("string", false), "text-white");
+	assert.equal(tokenClass("punct", true), "text-ut");
+});
 
 test("scalar fields render as single lines keyed by their dotted path", () => {
 	const lines = jsonLines({ transferId: "tx_1", settled: true });

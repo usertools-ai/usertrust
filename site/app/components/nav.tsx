@@ -113,8 +113,17 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 	return (
 		<nav
 			className={`fixed top-0 left-0 right-0 z-50 border-b transition-all duration-300 ${
+				/*
+				 * The scrolled bar used to be MORE transparent (60%) than the
+				 * top-of-page bar (80%), and the fixed bar passes over the one light
+				 * surface on the page — the open-ledger receipt paper (#f2efe6),
+				 * which spans x352-928 at 1280 and nearly the full width at 390.
+				 * Over that composite ground, white/70 nav text falls to ~3.7:1 and
+				 * text-ut to ~2.95:1, both under the 4.5:1 floor. 85% restores
+				 * white/70 to ~7.4:1 and text-ut to ~7.1:1 while keeping the blur.
+				 */
 				scrolled
-					? "bg-brand-bg/60 backdrop-blur-[20px] border-white/[0.10]"
+					? "bg-brand-bg/85 backdrop-blur-[20px] border-white/[0.10]"
 					: "bg-brand-bg/80 backdrop-blur-[16px] border-white/[0.06]"
 			}`}
 		>
@@ -126,18 +135,32 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 					 * focus-visible makes it prominent (the shared .focus-ring outline plus
 					 * a color flip to emerald).
 					 */}
+					{/*
+					 * Two labels, one link. The full label wrapped to THREE lines at
+					 * 390 ("skip to / the / facts ↓"), inflating the fixed bar to
+					 * ~80px beside the pill/GitHub/hamburger row. Only one span is in
+					 * the accessibility tree at a time (display:none hides the other
+					 * from AT as well as from view), and the link stays first
+					 * focusable at every width.
+					 */}
 					<a
 						href="#docket"
-						className="focus-ring inline-flex min-h-[44px] items-center font-mono text-xs text-white/70 hover:text-white focus-visible:text-ut transition-colors duration-200"
+						className="focus-ring inline-flex min-h-[44px] items-center whitespace-nowrap font-mono text-xs text-white/70 hover:text-white focus-visible:text-ut transition-colors duration-200"
 					>
-						skip to the facts ↓
+						<span className="md:hidden">facts ↓</span>
+						<span className="hidden md:inline">skip to the facts ↓</span>
 					</a>
 					<a
 						href="/"
 						className={`focus-ring inline-flex min-h-[44px] items-center px-4 py-2.5 border rounded-full text-sm font-medium tracking-tight transition-all duration-300 ${
-							scrolled
-								? "border-ut/30 text-ut shadow-[0_0_20px_rgba(52,211,153,0.1)]"
-								: "border-white/20 hover:border-ut/50 hover:text-ut"
+							/*
+							 * No glow: the old shadow-[0_0_20px_rgba(52,211,153,0.1)] was
+							 * a fifth depth idiom beside lift-1/lift-2/glow-emerald/
+							 * ground-zone (Addendum H3) and rendered no perceptible halo
+							 * in any capture. border-ut/30 + text-ut already state the
+							 * scrolled condition.
+							 */
+							scrolled ? "border-ut/30 text-ut" : "border-white/20 hover:border-ut/50 hover:text-ut"
 						}`}
 					>
 						usertrust
@@ -285,6 +308,12 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 			 * padding with a 1rem floor. `max-h` plus `overflow-y-auto` keep the menu
 			 * reachable on short viewports, and `[overscroll-behavior:contain]` stops the
 			 * inner scroll chaining out to the locked body.
+			 *
+			 * 4.81rem in the max-h calc is this nav's own rendered height, and it
+			 * is a SUM, not a magic number: 44px link row (min-h-[44px]) + 2 x 16px
+			 * (py-4) + 1px border-b = 77px = 4.81rem. globals.css's
+			 * scroll-padding-top is derived from the same figure — change py-4 or
+			 * the 44px target and both rules need re-measuring together.
 			 */}
 			{open && (
 				<div

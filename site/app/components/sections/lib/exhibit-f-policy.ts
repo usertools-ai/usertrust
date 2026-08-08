@@ -173,7 +173,10 @@ export const SPOOL_IO_THRESHOLD = 0.35;
  */
 export function chitCardClass(violator: boolean, anim: string): string {
 	const border = violator ? "border-danger/50" : "border-brand-border";
-	return `lift-1 rounded-sm border bg-[#11112a] px-3 py-2 ${border} ${anim}`;
+	// bg-brand-surface, not a one-off #11112a: the PRINT SPOOL header directly
+	// above these cards is brand-surface, so the column was stacking two
+	// almost-but-not-quite identical surfaces in a token-first system.
+	return `lift-1 rounded-sm border bg-brand-surface px-3 py-2 ${border} ${anim}`;
 }
 
 export function chitLineClass(hot: boolean): string {

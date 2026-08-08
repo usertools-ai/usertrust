@@ -27,6 +27,13 @@ export default function CopyChip({
 	 * glyph and the "copy" label) uses ink at 64% opacity, matching
 	 * globals.css's `.provenance-stub` convention (~5.1:1 on paper) rather
 	 * than 50% (~3.3:1, under the bar).
+	 *
+	 * The dark tone carried the same defect the paper tone was built to
+	 * avoid, and shipped it to three sections at once (hero, exhibit E,
+	 * exhibit G): the trailing "copy" label sampled 3.38-3.48:1 at 12px and
+	 * the "$" prompt 3.72-3.97:1 at 14px, both on the chip's own
+	 * white/[0.06] fill. white/70 (9.5:1) and ut/80 (6.0:1) are the
+	 * dark-tone equivalents of the paper tone's ink/64 correction.
 	 */
 	tone?: "dark" | "paper";
 }) {
@@ -63,7 +70,7 @@ export default function CopyChip({
 					: "focus-ring group relative inline-flex min-h-[44px] cursor-pointer items-center gap-3 rounded-lg border border-white/10 bg-white/[0.06] px-4 py-2.5 font-mono text-sm text-white/85 transition-colors hover:border-ut/30"
 			}
 		>
-			<span aria-hidden="true" className={isPaper ? "text-ink/64" : "text-ut/60"}>
+			<span aria-hidden="true" className={isPaper ? "text-ink/64" : "text-ut/80"}>
 				$
 			</span>
 			<span>{label ?? text}</span>
@@ -71,7 +78,7 @@ export default function CopyChip({
 				className={
 					isPaper
 						? "text-xs text-ink/64 transition-colors group-hover:text-ink"
-						: "text-xs text-white/40 transition-colors group-hover:text-ut"
+						: "text-xs text-white/70 transition-colors group-hover:text-ut"
 				}
 			>
 				copy
@@ -79,7 +86,7 @@ export default function CopyChip({
 			{state === "copied" && (
 				<span
 					aria-hidden="true"
-					className="chit pointer-events-none absolute -top-3 right-2 rounded-sm bg-paper px-2 py-0.5 font-mono text-[12px] text-ink shadow-md"
+					className="chit lift-2 pointer-events-none absolute -top-3 right-2 rounded-sm bg-paper px-2 py-0.5 font-mono text-[12px] text-ink"
 				>
 					copied · $0.00
 				</span>
@@ -87,7 +94,7 @@ export default function CopyChip({
 			{state === "failed" && (
 				<span
 					aria-hidden="true"
-					className="chit pointer-events-none absolute -top-3 right-2 rounded-sm bg-paper-red px-2 py-0.5 font-mono text-[12px] text-white shadow-md"
+					className="chit lift-2 pointer-events-none absolute -top-3 right-2 rounded-sm bg-paper-red px-2 py-0.5 font-mono text-[12px] text-white"
 				>
 					copy failed
 				</span>

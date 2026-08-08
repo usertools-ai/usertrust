@@ -12,16 +12,26 @@ const BASE =
  * swaps to a motion spring that fires ONCE when scrolled into view
  * (whileInView + viewport.once = IntersectionObserver, disconnected after the
  * first hit). Reduced motion: static finished state, no spring.
- * Color comes from the caller: default text-danger for dark ground; pass
- * className="text-paper-red" on paper — the stamp is a >=3:1 graphic, its
- * caption stays ink.
+ * COLOR IS ITS OWN PROP, and that is a bug fix, not a preference. It used to
+ * ride `className ?? "text-danger"`, so the default applied only when the
+ * caller passed NO className at all — and every caller passes one, because a
+ * stamp is positioned by its host (`absolute -right-2 -top-3`). The fallback
+ * was therefore dead in practice and the stamp inherited body white: exhibit
+ * F's BLOCKED sampled 1299 near-white pixels against a danger-red border,
+ * breaking the danger-ink language on the one element that most depends on
+ * it. Positioning and color cannot share one slot. `colorClassName` defaults
+ * to text-danger for dark ground; pass "text-paper-red" on paper — the stamp
+ * is a >=3:1 graphic at 24px, so full danger is correct here (the <16px
+ * danger-ink rule does not reach it).
  */
 export default function Stamp({
 	word,
 	className,
+	colorClassName = "text-danger",
 }: {
 	word: "BLOCKED" | "VOID";
 	className?: string;
+	colorClassName?: string;
 }) {
 	const reduce = useReducedMotion();
 	const [hydrated, setHydrated] = useState(false);
@@ -33,7 +43,7 @@ export default function Stamp({
 	if (!hydrated || reduce) {
 		return (
 			<span
-				className={`${BASE} ${className ?? "text-danger"}`}
+				className={`${BASE} ${colorClassName} ${className ?? ""}`}
 				style={{ transform: "rotate(-8deg)" }}
 			>
 				{word}
@@ -43,7 +53,7 @@ export default function Stamp({
 
 	return (
 		<motion.span
-			className={`${BASE} ${className ?? "text-danger"}`}
+			className={`${BASE} ${colorClassName} ${className ?? ""}`}
 			initial={{ opacity: 0, scale: 1.6, rotate: -14 }}
 			whileInView={{ opacity: 1, scale: 1, rotate: -8 }}
 			viewport={{ once: true, amount: 0.6 }}

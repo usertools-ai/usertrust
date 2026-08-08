@@ -99,13 +99,18 @@ export function chainSeqFor(slice: ChainSlice, auditHash: string): number {
 /**
  * Syntax-tint class for a JSON token in the evidence terminal. Lives here
  * (outside app/components/sections) so its Tailwind opacity literals
- * (e.g. "text-white/40") never land in the check-facts digit scan of
+ * (e.g. "text-white/60") never land in the check-facts digit scan of
  * marketing-section JSX — the same rationale as the leader-path tuning
  * constants.
+ *
+ * Punctuation is the receipt's quietest role, but it is still 14px text on
+ * bg-terminal: white/40 measured 3.81:1 there, under the 4.5:1 floor
+ * (Addendum H2). white/60 measures 7.21:1 and keeps the
+ * key > value > punct hierarchy intact.
  */
 export function tokenClass(role: JsonToken["role"], emerald: boolean): string {
 	if (emerald) return "text-ut";
 	if (role === "key") return "text-tim";
-	if (role === "punct") return "text-white/40";
+	if (role === "punct") return "text-white/60";
 	return "text-white";
 }

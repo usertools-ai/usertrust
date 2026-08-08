@@ -110,12 +110,26 @@ export function cardStateClassName(failed: boolean): string {
 	return `${base} ${state}`;
 }
 
+/*
+ * Card inks (Addendum H2). Both of these render at 12px inside
+ * cardStateClassName's `text-xs` card, so both are held to 4.5:1 on the real
+ * composited grounds. white/40 measured 3.77-3.80:1 (page ground, card
+ * surface, failed card) — white/70 measures 9.70:1. Red text at this size is
+ * `danger-ink`, never `danger`/`danger/80`: see the token's note in
+ * globals.css.
+ */
 export function prevHashClassName(isDownstream: boolean): string {
-	return isDownstream ? "text-danger" : "text-white/40";
+	return isDownstream ? "text-danger-ink" : "text-white/70";
 }
 
+/*
+ * The chain arrow is aria-hidden decoration at 18px, so it could ride the
+ * >=18px decorative exemption — but at white/30 (2.62:1) it very nearly
+ * disappeared next to the hash lines it is supposed to chain together.
+ * white/50 keeps the recede without losing the metaphor.
+ */
 export function chainArrowClassName(isPastTamper: boolean): string {
-	return `px-2 text-lg ${isPastTamper ? "text-danger" : "text-white/30"}`;
+	return `px-2 text-lg ${isPastTamper ? "text-danger-ink" : "text-white/50"}`;
 }
 
 // ---------------------------------------------------------------------------

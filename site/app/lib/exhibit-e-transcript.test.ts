@@ -7,8 +7,18 @@ import {
 	NBSP,
 	splitTranscriptLine,
 	stepTypewriter,
+	transcriptMinHeightPx,
 	visibleLines,
 } from "./exhibit-e-transcript";
+
+test("the CLS reservation is derived from the transcript, not a fixed 16rem", () => {
+	const seven = ["a", "b", "c", "d", "e", "f", "g"];
+	// 14px mono at leading-relaxed (1.625) = 22.75px per rendered line.
+	assert.equal(transcriptMinHeightPx(seven), 159.25);
+	// The old hardcoded min-h-[16rem] (256px) left ~96px of dead frame.
+	assert.ok(transcriptMinHeightPx(seven) < 256);
+	assert.equal(transcriptMinHeightPx([]), 0);
+});
 
 test("initialTypewriterFrame is the zeroed typing baseline", () => {
 	assert.deepEqual(initialTypewriterFrame(), {

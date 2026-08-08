@@ -16,6 +16,15 @@
 	--color-mem: #c084fc;
 	--color-warning: #f59e0b;
 	--color-danger: #ef4444;
+	/* Small-size danger ink (Addendum H2). #ef4444 is the danger GRAPHIC —
+	   borders, fills, stamps, and any red text at >=16px. Below 16px it does
+	   not clear 4.5:1 with any de-emphasis on top of it: the /80 alpha step
+	   measured 3.52:1 on the race card and 3.64:1 on the page ground, and
+	   red-on-red (danger over bg-danger/30) measured 3.11:1. This lighter red
+	   is the ONE sanctioned red for 12-14px text roles — 7.09:1 on the page
+	   ground, 6.9:1 on the terminal fill. Never de-emphasize it with an alpha
+	   step; de-emphasize by size or weight. */
+	--color-danger-ink: #f87171;
 
 	/* Shared code-surface chrome (Addendum E) — TerminalFrame's container fill. */
 	--color-terminal: #0d0d20;
@@ -107,11 +116,18 @@ html {
 	background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-	background: rgba(52, 211, 153, 0.2);
+	/*
+	 * The thumb is the ONLY affordance telling a reader that a code surface
+	 * scrolls sideways (exhibit F's policy YAML, exhibit A's receipt hashes).
+	 * At 0.2 alpha it sampled 1.46:1 against the terminal fill — invisible,
+	 * so the clipped YAML read as truncation rather than scroll. 0.4 is the
+	 * former hover value; hover now goes to 0.6.
+	 */
+	background: rgba(52, 211, 153, 0.4);
 	border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-	background: rgba(52, 211, 153, 0.4);
+	background: rgba(52, 211, 153, 0.6);
 }
 
 /* Selection color */
@@ -360,6 +376,31 @@ html {
 }
 
 /* ── Receipts design system (2026-08 redesign) ─────────────────────────── */
+
+/*
+ * THE SECTION EYEBROW — one treatment, one definition (Addendum H1/H2).
+ *
+ * Every section opens with the same 12px mono kicker ("the docket",
+ * "exhibit a" … "the discipline"). It used to be re-typed per section as
+ * `font-mono text-xs uppercase tracking-[…] text-white/40`, which produced
+ * three different tracking values (0.1em / 0.25em / 0.3em) and, at 40%,
+ * a measured 3.77-3.81:1 on every ground the page owns — under the 4.5:1
+ * small-text floor in TEN sections at once. Both defects are one defect:
+ * the element had no single definition. It does now. 70% is the same ink
+ * the TerminalFrame title bar and the dt labels already carry (9.5-9.7:1),
+ * and 0.3em is the majority tracking it consolidates.
+ *
+ * Written unlayered so it beats Tailwind's layered utilities: a stray
+ * `text-white/40` on the same element cannot silently win the cascade.
+ */
+.section-eyebrow {
+	font-family: var(--font-mono);
+	font-size: 0.75rem;
+	line-height: 1rem;
+	text-transform: uppercase;
+	letter-spacing: 0.3em;
+	color: rgba(255, 255, 255, 0.7);
+}
 
 /* Thermal-paper surface — warm, slightly dimmed against pure white so paper
    reads as artifact, lifted off the dark ground by shadow, never by border. */
