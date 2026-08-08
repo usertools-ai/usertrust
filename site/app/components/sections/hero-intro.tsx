@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { INTRO_VIDEO_SOURCES } from "./intro-video-sources";
 
 /*
  * The intro backdrop (Addendum A; scrim per Addendum C). Poster paints in
@@ -58,8 +59,9 @@ export default function HeroIntro() {
 					onEnded={() => setSettled(true)}
 					className="absolute inset-0 h-full w-full object-cover"
 				>
-					<source src="/intro/intro-autoplay.webm" type="video/webm" />
-					<source src="/intro/intro-autoplay.mp4" type="video/mp4" />
+					{INTRO_VIDEO_SOURCES.map((source) => (
+						<source key={source.type} src={source.src} type={source.type} />
+					))}
 				</video>
 			)}
 			{/* Legibility scrim (Addendum C rebalance) — gradient only, NO

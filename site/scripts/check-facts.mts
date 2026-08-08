@@ -66,11 +66,6 @@ const ALLOWLIST = new RegExp(
 		"data-code-sample",
 		// hex colors
 		"#[0-9a-f]",
-		// video/audio container format identifiers: a codec/container name, not
-		// a marketing digit (e.g. `<source type="video/mp4" src=".../x.mp4" />`
-		// — the Safari fallback source is unavoidably literal). Whole-word only,
-		// so it never bleeds into an adjacent rogue digit on the same line.
-		String.raw`\bmp4\b`,
 		// raw CSS values: a digit glued directly to its unit, never bare "px"/
 		// "rem"/"%" (those match inside ordinary words like "premium").
 		String.raw`\d+(?:\.\d+)?(?:px|rem|em|vh|vw|deg|ms)\b`,
