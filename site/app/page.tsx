@@ -13,6 +13,7 @@ import ExhibitA from "./components/sections/exhibit-a";
 import ExhibitB from "./components/sections/exhibit-b";
 import ExhibitC from "./components/sections/exhibit-c";
 import ExhibitD from "./components/sections/exhibit-d";
+import ExhibitE from "./components/sections/exhibit-e";
 import Hero from "./components/sections/hero";
 import { SocialProof } from "./components/social-proof";
 
@@ -27,6 +28,7 @@ export default function Home() {
 			<ExhibitB />
 			<ExhibitC />
 			<ExhibitD />
+			<ExhibitE />
 			<SocialProof />
 			<CodeExample />
 			<BeforeAfter />
