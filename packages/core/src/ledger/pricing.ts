@@ -220,6 +220,46 @@ export function warnUnknownModel(model: string): void {
 	);
 }
 
+/** True once the D8 cache-rate migration warning has fired this process. */
+let cacheRateMigrationWarned = false;
+
+/**
+ * D8 migration warning: `customRates` is replace-not-merge (D1) — a custom
+ * entry for a model the table prices at four tiers, written before this ship,
+ * silently loses the cache discount forever, not by operator choice but
+ * because the fields didn't exist yet. This is NOT the D1 money invariant
+ * (that fallback is correct and stays); it is a one-time notice so the
+ * operator knows their cache reads are about to price at the full input
+ * rate and can add `cacheReadPer1k`/`cacheWritePer1k` if that is unwanted.
+ *
+ * Fires at most ONCE per process — not once per call, not once per model —
+ * via the module-level flag above, so a long-running governor isn't spammed
+ * on every settle. Called from the config-load path of every entry point
+ * that actually meters against `customRates` (`trust()`, `createGovernor()`),
+ * mirroring how `warnUnknownModel` is shared by both.
+ */
+export function warnCacheRateMigration(customRates: Record<string, ModelRates> | undefined): void {
+	if (cacheRateMigrationWarned || !customRates) return;
+
+	const affected: string[] = [];
+	for (const [model, custom] of Object.entries(customRates)) {
+		const base = PRICING_TABLE[model];
+		if (!base) continue;
+		const missingRead = base.cacheReadPer1k !== undefined && custom.cacheReadPer1k === undefined;
+		const missingWrite = base.cacheWritePer1k !== undefined && custom.cacheWritePer1k === undefined;
+		if (missingRead || missingWrite) affected.push(model);
+	}
+
+	if (affected.length === 0) return;
+
+	cacheRateMigrationWarned = true;
+	process.stderr.write(
+		`[usertrust] customRates for ${affected.join(", ")} omit cache rates the pricing table publishes for ` +
+			`${affected.length === 1 ? "it" : "them"}; cache reads will price at full input rate. Add ` +
+			"cacheReadPer1k/cacheWritePer1k to customRates to restore the discount.\n",
+	);
+}
+
 /**
  * Resolve the effective rate for one cache tier — THE single site where the D1
  * money invariant is applied. Do not inline this resolution anywhere else: a

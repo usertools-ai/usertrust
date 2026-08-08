@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	costFromRates,
 	estimateCost,
@@ -9,6 +9,7 @@ import {
 	modelsForProvider,
 	PRICING_TABLE,
 	PRICING_TABLE_VERSION,
+	warnCacheRateMigration,
 } from "../../src/ledger/pricing.js";
 
 describe("PRICING_TABLE", () => {
@@ -687,5 +688,68 @@ describe("costFromRates guards on the new cache params", () => {
 		const cost = costFromRates(rates, Number.NaN, Number.NaN, Number.NaN, Number.NaN);
 		expect(Number.isFinite(cost)).toBe(true);
 		expect(cost).toBe(1);
+	});
+});
+
+// D8: the migration warning is a process-lifetime singleton (fires at most
+// once, ever, in this module instance) — vitest isolates modules per test
+// FILE by default, so these tests share that one lifetime. The "does not
+// warn" cases run first, before anything trips the flag; the final test both
+// trips it and proves the dedup, so ordering here is load-bearing.
+describe("warnCacheRateMigration (D8 migration warning)", () => {
+	let stderrSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+	});
+
+	afterEach(() => {
+		stderrSpy.mockRestore();
+	});
+
+	it("does not warn when customRates is undefined", () => {
+		warnCacheRateMigration(undefined);
+		expect(stderrSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not warn when the custom entry carries both cache fields", () => {
+		warnCacheRateMigration({
+			"claude-haiku-4-5": {
+				inputPer1k: 10,
+				outputPer1k: 50,
+				cacheReadPer1k: 1,
+				cacheWritePer1k: 12.5,
+			},
+		});
+		expect(stderrSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not warn when the table entry itself has no cache fields", () => {
+		// mistral-large is two-tier in PRICING_TABLE — nothing to migrate away from.
+		expect(PRICING_TABLE["mistral-large"]?.cacheReadPer1k).toBeUndefined();
+		warnCacheRateMigration({ "mistral-large": { inputPer1k: 6, outputPer1k: 16 } });
+		expect(stderrSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not warn for a model absent from the table (nothing to compare against)", () => {
+		warnCacheRateMigration({ "totally-custom-model": { inputPer1k: 1, outputPer1k: 2 } });
+		expect(stderrSpy).not.toHaveBeenCalled();
+	});
+
+	it("warns once naming the model and the conservative consequence, then stays silent", () => {
+		// claude-haiku-4-5 publishes both cache tiers in PRICING_TABLE; this custom
+		// entry omits both, which is exactly the pre-D1 shape an operator's config
+		// would already have.
+		warnCacheRateMigration({ "claude-haiku-4-5": { inputPer1k: 11, outputPer1k: 55 } });
+
+		expect(stderrSpy).toHaveBeenCalledTimes(1);
+		const [msg] = stderrSpy.mock.calls[0] as [string];
+		expect(msg).toContain("claude-haiku-4-5");
+		expect(msg).toContain("cache reads will price at full input rate");
+
+		// Once per PROCESS, not once per call: a second call — even with a
+		// different affected model — must not fire again.
+		warnCacheRateMigration({ "claude-opus-4-6": { inputPer1k: 55, outputPer1k: 275 } });
+		expect(stderrSpy).toHaveBeenCalledTimes(1);
 	});
 });

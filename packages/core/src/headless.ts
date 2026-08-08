@@ -83,6 +83,7 @@ import {
 	PRICING_TABLE_VERSION,
 	resolveAppliedRates,
 	resolveRates,
+	warnCacheRateMigration,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
 import { publishableUsage, sanitizeUsage } from "./ledger/usage.js";
@@ -707,6 +708,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	}
 
 	const customRates = config.pricing === "custom" ? config.customRates : undefined;
+	// D8: one-time migration warning, evaluated at the config-load path.
+	warnCacheRateMigration(customRates);
 	// M2: governor-wide default endpoint scope; per-call AuthorizeParams.endpoint
 	// overrides it (A3). Defaults to cloud — pre-M2 metering exactly.
 	const defaultEndpoint = normalizeEndpoint(opts?.endpoint);

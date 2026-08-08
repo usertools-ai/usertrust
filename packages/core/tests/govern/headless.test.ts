@@ -638,6 +638,40 @@ describe("headless governor", () => {
 		await gov.destroy();
 	});
 
+	// ── D8 migration warning ──
+
+	it(
+		"warns on stderr once when customRates omits cache fields the table publishes " +
+			"(createGovernor is a config-load path warnCacheRateMigration is wired into)",
+		async () => {
+			const configDir = join(vaultBase, VAULT_DIR);
+			mkdirSync(configDir, { recursive: true });
+			writeFileSync(
+				join(configDir, "usertrust.config.json"),
+				JSON.stringify({
+					budget: 100_000,
+					pricing: "custom",
+					// claude-opus-4-6 publishes cacheReadPer1k/cacheWritePer1k in
+					// PRICING_TABLE; this entry, pre-D1 shaped, omits both.
+					customRates: { "claude-opus-4-6": { inputPer1k: 50, outputPer1k: 250 } },
+				}),
+			);
+
+			const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+			const gov = await createGovernor({ dryRun: true, vaultBase });
+
+			const migrationCalls = stderrSpy.mock.calls.filter((call) =>
+				String(call[0]).includes("cache reads will price at full input rate"),
+			);
+			expect(migrationCalls).toHaveLength(1);
+			expect(String(migrationCalls[0]?.[0])).toContain("claude-opus-4-6");
+
+			stderrSpy.mockRestore();
+			await gov.destroy();
+		},
+	);
+
 	// ── Policy denial ──
 
 	it("authorize throws PolicyDeniedError when budget is exhausted", async () => {

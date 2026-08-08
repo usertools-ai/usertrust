@@ -49,6 +49,7 @@ import {
 	type RateResolution,
 	resolveAppliedRates,
 	resolveRates,
+	warnCacheRateMigration,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
 import {
@@ -709,6 +710,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
 		});
 	}
+
+	// D8: one-time migration warning, evaluated at the config-load path.
+	warnCacheRateMigration(config.pricing === "custom" ? config.customRates : undefined);
 
 	const isDryRun = opts?.dryRun ?? process.env.USERTRUST_DRY_RUN === "true";
 

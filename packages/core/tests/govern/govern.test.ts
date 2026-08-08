@@ -706,6 +706,38 @@ describe("trust()", () => {
 
 			await governed.destroy();
 		});
+
+		// D8: trust() is one of the config-load paths warnCacheRateMigration is
+		// wired into — a customRates entry for a model the table prices at four
+		// tiers, written without the cache fields, must warn once at load time.
+		it("warns on stderr once when customRates omits cache fields the table publishes", async () => {
+			const configDir = join(tmpVault, ".usertrust");
+			mkdirSync(configDir, { recursive: true });
+			writeFileSync(
+				join(configDir, "usertrust.config.json"),
+				JSON.stringify({
+					budget: 50_000,
+					pricing: "custom",
+					// claude-sonnet-4-6 publishes cacheReadPer1k/cacheWritePer1k in
+					// PRICING_TABLE; this entry, pre-D1 shaped, omits both.
+					customRates: { "claude-sonnet-4-6": { inputPer1k: 30, outputPer1k: 150 } },
+				}),
+			);
+
+			const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+			const mockClient = makeAnthropicMock();
+			const governed = await trust(mockClient, { vaultBase: tmpVault, dryRun: true });
+
+			const migrationCalls = stderrSpy.mock.calls.filter((call) =>
+				String(call[0]).includes("cache reads will price at full input rate"),
+			);
+			expect(migrationCalls).toHaveLength(1);
+			expect(String(migrationCalls[0]?.[0])).toContain("claude-sonnet-4-6");
+
+			stderrSpy.mockRestore();
+			await governed.destroy();
+		});
 	});
 
 	// ─── Policy gate ───
