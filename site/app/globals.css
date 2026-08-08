@@ -751,3 +751,53 @@ html {
 		animation: none;
 	}
 }
+
+/* Exhibit F — print-spool drop, violator eject, audit-rail arrival.
+   Each fires once (IO-once in the island); reduced-motion renders the
+   settled end state, so these are simply disabled there. */
+@keyframes chit-drop {
+	from {
+		opacity: 0;
+		transform: translateY(-18px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+@keyframes chit-eject {
+	from {
+		opacity: 1;
+		transform: translate(0, 0) rotate(0deg);
+	}
+	to {
+		opacity: 0;
+		transform: translate(64px, 24px) rotate(8deg);
+	}
+}
+@keyframes rail-arrive {
+	from {
+		opacity: 0;
+		transform: translateX(-24px);
+	}
+	to {
+		opacity: 1;
+		transform: translateX(0);
+	}
+}
+.chit-drop {
+	animation: chit-drop 0.45s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+.chit-eject {
+	animation: chit-eject 0.5s ease-in both;
+}
+.rail-arrive {
+	animation: rail-arrive 0.4s ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+	.chit-drop,
+	.chit-eject,
+	.rail-arrive {
+		animation: none;
+	}
+}

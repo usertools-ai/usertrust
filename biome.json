@@ -37,7 +37,8 @@
 			"includes": [
 				"**/site/app/components/typewriter-code.tsx",
 				"**/site/app/components/before-after.tsx",
-				"**/site/app/components/governance-receipt.tsx"
+				"**/site/app/components/governance-receipt.tsx",
+				"**/site/app/components/sections/exhibit-f-spool.tsx"
 			],
 			"linter": {
 				"rules": {
