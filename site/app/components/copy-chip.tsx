@@ -8,7 +8,24 @@ import { useCallback, useEffect, useRef, useState } from "react";
  * (permissions policy, insecure context). Screen readers get an
  * aria-live="polite" announcement either way.
  */
-export default function CopyChip({ text, label }: { text: string; label?: string }) {
+export default function CopyChip({
+	text,
+	label,
+	tone = "dark",
+}: {
+	text: string;
+	label?: string;
+	/**
+	 * "dark" (default) is the original dark-ground styling (white/near-white
+	 * on a translucent white fill) — every pre-existing call site (hero,
+	 * exhibit E, exhibit G) renders on dark ground and is unaffected. "paper"
+	 * swaps to ink-on-paper for placement inside ReceiptPaper: the dark
+	 * styling reads at ~1.1:1 contrast on `--color-paper`, well under the
+	 * ≥4.5:1 the paper surface requires (globals.css's validated paper-*
+	 * accents), so it cannot be reused as-is there.
+	 */
+	tone?: "dark" | "paper";
+}) {
 	const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
 	const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
@@ -29,18 +46,31 @@ export default function CopyChip({ text, label }: { text: string; label?: string
 		timer.current = setTimeout(() => setState("idle"), 1600);
 	}, [text]);
 
+	const isPaper = tone === "paper";
 	return (
 		<button
 			type="button"
 			onClick={handleCopy}
 			aria-label={`Copy ${label ?? text}`}
-			className="focus-ring group relative inline-flex min-h-[44px] cursor-pointer items-center gap-3 rounded-lg border border-white/10 bg-white/[0.06] px-4 py-2.5 font-mono text-sm text-white/85 transition-colors hover:border-ut/30"
+			className={
+				isPaper
+					? "focus-ring group relative inline-flex min-h-[44px] cursor-pointer items-center gap-3 rounded-lg border border-ink/15 bg-ink/[0.04] px-4 py-2.5 font-mono text-sm text-ink transition-colors hover:border-ink/30"
+					: "focus-ring group relative inline-flex min-h-[44px] cursor-pointer items-center gap-3 rounded-lg border border-white/10 bg-white/[0.06] px-4 py-2.5 font-mono text-sm text-white/85 transition-colors hover:border-ut/30"
+			}
 		>
-			<span aria-hidden="true" className="text-ut/60">
+			<span aria-hidden="true" className={isPaper ? "text-ink/50" : "text-ut/60"}>
 				$
 			</span>
 			<span>{label ?? text}</span>
-			<span className="text-xs text-white/40 transition-colors group-hover:text-ut">copy</span>
+			<span
+				className={
+					isPaper
+						? "text-xs text-ink/50 transition-colors group-hover:text-ink"
+						: "text-xs text-white/40 transition-colors group-hover:text-ut"
+				}
+			>
+				copy
+			</span>
 			{state === "copied" && (
 				<span
 					aria-hidden="true"

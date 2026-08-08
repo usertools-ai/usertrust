@@ -2,9 +2,7 @@ import { BeforeAfter } from "./components/before-after";
 import { BuiltFor } from "./components/built-for";
 import { BYOK } from "./components/byok";
 import { CodeExample } from "./components/code-example";
-import { CTA } from "./components/cta";
 import { Features } from "./components/features";
-import { Footer } from "./components/footer";
 import { GridBackground } from "./components/grid-background";
 import { HowItWorks } from "./components/how-it-works";
 import { Nav } from "./components/nav";
@@ -18,6 +16,7 @@ import ExhibitF from "./components/sections/exhibit-f";
 import ExhibitG from "./components/sections/exhibit-g";
 import HardenStrip from "./components/sections/harden-strip";
 import Hero from "./components/sections/hero";
+import OpenLedger from "./components/sections/open-ledger";
 import { SocialProof } from "./components/social-proof";
 
 export default function Home() {
@@ -42,8 +41,7 @@ export default function Home() {
 			<HowItWorks />
 			<BYOK />
 			<BuiltFor />
-			<CTA />
-			<Footer />
+			<OpenLedger />
 		</>
 	);
 }

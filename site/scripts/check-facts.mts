@@ -94,6 +94,8 @@ const ALWAYS_SANCTIONED = [
 	"6962",
 	"2.0",
 	"001",
+	// totalSurprises — the dotted-leader punchline in open-ledger.tsx; the 0 is copy, not a fact.
+	"TOTAL SURPRISES ··· 0",
 ];
 
 /** Matches "$0.00", "$500", "50,000", "20+", "9", "44" ... as whole tokens. */
