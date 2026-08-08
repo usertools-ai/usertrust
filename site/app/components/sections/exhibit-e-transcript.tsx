@@ -8,6 +8,7 @@ import {
 	lastLineIndex,
 	splitTranscriptLine,
 	stepTypewriter,
+	transcriptMinHeightPx,
 	visibleLines,
 } from "@/lib/exhibit-e-transcript";
 
@@ -88,7 +89,7 @@ export default function ExhibitETranscript({ lines }: { lines: string[] }) {
 		phase === "static" || phase === "done" || (phase === "typing" && shownLines >= lastIndex);
 
 	return (
-		<div ref={rootRef} className="min-h-[16rem]">
+		<div ref={rootRef} style={{ minHeight: `${transcriptMinHeightPx(lines)}px` }}>
 			{/* Screen readers get the whole transcript immediately; the
 			    typewriter is a purely visual effect. */}
 			<pre className="sr-only">{lines.join("\n")}</pre>
@@ -96,7 +97,14 @@ export default function ExhibitETranscript({ lines }: { lines: string[] }) {
 				{visibleLines(lines, shownLines).map((line, i) => {
 					const { key, value } = splitTranscriptLine(line);
 					return (
-						<div key={line || `blank-${i}`} className="whitespace-pre">
+						// whitespace-pre-wrap, not whitespace-pre: the verdict line
+						// ("Vault integrity: VERIFIED (UNANCHORED — internal consistency
+						// only)") is longer than the frame is wide, so pre clipped it
+						// mid-word at every viewport — and the crop landed exactly on the
+						// honesty qualifier. Soft wrap makes the sentence fully visible
+						// without interaction; the Merkle root hex has no break
+						// opportunity, so it still rides the frame's overflow-x-auto.
+						<div key={line || `blank-${i}`} className="whitespace-pre-wrap">
 							{key && <span className="text-tim">{key}</span>}
 							<span className="text-white">{value}</span>
 						</div>
@@ -104,7 +112,7 @@ export default function ExhibitETranscript({ lines }: { lines: string[] }) {
 				})}
 				{showFinal && lastIndex >= 0 && (
 					<div
-						className={`whitespace-pre text-ut ${phase === "done" || phase === "static" ? "ok-stamp" : ""}`}
+						className={`whitespace-pre-wrap text-ut ${phase === "done" || phase === "static" ? "ok-stamp" : ""}`}
 					>
 						{phase === "typing" ? finalLineText(lines, finalChars) : lines[lastIndex]}
 					</div>

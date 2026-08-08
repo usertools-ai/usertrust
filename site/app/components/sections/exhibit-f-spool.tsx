@@ -53,7 +53,18 @@ export default function ExhibitFSpool() {
 	const [phase, setPhase] = useState<Phase>("settled");
 	const [ejecting, setEjecting] = useState(false);
 	const [ejected, setEjected] = useState(true);
-	const [activeOp, setActiveOp] = useState<PolicyOp | null>(null);
+	/*
+	 * Hover and pin are two different states and used to share one slot, which
+	 * produced two defects at once: a click-pinned chip looked identical to a
+	 * merely hovered one, and moving the pointer off a PINNED chip silently
+	 * unpinned it (onMouseLeave cleared whatever `activeOp` held, pin or not).
+	 * Hover is transient and clears on mouseleave; the pin only toggles on
+	 * click/focus. Hover wins the highlight while it exists, so hovering a
+	 * neighbour still previews it without destroying the pin underneath.
+	 */
+	const [pinnedOp, setPinnedOp] = useState<PolicyOp | null>(null);
+	const [hoverOp, setHoverOp] = useState<PolicyOp | null>(null);
+	const activeOp = hoverOp ?? pinnedOp;
 	const rootRef = useRef<HTMLDivElement | null>(null);
 	const playedRef = useRef(false);
 
@@ -79,9 +90,19 @@ export default function ExhibitFSpool() {
 	const railVisible = ejected || phase === "settled";
 
 	return (
-		<div ref={rootRef} className="mt-12 grid gap-8 md:grid-cols-2">
+		// The YAML wants the spare width, not an even split: the policy's longest
+		// line is 78 chars and the right column is a fixed w-72 stack that was
+		// centering itself inside a ~560px cell at 2000 (~130px dead margin each
+		// side) while the editor clipped rule values mid-token at every viewport.
+		<div
+			ref={rootRef}
+			className="mt-12 grid grid-cols-[minmax(0,1fr)] gap-8 md:grid-cols-[minmax(0,1fr)_20rem]"
+		>
 			{/* left: the policy, as a mono editor frame */}
-			<TerminalFrame title="policy.yaml">
+			{/* self-start, not the grid's default stretch: matching the spool
+			    column's height left a tall band of empty terminal under the last
+			    YAML line, which reads as a broken frame rather than a tall one. */}
+			<TerminalFrame className="self-start" title="policy.yaml">
 				<pre>
 					{POLICY_LINES.map((line, i) => {
 						const hot = activeOp !== null && opsInLine(line).includes(activeOp);
@@ -95,13 +116,13 @@ export default function ExhibitFSpool() {
 											key={j}
 											type="button"
 											data-operator={op}
-											aria-pressed={activeOp === op}
-											onClick={() => setActiveOp((cur) => (cur === op ? null : op))}
-											onMouseEnter={() => setActiveOp(op)}
-											onMouseLeave={() => setActiveOp((cur) => (cur === op ? null : cur))}
-											onFocus={() => setActiveOp(op)}
-											onBlur={() => setActiveOp((cur) => (cur === op ? null : cur))}
-											className="focus-ring rounded-sm border border-tim/40 bg-tim/10 px-1 text-tim"
+											aria-pressed={pinnedOp === op}
+											onClick={() => setPinnedOp((cur) => (cur === op ? null : op))}
+											onMouseEnter={() => setHoverOp(op)}
+											onMouseLeave={() => setHoverOp((cur) => (cur === op ? null : cur))}
+											onFocus={() => setHoverOp(op)}
+											onBlur={() => setHoverOp((cur) => (cur === op ? null : cur))}
+											className="focus-ring rounded-sm border border-tim/40 bg-tim/10 px-1 text-tim transition-colors aria-pressed:border-tim aria-pressed:bg-tim/30 aria-pressed:text-white"
 										>
 											{seg.t}
 										</button>
@@ -206,13 +227,22 @@ export default function ExhibitFSpool() {
 									phase === "playing" ? "rail-arrive" : ""
 								}`}
 							>
-								<Stamp word="BLOCKED" className="absolute -right-2 -top-3" />
-								<p className="font-mono text-[12px] text-white/80">{RAIL_THROWN}</p>
+								{/* The stamp is lifted clear of the text block and the first
+								    paragraph reserves the stamp's footprint (pr-24): at
+								    -top-3 the stamp's lower border stroke ran straight
+								    through both 12px lines of RAIL_THROWN, reading as
+								    strike-through rather than as a stamp. */}
+								<Stamp word="BLOCKED" className="absolute -right-3 -top-6 z-10" />
+								<p className="pr-24 font-mono text-[12px] text-white/80">{RAIL_THROWN}</p>
 								<p className="mt-1 font-mono text-[12px] text-white/70">{RAIL_REASON}</p>
 							</div>
 						) : (
-							/* reserved space — the card's arrival must not shift layout */
-							<div className="mt-2 h-24" aria-hidden="true" />
+							/* reserved space — the card's arrival must not shift layout.
+							   h-32, not h-24: the settled card measures ~120px (p-3 plus
+							   two wrapped RAIL_THROWN lines and three wrapped RAIL_REASON
+							   lines), so the shorter placeholder shifted the column ~24px
+							   on arrival — the exact shift it exists to prevent. */
+							<div className="mt-2 h-32" aria-hidden="true" />
 						)}
 					</div>
 				</div>

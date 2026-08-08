@@ -39,7 +39,7 @@ export default function ExhibitC() {
 	return (
 		<section id="exhibit-c" className="ground-zone relative py-24 sm:py-32 safe-x">
 			<div className="mx-auto max-w-6xl">
-				<p className="font-mono text-xs uppercase tracking-widest text-white/40">exhibit c</p>
+				<p className="section-eyebrow">exhibit c</p>
 				<div className="mt-3 flex items-center gap-1.5">
 					<StageTag stage="ENFORCE" />
 				</div>
@@ -82,19 +82,28 @@ export default function ExhibitC() {
 				</div>
 
 				{/* Counterfactual replay — desktop-only ambient video beside the real
-				    thrown error, stamped by the one set-piece in this section. */}
-				<div className="mt-32 hidden gap-10 md:mt-44 md:grid md:grid-cols-2 md:items-center">
-					<figure>
+				    thrown error, stamped by the one set-piece in this section.
+				    ONLY the video is desktop-only. The copy above promises "the error
+				    it throws is captured below, verbatim" at every viewport, so the
+				    thrown-error card and its tagline — both content-gate items — must
+				    render on a phone too; the plan sanctions the replay VIDEO as
+				    desktop-only, never the evidence beside it. */}
+				<div className="mt-32 grid gap-10 md:mt-44 md:grid-cols-2 md:items-center">
+					<figure className="hidden md:block">
 						<AmbientVideo
 							src={REPLAY_VIDEO.src}
 							poster={REPLAY_VIDEO.poster}
 							className="aspect-[39/16] w-full border border-white/10"
 						/>
-						<figcaption className="mt-3 font-mono text-xs leading-5 text-white/40">
+						<figcaption className="mt-3 font-mono text-xs leading-5 text-white/70">
 							counterfactual replay — the same loop, governed: usertrust throws at the cap.
 						</figcaption>
 					</figure>
-					<div className="relative">
+					{/* min-w-0: now that this column renders on a phone it is a grid
+					    item with the default auto minimum, and the thrown error's
+					    longest unbreakable token set the track's min-content wider
+					    than the viewport. */}
+					<div className="relative min-w-0">
 						<Stamp word="BLOCKED" className="absolute -right-4 -top-6 z-10" />
 						<ThrownDenialCard />
 						<p className="mt-4 font-mono text-sm text-white/70">

@@ -62,7 +62,7 @@ function SurfaceColumn({
 			<p className={`uppercase tracking-widest ${titleClass}`}>{title}</p>
 			{groups.map((g) => (
 				<div key={g.provider} className="mt-4">
-					<p className="text-white/40">{g.provider}</p>
+					<p className="text-white/70">{g.provider}</p>
 					<ul className="mt-1 space-y-0.5 text-white/80">
 						{g.surfaces.map((s) => (
 							<li key={s}>{s}</li>
@@ -78,7 +78,7 @@ export default function ExhibitB() {
 	return (
 		<section id="exhibit-b" className="relative py-24 sm:py-32 safe-x">
 			<div className="mx-auto max-w-6xl">
-				<p className="font-mono text-xs uppercase tracking-widest text-white/40">exhibit b</p>
+				<p className="section-eyebrow">exhibit b</p>
 				<h2 className="mt-4 font-display text-[clamp(2.5rem,6vw,4.5rem)] leading-[0.95] tracking-tight text-white">
 					your SDK. one line.
 				</h2>
@@ -121,7 +121,7 @@ export default function ExhibitB() {
 						{PROVIDER_BADGES.map((badge) => (
 							<li
 								key={badge}
-								className="font-mono text-[12px] tracking-[0.12em] text-white/45 transition-colors hover:text-white/85"
+								className="font-mono text-[12px] tracking-[0.12em] text-white/50 transition-colors hover:text-white/85"
 							>
 								{badge}
 							</li>
@@ -158,7 +158,7 @@ export default function ExhibitB() {
 									groups={PASSTHROUGH}
 								/>
 							</div>
-							<p className="border-t border-white/[0.06] px-4 py-3 text-white/40">
+							<p className="border-t border-white/[0.06] px-4 py-3 text-white/70">
 								passthrough surfaces bypass governance, audit, and budget enforcement — route spend
 								through the governed entry points. {facts.modelCount.value} models priced across
 								anthropic, openai, and google.

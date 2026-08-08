@@ -61,9 +61,9 @@ function verdictClass(verdict: string): string {
 
 export default function ExhibitG() {
 	return (
-		<section id="exhibit-g" className="ground-zone safe-x relative py-24 md:py-32">
+		<section id="exhibit-g" className="ground-zone safe-x relative py-24 sm:py-32">
 			<div className="mx-auto max-w-6xl">
-				<p className="font-mono text-xs uppercase tracking-[0.3em] text-white/40">exhibit g</p>
+				<p className="section-eyebrow">exhibit g</p>
 				<div className="mt-3 flex items-center gap-1.5">
 					<StageTag stage="VERIFY" />
 				</div>
@@ -75,7 +75,7 @@ export default function ExhibitG() {
 				</p>
 				{/* the count numeral derives from the fixture — the headline word
 			    carries no digit (check-facts stays clean by construction) */}
-				<p className="mt-4 font-mono text-xs text-white/40">
+				<p className="mt-4 font-mono text-xs text-white/70">
 					<span className="text-2xl leading-none text-white/90">{corpus.attacks.length}</span>{" "}
 					scenarios · every verdict below is the string the verifier really returns
 				</p>
@@ -93,7 +93,13 @@ export default function ExhibitG() {
 					}
 				>
 					<InView>
-						<ol className="list-none">
+						{/* min-w-max below sm: the rows keep their intrinsic width and
+						    scroll inside TerminalFrame's own overflow-x-auto, which is
+						    what the frame is for. truncate shrink-to-fit meant the
+						    container never overflowed and so never scrolled, collapsing
+						    every scenario to a dozen characters with no way to read the
+						    rest — the title attribute does not exist on touch. */}
+						<ol className="list-none min-w-max sm:min-w-0">
 							{corpus.attacks.map((attack, i) => (
 								<li
 									key={attack.name}
@@ -105,9 +111,16 @@ export default function ExhibitG() {
 										target="_blank"
 										rel="noreferrer"
 										title={attack.name}
-										className="focus-ring flex items-baseline justify-between gap-6 rounded-sm px-2 py-1.5 transition-colors hover:bg-white/[0.04]"
+										// The hover ground is the nav's own token; the previous
+										// value shifted the ground barely past the threshold
+										// of perception. Paired with a text lift so the row
+										// answers the pointer the way every other interactive
+										// row on the page does.
+										className="focus-ring group flex items-baseline justify-between gap-6 rounded-sm px-2 py-1.5 transition-colors hover:bg-white/[0.06]"
 									>
-										<span className="min-w-0 flex-1 truncate text-white/85">{attack.name}</span>
+										<span className="min-w-0 flex-1 whitespace-nowrap text-white/85 transition-colors group-hover:text-white sm:truncate sm:whitespace-normal">
+											{attack.name}
+										</span>
 										<span
 											className={`shrink-0 uppercase tracking-wide ${verdictClass(attack.verdict)}`}
 										>
@@ -132,14 +145,14 @@ export default function ExhibitG() {
 						<pre>
 							{REPRO_LINES.map((line) => (
 								<div key={line}>
-									<span className="select-none text-white/35">$ </span>
+									<span className="select-none text-white/50">$ </span>
 									{line}
 								</div>
 							))}
 						</pre>
 					</TerminalFrame>
 				</div>
-				<p className="mt-3 font-mono text-xs text-white/40">don&rsquo;t trust us — recompute us.</p>
+				<p className="mt-3 font-mono text-xs text-white/70">don&rsquo;t trust us — recompute us.</p>
 			</div>
 		</section>
 	);

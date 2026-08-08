@@ -103,7 +103,11 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 			{/* Mode toggle — aria-pressed drives both semantics and styling. A real
 			    <fieldset>/<legend> rather than role="group" on a div: same grouping
 			    semantics with no ARIA needed (biome's useSemanticElements rule). */}
-			<fieldset className="mt-6 flex gap-2">
+			{/* Stacked below sm: on a phone the two labels ("without holds",
+			    "two-phase holds") cannot share a row without wrapping mid-chip, and
+			    nowrap overflows the track instead. Full-width rows keep each label
+			    on one line and each target at full tap height. */}
+			<fieldset className="mt-6 flex flex-col gap-2 sm:flex-row">
 				<legend className="sr-only">enforcement mode</legend>
 				<button
 					type="button"
@@ -124,21 +128,30 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 			</fieldset>
 
 			{/* The equation — real math, live values. Without holds, Σ(holds) is
-			    zero: the ledger never sees the race. That is the indictment. */}
-			<div className="mt-8 flex flex-wrap items-end gap-x-4 gap-y-2">
+			    zero: the ledger never sees the race. That is the indictment.
+			    Each operator is welded to the term it introduces inside a
+			    non-wrapping group, so when the children cannot fit a phone-width
+			    track the break falls BEFORE the operator and the minus sign leads
+			    the next line. Left loose, flex-wrap stranded a dangling minus at
+			    the end of the first line — an equation that reads as a typo. */}
+			<div className="mt-8 flex flex-wrap items-end gap-x-3 gap-y-2 sm:gap-x-4">
 				<Term
 					label="available"
 					value={fmt(holdsMode ? race.available : budget)}
 					tone={holdsMode ? "ok" : undefined}
 				/>
-				<span aria-hidden="true" className="font-mono text-xl text-white/40">
-					=
+				<span className="flex items-end gap-x-3 sm:gap-x-4">
+					<span aria-hidden="true" className="font-mono text-xl text-white/70">
+						=
+					</span>
+					<Term label="budget" value={fmt(budget)} />
 				</span>
-				<Term label="budget" value={fmt(budget)} />
-				<span aria-hidden="true" className="font-mono text-xl text-white/40">
-					−
+				<span className="flex items-end gap-x-3 sm:gap-x-4">
+					<span aria-hidden="true" className="font-mono text-xl text-white/70">
+						−
+					</span>
+					<Term label="Σ(holds)" value={fmt(holdsMode ? race.heldTotal : 0)} />
 				</span>
-				<Term label="Σ(holds)" value={fmt(holdsMode ? race.heldTotal : 0)} />
 			</div>
 			{!holdsMode && (
 				<p className="mt-2 font-mono text-xs text-white/70">
@@ -209,7 +222,7 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 								key={h.label}
 								className="flex items-baseline gap-3 font-mono text-xs text-white/70"
 							>
-								<span className="w-28 shrink-0 text-white/45">{h.label}</span>
+								<span className="w-28 shrink-0 text-white/50">{h.label}</span>
 								<span
 									aria-hidden="true"
 									className="flex-1 border-b border-dashed border-white/10"
@@ -220,8 +233,8 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 						))}
 						{race.firstBlocked && (
 							<li className="mt-3 border border-danger/40 bg-danger/[0.06] px-3 py-2 font-mono text-xs leading-5">
-								<span className="text-white/45">{race.firstBlocked.label}</span>{" "}
-								<span className="font-bold text-danger">✗ {THROWN_DENIAL.name}</span>
+								<span className="text-white/50">{race.firstBlocked.label}</span>{" "}
+								<span className="font-bold text-danger-ink">✗ {THROWN_DENIAL.name}</span>
 								<span className="text-white/70">: hold would exceed available budget</span>
 								<span className="mt-1 block tabular-nums text-white/70">
 									hold {fmt(costPerCall)} &gt; available {fmt(race.available)} — nothing moved,
@@ -230,7 +243,7 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 							</li>
 						)}
 						{race.extraDenied > 0 && (
-							<li className="font-mono text-xs text-white/40">
+							<li className="font-mono text-xs text-white/70">
 								+ {race.extraDenied} more denied — the ledger's answer does not change
 							</li>
 						)}
@@ -244,9 +257,9 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 					race.settles.map((s) => (
 						<li
 							key={s.label}
-							className={`flex items-baseline gap-3 font-mono text-xs ${s.pastCap ? "text-danger" : "text-white/70"}`}
+							className={`flex items-baseline gap-3 font-mono text-xs ${s.pastCap ? "text-danger-ink" : "text-white/70"}`}
 						>
-							<span className={`w-28 shrink-0 ${s.pastCap ? "text-danger/80" : "text-white/45"}`}>
+							<span className={`w-28 shrink-0 ${s.pastCap ? "text-danger-ink" : "text-white/50"}`}>
 								{s.label}
 							</span>
 							<span aria-hidden="true" className="flex-1 border-b border-dashed border-white/10" />
@@ -264,7 +277,7 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 				</p>
 			) : (
 				<p
-					className={`mt-4 border-t border-white/15 pt-3 font-mono text-sm tabular-nums ${race.overshoot > 0 ? "text-danger" : "text-white/70"}`}
+					className={`mt-4 border-t border-white/15 pt-3 font-mono text-sm tabular-nums ${race.overshoot > 0 ? "text-danger-ink" : "text-white/70"}`}
 				>
 					{race.overshoot > 0
 						? `total settled ${fmt(race.settledTotal)} — ${fmt(race.overshoot)} past the ${usdFromUsertokens(budget)} budget. it surfaces on the invoice.`

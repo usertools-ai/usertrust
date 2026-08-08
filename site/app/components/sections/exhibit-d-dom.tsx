@@ -83,7 +83,7 @@ export default function ExhibitDDom({ entries }: { entries: Entries }) {
 								<article className={cardStateClassName(failed)}>
 									<header className="flex items-baseline justify-between">
 										<span className="text-white/70">entry {entry.seq}</span>
-										<span className={failed ? "text-danger" : "text-ut"}>
+										<span className={failed ? "text-danger-ink" : "text-ut"}>
 											{isTampered ? "TAMPERED" : isDownstream ? "FAILED" : "✓"}
 										</span>
 									</header>
@@ -91,28 +91,35 @@ export default function ExhibitDDom({ entries }: { entries: Entries }) {
 									<p className="mt-1 truncate text-white/70">
 										{isTampered ? (
 											<>
-												<mark className="bg-danger/30 text-danger">{first}</mark>
+												{/* The flipped byte is unique information: only this
+												    mark says WHICH character moved. Red-on-red — the
+												    danger ink over its own tint — measured far under
+												    the floor at card size, so the tint keeps the
+												    danger signal while the ink goes light. */}
+												<mark className="bg-danger/40 text-white/90">{first}</mark>
 												{rest}
 											</>
 										) : (
 											summary
 										)}
 									</p>
-									<p className="mt-2 text-white/40">sha256 {previewCardHash(entry.hash)}…</p>
+									<p className="mt-2 text-white/70">sha256 {previewCardHash(entry.hash)}…</p>
 									<p className={prevHashClassName(isDownstream)}>
 										prev&nbsp;&nbsp;&nbsp;{previewCardHash(entry.prevHash)}…
 									</p>
 									{isTampered && tamper && baseline && (
 										<p className="mt-2 border-t border-danger/40 pt-2">
-											<span className="block text-danger">
+											<span className="block text-danger-ink">
 												now {previewCardHash(tamper.recomputedHash)}…
 											</span>
-											<span className="block text-white/40">
+											<span className="block text-white/70">
 												was {previewCardHash(baseline[i])}…
 											</span>
 										</p>
 									)}
-									{isDownstream && <p className="mt-2 text-danger">prevHash no longer matches</p>}
+									{isDownstream && (
+										<p className="mt-2 text-danger-ink">prevHash no longer matches</p>
+									)}
 									<button
 										type="button"
 										onClick={() => handleFlip(i)}
@@ -150,9 +157,9 @@ export default function ExhibitDDom({ entries }: { entries: Entries }) {
 							chain intact — {entries.length} entries, every prevHash verified
 						</span>
 					) : (
-						<span className="text-danger">
+						<span className="text-danger-ink">
 							<span className="block">✗ chain broken at entry {verdict.brokenSeq}</span>
-							<span className="block text-danger/80">{verdict.message}</span>
+							<span className="block text-danger-ink">{verdict.message}</span>
 						</span>
 					)}
 				</p>

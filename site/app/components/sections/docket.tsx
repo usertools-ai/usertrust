@@ -83,7 +83,7 @@ export default function Docket() {
 	return (
 		<section id="docket" className="ground-zone relative w-full safe-x py-24 sm:py-32">
 			<div className="mx-auto max-w-6xl">
-				<p className="font-mono text-xs uppercase tracking-[0.25em] text-white/40">the docket</p>
+				<p className="section-eyebrow">the docket</p>
 				<h2 className="mt-3 font-display font-bold lowercase leading-[0.95] text-white text-[clamp(2.5rem,6vw,4.5rem)]">
 					the facts, itemized.
 				</h2>
@@ -101,7 +101,7 @@ export default function Docket() {
 							<span className="docket-hairline docket-hairline-v" aria-hidden="true" />
 							<a
 								href={t.href}
-								className="focus-ring self-start font-mono text-[12px] tracking-wide text-tim transition-colors hover:text-white"
+								className="focus-ring inline-flex min-h-[44px] items-center self-start font-mono text-[12px] tracking-wide text-tim transition-colors hover:text-white"
 							>
 								→ {t.exhibit}
 							</a>
@@ -113,7 +113,16 @@ export default function Docket() {
 							>
 								{t.value}
 							</div>
-							<div className="font-mono text-[12px] leading-snug text-white/70">{t.caption}</div>
+							{/* mt-auto pins every caption to its tile's bottom edge, so one
+							    grid row shares ONE caption rule regardless of whether the
+							    numeral above it is the 88px large clamp, the 32px small
+							    clamp, or a two-line value — row 2 previously landed its
+							    captions on three different baselines. tracking-[0.12em]
+							    is the site's 12px-mono-label convention (TerminalFrame
+							    title bar, exhibit-b badges, dt labels). */}
+							<div className="mt-auto font-mono text-[12px] leading-snug tracking-[0.12em] text-white/70">
+								{t.caption}
+							</div>
 						</div>
 					))}
 				</InView>

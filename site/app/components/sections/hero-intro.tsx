@@ -74,9 +74,17 @@ export default function HeroIntro() {
 			    the suit settles essentially unveiled (spec ceiling: 20%). */}
 			<div className="absolute inset-0 bg-gradient-to-r from-brand-bg/90 from-10% via-brand-bg/45 via-45% to-brand-bg/15 to-80%" />
 			{/* Mobile: the stack sits full-width over the centered figure — one
-			    flat layer restores contrast without dimming the desktop right. */}
-			<div className="absolute inset-0 bg-brand-bg/40 md:hidden" />
-			<div className="absolute inset-x-0 bottom-0 h-40 bg-gradient-to-t from-brand-bg to-transparent" />
+			    flat layer restores contrast without dimming the desktop right.
+			    Denser than before: mobile always shows the SETTLED frame, so the
+			    suit's lit rock face is the permanent ground under the footnote row,
+			    where "verifier" sampled well under the floor against the median
+			    rock, and worse against its brightest highlights. */}
+			<div className="absolute inset-0 bg-brand-bg/55 md:hidden" />
+			{/* The footnote row sits ABOVE the desktop h-40 gradient's start, so
+			    mobile gets its own taller, denser bottom ramp; desktop's scrim
+			    balance (spec ceiling 20% over the suit) is untouched. */}
+			<div className="absolute inset-x-0 bottom-0 h-64 bg-gradient-to-t from-brand-bg via-brand-bg/70 to-transparent md:hidden" />
+			<div className="absolute inset-x-0 bottom-0 hidden h-40 bg-gradient-to-t from-brand-bg to-transparent md:block" />
 		</div>
 	);
 }

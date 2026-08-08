@@ -33,7 +33,7 @@ export default function CaseFile() {
 				</div>
 			}
 		>
-			<p className="text-white/45">subject: autonomous coding agent · production API key</p>
+			<p className="text-white/50">subject: autonomous coding agent · production API key</p>
 			<p className="mt-3">overnight, the agent entered a retry loop nothing was watching.</p>
 			<p className="mt-2">{calls} identical completion calls. no variation. no ceiling.</p>
 			<p className="mt-2">

@@ -46,7 +46,13 @@ export default function ExhibitBTabs() {
 	};
 
 	return (
-		<div>
+		// min-w-0: as a grid item this root defaults to min-width:auto, so the
+		// widest code line's min-content (~412px) propagated out through
+		// TerminalFrame's overflow-hidden container and widened the track past
+		// the 342px available at 390 — the code painted to the viewport edge with
+		// no frame border in front of it and the frame's own overflow-x-auto
+		// never engaged.
+		<div className="min-w-0">
 			<div
 				role="tablist"
 				aria-label="SDK provider"

@@ -14,8 +14,8 @@ const facts = factsJson as unknown as EvidenceFacts;
 export default function ExhibitF() {
 	const operators = facts.facts.policyOperators;
 	return (
-		<section id="exhibit-f" className="safe-x relative mx-auto max-w-6xl py-24 md:py-32">
-			<p className="font-mono text-xs uppercase tracking-[0.3em] text-white/40">exhibit f</p>
+		<section id="exhibit-f" className="safe-x relative mx-auto max-w-6xl py-24 sm:py-32">
+			<p className="section-eyebrow">exhibit f</p>
 			<h2 className="font-display mt-4 leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
 				BLOCKED is a feature.
 			</h2>
@@ -23,7 +23,7 @@ export default function ExhibitF() {
 				the gate runs before the provider is ever called. a denial throws — the provider is never
 				called, and no receipt is returned.
 			</p>
-			<p className="mt-2 font-mono text-xs text-white/40">
+			<p className="mt-2 font-mono text-xs text-white/70">
 				{operators.value} policy operators · {operators.source}
 			</p>
 			<ExhibitFSpool />

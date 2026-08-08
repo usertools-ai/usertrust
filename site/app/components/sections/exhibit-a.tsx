@@ -34,7 +34,7 @@ export default function ExhibitA() {
 	return (
 		<section id="exhibit-a" className="relative py-24 sm:py-32 safe-x">
 			<div className="mx-auto max-w-6xl">
-				<p className="font-mono text-xs uppercase tracking-widest text-white/40">exhibit a</p>
+				<p className="section-eyebrow">exhibit a</p>
 				<div className="mt-3 flex items-center gap-1.5">
 					<StageTag stage="RECORD" />
 				</div>
@@ -42,10 +42,18 @@ export default function ExhibitA() {
 					every governed call returns evidence.
 				</h2>
 
-				<div className="mt-14 grid gap-12 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-16">
+				{/* The base track pins its own minimum instead of taking the
+				    implicit default: a grid track's default minimum is min-content,
+				    and the receipt <pre>'s min-content is wider than a phone. Below
+				    lg that blew the single column out past the viewport, and because
+				    body is overflow-x-hidden the clipped right half of both frames
+				    was unreachable rather than scrollable. With the minimum pinned,
+				    wide content scrolls inside TerminalFrame's own overflow-x-auto,
+				    where it belongs. */}
+				<div className="mt-14 grid grid-cols-[minmax(0,1fr)] gap-12 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-16">
 					{/* The call — static mono, emerald keyword accents. TerminalFrame's
 					    shared chrome, no title; pre/code semantics preserved inside. */}
-					<TerminalFrame className="self-start text-white/80">
+					<TerminalFrame className="min-w-0 self-start text-white/80">
 						<pre data-code-sample>
 							<code>
 								<span className="text-ut">import</span> {"{ trust }"}{" "}
@@ -56,7 +64,8 @@ export default function ExhibitA() {
 								<span className="text-ut">new</span> Anthropic());{"\n\n"}
 								<span className="text-ut">const</span> {"{ response, "}
 								<span className="text-ut">receipt</span>
-								{" }"} = <span className="text-ut">await</span> client.messages.create({"{"}
+								{" }"} ={"\n  "}
+								<span className="text-ut">await</span> client.messages.create({"{"}
 								{"\n"}
 								{"  model: "}
 								<span className="text-white/80">"{receiptLedger.receipt.model}"</span>,{"\n"}

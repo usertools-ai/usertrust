@@ -121,8 +121,8 @@ function MerkleTree({ entries }: { entries: ChainSlice["entries"] }) {
 
 export default function ExhibitD() {
 	return (
-		<section id="exhibit-d" className="safe-x relative mx-auto max-w-6xl py-24 md:py-32">
-			<p className="font-mono text-xs uppercase tracking-[0.3em] text-white/40">exhibit d</p>
+		<section id="exhibit-d" className="safe-x relative mx-auto max-w-6xl py-24 sm:py-32">
+			<p className="section-eyebrow">exhibit d</p>
 			<div className="mt-3 flex items-center gap-1.5">
 				<StageTag stage="RECORD" />
 				<StageTag stage="ANCHOR" />
@@ -146,17 +146,23 @@ export default function ExhibitD() {
 					<h3 className="font-display text-xl lowercase text-white">
 						and can be anchored beyond your infra
 					</h3>
+					{/* EXPERIMENTAL is a baseline-aligned mini-tag, not a <sup>. A
+					    <sup> keeps its superscript raise while `text-[12px]` cancels
+					    the browser's compensating size reduction, so the raised
+					    full-size line box grew the Rekor chip well past its siblings
+					    and pushed the glyph caps through the chip's top hairline at
+					    390. The 12px H1 floor is kept; only the raise is dropped. */}
 					<ul className="flex flex-wrap gap-2">
 						{ANCHOR_BADGES.map((b) => (
 							<li
 								key={b.label}
-								className="rounded-sm border border-brand-border px-2 py-1 font-mono text-xs text-white/70"
+								className="inline-flex items-center gap-1 rounded-sm border border-brand-border px-2 py-1 font-mono text-xs text-white/70"
 							>
 								{b.label}
 								{b.experimental && (
-									<sup className="ml-1 font-mono text-[12px] tracking-widest text-white/70">
+									<span className="font-mono text-[12px] tracking-widest text-white/70">
 										EXPERIMENTAL
-									</sup>
+									</span>
 								)}
 							</li>
 						))}
@@ -184,7 +190,7 @@ export default function ExhibitD() {
 			>
 				view raw JSONL →
 			</a>
-			<p className="mt-6 font-mono text-xs text-white/40">{EU_FOOTNOTE}</p>
+			<p className="mt-6 font-mono text-xs text-white/70">{EU_FOOTNOTE}</p>
 			<p className="mt-2 font-mono text-[12px] text-white/70">{SMALL_PRINT}</p>
 		</section>
 	);

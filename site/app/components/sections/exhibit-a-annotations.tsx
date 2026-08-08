@@ -108,6 +108,11 @@ export default function ExhibitAAnnotations({
 			row.setAttribute("tabindex", "0");
 			row.setAttribute("role", "button");
 			row.setAttribute("aria-haspopup", "dialog");
+			// Same pass, same reason: a row made focusable here must also carry
+			// the page's one focus treatment, or keyboard users get the UA's
+			// default blue ring on the only server-rendered focus targets on the
+			// page while the sibling annotation buttons show the emerald one.
+			row.classList.add("focus-ring");
 		}
 	}, [annotations]);
 
@@ -166,7 +171,7 @@ export default function ExhibitAAnnotations({
 	return (
 		<div
 			ref={wrapRef}
-			className="relative md:grid md:grid-cols-[minmax(0,12rem)_minmax(0,1fr)] md:gap-10"
+			className="relative min-w-0 md:grid md:grid-cols-[minmax(0,12rem)_minmax(0,1fr)] md:gap-10"
 		>
 			{/* Annotation rail — desktop only, left of the terminal frame. */}
 			<ul className="hidden flex-col justify-center gap-7 md:flex">
@@ -183,7 +188,9 @@ export default function ExhibitAAnnotations({
 							onMouseLeave={() => setActive(null)}
 							onFocus={() => setActive(a.field)}
 							onBlur={() => setActive(null)}
-							className="focus-ring block max-w-[14rem] cursor-default text-left font-mono text-xs leading-5 text-white/70 transition-colors data-[active=true]:text-white"
+							// No max-w: the rail column is already minmax(0,12rem), so the
+							// old max-w-[14rem] could never bind.
+							className="focus-ring block cursor-default text-left font-mono text-xs leading-5 text-white/70 transition-colors data-[active=true]:text-white"
 						>
 							{a.text}
 						</button>
@@ -254,7 +261,10 @@ export default function ExhibitAAnnotations({
 				<div
 					role="dialog"
 					aria-label={`annotation: ${popover.field}`}
-					className="absolute left-4 right-4 z-20 rounded-lg border border-white/15 bg-[#0f0f2a] p-4 shadow-xl md:hidden"
+					// lift-2 (floating physical object) and bg-terminal, not shadow-xl
+					// over a one-off #0f0f2a: depth and surfaces both come from the
+					// vocabulary, never from a per-section invention (Addendum H3).
+					className="lift-2 absolute left-4 right-4 z-20 rounded-lg border border-white/15 bg-terminal p-4 md:hidden"
 					style={{ top: popover.top }}
 				>
 					<p className="font-mono text-[12px] uppercase tracking-widest text-tim">
@@ -264,7 +274,7 @@ export default function ExhibitAAnnotations({
 					<button
 						type="button"
 						onClick={() => setPopover(null)}
-						className="focus-ring mt-3 font-mono text-xs uppercase tracking-widest text-white/70 underline"
+						className="focus-ring mt-3 inline-flex min-h-[44px] items-center font-mono text-xs uppercase tracking-widest text-white/70 underline"
 					>
 						close
 					</button>

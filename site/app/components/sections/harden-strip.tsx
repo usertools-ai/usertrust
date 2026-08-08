@@ -33,7 +33,7 @@ export default function HardenStrip() {
 	return (
 		<section id="harden-doctrine" className="border-y border-white/10 bg-white/[0.02]">
 			<div className="safe-x mx-auto max-w-6xl py-20 md:py-24">
-				<p className="font-mono text-xs uppercase tracking-[0.3em] text-white/40">the discipline</p>
+				<p className="section-eyebrow">the discipline</p>
 				<h2 className="font-display mt-4 lowercase leading-none text-white text-[clamp(2rem,5vw,4rem)]">
 					the harden doctrine.
 				</h2>
@@ -42,7 +42,14 @@ export default function HardenStrip() {
 				    gap-px over a faint white ground draws the hairline grid. */}
 				<dl className="mt-10 grid grid-cols-2 gap-px border border-white/10 bg-white/10 md:grid-cols-5">
 					{stats.map(({ label, stat }) => (
-						<div key={label} className="flex flex-col gap-2 bg-brand-bg p-5">
+						/* last:col-span-2 fills the odd fifth cell across the mobile
+						   two-column row. Without it the empty half-cell exposed the
+						   dl's own bg-white/10 hairline ground as a ~170x120px light
+						   panel — a ghost tile, not a hairline. */
+						<div
+							key={label}
+							className="flex flex-col gap-2 bg-brand-bg p-5 last:col-span-2 md:last:col-span-1"
+						>
 							<dt className="font-mono text-[12px] uppercase tracking-widest text-white/70">
 								{label}
 							</dt>
@@ -70,12 +77,12 @@ export default function HardenStrip() {
 						<p>{PARITY_QUOTE_CONTEXT}</p>
 						<p className="mt-4 text-white">{PARITY_QUOTE_RULE}</p>
 					</blockquote>
-					<figcaption className="mt-3 font-mono text-xs text-white/40">
+					<figcaption className="mt-3 font-mono text-xs text-white/70">
 						<a
 							href={AGENTS_URL}
 							target="_blank"
 							rel="noreferrer"
-							className="focus-ring underline decoration-white/30 underline-offset-4 transition-colors hover:text-white"
+							className="focus-ring underline decoration-white/50 underline-offset-4 transition-colors hover:text-white"
 						>
 							AGENTS.md · the packages/verify parity contract
 						</a>

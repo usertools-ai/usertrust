@@ -58,7 +58,7 @@ export default function OpenLedger() {
 							your keys. your billing. your evidence.
 						</p>
 
-						<p className="font-mono text-xs text-ink/60">
+						<p className="font-mono text-xs text-ink/70">
 							start in dry-run — no TigerBeetle required; receipts marked accordingly
 						</p>
 
@@ -145,7 +145,7 @@ export default function OpenLedger() {
 					<div className="flex flex-col items-center gap-2 text-center">
 						{/* biome-ignore lint/performance/noImgElement: tiny static footer mark, not an LCP candidate */}
 						<img src="/brand/mascot-mark.png" alt="the usertrust mascot" className="h-8 w-auto" />
-						<p className="font-mono text-xs text-white/40">governance wins.</p>
+						<p className="font-mono text-xs text-white/70">governance wins.</p>
 					</div>
 
 					<div className="mt-8 flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
@@ -155,19 +155,19 @@ export default function OpenLedger() {
 									key={l.label}
 									href={l.href}
 									{...(l.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
-									className="focus-ring inline-flex min-h-[44px] items-center font-mono text-sm text-white/40 hover:text-white/80 transition-colors duration-200"
+									className="focus-ring inline-flex min-h-[44px] items-center font-mono text-sm text-white/70 hover:text-white transition-colors duration-200"
 								>
 									{l.label}
 								</a>
 							))}
 						</nav>
-						<p className="font-mono text-xs text-white/25">
+						<p className="font-mono text-xs text-white/70">
 							usertrust · part of{" "}
 							<a
 								href="https://usertools.ai"
 								target="_blank"
 								rel="noopener noreferrer"
-								className="focus-ring text-white/40 hover:text-ut transition-colors duration-200"
+								className="focus-ring text-white/90 hover:text-ut transition-colors duration-200"
 							>
 								usertools.ai
 							</a>
