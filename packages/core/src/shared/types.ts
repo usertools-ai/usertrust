@@ -25,6 +25,50 @@ export type CostBasis = "usd-proxy" | "nominal";
 /** Where the applied rates came from during resolution. */
 export type RateSource = "table" | "custom" | "local-model" | "local-default" | "fallback";
 
+/**
+ * The four RESOLVED per-1k rates a settle was metered with (spec D5).
+ *
+ * "Resolved" is the load-bearing word: these are the rates AFTER the D1
+ * fallback, so an absent cache tier appears here as `inputPer1k`, never as
+ * `undefined` and never as 0. Publishing the raw `ModelRates` instead would
+ * hand an auditor a hole in exactly the tiers the fallback makes non-zero, and
+ * their recompute would understate the bill.
+ *
+ * Together with {@link ReceiptUsage} this is what makes the narrowed
+ * reconciliation claim checkable: `ceil(sum(counts x rates / 1000))`, floored
+ * at 1, reproduces `TrustReceipt.cost` exactly — from the record alone, with no
+ * access to the pricing table, the config, or this codebase.
+ */
+export interface AppliedRates {
+	inputPer1k: number;
+	outputPer1k: number;
+	cacheReadPer1k: number;
+	cacheWritePer1k: number;
+}
+
+/**
+ * The four-tier DISJOINT token split a settle was metered from (spec D5).
+ *
+ * Sanitized by construction — every count is a finite integer >= 0 — because
+ * this is the object that reaches audit canonicalization, which throws on
+ * NaN/Infinity. Disjoint means `inputTokens` is FRESH input only: cached reads
+ * and cache writes are separate tiers, and the four sum to the call's billable
+ * tokens with nothing double-counted.
+ *
+ * Present on a record only when the usage was provider-reported. See
+ * `TrustReceipt.usage`.
+ */
+export interface ReceiptUsage {
+	/** Fresh (non-cached) prompt tokens. */
+	inputTokens: number;
+	/** Completion tokens, including provider-billed thinking tokens. */
+	outputTokens: number;
+	/** Cache-hit prompt tokens. */
+	cacheReadTokens: number;
+	/** Cache-creation prompt tokens. */
+	cacheWriteTokens: number;
+}
+
 // ── Trust Receipt ──
 export interface TrustReceipt {
 	transferId: string;
@@ -49,14 +93,44 @@ export interface TrustReceipt {
 	auditDegraded?: boolean;
 	/** Whether cost came from provider-reported usage or the pre-call estimate. */
 	usageSource?: "provider" | "estimated";
+	/**
+	 * The four-tier disjoint token split this cost was metered from (D5).
+	 *
+	 * PRESENT IFF `usageSource === "provider"`. An estimated settle has no
+	 * reported counts, and a four-tier block full of fabricated zeros would
+	 * invite an auditor to "recompute" a cost that was never derived from
+	 * counts at all — so it is omitted outright, never zero-filled.
+	 *
+	 * With `meter.appliedRates` this is the whole reconciliation surface:
+	 * `ceil(sum(counts x rates / 1000))` floored at 1 equals `cost`.
+	 */
+	usage?: ReceiptUsage;
 	/** Number of chunks delivered to the consumer (streaming calls only). */
 	chunksDelivered?: number;
 	/** Action kind for governed non-LLM actions. Absent for LLM calls (backward compat). */
 	actionKind?: ActionKind;
 	/** Endpoint classification for this call. Absent on pre-M2 receipts. */
 	endpoint?: { class: EndpointClass; runtime: LocalRuntime };
-	/** Metering provenance: denomination and rate origin of the settled cost. */
-	meter?: { costBasis: CostBasis; rateSource: RateSource; computeMs?: number };
+	/**
+	 * Metering provenance: denomination, rate origin, and — since D5 — the
+	 * RESOLVED rates themselves plus the pricing-table version they came from.
+	 *
+	 * `rateSource` says WHERE the rates came from; `appliedRates` says WHAT they
+	 * were. Only the second one makes a custom-rate or local-model cost
+	 * independently recomputable, which is why both are here. Both new fields
+	 * are optional for backward compatibility with pre-D5 receipts (and with
+	 * non-LLM action receipts, which meter no tokens at all), but every LLM
+	 * settle emits them.
+	 */
+	meter?: {
+		costBasis: CostBasis;
+		rateSource: RateSource;
+		computeMs?: number;
+		/** The four resolved per-1k rates the cost was computed with. */
+		appliedRates?: AppliedRates;
+		/** Date-stamped version of the built-in pricing table (`PRICING_TABLE_VERSION`). */
+		pricingTableVersion?: string;
+	};
 	/**
 	 * Cost-center envelope snapshot — the PUSH half of visibility (the pull half is
 	 * `budgetContext()`). Present only when the call ran inside a `withCostCenter`

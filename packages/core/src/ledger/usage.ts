@@ -34,6 +34,8 @@
  * Every function here is pure — no I/O, no clock, no config.
  */
 
+import type { ReceiptUsage } from "../shared/types.js";
+
 /**
  * A sanitized, four-tier, disjoint usage snapshot.
  *
@@ -149,6 +151,36 @@ export function sanitizeUsage(raw: RawUsageCandidate | null | undefined): Normal
 		cacheReadTokens: readCount(r.cacheReadTokens) ?? 0,
 		cacheWriteTokens: readCount(r.cacheWriteTokens) ?? 0,
 		source: r.source === "provider" && reported ? "provider" : "estimated",
+	};
+}
+
+/**
+ * The four tiers of a snapshot, but ONLY when they are publishable (D5).
+ *
+ * Returns `undefined` for an estimated snapshot, and that is the whole point:
+ * `receipt.usage` and `llm_call.data.usage` are present IFF the settle was
+ * provider-sourced. An estimated settle's cost comes from the pre-call
+ * estimate, not from counts, so publishing a four-tier block of fabricated
+ * zeros beside it would invite an auditor to "recompute" a number that was
+ * never derived from tokens — and to conclude the call cost 1 usertoken.
+ *
+ * The rule lives HERE, in one function, rather than as an `if` repeated at
+ * each of the four emission sites (headless settle, govern non-stream, govern
+ * stream terminal, the estimate-priced stream handle). Four copies of a
+ * provenance rule is three chances to publish a fabrication.
+ *
+ * The returned object is a fresh copy, so a caller cannot hand the same
+ * mutable snapshot to both the chain and the receipt and have a later mutation
+ * rewrite an already-emitted record. `source` is deliberately dropped: it is
+ * published once, as `usageSource`, not twice under two names.
+ */
+export function publishableUsage(snapshot: NormalizedUsage): ReceiptUsage | undefined {
+	if (snapshot.source !== "provider") return undefined;
+	return {
+		inputTokens: snapshot.inputTokens,
+		outputTokens: snapshot.outputTokens,
+		cacheReadTokens: snapshot.cacheReadTokens,
+		cacheWriteTokens: snapshot.cacheWriteTokens,
 	};
 }
 

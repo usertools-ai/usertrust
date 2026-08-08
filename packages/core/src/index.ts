@@ -99,6 +99,8 @@ export {
 	estimateCost,
 	estimateInputTokens,
 	getModelRates,
+	PRICING_TABLE_VERSION,
+	resolveAppliedRates,
 	resolveRates,
 } from "./ledger/pricing.js";
 // Usage normalization (spec D2/D5): the one place provider usage becomes the
@@ -110,6 +112,7 @@ export {
 	fromOpenAICompletionsUsage,
 	fromOpenAIResponsesUsage,
 	fromProviderResponse,
+	publishableUsage,
 	sanitizeUsage,
 } from "./ledger/usage.js";
 // Pattern memory
@@ -149,6 +152,7 @@ export { parentUserIdRefusal } from "./shared/ids.js";
 export type {
 	ActionDescriptor,
 	ActionKind,
+	AppliedRates,
 	AuditEvent,
 	BoardDecision,
 	CanaryToken,
@@ -169,6 +173,7 @@ export type {
 	PolicyRule,
 	PolicySeverity,
 	RateSource,
+	ReceiptUsage,
 	SkillManifest,
 	SkillPermission,
 	SkillVerification,

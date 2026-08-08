@@ -44,13 +44,16 @@ import {
 	costFromRates,
 	effectiveCacheWriteRate,
 	estimateInputTokens,
+	PRICING_TABLE_VERSION,
 	type RateResolution,
+	resolveAppliedRates,
 	resolveRates,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
 import {
 	fromAnthropicUsage,
 	fromProviderResponse,
+	publishableUsage,
 	sanitizeUsage,
 	type UsageWireShape,
 } from "./ledger/usage.js";
@@ -945,6 +948,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				estimatedInputTokens,
 				maxOutputTokens,
 			);
+			// D5 — the RESOLVED rates this call meters with, published on every
+			// record surface below (the estimate-priced stream handle, the stream
+			// terminal, the non-stream settle) so a cost can be recomputed from the
+			// record alone: `ceil(sum(counts x appliedRates / 1000))`, floored at 1.
+			// Resolved ONCE here, from the same authorize-time `rateResolution` A3
+			// prices every path with — the published rates and the rates the money
+			// used cannot become two different things. This is the D1 resolution, so
+			// an absent cache tier appears as `inputPer1k` (what it actually charges),
+			// never as a hole an auditor would read as free.
+			const appliedRates = resolveAppliedRates(rateResolution.rates);
 
 			// AUD-453: Acquire mutex to serialise budget-check + PENDING hold.
 			// This prevents concurrent calls from both passing the budget check and
@@ -1228,9 +1241,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					timestamp: new Date().toISOString(),
 					// M2: authorize-time scope, already fixed for the eventual settle (A3).
 					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
+					// D5: no `usage` — nothing has been reported yet, and this handle's
+					// `cost` is the ESTIMATE, which no set of counts reproduces. The
+					// rates are published anyway: they are the rates the eventual
+					// settle will meter with (A3 fixes them at authorize).
 					meter: {
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
+						appliedRates,
+						pricingTableVersion: PRICING_TABLE_VERSION,
 					},
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					// AUD-456: Flag proxy stub receipts
@@ -1272,6 +1291,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					cacheWriteTokens: completion.usage.cacheWriteTokens,
 					source: completion.usageReported ? "provider" : "estimated",
 				});
+				// D5: the record half of the SAME snapshot the cost comes from —
+				// present iff provider-sourced, omitted (never zero-filled) otherwise.
+				const usageRecord = publishableUsage(usageSnapshot);
+				const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
 				let streamCost: number;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
 				if (usageSnapshot.source === "provider") {
@@ -1379,6 +1402,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						settled,
 						transferId,
 						usageSource,
+						// D5: the durable record carries the four tiers AND the rates
+						// that priced them — the receipt is a return value the caller
+						// may drop, the chain event is what an auditor reads.
+						...usageAudit,
+						appliedRates,
+						pricingTableVersion: PRICING_TABLE_VERSION,
 						chunksDelivered: completion.chunksDelivered,
 						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
 						endpointClass: endpoint.class,
@@ -1463,12 +1492,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					provider: kind,
 					timestamp: new Date().toISOString(),
 					usageSource,
+					// D5: present IFF provider-sourced — same snapshot the cost came from.
+					...usageAudit,
 					chunksDelivered: completion.chunksDelivered,
 					// M2 provenance (A6: computeMs omitted — no compute-time source here).
 					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
 					meter: {
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
+						// D5: what the rates WERE, beside where they came from.
+						appliedRates,
+						pricingTableVersion: PRICING_TABLE_VERSION,
 					},
 					...(postedCost !== undefined ? { postedCost } : {}),
 					...(streamBudget !== undefined ? { budget: streamBudget } : {}),
@@ -1936,6 +1970,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// (see the `meteredEstimateCost` comment at the hold-sizing site).
 				let actualCost = meteredEstimateCost;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
+				// D5: the record half of the SAME snapshot the cost comes from. Nothing
+				// below re-reads `response.usage` — one read, one object, two uses.
+				const usageRecord = publishableUsage(usageSnapshot);
+				const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
 				if (usageSnapshot.source === "provider") {
 					actualCost = costFromRates(
 						rateResolution.rates,
@@ -1961,6 +1999,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						settled: true,
 						transferId,
 						usageSource,
+						// D5: the durable record — four tiers (iff provider-sourced) and
+						// the rates that priced them, so the chain event alone is
+						// enough to reprice the call.
+						...usageAudit,
+						appliedRates,
+						pricingTableVersion: PRICING_TABLE_VERSION,
 						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
 						endpointClass: endpoint.class,
 						costBasis: rateResolution.costBasis,
@@ -2154,11 +2198,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					provider: kind,
 					timestamp: new Date().toISOString(),
 					usageSource,
+					// D5: present IFF provider-sourced — same snapshot the cost came from.
+					...usageAudit,
 					// M2 provenance (A6: computeMs omitted — no compute-time source here).
 					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
 					meter: {
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
+						// D5: what the rates WERE, beside where they came from.
+						appliedRates,
+						pricingTableVersion: PRICING_TABLE_VERSION,
 					},
 					...(postedCost !== undefined ? { postedCost } : {}),
 					...(settledBudget !== undefined ? { budget: settledBudget } : {}),

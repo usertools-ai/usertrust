@@ -9,7 +9,13 @@
  * Canonical pricing source for supported LLM models.
  */
 
-import type { CostBasis, EndpointClass, RateSource, TrustConfig } from "../shared/types.js";
+import type {
+	AppliedRates,
+	CostBasis,
+	EndpointClass,
+	RateSource,
+	TrustConfig,
+} from "../shared/types.js";
 
 export interface ModelRates {
 	inputPer1k: number;
@@ -241,6 +247,28 @@ function effectiveCacheRate(rate: number | undefined, inputPer1k: number): numbe
  */
 export function effectiveCacheWriteRate(rates: ModelRates): number {
 	return effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k);
+}
+
+/**
+ * The four RESOLVED per-1k rates a settle is metered with — the record-surface
+ * half of the D1 invariant, and what `receipt.meter.appliedRates` publishes.
+ *
+ * Same `effectiveCacheRate` the money goes through, deliberately: the published
+ * rates and the rates the cost was computed with are the SAME resolution, so
+ * they cannot drift. An absent cache tier is published as `inputPer1k` — which
+ * is what the operator will actually be charged for it — never as `undefined`
+ * and never as 0. Emitting the raw `ModelRates` here instead would leave a hole
+ * in exactly the tiers the fallback makes non-zero, and an auditor recomputing
+ * from the record would understate the bill: the same failure direction this
+ * whole ship exists to kill.
+ */
+export function resolveAppliedRates(rates: ModelRates): AppliedRates {
+	return {
+		inputPer1k: rates.inputPer1k,
+		outputPer1k: rates.outputPer1k,
+		cacheReadPer1k: effectiveCacheRate(rates.cacheReadPer1k, rates.inputPer1k),
+		cacheWritePer1k: effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k),
+	};
 }
 
 /**

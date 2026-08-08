@@ -531,7 +531,10 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 			});
 			expect(createFn).toHaveBeenCalledTimes(1);
 			expect(result.receipt.cost).toBe(1);
-			expect(result.receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-default" });
+			expect(result.receipt.meter).toMatchObject({
+				costBasis: "nominal",
+				rateSource: "local-default",
+			});
 			await destroy(governed);
 		});
 
@@ -560,8 +563,8 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				String(c[0]).includes("made-up-model-warn-1"),
 			);
 			expect(unknownModelWarns).toHaveLength(1);
-			expect(r1.receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "fallback" });
-			expect(r2.receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "fallback" });
+			expect(r1.receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "fallback" });
+			expect(r2.receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "fallback" });
 			await destroy(governed);
 		});
 
@@ -586,7 +589,10 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				String(c[0]).includes("made-up-model-silent-1"),
 			);
 			expect(unknownModelWarns).toHaveLength(0);
-			expect(result.receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "fallback" });
+			expect(result.receipt.meter).toMatchObject({
+				costBasis: "usd-proxy",
+				rateSource: "fallback",
+			});
 			await destroy(governed);
 		});
 	});
@@ -609,8 +615,14 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				messages: [{ role: "user", content: "hi" }],
 			});
 			expect(result.receipt.endpoint).toEqual({ class: "local", runtime: "ollama" });
-			// A6: absent optional fields are OMITTED — toEqual proves no computeMs key.
-			expect(result.receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-default" });
+			// A6: absent optional fields are OMITTED. `meter` is no longer asserted
+			// exhaustively (D5 added appliedRates + pricingTableVersion), so the
+			// omission is pinned directly on the key.
+			expect(result.receipt.meter).toMatchObject({
+				costBasis: "nominal",
+				rateSource: "local-default",
+			});
+			expect(Object.hasOwn(result.receipt.meter as object, "computeMs")).toBe(false);
 			expect(result.receipt.usageSource).toBe("provider");
 			expect(result.receipt.cost).toBe(1);
 			await destroy(governed);
@@ -689,7 +701,10 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 
 			// Pre-settlement (estimated) receipt already carries authorize-time scope (A3).
 			expect(result.receipt.endpoint).toEqual({ class: "local", runtime: "ollama" });
-			expect(result.receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-model" });
+			expect(result.receipt.meter).toMatchObject({
+				costBasis: "nominal",
+				rateSource: "local-model",
+			});
 
 			const { chunks, receipt } = await consumeStream(result);
 			// The injected usage chunk is forwarded to the consumer unmodified.
@@ -698,7 +713,7 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 			expect(receipt.cost).toBe(2);
 			expect(receipt.usageSource).toBe("provider");
 			expect(receipt.endpoint).toEqual({ class: "local", runtime: "ollama" });
-			expect(receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-model" });
+			expect(receipt.meter).toMatchObject({ costBasis: "nominal", rateSource: "local-model" });
 			await destroy(governed);
 		});
 
@@ -718,7 +733,7 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				messages: [{ role: "user", content: "hi" }],
 			});
 			expect(result.receipt.endpoint).toEqual({ class: "cloud", runtime: "unknown" });
-			expect(result.receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "table" });
+			expect(result.receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "table" });
 			// (200/1000)*25 + (100/1000)*100 = 5 + 10 = 15
 			expect(result.receipt.cost).toBe(15);
 			await destroy(governed);
@@ -738,7 +753,10 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 			});
 			// Endpoint class — not the model string — picks the settlement regime.
 			expect(result.receipt.cost).toBe(1);
-			expect(result.receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-default" });
+			expect(result.receipt.meter).toMatchObject({
+				costBasis: "nominal",
+				rateSource: "local-default",
+			});
 			await destroy(governed);
 		});
 
@@ -760,7 +778,7 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				messages: [{ role: "user", content: "hi" }],
 			});
 			expect(result.receipt.endpoint).toEqual({ class: "cloud", runtime: "unknown" });
-			expect(result.receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "table" });
+			expect(result.receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "table" });
 			await destroy(governed);
 		});
 
@@ -780,7 +798,10 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				model: "qwen2.5:7b",
 				messages: [{ role: "user", content: "hi" }],
 			});
-			expect(result.receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "local-default" });
+			expect(result.receipt.meter).toMatchObject({
+				costBasis: "usd-proxy",
+				rateSource: "local-default",
+			});
 			// (1000/1000)*1 + (500/1000)*2 = 2
 			expect(result.receipt.cost).toBe(2);
 			await destroy(governed);
