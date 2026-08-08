@@ -685,7 +685,7 @@ html {
 	stroke: #34d399;
 	stroke-width: 2px;
 	stroke-dasharray: 14 220;
-	animation: die-pulse 1.8s linear both;
+	animation: die-pulse 1.8s linear infinite;
 	animation-play-state: paused;
 }
 /* Output trace pulses brighter: a short bright core dash rides at the head
@@ -695,7 +695,7 @@ html {
 	stroke: #d1fae5;
 	stroke-width: 2px;
 	stroke-dasharray: 6 228;
-	animation: die-pulse 1.8s linear both;
+	animation: die-pulse 1.8s linear infinite;
 	animation-play-state: paused;
 }
 /* Per-trace stagger — negative delays put pulses mid-path immediately. */

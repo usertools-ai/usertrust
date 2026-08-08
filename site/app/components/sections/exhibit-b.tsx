@@ -26,6 +26,8 @@ const GOVERNED: { provider: string; surfaces: string[] }[] = [
 	{ provider: "google", surfaces: ["models.generateContent"] },
 ];
 
+// Anthropic + OpenAI: documented in packages/core/src/detect.ts
+// Google: documented in packages/core/src/govern.ts buildGoogleProxy (traps generateContent only)
 const PASSTHROUGH: { provider: string; surfaces: string[] }[] = [
 	{
 		provider: "anthropic",
