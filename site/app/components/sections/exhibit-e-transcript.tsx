@@ -6,7 +6,7 @@ import {
 	IO_THRESHOLD,
 	initialTypewriterFrame,
 	lastLineIndex,
-	NBSP,
+	splitTranscriptLine,
 	stepTypewriter,
 	visibleLines,
 } from "@/lib/exhibit-e-transcript";
@@ -93,11 +93,15 @@ export default function ExhibitETranscript({ lines }: { lines: string[] }) {
 			    typewriter is a purely visual effect. */}
 			<pre className="sr-only">{lines.join("\n")}</pre>
 			<div aria-hidden="true">
-				{visibleLines(lines, shownLines).map((line, i) => (
-					<div key={line || `blank-${i}`} className="whitespace-pre text-white/70">
-						{line || NBSP}
-					</div>
-				))}
+				{visibleLines(lines, shownLines).map((line, i) => {
+					const { key, value } = splitTranscriptLine(line);
+					return (
+						<div key={line || `blank-${i}`} className="whitespace-pre">
+							{key && <span className="text-tim">{key}</span>}
+							<span className="text-white">{value}</span>
+						</div>
+					);
+				})}
 				{showFinal && lastIndex >= 0 && (
 					<div
 						className={`whitespace-pre text-ut ${phase === "done" || phase === "static" ? "ok-stamp" : ""}`}

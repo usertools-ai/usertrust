@@ -60,6 +60,28 @@ export function finalLineText(lines: string[], finalChars: number): string {
 /** Placeholder for a blank captured line — preserves its line-box height. */
 export const NBSP = "\u00A0";
 
+export interface TranscriptLineTokens {
+	/** The label up to and including its colon (steel), or "" when the line carries no key. */
+	key: string;
+	/** Everything after the key (white) — the placeholder when the line is blank. */
+	value: string;
+}
+
+/**
+ * Splits one captured transcript line into its syntax-tint roles per the
+ * shared code-surface directive (keys/annotations steel, values white) —
+ * the same two-role split `tokenClass` applies to Exhibit A's receipt JSON,
+ * so this transcript never reinvents its own scheme. Every captured line is
+ * "label: value" (e.g. "Chain length: 9 events"); the label through its
+ * colon is the key, the remainder is the value. A line with no colon
+ * (defensive — not produced by today's fixture) renders entirely as a value.
+ */
+export function splitTranscriptLine(line: string): TranscriptLineTokens {
+	const i = line.indexOf(":");
+	if (i === -1) return { key: "", value: line || NBSP };
+	return { key: line.slice(0, i + 1), value: line.slice(i + 1) || NBSP };
+}
+
 /**
  * Advances one rAF tick. `lastIndex` is the index of the final (OK) line;
  * `finalLineLength` is its character count. Idempotent once `phase` is

@@ -5,6 +5,7 @@ import {
 	initialTypewriterFrame,
 	lastLineIndex,
 	NBSP,
+	splitTranscriptLine,
 	stepTypewriter,
 	visibleLines,
 } from "./exhibit-e-transcript";
@@ -114,4 +115,38 @@ test("finalLineText types the final line up to finalChars and handles an empty t
 test("NBSP is a real non-breaking space, not an ordinary one", () => {
 	assert.equal(NBSP, "\u00A0");
 	assert.notEqual(NBSP, " ");
+});
+
+// ---------------------------------------------------------------------------
+// splitTranscriptLine \u2014 the key/value syntax-tint split (keys/annotations
+// steel, values white), per the shared code-surface directive.
+// ---------------------------------------------------------------------------
+
+test("splitTranscriptLine splits a 'label: value' line at the first colon, colon stays with the key", () => {
+	assert.deepEqual(splitTranscriptLine("Chain length: 9 events"), {
+		key: "Chain length:",
+		value: " 9 events",
+	});
+});
+
+test("splitTranscriptLine only splits on the FIRST colon \u2014 timestamps keep theirs in the value", () => {
+	assert.deepEqual(splitTranscriptLine("First event: 2026-08-08T00:31:12.036Z"), {
+		key: "First event:",
+		value: " 2026-08-08T00:31:12.036Z",
+	});
+});
+
+test("splitTranscriptLine with no colon renders the whole line as a value, no key", () => {
+	assert.deepEqual(splitTranscriptLine("no colon in this line"), {
+		key: "",
+		value: "no colon in this line",
+	});
+});
+
+test("splitTranscriptLine falls back to NBSP for an empty line, so its box height survives", () => {
+	assert.deepEqual(splitTranscriptLine(""), { key: "", value: NBSP });
+});
+
+test("splitTranscriptLine falls back to NBSP when the value half is empty (a bare trailing colon)", () => {
+	assert.deepEqual(splitTranscriptLine("Status:"), { key: "Status:", value: NBSP });
 });
