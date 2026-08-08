@@ -40,7 +40,12 @@ function expectSafeSnapshot(u: NormalizedUsage): void {
 }
 
 describe("sanitizeUsage", () => {
-	it("clamps NaN, Infinity and negatives to 0 and keeps the source", () => {
+	it("clamps NaN, Infinity and negatives to 0 and downgrades the provider label", () => {
+		// D5: "provider" requires provider-reported input AND output. All four
+		// counts here are garbage, so the clamped zeros are fabricated, not
+		// reported — labelling them "provider" would publish a usage record
+		// claiming a zero-input call. That mislabel dies here (D5), not only
+		// inside the extractors.
 		const u = sanitizeUsage({
 			inputTokens: Number.NaN,
 			outputTokens: Number.POSITIVE_INFINITY,
@@ -53,9 +58,45 @@ describe("sanitizeUsage", () => {
 			outputTokens: 0,
 			cacheReadTokens: 0,
 			cacheWriteTokens: 0,
-			source: "provider",
+			source: "estimated",
 		});
 		expectSafeSnapshot(u);
+	});
+
+	it("downgrades a provider label when EITHER input or output is unusable", () => {
+		// One half of the pair is enough: a half-provider snapshot is a mislabel.
+		expect(
+			sanitizeUsage({ inputTokens: Number.NaN, outputTokens: 50, source: "provider" }).source,
+		).toBe("estimated");
+		expect(
+			sanitizeUsage({ inputTokens: 50, outputTokens: undefined, source: "provider" }).source,
+		).toBe("estimated");
+		expect(sanitizeUsage({ inputTokens: 50, outputTokens: -1, source: "provider" }).source).toBe(
+			"estimated",
+		);
+		expect(
+			sanitizeUsage({
+				inputTokens: "500" as unknown as number,
+				outputTokens: 5,
+				source: "provider",
+			}).source,
+		).toBe("estimated");
+	});
+
+	it("keeps the provider label when both input and output are usable, zeros included", () => {
+		// An explicit 0 IS data. And absent CACHE fields default to 0 without
+		// downgrading — D5 says a provider reporting no cache use reports zero.
+		expect(sanitizeUsage({ inputTokens: 0, outputTokens: 0, source: "provider" }).source).toBe(
+			"provider",
+		);
+		expect(
+			sanitizeUsage({
+				inputTokens: 10,
+				outputTokens: 5,
+				cacheReadTokens: Number.NaN,
+				source: "provider",
+			}).source,
+		).toBe("provider");
 	});
 
 	it("rounds fractional counts UP (understatement is the dangerous direction)", () => {

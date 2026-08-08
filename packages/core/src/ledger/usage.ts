@@ -56,6 +56,11 @@ export interface NormalizedUsage {
 	 * means at least one of input/output was missing or unusable, so the caller
 	 * must substitute its estimate and MUST NOT publish a `usage` record — a
 	 * half-provider snapshot labelled "provider" is a mislabel, not a saving.
+	 *
+	 * Held by construction: `sanitizeUsage` downgrades a `"provider"` label to
+	 * `"estimated"` whenever the input or output it was handed is not a usable
+	 * count, so no snapshot leaving this module can carry a fabricated zero
+	 * under a provider label — whichever entry point produced it.
 	 */
 	source: "provider" | "estimated";
 }
@@ -117,18 +122,33 @@ function disjointInput(promptTokens: number, cacheReadTokens: number, cacheWrite
  * Non-finite, negative and non-numeric values collapse to 0; fractional counts
  * round up; an absent `source` defaults to the conservative `"estimated"`.
  *
+ * **The D5 provenance rule is enforced HERE, not only in the extractors.** A
+ * caller may label a snapshot `"provider"`, but the label survives only if
+ * BOTH `inputTokens` and `outputTokens` are usable counts (an explicit `0`
+ * qualifies — a provider that used no cache reports zero, and that is data).
+ * When either is absent or garbage, the clamped `0` is *fabricated*, so the
+ * label is downgraded to `"estimated"` and the caller must not publish a
+ * `usage` record. Without this guard a boundary that derives `source` from a
+ * `typeof value === "number"` check on a NaN counter would publish a
+ * provider-labelled zero-input call — the exact mislabel D5 kills, and one
+ * that understates money by pricing fresh input at the 1-usertoken floor.
+ * Absent CACHE fields never downgrade: D5 says they legitimately default to 0.
+ *
  * Note there is no upper clamp: a finite-but-absurd count passes through and
  * prices high. Overstatement is fail-safe under the D1 money invariant, and
  * `canonicalize` only rejects non-finite values, so the audit write stays safe.
  */
 export function sanitizeUsage(raw: RawUsageCandidate | null | undefined): NormalizedUsage {
 	const r = raw ?? {};
+	const input = readCount(r.inputTokens);
+	const output = readCount(r.outputTokens);
+	const reported = input != null && output != null;
 	return {
-		inputTokens: readCount(r.inputTokens) ?? 0,
-		outputTokens: readCount(r.outputTokens) ?? 0,
+		inputTokens: input ?? 0,
+		outputTokens: output ?? 0,
 		cacheReadTokens: readCount(r.cacheReadTokens) ?? 0,
 		cacheWriteTokens: readCount(r.cacheWriteTokens) ?? 0,
-		source: r.source === "provider" ? "provider" : "estimated",
+		source: r.source === "provider" && reported ? "provider" : "estimated",
 	};
 }
 
