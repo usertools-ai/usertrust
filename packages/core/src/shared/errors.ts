@@ -13,6 +13,14 @@
  * thrown by a version before this existed, also looks like. `auditDegraded`
  * separates "the append was attempted and failed" (dead-lettered, no chain
  * record) from "no append was ever attempted".
+ *
+ * All FOUR combinations are meaningful:
+ * - hash, no flag — the event is on the chain; ordinary success.
+ * - hash AND flag — the event IS on the chain at that hash, but the write
+ *   reported failure (the log was fsync'd and the `.meta` sidecar was not).
+ *   The handle is usable AND the vault wants a verify pass.
+ * - flag only — attempted, nothing durable landed, payload dead-lettered.
+ * - neither — no append was attempted.
  */
 export interface DenialAuditMetadata {
 	/** Hash of the appended denial event; absent when the append did not land. */

@@ -105,7 +105,8 @@ The two fields answer different questions, and you need both:
 | `auditEventHash` | `auditDegraded` | What happened |
 |---|---|---|
 | set | absent | The denial is on the chain, at that hash. |
-| absent | `true` | The append was attempted, failed, and the payload was dead-lettered to `.usertrust/dlq/`. There is no chain record. |
+| set | `true` | The event **is** on the chain at that hash, but the write reported failure — the log was fsync'd and the `.meta` sidecar was not. The handle is usable; run `usertrust verify` on the vault. |
+| absent | `true` | The append was attempted, nothing durable landed, and the payload was dead-lettered to `.usertrust/dlq/`. There is no chain record. |
 | absent | absent | No append was attempted — an error built by hand, or thrown by a version before denial events existed. |
 
 A failed denial-append never changes the error you receive. `audit.failClosed`

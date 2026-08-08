@@ -480,6 +480,7 @@ describe("denial events — every throw site, every governor", () => {
 
 		const [event] = rec.only("ledger_rejected");
 		expect(event?.data.actionKind).toBe("tool");
+		expect(event?.data.actionName).toBe("curl");
 		expect(event?.data.estimatedCost).toBe(500);
 		expect((err as InsufficientBalanceError).auditEventHash).toBeDefined();
 		expect(execute).not.toHaveBeenCalled();

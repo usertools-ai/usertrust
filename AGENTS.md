@@ -508,6 +508,15 @@ The append-failure contract is deliberately FLAT, `audit.failClosed` included: e
 the ORIGINAL typed denial with `auditDegraded: true` after the writer's DLQ attempt, and the hash is
 attached to the thrown instance with `defineProperty` — never a reconstructed error, which would
 break the same-object identity `envelope-threading.test.ts` pins.
+
+*A rejected append has not necessarily written nothing.* `appendEvent` fsyncs `events.jsonl` and
+only then writes the `.meta` sidecar, so a sidecar failure rejects for an event that IS on the
+chain. The writer records that event's hash on the rejection under a module-private SYMBOL
+(`readDurableEventHash`, a symbol so it is invisible to `JSON.stringify`/`Object.keys` and cannot
+collide), and the denial boundary reports **both** `auditEventHash` and `auditDegraded: true`.
+*Prevents:* discarding a usable correlation handle for a record an auditor can still read and
+verify — the one failure mode where the hash is known. The pair means "on-chain at this hash AND
+the write reported failure", which is strictly more than either field alone.
 *Prevents:* `failClosed` replacing an actionable denial with an `AuditDegradedError` that hides
 *why* the call was refused. `failClosed` exists to stop an unaudited SPEND from settling; a denial
 has already refused the call and moved no money, so it has nothing left to fail closed about.
@@ -694,12 +703,21 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **seven** sanitizers, in two variants. Do not consolidate them onto the weaker one.
+There are **eight** sanitizers, in two variants. Do not consolidate them onto the weaker one.
 
 - Six identical copies of `CONTROL_CHARS = /[\x00-\x1f\x7f]/g` plus a clip at 80, in
   `core/src/cli/verify.ts`, `verify/src/cli.ts`, and the `rekor-verify.ts` / `anchor-verify.ts`
   pairs. These must move together. The
   `biome-ignore lint/suspicious/noControlCharactersInRegex` on each is intentional — do not "fix" it.
+- An eighth, the **stronger** variant again: `forDisplay` in `verify/src/receipt.ts`, applied to
+  every untrusted string the `--tx` receipt prints (model, error, transferId, timestamp, both
+  chain hashes, and the `renderNotFound` txId, which is argv). The receipt reads `events.jsonl` —
+  a file the party under audit owns — and prints it at the auditor. The unknown-model denial is
+  the sharpest edge: the model string is CALLER-supplied and the governor copies it into the
+  event's `error` text, so one hostile value arrives through two fields. C1 coverage matters here
+  for the same reason it does in `budget.ts`. The UI is deliberately NOT patched: it renders
+  these into DOM text nodes, where escapes are inert, and it displays this same already-scrubbed
+  receipt string.
 - A seventh, independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
   also covers `0x80–0x9f`, the C1 range holding the 8-bit CSI/OSC introducers that the regex above
   does not match; it substitutes `?` rather than stripping; and it clips at 120.

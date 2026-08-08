@@ -242,6 +242,8 @@ describe("appendDenialEvent — payload shape", () => {
 			record: undefined,
 			fields: {
 				model: "claude-sonnet-4-6",
+				actionKind: "tool",
+				actionName: "curl",
 				transferId: "tx_9",
 				estimatedCost: 900,
 				costCenter: "research",
@@ -257,6 +259,10 @@ describe("appendDenialEvent — payload shape", () => {
 			schemaVersion: DENIAL_SCHEMA_VERSION,
 			decision: "deny",
 			model: "claude-sonnet-4-6",
+			actionKind: "tool",
+			// Mirrors policy_denied: without it, every rejected action sharing a
+			// broad kind is indistinguishable in the chain.
+			actionName: "curl",
 			transferId: "tx_9",
 			estimatedCost: 900,
 			costCenter: "research",

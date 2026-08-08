@@ -34,6 +34,32 @@ export interface AppendEventInput {
 	data: Record<string, unknown>;
 }
 
+/**
+ * Where a PARTIALLY-successful append records the hash of the event that did
+ * land durably in `events.jsonl`.
+ *
+ * `appendEvent` writes the log, fsyncs it, and only then writes the `.meta`
+ * sidecar. A sidecar failure therefore rejects for an event that IS on the
+ * chain — and a caller told only "it failed" throws away the correlation handle
+ * for a record an auditor can still read. The hash rides out on the rejection
+ * so that caller can recover it.
+ *
+ * A SYMBOL, not a string key: invisible to `JSON.stringify`, `Object.keys` and
+ * any log line that serialises the error, and impossible to collide with a
+ * field some other layer sets.
+ */
+const DURABLE_EVENT_HASH = Symbol.for("usertrust.audit.durableEventHash");
+
+/**
+ * Recover the hash of an event that reached the log before the append failed.
+ * `undefined` means nothing durable was written — the ordinary total failure.
+ */
+export function readDurableEventHash(err: unknown): string | undefined {
+	if (err === null || typeof err !== "object") return undefined;
+	const value = (err as Record<symbol, unknown>)[DURABLE_EVENT_HASH];
+	return typeof value === "string" ? value : undefined;
+}
+
 export interface AuditWriter {
 	appendEvent(input: AppendEventInput): Promise<AuditEvent>;
 	getWriteFailures(): number;
@@ -401,6 +427,10 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 
 	async function appendEvent(input: AppendEventInput): Promise<AuditEvent> {
 		const release = await mutex.acquire();
+		// Set ONLY once the log bytes are fsync'd. Everything after that point can
+		// still throw (the sidecar above all), and the event is on the chain
+		// regardless — see DURABLE_EVENT_HASH.
+		let durableHash: string | undefined;
 		try {
 			acquireProcessLock(logPath, locksByDir, writerId);
 
@@ -443,6 +473,11 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 				closeSync(fd);
 			}
 			lastEventCache.set(logPath, { hash, sequence });
+			// The bytes are fsync'd: this event is on the chain even if the sidecar
+			// write below throws. Deliberately set AFTER `closeSync` has run, so a
+			// close that itself fails leaves this unset — under-claiming durability
+			// is the safe direction here.
+			durableHash = hash;
 
 			// Persist last hash to sidecar for cross-segment chain continuity
 			const metaPath = `${logPath}.meta`;
@@ -458,6 +493,14 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 		} catch (err) {
 			degraded = true;
 			writeFailures++;
+			if (durableHash !== undefined && err !== null && typeof err === "object") {
+				Object.defineProperty(err, DURABLE_EVENT_HASH, {
+					value: durableHash,
+					enumerable: false,
+					writable: false,
+					configurable: true,
+				});
+			}
 			console.warn("[AUDIT] Audit trail degraded — write failed", {
 				error: err instanceof Error ? err.message : String(err),
 			});

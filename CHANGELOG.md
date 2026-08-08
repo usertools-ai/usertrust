@@ -53,6 +53,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   too. Richer UI rendering of `denialClass`/rules, export columns, and an
   `inspect` kind column are also follow-ups.
 
+### Fixed
+
+- **`usertrust-verify --tx` scrubs control characters out of every untrusted
+  receipt field.** The receipt renders strings read from `events.jsonl` — a file
+  the party under audit owns — onto the terminal of the auditor checking it, so
+  an escape sequence could erase the line the verdict prints on and forge a
+  passing verification. The unknown-model denial made this reachable with a
+  caller-supplied `model`, which the governor also copies into the event's
+  `error` text. `model`, `error`, `transferId`, the timestamp, both chain hashes
+  and the `renderNotFound` txId now go through the stronger `forDisplay`
+  sanitizer (C1 range included) before rendering. This also closes the same
+  pre-existing exposure on the `llm_call_failed` error line.
+- **A denial whose audit append fails only at the `.meta` sidecar now keeps its
+  correlation handle.** `appendEvent` fsyncs `events.jsonl` before writing the
+  sidecar, so a sidecar failure rejected for an event that was already durably
+  on the chain — and the caller was told `auditDegraded` with no hash, losing
+  the handle for a record an auditor could still read. The writer now reports
+  that event's hash on the rejection and the denial boundary surfaces
+  `auditEventHash` **and** `auditDegraded: true` together, meaning "on-chain at
+  this hash, and the write reported failure".
+- **`ledger_rejected` carries `actionName`,** mirroring `policy_denied`. Without
+  it, every rejected action sharing a broad `kind` (`"tool"`) was
+  indistinguishable in the chain — the question a rejected-hold investigation
+  starts from.
+
 - **Budget envelopes: spend routing, per-envelope caps, and scarcity visibility
   (#79, previously unlisted).** `withCostCenter(costCenter, fn, opts?)`
   (`budget/attribution.ts`) attributes a governed call's spend to a

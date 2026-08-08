@@ -33,7 +33,7 @@ import {
 	InsufficientBalanceError,
 	PolicyDeniedError,
 } from "../shared/errors.js";
-import type { AuditWriter } from "./chain.js";
+import { type AuditWriter, readDurableEventHash } from "./chain.js";
 
 /** Both denial kinds carry this, so a reader can tell old records from new. */
 export const DENIAL_SCHEMA_VERSION = 1 as const;
@@ -229,6 +229,10 @@ function buildLedgerRejectedData(
 		decision: "deny",
 		...(fields.model !== undefined ? { model: fields.model } : {}),
 		...(fields.actionKind !== undefined ? { actionKind: fields.actionKind } : {}),
+		// Mirrors `policy_denied`. Without it, every rejected action sharing a
+		// broad `kind` ("tool") is indistinguishable in the chain, which is
+		// exactly the question a rejected-hold investigation starts from.
+		...(fields.actionName !== undefined ? { actionName: fields.actionName } : {}),
 		...(fields.transferId !== undefined ? { transferId: fields.transferId } : {}),
 		...(fields.estimatedCost !== undefined ? { estimatedCost: fields.estimatedCost } : {}),
 		...(fields.costCenter !== undefined ? { costCenter: fields.costCenter } : {}),
@@ -266,7 +270,23 @@ export async function appendDenialEvent(args: AppendDenialEventArgs): Promise<vo
 	try {
 		const event = await audit.appendEvent({ kind, actor, data });
 		attachDenialAudit(error, { auditEventHash: event.hash });
-	} catch {
-		attachDenialAudit(error, { auditDegraded: true });
+	} catch (appendErr) {
+		// A rejection does NOT always mean nothing was written. The writer fsyncs
+		// `events.jsonl` and only then writes the `.meta` sidecar, so a sidecar
+		// failure rejects for an event that IS on the chain. Reporting only
+		// `auditDegraded` there would throw away the correlation handle for a
+		// record an auditor can still read — the one case where the hash is known
+		// and we were about to discard it.
+		//
+		// Both fields together mean: the event is on the chain at this hash, AND
+		// the write reported failure, so treat the vault as needing a verify pass.
+		// That is strictly more information than either field alone.
+		const durable = readDurableEventHash(appendErr);
+		attachDenialAudit(
+			error,
+			durable !== undefined
+				? { auditEventHash: durable, auditDegraded: true }
+				: { auditDegraded: true },
+		);
 	}
 }

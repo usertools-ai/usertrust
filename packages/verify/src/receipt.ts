@@ -158,6 +158,38 @@ function wordWrap(text: string, maxWidth: number): string[] {
 	return result.length > 0 ? result : [""];
 }
 
+// ── Terminal safety ──
+
+/**
+ * Scrub control characters out of an untrusted string before it is printed.
+ *
+ * EVERY string on this receipt comes out of `events.jsonl` — a file owned by
+ * the party under audit — and lands on the terminal of the auditor running
+ * `usertrust-verify --tx`. An escape sequence in any of them repaints the
+ * screen the verdict is printed on, which forges a passing verification: the
+ * entire product of a verification tool. `model` is the sharpest edge, because
+ * the unknown-model denial copies a CALLER-SUPPLIED model string into the
+ * event's `error` text, so it reaches here through two fields at once.
+ *
+ * This is the STRONGER of the repo's two sanitizer variants — the `forDisplay`
+ * shape from `core/src/cli/budget.ts`, not the six-copy
+ * `/[\x00-\x1f\x7f]/g` strip. It also covers C1 (0x80–0x9f), which holds the
+ * 8-bit CSI and OSC introducers the narrower regex misses, and it SUBSTITUTES
+ * rather than deletes so a scrubbed byte stays visible as evidence instead of
+ * silently closing up. Duplicated rather than imported because this package is
+ * the independent zero-dependency verifier and may not import from core; see
+ * the sanitizer inventory in AGENTS.md, which forbids consolidating these onto
+ * the weaker variant.
+ */
+function forDisplay(raw: string): string {
+	let out = "";
+	for (const ch of raw) {
+		const code = ch.codePointAt(0) as number;
+		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : ch;
+	}
+	return out;
+}
+
 // ── Hash formatting ──
 
 function truncHash(hash: string, len = 8): string {
@@ -207,6 +239,9 @@ export function renderReceipt(data: ReceiptData): string {
 		verifiedAt,
 	} = data;
 	const status = resolveStatus(event);
+	// `detectProvider` matches on the RAW value — scrubbing first would let a
+	// leading control character hide a real provider prefix and mislabel the
+	// row. Only the rendered copy is scrubbed.
 	const model = event.data.model ?? "unknown";
 	const provider = detectProvider(model);
 	const cost = event.data.cost;
@@ -228,9 +263,9 @@ export function renderReceipt(data: ReceiptData): string {
 	// ── Transaction details ──
 	lines.push(row(pad("  TRANSACTION RECEIPT")));
 	lines.push(divider());
-	lines.push(row(`${dotted("  TX", event.data.transferId, WIDTH - 1)} `));
-	lines.push(row(`${dotted("  Date", formatDate(event.timestamp), WIDTH - 1)} `));
-	lines.push(row(`${dotted("  Model", model, WIDTH - 1)} `));
+	lines.push(row(`${dotted("  TX", forDisplay(event.data.transferId), WIDTH - 1)} `));
+	lines.push(row(`${dotted("  Date", forDisplay(formatDate(event.timestamp)), WIDTH - 1)} `));
+	lines.push(row(`${dotted("  Model", forDisplay(model), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Provider", provider, WIDTH - 1)} `));
 
 	if (!isFailed && !isDenied && cost !== undefined) {
@@ -245,7 +280,7 @@ export function renderReceipt(data: ReceiptData): string {
 		const errPrefix = "  Error: ";
 		const indent = " ".repeat(errPrefix.length);
 		const maxW = WIDTH - indent.length - 2;
-		const wrapped = wordWrap(event.data.error, maxW);
+		const wrapped = wordWrap(forDisplay(event.data.error), maxW);
 		for (let i = 0; i < wrapped.length; i++) {
 			const prefix = i === 0 ? errPrefix : indent;
 			lines.push(row(pad(`${prefix}${wrapped[i] as string}`)));
@@ -260,8 +295,8 @@ export function renderReceipt(data: ReceiptData): string {
 	lines.push(
 		row(`${dotted("  Position", `Event ${event.sequence} of ${chainLength}`, WIDTH - 1)} `),
 	);
-	lines.push(row(`${dotted("  Hash", truncHash(event.hash), WIDTH - 1)} `));
-	lines.push(row(`${dotted("  Prev", truncHash(event.previousHash), WIDTH - 1)} `));
+	lines.push(row(`${dotted("  Hash", forDisplay(truncHash(event.hash)), WIDTH - 1)} `));
+	lines.push(row(`${dotted("  Prev", forDisplay(truncHash(event.previousHash)), WIDTH - 1)} `));
 
 	// AC-5.3: without an external anchor the truthful claim is chain
 	// consistency, not inclusion — the old unconditional "INCLUSION VERIFIED"
@@ -307,7 +342,10 @@ export function renderNotFound(txId: string): string {
 	lines.push(blank());
 	lines.push(row(center("Transaction not found")));
 	lines.push(blank());
-	lines.push(row(pad(`  TX: ${txId}`)));
+	// argv, echoed back at the operator who typed it — and an agent may be the
+	// one typing. Sanitize first, clip second: `pad` truncating at WIDTH is not
+	// a defense, since an erase-line sequence is four characters.
+	lines.push(row(pad(`  TX: ${forDisplay(txId)}`)));
 	lines.push(blank());
 	lines.push(row(pad("  No event with this transferId exists")));
 	lines.push(row(pad("  in the audit chain.")));
