@@ -11,6 +11,8 @@ import {
 	generateInclusionProof,
 	hashInternal,
 	hashLeaf,
+	type MerkleInclusionProof,
+	type MerkleSibling,
 	verifyChain,
 	verifyConsistencyProof,
 	verifyInclusionProof,
@@ -611,6 +613,179 @@ describe("verifyInclusionProof", () => {
 		for (let i = 0; i < 16; i++) {
 			const proof = generateInclusionProof(i, leaves, "seg-16");
 			expect(verifyInclusionProof(proof, rootOf(tree), 16)).toBe(true);
+		}
+	});
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Path topology. Mirrors packages/core/tests/audit/merkle.test.ts —
+// the fold alone proves a path exists, never that the leaf sits
+// where the proof claims it does.
+// ═══════════════════════════════════════════════════════════════
+
+describe("verifyInclusionProof — path topology", () => {
+	/** Cast an intentionally malformed proof to the declared shape. */
+	function malformed(value: unknown): MerkleInclusionProof {
+		return value as MerkleInclusionProof;
+	}
+
+	it("rejects a forged leafIndex riding an otherwise-valid fold", () => {
+		const leaves = makeLeaves(8);
+		const tree = buildMerkleTree(leaves);
+		const proof = generateInclusionProof(3, leaves, "seg-forged");
+
+		expect(verifyInclusionProof({ ...proof, leafIndex: 5 }, rootOf(tree), 8)).toBe(false);
+	});
+
+	it("rejects padded, truncated and flipped sibling paths", () => {
+		const leaves = makeLeaves(8);
+		const tree = buildMerkleTree(leaves);
+		const root = rootOf(tree);
+		const proof = generateInclusionProof(3, leaves, "seg-path");
+
+		const padded = { ...proof, siblings: [...proof.siblings, at(proof.siblings, 0)] };
+		expect(verifyInclusionProof(padded, root, 8)).toBe(false);
+
+		const truncated = { ...proof, siblings: proof.siblings.slice(0, 2) };
+		expect(verifyInclusionProof(truncated, root, 8)).toBe(false);
+
+		const flipped = {
+			...proof,
+			siblings: proof.siblings.map((s, i) =>
+				i === 1 ? { ...s, position: s.position === "left" ? "right" : "left" } : s,
+			),
+		};
+		expect(verifyInclusionProof(malformed(flipped), root, 8)).toBe(false);
+	});
+
+	it("rejects a non-'left'/'right' position rather than treating it as right", () => {
+		const leaves = makeLeaves(8);
+		const tree = buildMerkleTree(leaves);
+		const proof = generateInclusionProof(1, leaves, "seg-bogus");
+		const bogus = malformed({
+			...proof,
+			siblings: proof.siblings.map((s, i) => (i === 1 ? { ...s, position: "bogus" } : s)),
+		});
+
+		expect(verifyInclusionProof(bogus, rootOf(tree), 8)).toBe(false);
+	});
+
+	it("rejects the equal-hash flip: identical leaves refold to the same root", () => {
+		const twin = createHash("sha256").update("twin").digest("hex");
+		const pair = [twin, twin];
+		const root = rootOf(buildMerkleTree(pair));
+		const proof = generateInclusionProof(0, pair, "seg-twin");
+		expect(at(proof.siblings, 0).position).toBe("right");
+
+		const flipped: MerkleSibling[] = [{ hash: at(proof.siblings, 0).hash, position: "left" }];
+		expect(verifyInclusionProof({ ...proof, siblings: flipped }, root, 2)).toBe(false);
+		expect(verifyInclusionProof({ ...proof, leafIndex: 1 }, root, 2)).toBe(false);
+	});
+
+	it("rejects out-of-range leafIndex and non-safe-integer sizes", () => {
+		const leaves = makeLeaves(8);
+		const tree = buildMerkleTree(leaves);
+		const root = rootOf(tree);
+		const proof = generateInclusionProof(3, leaves, "seg-bounds");
+
+		for (const leafIndex of [-1, 8, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+			expect(verifyInclusionProof({ ...proof, leafIndex }, root, 8)).toBe(false);
+		}
+		// Number.isInteger(2**53) is true — Number.isSafeInteger is what refuses it.
+		for (const treeSize of [0, -1, 8.5, Number.POSITIVE_INFINITY, 2 ** 53]) {
+			expect(verifyInclusionProof({ ...proof, treeSize }, root, treeSize)).toBe(false);
+		}
+	});
+
+	it("returns false — never throws — for structurally malformed proofs", () => {
+		const leaves = makeLeaves(8);
+		const root = rootOf(buildMerkleTree(leaves));
+		const proof = generateInclusionProof(3, leaves, "seg-malformed");
+
+		const cases: MerkleInclusionProof[] = [
+			malformed({ ...proof, siblings: null }),
+			malformed({ ...proof, siblings: "not-an-array" }),
+			malformed({ ...proof, siblings: [proof.siblings[0], undefined, proof.siblings[2]] }),
+			malformed({ ...proof, siblings: [proof.siblings[0], null, proof.siblings[2]] }),
+			malformed({ ...proof, siblings: proof.siblings.map(({ hash }) => ({ hash })) }),
+			malformed({ ...proof, leafHash: undefined }),
+		];
+
+		for (const bad of cases) {
+			expect(() => verifyInclusionProof(bad, root, 8)).not.toThrow();
+			expect(verifyInclusionProof(bad, root, 8)).toBe(false);
+		}
+	});
+
+	// Hostile in-memory objects. These defend the EXPORTED function's
+	// "untrusted input" contract, not any vault ingestion path — a JSON-parsed
+	// proof carries plain data properties. A valid leaf-0 proof in a 4-leaf
+	// tree has orientations [right, right]; leafIndex 2 derives [right, left],
+	// so each fixture shows one face to validation and the other to a fold
+	// that re-reads.
+
+	it("rejects a `position` getter that flips between validation and the fold", () => {
+		const leaves = makeLeaves(4);
+		const root = rootOf(buildMerkleTree(leaves));
+		const proof = generateInclusionProof(0, leaves, "seg-hostile");
+		let reads = 0;
+		const hostile = {
+			hash: at(proof.siblings, 1).hash,
+			get position(): string {
+				reads += 1;
+				return reads === 1 ? "left" : "right";
+			},
+		};
+		const forged = malformed({
+			...proof,
+			leafIndex: 2,
+			siblings: [at(proof.siblings, 0), hostile],
+		});
+
+		expect(verifyInclusionProof(forged, root, 4)).toBe(false);
+		// One read per property, total — the fold must never come back for more.
+		expect(reads).toBe(1);
+	});
+
+	it("rejects an array whose Symbol.iterator yields a different path", () => {
+		const leaves = makeLeaves(4);
+		const root = rootOf(buildMerkleTree(leaves));
+		const proof = generateInclusionProof(0, leaves, "seg-hostile-iter");
+		const real = at(proof.siblings, 1);
+		const indexed: unknown[] = [at(proof.siblings, 0), { ...real, position: "left" }];
+		Object.defineProperty(indexed, Symbol.iterator, {
+			value: function* () {
+				yield at(proof.siblings, 0);
+				yield real;
+			},
+		});
+		const forged = malformed({ ...proof, leafIndex: 2, siblings: indexed });
+
+		expect(verifyInclusionProof(forged, root, 4)).toBe(false);
+	});
+
+	it("round-trips every leaf of trees sized 1..33, including promotion shapes", () => {
+		for (let size = 1; size <= 33; size++) {
+			const leaves = makeLeaves(size);
+			const root = rootOf(buildMerkleTree(leaves));
+			for (let i = 0; i < size; i++) {
+				const proof = generateInclusionProof(i, leaves, `seg-${size}`);
+				expect(verifyInclusionProof(proof, root, size)).toBe(true);
+			}
+		}
+	});
+
+	it("no valid proof verifies at any other leaf index, for trees sized 2..17", () => {
+		for (let size = 2; size <= 17; size++) {
+			const leaves = makeLeaves(size);
+			const root = rootOf(buildMerkleTree(leaves));
+			for (let i = 0; i < size; i++) {
+				const proof = generateInclusionProof(i, leaves, `seg-${size}`);
+				for (let claimed = 0; claimed < size; claimed++) {
+					if (claimed === i) continue;
+					expect(verifyInclusionProof({ ...proof, leafIndex: claimed }, root, size)).toBe(false);
+				}
+			}
 		}
 	});
 });

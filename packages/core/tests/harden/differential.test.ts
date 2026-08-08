@@ -15,8 +15,20 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 // Zero-dep verify package, imported by relative path across the workspace.
 import { verifyVault as pkgVerifyVault } from "../../../verify/src/index.js";
+import {
+	buildMerkleTree as pkgBuildMerkleTree,
+	generateInclusionProof as pkgGenerateInclusionProof,
+	verifyInclusionProof as pkgVerifyInclusionProof,
+} from "../../../verify/src/verify.js";
 import { canonicalize } from "../../src/audit/canonical.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
+import {
+	buildMerkleTree as coreBuildMerkleTree,
+	generateInclusionProof as coreGenerateInclusionProof,
+	verifyInclusionProof as coreVerifyInclusionProof,
+	type MerkleInclusionProof,
+	type MerkleSibling,
+} from "../../src/audit/merkle.js";
 import { verifyVault as coreVerifyVault } from "../../src/audit/verify.js";
 import { GENESIS_HASH, VAULT_DIR } from "../../src/shared/constants.js";
 
@@ -154,5 +166,170 @@ describe("HARDEN: core vs verify pkg produce identical verdicts", () => {
 		lines[0] = JSON.stringify(ev);
 		writeFileSync(logPath, `${lines.join("\n")}\n`);
 		assertAgree(join(root, VAULT_DIR), false);
+	});
+});
+
+// ═══════════════════════════════════════════════════════════════
+// Inclusion proofs are driven DIRECTLY, not through a vault. No
+// vault format carries an attacker-supplied inclusion proof — core
+// builds roots, and verify generates its own proof immediately
+// before checking it (verify/src/index.ts) — so a forged proof
+// smuggled into vault data would have both packages "agree" for a
+// reason that has nothing to do with this function.
+// ═══════════════════════════════════════════════════════════════
+
+function merkleLeaves(n: number): string[] {
+	return Array.from({ length: n }, (_, i) =>
+		createHash("sha256").update(`leaf-${i}`).digest("hex"),
+	);
+}
+
+/**
+ * Both implementations must return the same boolean, and neither may throw.
+ * Cross-fed as well: core's generator against verify's verifier and back, so
+ * a drift in either the generator or the topology derivation surfaces here.
+ */
+function assertInclusionAgree(
+	proof: MerkleInclusionProof,
+	root: string,
+	treeSize: number,
+	expected: boolean,
+): void {
+	let core: boolean | undefined;
+	let pkg: boolean | undefined;
+	expect(() => {
+		core = coreVerifyInclusionProof(proof, root, treeSize);
+	}).not.toThrow();
+	expect(() => {
+		pkg = pkgVerifyInclusionProof(proof, root, treeSize);
+	}).not.toThrow();
+	expect(core).toBe(pkg);
+	expect(core).toBe(expected);
+}
+
+describe("HARDEN: core vs verify pkg agree on inclusion-proof topology", () => {
+	it("7. both generators produce proofs both verifiers accept (sizes 1..17)", () => {
+		for (let size = 1; size <= 17; size++) {
+			const leaves = merkleLeaves(size);
+			const coreRoot = coreBuildMerkleTree(leaves).root as string;
+			const pkgRoot = pkgBuildMerkleTree(leaves).root as string;
+			expect(coreRoot).toBe(pkgRoot);
+
+			for (let i = 0; i < size; i++) {
+				assertInclusionAgree(coreGenerateInclusionProof(i, leaves, "seg"), coreRoot, size, true);
+				assertInclusionAgree(pkgGenerateInclusionProof(i, leaves, "seg"), coreRoot, size, true);
+			}
+		}
+	});
+
+	it("8. both reject a forged leafIndex on an otherwise-valid fold", () => {
+		const leaves = merkleLeaves(8);
+		const root = coreBuildMerkleTree(leaves).root as string;
+		const proof = coreGenerateInclusionProof(3, leaves, "seg-forged");
+
+		assertInclusionAgree(proof, root, 8, true);
+		for (const leafIndex of [0, 1, 2, 4, 5, 6, 7]) {
+			assertInclusionAgree({ ...proof, leafIndex }, root, 8, false);
+		}
+	});
+
+	it("9. both reject the equal-hash position flip", () => {
+		const twin = createHash("sha256").update("twin").digest("hex");
+		const pair = [twin, twin];
+		const root = coreBuildMerkleTree(pair).root as string;
+		const proof = coreGenerateInclusionProof(0, pair, "seg-twin");
+
+		assertInclusionAgree(proof, root, 2, true);
+		assertInclusionAgree(
+			{ ...proof, siblings: [{ hash: proof.siblings[0]?.hash as string, position: "left" }] },
+			root,
+			2,
+			false,
+		);
+	});
+
+	it("10. both reject malformed proofs identically, neither throws", () => {
+		const leaves = merkleLeaves(8);
+		const root = coreBuildMerkleTree(leaves).root as string;
+		const proof = coreGenerateInclusionProof(3, leaves, "seg-malformed");
+		const bad = (v: unknown): MerkleInclusionProof => v as MerkleInclusionProof;
+
+		const cases: MerkleInclusionProof[] = [
+			bad({ ...proof, siblings: null }),
+			bad({ ...proof, siblings: [...proof.siblings, proof.siblings[0]] }),
+			bad({ ...proof, siblings: proof.siblings.slice(0, 1) }),
+			bad({ ...proof, siblings: [proof.siblings[0], null, proof.siblings[2]] }),
+			bad({ ...proof, siblings: proof.siblings.map((s) => ({ ...s, position: "bogus" })) }),
+			bad({ ...proof, siblings: proof.siblings.map(({ position }) => ({ position })) }),
+			bad({ ...proof, leafHash: undefined }),
+			bad({ ...proof, leafIndex: Number.NaN }),
+			bad({ ...proof, leafIndex: -1 }),
+			bad({ ...proof, leafIndex: 1.5 }),
+		];
+
+		for (const c of cases) {
+			assertInclusionAgree(c, root, 8, false);
+		}
+	});
+
+	it("11. both reject non-safe-integer tree sizes", () => {
+		const leaves = merkleLeaves(8);
+		const root = coreBuildMerkleTree(leaves).root as string;
+		const proof = coreGenerateInclusionProof(3, leaves, "seg-size");
+
+		for (const treeSize of [0, -1, 8.5, Number.POSITIVE_INFINITY, 2 ** 53]) {
+			assertInclusionAgree({ ...proof, treeSize }, root, treeSize, false);
+		}
+	});
+
+	it("12. both reject hostile objects that answer differently on a second read", () => {
+		// A fresh fixture per verifier: a one-shot getter is consumed by the
+		// first call. Defends the exported contract, not a vault path.
+		const leaves = merkleLeaves(4);
+		const root = coreBuildMerkleTree(leaves).root as string;
+		const source = coreGenerateInclusionProof(0, leaves, "seg-hostile");
+
+		const flippingGetter = (): MerkleInclusionProof => {
+			let reads = 0;
+			return {
+				...source,
+				leafIndex: 2,
+				siblings: [
+					source.siblings[0],
+					{
+						hash: (source.siblings[1] as MerkleSibling).hash,
+						get position(): string {
+							reads += 1;
+							return reads === 1 ? "left" : "right";
+						},
+					},
+				],
+			} as unknown as MerkleInclusionProof;
+		};
+
+		const hostileIterator = (): MerkleInclusionProof => {
+			const real = source.siblings[1] as MerkleSibling;
+			const indexed: unknown[] = [source.siblings[0], { ...real, position: "left" }];
+			Object.defineProperty(indexed, Symbol.iterator, {
+				value: function* () {
+					yield source.siblings[0];
+					yield real;
+				},
+			});
+			return { ...source, leafIndex: 2, siblings: indexed } as unknown as MerkleInclusionProof;
+		};
+
+		for (const make of [flippingGetter, hostileIterator]) {
+			let core: boolean | undefined;
+			let pkg: boolean | undefined;
+			expect(() => {
+				core = coreVerifyInclusionProof(make(), root, 4);
+			}).not.toThrow();
+			expect(() => {
+				pkg = pkgVerifyInclusionProof(make(), root, 4);
+			}).not.toThrow();
+			expect(core).toBe(pkg);
+			expect(core).toBe(false);
+		}
 	});
 });
