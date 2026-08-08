@@ -50,6 +50,8 @@ Governance metadata returned with every LLM call. See [trust()](/docs/api/trust)
 interface TrustReceipt {
   transferId: string;
   cost: number;
+  /** Present only when the settle POST was capped at the reserved hold. */
+  postedCost?: number;
   budgetRemaining: number;
   auditHash: string;
   chainPath: string;
@@ -59,8 +61,63 @@ interface TrustReceipt {
   provider: string;
   timestamp: string;
   auditDegraded?: boolean;
+  usageSource?: "provider" | "estimated";
+  /** Four-tier disjoint token split. Present iff usageSource === "provider". */
+  usage?: ReceiptUsage;
+  chunksDelivered?: number;
+  actionKind?: ActionKind;
+  endpoint?: { class: EndpointClass; runtime: LocalRuntime };
+  meter?: {
+    costBasis: CostBasis;
+    rateSource: RateSource;
+    computeMs?: number;
+    /** The four resolved per-1k rates the cost was computed with. */
+    appliedRates?: AppliedRates;
+    /** Date-stamped PRICING_TABLE version the rates came from. */
+    pricingTableVersion?: string;
+  };
+  budget?: { costCenter: string; remaining: number; fraction?: number };
 }
 ```
+
+### ReceiptUsage
+
+The four-tier disjoint token split a settle was metered from (spec D5). Present on
+`TrustReceipt.usage` and `llm_call` audit events only when usage was provider-reported —
+never zero-filled for an estimated settle.
+
+```typescript
+interface ReceiptUsage {
+  inputTokens: number;      // fresh (non-cached) prompt tokens
+  outputTokens: number;     // completion tokens, incl. provider-billed thinking
+  cacheReadTokens: number;  // cache-hit prompt tokens
+  cacheWriteTokens: number; // cache-creation prompt tokens
+}
+```
+
+### AppliedRates
+
+The four RESOLVED per-1k rates a settle was metered with — i.e. **after** the [cache-rate
+fallback invariant](/docs/api/pricing#cache-tiers-and-the-fallback-invariant), so an absent cache
+tier appears here as `inputPer1k`, never as `undefined` or `0`. Together with `ReceiptUsage` this
+is the whole reconciliation surface: `ceil(sum(counts × rates / 1000))`, floored at 1, reproduces
+`TrustReceipt.cost` exactly, from the record alone.
+
+```typescript
+interface AppliedRates {
+  inputPer1k: number;
+  outputPer1k: number;
+  cacheReadPer1k: number;
+  cacheWritePer1k: number;
+}
+```
+
+`TrustReceipt`'s other inline field types: `ActionKind` is
+`"llm_call" | "tool_use" | "file_access" | "shell_command" | "api_request"`; `EndpointClass` is
+`"local" | "cloud"`; `LocalRuntime` is
+`"ollama" | "vllm" | "lmstudio" | "openai-compat" | "unknown"`; `CostBasis` is
+`"usd-proxy" | "nominal"`; `RateSource` is
+`"table" | "custom" | "local-model" | "local-default" | "fallback"`.
 
 ### LLMClientKind
 
@@ -252,11 +309,17 @@ const receipt = await response.receipt;
 
 ### StreamUsage
 
-Internal token accumulation from stream chunks.
+Internal token accumulation from stream chunks — the four DISJOINT tiers of spec D2.
+`inputTokens` is fresh prompt tokens only: for providers whose prompt count is inclusive of the
+cache tiers (OpenAI, Gemini), the cached tokens are already subtracted back out by the
+extractors; for Anthropic, whose SDK counters are disjoint at the source, nothing is subtracted.
+Summing all four fields gives the billable total with nothing double-counted.
 
 ```typescript
 interface StreamUsage {
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 ```

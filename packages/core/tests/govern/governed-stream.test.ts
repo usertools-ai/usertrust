@@ -159,7 +159,7 @@ describe("createGovernedStream", () => {
 
 		expect(resolveReceipt).toHaveBeenCalledOnce();
 		expect(resolveReceipt).toHaveBeenCalledWith({
-			usage: { inputTokens: 200, outputTokens: 50 },
+			usage: { inputTokens: 200, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 },
 			chunksDelivered: 3,
 			usageReported: true,
 		});
@@ -213,7 +213,7 @@ describe("createGovernedStream", () => {
 		const result = await governed.receipt;
 		expect(result.provider).toBe("google");
 		expect(resolveReceipt).toHaveBeenCalledWith({
-			usage: { inputTokens: 30, outputTokens: 15 },
+			usage: { inputTokens: 30, outputTokens: 15, cacheReadTokens: 0, cacheWriteTokens: 0 },
 			chunksDelivered: 2,
 			usageReported: true,
 		});
@@ -232,7 +232,7 @@ describe("createGovernedStream", () => {
 		const result = await governed.receipt;
 		expect(result.cost).toBe(0);
 		expect(resolveReceipt).toHaveBeenCalledWith({
-			usage: { inputTokens: 0, outputTokens: 0 },
+			usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
 			chunksDelivered: 0,
 			usageReported: false,
 		});

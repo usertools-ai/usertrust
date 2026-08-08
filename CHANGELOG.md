@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Four-tier cache pricing: rates, receipts, and public schemas (correctness fix).**
+  Cache traffic was billed at **zero**: `ModelRates` was two-tier, core's extraction read
+  `usage.input_tokens ?? prompt_tokens` while providers report cache read/write as separate
+  counters, and openclaw's accumulator dropped the cache fields it did extract. A
+  1.14B-cache-read day was under-recorded roughly 7-8x — understatement is the dangerous
+  direction, since it makes budgets deplete an order of magnitude slower than the real invoice
+  and every scarcity number read falsely high. `ModelRates` gains optional `cacheReadPer1k` /
+  `cacheWritePer1k`; every `PRICING_TABLE` entry was re-derived from providers' current published
+  rates (`PRICING_TABLE_VERSION = "2026-08-08"`, recorded on receipts), correcting a stale
+  `o4-mini` base rate along the way. **An absent cache rate now prices at `inputPer1k`, never
+  zero** — overstatement is the fail-safe direction, and this resolution happens in exactly one
+  place (`costFromRates`). Core's Anthropic/OpenAI-completions/Responses/Gemini extraction,
+  openclaw's accumulator and settle paths, the server wire schema, and the ACS adapter's
+  `token_count` all carry the four disjoint tiers end-to-end now, normalized per-source (pi-ai's
+  pinned adapters are already disjoint and pass through; core-direct OpenAI/Gemini subtract the
+  cache tiers back out of an inclusive prompt count, clamped at 0). The PENDING hold now reserves
+  the input leg at `max(inputPer1k, effective cacheWritePer1k)` so a cache-write premium (Anthropic
+  1.25x/2x) can't exceed an input-only hold — holds on cache-writing workloads run ~25% fatter;
+  warm workloads settle well below and release the difference. `TrustReceipt.usage` (the four-tier
+  split) and `receipt.meter.appliedRates`/`pricingTableVersion` (the resolved rates, published
+  even when they came from the fallback) make a settled cost independently recomputable from the
+  record alone — `receipt.v2.schema.json` publishes both (v1 stays frozen). Anomaly velocity
+  tracking now sees cached traffic instead of losing it once `inputTokens` stopped including it.
+  Documented approximations (per-TTL write premium collapsed to the 5-minute rate; long-context,
+  service-tier, regional, modality, and cache-storage charges not modeled) are in `AGENTS.md`'s
+  Money invariants and `/docs/api/pricing`. See the design spec and the D1-D9 sections it links
+  for the full boundary inventory.
+
 - **Budget envelopes: spend routing, per-envelope caps, and scarcity visibility
   (#79, previously unlisted).** `withCostCenter(costCenter, fn, opts?)`
   (`budget/attribution.ts`) attributes a governed call's spend to a

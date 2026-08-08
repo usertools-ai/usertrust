@@ -99,8 +99,22 @@ export {
 	estimateCost,
 	estimateInputTokens,
 	getModelRates,
+	PRICING_TABLE_VERSION,
+	resolveAppliedRates,
 	resolveRates,
 } from "./ledger/pricing.js";
+// Usage normalization (spec D2/D5): the one place provider usage becomes the
+// four-tier disjoint snapshot that both cost and record emission derive from.
+export type { NormalizedUsage, RawUsageCandidate, UsageWireShape } from "./ledger/usage.js";
+export {
+	fromAnthropicUsage,
+	fromGeminiUsage,
+	fromOpenAICompletionsUsage,
+	fromOpenAIResponsesUsage,
+	fromProviderResponse,
+	publishableUsage,
+	sanitizeUsage,
+} from "./ledger/usage.js";
 // Pattern memory
 export { getPatternStats, hashPrompt, recordPattern, suggestModel } from "./memory/patterns.js";
 export { detectCanaryLeak, generateCanary, injectCanary } from "./policy/canary.js";
@@ -138,6 +152,7 @@ export { parentUserIdRefusal } from "./shared/ids.js";
 export type {
 	ActionDescriptor,
 	ActionKind,
+	AppliedRates,
 	AuditEvent,
 	BoardDecision,
 	CanaryToken,
@@ -158,6 +173,7 @@ export type {
 	PolicyRule,
 	PolicySeverity,
 	RateSource,
+	ReceiptUsage,
 	SkillManifest,
 	SkillPermission,
 	SkillVerification,

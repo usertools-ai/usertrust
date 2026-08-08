@@ -5,7 +5,7 @@ import {
 	extractUsageFromEvent,
 	extractUsageFromProviderChunk,
 } from "../src/token-extractor.js";
-import type { ErrorEvent, StreamEvent } from "../src/types.js";
+import type { ErrorEvent, StreamEvent, Usage } from "../src/types.js";
 import {
 	doneEvent,
 	errorEvent,
@@ -119,6 +119,33 @@ describe("extractUsageFromEvent edge cases", () => {
 		expect(usage?.cacheReadTokens).toBe(30);
 		expect(usage?.cacheWriteTokens).toBe(10);
 	});
+
+	/**
+	 * Older-runtime degradation (spec D2 "Version contract"): a pi-ai below the
+	 * >=0.12.0 peer floor may hand back a two-field `Usage` — `input`/`output`
+	 * only, no `cacheRead`/`cacheWrite` keys at all (not `0`-valued, ABSENT).
+	 * `normalizeHostUsage`'s `readNum(...) != null` guard is what keeps that
+	 * distinguishable from a provider that legitimately reports zero cache use:
+	 * the cache fields must be OMITTED here, never coerced to `0`, because
+	 * downstream (D1) omitted ≠ zero — those tokens ride inside `inputTokens`
+	 * and price at `inputPer1k` (conservative), whereas a `0` would claim
+	 * "provider confirmed no cache activity."
+	 */
+	it("omits cache fields entirely for a pre-cache (two-field) host Usage shape", () => {
+		const legacyUsage = {
+			input: 40,
+			output: 20,
+			totalTokens: 60,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		} as unknown as Usage;
+
+		const usage = extractUsageFromEvent(doneEvent(legacyUsage));
+
+		expect(usage?.inputTokens).toBe(40);
+		expect(usage?.outputTokens).toBe(20);
+		expect(usage).not.toHaveProperty("cacheReadTokens");
+		expect(usage).not.toHaveProperty("cacheWriteTokens");
+	});
 });
 
 describe("createAccumulator", () => {
@@ -163,6 +190,32 @@ describe("createAccumulator", () => {
 		expect(result.inputTokens).toBe(100);
 		expect(result.outputTokens).toBe(50);
 		expect(result.usageReported).toBe(true);
+		// Regression pin on the severed boundary (spec D4 row 1): createAccumulator
+		// used to drop cache tiers on the floor here, not just at settle.
+		expect(result.cacheReadTokens).toBe(30);
+		expect(result.cacheWriteTokens).toBe(10);
+	});
+
+	it("carries cache token fields through an error-terminated stream too", () => {
+		const acc = createAccumulator();
+
+		acc.update(startEvent());
+		acc.update(errorEvent(makeUsage(60, 25, 15, 5)));
+
+		const result = acc.result();
+		expect(result.cacheReadTokens).toBe(15);
+		expect(result.cacheWriteTokens).toBe(5);
+	});
+
+	it("omits cache fields from result() when the host never reported them", () => {
+		const acc = createAccumulator();
+
+		acc.update(startEvent());
+		acc.update(textDelta("hi"));
+
+		const result = acc.result();
+		expect(result).not.toHaveProperty("cacheReadTokens");
+		expect(result).not.toHaveProperty("cacheWriteTokens");
 	});
 
 	it("returns zero usage for empty accumulator (no events)", () => {
