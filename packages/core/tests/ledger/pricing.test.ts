@@ -736,20 +736,24 @@ describe("warnCacheRateMigration (D8 migration warning)", () => {
 		expect(stderrSpy).not.toHaveBeenCalled();
 	});
 
-	it("warns once naming the model and the conservative consequence, then stays silent", () => {
-		// claude-haiku-4-5 publishes both cache tiers in PRICING_TABLE; this custom
-		// entry omits both, which is exactly the pre-D1 shape an operator's config
-		// would already have.
-		warnCacheRateMigration({ "claude-haiku-4-5": { inputPer1k: 11, outputPer1k: 55 } });
+	it("warns once naming every affected model and the conservative consequence, then stays silent", () => {
+		// Both claude-haiku-4-5 and claude-opus-4-6 publish both cache tiers in
+		// PRICING_TABLE; this pre-D1-shaped config omits them on both — one call
+		// with two affected models exercises the plural wording too.
+		warnCacheRateMigration({
+			"claude-haiku-4-5": { inputPer1k: 11, outputPer1k: 55 },
+			"claude-opus-4-6": { inputPer1k: 55, outputPer1k: 275 },
+		});
 
 		expect(stderrSpy).toHaveBeenCalledTimes(1);
 		const [msg] = stderrSpy.mock.calls[0] as [string];
 		expect(msg).toContain("claude-haiku-4-5");
+		expect(msg).toContain("claude-opus-4-6");
 		expect(msg).toContain("cache reads will price at full input rate");
 
 		// Once per PROCESS, not once per call: a second call — even with a
 		// different affected model — must not fire again.
-		warnCacheRateMigration({ "claude-opus-4-6": { inputPer1k: 55, outputPer1k: 275 } });
+		warnCacheRateMigration({ "claude-sonnet-4-6": { inputPer1k: 30, outputPer1k: 150 } });
 		expect(stderrSpy).toHaveBeenCalledTimes(1);
 	});
 });
