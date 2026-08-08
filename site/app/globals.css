@@ -612,21 +612,16 @@ html {
 /* ── THE GOVERNANCE DIE (Exhibit B set-piece, Addendum C4) ──────────────────
    Emerald circuit pulses: layered SVG strokes animated by stroke-dashoffset —
    glow comes from stacked strokes and low-opacity rects, never from filter
-   or backdrop-filter. Fires ONCE (no `infinite`) per the sitewide motion
-   doctrine — set-pieces fire once per pageview, and nothing loops except
-   muted desktop-only ambient video paused offscreen; see the docket's
-   `hairline-draw` (also `both`, no `infinite`) for the same idiom. The
-   dasharray period is 14 + 220 = 234 and the keyframe shifts exactly -234
-   over that single cycle, so the frozen end frame (fill-mode: both) lands
-   back on the exact registration the trace started from — a seamless
-   settle, not a jump, on every path length. Paused by default; the client
-   wrapper (exhibit-b-die.tsx) flips data-active="true" the first time the
-   figure is in view via IntersectionObserver, which starts that one pass.
-   Later scroll-out/scroll-in toggles play-state on an already-finished
-   animation, which is inert — browsers do not replay a completed animation
-   by resuming it, so the pulse never re-fires. Reduced motion: animation
-   removed, traces render as a static glow (solid strokes at reduced
-   opacity). */
+   or backdrop-filter. Loops infinitely (`infinite` fill-mode) as ambient art
+   while in view — an exception to the motion doctrine (Addendum C4). The IO
+   gate (IntersectionObserver in exhibit-b-die.tsx) pauses the animation when
+   offscreen via data-active attribute. The dasharray period is 14 + 220 = 234
+   and the keyframe shifts exactly -234 over one cycle. Paused by default
+   (animation-play-state: paused); when in view (data-active="true"), the IO
+   gate sets animation-play-state to running, and the infinite loop cycles
+   continuously. When scrolled offscreen (data-active="false"), play-state
+   returns to paused. Reduced motion: animation removed, traces render as a
+   static glow (solid strokes at reduced opacity). */
 @keyframes die-pulse {
 	to {
 		stroke-dashoffset: -234;
@@ -708,8 +703,8 @@ html {
 .die-delay-c {
 	animation-delay: -1500ms;
 }
-/* IO gate: the wrapper flips data-active on first intersection, which
-   starts the single pass described above — no repeated re-firing. */
+/* IO gate: the wrapper toggles data-active based on IntersectionObserver;
+   when true, animation-play-state runs the infinite loop; when false, paused. */
 .die-figure[data-active="true"] .die-trace-pulse,
 .die-figure[data-active="true"] .die-trace-pulse-bright {
 	animation-play-state: running;
