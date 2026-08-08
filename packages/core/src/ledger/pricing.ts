@@ -14,34 +14,83 @@ import type { CostBasis, EndpointClass, RateSource, TrustConfig } from "../share
 export interface ModelRates {
 	inputPer1k: number;
 	outputPer1k: number;
+	/**
+	 * Rate for cached-prompt READ tokens (cache hits).
+	 *
+	 * OPTIONAL, and absence is meaningful: an entry omits this field when the
+	 * provider publishes no cache-read rate. Absent does NOT mean free —
+	 * `costFromRates` resolves it to `inputPer1k` (the D1 money invariant).
+	 * Never set this to 0 to mean "unknown"; omit the field instead.
+	 */
+	cacheReadPer1k?: number;
+	/**
+	 * Rate for cache-WRITE tokens (cache creation).
+	 *
+	 * Same absence semantics as `cacheReadPer1k`: omitted means "unpublished",
+	 * and `costFromRates` prices those tokens at `inputPer1k`.
+	 */
+	cacheWritePer1k?: number;
 }
 
 /**
  * Pricing table for the top 20 models supported by the SDK.
  * Key: model identifier as sent by the client.
+ *
+ * All four tiers were re-derived from the providers' published pricing pages on
+ * the PRICING_TABLE_VERSION date below, converted at 1 usertoken = $0.0001
+ * (so $/MTok x 10 = the per-1k usertoken rate).
+ *
+ * A cache field is OMITTED wherever the provider publishes no rate for that
+ * tier. Omission routes those tokens through the D1 fallback in costFromRates
+ * (priced at inputPer1k — conservative overstatement). Never invent a discount
+ * to fill a gap: understatement is the dangerous direction, because budgets then
+ * deplete slower than the invoice and every scarcity number reads falsely high.
  */
 export const PRICING_TABLE: Record<string, ModelRates> = {
 	// ── Anthropic ──
-	"claude-sonnet-4-6": { inputPer1k: 30, outputPer1k: 150 },
-	"claude-haiku-4-5": { inputPer1k: 10, outputPer1k: 50 },
-	"claude-opus-4-6": { inputPer1k: 50, outputPer1k: 250 },
+	// Published multipliers: cache read 0.1x base input, 5-minute cache write
+	// 1.25x. (The 1-hour write is 2x; collapsing per-TTL pricing to the 5m rate
+	// is a documented approximation — operators with 1h-heavy workloads override
+	// via customRates.)
+	"claude-sonnet-4-6": {
+		inputPer1k: 30,
+		outputPer1k: 150,
+		cacheReadPer1k: 3,
+		cacheWritePer1k: 37.5,
+	},
+	"claude-haiku-4-5": { inputPer1k: 10, outputPer1k: 50, cacheReadPer1k: 1, cacheWritePer1k: 12.5 },
+	"claude-opus-4-6": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
 
 	// ── OpenAI ──
-	"gpt-4o": { inputPer1k: 25, outputPer1k: 100 },
-	"gpt-4o-mini": { inputPer1k: 1.5, outputPer1k: 6 },
-	"gpt-5.4": { inputPer1k: 25, outputPer1k: 150 },
-	o3: { inputPer1k: 20, outputPer1k: 80 },
-	"o4-mini": { inputPer1k: 5.5, outputPer1k: 22 },
+	// Cached-input reads are published per model and the discount varies WITHIN
+	// the family: gpt-5.4 reads at 0.1x, o3/o4-mini at 0.25x, the 4o family at
+	// 0.5x. OpenAI publishes no separate cache-WRITE rate — writes bill at the
+	// standard input price — so cacheWritePer1k is omitted and the D1 fallback
+	// reproduces the published behaviour exactly.
+	"gpt-4o": { inputPer1k: 25, outputPer1k: 100, cacheReadPer1k: 12.5 },
+	"gpt-4o-mini": { inputPer1k: 1.5, outputPer1k: 6, cacheReadPer1k: 0.75 },
+	"gpt-5.4": { inputPer1k: 25, outputPer1k: 150, cacheReadPer1k: 2.5 },
+	o3: { inputPer1k: 20, outputPer1k: 80, cacheReadPer1k: 5 },
+	// Base was 5.5/22 before the 2026-08-08 audit — exactly half the published
+	// standard rate. Corrected upward; understatement is the dangerous direction.
+	"o4-mini": { inputPer1k: 11, outputPer1k: 44, cacheReadPer1k: 2.75 },
 
 	// ── Google Gemini ──
-	"gemini-2.5-flash": { inputPer1k: 3, outputPer1k: 25 },
-	"gemini-2.5-pro": { inputPer1k: 12.5, outputPer1k: 100 },
-	"gemini-3.1-pro": { inputPer1k: 20, outputPer1k: 120 },
+	// Context-cache reads are 0.1x base input. Cache CREATION bills as ordinary
+	// input plus an hourly storage charge that this per-token model does not
+	// carry, so cacheWritePer1k is omitted rather than guessed. Rates are the
+	// <=200k-prompt tier; long-context uplifts are a documented approximation.
+	"gemini-2.5-flash": { inputPer1k: 3, outputPer1k: 25, cacheReadPer1k: 0.3 },
+	"gemini-2.5-pro": { inputPer1k: 12.5, outputPer1k: 100, cacheReadPer1k: 1.25 },
+	"gemini-3.1-pro": { inputPer1k: 20, outputPer1k: 120, cacheReadPer1k: 2 },
 
 	// ── Mistral ──
-	"mistral-large": { inputPer1k: 5, outputPer1k: 15 },
+	// Base was 5/15 before the 2026-08-08 audit; published rate is $2/$6 per MTok.
+	// No caching discount published.
+	"mistral-large": { inputPer1k: 20, outputPer1k: 60 },
 
 	// ── DeepSeek ──
+	// No cache pricing resolvable for these alias keys (see task report).
 	"deepseek-chat": { inputPer1k: 2.8, outputPer1k: 4.2 },
 	"deepseek-reasoner": { inputPer1k: 2.8, outputPer1k: 4.2 },
 
@@ -61,16 +110,28 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	"qwen-72b": { inputPer1k: 2.9, outputPer1k: 3.9 },
 
 	// ── Amazon ──
-	"nova-pro": { inputPer1k: 8, outputPer1k: 32 },
+	// Output was 32 before the 2026-08-08 audit; published rate is $4.00 per MTok.
+	"nova-pro": { inputPer1k: 8, outputPer1k: 40 },
 };
 
-/** Date the PRICING_TABLE rates were last verified against provider pricing pages. */
-export const PRICING_TABLE_VERSION = "2026-03-29";
+/**
+ * Date the PRICING_TABLE rates were last verified against provider pricing pages.
+ * Bump on every entry change; recorded on receipts so a metered cost can be
+ * reproduced against the exact table that priced it.
+ */
+export const PRICING_TABLE_VERSION = "2026-08-08";
 
 /** Pre-sorted entries for prefix matching (longest key first). */
 const SORTED_TABLE = Object.entries(PRICING_TABLE).sort((a, b) => b[0].length - a[0].length);
 
-/** Fallback rate for unknown models (sonnet-class pricing). */
+/**
+ * Fallback rate for unknown models (sonnet-class pricing).
+ *
+ * Deliberately two-tier: an unknown model is not known to be Anthropic-shaped,
+ * so attaching a cache discount here would silently under-bill every
+ * unrecognised model. Leaving both cache fields absent routes cache tokens
+ * through the D1 fallback and prices them at inputPer1k instead.
+ */
 export const FALLBACK_RATE: ModelRates = { inputPer1k: 30, outputPer1k: 150 };
 
 /** Maps provider names to their model key prefixes in PRICING_TABLE. */
@@ -145,16 +206,41 @@ export function warnUnknownModel(model: string): void {
 }
 
 /**
- * Compute usertoken cost from explicit rates.
+ * Resolve the effective rate for one cache tier — THE single site where the D1
+ * money invariant is applied. Do not inline this resolution anywhere else: a
+ * second resolution site is how a silent discount gets introduced.
+ *
+ * An absent (or garbage) cache rate resolves to `inputPer1k`. Overstatement is
+ * fail-safe; zero-billing cache tokens is forbidden. A rate the operator set
+ * explicitly to a finite value >= 0 is honoured as written — including 0, which
+ * is a deliberate choice for self-hosted models, not an absence.
+ */
+function effectiveCacheRate(rate: number | undefined, inputPer1k: number): number {
+	return rate !== undefined && Number.isFinite(rate) && rate >= 0 ? rate : inputPer1k;
+}
+
+/**
+ * Compute usertoken cost from explicit rates across all four token tiers.
+ *
  * Applies the same non-finite/negative clamp and >=1 floor as estimateCost —
  * the floor is per-call and load-bearing (zero-amount ledger transfers are
  * invalid; it is what makes a {0,0}-rate local call settle at exactly 1
  * nominal usertoken).
+ *
+ * `cacheReadTokens`/`cacheWriteTokens` default to 0, so existing three-argument
+ * callers are unaffected. The four tiers are expected to be DISJOINT — callers
+ * pass a normalized usage snapshot in which cached tokens have already been
+ * separated out of `inputTokens`, so nothing is double-counted here.
+ *
+ * Cache rates resolve per D1 via effectiveCacheRate: absent means inputPer1k,
+ * never zero.
  */
 export function costFromRates(
 	rates: ModelRates,
 	inputTokens: number,
 	outputTokens: number,
+	cacheReadTokens = 0,
+	cacheWriteTokens = 0,
 ): number {
 	// Defend against non-finite/negative token counts (garbage `max_tokens`, or
 	// provider usage that reports a negative/NaN value): any count that is not a
@@ -162,9 +248,19 @@ export function costFromRates(
 	// state permanently; a negative would collapse a real cost to the floor of 1.
 	const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
 	const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
+	const cacheReadTok =
+		Number.isFinite(cacheReadTokens) && cacheReadTokens > 0 ? cacheReadTokens : 0;
+	const cacheWriteTok =
+		Number.isFinite(cacheWriteTokens) && cacheWriteTokens > 0 ? cacheWriteTokens : 0;
+
 	const inputCost = (inTok / 1000) * rates.inputPer1k;
 	const outputCost = (outTok / 1000) * rates.outputPer1k;
-	return Math.max(1, Math.ceil(inputCost + outputCost));
+	const cacheReadCost =
+		(cacheReadTok / 1000) * effectiveCacheRate(rates.cacheReadPer1k, rates.inputPer1k);
+	const cacheWriteCost =
+		(cacheWriteTok / 1000) * effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k);
+
+	return Math.max(1, Math.ceil(inputCost + outputCost + cacheReadCost + cacheWriteCost));
 }
 
 /**

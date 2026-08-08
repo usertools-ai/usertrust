@@ -8,6 +8,7 @@ import {
 	FALLBACK_RATE,
 	getModelRates,
 	matchModelPattern,
+	PRICING_TABLE,
 	resolveRates,
 } from "../../src/ledger/pricing.js";
 import { type TrustConfig, TrustConfigSchema } from "../../src/shared/types.js";
@@ -147,7 +148,9 @@ describe("resolveRates — local scope", () => {
 describe("resolveRates — cloud scope", () => {
 	it('table hit resolves rateSource "table", unknown false, costBasis "usd-proxy"', () => {
 		const r = resolveRates("claude-sonnet-4-6", "cloud", makeConfig());
-		expect(r.rates).toEqual({ inputPer1k: 30, outputPer1k: 150 });
+		// Identity against the table, not a literal: the rates matrix is audited and
+		// re-pinned in pricing.test.ts, so duplicating values here only creates drift.
+		expect(r.rates).toBe(PRICING_TABLE["claude-sonnet-4-6"]);
 		expect(r.scope).toBe("cloud");
 		expect(r.rateSource).toBe("table");
 		expect(r.costBasis).toBe("usd-proxy");
@@ -156,7 +159,7 @@ describe("resolveRates — cloud scope", () => {
 
 	it('prefix hit resolves rateSource "table"', () => {
 		const r = resolveRates("claude-haiku-4-5-20251001", "cloud", makeConfig());
-		expect(r.rates).toEqual({ inputPer1k: 10, outputPer1k: 50 });
+		expect(r.rates).toBe(PRICING_TABLE["claude-haiku-4-5"]);
 		expect(r.rateSource).toBe("table");
 		expect(r.unknown).toBe(false);
 	});
@@ -178,7 +181,7 @@ describe("resolveRates — cloud scope", () => {
 			customRates: { "claude-sonnet-4-6": { inputPer1k: 1, outputPer1k: 1 } },
 		});
 		const r = resolveRates("claude-sonnet-4-6", "cloud", config);
-		expect(r.rates).toEqual({ inputPer1k: 30, outputPer1k: 150 });
+		expect(r.rates).toBe(PRICING_TABLE["claude-sonnet-4-6"]);
 		expect(r.rateSource).toBe("table");
 	});
 
