@@ -96,7 +96,16 @@ export function toLedgerRows(
 	});
 }
 
-export function statusOf(row: LedgerRow): "settled" | "pending" | "failed" {
+/**
+ * Governance denials. Checked FIRST, because a denial event carries an `error`
+ * string and the generic mapping would otherwise file every refusal alongside
+ * provider failures — a refused call and a broken call are different facts, and
+ * the ledger's own table is where an operator tells them apart.
+ */
+const DENIAL_KINDS = new Set(["policy_denied", "ledger_rejected"]);
+
+export function statusOf(row: LedgerRow): "settled" | "pending" | "failed" | "denied" {
+	if (DENIAL_KINDS.has(row.kind)) return "denied";
 	if (row.kind === "llm_call_failed" || row.error !== undefined) return "failed";
 	if (row.settled === true) return "settled";
 	return "pending";

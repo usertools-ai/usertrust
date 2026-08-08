@@ -99,6 +99,22 @@ are not.
    `receipt.postedCost`. `receipt.cost` stays the true metered cost.
 10. **Or void.** Any failure path routes to `finalizeOnce("void")` → `voidPendingSpend`.
 
+A **denial** exits before step 6 and never reaches steps 7-10. Any of steps 4-5 that
+refuses — a policy rule, PII, injection, an unpriceable model, or the ledger's own
+rejection of the hold — throws out to its flow's **denial boundary**, which appends a
+`policy_denied` or `ledger_rejected` chain event, attaches that event's hash to the error
+as `auditEventHash`, and rethrows. The boundary is a `catch` wrapped **around** the
+try/finally that releases the budget mutex, so the append runs with the lock already
+released; and it ends **lexically before** the provider call in step 6, so a provider that
+throws a same-typed error is never audited as a governor decision. There are **five append
+sites**: the mutex-section boundary in each of the three flows, plus a pre-mutex
+unknown-model site in `interceptCall` and headless `authorize` — actions have no model to
+price, so `governActionImpl` has only the mutex one. Four of the five are `catch (denialErr)`
+blocks; the exception is headless's pre-mutex site, which appends inline before an
+unconditional `throw` because the throw is right there and needs no catch to intercept it.
+Grepping `catch (denialErr)` therefore finds four, not five. Payloads and rationale live in
+`audit/denial-events.ts`.
+
 `destroy()` waits up to 5s for in-flight work, voids all remaining pending transfers, flushes and
 releases the audit writer. **Callers must call it** or the process hangs on the TigerBeetle client.
 A `process.on("beforeExit")` handler calls it too, but that is a net, not a substitute: `beforeExit`
@@ -349,9 +365,10 @@ accounting, matching the numbers its policy gate saw.
 *Every audit record an attributed call emits carries `costCenter`, from that same capture* — not
 from params, and on the failure terminals as well as the settle ones (`llm_call`, `<action.kind>`,
 `llm_call_failed`, `<action.kind>_failed`, `stream_partial_delivery`, `settlement_ambiguous`,
-`settlement_shortfall`, `injection_detected`, `anomaly_detected`). An attributed hold must leave an
-attributed forensic trail whichever way it ends. Unattributed calls spread an empty object, so their
-records stay byte-identical to what they were before envelopes existed.
+`settlement_shortfall`, `injection_detected`, `anomaly_detected`, `policy_denied`,
+`ledger_rejected`). An attributed hold must leave an attributed forensic trail whichever way it
+ends — including the way where it never became a hold at all. Unattributed calls spread an empty
+object, so their records stay byte-identical to what they were before envelopes existed.
 
 *One field, two spellings, deliberately.* The policy context spells it `cost_center` — snake_case,
 beside `estimated_cost`, `budget_remaining` and `action_kind`, because a rule file is what reads it
@@ -470,6 +487,34 @@ must not retry it, and must not surface as a rejection a caller could read as "t
 move." The only escalation is opt-in `config.audit.failClosed` (default `false`), which aborts the
 call *before* money moves.
 *Prevents:* lying to a caller about a spend that happened, in either direction.
+
+**A denial's chain event is appended at a FLOW BOUNDARY, outside the budget mutex, and before
+the guarded call.** Two kinds: `policy_denied` for a decision the governor made, `ledger_rejected`
+for the ledger's atomic refusal of a hold. Three placement rules, each preventing a different
+failure:
+- *Outside the lock.* The boundary `catch` sits around the try/**finally** that releases the budget
+  mutex, never inside it. *Prevents:* holding the money lock across an fsync, so a denial storm
+  stalls unrelated ALLOWED calls behind refusals that never touched a provider.
+- *Ending before the guarded call.* Each catch closes lexically before the provider invocation
+  (`govern.ts`) and before `execute()` (`governAction`). *Prevents:* a provider or an action
+  callback that throws its own `PolicyDeniedError`/`InsufficientBalanceError` being recorded as a
+  decision this governor made — a forged governance record, in the one log an auditor trusts.
+- *Context in a closure local, never on the error.* Rule matches, PII types and budget numbers
+  travel in a per-invocation `DenialRecord` in the flow's own closure. Non-enumerable would not be
+  enough. *Prevents:* prompt-adjacent context reachable from the caught error via a descriptor read
+  or a symbol key — i.e. the no-prompt-on-disk invariant dying at the caller's own log line.
+
+The append-failure contract is deliberately FLAT, `audit.failClosed` included: every mode rethrows
+the ORIGINAL typed denial with `auditDegraded: true` after the writer's DLQ attempt, and the hash is
+attached to the thrown instance with `defineProperty` — never a reconstructed error, which would
+break the same-object identity `envelope-threading.test.ts` pins.
+*Prevents:* `failClosed` replacing an actionable denial with an `AuditDegradedError` that hides
+*why* the call was refused. `failClosed` exists to stop an unaudited SPEND from settling; a denial
+has already refused the call and moved no money, so it has nothing left to fail closed about.
+
+`decision: "deny"` on both kinds is load-bearing — it is what `entropy.ts` counts. That filter
+selects denial kinds by NAME as well as by the `"policy"` substring, because `ledger_rejected` does
+not contain it and would otherwise be the one class `usertrust health` could not see.
 
 **The budget money path degrades under a different contract — keep both.** `appendBudgetEvent` does
 **not** re-throw. It warns and returns `{ audited: false, auditFailed: true, auditFailureReason }`,
@@ -937,6 +982,8 @@ These look like defects and are not. Flagging them wastes review cycles.
 | **The settle-vs-void asymmetry on streams** | Enumerated above. Each branch is a separate, deliberate decision. |
 | **`ledger/engine.ts` appearing unused** | Accurate observation, not a bug to fix silently — see Known drift. |
 | **The pre-existing Biome warnings** | Counted and characterised under *Formatting and linting* above. CI fails on errors only. |
+| **The "redundant" nested `try { try { … } finally { release() } } catch { … }` at each denial boundary** | The nesting IS the design. A `catch` on the same `try` as the `finally` runs BEFORE it — i.e. with the budget mutex still held across the append's fsync. Flattening it reintroduces exactly the stall the boundary exists to avoid. |
+| **`audit.failClosed` not escalating a failed DENIAL append** | Deliberate, and documented in the invariant above. The call is already refused and no money moved; escalating would replace a typed denial with an `AuditDegradedError` and hide the reason. |
 
 Automated review tools do not have this context by default. Treat their findings on the rows above
 as noise unless they identify a *specific* concrete failure.

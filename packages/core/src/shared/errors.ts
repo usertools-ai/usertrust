@@ -1,12 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+/**
+ * The correlation handle a governance denial carries back to the caller.
+ *
+ * A denial now writes a chain event (`policy_denied` / `ledger_rejected`), and
+ * `auditEventHash` is that event's hash — the join between the exception a
+ * caller logged and the record an auditor reads.
+ *
+ * The two fields answer DIFFERENT questions, and both are needed. A missing
+ * `auditEventHash` alone is ambiguous: it is what an error built by hand, or
+ * thrown by a version before this existed, also looks like. `auditDegraded`
+ * separates "the append was attempted and failed" (dead-lettered, no chain
+ * record) from "no append was ever attempted".
+ */
+export interface DenialAuditMetadata {
+	/** Hash of the appended denial event; absent when the append did not land. */
+	auditEventHash?: string | undefined;
+	/** `true` when the append was attempted, failed, and was dead-lettered. */
+	auditDegraded?: boolean | undefined;
+}
+
 export class InsufficientBalanceError extends Error {
 	public readonly userId: string;
 	public readonly required: number;
 	public readonly available: number;
 	public readonly hint: string;
 	public readonly docsUrl: string;
+	/** @see DenialAuditMetadata */
+	public readonly auditEventHash?: string | undefined;
+	/** @see DenialAuditMetadata */
+	public readonly auditDegraded?: boolean | undefined;
 
 	/**
 	 * `hint` is overridable because the default advice is WRONG for a cost-center
@@ -16,8 +40,20 @@ export class InsufficientBalanceError extends Error {
 	 * the envelope remedy (`allocateBudget`) when it re-wraps a rejected attributed
 	 * hold; every other caller omits the argument and gets today's string
 	 * byte-for-byte.
+	 *
+	 * `auditMeta` is argument FIVE, behind `hint`, so every existing three- and
+	 * four-argument construction keeps compiling unchanged. In practice the
+	 * governor does NOT use it: the boundary attaches the handle to the error
+	 * INSTANCE it is about to rethrow, because rebuilding the error there would
+	 * break the same-object identity the envelope threading relies on.
 	 */
-	constructor(userId: string, required: number, available: number, hintOverride?: string) {
+	constructor(
+		userId: string,
+		required: number,
+		available: number,
+		hintOverride?: string,
+		auditMeta?: DenialAuditMetadata,
+	) {
 		const hint =
 			hintOverride ?? "Increase the budget in trust() options or add funds via the ledger.";
 		const docsUrl = "https://usertrust.ai/docs/errors/insufficient-balance";
@@ -30,6 +66,8 @@ export class InsufficientBalanceError extends Error {
 		this.available = available;
 		this.hint = hint;
 		this.docsUrl = docsUrl;
+		this.auditEventHash = auditMeta?.auditEventHash;
+		this.auditDegraded = auditMeta?.auditDegraded;
 	}
 }
 
@@ -37,14 +75,22 @@ export class PolicyDeniedError extends Error {
 	public readonly reason: string;
 	public readonly hint: string;
 	public readonly docsUrl: string;
+	/** @see DenialAuditMetadata */
+	public readonly auditEventHash?: string | undefined;
+	/** @see DenialAuditMetadata */
+	public readonly auditDegraded?: boolean | undefined;
 
 	/**
 	 * `hint` is overridable because the default advice is WRONG for a budget or
 	 * scarcity denial: it names a PII downgrade that has nothing to do with the
 	 * rule that fired. The governor derives a class-aware remedy at the throw
 	 * site; every caller that omits the argument gets the default string.
+	 *
+	 * `auditMeta` is a THIRD argument for the same source-compatibility reason
+	 * as `InsufficientBalanceError`'s fifth; see the note there for why the
+	 * governor attaches the handle to the instance instead of passing it here.
 	 */
-	constructor(reason: string, hintOverride?: string) {
+	constructor(reason: string, hintOverride?: string, auditMeta?: DenialAuditMetadata) {
 		const hint =
 			hintOverride ??
 			'Check your policy rules in .usertrust/policies/default.yml or use { pii: "warn" } to downgrade PII enforcement.';
@@ -54,6 +100,8 @@ export class PolicyDeniedError extends Error {
 		this.reason = reason;
 		this.hint = hint;
 		this.docsUrl = docsUrl;
+		this.auditEventHash = auditMeta?.auditEventHash;
+		this.auditDegraded = auditMeta?.auditDegraded;
 	}
 }
 

@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Chain events for governance denials, and a correlation handle on the error.**
+  A denied call previously wrote NOTHING to the audit chain: invisible to
+  `usertrust verify`, to the ledger UI, to exports, and to the entropy signal
+  behind `usertrust health`, with no handle a caller could quote back. Two new
+  kinds close that gap. `policy_denied` records a decision the GOVERNOR made —
+  `denialClass` is one of `policy`, `budget_gate`, `pii`, `injection`,
+  `unknown_model` — and carries the hard rules that fired (id + name), PII
+  TYPE names, injection PATTERN names, the two budget numbers the gate
+  compared, a `promptHash` that joins to pattern memory, plus model /
+  action / cost-center / endpoint / transferId. `ledger_rejected` records the
+  ledger's own atomic refusal of a hold, where a `transferId` genuinely exists
+  and `usertrust verify --tx` can join on it. Both carry `schemaVersion: 1` and
+  `decision: "deny"`; every field is PII-safe, and the error text is redacted
+  before it is truncated.
+
+  `PolicyDeniedError` and `InsufficientBalanceError` now expose
+  `auditEventHash` — the appended event's hash — and `auditDegraded`, which
+  distinguishes "the append was attempted, failed, and was dead-lettered" from
+  "no append was ever attempted" (an error built by hand, or thrown by an
+  older version). Both errors gained an optional trailing metadata argument
+  (third and **fifth** respectively, behind their existing `hint`), so every
+  existing construction compiles unchanged.
+
+  Appends happen at a FLOW BOUNDARY — a `catch` wrapped around the try/finally
+  that releases the budget mutex, ending lexically before the provider call —
+  so a denial storm never stalls allowed calls behind an fsync, and a provider
+  that throws a same-typed error is never audited as a governor decision. A
+  failed denial-append never changes the error the caller receives, `failClosed`
+  included: the call is already refused and no money moved. The circuit breaker
+  remains deliberately un-wired for denials; a refusal never contacted a
+  provider, and counting it would let a policy storm suppress healthy traffic.
+
+  Downstream: `usertrust health` counts both kinds, `verifyTransaction()`
+  renders **DENIED** instead of a false PENDING receipt, and the visual ledger
+  labels denials as denials rather than as zero-cost failed transactions.
+
+  **Caveat for indirect callers:** `usertrust-server` and the ACS adapter do
+  not yet forward `auditEventHash` on the wire, so an HTTP caller receives the
+  denial without the handle. The event itself is written either way — the
+  server converts the error only after `governor.authorize()` has returned its
+  decision, so an `evaluate_only` (`would_deny`) deployment records the denial
+  too. Richer UI rendering of `denialClass`/rules, export columns, and an
+  `inspect` kind column are also follow-ups.
+
 - **Budget envelopes: spend routing, per-envelope caps, and scarcity visibility
   (#79, previously unlisted).** `withCostCenter(costCenter, fn, opts?)`
   (`budget/attribution.ts`) attributes a governed call's spend to a

@@ -178,7 +178,17 @@ function detectProvider(model: string): string {
 
 // ── Status ──
 
+/**
+ * A governance denial writes a chain event carrying a `transferId`, so
+ * `verifyTransaction` selects it by id like any other event. Without DENIED,
+ * the renderer falls through to the `settled !== true` default and prints
+ * PENDING for a call that was REFUSED and will never settle — a receipt
+ * asserting the opposite of what the chain records.
+ */
+const DENIAL_KINDS = new Set(["policy_denied", "ledger_rejected"]);
+
 function resolveStatus(event: TransactionEvent): string {
+	if (DENIAL_KINDS.has(event.kind)) return "DENIED";
 	if (event.kind === "llm_call_failed") return "FAILED";
 	if (event.data.settled === true) return "SETTLED";
 	return "PENDING";
@@ -201,6 +211,9 @@ export function renderReceipt(data: ReceiptData): string {
 	const provider = detectProvider(model);
 	const cost = event.data.cost;
 	const isFailed = event.kind === "llm_call_failed";
+	// A denial spent nothing, so it renders no spend lines — but its `error` is
+	// the whole point of the receipt and must still be shown.
+	const isDenied = DENIAL_KINDS.has(event.kind);
 	const allVerified = chainVerified && merkleVerified;
 
 	const lines: string[] = [];
@@ -220,14 +233,14 @@ export function renderReceipt(data: ReceiptData): string {
 	lines.push(row(`${dotted("  Model", model, WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Provider", provider, WIDTH - 1)} `));
 
-	if (!isFailed && cost !== undefined) {
+	if (!isFailed && !isDenied && cost !== undefined) {
 		lines.push(row(`${dotted("  Spend", `${cumulativeSpend} UT`, WIDTH - 1)} `));
 		lines.push(row(`${dotted("  Conversion", formatUsd(cumulativeSpend), WIDTH - 1)} `));
 	}
 
 	lines.push(row(`${dotted("  Status", status, WIDTH - 1)} `));
 
-	if (isFailed && event.data.error) {
+	if ((isFailed || isDenied) && event.data.error) {
 		lines.push(blank());
 		const errPrefix = "  Error: ";
 		const indent = " ".repeat(errPrefix.length);

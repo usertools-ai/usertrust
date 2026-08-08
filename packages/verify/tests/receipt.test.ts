@@ -250,6 +250,56 @@ describe("renderReceipt — pending status", () => {
 	});
 });
 
+describe("renderReceipt — denied status", () => {
+	// A denial event carries a transferId, so `verifyTransaction` selects it by
+	// id like any other event. Without a DENIED status the renderer falls
+	// through to the `settled !== true` default and prints a PENDING receipt for
+	// a call that was REFUSED and will never settle — the receipt asserting the
+	// opposite of what the chain records.
+	it("shows DENIED for a policy_denied event and names the class", () => {
+		const output = renderReceipt(
+			makeReceiptData({
+				event: makeEvent({
+					kind: "policy_denied",
+					data: {
+						schemaVersion: 1,
+						decision: "deny",
+						denialClass: "pii",
+						model: "claude-haiku-4-5-20251001",
+						transferId: "tx_denied_001",
+						error: "Policy denied: PII detected: ssn",
+					},
+				}),
+			}),
+		);
+		expect(output).toContain("DENIED");
+		expect(output).not.toContain("PENDING");
+		expect(output).toContain("tx_denied_001");
+		expect(output).toContain("PII detected");
+	});
+
+	it("shows DENIED for a ledger_rejected event", () => {
+		const output = renderReceipt(
+			makeReceiptData({
+				event: makeEvent({
+					kind: "ledger_rejected",
+					data: {
+						schemaVersion: 1,
+						decision: "deny",
+						model: "claude-haiku-4-5-20251001",
+						transferId: "tx_denied_002",
+						estimatedCost: 900,
+						error: "Insufficient balance for user trust:hold: need 900, have 1",
+					},
+				}),
+			}),
+		);
+		expect(output).toContain("DENIED");
+		expect(output).not.toContain("PENDING");
+		expect(output).not.toContain("SETTLED");
+	});
+});
+
 describe("renderNotFound", () => {
 	it("renders not-found with tx ID and proper structure", () => {
 		const txId = "tx_missing_999";

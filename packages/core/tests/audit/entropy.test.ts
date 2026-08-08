@@ -26,6 +26,22 @@ describe("Entropy — individual signals", () => {
 		expect(signal.value).toBeCloseTo(2 / 3);
 	});
 
+	it("extractPolicyViolations counts BOTH denial kinds", () => {
+		// `ledger_rejected` does not contain "policy", so a kind-substring filter
+		// alone makes an atomic ledger refusal invisible to `usertrust health` —
+		// the worst-diagnosed denial class going unmeasured.
+		const events: EntropyEventInput[] = [
+			{ kind: "policy_denied", data: { decision: "deny", denialClass: "pii" } },
+			{ kind: "ledger_rejected", data: { decision: "deny" } },
+			{ kind: "llm_call", data: { settled: true } },
+		];
+
+		const signal = extractPolicyViolations(events);
+		expect(signal.hits).toBe(2);
+		expect(signal.total).toBe(2);
+		expect(signal.value).toBe(1);
+	});
+
 	it("extractPolicyViolations returns 0 for no policy events", () => {
 		const events: EntropyEventInput[] = [{ kind: "system.start", data: {} }];
 		const signal = extractPolicyViolations(events);
