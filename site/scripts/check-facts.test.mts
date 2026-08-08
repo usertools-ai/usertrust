@@ -188,6 +188,46 @@ test("a standalone bare opening heading tag line passes (Biome's multi-attribute
 	}
 });
 
+test("a video source's literal mp4 container/extension passes, but an unrelated bare digit does not", () => {
+	const dir = mkdtempSync(join(tmpdir(), "check-facts-mp4-"));
+	try {
+		writeFileSync(
+			join(dir, "hero-intro.tsx"),
+			[
+				"export default function HeroIntro() {",
+				"\treturn (",
+				"\t\t<video>",
+				'\t\t\t<source src="/intro/intro-autoplay.mp4" type="video/mp4" />',
+				"\t\t</video>",
+				"\t);",
+				"}",
+				"",
+			].join("\n"),
+		);
+		const r = runChecker(dir);
+		assert.equal(r.status, 0, `expected the mp4 source line to pass, got:\n${r.stderr}`);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	const rogueDir = mkdtempSync(join(tmpdir(), "check-facts-mp4-rogue-"));
+	try {
+		writeFileSync(
+			join(rogueDir, "docket.tsx"),
+			"export default function Docket() {\n\treturn <p>4 transfer codes</p>;\n}\n",
+		);
+		const r = runChecker(rogueDir);
+		assert.notEqual(
+			r.status,
+			0,
+			`the mp4 exemption must not sanction an unrelated bare "4", got:\n${r.stderr}`,
+		);
+		assert.match(r.stderr, /docket\.tsx:2/);
+	} finally {
+		rmSync(rogueDir, { recursive: true, force: true });
+	}
+});
+
 test("a rogue digit in heading TEXT still fails even with the closing-tag exemption in place", () => {
 	const dir = mkdtempSync(join(tmpdir(), "check-facts-heading-text-"));
 	try {
