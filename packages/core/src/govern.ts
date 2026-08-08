@@ -929,6 +929,22 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				estimatedInputTokens,
 				maxOutputTokens,
 			);
+			// FIX (review finding, D3 scope): `estimatedCost` above is the
+			// write-premium-INFLATED HOLD — correct for sizing the PENDING
+			// reservation (spendPending/proxy.spend/inFlightHoldTotal) and for the
+			// policy gate (`estimated_cost`/`budget_remaining_after`, whose
+			// documented over-denial trade in D3 depends on the gate seeing the
+			// SAME fattened number the ledger actually reserves). It must NEVER
+			// become the settled/audited/receipted cost of a call that reports no
+			// provider usage — that would price zero cache-write tokens at the
+			// cache-write rate. `meteredEstimateCost` is the un-inflated metering
+			// estimate (plain `inputPer1k`, unmodified rates) and is the ONLY
+			// value the settle-time "no usage reported" fallback may use.
+			const meteredEstimateCost = costFromRates(
+				rateResolution.rates,
+				estimatedInputTokens,
+				maxOutputTokens,
+			);
 
 			// AUD-453: Acquire mutex to serialise budget-check + PENDING hold.
 			// This prevents concurrent calls from both passing the budget check and
@@ -1267,7 +1283,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						usageSnapshot.cacheWriteTokens,
 					);
 				} else {
-					streamCost = estimatedCost;
+					// FIX: the un-inflated metering estimate, never the fattened hold
+					// (see the `meteredEstimateCost` comment at the hold-sizing site).
+					streamCost = meteredEstimateCost;
 				}
 
 				// Release in-flight hold and commit budget under mutex.
@@ -1914,7 +1932,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								? "openai-responses"
 								: "openai-completions";
 				const usageSnapshot = fromProviderResponse(response, usageShape);
-				let actualCost = estimatedCost;
+				// FIX: the un-inflated metering estimate, never the fattened hold
+				// (see the `meteredEstimateCost` comment at the hold-sizing site).
+				let actualCost = meteredEstimateCost;
 				const usageSource: "provider" | "estimated" = usageSnapshot.source;
 				if (usageSnapshot.source === "provider") {
 					actualCost = costFromRates(

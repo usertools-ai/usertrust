@@ -32,6 +32,15 @@
  *     rather than silently under-debiting when the actual STILL outruns the
  *     (now fatter) hold.
  *
+ * Review fix (round 1): the write-premium-inflated HOLD must never leak into
+ * the CHARGED/audited/receipted cost of a call that settles WITHOUT
+ * provider-reported usage. `costFromRates(rates, estInput, maxOutput)` — the
+ * plain, un-inflated metering estimate — is the fixture used throughout to
+ * assert the un-leaked value, at all three fallback sites:
+ *  5. headless `settle()` with no token params (govern.ts's twin fallback).
+ *  6. govern.ts non-stream: an Anthropic response with no usable `usage`.
+ *  7. govern.ts stream: an Anthropic stream that reports no usage chunks.
+ *
  * SECURITY: never log or snapshot a whole PolicyContext/receipt payload —
  * assert on individual fields, as the sibling suites do.
  */
@@ -157,6 +166,20 @@ function makeAnthropicMock(usage: Record<string, unknown>) {
 
 function shortfallEvents(audit: { events: AppendEventInput[] }): AppendEventInput[] {
 	return audit.events.filter((e) => e.kind === "settlement_shortfall");
+}
+
+/** An Anthropic STREAMING mock — yields chunks then ends (govern.ts stream terminal). */
+function makeStreamingAnthropicMock(chunks: unknown[]) {
+	return {
+		messages: {
+			create: vi.fn(async () => {
+				async function* gen() {
+					for (const c of chunks) yield c;
+				}
+				return gen();
+			}),
+		},
+	};
 }
 
 // ── Pure export: effectiveCacheWriteRate ──
@@ -423,6 +446,155 @@ describe("govern trust() hold sizing (spec D3)", () => {
 			posted: reservedAmount,
 			shortfall: actualCost - reservedAmount,
 		});
+
+		await governed.destroy();
+	});
+});
+
+// ── Review fix (round 1): the inflated HOLD must never leak into the
+// CHARGED cost of a call that settles without provider-reported usage ──
+
+describe("estimated-settle never charges the write-premium-inflated hold (review fix)", () => {
+	let tmpVault: string;
+
+	beforeEach(() => {
+		tmpVault = makeTmpVault("hold-sizing-leak");
+	});
+
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+	});
+
+	it("headless settle() with no token params charges the un-inflated estimate, not the fattened hold", async () => {
+		const governor = await createGovernor({ budget: 1_000_000, vaultBase: tmpVault, dryRun: true });
+		const rates = getModelRates("claude-sonnet-4-6");
+
+		const auth = await governor.authorize({
+			model: "claude-sonnet-4-6",
+			estimatedInputTokens: 10_000,
+			maxOutputTokens: 1,
+		});
+
+		// The hold IS the write-premium-inflated number (D3, unaffected by this fix).
+		const holdRate = Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates));
+		const expectedHold = costFromRates({ ...rates, inputPer1k: holdRate }, 10_000, 1);
+		expect(auth.estimatedCost).toBe(expectedHold);
+
+		// settle() with NO token params — the "no usage reported" fallback.
+		const receipt = await governor.settle(auth, {});
+
+		const uninflatedEstimate = costFromRates(rates, 10_000, 1);
+		expect(receipt.usageSource).toBe("estimated");
+		// The bug: pre-fix this equalled `expectedHold` (a ~25% overcharge).
+		expect(receipt.cost).toBe(uninflatedEstimate);
+		expect(receipt.cost).toBeLessThan(expectedHold);
+
+		await governor.destroy();
+	});
+
+	it("govern.ts non-stream settle with no usable provider usage charges the un-inflated estimate", async () => {
+		const engine = makeCappingEngine();
+		// No `usage` field at all → sanitizeUsage sees input/output as null →
+		// source stays "estimated" and the non-stream fallback at govern.ts
+		// (the `actualCost = ...` initializer) is exercised directly.
+		const mockClient = {
+			messages: {
+				create: vi.fn(async () => ({
+					id: "msg_1",
+					type: "message",
+					role: "assistant",
+					content: [{ type: "text", text: "ok" }],
+					model: "claude-sonnet-4-6",
+				})),
+			},
+		};
+
+		const messages = [{ role: "user", content: "x".repeat(2000) }];
+		const estInput = estimateInputTokens(messages);
+		const maxOutputTokens = 1;
+		const rates = getModelRates("claude-sonnet-4-6");
+		const holdRate = Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates));
+		const expectedHold = costFromRates(
+			{ ...rates, inputPer1k: holdRate },
+			estInput,
+			maxOutputTokens,
+		);
+		const uninflatedEstimate = costFromRates(rates, estInput, maxOutputTokens);
+		expect(uninflatedEstimate).toBeLessThan(expectedHold);
+
+		const governed = await trust(mockClient, {
+			budget: 1_000_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+		});
+
+		const { receipt } = (await governed.messages.create({
+			model: "claude-sonnet-4-6",
+			max_tokens: maxOutputTokens,
+			messages,
+		})) as { receipt: TrustReceipt };
+
+		expect(receipt.usageSource).toBe("estimated");
+		// The bug: pre-fix this equalled `expectedHold` (the reserved amount).
+		expect(receipt.cost).toBe(uninflatedEstimate);
+		const reservedAmount = engine.spendPending.mock.calls[0]?.[0]?.amount as number;
+		expect(reservedAmount).toBe(expectedHold);
+		expect(receipt.cost).toBeLessThan(reservedAmount);
+
+		await governed.destroy();
+	});
+
+	it("govern.ts stream settle with no usage chunks charges the un-inflated estimate", async () => {
+		const engine = makeCappingEngine();
+		// Content deltas only — no message_start/message_delta usage — the
+		// stream terminal's `usageSnapshot.source !== "provider"` fallback.
+		const chunks = [
+			{ type: "content_block_delta", delta: { text: "Hello" } },
+			{ type: "content_block_delta", delta: { text: " world" } },
+		];
+		const mockClient = makeStreamingAnthropicMock(chunks);
+
+		const messages = [{ role: "user", content: "x".repeat(2000) }];
+		const estInput = estimateInputTokens(messages);
+		const maxOutputTokens = 1;
+		const rates = getModelRates("claude-sonnet-4-6");
+		const holdRate = Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates));
+		const expectedHold = costFromRates(
+			{ ...rates, inputPer1k: holdRate },
+			estInput,
+			maxOutputTokens,
+		);
+		const uninflatedEstimate = costFromRates(rates, estInput, maxOutputTokens);
+		expect(uninflatedEstimate).toBeLessThan(expectedHold);
+
+		const governed = await trust(mockClient, {
+			dryRun: false,
+			budget: 1_000_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+		});
+
+		const result = await governed.messages.create({
+			model: "claude-sonnet-4-6",
+			max_tokens: maxOutputTokens,
+			messages,
+		});
+
+		for await (const _ of result.response as AsyncIterable<unknown>) {
+			// consume
+		}
+		const finalReceipt = await (result.response as { receipt: Promise<TrustReceipt> }).receipt;
+
+		expect(finalReceipt.usageSource).toBe("estimated");
+		// The bug: pre-fix this equalled `expectedHold` (the reserved amount).
+		expect(finalReceipt.cost).toBe(uninflatedEstimate);
+		const reservedAmount = engine.spendPending.mock.calls[0]?.[0]?.amount as number;
+		expect(reservedAmount).toBe(expectedHold);
+		expect(finalReceipt.cost).toBeLessThan(reservedAmount);
 
 		await governed.destroy();
 	});

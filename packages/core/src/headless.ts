@@ -210,6 +210,16 @@ interface AuthorizationCapture {
 	 * budget.
 	 */
 	readonly sessionAccounted: boolean;
+	/**
+	 * The UN-INFLATED metering estimate (plain `inputPer1k`, unmodified rates),
+	 * captured at authorize time — never the write-premium-fattened hold
+	 * (`Authorization.estimatedCost`). `settle()`'s "no usage reported"
+	 * fallback reads THIS, so a call that never reports cache-write tokens is
+	 * never charged, audited, or receipted at the cache-write rate. Internal
+	 * only, deliberately off the public `Authorization` handle — see the
+	 * `meteredEstimate` comment at the authorize-time computation.
+	 */
+	readonly meteredEstimate: number;
 }
 
 /** Parameters for authorizing an LLM call. */
@@ -829,6 +839,20 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				estInputTokens,
 				maxOutputTokens,
 			);
+			// FIX (review finding, D3 scope): `estCost` above is the
+			// write-premium-INFLATED HOLD — correct for the PENDING reservation
+			// (spendPending/proxy.spend/inFlightHoldTotal) and for the policy gate
+			// (`estimated_cost`/`budget_remaining_after`, whose documented
+			// over-denial trade in D3 depends on the gate seeing the SAME
+			// fattened number the ledger actually reserves) and for the public
+			// `Authorization.estimatedCost` field it is reported on. It must NEVER
+			// become the settled/audited/receipted cost of a call whose settle()
+			// reports no token usage — that would price zero cache-write tokens at
+			// the cache-write rate. `meteredEstimate` is the un-inflated metering
+			// estimate (plain `inputPer1k`, unmodified rates), carried on the
+			// internal capture (never the public handle) and is the ONLY value
+			// settle()'s "no usage reported" fallback may use.
+			const meteredEstimate = costFromRates(rateInfo.rates, estInputTokens, maxOutputTokens);
 
 			// Acquire mutex for budget atomicity (AUD-453). The attributed-envelope
 			// preflight read is taken INSIDE this lock (top of the try below) so a
@@ -1043,6 +1067,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					costCenter: captured?.attribution.costCenter,
 					envelope: captured,
 					sessionAccounted: !envelopeDebited,
+					meteredEstimate,
 				}),
 			);
 			return auth;
@@ -1093,7 +1118,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				);
 				usageSource = params.usageSource ?? "provider";
 			} else {
-				actualCost = auth.estimatedCost;
+				// FIX: the un-inflated metering estimate, never the fattened hold
+				// carried on `auth.estimatedCost` (see the `meteredEstimate`
+				// comment on `AuthorizationCapture`).
+				actualCost = capture.meteredEstimate;
 				usageSource = "estimated";
 			}
 

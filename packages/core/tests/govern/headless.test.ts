@@ -7,6 +7,7 @@ import type { AuditWriter } from "../../src/audit/chain.js";
 import type { TrustEngine } from "../../src/govern.js";
 import type { Governor } from "../../src/headless.js";
 import { createGovernor } from "../../src/headless.js";
+import { costFromRates, getModelRates } from "../../src/ledger/pricing.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 
 // Mock tigerbeetle-node (native module, never loaded in tests)
@@ -178,7 +179,15 @@ describe("headless governor", () => {
 		// Settle without providing actual usage
 		const receipt = await gov.settle(auth);
 
-		expect(receipt.cost).toBe(auth.estimatedCost);
+		// Review fix (round 1, spec D3): `auth.estimatedCost` is the
+		// write-premium-INFLATED hold (claude-sonnet-4-6 has a cache-write
+		// premium), which is deliberately fatter than plain
+		// `inputPer1k`-priced usage. The settle-time "no usage reported"
+		// fallback must charge the UN-INFLATED metering estimate, never the
+		// hold, so `receipt.cost` is strictly LESS than `auth.estimatedCost`
+		// here, not equal to it.
+		expect(receipt.cost).toBeLessThan(auth.estimatedCost);
+		expect(receipt.cost).toBe(costFromRates(getModelRates("claude-sonnet-4-6"), 100, 500));
 		expect(receipt.usageSource).toBe("estimated");
 
 		await gov.destroy();
