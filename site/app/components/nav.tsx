@@ -128,7 +128,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 					 */}
 					<a
 						href="#docket"
-						className="focus-ring inline-flex min-h-[44px] items-center font-mono text-[11px] text-white/35 hover:text-white/70 focus-visible:text-ut transition-colors duration-200"
+						className="focus-ring inline-flex min-h-[44px] items-center font-mono text-xs text-white/70 hover:text-white focus-visible:text-ut transition-colors duration-200"
 					>
 						skip to the facts ↓
 					</a>
@@ -171,7 +171,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 
 					{/* Mono counters — omitted entirely on fetch failure, never rendered as 0. */}
 					{(stars !== null || downloads !== null) && (
-						<div className="hidden lg:flex items-center gap-4 font-mono text-xs text-white/45">
+						<div className="hidden lg:flex items-center gap-4 font-mono text-xs text-white/70">
 							{stars !== null && (
 								<a
 									href="https://github.com/usertools-ai/usertrust"
