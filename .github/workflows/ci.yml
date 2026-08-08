@@ -123,6 +123,22 @@ jobs:
         # package-lock.json, the pin has silently become a dependency again and
         # this job must say so instead of passing.
         run: git diff --exit-code -- package.json package-lock.json 'packages/*/package.json'
+      - name: Build packages/core declarations
+        # `usertrust` is a workspace symlink to packages/core, whose package.json
+        # points `types` at dist/index.d.ts — a file that does not exist on a fresh
+        # runner (dist/ is gitignored). The contract project imports `usertrust`
+        # through src/types.ts and src/index.ts, and `tsc -p` — unlike `tsc -b` —
+        # does NOT build referenced projects, so without this step the next step
+        # fails with `TS2307: Cannot find module 'usertrust'`. That is exactly how
+        # this job failed on its first real run (#82, job 93028801034).
+        #
+        # `tsc -b packages/core` is the same idiom the `typecheck` job gets for free
+        # (`npm run typecheck` = `tsc -b && …`, where the leading `tsc -b` is what
+        # makes tsconfig.type-tests.json resolve `usertrust` at all), scoped to the
+        # one project the contract needs. The `test` job needs no equivalent:
+        # vitest.config.ts aliases `usertrust` to packages/core/src, which is why
+        # the vitest step below is unaffected.
+        run: npx tsc -b packages/core
       - name: Type-level contract vs. the pinned host
         # tsconfig.contract-openclaw.json, not tsconfig.type-tests.json: `tsc` has
         # no way to skip a file whose import cannot resolve, so the openclaw
