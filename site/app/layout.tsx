@@ -106,6 +106,16 @@ const jsonLd = {
 		"keep the receipts. One line wraps your LLM client — every governed call becomes a ledger transaction with a receipt anyone can verify: budget holds, a tamper-evident audit chain, and an independent verifier with zero runtime dependencies.",
 };
 
+// Vercel sets VERCEL=1 at build time and at runtime for both Functions and
+// static hosting, on every environment it actually serves (production AND
+// preview) — never on a local `next dev`/`next start`. Gating on it means
+// the analytics script tag is only emitted where its endpoint
+// (`/_vercel/insights/script.js`) actually resolves: the real Vercel edge
+// injects that route, `next start` on localhost does not, so requesting it
+// there 404s and surfaces as a console network error. Real deploys are
+// unaffected; this only silences a localhost-only artifact.
+const isVercelRuntime = process.env.VERCEL === "1";
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
 	return (
 		<html
@@ -120,7 +130,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 					// biome-ignore lint/security/noDangerouslySetInnerHtml: JSON-LD structured data requires this pattern
 					dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
 				/>
-				<Analytics />
+				{isVercelRuntime && <Analytics />}
 			</body>
 		</html>
 	);
