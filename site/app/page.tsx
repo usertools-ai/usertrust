@@ -11,6 +11,7 @@ import { Nav } from "./components/nav";
 import Docket from "./components/sections/docket";
 import ExhibitA from "./components/sections/exhibit-a";
 import ExhibitB from "./components/sections/exhibit-b";
+import ExhibitC from "./components/sections/exhibit-c";
 import Hero from "./components/sections/hero";
 import { SocialProof } from "./components/social-proof";
 
@@ -23,6 +24,7 @@ export default function Home() {
 			<Docket />
 			<ExhibitA />
 			<ExhibitB />
+			<ExhibitC />
 			<SocialProof />
 			<CodeExample />
 			<BeforeAfter />
