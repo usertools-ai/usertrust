@@ -42,6 +42,7 @@ import { classifyEndpoint, detectClientKind } from "./detect.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
 	costFromRates,
+	costFromRatesUnfloored,
 	effectiveCacheWriteRate,
 	estimateInputTokens,
 	PRICING_TABLE_VERSION,
@@ -790,20 +791,25 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// Settlement floors per call; the anomaly signal measures flow — so a
 	// default {0,0}-rate local stream contributes 0 and can never false-trip
 	// spend_velocity (rejected-merge design note, pinned by Task 3 tests).
+	// Spec D7: both branches now price all FOUR tiers (event.cumulativeCache*,
+	// default 0) via the single unfloored resolution site, `costFromRatesUnfloored`
+	// — a cache-read flood is visible at its true rate instead of vanishing
+	// behind near-zero fresh input/output.
 	const anomalyDetector = createAnomalyDetector(config.anomaly, {
 		provider: kind,
 		costCalculator: (calcModel, inputTokens, outputTokens, event) => {
 			const scope = event?.endpointClass ?? "cloud";
 			const resolution = resolveRates(event?.model ?? calcModel, scope, config);
-			if (scope === "local") {
-				const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
-				const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
-				return (
-					(inTok / 1000) * resolution.rates.inputPer1k +
-					(outTok / 1000) * resolution.rates.outputPer1k
-				);
-			}
-			return costFromRates(resolution.rates, inputTokens, outputTokens) / USERTOKENS_PER_DOLLAR;
+			const cacheReadTokens = event?.cumulativeCacheReadTokens ?? 0;
+			const cacheWriteTokens = event?.cumulativeCacheWriteTokens ?? 0;
+			const usertokens = costFromRatesUnfloored(
+				resolution.rates,
+				inputTokens,
+				outputTokens,
+				cacheReadTokens,
+				cacheWriteTokens,
+			);
+			return scope === "local" ? usertokens : usertokens / USERTOKENS_PER_DOLLAR;
 		},
 	});
 
@@ -1683,14 +1689,24 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						accOutput = tokens.outputTokens;
 						accUsageReported = true;
 					}
-					if (tokens.cacheReadTokens > accCacheRead) accCacheRead = tokens.cacheReadTokens;
-					if (tokens.cacheWriteTokens > accCacheWrite) accCacheWrite = tokens.cacheWriteTokens;
+					// D7: cache-tier deltas count toward deltaTokens too — a cache-heavy
+					// chunk with near-zero fresh input/output must not read as idle.
+					if (tokens.cacheReadTokens > accCacheRead) {
+						deltaTokens += tokens.cacheReadTokens - accCacheRead;
+						accCacheRead = tokens.cacheReadTokens;
+					}
+					if (tokens.cacheWriteTokens > accCacheWrite) {
+						deltaTokens += tokens.cacheWriteTokens - accCacheWrite;
+						accCacheWrite = tokens.cacheWriteTokens;
+					}
 					if (!config.anomaly.enabled) return;
 					anomalyDetector.observe({
 						kind: "chunk",
 						deltaTokens,
 						cumulativeInputTokens: accInput,
 						cumulativeOutputTokens: accOutput,
+						cumulativeCacheReadTokens: accCacheRead,
+						cumulativeCacheWriteTokens: accCacheWrite,
 						// M2: stamp the per-call scope so the SHARED detector prices this
 						// event with the same scoped rates as settlement.
 						model,
@@ -1898,6 +1914,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								deltaTokens: obs.deltaTokens,
 								cumulativeInputTokens: obs.cumulativeInputTokens,
 								cumulativeOutputTokens: obs.cumulativeOutputTokens,
+								cumulativeCacheReadTokens: obs.cumulativeCacheReadTokens,
+								cumulativeCacheWriteTokens: obs.cumulativeCacheWriteTokens,
 								// M2: stamp the per-call scope so the SHARED detector prices
 								// this event with the same scoped rates as settlement.
 								model,

@@ -129,6 +129,27 @@ describe("CompositeEvaluator", () => {
 		expect(evaluator.budgetsEnvelope().token_count).toBe(15);
 	});
 
+	it("token_count sums all four tiers, not just input+output (D4 row 7 — the undercount)", async () => {
+		const { governor } = createMockGovernor({ budget: 1000 });
+		const evaluator = new CompositeEvaluator({ policy: () => ({ decision: "allow" }), governor });
+		const result = await evaluator.evaluate(ACTION);
+		await evaluator.settle(result, {
+			inputTokens: 10,
+			outputTokens: 5,
+			cacheReadTokens: 900_000,
+			cacheWriteTokens: 1_200,
+		});
+		const budgets = evaluator.budgetsEnvelope();
+		// Pre-fix this was 15 (input+output only) — the cache-read flood vanished.
+		expect(budgets.token_count).toBe(10 + 5 + 900_000 + 1_200);
+		expect(evaluator.tokenCounts()).toEqual({
+			inputTokenCount: 10,
+			outputTokenCount: 5,
+			cacheReadTokenCount: 900_000,
+			cacheWriteTokenCount: 1_200,
+		});
+	});
+
 	it("guards abort-after-settle, settle-after-abort, and double-abort", async () => {
 		const { governor } = createMockGovernor({ budget: 1000 });
 		const evaluator = new CompositeEvaluator({ policy: () => ({ decision: "allow" }), governor });

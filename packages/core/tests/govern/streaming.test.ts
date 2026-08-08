@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LLMClientKind } from "../../src/shared/types.js";
-import { type StreamCompletion, type StreamUsage, wrapStream } from "../../src/streaming.js";
+import {
+	type ChunkObservation,
+	type StreamCompletion,
+	type StreamUsage,
+	wrapStream,
+} from "../../src/streaming.js";
 
 // ── Helpers ──
 
@@ -667,6 +672,76 @@ describe("wrapStream", () => {
 			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
 			expect(completion.usageReported).toBe(false);
 			expect(completion.usage.cacheReadTokens).toBe(9_000);
+		});
+	});
+
+	describe("onChunk observation carries the four tiers (spec D7)", () => {
+		it("anthropic: cumulative cache tiers reach the onChunk hook, and deltaTokens counts them", async () => {
+			const chunks = [
+				{
+					type: "message_start",
+					message: {
+						usage: {
+							input_tokens: 100,
+							cache_read_input_tokens: 9_000,
+							cache_creation_input_tokens: 1_000,
+						},
+					},
+				},
+				{ type: "message_delta", usage: { output_tokens: 200 } },
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const observations: ChunkObservation[] = [];
+			const wrapped = wrapStream(mockStream(chunks), "anthropic", onComplete, onError, (obs) => {
+				observations.push(obs);
+			});
+			await collectAll(wrapped);
+
+			expect(observations).toHaveLength(2);
+			expect(observations[0]).toMatchObject({
+				cumulativeInputTokens: 100,
+				cumulativeOutputTokens: 0,
+				cumulativeCacheReadTokens: 9_000,
+				cumulativeCacheWriteTokens: 1_000,
+			});
+			// deltaTokens on the first chunk counts the cache tiers too — a
+			// cache-heavy chunk with near-zero fresh input must not read as idle.
+			expect(observations[0]?.deltaTokens).toBe(100 + 9_000 + 1_000);
+			expect(observations[1]).toMatchObject({
+				cumulativeInputTokens: 100,
+				cumulativeOutputTokens: 200,
+				cumulativeCacheReadTokens: 9_000,
+				cumulativeCacheWriteTokens: 1_000,
+			});
+			expect(observations[1]?.deltaTokens).toBe(200);
+		});
+
+		it("openai: the replace-with-latest cache snapshot reaches onChunk too", async () => {
+			const chunks = [
+				{
+					choices: [],
+					usage: {
+						prompt_tokens: 5_000,
+						completion_tokens: 100,
+						prompt_tokens_details: { cached_tokens: 4_000 },
+					},
+				},
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const observations: ChunkObservation[] = [];
+			const wrapped = wrapStream(mockStream(chunks), "openai", onComplete, onError, (obs) => {
+				observations.push(obs);
+			});
+			await collectAll(wrapped);
+
+			expect(observations[0]).toMatchObject({
+				cumulativeInputTokens: 1_000,
+				cumulativeOutputTokens: 100,
+				cumulativeCacheReadTokens: 4_000,
+				cumulativeCacheWriteTokens: 0,
+			});
 		});
 	});
 });

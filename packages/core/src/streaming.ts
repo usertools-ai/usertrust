@@ -237,12 +237,18 @@ function extractUsageSnapshot(
  *
  * `delta` reflects the change in tokens compared to the previous chunk
  * (cumulative reporting is normalised to a delta here).
+ *
+ * Spec D7: `deltaTokens` and the cumulative counters carry all FOUR tiers —
+ * once `inputTokens` means fresh-only, a cache-heavy chunk with near-zero
+ * fresh input/output must still register as real traffic, not idle.
  */
 export interface ChunkObservation {
 	chunk: unknown;
 	deltaTokens: number;
 	cumulativeInputTokens: number;
 	cumulativeOutputTokens: number;
+	cumulativeCacheReadTokens: number;
+	cumulativeCacheWriteTokens: number;
 }
 
 export type ChunkHook = (obs: ChunkObservation) => void;
@@ -293,6 +299,8 @@ async function* wrapStreamImpl<T>(
 		for await (const chunk of stream) {
 			let deltaInput = 0;
 			let deltaOutput = 0;
+			let deltaCacheRead = 0;
+			let deltaCacheWrite = 0;
 			if (kind === "openai" || kind === "google") {
 				// M2 REPLACE-WITH-LATEST (design decision 5.2 / plan Task 2): each
 				// usage-bearing chunk is an absolute snapshot, assigned wholesale.
@@ -307,6 +315,10 @@ async function* wrapStreamImpl<T>(
 					outputTokens = latest.outputTokens;
 					// The cache tiers are part of the same absolute snapshot: replace,
 					// never sum, or vLLM-style running totals multiply-count them too.
+					// D7: still measure the DELTA (not just replace) so the anomaly
+					// signal sees the cache traffic that arrived on this chunk.
+					deltaCacheRead = Math.max(0, latest.cacheReadTokens - cacheReadTokens);
+					deltaCacheWrite = Math.max(0, latest.cacheWriteTokens - cacheWriteTokens);
 					cacheReadTokens = latest.cacheReadTokens;
 					cacheWriteTokens = latest.cacheWriteTokens;
 					// D5: only a payload that actually reported a usable input AND output
@@ -330,19 +342,27 @@ async function* wrapStreamImpl<T>(
 				}
 				// Cache tokens alone do NOT make usage "reported" (D5: provenance needs
 				// input AND output) — but they are real billed tokens, so they still
-				// accumulate for the partial/void audit and for the cost when the
-				// headline counters do arrive.
-				if (tokens.cacheReadTokens > cacheReadTokens) cacheReadTokens = tokens.cacheReadTokens;
-				if (tokens.cacheWriteTokens > cacheWriteTokens) cacheWriteTokens = tokens.cacheWriteTokens;
+				// accumulate for the partial/void audit, for the cost when the headline
+				// counters do arrive, and (D7) for the anomaly signal's delta.
+				if (tokens.cacheReadTokens > cacheReadTokens) {
+					deltaCacheRead = tokens.cacheReadTokens - cacheReadTokens;
+					cacheReadTokens = tokens.cacheReadTokens;
+				}
+				if (tokens.cacheWriteTokens > cacheWriteTokens) {
+					deltaCacheWrite = tokens.cacheWriteTokens - cacheWriteTokens;
+					cacheWriteTokens = tokens.cacheWriteTokens;
+				}
 			}
 
 			// Run hook BEFORE yielding so a throw aborts before the consumer sees it.
 			if (onChunk != null) {
 				onChunk({
 					chunk,
-					deltaTokens: deltaInput + deltaOutput,
+					deltaTokens: deltaInput + deltaOutput + deltaCacheRead + deltaCacheWrite,
 					cumulativeInputTokens: inputTokens,
 					cumulativeOutputTokens: outputTokens,
+					cumulativeCacheReadTokens: cacheReadTokens,
+					cumulativeCacheWriteTokens: cacheWriteTokens,
 				});
 			}
 

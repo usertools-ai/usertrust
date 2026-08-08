@@ -272,6 +272,40 @@ export function resolveAppliedRates(rates: ModelRates): AppliedRates {
 }
 
 /**
+ * Raw (unfloored) four-tier cost — the ONE place D1's cache-rate resolution
+ * (`effectiveCacheRate`) is applied to token counts. Both `costFromRates` and
+ * `costFromRatesUnfloored` route through here so the two never drift and
+ * there is exactly one rate-resolution site (D1).
+ *
+ * Defends against non-finite/negative token counts (garbage `max_tokens`, or
+ * provider usage that reports a negative/NaN value): any count that is not a
+ * finite number >= 0 is treated as 0.
+ */
+function tieredCostRaw(
+	rates: ModelRates,
+	inputTokens: number,
+	outputTokens: number,
+	cacheReadTokens: number,
+	cacheWriteTokens: number,
+): number {
+	const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
+	const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
+	const cacheReadTok =
+		Number.isFinite(cacheReadTokens) && cacheReadTokens > 0 ? cacheReadTokens : 0;
+	const cacheWriteTok =
+		Number.isFinite(cacheWriteTokens) && cacheWriteTokens > 0 ? cacheWriteTokens : 0;
+
+	const inputCost = (inTok / 1000) * rates.inputPer1k;
+	const outputCost = (outTok / 1000) * rates.outputPer1k;
+	const cacheReadCost =
+		(cacheReadTok / 1000) * effectiveCacheRate(rates.cacheReadPer1k, rates.inputPer1k);
+	const cacheWriteCost =
+		(cacheWriteTok / 1000) * effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k);
+
+	return inputCost + outputCost + cacheReadCost + cacheWriteCost;
+}
+
+/**
  * Compute usertoken cost from explicit rates across all four token tiers.
  *
  * Applies the same non-finite/negative clamp and >=1 floor as estimateCost —
@@ -294,25 +328,32 @@ export function costFromRates(
 	cacheReadTokens = 0,
 	cacheWriteTokens = 0,
 ): number {
-	// Defend against non-finite/negative token counts (garbage `max_tokens`, or
-	// provider usage that reports a negative/NaN value): any count that is not a
-	// finite number >= 0 is treated as 0. A NaN would otherwise poison budget
-	// state permanently; a negative would collapse a real cost to the floor of 1.
-	const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
-	const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
-	const cacheReadTok =
-		Number.isFinite(cacheReadTokens) && cacheReadTokens > 0 ? cacheReadTokens : 0;
-	const cacheWriteTok =
-		Number.isFinite(cacheWriteTokens) && cacheWriteTokens > 0 ? cacheWriteTokens : 0;
+	return Math.max(
+		1,
+		Math.ceil(tieredCostRaw(rates, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens)),
+	);
+}
 
-	const inputCost = (inTok / 1000) * rates.inputPer1k;
-	const outputCost = (outTok / 1000) * rates.outputPer1k;
-	const cacheReadCost =
-		(cacheReadTok / 1000) * effectiveCacheRate(rates.cacheReadPer1k, rates.inputPer1k);
-	const cacheWriteCost =
-		(cacheWriteTok / 1000) * effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k);
-
-	return Math.max(1, Math.ceil(inputCost + outputCost + cacheReadCost + cacheWriteCost));
+/**
+ * The same four-tier D1 resolution as `costFromRates`, WITHOUT the per-call
+ * >=1 floor (spec D7). Settlement floors per call — that is correct there,
+ * a real ledger transfer cannot be zero-amount. The streaming anomaly
+ * detector's spend-velocity signal instead measures a continuous FLOW: it
+ * evaluates this same tiered cost repeatedly against growing cumulative
+ * counts to derive a $/min rate, and a per-call floor would clamp every
+ * early (genuinely near-zero) sample up to the same 1-usertoken plateau —
+ * exactly how a cache-read flood with near-zero fresh input/output computed
+ * ~zero velocity pre-fix. Never use this for anything that debits the
+ * ledger; it exists only for flow measurement.
+ */
+export function costFromRatesUnfloored(
+	rates: ModelRates,
+	inputTokens: number,
+	outputTokens: number,
+	cacheReadTokens = 0,
+	cacheWriteTokens = 0,
+): number {
+	return tieredCostRaw(rates, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
 }
 
 /**
