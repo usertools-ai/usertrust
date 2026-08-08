@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
+import { createRequire } from "node:module";
 import type { Authorization } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
 import { resolveTenant } from "./config.js";
@@ -19,7 +20,10 @@ import {
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const SERVER_NAME = "usertrust-server";
-const SERVER_VERSION = "1.3.0";
+/** Reported by /healthz — read from this package's own manifest so the
+ * version can never drift from the published package again (Addendum D5). */
+const SERVER_VERSION = (createRequire(import.meta.url)("../package.json") as { version: string })
+	.version;
 const SWEEP_INTERVAL_MS = 30_000;
 /** Max concurrent SSE streams a single tenant may hold open at once. */
 const MAX_SSE_PER_TENANT = 8;
