@@ -473,6 +473,64 @@ describe("Merkle — inclusion proof read discipline (hostile objects)", () => {
 
 		expect(verifyInclusionProof(forged, root, 4)).toBe(false);
 	});
+
+	it("returns false for a proof that is not an object at all", () => {
+		const root = rootOf(4);
+		for (const bad of [null, undefined, 42, "proof", true, Symbol("p")]) {
+			expect(() => verifyInclusionProof(malformed(bad), root, 4)).not.toThrow();
+			expect(verifyInclusionProof(malformed(bad), root, 4)).toBe(false);
+		}
+	});
+
+	it("returns false when any field accessor throws", () => {
+		const { root, proof } = fourLeaf();
+		for (const field of ["treeSize", "root", "leafIndex", "leafHash", "siblings"]) {
+			const hostile = { ...proof };
+			Object.defineProperty(hostile, field, {
+				get(): never {
+					throw new Error(`hostile ${field}`);
+				},
+			});
+			expect(() => verifyInclusionProof(malformed(hostile), root, 4)).not.toThrow();
+			expect(verifyInclusionProof(malformed(hostile), root, 4)).toBe(false);
+		}
+	});
+
+	it("returns false when a sibling's index or accessor throws", () => {
+		const { root, proof } = fourLeaf();
+
+		const throwingIndex: unknown[] = [proof.siblings[0], proof.siblings[1]];
+		Object.defineProperty(throwingIndex, "1", {
+			get(): never {
+				throw new Error("hostile index");
+			},
+			configurable: true,
+		});
+		const byIndex = malformed({ ...proof, siblings: throwingIndex });
+		expect(() => verifyInclusionProof(byIndex, root, 4)).not.toThrow();
+		expect(verifyInclusionProof(byIndex, root, 4)).toBe(false);
+
+		for (const field of ["hash", "position"]) {
+			const sibling = { ...(proof.siblings[1] as MerkleSibling) };
+			Object.defineProperty(sibling, field, {
+				get(): never {
+					throw new Error(`hostile ${field}`);
+				},
+			});
+			const forged = malformed({ ...proof, siblings: [proof.siblings[0], sibling] });
+			expect(() => verifyInclusionProof(forged, root, 4)).not.toThrow();
+			expect(verifyInclusionProof(forged, root, 4)).toBe(false);
+		}
+	});
+
+	it("returns false for a revoked proxy", () => {
+		const { root, proof } = fourLeaf();
+		const { proxy, revoke } = Proxy.revocable({ ...proof }, {});
+		revoke();
+
+		expect(() => verifyInclusionProof(malformed(proxy), root, 4)).not.toThrow();
+		expect(verifyInclusionProof(malformed(proxy), root, 4)).toBe(false);
+	});
 });
 
 describe("Merkle — inclusion proof round-trip and position uniqueness", () => {

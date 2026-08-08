@@ -487,6 +487,17 @@ it; a genuine leaf-0 proof verified at a forged `leafIndex` of 2 through that ga
 Not reachable through JSON-parsed input or any shipped caller — a parsed proof carries plain data
 properties — but `verifyInclusionProof` is an **exported** function whose contract says "untrusted
 input", so it must hold against objects a caller built by hand.
+
+*The `proof` argument itself is inside that contract.* It is guarded for object-ness (`null`,
+`undefined` and primitives return false), and **both** groups of extraction reads — the five
+top-level fields, and the per-level sibling index/`hash`/`position` reads — sit inside a
+`try`/`catch` that returns false. The catch spans only the reads; the hashing is deliberately left
+outside every catch, so a genuine crypto fault can never be swallowed into a silent verdict.
+*Prevents:* `verifyInclusionProof(null, …)`, a throwing accessor, or a revoked `Proxy` throwing out
+of a function this same section documents as never throwing — the contract contradicting itself.
+This is not a hypothetical tidy-up: the first two rounds of this work shipped the "never throws"
+wording while a bare `null` still threw on `proof.treeSize`, and wrapping only the top-level reads
+still let a hand-built array's throwing index getter escape.
 *Prevents:* a forged `leafIndex` riding an otherwise-valid fold, which is what lets a tampered
 receipt claim a different event's position in an anchored tree; padded, truncated or reordered
 sibling paths; and — the case no amount of hashing can catch — the **equal-hash flip**, where two

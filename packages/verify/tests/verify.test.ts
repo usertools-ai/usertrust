@@ -764,6 +764,71 @@ describe("verifyInclusionProof — path topology", () => {
 		expect(verifyInclusionProof(forged, root, 4)).toBe(false);
 	});
 
+	it("returns false for a proof that is not an object at all", () => {
+		const root = rootOf(buildMerkleTree(makeLeaves(4)));
+		for (const bad of [null, undefined, 42, "proof", true, Symbol("p")]) {
+			expect(() => verifyInclusionProof(malformed(bad), root, 4)).not.toThrow();
+			expect(verifyInclusionProof(malformed(bad), root, 4)).toBe(false);
+		}
+	});
+
+	it("returns false when any field accessor throws", () => {
+		const leaves = makeLeaves(4);
+		const root = rootOf(buildMerkleTree(leaves));
+		const proof = generateInclusionProof(0, leaves, "seg-throwing");
+
+		for (const field of ["treeSize", "root", "leafIndex", "leafHash", "siblings"]) {
+			const hostile = { ...proof };
+			Object.defineProperty(hostile, field, {
+				get(): never {
+					throw new Error(`hostile ${field}`);
+				},
+			});
+			expect(() => verifyInclusionProof(malformed(hostile), root, 4)).not.toThrow();
+			expect(verifyInclusionProof(malformed(hostile), root, 4)).toBe(false);
+		}
+	});
+
+	it("returns false when a sibling's index or accessor throws", () => {
+		const leaves = makeLeaves(4);
+		const root = rootOf(buildMerkleTree(leaves));
+		const proof = generateInclusionProof(0, leaves, "seg-throwing-sib");
+
+		const throwingIndex: unknown[] = [at(proof.siblings, 0), at(proof.siblings, 1)];
+		Object.defineProperty(throwingIndex, "1", {
+			get(): never {
+				throw new Error("hostile index");
+			},
+			configurable: true,
+		});
+		const byIndex = malformed({ ...proof, siblings: throwingIndex });
+		expect(() => verifyInclusionProof(byIndex, root, 4)).not.toThrow();
+		expect(verifyInclusionProof(byIndex, root, 4)).toBe(false);
+
+		for (const field of ["hash", "position"]) {
+			const sibling = { ...at(proof.siblings, 1) };
+			Object.defineProperty(sibling, field, {
+				get(): never {
+					throw new Error(`hostile ${field}`);
+				},
+			});
+			const forged = malformed({ ...proof, siblings: [at(proof.siblings, 0), sibling] });
+			expect(() => verifyInclusionProof(forged, root, 4)).not.toThrow();
+			expect(verifyInclusionProof(forged, root, 4)).toBe(false);
+		}
+	});
+
+	it("returns false for a revoked proxy", () => {
+		const leaves = makeLeaves(4);
+		const root = rootOf(buildMerkleTree(leaves));
+		const proof = generateInclusionProof(0, leaves, "seg-revoked");
+		const { proxy, revoke } = Proxy.revocable({ ...proof }, {});
+		revoke();
+
+		expect(() => verifyInclusionProof(malformed(proxy), root, 4)).not.toThrow();
+		expect(verifyInclusionProof(malformed(proxy), root, 4)).toBe(false);
+	});
+
 	it("round-trips every leaf of trees sized 1..33, including promotion shapes", () => {
 		for (let size = 1; size <= 33; size++) {
 			const leaves = makeLeaves(size);

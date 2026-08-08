@@ -332,4 +332,60 @@ describe("HARDEN: core vs verify pkg agree on inclusion-proof topology", () => {
 			expect(core).toBe(false);
 		}
 	});
+
+	it("13. neither throws on a non-object, throwing-accessor or revoked proof", () => {
+		const leaves = merkleLeaves(4);
+		const root = coreBuildMerkleTree(leaves).root as string;
+		const source = coreGenerateInclusionProof(0, leaves, "seg-hostile-proof");
+		const as = (v: unknown): MerkleInclusionProof => v as MerkleInclusionProof;
+
+		const makers: (() => MerkleInclusionProof)[] = [
+			() => as(null),
+			() => as(undefined),
+			() => as(42),
+			() => as("proof"),
+		];
+
+		for (const field of ["treeSize", "root", "leafIndex", "leafHash", "siblings"]) {
+			makers.push(() => {
+				const hostile = { ...source };
+				Object.defineProperty(hostile, field, {
+					get(): never {
+						throw new Error(`hostile ${field}`);
+					},
+				});
+				return as(hostile);
+			});
+		}
+
+		makers.push(() => {
+			const throwingIndex: unknown[] = [source.siblings[0], source.siblings[1]];
+			Object.defineProperty(throwingIndex, "1", {
+				get(): never {
+					throw new Error("hostile index");
+				},
+				configurable: true,
+			});
+			return as({ ...source, siblings: throwingIndex });
+		});
+
+		makers.push(() => {
+			const { proxy, revoke } = Proxy.revocable({ ...source }, {});
+			revoke();
+			return as(proxy);
+		});
+
+		for (const make of makers) {
+			let core: boolean | undefined;
+			let pkg: boolean | undefined;
+			expect(() => {
+				core = coreVerifyInclusionProof(make(), root, 4);
+			}).not.toThrow();
+			expect(() => {
+				pkg = pkgVerifyInclusionProof(make(), root, 4);
+			}).not.toThrow();
+			expect(core).toBe(pkg);
+			expect(core).toBe(false);
+		}
+	});
 });
