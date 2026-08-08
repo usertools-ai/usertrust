@@ -13,7 +13,7 @@
  * forces cacheWrite: 0 ... | pass through"; "pi-ai Faux adapter | input
  * overlaps cache-write | subtract (clamp >= 0)". Every row below gets a test.
  *
- * WHY THESE ARE HAND-BUILT FIXTURES, NOT LIVE PI-AI CALLS (five of six rows):
+ * WHY FIVE OF SIX ROWS ARE HAND-BUILT FIXTURES, NOT LIVE PI-AI CALLS:
  * five of pi-ai's providers export ONLY the network-calling `stream*`
  * functions (see `node_modules/@mariozechner/pi-ai/package.json`'s `exports`
  * map: `./anthropic`, `./openai-completions`, `./openai-responses`,
@@ -22,14 +22,23 @@
  * provider, which proves the same arithmetic these fixtures pin, at far
  * higher cost and fragility, for a devDependency this package's own README
  * (`packages/openclaw/README.md:203`) and `openclaw-contract.env` both
- * describe as read TYPE-ONLY — a characterization this file preserves. The
+ * describe (accurately, for those two files) as read TYPE-ONLY. The
  * fixtures below are PORTS of the pinned source (same discipline as
  * `host-fixtures.ts`'s `PinnedEventStream`), each cited to the exact 0.73.1
  * line numbers that produced it, not values pulled from documentation.
  *
- * The exception is Faux, verified differently — see that section.
+ * Faux is the deliberate exception: it needs no network mock (it is
+ * pi-ai's own in-memory mock adapter), so its test below drives TWO REAL
+ * `stream()` calls against the pinned 0.73.1 package at test-run time — a
+ * genuinely live contract, not a fixture. That is a real, if narrow,
+ * departure from this file's "read TYPE-ONLY" framing for `@mariozechner/pi-ai`
+ * as a whole: this one test file now also exercises pi-ai's runtime code
+ * (never its shipped output — `packages/openclaw`'s own runtime never
+ * imports pi-ai). See that section for why the trade was made.
  */
 
+import type { Context, UserMessage } from "@mariozechner/pi-ai";
+import { fauxAssistantMessage, registerFauxProvider, stream } from "@mariozechner/pi-ai";
 import { describe, expect, it } from "vitest";
 import { extractUsageFromEvent } from "../src/token-extractor.js";
 import type { Usage } from "../src/types.js";
@@ -135,37 +144,46 @@ describe("pi-ai adapter contract (0.73.1) — D2 pi-ai rows, pass-through pinned
 	});
 
 	/**
-	 * pi-ai's Faux adapter — the ONE D2 pi-ai row NOT pass-through-safe.
+	 * pi-ai's Faux adapter — the ONE D2 pi-ai row NOT pass-through-safe, and
+	 * the one row this test drives LIVE rather than pinning with a fixture.
 	 *
 	 * Unlike the five rows above, Faux's `withUsageEstimate`
 	 * (`dist/providers/faux.js:116-146`) is reachable from the package's
 	 * PUBLIC entry point at runtime (`registerFauxProvider`, `stream`,
 	 * `fauxAssistantMessage` are all re-exported from `.`, unlike a deep
 	 * import of `dist/providers/faux.js` itself, which throws
-	 * ERR_PACKAGE_PATH_NOT_EXPORTED — there is no `./faux` subpath). The
-	 * numbers below are not read off the source; they are the REAL output of
-	 * running 0.73.1's own code, reproducible with:
+	 * ERR_PACKAGE_PATH_NOT_EXPORTED — there is no `./faux` subpath), and it
+	 * needs no HTTP/SSE mock (it IS the in-memory mock). So rather than
+	 * hand-computing what 0.73.1 would produce, the test below makes two real
+	 * `stream(...).result()` calls against the pinned package and reads the
+	 * resulting `Usage` straight off the wire:
 	 *
-	 *   import { registerFauxProvider, fauxAssistantMessage, stream } from "@mariozechner/pi-ai";
-	 *   const reg = registerFauxProvider({ tokensPerSecond: 0 });
-	 *   const model = reg.getModel();
-	 *   reg.setResponses([fauxAssistantMessage("resp one"), fauxAssistantMessage("resp two")]);
-	 *   // call 1: a 99-char user message ("user:" + 99 chars = 104, a multiple
-	 *   // of 4 — chosen so ceil()'s rounding at the prefix boundary cancels
-	 *   // exactly, see below) → usage.cacheWrite === 26
-	 *   // call 2 (same sessionId, cacheRetention: "long", context = call 1's
-	 *   // messages + call 1's own reply + a new 40-char user message) →
-	 *   // usage === { input: 17, output: 2, cacheRead: 26, cacheWrite: 17, ... }
+	 *   call 1: a 99-char user message ("user:" + 99 chars = 104 chars, a
+	 *   multiple of 4 — see below for why that matters), sessionId set,
+	 *   `cacheRetention: "long"`. Faux has no prior prompt for this
+	 *   sessionId, so per `faux.js:125-136` the WHOLE prompt is billed as a
+	 *   cache write (this is call 1's own instance of the same overlap, not
+	 *   just call 2's).
 	 *
-	 * `input === cacheWrite === 17` is not a coincidence of these numbers: per
-	 * `faux.js:129-131`, `input = max(0, promptTokens - cacheRead)` while
-	 * `cacheWrite = estimateTokens(promptText.slice(cachedChars))` — BOTH
-	 * describe the identical uncached tail of the prompt (`cachedChars` is an
-	 * exact string-prefix match here, since call 2's serialized context
-	 * literally starts with call 1's). `estimateTokens` is `ceil(len/4)`
-	 * (`faux.js:52-54`), so the two computations agree exactly whenever the
-	 * cached prefix's length is a multiple of 4 (chosen here) — that's what
-	 * eliminates flakiness from rounding, not luck.
+	 *   call 2: same sessionId/retention, context = call 1's message + call
+	 *   1's own reply + a new user message. Call 2's serialized prompt
+	 *   therefore starts with an EXACT copy of call 1's serialized prompt
+	 *   (`faux.js:96-108`'s `serializeContext`), so
+	 *   `commonPrefixLength` (`faux.js:109-116`) walks the full 104 characters
+	 *   of call 1's prompt and no further — a genuine cache hit, not a
+	 *   fixture standing in for one.
+	 *
+	 * `input === cacheWrite` on call 2 is not a coincidence of the chosen
+	 * lengths: per `faux.js:129-131`, `input = max(0, promptTokens -
+	 * cacheRead)` while `cacheWrite = estimateTokens(promptText.slice(cachedChars))`
+	 * — BOTH describe the identical uncached tail of the prompt.
+	 * `estimateTokens` is `ceil(len/4)` (`faux.js:52-54`); because call 1's
+	 * prompt length (104) is an exact multiple of 4, `ceil` distributes over
+	 * the sum cleanly and the two computations agree exactly, for ANY length
+	 * of the appended tail — that is what the 99-char (not the 40-char)
+	 * choice buys, and it is why this assertion is a property of the code,
+	 * not a hardcoded pair of magic numbers that could silently drift out of
+	 * sync with a re-run.
 	 *
 	 * This is where the D2 table's Normalization column ("subtract (clamp >=
 	 * 0)") and the dispatch's summary ("the pinned pi-ai 0.73.1 adapters are
@@ -181,19 +199,52 @@ describe("pi-ai adapter contract (0.73.1) — D2 pi-ai rows, pass-through pinned
 	 * it exactly as pi-ai delivered it — a deliberate, flagged judgment call,
 	 * not an oversight.
 	 */
-	it("Faux: real pi-ai 0.73.1 cache-hit output overlaps input/cacheWrite, and openclaw does not correct it", () => {
-		const fauxCacheHitUsage = usage(17, 2, 26, 17);
+	it("Faux: real pi-ai 0.73.1 cache-hit output overlaps input/cacheWrite, and openclaw does not correct it", async () => {
+		const registration = registerFauxProvider({ tokensPerSecond: 0 });
+		const model = registration.getModel();
+		if (!model) {
+			throw new Error("registerFauxProvider produced no default model — pi-ai's Faux API changed");
+		}
+		try {
+			const sessionId = "faux-contract-cache-overlap";
+			const streamOptions = { sessionId, cacheRetention: "long" as const };
 
-		const result = extractUsageFromEvent(doneEvent(fauxCacheHitUsage));
+			const firstUser: UserMessage = {
+				role: "user",
+				content: "u".repeat(99),
+				timestamp: Date.now(),
+			};
+			const firstContext: Context = { messages: [firstUser] };
+			registration.setResponses([fauxAssistantMessage("resp one")]);
+			const firstReply = await stream(model, firstContext, streamOptions).result();
 
-		expect(result).toEqual({
-			inputTokens: 17,
-			outputTokens: 2,
-			cacheReadTokens: 26,
-			cacheWriteTokens: 17,
-		});
-		// The overlap, named: the same underlying prompt tail is billed once as
-		// fresh input and once as a cache write.
-		expect(result?.inputTokens).toBe(result?.cacheWriteTokens);
+			const secondUser: UserMessage = {
+				role: "user",
+				content: "v".repeat(40),
+				timestamp: Date.now(),
+			};
+			const secondContext: Context = { messages: [firstUser, firstReply, secondUser] };
+			registration.setResponses([fauxAssistantMessage("resp two")]);
+			const secondReply = await stream(model, secondContext, streamOptions).result();
+
+			// A real cache hit actually happened on call 2 — not a degenerate
+			// no-op that would make the overlap assertion below vacuous.
+			expect(secondReply.usage.cacheRead).toBeGreaterThan(0);
+
+			const result = extractUsageFromEvent(doneEvent(secondReply.usage));
+
+			// Pass-through: openclaw does not alter what pi-ai computed.
+			expect(result).toEqual({
+				inputTokens: secondReply.usage.input,
+				outputTokens: secondReply.usage.output,
+				cacheReadTokens: secondReply.usage.cacheRead,
+				cacheWriteTokens: secondReply.usage.cacheWrite,
+			});
+			// The overlap, named: the same underlying prompt tail is billed once
+			// as fresh input and once as a cache write.
+			expect(secondReply.usage.input).toBe(secondReply.usage.cacheWrite);
+		} finally {
+			registration.unregister();
+		}
 	});
 });
