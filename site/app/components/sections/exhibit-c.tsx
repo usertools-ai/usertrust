@@ -5,6 +5,7 @@ import factsJson from "@/evidence/facts.json";
 import type { EvidenceFacts } from "@/evidence/types";
 import { raceDefaults } from "@/lib/budget-race";
 import { REPLAY_VIDEO, THROWN_DENIAL } from "@/lib/exhibit-c-data";
+import TerminalFrame from "../terminal-frame";
 import CaseFile from "./case-file";
 import ExhibitCRace from "./exhibit-c-race";
 
@@ -21,19 +22,15 @@ const defaults = raceDefaults(BUDGET);
  */
 function ThrownDenialCard() {
 	return (
-		<div className="border border-danger/40 bg-black/30 font-mono text-xs leading-6">
-			{/* Header keeps its right side clear — the BLOCKED stamp lands there. */}
-			<div className="border-b border-danger/30 px-4 py-2">
-				<span className="uppercase tracking-widest text-danger">uncaught</span>
-			</div>
-			<pre className="overflow-x-auto whitespace-pre-wrap break-words px-4 py-4 text-white/75">
+		<TerminalFrame title="uncaught" tone="error">
+			<pre className="whitespace-pre-wrap break-words text-white/75">
 				<span className="font-bold text-danger">{THROWN_DENIAL.name}</span>
 				{`: ${THROWN_DENIAL.message}`}
 			</pre>
-			<p className="border-t border-dashed border-white/15 px-4 py-2 text-[10px] leading-5 text-white/35">
+			<p className="mt-4 border-t border-dashed border-white/15 pt-2 text-[10px] leading-5 text-white/35">
 				captured on {THROWN_DENIAL.capturedWith} — {THROWN_DENIAL.capturedFrom}
 			</p>
-		</div>
+		</TerminalFrame>
 	);
 }
 

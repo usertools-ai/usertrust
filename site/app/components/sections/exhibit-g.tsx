@@ -1,6 +1,7 @@
 import attackCorpusJson from "@/evidence/attack-corpus.json";
 import CopyChip from "../copy-chip";
 import InView from "../in-view";
+import TerminalFrame from "../terminal-frame";
 import { ROW_STAGGER_MS } from "./lib/exhibit-g-corpus";
 
 /**
@@ -16,18 +17,24 @@ import { ROW_STAGGER_MS } from "./lib/exhibit-g-corpus";
  * ({ attacks: [{ name, verdict }] }) so this file depends on the
  * fixture's shape, not on any type-export naming.
  *
- * The corpus table and reproduction block hardcode the shared TerminalFrame
- * contract verbatim (see the constraints doc's Addendum on code-surface
- * consistency; exhibit-e.tsx and exhibit-f-spool.tsx are the conforming
- * references) ahead of the shared component landing in a follow-up task: container
- * `overflow-hidden rounded-xl border border-white/10 bg-[#0d0d20]`, title
- * bar `flex h-9 items-center border-b border-white/[0.06] px-4 font-mono
- * text-[11px] uppercase tracking-[0.12em] text-white/50`, body `p-4 md:p-5
- * font-mono text-[13px] leading-relaxed overflow-x-auto`. The reproduction
- * block's CopyChip sits as a caption above the frame rather than inside a
- * title-bar row, exactly as exhibit-e.tsx does — its full 44px touch target
+ * The reproduction block is TerminalFrame, no title — the "reproduce it
+ * yourself" caption sits above the frame as its own row, exactly as
+ * exhibit-e.tsx's CopyChip caption does, since its full 44px touch target
  * can't fit a h-9 title-bar row without clipping against the frame's
  * rounded, clipped edge.
+ *
+ * The corpus table keeps the shared TerminalFrame contract's exact classes
+ * inline instead: its title bar is two pieces (filename + row count,
+ * `justify-between`), which is a ReactNode, not the single string
+ * TerminalFrame's `title` prop accepts — so the container/title-bar/body
+ * classes are hand-applied here rather than composed through the component
+ * (documented in the retrofit report; this file's classes are the reference
+ * the shared component (site/app/components/terminal-frame.tsx) was built
+ * to match verbatim: container `overflow-hidden rounded-xl border
+ * border-white/10 bg-terminal`, title bar `flex h-9 items-center border-b
+ * border-white/[0.06] px-4 font-mono text-[11px] uppercase
+ * tracking-[0.12em] text-white/50`, body `p-4 md:p-5 font-mono text-[13px]
+ * leading-relaxed overflow-x-auto`).
  */
 interface AttackRow {
 	name: string;
@@ -63,7 +70,7 @@ export default function ExhibitG() {
 		<section id="exhibit-g" className="safe-x relative mx-auto max-w-6xl py-24 md:py-32">
 			<p className="font-mono text-xs uppercase tracking-[0.3em] text-white/40">exhibit g</p>
 			<h2 className="font-display mt-4 lowercase leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
-				thirty ways to forge a ledger.
+				every way we know to forge a ledger.
 			</h2>
 			<p className="font-display mt-2 lowercase leading-none text-white/50 text-[clamp(1.5rem,3.5vw,2.75rem)]">
 				verified to fail, every one.
@@ -76,7 +83,7 @@ export default function ExhibitG() {
 			</p>
 
 			{/* terminal-styled corpus table — every row links to the real test file */}
-			<div className="mt-10 overflow-hidden rounded-xl border border-white/10 bg-[#0d0d20]">
+			<div className="mt-10 overflow-hidden rounded-xl border border-white/10 bg-terminal">
 				<div className="flex h-9 items-center justify-between gap-4 border-b border-white/[0.06] px-4 font-mono text-[11px] uppercase tracking-[0.12em] text-white/50">
 					<span className="min-w-0 truncate">
 						packages/core/tests/harden/anchoring/anchor-corpus.test.ts
@@ -119,8 +126,8 @@ export default function ExhibitG() {
 					</span>
 					<CopyChip text={REPRO_COMMAND} label="copy reproduction commands" />
 				</div>
-				<div className="overflow-hidden rounded-xl border border-white/10 bg-[#0d0d20]">
-					<pre className="overflow-x-auto p-4 font-mono text-[13px] leading-relaxed md:p-5">
+				<TerminalFrame>
+					<pre>
 						{REPRO_LINES.map((line) => (
 							<div key={line}>
 								<span className="select-none text-white/35">$ </span>
@@ -128,7 +135,7 @@ export default function ExhibitG() {
 							</div>
 						))}
 					</pre>
-				</div>
+				</TerminalFrame>
 			</div>
 			<p className="mt-3 font-mono text-xs text-white/40">don&rsquo;t trust us — recompute us.</p>
 		</section>

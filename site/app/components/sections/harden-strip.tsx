@@ -57,11 +57,15 @@ export default function HardenStrip() {
 					counted at capture · {facts.commit} · v{facts.usertrustVersion}
 				</p>
 
-				{/* the parity rule, verbatim, bordered mono — linked to its source */}
+				{/* the parity rule, verbatim, bordered mono — linked to its source.
+				    Adopts TerminalFrame's contract classes directly: the `cite`
+				    attribute requires a native <blockquote>, which TerminalFrame
+				    (a <div>) can't provide, so the shared chrome is applied inline
+				    rather than through the component. */}
 				<figure className="mt-12 max-w-3xl">
 					<blockquote
 						cite={AGENTS_URL}
-						className="rounded-md border border-white/15 bg-[#0d0d1f] p-6 font-mono text-sm leading-relaxed text-white/80"
+						className="overflow-hidden rounded-xl border border-white/10 bg-terminal p-4 font-mono text-[13px] leading-relaxed text-white/80 md:p-5"
 					>
 						<p>{PARITY_QUOTE_CONTEXT}</p>
 						<p className="mt-4 text-white">{PARITY_QUOTE_RULE}</p>

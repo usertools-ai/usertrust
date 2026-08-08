@@ -7,9 +7,9 @@ const facts = factsJson as unknown as EvidenceFacts;
 /**
  * Exhibit F — the gate runs before the provider is ever called. A denial
  * throws a typed error (PolicyDeniedError) and the blocked call never
- * returns a receipt. Per the 2026-08-07 ruling, denials write NO audit
- * event today — see exhibit-f-spool.tsx's header for why there is no
- * "audit chain" language anywhere in this exhibit.
+ * returns a receipt. Per the ruling on file, denials write NO audit event
+ * today — see exhibit-f-spool.tsx's header for why there is no "audit
+ * chain" language anywhere in this exhibit.
  */
 export default function ExhibitF() {
 	const operators = facts.facts.policyOperators;

@@ -2,6 +2,7 @@ import factsJson from "@/evidence/facts.json";
 import type { EvidenceFacts, VerifyTranscript } from "@/evidence/types";
 import verifyTranscriptJson from "@/evidence/verify-transcript.json";
 import CopyChip from "../copy-chip";
+import TerminalFrame from "../terminal-frame";
 import ExhibitETranscript from "./exhibit-e-transcript";
 
 const facts = factsJson as unknown as EvidenceFacts;
@@ -11,15 +12,16 @@ const transcript = verifyTranscriptJson as unknown as VerifyTranscript;
  * Exhibit E — the giant zero renders from facts.verifierRuntimeDeps.value,
  * never a literal (check-facts enforces this).
  *
- * The terminal frame below hardcodes the shared TerminalFrame contract
- * (see the constraints doc's Addendum on code-surface consistency) verbatim:
- * its container and body classes match what the forthcoming shared component
- * will render, so that retrofit becomes a pure wrapper swap. The contract's
- * optional title bar is skipped here on purpose: its fixed-height row can't
- * host CopyChip's full touch target without clipping it against the frame's
- * rounded, clipped edge, so the "usertrust-verify" label and its copy chip
- * sit as a caption directly above the frame instead — visually adjacent, as
- * the exhibit calls for, without fighting the shared contract's row height.
+ * The terminal below is TerminalFrame, no title: this server component
+ * passes the client transcript island through as children, so the shared
+ * chrome and the typewriter island compose across the server/client
+ * boundary without either side needing to know about the other. The
+ * contract's optional title bar is skipped on purpose: its fixed-height row
+ * can't host CopyChip's full touch target without clipping it against the
+ * frame's rounded, clipped edge, so the "usertrust-verify" label and its
+ * copy chip sit as a caption directly above the frame instead — visually
+ * adjacent, as the exhibit calls for, without fighting the shared
+ * contract's row height.
  */
 export default function ExhibitE() {
 	const deps = facts.facts.verifierRuntimeDeps;
@@ -59,9 +61,9 @@ export default function ExhibitE() {
 						</span>
 						<CopyChip text={transcript.command} label="copy verify command" />
 					</div>
-					<div className="overflow-hidden rounded-xl border border-white/10 bg-[#0d0d20]">
+					<TerminalFrame>
 						<ExhibitETranscript lines={transcript.lines} />
-					</div>
+					</TerminalFrame>
 				</div>
 			</div>
 		</section>

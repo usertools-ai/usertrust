@@ -76,6 +76,7 @@ export default function ExhibitDRibbon({ entries }: { entries: ChainSlice["entri
 	}, [entries]);
 
 	return (
+		// biome-ignore lint: the accessibility rule against aria-hidden on focusable elements does not apply — this decorative canvas is never given a tabindex and receives no interaction; aria-hidden keeps it out of the accessibility tree while the DOM demo above stays the real, always-present interactive path
 		<canvas
 			ref={canvasRef}
 			height={RIBBON_HEIGHT}

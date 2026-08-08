@@ -63,8 +63,10 @@ export default function ExhibitDDom({ entries }: { entries: Entries }) {
 
 	return (
 		<div>
+			{/* biome-ignore lint: the accessibility rule that suggests <fieldset> here does not apply — this is a scrollable landmark, not a form control group; role="group" + aria-label is the correct scrollable-region pattern */}
 			<div
 				className="overflow-x-auto"
+				// biome-ignore lint: the accessibility rule against non-interactive tabindex does not apply — this is the WAI-ARIA scrollable-region-focusable pattern; tabIndex=0 is how keyboard users reach and scroll this horizontally-overflowing chain
 				tabIndex={0}
 				role="group"
 				aria-label="captured audit chain entries — flip a byte in any entry to break the chain"

@@ -56,7 +56,7 @@ function SurfaceColumn({
 	groups: { provider: string; surfaces: string[] }[];
 }) {
 	return (
-		<div className="p-5">
+		<div className="p-4 md:p-5">
 			<p className={`uppercase tracking-widest ${titleClass}`}>{title}</p>
 			{groups.map((g) => (
 				<div key={g.provider} className="mt-4">
@@ -92,27 +92,36 @@ export default function ExhibitB() {
 					{"your keys. your billing. your evidence."}
 				</p>
 
-				{/* GOVERNED SURFACES — the boundary, stated precisely. */}
-				<div className="mt-16 overflow-x-auto rounded-xl border border-white/10">
-					<div className="min-w-[40rem] font-mono text-xs leading-6">
-						<p className="border-b border-white/10 bg-white/[0.03] px-5 py-3 uppercase tracking-widest text-white/70">
-							governed surfaces
-						</p>
-						<div className="grid grid-cols-2">
-							<div className="border-r border-white/10">
-								<SurfaceColumn title="governed" titleClass="text-ut" groups={GOVERNED} />
+				{/* GOVERNED SURFACES — the boundary, stated precisely. A two-column
+				    manifest with its own header/footer bars exceeds TerminalFrame's
+				    {title, children} shape (the header alone would need to be a
+				    ReactNode, not a string), so the contract's exact classes are
+				    kept inline rather than importing the component (documented in
+				    the retrofit report). Outer overflow-hidden clips the rounded
+				    corners; the inner overflow-x-auto scrolls the manifest on
+				    narrow viewports without breaking that clip. */}
+				<div className="mt-16 overflow-hidden rounded-xl border border-white/10 bg-terminal">
+					<div className="overflow-x-auto">
+						<div className="min-w-[40rem] font-mono text-[13px] leading-relaxed">
+							<p className="flex h-9 items-center border-b border-white/[0.06] px-4 text-[11px] uppercase tracking-[0.12em] text-white/50">
+								governed surfaces
+							</p>
+							<div className="grid grid-cols-2">
+								<div className="border-r border-white/[0.06]">
+									<SurfaceColumn title="governed" titleClass="text-ut" groups={GOVERNED} />
+								</div>
+								<SurfaceColumn
+									title="passthrough — not governed"
+									titleClass="text-white opacity-50"
+									groups={PASSTHROUGH}
+								/>
 							</div>
-							<SurfaceColumn
-								title="passthrough — not governed"
-								titleClass="text-white opacity-50"
-								groups={PASSTHROUGH}
-							/>
+							<p className="border-t border-white/[0.06] px-4 py-3 text-white/40">
+								passthrough surfaces bypass governance, audit, and budget enforcement — route spend
+								through the governed entry points. {facts.modelCount.value} models priced across
+								anthropic, openai, and google.
+							</p>
 						</div>
-						<p className="border-t border-white/10 px-5 py-3 text-white/40">
-							passthrough surfaces bypass governance, audit, and budget enforcement — route spend
-							through the governed entry points. {facts.modelCount.value} models priced across
-							anthropic, openai, and google.
-						</p>
 					</div>
 				</div>
 			</div>

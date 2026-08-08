@@ -14,14 +14,17 @@ import {
 type Phase = "static" | "waiting" | "typing" | "done";
 
 /**
- * Terminal body — matches the shared TerminalFrame contract verbatim (mono
- * body copy, the standard frame padding, horizontal scroll on overflow)
- * ahead of the shared component landing. Server HTML is the FINISHED
- * transcript (island contract): reduced-motion and no-JS visitors get the
- * whole thing immediately, final line already emerald. Motion users are
- * re-armed to blank in the effect below and get one typing pass, fired once
- * by IntersectionObserver, before the section scrolls into view. Lines batch
- * per rAF tick, never per character — only the final line types
+ * Terminal body — rendered as TerminalFrame's children (exhibit-e.tsx owns
+ * the frame itself, since it's a server component that can pass this client
+ * island through as children). This root div owns only the one thing the
+ * shared frame can't know about: min-h reserves the tallest state so the
+ * typewriter never shifts layout; the mono body copy, padding, and
+ * horizontal scroll all come from TerminalFrame now. Server HTML is the
+ * FINISHED transcript (island contract): reduced-motion and no-JS visitors
+ * get the whole thing immediately, final line already emerald. Motion users
+ * are re-armed to blank in the effect below and get one typing pass, fired
+ * once by IntersectionObserver, before the section scrolls into view. Lines
+ * batch per rAF tick, never per character — only the final line types
  * char-by-char. The batching math, its timing constants, and the array-index
  * bookkeeping all live in app/lib/exhibit-e-transcript.ts: check-facts scans
  * this file for bare digit literals, so none of that can live here.
@@ -85,10 +88,7 @@ export default function ExhibitETranscript({ lines }: { lines: string[] }) {
 		phase === "static" || phase === "done" || (phase === "typing" && shownLines >= lastIndex);
 
 	return (
-		<div
-			ref={rootRef}
-			className="min-h-[16rem] overflow-x-auto p-4 font-mono text-[13px] leading-relaxed md:p-5"
-		>
+		<div ref={rootRef} className="min-h-[16rem]">
 			{/* Screen readers get the whole transcript immediately; the
 			    typewriter is a purely visual effect. */}
 			<pre className="sr-only">{lines.join("\n")}</pre>

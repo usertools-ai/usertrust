@@ -4,6 +4,7 @@ import receiptLedgerJson from "@/evidence/receipt-ledger.json";
 import type { CapturedReceipt, ChainSlice, EvidenceFacts } from "@/evidence/types";
 import { chainSeqFor, receiptJsonLines, tokenClass } from "../../lib/receipt-json";
 import { usdFromUsertokens } from "../receipt/format";
+import TerminalFrame from "../terminal-frame";
 import ExhibitAAnnotations, { type Annotation } from "./exhibit-a-annotations";
 
 const facts = factsJson as EvidenceFacts;
@@ -38,46 +39,50 @@ export default function ExhibitA() {
 				</h2>
 
 				<div className="mt-14 grid gap-12 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-16">
-					{/* The call — static mono, emerald keyword accents (dark ground). */}
-					<pre
-						data-code-sample
-						className="self-start overflow-x-auto rounded-xl border border-white/10 bg-white/[0.03] p-6 font-mono text-[13px] leading-7 text-white/80"
-					>
-						<code>
-							<span className="text-ut">import</span> {"{ trust }"}{" "}
-							<span className="text-ut">from</span>{" "}
-							<span className="text-white/60">"usertrust"</span>;{"\n\n"}
-							<span className="text-ut">const</span> client = <span className="text-ut">await</span>{" "}
-							trust(
-							<span className="text-ut">new</span> Anthropic());{"\n\n"}
-							<span className="text-ut">const</span> {"{ response, "}
-							<span className="text-ut">receipt</span>
-							{" }"} = <span className="text-ut">await</span> client.messages.create({"{"}
-							{"\n"}
-							{"  model: "}
-							<span className="text-white/60">"{receiptLedger.receipt.model}"</span>,{"\n"}
-							<span data-code-sample>{"  max_tokens: 1024,"}</span>
-							{"\n"}
-							{"  messages: [...],"}
-							{"\n"}
-							{"}"});
-						</code>
-					</pre>
+					{/* The call — static mono, emerald keyword accents. TerminalFrame's
+					    shared chrome, no title; pre/code semantics preserved inside. */}
+					<TerminalFrame className="self-start text-white/80">
+						<pre data-code-sample>
+							<code>
+								<span className="text-ut">import</span> {"{ trust }"}{" "}
+								<span className="text-ut">from</span>{" "}
+								<span className="text-white/60">"usertrust"</span>;{"\n\n"}
+								<span className="text-ut">const</span> client ={" "}
+								<span className="text-ut">await</span> trust(
+								<span className="text-ut">new</span> Anthropic());{"\n\n"}
+								<span className="text-ut">const</span> {"{ response, "}
+								<span className="text-ut">receipt</span>
+								{" }"} = <span className="text-ut">await</span> client.messages.create({"{"}
+								{"\n"}
+								{"  model: "}
+								<span className="text-white/60">"{receiptLedger.receipt.model}"</span>,{"\n"}
+								<span data-code-sample>{"  max_tokens: 1024,"}</span>
+								{"\n"}
+								{"  messages: [...],"}
+								{"\n"}
+								{"}"});
+							</code>
+						</pre>
+					</TerminalFrame>
 
-					{/* The evidence — the SDK's actual return value, annotated. */}
+					{/* The evidence — the SDK's actual return value, annotated. Custom
+					    title bar (traffic-light dots) and provenance footer exceed
+					    TerminalFrame's {title, children} shape, so the contract's exact
+					    classes are kept inline here rather than importing the component
+					    (documented in the retrofit report). */}
 					<ExhibitAAnnotations annotations={ANNOTATIONS}>
-						<div className="receipt-terminal overflow-hidden rounded-xl border border-white/10 bg-[#0d0d22] shadow-[0_14px_40px_rgba(0,0,0,0.5)]">
+						<div className="receipt-terminal overflow-hidden rounded-xl border border-white/10 bg-terminal shadow-[0_14px_40px_rgba(0,0,0,0.5)]">
 							{/* Title bar */}
-							<div className="flex items-center gap-2 border-b border-white/10 px-4 py-2.5">
+							<div className="flex h-9 items-center gap-2 border-b border-white/[0.06] px-4">
 								<span aria-hidden="true" className="h-2 w-2 rounded-full bg-white/15" />
 								<span aria-hidden="true" className="h-2 w-2 rounded-full bg-white/15" />
 								<span aria-hidden="true" className="h-2 w-2 rounded-full bg-white/15" />
-								<span className="ml-2 font-mono text-[11px] tracking-wide text-white/50">
+								<span className="ml-2 font-mono text-[11px] uppercase tracking-[0.12em] text-white/50">
 									receipt · returned from every governed call
 								</span>
 							</div>
 							{/* The receipt JSON — line-keyed spans the island targets. */}
-							<pre className="overflow-x-auto px-5 py-4 font-mono text-[12.5px] leading-6">
+							<pre className="overflow-x-auto p-4 font-mono text-[13px] leading-relaxed md:p-5">
 								<code>
 									{receiptLines.map((line) => (
 										<span key={line.key} data-line={line.key} className="block rounded-sm px-1">

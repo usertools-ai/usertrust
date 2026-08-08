@@ -17,6 +17,9 @@
 	--color-warning: #f59e0b;
 	--color-danger: #ef4444;
 
+	/* Shared code-surface chrome (Addendum E) — TerminalFrame's container fill. */
+	--color-terminal: #0d0d20;
+
 	/* ── Receipts redesign (2026-08) ───────────────────────────────────── */
 	/* Thermal paper — the ONLY light surfaces on the page (15.6:1 ink-on-paper). */
 	--color-paper: #f2efe6;
@@ -752,7 +755,7 @@ html {
 	}
 }
 
-/* Exhibit F — print-spool drop, violator eject, audit-rail arrival.
+/* Exhibit F — print-spool drop, violator eject, thrown-error card arrival.
    Each fires once (IO-once in the island); reduced-motion renders the
    settled end state, so these are simply disabled there. */
 @keyframes chit-drop {

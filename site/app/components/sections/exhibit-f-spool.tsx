@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Stamp from "../stamp";
+import TerminalFrame from "../terminal-frame";
 import {
 	CHITS,
 	chitCardClass,
@@ -35,6 +36,16 @@ function opsInLine(line: PolicyLine): PolicyOp[] {
  * when the violating chit ejects is the real thrown error (RAIL_THROWN /
  * PolicyDeniedError), never a logged event. Never rename this back to imply
  * the denial produced an audit-chain entry.
+ *
+ * The policy editor (left) is TerminalFrame with title="policy.yaml" — a
+ * clean fit for the shared {title, children} shape, imported directly into
+ * this client island since TerminalFrame is plain markup with no
+ * server-only APIs. The compact thrown-error card (right, in the narrow
+ * w-64 print-spool column) stays a small receipt-style chit matching the
+ * chit stack above it, not a full TerminalFrame: its 9–10px type and p-3
+ * padding are scaled to the print-spool illustration, not the page's
+ * code-surface body copy, and forcing the 13px contract onto it would
+ * overpower that narrow column.
  */
 export default function ExhibitFSpool() {
 	// "settled" is both the server HTML and the reduced-motion experience:
@@ -70,11 +81,8 @@ export default function ExhibitFSpool() {
 	return (
 		<div ref={rootRef} className="mt-12 grid gap-8 md:grid-cols-2">
 			{/* left: the policy, as a mono editor frame */}
-			<div className="overflow-hidden rounded-xl border border-white/10 bg-[#0d0d20]">
-				<div className="flex h-9 items-center border-b border-white/[0.06] px-4 font-mono text-[11px] uppercase tracking-[0.12em] text-white/50">
-					policy.yaml
-				</div>
-				<pre className="overflow-x-auto p-4 font-mono text-[13px] leading-relaxed md:p-5">
+			<TerminalFrame title="policy.yaml">
+				<pre>
 					{POLICY_LINES.map((line, i) => {
 						const hot = activeOp !== null && opsInLine(line).includes(activeOp);
 						return (
@@ -103,7 +111,7 @@ export default function ExhibitFSpool() {
 						);
 					})}
 				</pre>
-			</div>
+			</TerminalFrame>
 
 			{/* right: the print spool + the denial's thrown-error card */}
 			<div>

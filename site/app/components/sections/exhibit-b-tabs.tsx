@@ -13,6 +13,7 @@ import {
 	tabButtonClass,
 	trustLineBody,
 } from "../../lib/sdk-tabs";
+import TerminalFrame from "../terminal-frame";
 
 export default function ExhibitBTabs() {
 	const [selected, setSelected] = useState<ProviderId>("anthropic");
@@ -86,44 +87,47 @@ export default function ExhibitBTabs() {
 				tabIndex={0}
 				className="focus-ring mt-4"
 			>
-				{/* min-h reserves the tallest panel — no CLS on tab switch. */}
-				<pre
-					data-code-sample
-					className="min-h-[23rem] overflow-x-auto rounded-xl border border-white/10 bg-white/[0.03] p-6 font-mono text-[13px] leading-7 text-white/80"
-				>
-					<code className="block">
-						<AnimatePresence initial={false} mode="popLayout">
-							{tab.lines.map((line) => (
-								<motion.span
-									key={line.key}
-									layout={!reduced}
-									initial={reduced || !line.changed ? false : { opacity: 0, y: 6 }}
-									animate={{ opacity: 1, y: 0 }}
-									exit={
-										reduced || !line.changed
-											? { opacity: 0, transition: { duration: 0 } }
-											: { opacity: 0, y: -6, transition: { duration: 0.15 } }
-									}
-									transition={
-										reduced ? { duration: 0 } : { type: "spring", stiffness: 550, damping: 42 }
-									}
-									className="block min-h-[1.75rem] whitespace-pre"
-								>
-									{line.trust ? (
-										<>
-											{TRUST_PREFIX}
-											{/* persistent emerald underline — same line, same position, every tab */}
-											<span className="border-b-2 border-ut pb-px">{trustLineBody(line.text)}</span>
-											{";"}
-										</>
-									) : (
-										line.text || " "
-									)}
-								</motion.span>
-							))}
-						</AnimatePresence>
-					</code>
-				</pre>
+				{/* min-h reserves the tallest panel — no CLS on tab switch. TerminalFrame
+				    is plain markup (no server-only APIs), so this client island imports
+				    and renders it directly rather than needing a server/children split. */}
+				<TerminalFrame className="min-h-[23rem] text-white/80">
+					<pre data-code-sample>
+						<code className="block">
+							<AnimatePresence initial={false} mode="popLayout">
+								{tab.lines.map((line) => (
+									<motion.span
+										key={line.key}
+										layout={!reduced}
+										initial={reduced || !line.changed ? false : { opacity: 0, y: 6 }}
+										animate={{ opacity: 1, y: 0 }}
+										exit={
+											reduced || !line.changed
+												? { opacity: 0, transition: { duration: 0 } }
+												: { opacity: 0, y: -6, transition: { duration: 0.15 } }
+										}
+										transition={
+											reduced ? { duration: 0 } : { type: "spring", stiffness: 550, damping: 42 }
+										}
+										className="block min-h-[1.75rem] whitespace-pre"
+									>
+										{line.trust ? (
+											<>
+												{TRUST_PREFIX}
+												{/* persistent emerald underline — same line, same position, every tab */}
+												<span className="border-b-2 border-ut pb-px">
+													{trustLineBody(line.text)}
+												</span>
+												{";"}
+											</>
+										) : (
+											line.text || " "
+										)}
+									</motion.span>
+								))}
+							</AnimatePresence>
+						</code>
+					</pre>
+				</TerminalFrame>
 			</div>
 		</div>
 	);
