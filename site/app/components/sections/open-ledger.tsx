@@ -149,7 +149,7 @@ export default function OpenLedger() {
 						<img
 							src="/brand/mascot-mark.png"
 							alt="the usertrust mascot"
-							className="h-8 w-auto rounded-lg"
+							className="h-8 w-auto"
 						/>
 						<p className="font-mono text-xs text-white/40">governance wins.</p>
 					</div>
