@@ -66,6 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `TrustedClient` types: governed `messages.create` / `beta.messages.create` now
+  type as `Promise<{ response, receipt }>`, matching the runtime envelope — the
+  documented `const { response, receipt } = await client.messages.create(...)`
+  pattern now compiles, per-overload (streaming `create` keeps its stream-typed
+  `response`). Types-only; no runtime change.
 - A policy rule with no `description` no longer renders its identifier twice
   in the denial reason (`[scarcity-brake] scarcity-brake` is now
   `[scarcity-brake]`).

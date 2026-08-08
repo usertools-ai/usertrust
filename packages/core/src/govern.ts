@@ -196,13 +196,15 @@ export interface TrustEngine {
 }
 
 // ── F5: governed-surface type rewrites ────────────────────────────────────────
-// The runtime proxy makes Anthropic `messages.stream` / `beta.messages.stream`
-// ASYNC (they authorize before forwarding) and hangs a `.receipt` promise off the
-// returned MessageStream; `messages.parse` / `beta.messages.parse` return the
-// parsed message with a settled `.receipt`. These mapped types make the EXPORTED
-// TrustedClient type match that runtime contract, so a consumer using the old sync
-// `const s = client.messages.stream(...)` pattern gets a compile error. Clients
-// without a top-level `messages` (OpenAI/Google) pass through unchanged.
+// The runtime proxy makes Anthropic `messages.create` / `beta.messages.create`
+// resolve to the `{ response, receipt }` envelope, makes `messages.stream` /
+// `beta.messages.stream` ASYNC (they authorize before forwarding) with a
+// `.receipt` promise hung off the returned MessageStream, and makes
+// `messages.parse` / `beta.messages.parse` return the parsed message with a
+// settled `.receipt`. These mapped types make the EXPORTED TrustedClient type
+// match that runtime contract, so a consumer using the old bare-`Message` or
+// sync `const s = client.messages.stream(...)` patterns gets a compile error.
+// Clients without a top-level `messages` (OpenAI/Google) pass through unchanged.
 
 /** `stream` becomes `(...args) => Promise<MessageStream & { receipt: Promise<TrustReceipt> }>`. */
 type GovernedStreamMethod<F> = F extends (...args: infer A) => infer R
@@ -214,9 +216,47 @@ type GovernedParseMethod<F> = F extends (...args: infer A) => infer R
 	? (...args: A) => Promise<Awaited<R> & { receipt: TrustReceipt }>
 	: F;
 
-/** Rewrite `stream`/`parse` on a `messages` resource; leave `create`/everything else. */
+/**
+ * `create` becomes `(...args) => Promise<{ response, receipt }>`, per overload.
+ * The Anthropic SDK declares three `create` overloads (non-streaming, streaming,
+ * base); a bare `F extends (...args) => R` conditional infers only the LAST one,
+ * which would collapse `create({ stream: true })`'s response to the base union.
+ * The cascade matches the overload list positionally (3, then 2, then 1) and
+ * rewrites each signature, preserving its response type inside the envelope —
+ * matching the runtime, where interceptCall resolves BOTH paths with
+ * `{ response, receipt }` (see the `create` trap in buildAnthropicMessagesProxy).
+ * A single-signature `create` unifies into the 3-pattern as three identical
+ * signatures, which resolves identically at every call site. Scoped to the SDK's
+ * current 3-overload shape; the real-SDK block in
+ * tests/govern/trusted-client-types.test-d.ts is the drift alarm if upstream
+ * adds a fourth.
+ */
+type GovernedCreateMethod<F> = F extends {
+	(...args: infer A1): infer R1;
+	(...args: infer A2): infer R2;
+	(...args: infer A3): infer R3;
+}
+	? {
+			(...args: A1): Promise<{ response: Awaited<R1>; receipt: TrustReceipt }>;
+			(...args: A2): Promise<{ response: Awaited<R2>; receipt: TrustReceipt }>;
+			(...args: A3): Promise<{ response: Awaited<R3>; receipt: TrustReceipt }>;
+		}
+	: F extends {
+				(...args: infer A1): infer R1;
+				(...args: infer A2): infer R2;
+			}
+		? {
+				(...args: A1): Promise<{ response: Awaited<R1>; receipt: TrustReceipt }>;
+				(...args: A2): Promise<{ response: Awaited<R2>; receipt: TrustReceipt }>;
+			}
+		: F extends (...args: infer A) => infer R
+			? (...args: A) => Promise<{ response: Awaited<R>; receipt: TrustReceipt }>
+			: F;
+
+/** Rewrite `create`/`stream`/`parse` on a `messages` resource; leave everything else. */
 type GovernedMessages<M> = M extends object
-	? Omit<M, "stream" | "parse"> &
+	? Omit<M, "create" | "stream" | "parse"> &
+			("create" extends keyof M ? { create: GovernedCreateMethod<M["create"]> } : unknown) &
 			("stream" extends keyof M ? { stream: GovernedStreamMethod<M["stream"]> } : unknown) &
 			("parse" extends keyof M ? { parse: GovernedParseMethod<M["parse"]> } : unknown)
 	: M;
