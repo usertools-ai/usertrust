@@ -518,3 +518,79 @@ html {
 		animation: none;
 	}
 }
+
+/* ── Docket hairlines — draw in on approach, numerals stay static ── */
+@keyframes hairline-draw {
+	from {
+		transform: scaleX(0);
+	}
+	to {
+		transform: scaleX(1);
+	}
+}
+@keyframes hairline-draw-v {
+	from {
+		transform: scaleY(0);
+	}
+	to {
+		transform: scaleY(1);
+	}
+}
+.docket-hairline {
+	position: absolute;
+	background: rgba(52, 211, 153, 0.08);
+	pointer-events: none;
+}
+.docket-hairline-h {
+	top: 0;
+	left: 0;
+	right: 0;
+	height: 1px;
+	transform-origin: left center;
+}
+.docket-hairline-v {
+	top: 0;
+	bottom: 0;
+	left: 0;
+	width: 1px;
+	transform-origin: center top;
+}
+
+/* Scroll-driven draw where supported (Chrome/Edge). */
+@supports (animation-timeline: view()) {
+	.docket-hairline-h {
+		animation: hairline-draw 1s ease-out both;
+		animation-timeline: view();
+		animation-range: entry 0% entry 60%;
+	}
+	.docket-hairline-v {
+		animation: hairline-draw-v 1s ease-out both;
+		animation-timeline: view();
+		animation-range: entry 0% entry 60%;
+	}
+}
+
+/* IO-class fallback (Safari/Firefox). Hidden state exists ONLY under
+   [data-inview="false"], which <InView> stamps post-hydration — no-JS
+   visitors keep the drawn state. */
+@supports not (animation-timeline: view()) {
+	[data-inview="false"] .docket-hairline {
+		transform: scale(0);
+	}
+	[data-inview="true"] .docket-hairline-h {
+		animation: hairline-draw 0.9s ease-out both;
+	}
+	[data-inview="true"] .docket-hairline-v {
+		animation: hairline-draw-v 0.9s ease-out both;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.docket-hairline,
+	[data-inview="false"] .docket-hairline,
+	[data-inview="true"] .docket-hairline-h,
+	[data-inview="true"] .docket-hairline-v {
+		animation: none !important;
+		transform: none !important;
+	}
+}

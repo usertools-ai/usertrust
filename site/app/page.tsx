@@ -8,6 +8,7 @@ import { Footer } from "./components/footer";
 import { GridBackground } from "./components/grid-background";
 import { HowItWorks } from "./components/how-it-works";
 import { Nav } from "./components/nav";
+import Docket from "./components/sections/docket";
 import Hero from "./components/sections/hero";
 import { SocialProof } from "./components/social-proof";
 
@@ -17,6 +18,7 @@ export default function Home() {
 			<GridBackground />
 			<Nav />
 			<Hero />
+			<Docket />
 			<SocialProof />
 			<CodeExample />
 			<BeforeAfter />
