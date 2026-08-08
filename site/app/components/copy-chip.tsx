@@ -22,7 +22,10 @@ export default function CopyChip({
 	 * swaps to ink-on-paper for placement inside ReceiptPaper: the dark
 	 * styling reads at ~1.1:1 contrast on `--color-paper`, well under the
 	 * ≥4.5:1 the paper surface requires (globals.css's validated paper-*
-	 * accents), so it cannot be reused as-is there.
+	 * accents), so it cannot be reused as-is there. Dim paper text (the "$"
+	 * glyph and the "copy" label) uses ink at 64% opacity, matching
+	 * globals.css's `.provenance-stub` convention (~5.1:1 on paper) rather
+	 * than 50% (~3.3:1, under the bar).
 	 */
 	tone?: "dark" | "paper";
 }) {
@@ -58,14 +61,14 @@ export default function CopyChip({
 					: "focus-ring group relative inline-flex min-h-[44px] cursor-pointer items-center gap-3 rounded-lg border border-white/10 bg-white/[0.06] px-4 py-2.5 font-mono text-sm text-white/85 transition-colors hover:border-ut/30"
 			}
 		>
-			<span aria-hidden="true" className={isPaper ? "text-ink/50" : "text-ut/60"}>
+			<span aria-hidden="true" className={isPaper ? "text-ink/64" : "text-ut/60"}>
 				$
 			</span>
 			<span>{label ?? text}</span>
 			<span
 				className={
 					isPaper
-						? "text-xs text-ink/50 transition-colors group-hover:text-ink"
+						? "text-xs text-ink/64 transition-colors group-hover:text-ink"
 						: "text-xs text-white/40 transition-colors group-hover:text-ut"
 				}
 			>
