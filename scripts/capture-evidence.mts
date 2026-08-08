@@ -21,7 +21,7 @@
  */
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -156,6 +156,7 @@ async function waitForPort(port: number): Promise<void> {
 async function deriveFacts(tigerbeetleVersion: string, commit: string, usertrustVersion: string) {
 	const ledgerSrc = await readFile(join(REPO_ROOT, "packages/core/src/ledger/client.ts"), "utf-8");
 	const transferCodes = (ledgerSrc.match(/^export const XFER_/gm) ?? []).length;
+	const accountCodes = (ledgerSrc.match(/^export const CODE_/gm) ?? []).length;
 
 	const typesSrc = await readFile(join(REPO_ROOT, "packages/core/src/shared/types.ts"), "utf-8");
 	const unionStart = typesSrc.indexOf("export type FieldOperator =");
@@ -172,6 +173,45 @@ async function deriveFacts(tigerbeetleVersion: string, commit: string, usertrust
 		PRICING_TABLE: Record<string, unknown>;
 	};
 	const modelNumeric = Object.keys(PRICING_TABLE).length;
+
+	// AGENTS.md invariants — one `Prevents:` clause per invariant entry (D2).
+	const agentsSrc = await readFile(join(REPO_ROOT, "AGENTS.md"), "utf-8");
+	const invariantCount = (agentsSrc.match(/Prevents:/g) ?? []).length;
+
+	// Harden-doctrine counts (Addendum D2): mechanical counts over the test
+	// tree. expect() totals are TEST assertions, not runtime guarantees (D6).
+	const hardenSuiteCount = (
+		await readdir(join(REPO_ROOT, "packages/core/tests/harden"), { recursive: true })
+	).filter((f) => f.endsWith(".test.ts")).length;
+
+	const testFiles = (await readdir(join(REPO_ROOT, "packages"), { recursive: true })).filter(
+		(f) => f.endsWith(".test.ts") && !f.includes("node_modules") && !f.includes("dist"),
+	);
+	let testCaseCount = 0;
+	let expectAssertionCount = 0;
+	for (const rel of testFiles) {
+		const src = await readFile(join(REPO_ROOT, "packages", rel), "utf-8");
+		testCaseCount += (src.match(/^\s*(?:it|test)(?:\.\w+)?\(/gm) ?? []).length;
+		expectAssertionCount += (src.match(/expect\(/g) ?? []).length;
+	}
+
+	// Parity contract (AGENTS.md): verify shares ZERO lines with core. Re-audit
+	// it mechanically — every import specifier in packages/verify/src must be
+	// node:* or ./-relative — so the 0 is re-proven at every capture, not assumed.
+	const verifySrcDir = join(REPO_ROOT, "packages/verify/src");
+	const verifySrcFiles = (await readdir(verifySrcDir, { recursive: true })).filter((f) =>
+		f.endsWith(".ts"),
+	);
+	for (const rel of verifySrcFiles) {
+		const src = await readFile(join(verifySrcDir, rel), "utf-8");
+		for (const m of src.matchAll(/from\s+"([^"]+)"/g)) {
+			const spec = m[1] ?? "";
+			if (!spec.startsWith("node:") && !spec.startsWith("./")) {
+				throw new Error(`parity contract violated: packages/verify imports "${spec}"`);
+			}
+		}
+	}
+	const verifierSharedLines = 0;
 
 	// sizzle.mp4 measured 44.4s at plan time — 44 is the documented fallback.
 	let filmDurationSeconds = 44;
@@ -206,6 +246,10 @@ async function deriveFacts(tigerbeetleVersion: string, commit: string, usertrust
 				value: transferCodes,
 				source: "packages/core/src/ledger/client.ts — count of `export const XFER_*`",
 			},
+			accountCodes: {
+				value: accountCodes,
+				source: "packages/core/src/ledger/client.ts — count of `export const CODE_*`",
+			},
 			policyOperators: {
 				value: policyOperators,
 				source: "packages/core/src/shared/types.ts — FieldOperator union members",
@@ -234,12 +278,68 @@ async function deriveFacts(tigerbeetleVersion: string, commit: string, usertrust
 				source:
 					"packages/core/src/shared/constants.ts — DEFAULT_BUDGET = 50_000 usertokens ($5 starter budget)",
 			},
+			invariantCount: {
+				value: invariantCount,
+				source: "AGENTS.md — count of `Prevents:` clauses",
+			},
+			hardenSuiteCount: {
+				value: hardenSuiteCount,
+				source: "packages/core/tests/harden/**/*.test.ts — test-file count",
+			},
+			testCaseCount: {
+				value: testCaseCount,
+				source: "packages/**/*.test.ts — count of it()/test() case openers",
+			},
+			expectAssertionCount: {
+				value: expectAssertionCount,
+				source:
+					"packages/**/*.test.ts — count of expect( calls; TEST assertions, not runtime guarantees",
+			},
+			verifierSharedLines: {
+				value: verifierSharedLines,
+				source: "packages/verify parity contract (AGENTS.md) — import audit re-run at capture time",
+			},
 			// CASE FILE 001 narrative figures (Exhibit C, Task 9) — fixed marketing
 			// copy, not derived from code; the manifest is their single source.
 			caseFileCalls: { value: 47, source: "CASE FILE 001 incident narrative (fixed copy)" },
 			caseFileDollars: { value: 500, source: "CASE FILE 001 incident narrative (fixed copy)" },
 		},
 	};
+}
+
+// ── attack corpus (Addendum D1) — names + pinned verdicts from the REAL harden test ──
+async function deriveAttackCorpus(): Promise<{
+	attacks: Array<{ name: string; verdict: string }>;
+}> {
+	const src = await readFile(
+		join(REPO_ROOT, "packages/core/tests/harden/anchoring/anchor-corpus.test.ts"),
+		"utf-8",
+	);
+	// Structure (verified): every case opens `\tit("<title>", async () => {` on a
+	// single line, titles never contain a double quote, and the pinned verdict is
+	// the FIRST `anchorState).toBe("...")` in the block. The verdict alphabet is
+	// the AnchorState union (packages/core/src/audit/anchor-verify.ts).
+	const VERDICTS = new Set([
+		"UNANCHORED",
+		"ANCHORED_VERIFIED",
+		"ANCHOR_STALE",
+		"ANCHOR_UNVERIFIABLE",
+		"ANCHOR_INVALID",
+		"ANCHOR_MISMATCH",
+	]);
+	const blocks = src.split(/^\tit\("/m).slice(1);
+	const attacks = blocks.map((block) => {
+		const name = block.slice(0, block.indexOf('"'));
+		const verdict = /anchorState\)\.toBe\("([A-Z_]+)"\)/.exec(block)?.[1];
+		if (verdict === undefined || !VERDICTS.has(verdict)) {
+			throw new Error(`no pinned AnchorState verdict found for corpus case: ${name}`);
+		}
+		return { name, verdict };
+	});
+	if (attacks.length < 20) {
+		throw new Error(`attack-corpus extraction looks broken: only ${attacks.length} cases found`);
+	}
+	return { attacks };
 }
 
 // ── main ──
@@ -400,13 +500,15 @@ async function main(): Promise<void> {
 			exitCode: 0 as const,
 		};
 
-		// (e) facts + (f) write everything
+		// (e) facts + attack corpus + (f) write everything
 		const facts = await deriveFacts(tbVersion, commit, usertrustVersion);
+		const attackCorpus = await deriveAttackCorpus();
 		await mkdir(appEvidence, { recursive: true });
 		await mkdir(publicEvidence, { recursive: true });
 		const writeJson = (dir: string, name: string, value: unknown) =>
 			writeFile(join(dir, name), `${JSON.stringify(value, null, "\t")}\n`);
 		await writeJson(appEvidence, "facts.json", facts);
+		await writeJson(appEvidence, "attack-corpus.json", attackCorpus);
 		if (receiptLedger !== null) await writeJson(appEvidence, "receipt-ledger.json", receiptLedger);
 		await writeJson(appEvidence, "receipt-dryrun.json", receiptDry);
 		await writeJson(appEvidence, "chain-slice.json", chainSlice);

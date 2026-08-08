@@ -19,7 +19,7 @@ test("capture-evidence --dry-run-only writes well-formed fixtures (no TigerBeetl
 			stdio: "pipe",
 		});
 
-		// facts.json — all eleven fact keys, each with a source string
+		// facts.json — all seventeen fact keys, each with a source string
 		const facts = JSON.parse(readFileSync(join(out, "facts.json"), "utf-8"));
 		for (const key of [
 			"transferCodes",
@@ -33,6 +33,12 @@ test("capture-evidence --dry-run-only writes well-formed fixtures (no TigerBeetl
 			"usertokensPerFiveDollars",
 			"caseFileCalls",
 			"caseFileDollars",
+			"accountCodes",
+			"invariantCount",
+			"hardenSuiteCount",
+			"testCaseCount",
+			"expectAssertionCount",
+			"verifierSharedLines",
 		]) {
 			assert.ok(key in facts.facts, `facts.${key} missing`);
 			assert.equal(typeof facts.facts[key].source, "string");
@@ -44,6 +50,38 @@ test("capture-evidence --dry-run-only writes well-formed fixtures (no TigerBeetl
 		assert.equal(facts.facts.verifierRuntimeDeps.value, 0);
 		assert.equal(facts.facts.modelCount.numeric, 20);
 		assert.equal(facts.facts.usertokensPerFiveDollars.value, 50000);
+
+		// Addendum D7 — new derived counts. Exact pins only where the value is a
+		// sanctioned claim; plausibility floors for counts that move with the suite.
+		assert.equal(facts.facts.accountCodes.value, 3); // CODE_USER_WALLET · CODE_PLATFORM_TREASURY · CODE_ESCROW
+		assert.equal(facts.facts.verifierSharedLines.value, 0); // parity contract
+		assert.ok(facts.facts.invariantCount.value >= 20, "AGENTS.md Prevents: count implausibly low");
+		assert.ok(facts.facts.hardenSuiteCount.value >= 40, "harden suite count implausibly low");
+		assert.ok(facts.facts.testCaseCount.value >= 2000, "test-case count implausibly low");
+		assert.ok(facts.facts.expectAssertionCount.value >= 4000, "expect() count implausibly low");
+		assert.ok(facts.facts.expectAssertionCount.value > facts.facts.testCaseCount.value);
+		// Addendum D6: expect() totals are TEST assertions, never runtime guarantees.
+		assert.match(facts.facts.expectAssertionCount.source, /TEST assertions/);
+
+		// attack-corpus.json — names + pinned verdicts from the REAL corpus test file.
+		// 29 it() cases cover spec rows 1-30 (row 17 is folded into case 5).
+		const corpus = JSON.parse(readFileSync(join(out, "attack-corpus.json"), "utf-8"));
+		assert.equal(corpus.attacks.length, 29);
+		const verdicts = new Set([
+			"UNANCHORED",
+			"ANCHORED_VERIFIED",
+			"ANCHOR_STALE",
+			"ANCHOR_UNVERIFIABLE",
+			"ANCHOR_INVALID",
+			"ANCHOR_MISMATCH",
+		]);
+		for (const attack of corpus.attacks) {
+			assert.ok(typeof attack.name === "string" && attack.name.length > 0, "empty attack name");
+			assert.ok(verdicts.has(attack.verdict), `unknown verdict: ${attack.verdict}`);
+		}
+		assert.equal(new Set(corpus.attacks.map((a) => a.name)).size, corpus.attacks.length);
+		assert.match(corpus.attacks[0].name, /^1\. F1 KILL/);
+		assert.equal(corpus.attacks[0].verdict, "ANCHOR_MISMATCH");
 
 		// dry-run receipt — locally-minted tx_ id, honest mode label
 		const dry = JSON.parse(readFileSync(join(out, "receipt-dryrun.json"), "utf-8"));

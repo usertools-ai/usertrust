@@ -1,12 +1,16 @@
 {
-	"generatedAt": "2026-08-07T21:58:11.755Z",
-	"commit": "d61256b",
+	"generatedAt": "2026-08-08T00:31:12.271Z",
+	"commit": "bea0f03",
 	"usertrustVersion": "3.1.0",
 	"tigerbeetleVersion": "0.17.9",
 	"facts": {
 		"transferCodes": {
 			"value": 9,
 			"source": "packages/core/src/ledger/client.ts — count of `export const XFER_*`"
+		},
+		"accountCodes": {
+			"value": 3,
+			"source": "packages/core/src/ledger/client.ts — count of `export const CODE_*`"
 		},
 		"policyOperators": {
 			"value": 12,
@@ -40,6 +44,26 @@
 		"usertokensPerFiveDollars": {
 			"value": 50000,
 			"source": "packages/core/src/shared/constants.ts — DEFAULT_BUDGET = 50_000 usertokens ($5 starter budget)"
+		},
+		"invariantCount": {
+			"value": 26,
+			"source": "AGENTS.md — count of `Prevents:` clauses"
+		},
+		"hardenSuiteCount": {
+			"value": 49,
+			"source": "packages/core/tests/harden/**/*.test.ts — test-file count"
+		},
+		"testCaseCount": {
+			"value": 2618,
+			"source": "packages/**/*.test.ts — count of it()/test() case openers"
+		},
+		"expectAssertionCount": {
+			"value": 6171,
+			"source": "packages/**/*.test.ts — count of expect( calls; TEST assertions, not runtime guarantees"
+		},
+		"verifierSharedLines": {
+			"value": 0,
+			"source": "packages/verify parity contract (AGENTS.md) — import audit re-run at capture time"
 		},
 		"caseFileCalls": {
 			"value": 47,

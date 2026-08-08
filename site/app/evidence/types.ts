@@ -36,6 +36,7 @@ export interface EvidenceFacts {
 	tigerbeetleVersion: string;
 	facts: {
 		transferCodes: { value: number; source: string };
+		accountCodes: { value: number; source: string };
 		policyOperators: { value: number; source: string };
 		verifierRuntimeDeps: { value: number; source: string };
 		modelCount: { value: string; numeric: number; source: string };
@@ -44,6 +45,11 @@ export interface EvidenceFacts {
 		quickstartMinutes: { value: 2; source: string };
 		filmDurationSeconds: { value: number; source: string };
 		usertokensPerFiveDollars: { value: 50000; source: string };
+		invariantCount: { value: number; source: string };
+		hardenSuiteCount: { value: number; source: string };
+		testCaseCount: { value: number; source: string };
+		expectAssertionCount: { value: number; source: string };
+		verifierSharedLines: { value: 0; source: string };
 		caseFileCalls: { value: number; source: string };
 		caseFileDollars: { value: number; source: string };
 	};
@@ -66,4 +72,21 @@ export interface VerifyTranscript {
 	command: string;
 	lines: string[];
 	exitCode: 0;
+}
+
+/**
+ * Mirrors the AnchorState union at packages/core/src/audit/anchor-verify.ts.
+ * ANCHORED_VERIFIED rows are the corpus's happy paths — the fixture records
+ * whatever verdict the harden test pins, pass or fail.
+ */
+export type AnchorVerdict =
+	| "UNANCHORED"
+	| "ANCHORED_VERIFIED"
+	| "ANCHOR_STALE"
+	| "ANCHOR_UNVERIFIABLE"
+	| "ANCHOR_INVALID"
+	| "ANCHOR_MISMATCH";
+
+export interface AttackCorpus {
+	attacks: Array<{ name: string; verdict: AnchorVerdict }>;
 }
