@@ -608,3 +608,110 @@ html {
 		transition: none;
 	}
 }
+
+/* ── THE GOVERNANCE DIE (Exhibit B set-piece, Addendum C4) ──────────────────
+   Emerald circuit pulses: layered SVG strokes animated by stroke-dashoffset —
+   glow comes from stacked strokes and low-opacity rects, never from filter
+   or backdrop-filter. The dasharray period is 14 + 220 = 234 and each cycle
+   shifts exactly -234, so the loop is seamless on every path length.
+   Paused by default; the client wrapper (exhibit-b-die.tsx) flips
+   data-active="true" in view via IntersectionObserver, so pulses never run
+   offscreen. Reduced motion: animation removed, traces render as a static
+   glow (solid strokes at reduced opacity). */
+@keyframes die-pulse {
+	to {
+		stroke-dashoffset: -234;
+	}
+}
+.die-label {
+	font-family: var(--font-mono);
+	font-size: 11px;
+	letter-spacing: 0.16em;
+	text-transform: uppercase;
+	fill: rgba(255, 255, 255, 0.5);
+}
+.die-label-out {
+	fill: rgba(52, 211, 153, 0.85);
+}
+.die-mark {
+	font-family: var(--font-display);
+	font-size: 72px;
+	font-weight: 700;
+	fill: #34d399;
+}
+.die-body {
+	fill: #0e0e22;
+	stroke: rgba(52, 211, 153, 0.55);
+	stroke-width: 1.5px;
+}
+.die-body-inner {
+	fill: none;
+	stroke: rgba(52, 211, 153, 0.2);
+	stroke-width: 1px;
+}
+/* Soft emerald glow — three stacked rounded rects, opacity only, no filter. */
+.die-glow-outer {
+	fill: rgba(52, 211, 153, 0.04);
+}
+.die-glow-mid {
+	fill: rgba(52, 211, 153, 0.07);
+}
+.die-glow-inner {
+	fill: rgba(52, 211, 153, 0.1);
+}
+.die-pin {
+	stroke: rgba(52, 211, 153, 0.25);
+	stroke-width: 2px;
+}
+.die-pad {
+	fill: rgba(52, 211, 153, 0.6);
+}
+.die-trace-base {
+	fill: none;
+	stroke: rgba(52, 211, 153, 0.15);
+	stroke-width: 2px;
+}
+.die-trace-pulse {
+	fill: none;
+	stroke: #34d399;
+	stroke-width: 2px;
+	stroke-dasharray: 14 220;
+	animation: die-pulse 1.8s linear infinite;
+	animation-play-state: paused;
+}
+/* Output trace pulses brighter: a short bright core dash rides at the head
+   of the emerald pulse (same 234 period, same keyframe — always in sync). */
+.die-trace-pulse-bright {
+	fill: none;
+	stroke: #d1fae5;
+	stroke-width: 2px;
+	stroke-dasharray: 6 228;
+	animation: die-pulse 1.8s linear infinite;
+	animation-play-state: paused;
+}
+/* Per-trace stagger — negative delays put pulses mid-path immediately. */
+.die-delay-a {
+	animation-delay: -300ms;
+}
+.die-delay-b {
+	animation-delay: -900ms;
+}
+.die-delay-c {
+	animation-delay: -1500ms;
+}
+/* IO gate: the wrapper flips data-active; pulses run only in view. */
+.die-figure[data-active="true"] .die-trace-pulse,
+.die-figure[data-active="true"] .die-trace-pulse-bright {
+	animation-play-state: running;
+}
+/* Reduced motion: static glowing state — solid emerald traces, no movement. */
+@media (prefers-reduced-motion: reduce) {
+	.die-trace-pulse {
+		animation: none;
+		stroke-dasharray: none;
+		opacity: 0.4;
+	}
+	.die-trace-pulse-bright {
+		display: none;
+	}
+}

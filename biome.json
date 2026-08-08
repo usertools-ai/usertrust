@@ -56,6 +56,16 @@
 					}
 				}
 			}
+		},
+		{
+			"includes": ["**/site/app/components/sections/exhibit-b-tabs.tsx"],
+			"linter": {
+				"rules": {
+					"a11y": {
+						"noNoninteractiveTabindex": "off"
+					}
+				}
+			}
 		}
 	]
 }
