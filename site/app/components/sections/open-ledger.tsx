@@ -139,11 +139,9 @@ export default function OpenLedger() {
 			{/* dark footer strip */}
 			<footer className="mt-24 border-t border-white/[0.06]">
 				<div className="mx-auto max-w-5xl py-10">
-					{/* mascot mark — the earlier hero task recorded the framed-still
-					    fallback register (a rounded-corner crop framed on the figure,
-					    not a silhouette), so it renders here at 32px tall with rounded
-					    corners (Addendum A), centered above the usertools attribution
-					    line. */}
+					{/* mascot mark — clean two-tone cutout (white face/gloves/shirt,
+					    dark suit), renders at 32px tall (h-8) with no rounded corners,
+					    centered above the usertools attribution line. */}
 					<div className="flex flex-col items-center gap-2 text-center">
 						{/* biome-ignore lint/performance/noImgElement: tiny static footer mark, not an LCP candidate */}
 						<img
