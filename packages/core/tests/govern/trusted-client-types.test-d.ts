@@ -686,3 +686,186 @@ export type _NonCallableResponsesCreateStaysRaw = Assert<
 		{ create: string; retrieve(id: string): Promise<{ id: string }> }
 	>
 >;
+
+// ── CALLABLE namespaces: the runtime SKIPS them, so the type must too ──
+// Every namespace walk in the runtime is gated on `typeof ns === "object"` —
+// detectClientKind, buildOpenAIResponsesProxy and buildAnthropicBetaProxy alike —
+// and a function object (a callable carrying properties) answers `"function"`
+// there. It nonetheless satisfies a bare `extends { create: … }`, so without the
+// IsCallable exclusion these clients would be typed as governed on a surface no
+// proxy ever wraps, and — worse on the hybrid — typed as UNgoverned on the
+// surface that actually is.
+
+interface CallableChat {
+	(...args: never[]): void;
+	completions: { create(body: { model: string }): Promise<{ id: string }> };
+}
+
+// A callable `chat` with a valid Google `models`: detectClientKind's OpenAI test
+// fails on `typeof client.chat === "object"` and falls through to Google.
+interface CallableChatWithGoogle {
+	chat: CallableChat;
+	models: FakeGoogleModels;
+}
+type GovCallableChatWithGoogle = TrustedClient<CallableChatWithGoogle>;
+
+export type _CallableChatFallsThroughToGoogle = Assert<
+	IsExact<
+		ReturnType<GovCallableChatWithGoogle["models"]["generateContent"]>,
+		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+	>
+>;
+export type _CallableChatStaysRaw = Assert<
+	IsExact<GovCallableChatWithGoogle["chat"], CallableChat>
+>;
+
+// Same for a callable `chat.completions`.
+interface CallableCompletions {
+	(...args: never[]): void;
+	create(body: { model: string }): Promise<{ id: string }>;
+}
+interface CallableCompletionsWithGoogle {
+	chat: { completions: CallableCompletions };
+	models: FakeGoogleModels;
+}
+type GovCallableCompletions = TrustedClient<CallableCompletionsWithGoogle>;
+
+export type _CallableCompletionsFallsThroughToGoogle = Assert<
+	IsExact<
+		ReturnType<GovCallableCompletions["models"]["generateContent"]>,
+		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+	>
+>;
+export type _CallableCompletionsStaysRaw = Assert<
+	IsExact<GovCallableCompletions["chat"]["completions"], CallableCompletions>
+>;
+
+// A callable `messages` must not preempt the OpenAI branch.
+interface CallableMessages {
+	(...args: never[]): void;
+	create(body: { model: string }): Promise<{ id: string }>;
+}
+interface CallableMessagesWithOpenAI extends FakeOpenAI {
+	messages: CallableMessages;
+}
+type GovCallableMessages = TrustedClient<CallableMessagesWithOpenAI>;
+
+export type _CallableMessagesStaysRaw = Assert<
+	IsExact<GovCallableMessages["messages"], CallableMessages>
+>;
+export type _CallableMessagesFallsThroughToOpenAI = Assert<
+	IsExact<
+		ReturnType<GovCallableMessages["chat"]["completions"]["create"]>,
+		Promise<{ response: { id: string }; receipt: TrustReceipt }>
+	>
+>;
+
+// A callable `models` is not a Google client either.
+interface CallableModels {
+	(...args: never[]): void;
+	generateContent(params: { model: string; contents: string }): Promise<{ text: string }>;
+}
+export type _CallableModelsStaysRaw = Assert<
+	IsExact<TrustedClient<{ models: CallableModels }>["models"], CallableModels>
+>;
+
+// A callable `responses` is left ENTIRELY raw by buildOpenAIResponsesProxy — it
+// bails on `typeof responses !== "object"`. The IsExact here is what pins the
+// call signature: `Omit` builds a plain object type and would silently drop it,
+// so a rewrite makes the resource uncallable at every existing call site.
+interface CallableResponses {
+	(...args: never[]): void;
+	create(body: { model: string }): Promise<{ id: string }>;
+}
+interface CallableResponsesOpenAI {
+	chat: { completions: { create(body: { model: string }): Promise<{ id: string }> } };
+	responses: CallableResponses;
+}
+type GovCallableResponses = TrustedClient<CallableResponsesOpenAI>;
+
+export type _CallableResponsesStaysFullyRaw = Assert<
+	IsExact<GovCallableResponses["responses"], CallableResponses>
+>;
+export type _CallableResponsesChatStillGoverned = Assert<
+	IsExact<
+		ReturnType<GovCallableResponses["chat"]["completions"]["create"]>,
+		Promise<{ response: { id: string }; receipt: TrustReceipt }>
+	>
+>;
+
+// A callable `beta` — and a callable `beta.messages` — are both skipped by
+// buildAnthropicBetaProxy, which returns undefined and leaves `beta` a whole raw
+// pass-through.
+interface CallableBeta {
+	(...args: never[]): void;
+	messages: { create(body: { model: string }): Promise<{ id: string }> };
+}
+export type _CallableBetaStaysRaw = Assert<
+	IsExact<
+		TrustedClient<{
+			messages: { create(body: { model: string }): Promise<{ id: string }> };
+			beta: CallableBeta;
+		}>["beta"],
+		CallableBeta
+	>
+>;
+export type _CallableBetaMessagesStaysRaw = Assert<
+	IsExact<
+		TrustedClient<{
+			messages: { create(body: { model: string }): Promise<{ id: string }> };
+			beta: { messages: CallableMessages };
+		}>["beta"],
+		{ messages: CallableMessages }
+	>
+>;
+
+// ── namespace modifiers survive the rewrite ──
+// Real `@google/genai` declares `models` readonly. Rebuilding the namespace as a
+// plain property drops the modifier, so a consumer holding the original client
+// type could assign over a namespace the SDK declared immutable.
+interface ReadonlyModelsGoogle {
+	readonly models: FakeGoogleModels;
+}
+type GovReadonlyModels = TrustedClient<ReadonlyModelsGoogle>;
+export type _ReadonlyModelsStaysReadonly = Assert<
+	IsExact<
+		Pick<GovReadonlyModels, "models">,
+		{ readonly models: Pick<GovReadonlyModels, "models">["models"] }
+	>
+>;
+export type _ReadonlyModelsIsGoverned = Assert<
+	IsExact<
+		ReturnType<GovReadonlyModels["models"]["generateContent"]>,
+		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+	>
+>;
+
+interface ReadonlyMessagesAnthropic {
+	readonly messages: { create(body: { model: string }): Promise<{ id: string }> };
+}
+export type _ReadonlyMessagesStaysReadonly = Assert<
+	IsExact<
+		Pick<TrustedClient<ReadonlyMessagesAnthropic>, "messages">,
+		{ readonly messages: TrustedClient<ReadonlyMessagesAnthropic>["messages"] }
+	>
+>;
+
+// ── a UNION client type still resolves per member ──
+// GovernedShape distributes before selecting a provider; without that, the
+// predicates collapse to `boolean` and the whole union comes back unrewritten.
+type GovUnion = TrustedClient<FakeAnthropic | FakeGoogle>;
+type GovUnionAnthropic = Extract<GovUnion, { messages: unknown }>;
+type GovUnionGoogle = Extract<GovUnion, { models: unknown }>;
+
+export type _UnionAnthropicMemberGoverned = Assert<
+	IsExact<
+		ReturnType<GovUnionAnthropic["messages"]["create"]>,
+		Promise<{ response: { id: string }; receipt: TrustReceipt }>
+	>
+>;
+export type _UnionGoogleMemberGoverned = Assert<
+	IsExact<
+		ReturnType<GovUnionGoogle["models"]["generateContent"]>,
+		Promise<{ response: { text: string }; receipt: TrustReceipt }>
+	>
+>;
