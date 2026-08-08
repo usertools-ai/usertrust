@@ -229,6 +229,21 @@ function effectiveCacheRate(rate: number | undefined, inputPer1k: number): numbe
 }
 
 /**
+ * Resolve the effective cache-WRITE rate for a rate set — the same D1
+ * resolution `costFromRates` applies internally, exposed as its own tiny
+ * export so hold-sizing call sites (spec D3) can read it WITHOUT re-deriving
+ * the `??` chain. Do not inline `rates.cacheWritePer1k ?? rates.inputPer1k`
+ * anywhere else; that is exactly the second resolution site D1 forbids —
+ * route through here (or `costFromRates`) instead.
+ *
+ * Absent/garbage `cacheWritePer1k` resolves to `inputPer1k`, identical to
+ * `costFromRates`'s own cache-write pricing.
+ */
+export function effectiveCacheWriteRate(rates: ModelRates): number {
+	return effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k);
+}
+
+/**
  * Compute usertoken cost from explicit rates across all four token tiers.
  *
  * Applies the same non-finite/negative clamp and >=1 floor as estimateCost —

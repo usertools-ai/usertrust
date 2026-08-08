@@ -77,6 +77,7 @@ import {
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
 	costFromRates,
+	effectiveCacheWriteRate,
 	estimateCost,
 	estimateInputTokens,
 	resolveRates,
@@ -815,7 +816,19 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const transferId = trustId("tx");
 			const estInputTokens = params.estimatedInputTokens ?? estimateInputTokens(messages);
 			const maxOutputTokens = params.maxOutputTokens ?? 4096;
-			const estCost = costFromRates(rateInfo.rates, estInputTokens, maxOutputTokens);
+			// D3: size the ESTIMATED-input half of the hold at
+			// max(inputPer1k, effective cacheWritePer1k) — see the identical
+			// govern.ts hold-sizing comment for the full rationale. Settle-time
+			// actual cost is unaffected; this only widens the PENDING reservation.
+			const holdInputRate = Math.max(
+				rateInfo.rates.inputPer1k,
+				effectiveCacheWriteRate(rateInfo.rates),
+			);
+			const estCost = costFromRates(
+				{ ...rateInfo.rates, inputPer1k: holdInputRate },
+				estInputTokens,
+				maxOutputTokens,
+			);
 
 			// Acquire mutex for budget atomicity (AUD-453). The attributed-envelope
 			// preflight read is taken INSIDE this lock (top of the try below) so a

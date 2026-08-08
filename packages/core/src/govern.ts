@@ -42,6 +42,7 @@ import { classifyEndpoint, detectClientKind } from "./detect.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
 	costFromRates,
+	effectiveCacheWriteRate,
 	estimateInputTokens,
 	type RateResolution,
 	resolveRates,
@@ -912,8 +913,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				finitePositiveCap(params.max_output_tokens) ?? finitePositiveCap(params.max_tokens) ?? 4096;
 			const rateResolution = resolveRates(model, endpoint.class, config);
 			enforceUnknownModelPolicy(model, rateResolution, config);
+			// D3: "cold-cache worst case" is false for write premiums — a 1.25x (or
+			// operator-set) cache-write rate can exceed an input-priced hold, and the
+			// settle-time actual (already cache-aware) would then post
+			// `min(actual, held)` and silently under-debit the envelope. Size the
+			// ESTIMATED-input half of the hold at the fatter of the two rates; this
+			// is a HOLD-sizing adjustment only — the settle-time actual cost still
+			// resolves each tier independently via `costFromRates`, never discounted.
+			const holdInputRate = Math.max(
+				rateResolution.rates.inputPer1k,
+				effectiveCacheWriteRate(rateResolution.rates),
+			);
 			const estimatedCost = costFromRates(
-				rateResolution.rates,
+				{ ...rateResolution.rates, inputPer1k: holdInputRate },
 				estimatedInputTokens,
 				maxOutputTokens,
 			);
