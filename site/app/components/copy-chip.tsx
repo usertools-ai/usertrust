@@ -1,5 +1,6 @@
 "use client";
 
+import { track } from "@vercel/analytics";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
@@ -42,12 +43,13 @@ export default function CopyChip({
 		if (timer.current) clearTimeout(timer.current);
 		try {
 			await navigator.clipboard.writeText(text);
+			track("copy", { label: label ?? text });
 			setState("copied");
 		} catch {
 			setState("failed");
 		}
 		timer.current = setTimeout(() => setState("idle"), 1600);
-	}, [text]);
+	}, [text, label]);
 
 	const isPaper = tone === "paper";
 	return (

@@ -1,5 +1,6 @@
 "use client";
 
+import { track } from "@vercel/analytics";
 import { motion, useReducedMotion } from "motion/react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
@@ -19,6 +20,7 @@ export default function TearOff() {
 	const [tearing, setTearing] = useState(false);
 
 	function onClick(e: React.MouseEvent<HTMLAnchorElement>) {
+		track("quickstart_enter");
 		if (reduceMotion) return; // plain <a> navigation
 		if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; // new-tab intents stay native
 		e.preventDefault();
