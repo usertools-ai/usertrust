@@ -519,15 +519,9 @@ html {
 	}
 }
 
-/* ── Docket hairlines — draw in on approach, numerals stay static ── */
-@keyframes hairline-draw {
-	from {
-		transform: scaleX(0);
-	}
-	to {
-		transform: scaleX(1);
-	}
-}
+/* ── Docket hairlines — draw in on approach, numerals stay static ──
+   Reuses the `hairline-draw` keyframe declared above (line ~462); only the
+   vertical counterpart is new here. */
 @keyframes hairline-draw-v {
 	from {
 		transform: scaleY(0);
