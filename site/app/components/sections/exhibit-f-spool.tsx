@@ -70,11 +70,11 @@ export default function ExhibitFSpool() {
 	return (
 		<div ref={rootRef} className="mt-12 grid gap-8 md:grid-cols-2">
 			{/* left: the policy, as a mono editor frame */}
-			<div className="rounded-md border border-brand-border bg-[#0d0d1f]">
-				<div className="border-b border-brand-border px-4 py-2 font-mono text-xs text-white/60">
+			<div className="overflow-hidden rounded-xl border border-white/10 bg-[#0d0d20]">
+				<div className="flex h-9 items-center border-b border-white/[0.06] px-4 font-mono text-[11px] uppercase tracking-[0.12em] text-white/50">
 					policy.yaml
 				</div>
-				<pre className="overflow-x-auto p-4 font-mono text-xs leading-relaxed text-white/80">
+				<pre className="overflow-x-auto p-4 font-mono text-[13px] leading-relaxed md:p-5">
 					{POLICY_LINES.map((line, i) => {
 						const hot = activeOp !== null && opsInLine(line).includes(activeOp);
 						return (
