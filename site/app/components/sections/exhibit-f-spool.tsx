@@ -91,9 +91,9 @@ export default function ExhibitFSpool() {
 
 	return (
 		// The YAML wants the spare width, not an even split: the policy's longest
-		// line is 78 chars and the right column is a fixed w-72 stack that was
-		// centering itself inside a ~560px cell at 2000 (~130px dead margin each
-		// side) while the editor clipped rule values mid-token at every viewport.
+		// line runs well past half the row, while the right column is a fixed
+		// narrow stack that was centering itself inside a much wider cell on
+		// desktop while the editor clipped rule values mid-token at every width.
 		<div
 			ref={rootRef}
 			className="mt-12 grid grid-cols-[minmax(0,1fr)] gap-8 md:grid-cols-[minmax(0,1fr)_20rem]"
