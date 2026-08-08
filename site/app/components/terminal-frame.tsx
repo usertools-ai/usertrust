@@ -4,7 +4,10 @@
  * inside this frame — container, title bar, and body typography are
  * defined here and nowhere else. Sizes are the Addendum H1 bump: body is
  * ALWAYS 14px mono, frame-internal labels are ALWAYS 12px mono uppercase
- * (global-constraints.md, "Code-surface consistency").
+ * at white/70 — not white/50, the amended contrast floor
+ * (global-constraints.md, "Code-surface consistency" + "Type + contrast
+ * floors"). The container carries `lift-1`, the one sanctioned elevation
+ * primitive for cards/frames (Addendum H3) — no per-section shadow.
  *
  * `title` and `footer` accept a `ReactNode`, not just a string: several
  * surfaces need a two-part title bar (filename + count, case number +
@@ -33,9 +36,11 @@ export default function TerminalFrame({
 }) {
 	const border = tone === "error" ? "border-danger/30" : "border-white/10";
 	return (
-		<div className={`overflow-hidden rounded-xl border ${border} bg-terminal ${className ?? ""}`}>
+		<div
+			className={`lift-1 overflow-hidden rounded-xl border ${border} bg-terminal ${className ?? ""}`}
+		>
 			{title != null && (
-				<div className="flex h-9 items-center border-b border-white/[0.06] px-4 font-mono text-[12px] uppercase tracking-[0.12em] text-white/50">
+				<div className="flex h-9 items-center border-b border-white/[0.06] px-4 font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
 					{title}
 				</div>
 			)}

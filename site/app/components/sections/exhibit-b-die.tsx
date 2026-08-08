@@ -33,7 +33,7 @@ export default function ExhibitBDie() {
 	}, []);
 
 	return (
-		<div ref={ref} data-active="false" className="die-figure mx-auto w-full max-w-xl">
+		<div ref={ref} data-active="false" className="glow-emerald die-figure mx-auto w-full max-w-xl">
 			<svg
 				viewBox="0 0 900 700"
 				role="img"
@@ -83,7 +83,9 @@ export default function ExhibitBDie() {
 					ut
 				</text>
 
-				{/* labels — 11px mono uppercase (styling in globals.css .die-label) */}
+				{/* labels — 20px mono uppercase, renders at ~12px rendered width in
+			    the desktop grid column (styling in globals.css .die-label — see
+			    the type/contrast-floor addendum for the rationale) */}
 				<text x={40} y={108} className="die-label">
 					anthropic
 				</text>

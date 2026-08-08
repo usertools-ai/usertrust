@@ -50,7 +50,7 @@ export default function ExhibitA() {
 							<code>
 								<span className="text-ut">import</span> {"{ trust }"}{" "}
 								<span className="text-ut">from</span>{" "}
-								<span className="text-white/60">"usertrust"</span>;{"\n\n"}
+								<span className="text-white/80">"usertrust"</span>;{"\n\n"}
 								<span className="text-ut">const</span> client ={" "}
 								<span className="text-ut">await</span> trust(
 								<span className="text-ut">new</span> Anthropic());{"\n\n"}
@@ -59,7 +59,7 @@ export default function ExhibitA() {
 								{" }"} = <span className="text-ut">await</span> client.messages.create({"{"}
 								{"\n"}
 								{"  model: "}
-								<span className="text-white/60">"{receiptLedger.receipt.model}"</span>,{"\n"}
+								<span className="text-white/80">"{receiptLedger.receipt.model}"</span>,{"\n"}
 								<span data-code-sample>{"  max_tokens: 1024,"}</span>
 								{"\n"}
 								{"  messages: [...],"}
@@ -76,7 +76,7 @@ export default function ExhibitA() {
 					    terminal-frame.tsx on why footers stay per-surface). */}
 					<ExhibitAAnnotations annotations={ANNOTATIONS}>
 						<TerminalFrame
-							className="receipt-terminal shadow-[0_14px_40px_rgba(0,0,0,0.5)]"
+							className="receipt-terminal"
 							title={
 								<div className="flex items-center gap-2">
 									<span aria-hidden="true" className="h-2 w-2 rounded-full bg-white/15" />
@@ -86,7 +86,7 @@ export default function ExhibitA() {
 								</div>
 							}
 							footer={
-								<div className="border-t border-white/10 px-5 py-2.5 font-mono text-[12px] tracking-wide text-white/40">
+								<div className="border-t border-white/10 px-5 py-2.5 font-mono text-[12px] tracking-wide text-white/70">
 									{provenanceLine}
 								</div>
 							}

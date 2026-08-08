@@ -28,7 +28,7 @@ function ThrownDenialCard() {
 				<span className="font-bold text-danger">{THROWN_DENIAL.name}</span>
 				{`: ${THROWN_DENIAL.message}`}
 			</pre>
-			<p className="mt-4 border-t border-dashed border-white/15 pt-2 text-[10px] leading-5 text-white/35">
+			<p className="mt-4 border-t border-dashed border-white/15 pt-2 text-[12px] leading-5 text-white/70">
 				captured on {THROWN_DENIAL.capturedWith} — {THROWN_DENIAL.capturedFrom}
 			</p>
 		</TerminalFrame>
@@ -37,7 +37,7 @@ function ThrownDenialCard() {
 
 export default function ExhibitC() {
 	return (
-		<section id="exhibit-c" className="relative py-24 sm:py-32 safe-x">
+		<section id="exhibit-c" className="ground-zone relative py-24 sm:py-32 safe-x">
 			<div className="mx-auto max-w-6xl">
 				<p className="font-mono text-xs uppercase tracking-widest text-white/40">exhibit c</p>
 				<div className="mt-3 flex items-center gap-1.5">
@@ -46,7 +46,7 @@ export default function ExhibitC() {
 				<h2 className="mt-4 font-display font-bold lowercase leading-[0.95] tracking-tight text-white text-[clamp(2.5rem,6vw,4.5rem)]">
 					hold. settle. or void.
 				</h2>
-				<p className="mt-6 max-w-xl font-mono text-sm leading-6 text-white/60">
+				<p className="mt-6 max-w-xl font-mono text-sm leading-6 text-white/70">
 					the banking pattern: held, then settled or voided. never lost.
 				</p>
 				<p className="mt-4 max-w-2xl text-base leading-relaxed text-white/70">
@@ -65,12 +65,12 @@ export default function ExhibitC() {
 				<div className="mt-10">
 					<ExhibitCRace budget={BUDGET} />
 					<noscript>
-						<p className="mt-3 font-mono text-xs text-white/50">
+						<p className="mt-3 font-mono text-xs text-white/70">
 							the sliders need JavaScript — shown: two-phase holds with {defaults.agents} agents at{" "}
 							{formatUsertokens(defaults.costPerCall)} per call. the retry is denied.
 						</p>
 					</noscript>
-					<p className="mt-3 font-mono text-[11px] leading-5 text-white/40">
+					<p className="mt-3 font-mono text-[12px] leading-5 text-white/70">
 						arithmetic, not a screenshot: the same gate the block-budget-overshoot default rule
 						enforces before every governed call. the error it throws is captured below, verbatim.
 					</p>
@@ -97,7 +97,7 @@ export default function ExhibitC() {
 					<div className="relative">
 						<Stamp word="BLOCKED" className="absolute -right-4 -top-6 z-10" />
 						<ThrownDenialCard />
-						<p className="mt-4 font-mono text-sm text-white/60">
+						<p className="mt-4 font-mono text-sm text-white/70">
 							the request throws. the ledger never moves.
 						</p>
 					</div>

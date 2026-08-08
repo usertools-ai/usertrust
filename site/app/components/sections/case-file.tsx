@@ -24,11 +24,11 @@ export default function CaseFile() {
 			title={
 				<div className="flex w-full items-center justify-between">
 					<span className="font-bold text-white/80">case file 001</span>
-					<span className="text-white/40">incident log</span>
+					<span className="text-white/70">incident log</span>
 				</div>
 			}
 			footer={
-				<div className="border-t border-dashed border-white/15 px-4 py-2 font-mono text-[12px] uppercase tracking-widest text-white/35">
+				<div className="border-t border-dashed border-white/15 px-4 py-2 font-mono text-[12px] uppercase tracking-widest text-white/70">
 					file closed — unstamped
 				</div>
 			}

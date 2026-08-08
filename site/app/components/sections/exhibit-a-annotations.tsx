@@ -183,7 +183,7 @@ export default function ExhibitAAnnotations({
 							onMouseLeave={() => setActive(null)}
 							onFocus={() => setActive(a.field)}
 							onBlur={() => setActive(null)}
-							className="focus-ring block max-w-[14rem] cursor-default text-left font-mono text-xs leading-5 text-white/60 transition-colors data-[active=true]:text-white"
+							className="focus-ring block max-w-[14rem] cursor-default text-left font-mono text-xs leading-5 text-white/70 transition-colors data-[active=true]:text-white"
 						>
 							{a.text}
 						</button>
@@ -257,14 +257,14 @@ export default function ExhibitAAnnotations({
 					className="absolute left-4 right-4 z-20 rounded-lg border border-white/15 bg-[#0f0f2a] p-4 shadow-xl md:hidden"
 					style={{ top: popover.top }}
 				>
-					<p className="font-mono text-[11px] uppercase tracking-widest text-tim">
+					<p className="font-mono text-[12px] uppercase tracking-widest text-tim">
 						{popover.field}
 					</p>
 					<p className="mt-1 font-mono text-sm leading-6 text-white/85">{popoverText}</p>
 					<button
 						type="button"
 						onClick={() => setPopover(null)}
-						className="focus-ring mt-3 font-mono text-xs uppercase tracking-widest text-white/50 underline"
+						className="focus-ring mt-3 font-mono text-xs uppercase tracking-widest text-white/70 underline"
 					>
 						close
 					</button>

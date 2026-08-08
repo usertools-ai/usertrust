@@ -13,7 +13,7 @@ function Term({ label, value, tone }: { label: string; value: string; tone?: "ok
 	const valueColor = tone === "ok" ? "text-ut" : tone === "bad" ? "text-danger" : "text-white";
 	return (
 		<span className="inline-flex flex-col">
-			<span className="font-mono text-[11px] uppercase tracking-widest text-tim/80">{label}</span>
+			<span className="font-mono text-[12px] uppercase tracking-widest text-tim">{label}</span>
 			<span className={`font-mono text-xl tabular-nums ${valueColor}`}>{value}</span>
 		</span>
 	);
@@ -49,7 +49,7 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 				<div>
 					<label
 						htmlFor={agentsId}
-						className="font-mono text-xs uppercase tracking-widest text-white/60"
+						className="font-mono text-xs uppercase tracking-widest text-white/70"
 					>
 						concurrent agents
 					</label>
@@ -75,7 +75,7 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 				<div>
 					<label
 						htmlFor={costId}
-						className="font-mono text-xs uppercase tracking-widest text-white/60"
+						className="font-mono text-xs uppercase tracking-widest text-white/70"
 					>
 						est. cost per call
 					</label>
@@ -109,7 +109,7 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 					type="button"
 					aria-pressed={!holdsMode}
 					onClick={() => setMode("none")}
-					className="focus-ring min-h-[44px] border border-white/15 px-4 py-2 font-mono text-sm text-white/50 transition-colors hover:text-white/80 aria-pressed:border-ut/60 aria-pressed:bg-ut/10 aria-pressed:text-white"
+					className="focus-ring min-h-[44px] border border-white/15 px-4 py-2 font-mono text-sm text-white/70 transition-colors hover:text-white/80 aria-pressed:border-ut/60 aria-pressed:bg-ut/10 aria-pressed:text-white"
 				>
 					without holds
 				</button>
@@ -117,7 +117,7 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 					type="button"
 					aria-pressed={holdsMode}
 					onClick={() => setMode("holds")}
-					className="focus-ring min-h-[44px] border border-white/15 px-4 py-2 font-mono text-sm text-white/50 transition-colors hover:text-white/80 aria-pressed:border-ut/60 aria-pressed:bg-ut/10 aria-pressed:text-white"
+					className="focus-ring min-h-[44px] border border-white/15 px-4 py-2 font-mono text-sm text-white/70 transition-colors hover:text-white/80 aria-pressed:border-ut/60 aria-pressed:bg-ut/10 aria-pressed:text-white"
 				>
 					two-phase holds
 				</button>
@@ -141,7 +141,7 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 				<Term label="Σ(holds)" value={fmt(holdsMode ? race.heldTotal : 0)} />
 			</div>
 			{!holdsMode && (
-				<p className="mt-2 font-mono text-xs text-white/50">
+				<p className="mt-2 font-mono text-xs text-white/70">
 					no holds were placed — the equation cannot see the race.
 				</p>
 			)}
@@ -193,7 +193,7 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 						/>
 					)}
 				</div>
-				<p className="mt-1 font-mono text-[10px] uppercase tracking-widest text-white/40">
+				<p className="mt-1 font-mono text-[12px] uppercase tracking-widest text-white/70">
 					{holdsMode
 						? "budget bar — holds stack. the cap is the wall."
 						: "budget bar — the white line is the cap. red is past it."}
@@ -223,7 +223,7 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 								<span className="text-white/45">{race.firstBlocked.label}</span>{" "}
 								<span className="font-bold text-danger">✗ {THROWN_DENIAL.name}</span>
 								<span className="text-white/70">: hold would exceed available budget</span>
-								<span className="mt-1 block tabular-nums text-white/50">
+								<span className="mt-1 block tabular-nums text-white/70">
 									hold {fmt(costPerCall)} &gt; available {fmt(race.available)} — nothing moved,
 									nothing owed
 								</span>
@@ -235,7 +235,7 @@ export default function ExhibitCRace({ budget }: { budget: number }) {
 							</li>
 						)}
 						{!race.firstBlocked && (
-							<li className="font-mono text-xs text-white/50">
+							<li className="font-mono text-xs text-white/70">
 								every hold fit — {fmt(race.available)} still available. push the race harder.
 							</li>
 						)}

@@ -30,7 +30,7 @@ function MerkleTree({ entries }: { entries: ChainSlice["entries"] }) {
 			viewBox={`0 0 ${geometry.viewBoxWidth} ${geometry.viewBoxHeight}`}
 			role="img"
 			aria-label="sparse merkle tree over the captured audit entries, reducing to a single root hash"
-			className="w-full max-w-2xl"
+			className="w-full"
 		>
 			{geometry.leafLines.map((ln) => (
 				<line
@@ -80,7 +80,7 @@ function MerkleTree({ entries }: { entries: ChainSlice["entries"] }) {
 						y={leaf.textY}
 						textAnchor="middle"
 						fill="#ffffff99"
-						className="text-[9px]"
+						className="text-[12px]"
 						fontFamily="var(--font-jetbrains), monospace"
 					>
 						{leaf.label}
@@ -110,7 +110,7 @@ function MerkleTree({ entries }: { entries: ChainSlice["entries"] }) {
 				x={geometry.root.labelX}
 				y={geometry.root.labelY}
 				fill="#34d399"
-				className="text-[10px]"
+				className="text-[12px]"
 				fontFamily="var(--font-jetbrains), monospace"
 			>
 				root
@@ -131,14 +131,16 @@ export default function ExhibitD() {
 				tamper with one byte. break the whole chain.
 			</h2>
 
-			<div className="mt-12">
-				<MerkleTree entries={slice.entries} />
+			<div className="mt-12 overflow-x-auto">
+				<div className="min-w-[40rem] max-w-2xl">
+					<MerkleTree entries={slice.entries} />
+				</div>
 			</div>
 
 			<div className="mt-8 grid gap-3">
 				<div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 border-t border-brand-border pt-3">
 					<h3 className="font-display text-xl lowercase text-white">the chain verifies itself</h3>
-					<p className="font-mono text-xs text-white/50">{MERKLE_CAPTION}</p>
+					<p className="font-mono text-xs text-white/70">{MERKLE_CAPTION}</p>
 				</div>
 				<div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-brand-border pt-3">
 					<h3 className="font-display text-xl lowercase text-white">
@@ -152,14 +154,14 @@ export default function ExhibitD() {
 							>
 								{b.label}
 								{b.experimental && (
-									<sup className="ml-1 font-mono text-[0.6rem] tracking-widest text-white/40">
+									<sup className="ml-1 font-mono text-[12px] tracking-widest text-white/70">
 										EXPERIMENTAL
 									</sup>
 								)}
 							</li>
 						))}
 					</ul>
-					<p className="w-full font-mono text-[11px] text-white/40">{DRY_RUN_LABEL}</p>
+					<p className="w-full font-mono text-[12px] text-white/70">{DRY_RUN_LABEL}</p>
 				</div>
 			</div>
 
@@ -183,7 +185,7 @@ export default function ExhibitD() {
 				view raw JSONL →
 			</a>
 			<p className="mt-6 font-mono text-xs text-white/40">{EU_FOOTNOTE}</p>
-			<p className="mt-2 font-mono text-[11px] text-white/30">{SMALL_PRINT}</p>
+			<p className="mt-2 font-mono text-[12px] text-white/70">{SMALL_PRINT}</p>
 		</section>
 	);
 }

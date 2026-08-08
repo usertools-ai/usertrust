@@ -145,7 +145,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 				</div>
 
 				<div className="flex items-center gap-6">
-					<div className="hidden md:flex items-center gap-5 text-sm text-white/60 font-medium">
+					<div className="hidden md:flex items-center gap-5 text-sm text-white/70 font-medium">
 						{links.map((link) => (
 							<a
 								key={link.href}
@@ -299,7 +299,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 								href={link.href}
 								onClick={() => setOpen(false)}
 								className={`focus-ring flex min-h-[44px] items-center px-3 py-2.5 text-sm font-medium rounded-lg hover:text-white hover:bg-white/[0.06] transition-colors duration-200 ${
-									activeSection === link.href ? "text-ut" : "text-white/60"
+									activeSection === link.href ? "text-ut" : "text-white/70"
 								}`}
 							>
 								{link.label}

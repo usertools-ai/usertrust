@@ -36,7 +36,7 @@ export default function TearOff() {
 				onClick={onClick}
 				animate={tearing ? { y: 2, rotate: -1.2, opacity: 0.35 } : { y: 0, rotate: 0, opacity: 1 }}
 				transition={TEAR_SPRING}
-				className="focus-ring mt-px flex min-h-[56px] w-full items-center justify-center bg-paper font-mono text-base font-bold uppercase tracking-widest text-ink hover:bg-paper/90"
+				className="lift-2 focus-ring mt-px flex min-h-[56px] w-full items-center justify-center bg-paper font-mono text-base font-bold uppercase tracking-widest text-ink hover:bg-paper/90"
 			>
 				open your ledger →
 			</motion.a>

@@ -86,7 +86,7 @@ export default function OpenLedger() {
 									<rect key={b.x} x={b.x} y={0} width={b.width} height={40} fill="currentColor" />
 								))}
 							</svg>
-							<p className="mt-1 font-mono text-[9px] tracking-wider text-ink/60">
+							<p className="mt-1 font-mono text-[12px] tracking-wider text-ink/70">
 								chain head {prefix}
 							</p>
 						</div>
@@ -104,7 +104,7 @@ export default function OpenLedger() {
 				<ul className="mt-6 grid gap-4 sm:grid-cols-3">
 					<li className="flex flex-col gap-3 rounded-sm border border-white/[0.06] bg-white/[0.02] p-5">
 						<p className="font-mono text-xs uppercase tracking-widest text-white/70">local SDK</p>
-						<p className="font-mono text-[11px] uppercase tracking-widest text-ut">
+						<p className="font-mono text-[12px] uppercase tracking-widest text-ut">
 							shipping today
 						</p>
 						<div className="mt-auto">
@@ -115,7 +115,7 @@ export default function OpenLedger() {
 						<p className="font-mono text-xs uppercase tracking-widest text-white/70">
 							self-hosted control plane
 						</p>
-						<p className="font-mono text-[11px] uppercase tracking-widest text-ut">
+						<p className="font-mono text-[12px] uppercase tracking-widest text-ut">
 							shipping today
 						</p>
 						<div className="mt-auto">

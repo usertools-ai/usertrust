@@ -77,7 +77,7 @@ export default function CopyChip({
 			{state === "copied" && (
 				<span
 					aria-hidden="true"
-					className="chit pointer-events-none absolute -top-3 right-2 rounded-sm bg-paper px-2 py-0.5 font-mono text-[10px] text-ink shadow-md"
+					className="chit pointer-events-none absolute -top-3 right-2 rounded-sm bg-paper px-2 py-0.5 font-mono text-[12px] text-ink shadow-md"
 				>
 					copied · $0.00
 				</span>
@@ -85,7 +85,7 @@ export default function CopyChip({
 			{state === "failed" && (
 				<span
 					aria-hidden="true"
-					className="chit pointer-events-none absolute -top-3 right-2 rounded-sm bg-danger px-2 py-0.5 font-mono text-[10px] text-white shadow-md"
+					className="chit pointer-events-none absolute -top-3 right-2 rounded-sm bg-paper-red px-2 py-0.5 font-mono text-[12px] text-white shadow-md"
 				>
 					copy failed
 				</span>

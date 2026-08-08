@@ -43,7 +43,7 @@ export default function HardenStrip() {
 				<dl className="mt-10 grid grid-cols-2 gap-px border border-white/10 bg-white/10 md:grid-cols-5">
 					{stats.map(({ label, stat }) => (
 						<div key={label} className="flex flex-col gap-2 bg-brand-bg p-5">
-							<dt className="font-mono text-[0.65rem] uppercase tracking-widest text-white/40">
+							<dt className="font-mono text-[12px] uppercase tracking-widest text-white/70">
 								{label}
 							</dt>
 							<dd className={statValueClassName(label)} title={stat.source}>
@@ -53,7 +53,7 @@ export default function HardenStrip() {
 					))}
 				</dl>
 				{/* provenance stub — counts derive from source at capture time */}
-				<p className="mt-3 font-mono text-[0.65rem] text-white/30">
+				<p className="mt-3 font-mono text-[12px] text-white/70">
 					counted at capture · {facts.commit} · v{facts.usertrustVersion}
 				</p>
 
@@ -65,7 +65,7 @@ export default function HardenStrip() {
 				<figure className="mt-12 max-w-3xl">
 					<blockquote
 						cite={AGENTS_URL}
-						className="overflow-hidden rounded-xl border border-white/10 bg-terminal p-4 font-mono text-[14px] leading-relaxed text-white/80 md:p-5"
+						className="lift-1 overflow-hidden rounded-xl border border-white/10 bg-terminal p-4 font-mono text-[14px] leading-relaxed text-white/80 md:p-5"
 					>
 						<p>{PARITY_QUOTE_CONTEXT}</p>
 						<p className="mt-4 text-white">{PARITY_QUOTE_RULE}</p>

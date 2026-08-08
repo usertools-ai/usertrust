@@ -39,7 +39,7 @@ export default function ReceiptPaper({
 			<div className="paper-surface relative text-ink">
 				<div className="px-5 py-6 sm:px-6">{children}</div>
 				{provenance ? (
-					<div className="mx-5 border-t border-dashed border-ink/20 py-2 font-mono text-[10px] leading-tight text-ink/60">
+					<div className="mx-5 border-t border-dashed border-ink/20 py-2 font-mono text-[12px] leading-tight text-ink/70">
 						{provenance}
 					</div>
 				) : null}

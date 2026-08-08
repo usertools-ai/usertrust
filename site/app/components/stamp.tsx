@@ -4,7 +4,7 @@ import { motion, useReducedMotion } from "motion/react";
 import { useEffect, useState } from "react";
 
 const BASE =
-	"inline-block select-none border-[3px] border-current px-3 py-1 font-display text-2xl font-bold uppercase tracking-[0.18em]";
+	"lift-2 inline-block select-none border-[3px] border-current px-3 py-1 font-display text-2xl font-bold uppercase tracking-[0.18em]";
 
 /**
  * Rubber-stamp set-piece (BLOCKED / VOID). SSR and no-JS render the FINISHED

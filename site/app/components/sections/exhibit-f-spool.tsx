@@ -41,11 +41,11 @@ function opsInLine(line: PolicyLine): PolicyOp[] {
  * clean fit for the shared {title, children} shape, imported directly into
  * this client island since TerminalFrame is plain markup with no
  * server-only APIs. The compact thrown-error card (right, in the narrow
- * w-64 print-spool column) stays a small receipt-style chit matching the
- * chit stack above it, not a full TerminalFrame: its 9–10px type and p-3
- * padding are scaled to the print-spool illustration, not the page's
- * code-surface body copy, and forcing the 14px contract onto it would
- * overpower that narrow column.
+ * w-72 print-spool column) stays a small receipt-style chit matching the
+ * chit stack above it, not a full TerminalFrame: its 12px type (the
+ * Addendum H1 floor) and p-3 padding are scaled to the print-spool
+ * illustration, not the page's code-surface body copy, and forcing the
+ * 14px contract onto it would overpower that narrow column.
  */
 export default function ExhibitFSpool() {
 	// "settled" is both the server HTML and the reduced-motion experience:
@@ -115,8 +115,8 @@ export default function ExhibitFSpool() {
 
 			{/* right: the print spool + the denial's thrown-error card */}
 			<div>
-				<div className="mx-auto w-64">
-					<div className="rounded-sm border border-brand-border bg-brand-surface px-3 py-2 text-center font-mono text-[0.6rem] uppercase tracking-widest text-white/40">
+				<div className="mx-auto w-72">
+					<div className="rounded-sm border border-brand-border bg-brand-surface px-3 py-2 text-center font-mono text-[12px] uppercase tracking-widest text-white/70">
 						print spool
 					</div>
 					<ol className="mt-3 flex flex-col gap-2">
@@ -149,7 +149,7 @@ export default function ExhibitFSpool() {
 											: undefined
 									}
 								>
-									<div className="flex items-center justify-between font-mono text-[0.6rem] text-white/40">
+									<div className="flex items-center justify-between font-mono text-[12px] text-white/70">
 										<span>{chit.id}</span>
 										{chit.verdict === "pass" ? (
 											<span className="text-ut">✓</span>
@@ -166,7 +166,7 @@ export default function ExhibitFSpool() {
 													className="mt-1 flex items-center gap-2"
 													data-operator={(ln.caughtBy ?? []).join(" ")}
 												>
-													<span className="font-mono text-[0.6rem] text-white/40">{ln.label}</span>
+													<span className="font-mono text-[12px] text-white/70">{ln.label}</span>
 													<span
 														role="img"
 														aria-label="card number redacted before it ever reached the ledger"
@@ -183,7 +183,7 @@ export default function ExhibitFSpool() {
 											<div
 												key={ln.label}
 												data-operator={(ln.caughtBy ?? []).join(" ")}
-												className={`mt-1 flex justify-between font-mono text-[0.65rem] ${chitLineClass(hot)}`}
+												className={`mt-1 flex justify-between font-mono text-[12px] ${chitLineClass(hot)}`}
 											>
 												<span>{ln.label}</span>
 												<span>{ln.value}</span>
@@ -197,22 +197,22 @@ export default function ExhibitFSpool() {
 
 					{/* the denial's evidence — a thrown error, NOT a chain entry */}
 					<div className="mt-6 border-t border-dashed border-brand-border pt-3">
-						<p className="font-mono text-[0.6rem] uppercase tracking-widest text-white/40">
+						<p className="font-mono text-[12px] uppercase tracking-widest text-white/70">
 							thrown, not chained
 						</p>
 						{railVisible ? (
 							<div
-								className={`relative mt-2 rounded-sm border border-danger/50 bg-danger/5 p-3 ${
+								className={`lift-1 relative mt-2 rounded-sm border border-danger/50 bg-danger/5 p-3 ${
 									phase === "playing" ? "rail-arrive" : ""
 								}`}
 							>
 								<Stamp word="BLOCKED" className="absolute -right-2 -top-3" />
-								<p className="font-mono text-[0.65rem] text-white/80">{RAIL_THROWN}</p>
-								<p className="mt-1 font-mono text-[0.6rem] text-white/50">{RAIL_REASON}</p>
+								<p className="font-mono text-[12px] text-white/80">{RAIL_THROWN}</p>
+								<p className="mt-1 font-mono text-[12px] text-white/70">{RAIL_REASON}</p>
 							</div>
 						) : (
 							/* reserved space — the card's arrival must not shift layout */
-							<div className="mt-2 h-20" aria-hidden="true" />
+							<div className="mt-2 h-24" aria-hidden="true" />
 						)}
 					</div>
 				</div>

@@ -81,38 +81,43 @@ const tiles: Tile[] = [
  */
 export default function Docket() {
 	return (
-		<section id="docket" className="relative mx-auto w-full max-w-6xl safe-x py-24 sm:py-32">
-			<p className="font-mono text-xs uppercase tracking-[0.25em] text-white/40">the docket</p>
-			<h2 className="mt-3 font-display font-bold lowercase leading-[0.95] text-white text-[clamp(2.5rem,6vw,4.5rem)]">
-				the facts, itemized.
-			</h2>
-			{/* InView is a regular client component imported normally (no
+		<section id="docket" className="ground-zone relative w-full safe-x py-24 sm:py-32">
+			<div className="mx-auto max-w-6xl">
+				<p className="font-mono text-xs uppercase tracking-[0.25em] text-white/40">the docket</p>
+				<h2 className="mt-3 font-display font-bold lowercase leading-[0.95] text-white text-[clamp(2.5rem,6vw,4.5rem)]">
+					the facts, itemized.
+				</h2>
+				{/* InView is a regular client component imported normally (no
 			    next/dynamic ssr:false — unsupported in server components on
 			    the current Next.js major); it code-splits automatically with
 			    the route. */}
-			<InView className="mt-12 grid grid-cols-2 border border-[rgba(52,211,153,0.08)] md:grid-cols-4">
-				{tiles.map((t) => (
-					<div key={t.caption} className="docket-tile relative flex flex-col gap-3 p-6 sm:p-8">
-						<span className="docket-hairline docket-hairline-h" aria-hidden="true" />
-						<span className="docket-hairline docket-hairline-v" aria-hidden="true" />
-						<a
-							href={t.href}
-							className="focus-ring self-start font-mono text-[10px] tracking-wide text-tim transition-colors hover:text-white"
-						>
-							→ {t.exhibit}
-						</a>
-						{/* Static numeral — never counts up, never animates. */}
+				<InView className="mt-12 grid grid-cols-2 border border-[rgba(52,211,153,0.08)] md:grid-cols-4">
+					{tiles.map((t) => (
 						<div
-							className={`font-mono font-bold tabular-nums leading-none text-white ${
-								t.small ? "text-[clamp(1.3rem,2.6vw,2rem)]" : "text-[clamp(3rem,7vw,5.5rem)]"
-							}`}
+							key={t.caption}
+							className="docket-tile lift-1 relative flex flex-col gap-3 p-6 sm:p-8"
 						>
-							{t.value}
+							<span className="docket-hairline docket-hairline-h" aria-hidden="true" />
+							<span className="docket-hairline docket-hairline-v" aria-hidden="true" />
+							<a
+								href={t.href}
+								className="focus-ring self-start font-mono text-[12px] tracking-wide text-tim transition-colors hover:text-white"
+							>
+								→ {t.exhibit}
+							</a>
+							{/* Static numeral — never counts up, never animates. */}
+							<div
+								className={`font-mono font-bold tabular-nums leading-none text-white ${
+									t.small ? "text-[clamp(1.3rem,2.6vw,2rem)]" : "text-[clamp(3rem,7vw,5.5rem)]"
+								}`}
+							>
+								{t.value}
+							</div>
+							<div className="font-mono text-[12px] leading-snug text-white/70">{t.caption}</div>
 						</div>
-						<div className="font-mono text-[11px] leading-snug text-white/50">{t.caption}</div>
-					</div>
-				))}
-			</InView>
+					))}
+				</InView>
+			</div>
 		</section>
 	);
 }

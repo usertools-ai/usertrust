@@ -61,84 +61,86 @@ function verdictClass(verdict: string): string {
 
 export default function ExhibitG() {
 	return (
-		<section id="exhibit-g" className="safe-x relative mx-auto max-w-6xl py-24 md:py-32">
-			<p className="font-mono text-xs uppercase tracking-[0.3em] text-white/40">exhibit g</p>
-			<div className="mt-3 flex items-center gap-1.5">
-				<StageTag stage="VERIFY" />
-			</div>
-			<h2 className="font-display mt-4 lowercase leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
-				every way we know to forge a ledger.
-			</h2>
-			<p className="font-display mt-2 lowercase leading-none text-white/50 text-[clamp(1.5rem,3.5vw,2.75rem)]">
-				verified to fail, every one.
-			</p>
-			{/* the count numeral derives from the fixture — the headline word
-			    carries no digit (check-facts stays clean by construction) */}
-			<p className="mt-4 font-mono text-xs text-white/40">
-				<span className="text-2xl leading-none text-white/90">{corpus.attacks.length}</span>{" "}
-				scenarios · every verdict below is the string the verifier really returns
-			</p>
-
-			{/* terminal-styled corpus table — every row links to the real test file */}
-			<TerminalFrame
-				className="mt-10"
-				title={
-					<div className="flex w-full items-center justify-between gap-4">
-						<span className="min-w-0 truncate">
-							packages/core/tests/harden/anchoring/anchor-corpus.test.ts
-						</span>
-						<span className="shrink-0">{corpus.attacks.length} rows</span>
-					</div>
-				}
-			>
-				<InView>
-					<ol className="list-none">
-						{corpus.attacks.map((attack, i) => (
-							<li
-								key={attack.name}
-								className="attack-row"
-								style={{ animationDelay: `${i * ROW_STAGGER_MS}ms` }}
-							>
-								<a
-									href={CORPUS_TEST_URL}
-									target="_blank"
-									rel="noreferrer"
-									title={attack.name}
-									className="focus-ring flex items-baseline justify-between gap-6 rounded-sm px-2 py-1.5 transition-colors hover:bg-white/[0.04]"
-								>
-									<span className="min-w-0 flex-1 truncate text-white/85">{attack.name}</span>
-									<span
-										className={`shrink-0 uppercase tracking-wide ${verdictClass(attack.verdict)}`}
-									>
-										{attack.verdict}
-									</span>
-								</a>
-							</li>
-						))}
-					</ol>
-				</InView>
-			</TerminalFrame>
-
-			{/* reproduction block — the corpus is one command sequence away */}
-			<div className="mt-8 max-w-2xl">
-				<div className="mb-3 flex items-center justify-between gap-4">
-					<span className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/50">
-						reproduce it yourself
-					</span>
-					<CopyChip text={REPRO_COMMAND} label="copy reproduction commands" />
+		<section id="exhibit-g" className="ground-zone safe-x relative py-24 md:py-32">
+			<div className="mx-auto max-w-6xl">
+				<p className="font-mono text-xs uppercase tracking-[0.3em] text-white/40">exhibit g</p>
+				<div className="mt-3 flex items-center gap-1.5">
+					<StageTag stage="VERIFY" />
 				</div>
-				<TerminalFrame>
-					<pre>
-						{REPRO_LINES.map((line) => (
-							<div key={line}>
-								<span className="select-none text-white/35">$ </span>
-								{line}
-							</div>
-						))}
-					</pre>
+				<h2 className="font-display mt-4 lowercase leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
+					every way we know to forge a ledger.
+				</h2>
+				<p className="font-display mt-2 lowercase leading-none text-white/50 text-[clamp(1.5rem,3.5vw,2.75rem)]">
+					verified to fail, every one.
+				</p>
+				{/* the count numeral derives from the fixture — the headline word
+			    carries no digit (check-facts stays clean by construction) */}
+				<p className="mt-4 font-mono text-xs text-white/40">
+					<span className="text-2xl leading-none text-white/90">{corpus.attacks.length}</span>{" "}
+					scenarios · every verdict below is the string the verifier really returns
+				</p>
+
+				{/* terminal-styled corpus table — every row links to the real test file */}
+				<TerminalFrame
+					className="mt-10"
+					title={
+						<div className="flex w-full items-center justify-between gap-4">
+							<span className="min-w-0 truncate">
+								packages/core/tests/harden/anchoring/anchor-corpus.test.ts
+							</span>
+							<span className="shrink-0">{corpus.attacks.length} rows</span>
+						</div>
+					}
+				>
+					<InView>
+						<ol className="list-none">
+							{corpus.attacks.map((attack, i) => (
+								<li
+									key={attack.name}
+									className="attack-row"
+									style={{ animationDelay: `${i * ROW_STAGGER_MS}ms` }}
+								>
+									<a
+										href={CORPUS_TEST_URL}
+										target="_blank"
+										rel="noreferrer"
+										title={attack.name}
+										className="focus-ring flex items-baseline justify-between gap-6 rounded-sm px-2 py-1.5 transition-colors hover:bg-white/[0.04]"
+									>
+										<span className="min-w-0 flex-1 truncate text-white/85">{attack.name}</span>
+										<span
+											className={`shrink-0 uppercase tracking-wide ${verdictClass(attack.verdict)}`}
+										>
+											{attack.verdict}
+										</span>
+									</a>
+								</li>
+							))}
+						</ol>
+					</InView>
 				</TerminalFrame>
+
+				{/* reproduction block — the corpus is one command sequence away */}
+				<div className="mt-8 max-w-2xl">
+					<div className="mb-3 flex items-center justify-between gap-4">
+						<span className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+							reproduce it yourself
+						</span>
+						<CopyChip text={REPRO_COMMAND} label="copy reproduction commands" />
+					</div>
+					<TerminalFrame>
+						<pre>
+							{REPRO_LINES.map((line) => (
+								<div key={line}>
+									<span className="select-none text-white/35">$ </span>
+									{line}
+								</div>
+							))}
+						</pre>
+					</TerminalFrame>
+				</div>
+				<p className="mt-3 font-mono text-xs text-white/40">don&rsquo;t trust us — recompute us.</p>
 			</div>
-			<p className="mt-3 font-mono text-xs text-white/40">don&rsquo;t trust us — recompute us.</p>
 		</section>
 	);
 }

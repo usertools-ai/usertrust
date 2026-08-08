@@ -3,6 +3,7 @@ import type { EvidenceFacts } from "@/evidence/types";
 import TerminalFrame from "../terminal-frame";
 import ExhibitBDie from "./exhibit-b-die";
 import ExhibitBTabs from "./exhibit-b-tabs";
+import { PROVIDER_BADGES, PROVIDER_LOGOS, PROVIDER_VIEWBOX } from "./lib/provider-logos";
 
 const facts = (factsJson as EvidenceFacts).facts;
 
@@ -89,9 +90,44 @@ export default function ExhibitB() {
 				</div>
 
 				{/* BYOK creed */}
-				<p className="mt-8 font-mono text-sm tracking-wide text-white/60">
+				<p className="mt-8 font-mono text-sm tracking-wide text-white/70">
 					{"your keys. your billing. your evidence."}
 				</p>
+
+				{/* works with — model-provider marks, monochrome ghosted (the
+				    provider-logo addendum). Graphics register: white at 45%
+				    resting clears the graphics-only contrast floor (a lower bar
+				    than body text, validated); hover lifts to white at 85%.
+				    Nominative use only — no color, no endorsement. No uppercase
+				    class on the badges: casing is the brand. */}
+				<div className="mt-10">
+					<p className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+						works with
+					</p>
+					<ul aria-label="model providers" className="mt-4 flex flex-wrap items-center gap-8">
+						{PROVIDER_LOGOS.map((logo) => (
+							<li key={logo.name} className="text-white/45 transition-colors hover:text-white/85">
+								<svg
+									viewBox={PROVIDER_VIEWBOX}
+									role="img"
+									aria-label={logo.name}
+									fill="currentColor"
+									className="h-5 w-auto"
+								>
+									<path d={logo.path} />
+								</svg>
+							</li>
+						))}
+						{PROVIDER_BADGES.map((badge) => (
+							<li
+								key={badge}
+								className="font-mono text-[12px] tracking-[0.12em] text-white/45 transition-colors hover:text-white/85"
+							>
+								{badge}
+							</li>
+						))}
+					</ul>
+				</div>
 
 				{/* GOVERNED SURFACES — the boundary, stated precisely. Renders through
 				    the shared TerminalFrame with a plain string title ("governed
@@ -118,7 +154,7 @@ export default function ExhibitB() {
 								</div>
 								<SurfaceColumn
 									title="passthrough — not governed"
-									titleClass="text-white opacity-50"
+									titleClass="text-white opacity-70"
 									groups={PASSTHROUGH}
 								/>
 							</div>

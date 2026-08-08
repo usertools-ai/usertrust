@@ -82,13 +82,13 @@ export default function ExhibitDDom({ entries }: { entries: Entries }) {
 							<li key={entry.hash} className="flex items-center">
 								<article className={cardStateClassName(failed)}>
 									<header className="flex items-baseline justify-between">
-										<span className="text-white/50">entry {entry.seq}</span>
+										<span className="text-white/70">entry {entry.seq}</span>
 										<span className={failed ? "text-danger" : "text-ut"}>
 											{isTampered ? "TAMPERED" : isDownstream ? "FAILED" : "✓"}
 										</span>
 									</header>
 									<p className="mt-2 truncate text-white/80">{entry.type}</p>
-									<p className="mt-1 truncate text-white/50">
+									<p className="mt-1 truncate text-white/70">
 										{isTampered ? (
 											<>
 												<mark className="bg-danger/30 text-danger">{first}</mark>
@@ -146,7 +146,7 @@ export default function ExhibitDDom({ entries }: { entries: Entries }) {
 				</button>
 				<p role="status" aria-live="polite" className="font-mono text-xs">
 					{verdict === null ? (
-						<span className="text-white/50">
+						<span className="text-white/70">
 							chain intact — {entries.length} entries, every prevHash verified
 						</span>
 					) : (
