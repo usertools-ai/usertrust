@@ -21,15 +21,22 @@ export interface ModelRates {
 	 * provider publishes no cache-read rate. Absent does NOT mean free —
 	 * `costFromRates` resolves it to `inputPer1k` (the D1 money invariant).
 	 * Never set this to 0 to mean "unknown"; omit the field instead.
+	 *
+	 * `| undefined` is explicit because the repo runs `exactOptionalPropertyTypes`
+	 * and this type also receives Zod-parsed config rates (`RateSchema`), whose
+	 * inference for an optional field is `number | undefined`. An explicit
+	 * `undefined` is treated exactly like absence by `effectiveCacheRate`, so the
+	 * D1 invariant holds for both shapes; omitting the key is still the form to
+	 * write by hand.
 	 */
-	cacheReadPer1k?: number;
+	cacheReadPer1k?: number | undefined;
 	/**
 	 * Rate for cache-WRITE tokens (cache creation).
 	 *
 	 * Same absence semantics as `cacheReadPer1k`: omitted means "unpublished",
 	 * and `costFromRates` prices those tokens at `inputPer1k`.
 	 */
-	cacheWritePer1k?: number;
+	cacheWritePer1k?: number | undefined;
 }
 
 /**

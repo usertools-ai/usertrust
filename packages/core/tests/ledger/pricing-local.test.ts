@@ -205,6 +205,61 @@ describe("resolveRates — cloud scope", () => {
 	});
 });
 
+describe("config-declared cache rates survive parsing and reach the money path (D1)", () => {
+	// The end-to-end proof for the RateSchema fix. Schema-level round-trip is
+	// pinned in tests/shared/config-schema.test.ts; this pins the consequence that
+	// actually costs money: an operator's declared cache-read discount must be the
+	// rate costFromRates bills at, not inputPer1k.
+	it("prices a custom entry's cache tokens at the operator's declared rates", () => {
+		const config = makeConfig({
+			pricing: "custom",
+			customRates: {
+				"my-fine-tune": {
+					inputPer1k: 100,
+					outputPer1k: 200,
+					cacheReadPer1k: 10,
+					cacheWritePer1k: 125,
+				},
+			},
+		});
+		const { rates } = resolveRates("my-fine-tune", "cloud", config);
+		expect(rates.cacheReadPer1k).toBe(10);
+		expect(rates.cacheWritePer1k).toBe(125);
+
+		// 1k input @100 + 1k output @200 + 1k read @10 + 1k write @125 = 435.
+		expect(costFromRates(rates, 1000, 1000, 1000, 1000)).toBe(435);
+		// If the fields were stripped, both cache tiers would fall back to
+		// inputPer1k (D1) and the call would bill 100 + 200 + 100 + 100 = 500.
+		expect(costFromRates(rates, 1000, 1000, 1000, 1000)).not.toBe(500);
+	});
+
+	it("an explicit 0 in config zero-rates that tier (override, not absence)", () => {
+		const config = makeConfig({
+			pricing: "custom",
+			customRates: {
+				"free-cache": { inputPer1k: 100, outputPer1k: 100, cacheReadPer1k: 0 },
+			},
+		});
+		const { rates } = resolveRates("free-cache", "cloud", config);
+		// 1k input @100 only; the 1k cache-read tokens bill at the declared 0.
+		expect(costFromRates(rates, 1000, 0, 1000, 0)).toBe(100);
+	});
+
+	it("local.models cache rates reach costFromRates too (shared RateSchema)", () => {
+		const config = makeConfig({
+			local: {
+				models: {
+					"llama3.3*": { inputPer1k: 10, outputPer1k: 20, cacheReadPer1k: 1, cacheWritePer1k: 5 },
+				},
+			},
+		});
+		const { rates } = resolveRates("llama3.3:70b", "local", config);
+		expect(rates.cacheReadPer1k).toBe(1);
+		// 1k read @1 + 1k write @5 = 6, not 2 x inputPer1k = 20.
+		expect(costFromRates(rates, 0, 0, 1000, 1000)).toBe(6);
+	});
+});
+
 describe("costFromRates", () => {
 	it("agrees with estimateCost for table models (refactor regression)", () => {
 		expect(costFromRates(getModelRates("claude-sonnet-4-6"), 1000, 500)).toBe(

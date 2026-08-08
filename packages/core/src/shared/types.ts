@@ -91,10 +91,23 @@ export interface TrustedResponse<T> {
 
 // ── Config schema ──
 
-/** Per-1k-token rate pair (usertokens). Shared by customRates and local.* rates. */
+/**
+ * Per-1k-token rate tiers (usertokens). Shared by customRates and local.* rates,
+ * and structurally the config-side mirror of `ModelRates` (ledger/pricing.ts).
+ *
+ * The two cache tiers are OPTIONAL and their absence is MEANINGFUL (D1): an
+ * omitted tier is not free, it prices at `inputPer1k` inside `costFromRates`.
+ * So they must stay `.optional()` with no default — a default of 0 would
+ * zero-bill cache tokens, and z.object() is closed, so leaving them undeclared
+ * silently STRIPS rates an operator wrote in usertrust.config.json (which is the
+ * same zero-billing outcome one indirection away). `.nonnegative()` still admits
+ * an explicit 0, which `costFromRates` honours as a deliberate override.
+ */
 const RateSchema = z.object({
 	inputPer1k: z.number().finite().nonnegative(),
 	outputPer1k: z.number().finite().nonnegative(),
+	cacheReadPer1k: z.number().finite().nonnegative().optional(),
+	cacheWritePer1k: z.number().finite().nonnegative().optional(),
 });
 
 export const TrustConfigSchema = z.object({
