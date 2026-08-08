@@ -451,9 +451,17 @@ provider publishes no rate for that tier, not that the tier is free. `costFromRa
 absent (or non-finite/negative) cache rate to the model's `inputPer1k`, and that resolution happens
 in exactly one place — `effectiveCacheRate` in `ledger/pricing.ts`. Never inline
 `rate ?? rates.inputPer1k` (or equivalent) anywhere else; a second resolution site is exactly how a
-silent discount gets introduced. `resolveAppliedRates` (published on `receipt.meter.appliedRates`)
+silent discount gets introduced. `resolveAppliedRates` (published on `receipt.pricing.appliedRates`)
 goes through the same function, so the rates an auditor sees are the rates the cost was computed
-with.
+with. It returns a FROZEN snapshot and each record surface gets its own copy: one resolved object
+reaches the caller's receipt, the chain event and (for streams) the pre-settle handle, so a shared
+mutable object would let a caller rewrite the rates the chain records without touching the cost.
+
+**New receipt fields go at the ROOT, never inside `meter`.** `receipt.v1.schema.json` is frozen
+and declares `meter` with `additionalProperties: false` while leaving the receipt root open. A
+field added inside `meter` therefore makes every v1 validator reject every receipt usertrust
+emits — a compatibility break with no error message. This is why the D5 rate surface is
+`receipt.pricing`, a sibling of `meter`, and it binds anything added later.
 *Prevents:* the failure this whole ship exists to kill — a 1.14B-cache-read day billed at zero
 because a two-tier `ModelRates`/extractor pair had nowhere to price cache tokens, understating spend
 ~7-8x. Overstatement is the fail-safe direction: a mispriced call costs too much, never too little,

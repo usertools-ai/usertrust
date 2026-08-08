@@ -296,7 +296,7 @@ export function effectiveCacheWriteRate(rates: ModelRates): number {
 
 /**
  * The four RESOLVED per-1k rates a settle is metered with — the record-surface
- * half of the D1 invariant, and what `receipt.meter.appliedRates` publishes.
+ * half of the D1 invariant, and what `receipt.pricing.appliedRates` publishes.
  *
  * Same `effectiveCacheRate` the money goes through, deliberately: the published
  * rates and the rates the cost was computed with are the SAME resolution, so
@@ -306,14 +306,44 @@ export function effectiveCacheWriteRate(rates: ModelRates): number {
  * in exactly the tiers the fallback makes non-zero, and an auditor recomputing
  * from the record would understate the bill: the same failure direction this
  * whole ship exists to kill.
+ *
+ * THE RESULT IS FROZEN (Codex PR-85 P1-2), and that is load-bearing rather than
+ * hygienic. One snapshot is resolved per governed call and then shared by every
+ * record surface that call produces — the estimate-priced stream handle HANDED
+ * TO THE CALLER before the stream is consumed, the `llm_call` chain event
+ * written at the terminal, and the settled receipt. Without the freeze, a
+ * caller could mutate the rates on the handle it holds and the mutated numbers
+ * would be what the audit chain records, while the cost stayed computed from
+ * the untouched `ModelRates`. The chain would hash and verify perfectly around
+ * rates that never priced anything — a receipt whose own recompute disagrees
+ * with its own cost, with nothing in the record to show it happened.
+ *
+ * All four fields are numbers, so the shallow freeze is a deep freeze.
  */
 export function resolveAppliedRates(rates: ModelRates): AppliedRates {
-	return {
+	return Object.freeze({
 		inputPer1k: rates.inputPer1k,
 		outputPer1k: rates.outputPer1k,
 		cacheReadPer1k: effectiveCacheRate(rates.cacheReadPer1k, rates.inputPer1k),
 		cacheWritePer1k: effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k),
-	};
+	});
+}
+
+/**
+ * An INDEPENDENT frozen copy of a resolved rate snapshot, for one record
+ * surface (Codex PR-85 P1-2).
+ *
+ * `resolveAppliedRates` already freezes, so this is defence in depth rather
+ * than the primary guard: it means no two surfaces of a call — caller-visible
+ * receipt, audit event, settled receipt — share object identity, so no single
+ * escape hatch (a future refactor that drops the freeze, a `structuredClone`
+ * round trip that loses it, a host that re-exposes the object) can turn a
+ * mutation on one into a rewrite of another. Call it at the point of emission,
+ * not at the point of resolution: the whole risk is one object reaching several
+ * consumers.
+ */
+export function copyAppliedRates(rates: AppliedRates): AppliedRates {
+	return Object.freeze({ ...rates });
 }
 
 /**
@@ -340,12 +370,22 @@ function tieredCostRaw(
 	const cacheWriteTok =
 		Number.isFinite(cacheWriteTokens) && cacheWriteTokens > 0 ? cacheWriteTokens : 0;
 
-	const inputCost = (inTok / 1000) * rates.inputPer1k;
-	const outputCost = (outTok / 1000) * rates.outputPer1k;
+	// OPERATION ORDER IS PART OF THE CONTRACT (Codex PR-85 P2-4). Multiply THEN
+	// divide — `(tokens * ratePer1k) / 1000`, never `(tokens / 1000) * ratePer1k`.
+	// The two are equal in real arithmetic and NOT equal in IEEE-754: `560 / 1000`
+	// is inexact, so the divide-first form yields 7.000000000000001 where the
+	// published form yields exactly 7, and the `Math.ceil` below turns that 1-ulp
+	// residue into a whole extra usertoken. This exact expression — mirrored in
+	// receipt.v2.schema.json, docs/api/types.mdx and the reconciliation integration
+	// test as `ceil(sum(counts x rates / 1000))` — is what an auditor recomputes
+	// from a receipt, so it must be what the money is computed with. Do not
+	// "simplify" the order.
+	const inputCost = (inTok * rates.inputPer1k) / 1000;
+	const outputCost = (outTok * rates.outputPer1k) / 1000;
 	const cacheReadCost =
-		(cacheReadTok / 1000) * effectiveCacheRate(rates.cacheReadPer1k, rates.inputPer1k);
+		(cacheReadTok * effectiveCacheRate(rates.cacheReadPer1k, rates.inputPer1k)) / 1000;
 	const cacheWriteCost =
-		(cacheWriteTok / 1000) * effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k);
+		(cacheWriteTok * effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k)) / 1000;
 
 	return inputCost + outputCost + cacheReadCost + cacheWriteCost;
 }

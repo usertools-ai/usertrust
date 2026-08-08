@@ -71,14 +71,27 @@ interface TrustReceipt {
     costBasis: CostBasis;
     rateSource: RateSource;
     computeMs?: number;
+  };
+  /** The rate half of the reconciliation surface. Frozen; every LLM settle emits it. */
+  pricing?: {
     /** The four resolved per-1k rates the cost was computed with. */
-    appliedRates?: AppliedRates;
+    appliedRates: AppliedRates;
     /** Date-stamped PRICING_TABLE version the rates came from. */
-    pricingTableVersion?: string;
+    tableVersion: string;
   };
   budget?: { costCenter: string; remaining: number; fraction?: number };
 }
 ```
+
+`pricing` is a **root-level sibling** of `meter`, not a member of it. That placement is deliberate:
+[`receipt.v1.schema.json`](https://usertrust.ai/schemas/receipt.v1.schema.json) declares `meter`
+with `additionalProperties: false` while leaving the receipt root open, so growing `meter` would
+make every v1 validator reject every receipt usertrust emits — and v1 is frozen. Adding at the root
+keeps v1 validators green and costs recomputability nothing.
+
+`pricing.appliedRates` is **frozen**, and each record surface (the receipt, the `llm_call` chain
+event, a stream's pre-settle handle) gets its own copy. Mutating what you were handed cannot make
+the rates recorded in the audit chain diverge from the rates your cost was computed with.
 
 ### ReceiptUsage
 

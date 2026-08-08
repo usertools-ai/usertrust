@@ -267,11 +267,11 @@ function twoTierCost(usage: ReceiptUsage, rates: AppliedRates): number {
 function recordOf(receipt: TrustReceipt): { usage: ReceiptUsage; rates: AppliedRates } {
 	expect(receipt.usageSource).toBe("provider");
 	const usage = receipt.usage;
-	const rates = receipt.meter?.appliedRates;
+	const rates = receipt.pricing?.appliedRates;
 	if (usage === undefined || rates === undefined) {
 		throw new Error("receipt is not recomputable: usage or appliedRates missing");
 	}
-	expect(receipt.meter?.pricingTableVersion).toBe(PRICING_TABLE_VERSION);
+	expect(receipt.pricing?.tableVersion).toBe(PRICING_TABLE_VERSION);
 	return { usage, rates };
 }
 

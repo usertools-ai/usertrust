@@ -156,10 +156,18 @@ at 1 usertoken, same as `estimateCost()`.
 ```typescript
 // 1,000 fresh input + 500 output + 2,000 cache-read tokens on claude-sonnet-4-6
 costFromRates(getModelRates("claude-sonnet-4-6"), 1000, 500, 2000, 0)
-// → Math.max(1, Math.ceil((1000/1000 * 30) + (500/1000 * 150) + (2000/1000 * 3)))
+// → Math.max(1, Math.ceil((1000 * 30)/1000 + (500 * 150)/1000 + (2000 * 3)/1000))
 // → Math.max(1, Math.ceil(30 + 75 + 6))
 // → 111 UT
 ```
+
+Each tier is computed as `(tokens × ratePer1k) / 1000` — **multiply before dividing**. This is the
+same order the [receipt schema](https://usertrust.ai/schemas/receipt.v2.schema.json) publishes as
+`ceil(sum(counts × rates / 1000))`, and it is load-bearing rather than stylistic: in IEEE-754 the
+divide-first form `(tokens / 1000) × ratePer1k` can land a ulp above an integer (560 cache-write
+tokens at 12.5/1k give `7.000000000000001`), which `Math.ceil` then rounds to a whole extra
+usertoken. Reconciling against a receipt with the published formula reproduces the charged cost
+exactly, on every input.
 
 ### estimateCost()
 
@@ -174,7 +182,7 @@ prevent zero-amount transfers in TigerBeetle).
 ```typescript
 // 1,000 input tokens + 500 output tokens on claude-sonnet-4-6
 estimateCost("claude-sonnet-4-6", 1000, 500)
-// → Math.max(1, Math.ceil((1000/1000 * 30) + (500/1000 * 150)))
+// → Math.max(1, Math.ceil((1000 * 30)/1000 + (500 * 150)/1000))
 // → Math.max(1, Math.ceil(30 + 75))
 // → 105 UT
 ```
@@ -214,8 +222,8 @@ const PRICING_TABLE_VERSION: string  // e.g. "2026-08-08"
 ```
 
 Date-stamped version of the built-in `PRICING_TABLE`, bumped whenever any entry's rates change.
-Recorded on every settled receipt (`receipt.meter.pricingTableVersion`) alongside the resolved
-rates (`receipt.meter.appliedRates`) so a metered cost can be reproduced exactly against the table
+Recorded on every settled receipt (`receipt.pricing.tableVersion`) alongside the resolved
+rates (`receipt.pricing.appliedRates`) so a metered cost can be reproduced exactly against the table
 version that priced it, independent of the SDK version currently installed.
 
 ## Hold sizing and the cache-write premium

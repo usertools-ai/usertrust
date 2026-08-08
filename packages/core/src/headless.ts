@@ -76,6 +76,7 @@ import {
 } from "./govern.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
+	copyAppliedRates,
 	costFromRates,
 	effectiveCacheWriteRate,
 	estimateCost,
@@ -1322,7 +1323,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						// trust, not a reconciliation surface. Mirrors the receipt
 						// exactly: same snapshot, same resolution.
 						...usageAudit,
-						appliedRates,
+						// P1-1: the chain event keeps its FLAT shape — audit-event.v1
+						// documents `data` as open and it already flattens the receipt's
+						// meter. The receipt-side relocation was forced by receipt.v1's
+						// CLOSED `meter` object, which has no counterpart here.
+						// P1-2: its own frozen copy.
+						appliedRates: copyAppliedRates(appliedRates),
 						pricingTableVersion: PRICING_TABLE_VERSION,
 						...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
 						source: "headless",
@@ -1427,15 +1433,19 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				meter: {
 					costBasis: rateInfo.costBasis,
 					rateSource: rateInfo.rateSource,
-					// D5: what the rates WERE, beside where they came from. Only this
-					// makes a custom/local-model cost independently recomputable.
-					appliedRates,
-					pricingTableVersion: PRICING_TABLE_VERSION,
 					...(params?.computeMs != null &&
 					Number.isFinite(params.computeMs) &&
 					params.computeMs >= 0
 						? { computeMs: params.computeMs }
 						: {}),
+				},
+				// D5: what the rates WERE, beside where they came from. Only this makes
+				// a custom/local-model cost independently recomputable. A SIBLING of
+				// `meter`, not a member of it — receipt.v1 closed `meter` to additions
+				// (P1-1). P1-2: its own frozen copy.
+				pricing: {
+					appliedRates: copyAppliedRates(appliedRates),
+					tableVersion: PRICING_TABLE_VERSION,
 				},
 				...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
 				...(postedCost !== undefined ? { postedCost } : {}),

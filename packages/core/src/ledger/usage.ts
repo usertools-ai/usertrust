@@ -235,6 +235,20 @@ export function fromAnthropicUsage(usage: unknown): NormalizedUsage {
  * `completion_tokens` already includes reasoning tokens
  * (`completion_tokens_details.reasoning_tokens` is a breakdown, not an
  * addition), so nothing is added to output.
+ *
+ * THE TWO CACHE COUNTERS ARE DISJOINT, and subtracting both is correct even
+ * when both are non-zero (Codex PR-85 P2-5, investigated and refuted).
+ * OpenRouter's own examples put both inside `prompt_tokens` without overlap —
+ * `prompt_tokens: 194 / cached_tokens: 0 / cache_write_tokens: 100 /
+ * completion_tokens: 2 / total_tokens: 196`, and `prompt_tokens: 10339 /
+ * cached_tokens: 10318 / cache_write_tokens: 0` — and both vendors define the
+ * pair as tokens READ from vs WRITTEN to the cache in the same request. They
+ * also map from Anthropic's `cache_read_input_tokens` /
+ * `cache_creation_input_tokens`, whose disjointness the pass-through row above
+ * already depends on. Do not add a "reads are inclusive of writes" correction
+ * here: OpenRouter and native OpenAI gpt-5.6+ emit the SAME field names, so
+ * such a rule cannot be scoped to one of them, and it would reprice every
+ * cache-writing OpenAI call off a shape neither vendor documents.
  */
 export function fromOpenAICompletionsUsage(usage: unknown): NormalizedUsage {
 	const u = asRecord(usage);
@@ -300,6 +314,20 @@ export function fromOpenAIResponsesUsage(usage: unknown): NormalizedUsage {
  * `thoughtsTokenCount` is billed at the output rate and is NOT included in
  * `candidatesTokenCount`, so it is added.
  *
+ * `toolUsePromptTokenCount` is billable INPUT and is NOT inside
+ * `promptTokenCount`, so it is ADDED to fresh input rather than subtracted from
+ * anything. `@google/genai` (1.52.0) is explicit on both halves of that:
+ * `GenerateContentResponseUsageMetadata.totalTokenCount` is documented as "the
+ * sum of `prompt_token_count`, `candidates_token_count`,
+ * `tool_use_prompt_token_count`, and `thoughts_token_count`" — four separate
+ * summands — and `toolUsePromptTokenCount` itself as "the number of tokens in
+ * the results from tool executions, which are provided back to the model as
+ * input". Ignoring it silently understates every tools-using Gemini call.
+ *
+ * It is added AFTER the cache clamp, not inside it: only `promptTokenCount` is
+ * inclusive of `cachedContentTokenCount`, so an over-large cached count must
+ * not be allowed to swallow tool-use input that was never part of the prompt.
+ *
  * `cacheWriteTokens` is always 0: Gemini bills cache creation as ordinary
  * input (plus an hourly storage charge this per-token model does not carry —
  * a documented D6 approximation) and reports no write counter. Those tokens
@@ -316,9 +344,10 @@ export function fromGeminiUsage(metadata: unknown): NormalizedUsage {
 	const candidates = readCount(m.candidatesTokenCount);
 	const thoughts = readCount(m.thoughtsTokenCount);
 	const cacheRead = readCount(m.cachedContentTokenCount) ?? 0;
+	const toolUsePrompt = readCount(m.toolUsePromptTokenCount) ?? 0;
 
 	return sanitizeUsage({
-		inputTokens: disjointInput(prompt ?? 0, cacheRead, 0),
+		inputTokens: disjointInput(prompt ?? 0, cacheRead, 0) + toolUsePrompt,
 		outputTokens: (candidates ?? 0) + (thoughts ?? 0),
 		cacheReadTokens: cacheRead,
 		cacheWriteTokens: 0,

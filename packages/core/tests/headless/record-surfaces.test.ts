@@ -28,7 +28,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -100,7 +100,7 @@ function recomputeCost(usage: ReceiptUsage, rates: AppliedRates): number {
 function expectRecomputable(receipt: TrustReceipt): void {
 	expect(receipt.usageSource).toBe("provider");
 	const usage = receipt.usage;
-	const applied = receipt.meter?.appliedRates;
+	const applied = receipt.pricing?.appliedRates;
 	if (usage === undefined || applied === undefined) {
 		throw new Error("receipt is not recomputable: usage or appliedRates missing");
 	}
@@ -205,16 +205,89 @@ describe("headless record surfaces (spec D5)", () => {
 		const auth = await gov.authorize(AUTHORIZE);
 		const receipt = await gov.settle(auth, { inputTokens: 100, outputTokens: 50 });
 
-		expect(receipt.meter?.appliedRates).toEqual({
+		expect(receipt.pricing?.appliedRates).toEqual({
 			inputPer1k: rates.inputPer1k,
 			outputPer1k: rates.outputPer1k,
 			cacheReadPer1k: rates.cacheReadPer1k,
 			cacheWritePer1k: rates.cacheWritePer1k,
 		});
-		expect(receipt.meter?.pricingTableVersion).toBe(PRICING_TABLE_VERSION);
+		expect(receipt.pricing?.tableVersion).toBe(PRICING_TABLE_VERSION);
 		// The other meter fields are untouched.
 		expect(receipt.meter?.costBasis).toBe("usd-proxy");
 		expect(receipt.meter?.rateSource).toBe("table");
+
+		await gov.destroy();
+	});
+
+	// Codex PR-85 P1-1. receipt.v1.schema.json declares the `meter` object
+	// `additionalProperties: false` while leaving the receipt root open, so the
+	// D5 rate surface has to be a root-level sibling: widening `meter` would make
+	// every v1 validator reject every receipt this ship emits. Read from the
+	// SHIPPED schema so the assertion tracks the file rather than restating it.
+	it("emits no meter key that the frozen receipt.v1 schema would reject", async () => {
+		const schema = JSON.parse(
+			readFileSync(
+				join(import.meta.dirname, "../../../../site/public/schemas/receipt.v1.schema.json"),
+				"utf8",
+			),
+		) as {
+			additionalProperties?: boolean;
+			properties: {
+				meter: { additionalProperties?: boolean; properties: Record<string, unknown> };
+			};
+		};
+		expect(schema.properties.meter.additionalProperties).toBe(false);
+		expect(schema.additionalProperties).toBe(true);
+		const allowed = new Set(Object.keys(schema.properties.meter.properties));
+
+		const gov = await governor();
+		const auth = await gov.authorize(AUTHORIZE);
+		const receipt = await gov.settle(auth, {
+			inputTokens: 100,
+			outputTokens: 50,
+			computeMs: 42,
+		});
+
+		expect(receipt.meter).toBeDefined();
+		expect(Object.keys(receipt.meter ?? {}).filter((k) => !allowed.has(k))).toEqual([]);
+		expect(receipt.meter?.computeMs).toBe(42);
+		expect(receipt.pricing?.tableVersion).toBe(PRICING_TABLE_VERSION);
+
+		await gov.destroy();
+	});
+
+	// Codex PR-85 P1-2. The headless settle hands the caller a receipt and writes
+	// a chain event from the same resolved snapshot. If they shared a mutable
+	// object, editing the returned receipt would rewrite what the auditor reads.
+	it("freezes the applied rates and gives the receipt and the chain event separate copies", async () => {
+		const gov = await governor();
+		const auth = await gov.authorize(AUTHORIZE);
+		const receipt = await gov.settle(auth, {
+			inputTokens: 1000,
+			outputTokens: 500,
+			cacheReadTokens: 200_000,
+			cacheWriteTokens: 4000,
+		});
+
+		const rates = receipt.pricing?.appliedRates as AppliedRates;
+		const truth = { ...rates };
+		expect(Object.isFrozen(rates)).toBe(true);
+		try {
+			(rates as { cacheReadPer1k: number }).cacheReadPer1k = 0;
+			(rates as { inputPer1k: number }).inputPer1k = 0;
+		} catch {
+			// frozen object in strict mode — the good path
+		}
+		expect(rates).toEqual(truth);
+
+		const data = llmCalls(audit)[0]?.data as Record<string, unknown>;
+		expect(data.appliedRates).toEqual(truth);
+		expect(data.appliedRates).not.toBe(rates);
+		expect(Object.isFrozen(data.appliedRates)).toBe(true);
+		expect(recomputeCost(data.usage as ReceiptUsage, data.appliedRates as AppliedRates)).toBe(
+			data.cost,
+		);
+		expectRecomputable(receipt);
 
 		await gov.destroy();
 	});
@@ -231,7 +304,7 @@ describe("headless record surfaces (spec D5)", () => {
 
 		const data = llmCalls(audit)[0]?.data as Record<string, unknown>;
 		expect(data.usage).toEqual(receipt.usage);
-		expect(data.appliedRates).toEqual(receipt.meter?.appliedRates);
+		expect(data.appliedRates).toEqual(receipt.pricing?.appliedRates);
 		expect(data.pricingTableVersion).toBe(PRICING_TABLE_VERSION);
 		expect(recomputeCost(data.usage as ReceiptUsage, data.appliedRates as AppliedRates)).toBe(
 			data.cost,
@@ -250,7 +323,7 @@ describe("headless record surfaces (spec D5)", () => {
 		expect(receipt.usageSource).toBe("estimated");
 		expect(Object.hasOwn(receipt, "usage")).toBe(false);
 		expect(receipt.cost).toBe(costFromRates(rates, 10_000, 1));
-		expect(receipt.meter?.appliedRates).toBeDefined();
+		expect(receipt.pricing?.appliedRates).toBeDefined();
 
 		const data = llmCalls(audit)[0]?.data as Record<string, unknown>;
 		expect(Object.hasOwn(data, "usage")).toBe(false);

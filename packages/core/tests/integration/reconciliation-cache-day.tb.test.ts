@@ -227,7 +227,7 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — attributed cache-heavy settle
 			// ── The record reprices itself ──
 			expect(receipt.usageSource).toBe("provider");
 			expect(receipt.usage).toEqual(USAGE);
-			const applied = receipt.meter?.appliedRates;
+			const applied = receipt.pricing?.appliedRates;
 			if (applied === undefined) throw new Error("receipt carries no appliedRates");
 			expect(applied).toEqual({
 				inputPer1k: 30,
@@ -235,7 +235,7 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — attributed cache-heavy settle
 				cacheReadPer1k: 3,
 				cacheWritePer1k: 37.5,
 			});
-			expect(receipt.meter?.pricingTableVersion).toBe(PRICING_TABLE_VERSION);
+			expect(receipt.pricing?.tableVersion).toBe(PRICING_TABLE_VERSION);
 			expect(receipt.cost).toBe(ACTUAL_COST);
 			expect(recomputeCost(USAGE, applied)).toBe(ACTUAL_COST);
 

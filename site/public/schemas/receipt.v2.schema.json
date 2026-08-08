@@ -2,7 +2,7 @@
 	"$schema": "https://json-schema.org/draft/2020-12/schema",
 	"$id": "https://usertrust.ai/schemas/receipt.v2.schema.json",
 	"title": "TrustReceipt",
-	"description": "The receipt returned by every governed call in usertrust. Each receipt links a two-phase ledger transfer (PENDING → POST/VOID) to its hash-chained audit event. v2 is additive over v1 (per the site's versioning policy: v1 stays frozen forever): it adds `usage` (the four-tier disjoint token split) and widens `meter` with `appliedRates` and `pricingTableVersion`, so a metered cost can be independently recomputed from the record alone. Receipts may carry additional diagnostic fields beyond this schema (e.g. proxy stub markers); v2 validators must ignore unknown fields rather than reject them.",
+	"description": "The receipt returned by every governed call in usertrust. Each receipt links a two-phase ledger transfer (PENDING -> POST/VOID) to its hash-chained audit event. v2 is additive over v1 (per the site's versioning policy: v1 stays frozen forever): it adds `usage` (the four-tier disjoint token split) and `pricing` (the resolved rates plus the pricing-table version), so a metered cost can be independently recomputed from the record alone. Both are ROOT-LEVEL additions: v1 leaves the root open (additionalProperties:true) but closes `meter` (additionalProperties:false), so a v1 validator accepts every v2 receipt unchanged. Receipts may carry additional diagnostic fields beyond this schema (e.g. proxy stub markers); v2 validators must ignore unknown fields rather than reject them.",
 	"type": "object",
 	"required": [
 		"transferId",
@@ -133,7 +133,7 @@
 		},
 		"meter": {
 			"type": "object",
-			"description": "Metering provenance: denomination and rate origin of the settled cost. Absent on pre-M2 receipts. Widened in v2 with appliedRates and pricingTableVersion.",
+			"description": "Metering provenance: denomination and rate origin of the settled cost. Absent on pre-M2 receipts. UNCHANGED from v1, deliberately: v1 declares this object additionalProperties:false, so any field added inside it would make every v1 validator reject the receipt. The v2 rate surface is the root-level `pricing` object instead.",
 			"required": ["costBasis", "rateSource"],
 			"properties": {
 				"costBasis": {
@@ -150,22 +150,42 @@
 					"type": "number",
 					"minimum": 0,
 					"description": "Compute wall-time in milliseconds. Present only when a compute-time source was available."
-				},
+				}
+			},
+			"additionalProperties": false
+		},
+		"pricing": {
+			"type": "object",
+			"description": "NEW in v2. The rate half of the reconciliation surface: the resolved per-1k rates this cost was metered with, and the pricing-table version they came from. Together with `usage` it is everything needed to recompute the cost from the record alone: ceil(sum(counts x rates / 1000)), floored at 1, reproduces `cost` exactly. Operation order is part of the contract - multiply THEN divide; (tokens / 1000) * rate can differ by a whole usertoken after the ceil. This is a ROOT-LEVEL object rather than a widening of `meter` because v1 froze `meter` with additionalProperties:false while leaving the receipt root open, so v1 validators keep accepting v2 receipts unchanged. Present on every LLM settle; absent on pre-D5 receipts and on non-LLM action receipts, which meter no tokens.",
+			"required": ["appliedRates", "tableVersion"],
+			"properties": {
 				"appliedRates": {
 					"type": "object",
-					"description": "NEW in v2. The four RESOLVED per-1k rates the cost was computed with. 'Resolved' means AFTER the cache-rate fallback invariant: an absent cache tier in the pricing table appears here as inputPer1k, never as a missing field or 0, because that is what the operator was actually charged for it. Only present on receipts emitted by a settle that ran the D5 record-surface changes.",
+					"description": "The four RESOLVED per-1k rates the cost was computed with. 'Resolved' means AFTER the cache-rate fallback invariant: an absent cache tier in the pricing table appears here as inputPer1k, never as a missing field or 0, because that is what the operator was actually charged for it. Immutable: the producer freezes this object and gives each record surface (receipt, chain event) its own copy, so the rates an auditor reads are always the rates the money was computed with.",
 					"required": ["inputPer1k", "outputPer1k", "cacheReadPer1k", "cacheWritePer1k"],
 					"properties": {
-						"inputPer1k": { "type": "number", "minimum": 0 },
-						"outputPer1k": { "type": "number", "minimum": 0 },
-						"cacheReadPer1k": { "type": "number", "minimum": 0 },
-						"cacheWritePer1k": { "type": "number", "minimum": 0 }
+						"inputPer1k": {
+							"type": "number",
+							"minimum": 0
+						},
+						"outputPer1k": {
+							"type": "number",
+							"minimum": 0
+						},
+						"cacheReadPer1k": {
+							"type": "number",
+							"minimum": 0
+						},
+						"cacheWritePer1k": {
+							"type": "number",
+							"minimum": 0
+						}
 					},
 					"additionalProperties": false
 				},
-				"pricingTableVersion": {
+				"tableVersion": {
 					"type": "string",
-					"description": "NEW in v2. Date-stamped version of the built-in pricing table (PRICING_TABLE_VERSION) the appliedRates came from, e.g. '2026-08-08'."
+					"description": "Date-stamped version of the built-in pricing table (PRICING_TABLE_VERSION) the appliedRates came from, e.g. '2026-08-08'."
 				}
 			},
 			"additionalProperties": false
@@ -191,17 +211,22 @@
 				"cacheReadTokens": 2000,
 				"cacheWriteTokens": 0
 			},
-			"endpoint": { "class": "cloud", "runtime": "unknown" },
+			"endpoint": {
+				"class": "cloud",
+				"runtime": "unknown"
+			},
 			"meter": {
 				"costBasis": "usd-proxy",
-				"rateSource": "table",
+				"rateSource": "table"
+			},
+			"pricing": {
 				"appliedRates": {
 					"inputPer1k": 30,
 					"outputPer1k": 150,
 					"cacheReadPer1k": 3,
 					"cacheWritePer1k": 37.5
 				},
-				"pricingTableVersion": "2026-08-08"
+				"tableVersion": "2026-08-08"
 			}
 		}
 	]

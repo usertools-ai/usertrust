@@ -602,6 +602,81 @@ describe("costFromRates four-tier math (D3)", () => {
 	});
 });
 
+// Codex PR-85 [P2-4]. The recompute pin is this ship's headline claim, and it is
+// published in three places as ONE formula — receipt.v2.schema.json, types.mdx and
+// the reconciliation integration test all write `ceil(sum(counts x rates / 1000))`,
+// i.e. MULTIPLY THEN DIVIDE. Implementing it as `(count / 1000) * rate` is a
+// different computation in IEEE-754: 560/1000 is not representable, so the division
+// carries a 1-ulp error that `Math.ceil` then amplifies to a whole usertoken.
+// An auditor running the documented formula would get 7 where usertrust charged 8,
+// and "exactly recomputable" would be false on real, unremarkable inputs.
+describe("costFromRates matches the PUBLISHED auditor formula exactly (Codex PR-85 P2-4)", () => {
+	/** The documented reconciliation formula, verbatim from receipt.v2.schema.json. */
+	const publishedFormula = (
+		rates: Required<Pick<ModelRates, "inputPer1k" | "outputPer1k">> & {
+			cacheReadPer1k: number;
+			cacheWritePer1k: number;
+		},
+		counts: { input: number; output: number; cacheRead: number; cacheWrite: number },
+	): number =>
+		Math.max(
+			1,
+			Math.ceil(
+				(counts.input * rates.inputPer1k) / 1000 +
+					(counts.output * rates.outputPer1k) / 1000 +
+					(counts.cacheRead * rates.cacheReadPer1k) / 1000 +
+					(counts.cacheWrite * rates.cacheWritePer1k) / 1000,
+			),
+		);
+
+	it("prices 560 cache-write tokens at 12.5/1k as 7, not 8 (the exact divergence case)", () => {
+		// claude-haiku-4-5's shipped cacheWritePer1k. (560 * 12.5) / 1000 === 7 exactly;
+		// (560 / 1000) * 12.5 === 7.000000000000001, which ceils to 8.
+		const haiku: ModelRates = {
+			inputPer1k: 10,
+			outputPer1k: 50,
+			cacheReadPer1k: 1,
+			cacheWritePer1k: 12.5,
+		};
+		expect((560 / 1000) * 12.5).toBe(7.000000000000001); // the trap, pinned
+		expect((560 * 12.5) / 1000).toBe(7); // the published order
+		expect(costFromRates(haiku, 0, 0, 0, 560)).toBe(7);
+	});
+
+	it("agrees with the published formula across a divergence-hunting table", () => {
+		const rates = {
+			inputPer1k: 12.5,
+			outputPer1k: 37.5,
+			cacheReadPer1k: 12.5,
+			cacheWritePer1k: 37.5,
+		};
+		// Counts chosen so that `n / 1000` is inexact in binary and the product
+		// lands within 1 ulp of an integer — exactly where ceil() flips.
+		for (const n of [560, 1120, 2240, 4480, 560_000, 28, 56, 112, 224, 448]) {
+			for (const tier of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+				const counts = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, [tier]: n };
+				expect(
+					costFromRates(rates, counts.input, counts.output, counts.cacheRead, counts.cacheWrite),
+					`${tier}=${n}`,
+				).toBe(publishedFormula(rates, counts));
+			}
+		}
+	});
+
+	it("agrees with the published formula on a mixed four-tier settle", () => {
+		const rates = {
+			inputPer1k: 30,
+			outputPer1k: 150,
+			cacheReadPer1k: 3,
+			cacheWritePer1k: 37.5,
+		};
+		const counts = { input: 560, output: 1120, cacheRead: 2240, cacheWrite: 560 };
+		expect(
+			costFromRates(rates, counts.input, counts.output, counts.cacheRead, counts.cacheWrite),
+		).toBe(publishedFormula(rates, counts));
+	});
+});
+
 describe("costFromRates D1 money invariant: absent cache rates resolve to inputPer1k", () => {
 	// SPEC D1 (money invariant): "absent cache rates price cache tokens at
 	// `inputPer1k` — overstatement is fail-safe; zero-billing and silent discounts

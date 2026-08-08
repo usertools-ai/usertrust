@@ -28,9 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the input leg at `max(inputPer1k, effective cacheWritePer1k)` so a cache-write premium (Anthropic
   1.25x/2x) can't exceed an input-only hold — holds on cache-writing workloads run ~25% fatter;
   warm workloads settle well below and release the difference. `TrustReceipt.usage` (the four-tier
-  split) and `receipt.meter.appliedRates`/`pricingTableVersion` (the resolved rates, published
-  even when they came from the fallback) make a settled cost independently recomputable from the
-  record alone — `receipt.v2.schema.json` publishes both (v1 stays frozen). Anomaly velocity
+  split) and `TrustReceipt.pricing` (`appliedRates` + `tableVersion` — the resolved rates,
+  published even when they came from the fallback) make a settled cost independently recomputable
+  from the record alone: `ceil(sum(counts x rates / 1000))`, multiply-then-divide, floored at 1.
+  Both are ROOT-level additions because v1 froze `meter` with `additionalProperties: false`, so v1
+  validators accept v2 receipts unchanged. `appliedRates` is frozen and copied per record surface.
+  `receipt.v2.schema.json` publishes both (v1 stays frozen). Anomaly velocity
   tracking now sees cached traffic instead of losing it once `inputTokens` stopped including it.
   Documented approximations (per-TTL write premium collapsed to the 5-minute rate; long-context,
   service-tier, regional, modality, and cache-storage charges not modeled) are in `AGENTS.md`'s

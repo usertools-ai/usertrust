@@ -8,13 +8,14 @@ usertrust publishes JSON Schema (draft 2020-12) definitions for its two public i
 | Schema | `$id` | Describes |
 |--------|-------|-----------|
 | Trust Receipt v1 | [receipt.v1.schema.json](https://usertrust.ai/schemas/receipt.v1.schema.json) | The `TrustReceipt` returned by every governed call |
-| Trust Receipt v2 | [receipt.v2.schema.json](https://usertrust.ai/schemas/receipt.v2.schema.json) | v1 plus the four-tier `usage` split and the widened `meter` (`appliedRates`, `pricingTableVersion`) — see [Pricing](/docs/api/pricing) |
+| Trust Receipt v2 | [receipt.v2.schema.json](https://usertrust.ai/schemas/receipt.v2.schema.json) | v1 plus two root-level additions: the four-tier `usage` split and `pricing` (`appliedRates`, `tableVersion`) — see [Pricing](/docs/api/pricing) |
 | Audit Event v1 | [audit-event.v1.schema.json](https://usertrust.ai/schemas/audit-event.v1.schema.json) | One line of the audit chain (`.usertrust/audit/*.jsonl`) |
 
 ## Versioning
 
 - **v1 is frozen.** Once published, a versioned schema never changes meaning. Description wording may improve; the validated shape does not. `receipt.v1.schema.json` keeps validating exactly what it always validated — a v1-only validator does not need to change to keep accepting receipts.
-- **Changes ship as a new version.** Additive or breaking changes become a new schema at a new URL — `receipt.v2.schema.json` is the first of these: it adds the `usage` object (fresh/cache-read/cache-write/output token split) and widens `meter` with the resolved `appliedRates` and `pricingTableVersion`, so a receipt's cost is independently recomputable from the record alone. v1 URLs keep working and keep meaning the same thing.
+- **Changes ship as a new version.** Additive or breaking changes become a new schema at a new URL — `receipt.v2.schema.json` is the first of these: it adds the `usage` object (fresh/cache-read/cache-write/output token split) and the `pricing` object (the resolved `appliedRates` and the `tableVersion` they came from), so a receipt's cost is independently recomputable from the record alone. v1 URLs keep working and keep meaning the same thing.
+- **Additions go where the frozen schema left room.** v1 declares the receipt root `additionalProperties: true` but closes `meter` with `additionalProperties: false`. Both v2 additions are therefore ROOT-level objects: a v1 validator accepts every v2 receipt unchanged, which is what "v1 keeps meaning the same thing" has to mean in practice. Anything added later must clear the same bar.
 - **Both schemas are open.** Receipts may carry additional diagnostic fields, and audit events may carry extra fields that are covered by the chain hash. Validators must ignore unknown fields, not reject them.
 
 ## Validating a receipt

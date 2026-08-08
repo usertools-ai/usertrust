@@ -41,6 +41,7 @@ import { computeRunway, runwayHours } from "./budget/runway.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
+	copyAppliedRates,
 	costFromRates,
 	costFromRatesUnfloored,
 	effectiveCacheWriteRate,
@@ -1258,8 +1259,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					meter: {
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
-						appliedRates,
-						pricingTableVersion: PRICING_TABLE_VERSION,
+					},
+					// P1-2: this handle is the one record surface the caller holds
+					// BEFORE the settle writes anything, so it is exactly the object a
+					// mutation would travel from. Its own frozen copy.
+					pricing: {
+						appliedRates: copyAppliedRates(appliedRates),
+						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					// AUD-456: Flag proxy stub receipts
@@ -1416,7 +1422,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// that priced them — the receipt is a return value the caller
 						// may drop, the chain event is what an auditor reads.
 						...usageAudit,
-						appliedRates,
+						// P1-1: the chain event keeps its FLAT shape (`data` is
+						// documented open in audit-event.v1 and already flattens the
+						// receipt's meter as costBasis/rateSource/endpointClass). The
+						// relocation was forced by v1's closed `meter` object, which
+						// has no counterpart here. P1-2: its own frozen copy.
+						appliedRates: copyAppliedRates(appliedRates),
 						pricingTableVersion: PRICING_TABLE_VERSION,
 						chunksDelivered: completion.chunksDelivered,
 						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
@@ -1510,9 +1521,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					meter: {
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
-						// D5: what the rates WERE, beside where they came from.
-						appliedRates,
-						pricingTableVersion: PRICING_TABLE_VERSION,
+					},
+					// D5: what the rates WERE, beside where they came from — a sibling
+					// of `meter`, not a member of it (P1-1). P1-2: its own frozen copy.
+					pricing: {
+						appliedRates: copyAppliedRates(appliedRates),
+						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(postedCost !== undefined ? { postedCost } : {}),
 					...(streamBudget !== undefined ? { budget: streamBudget } : {}),
@@ -2025,7 +2039,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// the rates that priced them, so the chain event alone is
 						// enough to reprice the call.
 						...usageAudit,
-						appliedRates,
+						// P1-1: flat here by design (see the stream terminal above).
+						// P1-2: its own frozen copy.
+						appliedRates: copyAppliedRates(appliedRates),
 						pricingTableVersion: PRICING_TABLE_VERSION,
 						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
 						endpointClass: endpoint.class,
@@ -2227,9 +2243,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					meter: {
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
-						// D5: what the rates WERE, beside where they came from.
-						appliedRates,
-						pricingTableVersion: PRICING_TABLE_VERSION,
+					},
+					// D5: what the rates WERE, beside where they came from — a sibling
+					// of `meter`, not a member of it (P1-1). P1-2: its own frozen copy.
+					pricing: {
+						appliedRates: copyAppliedRates(appliedRates),
+						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(postedCost !== undefined ? { postedCost } : {}),
 					...(settledBudget !== undefined ? { budget: settledBudget } : {}),

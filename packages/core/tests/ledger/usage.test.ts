@@ -283,6 +283,117 @@ describe("D2 row: OpenAI completions (core direct) — prompt_tokens is INCLUSIV
 	});
 });
 
+/**
+ * Codex PR-85 [P2-5], investigated and REFUTED — pinned here so the question
+ * does not get re-opened from first principles.
+ *
+ * The claim was that OpenRouter's `cached_tokens` is INCLUSIVE of
+ * `cache_write_tokens`, so subtracting both double-counts the writes and
+ * overstates the (cheap) read tier at the expense of the (expensive) fresh
+ * tier. Three pieces of evidence say the counters are disjoint subsets of
+ * `prompt_tokens`, which is exactly what `disjointInput` already assumes:
+ *
+ *  1. OpenRouter's usage-accounting example: `prompt_tokens: 194`,
+ *     `cached_tokens: 0`, `cache_write_tokens: 100`, `completion_tokens: 2`,
+ *     `total_tokens: 196`. `total = prompt + completion`, and the 100 written
+ *     tokens are not added on top — so writes live INSIDE `prompt_tokens`.
+ *  2. OpenRouter's prompt-caching guide: `prompt_tokens: 10_339`,
+ *     `cached_tokens: 10_318`, `cache_write_tokens: 0`, described as "most of
+ *     the prompt tokens came from cache" — reads live inside `prompt_tokens`
+ *     too, and `prompt_tokens >= cached_tokens` throughout.
+ *  3. Both OpenRouter and OpenAI define the pair as tokens "read from" vs
+ *     "written to" the cache in the SAME request — different tokens, and they
+ *     map from Anthropic's `cache_read_input_tokens` /
+ *     `cache_creation_input_tokens`, which this codebase already relies on
+ *     being disjoint for the Anthropic pass-through row.
+ *
+ * There is also no way to implement the proposed fix narrowly: OpenRouter and
+ * native OpenAI gpt-5.6+ emit the SAME JSON shape
+ * (`prompt_tokens_details.{cached_tokens, cache_write_tokens}`), so any
+ * "both fields present" rule would silently reprice plain OpenAI traffic too —
+ * which the finding itself says must not change.
+ */
+describe("both-cache-counter payloads: reads and writes are DISJOINT (Codex PR-85 P2-5)", () => {
+	const cases: Array<{
+		name: string;
+		usage: Record<string, unknown>;
+		expected: { inputTokens: number; cacheReadTokens: number; cacheWriteTokens: number };
+	}> = [
+		{
+			name: "OpenRouter usage-accounting example (write-only turn)",
+			usage: {
+				prompt_tokens: 194,
+				completion_tokens: 2,
+				prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 100, audio_tokens: 0 },
+			},
+			expected: { inputTokens: 94, cacheReadTokens: 0, cacheWriteTokens: 100 },
+		},
+		{
+			name: "OpenRouter prompt-caching guide example (read-heavy turn)",
+			usage: {
+				prompt_tokens: 10_339,
+				completion_tokens: 120,
+				prompt_tokens_details: { cached_tokens: 10_318, cache_write_tokens: 0 },
+			},
+			expected: { inputTokens: 21, cacheReadTokens: 10_318, cacheWriteTokens: 0 },
+		},
+		{
+			name: "OpenRouter both counters non-zero (read prefix + freshly written suffix)",
+			usage: {
+				prompt_tokens: 1000,
+				completion_tokens: 40,
+				prompt_tokens_details: { cached_tokens: 400, cache_write_tokens: 100 },
+			},
+			// NOT 600/300/100: nothing is removed from the read count.
+			expected: { inputTokens: 500, cacheReadTokens: 400, cacheWriteTokens: 100 },
+		},
+		{
+			name: "native OpenAI gpt-5.6 shape — identical JSON, and must price identically",
+			usage: {
+				prompt_tokens: 1000,
+				completion_tokens: 40,
+				prompt_tokens_details: { cached_tokens: 400, cache_write_tokens: 100 },
+			},
+			expected: { inputTokens: 500, cacheReadTokens: 400, cacheWriteTokens: 100 },
+		},
+		{
+			name: "top-level cache_write_tokens (proxy variant) reads the same way",
+			usage: {
+				prompt_tokens: 1000,
+				completion_tokens: 40,
+				prompt_tokens_details: { cached_tokens: 400 },
+				cache_write_tokens: 100,
+			},
+			expected: { inputTokens: 500, cacheReadTokens: 400, cacheWriteTokens: 100 },
+		},
+	];
+
+	for (const { name, usage, expected } of cases) {
+		it(name, () => {
+			const u = fromOpenAICompletionsUsage(usage);
+			expect(u.inputTokens).toBe(expected.inputTokens);
+			expect(u.cacheReadTokens).toBe(expected.cacheReadTokens);
+			expect(u.cacheWriteTokens).toBe(expected.cacheWriteTokens);
+			expect(u.source).toBe("provider");
+			expectSafeSnapshot(u);
+		});
+	}
+
+	it("keeps the four tiers summing to the provider's own total_tokens", () => {
+		// The disjointness claim, stated as arithmetic: if reads and writes are
+		// disjoint subsets of prompt_tokens, the four tiers reconstruct the
+		// provider's total exactly. Under the proposed "reads include writes"
+		// reading they would overshoot it by cache_write_tokens.
+		const u = fromOpenAICompletionsUsage({
+			prompt_tokens: 194,
+			completion_tokens: 2,
+			total_tokens: 196,
+			prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 100 },
+		});
+		expect(u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens).toBe(196);
+	});
+});
+
 describe("D2 row: OpenAI Responses (core direct) — input_tokens_details subtraction", () => {
 	it("subtracts input_tokens_details.cached_tokens from input_tokens", () => {
 		const u = fromOpenAIResponsesUsage({
@@ -362,6 +473,78 @@ describe("D2 row: Gemini (core direct) — inclusive prompt, thinking billed as 
 	it("reports estimated when the prompt or output counters are absent", () => {
 		expect(fromGeminiUsage({ candidatesTokenCount: 5 }).source).toBe("estimated");
 		expect(fromGeminiUsage({ promptTokenCount: 5 }).source).toBe("estimated");
+	});
+
+	// Codex PR-85 [P1-3]. @google/genai 1.52.0 documents
+	// GenerateContentResponseUsageMetadata.totalTokenCount as "the sum of
+	// prompt_token_count, candidates_token_count, tool_use_prompt_token_count, and
+	// thoughts_token_count" — so toolUsePromptTokenCount is a SEPARATE summand, not
+	// part of promptTokenCount, and its own doc calls it "the number of tokens in
+	// the results from tool executions, which are provided back to the model as
+	// input". Dropping it understates every tools-using Gemini call, which is the
+	// one direction the money invariant forbids.
+	it("adds toolUsePromptTokenCount into fresh input (it is billable input, separate from promptTokenCount)", () => {
+		const u = fromGeminiUsage({
+			promptTokenCount: 1000,
+			candidatesTokenCount: 50,
+			cachedContentTokenCount: 400,
+			thoughtsTokenCount: 30,
+			toolUsePromptTokenCount: 250,
+		});
+		expect(u).toEqual({
+			inputTokens: 850, // (1000 - 400 cached) + 250 tool-use
+			outputTokens: 80,
+			cacheReadTokens: 400,
+			cacheWriteTokens: 0,
+			source: "provider",
+		});
+		expectSafeSnapshot(u);
+	});
+
+	it("keeps toolUsePromptTokenCount OUT of the cache subtraction (only the prompt is inclusive)", () => {
+		// The clamp applies to promptTokenCount alone. Tool-use input is disjoint
+		// from the cached prompt, so an over-large cachedContentTokenCount must not
+		// eat it: 0 fresh prompt + 250 tool-use = 250, not 0.
+		const u = fromGeminiUsage({
+			promptTokenCount: 100,
+			candidatesTokenCount: 10,
+			cachedContentTokenCount: 900,
+			toolUsePromptTokenCount: 250,
+		});
+		expect(u.inputTokens).toBe(250);
+		expect(u.cacheReadTokens).toBe(900);
+		expectSafeSnapshot(u);
+	});
+
+	it("sanitizes a garbage toolUsePromptTokenCount to 0 rather than poisoning the snapshot", () => {
+		// canonicalize() throws on non-finite, so a NaN reaching the snapshot would
+		// fail the audit write for the whole settle (D5).
+		for (const junk of [Number.NaN, Number.POSITIVE_INFINITY, -500, "300", null]) {
+			const u = fromGeminiUsage({
+				promptTokenCount: 100,
+				candidatesTokenCount: 10,
+				toolUsePromptTokenCount: junk,
+			});
+			expect(u.inputTokens, String(junk)).toBe(100);
+			expectSafeSnapshot(u);
+		}
+	});
+
+	it("reconciles with the SDK's documented totalTokenCount identity", () => {
+		// totalTokenCount = prompt + candidates + toolUsePrompt + thoughts. Our four
+		// disjoint tiers must sum to the same number, or a tier is missing.
+		const metadata = {
+			promptTokenCount: 1000,
+			candidatesTokenCount: 50,
+			cachedContentTokenCount: 400,
+			thoughtsTokenCount: 30,
+			toolUsePromptTokenCount: 250,
+			totalTokenCount: 1330,
+		};
+		const u = fromGeminiUsage(metadata);
+		expect(u.inputTokens + u.outputTokens + u.cacheReadTokens + u.cacheWriteTokens).toBe(
+			metadata.totalTokenCount,
+		);
 	});
 });
 

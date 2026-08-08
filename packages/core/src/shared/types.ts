@@ -101,7 +101,7 @@ export interface TrustReceipt {
 	 * invite an auditor to "recompute" a cost that was never derived from
 	 * counts at all — so it is omitted outright, never zero-filled.
 	 *
-	 * With `meter.appliedRates` this is the whole reconciliation surface:
+	 * With `pricing.appliedRates` this is the whole reconciliation surface:
 	 * `ceil(sum(counts x rates / 1000))` floored at 1 equals `cost`.
 	 */
 	usage?: ReceiptUsage;
@@ -112,24 +112,48 @@ export interface TrustReceipt {
 	/** Endpoint classification for this call. Absent on pre-M2 receipts. */
 	endpoint?: { class: EndpointClass; runtime: LocalRuntime };
 	/**
-	 * Metering provenance: denomination, rate origin, and — since D5 — the
-	 * RESOLVED rates themselves plus the pricing-table version they came from.
+	 * Metering provenance: denomination and rate origin of the settled cost.
 	 *
-	 * `rateSource` says WHERE the rates came from; `appliedRates` says WHAT they
-	 * were. Only the second one makes a custom-rate or local-model cost
-	 * independently recomputable, which is why both are here. Both new fields
-	 * are optional for backward compatibility with pre-D5 receipts (and with
-	 * non-LLM action receipts, which meter no tokens at all), but every LLM
-	 * settle emits them.
+	 * `rateSource` says WHERE the rates came from. WHAT they were lives in the
+	 * sibling {@link TrustReceipt.pricing} block, deliberately NOT here — see the
+	 * note there for why this object cannot grow.
 	 */
 	meter?: {
 		costBasis: CostBasis;
 		rateSource: RateSource;
 		computeMs?: number;
+	};
+	/**
+	 * The rate side of the reconciliation surface (D5): the four RESOLVED per-1k
+	 * rates this cost was metered with, and the pricing-table version they came
+	 * from. With {@link TrustReceipt.usage} it is everything an auditor needs —
+	 * `ceil(sum(counts x rates / 1000))` floored at 1 reproduces `cost` exactly,
+	 * from the record alone.
+	 *
+	 * WHY THIS IS A TOP-LEVEL BLOCK AND NOT PART OF `meter` (Codex PR-85 P1-1).
+	 * The published `receipt.v1.schema.json` sets `additionalProperties: false`
+	 * on `meter` while leaving the receipt ROOT open (`additionalProperties:
+	 * true`). Widening `meter` would therefore make every v1 validator REJECT
+	 * every new receipt, breaking the site's "v1 stays frozen and keeps meaning
+	 * the same thing" promise; adding a new root-level object keeps v1
+	 * validators green and loses nothing, because recomputability only needs the
+	 * two halves to be findable, not adjacent. Anything else added later must
+	 * clear the same bar: the root is extensible, `meter` is not.
+	 *
+	 * Optional for backward compatibility with pre-D5 receipts and with non-LLM
+	 * action receipts (which meter no tokens at all), but every LLM settle emits
+	 * it. When present, BOTH fields are present.
+	 *
+	 * FROZEN (Codex PR-85 P1-2). `appliedRates` is deep-immutable and is this
+	 * receipt's own copy: a caller that mutates what it was handed cannot make
+	 * the rates recorded in the audit chain diverge from the rates the money was
+	 * computed with.
+	 */
+	pricing?: {
 		/** The four resolved per-1k rates the cost was computed with. */
-		appliedRates?: AppliedRates;
+		appliedRates: AppliedRates;
 		/** Date-stamped version of the built-in pricing table (`PRICING_TABLE_VERSION`). */
-		pricingTableVersion?: string;
+		tableVersion: string;
 	};
 	/**
 	 * Cost-center envelope snapshot — the PUSH half of visibility (the pull half is

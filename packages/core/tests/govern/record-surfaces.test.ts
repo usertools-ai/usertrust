@@ -13,11 +13,11 @@
  *  1. `receipt.usage` — the four SANITIZED disjoint tiers, present iff the
  *     settle was provider-sourced and ABSENT on an estimated settle (a record
  *     of counts nobody reported is a fabrication, not a saving).
- *  2. `receipt.meter.appliedRates` — the four RESOLVED per-1k rates, i.e. what
+ *  2. `receipt.pricing.appliedRates` — the four RESOLVED per-1k rates, i.e. what
  *     the money was actually computed with after the D1 fallback. Publishing
  *     the raw `ModelRates` instead would hand the auditor `undefined` for
  *     exactly the tiers the fallback makes non-zero.
- *  3. `receipt.meter.pricingTableVersion` — which table those rates came from.
+ *  3. `receipt.pricing.tableVersion` — which table those rates came from.
  *
  *  ... plus `llm_call.data.usage`, which MIRRORS `receipt.usage` byte-for-byte:
  *  the receipt is an ephemeral return value, the chain event is the durable
@@ -40,7 +40,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -166,7 +166,7 @@ function recomputeCost(usage: ReceiptUsage, rates: AppliedRates): number {
 function expectRecomputable(receipt: TrustReceipt): void {
 	expect(receipt.usageSource).toBe("provider");
 	const usage = receipt.usage;
-	const applied = receipt.meter?.appliedRates;
+	const applied = receipt.pricing?.appliedRates;
 	if (usage === undefined || applied === undefined) {
 		throw new Error("receipt is not recomputable: usage or appliedRates missing");
 	}
@@ -221,13 +221,13 @@ describe("trust() non-stream record surfaces (spec D5)", () => {
 		});
 
 		const rates = getModelRates("claude-sonnet-4-6");
-		expect(receipt.meter?.appliedRates).toEqual({
+		expect(receipt.pricing?.appliedRates).toEqual({
 			inputPer1k: rates.inputPer1k,
 			outputPer1k: rates.outputPer1k,
 			cacheReadPer1k: rates.cacheReadPer1k,
 			cacheWritePer1k: rates.cacheWritePer1k,
 		});
-		expect(receipt.meter?.pricingTableVersion).toBe(PRICING_TABLE_VERSION);
+		expect(receipt.pricing?.tableVersion).toBe(PRICING_TABLE_VERSION);
 
 		// 30 + 75 + 600 + 150 — the cache tiers used to bill at ZERO.
 		expect(receipt.cost).toBe(855);
@@ -264,7 +264,7 @@ describe("trust() non-stream record surfaces (spec D5)", () => {
 		expect(data.usageSource).toBe("provider");
 		// The durable record carries the rates too — a chain event that cannot be
 		// repriced is not a reconciliation surface, it is a number to trust.
-		expect(data.appliedRates).toEqual(receipt.meter?.appliedRates);
+		expect(data.appliedRates).toEqual(receipt.pricing?.appliedRates);
 		expect(data.pricingTableVersion).toBe(PRICING_TABLE_VERSION);
 		expect(recomputeCost(data.usage as ReceiptUsage, data.appliedRates as AppliedRates)).toBe(
 			data.cost,
@@ -299,8 +299,8 @@ describe("trust() non-stream record surfaces (spec D5)", () => {
 		const rates = getModelRates("mistral-large");
 		expect(rates.cacheReadPer1k).toBeUndefined();
 		expect(rates.cacheWritePer1k).toBeUndefined();
-		expect(receipt.meter?.appliedRates?.cacheReadPer1k).toBe(rates.inputPer1k);
-		expect(receipt.meter?.appliedRates?.cacheWritePer1k).toBe(rates.inputPer1k);
+		expect(receipt.pricing?.appliedRates?.cacheReadPer1k).toBe(rates.inputPer1k);
+		expect(receipt.pricing?.appliedRates?.cacheWritePer1k).toBe(rates.inputPer1k);
 		expectRecomputable(receipt);
 
 		await governed.destroy();
@@ -327,8 +327,8 @@ describe("trust() non-stream record surfaces (spec D5)", () => {
 
 		expect(receipt.usageSource).toBe("estimated");
 		expect(Object.hasOwn(receipt, "usage")).toBe(false);
-		expect(receipt.meter?.appliedRates).toBeDefined();
-		expect(receipt.meter?.pricingTableVersion).toBe(PRICING_TABLE_VERSION);
+		expect(receipt.pricing?.appliedRates).toBeDefined();
+		expect(receipt.pricing?.tableVersion).toBe(PRICING_TABLE_VERSION);
 
 		const data = llmCalls(audit)[0]?.data as Record<string, unknown>;
 		expect(Object.hasOwn(data, "usage")).toBe(false);
@@ -504,7 +504,7 @@ describe("trust() stream record surfaces (spec D5)", () => {
 			cacheReadTokens: 200_000,
 			cacheWriteTokens: 4000,
 		});
-		expect(receipt.meter?.pricingTableVersion).toBe(PRICING_TABLE_VERSION);
+		expect(receipt.pricing?.tableVersion).toBe(PRICING_TABLE_VERSION);
 		expect(receipt.cost).toBe(855);
 		expectRecomputable(receipt);
 
@@ -525,7 +525,7 @@ describe("trust() stream record surfaces (spec D5)", () => {
 
 		expect(receipt.usageSource).toBe("estimated");
 		expect(Object.hasOwn(receipt, "usage")).toBe(false);
-		expect(receipt.meter?.appliedRates).toBeDefined();
+		expect(receipt.pricing?.appliedRates).toBeDefined();
 
 		const data = llmCalls(audit)[0]?.data as Record<string, unknown>;
 		expect(Object.hasOwn(data, "usage")).toBe(false);
@@ -552,13 +552,287 @@ describe("trust() stream record surfaces (spec D5)", () => {
 		// reported yet, so there is nothing honest to publish as usage.
 		expect(result.receipt.settled).toBe(false);
 		expect(Object.hasOwn(result.receipt, "usage")).toBe(false);
-		expect(result.receipt.meter?.appliedRates).toBeDefined();
-		expect(result.receipt.meter?.pricingTableVersion).toBe(PRICING_TABLE_VERSION);
+		expect(result.receipt.pricing?.appliedRates).toBeDefined();
+		expect(result.receipt.pricing?.tableVersion).toBe(PRICING_TABLE_VERSION);
 
 		for await (const _ of result.response as AsyncIterable<unknown>) {
 			// consume so the hold resolves
 		}
 		await (result.response as { receipt: Promise<TrustReceipt> }).receipt;
+		await governed.destroy();
+	});
+});
+
+// ── Codex PR-85 P1-1: the frozen v1 schema still validates new receipts ──
+
+/**
+ * `receipt.v1.schema.json` is published at a stable URL and the site's
+ * versioning policy says it "stays frozen forever" and "keeps meaning the same
+ * thing". Its `meter` object declares `additionalProperties: false`, so ANY new
+ * key inside `meter` makes every v1 validator reject every receipt usertrust
+ * emits from this ship onward — a silent break of the compatibility promise
+ * that no test in this repo would otherwise notice.
+ *
+ * The receipt ROOT is `additionalProperties: true`, which is why the D5 rate
+ * surface lives at `receipt.pricing` instead. These tests read the SHIPPED
+ * schema file rather than restating its rules, so they keep telling the truth
+ * if the schema is ever edited.
+ */
+describe("receipt.v1 compatibility of the D5 record surface (Codex PR-85 P1-1)", () => {
+	let tmpVault: string;
+
+	beforeEach(() => {
+		tmpVault = makeTmpVault("record-surfaces-v1compat");
+	});
+
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+	});
+
+	interface V1Schema {
+		additionalProperties?: boolean;
+		properties: {
+			meter: { additionalProperties?: boolean; properties: Record<string, unknown> };
+		};
+	}
+
+	function loadV1Schema(): V1Schema {
+		const path = join(
+			import.meta.dirname,
+			"../../../../site/public/schemas/receipt.v1.schema.json",
+		);
+		return JSON.parse(readFileSync(path, "utf8")) as V1Schema;
+	}
+
+	it("still describes a CLOSED meter and an OPEN root — the premise of the relocation", () => {
+		const v1 = loadV1Schema();
+		// If either of these ever flips, the reasoning behind `receipt.pricing`
+		// changes and this whole describe block needs revisiting.
+		expect(v1.properties.meter.additionalProperties).toBe(false);
+		expect(v1.additionalProperties).toBe(true);
+	});
+
+	it("keeps receipt.v2's meter identical to v1's and puts the rate surface at the root", () => {
+		const v1 = loadV1Schema();
+		const v2 = JSON.parse(
+			readFileSync(
+				join(import.meta.dirname, "../../../../site/public/schemas/receipt.v2.schema.json"),
+				"utf8",
+			),
+		) as V1Schema & {
+			properties: { pricing: { required: string[]; properties: Record<string, unknown> } };
+			examples: Array<Record<string, Record<string, unknown>>>;
+		};
+
+		// v2 is additive at the ROOT only: `meter` must not have grown a single key,
+		// or v2 receipts stop validating against the frozen v1 schema.
+		expect(Object.keys(v2.properties.meter.properties).sort()).toEqual(
+			Object.keys(v1.properties.meter.properties).sort(),
+		);
+		expect(v2.properties.pricing.required.sort()).toEqual(["appliedRates", "tableVersion"]);
+
+		// The published example must describe what the code actually emits.
+		const example = v2.examples[0];
+		if (example === undefined) throw new Error("receipt.v2 schema publishes no example");
+		expect(Object.keys(example.pricing ?? {}).sort()).toEqual(["appliedRates", "tableVersion"]);
+		const allowed = new Set(Object.keys(v1.properties.meter.properties));
+		expect(Object.keys(example.meter ?? {}).filter((k) => !allowed.has(k))).toEqual([]);
+	});
+
+	it("emits no meter key that receipt.v1 would reject", async () => {
+		const v1 = loadV1Schema();
+		const allowed = new Set(Object.keys(v1.properties.meter.properties));
+
+		const audit = makeMockAudit();
+		const governed = await trust(
+			makeAnthropicMock({
+				input_tokens: 1000,
+				output_tokens: 500,
+				cache_read_input_tokens: 200_000,
+				cache_creation_input_tokens: 4000,
+			}),
+			{ budget: 10_000_000, vaultBase: tmpVault, _engine: makeEngine(), _audit: audit },
+		);
+		const { receipt } = await governed.messages.create({
+			model: "claude-sonnet-4-6",
+			max_tokens: 64,
+			messages: MESSAGES,
+		});
+
+		expect(receipt.meter).toBeDefined();
+		expect(Object.keys(receipt.meter ?? {}).filter((k) => !allowed.has(k))).toEqual([]);
+		// ...and the rate surface is where it can live without breaking anyone.
+		expect(receipt.pricing?.appliedRates).toBeDefined();
+		expect(receipt.pricing?.tableVersion).toBe(PRICING_TABLE_VERSION);
+		expectRecomputable(receipt);
+
+		await governed.destroy();
+	});
+
+	it("emits no meter key that receipt.v1 would reject on the stream terminal either", async () => {
+		const v1 = loadV1Schema();
+		const allowed = new Set(Object.keys(v1.properties.meter.properties));
+
+		const audit = makeMockAudit();
+		const governed = await trust(
+			makeStreamingAnthropicMock([
+				{ type: "message_start", message: { usage: { input_tokens: 1000 } } },
+				{ type: "message_delta", usage: { output_tokens: 500 } },
+			]),
+			{ budget: 10_000_000, vaultBase: tmpVault, _engine: makeEngine(), _audit: audit },
+		);
+		const result = await governed.messages.create({
+			model: "claude-sonnet-4-6",
+			max_tokens: 64,
+			messages: MESSAGES,
+		});
+
+		// Both stream surfaces: the pre-settle handle AND the settled receipt.
+		expect(Object.keys(result.receipt.meter ?? {}).filter((k) => !allowed.has(k))).toEqual([]);
+		for await (const _ of result.response as AsyncIterable<unknown>) {
+			// consume
+		}
+		const settled = await (result.response as { receipt: Promise<TrustReceipt> }).receipt;
+		expect(Object.keys(settled.meter ?? {}).filter((k) => !allowed.has(k))).toEqual([]);
+		expect(settled.pricing?.tableVersion).toBe(PRICING_TABLE_VERSION);
+
+		await governed.destroy();
+	});
+});
+
+// ── Codex PR-85 P1-2: a caller cannot rewrite the rates the chain recorded ──
+
+/**
+ * One rate snapshot is resolved per governed call and reaches three surfaces:
+ * the estimate-priced stream handle (returned to the caller BEFORE the stream
+ * is consumed), the `llm_call` chain event, and the settled receipt. Shared by
+ * reference and mutable, the handle would be a writable back door into the
+ * audit record: the caller edits the rates it holds, the terminal writes the
+ * edited object into the chain, and the cost stays computed from the untouched
+ * `ModelRates`. The chain hashes and verifies perfectly around rates that
+ * priced nothing, and the receipt's own recompute contradicts its own cost.
+ */
+describe("applied rates are immutable and unshared across record surfaces (Codex PR-85 P1-2)", () => {
+	let tmpVault: string;
+
+	beforeEach(() => {
+		tmpVault = makeTmpVault("record-surfaces-frozen");
+	});
+
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+	});
+
+	it("a caller mutating the pre-settle stream handle cannot change the audited or receipted rates", async () => {
+		const audit = makeMockAudit();
+		const governed = await trust(
+			makeStreamingAnthropicMock([
+				{
+					type: "message_start",
+					message: {
+						usage: {
+							input_tokens: 1000,
+							cache_read_input_tokens: 200_000,
+							cache_creation_input_tokens: 4000,
+						},
+					},
+				},
+				{ type: "message_delta", usage: { output_tokens: 500 } },
+			]),
+			{ budget: 10_000_000, vaultBase: tmpVault, _engine: makeEngine(), _audit: audit },
+		);
+		const result = await governed.messages.create({
+			model: "claude-sonnet-4-6",
+			max_tokens: 64,
+			messages: MESSAGES,
+		});
+
+		const handleRates = result.receipt.pricing?.appliedRates as AppliedRates;
+		const truth = { ...handleRates };
+		expect(Object.isFrozen(handleRates)).toBe(true);
+
+		// The attack, in both the shapes a caller can reach for. Strict-mode ESM
+		// makes the assignment throw; a non-strict host silently no-ops. Either
+		// way the recorded rates must be untouched, so both are tolerated here
+		// and only the OUTCOME is asserted.
+		try {
+			(handleRates as { cacheReadPer1k: number }).cacheReadPer1k = 0;
+			(handleRates as { inputPer1k: number }).inputPer1k = 0;
+		} catch {
+			// frozen object in strict mode — the good path
+		}
+		try {
+			Object.assign(handleRates, { outputPer1k: 0, cacheWritePer1k: 0 });
+		} catch {
+			// likewise
+		}
+		expect(handleRates).toEqual(truth);
+
+		for await (const _ of result.response as AsyncIterable<unknown>) {
+			// consume so the terminal writes the chain event
+		}
+		const settled = await (result.response as { receipt: Promise<TrustReceipt> }).receipt;
+
+		// The chain event and the settled receipt carry the REAL rates...
+		const data = llmCalls(audit)[0]?.data as Record<string, unknown>;
+		expect(data.appliedRates).toEqual(truth);
+		expect(settled.pricing?.appliedRates).toEqual(truth);
+		// ...and the money still reconciles against them, which is the point.
+		expectRecomputable(settled);
+		expect(recomputeCost(data.usage as ReceiptUsage, data.appliedRates as AppliedRates)).toBe(
+			data.cost,
+		);
+
+		// No two surfaces share object identity, so no future escape from the
+		// freeze can turn one mutation into three.
+		expect(settled.pricing?.appliedRates).not.toBe(handleRates);
+		expect(data.appliedRates).not.toBe(handleRates);
+		expect(data.appliedRates).not.toBe(settled.pricing?.appliedRates);
+		expect(Object.isFrozen(settled.pricing?.appliedRates)).toBe(true);
+		expect(Object.isFrozen(data.appliedRates)).toBe(true);
+
+		await governed.destroy();
+	});
+
+	it("a caller mutating a settled non-stream receipt cannot rewrite the chain event beside it", async () => {
+		const audit = makeMockAudit();
+		const governed = await trust(
+			makeAnthropicMock({
+				input_tokens: 1000,
+				output_tokens: 500,
+				cache_read_input_tokens: 200_000,
+				cache_creation_input_tokens: 4000,
+			}),
+			{ budget: 10_000_000, vaultBase: tmpVault, _engine: makeEngine(), _audit: audit },
+		);
+		const { receipt } = await governed.messages.create({
+			model: "claude-sonnet-4-6",
+			max_tokens: 64,
+			messages: MESSAGES,
+		});
+
+		const receiptRates = receipt.pricing?.appliedRates as AppliedRates;
+		const truth = { ...receiptRates };
+		expect(Object.isFrozen(receiptRates)).toBe(true);
+		try {
+			(receiptRates as { cacheReadPer1k: number }).cacheReadPer1k = 0;
+		} catch {
+			// frozen in strict mode
+		}
+
+		const data = llmCalls(audit)[0]?.data as Record<string, unknown>;
+		expect(data.appliedRates).toEqual(truth);
+		expect(data.appliedRates).not.toBe(receiptRates);
+		expectRecomputable(receipt);
+
 		await governed.destroy();
 	});
 });
