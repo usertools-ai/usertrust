@@ -17,6 +17,11 @@ export const SettleRequestSchema = z.object({
 	transferId: z.string().min(1),
 	inputTokens: z.number().int().nonnegative().optional(),
 	outputTokens: z.number().int().nonnegative().optional(),
+	// Spec D4 row 6: zod strips unrecognized keys by default, so these two
+	// tiers used to vanish silently on the wire — a settle carrying real cache
+	// counts round-tripped as if they were never sent.
+	cacheReadTokens: z.number().int().nonnegative().optional(),
+	cacheWriteTokens: z.number().int().nonnegative().optional(),
 	chunksDelivered: z.number().int().nonnegative().optional(),
 	usageSource: z.enum(["provider", "estimated"]).optional(),
 });

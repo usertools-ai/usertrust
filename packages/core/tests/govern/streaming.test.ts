@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import type { LLMClientKind } from "../../src/shared/types.js";
-import { type StreamCompletion, type StreamUsage, wrapStream } from "../../src/streaming.js";
+import {
+	type ChunkObservation,
+	type StreamCompletion,
+	type StreamUsage,
+	wrapStream,
+} from "../../src/streaming.js";
 
 // ── Helpers ──
 
@@ -97,7 +102,7 @@ describe("wrapStream", () => {
 			await collectAll(wrapped);
 
 			expect(onComplete).toHaveBeenCalledWith({
-				usage: { inputTokens: 200, outputTokens: 50 },
+				usage: { inputTokens: 200, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 },
 				chunksDelivered: 3,
 				usageReported: true,
 			});
@@ -153,7 +158,7 @@ describe("wrapStream", () => {
 			await collectAll(wrapped);
 
 			expect(onComplete).toHaveBeenCalledWith({
-				usage: { inputTokens: 100, outputTokens: 42 },
+				usage: { inputTokens: 100, outputTokens: 42, cacheReadTokens: 0, cacheWriteTokens: 0 },
 				chunksDelivered: 2,
 				usageReported: true,
 			});
@@ -213,7 +218,7 @@ describe("wrapStream", () => {
 			await collectAll(wrapped);
 
 			expect(onComplete).toHaveBeenCalledWith({
-				usage: { inputTokens: 60, outputTokens: 33 },
+				usage: { inputTokens: 60, outputTokens: 33, cacheReadTokens: 0, cacheWriteTokens: 0 },
 				chunksDelivered: 2,
 				usageReported: true,
 			});
@@ -331,7 +336,7 @@ describe("wrapStream", () => {
 			const collected = await collectAll(wrapped);
 			expect(collected).toEqual([]);
 			expect(onComplete).toHaveBeenCalledWith({
-				usage: { inputTokens: 0, outputTokens: 0 },
+				usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
 				chunksDelivered: 0,
 				usageReported: false,
 			});
@@ -348,7 +353,7 @@ describe("wrapStream", () => {
 			const collected = await collectAll(wrapped);
 			expect(collected).toHaveLength(3);
 			expect(onComplete).toHaveBeenCalledWith({
-				usage: { inputTokens: 0, outputTokens: 0 },
+				usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
 				chunksDelivered: 3,
 				usageReported: false,
 			});
@@ -477,6 +482,266 @@ describe("wrapStream", () => {
 			await collectAll(wrapped);
 			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
 			expect(completion.usageReported).toBe(true);
+		});
+	});
+
+	// ─── Four-tier accumulation (spec D2/D4 — the generic stream accumulator) ───
+
+	describe("cache tiers survive the accumulator", () => {
+		it("anthropic: message_start cache counters ride through PASS-THROUGH (no subtraction)", async () => {
+			// The SDK's three input counters are disjoint, so input_tokens stays 100
+			// even though 9000 tokens were read from cache. Subtracting here would
+			// undercount — the direction the whole ship exists to kill.
+			const chunks = [
+				{
+					type: "message_start",
+					message: {
+						usage: {
+							input_tokens: 100,
+							cache_read_input_tokens: 9_000,
+							cache_creation_input_tokens: 1_000,
+						},
+					},
+				},
+				{ type: "message_delta", usage: { output_tokens: 200 } },
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "anthropic", onComplete, onError);
+			await collectAll(wrapped);
+
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage).toEqual({
+				inputTokens: 100,
+				outputTokens: 200,
+				cacheReadTokens: 9_000,
+				cacheWriteTokens: 1_000,
+			});
+		});
+
+		it("anthropic: the nested cache_creation TTL breakdown sums into the write tier", async () => {
+			const chunks = [
+				{
+					type: "message_start",
+					message: {
+						usage: {
+							input_tokens: 10,
+							cache_creation: {
+								ephemeral_5m_input_tokens: 1_500,
+								ephemeral_1h_input_tokens: 500,
+							},
+						},
+					},
+				},
+				{ type: "message_delta", usage: { output_tokens: 5 } },
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "anthropic", onComplete, onError);
+			await collectAll(wrapped);
+
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage.cacheWriteTokens).toBe(2_000);
+		});
+
+		it("openai chat.completions: the inclusive cached read is subtracted out of prompt_tokens", async () => {
+			const chunks = [
+				{ choices: [{ delta: { content: "Hi" } }] },
+				{
+					choices: [],
+					usage: {
+						prompt_tokens: 5_000,
+						completion_tokens: 100,
+						prompt_tokens_details: { cached_tokens: 4_000 },
+					},
+				},
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "openai", onComplete, onError);
+			await collectAll(wrapped);
+
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage).toEqual({
+				inputTokens: 1_000,
+				outputTokens: 100,
+				cacheReadTokens: 4_000,
+				cacheWriteTokens: 0,
+			});
+		});
+
+		it("openai Responses: the terminal event's input_tokens_details are normalized (streaming.ts:94)", async () => {
+			const chunks = [
+				{ type: "response.output_text.delta", delta: "Hi" },
+				{
+					type: "response.completed",
+					response: {
+						id: "resp_1",
+						usage: {
+							input_tokens: 5_000,
+							output_tokens: 100,
+							input_tokens_details: { cached_tokens: 4_000 },
+						},
+					},
+				},
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "openai", onComplete, onError);
+			await collectAll(wrapped);
+
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage).toEqual({
+				inputTokens: 1_000,
+				outputTokens: 100,
+				cacheReadTokens: 4_000,
+				cacheWriteTokens: 0,
+			});
+		});
+
+		it("google: cachedContentTokenCount is subtracted and thoughts bill as output", async () => {
+			const chunks = [
+				{
+					candidates: [],
+					usageMetadata: {
+						promptTokenCount: 10_000,
+						cachedContentTokenCount: 9_000,
+						candidatesTokenCount: 100,
+						thoughtsTokenCount: 400,
+					},
+				},
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "google", onComplete, onError);
+			await collectAll(wrapped);
+
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage).toEqual({
+				inputTokens: 1_000,
+				outputTokens: 500,
+				cacheReadTokens: 9_000,
+				cacheWriteTokens: 0,
+			});
+		});
+
+		it("openai/google snapshots REPLACE the cache tiers too, never sum them", async () => {
+			// vLLM-style running totals: the last snapshot wins for every tier.
+			const chunks = [
+				{
+					choices: [],
+					usage: {
+						prompt_tokens: 5_000,
+						completion_tokens: 10,
+						prompt_tokens_details: { cached_tokens: 4_000 },
+					},
+				},
+				{
+					choices: [],
+					usage: {
+						prompt_tokens: 5_000,
+						completion_tokens: 60,
+						prompt_tokens_details: { cached_tokens: 4_000 },
+					},
+				},
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "openai", onComplete, onError);
+			await collectAll(wrapped);
+
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usage.cacheReadTokens).toBe(4_000);
+			expect(completion.usage.outputTokens).toBe(60);
+		});
+
+		it("a cache-only chunk does NOT by itself count as reported usage (D5)", async () => {
+			// No input/output counters anywhere → the settle must fall to the estimate,
+			// not to a 1-usertoken "provider" settle built out of cache tokens alone.
+			const chunks = [
+				{
+					type: "message_start",
+					message: { usage: { cache_read_input_tokens: 9_000 } },
+				},
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const wrapped = wrapStream(mockStream(chunks), "anthropic", onComplete, onError);
+			await collectAll(wrapped);
+
+			const completion = onComplete.mock.calls[0]?.[0] as StreamCompletion;
+			expect(completion.usageReported).toBe(false);
+			expect(completion.usage.cacheReadTokens).toBe(9_000);
+		});
+	});
+
+	describe("onChunk observation carries the four tiers (spec D7)", () => {
+		it("anthropic: cumulative cache tiers reach the onChunk hook, and deltaTokens counts them", async () => {
+			const chunks = [
+				{
+					type: "message_start",
+					message: {
+						usage: {
+							input_tokens: 100,
+							cache_read_input_tokens: 9_000,
+							cache_creation_input_tokens: 1_000,
+						},
+					},
+				},
+				{ type: "message_delta", usage: { output_tokens: 200 } },
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const observations: ChunkObservation[] = [];
+			const wrapped = wrapStream(mockStream(chunks), "anthropic", onComplete, onError, (obs) => {
+				observations.push(obs);
+			});
+			await collectAll(wrapped);
+
+			expect(observations).toHaveLength(2);
+			expect(observations[0]).toMatchObject({
+				cumulativeInputTokens: 100,
+				cumulativeOutputTokens: 0,
+				cumulativeCacheReadTokens: 9_000,
+				cumulativeCacheWriteTokens: 1_000,
+			});
+			// deltaTokens on the first chunk counts the cache tiers too — a
+			// cache-heavy chunk with near-zero fresh input must not read as idle.
+			expect(observations[0]?.deltaTokens).toBe(100 + 9_000 + 1_000);
+			expect(observations[1]).toMatchObject({
+				cumulativeInputTokens: 100,
+				cumulativeOutputTokens: 200,
+				cumulativeCacheReadTokens: 9_000,
+				cumulativeCacheWriteTokens: 1_000,
+			});
+			expect(observations[1]?.deltaTokens).toBe(200);
+		});
+
+		it("openai: the replace-with-latest cache snapshot reaches onChunk too", async () => {
+			const chunks = [
+				{
+					choices: [],
+					usage: {
+						prompt_tokens: 5_000,
+						completion_tokens: 100,
+						prompt_tokens_details: { cached_tokens: 4_000 },
+					},
+				},
+			];
+			const onComplete = vi.fn();
+			const onError = vi.fn();
+			const observations: ChunkObservation[] = [];
+			const wrapped = wrapStream(mockStream(chunks), "openai", onComplete, onError, (obs) => {
+				observations.push(obs);
+			});
+			await collectAll(wrapped);
+
+			expect(observations[0]).toMatchObject({
+				cumulativeInputTokens: 1_000,
+				cumulativeOutputTokens: 100,
+				cumulativeCacheReadTokens: 4_000,
+				cumulativeCacheWriteTokens: 0,
+			});
 		});
 	});
 });

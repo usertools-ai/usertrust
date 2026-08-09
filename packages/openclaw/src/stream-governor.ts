@@ -603,7 +603,17 @@ function fireOnReceipt(opts: GovernanceOptions | undefined, receipt: TrustReceip
 function settleParamsFor(usage: AccumulatedUsage): SettleParams {
 	return {
 		...(usage.usageReported
-			? { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens }
+			? {
+					inputTokens: usage.inputTokens,
+					outputTokens: usage.outputTokens,
+					// Cache tiers (spec D2/D4): pass through unchanged — the pinned
+					// pi-ai adapters that reach openclaw are already disjoint, so no
+					// second subtraction happens here. Omitted (not zeroed) when the
+					// accumulator never saw them, so core's D1 fallback (absent ⇒
+					// inputPer1k, never free) is what prices them, not a fabricated 0.
+					...(usage.cacheReadTokens != null ? { cacheReadTokens: usage.cacheReadTokens } : {}),
+					...(usage.cacheWriteTokens != null ? { cacheWriteTokens: usage.cacheWriteTokens } : {}),
+				}
 			: {}),
 		chunksDelivered: usage.chunksDelivered,
 		usageSource: usage.usageReported ? "provider" : "estimated",
@@ -668,6 +678,23 @@ export function wrapCompleteWithGovernance<T extends { usage?: Usage }>(
 					? {
 							inputTokens: result.usage.input,
 							outputTokens: result.usage.output,
+							// Cache tiers (spec D2/D4): pass through unchanged, same as the
+							// streaming settle path — the pinned pi-ai adapters deliver
+							// disjoint counters, so no subtraction happens at this boundary
+							// either. Guarded (not a bare property read) for the same
+							// older-runtime reason as `normalizeHostUsage`: a `Usage` from a
+							// pi-ai below the >=0.12.0 peer floor may lack these keys at
+							// runtime despite the pinned type saying they are required, and
+							// an absent tier must stay OMITTED (D1: absent ⇒ inputPer1k),
+							// never coerced to a fabricated `0`.
+							...(typeof result.usage.cacheRead === "number" &&
+							Number.isFinite(result.usage.cacheRead)
+								? { cacheReadTokens: result.usage.cacheRead }
+								: {}),
+							...(typeof result.usage.cacheWrite === "number" &&
+							Number.isFinite(result.usage.cacheWrite)
+								? { cacheWriteTokens: result.usage.cacheWrite }
+								: {}),
 							usageSource: "provider" as const,
 						}
 					: { usageSource: "estimated" as const }),

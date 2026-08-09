@@ -462,6 +462,48 @@ spoofing (`ollama cp llama3.2 gpt-4o`) changing the regime; and
 end-user or request input; set `local.autoDetectLoopback: false` in multi-tenant deployments, since
 loopback inside a container may be a forwarding sidecar to a paid API.
 
+**Absent cache rates price at `inputPer1k` — never zero, and never a silent discount (D1).**
+`ModelRates.cacheReadPer1k` / `cacheWritePer1k` are optional; an entry that omits either means the
+provider publishes no rate for that tier, not that the tier is free. `costFromRates` resolves an
+absent (or non-finite/negative) cache rate to the model's `inputPer1k`, and that resolution happens
+in exactly one place — `effectiveCacheRate` in `ledger/pricing.ts`. Never inline
+`rate ?? rates.inputPer1k` (or equivalent) anywhere else; a second resolution site is exactly how a
+silent discount gets introduced. `resolveAppliedRates` (published on `receipt.pricing.appliedRates`)
+goes through the same function, so the rates an auditor sees are the rates the cost was computed
+with. It returns a FROZEN snapshot and each record surface gets its own copy: one resolved object
+reaches the caller's receipt, the chain event and (for streams) the pre-settle handle, so a shared
+mutable object would let a caller rewrite the rates the chain records without touching the cost.
+
+**New receipt fields go at the ROOT, never inside `meter`.** `receipt.v1.schema.json` is frozen
+and declares `meter` with `additionalProperties: false` while leaving the receipt root open. A
+field added inside `meter` therefore makes every v1 validator reject every receipt usertrust
+emits — a compatibility break with no error message. This is why the D5 rate surface is
+`receipt.pricing`, a sibling of `meter`, and it binds anything added later.
+*Prevents:* the failure this whole ship exists to kill — a 1.14B-cache-read day billed at zero
+because a two-tier `ModelRates`/extractor pair had nowhere to price cache tokens, understating spend
+~7-8x. Overstatement is the fail-safe direction: a mispriced call costs too much, never too little,
+so budgets can only deplete faster than the true invoice, never slower.
+
+**Hold sizing reserves the write-premium case, not just the input case (D3).**
+A cache WRITE (Anthropic 1.25x/2x; provider-specific elsewhere) can price above a plain
+input-priced hold, so "cold-cache worst case" was false wherever a write premium applies — a
+headless caller supplying an exact `estimatedInputTokens` had no margin, and the capped-settle
+machinery (above) would then post `min(actual, held)`, silently under-debiting the envelope and
+leaving scarcity numbers falsely high. Both hold-sizing sites — the govern-path authorize estimate
+and the headless authorize estimate — reserve the input leg at
+`max(inputPer1k, effectiveCacheWriteRate(rates))` instead of `inputPer1k` alone.
+*Documented consequence:* holds on cache-writing workloads run ~25% fatter than before; warm
+(cache-hit-heavy) workloads settle far below the hold and release the difference back, so this is
+conservative, not a leak. A warm-but-cold-held call can see `budget_remaining_after` over-deny —
+the fail-safe trade the invariant above already accepts.
+
+**Documented pricing approximations — verbatim, also published at `/docs/api/pricing`:**
+Per-TTL write premium collapsed (1h = 2× billed as 1.25×; `customRates` override for 1h-heavy
+workloads); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
+hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not modeled — fixed
+per-model rates by design; per-call `ceil` + 1-UT floor differs from provider-side aggregation.
+Estimates never model cache state.
+
 ### Audit
 
 **Persist the canonical bytes, not `JSON.stringify` output.** The hash pre-image is
@@ -479,6 +521,53 @@ pre-image.
 **Merkle hashing is RFC 6962 domain-separated.** Leaves `SHA-256(0x00 ‖ data)`, internal nodes
 `SHA-256(0x01 ‖ left ‖ right)`. **Odd nodes are promoted, not duplicated** — this avoids
 CVE-2012-2459.
+
+**An inclusion proof is validated for PATH TOPOLOGY before it is folded.** The fold alone proves
+only that *some* path of these siblings reaches the root; it says nothing about *where* the leaf
+sits. `verifyInclusionProof` therefore derives the expected per-level sibling orientation from
+`(leafIndex, treeSize)` — walking the levels under the promotion semantics above, never a
+`ceil(log2(treeSize))` shortcut, because a promoted node has **no** sibling at its level and its
+path is correspondingly shorter — and requires the supplied sibling count and every `position` to
+match that sequence exactly. `leafIndex` is zero-based, both it and `treeSize` must be
+`Number.isSafeInteger` (`2**53` passes `Number.isInteger`; a non-finite size never leaves the
+derivation loop, since `ceil(Infinity / 2)` is `Infinity`), and `0 ≤ leafIndex < treeSize`. The
+proof is untrusted input, so every structural defect returns `false` and the function never throws.
+The two copies — `core/src/audit/merkle.ts` and `verify/src/verify.ts` — carry byte-identical
+validation blocks and identical early-return order (treeSize, root, then topology).
+
+*Every field of the proof is read EXACTLY ONCE, into a local, and the fold walks a materialized
+array of checked hashes plus the **derived** orientation — never `proof.siblings` a second time, and
+never `sibling.position`, which the loop above already proved equal to `expected[level]`. Do not
+"simplify" the fold back onto `for (const sibling of proof.siblings)`.
+*Prevents:* a hostile in-memory proof — a `get position()` that answers differently on its second
+read, or an array with an overridden `Symbol.iterator` — passing validation on one path and then
+folding a different one. The first cut of this fix validated by index and re-read the object to fold
+it; a genuine leaf-0 proof verified at a forged `leafIndex` of 2 through that gap, by both routes.
+Not reachable through JSON-parsed input or any shipped caller — a parsed proof carries plain data
+properties — but `verifyInclusionProof` is an **exported** function whose contract says "untrusted
+input", so it must hold against objects a caller built by hand.
+
+*The `proof` argument itself is inside that contract.* It is guarded for object-ness (`null`,
+`undefined` and primitives return false), and **both** groups of extraction reads — the five
+top-level fields, and the per-level sibling index/`hash`/`position` reads — sit inside a
+`try`/`catch` that returns false. The catch spans only the reads; the hashing is deliberately left
+outside every catch, so a genuine crypto fault can never be swallowed into a silent verdict.
+*Prevents:* `verifyInclusionProof(null, …)`, a throwing accessor, or a revoked `Proxy` throwing out
+of a function this same section documents as never throwing — the contract contradicting itself.
+This is not a hypothetical tidy-up: the first two rounds of this work shipped the "never throws"
+wording while a bare `null` still threw on `proof.treeSize`, and wrapping only the top-level reads
+still let a hand-built array's throwing index getter escape.
+*Prevents:* a forged `leafIndex` riding an otherwise-valid fold, which is what lets a tampered
+receipt claim a different event's position in an anchored tree; padded, truncated or reordered
+sibling paths; and — the case no amount of hashing can catch — the **equal-hash flip**, where two
+identical leaves make `hashInternal(sibling, self)` and `hashInternal(self, sibling)` the same
+value, so swapping a sibling's side refolds to the very same published root. Strict position
+matching is load-bearing on its own: the fold reads every non-`"left"` value as `"right"`, so an
+unvalidated `position` field is a free right-hand step.
+*What this function still does NOT authenticate,* deliberately: `version` and `segmentId` (changing
+either still verifies), and the binding of `leafHash` to an externally expected event — that is the
+caller's job. Hash-string *encoding* is likewise unvalidated beyond `typeof === "string"`; Node's
+hex decoder is permissive, and tightening it needs its own compatibility analysis.
 
 **Audit-write failure degrades; it never unwinds committed money.** The writer dead-letters to
 `.usertrust/dlq/dead-letters.jsonl` (dir `0700`, file `0600`, fsync'd) and **re-throws**; governance

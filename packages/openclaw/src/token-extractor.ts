@@ -27,6 +27,17 @@ export interface AccumulatedUsage {
 	 * carried no native duration.
 	 */
 	computeMs?: number | undefined;
+	/**
+	 * Cache-hit / cache-creation prompt tokens (spec D2/D4). Omitted (never
+	 * `undefined`-valued), not zeroed, when the host's terminal event did not
+	 * report them — an absent tier is priced at `inputPer1k` downstream (D1),
+	 * a `0` tier claims the provider confirmed no cache activity. These ride
+	 * straight through from `extractUsageFromEvent`/`normalizeHostUsage`: the
+	 * pinned pi-ai adapters that reach openclaw are already disjoint (D2), so
+	 * the accumulator carries them, it does not recompute them.
+	 */
+	cacheReadTokens?: number | undefined;
+	cacheWriteTokens?: number | undefined;
 }
 
 /** Max tokens to accept from a provider (prevents Infinity/overflow in cost math). */
@@ -284,6 +295,8 @@ export function createAccumulator(): {
 	let chunksDelivered = 0;
 	let usageReported = false;
 	let computeMs: number | undefined;
+	let cacheReadTokens: number | undefined;
+	let cacheWriteTokens: number | undefined;
 
 	return {
 		update(event: StreamEvent): void {
@@ -298,6 +311,12 @@ export function createAccumulator(): {
 			if (usage != null) {
 				inputTokens = usage.inputTokens;
 				outputTokens = usage.outputTokens;
+				// Overwritten, not merged — mirrors inputTokens/outputTokens above.
+				// Exactly one terminal event ever carries usage, so this is the
+				// terminal event's own cache tiers (or their absence), not a stale
+				// carry-over from an earlier update().
+				cacheReadTokens = usage.cacheReadTokens;
+				cacheWriteTokens = usage.cacheWriteTokens;
 				usageReported = true;
 			}
 
@@ -315,6 +334,8 @@ export function createAccumulator(): {
 				usageReported,
 				// Omitted entirely when absent — never `computeMs: undefined` (plan A6).
 				...(computeMs != null ? { computeMs } : {}),
+				...(cacheReadTokens != null ? { cacheReadTokens } : {}),
+				...(cacheWriteTokens != null ? { cacheWriteTokens } : {}),
 			};
 		},
 	};

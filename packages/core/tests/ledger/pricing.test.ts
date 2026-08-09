@@ -1,12 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	costFromRates,
 	estimateCost,
 	estimateInputTokens,
 	FALLBACK_RATE,
 	getModelRates,
+	type ModelRates,
 	modelsForProvider,
 	PRICING_TABLE,
 	PRICING_TABLE_VERSION,
+	warnCacheRateMigration,
 } from "../../src/ledger/pricing.js";
 
 describe("PRICING_TABLE", () => {
@@ -359,6 +362,12 @@ describe("PRICING_TABLE_VERSION", () => {
 	it("is a date string", () => {
 		expect(PRICING_TABLE_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
 	});
+
+	it("is the date of the four-tier rates audit", () => {
+		// Bumped whenever any PRICING_TABLE entry changes (spec D1). Receipts record
+		// it (D5) so a cost can be reproduced against the exact table that priced it.
+		expect(PRICING_TABLE_VERSION).toBe("2026-08-08");
+	});
 });
 
 describe("getModelRates with customRates", () => {
@@ -424,5 +433,402 @@ describe("estimateCost with customRates", () => {
 		// claude-sonnet-4-6 not in custom, uses PRICING_TABLE: 30 + 75 = 105
 		const cost = estimateCost("claude-sonnet-4-6", 1000, 500, custom);
 		expect(cost).toBe(105);
+	});
+});
+
+// ── Rates audit (spec D1): the four-tier matrix ──
+//
+// Every rate below was re-derived from the provider's published pricing page on
+// 2026-08-08 and converted at 1 usertoken = $0.0001 (so $/MTok x 10 = per-1k
+// usertokens). Sources, retrieved values, and the per-entry provenance notes are
+// in the task report (.superpowers/sdd/2026-08-08-cache-tier-pricing/task-1-report.md).
+//
+// An entry OMITS a cache field when the provider publishes no rate for that tier.
+// Omission is not zero: costFromRates resolves it to inputPer1k (the D1 money
+// invariant, pinned by name below). Never invent a discount to fill a gap.
+const AUDITED_RATES: Record<string, ModelRates> = {
+	// Anthropic — cache read 0.1x, 5-minute cache write 1.25x of base input.
+	"claude-sonnet-4-6": {
+		inputPer1k: 30,
+		outputPer1k: 150,
+		cacheReadPer1k: 3,
+		cacheWritePer1k: 37.5,
+	},
+	"claude-haiku-4-5": { inputPer1k: 10, outputPer1k: 50, cacheReadPer1k: 1, cacheWritePer1k: 12.5 },
+	"claude-opus-4-6": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
+
+	// OpenAI — cached-input reads are published per model; there is no separate
+	// cache-WRITE rate (writes bill at standard input), so cacheWritePer1k is omitted
+	// and the D1 fallback reproduces the published behaviour exactly.
+	"gpt-4o": { inputPer1k: 25, outputPer1k: 100, cacheReadPer1k: 12.5 },
+	"gpt-4o-mini": { inputPer1k: 1.5, outputPer1k: 6, cacheReadPer1k: 0.75 },
+	"gpt-5.4": { inputPer1k: 25, outputPer1k: 150, cacheReadPer1k: 2.5 },
+	o3: { inputPer1k: 20, outputPer1k: 80, cacheReadPer1k: 5 },
+	"o4-mini": { inputPer1k: 11, outputPer1k: 44, cacheReadPer1k: 2.75 },
+
+	// Google — context-cache reads are 0.1x base input. Cache creation bills as
+	// ordinary input plus an hourly STORAGE charge, which this model does not carry
+	// (D6), so cacheWritePer1k is omitted rather than guessed.
+	"gemini-2.5-flash": { inputPer1k: 3, outputPer1k: 25, cacheReadPer1k: 0.3 },
+	"gemini-2.5-pro": { inputPer1k: 12.5, outputPer1k: 100, cacheReadPer1k: 1.25 },
+	"gemini-3.1-pro": { inputPer1k: 20, outputPer1k: 120, cacheReadPer1k: 2 },
+
+	// No published cache pricing for these models — both cache fields omitted.
+	"mistral-large": { inputPer1k: 5, outputPer1k: 15 },
+	"deepseek-chat": { inputPer1k: 2.8, outputPer1k: 4.2 },
+	"deepseek-reasoner": { inputPer1k: 2.8, outputPer1k: 4.2 },
+	"grok-3": { inputPer1k: 30, outputPer1k: 150 },
+	"llama-4-maverick": { inputPer1k: 2.4, outputPer1k: 9.7 },
+	"command-a": { inputPer1k: 25, outputPer1k: 100 },
+	"sonar-pro": { inputPer1k: 30, outputPer1k: 150 },
+	"qwen-72b": { inputPer1k: 2.9, outputPer1k: 3.9 },
+	"nova-pro": { inputPer1k: 8, outputPer1k: 32 },
+};
+
+describe("PRICING_TABLE rates audit (D1)", () => {
+	it("covers exactly the audited model set", () => {
+		expect(Object.keys(PRICING_TABLE).sort()).toEqual(Object.keys(AUDITED_RATES).sort());
+	});
+
+	for (const [model, expected] of Object.entries(AUDITED_RATES)) {
+		it(`pins all four tiers for ${model}`, () => {
+			// toStrictEqual so an accidentally-present `cacheWritePer1k: undefined`
+			// fails too — presence/absence of a cache field is load-bearing under D1.
+			expect(PRICING_TABLE[model]).toStrictEqual(expected);
+		});
+	}
+
+	it("never records a cache rate of zero (zero-billing is forbidden)", () => {
+		for (const [model, rates] of Object.entries(PRICING_TABLE)) {
+			if (rates.cacheReadPer1k !== undefined) {
+				expect(rates.cacheReadPer1k, `${model} cacheReadPer1k`).toBeGreaterThan(0);
+			}
+			if (rates.cacheWritePer1k !== undefined) {
+				expect(rates.cacheWritePer1k, `${model} cacheWritePer1k`).toBeGreaterThan(0);
+			}
+		}
+	});
+
+	it("prices cache reads at or below base input, and cache writes at or above", () => {
+		for (const [model, rates] of Object.entries(PRICING_TABLE)) {
+			if (rates.cacheReadPer1k !== undefined) {
+				expect(rates.cacheReadPer1k, `${model} read <= input`).toBeLessThanOrEqual(
+					rates.inputPer1k,
+				);
+			}
+			if (rates.cacheWritePer1k !== undefined) {
+				expect(rates.cacheWritePer1k, `${model} write >= input`).toBeGreaterThanOrEqual(
+					rates.inputPer1k,
+				);
+			}
+		}
+	});
+
+	it("corrects the stale o4-mini base rate found in review", () => {
+		// Was 5.5/22 — exactly half the current published standard rate of
+		// $1.10 / $4.40 per MTok. Understatement is the dangerous direction.
+		expect(PRICING_TABLE["o4-mini"]?.inputPer1k).toBe(11);
+		expect(PRICING_TABLE["o4-mini"]?.outputPer1k).toBe(44);
+	});
+
+	it("keeps nova-pro and mistral-large at their real published rates", () => {
+		// Regression guard for two bad "corrections" made during the 2026-08-08 audit
+		// and caught in review. Both overstated the rate, so budgets depleted faster
+		// than the invoice and receipts recomputed against a rate that does not exist.
+		//
+		//   nova-pro      — Amazon Bedrock on-demand is $0.80 in / $3.20 out per MTok
+		//                   (= 8 / 32), NOT $4.00 out. The audit briefly wrote 40.
+		//   mistral-large — `mistral-large-latest` resolves to Mistral Large 3, which
+		//                   Mistral's own /pricing/api lists at $0.50 in / $1.50 out
+		//                   (= 5 / 15). The $2/$6 figure the audit briefly wrote is
+		//                   the retired Mistral Large 2 rate, still quoted in a stale
+		//                   FAQ line on the marketing pricing page.
+		//
+		// In both cases the pre-existing table value was already correct.
+		expect(PRICING_TABLE["nova-pro"]).toStrictEqual({ inputPer1k: 8, outputPer1k: 32 });
+		expect(PRICING_TABLE["mistral-large"]).toStrictEqual({ inputPer1k: 5, outputPer1k: 15 });
+	});
+
+	it("keeps FALLBACK_RATE two-tier so unknown models price cache at input rate", () => {
+		// An unknown model is not known to be Anthropic-shaped; attaching a cache
+		// discount here would silently under-bill every unrecognised model. Leaving
+		// both cache fields absent routes them through the D1 fallback instead.
+		expect(FALLBACK_RATE.cacheReadPer1k).toBeUndefined();
+		expect(FALLBACK_RATE.cacheWritePer1k).toBeUndefined();
+	});
+});
+
+describe("costFromRates four-tier math (D3)", () => {
+	const FOUR_TIER: ModelRates = {
+		inputPer1k: 30,
+		outputPer1k: 150,
+		cacheReadPer1k: 3,
+		cacheWritePer1k: 37.5,
+	};
+
+	it("bills each tier at its own rate", () => {
+		// 1000*30/1k + 1000*150/1k + 1000*3/1k + 1000*37.5/1k = 30 + 150 + 3 + 37.5
+		// = 220.5 -> ceil -> 221
+		expect(costFromRates(FOUR_TIER, 1000, 1000, 1000, 1000)).toBe(221);
+	});
+
+	it("defaults both cache params to 0 (three-arg callers are unaffected)", () => {
+		expect(costFromRates(FOUR_TIER, 1000, 500)).toBe(costFromRates(FOUR_TIER, 1000, 500, 0, 0));
+		expect(costFromRates(FOUR_TIER, 1000, 500)).toBe(105);
+	});
+
+	it("bills cache-read-only traffic (the 7-8x understatement this ship kills)", () => {
+		// Pre-fix, cache reads were dropped entirely and this settled at the floor of 1.
+		expect(costFromRates(FOUR_TIER, 0, 0, 1_000_000, 0)).toBe(3000);
+	});
+
+	it("bills cache-write-only traffic above the input rate", () => {
+		expect(costFromRates(FOUR_TIER, 0, 0, 0, 1_000_000)).toBe(37_500);
+	});
+
+	it("keeps the >=1 floor for a {0,0}-rate local call with cache tokens", () => {
+		// The shipped default local rate. The floor is load-bearing: zero-amount
+		// ledger transfers are invalid, so this must still settle at exactly 1.
+		const localDefault: ModelRates = { inputPer1k: 0, outputPer1k: 0 };
+		expect(costFromRates(localDefault, 0, 0, 0, 0)).toBe(1);
+		expect(costFromRates(localDefault, 1_000_000, 1_000_000, 1_000_000, 1_000_000)).toBe(1);
+	});
+
+	it("honours an explicit zero cache rate (operator choice, not absence)", () => {
+		// D1 forbids IMPLICIT zero-billing from absent fields. An operator who writes
+		// cacheReadPer1k: 0 for a self-hosted model meant it; that is not a silent gap.
+		const free: ModelRates = { inputPer1k: 30, outputPer1k: 150, cacheReadPer1k: 0 };
+		expect(costFromRates(free, 0, 0, 1_000_000, 0)).toBe(1);
+	});
+});
+
+// Codex PR-85 [P2-4]. The recompute pin is this ship's headline claim, and it is
+// published in three places as ONE formula — receipt.v2.schema.json, types.mdx and
+// the reconciliation integration test all write `ceil(sum(counts x rates / 1000))`,
+// i.e. MULTIPLY THEN DIVIDE. Implementing it as `(count / 1000) * rate` is a
+// different computation in IEEE-754: 560/1000 is not representable, so the division
+// carries a 1-ulp error that `Math.ceil` then amplifies to a whole usertoken.
+// An auditor running the documented formula would get 7 where usertrust charged 8,
+// and "exactly recomputable" would be false on real, unremarkable inputs.
+describe("costFromRates matches the PUBLISHED auditor formula exactly (Codex PR-85 P2-4)", () => {
+	/** The documented reconciliation formula, verbatim from receipt.v2.schema.json. */
+	const publishedFormula = (
+		rates: Required<Pick<ModelRates, "inputPer1k" | "outputPer1k">> & {
+			cacheReadPer1k: number;
+			cacheWritePer1k: number;
+		},
+		counts: { input: number; output: number; cacheRead: number; cacheWrite: number },
+	): number =>
+		Math.max(
+			1,
+			Math.ceil(
+				(counts.input * rates.inputPer1k) / 1000 +
+					(counts.output * rates.outputPer1k) / 1000 +
+					(counts.cacheRead * rates.cacheReadPer1k) / 1000 +
+					(counts.cacheWrite * rates.cacheWritePer1k) / 1000,
+			),
+		);
+
+	it("prices 560 cache-write tokens at 12.5/1k as 7, not 8 (the exact divergence case)", () => {
+		// claude-haiku-4-5's shipped cacheWritePer1k. (560 * 12.5) / 1000 === 7 exactly;
+		// (560 / 1000) * 12.5 === 7.000000000000001, which ceils to 8.
+		const haiku: ModelRates = {
+			inputPer1k: 10,
+			outputPer1k: 50,
+			cacheReadPer1k: 1,
+			cacheWritePer1k: 12.5,
+		};
+		expect((560 / 1000) * 12.5).toBe(7.000000000000001); // the trap, pinned
+		expect((560 * 12.5) / 1000).toBe(7); // the published order
+		expect(costFromRates(haiku, 0, 0, 0, 560)).toBe(7);
+	});
+
+	it("agrees with the published formula across a divergence-hunting table", () => {
+		const rates = {
+			inputPer1k: 12.5,
+			outputPer1k: 37.5,
+			cacheReadPer1k: 12.5,
+			cacheWritePer1k: 37.5,
+		};
+		// Counts chosen so that `n / 1000` is inexact in binary and the product
+		// lands within 1 ulp of an integer — exactly where ceil() flips.
+		for (const n of [560, 1120, 2240, 4480, 560_000, 28, 56, 112, 224, 448]) {
+			for (const tier of ["input", "output", "cacheRead", "cacheWrite"] as const) {
+				const counts = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, [tier]: n };
+				expect(
+					costFromRates(rates, counts.input, counts.output, counts.cacheRead, counts.cacheWrite),
+					`${tier}=${n}`,
+				).toBe(publishedFormula(rates, counts));
+			}
+		}
+	});
+
+	it("agrees with the published formula on a mixed four-tier settle", () => {
+		const rates = {
+			inputPer1k: 30,
+			outputPer1k: 150,
+			cacheReadPer1k: 3,
+			cacheWritePer1k: 37.5,
+		};
+		const counts = { input: 560, output: 1120, cacheRead: 2240, cacheWrite: 560 };
+		expect(
+			costFromRates(rates, counts.input, counts.output, counts.cacheRead, counts.cacheWrite),
+		).toBe(publishedFormula(rates, counts));
+	});
+});
+
+describe("costFromRates D1 money invariant: absent cache rates resolve to inputPer1k", () => {
+	// SPEC D1 (money invariant): "absent cache rates price cache tokens at
+	// `inputPer1k` — overstatement is fail-safe; zero-billing and silent discounts
+	// are forbidden. The fallback resolution lives in exactly one place
+	// (`costFromRates`)." These assertions are the executable form of that sentence.
+	const twoTier: ModelRates = { inputPer1k: 30, outputPer1k: 150 };
+
+	it("does NOT bill absent-rate cache reads at zero", () => {
+		const cost = costFromRates(twoTier, 0, 0, 1_000_000, 0);
+		expect(cost).not.toBe(0);
+		expect(cost).not.toBe(1); // not the floor either — real tokens, real cost
+	});
+
+	it("bills absent-rate cache reads at exactly inputPer1k", () => {
+		expect(costFromRates(twoTier, 0, 0, 1_000_000, 0)).toBe(30_000);
+		expect(costFromRates(twoTier, 0, 0, 1_000_000, 0)).toBe(
+			costFromRates(twoTier, 1_000_000, 0, 0, 0),
+		);
+	});
+
+	it("bills absent-rate cache writes at exactly inputPer1k", () => {
+		expect(costFromRates(twoTier, 0, 0, 0, 1_000_000)).toBe(30_000);
+		expect(costFromRates(twoTier, 0, 0, 0, 1_000_000)).toBe(
+			costFromRates(twoTier, 1_000_000, 0, 0, 0),
+		);
+	});
+
+	it("resolves each cache tier independently when only one is published", () => {
+		// gpt-4o ships a published read discount and no write rate: reads bill at the
+		// discount, writes fall back to full input rate.
+		const readOnly: ModelRates = { inputPer1k: 25, outputPer1k: 100, cacheReadPer1k: 12.5 };
+		expect(costFromRates(readOnly, 0, 0, 1_000_000, 0)).toBe(12_500);
+		expect(costFromRates(readOnly, 0, 0, 0, 1_000_000)).toBe(25_000);
+	});
+
+	it("holds for every PRICING_TABLE entry that omits a cache field", () => {
+		for (const [model, rates] of Object.entries(PRICING_TABLE)) {
+			if (rates.cacheReadPer1k === undefined) {
+				expect(costFromRates(rates, 0, 0, 1_000_000, 0), `${model} read fallback`).toBe(
+					costFromRates(rates, 1_000_000, 0, 0, 0),
+				);
+			}
+			if (rates.cacheWritePer1k === undefined) {
+				expect(costFromRates(rates, 0, 0, 0, 1_000_000), `${model} write fallback`).toBe(
+					costFromRates(rates, 1_000_000, 0, 0, 0),
+				);
+			}
+		}
+	});
+
+	it("falls back to inputPer1k for a non-finite or negative cache rate", () => {
+		// Garbage customRates must not zero-bill or produce a negative offset.
+		const nan: ModelRates = { inputPer1k: 30, outputPer1k: 150, cacheReadPer1k: Number.NaN };
+		const negative: ModelRates = { inputPer1k: 30, outputPer1k: 150, cacheWritePer1k: -100 };
+		expect(costFromRates(nan, 0, 0, 1_000_000, 0)).toBe(30_000);
+		expect(costFromRates(negative, 0, 0, 0, 1_000_000)).toBe(30_000);
+	});
+});
+
+describe("costFromRates guards on the new cache params", () => {
+	const rates: ModelRates = {
+		inputPer1k: 30,
+		outputPer1k: 150,
+		cacheReadPer1k: 3,
+		cacheWritePer1k: 37.5,
+	};
+
+	it("treats NaN cache token counts as 0", () => {
+		expect(costFromRates(rates, 1000, 0, Number.NaN, Number.NaN)).toBe(30);
+		expect(Number.isInteger(costFromRates(rates, 1000, 0, Number.NaN, Number.NaN))).toBe(true);
+	});
+
+	it("treats Infinity cache token counts as 0", () => {
+		expect(costFromRates(rates, 1000, 0, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY)).toBe(
+			30,
+		);
+	});
+
+	it("treats negative cache token counts as 0", () => {
+		expect(costFromRates(rates, 1000, 0, -5000, -5000)).toBe(30);
+	});
+
+	it("never returns a non-finite cost from garbage cache counts", () => {
+		const cost = costFromRates(rates, Number.NaN, Number.NaN, Number.NaN, Number.NaN);
+		expect(Number.isFinite(cost)).toBe(true);
+		expect(cost).toBe(1);
+	});
+});
+
+// D8: the migration warning is a process-lifetime singleton (fires at most
+// once, ever, in this module instance) — vitest isolates modules per test
+// FILE by default, so these tests share that one lifetime. The "does not
+// warn" cases run first, before anything trips the flag; the final test both
+// trips it and proves the dedup, so ordering here is load-bearing.
+describe("warnCacheRateMigration (D8 migration warning)", () => {
+	let stderrSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+	});
+
+	afterEach(() => {
+		stderrSpy.mockRestore();
+	});
+
+	it("does not warn when customRates is undefined", () => {
+		warnCacheRateMigration(undefined);
+		expect(stderrSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not warn when the custom entry carries both cache fields", () => {
+		warnCacheRateMigration({
+			"claude-haiku-4-5": {
+				inputPer1k: 10,
+				outputPer1k: 50,
+				cacheReadPer1k: 1,
+				cacheWritePer1k: 12.5,
+			},
+		});
+		expect(stderrSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not warn when the table entry itself has no cache fields", () => {
+		// mistral-large is two-tier in PRICING_TABLE — nothing to migrate away from.
+		expect(PRICING_TABLE["mistral-large"]?.cacheReadPer1k).toBeUndefined();
+		warnCacheRateMigration({ "mistral-large": { inputPer1k: 6, outputPer1k: 16 } });
+		expect(stderrSpy).not.toHaveBeenCalled();
+	});
+
+	it("does not warn for a model absent from the table (nothing to compare against)", () => {
+		warnCacheRateMigration({ "totally-custom-model": { inputPer1k: 1, outputPer1k: 2 } });
+		expect(stderrSpy).not.toHaveBeenCalled();
+	});
+
+	it("warns once naming every affected model and the conservative consequence, then stays silent", () => {
+		// Both claude-haiku-4-5 and claude-opus-4-6 publish both cache tiers in
+		// PRICING_TABLE; this pre-D1-shaped config omits them on both — one call
+		// with two affected models exercises the plural wording too.
+		warnCacheRateMigration({
+			"claude-haiku-4-5": { inputPer1k: 11, outputPer1k: 55 },
+			"claude-opus-4-6": { inputPer1k: 55, outputPer1k: 275 },
+		});
+
+		expect(stderrSpy).toHaveBeenCalledTimes(1);
+		const [msg] = stderrSpy.mock.calls[0] as [string];
+		expect(msg).toContain("claude-haiku-4-5");
+		expect(msg).toContain("claude-opus-4-6");
+		expect(msg).toContain("cache reads will price at full input rate");
+
+		// Once per PROCESS, not once per call: a second call — even with a
+		// different affected model — must not fire again.
+		warnCacheRateMigration({ "claude-sonnet-4-6": { inputPer1k: 30, outputPer1k: 150 } });
+		expect(stderrSpy).toHaveBeenCalledTimes(1);
 	});
 });

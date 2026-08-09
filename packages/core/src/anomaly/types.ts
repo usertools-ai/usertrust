@@ -91,6 +91,15 @@ export interface AnomalyChunkEvent {
 	cumulativeInputTokens: number;
 	/** Cumulative output tokens reported by provider so far (or last estimate). */
 	cumulativeOutputTokens: number;
+	/**
+	 * Cumulative cache-READ tokens reported so far (spec D7). Optional and
+	 * defaults to 0 for callers built before the four-tier split — cache
+	 * traffic then simply does not contribute to spend-velocity, the same
+	 * pre-fix behavior, rather than a type error.
+	 */
+	cumulativeCacheReadTokens?: number | undefined;
+	/** Cumulative cache-WRITE tokens reported so far (spec D7). Same default-0 semantics. */
+	cumulativeCacheWriteTokens?: number | undefined;
 	/** Wall-clock timestamp. Defaults to Date.now() if omitted. */
 	at?: number;
 	/** Model of the call this chunk belongs to. Overrides options.model when present (M2). */
@@ -135,7 +144,11 @@ export interface AnomalyDetectorOptions {
 	 * dollars for cloud-scope events, nominal usertokens for local-scope events.
 	 * The observed chunk event is passed as the optional 4th argument so an injected
 	 * calculator can price per-event (scoped by event.model/event.endpointClass); 3-arg
-	 * implementations remain assignable (backward compatible).
+	 * implementations remain assignable (backward compatible). Spec D7: an injected
+	 * calculator that wants the cache tiers reads `event.cumulativeCacheReadTokens` /
+	 * `event.cumulativeCacheWriteTokens` — arity stays 4 so legacy 3-arg calculators
+	 * keep type-checking. The built-in default calculator (used when this is omitted)
+	 * already reads them and prices all four tiers, unfloored.
 	 */
 	costCalculator?: (
 		model: string,

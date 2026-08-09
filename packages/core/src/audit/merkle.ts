@@ -177,34 +177,163 @@ export function generateInclusionProof(
 }
 
 /**
+ * Derive the sibling orientation a proof for `leafIndex` in a tree of
+ * `treeSize` leaves MUST have, level by level, under this tree's
+ * odd-node-PROMOTION variant of RFC 6962 (see buildMerkleTree).
+ *
+ * Returns null when (leafIndex, treeSize) cannot describe a real position.
+ * `Number.isSafeInteger` rather than `Number.isInteger`: 2**53 passes the
+ * latter, and a non-finite size never leaves the loop — ceil(Infinity / 2)
+ * is Infinity.
+ *
+ * A promoted node has NO sibling at its level, so the path is shorter than
+ * ceil(log2(treeSize)) — deriving the length arithmetically instead of
+ * walking the levels gets every promotion-shaped tree wrong.
+ */
+function expectedPathTopology(leafIndex: number, treeSize: number): ("left" | "right")[] | null {
+	if (!Number.isSafeInteger(leafIndex) || !Number.isSafeInteger(treeSize)) {
+		return null;
+	}
+
+	if (leafIndex < 0 || leafIndex >= treeSize) {
+		return null;
+	}
+
+	const positions: ("left" | "right")[] = [];
+	let index = leafIndex;
+	let levelSize = treeSize;
+
+	while (levelSize > 1) {
+		const promoted = index === levelSize - 1 && levelSize % 2 === 1;
+		if (!promoted) {
+			positions.push(index % 2 === 0 ? "right" : "left");
+		}
+		index = Math.floor(index / 2);
+		levelSize = Math.ceil(levelSize / 2);
+	}
+
+	return positions;
+}
+
+/**
  * Verify an inclusion proof against a published root and tree size.
  *
  * Pure function — no I/O, only crypto.createHash.
+ *
+ * The fold alone proves only that SOME path of these siblings reaches the
+ * root; it says nothing about WHERE the leaf sits. The topology check below
+ * is what binds the proof to its claimed position: without it a forged
+ * `leafIndex` rides an otherwise-valid fold unchallenged, and — where two
+ * sibling hashes are equal — flipping a sibling's side refolds to the very
+ * same root, so no amount of hashing can catch it.
+ *
+ * Positions are matched STRICTLY against the derived orientation. The fold
+ * treats every non-"left" value as "right", so an unvalidated "position"
+ * field is a free right-hand step.
+ *
+ * The proof is untrusted input: every structural defect returns false, and
+ * this function never throws.
+ *
+ * Every field of the proof is read EXACTLY ONCE, into a local, and the fold
+ * walks only those locals and the DERIVED orientation.
+ * *Prevents:* a hostile in-memory object — a `get position()` that answers
+ * differently on its second read, or an array with an overridden
+ * `Symbol.iterator` — passing validation on one path and then folding a
+ * different one. Validating a value and re-reading it to use it is the
+ * check-then-use gap; a genuine leaf-0 proof verified at a forged leafIndex
+ * of 2 through exactly that gap. Unreachable through JSON-parsed input, but
+ * this is an exported function whose contract is "untrusted input", so the
+ * contract has to hold against objects the caller built by hand.
+ *
+ * The `proof` argument itself is part of that contract: it is guarded for
+ * object-ness, and the extraction below is wrapped so a throwing accessor or
+ * a revoked proxy answers `false` like any other structural defect. The catch
+ * spans ONLY the reads — never the hashing — so it can never turn a genuine
+ * crypto fault into a silent verdict.
  */
 export function verifyInclusionProof(
 	proof: MerkleInclusionProof,
 	publishedRoot: string,
 	publishedTreeSize: number,
 ): boolean {
-	if (proof.treeSize !== publishedTreeSize) {
+	const candidate: unknown = proof;
+	if (typeof candidate !== "object" || candidate === null) {
 		return false;
 	}
 
-	if (proof.root !== publishedRoot) {
+	let treeSize: number;
+	let root: string;
+	let leafIndex: number;
+	let leafHash: unknown;
+	let siblings: unknown;
+	try {
+		treeSize = proof.treeSize;
+		root = proof.root;
+		leafIndex = proof.leafIndex;
+		leafHash = proof.leafHash;
+		siblings = proof.siblings;
+	} catch {
 		return false;
 	}
 
-	let currentHash = hashLeaf(proof.leafHash);
+	if (treeSize !== publishedTreeSize) {
+		return false;
+	}
 
-	for (const sibling of proof.siblings) {
-		if (sibling.position === "left") {
-			currentHash = hashInternal(sibling.hash, currentHash);
-		} else {
-			currentHash = hashInternal(currentHash, sibling.hash);
+	if (root !== publishedRoot) {
+		return false;
+	}
+
+	const expected = expectedPathTopology(leafIndex, treeSize);
+	if (expected === null) {
+		return false;
+	}
+
+	if (typeof leafHash !== "string") {
+		return false;
+	}
+
+	if (!Array.isArray(siblings) || siblings.length !== expected.length) {
+		return false;
+	}
+
+	// Materialize the checked hashes; nothing below re-reads `proof`. These are
+	// extraction reads too — an index or accessor on a hand-built array can
+	// throw — so they carry the same catch, and it still stops short of the
+	// hashing.
+	const path: string[] = [];
+	try {
+		for (const [level, expectedPosition] of expected.entries()) {
+			const sibling = siblings[level] as Partial<MerkleSibling> | null | undefined;
+			if (typeof sibling !== "object" || sibling === null) {
+				return false;
+			}
+			const hash = sibling.hash;
+			if (typeof hash !== "string") {
+				return false;
+			}
+			if (sibling.position !== expectedPosition) {
+				return false;
+			}
+			path.push(hash);
 		}
+	} catch {
+		return false;
 	}
 
-	return currentHash === proof.root;
+	let currentHash = hashLeaf(leafHash);
+
+	// Orientation comes from `expected`, never from the sibling: it was already
+	// proven equal, and re-reading it is what the gap above was made of.
+	for (const [level, expectedPosition] of expected.entries()) {
+		const hash = path[level] as string;
+		currentHash =
+			expectedPosition === "left"
+				? hashInternal(hash, currentHash)
+				: hashInternal(currentHash, hash);
+	}
+
+	return currentHash === root;
 }
 
 // ── Consistency proofs ──

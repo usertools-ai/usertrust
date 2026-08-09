@@ -54,7 +54,7 @@ Returns the Merkle root and all intermediate layers. If the input is empty, `roo
 
 ## Inclusion Proofs
 
-An inclusion proof demonstrates that a specific audit event (identified by its leaf index) is part of the Merkle tree with a known root.
+An inclusion proof demonstrates that a specific audit event (identified by its zero-based leaf index) is part of the Merkle tree with a known root.
 
 ```typescript
 generateInclusionProof(
@@ -71,6 +71,8 @@ verifyInclusionProof(
 ```
 
 The proof contains the sibling hashes needed to recompute the path from the leaf to the root. A verifier walks the path, hashing at each level, and checks that the result matches the published root.
+
+Verification also checks the path's **topology**: the expected number of siblings and each one's left/right orientation are derived from `leafIndex` and `treeSize`, and a proof whose siblings do not match that sequence is rejected before any hashing. Recomputing to the right root is not enough on its own — without this check a proof could claim any position it liked, and where two sibling hashes are equal, flipping a sibling's side folds to the same root.
 
 ### MerkleInclusionProof
 

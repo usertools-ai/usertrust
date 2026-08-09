@@ -8,6 +8,7 @@ import {
 	FALLBACK_RATE,
 	getModelRates,
 	matchModelPattern,
+	PRICING_TABLE,
 	resolveRates,
 } from "../../src/ledger/pricing.js";
 import { type TrustConfig, TrustConfigSchema } from "../../src/shared/types.js";
@@ -147,7 +148,9 @@ describe("resolveRates — local scope", () => {
 describe("resolveRates — cloud scope", () => {
 	it('table hit resolves rateSource "table", unknown false, costBasis "usd-proxy"', () => {
 		const r = resolveRates("claude-sonnet-4-6", "cloud", makeConfig());
-		expect(r.rates).toEqual({ inputPer1k: 30, outputPer1k: 150 });
+		// Identity against the table, not a literal: the rates matrix is audited and
+		// re-pinned in pricing.test.ts, so duplicating values here only creates drift.
+		expect(r.rates).toBe(PRICING_TABLE["claude-sonnet-4-6"]);
 		expect(r.scope).toBe("cloud");
 		expect(r.rateSource).toBe("table");
 		expect(r.costBasis).toBe("usd-proxy");
@@ -156,7 +159,7 @@ describe("resolveRates — cloud scope", () => {
 
 	it('prefix hit resolves rateSource "table"', () => {
 		const r = resolveRates("claude-haiku-4-5-20251001", "cloud", makeConfig());
-		expect(r.rates).toEqual({ inputPer1k: 10, outputPer1k: 50 });
+		expect(r.rates).toBe(PRICING_TABLE["claude-haiku-4-5"]);
 		expect(r.rateSource).toBe("table");
 		expect(r.unknown).toBe(false);
 	});
@@ -178,7 +181,7 @@ describe("resolveRates — cloud scope", () => {
 			customRates: { "claude-sonnet-4-6": { inputPer1k: 1, outputPer1k: 1 } },
 		});
 		const r = resolveRates("claude-sonnet-4-6", "cloud", config);
-		expect(r.rates).toEqual({ inputPer1k: 30, outputPer1k: 150 });
+		expect(r.rates).toBe(PRICING_TABLE["claude-sonnet-4-6"]);
 		expect(r.rateSource).toBe("table");
 	});
 
@@ -199,6 +202,61 @@ describe("resolveRates — cloud scope", () => {
 			const r = resolveRates(model, "cloud", config);
 			expect(r.rates).toEqual(getModelRates(model, config.customRates));
 		}
+	});
+});
+
+describe("config-declared cache rates survive parsing and reach the money path (D1)", () => {
+	// The end-to-end proof for the RateSchema fix. Schema-level round-trip is
+	// pinned in tests/shared/config-schema.test.ts; this pins the consequence that
+	// actually costs money: an operator's declared cache-read discount must be the
+	// rate costFromRates bills at, not inputPer1k.
+	it("prices a custom entry's cache tokens at the operator's declared rates", () => {
+		const config = makeConfig({
+			pricing: "custom",
+			customRates: {
+				"my-fine-tune": {
+					inputPer1k: 100,
+					outputPer1k: 200,
+					cacheReadPer1k: 10,
+					cacheWritePer1k: 125,
+				},
+			},
+		});
+		const { rates } = resolveRates("my-fine-tune", "cloud", config);
+		expect(rates.cacheReadPer1k).toBe(10);
+		expect(rates.cacheWritePer1k).toBe(125);
+
+		// 1k input @100 + 1k output @200 + 1k read @10 + 1k write @125 = 435.
+		expect(costFromRates(rates, 1000, 1000, 1000, 1000)).toBe(435);
+		// If the fields were stripped, both cache tiers would fall back to
+		// inputPer1k (D1) and the call would bill 100 + 200 + 100 + 100 = 500.
+		expect(costFromRates(rates, 1000, 1000, 1000, 1000)).not.toBe(500);
+	});
+
+	it("an explicit 0 in config zero-rates that tier (override, not absence)", () => {
+		const config = makeConfig({
+			pricing: "custom",
+			customRates: {
+				"free-cache": { inputPer1k: 100, outputPer1k: 100, cacheReadPer1k: 0 },
+			},
+		});
+		const { rates } = resolveRates("free-cache", "cloud", config);
+		// 1k input @100 only; the 1k cache-read tokens bill at the declared 0.
+		expect(costFromRates(rates, 1000, 0, 1000, 0)).toBe(100);
+	});
+
+	it("local.models cache rates reach costFromRates too (shared RateSchema)", () => {
+		const config = makeConfig({
+			local: {
+				models: {
+					"llama3.3*": { inputPer1k: 10, outputPer1k: 20, cacheReadPer1k: 1, cacheWritePer1k: 5 },
+				},
+			},
+		});
+		const { rates } = resolveRates("llama3.3:70b", "local", config);
+		expect(rates.cacheReadPer1k).toBe(1);
+		// 1k read @1 + 1k write @5 = 6, not 2 x inputPer1k = 20.
+		expect(costFromRates(rates, 0, 0, 1000, 1000)).toBe(6);
 	});
 });
 
