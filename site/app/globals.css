@@ -90,13 +90,22 @@
 	}
 }
 
-/* ── CUSTOM CURSOR (Addendum M1) ──────────────────────────────────────────
+/* ── CUSTOM CURSOR (Addendum M1, REVISED — Cam overrule) ──────────────────
    cursor.tsx mounts one dot + one trailing ring, position-driven by motion
-   values (fixed + transform-only, so this layer never affects layout). Never
-   sets `cursor: none` anywhere — this is a decorative addition on top of the
-   real system cursor, not a replacement for it. z-index sits above the nav
-   (z-50) so the ring is never clipped under the fixed bar. will-change is
-   scoped to just these two elements, not a page-wide rule. */
+   values (fixed + transform-only, so this layer never affects layout). The
+   bullseye REPLACES the system cursor while the island is mounted: the rule
+   below is scoped to `html.cursor-active`, a class ONLY cursor.tsx ever
+   applies (on mount, inside its pointer:fine + not-reduced-motion gate) and
+   ONLY it ever removes (unmount, window blur). JS-off, coarse pointers, and
+   reduced-motion never see the class, so they keep the native cursor
+   everywhere — this is not a decorative layer on top of it for them, there
+   is simply no script that could hide it. z-index sits above the nav (z-50)
+   so the ring is never clipped under the fixed bar. will-change is scoped to
+   just these two elements, not a page-wide rule. */
+html.cursor-active,
+html.cursor-active * {
+	cursor: none !important;
+}
 .cursor-layer {
 	position: fixed;
 	inset: 0;

@@ -4,15 +4,18 @@ import { motion, useMotionValue, useSpring } from "motion/react";
 import { useEffect, useState } from "react";
 
 /*
- * THE CUSTOM CURSOR (Addendum M1) — a decorative overlay, never a system-cursor
- * replacement. `cursor: none` never appears anywhere on this page, so the
- * native pointer stays visible underneath the whole time; this is a second,
- * purely additive layer above it.
+ * THE CUSTOM CURSOR (Addendum M1, REVISED — Cam overrule) — the bullseye IS
+ * the cursor. While this island is mounted it REPLACES the native pointer
+ * (`html.cursor-active, html.cursor-active * { cursor: none !important; }`
+ * in globals.css, scoped to the class this component alone applies) rather
+ * than drawing a decorative layer on top of it.
  *
- * A small dot tracks the raw pointer position every frame; a trailing ring
- * lags behind it on a spring. Over any [data-cursor-hover] target the ring
- * scales up and switches to mix-blend-mode: difference, inverting whatever
- * ground it crosses.
+ * A small dot tracks the raw pointer position 1:1 — unsprung, batched to a
+ * single requestAnimationFrame write per burst of pointermove events so the
+ * transform lands at rAF resolution without spamming a motion-value commit
+ * per event. A trailing ring lags behind it on a spring. Over any
+ * [data-cursor-hover] target the ring scales up and switches to
+ * mix-blend-mode: difference, inverting whatever ground it crosses.
  *
  * useSpring (motion/react — already a page dependency, so this is zero new
  * packages) drives the trail rather than a hand-rolled rAF lerp: both run on
@@ -21,12 +24,15 @@ import { useEffect, useState } from "react";
  * epsilon-and-cancel bookkeeping to do the same — one fewer thing to get
  * wrong at 120Hz for the same feel.
  *
- * Mounts ONLY when `(pointer: fine)` matches at mount — touch and coarse
- * pointers never see the overlay, so there is nothing that can render at a
- * stale position after a tap or get "stuck" showing on a touchscreen. Reduced
- * motion is a pure CSS `display: none` on `.cursor-layer` (globals.css):
- * nothing here loops or fires once per pageview, so there is no motion
- * contract to satisfy beyond simply not drawing it.
+ * Mounts ONLY when `(pointer: fine)` matches AND reduced motion is NOT
+ * requested at mount — touch/coarse pointers and reduced-motion users never
+ * get the class, so they keep the native cursor everywhere (there is no
+ * script that could ever fire `cursor: none` for them, not just a CSS
+ * override sitting on top of it). That combined gate is also why nothing
+ * can render at a stale position after a tap or get "stuck" showing on a
+ * touchscreen. `cursor-active` comes off again on unmount and on window
+ * blur (alt-tab, devtools stealing focus) — re-applied on focus — so a user
+ * who leaves the tab is never stranded without any visible cursor at all.
  */
 
 // Trailing-ring spring — tuned for a short, controlled lag behind the dot
@@ -44,12 +50,33 @@ export default function Cursor() {
 	const ringY = useSpring(mouseY, RING_SPRING);
 
 	useEffect(() => {
-		if (!window.matchMedia("(pointer: fine)").matches) return;
+		if (
+			!window.matchMedia("(pointer: fine)").matches ||
+			window.matchMedia("(prefers-reduced-motion: reduce)").matches
+		) {
+			return;
+		}
 		setEnabled(true);
 
+		const root = document.documentElement;
+		root.classList.add("cursor-active");
+
+		// The dot's transform is written at most once per animation frame —
+		// pointermove can fire far faster than the display refreshes, so this
+		// coalesces a burst of events into a single commit per frame, landing
+		// the dot 1:1 on the pointer at rAF resolution with no spring/lerp.
+		let rafId = 0;
+		let pendingX = -100;
+		let pendingY = -100;
 		function onMove(e: PointerEvent) {
-			mouseX.set(e.clientX);
-			mouseY.set(e.clientY);
+			pendingX = e.clientX;
+			pendingY = e.clientY;
+			if (rafId) return;
+			rafId = requestAnimationFrame(() => {
+				mouseX.set(pendingX);
+				mouseY.set(pendingY);
+				rafId = 0;
+			});
 		}
 		// pointerover (not pointermove) for hover detection — it only fires when
 		// the element under the pointer actually changes, so this is a handful
@@ -58,9 +85,10 @@ export default function Cursor() {
 			const target = e.target as Element | null;
 			setHovering(Boolean(target?.closest?.("[data-cursor-hover]")));
 		}
-		// Pointer left the whole document (relatedTarget null) or the window
-		// itself lost focus (alt-tab, devtools) — clear the hover bloom and
-		// park the overlay off-screen so it can't linger mid-scene.
+		// Pointer left the whole document (relatedTarget null) — clear the
+		// hover bloom and park the overlay off-screen so it can't linger
+		// mid-scene. This guard is unchanged by the M1 revision: it only ever
+		// moved the decorative dot/ring, never the cursor-active class.
 		function onLeave() {
 			setHovering(false);
 			mouseX.set(-100);
@@ -69,15 +97,29 @@ export default function Cursor() {
 		function onPointerOut(e: PointerEvent) {
 			if (e.relatedTarget === null) onLeave();
 		}
+		// Window itself lost focus (alt-tab, devtools) — restore the native
+		// pointer along with parking the overlay, so a user who tabs away is
+		// never left with neither cursor visible; re-suppress on refocus.
+		function onBlur() {
+			onLeave();
+			root.classList.remove("cursor-active");
+		}
+		function onFocus() {
+			root.classList.add("cursor-active");
+		}
 		window.addEventListener("pointermove", onMove, { passive: true });
 		window.addEventListener("pointerover", onOver, { passive: true });
 		window.addEventListener("pointerout", onPointerOut, { passive: true });
-		window.addEventListener("blur", onLeave);
+		window.addEventListener("blur", onBlur);
+		window.addEventListener("focus", onFocus);
 		return () => {
+			if (rafId) cancelAnimationFrame(rafId);
 			window.removeEventListener("pointermove", onMove);
 			window.removeEventListener("pointerover", onOver);
 			window.removeEventListener("pointerout", onPointerOut);
-			window.removeEventListener("blur", onLeave);
+			window.removeEventListener("blur", onBlur);
+			window.removeEventListener("focus", onFocus);
+			root.classList.remove("cursor-active");
 		};
 	}, [mouseX, mouseY]);
 
