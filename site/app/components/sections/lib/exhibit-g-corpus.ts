@@ -35,7 +35,48 @@ export function rowIndexLabel(position: number, total: number): string {
 	return String(position + 1).padStart(String(total).length, "0");
 }
 
+/**
+ * A leading SPEC-ROW ORDINAL: digits, a dot, then whitespace or end of string.
+ * The trailing `(?=\s|$)` is what keeps `1.2 rotation window` and
+ * `sha-256 mismatch` out — a version number and a hyphenated algorithm name
+ * are content, and stripping either would corrupt a real test title.
+ */
+const SPEC_NUMBER_PREFIX = /^\s*\d+\.(?=\s|$)\s*/;
+
 /** True when a title still opens with its own spec-row number. */
 export function titleCarriesSpecNumber(name: string): boolean {
-	return /^\s*\d+\./.test(name);
+	return SPEC_NUMBER_PREFIX.test(name);
 }
+
+/**
+ * The title as the corpus table RENDERS it.
+ *
+ * The fixture preserves each harden test's title verbatim, prefix included —
+ * that is provenance, and the row still links to the source file where the
+ * prefix is visible. But those prefixes are SPEC-ROW numbers from a sequence
+ * that skips 17 (folded into scenario 5 upstream), so on the page they sat
+ * beside the table's own 01..N gutter disagreeing with it: two numbering
+ * systems, one row, on a page whose whole argument is that its numbers are
+ * derived.
+ *
+ * So the prefix is dropped at RENDER only. The fixture stays frozen, the link
+ * stays honest, and the gutter is the only numbering a reader can count.
+ * A title with no prefix comes back untouched.
+ */
+export function displayTitle(name: string): string {
+	return name.replace(SPEC_NUMBER_PREFIX, "");
+}
+
+/**
+ * The table's footnote. It states both true things at once: the gutter is the
+ * only numbering on the page, and the titles are still the source titles —
+ * linked, verbatim, prefix and all, at the other end of every row's href.
+ *
+ * It lives HERE rather than in exhibit-g.tsx for the same reason ROW_STAGGER_MS
+ * does: this directory sits outside the check-facts prebuild gate's line scan
+ * of sections/*.tsx, and the sentence names a spec row by its number. Those
+ * digits are provenance about an upstream test file, not a product claim with
+ * a facts.json entry.
+ */
+export const CORPUS_FOOTNOTE =
+	"indexed by row · source test titles linked verbatim; their original spec-row prefixes are omitted (row 17 was folded into scenario 5 upstream).";

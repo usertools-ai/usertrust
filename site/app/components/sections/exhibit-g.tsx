@@ -3,7 +3,13 @@ import CopyChip from "../copy-chip";
 import InView from "../in-view";
 import StageTag from "../stage-tag";
 import TerminalFrame from "../terminal-frame";
-import { ROW_STAGGER_MS, rowIndexLabel, titleCarriesSpecNumber } from "./lib/exhibit-g-corpus";
+import {
+	CORPUS_FOOTNOTE,
+	displayTitle,
+	ROW_STAGGER_MS,
+	rowIndexLabel,
+	titleCarriesSpecNumber,
+} from "./lib/exhibit-g-corpus";
 
 /**
  * Exhibit G — the attack corpus (the redesign's adversarial-coverage addendum).
@@ -143,8 +149,12 @@ export default function ExhibitG() {
 										<span aria-hidden="true" className="shrink-0 tabular-nums text-white/50">
 											{rowIndexLabel(i, corpus.attacks.length)}
 										</span>
+										{/* The SOURCE title, minus its spec-row prefix — a render
+										    transform only (displayTitle); the fixture and the link
+										    above it stay verbatim. `title` keeps the full attribute
+										    text for the tooltip, prefix and all. */}
 										<span className="min-w-0 flex-1 whitespace-nowrap text-white/85 transition-colors group-hover:text-white sm:truncate sm:whitespace-normal">
-											{attack.name}
+											{displayTitle(attack.name)}
 										</span>
 										<span
 											className={`shrink-0 uppercase tracking-wide ${verdictClass(attack.verdict)}`}
@@ -158,9 +168,7 @@ export default function ExhibitG() {
 					</InView>
 				</TerminalFrame>
 				{TITLES_CARRY_SPEC_NUMBERS && (
-					<p className="mt-3 font-mono text-[12px] leading-5 text-white/70">
-						indexed by row; source test titles preserved verbatim.
-					</p>
+					<p className="mt-3 font-mono text-[12px] leading-5 text-white/70">{CORPUS_FOOTNOTE}</p>
 				)}
 
 				{/* reproduction block — the corpus is one command sequence away. The
