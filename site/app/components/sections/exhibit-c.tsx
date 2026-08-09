@@ -137,17 +137,17 @@ export default function ExhibitC() {
 		<section
 			id="exhibit-c"
 			data-theme="amber"
-			className="section-anchor ground-zone relative py-24 sm:py-32 safe-x"
+			className="section-anchor ground-zone relative py-14 sm:py-20 safe-x"
 		>
 			<div className="mx-auto max-w-6xl">
 				<p className="section-eyebrow">exhibit c</p>
-				<div className="mt-3 flex items-center gap-1.5">
+				<div className="mt-2 flex items-center gap-1.5">
 					<StageTag stage="ENFORCE" />
 				</div>
-				<h2 className="mt-4 font-display font-bold lowercase leading-[0.95] tracking-tight text-white text-[clamp(2.5rem,6vw,4.5rem)]">
+				<h2 className="mt-3 font-display font-bold lowercase leading-[0.95] tracking-tight text-white text-[clamp(2.5rem,6vw,4.5rem)]">
 					hold. settle. or void.
 				</h2>
-				<p className="mt-6 max-w-xl font-mono text-sm leading-6 text-white/70">
+				<p className="mt-4 max-w-xl font-mono text-sm leading-6 text-white/70">
 					the banking pattern: held, then settled or voided. never lost.
 				</p>
 				<div className="mt-8">
@@ -176,7 +176,7 @@ export default function ExhibitC() {
 				{/* THE BUDGET RACE — client island. Its server render IS the static
 				    fallback: the two-phase state at the defaults, one BLOCKED row.
 				    Hydration enhances in place; no swap, no entrance animation. */}
-				<div className="mt-10">
+				<div className="mt-8">
 					<ExhibitCRace budget={BUDGET} />
 					<noscript>
 						<p className="mt-3 font-mono text-xs text-white/70">

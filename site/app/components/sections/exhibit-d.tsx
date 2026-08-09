@@ -106,14 +106,14 @@ export default function ExhibitD() {
 		<section
 			id="exhibit-d"
 			data-theme="emerald"
-			className="section-anchor safe-x relative mx-auto max-w-6xl py-24 sm:py-32"
+			className="section-anchor safe-x relative mx-auto max-w-6xl py-14 sm:py-20"
 		>
 			<p className="section-eyebrow">exhibit d</p>
 			<div className="mt-3 flex items-center gap-1.5">
 				<StageTag stage="RECORD" />
 				<StageTag stage="ANCHOR" />
 			</div>
-			<h2 className="font-display mt-4 lowercase leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
+			<h2 className="font-display mt-3 lowercase leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
 				tamper with one byte. break the whole chain.
 			</h2>
 
@@ -159,14 +159,14 @@ export default function ExhibitD() {
 
 			{/* Canvas ribbon: desktop + motion-safe only. The DOM demo below is THE
 			    interactive path and is always present. */}
-			<div aria-hidden="true" className="mt-12 hidden motion-safe:md:block">
+			<div aria-hidden="true" className="mt-8 hidden motion-safe:md:block">
 				<ExhibitDRibbon entries={slice.entries} />
 			</div>
-			<div className="mt-12 motion-safe:md:hidden">
+			<div className="mt-8 motion-safe:md:hidden">
 				<ExhibitDStatic entries={slice.entries} />
 			</div>
 
-			<div className="mt-8">
+			<div className="mt-6">
 				<ExhibitDDom entries={slice.entries} />
 			</div>
 

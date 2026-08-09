@@ -79,11 +79,11 @@ export default function ExhibitB() {
 		<section
 			id="exhibit-b"
 			data-theme="purple"
-			className="section-anchor relative py-24 sm:py-32 safe-x"
+			className="section-anchor relative py-14 sm:py-20 safe-x"
 		>
 			<div className="mx-auto max-w-6xl">
 				<p className="section-eyebrow">exhibit b</p>
-				<h2 className="mt-4 font-display text-[clamp(2.5rem,6vw,4.5rem)] leading-[0.95] tracking-tight text-white">
+				<h2 className="mt-3 font-display text-[clamp(2.5rem,6vw,4.5rem)] leading-[0.95] tracking-tight text-white">
 					your SDK. one line.
 				</h2>
 
@@ -149,7 +149,7 @@ export default function ExhibitB() {
 				    390px). The outer box owns the bleed and the fresh
 				    overflow-x-auto scroll context; the inner box owns min-w-[40rem]
 				    with zero margin, so oversized content overflows it cleanly. */}
-				<TerminalFrame className="mt-16" title="governed surfaces">
+				<TerminalFrame className="mt-10" title="governed surfaces">
 					<div className="-m-4 overflow-x-auto md:-m-5">
 						<div className="min-w-[40rem]">
 							<div className="grid grid-cols-2">

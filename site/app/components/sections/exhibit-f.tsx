@@ -17,13 +17,13 @@ export default function ExhibitF() {
 		<section
 			id="exhibit-f"
 			data-theme="steel"
-			className="section-anchor safe-x relative mx-auto max-w-6xl py-24 sm:py-32"
+			className="section-anchor safe-x relative mx-auto max-w-6xl py-14 sm:py-20"
 		>
 			<p className="section-eyebrow">exhibit f</p>
-			<h2 className="font-display mt-4 leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
+			<h2 className="font-display mt-3 leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
 				BLOCKED is a feature.
 			</h2>
-			<p className="mt-4 max-w-xl text-white/70">
+			<p className="mt-3 max-w-2xl text-white/70">
 				the gate runs before the provider is ever called. a denial throws, the provider is never
 				reached, and no receipt is returned — but the refusal is not silent. denials don&rsquo;t get
 				receipts. they get chain events.

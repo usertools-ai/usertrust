@@ -82,17 +82,17 @@ export default function ExhibitA() {
 		<section
 			id="exhibit-a"
 			data-theme="steel"
-			className="section-anchor relative py-24 sm:py-32 safe-x"
+			className="section-anchor relative py-14 sm:py-20 safe-x"
 		>
 			<div className="mx-auto max-w-6xl">
 				<p className="section-eyebrow">exhibit a</p>
-				<div className="mt-3 flex items-center gap-1.5">
+				<div className="mt-2 flex items-center gap-1.5">
 					<StageTag stage="RECORD" />
 				</div>
-				<h2 className="mt-4 max-w-3xl font-display text-[clamp(2.5rem,6vw,4.5rem)] leading-[0.95] tracking-tight text-white">
+				<h2 className="mt-3 max-w-3xl font-display text-[clamp(2.5rem,6vw,4.5rem)] leading-[0.95] tracking-tight text-white">
 					every governed call returns evidence.
 				</h2>
-				<p className="mt-6 max-w-2xl text-base leading-relaxed text-white/70">
+				<p className="mt-4 max-w-2xl text-base leading-relaxed text-white/70">
 					three frontier models, three real receipts, one ledger. every field below is the object
 					the SDK handed back — {facts.facts.usertokensPerFiveDollars.value.toLocaleString("en-US")}{" "}
 					usertokens = {usdFromUsertokens(ut)}.

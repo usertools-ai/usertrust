@@ -30,14 +30,14 @@ export default function ExhibitE() {
 		<section
 			id="exhibit-e"
 			data-theme="gold"
-			className="section-anchor ground-zone safe-x relative py-24 sm:py-32"
+			className="section-anchor ground-zone safe-x relative py-14 sm:py-20"
 		>
 			<div className="mx-auto max-w-6xl">
 				<p className="section-eyebrow">exhibit e</p>
 				<div className="mt-3 flex items-center gap-1.5">
 					<StageTag stage="VERIFY" />
 				</div>
-				<h2 className="font-display mt-4 lowercase leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
+				<h2 className="font-display mt-3 lowercase leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
 					don&rsquo;t take our word for it.
 				</h2>
 

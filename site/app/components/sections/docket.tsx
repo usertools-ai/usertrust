@@ -88,23 +88,23 @@ export default function Docket() {
 		<section
 			id="docket"
 			data-theme="gold"
-			className="section-anchor ground-zone relative w-full safe-x py-24 sm:py-32"
+			className="section-anchor ground-zone relative w-full safe-x py-14 sm:py-20"
 		>
 			<div className="mx-auto max-w-6xl">
 				<p className="section-eyebrow">the docket</p>
-				<h2 className="mt-3 font-display font-bold lowercase leading-[0.95] text-white text-[clamp(2.5rem,6vw,4.5rem)]">
+				<h2 className="mt-2 font-display font-bold lowercase leading-[0.95] text-white text-[clamp(2.5rem,6vw,4.5rem)]">
 					the facts, itemized.
 				</h2>
 				{/* InView is a regular client component imported normally (no
 			    next/dynamic ssr:false — unsupported in server components on
 			    the current Next.js major); it code-splits automatically with
 			    the route. */}
-				<InView className="mt-12 grid grid-cols-2 border border-[rgba(52,211,153,0.08)] md:grid-cols-4">
+				<InView className="mt-8 grid grid-cols-2 border border-[rgba(52,211,153,0.08)] md:grid-cols-4">
 					{tiles.map((t) => (
 						<div
 							key={t.caption}
 							data-cursor-hover
-							className="docket-tile lift-1 hover-vivid relative flex flex-col gap-3 p-6 sm:p-8"
+							className="docket-tile lift-1 hover-vivid relative flex flex-col gap-3 p-5 sm:p-6"
 						>
 							<span className="docket-hairline docket-hairline-h" aria-hidden="true" />
 							<span className="docket-hairline docket-hairline-v" aria-hidden="true" />

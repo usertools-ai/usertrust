@@ -36,7 +36,7 @@ export default function HardenStrip() {
 			data-theme="gold"
 			className="section-anchor relative border-y border-white/10 bg-white/[0.02]"
 		>
-			<div className="safe-x mx-auto max-w-6xl py-20 md:py-24">
+			<div className="safe-x mx-auto max-w-6xl py-12 md:py-16">
 				<p className="section-eyebrow">the discipline</p>
 				<h2 className="font-display mt-4 lowercase leading-none text-white text-[clamp(2rem,5vw,4rem)]">
 					the harden doctrine.
@@ -44,7 +44,7 @@ export default function HardenStrip() {
 
 				{/* stat wall — every numeral from facts.json, never a literal.
 				    gap-px over a faint white ground draws the hairline grid. */}
-				<dl className="mt-10 grid grid-cols-2 gap-px border border-white/10 bg-white/10 md:grid-cols-5">
+				<dl className="mt-8 grid grid-cols-2 gap-px border border-white/10 bg-white/10 md:grid-cols-5">
 					{stats.map(({ label, stat }) => (
 						/* last:col-span-2 fills the odd fifth cell across the mobile
 						   two-column row. Without it the empty half-cell exposed the
@@ -52,7 +52,7 @@ export default function HardenStrip() {
 						   panel — a ghost tile, not a hairline. */
 						<div
 							key={label}
-							className="flex flex-col gap-2 bg-brand-bg p-5 last:col-span-2 md:last:col-span-1"
+							className="flex flex-col gap-2 bg-brand-bg p-4 last:col-span-2 md:last:col-span-1"
 						>
 							<dt className="font-mono text-[12px] uppercase tracking-widest text-white/70">
 								{label}

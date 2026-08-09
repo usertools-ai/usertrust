@@ -69,14 +69,14 @@ export default function ExhibitG() {
 		<section
 			id="exhibit-g"
 			data-theme="purple"
-			className="section-anchor ground-zone safe-x relative py-24 sm:py-32"
+			className="section-anchor ground-zone safe-x relative py-14 sm:py-20"
 		>
 			<div className="mx-auto max-w-6xl">
 				<p className="section-eyebrow">exhibit g</p>
 				<div className="mt-3 flex items-center gap-1.5">
 					<StageTag stage="VERIFY" />
 				</div>
-				<h2 className="font-display mt-4 lowercase leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
+				<h2 className="font-display mt-3 lowercase leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
 					every way we know to forge a ledger.
 				</h2>
 				<p className="font-display mt-2 lowercase leading-none text-white/50 text-[clamp(1.5rem,3.5vw,2.75rem)]">
@@ -84,7 +84,7 @@ export default function ExhibitG() {
 				</p>
 				{/* the count numeral derives from the fixture — the headline word
 			    carries no digit (check-facts stays clean by construction) */}
-				<p className="mt-4 font-mono text-xs text-white/70">
+				<p className="mt-3 font-mono text-xs text-white/70">
 					<span className="text-2xl leading-none text-white/90">{corpus.attacks.length}</span>{" "}
 					scenarios · every verdict below is the string the verifier really returns
 				</p>
@@ -101,7 +101,7 @@ export default function ExhibitG() {
 
 				{/* terminal-styled corpus table — every row links to the real test file */}
 				<TerminalFrame
-					className="mt-10"
+					className="mt-8"
 					title={
 						<div className="flex w-full items-center justify-between gap-4">
 							<span className="min-w-0 truncate">

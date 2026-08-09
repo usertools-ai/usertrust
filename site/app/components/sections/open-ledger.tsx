@@ -104,10 +104,10 @@ export default function OpenLedger() {
 		<section
 			id="open-ledger"
 			data-theme="emerald"
-			className="section-anchor relative pt-24 sm:pt-32 safe-x"
+			className="section-anchor relative pt-14 sm:pt-20 safe-x"
 		>
 			<div className="mx-auto max-w-5xl">
-				<h2 className="font-display lowercase text-4xl sm:text-6xl leading-none mb-10">
+				<h2 className="font-display lowercase text-4xl sm:text-6xl leading-none mb-8">
 					open your ledger.
 				</h2>
 
@@ -173,9 +173,9 @@ export default function OpenLedger() {
 			    ship today with real commands; the managed proxy is a mailto
 			    capture, never a fake service claim. Dark ground: emerald is
 			    the status ink only. */}
-			<div className="mx-auto mt-24 max-w-5xl">
+			<div className="mx-auto mt-14 max-w-5xl">
 				<h3 className="font-display lowercase text-2xl text-white">run it where you need it.</h3>
-				<ul className="mt-6 grid gap-4 sm:grid-cols-3">
+				<ul className="mt-4 grid gap-4 sm:grid-cols-3">
 					<li className="flex flex-col gap-3 rounded-sm border border-white/[0.06] bg-white/[0.02] p-5">
 						<p className="font-mono text-xs uppercase tracking-widest text-white/70">local SDK</p>
 						<p className="font-mono text-[12px] uppercase tracking-widest text-ut">
@@ -211,8 +211,8 @@ export default function OpenLedger() {
 			</div>
 
 			{/* dark footer strip */}
-			<footer className="mt-24 border-t border-white/[0.06]">
-				<div className="mx-auto max-w-5xl py-10">
+			<footer className="mt-14 border-t border-white/[0.06]">
+				<div className="mx-auto max-w-5xl py-8">
 					{/* No mark and no caption here: both moved up into the mascot's
 					    closing panel (Addendum L). What is left is the link row. */}
 					<div className="flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">

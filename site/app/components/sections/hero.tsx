@@ -29,11 +29,11 @@ export default function Hero() {
 							keep the receipts.
 						</span>
 					</h1>
-					<p className="mt-6 max-w-md text-base leading-relaxed text-white/70 sm:text-lg">
+					<p className="mt-4 max-w-md text-base leading-relaxed text-white/70 sm:text-lg">
 						one line wraps your LLM client. every governed call becomes a ledger transaction — with
 						a receipt anyone can verify.
 					</p>
-					<div className="glow-emerald mt-8 flex flex-wrap items-center gap-4">
+					<div className="glow-emerald mt-6 flex flex-wrap items-center gap-4">
 						<CopyChip text="npm install usertrust" />
 						<a
 							href="#exhibit-e"
@@ -42,7 +42,7 @@ export default function Hero() {
 							verify a ledger →
 						</a>
 					</div>
-					<p className="mt-10 flex flex-wrap items-center gap-3 font-mono text-[12px] tracking-wide text-white/70">
+					<p className="mt-7 flex flex-wrap items-center gap-3 font-mono text-[12px] tracking-wide text-white/70">
 						<span>
 							{facts.license.value} · {facts.verifierRuntimeDeps.value} runtime deps in the verifier
 							· {facts.commandsToFirstReceipt.value} commands to first receipt

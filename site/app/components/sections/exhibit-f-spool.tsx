@@ -98,7 +98,7 @@ export default function ExhibitFSpool() {
 		// desktop while the editor clipped rule values mid-token at every width.
 		<div
 			ref={rootRef}
-			className="mt-12 grid grid-cols-[minmax(0,1fr)] gap-8 md:grid-cols-[minmax(0,1fr)_20rem]"
+			className="mt-8 grid grid-cols-[minmax(0,1fr)] gap-8 md:grid-cols-[minmax(0,1fr)_20rem]"
 		>
 			{/* left: the policy, as a mono editor frame */}
 			{/* self-start, not the grid's default stretch: matching the spool
