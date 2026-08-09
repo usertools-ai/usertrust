@@ -1,22 +1,49 @@
 {
 	"receipt": {
-		"transferId": "tx_msjn1ggx_b870d7c4",
-		"cost": {
-			"estimated": 39,
-			"actual": 30
-		},
-		"budgetRemaining": 49970,
-		"auditHash": "aa302fdd69875b07d51a061fb181ca6cccc8253c8c6448451486d89d0f8d5f82",
+		"transferId": "tx_msm19z93_e603a1a2",
+		"cost": 104,
+		"budgetRemaining": 49896,
+		"auditHash": "08c22f6127aa76d31a847529bd968ca6166fa88bbc50906c512ccabf030f8622",
+		"chainPath": ".usertrust/audit",
+		"receiptUrl": null,
 		"settled": true,
-		"model": "claude-sonnet-4-6",
+		"model": "claude-fable-5",
 		"provider": "anthropic",
-		"timestamp": "2026-08-08T00:31:12.042Z"
+		"timestamp": "2026-08-09T16:45:16.630Z",
+		"usageSource": "provider",
+		"usage": {
+			"inputTokens": 317,
+			"outputTokens": 131,
+			"cacheReadTokens": 87,
+			"cacheWriteTokens": 43
+		},
+		"endpoint": {
+			"class": "cloud",
+			"runtime": "unknown"
+		},
+		"meter": {
+			"costBasis": "usd-proxy",
+			"rateSource": "table"
+		},
+		"pricing": {
+			"appliedRates": {
+				"inputPer1k": 100,
+				"outputPer1k": 500,
+				"cacheReadPer1k": 10,
+				"cacheWritePer1k": 125
+			},
+			"tableVersion": "2026-08-09"
+		}
+	},
+	"capture": {
+		"estimatedCost": 130,
+		"clientShape": "anthropic"
 	},
 	"provenance": {
-		"usertrustVersion": "3.1.0",
+		"usertrustVersion": "3.2.0",
 		"tigerbeetleVersion": null,
+		"capturedAt": "2026-08-09T16:45:16.951Z",
 		"mode": "dry-run",
-		"commit": "bea0f03",
-		"capturedAt": "2026-08-08T00:31:12.042Z"
+		"commit": "699fcef"
 	}
 }

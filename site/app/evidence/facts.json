@@ -1,7 +1,7 @@
 {
-	"generatedAt": "2026-08-08T00:31:12.271Z",
-	"commit": "bea0f03",
-	"usertrustVersion": "3.1.0",
+	"generatedAt": "2026-08-09T16:45:16.950Z",
+	"commit": "699fcef",
+	"usertrustVersion": "3.2.0",
 	"tigerbeetleVersion": "0.17.9",
 	"facts": {
 		"transferCodes": {
@@ -21,8 +21,8 @@
 			"source": "packages/verify/package.json — dependencies key count"
 		},
 		"modelCount": {
-			"value": "20+",
-			"numeric": 20,
+			"value": "23+",
+			"numeric": 23,
 			"source": "packages/core/src/ledger/pricing.ts — PRICING_TABLE keys"
 		},
 		"license": {
@@ -39,26 +39,26 @@
 		},
 		"filmDurationSeconds": {
 			"value": 44,
-			"source": "fallback: 44 (ffprobe unavailable at capture time; sizzle.mp4 measured 44.4s)"
+			"source": "ffprobe site/public/demo/sizzle.mp4 (format.duration, rounded)"
 		},
 		"usertokensPerFiveDollars": {
 			"value": 50000,
 			"source": "packages/core/src/shared/constants.ts — DEFAULT_BUDGET = 50_000 usertokens ($5 starter budget)"
 		},
 		"invariantCount": {
-			"value": 26,
+			"value": 35,
 			"source": "AGENTS.md — count of `Prevents:` clauses"
 		},
 		"hardenSuiteCount": {
-			"value": 49,
+			"value": 53,
 			"source": "packages/core/tests/harden/**/*.test.ts — test-file count"
 		},
 		"testCaseCount": {
-			"value": 2618,
+			"value": 3014,
 			"source": "packages/**/*.test.ts — count of it()/test() case openers"
 		},
 		"expectAssertionCount": {
-			"value": 6171,
+			"value": 7228,
 			"source": "packages/**/*.test.ts — count of expect( calls; TEST assertions, not runtime guarantees"
 		},
 		"verifierSharedLines": {
