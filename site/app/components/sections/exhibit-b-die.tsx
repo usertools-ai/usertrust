@@ -20,6 +20,7 @@ import {
 	DIE_PIN_TOP_TO,
 	DIE_PIN_X,
 } from "./lib/die-geometry";
+import { TRACE } from "./lib/trace-style";
 
 /**
  * THE GOVERNANCE DIE — Exhibit B set-piece (Addendum C, upgraded per K).
@@ -148,12 +149,31 @@ export default function ExhibitBDie() {
 				<path d="M 660 350 H 860" className="die-trace-base" />
 
 				{/* input traces — pulse layer, staggered per-trace */}
-				<path d="M 40 130 H 320 V 300 H 460" className="die-trace-pulse die-delay-a" />
-				<path d="M 40 350 H 460" className="die-trace-pulse die-delay-b" />
-				<path d="M 40 570 H 320 V 400 H 460" className="die-trace-pulse die-delay-c" />
+				{/* The dash grammar comes from the shared trace module, as a
+				    presentation ATTRIBUTE — which CSS still outranks, so the
+				    reduced-motion rule's `stroke-dasharray: none` keeps winning. */}
+				<path
+					d="M 40 130 H 320 V 300 H 460"
+					strokeDasharray={TRACE.dash.pulse}
+					className="die-trace-pulse die-delay-a"
+				/>
+				<path
+					d="M 40 350 H 460"
+					strokeDasharray={TRACE.dash.pulse}
+					className="die-trace-pulse die-delay-b"
+				/>
+				<path
+					d="M 40 570 H 320 V 400 H 460"
+					strokeDasharray={TRACE.dash.pulse}
+					className="die-trace-pulse die-delay-c"
+				/>
 				{/* output trace — pulses brighter: emerald pulse + bright core dash */}
-				<path d="M 660 350 H 860" className="die-trace-pulse" />
-				<path d="M 660 350 H 860" className="die-trace-pulse-bright" />
+				<path d="M 660 350 H 860" strokeDasharray={TRACE.dash.pulse} className="die-trace-pulse" />
+				<path
+					d="M 660 350 H 860"
+					strokeDasharray={TRACE.dash.core}
+					className="die-trace-pulse-bright"
+				/>
 
 				{/* trace terminals */}
 				<circle cx={40} cy={130} r={5} className="die-pad" />

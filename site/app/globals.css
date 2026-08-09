@@ -871,11 +871,14 @@
 	stroke: rgba(52, 211, 153, 0.15);
 	stroke-width: 2px;
 }
+/* stroke-dasharray is NOT set here: it comes from TRACE.dash in
+   sections/lib/trace-style.ts as a presentation attribute, so the dash grammar
+   has one definition shared with every other trace on the page. The keyframe's
+   -234 shift is that grammar's period (14 + 220) and must move with it. */
 .die-trace-pulse {
 	fill: none;
 	stroke: #34d399;
 	stroke-width: 2px;
-	stroke-dasharray: 14 220;
 	animation: die-pulse 1.8s linear infinite;
 	animation-play-state: paused;
 }
@@ -885,7 +888,6 @@
 	fill: none;
 	stroke: #d1fae5;
 	stroke-width: 2px;
-	stroke-dasharray: 6 228;
 	animation: die-pulse 1.8s linear infinite;
 	animation-play-state: paused;
 }
