@@ -127,8 +127,32 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 					: "bg-brand-bg/80 backdrop-blur-[16px] border-white/[0.06]"
 			}`}
 		>
-			<div className="flex items-center justify-between safe-x py-4">
-				<div className="flex items-center gap-4">
+			{/*
+			 * A gap plus the min-w-0/shrink discipline below (Addendum O2). The bar is
+			 * one flex row of two clusters, and NOTHING in it used to yield: every
+			 * child sized to its content, so the instant the two clusters together
+			 * exceeded the track the row overflowed to the right and the GitHub CTA
+			 * — the last child — was pushed past the safe-x edge with its label cut
+			 * off. Reproduced by inflating the star counter: at 1280 the CTA landed
+			 * 49px past the content edge reading "GitHu".
+			 *
+			 * The rule now: the COUNTERS are the only sacrificial element. They are
+			 * the one decorative thing in the bar, so they get `min-w-0 shrink` and
+			 * clip themselves; the nav links, the CTA and the hamburger are all
+			 * `shrink-0`, so the CTA is structurally incapable of losing a pixel.
+			 *
+			 * The gap is `gap-2 md:gap-4`, not a flat gap-4: `justify-between`
+			 * already separates the clusters and the gap only binds under pressure,
+			 * which is exactly the phone widths where the track is scarcest — a flat
+			 * 16px there spent the last pixel of slack at 390 and pushed the
+			 * hamburger back over the edge.
+			 *
+			 * `py-4` is untouched — it is the summand in the 4.81rem mobile-menu
+			 * max-h AND the I3 --anchor-offset, and this fix must not move either.
+			 * Re-measured after: the bar is 77px at every width from 320 to 2000.
+			 */}
+			<div className="flex items-center justify-between gap-2 safe-x py-4 md:gap-4">
+				<div className="flex min-w-0 items-center gap-4">
 					{/*
 					 * First focusable element on the page: the dossier's escape hatch for
 					 * people who came for numbers, not scenography. Visually subtle mono;
@@ -146,7 +170,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 					<a
 						href="#docket"
 						data-cursor-hover
-						className="focus-ring inline-flex min-h-[44px] items-center whitespace-nowrap font-mono text-xs text-white/70 hover:text-white focus-visible:text-ut transition-colors duration-200"
+						className="focus-ring inline-flex min-h-[44px] min-w-0 items-center overflow-hidden whitespace-nowrap font-mono text-xs text-white/70 hover:text-white focus-visible:text-ut transition-colors duration-200"
 					>
 						<span className="md:hidden">facts ↓</span>
 						<span className="hidden md:inline">skip to the facts ↓</span>
@@ -154,7 +178,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 					<a
 						href="/"
 						data-cursor-hover
-						className={`focus-ring inline-flex min-h-[44px] items-center px-4 py-2.5 border rounded-full text-sm font-medium tracking-tight transition-all duration-300 ${
+						className={`focus-ring inline-flex min-h-[44px] shrink-0 items-center px-4 py-2.5 border rounded-full text-sm font-medium tracking-tight transition-all duration-300 ${
 							/*
 							 * No glow: the old shadow-[0_0_20px_rgba(52,211,153,0.1)] was
 							 * a fifth depth idiom beside lift-1/lift-2/glow-emerald/
@@ -169,14 +193,14 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 					</a>
 				</div>
 
-				<div className="flex items-center gap-6">
-					<div className="hidden md:flex items-center gap-5 text-sm text-white/70 font-medium">
+				<div className="flex min-w-0 items-center gap-6">
+					<div className="hidden md:flex shrink-0 items-center gap-5 text-sm text-white/70 font-medium">
 						{links.map((link) => (
 							<a
 								key={link.href}
 								href={link.href}
 								data-cursor-hover
-								className={`focus-ring relative inline-flex min-h-[44px] items-center hover:text-white transition-colors duration-200 ${
+								className={`focus-ring relative inline-flex min-h-[44px] items-center whitespace-nowrap hover:text-white transition-colors duration-200 ${
 									activeSection === link.href ? "text-ut" : ""
 								}`}
 							>
@@ -197,14 +221,14 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 
 					{/* Mono counters — omitted entirely on fetch failure, never rendered as 0. */}
 					{(stars !== null || downloads !== null) && (
-						<div className="hidden lg:flex items-center gap-4 font-mono text-xs text-white/70">
+						<div className="hidden lg:flex min-w-0 shrink items-center gap-4 overflow-hidden font-mono text-xs text-white/70">
 							{stars !== null && (
 								<a
 									href="https://github.com/usertools-ai/usertrust"
 									target="_blank"
 									rel="noopener noreferrer"
 									data-cursor-hover
-									className="focus-ring inline-flex min-h-[44px] items-center hover:text-white/80 transition-colors duration-200"
+									className="focus-ring inline-flex min-h-[44px] items-center whitespace-nowrap hover:text-white/80 transition-colors duration-200"
 								>
 									★ {fmtCompact(stars)}
 								</a>
@@ -215,7 +239,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 									target="_blank"
 									rel="noopener noreferrer"
 									data-cursor-hover
-									className="focus-ring inline-flex min-h-[44px] items-center hover:text-white/80 transition-colors duration-200"
+									className="focus-ring inline-flex min-h-[44px] items-center whitespace-nowrap hover:text-white/80 transition-colors duration-200"
 								>
 									↓ {fmtCompact(downloads)}/mo
 								</a>
@@ -228,7 +252,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 						target="_blank"
 						rel="noopener noreferrer"
 						data-cursor-hover
-						className="focus-ring inline-flex min-h-[44px] items-center gap-2 px-3.5 py-1.5 bg-white/[0.06] border border-white/10 rounded-lg text-sm font-medium hover:bg-white/[0.10] hover:border-white/20 transition-all duration-200"
+						className="focus-ring inline-flex min-h-[44px] shrink-0 items-center gap-2 whitespace-nowrap px-3.5 py-1.5 bg-white/[0.06] border border-white/10 rounded-lg text-sm font-medium hover:bg-white/[0.10] hover:border-white/20 transition-all duration-200"
 					>
 						<GitHubIcon className="w-4 h-4" />
 						GitHub
@@ -239,7 +263,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 						ref={buttonRef}
 						type="button"
 						onClick={() => setOpen((prev) => !prev)}
-						className="focus-ring md:hidden inline-flex items-center justify-center w-11 h-11 rounded-lg border border-white/10 bg-white/[0.06] hover:bg-white/[0.10] transition-colors duration-200"
+						className="focus-ring md:hidden inline-flex shrink-0 items-center justify-center w-11 h-11 rounded-lg border border-white/10 bg-white/[0.06] hover:bg-white/[0.10] transition-colors duration-200"
 						aria-label={open ? "Close menu" : "Open menu"}
 						aria-expanded={open}
 						aria-controls={open ? "mobile-menu" : undefined}
