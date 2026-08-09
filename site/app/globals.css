@@ -693,43 +693,53 @@ html.cursor-active * {
 		transparent 100%
 	);
 }
-/* hover-vivid (Addendum M3) — docket tiles: lift-1 at rest, lift-2's deeper
-   shadow plus an accent-tinted glow on hover. Same ::before-at-isolated-
-   stacking-context shape as glow-emerald, just hover-triggered instead of
-   always-on, and brighter (16% vs. glow-emerald's ambient 7%) because this one
-   is meant to be noticed, not felt. (hover: hover) gated — a touchscreen
-   reports hover:none, so a tap can never leave a tile "stuck" glowing the way
-   :hover alone can on iOS. */
+/* hover-vivid (Addendum M3, RECALIBRATED — Addendum O3) — docket tiles:
+   lift-1 at rest, lift-2's deeper shadow plus an accent-tinted EDGE on hover.
+
+   What it was, and why it changed. The hover state used to be a ::after
+   ellipse — 60% x 40%, centred at 50% 50%, inflated to inset:-20% — filled
+   with the accent at 16%. Two problems, both measured on a hovered docket
+   tile at 1512: the gradient's centre landed over the tile's numeral and its
+   caption, and 16% of a warm accent spread that wide over a near-black ground
+   resolves to a desaturated grey lift, not a tint. Pixel-sampled: the tile
+   centre went rgb(18,17,36) -> rgb(49,41,46) on hover — a +31/+24/+10 wash
+   that reads as haze over the content, while the tile's own edge moved by
+   almost nothing. A tile that lights up in the middle and stays dark at the
+   boundary is a smudge; a tile that lights up at the boundary is a lit
+   object.
+
+   What it is now: four box-shadow layers, no pseudo-element, all anchored to
+   the edge.
+     1. var(--shadow-lift-2) — the elevation step, still the depth vocabulary's
+        (this is what "composes lift-1 -> lift-2" means; it was never the
+        gradient's job);
+     2. a 1px accent ring ON the border, which is what makes the accent read as
+        the section's own colour rather than as a tint of the ground;
+     3. a tight outer glow with a NEGATIVE spread, so it never reaches more
+        than a few pixels past the border;
+     4. an inset bloom with a negative spread too — it fades out well before
+        the middle of the tile, so nothing washes the numeral.
+   No ::after means nothing paints over the content at all, and the whole
+   state is one animatable property.
+
+   (hover: hover) gated — a touchscreen reports hover:none, so a tap can never
+   leave a tile "stuck" glowing the way :hover alone can on iOS. */
 @media (hover: hover) {
 	.hover-vivid {
 		position: relative;
 		isolation: isolate;
 		transition: box-shadow 0.25s ease;
 	}
-	.hover-vivid::after {
-		content: "";
-		position: absolute;
-		inset: -20%;
-		z-index: -1;
-		pointer-events: none;
-		opacity: 0;
-		transition: opacity 0.25s ease;
-		background: radial-gradient(
-			ellipse 60% 40% at 50% 50%,
-			color-mix(in srgb, var(--section-accent, var(--color-ut)) 16%, transparent),
-			transparent 100%
-		);
-	}
 	.hover-vivid:hover {
-		box-shadow: var(--shadow-lift-2);
-	}
-	.hover-vivid:hover::after {
-		opacity: 1;
+		box-shadow:
+			var(--shadow-lift-2),
+			0 0 0 1px color-mix(in srgb, var(--section-accent, var(--color-ut)) 40%, transparent),
+			0 0 14px -2px color-mix(in srgb, var(--section-accent, var(--color-ut)) 32%, transparent),
+			inset 0 0 22px -10px color-mix(in srgb, var(--section-accent, var(--color-ut)) 55%, transparent);
 	}
 }
 @media (prefers-reduced-motion: reduce) {
-	.hover-vivid,
-	.hover-vivid::after {
+	.hover-vivid {
 		transition: none;
 	}
 }
@@ -1277,17 +1287,20 @@ html.cursor-active * {
 	}
 }
 
-/* Corpus row hover ground (Addendum M3) — replaces the old flat
-   hover:bg-white/[0.06] wash with one tinted by the section's own accent
-   (exhibit-g is themed purple) and intensified: 14% accent over an 8% white
-   base reads more clearly than the previous 6% white alone did. (hover: hover)
-   gated so a tap can never leave a row visibly "stuck" highlighted. */
+/* Corpus row hover ground (Addendum M3, RECALIBRATED — Addendum O3) — the
+   same correction hover-vivid just took, in the register a table row can
+   afford. A row is 35px tall, so it gets a ground rather than a bloom; what
+   changes is WHAT the ground is made of. It used to be 14% accent mixed into
+   an 8% WHITE base, and on a near-black ground the white half dominates: the
+   row lit up grey and the section's purple was a rumour. The white base is
+   gone. The ground is now the accent alone at a low alpha, edge-anchored by
+   an inset accent rule down the row's leading edge — the table's own version
+   of the 1px ring the tiles get. (hover: hover) gated so a tap can never
+   leave a row visibly "stuck" highlighted. */
 @media (hover: hover) {
 	.corpus-row-link:hover {
-		background: color-mix(
-			in srgb,
-			var(--section-accent, var(--color-ut)) 14%,
-			rgba(255, 255, 255, 0.08)
-		);
+		background: color-mix(in srgb, var(--section-accent, var(--color-ut)) 16%, transparent);
+		box-shadow: inset 2px 0 0 0
+			color-mix(in srgb, var(--section-accent, var(--color-ut)) 70%, transparent);
 	}
 }
