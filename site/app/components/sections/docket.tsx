@@ -103,7 +103,8 @@ export default function Docket() {
 					{tiles.map((t) => (
 						<div
 							key={t.caption}
-							className="docket-tile lift-1 relative flex flex-col gap-3 p-6 sm:p-8"
+							data-cursor-hover
+							className="docket-tile lift-1 hover-vivid relative flex flex-col gap-3 p-6 sm:p-8"
 						>
 							<span className="docket-hairline docket-hairline-h" aria-hidden="true" />
 							<span className="docket-hairline docket-hairline-v" aria-hidden="true" />

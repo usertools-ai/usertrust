@@ -1,6 +1,7 @@
 import { Analytics } from "@vercel/analytics/next";
 import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
+import Cursor from "./components/cursor";
 import { NoiseOverlay } from "./components/noise-overlay";
 import "./globals.css";
 
@@ -138,6 +139,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 		>
 			<body className="bg-brand-bg text-white font-sans antialiased overflow-x-hidden">
 				<NoiseOverlay />
+				<Cursor />
 				{children}
 				<script
 					type="application/ld+json"

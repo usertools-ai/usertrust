@@ -90,6 +90,54 @@
 	}
 }
 
+/* ── CUSTOM CURSOR (Addendum M1) ──────────────────────────────────────────
+   cursor.tsx mounts one dot + one trailing ring, position-driven by motion
+   values (fixed + transform-only, so this layer never affects layout). Never
+   sets `cursor: none` anywhere — this is a decorative addition on top of the
+   real system cursor, not a replacement for it. z-index sits above the nav
+   (z-50) so the ring is never clipped under the fixed bar. will-change is
+   scoped to just these two elements, not a page-wide rule. */
+.cursor-layer {
+	position: fixed;
+	inset: 0;
+	z-index: 100;
+	pointer-events: none;
+}
+.cursor-dot {
+	position: fixed;
+	top: -4px;
+	left: -4px;
+	width: 8px;
+	height: 8px;
+	border-radius: 9999px;
+	background: rgba(255, 255, 255, 0.9);
+	will-change: transform;
+}
+.cursor-ring {
+	position: fixed;
+	top: -18px;
+	left: -18px;
+	width: 36px;
+	height: 36px;
+	border-radius: 9999px;
+	border: 1px solid rgba(255, 255, 255, 0.5);
+	/* Only color/border transition here — x/y/scale are motion values
+	   (cursor.tsx) already animated on their own spring; a CSS transition on
+	   `transform` too would fight that spring with a second, competing ease. */
+	transition: background-color 0.2s ease, border-color 0.2s ease;
+	will-change: transform;
+}
+.cursor-ring--hover {
+	background: rgba(255, 255, 255, 0.9);
+	border-color: transparent;
+	mix-blend-mode: difference;
+}
+@media (prefers-reduced-motion: reduce) {
+	.cursor-layer {
+		display: none;
+	}
+}
+
 /*
  * Document scrolling.
  *
@@ -250,7 +298,11 @@
 	}
 }
 
-/* Spotlight card — mouse-following radial highlight */
+/* Spotlight card — mouse-following radial highlight. Addendum M3: the
+   highlight now follows --section-accent (defaulting to emerald) instead of a
+   hardcoded emerald rgba, so a themed section's card reads its own accent
+   rather than always emerald. (hover: hover) gated per M3's touch-devices
+   rule — see the hover-vivid comment above. */
 .spotlight-card {
 	position: relative;
 	overflow: hidden;
@@ -260,7 +312,11 @@
 	position: absolute;
 	width: 300px;
 	height: 300px;
-	background: radial-gradient(circle, rgba(52, 211, 153, 0.06) 0%, transparent 70%);
+	background: radial-gradient(
+		circle,
+		color-mix(in srgb, var(--section-accent, var(--color-ut)) 10%, transparent) 0%,
+		transparent 70%
+	);
 	border-radius: 50%;
 	pointer-events: none;
 	transform: translate(-50%, -50%);
@@ -270,8 +326,10 @@
 	opacity: 0;
 	z-index: 1;
 }
-.spotlight-card:hover::before {
-	opacity: 1;
+@media (hover: hover) {
+	.spotlight-card:hover::before {
+		opacity: 1;
+	}
 }
 
 /* Animated underline for links */
@@ -559,12 +617,20 @@
    light, never skeuomorphic bevels; no section may invent its own shadow
    or gradient — compose these. lift-1: cards/frames. lift-2: physical
    objects (stamp, tear-off). glow-emerald: radial ambience behind set
-   pieces. ground-zone: alternating section grounds (dark-zone rhythm). */
+   pieces. ground-zone: alternating section grounds (dark-zone rhythm).
+   hover-vivid (Addendum M3): the interactive-hover variant — it COMPOSES
+   lift-1 -> lift-2 and the glow-emerald recipe rather than inventing a third
+   shadow, which is why the two lift box-shadows are named custom properties
+   below instead of two separate literal values. */
+:root {
+	--shadow-lift-1: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.35);
+	--shadow-lift-2: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 16px 48px rgba(0, 0, 0, 0.5);
+}
 .lift-1 {
-	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.35);
+	box-shadow: var(--shadow-lift-1);
 }
 .lift-2 {
-	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 16px 48px rgba(0, 0, 0, 0.5);
+	box-shadow: var(--shadow-lift-2);
 }
 /* Emerald ambience on ::before at z-index -1; isolation keeps the layer
    inside the host's stacking context so it can never slip behind the page
@@ -587,6 +653,46 @@
 		color-mix(in srgb, var(--section-accent, var(--color-ut)) 7%, transparent),
 		transparent 100%
 	);
+}
+/* hover-vivid (Addendum M3) — docket tiles: lift-1 at rest, lift-2's deeper
+   shadow plus an accent-tinted glow on hover. Same ::before-at-isolated-
+   stacking-context shape as glow-emerald, just hover-triggered instead of
+   always-on, and brighter (16% vs. glow-emerald's ambient 7%) because this one
+   is meant to be noticed, not felt. (hover: hover) gated — a touchscreen
+   reports hover:none, so a tap can never leave a tile "stuck" glowing the way
+   :hover alone can on iOS. */
+@media (hover: hover) {
+	.hover-vivid {
+		position: relative;
+		isolation: isolate;
+		transition: box-shadow 0.25s ease;
+	}
+	.hover-vivid::after {
+		content: "";
+		position: absolute;
+		inset: -20%;
+		z-index: -1;
+		pointer-events: none;
+		opacity: 0;
+		transition: opacity 0.25s ease;
+		background: radial-gradient(
+			ellipse 60% 40% at 50% 50%,
+			color-mix(in srgb, var(--section-accent, var(--color-ut)) 16%, transparent),
+			transparent 100%
+		);
+	}
+	.hover-vivid:hover {
+		box-shadow: var(--shadow-lift-2);
+	}
+	.hover-vivid:hover::after {
+		opacity: 1;
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.hover-vivid,
+	.hover-vivid::after {
+		transition: none;
+	}
 }
 /* Section-ground rhythm: #0a0a1a → #0c0c22 → #0a0a1a, with the mid stop
    carrying a 3% wash of the section accent (Addendum I2). Three percent is
@@ -884,11 +990,19 @@
    sections/lib/trace-style.ts as a presentation attribute, so the dash grammar
    has one definition shared with every other trace on the page. The keyframe's
    -234 shift is that grammar's period (14 + 220) and must move with it. */
+/* Duration is a custom property, not baked into the shorthand, so hovering
+   the die (Addendum M3, below) can shorten it without restating the rest of
+   the animation. Changing animation-duration on a running animation keeps its
+   current fractional progress and simply plays the rest faster — no jump, no
+   restart, same effect as a video's playback-rate control. */
 .die-trace-pulse {
 	fill: none;
 	stroke: #34d399;
 	stroke-width: 2px;
-	animation: die-pulse 1.8s linear infinite;
+	animation-name: die-pulse;
+	animation-duration: var(--die-pulse-duration, 1.8s);
+	animation-timing-function: linear;
+	animation-iteration-count: infinite;
 	animation-play-state: paused;
 }
 /* Output trace pulses brighter: a short bright core dash rides at the head
@@ -897,7 +1011,10 @@
 	fill: none;
 	stroke: #d1fae5;
 	stroke-width: 2px;
-	animation: die-pulse 1.8s linear infinite;
+	animation-name: die-pulse;
+	animation-duration: var(--die-pulse-duration, 1.8s);
+	animation-timing-function: linear;
+	animation-iteration-count: infinite;
 	animation-play-state: paused;
 }
 /* Per-trace stagger — negative delays put pulses mid-path immediately. */
@@ -909,6 +1026,35 @@
 }
 .die-delay-c {
 	animation-delay: -1500ms;
+}
+/* The halo's two inner gradient stops (exhibit-b-die.tsx), read from custom
+   properties so hovering the die (below) can brighten them without a filter —
+   the file's own doctrine is that `filter:` on this SVG re-rasters the whole
+   surface every frame while it animates, which a hover state would do for as
+   long as the pointer sits still. A stop-opacity swap costs nothing extra. */
+.die-halo-core {
+	stop-opacity: var(--die-halo-alpha-core, 0.16);
+}
+.die-halo-mid {
+	stop-opacity: var(--die-halo-alpha-mid, 0.06);
+}
+/* Addendum M3 — the die on hover: trace pulses run ~35% faster (1.8s -> 1.17s)
+   and the halo brightens, both as custom-property swaps on the figure so the
+   two trace/pulse rules and the two halo stops above pick them up by
+   inheritance without a single additional selector. (hover: hover) gated —
+   see the hover-vivid comment above for why. */
+@media (hover: hover) {
+	.die-figure:hover {
+		--die-pulse-duration: 1.17s;
+		--die-halo-alpha-core: 0.3;
+		--die-halo-alpha-mid: 0.12;
+	}
+}
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+	.die-halo-core,
+	.die-halo-mid {
+		transition: stop-opacity 0.25s ease;
+	}
 }
 /* SPECULAR SHEEN (Addendum K2) — the die's second ambient loop. A wide
    gradient band crosses the clipped face on an 8s period. Transform-only: the
@@ -1048,32 +1194,61 @@
 	}
 }
 
+/* One spring-ish, no-overshoot ease for every InView content reveal
+   (Addendum M2) — a single named curve so a future reveal reuses it instead
+   of re-tuning its own. Fast out of the gate, no bounce past 1 (a bounce on
+   a line of text reads as jitter, not spring). */
+:root {
+	--ease-reveal: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 /* Exhibit G — attack-corpus rows reveal once on approach (IO stagger via
    InView). Server/no-JS markup carries NO data-inview attribute, so the
    rows can never be hidden from users without JS; InView sets "true" once
    and never unsets it, so the stagger fires once per pageview.
    Reduced-motion renders the finished table (finished states, not
-   disabled features). */
+   disabled features).
+   Addendum M2: bolder entry — a taller 24px rise and a 6px->0 blur resolve
+   alongside the fade, on the shared --ease-reveal curve, at a 50ms stagger
+   step (ROW_STAGGER_MS, exhibit-g-corpus.ts). */
 @keyframes attack-row-in {
 	from {
 		opacity: 0;
-		transform: translateY(6px);
+		transform: translateY(24px);
+		filter: blur(6px);
 	}
 	to {
 		opacity: 1;
 		transform: translateY(0);
+		filter: blur(0);
 	}
 }
 [data-inview="false"] .attack-row {
 	opacity: 0;
 }
 [data-inview="true"] .attack-row {
-	animation: attack-row-in 0.35s ease-out both;
+	animation: attack-row-in 0.5s var(--ease-reveal) both;
 }
 @media (prefers-reduced-motion: reduce) {
 	[data-inview="false"] .attack-row,
 	[data-inview="true"] .attack-row {
 		opacity: 1;
 		animation: none;
+		filter: none;
+	}
+}
+
+/* Corpus row hover ground (Addendum M3) — replaces the old flat
+   hover:bg-white/[0.06] wash with one tinted by the section's own accent
+   (exhibit-g is themed purple) and intensified: 14% accent over an 8% white
+   base reads more clearly than the previous 6% white alone did. (hover: hover)
+   gated so a tap can never leave a row visibly "stuck" highlighted. */
+@media (hover: hover) {
+	.corpus-row-link:hover {
+		background: color-mix(
+			in srgb,
+			var(--section-accent, var(--color-ut)) 14%,
+			rgba(255, 255, 255, 0.08)
+		);
 	}
 }

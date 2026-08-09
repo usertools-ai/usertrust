@@ -36,6 +36,7 @@ export default function TearOff() {
 			<motion.a
 				href="/docs/quickstart"
 				onClick={onClick}
+				data-cursor-hover
 				animate={tearing ? { y: 2, rotate: -1.2, opacity: 0.35 } : { y: 0, rotate: 0, opacity: 1 }}
 				transition={TEAR_SPRING}
 				className="lift-2 focus-ring mt-px flex min-h-[56px] w-full items-center justify-center bg-paper font-mono text-base font-bold uppercase tracking-widest text-ink hover:bg-paper/90"

@@ -145,6 +145,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 					 */}
 					<a
 						href="#docket"
+						data-cursor-hover
 						className="focus-ring inline-flex min-h-[44px] items-center whitespace-nowrap font-mono text-xs text-white/70 hover:text-white focus-visible:text-ut transition-colors duration-200"
 					>
 						<span className="md:hidden">facts ↓</span>
@@ -152,6 +153,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 					</a>
 					<a
 						href="/"
+						data-cursor-hover
 						className={`focus-ring inline-flex min-h-[44px] items-center px-4 py-2.5 border rounded-full text-sm font-medium tracking-tight transition-all duration-300 ${
 							/*
 							 * No glow: the old shadow-[0_0_20px_rgba(52,211,153,0.1)] was
@@ -173,6 +175,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 							<a
 								key={link.href}
 								href={link.href}
+								data-cursor-hover
 								className={`focus-ring relative inline-flex min-h-[44px] items-center hover:text-white transition-colors duration-200 ${
 									activeSection === link.href ? "text-ut" : ""
 								}`}
@@ -200,6 +203,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 									href="https://github.com/usertools-ai/usertrust"
 									target="_blank"
 									rel="noopener noreferrer"
+									data-cursor-hover
 									className="focus-ring inline-flex min-h-[44px] items-center hover:text-white/80 transition-colors duration-200"
 								>
 									★ {fmtCompact(stars)}
@@ -210,6 +214,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 									href="https://www.npmjs.com/package/usertrust"
 									target="_blank"
 									rel="noopener noreferrer"
+									data-cursor-hover
 									className="focus-ring inline-flex min-h-[44px] items-center hover:text-white/80 transition-colors duration-200"
 								>
 									↓ {fmtCompact(downloads)}/mo
@@ -222,6 +227,7 @@ export function Nav({ stars, downloads }: { stars: number | null; downloads: num
 						href="https://github.com/usertools-ai/usertrust"
 						target="_blank"
 						rel="noopener noreferrer"
+						data-cursor-hover
 						className="focus-ring inline-flex min-h-[44px] items-center gap-2 px-3.5 py-1.5 bg-white/[0.06] border border-white/10 rounded-lg text-sm font-medium hover:bg-white/[0.10] hover:border-white/20 transition-all duration-200"
 					>
 						<GitHubIcon className="w-4 h-4" />

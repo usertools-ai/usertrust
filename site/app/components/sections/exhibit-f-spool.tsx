@@ -118,6 +118,7 @@ export default function ExhibitFSpool() {
 											key={j}
 											type="button"
 											data-operator={op}
+											data-cursor-hover
 											aria-pressed={pinnedOp === op}
 											onClick={() => setPinnedOp((cur) => (cur === op ? null : op))}
 											onMouseEnter={() => setHoverOp(op)}

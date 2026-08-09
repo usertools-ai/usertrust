@@ -73,6 +73,7 @@ export default function ExhibitBTabs() {
 						aria-controls={`${baseId}-panel-${t.id}`}
 						tabIndex={rovingTabIndex(selected === t.id)}
 						onClick={() => setSelected(t.id)}
+						data-cursor-hover
 						className={`focus-ring rounded-md px-4 py-1.5 font-mono text-xs tracking-wide transition-colors ${tabButtonClass(
 							selected === t.id,
 						)}`}

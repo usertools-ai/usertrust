@@ -130,12 +130,15 @@ export default function ExhibitG() {
 										target="_blank"
 										rel="noreferrer"
 										title={attack.name}
+										data-cursor-hover
 										// The hover ground is the nav's own token; the previous
 										// value shifted the ground barely past the threshold
 										// of perception. Paired with a text lift so the row
 										// answers the pointer the way every other interactive
-										// row on the page does.
-										className="focus-ring group flex items-baseline gap-4 rounded-sm px-2 py-1.5 transition-colors hover:bg-white/[0.06]"
+										// row on the page does. corpus-row-link (globals.css,
+										// Addendum M3) intensifies that ground and tints it with
+										// the section accent instead of a plain white wash.
+										className="focus-ring group corpus-row-link flex items-baseline gap-4 rounded-sm px-2 py-1.5 transition-colors"
 									>
 										<span aria-hidden="true" className="shrink-0 tabular-nums text-white/50">
 											{rowIndexLabel(i, corpus.attacks.length)}

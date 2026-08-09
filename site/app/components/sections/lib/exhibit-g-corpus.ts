@@ -5,8 +5,13 @@
  * named constant, never a digit literal in marketing JSX. Same pattern as
  * app/lib/leader-path.ts's DRAW_STAGGER_MS and this directory's
  * exhibit-f-policy.ts's DROP_STAGGER_MS.
+ *
+ * 50ms (Addendum M2's reveal choreography) — the bolder y-rise + blur entry
+ * (globals.css's attack-row-in) reads as a single crisp cascade at this step;
+ * the previous 40ms was tuned for the smaller 6px slide it has since traded up
+ * from and looked too fast once the entry grew heavier.
  */
-export const ROW_STAGGER_MS = 40;
+export const ROW_STAGGER_MS = 50;
 
 /**
  * Zero-padded 1..N ROW INDEX for the corpus table.

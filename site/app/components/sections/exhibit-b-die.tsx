@@ -112,8 +112,13 @@ export default function ExhibitBDie() {
 					    larger rounded box sitting behind the chip — an edge is an edge
 					    at any opacity. A radial falloff has no edge to see. */}
 					<radialGradient id="dieHalo" cx="0.5" cy="0.5" r="0.5">
-						<stop offset="0%" stopColor="#34d399" stopOpacity="0.16" />
-						<stop offset="55%" stopColor="#34d399" stopOpacity="0.06" />
+						{/* stop-opacity on these two comes from globals.css's
+						    --die-halo-alpha-* custom properties (Addendum M3), not this
+						    attribute — the attribute is only the no-JS/no-hover fallback,
+						    since a CSS class rule always outranks a presentation
+						    attribute in the cascade. Hovering .die-figure brightens both. */}
+						<stop offset="0%" stopColor="#34d399" stopOpacity="0.16" className="die-halo-core" />
+						<stop offset="55%" stopColor="#34d399" stopOpacity="0.06" className="die-halo-mid" />
 						<stop offset="100%" stopColor="#34d399" stopOpacity="0" />
 					</radialGradient>
 					<clipPath id="dieFaceClip">
