@@ -10,6 +10,7 @@ import ExhibitF from "./components/sections/exhibit-f";
 import ExhibitG from "./components/sections/exhibit-g";
 import HardenStrip from "./components/sections/harden-strip";
 import Hero from "./components/sections/hero";
+import LedgerTicker from "./components/sections/ledger-ticker";
 import OpenLedger from "./components/sections/open-ledger";
 
 /*
@@ -52,6 +53,9 @@ export default async function Home() {
 			<ExhibitF />
 			<ExhibitG />
 			<HardenStrip />
+			{/* Addendum O — the chain keeps running between the doctrine and the
+			    closing panel. Not a section[id]: it is not a nav destination. */}
+			<LedgerTicker />
 			<OpenLedger />
 		</>
 	);

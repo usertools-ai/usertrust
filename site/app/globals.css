@@ -720,6 +720,104 @@ html.cursor-active * {
 	box-shadow: 0 1px 0 rgba(22, 22, 30, 0.08), 0 14px 40px rgba(0, 0, 0, 0.5);
 }
 
+/* ── THE LEDGER TICKER (Addendum O1) ──────────────────────────────────────
+   A perforated receipt strip running the published chain between the harden
+   doctrine and the closing panel. Paper register, dimmed: the page's paper
+   token pulled a few percent toward ink, so the strip reads as a secondary
+   artifact beside the closing receipt rather than competing with it. Text is
+   ink and only ink — emerald/amber/steel/red never appear as text on paper.
+
+   MOTION. The doctrine allows two looping animations on this page; this is
+   the third, added by Addendum O1 and held to the identical discipline both
+   of the others are. Transform-only, so the loop composites and never
+   repaints. `animation-play-state: paused` whenever the island's
+   IntersectionObserver says the strip is off screen (data-play="false" is
+   also the SSR/no-JS state, so a JavaScript-off visitor gets a static strip
+   rather than a permanently running one). No animation at all under reduced
+   motion.
+
+   SEAMLESS. The track holds the fragment list twice and travels exactly
+   -50%, so at the end of a period copy two sits precisely where copy one
+   started and the reset is invisible. Change the number of copies and this
+   percentage changes with it. 40s is deliberately slow: this is ambience
+   under the reader's eye, not a thing to be read at speed. */
+.ledger-strip {
+	position: relative;
+	overflow: hidden;
+	color: var(--color-ink);
+	--ledger-paper: color-mix(in srgb, var(--color-paper) 90%, var(--color-ink));
+}
+/* The punched edges. Same 14px rhythm as .perforation, drawn in the dimmed
+   strip's own paper. The holes are TRANSPARENT, which is why the paper fill
+   lives on the window below and not on .ledger-strip itself — a hole punched
+   through paper that is sitting on more paper is not a hole. Here it shows
+   the page's dark ground, which is what a punched edge looks like. */
+.ledger-perf {
+	display: block;
+	height: 10px;
+	background-image: radial-gradient(
+		circle at 5px 5px,
+		transparent 0 3.5px,
+		var(--ledger-paper) 4px
+	);
+	background-size: 14px 10px;
+	background-repeat: repeat-x;
+}
+.ledger-strip-window {
+	overflow: hidden;
+	background: var(--ledger-paper);
+}
+.ledger-strip-track {
+	display: flex;
+	width: max-content;
+	will-change: transform;
+	animation: ledger-scroll 40s linear infinite;
+}
+.ledger-strip[data-play="false"] .ledger-strip-track {
+	animation-play-state: paused;
+}
+.ledger-strip-run {
+	display: flex;
+	flex-shrink: 0;
+}
+@keyframes ledger-scroll {
+	from {
+		transform: translateX(0);
+	}
+	to {
+		transform: translateX(-50%);
+	}
+}
+/* Fragments. 12px mono is the page's floor and this strip sits on it; ink on
+   the dimmed paper measures far above the 4.5:1 text floor (pixel-verified). */
+.ledger-frag {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.5rem 1.25rem;
+	font-family: var(--font-mono);
+	font-size: 12px;
+	letter-spacing: 0.06em;
+	white-space: nowrap;
+}
+.ledger-frag-kind {
+	text-transform: uppercase;
+	letter-spacing: 0.12em;
+	font-weight: 600;
+}
+/* The separators sit back from the fragment they punctuate, but they are still
+   rendered 12px glyphs, so they hold the same 4.5:1 floor every other glyph on
+   this page does rather than claiming a decorative exemption. 65% ink over the
+   dimmed paper measures 4.86:1; 45%, which is where this started, was 2.75:1. */
+.ledger-frag-sep {
+	color: color-mix(in srgb, var(--color-ink) 65%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+	.ledger-strip-track {
+		animation: none;
+	}
+}
+
 /* Punch-hole perforation strip (receipt top/bottom edges): transparent holes
    punched out of paper on a 14px rhythm. */
 .perforation {
