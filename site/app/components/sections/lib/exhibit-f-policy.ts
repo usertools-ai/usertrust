@@ -95,7 +95,7 @@ export const CHITS: Chit[] = [
 		id: "chit-01",
 		verdict: "pass",
 		lines: [
-			{ label: "model", value: "claude-sonnet-4-6", caughtBy: ["in", "regex"] },
+			{ label: "model", value: "claude-fable-5", caughtBy: ["in", "regex"] },
 			{ label: "est_cost", value: "840", caughtBy: ["gt"] },
 		],
 	},

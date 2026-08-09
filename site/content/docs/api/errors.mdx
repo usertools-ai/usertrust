@@ -16,7 +16,7 @@ import {
 
 try {
   const { response, receipt } = await client.messages.create({
-    model: "claude-sonnet-4-6",
+    model: "claude-fable-5",
     max_tokens: 1024,
     messages: [{ role: "user", content: "Hello" }],
   });
@@ -172,6 +172,13 @@ class LedgerUnavailableError extends Error {
 **When it fires:** Before any LLM call, during the connection check or PENDING hold attempt. This is failure mode 15.4 -- no tokens are at risk because no hold was placed.
 
 **Hint:** `'Start TigerBeetle with "npx usertrust tb start" or use { dryRun: true } to skip the ledger.'`
+
+<Callout type="warn">
+That hint is the error's own text, quoted verbatim — and `usertrust tb start` is
+a stub that prints a manual command rather than starting anything. Follow the
+[CLI page's `usertrust tb` section](/docs/cli#usertrust-tb) for the command that
+actually starts a node, or pass `{ dryRun: true }` to skip the ledger entirely.
+</Callout>
 
 <Callout type="warn">
 When TigerBeetle is unreachable, usertrust refuses to forward the request. This is by design -- without a ledger, budget enforcement is impossible.

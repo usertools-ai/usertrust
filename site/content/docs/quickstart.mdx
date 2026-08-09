@@ -33,7 +33,7 @@ const client = await trust(new Anthropic(), {
 
 // Returns { response, receipt } — NOT response._governance
 const { response, receipt } = await client.messages.create({
-  model: "claude-sonnet-4-6",
+  model: "claude-fable-5",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Hello" }],
 });
@@ -72,7 +72,7 @@ Every call returns a `TrustReceipt`:
   auditHash: "a1b2c3d4...",     // SHA-256 hash in the chain
   chainPath: ".usertrust/audit/events.jsonl",
   settled: true,                // POST succeeded
-  model: "claude-sonnet-4-6",
+  model: "claude-fable-5",
   provider: "anthropic",
   timestamp: "2025-01-15T...",
 }
@@ -106,7 +106,7 @@ Streaming works transparently. The governance receipt resolves when the stream c
 
 ```ts
 const { response } = await client.messages.create({
-  model: "claude-sonnet-4-6",
+  model: "claude-fable-5",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Hello" }],
   stream: true,

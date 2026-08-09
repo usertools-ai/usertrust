@@ -54,7 +54,7 @@ Every call cost is floored at 1 usertoken -- zero-amount ledger transfers are in
 
 ### Why Budgets Still Bind
 
-Nominal metering is not an exemption. Every local call still places a PENDING hold, settles at least 1 usertoken, and lands on the audit chain -- so runaway loops burn budget, anomaly governance still fires, and every call has a receipt. The receipt carries the provenance:
+Nominal metering is not an exemption. Every governed local call still places a PENDING hold, settles at least 1 usertoken, and lands on the audit chain -- so runaway loops burn budget, anomaly governance still fires, and every governed call has a receipt. The receipt carries the provenance:
 
 | Receipt field | Local value |
 |---------------|-------------|

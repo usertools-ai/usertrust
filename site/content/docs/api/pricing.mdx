@@ -12,7 +12,7 @@ A budget of `100_000` UT equals $10.00. A budget of `1_000_000` UT equals $100.0
 ## Pricing Table
 
 The SDK includes a 20-model pricing table in `ledger/pricing.ts`, current as of
-`PRICING_TABLE_VERSION = "2026-08-08"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
+`PRICING_TABLE_VERSION = "2026-08-09"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
 Rates are in usertokens per 1,000 LLM tokens, across **four tiers**: input (fresh prompt tokens),
 output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation prompt tokens). A
 `—` means the provider publishes no rate for that tier — it is **not** free; see
@@ -25,6 +25,7 @@ output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation pr
 | `claude-sonnet-4-6` | 30 | 150 | 3 | 37.5 |
 | `claude-haiku-4-5` | 10 | 50 | 1 | 12.5 |
 | `claude-opus-4-6` | 50 | 250 | 5 | 62.5 |
+| `claude-fable-5` | 100 | 500 | 10 | 125 |
 
 Anthropic publishes cache-read at 0.1x base input and 5-minute cache-write at 1.25x. The 1-hour
 write premium (2x) collapses to the 5-minute rate — see [Documented
@@ -40,11 +41,25 @@ approximations](#documented-approximations) — operators with 1h-heavy workload
 | `gpt-5.4` | 25 | 150 | 2.5 | — |
 | `o3` | 20 | 80 | 5 | — |
 | `o4-mini` | 11 | 44 | 2.75 | — |
+| `gpt-5.6-sol` | 50 | 300 | 5 | 62.5 |
 
 The cached-input discount varies **within** the OpenAI family — `gpt-5.4` reads at 0.1x, `o3`/
 `o4-mini` at 0.25x — so there is no single family-level multiplier. OpenAI publishes no separate
-cache-write rate; writes bill at the standard input price, which is exactly what the fallback
-invariant reproduces by leaving `cacheWritePer1k` unset.
+cache-write rate for the models above; writes bill at the standard input price, which is exactly
+what the fallback invariant reproduces by leaving `cacheWritePer1k` unset. `gpt-5.6-sol` is the
+exception and carries an explicit rate: from gpt-5.6 onward OpenAI bills cache writes at 1.25x the
+uncached input price, so leaving it unset would misprice them.
+
+### Moonshot AI
+
+| Model | Input | Output | Cache Read | Cache Write |
+|-------|------:|-------:|-----------:|------------:|
+| `kimi-k3` | 30 | 150 | 3 | — |
+
+Moonshot's price list has a cache-hit and a cache-miss input column and no cache-creation column at
+all, so `cacheWritePer1k` is unset and writes price at the input rate through the fallback
+invariant. Kimi speaks the OpenAI wire protocol, so `detectClientKind` reports `openai` for a Kimi
+client — that is the client SHAPE, and it does not change which rates apply.
 
 ### Google Gemini
 
@@ -120,8 +135,8 @@ tokens route through the same fallback invariant above and price at 30 UT/1k.
 `getModelRates()` first attempts an exact match against the pricing table. If no exact match is found, it tries prefix matching (longest key first) to handle versioned model names. If neither matches, the fallback rate is used.
 
 ```typescript
-getModelRates("claude-sonnet-4-6")         // exact match → { 30, 150 }
-getModelRates("claude-sonnet-4-6-20260301") // prefix match → { 30, 150 }
+getModelRates("claude-fable-5")           // exact match → { 100, 500 }
+getModelRates("claude-fable-5-20260301")  // prefix match → { 100, 500 }
 getModelRates("unknown-model")              // fallback → { 30, 150 }
 ```
 
@@ -154,11 +169,11 @@ tiers and the fallback invariant](#cache-tiers-and-the-fallback-invariant)); the
 at 1 usertoken, same as `estimateCost()`.
 
 ```typescript
-// 1,000 fresh input + 500 output + 2,000 cache-read tokens on claude-sonnet-4-6
-costFromRates(getModelRates("claude-sonnet-4-6"), 1000, 500, 2000, 0)
-// → Math.max(1, Math.ceil((1000 * 30)/1000 + (500 * 150)/1000 + (2000 * 3)/1000))
-// → Math.max(1, Math.ceil(30 + 75 + 6))
-// → 111 UT
+// 1,000 fresh input + 500 output + 2,000 cache-read tokens on claude-fable-5
+costFromRates(getModelRates("claude-fable-5"), 1000, 500, 2000, 0)
+// → Math.max(1, Math.ceil((1000 * 100)/1000 + (500 * 500)/1000 + (2000 * 10)/1000))
+// → Math.max(1, Math.ceil(100 + 250 + 20))
+// → 370 UT
 ```
 
 Each tier is computed as `(tokens × ratePer1k) / 1000` — **multiply before dividing**. This is the
@@ -180,11 +195,11 @@ Two-tier convenience wrapper around `costFromRates()` for callers that don't hav
 prevent zero-amount transfers in TigerBeetle).
 
 ```typescript
-// 1,000 input tokens + 500 output tokens on claude-sonnet-4-6
-estimateCost("claude-sonnet-4-6", 1000, 500)
-// → Math.max(1, Math.ceil((1000 * 30)/1000 + (500 * 150)/1000))
-// → Math.max(1, Math.ceil(30 + 75))
-// → 105 UT
+// 1,000 input tokens + 500 output tokens on claude-fable-5
+estimateCost("claude-fable-5", 1000, 500)
+// → Math.max(1, Math.ceil((1000 * 100)/1000 + (500 * 500)/1000))
+// → Math.max(1, Math.ceil(100 + 250))
+// → 350 UT
 ```
 
 ### estimateInputTokens()
@@ -218,7 +233,7 @@ interface ModelRates {
 ### PRICING_TABLE_VERSION
 
 ```typescript
-const PRICING_TABLE_VERSION: string  // e.g. "2026-08-08"
+const PRICING_TABLE_VERSION: string  // e.g. "2026-08-09"
 ```
 
 Date-stamped version of the built-in `PRICING_TABLE`, bumped whenever any entry's rates change.

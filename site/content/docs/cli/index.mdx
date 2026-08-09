@@ -89,10 +89,28 @@ npx usertrust snapshot --restore <name>  # restore from snapshot
 TigerBeetle process management:
 
 ```bash
-npx usertrust tb start    # start TigerBeetle
-npx usertrust tb stop     # stop TigerBeetle
-npx usertrust tb status   # check if running
+npx usertrust tb start    # NOT YET IMPLEMENTED — prints the manual command below
+npx usertrust tb stop     # NOT YET IMPLEMENTED — prints the manual command below
+npx usertrust tb status   # works: reports whether a TigerBeetle process is running
 ```
+
+<Callout type="warn">
+`tb start` and `tb stop` are stubs today. They exit without managing anything and
+print the manual command instead — process lifecycle management is a future
+version. `tb status` is real: it checks for a running `tigerbeetle` process.
+
+Start and stop TigerBeetle yourself:
+
+```bash
+tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development ./data/0_0.tigerbeetle
+tigerbeetle start --addresses=3000 --cache-grid=256MiB ./data/0_0.tigerbeetle
+kill $(pgrep tigerbeetle)
+```
+
+The `start` line is the exact command `usertrust tb start` prints. See the
+[TigerBeetle quick start](https://docs.tigerbeetle.com/start/) for installation
+and for running it in Docker.
+</Callout>
 
 ## usertrust completions
 
