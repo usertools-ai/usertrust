@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * Pricing table for the top 20 LLM models.
+ * Pricing table for the LLM models the SDK prices natively.
  * All rates are in usertokens per 1,000 LLM tokens.
  * 1 usertoken = $0.0001 (one basis point of a cent).
  *
@@ -46,7 +46,7 @@ export interface ModelRates {
 }
 
 /**
- * Pricing table for the top 20 models supported by the SDK.
+ * Pricing table for the models supported by the SDK.
  * Key: model identifier as sent by the client.
  *
  * All four tiers were re-derived from the providers' published pricing pages on
@@ -73,6 +73,17 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	},
 	"claude-haiku-4-5": { inputPer1k: 10, outputPer1k: 50, cacheReadPer1k: 1, cacheWritePer1k: 12.5 },
 	"claude-opus-4-6": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
+	// Retrieved 2026-08-09 from Anthropic's published model-pricing table
+	// (platform.claude.com/docs/en/about-claude/pricing): $10 base input,
+	// $50 output, $1 cache hit, $12.50 5-minute cache write per MTok. The 1-hour
+	// write ($20) collapses to the 5m rate under the same documented
+	// approximation as every other Anthropic row.
+	"claude-fable-5": {
+		inputPer1k: 100,
+		outputPer1k: 500,
+		cacheReadPer1k: 10,
+		cacheWritePer1k: 125,
+	},
 
 	// ── OpenAI ──
 	// Cached-input reads are published per model and the discount varies WITHIN
@@ -92,6 +103,21 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	// Base was 5.5/22 before the 2026-08-08 audit — exactly half the published
 	// standard rate. Corrected upward; understatement is the dangerous direction.
 	"o4-mini": { inputPer1k: 11, outputPer1k: 44, cacheReadPer1k: 2.75 },
+	// Retrieved 2026-08-09 from OpenAI's published model page
+	// (developers.openai.com/api/docs/models/gpt-5.6-sol): $5 input, $30 output,
+	// $0.50 cached input per MTok, and — the reason the comment above demands it
+	// — an explicit cache-WRITE rate at 1.25x uncached input ($6.25/MTok). Rates
+	// are the standard short-context tier; the >272k long-context uplift (2x in /
+	// 1.5x out) is a documented approximation this per-token model does not carry.
+	"gpt-5.6-sol": { inputPer1k: 50, outputPer1k: 300, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
+
+	// ── Moonshot AI ──
+	// Retrieved 2026-08-09 from Moonshot's published price list
+	// (platform.kimi.ai/docs/pricing/chat-k3): $3.00 cache-miss input, $0.30
+	// cache hit, $15.00 output per MTok, flat across the full 1M context. The
+	// price list has no cache-CREATION column at all, so cacheWritePer1k is
+	// omitted and writes price at inputPer1k through the D1 fallback.
+	"kimi-k3": { inputPer1k: 30, outputPer1k: 150, cacheReadPer1k: 3 },
 
 	// ── Google Gemini ──
 	// Context-cache reads are 0.1x base input. Cache CREATION bills as ordinary
@@ -139,7 +165,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
  * Bump on every entry change; recorded on receipts so a metered cost can be
  * reproduced against the exact table that priced it.
  */
-export const PRICING_TABLE_VERSION = "2026-08-08";
+export const PRICING_TABLE_VERSION = "2026-08-09";
 
 /** Pre-sorted entries for prefix matching (longest key first). */
 const SORTED_TABLE = Object.entries(PRICING_TABLE).sort((a, b) => b[0].length - a[0].length);
@@ -167,6 +193,12 @@ const PROVIDER_MODEL_MAP: Record<string, string[]> = {
 	perplexity: ["sonar-"],
 	alibaba: ["qwen-"],
 	amazon: ["nova-"],
+	// Kimi speaks the OpenAI wire protocol, so `detectClientKind` reports
+	// "openai" for a Kimi client — that is a CLIENT SHAPE, not a vendor. This map
+	// answers a different question ("which table keys does vendor X publish?"),
+	// and leaving kimi-k3 unmapped would make `usertrust pricing` silently skip
+	// it for an operator who configured Moonshot as a provider.
+	moonshot: ["kimi-"],
 };
 
 /** Return all PRICING_TABLE model keys that belong to a given provider. */

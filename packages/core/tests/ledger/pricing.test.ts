@@ -13,8 +13,8 @@ import {
 } from "../../src/ledger/pricing.js";
 
 describe("PRICING_TABLE", () => {
-	it("contains 20 models", () => {
-		expect(Object.keys(PRICING_TABLE)).toHaveLength(20);
+	it("contains 23 models", () => {
+		expect(Object.keys(PRICING_TABLE)).toHaveLength(23);
 	});
 
 	it("all rates are positive", () => {
@@ -366,7 +366,8 @@ describe("PRICING_TABLE_VERSION", () => {
 	it("is the date of the four-tier rates audit", () => {
 		// Bumped whenever any PRICING_TABLE entry changes (spec D1). Receipts record
 		// it (D5) so a cost can be reproduced against the exact table that priced it.
-		expect(PRICING_TABLE_VERSION).toBe("2026-08-08");
+		// 2026-08-09: the three frontier entries (fable-5 / gpt-5.6-sol / kimi-k3).
+		expect(PRICING_TABLE_VERSION).toBe("2026-08-09");
 	});
 });
 
@@ -443,6 +444,11 @@ describe("estimateCost with customRates", () => {
 // usertokens). Sources, retrieved values, and the per-entry provenance notes are
 // in the task report (.superpowers/sdd/2026-08-08-cache-tier-pricing/task-1-report.md).
 //
+// The three frontier entries (claude-fable-5, gpt-5.6-sol, kimi-k3) were added on
+// 2026-08-09 from the same kind of primary source — the vendors' own published
+// price tables, retrieved that day. Their per-entry provenance is in the pricing
+// table's own comments.
+//
 // An entry OMITS a cache field when the provider publishes no rate for that tier.
 // Omission is not zero: costFromRates resolves it to inputPer1k (the D1 money
 // invariant, pinned by name below). Never invent a discount to fill a gap.
@@ -456,6 +462,13 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 	},
 	"claude-haiku-4-5": { inputPer1k: 10, outputPer1k: 50, cacheReadPer1k: 1, cacheWritePer1k: 12.5 },
 	"claude-opus-4-6": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
+	// $10 in / $50 out / $1 cache hit / $12.50 5m cache write per MTok.
+	"claude-fable-5": {
+		inputPer1k: 100,
+		outputPer1k: 500,
+		cacheReadPer1k: 10,
+		cacheWritePer1k: 125,
+	},
 
 	// OpenAI — cached-input reads are published per model; there is no separate
 	// cache-WRITE rate (writes bill at standard input), so cacheWritePer1k is omitted
@@ -465,6 +478,15 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 	"gpt-5.4": { inputPer1k: 25, outputPer1k: 150, cacheReadPer1k: 2.5 },
 	o3: { inputPer1k: 20, outputPer1k: 80, cacheReadPer1k: 5 },
 	"o4-mini": { inputPer1k: 11, outputPer1k: 44, cacheReadPer1k: 2.75 },
+	// gpt-5.6+ DOES publish a cache-write rate (1.25x uncached input), so this
+	// entry carries one where every older OpenAI row above omits it.
+	// $5 in / $30 out / $0.50 cached input / $6.25 cache write per MTok.
+	"gpt-5.6-sol": { inputPer1k: 50, outputPer1k: 300, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
+
+	// Moonshot AI — $3 cache-miss input / $0.30 cache hit / $15 out per MTok.
+	// No cache-CREATION rate is published (the price list has two input columns,
+	// hit and miss, and no write column) — omitted, never guessed.
+	"kimi-k3": { inputPer1k: 30, outputPer1k: 150, cacheReadPer1k: 3 },
 
 	// Google — context-cache reads are 0.1x base input. Cache creation bills as
 	// ordinary input plus an hourly STORAGE charge, which this model does not carry
@@ -489,6 +511,18 @@ describe("PRICING_TABLE rates audit (D1)", () => {
 	it("covers exactly the audited model set", () => {
 		expect(Object.keys(PRICING_TABLE).sort()).toEqual(Object.keys(AUDITED_RATES).sort());
 	});
+
+	// The frontier ids are metered from their OWN published rates, never from
+	// FALLBACK_RATE and never from a shorter sibling key's prefix match. A
+	// regression here is silent mispricing, not a failed lookup, so it is pinned
+	// as its own assertion rather than left to the per-entry checks above.
+	for (const model of ["claude-fable-5", "gpt-5.6-sol", "kimi-k3"]) {
+		it(`resolves ${model} to a table entry, not the fallback`, () => {
+			const rates = getModelRates(model);
+			expect(rates).toBe(PRICING_TABLE[model]);
+			expect(rates).not.toBe(FALLBACK_RATE);
+		});
+	}
 
 	for (const [model, expected] of Object.entries(AUDITED_RATES)) {
 		it(`pins all four tiers for ${model}`, () => {
