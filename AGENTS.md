@@ -505,6 +505,53 @@ pre-image.
 `SHA-256(0x01 ‖ left ‖ right)`. **Odd nodes are promoted, not duplicated** — this avoids
 CVE-2012-2459.
 
+**An inclusion proof is validated for PATH TOPOLOGY before it is folded.** The fold alone proves
+only that *some* path of these siblings reaches the root; it says nothing about *where* the leaf
+sits. `verifyInclusionProof` therefore derives the expected per-level sibling orientation from
+`(leafIndex, treeSize)` — walking the levels under the promotion semantics above, never a
+`ceil(log2(treeSize))` shortcut, because a promoted node has **no** sibling at its level and its
+path is correspondingly shorter — and requires the supplied sibling count and every `position` to
+match that sequence exactly. `leafIndex` is zero-based, both it and `treeSize` must be
+`Number.isSafeInteger` (`2**53` passes `Number.isInteger`; a non-finite size never leaves the
+derivation loop, since `ceil(Infinity / 2)` is `Infinity`), and `0 ≤ leafIndex < treeSize`. The
+proof is untrusted input, so every structural defect returns `false` and the function never throws.
+The two copies — `core/src/audit/merkle.ts` and `verify/src/verify.ts` — carry byte-identical
+validation blocks and identical early-return order (treeSize, root, then topology).
+
+*Every field of the proof is read EXACTLY ONCE, into a local, and the fold walks a materialized
+array of checked hashes plus the **derived** orientation — never `proof.siblings` a second time, and
+never `sibling.position`, which the loop above already proved equal to `expected[level]`. Do not
+"simplify" the fold back onto `for (const sibling of proof.siblings)`.
+*Prevents:* a hostile in-memory proof — a `get position()` that answers differently on its second
+read, or an array with an overridden `Symbol.iterator` — passing validation on one path and then
+folding a different one. The first cut of this fix validated by index and re-read the object to fold
+it; a genuine leaf-0 proof verified at a forged `leafIndex` of 2 through that gap, by both routes.
+Not reachable through JSON-parsed input or any shipped caller — a parsed proof carries plain data
+properties — but `verifyInclusionProof` is an **exported** function whose contract says "untrusted
+input", so it must hold against objects a caller built by hand.
+
+*The `proof` argument itself is inside that contract.* It is guarded for object-ness (`null`,
+`undefined` and primitives return false), and **both** groups of extraction reads — the five
+top-level fields, and the per-level sibling index/`hash`/`position` reads — sit inside a
+`try`/`catch` that returns false. The catch spans only the reads; the hashing is deliberately left
+outside every catch, so a genuine crypto fault can never be swallowed into a silent verdict.
+*Prevents:* `verifyInclusionProof(null, …)`, a throwing accessor, or a revoked `Proxy` throwing out
+of a function this same section documents as never throwing — the contract contradicting itself.
+This is not a hypothetical tidy-up: the first two rounds of this work shipped the "never throws"
+wording while a bare `null` still threw on `proof.treeSize`, and wrapping only the top-level reads
+still let a hand-built array's throwing index getter escape.
+*Prevents:* a forged `leafIndex` riding an otherwise-valid fold, which is what lets a tampered
+receipt claim a different event's position in an anchored tree; padded, truncated or reordered
+sibling paths; and — the case no amount of hashing can catch — the **equal-hash flip**, where two
+identical leaves make `hashInternal(sibling, self)` and `hashInternal(self, sibling)` the same
+value, so swapping a sibling's side refolds to the very same published root. Strict position
+matching is load-bearing on its own: the fold reads every non-`"left"` value as `"right"`, so an
+unvalidated `position` field is a free right-hand step.
+*What this function still does NOT authenticate,* deliberately: `version` and `segmentId` (changing
+either still verifies), and the binding of `leafHash` to an externally expected event — that is the
+caller's job. Hash-string *encoding* is likewise unvalidated beyond `typeof === "string"`; Node's
+hex decoder is permissive, and tightening it needs its own compatibility analysis.
+
 **Audit-write failure degrades; it never unwinds committed money.** The writer dead-letters to
 `.usertrust/dlq/dead-letters.jsonl` (dir `0700`, file `0600`, fsync'd) and **re-throws**; governance
 call sites catch it and mark the call audit-degraded. A failed append must not unwind the transfer,
