@@ -213,3 +213,85 @@ test("a rogue digit in heading TEXT still fails even with the closing-tag exempt
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("an allowlisted ATTRIBUTE no longer exempts the rest of its line (span-stripping)", () => {
+	const dir = mkdtempSync(join(tmpdir(), "check-facts-span-"));
+	try {
+		// The whole-line allowlist let any line carrying `className=` through,
+		// so a rogue claim sharing a line with one was invisible to the gate.
+		// Only the attribute's own span is exempt now; the JSX TEXT beside it is
+		// scanned like any other prose.
+		writeFileSync(
+			join(dir, "docket.tsx"),
+			[
+				"export default function Docket() {",
+				'\treturn <p className="mt-4 text-white/70">9999 customers</p>;',
+				"}",
+				"",
+			].join("\n"),
+		);
+		const r = runChecker(dir);
+		assert.notEqual(
+			r.status,
+			0,
+			`className= must not exempt the text beside it, got:\n${r.stderr}`,
+		);
+		assert.match(r.stderr, /docket\.tsx:2/);
+		assert.match(r.stderr, /9999/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("a fixture expression no longer exempts a rogue digit sharing its line", () => {
+	const dir = mkdtempSync(join(tmpdir(), "check-facts-fixture-span-"));
+	try {
+		writeFileSync(
+			join(dir, "docket.tsx"),
+			[
+				'import facts from "../../evidence/facts.json";',
+				"export default function Docket() {",
+				"\treturn <p>{facts.facts.transferCodes.value} codes and 4242 customers</p>;",
+				"}",
+				"",
+			].join("\n"),
+		);
+		const r = runChecker(dir);
+		assert.notEqual(
+			r.status,
+			0,
+			`a facts. expression must not exempt unrelated digits on its line, got:\n${r.stderr}`,
+		);
+		assert.match(r.stderr, /4242/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("stripping is span-scoped, not greedy: real section lines still pass", () => {
+	const dir = mkdtempSync(join(tmpdir(), "check-facts-realistic-"));
+	try {
+		// Lines lifted from the shipped sections — each mixes an allowlisted span
+		// with ordinary markup, and each must still pass after the change.
+		writeFileSync(
+			join(dir, "docket.tsx"),
+			[
+				'import facts from "../../evidence/facts.json";',
+				"export default function Docket() {",
+				"\treturn (",
+				'\t\t<div className="mt-12 grid grid-cols-2 border border-[rgba(52,211,153,0.08)] md:grid-cols-4">',
+				'\t\t\t<span style={{ left: "25%" }} />',
+				'\t\t\t<circle cx={40} cy={130} r={5} className="die-pad" />',
+				'\t\t\t<p className="text-[12px]">{facts.facts.policyOperators.value} policy operators</p>',
+				"\t\t</div>",
+				"\t);",
+				"}",
+				"",
+			].join("\n"),
+		);
+		const r = runChecker(dir);
+		assert.equal(r.status, 0, `realistic section lines must still pass, got:\n${r.stderr}`);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

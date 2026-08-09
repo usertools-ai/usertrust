@@ -9,24 +9,102 @@
  *   const facts = factsJson as EvidenceFacts;
  */
 
+/**
+ * One captured call. `receipt` is the TrustReceipt object EXACTLY as the SDK
+ * returned it — `cost` is the scalar number, and the optional #85 blocks
+ * (`usage`, `pricing`) are present whenever the settle was provider-metered.
+ * The pre-call estimate is deliberately OUTSIDE the receipt, on `capture`: it
+ * is an input to the hold, and a receipt field named "estimated" would be an
+ * API this SDK does not have.
+ */
 export interface CapturedReceipt {
 	receipt: {
 		transferId: string;
-		cost: { estimated: number; actual: number | null };
+		cost: number;
 		budgetRemaining: number;
 		auditHash: string;
+		chainPath: string;
+		receiptUrl: string | null;
 		settled: boolean;
 		model: string;
 		provider: string;
 		timestamp: string;
+		usageSource?: "provider" | "estimated";
+		usage?: {
+			inputTokens: number;
+			outputTokens: number;
+			cacheReadTokens: number;
+			cacheWriteTokens: number;
+		};
+		endpoint?: { class: string; runtime: string };
+		meter?: { costBasis: string; rateSource: string };
+		pricing?: {
+			appliedRates: {
+				inputPer1k: number;
+				outputPer1k: number;
+				cacheReadPer1k: number;
+				cacheWritePer1k: number;
+			};
+			tableVersion: string;
+		};
 	};
-	provenance: {
-		usertrustVersion: string;
-		tigerbeetleVersion: string | null;
-		capturedAt: string;
-		mode: "ledger" | "dry-run";
-		commit: string;
+	capture: {
+		estimatedCost: number;
+		clientShape: string;
 	};
+}
+
+export interface CaptureProvenance {
+	usertrustVersion: string;
+	tigerbeetleVersion: string | null;
+	capturedAt: string;
+	mode: "ledger" | "dry-run";
+	commit: string;
+}
+
+/** receipt-ledger.json — the three frontier captures from one ledger vault. */
+export interface LedgerCaptures {
+	captures: CapturedReceipt[];
+	provenance: CaptureProvenance;
+}
+
+/** receipt-dryrun.json — the single no-TigerBeetle capture. */
+export interface DryRunCapture extends CapturedReceipt {
+	provenance: CaptureProvenance;
+}
+
+/**
+ * denial-event.json — the two halves of a denial's evidence, both real: the
+ * error the caller receives, and the chain event the governor wrote before
+ * rethrowing it (#87). `data` is typed loosely on purpose — the payload is
+ * denial-class dependent and the page reads only the fields it names.
+ */
+export interface DenialEvidence {
+	error: { name: string; message: string };
+	event: {
+		kind: string;
+		hash: string;
+		previousHash: string;
+		timestamp: string;
+		actor: string;
+		sequence: number;
+		seq: number;
+		data: {
+			schemaVersion: number;
+			decision: string;
+			denialClass: string;
+			model?: string;
+			policyRules?: Array<{ id?: string; name: string }>;
+			budget?: { estimatedCost: number; budgetRemaining: number };
+			promptHash?: string;
+			promptHashAlg?: string;
+			transferId?: string;
+			endpointClass?: string;
+			error: string;
+		};
+	};
+	provenance: CaptureProvenance;
+	reproduce: string;
 }
 
 export interface EvidenceFacts {

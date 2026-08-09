@@ -60,7 +60,7 @@ test("every token key is unique (stable render keys)", () => {
 	assert.equal(new Set(keys).size, keys.length);
 });
 
-test("chainSeqFor: exact auditHash match wins; otherwise the newest entry", () => {
+test("chainSeqFor: exact auditHash match wins; a miss is null, never the newest entry", () => {
 	const slice = {
 		entries: [
 			{ seq: 4, type: "llm_call", hash: "aaa", prevHash: "zzz", timestamp: "t", summary: "s" },
@@ -68,5 +68,8 @@ test("chainSeqFor: exact auditHash match wins; otherwise the newest entry", () =
 		],
 	};
 	assert.equal(chainSeqFor(slice, "aaa"), 4);
-	assert.equal(chainSeqFor(slice, "not-there"), 5);
+	// The old fallback answered 5 here — a real sequence number about a
+	// DIFFERENT record, which is how "link 9 of the chain" came to annotate a
+	// receipt from another vault entirely.
+	assert.equal(chainSeqFor(slice, "not-there"), null);
 });

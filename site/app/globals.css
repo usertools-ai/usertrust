@@ -42,6 +42,16 @@
 	--color-paper-red: #a11212;
 	--color-paper-steel: #33566e;
 
+	/* Section-theme gold (Addendum I2) — the one new hue in the palette. Both
+	   halves measured against the page ground #0a0a1a: the graphic tone is
+	   9.68:1 and the text-safe tone 11.69:1, so either clears the H2 floor and
+	   the pair exists to keep hairlines/glows richer than the ink they sit
+	   beside, not because the darker one is unsafe. */
+	--color-gold: #d9b06a;
+	--color-gold-ink: #e8c37a;
+	/* Text-safe lifts of the two darkest accents, for the same reason. */
+	--color-tim-ink: #8bb8d4;
+
 	--font-sans: var(--font-usertools), -apple-system, BlinkMacSystemFont, sans-serif;
 	--font-mono: var(--font-jetbrains), "SF Mono", "Cascadia Code", monospace;
 
@@ -399,7 +409,109 @@ html {
 	line-height: 1rem;
 	text-transform: uppercase;
 	letter-spacing: 0.3em;
-	color: rgba(255, 255, 255, 0.7);
+	/* Themed sections tint the eyebrow with their accent's TEXT-SAFE variant;
+	   an unthemed section keeps the white/70 default. */
+	color: var(--section-accent-ink, rgba(255, 255, 255, 0.7));
+}
+
+/* ── SECTION THEME ACCENTS (Addendum I2) ─────────────────────────────────
+   TigerBeetle's colour-zone rhythm, with one hard rule: a theme colours
+   CHROME ONLY — eyebrow, stage tag, hairlines, connector traces, the glow
+   primitive's tint, the ground-zone wash. SEMANTIC INKS NEVER MOVE: emerald
+   still means verified, amber still means pending, red still means denied,
+   in every section regardless of its theme. A section that tinted its
+   verdicts would be repainting meaning, not chrome.
+
+   Each theme sets a pair. `--section-accent` is the graphic tone (strokes,
+   fills, low-alpha washes); `--section-accent-ink` is the tone used for TEXT
+   and is the one measured against the H2 floor. Every pair below clears
+   4.5:1 on both section grounds (#0a0a1a and the #0c0c22 ground-zone mid) —
+   the lowest of the five is purple at 7.28:1. */
+[data-theme="emerald"] {
+	--section-accent: var(--color-ut);
+	--section-accent-ink: var(--color-ut);
+}
+[data-theme="steel"] {
+	--section-accent: var(--color-tim);
+	--section-accent-ink: var(--color-tim-ink);
+}
+[data-theme="purple"] {
+	--section-accent: var(--color-mem);
+	--section-accent-ink: var(--color-mem);
+}
+[data-theme="amber"] {
+	--section-accent: var(--color-warning);
+	--section-accent-ink: var(--color-warning);
+}
+[data-theme="gold"] {
+	--section-accent: var(--color-gold);
+	--section-accent-ink: var(--color-gold-ink);
+}
+
+/* The stage tag rides the section accent too — same chip, same 12px mono, the
+   section's hue. Written unlayered so it beats the utility classes on the
+   element without needing !important. */
+[data-theme] .stage-tag {
+	border-color: color-mix(in srgb, var(--section-accent) 22%, transparent);
+	background: color-mix(in srgb, var(--section-accent) 8%, transparent);
+	color: var(--section-accent-ink);
+}
+
+/* ── ANCHOR CALIBRATION (Addendum I3) ────────────────────────────────────
+   One token, one rule, every anchored section. `scroll-padding-top` on <html>
+   already handles the fragment jump, but it is a DOCUMENT-level setting: it
+   cannot be tuned per target, and it does not travel with an element that is
+   scrolled programmatically. `scroll-margin-top` belongs to the target, which
+   is where the requirement actually lives.
+
+   The value is a SUM, not a guess: 4.81rem is the fixed nav's own rendered
+   height (44px link row + 2 x 16px py-4 + 1px border — the same figure the
+   nav dropdown's max-h and html's scroll-padding-top are derived from), plus
+   1.5rem of breath so the landed heading is clear of the bar rather than
+   tucked against it. Re-measure all three together if the nav padding moves. */
+:root {
+	--anchor-offset: calc(4.81rem + 1.5rem);
+}
+.section-anchor {
+	scroll-margin-top: var(--anchor-offset);
+}
+
+/* ── THE CIRCUIT GRAMMAR (Addendum K1) ───────────────────────────────────
+   Paint for the routed traces whose GEOMETRY lives in
+   sections/lib/trace-style.ts. Two layers everywhere: a dim always-on base
+   with a brighter core inside it, which is what makes a trace read as etched
+   into a board rather than drawn on top of one. Colour follows the section
+   accent and falls back to emerald, so one grammar serves every section
+   without any of them hard-coding a hue. */
+.trace-layer {
+	color: var(--section-accent, var(--color-ut));
+}
+.trace-base {
+	fill: none;
+	stroke: color-mix(in srgb, var(--section-accent, var(--color-ut)) 26%, transparent);
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+.trace-core {
+	fill: none;
+	stroke: color-mix(in srgb, var(--section-accent, var(--color-ut)) 78%, transparent);
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+.trace-via {
+	fill: color-mix(in srgb, var(--section-accent, var(--color-ut)) 70%, transparent);
+}
+.trace-pad {
+	fill: var(--section-accent, var(--color-ut));
+}
+/* Labels on a trace diagram. Authored size is NOT rendered size for SVG text —
+   the fork's 520-unit viewBox renders at ~512px in its column, so 14px authored
+   lands at ~13.8px rendered and clears the 12px floor. */
+.fork-label {
+	font-size: 14px;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+	fill: var(--section-accent-ink, rgba(255, 255, 255, 0.7));
 }
 
 /* Thermal-paper surface — warm, slightly dimmed against pure white so paper
@@ -455,36 +567,28 @@ html {
 	inset: -20%;
 	z-index: -1;
 	pointer-events: none;
-	background: radial-gradient(ellipse 60% 40% at 50% 50%, rgba(52, 211, 153, 0.07), transparent 100%);
+	/* Tint follows the section accent (Addendum I2) and defaults to emerald,
+	   so the primitive keeps its name and its default while a themed section
+	   gets its own ambience. */
+	background: radial-gradient(
+		ellipse 60% 40% at 50% 50%,
+		color-mix(in srgb, var(--section-accent, var(--color-ut)) 7%, transparent),
+		transparent 100%
+	);
 }
-/* Section-ground rhythm: #0a0a1a → #0c0c22 → #0a0a1a. Applied to
-   alternating FULL-BLEED sections (Task 16b records which). */
+/* Section-ground rhythm: #0a0a1a → #0c0c22 → #0a0a1a, with the mid stop
+   carrying a 3% wash of the section accent (Addendum I2). Three percent is
+   deliberately at the edge of perception: the zone rhythm is meant to be felt
+   scrolling past, not read. */
 .ground-zone {
-	background: linear-gradient(180deg, #0a0a1a 0%, #0c0c22 50%, #0a0a1a 100%);
-}
-
-/* THE HERO PRINT — pure-CSS print-head sweep, present in initial HTML (no
-   hydration dependency, no flash-reprint). The element's DEFAULT state is the
-   finished print; mask + animation exist only inside no-preference, so
-   reduced-motion users get the printed receipt instantly. */
-@media (prefers-reduced-motion: no-preference) {
-	.print-sweep {
-		-webkit-mask-image: linear-gradient(to bottom, #000 0 55%, transparent 72%);
-		mask-image: linear-gradient(to bottom, #000 0 55%, transparent 72%);
-		-webkit-mask-size: 100% 300%;
-		mask-size: 100% 300%;
-		animation: print-sweep 1.4s cubic-bezier(0.65, 0, 0.35, 1) 0.15s both;
-	}
-}
-@keyframes print-sweep {
-	from {
-		-webkit-mask-position: 0 100%;
-		mask-position: 0 100%;
-	}
-	to {
-		-webkit-mask-position: 0 0;
-		mask-position: 0 0;
-	}
+	background:
+		linear-gradient(
+			180deg,
+			transparent 0%,
+			color-mix(in srgb, var(--section-accent, transparent) 3%, transparent) 50%,
+			transparent 100%
+		),
+		linear-gradient(180deg, #0a0a1a 0%, #0c0c22 50%, #0a0a1a 100%);
 }
 
 /* Stamp slam — CSS voice of the motion-v12 spring in stamp.tsx. Fires once;
@@ -579,7 +683,7 @@ html {
 }
 .docket-hairline {
 	position: absolute;
-	background: rgba(52, 211, 153, 0.08);
+	background: color-mix(in srgb, var(--section-accent, var(--color-ut)) 12%, transparent);
 	pointer-events: none;
 }
 .docket-hairline-h {
@@ -696,31 +800,60 @@ html {
 .die-label-out {
 	fill: rgba(52, 211, 153, 0.85);
 }
+/* THE ENGRAVED MARK (Addendum K2). Three stacked copies do the work a
+   drop-shadow filter would: a dark copy offset down-right and a light copy
+   offset up-left read as the two walls of a cut channel, and the fill sits at
+   the bottom of it. Drawn rather than filtered because this element animates
+   continuously and a filter re-rasterises the whole surface per frame. */
 .die-mark {
 	font-family: var(--font-display);
 	font-size: 72px;
 	font-weight: 700;
-	fill: #34d399;
+	fill: #1e6b56;
 }
-.die-body {
-	fill: #0e0e22;
-	stroke: rgba(52, 211, 153, 0.55);
+.die-mark-shadow {
+	font-family: var(--font-display);
+	font-size: 72px;
+	font-weight: 700;
+	fill: rgba(0, 0, 0, 0.75);
+}
+.die-mark-light {
+	font-family: var(--font-display);
+	font-size: 72px;
+	font-weight: 700;
+	fill: rgba(160, 255, 214, 0.28);
+}
+/* Milled edges: one catch light on the top-left shoulder, one shadow on the
+   bottom-right, plus a faint full-perimeter containment stroke. */
+.die-edge {
+	stroke: rgba(52, 211, 153, 0.4);
 	stroke-width: 1.5px;
 }
-.die-body-inner {
-	fill: none;
-	stroke: rgba(52, 211, 153, 0.2);
+.die-edge-light {
+	stroke: rgba(190, 255, 226, 0.5);
+	stroke-width: 2px;
+	stroke-linecap: round;
+}
+.die-edge-dark {
+	stroke: rgba(0, 0, 0, 0.55);
+	stroke-width: 2px;
+	stroke-linecap: round;
+}
+.die-face-edge {
+	stroke: rgba(52, 211, 153, 0.18);
 	stroke-width: 1px;
 }
-/* Soft emerald glow — three stacked rounded rects, opacity only, no filter. */
+/* The board under the die — a dot lattice, deliberately at the threshold of
+   perception so it reads as substrate texture, never as content. */
+.die-substrate-dot {
+	fill: rgba(52, 211, 153, 0.06);
+}
+/* Soft emerald glow — stacked rounded rects, opacity only, no filter. */
 .die-glow-outer {
 	fill: rgba(52, 211, 153, 0.04);
 }
-.die-glow-mid {
-	fill: rgba(52, 211, 153, 0.07);
-}
 .die-glow-inner {
-	fill: rgba(52, 211, 153, 0.1);
+	fill: rgba(52, 211, 153, 0.08);
 }
 .die-pin {
 	stroke: rgba(52, 211, 153, 0.25);
@@ -728,6 +861,14 @@ html {
 }
 .die-pad {
 	fill: rgba(52, 211, 153, 0.6);
+}
+.die-pad-small {
+	fill: rgba(52, 211, 153, 0.35);
+}
+.die-trace-fine {
+	fill: none;
+	stroke: rgba(52, 211, 153, 0.1);
+	stroke-width: 1px;
 }
 .die-trace-base {
 	fill: none;
@@ -762,13 +903,34 @@ html {
 .die-delay-c {
 	animation-delay: -1500ms;
 }
+/* SPECULAR SHEEN (Addendum K2) — the die's second ambient loop. A wide
+   gradient band crosses the clipped face on an 8s period. Transform-only: the
+   band is a static fill and only its translate changes, so the whole sweep
+   composites and never repaints. Same C4 ambient exception as the pulses, same
+   IO gate. */
+@keyframes die-sheen {
+	from {
+		transform: translateX(0);
+	}
+	to {
+		transform: translateX(700px);
+	}
+}
+.die-sheen {
+	animation: die-sheen 8s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+	animation-play-state: paused;
+	will-change: transform;
+}
 /* IO gate: the wrapper toggles data-active based on IntersectionObserver;
-   when true, animation-play-state runs the infinite loop; when false, paused. */
+   when true, animation-play-state runs the infinite loops; when false, paused. */
 .die-figure[data-active="true"] .die-trace-pulse,
-.die-figure[data-active="true"] .die-trace-pulse-bright {
+.die-figure[data-active="true"] .die-trace-pulse-bright,
+.die-figure[data-active="true"] .die-sheen {
 	animation-play-state: running;
 }
-/* Reduced motion: static glowing state — solid emerald traces, no movement. */
+/* Reduced motion: static glowing state — solid emerald traces, no movement,
+   and the sheen parked off the face rather than frozen mid-sweep (a stalled
+   highlight reads as a rendering fault, not as a finished state). */
 @media (prefers-reduced-motion: reduce) {
 	.die-trace-pulse {
 		animation: none;
@@ -776,6 +938,10 @@ html {
 		opacity: 0.4;
 	}
 	.die-trace-pulse-bright {
+		display: none;
+	}
+	.die-sheen {
+		animation: none;
 		display: none;
 	}
 }

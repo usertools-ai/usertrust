@@ -12,12 +12,3 @@ export function usdFromUsertokens(n: number): string {
 	const usd = n / UT_PER_USD;
 	return usd >= 1 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(4)}`;
 }
-
-export function truncateHash(hash: string): string {
-	if (hash.length <= 20) return hash;
-	return `${hash.slice(0, 10)}…${hash.slice(-6)}`;
-}
-
-export function formatTimestamp(iso: string): string {
-	return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
-}

@@ -4,9 +4,13 @@ import InView from "../in-view";
 
 const facts = (factsJson as EvidenceFacts).facts;
 
-// Digit-bearing crypto spec strings stay in module scope, NOT in JSX text:
-// check-facts scans marketing-section JSX text nodes for digit literals, and
-// these are cryptographic constants, not product metrics with facts entries.
+// Digit-bearing crypto spec strings stay in module scope, NOT in JSX text.
+// The gate is a LINE scan, not a JSX-text scan — it reads every line of every
+// sections/*.tsx, comments included, and exempts only recognised structural
+// spans (attribute assignments, CSS values, utility classes, fixture
+// expressions). A bare "SHA-256" in JSX text has none of those around it, so
+// the string lives here where the scan has nothing to trip on. These are
+// cryptographic constants, not product metrics with facts entries.
 const HASH_SPEC = "SHA-256 · RFC 6962";
 const SIG_SPEC = "Ed25519";
 
@@ -81,7 +85,11 @@ const tiles: Tile[] = [
  */
 export default function Docket() {
 	return (
-		<section id="docket" className="ground-zone relative w-full safe-x py-24 sm:py-32">
+		<section
+			id="docket"
+			data-theme="gold"
+			className="section-anchor ground-zone relative w-full safe-x py-24 sm:py-32"
+		>
 			<div className="mx-auto max-w-6xl">
 				<p className="section-eyebrow">the docket</p>
 				<h2 className="mt-3 font-display font-bold lowercase leading-[0.95] text-white text-[clamp(2.5rem,6vw,4.5rem)]">

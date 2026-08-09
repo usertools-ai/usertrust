@@ -27,7 +27,11 @@ const transcript = verifyTranscriptJson as unknown as VerifyTranscript;
 export default function ExhibitE() {
 	const deps = facts.facts.verifierRuntimeDeps;
 	return (
-		<section id="exhibit-e" className="ground-zone safe-x relative py-24 sm:py-32">
+		<section
+			id="exhibit-e"
+			data-theme="gold"
+			className="section-anchor ground-zone safe-x relative py-24 sm:py-32"
+		>
 			<div className="mx-auto max-w-6xl">
 				<p className="section-eyebrow">exhibit e</p>
 				<div className="mt-3 flex items-center gap-1.5">

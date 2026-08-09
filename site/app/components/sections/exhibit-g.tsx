@@ -3,7 +3,7 @@ import CopyChip from "../copy-chip";
 import InView from "../in-view";
 import StageTag from "../stage-tag";
 import TerminalFrame from "../terminal-frame";
-import { ROW_STAGGER_MS } from "./lib/exhibit-g-corpus";
+import { ROW_STAGGER_MS, rowIndexLabel, titleCarriesSpecNumber } from "./lib/exhibit-g-corpus";
 
 /**
  * Exhibit G — the attack corpus (the redesign's adversarial-coverage addendum).
@@ -37,6 +37,11 @@ interface AttackRow {
 
 const corpus = attackCorpusJson as { attacks: AttackRow[] };
 
+/* Whether any title still opens with its own spec-row number — which decides
+   whether the table needs the "indexed by row" footnote at all. Derived, so
+   the footnote disappears on its own if the corpus titles ever change. */
+const TITLES_CARRY_SPEC_NUMBERS = corpus.attacks.some((a) => titleCarriesSpecNumber(a.name));
+
 const CORPUS_TEST_URL =
 	"https://github.com/usertools-ai/usertrust/blob/master/packages/core/tests/harden/anchoring/anchor-corpus.test.ts";
 
@@ -61,7 +66,11 @@ function verdictClass(verdict: string): string {
 
 export default function ExhibitG() {
 	return (
-		<section id="exhibit-g" className="ground-zone safe-x relative py-24 sm:py-32">
+		<section
+			id="exhibit-g"
+			data-theme="purple"
+			className="section-anchor ground-zone safe-x relative py-24 sm:py-32"
+		>
 			<div className="mx-auto max-w-6xl">
 				<p className="section-eyebrow">exhibit g</p>
 				<div className="mt-3 flex items-center gap-1.5">
@@ -71,13 +80,23 @@ export default function ExhibitG() {
 					every way we know to forge a ledger.
 				</h2>
 				<p className="font-display mt-2 lowercase leading-none text-white/50 text-[clamp(1.5rem,3.5vw,2.75rem)]">
-					verified to fail, every one.
+					every forgery fails. every legitimate operation verifies.
 				</p>
 				{/* the count numeral derives from the fixture — the headline word
 			    carries no digit (check-facts stays clean by construction) */}
 				<p className="mt-4 font-mono text-xs text-white/70">
 					<span className="text-2xl leading-none text-white/90">{corpus.attacks.length}</span>{" "}
 					scenarios · every verdict below is the string the verifier really returns
+				</p>
+				{/* The legend the subhead now requires. Not every row is an attack: the
+				    corpus includes CONTROL cases — a benign duplicate, a clean rotation,
+				    the happy paths — whose correct answer is ANCHORED_VERIFIED. Without
+				    this line an emerald row sitting under "every forgery fails" reads as
+				    a forgery that got through. */}
+				<p className="mt-2 font-mono text-[12px] leading-5 text-white/70">
+					<span className="text-ut">emerald</span> rows are control cases — legitimate operations
+					that must verify. <span className="text-danger-ink">red</span> rows are forgeries the
+					verifier must refuse.
 				</p>
 
 				{/* terminal-styled corpus table — every row links to the real test file */}
@@ -116,8 +135,11 @@ export default function ExhibitG() {
 										// of perception. Paired with a text lift so the row
 										// answers the pointer the way every other interactive
 										// row on the page does.
-										className="focus-ring group flex items-baseline justify-between gap-6 rounded-sm px-2 py-1.5 transition-colors hover:bg-white/[0.06]"
+										className="focus-ring group flex items-baseline gap-4 rounded-sm px-2 py-1.5 transition-colors hover:bg-white/[0.06]"
 									>
+										<span aria-hidden="true" className="shrink-0 tabular-nums text-white/50">
+											{rowIndexLabel(i, corpus.attacks.length)}
+										</span>
 										<span className="min-w-0 flex-1 whitespace-nowrap text-white/85 transition-colors group-hover:text-white sm:truncate sm:whitespace-normal">
 											{attack.name}
 										</span>
@@ -132,6 +154,11 @@ export default function ExhibitG() {
 						</ol>
 					</InView>
 				</TerminalFrame>
+				{TITLES_CARRY_SPEC_NUMBERS && (
+					<p className="mt-3 font-mono text-[12px] leading-5 text-white/70">
+						indexed by row; source test titles preserved verbatim.
+					</p>
+				)}
 
 				{/* reproduction block — the corpus is one command sequence away */}
 				<div className="mt-8 max-w-2xl">

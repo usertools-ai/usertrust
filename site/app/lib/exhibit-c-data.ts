@@ -1,29 +1,78 @@
+import denialJson from "../evidence/denial-event.json";
+import type { DenialEvidence } from "../evidence/types";
+
 /**
- * Exhibit C's denial artifact — the REAL error usertrust throws when a hold
- * would overshoot the budget.
+ * Exhibit C's denial evidence — BOTH halves, both captured, neither typed by
+ * hand.
  *
- * Why a thrown error and not an audit event: a policy denial writes NOTHING to
- * the audit chain today. Verified empirically against this worktree — a
- * dry-run client with a 50,000-ut budget, one baseline call, then one
- * deliberately overshooting call: `PolicyDeniedError` is thrown and
- * `.usertrust/audit/events.jsonl` stays at exactly one entry. The deny gate
- * (packages/core/src/govern.ts) throws out of a `finally`-only try, never
- * entering the `catch` that emits `llm_call_failed`. So the honest artifact of
- * a denial is the throw itself: the request throws, the ledger never moves.
- * (Product gap filed separately, 2026-08-07 — not fixed here.)
+ * The history matters, because the page used to say the opposite. A denial
+ * wrote nothing to the audit chain: the deny gate threw out of a finally-only
+ * try, never entering the catch that emits `llm_call_failed`. That was verified
+ * empirically (two calls in, one event out) and the page said only what was
+ * true — "the request throws, the ledger never moves" — while the gap was filed
+ * as a product defect.
  *
- * This module lives OUTSIDE app/components/sections/ on purpose: the
- * check-facts prebuild gate scans sections/*.tsx for digit literals, and the
- * captured message carries digits (`1000 tokens`) that are the SDK's words,
- * not marketing copy. Sections import the string from here; they never retype
- * it.
+ * #87 closed it. A denial now appends a real `policy_denied` (or
+ * `ledger_rejected`) chain event before the error is rethrown, carrying the
+ * denial class, the rules that fired, a HASH of the prompt (never the prompt),
+ * and the transferId of the hold that never opened. So the honest artifact of a
+ * denial is no longer just the throw — it is the throw AND its chain event, and
+ * this module exposes both from the same capture run as every other fixture.
  *
- * Re-capture (do not hand-edit — reproduce and paste):
- *   const c = await trust(fakeAnthropic(), { budget: 50_000, vaultBase: tmp, dryRun: true });
- *   await c.messages.create({ model: "claude-sonnet-4-6", max_tokens: 4_000_000,
- *     messages: [{ role: "user", content: "runaway retry — this call must be denied" }] });
- *   // catch (err) → err.name, err.message
+ * The fixture is imported here, OUTSIDE app/components/sections/, for the same
+ * reason it always was: the captured message carries digits that are the SDK's
+ * words, not marketing copy, and the check-facts prebuild gate scans sections
+ * line by line. Sections read these exports; they never retype them.
+ *
+ * Re-capture: `npm run evidence:capture` at the repo root. Never hand-edit.
  */
+
+const denial = denialJson as DenialEvidence;
+
+/** The error the caller receives, verbatim. */
+export const THROWN_DENIAL: ThrownDenial = {
+	name: denial.error.name,
+	message: denial.error.message,
+	capturedFrom: denial.reproduce,
+	capturedWith: `usertrust ${denial.provenance.usertrustVersion} @ ${denial.provenance.commit}`,
+};
+
+/** The chain event that denial wrote — the record it now leaves behind. */
+export const DENIAL_EVENT = denial.event;
+
+/** Provenance of the capture both halves came from. */
+export const DENIAL_PROVENANCE = denial.provenance;
+
+/**
+ * The denial's chain event reduced to the rows the page shows. Built here so
+ * Exhibit C renders labels and values, never digit-bearing literals.
+ */
+export function denialEventRows(): Array<{ label: string; value: string }> {
+	const d = denial.event.data;
+	const rows: Array<{ label: string; value: string }> = [
+		{ label: "kind", value: denial.event.kind },
+		{ label: "decision", value: d.decision },
+		{ label: "denialClass", value: d.denialClass },
+	];
+	if (d.policyRules?.[0])
+		rows.push({ label: "rule", value: d.policyRules[0].id ?? d.policyRules[0].name });
+	if (d.model) rows.push({ label: "model", value: d.model });
+	if (d.budget) {
+		rows.push({
+			label: "estimatedCost",
+			value: `${d.budget.estimatedCost.toLocaleString("en-US")} ut`,
+		});
+		rows.push({
+			label: "budgetRemaining",
+			value: `${d.budget.budgetRemaining.toLocaleString("en-US")} ut`,
+		});
+	}
+	if (d.promptHash) rows.push({ label: "promptHash", value: d.promptHash });
+	if (d.transferId) rows.push({ label: "transferId", value: d.transferId });
+	rows.push({ label: "hash", value: denial.event.hash });
+	rows.push({ label: "previousHash", value: denial.event.previousHash });
+	return rows;
+}
 
 export interface ThrownDenial {
 	/** Error class name, exactly as the runtime reports it. */
@@ -35,15 +84,6 @@ export interface ThrownDenial {
 	/** The build it was reproduced against. */
 	capturedWith: string;
 }
-
-export const THROWN_DENIAL: ThrownDenial = {
-	name: "PolicyDeniedError",
-	message:
-		"Policy denied: [block-budget-overshoot] Deny pre-spend when estimated cost would drive remaining budget below zero; [WARN] [warn-high-cost] Emit a warning when estimated cost exceeds 1000 tokens\n\n  Hint: A budget rule denied this call: increase the budget in trust() options or reduce the call's max_tokens, and review your budget_remaining / budget_remaining_after tiers.\n  Docs: https://usertrust.ai/docs/errors/policy-denied",
-	capturedFrom:
-		"dry-run client, budget 50,000 ut (DEFAULT_BUDGET); one baseline call, then one call with max_tokens 4,000,000",
-	capturedWith: "usertrust 3.1.0 @ 9de06a5",
-};
 
 /** Exactly what a terminal prints for the uncaught throw. */
 export function denialThrowText(): string {

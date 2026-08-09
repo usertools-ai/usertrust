@@ -37,11 +37,25 @@ const khand = localFont({
 	display: "swap",
 });
 
+/*
+ * "tamper-evident", not "immutable". The audit chain DETECTS mutation; it does
+ * not prevent it, and the small print in Exhibit D has said so since it
+ * shipped ("tamper-evident, not tamper-proof — detection, not recovery"). A
+ * meta description promising immutability contradicted the page's own most
+ * careful sentence, in the one string search engines quote back.
+ */
 const description =
-	"financial governance for AI agents. every governed LLM call becomes an immutable ledger transaction — with a receipt anyone can verify.";
+	"financial governance for AI agents. every governed LLM call becomes a tamper-evident ledger transaction — with a receipt anyone can verify.";
 
 export const metadata: Metadata = {
-	title: "usertrust — keep the receipts.",
+	/*
+	 * The TAB says just the brand; the SHARE CARDS keep the tagline. A browser
+	 * tab is a few characters wide and truncates from the right, so the tagline
+	 * was the only part a reader with a dozen tabs open ever saw. og:title and
+	 * twitter:title below are unchanged — a share card has room, and that is
+	 * where the brand line earns its keep.
+	 */
+	title: "usertrust",
 	description,
 	keywords: [
 		"AI governance",

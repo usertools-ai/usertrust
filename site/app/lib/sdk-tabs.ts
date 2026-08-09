@@ -104,17 +104,23 @@ export const PROVIDER_TABS: ProviderTab[] = [
  * the facts-traceability scan in the first place, and living here keeps the
  * section file free of digit literals the gate would otherwise flag.
  */
-export function nextProvider(ids: ProviderId[], current: ProviderId): ProviderId {
+/*
+ * Generic over the id type, not pinned to ProviderId: Exhibit A's receipt
+ * switcher is the same roving-tabs pattern over MODEL ids, and two tab strips
+ * on one page that disagree about what an arrow key does is worse than either
+ * behaviour. One implementation, two callers.
+ */
+export function nextProvider<T extends string>(ids: T[], current: T): T {
 	const i = ids.indexOf(current);
 	return ids[(i + 1) % ids.length];
 }
 
-export function prevProvider(ids: ProviderId[], current: ProviderId): ProviderId {
+export function prevProvider<T extends string>(ids: T[], current: T): T {
 	const i = ids.indexOf(current);
 	return ids[(i - 1 + ids.length) % ids.length];
 }
 
-export function lastProvider(ids: ProviderId[]): ProviderId {
+export function lastProvider<T extends string>(ids: T[]): T {
 	return ids[ids.length - 1];
 }
 

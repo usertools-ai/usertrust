@@ -90,10 +90,19 @@ export function receiptJsonLines(receipt: CapturedReceipt["receipt"]): JsonLine[
 	return jsonLines(receipt as unknown as JsonObject);
 }
 
-/** seq of the chain entry the receipt's auditHash lands on (fallback: newest). */
-export function chainSeqFor(slice: ChainSlice, auditHash: string): number {
-	const hit = slice.entries.find((e) => e.hash === auditHash);
-	return (hit ?? slice.entries[slice.entries.length - 1]).seq;
+/**
+ * seq of the chain entry the receipt's auditHash lands on — or `null`.
+ *
+ * NO FALLBACK. This used to answer "the newest entry" on a miss, which is how
+ * Exhibit A came to annotate a cross-vault receipt with "link 9 of the chain":
+ * a sequence number that was real, and about a different record. A miss is
+ * ABSENCE, and the caller renders absence rather than a plausible number.
+ * (The capture script now settles the featured receipts into the same vault the
+ * slice is read from and asserts the match, so the null branch is the belt to
+ * that braces — it must never come back as a guess.)
+ */
+export function chainSeqFor(slice: ChainSlice, auditHash: string): number | null {
+	return slice.entries.find((e) => e.hash === auditHash)?.seq ?? null;
 }
 
 /**

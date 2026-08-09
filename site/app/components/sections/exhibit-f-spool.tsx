@@ -12,6 +12,7 @@ import {
 	POLICY_LINES,
 	type PolicyLine,
 	type PolicyOp,
+	RAIL_CHAINED,
 	RAIL_REASON,
 	RAIL_THROWN,
 	SPOOL_IO_THRESHOLD,
@@ -31,11 +32,12 @@ function opsInLine(line: PolicyLine): PolicyOp[] {
  * plays once on IO. Highlights use `tim` (steel-on-dark equivalent per the
  * shared contract).
  *
- * RULING: denials write NO audit event today. There is deliberately no
- * "audit chain" label and no chain-entry card here — the card that appears
- * when the violating chit ejects is the real thrown error (RAIL_THROWN /
- * PolicyDeniedError), never a logged event. Never rename this back to imply
- * the denial produced an audit-chain entry.
+ * The card that appears when the violating chit ejects carries BOTH halves of
+ * a denial's evidence: the thrown PolicyDeniedError the caller receives, and
+ * the policy_denied chain event the governor writes before rethrowing it. The
+ * earlier ruling here said denials wrote no audit event at all, and that was
+ * true when it was written — the denial-events change made it false, and
+ * Exhibit C renders the real captured event in full.
  *
  * The policy editor (left) is TerminalFrame with title="policy.yaml" — a
  * clean fit for the shared {title, children} shape, imported directly into
@@ -43,7 +45,7 @@ function opsInLine(line: PolicyLine): PolicyOp[] {
  * server-only APIs. The compact thrown-error card (right, in the narrow
  * w-72 print-spool column) stays a small receipt-style chit matching the
  * chit stack above it, not a full TerminalFrame: its 12px type (the
- * Addendum H1 floor) and p-3 padding are scaled to the print-spool
+ * Addendum H floor) and p-3 padding are scaled to the print-spool
  * illustration, not the page's code-surface body copy, and forcing the
  * 14px contract onto it would overpower that narrow column.
  */
@@ -219,7 +221,7 @@ export default function ExhibitFSpool() {
 					{/* the denial's evidence — a thrown error, NOT a chain entry */}
 					<div className="mt-6 border-t border-dashed border-brand-border pt-3">
 						<p className="font-mono text-[12px] uppercase tracking-widest text-white/70">
-							thrown, not chained
+							thrown AND chained
 						</p>
 						{railVisible ? (
 							<div
@@ -234,6 +236,7 @@ export default function ExhibitFSpool() {
 								    strike-through rather than as a stamp. */}
 								<Stamp word="BLOCKED" className="absolute -right-3 -top-6 z-10" />
 								<p className="pr-24 font-mono text-[12px] text-white/80">{RAIL_THROWN}</p>
+								<p className="mt-1 font-mono text-[12px] text-ut/90">{RAIL_CHAINED}</p>
 								<p className="mt-1 font-mono text-[12px] text-white/70">{RAIL_REASON}</p>
 							</div>
 						) : (
@@ -242,7 +245,7 @@ export default function ExhibitFSpool() {
 							   two wrapped RAIL_THROWN lines and three wrapped RAIL_REASON
 							   lines), so the shorter placeholder shifted the column ~24px
 							   on arrival — the exact shift it exists to prevent. */
-							<div className="mt-2 h-32" aria-hidden="true" />
+							<div className="mt-2 h-40" aria-hidden="true" />
 						)}
 					</div>
 				</div>

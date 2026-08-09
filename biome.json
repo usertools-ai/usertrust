@@ -34,12 +34,7 @@
 			}
 		},
 		{
-			"includes": [
-				"**/site/app/components/typewriter-code.tsx",
-				"**/site/app/components/before-after.tsx",
-				"**/site/app/components/governance-receipt.tsx",
-				"**/site/app/components/sections/exhibit-f-spool.tsx"
-			],
+			"includes": ["**/site/app/components/sections/exhibit-f-spool.tsx"],
 			"linter": {
 				"rules": {
 					"suspicious": {
@@ -59,7 +54,10 @@
 			}
 		},
 		{
-			"includes": ["**/site/app/components/sections/exhibit-b-tabs.tsx"],
+			"includes": [
+				"**/site/app/components/sections/exhibit-b-tabs.tsx",
+				"**/site/app/components/sections/exhibit-a-receipts.tsx"
+			],
 			"linter": {
 				"rules": {
 					"a11y": {

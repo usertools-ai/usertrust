@@ -1,9 +1,22 @@
 import chain from "../../evidence/chain-slice.json";
 import facts from "../../evidence/facts.json";
-import { barcodeBars, chainHeadPrefix } from "../../lib/barcode";
+import { barcodeBars, chainHeadHash, chainHeadPrefix, isoDate } from "../../lib/barcode";
 import CopyChip from "../copy-chip";
 import ReceiptPaper from "../receipt/receipt-paper";
 import TearOff from "./tear-off";
+
+/*
+ * Waitlist capture for the one tier that does not ship yet. Built with
+ * encodeURIComponent rather than a pre-escaped literal: percent-escapes in a
+ * hand-written mailto are digit tokens to the line-based check-facts scan, and
+ * the old literal only ever passed because its escape happened to match a
+ * sanctioned token in the models fact. Growing the pricing table changed that
+ * fact and the line started failing — a gate passing by coincidence is a gate
+ * that fails on an unrelated change, which is precisely what happened.
+ */
+const WAITLIST_HREF = `mailto:hello@usertools.ai?subject=${encodeURIComponent(
+	"usertrust managed proxy access",
+)}`;
 
 const FOOTER_LINKS: { label: string; href: string; external: boolean }[] = [
 	{ label: "Docs", href: "/docs", external: false },
@@ -35,13 +48,17 @@ function DottedLeader({ label, value }: { label: string; value: string }) {
  */
 export default function OpenLedger() {
 	const f = facts.facts;
-	const head = chain.entries[chain.entries.length - 1].hash;
+	const head = chainHeadHash(chain.entries);
 	const prefix = chainHeadPrefix(head);
 	const { bars, total } = barcodeBars(prefix);
-	const provenance = `captured v${facts.usertrustVersion} · ${facts.generatedAt.slice(0, 10)}`;
+	const provenance = `captured v${facts.usertrustVersion} · ${isoDate(facts.generatedAt)}`;
 
 	return (
-		<section id="open-ledger" className="relative pt-24 sm:pt-32 safe-x">
+		<section
+			id="open-ledger"
+			data-theme="emerald"
+			className="section-anchor relative pt-24 sm:pt-32 safe-x"
+		>
 			<div className="mx-auto max-w-xl">
 				<h2 className="font-display lowercase text-4xl sm:text-6xl leading-none mb-10">
 					open your ledger.
@@ -127,7 +144,7 @@ export default function OpenLedger() {
 							managed proxy
 						</p>
 						<a
-							href="mailto:cam@camwhiteus.com?subject=usertrust%20managed%20proxy%20access"
+							href={WAITLIST_HREF}
 							className="focus-ring mt-auto inline-flex min-h-[44px] items-center font-mono text-sm text-white/70 hover:text-ut transition-colors duration-200"
 						>
 							request access →

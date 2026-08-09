@@ -1,38 +1,89 @@
 import chainSliceJson from "@/evidence/chain-slice.json";
 import factsJson from "@/evidence/facts.json";
 import receiptLedgerJson from "@/evidence/receipt-ledger.json";
-import type { CapturedReceipt, ChainSlice, EvidenceFacts } from "@/evidence/types";
-import { chainSeqFor, receiptJsonLines, tokenClass } from "../../lib/receipt-json";
+import type { ChainSlice, EvidenceFacts, LedgerCaptures } from "@/evidence/types";
+import { chainSeqFor, receiptJsonLines } from "../../lib/receipt-json";
 import { usdFromUsertokens } from "../receipt/format";
 import StageTag from "../stage-tag";
-import TerminalFrame from "../terminal-frame";
-import ExhibitAAnnotations, { type Annotation } from "./exhibit-a-annotations";
+import ExhibitAReceipts, { type ReceiptPanel } from "./exhibit-a-receipts";
+import { LAB_VIEWBOX, labFor } from "./lib/receipt-labs";
 
 const facts = factsJson as EvidenceFacts;
 const chainSlice = chainSliceJson as ChainSlice;
-const receiptLedger = receiptLedgerJson as CapturedReceipt;
+const ledger = receiptLedgerJson as LedgerCaptures;
 
 const ut = facts.facts.usertokensPerFiveDollars.value;
-const chainSeq = chainSeqFor(chainSlice, receiptLedger.receipt.auditHash);
-
-const ANNOTATIONS: Annotation[] = [
-	{ field: "transferId", text: "a TigerBeetle transfer — this one" },
-	{ field: "cost", text: `usertokens: ${ut.toLocaleString("en-US")} = ${usdFromUsertokens(ut)}` },
-	{ field: "auditHash", text: `link ${chainSeq} of the chain` },
-	{ field: "settled", text: "two-phase state: held, then settled" },
-];
-
-const receiptLines = receiptJsonLines(receiptLedger.receipt);
-
-const prov = receiptLedger.provenance;
+const prov = ledger.provenance;
 // "T"-split keeps the date prefix without a digit-literal slice length (facts gate).
 const provenanceLine = `captured v${prov.usertrustVersion} · TigerBeetle ${
 	prov.tigerbeetleVersion ?? "—"
 } · ${prov.mode} · ${prov.commit} · ${prov.capturedAt.split("T")[0]}`;
 
+/**
+ * One panel per captured model — built on the SERVER from the fixture, so the
+ * client island ships data, not a fixture parser.
+ *
+ * Every annotation is derived, never authored at a value:
+ *  - the estimate comes from `capture.estimatedCost`, the wrapper sidecar, and
+ *    is described as what it is (a pre-call input to the hold) rather than
+ *    smuggled into the receipt as a `cost.estimated` field;
+ *  - "link N" comes from matching this receipt's auditHash against the
+ *    published slice, and renders as ABSENCE when there is no match — the
+ *    capture asserts there always is, and a plausible fallback number is
+ *    exactly the defect that made the old annotation dishonest;
+ *  - budgetRemaining is worded as an observation, per the honesty constraint in
+ *    Addendum D. It is a reading taken after this call settled, not a promise
+ *    about the next one.
+ */
+const PANELS: ReceiptPanel[] = ledger.captures.map(({ receipt, capture }) => {
+	const seq = chainSeqFor(chainSlice, receipt.auditHash);
+	const lab = labFor(receipt.model);
+	return {
+		id: receipt.model,
+		label: lab.label,
+		lab: lab.lab,
+		mark: lab.mark,
+		markViewBox: LAB_VIEWBOX,
+		model: receipt.model,
+		// The sample matches the client this receipt was actually captured
+		// through. Kimi rides the OpenAI-compatible surface, which is exactly
+		// why its receipt below reads provider: "openai".
+		ctor: capture.clientShape === "anthropic" ? "Anthropic" : "OpenAI",
+		surface:
+			capture.clientShape === "anthropic"
+				? "client.messages.create"
+				: "client.chat.completions.create",
+		settled: receipt.settled,
+		lines: receiptJsonLines(receipt),
+		annotations: [
+			{ field: "transferId", text: "a TigerBeetle transfer — this one" },
+			{
+				field: "cost",
+				text: `what it settled at · estimated ${capture.estimatedCost} before the call`,
+			},
+			{
+				field: "budgetRemaining",
+				text: "read after this call settled — an observation, not a promise",
+			},
+			{
+				field: "auditHash",
+				text: seq === null ? "not in the published slice" : `link ${seq} of the chain`,
+			},
+			{
+				field: "pricing",
+				text: "the rates this cost was metered with — recompute it yourself",
+			},
+		],
+	};
+});
+
 export default function ExhibitA() {
 	return (
-		<section id="exhibit-a" className="relative py-24 sm:py-32 safe-x">
+		<section
+			id="exhibit-a"
+			data-theme="steel"
+			className="section-anchor relative py-24 sm:py-32 safe-x"
+		>
 			<div className="mx-auto max-w-6xl">
 				<p className="section-eyebrow">exhibit a</p>
 				<div className="mt-3 flex items-center gap-1.5">
@@ -41,93 +92,13 @@ export default function ExhibitA() {
 				<h2 className="mt-4 max-w-3xl font-display text-[clamp(2.5rem,6vw,4.5rem)] leading-[0.95] tracking-tight text-white">
 					every governed call returns evidence.
 				</h2>
+				<p className="mt-6 max-w-2xl text-base leading-relaxed text-white/70">
+					three frontier models, three real receipts, one ledger. every field below is the object
+					the SDK handed back — {facts.facts.usertokensPerFiveDollars.value.toLocaleString("en-US")}{" "}
+					usertokens = {usdFromUsertokens(ut)}.
+				</p>
 
-				{/* The base track pins its own minimum instead of taking the
-				    implicit default: a grid track's default minimum is min-content,
-				    and the receipt <pre>'s min-content is wider than a phone. Below
-				    lg that blew the single column out past the viewport, and because
-				    body is overflow-x-hidden the clipped right half of both frames
-				    was unreachable rather than scrollable. With the minimum pinned,
-				    wide content scrolls inside TerminalFrame's own overflow-x-auto,
-				    where it belongs. */}
-				<div className="mt-14 grid grid-cols-[minmax(0,1fr)] gap-12 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-16">
-					{/* The call — static mono, emerald keyword accents. TerminalFrame's
-					    shared chrome, no title; pre/code semantics preserved inside. */}
-					<TerminalFrame className="min-w-0 self-start text-white/80">
-						<pre data-code-sample>
-							<code>
-								<span className="text-ut">import</span> {"{ trust }"}{" "}
-								<span className="text-ut">from</span>{" "}
-								<span className="text-white/80">"usertrust"</span>;{"\n\n"}
-								<span className="text-ut">const</span> client ={" "}
-								<span className="text-ut">await</span> trust(
-								<span className="text-ut">new</span> Anthropic());{"\n\n"}
-								<span className="text-ut">const</span> {"{ response, "}
-								<span className="text-ut">receipt</span>
-								{" }"} ={"\n  "}
-								<span className="text-ut">await</span> client.messages.create({"{"}
-								{"\n"}
-								{"  model: "}
-								<span className="text-white/80">"{receiptLedger.receipt.model}"</span>,{"\n"}
-								<span data-code-sample>{"  max_tokens: 1024,"}</span>
-								{"\n"}
-								{"  messages: [...],"}
-								{"\n"}
-								{"}"});
-							</code>
-						</pre>
-					</TerminalFrame>
-
-					{/* The evidence — the SDK's actual return value, annotated. Renders
-					    through the shared TerminalFrame: the traffic-light-dots title
-					    bar is a ReactNode title, and the provenance line is the frame's
-					    footer slot (its own classes, not the frame's — see
-					    terminal-frame.tsx on why footers stay per-surface). */}
-					<ExhibitAAnnotations annotations={ANNOTATIONS}>
-						<TerminalFrame
-							className="receipt-terminal"
-							title={
-								<div className="flex items-center gap-2">
-									<span aria-hidden="true" className="h-2 w-2 rounded-full bg-white/15" />
-									<span aria-hidden="true" className="h-2 w-2 rounded-full bg-white/15" />
-									<span aria-hidden="true" className="h-2 w-2 rounded-full bg-white/15" />
-									<span className="ml-2">receipt · returned from every governed call</span>
-								</div>
-							}
-							footer={
-								<div className="border-t border-white/10 px-5 py-2.5 font-mono text-[12px] tracking-wide text-white/70">
-									{provenanceLine}
-								</div>
-							}
-						>
-							{/* The receipt JSON — line-keyed spans the island targets. */}
-							<pre>
-								<code>
-									{receiptLines.map((line) => (
-										<span
-											key={line.key}
-											data-line={line.key}
-											className="block rounded-sm px-1 py-px"
-										>
-											{"  ".repeat(line.indent)}
-											{line.tokens.map((tok) => (
-												<span
-													key={tok.key}
-													className={tokenClass(
-														tok.role,
-														line.key === "settled" && receiptLedger.receipt.settled,
-													)}
-												>
-													{tok.text}
-												</span>
-											))}
-										</span>
-									))}
-								</code>
-							</pre>
-						</TerminalFrame>
-					</ExhibitAAnnotations>
-				</div>
+				<ExhibitAReceipts panels={PANELS} provenanceLine={provenanceLine} />
 			</div>
 		</section>
 	);

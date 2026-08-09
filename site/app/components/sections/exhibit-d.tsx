@@ -5,6 +5,7 @@ import StageTag from "../stage-tag";
 import ExhibitDDom from "./exhibit-d-dom";
 import ExhibitDRibbon from "./exhibit-d-ribbon";
 import ExhibitDStatic from "./exhibit-d-static";
+import { routedTracePath, TRACE, traceVias } from "./lib/trace-style";
 
 const slice = chainSliceJson as unknown as ChainSlice;
 
@@ -25,44 +26,34 @@ const SMALL_PRINT = "tamper-evident, not tamper-proof — detection, not recover
 
 function MerkleTree({ entries }: { entries: ChainSlice["entries"] }) {
 	const geometry = computeMerkleGeometry(entries);
+	// Every edge routed in the page's one circuit grammar (Addendum K) — the
+	// bare diagonals these were are the only line-work on the page that spoke a
+	// third dialect. `lead: "v"` because a merkle edge climbs: it runs straight
+	// up out of its child, then closes the horizontal offset diagonally.
+	const edges = [...geometry.leafLines, ...geometry.midLinesLow, ...geometry.midLinesHigh].map(
+		(ln) => ({ key: ln.key, d: routedTracePath(ln.x1, ln.y1, ln.x2, ln.y2, { lead: "v" }) }),
+	);
+	// Vias mark the BRANCH points — every internal node two edges meet at.
+	const vias = traceVias([
+		...geometry.midNodesLow.map((n) => ({ x: n.x, y: geometry.midNodeCy })),
+		...geometry.midNodesHigh.map((n) => ({ x: n.x, y: geometry.midNodeHighCy })),
+	]);
 	return (
 		<svg
 			viewBox={`0 0 ${geometry.viewBoxWidth} ${geometry.viewBoxHeight}`}
 			role="img"
 			aria-label="sparse merkle tree over the captured audit entries, reducing to a single root hash"
-			className="w-full"
+			className="trace-layer w-full"
 		>
-			{geometry.leafLines.map((ln) => (
-				<line
-					key={ln.key}
-					x1={ln.x1}
-					y1={ln.y1}
-					x2={ln.x2}
-					y2={ln.y2}
-					stroke="#ffffff40"
-					strokeWidth="1"
-				/>
+			{edges.map((e) => (
+				<path key={e.key} d={e.d} className={TRACE.baseClass} strokeWidth={TRACE.baseWidth} />
 			))}
-			{geometry.midLinesLow.map((ln) => (
-				<line
-					key={ln.key}
-					x1={ln.x1}
-					y1={ln.y1}
-					x2={ln.x2}
-					y2={ln.y2}
-					stroke="#ffffff40"
-					strokeWidth="1"
-				/>
-			))}
-			{geometry.midLinesHigh.map((ln) => (
-				<line
-					key={ln.key}
-					x1={ln.x1}
-					y1={ln.y1}
-					x2={ln.x2}
-					y2={ln.y2}
-					stroke="#ffffff40"
-					strokeWidth="1"
+			{edges.map((e) => (
+				<path
+					key={`${e.key}-core`}
+					d={e.d}
+					className={TRACE.coreClass}
+					strokeWidth={TRACE.coreWidth}
 				/>
 			))}
 			{geometry.leaves.map((leaf) => (
@@ -72,6 +63,7 @@ function MerkleTree({ entries }: { entries: ChainSlice["entries"] }) {
 						y={geometry.leafRectY}
 						width={geometry.leafRectWidth}
 						height={geometry.leafRectHeight}
+						rx={2}
 						fill="#ffffff0f"
 						stroke="#ffffff33"
 					/>
@@ -87,25 +79,15 @@ function MerkleTree({ entries }: { entries: ChainSlice["entries"] }) {
 					</text>
 				</g>
 			))}
-			{geometry.midNodesLow.map((node) => (
-				<circle
-					key={node.key}
-					cx={node.x}
-					cy={geometry.midNodeCy}
-					r={geometry.nodeRadius}
-					fill="#6ca0c0cc"
-				/>
+			{vias.map((v) => (
+				<circle key={v.key} cx={v.x} cy={v.y} r={TRACE.viaRadius} className={TRACE.viaClass} />
 			))}
-			{geometry.midNodesHigh.map((node) => (
-				<circle
-					key={node.key}
-					cx={node.x}
-					cy={geometry.midNodeHighCy}
-					r={geometry.nodeRadius}
-					fill="#6ca0c0cc"
-				/>
-			))}
-			<circle cx={geometry.root.x} cy={geometry.root.y} r={geometry.root.radius} fill="#34d399" />
+			<circle
+				cx={geometry.root.x}
+				cy={geometry.root.y}
+				r={geometry.root.radius}
+				className={TRACE.padClass}
+			/>
 			<text
 				x={geometry.root.labelX}
 				y={geometry.root.labelY}
@@ -121,7 +103,11 @@ function MerkleTree({ entries }: { entries: ChainSlice["entries"] }) {
 
 export default function ExhibitD() {
 	return (
-		<section id="exhibit-d" className="safe-x relative mx-auto max-w-6xl py-24 sm:py-32">
+		<section
+			id="exhibit-d"
+			data-theme="emerald"
+			className="section-anchor safe-x relative mx-auto max-w-6xl py-24 sm:py-32"
+		>
 			<p className="section-eyebrow">exhibit d</p>
 			<div className="mt-3 flex items-center gap-1.5">
 				<StageTag stage="RECORD" />
@@ -151,7 +137,7 @@ export default function ExhibitD() {
 					    the browser's compensating size reduction, so the raised
 					    full-size line box grew the Rekor chip well past its siblings
 					    and pushed the glyph caps through the chip's top hairline at
-					    390. The 12px H1 floor is kept; only the raise is dropped. */}
+					    390px. The 12px floor (Addendum H) is kept; only the raise is dropped. */}
 					<ul className="flex flex-wrap gap-2">
 						{ANCHOR_BADGES.map((b) => (
 							<li

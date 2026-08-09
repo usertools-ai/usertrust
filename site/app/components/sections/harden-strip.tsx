@@ -31,7 +31,11 @@ export default function HardenStrip() {
 		{ label: "shared verifier lines", stat: f.verifierSharedLines },
 	];
 	return (
-		<section id="harden-doctrine" className="border-y border-white/10 bg-white/[0.02]">
+		<section
+			id="harden-doctrine"
+			data-theme="gold"
+			className="section-anchor border-y border-white/10 bg-white/[0.02]"
+		>
 			<div className="safe-x mx-auto max-w-6xl py-20 md:py-24">
 				<p className="section-eyebrow">the discipline</p>
 				<h2 className="font-display mt-4 lowercase leading-none text-white text-[clamp(2rem,5vw,4rem)]">
@@ -44,7 +48,7 @@ export default function HardenStrip() {
 					{stats.map(({ label, stat }) => (
 						/* last:col-span-2 fills the odd fifth cell across the mobile
 						   two-column row. Without it the empty half-cell exposed the
-						   dl's own bg-white/10 hairline ground as a ~170x120px light
+						   dl's own hairline ground (bg-white/10) as a ~170px x 120px light
 						   panel — a ghost tile, not a hairline. */
 						<div
 							key={label}

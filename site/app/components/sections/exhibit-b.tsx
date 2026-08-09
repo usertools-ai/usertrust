@@ -76,7 +76,11 @@ function SurfaceColumn({
 
 export default function ExhibitB() {
 	return (
-		<section id="exhibit-b" className="relative py-24 sm:py-32 safe-x">
+		<section
+			id="exhibit-b"
+			data-theme="purple"
+			className="section-anchor relative py-24 sm:py-32 safe-x"
+		>
 			<div className="mx-auto max-w-6xl">
 				<p className="section-eyebrow">exhibit b</p>
 				<h2 className="mt-4 font-display text-[clamp(2.5rem,6vw,4.5rem)] leading-[0.95] tracking-tight text-white">

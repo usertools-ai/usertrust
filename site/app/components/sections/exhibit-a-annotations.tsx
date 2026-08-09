@@ -10,6 +10,7 @@ import {
 	LEADER_GAP,
 	UNIT_DASH,
 } from "../../lib/leader-path";
+import { TRACE, traceVias } from "./lib/trace-style";
 
 export interface Annotation {
 	/** Stable line key in the terminal frame (matches the span's data-line). */
@@ -20,6 +21,9 @@ export interface Annotation {
 interface Leader {
 	field: string;
 	d: string;
+	/** Where the trace leaves the label — a via-dot marks the junction. */
+	viaX: number;
+	viaY: number;
 }
 
 export default function ExhibitAAnnotations({
@@ -52,14 +56,18 @@ export default function ExhibitAAnnotations({
 			const lr = label.getBoundingClientRect();
 			const rr = row.getBoundingClientRect();
 			if (lr.width === 0) continue; // annotation rail is display:none below md
+			const startX = lr.right - wrapRect.left + LEADER_GAP;
+			const startY = lr.top + lr.height / 2 - wrapRect.top;
 			next.push({
 				field: a.field,
 				d: buildLeaderPath(
-					lr.right - wrapRect.left + LEADER_GAP,
-					lr.top + lr.height / 2 - wrapRect.top,
+					startX,
+					startY,
 					rr.left - wrapRect.left - LEADER_GAP,
 					rr.top + rr.height / 2 - wrapRect.top,
 				),
+				viaX: startX,
+				viaY: startY,
 			});
 		}
 		setLeaders(next);
@@ -228,29 +236,60 @@ export default function ExhibitAAnnotations({
 				{children}
 			</div>
 
-			{/* Leader lines — steel data ink on dark, drawn sequentially, once. */}
+			{/* Leader lines in the page's one circuit grammar (Addendum K):
+			    orthogonal runs closed by a diagonal, filleted corners, and a
+			    via-dot where each trace leaves its label — the same language the
+			    governance die speaks, not the cubic beziers this used to draw.
+			    Two layers: a dim always-on base with a brighter core inside it.
+			    Colour is the section accent, so the grammar is shared and the
+			    palette stays local. */}
 			{size && (
 				<svg
-					className="pointer-events-none absolute inset-0 hidden h-full w-full md:block"
+					className="trace-layer pointer-events-none absolute inset-0 hidden h-full w-full md:block"
 					viewBox={`0 0 ${size.w} ${size.h}`}
 					aria-hidden="true"
 				>
-					{leaders.map((l, i) => (
-						<path
-							key={l.field}
-							d={l.d}
-							pathLength={UNIT_DASH}
-							fill="none"
-							stroke="var(--color-tim)"
-							strokeWidth={active === l.field ? 2 : 1.25}
-							className={active && active !== l.field ? "opacity-40" : "opacity-100"}
-							style={{
-								strokeDasharray: UNIT_DASH,
-								strokeDashoffset: drawn ? 0 : UNIT_DASH,
-								transition: reduced
-									? "none"
-									: `stroke-dashoffset ${DRAW_DURATION_MS}ms ease-out ${i * DRAW_STAGGER_MS}ms, stroke-width 150ms ease, opacity 150ms ease`,
-							}}
+					{leaders.map((l, i) => {
+						const dimmed = active !== null && active !== l.field;
+						const draw = {
+							strokeDasharray: UNIT_DASH,
+							strokeDashoffset: drawn ? 0 : UNIT_DASH,
+							transition: reduced
+								? "none"
+								: `stroke-dashoffset ${DRAW_DURATION_MS}ms ease-out ${i * DRAW_STAGGER_MS}ms, opacity 150ms ease`,
+						};
+						return (
+							<g key={l.field} className={dimmed ? "opacity-40" : "opacity-100"}>
+								<path
+									d={l.d}
+									pathLength={UNIT_DASH}
+									className={TRACE.baseClass}
+									strokeWidth={TRACE.baseWidth}
+									style={draw}
+								/>
+								<path
+									d={l.d}
+									pathLength={UNIT_DASH}
+									className={TRACE.coreClass}
+									strokeWidth={active === l.field ? TRACE.baseWidth : TRACE.coreWidth}
+									style={draw}
+								/>
+							</g>
+						);
+					})}
+					{traceVias(leaders.map((l) => ({ x: l.viaX, y: l.viaY }))).map((v) => (
+						<circle
+							key={v.key}
+							cx={v.x}
+							cy={v.y}
+							r={TRACE.viaRadius}
+							// Utility classes, not an inline style object: the raw
+							// opacity endpoints are bare digit literals to the
+							// check-facts scan, and Tailwind's opacity utilities say
+							// the same thing in syntax the gate already understands.
+							className={`${TRACE.viaClass} ${drawn ? "opacity-100" : "opacity-0"} ${
+								reduced ? "" : "transition-opacity duration-200"
+							}`}
 						/>
 					))}
 				</svg>

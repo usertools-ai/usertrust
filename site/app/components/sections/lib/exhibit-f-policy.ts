@@ -143,16 +143,23 @@ export const CHITS: Chit[] = [
 ];
 
 /**
- * Why chit-05 was denied — shown on the thrown-error card in the spool's
- * rail. RULING (2026-08-07): denials write NO audit event — the card is the
- * REAL thrown error, never a chain entry (spec Rev 3 / D6 correction). There
- * is deliberately no RAIL_EVENT constant: an `llm_call_failed`-style chain
- * entry is not what happens on denial, so the page must not render one.
+ * Why chit-05 was denied — shown on the denial card in the spool's rail.
+ *
+ * HISTORY, because the copy here is a claim about the product and it changed.
+ * The 2026-08-07 ruling was that denials wrote NO audit event, so this card
+ * could only ever show the thrown error and the page said exactly that. The
+ * denial-events change closed the gap: a denial now appends a real
+ * `policy_denied` chain event before the error is rethrown. So the card names
+ * BOTH outcomes, and the wording below is the shape of the record — the real
+ * one Exhibit C renders in full is the same event kind.
  */
 export const RAIL_REASON =
 	"frontier-cost-cap · estimated_cost 2400 gt 2000 · model gpt-x in [gpt-x, gpt-x-mini]";
 
 export const RAIL_THROWN = "thrown: PolicyDeniedError · the provider was never called";
+
+/** The other half: what the denial leaves behind on the chain. */
+export const RAIL_CHAINED = "chained: policy_denied · denialClass budget_gate · prompt hashed";
 
 /** Print-spool drop stagger, per chit index. See module header for why this
  * digit lives here instead of in exhibit-f-spool.tsx. */

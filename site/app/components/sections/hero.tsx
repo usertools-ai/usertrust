@@ -14,7 +14,7 @@ const facts = (factsJson as EvidenceFacts).facts;
  */
 export default function Hero() {
 	return (
-		<section className="relative isolate overflow-hidden">
+		<section data-theme="emerald" className="relative isolate overflow-hidden">
 			<HeroIntro />
 			<div className="relative z-[1] mx-auto flex min-h-[100dvh] w-full max-w-6xl items-center safe-x pt-28 pb-16 lg:pt-20">
 				{/* Single left column — the max-w cap keeps the right of frame

@@ -75,6 +75,58 @@
 			"enum": ["provider", "estimated"],
 			"description": "Whether cost came from provider-reported usage or the pre-call estimate."
 		},
+		"usage": {
+			"type": "object",
+			"description": "The four-tier DISJOINT token split this cost was metered from. Present iff usageSource is \"provider\": an estimated settle has no reported counts, and a block of zeros would invite a recompute of a cost that was never derived from counts. Disjoint means inputTokens is FRESH input only — cache reads and cache writes are separate tiers. With pricing.appliedRates this is the whole reconciliation surface: ceil(sum(counts x rates / 1000)), floored at 1, reproduces cost exactly, from the record alone.",
+			"required": ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"],
+			"properties": {
+				"inputTokens": {
+					"type": "number",
+					"minimum": 0,
+					"description": "Fresh (non-cached) prompt tokens."
+				},
+				"outputTokens": {
+					"type": "number",
+					"minimum": 0,
+					"description": "Completion tokens, including provider-billed thinking tokens."
+				},
+				"cacheReadTokens": {
+					"type": "number",
+					"minimum": 0,
+					"description": "Cache-hit prompt tokens."
+				},
+				"cacheWriteTokens": {
+					"type": "number",
+					"minimum": 0,
+					"description": "Cache-creation prompt tokens."
+				}
+			},
+			"additionalProperties": false
+		},
+		"pricing": {
+			"type": "object",
+			"description": "The rate side of the reconciliation surface: the four RESOLVED per-1k rates this cost was metered with, and the pricing-table version they came from. \"Resolved\" is load-bearing — these are the rates AFTER the cache-tier fallback, so a tier the provider does not publish appears here at the input rate rather than as 0 or as an absence. A top-level block rather than part of `meter` precisely because `meter` is closed (additionalProperties: false) and widening it would make every v1 validator reject every new receipt.",
+			"required": ["appliedRates", "tableVersion"],
+			"properties": {
+				"appliedRates": {
+					"type": "object",
+					"description": "The four resolved per-1k rates, in usertokens per 1,000 tokens.",
+					"required": ["inputPer1k", "outputPer1k", "cacheReadPer1k", "cacheWritePer1k"],
+					"properties": {
+						"inputPer1k": { "type": "number", "minimum": 0 },
+						"outputPer1k": { "type": "number", "minimum": 0 },
+						"cacheReadPer1k": { "type": "number", "minimum": 0 },
+						"cacheWritePer1k": { "type": "number", "minimum": 0 }
+					},
+					"additionalProperties": false
+				},
+				"tableVersion": {
+					"type": "string",
+					"description": "Date-stamped version of the built-in pricing table the rates came from."
+				}
+			},
+			"additionalProperties": false
+		},
 		"chunksDelivered": {
 			"type": "number",
 			"minimum": 0,

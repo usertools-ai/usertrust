@@ -36,3 +36,20 @@ export function barcodeBars(hexPrefix: string): { bars: Bar[]; total: number } {
 	}
 	return { bars, total: Math.max(0, x - 1) };
 }
+
+/**
+ * Hash of the newest entry in a chain slice — the chain HEAD.
+ *
+ * Lives here rather than inline in open-ledger.tsx for the reason every helper
+ * in app/lib does: `entries[entries.length - 1]` puts a bare `1` in a file the
+ * check-facts gate scans line by line, and index arithmetic is not a product
+ * number. Moving the expression is the fix; exempting the line is not.
+ */
+export function chainHeadHash(entries: Array<{ hash: string }>): string {
+	return entries[entries.length - 1].hash;
+}
+
+/** Date half of an ISO timestamp, without a digit-literal slice length. */
+export function isoDate(iso: string): string {
+	return iso.split("T")[0];
+}
