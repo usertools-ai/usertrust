@@ -51,7 +51,7 @@ export default function HeroIntro() {
 			<img
 				src={settled ? "/intro/intro-poster.jpg" : "/intro/intro-first.jpg"}
 				alt=""
-				className="absolute inset-0 h-full w-full object-cover md:scale-[1.2] md:translate-x-[13%] md:translate-y-[16%] 2xl:scale-[1.3]"
+				className="absolute inset-0 h-full w-full object-cover md:scale-[1.2] md:translate-x-[19%] md:translate-y-[16%] 2xl:scale-[1.3]"
 			/>
 			{mountVideo && (
 				<video
@@ -61,7 +61,7 @@ export default function HeroIntro() {
 					autoPlay
 					preload="none"
 					onEnded={() => setSettled(true)}
-					className="absolute inset-0 h-full w-full object-cover md:scale-[1.2] md:translate-x-[13%] md:translate-y-[16%] 2xl:scale-[1.3]"
+					className="absolute inset-0 h-full w-full object-cover md:scale-[1.2] md:translate-x-[19%] md:translate-y-[16%] 2xl:scale-[1.3]"
 				>
 					{INTRO_VIDEO_SOURCES.map((source) => (
 						<source key={source.type} src={source.src} type={source.type} />
