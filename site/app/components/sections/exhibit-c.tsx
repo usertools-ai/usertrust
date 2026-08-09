@@ -10,7 +10,13 @@ import TerminalFrame from "../terminal-frame";
 import CaseFile from "./case-file";
 import ExhibitCRace from "./exhibit-c-race";
 import { routedTracePath, TRACE } from "./lib/trace-style";
-import { FORK_HEIGHT, FORK_NODES, FORK_ROUTES, FORK_WIDTH } from "./lib/two-phase-fork";
+import {
+	FORK_HEIGHT,
+	FORK_NODES,
+	FORK_ROUTES,
+	FORK_WIDTH,
+	forkLabelPlacement,
+} from "./lib/two-phase-fork";
 
 const facts = factsJson as EvidenceFacts;
 const BUDGET = facts.facts.usertokensPerFiveDollars.value;
@@ -23,51 +29,60 @@ const defaults = raceDefaults(BUDGET);
  *
  * XOR is the load-bearing word, and the reason the fork has exactly two exits
  * with nothing between them and nothing after: a hold settles or it voids.
+ *
+ * The labels are HTML overlaid on the diagram, not `<text>` inside it. Inside
+ * the viewBox their size would be multiplied by the render scale and would fall
+ * to ~9px on a phone; over it, 12px mono is 12px mono at every width. The
+ * placement percentages come from the same geometry table the traces do, so
+ * nothing about the drawing moved. See forkLabelPlacement().
  */
 function TwoPhaseFork() {
 	return (
-		<svg
-			viewBox={`0 0 ${FORK_WIDTH} ${FORK_HEIGHT}`}
-			role="img"
-			aria-label="a pending hold forks into exactly two outcomes: settled, or voided"
-			className="trace-layer h-auto w-full max-w-lg"
-		>
-			{FORK_ROUTES.map((r) => (
-				<path
-					key={r.key}
-					d={routedTracePath(r.x1, r.y1, r.x2, r.y2, { lead: r.lead })}
-					className={TRACE.baseClass}
-					strokeWidth={TRACE.baseWidth}
-				/>
-			))}
-			{FORK_ROUTES.map((r) => (
-				<path
-					key={`${r.key}-core`}
-					d={routedTracePath(r.x1, r.y1, r.x2, r.y2, { lead: r.lead })}
-					className={TRACE.coreClass}
-					strokeWidth={TRACE.coreWidth}
-				/>
-			))}
-			{FORK_NODES.map((n) => (
-				<g key={n.label}>
-					<circle
-						cx={n.x}
-						cy={n.y}
-						r={n.branch ? TRACE.viaRadius : TRACE.padRadius}
-						className={n.branch ? TRACE.viaClass : TRACE.padClass}
-					/>
-					<text
-						x={n.x}
-						y={n.labelY}
-						textAnchor={n.anchor}
-						className="fork-label"
-						fontFamily="var(--font-jetbrains), monospace"
-					>
-						{n.label}
-					</text>
-				</g>
-			))}
-		</svg>
+		<div className="w-full max-w-lg py-4">
+			<div className="relative">
+				<svg
+					viewBox={`0 0 ${FORK_WIDTH} ${FORK_HEIGHT}`}
+					role="img"
+					aria-label="a pending hold forks into exactly two outcomes — settled, or voided; never both, never neither"
+					className="trace-layer block h-auto w-full"
+				>
+					{FORK_ROUTES.map((r) => (
+						<path
+							key={r.key}
+							d={routedTracePath(r.x1, r.y1, r.x2, r.y2, { lead: r.lead })}
+							className={TRACE.baseClass}
+							strokeWidth={TRACE.baseWidth}
+						/>
+					))}
+					{FORK_ROUTES.map((r) => (
+						<path
+							key={`${r.key}-core`}
+							d={routedTracePath(r.x1, r.y1, r.x2, r.y2, { lead: r.lead })}
+							className={TRACE.coreClass}
+							strokeWidth={TRACE.coreWidth}
+						/>
+					))}
+					{FORK_NODES.map((n) => (
+						<circle
+							key={n.label}
+							cx={n.x}
+							cy={n.y}
+							r={n.branch ? TRACE.viaRadius : TRACE.padRadius}
+							className={n.branch ? TRACE.viaClass : TRACE.padClass}
+						/>
+					))}
+				</svg>
+				{/* aria-hidden: the svg's own label already names every outcome, and
+				    four loose words in the reading order would only repeat it. */}
+				<div aria-hidden="true" className="pointer-events-none absolute inset-0">
+					{FORK_NODES.map((n) => (
+						<span key={n.label} className="fork-label" style={forkLabelPlacement(n)}>
+							{n.label}
+						</span>
+					))}
+				</div>
+			</div>
+		</div>
 	);
 }
 

@@ -507,14 +507,23 @@
 .trace-pad {
 	fill: var(--section-accent, var(--color-ut));
 }
-/* Labels on a trace diagram. Authored size is NOT rendered size for SVG text —
-   the fork's 520-unit viewBox renders at ~512px in its column, so 14px authored
-   lands at ~13.8px rendered and clears the 12px floor. */
+/* Labels on a trace diagram. These are HTML absolutely positioned OVER the
+   diagram, never `<text>` inside it, because authored size is not rendered size
+   inside a viewBox: 14px in the fork's 520-unit box rendered at ~13.8px in a
+   512px desktop column but at ~9.2px on a 390px phone (scale 342/520), under
+   the 12px floor that binds every glyph on the page. In CSS pixels the floor
+   holds at every viewport. The die solved the same problem by hiding its labels
+   below 48rem; the fork cannot — hold/xor/settle/void ARE the diagram.
+   Positioning comes from forkLabelPlacement() in lib/two-phase-fork.ts. */
 .fork-label {
-	font-size: 14px;
+	position: absolute;
+	font-family: var(--font-jetbrains), monospace;
+	font-size: 12px;
+	line-height: 1;
 	letter-spacing: 0.14em;
 	text-transform: uppercase;
-	fill: var(--section-accent-ink, rgba(255, 255, 255, 0.7));
+	white-space: nowrap;
+	color: var(--section-accent-ink, rgba(255, 255, 255, 0.7));
 }
 
 /* Thermal-paper surface — warm, slightly dimmed against pure white so paper
