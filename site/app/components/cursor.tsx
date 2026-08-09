@@ -13,9 +13,12 @@ import { useEffect, useState } from "react";
  * A small dot tracks the raw pointer position 1:1 — unsprung, batched to a
  * single requestAnimationFrame write per burst of pointermove events so the
  * transform lands at rAF resolution without spamming a motion-value commit
- * per event. A trailing ring lags behind it on a spring. Over any
- * [data-cursor-hover] target the ring scales up and switches to
- * mix-blend-mode: difference, inverting whatever ground it crosses.
+ * per event. The dot alone carries `mix-blend-mode: difference` (globals.css),
+ * inverting the small area it covers as it crosses light/dark ground. A
+ * trailing ring lags behind it on a spring; the ring is outline-only at all
+ * times (transparent fill, never a background — see "Kill the flashlight" in
+ * globals.css) and over any [data-cursor-hover] target it scales up and
+ * thickens its border, but never fills.
  *
  * useSpring (motion/react — already a page dependency, so this is zero new
  * packages) drives the trail rather than a hand-rolled rAF lerp: both run on

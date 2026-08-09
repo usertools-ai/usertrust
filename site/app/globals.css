@@ -101,7 +101,18 @@
    everywhere — this is not a decorative layer on top of it for them, there
    is simply no script that could hide it. z-index sits above the nav (z-50)
    so the ring is never clipped under the fixed bar. will-change is scoped to
-   just these two elements, not a page-wide rule. */
+   just these two elements, not a page-wide rule.
+
+   "Kill the flashlight" (Cam live review, binding, item 6): the ring used to
+   fill opaque white on hover with `mix-blend-mode: difference` on itself —
+   a filled disc inverted against a near-black page is a near-white blob
+   that washes out whatever text sits under it, not a glitch, just the blend
+   math. The ring is now OUTLINE-ONLY at all times — transparent fill, never
+   a background — in both resting and hover states, so it can never occlude
+   what's under it. Only the small dot carries `mix-blend-mode: difference`;
+   at 8px it inverts just the pixels it covers (the vivid bit) without the
+   wash. Hover scales the ring (~2.2x, unchanged) and thickens its border
+   (~1.5px resting → ~2px hover) instead of filling it. */
 html.cursor-active,
 html.cursor-active * {
 	cursor: none !important;
@@ -120,6 +131,7 @@ html.cursor-active * {
 	height: 8px;
 	border-radius: 9999px;
 	background: rgba(255, 255, 255, 0.9);
+	mix-blend-mode: difference;
 	will-change: transform;
 }
 .cursor-ring {
@@ -129,17 +141,18 @@ html.cursor-active * {
 	width: 36px;
 	height: 36px;
 	border-radius: 9999px;
-	border: 1px solid rgba(255, 255, 255, 0.5);
-	/* Only color/border transition here — x/y/scale are motion values
+	background: transparent;
+	border: 1.5px solid rgba(255, 255, 255, 0.7);
+	/* Only the border transitions here — x/y/scale are motion values
 	   (cursor.tsx) already animated on their own spring; a CSS transition on
-	   `transform` too would fight that spring with a second, competing ease. */
-	transition: background-color 0.2s ease, border-color 0.2s ease;
+	   `transform` too would fight that spring with a second, competing ease.
+	   No background-color transition: the ring never fills, resting or hover. */
+	transition: border-color 0.2s ease, border-width 0.2s ease;
 	will-change: transform;
 }
 .cursor-ring--hover {
-	background: rgba(255, 255, 255, 0.9);
-	border-color: transparent;
-	mix-blend-mode: difference;
+	border-width: 2px;
+	border-color: rgba(255, 255, 255, 0.85);
 }
 @media (prefers-reduced-motion: reduce) {
 	.cursor-layer {
