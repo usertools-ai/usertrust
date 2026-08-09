@@ -109,7 +109,7 @@ export default function ExhibitD() {
 			className="section-anchor safe-x relative mx-auto max-w-6xl py-14 sm:py-20"
 		>
 			<p className="section-eyebrow">exhibit d</p>
-			<div className="mt-3 flex items-center gap-1.5">
+			<div className="mt-2 flex items-center gap-1.5">
 				<StageTag stage="RECORD" />
 				<StageTag stage="ANCHOR" />
 			</div>

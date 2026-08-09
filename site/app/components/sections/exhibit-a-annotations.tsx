@@ -39,10 +39,10 @@ export default function ExhibitAAnnotations({
 	 * column went empty for the receipt's whole remaining height while a 12rem
 	 * rail squeezed the receipt until its auditHash clipped. The island now owns
 	 * the whole row: the call stacks above the rail in one narrow column, the
-	 * receipt takes the wide one, and the routed leader traces cross the gap that
-	 * used to
-	 * be dead ground. Passed as a prop rather than composed outside because the
-	 * wrapRef has to enclose BOTH columns for the trace geometry to measure.
+	 * receipt takes the wide one, and the routed leader traces cross the gap
+	 * that used to be dead ground. Passed as a prop rather than composed
+	 * outside because the wrapRef has to enclose BOTH columns for the trace
+	 * geometry to measure.
 	 */
 	call: React.ReactNode;
 	children: React.ReactNode;

@@ -34,7 +34,7 @@ export default function ExhibitE() {
 		>
 			<div className="mx-auto max-w-6xl">
 				<p className="section-eyebrow">exhibit e</p>
-				<div className="mt-3 flex items-center gap-1.5">
+				<div className="mt-2 flex items-center gap-1.5">
 					<StageTag stage="VERIFY" />
 				</div>
 				<h2 className="font-display mt-3 lowercase leading-none text-white text-[clamp(2.5rem,7vw,5.5rem)]">
