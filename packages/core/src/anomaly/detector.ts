@@ -21,7 +21,7 @@
  * when off, observe/check are no-ops.
  */
 
-import { costFromRates, estimateCost } from "../ledger/pricing.js";
+import { costFromRatesUnfloored, getModelRates } from "../ledger/pricing.js";
 import {
 	createInjectionCascadeSignal,
 	type InjectionCascadeSignal,
@@ -71,16 +71,36 @@ function defaultCostCalculator(
 	outputTokens: number,
 	event?: AnomalyChunkEvent,
 ): number {
+	// Spec D7: read the event's cache tiers (default 0 for callers/events built
+	// before the four-tier split) so a cache-heavy flood prices at its true
+	// rate instead of vanishing behind fresh-only input/output.
+	const cacheReadTokens = event?.cumulativeCacheReadTokens ?? 0;
+	const cacheWriteTokens = event?.cumulativeCacheWriteTokens ?? 0;
 	if (event?.endpointClass === "local") {
 		// Local scope without an injected calculator: price in nominal usertokens at
-		// the shipped default local rate {0,0}. costFromRates floors at 1, so the
-		// cumulative cost is a constant and spend-velocity stays flat — token_rate is
-		// the primary local signal. govern.ts injects a config-aware calculator that
-		// prices via resolveRates (operator-set local rates enable velocity showback).
-		return costFromRates({ inputPer1k: 0, outputPer1k: 0 }, inputTokens, outputTokens);
+		// the shipped default local rate {0,0}. Unfloored, so the cumulative cost is
+		// exactly 0 and spend-velocity stays flat — token_rate is the primary local
+		// signal. govern.ts injects a config-aware calculator that prices via
+		// resolveRates (operator-set local rates enable velocity showback).
+		return costFromRatesUnfloored(
+			{ inputPer1k: 0, outputPer1k: 0 },
+			inputTokens,
+			outputTokens,
+			cacheReadTokens,
+			cacheWriteTokens,
+		);
 	}
-	// estimateCost returns usertokens; convert to dollars (cloud usd-proxy scope).
-	const usertokens = estimateCost(model, inputTokens, outputTokens);
+	// Unfloored four-tier usertokens; convert to dollars (cloud usd-proxy scope).
+	// No-floor per D7: settlement floors per call, but spend-velocity measures a
+	// continuous flow — a per-call floor would clamp every early sample to the
+	// same plateau, hiding exactly the flood this fix makes visible.
+	const usertokens = costFromRatesUnfloored(
+		getModelRates(model),
+		inputTokens,
+		outputTokens,
+		cacheReadTokens,
+		cacheWriteTokens,
+	);
 	return usertokens / USERTOKENS_PER_DOLLAR;
 }
 

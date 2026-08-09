@@ -76,12 +76,18 @@ import {
 } from "./govern.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
+	copyAppliedRates,
 	costFromRates,
+	effectiveCacheWriteRate,
 	estimateCost,
 	estimateInputTokens,
+	PRICING_TABLE_VERSION,
+	resolveAppliedRates,
 	resolveRates,
+	warnCacheRateMigration,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
+import { publishableUsage, sanitizeUsage } from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import { derivePolicyHint, evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
@@ -209,6 +215,16 @@ interface AuthorizationCapture {
 	 * budget.
 	 */
 	readonly sessionAccounted: boolean;
+	/**
+	 * The UN-INFLATED metering estimate (plain `inputPer1k`, unmodified rates),
+	 * captured at authorize time — never the write-premium-fattened hold
+	 * (`Authorization.estimatedCost`). `settle()`'s "no usage reported"
+	 * fallback reads THIS, so a call that never reports cache-write tokens is
+	 * never charged, audited, or receipted at the cache-write rate. Internal
+	 * only, deliberately off the public `Authorization` handle — see the
+	 * `meteredEstimate` comment at the authorize-time computation.
+	 */
+	readonly meteredEstimate: number;
 }
 
 /** Parameters for authorizing an LLM call. */
@@ -237,15 +253,44 @@ export interface AuthorizeParams {
 	endpoint?: Partial<EndpointInfo> | undefined;
 }
 
-/** Parameters for settling an authorized call. */
+/**
+ * Parameters for settling an authorized call.
+ *
+ * The four token fields are the DISJOINT tiers of spec D2: `inputTokens` is
+ * FRESH input only, with cached reads and cache writes reported separately.
+ * Callers that normalize their own provider usage (openclaw does) must not
+ * leave cache tokens inside `inputTokens` — they would then price at
+ * `inputPer1k` instead of the cache rates, which overstates reads by ~10x.
+ *
+ * Supplying ANY of the four counts makes the settle "reported": the cost is
+ * metered from what was supplied and the omitted counts are 0. Supplying NONE
+ * falls back to the pre-call metering estimate.
+ */
 export interface SettleParams {
-	/** Actual input tokens consumed. If omitted, uses the pre-call estimate. */
+	/** Actual FRESH input tokens consumed (cache tiers excluded). */
 	inputTokens?: number | undefined;
-	/** Actual output tokens consumed. */
+	/** Actual output tokens consumed, including provider-billed thinking tokens. */
 	outputTokens?: number | undefined;
+	/**
+	 * Cache-hit prompt tokens (D5). Priced at the model's resolved
+	 * `cacheReadPer1k`; when the model publishes none, at `inputPer1k` (D1 —
+	 * absence is never free).
+	 */
+	cacheReadTokens?: number | undefined;
+	/** Cache-creation prompt tokens (D5). Priced at the resolved `cacheWritePer1k`. */
+	cacheWriteTokens?: number | undefined;
 	/** Number of streaming chunks delivered (for streaming calls). */
 	chunksDelivered?: number | undefined;
-	/** Whether usage came from the provider or our estimate. */
+	/**
+	 * Whether usage came from the provider or the caller's estimate.
+	 *
+	 * Headless trusts this label — it is an operator boundary, and the caller is
+	 * the only party that knows where its counts came from (D5). What is NOT
+	 * trusted is a count: a `"provider"` label over an unusable `inputTokens` or
+	 * `outputTokens` still yields `usageSource: "estimated"` and NO `usage`
+	 * record, because a published four-tier record containing a fabricated zero
+	 * is the one thing D5 forbids outright.
+	 */
 	usageSource?: "provider" | "estimated" | undefined;
 	/**
 	 * Wall-clock compute duration in milliseconds (local runtimes report it,
@@ -664,6 +709,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	}
 
 	const customRates = config.pricing === "custom" ? config.customRates : undefined;
+	// D8: one-time migration warning, evaluated at the config-load path.
+	warnCacheRateMigration(customRates);
 	// M2: governor-wide default endpoint scope; per-call AuthorizeParams.endpoint
 	// overrides it (A3). Defaults to cloud — pre-M2 metering exactly.
 	const defaultEndpoint = normalizeEndpoint(opts?.endpoint);
@@ -815,7 +862,33 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const transferId = trustId("tx");
 			const estInputTokens = params.estimatedInputTokens ?? estimateInputTokens(messages);
 			const maxOutputTokens = params.maxOutputTokens ?? 4096;
-			const estCost = costFromRates(rateInfo.rates, estInputTokens, maxOutputTokens);
+			// D3: size the ESTIMATED-input half of the hold at
+			// max(inputPer1k, effective cacheWritePer1k) — see the identical
+			// govern.ts hold-sizing comment for the full rationale. Settle-time
+			// actual cost is unaffected; this only widens the PENDING reservation.
+			const holdInputRate = Math.max(
+				rateInfo.rates.inputPer1k,
+				effectiveCacheWriteRate(rateInfo.rates),
+			);
+			const estCost = costFromRates(
+				{ ...rateInfo.rates, inputPer1k: holdInputRate },
+				estInputTokens,
+				maxOutputTokens,
+			);
+			// FIX (review finding, D3 scope): `estCost` above is the
+			// write-premium-INFLATED HOLD — correct for the PENDING reservation
+			// (spendPending/proxy.spend/inFlightHoldTotal) and for the policy gate
+			// (`estimated_cost`/`budget_remaining_after`, whose documented
+			// over-denial trade in D3 depends on the gate seeing the SAME
+			// fattened number the ledger actually reserves) and for the public
+			// `Authorization.estimatedCost` field it is reported on. It must NEVER
+			// become the settled/audited/receipted cost of a call whose settle()
+			// reports no token usage — that would price zero cache-write tokens at
+			// the cache-write rate. `meteredEstimate` is the un-inflated metering
+			// estimate (plain `inputPer1k`, unmodified rates), carried on the
+			// internal capture (never the public handle) and is the ONLY value
+			// settle()'s "no usage reported" fallback may use.
+			const meteredEstimate = costFromRates(rateInfo.rates, estInputTokens, maxOutputTokens);
 
 			// Acquire mutex for budget atomicity (AUD-453). The attributed-envelope
 			// preflight read is taken INSIDE this lock (top of the try below) so a
@@ -1030,6 +1103,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					costCenter: captured?.attribution.costCenter,
 					envelope: captured,
 					sessionAccounted: !envelopeDebited,
+					meteredEstimate,
 				}),
 			);
 			return auth;
@@ -1069,20 +1143,72 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const endpoint = auth.endpoint ?? defaultEndpoint;
 			const rateInfo = resolveRates(model, endpoint.class, config);
 
+			// D5 — read the caller's object ONCE, into a local. The presence check
+			// below and the counts that get priced and recorded then come from the
+			// same read, so a caller whose `SettleParams` is a live object (a proxy,
+			// a getter over a running accumulator) cannot have "reported?" answered
+			// off one value and the money computed off another.
+			const reportedCounts = {
+				inputTokens: params?.inputTokens,
+				outputTokens: params?.outputTokens,
+				cacheReadTokens: params?.cacheReadTokens,
+				cacheWriteTokens: params?.cacheWriteTokens,
+			};
+			// D4/D5: the reported-usage condition is WIDENED to the cache tiers. It
+			// read only input/output, so a settle carrying nothing but cache counts
+			// looked like "nothing reported" and silently fell back to the pre-call
+			// estimate — discarding real billable tokens at the one boundary
+			// (openclaw, and every non-SDK integration) that has them.
+			const usageReported =
+				reportedCounts.inputTokens != null ||
+				reportedCounts.outputTokens != null ||
+				reportedCounts.cacheReadTokens != null ||
+				reportedCounts.cacheWriteTokens != null;
+
+			// D5 — THE ONE SNAPSHOT. Both the cost below and the `usage` record on
+			// the chain event and the receipt derive from THIS object; nothing
+			// downstream re-reads `params`. Omitted counts collapse to 0 at this
+			// operator boundary: when a caller reported some of the four, the ones
+			// it left out are zero (the same "absent cache fields mean zero" rule
+			// D5 states for providers), not an invitation to re-estimate half the
+			// call. `sanitizeUsage` then clamps every count to a finite integer >= 0
+			// — the reason a NaN from a caller's arithmetic cannot reach audit
+			// canonicalization, which throws on non-finite — and downgrades a
+			// "provider" label whose input/output is unusable.
+			const usageSnapshot = sanitizeUsage({
+				inputTokens: reportedCounts.inputTokens ?? 0,
+				outputTokens: reportedCounts.outputTokens ?? 0,
+				cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
+				cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
+				source: usageReported ? (params?.usageSource ?? "provider") : "estimated",
+			});
+			// Present IFF provider-sourced (D5) — the single rule, in one place.
+			const usageRecord = publishableUsage(usageSnapshot);
+			const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
+
 			// Determine actual cost
 			let actualCost: number;
-			let usageSource: "provider" | "estimated";
-			if (params?.inputTokens != null || params?.outputTokens != null) {
+			const usageSource: "provider" | "estimated" = usageSnapshot.source;
+			if (usageReported) {
 				actualCost = costFromRates(
 					rateInfo.rates,
-					params.inputTokens ?? 0,
-					params.outputTokens ?? 0,
+					usageSnapshot.inputTokens,
+					usageSnapshot.outputTokens,
+					usageSnapshot.cacheReadTokens,
+					usageSnapshot.cacheWriteTokens,
 				);
-				usageSource = params.usageSource ?? "provider";
 			} else {
-				actualCost = auth.estimatedCost;
-				usageSource = "estimated";
+				// FIX: the un-inflated metering estimate, never the fattened hold
+				// carried on `auth.estimatedCost` (see the `meteredEstimate`
+				// comment on `AuthorizationCapture`).
+				actualCost = capture.meteredEstimate;
 			}
+
+			// D5 — the rates the money was computed with, published so the record is
+			// self-sufficient: `ceil(sum(counts x appliedRates / 1000))` floored at 1
+			// reproduces `cost` exactly. RESOLVED rates, so the D1 cache fallback is
+			// visible as the number it actually charges rather than as a hole.
+			const appliedRates = resolveAppliedRates(rateInfo.rates);
 
 			// SESSION accounting, skipped in full when the ENVELOPE paid: this hold was
 			// never counted into `inFlightHoldTotal`, so releasing it here would drive
@@ -1190,6 +1316,20 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						settled,
 						transferId: auth.transferId,
 						usageSource,
+						// D5: the durable record. The receipt is a return value the
+						// caller may drop on the floor; THIS is what an auditor reads,
+						// so the four tiers and the rates that priced them belong here
+						// too — a chain event that cannot be repriced is a number to
+						// trust, not a reconciliation surface. Mirrors the receipt
+						// exactly: same snapshot, same resolution.
+						...usageAudit,
+						// P1-1: the chain event keeps its FLAT shape — audit-event.v1
+						// documents `data` as open and it already flattens the receipt's
+						// meter. The receipt-side relocation was forced by receipt.v1's
+						// CLOSED `meter` object, which has no counterpart here.
+						// P1-2: its own frozen copy.
+						appliedRates: copyAppliedRates(appliedRates),
+						pricingTableVersion: PRICING_TABLE_VERSION,
 						...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
 						source: "headless",
 						...costCenterAudit,
@@ -1285,6 +1425,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				provider: "headless",
 				timestamp: new Date().toISOString(),
 				usageSource,
+				// D5: present IFF provider-sourced — same snapshot the cost came from.
+				...usageAudit,
 				// M2: endpoint classification + metering provenance (A6: computeMs is
 				// OMITTED, never undefined, when absent/invalid).
 				endpoint: { class: endpoint.class, runtime: endpoint.runtime },
@@ -1296,6 +1438,14 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					params.computeMs >= 0
 						? { computeMs: params.computeMs }
 						: {}),
+				},
+				// D5: what the rates WERE, beside where they came from. Only this makes
+				// a custom/local-model cost independently recomputable. A SIBLING of
+				// `meter`, not a member of it — receipt.v1 closed `meter` to additions
+				// (P1-1). P1-2: its own frozen copy.
+				pricing: {
+					appliedRates: copyAppliedRates(appliedRates),
+					tableVersion: PRICING_TABLE_VERSION,
 				},
 				...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
 				...(postedCost !== undefined ? { postedCost } : {}),

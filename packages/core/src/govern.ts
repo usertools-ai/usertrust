@@ -41,12 +41,25 @@ import { computeRunway, runwayHours } from "./budget/runway.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
+	copyAppliedRates,
 	costFromRates,
+	costFromRatesUnfloored,
+	effectiveCacheWriteRate,
 	estimateInputTokens,
+	PRICING_TABLE_VERSION,
 	type RateResolution,
+	resolveAppliedRates,
 	resolveRates,
+	warnCacheRateMigration,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
+import {
+	fromAnthropicUsage,
+	fromProviderResponse,
+	publishableUsage,
+	sanitizeUsage,
+	type UsageWireShape,
+} from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import { derivePolicyHint, evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
@@ -209,7 +222,15 @@ export interface TrustEngine {
 // settled `.receipt`. These mapped types make the EXPORTED TrustedClient type
 // match that runtime contract, so a consumer using the old bare-`Message` or
 // sync `const s = client.messages.stream(...)` patterns gets a compile error.
-// Clients without a top-level `messages` (OpenAI/Google) pass through unchanged.
+//
+// The same envelope rewrite covers the other two providers' governed `create`
+// surfaces: OpenAI `chat.completions.create` and (feature-detected)
+// `responses.create` via buildOpenAIProxy, and Google `models.generateContent`
+// via buildGoogleProxy. Neither is a special case — both route through the same
+// interceptCall, and a streaming call on either reaches the GENERIC
+// `Symbol.asyncIterator` branch that returns createGovernedStream's wrapper, not
+// the Anthropic `stream-helper` graft. Everything else on those resources is
+// ungoverned (see detect.ts's boundary block) and passes through untouched.
 
 /** `stream` becomes `(...args) => Promise<MessageStream & { receipt: Promise<TrustReceipt> }>`. */
 type GovernedStreamMethod<F> = F extends (...args: infer A) => infer R
@@ -286,21 +307,182 @@ type GovernedMessages<M> = M extends object
 			("parse" extends keyof M ? { parse: GovernedParseMethod<M["parse"]> } : unknown)
 	: M;
 
-/** Rewrite `beta.messages` when present; otherwise leave `beta` untouched. */
-type GovernedBeta<B> = B extends { messages: infer BM }
-	? Omit<B, "messages"> & { messages: GovernedMessages<BM> }
-	: B;
+/**
+ * A callable member — a GUARD, never a value type. `detectClientKind` keys every
+ * provider branch on `typeof x === "function"`, not on the key merely being
+ * present, and these types must agree with it exactly. `never[]` parameters put
+ * this at the top of the function lattice, so every function matches and every
+ * non-function (a string stub, a nested object) does not.
+ */
+type AnyMethod = (...args: never[]) => unknown;
 
 /**
- * Rewrite only the Anthropic `messages` / `beta.messages` surfaces. A client
- * without a `messages` resource (OpenAI, Google) is returned unchanged — its
- * governed `create`/`responses` shapes are unaffected by this rewrite.
+ * True when `X` is callable. The bracket wrapping is load-bearing: it stops the
+ * conditional distributing, so a union answers once for the whole union.
+ *
+ * This is the NEGATIVE half of the runtime's shape tests, and it needs its own
+ * type because TypeScript has no "object but not callable" constraint to write
+ * positively. Every namespace the runtime walks is gated on
+ * `typeof x === "object"` — `detectClientKind`, `buildOpenAIResponsesProxy` and
+ * `buildAnthropicBetaProxy` all do it — and a FUNCTION OBJECT (a callable that
+ * also carries properties) answers `"function"` there, not `"object"`. Yet a
+ * function object with the right properties satisfies `X extends { create: … }`
+ * happily, so the positive structural guard alone selects surfaces the runtime
+ * skips entirely.
  */
-type GovernedShape<T> = T extends { messages: infer M }
-	? Omit<T, "messages" | "beta"> & { messages: GovernedMessages<M> } & (T extends { beta: infer B }
-				? { beta: GovernedBeta<B> }
-				: unknown)
-	: T;
+type IsCallable<X> = [X] extends [AnyMethod] ? true : false;
+
+/**
+ * Rewrite `beta.messages` when present; otherwise leave `beta` untouched.
+ * Both levels are excluded when callable, mirroring buildAnthropicBetaProxy,
+ * which returns undefined — leaving `beta` a whole raw pass-through — unless
+ * `beta` AND `beta.messages` are both non-callable objects.
+ */
+type GovernedBeta<B> =
+	IsCallable<B> extends true
+		? B
+		: B extends { messages: infer BM }
+			? IsCallable<BM> extends true
+				? B
+				: Omit<B, "messages"> & { messages: GovernedMessages<BM> }
+			: B;
+
+/**
+ * Rewrite `create` on an OpenAI `chat.completions` resource. `parse`, `stream`,
+ * `runTools`, `retrieve` / `update` / `list` / `delete` and the legacy top-level
+ * `completions` are all UNGOVERNED (detect.ts's boundary block) and survive the
+ * `Omit` untouched — they drive the SDK's raw client and never reach interceptCall.
+ */
+type GovernedChatCompletions<CC> = CC extends { create: infer C extends AnyMethod }
+	? Omit<CC, "create"> & { create: GovernedCreateMethod<C> }
+	: CC;
+
+/** Rewrite `chat.completions` when present; the rest of `chat` is left alone. */
+type GovernedChat<C> = C extends { completions: infer CC }
+	? Omit<C, "completions"> & { completions: GovernedChatCompletions<CC> }
+	: C;
+
+/**
+ * Rewrite ONLY `create` on an OpenAI `responses` resource. The guard is the
+ * type-level twin of buildOpenAIResponsesProxy's
+ * `typeof responsesObj.create !== "function"` bail-out: on that miss the runtime
+ * installs no proxy and the WHOLE resource stays a raw pass-through, so a
+ * non-callable `create` must leave `R` intact rather than rewrite the rest of it.
+ * `stream` / `parse` / `retrieve` / `cancel` / `delete` / `compact` are ungoverned.
+ */
+type GovernedResponses<R> =
+	IsCallable<R> extends true
+		? R
+		: R extends { create: infer C extends AnyMethod }
+			? Omit<R, "create"> & { create: GovernedCreateMethod<C> }
+			: R;
+
+/**
+ * Rewrite ONLY `generateContent` on a Google `models` resource. `generateContentStream`
+ * stays raw: buildGoogleProxy traps the one method and lets everything else fall
+ * through `Reflect.get`, so a rewrite here would advertise a `.receipt` that never
+ * arrives on the streaming shortcut users actually reach for.
+ */
+type GovernedGoogleModels<G> = G extends { generateContent: infer C extends AnyMethod }
+	? Omit<G, "generateContent"> & { generateContent: GovernedCreateMethod<C> }
+	: G;
+
+// ── Provider selection: the type-level twin of detectClientKind ──
+// Each predicate is the full runtime test, both halves: the namespace is a
+// NON-CALLABLE object, and the governed method on it is callable. `detect.ts`
+// spells this `typeof ns === "object" && typeof ns.method === "function"`.
+
+/** detect.ts's Anthropic test: `messages` a non-callable object, `create` callable. */
+type IsAnthropicClient<T> = T extends { messages: infer M }
+	? IsCallable<M> extends true
+		? false
+		: M extends { create: AnyMethod }
+			? true
+			: false
+	: false;
+
+/** detect.ts's OpenAI test — `chat` AND `chat.completions` are both checked for object-ness. */
+type IsOpenAIClient<T> = T extends { chat: infer C }
+	? IsCallable<C> extends true
+		? false
+		: C extends { completions: infer CC }
+			? IsCallable<CC> extends true
+				? false
+				: CC extends { create: AnyMethod }
+					? true
+					: false
+			: false
+	: false;
+
+/** detect.ts's Google test: `models` a non-callable object, `generateContent` callable. */
+type IsGoogleClient<T> = T extends { models: infer G }
+	? IsCallable<G> extends true
+		? false
+		: G extends { generateContent: AnyMethod }
+			? true
+			: false
+	: false;
+
+// ── Namespace re-add parts ──
+// Every rewritten namespace is put back through a homomorphic mapped type over a
+// key set derived from `keyof T`, never a hand-written `{ ns: … }` intersection.
+// Three things that buys, all of which a literal intersection silently breaks:
+// a namespace the client does not declare stays ABSENT rather than becoming a
+// phantom property for a surface no proxy installs (an OpenAI client older than
+// the Responses API — ~4.87, under the `>=4.70.0` peer floor — has no `responses`
+// at all); an OPTIONAL namespace stays optional, where re-adding it as required,
+// or as `X | undefined`, is a different type under `exactOptionalPropertyTypes`
+// and breaks assignability for every consumer holding the original client type;
+// and `readonly` survives, which real `@google/genai` declares on `models`.
+
+type GovernedMessagesPart<T, K extends keyof T = Extract<keyof T, "messages">> = {
+	[P in K]: GovernedMessages<T[P]>;
+};
+type GovernedBetaPart<T, K extends keyof T = Extract<keyof T, "beta">> = {
+	[P in K]: GovernedBeta<T[P]>;
+};
+type GovernedChatPart<T, K extends keyof T = Extract<keyof T, "chat">> = {
+	[P in K]: GovernedChat<T[P]>;
+};
+type GovernedResponsesPart<T, K extends keyof T = Extract<keyof T, "responses">> = {
+	[P in K]: GovernedResponses<T[P]>;
+};
+type GovernedModelsPart<T, K extends keyof T = Extract<keyof T, "models">> = {
+	[P in K]: GovernedGoogleModels<T[P]>;
+};
+
+/**
+ * Rewrite the governed surfaces of whichever provider `detectClientKind` would
+ * pick — and only that provider's. The branches are EXCLUSIVE and ordered exactly
+ * as detect.ts:61: Anthropic, else OpenAI (carrying `responses` with it), else
+ * Google. A client matching none passes through unchanged; detectClientKind
+ * throws on it at runtime.
+ * *Prevents:* a hybrid client — an in-house facade exposing both an Anthropic and
+ * an OpenAI shape — typed as if both were governed, when `trust()` installs exactly
+ * ONE provider proxy and the loser's `create` is never intercepted. A receipt
+ * advertised on a surface no proxy wraps is the one lie this type must not tell.
+ * That is also why selection runs through the predicates above rather than a bare
+ * structural `extends`: a client whose `chat` is a function object is skipped by
+ * the runtime and falls through to Google, and the type must fall through with it.
+ */
+type GovernedShapeOf<T> =
+	IsAnthropicClient<T> extends true
+		? Omit<T, "messages" | "beta"> & GovernedMessagesPart<T> & GovernedBetaPart<T>
+		: IsOpenAIClient<T> extends true
+			? Omit<T, "chat" | "responses"> & GovernedChatPart<T> & GovernedResponsesPart<T>
+			: IsGoogleClient<T> extends true
+				? Omit<T, "models"> & GovernedModelsPart<T>
+				: T;
+
+/**
+ * `T extends unknown` is a no-op for a single client type and DISTRIBUTES over a
+ * union one. It is required because the predicates above are not naked-`T`
+ * conditionals: `IsOpenAIClient<A | B>` would collapse to `boolean` and fail
+ * `extends true`, silently returning a union client unrewritten. Distributing
+ * first makes each member pick its own provider branch, which is what `trust()`
+ * does anyway — it detects one kind per actual client.
+ */
+type GovernedShape<T> = T extends unknown ? GovernedShapeOf<T> : never;
 
 /** The trusted client: governed client shape (F5) + governance methods. */
 export type TrustedClient<T> = GovernedShape<T> & {
@@ -764,6 +946,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		});
 	}
 
+	// D8: one-time migration warning, evaluated at the config-load path.
+	warnCacheRateMigration(config.pricing === "custom" ? config.customRates : undefined);
+
 	const isDryRun = opts?.dryRun ?? process.env.USERTRUST_DRY_RUN === "true";
 
 	// AUD-470: Only accept injected _engine/_audit in test environments.
@@ -845,20 +1030,25 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// Settlement floors per call; the anomaly signal measures flow — so a
 	// default {0,0}-rate local stream contributes 0 and can never false-trip
 	// spend_velocity (rejected-merge design note, pinned by Task 3 tests).
+	// Spec D7: both branches now price all FOUR tiers (event.cumulativeCache*,
+	// default 0) via the single unfloored resolution site, `costFromRatesUnfloored`
+	// — a cache-read flood is visible at its true rate instead of vanishing
+	// behind near-zero fresh input/output.
 	const anomalyDetector = createAnomalyDetector(config.anomaly, {
 		provider: kind,
 		costCalculator: (calcModel, inputTokens, outputTokens, event) => {
 			const scope = event?.endpointClass ?? "cloud";
 			const resolution = resolveRates(event?.model ?? calcModel, scope, config);
-			if (scope === "local") {
-				const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
-				const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
-				return (
-					(inTok / 1000) * resolution.rates.inputPer1k +
-					(outTok / 1000) * resolution.rates.outputPer1k
-				);
-			}
-			return costFromRates(resolution.rates, inputTokens, outputTokens) / USERTOKENS_PER_DOLLAR;
+			const cacheReadTokens = event?.cumulativeCacheReadTokens ?? 0;
+			const cacheWriteTokens = event?.cumulativeCacheWriteTokens ?? 0;
+			const usertokens = costFromRatesUnfloored(
+				resolution.rates,
+				inputTokens,
+				outputTokens,
+				cacheReadTokens,
+				cacheWriteTokens,
+			);
+			return scope === "local" ? usertokens : usertokens / USERTOKENS_PER_DOLLAR;
 		},
 	});
 
@@ -971,11 +1161,48 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				finitePositiveCap(params.max_output_tokens) ?? finitePositiveCap(params.max_tokens) ?? 4096;
 			const rateResolution = resolveRates(model, endpoint.class, config);
 			enforceUnknownModelPolicy(model, rateResolution, config);
+			// D3: "cold-cache worst case" is false for write premiums — a 1.25x (or
+			// operator-set) cache-write rate can exceed an input-priced hold, and the
+			// settle-time actual (already cache-aware) would then post
+			// `min(actual, held)` and silently under-debit the envelope. Size the
+			// ESTIMATED-input half of the hold at the fatter of the two rates; this
+			// is a HOLD-sizing adjustment only — the settle-time actual cost still
+			// resolves each tier independently via `costFromRates`, never discounted.
+			const holdInputRate = Math.max(
+				rateResolution.rates.inputPer1k,
+				effectiveCacheWriteRate(rateResolution.rates),
+			);
 			const estimatedCost = costFromRates(
+				{ ...rateResolution.rates, inputPer1k: holdInputRate },
+				estimatedInputTokens,
+				maxOutputTokens,
+			);
+			// FIX (review finding, D3 scope): `estimatedCost` above is the
+			// write-premium-INFLATED HOLD — correct for sizing the PENDING
+			// reservation (spendPending/proxy.spend/inFlightHoldTotal) and for the
+			// policy gate (`estimated_cost`/`budget_remaining_after`, whose
+			// documented over-denial trade in D3 depends on the gate seeing the
+			// SAME fattened number the ledger actually reserves). It must NEVER
+			// become the settled/audited/receipted cost of a call that reports no
+			// provider usage — that would price zero cache-write tokens at the
+			// cache-write rate. `meteredEstimateCost` is the un-inflated metering
+			// estimate (plain `inputPer1k`, unmodified rates) and is the ONLY
+			// value the settle-time "no usage reported" fallback may use.
+			const meteredEstimateCost = costFromRates(
 				rateResolution.rates,
 				estimatedInputTokens,
 				maxOutputTokens,
 			);
+			// D5 — the RESOLVED rates this call meters with, published on every
+			// record surface below (the estimate-priced stream handle, the stream
+			// terminal, the non-stream settle) so a cost can be recomputed from the
+			// record alone: `ceil(sum(counts x appliedRates / 1000))`, floored at 1.
+			// Resolved ONCE here, from the same authorize-time `rateResolution` A3
+			// prices every path with — the published rates and the rates the money
+			// used cannot become two different things. This is the D1 resolution, so
+			// an absent cache tier appears as `inputPer1k` (what it actually charges),
+			// never as a hole an auditor would read as free.
+			const appliedRates = resolveAppliedRates(rateResolution.rates);
 
 			// AUD-453: Acquire mutex to serialise budget-check + PENDING hold.
 			// This prevents concurrent calls from both passing the budget check and
@@ -1259,9 +1486,20 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					timestamp: new Date().toISOString(),
 					// M2: authorize-time scope, already fixed for the eventual settle (A3).
 					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
+					// D5: no `usage` — nothing has been reported yet, and this handle's
+					// `cost` is the ESTIMATE, which no set of counts reproduces. The
+					// rates are published anyway: they are the rates the eventual
+					// settle will meter with (A3 fixes them at authorize).
 					meter: {
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
+					},
+					// P1-2: this handle is the one record surface the caller holds
+					// BEFORE the settle writes anything, so it is exactly the object a
+					// mutation would travel from. Its own frozen copy.
+					pricing: {
+						appliedRates: copyAppliedRates(appliedRates),
+						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					// AUD-456: Flag proxy stub receipts
@@ -1287,18 +1525,40 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// Determine cost: use provider usage if reported, else fall back to
 				// estimate. A3: priced with the rate resolution captured at authorize;
 				// A11: costFromRates floors at 1 even for 0/0 usage.
+				//
+				// D5 — ONE sanitized snapshot. `sanitizeUsage` is the single gate the
+				// four tiers pass through before they reach either `costFromRates` or
+				// (Task 5) record emission, so the money and the record can never derive
+				// from different objects, and a non-finite provider count can never
+				// reach audit canonicalization. It also enforces the provenance rule:
+				// a "provider" label survives only when input AND output are usable
+				// counts, so a stream that reported neither cannot be published as
+				// provider-sourced.
+				const usageSnapshot = sanitizeUsage({
+					inputTokens: completion.usage.inputTokens,
+					outputTokens: completion.usage.outputTokens,
+					cacheReadTokens: completion.usage.cacheReadTokens,
+					cacheWriteTokens: completion.usage.cacheWriteTokens,
+					source: completion.usageReported ? "provider" : "estimated",
+				});
+				// D5: the record half of the SAME snapshot the cost comes from —
+				// present iff provider-sourced, omitted (never zero-filled) otherwise.
+				const usageRecord = publishableUsage(usageSnapshot);
+				const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
 				let streamCost: number;
-				let usageSource: "provider" | "estimated";
-				if (completion.usageReported) {
+				const usageSource: "provider" | "estimated" = usageSnapshot.source;
+				if (usageSnapshot.source === "provider") {
 					streamCost = costFromRates(
 						rateResolution.rates,
-						completion.usage.inputTokens,
-						completion.usage.outputTokens,
+						usageSnapshot.inputTokens,
+						usageSnapshot.outputTokens,
+						usageSnapshot.cacheReadTokens,
+						usageSnapshot.cacheWriteTokens,
 					);
-					usageSource = "provider";
 				} else {
-					streamCost = estimatedCost;
-					usageSource = "estimated";
+					// FIX: the un-inflated metering estimate, never the fattened hold
+					// (see the `meteredEstimateCost` comment at the hold-sizing site).
+					streamCost = meteredEstimateCost;
 				}
 
 				// Release in-flight hold and commit budget under mutex.
@@ -1392,6 +1652,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						settled,
 						transferId,
 						usageSource,
+						// D5: the durable record carries the four tiers AND the rates
+						// that priced them — the receipt is a return value the caller
+						// may drop, the chain event is what an auditor reads.
+						...usageAudit,
+						// P1-1: the chain event keeps its FLAT shape (`data` is
+						// documented open in audit-event.v1 and already flattens the
+						// receipt's meter as costBasis/rateSource/endpointClass). The
+						// relocation was forced by v1's closed `meter` object, which
+						// has no counterpart here. P1-2: its own frozen copy.
+						appliedRates: copyAppliedRates(appliedRates),
+						pricingTableVersion: PRICING_TABLE_VERSION,
 						chunksDelivered: completion.chunksDelivered,
 						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
 						endpointClass: endpoint.class,
@@ -1476,12 +1747,20 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					provider: kind,
 					timestamp: new Date().toISOString(),
 					usageSource,
+					// D5: present IFF provider-sourced — same snapshot the cost came from.
+					...usageAudit,
 					chunksDelivered: completion.chunksDelivered,
 					// M2 provenance (A6: computeMs omitted — no compute-time source here).
 					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
 					meter: {
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
+					},
+					// D5: what the rates WERE, beside where they came from — a sibling
+					// of `meter`, not a member of it (P1-1). P1-2: its own frozen copy.
+					pricing: {
+						appliedRates: copyAppliedRates(appliedRates),
+						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(postedCost !== undefined ? { postedCost } : {}),
 					...(streamBudget !== undefined ? { budget: streamBudget } : {}),
@@ -1609,7 +1888,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// back raw.
 				if (emitter == null || typeof emitter.on !== "function") {
 					finalizeStreamSettle({
-						usage: { inputTokens: 0, outputTokens: 0 },
+						usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
 						chunksDelivered: 0,
 						usageReported: false,
 					})
@@ -1626,13 +1905,24 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				let chunksDelivered = 0;
 				let accInput = 0;
 				let accOutput = 0;
+				// D2/D4: the cache tiers accumulate alongside input/output. They do NOT
+				// set accUsageReported on their own — D5 provenance needs input AND
+				// output — but they are real billed tokens, so a partial settle carries
+				// them.
+				let accCacheRead = 0;
+				let accCacheWrite = 0;
 				let accUsageReported = false;
 				// R1: set TRUE before governance calls emitter.abort() on an anomaly trip,
 				// so the 'abort' handler can distinguish a governance cutoff (void + breaker
 				// failure) from a genuine consumer abort (F9 settle-partial).
 				let anomalyAbort = false;
 				const partial = (): StreamCompletion => ({
-					usage: { inputTokens: accInput, outputTokens: accOutput },
+					usage: {
+						inputTokens: accInput,
+						outputTokens: accOutput,
+						cacheReadTokens: accCacheRead,
+						cacheWriteTokens: accCacheWrite,
+					},
 					chunksDelivered,
 					usageReported: accUsageReported,
 				});
@@ -1651,12 +1941,24 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						accOutput = tokens.outputTokens;
 						accUsageReported = true;
 					}
+					// D7: cache-tier deltas count toward deltaTokens too — a cache-heavy
+					// chunk with near-zero fresh input/output must not read as idle.
+					if (tokens.cacheReadTokens > accCacheRead) {
+						deltaTokens += tokens.cacheReadTokens - accCacheRead;
+						accCacheRead = tokens.cacheReadTokens;
+					}
+					if (tokens.cacheWriteTokens > accCacheWrite) {
+						deltaTokens += tokens.cacheWriteTokens - accCacheWrite;
+						accCacheWrite = tokens.cacheWriteTokens;
+					}
 					if (!config.anomaly.enabled) return;
 					anomalyDetector.observe({
 						kind: "chunk",
 						deltaTokens,
 						cumulativeInputTokens: accInput,
 						cumulativeOutputTokens: accOutput,
+						cumulativeCacheReadTokens: accCacheRead,
+						cumulativeCacheWriteTokens: accCacheWrite,
 						// M2: stamp the per-call scope so the SHARED detector prices this
 						// event with the same scoped rates as settlement.
 						model,
@@ -1705,12 +2007,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								usage: {
 									inputTokens: finalUsage.inputTokens ?? accInput,
 									outputTokens: finalUsage.outputTokens ?? accOutput,
+									cacheReadTokens: finalUsage.cacheReadTokens ?? accCacheRead,
+									cacheWriteTokens: finalUsage.cacheWriteTokens ?? accCacheWrite,
 								},
 								chunksDelivered,
 								usageReported: true,
 							}
 						: {
-								usage: { inputTokens: 0, outputTokens: 0 },
+								usage: {
+									inputTokens: 0,
+									outputTokens: 0,
+									cacheReadTokens: 0,
+									cacheWriteTokens: 0,
+								},
 								chunksDelivered,
 								usageReported: false,
 							};
@@ -1768,7 +2077,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				emitter.on("end", () => {
 					if (finalizeState !== "pending") return;
 					finalizeStreamSettle({
-						usage: { inputTokens: 0, outputTokens: 0 },
+						usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
 						chunksDelivered,
 						usageReported: false,
 					})
@@ -1857,6 +2166,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								deltaTokens: obs.deltaTokens,
 								cumulativeInputTokens: obs.cumulativeInputTokens,
 								cumulativeOutputTokens: obs.cumulativeOutputTokens,
+								cumulativeCacheReadTokens: obs.cumulativeCacheReadTokens,
+								cumulativeCacheWriteTokens: obs.cumulativeCacheWriteTokens,
 								// M2: stamp the per-call scope so the SHARED detector prices
 								// this event with the same scoped rates as settlement.
 								model,
@@ -1904,25 +2215,43 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// f. Compute actual cost from response usage. A3: priced with the rate
 				// resolution captured at authorize. costFromRates clamps NaN/negative
 				// counts (A7) and floors at 1 even for 0/0 provider usage (A11).
-				let actualCost = estimatedCost;
-				let usageSource: "provider" | "estimated" = "estimated";
-				if (response != null && typeof response === "object" && "usage" in response) {
-					const usage = (response as Record<string, unknown>).usage as Record<
-						string,
-						unknown
-					> | null;
-					if (usage != null) {
-						const inputTokens =
-							(usage.input_tokens as number | undefined) ??
-							(usage.prompt_tokens as number | undefined) ??
-							estimatedInputTokens;
-						const outputTokens =
-							(usage.output_tokens as number | undefined) ??
-							(usage.completion_tokens as number | undefined) ??
-							0;
-						actualCost = costFromRates(rateResolution.rates, inputTokens, outputTokens);
-						usageSource = "provider";
-					}
+				//
+				// D2/D4/D5: the response is read into ONE sanitized four-tier snapshot.
+				// Three things changed here:
+				//   - the cache tiers are priced instead of being silently dropped
+				//     (Anthropic reports them disjoint, so they were billed at ZERO);
+				//   - Google's ROOT `usageMetadata` is read at all — the old
+				//     `"usage" in response` test is FALSE for every real Gemini
+				//     response, so every Gemini call settled at the estimate;
+				//   - the estimate is no longer substituted for a missing provider
+				//     count while still claiming `usageSource: "provider"`. D5: provider
+				//     provenance requires provider-reported input AND output; anything
+				//     less settles at the estimate and is LABELLED estimated.
+				const usageShape: UsageWireShape =
+					kind === "google"
+						? "gemini"
+						: kind === "anthropic"
+							? "anthropic"
+							: surfaceKind === "openai-responses"
+								? "openai-responses"
+								: "openai-completions";
+				const usageSnapshot = fromProviderResponse(response, usageShape);
+				// FIX: the un-inflated metering estimate, never the fattened hold
+				// (see the `meteredEstimateCost` comment at the hold-sizing site).
+				let actualCost = meteredEstimateCost;
+				const usageSource: "provider" | "estimated" = usageSnapshot.source;
+				// D5: the record half of the SAME snapshot the cost comes from. Nothing
+				// below re-reads `response.usage` — one read, one object, two uses.
+				const usageRecord = publishableUsage(usageSnapshot);
+				const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
+				if (usageSnapshot.source === "provider") {
+					actualCost = costFromRates(
+						rateResolution.rates,
+						usageSnapshot.inputTokens,
+						usageSnapshot.outputTokens,
+						usageSnapshot.cacheReadTokens,
+						usageSnapshot.cacheWriteTokens,
+					);
 				}
 
 				// h. Audit the llm_call FIRST (P3-AUDIT-FAILCLOSED). The settlement-
@@ -1940,6 +2269,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						settled: true,
 						transferId,
 						usageSource,
+						// D5: the durable record — four tiers (iff provider-sourced) and
+						// the rates that priced them, so the chain event alone is
+						// enough to reprice the call.
+						...usageAudit,
+						// P1-1: flat here by design (see the stream terminal above).
+						// P1-2: its own frozen copy.
+						appliedRates: copyAppliedRates(appliedRates),
+						pricingTableVersion: PRICING_TABLE_VERSION,
 						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
 						endpointClass: endpoint.class,
 						costBasis: rateResolution.costBasis,
@@ -2133,11 +2470,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					provider: kind,
 					timestamp: new Date().toISOString(),
 					usageSource,
+					// D5: present IFF provider-sourced — same snapshot the cost came from.
+					...usageAudit,
 					// M2 provenance (A6: computeMs omitted — no compute-time source here).
 					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
 					meter: {
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
+					},
+					// D5: what the rates WERE, beside where they came from — a sibling
+					// of `meter`, not a member of it (P1-1). P1-2: its own frozen copy.
+					pricing: {
+						appliedRates: copyAppliedRates(appliedRates),
+						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(postedCost !== undefined ? { postedCost } : {}),
 					...(settledBudget !== undefined ? { budget: settledBudget } : {}),
@@ -2809,28 +3154,60 @@ export function extractPromptParts(
 function readFinalMessageUsage(msg: unknown): {
 	inputTokens: number | undefined;
 	outputTokens: number | undefined;
+	cacheReadTokens: number | undefined;
+	cacheWriteTokens: number | undefined;
 	reported: boolean;
 } {
 	if (msg != null && typeof msg === "object") {
 		const usage = (msg as Record<string, unknown>).usage;
 		if (usage != null && typeof usage === "object") {
 			const u = usage as Record<string, unknown>;
-			const inTok =
-				typeof u.input_tokens === "number" && Number.isFinite(u.input_tokens) && u.input_tokens >= 0
-					? u.input_tokens
+			const isUsableCount = (value: unknown): value is number =>
+				typeof value === "number" && Number.isFinite(value) && value >= 0;
+			const inTok = isUsableCount(u.input_tokens) ? u.input_tokens : undefined;
+			const outTok = isUsableCount(u.output_tokens) ? u.output_tokens : undefined;
+			// D2/D4: the cache tiers come from the ONE Anthropic extractor, which also
+			// folds the nested `cache_creation` TTL breakdown into the write tier.
+			//
+			// F3 applies PER TIER, and per tier separately: a finalMessage that names
+			// only the read counter must not zero an accumulated WRITE counter. Each
+			// tier is therefore reported only when the payload actually carries a
+			// USABLE value for one of its fields (same discipline as inTok/outTok
+			// above) — not merely when the key is present. A `null`/NaN counter is
+			// present-but-unusable, and gating on presence alone would zero an
+			// accumulated tier the streamEvent tap already billed (understatement).
+			// When a tier is not usable it stays `undefined` and the caller keeps
+			// what the streamEvent tap accumulated.
+			const cacheTiers = fromAnthropicUsage(u);
+			const readUsable = isUsableCount(u.cache_read_input_tokens);
+			const breakdownRaw = u.cache_creation;
+			const breakdown =
+				breakdownRaw != null && typeof breakdownRaw === "object"
+					? (breakdownRaw as Record<string, unknown>)
 					: undefined;
-			const outTok =
-				typeof u.output_tokens === "number" &&
-				Number.isFinite(u.output_tokens) &&
-				u.output_tokens >= 0
-					? u.output_tokens
-					: undefined;
+			const breakdownUsable =
+				breakdown != null &&
+				(isUsableCount(breakdown.ephemeral_5m_input_tokens) ||
+					isUsableCount(breakdown.ephemeral_1h_input_tokens));
+			const writeUsable = isUsableCount(u.cache_creation_input_tokens) || breakdownUsable;
 			if (inTok !== undefined || outTok !== undefined) {
-				return { inputTokens: inTok, outputTokens: outTok, reported: true };
+				return {
+					inputTokens: inTok,
+					outputTokens: outTok,
+					cacheReadTokens: readUsable ? cacheTiers.cacheReadTokens : undefined,
+					cacheWriteTokens: writeUsable ? cacheTiers.cacheWriteTokens : undefined,
+					reported: true,
+				};
 			}
 		}
 	}
-	return { inputTokens: undefined, outputTokens: undefined, reported: false };
+	return {
+		inputTokens: undefined,
+		outputTokens: undefined,
+		cacheReadTokens: undefined,
+		cacheWriteTokens: undefined,
+		reported: false,
+	};
 }
 
 /**
@@ -2842,23 +3219,40 @@ function readFinalMessageUsage(msg: unknown): {
 function extractAnthropicStreamUsage(event: unknown): {
 	inputTokens: number;
 	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
 } {
-	if (event == null || typeof event !== "object") return { inputTokens: 0, outputTokens: 0 };
+	const none = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+	if (event == null || typeof event !== "object") return none;
 	const c = event as Record<string, unknown>;
 	if (c.type === "message_start" && c.message != null && typeof c.message === "object") {
 		const msg = c.message as Record<string, unknown>;
 		if (msg.usage != null && typeof msg.usage === "object") {
 			const usage = msg.usage as Record<string, unknown>;
 			const inTok = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
-			return { inputTokens: inTok > 0 ? inTok : 0, outputTokens: 0 };
+			// D2: the SDK's three input counters are DISJOINT — the cache tiers are
+			// pure addition, never subtracted out of input_tokens.
+			const tiers = fromAnthropicUsage(usage);
+			return {
+				inputTokens: inTok > 0 ? inTok : 0,
+				outputTokens: 0,
+				cacheReadTokens: tiers.cacheReadTokens,
+				cacheWriteTokens: tiers.cacheWriteTokens,
+			};
 		}
 	}
 	if (c.type === "message_delta" && c.usage != null && typeof c.usage === "object") {
 		const usage = c.usage as Record<string, unknown>;
 		const outTok = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
-		return { inputTokens: 0, outputTokens: outTok > 0 ? outTok : 0 };
+		const tiers = fromAnthropicUsage(usage);
+		return {
+			inputTokens: 0,
+			outputTokens: outTok > 0 ? outTok : 0,
+			cacheReadTokens: tiers.cacheReadTokens,
+			cacheWriteTokens: tiers.cacheWriteTokens,
+		};
 	}
-	return { inputTokens: 0, outputTokens: 0 };
+	return none;
 }
 
 // ── TigerBeetle engine factory ──

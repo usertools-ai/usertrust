@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Four-tier cache pricing: rates, receipts, and public schemas (correctness fix).**
+  Cache traffic was billed at **zero**: `ModelRates` was two-tier, core's extraction read
+  `usage.input_tokens ?? prompt_tokens` while providers report cache read/write as separate
+  counters, and openclaw's accumulator dropped the cache fields it did extract. A
+  1.14B-cache-read day was under-recorded roughly 7-8x — understatement is the dangerous
+  direction, since it makes budgets deplete an order of magnitude slower than the real invoice
+  and every scarcity number read falsely high. `ModelRates` gains optional `cacheReadPer1k` /
+  `cacheWritePer1k`; every `PRICING_TABLE` entry was re-derived from providers' current published
+  rates (`PRICING_TABLE_VERSION = "2026-08-08"`, recorded on receipts), correcting a stale
+  `o4-mini` base rate along the way. **An absent cache rate now prices at `inputPer1k`, never
+  zero** — overstatement is the fail-safe direction, and this resolution happens in exactly one
+  place (`costFromRates`). Core's Anthropic/OpenAI-completions/Responses/Gemini extraction,
+  openclaw's accumulator and settle paths, the server wire schema, and the ACS adapter's
+  `token_count` all carry the four disjoint tiers end-to-end now, normalized per-source (pi-ai's
+  pinned adapters are already disjoint and pass through; core-direct OpenAI/Gemini subtract the
+  cache tiers back out of an inclusive prompt count, clamped at 0). The PENDING hold now reserves
+  the input leg at `max(inputPer1k, effective cacheWritePer1k)` so a cache-write premium (Anthropic
+  1.25x/2x) can't exceed an input-only hold — holds on cache-writing workloads run ~25% fatter;
+  warm workloads settle well below and release the difference. `TrustReceipt.usage` (the four-tier
+  split) and `TrustReceipt.pricing` (`appliedRates` + `tableVersion` — the resolved rates,
+  published even when they came from the fallback) make a settled cost independently recomputable
+  from the record alone: `ceil(sum(counts x rates / 1000))`, multiply-then-divide, floored at 1.
+  Both are ROOT-level additions because v1 froze `meter` with `additionalProperties: false`, so v1
+  validators accept v2 receipts unchanged. `appliedRates` is frozen and copied per record surface.
+  `receipt.v2.schema.json` publishes both (v1 stays frozen). Anomaly velocity
+  tracking now sees cached traffic instead of losing it once `inputTokens` stopped including it.
+  Documented approximations (per-TTL write premium collapsed to the 5-minute rate; long-context,
+  service-tier, regional, modality, and cache-storage charges not modeled) are in `AGENTS.md`'s
+  Money invariants and `/docs/api/pricing`. See the design spec and the D1-D9 sections it links
+  for the full boundary inventory.
+
 - **Budget envelopes: spend routing, per-envelope caps, and scarcity visibility
   (#79, previously unlisted).** `withCostCenter(costCenter, fn, opts?)`
   (`budget/attribution.ts`) attributes a governed call's spend to a
@@ -75,6 +106,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   iterable with a settled-`.receipt` promise — not the SDK's raw `Stream`
   (which the runtime never returns from governed `create`; the envelope's own
   `receipt` is the pre-settlement estimate). Types-only; no runtime change.
+- `TrustedClient` types: the same envelope now covers the remaining governed
+  surfaces — OpenAI `chat.completions.create` and `responses.create`, and Google
+  `models.generateContent`. All three resolved to the provider SDK's raw return
+  type while the runtime had been returning `{ response, receipt }` since the
+  proxies were written, so an OpenAI or Google consumer had no typed path to
+  `.receipt` at all and had to cast through `as unknown as`. Streaming calls on
+  either OpenAI surface resolve `response` to `GovernedStream<T>`, matching the
+  generic async-iterable branch of `interceptCall` that actually wraps them.
+  `TrustedClient<T>` now mirrors `detectClientKind`'s ORDER and BOTH halves of
+  its shape test, as exclusive branches — Anthropic, else OpenAI, else Google —
+  so a hybrid client is typed as governed on exactly the one provider surface
+  `trust()` proxies at runtime. Both halves means the governed method must be
+  callable AND its namespace must be a non-callable object: every namespace walk
+  in the runtime is gated on `typeof ns === "object"`, which a function object
+  fails, so a client whose `chat`, `messages`, `models`, `responses` or `beta` is
+  a callable carrying properties is skipped by the runtime and is now skipped by
+  the type too (falling through to the next provider where one applies).
+  Namespaces are re-added through homomorphic mapped types rather than plain
+  intersections, so `readonly` — which real `@google/genai` declares on `models`
+  — and `?` both survive, and a namespace the client never declared does not
+  become a phantom property. The ungoverned inventory stays raw and
+  is pinned by type tests: `chat.completions.parse` / `.stream` / `.runTools`,
+  `responses.stream` / `.parse` / `.retrieve` / `.cancel` / `.delete` /
+  `.compact`, the OpenAI `beta.*` namespace, legacy `completions.create`, and
+  Google `models.generateContentStream`. The OpenAI assertions run against the
+  real installed `openai@^7.3.0` types; the Google mapper is asserted against a
+  structural mock only — no `@google/genai` devDependency exists yet, so real
+  `@google/genai` compatibility is unverified. Types-only; no runtime change.
 - A policy rule with no `description` no longer renders its identifier twice
   in the denial reason (`[scarcity-brake] scarcity-brake` is now
   `[scarcity-brake]`).

@@ -445,6 +445,48 @@ spoofing (`ollama cp llama3.2 gpt-4o`) changing the regime; and
 end-user or request input; set `local.autoDetectLoopback: false` in multi-tenant deployments, since
 loopback inside a container may be a forwarding sidecar to a paid API.
 
+**Absent cache rates price at `inputPer1k` — never zero, and never a silent discount (D1).**
+`ModelRates.cacheReadPer1k` / `cacheWritePer1k` are optional; an entry that omits either means the
+provider publishes no rate for that tier, not that the tier is free. `costFromRates` resolves an
+absent (or non-finite/negative) cache rate to the model's `inputPer1k`, and that resolution happens
+in exactly one place — `effectiveCacheRate` in `ledger/pricing.ts`. Never inline
+`rate ?? rates.inputPer1k` (or equivalent) anywhere else; a second resolution site is exactly how a
+silent discount gets introduced. `resolveAppliedRates` (published on `receipt.pricing.appliedRates`)
+goes through the same function, so the rates an auditor sees are the rates the cost was computed
+with. It returns a FROZEN snapshot and each record surface gets its own copy: one resolved object
+reaches the caller's receipt, the chain event and (for streams) the pre-settle handle, so a shared
+mutable object would let a caller rewrite the rates the chain records without touching the cost.
+
+**New receipt fields go at the ROOT, never inside `meter`.** `receipt.v1.schema.json` is frozen
+and declares `meter` with `additionalProperties: false` while leaving the receipt root open. A
+field added inside `meter` therefore makes every v1 validator reject every receipt usertrust
+emits — a compatibility break with no error message. This is why the D5 rate surface is
+`receipt.pricing`, a sibling of `meter`, and it binds anything added later.
+*Prevents:* the failure this whole ship exists to kill — a 1.14B-cache-read day billed at zero
+because a two-tier `ModelRates`/extractor pair had nowhere to price cache tokens, understating spend
+~7-8x. Overstatement is the fail-safe direction: a mispriced call costs too much, never too little,
+so budgets can only deplete faster than the true invoice, never slower.
+
+**Hold sizing reserves the write-premium case, not just the input case (D3).**
+A cache WRITE (Anthropic 1.25x/2x; provider-specific elsewhere) can price above a plain
+input-priced hold, so "cold-cache worst case" was false wherever a write premium applies — a
+headless caller supplying an exact `estimatedInputTokens` had no margin, and the capped-settle
+machinery (above) would then post `min(actual, held)`, silently under-debiting the envelope and
+leaving scarcity numbers falsely high. Both hold-sizing sites — the govern-path authorize estimate
+and the headless authorize estimate — reserve the input leg at
+`max(inputPer1k, effectiveCacheWriteRate(rates))` instead of `inputPer1k` alone.
+*Documented consequence:* holds on cache-writing workloads run ~25% fatter than before; warm
+(cache-hit-heavy) workloads settle far below the hold and release the difference back, so this is
+conservative, not a leak. A warm-but-cold-held call can see `budget_remaining_after` over-deny —
+the fail-safe trade the invariant above already accepts.
+
+**Documented pricing approximations — verbatim, also published at `/docs/api/pricing`:**
+Per-TTL write premium collapsed (1h = 2× billed as 1.25×; `customRates` override for 1h-heavy
+workloads); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
+hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not modeled — fixed
+per-model rates by design; per-call `ceil` + 1-UT floor differs from provider-side aggregation.
+Estimates never model cache state.
+
 ### Audit
 
 **Persist the canonical bytes, not `JSON.stringify` output.** The hash pre-image is

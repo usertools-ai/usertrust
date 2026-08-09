@@ -190,7 +190,12 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				],
 				"openai",
 			);
-			expect(completion.usage).toEqual({ inputTokens: 10, outputTokens: 20 });
+			expect(completion.usage).toEqual({
+				inputTokens: 10,
+				outputTokens: 20,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+			});
 			expect(completion.usageReported).toBe(true);
 		});
 
@@ -202,7 +207,12 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				],
 				"openai",
 			);
-			expect(completion.usage).toEqual({ inputTokens: 100, outputTokens: 25 });
+			expect(completion.usage).toEqual({
+				inputTokens: 100,
+				outputTokens: 25,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+			});
 		});
 
 		it("openai: a usage-bearing chunk with explicit zeros counts as reported usage (A11)", async () => {
@@ -210,11 +220,16 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				[{ choices: [], usage: { prompt_tokens: 0, completion_tokens: 0 } }],
 				"openai",
 			);
-			expect(completion.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+			expect(completion.usage).toEqual({
+				inputTokens: 0,
+				outputTokens: 0,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+			});
 			expect(completion.usageReported).toBe(true);
 		});
 
-		it("openai: NaN/negative usage values are clamped to 0 (A7)", async () => {
+		it("openai: NaN/negative usage values clamp to 0 AND lose the provider label (A7+D5)", async () => {
 			const completion = await collect(
 				[
 					{
@@ -224,8 +239,19 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				],
 				"openai",
 			);
-			expect(completion.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
-			expect(completion.usageReported).toBe(true);
+			expect(completion.usage).toEqual({
+				inputTokens: 0,
+				outputTokens: 0,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+			});
+			// A7 clamping is unchanged — the counts are 0. What changed is the LABEL:
+			// spec D5 requires a provider-reported input AND output for provider
+			// provenance, and NaN/-7 are not reported counts. Treating the clamped
+			// zeros as "reported" settled a real call at the 1-usertoken floor under a
+			// "provider" label — an understatement AND a mislabel. It now falls back to
+			// the estimate (which the hold already reserved), the fail-safe direction.
+			expect(completion.usageReported).toBe(false);
 		});
 
 		it("google: usageMetadata snapshots replace, never sum", async () => {
@@ -236,7 +262,12 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				],
 				"google",
 			);
-			expect(completion.usage).toEqual({ inputTokens: 60, outputTokens: 33 });
+			expect(completion.usage).toEqual({
+				inputTokens: 60,
+				outputTokens: 33,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+			});
 		});
 
 		it("anthropic: incremental message_start/message_delta path is unchanged (regression)", async () => {
@@ -247,7 +278,12 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				],
 				"anthropic",
 			);
-			expect(completion.usage).toEqual({ inputTokens: 100, outputTokens: 25 });
+			expect(completion.usage).toEqual({
+				inputTokens: 100,
+				outputTokens: 25,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+			});
 			expect(completion.usageReported).toBe(true);
 		});
 	});
@@ -495,7 +531,10 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 			});
 			expect(createFn).toHaveBeenCalledTimes(1);
 			expect(result.receipt.cost).toBe(1);
-			expect(result.receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-default" });
+			expect(result.receipt.meter).toMatchObject({
+				costBasis: "nominal",
+				rateSource: "local-default",
+			});
 			await destroy(governed);
 		});
 
@@ -524,8 +563,8 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				String(c[0]).includes("made-up-model-warn-1"),
 			);
 			expect(unknownModelWarns).toHaveLength(1);
-			expect(r1.receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "fallback" });
-			expect(r2.receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "fallback" });
+			expect(r1.receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "fallback" });
+			expect(r2.receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "fallback" });
 			await destroy(governed);
 		});
 
@@ -550,7 +589,10 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				String(c[0]).includes("made-up-model-silent-1"),
 			);
 			expect(unknownModelWarns).toHaveLength(0);
-			expect(result.receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "fallback" });
+			expect(result.receipt.meter).toMatchObject({
+				costBasis: "usd-proxy",
+				rateSource: "fallback",
+			});
 			await destroy(governed);
 		});
 	});
@@ -573,8 +615,14 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				messages: [{ role: "user", content: "hi" }],
 			});
 			expect(result.receipt.endpoint).toEqual({ class: "local", runtime: "ollama" });
-			// A6: absent optional fields are OMITTED — toEqual proves no computeMs key.
-			expect(result.receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-default" });
+			// A6: absent optional fields are OMITTED. `meter` is no longer asserted
+			// exhaustively (D5 added appliedRates + pricingTableVersion), so the
+			// omission is pinned directly on the key.
+			expect(result.receipt.meter).toMatchObject({
+				costBasis: "nominal",
+				rateSource: "local-default",
+			});
+			expect(Object.hasOwn(result.receipt.meter as object, "computeMs")).toBe(false);
 			expect(result.receipt.usageSource).toBe("provider");
 			expect(result.receipt.cost).toBe(1);
 			await destroy(governed);
@@ -597,7 +645,7 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 			await destroy(governed);
 		});
 
-		it("A7: negative/NaN non-stream usage is clamped — cost floors at 1", async () => {
+		it("A7+D5: negative/NaN non-stream usage clamps to 0 and settles as ESTIMATED", async () => {
 			const { client } = makeJsonClient({
 				id: "x",
 				choices: [{ message: { role: "assistant", content: "hi" } }],
@@ -609,7 +657,12 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				model: "qwen2.5:7b",
 				messages: [{ role: "user", content: "hi" }],
 			});
-			expect(result.receipt.usageSource).toBe("provider");
+			// D5: neither counter is a usable provider count, so the clamped zeros are
+			// FABRICATED and must not be published as provider-sourced. Previously this
+			// settled "provider" at the floor; it now settles on the estimate and says
+			// so. On a local endpoint both are 1 usertoken (rate {0,0} + the A11 floor),
+			// so the money is unchanged here — only the honesty of the label.
+			expect(result.receipt.usageSource).toBe("estimated");
 			expect(result.receipt.cost).toBe(1);
 			await destroy(governed);
 		});
@@ -648,7 +701,10 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 
 			// Pre-settlement (estimated) receipt already carries authorize-time scope (A3).
 			expect(result.receipt.endpoint).toEqual({ class: "local", runtime: "ollama" });
-			expect(result.receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-model" });
+			expect(result.receipt.meter).toMatchObject({
+				costBasis: "nominal",
+				rateSource: "local-model",
+			});
 
 			const { chunks, receipt } = await consumeStream(result);
 			// The injected usage chunk is forwarded to the consumer unmodified.
@@ -657,7 +713,7 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 			expect(receipt.cost).toBe(2);
 			expect(receipt.usageSource).toBe("provider");
 			expect(receipt.endpoint).toEqual({ class: "local", runtime: "ollama" });
-			expect(receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-model" });
+			expect(receipt.meter).toMatchObject({ costBasis: "nominal", rateSource: "local-model" });
 			await destroy(governed);
 		});
 
@@ -677,7 +733,7 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				messages: [{ role: "user", content: "hi" }],
 			});
 			expect(result.receipt.endpoint).toEqual({ class: "cloud", runtime: "unknown" });
-			expect(result.receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "table" });
+			expect(result.receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "table" });
 			// (200/1000)*25 + (100/1000)*100 = 5 + 10 = 15
 			expect(result.receipt.cost).toBe(15);
 			await destroy(governed);
@@ -697,7 +753,10 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 			});
 			// Endpoint class — not the model string — picks the settlement regime.
 			expect(result.receipt.cost).toBe(1);
-			expect(result.receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-default" });
+			expect(result.receipt.meter).toMatchObject({
+				costBasis: "nominal",
+				rateSource: "local-default",
+			});
 			await destroy(governed);
 		});
 
@@ -719,7 +778,7 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				messages: [{ role: "user", content: "hi" }],
 			});
 			expect(result.receipt.endpoint).toEqual({ class: "cloud", runtime: "unknown" });
-			expect(result.receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "table" });
+			expect(result.receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "table" });
 			await destroy(governed);
 		});
 
@@ -739,7 +798,10 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				model: "qwen2.5:7b",
 				messages: [{ role: "user", content: "hi" }],
 			});
-			expect(result.receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "local-default" });
+			expect(result.receipt.meter).toMatchObject({
+				costBasis: "usd-proxy",
+				rateSource: "local-default",
+			});
 			// (1000/1000)*1 + (500/1000)*2 = 2
 			expect(result.receipt.cost).toBe(2);
 			await destroy(governed);

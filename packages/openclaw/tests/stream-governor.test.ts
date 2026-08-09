@@ -6,7 +6,7 @@ import type { Governor } from "usertrust";
 import { createGovernor } from "usertrust";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { wrapCompleteWithGovernance, wrapStreamWithGovernance } from "../src/stream-governor.js";
-import type { Context, StreamEvent, StreamFn, StreamOptions } from "../src/types.js";
+import type { Context, StreamEvent, StreamFn, StreamOptions, Usage } from "../src/types.js";
 import {
 	asHostStream,
 	doneEvent,
@@ -19,6 +19,23 @@ import {
 	textDelta,
 	withTimeout,
 } from "./host-fixtures.js";
+
+/**
+ * A pre-cache (two-field) host `Usage` shape — `cacheRead`/`cacheWrite` are
+ * ABSENT keys, not `0`-valued ones. `makeUsage()` always supplies explicit
+ * zeros (a provider reporting confirmed no cache use), so this fixture is what
+ * the older-runtime degradation path (spec D2 "Version contract") actually
+ * needs: a pi-ai below the >=0.12.0 peer floor whose `Usage` never had cache
+ * fields at all.
+ */
+function legacyUsage(input: number, output: number): Usage {
+	return {
+		input,
+		output,
+		totalTokens: input + output,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	} as unknown as Usage;
+}
 
 // Mock tigerbeetle-node
 vi.mock("tigerbeetle-node", () => ({
@@ -163,6 +180,40 @@ describe("wrapStreamWithGovernance", () => {
 		expect(gov.budgetRemaining()).toBe(budgetBefore);
 	});
 
+	it("forwards cache read/write tokens to governor.settle (spec D4 row 2, stream path)", async () => {
+		const settle = vi.spyOn(gov, "settle");
+		const events: StreamEvent[] = [startEvent(), doneEvent(makeUsage(100, 50, 30, 10))];
+
+		const governed = wrapStreamWithGovernance(mockStreamFn(events), gov);
+		for await (const _event of await governed(model, makeContext())) {
+			// consume
+		}
+
+		expect(settle).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({
+				inputTokens: 100,
+				outputTokens: 50,
+				cacheReadTokens: 30,
+				cacheWriteTokens: 10,
+			}),
+		);
+	});
+
+	it("omits cache tokens from the settle params for a pre-cache (two-field) host Usage", async () => {
+		const settle = vi.spyOn(gov, "settle");
+		const events: StreamEvent[] = [startEvent(), doneEvent(legacyUsage(100, 50))];
+
+		const governed = wrapStreamWithGovernance(mockStreamFn(events), gov);
+		for await (const _event of await governed(model, makeContext())) {
+			// consume
+		}
+
+		const params = settle.mock.calls[0]?.[1];
+		expect(params).not.toHaveProperty("cacheReadTokens");
+		expect(params).not.toHaveProperty("cacheWriteTokens");
+	});
+
 	it("handles multiple concurrent streams", async () => {
 		const events: StreamEvent[] = [
 			startEvent(),
@@ -253,6 +304,42 @@ describe("wrapCompleteWithGovernance", () => {
 
 		// Budget restored after abort
 		expect(gov.budgetRemaining()).toBe(budgetBefore);
+	});
+
+	it("forwards cache read/write tokens to governor.settle (spec D4 row 2, completion path)", async () => {
+		const settle = vi.spyOn(gov, "settle");
+		const completeFn = vi.fn(async () => ({
+			content: "Hello!",
+			usage: makeUsage(100, 50, 30, 10),
+		}));
+
+		const governed = wrapCompleteWithGovernance(completeFn, gov);
+		await governed(model, makeContext());
+
+		expect(settle).toHaveBeenCalledWith(
+			expect.anything(),
+			expect.objectContaining({
+				inputTokens: 100,
+				outputTokens: 50,
+				cacheReadTokens: 30,
+				cacheWriteTokens: 10,
+			}),
+		);
+	});
+
+	it("omits cache tokens from settle params for a pre-cache (two-field) completion Usage", async () => {
+		const settle = vi.spyOn(gov, "settle");
+		const completeFn = vi.fn(async () => ({
+			content: "Hello!",
+			usage: legacyUsage(100, 50),
+		}));
+
+		const governed = wrapCompleteWithGovernance(completeFn, gov);
+		await governed(model, makeContext());
+
+		const params = settle.mock.calls[0]?.[1];
+		expect(params).not.toHaveProperty("cacheReadTokens");
+		expect(params).not.toHaveProperty("cacheWriteTokens");
 	});
 
 	it("wraps a completion without usage (falls back to estimated)", async () => {

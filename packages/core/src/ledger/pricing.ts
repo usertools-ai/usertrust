@@ -9,39 +9,108 @@
  * Canonical pricing source for supported LLM models.
  */
 
-import type { CostBasis, EndpointClass, RateSource, TrustConfig } from "../shared/types.js";
+import type {
+	AppliedRates,
+	CostBasis,
+	EndpointClass,
+	RateSource,
+	TrustConfig,
+} from "../shared/types.js";
 
 export interface ModelRates {
 	inputPer1k: number;
 	outputPer1k: number;
+	/**
+	 * Rate for cached-prompt READ tokens (cache hits).
+	 *
+	 * OPTIONAL, and absence is meaningful: an entry omits this field when the
+	 * provider publishes no cache-read rate. Absent does NOT mean free —
+	 * `costFromRates` resolves it to `inputPer1k` (the D1 money invariant).
+	 * Never set this to 0 to mean "unknown"; omit the field instead.
+	 *
+	 * `| undefined` is explicit because the repo runs `exactOptionalPropertyTypes`
+	 * and this type also receives Zod-parsed config rates (`RateSchema`), whose
+	 * inference for an optional field is `number | undefined`. An explicit
+	 * `undefined` is treated exactly like absence by `effectiveCacheRate`, so the
+	 * D1 invariant holds for both shapes; omitting the key is still the form to
+	 * write by hand.
+	 */
+	cacheReadPer1k?: number | undefined;
+	/**
+	 * Rate for cache-WRITE tokens (cache creation).
+	 *
+	 * Same absence semantics as `cacheReadPer1k`: omitted means "unpublished",
+	 * and `costFromRates` prices those tokens at `inputPer1k`.
+	 */
+	cacheWritePer1k?: number | undefined;
 }
 
 /**
  * Pricing table for the top 20 models supported by the SDK.
  * Key: model identifier as sent by the client.
+ *
+ * All four tiers were re-derived from the providers' published pricing pages on
+ * the PRICING_TABLE_VERSION date below, converted at 1 usertoken = $0.0001
+ * (so $/MTok x 10 = the per-1k usertoken rate).
+ *
+ * A cache field is OMITTED wherever the provider publishes no rate for that
+ * tier. Omission routes those tokens through the D1 fallback in costFromRates
+ * (priced at inputPer1k — conservative overstatement). Never invent a discount
+ * to fill a gap: understatement is the dangerous direction, because budgets then
+ * deplete slower than the invoice and every scarcity number reads falsely high.
  */
 export const PRICING_TABLE: Record<string, ModelRates> = {
 	// ── Anthropic ──
-	"claude-sonnet-4-6": { inputPer1k: 30, outputPer1k: 150 },
-	"claude-haiku-4-5": { inputPer1k: 10, outputPer1k: 50 },
-	"claude-opus-4-6": { inputPer1k: 50, outputPer1k: 250 },
+	// Published multipliers: cache read 0.1x base input, 5-minute cache write
+	// 1.25x. (The 1-hour write is 2x; collapsing per-TTL pricing to the 5m rate
+	// is a documented approximation — operators with 1h-heavy workloads override
+	// via customRates.)
+	"claude-sonnet-4-6": {
+		inputPer1k: 30,
+		outputPer1k: 150,
+		cacheReadPer1k: 3,
+		cacheWritePer1k: 37.5,
+	},
+	"claude-haiku-4-5": { inputPer1k: 10, outputPer1k: 50, cacheReadPer1k: 1, cacheWritePer1k: 12.5 },
+	"claude-opus-4-6": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
 
 	// ── OpenAI ──
-	"gpt-4o": { inputPer1k: 25, outputPer1k: 100 },
-	"gpt-4o-mini": { inputPer1k: 1.5, outputPer1k: 6 },
-	"gpt-5.4": { inputPer1k: 25, outputPer1k: 150 },
-	o3: { inputPer1k: 20, outputPer1k: 80 },
-	"o4-mini": { inputPer1k: 5.5, outputPer1k: 22 },
+	// Cached-input reads are published per model and the discount varies WITHIN
+	// the family: gpt-5.4 reads at 0.1x, o3/o4-mini at 0.25x, the 4o family at
+	// 0.5x. None of the entries below publish a separate cache-WRITE rate —
+	// every one predates gpt-5.6 — so cacheWritePer1k is omitted and the D1
+	// fallback (price at inputPer1k) reproduces the published behaviour
+	// exactly. This is a claim about THIS table, not about OpenAI generally:
+	// OpenAI's prompt-caching guide documents `cache_write_tokens`, billed at
+	// 1.25x the uncached input rate, for gpt-5.6 and later model families. Any
+	// gpt-5.6+ entry added here MUST carry an explicit cacheWritePer1k, or its
+	// writes will silently misprice at the (now wrong) inputPer1k fallback.
+	"gpt-4o": { inputPer1k: 25, outputPer1k: 100, cacheReadPer1k: 12.5 },
+	"gpt-4o-mini": { inputPer1k: 1.5, outputPer1k: 6, cacheReadPer1k: 0.75 },
+	"gpt-5.4": { inputPer1k: 25, outputPer1k: 150, cacheReadPer1k: 2.5 },
+	o3: { inputPer1k: 20, outputPer1k: 80, cacheReadPer1k: 5 },
+	// Base was 5.5/22 before the 2026-08-08 audit — exactly half the published
+	// standard rate. Corrected upward; understatement is the dangerous direction.
+	"o4-mini": { inputPer1k: 11, outputPer1k: 44, cacheReadPer1k: 2.75 },
 
 	// ── Google Gemini ──
-	"gemini-2.5-flash": { inputPer1k: 3, outputPer1k: 25 },
-	"gemini-2.5-pro": { inputPer1k: 12.5, outputPer1k: 100 },
-	"gemini-3.1-pro": { inputPer1k: 20, outputPer1k: 120 },
+	// Context-cache reads are 0.1x base input. Cache CREATION bills as ordinary
+	// input plus an hourly storage charge that this per-token model does not
+	// carry, so cacheWritePer1k is omitted rather than guessed. Rates are the
+	// <=200k-prompt tier; long-context uplifts are a documented approximation.
+	"gemini-2.5-flash": { inputPer1k: 3, outputPer1k: 25, cacheReadPer1k: 0.3 },
+	"gemini-2.5-pro": { inputPer1k: 12.5, outputPer1k: 100, cacheReadPer1k: 1.25 },
+	"gemini-3.1-pro": { inputPer1k: 20, outputPer1k: 120, cacheReadPer1k: 2 },
 
 	// ── Mistral ──
+	// `mistral-large-latest` resolves to Mistral Large 3, listed at $0.50 in /
+	// $1.50 out per MTok on Mistral's own /pricing/api. (The $2/$6 figure still
+	// quoted in the marketing FAQ is the retired Large 2 rate — do not use it.)
+	// No caching discount published.
 	"mistral-large": { inputPer1k: 5, outputPer1k: 15 },
 
 	// ── DeepSeek ──
+	// No cache pricing resolvable for these alias keys (see task report).
 	"deepseek-chat": { inputPer1k: 2.8, outputPer1k: 4.2 },
 	"deepseek-reasoner": { inputPer1k: 2.8, outputPer1k: 4.2 },
 
@@ -61,16 +130,28 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	"qwen-72b": { inputPer1k: 2.9, outputPer1k: 3.9 },
 
 	// ── Amazon ──
+	// Bedrock on-demand: $0.80 in / $3.20 out per MTok. No cache pricing published.
 	"nova-pro": { inputPer1k: 8, outputPer1k: 32 },
 };
 
-/** Date the PRICING_TABLE rates were last verified against provider pricing pages. */
-export const PRICING_TABLE_VERSION = "2026-03-29";
+/**
+ * Date the PRICING_TABLE rates were last verified against provider pricing pages.
+ * Bump on every entry change; recorded on receipts so a metered cost can be
+ * reproduced against the exact table that priced it.
+ */
+export const PRICING_TABLE_VERSION = "2026-08-08";
 
 /** Pre-sorted entries for prefix matching (longest key first). */
 const SORTED_TABLE = Object.entries(PRICING_TABLE).sort((a, b) => b[0].length - a[0].length);
 
-/** Fallback rate for unknown models (sonnet-class pricing). */
+/**
+ * Fallback rate for unknown models (sonnet-class pricing).
+ *
+ * Deliberately two-tier: an unknown model is not known to be Anthropic-shaped,
+ * so attaching a cache discount here would silently under-bill every
+ * unrecognised model. Leaving both cache fields absent routes cache tokens
+ * through the D1 fallback and prices them at inputPer1k instead.
+ */
 export const FALLBACK_RATE: ModelRates = { inputPer1k: 30, outputPer1k: 150 };
 
 /** Maps provider names to their model key prefixes in PRICING_TABLE. */
@@ -144,27 +225,220 @@ export function warnUnknownModel(model: string): void {
 	);
 }
 
+/** True once the D8 cache-rate migration warning has fired this process. */
+let cacheRateMigrationWarned = false;
+
 /**
- * Compute usertoken cost from explicit rates.
+ * D8 migration warning: `customRates` is replace-not-merge (D1) — a custom
+ * entry for a model the table prices at four tiers, written before this ship,
+ * silently loses the cache discount forever, not by operator choice but
+ * because the fields didn't exist yet. This is NOT the D1 money invariant
+ * (that fallback is correct and stays); it is a one-time notice so the
+ * operator knows their cache reads are about to price at the full input
+ * rate and can add `cacheReadPer1k`/`cacheWritePer1k` if that is unwanted.
+ *
+ * Fires at most ONCE per process — not once per call, not once per model —
+ * via the module-level flag above, so a long-running governor isn't spammed
+ * on every settle. Called from the config-load path of every entry point
+ * that actually meters against `customRates` (`trust()`, `createGovernor()`),
+ * mirroring how `warnUnknownModel` is shared by both.
+ */
+export function warnCacheRateMigration(customRates: Record<string, ModelRates> | undefined): void {
+	if (cacheRateMigrationWarned || !customRates) return;
+
+	const affected: string[] = [];
+	for (const [model, custom] of Object.entries(customRates)) {
+		const base = PRICING_TABLE[model];
+		if (!base) continue;
+		const missingRead = base.cacheReadPer1k !== undefined && custom.cacheReadPer1k === undefined;
+		const missingWrite = base.cacheWritePer1k !== undefined && custom.cacheWritePer1k === undefined;
+		if (missingRead || missingWrite) affected.push(model);
+	}
+
+	if (affected.length === 0) return;
+
+	cacheRateMigrationWarned = true;
+	process.stderr.write(
+		`[usertrust] customRates for ${affected.join(", ")} omit cache rates the pricing table publishes for ` +
+			`${affected.length === 1 ? "it" : "them"}; cache reads will price at full input rate. Add ` +
+			"cacheReadPer1k/cacheWritePer1k to customRates to restore the discount.\n",
+	);
+}
+
+/**
+ * Resolve the effective rate for one cache tier — THE single site where the D1
+ * money invariant is applied. Do not inline this resolution anywhere else: a
+ * second resolution site is how a silent discount gets introduced.
+ *
+ * An absent (or garbage) cache rate resolves to `inputPer1k`. Overstatement is
+ * fail-safe; zero-billing cache tokens is forbidden. A rate the operator set
+ * explicitly to a finite value >= 0 is honoured as written — including 0, which
+ * is a deliberate choice for self-hosted models, not an absence.
+ */
+function effectiveCacheRate(rate: number | undefined, inputPer1k: number): number {
+	return rate !== undefined && Number.isFinite(rate) && rate >= 0 ? rate : inputPer1k;
+}
+
+/**
+ * Resolve the effective cache-WRITE rate for a rate set — the same D1
+ * resolution `costFromRates` applies internally, exposed as its own tiny
+ * export so hold-sizing call sites (spec D3) can read it WITHOUT re-deriving
+ * the `??` chain. Do not inline `rates.cacheWritePer1k ?? rates.inputPer1k`
+ * anywhere else; that is exactly the second resolution site D1 forbids —
+ * route through here (or `costFromRates`) instead.
+ *
+ * Absent/garbage `cacheWritePer1k` resolves to `inputPer1k`, identical to
+ * `costFromRates`'s own cache-write pricing.
+ */
+export function effectiveCacheWriteRate(rates: ModelRates): number {
+	return effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k);
+}
+
+/**
+ * The four RESOLVED per-1k rates a settle is metered with — the record-surface
+ * half of the D1 invariant, and what `receipt.pricing.appliedRates` publishes.
+ *
+ * Same `effectiveCacheRate` the money goes through, deliberately: the published
+ * rates and the rates the cost was computed with are the SAME resolution, so
+ * they cannot drift. An absent cache tier is published as `inputPer1k` — which
+ * is what the operator will actually be charged for it — never as `undefined`
+ * and never as 0. Emitting the raw `ModelRates` here instead would leave a hole
+ * in exactly the tiers the fallback makes non-zero, and an auditor recomputing
+ * from the record would understate the bill: the same failure direction this
+ * whole ship exists to kill.
+ *
+ * THE RESULT IS FROZEN (Codex PR-85 P1-2), and that is load-bearing rather than
+ * hygienic. One snapshot is resolved per governed call and then shared by every
+ * record surface that call produces — the estimate-priced stream handle HANDED
+ * TO THE CALLER before the stream is consumed, the `llm_call` chain event
+ * written at the terminal, and the settled receipt. Without the freeze, a
+ * caller could mutate the rates on the handle it holds and the mutated numbers
+ * would be what the audit chain records, while the cost stayed computed from
+ * the untouched `ModelRates`. The chain would hash and verify perfectly around
+ * rates that never priced anything — a receipt whose own recompute disagrees
+ * with its own cost, with nothing in the record to show it happened.
+ *
+ * All four fields are numbers, so the shallow freeze is a deep freeze.
+ */
+export function resolveAppliedRates(rates: ModelRates): AppliedRates {
+	return Object.freeze({
+		inputPer1k: rates.inputPer1k,
+		outputPer1k: rates.outputPer1k,
+		cacheReadPer1k: effectiveCacheRate(rates.cacheReadPer1k, rates.inputPer1k),
+		cacheWritePer1k: effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k),
+	});
+}
+
+/**
+ * An INDEPENDENT frozen copy of a resolved rate snapshot, for one record
+ * surface (Codex PR-85 P1-2).
+ *
+ * `resolveAppliedRates` already freezes, so this is defence in depth rather
+ * than the primary guard: it means no two surfaces of a call — caller-visible
+ * receipt, audit event, settled receipt — share object identity, so no single
+ * escape hatch (a future refactor that drops the freeze, a `structuredClone`
+ * round trip that loses it, a host that re-exposes the object) can turn a
+ * mutation on one into a rewrite of another. Call it at the point of emission,
+ * not at the point of resolution: the whole risk is one object reaching several
+ * consumers.
+ */
+export function copyAppliedRates(rates: AppliedRates): AppliedRates {
+	return Object.freeze({ ...rates });
+}
+
+/**
+ * Raw (unfloored) four-tier cost — the ONE place D1's cache-rate resolution
+ * (`effectiveCacheRate`) is applied to token counts. Both `costFromRates` and
+ * `costFromRatesUnfloored` route through here so the two never drift and
+ * there is exactly one rate-resolution site (D1).
+ *
+ * Defends against non-finite/negative token counts (garbage `max_tokens`, or
+ * provider usage that reports a negative/NaN value): any count that is not a
+ * finite number >= 0 is treated as 0.
+ */
+function tieredCostRaw(
+	rates: ModelRates,
+	inputTokens: number,
+	outputTokens: number,
+	cacheReadTokens: number,
+	cacheWriteTokens: number,
+): number {
+	const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
+	const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
+	const cacheReadTok =
+		Number.isFinite(cacheReadTokens) && cacheReadTokens > 0 ? cacheReadTokens : 0;
+	const cacheWriteTok =
+		Number.isFinite(cacheWriteTokens) && cacheWriteTokens > 0 ? cacheWriteTokens : 0;
+
+	// OPERATION ORDER IS PART OF THE CONTRACT (Codex PR-85 P2-4). Multiply THEN
+	// divide — `(tokens * ratePer1k) / 1000`, never `(tokens / 1000) * ratePer1k`.
+	// The two are equal in real arithmetic and NOT equal in IEEE-754: `560 / 1000`
+	// is inexact, so the divide-first form yields 7.000000000000001 where the
+	// published form yields exactly 7, and the `Math.ceil` below turns that 1-ulp
+	// residue into a whole extra usertoken. This exact expression — mirrored in
+	// receipt.v2.schema.json, docs/api/types.mdx and the reconciliation integration
+	// test as `ceil(sum(counts x rates / 1000))` — is what an auditor recomputes
+	// from a receipt, so it must be what the money is computed with. Do not
+	// "simplify" the order.
+	const inputCost = (inTok * rates.inputPer1k) / 1000;
+	const outputCost = (outTok * rates.outputPer1k) / 1000;
+	const cacheReadCost =
+		(cacheReadTok * effectiveCacheRate(rates.cacheReadPer1k, rates.inputPer1k)) / 1000;
+	const cacheWriteCost =
+		(cacheWriteTok * effectiveCacheRate(rates.cacheWritePer1k, rates.inputPer1k)) / 1000;
+
+	return inputCost + outputCost + cacheReadCost + cacheWriteCost;
+}
+
+/**
+ * Compute usertoken cost from explicit rates across all four token tiers.
+ *
  * Applies the same non-finite/negative clamp and >=1 floor as estimateCost —
  * the floor is per-call and load-bearing (zero-amount ledger transfers are
  * invalid; it is what makes a {0,0}-rate local call settle at exactly 1
  * nominal usertoken).
+ *
+ * `cacheReadTokens`/`cacheWriteTokens` default to 0, so existing three-argument
+ * callers are unaffected. The four tiers are expected to be DISJOINT — callers
+ * pass a normalized usage snapshot in which cached tokens have already been
+ * separated out of `inputTokens`, so nothing is double-counted here.
+ *
+ * Cache rates resolve per D1 via effectiveCacheRate: absent means inputPer1k,
+ * never zero.
  */
 export function costFromRates(
 	rates: ModelRates,
 	inputTokens: number,
 	outputTokens: number,
+	cacheReadTokens = 0,
+	cacheWriteTokens = 0,
 ): number {
-	// Defend against non-finite/negative token counts (garbage `max_tokens`, or
-	// provider usage that reports a negative/NaN value): any count that is not a
-	// finite number >= 0 is treated as 0. A NaN would otherwise poison budget
-	// state permanently; a negative would collapse a real cost to the floor of 1.
-	const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
-	const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
-	const inputCost = (inTok / 1000) * rates.inputPer1k;
-	const outputCost = (outTok / 1000) * rates.outputPer1k;
-	return Math.max(1, Math.ceil(inputCost + outputCost));
+	return Math.max(
+		1,
+		Math.ceil(tieredCostRaw(rates, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens)),
+	);
+}
+
+/**
+ * The same four-tier D1 resolution as `costFromRates`, WITHOUT the per-call
+ * >=1 floor (spec D7). Settlement floors per call — that is correct there,
+ * a real ledger transfer cannot be zero-amount. The streaming anomaly
+ * detector's spend-velocity signal instead measures a continuous FLOW: it
+ * evaluates this same tiered cost repeatedly against growing cumulative
+ * counts to derive a $/min rate, and a per-call floor would clamp every
+ * early (genuinely near-zero) sample up to the same 1-usertoken plateau —
+ * exactly how a cache-read flood with near-zero fresh input/output computed
+ * ~zero velocity pre-fix. Never use this for anything that debits the
+ * ledger; it exists only for flow measurement.
+ */
+export function costFromRatesUnfloored(
+	rates: ModelRates,
+	inputTokens: number,
+	outputTokens: number,
+	cacheReadTokens = 0,
+	cacheWriteTokens = 0,
+): number {
+	return tieredCostRaw(rates, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens);
 }
 
 /**
