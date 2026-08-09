@@ -112,15 +112,30 @@
    what's under it. Only the small dot carries `mix-blend-mode: difference`;
    at 8px it inverts just the pixels it covers (the vivid bit) without the
    wash. Hover scales the ring (~2.2x, unchanged) and thickens its border
-   (~1.5px resting → ~2px hover) instead of filling it. */
+   (~1.5px resting → ~2px hover) instead of filling it.
+
+   Fix round 2 (paper-surface non-invert, live-measured, not a screenshot
+   artifact): `.cursor-layer` used to be the thing carrying `position: fixed`
+   + `z-index: 100`, with `.cursor-dot`/`.cursor-ring` as its children —
+   each of THEM is independently `position: fixed` too (needed regardless of
+   the wrapper, since that's what pins them to the viewport), so the wrapper's
+   own fixed positioning was already redundant for layout. It was not
+   redundant for stacking: it nested the dot inside TWO stacking contexts
+   (the layer's, then the dot's own — `position: fixed` always creates one,
+   z-index or not) before reaching the page. Measured live (pixel-sampled
+   screenshots, not eyeballed): with that nesting, `.cursor-dot`'s backdrop
+   for `mix-blend-mode: difference` came back fully transparent instead of
+   the real page pixels — the dot rendered as a plain 90%-white circle
+   everywhere, the difference math never ran. Flattening the nesting (the
+   wrapper stops being positioned; the dot and ring each carry their own
+   `z-index` directly) fixed it in the same live session, confirmed by
+   resampling the same pixel. One stacking context between the blend element
+   and the page, not two. */
 html.cursor-active,
 html.cursor-active * {
 	cursor: none !important;
 }
 .cursor-layer {
-	position: fixed;
-	inset: 0;
-	z-index: 100;
 	pointer-events: none;
 }
 .cursor-dot {
@@ -133,6 +148,7 @@ html.cursor-active * {
 	background: rgba(255, 255, 255, 0.9);
 	mix-blend-mode: difference;
 	will-change: transform;
+	z-index: 100;
 }
 .cursor-ring {
 	position: fixed;
@@ -149,6 +165,7 @@ html.cursor-active * {
 	   No background-color transition: the ring never fills, resting or hover. */
 	transition: border-color 0.2s ease, border-width 0.2s ease;
 	will-change: transform;
+	z-index: 100;
 }
 .cursor-ring--hover {
 	border-width: 2px;
