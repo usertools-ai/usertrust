@@ -236,9 +236,12 @@ export default function ExhibitBDie() {
 					<text x={560} y={376} textAnchor="middle" className="die-mark">
 						ut
 					</text>
-					{/* specular sheen — a wide band translated across the clipped face */}
+					{/* Specular sheen — a wide band translated across the clipped face.
+					    Parked just LEFT of the clip at rest so the loop begins and ends
+					    with the band fully off the face; the keyframe's travel is
+					    derived from this x (globals.css @keyframes die-sheen). */}
 					<g className="die-sheen">
-						<rect x={-260} y={230} width={220} height={240} fill="url(#dieSheen)" />
+						<rect x={200} y={230} width={220} height={240} fill="url(#dieSheen)" />
 					</g>
 				</g>
 

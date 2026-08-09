@@ -914,19 +914,27 @@
    gradient band crosses the clipped face on an 8s period. Transform-only: the
    band is a static fill and only its translate changes, so the whole sweep
    composites and never repaints. Same C4 ambient exception as the pulses, same
-   IO gate. */
+   IO gate.
+
+   THE TRAVEL IS AN ARITHMETIC RESULT, NOT A FEEL. `#dieFaceClip` spans x
+   460..660. The band is 220 units wide and starts at x=200, so it sits fully
+   LEFT of the clip at t=0 (200..420) and must reach x=660 with its LEFT edge to
+   be fully RIGHT of it: 660 − 200 = 460, plus 60 units of dwell past the edge =
+   520. An `infinite` loop resets instantaneously, so any end state still inside
+   the clip snaps a lit highlight to black once per period; at the old 700px the
+   band ended at 440..660 with its brightest stops parked dead centre of the
+   face. Move the band's x or the clip and this number moves with them. */
 @keyframes die-sheen {
 	from {
 		transform: translateX(0);
 	}
 	to {
-		transform: translateX(700px);
+		transform: translateX(520px);
 	}
 }
 .die-sheen {
 	animation: die-sheen 8s cubic-bezier(0.5, 0, 0.5, 1) infinite;
 	animation-play-state: paused;
-	will-change: transform;
 }
 /* IO gate: the wrapper toggles data-active based on IntersectionObserver;
    when true, animation-play-state runs the infinite loops; when false, paused. */
@@ -934,6 +942,12 @@
 .die-figure[data-active="true"] .die-trace-pulse-bright,
 .die-figure[data-active="true"] .die-sheen {
 	animation-play-state: running;
+}
+/* will-change lives WITH the IO gate, not on the class. Declared unconditionally
+   it holds a promoted compositor layer for the whole session — including while
+   the gate has the sweep paused offscreen, which is most of the session. */
+.die-figure[data-active="true"] .die-sheen {
+	will-change: transform;
 }
 /* Reduced motion: static glowing state — solid emerald traces, no movement,
    and the sheen parked off the face rather than frozen mid-sweep (a stalled
