@@ -1,56 +1,71 @@
 "use client";
 
-import { motion, useMotionValue, useSpring } from "motion/react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /*
- * THE CUSTOM CURSOR (Addendum M1, REVISED — Cam overrule) — the bullseye IS
- * the cursor. While this island is mounted it REPLACES the native pointer
- * (`html.cursor-active, html.cursor-active * { cursor: none !important; }`
- * in globals.css, scoped to the class this component alone applies) rather
- * than drawing a decorative layer on top of it.
+ * THE CUSTOM CURSOR (Addendum M1, REVISION 2 — Cam-decided) — THE
+ * REGISTRATION MARK. While this island is mounted it REPLACES the native
+ * pointer (`html.cursor-active, html.cursor-active * { cursor: none
+ * !important; }` in globals.css, scoped to the class this component alone
+ * applies) rather than drawing a decorative layer on top of it.
  *
- * A small dot tracks the raw pointer position 1:1 — unsprung, batched to a
- * single requestAnimationFrame write per burst of pointermove events so the
- * transform lands at rAF resolution without spamming a motion-value commit
- * per event. The dot alone carries `mix-blend-mode: difference` (globals.css),
- * inverting the small area it covers as it crosses light/dark ground. A
- * trailing ring lags behind it on a spring; the ring is outline-only at all
- * times (transparent fill, never a background — see "Kill the flashlight" in
- * globals.css) and over any [data-cursor-hover] target it scales up and
- * thickens its border, but never fills.
+ * WHAT IT DRAWS. At rest: a printer's registration mark — a ~14px hairline
+ * crosshair (two 1px strokes) with a 2px dot at the crossing. Over any
+ * [data-cursor-hover] target: four L-shaped 1px corner ticks snap outward
+ * ~10px and hold, framing the target the way crop marks frame a plate. The
+ * ticks carry the CURRENT SECTION's accent, read off the nearest
+ * [data-theme] ancestor at hoverstart, so the mark speaks the colour of
+ * whatever it is standing on.
  *
- * useSpring (motion/react — already a page dependency, so this is zero new
- * packages) drives the trail rather than a hand-rolled rAF lerp: both run on
- * the same requestAnimationFrame loop, but the spring settles to a full stop
- * on its own once the pointer is still, where a manual lerp needs its own
- * epsilon-and-cancel bookkeeping to do the same — one fewer thing to get
- * wrong at 120Hz for the same feel.
+ * WHAT IT NO LONGER DRAWS. The bullseye's trailing ring is gone, and with it
+ * the spring that lagged it and the scale bloom it grew on hover. Nothing
+ * here is filled and nothing is larger than 14px across, so the cursor
+ * cannot occlude the text under it — the skip link reads through the mark by
+ * construction, not by tuning. That also retires this file's motion/react
+ * import: the mark tracks 1:1, so there is nothing left to spring.
+ *
+ * BLEND AND STACKING (the 19I finding, preserved verbatim). The three
+ * hairline parts — h-stroke, v-stroke, dot — each carry
+ * `mix-blend-mode: difference` so the mark inverts against whatever it
+ * crosses, dark ground or the one paper surface on the page. That only works
+ * if each blending element sits ONE stacking context away from the page:
+ * nesting them inside a positioned wrapper made their blend backdrop come
+ * back fully transparent and the difference math never ran (measured live in
+ * 19I by resampling the same pixel). So they are direct children of the
+ * unpositioned `.cursor-layer`, each `position: fixed` with its own z-index,
+ * and each takes its own transform write. The corner ticks do NOT blend —
+ * they are accent-coloured on purpose — so they may share one positioned
+ * wrapper.
+ *
+ * Every position write is batched into a single requestAnimationFrame per
+ * burst of pointermove events: pointermove can fire faster than the display
+ * refreshes, so this lands the mark 1:1 on the pointer at rAF resolution
+ * without a commit per event.
  *
  * Mounts ONLY when `(pointer: fine)` matches AND reduced motion is NOT
  * requested at mount — touch/coarse pointers and reduced-motion users never
  * get the class, so they keep the native cursor everywhere (there is no
  * script that could ever fire `cursor: none` for them, not just a CSS
- * override sitting on top of it). That combined gate is also why nothing
- * can render at a stale position after a tap or get "stuck" showing on a
- * touchscreen. `cursor-active` comes off again on unmount and on window
- * blur (alt-tab, devtools stealing focus) — re-applied on focus — so a user
- * who leaves the tab is never stranded without any visible cursor at all.
+ * override sitting on top of it). That combined gate is also why nothing can
+ * render at a stale position after a tap or get "stuck" showing on a
+ * touchscreen. `cursor-active` comes off again on unmount and on window blur
+ * (alt-tab, devtools stealing focus) — re-applied on focus — so a user who
+ * leaves the tab is never stranded without any visible cursor at all.
  */
 
-// Trailing-ring spring — tuned for a short, controlled lag behind the dot
-// rather than a loose, springy overshoot (this tracks a pointer, not a card).
-const RING_SPRING = { stiffness: 320, damping: 28, mass: 0.6 };
-// Scale transition for the hover-target ring bloom — a quick settle, no bounce.
-const SCALE_TRANSITION = { type: "spring", stiffness: 300, damping: 24 } as const;
+/** Section accent to fall back to when the pointer is over no themed section. */
+const ACCENT_FALLBACK = "var(--color-ut)";
 
 export default function Cursor() {
 	const [enabled, setEnabled] = useState(false);
-	const [hovering, setHovering] = useState(false);
-	const mouseX = useMotionValue(-100);
-	const mouseY = useMotionValue(-100);
-	const ringX = useSpring(mouseX, RING_SPRING);
-	const ringY = useSpring(mouseY, RING_SPRING);
+	const [framing, setFraming] = useState(false);
+	const [accent, setAccent] = useState<string>(ACCENT_FALLBACK);
+	// One ref per independently-positioned part. The three blend parts cannot
+	// share a wrapper (see the stacking note above); the ticks can.
+	const hRef = useRef<HTMLSpanElement>(null);
+	const vRef = useRef<HTMLSpanElement>(null);
+	const dotRef = useRef<HTMLSpanElement>(null);
+	const frameRef = useRef<HTMLSpanElement>(null);
 
 	useEffect(() => {
 		if (
@@ -64,45 +79,56 @@ export default function Cursor() {
 		const root = document.documentElement;
 		root.classList.add("cursor-active");
 
-		// The dot's transform is written at most once per animation frame —
-		// pointermove can fire far faster than the display refreshes, so this
-		// coalesces a burst of events into a single commit per frame, landing
-		// the dot 1:1 on the pointer at rAF resolution with no spring/lerp.
 		let rafId = 0;
 		let pendingX = -100;
 		let pendingY = -100;
+		const parts = [hRef, vRef, dotRef, frameRef];
+		function place() {
+			const t = `translate3d(${pendingX}px, ${pendingY}px, 0)`;
+			for (const p of parts) {
+				if (p.current) p.current.style.transform = t;
+			}
+		}
 		function onMove(e: PointerEvent) {
 			pendingX = e.clientX;
 			pendingY = e.clientY;
 			if (rafId) return;
 			rafId = requestAnimationFrame(() => {
-				mouseX.set(pendingX);
-				mouseY.set(pendingY);
+				place();
 				rafId = 0;
 			});
 		}
 		// pointerover (not pointermove) for hover detection — it only fires when
-		// the element under the pointer actually changes, so this is a handful
-		// of events per interaction rather than one per animation frame.
+		// the element under the pointer actually changes, so this is a handful of
+		// events per interaction rather than one per animation frame. The accent
+		// is read HERE, once per hoverstart, never per frame.
 		function onOver(e: PointerEvent) {
 			const target = e.target as Element | null;
-			setHovering(Boolean(target?.closest?.("[data-cursor-hover]")));
+			const hit = target?.closest?.("[data-cursor-hover]") ?? null;
+			setFraming(Boolean(hit));
+			if (!hit) return;
+			const themed = hit.closest("[data-theme]");
+			const value = themed
+				? getComputedStyle(themed).getPropertyValue("--section-accent").trim()
+				: "";
+			setAccent(value || ACCENT_FALLBACK);
 		}
-		// Pointer left the whole document (relatedTarget null) — clear the
-		// hover bloom and park the overlay off-screen so it can't linger
-		// mid-scene. This guard is unchanged by the M1 revision: it only ever
-		// moved the decorative dot/ring, never the cursor-active class.
+		// Pointer left the whole document (relatedTarget null) — drop the framing
+		// and park the mark off-screen so it can't linger mid-scene. This guard is
+		// unchanged by the reskin: it only ever moved the decorative parts, never
+		// the cursor-active class.
 		function onLeave() {
-			setHovering(false);
-			mouseX.set(-100);
-			mouseY.set(-100);
+			setFraming(false);
+			pendingX = -100;
+			pendingY = -100;
+			place();
 		}
 		function onPointerOut(e: PointerEvent) {
 			if (e.relatedTarget === null) onLeave();
 		}
 		// Window itself lost focus (alt-tab, devtools) — restore the native
-		// pointer along with parking the overlay, so a user who tabs away is
-		// never left with neither cursor visible; re-suppress on refocus.
+		// pointer along with parking the mark, so a user who tabs away is never
+		// left with neither cursor visible; re-suppress on refocus.
 		function onBlur() {
 			onLeave();
 			root.classList.remove("cursor-active");
@@ -124,19 +150,29 @@ export default function Cursor() {
 			window.removeEventListener("focus", onFocus);
 			root.classList.remove("cursor-active");
 		};
-	}, [mouseX, mouseY]);
+	}, []);
 
 	if (!enabled) return null;
 
+	const frameClass = `cursor-frame${framing ? " cursor-frame--on" : ""}`;
 	return (
 		<div aria-hidden="true" className="cursor-layer">
-			<motion.div className="cursor-dot" style={{ x: mouseX, y: mouseY }} />
-			<motion.div
-				className={`cursor-ring${hovering ? " cursor-ring--hover" : ""}`}
-				style={{ x: ringX, y: ringY }}
-				animate={{ scale: hovering ? 2.2 : 1 }}
-				transition={SCALE_TRANSITION}
-			/>
+			{/* The three blending parts: each its own fixed, top-level layer. */}
+			<span ref={hRef} className="cursor-rule cursor-rule--h" />
+			<span ref={vRef} className="cursor-rule cursor-rule--v" />
+			<span ref={dotRef} className="cursor-dot" />
+			{/* The crop marks. One wrapper, four L-shaped ticks, accent-tinted from
+			    the section under the pointer. */}
+			<span
+				ref={frameRef}
+				className={frameClass}
+				style={{ "--cursor-accent": accent } as React.CSSProperties}
+			>
+				<i className="cursor-tick cursor-tick--tl" />
+				<i className="cursor-tick cursor-tick--tr" />
+				<i className="cursor-tick cursor-tick--bl" />
+				<i className="cursor-tick cursor-tick--br" />
+			</span>
 		</div>
 	);
 }

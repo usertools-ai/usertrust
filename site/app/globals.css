@@ -90,47 +90,50 @@
 	}
 }
 
-/* ── CUSTOM CURSOR (Addendum M1, REVISED — Cam overrule) ──────────────────
-   cursor.tsx mounts one dot + one trailing ring, position-driven by motion
-   values (fixed + transform-only, so this layer never affects layout). The
-   bullseye REPLACES the system cursor while the island is mounted: the rule
+/* ── CUSTOM CURSOR (Addendum M1, REVISION 2 — THE REGISTRATION MARK) ──────
+   cursor.tsx mounts a printer's registration mark and nothing else: a ~14px
+   hairline crosshair (two 1px rules) with a 2px dot at the crossing, plus
+   four L-shaped 1px corner ticks that snap outward over a
+   [data-cursor-hover] target. Every part is `position: fixed` and driven by
+   transform alone, so this layer never affects layout and never repaints.
+
+   The mark REPLACES the system cursor while the island is mounted: the rule
    below is scoped to `html.cursor-active`, a class ONLY cursor.tsx ever
    applies (on mount, inside its pointer:fine + not-reduced-motion gate) and
    ONLY it ever removes (unmount, window blur). JS-off, coarse pointers, and
    reduced-motion never see the class, so they keep the native cursor
    everywhere — this is not a decorative layer on top of it for them, there
    is simply no script that could hide it. z-index sits above the nav (z-50)
-   so the ring is never clipped under the fixed bar. will-change is scoped to
-   just these two elements, not a page-wide rule.
+   so no part is ever clipped under the fixed bar. will-change is scoped to
+   these few elements, not a page-wide rule.
 
-   "Kill the flashlight" (Cam live review, binding, item 6): the ring used to
-   fill opaque white on hover with `mix-blend-mode: difference` on itself —
-   a filled disc inverted against a near-black page is a near-white blob
-   that washes out whatever text sits under it, not a glitch, just the blend
-   math. The ring is now OUTLINE-ONLY at all times — transparent fill, never
-   a background — in both resting and hover states, so it can never occlude
-   what's under it. Only the small dot carries `mix-blend-mode: difference`;
-   at 8px it inverts just the pixels it covers (the vivid bit) without the
-   wash. Hover scales the ring (~2.2x, unchanged) and thickens its border
-   (~1.5px resting → ~2px hover) instead of filling it.
+   WHY THERE IS NOTHING FILLED HERE. The bullseye this replaces went through
+   two corrections for the same root cause — area. A filled disc inverted
+   against a near-black page is a near-white blob that washes out whatever
+   text sits under it ("kill the flashlight"), and even outline-only, a 36px
+   ring scaled 2.2x on hover is a 79px object sitting on top of a 12px label.
+   The registration mark is hairlines and a 2px dot: at no state does it
+   cover more than a couple of pixels of anything, so it cannot occlude the
+   skip link — or any other target — by CONSTRUCTION rather than by tuning.
 
-   Fix round 2 (paper-surface non-invert, live-measured, not a screenshot
-   artifact): `.cursor-layer` used to be the thing carrying `position: fixed`
-   + `z-index: 100`, with `.cursor-dot`/`.cursor-ring` as its children —
-   each of THEM is independently `position: fixed` too (needed regardless of
-   the wrapper, since that's what pins them to the viewport), so the wrapper's
-   own fixed positioning was already redundant for layout. It was not
-   redundant for stacking: it nested the dot inside TWO stacking contexts
-   (the layer's, then the dot's own — `position: fixed` always creates one,
-   z-index or not) before reaching the page. Measured live (pixel-sampled
-   screenshots, not eyeballed): with that nesting, `.cursor-dot`'s backdrop
-   for `mix-blend-mode: difference` came back fully transparent instead of
-   the real page pixels — the dot rendered as a plain 90%-white circle
-   everywhere, the difference math never ran. Flattening the nesting (the
-   wrapper stops being positioned; the dot and ring each carry their own
-   `z-index` directly) fixed it in the same live session, confirmed by
-   resampling the same pixel. One stacking context between the blend element
-   and the page, not two. */
+   BLEND AND STACKING (the 19I finding, preserved). The three hairline parts
+   each carry `mix-blend-mode: difference` so the mark inverts against
+   whatever it crosses, dark ground or the page's one paper surface. That
+   only works if each blending element sits ONE stacking context away from
+   the page. Measured live in 19I (pixel-sampled, not eyeballed): nesting the
+   dot inside a positioned wrapper made its blend backdrop come back fully
+   transparent and the difference math never ran — the dot rendered as a
+   plain white circle everywhere. So `.cursor-layer` stays UNPOSITIONED and
+   each blending part is its own fixed, z-indexed top-level layer. Do not
+   wrap them. The corner ticks do not blend (they are accent-coloured on
+   purpose), so those may share one positioned wrapper, and do.
+
+   THE TICKS ARE TRANSFORM-ONLY. Rest is `scale(0)`, framing is a diagonal
+   translate at `scale(1)` — one property, composited, ~120ms ease-out. No
+   opacity fade, no width/height animation, nothing that can trigger layout.
+   `--cursor-accent` is written inline by cursor.tsx from the nearest
+   [data-theme] ancestor at hoverstart, so the crop marks carry the colour of
+   the section the pointer is standing on. */
 html.cursor-active,
 html.cursor-active * {
 	cursor: none !important;
@@ -138,38 +141,124 @@ html.cursor-active * {
 .cursor-layer {
 	pointer-events: none;
 }
-.cursor-dot {
+/* The hairline crosshair. 14px across, 1px thick, centred on the pointer via
+   negative offsets so the element's own transform carries only the position.
+
+   Each rule is a gradient, not a flat fill, because it needs a 2px TRANSPARENT
+   GAP at the crossing — the classic registration mark's centre, and here also
+   a correctness fix. `mix-blend-mode: difference` composites against whatever
+   is behind the element, and a solid dot laid ON TOP of two solid rules
+   inverts the rules' own already-inverted pixels back toward the ground:
+   measured on the paper surface, the dot's four pixels came back 36 / 201 /
+   182 / 84 instead of a uniform ink. With the rules opening a hole exactly the
+   dot's size, every part of the mark blends against the PAGE once and only
+   once. */
+.cursor-rule {
 	position: fixed;
-	top: -4px;
-	left: -4px;
-	width: 8px;
-	height: 8px;
-	border-radius: 9999px;
-	background: rgba(255, 255, 255, 0.9);
 	mix-blend-mode: difference;
 	will-change: transform;
 	z-index: 100;
 }
-.cursor-ring {
+.cursor-rule--h {
+	top: -0.5px;
+	left: -7px;
+	width: 14px;
+	height: 1px;
+	background: linear-gradient(
+		to right,
+		rgba(255, 255, 255, 0.9) 0 6px,
+		transparent 6px 8px,
+		rgba(255, 255, 255, 0.9) 8px 14px
+	);
+}
+.cursor-rule--v {
+	top: -7px;
+	left: -0.5px;
+	width: 1px;
+	height: 14px;
+	background: linear-gradient(
+		to bottom,
+		rgba(255, 255, 255, 0.9) 0 6px,
+		transparent 6px 8px,
+		rgba(255, 255, 255, 0.9) 8px 14px
+	);
+}
+/* The centre dot, sitting in the crosshair's gap. 2px, square-cornered at this
+   size (a radius on 2px reads as nothing but antialiasing), full white so the
+   core is the densest part of the mark, same difference blend as the rules.
+   PAPER (19I's disclosed residual, re-tested here): over .paper-surface
+   (#f2efe6) the blend inverts correctly — the mark renders as ink,
+   pixel-sampled at rgb(36,38,45) against the paper's rgb(242,239,230). No ink
+   outline was needed; the fallback stays unshipped. */
+.cursor-dot {
 	position: fixed;
-	top: -18px;
-	left: -18px;
-	width: 36px;
-	height: 36px;
-	border-radius: 9999px;
-	background: transparent;
-	border: 1.5px solid rgba(255, 255, 255, 0.7);
-	/* Only the border transitions here — x/y/scale are motion values
-	   (cursor.tsx) already animated on their own spring; a CSS transition on
-	   `transform` too would fight that spring with a second, competing ease.
-	   No background-color transition: the ring never fills, resting or hover. */
-	transition: border-color 0.2s ease, border-width 0.2s ease;
+	top: -1px;
+	left: -1px;
+	width: 2px;
+	height: 2px;
+	background: #ffffff;
+	mix-blend-mode: difference;
 	will-change: transform;
 	z-index: 100;
 }
-.cursor-ring--hover {
-	border-width: 2px;
-	border-color: rgba(255, 255, 255, 0.85);
+/* The crop-mark frame: a zero-size anchor at the pointer, four L-ticks hung
+   off it. Positioned, and deliberately holding no blending child. */
+.cursor-frame {
+	position: fixed;
+	top: 0;
+	left: 0;
+	width: 0;
+	height: 0;
+	will-change: transform;
+	z-index: 100;
+}
+.cursor-tick {
+	position: absolute;
+	width: 6px;
+	height: 6px;
+	border: 0 solid var(--cursor-accent, var(--color-ut));
+	transform: scale(0);
+	transition: transform 0.12s ease-out;
+}
+.cursor-tick--tl {
+	top: -7px;
+	left: -7px;
+	border-top-width: 1px;
+	border-left-width: 1px;
+	transform-origin: top left;
+}
+.cursor-tick--tr {
+	top: -7px;
+	left: 1px;
+	border-top-width: 1px;
+	border-right-width: 1px;
+	transform-origin: top right;
+}
+.cursor-tick--bl {
+	top: 1px;
+	left: -7px;
+	border-bottom-width: 1px;
+	border-left-width: 1px;
+	transform-origin: bottom left;
+}
+.cursor-tick--br {
+	top: 1px;
+	left: 1px;
+	border-bottom-width: 1px;
+	border-right-width: 1px;
+	transform-origin: bottom right;
+}
+.cursor-frame--on .cursor-tick--tl {
+	transform: translate(-10px, -10px) scale(1);
+}
+.cursor-frame--on .cursor-tick--tr {
+	transform: translate(10px, -10px) scale(1);
+}
+.cursor-frame--on .cursor-tick--bl {
+	transform: translate(-10px, 10px) scale(1);
+}
+.cursor-frame--on .cursor-tick--br {
+	transform: translate(10px, 10px) scale(1);
 }
 @media (prefers-reduced-motion: reduce) {
 	.cursor-layer {
