@@ -51,20 +51,26 @@ export default function ExhibitE() {
 				    With the minimum pinned, the line scrolls inside TerminalFrame's own
 				    overflow-x-auto, which is what the frame is for. Same defect and
 				    same fix as the Exhibit A grid documents. */}
-				<div className="mt-12 grid grid-cols-[minmax(0,1fr)] items-center gap-12 md:grid-cols-2">
-					{/* set-piece: the outlined zero over halftone */}
-					<figure className="glow-emerald relative flex min-w-0 flex-col items-center justify-center py-8">
+				{/* Two-fifths · three-fifths at lg, not an even split: the transcript
+				    is the dense artifact and at ~640px inner its full-length merkle
+				    root fits without the wrap the even row forced, while the airy zero
+				    cedes width it was not using. */}
+				<div className="mt-8 grid grid-cols-[minmax(0,1fr)] items-center gap-8 md:grid-cols-2 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)]">
+					{/* set-piece: the outlined zero over halftone. The caption folds
+					    beside the glyph at lg so the figure stops towering ~90px past
+					    the terminal beside it. */}
+					<figure className="glow-emerald relative flex min-w-0 flex-col items-center justify-center gap-x-8 py-4 lg:flex-row">
 						<div aria-hidden="true" className="halftone absolute inset-0" />
 						<span
 							className="font-display relative select-none leading-none text-transparent"
 							style={{
 								WebkitTextStroke: "2px var(--color-ut)",
-								fontSize: "clamp(12rem,30vw,24rem)",
+								fontSize: "clamp(9rem,16vw,15rem)",
 							}}
 						>
 							{deps.value}
 						</span>
-						<figcaption className="relative mt-2 text-center">
+						<figcaption className="relative mt-2 text-center lg:mt-0 lg:max-w-56 lg:text-left">
 							<p className="text-lg text-white/80">runtime dependencies in the verifier.</p>
 							<p className="mt-2 font-mono text-xs text-white/70">the verifier owes us nothing.</p>
 							{/* provenance stub — provenance as a design element */}

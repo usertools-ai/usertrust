@@ -28,9 +28,23 @@ interface Leader {
 
 export default function ExhibitAAnnotations({
 	annotations,
+	call,
 	children,
 }: {
 	annotations: Annotation[];
+	/**
+	 * The call frame. It used to be the tabpanel grid's own first column, with
+	 * this island occupying the second and splitting IT again into rail +
+	 * receipt — three tracks of nesting for two visual columns, and the call
+	 * column went empty for the receipt's whole remaining height while a 12rem
+	 * rail squeezed the receipt until its auditHash clipped. The island now owns
+	 * the whole row: the call stacks above the rail in one narrow column, the
+	 * receipt takes the wide one, and the routed leader traces cross the gap that
+	 * used to
+	 * be dead ground. Passed as a prop rather than composed outside because the
+	 * wrapRef has to enclose BOTH columns for the trace geometry to measure.
+	 */
+	call: React.ReactNode;
 	children: React.ReactNode;
 }) {
 	const wrapRef = useRef<HTMLDivElement>(null);
@@ -55,7 +69,7 @@ export default function ExhibitAAnnotations({
 			if (!label || !row) continue;
 			const lr = label.getBoundingClientRect();
 			const rr = row.getBoundingClientRect();
-			if (lr.width === 0) continue; // annotation rail is display:none below md
+			if (lr.width === 0) continue; // annotation rail is display:none below lg
 			const startX = lr.right - wrapRect.left + LEADER_GAP;
 			const startY = lr.top + lr.height / 2 - wrapRect.top;
 			next.push({
@@ -170,7 +184,9 @@ export default function ExhibitAAnnotations({
 	};
 
 	const onRowActivate = (field: string) => {
-		if (window.matchMedia("(max-width: 767px)").matches) openPopover(field);
+		// The rail is lg-only now, so md viewports take the tap-popover path the
+		// way phones always did. Same boundary as the `lg:flex` on the rail.
+		if (window.matchMedia("(max-width: 1023px)").matches) openPopover(field);
 		else setActive(field);
 	};
 
@@ -179,32 +195,37 @@ export default function ExhibitAAnnotations({
 	return (
 		<div
 			ref={wrapRef}
-			className="relative min-w-0 md:grid md:grid-cols-[minmax(0,12rem)_minmax(0,1fr)] md:gap-10"
+			className="relative grid min-w-0 grid-cols-[minmax(0,1fr)] gap-8 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-10"
 		>
-			{/* Annotation rail — desktop only, left of the terminal frame. */}
-			<ul className="hidden flex-col justify-center gap-7 md:flex">
-				{annotations.map((a) => (
-					<li key={a.field}>
-						<button
-							type="button"
-							ref={(el) => {
-								if (el) labelRefs.current.set(a.field, el);
-								else labelRefs.current.delete(a.field);
-							}}
-							data-active={active === a.field}
-							onMouseEnter={() => setActive(a.field)}
-							onMouseLeave={() => setActive(null)}
-							onFocus={() => setActive(a.field)}
-							onBlur={() => setActive(null)}
-							// No max-w: the rail column is already minmax(0,12rem), so the
-							// old max-w-[14rem] could never bind.
-							className="focus-ring block cursor-default text-left font-mono text-xs leading-5 text-white/70 transition-colors data-[active=true]:text-white"
-						>
-							{a.text}
-						</button>
-					</li>
-				))}
-			</ul>
+			{/* Column one: the call, then the annotation rail beneath it. */}
+			<div className="flex min-w-0 flex-col gap-6">
+				{call}
+				{/* Annotation rail — lg only now (the rail needs the narrow column to
+				    read as a rail rather than a wrapped paragraph stack), top-aligned
+				    under the call frame. `justify-center` died with the shared-height
+				    column it used to centre against. */}
+				<ul className="hidden flex-col gap-4 lg:flex">
+					{annotations.map((a) => (
+						<li key={a.field}>
+							<button
+								type="button"
+								ref={(el) => {
+									if (el) labelRefs.current.set(a.field, el);
+									else labelRefs.current.delete(a.field);
+								}}
+								data-active={active === a.field}
+								onMouseEnter={() => setActive(a.field)}
+								onMouseLeave={() => setActive(null)}
+								onFocus={() => setActive(a.field)}
+								onBlur={() => setActive(null)}
+								className="focus-ring block cursor-default text-left font-mono text-xs leading-5 text-white/70 transition-colors data-[active=true]:text-white"
+							>
+								{a.text}
+							</button>
+						</li>
+					))}
+				</ul>
+			</div>
 
 			{/* Server-rendered terminal frame, passed through; hover/tap/focus by delegation
 			    (focusin/focusout bubble, so onFocus/onBlur fire for the rows). */}
@@ -245,7 +266,7 @@ export default function ExhibitAAnnotations({
 			    palette stays local. */}
 			{size && (
 				<svg
-					className="trace-layer pointer-events-none absolute inset-0 hidden h-full w-full md:block"
+					className="trace-layer pointer-events-none absolute inset-0 hidden h-full w-full lg:block"
 					viewBox={`0 0 ${size.w} ${size.h}`}
 					aria-hidden="true"
 				>
@@ -303,7 +324,7 @@ export default function ExhibitAAnnotations({
 					// lift-2 (floating physical object) and bg-terminal, not shadow-xl
 					// over a one-off #0f0f2a: depth and surfaces both come from the
 					// vocabulary, never from a per-section invention (Addendum H3).
-					className="lift-2 absolute left-4 right-4 z-20 rounded-lg border border-white/15 bg-terminal p-4 md:hidden"
+					className="lift-2 absolute left-4 right-4 z-20 rounded-lg border border-white/15 bg-terminal p-4 lg:hidden"
 					style={{ top: popover.top }}
 				>
 					<p className="font-mono text-[12px] uppercase tracking-widest text-tim">

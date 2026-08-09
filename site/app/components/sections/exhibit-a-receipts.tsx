@@ -83,7 +83,7 @@ export default function ExhibitAReceipts({
 	};
 
 	return (
-		<div className="mt-10">
+		<div className="mt-7">
 			<div
 				role="tablist"
 				aria-label="captured model receipts"
@@ -114,8 +114,10 @@ export default function ExhibitAReceipts({
 				))}
 			</div>
 
-			{/* The call — static mono, emerald keyword accents. TerminalFrame's
-			    shared chrome, no title; pre/code semantics preserved inside. */}
+			{/* The tabpanel is no longer the grid — the annotations island is (see
+			    its `call` prop). This div keeps role/aria/tabIndex and nothing
+			    else, so the whole exhibit is one two-column row instead of a
+			    column that goes empty under the call frame. */}
 			<div
 				role="tabpanel"
 				id={`receipt-panel-${panel.id}`}
@@ -125,36 +127,42 @@ export default function ExhibitAReceipts({
 				// matching lint rule is disabled for this file in biome.json (an
 				// inline suppression would itself trip check-facts on the rule name).
 				tabIndex={0}
-				className="focus-ring mt-6 grid grid-cols-[minmax(0,1fr)] gap-12 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:gap-16"
+				className="focus-ring mt-4"
 			>
-				<TerminalFrame className="min-w-0 self-start text-white/80">
-					<pre data-code-sample>
-						<code>
-							<span className="text-ut">import</span> {"{ trust }"}{" "}
-							<span className="text-ut">from</span>{" "}
-							<span className="text-white/80">"usertrust"</span>;{"\n\n"}
-							<span className="text-ut">const</span> client = <span className="text-ut">await</span>{" "}
-							trust(<span className="text-ut">new</span> {panel.ctor}());{"\n\n"}
-							<span className="text-ut">const</span> {"{ response, "}
-							<span className="text-ut">receipt</span>
-							{" }"} ={"\n  "}
-							<span className="text-ut">await</span> {panel.surface}({"{"}
-							{"\n"}
-							{"  model: "}
-							<span className="text-white/80">"{panel.model}"</span>,{"\n"}
-							<span data-code-sample>{"  max_tokens: 256,"}</span>
-							{"\n"}
-							{"  messages: [...],"}
-							{"\n"}
-							{"}"});
-						</code>
-					</pre>
-				</TerminalFrame>
-
 				{/* The evidence — the SDK's actual return value, annotated. The
 				    title bar carries the lab mark; the provenance line is the
-				    frame's footer slot. */}
-				<ExhibitAAnnotations annotations={panel.annotations}>
+				    frame's footer slot. The call frame rides along as `call`:
+				    static mono, emerald keyword accents, TerminalFrame's shared
+				    chrome, no title; pre/code semantics preserved inside. */}
+				<ExhibitAAnnotations
+					annotations={panel.annotations}
+					call={
+						<TerminalFrame className="min-w-0 self-start text-white/80">
+							<pre data-code-sample>
+								<code>
+									<span className="text-ut">import</span> {"{ trust }"}{" "}
+									<span className="text-ut">from</span>{" "}
+									<span className="text-white/80">"usertrust"</span>;{"\n\n"}
+									<span className="text-ut">const</span> client ={" "}
+									<span className="text-ut">await</span> trust(<span className="text-ut">new</span>{" "}
+									{panel.ctor}());{"\n\n"}
+									<span className="text-ut">const</span> {"{ response, "}
+									<span className="text-ut">receipt</span>
+									{" }"} ={"\n  "}
+									<span className="text-ut">await</span> {panel.surface}({"{"}
+									{"\n"}
+									{"  model: "}
+									<span className="text-white/80">"{panel.model}"</span>,{"\n"}
+									<span data-code-sample>{"  max_tokens: 256,"}</span>
+									{"\n"}
+									{"  messages: [...],"}
+									{"\n"}
+									{"}"});
+								</code>
+							</pre>
+						</TerminalFrame>
+					}
+				>
 					<TerminalFrame
 						className="receipt-terminal"
 						title={

@@ -73,13 +73,18 @@ export default function HardenStrip() {
 				    attribute requires a native <blockquote>, which TerminalFrame
 				    (a <div>) can't provide, so the shared chrome is applied inline
 				    rather than through the component. */}
-				<figure className="mt-12 max-w-3xl">
+				{/* The quote used to stop at 971px under a stat wall running to 1307px.
+				    The two verbatim paragraphs side by side (each well within the
+				    measure cap at md+) square it off to the wall's own right edge and
+				    halve its height. Quote text untouched — it is a verbatim contract
+				    with AGENTS.md. */}
+				<figure className="mt-8">
 					<blockquote
 						cite={AGENTS_URL}
-						className="lift-1 overflow-hidden rounded-xl border border-white/10 bg-terminal p-4 font-mono text-[14px] leading-relaxed text-white/80 md:p-5"
+						className="lift-1 grid gap-4 overflow-hidden rounded-xl border border-white/10 bg-terminal p-4 font-mono text-[14px] leading-relaxed text-white/80 md:grid-cols-2 md:gap-8 md:p-5"
 					>
 						<p>{PARITY_QUOTE_CONTEXT}</p>
-						<p className="mt-4 text-white">{PARITY_QUOTE_RULE}</p>
+						<p className="text-white">{PARITY_QUOTE_RULE}</p>
 					</blockquote>
 					<figcaption className="mt-3 font-mono text-xs text-white/70">
 						<a

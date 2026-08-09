@@ -117,43 +117,50 @@ export default function ExhibitD() {
 				tamper with one byte. break the whole chain.
 			</h2>
 
-			<div className="mt-12 overflow-x-auto">
-				<div className="min-w-[40rem] max-w-2xl">
-					<MerkleTree entries={slice.entries} />
+			{/* The tree ended at ~860px while the content column ran to ~1310px, and
+			    the two caption rows then repeated that dead width full-bleed below
+			    it (N3). Side by side, the wider column renders the same viewBox at
+			    roughly its current size — no label rescale — and the block loses
+			    ~140px. */}
+			<div className="mt-8 grid gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:items-center lg:gap-10">
+				<div className="min-w-0 overflow-x-auto">
+					<div className="min-w-[40rem]">
+						<MerkleTree entries={slice.entries} />
+					</div>
 				</div>
-			</div>
 
-			<div className="mt-8 grid gap-3">
-				<div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 border-t border-brand-border pt-3">
-					<h3 className="font-display text-xl lowercase text-white">the chain verifies itself</h3>
-					<p className="font-mono text-xs text-white/70">{MERKLE_CAPTION}</p>
-				</div>
-				<div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-brand-border pt-3">
-					<h3 className="font-display text-xl lowercase text-white">
-						and can be anchored beyond your infra
-					</h3>
-					{/* EXPERIMENTAL is a baseline-aligned mini-tag, not a <sup>. A
+				<div className="grid min-w-0 gap-3">
+					<div className="flex flex-wrap items-baseline gap-x-6 gap-y-2 border-t border-brand-border pt-3">
+						<h3 className="font-display text-xl lowercase text-white">the chain verifies itself</h3>
+						<p className="font-mono text-xs text-white/70">{MERKLE_CAPTION}</p>
+					</div>
+					<div className="flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-brand-border pt-3">
+						<h3 className="font-display text-xl lowercase text-white">
+							and can be anchored beyond your infra
+						</h3>
+						{/* EXPERIMENTAL is a baseline-aligned mini-tag, not a <sup>. A
 					    <sup> keeps its superscript raise while `text-[12px]` cancels
 					    the browser's compensating size reduction, so the raised
 					    full-size line box grew the Rekor chip well past its siblings
 					    and pushed the glyph caps through the chip's top hairline at
 					    390px. The 12px floor (Addendum H) is kept; only the raise is dropped. */}
-					<ul className="flex flex-wrap gap-2">
-						{ANCHOR_BADGES.map((b) => (
-							<li
-								key={b.label}
-								className="inline-flex items-center gap-1 rounded-sm border border-brand-border px-2 py-1 font-mono text-xs text-white/70"
-							>
-								{b.label}
-								{b.experimental && (
-									<span className="font-mono text-[12px] tracking-widest text-white/70">
-										EXPERIMENTAL
-									</span>
-								)}
-							</li>
-						))}
-					</ul>
-					<p className="w-full font-mono text-[12px] text-white/70">{DRY_RUN_LABEL}</p>
+						<ul className="flex flex-wrap gap-2">
+							{ANCHOR_BADGES.map((b) => (
+								<li
+									key={b.label}
+									className="inline-flex items-center gap-1 rounded-sm border border-brand-border px-2 py-1 font-mono text-xs text-white/70"
+								>
+									{b.label}
+									{b.experimental && (
+										<span className="font-mono text-[12px] tracking-widest text-white/70">
+											EXPERIMENTAL
+										</span>
+									)}
+								</li>
+							))}
+						</ul>
+						<p className="w-full font-mono text-[12px] text-white/70">{DRY_RUN_LABEL}</p>
+					</div>
 				</div>
 			</div>
 
@@ -170,14 +177,19 @@ export default function ExhibitD() {
 				<ExhibitDDom entries={slice.entries} />
 			</div>
 
-			<a
-				href="/evidence/chain.jsonl"
-				className="focus-ring mt-6 inline-block font-mono text-xs text-tim hover:text-white"
-			>
-				view raw JSONL →
-			</a>
-			<p className="mt-6 font-mono text-xs text-white/70">{EU_FOOTNOTE}</p>
-			<p className="mt-2 font-mono text-[12px] text-white/70">{SMALL_PRINT}</p>
+			{/* Three left-aligned mono lines, each owning a full 1120px row for
+			    ~930px of combined text. They fit one flex rail at desktop width and
+			    wrap cleanly below it. */}
+			<div className="mt-6 flex flex-wrap items-baseline gap-x-8 gap-y-2">
+				<a
+					href="/evidence/chain.jsonl"
+					className="focus-ring inline-block font-mono text-xs text-tim hover:text-white"
+				>
+					view raw JSONL →
+				</a>
+				<p className="font-mono text-xs text-white/70">{EU_FOOTNOTE}</p>
+				<p className="font-mono text-[12px] text-white/70">{SMALL_PRINT}</p>
+			</div>
 		</section>
 	);
 }

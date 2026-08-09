@@ -150,28 +150,35 @@ export default function ExhibitC() {
 				<p className="mt-4 max-w-xl font-mono text-sm leading-6 text-white/70">
 					the banking pattern: held, then settled or voided. never lost.
 				</p>
-				<div className="mt-8">
+				{/* The fork and its explainer share one row (N2). The fork is capped at
+				    max-w-lg and both paragraphs at max-w-2xl, so stacked they left the
+				    right half of the section dead for ~450px. Side by side the fork
+				    fills the narrow track and the prose the wide one; below lg they
+				    stack in source order (diagram, then the prose that reads it). */}
+				<div className="mt-6 grid gap-8 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:items-center lg:gap-10">
 					<TwoPhaseFork />
+					<div>
+						<p className="max-w-2xl text-base leading-relaxed text-white/70">
+							every governed call opens a two-phase hold against the budget before a token moves —{" "}
+							<span className="font-mono text-white/90">available = budget − Σ(holds)</span>.
+							without holds, concurrent agents each see the full budget and settle past it. with
+							holds, the first hold that would exceed what is actually available throws. the budget
+							here is <span className="font-mono">{formatUsertokens(BUDGET)}</span> ={" "}
+							<span className="font-mono">{usdFromUsertokens(BUDGET)}</span> — the starter default.
+							run the race yourself:
+						</p>
+						{/* Scope, stated where the claim is made. An in-process mutex is what
+						    serialises the budget read and the hold for ONE governor; across
+						    processes the guarantee is the ledger's own
+						    debits_must_not_exceed_credits, which rejects an overshoot
+						    atomically — the same limitation govern.ts states about itself. */}
+						<p className="mt-4 max-w-2xl text-base leading-relaxed text-white/70">
+							the gate is per-governor: one process serialises its own budget read and hold behind a
+							mutex. across processes the guarantee is the ledger&rsquo;s — TigerBeetle atomically
+							rejects a hold that would overshoot, whoever asked for it.
+						</p>
+					</div>
 				</div>
-				<p className="mt-8 max-w-2xl text-base leading-relaxed text-white/70">
-					every governed call opens a two-phase hold against the budget before a token moves —{" "}
-					<span className="font-mono text-white/90">available = budget − Σ(holds)</span>. without
-					holds, concurrent agents each see the full budget and settle past it. with holds, the
-					first hold that would exceed what is actually available throws. the budget here is{" "}
-					<span className="font-mono">{formatUsertokens(BUDGET)}</span> ={" "}
-					<span className="font-mono">{usdFromUsertokens(BUDGET)}</span> — the starter default. run
-					the race yourself:
-				</p>
-				{/* Scope, stated where the claim is made. An in-process mutex is what
-				    serialises the budget read and the hold for ONE governor; across
-				    processes the guarantee is the ledger's own
-				    debits_must_not_exceed_credits, which rejects an overshoot
-				    atomically — the same limitation govern.ts states about itself. */}
-				<p className="mt-4 max-w-2xl text-base leading-relaxed text-white/70">
-					the gate is per-governor: one process serialises its own budget read and hold behind a
-					mutex. across processes the guarantee is the ledger&rsquo;s — TigerBeetle atomically
-					rejects a hold that would overshoot, whoever asked for it.
-				</p>
 
 				{/* THE BUDGET RACE — client island. Its server render IS the static
 				    fallback: the two-phase state at the defaults, one BLOCKED row.
@@ -190,21 +197,25 @@ export default function ExhibitC() {
 					</p>
 				</div>
 
-				{/* CASE FILE 001 — the ungoverned original. Dark incident log; no paper. */}
-				<div className="mt-32 md:mt-44">
-					<CaseFile />
-				</div>
+				{/* CASE FILE 001 and the counterfactual replay are the narrative pair —
+				    the ungoverned incident log, and the same loop governed — so they
+				    share ONE row (N3) instead of sitting in two full-width rows
+				    separated by ~176px oceans. The case file keeps its own
+				    `mx-auto w-full max-w-md`: it fills the narrow track at lg and
+				    re-centres when the row stacks. The replay takes the WIDER
+				    track deliberately — the widest column the composition allows, per
+				    the Addendum I legibility target for the BLOCK line.
 
-				{/* Counterfactual replay — desktop-only ambient video, now given the
-				    full column and cropped to its active terminal rows so the BLOCK
-				    line is readable without leaning in (Addendum I). The recording is a
-				    wide terminal capture with roughly a sixth of its height empty below
-				    the last prompt; the wrapper pins a taller aspect and object-top
-				    cover crops that dead band away instead of scaling it down with the
-				    text (the ratio itself lives in the className, not this comment).
-				    ONLY the video is desktop-only — the denial evidence below it is
-				    content and renders at every viewport. */}
-				<div className="mt-32 md:mt-44">
+				    Counterfactual replay — desktop-only ambient video, cropped to its
+				    active terminal rows (Addendum I). The recording is a wide terminal
+				    capture with roughly a sixth of its height empty below the last
+				    prompt; the wrapper pins a taller aspect and object-top cover crops
+				    that dead band away instead of scaling it down with the text (the
+				    ratio itself lives in the className, not this comment). ONLY the
+				    video is desktop-only — the denial evidence below is content and
+				    renders at every viewport. */}
+				<div className="mt-16 grid gap-8 md:mt-20 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:items-center lg:gap-10">
+					<CaseFile />
 					<figure className="hidden md:block">
 						<div className="aspect-[26/9] w-full overflow-hidden rounded-xl border border-white/10">
 							<AmbientVideo
@@ -217,20 +228,23 @@ export default function ExhibitC() {
 							counterfactual replay — the same loop, governed: usertrust throws at the cap.
 						</figcaption>
 					</figure>
+				</div>
 
-					{/* min-w-0: the thrown error's longest unbreakable token would
-					    otherwise set this column's min-content wider than a phone. */}
-					<div className="relative mt-14 min-w-0">
-						<Stamp word="BLOCKED" className="absolute -right-4 -top-6 z-10" />
-						<h3 className="font-display lowercase leading-none text-white text-[clamp(1.75rem,4vw,3rem)]">
-							the denial, on the chain.
-						</h3>
-						<p className="mt-3 max-w-2xl font-mono text-sm leading-6 text-white/70">
-							denials don&rsquo;t get receipts. they get chain events.
-						</p>
-						<div className="mt-8">
-							<DenialEvidence />
-						</div>
+				{/* The denial is its own instrument now, on the page-wide
+				    "next instrument, same exhibit" token (G3) rather than tucked
+				    inside the replay's wrapper.
+				    min-w-0: the thrown error's longest unbreakable token would
+				    otherwise set this column's min-content wider than a phone. */}
+				<div className="relative mt-16 min-w-0 md:mt-20">
+					<Stamp word="BLOCKED" className="absolute -right-4 -top-6 z-10" />
+					<h3 className="font-display lowercase leading-none text-white text-[clamp(1.75rem,4vw,3rem)]">
+						the denial, on the chain.
+					</h3>
+					<p className="mt-3 max-w-2xl font-mono text-sm leading-6 text-white/70">
+						denials don&rsquo;t get receipts. they get chain events.
+					</p>
+					<div className="mt-6">
+						<DenialEvidence />
 					</div>
 				</div>
 			</div>

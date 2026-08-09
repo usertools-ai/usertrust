@@ -88,49 +88,55 @@ export default function ExhibitB() {
 				</h2>
 
 				{/* Tabs left, THE GOVERNANCE DIE opposite. Stacks on mobile. */}
-				<div className="mt-12 grid items-center gap-12 lg:grid-cols-2">
+				<div className="mt-8 grid items-center gap-8 lg:grid-cols-2 lg:gap-10">
 					<ExhibitBTabs />
 					<ExhibitBDie />
 				</div>
 
-				{/* BYOK creed */}
-				<p className="mt-8 font-mono text-sm tracking-wide text-white/70">
-					{"your keys. your billing. your evidence."}
-				</p>
-
-				{/* works with — model-provider marks, monochrome ghosted (the
-				    provider-logo addendum). Graphics register: white at 45%
-				    resting clears the graphics-only contrast floor (a lower bar
-				    than body text, validated); hover lifts to white at 85%.
-				    Nominative use only — no color, no endorsement. No uppercase
-				    class on the badges: casing is the brand. */}
-				<div className="mt-10">
-					<p className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
-						works with
+				{/* The BYOK creed and the works-with rail are each ONE mono line, and
+				    each used to own a full-width row with a dead right half under it
+				    (N2). One composed row: creed left, marks right, baseline-matched
+				    at lg and stacked below it. */}
+				<div className="mt-6 flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+					{/* BYOK creed */}
+					<p className="font-mono text-sm tracking-wide text-white/70">
+						{"your keys. your billing. your evidence."}
 					</p>
-					<ul aria-label="model providers" className="mt-4 flex flex-wrap items-center gap-8">
-						{PROVIDER_LOGOS.map((logo) => (
-							<li key={logo.name} className="text-white/45 transition-colors hover:text-white/85">
-								<svg
-									viewBox={PROVIDER_VIEWBOX}
-									role="img"
-									aria-label={logo.name}
-									fill="currentColor"
-									className="h-5 w-auto"
+
+					{/* works with — model-provider marks, monochrome ghosted (the
+					    provider-logo addendum). Graphics register: white at 45%
+					    resting clears the graphics-only contrast floor (a lower bar
+					    than body text, validated); hover lifts to white at 85%.
+					    Nominative use only — no color, no endorsement. No uppercase
+					    class on the badges: casing is the brand. */}
+					<div>
+						<p className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+							works with
+						</p>
+						<ul aria-label="model providers" className="mt-3 flex flex-wrap items-center gap-8">
+							{PROVIDER_LOGOS.map((logo) => (
+								<li key={logo.name} className="text-white/45 transition-colors hover:text-white/85">
+									<svg
+										viewBox={PROVIDER_VIEWBOX}
+										role="img"
+										aria-label={logo.name}
+										fill="currentColor"
+										className="h-5 w-auto"
+									>
+										<path d={logo.path} />
+									</svg>
+								</li>
+							))}
+							{PROVIDER_BADGES.map((badge) => (
+								<li
+									key={badge}
+									className="font-mono text-[12px] tracking-[0.12em] text-white/50 transition-colors hover:text-white/85"
 								>
-									<path d={logo.path} />
-								</svg>
-							</li>
-						))}
-						{PROVIDER_BADGES.map((badge) => (
-							<li
-								key={badge}
-								className="font-mono text-[12px] tracking-[0.12em] text-white/50 transition-colors hover:text-white/85"
-							>
-								{badge}
-							</li>
-						))}
-					</ul>
+									{badge}
+								</li>
+							))}
+						</ul>
+					</div>
 				</div>
 
 				{/* GOVERNED SURFACES — the boundary, stated precisely. Renders through

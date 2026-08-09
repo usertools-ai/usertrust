@@ -163,26 +163,37 @@ export default function ExhibitG() {
 					</p>
 				)}
 
-				{/* reproduction block — the corpus is one command sequence away */}
-				<div className="mt-8 max-w-2xl">
-					<div className="mb-3 flex items-center justify-between gap-4">
-						<span className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
-							reproduce it yourself
-						</span>
-						<CopyChip text={REPRO_COMMAND} label="copy reproduction commands" />
+				{/* reproduction block — the corpus is one command sequence away. The
+				    terminal used to be capped at 672px against an 1152px column with
+				    a ~480px dead right half, and the section's best line was buried
+				    under it as a footnote in the smallest register on the page (N3).
+				    The wider terminal track (~640px, every command well inside the
+				    measure cap) now pairs with that line promoted into the section's
+				    own white/50 display register — the same one the subhead above
+				    uses. Text unchanged. */}
+				<div className="mt-8 grid gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:items-center lg:gap-10">
+					<div className="min-w-0">
+						<div className="mb-3 flex items-center justify-between gap-4">
+							<span className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+								reproduce it yourself
+							</span>
+							<CopyChip text={REPRO_COMMAND} label="copy reproduction commands" />
+						</div>
+						<TerminalFrame>
+							<pre>
+								{REPRO_LINES.map((line) => (
+									<div key={line}>
+										<span className="select-none text-white/50">$ </span>
+										{line}
+									</div>
+								))}
+							</pre>
+						</TerminalFrame>
 					</div>
-					<TerminalFrame>
-						<pre>
-							{REPRO_LINES.map((line) => (
-								<div key={line}>
-									<span className="select-none text-white/50">$ </span>
-									{line}
-								</div>
-							))}
-						</pre>
-					</TerminalFrame>
+					<p className="font-display lowercase leading-tight text-white/50 text-[clamp(1.75rem,2.5vw,2.5rem)]">
+						don&rsquo;t trust us — recompute us.
+					</p>
 				</div>
-				<p className="mt-3 font-mono text-xs text-white/70">don&rsquo;t trust us — recompute us.</p>
 			</div>
 		</section>
 	);
