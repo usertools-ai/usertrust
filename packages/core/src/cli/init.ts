@@ -249,7 +249,16 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			for (const model of models) {
 				const rates = PRICING_TABLE[model];
 				if (!rates) continue;
-				clack.log.step(`  ${model}: input=${rates.inputPer1k}/1k, output=${rates.outputPer1k}/1k`);
+				// D8: show all four tiers the table publishes so the migration
+				// prompt below is legible against what's actually being replaced —
+				// an omitted tier here means the table has no published rate for it.
+				const cacheReadPart =
+					rates.cacheReadPer1k !== undefined ? `, cache-read=${rates.cacheReadPer1k}/1k` : "";
+				const cacheWritePart =
+					rates.cacheWritePer1k !== undefined ? `, cache-write=${rates.cacheWritePer1k}/1k` : "";
+				clack.log.step(
+					`  ${model}: input=${rates.inputPer1k}/1k, output=${rates.outputPer1k}/1k${cacheReadPart}${cacheWritePart}`,
+				);
 			}
 		}
 
@@ -304,10 +313,57 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				continue;
 			}
 
+			// D8: optional cache tiers. customRates is replace-not-merge (D1), so a
+			// blank answer here OMITS the field rather than writing 0 — an omitted
+			// tier still prices safely via the D1 fallback (full input rate), it
+			// just doesn't carry the model's cache discount. Never write 0 for
+			// "unanswered"; that would zero-bill cache tokens.
+			const cacheReadResult = await clack.text({
+				message: `${model} cache-read rate ($/1M tokens, blank = price at full input rate):`,
+			});
+
+			if (clack.isCancel(cacheReadResult)) {
+				clack.log.warn("Setup cancelled.");
+				return;
+			}
+
+			const cacheWriteResult = await clack.text({
+				message: `${model} cache-write rate ($/1M tokens, blank = price at full input rate):`,
+			});
+
+			if (clack.isCancel(cacheWriteResult)) {
+				clack.log.warn("Setup cancelled.");
+				return;
+			}
+
+			let cacheReadPerM: number | undefined;
+			const cacheReadStr = (cacheReadResult as string).trim();
+			if (cacheReadStr !== "") {
+				const parsed = Number(cacheReadStr);
+				if (!Number.isFinite(parsed) || parsed < 0) {
+					clack.log.warn("Cache-read rate must be a non-negative number. Omitting it.");
+				} else {
+					cacheReadPerM = parsed;
+				}
+			}
+
+			let cacheWritePerM: number | undefined;
+			const cacheWriteStr = (cacheWriteResult as string).trim();
+			if (cacheWriteStr !== "") {
+				const parsed = Number(cacheWriteStr);
+				if (!Number.isFinite(parsed) || parsed < 0) {
+					clack.log.warn("Cache-write rate must be a non-negative number. Omitting it.");
+				} else {
+					cacheWritePerM = parsed;
+				}
+			}
+
 			// Convert $/1M to usertokens/1K: $X per 1M = X*10 usertokens per 1K
 			customRates[model] = {
 				inputPer1k: inputPerM * 10,
 				outputPer1k: outputPerM * 10,
+				...(cacheReadPerM !== undefined ? { cacheReadPer1k: cacheReadPerM * 10 } : {}),
+				...(cacheWritePerM !== undefined ? { cacheWritePer1k: cacheWritePerM * 10 } : {}),
 			};
 
 			clack.log.success(`Updated ${model}`);

@@ -40,6 +40,34 @@ describe("request schemas", () => {
 		);
 		expect(AbortRequestSchema.parse({ transferId: "tx_1" }).transferId).toBe("tx_1");
 	});
+
+	it("round-trips the four-tier cache fields on settle (D4 row 6 — the schema used to STRIP them)", () => {
+		const parsed = SettleRequestSchema.parse({
+			transferId: "tx_1",
+			inputTokens: 100,
+			outputTokens: 50,
+			cacheReadTokens: 900_000,
+			cacheWriteTokens: 1_200,
+		});
+		// Both directions: present AND round-tripped exactly, not silently dropped.
+		expect(parsed.cacheReadTokens).toBe(900_000);
+		expect(parsed.cacheWriteTokens).toBe(1_200);
+		expect(parsed).toEqual({
+			transferId: "tx_1",
+			inputTokens: 100,
+			outputTokens: 50,
+			cacheReadTokens: 900_000,
+			cacheWriteTokens: 1_200,
+		});
+	});
+
+	it("cache fields stay optional and reject non-integer/negative values like the existing token fields", () => {
+		expect(SettleRequestSchema.parse({ transferId: "tx_1" }).cacheReadTokens).toBeUndefined();
+		expect(() => SettleRequestSchema.parse({ transferId: "tx_1", cacheReadTokens: -1 })).toThrow();
+		expect(() =>
+			SettleRequestSchema.parse({ transferId: "tx_1", cacheWriteTokens: 1.5 }),
+		).toThrow();
+	});
 });
 
 describe("toHttpError", () => {

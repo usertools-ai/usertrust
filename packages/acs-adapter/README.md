@@ -38,6 +38,10 @@ const result = await evaluator.evaluate({
 if (result.verdict.decision === "allow") {
 	// ... run the action ...
 	await evaluator.settle(result, { inputTokens: 210, outputTokens: 480 });
+	// or, for a call that hit the model's cache:
+	// await evaluator.settle(result, {
+	//   inputTokens: 40, outputTokens: 480, cacheReadTokens: 170, cacheWriteTokens: 0,
+	// });
 } // denied? nothing to clean up — no reservation was made
 ```
 
@@ -61,6 +65,12 @@ ACS-style policy layer unchanged. usertrust meters in usertokens; `cost_usd` car
 usertoken cost unless the deployment configures a conversion. Action identity
 (`canonicalJson`/`actionIdentity`) is the adapter's own namespace — unrelated to core's
 audit-chain canonicalization.
+
+`token_count` sums all four disjoint tiers `settle()` accepts — fresh input, output, cache-read,
+cache-write — not just input+output, so a cache-heavy session no longer under-reports against the
+ACS-spec envelope. The ACS envelope itself stays fixed to its four counters; the per-tier
+breakdown (`CompositeEvaluator.tokenCounts()`) lives outside it as an additive, adapter-specific
+accessor rather than widening that contract.
 
 Patterns and schemas adapted from the Microsoft Agent Governance Toolkit (MIT License) —
 see the repository `NOTICE` file. No Microsoft source code is included.

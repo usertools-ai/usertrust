@@ -97,8 +97,11 @@ function makeMockAudit(): AuditWriter {
 }
 
 interface ResponsesClientOpts {
-	/** Non-stream `response.usage`; `null` → omit the usage object entirely. */
-	usage?: { input_tokens: number; output_tokens: number; total_tokens?: number } | null;
+	/**
+	 * Non-stream `response.usage`; `null` → omit the usage object entirely.
+	 * Loosely typed so a test can supply `input_tokens_details` (the D2 cache tiers).
+	 */
+	usage?: Record<string, unknown> | null;
 	/** Streaming events yielded in order (a `response.completed` carries usage). */
 	streamEvents?: unknown[];
 	/** Throw mid-stream AFTER this many events have been yielded (void path). */
@@ -400,6 +403,63 @@ describe("OpenAI Responses non-stream governance (A6)", () => {
 
 		await destroy(governed);
 	});
+
+	// ── D2: the Responses cache tiers nest under input_tokens_details ──
+
+	it("subtracts input_tokens_details.cached_tokens out of the inclusive input count", async () => {
+		// gpt-4o: input 25 / output 100 / cacheRead 12.5 per 1k. `input_tokens` is
+		// INCLUSIVE of the cached read, so fresh input is 5000 - 4000 = 1000:
+		//   (1000/1000)*25 + (100/1000)*100 + (4000/1000)*12.5 = 25 + 10 + 50 = 85
+		// Pre-fix the details were never read: 5000 fresh input priced 125 + 10 = 135,
+		// double-counting every cached token at the full input rate.
+		const { client } = makeResponsesClient({
+			usage: {
+				input_tokens: 5_000,
+				output_tokens: 100,
+				total_tokens: 5_100,
+				input_tokens_details: { cached_tokens: 4_000 },
+			},
+		});
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 5_000_000,
+			vaultBase: tmpVault,
+			_engine: makeMockEngine(),
+			_audit: makeMockAudit(),
+		});
+
+		const { receipt } = await callResponses(governed, NONSTREAM_PARAMS);
+
+		expect(receipt.usageSource).toBe("provider");
+		expect(receipt.cost).toBe(85);
+
+		await destroy(governed);
+	});
+
+	it("does not double-count reasoning tokens (output_tokens already includes them)", async () => {
+		// (1000/1000)*25 + (400/1000)*100 = 25 + 40 = 65. Adding the 300 reasoning
+		// tokens on top of output_tokens would over-bill thinking at 95.
+		const { client } = makeResponsesClient({
+			usage: {
+				input_tokens: 1_000,
+				output_tokens: 400,
+				output_tokens_details: { reasoning_tokens: 300 },
+			},
+		});
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 5_000_000,
+			vaultBase: tmpVault,
+			_engine: makeMockEngine(),
+			_audit: makeMockAudit(),
+		});
+
+		const { receipt } = await callResponses(governed, NONSTREAM_PARAMS);
+
+		expect(receipt.cost).toBe(65);
+
+		await destroy(governed);
+	});
 });
 
 // ── Streaming (A7) ──
@@ -444,6 +504,44 @@ describe("OpenAI Responses streaming governance (A7)", () => {
 		await destroy(governed);
 	});
 
+	it("carries the terminal event's cache tiers into streamCost (D2/D4 streaming.ts:94)", async () => {
+		// Same arithmetic as the non-stream Responses row, proving BOTH paths share
+		// one extractor: fresh 1000 @25 + output 100 @100 + read 4000 @12.5 = 85.
+		const { client } = makeResponsesClient({
+			streamEvents: [
+				{ type: "response.created", response: { id: "resp_c" } },
+				{ type: "response.output_text.delta", delta: "Hello" },
+				{
+					type: "response.completed",
+					response: {
+						id: "resp_c",
+						usage: {
+							input_tokens: 5_000,
+							output_tokens: 100,
+							total_tokens: 5_100,
+							input_tokens_details: { cached_tokens: 4_000 },
+						},
+					},
+				},
+			],
+		});
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 5_000_000,
+			vaultBase: tmpVault,
+			_engine: makeMockEngine(),
+			_audit: makeMockAudit(),
+		});
+
+		const result = await callResponses(governed, STREAM_PARAMS);
+		const { receipt } = await consumeStream(result);
+
+		expect(receipt.usageSource).toBe("provider");
+		expect(receipt.cost).toBe(85);
+
+		await destroy(governed);
+	});
+
 	it("settles at ESTIMATE when the terminal event carries no usage (A3/A7)", async () => {
 		const engine = makeMockEngine();
 		const { client } = makeResponsesClient({ streamEvents: RESPONSES_STREAM_NO_USAGE });
@@ -467,7 +565,7 @@ describe("OpenAI Responses streaming governance (A7)", () => {
 		await destroy(governed);
 	});
 
-	it("clamps non-finite/negative terminal usage counts (A7 sanitation)", async () => {
+	it("clamps non-finite/negative terminal usage counts and settles as ESTIMATED (A7+D5)", async () => {
 		const engine = makeMockEngine();
 		const { client } = makeResponsesClient({
 			streamEvents: [
@@ -489,9 +587,13 @@ describe("OpenAI Responses streaming governance (A7)", () => {
 		const result = await callResponses(governed, STREAM_PARAMS);
 		const { receipt } = await consumeStream(result);
 
-		// A present-but-garbage usage object still counts as reported (clamped to 0);
-		// cost floors at the >=1 nominal per-call floor.
-		expect(receipt.usageSource).toBe("provider");
+		// A7 sanitation is unchanged: -5 and NaN clamp to 0, and the >=1 per-call
+		// floor still applies. D5 changes the LABEL and therefore the fallback — a
+		// terminal that reported no usable input AND output is not provider-sourced,
+		// so this settles on the ESTIMATE rather than billing a real call at the
+		// 1-usertoken floor while claiming the provider said so. Still a settle, never
+		// a void (A3): a billable success with unknown usage always settles.
+		expect(receipt.usageSource).toBe("estimated");
 		expect(receipt.cost).toBeGreaterThanOrEqual(1);
 		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
 

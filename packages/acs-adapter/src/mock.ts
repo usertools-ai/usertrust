@@ -40,7 +40,17 @@ export function createMockGovernor(opts: { budget?: number } = {}): { governor: 
 		},
 		async settle(auth: Authorization, params?: SettleParams): Promise<TrustReceipt> {
 			holds.delete(auth.transferId);
-			const actual = (params?.inputTokens ?? 0) + (params?.outputTokens ?? 0);
+			// ALL FOUR disjoint tiers (spec D4 row 7 / Codex PR-85 P2-6). The mock's
+			// cost model is "1 token = 1 usertoken", and since the ACS token counters
+			// went four-tier, `CompositeEvaluator.budgetsEnvelope().token_count` sums
+			// all four. Charging input+output only made the demo's receipt disagree
+			// with the demo's own envelope, and sent a cache-only settle (both of
+			// those zero) down the `actual > 0` fallback to bill the entire hold.
+			const actual =
+				(params?.inputTokens ?? 0) +
+				(params?.outputTokens ?? 0) +
+				(params?.cacheReadTokens ?? 0) +
+				(params?.cacheWriteTokens ?? 0);
 			const cost = actual > 0 ? actual : auth.estimatedCost;
 			budget += auth.estimatedCost - cost;
 			return {
