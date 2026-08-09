@@ -85,4 +85,30 @@ describe("statusOf", () => {
 		expect(statusOf(settled as never)).toBe("settled");
 		expect(statusOf(pending as never)).toBe("pending");
 	});
+
+	it("labels a denial as denied, not as a zero-cost failed transaction", () => {
+		// A denial carries an `error` string, which the generic mapping would
+		// otherwise read as a failed CALL — putting refusals in the same column
+		// as provider failures and displacing real receipts.
+		const [policyDenied, ledgerRejected] = toLedgerRows(
+			[
+				evt({
+					kind: "policy_denied",
+					data: { decision: "deny", denialClass: "pii", error: "Policy denied: PII detected" },
+				}),
+				evt({
+					id: "id-2",
+					sequence: 2,
+					kind: "ledger_rejected",
+					data: { decision: "deny", transferId: "tx_1", error: "Insufficient balance" },
+				}),
+			],
+			{ valid: true, breakIndex: null },
+		);
+		expect(statusOf(policyDenied as never)).toBe("denied");
+		expect(statusOf(ledgerRejected as never)).toBe("denied");
+		// No fabricated zero cost — a denial spent nothing and reports nothing.
+		expect(policyDenied?.costUt).toBeUndefined();
+		expect(ledgerRejected?.costUt).toBeUndefined();
+	});
 });

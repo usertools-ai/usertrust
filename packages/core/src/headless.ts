@@ -43,6 +43,13 @@ import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
+import {
+	appendDenialEvent,
+	classifyPolicyDenial,
+	type DenialRecord,
+	isGovernanceDenial,
+	toDenialRuleRefs,
+} from "./audit/denial-events.js";
 import { writeReceipt } from "./audit/rotation.js";
 import { getCurrentCostCenter } from "./budget/attribution.js";
 // The money math and the validation doors are IMPORTED from `budget/context.ts`,
@@ -830,6 +837,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const actor = params.actor ?? "local";
 			const messages = params.messages ?? [];
 
+			// Per-invocation denial evidence, filled by the throw sites and read by
+			// the boundaries below. A closure local, never an error property — see
+			// `govern.ts` for the full rationale.
+			const denial: DenialRecord = { denialClass: "policy" };
+			const costCenterAudit: { costCenter?: string } =
+				envelope === undefined ? {} : { costCenter: envelope.attribution.costCenter };
+
 			// Circuit breaker — key on "headless" since we don't have a client kind
 			const cb = breaker.get("headless" as never);
 			cb.allowRequest();
@@ -847,10 +861,30 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const rateInfo = resolveRates(model, endpoint.class, config);
 			if (rateInfo.unknown) {
 				if (config.unknownModelPolicy === "deny") {
-					throw new PolicyDeniedError(
+					// ── Denial boundary 1 of 2: the PRE-MUTEX unknown-model refusal ──
+					// No transfer id yet — it is minted below — so the event carries
+					// only what genuinely exists. The `promptHash` here is THIS spec's
+					// `sha256-json-v1` over the prompt parts; the headless pattern
+					// memory's `sha256(transferId)` is a different thing entirely and
+					// is never substituted for it.
+					denial.denialClass = "unknown_model";
+					const unknownModelDenial = new PolicyDeniedError(
 						`unknown_model: ${model} not in pricing table`,
 						'Set pricing: "custom" with a customRates entry for this model in usertrust.config.json, or use a model from the built-in pricing table.',
 					);
+					await appendDenialEvent({
+						audit,
+						actor,
+						error: unknownModelDenial,
+						record: denial,
+						fields: {
+							model,
+							endpointClass: endpoint.class,
+							promptParts: messages,
+							...costCenterAudit,
+						},
+					});
+					throw unknownModelDenial;
 				}
 				if (config.unknownModelPolicy === "warn") {
 					// Shared once-per-process helper — identical wording to trust() (F5).
@@ -903,163 +937,195 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// the only numbers its policy gate saw.
 			let envelopeDebited = false;
 
+			// ── Denial boundary 2 of 2: the whole budget-mutex section ──
+			// Catch OUTSIDE the lock-releasing finally, so the append never holds
+			// the money lock across an fsync. See `govern.ts` for the full
+			// rationale; this governor's boundary has no provider call after it,
+			// because `authorize()` never contacts one.
 			try {
-				// Attributed calls only: ONE batched read of the envelope's live
-				// `available`, for the policy numbers below. Taken INSIDE the budget mutex
-				// — the same lock that serialises the hold — and BEFORE the gate, so this
-				// call's own hold lands only after the read and a CONCURRENT attributed
-				// authorize on the SAME envelope cannot slip its hold between this read and
-				// the gate. When the read was OUTSIDE the lock, both read the pre-hold
-				// balance and the second bypassed a hard scarcity tier
-				// (`budgetFractionRemaining` / `budgetRunwayHours`) the ledger cannot
-				// enforce — TigerBeetle rejects an OVERSHOOT, never a fractional/runway
-				// tier. Serialising the read under the hold's lock makes the gate describe
-				// the wallet the hold will debit, exactly as the SESSION path already does.
-				// Cross-process (multi-governor) concurrency still relies on TB atomicity —
-				// overshoot only — the same limitation the session path has. The full
-				// rationale lives with the helper in `govern.ts`.
-				// A2: a read that FAILS refuses the call outright — the finally below
-				// releases the mutex and the ledger-unavailable error propagates before the
-				// gate is evaluated or any hold is attempted; gating on the SESSION wallet
-				// while the hold debits the ENVELOPE would clear the call against a wallet
-				// the money never came from, in the one record an auditor reads.
-				const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
+				try {
+					// Attributed calls only: ONE batched read of the envelope's live
+					// `available`, for the policy numbers below. Taken INSIDE the budget mutex
+					// — the same lock that serialises the hold — and BEFORE the gate, so this
+					// call's own hold lands only after the read and a CONCURRENT attributed
+					// authorize on the SAME envelope cannot slip its hold between this read and
+					// the gate. When the read was OUTSIDE the lock, both read the pre-hold
+					// balance and the second bypassed a hard scarcity tier
+					// (`budgetFractionRemaining` / `budgetRunwayHours`) the ledger cannot
+					// enforce — TigerBeetle rejects an OVERSHOOT, never a fractional/runway
+					// tier. Serialising the read under the hold's lock makes the gate describe
+					// the wallet the hold will debit, exactly as the SESSION path already does.
+					// Cross-process (multi-governor) concurrency still relies on TB atomicity —
+					// overshoot only — the same limitation the session path has. The full
+					// rationale lives with the helper in `govern.ts`.
+					// A2: a read that FAILS refuses the call outright — the finally below
+					// releases the mutex and the ledger-unavailable error propagates before the
+					// gate is evaluated or any hold is attempted; gating on the SESSION wallet
+					// while the hold debits the ENVELOPE would clear the call against a wallet
+					// the money never came from, in the one record an auditor reads.
+					const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
 
-				// Policy gate — caller params spread FIRST so trusted governance
-				// fields (tier/estimated_cost/budget_remaining/budget_remaining_after)
-				// CANNOT be shadowed by attacker-controlled params.
-				// P1-BUDGET-PREFLIGHT (RECON #1): budget_remaining_after is the derived
-				// field the block-budget-overshoot default rule compares against zero to
-				// deny a single overshooting call PRE-spend. As a HARD rule it fails
-				// CLOSED if omitted, so it MUST be supplied on every evaluation.
-				//
-				// ENVELOPE SCOPING (identical to `trust()`'s two sites — the three-site
-				// re-assertion table in AGENTS.md is a set, not three independent
-				// choices): an ATTRIBUTED call is gated on THE ENVELOPE ITS HOLD WILL
-				// DEBIT. `budget_remaining` is that envelope's live ledger `available`,
-				// so `block-budget-exhausted` and `block-budget-overshoot` become
-				// pre-spend guards on the cost center, ahead of the ledger's own atomic
-				// rejection, and the gate and the hold always describe the SAME wallet —
-				// the case where they could disagree (an unreadable envelope) refused the
-				// call above rather than reaching here (A2).
-				// `budget_remaining_after` is deliberately UNFLOORED on both paths (A7):
-				// it must be allowed to go NEGATIVE, because `block-budget-overshoot` is
-				// a non-disableable hard `lt 0` deny and flooring it at zero would
-				// structurally disarm that rule on every attributed call.
-				// The session numbers still stand for a call that places no envelope hold
-				// at all — unattributed, dry-run, or no engine — which is honest, because
-				// nothing debits an envelope on those paths either.
-				const sessionRemaining = config.budget - budgetSpent - inFlightHoldTotal;
-				const gateRemaining = envelopeRemaining ?? sessionRemaining;
-				// P1-BUDGET-TIER-SHADOW: the budget tier fields are trusted-host input,
-				// and asserting them here is what stops `params.params` from supplying
-				// its own `budgetFractionRemaining` and satisfying a tier that guards
-				// frontier spend. They are now REAL for an attributed call whose scope
-				// stated its allocation (D4) — the case this governor could not describe
-				// before — and stay explicitly `undefined` for every other call, where
-				// the honest value is ABSENT: an `exists`-guarded rule then simply does
-				// not match, and a hard rule without that guard fires. Never an
-				// attacker's number.
-				const tierFields =
-					envelope !== undefined && envelopeRemaining !== undefined
-						? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
-						: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
-				const policyResult = evaluatePolicy(policyRules, {
-					...(params.params ?? {}),
-					model,
-					tier: config.tier,
-					estimated_cost: estCost,
-					budget_remaining: gateRemaining,
-					budget_remaining_after: gateRemaining - estCost,
-					budgetFractionRemaining: tierFields.budgetFractionRemaining,
-					budgetRunwayHours: tierFields.budgetRunwayHours,
-					// Structurally un-forgeable: this comes from the caller's own async
-					// execution context, which no request body can reach. Asserted after
-					// the spread like every other trusted field, `undefined` included.
-					cost_center: envelope?.attribution.costCenter,
-				});
-				if (policyResult.decision === "deny") {
-					const reason =
-						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
-					throw new PolicyDeniedError(
-						reason,
-						derivePolicyHint(policyResult, envelope !== undefined),
-					);
-				}
-
-				// PII check
-				if (config.pii !== "off" && messages.length > 0) {
-					const piiResult = detectPII(messages);
-					if (piiResult.found && config.pii === "block") {
-						throw new PolicyDeniedError(
-							`PII detected: ${piiResult.types.join(", ")}`,
-							'PII enforcement blocked this call. Use { pii: "warn" } to log instead of block; the headless governor does not redact egress — redaction is the integrating host\'s responsibility.',
-						);
-					}
-				}
-
-				// PENDING hold
-				if (proxyConn != null && !isDryRun) {
-					try {
-						const proxyResult = await proxyConn.spend({
-							model,
-							estimatedCost: estCost,
-							actor,
-						});
-						proxyTransferId = proxyResult.transferId;
-					} catch (holdErr) {
-						throw new LedgerUnavailableError(
-							holdErr instanceof Error ? holdErr.message : String(holdErr),
-						);
-					}
-				} else if (engine != null && !isDryRun) {
-					try {
-						await engine.spendPending({
-							transferId,
-							amount: estCost,
-							// Attributed → the envelope pays. Unattributed → the key is
-							// OMITTED, not passed as undefined, so the engine's default (the
-							// session holding wallet) is reached by exactly the path it was
-							// before envelopes existed.
-							...(envelope !== undefined ? { debitAccountId: envelope.accountId } : {}),
-						});
-					} catch (holdErr) {
-						// P1-LEDGER-ENFORCE: an over-budget reservation is rejected
-						// atomically by the ledger. Surface it as a hard budget DENY —
-						// NOT as "ledger unavailable" (which would misreport a budget cap
-						// as an outage).
-						if (holdErr instanceof InsufficientBalanceError) {
-							// An attributed rejection is re-presented in the caller's terms:
-							// the `parent::costCenter` label instead of a derived account id,
-							// and the remedy that actually funds an envelope. Unattributed
-							// rejections rethrow the SAME object — nothing on that path moved.
-							throw envelope === undefined
-								? holdErr
-								: asEnvelopeBalanceError(holdErr, envelope.label);
+					// Policy gate — caller params spread FIRST so trusted governance
+					// fields (tier/estimated_cost/budget_remaining/budget_remaining_after)
+					// CANNOT be shadowed by attacker-controlled params.
+					// P1-BUDGET-PREFLIGHT (RECON #1): budget_remaining_after is the derived
+					// field the block-budget-overshoot default rule compares against zero to
+					// deny a single overshooting call PRE-spend. As a HARD rule it fails
+					// CLOSED if omitted, so it MUST be supplied on every evaluation.
+					//
+					// ENVELOPE SCOPING (identical to `trust()`'s two sites — the three-site
+					// re-assertion table in AGENTS.md is a set, not three independent
+					// choices): an ATTRIBUTED call is gated on THE ENVELOPE ITS HOLD WILL
+					// DEBIT. `budget_remaining` is that envelope's live ledger `available`,
+					// so `block-budget-exhausted` and `block-budget-overshoot` become
+					// pre-spend guards on the cost center, ahead of the ledger's own atomic
+					// rejection, and the gate and the hold always describe the SAME wallet —
+					// the case where they could disagree (an unreadable envelope) refused the
+					// call above rather than reaching here (A2).
+					// `budget_remaining_after` is deliberately UNFLOORED on both paths (A7):
+					// it must be allowed to go NEGATIVE, because `block-budget-overshoot` is
+					// a non-disableable hard `lt 0` deny and flooring it at zero would
+					// structurally disarm that rule on every attributed call.
+					// The session numbers still stand for a call that places no envelope hold
+					// at all — unattributed, dry-run, or no engine — which is honest, because
+					// nothing debits an envelope on those paths either.
+					const sessionRemaining = config.budget - budgetSpent - inFlightHoldTotal;
+					const gateRemaining = envelopeRemaining ?? sessionRemaining;
+					// P1-BUDGET-TIER-SHADOW: the budget tier fields are trusted-host input,
+					// and asserting them here is what stops `params.params` from supplying
+					// its own `budgetFractionRemaining` and satisfying a tier that guards
+					// frontier spend. They are now REAL for an attributed call whose scope
+					// stated its allocation (D4) — the case this governor could not describe
+					// before — and stay explicitly `undefined` for every other call, where
+					// the honest value is ABSENT: an `exists`-guarded rule then simply does
+					// not match, and a hard rule without that guard fires. Never an
+					// attacker's number.
+					const tierFields =
+						envelope !== undefined && envelopeRemaining !== undefined
+							? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
+							: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
+					const policyResult = evaluatePolicy(policyRules, {
+						...(params.params ?? {}),
+						model,
+						tier: config.tier,
+						estimated_cost: estCost,
+						budget_remaining: gateRemaining,
+						budget_remaining_after: gateRemaining - estCost,
+						budgetFractionRemaining: tierFields.budgetFractionRemaining,
+						budgetRunwayHours: tierFields.budgetRunwayHours,
+						// Structurally un-forgeable: this comes from the caller's own async
+						// execution context, which no request body can reach. Asserted after
+						// the spread like every other trusted field, `undefined` included.
+						cost_center: envelope?.attribution.costCenter,
+					});
+					if (policyResult.decision === "deny") {
+						const reason =
+							policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
+						denial.denialClass = classifyPolicyDenial(policyResult.hardViolations);
+						denial.policyRules = toDenialRuleRefs(policyResult.hardViolations);
+						if (denial.denialClass === "budget_gate") {
+							denial.budget = { estimatedCost: estCost, budgetRemaining: gateRemaining };
 						}
-						// Genuine ledger outage — do NOT forward to provider.
-						throw new LedgerUnavailableError(
-							holdErr instanceof Error ? holdErr.message : String(holdErr),
+						throw new PolicyDeniedError(
+							reason,
+							derivePolicyHint(policyResult, envelope !== undefined),
 						);
 					}
-					// The hold landed. Record WHICH wallet it debited, for the session
-					// accounting below and for the release on settle/abort.
-					envelopeDebited = envelope !== undefined;
-				}
 
-				// SESSION accounting tracks SESSION-WALLET money only. An attributed hold
-				// debits the `(parentUserId, costCenter)` envelope, so counting it here
-				// would reserve session headroom against money the session wallet never
-				// pays — every later unattributed call gated on a smaller number than the
-				// wallet actually holds, and (via `budgetSpent` on settle) that shortfall
-				// persisted into the next run's holding-wallet seed. The envelope's own
-				// `debits_must_not_exceed_credits` is what bounds an attributed call, and
-				// the policy gate above is already scoped to it.
-				if (!envelopeDebited) {
-					inFlightHoldTotal += estCost;
+					// PII check
+					if (config.pii !== "off" && messages.length > 0) {
+						const piiResult = detectPII(messages);
+						if (piiResult.found && config.pii === "block") {
+							denial.denialClass = "pii";
+							denial.piiTypes = piiResult.types;
+							throw new PolicyDeniedError(
+								`PII detected: ${piiResult.types.join(", ")}`,
+								'PII enforcement blocked this call. Use { pii: "warn" } to log instead of block; the headless governor does not redact egress — redaction is the integrating host\'s responsibility.',
+							);
+						}
+					}
+
+					// PENDING hold
+					if (proxyConn != null && !isDryRun) {
+						try {
+							const proxyResult = await proxyConn.spend({
+								model,
+								estimatedCost: estCost,
+								actor,
+							});
+							proxyTransferId = proxyResult.transferId;
+						} catch (holdErr) {
+							throw new LedgerUnavailableError(
+								holdErr instanceof Error ? holdErr.message : String(holdErr),
+							);
+						}
+					} else if (engine != null && !isDryRun) {
+						try {
+							await engine.spendPending({
+								transferId,
+								amount: estCost,
+								// Attributed → the envelope pays. Unattributed → the key is
+								// OMITTED, not passed as undefined, so the engine's default (the
+								// session holding wallet) is reached by exactly the path it was
+								// before envelopes existed.
+								...(envelope !== undefined ? { debitAccountId: envelope.accountId } : {}),
+							});
+						} catch (holdErr) {
+							// P1-LEDGER-ENFORCE: an over-budget reservation is rejected
+							// atomically by the ledger. Surface it as a hard budget DENY —
+							// NOT as "ledger unavailable" (which would misreport a budget cap
+							// as an outage).
+							if (holdErr instanceof InsufficientBalanceError) {
+								// An attributed rejection is re-presented in the caller's terms:
+								// the `parent::costCenter` label instead of a derived account id,
+								// and the remedy that actually funds an envelope. Unattributed
+								// rejections rethrow the SAME object — nothing on that path moved.
+								throw envelope === undefined
+									? holdErr
+									: asEnvelopeBalanceError(holdErr, envelope.label);
+							}
+							// Genuine ledger outage — do NOT forward to provider.
+							throw new LedgerUnavailableError(
+								holdErr instanceof Error ? holdErr.message : String(holdErr),
+							);
+						}
+						// The hold landed. Record WHICH wallet it debited, for the session
+						// accounting below and for the release on settle/abort.
+						envelopeDebited = envelope !== undefined;
+					}
+
+					// SESSION accounting tracks SESSION-WALLET money only. An attributed hold
+					// debits the `(parentUserId, costCenter)` envelope, so counting it here
+					// would reserve session headroom against money the session wallet never
+					// pays — every later unattributed call gated on a smaller number than the
+					// wallet actually holds, and (via `budgetSpent` on settle) that shortfall
+					// persisted into the next run's holding-wallet seed. The envelope's own
+					// `debits_must_not_exceed_credits` is what bounds an attributed call, and
+					// the policy gate above is already scoped to it.
+					if (!envelopeDebited) {
+						inFlightHoldTotal += estCost;
+					}
+				} finally {
+					releaseBudgetLock();
 				}
-			} finally {
-				releaseBudgetLock();
+			} catch (denialErr) {
+				if (isGovernanceDenial(denialErr)) {
+					await appendDenialEvent({
+						audit,
+						actor,
+						error: denialErr,
+						record: denial,
+						fields: {
+							model,
+							endpointClass: endpoint.class,
+							transferId,
+							estimatedCost: estCost,
+							promptParts: messages,
+							...costCenterAudit,
+						},
+					});
+				}
+				throw denialErr;
 			}
 
 			// ONE capture, frozen, shared by the handle and the governor's own record.

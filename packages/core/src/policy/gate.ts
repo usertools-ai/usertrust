@@ -32,6 +32,12 @@ import type {
 // ---------------------------------------------------------------------------
 
 export interface RuleMatch {
+	/**
+	 * Rule id, when the rule declares one. OMITTED (not `undefined`) for an
+	 * ID-less rule, so an audit payload built from this carries no empty key
+	 * under `exactOptionalPropertyTypes`.
+	 */
+	id?: string;
 	/** Rule name */
 	name: string;
 	/** Effect of the matched rule */
@@ -71,6 +77,19 @@ const BUDGET_HINT_FIELDS = new Set([
 ]);
 
 /**
+ * Does this matched rule deny for BUDGET reasons rather than content reasons?
+ *
+ * The single source for the budget-family question, shared by `derivePolicyHint`
+ * (which remedy to prescribe) and the denial-event classifier (`budget_gate` vs
+ * `policy`). Duplicating the field set in the audit module would let the two
+ * drift, and then a chain event would classify a denial differently from the
+ * hint the same denial printed.
+ */
+export function isBudgetRuleMatch(match: RuleMatch): boolean {
+	return match.fields.some((f) => BUDGET_HINT_FIELDS.has(f));
+}
+
+/**
  * Class-aware operator remedy for a gate denial (D6). Returns `undefined` when no
  * hard violation is budget-classed — the error's default hint then applies. PII
  * and injection denials never reach here: they throw from their own detector
@@ -85,9 +104,7 @@ const BUDGET_HINT_FIELDS = new Set([
  * `envelope !== undefined` from the gate call site; never guess it from the rule.
  */
 export function derivePolicyHint(result: PolicyResult, attributed: boolean): string | undefined {
-	const budgetHit = result.hardViolations.some((v) =>
-		v.fields.some((f) => BUDGET_HINT_FIELDS.has(f)),
-	);
+	const budgetHit = result.hardViolations.some(isBudgetRuleMatch);
 	if (!budgetHit) return undefined;
 	return attributed
 		? "A budget rule denied this call: check the envelope's allocation (allocateBudget) and your budgetFractionRemaining / budgetRunwayHours tiers."
@@ -612,6 +629,7 @@ export function evaluatePolicy(rules: GateRule[], context: PolicyContext): Polic
 		if (!ruleMatches(rule, context)) continue;
 
 		const match: RuleMatch = {
+			...(rule.id !== undefined ? { id: rule.id } : {}),
 			name: rule.name,
 			effect: rule.effect,
 			enforcement: rule.enforcement,

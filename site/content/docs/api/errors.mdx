@@ -49,6 +49,8 @@ class InsufficientBalanceError extends Error {
   readonly available: number;   // usertokens remaining
   readonly hint: string;
   readonly docsUrl: string;
+  readonly auditEventHash?: string;   // the `ledger_rejected` event's hash
+  readonly auditDegraded?: boolean;   // the append failed and was dead-lettered
 }
 ```
 
@@ -67,12 +69,55 @@ class PolicyDeniedError extends Error {
   readonly reason: string;
   readonly hint: string;
   readonly docsUrl: string;
+  readonly auditEventHash?: string;   // the `policy_denied` event's hash
+  readonly auditDegraded?: boolean;   // the append failed and was dead-lettered
 }
 ```
 
 **When it fires:** During policy evaluation, before the LLM call. The `reason` field describes which rule or PII type triggered the denial.
 
 **Hint:** `'Check your policy rules in .usertrust/policies/ or use { pii: "warn" } to downgrade PII enforcement.'`
+
+---
+
+## The denial correlation handle
+
+Both denial errors above carry `auditEventHash` — the hash of the chain event
+the governor wrote when it refused the call. It is the join between the
+exception your code logged and the record an auditor reads: `policy_denied` for
+a governor decision (a policy rule, a budget-family rule, PII, injection, or an
+unpriceable model), `ledger_rejected` for the ledger's own atomic refusal of the
+hold.
+
+```typescript
+try {
+  await client.messages.create({ /* ... */ });
+} catch (err) {
+  if (err instanceof PolicyDeniedError) {
+    // Quote this in your incident ticket; `usertrust verify` can find it.
+    console.log(`denied, chain event ${err.auditEventHash ?? "(none)"}`);
+  }
+}
+```
+
+The two fields answer different questions, and you need both:
+
+| `auditEventHash` | `auditDegraded` | What happened |
+|---|---|---|
+| set | absent | The denial is on the chain, at that hash. |
+| set | `true` | The event **is** on the chain at that hash, but the write reported failure — the log was fsync'd and the `.meta` sidecar was not. The handle is usable; run `usertrust verify` on the vault. |
+| absent | `true` | The append was attempted, nothing durable landed, and the payload was dead-lettered to `.usertrust/dlq/`. There is no chain record. |
+| absent | absent | No append was attempted — an error built by hand, or thrown by a version before denial events existed. |
+
+A failed denial-append never changes the error you receive. `audit.failClosed`
+exists to stop an unaudited **spend** from settling; a denial already refused
+the call and moved no money, so escalating here would only replace an
+actionable, typed denial with an `AuditDegradedError` and hide *why* the call
+was refused.
+
+**Indirect callers do not receive the handle yet.** `usertrust-server` and the
+ACS adapter convert the error to a wire response and do not forward
+`auditEventHash` today; the field is on the in-process error object only.
 
 ---
 
