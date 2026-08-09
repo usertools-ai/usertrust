@@ -15,9 +15,25 @@
  *
  * Prerequisite: npm ci && npx tsc -b  (imports resolve to each package's dist/
  * via the workspace symlinks in node_modules).
- * No network, no API keys: the governed client is a duck-typed fake that
- * satisfies detect.ts's Anthropic shape (messages.create is a function) and
- * returns a canned response with real usage numbers.
+ * No network, no API keys: the governed clients are duck-typed fakes that
+ * satisfy detect.ts's Anthropic and OpenAI shapes and return canned responses
+ * carrying real four-tier usage numbers.
+ *
+ * WHAT THE FIXTURES PROMISE (and how this file keeps the promise)
+ *
+ *  - `receipt-ledger.json` carries the receipt object the SDK ACTUALLY returns:
+ *    `cost` is the scalar number on `TrustReceipt`, and `chainPath`,
+ *    `receiptUrl`, `usage` and `pricing` are whatever the settle produced. The
+ *    pre-call ESTIMATE is a sidecar (`capture.estimatedCost`) on the wrapper,
+ *    never a field inside the receipt — a synthesized `cost: {estimated,
+ *    actual}` object labelled as an SDK return value is a fabricated API.
+ *  - The chain slice comes from THE SAME VAULT as those receipts, so every
+ *    featured receipt's `auditHash` is literally an entry in the slice and
+ *    Exhibit A's "link N of the chain" is a fact rather than a coincidence.
+ *    Asserted below; a miss fails the capture instead of shipping.
+ *  - One call is DENIED on purpose. Since #87 a denial writes a real
+ *    `policy_denied` chain event, so the denial's evidence is captured the same
+ *    way everything else is — the thrown error AND its chain event, both real.
  */
 import { type ChildProcess, execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -32,7 +48,28 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 // Matches TrustConfigSchema's default tigerbeetle.addresses ["127.0.0.1:3001"]
 // (packages/core/src/shared/types.ts) — no config file needed in the vault.
 const TB_PORT = 3001;
-const MODEL = "claude-sonnet-4-6";
+const BUDGET = 50_000;
+const MAX_TOKENS = 256;
+/** Deliberately unaffordable: drives the block-budget-overshoot deny gate. */
+const OVERSHOOT_MAX_TOKENS = 4_000_000;
+/** Chain entries the site renders (Exhibit D's merkle tree wants a power of two). */
+const SLICE_SIZE = 8;
+
+/**
+ * The three frontier models every public receipt surface shows (Addendum J).
+ *
+ * `shape` is the CLIENT shape the fake presents, not a vendor: Kimi ships an
+ * OpenAI-compatible API, so `detectClientKind` reports "openai" for it and the
+ * receipt's `provider` field records exactly that. The page must never dress
+ * that up as "moonshot" — the field says what detection truly returned.
+ */
+const CAPTURE_MODELS = [
+	{ id: "claude-fable-5", shape: "anthropic" },
+	{ id: "gpt-5.6-sol", shape: "openai" },
+	{ id: "kimi-k3", shape: "openai" },
+] as const;
+
+type ClientShape = (typeof CAPTURE_MODELS)[number]["shape"];
 
 const argv = process.argv.slice(2);
 const dryRunOnly = argv.includes("--dry-run-only");
@@ -41,11 +78,33 @@ const OUT_DIR = outIdx !== -1 ? resolve(argv[outIdx + 1] ?? ".") : null;
 const appEvidence = OUT_DIR ?? join(REPO_ROOT, "site", "app", "evidence");
 const publicEvidence = OUT_DIR ?? join(REPO_ROOT, "site", "public", "evidence");
 
-// ── fake duck-typed Anthropic client (detect.ts: messages.create function ⇒ "anthropic") ──
+// ── duck-typed fake clients ──
+//
+// Token counts are canned but SHAPED like the real thing: the four tiers are
+// disjoint, and each SDK's own inclusivity rule is honoured (Anthropic reports
+// the tiers separately; OpenAI's `prompt_tokens` is inclusive of both cache
+// counters). Getting that wrong here would produce a receipt whose four-tier
+// `usage` block does not reconcile against its own `cost`.
 interface FakeArgs {
 	model: string;
 	max_tokens: number;
 	messages: Array<{ role: string; content: string }>;
+}
+
+interface FakeUsage {
+	freshInput: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+}
+
+function usageForCall(call: number): FakeUsage {
+	return {
+		freshInput: 300 + call * 17,
+		output: 120 + call * 11,
+		cacheRead: 80 + call * 7,
+		cacheWrite: 40 + call * 3,
+	};
 }
 
 function fakeAnthropic() {
@@ -54,6 +113,7 @@ function fakeAnthropic() {
 		messages: {
 			create: async (args: FakeArgs) => {
 				call += 1;
+				const u = usageForCall(call);
 				return {
 					id: `msg_capture_${call}`,
 					type: "message",
@@ -64,15 +124,80 @@ function fakeAnthropic() {
 					],
 					stop_reason: "end_turn",
 					stop_sequence: null,
-					// Settlement reads usage.input_tokens/output_tokens for Anthropic.
-					usage: { input_tokens: 300 + call * 17, output_tokens: 120 + call * 11 },
+					// Anthropic reports the tiers DISJOINT — input_tokens excludes both
+					// cache counters (fromAnthropicUsage passes them straight through).
+					usage: {
+						input_tokens: u.freshInput,
+						output_tokens: u.output,
+						cache_read_input_tokens: u.cacheRead,
+						cache_creation_input_tokens: u.cacheWrite,
+					},
 				};
 			},
 		},
 	};
 }
 
+function fakeOpenAI() {
+	let call = 0;
+	return {
+		chat: {
+			completions: {
+				create: async (args: FakeArgs) => {
+					call += 1;
+					const u = usageForCall(call);
+					return {
+						id: `chatcmpl_capture_${call}`,
+						object: "chat.completion",
+						model: args.model,
+						choices: [
+							{
+								index: 0,
+								message: {
+									role: "assistant",
+									content: `canned capture response ${call} — offline, no network`,
+								},
+								finish_reason: "stop",
+							},
+						],
+						// OpenAI's prompt_tokens is INCLUSIVE of both cache counters, so
+						// the total is summed here and fromOpenAICompletionsUsage
+						// subtracts them back out to recover fresh input.
+						usage: {
+							prompt_tokens: u.freshInput + u.cacheRead + u.cacheWrite,
+							completion_tokens: u.output,
+							total_tokens: u.freshInput + u.cacheRead + u.cacheWrite + u.output,
+							prompt_tokens_details: { cached_tokens: u.cacheRead },
+							cache_write_tokens: u.cacheWrite,
+						},
+					};
+				},
+			},
+		},
+	};
+}
+
+function fakeClient(shape: ClientShape): unknown {
+	return shape === "anthropic" ? fakeAnthropic() : fakeOpenAI();
+}
+
 type GovernedResult = { response: unknown; receipt: TrustReceipt };
+
+/** Invoke the governed surface that matches the client shape. */
+async function governedCall(
+	client: unknown,
+	shape: ClientShape,
+	args: FakeArgs,
+): Promise<GovernedResult> {
+	if (shape === "anthropic") {
+		const c = client as { messages: { create: (a: FakeArgs) => Promise<unknown> } };
+		return (await c.messages.create(args)) as unknown as GovernedResult;
+	}
+	const c = client as {
+		chat: { completions: { create: (a: FakeArgs) => Promise<unknown> } };
+	};
+	return (await c.chat.completions.create(args)) as unknown as GovernedResult;
+}
 
 interface Provenance {
 	usertrustVersion: string;
@@ -82,24 +207,27 @@ interface Provenance {
 	commit: string;
 }
 
-function fixtureFrom(
-	receipt: TrustReceipt,
-	estimated: number,
-	prov: Omit<Provenance, "capturedAt">,
-) {
-	return {
-		receipt: {
-			transferId: receipt.transferId,
-			cost: { estimated, actual: receipt.settled ? receipt.cost : null },
-			budgetRemaining: receipt.budgetRemaining,
-			auditHash: receipt.auditHash,
-			settled: receipt.settled,
-			model: receipt.model,
-			provider: receipt.provider,
-			timestamp: receipt.timestamp,
-		},
-		provenance: { ...prov, capturedAt: new Date().toISOString() },
+/**
+ * One captured call: the receipt EXACTLY as returned, plus capture-side
+ * metadata that is deliberately OUTSIDE the receipt object.
+ */
+interface Capture {
+	receipt: TrustReceipt;
+	capture: {
+		/** Pre-call estimate from `estimateCost` — an input to the hold, not a receipt field. */
+		estimatedCost: number;
+		/** Client shape `detectClientKind` matched. `receipt.provider` is the same string. */
+		clientShape: ClientShape;
 	};
+}
+
+interface ChainEvent {
+	kind: string;
+	hash: string;
+	previousHash: string;
+	timestamp: string;
+	actor?: string;
+	data?: Record<string, unknown>;
 }
 
 // ── TigerBeetle helpers ──
@@ -150,6 +278,41 @@ async function waitForPort(port: number): Promise<void> {
 		await new Promise((r) => setTimeout(r, 500));
 	}
 	throw new Error(`TigerBeetle did not accept connections on 127.0.0.1:${port} within 30s`);
+}
+
+// ── audit-chain helpers ──
+async function readChainEvents(vault: string): Promise<{ raw: string; events: ChainEvent[] }> {
+	const raw = await readFile(join(vault, ".usertrust", "audit", "events.jsonl"), "utf-8");
+	const events = raw
+		.trim()
+		.split("\n")
+		.map((l) => JSON.parse(l) as ChainEvent);
+	return { raw, events };
+}
+
+function sliceFromEvents(events: ChainEvent[]) {
+	const tail = events.slice(-SLICE_SIZE);
+	if (tail.length !== SLICE_SIZE) {
+		throw new Error(`expected >= ${SLICE_SIZE} chain events, got ${events.length}`);
+	}
+	const baseSeq = events.length - SLICE_SIZE;
+	return {
+		entries: tail.map((e, i) => ({
+			seq: baseSeq + i + 1, // 1-based line number in events.jsonl
+			type: e.kind,
+			hash: e.hash,
+			prevHash: e.previousHash,
+			timestamp: e.timestamp,
+			summary: [
+				e.kind,
+				typeof e.data?.model === "string" ? e.data.model : null,
+				typeof e.data?.cost === "number" ? `${e.data.cost} usertokens` : null,
+				typeof e.data?.denialClass === "string" ? `denied · ${e.data.denialClass}` : null,
+			]
+				.filter(Boolean)
+				.join(" · "),
+		})),
+	};
 }
 
 // ── facts derivation (values derived from source at capture time — never hand-typed) ──
@@ -353,6 +516,20 @@ async function main(): Promise<void> {
 
 	// Dynamic import so the preflight above can fail with a clear message.
 	const { trust, estimateCost, estimateInputTokens } = await import("usertrust");
+	const { PRICING_TABLE } = (await import("usertrust/pricing")) as {
+		PRICING_TABLE: Record<string, unknown>;
+	};
+
+	// PRE-FLIGHT (Addendum J1). A model missing from the table still "works" —
+	// it meters at FALLBACK_RATE — so the capture would silently publish three
+	// receipts priced at sonnet-class rates. Fail loudly instead.
+	const unpriced = CAPTURE_MODELS.filter((m) => !Object.hasOwn(PRICING_TABLE, m.id));
+	if (unpriced.length > 0) {
+		throw new Error(
+			`pricing pre-flight failed: ${unpriced.map((m) => m.id).join(", ")} not in PRICING_TABLE — ` +
+				`add the REAL published rates to packages/core/src/ledger/pricing.ts before capturing.`,
+		);
+	}
 
 	const corePkg = JSON.parse(
 		await readFile(join(REPO_ROOT, "packages/core/package.json"), "utf-8"),
@@ -370,9 +547,14 @@ async function main(): Promise<void> {
 
 	try {
 		let tbVersion = "n/a (dry-run-only capture)";
-		let receiptLedger: ReturnType<typeof fixtureFrom> | null = null;
+		const captures: Capture[] = [];
+		let denial: {
+			error: { name: string; message: string };
+			event: ChainEvent & { seq: number };
+		} | null = null;
 
-		// (a) real-ledger capture — a genuine settled TigerBeetle transfer
+		// (a) real-ledger capture — genuine settled TigerBeetle transfers, one
+		// per frontier model, all into ONE vault so one chain carries all three.
 		if (!dryRunOnly) {
 			const tb = tbBinary();
 			tbVersion = tb.version;
@@ -394,100 +576,138 @@ async function main(): Promise<void> {
 			await waitForPort(TB_PORT);
 
 			ledgerVault = await mkdtemp(join(tmpdir(), "usertrust-capture-ledger-"));
-			const client = await trust(fakeAnthropic(), { budget: 50_000, vaultBase: ledgerVault });
-			const args: FakeArgs = {
-				model: MODEL,
-				max_tokens: 256,
-				messages: [{ role: "user", content: "summarize the runaway-agent incident report" }],
-			};
-			const estimated = estimateCost(
-				args.model,
-				estimateInputTokens(args.messages),
-				args.max_tokens,
-			);
-			const { receipt } = (await client.messages.create(args)) as unknown as GovernedResult;
-			await client.destroy();
-			receiptLedger = fixtureFrom(receipt, estimated, {
-				usertrustVersion,
-				tigerbeetleVersion: tbVersion,
-				mode: "ledger",
-				commit,
+
+			// One featured receipt per model.
+			for (const model of CAPTURE_MODELS) {
+				const client = await trust(fakeClient(model.shape), {
+					budget: BUDGET,
+					vaultBase: ledgerVault,
+				});
+				try {
+					const args: FakeArgs = {
+						model: model.id,
+						max_tokens: MAX_TOKENS,
+						messages: [{ role: "user", content: "summarize the runaway-agent incident report" }],
+					};
+					const estimatedCost = estimateCost(
+						args.model,
+						estimateInputTokens(args.messages),
+						args.max_tokens,
+					);
+					const { receipt } = await governedCall(client, model.shape, args);
+					captures.push({ receipt, capture: { estimatedCost, clientShape: model.shape } });
+				} finally {
+					await client.destroy();
+				}
+			}
+
+			// Fill the chain out to the slice size with further governed calls, then
+			// close it with a REAL denial. Both use the same vault as the receipts.
+			const filler = await trust(fakeClient("anthropic"), {
+				budget: BUDGET,
+				vaultBase: ledgerVault,
 			});
+			try {
+				const alreadyWritten = captures.length;
+				for (let i = alreadyWritten; i < SLICE_SIZE - 1; i++) {
+					await governedCall(filler, "anthropic", {
+						model: CAPTURE_MODELS[0].id,
+						max_tokens: MAX_TOKENS,
+						messages: [{ role: "user", content: `governed call ${i + 1} — incident review` }],
+					});
+				}
+
+				// THE DENIAL (#87). A hold this size cannot fit the budget, so the
+				// block-budget-overshoot rule denies pre-spend — and, since #87, the
+				// governor writes a `policy_denied` chain event before rethrowing.
+				const before = (await readChainEvents(ledgerVault)).events.length;
+				let thrown: unknown;
+				try {
+					await governedCall(filler, "anthropic", {
+						model: CAPTURE_MODELS[0].id,
+						max_tokens: OVERSHOOT_MAX_TOKENS,
+						messages: [{ role: "user", content: "runaway retry — this call must be denied" }],
+					});
+				} catch (err) {
+					thrown = err;
+				}
+				if (!(thrown instanceof Error)) {
+					throw new Error("expected the overshooting call to throw a governance denial");
+				}
+				const after = await readChainEvents(ledgerVault);
+				if (after.events.length !== before + 1) {
+					throw new Error(
+						`expected the denial to append exactly one chain event (${before} -> ${after.events.length})`,
+					);
+				}
+				const event = after.events[after.events.length - 1];
+				if (event.kind !== "policy_denied") {
+					throw new Error(`expected a policy_denied chain event, got "${event.kind}"`);
+				}
+				denial = {
+					error: { name: thrown.name, message: thrown.message },
+					event: { ...event, seq: after.events.length },
+				};
+			} finally {
+				await filler.destroy();
+			}
 		}
 
-		// (b)+(c) dry-run capture: featured receipt + 8 more calls to build the chain
+		// (b) dry-run capture — the no-TigerBeetle path, kept so the fixture set
+		// (and the capture test) still exercises it end to end.
 		dryVault = await mkdtemp(join(tmpdir(), "usertrust-capture-dry-"));
-		const dryClient = await trust(fakeAnthropic(), {
-			budget: 50_000,
+		const dryClient = await trust(fakeClient("anthropic"), {
+			budget: BUDGET,
 			vaultBase: dryVault,
 			dryRun: true,
 		});
-		let receiptDry: ReturnType<typeof fixtureFrom> | null = null;
-		for (let i = 1; i <= 9; i++) {
-			const args: FakeArgs = {
-				model: MODEL,
-				max_tokens: 256,
-				messages: [{ role: "user", content: `governed dry-run call ${i} of 9` }],
-			};
-			const estimated = estimateCost(
-				args.model,
-				estimateInputTokens(args.messages),
-				args.max_tokens,
-			);
-			const { receipt } = (await dryClient.messages.create(args)) as unknown as GovernedResult;
-			if (i === 1) {
-				receiptDry = fixtureFrom(receipt, estimated, {
-					usertrustVersion,
-					tigerbeetleVersion: null,
-					mode: "dry-run",
-					commit,
-				});
+		let dryCapture: Capture | null = null;
+		try {
+			for (let i = 1; i <= SLICE_SIZE; i++) {
+				const args: FakeArgs = {
+					model: CAPTURE_MODELS[0].id,
+					max_tokens: MAX_TOKENS,
+					messages: [{ role: "user", content: `governed dry-run call ${i}` }],
+				};
+				const estimatedCost = estimateCost(
+					args.model,
+					estimateInputTokens(args.messages),
+					args.max_tokens,
+				);
+				const { receipt } = await governedCall(dryClient, "anthropic", args);
+				if (i === 1) {
+					dryCapture = { receipt, capture: { estimatedCost, clientShape: "anthropic" } };
+				}
 			}
+		} finally {
+			await dryClient.destroy();
 		}
-		await dryClient.destroy();
+		if (dryCapture === null) throw new Error("dry-run capture produced no receipt");
 
-		// (c) chain slice from the dry vault's real audit chain
-		const eventsPath = join(dryVault, ".usertrust", "audit", "events.jsonl");
-		const rawJsonl = await readFile(eventsPath, "utf-8");
-		const events = rawJsonl
-			.trim()
-			.split("\n")
-			.map(
-				(l) =>
-					JSON.parse(l) as {
-						kind: string;
-						hash: string;
-						previousHash: string;
-						timestamp: string;
-						data?: Record<string, unknown>;
-					},
+		// (c) chain slice — from the SAME vault the featured receipts settled in
+		// (the dry vault only when there is no ledger vault to read).
+		const sliceVault = ledgerVault ?? dryVault;
+		const { raw: rawJsonl, events } = await readChainEvents(sliceVault);
+		const chainSlice = sliceFromEvents(events);
+
+		// The promise Exhibit A makes: every featured receipt's auditHash IS an
+		// entry in the published slice. Assert it rather than hope for it.
+		const sliceHashes = new Set(chainSlice.entries.map((e) => e.hash));
+		const featured = ledgerVault !== null ? captures : [dryCapture];
+		const orphans = featured.filter((c) => !sliceHashes.has(c.receipt.auditHash));
+		if (orphans.length > 0) {
+			throw new Error(
+				`chain slice does not contain ${orphans.length} featured receipt hash(es): ` +
+					orphans.map((c) => `${c.receipt.model} ${c.receipt.auditHash.slice(0, 12)}`).join(", "),
 			);
-		const lastEight = events.slice(-8);
-		if (lastEight.length !== 8) throw new Error(`expected >= 8 chain events, got ${events.length}`);
-		const baseSeq = events.length - 8;
-		const chainSlice = {
-			entries: lastEight.map((e, i) => ({
-				seq: baseSeq + i + 1, // 1-based line number in events.jsonl
-				type: e.kind,
-				hash: e.hash,
-				prevHash: e.previousHash,
-				timestamp: e.timestamp,
-				summary: [
-					e.kind,
-					typeof e.data?.model === "string" ? e.data.model : null,
-					typeof e.data?.cost === "number" ? `${e.data.cost} usertokens` : null,
-				]
-					.filter(Boolean)
-					.join(" · "),
-			})),
-		};
+		}
 
-		// (d) workspace verifier transcript (never registry npx)
+		// (d) workspace verifier transcript over the SAME vault (never registry npx)
 		const verifyCli = join(REPO_ROOT, "packages/verify/dist/cli.js");
 		if (!existsSync(verifyCli))
 			throw new Error("packages/verify/dist/cli.js missing — run `npx tsc -b`");
 		// execFileSync throws on non-zero exit, so reaching the next line proves exitCode 0.
-		const verifyOut = execFileSync("node", [verifyCli, join(dryVault, ".usertrust")], {
+		const verifyOut = execFileSync("node", [verifyCli, join(sliceVault, ".usertrust")], {
 			encoding: "utf-8",
 		});
 		const transcript = {
@@ -503,14 +723,33 @@ async function main(): Promise<void> {
 		// (e) facts + attack corpus + (f) write everything
 		const facts = await deriveFacts(tbVersion, commit, usertrustVersion);
 		const attackCorpus = await deriveAttackCorpus();
+		const provenance: Provenance = {
+			usertrustVersion,
+			tigerbeetleVersion: dryRunOnly ? null : tbVersion,
+			capturedAt: new Date().toISOString(),
+			mode: dryRunOnly ? "dry-run" : "ledger",
+			commit,
+		};
 		await mkdir(appEvidence, { recursive: true });
 		await mkdir(publicEvidence, { recursive: true });
 		const writeJson = (dir: string, name: string, value: unknown) =>
 			writeFile(join(dir, name), `${JSON.stringify(value, null, "\t")}\n`);
 		await writeJson(appEvidence, "facts.json", facts);
 		await writeJson(appEvidence, "attack-corpus.json", attackCorpus);
-		if (receiptLedger !== null) await writeJson(appEvidence, "receipt-ledger.json", receiptLedger);
-		await writeJson(appEvidence, "receipt-dryrun.json", receiptDry);
+		if (!dryRunOnly) {
+			await writeJson(appEvidence, "receipt-ledger.json", { captures, provenance });
+			await writeJson(appEvidence, "denial-event.json", {
+				...denial,
+				provenance,
+				reproduce:
+					`one governed call with max_tokens ${OVERSHOOT_MAX_TOKENS.toLocaleString("en-US")} ` +
+					`against a ${BUDGET.toLocaleString("en-US")} usertoken budget`,
+			});
+		}
+		await writeJson(appEvidence, "receipt-dryrun.json", {
+			...dryCapture,
+			provenance: { ...provenance, tigerbeetleVersion: null, mode: "dry-run" as const },
+		});
 		await writeJson(appEvidence, "chain-slice.json", chainSlice);
 		await writeJson(appEvidence, "verify-transcript.json", transcript);
 		await writeFile(

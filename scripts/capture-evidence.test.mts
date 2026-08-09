@@ -48,7 +48,7 @@ test("capture-evidence --dry-run-only writes well-formed fixtures (no TigerBeetl
 		assert.equal(facts.facts.transferCodes.value, 9);
 		assert.equal(facts.facts.policyOperators.value, 12);
 		assert.equal(facts.facts.verifierRuntimeDeps.value, 0);
-		assert.equal(facts.facts.modelCount.numeric, 20);
+		assert.equal(facts.facts.modelCount.numeric, 23);
 		assert.equal(facts.facts.usertokensPerFiveDollars.value, 50000);
 
 		// Addendum D7 — new derived counts. Exact pins only where the value is a
@@ -83,13 +83,36 @@ test("capture-evidence --dry-run-only writes well-formed fixtures (no TigerBeetl
 		assert.match(corpus.attacks[0].name, /^1\. F1 KILL/);
 		assert.equal(corpus.attacks[0].verdict, "ANCHOR_MISMATCH");
 
-		// dry-run receipt — locally-minted tx_ id, honest mode label
+		// dry-run receipt — the REAL TrustReceipt shape, not a synthesized one.
+		// `cost` is the scalar the SDK returns; the pre-call estimate is a sidecar
+		// on the wrapper, never a field inside the receipt.
 		const dry = JSON.parse(readFileSync(join(out, "receipt-dryrun.json"), "utf-8"));
 		assert.match(dry.receipt.transferId, /^tx_/);
 		assert.equal(dry.provenance.mode, "dry-run");
 		assert.equal(dry.provenance.tigerbeetleVersion, null);
-		assert.equal(typeof dry.receipt.cost.estimated, "number");
+		assert.equal(typeof dry.receipt.cost, "number", "receipt.cost must be the scalar SDK value");
+		assert.equal(dry.receipt.chainPath, ".usertrust/audit");
+		assert.equal(dry.receipt.receiptUrl, null);
+		assert.equal(typeof dry.capture.estimatedCost, "number");
+		assert.equal(dry.capture.clientShape, "anthropic");
 		assert.equal(dry.receipt.settled, true);
+
+		// Four-tier reconciliation (D5): counts x rates / 1000, ceiled, floored at
+		// 1, reproduces the receipt cost from the record alone.
+		assert.equal(dry.receipt.usageSource, "provider");
+		const u = dry.receipt.usage;
+		const rates = dry.receipt.pricing.appliedRates;
+		const recomputed = Math.max(
+			1,
+			Math.ceil(
+				(u.inputTokens * rates.inputPer1k +
+					u.outputTokens * rates.outputPer1k +
+					u.cacheReadTokens * rates.cacheReadPer1k +
+					u.cacheWriteTokens * rates.cacheWritePer1k) /
+					1000,
+			),
+		);
+		assert.equal(recomputed, dry.receipt.cost, "four-tier recompute must reproduce cost");
 
 		// chain slice — exactly 8 entries, internally linked
 		const slice = JSON.parse(readFileSync(join(out, "chain-slice.json"), "utf-8"));
@@ -108,11 +131,24 @@ test("capture-evidence --dry-run-only writes well-formed fixtures (no TigerBeetl
 		assert.equal(transcript.command, "npx usertrust-verify .usertrust");
 		assert.ok(Array.isArray(transcript.lines) && transcript.lines.length > 0);
 
-		// raw chain copy present; ledger fixture must NOT exist in dry-run-only mode
+		// raw chain copy present; ledger-only fixtures must NOT exist in dry-run-only
+		// mode — both are captured against a real TigerBeetle vault or not at all.
 		assert.ok(existsSync(join(out, "chain.jsonl")));
 		assert.ok(
 			!existsSync(join(out, "receipt-ledger.json")),
 			"ledger fixture must not be written by --dry-run-only",
+		);
+		assert.ok(
+			!existsSync(join(out, "denial-event.json")),
+			"denial-event fixture must not be written by --dry-run-only",
+		);
+
+		// The dry-run receipt settled into the SAME vault the slice was read from,
+		// so its auditHash is an entry in that slice — the property Exhibit A's
+		// "link N of the chain" annotation depends on.
+		assert.ok(
+			slice.entries.some((e) => e.hash === dry.receipt.auditHash),
+			"dry-run receipt auditHash must appear in the published chain slice",
 		);
 	} finally {
 		rmSync(out, { recursive: true, force: true });
