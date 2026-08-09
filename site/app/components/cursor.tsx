@@ -58,11 +58,26 @@ export default function Cursor() {
 			const target = e.target as Element | null;
 			setHovering(Boolean(target?.closest?.("[data-cursor-hover]")));
 		}
+		// Pointer left the whole document (relatedTarget null) or the window
+		// itself lost focus (alt-tab, devtools) — clear the hover bloom and
+		// park the overlay off-screen so it can't linger mid-scene.
+		function onLeave() {
+			setHovering(false);
+			mouseX.set(-100);
+			mouseY.set(-100);
+		}
+		function onPointerOut(e: PointerEvent) {
+			if (e.relatedTarget === null) onLeave();
+		}
 		window.addEventListener("pointermove", onMove, { passive: true });
 		window.addEventListener("pointerover", onOver, { passive: true });
+		window.addEventListener("pointerout", onPointerOut, { passive: true });
+		window.addEventListener("blur", onLeave);
 		return () => {
 			window.removeEventListener("pointermove", onMove);
 			window.removeEventListener("pointerover", onOver);
+			window.removeEventListener("pointerout", onPointerOut);
+			window.removeEventListener("blur", onLeave);
 		};
 	}, [mouseX, mouseY]);
 

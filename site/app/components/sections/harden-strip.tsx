@@ -34,7 +34,7 @@ export default function HardenStrip() {
 		<section
 			id="harden-doctrine"
 			data-theme="gold"
-			className="section-anchor border-y border-white/10 bg-white/[0.02]"
+			className="section-anchor relative border-y border-white/10 bg-white/[0.02]"
 		>
 			<div className="safe-x mx-auto max-w-6xl py-20 md:py-24">
 				<p className="section-eyebrow">the discipline</p>

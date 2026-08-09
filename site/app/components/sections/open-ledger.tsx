@@ -66,7 +66,7 @@ function DottedLeader({ label, value }: { label: string; value: string }) {
  */
 function MascotPanel() {
 	return (
-		<figure className="lift-1 order-2 bg-[#fbfbfb] md:order-1 md:flex md:flex-col">
+		<figure className="lift-1 bg-[#fbfbfb] md:order-1 md:flex md:flex-col">
 			{/* biome-ignore lint/performance/noImgElement: static brand plate below the fold; intrinsic size is declared so it reserves its own space */}
 			<img
 				src="/brand/mascot-panel.jpg"
@@ -112,12 +112,15 @@ export default function OpenLedger() {
 				</h2>
 
 				{/* The split composition: the mascot's panel and the receipt tail,
-				    the same height on desktop, stacked with the panel last on a
-				    phone (it is the closing image, not the lede). */}
+				    the same height on desktop, stacked with the panel FIRST on a
+				    phone (Addendum L: it closes the page, so it leads the stack
+				    the way a cover leads a folder). DOM order already puts
+				    MascotPanel first; only the md: breakpoint reassigns order,
+				    so mobile falls through to that natural order for free. */}
 				<div className="grid items-stretch gap-8 md:grid-cols-2">
 					<MascotPanel />
 
-					<ReceiptPaper className="order-1 md:order-2" perforated="top" provenance={provenance}>
+					<ReceiptPaper className="md:order-2" perforated="top" provenance={provenance}>
 						<div className="flex flex-col gap-5 p-6">
 							<div className="flex flex-col gap-3">
 								<CopyChip text="npm install usertrust" tone="paper" />
