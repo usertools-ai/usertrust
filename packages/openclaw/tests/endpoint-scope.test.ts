@@ -17,7 +17,16 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { StreamContext, StreamEvent, StreamFn } from "../src/types.js";
+import type { Context, StreamFn } from "../src/types.js";
+import {
+	doneEvent,
+	makeContext,
+	makeModel,
+	makeUsage,
+	startEvent,
+	streamOf,
+	textDelta,
+} from "./host-fixtures.js";
 
 // Mock tigerbeetle-node (native module; dry-run never touches it, keep hermetic)
 vi.mock("tigerbeetle-node", () => ({
@@ -41,23 +50,13 @@ function makeTmpVault(): string {
 	return dir;
 }
 
-/** A pi-ai stream that reports 26 input / 298 output tokens on its done event. */
+/** A host stream that reports 26 input / 298 output tokens on its done event. */
 function llamaStream(): StreamFn {
-	const events: StreamEvent[] = [
-		{ type: "start" },
-		{ type: "text_delta", text: "hello world" },
-		{ type: "done", stopReason: "stop", usage: { inputTokens: 26, outputTokens: 298 } },
-	];
-	return (_model: string, _context: StreamContext, _options?: Record<string, unknown>) =>
-		(async function* () {
-			for (const e of events) yield e;
-		})();
+	return streamOf([startEvent(), textDelta("hello world"), doneEvent(makeUsage(26, 298))]);
 }
 
-const CONTEXT: StreamContext = {
-	messages: [{ role: "user", content: "hi" }],
-	model: "llama3.3:70b",
-};
+const MODEL = makeModel("llama3.3:70b");
+const CONTEXT: Context = makeContext();
 
 const BUDGET = 100_000;
 
@@ -91,7 +90,7 @@ describe("UsertrustPluginConfig.endpoint threading (F1)", () => {
 			endpoint: { class: "local", runtime: "ollama" },
 		});
 
-		for await (const _event of governedStreamFn("llama3.3:70b", CONTEXT)) {
+		for await (const _event of await governedStreamFn(MODEL, CONTEXT)) {
 			// drain — settlement runs after the final event
 		}
 
@@ -115,7 +114,7 @@ describe("UsertrustPluginConfig.endpoint threading (F1)", () => {
 			vaultBase,
 		});
 
-		for await (const _event of governedStreamFn("llama3.3:70b", CONTEXT)) {
+		for await (const _event of await governedStreamFn(MODEL, CONTEXT)) {
 			// drain
 		}
 

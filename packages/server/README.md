@@ -33,6 +33,11 @@ curl -s localhost:4519/v1/settle -H "Authorization: Bearer $KEY" \
   -d '{"transferId":"<from authorize>","inputTokens":200,"outputTokens":40}'
 ```
 
+`/v1/settle` also accepts `cacheReadTokens` / `cacheWriteTokens` (both optional, disjoint from
+`inputTokens` — do not include cached tokens in `inputTokens` too, or they double-count). Absent
+cache rates for the model still price those tokens at the input rate — see the money invariants
+in `AGENTS.md` — omitting the fields is not the same as reporting zero cache activity.
+
 ## Endpoints
 
 | Method | Path            | Auth   | Purpose                                             |

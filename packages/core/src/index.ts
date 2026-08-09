@@ -99,8 +99,22 @@ export {
 	estimateCost,
 	estimateInputTokens,
 	getModelRates,
+	PRICING_TABLE_VERSION,
+	resolveAppliedRates,
 	resolveRates,
 } from "./ledger/pricing.js";
+// Usage normalization (spec D2/D5): the one place provider usage becomes the
+// four-tier disjoint snapshot that both cost and record emission derive from.
+export type { NormalizedUsage, RawUsageCandidate, UsageWireShape } from "./ledger/usage.js";
+export {
+	fromAnthropicUsage,
+	fromGeminiUsage,
+	fromOpenAICompletionsUsage,
+	fromOpenAIResponsesUsage,
+	fromProviderResponse,
+	publishableUsage,
+	sanitizeUsage,
+} from "./ledger/usage.js";
 // Pattern memory
 export { getPatternStats, hashPrompt, recordPattern, suggestModel } from "./memory/patterns.js";
 export { detectCanaryLeak, generateCanary, injectCanary } from "./policy/canary.js";
@@ -113,6 +127,10 @@ export type { CircuitBreakerSnapshot } from "./resilience/circuit.js";
 // Circuit breaker
 export { CircuitBreaker, CircuitBreakerRegistry, CircuitOpenError } from "./resilience/circuit.js";
 export { VAULT_DIR } from "./shared/constants.js";
+// Denial audit events — the kinds a consumer filters on, and the correlation
+// metadata a caught denial carries. A handle a caller cannot NAME is not a
+// handle, so the metadata shape is exported alongside the errors themselves.
+export type { DenialAuditMetadata } from "./shared/errors.js";
 // Errors
 export {
 	AccountNotFoundError,
@@ -127,10 +145,18 @@ export {
 	VaultKeyMissingError,
 	VaultNotInitializedError,
 } from "./shared/errors.js";
+// The AUTHORITATIVE parent-id door, exported so an integration that validates its
+// own operator config refuses exactly what the ledger doors refuse — charset AND
+// the `::` quarantine, with the reason each door already prints. A copy of the
+// pattern outside this package is a rule that drifts silently: it would accept an
+// id `createGovernor()` then rejects, or (worse) admit a `::` parent whose account
+// derivation lands on stranded pre-v3 cost-center money.
+export { parentUserIdRefusal } from "./shared/ids.js";
 // Types
 export type {
 	ActionDescriptor,
 	ActionKind,
+	AppliedRates,
 	AuditEvent,
 	BoardDecision,
 	CanaryToken,
@@ -151,6 +177,7 @@ export type {
 	PolicyRule,
 	PolicySeverity,
 	RateSource,
+	ReceiptUsage,
 	SkillManifest,
 	SkillPermission,
 	SkillVerification,

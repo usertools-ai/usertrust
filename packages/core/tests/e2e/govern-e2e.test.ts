@@ -800,7 +800,7 @@ describe("trust() — end-to-end integration", () => {
 			expect(chunks).toHaveLength(4);
 			expect(onComplete).toHaveBeenCalledOnce();
 			expect(onComplete).toHaveBeenCalledWith({
-				usage: { inputTokens: 100, outputTokens: 25 },
+				usage: { inputTokens: 100, outputTokens: 25, cacheReadTokens: 0, cacheWriteTokens: 0 },
 				chunksDelivered: 4,
 				usageReported: true,
 			});

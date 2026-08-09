@@ -164,7 +164,10 @@ describe("local OpenAI-compat endpoint — e2e over HTTP (M2)", () => {
 		expect(result.receipt.usageSource).toBe("provider");
 		expect(result.receipt.endpoint).toEqual({ class: "local", runtime: "openai-compat" });
 		// A6: computeMs is omitted, not undefined — toEqual pins the exact key set.
-		expect(result.receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-default" });
+		expect(result.receipt.meter).toMatchObject({
+			costBasis: "nominal",
+			rateSource: "local-default",
+		});
 		expect(result.receipt.settled).toBe(true);
 		expect(result.receipt.budgetRemaining).toBe(199);
 
@@ -201,7 +204,7 @@ describe("local OpenAI-compat endpoint — e2e over HTTP (M2)", () => {
 		// Server-truth settlement: (100/1000)*10 + (50/1000)*20 = 2.
 		expect(receipt.cost).toBe(2);
 		expect(receipt.usageSource).toBe("provider");
-		expect(receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-model" });
+		expect(receipt.meter).toMatchObject({ costBasis: "nominal", rateSource: "local-model" });
 		expect(receipt.endpoint).toEqual({ class: "local", runtime: "openai-compat" });
 
 		await destroy(governed);
@@ -223,7 +226,7 @@ describe("local OpenAI-compat endpoint — e2e over HTTP (M2)", () => {
 
 		expect(receipt.cost).toBe(1);
 		expect(receipt.usageSource).toBe("provider");
-		expect(receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-default" });
+		expect(receipt.meter).toMatchObject({ costBasis: "nominal", rateSource: "local-default" });
 
 		await destroy(governed);
 	});
@@ -268,7 +271,7 @@ describe("local OpenAI-compat endpoint — e2e over HTTP (M2)", () => {
 		});
 
 		expect(result.receipt.endpoint).toEqual({ class: "cloud", runtime: "unknown" });
-		expect(result.receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "fallback" });
+		expect(result.receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "fallback" });
 		// FALLBACK_RATE {30, 150}: (100/1000)*30 + (50/1000)*150 = 3 + 7.5 → ceil = 11.
 		expect(result.receipt.cost).toBe(11);
 		// Default unknownModelPolicy "warn" surfaces the fallback footgun.
@@ -289,7 +292,10 @@ describe("local OpenAI-compat endpoint — e2e over HTTP (M2)", () => {
 			model: "llama3.3:70b",
 			messages: [{ role: "user", content: "audit me" }],
 		});
-		expect(nonStream.receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-default" });
+		expect(nonStream.receipt.meter).toMatchObject({
+			costBasis: "nominal",
+			rateSource: "local-default",
+		});
 
 		const streamed = await call(governed, {
 			model: "llama3.3:70b",

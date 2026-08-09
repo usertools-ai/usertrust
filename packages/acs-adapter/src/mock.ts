@@ -1,7 +1,13 @@
 import { createHash } from "node:crypto";
 import type { TrustReceipt } from "usertrust";
 import { InsufficientBalanceError } from "usertrust";
-import type { Authorization, AuthorizeParams, Governor, SettleParams } from "usertrust/headless";
+import type {
+	Authorization,
+	AuthorizeParams,
+	EnvelopeStatus,
+	Governor,
+	SettleParams,
+} from "usertrust/headless";
 import type { PolicyDecider } from "./composite.js";
 import { CompositeEvaluator } from "./composite.js";
 
@@ -34,7 +40,17 @@ export function createMockGovernor(opts: { budget?: number } = {}): { governor: 
 		},
 		async settle(auth: Authorization, params?: SettleParams): Promise<TrustReceipt> {
 			holds.delete(auth.transferId);
-			const actual = (params?.inputTokens ?? 0) + (params?.outputTokens ?? 0);
+			// ALL FOUR disjoint tiers (spec D4 row 7 / Codex PR-85 P2-6). The mock's
+			// cost model is "1 token = 1 usertoken", and since the ACS token counters
+			// went four-tier, `CompositeEvaluator.budgetsEnvelope().token_count` sums
+			// all four. Charging input+output only made the demo's receipt disagree
+			// with the demo's own envelope, and sent a cache-only settle (both of
+			// those zero) down the `actual > 0` fallback to bill the entire hold.
+			const actual =
+				(params?.inputTokens ?? 0) +
+				(params?.outputTokens ?? 0) +
+				(params?.cacheReadTokens ?? 0) +
+				(params?.cacheWriteTokens ?? 0);
 			const cost = actual > 0 ? actual : auth.estimatedCost;
 			budget += auth.estimatedCost - cost;
 			return {
@@ -69,6 +85,15 @@ export function createMockGovernor(opts: { budget?: number } = {}): { governor: 
 		},
 		budgetRemaining(): number {
 			return budget;
+		},
+		/**
+		 * No ledger and no `parentUserId`, so there are no envelopes to report on —
+		 * the same empty answer the real governor gives for a dry-run or identity-less
+		 * one. Faking scarcity numbers here would put a demo's invented percentages in
+		 * front of a model as though they came from TigerBeetle.
+		 */
+		async budgetContext(): Promise<EnvelopeStatus[]> {
+			return [];
 		},
 		// biome-ignore lint/suspicious/noExplicitAny: mock config, never read by the adapter
 		config: {} as any,

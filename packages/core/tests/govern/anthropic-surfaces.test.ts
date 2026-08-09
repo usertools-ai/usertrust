@@ -1254,3 +1254,239 @@ describe("R1 — anomaly cutoff on messages.stream matches the generic path (voi
 		await governed.destroy();
 	});
 });
+
+// ── Cache tiers through the MessageStream accumulator (spec D2/D4, govern.ts:1561) ──
+
+describe("cache tiers survive the MessageStream accumulator", () => {
+	let tmpVault: string;
+	beforeEach(() => {
+		tmpVault = makeTmpVault();
+	});
+	afterEach(() => {
+		try {
+			rmSync(tmpVault, { recursive: true, force: true });
+		} catch {}
+	});
+
+	/** claude-sonnet-4-6: input 30 / output 150 / cacheRead 3 / cacheWrite 37.5 per 1k. */
+	const CACHE_EVENTS = [
+		{
+			type: "message_start",
+			message: {
+				usage: {
+					input_tokens: 100,
+					cache_read_input_tokens: 9_000,
+					cache_creation_input_tokens: 1_000,
+				},
+			},
+		},
+		{ type: "content_block_delta", delta: { text: "Hi" } },
+		{ type: "message_delta", usage: { output_tokens: 200 } },
+	];
+
+	it("prices all four tiers from the streamEvent tap alone (no finalMessage usage)", async () => {
+		// Pre-fix: 3 + 30 = 33 usertokens, cache severed at zero.
+		// Post-fix: 33 + (9000/1000)*3 + (1000/1000)*37.5 = 33 + 27 + 37.5 = 97.5 → 98.
+		const engine = makeMockEngine();
+		const client = {
+			messages: {
+				create: vi.fn(),
+				stream: vi.fn(
+					() =>
+						new FakeMessageStream({
+							events: CACHE_EVENTS,
+							// finalMessage carries only the two headline counters — the cache
+							// tiers must still come from the accumulated streamEvent tap (F3).
+							final: { id: "msg_c", usage: { input_tokens: 100, output_tokens: 200 } },
+						}),
+				),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 5_000_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const stream = (await governed.messages.stream(STREAM_PARAMS)) as FakeMessageStream & {
+			receipt: Promise<TrustReceipt>;
+		};
+		const receipt = await stream.receipt;
+
+		expect(receipt.usageSource).toBe("provider");
+		expect(receipt.cost).toBe(98);
+		expect(receipt.cost).not.toBe(33);
+
+		await governed.destroy();
+	});
+
+	it("prefers the finalMessage cache counters over the accumulated ones", async () => {
+		// finalMessage is the authoritative total: 12000 read, 0 write.
+		// 3 + 30 + (12000/1000)*3 = 69.
+		const engine = makeMockEngine();
+		const client = {
+			messages: {
+				create: vi.fn(),
+				stream: vi.fn(
+					() =>
+						new FakeMessageStream({
+							events: CACHE_EVENTS,
+							final: {
+								id: "msg_c2",
+								usage: {
+									input_tokens: 100,
+									output_tokens: 200,
+									cache_read_input_tokens: 12_000,
+									cache_creation_input_tokens: 0,
+								},
+							},
+						}),
+				),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 5_000_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const stream = (await governed.messages.stream(STREAM_PARAMS)) as FakeMessageStream & {
+			receipt: Promise<TrustReceipt>;
+		};
+		const receipt = await stream.receipt;
+
+		expect(receipt.cost).toBe(69);
+
+		await governed.destroy();
+	});
+
+	it("keeps an accumulated WRITE tier when finalMessage names only the READ tier (F3 per tier)", async () => {
+		// F3 applies per tier, separately. A finalMessage that reports the read
+		// counter but omits the write counter must NOT zero the 1000 write tokens the
+		// streamEvent tap already saw — they were billed.
+		// 3 + 30 + (9000/1000)*3 + (1000/1000)*37.5 = 97.5 → 98.
+		const client = {
+			messages: {
+				create: vi.fn(),
+				stream: vi.fn(
+					() =>
+						new FakeMessageStream({
+							events: CACHE_EVENTS,
+							final: {
+								id: "msg_c3",
+								usage: {
+									input_tokens: 100,
+									output_tokens: 200,
+									cache_read_input_tokens: 9_000,
+								},
+							},
+						}),
+				),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 5_000_000,
+			vaultBase: tmpVault,
+			_engine: makeMockEngine(),
+			_audit: makeMockAudit(),
+		});
+
+		const stream = (await governed.messages.stream(STREAM_PARAMS)) as FakeMessageStream & {
+			receipt: Promise<TrustReceipt>;
+		};
+		const receipt = await stream.receipt;
+
+		expect(receipt.cost).toBe(98);
+
+		await governed.destroy();
+	});
+
+	it("keeps the accumulated READ tier when finalMessage carries cache_read_input_tokens: null", async () => {
+		// Bug: the gate was `"cache_read_input_tokens" in u` — true even when the
+		// value is `null`, a present-but-unusable counter. That zeroed the 9000
+		// read tokens the streamEvent tap already accumulated and billed
+		// (understatement). Fixed: gate on a USABLE value (typeof number, finite,
+		// >= 0), so a null counter falls back to the accumulated 9000 exactly as
+		// if the key had been omitted entirely — same math as the sibling
+		// omitted-WRITE-tier test above.
+		// 3 + 30 + (9000/1000)*3 + (1000/1000)*37.5 = 97.5 → 98.
+		const client = {
+			messages: {
+				create: vi.fn(),
+				stream: vi.fn(
+					() =>
+						new FakeMessageStream({
+							events: CACHE_EVENTS,
+							final: {
+								id: "msg_c4",
+								usage: {
+									input_tokens: 100,
+									output_tokens: 200,
+									cache_read_input_tokens: null,
+								},
+							},
+						}),
+				),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 5_000_000,
+			vaultBase: tmpVault,
+			_engine: makeMockEngine(),
+			_audit: makeMockAudit(),
+		});
+
+		const stream = (await governed.messages.stream(STREAM_PARAMS)) as FakeMessageStream & {
+			receipt: Promise<TrustReceipt>;
+		};
+		const receipt = await stream.receipt;
+
+		expect(receipt.cost).toBe(98);
+
+		await governed.destroy();
+	});
+
+	it("carries the cache tiers into a consumer-abort partial settle", async () => {
+		// F9: an abort settles at the PARTIAL accumulated usage. The cache tokens were
+		// already read and billed by the provider, so they must ride along.
+		const engine = makeMockEngine();
+		const client = {
+			messages: {
+				create: vi.fn(),
+				// Neighbouring runaway test (R1) uses the same 30ms spacing — 5ms left
+				// only a ~2ms margin against `flush(8)` below, a timing-tight flake risk
+				// on slow CI. message_start (the only event the abort needs to have
+				// landed) still fires on the very first macrotask, well before either
+				// the 8ms flush or the 30ms delay to the second event.
+				stream: vi.fn(() => new FakeMessageStream({ events: CACHE_EVENTS, chunkDelayMs: 30 })),
+			},
+		};
+		const governed = await trust(client, {
+			dryRun: false,
+			budget: 5_000_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+			_audit: makeMockAudit(),
+		});
+
+		const stream = (await governed.messages.stream(STREAM_PARAMS)) as FakeMessageStream & {
+			receipt: Promise<TrustReceipt>;
+		};
+		// Let message_start land (cache counters accumulate), then abort.
+		await flush(8);
+		stream.abort();
+		const receipt = await stream.receipt;
+
+		// input 100 + cacheRead 9000 + cacheWrite 1000, no output yet:
+		// 3 + 27 + 37.5 = 67.5 → 68. Without the cache tiers this would be 3 → 3.
+		expect(receipt.cost).toBe(68);
+
+		await governed.destroy();
+	});
+});

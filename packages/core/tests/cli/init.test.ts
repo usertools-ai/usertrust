@@ -161,6 +161,60 @@ describe("usertrust init (interactive)", () => {
 		expect(config.budget).toBe(1_005_000); // $100.50 × 10,000
 	});
 
+	// D8: the custom-rate wizard writes four-tier examples.
+	it("writes all four tiers when the operator supplies cache rates", async () => {
+		vi.mocked(clack.text)
+			.mockResolvedValueOnce("sk-ant-api03-testkey123") // key
+			.mockResolvedValueOnce("") // done adding keys
+			.mockResolvedValueOnce("50") // budget
+			.mockResolvedValueOnce("claude-sonnet-4-6") // model to edit
+			.mockResolvedValueOnce("35") // input rate $/1M
+			.mockResolvedValueOnce("170") // output rate $/1M
+			.mockResolvedValueOnce("4") // cache-read rate $/1M
+			.mockResolvedValueOnce("45") // cache-write rate $/1M
+			.mockResolvedValueOnce(""); // done editing models
+		vi.mocked(clack.confirm)
+			.mockResolvedValueOnce(false) // useRecommended? -> no, custom
+			.mockResolvedValueOnce(false); // configure local inference? -> no
+
+		await run(tempDir);
+
+		const config = JSON.parse(
+			readFileSync(join(tempDir, ".usertrust", "usertrust.config.json"), "utf-8"),
+		);
+		expect(config.pricing).toBe("custom");
+		expect(config.customRates["claude-sonnet-4-6"]).toEqual({
+			inputPer1k: 350,
+			outputPer1k: 1700,
+			cacheReadPer1k: 40,
+			cacheWritePer1k: 450,
+		});
+	});
+
+	it("omits (not zeroes) cache tiers left blank in the custom-rate wizard", async () => {
+		vi.mocked(clack.text)
+			.mockResolvedValueOnce("sk-ant-api03-testkey123")
+			.mockResolvedValueOnce("")
+			.mockResolvedValueOnce("50")
+			.mockResolvedValueOnce("claude-sonnet-4-6")
+			.mockResolvedValueOnce("35") // input rate $/1M
+			.mockResolvedValueOnce("170") // output rate $/1M
+			.mockResolvedValueOnce("") // cache-read rate: blank
+			.mockResolvedValueOnce("") // cache-write rate: blank
+			.mockResolvedValueOnce("");
+		vi.mocked(clack.confirm).mockResolvedValueOnce(false).mockResolvedValueOnce(false);
+
+		await run(tempDir);
+
+		const config = JSON.parse(
+			readFileSync(join(tempDir, ".usertrust", "usertrust.config.json"), "utf-8"),
+		);
+		const rate = config.customRates["claude-sonnet-4-6"];
+		expect(rate).toEqual({ inputPer1k: 350, outputPer1k: 1700 });
+		expect(rate).not.toHaveProperty("cacheReadPer1k");
+		expect(rate).not.toHaveProperty("cacheWritePer1k");
+	});
+
 	it("--json flag produces non-interactive output with defaults", async () => {
 		await run(tempDir, { json: true });
 

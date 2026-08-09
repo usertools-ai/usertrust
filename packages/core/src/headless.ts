@@ -43,8 +43,26 @@ import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
+import {
+	appendDenialEvent,
+	classifyPolicyDenial,
+	type DenialRecord,
+	isGovernanceDenial,
+	toDenialRuleRefs,
+} from "./audit/denial-events.js";
 import { writeReceipt } from "./audit/rotation.js";
 import { getCurrentCostCenter } from "./budget/attribution.js";
+// The money math and the validation doors are IMPORTED from `budget/context.ts`,
+// never re-implemented: `budgetContext()` below is a second reader of the same
+// ledger balances, and a private clamp/runway copy here would let the pull-side
+// report and the standalone `budgetContext` disagree about the same envelope.
+import {
+	assertDistinctValidCostCenters,
+	assertEnvelopeCap,
+	type EnvelopeDescriptor,
+	type EnvelopeStatus,
+	envelopeStatusFrom,
+} from "./budget/context.js";
 // The cost-center envelope helpers are SHARED with `govern.ts`, not copied from
 // it (see the block comment above `ResolvedEnvelope` there). D1's throw, A2's
 // pre-gate refusal, A7's unfloored arithmetic and D5's label re-wrap all decide
@@ -65,12 +83,18 @@ import {
 } from "./govern.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
+	copyAppliedRates,
 	costFromRates,
+	effectiveCacheWriteRate,
 	estimateCost,
 	estimateInputTokens,
+	PRICING_TABLE_VERSION,
+	resolveAppliedRates,
 	resolveRates,
+	warnCacheRateMigration,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
+import { publishableUsage, sanitizeUsage } from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import { derivePolicyHint, evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
@@ -88,6 +112,12 @@ import type { EndpointInfo, TrustConfig, TrustReceipt } from "./shared/types.js"
 import { TrustConfigSchema } from "./shared/types.js";
 
 // ── Public types ──
+
+// Re-exported so an integration typing a `budgetContext()` call has both shapes at
+// the SAME entry point as the `Governor` it calls — `usertrust/headless` is a
+// package entry point in its own right, and a plugin should not have to reach into
+// the root export for the argument type of a method it can already see here.
+export type { EnvelopeDescriptor, EnvelopeStatus } from "./budget/context.js";
 
 /**
  * Options for createGovernor(): TrustOpts plus a governor-wide default
@@ -192,6 +222,16 @@ interface AuthorizationCapture {
 	 * budget.
 	 */
 	readonly sessionAccounted: boolean;
+	/**
+	 * The UN-INFLATED metering estimate (plain `inputPer1k`, unmodified rates),
+	 * captured at authorize time — never the write-premium-fattened hold
+	 * (`Authorization.estimatedCost`). `settle()`'s "no usage reported"
+	 * fallback reads THIS, so a call that never reports cache-write tokens is
+	 * never charged, audited, or receipted at the cache-write rate. Internal
+	 * only, deliberately off the public `Authorization` handle — see the
+	 * `meteredEstimate` comment at the authorize-time computation.
+	 */
+	readonly meteredEstimate: number;
 }
 
 /** Parameters for authorizing an LLM call. */
@@ -220,15 +260,44 @@ export interface AuthorizeParams {
 	endpoint?: Partial<EndpointInfo> | undefined;
 }
 
-/** Parameters for settling an authorized call. */
+/**
+ * Parameters for settling an authorized call.
+ *
+ * The four token fields are the DISJOINT tiers of spec D2: `inputTokens` is
+ * FRESH input only, with cached reads and cache writes reported separately.
+ * Callers that normalize their own provider usage (openclaw does) must not
+ * leave cache tokens inside `inputTokens` — they would then price at
+ * `inputPer1k` instead of the cache rates, which overstates reads by ~10x.
+ *
+ * Supplying ANY of the four counts makes the settle "reported": the cost is
+ * metered from what was supplied and the omitted counts are 0. Supplying NONE
+ * falls back to the pre-call metering estimate.
+ */
 export interface SettleParams {
-	/** Actual input tokens consumed. If omitted, uses the pre-call estimate. */
+	/** Actual FRESH input tokens consumed (cache tiers excluded). */
 	inputTokens?: number | undefined;
-	/** Actual output tokens consumed. */
+	/** Actual output tokens consumed, including provider-billed thinking tokens. */
 	outputTokens?: number | undefined;
+	/**
+	 * Cache-hit prompt tokens (D5). Priced at the model's resolved
+	 * `cacheReadPer1k`; when the model publishes none, at `inputPer1k` (D1 —
+	 * absence is never free).
+	 */
+	cacheReadTokens?: number | undefined;
+	/** Cache-creation prompt tokens (D5). Priced at the resolved `cacheWritePer1k`. */
+	cacheWriteTokens?: number | undefined;
 	/** Number of streaming chunks delivered (for streaming calls). */
 	chunksDelivered?: number | undefined;
-	/** Whether usage came from the provider or our estimate. */
+	/**
+	 * Whether usage came from the provider or the caller's estimate.
+	 *
+	 * Headless trusts this label — it is an operator boundary, and the caller is
+	 * the only party that knows where its counts came from (D5). What is NOT
+	 * trusted is a count: a `"provider"` label over an unusable `inputTokens` or
+	 * `outputTokens` still yields `usageSource: "estimated"` and NO `usage`
+	 * record, because a published four-tier record containing a fabricated zero
+	 * is the one thing D5 forbids outright.
+	 */
 	usageSource?: "provider" | "estimated" | undefined;
 	/**
 	 * Wall-clock compute duration in milliseconds (local runtimes report it,
@@ -273,6 +342,34 @@ export interface Governor {
 
 	/** Graceful shutdown — voids all pending holds, flushes audit. */
 	destroy(): Promise<void>;
+
+	/**
+	 * The pull-side scarcity read across this governor's own envelopes — what an
+	 * integration puts in front of the model so it can spend like it knows what
+	 * things cost. Batched: exactly ONE ledger round trip for the whole array,
+	 * answered in descriptor order.
+	 *
+	 * REPORTING ONLY (A8). Nothing here gates, delays, or decides a spend, and
+	 * the numbers are snapshots that can race a concurrent settlement — the same
+	 * observational contract `budget/context.ts` documents at length.
+	 *
+	 * TWO LAYERS, deliberately not the same layer:
+	 *  - Pre-I/O validation THROWS — the `MAX_ENVELOPES` cap, the
+	 *    per-descriptor cost-center door and duplicate rejection are caller/config
+	 *    bugs, and answering `[]` would hide a misconfiguration forever.
+	 *  - Every READ failure is quiet: dryRun, no engine, an engine without
+	 *    `lookupBalances`, a rejected lookup, or a governor with no
+	 *    `parentUserId` all answer `[]`.
+	 *
+	 * `envelopes` is CALLER TRUTH for reporting only. There is no cost-center
+	 * registry, so `allocated` and the period bounds come from the caller's own
+	 * bookkeeping — a descriptor neither creates nor funds an envelope
+	 * (`allocateBudget` does).
+	 *
+	 * @throws Error when `envelopes.length` exceeds the cap, a `costCenter` fails
+	 * validation, or two descriptors name the same one — all before any ledger I/O.
+	 */
+	budgetContext(envelopes: EnvelopeDescriptor[]): Promise<EnvelopeStatus[]>;
 
 	/** Estimate cost in usertokens for a model call. */
 	estimateCost(model: string, inputTokens: number, outputTokens: number): number;
@@ -619,6 +716,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	}
 
 	const customRates = config.pricing === "custom" ? config.customRates : undefined;
+	// D8: one-time migration warning, evaluated at the config-load path.
+	warnCacheRateMigration(customRates);
 	// M2: governor-wide default endpoint scope; per-call AuthorizeParams.endpoint
 	// overrides it (A3). Defaults to cloud — pre-M2 metering exactly.
 	const defaultEndpoint = normalizeEndpoint(opts?.endpoint);
@@ -738,6 +837,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const actor = params.actor ?? "local";
 			const messages = params.messages ?? [];
 
+			// Per-invocation denial evidence, filled by the throw sites and read by
+			// the boundaries below. A closure local, never an error property — see
+			// `govern.ts` for the full rationale.
+			const denial: DenialRecord = { denialClass: "policy" };
+			const costCenterAudit: { costCenter?: string } =
+				envelope === undefined ? {} : { costCenter: envelope.attribution.costCenter };
+
 			// Circuit breaker — key on "headless" since we don't have a client kind
 			const cb = breaker.get("headless" as never);
 			cb.allowRequest();
@@ -755,10 +861,30 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const rateInfo = resolveRates(model, endpoint.class, config);
 			if (rateInfo.unknown) {
 				if (config.unknownModelPolicy === "deny") {
-					throw new PolicyDeniedError(
+					// ── Denial boundary 1 of 2: the PRE-MUTEX unknown-model refusal ──
+					// No transfer id yet — it is minted below — so the event carries
+					// only what genuinely exists. The `promptHash` here is THIS spec's
+					// `sha256-json-v1` over the prompt parts; the headless pattern
+					// memory's `sha256(transferId)` is a different thing entirely and
+					// is never substituted for it.
+					denial.denialClass = "unknown_model";
+					const unknownModelDenial = new PolicyDeniedError(
 						`unknown_model: ${model} not in pricing table`,
 						'Set pricing: "custom" with a customRates entry for this model in usertrust.config.json, or use a model from the built-in pricing table.',
 					);
+					await appendDenialEvent({
+						audit,
+						actor,
+						error: unknownModelDenial,
+						record: denial,
+						fields: {
+							model,
+							endpointClass: endpoint.class,
+							promptParts: messages,
+							...costCenterAudit,
+						},
+					});
+					throw unknownModelDenial;
 				}
 				if (config.unknownModelPolicy === "warn") {
 					// Shared once-per-process helper — identical wording to trust() (F5).
@@ -770,7 +896,33 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const transferId = trustId("tx");
 			const estInputTokens = params.estimatedInputTokens ?? estimateInputTokens(messages);
 			const maxOutputTokens = params.maxOutputTokens ?? 4096;
-			const estCost = costFromRates(rateInfo.rates, estInputTokens, maxOutputTokens);
+			// D3: size the ESTIMATED-input half of the hold at
+			// max(inputPer1k, effective cacheWritePer1k) — see the identical
+			// govern.ts hold-sizing comment for the full rationale. Settle-time
+			// actual cost is unaffected; this only widens the PENDING reservation.
+			const holdInputRate = Math.max(
+				rateInfo.rates.inputPer1k,
+				effectiveCacheWriteRate(rateInfo.rates),
+			);
+			const estCost = costFromRates(
+				{ ...rateInfo.rates, inputPer1k: holdInputRate },
+				estInputTokens,
+				maxOutputTokens,
+			);
+			// FIX (review finding, D3 scope): `estCost` above is the
+			// write-premium-INFLATED HOLD — correct for the PENDING reservation
+			// (spendPending/proxy.spend/inFlightHoldTotal) and for the policy gate
+			// (`estimated_cost`/`budget_remaining_after`, whose documented
+			// over-denial trade in D3 depends on the gate seeing the SAME
+			// fattened number the ledger actually reserves) and for the public
+			// `Authorization.estimatedCost` field it is reported on. It must NEVER
+			// become the settled/audited/receipted cost of a call whose settle()
+			// reports no token usage — that would price zero cache-write tokens at
+			// the cache-write rate. `meteredEstimate` is the un-inflated metering
+			// estimate (plain `inputPer1k`, unmodified rates), carried on the
+			// internal capture (never the public handle) and is the ONLY value
+			// settle()'s "no usage reported" fallback may use.
+			const meteredEstimate = costFromRates(rateInfo.rates, estInputTokens, maxOutputTokens);
 
 			// Acquire mutex for budget atomicity (AUD-453). The attributed-envelope
 			// preflight read is taken INSIDE this lock (top of the try below) so a
@@ -785,163 +937,195 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// the only numbers its policy gate saw.
 			let envelopeDebited = false;
 
+			// ── Denial boundary 2 of 2: the whole budget-mutex section ──
+			// Catch OUTSIDE the lock-releasing finally, so the append never holds
+			// the money lock across an fsync. See `govern.ts` for the full
+			// rationale; this governor's boundary has no provider call after it,
+			// because `authorize()` never contacts one.
 			try {
-				// Attributed calls only: ONE batched read of the envelope's live
-				// `available`, for the policy numbers below. Taken INSIDE the budget mutex
-				// — the same lock that serialises the hold — and BEFORE the gate, so this
-				// call's own hold lands only after the read and a CONCURRENT attributed
-				// authorize on the SAME envelope cannot slip its hold between this read and
-				// the gate. When the read was OUTSIDE the lock, both read the pre-hold
-				// balance and the second bypassed a hard scarcity tier
-				// (`budgetFractionRemaining` / `budgetRunwayHours`) the ledger cannot
-				// enforce — TigerBeetle rejects an OVERSHOOT, never a fractional/runway
-				// tier. Serialising the read under the hold's lock makes the gate describe
-				// the wallet the hold will debit, exactly as the SESSION path already does.
-				// Cross-process (multi-governor) concurrency still relies on TB atomicity —
-				// overshoot only — the same limitation the session path has. The full
-				// rationale lives with the helper in `govern.ts`.
-				// A2: a read that FAILS refuses the call outright — the finally below
-				// releases the mutex and the ledger-unavailable error propagates before the
-				// gate is evaluated or any hold is attempted; gating on the SESSION wallet
-				// while the hold debits the ENVELOPE would clear the call against a wallet
-				// the money never came from, in the one record an auditor reads.
-				const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
+				try {
+					// Attributed calls only: ONE batched read of the envelope's live
+					// `available`, for the policy numbers below. Taken INSIDE the budget mutex
+					// — the same lock that serialises the hold — and BEFORE the gate, so this
+					// call's own hold lands only after the read and a CONCURRENT attributed
+					// authorize on the SAME envelope cannot slip its hold between this read and
+					// the gate. When the read was OUTSIDE the lock, both read the pre-hold
+					// balance and the second bypassed a hard scarcity tier
+					// (`budgetFractionRemaining` / `budgetRunwayHours`) the ledger cannot
+					// enforce — TigerBeetle rejects an OVERSHOOT, never a fractional/runway
+					// tier. Serialising the read under the hold's lock makes the gate describe
+					// the wallet the hold will debit, exactly as the SESSION path already does.
+					// Cross-process (multi-governor) concurrency still relies on TB atomicity —
+					// overshoot only — the same limitation the session path has. The full
+					// rationale lives with the helper in `govern.ts`.
+					// A2: a read that FAILS refuses the call outright — the finally below
+					// releases the mutex and the ledger-unavailable error propagates before the
+					// gate is evaluated or any hold is attempted; gating on the SESSION wallet
+					// while the hold debits the ENVELOPE would clear the call against a wallet
+					// the money never came from, in the one record an auditor reads.
+					const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
 
-				// Policy gate — caller params spread FIRST so trusted governance
-				// fields (tier/estimated_cost/budget_remaining/budget_remaining_after)
-				// CANNOT be shadowed by attacker-controlled params.
-				// P1-BUDGET-PREFLIGHT (RECON #1): budget_remaining_after is the derived
-				// field the block-budget-overshoot default rule compares against zero to
-				// deny a single overshooting call PRE-spend. As a HARD rule it fails
-				// CLOSED if omitted, so it MUST be supplied on every evaluation.
-				//
-				// ENVELOPE SCOPING (identical to `trust()`'s two sites — the three-site
-				// re-assertion table in AGENTS.md is a set, not three independent
-				// choices): an ATTRIBUTED call is gated on THE ENVELOPE ITS HOLD WILL
-				// DEBIT. `budget_remaining` is that envelope's live ledger `available`,
-				// so `block-budget-exhausted` and `block-budget-overshoot` become
-				// pre-spend guards on the cost center, ahead of the ledger's own atomic
-				// rejection, and the gate and the hold always describe the SAME wallet —
-				// the case where they could disagree (an unreadable envelope) refused the
-				// call above rather than reaching here (A2).
-				// `budget_remaining_after` is deliberately UNFLOORED on both paths (A7):
-				// it must be allowed to go NEGATIVE, because `block-budget-overshoot` is
-				// a non-disableable hard `lt 0` deny and flooring it at zero would
-				// structurally disarm that rule on every attributed call.
-				// The session numbers still stand for a call that places no envelope hold
-				// at all — unattributed, dry-run, or no engine — which is honest, because
-				// nothing debits an envelope on those paths either.
-				const sessionRemaining = config.budget - budgetSpent - inFlightHoldTotal;
-				const gateRemaining = envelopeRemaining ?? sessionRemaining;
-				// P1-BUDGET-TIER-SHADOW: the budget tier fields are trusted-host input,
-				// and asserting them here is what stops `params.params` from supplying
-				// its own `budgetFractionRemaining` and satisfying a tier that guards
-				// frontier spend. They are now REAL for an attributed call whose scope
-				// stated its allocation (D4) — the case this governor could not describe
-				// before — and stay explicitly `undefined` for every other call, where
-				// the honest value is ABSENT: an `exists`-guarded rule then simply does
-				// not match, and a hard rule without that guard fires. Never an
-				// attacker's number.
-				const tierFields =
-					envelope !== undefined && envelopeRemaining !== undefined
-						? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
-						: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
-				const policyResult = evaluatePolicy(policyRules, {
-					...(params.params ?? {}),
-					model,
-					tier: config.tier,
-					estimated_cost: estCost,
-					budget_remaining: gateRemaining,
-					budget_remaining_after: gateRemaining - estCost,
-					budgetFractionRemaining: tierFields.budgetFractionRemaining,
-					budgetRunwayHours: tierFields.budgetRunwayHours,
-					// Structurally un-forgeable: this comes from the caller's own async
-					// execution context, which no request body can reach. Asserted after
-					// the spread like every other trusted field, `undefined` included.
-					cost_center: envelope?.attribution.costCenter,
-				});
-				if (policyResult.decision === "deny") {
-					const reason =
-						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
-					throw new PolicyDeniedError(
-						reason,
-						derivePolicyHint(policyResult, envelope !== undefined),
-					);
-				}
-
-				// PII check
-				if (config.pii !== "off" && messages.length > 0) {
-					const piiResult = detectPII(messages);
-					if (piiResult.found && config.pii === "block") {
-						throw new PolicyDeniedError(
-							`PII detected: ${piiResult.types.join(", ")}`,
-							'PII enforcement blocked this call. Use { pii: "warn" } to log instead of block; the headless governor does not redact egress — redaction is the integrating host\'s responsibility.',
-						);
-					}
-				}
-
-				// PENDING hold
-				if (proxyConn != null && !isDryRun) {
-					try {
-						const proxyResult = await proxyConn.spend({
-							model,
-							estimatedCost: estCost,
-							actor,
-						});
-						proxyTransferId = proxyResult.transferId;
-					} catch (holdErr) {
-						throw new LedgerUnavailableError(
-							holdErr instanceof Error ? holdErr.message : String(holdErr),
-						);
-					}
-				} else if (engine != null && !isDryRun) {
-					try {
-						await engine.spendPending({
-							transferId,
-							amount: estCost,
-							// Attributed → the envelope pays. Unattributed → the key is
-							// OMITTED, not passed as undefined, so the engine's default (the
-							// session holding wallet) is reached by exactly the path it was
-							// before envelopes existed.
-							...(envelope !== undefined ? { debitAccountId: envelope.accountId } : {}),
-						});
-					} catch (holdErr) {
-						// P1-LEDGER-ENFORCE: an over-budget reservation is rejected
-						// atomically by the ledger. Surface it as a hard budget DENY —
-						// NOT as "ledger unavailable" (which would misreport a budget cap
-						// as an outage).
-						if (holdErr instanceof InsufficientBalanceError) {
-							// An attributed rejection is re-presented in the caller's terms:
-							// the `parent::costCenter` label instead of a derived account id,
-							// and the remedy that actually funds an envelope. Unattributed
-							// rejections rethrow the SAME object — nothing on that path moved.
-							throw envelope === undefined
-								? holdErr
-								: asEnvelopeBalanceError(holdErr, envelope.label);
+					// Policy gate — caller params spread FIRST so trusted governance
+					// fields (tier/estimated_cost/budget_remaining/budget_remaining_after)
+					// CANNOT be shadowed by attacker-controlled params.
+					// P1-BUDGET-PREFLIGHT (RECON #1): budget_remaining_after is the derived
+					// field the block-budget-overshoot default rule compares against zero to
+					// deny a single overshooting call PRE-spend. As a HARD rule it fails
+					// CLOSED if omitted, so it MUST be supplied on every evaluation.
+					//
+					// ENVELOPE SCOPING (identical to `trust()`'s two sites — the three-site
+					// re-assertion table in AGENTS.md is a set, not three independent
+					// choices): an ATTRIBUTED call is gated on THE ENVELOPE ITS HOLD WILL
+					// DEBIT. `budget_remaining` is that envelope's live ledger `available`,
+					// so `block-budget-exhausted` and `block-budget-overshoot` become
+					// pre-spend guards on the cost center, ahead of the ledger's own atomic
+					// rejection, and the gate and the hold always describe the SAME wallet —
+					// the case where they could disagree (an unreadable envelope) refused the
+					// call above rather than reaching here (A2).
+					// `budget_remaining_after` is deliberately UNFLOORED on both paths (A7):
+					// it must be allowed to go NEGATIVE, because `block-budget-overshoot` is
+					// a non-disableable hard `lt 0` deny and flooring it at zero would
+					// structurally disarm that rule on every attributed call.
+					// The session numbers still stand for a call that places no envelope hold
+					// at all — unattributed, dry-run, or no engine — which is honest, because
+					// nothing debits an envelope on those paths either.
+					const sessionRemaining = config.budget - budgetSpent - inFlightHoldTotal;
+					const gateRemaining = envelopeRemaining ?? sessionRemaining;
+					// P1-BUDGET-TIER-SHADOW: the budget tier fields are trusted-host input,
+					// and asserting them here is what stops `params.params` from supplying
+					// its own `budgetFractionRemaining` and satisfying a tier that guards
+					// frontier spend. They are now REAL for an attributed call whose scope
+					// stated its allocation (D4) — the case this governor could not describe
+					// before — and stay explicitly `undefined` for every other call, where
+					// the honest value is ABSENT: an `exists`-guarded rule then simply does
+					// not match, and a hard rule without that guard fires. Never an
+					// attacker's number.
+					const tierFields =
+						envelope !== undefined && envelopeRemaining !== undefined
+							? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
+							: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
+					const policyResult = evaluatePolicy(policyRules, {
+						...(params.params ?? {}),
+						model,
+						tier: config.tier,
+						estimated_cost: estCost,
+						budget_remaining: gateRemaining,
+						budget_remaining_after: gateRemaining - estCost,
+						budgetFractionRemaining: tierFields.budgetFractionRemaining,
+						budgetRunwayHours: tierFields.budgetRunwayHours,
+						// Structurally un-forgeable: this comes from the caller's own async
+						// execution context, which no request body can reach. Asserted after
+						// the spread like every other trusted field, `undefined` included.
+						cost_center: envelope?.attribution.costCenter,
+					});
+					if (policyResult.decision === "deny") {
+						const reason =
+							policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
+						denial.denialClass = classifyPolicyDenial(policyResult.hardViolations);
+						denial.policyRules = toDenialRuleRefs(policyResult.hardViolations);
+						if (denial.denialClass === "budget_gate") {
+							denial.budget = { estimatedCost: estCost, budgetRemaining: gateRemaining };
 						}
-						// Genuine ledger outage — do NOT forward to provider.
-						throw new LedgerUnavailableError(
-							holdErr instanceof Error ? holdErr.message : String(holdErr),
+						throw new PolicyDeniedError(
+							reason,
+							derivePolicyHint(policyResult, envelope !== undefined),
 						);
 					}
-					// The hold landed. Record WHICH wallet it debited, for the session
-					// accounting below and for the release on settle/abort.
-					envelopeDebited = envelope !== undefined;
-				}
 
-				// SESSION accounting tracks SESSION-WALLET money only. An attributed hold
-				// debits the `(parentUserId, costCenter)` envelope, so counting it here
-				// would reserve session headroom against money the session wallet never
-				// pays — every later unattributed call gated on a smaller number than the
-				// wallet actually holds, and (via `budgetSpent` on settle) that shortfall
-				// persisted into the next run's holding-wallet seed. The envelope's own
-				// `debits_must_not_exceed_credits` is what bounds an attributed call, and
-				// the policy gate above is already scoped to it.
-				if (!envelopeDebited) {
-					inFlightHoldTotal += estCost;
+					// PII check
+					if (config.pii !== "off" && messages.length > 0) {
+						const piiResult = detectPII(messages);
+						if (piiResult.found && config.pii === "block") {
+							denial.denialClass = "pii";
+							denial.piiTypes = piiResult.types;
+							throw new PolicyDeniedError(
+								`PII detected: ${piiResult.types.join(", ")}`,
+								'PII enforcement blocked this call. Use { pii: "warn" } to log instead of block; the headless governor does not redact egress — redaction is the integrating host\'s responsibility.',
+							);
+						}
+					}
+
+					// PENDING hold
+					if (proxyConn != null && !isDryRun) {
+						try {
+							const proxyResult = await proxyConn.spend({
+								model,
+								estimatedCost: estCost,
+								actor,
+							});
+							proxyTransferId = proxyResult.transferId;
+						} catch (holdErr) {
+							throw new LedgerUnavailableError(
+								holdErr instanceof Error ? holdErr.message : String(holdErr),
+							);
+						}
+					} else if (engine != null && !isDryRun) {
+						try {
+							await engine.spendPending({
+								transferId,
+								amount: estCost,
+								// Attributed → the envelope pays. Unattributed → the key is
+								// OMITTED, not passed as undefined, so the engine's default (the
+								// session holding wallet) is reached by exactly the path it was
+								// before envelopes existed.
+								...(envelope !== undefined ? { debitAccountId: envelope.accountId } : {}),
+							});
+						} catch (holdErr) {
+							// P1-LEDGER-ENFORCE: an over-budget reservation is rejected
+							// atomically by the ledger. Surface it as a hard budget DENY —
+							// NOT as "ledger unavailable" (which would misreport a budget cap
+							// as an outage).
+							if (holdErr instanceof InsufficientBalanceError) {
+								// An attributed rejection is re-presented in the caller's terms:
+								// the `parent::costCenter` label instead of a derived account id,
+								// and the remedy that actually funds an envelope. Unattributed
+								// rejections rethrow the SAME object — nothing on that path moved.
+								throw envelope === undefined
+									? holdErr
+									: asEnvelopeBalanceError(holdErr, envelope.label);
+							}
+							// Genuine ledger outage — do NOT forward to provider.
+							throw new LedgerUnavailableError(
+								holdErr instanceof Error ? holdErr.message : String(holdErr),
+							);
+						}
+						// The hold landed. Record WHICH wallet it debited, for the session
+						// accounting below and for the release on settle/abort.
+						envelopeDebited = envelope !== undefined;
+					}
+
+					// SESSION accounting tracks SESSION-WALLET money only. An attributed hold
+					// debits the `(parentUserId, costCenter)` envelope, so counting it here
+					// would reserve session headroom against money the session wallet never
+					// pays — every later unattributed call gated on a smaller number than the
+					// wallet actually holds, and (via `budgetSpent` on settle) that shortfall
+					// persisted into the next run's holding-wallet seed. The envelope's own
+					// `debits_must_not_exceed_credits` is what bounds an attributed call, and
+					// the policy gate above is already scoped to it.
+					if (!envelopeDebited) {
+						inFlightHoldTotal += estCost;
+					}
+				} finally {
+					releaseBudgetLock();
 				}
-			} finally {
-				releaseBudgetLock();
+			} catch (denialErr) {
+				if (isGovernanceDenial(denialErr)) {
+					await appendDenialEvent({
+						audit,
+						actor,
+						error: denialErr,
+						record: denial,
+						fields: {
+							model,
+							endpointClass: endpoint.class,
+							transferId,
+							estimatedCost: estCost,
+							promptParts: messages,
+							...costCenterAudit,
+						},
+					});
+				}
+				throw denialErr;
 			}
 
 			// ONE capture, frozen, shared by the handle and the governor's own record.
@@ -985,6 +1169,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					costCenter: captured?.attribution.costCenter,
 					envelope: captured,
 					sessionAccounted: !envelopeDebited,
+					meteredEstimate,
 				}),
 			);
 			return auth;
@@ -1024,20 +1209,72 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const endpoint = auth.endpoint ?? defaultEndpoint;
 			const rateInfo = resolveRates(model, endpoint.class, config);
 
+			// D5 — read the caller's object ONCE, into a local. The presence check
+			// below and the counts that get priced and recorded then come from the
+			// same read, so a caller whose `SettleParams` is a live object (a proxy,
+			// a getter over a running accumulator) cannot have "reported?" answered
+			// off one value and the money computed off another.
+			const reportedCounts = {
+				inputTokens: params?.inputTokens,
+				outputTokens: params?.outputTokens,
+				cacheReadTokens: params?.cacheReadTokens,
+				cacheWriteTokens: params?.cacheWriteTokens,
+			};
+			// D4/D5: the reported-usage condition is WIDENED to the cache tiers. It
+			// read only input/output, so a settle carrying nothing but cache counts
+			// looked like "nothing reported" and silently fell back to the pre-call
+			// estimate — discarding real billable tokens at the one boundary
+			// (openclaw, and every non-SDK integration) that has them.
+			const usageReported =
+				reportedCounts.inputTokens != null ||
+				reportedCounts.outputTokens != null ||
+				reportedCounts.cacheReadTokens != null ||
+				reportedCounts.cacheWriteTokens != null;
+
+			// D5 — THE ONE SNAPSHOT. Both the cost below and the `usage` record on
+			// the chain event and the receipt derive from THIS object; nothing
+			// downstream re-reads `params`. Omitted counts collapse to 0 at this
+			// operator boundary: when a caller reported some of the four, the ones
+			// it left out are zero (the same "absent cache fields mean zero" rule
+			// D5 states for providers), not an invitation to re-estimate half the
+			// call. `sanitizeUsage` then clamps every count to a finite integer >= 0
+			// — the reason a NaN from a caller's arithmetic cannot reach audit
+			// canonicalization, which throws on non-finite — and downgrades a
+			// "provider" label whose input/output is unusable.
+			const usageSnapshot = sanitizeUsage({
+				inputTokens: reportedCounts.inputTokens ?? 0,
+				outputTokens: reportedCounts.outputTokens ?? 0,
+				cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
+				cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
+				source: usageReported ? (params?.usageSource ?? "provider") : "estimated",
+			});
+			// Present IFF provider-sourced (D5) — the single rule, in one place.
+			const usageRecord = publishableUsage(usageSnapshot);
+			const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
+
 			// Determine actual cost
 			let actualCost: number;
-			let usageSource: "provider" | "estimated";
-			if (params?.inputTokens != null || params?.outputTokens != null) {
+			const usageSource: "provider" | "estimated" = usageSnapshot.source;
+			if (usageReported) {
 				actualCost = costFromRates(
 					rateInfo.rates,
-					params.inputTokens ?? 0,
-					params.outputTokens ?? 0,
+					usageSnapshot.inputTokens,
+					usageSnapshot.outputTokens,
+					usageSnapshot.cacheReadTokens,
+					usageSnapshot.cacheWriteTokens,
 				);
-				usageSource = params.usageSource ?? "provider";
 			} else {
-				actualCost = auth.estimatedCost;
-				usageSource = "estimated";
+				// FIX: the un-inflated metering estimate, never the fattened hold
+				// carried on `auth.estimatedCost` (see the `meteredEstimate`
+				// comment on `AuthorizationCapture`).
+				actualCost = capture.meteredEstimate;
 			}
+
+			// D5 — the rates the money was computed with, published so the record is
+			// self-sufficient: `ceil(sum(counts x appliedRates / 1000))` floored at 1
+			// reproduces `cost` exactly. RESOLVED rates, so the D1 cache fallback is
+			// visible as the number it actually charges rather than as a hole.
+			const appliedRates = resolveAppliedRates(rateInfo.rates);
 
 			// SESSION accounting, skipped in full when the ENVELOPE paid: this hold was
 			// never counted into `inFlightHoldTotal`, so releasing it here would drive
@@ -1145,6 +1382,20 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						settled,
 						transferId: auth.transferId,
 						usageSource,
+						// D5: the durable record. The receipt is a return value the
+						// caller may drop on the floor; THIS is what an auditor reads,
+						// so the four tiers and the rates that priced them belong here
+						// too — a chain event that cannot be repriced is a number to
+						// trust, not a reconciliation surface. Mirrors the receipt
+						// exactly: same snapshot, same resolution.
+						...usageAudit,
+						// P1-1: the chain event keeps its FLAT shape — audit-event.v1
+						// documents `data` as open and it already flattens the receipt's
+						// meter. The receipt-side relocation was forced by receipt.v1's
+						// CLOSED `meter` object, which has no counterpart here.
+						// P1-2: its own frozen copy.
+						appliedRates: copyAppliedRates(appliedRates),
+						pricingTableVersion: PRICING_TABLE_VERSION,
 						...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
 						source: "headless",
 						...costCenterAudit,
@@ -1240,6 +1491,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				provider: "headless",
 				timestamp: new Date().toISOString(),
 				usageSource,
+				// D5: present IFF provider-sourced — same snapshot the cost came from.
+				...usageAudit,
 				// M2: endpoint classification + metering provenance (A6: computeMs is
 				// OMITTED, never undefined, when absent/invalid).
 				endpoint: { class: endpoint.class, runtime: endpoint.runtime },
@@ -1251,6 +1504,14 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					params.computeMs >= 0
 						? { computeMs: params.computeMs }
 						: {}),
+				},
+				// D5: what the rates WERE, beside where they came from. Only this makes
+				// a custom/local-model cost independently recomputable. A SIBLING of
+				// `meter`, not a member of it — receipt.v1 closed `meter` to additions
+				// (P1-1). P1-2: its own frozen copy.
+				pricing: {
+					appliedRates: copyAppliedRates(appliedRates),
+					tableVersion: PRICING_TABLE_VERSION,
 				},
 				...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
 				...(postedCost !== undefined ? { postedCost } : {}),
@@ -1366,6 +1627,62 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			if (proxyConn != null) {
 				proxyConn.destroy();
 			}
+		},
+
+		/**
+		 * REPORTING ONLY, and the failure policy is the whole design (A8).
+		 *
+		 * This is the MIRROR of `snapshotEnvelopeRemaining`: same read, never throws,
+		 * because nothing downstream decides anything from it. It is deliberately the
+		 * OPPOSITE of `preflightEnvelopeRemaining` (A2), which REFUSES an attributed
+		 * authorize when the same read fails — there the number feeds the policy gate,
+		 * so degrading it would clear a call against a wallet the money never came
+		 * from. Here the number goes into a scarcity hint a model reads; an
+		 * unreachable ledger must cost the caller a paragraph of prose, never a
+		 * denied or delayed call. DO NOT UNIFY THE TWO.
+		 *
+		 * Only the awaited `lookupBalances` is inside the catch. The pre-I/O doors
+		 * above it are caller bugs and throw, and the `envelopeStatusFrom` mapping
+		 * below it stays OUTSIDE — a non-finite `periodStartMs` propagates exactly as
+		 * it does from core `budgetContext`, rather than collapsing every envelope's
+		 * report into an empty array the caller cannot diagnose.
+		 */
+		async budgetContext(envelopes: EnvelopeDescriptor[]): Promise<EnvelopeStatus[]> {
+			// Cheapest door first, and the only one that needs no ledger identity.
+			assertEnvelopeCap(envelopes);
+
+			// No parentUserId ⇒ no envelope account is derivable. Unlike `authorize()`'s
+			// D1 throw, nothing is about to spend here, so there is nothing to refuse:
+			// a governor with no ledger identity simply has no envelopes to report on.
+			// It also has to be settled BEFORE the per-descriptor door, which validates
+			// each cost center against a parent.
+			const parentUserId = config.parentUserId;
+			if (parentUserId === undefined) return [];
+
+			assertDistinctValidCostCenters(parentUserId, envelopes);
+
+			// dryRun has no engine at all; an injected engine may predate `lookupBalances`.
+			if (isDryRun || engine == null || engine.lookupBalances === undefined) return [];
+
+			// ONE clock read for the whole batch, so two envelopes in one response never
+			// disagree about "now" — the same rule core `budgetContext` follows.
+			const clock = Date.now();
+			const accountIds = envelopes.map((envelope) =>
+				TrustTBClient.deriveCostCenterAccountId(parentUserId, envelope.costCenter),
+			);
+
+			let balances: Map<bigint, number>;
+			try {
+				balances = await engine.lookupBalances(accountIds);
+			} catch {
+				return [];
+			}
+
+			// An id the ledger omitted reads as 0 — never-allocated and fully-reclaimed
+			// are the same observable state.
+			return envelopes.map((envelope, i) =>
+				envelopeStatusFrom(envelope, balances.get(accountIds[i] as bigint) ?? 0, clock),
+			);
 		},
 
 		estimateCost(model: string, inputTokens: number, outputTokens: number): number {

@@ -56,12 +56,24 @@ export interface EntropyReport {
 // ── Signal extractors ──
 
 /**
+ * Governance DENIAL kinds, named explicitly rather than matched by substring.
+ *
+ * `policy_denied` happens to contain "policy"; `ledger_rejected` does not, and
+ * a substring filter alone therefore made an atomic ledger refusal — the
+ * worst-diagnosed denial class there is — invisible to `usertrust health`.
+ */
+const DENIAL_EVENT_KINDS = new Set(["policy_denied", "ledger_rejected"]);
+
+/**
  * Signal 1: Policy violations
  *
- * Events where kind contains "policy" and data indicates a deny/block decision.
+ * Events where kind contains "policy", or is a governance denial kind, and data
+ * indicates a deny/block decision.
  */
 export function extractPolicyViolations(events: EntropyEventInput[]): EntropySignal {
-	const policyEvents = events.filter((e) => e.kind.includes("policy"));
+	const policyEvents = events.filter(
+		(e) => e.kind.includes("policy") || DENIAL_EVENT_KINDS.has(e.kind),
+	);
 	let hits = 0;
 
 	for (const e of policyEvents) {

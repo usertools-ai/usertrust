@@ -3,6 +3,16 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { OpenClawPluginApi, ProviderPlugin } from "../src/types.js";
+import {
+	doneEvent,
+	makeContext,
+	makeModel,
+	makeUsage,
+	startEvent,
+	streamOf,
+	textDelta,
+} from "./host-fixtures.js";
 
 // Mock tigerbeetle-node
 vi.mock("tigerbeetle-node", () => ({
@@ -61,45 +71,42 @@ describe("openclaw plugin entry point", () => {
 			const registerFn = mod.default;
 
 			const registerProviderMock = vi.fn();
-			const api = {
-				registerTool: vi.fn(),
+			const api: OpenClawPluginApi = {
+				id: "usertrust",
+				name: "usertrust",
+				pluginConfig: { budget: 100_000, dryRun: true },
 				registerProvider: registerProviderMock,
-				registerChannel: vi.fn(),
-				registerHttpRoute: vi.fn(),
 			};
 
 			registerFn(api);
 
 			expect(registerProviderMock).toHaveBeenCalledOnce();
-			const plugin = registerProviderMock.mock.calls[0][0];
+			const plugin = registerProviderMock.mock.calls[0]?.[0] as ProviderPlugin;
 			expect(plugin.id).toBe("usertrust");
 			expect(plugin.label).toBe("usertrust Governance");
 			expect(typeof plugin.wrapStreamFn).toBe("function");
 		});
 
-		it("wrapStreamFn returns a function with the same arity", async () => {
+		it("wrapStreamFn returns a stream function from the hook context", async () => {
 			const mod = await import("../src/index.js");
 			const registerFn = mod.default;
 
-			let capturedPlugin: { wrapStreamFn: (fn: unknown, config: unknown) => unknown } | null = null;
-			const api = {
-				registerTool: vi.fn(),
-				registerProvider: vi.fn((p: unknown) => {
-					capturedPlugin = p as typeof capturedPlugin;
-				}),
-				registerChannel: vi.fn(),
-				registerHttpRoute: vi.fn(),
+			let capturedPlugin: ProviderPlugin | null = null;
+			const api: OpenClawPluginApi = {
+				id: "usertrust",
+				name: "usertrust",
+				pluginConfig: { budget: 100_000, dryRun: true },
+				registerProvider: (p) => {
+					capturedPlugin = p;
+				},
 			};
 
 			registerFn(api);
 
-			const mockStreamFn = async function* () {
-				yield { type: "start" as const };
-			};
-
-			const wrapped = capturedPlugin?.wrapStreamFn(mockStreamFn, {
-				budget: 100_000,
-				dryRun: true,
+			const wrapped = capturedPlugin?.wrapStreamFn?.({
+				provider: "anthropic",
+				modelId: "claude-sonnet-4-6",
+				streamFn: streamOf([startEvent()]),
 			});
 
 			expect(typeof wrapped).toBe("function");
@@ -110,26 +117,13 @@ describe("openclaw plugin entry point", () => {
 		it("returns a governed stream function and a governor", async () => {
 			const { createGovernedStreamFn } = await import("../src/index.js");
 
-			const events = [
-				{ type: "start" as const },
-				{ type: "text_delta" as const, text: "hello" },
+			const { governedStreamFn, governor } = await createGovernedStreamFn(
+				streamOf([startEvent(), doneEvent(makeUsage(50, 20))]),
 				{
-					type: "done" as const,
-					stopReason: "stop" as const,
-					usage: { inputTokens: 50, outputTokens: 20 },
+					budget: 100_000,
+					dryRun: true,
 				},
-			];
-
-			const mockStreamFn = async function* () {
-				for (const event of events) {
-					yield event;
-				}
-			};
-
-			const { governedStreamFn, governor } = await createGovernedStreamFn(mockStreamFn, {
-				budget: 100_000,
-				dryRun: true,
-			});
+			);
 
 			expect(typeof governedStreamFn).toBe("function");
 			expect(governor).toBeDefined();
@@ -152,9 +146,7 @@ describe("openclaw plugin entry point", () => {
 		it("returns governor after createGovernedStreamFn() initializes it", async () => {
 			const { createGovernedStreamFn, getGovernor } = await import("../src/index.js");
 
-			const mockStreamFn = async function* () {
-				yield { type: "start" as const };
-			};
+			const mockStreamFn = streamOf([startEvent()]);
 
 			const { governor } = await createGovernedStreamFn(mockStreamFn, {
 				budget: 100_000,
@@ -173,9 +165,7 @@ describe("openclaw plugin entry point", () => {
 		it("cleans up governor and sets it to null", async () => {
 			const { createGovernedStreamFn, getGovernor, shutdown } = await import("../src/index.js");
 
-			const mockStreamFn = async function* () {
-				yield { type: "start" as const };
-			};
+			const mockStreamFn = streamOf([startEvent()]);
 
 			await createGovernedStreamFn(mockStreamFn, {
 				budget: 100_000,
@@ -198,24 +188,20 @@ describe("openclaw plugin entry point", () => {
 	});
 
 	describe("initGovernor early return", () => {
-		it("returns existing governor on second createGovernedStreamFn call", async () => {
+		it("returns existing governor on second createGovernedStreamFn call with the SAME config", async () => {
 			const { createGovernedStreamFn, getGovernor } = await import("../src/index.js");
 
-			const mockStreamFn = async function* () {
-				yield { type: "start" as const };
-			};
+			const mockStreamFn = streamOf([startEvent()]);
+			const config = { budget: 100_000, dryRun: true };
 
 			// First call initializes
-			const { governor: gov1 } = await createGovernedStreamFn(mockStreamFn, {
-				budget: 100_000,
-				dryRun: true,
-			});
+			const { governor: gov1 } = await createGovernedStreamFn(mockStreamFn, config);
 
-			// Second call should return the same governor
-			const { governor: gov2 } = await createGovernedStreamFn(mockStreamFn, {
-				budget: 200_000,
-				dryRun: true,
-			});
+			// Second call, SAME config, should return the same governor — a
+			// DIFFERENT config now rejects instead of silently reusing the first
+			// instance's governor (Task 4, `tests/cost-centers-config.test.ts`'s
+			// "governor config-mismatch guard" suite).
+			const { governor: gov2 } = await createGovernedStreamFn(mockStreamFn, config);
 
 			expect(gov1).toBe(gov2);
 			expect(getGovernor()).toBe(gov1);
@@ -229,51 +215,31 @@ describe("openclaw plugin entry point", () => {
 			const mod = await import("../src/index.js");
 			const registerFn = mod.default;
 
-			let capturedPlugin: {
-				wrapStreamFn: (
-					fn: (...args: unknown[]) => AsyncIterable<unknown>,
-					config: { budget: number; dryRun: boolean },
-				) => (...args: unknown[]) => AsyncIterable<unknown>;
-			} | null = null;
-			const api = {
-				registerTool: vi.fn(),
-				registerProvider: vi.fn((p: unknown) => {
-					capturedPlugin = p as typeof capturedPlugin;
-				}),
-				registerChannel: vi.fn(),
-				registerHttpRoute: vi.fn(),
+			let capturedPlugin: ProviderPlugin | null = null;
+			const api: OpenClawPluginApi = {
+				id: "usertrust",
+				name: "usertrust",
+				pluginConfig: { budget: 100_000, dryRun: true },
+				registerProvider: (p) => {
+					capturedPlugin = p;
+				},
 			};
 
 			registerFn(api);
 
-			const events = [
-				{ type: "start" as const },
-				{ type: "text_delta" as const, text: "hello" },
-				{
-					type: "done" as const,
-					stopReason: "stop" as const,
-					usage: { inputTokens: 50, outputTokens: 20 },
-				},
-			];
-
-			const mockStreamFn = async function* () {
-				for (const e of events) yield e;
-			};
-
-			const wrapped = capturedPlugin?.wrapStreamFn(mockStreamFn, {
-				budget: 100_000,
-				dryRun: true,
+			const wrapped = capturedPlugin?.wrapStreamFn?.({
+				provider: "anthropic",
+				modelId: "claude-sonnet-4-6",
+				streamFn: streamOf([startEvent(), textDelta("hello"), doneEvent(makeUsage(50, 20))]),
 			});
+
+			expect(wrapped).toBeTypeOf("function");
+			// biome-ignore lint/style/noNonNullAssertion: guarded by expect above
+			const stream = await wrapped!(makeModel(), makeContext());
 
 			const collected: unknown[] = [];
-			const stream = wrapped?.("claude-sonnet-4-6", {
-				messages: [{ role: "user", content: "hi" }],
-				model: "claude-sonnet-4-6",
-			});
-			if (stream) {
-				for await (const event of stream) {
-					collected.push(event);
-				}
+			for await (const event of stream) {
+				collected.push(event);
 			}
 
 			expect(collected).toHaveLength(3);

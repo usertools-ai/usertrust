@@ -52,7 +52,12 @@ export class CompositeEvaluator {
 	/** Results already settled or aborted — a result is one-shot. */
 	private readonly finished = new WeakSet<CompositeResult>();
 	private toolCallCount = 0;
-	private tokenCount = 0;
+	// Spec D4 row 7: four disjoint tiers, tracked separately so `token_count`
+	// can sum all of them instead of undercounting at input+output only.
+	private inputTokenCount = 0;
+	private outputTokenCount = 0;
+	private cacheReadTokenCount = 0;
+	private cacheWriteTokenCount = 0;
 	private costTotal = 0;
 
 	constructor(opts: {
@@ -71,9 +76,33 @@ export class CompositeEvaluator {
 	budgetsEnvelope(): AcsBudgetsEnvelope {
 		return {
 			tool_call_count: this.toolCallCount,
-			token_count: this.tokenCount,
+			token_count:
+				this.inputTokenCount +
+				this.outputTokenCount +
+				this.cacheReadTokenCount +
+				this.cacheWriteTokenCount,
 			elapsed_seconds: Math.floor((this.clock() - this.startedAt) / 1000),
 			cost_usd: this.costTotal,
+		};
+	}
+
+	/**
+	 * The four disjoint token-tier counters that sum to `budgetsEnvelope().token_count`
+	 * (spec D4 row 7). Additive surface: the ACS-spec envelope itself stays fixed to
+	 * its four counters (`tool_call_count`, `token_count`, `elapsed_seconds`, `cost_usd`),
+	 * so the per-tier breakdown lives here instead of widening that contract.
+	 */
+	tokenCounts(): {
+		inputTokenCount: number;
+		outputTokenCount: number;
+		cacheReadTokenCount: number;
+		cacheWriteTokenCount: number;
+	} {
+		return {
+			inputTokenCount: this.inputTokenCount,
+			outputTokenCount: this.outputTokenCount,
+			cacheReadTokenCount: this.cacheReadTokenCount,
+			cacheWriteTokenCount: this.cacheWriteTokenCount,
 		};
 	}
 
@@ -144,13 +173,23 @@ export class CompositeEvaluator {
 
 	async settle(
 		result: CompositeResult,
-		usage?: { inputTokens?: number | undefined; outputTokens?: number | undefined },
+		usage?: {
+			inputTokens?: number | undefined;
+			outputTokens?: number | undefined;
+			/** Cache-hit prompt tokens (spec D4 row 7). */
+			cacheReadTokens?: number | undefined;
+			/** Cache-creation prompt tokens (spec D4 row 7). */
+			cacheWriteTokens?: number | undefined;
+		},
 	): Promise<TrustReceipt | null> {
 		if (!result.authorization || this.finished.has(result)) return null;
 		this.finished.add(result);
 		try {
 			const receipt = await this.governor.settle(result.authorization, usage);
-			this.tokenCount += (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0);
+			this.inputTokenCount += usage?.inputTokens ?? 0;
+			this.outputTokenCount += usage?.outputTokens ?? 0;
+			this.cacheReadTokenCount += usage?.cacheReadTokens ?? 0;
+			this.cacheWriteTokenCount += usage?.cacheWriteTokens ?? 0;
 			this.costTotal += receipt.cost;
 			return receipt;
 		} catch (err) {

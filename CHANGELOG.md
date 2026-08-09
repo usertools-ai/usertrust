@@ -9,6 +9,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Chain events for governance denials, and a correlation handle on the error.**
+  A denied call previously wrote NOTHING to the audit chain: invisible to
+  `usertrust verify`, to the ledger UI, to exports, and to the entropy signal
+  behind `usertrust health`, with no handle a caller could quote back. Two new
+  kinds close that gap. `policy_denied` records a decision the GOVERNOR made —
+  `denialClass` is one of `policy`, `budget_gate`, `pii`, `injection`,
+  `unknown_model` — and carries the hard rules that fired (id + name), PII
+  TYPE names, injection PATTERN names, the two budget numbers the gate
+  compared, a `promptHash` that joins to pattern memory, plus model /
+  action / cost-center / endpoint / transferId. `ledger_rejected` records the
+  ledger's own atomic refusal of a hold, where a `transferId` genuinely exists
+  and `usertrust verify --tx` can join on it. Both carry `schemaVersion: 1` and
+  `decision: "deny"`; every field is PII-safe, and the error text is redacted
+  before it is truncated.
+
+  `PolicyDeniedError` and `InsufficientBalanceError` now expose
+  `auditEventHash` — the appended event's hash — and `auditDegraded`, which
+  distinguishes "the append was attempted, failed, and was dead-lettered" from
+  "no append was ever attempted" (an error built by hand, or thrown by an
+  older version). Both errors gained an optional trailing metadata argument
+  (third and **fifth** respectively, behind their existing `hint`), so every
+  existing construction compiles unchanged.
+
+  Appends happen at a FLOW BOUNDARY — a `catch` wrapped around the try/finally
+  that releases the budget mutex, ending lexically before the provider call —
+  so a denial storm never stalls allowed calls behind an fsync, and a provider
+  that throws a same-typed error is never audited as a governor decision. A
+  failed denial-append never changes the error the caller receives, `failClosed`
+  included: the call is already refused and no money moved. The circuit breaker
+  remains deliberately un-wired for denials; a refusal never contacted a
+  provider, and counting it would let a policy storm suppress healthy traffic.
+
+  Downstream: `usertrust health` counts both kinds, `verifyTransaction()`
+  renders **DENIED** instead of a false PENDING receipt, and the visual ledger
+  labels denials as denials rather than as zero-cost failed transactions.
+
+  **Caveat for indirect callers:** `usertrust-server` and the ACS adapter do
+  not yet forward `auditEventHash` on the wire, so an HTTP caller receives the
+  denial without the handle. The event itself is written either way — the
+  server converts the error only after `governor.authorize()` has returned its
+  decision, so an `evaluate_only` (`would_deny`) deployment records the denial
+  too. Richer UI rendering of `denialClass`/rules, export columns, and an
+  `inspect` kind column are also follow-ups.
+
+### Fixed
+
+- **`usertrust-verify --tx` scrubs control characters out of every untrusted
+  receipt field.** The receipt renders strings read from `events.jsonl` — a file
+  the party under audit owns — onto the terminal of the auditor checking it, so
+  an escape sequence could erase the line the verdict prints on and forge a
+  passing verification. The unknown-model denial made this reachable with a
+  caller-supplied `model`, which the governor also copies into the event's
+  `error` text. `model`, `error`, `transferId`, the timestamp, both chain hashes
+  and the `renderNotFound` txId now go through the stronger `forDisplay`
+  sanitizer (C1 range included) before rendering. This also closes the same
+  pre-existing exposure on the `llm_call_failed` error line.
+- **A denial whose audit append fails only at the `.meta` sidecar now keeps its
+  correlation handle.** `appendEvent` fsyncs `events.jsonl` before writing the
+  sidecar, so a sidecar failure rejected for an event that was already durably
+  on the chain — and the caller was told `auditDegraded` with no hash, losing
+  the handle for a record an auditor could still read. The writer now reports
+  that event's hash on the rejection and the denial boundary surfaces
+  `auditEventHash` **and** `auditDegraded: true` together, meaning "on-chain at
+  this hash, and the write reported failure".
+- **`ledger_rejected` carries `actionName`,** mirroring `policy_denied`. Without
+  it, every rejected action sharing a broad `kind` (`"tool"`) was
+  indistinguishable in the chain — the question a rejected-hold investigation
+  starts from.
+- **Four-tier cache pricing: rates, receipts, and public schemas (correctness fix).**
+  Cache traffic was billed at **zero**: `ModelRates` was two-tier, core's extraction read
+  `usage.input_tokens ?? prompt_tokens` while providers report cache read/write as separate
+  counters, and openclaw's accumulator dropped the cache fields it did extract. A
+  1.14B-cache-read day was under-recorded roughly 7-8x — understatement is the dangerous
+  direction, since it makes budgets deplete an order of magnitude slower than the real invoice
+  and every scarcity number read falsely high. `ModelRates` gains optional `cacheReadPer1k` /
+  `cacheWritePer1k`; every `PRICING_TABLE` entry was re-derived from providers' current published
+  rates (`PRICING_TABLE_VERSION = "2026-08-08"`, recorded on receipts), correcting a stale
+  `o4-mini` base rate along the way. **An absent cache rate now prices at `inputPer1k`, never
+  zero** — overstatement is the fail-safe direction, and this resolution happens in exactly one
+  place (`costFromRates`). Core's Anthropic/OpenAI-completions/Responses/Gemini extraction,
+  openclaw's accumulator and settle paths, the server wire schema, and the ACS adapter's
+  `token_count` all carry the four disjoint tiers end-to-end now, normalized per-source (pi-ai's
+  pinned adapters are already disjoint and pass through; core-direct OpenAI/Gemini subtract the
+  cache tiers back out of an inclusive prompt count, clamped at 0). The PENDING hold now reserves
+  the input leg at `max(inputPer1k, effective cacheWritePer1k)` so a cache-write premium (Anthropic
+  1.25x/2x) can't exceed an input-only hold — holds on cache-writing workloads run ~25% fatter;
+  warm workloads settle well below and release the difference. `TrustReceipt.usage` (the four-tier
+  split) and `TrustReceipt.pricing` (`appliedRates` + `tableVersion` — the resolved rates,
+  published even when they came from the fallback) make a settled cost independently recomputable
+  from the record alone: `ceil(sum(counts x rates / 1000))`, multiply-then-divide, floored at 1.
+  Both are ROOT-level additions because v1 froze `meter` with `additionalProperties: false`, so v1
+  validators accept v2 receipts unchanged. `appliedRates` is frozen and copied per record surface.
+  `receipt.v2.schema.json` publishes both (v1 stays frozen). Anomaly velocity
+  tracking now sees cached traffic instead of losing it once `inputTokens` stopped including it.
+  Documented approximations (per-TTL write premium collapsed to the 5-minute rate; long-context,
+  service-tier, regional, modality, and cache-storage charges not modeled) are in `AGENTS.md`'s
+  Money invariants and `/docs/api/pricing`. See the design spec and the D1-D9 sections it links
+  for the full boundary inventory.
+
 - **Budget envelopes: spend routing, per-envelope caps, and scarcity visibility
   (#79, previously unlisted).** `withCostCenter(costCenter, fn, opts?)`
   (`budget/attribution.ts`) attributes a governed call's spend to a
@@ -43,12 +142,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `estimated_cost`) now surfaces a budget-specific remedy pointing at
   `allocateBudget` and the fraction/runway tiers (`derivePolicyHint`), instead
   of the rule's generic description.
+- **`usertrust-openclaw`: operator-declared tool→envelope attribution and
+  per-turn scarcity injection.** A new `costCenters` plugin config
+  (`parentUserId`, `tools`, `default`, `envelopes`, `scarcityContext`) routes
+  each governed call's spend to a named, operator-capped budget envelope,
+  selected STATELESSLY per call from the caller-supplied context's trailing,
+  correlated, non-error tool-result run (`deriveAttribution`,
+  `src/attribution.ts`) — structured-field matching only, never message text.
+  Validated once at plugin construction through core's own
+  `parentUserIdRefusal` and `withCostCenter` doors, normalized into a
+  deep-frozen config every wrapper reads. When enabled, a
+  `[usertrust scarcity] research: 34% left (~2.1h runway) · …` block is
+  appended to each call's system prompt from a live batched read of the
+  configured envelopes (`Governor.budgetContext`, core), on a copy of the
+  caller's context — never gating, delaying, or throwing into the money path
+  on a read failure. Fixes a pre-existing money bug in the same pass: the
+  stream wrapper now guarantees exactly one settle/abort on every terminal
+  mode (completion, thrown error, error event, consumer break/return,
+  close-without-`done`), where it previously leaked the PENDING hold on an
+  early consumer `break`. See `packages/openclaw/README.md` for the full
+  attribution rule and the security-model carve-out.
 
 ### Fixed
 
+- `TrustedClient` types: governed `messages.create` / `beta.messages.create` now
+  type as `Promise<{ response, receipt }>`, matching the runtime envelope — the
+  documented `const { response, receipt } = await client.messages.create(...)`
+  pattern now compiles, per-overload. On the streaming overload
+  (`stream: true`, and the streaming half of the base-overload union),
+  `response` is the governed stream wrapper — `GovernedStream<T>`, an async
+  iterable with a settled-`.receipt` promise — not the SDK's raw `Stream`
+  (which the runtime never returns from governed `create`; the envelope's own
+  `receipt` is the pre-settlement estimate). Types-only; no runtime change.
+- `TrustedClient` types: the same envelope now covers the remaining governed
+  surfaces — OpenAI `chat.completions.create` and `responses.create`, and Google
+  `models.generateContent`. All three resolved to the provider SDK's raw return
+  type while the runtime had been returning `{ response, receipt }` since the
+  proxies were written, so an OpenAI or Google consumer had no typed path to
+  `.receipt` at all and had to cast through `as unknown as`. Streaming calls on
+  either OpenAI surface resolve `response` to `GovernedStream<T>`, matching the
+  generic async-iterable branch of `interceptCall` that actually wraps them.
+  `TrustedClient<T>` now mirrors `detectClientKind`'s ORDER and BOTH halves of
+  its shape test, as exclusive branches — Anthropic, else OpenAI, else Google —
+  so a hybrid client is typed as governed on exactly the one provider surface
+  `trust()` proxies at runtime. Both halves means the governed method must be
+  callable AND its namespace must be a non-callable object: every namespace walk
+  in the runtime is gated on `typeof ns === "object"`, which a function object
+  fails, so a client whose `chat`, `messages`, `models`, `responses` or `beta` is
+  a callable carrying properties is skipped by the runtime and is now skipped by
+  the type too (falling through to the next provider where one applies).
+  Namespaces are re-added through homomorphic mapped types rather than plain
+  intersections, so `readonly` — which real `@google/genai` declares on `models`
+  — and `?` both survive, and a namespace the client never declared does not
+  become a phantom property. The ungoverned inventory stays raw and
+  is pinned by type tests: `chat.completions.parse` / `.stream` / `.runTools`,
+  `responses.stream` / `.parse` / `.retrieve` / `.cancel` / `.delete` /
+  `.compact`, the OpenAI `beta.*` namespace, legacy `completions.create`, and
+  Google `models.generateContentStream`. The OpenAI assertions run against the
+  real installed `openai@^7.3.0` types; the Google mapper is asserted against a
+  structural mock only — no `@google/genai` devDependency exists yet, so real
+  `@google/genai` compatibility is unverified. Types-only; no runtime change.
 - A policy rule with no `description` no longer renders its identifier twice
   in the denial reason (`[scarcity-brake] scarcity-brake` is now
   `[scarcity-brake]`).
+
+### Security
+
+- **Merkle inclusion proofs now validate PATH TOPOLOGY against
+  `(leafIndex, treeSize)`.** `verifyInclusionProof` previously folded whatever
+  siblings it was handed and compared the result to the published root. It
+  never derived what the path *should* look like for the claimed position, so
+  a proof could assert any `leafIndex` it liked and still verify — a forged
+  index rode an otherwise-valid fold, and where two sibling hashes are equal
+  (identical leaves) flipping a sibling's side refolded to the very same root,
+  which no amount of hashing can catch. The verifier now derives the expected
+  per-level orientation from `(leafIndex, treeSize)` under the tree's
+  odd-node-promotion semantics, requires the supplied sibling count and every
+  `position` to match it exactly, and rejects non-safe-integer or
+  out-of-range indices and sizes before hashing. `packages/core` and
+  `usertrust-verify` changed in lockstep and are covered by a differential
+  suite that drives both verifiers directly. Every field of the proof is read
+  exactly once and the fold walks a materialized array plus the derived
+  orientation, so a hand-built object with a re-reading `position` getter or an
+  overridden array iterator cannot pass validation on one path and fold
+  another.
+
+  **Compatibility.** Every proof `generateInclusionProof` produces still
+  verifies — exhaustively pinned for all leaves of every tree sized 1..33.
+  `leafIndex` is ZERO-BASED and is now authenticated: a caller that treated
+  it as informational, dropped it during (de)serialization, or stored a
+  one-based sequence number will start failing verification. That is the fix
+  working, not a regression.
 
 ## [3.0.0] - 2026-08-03
 

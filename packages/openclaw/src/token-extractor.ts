@@ -4,16 +4,18 @@
 /**
  * token-extractor.ts — Stream Token Extraction
  *
- * Extracts token usage from pi-ai's normalized stream events AND from
+ * Extracts token usage from the host's normalized stream events AND from
  * raw provider chunk shapes (Anthropic, OpenAI, Gemini) via duck-typing.
  *
- * pi-ai reports usage on `done` / `error` events. Raw provider chunks
- * scatter usage across multiple shapes — we duck-type each one.
+ * The host reports usage on the terminal `done` / `error` events, nested on
+ * the final assistant message (`done.message.usage` / `error.error.usage`).
+ * Raw provider chunks scatter usage across multiple shapes — we duck-type
+ * each one. Everything normalizes into `StreamUsage`.
  */
 
-import type { StreamEvent, StreamUsage } from "./types.js";
+import type { StreamEvent, StreamUsage, Usage } from "./types.js";
 
-/** Accumulated usage from a pi-ai stream. */
+/** Accumulated usage from a host stream. */
 export interface AccumulatedUsage {
 	inputTokens: number;
 	outputTokens: number;
@@ -25,6 +27,17 @@ export interface AccumulatedUsage {
 	 * carried no native duration.
 	 */
 	computeMs?: number | undefined;
+	/**
+	 * Cache-hit / cache-creation prompt tokens (spec D2/D4). Omitted (never
+	 * `undefined`-valued), not zeroed, when the host's terminal event did not
+	 * report them — an absent tier is priced at `inputPer1k` downstream (D1),
+	 * a `0` tier claims the provider confirmed no cache activity. These ride
+	 * straight through from `extractUsageFromEvent`/`normalizeHostUsage`: the
+	 * pinned pi-ai adapters that reach openclaw are already disjoint (D2), so
+	 * the accumulator carries them, it does not recompute them.
+	 */
+	cacheReadTokens?: number | undefined;
+	cacheWriteTokens?: number | undefined;
 }
 
 /** Max tokens to accept from a provider (prevents Infinity/overflow in cost math). */
@@ -184,15 +197,15 @@ export function extractComputeMs(chunk: unknown): number | undefined {
  *   OpenAI:    chunk.choices[0].delta.content
  *   Gemini:    chunk.candidates[0].content.parts[0].text
  *   Ollama:    chunk.message.content  (native /api/chat, non-final only)
- *   pi-ai:     chunk.text  (text_delta event)
+ *   host:      chunk.delta  (text_delta event)
  */
 export function extractTextDeltaLength(chunk: unknown): number {
 	if (chunk == null || typeof chunk !== "object") return 0;
 	const c = chunk as Record<string, unknown>;
 
-	// pi-ai text_delta
-	if (c.type === "text_delta" && typeof c.text === "string") {
-		return c.text.length;
+	// Host text_delta — the text is on `delta`, not `text`.
+	if (c.type === "text_delta" && typeof c.delta === "string") {
+		return c.delta.length;
 	}
 
 	// Anthropic content_block_delta
@@ -241,24 +254,31 @@ function readNum(v: unknown): number | null {
 }
 
 /**
- * Extract token usage from a pi-ai stream event.
- * Returns non-zero usage only for `done` and `error` events.
+ * Normalize the host's `Usage` (input/output/cacheRead/cacheWrite) into
+ * usertrust's `StreamUsage` (…Tokens). Cache fields are OMITTED, never
+ * `undefined`-valued, when the host did not report them.
+ */
+function normalizeHostUsage(usage: Usage | undefined): StreamUsage | null {
+	if (usage == null) return null;
+	return {
+		inputTokens: clampTokens(readNum(usage.input) ?? 0),
+		outputTokens: clampTokens(readNum(usage.output) ?? 0),
+		...(readNum(usage.cacheRead) != null ? { cacheReadTokens: clampTokens(usage.cacheRead) } : {}),
+		...(readNum(usage.cacheWrite) != null
+			? { cacheWriteTokens: clampTokens(usage.cacheWrite) }
+			: {}),
+	};
+}
+
+/**
+ * Extract token usage from a host stream event.
+ *
+ * Only the two terminal events carry usage, and both nest it on the final
+ * assistant message: `done.message.usage` and `error.error.usage`.
  */
 export function extractUsageFromEvent(event: StreamEvent): StreamUsage | null {
-	if (event.type === "done" && event.usage != null) {
-		return {
-			...event.usage,
-			inputTokens: clampTokens(event.usage.inputTokens),
-			outputTokens: clampTokens(event.usage.outputTokens),
-		};
-	}
-	if (event.type === "error" && event.usage != null) {
-		return {
-			...event.usage,
-			inputTokens: clampTokens(event.usage.inputTokens),
-			outputTokens: clampTokens(event.usage.outputTokens),
-		};
-	}
+	if (event.type === "done") return normalizeHostUsage(event.message?.usage);
+	if (event.type === "error") return normalizeHostUsage(event.error?.usage);
 	return null;
 }
 
@@ -275,6 +295,8 @@ export function createAccumulator(): {
 	let chunksDelivered = 0;
 	let usageReported = false;
 	let computeMs: number | undefined;
+	let cacheReadTokens: number | undefined;
+	let cacheWriteTokens: number | undefined;
 
 	return {
 		update(event: StreamEvent): void {
@@ -289,6 +311,12 @@ export function createAccumulator(): {
 			if (usage != null) {
 				inputTokens = usage.inputTokens;
 				outputTokens = usage.outputTokens;
+				// Overwritten, not merged — mirrors inputTokens/outputTokens above.
+				// Exactly one terminal event ever carries usage, so this is the
+				// terminal event's own cache tiers (or their absence), not a stale
+				// carry-over from an earlier update().
+				cacheReadTokens = usage.cacheReadTokens;
+				cacheWriteTokens = usage.cacheWriteTokens;
 				usageReported = true;
 			}
 
@@ -306,6 +334,8 @@ export function createAccumulator(): {
 				usageReported,
 				// Omitted entirely when absent — never `computeMs: undefined` (plan A6).
 				...(computeMs != null ? { computeMs } : {}),
+				...(cacheReadTokens != null ? { cacheReadTokens } : {}),
+				...(cacheWriteTokens != null ? { cacheWriteTokens } : {}),
 			};
 		},
 	};

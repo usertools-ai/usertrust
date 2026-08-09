@@ -99,6 +99,22 @@ are not.
    `receipt.postedCost`. `receipt.cost` stays the true metered cost.
 10. **Or void.** Any failure path routes to `finalizeOnce("void")` → `voidPendingSpend`.
 
+A **denial** exits before step 6 and never reaches steps 7-10. Any of steps 4-5 that
+refuses — a policy rule, PII, injection, an unpriceable model, or the ledger's own
+rejection of the hold — throws out to its flow's **denial boundary**, which appends a
+`policy_denied` or `ledger_rejected` chain event, attaches that event's hash to the error
+as `auditEventHash`, and rethrows. The boundary is a `catch` wrapped **around** the
+try/finally that releases the budget mutex, so the append runs with the lock already
+released; and it ends **lexically before** the provider call in step 6, so a provider that
+throws a same-typed error is never audited as a governor decision. There are **five append
+sites**: the mutex-section boundary in each of the three flows, plus a pre-mutex
+unknown-model site in `interceptCall` and headless `authorize` — actions have no model to
+price, so `governActionImpl` has only the mutex one. Four of the five are `catch (denialErr)`
+blocks; the exception is headless's pre-mutex site, which appends inline before an
+unconditional `throw` because the throw is right there and needs no catch to intercept it.
+Grepping `catch (denialErr)` therefore finds four, not five. Payloads and rationale live in
+`audit/denial-events.ts`.
+
 `destroy()` waits up to 5s for in-flight work, voids all remaining pending transfers, flushes and
 releases the audit writer. **Callers must call it** or the process hangs on the TigerBeetle client.
 A `process.on("beforeExit")` handler calls it too, but that is a net, not a substitute: `beforeExit`
@@ -349,9 +365,10 @@ accounting, matching the numbers its policy gate saw.
 *Every audit record an attributed call emits carries `costCenter`, from that same capture* — not
 from params, and on the failure terminals as well as the settle ones (`llm_call`, `<action.kind>`,
 `llm_call_failed`, `<action.kind>_failed`, `stream_partial_delivery`, `settlement_ambiguous`,
-`settlement_shortfall`, `injection_detected`, `anomaly_detected`). An attributed hold must leave an
-attributed forensic trail whichever way it ends. Unattributed calls spread an empty object, so their
-records stay byte-identical to what they were before envelopes existed.
+`settlement_shortfall`, `injection_detected`, `anomaly_detected`, `policy_denied`,
+`ledger_rejected`). An attributed hold must leave an attributed forensic trail whichever way it
+ends — including the way where it never became a hold at all. Unattributed calls spread an empty
+object, so their records stay byte-identical to what they were before envelopes existed.
 
 *One field, two spellings, deliberately.* The policy context spells it `cost_center` — snake_case,
 beside `estimated_cost`, `budget_remaining` and `action_kind`, because a rule file is what reads it
@@ -374,6 +391,20 @@ and `remaining` stays honest while `spent`, `fraction` and `runwayHours` silentl
 `receipt.budget` is also allowed to be simply ABSENT — unattributed call, unsettled (estimated)
 stream handle, or a post-settle read that did not answer. That read failing is deliberately silent:
 a receipt is a report, and degrading a report must never unwind or re-decide committed money.
+
+**The `withCostCenter` scope itself stays operator-authored even where the `cc` string is
+selected by agent activity.** `packages/openclaw`'s `deriveAttribution` (`src/attribution.ts`)
+picks *which* operator-declared cost center a call's `withCostCenter` scope opens by reading the
+trailing, correlated, non-error tool-result run out of the caller-supplied context — never from
+message text — but the only strings it can ever return are values already present in the
+plugin's frozen `tools`/`default` config, both validated at construction through this same
+`withCostCenter` door (§ above) before any call runs. The scope-opens-from-code-structure
+invariant is intact: what changed is that the code choosing the argument now reads agent
+activity instead of being hardcoded, and that choice is bounded to envelopes the operator
+explicitly delegated. Full security-model treatment — the bounded-delegation argument, the
+plugin-vs-programmatic evidence-trust boundary, and the documented residual — lives in
+`packages/openclaw/README.md`'s "Security model" section (verbatim from the ship's design spec),
+not duplicated here.
 
 **1 usertoken = $0.0001 USD, everywhere.** All pricing rates are usertokens per 1,000 LLM tokens.
 This constant is duplicated in `packages/verify` on purpose.
@@ -431,6 +462,48 @@ spoofing (`ollama cp llama3.2 gpt-4o`) changing the regime; and
 end-user or request input; set `local.autoDetectLoopback: false` in multi-tenant deployments, since
 loopback inside a container may be a forwarding sidecar to a paid API.
 
+**Absent cache rates price at `inputPer1k` — never zero, and never a silent discount (D1).**
+`ModelRates.cacheReadPer1k` / `cacheWritePer1k` are optional; an entry that omits either means the
+provider publishes no rate for that tier, not that the tier is free. `costFromRates` resolves an
+absent (or non-finite/negative) cache rate to the model's `inputPer1k`, and that resolution happens
+in exactly one place — `effectiveCacheRate` in `ledger/pricing.ts`. Never inline
+`rate ?? rates.inputPer1k` (or equivalent) anywhere else; a second resolution site is exactly how a
+silent discount gets introduced. `resolveAppliedRates` (published on `receipt.pricing.appliedRates`)
+goes through the same function, so the rates an auditor sees are the rates the cost was computed
+with. It returns a FROZEN snapshot and each record surface gets its own copy: one resolved object
+reaches the caller's receipt, the chain event and (for streams) the pre-settle handle, so a shared
+mutable object would let a caller rewrite the rates the chain records without touching the cost.
+
+**New receipt fields go at the ROOT, never inside `meter`.** `receipt.v1.schema.json` is frozen
+and declares `meter` with `additionalProperties: false` while leaving the receipt root open. A
+field added inside `meter` therefore makes every v1 validator reject every receipt usertrust
+emits — a compatibility break with no error message. This is why the D5 rate surface is
+`receipt.pricing`, a sibling of `meter`, and it binds anything added later.
+*Prevents:* the failure this whole ship exists to kill — a 1.14B-cache-read day billed at zero
+because a two-tier `ModelRates`/extractor pair had nowhere to price cache tokens, understating spend
+~7-8x. Overstatement is the fail-safe direction: a mispriced call costs too much, never too little,
+so budgets can only deplete faster than the true invoice, never slower.
+
+**Hold sizing reserves the write-premium case, not just the input case (D3).**
+A cache WRITE (Anthropic 1.25x/2x; provider-specific elsewhere) can price above a plain
+input-priced hold, so "cold-cache worst case" was false wherever a write premium applies — a
+headless caller supplying an exact `estimatedInputTokens` had no margin, and the capped-settle
+machinery (above) would then post `min(actual, held)`, silently under-debiting the envelope and
+leaving scarcity numbers falsely high. Both hold-sizing sites — the govern-path authorize estimate
+and the headless authorize estimate — reserve the input leg at
+`max(inputPer1k, effectiveCacheWriteRate(rates))` instead of `inputPer1k` alone.
+*Documented consequence:* holds on cache-writing workloads run ~25% fatter than before; warm
+(cache-hit-heavy) workloads settle far below the hold and release the difference back, so this is
+conservative, not a leak. A warm-but-cold-held call can see `budget_remaining_after` over-deny —
+the fail-safe trade the invariant above already accepts.
+
+**Documented pricing approximations — verbatim, also published at `/docs/api/pricing`:**
+Per-TTL write premium collapsed (1h = 2× billed as 1.25×; `customRates` override for 1h-heavy
+workloads); long-context, service-tier, regional, modality, and cache-STORAGE charges (Gemini
+hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not modeled — fixed
+per-model rates by design; per-call `ceil` + 1-UT floor differs from provider-side aggregation.
+Estimates never model cache state.
+
 ### Audit
 
 **Persist the canonical bytes, not `JSON.stringify` output.** The hash pre-image is
@@ -449,6 +522,53 @@ pre-image.
 `SHA-256(0x01 ‖ left ‖ right)`. **Odd nodes are promoted, not duplicated** — this avoids
 CVE-2012-2459.
 
+**An inclusion proof is validated for PATH TOPOLOGY before it is folded.** The fold alone proves
+only that *some* path of these siblings reaches the root; it says nothing about *where* the leaf
+sits. `verifyInclusionProof` therefore derives the expected per-level sibling orientation from
+`(leafIndex, treeSize)` — walking the levels under the promotion semantics above, never a
+`ceil(log2(treeSize))` shortcut, because a promoted node has **no** sibling at its level and its
+path is correspondingly shorter — and requires the supplied sibling count and every `position` to
+match that sequence exactly. `leafIndex` is zero-based, both it and `treeSize` must be
+`Number.isSafeInteger` (`2**53` passes `Number.isInteger`; a non-finite size never leaves the
+derivation loop, since `ceil(Infinity / 2)` is `Infinity`), and `0 ≤ leafIndex < treeSize`. The
+proof is untrusted input, so every structural defect returns `false` and the function never throws.
+The two copies — `core/src/audit/merkle.ts` and `verify/src/verify.ts` — carry byte-identical
+validation blocks and identical early-return order (treeSize, root, then topology).
+
+*Every field of the proof is read EXACTLY ONCE, into a local, and the fold walks a materialized
+array of checked hashes plus the **derived** orientation — never `proof.siblings` a second time, and
+never `sibling.position`, which the loop above already proved equal to `expected[level]`. Do not
+"simplify" the fold back onto `for (const sibling of proof.siblings)`.
+*Prevents:* a hostile in-memory proof — a `get position()` that answers differently on its second
+read, or an array with an overridden `Symbol.iterator` — passing validation on one path and then
+folding a different one. The first cut of this fix validated by index and re-read the object to fold
+it; a genuine leaf-0 proof verified at a forged `leafIndex` of 2 through that gap, by both routes.
+Not reachable through JSON-parsed input or any shipped caller — a parsed proof carries plain data
+properties — but `verifyInclusionProof` is an **exported** function whose contract says "untrusted
+input", so it must hold against objects a caller built by hand.
+
+*The `proof` argument itself is inside that contract.* It is guarded for object-ness (`null`,
+`undefined` and primitives return false), and **both** groups of extraction reads — the five
+top-level fields, and the per-level sibling index/`hash`/`position` reads — sit inside a
+`try`/`catch` that returns false. The catch spans only the reads; the hashing is deliberately left
+outside every catch, so a genuine crypto fault can never be swallowed into a silent verdict.
+*Prevents:* `verifyInclusionProof(null, …)`, a throwing accessor, or a revoked `Proxy` throwing out
+of a function this same section documents as never throwing — the contract contradicting itself.
+This is not a hypothetical tidy-up: the first two rounds of this work shipped the "never throws"
+wording while a bare `null` still threw on `proof.treeSize`, and wrapping only the top-level reads
+still let a hand-built array's throwing index getter escape.
+*Prevents:* a forged `leafIndex` riding an otherwise-valid fold, which is what lets a tampered
+receipt claim a different event's position in an anchored tree; padded, truncated or reordered
+sibling paths; and — the case no amount of hashing can catch — the **equal-hash flip**, where two
+identical leaves make `hashInternal(sibling, self)` and `hashInternal(self, sibling)` the same
+value, so swapping a sibling's side refolds to the very same published root. Strict position
+matching is load-bearing on its own: the fold reads every non-`"left"` value as `"right"`, so an
+unvalidated `position` field is a free right-hand step.
+*What this function still does NOT authenticate,* deliberately: `version` and `segmentId` (changing
+either still verifies), and the binding of `leafHash` to an externally expected event — that is the
+caller's job. Hash-string *encoding* is likewise unvalidated beyond `typeof === "string"`; Node's
+hex decoder is permissive, and tightening it needs its own compatibility analysis.
+
 **Audit-write failure degrades; it never unwinds committed money.** The writer dead-letters to
 `.usertrust/dlq/dead-letters.jsonl` (dir `0700`, file `0600`, fsync'd) and **re-throws**; governance
 call sites catch it and mark the call audit-degraded. A failed append must not unwind the transfer,
@@ -456,6 +576,43 @@ must not retry it, and must not surface as a rejection a caller could read as "t
 move." The only escalation is opt-in `config.audit.failClosed` (default `false`), which aborts the
 call *before* money moves.
 *Prevents:* lying to a caller about a spend that happened, in either direction.
+
+**A denial's chain event is appended at a FLOW BOUNDARY, outside the budget mutex, and before
+the guarded call.** Two kinds: `policy_denied` for a decision the governor made, `ledger_rejected`
+for the ledger's atomic refusal of a hold. Three placement rules, each preventing a different
+failure:
+- *Outside the lock.* The boundary `catch` sits around the try/**finally** that releases the budget
+  mutex, never inside it. *Prevents:* holding the money lock across an fsync, so a denial storm
+  stalls unrelated ALLOWED calls behind refusals that never touched a provider.
+- *Ending before the guarded call.* Each catch closes lexically before the provider invocation
+  (`govern.ts`) and before `execute()` (`governAction`). *Prevents:* a provider or an action
+  callback that throws its own `PolicyDeniedError`/`InsufficientBalanceError` being recorded as a
+  decision this governor made — a forged governance record, in the one log an auditor trusts.
+- *Context in a closure local, never on the error.* Rule matches, PII types and budget numbers
+  travel in a per-invocation `DenialRecord` in the flow's own closure. Non-enumerable would not be
+  enough. *Prevents:* prompt-adjacent context reachable from the caught error via a descriptor read
+  or a symbol key — i.e. the no-prompt-on-disk invariant dying at the caller's own log line.
+
+The append-failure contract is deliberately FLAT, `audit.failClosed` included: every mode rethrows
+the ORIGINAL typed denial with `auditDegraded: true` after the writer's DLQ attempt, and the hash is
+attached to the thrown instance with `defineProperty` — never a reconstructed error, which would
+break the same-object identity `envelope-threading.test.ts` pins.
+
+*A rejected append has not necessarily written nothing.* `appendEvent` fsyncs `events.jsonl` and
+only then writes the `.meta` sidecar, so a sidecar failure rejects for an event that IS on the
+chain. The writer records that event's hash on the rejection under a module-private SYMBOL
+(`readDurableEventHash`, a symbol so it is invisible to `JSON.stringify`/`Object.keys` and cannot
+collide), and the denial boundary reports **both** `auditEventHash` and `auditDegraded: true`.
+*Prevents:* discarding a usable correlation handle for a record an auditor can still read and
+verify — the one failure mode where the hash is known. The pair means "on-chain at this hash AND
+the write reported failure", which is strictly more than either field alone.
+*Prevents:* `failClosed` replacing an actionable denial with an `AuditDegradedError` that hides
+*why* the call was refused. `failClosed` exists to stop an unaudited SPEND from settling; a denial
+has already refused the call and moved no money, so it has nothing left to fail closed about.
+
+`decision: "deny"` on both kinds is load-bearing — it is what `entropy.ts` counts. That filter
+selects denial kinds by NAME as well as by the `"policy"` substring, because `ledger_rejected` does
+not contain it and would otherwise be the one class `usertrust health` could not see.
 
 **The budget money path degrades under a different contract — keep both.** `appendBudgetEvent` does
 **not** re-throw. It warns and returns `{ audited: false, auditFailed: true, auditFailureReason }`,
@@ -635,12 +792,21 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **seven** sanitizers, in two variants. Do not consolidate them onto the weaker one.
+There are **eight** sanitizers, in two variants. Do not consolidate them onto the weaker one.
 
 - Six identical copies of `CONTROL_CHARS = /[\x00-\x1f\x7f]/g` plus a clip at 80, in
   `core/src/cli/verify.ts`, `verify/src/cli.ts`, and the `rekor-verify.ts` / `anchor-verify.ts`
   pairs. These must move together. The
   `biome-ignore lint/suspicious/noControlCharactersInRegex` on each is intentional — do not "fix" it.
+- An eighth, the **stronger** variant again: `forDisplay` in `verify/src/receipt.ts`, applied to
+  every untrusted string the `--tx` receipt prints (model, error, transferId, timestamp, both
+  chain hashes, and the `renderNotFound` txId, which is argv). The receipt reads `events.jsonl` —
+  a file the party under audit owns — and prints it at the auditor. The unknown-model denial is
+  the sharpest edge: the model string is CALLER-supplied and the governor copies it into the
+  event's `error` text, so one hostile value arrives through two fields. C1 coverage matters here
+  for the same reason it does in `budget.ts`. The UI is deliberately NOT patched: it renders
+  these into DOM text nodes, where escapes are inert, and it displays this same already-scrubbed
+  receipt string.
 - A seventh, independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
   also covers `0x80–0x9f`, the C1 range holding the 8-bit CSI/OSC introducers that the regex above
   does not match; it substitutes `?` rather than stripping; and it clips at 120.
@@ -923,6 +1089,8 @@ These look like defects and are not. Flagging them wastes review cycles.
 | **The settle-vs-void asymmetry on streams** | Enumerated above. Each branch is a separate, deliberate decision. |
 | **`ledger/engine.ts` appearing unused** | Accurate observation, not a bug to fix silently — see Known drift. |
 | **The pre-existing Biome warnings** | Counted and characterised under *Formatting and linting* above. CI fails on errors only. |
+| **The "redundant" nested `try { try { … } finally { release() } } catch { … }` at each denial boundary** | The nesting IS the design. A `catch` on the same `try` as the `finally` runs BEFORE it — i.e. with the budget mutex still held across the append's fsync. Flattening it reintroduces exactly the stall the boundary exists to avoid. |
+| **`audit.failClosed` not escalating a failed DENIAL append** | Deliberate, and documented in the invariant above. The call is already refused and no money moved; escalating would replace a typed denial with an `AuditDegradedError` and hide the reason. |
 
 Automated review tools do not have this context by default. Treat their findings on the rows above
 as noise unless they identify a *specific* concrete failure.
@@ -964,9 +1132,22 @@ Real, verified, and worth knowing before you touch the surrounding code.
   means an agent that never opens a scope still reads as `spent: 0` while it burns the session
   budget. That residue is an INSTRUMENTATION gap, not an enforcement one: the session wallet's own
   `debits_must_not_exceed_credits` bounds that spend either way.
-- **`packages/openclaw` is not typechecked by CI.** It is absent from the root `tsconfig.json`
-  references and is not `composite`, so neither `tsc -b` nor `npm run typecheck` covers it. Type
-  errors there surface only at release time.
+- **`packages/openclaw/src` is still not typechecked by CI.** The package is absent from the root
+  `tsconfig.json` references and is not `composite`, so `tsc -b` does not cover it. What *is*
+  covered: `npm run typecheck` now also runs `tsc -p packages/openclaw/tsconfig.type-tests.json`,
+  which compiles the host-contract type assertions and, through them, `src/types.ts`. Errors
+  anywhere else under `src/` still surface only at release time (`cd packages/openclaw && npx tsc`).
+- **The openclaw host contract is split across two CI jobs, because openclaw is not installed.**
+  `openclaw` is an OPTIONAL PEER of `packages/openclaw`, never a devDependency, and `npm ci` does
+  not install optional peers — so no ordinary job has it on disk. The pi-ai half of the contract
+  (`tests/contract.test-d.ts`) compiles in `typecheck` on every push. The openclaw half
+  (`tests/contract-openclaw.test-d.ts` + the `contract.test.ts` host smoke) runs only in the
+  required `openclaw-contract` job, which installs the pinned version out-of-tree and sets
+  `USERTRUST_OPENCLAW_CONTRACT=1` — the flag that turns an absent or mismatched openclaw from a
+  loud skip into a hard failure. **The pin lives in exactly one file,
+  `packages/openclaw/openclaw-contract.env`; never inline the version anywhere else.** The split is
+  two tsconfigs rather than one conditional include because `tsc` cannot skip a file whose import
+  does not resolve.
 - **`site/` is not typechecked or built by CI** — only linted. Its `tsconfig.json` is standalone and
   has neither `noUncheckedIndexedAccess` nor `exactOptionalPropertyTypes`.
   **A green CI run says nothing about whether the site builds.** `site/` is not a workspace and

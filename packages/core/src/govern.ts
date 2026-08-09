@@ -34,6 +34,13 @@ import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
+import {
+	appendDenialEvent,
+	classifyPolicyDenial,
+	type DenialRecord,
+	isGovernanceDenial,
+	toDenialRuleRefs,
+} from "./audit/denial-events.js";
 import { writeReceipt } from "./audit/rotation.js";
 import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
@@ -41,12 +48,25 @@ import { computeRunway, runwayHours } from "./budget/runway.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
 import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
 import {
+	copyAppliedRates,
 	costFromRates,
+	costFromRatesUnfloored,
+	effectiveCacheWriteRate,
 	estimateInputTokens,
+	PRICING_TABLE_VERSION,
 	type RateResolution,
+	resolveAppliedRates,
 	resolveRates,
+	warnCacheRateMigration,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
+import {
+	fromAnthropicUsage,
+	fromProviderResponse,
+	publishableUsage,
+	sanitizeUsage,
+	type UsageWireShape,
+} from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import { derivePolicyHint, evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
@@ -78,7 +98,12 @@ import type {
 	TrustReceipt,
 } from "./shared/types.js";
 import { TrustConfigSchema } from "./shared/types.js";
-import { type ChunkObservation, createGovernedStream, type StreamCompletion } from "./streaming.js";
+import {
+	type ChunkObservation,
+	createGovernedStream,
+	type GovernedStream,
+	type StreamCompletion,
+} from "./streaming.js";
 
 // ── Public types ──
 
@@ -196,13 +221,23 @@ export interface TrustEngine {
 }
 
 // ── F5: governed-surface type rewrites ────────────────────────────────────────
-// The runtime proxy makes Anthropic `messages.stream` / `beta.messages.stream`
-// ASYNC (they authorize before forwarding) and hangs a `.receipt` promise off the
-// returned MessageStream; `messages.parse` / `beta.messages.parse` return the
-// parsed message with a settled `.receipt`. These mapped types make the EXPORTED
-// TrustedClient type match that runtime contract, so a consumer using the old sync
-// `const s = client.messages.stream(...)` pattern gets a compile error. Clients
-// without a top-level `messages` (OpenAI/Google) pass through unchanged.
+// The runtime proxy makes Anthropic `messages.create` / `beta.messages.create`
+// resolve to the `{ response, receipt }` envelope, makes `messages.stream` /
+// `beta.messages.stream` ASYNC (they authorize before forwarding) with a
+// `.receipt` promise hung off the returned MessageStream, and makes
+// `messages.parse` / `beta.messages.parse` return the parsed message with a
+// settled `.receipt`. These mapped types make the EXPORTED TrustedClient type
+// match that runtime contract, so a consumer using the old bare-`Message` or
+// sync `const s = client.messages.stream(...)` patterns gets a compile error.
+//
+// The same envelope rewrite covers the other two providers' governed `create`
+// surfaces: OpenAI `chat.completions.create` and (feature-detected)
+// `responses.create` via buildOpenAIProxy, and Google `models.generateContent`
+// via buildGoogleProxy. Neither is a special case — both route through the same
+// interceptCall, and a streaming call on either reaches the GENERIC
+// `Symbol.asyncIterator` branch that returns createGovernedStream's wrapper, not
+// the Anthropic `stream-helper` graft. Everything else on those resources is
+// ungoverned (see detect.ts's boundary block) and passes through untouched.
 
 /** `stream` becomes `(...args) => Promise<MessageStream & { receipt: Promise<TrustReceipt> }>`. */
 type GovernedStreamMethod<F> = F extends (...args: infer A) => infer R
@@ -214,28 +249,247 @@ type GovernedParseMethod<F> = F extends (...args: infer A) => infer R
 	? (...args: A) => Promise<Awaited<R> & { receipt: TrustReceipt }>
 	: F;
 
-/** Rewrite `stream`/`parse` on a `messages` resource; leave `create`/everything else. */
+/**
+ * The `response` inside a governed `create` envelope. The runtime discriminates
+ * on `Symbol.asyncIterator in response` (interceptCall): an iterable provider
+ * response is wrapped by `createGovernedStream(...)` and the WRAPPER goes into
+ * the envelope — an `AsyncIterable` with a `.receipt` promise, NOT the SDK's
+ * raw `Stream` (no `tee()`/`controller`/`toReadableStream()`). On that path the
+ * envelope's own `receipt` is the ESTIMATED receipt; the settled one arrives on
+ * `response.receipt` — which `GovernedStream` already expresses. Non-iterable
+ * responses pass through unchanged. Distributes over the base overload's union,
+ * so `Stream<RawMessageStreamEvent> | Message` becomes
+ * `GovernedStream<RawMessageStreamEvent> | Message`.
+ */
+type GovernedResponseOf<T> = T extends AsyncIterable<infer E> ? GovernedStream<E> : T;
+
+/**
+ * `create` becomes `(...args) => Promise<{ response, receipt }>`, per overload.
+ * The Anthropic SDK declares three `create` overloads (non-streaming, streaming,
+ * base); a bare `F extends (...args) => R` conditional infers only the LAST one,
+ * which would collapse `create({ stream: true })`'s response to the base union.
+ * The cascade matches the overload list positionally (3, then 2, then 1) and
+ * rewrites each signature, preserving its response type inside the envelope —
+ * matching the runtime, where interceptCall resolves BOTH paths with
+ * `{ response, receipt }` (see the `create` trap in buildAnthropicMessagesProxy;
+ * on the streaming path `response` is createGovernedStream's wrapper, mapped by
+ * GovernedResponseOf above).
+ * A single-signature `create` unifies into the 3-pattern as three identical
+ * signatures, which resolves identically at every call site. Scoped to the SDK's
+ * current 3-overload shape; the real-SDK block in
+ * tests/govern/trusted-client-types.test-d.ts is the drift alarm if upstream
+ * adds a fourth.
+ */
+type GovernedCreateMethod<F> = F extends {
+	(...args: infer A1): infer R1;
+	(...args: infer A2): infer R2;
+	(...args: infer A3): infer R3;
+}
+	? {
+			(...args: A1): Promise<{ response: GovernedResponseOf<Awaited<R1>>; receipt: TrustReceipt }>;
+			(...args: A2): Promise<{ response: GovernedResponseOf<Awaited<R2>>; receipt: TrustReceipt }>;
+			(...args: A3): Promise<{ response: GovernedResponseOf<Awaited<R3>>; receipt: TrustReceipt }>;
+		}
+	: F extends {
+				(...args: infer A1): infer R1;
+				(...args: infer A2): infer R2;
+			}
+		? {
+				(
+					...args: A1
+				): Promise<{ response: GovernedResponseOf<Awaited<R1>>; receipt: TrustReceipt }>;
+				(
+					...args: A2
+				): Promise<{ response: GovernedResponseOf<Awaited<R2>>; receipt: TrustReceipt }>;
+			}
+		: F extends (...args: infer A) => infer R
+			? (...args: A) => Promise<{ response: GovernedResponseOf<Awaited<R>>; receipt: TrustReceipt }>
+			: F;
+
+/** Rewrite `create`/`stream`/`parse` on a `messages` resource; leave everything else. */
 type GovernedMessages<M> = M extends object
-	? Omit<M, "stream" | "parse"> &
+	? Omit<M, "create" | "stream" | "parse"> &
+			("create" extends keyof M ? { create: GovernedCreateMethod<M["create"]> } : unknown) &
 			("stream" extends keyof M ? { stream: GovernedStreamMethod<M["stream"]> } : unknown) &
 			("parse" extends keyof M ? { parse: GovernedParseMethod<M["parse"]> } : unknown)
 	: M;
 
-/** Rewrite `beta.messages` when present; otherwise leave `beta` untouched. */
-type GovernedBeta<B> = B extends { messages: infer BM }
-	? Omit<B, "messages"> & { messages: GovernedMessages<BM> }
-	: B;
+/**
+ * A callable member — a GUARD, never a value type. `detectClientKind` keys every
+ * provider branch on `typeof x === "function"`, not on the key merely being
+ * present, and these types must agree with it exactly. `never[]` parameters put
+ * this at the top of the function lattice, so every function matches and every
+ * non-function (a string stub, a nested object) does not.
+ */
+type AnyMethod = (...args: never[]) => unknown;
 
 /**
- * Rewrite only the Anthropic `messages` / `beta.messages` surfaces. A client
- * without a `messages` resource (OpenAI, Google) is returned unchanged — its
- * governed `create`/`responses` shapes are unaffected by this rewrite.
+ * True when `X` is callable. The bracket wrapping is load-bearing: it stops the
+ * conditional distributing, so a union answers once for the whole union.
+ *
+ * This is the NEGATIVE half of the runtime's shape tests, and it needs its own
+ * type because TypeScript has no "object but not callable" constraint to write
+ * positively. Every namespace the runtime walks is gated on
+ * `typeof x === "object"` — `detectClientKind`, `buildOpenAIResponsesProxy` and
+ * `buildAnthropicBetaProxy` all do it — and a FUNCTION OBJECT (a callable that
+ * also carries properties) answers `"function"` there, not `"object"`. Yet a
+ * function object with the right properties satisfies `X extends { create: … }`
+ * happily, so the positive structural guard alone selects surfaces the runtime
+ * skips entirely.
  */
-type GovernedShape<T> = T extends { messages: infer M }
-	? Omit<T, "messages" | "beta"> & { messages: GovernedMessages<M> } & (T extends { beta: infer B }
-				? { beta: GovernedBeta<B> }
-				: unknown)
-	: T;
+type IsCallable<X> = [X] extends [AnyMethod] ? true : false;
+
+/**
+ * Rewrite `beta.messages` when present; otherwise leave `beta` untouched.
+ * Both levels are excluded when callable, mirroring buildAnthropicBetaProxy,
+ * which returns undefined — leaving `beta` a whole raw pass-through — unless
+ * `beta` AND `beta.messages` are both non-callable objects.
+ */
+type GovernedBeta<B> =
+	IsCallable<B> extends true
+		? B
+		: B extends { messages: infer BM }
+			? IsCallable<BM> extends true
+				? B
+				: Omit<B, "messages"> & { messages: GovernedMessages<BM> }
+			: B;
+
+/**
+ * Rewrite `create` on an OpenAI `chat.completions` resource. `parse`, `stream`,
+ * `runTools`, `retrieve` / `update` / `list` / `delete` and the legacy top-level
+ * `completions` are all UNGOVERNED (detect.ts's boundary block) and survive the
+ * `Omit` untouched — they drive the SDK's raw client and never reach interceptCall.
+ */
+type GovernedChatCompletions<CC> = CC extends { create: infer C extends AnyMethod }
+	? Omit<CC, "create"> & { create: GovernedCreateMethod<C> }
+	: CC;
+
+/** Rewrite `chat.completions` when present; the rest of `chat` is left alone. */
+type GovernedChat<C> = C extends { completions: infer CC }
+	? Omit<C, "completions"> & { completions: GovernedChatCompletions<CC> }
+	: C;
+
+/**
+ * Rewrite ONLY `create` on an OpenAI `responses` resource. The guard is the
+ * type-level twin of buildOpenAIResponsesProxy's
+ * `typeof responsesObj.create !== "function"` bail-out: on that miss the runtime
+ * installs no proxy and the WHOLE resource stays a raw pass-through, so a
+ * non-callable `create` must leave `R` intact rather than rewrite the rest of it.
+ * `stream` / `parse` / `retrieve` / `cancel` / `delete` / `compact` are ungoverned.
+ */
+type GovernedResponses<R> =
+	IsCallable<R> extends true
+		? R
+		: R extends { create: infer C extends AnyMethod }
+			? Omit<R, "create"> & { create: GovernedCreateMethod<C> }
+			: R;
+
+/**
+ * Rewrite ONLY `generateContent` on a Google `models` resource. `generateContentStream`
+ * stays raw: buildGoogleProxy traps the one method and lets everything else fall
+ * through `Reflect.get`, so a rewrite here would advertise a `.receipt` that never
+ * arrives on the streaming shortcut users actually reach for.
+ */
+type GovernedGoogleModels<G> = G extends { generateContent: infer C extends AnyMethod }
+	? Omit<G, "generateContent"> & { generateContent: GovernedCreateMethod<C> }
+	: G;
+
+// ── Provider selection: the type-level twin of detectClientKind ──
+// Each predicate is the full runtime test, both halves: the namespace is a
+// NON-CALLABLE object, and the governed method on it is callable. `detect.ts`
+// spells this `typeof ns === "object" && typeof ns.method === "function"`.
+
+/** detect.ts's Anthropic test: `messages` a non-callable object, `create` callable. */
+type IsAnthropicClient<T> = T extends { messages: infer M }
+	? IsCallable<M> extends true
+		? false
+		: M extends { create: AnyMethod }
+			? true
+			: false
+	: false;
+
+/** detect.ts's OpenAI test — `chat` AND `chat.completions` are both checked for object-ness. */
+type IsOpenAIClient<T> = T extends { chat: infer C }
+	? IsCallable<C> extends true
+		? false
+		: C extends { completions: infer CC }
+			? IsCallable<CC> extends true
+				? false
+				: CC extends { create: AnyMethod }
+					? true
+					: false
+			: false
+	: false;
+
+/** detect.ts's Google test: `models` a non-callable object, `generateContent` callable. */
+type IsGoogleClient<T> = T extends { models: infer G }
+	? IsCallable<G> extends true
+		? false
+		: G extends { generateContent: AnyMethod }
+			? true
+			: false
+	: false;
+
+// ── Namespace re-add parts ──
+// Every rewritten namespace is put back through a homomorphic mapped type over a
+// key set derived from `keyof T`, never a hand-written `{ ns: … }` intersection.
+// Three things that buys, all of which a literal intersection silently breaks:
+// a namespace the client does not declare stays ABSENT rather than becoming a
+// phantom property for a surface no proxy installs (an OpenAI client older than
+// the Responses API — ~4.87, under the `>=4.70.0` peer floor — has no `responses`
+// at all); an OPTIONAL namespace stays optional, where re-adding it as required,
+// or as `X | undefined`, is a different type under `exactOptionalPropertyTypes`
+// and breaks assignability for every consumer holding the original client type;
+// and `readonly` survives, which real `@google/genai` declares on `models`.
+
+type GovernedMessagesPart<T, K extends keyof T = Extract<keyof T, "messages">> = {
+	[P in K]: GovernedMessages<T[P]>;
+};
+type GovernedBetaPart<T, K extends keyof T = Extract<keyof T, "beta">> = {
+	[P in K]: GovernedBeta<T[P]>;
+};
+type GovernedChatPart<T, K extends keyof T = Extract<keyof T, "chat">> = {
+	[P in K]: GovernedChat<T[P]>;
+};
+type GovernedResponsesPart<T, K extends keyof T = Extract<keyof T, "responses">> = {
+	[P in K]: GovernedResponses<T[P]>;
+};
+type GovernedModelsPart<T, K extends keyof T = Extract<keyof T, "models">> = {
+	[P in K]: GovernedGoogleModels<T[P]>;
+};
+
+/**
+ * Rewrite the governed surfaces of whichever provider `detectClientKind` would
+ * pick — and only that provider's. The branches are EXCLUSIVE and ordered exactly
+ * as detect.ts:61: Anthropic, else OpenAI (carrying `responses` with it), else
+ * Google. A client matching none passes through unchanged; detectClientKind
+ * throws on it at runtime.
+ * *Prevents:* a hybrid client — an in-house facade exposing both an Anthropic and
+ * an OpenAI shape — typed as if both were governed, when `trust()` installs exactly
+ * ONE provider proxy and the loser's `create` is never intercepted. A receipt
+ * advertised on a surface no proxy wraps is the one lie this type must not tell.
+ * That is also why selection runs through the predicates above rather than a bare
+ * structural `extends`: a client whose `chat` is a function object is skipped by
+ * the runtime and falls through to Google, and the type must fall through with it.
+ */
+type GovernedShapeOf<T> =
+	IsAnthropicClient<T> extends true
+		? Omit<T, "messages" | "beta"> & GovernedMessagesPart<T> & GovernedBetaPart<T>
+		: IsOpenAIClient<T> extends true
+			? Omit<T, "chat" | "responses"> & GovernedChatPart<T> & GovernedResponsesPart<T>
+			: IsGoogleClient<T> extends true
+				? Omit<T, "models"> & GovernedModelsPart<T>
+				: T;
+
+/**
+ * `T extends unknown` is a no-op for a single client type and DISTRIBUTES over a
+ * union one. It is required because the predicates above are not naked-`T`
+ * conditionals: `IsOpenAIClient<A | B>` would collapse to `boolean` and fail
+ * `extends true`, silently returning a union client unrewritten. Distributing
+ * first makes each member pick its own provider branch, which is what `trust()`
+ * does anyway — it detects one kind per actual client.
+ */
+type GovernedShape<T> = T extends unknown ? GovernedShapeOf<T> : never;
 
 /** The trusted client: governed client shape (F5) + governance methods. */
 export type TrustedClient<T> = GovernedShape<T> & {
@@ -699,6 +953,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		});
 	}
 
+	// D8: one-time migration warning, evaluated at the config-load path.
+	warnCacheRateMigration(config.pricing === "custom" ? config.customRates : undefined);
+
 	const isDryRun = opts?.dryRun ?? process.env.USERTRUST_DRY_RUN === "true";
 
 	// AUD-470: Only accept injected _engine/_audit in test environments.
@@ -780,20 +1037,25 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	// Settlement floors per call; the anomaly signal measures flow — so a
 	// default {0,0}-rate local stream contributes 0 and can never false-trip
 	// spend_velocity (rejected-merge design note, pinned by Task 3 tests).
+	// Spec D7: both branches now price all FOUR tiers (event.cumulativeCache*,
+	// default 0) via the single unfloored resolution site, `costFromRatesUnfloored`
+	// — a cache-read flood is visible at its true rate instead of vanishing
+	// behind near-zero fresh input/output.
 	const anomalyDetector = createAnomalyDetector(config.anomaly, {
 		provider: kind,
 		costCalculator: (calcModel, inputTokens, outputTokens, event) => {
 			const scope = event?.endpointClass ?? "cloud";
 			const resolution = resolveRates(event?.model ?? calcModel, scope, config);
-			if (scope === "local") {
-				const inTok = Number.isFinite(inputTokens) && inputTokens > 0 ? inputTokens : 0;
-				const outTok = Number.isFinite(outputTokens) && outputTokens > 0 ? outputTokens : 0;
-				return (
-					(inTok / 1000) * resolution.rates.inputPer1k +
-					(outTok / 1000) * resolution.rates.outputPer1k
-				);
-			}
-			return costFromRates(resolution.rates, inputTokens, outputTokens) / USERTOKENS_PER_DOLLAR;
+			const cacheReadTokens = event?.cumulativeCacheReadTokens ?? 0;
+			const cacheWriteTokens = event?.cumulativeCacheWriteTokens ?? 0;
+			const usertokens = costFromRatesUnfloored(
+				resolution.rates,
+				inputTokens,
+				outputTokens,
+				cacheReadTokens,
+				cacheWriteTokens,
+			);
+			return scope === "local" ? usertokens : usertokens / USERTOKENS_PER_DOLLAR;
 		},
 	});
 
@@ -880,6 +1142,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// Per-call audit degradation flag (not sticky across calls)
 			let callAuditDegraded = false;
 
+			// ── Denial evidence, per invocation ──
+			// The throw sites below fill this in; the flow BOUNDARIES read it and
+			// append the chain event. It is a mutable record in THIS closure and
+			// never a property of the thrown error: non-enumerable would not be
+			// enough, because a descriptor read or a symbol key still reaches it,
+			// and the caller's own log line is exactly where "no prompt content
+			// leaves the process" would die. `policy` is the honest default —
+			// every site that means something narrower sets it explicitly.
+			const denial: DenialRecord = { denialClass: "policy" };
+
 			// P3-PII-REDACT-EGRESS: `forwardArgs` is what we actually send to the
 			// provider. In redact mode it becomes a redacted deep clone so PII never
 			// egresses; block mode throws before any egress. Default: forward verbatim.
@@ -905,12 +1177,75 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const maxOutputTokens =
 				finitePositiveCap(params.max_output_tokens) ?? finitePositiveCap(params.max_tokens) ?? 4096;
 			const rateResolution = resolveRates(model, endpoint.class, config);
-			enforceUnknownModelPolicy(model, rateResolution, config);
+			// ── Denial boundary 1 of 2: the PRE-MUTEX unknown-model refusal ──
+			// Its own boundary because it fires before the budget lock is taken and
+			// before the cost estimate exists. Everything else the schema wants —
+			// attribution, the transfer id, the endpoint scope, the prompt parts —
+			// is already minted here, so only the estimate is absent, and it is
+			// absent rather than invented.
+			try {
+				enforceUnknownModelPolicy(model, rateResolution, config);
+			} catch (denialErr) {
+				if (isGovernanceDenial(denialErr)) {
+					denial.denialClass = "unknown_model";
+					await appendDenialEvent({
+						audit,
+						actor: "local",
+						error: denialErr,
+						record: denial,
+						fields: {
+							model,
+							endpointClass: endpoint.class,
+							transferId,
+							promptParts,
+							...costCenterAudit,
+						},
+					});
+				}
+				throw denialErr;
+			}
+			// D3: "cold-cache worst case" is false for write premiums — a 1.25x (or
+			// operator-set) cache-write rate can exceed an input-priced hold, and the
+			// settle-time actual (already cache-aware) would then post
+			// `min(actual, held)` and silently under-debit the envelope. Size the
+			// ESTIMATED-input half of the hold at the fatter of the two rates; this
+			// is a HOLD-sizing adjustment only — the settle-time actual cost still
+			// resolves each tier independently via `costFromRates`, never discounted.
+			const holdInputRate = Math.max(
+				rateResolution.rates.inputPer1k,
+				effectiveCacheWriteRate(rateResolution.rates),
+			);
 			const estimatedCost = costFromRates(
+				{ ...rateResolution.rates, inputPer1k: holdInputRate },
+				estimatedInputTokens,
+				maxOutputTokens,
+			);
+			// FIX (review finding, D3 scope): `estimatedCost` above is the
+			// write-premium-INFLATED HOLD — correct for sizing the PENDING
+			// reservation (spendPending/proxy.spend/inFlightHoldTotal) and for the
+			// policy gate (`estimated_cost`/`budget_remaining_after`, whose
+			// documented over-denial trade in D3 depends on the gate seeing the
+			// SAME fattened number the ledger actually reserves). It must NEVER
+			// become the settled/audited/receipted cost of a call that reports no
+			// provider usage — that would price zero cache-write tokens at the
+			// cache-write rate. `meteredEstimateCost` is the un-inflated metering
+			// estimate (plain `inputPer1k`, unmodified rates) and is the ONLY
+			// value the settle-time "no usage reported" fallback may use.
+			const meteredEstimateCost = costFromRates(
 				rateResolution.rates,
 				estimatedInputTokens,
 				maxOutputTokens,
 			);
+			// D5 — the RESOLVED rates this call meters with, published on every
+			// record surface below (the estimate-priced stream handle, the stream
+			// terminal, the non-stream settle) so a cost can be recomputed from the
+			// record alone: `ceil(sum(counts x appliedRates / 1000))`, floored at 1.
+			// Resolved ONCE here, from the same authorize-time `rateResolution` A3
+			// prices every path with — the published rates and the rates the money
+			// used cannot become two different things. This is the D1 resolution, so
+			// an absent cache tier appears as `inputPer1k` (what it actually charges),
+			// never as a hole an auditor would read as free.
+			const appliedRates = resolveAppliedRates(rateResolution.rates);
 
 			// AUD-453: Acquire mutex to serialise budget-check + PENDING hold.
 			// This prevents concurrent calls from both passing the budget check and
@@ -937,194 +1272,242 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				releaseLock();
 			}
 
+			// ── Denial boundary 2 of 2: the whole budget-mutex section ──
+			// The catch sits OUTSIDE the try/finally that releases the lock, so the
+			// append runs with the budget mutex already released. Appending at the
+			// throw sites instead would hold the money lock across an fsync, and a
+			// denial storm would stall unrelated ALLOWED calls behind it.
+			// This boundary ends HERE, before the provider is invoked below: a
+			// provider that throws a same-typed error is not a governor decision
+			// and must never be audited as one.
 			try {
-				// Attributed calls only: ONE batched read of the envelope's live
-				// `available`, for the policy numbers below. Taken INSIDE the budget mutex
-				// — the same lock that serialises the hold — and BEFORE the gate, so this
-				// call's own hold lands only after the read and a CONCURRENT attributed
-				// call to the SAME envelope cannot slip its hold between this read and the
-				// gate. When the read was OUTSIDE the lock, two such calls both read the
-				// pre-hold balance and the second bypassed a hard scarcity tier
-				// (`budgetFractionRemaining` / `budgetRunwayHours`) the ledger cannot
-				// enforce — TigerBeetle's atomic `debits_must_not_exceed_credits` rejects an
-				// OVERSHOOT but never a fractional/runway tier. Serialising the read under
-				// the hold's lock makes the gate describe the wallet the hold will debit,
-				// exactly as the SESSION path already does (its check reads in-process
-				// counters mutated under this same mutex). Cross-process (multi-governor)
-				// concurrency still relies on TB atomicity — overshoot only — the same
-				// limitation the session path has.
-				// A2: a read that FAILS refuses the call outright — the finally below
-				// releases the mutex and the ledger-unavailable error propagates before the
-				// gate is evaluated or any hold is attempted.
-				const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
+				try {
+					// Attributed calls only: ONE batched read of the envelope's live
+					// `available`, for the policy numbers below. Taken INSIDE the budget mutex
+					// — the same lock that serialises the hold — and BEFORE the gate, so this
+					// call's own hold lands only after the read and a CONCURRENT attributed
+					// call to the SAME envelope cannot slip its hold between this read and the
+					// gate. When the read was OUTSIDE the lock, two such calls both read the
+					// pre-hold balance and the second bypassed a hard scarcity tier
+					// (`budgetFractionRemaining` / `budgetRunwayHours`) the ledger cannot
+					// enforce — TigerBeetle's atomic `debits_must_not_exceed_credits` rejects an
+					// OVERSHOOT but never a fractional/runway tier. Serialising the read under
+					// the hold's lock makes the gate describe the wallet the hold will debit,
+					// exactly as the SESSION path already does (its check reads in-process
+					// counters mutated under this same mutex). Cross-process (multi-governor)
+					// concurrency still relies on TB atomicity — overshoot only — the same
+					// limitation the session path has.
+					// A2: a read that FAILS refuses the call outright — the finally below
+					// releases the mutex and the ledger-unavailable error propagates before the
+					// gate is evaluated or any hold is attempted.
+					const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
 
-				// c. Policy gate
-				// P1-PARAM-SHADOW: caller `params` are spread FIRST so trusted
-				// governance fields (tier/estimated_cost/budget_remaining/
-				// budget_remaining_after) CANNOT be shadowed by request-supplied keys.
-				// P1-BUDGET-PREFLIGHT: budget_remaining_after is the derived field the
-				// single-field gate compares against zero to deny a single overshooting
-				// call (the `block-budget-overshoot` default rule).
-				//
-				// ENVELOPE SCOPING: an ATTRIBUTED call is gated on THE ENVELOPE ITS HOLD
-				// WILL DEBIT — `budget_remaining` is that envelope's live ledger
-				// `available`, so `block-budget-exhausted` and `block-budget-overshoot`
-				// become pre-spend guards on the cost center, ahead of the ledger's own
-				// atomic rejection. The gate and the hold therefore always describe the
-				// SAME wallet; the case where they could disagree (an unreadable
-				// envelope) refused the call above rather than reaching here (A2).
-				// `budget_remaining_after` is deliberately UNFLOORED on both paths: it
-				// must be allowed to go NEGATIVE, because `block-budget-overshoot` is a
-				// non-disableable hard `lt 0` deny and flooring it at zero would
-				// structurally disarm that rule on every attributed call.
-				// The session numbers still stand for a call that places no hold at all
-				// (unattributed, dry-run, no engine) — unchanged, and honest, because
-				// nothing debits an envelope on those paths either.
-				const sessionRemaining = config.budget - budgetSpent - inFlightHoldTotal;
-				const gateRemaining = envelopeRemaining ?? sessionRemaining;
-				// P1-BUDGET-TIER-SHADOW: the budget tier fields are trusted-host input,
-				// and asserting them here is what stops a request body from supplying its
-				// own `budgetFractionRemaining` and satisfying a tier that guards frontier
-				// spend. They are now REAL for an attributed call whose scope stated its
-				// allocation (D4) — the case this path could not describe before — and
-				// stay explicitly `undefined` for every other call, where the honest value
-				// is ABSENT: an `exists`-guarded rule then simply does not match, and a
-				// hard rule without that guard fires. Never an attacker's number.
-				const tierFields =
-					envelope !== undefined && envelopeRemaining !== undefined
-						? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
-						: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
-				const policyResult = evaluatePolicy(policyRules, {
-					...params,
-					model,
-					tier: config.tier,
-					estimated_cost: estimatedCost,
-					budget_remaining: gateRemaining,
-					budget_remaining_after: gateRemaining - estimatedCost,
-					budgetFractionRemaining: tierFields.budgetFractionRemaining,
-					budgetRunwayHours: tierFields.budgetRunwayHours,
-					// Structurally un-forgeable: this comes from the caller's own async
-					// execution context, which no request body can reach. Asserted after
-					// the spread like every other trusted field, `undefined` included.
-					cost_center: envelope?.attribution.costCenter,
-				});
-				if (policyResult.decision === "deny") {
-					const reason =
-						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
-					throw new PolicyDeniedError(
-						reason,
-						derivePolicyHint(policyResult, envelope !== undefined),
-					);
-				}
-
-				// d. PII check + redact-egress
-				if (config.pii !== "off") {
-					const piiResult = detectPII(promptParts);
-					if (piiResult.found && config.pii === "block") {
-						// block mode: throw BEFORE any egress.
+					// c. Policy gate
+					// P1-PARAM-SHADOW: caller `params` are spread FIRST so trusted
+					// governance fields (tier/estimated_cost/budget_remaining/
+					// budget_remaining_after) CANNOT be shadowed by request-supplied keys.
+					// P1-BUDGET-PREFLIGHT: budget_remaining_after is the derived field the
+					// single-field gate compares against zero to deny a single overshooting
+					// call (the `block-budget-overshoot` default rule).
+					//
+					// ENVELOPE SCOPING: an ATTRIBUTED call is gated on THE ENVELOPE ITS HOLD
+					// WILL DEBIT — `budget_remaining` is that envelope's live ledger
+					// `available`, so `block-budget-exhausted` and `block-budget-overshoot`
+					// become pre-spend guards on the cost center, ahead of the ledger's own
+					// atomic rejection. The gate and the hold therefore always describe the
+					// SAME wallet; the case where they could disagree (an unreadable
+					// envelope) refused the call above rather than reaching here (A2).
+					// `budget_remaining_after` is deliberately UNFLOORED on both paths: it
+					// must be allowed to go NEGATIVE, because `block-budget-overshoot` is a
+					// non-disableable hard `lt 0` deny and flooring it at zero would
+					// structurally disarm that rule on every attributed call.
+					// The session numbers still stand for a call that places no hold at all
+					// (unattributed, dry-run, no engine) — unchanged, and honest, because
+					// nothing debits an envelope on those paths either.
+					const sessionRemaining = config.budget - budgetSpent - inFlightHoldTotal;
+					const gateRemaining = envelopeRemaining ?? sessionRemaining;
+					// P1-BUDGET-TIER-SHADOW: the budget tier fields are trusted-host input,
+					// and asserting them here is what stops a request body from supplying its
+					// own `budgetFractionRemaining` and satisfying a tier that guards frontier
+					// spend. They are now REAL for an attributed call whose scope stated its
+					// allocation (D4) — the case this path could not describe before — and
+					// stay explicitly `undefined` for every other call, where the honest value
+					// is ABSENT: an `exists`-guarded rule then simply does not match, and a
+					// hard rule without that guard fires. Never an attacker's number.
+					const tierFields =
+						envelope !== undefined && envelopeRemaining !== undefined
+							? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
+							: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
+					const policyResult = evaluatePolicy(policyRules, {
+						...params,
+						model,
+						tier: config.tier,
+						estimated_cost: estimatedCost,
+						budget_remaining: gateRemaining,
+						budget_remaining_after: gateRemaining - estimatedCost,
+						budgetFractionRemaining: tierFields.budgetFractionRemaining,
+						budgetRunwayHours: tierFields.budgetRunwayHours,
+						// Structurally un-forgeable: this comes from the caller's own async
+						// execution context, which no request body can reach. Asserted after
+						// the spread like every other trusted field, `undefined` included.
+						cost_center: envelope?.attribution.costCenter,
+					});
+					if (policyResult.decision === "deny") {
+						const reason =
+							policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
+						denial.denialClass = classifyPolicyDenial(policyResult.hardViolations);
+						// HARD violations only. A soft warning did not deny anything, and
+						// listing it as the cause would name a rule the operator can safely
+						// ignore as the reason their call was refused.
+						denial.policyRules = toDenialRuleRefs(policyResult.hardViolations);
+						if (denial.denialClass === "budget_gate") {
+							// The two numbers the gate actually compared — enough to explain a
+							// budget refusal without re-deriving anything from the chain.
+							denial.budget = { estimatedCost, budgetRemaining: gateRemaining };
+						}
 						throw new PolicyDeniedError(
-							`PII detected: ${piiResult.types.join(", ")}`,
-							'PII enforcement blocked this call. Use { pii: "warn" } to log instead, or { pii: "redact" } to strip PII before egress.',
+							reason,
+							derivePolicyHint(policyResult, envelope !== undefined),
 						);
 					}
-					if (config.pii === "redact" && piiResult.found) {
-						// redact mode: forward a redacted DEEP CLONE so PII never egresses.
-						// redactPII is pure — the caller's original object is never mutated.
-						const redactedBody = redactPII(params).data as Record<string, unknown>;
-						forwardArgs = [redactedBody, ...args.slice(1)];
-					}
-					// "warn" mode: continue, no transform (audit copy is redacted later).
-				}
 
-				// d2. Injection detection
-				if (config.injection !== "off") {
-					const injectionResult = detectInjection(promptParts);
-					if (injectionResult.detected) {
-						if (config.injection === "block") {
+					// d. PII check + redact-egress
+					if (config.pii !== "off") {
+						const piiResult = detectPII(promptParts);
+						if (piiResult.found && config.pii === "block") {
+							// block mode: throw BEFORE any egress.
+							denial.denialClass = "pii";
+							// TYPE names only — a matched value is the very thing that must
+							// not reach the chain, or the DLQ behind it.
+							denial.piiTypes = piiResult.types;
 							throw new PolicyDeniedError(
-								`Prompt injection detected: ${injectionResult.patterns.join(", ")}`,
-								'Injection enforcement blocked this call. Use { injection: "warn" } to log instead of block.',
+								`PII detected: ${piiResult.types.join(", ")}`,
+								'PII enforcement blocked this call. Use { pii: "warn" } to log instead, or { pii: "redact" } to strip PII before egress.',
 							);
 						}
-						// warn: log to audit trail (non-fatal)
-						await audit
-							.appendEvent({
-								kind: "injection_detected",
-								actor: "local",
-								data: {
-									patterns: injectionResult.patterns,
-									score: injectionResult.score,
-									model,
-									...costCenterAudit,
-								},
-							})
-							.catch(() => {});
-						// Feed the anomaly detector so cascading injections trip the breaker.
-						anomalyDetector.observe({
-							kind: "injection",
-							patterns: injectionResult.patterns,
-						});
-					}
-				}
-
-				// e. Failure mode 15.4: TigerBeetle / engine unreachable — PENDING hold
-				if (proxyConn != null && !isDryRun) {
-					try {
-						// AUD-460: Capture the proxy's returned transferId
-						const proxyResult = await proxyConn.spend({
-							model,
-							estimatedCost,
-							actor: "local",
-						});
-						proxyTransferId = proxyResult.transferId;
-					} catch (holdErr) {
-						throw new LedgerUnavailableError(
-							holdErr instanceof Error ? holdErr.message : String(holdErr),
-						);
-					}
-				} else if (engine != null && !isDryRun) {
-					try {
-						await engine.spendPending({
-							transferId,
-							amount: estimatedCost,
-							// Attributed → the envelope pays. Unattributed → the key is
-							// OMITTED, not passed as undefined, so the engine's default
-							// (the session holding wallet) is reached by exactly the path
-							// it was before envelopes existed.
-							...(envelope !== undefined ? { debitAccountId: envelope.accountId } : {}),
-						});
-					} catch (holdErr) {
-						// P1-LEDGER-ENFORCE: an over-budget reservation is rejected
-						// atomically by the ledger. Surface it as a hard budget DENY —
-						// NOT as "ledger unavailable" (which would misreport a budget cap
-						// as an outage). This throws out of the budget-section try, runs
-						// its finally (releases the budget lock), and propagates without
-						// a hold to void — exactly mirroring the policy-deny control flow.
-						if (holdErr instanceof InsufficientBalanceError) {
-							// An attributed rejection is re-presented in the caller's terms:
-							// the `parent::costCenter` label instead of a derived account id,
-							// and the remedy that actually funds an envelope.
-							throw envelope === undefined
-								? holdErr
-								: asEnvelopeBalanceError(holdErr, envelope.label);
+						if (config.pii === "redact" && piiResult.found) {
+							// redact mode: forward a redacted DEEP CLONE so PII never egresses.
+							// redactPII is pure — the caller's original object is never mutated.
+							const redactedBody = redactPII(params).data as Record<string, unknown>;
+							forwardArgs = [redactedBody, ...args.slice(1)];
 						}
-						// Genuine ledger outage — do NOT forward to provider.
-						throw new LedgerUnavailableError(
-							holdErr instanceof Error ? holdErr.message : String(holdErr),
-						);
+						// "warn" mode: continue, no transform (audit copy is redacted later).
 					}
-					// The hold landed. Record WHICH wallet it debited — every session
-					// counter below is conditioned on this one answer.
-					envelopeDebited = envelope !== undefined;
-				}
 
-				// Track in-flight hold cost for accurate budget calculations — the
-				// SESSION wallet's share of it, which is nothing once the envelope paid.
-				inFlightHoldTotal += sessionShare(estimatedCost);
-				holdActive = true; // AUD-468: arm the guard
-			} finally {
-				// AUD-453: Release lock after budget check + hold are complete
-				releaseBudgetLock();
+					// d2. Injection detection
+					if (config.injection !== "off") {
+						const injectionResult = detectInjection(promptParts);
+						if (injectionResult.detected) {
+							if (config.injection === "block") {
+								denial.denialClass = "injection";
+								denial.injectionPatterns = injectionResult.patterns;
+								throw new PolicyDeniedError(
+									`Prompt injection detected: ${injectionResult.patterns.join(", ")}`,
+									'Injection enforcement blocked this call. Use { injection: "warn" } to log instead of block.',
+								);
+							}
+							// warn: log to audit trail (non-fatal)
+							await audit
+								.appendEvent({
+									kind: "injection_detected",
+									actor: "local",
+									data: {
+										patterns: injectionResult.patterns,
+										score: injectionResult.score,
+										model,
+										...costCenterAudit,
+									},
+								})
+								.catch(() => {});
+							// Feed the anomaly detector so cascading injections trip the breaker.
+							anomalyDetector.observe({
+								kind: "injection",
+								patterns: injectionResult.patterns,
+							});
+						}
+					}
+
+					// e. Failure mode 15.4: TigerBeetle / engine unreachable — PENDING hold
+					if (proxyConn != null && !isDryRun) {
+						try {
+							// AUD-460: Capture the proxy's returned transferId
+							const proxyResult = await proxyConn.spend({
+								model,
+								estimatedCost,
+								actor: "local",
+							});
+							proxyTransferId = proxyResult.transferId;
+						} catch (holdErr) {
+							throw new LedgerUnavailableError(
+								holdErr instanceof Error ? holdErr.message : String(holdErr),
+							);
+						}
+					} else if (engine != null && !isDryRun) {
+						try {
+							await engine.spendPending({
+								transferId,
+								amount: estimatedCost,
+								// Attributed → the envelope pays. Unattributed → the key is
+								// OMITTED, not passed as undefined, so the engine's default
+								// (the session holding wallet) is reached by exactly the path
+								// it was before envelopes existed.
+								...(envelope !== undefined ? { debitAccountId: envelope.accountId } : {}),
+							});
+						} catch (holdErr) {
+							// P1-LEDGER-ENFORCE: an over-budget reservation is rejected
+							// atomically by the ledger. Surface it as a hard budget DENY —
+							// NOT as "ledger unavailable" (which would misreport a budget cap
+							// as an outage). This throws out of the budget-section try, runs
+							// its finally (releases the budget lock), and propagates without
+							// a hold to void — exactly mirroring the policy-deny control flow.
+							if (holdErr instanceof InsufficientBalanceError) {
+								// An attributed rejection is re-presented in the caller's terms:
+								// the `parent::costCenter` label instead of a derived account id,
+								// and the remedy that actually funds an envelope.
+								throw envelope === undefined
+									? holdErr
+									: asEnvelopeBalanceError(holdErr, envelope.label);
+							}
+							// Genuine ledger outage — do NOT forward to provider.
+							throw new LedgerUnavailableError(
+								holdErr instanceof Error ? holdErr.message : String(holdErr),
+							);
+						}
+						// The hold landed. Record WHICH wallet it debited — every session
+						// counter below is conditioned on this one answer.
+						envelopeDebited = envelope !== undefined;
+					}
+
+					// Track in-flight hold cost for accurate budget calculations — the
+					// SESSION wallet's share of it, which is nothing once the envelope paid.
+					inFlightHoldTotal += sessionShare(estimatedCost);
+					holdActive = true; // AUD-468: arm the guard
+				} finally {
+					// AUD-453: Release lock after budget check + hold are complete
+					releaseBudgetLock();
+				}
+			} catch (denialErr) {
+				// The lock is already released by the finally above — this is the
+				// whole point of the nesting. Non-denials (a ledger outage, a
+				// destroyed client) fall through untouched: they either have their
+				// own event or are not governance decisions at all.
+				if (isGovernanceDenial(denialErr)) {
+					await appendDenialEvent({
+						audit,
+						actor: "local",
+						error: denialErr,
+						record: denial,
+						fields: {
+							model,
+							endpointClass: endpoint.class,
+							transferId,
+							estimatedCost,
+							promptParts,
+							...costCenterAudit,
+						},
+					});
+				}
+				throw denialErr;
 			}
 
 			// e0. M2 usage injection (A4): for local openai streams, opt in to the
@@ -1194,9 +1577,20 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					timestamp: new Date().toISOString(),
 					// M2: authorize-time scope, already fixed for the eventual settle (A3).
 					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
+					// D5: no `usage` — nothing has been reported yet, and this handle's
+					// `cost` is the ESTIMATE, which no set of counts reproduces. The
+					// rates are published anyway: they are the rates the eventual
+					// settle will meter with (A3 fixes them at authorize).
 					meter: {
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
+					},
+					// P1-2: this handle is the one record surface the caller holds
+					// BEFORE the settle writes anything, so it is exactly the object a
+					// mutation would travel from. Its own frozen copy.
+					pricing: {
+						appliedRates: copyAppliedRates(appliedRates),
+						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					// AUD-456: Flag proxy stub receipts
@@ -1222,18 +1616,40 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// Determine cost: use provider usage if reported, else fall back to
 				// estimate. A3: priced with the rate resolution captured at authorize;
 				// A11: costFromRates floors at 1 even for 0/0 usage.
+				//
+				// D5 — ONE sanitized snapshot. `sanitizeUsage` is the single gate the
+				// four tiers pass through before they reach either `costFromRates` or
+				// (Task 5) record emission, so the money and the record can never derive
+				// from different objects, and a non-finite provider count can never
+				// reach audit canonicalization. It also enforces the provenance rule:
+				// a "provider" label survives only when input AND output are usable
+				// counts, so a stream that reported neither cannot be published as
+				// provider-sourced.
+				const usageSnapshot = sanitizeUsage({
+					inputTokens: completion.usage.inputTokens,
+					outputTokens: completion.usage.outputTokens,
+					cacheReadTokens: completion.usage.cacheReadTokens,
+					cacheWriteTokens: completion.usage.cacheWriteTokens,
+					source: completion.usageReported ? "provider" : "estimated",
+				});
+				// D5: the record half of the SAME snapshot the cost comes from —
+				// present iff provider-sourced, omitted (never zero-filled) otherwise.
+				const usageRecord = publishableUsage(usageSnapshot);
+				const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
 				let streamCost: number;
-				let usageSource: "provider" | "estimated";
-				if (completion.usageReported) {
+				const usageSource: "provider" | "estimated" = usageSnapshot.source;
+				if (usageSnapshot.source === "provider") {
 					streamCost = costFromRates(
 						rateResolution.rates,
-						completion.usage.inputTokens,
-						completion.usage.outputTokens,
+						usageSnapshot.inputTokens,
+						usageSnapshot.outputTokens,
+						usageSnapshot.cacheReadTokens,
+						usageSnapshot.cacheWriteTokens,
 					);
-					usageSource = "provider";
 				} else {
-					streamCost = estimatedCost;
-					usageSource = "estimated";
+					// FIX: the un-inflated metering estimate, never the fattened hold
+					// (see the `meteredEstimateCost` comment at the hold-sizing site).
+					streamCost = meteredEstimateCost;
 				}
 
 				// Release in-flight hold and commit budget under mutex.
@@ -1327,6 +1743,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						settled,
 						transferId,
 						usageSource,
+						// D5: the durable record carries the four tiers AND the rates
+						// that priced them — the receipt is a return value the caller
+						// may drop, the chain event is what an auditor reads.
+						...usageAudit,
+						// P1-1: the chain event keeps its FLAT shape (`data` is
+						// documented open in audit-event.v1 and already flattens the
+						// receipt's meter as costBasis/rateSource/endpointClass). The
+						// relocation was forced by v1's closed `meter` object, which
+						// has no counterpart here. P1-2: its own frozen copy.
+						appliedRates: copyAppliedRates(appliedRates),
+						pricingTableVersion: PRICING_TABLE_VERSION,
 						chunksDelivered: completion.chunksDelivered,
 						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
 						endpointClass: endpoint.class,
@@ -1411,12 +1838,20 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					provider: kind,
 					timestamp: new Date().toISOString(),
 					usageSource,
+					// D5: present IFF provider-sourced — same snapshot the cost came from.
+					...usageAudit,
 					chunksDelivered: completion.chunksDelivered,
 					// M2 provenance (A6: computeMs omitted — no compute-time source here).
 					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
 					meter: {
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
+					},
+					// D5: what the rates WERE, beside where they came from — a sibling
+					// of `meter`, not a member of it (P1-1). P1-2: its own frozen copy.
+					pricing: {
+						appliedRates: copyAppliedRates(appliedRates),
+						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(postedCost !== undefined ? { postedCost } : {}),
 					...(streamBudget !== undefined ? { budget: streamBudget } : {}),
@@ -1544,7 +1979,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// back raw.
 				if (emitter == null || typeof emitter.on !== "function") {
 					finalizeStreamSettle({
-						usage: { inputTokens: 0, outputTokens: 0 },
+						usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
 						chunksDelivered: 0,
 						usageReported: false,
 					})
@@ -1561,13 +1996,24 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				let chunksDelivered = 0;
 				let accInput = 0;
 				let accOutput = 0;
+				// D2/D4: the cache tiers accumulate alongside input/output. They do NOT
+				// set accUsageReported on their own — D5 provenance needs input AND
+				// output — but they are real billed tokens, so a partial settle carries
+				// them.
+				let accCacheRead = 0;
+				let accCacheWrite = 0;
 				let accUsageReported = false;
 				// R1: set TRUE before governance calls emitter.abort() on an anomaly trip,
 				// so the 'abort' handler can distinguish a governance cutoff (void + breaker
 				// failure) from a genuine consumer abort (F9 settle-partial).
 				let anomalyAbort = false;
 				const partial = (): StreamCompletion => ({
-					usage: { inputTokens: accInput, outputTokens: accOutput },
+					usage: {
+						inputTokens: accInput,
+						outputTokens: accOutput,
+						cacheReadTokens: accCacheRead,
+						cacheWriteTokens: accCacheWrite,
+					},
 					chunksDelivered,
 					usageReported: accUsageReported,
 				});
@@ -1586,12 +2032,24 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						accOutput = tokens.outputTokens;
 						accUsageReported = true;
 					}
+					// D7: cache-tier deltas count toward deltaTokens too — a cache-heavy
+					// chunk with near-zero fresh input/output must not read as idle.
+					if (tokens.cacheReadTokens > accCacheRead) {
+						deltaTokens += tokens.cacheReadTokens - accCacheRead;
+						accCacheRead = tokens.cacheReadTokens;
+					}
+					if (tokens.cacheWriteTokens > accCacheWrite) {
+						deltaTokens += tokens.cacheWriteTokens - accCacheWrite;
+						accCacheWrite = tokens.cacheWriteTokens;
+					}
 					if (!config.anomaly.enabled) return;
 					anomalyDetector.observe({
 						kind: "chunk",
 						deltaTokens,
 						cumulativeInputTokens: accInput,
 						cumulativeOutputTokens: accOutput,
+						cumulativeCacheReadTokens: accCacheRead,
+						cumulativeCacheWriteTokens: accCacheWrite,
 						// M2: stamp the per-call scope so the SHARED detector prices this
 						// event with the same scoped rates as settlement.
 						model,
@@ -1640,12 +2098,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								usage: {
 									inputTokens: finalUsage.inputTokens ?? accInput,
 									outputTokens: finalUsage.outputTokens ?? accOutput,
+									cacheReadTokens: finalUsage.cacheReadTokens ?? accCacheRead,
+									cacheWriteTokens: finalUsage.cacheWriteTokens ?? accCacheWrite,
 								},
 								chunksDelivered,
 								usageReported: true,
 							}
 						: {
-								usage: { inputTokens: 0, outputTokens: 0 },
+								usage: {
+									inputTokens: 0,
+									outputTokens: 0,
+									cacheReadTokens: 0,
+									cacheWriteTokens: 0,
+								},
 								chunksDelivered,
 								usageReported: false,
 							};
@@ -1703,7 +2168,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				emitter.on("end", () => {
 					if (finalizeState !== "pending") return;
 					finalizeStreamSettle({
-						usage: { inputTokens: 0, outputTokens: 0 },
+						usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
 						chunksDelivered,
 						usageReported: false,
 					})
@@ -1792,6 +2257,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								deltaTokens: obs.deltaTokens,
 								cumulativeInputTokens: obs.cumulativeInputTokens,
 								cumulativeOutputTokens: obs.cumulativeOutputTokens,
+								cumulativeCacheReadTokens: obs.cumulativeCacheReadTokens,
+								cumulativeCacheWriteTokens: obs.cumulativeCacheWriteTokens,
 								// M2: stamp the per-call scope so the SHARED detector prices
 								// this event with the same scoped rates as settlement.
 								model,
@@ -1839,25 +2306,43 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// f. Compute actual cost from response usage. A3: priced with the rate
 				// resolution captured at authorize. costFromRates clamps NaN/negative
 				// counts (A7) and floors at 1 even for 0/0 provider usage (A11).
-				let actualCost = estimatedCost;
-				let usageSource: "provider" | "estimated" = "estimated";
-				if (response != null && typeof response === "object" && "usage" in response) {
-					const usage = (response as Record<string, unknown>).usage as Record<
-						string,
-						unknown
-					> | null;
-					if (usage != null) {
-						const inputTokens =
-							(usage.input_tokens as number | undefined) ??
-							(usage.prompt_tokens as number | undefined) ??
-							estimatedInputTokens;
-						const outputTokens =
-							(usage.output_tokens as number | undefined) ??
-							(usage.completion_tokens as number | undefined) ??
-							0;
-						actualCost = costFromRates(rateResolution.rates, inputTokens, outputTokens);
-						usageSource = "provider";
-					}
+				//
+				// D2/D4/D5: the response is read into ONE sanitized four-tier snapshot.
+				// Three things changed here:
+				//   - the cache tiers are priced instead of being silently dropped
+				//     (Anthropic reports them disjoint, so they were billed at ZERO);
+				//   - Google's ROOT `usageMetadata` is read at all — the old
+				//     `"usage" in response` test is FALSE for every real Gemini
+				//     response, so every Gemini call settled at the estimate;
+				//   - the estimate is no longer substituted for a missing provider
+				//     count while still claiming `usageSource: "provider"`. D5: provider
+				//     provenance requires provider-reported input AND output; anything
+				//     less settles at the estimate and is LABELLED estimated.
+				const usageShape: UsageWireShape =
+					kind === "google"
+						? "gemini"
+						: kind === "anthropic"
+							? "anthropic"
+							: surfaceKind === "openai-responses"
+								? "openai-responses"
+								: "openai-completions";
+				const usageSnapshot = fromProviderResponse(response, usageShape);
+				// FIX: the un-inflated metering estimate, never the fattened hold
+				// (see the `meteredEstimateCost` comment at the hold-sizing site).
+				let actualCost = meteredEstimateCost;
+				const usageSource: "provider" | "estimated" = usageSnapshot.source;
+				// D5: the record half of the SAME snapshot the cost comes from. Nothing
+				// below re-reads `response.usage` — one read, one object, two uses.
+				const usageRecord = publishableUsage(usageSnapshot);
+				const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
+				if (usageSnapshot.source === "provider") {
+					actualCost = costFromRates(
+						rateResolution.rates,
+						usageSnapshot.inputTokens,
+						usageSnapshot.outputTokens,
+						usageSnapshot.cacheReadTokens,
+						usageSnapshot.cacheWriteTokens,
+					);
 				}
 
 				// h. Audit the llm_call FIRST (P3-AUDIT-FAILCLOSED). The settlement-
@@ -1875,6 +2360,14 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						settled: true,
 						transferId,
 						usageSource,
+						// D5: the durable record — four tiers (iff provider-sourced) and
+						// the rates that priced them, so the chain event alone is
+						// enough to reprice the call.
+						...usageAudit,
+						// P1-1: flat here by design (see the stream terminal above).
+						// P1-2: its own frozen copy.
+						appliedRates: copyAppliedRates(appliedRates),
+						pricingTableVersion: PRICING_TABLE_VERSION,
 						// M2: metering provenance mirrors the receipt (A3 authorize-time scope).
 						endpointClass: endpoint.class,
 						costBasis: rateResolution.costBasis,
@@ -2068,11 +2561,19 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					provider: kind,
 					timestamp: new Date().toISOString(),
 					usageSource,
+					// D5: present IFF provider-sourced — same snapshot the cost came from.
+					...usageAudit,
 					// M2 provenance (A6: computeMs omitted — no compute-time source here).
 					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
 					meter: {
 						costBasis: rateResolution.costBasis,
 						rateSource: rateResolution.rateSource,
+					},
+					// D5: what the rates WERE, beside where they came from — a sibling
+					// of `meter`, not a member of it (P1-1). P1-2: its own frozen copy.
+					pricing: {
+						appliedRates: copyAppliedRates(appliedRates),
+						tableVersion: PRICING_TABLE_VERSION,
 					},
 					...(postedCost !== undefined ? { postedCost } : {}),
 					...(settledBudget !== undefined ? { budget: settledBudget } : {}),
@@ -2202,6 +2703,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const actor = action.actor ?? "local";
 			const transferId = trustId("tx");
 
+			// Per-invocation denial evidence — see the identical record on the LLM
+			// path for why this is a closure local and never an error property.
+			const denial: DenialRecord = { denialClass: "policy" };
+
 			// a. Circuit breaker check (keyed by action kind)
 			const cb = breaker.get(action.kind as unknown as LLMClientKind);
 			cb.allowRequest();
@@ -2212,148 +2717,181 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const releaseBudgetLock = await budgetMutex.acquire();
 			let proxyTransferId: string | undefined;
 
+			// ── Denial boundary: the whole budget-mutex section ──
+			// Catch OUTSIDE the lock-releasing finally, and ending lexically before
+			// `execute()` below — an action callback that throws a same-typed error
+			// is the CALLER's failure, not a governance decision. See the LLM path
+			// for the full rationale.
 			try {
-				// Attributed only: ONE batched read of the envelope's live `available`,
-				// taken INSIDE the budget mutex and BEFORE the gate, so this action's own
-				// hold lands only after the read and a CONCURRENT attributed action on the
-				// SAME envelope cannot slip its hold between the read and the gate. Outside
-				// the lock, both would read the pre-hold balance and the second would bypass
-				// a hard scarcity tier (`budgetFractionRemaining` / `budgetRunwayHours`) the
-				// ledger cannot enforce — TB rejects an OVERSHOOT, never a fractional/runway
-				// tier. Same in-mutex serialisation the SESSION path already has;
-				// cross-process concurrency still relies on TB atomicity (overshoot only).
-				// A2: a read that FAILS refuses the action — the finally below releases the
-				// mutex and the error propagates before the gate or any hold.
-				const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
+				try {
+					// Attributed only: ONE batched read of the envelope's live `available`,
+					// taken INSIDE the budget mutex and BEFORE the gate, so this action's own
+					// hold lands only after the read and a CONCURRENT attributed action on the
+					// SAME envelope cannot slip its hold between the read and the gate. Outside
+					// the lock, both would read the pre-hold balance and the second would bypass
+					// a hard scarcity tier (`budgetFractionRemaining` / `budgetRunwayHours`) the
+					// ledger cannot enforce — TB rejects an OVERSHOOT, never a fractional/runway
+					// tier. Same in-mutex serialisation the SESSION path already has;
+					// cross-process concurrency still relies on TB atomicity (overshoot only).
+					// A2: a read that FAILS refuses the action — the finally below releases the
+					// mutex and the error propagates before the gate or any hold.
+					const envelopeRemaining = await preflightEnvelopeRemaining(engine, isDryRun, envelope);
 
-				// c. Policy gate — action fields available in context
-				// AUD-467: Caller params spread FIRST so governance fields cannot be shadowed.
-				// P1-BUDGET-PREFLIGHT: budget_remaining_after is the derived field the
-				// block-budget-overshoot default rule compares against zero (a HARD rule
-				// that fails CLOSED if the governor omits it — so it MUST be supplied),
-				// and it is UNFLOORED here for the same reason as on the LLM path: it has
-				// to be able to go negative or that rule can never fire.
-				// ENVELOPE SCOPING: identical to the LLM path — an attributed action is
-				// gated on the envelope its hold will debit, never on the session wallet.
-				const sessionRemaining = config.budget - budgetSpent - inFlightHoldTotal;
-				const gateRemaining = envelopeRemaining ?? sessionRemaining;
-				const tierFields =
-					envelope !== undefined && envelopeRemaining !== undefined
-						? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
-						: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
-				const policyResult = evaluatePolicy(policyRules, {
-					...(action.params ?? {}),
-					action_kind: action.kind,
-					action_name: action.name,
-					estimated_cost: action.cost,
-					budget_remaining: gateRemaining,
-					budget_remaining_after: gateRemaining - action.cost,
-					tier: config.tier,
-					// P1-BUDGET-TIER-SHADOW: trusted-host input, asserted after the spread
-					// so `action.params` cannot inject a budget tier's own inputs. REAL for
-					// an attributed action whose scope stated its allocation (D4), and
-					// explicitly `undefined` otherwise — never a caller's number. See the
-					// same assertion on the LLM path above.
-					budgetFractionRemaining: tierFields.budgetFractionRemaining,
-					budgetRunwayHours: tierFields.budgetRunwayHours,
-					// Structurally un-forgeable: it comes from this call's own async
-					// execution context, which `action.params` cannot reach.
-					cost_center: envelope?.attribution.costCenter,
-				});
-				if (policyResult.decision === "deny") {
-					const reason =
-						policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
-					throw new PolicyDeniedError(
-						reason,
-						derivePolicyHint(policyResult, envelope !== undefined),
-					);
-				}
-
-				// d. PII check on action params
-				if (config.pii !== "off" && action.params != null) {
-					const piiResult = detectPII(action.params);
-					if (piiResult.found && config.pii === "block") {
+					// c. Policy gate — action fields available in context
+					// AUD-467: Caller params spread FIRST so governance fields cannot be shadowed.
+					// P1-BUDGET-PREFLIGHT: budget_remaining_after is the derived field the
+					// block-budget-overshoot default rule compares against zero (a HARD rule
+					// that fails CLOSED if the governor omits it — so it MUST be supplied),
+					// and it is UNFLOORED here for the same reason as on the LLM path: it has
+					// to be able to go negative or that rule can never fire.
+					// ENVELOPE SCOPING: identical to the LLM path — an attributed action is
+					// gated on the envelope its hold will debit, never on the session wallet.
+					const sessionRemaining = config.budget - budgetSpent - inFlightHoldTotal;
+					const gateRemaining = envelopeRemaining ?? sessionRemaining;
+					const tierFields =
+						envelope !== undefined && envelopeRemaining !== undefined
+							? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
+							: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
+					const policyResult = evaluatePolicy(policyRules, {
+						...(action.params ?? {}),
+						action_kind: action.kind,
+						action_name: action.name,
+						estimated_cost: action.cost,
+						budget_remaining: gateRemaining,
+						budget_remaining_after: gateRemaining - action.cost,
+						tier: config.tier,
+						// P1-BUDGET-TIER-SHADOW: trusted-host input, asserted after the spread
+						// so `action.params` cannot inject a budget tier's own inputs. REAL for
+						// an attributed action whose scope stated its allocation (D4), and
+						// explicitly `undefined` otherwise — never a caller's number. See the
+						// same assertion on the LLM path above.
+						budgetFractionRemaining: tierFields.budgetFractionRemaining,
+						budgetRunwayHours: tierFields.budgetRunwayHours,
+						// Structurally un-forgeable: it comes from this call's own async
+						// execution context, which `action.params` cannot reach.
+						cost_center: envelope?.attribution.costCenter,
+					});
+					if (policyResult.decision === "deny") {
+						const reason =
+							policyResult.reasons.length > 0 ? policyResult.reasons.join("; ") : "Policy denied";
+						denial.denialClass = classifyPolicyDenial(policyResult.hardViolations);
+						denial.policyRules = toDenialRuleRefs(policyResult.hardViolations);
+						if (denial.denialClass === "budget_gate") {
+							denial.budget = { estimatedCost: action.cost, budgetRemaining: gateRemaining };
+						}
 						throw new PolicyDeniedError(
-							`PII detected in action params: ${piiResult.types.join(", ")}`,
-							'PII enforcement blocked this action. Use { pii: "warn" } to log instead of block; on governed actions { pii: "redact" } redacts only the audit copy — the action itself runs on the original input.',
+							reason,
+							derivePolicyHint(policyResult, envelope !== undefined),
 						);
 					}
-				}
 
-				// d2. Injection detection on action params
-				if (config.injection !== "off" && action.params != null) {
-					const injectionResult = detectInjection(action.params);
-					if (injectionResult.detected) {
-						if (config.injection === "block") {
+					// d. PII check on action params
+					if (config.pii !== "off" && action.params != null) {
+						const piiResult = detectPII(action.params);
+						if (piiResult.found && config.pii === "block") {
+							denial.denialClass = "pii";
+							denial.piiTypes = piiResult.types;
 							throw new PolicyDeniedError(
-								`Injection detected in action params: ${injectionResult.patterns.join(", ")}`,
-								'Injection enforcement blocked this call. Use { injection: "warn" } to log instead of block.',
+								`PII detected in action params: ${piiResult.types.join(", ")}`,
+								'PII enforcement blocked this action. Use { pii: "warn" } to log instead of block; on governed actions { pii: "redact" } redacts only the audit copy — the action itself runs on the original input.',
 							);
 						}
-						// warn: log to audit trail (non-fatal)
-						await audit
-							.appendEvent({
-								kind: "injection_detected",
-								actor: action.actor ?? "local",
-								data: {
-									patterns: injectionResult.patterns,
-									score: injectionResult.score,
-									actionName: action.name,
-									actionKind: action.kind,
-									...costCenterAudit,
-								},
-							})
-							.catch(() => {});
 					}
-				}
 
-				// e. PENDING hold
-				if (proxyConn != null && !isDryRun) {
-					try {
-						const proxyResult = await proxyConn.spend({
-							model: action.name,
-							estimatedCost: action.cost,
-							actor,
-						});
-						proxyTransferId = proxyResult.transferId;
-					} catch (holdErr) {
-						throw new LedgerUnavailableError(
-							holdErr instanceof Error ? holdErr.message : String(holdErr),
-						);
-					}
-				} else if (engine != null && !isDryRun) {
-					try {
-						await engine.spendPending({
-							transferId,
-							amount: action.cost,
-							// Attributed → the envelope pays. Unattributed → the key is
-							// OMITTED, not passed as undefined, so the engine's default (the
-							// session holding wallet) is reached by exactly the path it was
-							// before envelopes existed.
-							...(envelope !== undefined ? { debitAccountId: envelope.accountId } : {}),
-						});
-					} catch (holdErr) {
-						// P1-LEDGER-ENFORCE: over-budget reservation → hard budget DENY,
-						// not a ledger-outage misreport.
-						if (holdErr instanceof InsufficientBalanceError) {
-							// An attributed rejection is re-presented in the caller's terms:
-							// the `parent::costCenter` label instead of a derived account id,
-							// and the remedy that actually funds an envelope.
-							throw envelope === undefined
-								? holdErr
-								: asEnvelopeBalanceError(holdErr, envelope.label);
+					// d2. Injection detection on action params
+					if (config.injection !== "off" && action.params != null) {
+						const injectionResult = detectInjection(action.params);
+						if (injectionResult.detected) {
+							if (config.injection === "block") {
+								denial.denialClass = "injection";
+								denial.injectionPatterns = injectionResult.patterns;
+								throw new PolicyDeniedError(
+									`Injection detected in action params: ${injectionResult.patterns.join(", ")}`,
+									'Injection enforcement blocked this call. Use { injection: "warn" } to log instead of block.',
+								);
+							}
+							// warn: log to audit trail (non-fatal)
+							await audit
+								.appendEvent({
+									kind: "injection_detected",
+									actor: action.actor ?? "local",
+									data: {
+										patterns: injectionResult.patterns,
+										score: injectionResult.score,
+										actionName: action.name,
+										actionKind: action.kind,
+										...costCenterAudit,
+									},
+								})
+								.catch(() => {});
 						}
-						throw new LedgerUnavailableError(
-							holdErr instanceof Error ? holdErr.message : String(holdErr),
-						);
 					}
-					// The hold landed — record which wallet it debited.
-					envelopeDebited = envelope !== undefined;
-				}
 
-				inFlightHoldTotal += sessionShare(action.cost);
-			} finally {
-				releaseBudgetLock();
+					// e. PENDING hold
+					if (proxyConn != null && !isDryRun) {
+						try {
+							const proxyResult = await proxyConn.spend({
+								model: action.name,
+								estimatedCost: action.cost,
+								actor,
+							});
+							proxyTransferId = proxyResult.transferId;
+						} catch (holdErr) {
+							throw new LedgerUnavailableError(
+								holdErr instanceof Error ? holdErr.message : String(holdErr),
+							);
+						}
+					} else if (engine != null && !isDryRun) {
+						try {
+							await engine.spendPending({
+								transferId,
+								amount: action.cost,
+								// Attributed → the envelope pays. Unattributed → the key is
+								// OMITTED, not passed as undefined, so the engine's default (the
+								// session holding wallet) is reached by exactly the path it was
+								// before envelopes existed.
+								...(envelope !== undefined ? { debitAccountId: envelope.accountId } : {}),
+							});
+						} catch (holdErr) {
+							// P1-LEDGER-ENFORCE: over-budget reservation → hard budget DENY,
+							// not a ledger-outage misreport.
+							if (holdErr instanceof InsufficientBalanceError) {
+								// An attributed rejection is re-presented in the caller's terms:
+								// the `parent::costCenter` label instead of a derived account id,
+								// and the remedy that actually funds an envelope.
+								throw envelope === undefined
+									? holdErr
+									: asEnvelopeBalanceError(holdErr, envelope.label);
+							}
+							throw new LedgerUnavailableError(
+								holdErr instanceof Error ? holdErr.message : String(holdErr),
+							);
+						}
+						// The hold landed — record which wallet it debited.
+						envelopeDebited = envelope !== undefined;
+					}
+
+					inFlightHoldTotal += sessionShare(action.cost);
+				} finally {
+					releaseBudgetLock();
+				}
+			} catch (denialErr) {
+				if (isGovernanceDenial(denialErr)) {
+					await appendDenialEvent({
+						audit,
+						actor,
+						error: denialErr,
+						record: denial,
+						fields: {
+							actionKind: action.kind,
+							actionName: action.name,
+							transferId,
+							estimatedCost: action.cost,
+							...costCenterAudit,
+						},
+					});
+				}
+				throw denialErr;
 			}
 
 			// f. Execute the action
@@ -2744,28 +3282,60 @@ export function extractPromptParts(
 function readFinalMessageUsage(msg: unknown): {
 	inputTokens: number | undefined;
 	outputTokens: number | undefined;
+	cacheReadTokens: number | undefined;
+	cacheWriteTokens: number | undefined;
 	reported: boolean;
 } {
 	if (msg != null && typeof msg === "object") {
 		const usage = (msg as Record<string, unknown>).usage;
 		if (usage != null && typeof usage === "object") {
 			const u = usage as Record<string, unknown>;
-			const inTok =
-				typeof u.input_tokens === "number" && Number.isFinite(u.input_tokens) && u.input_tokens >= 0
-					? u.input_tokens
+			const isUsableCount = (value: unknown): value is number =>
+				typeof value === "number" && Number.isFinite(value) && value >= 0;
+			const inTok = isUsableCount(u.input_tokens) ? u.input_tokens : undefined;
+			const outTok = isUsableCount(u.output_tokens) ? u.output_tokens : undefined;
+			// D2/D4: the cache tiers come from the ONE Anthropic extractor, which also
+			// folds the nested `cache_creation` TTL breakdown into the write tier.
+			//
+			// F3 applies PER TIER, and per tier separately: a finalMessage that names
+			// only the read counter must not zero an accumulated WRITE counter. Each
+			// tier is therefore reported only when the payload actually carries a
+			// USABLE value for one of its fields (same discipline as inTok/outTok
+			// above) — not merely when the key is present. A `null`/NaN counter is
+			// present-but-unusable, and gating on presence alone would zero an
+			// accumulated tier the streamEvent tap already billed (understatement).
+			// When a tier is not usable it stays `undefined` and the caller keeps
+			// what the streamEvent tap accumulated.
+			const cacheTiers = fromAnthropicUsage(u);
+			const readUsable = isUsableCount(u.cache_read_input_tokens);
+			const breakdownRaw = u.cache_creation;
+			const breakdown =
+				breakdownRaw != null && typeof breakdownRaw === "object"
+					? (breakdownRaw as Record<string, unknown>)
 					: undefined;
-			const outTok =
-				typeof u.output_tokens === "number" &&
-				Number.isFinite(u.output_tokens) &&
-				u.output_tokens >= 0
-					? u.output_tokens
-					: undefined;
+			const breakdownUsable =
+				breakdown != null &&
+				(isUsableCount(breakdown.ephemeral_5m_input_tokens) ||
+					isUsableCount(breakdown.ephemeral_1h_input_tokens));
+			const writeUsable = isUsableCount(u.cache_creation_input_tokens) || breakdownUsable;
 			if (inTok !== undefined || outTok !== undefined) {
-				return { inputTokens: inTok, outputTokens: outTok, reported: true };
+				return {
+					inputTokens: inTok,
+					outputTokens: outTok,
+					cacheReadTokens: readUsable ? cacheTiers.cacheReadTokens : undefined,
+					cacheWriteTokens: writeUsable ? cacheTiers.cacheWriteTokens : undefined,
+					reported: true,
+				};
 			}
 		}
 	}
-	return { inputTokens: undefined, outputTokens: undefined, reported: false };
+	return {
+		inputTokens: undefined,
+		outputTokens: undefined,
+		cacheReadTokens: undefined,
+		cacheWriteTokens: undefined,
+		reported: false,
+	};
 }
 
 /**
@@ -2777,23 +3347,40 @@ function readFinalMessageUsage(msg: unknown): {
 function extractAnthropicStreamUsage(event: unknown): {
 	inputTokens: number;
 	outputTokens: number;
+	cacheReadTokens: number;
+	cacheWriteTokens: number;
 } {
-	if (event == null || typeof event !== "object") return { inputTokens: 0, outputTokens: 0 };
+	const none = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+	if (event == null || typeof event !== "object") return none;
 	const c = event as Record<string, unknown>;
 	if (c.type === "message_start" && c.message != null && typeof c.message === "object") {
 		const msg = c.message as Record<string, unknown>;
 		if (msg.usage != null && typeof msg.usage === "object") {
 			const usage = msg.usage as Record<string, unknown>;
 			const inTok = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
-			return { inputTokens: inTok > 0 ? inTok : 0, outputTokens: 0 };
+			// D2: the SDK's three input counters are DISJOINT — the cache tiers are
+			// pure addition, never subtracted out of input_tokens.
+			const tiers = fromAnthropicUsage(usage);
+			return {
+				inputTokens: inTok > 0 ? inTok : 0,
+				outputTokens: 0,
+				cacheReadTokens: tiers.cacheReadTokens,
+				cacheWriteTokens: tiers.cacheWriteTokens,
+			};
 		}
 	}
 	if (c.type === "message_delta" && c.usage != null && typeof c.usage === "object") {
 		const usage = c.usage as Record<string, unknown>;
 		const outTok = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
-		return { inputTokens: 0, outputTokens: outTok > 0 ? outTok : 0 };
+		const tiers = fromAnthropicUsage(usage);
+		return {
+			inputTokens: 0,
+			outputTokens: outTok > 0 ? outTok : 0,
+			cacheReadTokens: tiers.cacheReadTokens,
+			cacheWriteTokens: tiers.cacheWriteTokens,
+		};
 	}
-	return { inputTokens: 0, outputTokens: 0 };
+	return none;
 }
 
 // ── TigerBeetle engine factory ──

@@ -99,6 +99,36 @@ describe("SSE + shadow + sweep", () => {
 		).toBe(true);
 	});
 
+	it("evaluate_only still runs the real governor, so its denial event exists", async () => {
+		// The server converts the error AFTER `governor.authorize()` has already
+		// returned its decision, so the chain event is written by the governor
+		// and the shadowing is presentation only. There is deliberately no
+		// suppression API: an operator running in shadow mode is exactly the
+		// operator who needs the denial record.
+		const fake = createFakeGovernor({ denyReason: "rule says no" });
+		let authorizeCalls = 0;
+		const spying = {
+			...fake.governor,
+			authorize: async (params: Parameters<typeof fake.governor.authorize>[0]) => {
+				authorizeCalls++;
+				return fake.governor.authorize(params);
+			},
+		};
+		server = createUsertrustServer({
+			config: config({ enforcement: "evaluate_only" }),
+			factory: async () => spying,
+		});
+		const { port } = await server.listen();
+		const res = await fetch(`http://127.0.0.1:${port}/v1/authorize`, {
+			method: "POST",
+			headers: { "content-type": "application/json", authorization: `Bearer ${KEY}` },
+			body: JSON.stringify({ model: "m" }),
+		});
+		expect(res.status).toBe(200);
+		expect(((await res.json()) as { decision: string }).decision).toBe("would_deny");
+		expect(authorizeCalls).toBe(1);
+	});
+
 	it("sweepExpired aborts stale pending holds", async () => {
 		const fake = createFakeGovernor();
 		server = createUsertrustServer({ config: config(), factory: async () => fake.governor });

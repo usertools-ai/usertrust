@@ -5,94 +5,101 @@ import {
 	extractUsageFromEvent,
 	extractUsageFromProviderChunk,
 } from "../src/token-extractor.js";
-import type { DoneEvent, ErrorEvent, StreamEvent, TextDeltaEvent } from "../src/types.js";
+import type { ErrorEvent, StreamEvent, Usage } from "../src/types.js";
+import {
+	doneEvent,
+	errorEvent,
+	makeAssistantMessage,
+	makeUsage,
+	startEvent,
+	textDelta,
+} from "./host-fixtures.js";
 
 describe("extractUsageFromEvent", () => {
 	it("extracts usage from done event", () => {
-		const event: DoneEvent = {
-			type: "done",
-			stopReason: "stop",
-			usage: { inputTokens: 100, outputTokens: 50 },
-		};
-
-		const usage = extractUsageFromEvent(event);
-		expect(usage).toEqual({ inputTokens: 100, outputTokens: 50 });
+		const usage = extractUsageFromEvent(doneEvent(makeUsage(100, 50)));
+		expect(usage).toEqual({
+			inputTokens: 100,
+			outputTokens: 50,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+		});
 	});
 
-	it("extracts usage from error event with usage", () => {
-		const event: ErrorEvent = {
-			type: "error",
-			error: new Error("test"),
-			usage: { inputTokens: 80, outputTokens: 30 },
-		};
-
-		const usage = extractUsageFromEvent(event);
-		expect(usage).toEqual({ inputTokens: 80, outputTokens: 30 });
+	it("extracts usage from error event", () => {
+		const usage = extractUsageFromEvent(errorEvent(makeUsage(80, 30)));
+		expect(usage).toEqual({
+			inputTokens: 80,
+			outputTokens: 30,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+		});
 	});
 
-	it("returns null for error event without usage", () => {
-		const event: ErrorEvent = {
-			type: "error",
-			error: new Error("test"),
-		};
-
+	it("returns null for a malformed error event carrying no assistant message", () => {
+		const event = { type: "error", reason: "error" } as unknown as ErrorEvent;
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("returns null for text delta events", () => {
-		const event: TextDeltaEvent = {
-			type: "text_delta",
-			text: "hello",
-		};
-
-		expect(extractUsageFromEvent(event)).toBeNull();
+		expect(extractUsageFromEvent(textDelta("hello"))).toBeNull();
 	});
 
 	it("returns null for start events", () => {
-		const event: StreamEvent = { type: "start" };
-		expect(extractUsageFromEvent(event)).toBeNull();
+		expect(extractUsageFromEvent(startEvent())).toBeNull();
 	});
 });
 
 describe("extractUsageFromEvent edge cases", () => {
+	const partial = makeAssistantMessage();
+
 	it("returns null for text_start events", () => {
-		const event: StreamEvent = { type: "text_start" };
+		const event: StreamEvent = { type: "text_start", contentIndex: 0, partial };
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("returns null for text_end events", () => {
-		const event: StreamEvent = { type: "text_end" };
+		const event: StreamEvent = { type: "text_end", contentIndex: 0, content: "hi", partial };
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("returns null for thinking_delta events", () => {
-		const event: StreamEvent = { type: "thinking_delta", text: "reasoning..." };
+		const event: StreamEvent = {
+			type: "thinking_delta",
+			contentIndex: 0,
+			delta: "reasoning...",
+			partial,
+		};
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("returns null for toolcall_start events", () => {
-		const event: StreamEvent = { type: "toolcall_start", name: "search", id: "tc_1" };
+		const event: StreamEvent = { type: "toolcall_start", contentIndex: 0, partial };
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("returns null for toolcall_delta events", () => {
-		const event: StreamEvent = { type: "toolcall_delta", args: '{"q":"test"}' };
+		const event: StreamEvent = {
+			type: "toolcall_delta",
+			contentIndex: 0,
+			delta: '{"q":"test"}',
+			partial,
+		};
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("returns null for toolcall_end events", () => {
-		const event: StreamEvent = { type: "toolcall_end" };
+		const event: StreamEvent = {
+			type: "toolcall_end",
+			contentIndex: 0,
+			toolCall: { type: "toolCall", id: "tc_1", name: "search", arguments: {} },
+			partial,
+		};
 		expect(extractUsageFromEvent(event)).toBeNull();
 	});
 
 	it("clamps excessively large token counts", () => {
-		const event: DoneEvent = {
-			type: "done",
-			stopReason: "stop",
-			usage: { inputTokens: 999_999_999, outputTokens: 999_999_999 },
-		};
-
-		const usage = extractUsageFromEvent(event);
+		const usage = extractUsageFromEvent(doneEvent(makeUsage(999_999_999, 999_999_999)));
 		expect(usage).not.toBeNull();
 		// MAX_TOKENS is 2_000_000, so these should be clamped
 		expect(usage?.inputTokens).toBeLessThanOrEqual(2_000_000);
@@ -100,51 +107,59 @@ describe("extractUsageFromEvent edge cases", () => {
 	});
 
 	it("clamps negative token counts to zero", () => {
-		const event: DoneEvent = {
-			type: "done",
-			stopReason: "stop",
-			usage: { inputTokens: -100, outputTokens: -50 },
-		};
-
-		const usage = extractUsageFromEvent(event);
+		const usage = extractUsageFromEvent(doneEvent(makeUsage(-100, -50)));
 		expect(usage).not.toBeNull();
 		expect(usage?.inputTokens).toBe(0);
 		expect(usage?.outputTokens).toBe(0);
 	});
 
 	it("preserves cache token fields from done events", () => {
-		const event: DoneEvent = {
-			type: "done",
-			stopReason: "stop",
-			usage: {
-				inputTokens: 100,
-				outputTokens: 50,
-				cacheReadTokens: 30,
-				cacheWriteTokens: 10,
-			},
-		};
-
-		const usage = extractUsageFromEvent(event);
+		const usage = extractUsageFromEvent(doneEvent(makeUsage(100, 50, 30, 10)));
 		expect(usage).not.toBeNull();
 		expect(usage?.cacheReadTokens).toBe(30);
 		expect(usage?.cacheWriteTokens).toBe(10);
 	});
+
+	/**
+	 * Older-runtime degradation (spec D2 "Version contract"): a pi-ai below the
+	 * >=0.12.0 peer floor may hand back a two-field `Usage` — `input`/`output`
+	 * only, no `cacheRead`/`cacheWrite` keys at all (not `0`-valued, ABSENT).
+	 * `normalizeHostUsage`'s `readNum(...) != null` guard is what keeps that
+	 * distinguishable from a provider that legitimately reports zero cache use:
+	 * the cache fields must be OMITTED here, never coerced to `0`, because
+	 * downstream (D1) omitted ≠ zero — those tokens ride inside `inputTokens`
+	 * and price at `inputPer1k` (conservative), whereas a `0` would claim
+	 * "provider confirmed no cache activity."
+	 */
+	it("omits cache fields entirely for a pre-cache (two-field) host Usage shape", () => {
+		const legacyUsage = {
+			input: 40,
+			output: 20,
+			totalTokens: 60,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		} as unknown as Usage;
+
+		const usage = extractUsageFromEvent(doneEvent(legacyUsage));
+
+		expect(usage?.inputTokens).toBe(40);
+		expect(usage?.outputTokens).toBe(20);
+		expect(usage).not.toHaveProperty("cacheReadTokens");
+		expect(usage).not.toHaveProperty("cacheWriteTokens");
+	});
 });
 
 describe("createAccumulator", () => {
+	const partial = makeAssistantMessage();
+
 	it("accumulates usage from a stream of events", () => {
 		const acc = createAccumulator();
 
-		acc.update({ type: "start" });
-		acc.update({ type: "text_start" });
-		acc.update({ type: "text_delta", text: "Hello" });
-		acc.update({ type: "text_delta", text: " world" });
-		acc.update({ type: "text_end" });
-		acc.update({
-			type: "done",
-			stopReason: "stop",
-			usage: { inputTokens: 120, outputTokens: 45 },
-		});
+		acc.update(startEvent());
+		acc.update({ type: "text_start", contentIndex: 0, partial });
+		acc.update(textDelta("Hello"));
+		acc.update(textDelta(" world"));
+		acc.update({ type: "text_end", contentIndex: 0, content: "Hello world", partial });
+		acc.update(doneEvent(makeUsage(120, 45)));
 
 		const result = acc.result();
 		expect(result.inputTokens).toBe(120);
@@ -156,8 +171,8 @@ describe("createAccumulator", () => {
 	it("reports usageReported = false when no done event", () => {
 		const acc = createAccumulator();
 
-		acc.update({ type: "start" });
-		acc.update({ type: "text_delta", text: "Hello" });
+		acc.update(startEvent());
+		acc.update(textDelta("Hello"));
 
 		const result = acc.result();
 		expect(result.inputTokens).toBe(0);
@@ -169,21 +184,38 @@ describe("createAccumulator", () => {
 	it("handles cache token fields", () => {
 		const acc = createAccumulator();
 
-		acc.update({
-			type: "done",
-			stopReason: "stop",
-			usage: {
-				inputTokens: 100,
-				outputTokens: 50,
-				cacheReadTokens: 30,
-				cacheWriteTokens: 10,
-			},
-		});
+		acc.update(doneEvent(makeUsage(100, 50, 30, 10)));
 
 		const result = acc.result();
 		expect(result.inputTokens).toBe(100);
 		expect(result.outputTokens).toBe(50);
 		expect(result.usageReported).toBe(true);
+		// Regression pin on the severed boundary (spec D4 row 1): createAccumulator
+		// used to drop cache tiers on the floor here, not just at settle.
+		expect(result.cacheReadTokens).toBe(30);
+		expect(result.cacheWriteTokens).toBe(10);
+	});
+
+	it("carries cache token fields through an error-terminated stream too", () => {
+		const acc = createAccumulator();
+
+		acc.update(startEvent());
+		acc.update(errorEvent(makeUsage(60, 25, 15, 5)));
+
+		const result = acc.result();
+		expect(result.cacheReadTokens).toBe(15);
+		expect(result.cacheWriteTokens).toBe(5);
+	});
+
+	it("omits cache fields from result() when the host never reported them", () => {
+		const acc = createAccumulator();
+
+		acc.update(startEvent());
+		acc.update(textDelta("hi"));
+
+		const result = acc.result();
+		expect(result).not.toHaveProperty("cacheReadTokens");
+		expect(result).not.toHaveProperty("cacheWriteTokens");
 	});
 
 	it("returns zero usage for empty accumulator (no events)", () => {
@@ -196,12 +228,12 @@ describe("createAccumulator", () => {
 		expect(result.usageReported).toBe(false);
 	});
 
-	it("handles error event without usage field", () => {
+	it("handles a malformed error event with no assistant message", () => {
 		const acc = createAccumulator();
 
-		acc.update({ type: "start" });
-		acc.update({ type: "text_delta", text: "partial" });
-		acc.update({ type: "error", error: new Error("stream broke") } as ErrorEvent);
+		acc.update(startEvent());
+		acc.update(textDelta("partial"));
+		acc.update({ type: "error", reason: "error" } as unknown as ErrorEvent);
 
 		const result = acc.result();
 		expect(result.inputTokens).toBe(0);
@@ -213,12 +245,8 @@ describe("createAccumulator", () => {
 	it("handles error event with usage field", () => {
 		const acc = createAccumulator();
 
-		acc.update({ type: "start" });
-		acc.update({
-			type: "error",
-			error: new Error("partial failure"),
-			usage: { inputTokens: 60, outputTokens: 25 },
-		} as ErrorEvent);
+		acc.update(startEvent());
+		acc.update(errorEvent(makeUsage(60, 25)));
 
 		const result = acc.result();
 		expect(result.inputTokens).toBe(60);
@@ -376,8 +404,8 @@ describe("extractTextDeltaLength", () => {
 		expect(extractTextDeltaLength(undefined)).toBe(0);
 	});
 
-	it("counts pi-ai text_delta length", () => {
-		expect(extractTextDeltaLength({ type: "text_delta", text: "hello" })).toBe(5);
+	it("counts host text_delta length off `delta`", () => {
+		expect(extractTextDeltaLength({ type: "text_delta", contentIndex: 0, delta: "hello" })).toBe(5);
 	});
 
 	it("counts Anthropic content_block_delta length", () => {

@@ -46,7 +46,7 @@ function StatusBadge(props: { row: LedgerRow }): React.JSX.Element {
 	const color =
 		status === "settled"
 			? "text-[var(--text)]"
-			: status === "failed"
+			: status === "failed" || status === "denied"
 				? "text-[var(--danger)]"
 				: "text-[var(--amber)]";
 	return <span className={`text-xs uppercase ${color}`}>{status}</span>;

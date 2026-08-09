@@ -25,6 +25,50 @@ export type CostBasis = "usd-proxy" | "nominal";
 /** Where the applied rates came from during resolution. */
 export type RateSource = "table" | "custom" | "local-model" | "local-default" | "fallback";
 
+/**
+ * The four RESOLVED per-1k rates a settle was metered with (spec D5).
+ *
+ * "Resolved" is the load-bearing word: these are the rates AFTER the D1
+ * fallback, so an absent cache tier appears here as `inputPer1k`, never as
+ * `undefined` and never as 0. Publishing the raw `ModelRates` instead would
+ * hand an auditor a hole in exactly the tiers the fallback makes non-zero, and
+ * their recompute would understate the bill.
+ *
+ * Together with {@link ReceiptUsage} this is what makes the narrowed
+ * reconciliation claim checkable: `ceil(sum(counts x rates / 1000))`, floored
+ * at 1, reproduces `TrustReceipt.cost` exactly — from the record alone, with no
+ * access to the pricing table, the config, or this codebase.
+ */
+export interface AppliedRates {
+	inputPer1k: number;
+	outputPer1k: number;
+	cacheReadPer1k: number;
+	cacheWritePer1k: number;
+}
+
+/**
+ * The four-tier DISJOINT token split a settle was metered from (spec D5).
+ *
+ * Sanitized by construction — every count is a finite integer >= 0 — because
+ * this is the object that reaches audit canonicalization, which throws on
+ * NaN/Infinity. Disjoint means `inputTokens` is FRESH input only: cached reads
+ * and cache writes are separate tiers, and the four sum to the call's billable
+ * tokens with nothing double-counted.
+ *
+ * Present on a record only when the usage was provider-reported. See
+ * `TrustReceipt.usage`.
+ */
+export interface ReceiptUsage {
+	/** Fresh (non-cached) prompt tokens. */
+	inputTokens: number;
+	/** Completion tokens, including provider-billed thinking tokens. */
+	outputTokens: number;
+	/** Cache-hit prompt tokens. */
+	cacheReadTokens: number;
+	/** Cache-creation prompt tokens. */
+	cacheWriteTokens: number;
+}
+
 // ── Trust Receipt ──
 export interface TrustReceipt {
 	transferId: string;
@@ -49,14 +93,68 @@ export interface TrustReceipt {
 	auditDegraded?: boolean;
 	/** Whether cost came from provider-reported usage or the pre-call estimate. */
 	usageSource?: "provider" | "estimated";
+	/**
+	 * The four-tier disjoint token split this cost was metered from (D5).
+	 *
+	 * PRESENT IFF `usageSource === "provider"`. An estimated settle has no
+	 * reported counts, and a four-tier block full of fabricated zeros would
+	 * invite an auditor to "recompute" a cost that was never derived from
+	 * counts at all — so it is omitted outright, never zero-filled.
+	 *
+	 * With `pricing.appliedRates` this is the whole reconciliation surface:
+	 * `ceil(sum(counts x rates / 1000))` floored at 1 equals `cost`.
+	 */
+	usage?: ReceiptUsage;
 	/** Number of chunks delivered to the consumer (streaming calls only). */
 	chunksDelivered?: number;
 	/** Action kind for governed non-LLM actions. Absent for LLM calls (backward compat). */
 	actionKind?: ActionKind;
 	/** Endpoint classification for this call. Absent on pre-M2 receipts. */
 	endpoint?: { class: EndpointClass; runtime: LocalRuntime };
-	/** Metering provenance: denomination and rate origin of the settled cost. */
-	meter?: { costBasis: CostBasis; rateSource: RateSource; computeMs?: number };
+	/**
+	 * Metering provenance: denomination and rate origin of the settled cost.
+	 *
+	 * `rateSource` says WHERE the rates came from. WHAT they were lives in the
+	 * sibling {@link TrustReceipt.pricing} block, deliberately NOT here — see the
+	 * note there for why this object cannot grow.
+	 */
+	meter?: {
+		costBasis: CostBasis;
+		rateSource: RateSource;
+		computeMs?: number;
+	};
+	/**
+	 * The rate side of the reconciliation surface (D5): the four RESOLVED per-1k
+	 * rates this cost was metered with, and the pricing-table version they came
+	 * from. With {@link TrustReceipt.usage} it is everything an auditor needs —
+	 * `ceil(sum(counts x rates / 1000))` floored at 1 reproduces `cost` exactly,
+	 * from the record alone.
+	 *
+	 * WHY THIS IS A TOP-LEVEL BLOCK AND NOT PART OF `meter` (Codex PR-85 P1-1).
+	 * The published `receipt.v1.schema.json` sets `additionalProperties: false`
+	 * on `meter` while leaving the receipt ROOT open (`additionalProperties:
+	 * true`). Widening `meter` would therefore make every v1 validator REJECT
+	 * every new receipt, breaking the site's "v1 stays frozen and keeps meaning
+	 * the same thing" promise; adding a new root-level object keeps v1
+	 * validators green and loses nothing, because recomputability only needs the
+	 * two halves to be findable, not adjacent. Anything else added later must
+	 * clear the same bar: the root is extensible, `meter` is not.
+	 *
+	 * Optional for backward compatibility with pre-D5 receipts and with non-LLM
+	 * action receipts (which meter no tokens at all), but every LLM settle emits
+	 * it. When present, BOTH fields are present.
+	 *
+	 * FROZEN (Codex PR-85 P1-2). `appliedRates` is deep-immutable and is this
+	 * receipt's own copy: a caller that mutates what it was handed cannot make
+	 * the rates recorded in the audit chain diverge from the rates the money was
+	 * computed with.
+	 */
+	pricing?: {
+		/** The four resolved per-1k rates the cost was computed with. */
+		appliedRates: AppliedRates;
+		/** Date-stamped version of the built-in pricing table (`PRICING_TABLE_VERSION`). */
+		tableVersion: string;
+	};
 	/**
 	 * Cost-center envelope snapshot — the PUSH half of visibility (the pull half is
 	 * `budgetContext()`). Present only when the call ran inside a `withCostCenter`
@@ -91,10 +189,23 @@ export interface TrustedResponse<T> {
 
 // ── Config schema ──
 
-/** Per-1k-token rate pair (usertokens). Shared by customRates and local.* rates. */
+/**
+ * Per-1k-token rate tiers (usertokens). Shared by customRates and local.* rates,
+ * and structurally the config-side mirror of `ModelRates` (ledger/pricing.ts).
+ *
+ * The two cache tiers are OPTIONAL and their absence is MEANINGFUL (D1): an
+ * omitted tier is not free, it prices at `inputPer1k` inside `costFromRates`.
+ * So they must stay `.optional()` with no default — a default of 0 would
+ * zero-bill cache tokens, and z.object() is closed, so leaving them undeclared
+ * silently STRIPS rates an operator wrote in usertrust.config.json (which is the
+ * same zero-billing outcome one indirection away). `.nonnegative()` still admits
+ * an explicit 0, which `costFromRates` honours as a deliberate override.
+ */
 const RateSchema = z.object({
 	inputPer1k: z.number().finite().nonnegative(),
 	outputPer1k: z.number().finite().nonnegative(),
+	cacheReadPer1k: z.number().finite().nonnegative().optional(),
+	cacheWritePer1k: z.number().finite().nonnegative().optional(),
 });
 
 export const TrustConfigSchema = z.object({

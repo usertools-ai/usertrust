@@ -8,7 +8,7 @@ import {
 	extractUsageFromEvent,
 	extractUsageFromProviderChunk,
 } from "../src/token-extractor.js";
-import type { DoneEvent, ErrorEvent, StreamEvent } from "../src/types.js";
+import { doneEvent, errorEvent, makeUsage, textDelta } from "./host-fixtures.js";
 
 describe("extractUsageFromProviderChunk — clamping and cache tokens", () => {
 	it("clamps non-finite, negative, and over-max token counts", () => {
@@ -93,8 +93,8 @@ describe("extractUsageFromProviderChunk — message_delta / OpenAI / Gemini", ()
 });
 
 describe("extractTextDeltaLength — provider shapes", () => {
-	it("pi-ai text_delta", () => {
-		expect(extractTextDeltaLength({ type: "text_delta", text: "hello" })).toBe(5);
+	it("host text_delta carries the text on `delta`", () => {
+		expect(extractTextDeltaLength({ type: "text_delta", contentIndex: 0, delta: "hello" })).toBe(5);
 	});
 
 	it("Anthropic content_block_delta", () => {
@@ -124,32 +124,32 @@ describe("extractTextDeltaLength — provider shapes", () => {
 
 describe("extractUsageFromEvent + createAccumulator", () => {
 	it("extracts usage from an error event", () => {
-		const ev: ErrorEvent = {
-			type: "error",
-			error: new Error("boom"),
-			usage: { inputTokens: 3, outputTokens: 4 },
-		};
-		expect(extractUsageFromEvent(ev)).toMatchObject({ inputTokens: 3, outputTokens: 4 });
+		expect(extractUsageFromEvent(errorEvent(makeUsage(3, 4)))).toMatchObject({
+			inputTokens: 3,
+			outputTokens: 4,
+		});
 	});
 
 	it("returns null for a non-terminal event", () => {
-		expect(extractUsageFromEvent({ type: "text_delta", text: "hi" } as StreamEvent)).toBeNull();
+		expect(extractUsageFromEvent(textDelta("hi"))).toBeNull();
 	});
 
 	it("accumulator records usage only from terminal events and counts chunks", () => {
 		const acc = createAccumulator();
-		acc.update({ type: "text_delta", text: "hi" } as StreamEvent);
-		const done: DoneEvent = {
-			type: "done",
-			stopReason: "stop",
-			usage: { inputTokens: 11, outputTokens: 22 },
-		};
-		acc.update(done);
+		acc.update(textDelta("hi"));
+		acc.update(doneEvent(makeUsage(11, 22)));
+		// `makeUsage`'s default cacheRead/cacheWrite are explicit 0s (a provider
+		// confirming no cache use), not absent keys — spec D5 treats that as
+		// data, so the accumulator carries them through rather than omitting
+		// them the way it does for a genuinely cache-field-less host Usage
+		// (see token-extractor.test.ts's older-runtime degradation test).
 		expect(acc.result()).toEqual({
 			inputTokens: 11,
 			outputTokens: 22,
 			chunksDelivered: 2,
 			usageReported: true,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
 		});
 	});
 });

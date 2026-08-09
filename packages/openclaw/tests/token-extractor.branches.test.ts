@@ -7,15 +7,11 @@ import {
 	extractUsageFromEvent,
 	extractUsageFromProviderChunk,
 } from "../src/token-extractor.js";
-import type { DoneEvent } from "../src/types.js";
+import { doneEvent, makeUsage } from "./host-fixtures.js";
 
 describe("token-extractor — remaining branch edges", () => {
 	it("clampTokens zeroes non-finite usage that bypasses readNum (event path)", () => {
-		const done: DoneEvent = {
-			type: "done",
-			stopReason: "stop",
-			usage: { inputTokens: Number.POSITIVE_INFINITY, outputTokens: Number.NaN },
-		};
+		const done = doneEvent(makeUsage(Number.POSITIVE_INFINITY, Number.NaN));
 		expect(extractUsageFromEvent(done)).toMatchObject({ inputTokens: 0, outputTokens: 0 });
 	});
 
