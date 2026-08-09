@@ -7,6 +7,7 @@ import type { AuditWriter } from "../../src/audit/chain.js";
 import type { TrustEngine } from "../../src/govern.js";
 import type { Governor } from "../../src/headless.js";
 import { createGovernor } from "../../src/headless.js";
+import { costFromRates, getModelRates } from "../../src/ledger/pricing.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 
 // Mock tigerbeetle-node (native module, never loaded in tests)
@@ -178,7 +179,15 @@ describe("headless governor", () => {
 		// Settle without providing actual usage
 		const receipt = await gov.settle(auth);
 
-		expect(receipt.cost).toBe(auth.estimatedCost);
+		// Review fix (round 1, spec D3): `auth.estimatedCost` is the
+		// write-premium-INFLATED hold (claude-sonnet-4-6 has a cache-write
+		// premium), which is deliberately fatter than plain
+		// `inputPer1k`-priced usage. The settle-time "no usage reported"
+		// fallback must charge the UN-INFLATED metering estimate, never the
+		// hold, so `receipt.cost` is strictly LESS than `auth.estimatedCost`
+		// here, not equal to it.
+		expect(receipt.cost).toBeLessThan(auth.estimatedCost);
+		expect(receipt.cost).toBe(costFromRates(getModelRates("claude-sonnet-4-6"), 100, 500));
 		expect(receipt.usageSource).toBe("estimated");
 
 		await gov.destroy();
@@ -628,6 +637,40 @@ describe("headless governor", () => {
 
 		await gov.destroy();
 	});
+
+	// ── D8 migration warning ──
+
+	it(
+		"warns on stderr once when customRates omits cache fields the table publishes " +
+			"(createGovernor is a config-load path warnCacheRateMigration is wired into)",
+		async () => {
+			const configDir = join(vaultBase, VAULT_DIR);
+			mkdirSync(configDir, { recursive: true });
+			writeFileSync(
+				join(configDir, "usertrust.config.json"),
+				JSON.stringify({
+					budget: 100_000,
+					pricing: "custom",
+					// claude-opus-4-6 publishes cacheReadPer1k/cacheWritePer1k in
+					// PRICING_TABLE; this entry, pre-D1 shaped, omits both.
+					customRates: { "claude-opus-4-6": { inputPer1k: 50, outputPer1k: 250 } },
+				}),
+			);
+
+			const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+			const gov = await createGovernor({ dryRun: true, vaultBase });
+
+			const migrationCalls = stderrSpy.mock.calls.filter((call) =>
+				String(call[0]).includes("cache reads will price at full input rate"),
+			);
+			expect(migrationCalls).toHaveLength(1);
+			expect(String(migrationCalls[0]?.[0])).toContain("claude-opus-4-6");
+
+			stderrSpy.mockRestore();
+			await gov.destroy();
+		},
+	);
 
 	// ── Policy denial ──
 

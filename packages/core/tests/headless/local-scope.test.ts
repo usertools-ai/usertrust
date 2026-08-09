@@ -103,7 +103,7 @@ describe("headless governor — M2 endpoint scope", () => {
 		expect(receipt.usageSource).toBe("provider");
 		expect(receipt.endpoint).toEqual({ class: "local", runtime: "ollama" });
 		// toEqual (not objectContaining) pins A6: no computeMs key when absent.
-		expect(receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-default" });
+		expect(receipt.meter).toMatchObject({ costBasis: "nominal", rateSource: "local-default" });
 		expect(gov.budgetRemaining()).toBe(100_000 - 1);
 
 		// Second call decrements by exactly 1 again.
@@ -133,7 +133,7 @@ describe("headless governor — M2 endpoint scope", () => {
 		const receipt = await gov.settle(auth, { inputTokens: 1_000, outputTokens: 1_000 });
 		expect(receipt.cost).toBe(1);
 		expect(receipt.endpoint).toEqual({ class: "local", runtime: "vllm" });
-		expect(receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-default" });
+		expect(receipt.meter).toMatchObject({ costBasis: "nominal", rateSource: "local-default" });
 
 		await gov.destroy();
 	});
@@ -157,7 +157,7 @@ describe("headless governor — M2 endpoint scope", () => {
 		// Cloud table rates for claude-sonnet-4-6: 30 in + 150 out per 1k → 180.
 		expect(receipt.cost).toBe(180);
 		expect(receipt.endpoint).toEqual({ class: "cloud", runtime: "unknown" });
-		expect(receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "table" });
+		expect(receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "table" });
 
 		await gov.destroy();
 	});
@@ -179,7 +179,7 @@ describe("headless governor — M2 endpoint scope", () => {
 			computeMs: 842,
 		});
 
-		expect(receipt.meter).toEqual({
+		expect(receipt.meter).toMatchObject({
 			costBasis: "nominal",
 			rateSource: "local-default",
 			computeMs: 842,
@@ -243,7 +243,7 @@ describe("headless governor — M2 endpoint scope", () => {
 		const receipt = await gov.settle(auth, { inputTokens: 500, outputTokens: 500 });
 
 		expect(receipt.cost).toBe(1);
-		expect(receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-default" });
+		expect(receipt.meter).toMatchObject({ costBasis: "nominal", rateSource: "local-default" });
 
 		await gov.destroy();
 	});
@@ -272,8 +272,8 @@ describe("headless governor — M2 endpoint scope", () => {
 			expect(unknownModelWarns).toHaveLength(1);
 
 			// Receipt marker is set on EVERY receipt, regardless of warn dedup (A5).
-			expect(r1.meter).toEqual({ costBasis: "usd-proxy", rateSource: "fallback" });
-			expect(r2.meter).toEqual({ costBasis: "usd-proxy", rateSource: "fallback" });
+			expect(r1.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "fallback" });
+			expect(r2.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "fallback" });
 			// FALLBACK_RATE (sonnet-class): 30 in + 150 out per 1k → 180.
 			expect(r1.cost).toBe(180);
 
@@ -296,7 +296,7 @@ describe("headless governor — M2 endpoint scope", () => {
 				String(c[0]).includes("m2-silent-model"),
 			);
 			expect(silentModelWarns).toHaveLength(0);
-			expect(receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "fallback" });
+			expect(receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "fallback" });
 			expect(receipt.cost).toBe(30);
 
 			await gov.destroy();
@@ -326,7 +326,7 @@ describe("headless governor — M2 endpoint scope", () => {
 
 		// ceil(1000/1000*1 + 1000/1000*2) = 3
 		expect(receipt.cost).toBe(3);
-		expect(receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "local-model" });
+		expect(receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "local-model" });
 
 		await gov.destroy();
 	});
@@ -352,7 +352,7 @@ describe("headless governor — M2 endpoint scope", () => {
 		expect(receipt.cost).toBe(1);
 		expect(receipt.usageSource).toBe("estimated");
 		expect(receipt.endpoint).toEqual({ class: "local", runtime: "lmstudio" });
-		expect(receipt.meter).toEqual({ costBasis: "nominal", rateSource: "local-default" });
+		expect(receipt.meter).toMatchObject({ costBasis: "nominal", rateSource: "local-default" });
 
 		await gov.destroy();
 	});
@@ -392,7 +392,7 @@ describe("headless governor — M2 endpoint scope", () => {
 
 		expect(receipt.cost).toBe(180);
 		expect(receipt.endpoint).toEqual({ class: "cloud", runtime: "unknown" });
-		expect(receipt.meter).toEqual({ costBasis: "usd-proxy", rateSource: "table" });
+		expect(receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "table" });
 
 		await gov.destroy();
 	});

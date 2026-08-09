@@ -218,6 +218,15 @@ USERTRUST_OPENCLAW_CONTRACT=1 npx vitest run packages/openclaw/tests/contract.te
 `USERTRUST_OPENCLAW_CONTRACT=1` is what makes an absent or mismatched openclaw a hard failure;
 without it the host-smoke suite skips itself with a notice naming that job.
 
+**Cache-tier normalization is guaranteed only under the pinned `@mariozechner/pi-ai` (contract
+suite pins the pinned adapters' behavior; the peer floor stays `>=0.12.0`).** On an older runtime
+`pi-ai` that doesn't yet surface the cache-read/cache-write fields, this plugin degrades
+predictably rather than losing money: the absent cache tiers ride inside `inputTokens` and price
+at `inputPer1k`, the same conservative-overstatement fallback the SDK applies to any absent cache
+rate (see the Money invariants in the root `AGENTS.md`). Cache tokens are never dropped and never
+billed at zero — the worst case on an older host is paying the plain input rate for what would
+otherwise be a cheaper cache-read.
+
 The `-0` on the openclaw peer floor is load-bearing, not a typo. OpenClaw ships its releases with
 a numeric build suffix, which node-semver treats as a *prerelease*; a prerelease version never
 satisfies a release-only range, so `>=2026.7.1` would exclude the very build this package pins.

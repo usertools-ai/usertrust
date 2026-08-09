@@ -138,11 +138,18 @@ describe("extractUsageFromEvent + createAccumulator", () => {
 		const acc = createAccumulator();
 		acc.update(textDelta("hi"));
 		acc.update(doneEvent(makeUsage(11, 22)));
+		// `makeUsage`'s default cacheRead/cacheWrite are explicit 0s (a provider
+		// confirming no cache use), not absent keys — spec D5 treats that as
+		// data, so the accumulator carries them through rather than omitting
+		// them the way it does for a genuinely cache-field-less host Usage
+		// (see token-extractor.test.ts's older-runtime degradation test).
 		expect(acc.result()).toEqual({
 			inputTokens: 11,
 			outputTokens: 22,
 			chunksDelivered: 2,
 			usageReported: true,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
 		});
 	});
 });

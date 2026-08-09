@@ -9,7 +9,12 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import pc from "picocolors";
-import { modelsForProvider, PRICING_TABLE, PRICING_TABLE_VERSION } from "../ledger/pricing.js";
+import {
+	modelsForProvider,
+	PRICING_TABLE,
+	PRICING_TABLE_VERSION,
+	resolveAppliedRates,
+} from "../ledger/pricing.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { TrustConfig } from "../shared/types.js";
 import { TrustConfigSchema } from "../shared/types.js";
@@ -40,16 +45,31 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 			: Object.keys(PRICING_TABLE);
 
 	if (json) {
-		const rates: Record<string, { inputPerM: number; outputPerM: number; source: string }> = {};
+		const rates: Record<
+			string,
+			{
+				inputPerM: number;
+				outputPerM: number;
+				cacheReadPerM: number;
+				cacheWritePerM: number;
+				source: string;
+			}
+		> = {};
 		for (const model of modelKeys) {
 			const custom = customRates?.[model];
 			const base = PRICING_TABLE[model];
 			const source = custom ? "custom" : "recommended";
 			const r = custom ?? base;
 			if (r) {
+				// Four resolved tiers (D1): an omitted cache rate is published at
+				// inputPer1k — what the operator is actually charged for it — never
+				// as a hole in the export.
+				const applied = resolveAppliedRates(r);
 				rates[model] = {
-					inputPerM: r.inputPer1k / 10,
-					outputPerM: r.outputPer1k / 10,
+					inputPerM: applied.inputPer1k / 10,
+					outputPerM: applied.outputPer1k / 10,
+					cacheReadPerM: applied.cacheReadPer1k / 10,
+					cacheWritePerM: applied.cacheWritePer1k / 10,
 					source,
 				};
 			}
@@ -68,11 +88,15 @@ export async function run(rootDir?: string, opts?: PricingOpts): Promise<void> {
 		const r = custom ?? base;
 		if (!r) continue;
 
-		const inputPerM = (r.inputPer1k / 10).toFixed(2);
-		const outputPerM = (r.outputPer1k / 10).toFixed(2);
+		const applied = resolveAppliedRates(r);
+		const inputPerM = (applied.inputPer1k / 10).toFixed(2);
+		const outputPerM = (applied.outputPer1k / 10).toFixed(2);
+		const cacheReadPerM = (applied.cacheReadPer1k / 10).toFixed(2);
+		const cacheWritePerM = (applied.cacheWritePer1k / 10).toFixed(2);
 		const tag = custom ? pc.yellow(" (custom)") : "";
 		console.log(
-			`  ${pc.cyan(model.padEnd(24))} $${inputPerM} / $${outputPerM} per 1M tokens${tag}`,
+			`  ${pc.cyan(model.padEnd(24))} in $${inputPerM} out $${outputPerM} ` +
+				`cache-read $${cacheReadPerM} cache-write $${cacheWritePerM} per 1M${tag}`,
 		);
 	}
 
