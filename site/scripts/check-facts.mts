@@ -44,6 +44,14 @@
  * percentages), because those only ever survived by sharing a line with an
  * allowlisted fragment.
  *
+ * A SPAN IS ONLY EXEMPT IF ITS SYNTAX IS COMPLETE. The first cut of the
+ * object-property rule ended in `[^,}\n]+`, which consumed the rest of the line
+ * after any `word:` — reopening colon-label prose (`<p>models: 9999
+ * supported</p>` passed; the control `<p>9999 customers</p>` failed) inside the
+ * very change that claimed to close it. Every value alternative now has to be a
+ * finished literal followed by real punctuation. When adding a fragment, write
+ * the failing prose line FIRST and prove the gate still catches it.
+ *
  * A full JSX parse would be stricter still and remains the post-launch
  * intention; span-stripping is the version that needs no parser and no new
  * dependency in a prebuild gate.
@@ -92,10 +100,18 @@ const STRIP_SPANS: RegExp[] = [
 	// qualifies — the point is no longer to enumerate safe names (the old list
 	// was the bypass) but to remove the assignment and leave the text.
 	/\b[A-Za-z_][\w:-]*\s*=\s*(?:"[^"]*"|'[^']*'|\{(?:[^{}]|\{[^{}]*\})*\})/g,
-	// CSS-in-JS / object-literal property assignments: `left: "25%"`,
-	// `animationDelay: `${i * ROW_STAGGER_MS}ms``. Anchored on a property name
-	// followed by a colon, up to the next comma or closing brace.
-	/\b[A-Za-z_]\w*\s*:\s*(?:"[^"]*"|'[^']*'|`[^`]*`|[^,}\n]+)/g,
+	// CSS-in-JS / object-literal property assignments: `opacity: 0,`,
+	// `stiffness: 550,`, `type: "spring",`, `animationDelay: `${i * MS}ms`,`.
+	//
+	// THE VALUE MUST BE A COMPLETE LITERAL AND MUST END THE PROPERTY. An earlier
+	// cut allowed `[^,}\n]+` as a final alternative, which ate everything to the
+	// end of the line after any `word:` — so `<p>models: 9999 supported</p>`
+	// passed while the control `<p>9999 customers</p>` failed. That is precisely
+	// the colon-label-prose bypass this file claims to have closed, reopened by
+	// the rule meant to close it. A quoted string, a template literal or a
+	// number, followed by real punctuation, is a property assignment; a number
+	// followed by more English is prose.
+	/\b[A-Za-z_]\w*\s*:\s*(?:"[^"]*"|'[^']*'|`[^`]*`|-?\d+(?:\.\d+)?)(?=\s*[,;)}\]])/g,
 	// fixture/facts-derived expressions, including the property path that
 	// follows them: `facts.facts.transferCodes.value`.
 	/\b(?:facts|receipt|chain|transcript)\.[\w.?[\]]*/g,
@@ -118,6 +134,12 @@ const STRIP_SPANS: RegExp[] = [
 	// continuation line where the property name sits on the line above.
 	/\b(?:rgba?|hsla?)\([^)]*\)/g,
 	/\b(?:repeating-)?(?:linear|radial|conic)-gradient\([^)]*\)/g,
+	// CSS functional notation with numeric arguments: `minmax(0,12rem)`,
+	// `clamp(2.5rem,6vw,4.5rem)`, `calc(4.81rem + 1.5rem)`,
+	// `cubic-bezier(0.5,0,0.5,1)`. Structural CSS wherever it appears, including
+	// inside a comment explaining the utility class it came from. None of these
+	// four names is an English word, so none can swallow prose.
+	/\b(?:calc|clamp|minmax|cubic-bezier)\([^)]*\)/g,
 	// An attribute whose template-literal value OPENS on this line and does not
 	// close on it (`className={`... ${`). Anchored on real attribute syntax, so
 	// it strips a wrapped class list and nothing else.
