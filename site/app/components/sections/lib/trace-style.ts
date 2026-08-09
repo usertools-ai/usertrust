@@ -99,8 +99,14 @@ function routePoints(
 		return [{ x: x1, y: y1 }, corner, { x: x2, y: y2 }];
 	}
 	if (leadDelta < crossDelta) {
-		// Diagonal first, then straight along the CROSS axis into the target.
-		const corner = leadIsX ? { x: x2, y: y1 + sy * leadDelta } : { x: x1 + sx * crossDelta, y: y2 };
+		// Diagonal first, then straight along the CROSS axis into the target. The
+		// diagonal spends the SHORT axis entirely — `leadDelta` on both axes, which
+		// is what makes it 45 degrees. Spending `crossDelta` here instead lands the
+		// corner ON the target and collapses the whole route to one shallow line
+		// (a 12-degree slope in a grammar that claims 45s and 90s).
+		// The same point either way: a 45 spends the same amount on both axes, so
+		// which axis "leads" only decides WHICH of the two runs is the diagonal.
+		const corner = { x: x1 + sx * leadDelta, y: y1 + sy * leadDelta };
 		return [{ x: x1, y: y1 }, corner, { x: x2, y: y2 }];
 	}
 	// Perfect 45 — no corner to round.

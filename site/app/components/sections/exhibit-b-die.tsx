@@ -107,6 +107,14 @@ export default function ExhibitBDie() {
 						<circle cx={6} cy={7} r={1.4} className="die-substrate-dot" />
 						<circle cx={19} cy={22} r={1.4} className="die-substrate-dot" />
 					</pattern>
+					{/* The die's ambience. A FLAT low-alpha rect reads as a second,
+					    larger rounded box sitting behind the chip — an edge is an edge
+					    at any opacity. A radial falloff has no edge to see. */}
+					<radialGradient id="dieHalo" cx="0.5" cy="0.5" r="0.5">
+						<stop offset="0%" stopColor="#34d399" stopOpacity="0.16" />
+						<stop offset="55%" stopColor="#34d399" stopOpacity="0.06" />
+						<stop offset="100%" stopColor="#34d399" stopOpacity="0" />
+					</radialGradient>
 					<clipPath id="dieFaceClip">
 						<rect x={460} y={250} width={200} height={200} rx={24} />
 					</clipPath>
@@ -115,9 +123,8 @@ export default function ExhibitBDie() {
 				{/* substrate mesh — behind everything, clipped to the trace field */}
 				<rect x={0} y={60} width={900} height={580} fill="url(#dieSubstrate)" />
 
-				{/* soft emerald glow — layered rects, opacity only, no filter */}
-				<rect x={404} y={194} width={312} height={312} rx={44} className="die-glow-outer" />
-				<rect x={432} y={222} width={256} height={256} rx={34} className="die-glow-inner" />
+				{/* soft emerald ambience — a radial falloff, no filter and no visible edge */}
+				<rect x={330} y={120} width={460} height={460} fill="url(#dieHalo)" />
 
 				{/* fine trace field — denser than the three named routes, each ending
 				    in a terminal pad at the die's edge */}

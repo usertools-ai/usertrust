@@ -41,9 +41,19 @@ export default function ExhibitE() {
 					don&rsquo;t take our word for it.
 				</h2>
 
-				<div className="mt-12 grid items-center gap-12 md:grid-cols-2">
+				{/* min-w-0 on both tracks: a grid item's default minimum is its
+				    CONTENT's min-content, and `overflow-x-auto` inside the frame does
+				    not lower that — so the transcript's full-length merkle root (one
+				    unbreakable hex token, ~538px wide at the 14px body size) blew the
+				    single column out to 572px at a 390px viewport. Body is overflow-x-hidden,
+				    so the overflow was CLIPPED rather than scrollable: the right third
+				    of the terminal, root hash included, was unreachable on a phone.
+				    With the minimum pinned, the line scrolls inside TerminalFrame's own
+				    overflow-x-auto, which is what the frame is for. Same defect and
+				    same fix as the Exhibit A grid documents. */}
+				<div className="mt-12 grid grid-cols-[minmax(0,1fr)] items-center gap-12 md:grid-cols-2">
 					{/* set-piece: the outlined zero over halftone */}
-					<figure className="glow-emerald relative flex flex-col items-center justify-center py-8">
+					<figure className="glow-emerald relative flex min-w-0 flex-col items-center justify-center py-8">
 						<div aria-hidden="true" className="halftone absolute inset-0" />
 						<span
 							className="font-display relative select-none leading-none text-transparent"
@@ -63,7 +73,7 @@ export default function ExhibitE() {
 					</figure>
 
 					{/* terminal: the captured workspace-verifier transcript */}
-					<div>
+					<div className="min-w-0">
 						{/* Stacked below sm: on a phone the narrow label column forced
 						    the tracked label onto two lines beside a two-line chip. */}
 						<div className="mb-3 flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">

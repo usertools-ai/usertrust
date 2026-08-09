@@ -90,18 +90,20 @@
 	}
 }
 
-/* Document scrolling */
-html {
-	/*
-	 * The nav is `fixed top-0`, so an anchor jump lands underneath it without
-	 * this. 5rem clears the real header: the bar is py-4 (2rem) around a logo
-	 * pill, which this pass grew to a 44px tap target (2.75rem), plus the 1px border-b: 77px ≈ 4.81rem.
-	 * The nav dropdown's max-h subtracts the same figure — keep them in step. Re-measure
-	 * if the nav padding changes — a value shorter than the header silently
-	 * reintroduces the bug.
-	 */
-	scroll-padding-top: 5rem;
-}
+/*
+ * Document scrolling.
+ *
+ * `scroll-padding-top` used to live here, sized to the landing page's fixed
+ * nav. It is gone, and the offset now belongs to the TARGET
+ * (`.section-anchor`, below). The two do not replace each other — they ADD:
+ * with both in force every anchor landed 181px down (80 from the padding, 101
+ * from the margin) instead of the ~101 either one alone intends, which is the
+ * "lands misaligned" symptom, measured. One mechanism, one place.
+ *
+ * The docs surface is unaffected: fumadocs sizes its own heading scroll
+ * margins against its own sticky header, and this rule was written for THIS
+ * nav (its old comment derived 5rem from this bar's 77px height).
+ */
 
 /* Smooth scrolling is motion — reduced-motion users get instant anchor jumps
    (motion doctrine #5: finished states, not disabled features). */
@@ -465,10 +467,11 @@ html {
    is where the requirement actually lives.
 
    The value is a SUM, not a guess: 4.81rem is the fixed nav's own rendered
-   height (44px link row + 2 x 16px py-4 + 1px border — the same figure the
-   nav dropdown's max-h and html's scroll-padding-top are derived from), plus
-   1.5rem of breath so the landed heading is clear of the bar rather than
-   tucked against it. Re-measure all three together if the nav padding moves. */
+   height (44px link row + 2 x 16px py-4 + 1px border — the same figure the nav
+   dropdown's max-h is derived from), plus 1.5rem of breath so the landed
+   section clears the bar rather than tucking under it. Measured: every
+   anchored section lands its top edge 24px below the nav, identically at 390,
+   768, 1280 and 1512. Re-measure both together if the nav padding moves. */
 :root {
 	--anchor-offset: calc(4.81rem + 1.5rem);
 }
@@ -847,13 +850,6 @@ html {
    perception so it reads as substrate texture, never as content. */
 .die-substrate-dot {
 	fill: rgba(52, 211, 153, 0.06);
-}
-/* Soft emerald glow — stacked rounded rects, opacity only, no filter. */
-.die-glow-outer {
-	fill: rgba(52, 211, 153, 0.04);
-}
-.die-glow-inner {
-	fill: rgba(52, 211, 153, 0.08);
 }
 .die-pin {
 	stroke: rgba(52, 211, 153, 0.25);

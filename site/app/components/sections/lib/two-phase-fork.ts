@@ -20,6 +20,7 @@ export interface ForkRoute {
 	y1: number;
 	x2: number;
 	y2: number;
+	lead: "h" | "v";
 }
 
 export interface ForkNode {
@@ -39,10 +40,19 @@ const MID_Y = 80;
 const TOP_Y = 26;
 const BOTTOM_Y = 134;
 
+/**
+ * The two branches lead on the VERTICAL axis, the trunk on the horizontal.
+ *
+ * That is not a style choice. A horizontal-leading branch spends its surplus x
+ * FIRST, so both branches run along the trunk line before diverging — and the
+ * via-dot then marks a point where nothing visibly happens, with the apparent
+ * fork somewhere downstream of it. Leading vertically puts the diagonal at the
+ * junction, so the dot marks the split a reader actually sees.
+ */
 export const FORK_ROUTES: ForkRoute[] = [
-	{ key: "hold", x1: IN_X, y1: MID_Y, x2: BRANCH_X, y2: MID_Y },
-	{ key: "settle", x1: BRANCH_X, y1: MID_Y, x2: OUT_X, y2: TOP_Y },
-	{ key: "void", x1: BRANCH_X, y1: MID_Y, x2: OUT_X, y2: BOTTOM_Y },
+	{ key: "hold", x1: IN_X, y1: MID_Y, x2: BRANCH_X, y2: MID_Y, lead: "h" },
+	{ key: "settle", x1: BRANCH_X, y1: MID_Y, x2: OUT_X, y2: TOP_Y, lead: "v" },
+	{ key: "void", x1: BRANCH_X, y1: MID_Y, x2: OUT_X, y2: BOTTOM_Y, lead: "v" },
 ];
 
 export const FORK_NODES: ForkNode[] = [

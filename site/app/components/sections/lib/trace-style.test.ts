@@ -45,6 +45,28 @@ test("no segment is ever an organic curve — only lines and corner fillets", ()
 	assert.ok(!/[CSTA]/.test(d), `unexpected curve command in: ${d}`);
 });
 
+test("when the CROSS axis is the major one, the diagonal comes first and is still 45", () => {
+	// lead "v" with dy 54 and dx 266: the vertical is the SHORT axis, so the
+	// route opens with a 45 that spends all 54 of it, then runs flat to the
+	// target. The bug this pins produced one shallow straight line instead —
+	// a 12-degree slope in a grammar whose whole claim is 45s and 90s.
+	const d = routedTracePath(220, 80, 486, 26, { lead: "v" });
+	assert.equal(grammar(d), "MLQL");
+	const pts = points(d);
+	const [cx, cy] = pts[2]; // the corner
+	assert.equal(Math.abs(cx - 220), Math.abs(cy - 80), "the opening run must be a true 45");
+	assert.equal(cy, 26, "after the diagonal the route is flat at the target y");
+	assert.deepEqual(pts[pts.length - 1], [486, 26]);
+});
+
+test("the mirrored case: horizontal lead with a taller cross axis", () => {
+	const d = routedTracePath(0, 0, 40, 200, { lead: "h" });
+	const pts = points(d);
+	const [cx, cy] = pts[2];
+	assert.equal(Math.abs(cx - 0), Math.abs(cy - 0), "the opening run must be a true 45");
+	assert.equal(cx, 40, "after the diagonal the route is vertical at the target x");
+});
+
 test("horizontal lead routes along x first", () => {
 	// dx 200, dy 40, lead h: the first move is horizontal, so y stays put.
 	const pts = points(routedTracePath(0, 0, 200, 40, { lead: "h" }));

@@ -35,7 +35,7 @@ function TwoPhaseFork() {
 			{FORK_ROUTES.map((r) => (
 				<path
 					key={r.key}
-					d={routedTracePath(r.x1, r.y1, r.x2, r.y2, { lead: "h" })}
+					d={routedTracePath(r.x1, r.y1, r.x2, r.y2, { lead: r.lead })}
 					className={TRACE.baseClass}
 					strokeWidth={TRACE.baseWidth}
 				/>
@@ -43,7 +43,7 @@ function TwoPhaseFork() {
 			{FORK_ROUTES.map((r) => (
 				<path
 					key={`${r.key}-core`}
-					d={routedTracePath(r.x1, r.y1, r.x2, r.y2, { lead: "h" })}
+					d={routedTracePath(r.x1, r.y1, r.x2, r.y2, { lead: r.lead })}
 					className={TRACE.coreClass}
 					strokeWidth={TRACE.coreWidth}
 				/>

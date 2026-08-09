@@ -160,9 +160,9 @@ export default function ExhibitAReceipts({
 						title={
 							<div className="flex w-full items-center gap-2">
 								<LabMark panel={panel} className="h-4 w-4 shrink-0 text-white/45" />
-								<span className="min-w-0 truncate">
-									receipt · {panel.lab} · returned from the governed call
-								</span>
+								{/* Short enough to fit the bar. The longer wording ellipsized
+								    at every viewport, which turns a label into a shrug. */}
+								<span className="min-w-0 truncate">receipt · {panel.lab}</span>
 							</div>
 						}
 						footer={
