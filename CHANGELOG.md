@@ -106,6 +106,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   iterable with a settled-`.receipt` promise — not the SDK's raw `Stream`
   (which the runtime never returns from governed `create`; the envelope's own
   `receipt` is the pre-settlement estimate). Types-only; no runtime change.
+- `TrustedClient` types: the same envelope now covers the remaining governed
+  surfaces — OpenAI `chat.completions.create` and `responses.create`, and Google
+  `models.generateContent`. All three resolved to the provider SDK's raw return
+  type while the runtime had been returning `{ response, receipt }` since the
+  proxies were written, so an OpenAI or Google consumer had no typed path to
+  `.receipt` at all and had to cast through `as unknown as`. Streaming calls on
+  either OpenAI surface resolve `response` to `GovernedStream<T>`, matching the
+  generic async-iterable branch of `interceptCall` that actually wraps them.
+  `TrustedClient<T>` now mirrors `detectClientKind`'s ORDER and BOTH halves of
+  its shape test, as exclusive branches — Anthropic, else OpenAI, else Google —
+  so a hybrid client is typed as governed on exactly the one provider surface
+  `trust()` proxies at runtime. Both halves means the governed method must be
+  callable AND its namespace must be a non-callable object: every namespace walk
+  in the runtime is gated on `typeof ns === "object"`, which a function object
+  fails, so a client whose `chat`, `messages`, `models`, `responses` or `beta` is
+  a callable carrying properties is skipped by the runtime and is now skipped by
+  the type too (falling through to the next provider where one applies).
+  Namespaces are re-added through homomorphic mapped types rather than plain
+  intersections, so `readonly` — which real `@google/genai` declares on `models`
+  — and `?` both survive, and a namespace the client never declared does not
+  become a phantom property. The ungoverned inventory stays raw and
+  is pinned by type tests: `chat.completions.parse` / `.stream` / `.runTools`,
+  `responses.stream` / `.parse` / `.retrieve` / `.cancel` / `.delete` /
+  `.compact`, the OpenAI `beta.*` namespace, legacy `completions.create`, and
+  Google `models.generateContentStream`. The OpenAI assertions run against the
+  real installed `openai@^7.3.0` types; the Google mapper is asserted against a
+  structural mock only — no `@google/genai` devDependency exists yet, so real
+  `@google/genai` compatibility is unverified. Types-only; no runtime change.
 - A policy rule with no `description` no longer renders its identifier twice
   in the denial reason (`[scarcity-brake] scarcity-brake` is now
   `[scarcity-brake]`).
