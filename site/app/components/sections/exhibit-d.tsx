@@ -20,8 +20,18 @@ const ANCHOR_BADGES: { label: string; experimental?: boolean }[] = [
 	{ label: "SIEM" },
 	{ label: "Rekor", experimental: true },
 ];
-const DRY_RUN_LABEL =
-	"entries captured in dry-run — audit + policy only; ledger enforcement requires TigerBeetle";
+// Provenance must match the committed fixture: chain-slice.json is read from
+// the LEDGER vault when the capture runs with TigerBeetle (scripts/
+// capture-evidence.mts, `sliceVault = ledgerVault ?? dryVault`), and the
+// current capture did. A dry-run-only capture would need this flipped back.
+const CAPTURE_LABEL =
+	"entries captured in ledger mode — TigerBeetle enforcing; dry-run writes the same audit chain without the ledger";
+// The DOM demo's break arithmetic hashes each card's visible fields; the
+// printed stubs are the vault's captured hashes over the full event record.
+// Said on-page so the post-tamper "was …" digest differing from the printed
+// stub reads as scope, not sleight of hand.
+const DEMO_SCOPE =
+	"live demo recomputes sha-256 over each card's visible fields — printed stubs are the vault's captured hashes over the full event record";
 const SMALL_PRINT = "tamper-evident, not tamper-proof — detection, not recovery.";
 
 function MerkleTree({ entries }: { entries: ChainSlice["entries"] }) {
@@ -159,7 +169,7 @@ export default function ExhibitD() {
 								</li>
 							))}
 						</ul>
-						<p className="w-full font-mono text-[12px] text-white/70">{DRY_RUN_LABEL}</p>
+						<p className="w-full font-mono text-[12px] text-white/70">{CAPTURE_LABEL}</p>
 					</div>
 				</div>
 			</div>
@@ -175,6 +185,7 @@ export default function ExhibitD() {
 
 			<div className="mt-6">
 				<ExhibitDDom entries={slice.entries} />
+				<p className="mt-2 font-mono text-[12px] text-white/70">{DEMO_SCOPE}</p>
 			</div>
 
 			{/* Three left-aligned mono lines, each owning a full 1120px row for
