@@ -129,14 +129,22 @@ export default function ExhibitG() {
 				    own fixture titles say the default verifier exits clean on them.
 				    Calling those forgeries would have the page accusing an honest
 				    operator, on the one exhibit whose whole argument is that the
-				    verdict strings are the verifier's own words. */}
+				    verdict strings are the verifier's own words.
+				    The strict flag is named exactly: `--require-anchor`, whose own
+				    usage line in packages/verify/src/cli.ts reads "Strict:
+				    UNANCHORED/UNVERIFIABLE/STALE" and fails — the same three states
+				    this legend names, and exactly the set exitCodeForAnchored gates
+				    on. There is no `--strict`: the arg loop's terminal `else usage()`
+				    would print the usage block and fail, which LOOKS like strict mode
+				    rejecting the vault, so a wrong flag name here would conceal
+				    itself — which is why the name is copied from the source. */}
 				<p className="mt-2 font-mono text-[12px] leading-5 text-white/70">
 					<span className="text-ut">emerald</span> rows are control cases — legitimate operations
 					that must verify. <span className="text-danger-ink">red</span> rows are the non-verified
 					states: forgeries the verifier refuses (ANCHOR_MISMATCH, ANCHOR_INVALID), and the
 					can&rsquo;t-attest states (ANCHOR_STALE, ANCHOR_UNVERIFIABLE, UNANCHORED) — no accusation
 					in those, and the default verifier still exits clean;{" "}
-					<span className="whitespace-nowrap">--strict</span> is what fails them.
+					<span className="whitespace-nowrap">--require-anchor</span> is what fails them.
 				</p>
 
 				{/* terminal-styled corpus table — every row links to the real test file */}
