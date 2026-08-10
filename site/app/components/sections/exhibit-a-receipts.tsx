@@ -189,11 +189,38 @@ export default function ExhibitAReceipts({
 							</div>
 						}
 					>
-						{/* The receipt JSON — line-keyed spans the island targets. */}
-						<pre>
+						{/* The receipt JSON — line-keyed spans the island targets.
+
+						    It wraps rather than scrolls. The rail move handed this
+						    frame most of a rail's width back, but the audit hash is
+						    one unbroken hex token and its line still runs
+						    past the widest track the composition allows — so the
+						    evidence line the whole exhibit is about sat behind an
+						    overflow scrollbar. `pre-wrap` + break-anywhere folds the
+						    tail onto a continuation line INSIDE the same
+						    `[data-line]` span, so the hash is readable without a
+						    gesture and the annotation crosslink, the leader-trace
+						    geometry and the row highlight all still address one row.
+						    Every other line fits, so nothing else changes shape.
+
+						    `break-all` and not `overflow-wrap: anywhere`: "anywhere"
+						    opens a break opportunity between the closing quote and its
+						    comma, and on a phone the greedy fill took it — the hash's
+						    trailing comma landed alone on a fourth line. `break-all`
+						    breaks inside the hex run instead. */}
+						<pre className="whitespace-pre-wrap break-all">
 							<code>
 								{panel.lines.map((line) => (
-									<span key={line.key} data-line={line.key} className="block rounded-sm px-1 py-px">
+									// The hanging indent is what makes the wrap read as JSON
+									// rather than as a stray line of hex: the continuation
+									// lands one indent step in, under the key it belongs to.
+									// `pr-1` + an explicit `pl` instead of `px-1` so the
+									// override never depends on utility sort order.
+									<span
+										key={line.key}
+										data-line={line.key}
+										className="block rounded-sm py-px pr-1 pl-[calc(0.25rem+2ch)] [text-indent:-2ch]"
+									>
 										{"  ".repeat(line.indent)}
 										{line.tokens.map((tok) => (
 											<span
