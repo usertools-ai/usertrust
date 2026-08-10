@@ -79,10 +79,16 @@ const REPRO_LINES = [
 const REPRO_COMMAND = REPRO_LINES.join(" && ");
 
 /**
- * Semantic rationing: red is for failure verdicts only; emerald is the
- * mark of verification only. The corpus's happy-path control rows return
- * ANCHORED_VERIFIED (possibly with a warning suffix) and earn emerald —
- * every forgery row is red.
+ * Semantic rationing: emerald is the mark of VERIFICATION only. The corpus's
+ * happy-path control rows return ANCHORED_VERIFIED (possibly with a warning
+ * suffix) and earn it; every other verdict is red.
+ *
+ * Red therefore means "not verified", which is a wider set than "forged": it
+ * also covers ANCHOR_STALE, UNANCHORED and ANCHOR_UNVERIFIABLE, where the
+ * verifier is declining to attest rather than catching anyone, and where the
+ * default exit code is still clean. The legend above says so — the colour
+ * cannot make that distinction on its own, and inventing a third ink for it
+ * would break the page's two-ink verdict grammar.
  */
 function verdictClass(verdict: string): string {
 	return verdict.startsWith("ANCHORED_VERIFIED") ? "text-ut" : "text-danger";
@@ -112,15 +118,25 @@ export default function ExhibitG() {
 					<span className="text-2xl leading-none text-white/90">{corpus.attacks.length}</span>{" "}
 					scenarios · every verdict below is the string the verifier really returns
 				</p>
-				{/* The legend the subhead now requires. Not every row is an attack: the
-				    corpus includes CONTROL cases — a benign duplicate, a clean rotation,
-				    the happy paths — whose correct answer is ANCHORED_VERIFIED. Without
-				    this line an emerald row sitting under "every forgery fails" reads as
-				    a forgery that got through. */}
+				{/* The legend the subhead now requires, and it has to cut BOTH ways.
+				    Not every row is an attack: the corpus includes CONTROL cases — a
+				    benign duplicate, a clean rotation, the happy paths — whose correct
+				    answer is ANCHORED_VERIFIED, and without this line an emerald row
+				    under "every forgery fails" reads as a forgery that got through.
+				    And not every red row is a forgery: ANCHOR_STALE, UNANCHORED and
+				    ANCHOR_UNVERIFIABLE are the verifier declining to ATTEST — a legacy
+				    vault, an unreachable witness, no trust material on hand — and their
+				    own fixture titles say the default verifier exits clean on them.
+				    Calling those forgeries would have the page accusing an honest
+				    operator, on the one exhibit whose whole argument is that the
+				    verdict strings are the verifier's own words. */}
 				<p className="mt-2 font-mono text-[12px] leading-5 text-white/70">
 					<span className="text-ut">emerald</span> rows are control cases — legitimate operations
-					that must verify. <span className="text-danger-ink">red</span> rows are forgeries the
-					verifier must refuse.
+					that must verify. <span className="text-danger-ink">red</span> rows are the non-verified
+					states: forgeries the verifier refuses (ANCHOR_MISMATCH, ANCHOR_INVALID), and the
+					can&rsquo;t-attest states (ANCHOR_STALE, ANCHOR_UNVERIFIABLE, UNANCHORED) — no accusation
+					in those, and the default verifier still exits clean;{" "}
+					<span className="whitespace-nowrap">--strict</span> is what fails them.
 				</p>
 
 				{/* terminal-styled corpus table — every row links to the real test file */}
@@ -199,11 +215,18 @@ export default function ExhibitG() {
 				    uses. Text unchanged. */}
 				<div className="mt-8 grid gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:items-center lg:gap-10">
 					<div className="min-w-0">
-						<div className="mb-3 flex items-center justify-between gap-4">
+						{/* Two fixes to one row. The chip's label took THREE lines inside
+						    the chip on a phone, because the eyebrow beside it took the
+						    width first and the chip kept only what was left. The label is
+						    shorter now — the caption directly beside it already says what
+						    is being reproduced — and below sm the row stacks so the chip
+						    gets the full column instead of a remainder. Measured after:
+						    one line, at every viewport. */}
+						<div className="mb-3 flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
 							<span className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
 								reproduce it yourself
 							</span>
-							<CopyChip text={REPRO_COMMAND} label="copy reproduction commands" />
+							<CopyChip text={REPRO_COMMAND} label="copy commands" />
 						</div>
 						<TerminalFrame>
 							<pre>
@@ -216,7 +239,12 @@ export default function ExhibitG() {
 							</pre>
 						</TerminalFrame>
 					</div>
-					<p className="font-display lowercase leading-tight text-white/50 text-[clamp(1.75rem,2.5vw,2.5rem)]">
+					{/* text-balance — on an ultrawide desktop this broke after "recompute"
+					    and left "us." orphaned on a line of its own, which reads as a typo
+					    at display size. Balance splits the two clauses evenly instead; at
+					    narrower viewports the line already fits on one row, so nothing
+					    moves. */}
+					<p className="text-balance font-display lowercase leading-tight text-white/50 text-[clamp(1.75rem,2.5vw,2.5rem)]">
 						don&rsquo;t trust us — recompute us.
 					</p>
 				</div>

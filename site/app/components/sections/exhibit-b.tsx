@@ -152,28 +152,38 @@ export default function ExhibitB() {
 				    the SAME box over-constrain the layout, and browsers resolve
 				    that by honoring the margin and letting content wrap instead of
 				    forcing the intended horizontal scroll (verified in-browser at
-				    390px). The outer box owns the bleed and the fresh
-				    overflow-x-auto scroll context; the inner box owns min-w-[40rem]
-				    with zero margin, so oversized content overflows it cleanly. */}
+				    390px). Bleed, scroll context and min-width are now three separate
+				    boxes, for two reasons: a negative margin and a min-width on the
+				    same box over-constrain each other (above), and the CAPTION must
+				    not sit inside the min-width at all. It did — a sentence of prose
+				    laid out at the TABLE's min-width inside a horizontally scrolling
+				    box, so on a phone a reader had to drag the TABLE sideways to
+				    finish reading a PARAGRAPH. Prose belongs to the frame's width,
+				    not the table's: the
+				    scroll box now wraps the grid alone, and the caption is its sibling
+				    under the same bleed, which also keeps its border-t spanning the
+				    full frame. */}
 				<TerminalFrame className="mt-10" title="governed surfaces">
-					<div className="-m-4 overflow-x-auto md:-m-5">
-						<div className="min-w-[40rem]">
-							<div className="grid grid-cols-2">
-								<div className="border-r border-white/[0.06]">
-									<SurfaceColumn title="governed" titleClass="text-ut" groups={GOVERNED} />
+					<div className="-m-4 md:-m-5">
+						<div className="overflow-x-auto">
+							<div className="min-w-[40rem]">
+								<div className="grid grid-cols-2">
+									<div className="border-r border-white/[0.06]">
+										<SurfaceColumn title="governed" titleClass="text-ut" groups={GOVERNED} />
+									</div>
+									<SurfaceColumn
+										title="passthrough — not governed"
+										titleClass="text-white opacity-70"
+										groups={PASSTHROUGH}
+									/>
 								</div>
-								<SurfaceColumn
-									title="passthrough — not governed"
-									titleClass="text-white opacity-70"
-									groups={PASSTHROUGH}
-								/>
 							</div>
-							<p className="border-t border-white/[0.06] px-4 py-3 text-white/70">
-								passthrough surfaces bypass governance, audit, and budget enforcement — route spend
-								through the governed entry points. {facts.modelCount.value} models priced across
-								anthropic, openai, and google.
-							</p>
 						</div>
+						<p className="border-t border-white/[0.06] px-4 py-3 text-white/70">
+							passthrough surfaces bypass governance, audit, and budget enforcement — route spend
+							through the governed entry points. {facts.modelCount.value} models priced across
+							anthropic, openai, and google.
+						</p>
 					</div>
 				</TerminalFrame>
 			</div>

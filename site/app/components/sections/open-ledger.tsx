@@ -131,8 +131,13 @@ export default function OpenLedger() {
 								your keys. your billing. your evidence.
 							</p>
 
+							{/* Not "receipts marked accordingly" — they are not marked at all.
+							    `TrustReceipt` carries no dry-run or ledger-mode field, and the
+							    committed dry-run fixture records the mode in its capture
+							    PROVENANCE, outside the receipt. So the line says what the mode
+							    really does: what it skips, and what it does not. */}
 							<p className="font-mono text-xs text-ink/70">
-								start in dry-run — no TigerBeetle required; receipts marked accordingly
+								start in dry-run — TigerBeetle skipped; audit chain and policy gates still run
 							</p>
 
 							<div className="flex flex-col gap-1.5 border-t border-ink/15 pt-4">

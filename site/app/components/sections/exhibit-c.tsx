@@ -171,8 +171,19 @@ export default function ExhibitC() {
 				    inside the replay's wrapper.
 				    min-w-0: the thrown error's longest unbreakable token would
 				    otherwise set this column's min-content wider than a phone. */}
-				<div className="relative mt-16 min-w-0 md:mt-20">
-					<Stamp word="BLOCKED" className="absolute -right-4 -top-6 z-10" />
+				<div className="relative mt-16 min-w-0 pt-20 sm:pt-0 md:mt-20">
+					{/* From sm up the stamp hangs off the top-right corner, where the
+				    headline's measure leaves the row end empty — the placement this
+				    card shipped with, unchanged. Below sm the headline fills the
+				    column edge to edge and the two collided: measured at a phone
+				    width, the stamp's lower edge crossed the headline's cap line.
+				    Lifting the stamp alone was not enough (the settled stamp is
+				    taller than the section gap above it), so at base the CARD makes
+				    room instead — pt-20 opens a band the stamp sits inside at
+				    top-0, clear of the headline and inside the column, which also
+				    stops it bleeding past the viewport edge. The padding is dropped
+				    from sm up, where nothing needs it. */}
+					<Stamp word="BLOCKED" className="absolute right-0 top-0 z-10 sm:-right-4 sm:-top-6" />
 					<h3 className="font-display lowercase leading-none text-white text-[clamp(1.75rem,4vw,3rem)]">
 						the denial, on the chain.
 					</h3>
