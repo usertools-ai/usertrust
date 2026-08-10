@@ -8,30 +8,37 @@
 # column ~741px wide at a 1512 viewport. The type has to clear the site's 12px
 # rendered-glyph floor THERE, not in the raw file: a glyph's rendered size is
 # `FontSize x (displayed width / recorded width)`, so the only lever that
-# matters is the COLUMN COUNT. At the previous 1560x640 / FontSize 17 the tape
-# recorded ~135 columns to keep the 133-char BLOCK line on one row, and 17px
-# over a 741px display came out at ~8px — under the floor, unreadable without
-# leaning in.
+# matters is the COLUMN COUNT. An early cut recorded ~135 columns to keep the
+# longest line on one row, and its type landed at ~8px over that column —
+# unreadable without leaning in.
 #
-# Wrapping that line is now explicitly blessed, which frees the frame to be
-# narrow. 74 columns is the choice, and it is a choice: the BLOCK line breaks
-# after "...Deny pre-spend " — a real word boundary, character 74 of 133 — so
-# the wrap reads as a sentence continuing rather than a word torn in half. The
-# continuation is 59 characters, and no other line in the demo exceeds 59, so
-# 74 columns is also the narrowest frame in which nothing ELSE wraps.
+# Wrapping the long BLOCK line is explicitly blessed, which frees the frame to
+# be narrow. 79 columns is the choice, and it is a choice. The BLOCK line is
+# 213 characters (the deny reason AND the high-cost warning the same evaluation
+# raised), so it wraps to three rows, and a terminal wraps at the column edge
+# without caring about words. 79 is the narrowest column count at which BOTH
+# breaks land on a space — after "...drive remaining budget below zero;" is not
+# where they fall, but after "...Deny pre-spend when " and after
+# "[warn-high-cost]" is: a sentence continuing, never a word torn in half.
+# (74, the previous count, tears "[warn-high-cost]" into "[warn-" + "high-cost]".
+# The next clean counts are 89 and 94, and both drop the rendered type toward
+# the floor for no gain.) No other line in the demo exceeds 79 columns.
 #
 # Width/Height are pixels, and the terminal grid they produce is a floor
 # division the renderer does internally — so both numbers were measured with
 # `tput cols` / `tput lines` against this exact FontSize, Padding and WindowBar
 # rather than computed from a font metric:
-#   Width  1488 -> 74 columns  (1480 is the first width that yields 74; 1500 gives 75)
-#   Height 1036 -> 23 rows     (1020 is the first height that yields 23; 1060 gives 24)
-# Both sit mid-band so a renderer or font update cannot flip them by a pixel.
-# 23 rows is 22 rows of content (command, 19 lines of output with the BLOCK
-# line wrapped, and the returned prompt) plus one, so the frame FILLS without
-# scrolling the header off the top. Nothing downstream crops it.
+#   Width  1590 -> 79 columns  (1580 is the first width that yields 79; 1600 gives 80)
+#   Height 1104 -> 25 rows     (1090 yields 25; 1080 gives 24 and 1130 gives 26)
+# Both sit mid-band so a renderer or font update cannot flip them by a pixel,
+# and both are even, which h264 requires.
+# 25 rows is 24 rows of content (command, the demo's output with the BLOCK line
+# wrapped to three, and the returned prompt) plus one, so the frame FILLS
+# without scrolling the header off the top. Nothing downstream crops it.
 #
-# Re-measure both if FontSize, Padding or WindowBar changes.
+# Re-measure both if FontSize, Padding or WindowBar changes — or if the demo's
+# output grows a line. The site's aspect-[1590/1104] box in exhibit-c.tsx is
+# this frame's own aspect and moves with it.
 #
 # NO GIF OUTPUT. The tape used to also write packages/openclaw/demo/runaway-agent.gif,
 # which nothing reads: the site embeds the mp4/webm pair and this directory's
@@ -44,8 +51,8 @@ Output site/public/demo/runaway-agent.webm
 
 Set Shell "bash"
 Set FontSize 30
-Set Width 1488
-Set Height 1036
+Set Width 1590
+Set Height 1104
 Set Padding 24
 Set WindowBar Colorful
 Set BorderRadius 10

@@ -153,7 +153,7 @@ export default function ExhibitC() {
 				<div className="mt-16 grid gap-8 md:mt-20 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:items-center lg:gap-10">
 					<CaseFile />
 					<figure className="hidden md:block">
-						<div className="aspect-[1488/1036] w-full overflow-hidden rounded-xl border border-white/10">
+						<div className="aspect-[1590/1104] w-full overflow-hidden rounded-xl border border-white/10">
 							<AmbientVideo
 								src={REPLAY_VIDEO.src}
 								poster={REPLAY_VIDEO.poster}

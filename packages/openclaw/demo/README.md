@@ -17,29 +17,33 @@ npx tsx packages/openclaw/demo/runaway-agent.ts
 
 ## What it shows
 
-- A `createUsertrustPlugin` instance is built with a tiny $0.50 budget.
-- A mock `streamFn` simulates a runaway agent burning ~250 usertokens per call.
+- A `createUsertrustPlugin` instance is built with a tiny $0.40 budget
+  (4,000 usertokens, at the repo-wide 1 usertoken = $0.0001).
+- A mock `streamFn` simulates a runaway agent burning 800 usertokens per call —
+  priced by the same table governance uses, not by hand.
 - The plugin's `wrapStreamFn` middleware authorizes → forwards → settles each call.
 - After 3 settled calls, the `block-budget-overshoot` policy gate denies call #4
-  *before* it spends — the pre-spend estimate would drive the remaining budget
-  below zero. The audit ledger reflects every settled call.
+  *before* it spends — the pre-spend estimate (a conservative max-output hold)
+  would drive the remaining budget below zero. So the loop stops with budget
+  still unspent, and the audit ledger reflects every settled call.
 
 Expected output (truncated):
 
 ```
-  budget:        1,200 usertokens (~$0.50)
-  agent model:   claude-sonnet-4-6
-  agent:         buggy loop, ~250 usertokens per call
+  budget:        4,000 usertokens ($0.40)
+  agent model:   claude-fable-5
+  agent:         buggy loop, 800 usertokens per call
 
   call # 1  OK     chunks=29  → call settled
   call # 2  OK     chunks=29  → call settled
   call # 3  OK     chunks=29  → call settled
-  call # 4  BLOCK  Policy denied: [block-budget-overshoot] Deny pre-spend when estimated cost would drive remaining budget below zero
+  call # 4  BLOCK  Policy denied: [block-budget-overshoot] Deny pre-spend when estimated cost would drive remaining budget below zero; [WARN] [warn-high-cost] Emit a warning when estimated cost exceeds 1000 tokens
 
   --- final ledger ----------------------------------------
   successful calls:  3
   cut off at:        call #4
-  budget exhausted:  yes — governance enforced
+  settled spend:     2,400 usertokens
+  stopped by:        the gate, before the spend
   ---------------------------------------------------------
 ```
 
