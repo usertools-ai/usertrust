@@ -737,7 +737,28 @@ html.cursor-active * {
    here is `paused` at 0%, and 0% is the parked state: the pulse dash sits
    behind its own origin and both flashes are fully transparent. The fork draws
    exactly as it did before it moved. Under reduced motion the overlay is not
-   drawn at all. */
+   drawn at all.
+
+   THE PROPERTY ALLOWLIST — `stroke-dashoffset`, `opacity`, `transform`, and
+   nothing else. That is the whole set the ambient class permits, and this
+   diagram is the first loop on the page to use all three: the pulses shift a
+   dash, the beat and the flashes fade, the two halos also scale.
+
+   `opacity` was added to the doctrine's wording when this diagram arrived
+   (2026-08-09), and it is the CHEAPEST of the three, not a relaxation.
+   `transform` and `opacity` are the two properties a compositor animates
+   without repainting anything; a `stroke-dashoffset` shift — which the
+   doctrine named first, because the die got here first — re-rasterises the
+   path every frame. Permitting the dearer property while excluding the
+   cheaper one inverted the cost ordering the criterion exists to enforce. The
+   same reasoning is already on file a couple of hundred lines up, where
+   `.glow-ring` pulses opacity precisely so it does not animate `box-shadow`.
+
+   What stays out is unchanged: layout, `filter`, and any repaint of a fill or
+   a background. A `fill` swap on the via was the first draft of the decision
+   beat — it repaints the shape every frame, which is why the beat is an
+   overlaid copy instead. `site/app/lib/motion-doctrine.test.ts` pins the
+   allowlist against this stylesheet for every ambient loop on the page. */
 .fork-figure {
 	--fork-cycle-duration: 6s;
 }

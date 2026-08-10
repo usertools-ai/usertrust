@@ -28,6 +28,13 @@ import {
  * under reduced motion, decorative over content that is already fully drawn
  * without it.
  *
+ * `opacity` is the newest name on that list and this is the loop that put it
+ * there — the beat and the two outcome flashes fade. It is the cheapest of the
+ * three: a compositor animates opacity and transform without repainting, while
+ * a dash-offset shift re-rasterises the path each frame. The reasoning, and
+ * what stays out (fill, filter, layout), is written up beside the keyframes in
+ * globals.css and pinned by app/lib/motion-doctrine.test.ts.
+ *
  * It animates the CLAIM. A pulse leaves the hold pad and runs the trunk; the
  * via-dot brightens as it arrives and holds for a beat — the decision. Then ONE
  * branch carries it out, and the pad at that end flashes the ink of what
