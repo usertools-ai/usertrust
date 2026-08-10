@@ -49,6 +49,9 @@ export interface ReceiptPanel {
  * fixture. The default panel is server-rendered into the initial HTML, so the
  * receipt is readable with JavaScript still in flight.
  */
+/** The one panel element the whole strip controls. */
+const PANEL_ID = "receipt-panel";
+
 export default function ExhibitAReceipts({
 	panels,
 	provenanceLine,
@@ -101,7 +104,10 @@ export default function ExhibitAReceipts({
 						role="tab"
 						id={`receipt-tab-${p.id}`}
 						aria-selected={selected === p.id}
-						aria-controls={`receipt-panel-${p.id}`}
+						// ONE panel id for the strip — see the panel below. Only the
+						// selected panel is rendered, so a per-tab id left the other two
+						// tabs pointing at elements that do not exist.
+						aria-controls={PANEL_ID}
 						tabIndex={rovingTabIndex(selected === p.id)}
 						onClick={() => setSelected(p.id)}
 						className={`focus-ring inline-flex items-center gap-2 rounded-md px-3 py-1.5 font-mono text-xs tracking-wide transition-colors ${tabButtonClass(
@@ -117,10 +123,16 @@ export default function ExhibitAReceipts({
 			{/* The tabpanel is no longer the grid — the annotations island is (see
 			    its `call` prop). This div keeps role/aria/tabIndex and nothing
 			    else, so the whole exhibit is one two-column row instead of a
-			    column that goes empty under the call frame. */}
+			    column that goes empty under the call frame.
+
+			    Its id is STABLE across selection. This element is the panel for
+			    whichever tab is selected — it is the only panel there ever is —
+			    so every tab's aria-controls resolves to it and the
+			    tab-to-panel relationship survives an arrow-key walk of the strip.
+			    aria-labelledby still names the tab currently showing. */}
 			<div
 				role="tabpanel"
-				id={`receipt-panel-${panel.id}`}
+				id={PANEL_ID}
 				aria-labelledby={`receipt-tab-${panel.id}`}
 				// WAI-ARIA APG tabs pattern: the panel is reachable by Tab so keyboard
 				// users move from the active tab straight into its content. The

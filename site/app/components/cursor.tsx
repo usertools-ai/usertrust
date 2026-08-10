@@ -43,14 +43,24 @@ import { useEffect, useRef, useState } from "react";
  * without a commit per event.
  *
  * Mounts ONLY when `(pointer: fine)` matches AND reduced motion is NOT
- * requested at mount — touch/coarse pointers and reduced-motion users never
- * get the class, so they keep the native cursor everywhere (there is no
- * script that could ever fire `cursor: none` for them, not just a CSS
- * override sitting on top of it). That combined gate is also why nothing can
- * render at a stale position after a tap or get "stuck" showing on a
- * touchscreen. `cursor-active` comes off again on unmount and on window blur
- * (alt-tab, devtools stealing focus) — re-applied on focus — so a user who
- * leaves the tab is never stranded without any visible cursor at all.
+ * requested — touch/coarse pointers and reduced-motion users never get the
+ * class, so they keep the native cursor everywhere (there is no script that
+ * could ever fire `cursor: none` for them, not just a CSS override sitting on
+ * top of it). That combined gate is also why nothing can render at a stale
+ * position after a tap or get "stuck" showing on a touchscreen.
+ * `cursor-active` comes off again on unmount and on window blur (alt-tab,
+ * devtools stealing focus) — re-applied on focus — so a user who leaves the
+ * tab is never stranded without any visible cursor at all.
+ *
+ * THE GATE IS LIVE, NOT A MOUNT-TIME SNAPSHOT. Both queries are subscribed for
+ * the island's whole life, and the machinery below is keyed on their combined
+ * verdict. A one-shot check left a real trap: turn reduced motion on after
+ * load — macOS Accessibility, or a phone that pairs a mouse the other way —
+ * and CSS hid `.cursor-layer` instantly while `cursor-active` (and with it
+ * `cursor: none`) stayed on the root. The page was left with NO cursor at all
+ * until a reload. Now the verdict flipping false tears the whole thing down —
+ * class off, listeners off, layer unmounted — and flipping back true builds it
+ * again, so the trap cannot form in either direction.
  */
 
 /** Section accent to fall back to when the pointer is over no themed section. */
@@ -61,10 +71,10 @@ const ACCENT_FALLBACK = "var(--color-ut)";
  * enough that no part of a 14px crosshair can reach the viewport.
  *
  * THIS IS ALSO THE INITIAL RENDER. Every part below ships parked in its own
- * inline style, because the imperative `place()` cannot run before the first
- * pointermove: the mount effect returns while `enabled` is still false, so the
- * refs it would write through are null, and the elements only exist on the
- * render AFTER it. Without the inline transform they render at transform:none
+ * inline style, because nothing writes a transform until the first
+ * pointermove: the parts first exist on the render where the gate turns true,
+ * and `place()` is only ever called from a pointer event or the leave/blur
+ * guards. Without the inline transform they render at transform:none
  * — the crosshair painted over the very top-left corner of the page on every
  * fresh load until the pointer moved. (The bullseye this replaced never showed
  * it because it was positioned from a spring whose resting value was already
@@ -79,8 +89,18 @@ const PARKED: React.CSSProperties = {
 	transform: `translate3d(${PARK_PX}px, ${PARK_PX}px, 0)`,
 };
 
+/**
+ * The two media queries the mark is gated on, and the verdict they combine to.
+ * Exported shape kept trivial on purpose: the gate is one AND, and the value of
+ * writing it once is that the subscription below and the render both read the
+ * same rule.
+ */
+function markAllowed(fine: MediaQueryList, reduce: MediaQueryList): boolean {
+	return fine.matches && !reduce.matches;
+}
+
 export default function Cursor() {
-	const [enabled, setEnabled] = useState(false);
+	const [allowed, setAllowed] = useState(false);
 	const [framing, setFraming] = useState(false);
 	const [accent, setAccent] = useState<string>(ACCENT_FALLBACK);
 	// One ref per independently-positioned part. The three blend parts cannot
@@ -90,14 +110,27 @@ export default function Cursor() {
 	const dotRef = useRef<HTMLSpanElement>(null);
 	const frameRef = useRef<HTMLSpanElement>(null);
 
+	// Subscription only: runs once, never tears down the machinery itself, and
+	// is the single place either preference is read. `sync()` on mount is also
+	// what keeps the server's empty render and the client's first render equal.
 	useEffect(() => {
-		if (
-			!window.matchMedia("(pointer: fine)").matches ||
-			window.matchMedia("(prefers-reduced-motion: reduce)").matches
-		) {
-			return;
-		}
-		setEnabled(true);
+		const fine = window.matchMedia("(pointer: fine)");
+		const reduce = window.matchMedia("(prefers-reduced-motion: reduce)");
+		const sync = () => setAllowed(markAllowed(fine, reduce));
+		sync();
+		fine.addEventListener("change", sync);
+		reduce.addEventListener("change", sync);
+		return () => {
+			fine.removeEventListener("change", sync);
+			reduce.removeEventListener("change", sync);
+		};
+	}, []);
+
+	// The machinery, keyed on the verdict. Everything it installs — the root
+	// class, five window listeners, a pending rAF — is undone by its own
+	// cleanup, so a preference change mid-session unwinds it completely.
+	useEffect(() => {
+		if (!allowed) return;
 
 		const root = document.documentElement;
 		root.classList.add("cursor-active");
@@ -173,9 +206,9 @@ export default function Cursor() {
 			window.removeEventListener("focus", onFocus);
 			root.classList.remove("cursor-active");
 		};
-	}, []);
+	}, [allowed]);
 
-	if (!enabled) return null;
+	if (!allowed) return null;
 
 	const frameClass = `cursor-frame${framing ? " cursor-frame--on" : ""}`;
 	return (

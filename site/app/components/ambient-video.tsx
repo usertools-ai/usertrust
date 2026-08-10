@@ -8,6 +8,9 @@ import { useEffect, useRef } from "react";
  * reduced motion (poster only). `preload="none"` + poster keeps the bytes off
  * the network until the IntersectionObserver calls play().
  */
+/** How much of the video must be on screen for the loop to run. */
+const VISIBLE_RATIO = 0.5;
+
 export default function AmbientVideo({
 	src,
 	poster,
@@ -26,10 +29,17 @@ export default function AmbientVideo({
 		if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
 		const io = new IntersectionObserver(
 			([entry]) => {
-				if (entry?.isIntersecting) void video.play().catch(() => {});
+				if (!entry) return;
+				// Compare the RATIO, not `isIntersecting`. A threshold only says
+				// where the observer notifies; the callback also runs on any
+				// isIntersecting edge, so `isIntersecting` alone starts the loop at
+				// one visible pixel and, crossing 50% downward, calls play() again
+				// on a video that is mostly off screen. The documented behaviour —
+				// and the one the motion doctrine sanctions — is 50%.
+				if (entry.intersectionRatio >= VISIBLE_RATIO) void video.play().catch(() => {});
 				else video.pause();
 			},
-			{ threshold: 0.5 },
+			{ threshold: VISIBLE_RATIO },
 		);
 		io.observe(video);
 		return () => io.disconnect();

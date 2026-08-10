@@ -73,6 +73,17 @@ const TRANSCRIPT_LINE_PX = 22.75;
  * frame must reserve it up front \u2014 but a hardcoded `min-h-[16rem]` (256px)
  * over a 7-line fixture left ~96px of permanently empty terminal under the
  * finished output, reading as a broken frame rather than a reservation.
+ *
+ * THIS IS A FLOOR, AND IT ONLY HOLDS WHERE NOTHING WRAPS. One LOGICAL line is
+ * counted as one line box, but the transcript renders `whitespace-pre-wrap`
+ * (deliberately \u2014 the verdict line's honesty qualifier must not be clipped),
+ * so on a narrow viewport several of these strings occupy two or three PHYSICAL
+ * lines and the real finished height is larger than this. Reserving only this
+ * would let hydration collapse a taller server-rendered transcript down to the
+ * floor before the typewriter grew it back \u2014 precisely the shift the
+ * reservation exists to prevent. The island therefore MEASURES the
+ * server-rendered transcript before it blanks it and reserves that instead;
+ * this stays as the no-JS / pre-measurement floor.
  */
 export function transcriptMinHeightPx(lines: string[]): number {
 	return lines.length * TRANSCRIPT_LINE_PX;

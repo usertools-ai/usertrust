@@ -37,6 +37,10 @@ export default function ExhibitETranscript({ lines }: { lines: string[] }) {
 	const [finalChars, setFinalChars] = useState(lines[lastIndex]?.length ?? 0);
 	const rootRef = useRef<HTMLDivElement | null>(null);
 	const rafRef = useRef(0);
+	// The finished transcript's REAL height, measured off the server-rendered
+	// DOM before the island blanks it. Null until measured; the lib's line-count
+	// floor covers no-JS, reduced-motion and that one pre-measurement render.
+	const [measuredPx, setMeasuredPx] = useState<number | null>(null);
 
 	// biome-ignore lint/correctness/useExhaustiveDependencies: lines/lastIndex are stable fixture data — this set-piece arms once per mount, not on every render.
 	useEffect(() => {
@@ -73,6 +77,14 @@ export default function ExhibitETranscript({ lines }: { lines: string[] }) {
 			{ threshold: IO_THRESHOLD },
 		);
 
+		// Measure BEFORE arming. What is on screen right now is the finished
+		// transcript the server sent, with every soft wrap this viewport
+		// produces, so its height is the exact height the typewriter will end
+		// at — which a line COUNT cannot know (see transcriptMinHeightPx).
+		// Both state writes land in the same commit, so the blanked render is
+		// already reserving the measured height and the box never shrinks.
+		setMeasuredPx(root.getBoundingClientRect().height);
+
 		// Arm: blank the terminal now, before it scrolls into view.
 		setPhase("waiting");
 		setShownLines(0);
@@ -89,7 +101,7 @@ export default function ExhibitETranscript({ lines }: { lines: string[] }) {
 		phase === "static" || phase === "done" || (phase === "typing" && shownLines >= lastIndex);
 
 	return (
-		<div ref={rootRef} style={{ minHeight: `${transcriptMinHeightPx(lines)}px` }}>
+		<div ref={rootRef} style={{ minHeight: `${measuredPx ?? transcriptMinHeightPx(lines)}px` }}>
 			{/* Screen readers get the whole transcript immediately; the
 			    typewriter is a purely visual effect. */}
 			<pre className="sr-only">{lines.join("\n")}</pre>

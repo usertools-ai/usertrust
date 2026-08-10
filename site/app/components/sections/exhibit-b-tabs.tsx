@@ -23,6 +23,7 @@ export default function ExhibitBTabs() {
 
 	const ids = PROVIDER_TABS.map((t) => t.id);
 	const tab = PROVIDER_TABS.find((t) => t.id === selected) ?? PROVIDER_TABS[0];
+	const panelId = `${baseId}-panel`;
 
 	const focusAndSelect = (id: ProviderId) => {
 		setSelected(id);
@@ -70,7 +71,15 @@ export default function ExhibitBTabs() {
 						role="tab"
 						id={`${baseId}-tab-${t.id}`}
 						aria-selected={selected === t.id}
-						aria-controls={`${baseId}-panel-${t.id}`}
+						// ONE panel id, not one per tab. Only the selected panel is
+						// rendered — three tabs pointing at three ids left two of them
+						// dangling, so an AT walking the strip found two tabs that
+						// control nothing, including at the moment arrow-key focus
+						// lands on a newly selected tab. This element is the panel for
+						// whichever tab is selected, so every aria-controls resolves to
+						// it, and `aria-labelledby` below names the tab it is currently
+						// showing.
+						aria-controls={panelId}
 						tabIndex={rovingTabIndex(selected === t.id)}
 						onClick={() => setSelected(t.id)}
 						data-cursor-hover
@@ -85,7 +94,7 @@ export default function ExhibitBTabs() {
 
 			<div
 				role="tabpanel"
-				id={`${baseId}-panel-${tab.id}`}
+				id={panelId}
 				aria-labelledby={`${baseId}-tab-${tab.id}`}
 				// WAI-ARIA APG tabs pattern: the tabpanel must be reachable by Tab so keyboard
 				// users can move straight from the active tab into its content. The matching
