@@ -133,11 +133,21 @@ export default function ExhibitAReceipts({
 				    title bar carries the lab mark; the provenance line is the
 				    frame's footer slot. The call frame rides along as `call`:
 				    static mono, emerald keyword accents, TerminalFrame's shared
-				    chrome, no title; pre/code semantics preserved inside. */}
+				    chrome, no title; pre/code semantics preserved inside.
+
+				    No `self-start` on it. It carried one while its parent was a
+				    grid, where align-self works on the block axis and the class
+				    only meant "don't stretch to the receipt's height". Its parent
+				    is now a COLUMN flex container, where the same class works on
+				    the inline axis and would shrink the frame to its longest code
+				    line — a frame that changes width when the reader switches
+				    tabs, inside the very column this pass compressed. Nothing
+				    stretches vertically in a column flex container anyway, so the
+				    class has no job left; default `stretch` fills the track. */}
 				<ExhibitAAnnotations
 					annotations={panel.annotations}
 					call={
-						<TerminalFrame className="min-w-0 self-start text-white/80">
+						<TerminalFrame className="min-w-0 text-white/80">
 							<pre data-code-sample>
 								<code>
 									<span className="text-ut">import</span> {"{ trust }"}{" "}
