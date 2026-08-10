@@ -135,22 +135,29 @@ export default function ExhibitC() {
 				    track deliberately — the widest column the composition allows, per
 				    the Addendum I legibility target for the BLOCK line.
 
-				    Counterfactual replay — desktop-only ambient video, cropped to its
-				    active terminal rows (Addendum I). The recording is a wide terminal
-				    capture with roughly a sixth of its height empty below the last
-				    prompt; the wrapper pins a taller aspect and object-top cover crops
-				    that dead band away instead of scaling it down with the text (the
-				    ratio itself lives in the className, not this comment). ONLY the
-				    video is desktop-only — the denial evidence below is content and
+				    Counterfactual replay — desktop-only ambient video, shown WHOLE.
+				    There is no crop any more, and that is a fix at the source rather
+				    than at the display. The recording used to be an ultra-wide frame,
+				    sized so the long BLOCK line would not wrap, with roughly a sixth of
+				    its height empty below the last prompt; the wrapper pinned a taller
+				    aspect and cover-cropped the dead band away. Type that small over a
+				    column this size rendered well under the page's rendered-glyph floor
+				    — in the one artifact on the page that has to be READ. Wrapping is
+				    now blessed, so the tape records a narrow frame in large type, the
+				    BLOCK line breaks at a word boundary, and the content fills the
+				    frame. The aspect below is the recorded frame's own; it is derived
+				    in packages/openclaw/demo/runaway-agent.tape, which carries the
+				    column/row arithmetic, and it moves only when that tape does. ONLY
+				    the video is desktop-only — the denial evidence below is content and
 				    renders at every viewport. */}
 				<div className="mt-16 grid gap-8 md:mt-20 lg:grid-cols-[minmax(0,4fr)_minmax(0,8fr)] lg:items-center lg:gap-10">
 					<CaseFile />
 					<figure className="hidden md:block">
-						<div className="aspect-[26/9] w-full overflow-hidden rounded-xl border border-white/10">
+						<div className="aspect-[1488/1036] w-full overflow-hidden rounded-xl border border-white/10">
 							<AmbientVideo
 								src={REPLAY_VIDEO.src}
 								poster={REPLAY_VIDEO.poster}
-								className="h-full w-full object-cover object-top"
+								className="h-full w-full object-cover"
 							/>
 						</div>
 						<figcaption className="mt-3 font-mono text-xs leading-5 text-white/70">

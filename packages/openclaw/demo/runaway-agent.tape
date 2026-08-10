@@ -1,0 +1,70 @@
+# VHS tape — runaway-agent governance demo for usertrust.ai
+# Render from repo root:  vhs packages/openclaw/demo/runaway-agent.tape
+# Requires: brew install vhs
+#
+# THE GEOMETRY IS DERIVED, NOT EYEBALLED.
+#
+# This recording is embedded on usertrust.ai as the counterfactual replay, in a
+# column ~741px wide at a 1512 viewport. The type has to clear the site's 12px
+# rendered-glyph floor THERE, not in the raw file: a glyph's rendered size is
+# `FontSize x (displayed width / recorded width)`, so the only lever that
+# matters is the COLUMN COUNT. At the previous 1560x640 / FontSize 17 the tape
+# recorded ~135 columns to keep the 133-char BLOCK line on one row, and 17px
+# over a 741px display came out at ~8px — under the floor, unreadable without
+# leaning in.
+#
+# Wrapping that line is now explicitly blessed, which frees the frame to be
+# narrow. 74 columns is the choice, and it is a choice: the BLOCK line breaks
+# after "...Deny pre-spend " — a real word boundary, character 74 of 133 — so
+# the wrap reads as a sentence continuing rather than a word torn in half. The
+# continuation is 59 characters, and no other line in the demo exceeds 59, so
+# 74 columns is also the narrowest frame in which nothing ELSE wraps.
+#
+# Width/Height are pixels, and the terminal grid they produce is a floor
+# division the renderer does internally — so both numbers were measured with
+# `tput cols` / `tput lines` against this exact FontSize, Padding and WindowBar
+# rather than computed from a font metric:
+#   Width  1488 -> 74 columns  (1480 is the first width that yields 74; 1500 gives 75)
+#   Height 1036 -> 23 rows     (1020 is the first height that yields 23; 1060 gives 24)
+# Both sit mid-band so a renderer or font update cannot flip them by a pixel.
+# 23 rows is 22 rows of content (command, 19 lines of output with the BLOCK
+# line wrapped, and the returned prompt) plus one, so the frame FILLS without
+# scrolling the header off the top. Nothing downstream crops it.
+#
+# Re-measure both if FontSize, Padding or WindowBar changes.
+#
+# NO GIF OUTPUT. The tape used to also write packages/openclaw/demo/runaway-agent.gif,
+# which nothing reads: the site embeds the mp4/webm pair and this directory's
+# README embeds nothing. At this frame size the gif is the largest artifact of
+# the three, and it would land untracked in a public repo. Add it back only
+# with a consumer.
+
+Output site/public/demo/runaway-agent.mp4
+Output site/public/demo/runaway-agent.webm
+
+Set Shell "bash"
+Set FontSize 30
+Set Width 1488
+Set Height 1036
+Set Padding 24
+Set WindowBar Colorful
+Set BorderRadius 10
+Set TypingSpeed 45ms
+Set Theme { "name": "usertrust", "background": "#0a0a1a", "foreground": "#ebebeb", "cursor": "#34d399", "black": "#1a1a2e", "red": "#ef4444", "green": "#34d399", "yellow": "#f59e0b", "blue": "#6ca0c0", "magenta": "#c084fc", "cyan": "#7dd3fc", "white": "#ebebeb", "brightBlack": "#555570", "brightRed": "#f87171", "brightGreen": "#6ee7b7", "brightYellow": "#fbbf24", "brightBlue": "#93b8d8", "brightMagenta": "#d8b4fe", "brightCyan": "#bae6fd", "brightWhite": "#ffffff", "selection": "#2d2d50" }
+
+# Pace the demo output for readability (presentation-only knob in the script).
+# One fused command: a hidden `clear` on its own Enter leaves the export's own
+# echo on screen for a frame, and VHS has no way to un-draw it.
+Hide
+Type "export DEMO_PACE_MS=700 && clear"
+Enter
+Show
+
+Sleep 800ms
+Type "npx tsx packages/openclaw/demo/runaway-agent.ts"
+Sleep 700ms
+Enter
+# demo runs ~6s with pacing (npx/tsx startup + 4 paced calls + ledger)
+Sleep 10s
+# hold the final ledger frame
+Sleep 4s

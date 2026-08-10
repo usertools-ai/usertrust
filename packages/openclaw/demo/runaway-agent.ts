@@ -28,6 +28,12 @@ import type {
 	StreamFn,
 } from "../src/types.js";
 
+// Presentation-only pacing between calls (DEMO_PACE_MS=700 for recordings);
+// 0 = off. Never affects governance behavior.
+const PACE_MS = Number(process.env.DEMO_PACE_MS ?? 0) || 0;
+const pace = () =>
+	PACE_MS > 0 ? new Promise<void>((r) => setTimeout(r, PACE_MS)) : Promise.resolve();
+
 // ── 1. Tiny budget — 1,200 usertokens (~$0.50 at typical rates) ──
 const BUDGET = 1_200;
 const vaultBase = mkdtempSync(join(tmpdir(), "usertrust-runaway-"));
@@ -110,6 +116,7 @@ let call = 0;
 let cutoff = false;
 while (!cutoff && call < 40) {
 	call += 1;
+	await pace();
 	try {
 		let chunks = 0;
 		for await (const _e of await governedStream(MODEL, ctx)) {
@@ -123,6 +130,7 @@ while (!cutoff && call < 40) {
 	}
 }
 
+await pace();
 console.log("");
 console.log("  --- final ledger ----------------------------------------");
 console.log(`  successful calls:  ${call - 1}`);

@@ -20,8 +20,9 @@ npx tsx packages/openclaw/demo/runaway-agent.ts
 - A `createUsertrustPlugin` instance is built with a tiny $0.50 budget.
 - A mock `streamFn` simulates a runaway agent burning ~250 usertokens per call.
 - The plugin's `wrapStreamFn` middleware authorizes → forwards → settles each call.
-- After ~5 calls the budget is exhausted and the next call is denied with a clear
-  `budget exhausted` error. The audit ledger reflects every settled call.
+- After 3 settled calls, the `block-budget-overshoot` policy gate denies call #4
+  *before* it spends — the pre-spend estimate would drive the remaining budget
+  below zero. The audit ledger reflects every settled call.
 
 Expected output (truncated):
 
@@ -33,13 +34,11 @@ Expected output (truncated):
   call # 1  OK     chunks=29  → call settled
   call # 2  OK     chunks=29  → call settled
   call # 3  OK     chunks=29  → call settled
-  call # 4  OK     chunks=29  → call settled
-  call # 5  OK     chunks=29  → call settled
-  call # 6  BLOCK  usertrust: budget exhausted (0 remaining); call denied
+  call # 4  BLOCK  Policy denied: [block-budget-overshoot] Deny pre-spend when estimated cost would drive remaining budget below zero
 
   --- final ledger ----------------------------------------
-  successful calls:  5
-  cut off at:        call #6
+  successful calls:  3
+  cut off at:        call #4
   budget exhausted:  yes — governance enforced
   ---------------------------------------------------------
 ```
