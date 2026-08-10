@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { routedTracePath, TRACE, traceVias } from "./trace-style";
+import { routedTraceLength, routedTracePath, TRACE, traceVias } from "./trace-style";
 
 /** Every command letter in a path, in order — the route's grammar. */
 function grammar(d: string): string {
@@ -89,6 +89,17 @@ test("coordinates are rounded to two decimals (stable SSR/CSR markup)", () => {
 		const decimals = n.split(".")[1] ?? "";
 		assert.ok(decimals.length <= 2, `${n} carries more than two decimals`);
 	}
+});
+
+test("routedTraceLength measures the route the path actually takes, not the straight line", () => {
+	// A pure run is its own length.
+	assert.equal(routedTraceLength(0, 0, 100, 0), 100);
+	// The fork's settle branch: a 54/54 diagonal out of the via, then 212 flat.
+	// The straight-line distance is ~271 — a caller sizing a dash off THAT would
+	// undershoot the pad by 17 units.
+	const branch = routedTraceLength(220, 80, 486, 26, { lead: "v" });
+	assert.ok(Math.abs(branch - (Math.hypot(54, 54) + 212)) < 0.01, `got ${branch}`);
+	assert.ok(branch > Math.hypot(266, 54), "a routed run is never shorter than its chord");
 });
 
 test("traceVias marks the branch points, deduplicated", () => {

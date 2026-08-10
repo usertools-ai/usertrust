@@ -712,6 +712,276 @@ html.cursor-active * {
 	color: var(--section-accent-ink, rgba(255, 255, 255, 0.7));
 }
 
+/* ── THE FORK, ANIMATED (Exhibit C set-piece) ─────────────────────────────
+   The page's fourth and last ambient-class loop, and the only one that
+   animates an ARGUMENT rather than a texture: a pulse runs the hold trunk, the
+   via brightens as it arrives, and one branch — alternating — carries it out
+   to a pad that flashes emerald for a settle or red for a void. Never both.
+
+   THE CYCLE IS ONE NUMBER. `--fork-cycle-duration` is the beat everything is
+   phrased against; every keyframe percentage below is a time in that cycle
+   divided by it, and the comment beside each says which:
+       0.00s  the pulse leaves the hold pad
+       2.00s  it reaches the via                      (33.34% of one cycle)
+       2.40s  the decision beat ends                  (40%)
+       3.90s  the pulse reaches its pad               (32.5% of TWO cycles)
+       4.50s  the flash has decayed                   (37.5% of two)
+       6.00s  rest, and the other branch's turn
+   Branch animations run at TWO cycles and are offset by one via `--fork-cycle`
+   (0 for settle, 1 for void), which the component sets from the same
+   FORK_TERMINALS table the pads are drawn from. That is the whole alternation
+   mechanism: no JS timer, nothing to drift, and one shared start time means
+   the trunk and the two branches can never fall out of phase.
+
+   AT REST — offscreen, before hydration, with JavaScript off — every animation
+   here is `paused` at 0%, and 0% is the parked state: the pulse dash sits
+   behind its own origin and both flashes are fully transparent. The fork draws
+   exactly as it did before it moved. Under reduced motion the overlay is not
+   drawn at all. */
+.fork-figure {
+	--fork-cycle-duration: 6s;
+}
+/* The pulse's dash grammar (stroke-dasharray, pathLength) is set on the
+   element from sections/lib/two-phase-fork.ts, so one physical pulse length is
+   shared by a 196-unit trunk and two 288-unit branches. Only paint and timing
+   live here.
+
+   TWO STROKES PER PULSE — the same relationship the static traces already
+   have. A bright 2.5px head at full accent, and a wide soft copy under it that
+   reads as the light it is throwing. Without the second one the pulse is just
+   a slightly fatter piece of trace, which is what it looked like: the pulse
+   cannot say "here" with hue, because hue is reserved for the two terminals. */
+.fork-pulse-trunk,
+.fork-pulse-branch {
+	fill: none;
+	stroke-linecap: round;
+	/* The parked rest frame, also declared outside the keyframes so it holds
+	   even if an animation is never applied at all. */
+	stroke-dashoffset: var(--fork-park-start);
+	animation-timing-function: linear;
+	animation-iteration-count: infinite;
+	animation-play-state: paused;
+}
+.fork-pulse-core {
+	stroke: var(--section-accent, var(--color-ut));
+	stroke-width: 2.5px;
+}
+/* Two stacked low-alpha copies, not one: a single wide stroke at a flat alpha
+   has an EDGE, and an edge at any opacity reads as a shape rather than as
+   light — the same finding that replaced the die's flat halo rects with a
+   radial falloff. Two widths at two alphas is a two-step falloff, which is as
+   close to a gradient as a stroke gets without a filter. */
+.fork-pulse-glow {
+	stroke: color-mix(in srgb, var(--section-accent, var(--color-ut)) 20%, transparent);
+	stroke-width: 6px;
+}
+.fork-pulse-bloom {
+	stroke: color-mix(in srgb, var(--section-accent, var(--color-ut)) 9%, transparent);
+	stroke-width: 12px;
+}
+.fork-pulse-trunk {
+	animation-name: fork-trunk-pulse;
+	animation-duration: var(--fork-cycle-duration);
+}
+.fork-pulse-branch {
+	animation-name: fork-branch-pulse;
+	animation-duration: calc(var(--fork-cycle-duration) * 2);
+	animation-delay: calc(var(--fork-cycle, 0) * var(--fork-cycle-duration) * -1);
+}
+/* 0 -> 33.34%: the 2s run down the trunk. The rest of the cycle it waits past
+   the far end, which is where the branch pulse picks the packet up. */
+@keyframes fork-trunk-pulse {
+	0% {
+		stroke-dashoffset: var(--fork-park-start);
+	}
+	33.34% {
+		stroke-dashoffset: var(--fork-park-end);
+	}
+	100% {
+		stroke-dashoffset: var(--fork-park-end);
+	}
+}
+/* Two cycles. Parked until 20% (2.4s — the decision beat has ended), then the
+   1.5s run out to the pad at 32.5% (3.9s), then parked for the whole of the
+   other branch's cycle. */
+@keyframes fork-branch-pulse {
+	0%,
+	20% {
+		stroke-dashoffset: var(--fork-park-start);
+	}
+	32.5% {
+		stroke-dashoffset: var(--fork-park-end);
+	}
+	100% {
+		stroke-dashoffset: var(--fork-park-end);
+	}
+}
+/* THE DECISION BEAT. Opacity only on the dot; the halo also scales, from its
+   own centre — `transform-box: fill-box` is what makes `transform-origin:
+   center` mean the circle rather than the whole viewBox. */
+.fork-beat-dot,
+.fork-beat-halo {
+	opacity: 0;
+	animation-name: fork-beat;
+	animation-duration: var(--fork-cycle-duration);
+	animation-timing-function: ease-out;
+	animation-iteration-count: infinite;
+	animation-play-state: paused;
+}
+.fork-beat-dot {
+	fill: var(--section-accent, var(--color-ut));
+}
+.fork-beat-halo {
+	fill: color-mix(in srgb, var(--section-accent, var(--color-ut)) 30%, transparent);
+	transform-box: fill-box;
+	transform-origin: center;
+	animation-name: fork-beat-halo;
+}
+@keyframes fork-beat {
+	0%,
+	30% {
+		opacity: 0;
+	}
+	33.34% {
+		opacity: 1;
+	}
+	40% {
+		opacity: 1;
+	}
+	52% {
+		opacity: 0;
+	}
+	100% {
+		opacity: 0;
+	}
+}
+@keyframes fork-beat-halo {
+	0%,
+	30% {
+		opacity: 0;
+		transform: scale(0.4);
+	}
+	33.34% {
+		opacity: 0.9;
+		transform: scale(1);
+	}
+	40% {
+		opacity: 0.7;
+		transform: scale(1);
+	}
+	52% {
+		opacity: 0;
+		transform: scale(1.3);
+	}
+	100% {
+		opacity: 0;
+		transform: scale(1.3);
+	}
+}
+/* THE OUTCOME FLASH. The one place on this diagram where colour means
+   something: emerald settles, red voids. The traces and the travelling pulse
+   stay section-amber precisely so these two reads are unambiguous. */
+.fork-flash--settle {
+	--fork-ink: var(--color-ut);
+}
+.fork-flash--void {
+	--fork-ink: var(--color-danger);
+}
+.fork-flash-dot,
+.fork-flash-halo {
+	opacity: 0;
+	animation-duration: calc(var(--fork-cycle-duration) * 2);
+	animation-timing-function: ease-out;
+	animation-iteration-count: infinite;
+	animation-play-state: paused;
+	animation-delay: calc(var(--fork-cycle, 0) * var(--fork-cycle-duration) * -1);
+}
+.fork-flash-dot {
+	fill: var(--fork-ink);
+	animation-name: fork-flash;
+}
+.fork-flash-halo {
+	fill: color-mix(in srgb, var(--fork-ink) 32%, transparent);
+	transform-box: fill-box;
+	transform-origin: center;
+	animation-name: fork-flash-halo;
+}
+/* Arrival at 32.5% (3.9s), full at 33.4% (~110ms rise), decayed by 37.5%
+   (4.5s) — the ~600ms the outcome is legible before the fork rests. */
+@keyframes fork-flash {
+	0%,
+	32.5% {
+		opacity: 0;
+	}
+	33.4% {
+		opacity: 1;
+	}
+	37.5% {
+		opacity: 0;
+	}
+	100% {
+		opacity: 0;
+	}
+}
+@keyframes fork-flash-halo {
+	0%,
+	32.5% {
+		opacity: 0;
+		transform: scale(0.5);
+	}
+	33.4% {
+		opacity: 0.85;
+		transform: scale(1);
+	}
+	37.5% {
+		opacity: 0;
+		transform: scale(1.7);
+	}
+	100% {
+		opacity: 0;
+		transform: scale(1.7);
+	}
+}
+/* IO gate — the wrapper toggles data-active from an IntersectionObserver in
+   exhibit-c-fork.tsx. Same contract as the die: running in view, paused out of
+   it, and paused is also the SSR/no-JS state. */
+.fork-figure[data-active="true"] .fork-pulse-trunk,
+.fork-figure[data-active="true"] .fork-pulse-branch,
+.fork-figure[data-active="true"] .fork-beat-dot,
+.fork-figure[data-active="true"] .fork-beat-halo,
+.fork-figure[data-active="true"] .fork-flash-dot,
+.fork-figure[data-active="true"] .fork-flash-halo {
+	animation-play-state: running;
+}
+/* will-change rides WITH the gate, never on the class: declared
+   unconditionally it would hold promoted layers for the whole session,
+   including the ~95% of it this diagram is off screen.
+
+   AND IT IS SCOPED TO THE STROKES. It was briefly on the two flash halos as
+   well, and that promoted each of them to its own compositing layer inside the
+   SVG — which painted a faint dark ring the exact size of the scaled halo,
+   permanently, at opacity 0. A promotion hint that draws something is not a
+   hint. The halos animate transform and opacity, which the compositor handles
+   without being asked. */
+.fork-figure[data-active="true"] .fork-pulse-trunk,
+.fork-figure[data-active="true"] .fork-pulse-branch {
+	will-change: stroke-dashoffset;
+}
+/* Reduced motion: the fork the page shipped before it animated. The overlay is
+   removed rather than frozen — a pulse stopped halfway down a trace reads as a
+   rendering fault, and a lit terminal pad would be a claim about an outcome
+   that never happened. */
+@media (prefers-reduced-motion: reduce) {
+	.fork-pulse-trunk,
+	.fork-pulse-branch,
+	.fork-beat-dot,
+	.fork-beat-halo,
+	.fork-flash-dot,
+	.fork-flash-halo {
+		display: none;
+	}
+}
+
 /* Thermal-paper surface — warm, slightly dimmed against pure white so paper
    reads as artifact, lifted off the dark ground by shadow, never by border. */
 .paper-surface {

@@ -8,83 +8,12 @@ import { DENIAL_EVENT, denialEventRows, REPLAY_VIDEO, THROWN_DENIAL } from "@/li
 import StageTag from "../stage-tag";
 import TerminalFrame from "../terminal-frame";
 import CaseFile from "./case-file";
+import ExhibitCFork from "./exhibit-c-fork";
 import ExhibitCRace from "./exhibit-c-race";
-import { routedTracePath, TRACE } from "./lib/trace-style";
-import {
-	FORK_HEIGHT,
-	FORK_NODES,
-	FORK_ROUTES,
-	FORK_WIDTH,
-	forkLabelPlacement,
-} from "./lib/two-phase-fork";
 
 const facts = factsJson as EvidenceFacts;
 const BUDGET = facts.facts.usertokensPerFiveDollars.value;
 const defaults = raceDefaults(BUDGET);
-
-/**
- * THE TWO-PHASE FORK — hold, then settle XOR void, drawn in the page's one
- * circuit grammar (Addendum K): routed segments, filleted corners, a via-dot at
- * the branch and pads at the terminals. Geometry lives in lib/two-phase-fork.
- *
- * XOR is the load-bearing word, and the reason the fork has exactly two exits
- * with nothing between them and nothing after: a hold settles or it voids.
- *
- * The labels are HTML overlaid on the diagram, not `<text>` inside it. Inside
- * the viewBox their size would be multiplied by the render scale and would fall
- * to ~9px on a phone; over it, 12px mono is 12px mono at every width. The
- * placement percentages come from the same geometry table the traces do, so
- * nothing about the drawing moved. See forkLabelPlacement().
- */
-function TwoPhaseFork() {
-	return (
-		<div className="w-full max-w-lg py-4">
-			<div className="relative">
-				<svg
-					viewBox={`0 0 ${FORK_WIDTH} ${FORK_HEIGHT}`}
-					role="img"
-					aria-label="a pending hold forks into exactly two outcomes — settled, or voided; never both, never neither"
-					className="trace-layer block h-auto w-full"
-				>
-					{FORK_ROUTES.map((r) => (
-						<path
-							key={r.key}
-							d={routedTracePath(r.x1, r.y1, r.x2, r.y2, { lead: r.lead })}
-							className={TRACE.baseClass}
-							strokeWidth={TRACE.baseWidth}
-						/>
-					))}
-					{FORK_ROUTES.map((r) => (
-						<path
-							key={`${r.key}-core`}
-							d={routedTracePath(r.x1, r.y1, r.x2, r.y2, { lead: r.lead })}
-							className={TRACE.coreClass}
-							strokeWidth={TRACE.coreWidth}
-						/>
-					))}
-					{FORK_NODES.map((n) => (
-						<circle
-							key={n.label}
-							cx={n.x}
-							cy={n.y}
-							r={n.branch ? TRACE.viaRadius : TRACE.padRadius}
-							className={n.branch ? TRACE.viaClass : TRACE.padClass}
-						/>
-					))}
-				</svg>
-				{/* aria-hidden: the svg's own label already names every outcome, and
-				    four loose words in the reading order would only repeat it. */}
-				<div aria-hidden="true" className="pointer-events-none absolute inset-0">
-					{FORK_NODES.map((n) => (
-						<span key={n.label} className="fork-label" style={forkLabelPlacement(n)}>
-							{n.label}
-						</span>
-					))}
-				</div>
-			</div>
-		</div>
-	);
-}
 
 /**
  * THE DENIAL, ON THE CHAIN.
@@ -156,7 +85,7 @@ export default function ExhibitC() {
 				    fills the narrow track and the prose the wide one; below lg they
 				    stack in source order (diagram, then the prose that reads it). */}
 				<div className="mt-6 grid gap-8 lg:grid-cols-[minmax(0,5fr)_minmax(0,7fr)] lg:items-center lg:gap-10">
-					<TwoPhaseFork />
+					<ExhibitCFork />
 					<div>
 						<p className="max-w-2xl text-base leading-relaxed text-white/70">
 							every governed call opens a two-phase hold against the budget before a token moves —{" "}

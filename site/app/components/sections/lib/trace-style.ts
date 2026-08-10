@@ -160,6 +160,33 @@ export function routedTracePath(
 }
 
 /**
+ * How long a routed run is, in viewBox units.
+ *
+ * Measured on the POLYLINE — the same corner points `routedTracePath` draws,
+ * before the fillets round them. A fillet replaces two legs of `joinRadius`
+ * with a quadratic through the corner, which shortens the run by under two
+ * units at the radius this grammar uses; every caller is sizing a dash or a
+ * travel distance, and two units is a fifth of a pad.
+ *
+ * It exists because a `pathLength`-normalised dash is a FRACTION, and a
+ * fraction of two different-length routes is two different-sized dashes. A
+ * caller that wants one physical pulse on every trace has to divide by the
+ * route's own length, which means knowing it without a live DOM.
+ */
+export function routedTraceLength(
+	x1: number,
+	y1: number,
+	x2: number,
+	y2: number,
+	opts?: { lead?: TraceLead },
+): number {
+	const pts = routePoints(x1, y1, x2, y2, opts?.lead ?? "v");
+	let total = 0;
+	for (let i = 1; i < pts.length; i++) total += dist(pts[i - 1], pts[i]);
+	return total;
+}
+
+/**
  * Deduplicated via-dots for a set of branch points.
  *
  * Two traces meeting at one junction get ONE via, not two stacked at the same
