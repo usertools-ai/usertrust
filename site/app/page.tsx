@@ -1,58 +1,62 @@
-import { BeforeAfter } from "./components/before-after";
-import { BuiltFor } from "./components/built-for";
-import { BYOK } from "./components/byok";
-import { CodeExample } from "./components/code-example";
-import { CTA } from "./components/cta";
-import { Features } from "./components/features";
-import { Footer } from "./components/footer";
-import { GradientOrbs } from "./components/gradient-orbs";
 import { GridBackground } from "./components/grid-background";
-import { Hero } from "./components/hero";
-import { HowItWorks } from "./components/how-it-works";
 import { Nav } from "./components/nav";
-import { SocialProof } from "./components/social-proof";
+import Docket from "./components/sections/docket";
+import ExhibitA from "./components/sections/exhibit-a";
+import ExhibitB from "./components/sections/exhibit-b";
+import ExhibitC from "./components/sections/exhibit-c";
+import ExhibitD from "./components/sections/exhibit-d";
+import ExhibitE from "./components/sections/exhibit-e";
+import ExhibitF from "./components/sections/exhibit-f";
+import ExhibitG from "./components/sections/exhibit-g";
+import HardenStrip from "./components/sections/harden-strip";
+import Hero from "./components/sections/hero";
+import LedgerTicker from "./components/sections/ledger-ticker";
+import OpenLedger from "./components/sections/open-ledger";
 
-const fmtCount = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
-
-// Fetched once on the server and cached (ISR, 1h). Keeps the npm/GitHub calls off
-// the client critical path — no render-after-paint layout shift, and the GitHub
-// call runs from the deploy region instead of every visitor's rate-limited IP.
-async function getPackageStats(): Promise<{ downloads: string; stars: string }> {
-	let downloads = "—";
-	let stars = "—";
-	try {
-		const r = await fetch("https://api.npmjs.org/downloads/point/last-month/usertrust", {
+/*
+ * Fetched once on the server, ISR 1h. Parallelized with a hard 2s timeout per
+ * call so a slow upstream can never stall the render, and failures resolve to
+ * null — the Nav omits a null counter entirely rather than showing 0.
+ */
+async function getPackageStats(): Promise<{ stars: number | null; downloads: number | null }> {
+	const [downloads, stars] = await Promise.all([
+		fetch("https://api.npmjs.org/downloads/point/last-month/usertrust", {
 			next: { revalidate: 3600 },
-		});
-		if (r.ok) downloads = fmtCount((await r.json()).downloads as number);
-	} catch {}
-	try {
-		const r = await fetch("https://api.github.com/repos/usertools-ai/usertrust", {
+			signal: AbortSignal.timeout(2000),
+		})
+			.then(async (r) => (r.ok ? ((await r.json()).downloads as number) : null))
+			.catch(() => null),
+		fetch("https://api.github.com/repos/usertools-ai/usertrust", {
 			next: { revalidate: 3600 },
 			headers: { Accept: "application/vnd.github+json" },
-		});
-		if (r.ok) stars = fmtCount((await r.json()).stargazers_count as number);
-	} catch {}
+			signal: AbortSignal.timeout(2000),
+		})
+			.then(async (r) => (r.ok ? ((await r.json()).stargazers_count as number) : null))
+			.catch(() => null),
+	]);
 	return { downloads, stars };
 }
 
 export default async function Home() {
-	const { downloads, stars } = await getPackageStats();
+	const { stars, downloads } = await getPackageStats();
 	return (
 		<>
 			<GridBackground />
-			<GradientOrbs />
-			<Nav />
-			<Hero downloads={downloads} stars={stars} />
-			<SocialProof />
-			<CodeExample />
-			<BeforeAfter />
-			<Features />
-			<HowItWorks />
-			<BYOK />
-			<BuiltFor />
-			<CTA />
-			<Footer />
+			<Nav stars={stars} downloads={downloads} />
+			<Hero />
+			<Docket />
+			<ExhibitA />
+			<ExhibitB />
+			<ExhibitC />
+			<ExhibitD />
+			<ExhibitE />
+			<ExhibitF />
+			<ExhibitG />
+			<HardenStrip />
+			{/* Addendum O — the chain keeps running between the doctrine and the
+			    closing panel. Not a section[id]: it is not a nav destination. */}
+			<LedgerTicker />
+			<OpenLedger />
 		</>
 	);
 }

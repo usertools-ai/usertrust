@@ -34,15 +34,34 @@
 			}
 		},
 		{
-			"includes": [
-				"**/site/app/components/typewriter-code.tsx",
-				"**/site/app/components/before-after.tsx",
-				"**/site/app/components/governance-receipt.tsx"
-			],
+			"includes": ["**/site/app/components/sections/exhibit-f-spool.tsx"],
 			"linter": {
 				"rules": {
 					"suspicious": {
 						"noArrayIndexKey": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": ["**/site/app/components/sections/exhibit-a-annotations.tsx"],
+			"linter": {
+				"rules": {
+					"a11y": {
+						"noStaticElementInteractions": "off"
+					}
+				}
+			}
+		},
+		{
+			"includes": [
+				"**/site/app/components/sections/exhibit-b-tabs.tsx",
+				"**/site/app/components/sections/exhibit-a-receipts.tsx"
+			],
+			"linter": {
+				"rules": {
+					"a11y": {
+						"noNoninteractiveTabindex": "off"
 					}
 				}
 			}

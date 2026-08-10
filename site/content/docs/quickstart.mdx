@@ -33,7 +33,7 @@ const client = await trust(new Anthropic(), {
 
 // Returns { response, receipt } — NOT response._governance
 const { response, receipt } = await client.messages.create({
-  model: "claude-sonnet-4-6",
+  model: "claude-fable-5",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Hello" }],
 });
@@ -72,7 +72,7 @@ Every call returns a `TrustReceipt`:
   auditHash: "a1b2c3d4...",     // SHA-256 hash in the chain
   chainPath: ".usertrust/audit/events.jsonl",
   settled: true,                // POST succeeded
-  model: "claude-sonnet-4-6",
+  model: "claude-fable-5",
   provider: "anthropic",
   timestamp: "2025-01-15T...",
 }
@@ -106,7 +106,7 @@ Streaming works transparently. The governance receipt resolves when the stream c
 
 ```ts
 const { response } = await client.messages.create({
-  model: "claude-sonnet-4-6",
+  model: "claude-fable-5",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Hello" }],
   stream: true,
@@ -133,6 +133,26 @@ const client = await trust(new Anthropic(), {
 ```
 
 Use dry-run in CI, tests, and local development.
+
+## Verify the Chain
+
+Every governed call appends a SHA-256-hashed event to `.usertrust/audit/events.jsonl`. The standalone verifier checks the whole chain — it has zero runtime dependencies and works without usertrust installed:
+
+```bash
+npx usertrust-verify .usertrust
+```
+
+This is real output — the transcript below is captured from the release build:
+
+```txt
+Vault integrity: VERIFIED (UNANCHORED — internal consistency only)
+Chain length: 9 events
+Merkle root: 7c7ef4c824e1d1f02c37010a3f604bd10c7db739723d450d6e4576ff8503a6b8
+Hash algorithm: SHA-256
+First event: 2026-08-08T00:31:12.036Z
+Last event: 2026-08-08T00:31:12.107Z
+All hashes: valid (9/9)
+```
 
 ## Next Steps
 

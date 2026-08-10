@@ -89,10 +89,40 @@ npx usertrust snapshot --restore <name>  # restore from snapshot
 TigerBeetle process management:
 
 ```bash
-npx usertrust tb start    # start TigerBeetle
-npx usertrust tb stop     # stop TigerBeetle
-npx usertrust tb status   # check if running
+npx usertrust tb start    # NOT YET IMPLEMENTED — prints the manual command below
+npx usertrust tb stop     # NOT YET IMPLEMENTED — prints the manual command below
+npx usertrust tb status   # works: reports whether a TigerBeetle process is running
 ```
+
+<Callout type="warn">
+`tb start` and `tb stop` are stubs today. They exit without managing anything and
+print the manual command instead — process lifecycle management is a future
+version. `tb status` is real: it checks for a running `tigerbeetle` process.
+
+Start and stop TigerBeetle yourself:
+
+```bash
+mkdir -p ./data   # format writes the file, not the directory above it
+tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development ./data/0_0.tigerbeetle
+tigerbeetle start --addresses=3001 --cache-grid=256MiB ./data/0_0.tigerbeetle
+kill $(pgrep tigerbeetle)
+```
+
+Two things this block gets right that are easy to get wrong:
+
+- **`mkdir -p ./data` first.** `usertrust init` creates the `.usertrust/` vault,
+  not `./data`, and `tigerbeetle format` exits `error: FileNotFound` when the
+  parent directory is missing.
+- **Port 3001, not 3000.** With the generated config, the SDK dials
+  `127.0.0.1:3001` — `tigerbeetle.addresses` is not written by `init`, so the
+  schema default in `packages/core` applies. The `tb start` stub still prints
+  `--addresses=3000`, which predates that default; bind 3001 as above, or set
+  `tigerbeetle.addresses` in `.usertrust/usertrust.config.json` to whatever you
+  did bind.
+
+See the [TigerBeetle quick start](https://docs.tigerbeetle.com/start/) for
+installation and for running it in Docker.
+</Callout>
 
 ## usertrust completions
 

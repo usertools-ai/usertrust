@@ -1030,10 +1030,12 @@ this.
 
 There is no root `build` script; each package builds itself (`npm run build -w usertrust`, etc.).
 
-**CI** (`.github/workflows/ci.yml`) runs four jobs on Node 22, on every push to `master` and every
-**non-draft** PR: `lint`, `typecheck`, `test` (coverage, with the thresholds above), and
-`tb-integration` (a real single-node TigerBeetle cluster, sha256-pinned binary). There is **no path
-filter** — every non-draft PR runs all four regardless of what changed. Draft PRs run none of them.
+**CI** (`.github/workflows/ci.yml`) runs six jobs on Node 22, on every push to `master` and every
+**non-draft** PR: `lint`, `typecheck`, `test` (coverage, with the thresholds above),
+`openclaw-contract` (the host contract, described below), `tb-integration` (a real single-node
+TigerBeetle cluster, sha256-pinned binary), and `site-build` (the site's own install, tests and
+production build). There is **no path filter** — every non-draft PR runs all six regardless of what
+changed. Draft PRs run none of them.
 
 The TigerBeetle server version in CI is pinned to match `tigerbeetle-node` in `packages/core` and
 must be bumped in lockstep — **never `latest`**. The client must never be newer than the server. The
@@ -1148,15 +1150,21 @@ Real, verified, and worth knowing before you touch the surrounding code.
   `packages/openclaw/openclaw-contract.env`; never inline the version anywhere else.** The split is
   two tsconfigs rather than one conditional include because `tsc` cannot skip a file whose import
   does not resolve.
-- **`site/` is not typechecked or built by CI** — only linted. Its `tsconfig.json` is standalone and
-  has neither `noUncheckedIndexedAccess` nor `exactOptionalPropertyTypes`.
-  **A green CI run says nothing about whether the site builds.** `site/` is not a workspace and
-  carries its own `package-lock.json`, so a root `npm ci` leaves `site/node_modules` empty and
-  nothing in the pipeline ever compiles it. Any change under `site/` — a dependency bump above all —
-  must be verified with `cd site && npm ci && npx next build` before merge. This is not theoretical:
-  a Dependabot PR raised `fumadocs-mdx` to a version whose peer range demands a **major** bump of
-  `fumadocs-core`, passed all four CI jobs, merged, and broke the production deploy. The failure
-  surfaced at `vercel --prod`, after the release had shipped.
+- **`site/` IS built by CI now — in its own job, off its own lockfile.** `site-build` checks out,
+  runs `npm ci` / `npm test` / `npm run build` with `working-directory: site`, and caches on
+  `site/package-lock.json`. That last step is `npm run build`, never a bare `next build`, because
+  only the npm script fires the `prebuild` check-facts gate — the same command Vercel runs. The job
+  needs no TigerBeetle and no secrets: every evidence fixture under `site/app/evidence/` is
+  committed, so the build is public-safe under the workflow-level `contents: read`.
+  The install is separate on purpose: `site/` is **not** a workspace and carries its own
+  `package-lock.json`, so a root `npm ci` leaves `site/node_modules` empty and no other job in the
+  pipeline can compile it. Note the site's `tsconfig.json` is standalone and has neither
+  `noUncheckedIndexedAccess` nor `exactOptionalPropertyTypes`, and `site-build` runs `next build`'s
+  own typecheck rather than the root `typecheck` job's stricter one.
+  This job exists because of a real production break: a Dependabot PR raised `fumadocs-mdx` to a
+  version whose peer range demands a **major** bump of `fumadocs-core`, passed every CI job there
+  was at the time, merged, and broke the deploy — the failure surfaced at `vercel --prod`, after the
+  release had shipped. A green CI run is now evidence that the site builds; it was not before.
 - **`packages/claude-code-plugin` is typechecked by nothing** (no tsconfig, no `src/`).
 - **`package-lock.json` lags the package versions.** The release workflow commits only
   `packages/*/package.json`, so the lockfile records the previous version numbers. Harmless in

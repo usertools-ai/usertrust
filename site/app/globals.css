@@ -16,9 +16,47 @@
 	--color-mem: #c084fc;
 	--color-warning: #f59e0b;
 	--color-danger: #ef4444;
+	/* Small-size danger ink (Addendum H2). #ef4444 is the danger GRAPHIC —
+	   borders, fills, stamps, and any red text at >=16px. Below 16px it does
+	   not clear 4.5:1 with any de-emphasis on top of it: the /80 alpha step
+	   measured 3.52:1 on the race card and 3.64:1 on the page ground, and
+	   red-on-red (danger over bg-danger/30) measured 3.11:1. This lighter red
+	   is the ONE sanctioned red for 12-14px text roles — 7.09:1 on the page
+	   ground, 6.9:1 on the terminal fill. Never de-emphasize it with an alpha
+	   step; de-emphasize by size or weight. */
+	--color-danger-ink: #f87171;
+
+	/* Shared code-surface chrome (Addendum E) — TerminalFrame's container fill. */
+	--color-terminal: #0d0d20;
+
+	/* ── Receipts redesign (2026-08) ───────────────────────────────────── */
+	/* Thermal paper — the ONLY light surfaces on the page (15.6:1 ink-on-paper). */
+	--color-paper: #f2efe6;
+	--color-ink: #16161e;
+	/* On-paper semantic accents — ink-tinted dark variants. The bright dark-ground
+	   accents (--color-ut, --color-warning, --color-danger, --color-tim) are
+	   FORBIDDEN as text on paper (1.67–3.27:1, Codex-verified failures).
+	   All four validated ≥4.5:1 on --color-paper by the contrast gate (Step 13). */
+	--color-paper-emerald: #0b6b4f;
+	--color-paper-amber: #7a4d00;
+	--color-paper-red: #a11212;
+	--color-paper-steel: #33566e;
+
+	/* Section-theme gold (Addendum I2) — the one new hue in the palette. Both
+	   halves measured against the page ground #0a0a1a: the graphic tone is
+	   9.68:1 and the text-safe tone 11.69:1, so either clears the H2 floor and
+	   the pair exists to keep hairlines/glows richer than the ink they sit
+	   beside, not because the darker one is unsafe. */
+	--color-gold: #d9b06a;
+	--color-gold-ink: #e8c37a;
+	/* Text-safe lifts of the two darkest accents, for the same reason. */
+	--color-tim-ink: #8bb8d4;
 
 	--font-sans: var(--font-usertools), -apple-system, BlinkMacSystemFont, sans-serif;
 	--font-mono: var(--font-jetbrains), "SF Mono", "Cascadia Code", monospace;
+
+	/* Display voice — Khand. Tailwind emits this as the `font-display` utility. */
+	--font-display: var(--font-khand), var(--font-usertools), -apple-system, sans-serif;
 }
 
 /*
@@ -31,9 +69,9 @@
 	--color-fd-foreground: hsl(0, 0%, 92%);
 	--color-fd-muted: rgba(255, 255, 255, 0.05);
 	--color-fd-muted-foreground: hsla(0, 0%, 70%, 0.8);
-	--color-fd-popover: #0f0f2a;
+	--color-fd-popover: #10101f;
 	--color-fd-popover-foreground: hsl(0, 0%, 87%);
-	--color-fd-card: #0f0f2a;
+	--color-fd-card: #10101f;
 	--color-fd-card-foreground: hsl(0, 0%, 98%);
 	--color-fd-border: rgba(255, 255, 255, 0.08);
 	--color-fd-primary: #34d399;
@@ -45,16 +83,6 @@
 	--color-fd-ring: #34d399;
 }
 
-/* Ken Burns zoom on hero background */
-@keyframes kenburns {
-	0% {
-		transform: scale(1);
-	}
-	100% {
-		transform: scale(1.08);
-	}
-}
-
 /* Backdrop-filter fallback */
 @supports not (backdrop-filter: blur(1px)) {
 	.glass {
@@ -62,40 +90,203 @@
 	}
 }
 
-/* Mobile: disable ken burns */
-@media (max-width: 767px) {
-	.hero-bg {
-		animation: none !important;
-		background-position: center 30%;
-	}
-}
+/* ── CUSTOM CURSOR (Addendum M1, REVISION 2 — THE REGISTRATION MARK) ──────
+   cursor.tsx mounts a printer's registration mark and nothing else: a ~14px
+   hairline crosshair (two 1px rules) with a 2px dot at the crossing, plus
+   four L-shaped 1px corner ticks that snap outward over a
+   [data-cursor-hover] target. Every part is `position: fixed` and driven by
+   transform alone, so this layer never affects layout and never repaints.
 
-/* Reduced motion */
+   The mark REPLACES the system cursor while the island is mounted: the rule
+   below is scoped to `html.cursor-active`, a class ONLY cursor.tsx ever
+   applies (on mount, inside its pointer:fine + not-reduced-motion gate) and
+   ONLY it ever removes (unmount, window blur). JS-off, coarse pointers, and
+   reduced-motion never see the class, so they keep the native cursor
+   everywhere — this is not a decorative layer on top of it for them, there
+   is simply no script that could hide it. z-index sits above the nav (z-50)
+   so no part is ever clipped under the fixed bar. will-change is scoped to
+   these few elements, not a page-wide rule.
+
+   WHY THERE IS NOTHING FILLED HERE. The bullseye this replaces went through
+   two corrections for the same root cause — area. A filled disc inverted
+   against a near-black page is a near-white blob that washes out whatever
+   text sits under it ("kill the flashlight"), and even outline-only, a 36px
+   ring scaled 2.2x on hover is a 79px object sitting on top of a 12px label.
+   The registration mark is hairlines and a 2px dot: at no state does it
+   cover more than a couple of pixels of anything, so it cannot occlude the
+   skip link — or any other target — by CONSTRUCTION rather than by tuning.
+
+   BLEND AND STACKING (the 19I finding, preserved). The three hairline parts
+   each carry `mix-blend-mode: difference` so the mark inverts against
+   whatever it crosses, dark ground or the page's one paper surface. That
+   only works if each blending element sits ONE stacking context away from
+   the page. Measured live in 19I (pixel-sampled, not eyeballed): nesting the
+   dot inside a positioned wrapper made its blend backdrop come back fully
+   transparent and the difference math never ran — the dot rendered as a
+   plain white circle everywhere. So `.cursor-layer` stays UNPOSITIONED and
+   each blending part is its own fixed, z-indexed top-level layer. Do not
+   wrap them. The corner ticks do not blend (they are accent-coloured on
+   purpose), so those may share one positioned wrapper, and do.
+
+   THE TICKS ARE TRANSFORM-ONLY. Rest is `scale(0)`, framing is a diagonal
+   translate at `scale(1)` — one property, composited, ~120ms ease-out. No
+   opacity fade, no width/height animation, nothing that can trigger layout.
+   `--cursor-accent` is written inline by cursor.tsx from the nearest
+   [data-theme] ancestor at hoverstart, so the crop marks carry the colour of
+   the section the pointer is standing on. */
+html.cursor-active,
+html.cursor-active * {
+	cursor: none !important;
+}
+.cursor-layer {
+	pointer-events: none;
+}
+/* The hairline crosshair. 14px across, 1px thick, centred on the pointer via
+   negative offsets so the element's own transform carries only the position.
+
+   Each rule is a gradient, not a flat fill, because it needs a 2px TRANSPARENT
+   GAP at the crossing — the classic registration mark's centre, and here also
+   a correctness fix. `mix-blend-mode: difference` composites against whatever
+   is behind the element, and a solid dot laid ON TOP of two solid rules
+   inverts the rules' own already-inverted pixels back toward the ground:
+   measured on the paper surface, the dot's four pixels came back 36 / 201 /
+   182 / 84 instead of a uniform ink. With the rules opening a hole exactly the
+   dot's size, every part of the mark blends against the PAGE once and only
+   once. */
+.cursor-rule {
+	position: fixed;
+	mix-blend-mode: difference;
+	will-change: transform;
+	z-index: 100;
+}
+.cursor-rule--h {
+	top: -0.5px;
+	left: -7px;
+	width: 14px;
+	height: 1px;
+	background: linear-gradient(
+		to right,
+		rgba(255, 255, 255, 0.9) 0 6px,
+		transparent 6px 8px,
+		rgba(255, 255, 255, 0.9) 8px 14px
+	);
+}
+.cursor-rule--v {
+	top: -7px;
+	left: -0.5px;
+	width: 1px;
+	height: 14px;
+	background: linear-gradient(
+		to bottom,
+		rgba(255, 255, 255, 0.9) 0 6px,
+		transparent 6px 8px,
+		rgba(255, 255, 255, 0.9) 8px 14px
+	);
+}
+/* The centre dot, sitting in the crosshair's gap. 2px, square-cornered at this
+   size (a radius on 2px reads as nothing but antialiasing), full white so the
+   core is the densest part of the mark, same difference blend as the rules.
+   PAPER (19I's disclosed residual, re-tested here): over .paper-surface
+   (#f2efe6) the blend inverts correctly — the mark renders as ink,
+   pixel-sampled at rgb(36,38,45) against the paper's rgb(242,239,230). No ink
+   outline was needed; the fallback stays unshipped. */
+.cursor-dot {
+	position: fixed;
+	top: -1px;
+	left: -1px;
+	width: 2px;
+	height: 2px;
+	background: #ffffff;
+	mix-blend-mode: difference;
+	will-change: transform;
+	z-index: 100;
+}
+/* The crop-mark frame: a zero-size anchor at the pointer, four L-ticks hung
+   off it. Positioned, and deliberately holding no blending child. */
+.cursor-frame {
+	position: fixed;
+	top: 0;
+	left: 0;
+	width: 0;
+	height: 0;
+	will-change: transform;
+	z-index: 100;
+}
+.cursor-tick {
+	position: absolute;
+	width: 6px;
+	height: 6px;
+	border: 0 solid var(--cursor-accent, var(--color-ut));
+	transform: scale(0);
+	transition: transform 0.12s ease-out;
+}
+.cursor-tick--tl {
+	top: -7px;
+	left: -7px;
+	border-top-width: 1px;
+	border-left-width: 1px;
+	transform-origin: top left;
+}
+.cursor-tick--tr {
+	top: -7px;
+	left: 1px;
+	border-top-width: 1px;
+	border-right-width: 1px;
+	transform-origin: top right;
+}
+.cursor-tick--bl {
+	top: 1px;
+	left: -7px;
+	border-bottom-width: 1px;
+	border-left-width: 1px;
+	transform-origin: bottom left;
+}
+.cursor-tick--br {
+	top: 1px;
+	left: 1px;
+	border-bottom-width: 1px;
+	border-right-width: 1px;
+	transform-origin: bottom right;
+}
+.cursor-frame--on .cursor-tick--tl {
+	transform: translate(-10px, -10px) scale(1);
+}
+.cursor-frame--on .cursor-tick--tr {
+	transform: translate(10px, -10px) scale(1);
+}
+.cursor-frame--on .cursor-tick--bl {
+	transform: translate(-10px, 10px) scale(1);
+}
+.cursor-frame--on .cursor-tick--br {
+	transform: translate(10px, 10px) scale(1);
+}
 @media (prefers-reduced-motion: reduce) {
-	.hero-bg {
-		animation: none !important;
+	.cursor-layer {
+		display: none;
 	}
 }
 
-/* Promote the hero background to its own GPU layer only where Ken Burns runs */
-@media (min-width: 768px) and (prefers-reduced-motion: no-preference) {
-	.hero-bg {
-		will-change: transform;
-	}
-}
+/*
+ * Document scrolling.
+ *
+ * `scroll-padding-top` used to live here, sized to the landing page's fixed
+ * nav. It is gone, and the offset now belongs to the TARGET
+ * (`.section-anchor`, below). The two do not replace each other — they ADD:
+ * with both in force every anchor landed 181px down (80 from the padding, 101
+ * from the margin) instead of the ~101 either one alone intends, which is the
+ * "lands misaligned" symptom, measured. One mechanism, one place.
+ *
+ * The docs surface is unaffected: fumadocs sizes its own heading scroll
+ * margins against its own sticky header, and this rule was written for THIS
+ * nav (its old comment derived 5rem from this bar's 77px height).
+ */
 
-/* Document scrolling */
-html {
-	scroll-behavior: smooth;
-	/*
-	 * The nav is `fixed top-0`, so an anchor jump lands underneath it without
-	 * this. 5rem clears the real header: the bar is py-4 (2rem) around a logo
-	 * pill, which this pass grew to a 44px tap target (2.75rem), plus the 1px border-b: 77px ≈ 4.81rem.
-	 * The nav dropdown's max-h subtracts the same figure — keep them in step. Re-measure
-	 * if the nav padding changes — a value shorter than the header silently
-	 * reintroduces the bug.
-	 */
-	scroll-padding-top: 5rem;
+/* Smooth scrolling is motion — reduced-motion users get instant anchor jumps
+   (motion doctrine #5: finished states, not disabled features). */
+@media (prefers-reduced-motion: no-preference) {
+	html {
+		scroll-behavior: smooth;
+	}
 }
 
 /* Custom scrollbar */
@@ -113,11 +304,18 @@ html {
 	background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-	background: rgba(52, 211, 153, 0.2);
+	/*
+	 * The thumb is the ONLY affordance telling a reader that a code surface
+	 * scrolls sideways (exhibit F's policy YAML, exhibit A's receipt hashes).
+	 * At 0.2 alpha it sampled 1.46:1 against the terminal fill — invisible,
+	 * so the clipped YAML read as truncation rather than scroll. 0.4 is the
+	 * former hover value; hover now goes to 0.6.
+	 */
+	background: rgba(52, 211, 153, 0.4);
 	border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-	background: rgba(52, 211, 153, 0.4);
+	background: rgba(52, 211, 153, 0.6);
 }
 
 /* Selection color */
@@ -176,45 +374,6 @@ html {
 	pointer-events: none;
 }
 
-/* Glow utilities */
-.glow-ut {
-	box-shadow: 0 0 20px rgba(52, 211, 153, 0.15), 0 0 60px rgba(52, 211, 153, 0.08);
-}
-.glow-ut-strong {
-	box-shadow: 0 0 30px rgba(52, 211, 153, 0.25), 0 0 80px rgba(52, 211, 153, 0.12), 0 0 120px
-		rgba(52, 211, 153, 0.06);
-}
-
-/* Section divider */
-.section-divider {
-	height: 1px;
-	background: linear-gradient(90deg, transparent, rgba(52, 211, 153, 0.15), transparent);
-}
-
-/* Orb float animation */
-@keyframes orb-float {
-	0%,
-	100% {
-		transform: translate(0, 0);
-	}
-	25% {
-		transform: translate(30px, -25px);
-	}
-	50% {
-		transform: translate(-20px, 15px);
-	}
-	75% {
-		transform: translate(10px, -10px);
-	}
-}
-
-/* Compositor-only orb drift (duration set inline per orb).
-   No filter here — the radial gradient supplies the softness. */
-.orb {
-	animation: orb-float 25s ease-in-out infinite;
-	will-change: transform;
-}
-
 /* Shimmer effect for cards */
 @keyframes shimmer {
 	0% {
@@ -262,13 +421,16 @@ html {
 @media (prefers-reduced-motion: reduce) {
 	.shimmer-border::after,
 	.glow-ring,
-	.orb,
 	[class*="animate-"] {
 		animation: none !important;
 	}
 }
 
-/* Spotlight card — mouse-following radial highlight */
+/* Spotlight card — mouse-following radial highlight. Addendum M3: the
+   highlight now follows --section-accent (defaulting to emerald) instead of a
+   hardcoded emerald rgba, so a themed section's card reads its own accent
+   rather than always emerald. (hover: hover) gated per M3's touch-devices
+   rule — see the hover-vivid comment above. */
 .spotlight-card {
 	position: relative;
 	overflow: hidden;
@@ -278,7 +440,11 @@ html {
 	position: absolute;
 	width: 300px;
 	height: 300px;
-	background: radial-gradient(circle, rgba(52, 211, 153, 0.06) 0%, transparent 70%);
+	background: radial-gradient(
+		circle,
+		color-mix(in srgb, var(--section-accent, var(--color-ut)) 10%, transparent) 0%,
+		transparent 70%
+	);
 	border-radius: 50%;
 	pointer-events: none;
 	transform: translate(-50%, -50%);
@@ -288,8 +454,10 @@ html {
 	opacity: 0;
 	z-index: 1;
 }
-.spotlight-card:hover::before {
-	opacity: 1;
+@media (hover: hover) {
+	.spotlight-card:hover::before {
+		opacity: 1;
+	}
 }
 
 /* Animated underline for links */
@@ -309,18 +477,6 @@ html {
 }
 .animated-underline:hover::after {
 	width: 100%;
-}
-
-/* Stagger children animation */
-@keyframes fade-up {
-	from {
-		opacity: 0;
-		transform: translateY(12px);
-	}
-	to {
-		opacity: 1;
-		transform: translateY(0);
-	}
 }
 
 /* Hero entrance — CSS-driven so above-the-fold content paints on the first
@@ -345,28 +501,6 @@ html {
 	}
 }
 
-.stagger-children > * {
-	animation: fade-up 0.4s ease-out both;
-}
-.stagger-children > *:nth-child(1) {
-	animation-delay: 0ms;
-}
-.stagger-children > *:nth-child(2) {
-	animation-delay: 60ms;
-}
-.stagger-children > *:nth-child(3) {
-	animation-delay: 120ms;
-}
-.stagger-children > *:nth-child(4) {
-	animation-delay: 180ms;
-}
-.stagger-children > *:nth-child(5) {
-	animation-delay: 240ms;
-}
-.stagger-children > *:nth-child(6) {
-	animation-delay: 300ms;
-}
-
 /* Glow ring — breathing emerald halo for the highlighted stat.
    Pulses opacity (compositor) over a static shadow instead of animating
    box-shadow (paint) every frame. */
@@ -389,9 +523,6 @@ html {
 @media (prefers-reduced-motion: reduce) {
 	.spotlight-card::before {
 		display: none;
-	}
-	.stagger-children > * {
-		animation: none;
 	}
 	.glow-ring {
 		animation: none;
@@ -440,4 +571,1217 @@ html {
 @utility safe-x {
 	padding-left: max(1.5rem, env(safe-area-inset-left));
 	padding-right: max(1.5rem, env(safe-area-inset-right));
+}
+
+/* ── Receipts design system (2026-08 redesign) ─────────────────────────── */
+
+/*
+ * THE SECTION EYEBROW — one treatment, one definition (Addendum H1/H2).
+ *
+ * Every section opens with the same 12px mono kicker ("the docket",
+ * "exhibit a" … "the discipline"). It used to be re-typed per section as
+ * `font-mono text-xs uppercase tracking-[…] text-white/40`, which produced
+ * three different tracking values (0.1em / 0.25em / 0.3em) and, at 40%,
+ * a measured 3.77-3.81:1 on every ground the page owns — under the 4.5:1
+ * small-text floor in TEN sections at once. Both defects are one defect:
+ * the element had no single definition. It does now. 70% is the same ink
+ * the TerminalFrame title bar and the dt labels already carry (9.5-9.7:1),
+ * and 0.3em is the majority tracking it consolidates.
+ *
+ * Written unlayered so it beats Tailwind's layered utilities: a stray
+ * `text-white/40` on the same element cannot silently win the cascade.
+ */
+.section-eyebrow {
+	font-family: var(--font-mono);
+	font-size: 0.75rem;
+	line-height: 1rem;
+	text-transform: uppercase;
+	letter-spacing: 0.3em;
+	/* Themed sections tint the eyebrow with their accent's TEXT-SAFE variant;
+	   an unthemed section keeps the white/70 default. */
+	color: var(--section-accent-ink, rgba(255, 255, 255, 0.7));
+}
+
+/* ── SECTION THEME ACCENTS (Addendum I2) ─────────────────────────────────
+   TigerBeetle's colour-zone rhythm, with one hard rule: a theme colours
+   CHROME ONLY — eyebrow, stage tag, hairlines, connector traces, the glow
+   primitive's tint, the ground-zone wash. SEMANTIC INKS NEVER MOVE: emerald
+   still means verified, amber still means pending, red still means denied,
+   in every section regardless of its theme. A section that tinted its
+   verdicts would be repainting meaning, not chrome.
+
+   Each theme sets a pair. `--section-accent` is the graphic tone (strokes,
+   fills, low-alpha washes); `--section-accent-ink` is the tone used for TEXT
+   and is the one measured against the H2 floor. Every pair below clears
+   4.5:1 on both section grounds (#0a0a1a and the #0c0c22 ground-zone mid) —
+   the lowest of the five is purple at 7.28:1. */
+[data-theme="emerald"] {
+	--section-accent: var(--color-ut);
+	--section-accent-ink: var(--color-ut);
+}
+[data-theme="steel"] {
+	--section-accent: var(--color-tim);
+	--section-accent-ink: var(--color-tim-ink);
+}
+[data-theme="purple"] {
+	--section-accent: var(--color-mem);
+	--section-accent-ink: var(--color-mem);
+}
+[data-theme="amber"] {
+	--section-accent: var(--color-warning);
+	--section-accent-ink: var(--color-warning);
+}
+[data-theme="gold"] {
+	--section-accent: var(--color-gold);
+	--section-accent-ink: var(--color-gold-ink);
+}
+
+/* The stage tag rides the section accent too — same chip, same 12px mono, the
+   section's hue. Written unlayered so it beats the utility classes on the
+   element without needing !important. */
+[data-theme] .stage-tag {
+	border-color: color-mix(in srgb, var(--section-accent) 22%, transparent);
+	background: color-mix(in srgb, var(--section-accent) 8%, transparent);
+	color: var(--section-accent-ink);
+}
+
+/* ── ANCHOR CALIBRATION (Addendum I3) ────────────────────────────────────
+   One token, one rule, every anchored section. `scroll-padding-top` on <html>
+   already handles the fragment jump, but it is a DOCUMENT-level setting: it
+   cannot be tuned per target, and it does not travel with an element that is
+   scrolled programmatically. `scroll-margin-top` belongs to the target, which
+   is where the requirement actually lives.
+
+   The value is a SUM, not a guess: 4.81rem is the fixed nav's own rendered
+   height (44px link row + 2 x 16px py-4 + 1px border — the same figure the nav
+   dropdown's max-h is derived from), plus 1.5rem of breath so the landed
+   section clears the bar rather than tucking under it. Measured: every
+   anchored section lands its top edge 24px below the nav, identically at 390,
+   768, 1280 and 1512. Re-measure both together if the nav padding moves. */
+:root {
+	--anchor-offset: calc(4.81rem + 1.5rem);
+}
+.section-anchor {
+	scroll-margin-top: var(--anchor-offset);
+}
+
+/* ── THE CIRCUIT GRAMMAR (Addendum K1) ───────────────────────────────────
+   Paint for the routed traces whose GEOMETRY lives in
+   sections/lib/trace-style.ts. Two layers everywhere: a dim always-on base
+   with a brighter core inside it, which is what makes a trace read as etched
+   into a board rather than drawn on top of one. Colour follows the section
+   accent and falls back to emerald, so one grammar serves every section
+   without any of them hard-coding a hue. */
+.trace-layer {
+	color: var(--section-accent, var(--color-ut));
+}
+.trace-base {
+	fill: none;
+	stroke: color-mix(in srgb, var(--section-accent, var(--color-ut)) 26%, transparent);
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+.trace-core {
+	fill: none;
+	stroke: color-mix(in srgb, var(--section-accent, var(--color-ut)) 78%, transparent);
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+.trace-via {
+	fill: color-mix(in srgb, var(--section-accent, var(--color-ut)) 70%, transparent);
+}
+.trace-pad {
+	fill: var(--section-accent, var(--color-ut));
+}
+/* Labels on a trace diagram. These are HTML absolutely positioned OVER the
+   diagram, never `<text>` inside it, because authored size is not rendered size
+   inside a viewBox: 14px in the fork's 520-unit box rendered at ~13.8px in a
+   512px desktop column but at ~9.2px on a 390px phone (scale 342/520), under
+   the 12px floor that binds every glyph on the page. In CSS pixels the floor
+   holds at every viewport. The die solved the same problem by hiding its labels
+   below 48rem; the fork cannot — hold/xor/settle/void ARE the diagram.
+   Positioning comes from forkLabelPlacement() in lib/two-phase-fork.ts. */
+.fork-label {
+	position: absolute;
+	font-family: var(--font-jetbrains), monospace;
+	font-size: 12px;
+	line-height: 1;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+	white-space: nowrap;
+	color: var(--section-accent-ink, rgba(255, 255, 255, 0.7));
+}
+
+/* ── THE FORK, ANIMATED (Exhibit C set-piece) ─────────────────────────────
+   The page's fourth and last ambient-class loop, and the only one that
+   animates an ARGUMENT rather than a texture: a pulse runs the hold trunk, the
+   via brightens as it arrives, and one branch — alternating — carries it out
+   to a pad that flashes emerald for a settle or red for a void. Never both.
+
+   THE CYCLE IS ONE NUMBER. `--fork-cycle-duration` is the beat everything is
+   phrased against; every keyframe percentage below is a time in that cycle
+   divided by it, and the comment beside each says which:
+       0.00s  the pulse leaves the hold pad
+       2.00s  it reaches the via                      (33.34% of one cycle)
+       2.40s  the decision beat ends                  (40%)
+       3.90s  the pulse reaches its pad               (32.5% of TWO cycles)
+       4.50s  the flash has decayed                   (37.5% of two)
+       6.00s  rest, and the other branch's turn
+   Branch animations run at TWO cycles and are offset by one via `--fork-cycle`
+   (0 for settle, 1 for void), which the component sets from the same
+   FORK_TERMINALS table the pads are drawn from. That is the whole alternation
+   mechanism: no JS timer, nothing to drift, and one shared start time means
+   the trunk and the two branches can never fall out of phase.
+
+   AT REST — offscreen, before hydration, with JavaScript off — every animation
+   here is `paused` at 0%, and 0% is the parked state: the pulse dash sits
+   behind its own origin and both flashes are fully transparent. The fork draws
+   exactly as it did before it moved. Under reduced motion the overlay is not
+   drawn at all.
+
+   THE PROPERTY ALLOWLIST — `stroke-dashoffset`, `opacity`, `transform`, and
+   nothing else. That is the whole set the ambient class permits, and this
+   diagram is the first loop on the page to use all three: the pulses shift a
+   dash, the beat and the flashes fade, the two halos also scale.
+
+   `opacity` was added to the doctrine's wording when this diagram arrived
+   (2026-08-09), and it is the CHEAPEST of the three, not a relaxation.
+   `transform` and `opacity` are the two properties a compositor animates
+   without repainting anything; a `stroke-dashoffset` shift — which the
+   doctrine named first, because the die got here first — re-rasterises the
+   path every frame. Permitting the dearer property while excluding the
+   cheaper one inverted the cost ordering the criterion exists to enforce. The
+   same reasoning is already on file a couple of hundred lines up, where
+   `.glow-ring` pulses opacity precisely so it does not animate `box-shadow`.
+
+   What stays out is unchanged: layout, `filter`, and any repaint of a fill or
+   a background. A `fill` swap on the via was the first draft of the decision
+   beat — it repaints the shape every frame, which is why the beat is an
+   overlaid copy instead. `site/app/lib/motion-doctrine.test.ts` pins the
+   allowlist against this stylesheet for every ambient loop on the page. */
+.fork-figure {
+	--fork-cycle-duration: 6s;
+}
+/* The pulse's dash grammar (stroke-dasharray, pathLength) is set on the
+   element from sections/lib/two-phase-fork.ts, so one physical pulse length is
+   shared by a 196-unit trunk and two 288-unit branches. Only paint and timing
+   live here.
+
+   TWO STROKES PER PULSE — the same relationship the static traces already
+   have. A bright 2.5px head at full accent, and a wide soft copy under it that
+   reads as the light it is throwing. Without the second one the pulse is just
+   a slightly fatter piece of trace, which is what it looked like: the pulse
+   cannot say "here" with hue, because hue is reserved for the two terminals. */
+.fork-pulse-trunk,
+.fork-pulse-branch {
+	fill: none;
+	stroke-linecap: round;
+	/* The parked rest frame, also declared outside the keyframes so it holds
+	   even if an animation is never applied at all. */
+	stroke-dashoffset: var(--fork-park-start);
+	animation-timing-function: linear;
+	animation-iteration-count: infinite;
+	animation-play-state: paused;
+}
+.fork-pulse-core {
+	stroke: var(--section-accent, var(--color-ut));
+	stroke-width: 2.5px;
+}
+/* Two stacked low-alpha copies, not one: a single wide stroke at a flat alpha
+   has an EDGE, and an edge at any opacity reads as a shape rather than as
+   light — the same finding that replaced the die's flat halo rects with a
+   radial falloff. Two widths at two alphas is a two-step falloff, which is as
+   close to a gradient as a stroke gets without a filter. */
+.fork-pulse-glow {
+	stroke: color-mix(in srgb, var(--section-accent, var(--color-ut)) 20%, transparent);
+	stroke-width: 6px;
+}
+.fork-pulse-bloom {
+	stroke: color-mix(in srgb, var(--section-accent, var(--color-ut)) 9%, transparent);
+	stroke-width: 12px;
+}
+.fork-pulse-trunk {
+	animation-name: fork-trunk-pulse;
+	animation-duration: var(--fork-cycle-duration);
+}
+.fork-pulse-branch {
+	animation-name: fork-branch-pulse;
+	animation-duration: calc(var(--fork-cycle-duration) * 2);
+	animation-delay: calc(var(--fork-cycle, 0) * var(--fork-cycle-duration) * -1);
+}
+/* 0 -> 33.34%: the 2s run down the trunk. The rest of the cycle it waits past
+   the far end, which is where the branch pulse picks the packet up. */
+@keyframes fork-trunk-pulse {
+	0% {
+		stroke-dashoffset: var(--fork-park-start);
+	}
+	33.34% {
+		stroke-dashoffset: var(--fork-park-end);
+	}
+	100% {
+		stroke-dashoffset: var(--fork-park-end);
+	}
+}
+/* Two cycles. Parked until 20% (2.4s — the decision beat has ended), then the
+   1.5s run out to the pad at 32.5% (3.9s), then parked for the whole of the
+   other branch's cycle. */
+@keyframes fork-branch-pulse {
+	0%,
+	20% {
+		stroke-dashoffset: var(--fork-park-start);
+	}
+	32.5% {
+		stroke-dashoffset: var(--fork-park-end);
+	}
+	100% {
+		stroke-dashoffset: var(--fork-park-end);
+	}
+}
+/* THE DECISION BEAT. Opacity only on the dot; the halo also scales, from its
+   own centre — `transform-box: fill-box` is what makes `transform-origin:
+   center` mean the circle rather than the whole viewBox. */
+.fork-beat-dot,
+.fork-beat-halo {
+	opacity: 0;
+	animation-name: fork-beat;
+	animation-duration: var(--fork-cycle-duration);
+	animation-timing-function: ease-out;
+	animation-iteration-count: infinite;
+	animation-play-state: paused;
+}
+.fork-beat-dot {
+	fill: var(--section-accent, var(--color-ut));
+}
+.fork-beat-halo {
+	fill: color-mix(in srgb, var(--section-accent, var(--color-ut)) 30%, transparent);
+	transform-box: fill-box;
+	transform-origin: center;
+	animation-name: fork-beat-halo;
+}
+@keyframes fork-beat {
+	0%,
+	30% {
+		opacity: 0;
+	}
+	33.34% {
+		opacity: 1;
+	}
+	40% {
+		opacity: 1;
+	}
+	52% {
+		opacity: 0;
+	}
+	100% {
+		opacity: 0;
+	}
+}
+@keyframes fork-beat-halo {
+	0%,
+	30% {
+		opacity: 0;
+		transform: scale(0.4);
+	}
+	33.34% {
+		opacity: 0.9;
+		transform: scale(1);
+	}
+	40% {
+		opacity: 0.7;
+		transform: scale(1);
+	}
+	52% {
+		opacity: 0;
+		transform: scale(1.3);
+	}
+	100% {
+		opacity: 0;
+		transform: scale(1.3);
+	}
+}
+/* THE OUTCOME FLASH. The one place on this diagram where colour means
+   something: emerald settles, red voids. The traces and the travelling pulse
+   stay section-amber precisely so these two reads are unambiguous. */
+.fork-flash--settle {
+	--fork-ink: var(--color-ut);
+}
+.fork-flash--void {
+	--fork-ink: var(--color-danger);
+}
+.fork-flash-dot,
+.fork-flash-halo {
+	opacity: 0;
+	animation-duration: calc(var(--fork-cycle-duration) * 2);
+	animation-timing-function: ease-out;
+	animation-iteration-count: infinite;
+	animation-play-state: paused;
+	animation-delay: calc(var(--fork-cycle, 0) * var(--fork-cycle-duration) * -1);
+}
+.fork-flash-dot {
+	fill: var(--fork-ink);
+	animation-name: fork-flash;
+}
+.fork-flash-halo {
+	fill: color-mix(in srgb, var(--fork-ink) 32%, transparent);
+	transform-box: fill-box;
+	transform-origin: center;
+	animation-name: fork-flash-halo;
+}
+/* Arrival at 32.5% (3.9s), full at 33.4% (~110ms rise), decayed by 37.5%
+   (4.5s) — the ~600ms the outcome is legible before the fork rests. */
+@keyframes fork-flash {
+	0%,
+	32.5% {
+		opacity: 0;
+	}
+	33.4% {
+		opacity: 1;
+	}
+	37.5% {
+		opacity: 0;
+	}
+	100% {
+		opacity: 0;
+	}
+}
+@keyframes fork-flash-halo {
+	0%,
+	32.5% {
+		opacity: 0;
+		transform: scale(0.5);
+	}
+	33.4% {
+		opacity: 0.85;
+		transform: scale(1);
+	}
+	37.5% {
+		opacity: 0;
+		transform: scale(1.7);
+	}
+	100% {
+		opacity: 0;
+		transform: scale(1.7);
+	}
+}
+/* IO gate — the wrapper toggles data-active from an IntersectionObserver in
+   exhibit-c-fork.tsx. Same contract as the die: running in view, paused out of
+   it, and paused is also the SSR/no-JS state. */
+.fork-figure[data-active="true"] .fork-pulse-trunk,
+.fork-figure[data-active="true"] .fork-pulse-branch,
+.fork-figure[data-active="true"] .fork-beat-dot,
+.fork-figure[data-active="true"] .fork-beat-halo,
+.fork-figure[data-active="true"] .fork-flash-dot,
+.fork-figure[data-active="true"] .fork-flash-halo {
+	animation-play-state: running;
+}
+/* will-change rides WITH the gate, never on the class: declared
+   unconditionally it would hold promoted layers for the whole session,
+   including the ~95% of it this diagram is off screen.
+
+   AND IT IS SCOPED TO THE STROKES. It was briefly on the two flash halos as
+   well, and that promoted each of them to its own compositing layer inside the
+   SVG — which painted a faint dark ring the exact size of the scaled halo,
+   permanently, at opacity 0. A promotion hint that draws something is not a
+   hint. The halos animate transform and opacity, which the compositor handles
+   without being asked. */
+.fork-figure[data-active="true"] .fork-pulse-trunk,
+.fork-figure[data-active="true"] .fork-pulse-branch {
+	will-change: stroke-dashoffset;
+}
+/* Reduced motion: the fork the page shipped before it animated. The overlay is
+   removed rather than frozen — a pulse stopped halfway down a trace reads as a
+   rendering fault, and a lit terminal pad would be a claim about an outcome
+   that never happened. */
+@media (prefers-reduced-motion: reduce) {
+	.fork-pulse-trunk,
+	.fork-pulse-branch,
+	.fork-beat-dot,
+	.fork-beat-halo,
+	.fork-flash-dot,
+	.fork-flash-halo {
+		display: none;
+	}
+}
+
+/* Thermal-paper surface — warm, slightly dimmed against pure white so paper
+   reads as artifact, lifted off the dark ground by shadow, never by border. */
+.paper-surface {
+	background: var(--color-paper);
+	color: var(--color-ink);
+	box-shadow: 0 1px 0 rgba(22, 22, 30, 0.08), 0 14px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* ── THE LEDGER TICKER (Addendum O1) ──────────────────────────────────────
+   A perforated receipt strip running the published chain between the harden
+   doctrine and the closing panel. Paper register, dimmed: the page's paper
+   token pulled a few percent toward ink, so the strip reads as a secondary
+   artifact beside the closing receipt rather than competing with it. Text is
+   ink and only ink — emerald/amber/steel/red never appear as text on paper.
+
+   MOTION. The doctrine allows two looping animations on this page; this is
+   the third, added by Addendum O1 and held to the identical discipline both
+   of the others are. Transform-only, so the loop composites and never
+   repaints. `animation-play-state: paused` whenever the island's
+   IntersectionObserver says the strip is off screen (data-play="false" is
+   also the SSR/no-JS state, so a JavaScript-off visitor gets a static strip
+   rather than a permanently running one). No animation at all under reduced
+   motion.
+
+   SEAMLESS. The track holds several copies of the fragment list and travels
+   exactly ONE of them, so at the end of a period copy two sits precisely where
+   copy one started and the reset is invisible. The number of copies is owned
+   by the island (RUNS in ledger-ticker-strip.tsx) and arrives here as
+   `--ledger-runs`, so the travel below cannot fall out of step with it — the
+   travel used to be a literal -50% with a comment asking the next editor to
+   remember, and the copy count has since changed. 40s is deliberately slow:
+   this is ambience under the reader's eye, not a thing to be read at speed. */
+.ledger-strip {
+	position: relative;
+	overflow: hidden;
+	color: var(--color-ink);
+	--ledger-paper: color-mix(in srgb, var(--color-paper) 90%, var(--color-ink));
+}
+/* The punched edges. Same 14px rhythm as .perforation, drawn in the dimmed
+   strip's own paper. The holes are TRANSPARENT, which is why the paper fill
+   lives on the window below and not on .ledger-strip itself — a hole punched
+   through paper that is sitting on more paper is not a hole. Here it shows
+   the page's dark ground, which is what a punched edge looks like. */
+.ledger-perf {
+	display: block;
+	height: 10px;
+	background-image: radial-gradient(
+		circle at 5px 5px,
+		transparent 0 3.5px,
+		var(--ledger-paper) 4px
+	);
+	background-size: 14px 10px;
+	background-repeat: repeat-x;
+}
+.ledger-strip-window {
+	overflow: hidden;
+	background: var(--ledger-paper);
+}
+.ledger-strip-track {
+	display: flex;
+	width: max-content;
+	will-change: transform;
+	animation: ledger-scroll 40s linear infinite;
+}
+.ledger-strip[data-play="false"] .ledger-strip-track {
+	animation-play-state: paused;
+}
+.ledger-strip-run {
+	display: flex;
+	flex-shrink: 0;
+}
+@keyframes ledger-scroll {
+	from {
+		transform: translateX(0);
+	}
+	to {
+		transform: translateX(calc(-100% / var(--ledger-runs)));
+	}
+}
+/* Fragments. 12px mono is the page's floor and this strip sits on it; ink on
+   the dimmed paper measures far above the 4.5:1 text floor (pixel-verified). */
+.ledger-frag {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.5rem 1.25rem;
+	font-family: var(--font-mono);
+	font-size: 12px;
+	letter-spacing: 0.06em;
+	white-space: nowrap;
+}
+.ledger-frag-kind {
+	text-transform: uppercase;
+	letter-spacing: 0.12em;
+	font-weight: 600;
+}
+/* The separators sit back from the fragment they punctuate, but they are still
+   rendered 12px glyphs, so they hold the same 4.5:1 floor every other glyph on
+   this page does rather than claiming a decorative exemption. 65% ink over the
+   dimmed paper measures 4.86:1; 45%, which is where this started, was 2.75:1. */
+.ledger-frag-sep {
+	color: color-mix(in srgb, var(--color-ink) 65%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+	.ledger-strip-track {
+		animation: none;
+	}
+}
+
+/* Punch-hole perforation strip (receipt top/bottom edges): transparent holes
+   punched out of paper on a 14px rhythm. */
+.perforation {
+	height: 12px;
+	background-image: radial-gradient(circle at 6px 6px, transparent 0 4px, var(--color-paper) 4.5px);
+	background-size: 14px 12px;
+	background-repeat: repeat-x;
+}
+
+/* Mono provenance stub — "captured v3.1.0 · TigerBeetle 0.17.9 · 2026-08-07".
+   Ink-tinted (paper-* accents are labels/graphics, never fine print).
+   12px / 70% mix is the Addendum H1 floor bump (was 11px / 64%, ≈4.45:1 —
+   just under the 4.5:1 floor; 70% clears it, Step 13 validates). */
+.provenance-stub {
+	font-family: var(--font-mono);
+	font-size: 0.75rem;
+	letter-spacing: 0.04em;
+	color: color-mix(in srgb, var(--color-ink) 70%, var(--color-paper));
+}
+
+/* ── DEPTH VOCABULARY (Addendum H3) ──────────────────────────────────────
+   The ONLY sanctioned elevation/light primitives. Depth is elevation +
+   light, never skeuomorphic bevels; no section may invent its own shadow
+   or gradient — compose these. lift-1: cards/frames. lift-2: physical
+   objects (stamp, tear-off). glow-emerald: radial ambience behind set
+   pieces. ground-zone: alternating section grounds (dark-zone rhythm).
+   hover-vivid (Addendum M3): the interactive-hover variant — it COMPOSES
+   lift-1 -> lift-2 and the glow-emerald recipe rather than inventing a third
+   shadow, which is why the two lift box-shadows are named custom properties
+   below instead of two separate literal values. */
+:root {
+	--shadow-lift-1: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px rgba(0, 0, 0, 0.35);
+	--shadow-lift-2: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+.lift-1 {
+	box-shadow: var(--shadow-lift-1);
+}
+.lift-2 {
+	box-shadow: var(--shadow-lift-2);
+}
+/* Emerald ambience on ::before at z-index -1; isolation keeps the layer
+   inside the host's stacking context so it can never slip behind the page
+   ground. Pure paint — no filter, no animation, no layout impact. */
+.glow-emerald {
+	position: relative;
+	isolation: isolate;
+}
+.glow-emerald::before {
+	content: "";
+	position: absolute;
+	inset: -20%;
+	z-index: -1;
+	pointer-events: none;
+	/* Tint follows the section accent (Addendum I2) and defaults to emerald,
+	   so the primitive keeps its name and its default while a themed section
+	   gets its own ambience. */
+	background: radial-gradient(
+		ellipse 60% 40% at 50% 50%,
+		color-mix(in srgb, var(--section-accent, var(--color-ut)) 7%, transparent),
+		transparent 100%
+	);
+}
+/* hover-vivid (Addendum M3, RECALIBRATED — Addendum O3) — docket tiles:
+   lift-1 at rest, lift-2's deeper shadow plus an accent-tinted EDGE on hover.
+
+   What it was, and why it changed. The hover state used to be a ::after
+   ellipse — 60% x 40%, centred at 50% 50%, inflated to inset:-20% — filled
+   with the accent at 16%. Two problems, both measured on a hovered docket
+   tile at 1512: the gradient's centre landed over the tile's numeral and its
+   caption, and 16% of a warm accent spread that wide over a near-black ground
+   resolves to a desaturated grey lift, not a tint. Pixel-sampled: the tile
+   centre went rgb(18,17,36) -> rgb(49,41,46) on hover — a +31/+24/+10 wash
+   that reads as haze over the content, while the tile's own edge moved by
+   almost nothing. A tile that lights up in the middle and stays dark at the
+   boundary is a smudge; a tile that lights up at the boundary is a lit
+   object.
+
+   What it is now: four box-shadow layers, no pseudo-element, all anchored to
+   the edge.
+     1. var(--shadow-lift-2) — the elevation step, still the depth vocabulary's
+        (this is what "composes lift-1 -> lift-2" means; it was never the
+        gradient's job);
+     2. a 1px accent ring ON the border, which is what makes the accent read as
+        the section's own colour rather than as a tint of the ground;
+     3. a tight outer glow with a NEGATIVE spread, so it never reaches more
+        than a few pixels past the border;
+     4. an inset bloom with a negative spread too — it fades out well before
+        the middle of the tile, so nothing washes the numeral.
+   No ::after means nothing paints over the content at all, and the whole
+   state is one animatable property.
+
+   (hover: hover) gated — a touchscreen reports hover:none, so a tap can never
+   leave a tile "stuck" glowing the way :hover alone can on iOS. */
+@media (hover: hover) {
+	.hover-vivid {
+		position: relative;
+		isolation: isolate;
+		transition: box-shadow 0.25s ease;
+	}
+	.hover-vivid:hover {
+		box-shadow:
+			var(--shadow-lift-2),
+			0 0 0 1px color-mix(in srgb, var(--section-accent, var(--color-ut)) 40%, transparent),
+			0 0 14px -2px color-mix(in srgb, var(--section-accent, var(--color-ut)) 32%, transparent),
+			inset 0 0 22px -10px color-mix(in srgb, var(--section-accent, var(--color-ut)) 55%, transparent);
+	}
+}
+@media (prefers-reduced-motion: reduce) {
+	.hover-vivid {
+		transition: none;
+	}
+}
+/* Section-ground rhythm: #0a0a1a → #0c0c22 → #0a0a1a, with the mid stop
+   carrying a 3% wash of the section accent (Addendum I2). Three percent is
+   deliberately at the edge of perception: the zone rhythm is meant to be felt
+   scrolling past, not read. */
+.ground-zone {
+	background:
+		linear-gradient(
+			180deg,
+			transparent 0%,
+			color-mix(in srgb, var(--section-accent, transparent) 3%, transparent) 50%,
+			transparent 100%
+		),
+		linear-gradient(180deg, #0a0a1a 0%, #0c0c22 50%, #0a0a1a 100%);
+}
+
+/* Stamp slam — CSS voice of the motion-v12 spring in stamp.tsx. Fires once;
+   reduced-motion renders the final state statically (component's job). */
+@keyframes stamp-in {
+	0% {
+		opacity: 0;
+		transform: scale(1.6) rotate(-8deg);
+	}
+	60% {
+		opacity: 1;
+		transform: scale(0.94) rotate(-3deg);
+	}
+	100% {
+		opacity: 1;
+		transform: scale(1) rotate(-4deg);
+	}
+}
+
+/* Hairline rules drawing in (docket tiles, receipt field rules).
+   Apply with `transform-origin: left` on the element. */
+@keyframes hairline-draw {
+	from {
+		transform: scaleX(0);
+	}
+	to {
+		transform: scaleX(1);
+	}
+}
+
+/* "copied · $0.00" chit — pop in, hold, fade. 1.6s total (copy-chip.tsx). */
+@keyframes chit-pop {
+	0% {
+		opacity: 0;
+		transform: translateY(4px) scale(0.92);
+	}
+	12% {
+		opacity: 1;
+		transform: translateY(0) scale(1.03);
+	}
+	20%,
+	82% {
+		opacity: 1;
+		transform: translateY(0) scale(1);
+	}
+	100% {
+		opacity: 0;
+		transform: translateY(-4px) scale(1);
+	}
+}
+
+/* ── Receipt kit (shared components) ─────────────────────────── */
+
+/* Dotted leader between a receipt row's label and value */
+.dotted-leader {
+	flex: 1 1 auto;
+	min-width: 1.25rem;
+	border-bottom: 1px dotted color-mix(in srgb, var(--color-ink) 35%, transparent);
+	transform: translateY(-0.2em);
+}
+
+/* Steel-tinted row highlight for annotated receipt fields.
+   Graphic-only accent (>=3:1); row text stays ink — steel is never text on paper. */
+.receipt-row-highlight {
+	background: color-mix(in srgb, var(--color-paper-steel) 12%, transparent);
+	outline: 1px dashed color-mix(in srgb, var(--color-paper-steel) 45%, transparent);
+	outline-offset: 2px;
+}
+
+/* Drives the "copied · $0.00" chit in copy-chip.tsx off the chit-pop keyframe
+   declared above (1.6s pop -> hold -> fade, timed to CopyChip's setTimeout).
+   Not redefined here — this class only wires the animation to an element. */
+.chit {
+	animation: chit-pop 1.6s linear both;
+}
+@media (prefers-reduced-motion: reduce) {
+	.chit {
+		animation: none;
+	}
+}
+
+/* ── Docket hairlines — draw in on approach, numerals stay static ──
+   Reuses the `hairline-draw` keyframe declared above (line ~462); only the
+   vertical counterpart is new here. */
+@keyframes hairline-draw-v {
+	from {
+		transform: scaleY(0);
+	}
+	to {
+		transform: scaleY(1);
+	}
+}
+.docket-hairline {
+	position: absolute;
+	background: color-mix(in srgb, var(--section-accent, var(--color-ut)) 12%, transparent);
+	pointer-events: none;
+}
+.docket-hairline-h {
+	top: 0;
+	left: 0;
+	right: 0;
+	height: 1px;
+	transform-origin: left center;
+}
+.docket-hairline-v {
+	top: 0;
+	bottom: 0;
+	left: 0;
+	width: 1px;
+	transform-origin: center top;
+}
+
+/* Scroll-driven draw where supported (Chrome/Edge). */
+@supports (animation-timeline: view()) {
+	.docket-hairline-h {
+		animation: hairline-draw 1s ease-out both;
+		animation-timeline: view();
+		animation-range: entry 0% entry 60%;
+	}
+	.docket-hairline-v {
+		animation: hairline-draw-v 1s ease-out both;
+		animation-timeline: view();
+		animation-range: entry 0% entry 60%;
+	}
+}
+
+/* IO-class fallback (Safari/Firefox). Hidden state exists ONLY under
+   [data-inview="false"], which <InView> stamps post-hydration — no-JS
+   visitors keep the drawn state. */
+@supports not (animation-timeline: view()) {
+	[data-inview="false"] .docket-hairline {
+		transform: scale(0);
+	}
+	[data-inview="true"] .docket-hairline-h {
+		animation: hairline-draw 0.9s ease-out both;
+	}
+	[data-inview="true"] .docket-hairline-v {
+		animation: hairline-draw-v 0.9s ease-out both;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.docket-hairline,
+	[data-inview="false"] .docket-hairline,
+	[data-inview="true"] .docket-hairline-h,
+	[data-inview="true"] .docket-hairline-v {
+		animation: none !important;
+		transform: none !important;
+	}
+}
+
+/*
+ * Exhibit A — evidence-terminal crosslink. The island
+ * (exhibit-a-annotations.tsx) toggles data-annotation-active on the
+ * server-rendered JSON lines; the highlight is a white wash + steel inset
+ * bar — data inks on dark per Addendum C. Scoped under .receipt-terminal so
+ * a future data-line elsewhere is unaffected.
+ */
+.receipt-terminal [data-line] {
+	transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+.receipt-terminal [data-line][data-annotation-active="true"] {
+	background-color: rgba(255, 255, 255, 0.07);
+	box-shadow: inset 2px 0 0 0 var(--color-tim);
+}
+@media (prefers-reduced-motion: reduce) {
+	.receipt-terminal [data-line] {
+		transition: none;
+	}
+}
+
+/* ── THE GOVERNANCE DIE (Exhibit B set-piece, Addendum C4) ──────────────────
+   Emerald circuit pulses: layered SVG strokes animated by stroke-dashoffset —
+   glow comes from stacked strokes and low-opacity rects, never from filter
+   or backdrop-filter. Loops infinitely (`infinite` fill-mode) as ambient art
+   while in view — an exception to the motion doctrine (Addendum C4). The IO
+   gate (IntersectionObserver in exhibit-b-die.tsx) pauses the animation when
+   offscreen via data-active attribute. The dasharray period is 14 + 220 = 234
+   and the keyframe shifts exactly -234 over one cycle. Paused by default
+   (animation-play-state: paused); when in view (data-active="true"), the IO
+   gate sets animation-play-state to running, and the infinite loop cycles
+   continuously. When scrolled offscreen (data-active="false"), play-state
+   returns to paused. Reduced motion: animation removed, traces render as a
+   static glow (solid strokes at reduced opacity). */
+@keyframes die-pulse {
+	to {
+		stroke-dashoffset: -234;
+	}
+}
+/* Addendum H1: authored size is NOT rendered size for SVG text — this
+   renders at authored-size × (rendered-width / viewBox-width). The die's
+   900-unit viewBox renders at ≈552px in the desktop grid column, so 20px
+   authored ≈ 12.3px rendered (floor met). */
+.die-label {
+	font-family: var(--font-mono);
+	font-size: 20px;
+	letter-spacing: 0.16em;
+	text-transform: uppercase;
+	fill: rgba(255, 255, 255, 0.7);
+}
+/* Addendum H1: below md the die renders too narrow for its trace labels to
+   meet the 12px rendered floor — hide them; the svg's aria-label carries the
+   routing description. Decorative instrument art, not content. */
+@media (max-width: 48rem) {
+	.die-label {
+		display: none;
+	}
+}
+.die-label-out {
+	fill: rgba(52, 211, 153, 0.85);
+}
+/* THE ENGRAVED MARK (Addendum K2). Three stacked copies do the work a
+   drop-shadow filter would: a dark copy offset down-right and a light copy
+   offset up-left read as the two walls of a cut channel, and the fill sits at
+   the bottom of it. Drawn rather than filtered because this element animates
+   continuously and a filter re-rasterises the whole surface per frame. */
+.die-mark {
+	font-family: var(--font-display);
+	font-size: 72px;
+	font-weight: 700;
+	fill: #1e6b56;
+}
+.die-mark-shadow {
+	font-family: var(--font-display);
+	font-size: 72px;
+	font-weight: 700;
+	fill: rgba(0, 0, 0, 0.75);
+}
+.die-mark-light {
+	font-family: var(--font-display);
+	font-size: 72px;
+	font-weight: 700;
+	fill: rgba(160, 255, 214, 0.28);
+}
+/* Milled edges: one catch light on the top-left shoulder, one shadow on the
+   bottom-right, plus a faint full-perimeter containment stroke. */
+.die-edge {
+	stroke: rgba(52, 211, 153, 0.4);
+	stroke-width: 1.5px;
+}
+.die-edge-light {
+	stroke: rgba(190, 255, 226, 0.5);
+	stroke-width: 2px;
+	stroke-linecap: round;
+}
+.die-edge-dark {
+	stroke: rgba(0, 0, 0, 0.55);
+	stroke-width: 2px;
+	stroke-linecap: round;
+}
+.die-face-edge {
+	stroke: rgba(52, 211, 153, 0.18);
+	stroke-width: 1px;
+}
+/* The board under the die — a dot lattice, deliberately at the threshold of
+   perception so it reads as substrate texture, never as content. */
+.die-substrate-dot {
+	fill: rgba(52, 211, 153, 0.06);
+}
+.die-pin {
+	stroke: rgba(52, 211, 153, 0.25);
+	stroke-width: 2px;
+}
+.die-pad {
+	fill: rgba(52, 211, 153, 0.6);
+}
+.die-pad-small {
+	fill: rgba(52, 211, 153, 0.35);
+}
+.die-trace-fine {
+	fill: none;
+	stroke: rgba(52, 211, 153, 0.1);
+	stroke-width: 1px;
+}
+.die-trace-base {
+	fill: none;
+	stroke: rgba(52, 211, 153, 0.15);
+	stroke-width: 2px;
+}
+/* stroke-dasharray is NOT set here: it comes from TRACE.dash in
+   sections/lib/trace-style.ts as a presentation attribute, so the dash grammar
+   has one definition shared with every other trace on the page. The keyframe's
+   -234 shift is that grammar's period (14 + 220) and must move with it. */
+/* Duration is a custom property, not baked into the shorthand, so hovering
+   the die (Addendum M3, below) can shorten it without restating the rest of
+   the animation. Changing animation-duration on a running animation keeps its
+   current fractional progress and simply plays the rest faster — no jump, no
+   restart, same effect as a video's playback-rate control. */
+.die-trace-pulse {
+	fill: none;
+	stroke: #34d399;
+	stroke-width: 2px;
+	animation-name: die-pulse;
+	animation-duration: var(--die-pulse-duration, 1.8s);
+	animation-timing-function: linear;
+	animation-iteration-count: infinite;
+	animation-play-state: paused;
+}
+/* Output trace pulses brighter: a short bright core dash rides at the head
+   of the emerald pulse (same 234 period, same keyframe — always in sync). */
+.die-trace-pulse-bright {
+	fill: none;
+	stroke: #d1fae5;
+	stroke-width: 2px;
+	animation-name: die-pulse;
+	animation-duration: var(--die-pulse-duration, 1.8s);
+	animation-timing-function: linear;
+	animation-iteration-count: infinite;
+	animation-play-state: paused;
+}
+/* Per-trace stagger — negative delays put pulses mid-path immediately. */
+.die-delay-a {
+	animation-delay: -300ms;
+}
+.die-delay-b {
+	animation-delay: -900ms;
+}
+.die-delay-c {
+	animation-delay: -1500ms;
+}
+/* The halo's two inner gradient stops (exhibit-b-die.tsx), read from custom
+   properties so hovering the die (below) can brighten them without a filter —
+   the file's own doctrine is that `filter:` on this SVG re-rasters the whole
+   surface every frame while it animates, which a hover state would do for as
+   long as the pointer sits still. A stop-opacity swap costs nothing extra. */
+.die-halo-core {
+	stop-opacity: var(--die-halo-alpha-core, 0.16);
+}
+.die-halo-mid {
+	stop-opacity: var(--die-halo-alpha-mid, 0.06);
+}
+/* Addendum M3 — the die on hover: trace pulses run ~35% faster (1.8s -> 1.17s)
+   and the halo brightens, both as custom-property swaps on the figure so the
+   two trace/pulse rules and the two halo stops above pick them up by
+   inheritance without a single additional selector. (hover: hover) gated —
+   see the hover-vivid comment above for why. */
+@media (hover: hover) {
+	.die-figure:hover {
+		--die-pulse-duration: 1.17s;
+		--die-halo-alpha-core: 0.3;
+		--die-halo-alpha-mid: 0.12;
+	}
+}
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+	.die-halo-core,
+	.die-halo-mid {
+		transition: stop-opacity 0.25s ease;
+	}
+}
+/* SPECULAR SHEEN (Addendum K2) — the die's second ambient loop. A wide
+   gradient band crosses the clipped face on an 8s period. Transform-only: the
+   band is a static fill and only its translate changes, so the whole sweep
+   composites and never repaints. Same C4 ambient exception as the pulses, same
+   IO gate.
+
+   THE TRAVEL IS AN ARITHMETIC RESULT, NOT A FEEL. `#dieFaceClip` spans x
+   460..660. The band is 220 units wide and starts at x=200, so it sits fully
+   LEFT of the clip at t=0 (200..420) and must reach x=660 with its LEFT edge to
+   be fully RIGHT of it: 660 − 200 = 460, plus 60 units of dwell past the edge =
+   520. An `infinite` loop resets instantaneously, so any end state still inside
+   the clip snaps a lit highlight to black once per period; at the old 700px the
+   band ended at 440..660 with its brightest stops parked dead centre of the
+   face. Move the band's x or the clip and this number moves with them. */
+@keyframes die-sheen {
+	from {
+		transform: translateX(0);
+	}
+	to {
+		transform: translateX(520px);
+	}
+}
+.die-sheen {
+	animation: die-sheen 8s cubic-bezier(0.5, 0, 0.5, 1) infinite;
+	animation-play-state: paused;
+}
+/* IO gate: the wrapper toggles data-active based on IntersectionObserver;
+   when true, animation-play-state runs the infinite loops; when false, paused. */
+.die-figure[data-active="true"] .die-trace-pulse,
+.die-figure[data-active="true"] .die-trace-pulse-bright,
+.die-figure[data-active="true"] .die-sheen {
+	animation-play-state: running;
+}
+/* will-change lives WITH the IO gate, not on the class. Declared unconditionally
+   it holds a promoted compositor layer for the whole session — including while
+   the gate has the sweep paused offscreen, which is most of the session. */
+.die-figure[data-active="true"] .die-sheen {
+	will-change: transform;
+}
+/* Reduced motion: static glowing state — solid emerald traces, no movement,
+   and the sheen parked off the face rather than frozen mid-sweep (a stalled
+   highlight reads as a rendering fault, not as a finished state). */
+@media (prefers-reduced-motion: reduce) {
+	.die-trace-pulse {
+		animation: none;
+		stroke-dasharray: none;
+		opacity: 0.4;
+	}
+	.die-trace-pulse-bright {
+		display: none;
+	}
+	.die-sheen {
+		animation: none;
+		display: none;
+	}
+}
+
+/* Exhibit E — halftone dot field behind the outlined zero, vignetted so it
+   reads as a print texture, not a background fill */
+.halftone {
+	background-image: radial-gradient(rgba(52, 211, 153, 0.12) 1.5px, transparent 1.5px);
+	background-size: 12px 12px;
+	-webkit-mask-image: radial-gradient(closest-side, #000 55%, transparent 100%);
+	mask-image: radial-gradient(closest-side, #000 55%, transparent 100%);
+}
+
+/* Exhibit E — the verifier's final OK line stamps in once */
+@keyframes ok-stamp-in {
+	from {
+		opacity: 0;
+		transform: scale(1.25);
+	}
+	to {
+		opacity: 1;
+		transform: scale(1);
+	}
+}
+.ok-stamp {
+	display: inline-block;
+	transform-origin: left center;
+	animation: ok-stamp-in 0.3s cubic-bezier(0.2, 1.4, 0.4, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+	.ok-stamp {
+		animation: none;
+	}
+}
+
+/* Exhibit F — print-spool drop, violator eject, thrown-error card arrival.
+   Each fires once (IO-once in the island); reduced-motion renders the
+   settled end state, so these are simply disabled there. */
+@keyframes chit-drop {
+	from {
+		opacity: 0;
+		transform: translateY(-18px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+@keyframes chit-eject {
+	from {
+		opacity: 1;
+		transform: translate(0, 0) rotate(0deg);
+	}
+	to {
+		opacity: 0;
+		transform: translate(64px, 24px) rotate(8deg);
+	}
+}
+@keyframes rail-arrive {
+	from {
+		opacity: 0;
+		transform: translateX(-24px);
+	}
+	to {
+		opacity: 1;
+		transform: translateX(0);
+	}
+}
+.chit-drop {
+	animation: chit-drop 0.45s cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+.chit-eject {
+	animation: chit-eject 0.5s ease-in both;
+}
+.rail-arrive {
+	animation: rail-arrive 0.4s ease-out both;
+}
+@media (prefers-reduced-motion: reduce) {
+	.chit-drop,
+	.chit-eject,
+	.rail-arrive {
+		animation: none;
+	}
+}
+
+/* One spring-ish, no-overshoot ease for every InView content reveal
+   (Addendum M2) — a single named curve so a future reveal reuses it instead
+   of re-tuning its own. Fast out of the gate, no bounce past 1 (a bounce on
+   a line of text reads as jitter, not spring). */
+:root {
+	--ease-reveal: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Exhibit G — attack-corpus rows reveal once on approach (IO stagger via
+   InView). Server/no-JS markup carries NO data-inview attribute, so the
+   rows can never be hidden from users without JS; InView sets "true" once
+   and never unsets it, so the stagger fires once per pageview.
+   Reduced-motion renders the finished table (finished states, not
+   disabled features).
+   Addendum M2: bolder entry — a taller 24px rise and a 6px->0 blur resolve
+   alongside the fade, on the shared --ease-reveal curve, at a 50ms stagger
+   step (ROW_STAGGER_MS, exhibit-g-corpus.ts). */
+@keyframes attack-row-in {
+	from {
+		opacity: 0;
+		transform: translateY(24px);
+		filter: blur(6px);
+	}
+	to {
+		opacity: 1;
+		transform: translateY(0);
+		filter: blur(0);
+	}
+}
+[data-inview="false"] .attack-row {
+	opacity: 0;
+}
+[data-inview="true"] .attack-row {
+	animation: attack-row-in 0.5s var(--ease-reveal) both;
+}
+@media (prefers-reduced-motion: reduce) {
+	[data-inview="false"] .attack-row,
+	[data-inview="true"] .attack-row {
+		opacity: 1;
+		animation: none;
+		filter: none;
+	}
+}
+
+/* Corpus row hover ground (Addendum M3, RECALIBRATED — Addendum O3) — the
+   same correction hover-vivid just took, in the register a table row can
+   afford. A row is 35px tall, so it gets a ground rather than a bloom; what
+   changes is WHAT the ground is made of. It used to be 14% accent mixed into
+   an 8% WHITE base, and on a near-black ground the white half dominates: the
+   row lit up grey and the section's purple was a rumour. The white base is
+   gone. The ground is now the accent alone at a low alpha, edge-anchored by
+   an inset accent rule down the row's leading edge — the table's own version
+   of the 1px ring the tiles get. (hover: hover) gated so a tap can never
+   leave a row visibly "stuck" highlighted. */
+@media (hover: hover) {
+	.corpus-row-link:hover {
+		background: color-mix(in srgb, var(--section-accent, var(--color-ut)) 16%, transparent);
+		box-shadow: inset 2px 0 0 0
+			color-mix(in srgb, var(--section-accent, var(--color-ut)) 70%, transparent);
+	}
 }

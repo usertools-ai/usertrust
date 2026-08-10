@@ -1,0 +1,77 @@
+{
+	"generatedAt": "2026-08-09T16:45:16.950Z",
+	"commit": "699fcef",
+	"usertrustVersion": "3.2.0",
+	"tigerbeetleVersion": "0.17.9",
+	"facts": {
+		"transferCodes": {
+			"value": 9,
+			"source": "packages/core/src/ledger/client.ts — count of `export const XFER_*`"
+		},
+		"accountCodes": {
+			"value": 3,
+			"source": "packages/core/src/ledger/client.ts — count of `export const CODE_*`"
+		},
+		"policyOperators": {
+			"value": 12,
+			"source": "packages/core/src/shared/types.ts — FieldOperator union members"
+		},
+		"verifierRuntimeDeps": {
+			"value": 0,
+			"source": "packages/verify/package.json — dependencies key count"
+		},
+		"modelCount": {
+			"value": "23+",
+			"numeric": 23,
+			"source": "packages/core/src/ledger/pricing.ts — PRICING_TABLE keys"
+		},
+		"license": {
+			"value": "Apache 2.0",
+			"source": "packages/core/package.json — license: Apache-2.0"
+		},
+		"commandsToFirstReceipt": {
+			"value": 2,
+			"source": "README quickstart — `npm install usertrust` · `npx usertrust init`"
+		},
+		"quickstartMinutes": {
+			"value": 2,
+			"source": "docs quickstart — stated duration (dry-run path)"
+		},
+		"filmDurationSeconds": {
+			"value": 44,
+			"source": "ffprobe site/public/demo/sizzle.mp4 (format.duration, rounded)"
+		},
+		"usertokensPerFiveDollars": {
+			"value": 50000,
+			"source": "packages/core/src/shared/constants.ts — DEFAULT_BUDGET = 50_000 usertokens ($5 starter budget)"
+		},
+		"invariantCount": {
+			"value": 35,
+			"source": "AGENTS.md — count of `Prevents:` clauses"
+		},
+		"hardenSuiteCount": {
+			"value": 53,
+			"source": "packages/core/tests/harden/**/*.test.ts — test-file count"
+		},
+		"testCaseCount": {
+			"value": 3014,
+			"source": "packages/**/*.test.ts — count of it()/test() case openers"
+		},
+		"expectAssertionCount": {
+			"value": 7228,
+			"source": "packages/**/*.test.ts — count of expect( calls; TEST assertions, not runtime guarantees"
+		},
+		"verifierSharedLines": {
+			"value": 0,
+			"source": "packages/verify parity contract (AGENTS.md) — import audit re-run at capture time"
+		},
+		"caseFileCalls": {
+			"value": 47,
+			"source": "CASE FILE 001 incident narrative (fixed copy)"
+		},
+		"caseFileDollars": {
+			"value": 500,
+			"source": "CASE FILE 001 incident narrative (fixed copy)"
+		}
+	}
+}

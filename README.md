@@ -1,6 +1,6 @@
 # usertrust™
 
-Financial governance for AI agents. Every LLM call becomes an immutable, auditable transaction.
+Financial governance for AI agents. Every governed LLM call becomes a tamper-evident, auditable transaction.
 
 ```typescript
 import { trust } from "usertrust";
@@ -11,7 +11,7 @@ import Anthropic from "@anthropic-ai/sdk";
 const client = await trust(new Anthropic(), { dryRun: true, budget: 50_000 });
 
 const { response, receipt } = await client.messages.create({
-  model: "claude-sonnet-4-6",
+  model: "claude-fable-5",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Analyze this contract" }],
 });
@@ -26,19 +26,44 @@ That's it. One function wraps any supported LLM client. Every call is metered, a
 
 ### Expected Output
 
-The `receipt` returned from every call:
+The `receipt` returned from every governed call:
 
-```
+```jsonc
+// A real capture, not an illustration: scripts/capture-evidence.mts runs this
+// against a real TigerBeetle and commits what comes back. `usage` and
+// `pricing` are the two halves of the reconciliation surface — ceil(sum(counts
+// x rates / 1000)), floored at 1, reproduces `cost` from the record alone.
 {
-  cost: 42,
-  budgetRemaining: 49958,
-  transferId: "tx_m4k7p2_a1b2c3",
-  auditHash: "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  settled: true,
-  model: "claude-sonnet-4-6",
-  provider: "anthropic",
-  inputTokens: 12,
-  outputTokens: 28
+  "transferId": "tx_msm19wxa_a107246b",
+  "cost": 104,
+  "budgetRemaining": 49896,
+  "auditHash": "f4a15bc63fc64bcdab2dcca67718d6a89469311e01cb16fa9dd7bb0c31286654",
+  "chainPath": ".usertrust/audit",
+  "receiptUrl": null,
+  "settled": true,
+  "model": "claude-fable-5",
+  "provider": "anthropic",
+  "timestamp": "2026-08-09T16:45:13.634Z",
+  "usageSource": "provider",
+  "usage": {
+    "inputTokens": 317,
+    "outputTokens": 131,
+    "cacheReadTokens": 87,
+    "cacheWriteTokens": 43
+  },
+  "meter": {
+    "costBasis": "usd-proxy",
+    "rateSource": "table"
+  },
+  "pricing": {
+    "appliedRates": {
+      "inputPer1k": 100,
+      "outputPer1k": 500,
+      "cacheReadPer1k": 10,
+      "cacheWritePer1k": 125
+    },
+    "tableVersion": "2026-08-09"
+  }
 }
 ```
 
@@ -81,9 +106,11 @@ Every call returns `{ response, receipt }`:
   cost: 142,
   budgetRemaining: 49_858,
   auditHash: "a3f8...",
+  chainPath: ".usertrust/audit",
+  receiptUrl: null,
   settled: true,
-  model: "claude-sonnet-4-6",
-  provider: "anthropic",
+  model: "gpt-5.6-sol",
+  provider: "openai",
   timestamp: "2026-03-16T12:00:00.000Z"
 }
 ```
@@ -98,7 +125,7 @@ npx usertrust inspect
 === Vault Report ===
 Chain:    847 events · 12 segments
 Budget:   38,420 / 50,000 UT remaining
-Models:   claude-sonnet-4-6 (412) · gpt-4o (289) · gemini-2.0-flash (146)
+Models:   claude-fable-5 (412) · gpt-5.6-sol (289) · kimi-k3 (146)
 Policy:   3 rules active · 0 violations
 PII:      2 warnings · 0 blocks
 Merkle:   a3f8c1...d92b (root)

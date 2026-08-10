@@ -231,3 +231,25 @@ jobs:
           packages/core/tests/integration/tigerbeetle.tb.test.ts
           packages/core/tests/integration/budget-envelope.tb.test.ts
           packages/openclaw/tests/envelope-integration.test.ts
+
+  site-build:
+    name: site-build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event.pull_request.draft == false
+    # The site is a standalone npm project outside the workspaces (own lockfile).
+    # Evidence fixtures are committed, so this build needs no TigerBeetle and no
+    # secrets — public-safe under the workflow-level `contents: read`.
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci
+        working-directory: site
+      - run: npm test
+        working-directory: site
+      - name: Build (runs the prebuild check-facts gate)
+        run: npm run build
+        working-directory: site

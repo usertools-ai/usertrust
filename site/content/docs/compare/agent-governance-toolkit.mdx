@@ -30,7 +30,7 @@ const composite = new CompositeEvaluator({ policy, governor });
 //    A denied action never consumes a reservation.
 const result = await composite.evaluate({
 	kind: "model_call",
-	model: "claude-sonnet-4-6",
+	model: "claude-fable-5",
 	estimatedInputTokens: 500,
 	maxOutputTokens: 4096,
 });
@@ -63,7 +63,7 @@ Every AGT-side statement below links to the exact line in AGT's own specs and de
 | Budget check timing | Post-action cost governance; its ADR accepts a one-action overshoot | Pre-spend `PENDING` hold; an over-budget call is denied before it executes |
 | Stream governance | Evaluates assembled snapshots; token/chunk-level enforcement is outside its model | Per-chunk hook can cut a stream off mid-flight on anomaly signals |
 | Audit | SHA-256 hash-linked entry chain; several decision-context fields sit outside the canonical hash in spec v1.0 | SHA-256 hash chain + RFC 6962 Merkle proofs + zero-dependency offline verifier |
-| Spend accounting | In-process budget tracking over host-supplied cost estimates and counters | Double-entry two-phase TigerBeetle ledger (`PENDING → POST / VOID`), 7 transfer codes |
+| Spend accounting | In-process budget tracking over host-supplied cost estimates and counters | Double-entry two-phase TigerBeetle ledger (`PENDING → POST / VOID`), nine transfer codes |
 | Local models | n/a in the materials cited on this page | Nominal metering for local endpoints (v1.5.0) |
 
 ## Budget Timing: Post-Action vs Pre-Spend
@@ -92,7 +92,7 @@ usertrust's audit chain records settled outcomes — actual tokens, actual cost,
 
 AGT v5 removed a set of Public Preview surfaces precisely because they implied enforcement that did not exist — in its own words, "the ledger always admitted, slashing and quarantine recorded events but enforced nothing" ([BREAKING_CHANGES.md, lines 228–229](https://github.com/microsoft/agent-governance-toolkit/blob/179843b16eadd48bc9666c05f33a38f009542be1/BREAKING_CHANGES.md#L228-L229)). That cleanup is to AGT's credit, and it sharpened the architecture: the ledger is not AGT's job. Its SpendGuard integration guide makes the same point in table form, listing compliance evidence for its in-process `CostGuard` as "None" while pointing at an external cryptographically-audited ledger for that role ([spendguard-integration.md, line 27](https://github.com/microsoft/agent-governance-toolkit/blob/179843b16eadd48bc9666c05f33a38f009542be1/docs/integrations/spendguard-integration.md#L27)).
 
-usertrust is built as that ledger role, natively: real double-entry accounting in TigerBeetle, seven transfer codes, and a two-phase lifecycle where every token is either settled or voided — never lost in limbo. For local models, where there is no provider invoice, v1.5.0 meters calls in nominal usertokens so the same ledger, anomaly signals, and receipts govern your fleet's local endpoints too.
+usertrust is built as that ledger role, natively: real double-entry accounting in TigerBeetle, nine transfer codes, and a two-phase lifecycle where every token is either settled or voided — never lost in limbo. For local models, where there is no provider invoice, v1.5.0 meters calls in nominal usertokens so the same ledger, anomaly signals, and receipts govern your fleet's local endpoints too.
 
 ## Scope and Disclosure
 

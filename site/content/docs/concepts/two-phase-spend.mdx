@@ -76,7 +76,7 @@ The LLM stream starts successfully but errors mid-stream. The pending hold is vo
 
 ## The TigerBeetle Ledger
 
-usertrust uses TigerBeetle for real double-entry accounting -- not a simple counter. Seven transfer codes model the full range of financial operations:
+usertrust uses TigerBeetle for real double-entry accounting -- not a simple counter. Nine transfer codes model the full range of financial operations:
 
 | Code | Purpose |
 |------|---------|
@@ -87,6 +87,8 @@ usertrust uses TigerBeetle for real double-entry accounting -- not a simple coun
 | `ALLOCATION` | Reserve tokens for a sub-budget or scope |
 | `TOOL_CALL` | Cost attributed to an LLM tool/function call |
 | `A2A_DELEGATION` | Tokens delegated to an agent-to-agent call |
+| `BUDGET_GRANT` | Budget delegated into a cost-center envelope |
+| `BUDGET_RECLAIM` | Cost-center budget returned to its parent |
 
 Every transfer is a double-entry operation: one account is debited, another is credited. The ledger always balances.
 

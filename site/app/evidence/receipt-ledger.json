@@ -1,0 +1,137 @@
+{
+	"captures": [
+		{
+			"receipt": {
+				"transferId": "tx_msm19wxa_a107246b",
+				"cost": 104,
+				"budgetRemaining": 49896,
+				"auditHash": "f4a15bc63fc64bcdab2dcca67718d6a89469311e01cb16fa9dd7bb0c31286654",
+				"chainPath": ".usertrust/audit",
+				"receiptUrl": null,
+				"settled": true,
+				"model": "claude-fable-5",
+				"provider": "anthropic",
+				"timestamp": "2026-08-09T16:45:13.634Z",
+				"usageSource": "provider",
+				"usage": {
+					"inputTokens": 317,
+					"outputTokens": 131,
+					"cacheReadTokens": 87,
+					"cacheWriteTokens": 43
+				},
+				"endpoint": {
+					"class": "cloud",
+					"runtime": "unknown"
+				},
+				"meter": {
+					"costBasis": "usd-proxy",
+					"rateSource": "table"
+				},
+				"pricing": {
+					"appliedRates": {
+						"inputPer1k": 100,
+						"outputPer1k": 500,
+						"cacheReadPer1k": 10,
+						"cacheWritePer1k": 125
+					},
+					"tableVersion": "2026-08-09"
+				}
+			},
+			"capture": {
+				"estimatedCost": 131,
+				"clientShape": "anthropic"
+			}
+		},
+		{
+			"receipt": {
+				"transferId": "tx_msm19xmd_bd9207d5",
+				"cost": 59,
+				"budgetRemaining": 49837,
+				"auditHash": "0f1031df713336fb0e9a7f44642dfdd96f466d1ca4b31f61646b872161f1de4d",
+				"chainPath": ".usertrust/audit",
+				"receiptUrl": null,
+				"settled": true,
+				"model": "gpt-5.6-sol",
+				"provider": "openai",
+				"timestamp": "2026-08-09T16:45:14.656Z",
+				"usageSource": "provider",
+				"usage": {
+					"inputTokens": 317,
+					"outputTokens": 131,
+					"cacheReadTokens": 87,
+					"cacheWriteTokens": 43
+				},
+				"endpoint": {
+					"class": "cloud",
+					"runtime": "unknown"
+				},
+				"meter": {
+					"costBasis": "usd-proxy",
+					"rateSource": "table"
+				},
+				"pricing": {
+					"appliedRates": {
+						"inputPer1k": 50,
+						"outputPer1k": 300,
+						"cacheReadPer1k": 5,
+						"cacheWritePer1k": 62.5
+					},
+					"tableVersion": "2026-08-09"
+				}
+			},
+			"capture": {
+				"estimatedCost": 78,
+				"clientShape": "openai"
+			}
+		},
+		{
+			"receipt": {
+				"transferId": "tx_msm19yep_411c1c92",
+				"cost": 31,
+				"budgetRemaining": 49806,
+				"auditHash": "91df5d9e8bc181061f7982f01d2e4c1fb205193ef3ddaafd60cf2471d86521e0",
+				"chainPath": ".usertrust/audit",
+				"receiptUrl": null,
+				"settled": true,
+				"model": "kimi-k3",
+				"provider": "openai",
+				"timestamp": "2026-08-09T16:45:15.609Z",
+				"usageSource": "provider",
+				"usage": {
+					"inputTokens": 317,
+					"outputTokens": 131,
+					"cacheReadTokens": 87,
+					"cacheWriteTokens": 43
+				},
+				"endpoint": {
+					"class": "cloud",
+					"runtime": "unknown"
+				},
+				"meter": {
+					"costBasis": "usd-proxy",
+					"rateSource": "table"
+				},
+				"pricing": {
+					"appliedRates": {
+						"inputPer1k": 30,
+						"outputPer1k": 150,
+						"cacheReadPer1k": 3,
+						"cacheWritePer1k": 30
+					},
+					"tableVersion": "2026-08-09"
+				}
+			},
+			"capture": {
+				"estimatedCost": 40,
+				"clientShape": "openai"
+			}
+		}
+	],
+	"provenance": {
+		"usertrustVersion": "3.2.0",
+		"tigerbeetleVersion": "0.17.9",
+		"capturedAt": "2026-08-09T16:45:16.951Z",
+		"mode": "ledger",
+		"commit": "699fcef"
+	}
+}

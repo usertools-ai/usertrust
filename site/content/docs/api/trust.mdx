@@ -59,7 +59,7 @@ Every intercepted LLM call returns `{ response, receipt }` instead of the raw pr
 
 ```typescript
 const { response, receipt } = await client.messages.create({
-  model: "claude-sonnet-4-6",
+  model: "claude-fable-5",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Hello" }],
 });
@@ -105,7 +105,7 @@ Streaming is transparent. When you pass `stream: true` to the provider, usertrus
 
 ```typescript
 const { response } = await client.messages.create({
-  model: "claude-sonnet-4-6",
+  model: "claude-fable-5",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Write a poem" }],
   stream: true,
@@ -139,7 +139,7 @@ const client = await trust(new Anthropic(), {
 });
 
 const { response, receipt } = await client.messages.create({
-  model: "claude-sonnet-4-6",
+  model: "claude-fable-5",
   max_tokens: 1024,
   messages: [{ role: "user", content: "Explain double-entry accounting" }],
 });
@@ -159,7 +159,7 @@ import { trust } from "usertrust";
 const client = await trust(new OpenAI(), { budget: 30_000 });
 
 const { response, receipt } = await client.chat.completions.create({
-  model: "gpt-4o",
+  model: "gpt-5.6-sol",
   messages: [{ role: "user", content: "What is a Merkle tree?" }],
 });
 
@@ -199,7 +199,7 @@ import { trust } from "usertrust";
 const client = await trust(new Anthropic(), { budget: 50_000 });
 
 const { response } = await client.messages.create({
-  model: "claude-sonnet-4-6",
+  model: "claude-fable-5",
   max_tokens: 2048,
   messages: [{ role: "user", content: "Write a short story" }],
   stream: true,

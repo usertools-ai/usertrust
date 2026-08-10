@@ -16,10 +16,10 @@ const client = await trust(new Anthropic(), { budget: 50_000 });
 
 ## Core Guarantees
 
-- **Two-phase spend lifecycle** — Every LLM call follows `PENDING hold → LLM call → POST (success) or VOID (failure)`. The same pattern banks use for credit card holds.
+- **Two-phase spend lifecycle** — Every governed LLM call follows `PENDING hold → LLM call → POST (success) or VOID (failure)`. The same pattern banks use for credit card holds.
 - **SHA-256 hash-chained audit trail** — Append-only JSONL. Each event chains from the previous via deterministic canonicalization. Tamper-evident by construction.
 - **Merkle proofs (RFC 6962)** — Domain-separated hashing with inclusion and consistency proofs for public verifiability.
-- **Real double-entry accounting** — TigerBeetle ledger with 7 transfer codes. Not a counter.
+- **Real double-entry accounting** — TigerBeetle ledger with nine transfer codes. Not a counter.
 - **Duck-typed client detection** — Works with any Anthropic, OpenAI, or Google SDK. No direct imports.
 
 ## Explore the Docs

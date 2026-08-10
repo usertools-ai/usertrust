@@ -1,0 +1,45 @@
+{
+	"error": {
+		"name": "PolicyDeniedError",
+		"message": "Policy denied: [block-budget-overshoot] Deny pre-spend when estimated cost would drive remaining budget below zero; [WARN] [warn-high-cost] Emit a warning when estimated cost exceeds 1000 tokens\n\n  Hint: A budget rule denied this call: increase the budget in trust() options or reduce the call's max_tokens, and review your budget_remaining / budget_remaining_after tiers.\n  Docs: https://usertrust.ai/docs/errors/policy-denied"
+	},
+	"event": {
+		"actor": "local",
+		"data": {
+			"budget": {
+				"budgetRemaining": 49344,
+				"estimatedCost": 2000003
+			},
+			"decision": "deny",
+			"denialClass": "budget_gate",
+			"endpointClass": "cloud",
+			"error": "Policy denied: [block-budget-overshoot] Deny pre-spend when estimated cost would drive remaining budget below zero; [WARN] [warn-high-cost] Emit a warning when estimated cost exceeds 1000 tokens\n\n  Hi",
+			"model": "claude-fable-5",
+			"policyRules": [
+				{
+					"id": "block-budget-overshoot",
+					"name": "Block calls that would exceed remaining budget"
+				}
+			],
+			"promptHash": "bbef7150e9b81a13378e3f48d66e2c29b22e14d35cae8e89007250bf93c819b4",
+			"promptHashAlg": "sha256-json-v1",
+			"schemaVersion": 1,
+			"transferId": "tx_msm19z83_ddc7e446"
+		},
+		"hash": "627256b4498f26af6c5ec8ff55d9ea21cdab3b021028f96021600a5afb1cdbc8",
+		"id": "b508dfb4-b0dd-4aa3-9094-87e82934eadf",
+		"kind": "policy_denied",
+		"previousHash": "dbcbefad935613c7d02c806c039d2bea8fc3f73e2a3b022c7533010adf140bbf",
+		"sequence": 8,
+		"timestamp": "2026-08-09T16:45:16.565Z",
+		"seq": 8
+	},
+	"provenance": {
+		"usertrustVersion": "3.2.0",
+		"tigerbeetleVersion": "0.17.9",
+		"capturedAt": "2026-08-09T16:45:16.951Z",
+		"mode": "ledger",
+		"commit": "699fcef"
+	},
+	"reproduce": "one governed call with max_tokens 4,000,000 against a 50,000 usertoken budget"
+}

@@ -3,7 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import { GitHubIcon } from "./github-icon";
 
-export function Nav() {
+// "1.2k"-style compact mono counter. Trailing ".0" is dropped (1.0k -> 1k).
+function fmtCompact(n: number): string {
+	return n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n);
+}
+
+export function Nav({ stars, downloads }: { stars: number | null; downloads: number | null }) {
 	const [open, setOpen] = useState(false);
 	const [scrolled, setScrolled] = useState(false);
 	const [activeSection, setActiveSection] = useState("");
@@ -98,40 +103,104 @@ export function Nav() {
 		return () => document.removeEventListener("keydown", handleKey);
 	}, [open]);
 
+	// Addendum F (2026-08-08): the film section was dropped — no #film link.
 	const links = [
-		{ href: "#code", label: "Code" },
-		{ href: "#features", label: "Features" },
-		{ href: "#how", label: "How it works" },
-		{ href: "/docs", label: "Docs" },
+		{ href: "#docket", label: "the docket" },
+		{ href: "#exhibit-a", label: "exhibits" },
+		{ href: "/docs", label: "docs" },
 	];
 
 	return (
 		<nav
 			className={`fixed top-0 left-0 right-0 z-50 border-b transition-all duration-300 ${
+				/*
+				 * The scrolled bar used to be MORE transparent (60%) than the
+				 * top-of-page bar (80%), and the fixed bar passes over the one light
+				 * surface on the page — the open-ledger receipt paper (#f2efe6),
+				 * which spans x352-928 at 1280 and nearly the full width at 390.
+				 * Over that composite ground, white/70 nav text falls to ~3.7:1 and
+				 * text-ut to ~2.95:1, both under the 4.5:1 floor. 85% restores
+				 * white/70 to ~7.4:1 and text-ut to ~7.1:1 while keeping the blur.
+				 */
 				scrolled
-					? "bg-brand-bg/60 backdrop-blur-[20px] border-white/[0.10]"
+					? "bg-brand-bg/85 backdrop-blur-[20px] border-white/[0.10]"
 					: "bg-brand-bg/80 backdrop-blur-[16px] border-white/[0.06]"
 			}`}
 		>
-			<div className="flex items-center justify-between safe-x py-4">
-				<a
-					href="/"
-					className={`focus-ring inline-flex min-h-[44px] items-center px-4 py-2.5 border rounded-full text-sm font-medium tracking-tight transition-all duration-300 ${
-						scrolled
-							? "border-ut/30 text-ut shadow-[0_0_20px_rgba(52,211,153,0.1)]"
-							: "border-white/20 hover:border-ut/50 hover:text-ut animate-[pulse-glow_4s_ease-in-out_infinite]"
-					}`}
-				>
-					usertrust
-				</a>
+			{/*
+			 * A gap plus the min-w-0/shrink discipline below (Addendum O2). The bar is
+			 * one flex row of two clusters, and NOTHING in it used to yield: every
+			 * child sized to its content, so the instant the two clusters together
+			 * exceeded the track the row overflowed to the right and the GitHub CTA
+			 * — the last child — was pushed past the safe-x edge with its label cut
+			 * off. Reproduced by inflating the star counter: at 1280 the CTA landed
+			 * 49px past the content edge reading "GitHu".
+			 *
+			 * The rule now: the COUNTERS are the only sacrificial element. They are
+			 * the one decorative thing in the bar, so they get `min-w-0 shrink` and
+			 * clip themselves; the nav links, the CTA and the hamburger are all
+			 * `shrink-0`, so the CTA is structurally incapable of losing a pixel.
+			 *
+			 * The gap is `gap-2 md:gap-4`, not a flat gap-4: `justify-between`
+			 * already separates the clusters and the gap only binds under pressure,
+			 * which is exactly the phone widths where the track is scarcest — a flat
+			 * 16px there spent the last pixel of slack at 390 and pushed the
+			 * hamburger back over the edge.
+			 *
+			 * `py-4` is untouched — it is the summand in the 4.81rem mobile-menu
+			 * max-h AND the I3 --anchor-offset, and this fix must not move either.
+			 * Re-measured after: the bar is 77px at every width from 320 to 2000.
+			 */}
+			<div className="flex items-center justify-between gap-2 safe-x py-4 md:gap-4">
+				<div className="flex min-w-0 items-center gap-4">
+					{/*
+					 * First focusable element on the page: the dossier's escape hatch for
+					 * people who came for numbers, not scenography. Visually subtle mono;
+					 * focus-visible makes it prominent (the shared .focus-ring outline plus
+					 * a color flip to emerald).
+					 */}
+					{/*
+					 * Two labels, one link. The full label wrapped to THREE lines at
+					 * 390 ("skip to / the / facts ↓"), inflating the fixed bar to
+					 * ~80px beside the pill/GitHub/hamburger row. Only one span is in
+					 * the accessibility tree at a time (display:none hides the other
+					 * from AT as well as from view), and the link stays first
+					 * focusable at every width.
+					 */}
+					<a
+						href="#docket"
+						data-cursor-hover
+						className="focus-ring inline-flex min-h-[44px] min-w-0 items-center overflow-hidden whitespace-nowrap font-mono text-xs text-white/70 hover:text-white focus-visible:text-ut transition-colors duration-200"
+					>
+						<span className="md:hidden">facts ↓</span>
+						<span className="hidden md:inline">skip to the facts ↓</span>
+					</a>
+					<a
+						href="/"
+						data-cursor-hover
+						className={`focus-ring inline-flex min-h-[44px] shrink-0 items-center px-4 py-2.5 border rounded-full text-sm font-medium tracking-tight transition-all duration-300 ${
+							/*
+							 * No glow: the old shadow-[0_0_20px_rgba(52,211,153,0.1)] was
+							 * a fifth depth idiom beside lift-1/lift-2/glow-emerald/
+							 * ground-zone (Addendum H3) and rendered no perceptible halo
+							 * in any capture. border-ut/30 + text-ut already state the
+							 * scrolled condition.
+							 */
+							scrolled ? "border-ut/30 text-ut" : "border-white/20 hover:border-ut/50 hover:text-ut"
+						}`}
+					>
+						usertrust
+					</a>
+				</div>
 
-				<div className="flex items-center gap-6">
-					<div className="hidden md:flex items-center gap-5 text-sm text-white/60 font-medium">
+				<div className="flex min-w-0 items-center gap-6">
+					<div className="hidden md:flex shrink-0 items-center gap-5 text-sm text-white/70 font-medium">
 						{links.map((link) => (
 							<a
 								key={link.href}
 								href={link.href}
-								className={`focus-ring relative inline-flex min-h-[44px] items-center hover:text-white transition-colors duration-200 ${
+								data-cursor-hover
+								className={`focus-ring relative inline-flex min-h-[44px] items-center whitespace-nowrap hover:text-white transition-colors duration-200 ${
 									activeSection === link.href ? "text-ut" : ""
 								}`}
 							>
@@ -150,11 +219,40 @@ export function Nav() {
 						))}
 					</div>
 
+					{/* Mono counters — omitted entirely on fetch failure, never rendered as 0. */}
+					{(stars !== null || downloads !== null) && (
+						<div className="hidden lg:flex min-w-0 shrink items-center gap-4 overflow-hidden font-mono text-xs text-white/70">
+							{stars !== null && (
+								<a
+									href="https://github.com/usertools-ai/usertrust"
+									target="_blank"
+									rel="noopener noreferrer"
+									data-cursor-hover
+									className="focus-ring inline-flex min-h-[44px] items-center whitespace-nowrap hover:text-white/80 transition-colors duration-200"
+								>
+									★ {fmtCompact(stars)}
+								</a>
+							)}
+							{downloads !== null && (
+								<a
+									href="https://www.npmjs.com/package/usertrust"
+									target="_blank"
+									rel="noopener noreferrer"
+									data-cursor-hover
+									className="focus-ring inline-flex min-h-[44px] items-center whitespace-nowrap hover:text-white/80 transition-colors duration-200"
+								>
+									↓ {fmtCompact(downloads)}/mo
+								</a>
+							)}
+						</div>
+					)}
+
 					<a
 						href="https://github.com/usertools-ai/usertrust"
 						target="_blank"
 						rel="noopener noreferrer"
-						className="focus-ring inline-flex min-h-[44px] items-center gap-2 px-3.5 py-1.5 bg-white/[0.06] border border-white/10 rounded-lg text-sm font-medium hover:bg-white/[0.10] hover:border-white/20 transition-all duration-200"
+						data-cursor-hover
+						className="focus-ring inline-flex min-h-[44px] shrink-0 items-center gap-2 whitespace-nowrap px-3.5 py-1.5 bg-white/[0.06] border border-white/10 rounded-lg text-sm font-medium hover:bg-white/[0.10] hover:border-white/20 transition-all duration-200"
 					>
 						<GitHubIcon className="w-4 h-4" />
 						GitHub
@@ -165,16 +263,9 @@ export function Nav() {
 						ref={buttonRef}
 						type="button"
 						onClick={() => setOpen((prev) => !prev)}
-						className="focus-ring md:hidden inline-flex items-center justify-center w-11 h-11 rounded-lg border border-white/10 bg-white/[0.06] hover:bg-white/[0.10] transition-colors duration-200"
+						className="focus-ring md:hidden inline-flex shrink-0 items-center justify-center w-11 h-11 rounded-lg border border-white/10 bg-white/[0.06] hover:bg-white/[0.10] transition-colors duration-200"
 						aria-label={open ? "Close menu" : "Open menu"}
 						aria-expanded={open}
-						/*
-						 * Only while the menu exists: the dropdown is conditionally rendered, so a
-						 * constant aria-controls would be an IDREF resolving to nothing whenever
-						 * the menu is closed — validators flag it and assistive tech ignores it.
-						 * `undefined` omits the attribute entirely; `aria-expanded` alone is a
-						 * complete disclosure pattern in the meantime.
-						 */
 						aria-controls={open ? "mobile-menu" : undefined}
 					>
 						<svg
@@ -244,12 +335,15 @@ export function Nav() {
 
 			{/*
 			 * Mobile dropdown. No `pb-4` here on purpose: `.safe-bottom` owns the bottom
-			 * padding with a 1rem floor, and stacking both just doubles the padding —
-			 * `.safe-bottom` is unlayered while Tailwind's `pb-4` sits in `@layer utilities`,
-			 * so the safe-area value wins the cascade either way. `max-h` plus
-			 * `overflow-y-auto` keep the menu reachable when the viewport is short enough that
-			 * four 44px links and the header exceed it, and `[overscroll-behavior:contain]` is
-			 * what stops that inner scroll chaining out to the locked body.
+			 * padding with a 1rem floor. `max-h` plus `overflow-y-auto` keep the menu
+			 * reachable on short viewports, and `[overscroll-behavior:contain]` stops the
+			 * inner scroll chaining out to the locked body.
+			 *
+			 * 4.81rem in the max-h calc is this nav's own rendered height, and it
+			 * is a SUM, not a magic number: 44px link row (min-h-[44px]) + 2 x 16px
+			 * (py-4) + 1px border-b = 77px = 4.81rem. globals.css's
+			 * scroll-padding-top is derived from the same figure — change py-4 or
+			 * the 44px target and both rules need re-measuring together.
 			 */}
 			{open && (
 				<div
@@ -264,7 +358,7 @@ export function Nav() {
 								href={link.href}
 								onClick={() => setOpen(false)}
 								className={`focus-ring flex min-h-[44px] items-center px-3 py-2.5 text-sm font-medium rounded-lg hover:text-white hover:bg-white/[0.06] transition-colors duration-200 ${
-									activeSection === link.href ? "text-ut" : "text-white/60"
+									activeSection === link.href ? "text-ut" : "text-white/70"
 								}`}
 							>
 								{link.label}

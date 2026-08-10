@@ -5,9 +5,10 @@
  * runaway-agent.ts — usertrust governance cuts off a runaway LLM agent.
  *
  * Scenario: a buggy agent is in a loop, burning tokens. Without governance
- * it would happily exhaust the entire budget. With usertrust wrapping
- * the OpenClaw stream function, it gets cut off mid-stream the moment
- * the budget is exhausted.
+ * it would happily exhaust the entire budget. With usertrust wrapping the
+ * OpenClaw stream function, the policy gate refuses the first call whose
+ * pre-spend hold no longer fits in what is left — so the loop stops with
+ * budget still on the table, rather than after it is gone.
  *
  * Run:
  *   pnpm --filter usertrust-openclaw demo
@@ -18,6 +19,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { estimateCost } from "usertrust";
 import { createUsertrustPlugin } from "../src/index.js";
 import type {
 	AssistantMessage,
@@ -28,30 +30,69 @@ import type {
 	StreamFn,
 } from "../src/types.js";
 
-// ── 1. Tiny budget — 1,200 usertokens (~$0.50 at typical rates) ──
-const BUDGET = 1_200;
-const vaultBase = mkdtempSync(join(tmpdir(), "usertrust-runaway-"));
+// Presentation-only pacing between calls (DEMO_PACE_MS=700 for recordings);
+// 0 = off. Never affects governance behavior.
+const PACE_MS = Number(process.env.DEMO_PACE_MS ?? 0) || 0;
+const pace = () =>
+	PACE_MS > 0 ? new Promise<void>((r) => setTimeout(r, PACE_MS)) : Promise.resolve();
 
-console.log("\n  usertrust × OpenClaw — runaway agent demo");
-console.log("  -------------------------------------------");
-console.log(`  budget:        ${BUDGET.toLocaleString()} usertokens (~$0.50)`);
-console.log("  agent model:   claude-sonnet-4-6");
-console.log("  agent:         buggy loop, ~250 usertokens per call");
-console.log("");
-
-// ── 2. The "runaway" mock streamFn — pretends to be a real LLM stream ──
+// ── 1. The model the runaway agent is calling ──
 const MODEL: Model = {
-	id: "claude-sonnet-4-6",
-	name: "Claude Sonnet 4.6",
+	id: "claude-fable-5",
+	name: "Claude Fable 5",
 	api: "anthropic-messages",
 	provider: "anthropic",
 	baseUrl: "https://api.anthropic.com",
 	reasoning: false,
 	input: ["text"],
-	cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+	// USD per million tokens, matching the published rates the usertrust
+	// pricing table was built from (packages/core/src/ledger/pricing.ts).
+	cost: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 },
 	contextWindow: 200_000,
 	maxTokens: 8192,
 };
+
+/** What the mock provider reports for every call. */
+const CALL_USAGE = { input: 500, output: 1500 } as const;
+
+/**
+ * What one call actually settles at, priced by the SAME table governance
+ * uses. Never a typed-in number: a hand-written conversion is exactly how
+ * this demo came to print a budget worth four times its real value.
+ */
+const PER_CALL_UT = estimateCost(MODEL.id, CALL_USAGE.input, CALL_USAGE.output);
+
+/**
+ * USD per usertoken — the repo-wide invariant (AGENTS.md; also
+ * `packages/core/src/govern.ts`): 1 usertoken = $0.0001, one basis point of a
+ * cent. `~` appears only when the cent figure is a rounding of the real value.
+ */
+const UT_TO_USD = 0.0001;
+function usd(usertokens: number): string {
+	const exact = usertokens * UT_TO_USD;
+	const cents = exact.toFixed(2);
+	return `${Number(cents) === exact ? "" : "~"}$${cents}`;
+}
+
+/**
+ * ── 2. A tiny budget ──
+ *
+ * Sized against the pre-spend hold, not against the settled cost. `authorize()`
+ * holds a conservative estimate (the model's default max output), so the gate
+ * fires while there is still real budget left — the loop settles three calls
+ * and the fourth is refused before it can spend.
+ */
+const BUDGET = 4_000;
+const vaultBase = mkdtempSync(join(tmpdir(), "usertrust-runaway-"));
+
+console.log("\n  usertrust × OpenClaw — runaway agent demo");
+console.log("  -------------------------------------------");
+console.log(`  budget:        ${BUDGET.toLocaleString()} usertokens (${usd(BUDGET)})`);
+console.log(`  agent model:   ${MODEL.id}`);
+console.log(`  agent:         buggy loop, ${PER_CALL_UT.toLocaleString()} usertokens per call`);
+console.log("");
+
+// ── 3. The "runaway" mock streamFn — pretends to be a real LLM stream ──
 
 function finalMessage(input: number, output: number): AssistantMessage {
 	return {
@@ -74,8 +115,7 @@ function finalMessage(input: number, output: number): AssistantMessage {
 }
 
 const runawayStreamFn: StreamFn = (): AssistantMessageEventStreamLike => {
-	// ~240 usertokens / call
-	const message = finalMessage(500, 1500);
+	const message = finalMessage(CALL_USAGE.input, CALL_USAGE.output);
 	const events = (async function* (): AsyncGenerator<StreamEvent> {
 		yield { type: "start", partial: message };
 		yield { type: "text_start", contentIndex: 0, partial: message };
@@ -92,7 +132,7 @@ const runawayStreamFn: StreamFn = (): AssistantMessageEventStreamLike => {
 	};
 };
 
-// ── 3. Wire the governance plugin ──
+// ── 4. Wire the governance plugin ──
 const plugin = createUsertrustPlugin({ budget: BUDGET, dryRun: true, vaultBase });
 const governedStream = plugin.wrapStreamFn?.({
 	provider: MODEL.provider,
@@ -101,7 +141,8 @@ const governedStream = plugin.wrapStreamFn?.({
 });
 if (!governedStream) throw new Error("plugin missing wrapStreamFn");
 
-// ── 4. Run the agent loop. Each iteration costs ~$0.10 — it gets ~5 calls. ──
+// ── 5. Run the agent loop. Every iteration settles the same amount; the loop
+//       ends when the next call's hold no longer fits in what is left. ──
 const ctx: Context = {
 	messages: [{ role: "user", content: "do the thing forever", timestamp: Date.now() }],
 };
@@ -110,6 +151,7 @@ let call = 0;
 let cutoff = false;
 while (!cutoff && call < 40) {
 	call += 1;
+	await pace();
 	try {
 		let chunks = 0;
 		for await (const _e of await governedStream(MODEL, ctx)) {
@@ -123,11 +165,18 @@ while (!cutoff && call < 40) {
 	}
 }
 
+await pace();
 console.log("");
 console.log("  --- final ledger ----------------------------------------");
 console.log(`  successful calls:  ${call - 1}`);
 console.log(`  cut off at:        call #${call}`);
-console.log(`  budget exhausted:  ${cutoff ? "yes — governance enforced" : "no"}`);
+// Not "budget exhausted": the gate refuses the next HOLD, so the loop stops
+// with real budget still unspent. Saying otherwise would misdescribe the
+// product on the one surface that is meant to demonstrate it.
+console.log(`  settled spend:     ${((call - 1) * PER_CALL_UT).toLocaleString()} usertokens`);
+console.log(
+	`  stopped by:        ${cutoff ? "the gate, before the spend" : "nothing — loop ran out"}`,
+);
 console.log("  ---------------------------------------------------------");
 console.log("  Without usertrust, the buggy loop would have run forever.");
 console.log("");

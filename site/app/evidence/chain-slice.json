@@ -1,0 +1,68 @@
+{
+	"entries": [
+		{
+			"seq": 1,
+			"type": "llm_call",
+			"hash": "f4a15bc63fc64bcdab2dcca67718d6a89469311e01cb16fa9dd7bb0c31286654",
+			"prevHash": "0000000000000000000000000000000000000000000000000000000000000000",
+			"timestamp": "2026-08-09T16:45:13.602Z",
+			"summary": "llm_call · claude-fable-5 · 104 usertokens"
+		},
+		{
+			"seq": 2,
+			"type": "llm_call",
+			"hash": "0f1031df713336fb0e9a7f44642dfdd96f466d1ca4b31f61646b872161f1de4d",
+			"prevHash": "f4a15bc63fc64bcdab2dcca67718d6a89469311e01cb16fa9dd7bb0c31286654",
+			"timestamp": "2026-08-09T16:45:14.546Z",
+			"summary": "llm_call · gpt-5.6-sol · 59 usertokens"
+		},
+		{
+			"seq": 3,
+			"type": "llm_call",
+			"hash": "91df5d9e8bc181061f7982f01d2e4c1fb205193ef3ddaafd60cf2471d86521e0",
+			"prevHash": "0f1031df713336fb0e9a7f44642dfdd96f466d1ca4b31f61646b872161f1de4d",
+			"timestamp": "2026-08-09T16:45:15.563Z",
+			"summary": "llm_call · kimi-k3 · 31 usertokens"
+		},
+		{
+			"seq": 4,
+			"type": "llm_call",
+			"hash": "80bad924078d187ef7686ddbffeefd361552f3846d56582f7f40a764a6e8fdd8",
+			"prevHash": "91df5d9e8bc181061f7982f01d2e4c1fb205193ef3ddaafd60cf2471d86521e0",
+			"timestamp": "2026-08-09T16:45:16.383Z",
+			"summary": "llm_call · claude-fable-5 · 104 usertokens"
+		},
+		{
+			"seq": 5,
+			"type": "llm_call",
+			"hash": "919d10dca88493c564693d90efe69c2f4daab9f077b3b2b9ddfe1381756c1d30",
+			"prevHash": "80bad924078d187ef7686ddbffeefd361552f3846d56582f7f40a764a6e8fdd8",
+			"timestamp": "2026-08-09T16:45:16.422Z",
+			"summary": "llm_call · claude-fable-5 · 112 usertokens"
+		},
+		{
+			"seq": 6,
+			"type": "llm_call",
+			"hash": "52f85adb310a962ce1c4b1367ba93128aaeb6e2a3edfdd82c24a3cbdd1bbfc42",
+			"prevHash": "919d10dca88493c564693d90efe69c2f4daab9f077b3b2b9ddfe1381756c1d30",
+			"timestamp": "2026-08-09T16:45:16.473Z",
+			"summary": "llm_call · claude-fable-5 · 119 usertokens"
+		},
+		{
+			"seq": 7,
+			"type": "llm_call",
+			"hash": "dbcbefad935613c7d02c806c039d2bea8fc3f73e2a3b022c7533010adf140bbf",
+			"prevHash": "52f85adb310a962ce1c4b1367ba93128aaeb6e2a3edfdd82c24a3cbdd1bbfc42",
+			"timestamp": "2026-08-09T16:45:16.526Z",
+			"summary": "llm_call · claude-fable-5 · 127 usertokens"
+		},
+		{
+			"seq": 8,
+			"type": "policy_denied",
+			"hash": "627256b4498f26af6c5ec8ff55d9ea21cdab3b021028f96021600a5afb1cdbc8",
+			"prevHash": "dbcbefad935613c7d02c806c039d2bea8fc3f73e2a3b022c7533010adf140bbf",
+			"timestamp": "2026-08-09T16:45:16.565Z",
+			"summary": "policy_denied · claude-fable-5 · denied · budget_gate"
+		}
+	]
+}
