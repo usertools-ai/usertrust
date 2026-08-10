@@ -1006,11 +1006,14 @@ html.cursor-active * {
    rather than a permanently running one). No animation at all under reduced
    motion.
 
-   SEAMLESS. The track holds the fragment list twice and travels exactly
-   -50%, so at the end of a period copy two sits precisely where copy one
-   started and the reset is invisible. Change the number of copies and this
-   percentage changes with it. 40s is deliberately slow: this is ambience
-   under the reader's eye, not a thing to be read at speed. */
+   SEAMLESS. The track holds several copies of the fragment list and travels
+   exactly ONE of them, so at the end of a period copy two sits precisely where
+   copy one started and the reset is invisible. The number of copies is owned
+   by the island (RUNS in ledger-ticker-strip.tsx) and arrives here as
+   `--ledger-runs`, so the travel below cannot fall out of step with it — the
+   travel used to be a literal -50% with a comment asking the next editor to
+   remember, and the copy count has since changed. 40s is deliberately slow:
+   this is ambience under the reader's eye, not a thing to be read at speed. */
 .ledger-strip {
 	position: relative;
 	overflow: hidden;
@@ -1055,7 +1058,7 @@ html.cursor-active * {
 		transform: translateX(0);
 	}
 	to {
-		transform: translateX(-50%);
+		transform: translateX(calc(-100% / var(--ledger-runs)));
 	}
 }
 /* Fragments. 12px mono is the page's floor and this strip sits on it; ink on

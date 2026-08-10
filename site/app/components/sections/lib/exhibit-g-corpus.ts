@@ -67,16 +67,10 @@ export function displayTitle(name: string): string {
 	return name.replace(SPEC_NUMBER_PREFIX, "");
 }
 
-/**
- * The table's footnote. It states both true things at once: the gutter is the
- * only numbering on the page, and the titles are still the source titles —
- * linked, verbatim, prefix and all, at the other end of every row's href.
- *
- * It lives HERE rather than in exhibit-g.tsx for the same reason ROW_STAGGER_MS
- * does: this directory sits outside the check-facts prebuild gate's line scan
- * of sections/*.tsx, and the sentence names a spec row by its number. Those
- * digits are provenance about an upstream test file, not a product claim with
- * a facts.json entry.
+/*
+ * The corpus FOOTNOTE is deliberately not here. It is copy, so it lives with
+ * the copy, in exhibit-g.tsx under the check-facts scan; its two provenance
+ * digits are sanctioned by name in scripts/check-facts.mts. This file holds
+ * tuning constants and pure functions — things whose digits are code — and
+ * that is the only thing its position outside the scan is allowed to buy.
  */
-export const CORPUS_FOOTNOTE =
-	"indexed by row · source test titles linked verbatim; their original spec-row prefixes are omitted (row 17 was folded into scenario 5 upstream).";

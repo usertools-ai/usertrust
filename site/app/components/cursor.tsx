@@ -56,6 +56,29 @@ import { useEffect, useRef, useState } from "react";
 /** Section accent to fall back to when the pointer is over no themed section. */
 const ACCENT_FALLBACK = "var(--color-ut)";
 
+/**
+ * Where the mark sits when it has nowhere to be: off the top-left corner, far
+ * enough that no part of a 14px crosshair can reach the viewport.
+ *
+ * THIS IS ALSO THE INITIAL RENDER. Every part below ships parked in its own
+ * inline style, because the imperative `place()` cannot run before the first
+ * pointermove: the mount effect returns while `enabled` is still false, so the
+ * refs it would write through are null, and the elements only exist on the
+ * render AFTER it. Without the inline transform they render at transform:none
+ * — the crosshair painted over the very top-left corner of the page on every
+ * fresh load until the pointer moved. (The bullseye this replaced never showed
+ * it because it was positioned from a spring whose resting value was already
+ * this constant.)
+ *
+ * React keeps the imperative writes: the style prop's `transform` value is
+ * identical on every render, so the reconciler never re-applies it and never
+ * clobbers the value `place()` has written since.
+ */
+const PARK_PX = -100;
+const PARKED: React.CSSProperties = {
+	transform: `translate3d(${PARK_PX}px, ${PARK_PX}px, 0)`,
+};
+
 export default function Cursor() {
 	const [enabled, setEnabled] = useState(false);
 	const [framing, setFraming] = useState(false);
@@ -80,8 +103,8 @@ export default function Cursor() {
 		root.classList.add("cursor-active");
 
 		let rafId = 0;
-		let pendingX = -100;
-		let pendingY = -100;
+		let pendingX = PARK_PX;
+		let pendingY = PARK_PX;
 		const parts = [hRef, vRef, dotRef, frameRef];
 		function place() {
 			const t = `translate3d(${pendingX}px, ${pendingY}px, 0)`;
@@ -119,8 +142,8 @@ export default function Cursor() {
 		// the cursor-active class.
 		function onLeave() {
 			setFraming(false);
-			pendingX = -100;
-			pendingY = -100;
+			pendingX = PARK_PX;
+			pendingY = PARK_PX;
 			place();
 		}
 		function onPointerOut(e: PointerEvent) {
@@ -158,15 +181,15 @@ export default function Cursor() {
 	return (
 		<div aria-hidden="true" className="cursor-layer">
 			{/* The three blending parts: each its own fixed, top-level layer. */}
-			<span ref={hRef} className="cursor-rule cursor-rule--h" />
-			<span ref={vRef} className="cursor-rule cursor-rule--v" />
-			<span ref={dotRef} className="cursor-dot" />
+			<span ref={hRef} style={PARKED} className="cursor-rule cursor-rule--h" />
+			<span ref={vRef} style={PARKED} className="cursor-rule cursor-rule--v" />
+			<span ref={dotRef} style={PARKED} className="cursor-dot" />
 			{/* The crop marks. One wrapper, four L-shaped ticks, accent-tinted from
 			    the section under the pointer. */}
 			<span
 				ref={frameRef}
 				className={frameClass}
-				style={{ "--cursor-accent": accent } as React.CSSProperties}
+				style={{ ...PARKED, "--cursor-accent": accent } as React.CSSProperties}
 			>
 				<i className="cursor-tick cursor-tick--tl" />
 				<i className="cursor-tick cursor-tick--tr" />

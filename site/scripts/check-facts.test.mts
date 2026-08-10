@@ -330,6 +330,65 @@ test("genuine object-literal properties and CSS functional notation still pass",
 	}
 });
 
+/**
+ * SANCTIONED_PROSE. The corpus footnote names an upstream spec row and the
+ * scenario it was folded into, and those two digits are provenance about a test
+ * file rather than product claims with facts.json entries. They used to be
+ * exempt by ADDRESS — the sentence lived in sections/lib, which the scan does
+ * not walk — and an address is not a review. These two tests pin the
+ * replacement: the exact sentence is sanctioned by name, and one digit off it
+ * is not.
+ */
+test("a sentence on the SANCTIONED_PROSE list passes inside a scanned section", () => {
+	const dir = mkdtempSync(join(tmpdir(), "check-facts-prose-ok-"));
+	try {
+		writeFileSync(
+			join(dir, "exhibit-g.tsx"),
+			[
+				"export default function ExhibitG() {",
+				"\treturn (",
+				'\t\t<p className="mt-3">',
+				"\t\t\tindexed by row · source test titles linked verbatim; their original spec-row prefixes",
+				"\t\t\tare omitted (row 17 was folded into scenario 5 upstream).",
+				"\t\t</p>",
+				"\t);",
+				"}",
+				"",
+			].join("\n"),
+		);
+		const r = runChecker(dir);
+		assert.equal(r.status, 0, `the sanctioned footnote must pass, got:\n${r.stderr}`);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("SANCTIONED_PROSE is an exact sentence, not a pattern: one digit off still fails", () => {
+	const dir = mkdtempSync(join(tmpdir(), "check-facts-prose-near-miss-"));
+	try {
+		writeFileSync(
+			join(dir, "exhibit-g.tsx"),
+			[
+				"export default function ExhibitG() {",
+				"\treturn (",
+				"\t\t<p>are omitted (row 18 was folded into scenario 5 upstream).</p>",
+				"\t);",
+				"}",
+				"",
+			].join("\n"),
+		);
+		const r = runChecker(dir);
+		assert.notEqual(
+			r.status,
+			0,
+			`a near-miss of a sanctioned sentence must NOT inherit its exemption, got:\n${r.stderr}`,
+		);
+		assert.match(r.stderr, /18/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 test("stripping is span-scoped, not greedy: real section lines still pass", () => {
 	const dir = mkdtempSync(join(tmpdir(), "check-facts-realistic-"));
 	try {

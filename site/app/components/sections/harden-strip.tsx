@@ -74,14 +74,18 @@ export default function HardenStrip() {
 				    (a <div>) can't provide, so the shared chrome is applied inline
 				    rather than through the component. */}
 				{/* The quote used to stop at 971px under a stat wall running to 1307px.
-				    The two verbatim paragraphs side by side (each well within the
-				    measure cap at md+) square it off to the wall's own right edge and
-				    halve its height. Quote text untouched — it is a verbatim contract
-				    with AGENTS.md. */}
+				    The two verbatim paragraphs side by side square it off to the wall's
+				    own right edge and halve its height. Quote text untouched — it is a
+				    verbatim contract with AGENTS.md.
+				    The split is lg, not md, because the page's columniation rule is
+				    lg-only: at md this quote sat in two ~330px columns while every
+				    other two-up on the page was still stacked. The gap moves with it —
+				    at md there is one column, and 32px between two stacked paragraphs
+				    is a column gap doing a row's job. */}
 				<figure className="mt-8">
 					<blockquote
 						cite={AGENTS_URL}
-						className="lift-1 grid gap-4 overflow-hidden rounded-xl border border-white/10 bg-terminal p-4 font-mono text-[14px] leading-relaxed text-white/80 md:grid-cols-2 md:gap-8 md:p-5"
+						className="lift-1 grid gap-4 overflow-hidden rounded-xl border border-white/10 bg-terminal p-4 font-mono text-[14px] leading-relaxed text-white/80 md:p-5 lg:grid-cols-2 lg:gap-8"
 					>
 						<p>{PARITY_QUOTE_CONTEXT}</p>
 						<p className="text-white">{PARITY_QUOTE_RULE}</p>

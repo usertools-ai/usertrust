@@ -157,9 +157,40 @@ const STRIP_SPANS: RegExp[] = [
 	/\b(?:top|bottom|left|right|inset|z|duration|delay|w|h|p|m|px|py|pt|pb|pl|pr|mx|my|mt|mb|ml|mr|gap|rounded|opacity|scale|rotate|stroke|translate-x|translate-y)-(?:\[[^\]]*\]|[\w./%[\]-]*)/g,
 ];
 
+/**
+ * EXACT SENTENCES whose digits are provenance about the codebase rather than
+ * product claims — sanctioned by NAME, one string at a time.
+ *
+ * This list exists to kill a precedent. The corpus footnote below names an
+ * upstream spec row and the scenario it was folded into; neither digit has a
+ * facts.json entry and neither ever will, because they describe a test file,
+ * not the product. The first fix was to move the sentence into
+ * `sections/lib/`, which this scan does not walk — but that made the exemption
+ * a matter of ADDRESS: any prose parked in that directory would have been
+ * exempt, forever, with no review and no record. Copy does not become
+ * trustworthy by changing folders.
+ *
+ * So the sentence lives in the scanned section with the rest of the copy, and
+ * its exemption is written here where a reviewer reads it. The rules:
+ *
+ *   - EXACT substrings, never patterns. `row 17` is sanctioned; `row 18` is a
+ *     rogue digit, and the regression test in check-facts.test.mts proves it.
+ *   - The fragment must be the smallest span that carries the digits, so the
+ *     rest of the sentence stays under the lint.
+ *   - Adding an entry means editing this file. That review IS the gate, the
+ *     same contract ALWAYS_SANCTIONED has.
+ */
+const SANCTIONED_PROSE = [
+	// exhibit-g.tsx's corpus footnote. The gutter is the page's only numbering;
+	// this parenthetical explains why the SOURCE titles skip a number, and both
+	// digits are facts about packages/core/tests/harden, not about usertrust.
+	"(row 17 was folded into scenario 5 upstream)",
+];
+
 /** Remove every allowlisted span, leaving the prose to be scanned. */
 function strippedLine(line: string): string {
 	let out = line;
+	for (const phrase of SANCTIONED_PROSE) out = out.split(phrase).join(" ");
 	for (const re of STRIP_SPANS) out = out.replace(re, " ");
 	return out;
 }

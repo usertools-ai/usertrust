@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useRef, useState } from "react";
 import type { TickerFragment } from "./lib/ledger-ticker";
 
 /**
@@ -17,18 +17,33 @@ import type { TickerFragment } from "./lib/ledger-ticker";
  * reduced motion — where the strip renders as a static row of fragments, which
  * is a finished state, not a disabled feature.
  *
- * The loop is seamless because the track holds the fragment list TWICE and
- * translates by exactly -50%: at the end of a period, copy two sits precisely
- * where copy one started, so the reset is invisible. Copy two is aria-hidden
- * (and so is copy one — see the summary in the parent) because a screen reader
- * reading thirty hash prefixes twice is noise, not evidence.
+ * The loop is seamless because the track holds the fragment list more than
+ * once and translates by exactly one copy: at the end of a period, copy two
+ * sits precisely where copy one started, so the reset is invisible. Every copy
+ * is aria-hidden (see the summary in the parent) because a screen reader
+ * reading thirty hash prefixes three times is noise, not evidence.
  */
 /**
- * The two passes of the fragment list, named rather than indexed. The
- * keyframe's -50% travel is derived from there being exactly these two: add a
- * third and the percentage in globals.css moves with it.
+ * The passes of the fragment list, named rather than indexed.
+ *
+ * HOW MANY, AND WHY IT IS NOT TWO. The track travels exactly ONE run per
+ * period and then snaps back, so the copies that have not yet moved past the
+ * left edge are all that covers the strip at the end of a cycle: the widest
+ * strip that can never show a blank band is runW times ONE FEWER than the run
+ * count.
+ *
+ * One run of the published chain measures ~2368px at the shipped fragment set
+ * and 12px mono. Two runs therefore covered 2368px — narrower than a 2560px
+ * desktop, which is not a hypothetical viewport, and those readers got a band
+ * of bare paper sweeping the strip once per period. Three runs cover ~4736px,
+ * which clears a 3840px panel with room over.
+ *
+ * The travel is DERIVED from this number rather than restated: the count goes
+ * to CSS as `--ledger-runs` and the keyframe translates by
+ * `-100% / var(--ledger-runs)`. Add or remove a pass and the animation follows;
+ * there is no percentage in globals.css left to forget.
  */
-const RUNS = ["lead", "trail"] as const;
+const RUNS = ["lead", "middle", "trail"] as const;
 
 export default function LedgerTickerStrip({ fragments }: { fragments: TickerFragment[] }) {
 	const ref = useRef<HTMLDivElement>(null);
@@ -52,7 +67,10 @@ export default function LedgerTickerStrip({ fragments }: { fragments: TickerFrag
 		<div ref={ref} data-play={onscreen} className="ledger-strip">
 			<span aria-hidden="true" className="ledger-perf ledger-perf--top" />
 			<div className="ledger-strip-window">
-				<div className="ledger-strip-track">
+				<div
+					className="ledger-strip-track"
+					style={{ "--ledger-runs": RUNS.length } as CSSProperties}
+				>
 					{RUNS.map((run) => (
 						<div key={run} aria-hidden="true" className="ledger-strip-run">
 							{fragments.map((f) => (

@@ -4,7 +4,6 @@ import InView from "../in-view";
 import StageTag from "../stage-tag";
 import TerminalFrame from "../terminal-frame";
 import {
-	CORPUS_FOOTNOTE,
 	displayTitle,
 	ROW_STAGGER_MS,
 	rowIndexLabel,
@@ -47,6 +46,25 @@ const corpus = attackCorpusJson as { attacks: AttackRow[] };
    whether the table needs the "indexed by row" footnote at all. Derived, so
    the footnote disappears on its own if the corpus titles ever change. */
 const TITLES_CARRY_SPEC_NUMBERS = corpus.attacks.some((a) => titleCarriesSpecNumber(a.name));
+
+/**
+ * The table's footnote. It states both true things at once: the gutter is the
+ * only numbering on the page, and the titles are still the source titles —
+ * linked, verbatim, prefix and all, at the other end of every row's href.
+ *
+ * IT LIVES HERE, in the scanned surface, with the rest of the section's copy.
+ * It spent one revision in `lib/exhibit-g-corpus.ts` for the sole reason that
+ * check-facts does not walk that directory, and the two digits below (an
+ * upstream spec row, and the scenario it was folded into) have no facts.json
+ * entry because they are facts about packages/core/tests/harden, not about the
+ * product. That made the exemption a matter of ADDRESS rather than of review —
+ * a precedent under which any sentence could be exempted by moving it one
+ * directory sideways. The parenthetical is now sanctioned BY NAME in
+ * scripts/check-facts.mts (SANCTIONED_PROSE), where a reviewer sees it and
+ * where a near-miss still fails the build.
+ */
+const CORPUS_FOOTNOTE =
+	"indexed by row · source test titles linked verbatim; their original spec-row prefixes are omitted (row 17 was folded into scenario 5 upstream).";
 
 const CORPUS_TEST_URL =
 	"https://github.com/usertools-ai/usertrust/blob/master/packages/core/tests/harden/anchoring/anchor-corpus.test.ts";
