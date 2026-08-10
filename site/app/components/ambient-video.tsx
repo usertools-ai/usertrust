@@ -2,15 +2,16 @@
 
 import { useEffect, useRef } from "react";
 
-/**
- * Muted ambient loop — the one sanctioned loop in the motion doctrine. Plays
- * only while >=50% on screen, pauses off-screen, and never autoplays under
- * reduced motion (poster only). `preload="none"` + poster keeps the bytes off
- * the network until the IntersectionObserver calls play().
- */
 /** How much of the video must be on screen for the loop to run. */
 const VISIBLE_RATIO = 0.5;
 
+/**
+ * Muted ambient loop — the one sanctioned loop in the motion doctrine. Plays
+ * only while at least VISIBLE_RATIO of it is on screen, pauses otherwise, and
+ * never autoplays under reduced motion (poster only). `preload="none"` +
+ * poster keeps the bytes off the network until the IntersectionObserver calls
+ * play().
+ */
 export default function AmbientVideo({
 	src,
 	poster,

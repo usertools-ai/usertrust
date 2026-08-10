@@ -152,17 +152,14 @@ export default function ExhibitB() {
 				    the SAME box over-constrain the layout, and browsers resolve
 				    that by honoring the margin and letting content wrap instead of
 				    forcing the intended horizontal scroll (verified in-browser at
-				    390px). Bleed, scroll context and min-width are now three separate
-				    boxes, for two reasons: a negative margin and a min-width on the
-				    same box over-constrain each other (above), and the CAPTION must
-				    not sit inside the min-width at all. It did — a sentence of prose
-				    laid out at the TABLE's min-width inside a horizontally scrolling
-				    box, so on a phone a reader had to drag the TABLE sideways to
-				    finish reading a PARAGRAPH. Prose belongs to the frame's width,
-				    not the table's: the
-				    scroll box now wraps the grid alone, and the caption is its sibling
-				    under the same bleed, which also keeps its border-t spanning the
-				    full frame. */}
+				    390px). There are THREE boxes now, not two, because the CAPTION
+				    also must not sit inside the min-width — and it did, so a sentence
+				    of prose was laid out at the TABLE's width and a phone reader had
+				    to drag the TABLE sideways to finish reading a PARAGRAPH. Prose
+				    belongs to the frame's width: the outer box owns the bleed, the
+				    middle box owns the scroll context and wraps the grid alone, and
+				    the caption is the scroll box's sibling under the same bleed —
+				    which also keeps its border-t spanning the full frame. */}
 				<TerminalFrame className="mt-10" title="governed surfaces">
 					<div className="-m-4 md:-m-5">
 						<div className="overflow-x-auto">

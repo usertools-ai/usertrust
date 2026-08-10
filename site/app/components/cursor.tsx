@@ -90,10 +90,9 @@ const PARKED: React.CSSProperties = {
 };
 
 /**
- * The two media queries the mark is gated on, and the verdict they combine to.
- * Exported shape kept trivial on purpose: the gate is one AND, and the value of
- * writing it once is that the subscription below and the render both read the
- * same rule.
+ * The verdict the two media queries combine to. One AND, named once, so the
+ * subscription below and every teardown path read the same rule rather than
+ * two copies of it drifting apart.
  */
 function markAllowed(fine: MediaQueryList, reduce: MediaQueryList): boolean {
 	return fine.matches && !reduce.matches;
