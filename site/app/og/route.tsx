@@ -6,42 +6,44 @@ import { ImageResponse } from "next/og";
 // as a static, CDN-immutable asset (no per-request function invocation).
 export const dynamic = "force-static";
 
-// Design tokens, inlined: this route renders via satori and never sees
-// globals.css. Satori supports flexbox only; any element with more than one
-// child needs an explicit display:flex. woff2 is unsupported, so the bundled
-// default font renders all text (accepted — matches the previous route).
+/*
+ * The share card IS the hero (Cam, 2026-08-10): the intro's settle frame as
+ * full-bleed ground, the Khand headline stack in white, the tagline in
+ * emerald — and none of the hero's small print. The previous receipt-paper
+ * card read as a coupon at iMessage size; the suit was a 220px afterthought.
+ *
+ * Satori constraints honored here:
+ *  - flexbox only; every multi-child element declares display:flex
+ *  - woff2 unsupported → Khand ships in this directory as TTF (decompressed
+ *    from site/public/fonts/*.woff2, same OFL license, see public/fonts/OFL.txt)
+ *  - assets load via fs.readFile, never fetch(new URL(...)): webpack's
+ *    asset-module heuristic rewrites that literal pattern for images into a
+ *    bundled public path string, which breaks force-static prerendering.
+ *    Slicing to the buffer's own range yields the true ArrayBuffer satori
+ *    accepts for <img src>.
+ */
 const GROUND = "#0a0a1a";
-const PAPER = "#f2efe6";
-const INK = "#16161e";
-const INK_DIM = "rgba(22, 22, 30, 0.55)";
-const RULE = "rgba(22, 22, 30, 0.3)";
-const PAPER_EMERALD = "#0b6b4f"; // on-paper emerald — #34d399 is forbidden as ink on paper
+const EMERALD = "#34d399"; // --color-ut: the hero tagline's exact ink on dark
+
+// 1920x1080 poster on a 1200x630 canvas: scale to width (1200x675) and crop
+// the 45px overflow entirely from the bottom (rubble), because the suit's
+// head owns the top of frame. The frame is then slid RIGHT so the suit —
+// centered in the poster — lands at ~72% x like the hero's desktop
+// composition; the uncovered left strip is GROUND under the scrim's heaviest
+// stop, which is also where the headline needs its contrast anyway.
+const POSTER_W = 1200;
+const POSTER_H = 675;
+const POSTER_TOP = 0;
+const POSTER_LEFT = 270;
 
 export async function GET() {
-	const dots = Array.from({ length: 22 }, (_, i) => i);
-	// Two-register mascot cutout — supersedes this brief's original Step
-	// 2b/Addendum A framed-still mark. Traceable to two local SDD docs (not
-	// committed to the public repo, but verifiable in this worktree):
-	// .superpowers/sdd/2026-08-07-receipts-site-redesign/progress.md:77
-	// ("Addendum G (Cam 2026-08-08): ... Task 16 dispatch note: OG uses
-	// mascot-full.png cutout on dark ground, NOT the framed-still branch.")
-	// and task-14c-brief.md/-report.md, which produced this exact asset
-	// (site/public/brand/mascot-full.png, 441x1024 transparent two-tone
-	// cutout). White face/gloves read clean against the dark ground here —
-	// never place this mark on the paper card.
-	//
-	// Loaded via fs.readFile (Next's own opengraph-image.tsx pattern), not
-	// `fetch(new URL(..., import.meta.url))`: for .png specifically, webpack's
-	// asset-module heuristic rewrites that literal pattern into a bundled
-	// public path string ("/_next/static/media/...") instead of a resolvable
-	// URL, which breaks force-static build-time prerendering with "Failed to
-	// parse URL". Slicing to the buffer's own range (not the pool) yields a
-	// true ArrayBuffer, which satori's <img src> accepts.
-	const mascotFile = await readFile(join(process.cwd(), "app/og/mascot-full.png"));
-	const mascotBytes = mascotFile.buffer.slice(
-		mascotFile.byteOffset,
-		mascotFile.byteOffset + mascotFile.byteLength,
-	);
+	const dir = join(process.cwd(), "app/og");
+	const toArrayBuffer = (b: Buffer) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+	const [poster, khandBold, khandSemi] = await Promise.all([
+		readFile(join(dir, "intro-poster.jpg")),
+		readFile(join(dir, "Khand-Bold.ttf")),
+		readFile(join(dir, "Khand-SemiBold.ttf")),
+	]);
 	return new ImageResponse(
 		<div
 			style={{
@@ -50,124 +52,71 @@ export async function GET() {
 				height: "100%",
 				display: "flex",
 				alignItems: "center",
-				justifyContent: "center",
 				background: GROUND,
+				fontFamily: "Khand",
 			}}
 		>
-			{/* Thermal-paper receipt card */}
+			{/* The hero settle frame, cover-cropped */}
+			{/* biome-ignore lint/a11y/useAltText: satori OG renderer, decorative */}
+			{/* biome-ignore lint/performance/noImgElement: satori renders via <img>, not next/image */}
+			<img
+				src={toArrayBuffer(poster) as unknown as string}
+				width={POSTER_W}
+				height={POSTER_H}
+				style={{ position: "absolute", top: POSTER_TOP, left: POSTER_LEFT }}
+			/>
+
+			{/* Left scrim — the hero column's guaranteed contrast, gone by mid-frame
+			    so the suit keeps the poster's own lighting */}
+			<div
+				style={{
+					position: "absolute",
+					top: 0,
+					left: 0,
+					width: "100%",
+					height: "100%",
+					display: "flex",
+					background:
+						"linear-gradient(90deg, rgba(10,10,26,0.9) 0%, rgba(10,10,26,0.55) 42%, rgba(10,10,26,0) 68%)",
+				}}
+			/>
+
+			{/* The hero stack, verbatim: lowercase Khand, hero leading and tracking */}
 			<div
 				style={{
 					position: "relative",
 					display: "flex",
 					flexDirection: "column",
-					width: 640,
-					padding: "56px 56px",
-					background: PAPER,
-					transform: "rotate(-1deg)",
-					boxShadow: "0 24px 80px rgba(0, 0, 0, 0.55)",
+					paddingLeft: 72,
+					color: "#ffffff",
+					fontWeight: 700,
+					fontSize: 104,
+					lineHeight: 0.95,
+					letterSpacing: "-0.02em",
 				}}
 			>
-				{/* Top perforation — punched holes in the ground color */}
-				<div
+				<span>financial</span>
+				<span>governance</span>
+				<span>for ai agents.</span>
+				<span
 					style={{
-						position: "absolute",
-						top: -9,
-						left: 0,
-						right: 0,
-						display: "flex",
-						justifyContent: "space-between",
-						padding: "0 18px",
+						marginTop: 18,
+						color: EMERALD,
+						fontWeight: 600,
+						fontSize: 58,
 					}}
 				>
-					{dots.map((i) => (
-						<div
-							key={`t${i}`}
-							style={{ width: 16, height: 16, borderRadius: 9999, background: GROUND }}
-						/>
-					))}
-				</div>
-
-				{/* Wordmark */}
-				<div
-					style={{
-						display: "flex",
-						justifyContent: "center",
-						fontSize: 30,
-						fontWeight: 700,
-						letterSpacing: "0.14em",
-						color: INK,
-						fontFamily: "monospace",
-					}}
-				>
-					usertrust
-				</div>
-
-				<div style={{ marginTop: 30, borderTop: `2px dashed ${RULE}` }} />
-
-				{/* Headline — pinned two-line break; period is on-paper emerald */}
-				<div
-					style={{
-						display: "flex",
-						flexDirection: "column",
-						marginTop: 34,
-						fontSize: 88,
-						fontWeight: 800,
-						lineHeight: 1,
-						letterSpacing: "-0.02em",
-						color: INK,
-					}}
-				>
-					<span>keep the</span>
-					<div style={{ display: "flex" }}>
-						<span>receipts</span>
-						<span style={{ color: PAPER_EMERALD }}>.</span>
-					</div>
-				</div>
-
-				<div style={{ marginTop: 34, borderTop: `2px dashed ${RULE}` }} />
-
-				{/* Mono footer */}
-				<div
-					style={{
-						display: "flex",
-						marginTop: 28,
-						fontSize: 26,
-						fontFamily: "monospace",
-						color: INK,
-					}}
-				>
-					<span style={{ color: INK_DIM }}>$</span>
-					<span style={{ marginLeft: 12 }}>npm install usertrust</span>
-				</div>
-
-				{/* Bottom perforation */}
-				<div
-					style={{
-						position: "absolute",
-						bottom: -9,
-						left: 0,
-						right: 0,
-						display: "flex",
-						justifyContent: "space-between",
-						padding: "0 18px",
-					}}
-				>
-					{dots.map((i) => (
-						<div
-							key={`b${i}`}
-							style={{ width: 16, height: 16, borderRadius: 9999, background: GROUND }}
-						/>
-					))}
-				</div>
-			</div>
-
-			{/* Mascot cutout — dark ground, right of the card (Addendum G) */}
-			<div style={{ display: "flex", position: "absolute", right: 72, bottom: 64 }}>
-				{/* biome-ignore lint/a11y/useAltText: satori OG renderer, decorative */}
-				{/* biome-ignore lint/performance/noImgElement: satori renders via <img>, not next/image */}
-				<img src={mascotBytes as unknown as string} height={220} style={{ opacity: 0.9 }} />
+					keep the receipts.
+				</span>
 			</div>
 		</div>,
-		{ width: 1200, height: 630 },
+		{
+			width: 1200,
+			height: 630,
+			fonts: [
+				{ name: "Khand", data: khandBold, weight: 700, style: "normal" },
+				{ name: "Khand", data: khandSemi, weight: 600, style: "normal" },
+			],
+		},
 	);
 }
