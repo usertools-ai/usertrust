@@ -91,19 +91,34 @@ test("A→B→A interleave: final A wins even though B appeared in between", () 
 
 test("fresh mtime defers ALL ids — quiescence is file-mtime age only", () => {
 	const aba = fixture("interleave-aba.jsonl");
-	assert.deepStrictEqual(parseTranscriptFile(aba, freshNow(aba)), { records: [], deferred: 2 });
+	assert.deepStrictEqual(parseTranscriptFile(aba, freshNow(aba)), {
+		records: [],
+		deferred: 2,
+		malformed: 0,
+	});
 
 	const streaming = fixture("streaming-duplicate.jsonl");
 	assert.deepStrictEqual(parseTranscriptFile(streaming, freshNow(streaming)), {
 		records: [],
 		deferred: 1,
+		malformed: 0,
 	});
 
-	// deferred counts EMITTABLE ids: synthetic + malformed lines never count.
+	// deferred counts EMITTABLE ids: synthetic + unparseable lines never count.
 	const mixed = fixture("synthetic-and-malformed.jsonl");
 	assert.deepStrictEqual(parseTranscriptFile(mixed, freshNow(mixed)), {
 		records: [],
 		deferred: 1,
+		malformed: 0,
+	});
+
+	// A deferred file reports NO refusals: its lines are still being rewritten,
+	// so a counter absent right now may be present in the final line.
+	const counters = fixture("missing-counters.jsonl");
+	assert.deepStrictEqual(parseTranscriptFile(counters, freshNow(counters)), {
+		records: [],
+		deferred: 1,
+		malformed: 0,
 	});
 });
 
@@ -117,7 +132,7 @@ test("isQuiescent: exact 30-minute boundary on mtime age", () => {
 
 test("ALLOWLIST: every record from every fixture has EXACTLY the FleetRecord keys", () => {
 	const names = readdirSync(FIXTURES).filter((n) => n.endsWith(".jsonl"));
-	assert.equal(names.length, 6, "fixture inventory drifted");
+	assert.equal(names.length, 8, "fixture inventory drifted");
 	let total = 0;
 	for (const name of names) {
 		const path = fixture(name);
@@ -136,7 +151,7 @@ test("ALLOWLIST: every record from every fixture has EXACTLY the FleetRecord key
 			}
 		}
 	}
-	assert.equal(total, 7); // a:1 b:2 c:1 d:1 e:1 f:1
+	assert.equal(total, 11); // a:1 b:2 c:1 d:1 e:1 f:1 g:1 h:3
 });
 
 test("sessionHash: 12 hex chars, never the raw sessionId, raw id never serialized", () => {
@@ -162,6 +177,57 @@ test("missing nested cache_creation defaults {5m: flat, 1h: 0}; absent speed def
 	assert.equal(records[0].cacheWrite1h, 0);
 	assert.equal(records[0].speed, "standard"); // older shape has no usage.speed
 	assert.equal(records[0].cacheReadTokens, 2500);
+});
+
+test("missing/unusable input or output counter: record REFUSED and counted malformed (D5)", () => {
+	// Codex PR-91 #2. Coercing an absent counter to 0 makes the fake client
+	// report numeric zeros, so core labels the receipt usageSource "provider"
+	// and the rollup prices a real call at the 1-usertoken floor — a fabricated
+	// provider-metered zero, exactly the mislabel D5 kills. Unusable means the
+	// same three things core's `readCount` means: absent, non-numeric, negative.
+	const path = fixture("missing-counters.jsonl");
+	const { records, deferred, malformed } = parseTranscriptFile(path, quiescentNow(path));
+	assert.equal(deferred, 0);
+	assert.equal(malformed, 3, "no input / string output / negative input");
+	assert.equal(records.length, 1);
+	assert.equal(records[0]?.messageId, "msg_fix_g_good");
+	assert.equal(records[0]?.inputTokens, 6);
+	assert.equal(records[0]?.outputTokens, 7);
+});
+
+test("cache-tier fallback matches core's fromAnthropicUsage precedence exactly", () => {
+	// Codex PR-91 #3. Presence of the cache_creation OBJECT must not select the
+	// nested branch: core falls back to the flat counter whenever NEITHER tier
+	// yields a usable number, and recording zero there underprices the call
+	// against the very receipt core mints from these numbers. Expected values
+	// below are core's, tier-by-tier (5m + 1h == its cacheWriteTokens).
+	const path = fixture("cache-tier-fallback.jsonl");
+	const { records, malformed } = parseTranscriptFile(path, quiescentNow(path));
+	assert.equal(malformed, 0);
+	const byId = new Map(records.map((r) => [r.messageId, r]));
+
+	// Empty nested block + valid flat 512 ⇒ flat wins, {5m: 512, 1h: 0}.
+	assert.equal(byId.get("msg_fix_h_empty")?.cacheWrite5m, 512);
+	assert.equal(byId.get("msg_fix_h_empty")?.cacheWrite1h, 0);
+	// ONE usable tier ⇒ the nested block wins and the flat 999 is ignored.
+	assert.equal(byId.get("msg_fix_h_onetier")?.cacheWrite5m, 0);
+	assert.equal(byId.get("msg_fix_h_onetier")?.cacheWrite1h, 7);
+	// Both tiers junk (string, null) ⇒ flat 300 wins, not zero.
+	assert.equal(byId.get("msg_fix_h_junk")?.cacheWrite5m, 300);
+	assert.equal(byId.get("msg_fix_h_junk")?.cacheWrite1h, 0);
+
+	// The claim, stated as core states it: our tier sum IS fromAnthropicUsage's
+	// cacheWriteTokens for the same payload. Re-derived here from core's rules
+	// rather than imported (usage.ts is not a public export).
+	for (const [id, flat, expected] of [
+		["msg_fix_h_empty", 512, 512],
+		["msg_fix_h_onetier", 999, 7],
+		["msg_fix_h_junk", 300, 300],
+	] as const) {
+		const record = byId.get(id);
+		assert.ok(record, `${id} missing`);
+		assert.equal(record.cacheWrite5m + record.cacheWrite1h, expected, `${id} (flat ${flat})`);
+	}
 });
 
 test("malformed line skipped without throwing; <synthetic> model skipped; parsing continues", () => {

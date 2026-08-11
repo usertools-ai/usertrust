@@ -16,16 +16,28 @@
  * `getModelRates(m) === FALLBACK_RATE`) or its speed is not "standard".
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { type TestContext, test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { coreDistBuilt, REPO_ROOT } from "../fleet-collector.mts";
 import {
 	assertPublishable,
 	collectRecords,
 	projectDirAllowlist,
+	publishMonthFor,
+	scanTranscripts,
 	VERIFY_CLI,
-} from "../fleet-collector.mts";
+} from "./collect.mts";
 import { openJournal } from "./journal.mts";
 import type { FleetRecord } from "./parse.mts";
 import type { FleetProvenance } from "./replay.mts";
@@ -37,7 +49,9 @@ import {
 	type FleetStoreLine,
 	listRatesForModel,
 	RESIDUAL_CAUSES,
+	readReceiptStore,
 	renderFleetSummary,
+	repairReceiptStoreTail,
 } from "./rollup.mts";
 
 const MONTH = "2026-07";
@@ -357,6 +371,65 @@ test("bySession folds everything beyond the top 8 into 'other'", () => {
 	});
 });
 
+// ── receipt-store tail repair ──
+
+test("receipt store: a torn final line is DISCARDED before the next append, not just skipped", (t) => {
+	// Codex PR-91 #4. The reader tolerates an unterminated final line, but the
+	// bytes stay on disk: the next append concatenates onto them and produces a
+	// newline-terminated malformed INTERIOR line, which the reader then refuses
+	// forever — every later rollup dies on a month that can never be repaired by
+	// re-running. Mirrors the journal's proven protocol: truncate back to the
+	// last record boundary, and report what was discarded.
+	const dir = tempDir(t);
+	const path = join(dir, "receipts", `${MONTH}.jsonl`);
+	mkdirSync(dirname(path), { recursive: true });
+	const [first, second] = julyLines();
+	assert.ok(first && second);
+	const committed = JSON.stringify(first);
+	const torn = JSON.stringify(second).slice(0, 37); // crash mid-write
+	writeFileSync(path, `${committed}\n${torn}`);
+
+	const repair = repairReceiptStoreTail(path);
+	assert.deepStrictEqual(repair, { discarded: torn });
+	assert.equal(readFileSync(path, "utf-8"), `${committed}\n`, "torn bytes gone from disk");
+
+	// The next append now lands on a clean record boundary.
+	appendFileSync(path, `${JSON.stringify(second)}\n`);
+	const lines = readReceiptStore(path);
+	assert.equal(lines.length, 2);
+	assert.equal(lines[1]?.provenance.messageId, "msg_haiku");
+
+	// Repair is idempotent on an already-clean store.
+	assert.equal(repairReceiptStoreTail(path), null);
+	assert.equal(repairReceiptStoreTail(join(dir, "receipts", "2026-01.jsonl")), null);
+});
+
+test("receipt store: a complete final record that lost only its newline is TERMINATED, not discarded", (t) => {
+	// The other half of the journal's protocol. These bytes ARE a committed
+	// record (the reader already counts it); discarding them would delete a real
+	// receipt, and leaving them unterminated would let the next append glue a
+	// second record onto the same line.
+	const dir = tempDir(t);
+	const path = join(dir, "receipts", `${MONTH}.jsonl`);
+	mkdirSync(dirname(path), { recursive: true });
+	const [first, second] = julyLines();
+	assert.ok(first && second);
+	writeFileSync(path, `${JSON.stringify(first)}\n${JSON.stringify(second)}`);
+
+	assert.equal(repairReceiptStoreTail(path), null, "nothing discarded");
+	assert.ok(readFileSync(path, "utf-8").endsWith("}\n"), "terminator restored");
+	appendFileSync(path, `${JSON.stringify(first)}\n`);
+	assert.equal(readReceiptStore(path).length, 3);
+});
+
+test("receipt store: a parseable tail that is NOT a store line still refuses (no silent discard)", (t) => {
+	const dir = tempDir(t);
+	const path = join(dir, "receipts", `${MONTH}.jsonl`);
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, `${JSON.stringify(julyLines()[0])}\n{"foreign":"writer"}`);
+	assert.throws(() => repairReceiptStoreTail(path), /malformed receipt-store line/);
+});
+
 // ── publish gate ──
 
 test("publish gate accepts a genuinely collected month: clean WAL, chained DONEs, verify exit 0", async (t) => {
@@ -486,6 +559,82 @@ test("publish refuses when usertrust-verify exits non-zero", (t) => {
 			return true;
 		},
 	);
+});
+
+// ── CLI entry: the build check runs before any workspace import ──
+
+test("dist preflight: the CLI entry statically imports node builtins ONLY", () => {
+	// Codex PR-91 #6. ESM resolves every static import before the importing
+	// module's first statement runs, so a friendly "run npx tsc -b" check cannot
+	// live downstream of `import … from "usertrust"`: on a clean checkout
+	// (dist/ gitignored, `npm ci` does not build workspaces) the operator gets
+	// ERR_MODULE_NOT_FOUND instead. The entry's import list IS the guarantee.
+	const entry = join(dirname(fileURLToPath(import.meta.url)), "..", "fleet-collector.mts");
+	const src = readFileSync(entry, "utf-8");
+	const specifiers = [...src.matchAll(/^import\s[^;]*?from\s+"([^"]+)";$/gm)].map((m) => m[1]);
+	assert.ok(specifiers.length >= 3, `expected the entry's own imports, got ${specifiers.length}`);
+	for (const spec of specifiers) {
+		assert.ok(spec?.startsWith("node:"), `entry must not statically import ${spec}`);
+	}
+	// …and the check gates the dynamic import that pulls the workspace in.
+	const check = src.indexOf("coreDistBuilt(REPO_ROOT)");
+	const dynamic = src.indexOf('await import("./fleet/collect.mts")');
+	assert.ok(check > 0, "entry must run the build check");
+	assert.ok(dynamic > check, "the build check must precede the dynamic import");
+});
+
+test("dist preflight: the probe answers built vs unbuilt roots", (t) => {
+	assert.equal(coreDistBuilt(REPO_ROOT), true, "this worktree is built (npx tsc -b)");
+	assert.equal(coreDistBuilt(tempDir(t)), false, "an unbuilt root must fail the probe");
+});
+
+// ── publish month ──
+
+test("publish month is frozen at the clock captured at run START", () => {
+	// Codex PR-91 #5. A long replay can cross a UTC month boundary; recomputing
+	// the month afterwards points the publish at a month the run never touched —
+	// its journal was never opened, so the summary is empty or wrong.
+	const startMs = Date.parse("2026-08-31T23:58:00.000Z");
+	const afterMs = Date.parse("2026-09-01T00:03:00.000Z");
+	assert.equal(publishMonthFor(startMs), "2026-08");
+	// The wall clock at rollup time HAS crossed…
+	assert.equal(new Date(afterMs).toISOString().slice(0, 7), "2026-09");
+	// …and the run-start clock still answers August, which is what publishes.
+	assert.equal(publishMonthFor(startMs), "2026-08");
+	assert.equal(publishMonthFor(afterMs), "2026-09", "pure function of the clock it is handed");
+});
+
+// ── scan report ──
+
+test("scan report counts records refused for unusable token counters", (t) => {
+	// The reporting half of Codex PR-91 #2: refusals are surfaced, never silent.
+	const dir = tempDir(t);
+	const projects = join(dir, "projects");
+	mkdirSync(join(projects, "proj"), { recursive: true });
+	const line = (id: string, usage: Record<string, unknown>) =>
+		JSON.stringify({
+			type: "assistant",
+			sessionId: "scan-session",
+			timestamp: "2026-07-15T10:00:00.000Z",
+			isSidechain: false,
+			message: { id, type: "message", role: "assistant", model: "claude-opus-5", usage },
+		});
+	writeFileSync(
+		join(projects, "proj", "session.jsonl"),
+		`${line("msg_scan_good", { input_tokens: 5, output_tokens: 6 })}\n` +
+			`${line("msg_scan_bad", { input_tokens: 5 })}\n`,
+	);
+
+	const scan = scanTranscripts(
+		projects,
+		{ exact: new Set(["proj"]), prefixes: [] },
+		Date.now() + 60 * 60 * 1000, // well past quiescence
+	);
+	assert.equal(scan.filesParsed, 1);
+	assert.equal(scan.records.length, 1);
+	assert.equal(scan.records[0]?.messageId, "msg_scan_good");
+	assert.equal(scan.malformedRecords, 1);
+	assert.equal(scan.deferredIds, 0);
 });
 
 // ── allowlist mangling ──

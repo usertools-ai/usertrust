@@ -46,6 +46,7 @@ import type { TrustReceipt } from "usertrust";
 import { trust, withCostCenter } from "usertrust";
 import type { Journal } from "./journal.mts";
 import type { FleetRecord } from "./parse.mts";
+import { repairReceiptStoreTail } from "./rollup.mts";
 
 /** Spec-pinned sentinel budget (usertokens) — never rendered as a real limit. */
 export const FLEET_SENTINEL_BUDGET = 10_000_000_000;
@@ -183,8 +184,24 @@ interface TaggedChainEvent {
 }
 
 /**
- * Read every audit segment in the month vault and index events by their
- * cost-center tag. Interior garbage throws (a fleet vault we cannot read
+ * The ONE event kind a SETTLED call writes (govern.ts / headless.ts). Recovery
+ * keys on this and nothing else.
+ *
+ * An attributed call that never settled still leaves a tagged event behind:
+ * `llm_call_failed` on a throw, and (since #87) `policy_denied` /
+ * `ledger_rejected` on a governance denial — all three carry
+ * `data.costCenter`. Accepting a tag found on ANY kind therefore writes DONE
+ * for a call that produced NO receipt, the record is filtered out of every
+ * later run, and a REAL call disappears from the ledger with nothing to show
+ * it ever existed. The comparison must stay an EQUALITY on the kind:
+ * `llm_call_failed` starts with `llm_call`, so a prefix or substring test
+ * reintroduces the same silent omission for the commonest failure kind.
+ */
+const SETTLED_EVENT_KIND = "llm_call";
+
+/**
+ * Read every audit segment in the month vault and index SETTLED events by
+ * their cost-center tag. Interior garbage throws (a fleet vault we cannot read
  * honestly must not drive DONE/replay decisions); only an unterminated,
  * unparseable FINAL line of a segment — the one crash signature an
  * append-only log can leave — is skipped.
@@ -209,8 +226,12 @@ function readTaggedEvents(vaultBase: string): Map<string, TaggedChainEvent> {
 				if (isFinalLine) continue; // torn tail: not a committed event
 				throw new Error(`fleet replay: unparseable audit line at ${path}:${i + 1}`);
 			}
-			const event = parsed as { hash?: unknown; data?: { costCenter?: unknown } };
-			if (typeof event.hash === "string" && typeof event.data?.costCenter === "string") {
+			const event = parsed as { hash?: unknown; kind?: unknown; data?: { costCenter?: unknown } };
+			if (
+				event.kind === SETTLED_EVENT_KIND &&
+				typeof event.hash === "string" &&
+				typeof event.data?.costCenter === "string"
+			) {
 				byTag.set(event.data.costCenter, { hash: event.hash, costCenter: event.data.costCenter });
 			}
 		}
@@ -271,6 +292,12 @@ export async function replayMonth(opts: {
 	let minted = 0;
 	if (toMint.length === 0) return { minted, recovered };
 
+	// Bring the receipt store to a clean record boundary before the first
+	// append: a previous run killed mid-write leaves uncommitted bytes, and
+	// appending onto them makes the month permanently unreadable (rollup.mts).
+	mkdirSync(dirname(receiptStorePath), { recursive: true });
+	repairReceiptStoreTail(receiptStorePath);
+
 	// Explicit fleet config in the month vault: pattern memory OFF (r2/C7).
 	// Written unconditionally — a fleet vault must never run patterns-on, and
 	// the content is a deterministic constant, so the write is idempotent.
@@ -323,7 +350,6 @@ export async function replayMonth(opts: {
 				messageId: record.messageId,
 				cacheWriteTiers: { m5: record.cacheWrite5m, h1: record.cacheWrite1h },
 			};
-			mkdirSync(dirname(receiptStorePath), { recursive: true });
 			appendFileSync(receiptStorePath, `${JSON.stringify({ receipt, provenance })}\n`);
 			journal.done(record.messageId, receipt.auditHash, tag);
 			minted += 1;

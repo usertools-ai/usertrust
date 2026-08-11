@@ -22,7 +22,15 @@
  * JSON. The /fleet page renders every figure from this file; its bytes are
  * the whole data contract.
  */
-import { existsSync, readFileSync } from "node:fs";
+import {
+	closeSync,
+	existsSync,
+	fsyncSync,
+	ftruncateSync,
+	openSync,
+	readFileSync,
+	writeSync,
+} from "node:fs";
 import type { FleetProvenance } from "./replay.mts";
 
 // ── list-price constants (spec §6: source-URL comments required) ──
@@ -178,6 +186,12 @@ const asObject = (value: unknown): Record<string, unknown> | null =>
 		? (value as Record<string, unknown>)
 		: null;
 
+/** A parsed line is a store line iff it carries both sub-objects. */
+const isStoreLine = (parsed: unknown): boolean => {
+	const obj = asObject(parsed);
+	return obj !== null && asObject(obj.receipt) !== null && asObject(obj.provenance) !== null;
+};
+
 /**
  * Read one receipt-store JSONL file. Same crash tolerance as every other
  * fleet reader: ONLY an unterminated, unparseable FINAL line is skipped (the
@@ -200,15 +214,72 @@ export function readReceiptStore(path: string): FleetStoreLine[] {
 			if (isFinalLine) continue; // torn tail: the append never committed
 			throw new Error(`fleet rollup: unparseable receipt-store line at ${path}:${i + 1}`);
 		}
-		const obj = asObject(parsed);
-		const receipt = asObject(obj?.receipt);
-		const provenance = asObject(obj?.provenance);
-		if (!obj || !receipt || !provenance) {
+		if (!isStoreLine(parsed)) {
 			throw new Error(`fleet rollup: malformed receipt-store line at ${path}:${i + 1}`);
 		}
-		out.push(obj as unknown as FleetStoreLine);
+		out.push(parsed as FleetStoreLine);
 	}
 	return out;
+}
+
+/**
+ * Bring the receipt store to a clean record boundary BEFORE the next append —
+ * the journal's protocol (journal.mts), applied to the other append-only file
+ * the collector owns.
+ *
+ * Skipping a torn tail at READ time is not enough: the bytes stay on disk, so
+ * the next append concatenates onto them and produces a newline-terminated
+ * malformed INTERIOR line. Interior garbage is not a crash signature, so the
+ * reader refuses it — and every later rollup of that month dies on damage that
+ * re-running the collector can no longer clear.
+ *
+ * The trailing newline is the commit marker (the writer emits the whole record
+ * plus its "\n" in one call), so:
+ *  - tail that does NOT parse  → torn mid-write: truncate it away, report it;
+ *  - tail that parses as a store line → a committed record that lost only its
+ *    marker: restore the marker, discard nothing;
+ *  - tail that parses but is not a store line → not this writer's output;
+ *    throw, exactly as the reader would for the same bytes interior.
+ *
+ * Returns the discarded bytes, or null when nothing was discarded.
+ */
+export function repairReceiptStoreTail(path: string): { discarded: string } | null {
+	if (!existsSync(path)) return null;
+	const buf = readFileSync(path);
+	// `lastIndexOf` returns -1 when the file has no newline at all, which makes
+	// the boundary 0: the whole file is one uncommitted record.
+	const boundary = buf.lastIndexOf(0x0a) + 1;
+	if (boundary === buf.length) return null; // already ends on a record boundary
+
+	const tail = buf.subarray(boundary).toString("utf-8");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(tail);
+	} catch {
+		const fd = openSync(path, "r+");
+		try {
+			ftruncateSync(fd, boundary);
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		console.warn(
+			`fleet rollup: recovered from torn final line in ${path} — ` +
+				`${buf.length - boundary} uncommitted bytes discarded`,
+		);
+		return { discarded: tail };
+	}
+	if (!isStoreLine(parsed)) {
+		throw new Error(`fleet rollup: malformed receipt-store line at ${path}:EOF`);
+	}
+	const fd = openSync(path, "a");
+	try {
+		writeSync(fd, "\n");
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+	return null;
 }
 
 // ── the rollup ──

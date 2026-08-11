@@ -17,6 +17,7 @@
  */
 import assert from "node:assert/strict";
 import {
+	appendFileSync,
 	chmodSync,
 	existsSync,
 	mkdirSync,
@@ -24,6 +25,7 @@ import {
 	readdirSync,
 	readFileSync,
 	rmSync,
+	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,6 +34,7 @@ import { verifyVault } from "usertrust";
 import { openJournal } from "./journal.mts";
 import type { FleetRecord } from "./parse.mts";
 import { fleetMeters, fleetTag, parseFleetTag, replayMonth } from "./replay.mts";
+import { readReceiptStore } from "./rollup.mts";
 
 const MONTH = "2026-07";
 
@@ -317,6 +320,66 @@ test("crash recovery: INTENT + chain event without DONE resolves from the chain,
 	assert.equal(readStore(join(dir, "store1.jsonl")).length, 1);
 });
 
+test("crash recovery: a tagged FAILURE/DENIAL event never satisfies recovery — the record replays", async (t) => {
+	// The P1 (Codex PR-91 #1). Every one of these kinds carries `data.costCenter`
+	// when the call was attributed, so a tag-only lookup would find one and write
+	// DONE for a call that produced NO receipt — the record is then filtered out
+	// forever and a real call vanishes from the ledger. Note `llm_call_failed`
+	// STARTS WITH the success kind: a prefix/substring test would still accept it,
+	// which is exactly the shortcut this test exists to refuse.
+	for (const kind of ["llm_call_failed", "policy_denied", "ledger_rejected"]) {
+		const dir = mkdtempSync(join(tmpdir(), `fleet-replay-${kind}-`));
+		t.after(() => rmSync(dir, { recursive: true, force: true }));
+		const vaultRoot = join(dir, "vault");
+		const vaultBase = join(vaultRoot, MONTH);
+		const rec = record();
+		const tag = fleetTag(rec.sessionHash, rec.messageId);
+
+		// The crashed run's ONLY chain trace for this record is a failure/denial
+		// event carrying the tag (governor wrote it, then the replay threw).
+		const auditDir = join(vaultBase, ".usertrust", "audit");
+		mkdirSync(auditDir, { recursive: true });
+		writeFileSync(
+			join(auditDir, "events.jsonl"),
+			`${JSON.stringify({
+				id: `evt_${kind}`,
+				timestamp: "2026-07-15T10:00:00.000Z",
+				previousHash: "0".repeat(64),
+				hash: "9".repeat(64),
+				kind,
+				actor: "local",
+				data: { costCenter: tag, model: rec.model, error: "boom" },
+				sequence: 1,
+			})}\n`,
+		);
+
+		const fleetDir = join(dir, "fleet");
+		const journal = openJournal(fleetDir, MONTH);
+		journal.intent(rec.messageId, rec.sessionHash, fleetMeters(rec));
+		const receiptStorePath = join(dir, "store.jsonl");
+
+		const result = await replayMonth({
+			month: MONTH,
+			records: [rec],
+			vaultRoot,
+			journal,
+			receiptStorePath,
+		});
+
+		// REPLAYED, not recovered: the call gets a real receipt and a store row.
+		assert.deepStrictEqual(result, { minted: 1, recovered: 0 }, `${kind}: must replay`);
+		const stored = readStore(receiptStorePath);
+		assert.equal(stored.length, 1, `${kind}: the real call must reach the receipt store`);
+		// …and the DONE points at the newly minted SUCCESS event, never the
+		// failure event's hash.
+		const success = tagEvents(vaultBase, tag).filter((e) => e.kind === "llm_call");
+		assert.equal(success.length, 1, `${kind}: exactly one success event`);
+		assert.equal(stored[0]?.receipt.auditHash, success[0]?.hash);
+		assert.notEqual(stored[0]?.receipt.auditHash, "9".repeat(64));
+		assert.deepStrictEqual(journal.pendingIntents(), []);
+	}
+});
+
 test("auditDegraded receipt aborts the run: no DONE, no receipt-store line", async (t) => {
 	const dir = tempDir(t);
 	const vaultRoot = join(dir, "vault");
@@ -344,6 +407,45 @@ test("auditDegraded receipt aborts the run: no DONE, no receipt-store line", asy
 		{ messageId: rec.messageId, sessionHash: rec.sessionHash },
 	]);
 	assert.equal(existsSync(receiptStorePath), false);
+});
+
+test("receipt store: replay repairs a crashed run's torn tail before appending", async (t) => {
+	// The call site for the repair (Codex PR-91 #4). Without it the next append
+	// glues itself onto the uncommitted bytes and the resulting INTERIOR
+	// malformed line makes every later rollup of this month throw — permanently.
+	const dir = tempDir(t);
+	const vaultRoot = join(dir, "vault");
+	const fleetDir = join(dir, "fleet");
+	const receiptStorePath = join(dir, "receipts", `${MONTH}.jsonl`);
+	const recA = record();
+	const recB = record({ messageId: "msg_01ReplayBBB", sessionHash: "fed654cba321" });
+
+	await replayMonth({
+		month: MONTH,
+		records: [recA],
+		vaultRoot,
+		journal: openJournal(fleetDir, MONTH),
+		receiptStorePath,
+	});
+	// The crash: a second append that stopped mid-record, no newline.
+	appendFileSync(receiptStorePath, '{"receipt":{"cost":1,"tornMidWri');
+
+	await replayMonth({
+		month: MONTH,
+		records: [recA, recB],
+		vaultRoot,
+		journal: openJournal(fleetDir, MONTH),
+		receiptStorePath,
+	});
+
+	// The store reads back cleanly — one line per real receipt, torn bytes gone.
+	const lines = readReceiptStore(receiptStorePath);
+	assert.equal(lines.length, 2);
+	assert.deepStrictEqual(
+		lines.map((l) => l.provenance.messageId),
+		[recA.messageId, recB.messageId],
+	);
+	assert.ok(!readFileSync(receiptStorePath, "utf-8").includes("tornMidWri"), "torn bytes gone");
 });
 
 test("no piiDetected/piiPaths keys on any fleet event (absence, not false)", async (t) => {
