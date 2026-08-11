@@ -91,8 +91,9 @@ export const conformingFixtures: ConformingFixtureEntry[] = [
 		id: "C7",
 		files: ["commit-checks-unavailable.json"],
 		exercises:
-			"`registryBinding`/`checkpointHistory` `unavailable` — offline verdict, no degradation, status " +
-			"within cap (R11, §4.1)",
+			"`checkpointHistory: unavailable` with `registryBinding: passed` — extension unavailability " +
+			"never degrades, status within cap (R11, §4.1); NOTE v0.4: `registryBinding: unavailable` on a " +
+			"200 moved to the X6 rejection vectors (actor-conflation correction)",
 	},
 	{
 		id: "C8",

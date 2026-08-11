@@ -324,32 +324,63 @@ export type Advisory =
 // Anchor evidence (receipt-spec §5)
 // ---------------------------------------------------------------------------
 
-export interface RekorAnchorEvidence {
-	format: "rekor";
-	storedBytes: Base64String;
+/**
+ * The repo's existing `RekorReceipt` shape, transcribed VERBATIM from
+ * `packages/core/src/audit/rekor-verify.ts` (receipt-spec §5: "Rekor = the
+ * repo's existing `RekorReceipt` shape"). No `format` discriminator exists on
+ * the real type — the wrapping `AnchorEvidence` container's `rekor` key IS
+ * the discriminator — and no `logKeyId` is carried IN the evidence: the
+ * verifying party pins its OWN log key out of band ("a log key the AUDITOR
+ * pinned (never one the receipt names)", rekor-verify.ts:18-19); a
+ * self-declared key inside the evidence would let attacker-shaped evidence
+ * name its own trust anchor.
+ */
+export interface RekorReceipt {
+	v: 1;
+	vaultId: string;
+	anchorSeq: number;
+	/** 64-hex — MUST equal anchorPayloadHash(record). */
 	artifactHash: HexString;
-	logInclusionProof: {
+	/** base64 of the entry bytes AS STORED BY THE LOG, never a reserialization. */
+	entryBody: Base64String;
+	log: {
+		url: string;
 		logIndex: number;
-		rootHash: HexString;
 		treeSize: number;
+		/** 64-hex root the inclusion path must reconstruct. */
+		rootHash: HexString;
+		/** 64-hex inclusion path, leaf -> root order. */
 		hashes: HexString[];
+		/** Signed note (checkpoint) over treeSize + rootHash — one opaque string. */
+		checkpoint: string;
+		/** Unix SECONDS (not ISO 8601) the log claims it integrated the entry. */
+		integratedTime: number;
+		/** base64 ECDSA signature; optional — a log without a SET still yields inclusion. */
+		signedEntryTimestamp?: Base64String;
+		/** 64-hex log identity, part of the SET payload. Required with a SET. */
+		logID?: HexString;
 	};
-	signedLogCheckpoint: {
-		body: string;
-		signature: Base64String;
-	};
-	logKeyId: string;
-	integratedTime: Iso8601Utc;
 }
 
-/** Operator-asserted configuration probes — context only, never upgrades a verdict. */
-export interface S3ObjectLockProbe {
-	format: "s3ObjectLock";
-	bucket: string;
-	objectKey: string;
-	retentionMode: "GOVERNANCE" | "COMPLIANCE";
-	retainUntil: Iso8601Utc;
-	probedAt: Iso8601Utc;
+/** One `anchor doctor` check — `packages/core/src/audit/anchor-doctor.ts`. */
+export interface DoctorCheck {
+	name: string;
+	status: "pass" | "fail" | "info";
+	detail: string;
+}
+
+/**
+ * The anchor-doctor's ACTUAL output shape (receipt-spec §5: "S3 Object Lock
+ * = operator-asserted configuration probes (anchor-doctor output)"),
+ * transcribed from `packages/core/src/audit/anchor-doctor.ts`'s
+ * `DoctorReport` — an append-only-store PERMISSION probe, never a
+ * cryptographic claim, which is why it "can NEVER by itself reach
+ * `VERIFIED_ANCHORED`" (§8.1 C4).
+ */
+export interface DoctorReport {
+	sink: string;
+	checks: DoctorCheck[];
+	failed: boolean;
 }
 
 /**
@@ -361,8 +392,8 @@ export interface S3ObjectLockProbe {
  * via Rekor, S3 shown alongside as context; C4: S3 only, no anchor claim).
  */
 export interface AnchorEvidence {
-	rekor?: RekorAnchorEvidence;
-	s3ObjectLock?: S3ObjectLockProbe[];
+	rekor?: RekorReceipt;
+	s3ObjectLock?: DoctorReport[];
 }
 
 // ---------------------------------------------------------------------------

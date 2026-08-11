@@ -431,13 +431,15 @@ function checkVerdictAlgebra(body: SuccessEnvelope): AlgebraResult {
 			reason: `"derivations" is "${steps.derivations.result}" — must be passed or notApplicable on a 200`,
 		};
 	}
-	if (
-		checks.registryBinding.result !== "passed" &&
-		checks.registryBinding.result !== "unavailable"
-	) {
+	// v0.4 actor-conflation correction: registryBinding (step 3(b)) MUST be
+	// `passed` on a resolver-issued 200 — the registry IS the resolver's
+	// backing store, so a resolver that read the bytes could have read the
+	// binding. `unavailable`/`notApplicable` are OFFLINE-verification report
+	// values only; on a 200 they are a protocol error, same as `failed`.
+	if (checks.registryBinding.result !== "passed") {
 		return {
 			ok: false,
-			reason: `"registryBinding" is "${checks.registryBinding.result}" — must be passed or unavailable`,
+			reason: `"registryBinding" is "${checks.registryBinding.result}" — must be "passed" on a resolver-issued 200 (v0.4)`,
 		};
 	}
 	if (

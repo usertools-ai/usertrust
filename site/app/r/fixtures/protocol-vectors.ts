@@ -141,6 +141,24 @@ export const protocolVectors: ProtocolVector[] = [
 	})(),
 	(() => {
 		const body = cloneBase();
+		body.verification.checks.registryBinding = { result: "unavailable" };
+		return {
+			label:
+				"verdict algebra — registryBinding: unavailable on a 200 (v0.4 actor-conflation correction)",
+			kind: "verdictAlgebraViolation",
+			routeParamId: baseRouteId,
+			wire: { httpStatus: 200, headers: { "cache-control": "no-cache" }, body },
+			reason:
+				"The registry IS the resolver's backing store (§6 writes receiptId->event.hash and " +
+				"event.hash->bytes in the same atomic write), so a resolver that read the bytes could have " +
+				"read the binding; `unavailable` on a 200 would assert 'I read the registry for the bytes " +
+				"but not for the binding'. registryBinding (step 3(b)) MUST be `passed` on a resolver-issued " +
+				"200 (§4.1 rule 2, v0.4) — `unavailable`/`notApplicable` are offline-verification report " +
+				"values only.",
+		} satisfies ProtocolVector;
+	})(),
+	(() => {
+		const body = cloneBase();
 		body.verification.checks.predecessorLinkage = { result: "failed", failure: "ID_MISMATCH" };
 		return {
 			label: "verdict algebra — predecessorLinkage: failed on a 200",
