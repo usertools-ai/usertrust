@@ -1005,7 +1005,15 @@ export function decodeReceiptBytes(receiptBytes: string): DecodedReceiptBytes {
 	if (!decoded.ok) return { ok: false, stage: "base64", reason: decoded.reason };
 	let text: string;
 	try {
-		text = new TextDecoder("utf-8", { fatal: true }).decode(decoded.bytes);
+		// `ignoreBOM: true` means "do NOT strip a leading BOM" — the opposite of
+		// what the name suggests, and load-bearing for D2. With the default,
+		// TextDecoder silently drops three SIGNED bytes: `receipt.json`
+		// re-encodes this text, so the downloaded artifact would differ from the
+		// resolver's bytes and an independent verifier would hash a different
+		// document. Retaining U+FEFF keeps the round-trip byte-exact AND fails
+		// closed — canonical JSON carries no BOM, so the strict parse rejects it
+		// at the next stage rather than this decode quietly accepting it.
+		text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(decoded.bytes);
 	} catch {
 		return { ok: false, stage: "utf8", reason: "invalid UTF-8 sequence" };
 	}
@@ -2233,7 +2241,29 @@ export function verifyBilledUnfinalizedLinkage(
 			`the linked receipt's origin cites "${origin.sourceReservationReceiptId}", not "${state.receiptId}"`,
 		);
 	}
-	if (linked.receipt.event.data.transferSetRoot !== state.transferSetRoot) {
+	// The root that carries authority is the one COMMITTED IN THE TERMINAL
+	// EVENT — the bundle's top-level `transferSetRoot` is an unsigned envelope
+	// field the resolver could set to anything. Comparing only the top-level
+	// value against the linked receipt would let a bundle whose committed root
+	// disagrees with both still render as verified linkage, presenting an
+	// uncommitted value as part of the terminal-event proof. All three must
+	// agree: committed root === bundle field === linked receipt's root.
+	const committedRoot = (
+		state.envelope.terminalEvent.event as { data?: { transferSetRoot?: unknown } }
+	).data?.transferSetRoot;
+	if (typeof committedRoot !== "string") {
+		return fail(
+			"transferSetRoot",
+			"the terminal event commits no readable transferSetRoot, so the linkage cannot be checked against it",
+		);
+	}
+	if (committedRoot !== state.transferSetRoot) {
+		return fail(
+			"transferSetRoot",
+			"the terminal event's COMMITTED transfer-set root differs from the bundle's top-level transferSetRoot",
+		);
+	}
+	if (linked.receipt.event.data.transferSetRoot !== committedRoot) {
 		return fail(
 			"transferSetRoot",
 			"the transfer-set root differs between the terminal event and the fallback receipt",

@@ -1172,6 +1172,29 @@ test("R4 stage 1: the base64 decoder is canonical, not lenient", () => {
 	}
 });
 
+test("D2/R4: a BOM is never silently stripped — the decode round-trips byte-exact and fails closed", () => {
+	// A BOM-prefixed document: three SIGNED bytes an independent verifier will
+	// hash. A default TextDecoder drops them, so `receipt.json` would re-encode
+	// a shorter artifact than the resolver served and the CLI would hash a
+	// different document while the page still showed green.
+	const bomBytes = new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode('{"a":1}')]);
+	const base64 = Buffer.from(bomBytes).toString("base64");
+
+	const decoded = decodeReceiptBytes(base64);
+	assert.equal(decoded.ok, true, "a BOM is valid UTF-8 — it must not fail at the decode stage");
+	if (!decoded.ok) return;
+	assert.deepEqual(
+		[...new TextEncoder().encode(decoded.text)],
+		[...bomBytes],
+		"re-encoding the decoded text must reproduce the served bytes exactly, BOM included",
+	);
+
+	// ...and canonical JSON carries no BOM, so the NEXT stage rejects it: the
+	// bytes survive the round trip and the document still never renders green.
+	const agreement = checkReceiptBytesAgreement(base64, { a: 1 });
+	assert.equal(agreement.ok, false, "a BOM-prefixed document must not verify");
+});
+
 test("R4 stage 2: UTF-8 decoding is FATAL — no replacement characters", () => {
 	// 0x80 is a bare continuation byte: invalid UTF-8, silently replaced by
 	// U+FFFD under a non-fatal decoder.

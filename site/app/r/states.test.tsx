@@ -121,6 +121,52 @@ test("not-minted.json: the pinned headline, the distinct-not-danger note, and NO
 // billedUnfinalized (410) — R3's four-way-checked link
 // ===========================================================================
 
+test("R3: the root that must agree is the one COMMITTED IN the terminal event, not the bundle's top-level field", () => {
+	// The top-level `transferSetRoot` is an unsigned envelope field. If only
+	// that is compared against the linked receipt, a bundle whose terminal
+	// event COMMITS a different root still renders a verified link — and the
+	// page presents the uncommitted value as part of the terminal-event proof.
+	const bundle = loadFixture("billed-unfinalized.json");
+	const event = (
+		bundle.wire.body as { terminalEvent: { event: { data: { transferSetRoot: string } } } }
+	).terminalEvent.event;
+	event.data.transferSetRoot = "f".repeat(64); // committed root now disagrees
+
+	const bundleState = fixtureState(bundle);
+	assert.equal(bundleState.kind, "billedUnfinalized");
+	if (bundleState.kind !== "billedUnfinalized") return;
+	const linkedState = fixtureState(loadFixture("session-fallback.json"));
+
+	const checked = verifyBilledUnfinalizedLinkage(bundleState, linkedState);
+	assert.equal(
+		checked.kind,
+		"integrityFailure",
+		"a committed root that disagrees must break the linkage, not pass it",
+	);
+	if (checked.kind !== "integrityFailure") return;
+	assert.equal(checked.cause.source, "page");
+	if (checked.cause.source !== "page" || checked.cause.obligation !== "R3") {
+		throw new Error("the linkage break must be reported as R3's transferSetRoot equality");
+	}
+	assert.equal(checked.cause.brokenEquality, "transferSetRoot");
+});
+
+test("R3: a terminal event committing NO readable root fails closed rather than skipping the check", () => {
+	const bundle = loadFixture("billed-unfinalized.json");
+	const event = (
+		bundle.wire.body as { terminalEvent: { event: { data: Record<string, unknown> } } }
+	).terminalEvent.event;
+	delete event.data.transferSetRoot;
+
+	const bundleState = fixtureState(bundle);
+	if (bundleState.kind !== "billedUnfinalized") return;
+	const checked = verifyBilledUnfinalizedLinkage(
+		bundleState,
+		fixtureState(loadFixture("session-fallback.json")),
+	);
+	assert.equal(checked.kind, "integrityFailure");
+});
+
 test("C21<->C18: the happy path renders the UNPROVEN stamp, the proof summary, and the verified link", () => {
 	const bundleState = fixtureState(loadFixture("billed-unfinalized.json"));
 	assert.equal(bundleState.kind, "billedUnfinalized");

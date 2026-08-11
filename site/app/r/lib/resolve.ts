@@ -123,6 +123,7 @@ export async function resolveVerifyPageState(
 			headers: { Accept: "application/json" },
 		});
 	} catch (error) {
+		clearTimeout(timer);
 		return isAbortError(error)
 			? transportFailureState(routeParamId, "timeout")
 			: transportFailureState(
@@ -130,9 +131,12 @@ export async function resolveVerifyPageState(
 					"networkFailure",
 					error instanceof Error ? error.message : String(error),
 				);
-	} finally {
-		clearTimeout(timer);
 	}
+	// The timer deliberately stays ARMED past the headers. A resolver that
+	// answers promptly and then stalls mid-body would otherwise hang the SSR
+	// request forever: clearing here would disarm the deadline before
+	// `response.text()` ever runs. It is cleared on every path below, after
+	// the body is consumed (or after the 429 branch decides not to read one).
 
 	// 3 — the 429 exemption (§4.2), enforced here too: "the body is absent or
 	// untrusted and is NEVER parsed" means never attempted, not merely
@@ -141,6 +145,7 @@ export async function resolveVerifyPageState(
 	// the outcome at all, so the read itself is skipped and `raw` is `null` —
 	// exactly the shape `wire.ts` documents for a body-less 429.
 	if (response.status === 429) {
+		clearTimeout(timer);
 		return parseResolverResponse({
 			routeParamId,
 			httpStatus: response.status,
@@ -153,13 +158,17 @@ export async function resolveVerifyPageState(
 	try {
 		raw = await response.text();
 	} catch (error) {
-		return transportFailureState(
-			routeParamId,
-			"networkFailure",
-			`the resolver's response body could not be read: ${
-				error instanceof Error ? error.message : String(error)
-			}`,
-		);
+		return isAbortError(error)
+			? transportFailureState(routeParamId, "timeout")
+			: transportFailureState(
+					routeParamId,
+					"networkFailure",
+					`the resolver's response body could not be read: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+	} finally {
+		clearTimeout(timer);
 	}
 
 	// 4 — everything else (the §3 table, the §4 schema, R1/R4) is wire.ts's.

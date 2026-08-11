@@ -219,6 +219,47 @@ test("a resolver timeout maps to the protocol-error shell (transportTimeout)", a
 	}
 });
 
+// The per-test timeout is deliberate: if this regresses, the deadline never
+// fires and the awaited promise never settles, so an unbounded test would HANG
+// CI instead of failing it. Bounded, a regression is a red check in seconds.
+test("the deadline stays ARMED through the body: headers promptly, then a stalled stream, still times out", {
+	timeout: 5_000,
+}, async () => {
+	// The failure this pins: clearing the timer once the headers arrive
+	// disarms the deadline before the body is read, so a resolver that
+	// answers and then stalls mid-stream hangs the SSR request forever —
+	// a page that never renders instead of one that renders a shell.
+	const fetchImpl = (async (_url, init) => {
+		const signal = init?.signal;
+		return {
+			status: 200,
+			headers: new Headers({ "Content-Type": "application/json" }),
+			text: () =>
+				new Promise<string>((_resolve, reject) => {
+					signal?.addEventListener("abort", () => {
+						const err = new Error("The operation was aborted");
+						err.name = "AbortError";
+						reject(err);
+					});
+				}),
+		} as unknown as Response;
+	}) as typeof fetch;
+
+	const state = await resolveVerifyPageState("ut1_WskkNFGvdE3dwzwzFyxcNC", {
+		fetchImpl,
+		timeoutMs: 5,
+	});
+
+	assert.equal(state.kind, "protocolError");
+	if (state.kind === "protocolError") {
+		assert.equal(
+			state.reason,
+			"transportTimeout",
+			"a stalled BODY is a timeout, like a stalled header",
+		);
+	}
+});
+
 test("a network failure (fetch rejects, not aborted) maps to the protocol-error shell (networkFailure)", async () => {
 	const fetchImpl = (async () => {
 		throw new TypeError("fetch failed");
