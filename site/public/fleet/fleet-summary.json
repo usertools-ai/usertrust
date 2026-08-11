@@ -1,70 +1,102 @@
 {
 	"byModel": [
 		{
-			"calls": 3,
-			"kernelUsd": 0.0084,
+			"calls": 2757,
+			"kernelUsd": 859.7892,
+			"model": "claude-fable-5",
+			"rateSource": "table",
+			"usertokens": 8597892
+		},
+		{
+			"calls": 6636,
+			"kernelUsd": 843.0428,
 			"model": "claude-opus-5",
 			"rateSource": "table",
-			"usertokens": 84
+			"usertokens": 8430428
 		},
 		{
-			"calls": 1,
-			"kernelUsd": 0.0062,
-			"model": "claude-opus-4-8",
-			"rateSource": "table",
-			"usertokens": 62
-		},
-		{
-			"calls": 2,
-			"kernelUsd": 0.0013,
+			"calls": 7709,
+			"kernelUsd": 430.5126,
 			"model": "claude-sonnet-5",
 			"rateSource": "table",
-			"usertokens": 13
+			"usertokens": 4305126
+		},
+		{
+			"calls": 333,
+			"kernelUsd": 64.3081,
+			"model": "claude-opus-4-8",
+			"rateSource": "table",
+			"usertokens": 643081
+		},
+		{
+			"calls": 191,
+			"kernelUsd": 1.6815,
+			"model": "claude-haiku-4-5-20251001",
+			"rateSource": "table",
+			"usertokens": 16815
 		}
 	],
 	"bySession": [
 		{
-			"calls": 1,
-			"sessionHash": "d9dd19e2ebba",
-			"sidechainShare": 0,
-			"usertokens": 62
-		},
-		{
-			"calls": 1,
-			"sessionHash": "e279159a3ffc",
-			"sidechainShare": 0,
-			"usertokens": 39
-		},
-		{
-			"calls": 2,
-			"sessionHash": "de40e18aa282",
-			"sidechainShare": 0,
-			"usertokens": 38
-		},
-		{
-			"calls": 1,
-			"sessionHash": "66d39d6db395",
-			"sidechainShare": 0,
-			"usertokens": 14
-		},
-		{
-			"calls": 1,
-			"sessionHash": "eb18cc80abb6",
+			"calls": 8303,
+			"sessionHash": "c5331ff5bd2c",
 			"sidechainShare": 1,
-			"usertokens": 6
+			"usertokens": 9013441
+		},
+		{
+			"calls": 5206,
+			"sessionHash": "9ae40bf0e9b9",
+			"sidechainShare": 1,
+			"usertokens": 4644647
+		},
+		{
+			"calls": 2747,
+			"sessionHash": "307a9dcaae71",
+			"sidechainShare": 0.8893,
+			"usertokens": 4195195
+		},
+		{
+			"calls": 1217,
+			"sessionHash": "1c30e9961e5c",
+			"sidechainShare": 0.7305,
+			"usertokens": 3695786
+		},
+		{
+			"calls": 53,
+			"sessionHash": "d20ebc76ffb2",
+			"sidechainShare": 0,
+			"usertokens": 203748
+		},
+		{
+			"calls": 70,
+			"sessionHash": "465f6d59da29",
+			"sidechainShare": 1,
+			"usertokens": 163701
+		},
+		{
+			"calls": 27,
+			"sessionHash": "daccccd520ea",
+			"sidechainShare": 0,
+			"usertokens": 55887
+		},
+		{
+			"calls": 3,
+			"sessionHash": "1d2c2cb71688",
+			"sidechainShare": 0,
+			"usertokens": 20937
 		}
 	],
-	"collectorCommit": "2294ae8",
-	"generatedAt": "2026-08-11T10:18:02.032Z",
+	"collectorCommit": "de4724a",
+	"generatedAt": "2026-08-11T10:58:22.824Z",
 	"month": {
-		"cacheReadTokens": 5400,
-		"cacheWriteTokens": 1270,
-		"calls": 6,
-		"inputTokens": 47,
-		"kernelUsd": 0.0159,
-		"listPriceUsd": 0.015786,
-		"outputTokens": 216,
-		"usertokens": 159
+		"cacheReadTokens": 2477496375,
+		"cacheWriteTokens": 78345261,
+		"calls": 17626,
+		"inputTokens": 146749,
+		"kernelUsd": 2199.3342,
+		"listPriceUsd": 2257.676629,
+		"outputTokens": 13316695,
+		"usertokens": 21993342
 	},
 	"residualCauses": [
 		"cache-write TTL split",
@@ -73,15 +105,15 @@
 		"kernel per-call rounding floor/ceiling"
 	],
 	"scanReport": {
-		"candidateDirsSkipped": 0,
-		"deferredIds": 0,
-		"dirsScanned": 1
+		"candidateDirsSkipped": 3,
+		"deferredIds": 1489,
+		"dirsScanned": 44
 	},
 	"tableVersions": [
 		"2026-08-10"
 	],
 	"window": {
-		"firstOccurredAt": "2026-08-10T12:00:06.000Z",
+		"firstOccurredAt": "2026-07-17T12:47:25.891Z",
 		"publishedMonth": "2026-08"
 	}
 }

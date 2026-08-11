@@ -2,12 +2,12 @@
 	"command": "npx usertrust-verify .usertrust",
 	"lines": [
 		"Vault integrity: VERIFIED (UNANCHORED — internal consistency only)",
-		"Chain length: 6 events",
-		"Merkle root: 0a2632b8512156181936b1061aa444329dc5adba52b55ec861df18151e350a2a",
+		"Chain length: 17626 events",
+		"Merkle root: 4847f34a32769a46c8045128255ee985165a543c083f302b1425231a321c8712",
 		"Hash algorithm: SHA-256",
-		"First event: 2026-08-11T10:18:01.925Z",
-		"Last event: 2026-08-11T10:18:01.978Z",
-		"All hashes: valid (6/6)"
+		"First event: 2026-08-11T10:48:34.481Z",
+		"Last event: 2026-08-11T10:58:22.218Z",
+		"All hashes: valid (17626/17626)"
 	],
 	"exitCode": 0
 }
