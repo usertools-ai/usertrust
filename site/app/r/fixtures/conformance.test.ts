@@ -453,20 +453,36 @@ function checkVerdictAlgebra(body: SuccessEnvelope): AlgebraResult {
 		};
 	}
 
-	// Rule 3: extension checks cap the status (cumulative ladder).
-	const historyOk = checks.checkpointHistory.result === "passed";
-	const anchorOk = checks.anchorEvidence.result === "passed";
+	// Rule 3: extension checks cap the status (cumulative ladder) — and the cap
+	// binds the check result to the MEMBER that justifies it. A `passed` check
+	// whose evidence the envelope never served is treated as absent/unavailable
+	// (D1: "the history rung cannot render without it ... fail-closed to the
+	// rung below"), and S3 Object Lock evidence earns no anchor at all — it is
+	// operator-asserted configuration that "upgrades no cryptographic verdict,
+	// and must never render as a green anchor claim" (R8).
+	const evidence = body as unknown as {
+		checkpointHistory?: unknown;
+		anchorEvidence?: { rekor?: unknown };
+	};
+	const historyServed =
+		Array.isArray(evidence.checkpointHistory) && evidence.checkpointHistory.length > 0;
+	const rekorServed =
+		typeof evidence.anchorEvidence?.rekor === "object" && evidence.anchorEvidence?.rekor !== null;
+	const historyOk = checks.checkpointHistory.result === "passed" && historyServed;
+	const anchorOk = checks.anchorEvidence.result === "passed" && rekorServed;
 	if (body.status === "verified_checkpoint_history" && !historyOk) {
 		return {
 			ok: false,
-			reason: "status verified_checkpoint_history requires checkpointHistory: passed",
+			reason:
+				"status verified_checkpoint_history requires checkpointHistory: passed AND a non-empty checkpointHistory member",
 		};
 	}
 	if (body.status === "verified_anchored" && !(historyOk && anchorOk)) {
 		return {
 			ok: false,
 			reason:
-				"status verified_anchored requires checkpointHistory: passed AND anchorEvidence: passed",
+				"status verified_anchored requires checkpointHistory: passed AND anchorEvidence: passed, each with the " +
+				"member that justifies it (anchorEvidence.rekor — an S3 probe alone is context, not an anchor)",
 		};
 	}
 
@@ -563,10 +579,14 @@ test("manifest: 28 conforming JSON files (C1-C27, C22 a pair)", () => {
 	assert.equal(totalFiles, 28, "28 files total (C22 contributes 2)");
 });
 
-test("manifest: 11 rejection JSON files across X1-X5, plus X6/X7 as TS modules", () => {
+test("manifest: 12 rejection JSON files across X1-X5, plus X6/X7 as TS modules", () => {
 	const jsonEntries = rejectionVectors.filter((e) => e.kind === "json");
 	const totalJsonFiles = jsonEntries.reduce((sum, e) => sum + e.files.length, 0);
-	assert.equal(totalJsonFiles, 11, "X1(4) + X2(1) + X3(1) + X4(1) + X5(4) = 11");
+	// X4 carries TWO files — one per half of R1's identity chain (the envelope
+	// half and the signed-receipt-document half); the §8.2 row names the
+	// receipt-document case, and only a file whose `body.receiptId` agrees with
+	// the route isolates it.
+	assert.equal(totalJsonFiles, 12, "X1(4) + X2(1) + X3(1) + X4(2) + X5(4) = 12");
 	const tsEntries = rejectionVectors.filter((e) => e.kind === "ts-module");
 	assert.deepEqual(
 		tsEntries.map((e) => e.id),

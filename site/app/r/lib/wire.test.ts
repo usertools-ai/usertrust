@@ -215,7 +215,8 @@ for (const entry of conformingFixtures) {
 					"verified_anchored",
 				];
 				assert.ok(
-					ladder.indexOf(state.rung) <= ladder.indexOf(warrantedRung(state.envelope.verification)),
+					ladder.indexOf(state.rung) <=
+						ladder.indexOf(warrantedRung(state.envelope.verification, state.envelope)),
 					`${file}: rung above its extension cap`,
 				);
 			}
@@ -252,7 +253,7 @@ test("C25 (409): the integrity failure names the resolver's failed step and its 
 
 test("§4.2/R37: a 409 whose verification names NO failed step is a protocol error, not an integrity failure", () => {
 	const fixture = structuredClone(loadFixture("unverifiable.json"));
-	const body = fixture.wire.body as {
+	const body = fixture.wire.body as unknown as {
 		verification: { steps: Record<string, { result: string; failure?: string }> };
 	};
 	// The C25 fixture fails on `signature`; flip it to passed so nothing in
@@ -386,12 +387,39 @@ test("X3: an unrecognized status under apiVersion 1 fails closed", () => {
 });
 
 test("X4 (R1): an otherwise-valid 200 answering about another ID is an integrity failure", () => {
-	const state = parseFixture("id-mismatch.json");
-	assert.equal(state.kind, "integrityFailure");
-	if (state.kind !== "integrityFailure") return;
-	assert.equal(state.cause.source, "page");
-	if (state.cause.source !== "page") return;
-	assert.equal(state.cause.obligation, "R1");
+	// Both HALVES of R1's identity chain, one file each. The second is the
+	// dangerous one: the envelope agrees with the route, so only the SIGNED
+	// receipt document dissents — R4 passes (the bytes back that receipt), and
+	// the receipt-document check is the single thing standing between the
+	// §10.15 "answer B under receipt A" case and a green render.
+	const expectedDetail: Record<string, RegExp> = {
+		"id-mismatch.json": /^the resolver answered about "/,
+		"id-mismatch-receipt-document.json": /^the receipt document names "/,
+	};
+	const x4 = rejectionVectors.find((entry) => entry.id === "X4");
+	assert.ok(x4);
+	assert.equal(x4?.files.length, 2, "R1 has two halves; the corpus must cover both");
+	for (const file of x4?.files ?? []) {
+		const state = parseFixture(file);
+		assert.equal(state.kind, "integrityFailure", file);
+		if (state.kind !== "integrityFailure") continue;
+		assert.equal(state.cause.source, "page", file);
+		if (state.cause.source !== "page") continue;
+		assert.equal(state.cause.obligation, "R1", file);
+		assert.match(state.cause.detail, expectedDetail[file], `${file}: wrong R1 half named`);
+	}
+
+	// The receipt-document half is not reachable through the envelope half:
+	// this vector's envelope receiptId AGREES with the route.
+	const half = loadFixture<FixtureCase>("id-mismatch-receipt-document.json");
+	const body = half.wire.body as unknown as SuccessEnvelope;
+	assert.equal(body.receiptId, half.routeParamId, "the envelope half must be conformant here");
+	assert.notEqual(body.receipt.receiptId, half.routeParamId);
+	// ...and the bytes agree with the RECEIPT, so R4 cannot catch it either.
+	assert.ok(
+		checkReceiptBytesAgreement(body.receiptBytes, body.receipt).ok,
+		"R4 must pass, isolating the receipt-document identity check",
+	);
 });
 
 test("X5 (R4): each receiptBytes mutant fails at its own pipeline stage", () => {
@@ -577,7 +605,7 @@ test("§4.1 rule 1: every mandatory step is disqualified by failed AND by not-ru
 					)[step],
 				};
 			}
-			const algebra = checkVerdictAlgebra("verified_checkpoint", verification);
+			const algebra = checkVerdictAlgebra("verified_checkpoint", verification, {});
 			assert.equal(algebra.ok, false, `${step} = ${result} must disqualify a 200`);
 		}
 	}
@@ -588,19 +616,19 @@ test("§4.1 rule 2: derivations, registryBinding, predecessorLinkage, extensions
 	for (const result of ["passed", "notApplicable"] as const) {
 		const verification = baseVerification();
 		verification.steps.derivations = { result };
-		assert.equal(checkVerdictAlgebra("verified_checkpoint", verification).ok, true, result);
+		assert.equal(checkVerdictAlgebra("verified_checkpoint", verification, {}).ok, true, result);
 	}
 	for (const result of ["unavailable"] as const) {
 		const verification = baseVerification();
 		verification.steps.derivations = { result };
-		assert.equal(checkVerdictAlgebra("verified_checkpoint", verification).ok, false, result);
+		assert.equal(checkVerdictAlgebra("verified_checkpoint", verification, {}).ok, false, result);
 	}
 
 	// extensions (the step-9 summary) is upgrade-only — anything goes.
 	for (const result of ["passed", "notApplicable", "unavailable"] as const) {
 		const verification = baseVerification();
 		verification.steps.extensions = { result };
-		assert.equal(checkVerdictAlgebra("verified_checkpoint", verification).ok, true, result);
+		assert.equal(checkVerdictAlgebra("verified_checkpoint", verification, {}).ok, true, result);
 	}
 
 	// registryBinding: `passed` REQUIRED on a resolver-issued 200 (v0.4).
@@ -609,7 +637,7 @@ test("§4.1 rule 2: derivations, registryBinding, predecessorLinkage, extensions
 		verification.checks.registryBinding =
 			result === "failed" ? { result, failure: "ID_MISMATCH" } : { result };
 		assert.equal(
-			checkVerdictAlgebra("verified_checkpoint", verification).ok,
+			checkVerdictAlgebra("verified_checkpoint", verification, {}).ok,
 			false,
 			`registryBinding = ${result} must be a protocol error on a 200`,
 		);
@@ -620,12 +648,21 @@ test("§4.1 rule 2: derivations, registryBinding, predecessorLinkage, extensions
 	for (const result of ["passed", "notApplicable", "unavailable"] as const) {
 		const verification = baseVerification();
 		verification.checks.predecessorLinkage = { result };
-		assert.equal(checkVerdictAlgebra("verified_checkpoint", verification).ok, true, result);
+		assert.equal(checkVerdictAlgebra("verified_checkpoint", verification, {}).ok, true, result);
 	}
 	const contradicted = baseVerification();
 	contradicted.checks.predecessorLinkage = { result: "failed", failure: "PREDECESSOR_MISMATCH" };
-	assert.equal(checkVerdictAlgebra("verified_checkpoint", contradicted).ok, false);
+	assert.equal(checkVerdictAlgebra("verified_checkpoint", contradicted, {}).ok, false);
 });
+
+/**
+ * Evidence members that justify BOTH extension rungs, so the rule-3 table below
+ * varies exactly one axis — the check results. The member axis is its own test.
+ */
+const fullEvidence = {
+	checkpointHistory: [{ segment: 1 }],
+	anchorEvidence: { rekor: { logIndex: 1 } },
+};
 
 test("§4.1 rule 3: the ladder is cumulative and each rung is capped by its extension", () => {
 	const cases: [
@@ -650,9 +687,62 @@ test("§4.1 rule 3: the ladder is cumulative and each rung is capped by its exte
 		verification.checks.anchorEvidence =
 			anchor === "failed" ? { result: anchor, failure: "ANCHOR_INVALID" } : { result: anchor };
 		assert.equal(
-			checkVerdictAlgebra(status, verification).ok,
+			checkVerdictAlgebra(status, verification, fullEvidence).ok,
 			expected,
 			`${status} with history=${history} anchor=${anchor}`,
+		);
+	}
+});
+
+test("§4.1 rule 3: the SAME check results cap differently once the evidence member is gone", () => {
+	// The member axis of rule 3, held against the table above: identical
+	// `passed`/`passed` checks, and the only thing that changes is what the
+	// envelope actually served. Green must follow the evidence, not the claim.
+	const verification = baseVerification();
+	verification.checks.checkpointHistory = { result: "passed" };
+	verification.checks.anchorEvidence = { result: "passed" };
+	const cases: [string, LadderStatus, Record<string, unknown>, boolean][] = [
+		["everything served", "verified_anchored", fullEvidence, true],
+		["no members at all", "verified_anchored", {}, false],
+		["no members at all", "verified_checkpoint_history", {}, false],
+		["no members at all", "verified_checkpoint", {}, true], // the floor needs none
+		[
+			"history served, no anchor member",
+			"verified_anchored",
+			{ checkpointHistory: fullEvidence.checkpointHistory },
+			false,
+		],
+		[
+			"history served, no anchor member",
+			"verified_checkpoint_history",
+			{ checkpointHistory: fullEvidence.checkpointHistory },
+			true,
+		],
+		["empty history list", "verified_checkpoint_history", { checkpointHistory: [] }, false],
+		[
+			"S3 probe only (R8)",
+			"verified_anchored",
+			{
+				checkpointHistory: fullEvidence.checkpointHistory,
+				anchorEvidence: { s3ObjectLock: { bucket: "b", retainUntil: "2030-01-01T00:00:00.000Z" } },
+			},
+			false,
+		],
+		[
+			"S3 probe only (R8) — the rung BELOW is untouched",
+			"verified_checkpoint_history",
+			{
+				checkpointHistory: fullEvidence.checkpointHistory,
+				anchorEvidence: { s3ObjectLock: { bucket: "b", retainUntil: "2030-01-01T00:00:00.000Z" } },
+			},
+			true,
+		],
+	];
+	for (const [label, status, evidence, expected] of cases) {
+		assert.equal(
+			checkVerdictAlgebra(status, verification, evidence).ok,
+			expected,
+			`${status} with ${label}`,
 		);
 	}
 });
@@ -732,29 +822,103 @@ test("§4.1: an advisory of an UNKNOWN kind is carried through, never dropped, n
 	assert.equal(state.envelope.advisories[0].kind, "somethingTheResolverLearnedLater");
 });
 
-test("D1: a response WITHOUT the opt-in checkpointHistory member still parses, capped at the rung below", () => {
-	// `?include=checkpointHistory` is opt-in on the resolver; a response
-	// lacking the member must parse, with the §4.1 cap rules treating it as
-	// absent — fail-closed to the rung below, never a protocol error.
+test("D1: the history rung cannot render without the checkpointHistory member it walked", () => {
+	// `?include=checkpointHistory` is opt-in on the resolver, so a response
+	// lacking the member still PARSES (no schema failure) — but D1 rules that
+	// "the history rung cannot render without it; a response without the
+	// member still parses (the §4.1 cap rules treat it as absent/unavailable —
+	// fail-closed to the rung below)". A 200 still CLAIMING the history rung is
+	// therefore above its cap: a protocol error, never a green history chip.
 	const c2 = loadFixture<FixtureCase>("commit-history.json");
-	const body = JSON.parse(JSON.stringify(c2.wire.body)) as Record<string, unknown>;
-	delete body.checkpointHistory;
-	const withMemberGone = parseResolverResponse({ ...toInput(c2), raw: JSON.stringify(body) });
-	// The resolver still reported the check as passed, so the rung stands: the
-	// member is EVIDENCE for rendering, the check result is what caps.
-	assert.equal(withMemberGone.kind, "verified");
+	const mutations: [string, (body: Record<string, unknown>) => void][] = [
+		["member deleted", (body) => delete body.checkpointHistory],
+		[
+			"member is an EMPTY list",
+			(body) => {
+				body.checkpointHistory = [];
+			},
+		],
+		[
+			"check itself unavailable",
+			(body) => {
+				const checks = (body.verification as Record<string, unknown>).checks as Record<
+					string,
+					unknown
+				>;
+				checks.checkpointHistory = { result: "unavailable" };
+			},
+		],
+	];
+	for (const [label, mutate] of mutations) {
+		const body = JSON.parse(JSON.stringify(c2.wire.body)) as Record<string, unknown>;
+		mutate(body);
+		const state = parseResolverResponse({ ...toInput(c2), raw: JSON.stringify(body) });
+		assert.equal(state.kind, "protocolError", `checkpointHistory ${label}: must fail closed`);
+		if (state.kind !== "protocolError") continue;
+		assert.equal(state.reason, "verdictAlgebra", label);
+	}
 
-	// With the CHECK itself absent-equivalent (unavailable), the history rung
-	// is above its cap and fails closed.
-	const capped = JSON.parse(JSON.stringify(c2.wire.body)) as Record<string, unknown>;
-	delete capped.checkpointHistory;
-	(
-		(capped.verification as Record<string, unknown>).checks as Record<string, unknown>
-	).checkpointHistory = { result: "unavailable" };
-	const state = parseResolverResponse({ ...toInput(c2), raw: JSON.stringify(capped) });
-	assert.equal(state.kind, "protocolError");
-	if (state.kind !== "protocolError") return;
-	assert.equal(state.reason, "verdictAlgebra");
+	// The cap is exactly a cap: the intact fixture is untouched by it, and the
+	// FLOOR rung never needed an extension member in the first place.
+	assert.equal(parseFixture("commit-history.json").kind, "verified");
+	assert.equal(parseFixture("commit-checkpoint.json").kind, "verified");
+});
+
+test("R8: verified_anchored requires a REKOR attachment — an S3 probe is context, never a green anchor", () => {
+	// R8: the anchored rung "presupposes the complete verified history plus
+	// Rekor evidence (§4.1)", and S3 Object Lock evidence "may be displayed as
+	// context only, upgrades no cryptographic verdict, and must never render as
+	// a green anchor claim". The check result alone cannot carry the rung.
+	const c3 = loadFixture<FixtureCase>("commit-anchored.json");
+	const mutations: [string, (body: Record<string, unknown>) => void][] = [
+		["member deleted", (body) => delete body.anchorEvidence],
+		[
+			"member is an empty object",
+			(body) => {
+				body.anchorEvidence = {};
+			},
+		],
+		[
+			"S3 Object Lock probe ONLY",
+			(body) => delete (body.anchorEvidence as Record<string, unknown>).rekor,
+		],
+		[
+			"rekor present but not an attachment",
+			(body) => {
+				(body.anchorEvidence as Record<string, unknown>).rekor = null;
+			},
+		],
+	];
+	for (const [label, mutate] of mutations) {
+		const body = JSON.parse(JSON.stringify(c3.wire.body)) as Record<string, unknown>;
+		mutate(body);
+		const state = parseResolverResponse({ ...toInput(c3), raw: JSON.stringify(body) });
+		assert.equal(state.kind, "protocolError", `anchorEvidence ${label}: must fail closed`);
+		if (state.kind !== "protocolError") continue;
+		assert.equal(state.reason, "verdictAlgebra", label);
+	}
+
+	// C3 itself — Rekor attachment AND history served — still reaches the top.
+	const intact = parseFixture("commit-anchored.json");
+	assert.equal(intact.kind, "verified");
+	if (intact.kind !== "verified") return;
+	assert.equal(intact.rung, "verified_anchored");
+});
+
+test("R5: warrantedRung is a function of the check results AND the evidence served", () => {
+	const c3 = loadFixture<FixtureCase>("commit-anchored.json");
+	const anchored = c3.wire.body as unknown as SuccessEnvelope;
+	assert.equal(warrantedRung(anchored.verification, anchored), "verified_anchored");
+
+	// Strip the Rekor attachment and the anchor claim is gone — but the history
+	// rung UNDER it still stands. The demotion is exact, not blanket (R8/C4).
+	const s3Only = JSON.parse(JSON.stringify(anchored)) as SuccessEnvelope;
+	delete (s3Only.anchorEvidence as { rekor?: unknown }).rekor;
+	assert.equal(warrantedRung(s3Only.verification, s3Only), "verified_checkpoint_history");
+
+	// Identical checks, no members served at all: the floor rung, which is the
+	// fail-closed answer a caller that forgets the evidence gets.
+	assert.equal(warrantedRung(anchored.verification, {}), "verified_checkpoint");
 });
 
 test("R37: unknown MEMBERS under apiVersion 1 are tolerated; unknown VERSIONS are not", () => {

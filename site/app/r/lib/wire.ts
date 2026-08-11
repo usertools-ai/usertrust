@@ -1110,6 +1110,88 @@ const FAILURE_CODES: ReadonlySet<string> = new Set<FailureCode>([
 export type AlgebraResult = { ok: true } | { ok: false; reason: string };
 
 /**
+ * The OPTIONAL §4.1 members an extension rung's claim rests on. The cap rules
+ * key on the check result AND on the member that justifies it: a check saying
+ * `passed` with nothing served to show for it is treated exactly as
+ * `unavailable` (D1 — "a response without the member still parses (the §4.1
+ * cap rules treat it as absent/unavailable — fail-closed to the rung below)").
+ *
+ * Deliberately widened to `unknown`: a `SuccessEnvelope` is assignable, and so
+ * is a raw bag, so no caller can satisfy this by inventing a shape.
+ */
+export interface EvidenceMembers {
+	anchorEvidence?: unknown;
+	checkpointHistory?: unknown;
+}
+
+/**
+ * The history walk itself. Absent (the `?include=checkpointHistory` opt-in was
+ * not honored) or empty (a walk over nothing proves nothing) — either way the
+ * history rung has no evidence under it.
+ */
+export function hasHistoryEvidence(evidence: EvidenceMembers): boolean {
+	return Array.isArray(evidence.checkpointHistory) && evidence.checkpointHistory.length > 0;
+}
+
+/**
+ * Only a Rekor attachment earns the anchored rung (R8): S3 Object Lock evidence
+ * is OPERATOR-ASSERTED configuration that "may be displayed as context only,
+ * upgrades no cryptographic verdict, and must never render as a green anchor
+ * claim". An `anchorEvidence` member carrying only an S3 probe is therefore no
+ * anchor evidence at all for the purposes of the ladder.
+ */
+export function hasAnchorEvidence(evidence: EvidenceMembers): boolean {
+	return isBag(evidence.anchorEvidence) && isBag(evidence.anchorEvidence.rekor);
+}
+
+type ExtensionStanding = { upheld: true } | { upheld: false; why: string };
+
+/**
+ * Whether an extension check STANDS — the check passed and the envelope served
+ * the evidence that check claims to have examined. Anything less caps the
+ * status at the rung below, exactly as `unavailable` does (§4.1 rule 3).
+ */
+function extensionStanding(
+	name: "checkpointHistory" | "anchorEvidence",
+	result: StepResult,
+	evidence: EvidenceMembers,
+): ExtensionStanding {
+	if (result !== "passed") {
+		return { upheld: false, why: `${name} is "${result}", not "passed"` };
+	}
+	if (name === "checkpointHistory") {
+		if (!hasHistoryEvidence(evidence)) {
+			return {
+				upheld: false,
+				why:
+					'checkpointHistory is "passed" but the envelope serves no non-empty checkpointHistory member — ' +
+					"the history rung cannot render without the history it walked (D1), so the absent member caps " +
+					'the status exactly as "unavailable" does',
+			};
+		}
+		return { upheld: true };
+	}
+	if (!isBag(evidence.anchorEvidence)) {
+		return {
+			upheld: false,
+			why:
+				'anchorEvidence is "passed" but the envelope serves no anchorEvidence member — the absent member ' +
+				'caps the status exactly as "unavailable" does (D1)',
+		};
+	}
+	if (!isBag(evidence.anchorEvidence.rekor)) {
+		return {
+			upheld: false,
+			why:
+				'anchorEvidence is "passed" but the anchorEvidence member carries no Rekor attachment — S3 Object ' +
+				"Lock evidence is operator-asserted configuration that upgrades no cryptographic verdict and must " +
+				"never render as a green anchor claim (R8)",
+		};
+	}
+	return { upheld: true };
+}
+
+/**
  * The closed failure-code rule: `failure` is present iff `result === "failed"`,
  * and each code is legal only where §4.1 places it. "An unknown or misplaced
  * code is a schema failure (R37)."
@@ -1152,6 +1234,7 @@ export function checkFailureCodePlacement(verification: Verification): AlgebraRe
 export function checkVerdictAlgebra(
 	status: LadderStatus,
 	verification: Verification,
+	evidence: EvidenceMembers,
 ): AlgebraResult {
 	const { steps, checks } = verification;
 
@@ -1206,31 +1289,51 @@ export function checkVerdictAlgebra(
 	// Rule 3 — extension checks CAP the status (exact status<->extension
 	// agreement). A failed/unavailable extension never demotes the base
 	// verdict (R10/R11), but a status above its cap is a protocol error.
-	const historyPassed = checks.checkpointHistory.result === "passed";
-	const anchorPassed = checks.anchorEvidence.result === "passed";
-	if (status === "verified_checkpoint_history" && !historyPassed) {
+	//
+	// The cap binds the check result to the MEMBER that justifies it. A rung
+	// claimed on a `passed` check whose evidence the envelope never served
+	// (D1), or whose anchor evidence is operator-asserted S3 configuration
+	// rather than a Rekor attachment (R8), is a rung with nothing under it —
+	// capped exactly as `unavailable` caps, and therefore a protocol error at
+	// the claimed status. Fail-closed: the page never renders green on
+	// evidence it was not given.
+	const history = extensionStanding("checkpointHistory", checks.checkpointHistory.result, evidence);
+	const anchor = extensionStanding("anchorEvidence", checks.anchorEvidence.result, evidence);
+	if (status === "verified_checkpoint_history" && !history.upheld) {
 		return {
 			ok: false,
-			reason: `"verified_checkpoint_history" requires checkpointHistory: passed (it is "${checks.checkpointHistory.result}")`,
+			reason: `"verified_checkpoint_history" is above its cap: ${history.why}`,
 		};
 	}
-	if (status === "verified_anchored" && !(historyPassed && anchorPassed)) {
+	if (status === "verified_anchored" && !(history.upheld && anchor.upheld)) {
+		const why = anchor.upheld ? (history as { why: string }).why : anchor.why;
 		return {
 			ok: false,
-			reason:
-				'"verified_anchored" requires checkpointHistory: passed AND anchorEvidence: passed (the ladder is cumulative)',
+			reason: `"verified_anchored" is above its cap (the ladder is cumulative — it presupposes the complete verified history PLUS Rekor evidence): ${why}`,
 		};
 	}
 
 	return { ok: true };
 }
 
-/** The highest rung this `verification` warrants — R5's "which rungs exist above". */
-export function warrantedRung(verification: Verification): LadderStatus {
-	const historyPassed = verification.checks.checkpointHistory.result === "passed";
-	const anchorPassed = verification.checks.anchorEvidence.result === "passed";
-	if (historyPassed && anchorPassed) return "verified_anchored";
-	if (historyPassed) return "verified_checkpoint_history";
+/**
+ * The highest rung this `verification` warrants — R5's "which rungs exist
+ * above". A function of the check results AND the evidence members: the rung
+ * an envelope could claim is never higher than what it actually served.
+ */
+export function warrantedRung(verification: Verification, evidence: EvidenceMembers): LadderStatus {
+	const history = extensionStanding(
+		"checkpointHistory",
+		verification.checks.checkpointHistory.result,
+		evidence,
+	).upheld;
+	const anchor = extensionStanding(
+		"anchorEvidence",
+		verification.checks.anchorEvidence.result,
+		evidence,
+	).upheld;
+	if (history && anchor) return "verified_anchored";
+	if (history) return "verified_checkpoint_history";
 	return "verified_checkpoint";
 }
 
@@ -1891,7 +1994,9 @@ function parseSuccess(
 		return protocolError(routeParamId, "failureCodeInvalid", placement.reason, httpStatus);
 	}
 
-	const algebra = checkVerdictAlgebra(status, envelope.verification);
+	// The envelope IS the evidence argument — the members and the checks that
+	// claim them can never be read from two different objects.
+	const algebra = checkVerdictAlgebra(status, envelope.verification, envelope);
 	if (!algebra.ok) {
 		return protocolError(routeParamId, "verdictAlgebra", algebra.reason, httpStatus);
 	}

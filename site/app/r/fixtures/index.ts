@@ -242,9 +242,14 @@ export const rejectionVectors: RejectionVectorEntry[] = [
 	{
 		id: "X4",
 		kind: "json",
-		files: ["id-mismatch.json"],
+		files: ["id-mismatch.json", "id-mismatch-receipt-document.json"],
 		mustFailInto: "integrity failure",
-		exercises: "otherwise-valid 200 whose `receipt.receiptId` != requested route (R1)",
+		exercises:
+			"otherwise-valid 200 whose `receipt.receiptId` != requested route (R1) — one file per HALF of R1's " +
+			"identity chain: `id-mismatch.json` breaks the ENVELOPE half (`body.receiptId` != route, and the " +
+			"receipt/bytes agree with it), `id-mismatch-receipt-document.json` breaks the RECEIPT-DOCUMENT half " +
+			"alone (`body.receiptId` == route, so only the SIGNED receipt names another ID — the §10.15 " +
+			"answer-B-under-receipt-A case R1 exists to close, and the one the envelope check cannot see)",
 	},
 	{
 		id: "X5",

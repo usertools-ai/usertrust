@@ -16,7 +16,9 @@
  * `verification`, so each vector isolates exactly the one algebra rule it
  * breaks rather than also being a "missing required member" case.
  */
+import commitAnchoredFixture from "./commit-anchored.json";
 import commitCheckpointFixture from "./commit-checkpoint.json";
+import commitHistoryFixture from "./commit-history.json";
 import type { ProtocolVector, SuccessEnvelope } from "./types";
 
 const baseSuccessBody = commitCheckpointFixture.wire.body as unknown as SuccessEnvelope;
@@ -24,6 +26,23 @@ const baseRouteId = commitCheckpointFixture.routeParamId;
 
 function cloneBase(): SuccessEnvelope {
 	return JSON.parse(JSON.stringify(baseSuccessBody)) as SuccessEnvelope;
+}
+
+/**
+ * The rule-3 EVIDENCE-MEMBER vectors need a base that actually carries the
+ * member they remove, so each one isolates the missing evidence rather than
+ * also being a "this envelope never had a history/anchor" case. C2 and C3 are
+ * those bases.
+ */
+const historyRouteId = commitHistoryFixture.routeParamId;
+const anchoredRouteId = commitAnchoredFixture.routeParamId;
+
+function cloneHistory(): SuccessEnvelope {
+	return JSON.parse(JSON.stringify(commitHistoryFixture.wire.body)) as SuccessEnvelope;
+}
+
+function cloneAnchored(): SuccessEnvelope {
+	return JSON.parse(JSON.stringify(commitAnchoredFixture.wire.body)) as SuccessEnvelope;
 }
 
 export const protocolVectors: ProtocolVector[] = [
@@ -238,6 +257,76 @@ export const protocolVectors: ProtocolVector[] = [
 				"an unknown-or-misplaced code on another step is itself a schema failure (R37).",
 		} satisfies ProtocolVector;
 	})(),
+	// ---- §4.1 rule 3, the EVIDENCE-MEMBER half of the cap ----
+	//
+	// These four break the binding between a rung and the member that would
+	// justify it, with the CHECK RESULTS left conformant. Nothing above is
+	// enough to catch them: a resolver claiming a rung it served no evidence
+	// for passes every check-result rule and would otherwise render green.
+	(() => {
+		const body = cloneHistory() as unknown as Record<string, unknown>;
+		delete body.checkpointHistory;
+		return {
+			label:
+				"verdict algebra — verified_checkpoint_history claiming checkpointHistory: passed with the member absent",
+			kind: "verdictAlgebraViolation",
+			routeParamId: historyRouteId,
+			wire: { httpStatus: 200, headers: { "cache-control": "no-cache" }, body },
+			reason:
+				"D1: `?include=checkpointHistory` is opt-in, so a response without the member still parses — but 'the " +
+				"history rung cannot render without it', and the §4.1 cap rules treat the absent member as " +
+				"absent/unavailable, fail-closed to the rung below. A 200 still CLAIMING the history rung is therefore " +
+				"above its cap.",
+		} satisfies ProtocolVector;
+	})(),
+	(() => {
+		const body = cloneHistory() as unknown as Record<string, unknown>;
+		body.checkpointHistory = [];
+		return {
+			label:
+				"verdict algebra — verified_checkpoint_history whose checkpointHistory member is an EMPTY list",
+			kind: "verdictAlgebraViolation",
+			routeParamId: historyRouteId,
+			wire: { httpStatus: 200, headers: { "cache-control": "no-cache" }, body },
+			reason:
+				"A walk over nothing proves nothing: an empty history is the same evidentiary content as an absent one, " +
+				"and must cap identically (D1). Serving `[]` must not buy the rung that serving nothing cannot.",
+		} satisfies ProtocolVector;
+	})(),
+	(() => {
+		const body = cloneAnchored() as unknown as Record<string, unknown>;
+		delete body.anchorEvidence;
+		return {
+			label:
+				"verdict algebra — verified_anchored claiming anchorEvidence: passed with the member absent",
+			kind: "verdictAlgebraViolation",
+			routeParamId: anchoredRouteId,
+			wire: { httpStatus: 200, headers: { "cache-control": "no-cache" }, body },
+			reason:
+				"The anchored rung 'presupposes the complete verified history plus Rekor evidence' (R8/§4.1). With no " +
+				"anchorEvidence member served, the check's `passed` has nothing under it and caps the status at the " +
+				"history rung.",
+		} satisfies ProtocolVector;
+	})(),
+	(() => {
+		const body = cloneAnchored();
+		// The S3 probe stays; the Rekor attachment — the only member that can
+		// earn the rung — is removed.
+		delete (body.anchorEvidence as Record<string, unknown>).rekor;
+		return {
+			label:
+				"verdict algebra — verified_anchored whose anchorEvidence carries an S3 Object Lock probe ONLY",
+			kind: "verdictAlgebraViolation",
+			routeParamId: anchoredRouteId,
+			wire: { httpStatus: 200, headers: { "cache-control": "no-cache" }, body },
+			reason:
+				"R8: S3 Object Lock evidence is OPERATOR-ASSERTED configuration — 'it may be displayed as context only, " +
+				"upgrades no cryptographic verdict, and must never render as a green anchor claim'. A 200 claiming " +
+				"verified_anchored on an S3 probe alone is the exact rendering R8 forbids (C4 is the conforming " +
+				"counterpart: same evidence, status honestly left at verified_checkpoint).",
+		} satisfies ProtocolVector;
+	})(),
+
 	(() => {
 		const body = cloneBase() as unknown as Record<string, unknown>;
 		delete body.apiVersion;
