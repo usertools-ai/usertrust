@@ -159,14 +159,38 @@ export const protocolVectors: ProtocolVector[] = [
 	})(),
 	(() => {
 		const body = cloneBase();
-		body.verification.checks.predecessorLinkage = { result: "failed", failure: "ID_MISMATCH" };
+		body.verification.checks.predecessorLinkage = {
+			result: "failed",
+			failure: "PREDECESSOR_MISMATCH",
+		};
 		return {
 			label: "verdict algebra — predecessorLinkage: failed on a 200",
 			kind: "verdictAlgebraViolation",
 			routeParamId: baseRouteId,
 			wire: { httpStatus: 200, headers: { "cache-control": "no-cache" }, body },
 			reason:
-				"Same rule as registryBinding (§4.1 rule 2) — a positive-contradiction failure here is also disqualifying.",
+				"Same rule as registryBinding (§4.1 rule 2) — a positive-contradiction failure here is also disqualifying. " +
+				"The code is PREDECESSOR_MISMATCH (receipt-spec v0.7 — legal ONLY on this check), so the vector isolates " +
+				"the algebra rule instead of also tripping the failure-code placement rule.",
+		} satisfies ProtocolVector;
+	})(),
+	(() => {
+		const body = cloneBase();
+		// PREDECESSOR_MISMATCH is legal ONLY on `checks.predecessorLinkage`
+		// (receipt-spec v0.7); on the registry step it is a misplaced code and
+		// therefore a schema failure in its own right.
+		body.verification.checks.registryBinding = {
+			result: "failed",
+			failure: "PREDECESSOR_MISMATCH",
+		};
+		return {
+			label: "verdict algebra — misplaced failure code (PREDECESSOR_MISMATCH on registryBinding)",
+			kind: "verdictAlgebraViolation",
+			routeParamId: baseRouteId,
+			wire: { httpStatus: 200, headers: { "cache-control": "no-cache" }, body },
+			reason:
+				"v0.7 added PREDECESSOR_MISMATCH to the closed union for `predecessorLinkage` ALONE; anywhere else it is " +
+				"an unknown-or-misplaced code, which §4.1 makes a schema failure (R37).",
 		} satisfies ProtocolVector;
 	})(),
 	(() => {

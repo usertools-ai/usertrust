@@ -251,7 +251,14 @@ export type FailureCode =
 	| "SEMANTIC_INVALID"
 	| "DERIVATION_MISMATCH"
 	| "HISTORY_INVALID"
-	| "ANCHOR_INVALID";
+	| "ANCHOR_INVALID"
+	/**
+	 * Added at receipt-spec v0.7 (verify-page spec v0.5): legal ONLY on
+	 * `checks.predecessorLinkage`. The union previously assigned no code to
+	 * that check, so a generation-predecessor contradiction could not be
+	 * reported schema-validly at all.
+	 */
+	| "PREDECESSOR_MISMATCH";
 
 export interface CheckResult {
 	result: StepResult;

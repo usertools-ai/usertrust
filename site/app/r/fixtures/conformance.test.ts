@@ -486,7 +486,11 @@ const LEGAL_FAILURE_CODE_FOR_STEP: Record<string, string> = {
 	checkpointHistory: "HISTORY_INVALID",
 	anchorEvidence: "ANCHOR_INVALID",
 	registryBinding: "ID_MISMATCH",
-	predecessorLinkage: "ID_MISMATCH",
+	// v0.7 vocabulary fix: `predecessorLinkage: failed` reports
+	// PREDECESSOR_MISMATCH, not step 3's ID_MISMATCH — the union previously
+	// assigned it no code at all, which made a generation-predecessor
+	// contradiction unreportable wherever a `failed` result requires one.
+	predecessorLinkage: "PREDECESSOR_MISMATCH",
 };
 
 function checkFailureCodesArePlaced(verification: Verification): AlgebraResult {

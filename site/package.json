@@ -7,7 +7,7 @@
 		"prebuild": "tsx scripts/check-facts.mts",
 		"build": "next build",
 		"start": "next start",
-		"test": "node --import tsx --test scripts/*.test.mts app/lib/*.test.ts app/components/sections/lib/*.test.ts app/components/receipt/*.test.ts app/r/fixtures/*.test.ts"
+		"test": "node --import tsx --test scripts/*.test.mts app/lib/*.test.ts app/components/sections/lib/*.test.ts app/components/receipt/*.test.ts app/r/fixtures/*.test.ts app/r/lib/*.test.ts"
 	},
 	"dependencies": {
 		"@tailwindcss/postcss": "^4.2.2",
