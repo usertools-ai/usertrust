@@ -34,7 +34,7 @@ import { verifyVault } from "usertrust";
 import { openJournal } from "./journal.mts";
 import type { FleetRecord } from "./parse.mts";
 import { fleetMeters, fleetTag, parseFleetTag, replayMonth } from "./replay.mts";
-import { readReceiptStore } from "./rollup.mts";
+import { buildFleetSummary, readReceiptStore } from "./rollup.mts";
 
 const MONTH = "2026-07";
 
@@ -64,6 +64,7 @@ const record = (over: Partial<FleetRecord> = {}): FleetRecord => ({
 interface ChainEvent {
 	kind: string;
 	hash: string;
+	timestamp?: string;
 	data?: Record<string, unknown>;
 }
 
@@ -92,6 +93,8 @@ interface StoredLine {
 		auditDegraded?: boolean;
 		usageSource?: string;
 		usage?: Record<string, number>;
+		cost?: number;
+		pricing?: { tableVersion?: string };
 	};
 	provenance: Record<string, unknown>;
 }
@@ -305,8 +308,13 @@ test("crash recovery: INTENT + chain event without DONE resolves from the chain,
 	assert.equal(done.auditHash, tagged[0]?.hash);
 	assert.equal(done.costCenter, tag);
 
-	// Recovery writes DONE only — it never fabricates a receipt line.
-	assert.equal(existsSync(join(dir, "store2.jsonl")), false);
+	// …and the crashed run's receipt store gets the row it never wrote, rebuilt
+	// from that same chain event (Codex PR-91 round 2, #1a). Marking DONE with
+	// no row is how a real call ends up in the chain forever but absent from
+	// every rollup — see the dedicated test below.
+	const recoveredStore = readStore(join(dir, "store2.jsonl"));
+	assert.equal(recoveredStore.length, 1, "recovery must rebuild the missing store row");
+	assert.equal(recoveredStore[0]?.receipt.auditHash, tagged[0]?.hash);
 
 	// Idempotent rerun on the completed journal: everything seen, nothing to do.
 	const rerun = await replayMonth({
@@ -318,6 +326,128 @@ test("crash recovery: INTENT + chain event without DONE resolves from the chain,
 	});
 	assert.deepStrictEqual(rerun, { minted: 0, recovered: 0 });
 	assert.equal(readStore(join(dir, "store1.jsonl")).length, 1);
+});
+
+test("crash between the chain event and the store append: the rollup still counts the call", async (t) => {
+	// Codex PR-91 round 2, #1a — the P1. The mint order is: chain event →
+	// receipt-store append → DONE. A crash in the middle window left recovery a
+	// tag to find, so it wrote DONE, the id became `seen()` forever, and the
+	// call lived in the chain with NO store row: chained, verifiable, and
+	// invisible to every figure on the page. Recovery must REBUILD the row from
+	// the chain event — which carries model, cost, the four-tier usage, the
+	// applied rates and the table version — plus the record it is recovering.
+	const dir = tempDir(t);
+	const vaultRoot = join(dir, "vault");
+	const vaultBase = join(vaultRoot, MONTH);
+	const rec = record();
+
+	// Run 1 mints for real, so the chain event is genuine core output.
+	await replayMonth({
+		month: MONTH,
+		records: [rec],
+		vaultRoot,
+		journal: openJournal(join(dir, "fleet-run1"), MONTH),
+		receiptStorePath: join(dir, "store1.jsonl"),
+	});
+	const minted = readStore(join(dir, "store1.jsonl"))[0];
+	assert.ok(minted);
+
+	// The crash state: INTENT durable, chain event durable, store row lost.
+	const crashedDir = join(dir, "fleet-crashed");
+	const journal = openJournal(crashedDir, MONTH);
+	journal.intent(rec.messageId, rec.sessionHash, fleetMeters(rec));
+	const storePath = join(dir, "store2.jsonl");
+
+	const result = await replayMonth({
+		month: MONTH,
+		records: [rec],
+		vaultRoot,
+		journal,
+		receiptStorePath: storePath,
+	});
+	assert.deepStrictEqual(result, { minted: 0, recovered: 1 });
+
+	// The rebuilt row carries the CHAINED figures, not invented ones.
+	const rebuilt = readReceiptStore(storePath);
+	assert.equal(rebuilt.length, 1);
+	const line = rebuilt[0];
+	assert.ok(line);
+	assert.equal(line.receipt.auditHash, minted.receipt.auditHash);
+	assert.equal(line.receipt.cost, minted.receipt.cost);
+	assert.equal(line.receipt.model, rec.model);
+	assert.equal(line.receipt.usageSource, "provider");
+	assert.deepStrictEqual(line.receipt.usage, minted.receipt.usage);
+	assert.equal(line.receipt.meter?.rateSource, "table");
+	assert.equal(line.receipt.pricing?.tableVersion, minted.receipt.pricing?.tableVersion);
+	// Provenance comes from the record, and says plainly that this row was
+	// rebuilt rather than emitted by the mint.
+	assert.deepStrictEqual(line.provenance, {
+		mode: "dry-run",
+		source: "claude-code-transcript",
+		occurredAt: rec.occurredAt,
+		capturedAt: line.provenance.capturedAt,
+		sessionHash: rec.sessionHash,
+		isSidechain: rec.isSidechain,
+		messageId: rec.messageId,
+		cacheWriteTiers: { m5: rec.cacheWrite5m, h1: rec.cacheWrite1h },
+		recoveredFromChain: true,
+	});
+	// capturedAt is the ORIGINAL mint's chain timestamp — the moment the call
+	// really was captured — never the recovery run's wall clock.
+	const chainEvents = readChain(vaultBase);
+	const event = chainEvents.find((e) => e.hash === line.receipt.auditHash);
+	assert.ok(event, "the chain event the row was rebuilt from");
+	assert.equal(line.provenance.capturedAt, event.timestamp);
+
+	// THE POINT: the summary counts the recovered call, at the chained cost.
+	const summary = buildFleetSummary({
+		lines: rebuilt,
+		chainHashes: new Set(chainEvents.map((e) => e.hash)),
+		publishedMonth: MONTH,
+		scanReport: { dirsScanned: 1, candidateDirsSkipped: 0, deferredIds: 0 },
+		generatedAt: "2026-08-11T00:00:00.000Z",
+		collectorCommit: "abc1234",
+	});
+	assert.equal(summary.month.calls, 1, "a recovered call must reach the rollup");
+	assert.equal(summary.month.usertokens, line.receipt.cost);
+	assert.equal(summary.month.inputTokens, rec.inputTokens);
+	assert.equal(summary.month.cacheWriteTokens, rec.cacheWrite5m + rec.cacheWrite1h);
+});
+
+test("crash AFTER the store append: recovery reuses the surviving row, never duplicates it", async (t) => {
+	// The other side of the same window — store row written, DONE not. Recovery
+	// must notice the row and only finish the journal, or a re-run would double
+	// the call in every figure the page prints.
+	const dir = tempDir(t);
+	const vaultRoot = join(dir, "vault");
+	const rec = record();
+	const storePath = join(dir, "store.jsonl");
+
+	// Mint for real, then rewind ONLY the journal to its pre-DONE state.
+	await replayMonth({
+		month: MONTH,
+		records: [rec],
+		vaultRoot,
+		journal: openJournal(join(dir, "fleet-run1"), MONTH),
+		receiptStorePath: storePath,
+	});
+	assert.equal(readReceiptStore(storePath).length, 1);
+	const crashedDir = join(dir, "fleet-crashed");
+	const journal = openJournal(crashedDir, MONTH);
+	journal.intent(rec.messageId, rec.sessionHash, fleetMeters(rec));
+
+	const result = await replayMonth({
+		month: MONTH,
+		records: [rec],
+		vaultRoot,
+		journal,
+		receiptStorePath: storePath,
+	});
+	assert.deepStrictEqual(result, { minted: 0, recovered: 1 });
+	const lines = readReceiptStore(storePath);
+	assert.equal(lines.length, 1, "the surviving row must not be duplicated");
+	assert.equal(lines[0]?.provenance.recoveredFromChain, undefined, "still the minted row");
+	assert.deepStrictEqual(journal.pendingIntents(), []);
 });
 
 test("crash recovery: a tagged FAILURE/DENIAL event never satisfies recovery — the record replays", async (t) => {

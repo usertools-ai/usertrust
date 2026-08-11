@@ -53,7 +53,7 @@ import { fileURLToPath } from "node:url";
 import { FALLBACK_RATE, getModelRates } from "usertrust/pricing";
 import { type Journal, openJournal } from "./journal.mts";
 import { type FleetRecord, parseTranscriptFile } from "./parse.mts";
-import { replayMonth } from "./replay.mts";
+import { replayMonth, SETTLED_EVENT_KIND } from "./replay.mts";
 import {
 	buildFleetSummary,
 	type FleetStoreLine,
@@ -113,13 +113,21 @@ export function projectDirAllowlist(roots: readonly string[]): {
 // ── scan ──
 
 export interface ScanResult {
+	/** Ingestable records: quiescent-file records MINUS every globally deferred id. */
 	records: FleetRecord[];
 	dirsScanned: number;
 	candidateDirsSkipped: number;
+	/** DISTINCT message ids deferred by at least one still-active file. */
 	deferredIds: number;
 	filesParsed: number;
-	/** Assistant usage lines REFUSED for unusable token counters (parse.mts). */
+	/** RECORDS refused for unusable token counters — ids, not lines (parse.mts). */
 	malformedRecords: number;
+	/**
+	 * Quiescent-file records withheld this run because some ACTIVE file is still
+	 * rewriting the same id. Reported so the difference between "the corpus
+	 * shrank" and "the corpus is still being written" is never a guess.
+	 */
+	withheldRecords: number;
 }
 
 /**
@@ -128,6 +136,14 @@ export interface ScanResult {
  * dirs, and the corpus is ~87% sidechain fan-out (r1/M3), so a flat glob
  * would miss most of the fleet. Non-transcript JSONL files are harmless: the
  * parser's allowlist admits only assistant lines with a usage block.
+ *
+ * DEFERRAL IS GLOBAL, NOT PER-FILE. The same message id appears in an old
+ * transcript AND in the continuation that is still being written (a resumed
+ * session re-emits earlier messages), so a per-file rule would take the OLD
+ * file's superseded copy while the active file merely deferred its own — and
+ * `seen()` makes that permanent. Every scanned file's deferred ids are unioned
+ * FIRST; only then is the ingestable set filtered. This is the cross-file twin
+ * of the A→B→A rule inside one file (spec r2/C2).
  */
 export function scanTranscripts(
 	projectsDir: string,
@@ -141,7 +157,10 @@ export function scanTranscripts(
 		deferredIds: 0,
 		filesParsed: 0,
 		malformedRecords: 0,
+		withheldRecords: 0,
 	};
+	const ingestable: FleetRecord[] = [];
+	const deferred = new Set<string>();
 	for (const entry of readdirSync(projectsDir, { withFileTypes: true }).sort((a, b) =>
 		a.name < b.name ? -1 : 1,
 	)) {
@@ -160,13 +179,18 @@ export function scanTranscripts(
 			.filter((f) => f.endsWith(".jsonl"))
 			.sort();
 		for (const file of files) {
-			const { records, deferred, malformed } = parseTranscriptFile(join(base, file), nowMs);
-			result.records.push(...records);
-			result.deferredIds += deferred;
+			const { records, deferredIds, malformed } = parseTranscriptFile(join(base, file), nowMs);
+			ingestable.push(...records);
+			for (const id of deferredIds) deferred.add(id);
 			result.malformedRecords += malformed;
 			result.filesParsed += 1;
 		}
 	}
+	// The union is complete only now — a file scanned LAST can defer an id a
+	// file scanned first supplied, so the filter cannot run inside the loop.
+	result.records = ingestable.filter((record) => !deferred.has(record.messageId));
+	result.deferredIds = deferred.size;
+	result.withheldRecords = ingestable.length - result.records.length;
 	return result;
 }
 
@@ -289,6 +313,12 @@ interface OrderedChain {
 	/** Raw event lines, ordered by the persisted global `sequence`. */
 	rawLines: string[];
 	hashes: Set<string>;
+	/**
+	 * Events of the SETTLED kind (`llm_call`) — one per call that actually
+	 * minted a receipt, which is exactly what the receipt store must hold a
+	 * row for. Failure/denial kinds are excluded (replay.mts).
+	 */
+	settledCalls: number;
 }
 
 /**
@@ -299,7 +329,7 @@ interface OrderedChain {
  */
 function readOrderedChain(vaultBase: string): OrderedChain {
 	const auditDir = join(vaultBase, ".usertrust", "audit");
-	const chain: OrderedChain = { rawLines: [], hashes: new Set() };
+	const chain: OrderedChain = { rawLines: [], hashes: new Set(), settledCalls: 0 };
 	if (!existsSync(auditDir)) return chain;
 	const parsed: { sequence: number; raw: string; hash: string }[] = [];
 	for (const file of readdirSync(auditDir).sort()) {
@@ -318,10 +348,15 @@ function readOrderedChain(vaultBase: string): OrderedChain {
 				if (isFinalLine) continue; // torn tail: not a committed event
 				throw new Error(`fleet collect: unparseable audit line at ${path}:${i + 1}`);
 			}
-			const { hash, sequence } = event as { hash?: unknown; sequence?: unknown };
+			const { hash, sequence, kind } = event as {
+				hash?: unknown;
+				sequence?: unknown;
+				kind?: unknown;
+			};
 			if (typeof hash !== "string" || typeof sequence !== "number") {
 				throw new Error(`fleet collect: audit event without hash/sequence at ${path}:${i + 1}`);
 			}
+			if (kind === SETTLED_EVENT_KIND) chain.settledCalls += 1;
 			parsed.push({ sequence, raw: line, hash });
 		}
 	}
@@ -393,7 +428,12 @@ function runVerify(vaultBase: string, verifyCli: string, month: string): VerifyT
  *  2. every DONE auditHash is literally an event in the month chain
  *     (capture-evidence membership precedent — the WAL may never claim a
  *     mint the chain cannot show);
- *  3. the workspace `usertrust-verify` exits 0 over the month vault.
+ *  3. the month's `llm_call` event count EQUALS its receipt-store line count —
+ *     the OTHER direction, and the one that catches a call missing from the
+ *     rollup. The rollup refuses a store line the chain cannot show; nothing
+ *     refused a chained call the store never got (a crash between the chain
+ *     event and the store append), so the summary silently undercounted;
+ *  4. the workspace `usertrust-verify` exits 0 over the month vault.
  * Returns the verify transcript of gate run — the one that gets published.
  */
 export function assertPublishable(opts: {
@@ -430,7 +470,23 @@ export function assertPublishable(opts: {
 		);
 	}
 
-	// 3. Verifier exit 0.
+	// 3. Chain → store parity. Every settled chain event is a call that minted a
+	// receipt, so the month's store must hold exactly one row per event: fewer
+	// rows means a call the page would never count (the rollup only ever
+	// checked the reverse), more rows means a row the chain cannot vouch for.
+	// The store is partitioned by month at write time (`replayMonth` refuses a
+	// record outside its month), so the month file IS the month's rows.
+	const storeLines = readReceiptStore(join(fleetDir, "receipts", `${month}.jsonl`)).length;
+	if (chain.settledCalls !== storeLines) {
+		throw new Error(
+			`publish gate: ${month} chain has ${chain.settledCalls} llm_call event(s) but the ` +
+				`receipt store has ${storeLines} receipt-store line(s) — every chained call must have ` +
+				`exactly one store row, or the published summary counts a different set of calls than ` +
+				`the chain proves. Re-run the collector to recover before publishing.`,
+		);
+	}
+
+	// 4. Verifier exit 0.
 	return { transcript: runVerify(vaultBase, verifyCli, month) };
 }
 
@@ -478,12 +534,16 @@ function printScanReport(scan: ScanResult, deduped: FleetRecord[]): void {
 	console.log(`dirs scanned:            ${scan.dirsScanned}`);
 	console.log(`candidate dirs skipped:  ${scan.candidateDirsSkipped}`);
 	console.log(`transcript files parsed: ${scan.filesParsed}`);
-	console.log(`records (per-file dedup): ${scan.records.length}`);
+	console.log(`records (ingestable):    ${scan.records.length}`);
 	console.log(`records (global dedup):  ${deduped.length}`);
 	console.log(`ids deferred (active):   ${scan.deferredIds}`);
-	// Refused, never zero-filled: a line missing input_tokens/output_tokens
-	// cannot be metered honestly, and a fabricated zero would publish as a
-	// provider-metered ~1-usertoken call (D5). Loud, so a corpus that starts
+	// Withheld, not lost: a quiescent file's copy of an id some ACTIVE file is
+	// still rewriting. It ingests on the run after that file quiesces.
+	console.log(`records withheld (id active elsewhere): ${scan.withheldRecords}`);
+	// Refused, never zero-filled: a record whose FINAL occurrence is missing
+	// input_tokens/output_tokens cannot be metered honestly, and a fabricated
+	// zero would publish as a provider-metered ~1-usertoken call (D5). Counted
+	// per id, so this is records dropped — loud, so a corpus that starts
 	// dropping calls is visible instead of just smaller.
 	console.log(`records refused (malformed counters): ${scan.malformedRecords}`);
 	console.log("by model:");

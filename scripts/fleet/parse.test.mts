@@ -50,8 +50,8 @@ const freshNow = (path: string) => statSync(path).mtimeMs + 1_000;
 
 test("streaming duplicate id: last-wins, totals equal the FINAL line", () => {
 	const path = fixture("streaming-duplicate.jsonl");
-	const { records, deferred } = parseTranscriptFile(path, quiescentNow(path));
-	assert.equal(deferred, 0);
+	const { records, deferredIds } = parseTranscriptFile(path, quiescentNow(path));
+	assert.deepStrictEqual(deferredIds, []);
 	assert.equal(records.length, 1);
 	// Full-record pin: the whole record comes from the LAST msg_fix_a_001 line.
 	assert.deepStrictEqual(records[0], {
@@ -74,8 +74,8 @@ test("A→B→A interleave: final A wins even though B appeared in between", () 
 	// final — the third line rewrites A with larger usage. Only the final A
 	// line's totals may survive.
 	const path = fixture("interleave-aba.jsonl");
-	const { records, deferred } = parseTranscriptFile(path, quiescentNow(path));
-	assert.equal(deferred, 0);
+	const { records, deferredIds } = parseTranscriptFile(path, quiescentNow(path));
+	assert.deepStrictEqual(deferredIds, []);
 	assert.equal(records.length, 2);
 	const a = records.find((r) => r.messageId === "msg_fix_b_aaa");
 	const b = records.find((r) => r.messageId === "msg_fix_b_bbb");
@@ -93,31 +93,39 @@ test("fresh mtime defers ALL ids — quiescence is file-mtime age only", () => {
 	const aba = fixture("interleave-aba.jsonl");
 	assert.deepStrictEqual(parseTranscriptFile(aba, freshNow(aba)), {
 		records: [],
-		deferred: 2,
+		deferredIds: ["msg_fix_b_aaa", "msg_fix_b_bbb"],
 		malformed: 0,
 	});
 
 	const streaming = fixture("streaming-duplicate.jsonl");
 	assert.deepStrictEqual(parseTranscriptFile(streaming, freshNow(streaming)), {
 		records: [],
-		deferred: 1,
+		deferredIds: ["msg_fix_a_001"],
 		malformed: 0,
 	});
 
-	// deferred counts EMITTABLE ids: synthetic + unparseable lines never count.
+	// deferred lists EMITTABLE ids: synthetic + unparseable lines never count.
 	const mixed = fixture("synthetic-and-malformed.jsonl");
 	assert.deepStrictEqual(parseTranscriptFile(mixed, freshNow(mixed)), {
 		records: [],
-		deferred: 1,
+		deferredIds: ["msg_fix_e_good"],
 		malformed: 0,
 	});
 
 	// A deferred file reports NO refusals: its lines are still being rewritten,
-	// so a counter absent right now may be present in the final line.
+	// so a counter absent right now may be present in the final line. That is
+	// also WHY a refused id in an active file is DEFERRED rather than dropped —
+	// the file still has something to say about it, and a stale record for the
+	// same id sitting in a quiescent file must not ship in the meantime.
 	const counters = fixture("missing-counters.jsonl");
 	assert.deepStrictEqual(parseTranscriptFile(counters, freshNow(counters)), {
 		records: [],
-		deferred: 1,
+		deferredIds: [
+			"msg_fix_g_good",
+			"msg_fix_g_noinput",
+			"msg_fix_g_stringout",
+			"msg_fix_g_negative",
+		],
 		malformed: 0,
 	});
 });
@@ -132,7 +140,7 @@ test("isQuiescent: exact 30-minute boundary on mtime age", () => {
 
 test("ALLOWLIST: every record from every fixture has EXACTLY the FleetRecord keys", () => {
 	const names = readdirSync(FIXTURES).filter((n) => n.endsWith(".jsonl"));
-	assert.equal(names.length, 8, "fixture inventory drifted");
+	assert.equal(names.length, 9, "fixture inventory drifted");
 	let total = 0;
 	for (const name of names) {
 		const path = fixture(name);
@@ -151,7 +159,7 @@ test("ALLOWLIST: every record from every fixture has EXACTLY the FleetRecord key
 			}
 		}
 	}
-	assert.equal(total, 11); // a:1 b:2 c:1 d:1 e:1 f:1 g:1 h:3
+	assert.equal(total, 13); // a:1 b:2 c:1 d:1 e:1 f:1 g:1 h:3 i:2
 });
 
 test("sessionHash: 12 hex chars, never the raw sessionId, raw id never serialized", () => {
@@ -186,13 +194,45 @@ test("missing/unusable input or output counter: record REFUSED and counted malfo
 	// provider-metered zero, exactly the mislabel D5 kills. Unusable means the
 	// same three things core's `readCount` means: absent, non-numeric, negative.
 	const path = fixture("missing-counters.jsonl");
-	const { records, deferred, malformed } = parseTranscriptFile(path, quiescentNow(path));
-	assert.equal(deferred, 0);
+	const { records, deferredIds, malformed } = parseTranscriptFile(path, quiescentNow(path));
+	assert.deepStrictEqual(deferredIds, []);
 	assert.equal(malformed, 3, "no input / string output / negative input");
 	assert.equal(records.length, 1);
 	assert.equal(records[0]?.messageId, "msg_fix_g_good");
 	assert.equal(records[0]?.inputTokens, 6);
 	assert.equal(records[0]?.outputTokens, 7);
+});
+
+test("a REFUSED final occurrence refuses the whole id; the counter counts RECORDS", () => {
+	// Codex PR-91 round 2, #3. Last-occurrence-wins is the parser's dedup
+	// contract, and a refusal is an occurrence: a cumulative rewrite whose
+	// counters are unusable SUPERSEDES the earlier line, so shipping that
+	// earlier (understated) record publishes a call the transcript has since
+	// restated. The counter must count ids dropped, not lines seen — two
+	// refused lines for one id are ONE missing record, and a refusal that a
+	// later valid line overwrites is no missing record at all.
+	const path = fixture("valid-then-malformed.jsonl");
+	const { records, deferredIds, malformed } = parseTranscriptFile(path, quiescentNow(path));
+	assert.deepStrictEqual(deferredIds, []);
+
+	const ids = records.map((r) => r.messageId).sort();
+	assert.deepStrictEqual(ids, ["msg_fix_i_back", "msg_fix_i_ok"]);
+	// valid → refused: the earlier record is EVICTED, nothing ships for the id.
+	assert.equal(
+		records.find((r) => r.messageId === "msg_fix_i_rewrite"),
+		undefined,
+		"the superseded record must not survive its refused rewrite",
+	);
+	// refused → valid: the final line is usable, so the id ships (from that line).
+	const back = records.find((r) => r.messageId === "msg_fix_i_back");
+	assert.ok(back, "msg_fix_i_back missing");
+	assert.equal(back.inputTokens, 3);
+	assert.equal(back.outputTokens, 4);
+	assert.equal(back.cacheWrite5m, 12);
+
+	// RECORDS, not lines: rewrite (1 refused line) + twice (2 refused lines)
+	// = 2 records dropped; msg_fix_i_back's refused line is not a drop at all.
+	assert.equal(malformed, 2, "two ids dropped, though three lines were refused");
 });
 
 test("cache-tier fallback matches core's fromAnthropicUsage precedence exactly", () => {
@@ -234,8 +274,8 @@ test("malformed line skipped without throwing; <synthetic> model skipped; parsin
 	const path = fixture("synthetic-and-malformed.jsonl");
 	// The malformed line sits BETWEEN the synthetic and the good line — the good
 	// record surviving proves the parser continues past the parse failure.
-	const { records, deferred } = parseTranscriptFile(path, quiescentNow(path));
-	assert.equal(deferred, 0);
+	const { records, deferredIds } = parseTranscriptFile(path, quiescentNow(path));
+	assert.deepStrictEqual(deferredIds, []);
 	assert.equal(records.length, 1);
 	assert.equal(records[0].messageId, "msg_fix_e_good");
 	assert.equal(records[0].outputTokens, 13);

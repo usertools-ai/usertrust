@@ -23,6 +23,7 @@ import {
 	mkdtempSync,
 	readFileSync,
 	rmSync,
+	utimesSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,13 +34,14 @@ import { coreDistBuilt, REPO_ROOT } from "../fleet-collector.mts";
 import {
 	assertPublishable,
 	collectRecords,
+	dedupeRecords,
 	projectDirAllowlist,
 	publishMonthFor,
 	scanTranscripts,
 	VERIFY_CLI,
 } from "./collect.mts";
 import { openJournal } from "./journal.mts";
-import type { FleetRecord } from "./parse.mts";
+import { type FleetRecord, QUIESCENCE_MS } from "./parse.mts";
 import type { FleetProvenance } from "./replay.mts";
 import {
 	buildFleetSummary,
@@ -522,17 +524,78 @@ test("publish refuses when a DONE auditHash is missing from the month chain", as
 	);
 });
 
+test("publish refuses when a chained call has NO receipt-store row", async (t) => {
+	// Codex PR-91 round 2, #1(b) — the missing direction. The rollup checks
+	// store → chain (nothing unchained reaches the page); nothing checked
+	// chain → store, so a call whose store append was lost (crash between the
+	// chain event and the append) simply vanished from the summary and the page
+	// silently undercounted. Doctor the store by deleting one row: the gate must
+	// refuse with both counts named.
+	const dir = tempDir(t);
+	const fleetDir = join(dir, "fleet");
+	const vaultRoot = join(dir, "vault");
+	await collectRecords({
+		records: [
+			record({ messageId: "msg_gate_count_1" }),
+			record({ messageId: "msg_gate_count_2", occurredAt: "2026-07-16T10:00:00.000Z" }),
+		],
+		fleetDir,
+		vaultRoot,
+	});
+
+	// The gate says yes while chain and store agree…
+	const storePath = join(fleetDir, "receipts", `${MONTH}.jsonl`);
+	assert.equal(readReceiptStore(storePath).length, 2);
+	assert.equal(
+		assertPublishable({ fleetDir, month: MONTH, vaultRoot, verifyCli: VERIFY_CLI }).transcript
+			.exitCode,
+		0,
+	);
+
+	// …and refuses the moment a chained call has no row.
+	const kept = readFileSync(storePath, "utf-8").split("\n").filter(Boolean).slice(0, 1);
+	writeFileSync(storePath, `${kept.join("\n")}\n`);
+	assert.throws(
+		() => assertPublishable({ fleetDir, month: MONTH, vaultRoot, verifyCli: VERIFY_CLI }),
+		(err: unknown) => {
+			assert.ok(err instanceof Error);
+			assert.match(err.message, /2 llm_call event/);
+			assert.match(err.message, /1 receipt-store line/);
+			return true;
+		},
+	);
+});
+
 test("publish refuses when usertrust-verify exits non-zero", (t) => {
 	const dir = tempDir(t);
 	const fleetDir = join(dir, "fleet");
 	const vaultRoot = join(dir, "vault");
 	const hash = "f".repeat(64);
 
-	// Journal: clean (INTENT + DONE), DONE's auditHash present in the chain —
-	// so the FIRST two gate checks pass and the refusal is verify's alone.
+	// Journal: clean (INTENT + DONE), DONE's auditHash present in the chain, and
+	// one store row for the one chained call — so the FIRST THREE gate checks
+	// pass and the refusal is verify's alone.
 	const journal = openJournal(fleetDir, MONTH);
 	journal.intent("msg_bad", "abc123def456", "{}");
 	journal.done("msg_bad", hash, "fleet.abc123def456.msg_bad");
+	const storePath = join(fleetDir, "receipts", `${MONTH}.jsonl`);
+	mkdirSync(dirname(storePath), { recursive: true });
+	writeFileSync(
+		storePath,
+		`${JSON.stringify(
+			storeLine({
+				messageId: "msg_bad",
+				model: "claude-opus-5",
+				sessionHash: "abc123def456",
+				occurredAt: "2026-07-15T10:00:00.000Z",
+				isSidechain: false,
+				cost: 1,
+				auditHash: hash,
+				usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+				tiers: { m5: 0, h1: 0 },
+			}),
+		)}\n`,
+	);
 
 	// A chain whose event hash cannot be recomputed from its content: verify
 	// walks it, fails the hash check, exits 1.
@@ -635,6 +698,76 @@ test("scan report counts records refused for unusable token counters", (t) => {
 	assert.equal(scan.records[0]?.messageId, "msg_scan_good");
 	assert.equal(scan.malformedRecords, 1);
 	assert.equal(scan.deferredIds, 0);
+});
+
+test("an id deferred by ANY active file is deferred everywhere — the stale copy never ships", (t) => {
+	// Codex PR-91 round 2, #2: the cross-FILE twin of the A→B→A quiescence bug
+	// (spec r2/C2). The same message id lives in an OLD quiescent transcript and
+	// in the continuation that is still being written; per-file deferral only
+	// suppressed the active file's copy, so the run ingested the OLD, superseded
+	// one — permanently, since the id is `seen()` from then on.
+	const dir = tempDir(t);
+	const projects = join(dir, "projects");
+	mkdirSync(join(projects, "proj"), { recursive: true });
+	const line = (id: string, occurredAt: string, input: number, output: number) =>
+		JSON.stringify({
+			type: "assistant",
+			sessionId: "cross-file-session",
+			timestamp: occurredAt,
+			isSidechain: false,
+			message: {
+				id,
+				type: "message",
+				role: "assistant",
+				model: "claude-opus-5",
+				usage: {
+					input_tokens: input,
+					output_tokens: output,
+					cache_read_input_tokens: 0,
+					cache_creation_input_tokens: 0,
+				},
+			},
+		});
+
+	// The old, quiescent transcript: a partial copy of msg_shared plus an id of
+	// its own. Its mtime is pushed well past quiescence.
+	const quiescent = join(projects, "proj", "a-quiescent.jsonl");
+	writeFileSync(
+		quiescent,
+		`${line("msg_shared", "2026-07-15T10:00:00.000Z", 5, 5)}\n` +
+			`${line("msg_only_old", "2026-07-15T10:00:01.000Z", 7, 7)}\n`,
+	);
+	const old = Date.now() / 1000 - 24 * 60 * 60;
+	utimesSync(quiescent, old, old);
+
+	// The continuation, still being written RIGHT NOW: it restates msg_shared
+	// with the cumulative totals.
+	const active = join(projects, "proj", "b-active.jsonl");
+	writeFileSync(active, `${line("msg_shared", "2026-07-15T10:05:00.000Z", 50, 50)}\n`);
+
+	const allow = { exact: new Set(["proj"]), prefixes: [] as string[] };
+	const scan = scanTranscripts(projects, allow, Date.now());
+	assert.equal(scan.filesParsed, 2);
+	assert.deepStrictEqual(
+		scan.records.map((r) => r.messageId),
+		["msg_only_old"],
+		"the shared id is deferred by the ACTIVE file, so the quiescent file's stale copy is withheld",
+	);
+	assert.equal(scan.deferredIds, 1, "distinct ids deferred");
+	assert.equal(scan.withheldRecords, 1, "one quiescent-file record withheld by the global set");
+
+	// Once the continuation goes quiescent too, the FINAL occurrence wins: both
+	// files offer msg_shared and the global dedupe keeps the later, larger one.
+	const later = scanTranscripts(projects, allow, Date.now() + QUIESCENCE_MS + 60_000);
+	assert.equal(later.deferredIds, 0);
+	assert.equal(later.withheldRecords, 0);
+	const deduped = dedupeRecords(later.records);
+	assert.deepStrictEqual(deduped.map((r) => r.messageId).sort(), ["msg_only_old", "msg_shared"]);
+	const shared = deduped.find((r) => r.messageId === "msg_shared");
+	assert.ok(shared, "msg_shared missing once both files are quiescent");
+	assert.equal(shared.inputTokens, 50, "the continuation's restated total, not the stale 5");
+	assert.equal(shared.outputTokens, 50);
+	assert.equal(shared.occurredAt, "2026-07-15T10:05:00.000Z");
 });
 
 // ── allowlist mangling ──

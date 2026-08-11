@@ -19,7 +19,10 @@
  * not reintroduce it. A non-quiescent file defers ALL of its ids.
  *
  * DEDUP — last occurrence in file order wins, matching the cumulative-usage
- * streaming behavior of real transcripts.
+ * streaming behavior of real transcripts. A REFUSAL IS AN OCCURRENCE: a
+ * cumulative rewrite whose counters are unusable supersedes the earlier line,
+ * so the earlier record is evicted and the id ships nothing. Keeping it would
+ * publish an understated call the transcript has since restated.
  *
  * COUNTERS — read exactly the way core's `readCount`
  * (packages/core/src/ledger/usage.ts) reads them, because core is what turns
@@ -82,18 +85,23 @@ const asNonEmptyString = (value: unknown): string | null =>
 
 /**
  * An assistant usage line we REFUSE rather than ingest: it looks like a real
- * call but does not carry the counters a priced receipt needs. Distinguished
- * from `null` (not an ingestable line at all) so the run report can say how
- * many real-looking lines were dropped instead of hiding them.
+ * call but does not carry the counters a priced receipt needs. It carries the
+ * messageId because a refusal is a dedup OCCURRENCE — it must be able to evict
+ * an earlier record for the same id, and the run report counts ids dropped
+ * rather than lines seen.
  */
-const MALFORMED = "malformed" as const;
-type ParsedLine = FleetRecord | typeof MALFORMED | null;
+interface RefusedLine {
+	refusedMessageId: string;
+}
+type ParsedLine = FleetRecord | RefusedLine | null;
+const isRefusal = (outcome: FleetRecord | RefusedLine): outcome is RefusedLine =>
+	"refusedMessageId" in outcome;
 
 /**
  * Extract one FleetRecord from a parsed transcript line; `null` when the line
  * is not an ingestable assistant usage line (user lines, `<synthetic>` model
- * stubs, lines missing id/model/sessionId/timestamp/usage), `MALFORMED` when it
- * is one but its required token counters are unusable.
+ * stubs, lines missing id/model/sessionId/timestamp/usage), a `RefusedLine`
+ * when it is one but its required token counters are unusable.
  */
 function toFleetRecord(parsed: unknown): ParsedLine {
 	const line = asObject(parsed);
@@ -114,7 +122,7 @@ function toFleetRecord(parsed: unknown): ParsedLine {
 	// would publish an understated call as though the provider had said so.
 	const inputTokens = readCount(usage.input_tokens);
 	const outputTokens = readCount(usage.output_tokens);
-	if (inputTokens === null || outputTokens === null) return MALFORMED;
+	if (inputTokens === null || outputTokens === null) return { refusedMessageId: messageId };
 
 	// Cache-write split, PRECEDENCE MIRRORING core's `fromAnthropicUsage`: real
 	// usage carries a nested cache_creation block with ephemeral_5m/1h tiers;
@@ -151,19 +159,29 @@ export function parseTranscriptFile(
 	nowMs: number,
 ): {
 	records: FleetRecord[];
-	deferred: number;
 	/**
-	 * Assistant usage lines REFUSED for unusable counters — reported so a
-	 * corpus that starts dropping calls is visible in the run report rather
-	 * than silently smaller. Zero for a deferred file: nothing there was
-	 * ingested, so nothing there has been refused *yet*; the run that finally
-	 * ingests the quiesced file is the run that counts it.
+	 * The message ids this file DEFERS: empty for a quiescent file, and every
+	 * id a still-active file touched (usable or refused) otherwise. The caller
+	 * must union these across ALL scanned files before ingesting anything —
+	 * an id an active file is still rewriting must not be ingested from some
+	 * other file's older copy of it (collect.mts).
+	 */
+	deferredIds: string[];
+	/**
+	 * RECORDS refused for unusable counters — distinct message ids whose FINAL
+	 * occurrence in this file could not be metered, so nothing ships for them.
+	 * Counted per id, not per line: two refused lines for one id are one
+	 * missing record, and a refusal a later valid line overwrites is none.
+	 * Reported so a corpus that starts dropping calls is visible in the run
+	 * report rather than silently smaller. Zero for a deferred file: nothing
+	 * there was ingested, so nothing there has been refused *yet*; the run that
+	 * finally ingests the quiesced file is the run that counts it.
 	 */
 	malformed: number;
 } {
 	const mtimeMs = statSync(path).mtimeMs;
 	const byId = new Map<string, FleetRecord>();
-	let malformed = 0;
+	const refusedIds = new Set<string>();
 	for (const rawLine of readFileSync(path, "utf-8").split("\n")) {
 		const trimmed = rawLine.trim();
 		if (trimmed === "") continue;
@@ -174,16 +192,24 @@ export function parseTranscriptFile(
 			continue; // unparseable line: skip, never throw
 		}
 		const outcome = toFleetRecord(parsed);
-		if (outcome === MALFORMED) {
-			malformed += 1;
+		if (outcome === null) continue;
+		// LAST OCCURRENCE WINS, in both directions: a refusal evicts the earlier
+		// record for that id (the rewrite superseded it), and a later usable line
+		// clears an earlier refusal (the id is metered after all).
+		if (isRefusal(outcome)) {
+			byId.delete(outcome.refusedMessageId);
+			refusedIds.add(outcome.refusedMessageId);
 			continue;
 		}
-		if (outcome) byId.set(outcome.messageId, outcome); // last wins
+		refusedIds.delete(outcome.messageId);
+		byId.set(outcome.messageId, outcome);
 	}
 	if (!isQuiescent(mtimeMs, nowMs)) {
 		// Still streaming: defer EVERY id — partial ingest of a live file is how
-		// cumulative usage gets double-counted or undercounted.
-		return { records: [], deferred: byId.size, malformed: 0 };
+		// cumulative usage gets double-counted or undercounted. Refused ids defer
+		// too: this file is still rewriting them, so its refusal is not final and
+		// no other file's copy of that id may ship in the meantime.
+		return { records: [], deferredIds: [...byId.keys(), ...refusedIds], malformed: 0 };
 	}
-	return { records: [...byId.values()], deferred: 0, malformed };
+	return { records: [...byId.values()], deferredIds: [], malformed: refusedIds.size };
 }
