@@ -1959,6 +1959,19 @@ function parseUnverifiable(
 		if (entry.result === "failed" && entry.failure) failed.push({ name, failure: entry.failure });
 	}
 
+	// §4.2: a 409 names WHICH step failed, with its closed-union code — a
+	// body claiming "unverifiable" while its own verification names no
+	// failure contradicts its HTTP status, and R37 routes that to the
+	// protocol-error shell, not to the resolver's integrity wording.
+	if (failed.length === 0) {
+		return protocolError(
+			routeParamId,
+			"httpStatusBodyMismatch",
+			`a 409 "unverifiable" body must name the failed step (§4.2); its verification names none`,
+			httpStatus,
+		);
+	}
+
 	return integrityFailure(
 		routeParamId,
 		{ source: "resolver", verification, failed },

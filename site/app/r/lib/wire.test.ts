@@ -250,6 +250,20 @@ test("C25 (409): the integrity failure names the resolver's failed step and its 
 	assert.deepEqual(state.cause.failed, [{ name: "signature", failure: "SIG_INVALID" }]);
 });
 
+test("§4.2/R37: a 409 whose verification names NO failed step is a protocol error, not an integrity failure", () => {
+	const fixture = structuredClone(loadFixture("unverifiable.json"));
+	const body = fixture.wire.body as {
+		verification: { steps: Record<string, { result: string; failure?: string }> };
+	};
+	// The C25 fixture fails on `signature`; flip it to passed so nothing in
+	// the body names a failure while the HTTP status still claims 409.
+	body.verification.steps.signature = { result: "passed" };
+	const state = parseResolverResponse(toInput(fixture));
+	assert.equal(state.kind, "protocolError");
+	if (state.kind !== "protocolError") return;
+	assert.equal(state.reason, "httpStatusBodyMismatch");
+});
+
 test("C26 (503) and C27 (429) carry their Retry-After, and never share a state", () => {
 	const unavailable = parseFixture("verification-unavailable.json");
 	assert.equal(unavailable.kind, "verificationUnavailable");
