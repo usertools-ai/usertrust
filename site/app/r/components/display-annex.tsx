@@ -7,6 +7,7 @@ import {
 	PRICING_TABLES_NOTE,
 	RECOMPUTE_IS_RESOLVER_ONLINE_CHECK,
 } from "../lib/claims";
+import { type Bag, bagList, bool, isBag, num, str, stringList } from "../lib/unsigned-reads";
 import type { Display } from "../lib/wire";
 import HashValue from "./hash-value";
 
@@ -25,17 +26,72 @@ import HashValue from "./hash-value";
  * The `A + roundingAdjustment` recompute is rendered as the RESOLVER'S online
  * check (R29), never as a verifier verdict — a `packages/verify` run neither
  * has these rows nor needs them.
+ *
+ * `display` is the UNSIGNED member par excellence: `wire.ts` validates the
+ * container and nothing inside it, because R10 forbids unsigned material from
+ * demoting a sound receipt. Every field below is therefore read defensively
+ * (`lib/unsigned-reads.ts`) — a row, hash or flag whose shape this component
+ * does not recognize is dropped, never rendered as `[object Object]` and never
+ * thrown mid-render.
  */
+
+/** One breakdown row, narrowed to the four renderable cells (R29). */
+interface BreakdownRow {
+	key: string;
+	provider: string;
+	model: string;
+	tier: string;
+	usertokens: string;
+}
+
+function breakdownRows(value: unknown): BreakdownRow[] {
+	return bagList(value).map((row, index) => {
+		const usertokens = num(row, "usertokens");
+		return {
+			key: `${str(row, "provider") ?? "?"}/${str(row, "model") ?? "?"}/${str(row, "tier") ?? "?"}/${index}`,
+			provider: str(row, "provider") ?? "—",
+			model: str(row, "model") ?? "—",
+			tier: str(row, "tier") ?? "—",
+			usertokens: usertokens === undefined ? "—" : String(usertokens),
+		};
+	});
+}
+
+/** R29's resolver recompute — rendered only when all three legs are readable. */
+function recomputeLine(value: unknown): string | undefined {
+	if (!isBag(value)) return undefined;
+	const a = num(value, "a");
+	const adjustment = num(value, "roundingAdjustment");
+	const total = num(value, "total");
+	if (a === undefined || adjustment === undefined || total === undefined) return undefined;
+	return `${a} + ${adjustment} = ${total}`;
+}
+
+/** R31 — `agent` / `interactive` are booleans; anything else is not a flag. */
+function executionFlags(value: unknown): string | undefined {
+	if (!isBag(value)) return undefined;
+	const parts: string[] = [];
+	const agent = bool(value, "agent");
+	const interactive = bool(value, "interactive");
+	if (agent !== undefined) parts.push(`agent ${agent}`);
+	if (interactive !== undefined) parts.push(`interactive ${interactive}`);
+	return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
 export default function DisplayAnnex({ display }: { display?: Display }) {
-	if (display === undefined) return null;
-	const rows = display.spendBreakdown ?? [];
-	const recompute = display.recomputedTotal;
-	const pricingTables = display.pricingTables;
-	const execution = display.execution;
+	if (!isBag(display)) return null;
+	const served = display as Bag;
+	const rows = breakdownRows(served.spendBreakdown);
+	const recompute = recomputeLine(served.recomputedTotal);
+	const pricingTables = isBag(served.pricingTables) ? served.pricingTables : undefined;
+	const pricingHashes = pricingTables ? stringList(pricingTables.hashes) : [];
+	const pricingDeployment = pricingTables ? str(pricingTables, "pricingDeployment") : undefined;
+	const execution = executionFlags(served.execution);
 	if (
 		rows.length === 0 &&
 		recompute === undefined &&
-		pricingTables === undefined &&
+		pricingHashes.length === 0 &&
+		pricingDeployment === undefined &&
 		execution === undefined
 	) {
 		return null;
@@ -77,10 +133,7 @@ export default function DisplayAnnex({ display }: { display?: Display }) {
 								</thead>
 								<tbody>
 									{rows.map((row) => (
-										<tr
-											key={`${row.provider}/${row.model}/${row.tier}`}
-											className="border-b border-white/[0.04]"
-										>
+										<tr key={row.key} className="border-b border-white/[0.04]">
 											<td className="px-3 py-2 font-mono text-[13px] text-white/70">
 												{row.provider}
 											</td>
@@ -102,30 +155,28 @@ export default function DisplayAnnex({ display }: { display?: Display }) {
 						<span className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
 							resolver recompute
 						</span>
-						<span className="font-mono text-[13px] text-white/70">
-							{recompute.a} + {recompute.roundingAdjustment} = {recompute.total}
-						</span>
+						<span className="font-mono text-[13px] text-white/70">{recompute}</span>
 						<p className="text-[13px] leading-relaxed text-white/70">
 							{RECOMPUTE_IS_RESOLVER_ONLINE_CHECK}
 						</p>
 					</div>
 				) : null}
 
-				{pricingTables ? (
+				{pricingHashes.length > 0 || pricingDeployment !== undefined ? (
 					<div className="flex flex-col gap-1" data-testid="pricing-tables">
 						<span className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
 							pricing tables
 						</span>
 						<ul className="flex flex-col gap-1">
-							{pricingTables.hashes.map((hash) => (
+							{pricingHashes.map((hash) => (
 								<li key={hash}>
 									<HashValue value={hash} label="pricing table content hash" head={20} />
 								</li>
 							))}
 						</ul>
-						{pricingTables.pricingDeployment ? (
+						{pricingDeployment ? (
 							<span className="font-mono text-[13px] text-white/70">
-								pricingDeployment {pricingTables.pricingDeployment}
+								pricingDeployment {pricingDeployment}
 							</span>
 						) : null}
 						<p className="text-[13px] leading-relaxed text-white/70">{PRICING_TABLES_NOTE}</p>
@@ -137,9 +188,7 @@ export default function DisplayAnnex({ display }: { display?: Display }) {
 						<span className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
 							execution
 						</span>
-						<span className="font-mono text-[13px] text-white/70">
-							agent {String(execution.agent)} · interactive {String(execution.interactive)}
-						</span>
+						<span className="font-mono text-[13px] text-white/70">{execution}</span>
 						<p className="text-[13px] leading-relaxed text-white/70">{EXECUTION_METADATA_NOTE}</p>
 					</div>
 				) : null}

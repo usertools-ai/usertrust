@@ -162,6 +162,31 @@ test("AdvisoryBands: every band is amber — never red, never green (§6.4)", ()
 	assert.ok(!markup.includes("text-ut"), "never green");
 });
 
+test("AdvisoryBands: an advisory whose members are unreadable still renders, and LINKS to nothing", () => {
+	// Advisories are unsigned too (§4.1 validates only `kind`), so the same R10
+	// rule applies: never dropped, never thrown, and never a link to an
+	// invented receipt — a link is a claim.
+	const markup = html(
+		<AdvisoryBands
+			advisories={
+				[
+					{ kind: "receiptSuperseded", supersededByReceiptId: { id: "x" }, eventHash: 7 },
+					{ kind: "generationAddendum", generation: [], receiptId: null },
+					{ kind: "revisionSuperseded", observedRevision: {}, currentRevision: "r2" },
+				] as never
+			}
+		/>,
+	);
+	const text = textOf(markup);
+	assert.ok(!markup.includes("[object Object]"));
+	assert.ok(!markup.includes('href="/r/'), "an unreadable receipt id is not a link");
+	// Five unreadable members across the three bands, each named as not served
+	// rather than silently blank: supersededByReceiptId, eventHash, generation,
+	// receiptId, observedRevision.
+	assert.equal(text.match(/\(not served\)/g)?.length, 5, "each unreadable member says so");
+	assert.equal(markup.match(/data-advisory=/g)?.length, 3, "and none of them is dropped");
+});
+
 test("AdvisoryBands: repeated kinds both render (an addendum list is not a set)", () => {
 	const markup = html(
 		<AdvisoryBands
@@ -339,6 +364,42 @@ test("DisplayAnnex: every served member is labeled, and the annex never borrows 
 	assert.ok(!withoutCopyChips.includes("text-ut"), "and never in the verdict's green");
 });
 
+test("DisplayAnnex: an unreadable unsigned member is DROPPED, never thrown and never [object Object]", () => {
+	// R10's rule, applied to the annex: `wire.ts` validates the `display`
+	// container and nothing inside it, because unsigned material must never
+	// demote a sound receipt. That leaves the component holding shapes the
+	// declared type promised and the wire never checked — and a render-time
+	// throw is Next's generic 500, which is not one of §7's named states.
+	for (const [why, display] of [
+		["spendBreakdown is not an array", { spendBreakdown: "rows" }],
+		[
+			"a row cell is an object",
+			{ spendBreakdown: [{ provider: { id: "x" }, model: "m", tier: "t", usertokens: 1 }] },
+		],
+		["pricingTables.hashes is not an array", { pricingTables: { hashes: "abc" } }],
+		[
+			"a recompute leg is not a number",
+			{ recomputedTotal: { a: {}, roundingAdjustment: 1, total: 2 } },
+		],
+		["execution flags are not booleans", { execution: { agent: { name: "x" }, interactive: 1 } }],
+		["display itself is not an object", "display"],
+	] as const) {
+		const markup = html(<DisplayAnnex display={display as never} />);
+		assert.ok(!markup.includes("[object Object]"), `${why}: never rendered as [object Object]`);
+		assert.ok(!markup.includes("undefined"), `${why}: never rendered as "undefined"`);
+	}
+
+	// A readable cell beside an unreadable one still renders: dropping the FIELD
+	// is the fail-closed move, dropping the whole row would hide served data.
+	const partial = html(
+		<DisplayAnnex
+			display={{ spendBreakdown: [{ provider: "anthropic", model: 7, tier: "input" }] } as never}
+		/>,
+	);
+	assert.ok(textOf(partial).includes("anthropic"), "the readable cell survives");
+	assert.ok(partial.includes('data-testid="spend-breakdown"'));
+});
+
 // ---------------------------------------------------------------------------
 // AnchorEvidencePanels (R8/R10/R32)
 // ---------------------------------------------------------------------------
@@ -355,6 +416,40 @@ test("AnchorEvidencePanels: an unrecognizable anchorEvidence container renders a
 		/>,
 	);
 	assert.equal(markup, "", "fail-closed: no shape recognized, no panel rendered");
+});
+
+test("AnchorEvidencePanels: an unreadable served HISTORY renders as absent, and never as a throw", () => {
+	const checks = verification({ checkpointHistory: PASSED }).checks;
+	assert.equal(
+		html(<AnchorEvidencePanels checkpointHistory={["seg-1", 2] as never} checks={checks} />),
+		"",
+		"no readable entry is an unrecognized member — the ledger still carries the RESULT",
+	);
+
+	const partial = html(
+		<AnchorEvidencePanels
+			checkpointHistory={
+				[
+					{
+						segmentId: "seg-0001",
+						segmentFirstSequence: 1,
+						treeSize: 4,
+						previousSegmentId: "seg-0000",
+					},
+					{ segmentId: { s: 1 }, treeSize: "four" },
+				] as never
+			}
+			checks={checks}
+		/>,
+	);
+	const text = textOf(partial);
+	assert.ok(text.includes("seg-0001"), "the readable entry renders whole");
+	assert.ok(!partial.includes("[object Object]"));
+	assert.ok(
+		text.includes("(unnamed segment)"),
+		"an unreadable ID is named as such, never invented",
+	);
+	assert.ok(text.includes("segment-checkpoint history (2)"), "the count is what was served");
 });
 
 test("AnchorEvidencePanels: a PASSED Rekor attachment carries R8's caveat; a FAILED one does not", () => {

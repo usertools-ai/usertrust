@@ -33,6 +33,7 @@
  * teaches the reader the comparison only they can make (R13/R15).
  */
 
+import { type Bag, num, str } from "./unsigned-reads";
 import type {
 	Advisory,
 	CheckName,
@@ -791,36 +792,50 @@ export interface AdvisoryBand {
 }
 
 /**
+ * What an advisory member reads as when the resolver did not serve it in a
+ * readable shape. Advisories are UNSIGNED (§4.1) and `wire.ts` validates only
+ * the `kind` discriminator, so every other member is read defensively — R10's
+ * rule: unsigned material must not demote a sound receipt, and it must not
+ * throw the render either (see `lib/unsigned-reads.ts`).
+ */
+export const ADVISORY_FIELD_NOT_SERVED = "(not served)";
+
+function advisoryText(advisory: Advisory, key: string): string {
+	return str(advisory as Bag, key) ?? ADVISORY_FIELD_NOT_SERVED;
+}
+
+/** A member the band LINKS to: a link is a claim, so an unreadable one is no link. */
+function advisoryLink(advisory: Advisory, key: string): string | undefined {
+	return str(advisory as Bag, key);
+}
+
+/**
  * R16/R33/R34 — every advisory kind, plus the generic fallback §4.1 requires:
  * an unknown kind "renders as a generic advisory notice naming the kind (never
  * silently dropped, never verdict-affecting)".
  */
 export function advisoryBand(advisory: Advisory): AdvisoryBand {
 	switch (advisory.kind) {
-		case "revisionSuperseded": {
-			const it = advisory as { observedRevision: string; currentRevision: string };
+		case "revisionSuperseded":
 			return {
 				kind: advisory.kind,
 				title: "REVISION SUPERSEDED",
-				body: `${revisionSupersededLine(it.observedRevision)} (current revision ${it.currentRevision}). A display state, never a status: not a failure, not a downgrade, and never silently a plain green check.`,
+				body: `${revisionSupersededLine(advisoryText(advisory, "observedRevision"))} (current revision ${advisoryText(advisory, "currentRevision")}). A display state, never a status: not a failure, not a downgrade, and never silently a plain green check.`,
 			};
-		}
-		case "receiptSuperseded": {
-			const it = advisory as { supersededByReceiptId: string; eventHash: string };
+		case "receiptSuperseded":
 			return {
 				kind: advisory.kind,
 				title: "RECEIPT SUPERSEDED",
-				body: `a later receipt_superseded chain event names ${it.supersededByReceiptId} (event hash ${it.eventHash}). ${ADVISORY_NEVER_ALTERS_VERDICT}`,
-				linkedReceiptId: it.supersededByReceiptId,
+				body: `a later receipt_superseded chain event names ${advisoryText(advisory, "supersededByReceiptId")} (event hash ${advisoryText(advisory, "eventHash")}). ${ADVISORY_NEVER_ALTERS_VERDICT}`,
+				linkedReceiptId: advisoryLink(advisory, "supersededByReceiptId"),
 			};
-		}
 		case "generationAddendum": {
-			const it = advisory as { generation: number; receiptId: string };
+			const generation = num(advisory as Bag, "generation");
 			return {
 				kind: advisory.kind,
 				title: "GENERATION ADDENDUM",
-				body: `generation ${it.generation} was minted as ${it.receiptId}. The commit's trailer cites generation 1 forever — a later generation is advisory-surfaced, never a trailer rewrite. ${ADVISORY_NEVER_ALTERS_VERDICT}`,
-				linkedReceiptId: it.receiptId,
+				body: `generation ${generation ?? ADVISORY_FIELD_NOT_SERVED} was minted as ${advisoryText(advisory, "receiptId")}. The commit's trailer cites generation 1 forever — a later generation is advisory-surfaced, never a trailer rewrite. ${ADVISORY_NEVER_ALTERS_VERDICT}`,
+				linkedReceiptId: advisoryLink(advisory, "receiptId"),
 			};
 		}
 		default:

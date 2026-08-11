@@ -27,23 +27,34 @@ import {
 } from "./fixture-harness";
 import {
 	ANCHOR_EXTERNAL_VISIBILITY,
+	BREAKDOWN_ROWS_NOTE,
+	CHAIN_CLOCK_CLAIM_NOTE,
+	CHAIN_COMMITTED_SPEND_FIELDS,
 	CUSTOM_MODEL_MEANING,
 	DISPLAY_ANNEX_LABEL,
+	DISPLAY_NOT_ATTESTED,
 	EQUIVOCATION_CAVEAT,
 	ESTIMATES_NOT_UPPER_BOUND,
 	EXECUTION_METADATA_NOTE,
 	FORK_DISCLAIMER,
+	LEDGER_ROWS,
+	LEDGER_SHOWS_THE_INPUTS,
 	MEMBERSHIP_EPISTEMIC_SCOPE,
 	MINTED_AT_LABEL,
+	MINTED_AT_NOTE,
 	NEVER_ARTIFACT_VERIFIED,
 	NOT_APPLICABLE_MEANING,
 	POSTURES_ARE_ATTESTED_ENUMS,
 	PRICING_TABLES_NOTE,
+	PROOF_ID_IS_A_HANDLE,
 	RECOMPUTE_IS_RESOLVER_ONLINE_CHECK,
+	REKOR_EVIDENCE_MEANING,
+	REPO_NAME_IS_NOT_SCOPE,
 	S3_OPERATOR_ASSERTED,
 	SESSION_NON_ARTIFACT,
 	SESSION_PROMOTION_GATE,
 	TRANSFER_SET_ROOT_COMMITMENT,
+	TRANSFER_SET_ROOT_RECOMPUTABLE,
 	trustSnapshotLine,
 	UNAVAILABLE_MEANING,
 	UNDISCLOSED_PRIVATE_REPO,
@@ -193,6 +204,195 @@ test("R9: every verified render carries the full ledger and names its trust snap
 			`${row.id}: R9's trust-snapshot footer`,
 		);
 	}
+});
+
+/** The markup of ONE ledger row, so a meaning is asserted where it belongs. */
+function ledgerRowMarkup(html: string, name: string): string {
+	const match = html.match(new RegExp(`data-check="${name}"[\\s\\S]*?</tr>`));
+	assert.ok(match, `ledger row ${name} is missing entirely`);
+	return match[0];
+}
+
+test("§8/§6.3: the check-ledger's epistemic MEANINGS render row by row (C1/C9/C17 named, whole set covered)", () => {
+	// §8's closing requirement names C1/C9/C17 for the P2-7 obligation; the
+	// loop covers the whole conforming set because the meaning COLUMN is what
+	// carries every one of §6.3's epistemic labels, and a component that lost
+	// the column would still satisfy a three-fixture spot check on one string.
+	const named = [
+		"commit-checkpoint.json",
+		"commit-owner-asserted.json",
+		"session-workflow-attested.json",
+	];
+	const files = conformingVerifiedRows().map((row) => row.file);
+	for (const file of named) {
+		assert.ok(files.includes(file), `§8 names ${file}; it must render as a verified receipt`);
+	}
+	for (const file of files) {
+		const { html } = renderFixture(file);
+		for (const row of LEDGER_ROWS) {
+			const cell = textOf(ledgerRowMarkup(html, row.name));
+			assertContains(
+				cell,
+				row.meaning,
+				`${file}: the ${row.name} row must carry its one-line meaning`,
+			);
+		}
+		// P2-7, in the place §6.3 puts it: the attested-enum sentence rides on
+		// the row that reports posture validity, not only on the chips.
+		assertContains(
+			textOf(ledgerRowMarkup(html, "semantics")),
+			POSTURES_ARE_ATTESTED_ENUMS,
+			`${file}: the ledger's semantics row must read as a chain-committed CLAIM (P2-7)`,
+		);
+	}
+});
+
+/**
+ * The mandated sentences each fixture's own wire content OBLIGES, derived from
+ * the state rather than hand-listed per fixture: a constant pinned in
+ * `claims.test.ts` proves only that the STRING is right, never that it reaches
+ * a reader. This is the rendered half of the copy pin.
+ */
+function mandatedStrings(state: VerifiedState): { needle: string; why: string }[] {
+	const { envelope } = state;
+	const projection = envelope.receipt.event.data;
+	const required: { needle: string; why: string }[] = [
+		{ needle: LEDGER_SHOWS_THE_INPUTS, why: "R9 — why the ledger exists" },
+		{ needle: POSTURES_ARE_ATTESTED_ENUMS, why: "P2-7 — postures are attested enums" },
+		{ needle: REPO_NAME_IS_NOT_SCOPE, why: "R18 — repoId is the scope, the name is display" },
+		{ needle: MINTED_AT_NOTE, why: "R27 — the only minter-asserted clock claim" },
+		{ needle: CHAIN_CLOCK_CLAIM_NOTE, why: "R27 — startedAt/endedAt are chain clock claims" },
+		{ needle: NEVER_ARTIFACT_VERIFIED, why: "R13 — what the page refuses to say" },
+		{
+			needle:
+				projection.transferSet === undefined
+					? TRANSFER_SET_ROOT_COMMITMENT
+					: TRANSFER_SET_ROOT_RECOMPUTABLE,
+			why: "R25 — the root's meaning tracks the pair list's presence",
+		},
+	];
+	if (envelope.receipt.work.kind !== "session") {
+		required.push(
+			{ needle: MEMBERSHIP_EPISTEMIC_SCOPE, why: "R26 — the minter's committed observation" },
+			{ needle: PROOF_ID_IS_A_HANDLE, why: "R26 — proofId is a lookup handle" },
+		);
+	}
+	if (envelope.display !== undefined) {
+		required.push(
+			{ needle: DISPLAY_NOT_ATTESTED, why: "R28 — §10.1's rule, not just its label" },
+			{ needle: CHAIN_COMMITTED_SPEND_FIELDS, why: "R29 — what IS chain-committed" },
+		);
+		if ((envelope.display.spendBreakdown ?? []).length > 0) {
+			required.push({ needle: BREAKDOWN_ROWS_NOTE, why: "R29 — breakdown rows are display-grade" });
+		}
+	}
+	if (envelope.anchorEvidence?.rekor !== undefined) {
+		required.push({ needle: REKOR_EVIDENCE_MEANING, why: "R32 — what a Rekor attachment IS" });
+	}
+	return required;
+}
+
+test("§8: every mandated epistemic sentence the wire OBLIGES reaches the rendered DOM", () => {
+	// The mutation this closes: deleting the sentence from its component leaves
+	// the constant pinned in `claims.test.ts` and every other test green.
+	let asserted = 0;
+	for (const row of conformingVerifiedRows()) {
+		const { text, state } = renderFixture(row.file);
+		for (const { needle, why } of mandatedStrings(state)) {
+			assertContains(text, needle, `${row.id}: ${why}`);
+			asserted += 1;
+		}
+	}
+	assert.ok(asserted > 100, `expected the whole set to be swept, only ${asserted} assertions ran`);
+});
+
+test("R10/R37: hostile UNSIGNED members never crash the render and never demote the verdict", () => {
+	// The wire's two-sided rule, end to end. Unsigned members are TOLERATED by
+	// `wire.ts` (R10: unsigned material must not demote a sound receipt), which
+	// means the components are the last line — and "fail closed" has to mean a
+	// named state, not a thrown render (Next's generic 500: no verdict, no §7
+	// state, none of R35's guarantees). The signed half of the same rule is
+	// `wire.test.ts`'s "§2 shapes are a schema failure".
+	const hostile: Record<string, unknown>[] = [
+		{ display: { spendBreakdown: "rows" } },
+		{ display: { spendBreakdown: [{ provider: { id: "x" }, model: "m", tier: "t" }] } },
+		{ display: { pricingTables: { hashes: 7 } } },
+		{ display: { recomputedTotal: { a: [], roundingAdjustment: 1, total: 2 } } },
+		{ display: { execution: { agent: { on: true } } } },
+		{ checkpointHistory: ["seg-1"] },
+		{ checkpointHistory: [{ segmentId: { s: 1 }, treeSize: [] }] },
+		{ anchorEvidence: { rekor: { log: "not-an-object", artifactHash: 9 } } },
+		{ anchorEvidence: { s3ObjectLock: [{ sink: 1, checks: "none" }] } },
+	];
+	for (const graft of hostile) {
+		const fixture = loadFixture("commit-checkpoint.json");
+		const body = fixture.wire.body as Record<string, unknown>;
+		fixture.wire.body = { ...body, ...graft };
+		const state = fixtureState(fixture);
+		assert.equal(state.kind, "verified", `unsigned junk must not demote: ${JSON.stringify(graft)}`);
+		if (state.kind !== "verified") continue;
+		const markup = render(state);
+		assertContains(textOf(markup), "VERIFIED — CHECKPOINT", "the base verdict survives intact");
+		assert.ok(!markup.includes("[object Object]"), "nothing unreadable is rendered as an object");
+	}
+});
+
+/** Every leaf position inside a wire value, as a path from the envelope root. */
+function leafPaths(value: unknown, prefix: string[]): string[][] {
+	if (Array.isArray(value)) {
+		return [prefix, ...value.flatMap((item, index) => leafPaths(item, [...prefix, String(index)]))];
+	}
+	if (value !== null && typeof value === "object") {
+		return [
+			prefix,
+			...Object.entries(value).flatMap(([key, item]) => leafPaths(item, [...prefix, key])),
+		];
+	}
+	return [prefix];
+}
+
+function setAtPath(root: Record<string, unknown>, path: string[], value: unknown): void {
+	let node = root as Record<string, unknown>;
+	for (const key of path.slice(0, -1)) node = node[key] as Record<string, unknown>;
+	node[path[path.length - 1]] = value;
+}
+
+test("R37: NOTHING the wire accepts as verified can throw the render — every position, hostile values", () => {
+	// The invariant the enumerated cases above only SAMPLE, and the one that
+	// stays true as the components change: for every position in the envelope,
+	// with a value of every wrong JSON type, the page either fails closed into a
+	// NAMED state or renders. Never a thrown render — that is Next's generic
+	// 500, which is neither §7's protocol-error shell nor its integrity failure,
+	// carries no R35 no-store guarantee, and would let a wire shape the parser
+	// accepted take the page down. Signed positions land in the schema failure
+	// (R37); unsigned ones stay verified (R10) and render defensively.
+	const hostileValues = [{}, [], "x", 1, -1, null, true, ""];
+	let cases = 0;
+	let stillVerified = 0;
+	for (const file of ["commit-checkpoint.json", "pr-private.json", "commit-gen2-addendum.json"]) {
+		const template = loadFixture(file).wire.body as Record<string, unknown>;
+		const positions = leafPaths(template, []).filter((path) => path.length > 0);
+		for (const path of positions) {
+			for (const hostile of hostileValues) {
+				const fixture = loadFixture(file);
+				const body = fixture.wire.body as Record<string, unknown>;
+				setAtPath(body, path, hostile);
+				// Re-encode so the mutation is exercised against §4's SCHEMA rather
+				// than stopping at R4's byte check — the byte check is already proven
+				// in `wire.test.ts` and would mask everything downstream of it.
+				if (path[0] !== "receiptBytes") {
+					body.receiptBytes = Buffer.from(JSON.stringify(body.receipt), "utf-8").toString("base64");
+				}
+				cases += 1;
+				const state = fixtureState(fixture);
+				if (state.kind !== "verified") continue;
+				stillVerified += 1;
+				render(state);
+			}
+		}
+	}
+	assert.ok(cases > 2000, `the sweep must be exhaustive, only ${cases} positions ran`);
+	assert.ok(stillVerified > 100, `and it must actually reach the renderer (${stillVerified} did)`);
 });
 
 test("§6: nothing renders below the 12px type floor", () => {

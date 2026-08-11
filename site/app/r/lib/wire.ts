@@ -1433,6 +1433,42 @@ function requireInteger(bag: Bag, path: string, key: string): string | null {
 		: `${path}.${key} must be an integer`;
 }
 
+/**
+ * A §2/§5 digest member: exactly 64 lowercase hex characters.
+ *
+ * Applied only where the normative text pins the form itself — `transferSetRoot`
+ * and `prevGenerationEventHash` (§2, verbatim) and `event.hash` (§5:
+ * `sha256(canonicalize(event − hash))`). It is a SHAPE rule, not a recompute:
+ * nothing here checks that the digest is the right digest, which stays the
+ * resolver's step 2 and the CLI's. It matters page-side because the barcode
+ * footer maps `event.hash`'s nibbles and throws on anything else — a render-time
+ * throw is Next's generic 500, which is not one of §7's named states.
+ */
+const HEX_64 = /^[0-9a-f]{64}$/;
+
+function requireHex64(bag: Bag, path: string, key: string): string | null {
+	const value = bag[key];
+	return typeof value === "string" && HEX_64.test(value)
+		? null
+		: `${path}.${key} must be 64 lowercase hex characters`;
+}
+
+/**
+ * An integer member with a §2 RANGE. The ranges are per-field and quoted
+ * (`0 < assessedUsertokens`, `0 ≤ roundingAdjustment`, `transferCount ≥ 1`);
+ * the CROSS-field relations of §2 (`posted === assessed`,
+ * `roundingAdjustment ≤ transferCount`) are deliberately NOT here — those are
+ * step 7's semantic verdict, which is the resolver's to compute and the page's
+ * to report (D2). What this rules out is a "verified" render of a receipt whose
+ * own totals are nonsense, and R23's derivation refusing a negative total mid-
+ * render.
+ */
+function requireIntegerAtLeast(bag: Bag, path: string, key: string, min: number): string | null {
+	const integer = requireInteger(bag, path, key);
+	if (integer !== null) return integer;
+	return (bag[key] as number) >= min ? null : `${path}.${key} must be >= ${min}`;
+}
+
 function requireBag(bag: Bag, path: string, key: string): string | null {
 	return isBag(bag[key]) ? null : `${path}.${key} must be an object`;
 }
@@ -1486,6 +1522,20 @@ function validateVerification(value: unknown, path: string): string | null {
 	return null;
 }
 
+/**
+ * §2 — `repositoryMembership` is REQUIRED on every artifact variant and v1
+ * FAILS CLOSED: `providerVerified` is the only value, "unverified" is not a ut1
+ * value (§2/§6a). The page renders both members (R26), so both are validated
+ * here rather than trusted from the declared type.
+ */
+function validateRepositoryMembership(value: unknown, path: string): string | null {
+	if (!isBag(value)) return `${path} must be an object`;
+	if (value.status !== "providerVerified") {
+		return `${path}.status must be "providerVerified" (v1 fails closed — §2)`;
+	}
+	return requireString(value, path, "proofId");
+}
+
 function validateWork(value: unknown, path: string): string | null {
 	if (!isBag(value)) return `${path} must be an object`;
 	const repoId = requireString(value, path, "repoId");
@@ -1501,7 +1551,7 @@ function validateWork(value: unknown, path: string): string | null {
 					? null
 					: `${path}.oidAlg must be "sha1" or "sha256"`,
 				requireString(value, path, "objectSha256"),
-				requireBag(value, path, "repositoryMembership"),
+				validateRepositoryMembership(value.repositoryMembership, `${path}.repositoryMembership`),
 			);
 		case "pr":
 		case "issue": {
@@ -1510,7 +1560,7 @@ function validateWork(value: unknown, path: string): string | null {
 				requireString(value, path, "providerArtifactId"),
 				requireString(value, path, "observedRevision"),
 				requireBag(value, path, "contentBinding"),
-				requireBag(value, path, "repositoryMembership"),
+				validateRepositoryMembership(value.repositoryMembership, `${path}.repositoryMembership`),
 			);
 			if (scalars !== null) return scalars;
 			const binding = value.contentBinding as Bag;
@@ -1547,18 +1597,23 @@ function validateProjection(value: unknown, path: string): string | null {
 		requireString(value, path, "startedAt"),
 		requireString(value, path, "endedAt"),
 		requireBag(value, path, "pricing"),
-		requireString(value, path, "transferSetRoot"),
+		requireHex64(value, path, "transferSetRoot"),
 		requireBag(value, path, "spend"),
 		validateWork(value.work, `${path}.work`),
 	);
 	if (scalars !== null) return scalars;
 
+	// The page RENDERS `pricing.tableVersions` as a joined list (R29's
+	// chain-committed half), so the container being an object is not enough.
+	const pricingError = requireStringArray(value.pricing as Bag, `${path}.pricing`, "tableVersions");
+	if (pricingError !== null) return pricingError;
+
 	const spend = value.spend as Bag;
 	const spendErrors = first(
-		requireInteger(spend, `${path}.spend`, "assessedUsertokens"),
-		requireInteger(spend, `${path}.spend`, "postedUsertokens"),
-		requireInteger(spend, `${path}.spend`, "roundingAdjustment"),
-		requireInteger(spend, `${path}.spend`, "transferCount"),
+		requireIntegerAtLeast(spend, `${path}.spend`, "assessedUsertokens", 1),
+		requireIntegerAtLeast(spend, `${path}.spend`, "postedUsertokens", 1),
+		requireIntegerAtLeast(spend, `${path}.spend`, "roundingAdjustment", 0),
+		requireIntegerAtLeast(spend, `${path}.spend`, "transferCount", 1),
 		spend.usagePosture === "provider" ||
 			spend.usagePosture === "mixed" ||
 			spend.usagePosture === "estimated"
@@ -1588,12 +1643,26 @@ function validateProjection(value: unknown, path: string): string | null {
 	if (generation > 1 !== Object.hasOwn(value, "prevGenerationEventHash")) {
 		return `${path}.prevGenerationEventHash must be present iff generation > 1`;
 	}
+	if (generation > 1) {
+		const linkage = requireHex64(value, path, "prevGenerationEventHash");
+		if (linkage !== null) return linkage;
+	}
 	const transferCount = spend.transferCount as number;
 	if (transferCount <= 32 !== Object.hasOwn(value, "transferSet")) {
 		return `${path}.transferSet must be present iff spend.transferCount <= 32`;
 	}
-	if (Object.hasOwn(value, "transferSet") && !Array.isArray(value.transferSet)) {
-		return `${path}.transferSet must be an array`;
+	if (Object.hasOwn(value, "transferSet")) {
+		if (!Array.isArray(value.transferSet)) return `${path}.transferSet must be an array`;
+		// R25 renders the pair list itself, one line per pair.
+		for (const [index, pair] of value.transferSet.entries()) {
+			const pairPath = `${path}.transferSet[${index}]`;
+			if (!isBag(pair)) return `${pairPath} must be an object`;
+			const pairError = first(
+				requireString(pair, pairPath, "authorizationTransferId"),
+				requireString(pair, pairPath, "settlementTransferId"),
+			);
+			if (pairError !== null) return pairError;
+		}
 	}
 	return null;
 }
@@ -1640,7 +1709,7 @@ function validateChainEnvelope(value: unknown, path: string): string | null {
 		requireString(value, path, "kind"),
 		requireBag(value, path, "actor"),
 		requireInteger(value, path, "sequence"),
-		requireString(value, path, "hash"),
+		requireHex64(value, path, "hash"),
 		Object.hasOwn(value, "data") ? null : `${path}.data must be present`,
 	);
 }

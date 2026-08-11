@@ -9,6 +9,7 @@ import {
 	S3_OPERATOR_ASSERTED,
 	UNAVAILABLE_MEANING,
 } from "../lib/claims";
+import { type Bag, bagList, isBag, num, str } from "../lib/unsigned-reads";
 import type { AnchorEvidence, CheckEntry, SegmentCheckpointV2, Verification } from "../lib/wire";
 import HashValue from "./hash-value";
 
@@ -35,27 +36,13 @@ import HashValue from "./hash-value";
  * the base verdict is stated as preserved. The evidence still renders: hiding
  * it would deny the reader the material the resolver actually examined.
  *
- * `anchorEvidence`'s inner shapes are not validated by `wire.ts` (unsigned
- * envelope members, and §4.1 tolerates unknown members within version 1), so
- * every field is read defensively. A member whose shape this component does not
- * recognize renders as absent rather than as an empty claim — fail-closed.
+ * `anchorEvidence` and `checkpointHistory` are UNSIGNED envelope members, not
+ * validated by `wire.ts` beyond their container (§4.1 tolerates unknown members
+ * within version 1), so every field is read defensively — see
+ * `lib/unsigned-reads.ts` for why that is R10's rule rather than laziness. A
+ * member whose shape this component does not recognize renders as absent rather
+ * than as an empty claim, and never as a thrown render.
  */
-
-type Bag = Record<string, unknown>;
-
-function isBag(value: unknown): value is Bag {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function str(bag: Bag, key: string): string | undefined {
-	const value = bag[key];
-	return typeof value === "string" && value.length > 0 ? value : undefined;
-}
-
-function num(bag: Bag, key: string): number | undefined {
-	const value = bag[key];
-	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
 
 /** The voice an extension's served evidence is entitled to. */
 interface Standing {
@@ -200,9 +187,9 @@ function S3Panel({ probes }: { probes: unknown[] }) {
 			</p>
 			<p className="mt-2 text-[13px] leading-relaxed text-white/70">{S3_OPERATOR_ASSERTED}</p>
 			<ul className="mt-3 flex flex-col gap-3">
-				{probes.filter(isBag).map((report, index) => {
+				{bagList(probes).map((report, index) => {
 					const sink = str(report, "sink");
-					const checks = Array.isArray(report.checks) ? report.checks.filter(isBag) : [];
+					const checks = bagList(report.checks);
 					return (
 						<li key={sink ?? `probe-${index}`}>
 							<p className="font-mono text-[12px] break-all text-white/70">
@@ -226,6 +213,25 @@ function S3Panel({ probes }: { probes: unknown[] }) {
 	);
 }
 
+/** One served history entry, narrowed to what is renderable (R10, never a throw). */
+function historyLine(checkpoint: Bag, index: number): { key: string; label: string; rest: string } {
+	const segmentId = str(checkpoint, "segmentId");
+	const firstSequence = num(checkpoint, "segmentFirstSequence");
+	const treeSize = num(checkpoint, "treeSize");
+	const previousSegmentId = str(checkpoint, "previousSegmentId");
+	const parts: string[] = [];
+	if (firstSequence !== undefined) parts.push(`first sequence ${firstSequence}`);
+	if (treeSize !== undefined) parts.push(`tree size ${treeSize}`);
+	if (previousSegmentId !== undefined) parts.push(`previous ${previousSegmentId}`);
+	return {
+		key: segmentId ?? `segment-${index}`,
+		// An entry whose segmentId is unreadable is shown as unnamed rather than
+		// under a made-up ID: an invented identifier is a claim.
+		label: segmentId ?? "(unnamed segment)",
+		rest: parts.length > 0 ? ` · ${parts.join(" · ")}` : "",
+	};
+}
+
 function HistoryPanel({
 	history,
 	standing,
@@ -233,6 +239,7 @@ function HistoryPanel({
 	history: SegmentCheckpointV2[];
 	standing: Standing;
 }) {
+	const entries = bagList(history);
 	return (
 		<div
 			className={standing.frame}
@@ -240,7 +247,7 @@ function HistoryPanel({
 			data-history-standing={standing.upheld ? "upheld" : "not-upheld"}
 		>
 			<ExtensionHeader
-				title={`segment-checkpoint history (${history.length})`}
+				title={`segment-checkpoint history (${entries.length})`}
 				standing={standing}
 			/>
 			{/* R7 — "what the walk PROVED" is a claim, so it renders only where the
@@ -254,13 +261,15 @@ function HistoryPanel({
 				<p className="mt-2 text-[13px] leading-relaxed text-white/70">{standing.note}</p>
 			) : null}
 			<ol className="mt-3 flex flex-col gap-2">
-				{history.map((checkpoint) => (
-					<li key={checkpoint.segmentId} className="font-mono text-[12px] text-white/70">
-						<span className="text-white/85">{checkpoint.segmentId}</span> · first sequence{" "}
-						{checkpoint.segmentFirstSequence} · tree size {checkpoint.treeSize} · previous{" "}
-						{checkpoint.previousSegmentId}
-					</li>
-				))}
+				{entries.map((checkpoint, index) => {
+					const { key, label, rest } = historyLine(checkpoint, index);
+					return (
+						<li key={key} className="font-mono text-[12px] text-white/70">
+							<span className="text-white/85">{label}</span>
+							{rest}
+						</li>
+					);
+				})}
 			</ol>
 		</div>
 	);
@@ -281,10 +290,10 @@ export default function AnchorEvidencePanels({
 		anchorEvidence && Array.isArray(anchorEvidence.s3ObjectLock)
 			? anchorEvidence.s3ObjectLock
 			: undefined;
-	const history =
-		Array.isArray(checkpointHistory) && checkpointHistory.length > 0
-			? checkpointHistory
-			: undefined;
+	// A history served with no readable entry is an unrecognized member, and an
+	// unrecognized member renders as absent — the check RESULT still renders in
+	// the ledger, which is where the authority was in the first place (R9/R10).
+	const history = bagList(checkpointHistory).length > 0 ? checkpointHistory : undefined;
 	if (!rekor && !probes && !history) return null;
 
 	return (

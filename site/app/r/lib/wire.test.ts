@@ -967,6 +967,172 @@ test("R37: a 200 missing a required §4.1 member is a schema failure, never a pa
 	}
 });
 
+/**
+ * A C-fixture whose SIGNED document has been mutated, with `receiptBytes`
+ * re-encoded so R4 still AGREES. Without the re-encode every mutation would
+ * land in the integrity-failure state on the byte check and the §4 schema path
+ * would never be exercised at all — the mutant has to be a receipt the strict
+ * pipeline accepts before it can prove anything about the schema.
+ */
+function mutateSignedReceipt(
+	file: string,
+	mutate: (receipt: Record<string, unknown>) => void,
+): PageState {
+	const fixture = loadFixture<FixtureCase>(file);
+	const body = JSON.parse(JSON.stringify(fixture.wire.body)) as {
+		receipt: Record<string, unknown>;
+		receiptBytes: string;
+	};
+	mutate(body.receipt);
+	body.receiptBytes = Buffer.from(JSON.stringify(body.receipt), "utf-8").toString("base64");
+	return parseResolverResponse({ ...toInput(fixture), raw: JSON.stringify(body) });
+}
+
+type Bag = Record<string, unknown>;
+
+const projectionOf = (receipt: Bag): Bag => (receipt.event as Bag).data as Bag;
+const spendOf = (receipt: Bag): Bag => projectionOf(receipt).spend as Bag;
+const workOf = (receipt: Bag): Bag => receipt.work as Bag;
+
+/**
+ * R37 + §2: the signed document's own shapes.
+ *
+ * Every member below is one the VERIFIED renderer reads and the declared TS
+ * type promises. A 200 that carries the wrong shape there is a §4 schema
+ * failure, and it must reach the NAMED protocol-error shell — the house rule is
+ * fail-closed into a named state, and a render-time throw is not one (it is
+ * Next's generic 500: no verdict, no R35 no-store guarantee, no retry
+ * affordance). Three of these crashed the SSR render before the validator
+ * learned them: a non-array `tableVersions` (`.join` of undefined), a non-hex
+ * `event.hash` (`barcodeBars` throws by design), and a negative
+ * `assessedUsertokens` (R23's integer derivation refuses it).
+ */
+test("R37/§2: a 200 whose SIGNED document breaks §2's shapes is a schema failure, never a render", () => {
+	const cases: { why: string; file?: string; mutate: (receipt: Bag) => void }[] = [
+		{
+			why: "pricing.tableVersions must be the string list the page renders (R29)",
+			mutate: (r) => {
+				projectionOf(r).pricing = { tableVersions: "2026-07-01" };
+			},
+		},
+		{
+			why: "pricing.tableVersions entries are strings, not numbers",
+			mutate: (r) => {
+				projectionOf(r).pricing = { tableVersions: [20260701] };
+			},
+		},
+		{
+			why: "§2: assessedUsertokens is 0 < n — a negative total has no display amount (R23)",
+			mutate: (r) => {
+				spendOf(r).assessedUsertokens = -48224;
+			},
+		},
+		{
+			why: "§2: assessedUsertokens is 0 < n — zero is unmintable",
+			mutate: (r) => {
+				spendOf(r).assessedUsertokens = 0;
+			},
+		},
+		{
+			why: "§2: postedUsertokens is 0 < n",
+			mutate: (r) => {
+				spendOf(r).postedUsertokens = -1;
+			},
+		},
+		{
+			why: "§2: 0 <= roundingAdjustment",
+			mutate: (r) => {
+				spendOf(r).roundingAdjustment = -1;
+			},
+		},
+		{
+			why: "§2: transferCount >= 1 (empty sessions are unmintable)",
+			mutate: (r) => {
+				spendOf(r).transferCount = 0;
+			},
+		},
+		{
+			why: "§5: event.hash is a sha-256 digest, lowercase hex",
+			mutate: (r) => {
+				(r.event as Bag).hash = "not-a-hash";
+			},
+		},
+		{
+			why: "§5: event.hash is 64 hex characters, not a truncated one",
+			mutate: (r) => {
+				(r.event as Bag).hash = "12283b89";
+			},
+		},
+		{
+			why: "§2: transferSetRoot is exactly 64 lowercase hex",
+			mutate: (r) => {
+				projectionOf(r).transferSetRoot = "NOT-HEX";
+			},
+		},
+		{
+			why: "§2: repositoryMembership.status is the providerVerified literal",
+			mutate: (r) => {
+				(workOf(r).repositoryMembership as Bag).status = { code: "providerVerified" };
+			},
+		},
+		{
+			why: "§2/§6a: membership is providerVerified-only and FAILS CLOSED in v1",
+			mutate: (r) => {
+				(workOf(r).repositoryMembership as Bag).status = "unverified";
+			},
+		},
+		{
+			why: "§2: repositoryMembership.proofId is an opaque string handle",
+			mutate: (r) => {
+				(workOf(r).repositoryMembership as Bag).proofId = 42;
+			},
+		},
+		{
+			why: "§2: every transferSet member is a pair of transfer-ID strings",
+			mutate: (r) => {
+				projectionOf(r).transferSet = [{ authorizationTransferId: {}, settlementTransferId: "a" }];
+			},
+		},
+		{
+			why: "§2: a transferSet member is an object, never a bare string",
+			mutate: (r) => {
+				projectionOf(r).transferSet = ["auth->settle"];
+			},
+		},
+		{
+			why: "§2: prevGenerationEventHash is exactly 64 lowercase hex",
+			file: "commit-gen2-addendum.json",
+			mutate: (r) => {
+				projectionOf(r).prevGenerationEventHash = 2;
+			},
+		},
+	];
+
+	for (const { why, file, mutate } of cases) {
+		const state = mutateSignedReceipt(file ?? "commit-checkpoint.json", mutate);
+		assert.equal(state.kind, "protocolError", why);
+		if (state.kind !== "protocolError") continue;
+		assert.equal(state.reason, "schemaInvalid", why);
+	}
+});
+
+test("R37/§2: the shape rules reject the mutants WITHOUT rejecting the fixtures they came from", () => {
+	// The other half of the contract: a validator tightened until it rejects
+	// conformant receipts is not fail-closed, it is broken. `mutateSignedReceipt`
+	// with a no-op mutation re-encodes and re-parses every §8.1 file, so the
+	// re-encode itself is proven innocent too.
+	for (const entry of conformingFixtures) {
+		for (const file of entry.files) {
+			const original = parseFixture(file);
+			const roundTripped =
+				original.kind === "verified"
+					? mutateSignedReceipt(file, () => {})
+					: parseResolverResponse(toInput(loadFixture<FixtureCase>(file)));
+			assert.equal(roundTripped.kind, original.kind, `${entry.id} ${file}`);
+		}
+	}
+});
+
 test("R37: the protocol-error shell and the 503 state are never the same state", () => {
 	const timeout = transportFailureState("ut1_Ly6eTFZPxTsdg1JgGyiY9b", "timeout");
 	const network = transportFailureState("ut1_Ly6eTFZPxTsdg1JgGyiY9b", "networkFailure");
