@@ -54,8 +54,12 @@ export const CACHE_READ_MULT = 0.1;
  * for the kernel's PRICING_TABLE rows, so the two bases share one source.
  * Source: https://platform.claude.com/docs/en/about-claude/pricing
  * (model-pricing table, retrieved 2026-08-10). claude-sonnet-5 is entered at
- * the STANDARD $3/$15 rate; the $2/$10 introductory rate in effect through
- * 2026-08-31 is deliberately not entered — that drift is residual cause #2.
+ * the published rate for the published window: the $2/$10 INTRODUCTORY rate,
+ * in effect through 2026-08-31 (standard $3/$15 after). The kernel's
+ * PRICING_TABLE deliberately keeps the standard rate (Task 1 / D1), so that
+ * drift is residual cause #2 — real only because the two bases differ here.
+ * LEDGERED: the September republish must flip this row to standard $3/$15;
+ * the occurrence-date-aware fix is an accepted spec residual.
  */
 export const LIST_USD_PER_MTOK: Record<string, { input: number; output: number }> = {
 	"claude-sonnet-4-6": { input: 3, output: 15 },
@@ -63,7 +67,7 @@ export const LIST_USD_PER_MTOK: Record<string, { input: number; output: number }
 	"claude-opus-4-6": { input: 5, output: 25 },
 	"claude-fable-5": { input: 10, output: 50 },
 	"claude-opus-5": { input: 5, output: 25 },
-	"claude-sonnet-5": { input: 3, output: 15 },
+	"claude-sonnet-5": { input: 2, output: 10 },
 	"claude-opus-4-8": { input: 5, output: 25 },
 };
 

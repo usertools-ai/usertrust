@@ -28,11 +28,18 @@
  * exactly one machine: the one that builds usertrust). The scan report
  * publishes dirs scanned AND usertrust-looking candidate dirs skipped, so
  * allowlist gaps are visible rather than silent (r1/M4).
+ *
+ * THE LEDGER HOME IS MACHINE-SCOPED, NOT CHECKOUT-SCOPED: the WAL journal,
+ * receipt store and month vaults live at `~/.usertrust-fleet` (override:
+ * `USERTRUST_FLEET_DIR`). A repo-relative home would give every worktree its
+ * own divergent chain and let routine worktree cleanup destroy the ledger
+ * that backs the published verify transcript. `SITE_FLEET_DIR` stays
+ * repo-relative — artifacts publish into the checkout being committed from.
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { FALLBACK_RATE, getModelRates } from "usertrust/pricing";
 import { type Journal, openJournal } from "./fleet/journal.mts";
@@ -46,7 +53,7 @@ import {
 } from "./fleet/rollup.mts";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const FLEET_DIR = join(REPO_ROOT, ".usertrust-fleet");
+const FLEET_DIR = process.env.USERTRUST_FLEET_DIR ?? join(homedir(), ".usertrust-fleet");
 const VAULT_ROOT = join(FLEET_DIR, "vault");
 const SITE_FLEET_DIR = join(REPO_ROOT, "site", "public", "fleet");
 export const VERIFY_CLI = join(REPO_ROOT, "packages", "verify", "dist", "cli.js");
@@ -339,9 +346,10 @@ function runVerify(vaultBase: string, verifyCli: string, month: string): VerifyT
 	if (!existsSync(verifyCli)) {
 		throw new Error(`${verifyCli} missing — run \`npx tsc -b packages/verify\` first`);
 	}
+	const vaultPath = join(vaultBase, ".usertrust");
 	let out: string;
 	try {
-		out = execFileSync("node", [verifyCli, join(vaultBase, ".usertrust")], { encoding: "utf-8" });
+		out = execFileSync("node", [verifyCli, vaultPath], { encoding: "utf-8" });
 	} catch (error) {
 		const failed = error as { status?: number | null; stdout?: string; stderr?: string };
 		throw new Error(
@@ -350,7 +358,11 @@ function runVerify(vaultBase: string, verifyCli: string, month: string): VerifyT
 		);
 	}
 	return {
-		command: "npx usertrust-verify .usertrust",
+		// The LITERAL invocation that produced the lines below (final-review
+		// must-fix 4) — real paths, repo-root-relative for readability. A
+		// leading `../` is honest: it shows the vault is local to this
+		// machine, outside the published checkout.
+		command: `node ${relative(REPO_ROOT, verifyCli)} ${relative(REPO_ROOT, vaultPath)}`,
 		lines: out
 			// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping ANSI SGR sequences from real CLI output
 			.replace(/\[[0-9;]*m/g, "")

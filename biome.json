@@ -16,6 +16,7 @@
 			"!**/coverage",
 			"!**/.usertrust",
 			"!**/.usertrust-gate1",
+			"!**/site/public/fleet",
 			"!**/.source",
 			"!**/.next",
 			"!**/*.css",

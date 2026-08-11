@@ -259,16 +259,40 @@ test("rollup determinism: same inputs render byte-identical JSON with sorted key
 });
 
 test("list-price math matches hand-computed fixture values", () => {
-	const summary = buildFleetSummary(summaryOpts(julyLines()));
+	// sonnet-5's list rate is the INTRODUCTORY $2 in / $10 out published rate
+	// (in effect through 2026-08-31) — this line makes that rate load-bearing
+	// in the hand-derivation so a silent revert to standard $3/$15 fails here:
+	//  sonnet-5 ($2 in / $10 out): (2000×2 + 1000×10 + 5000×2×0.1 + 1000×2×1.25 + 500×2×2) / 1e6
+	//                            = (4000 + 10000 + 1000 + 2500 + 2000) / 1e6 = 0.0195
+	//  total listPriceUsd = 0.11225 (julyLines) + 0.0195 = 0.13175
+	const sonnet = storeLine({
+		messageId: "msg_sonnet",
+		model: "claude-sonnet-5",
+		sessionHash: "cccccccccccc",
+		occurredAt: "2026-07-17T12:00:00.000Z",
+		isSidechain: false,
+		cost: 200,
+		auditHash: "d".repeat(64),
+		usage: { inputTokens: 2000, outputTokens: 1000, cacheReadTokens: 5000, cacheWriteTokens: 1500 },
+		tiers: { m5: 1000, h1: 500 },
+	});
+	const summary = buildFleetSummary({
+		...summaryOpts([...julyLines(), sonnet]),
+		chainHashes: new Set([...julyChainHashes(), "d".repeat(64)]),
+	});
 
-	assert.equal(summary.month.listPriceUsd, 0.11225, "hand-derived in the fixture comment");
-	assert.equal(summary.month.calls, 2);
-	assert.equal(summary.month.inputTokens, 11_000);
-	assert.equal(summary.month.outputTokens, 2500);
-	assert.equal(summary.month.cacheReadTokens, 52_000);
-	assert.equal(summary.month.cacheWriteTokens, 15_000, "tier sum: (3000+4000) + (8000+0)");
-	assert.equal(summary.month.usertokens, 1123);
-	assert.equal(summary.month.kernelUsd, 0.1123, "1 usertoken = $0.0001");
+	assert.equal(summary.month.listPriceUsd, 0.13175, "hand-derived in the fixture comments");
+	assert.equal(summary.month.calls, 3);
+	assert.equal(summary.month.inputTokens, 13_000);
+	assert.equal(summary.month.outputTokens, 3500);
+	assert.equal(
+		summary.month.cacheWriteTokens,
+		16_500,
+		"tier sum: (3000+4000) + (8000+0) + (1000+500)",
+	);
+	assert.equal(summary.month.cacheReadTokens, 57_000);
+	assert.equal(summary.month.usertokens, 1323);
+	assert.equal(summary.month.kernelUsd, 0.1323, "1 usertoken = $0.0001");
 
 	// Published multipliers pinned (source-URL comments live on the constants).
 	assert.equal(CACHE_WRITE_5M_MULT, 1.25);
@@ -279,17 +303,21 @@ test("list-price math matches hand-computed fixture values", () => {
 	assert.deepStrictEqual(summary.byModel, [
 		{ model: "claude-opus-5", calls: 1, usertokens: 773, kernelUsd: 0.0773, rateSource: "table" },
 		{ model: "claude-haiku-4-5", calls: 1, usertokens: 350, kernelUsd: 0.035, rateSource: "table" },
+		{ model: "claude-sonnet-5", calls: 1, usertokens: 200, kernelUsd: 0.02, rateSource: "table" },
 	]);
 
-	// One session, half its calls sidechain.
+	// Two sessions, spend-descending; half of the first session's calls sidechain.
 	assert.deepStrictEqual(summary.bySession, [
 		{ sessionHash: "aaaaaaaaaaaa", calls: 2, usertokens: 1123, sidechainShare: 0.5 },
+		{ sessionHash: "cccccccccccc", calls: 1, usertokens: 200, sidechainShare: 0 },
 	]);
 
 	// Model resolution mirrors getModelRates (exact, then longest prefix) but
 	// THROWS where the kernel would fall back — no silent list-price guess.
 	assert.deepStrictEqual(listRatesForModel("claude-opus-5"), { input: 5, output: 25 });
 	assert.deepStrictEqual(listRatesForModel("claude-opus-5-20260901"), { input: 5, output: 25 });
+	// Introductory published rate, through 2026-08-31 (see LIST_USD_PER_MTOK).
+	assert.deepStrictEqual(listRatesForModel("claude-sonnet-5"), { input: 2, output: 10 });
 	assert.throws(() => listRatesForModel("totally-unknown-model-x"), /no published list rate/);
 });
 
@@ -355,7 +383,18 @@ test("publish gate accepts a genuinely collected month: clean WAL, chained DONEs
 		verifyCli: VERIFY_CLI,
 	});
 	assert.equal(transcript.exitCode, 0);
-	assert.equal(transcript.command, "npx usertrust-verify .usertrust");
+	// The published command is the LITERAL invocation — node + the real cli
+	// path + the real vault path, repo-root-relative — never an `npx` hint
+	// that was not what ran (final-review must-fix 4).
+	assert.ok(
+		transcript.command.startsWith(`node ${join("packages", "verify", "dist", "cli.js")} `),
+		`literal node invocation, got: ${transcript.command}`,
+	);
+	assert.ok(
+		transcript.command.endsWith(join("vault", MONTH, ".usertrust")),
+		`real vault path, got: ${transcript.command}`,
+	);
+	assert.ok(!transcript.command.includes("npx"), "no npx hint that was never executed");
 	assert.ok(transcript.lines.length > 0, "the published transcript carries the verifier's output");
 });
 
@@ -372,6 +411,39 @@ test("publish refuses when the journal has pending intents", (t) => {
 			assert.ok(err instanceof Error);
 			assert.match(err.message, /pending INTENT/);
 			assert.match(err.message, /msg_pending/);
+			return true;
+		},
+	);
+});
+
+test("publish refuses when a DONE auditHash is missing from the month chain", async (t) => {
+	// Gate check 2 — the one enforcing "the WAL may never claim a mint the
+	// chain cannot show". Collect a real month, then mutate one DONE's
+	// auditHash in the WAL: the gate must throw naming the missing hash.
+	const dir = tempDir(t);
+	const fleetDir = join(dir, "fleet");
+	const vaultRoot = join(dir, "vault");
+	await collectRecords({ records: [record({ messageId: "msg_gate_chain" })], fleetDir, vaultRoot });
+
+	const journalPath = join(fleetDir, "journal", `${MONTH}.jsonl`);
+	const mutated = readFileSync(journalPath, "utf-8")
+		.split("\n")
+		.map((line) => {
+			if (line.trim() === "") return line;
+			const entry = JSON.parse(line) as { type?: string; auditHash?: string };
+			if (entry.type === "DONE") entry.auditHash = "e".repeat(64);
+			return JSON.stringify(entry);
+		})
+		.join("\n");
+	writeFileSync(journalPath, mutated);
+
+	assert.throws(
+		() => assertPublishable({ fleetDir, month: MONTH, vaultRoot, verifyCli: VERIFY_CLI }),
+		(err: unknown) => {
+			assert.ok(err instanceof Error);
+			assert.match(err.message, /DONE auditHash/);
+			assert.match(err.message, /msg_gate_chain/);
+			assert.match(err.message, new RegExp("e".repeat(12)), "names the missing hash");
 			return true;
 		},
 	);
