@@ -84,6 +84,43 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		cacheReadPer1k: 10,
 		cacheWritePer1k: 125,
 	},
+	// Retrieved 2026-08-10 from Anthropic's published model-pricing table
+	// (platform.claude.com/docs/en/about-claude/pricing): $5 base input, $25
+	// output, $0.50 cache hit, $6.25 5-minute cache write per MTok. The 1-hour
+	// write ($10) collapses to the 5m rate under the documented approximation.
+	// These are the STANDARD-speed rates; fast mode ($10 in / $50 out) is a
+	// separate speed tier this per-model table does not price.
+	"claude-opus-5": {
+		inputPer1k: 50,
+		outputPer1k: 250,
+		cacheReadPer1k: 5,
+		cacheWritePer1k: 62.5,
+	},
+	// Retrieved 2026-08-10 from Anthropic's published model-pricing table
+	// (platform.claude.com/docs/en/about-claude/pricing): $3 base input, $15
+	// output, $0.30 cache hit, $3.75 5-minute cache write per MTok — the
+	// STANDARD rate effective 2026-09-01. The $2 in / $10 out introductory
+	// pricing in effect through 2026-08-31 is deliberately NOT entered:
+	// understatement is the dangerous direction, and D1 prefers conservative
+	// overstatement during the promo window. The 1-hour write ($6) collapses
+	// to the 5m rate under the documented approximation.
+	"claude-sonnet-5": {
+		inputPer1k: 30,
+		outputPer1k: 150,
+		cacheReadPer1k: 3,
+		cacheWritePer1k: 37.5,
+	},
+	// Retrieved 2026-08-10 from Anthropic's published model-pricing table
+	// (platform.claude.com/docs/en/about-claude/pricing): $5 base input, $25
+	// output, $0.50 cache hit, $6.25 5-minute cache write per MTok — identical
+	// to the opus-4-6 row, as published. The 1-hour write ($10) collapses to
+	// the 5m rate under the documented approximation.
+	"claude-opus-4-8": {
+		inputPer1k: 50,
+		outputPer1k: 250,
+		cacheReadPer1k: 5,
+		cacheWritePer1k: 62.5,
+	},
 
 	// ── OpenAI ──
 	// Cached-input reads are published per model and the discount varies WITHIN
@@ -165,7 +202,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
  * Bump on every entry change; recorded on receipts so a metered cost can be
  * reproduced against the exact table that priced it.
  */
-export const PRICING_TABLE_VERSION = "2026-08-09";
+export const PRICING_TABLE_VERSION = "2026-08-10";
 
 /** Pre-sorted entries for prefix matching (longest key first). */
 const SORTED_TABLE = Object.entries(PRICING_TABLE).sort((a, b) => b[0].length - a[0].length);

@@ -20,6 +20,7 @@ const WAITLIST_HREF = `mailto:hello@usertools.ai?subject=${encodeURIComponent(
 
 const FOOTER_LINKS: { label: string; href: string; external: boolean }[] = [
 	{ label: "Docs", href: "/docs", external: false },
+	{ label: "the fleet ledger", href: "/fleet", external: false },
 	{ label: "GitHub", href: "https://github.com/usertools-ai/usertrust", external: true },
 	{ label: "npm", href: "https://www.npmjs.com/package/usertrust", external: true },
 	{

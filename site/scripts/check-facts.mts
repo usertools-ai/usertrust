@@ -68,7 +68,9 @@
  * not loosen a fragment back to a plain substring match, and do not turn one
  * back into a whole-line pass.
  *
- * Usage: tsx scripts/check-facts.mts [sectionsDir]   (dir override for tests)
+ * Usage: tsx scripts/check-facts.mts [sectionsDir]
+ * No argument scans app/components/sections; the prebuild's second run passes
+ * `app/fleet`; tests pass temp dirs.
  * Exit 0 when sectionsDir does not exist yet (pre-section-build phase).
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -76,6 +78,11 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const SITE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// argv[2] resolves against the CWD, which is site/ when npm runs this script.
+// So the prebuild's fleet gate run passes `app/fleet` — NEVER `site/app/fleet`,
+// which resolves to site/site/app/fleet, a dir that never exists, and a missing
+// dir exits 0: a gate wired that way scans nothing and stays green forever
+// (spec r2/C9). check-facts.test.mts pins both the wired form and the trap.
 const sectionsDir = process.argv[2]
 	? resolve(process.argv[2])
 	: join(SITE_ROOT, "app", "components", "sections");

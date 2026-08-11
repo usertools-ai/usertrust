@@ -1,0 +1,1 @@
+{"type":"assistant","sessionId":"fixture-session-d","timestamp":"2026-08-10T12:30:00.000Z","isSidechain":false,"message":{"id":"msg_fix_d_001","type":"message","role":"assistant","model":"claude-opus-4-8","usage":{"input_tokens":12,"output_tokens":34,"cache_read_input_tokens":2500,"cache_creation_input_tokens":640,"service_tier":"standard"}}}

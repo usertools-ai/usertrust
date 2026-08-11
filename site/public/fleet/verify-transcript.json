@@ -1,0 +1,13 @@
+{
+	"command": "node packages/verify/dist/cli.js ../../../.usertrust-fleet/vault/2026-08/.usertrust",
+	"lines": [
+		"Vault integrity: VERIFIED (UNANCHORED — internal consistency only)",
+		"Chain length: 18457 events",
+		"Merkle root: 71170a6affd10dcb474798da3c7f4bf309b54419b16de337cbc47a8b896a48c0",
+		"Hash algorithm: SHA-256",
+		"First event: 2026-08-11T10:48:34.481Z",
+		"Last event: 2026-08-11T11:33:12.971Z",
+		"All hashes: valid (18457/18457)"
+	],
+	"exitCode": 0
+}

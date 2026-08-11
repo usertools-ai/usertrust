@@ -13,8 +13,8 @@ import {
 } from "../../src/ledger/pricing.js";
 
 describe("PRICING_TABLE", () => {
-	it("contains 23 models", () => {
-		expect(Object.keys(PRICING_TABLE)).toHaveLength(23);
+	it("contains 26 models", () => {
+		expect(Object.keys(PRICING_TABLE)).toHaveLength(26);
 	});
 
 	it("all rates are positive", () => {
@@ -367,7 +367,9 @@ describe("PRICING_TABLE_VERSION", () => {
 		// Bumped whenever any PRICING_TABLE entry changes (spec D1). Receipts record
 		// it (D5) so a cost can be reproduced against the exact table that priced it.
 		// 2026-08-09: the three frontier entries (fable-5 / gpt-5.6-sol / kimi-k3).
-		expect(PRICING_TABLE_VERSION).toBe("2026-08-09");
+		// 2026-08-10: the three fleet-ledger Anthropic entries (opus-5 / sonnet-5 /
+		// opus-4-8).
+		expect(PRICING_TABLE_VERSION).toBe("2026-08-10");
 	});
 });
 
@@ -449,6 +451,12 @@ describe("estimateCost with customRates", () => {
 // price tables, retrieved that day. Their per-entry provenance is in the pricing
 // table's own comments.
 //
+// The three fleet-ledger Anthropic entries (claude-opus-5, claude-sonnet-5,
+// claude-opus-4-8) were added on 2026-08-10, re-derived that day from Anthropic's
+// published model-pricing table (platform.claude.com/docs/en/about-claude/pricing).
+// sonnet-5 pins the STANDARD $3/$15 rate, not the $2/$10 introductory pricing
+// running through 2026-08-31 (D1 prefers overstatement during the promo window).
+//
 // An entry OMITS a cache field when the provider publishes no rate for that tier.
 // Omission is not zero: costFromRates resolves it to inputPer1k (the D1 money
 // invariant, pinned by name below). Never invent a discount to fill a gap.
@@ -468,6 +476,32 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 		outputPer1k: 500,
 		cacheReadPer1k: 10,
 		cacheWritePer1k: 125,
+	},
+	// $5 in / $25 out / $0.50 cache hit / $6.25 5m cache write per MTok
+	// (standard tier — fast mode's $10/$50 is a separate speed tier this table
+	// does not price). Retrieved 2026-08-10.
+	"claude-opus-5": {
+		inputPer1k: 50,
+		outputPer1k: 250,
+		cacheReadPer1k: 5,
+		cacheWritePer1k: 62.5,
+	},
+	// $3 in / $15 out / $0.30 cache hit / $3.75 5m cache write per MTok — the
+	// STANDARD rate effective 2026-09-01, deliberately not the $2/$10 intro
+	// pricing in effect through 2026-08-31. Retrieved 2026-08-10.
+	"claude-sonnet-5": {
+		inputPer1k: 30,
+		outputPer1k: 150,
+		cacheReadPer1k: 3,
+		cacheWritePer1k: 37.5,
+	},
+	// $5 in / $25 out / $0.50 cache hit / $6.25 5m cache write per MTok —
+	// identical to the opus-4-6 row, as published. Retrieved 2026-08-10.
+	"claude-opus-4-8": {
+		inputPer1k: 50,
+		outputPer1k: 250,
+		cacheReadPer1k: 5,
+		cacheWritePer1k: 62.5,
 	},
 
 	// OpenAI — cached-input reads are published per model; there is no separate
@@ -516,7 +550,17 @@ describe("PRICING_TABLE rates audit (D1)", () => {
 	// FALLBACK_RATE and never from a shorter sibling key's prefix match. A
 	// regression here is silent mispricing, not a failed lookup, so it is pinned
 	// as its own assertion rather than left to the per-entry checks above.
-	for (const model of ["claude-fable-5", "gpt-5.6-sol", "kimi-k3"]) {
+	// (Before 2026-08-10, "claude-opus-5" matched no table key at all and fell to
+	// FALLBACK_RATE — sonnet-class 30/150 — a silent 40% understatement of every
+	// opus-5 call. That is the mispricing the fleet-ledger rows kill.)
+	for (const model of [
+		"claude-fable-5",
+		"gpt-5.6-sol",
+		"kimi-k3",
+		"claude-opus-5",
+		"claude-sonnet-5",
+		"claude-opus-4-8",
+	]) {
 		it(`resolves ${model} to a table entry, not the fallback`, () => {
 			const rates = getModelRates(model);
 			expect(rates).toBe(PRICING_TABLE[model]);
