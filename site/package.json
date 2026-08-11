@@ -4,10 +4,10 @@
 	"type": "module",
 	"scripts": {
 		"dev": "next dev --turbopack",
-		"prebuild": "tsx scripts/check-facts.mts",
+		"prebuild": "tsx scripts/check-facts.mts && tsx scripts/check-facts.mts app/fleet",
 		"build": "next build",
 		"start": "next start",
-		"test": "node --import tsx --test scripts/*.test.mts app/lib/*.test.ts app/components/sections/lib/*.test.ts app/components/receipt/*.test.ts"
+		"test": "node --import tsx --test scripts/*.test.mts app/lib/*.test.ts app/components/sections/lib/*.test.ts app/components/receipt/*.test.ts app/fleet/*.test.ts"
 	},
 	"dependencies": {
 		"@tailwindcss/postcss": "^4.2.2",

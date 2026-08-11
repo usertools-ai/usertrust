@@ -2,6 +2,7 @@ node_modules/
 dist/
 coverage/
 .usertrust/
+.usertrust-fleet/
 .usertrust-gate1/
 .usertools/
 .usertools-gate1/
