@@ -1,0 +1,87 @@
+{
+	"byModel": [
+		{
+			"calls": 3,
+			"kernelUsd": 0.0084,
+			"model": "claude-opus-5",
+			"rateSource": "table",
+			"usertokens": 84
+		},
+		{
+			"calls": 1,
+			"kernelUsd": 0.0062,
+			"model": "claude-opus-4-8",
+			"rateSource": "table",
+			"usertokens": 62
+		},
+		{
+			"calls": 2,
+			"kernelUsd": 0.0013,
+			"model": "claude-sonnet-5",
+			"rateSource": "table",
+			"usertokens": 13
+		}
+	],
+	"bySession": [
+		{
+			"calls": 1,
+			"sessionHash": "d9dd19e2ebba",
+			"sidechainShare": 0,
+			"usertokens": 62
+		},
+		{
+			"calls": 1,
+			"sessionHash": "e279159a3ffc",
+			"sidechainShare": 0,
+			"usertokens": 39
+		},
+		{
+			"calls": 2,
+			"sessionHash": "de40e18aa282",
+			"sidechainShare": 0,
+			"usertokens": 38
+		},
+		{
+			"calls": 1,
+			"sessionHash": "66d39d6db395",
+			"sidechainShare": 0,
+			"usertokens": 14
+		},
+		{
+			"calls": 1,
+			"sessionHash": "eb18cc80abb6",
+			"sidechainShare": 1,
+			"usertokens": 6
+		}
+	],
+	"collectorCommit": "2294ae8",
+	"generatedAt": "2026-08-11T10:18:02.032Z",
+	"month": {
+		"cacheReadTokens": 5400,
+		"cacheWriteTokens": 1270,
+		"calls": 6,
+		"inputTokens": 47,
+		"kernelUsd": 0.0159,
+		"listPriceUsd": 0.015786,
+		"outputTokens": 216,
+		"usertokens": 159
+	},
+	"residualCauses": [
+		"cache-write TTL split",
+		"pricing-table vs list-price drift (incl. promotional rates)",
+		"capture-time vs occurrence-time pricing across table versions",
+		"kernel per-call rounding floor/ceiling"
+	],
+	"scanReport": {
+		"candidateDirsSkipped": 0,
+		"deferredIds": 0,
+		"dirsScanned": 1
+	},
+	"tableVersions": [
+		"2026-08-10"
+	],
+	"window": {
+		"firstOccurredAt": "2026-08-10T12:00:06.000Z",
+		"publishedMonth": "2026-08"
+	}
+}
