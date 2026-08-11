@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -415,4 +415,62 @@ test("stripping is span-scoped, not greedy: real section lines still pass", () =
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+/**
+ * THE FLEET GATE RUN (spec r2/C9). check-facts.mts resolves argv[2] against
+ * the CWD, and npm scripts run with cwd = site/. So the prebuild's second
+ * gate run must pass `app/fleet` — the plausible-looking `site/app/fleet`
+ * resolves to site/site/app/fleet, a directory that never exists, and a
+ * missing sectionsDir exits 0 by design (pre-section-build phase). That is a
+ * gate wired to scan NOTHING, green forever. These two tests pin (a) that the
+ * cwd-correct form actually scans a rogue digit planted in site/app/fleet,
+ * (b) that the trap form really does scan nothing (why the wiring matters),
+ * and (c) the prebuild wiring string itself, so a later "cleanup" to the
+ * trap form fails in CI instead of silently disarming the gate.
+ */
+test("fleet gate run: argv `app/fleet` from cwd site/ scans the route; `site/app/fleet` scans nothing", () => {
+	const fleetDir = join(SITE_ROOT, "app", "fleet");
+	// Task 7 owns the real page; until it lands, the test supplies the minimal
+	// directory presence and removes it again. If the page already exists, only
+	// the planted rogue file is created and removed.
+	const dirPreExisted = existsSync(fleetDir);
+	if (!dirPreExisted) mkdirSync(fleetDir, { recursive: true });
+	const rogue = join(fleetDir, "__fleet-gate-regression__.tsx");
+	try {
+		writeFileSync(
+			rogue,
+			"export default function Rogue() {\n\treturn <p>9999 agents in the fleet</p>;\n}\n",
+		);
+		// The wired form — relative to site/, exactly as the prebuild runs it.
+		const hit = runChecker("app/fleet");
+		assert.notEqual(hit.status, 0, "a rogue digit in site/app/fleet must fail the fleet gate run");
+		assert.match(hit.stderr, /__fleet-gate-regression__\.tsx:2/);
+		assert.match(hit.stderr, /9999/);
+		// The trap form — same cwd, rogue file still planted: resolves to
+		// site/site/app/fleet, scans nothing, exits 0. This is the r2/C9 failure
+		// mode the wiring test below exists to keep out of package.json.
+		const miss = runChecker("site/app/fleet");
+		assert.equal(
+			miss.status,
+			0,
+			`argv site/app/fleet must resolve to a missing dir and exit 0 (scanning nothing), got:\n${miss.stderr}`,
+		);
+		assert.match(miss.stdout, /does not exist yet/);
+	} finally {
+		rmSync(rogue, { force: true });
+		if (!dirPreExisted) rmSync(fleetDir, { recursive: true, force: true });
+	}
+});
+
+test("prebuild wires the fleet gate run with the cwd-correct argv form", () => {
+	const pkg = JSON.parse(readFileSync(join(SITE_ROOT, "package.json"), "utf-8")) as {
+		scripts: Record<string, string>;
+	};
+	assert.equal(
+		pkg.scripts.prebuild,
+		"tsx scripts/check-facts.mts && tsx scripts/check-facts.mts app/fleet",
+		"prebuild must run the sections gate AND the fleet gate with argv `app/fleet` — " +
+			"`site/app/fleet` resolves against cwd=site/ to a missing dir and exits 0, scanning nothing (r2/C9)",
+	);
 });
