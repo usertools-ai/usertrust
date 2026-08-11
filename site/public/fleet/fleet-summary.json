@@ -1,11 +1,11 @@
 {
 	"byModel": [
 		{
-			"calls": 2757,
-			"kernelUsd": 859.7892,
+			"calls": 3387,
+			"kernelUsd": 1312.0827,
 			"model": "claude-fable-5",
 			"rateSource": "table",
-			"usertokens": 8597892
+			"usertokens": 13120827
 		},
 		{
 			"calls": 6636,
@@ -15,11 +15,11 @@
 			"usertokens": 8430428
 		},
 		{
-			"calls": 7709,
-			"kernelUsd": 430.5126,
+			"calls": 7910,
+			"kernelUsd": 441.5464,
 			"model": "claude-sonnet-5",
 			"rateSource": "table",
-			"usertokens": 4305126
+			"usertokens": 4415464
 		},
 		{
 			"calls": 333,
@@ -38,16 +38,16 @@
 	],
 	"bySession": [
 		{
-			"calls": 8303,
+			"calls": 8408,
 			"sessionHash": "c5331ff5bd2c",
 			"sidechainShare": 1,
-			"usertokens": 9013441
+			"usertokens": 9259322
 		},
 		{
-			"calls": 5206,
+			"calls": 5932,
 			"sessionHash": "9ae40bf0e9b9",
-			"sidechainShare": 1,
-			"usertokens": 4644647
+			"sidechainShare": 0.9115,
+			"usertokens": 9032039
 		},
 		{
 			"calls": 2747,
@@ -86,17 +86,17 @@
 			"usertokens": 20937
 		}
 	],
-	"collectorCommit": "de4724a",
-	"generatedAt": "2026-08-11T10:58:22.824Z",
+	"collectorCommit": "944f9c2",
+	"generatedAt": "2026-08-11T11:35:41.256Z",
 	"month": {
-		"cacheReadTokens": 2477496375,
-		"cacheWriteTokens": 78345261,
-		"calls": 17626,
-		"inputTokens": 146749,
-		"kernelUsd": 2199.3342,
-		"listPriceUsd": 2257.676629,
-		"outputTokens": 13316695,
-		"usertokens": 21993342
+		"cacheReadTokens": 2776848283,
+		"cacheWriteTokens": 90229253,
+		"calls": 18457,
+		"inputTokens": 148337,
+		"kernelUsd": 2662.6615,
+		"listPriceUsd": 2623.277206,
+		"outputTokens": 14138501,
+		"usertokens": 26626615
 	},
 	"residualCauses": [
 		"cache-write TTL split",
@@ -106,7 +106,7 @@
 	],
 	"scanReport": {
 		"candidateDirsSkipped": 3,
-		"deferredIds": 1489,
+		"deferredIds": 928,
 		"dirsScanned": 44
 	},
 	"tableVersions": [
