@@ -2,15 +2,24 @@ import {
 	ANCHOR_EXTERNAL_VISIBILITY,
 	ANCHOR_NOT_PROOF_OF_UNIQUENESS,
 	ANCHOR_PARTIAL_MITIGATION,
+	EQUIVOCATION_CAVEAT,
+	EQUIVOCATION_NON_GOAL,
 	EXTENSION_FAILURE_MEANING,
 	HISTORY_WALK_PROVED,
 	REKOR_EVIDENCE_MEANING,
 	RESULT_LABEL,
+	rungDisclaimers,
 	S3_OPERATOR_ASSERTED,
 	UNAVAILABLE_MEANING,
 } from "../lib/claims";
 import { type Bag, bagList, isBag, num, str } from "../lib/unsigned-reads";
-import type { AnchorEvidence, CheckEntry, SegmentCheckpointV2, Verification } from "../lib/wire";
+import type {
+	AnchorEvidence,
+	CheckEntry,
+	LadderStatus,
+	SegmentCheckpointV2,
+	Verification,
+} from "../lib/wire";
 import HashValue from "./hash-value";
 
 /**
@@ -235,11 +244,22 @@ function historyLine(checkpoint: Bag, index: number): { key: string; label: stri
 function HistoryPanel({
 	history,
 	standing,
+	rung,
 }: {
 	history: SegmentCheckpointV2[];
 	standing: Standing;
+	rung: LadderStatus;
 }) {
 	const entries = bagList(history);
+	// R7 binds the walk's CLAIM to the walk's surviving GAP: the caveat pair
+	// exists so no reader infers the walk closed equivocation. The masthead
+	// carries the pair from `verified_checkpoint_history` up — but §4.1 rule 3
+	// is a ONE-SIDED cap, so a resolver may honestly serve
+	// `checkpointHistory: passed` while claiming only `verified_checkpoint`
+	// (the §7 launch ceiling does exactly this). At that rung the masthead
+	// carries no caveat, so the claim would otherwise render bare. The pair
+	// travels with the claim, not with the rung.
+	const mastheadCarriesCaveat = rungDisclaimers(rung).includes(EQUIVOCATION_CAVEAT);
 	return (
 		<div
 			className={standing.frame}
@@ -255,6 +275,14 @@ function HistoryPanel({
 			{standing.upheld ? (
 				<p className="mt-2 text-[13px] leading-relaxed text-white/70" data-testid="history-proved">
 					{HISTORY_WALK_PROVED}
+				</p>
+			) : null}
+			{standing.upheld && !mastheadCarriesCaveat ? (
+				<p
+					className="mt-2 text-[13px] leading-relaxed text-white/70"
+					data-testid="history-equivocation-caveat"
+				>
+					{EQUIVOCATION_CAVEAT} {EQUIVOCATION_NON_GOAL}
 				</p>
 			) : null}
 			{standing.note ? (
@@ -279,11 +307,14 @@ export default function AnchorEvidencePanels({
 	anchorEvidence,
 	checkpointHistory,
 	checks,
+	rung,
 }: {
 	anchorEvidence?: AnchorEvidence;
 	checkpointHistory?: SegmentCheckpointV2[];
 	/** The extension RESULTS — what the served evidence is entitled to claim. */
 	checks: Verification["checks"];
+	/** The rung, so a claim's caveat never depends on the masthead carrying it. */
+	rung: LadderStatus;
 }) {
 	const rekor = anchorEvidence && isBag(anchorEvidence.rekor) ? anchorEvidence.rekor : undefined;
 	const probes =
@@ -299,7 +330,11 @@ export default function AnchorEvidencePanels({
 	return (
 		<div className="flex flex-col gap-4" data-testid="extension-evidence">
 			{history ? (
-				<HistoryPanel history={history} standing={standingFor(checks.checkpointHistory)} />
+				<HistoryPanel
+					history={history}
+					standing={standingFor(checks.checkpointHistory)}
+					rung={rung}
+				/>
 			) : null}
 			{rekor ? <RekorPanel rekor={rekor} standing={standingFor(checks.anchorEvidence)} /> : null}
 			{probes ? <S3Panel probes={probes} /> : null}

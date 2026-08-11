@@ -26,7 +26,10 @@ import WorkClaims from "./components/work-claims";
 import { verifiedFixtureState } from "./fixture-harness";
 import {
 	ADVISORY_NEVER_ALTERS_VERDICT,
+	EQUIVOCATION_CAVEAT,
+	EQUIVOCATION_NON_GOAL,
 	EXTENSION_FAILURE_MEANING,
+	HISTORY_WALK_PROVED,
 	LADDER,
 	NOT_APPLICABLE_MEANING,
 	POSTURES_ARE_ATTESTED_ENUMS,
@@ -405,7 +408,10 @@ test("DisplayAnnex: an unreadable unsigned member is DROPPED, never thrown and n
 // ---------------------------------------------------------------------------
 
 test("AnchorEvidencePanels: nothing served renders nothing", () => {
-	assert.equal(html(<AnchorEvidencePanels checks={verification().checks} />), "");
+	assert.equal(
+		html(<AnchorEvidencePanels checks={verification().checks} rung="verified_checkpoint" />),
+		"",
+	);
 });
 
 test("AnchorEvidencePanels: an unrecognizable anchorEvidence container renders as absent, not as a claim", () => {
@@ -413,6 +419,7 @@ test("AnchorEvidencePanels: an unrecognizable anchorEvidence container renders a
 		<AnchorEvidencePanels
 			anchorEvidence={{ rekor: "not-an-object", s3ObjectLock: "not-an-array" }}
 			checks={verification({ anchorEvidence: PASSED }).checks}
+			rung="verified_checkpoint_history"
 		/>,
 	);
 	assert.equal(markup, "", "fail-closed: no shape recognized, no panel rendered");
@@ -421,7 +428,13 @@ test("AnchorEvidencePanels: an unrecognizable anchorEvidence container renders a
 test("AnchorEvidencePanels: an unreadable served HISTORY renders as absent, and never as a throw", () => {
 	const checks = verification({ checkpointHistory: PASSED }).checks;
 	assert.equal(
-		html(<AnchorEvidencePanels checkpointHistory={["seg-1", 2] as never} checks={checks} />),
+		html(
+			<AnchorEvidencePanels
+				checkpointHistory={["seg-1", 2] as never}
+				checks={checks}
+				rung="verified_checkpoint_history"
+			/>,
+		),
 		"",
 		"no readable entry is an unrecognized member — the ledger still carries the RESULT",
 	);
@@ -440,6 +453,7 @@ test("AnchorEvidencePanels: an unreadable served HISTORY renders as absent, and 
 				] as never
 			}
 			checks={checks}
+			rung="verified_checkpoint_history"
 		/>,
 	);
 	const text = textOf(partial);
@@ -452,6 +466,43 @@ test("AnchorEvidencePanels: an unreadable served HISTORY renders as absent, and 
 	assert.ok(text.includes("segment-checkpoint history (2)"), "the count is what was served");
 });
 
+test("R7: the history claim NEVER renders without its equivocation gap, at any rung", () => {
+	// §4.1 rule 3 is a ONE-SIDED cap: a resolver may serve
+	// `checkpointHistory: passed` while honestly claiming only
+	// `verified_checkpoint` (the §7 launch ceiling does exactly this). The
+	// masthead carries no caveat at that rung, so the panel must.
+	const history = [
+		{ segmentId: "seg-0001", segmentFirstSequence: 1, treeSize: 4 },
+	] as unknown as Parameters<typeof AnchorEvidencePanels>[0]["checkpointHistory"];
+	const checks = verification({ checkpointHistory: PASSED }).checks;
+
+	for (const rung of LADDER) {
+		const markup = html(
+			<AnchorEvidencePanels checkpointHistory={history} checks={checks} rung={rung} />,
+		);
+		const text = textOf(markup);
+		assert.ok(text.includes(HISTORY_WALK_PROVED), `${rung}: the walk's claim renders`);
+		const carried = [...rungDisclaimers(rung), text].join(" ");
+		assert.ok(
+			carried.includes(EQUIVOCATION_CAVEAT) && carried.includes(EQUIVOCATION_NON_GOAL),
+			`${rung}: the claim must never appear without the equivocation gap and its non-goal`,
+		);
+	}
+
+	// ...and a history that did NOT walk clean claims nothing, so it owes no caveat.
+	const failed = html(
+		<AnchorEvidencePanels
+			checkpointHistory={history}
+			checks={
+				verification({ checkpointHistory: { result: "failed", failure: "HISTORY_INVALID" } }).checks
+			}
+			rung="verified_checkpoint"
+		/>,
+	);
+	assert.ok(!textOf(failed).includes(HISTORY_WALK_PROVED));
+	assert.ok(!failed.includes('data-testid="history-equivocation-caveat"'));
+});
+
 test("AnchorEvidencePanels: a PASSED Rekor attachment carries R8's caveat; a FAILED one does not", () => {
 	const rekor = {
 		rekor: { artifactHash: "ab".repeat(32), log: { url: "https://log", logIndex: 1 } },
@@ -460,13 +511,18 @@ test("AnchorEvidencePanels: a PASSED Rekor attachment carries R8's caveat; a FAI
 		<AnchorEvidencePanels
 			anchorEvidence={rekor}
 			checks={verification({ anchorEvidence: PASSED }).checks}
+			rung="verified_checkpoint_history"
 		/>,
 	);
 	assert.ok(passed.includes('data-anchor-standing="upheld"'));
 	assert.ok(passed.includes('data-testid="anchor-caveat"'));
 
 	const failed = html(
-		<AnchorEvidencePanels anchorEvidence={rekor} checks={verification().checks} />,
+		<AnchorEvidencePanels
+			anchorEvidence={rekor}
+			checks={verification().checks}
+			rung="verified_checkpoint"
+		/>,
 	);
 	assert.ok(failed.includes('data-anchor-standing="not-upheld"'));
 	assert.ok(

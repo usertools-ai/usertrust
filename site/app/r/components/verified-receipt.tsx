@@ -50,6 +50,7 @@ export default function VerifiedReceipt({ state }: { state: VerifiedState }) {
 				anchorEvidence={envelope.anchorEvidence}
 				checkpointHistory={envelope.checkpointHistory}
 				checks={envelope.verification.checks}
+				rung={state.rung}
 			/>
 			<WorkClaims claims={claims} />
 			<DisplayAnnex display={envelope.display} />
