@@ -1,3 +1,4 @@
+import VerifiedReceipt from "../components/verified-receipt";
 import { verifyPageMetadata } from "../lib/metadata";
 import { resolveVerifyPageState } from "../lib/resolve";
 import { shellHeadline } from "../lib/shell-copy";
@@ -34,9 +35,14 @@ export default async function VerifyReceiptPage({ params }: PageProps) {
 	const { receiptId } = await params;
 	const state = await resolveVerifyPageState(receiptId);
 
+	// The VERIFIED rungs render through the §6 anatomy. Every other state is
+	// still the interim shell below — the §7 non-green copy matrix (pending,
+	// terminal, loud failures, operational) is the states pass that follows
+	// this one, and half-dressing those states now would make the shell look
+	// finished while it is still a placeholder.
 	return (
 		<main>
-			<Shell state={state} />
+			{state.kind === "verified" ? <VerifiedReceipt state={state} /> : <Shell state={state} />}
 		</main>
 	);
 }

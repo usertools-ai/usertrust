@@ -15,6 +15,7 @@
  * renders — that fallback text is an interim placeholder, not spec-pinned,
  * and is expected to be replaced wholesale when Task 5 lands.
  */
+import { RUNG_VERDICT_WORD } from "./claims";
 import type { PageState } from "./wire";
 
 /** §7, "Invalid ID (local, R2)". */
@@ -45,8 +46,13 @@ export function shellHeadline(state: PageState): string {
 			return PROTOCOL_ERROR_HEADLINE;
 		case "verificationUnavailable":
 			return VERIFICATION_UNAVAILABLE_HEADLINE;
+		// The §6 anatomy renders the verified rungs (`components/verified-receipt`),
+		// so this branch is only a fallback for a caller that wants a headline
+		// string. It DELEGATES to `claims.ts` rather than rebuilding the word from
+		// the status enum: two independent ways of spelling the verdict is exactly
+		// the drift the §8 copy pins exist to prevent.
 		case "verified":
-			return `VERIFIED — ${state.rung.replace("verified_", "").replace("_", " ").toUpperCase()}`;
+			return RUNG_VERDICT_WORD[state.rung];
 		case "pending":
 			return state.status === "reserved" ? "receipt pending…" : "reconciling…";
 		case "terminalNoReceipt":

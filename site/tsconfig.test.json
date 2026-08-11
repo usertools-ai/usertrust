@@ -1,0 +1,7 @@
+{
+	"//": "Test-only override. `tsconfig.json` keeps jsx: \"preserve\" because that is what Next.js compiles against; tsx/esbuild, driven directly by `node --import tsx --test`, needs an actual JSX transform to run a `.test.tsx` file, and the classic runtime it falls back to would demand a React import in every component. Pointed at by TSX_TSCONFIG_PATH in the `test` script. Nothing in the Next build reads this file.",
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"jsx": "react-jsx"
+	}
+}
