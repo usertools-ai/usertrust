@@ -158,6 +158,28 @@ test("the 429 exemption reaches rateLimited without protocol-error contamination
 	}
 });
 
+test("a 429 whose body read fails still resolves to rateLimited — the body is never even attempted", async () => {
+	let textCalled = false;
+	const fetchImpl = (async () => {
+		return {
+			status: 429,
+			headers: new Headers({ "Retry-After": "10" }),
+			text: async () => {
+				textCalled = true;
+				throw new Error("stream reset");
+			},
+		} as unknown as Response;
+	}) as typeof fetch;
+
+	const state = await resolveVerifyPageState("ut1_WskkNFGvdE3dwzwzFyxcNC", { fetchImpl });
+
+	assert.equal(textCalled, false, "the 429 body must never be read, not merely discarded");
+	assert.equal(state.kind, "rateLimited");
+	if (state.kind === "rateLimited") {
+		assert.equal(state.retryAfter?.raw, "10");
+	}
+});
+
 test("a 503 verificationUnavailable body resolves to the operational state, not protocol error", async () => {
 	const fixture = loadFixture("verification-unavailable.json");
 	const { impl } = spyFetch(fixture);

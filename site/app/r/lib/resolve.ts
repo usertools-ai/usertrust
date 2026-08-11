@@ -86,9 +86,15 @@ function isAbortError(error: unknown): boolean {
  *      HTTP response to hand it, so the states are built directly via
  *      {@link transportFailureState} (R37's transport half), exactly as
  *      `wire.ts` documents.
- *   3. **The body** — read as text and handed, verbatim and unparsed, to
- *      `parseResolverResponse`, which owns every remaining rule (the §3 wire
- *      table, the §4 schema, R1/R4 identity and byte authority).
+ *   3. **429** — the §4.2 exemption: the body is never read at all (not
+ *      merely discarded), so a body-read failure can never contaminate the
+ *      rate-limited outcome. `parseResolverResponse` gets `raw: null`.
+ *   4. **The body** (every other status) — read as text and handed,
+ *      verbatim and unparsed, to `parseResolverResponse`, which owns every
+ *      remaining rule (the §3 wire table, the §4 schema, R1/R4 identity and
+ *      byte authority). A read failure here IS a transport failure — it maps
+ *      to the protocol-error shell (R37), same as a network failure — because
+ *      only 429 is exempted from needing a trustworthy body.
  */
 export async function resolveVerifyPageState(
 	routeParamId: string,
@@ -127,6 +133,21 @@ export async function resolveVerifyPageState(
 		clearTimeout(timer);
 	}
 
+	// 3 — the 429 exemption (§4.2), enforced here too: "the body is absent or
+	// untrusted and is NEVER parsed" means never attempted, not merely
+	// discarded once read. A body read that throws on any other status is a
+	// transport failure (protocol-error shell); on 429 it must never affect
+	// the outcome at all, so the read itself is skipped and `raw` is `null` —
+	// exactly the shape `wire.ts` documents for a body-less 429.
+	if (response.status === 429) {
+		return parseResolverResponse({
+			routeParamId,
+			httpStatus: response.status,
+			headers: response.headers as ResolverHeaders,
+			raw: null,
+		});
+	}
+
 	let raw: string;
 	try {
 		raw = await response.text();
@@ -140,7 +161,7 @@ export async function resolveVerifyPageState(
 		);
 	}
 
-	// 3 — everything else (the §3 table, the §4 schema, R1/R4) is wire.ts's.
+	// 4 — everything else (the §3 table, the §4 schema, R1/R4) is wire.ts's.
 	return parseResolverResponse({
 		routeParamId,
 		httpStatus: response.status,
