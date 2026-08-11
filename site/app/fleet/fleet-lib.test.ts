@@ -228,5 +228,10 @@ test("loadVerifyTranscript: committed transcript is a passing run", () => {
 	const transcript = loadVerifyTranscript();
 	assert.equal(transcript.exitCode, 0);
 	assert.ok(transcript.lines.length > 0);
-	assert.ok(transcript.command.includes("usertrust-verify"));
+	// The command is the LITERAL gate invocation — node + the real verifier
+	// path + the real vault path — never an `npx usertrust-verify` hint that
+	// was not what ran (final-review must-fix 4).
+	assert.ok(transcript.command.startsWith("node "), transcript.command);
+	assert.ok(transcript.command.includes("packages/verify/dist/cli.js"), transcript.command);
+	assert.ok(!transcript.command.includes("npx"), "no npx hint that was never executed");
 });
