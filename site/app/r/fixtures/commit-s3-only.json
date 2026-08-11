@@ -1,0 +1,216 @@
+{
+	"routeParamId": "ut1_9Mpq7LGoAuHebPAPaMjmrx",
+	"wire": {
+		"httpStatus": 200,
+		"headers": {
+			"cache-control": "no-cache"
+		},
+		"body": {
+			"apiVersion": "1",
+			"receiptId": "ut1_9Mpq7LGoAuHebPAPaMjmrx",
+			"status": "verified_checkpoint",
+			"receiptBytes": "eyJzcGVjIjoidXQxIiwicmVjZWlwdElkIjoidXQxXzlNcHE3TEdvQXVIZWJQQVBhTWptcngiLCJzY29wZSI6InNlc3Npb24iLCJtaW50ZWRBdCI6IjIwMjYtMDgtMTBUMTQ6MTU6MDEuMDAwWiIsIm1pbnRlciI6eyJraW5kIjoicHJveHkiLCJrZXlJZCI6Im1pbnQta2V5LTIwMjYtMDEiLCJ0cnVzdERvbWFpbiI6InVzZXJ0cnVzdC5haSJ9LCJ3b3JrIjp7ImtpbmQiOiJjb21taXQiLCJyZXBvSWQiOiJnaXRodWIuY29tOlJfa2dET0sxeDJZdyIsIm9pZCI6ImMwMDY5NjU2N2VjODBmZDJlYWMzNTcyMDZmYjU4MmMzYjlhYWMyMzgiLCJvaWRBbGciOiJzaGExIiwib2JqZWN0U2hhMjU2IjoiYzk4YWUzNjI3ZmZhYjViYzQyNzQ5YzcwN2IwY2EyOWQ1ZmFiNWQyYzUyODliZWZjYjQ5OTc5MWNkZmZmNTQyNSIsInJlcG9zaXRvcnlNZW1iZXJzaGlwIjp7InN0YXR1cyI6InByb3ZpZGVyVmVyaWZpZWQiLCJwcm9vZklkIjoiNGYxNWY5Y2M5Njk3YzliMDViNDBiM2VkIn19LCJldmVudCI6eyJpZCI6IjM2Mzg2OTU0M2M4YTYxZjUxMDU2OWNmZjZkZDhjN2E0IiwidGltZXN0YW1wIjoiMjAyNi0wOC0xMFQxNDoxMjowMS4wMDBaIiwicHJldmlvdXNIYXNoIjoiODk4YTRiMDNhYjE0ZjZjNTkyYzM3ZTllYmQzMzZiNDkwNTI2YzNlYTBhYTg1OWY3YTBhZDAyZjE2ZTZiMzU5ZiIsImtpbmQiOiJyZWNlaXB0X3NldHRsZWQiLCJhY3RvciI6eyJ0eXBlIjoic3lzdGVtIiwiaWQiOiJyZWNlaXB0LW1pbnRlciIsIm5hbWUiOiJyZWNlaXB0LW1pbnRlciJ9LCJkYXRhIjp7InNwZWMiOiJ1dDEiLCJzY29wZSI6InNlc3Npb24iLCJzZXNzaW9uSWQiOiJzZXNzX2ZiMWYzZmIzZTVlNTNjY2NlZTNlZGZlZCIsImdlbmVyYXRpb24iOjEsIndvcmsiOnsia2luZCI6ImNvbW1pdCIsInJlcG9JZCI6ImdpdGh1Yi5jb206Ul9rZ0RPSzF4Mll3Iiwib2lkIjoiYzAwNjk2NTY3ZWM4MGZkMmVhYzM1NzIwNmZiNTgyYzNiOWFhYzIzOCIsIm9pZEFsZyI6InNoYTEiLCJvYmplY3RTaGEyNTYiOiJjOThhZTM2MjdmZmFiNWJjNDI3NDljNzA3YjBjYTI5ZDVmYWI1ZDJjNTI4OWJlZmNiNDk5NzkxY2RmZmY1NDI1IiwicmVwb3NpdG9yeU1lbWJlcnNoaXAiOnsic3RhdHVzIjoicHJvdmlkZXJWZXJpZmllZCIsInByb29mSWQiOiI0ZjE1ZjljYzk2OTdjOWIwNWI0MGIzZWQifX0sInNlc3Npb25Bc3NvY2lhdGlvbiI6Im93bmVyQXNzZXJ0ZWQiLCJtb2RlbHMiOlsiY2xhdWRlLXNvbm5ldC00LTYiXSwicHJvdmlkZXJzIjpbImFudGhyb3BpYyJdLCJzdGFydGVkQXQiOiIyMDI2LTA4LTEwVDE0OjAwOjAwLjAwMFoiLCJlbmRlZEF0IjoiMjAyNi0wOC0xMFQxNDoxMjowMC4wMDBaIiwic3BlbmQiOnsiYXNzZXNzZWRVc2VydG9rZW5zIjozMDAwLCJwb3N0ZWRVc2VydG9rZW5zIjozMDAwLCJyb3VuZGluZ0FkanVzdG1lbnQiOjEsInRyYW5zZmVyQ291bnQiOjMsInVzYWdlUG9zdHVyZSI6InByb3ZpZGVyIiwicHJpY2luZ1Bvc3R1cmUiOiJleGFjdCJ9LCJwcmljaW5nIjp7InRhYmxlVmVyc2lvbnMiOlsiMjAyNi0wNy0wMSJdfSwidHJhbnNmZXJTZXQiOlt7ImF1dGhvcml6YXRpb25UcmFuc2ZlcklkIjoiNGU1OTBlNTczNDUzYjZmMmJkOTE0MWVlYjE2YzdiZWQiLCJzZXR0bGVtZW50VHJhbnNmZXJJZCI6IjZkZTlmZGNiYjUzOTM2Yjc0OGQ1YTNiOGY4M2E0MzAzIn0seyJhdXRob3JpemF0aW9uVHJhbnNmZXJJZCI6ImE1M2M3MTdmMzMzODM5Y2JmYjY5ZjBmZGU5YjY5OGZhIiwic2V0dGxlbWVudFRyYW5zZmVySWQiOiI2YjQzNDE4NDRkYmUyZDgwZWVhYmY2ZmJjYjFjMGFkYSJ9LHsiYXV0aG9yaXphdGlvblRyYW5zZmVySWQiOiIzZmRjZGQ2ZGJhOTI3MGEzZmNlZWVjOTBjYWU1ZTFlYSIsInNldHRsZW1lbnRUcmFuc2ZlcklkIjoiOWNiYzRlOWU1NDliMTE3NzQwNGIzNWZjZDgxZTE3ZTcifV0sInRyYW5zZmVyU2V0Um9vdCI6IjZhYzRkYTQ3N2UxMmMzOThhYjVkODlhN2JhMDkxMGQ3NzQ4OWFlYTQ3NjMzYjQ2YjE2MDdkNzA1MzA1YmUyYjcifSwic2VxdWVuY2UiOjgxMjQxMDAsImhhc2giOiJlMjdlM2JmMDVhODA4MTE5MzU4ZTllNTIyMDZiZDgwNzY2NWE3MjgxMWQxNGVmNTYxZjdiNTFlZWMwOWQ1NDA0In0sInByb29mIjp7InByb2ZpbGUiOiJwcm94eS12MSIsImNoYWluIjoidmF1bHQtdXNlcnRydXN0LXByb2QtMSIsIm1pbnRFdmVudEhhc2giOiJlMjdlM2JmMDVhODA4MTE5MzU4ZTllNTIyMDZiZDgwNzY2NWE3MjgxMWQxNGVmNTYxZjdiNTFlZWMwOWQ1NDA0IiwiaW5jbHVzaW9uIjp7InZlcnNpb24iOjEsImxlYWZIYXNoIjoiZTI3ZTNiZjA1YTgwODExOTM1OGU5ZTUyMjA2YmQ4MDc2NjVhNzI4MTFkMTRlZjU2MWY3YjUxZWVjMDlkNTQwNCIsImxlYWZJbmRleCI6NTAsInRyZWVTaXplIjo5MCwicm9vdCI6IjgxYTEyYTZhYzc3NjhmOTVlMmJmYjY3ZDcxZWM5YTYxOTQ2Njc4ZTJkMDcyN2RhMmExNjIwNmNhNGZmYzBkNWIiLCJzaWJsaW5ncyI6W3siaGFzaCI6ImZhMDlhNWEyYzY4ODYzN2FjNjIxOGY1N2U3MjlkYmNjN2Y2YjZhZWMyYjg4YzA5NmQ0M2E3YjlhZTE1ZWYzNzQiLCJwb3NpdGlvbiI6ImxlZnQifSx7Imhhc2giOiI2YTAxZjI3OGQxMjdiYWU4YTM2MjE0MDA2NGM3NTAzMTJlZWRlYjE2YzZkZGVkZmE5NjAxMGMyMjI4Y2VjZjk0IiwicG9zaXRpb24iOiJyaWdodCJ9LHsiaGFzaCI6IjVjNzBjNjI4MjRhZGRjYjU4NzEzZTNhMTgyYTIxMmMzYzdkOTFmMjg2MGRmYjcyMWMwNjAwOGQ3NzM1MjE2N2QiLCJwb3NpdGlvbiI6ImxlZnQifV0sInNlZ21lbnRJZCI6InNlZy0wMDAzIn0sImNoZWNrcG9pbnQiOnsidiI6MiwidmF1bHRJZCI6InZhdWx0LXVzZXJ0cnVzdC1wcm9kLTEiLCJwcm9maWxlIjoicHJveHktdjEiLCJyb290IjoiODFhMTJhNmFjNzc2OGY5NWUyYmZiNjdkNzFlYzlhNjE5NDY2NzhlMmQwNzI3ZGEyYTE2MjA2Y2E0ZmZjMGQ1YiIsInRyZWVTaXplIjo5MCwic2VnbWVudElkIjoic2VnLTAwMDMiLCJzZWdtZW50Rmlyc3RTZXF1ZW5jZSI6ODEyNDA1MCwicHJldmlvdXNTZWdtZW50Um9vdCI6ImdlbmVzaXMiLCJwcmV2aW91c1NlZ21lbnRJZCI6ImdlbmVzaXMiLCJrZXlJZCI6ImNoZWNrcG9pbnQta2V5LTIwMjYtMDEiLCJwdWJsaXNoZWRBdCI6IjIwMjYtMDgtMTBUMTQ6MTU6MDAuMDAwWiIsInNpZyI6ImMzbHVkR2hsZEdsakxXTm9aV05yY0c5cGJuUXRjMmxuT2pwRE5BPT0ifX0sInNpZ25hdHVyZSI6eyJhbGciOiJlZDI1NTE5Iiwia2V5SWQiOiJtaW50LWtleS0yMDI2LTAxIiwic2lnIjoiYzNsdWRHaGxkR2xqTFcxcGJuUXRjMmxuT2pwRE5BPT0ifX0=",
+			"receipt": {
+				"spec": "ut1",
+				"receiptId": "ut1_9Mpq7LGoAuHebPAPaMjmrx",
+				"scope": "session",
+				"mintedAt": "2026-08-10T14:15:01.000Z",
+				"minter": {
+					"kind": "proxy",
+					"keyId": "mint-key-2026-01",
+					"trustDomain": "usertrust.ai"
+				},
+				"work": {
+					"kind": "commit",
+					"repoId": "github.com:R_kgDOK1x2Yw",
+					"oid": "c00696567ec80fd2eac357206fb582c3b9aac238",
+					"oidAlg": "sha1",
+					"objectSha256": "c98ae3627ffab5bc42749c707b0ca29d5fab5d2c5289befcb499791cdfff5425",
+					"repositoryMembership": {
+						"status": "providerVerified",
+						"proofId": "4f15f9cc9697c9b05b40b3ed"
+					}
+				},
+				"event": {
+					"id": "363869543c8a61f510569cff6dd8c7a4",
+					"timestamp": "2026-08-10T14:12:01.000Z",
+					"previousHash": "898a4b03ab14f6c592c37e9ebd336b490526c3ea0aa859f7a0ad02f16e6b359f",
+					"kind": "receipt_settled",
+					"actor": {
+						"type": "system",
+						"id": "receipt-minter",
+						"name": "receipt-minter"
+					},
+					"data": {
+						"spec": "ut1",
+						"scope": "session",
+						"sessionId": "sess_fb1f3fb3e5e53cccee3edfed",
+						"generation": 1,
+						"work": {
+							"kind": "commit",
+							"repoId": "github.com:R_kgDOK1x2Yw",
+							"oid": "c00696567ec80fd2eac357206fb582c3b9aac238",
+							"oidAlg": "sha1",
+							"objectSha256": "c98ae3627ffab5bc42749c707b0ca29d5fab5d2c5289befcb499791cdfff5425",
+							"repositoryMembership": {
+								"status": "providerVerified",
+								"proofId": "4f15f9cc9697c9b05b40b3ed"
+							}
+						},
+						"sessionAssociation": "ownerAsserted",
+						"models": ["claude-sonnet-4-6"],
+						"providers": ["anthropic"],
+						"startedAt": "2026-08-10T14:00:00.000Z",
+						"endedAt": "2026-08-10T14:12:00.000Z",
+						"spend": {
+							"assessedUsertokens": 3000,
+							"postedUsertokens": 3000,
+							"roundingAdjustment": 1,
+							"transferCount": 3,
+							"usagePosture": "provider",
+							"pricingPosture": "exact"
+						},
+						"pricing": {
+							"tableVersions": ["2026-07-01"]
+						},
+						"transferSet": [
+							{
+								"authorizationTransferId": "4e590e573453b6f2bd9141eeb16c7bed",
+								"settlementTransferId": "6de9fdcbb53936b748d5a3b8f83a4303"
+							},
+							{
+								"authorizationTransferId": "a53c717f333839cbfb69f0fde9b698fa",
+								"settlementTransferId": "6b4341844dbe2d80eeabf6fbcb1c0ada"
+							},
+							{
+								"authorizationTransferId": "3fdcdd6dba9270a3fceeec90cae5e1ea",
+								"settlementTransferId": "9cbc4e9e549b1177404b35fcd81e17e7"
+							}
+						],
+						"transferSetRoot": "6ac4da477e12c398ab5d89a7ba0910d77489aea47633b46b1607d705305be2b7"
+					},
+					"sequence": 8124100,
+					"hash": "e27e3bf05a808119358e9e52206bd807665a72811d14ef561f7b51eec09d5404"
+				},
+				"proof": {
+					"profile": "proxy-v1",
+					"chain": "vault-usertrust-prod-1",
+					"mintEventHash": "e27e3bf05a808119358e9e52206bd807665a72811d14ef561f7b51eec09d5404",
+					"inclusion": {
+						"version": 1,
+						"leafHash": "e27e3bf05a808119358e9e52206bd807665a72811d14ef561f7b51eec09d5404",
+						"leafIndex": 50,
+						"treeSize": 90,
+						"root": "81a12a6ac7768f95e2bfb67d71ec9a61946678e2d0727da2a16206ca4ffc0d5b",
+						"siblings": [
+							{
+								"hash": "fa09a5a2c688637ac6218f57e729dbcc7f6b6aec2b88c096d43a7b9ae15ef374",
+								"position": "left"
+							},
+							{
+								"hash": "6a01f278d127bae8a362140064c750312eedeb16c6ddedfa96010c2228cecf94",
+								"position": "right"
+							},
+							{
+								"hash": "5c70c62824addcb58713e3a182a212c3c7d91f2860dfb721c06008d77352167d",
+								"position": "left"
+							}
+						],
+						"segmentId": "seg-0003"
+					},
+					"checkpoint": {
+						"v": 2,
+						"vaultId": "vault-usertrust-prod-1",
+						"profile": "proxy-v1",
+						"root": "81a12a6ac7768f95e2bfb67d71ec9a61946678e2d0727da2a16206ca4ffc0d5b",
+						"treeSize": 90,
+						"segmentId": "seg-0003",
+						"segmentFirstSequence": 8124050,
+						"previousSegmentRoot": "genesis",
+						"previousSegmentId": "genesis",
+						"keyId": "checkpoint-key-2026-01",
+						"publishedAt": "2026-08-10T14:15:00.000Z",
+						"sig": "c3ludGhldGljLWNoZWNrcG9pbnQtc2lnOjpDNA=="
+					}
+				},
+				"signature": {
+					"alg": "ed25519",
+					"keyId": "mint-key-2026-01",
+					"sig": "c3ludGhldGljLW1pbnQtc2lnOjpDNA=="
+				}
+			},
+			"verification": {
+				"trustSnapshotId": "usertrust-verify@2026-08-10T00:00:00Z",
+				"steps": {
+					"schema": {
+						"result": "passed"
+					},
+					"event": {
+						"result": "passed"
+					},
+					"registry": {
+						"result": "passed"
+					},
+					"signature": {
+						"result": "passed"
+					},
+					"inclusion": {
+						"result": "passed"
+					},
+					"checkpoint": {
+						"result": "passed"
+					},
+					"semantics": {
+						"result": "passed"
+					},
+					"derivations": {
+						"result": "passed"
+					},
+					"extensions": {
+						"result": "passed"
+					}
+				},
+				"checks": {
+					"registryBinding": {
+						"result": "passed"
+					},
+					"predecessorLinkage": {
+						"result": "notApplicable"
+					},
+					"checkpointHistory": {
+						"result": "notApplicable"
+					},
+					"anchorEvidence": {
+						"result": "notApplicable"
+					}
+				}
+			},
+			"advisories": [],
+			"anchorEvidence": {
+				"s3ObjectLock": [
+					{
+						"sink": "s3://usertrust-audit-anchors/segments/seg-0003.json",
+						"checks": [
+							{
+								"name": "delete-denied",
+								"status": "pass",
+								"detail": "DeleteObject denied by bucket policy"
+							},
+							{
+								"name": "overwrite-denied",
+								"status": "pass",
+								"detail": "PutObject with same key denied (Object Lock GOVERNANCE)"
+							},
+							{
+								"name": "retention-mode",
+								"status": "info",
+								"detail": "retention mode GOVERNANCE, retain-until 2036-08-10T00:00:00.000Z"
+							}
+						],
+						"failed": false
+					}
+				]
+			}
+		}
+	}
+}

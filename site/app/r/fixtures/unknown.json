@@ -1,0 +1,14 @@
+{
+	"routeParamId": "ut1_C6dK44tm6Ck1cpuhyLeENY",
+	"wire": {
+		"httpStatus": 404,
+		"headers": {
+			"cache-control": "no-cache, must-revalidate"
+		},
+		"body": {
+			"apiVersion": "1",
+			"receiptId": "ut1_C6dK44tm6Ck1cpuhyLeENY",
+			"status": "unknown"
+		}
+	}
+}

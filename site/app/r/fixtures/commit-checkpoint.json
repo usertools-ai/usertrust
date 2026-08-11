@@ -1,0 +1,299 @@
+{
+	"routeParamId": "ut1_WskkNFGvdE3dwzwzFyxcNC",
+	"wire": {
+		"httpStatus": 200,
+		"headers": {
+			"cache-control": "no-cache"
+		},
+		"body": {
+			"apiVersion": "1",
+			"receiptId": "ut1_WskkNFGvdE3dwzwzFyxcNC",
+			"status": "verified_checkpoint",
+			"receiptBytes": "eyJzcGVjIjoidXQxIiwicmVjZWlwdElkIjoidXQxX1dza2tORkd2ZEUzZHd6d3pGeXhjTkMiLCJzY29wZSI6InNlc3Npb24iLCJtaW50ZWRBdCI6IjIwMjYtMDgtMTBUMTQ6MTU6MDEuMDAwWiIsIm1pbnRlciI6eyJraW5kIjoicHJveHkiLCJrZXlJZCI6Im1pbnQta2V5LTIwMjYtMDEiLCJ0cnVzdERvbWFpbiI6InVzZXJ0cnVzdC5haSJ9LCJ3b3JrIjp7ImtpbmQiOiJjb21taXQiLCJyZXBvSWQiOiJnaXRodWIuY29tOlJfa2dET0sxeDJZdyIsInJlcG8iOiJnaXRodWIuY29tL3VzZXJ0cnVzdC1haS91c2VydHJ1c3QiLCJvaWQiOiIxMjI4M2I4OWFkNTViNTg0Yzc5NTkzOTRhNTI3ZTI0ZGEwZWMxZjVlIiwib2lkQWxnIjoic2hhMSIsIm9iamVjdFNoYTI1NiI6ImMxYWE0MTMzN2I5NDI2MjFlYjliMjMxYmIyN2UzMDhiZWEyN2I2ZjFmM2I2NmU3Mzc5NzViNjJjZTc2NGU1NWYiLCJyZXBvc2l0b3J5TWVtYmVyc2hpcCI6eyJzdGF0dXMiOiJwcm92aWRlclZlcmlmaWVkIiwicHJvb2ZJZCI6IjA1YjE5NmYzMGNjOTUxMDMzMjE2NjEzYSJ9fSwiZXZlbnQiOnsiaWQiOiJiODM2NWNhMzc3MzEyYTVjN2IxOGM1NTZiZTkxODMwYyIsInRpbWVzdGFtcCI6IjIwMjYtMDgtMTBUMTQ6MTI6MDEuMDAwWiIsInByZXZpb3VzSGFzaCI6ImJjMmQ1MDJmZTI0MjZjZjc4Y2U3MWJjNmMxNzc1NTIwNThjNDI2ZTIzODczOGVhMjA1YTRkM2RmMTZlOGQ2ZjIiLCJraW5kIjoicmVjZWlwdF9zZXR0bGVkIiwiYWN0b3IiOnsidHlwZSI6InN5c3RlbSIsImlkIjoicmVjZWlwdC1taW50ZXIiLCJuYW1lIjoicmVjZWlwdC1taW50ZXIifSwiZGF0YSI6eyJzcGVjIjoidXQxIiwic2NvcGUiOiJzZXNzaW9uIiwic2Vzc2lvbklkIjoic2Vzc18yMTk4OTY0YTI4MmRkOTc5MTZjYzBmYjciLCJnZW5lcmF0aW9uIjoxLCJ3b3JrIjp7ImtpbmQiOiJjb21taXQiLCJyZXBvSWQiOiJnaXRodWIuY29tOlJfa2dET0sxeDJZdyIsInJlcG8iOiJnaXRodWIuY29tL3VzZXJ0cnVzdC1haS91c2VydHJ1c3QiLCJvaWQiOiIxMjI4M2I4OWFkNTViNTg0Yzc5NTkzOTRhNTI3ZTI0ZGEwZWMxZjVlIiwib2lkQWxnIjoic2hhMSIsIm9iamVjdFNoYTI1NiI6ImMxYWE0MTMzN2I5NDI2MjFlYjliMjMxYmIyN2UzMDhiZWEyN2I2ZjFmM2I2NmU3Mzc5NzViNjJjZTc2NGU1NWYiLCJyZXBvc2l0b3J5TWVtYmVyc2hpcCI6eyJzdGF0dXMiOiJwcm92aWRlclZlcmlmaWVkIiwicHJvb2ZJZCI6IjA1YjE5NmYzMGNjOTUxMDMzMjE2NjEzYSJ9fSwic2Vzc2lvbkFzc29jaWF0aW9uIjoid29ya2Zsb3dBdHRlc3RlZCIsIndvcmtsb2FkSWQiOiI4OTk3YjZlNjdmOTZiMTVjY2JjNjZiNmYiLCJtb2RlbHMiOlsiY2xhdWRlLW9wdXMtNC02IiwiY2xhdWRlLXNvbm5ldC00LTYiXSwicHJvdmlkZXJzIjpbImFudGhyb3BpYyJdLCJzdGFydGVkQXQiOiIyMDI2LTA4LTEwVDE0OjAwOjAwLjAwMFoiLCJlbmRlZEF0IjoiMjAyNi0wOC0xMFQxNDoxMjowMC4wMDBaIiwic3BlbmQiOnsiYXNzZXNzZWRVc2VydG9rZW5zIjo0ODIyNCwicG9zdGVkVXNlcnRva2VucyI6NDgyMjQsInJvdW5kaW5nQWRqdXN0bWVudCI6MTQsInRyYW5zZmVyQ291bnQiOjIyLCJ1c2FnZVBvc3R1cmUiOiJwcm92aWRlciIsInByaWNpbmdQb3N0dXJlIjoiZXhhY3QifSwicHJpY2luZyI6eyJ0YWJsZVZlcnNpb25zIjpbIjIwMjYtMDctMDEiXX0sInRyYW5zZmVyU2V0IjpbeyJhdXRob3JpemF0aW9uVHJhbnNmZXJJZCI6IjhlMGFjZDRhMTFmODg5NjMzOTcwNTgzZmFkNzZhMDQwIiwic2V0dGxlbWVudFRyYW5zZmVySWQiOiIxYzRkMGMxYmNkMGVkZjM1ZmFhNTBkNDI0YWE4YmRlMSJ9LHsiYXV0aG9yaXphdGlvblRyYW5zZmVySWQiOiIwODhiOWIwOTc3ZGVkMGIyM2IwZTRlMzgyOWQ4MjVkMiIsInNldHRsZW1lbnRUcmFuc2ZlcklkIjoiMDljZTgwNjAxZTE2Nzc1YWZmYmUxNWI2ZDYyM2ZiY2EifSx7ImF1dGhvcml6YXRpb25UcmFuc2ZlcklkIjoiYzBiY2U2Zjg2OTIzZmRhYzRlYmUwMWJhYzUwZTRmMTciLCJzZXR0bGVtZW50VHJhbnNmZXJJZCI6ImZiOGZlY2RhNDhiOTdiYWJjZDEyNjA5YWVmNjc0ZGQ1In0seyJhdXRob3JpemF0aW9uVHJhbnNmZXJJZCI6IjYwNjM2ZDg5MGIxOTU5ZDY3Zjk2MmExZmVjMjhhM2Q2Iiwic2V0dGxlbWVudFRyYW5zZmVySWQiOiI5NDY4YzM4ZWMwYzJjZDZhZTNlZmZiYWVmNGMwNTQ2OCJ9LHsiYXV0aG9yaXphdGlvblRyYW5zZmVySWQiOiIyODljMGVhZTAxYmZmZTJkZDc1ZDA3OThkMTA0MTI0MiIsInNldHRsZW1lbnRUcmFuc2ZlcklkIjoiNWRmMjg1NjZlNjQ5MTlkOTQ1NmZiMGRlNmU4YmU4MzMifSx7ImF1dGhvcml6YXRpb25UcmFuc2ZlcklkIjoiZmQ5NDUwZmM3NjhjZDhhMWE0Y2ZhOTU0M2NiNTcwMjQiLCJzZXR0bGVtZW50VHJhbnNmZXJJZCI6Ijk0NzYzYTY0NzFiYjRhMmJlOTllYjkzYjNlYjYxOTI4In0seyJhdXRob3JpemF0aW9uVHJhbnNmZXJJZCI6IjFhODBmM2I1YmU5NTQwNTFlNDA3ZjRmYmI1N2U0MThiIiwic2V0dGxlbWVudFRyYW5zZmVySWQiOiJmNTVjMTAwN2YxODNlZTQ0M2IwYmFjYjNmZjdlNTAzZCJ9LHsiYXV0aG9yaXphdGlvblRyYW5zZmVySWQiOiJmNGZmMjkzMGZjOWNmMjYwMjYwY2U4NDE0ZjU4N2NkOSIsInNldHRsZW1lbnRUcmFuc2ZlcklkIjoiZGZkNzU1NzNmNWQzZjgzNjcyOTY1MjZiNGQ5NzIyODYifSx7ImF1dGhvcml6YXRpb25UcmFuc2ZlcklkIjoiNTYxNWM4NTI5ZmY0ODhmZGJkOTViYjAxZjAwMzEwZGEiLCJzZXR0bGVtZW50VHJhbnNmZXJJZCI6IjEzNzkxYTMyZTA1N2QyYjQ3NGQxMGM5OWI3NGQ2YTFlIn0seyJhdXRob3JpemF0aW9uVHJhbnNmZXJJZCI6IjQzYjA4ZGUwYjBmMDEzMDEzZGM3OGYwMTc4MjVjZDZlIiwic2V0dGxlbWVudFRyYW5zZmVySWQiOiIyNTY4MTVlNTEzODU2MzQ4ZDU4YjRkODJiOWI3MjAzYiJ9LHsiYXV0aG9yaXphdGlvblRyYW5zZmVySWQiOiJlM2QzZmI0N2I5ZjI4ZDkzYTZiNmZmYTYxYTc2YTg4OCIsInNldHRsZW1lbnRUcmFuc2ZlcklkIjoiMzgyMDZjMWRiNzdkZGEyYzYxMDJhMGNiNTc0MGY2MDAifSx7ImF1dGhvcml6YXRpb25UcmFuc2ZlcklkIjoiODZlNGRhYWNmMjI4M2Y0YzkwOTE3YWFlZmU5YzYxYmUiLCJzZXR0bGVtZW50VHJhbnNmZXJJZCI6ImUyZTVlYWY2NDk5NmJlODQ2NWU1YjEyNjJhOTgyNzQ2In0seyJhdXRob3JpemF0aW9uVHJhbnNmZXJJZCI6IjE1MzMzYTA1OGI0NzA5MzBkNTI4OTI3NzY5NDY3MGE4Iiwic2V0dGxlbWVudFRyYW5zZmVySWQiOiJiMjNlYmFmMmEzMGI1NGEwYTZkN2U2ZjNmZDEzNDkxZSJ9LHsiYXV0aG9yaXphdGlvblRyYW5zZmVySWQiOiI2M2U0YzUwNTgxZGFkMjViNzlmZDQ4OTM2Mzg0NjViNCIsInNldHRsZW1lbnRUcmFuc2ZlcklkIjoiNjIwMmRkMTM3YmNkMDA5OGFiZDI1MGNmNTQ3YzJlNjcifSx7ImF1dGhvcml6YXRpb25UcmFuc2ZlcklkIjoiMWY4OTI4YWU5YTFmM2U2MGJjYTg2NjU4MDk5MzEyMDkiLCJzZXR0bGVtZW50VHJhbnNmZXJJZCI6IjI5MDNiZTQyNjg2YzYyMjc0NmViOGVjMTNlNTQxMzBhIn0seyJhdXRob3JpemF0aW9uVHJhbnNmZXJJZCI6IjU3ZGI5ODQ5YjE4YTZlNmJkYTQ1MTZkNjIxNDAwMTQzIiwic2V0dGxlbWVudFRyYW5zZmVySWQiOiI2YjZmZDk1YWI2YWY3NzA5N2M2N2ViNDE1ZjY2MTgzMSJ9LHsiYXV0aG9yaXphdGlvblRyYW5zZmVySWQiOiI1MzU0NTEwN2VhMGM2NWUwYzliZGQ2YWQzNzFhYjcxYyIsInNldHRsZW1lbnRUcmFuc2ZlcklkIjoiYTI3Y2U5NmI0MWRjYTU0ZWU4N2Y2MWFjZTRiNTUxOWEifSx7ImF1dGhvcml6YXRpb25UcmFuc2ZlcklkIjoiMzMyNDJhOWU0YjllYjZiZjdkNTJmMTA5ODg5YWRkMDYiLCJzZXR0bGVtZW50VHJhbnNmZXJJZCI6IjE0MGE4YTMzM2FlZGNhZmJjZjE5NWQ2Yzc5YzNhZDgyIn0seyJhdXRob3JpemF0aW9uVHJhbnNmZXJJZCI6IjZiYTMzODU5NTJmMDc1YTljYWNlODliYjA1YTc1YzVmIiwic2V0dGxlbWVudFRyYW5zZmVySWQiOiIxZGE2MjVmZjAzYmQ4ZDEwY2U1NzM2YWY5MDc4MzIzZSJ9LHsiYXV0aG9yaXphdGlvblRyYW5zZmVySWQiOiI1OTE1M2I4OGQ1MWI3MDU2ZjFjYjU0ZGM4MjEzYWQxOSIsInNldHRsZW1lbnRUcmFuc2ZlcklkIjoiYzVhZDEzMzU1MjBkMzI4MDQ4NjZhNmY0YmU4MDVjZTUifSx7ImF1dGhvcml6YXRpb25UcmFuc2ZlcklkIjoiMWMzZWZlOGMzYmJmMDgxNGE4NDBkOTc2MGQyOGY1ZjYiLCJzZXR0bGVtZW50VHJhbnNmZXJJZCI6ImY3ZTgzZTVjMThjYzE1NzYxNTMwY2M0MWM2NThjMDAyIn0seyJhdXRob3JpemF0aW9uVHJhbnNmZXJJZCI6ImEwOTRlMzhhYzM4NjQxOTg5Y2I1Yjc1NjI4NGExM2Y2Iiwic2V0dGxlbWVudFRyYW5zZmVySWQiOiI4YWU2MjM1NDY2OTk2MzY1MTBlNDkzYWE3ZTAyY2IyOSJ9XSwidHJhbnNmZXJTZXRSb290IjoiNGRhMzU0MDA2YjNiNGRmMTk1MGY4OGJkYTdmZjNkYzJmOTdjZTI1MmIxMzU2ZWQ2MDlmNTcxZjNhN2U1ZTZiYyJ9LCJzZXF1ZW5jZSI6ODEyMzQyMSwiaGFzaCI6ImZiOGM4M2Q4YjJlOGE5N2U2NjZhOThjNThmYTU1OTFhYTQzNjQwYWFmZTNkMDQ2NjgxMmQxYjE5YmUzZDMzYTMifSwicHJvb2YiOnsicHJvZmlsZSI6InByb3h5LXYxIiwiY2hhaW4iOiJ2YXVsdC11c2VydHJ1c3QtcHJvZC0xIiwibWludEV2ZW50SGFzaCI6ImZiOGM4M2Q4YjJlOGE5N2U2NjZhOThjNThmYTU1OTFhYTQzNjQwYWFmZTNkMDQ2NjgxMmQxYjE5YmUzZDMzYTMiLCJpbmNsdXNpb24iOnsidmVyc2lvbiI6MSwibGVhZkhhc2giOiJmYjhjODNkOGIyZThhOTdlNjY2YTk4YzU4ZmE1NTkxYWE0MzY0MGFhZmUzZDA0NjY4MTJkMWIxOWJlM2QzM2EzIiwibGVhZkluZGV4Ijo0MjEsInRyZWVTaXplIjo1MTIsInJvb3QiOiJkMTZiYzU2Zjk5ZmVlNjEzMGM2N2NmNWEwMjlkNzVlZGIxNjZmZmU2ZTBkM2ExMTVmMWRjZTY2Mzk0NGNlZjRmIiwic2libGluZ3MiOlt7Imhhc2giOiI5ODhlMDBjNDk5YWMyZDQ0NTg2YjY3Mjk0ZGM1MmU2YzM3ODJhODVmNzAwZDMyMWJlZGFjZDcxMzc4YTQ3NjIwIiwicG9zaXRpb24iOiJsZWZ0In0seyJoYXNoIjoiZjczYjg3MzJlNDM5OWMwYTI1ZjgzY2RkNWY0YTIzOGVmNWQyZTk3NGY0MWNmZDhiOGY2NWUxN2I2ZmZhOGM2YSIsInBvc2l0aW9uIjoicmlnaHQifSx7Imhhc2giOiJlZTVlOTg0Y2Y3ZDRkMDMyMjVhZjRmNDVlNzNkNGVkNzlhODA5MTAxM2Q0NzgyOGFiNDQ0ZTg0NzkxYTU0YjhkIiwicG9zaXRpb24iOiJsZWZ0In1dLCJzZWdtZW50SWQiOiJzZWctMDA0MiJ9LCJjaGVja3BvaW50Ijp7InYiOjIsInZhdWx0SWQiOiJ2YXVsdC11c2VydHJ1c3QtcHJvZC0xIiwicHJvZmlsZSI6InByb3h5LXYxIiwicm9vdCI6ImQxNmJjNTZmOTlmZWU2MTMwYzY3Y2Y1YTAyOWQ3NWVkYjE2NmZmZTZlMGQzYTExNWYxZGNlNjYzOTQ0Y2VmNGYiLCJ0cmVlU2l6ZSI6NTEyLCJzZWdtZW50SWQiOiJzZWctMDA0MiIsInNlZ21lbnRGaXJzdFNlcXVlbmNlIjo4MTIzMDAwLCJwcmV2aW91c1NlZ21lbnRSb290IjoiZ2VuZXNpcyIsInByZXZpb3VzU2VnbWVudElkIjoiZ2VuZXNpcyIsImtleUlkIjoiY2hlY2twb2ludC1rZXktMjAyNi0wMSIsInB1Ymxpc2hlZEF0IjoiMjAyNi0wOC0xMFQxNDoxNTowMC4wMDBaIiwic2lnIjoiYzNsdWRHaGxkR2xqTFdOb1pXTnJjRzlwYm5RdGMybG5PanBETVE9PSJ9fSwic2lnbmF0dXJlIjp7ImFsZyI6ImVkMjU1MTkiLCJrZXlJZCI6Im1pbnQta2V5LTIwMjYtMDEiLCJzaWciOiJjM2x1ZEdobGRHbGpMVzFwYm5RdGMybG5PanBETVE9PSJ9fQ==",
+			"receipt": {
+				"spec": "ut1",
+				"receiptId": "ut1_WskkNFGvdE3dwzwzFyxcNC",
+				"scope": "session",
+				"mintedAt": "2026-08-10T14:15:01.000Z",
+				"minter": {
+					"kind": "proxy",
+					"keyId": "mint-key-2026-01",
+					"trustDomain": "usertrust.ai"
+				},
+				"work": {
+					"kind": "commit",
+					"repoId": "github.com:R_kgDOK1x2Yw",
+					"repo": "github.com/usertrust-ai/usertrust",
+					"oid": "12283b89ad55b584c7959394a527e24da0ec1f5e",
+					"oidAlg": "sha1",
+					"objectSha256": "c1aa41337b942621eb9b231bb27e308bea27b6f1f3b66e737975b62ce764e55f",
+					"repositoryMembership": {
+						"status": "providerVerified",
+						"proofId": "05b196f30cc951033216613a"
+					}
+				},
+				"event": {
+					"id": "b8365ca377312a5c7b18c556be91830c",
+					"timestamp": "2026-08-10T14:12:01.000Z",
+					"previousHash": "bc2d502fe2426cf78ce71bc6c177552058c426e238738ea205a4d3df16e8d6f2",
+					"kind": "receipt_settled",
+					"actor": {
+						"type": "system",
+						"id": "receipt-minter",
+						"name": "receipt-minter"
+					},
+					"data": {
+						"spec": "ut1",
+						"scope": "session",
+						"sessionId": "sess_2198964a282dd97916cc0fb7",
+						"generation": 1,
+						"work": {
+							"kind": "commit",
+							"repoId": "github.com:R_kgDOK1x2Yw",
+							"repo": "github.com/usertrust-ai/usertrust",
+							"oid": "12283b89ad55b584c7959394a527e24da0ec1f5e",
+							"oidAlg": "sha1",
+							"objectSha256": "c1aa41337b942621eb9b231bb27e308bea27b6f1f3b66e737975b62ce764e55f",
+							"repositoryMembership": {
+								"status": "providerVerified",
+								"proofId": "05b196f30cc951033216613a"
+							}
+						},
+						"sessionAssociation": "workflowAttested",
+						"workloadId": "8997b6e67f96b15ccbc66b6f",
+						"models": ["claude-opus-4-6", "claude-sonnet-4-6"],
+						"providers": ["anthropic"],
+						"startedAt": "2026-08-10T14:00:00.000Z",
+						"endedAt": "2026-08-10T14:12:00.000Z",
+						"spend": {
+							"assessedUsertokens": 48224,
+							"postedUsertokens": 48224,
+							"roundingAdjustment": 14,
+							"transferCount": 22,
+							"usagePosture": "provider",
+							"pricingPosture": "exact"
+						},
+						"pricing": {
+							"tableVersions": ["2026-07-01"]
+						},
+						"transferSet": [
+							{
+								"authorizationTransferId": "8e0acd4a11f889633970583fad76a040",
+								"settlementTransferId": "1c4d0c1bcd0edf35faa50d424aa8bde1"
+							},
+							{
+								"authorizationTransferId": "088b9b0977ded0b23b0e4e3829d825d2",
+								"settlementTransferId": "09ce80601e16775affbe15b6d623fbca"
+							},
+							{
+								"authorizationTransferId": "c0bce6f86923fdac4ebe01bac50e4f17",
+								"settlementTransferId": "fb8fecda48b97babcd12609aef674dd5"
+							},
+							{
+								"authorizationTransferId": "60636d890b1959d67f962a1fec28a3d6",
+								"settlementTransferId": "9468c38ec0c2cd6ae3effbaef4c05468"
+							},
+							{
+								"authorizationTransferId": "289c0eae01bffe2dd75d0798d1041242",
+								"settlementTransferId": "5df28566e64919d9456fb0de6e8be833"
+							},
+							{
+								"authorizationTransferId": "fd9450fc768cd8a1a4cfa9543cb57024",
+								"settlementTransferId": "94763a6471bb4a2be99eb93b3eb61928"
+							},
+							{
+								"authorizationTransferId": "1a80f3b5be954051e407f4fbb57e418b",
+								"settlementTransferId": "f55c1007f183ee443b0bacb3ff7e503d"
+							},
+							{
+								"authorizationTransferId": "f4ff2930fc9cf260260ce8414f587cd9",
+								"settlementTransferId": "dfd75573f5d3f8367296526b4d972286"
+							},
+							{
+								"authorizationTransferId": "5615c8529ff488fdbd95bb01f00310da",
+								"settlementTransferId": "13791a32e057d2b474d10c99b74d6a1e"
+							},
+							{
+								"authorizationTransferId": "43b08de0b0f013013dc78f017825cd6e",
+								"settlementTransferId": "256815e513856348d58b4d82b9b7203b"
+							},
+							{
+								"authorizationTransferId": "e3d3fb47b9f28d93a6b6ffa61a76a888",
+								"settlementTransferId": "38206c1db77dda2c6102a0cb5740f600"
+							},
+							{
+								"authorizationTransferId": "86e4daacf2283f4c90917aaefe9c61be",
+								"settlementTransferId": "e2e5eaf64996be8465e5b1262a982746"
+							},
+							{
+								"authorizationTransferId": "15333a058b470930d5289277694670a8",
+								"settlementTransferId": "b23ebaf2a30b54a0a6d7e6f3fd13491e"
+							},
+							{
+								"authorizationTransferId": "63e4c50581dad25b79fd4893638465b4",
+								"settlementTransferId": "6202dd137bcd0098abd250cf547c2e67"
+							},
+							{
+								"authorizationTransferId": "1f8928ae9a1f3e60bca8665809931209",
+								"settlementTransferId": "2903be42686c622746eb8ec13e54130a"
+							},
+							{
+								"authorizationTransferId": "57db9849b18a6e6bda4516d621400143",
+								"settlementTransferId": "6b6fd95ab6af77097c67eb415f661831"
+							},
+							{
+								"authorizationTransferId": "53545107ea0c65e0c9bdd6ad371ab71c",
+								"settlementTransferId": "a27ce96b41dca54ee87f61ace4b5519a"
+							},
+							{
+								"authorizationTransferId": "33242a9e4b9eb6bf7d52f109889add06",
+								"settlementTransferId": "140a8a333aedcafbcf195d6c79c3ad82"
+							},
+							{
+								"authorizationTransferId": "6ba3385952f075a9cace89bb05a75c5f",
+								"settlementTransferId": "1da625ff03bd8d10ce5736af9078323e"
+							},
+							{
+								"authorizationTransferId": "59153b88d51b7056f1cb54dc8213ad19",
+								"settlementTransferId": "c5ad1335520d32804866a6f4be805ce5"
+							},
+							{
+								"authorizationTransferId": "1c3efe8c3bbf0814a840d9760d28f5f6",
+								"settlementTransferId": "f7e83e5c18cc15761530cc41c658c002"
+							},
+							{
+								"authorizationTransferId": "a094e38ac38641989cb5b756284a13f6",
+								"settlementTransferId": "8ae623546699636510e493aa7e02cb29"
+							}
+						],
+						"transferSetRoot": "4da354006b3b4df1950f88bda7ff3dc2f97ce252b1356ed609f571f3a7e5e6bc"
+					},
+					"sequence": 8123421,
+					"hash": "fb8c83d8b2e8a97e666a98c58fa5591aa43640aafe3d0466812d1b19be3d33a3"
+				},
+				"proof": {
+					"profile": "proxy-v1",
+					"chain": "vault-usertrust-prod-1",
+					"mintEventHash": "fb8c83d8b2e8a97e666a98c58fa5591aa43640aafe3d0466812d1b19be3d33a3",
+					"inclusion": {
+						"version": 1,
+						"leafHash": "fb8c83d8b2e8a97e666a98c58fa5591aa43640aafe3d0466812d1b19be3d33a3",
+						"leafIndex": 421,
+						"treeSize": 512,
+						"root": "d16bc56f99fee6130c67cf5a029d75edb166ffe6e0d3a115f1dce663944cef4f",
+						"siblings": [
+							{
+								"hash": "988e00c499ac2d44586b67294dc52e6c3782a85f700d321bedacd71378a47620",
+								"position": "left"
+							},
+							{
+								"hash": "f73b8732e4399c0a25f83cdd5f4a238ef5d2e974f41cfd8b8f65e17b6ffa8c6a",
+								"position": "right"
+							},
+							{
+								"hash": "ee5e984cf7d4d03225af4f45e73d4ed79a8091013d47828ab444e84791a54b8d",
+								"position": "left"
+							}
+						],
+						"segmentId": "seg-0042"
+					},
+					"checkpoint": {
+						"v": 2,
+						"vaultId": "vault-usertrust-prod-1",
+						"profile": "proxy-v1",
+						"root": "d16bc56f99fee6130c67cf5a029d75edb166ffe6e0d3a115f1dce663944cef4f",
+						"treeSize": 512,
+						"segmentId": "seg-0042",
+						"segmentFirstSequence": 8123000,
+						"previousSegmentRoot": "genesis",
+						"previousSegmentId": "genesis",
+						"keyId": "checkpoint-key-2026-01",
+						"publishedAt": "2026-08-10T14:15:00.000Z",
+						"sig": "c3ludGhldGljLWNoZWNrcG9pbnQtc2lnOjpDMQ=="
+					}
+				},
+				"signature": {
+					"alg": "ed25519",
+					"keyId": "mint-key-2026-01",
+					"sig": "c3ludGhldGljLW1pbnQtc2lnOjpDMQ=="
+				}
+			},
+			"verification": {
+				"trustSnapshotId": "usertrust-verify@2026-08-10T00:00:00Z",
+				"steps": {
+					"schema": {
+						"result": "passed"
+					},
+					"event": {
+						"result": "passed"
+					},
+					"registry": {
+						"result": "passed"
+					},
+					"signature": {
+						"result": "passed"
+					},
+					"inclusion": {
+						"result": "passed"
+					},
+					"checkpoint": {
+						"result": "passed"
+					},
+					"semantics": {
+						"result": "passed"
+					},
+					"derivations": {
+						"result": "passed"
+					},
+					"extensions": {
+						"result": "passed"
+					}
+				},
+				"checks": {
+					"registryBinding": {
+						"result": "passed"
+					},
+					"predecessorLinkage": {
+						"result": "notApplicable"
+					},
+					"checkpointHistory": {
+						"result": "notApplicable"
+					},
+					"anchorEvidence": {
+						"result": "notApplicable"
+					}
+				}
+			},
+			"advisories": [],
+			"display": {
+				"spendBreakdown": [
+					{
+						"provider": "anthropic",
+						"model": "claude-sonnet-4-6",
+						"tier": "input",
+						"usertokens": 30000
+					},
+					{
+						"provider": "anthropic",
+						"model": "claude-opus-4-6",
+						"tier": "output",
+						"usertokens": 18224
+					}
+				],
+				"recomputedTotal": {
+					"a": 48210,
+					"roundingAdjustment": 14,
+					"total": 48224
+				},
+				"pricingTables": {
+					"hashes": ["3255c1b614ea0ba5d9702c93ada094f5d49720963389751759266f52f0d12e54"],
+					"pricingDeployment": "pricing-2026-07-01"
+				},
+				"execution": {
+					"agent": true,
+					"interactive": false
+				}
+			}
+		}
+	}
+}

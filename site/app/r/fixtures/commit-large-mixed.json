@@ -1,0 +1,178 @@
+{
+	"routeParamId": "ut1_Nw7ZFVpu6J9eW1g5wJRwx2",
+	"wire": {
+		"httpStatus": 200,
+		"headers": {
+			"cache-control": "no-cache"
+		},
+		"body": {
+			"apiVersion": "1",
+			"receiptId": "ut1_Nw7ZFVpu6J9eW1g5wJRwx2",
+			"status": "verified_checkpoint",
+			"receiptBytes": "eyJzcGVjIjoidXQxIiwicmVjZWlwdElkIjoidXQxX053N1pGVnB1Nko5ZVcxZzV3SlJ3eDIiLCJzY29wZSI6InNlc3Npb24iLCJtaW50ZWRBdCI6IjIwMjYtMDgtMTBUMTQ6MTU6MDEuMDAwWiIsIm1pbnRlciI6eyJraW5kIjoicHJveHkiLCJrZXlJZCI6Im1pbnQta2V5LTIwMjYtMDEiLCJ0cnVzdERvbWFpbiI6InVzZXJ0cnVzdC5haSJ9LCJ3b3JrIjp7ImtpbmQiOiJjb21taXQiLCJyZXBvSWQiOiJnaXRodWIuY29tOlJfa2dET0sxeDJZdyIsIm9pZCI6IjQ1ZjIyZGFkY2I2MmY1MTg1NjM2MmZjZmVmMTZmYzEzMTBmYjYwYWQiLCJvaWRBbGciOiJzaGExIiwib2JqZWN0U2hhMjU2IjoiNjRkYjY5YWE2NWE3YzViMTFkMmNmNGQyZWExZDJlZDQ3ZjdhNGRhMDFkYjU3MmVlNGVjZWQ3NTRhY2RjNWUxNiIsInJlcG9zaXRvcnlNZW1iZXJzaGlwIjp7InN0YXR1cyI6InByb3ZpZGVyVmVyaWZpZWQiLCJwcm9vZklkIjoiNzhlMmM5ZmJhYjViNDg2NTk2YzA3YzI0In19LCJldmVudCI6eyJpZCI6IjYzZGRkMWRkMmRiNzU0ODgwZDk1MDM3MGI4ODJmMmMwIiwidGltZXN0YW1wIjoiMjAyNi0wOC0xMFQxNDoxMjowMS4wMDBaIiwicHJldmlvdXNIYXNoIjoiYjMwOWU1MGM5MjI1ZGI3YzY5Mjc0ZTQyZTJmMjJiMWFjNzg4Y2E5OThmYzBlZDFkZmExNmMxNWQ4ZjZiZDI2MSIsImtpbmQiOiJyZWNlaXB0X3NldHRsZWQiLCJhY3RvciI6eyJ0eXBlIjoic3lzdGVtIiwiaWQiOiJyZWNlaXB0LW1pbnRlciIsIm5hbWUiOiJyZWNlaXB0LW1pbnRlciJ9LCJkYXRhIjp7InNwZWMiOiJ1dDEiLCJzY29wZSI6InNlc3Npb24iLCJzZXNzaW9uSWQiOiJzZXNzX2UyYjA4ZjAzMTYxM2Q0Nzc1MmQ1OGE4MCIsImdlbmVyYXRpb24iOjEsIndvcmsiOnsia2luZCI6ImNvbW1pdCIsInJlcG9JZCI6ImdpdGh1Yi5jb206Ul9rZ0RPSzF4Mll3Iiwib2lkIjoiNDVmMjJkYWRjYjYyZjUxODU2MzYyZmNmZWYxNmZjMTMxMGZiNjBhZCIsIm9pZEFsZyI6InNoYTEiLCJvYmplY3RTaGEyNTYiOiI2NGRiNjlhYTY1YTdjNWIxMWQyY2Y0ZDJlYTFkMmVkNDdmN2E0ZGEwMWRiNTcyZWU0ZWNlZDc1NGFjZGM1ZTE2IiwicmVwb3NpdG9yeU1lbWJlcnNoaXAiOnsic3RhdHVzIjoicHJvdmlkZXJWZXJpZmllZCIsInByb29mSWQiOiI3OGUyYzlmYmFiNWI0ODY1OTZjMDdjMjQifX0sInNlc3Npb25Bc3NvY2lhdGlvbiI6IndvcmtmbG93QXR0ZXN0ZWQiLCJ3b3JrbG9hZElkIjoiY2JiZjhiZWEwNmI3MTA3YzJlZWUwNjI1IiwibW9kZWxzIjpbImNsYXVkZS1zb25uZXQtNC02IiwiY3VzdG9tIl0sInByb3ZpZGVycyI6WyJhbnRocm9waWMiXSwic3RhcnRlZEF0IjoiMjAyNi0wOC0xMFQxNDowMDowMC4wMDBaIiwiZW5kZWRBdCI6IjIwMjYtMDgtMTBUMTQ6MTI6MDAuMDAwWiIsInNwZW5kIjp7ImFzc2Vzc2VkVXNlcnRva2VucyI6OTAzMTIwLCJwb3N0ZWRVc2VydG9rZW5zIjo5MDMxMjAsInJvdW5kaW5nQWRqdXN0bWVudCI6NDAsInRyYW5zZmVyQ291bnQiOjU3LCJ1c2FnZVBvc3R1cmUiOiJtaXhlZCIsInByaWNpbmdQb3N0dXJlIjoiY29uc2VydmF0aXZlIn0sInByaWNpbmciOnsidGFibGVWZXJzaW9ucyI6WyIyMDI2LTA3LTAxIiwiMjAyNi0wNy0xNSJdfSwidHJhbnNmZXJTZXRSb290IjoiNzVmYzhkNTEzZWY1YTI4YWI0ZDkwYTliODM3ZWU4ZjAxYmM3MjhmMDQ1OTc0YmZlOTY0NDcxNWFlZmEyZDEwNSJ9LCJzZXF1ZW5jZSI6ODEyNDUwMCwiaGFzaCI6IjQzZTgzNjViMWM5NmU2Yzc1ZDlhNzRlNGJmYzYwNTVkOWIyZDJjZTI1YTM2Y2Q1OGQzZWFhYTEyMGI0ODJlMTQifSwicHJvb2YiOnsicHJvZmlsZSI6InByb3h5LXYxIiwiY2hhaW4iOiJ2YXVsdC11c2VydHJ1c3QtcHJvZC0xIiwibWludEV2ZW50SGFzaCI6IjQzZTgzNjViMWM5NmU2Yzc1ZDlhNzRlNGJmYzYwNTVkOWIyZDJjZTI1YTM2Y2Q1OGQzZWFhYTEyMGI0ODJlMTQiLCJpbmNsdXNpb24iOnsidmVyc2lvbiI6MSwibGVhZkhhc2giOiI0M2U4MzY1YjFjOTZlNmM3NWQ5YTc0ZTRiZmM2MDU1ZDliMmQyY2UyNWEzNmNkNThkM2VhYWExMjBiNDgyZTE0IiwibGVhZkluZGV4Ijo1MCwidHJlZVNpemUiOjEyMCwicm9vdCI6IjIwMTUzMjBmZTg5ZWJlNzUwYWE0ZTA0YTYxYjM3ZWU0YjY0MGJhNWVmMDJhMDkzNDhjODYwN2JjMGFiMDJhYzAiLCJzaWJsaW5ncyI6W3siaGFzaCI6Ijk2NzA4MmMzMzhjMTMwMjhiNjBjY2NhM2ZlYmJmOTZjODM2NjlhYjlhMDhiYzA2MGIzMDQ3NDc4Yjc2ZDE1OGMiLCJwb3NpdGlvbiI6ImxlZnQifSx7Imhhc2giOiJmNGI5ZDc0YzNjMDMwM2ZkMzUyNzA1Y2UzYjkyMmJiNDNmZjE4MTEwOTFiMTUxNTE0NDAwMWE1NmE1MWY0MmNhIiwicG9zaXRpb24iOiJyaWdodCJ9LHsiaGFzaCI6IjcwODFiZGM4YzUzZDFhMDRhNGNmM2E2Zjg1MGU4YTQ4ODljYTVkM2RmYTc1YjVlMmFhMzc3Yjc5MTlkMjU5NTgiLCJwb3NpdGlvbiI6ImxlZnQifV0sInNlZ21lbnRJZCI6InNlZy0wMDA3In0sImNoZWNrcG9pbnQiOnsidiI6MiwidmF1bHRJZCI6InZhdWx0LXVzZXJ0cnVzdC1wcm9kLTEiLCJwcm9maWxlIjoicHJveHktdjEiLCJyb290IjoiMjAxNTMyMGZlODllYmU3NTBhYTRlMDRhNjFiMzdlZTRiNjQwYmE1ZWYwMmEwOTM0OGM4NjA3YmMwYWIwMmFjMCIsInRyZWVTaXplIjoxMjAsInNlZ21lbnRJZCI6InNlZy0wMDA3Iiwic2VnbWVudEZpcnN0U2VxdWVuY2UiOjgxMjQ0NTAsInByZXZpb3VzU2VnbWVudFJvb3QiOiJnZW5lc2lzIiwicHJldmlvdXNTZWdtZW50SWQiOiJnZW5lc2lzIiwia2V5SWQiOiJjaGVja3BvaW50LWtleS0yMDI2LTAxIiwicHVibGlzaGVkQXQiOiIyMDI2LTA4LTEwVDE0OjE1OjAwLjAwMFoiLCJzaWciOiJjM2x1ZEdobGRHbGpMV05vWldOcmNHOXBiblF0YzJsbk9qcERPQT09In19LCJzaWduYXR1cmUiOnsiYWxnIjoiZWQyNTUxOSIsImtleUlkIjoibWludC1rZXktMjAyNi0wMSIsInNpZyI6ImMzbHVkR2hsZEdsakxXMXBiblF0YzJsbk9qcERPQT09In19",
+			"receipt": {
+				"spec": "ut1",
+				"receiptId": "ut1_Nw7ZFVpu6J9eW1g5wJRwx2",
+				"scope": "session",
+				"mintedAt": "2026-08-10T14:15:01.000Z",
+				"minter": {
+					"kind": "proxy",
+					"keyId": "mint-key-2026-01",
+					"trustDomain": "usertrust.ai"
+				},
+				"work": {
+					"kind": "commit",
+					"repoId": "github.com:R_kgDOK1x2Yw",
+					"oid": "45f22dadcb62f51856362fcfef16fc1310fb60ad",
+					"oidAlg": "sha1",
+					"objectSha256": "64db69aa65a7c5b11d2cf4d2ea1d2ed47f7a4da01db572ee4eced754acdc5e16",
+					"repositoryMembership": {
+						"status": "providerVerified",
+						"proofId": "78e2c9fbab5b486596c07c24"
+					}
+				},
+				"event": {
+					"id": "63ddd1dd2db754880d950370b882f2c0",
+					"timestamp": "2026-08-10T14:12:01.000Z",
+					"previousHash": "b309e50c9225db7c69274e42e2f22b1ac788ca998fc0ed1dfa16c15d8f6bd261",
+					"kind": "receipt_settled",
+					"actor": {
+						"type": "system",
+						"id": "receipt-minter",
+						"name": "receipt-minter"
+					},
+					"data": {
+						"spec": "ut1",
+						"scope": "session",
+						"sessionId": "sess_e2b08f031613d47752d58a80",
+						"generation": 1,
+						"work": {
+							"kind": "commit",
+							"repoId": "github.com:R_kgDOK1x2Yw",
+							"oid": "45f22dadcb62f51856362fcfef16fc1310fb60ad",
+							"oidAlg": "sha1",
+							"objectSha256": "64db69aa65a7c5b11d2cf4d2ea1d2ed47f7a4da01db572ee4eced754acdc5e16",
+							"repositoryMembership": {
+								"status": "providerVerified",
+								"proofId": "78e2c9fbab5b486596c07c24"
+							}
+						},
+						"sessionAssociation": "workflowAttested",
+						"workloadId": "cbbf8bea06b7107c2eee0625",
+						"models": ["claude-sonnet-4-6", "custom"],
+						"providers": ["anthropic"],
+						"startedAt": "2026-08-10T14:00:00.000Z",
+						"endedAt": "2026-08-10T14:12:00.000Z",
+						"spend": {
+							"assessedUsertokens": 903120,
+							"postedUsertokens": 903120,
+							"roundingAdjustment": 40,
+							"transferCount": 57,
+							"usagePosture": "mixed",
+							"pricingPosture": "conservative"
+						},
+						"pricing": {
+							"tableVersions": ["2026-07-01", "2026-07-15"]
+						},
+						"transferSetRoot": "75fc8d513ef5a28ab4d90a9b837ee8f01bc728f045974bfe9644715aefa2d105"
+					},
+					"sequence": 8124500,
+					"hash": "43e8365b1c96e6c75d9a74e4bfc6055d9b2d2ce25a36cd58d3eaaa120b482e14"
+				},
+				"proof": {
+					"profile": "proxy-v1",
+					"chain": "vault-usertrust-prod-1",
+					"mintEventHash": "43e8365b1c96e6c75d9a74e4bfc6055d9b2d2ce25a36cd58d3eaaa120b482e14",
+					"inclusion": {
+						"version": 1,
+						"leafHash": "43e8365b1c96e6c75d9a74e4bfc6055d9b2d2ce25a36cd58d3eaaa120b482e14",
+						"leafIndex": 50,
+						"treeSize": 120,
+						"root": "2015320fe89ebe750aa4e04a61b37ee4b640ba5ef02a09348c8607bc0ab02ac0",
+						"siblings": [
+							{
+								"hash": "967082c338c13028b60ccca3febbf96c83669ab9a08bc060b3047478b76d158c",
+								"position": "left"
+							},
+							{
+								"hash": "f4b9d74c3c0303fd352705ce3b922bb43ff1811091b1515144001a56a51f42ca",
+								"position": "right"
+							},
+							{
+								"hash": "7081bdc8c53d1a04a4cf3a6f850e8a4889ca5d3dfa75b5e2aa377b7919d25958",
+								"position": "left"
+							}
+						],
+						"segmentId": "seg-0007"
+					},
+					"checkpoint": {
+						"v": 2,
+						"vaultId": "vault-usertrust-prod-1",
+						"profile": "proxy-v1",
+						"root": "2015320fe89ebe750aa4e04a61b37ee4b640ba5ef02a09348c8607bc0ab02ac0",
+						"treeSize": 120,
+						"segmentId": "seg-0007",
+						"segmentFirstSequence": 8124450,
+						"previousSegmentRoot": "genesis",
+						"previousSegmentId": "genesis",
+						"keyId": "checkpoint-key-2026-01",
+						"publishedAt": "2026-08-10T14:15:00.000Z",
+						"sig": "c3ludGhldGljLWNoZWNrcG9pbnQtc2lnOjpDOA=="
+					}
+				},
+				"signature": {
+					"alg": "ed25519",
+					"keyId": "mint-key-2026-01",
+					"sig": "c3ludGhldGljLW1pbnQtc2lnOjpDOA=="
+				}
+			},
+			"verification": {
+				"trustSnapshotId": "usertrust-verify@2026-08-10T00:00:00Z",
+				"steps": {
+					"schema": {
+						"result": "passed"
+					},
+					"event": {
+						"result": "passed"
+					},
+					"registry": {
+						"result": "passed"
+					},
+					"signature": {
+						"result": "passed"
+					},
+					"inclusion": {
+						"result": "passed"
+					},
+					"checkpoint": {
+						"result": "passed"
+					},
+					"semantics": {
+						"result": "passed"
+					},
+					"derivations": {
+						"result": "notApplicable"
+					},
+					"extensions": {
+						"result": "passed"
+					}
+				},
+				"checks": {
+					"registryBinding": {
+						"result": "passed"
+					},
+					"predecessorLinkage": {
+						"result": "notApplicable"
+					},
+					"checkpointHistory": {
+						"result": "notApplicable"
+					},
+					"anchorEvidence": {
+						"result": "notApplicable"
+					}
+				}
+			},
+			"advisories": []
+		}
+	}
+}

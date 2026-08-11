@@ -1,0 +1,66 @@
+{
+	"routeParamId": "ut1_Bobv8amaajr6fELsxpSVPM",
+	"wire": {
+		"httpStatus": 410,
+		"headers": {
+			"cache-control": "no-store"
+		},
+		"body": {
+			"apiVersion": "1",
+			"status": "billedUnfinalized",
+			"receiptId": "ut1_Bobv8amaajr6fELsxpSVPM",
+			"linkedReceiptId": "ut1_PkZougmr9imYhvUx2ftgom",
+			"transferSetRoot": "4b178909f0e064f1eae7ff98253b87390bf41a2f8d67c18283e40c9b26a7dcf4",
+			"terminalEvent": {
+				"chain": "vault-usertrust-prod-1",
+				"profile": "proxy-v1",
+				"event": {
+					"id": "b8d8cbbda0910d8ddbfc65f9b135ea26",
+					"timestamp": "2026-08-10T15:00:00.000Z",
+					"previousHash": "20c4d3c41b6c153691723b2a5ffcbf7e4cd6ee289141df0abd7c93ba530a576d",
+					"kind": "billing_terminal_no_receipt",
+					"actor": {
+						"type": "system",
+						"id": "receipt-minter",
+						"name": "receipt-minter"
+					},
+					"data": {
+						"receiptId": "ut1_Bobv8amaajr6fELsxpSVPM",
+						"linkedReceiptId": "ut1_PkZougmr9imYhvUx2ftgom",
+						"transferSetRoot": "4b178909f0e064f1eae7ff98253b87390bf41a2f8d67c18283e40c9b26a7dcf4"
+					},
+					"sequence": 8125600,
+					"hash": "eb0ececc575db487d857769116a476c545f7ec15cbed9220757e091925d0cfbc"
+				},
+				"inclusion": {
+					"version": 1,
+					"leafHash": "eb0ececc575db487d857769116a476c545f7ec15cbed9220757e091925d0cfbc",
+					"leafIndex": 5,
+					"treeSize": 30,
+					"root": "6494a1dec3eb348522b0a3f5831b91be16b675be9d5010c522b8afcdda9a5b3c",
+					"siblings": [
+						{
+							"hash": "2f8552e11daf8bc399717ca8fde4bd6ae658c5d38c9c446618f285df1a60f9f7",
+							"position": "left"
+						}
+					],
+					"segmentId": "seg-0018"
+				},
+				"checkpoint": {
+					"v": 2,
+					"vaultId": "vault-usertrust-prod-1",
+					"profile": "proxy-v1",
+					"root": "6494a1dec3eb348522b0a3f5831b91be16b675be9d5010c522b8afcdda9a5b3c",
+					"treeSize": 30,
+					"segmentId": "seg-0018",
+					"segmentFirstSequence": 8125590,
+					"previousSegmentRoot": "genesis",
+					"previousSegmentId": "genesis",
+					"keyId": "checkpoint-key-2026-01",
+					"publishedAt": "2026-08-10T15:01:00.000Z",
+					"sig": "c3ludGhldGljLWNoZWNrcG9pbnQtc2lnOjpDMjE="
+				}
+			}
+		}
+	}
+}

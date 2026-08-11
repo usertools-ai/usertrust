@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/r/<receiptId>` — the public verify page a `Usertrust-Receipt` trailer
+  resolves to (ships DARK, not yet live).** A read-only, unauthenticated
+  page and two JSON siblings (`receipt.json`, `envelope.json`) that render
+  the resolver's answer as an honest verdict: chain-committed claims,
+  minter-asserted claims, and merely-displayed fields kept visually and
+  textually distinct, every non-green outcome (202/404/409/410/503/429,
+  plus a fail-closed protocol-error shell for anything the resolver's
+  contract doesn't name) rendered loud rather than swallowed. The page never
+  computes a verdict — every rung was already decided upstream by
+  `api.usertools.ai/v1/receipts/*` — and does no cryptography beyond the R4
+  byte-identity pipeline (canonical base64, fatal UTF-8, pre-parse
+  duplicate-key rejection, frozen numeric rules) that checks the served
+  receipt bytes against the signed envelope. Built fixture-first against a
+  40-fixture conformance matrix (28 conforming shapes, 11 rejection vectors,
+  2 vector modules) with every rendered claim string asserted verbatim
+  against the frozen spec. **Merges dark**: unlinked, `noindex`, and pointed
+  at the real (not-yet-serving) resolver endpoint — going DNS-visible still
+  needs the resolver live in production and `usertrust-verify receipt`
+  released from `packages/verify`, both tracked separately. See
+  `site/app/r/README.md`.
+
 - **Chain events for governance denials, and a correlation handle on the error.**
   A denied call previously wrote NOTHING to the audit chain: invisible to
   `usertrust verify`, to the ledger UI, to exports, and to the entropy signal
