@@ -1,0 +1,14 @@
+{
+	"routeParamId": "ut1_PM2bz5guVKxChz27pscq4V",
+	"wire": {
+		"httpStatus": 410,
+		"headers": {
+			"cache-control": "public, max-age=3600"
+		},
+		"body": {
+			"apiVersion": "1",
+			"receiptId": "ut1_PM2bz5guVKxChz27pscq4V",
+			"status": "notMinted"
+		}
+	}
+}

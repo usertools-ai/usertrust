@@ -1,0 +1,14 @@
+{
+	"routeParamId": "ut1_5VruzLBdMVWkqntenfymY2",
+	"wire": {
+		"httpStatus": 202,
+		"headers": {
+			"cache-control": "no-store"
+		},
+		"body": {
+			"apiVersion": "1",
+			"receiptId": "ut1_5VruzLBdMVWkqntenfymY2",
+			"status": "reconciling"
+		}
+	}
+}

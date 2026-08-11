@@ -1,0 +1,61 @@
+{
+	"routeParamId": "ut1_EUs1jrc3D4sxfNNhx1cA9G",
+	"wire": {
+		"httpStatus": 409,
+		"headers": {
+			"cache-control": "no-store"
+		},
+		"body": {
+			"apiVersion": "1",
+			"receiptId": "ut1_EUs1jrc3D4sxfNNhx1cA9G",
+			"status": "unverifiable",
+			"verification": {
+				"trustSnapshotId": "usertrust-verify@2026-08-10T00:00:00Z",
+				"steps": {
+					"schema": {
+						"result": "passed"
+					},
+					"event": {
+						"result": "passed"
+					},
+					"registry": {
+						"result": "passed"
+					},
+					"signature": {
+						"result": "failed",
+						"failure": "SIG_INVALID"
+					},
+					"inclusion": {
+						"result": "passed"
+					},
+					"checkpoint": {
+						"result": "passed"
+					},
+					"semantics": {
+						"result": "passed"
+					},
+					"derivations": {
+						"result": "passed"
+					},
+					"extensions": {
+						"result": "passed"
+					}
+				},
+				"checks": {
+					"registryBinding": {
+						"result": "passed"
+					},
+					"predecessorLinkage": {
+						"result": "notApplicable"
+					},
+					"checkpointHistory": {
+						"result": "notApplicable"
+					},
+					"anchorEvidence": {
+						"result": "notApplicable"
+					}
+				}
+			}
+		}
+	}
+}

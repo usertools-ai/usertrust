@@ -1,0 +1,10 @@
+{
+	"routeParamId": "ut1_VrrQsX5PQrfkJAfm2KfRUQ",
+	"wire": {
+		"httpStatus": 429,
+		"headers": {
+			"retry-after": "10"
+		},
+		"body": null
+	}
+}

@@ -1,0 +1,14 @@
+{
+	"routeParamId": "ut1_KLv2UBkfuxujUme32PdA9z",
+	"wire": {
+		"httpStatus": 503,
+		"headers": {
+			"cache-control": "no-store",
+			"retry-after": "30"
+		},
+		"body": {
+			"apiVersion": "1",
+			"status": "verificationUnavailable"
+		}
+	}
+}
