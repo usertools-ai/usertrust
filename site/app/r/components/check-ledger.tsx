@@ -32,6 +32,15 @@ import type { CheckEntry, CheckName, StepName, StepResult, Verification } from "
  *   - `notApplicable` — white/70 (9.7:1) and an EM DASH, never a tick (R12).
  * Every row also renders the four-valued WORD, so the result survives
  * grayscale, color-blindness, and a screen reader.
+ *
+ * **Keyboard / aria** (states pass, §7's `unverifiable`/409 rendering): every
+ * row carries an `id` (`check-<name>`) a caller can link straight to — the
+ * 409 state names ONE row as THE failed check, and a reader arriving via a
+ * "jump to the failed check" link needs a real, keyboard-reachable target,
+ * not just a color change somewhere down the page. The table itself is
+ * labeled as a landmark via `aria-labelledby`, pointing at its own visible
+ * title bar rather than a duplicate `aria-label` string that could drift
+ * from it.
  */
 
 const RESULT_INK: Record<StepResult, string> = {
@@ -72,8 +81,12 @@ export default function CheckLedger({
 		<section
 			className="lift-1 rounded-xl border border-white/10 bg-white/[0.02]"
 			data-testid="check-ledger"
+			aria-labelledby="check-ledger-title"
 		>
-			<div className="flex h-9 items-center border-b border-white/[0.06] px-4 font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+			<div
+				id="check-ledger-title"
+				className="flex h-9 items-center border-b border-white/[0.06] px-4 font-mono text-[12px] uppercase tracking-[0.12em] text-white/70"
+			>
 				check ledger
 			</div>
 
@@ -117,8 +130,9 @@ export default function CheckLedger({
 						return (
 							<tr
 								key={row.name}
+								id={`check-${row.name}`}
 								data-check={row.name}
-								className="border-b border-white/[0.04] align-top"
+								className="scroll-mt-6 border-b border-white/[0.04] align-top target:bg-white/[0.06]"
 							>
 								<th
 									scope="row"

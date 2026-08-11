@@ -1,15 +1,13 @@
-import VerifiedReceipt from "../components/verified-receipt";
+import StateView from "../components/state-view";
 import { verifyPageMetadata } from "../lib/metadata";
-import { resolveVerifyPageState } from "../lib/resolve";
-import { shellHeadline } from "../lib/shell-copy";
+import { resolvePageState } from "../lib/resolve";
 
 /**
  * `/r/<receiptId>` — what a `Usertrust-Receipt` trailer resolves to (spec
- * §9). This task (route + transport, D1/D2) owns getting a trustworthy
- * `PageState` onto the page and rendering it HONESTLY; the full visual
- * language for each rung/state (§6 anatomy, the §7 copy matrix) belongs to
- * Tasks 4 and 5, which replace the `<Shell>` below wholesale. Nothing here
- * claims to be the finished page.
+ * §9). Renders the full §7 state matrix via `StateView`: the `verified`
+ * rungs through Task 4's §6 anatomy, every other `PageState` kind through
+ * this task's own per-state components — 202/410/404/409/503/429/protocol-
+ * error, each with its mandated loudness and copy.
  */
 
 // Forces dynamic, per-request rendering (D1): the SSR fetch below is
@@ -33,33 +31,14 @@ export const metadata = verifyPageMetadata;
 
 export default async function VerifyReceiptPage({ params }: PageProps) {
 	const { receiptId } = await params;
-	const state = await resolveVerifyPageState(receiptId);
+	// `resolvePageState`, not `resolveVerifyPageState` directly: the ONE
+	// caller that renders (and may follow) the `billedUnfinalized` link
+	// needs R3's cross-check run first (`lib/resolve.ts`'s own doc comment).
+	const state = await resolvePageState(receiptId);
 
-	// The VERIFIED rungs render through the §6 anatomy. Every other state is
-	// still the interim shell below — the §7 non-green copy matrix (pending,
-	// terminal, loud failures, operational) is the states pass that follows
-	// this one, and half-dressing those states now would make the shell look
-	// finished while it is still a placeholder.
 	return (
 		<main>
-			{state.kind === "verified" ? <VerifiedReceipt state={state} /> : <Shell state={state} />}
+			<StateView state={state} />
 		</main>
-	);
-}
-
-/**
- * The interim, Task-3-scoped render: enough that every {@link PageState}
- * kind produces honest, distinctly-labeled output (never a silent blank
- * page, never one state's copy leaking into another's), without building
- * the §6 design system this task does not own.
- */
-function Shell({ state }: { state: Awaited<ReturnType<typeof resolveVerifyPageState>> }) {
-	const headline = shellHeadline(state);
-	return (
-		<section data-state={state.kind}>
-			<h1>{headline}</h1>
-			{"reason" in state ? <p>{state.reason}</p> : null}
-			{"detail" in state ? <p>{state.detail}</p> : null}
-		</section>
 	);
 }

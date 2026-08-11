@@ -23,13 +23,19 @@ const BASE =
  * to text-danger for dark ground; pass "text-paper-red" on paper — the stamp
  * is a >=3:1 graphic at 24px, so full danger is correct here (the <16px
  * danger-ink rule does not reach it).
+ *
+ * `UNPROVEN` (verify-page spec §6.2) extends the word union for the 410
+ * `billedUnfinalized` state: work was billed but the artifact association
+ * was never proven. It is a component-level extension, not a new component
+ * — §6.2 asks for exactly this ("`Stamp`, extended beyond `BLOCKED | VOID`
+ * as needed").
  */
 export default function Stamp({
 	word,
 	className,
 	colorClassName = "text-danger",
 }: {
-	word: "BLOCKED" | "VOID";
+	word: "BLOCKED" | "VOID" | "UNPROVEN";
 	className?: string;
 	colorClassName?: string;
 }) {

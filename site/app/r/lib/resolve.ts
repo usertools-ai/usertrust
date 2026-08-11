@@ -26,6 +26,7 @@ import {
 	type ResolverHeaders,
 	transportFailureState,
 	validateReceiptId,
+	verifyBilledUnfinalizedLinkage,
 } from "./wire";
 
 /**
@@ -168,6 +169,38 @@ export async function resolveVerifyPageState(
 		headers: response.headers as ResolverHeaders,
 		raw,
 	});
+}
+
+/**
+ * R3 — the 410 `billedUnfinalized` bundle's link is cross-checked BEFORE it
+ * is rendered or followed: "any mismatch → integrity-failure state, no link
+ * rendered." `resolveVerifyPageState` alone cannot do this (its own doc
+ * comment: "the only door ... one fetch implementation, three consumers" —
+ * `receipt.json`/`envelope.json` have no bytes to serve for a
+ * `billedUnfinalized` ID either way, per {@link jsonResourceStatus}'s 404,
+ * so paying for a second fetch on every download-route call would be waste
+ * without ever changing their answer).
+ *
+ * This wraps it for the ONE caller that renders a link: the page itself.
+ * `resolveVerifyPageState(state.linkedReceiptId, ...)` is a full, independent
+ * resolution — it runs the SAME `?include=checkpointHistory`/no-store/timeout
+ * discipline the primary fetch did, and R3's remaining three equalities are
+ * checked by {@link verifyBilledUnfinalizedLinkage} against whatever that
+ * resolution actually produced (a `verified` receipt, or something else
+ * entirely — a linked ID that itself 404s, or resolves to another
+ * `billedUnfinalized` bundle, both fail the "must be a verified receipt"
+ * gate and become an `integrityFailure`, with no further fetch chased: the
+ * `kind !== "verified"` check alone is sufficient to reject a chain of
+ * `billedUnfinalized` bundles, so this never recurses).
+ */
+export async function resolvePageState(
+	routeParamId: string,
+	options: ResolveOptions = {},
+): Promise<PageState> {
+	const state = await resolveVerifyPageState(routeParamId, options);
+	if (state.kind !== "billedUnfinalized") return state;
+	const linkedReceipt = await resolveVerifyPageState(state.linkedReceiptId, options);
+	return verifyBilledUnfinalizedLinkage(state, linkedReceipt);
 }
 
 /**
