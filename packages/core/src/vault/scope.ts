@@ -14,6 +14,7 @@ import type { ActionKind, CredentialScope } from "../shared/types.js";
  * - Agent scope: empty agents array = all agents allowed; otherwise accessor.agent must be in list.
  * - Action scope: empty actions array = all actions allowed; otherwise accessor.action must be in list.
  * - Expiry: if expiresAt is non-null and in the past, deny with "Credential expired".
+ *   An expiry that is present but UNPARSEABLE denies too — see the NaN note below.
  */
 export function checkScope(
 	scope: CredentialScope,
@@ -38,6 +39,15 @@ export function checkScope(
 	// Check expiry
 	if (scope.expiresAt !== null) {
 		const expiresAt = new Date(scope.expiresAt).getTime();
+		// An UNPARSEABLE expiry is not an absent one. `new Date("garbage").getTime()`
+		// is NaN, and every comparison against NaN is false — so `NaN <= Date.now()`
+		// fell through to `{ allowed: true }` and a credential whose expiry could not
+		// be read was treated as one that had not expired. The permissive branch is
+		// exactly the wrong default for a value that exists precisely to revoke
+		// access, so an uninterpretable expiry now denies.
+		if (!Number.isFinite(expiresAt)) {
+			return { allowed: false, reason: "Credential expiry is not a valid date" };
+		}
 		if (expiresAt <= Date.now()) {
 			return { allowed: false, reason: "Credential expired" };
 		}

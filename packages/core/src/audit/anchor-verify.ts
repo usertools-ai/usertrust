@@ -494,13 +494,23 @@ export function verifyAnchorChain(
 	const knownKeys = new Map<string, KeyObject>();
 	const rootKeyId = keyIdFromKeyObject(rootKey);
 	knownKeys.set(rootKeyId, rootKey);
-	for (const pem of trust.successorPinsPem ?? []) {
+	// An UNPARSEABLE successor pin used to be dropped here in silence. Note the
+	// asymmetry it created with the root key a few lines above: an unparseable
+	// ROOT pushes "trust root public key is not a parseable PEM" and returns,
+	// while a mistyped or truncated `--successor-pin` simply vanished. The
+	// operator supplied a pin precisely to constrain which successor key is
+	// acceptable, so discarding it silently verifies against a WEAKER trust set
+	// than the one they asked for — and the run still reports success. A pin that
+	// cannot be read is an input error, not an absent constraint.
+	for (const [i, pem] of (trust.successorPinsPem ?? []).entries()) {
 		const k = publicKeyFromPem(pem);
-		if (k !== null) {
-			const id = keyIdFromKeyObject(k);
-			pinKeyIds.add(id);
-			knownKeys.set(id, k);
+		if (k === null) {
+			errors.push(`successor pin #${i + 1} is not a parseable PEM`);
+			continue;
 		}
+		const id = keyIdFromKeyObject(k);
+		pinKeyIds.add(id);
+		knownKeys.set(id, k);
 	}
 
 	// A mixed-vaultId set is rejected wholesale, BEFORE dedup can collapse a

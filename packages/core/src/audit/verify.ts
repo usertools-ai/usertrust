@@ -221,8 +221,18 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 					segmentFiles.push(join(auditDir, entry));
 				}
 			}
-		} catch {
-			// Directory read failure — non-fatal
+		} catch (err) {
+			// NOT "non-fatal". A directory that exists but cannot be enumerated is a
+			// vault we did not read, and swallowing that produced the worst possible
+			// answer: with `events.jsonl` also absent or unreadable, `segmentFiles`
+			// stayed empty, the branch below found the directory present so pushed no
+			// error, and verification returned `valid: true, chainLength: 0` — a clean
+			// bill of health, exit 0, on a vault nobody could open. We cannot verify
+			// what we cannot list, and "0 events, all hashes valid" is a claim about
+			// evidence rather than an absence of it.
+			errors.push(
+				`Audit directory could not be enumerated: ${auditDir} (${err instanceof Error ? err.message : String(err)})`,
+			);
 		}
 	}
 
