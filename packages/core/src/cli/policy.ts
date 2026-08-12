@@ -23,6 +23,7 @@ import pc from "picocolors";
 import { validatePolicyFile } from "../policy/gate.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
+import { resolvePolicyPath } from "./policy-path.js";
 
 /**
  * Strip control characters from untrusted text before it reaches a terminal.
@@ -51,46 +52,6 @@ function scrubForTerminal(text: string, max = 200): string {
 		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : ch;
 	}
 	return out.length > max ? `${out.slice(0, max)}...` : out;
-}
-
-/** Default from `TrustConfigSchema.policies`. */
-const DEFAULT_POLICIES_PATH = "./policies/default.yml";
-
-/**
- * Read just the `policies` key. Tolerates a config that is otherwise unusable —
- * a broken budget must not stop an operator diagnosing their policy — but NOT a
- * config that cannot be read or parsed at all.
- *
- * Falling back to the default in that case validated a DIFFERENT file than the
- * governor would load, so the command could exit 0 having checked something
- * unrelated while startup failed. A diagnostic answering confidently about the
- * wrong file is worse than one that refuses.
- *
- * The value is taken VERBATIM, including "". `TrustConfigSchema` accepts an empty
- * string and both governors resolve it to the vault directory, where the load
- * fails — so substituting the default there would report ok for a deployment that
- * cannot start. A diagnostic must resolve its target the way the thing it
- * diagnoses does.
- */
-function readPoliciesPath(vaultDir: string): { path: string } | { error: string } {
-	const p = join(vaultDir, "usertrust.config.json");
-	if (!existsSync(p)) return { path: DEFAULT_POLICIES_PATH };
-	let raw: string;
-	try {
-		raw = readFileSync(p, "utf-8");
-	} catch (err) {
-		return { error: `config cannot be read: ${(err as Error).message}` };
-	}
-	let cfg: { policies?: unknown };
-	try {
-		cfg = JSON.parse(raw) as { policies?: unknown };
-	} catch (err) {
-		return { error: `config is not valid JSON: ${(err as Error).message}` };
-	}
-	if (cfg.policies !== undefined && typeof cfg.policies !== "string") {
-		return { error: `config "policies" must be a string, got ${typeof cfg.policies}` };
-	}
-	return { path: typeof cfg.policies === "string" ? cfg.policies : DEFAULT_POLICIES_PATH };
 }
 
 /**
@@ -146,7 +107,14 @@ export async function run(
 	// a missing budget, which would make an operator fix their config before they
 	// could find out why their policy stopped enforcing. Linting the policy file
 	// must not depend on anything else being right.
-	const resolved = readPoliciesPath(join(vaultPath, VAULT_DIR));
+	// The EXPLICIT path is chosen first, and the config is only consulted when
+	// there isn't one. Resolving config first meant `policy validate ./candidate.yml`
+	// refused on an unrelated config problem and never looked at the named file —
+	// killing the check-before-install mode this command advertises, in exactly the
+	// situation an operator reaches for it.
+	const explicit = argv.find((a, i) => i > 0 && !a.startsWith("-"));
+	const resolved =
+		explicit !== undefined ? { path: explicit } : resolvePolicyPath(join(vaultPath, VAULT_DIR));
 	if ("error" in resolved) {
 		if (options.json) {
 			console.log(
@@ -163,10 +131,8 @@ export async function run(
 		process.exitCode = 1;
 		return;
 	}
-	const policiesRel = resolved.path;
-	// An explicit path wins, so an operator can check a file before installing it.
-	const explicit = argv.find((a, i) => i > 0 && !a.startsWith("-"));
-	const policiesPath = explicit ?? join(vaultPath, VAULT_DIR, policiesRel);
+	const policiesPath =
+		explicit !== undefined ? explicit : join(vaultPath, VAULT_DIR, resolved.path);
 
 	const safePath = scrubForTerminal(policiesPath);
 	// Validate FIRST. An `existsSync` preflight answers false for a file inside a

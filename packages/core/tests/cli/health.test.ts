@@ -223,6 +223,20 @@ describe("usertrust health — policy line", () => {
 		expect(parsed.data.policy.path).toContain(CSI);
 	});
 
+	it("reports a broken config as invalid instead of validating the default", async () => {
+		// health shared this bug with `policy validate` by copy: a malformed config
+		// left the path at the default, so it validated ./policies/default.yml and
+		// printed [ok] for a deployment whose config the governor rejects outright.
+		// Both now use the one resolver in cli/policy-path.ts.
+		const v = join(tempDir, ".usertrust");
+		mkdirSync(join(v, "policies"), { recursive: true });
+		writeFileSync(join(v, "policies", "default.yml"), "rules: []\n", "utf-8");
+		writeFileSync(join(v, "usertrust.config.json"), "{ broken", "utf-8");
+		await run(tempDir, { json: false });
+		expect(out()).toContain("[INVALID]");
+		expect(out()).not.toContain("Policy rules loaded:      0    [none]");
+	});
+
 	it("distinguishes no policy file from a loaded policy", async () => {
 		vault({ budget: 1000, policies: "./policies/default.yml" });
 		await run(tempDir, { json: false });

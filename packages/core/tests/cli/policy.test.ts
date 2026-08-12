@@ -231,6 +231,34 @@ describe("usertrust policy validate", () => {
 		expect(process.exitCode).toBe(1);
 	});
 
+	it("does not crash on a config whose JSON root is null", async () => {
+		// `JSON.parse("null")` succeeds, so a property read threw a raw TypeError
+		// outside every catch — the command emitted NO diagnostic in either output
+		// mode, which is the one thing a pre-flight must never do.
+		mkdirSync(join(tempDir, ".usertrust"), { recursive: true });
+		writeFileSync(join(tempDir, ".usertrust", "usertrust.config.json"), "null", "utf-8");
+		await run(tempDir, { json: true }, ["validate"]);
+		const p = JSON.parse(out()) as { success: boolean; data: { error: string; reason: string } };
+		expect(p.success).toBe(false);
+		expect(p.data.error).toBe("config_unreadable");
+		expect(p.data.reason).toMatch(/must be a JSON object, got null/);
+	});
+
+	it("checks an EXPLICIT file even when the config is broken", async () => {
+		// Resolving the config first meant `policy validate ./candidate.yml` refused
+		// on an unrelated config problem and never looked at the named file — in
+		// exactly the situation an operator reaches for check-before-install.
+		mkdirSync(join(tempDir, ".usertrust"), { recursive: true });
+		writeFileSync(join(tempDir, ".usertrust", "usertrust.config.json"), "{ broken", "utf-8");
+		const candidate = join(tempDir, "candidate.yml");
+		writeFileSync(candidate, GOOD_YAML, "utf-8");
+		await run(tempDir, { json: true }, ["validate", candidate]);
+		const p = JSON.parse(out()) as { success: boolean; data: { path: string; rules: number } };
+		expect(p.success).toBe(true);
+		expect(p.data.path).toBe(candidate);
+		expect(p.data.rules).toBe(1);
+	});
+
 	it("rejects an unknown subcommand rather than silently validating", async () => {
 		writePolicy(GOOD_YAML);
 		await run(tempDir, { json: false }, ["lint"]);

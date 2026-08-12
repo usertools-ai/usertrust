@@ -21,6 +21,7 @@ import { validatePolicyFile } from "../policy/gate.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
 import type { CliOptions } from "./init.js";
+import { DEFAULT_POLICIES_PATH, resolvePolicyPath } from "./policy-path.js";
 
 function loadEvents(vaultPath: string): AuditEvent[] {
 	const logPath = join(vaultPath, "audit", "events.jsonl");
@@ -68,9 +69,6 @@ function scrubForTerminal(text: string, max = 200): string {
 	return out.length > max ? `${out.slice(0, max)}...` : out;
 }
 
-/** Default from `TrustConfigSchema.policies`, resolved relative to the vault dir. */
-const DEFAULT_POLICIES_PATH = "./policies/default.yml";
-
 /**
  * What the policy file would actually contribute to a governed call.
  *
@@ -88,19 +86,22 @@ function loadPolicyStatus(vaultPath: string): {
 	issues: number;
 	firstIssue: string | undefined;
 } {
-	let rel = DEFAULT_POLICIES_PATH;
-	try {
-		const cfgPath = join(vaultPath, "usertrust.config.json");
-		if (existsSync(cfgPath)) {
-			const cfg = JSON.parse(readFileSync(cfgPath, "utf-8")) as { policies?: string };
-			// Verbatim, including "" — see cli/policy.ts: substituting the default
-			// would report on a different file than the governor loads.
-			if (typeof cfg.policies === "string") rel = cfg.policies;
-		}
-	} catch {
-		// Unreadable config — fall back to the schema default rather than failing
-		// the whole health report; the policy line below still reports honestly.
+	// Shared with `cli/policy.ts` — see policy-path.ts. A config that cannot be
+	// read is reported, not replaced with the default: validating
+	// ./policies/default.yml and printing [ok] for a deployment whose config the
+	// governor rejects is a green light for a vault that cannot start.
+	const resolved = resolvePolicyPath(vaultPath);
+	if ("error" in resolved) {
+		return {
+			path: join(vaultPath, DEFAULT_POLICIES_PATH),
+			present: true,
+			rules: 0,
+			active: 0,
+			issues: 1,
+			firstIssue: resolved.error,
+		};
 	}
+	const rel = resolved.path;
 	const path = join(vaultPath, rel);
 	// No `existsSync` preflight — see validatePolicyFile. An absent file yields no
 	// issues and no rules, which is what `present: false` means here; anything
