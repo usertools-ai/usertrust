@@ -79,7 +79,10 @@ function scrubForTerminal(text: string, max = 200): string {
  * distinguishes "nothing was violated" from "nothing was enforced".
  */
 function loadPolicyStatus(vaultPath: string): {
-	path: string;
+	/** null when the config could not be resolved — there is no target to name. */
+	path: string | null;
+	/** Set only when the failure is the CONFIG rather than the policy file. */
+	configError?: string;
 	present: boolean;
 	rules: number;
 	active: number;
@@ -92,9 +95,15 @@ function loadPolicyStatus(vaultPath: string): {
 	// governor rejects is a green light for a vault that cannot start.
 	const resolved = resolvePolicyPath(vaultPath);
 	if ("error" in resolved) {
+		// No policy target was resolved, so there is no path to report and nothing
+		// whose presence could be asserted. Naming the DEFAULT here attributed the
+		// failure to `policies/default.yml` — a file that may be perfectly fine and
+		// that the governor will never reach — and `present: true` claimed it had
+		// been looked at. The config is the subject of this failure; say so.
 		return {
-			path: join(vaultPath, DEFAULT_POLICIES_PATH),
-			present: true,
+			path: null,
+			configError: resolved.error,
+			present: false,
 			rules: 0,
 			active: 0,
 			issues: 1,
@@ -263,6 +272,9 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 					level: levelLabel(report.level),
 					policy: {
 						path: policyStatus.path,
+						...(policyStatus.configError !== undefined
+							? { configError: policyStatus.configError }
+							: {}),
 						present: policyStatus.present,
 						rulesLoaded: policyStatus.rules,
 						rulesActive: policyStatus.active,
@@ -292,12 +304,21 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// here and used for every human-rendered branch below, rather than scrubbed at
 	// each print site — the JSON payload above keeps the raw value, since escaping
 	// is a rendering concern and truncating there would corrupt the field.
-	const safePath = scrubForTerminal(policyStatus.path);
+	const safePath = policyStatus.path === null ? null : scrubForTerminal(policyStatus.path);
 
 	// Signal 0: what the policy file actually contributes. This line comes FIRST
 	// on purpose — a violation count is only meaningful once you know how many
 	// rules were in a position to be violated.
-	if (!policyStatus.present) {
+	if (policyStatus.configError !== undefined) {
+		// The CONFIG failed, so no policy file was ever identified. Naming one here
+		// would point the operator at a file that is probably fine.
+		console.log(
+			`  Policy rules loaded:      0    ${pc.red("[CONFIG]")} ${scrubForTerminal(policyStatus.configError)}`,
+		);
+		console.log(
+			`${pc.red("      The governor resolves its policy path from this file, so it will not start.")}`,
+		);
+	} else if (!policyStatus.present) {
 		console.log(
 			`  Policy rules loaded:      0    ${pc.yellow("[none]")} no policy file at ${safePath} — built-in budget rules only`,
 		);

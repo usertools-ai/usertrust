@@ -112,7 +112,37 @@ export async function run(
 	// refused on an unrelated config problem and never looked at the named file —
 	// killing the check-before-install mode this command advertises, in exactly the
 	// situation an operator reaches for it.
-	const explicit = argv.find((a, i) => i > 0 && !a.startsWith("-"));
+	// EVERY remaining argument must be consumed. Taking the first non-flag and
+	// ignoring the rest meant `policy validate a.yml b.yml` checked only `a.yml`
+	// and exited 0 — a pre-flight that validates a different target than the one
+	// asked about and reports success. An unrecognised dashed option was worse: it
+	// was skipped as a flag and the command silently fell back to the CONFIGURED
+	// policy, answering about a file the operator never named.
+	const rest = argv.slice(1);
+	const paths = rest.filter((a) => !a.startsWith("-"));
+	const flags = rest.filter((a) => a.startsWith("-"));
+	const unknownFlags = flags.filter((a) => a !== "--json");
+	if (unknownFlags.length > 0 || paths.length > 1) {
+		const reason =
+			unknownFlags.length > 0
+				? `unknown option${unknownFlags.length > 1 ? "s" : ""}: ${unknownFlags.join(", ")}`
+				: `expected at most one policy file, got ${paths.length}`;
+		if (options.json) {
+			console.log(
+				toSafeJson({
+					command: "policy",
+					success: false,
+					data: { error: "bad_arguments", reason, arguments: rest },
+				}),
+			);
+		} else {
+			console.error(`${pc.red("[usage]")} ${scrubForTerminal(reason)}`);
+			console.error("Usage: usertrust policy validate [path] [--json]");
+		}
+		process.exitCode = 2;
+		return;
+	}
+	const explicit = paths[0];
 	const resolved =
 		explicit !== undefined ? { path: explicit } : resolvePolicyPath(join(vaultPath, VAULT_DIR));
 	if ("error" in resolved) {

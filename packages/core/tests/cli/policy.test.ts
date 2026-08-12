@@ -259,6 +259,30 @@ describe("usertrust policy validate", () => {
 		expect(p.data.rules).toBe(1);
 	});
 
+	it("refuses extra paths rather than checking only the first", async () => {
+		// `policy validate a.yml b.yml` used to check a.yml and exit 0 — a pre-flight
+		// validating a different target than the one asked about, and passing.
+		writePolicy(GOOD_YAML);
+		const a = join(tempDir, "a.yml");
+		const b = join(tempDir, "b.yml");
+		writeFileSync(a, GOOD_YAML, "utf-8");
+		writeFileSync(b, "rules: [", "utf-8");
+		await run(tempDir, { json: true }, ["validate", a, b]);
+		const p = JSON.parse(out()) as { success: boolean; data: { error: string } };
+		expect(p.success).toBe(false);
+		expect(p.data.error).toBe("bad_arguments");
+		expect(process.exitCode).toBe(2);
+	});
+
+	it("refuses an unknown option rather than falling back to the configured policy", async () => {
+		writePolicy(GOOD_YAML);
+		await run(tempDir, { json: true }, ["validate", "--strict"]);
+		const p = JSON.parse(out()) as { success: boolean; data: { reason: string } };
+		expect(p.success).toBe(false);
+		expect(p.data.reason).toMatch(/unknown option/);
+		expect(process.exitCode).toBe(2);
+	});
+
 	it("rejects an unknown subcommand rather than silently validating", async () => {
 		writePolicy(GOOD_YAML);
 		await run(tempDir, { json: false }, ["lint"]);

@@ -233,8 +233,25 @@ describe("usertrust health — policy line", () => {
 		writeFileSync(join(v, "policies", "default.yml"), "rules: []\n", "utf-8");
 		writeFileSync(join(v, "usertrust.config.json"), "{ broken", "utf-8");
 		await run(tempDir, { json: false });
-		expect(out()).toContain("[INVALID]");
-		expect(out()).not.toContain("Policy rules loaded:      0    [none]");
+		// [CONFIG], not [INVALID]: the config is the subject of the failure, and
+		// naming policies/default.yml would point the operator at a file that is
+		// probably fine and that the governor never reaches.
+		expect(out()).toContain("[CONFIG]");
+		expect(out()).not.toContain("default.yml");
+	});
+
+	it("--json reports the config failure without claiming a policy file is present", async () => {
+		const v = join(tempDir, ".usertrust");
+		mkdirSync(join(v, "policies"), { recursive: true });
+		writeFileSync(join(v, "policies", "default.yml"), "rules: []\n", "utf-8");
+		writeFileSync(join(v, "usertrust.config.json"), "{ broken", "utf-8");
+		await run(tempDir, { json: true });
+		const p = JSON.parse(out()) as {
+			data: { policy: { path: string | null; present: boolean; configError?: string } };
+		};
+		expect(p.data.policy.path).toBeNull();
+		expect(p.data.policy.present).toBe(false);
+		expect(p.data.policy.configError).toMatch(/not valid JSON/);
 	});
 
 	it("distinguishes no policy file from a loaded policy", async () => {
