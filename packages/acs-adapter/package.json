@@ -1,6 +1,6 @@
 {
 	"name": "usertrust-acs-adapter",
-	"version": "3.3.0",
+	"version": "3.3.1",
 	"description": "ACS/AGT composite-evaluator adapter: external policy decides, the usertrust ledger reserves",
 	"license": "Apache-2.0",
 	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
