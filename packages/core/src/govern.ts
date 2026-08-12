@@ -728,8 +728,22 @@ async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promi
 			} finally {
 				await dirHandle.close();
 			}
-		} catch {
-			// Platform does not support directory fsync — the rename still landed.
+		} catch (dirErr) {
+			// DISTINGUISH unsupported from failed. A blanket catch here read EIO,
+			// ENOSPC and EACCES as "this platform has no directory fsync" and
+			// reported success — so a real durability failure left the rename
+			// non-durable in silence, and a crash could restore an older ledger, or
+			// none at all on a first write, which reseeds a LARGER budget. Same
+			// conflation as the read path this branch exists to fix: "cannot" and
+			// "did not" are different facts.
+			const code = (dirErr as NodeJS.ErrnoException)?.code;
+			const unsupported =
+				code === "EINVAL" || code === "ENOTSUP" || code === "EPERM" || code === "EBADF";
+			if (!unsupported) {
+				process.stderr.write(
+					`[usertrust] spend ledger directory not fsynced (${dirErr instanceof Error ? dirErr.message : String(dirErr)}) — the rename may not survive a power loss\n`,
+				);
+			}
 		}
 	} catch (err) {
 		// Still best-effort — a settled call must not fail over ledger persistence,
