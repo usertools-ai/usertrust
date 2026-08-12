@@ -10,8 +10,9 @@
  * the import rule — `node:crypto`, `node:fs`, `node:path` and `./`-relative
  * siblings only.
  *
- * This file grows across the ship. Today it holds step 1's STRICT BYTE READER
- * and the §8 TRUST-SNAPSHOT LOADER; the nine steps land on top of it.
+ * This file grows across the ship. Today it holds step 1's STRICT BYTE READER,
+ * the §8 TRUST-SNAPSHOT LOADER, and §7 steps 1–8 — the BASE verdict. Step 9's
+ * extensions and the CLI surface land on top of it.
  *
  * Two rules govern everything here, and both are load-bearing rather than
  * stylistic:
@@ -37,7 +38,9 @@
  */
 
 import { createHash, type KeyObject } from "node:crypto";
-import { publicKeyFromPem, publicKeyFromSpkiBase64 } from "./anchor-verify.js";
+import { publicKeyFromPem, publicKeyFromSpkiBase64, verifySignatureRaw } from "./anchor-verify.js";
+import { canonicalize } from "./canonical.js";
+import { type MerkleInclusionProof, verifyInclusionProof } from "./verify.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // JSON value model.
@@ -1087,4 +1090,1146 @@ function lineageOf(keys: ReadonlyMap<string, TrustKey>, pinned: string): Readonl
 		if (!grew) break;
 	}
 	return lineage;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Literals the ut1 profile pins (receipt-spec §4a, §5, §8, §14).
+//
+// Named constants rather than inline strings because each one is a FORMAT
+// BREAK if it moves: §14 is explicit that renaming across the snake_case /
+// camelCase boundary is never a cleanup.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const RECEIPT_SIGNATURE_PREFIX = "usertrust/receipt-signature/v1\n";
+export const TRANSFER_SET_PREFIX = "usertrust/receipt-transfers/v1\n";
+export const UT1_PROFILE = "proxy-v1";
+export const UT1_MINT_EVENT_KIND = "receipt_settled";
+export const UT1_TRUST_DOMAIN = "usertrust.ai";
+export const UT1_SPEC = "ut1";
+export const UT1_SCOPE = "session";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §12 — the receipt-ID rule.
+//
+// "The character-count rule is NOT the ID rule." §12 requires a canonical
+// DECODE to exactly 16 bytes and a byte-identical RE-ENCODE; the `16*22`
+// character grammar is necessary and nowhere near sufficient, because many
+// strings of that length decode short and some decode long.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const RECEIPT_ID_PREFIX = "ut1_";
+const RECEIPT_ID_BYTES = 16;
+
+function base58Decode(text: string): Uint8Array | null {
+	let zeros = 0;
+	while (zeros < text.length && text[zeros] === "1") zeros += 1;
+	const bytes: number[] = [];
+	for (let i = zeros; i < text.length; i += 1) {
+		const value = BASE58_ALPHABET.indexOf(text[i] as string);
+		if (value < 0) return null;
+		let carry = value;
+		for (let j = 0; j < bytes.length; j += 1) {
+			carry += (bytes[j] as number) * 58;
+			bytes[j] = carry & 0xff;
+			carry >>= 8;
+		}
+		while (carry > 0) {
+			bytes.push(carry & 0xff);
+			carry >>= 8;
+		}
+	}
+	const out = new Uint8Array(zeros + bytes.length);
+	for (let i = 0; i < bytes.length; i += 1) {
+		out[zeros + bytes.length - 1 - i] = bytes[i] as number;
+	}
+	return out;
+}
+
+function base58Encode(bytes: Uint8Array): string {
+	let zeros = 0;
+	while (zeros < bytes.length && bytes[zeros] === 0) zeros += 1;
+	const digits: number[] = [];
+	for (let i = zeros; i < bytes.length; i += 1) {
+		let carry = bytes[i] as number;
+		for (let j = 0; j < digits.length; j += 1) {
+			carry += (digits[j] as number) << 8;
+			digits[j] = carry % 58;
+			carry = Math.floor(carry / 58);
+		}
+		while (carry > 0) {
+			digits.push(carry % 58);
+			carry = Math.floor(carry / 58);
+		}
+	}
+	let out = "1".repeat(zeros);
+	for (let i = digits.length - 1; i >= 0; i -= 1) out += BASE58_ALPHABET[digits[i] as number];
+	return out;
+}
+
+/** §12's two rules, applied after the `16*22base58char` grammar. */
+export function isCanonicalReceiptId(id: string): boolean {
+	if (!id.startsWith(RECEIPT_ID_PREFIX)) return false;
+	const body = id.slice(RECEIPT_ID_PREFIX.length);
+	if (body.length < 16 || body.length > 22) return false;
+	const decoded = base58Decode(body);
+	if (decoded === null || decoded.length !== RECEIPT_ID_BYTES) return false;
+	return base58Encode(decoded) === body;
+}
+
+const TRAILER_PREFIX = "Usertrust-Receipt: ";
+const RESOLUTION_URL_PREFIX = "https://usertrust.ai/r/";
+
+/**
+ * The ID a receipt ARRIVED under, extracted from `--expect-id` (CLI spec §2).
+ *
+ * §12's lexical rules are enforced rather than paraphrased: the key is
+ * case-SENSITIVE, followed by exactly one `:` and exactly one space, the value
+ * runs to end-of-line, and there is no folding, no trailing whitespace and no
+ * inline comment. A URL that merely APPEARS inside prose is not a trailer, so
+ * this never searches — it matches from the start of the (single) line.
+ *
+ * `null` means the context is not a §12 form. That is a USAGE error for the
+ * caller to report (exit 3), never a silent `notApplicable`: an unparseable
+ * `--expect-id` that quietly disabled step 3(a) would answer a question the
+ * operator did not ask.
+ */
+export function receiptIdFromArrivalContext(context: string): string | null {
+	let text = context;
+	// "line endings may be LF or CRLF and the CR is not part of the value".
+	if (text.endsWith("\n")) text = text.slice(0, -1);
+	if (text.endsWith("\r")) text = text.slice(0, -1);
+	if (text.includes("\n") || text.includes("\r")) return null;
+	if (text.startsWith(TRAILER_PREFIX)) text = text.slice(TRAILER_PREFIX.length);
+	if (text.startsWith(RESOLUTION_URL_PREFIX)) text = text.slice(RESOLUTION_URL_PREFIX.length);
+	return isCanonicalReceiptId(text) ? text : null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Verdict vocabulary (receipt-spec §7; CLI spec §5, §6).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** §7's eight BASE steps. Step 9 is `extensions`; `envelope` is the CLI's. */
+export type BaseStepName =
+	| "schema"
+	| "event"
+	| "registry"
+	| "signature"
+	| "inclusion"
+	| "checkpoint"
+	| "semantics"
+	| "derivations";
+
+export type StepName = BaseStepName | "extensions" | "envelope";
+
+/** §7's CLOSED failure vocabulary. */
+export type FailureCode =
+	| "SCHEMA_INVALID"
+	| "EVENT_MISMATCH"
+	| "ID_MISMATCH"
+	| "SIG_INVALID"
+	| "PROOF_INVALID"
+	| "CHECKPOINT_INVALID"
+	| "SEMANTIC_INVALID"
+	| "DERIVATION_MISMATCH"
+	| "HISTORY_INVALID"
+	| "ANCHOR_INVALID"
+	| "PREDECESSOR_MISMATCH";
+
+/** §7: "Every check reports a structured result, not a boolean." */
+export type CheckResultValue = "passed" | "failed" | "notApplicable" | "unavailable";
+
+export type MissingWhat = "trustSnapshot" | "receiptBytes" | "proof" | "checkpoint" | "trustKey";
+
+export interface StepOutcome {
+	readonly result: CheckResultValue;
+	readonly failure?: { readonly code: FailureCode; readonly detail: string };
+}
+
+/** R39's machine-readable labels. The amount is never rendered without them. */
+export interface PostureLabels {
+	readonly delegation: string;
+	readonly usage: string;
+	readonly pricing: string;
+}
+
+/**
+ * What step 9 needs and cannot re-derive. Present ONLY on a base pass: an
+ * extension may upgrade a verdict, never rescue one, so handing this out after
+ * a failure would be handing out an invitation to try.
+ */
+export interface VerifiedMaterial {
+	readonly document: JsonObject;
+	readonly chain: TrustChain;
+	readonly checkpoint: JsonObject;
+}
+
+export interface BaseVerdictReport {
+	readonly verdict: "VERIFIED_CHECKPOINT" | "FAILED" | "UNVERIFIABLE";
+	readonly receiptId: string | null;
+	readonly steps: Readonly<Record<BaseStepName, StepOutcome>>;
+	/** §7's named online checks. Both are `notApplicable` offline, by rule. */
+	readonly checks: {
+		readonly registryBinding: StepOutcome;
+		readonly predecessorLinkage: StepOutcome;
+	};
+	readonly arrivalContext: {
+		readonly result: CheckResultValue;
+		readonly expected: string | null;
+	};
+	readonly computed: { readonly amountUsd: string | null };
+	readonly posture: PostureLabels | null;
+	readonly failure: {
+		readonly step: StepName;
+		readonly code: FailureCode;
+		readonly detail: string;
+	} | null;
+	readonly missing: { readonly what: MissingWhat; readonly detail: string } | null;
+	readonly verified: VerifiedMaterial | null;
+}
+
+export interface ReceiptVerifyInput {
+	/** The BYTES are the artifact. In `--envelope` mode these are the decoded
+	 * `receiptBytes`, never the envelope's parsed `receipt` copy. */
+	readonly receiptBytes: Uint8Array;
+	readonly snapshot: TrustSnapshot;
+	/** The §12-validated ID the document arrived under. Omitted ⇒ 3(a) is n/a. */
+	readonly arrivalId?: string;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §2 — `amountUsd`, computed on an integer path.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `assessedUsertokens / 10000` by integer quotient/remainder, four decimals.
+ *
+ * §2 says "no float", and it is not a style rule: `999999999999999 / 10000`
+ * is 99999999999.99991 as a double and `.toFixed(4)` reads it back as
+ * 100000000000.0000 — a cent-scale overstatement at the top of the safe-integer
+ * range, in the one number the whole document exists to report. `%` and the
+ * subtraction below are exact on safe integers.
+ */
+export function amountUsdFromAssessed(assessed: number): string {
+	const remainder = assessed % 10000;
+	const whole = (assessed - remainder) / 10000;
+	return `${whole}.${String(remainder).padStart(4, "0")}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Step resolutions.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type Resolution =
+	| { readonly kind: "passed" }
+	| { readonly kind: "notApplicable" }
+	| { readonly kind: "failed"; readonly code: FailureCode; readonly detail: string }
+	| { readonly kind: "missing"; readonly what: MissingWhat; readonly detail: string };
+
+const PASSED: Resolution = { kind: "passed" };
+const NOT_APPLICABLE: Resolution = { kind: "notApplicable" };
+const NOT_APPLICABLE_OUTCOME: StepOutcome = { result: "notApplicable" };
+
+function failure(code: FailureCode, detail: string): Resolution {
+	return { kind: "failed", code, detail };
+}
+
+function missingMaterial(what: MissingWhat, detail: string): Resolution {
+	return { kind: "missing", what, detail };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Typed reads. Every one of these returns `null` rather than throwing: the
+// document is untrusted, and the step that needed the value reports its own
+// code for the absence.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function stringAt(object: JsonObject, key: string): string | null {
+	const value = object[key];
+	return typeof value === "string" ? value : null;
+}
+
+function numberAt(object: JsonObject, key: string): number | null {
+	const value = object[key];
+	// The frozen reader has already rejected every non-safe-integer, so a number
+	// reaching here is one; the guard is belt, and it keeps this usable on the
+	// snapshot path too.
+	return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+}
+
+function objectAtKey(object: JsonObject, key: string): JsonObject | undefined {
+	const value = object[key];
+	return isJsonObject(value) ? value : undefined;
+}
+
+function arrayAt(object: JsonObject, key: string): JsonValue[] | null {
+	const value = object[key];
+	return Array.isArray(value) ? value : null;
+}
+
+const LOWERCASE_HEX_64 = /^[0-9a-f]{64}$/;
+const LOWERCASE_HEX_32 = /^[0-9a-f]{32}$/;
+const OPAQUE_ID = /^[A-Za-z0-9._-]{1,128}$/;
+
+/** Canonical base64 FIRST, then the reused Ed25519 helper (CLI spec §4). */
+function verifyEd25519(preimage: string, key: KeyObject, sigBase64: string): boolean {
+	if (!isCanonicalBase64(sigBase64)) return false;
+	return verifySignatureRaw("ed25519", preimage, key, sigBase64);
+}
+
+/** `canonicalize(x − key)` with key-ABSENT exclusion, never an undefined value. */
+function canonicalizeWithout(object: JsonObject, key: string): string {
+	const { [key]: _dropped, ...rest } = object;
+	return canonicalize(rest);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The key-state rule (§8), shared by steps 4 and 6.
+//
+// One function for both because §8 states one rule: "MINT keys have no
+// segment-indexed material of their own; their retirement boundary is the mint
+// event's segment, evaluated the same way through the receipt's checkpoint."
+// Two copies would be two chances to implement `state permitting` as a state
+// check alone — which is precisely the defect that accepts a freshly-signed
+// receipt from a retired key.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function keyStatePermits(key: TrustKey, segmentFirstSequence: number): string | null {
+	if (key.state === "revoked") {
+		return `key ${key.keyId} is revoked — a revoked key verifies nothing, past or present`;
+	}
+	if (key.state === "retired") {
+		// The loader has already refused a `retired` key with no
+		// `activationSequence`, so an unevaluable boundary never reaches here.
+		const boundary = key.activationSequence;
+		if (boundary === undefined || !(segmentFirstSequence < boundary)) {
+			return `retired key ${key.keyId} signed material at segmentFirstSequence ${segmentFirstSequence}, at or after its successor's activation (${String(boundary)})`;
+		}
+	}
+	return null;
+}
+
+/**
+ * §7 step 6, factored out because step 9's history walk applies it to EVERY
+ * checkpoint it is handed and must reach the same answer for each.
+ *
+ * `missingTrustKey` is not the same outcome as a failure and the caller must
+ * keep them apart: an unresolvable `checkpoint.keyId` is missing material
+ * (UNVERIFIABLE), while a resolved key whose state forbids is a real negative
+ * answer (FAILED).
+ */
+export type CheckpointOutcome =
+	| { readonly ok: true }
+	| { readonly ok: false; readonly missingTrustKey: boolean; readonly detail: string };
+
+export function verifyCheckpointStatement(
+	checkpoint: JsonObject,
+	chain: TrustChain,
+	snapshot: TrustSnapshot,
+): CheckpointOutcome {
+	const reject = (detail: string): CheckpointOutcome => ({
+		ok: false,
+		missingTrustKey: false,
+		detail,
+	});
+
+	// §7 step 6, first clause: a v1 `PublishedMerkleRoot` in a receipt is FAIL.
+	// Its root-only signature leaves `treeSize` and the lineage edge
+	// unauthenticated, which is exactly what v2 exists to close.
+	if (checkpoint.v !== 2) {
+		return reject(`checkpoint.v is ${JSON.stringify(checkpoint.v)}, not the v2 statement`);
+	}
+	const keyId = stringAt(checkpoint, "keyId");
+	if (keyId === null) return reject("checkpoint carries no keyId");
+	const segmentFirstSequence = numberAt(checkpoint, "segmentFirstSequence");
+	if (segmentFirstSequence === null) return reject("checkpoint carries no segmentFirstSequence");
+	const sig = stringAt(checkpoint, "sig");
+	if (sig === null) return reject("checkpoint carries no sig");
+
+	const key = snapshot.keys.get(keyId);
+	if (key === undefined) {
+		return {
+			ok: false,
+			missingTrustKey: true,
+			detail: `checkpoint key ${keyId} is not in the pinned snapshot`,
+		};
+	}
+	if (key.role !== "checkpoint") {
+		return reject(`checkpoint key ${keyId} is registered with role ${key.role}`);
+	}
+	// Per-chain authority (R3-2): a domain-wide checkpoint key confers NO
+	// authority over a chain whose `checkpointRootKeyId` pins another lineage.
+	if (!chain.checkpointLineage.has(keyId)) {
+		return reject(
+			`checkpoint key ${keyId} is outside the lineage pinned by ${chain.checkpointRootKeyId}`,
+		);
+	}
+	const stateFailure = keyStatePermits(key, segmentFirstSequence);
+	if (stateFailure !== null) return reject(stateFailure);
+
+	// §4a: the checkpoint preimage is `canonicalize(unsigned)` with NO domain
+	// prefix. The asymmetry with the receipt signature is intentional and must
+	// not be "fixed" — adding a prefix here rejects every real checkpoint.
+	if (!verifyEd25519(canonicalizeWithout(checkpoint, "sig"), key.publicKey, sig)) {
+		return reject(`checkpoint signature does not verify under key ${keyId}`);
+	}
+	return { ok: true };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Step 7 — §2's EXHAUSTIVE semantic constraints.
+//
+// "Exhaustive" is load-bearing in both directions: a constraint §2 does not
+// list is not step 7's to invent (over-rejection fails honest receipts), and
+// every constraint it does list is decidable from the receipt alone.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const USAGE_POSTURES = new Set(["provider", "mixed", "estimated"]);
+const PRICING_POSTURES = new Set(["exact", "conservative"]);
+const SESSION_ASSOCIATIONS = new Set(["workflowAttested", "ownerAsserted"]);
+/** §2a's four values — the VERIFIER's vocabulary, wider than v1 minting's. */
+const DELEGATION_POSTURES = new Set([
+	"selfDebitsOnly",
+	"includesSomeDelegated",
+	"includesAllDelegated",
+	"indeterminate",
+]);
+const WORK_KINDS = new Set(["commit", "pr", "issue", "session"]);
+
+/** Sorted-unique, ASCII-lexicographic — one helper, three fields (§2). */
+function sortedUniqueStrings(value: JsonValue | undefined, field: string): string | null {
+	if (!Array.isArray(value)) return `${field} is missing or not an array`;
+	let previous: string | null = null;
+	for (const entry of value) {
+		if (typeof entry !== "string") return `${field} carries a non-string entry`;
+		if (previous !== null && !(previous < entry)) {
+			return `${field} is not sorted-unique ASCII-lexicographic at ${JSON.stringify(entry)}`;
+		}
+		previous = entry;
+	}
+	return null;
+}
+
+function checkWorkVariant(work: JsonObject): string | null {
+	const kind = stringAt(work, "kind");
+	if (kind === null || !WORK_KINDS.has(kind)) {
+		return `work.kind ${JSON.stringify(work.kind)} matches no §2 union variant`;
+	}
+	if (stringAt(work, "repoId") === null)
+		return "work.repoId is missing — it is the NORMATIVE scope";
+	const repo = work.repo;
+	if (repo !== undefined) {
+		// Public safety: `repo` is the canonical provider-URL form, ≤ 256 chars.
+		if (typeof repo !== "string" || repo.length > 256) {
+			return "work.repo is not a ≤256-character canonical provider URL";
+		}
+	}
+
+	if (kind === "session") {
+		// The two session variants MUST NOT overlap: `origin` present ⇒ fallback.
+		const origin = work.origin;
+		if (origin !== undefined) {
+			if (!isJsonObject(origin)) return "work.origin is not an object";
+			if (origin.kind !== "billedUnfinalized") {
+				return "work.origin.kind is not the fallback discriminator billedUnfinalized";
+			}
+			if (stringAt(origin, "sourceReservationReceiptId") === null) {
+				return "the fallback session variant requires sourceReservationReceiptId";
+			}
+		}
+		// §2: a session receipt claims NO artifact membership, so
+		// `repositoryMembership` is exempt — and present-anyway is an unknown
+		// field, already refused by step 1.
+		return null;
+	}
+
+	// v1 FAILS CLOSED on membership: `unverified` is not a ut1 value.
+	const membership = objectAtKey(work, "repositoryMembership");
+	if (membership === undefined) return `work.repositoryMembership is REQUIRED on kind ${kind}`;
+	if (membership.status !== "providerVerified") {
+		return "repositoryMembership.status is not providerVerified — v1 has no other value";
+	}
+	const proofId = stringAt(membership, "proofId");
+	if (proofId === null || !OPAQUE_ID.test(proofId)) {
+		return "repositoryMembership.proofId is not an opaque [A-Za-z0-9._-]{1,128} handle";
+	}
+
+	if (kind === "commit") {
+		if (stringAt(work, "oid") === null) return "work.oid is missing";
+		const oidAlg = stringAt(work, "oidAlg");
+		if (oidAlg !== "sha1" && oidAlg !== "sha256") return "work.oidAlg is not sha1 or sha256";
+		if (stringAt(work, "objectSha256") === null) return "work.objectSha256 is missing";
+		return null;
+	}
+
+	// pr / issue.
+	if (numberAt(work, "number") === null) return `work.number is missing on kind ${kind}`;
+	if (stringAt(work, "providerArtifactId") === null) return "work.providerArtifactId is missing";
+	if (stringAt(work, "observedRevision") === null) return "work.observedRevision is missing";
+	const binding = objectAtKey(work, "contentBinding");
+	if (binding === undefined) return "work.contentBinding is missing";
+	if (binding.kind === "publicSha256") {
+		return stringAt(binding, "sha256") === null ? "contentBinding.sha256 is missing" : null;
+	}
+	if (binding.kind === "privateHmacSha256V1") {
+		return stringAt(binding, "commitment") === null ? "contentBinding.commitment is missing" : null;
+	}
+	return "contentBinding matches neither arm of §2's EXACTLY-ONE union";
+}
+
+function checkTransferSet(projection: JsonObject, transferCount: number): string | null {
+	const present = projection.transferSet !== undefined;
+	// §2: "transferSet presence is a RULE, not an option."
+	if (transferCount > 32) {
+		return present ? "transferSet is present on a >32-pair receipt" : null;
+	}
+	if (!present) return "transferSet is absent on a ≤32-pair receipt";
+
+	const list = arrayAt(projection, "transferSet");
+	if (list === null) return "transferSet is not an array";
+	if (list.length !== transferCount) {
+		return `transferSet carries ${list.length} pairs against transferCount ${transferCount}`;
+	}
+	// §2 states two rules — no repeated transfer ID "in either position", and no
+	// repeated pair. The first SUBSUMES the second (a repeated pair repeats both
+	// of its IDs), so one set decides both and there is no second, unreachable
+	// branch pretending otherwise.
+	const seenIds = new Set<string>();
+	for (const entry of list) {
+		if (!isJsonObject(entry)) return "a transferSet member is not an object";
+		const authorization = stringAt(entry, "authorizationTransferId");
+		const settlement = stringAt(entry, "settlementTransferId");
+		if (authorization === null || settlement === null) {
+			return "a transferSet member is not the {authorization, settlement} ID pair";
+		}
+		for (const id of [authorization, settlement]) {
+			if (!LOWERCASE_HEX_32.test(id)) {
+				return `transfer ID ${JSON.stringify(id)} is not a canonical 128-bit lowercase-hex ID`;
+			}
+			// "no transfer ID repeats anywhere in the list, in EITHER position".
+			if (seenIds.has(id)) return `transfer ID ${id} repeats in the list`;
+			seenIds.add(id);
+		}
+	}
+	return null;
+}
+
+function checkSemantics(projection: JsonObject): string | null {
+	// The projection's own literals. Step 2's equality 7 already proved the two
+	// copies AGREE, so this is the check that both are ut1's — and it is
+	// unreachable-but-correct: a disagreement is caught earlier, and a matching
+	// pair of illegal literals is caught by step 1 on the receipt's side.
+	if (projection.spec !== UT1_SPEC) return `projection spec is not ${UT1_SPEC}`;
+	if (projection.scope !== UT1_SCOPE) return `projection scope is not ${UT1_SCOPE}`;
+	if (stringAt(projection, "sessionId") === null) return "sessionId is missing";
+	if (stringAt(projection, "startedAt") === null) return "startedAt is missing";
+	if (stringAt(projection, "endedAt") === null) return "endedAt is missing";
+
+	const generation = numberAt(projection, "generation");
+	if (generation === null || generation < 1) return "generation is not an integer ≥ 1";
+	const previousGeneration = projection.prevGenerationEventHash;
+	if (generation > 1) {
+		if (typeof previousGeneration !== "string" || !LOWERCASE_HEX_64.test(previousGeneration)) {
+			return "generation > 1 requires a 64-lowercase-hex prevGenerationEventHash";
+		}
+	} else if (previousGeneration !== undefined) {
+		return "prevGenerationEventHash is present at generation 1";
+	}
+
+	const association = stringAt(projection, "sessionAssociation");
+	if (association === null || !SESSION_ASSOCIATIONS.has(association)) {
+		return "sessionAssociation is missing or not a §6a posture";
+	}
+	const workloadId = projection.workloadId;
+	if (association === "workflowAttested") {
+		if (typeof workloadId !== "string" || !OPAQUE_ID.test(workloadId)) {
+			// The posture can never claim attestation without naming what was
+			// attested — present-without-attested and attested-without-present are
+			// BOTH failures, and this is the second half.
+			return "workflowAttested requires an opaque workloadId";
+		}
+	} else if (workloadId !== undefined) {
+		return "workloadId is present on an ownerAsserted receipt";
+	}
+
+	const work = objectAtKey(projection, "work");
+	if (work === undefined) return "work is missing from the projection";
+	const workFailure = checkWorkVariant(work);
+	if (workFailure !== null) return workFailure;
+
+	for (const [field, value] of [
+		["models", projection.models],
+		["providers", projection.providers],
+	] as const) {
+		const sortFailure = sortedUniqueStrings(value, field);
+		if (sortFailure !== null) return sortFailure;
+	}
+	const pricing = objectAtKey(projection, "pricing");
+	if (pricing === undefined) return "pricing is missing";
+	const versionFailure = sortedUniqueStrings(pricing.tableVersions, "pricing.tableVersions");
+	if (versionFailure !== null) return versionFailure;
+
+	const spend = objectAtKey(projection, "spend");
+	if (spend === undefined) return "spend is missing";
+	const assessed = numberAt(spend, "assessedUsertokens");
+	const posted = numberAt(spend, "postedUsertokens");
+	const rounding = numberAt(spend, "roundingAdjustment");
+	const transferCount = numberAt(spend, "transferCount");
+	if (assessed === null || posted === null || rounding === null || transferCount === null) {
+		return "spend is missing one of its integer members";
+	}
+	// P1-4: ut1 has no shortfall branch. A receipt with posted < assessed would
+	// need a negative roundingAdjustment to satisfy §2's own recompute equation,
+	// which the bound below forbids.
+	if (!(posted > 0) || posted !== assessed) {
+		return `0 < postedUsertokens === assessedUsertokens fails (${posted} vs ${assessed})`;
+	}
+	if (transferCount < 1) return "transferCount is not ≥ 1 — empty sessions are unmintable";
+	if (rounding < 0 || rounding > transferCount) {
+		return `roundingAdjustment ${rounding} is outside [0, ${transferCount}]`;
+	}
+	const usagePosture = stringAt(spend, "usagePosture");
+	if (usagePosture === null || !USAGE_POSTURES.has(usagePosture)) {
+		return "usagePosture is not one of provider | mixed | estimated";
+	}
+	const pricingPosture = stringAt(spend, "pricingPosture");
+	if (pricingPosture === null || !PRICING_POSTURES.has(pricingPosture)) {
+		return "pricingPosture is not one of exact | conservative";
+	}
+
+	// §2a / §7's REQUIRED verifier behavior. Missing or unrecognized fails
+	// closed: a v1 verifier meeting a value a later spec adds must refuse rather
+	// than render a total whose coverage it cannot interpret.
+	const delegation = stringAt(projection, "delegationPosture");
+	if (delegation === null || !DELEGATION_POSTURES.has(delegation)) {
+		return `delegationPosture ${JSON.stringify(projection.delegationPosture)} is missing or unrecognized — the amount's coverage cannot be interpreted`;
+	}
+	if (delegation === "includesAllDelegated") {
+		// Pinned in §2a: this posture is a CLAIM THAT MUST BE VERIFIABLE. No
+		// signed-evidence format is specified, so in v1 the claim can never be
+		// substantiated — and an unsubstantiated claim is a failed step, not a
+		// rendered total.
+		return "includesAllDelegated carries no validating signed evidence — §2a specifies no evidence format in v1";
+	}
+
+	const transferFailure = checkTransferSet(projection, transferCount);
+	if (transferFailure !== null) return transferFailure;
+
+	const root = stringAt(projection, "transferSetRoot");
+	if (root === null || !LOWERCASE_HEX_64.test(root)) {
+		return "transferSetRoot is not 64 lowercase hex characters";
+	}
+	return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The base run (receipt-spec §7 steps 1–8).
+// ─────────────────────────────────────────────────────────────────────────────
+
+const BASE_STEPS: readonly BaseStepName[] = [
+	"schema",
+	"event",
+	"registry",
+	"signature",
+	"inclusion",
+	"checkpoint",
+	"semantics",
+	"derivations",
+];
+
+/** What step 1 binds once, so no later step re-reads the document by hand. */
+interface BoundReceipt {
+	readonly document: JsonObject;
+	readonly receiptId: string;
+	readonly minter: JsonObject;
+	readonly signature: JsonObject;
+	readonly event: JsonObject;
+	readonly projection: JsonObject;
+	readonly proof: JsonObject;
+	readonly inclusion: JsonObject;
+	readonly checkpoint: JsonObject;
+}
+
+class BaseRun {
+	private readonly results = new Map<BaseStepName, StepOutcome>();
+	private receiptId: string | null = null;
+	private amountUsd: string | null = null;
+	private posture: PostureLabels | null = null;
+	private arrival: CheckResultValue = "notApplicable";
+	private bound: BoundReceipt | null = null;
+	private chain: TrustChain | null = null;
+
+	constructor(private readonly input: ReceiptVerifyInput) {}
+
+	run(): BaseVerdictReport {
+		for (const step of BASE_STEPS) {
+			const resolution = this.evaluate(step);
+			if (resolution.kind === "failed") {
+				this.results.set(step, {
+					result: "failed",
+					failure: { code: resolution.code, detail: resolution.detail },
+				});
+				return this.report({
+					verdict: "FAILED",
+					failure: { step, code: resolution.code, detail: resolution.detail },
+					missing: null,
+				});
+			}
+			if (resolution.kind === "missing") {
+				// Nothing FAILED — the material was not there to judge. §7 reserves
+				// UNVERIFIABLE for exactly this, and the exit code (2, not 1) is what
+				// makes the distinction operationally load-bearing.
+				return this.report({
+					verdict: "UNVERIFIABLE",
+					failure: null,
+					missing: { what: resolution.what, detail: resolution.detail },
+				});
+			}
+			this.results.set(step, {
+				result: resolution.kind === "passed" ? "passed" : "notApplicable",
+			});
+		}
+		return this.report({ verdict: "VERIFIED_CHECKPOINT", failure: null, missing: null });
+	}
+
+	private evaluate(step: BaseStepName): Resolution {
+		switch (step) {
+			case "schema":
+				return this.stepSchema();
+			case "event":
+				return this.stepEvent();
+			case "registry":
+				return this.stepRegistry();
+			case "signature":
+				return this.stepSignature();
+			case "inclusion":
+				return this.stepInclusion();
+			case "checkpoint":
+				return this.stepCheckpoint();
+			case "semantics":
+				return this.stepSemantics();
+			default:
+				return this.stepDerivations();
+		}
+	}
+
+	/** Non-null once step 1 has passed; every later step runs after it. */
+	private get receipt(): BoundReceipt {
+		return this.bound as BoundReceipt;
+	}
+
+	private get boundChain(): TrustChain {
+		return this.chain as TrustChain;
+	}
+
+	// ── Step 1: strict schema + §12 ID + §5 shape ────────────────────────────
+	private stepSchema(): Resolution {
+		const read = readReceiptDocument(this.input.receiptBytes);
+		if (!read.ok) {
+			return read.refusal.kind === "unparseable"
+				? missingMaterial("receiptBytes", read.refusal.detail)
+				: failure("SCHEMA_INVALID", read.refusal.detail);
+		}
+		const document = read.value;
+		const schema = (detail: string): Resolution => failure("SCHEMA_INVALID", detail);
+
+		if (document.spec !== UT1_SPEC) return schema(`spec is not the literal ${UT1_SPEC}`);
+		if (document.scope !== UT1_SCOPE) return schema(`scope is not the literal ${UT1_SCOPE}`);
+		const receiptId = stringAt(document, "receiptId");
+		if (receiptId === null) return schema("receiptId is missing");
+		if (!isCanonicalReceiptId(receiptId)) {
+			// §12's rules, not the character count: many grammar-legal strings
+			// decode to something other than 16 bytes.
+			return schema(`receiptId ${JSON.stringify(receiptId)} is not a canonical §12 ut1 ID`);
+		}
+		this.receiptId = receiptId;
+		if (stringAt(document, "mintedAt") === null) return schema("mintedAt is missing");
+
+		const minter = objectAtKey(document, "minter");
+		if (minter === undefined) return schema("minter is missing");
+		const minterKeyId = stringAt(minter, "keyId");
+		if (minterKeyId === null) return schema("minter.keyId is missing");
+		if (stringAt(minter, "kind") === null) return schema("minter.kind is missing");
+		if (stringAt(minter, "trustDomain") === null) return schema("minter.trustDomain is missing");
+
+		const signature = objectAtKey(document, "signature");
+		if (signature === undefined) return schema("signature is missing");
+		if (signature.alg !== "ed25519") return schema("signature.alg is not the literal ed25519");
+		const signatureKeyId = stringAt(signature, "keyId");
+		if (signatureKeyId === null) return schema("signature.keyId is missing");
+		// §5's binding. Two different keyIds would leave the report naming one key
+		// while the crypto used another.
+		if (signatureKeyId !== minterKeyId) {
+			return schema("signature.keyId does not equal minter.keyId");
+		}
+		const sig = stringAt(signature, "sig");
+		if (sig === null) return schema("signature.sig is missing");
+		const rawSignature = decodeCanonicalBase64(sig);
+		if (rawSignature === null) return schema("signature.sig is not canonical base64");
+		if (rawSignature.length !== 64) {
+			return schema(`signature.sig is ${rawSignature.length} bytes, not the RFC 8032 64`);
+		}
+
+		const event = objectAtKey(document, "event");
+		if (event === undefined) return schema("event is missing");
+		for (const key of ["id", "timestamp", "previousHash", "kind", "hash"]) {
+			if (stringAt(event, key) === null) return schema(`event.${key} is missing`);
+		}
+		const sequence = numberAt(event, "sequence");
+		if (sequence === null || sequence < 0) return schema("event.sequence is not a sequence number");
+		if (event.actor === undefined) return schema("event.actor is missing");
+		const projection = objectAtKey(event, "data");
+		if (projection === undefined) return schema("event.data is missing");
+
+		// `work` is deliberately NOT required here: §4's equality 9 owns the absent
+		// mirror ("receipt.work is REQUIRED, so an absent mirror fails HERE"), and
+		// step 1 must not pre-empt a condition a normative equality names.
+
+		// Proof material is the UNVERIFIABLE case, not a schema failure: §7 lists
+		// "a proof or checkpoint that is not there" under missing material.
+		const proof = objectAtKey(document, "proof");
+		if (proof === undefined) return missingMaterial("proof", "the receipt carries no proof");
+		const inclusion = objectAtKey(proof, "inclusion");
+		if (inclusion === undefined) {
+			return missingMaterial("proof", "the proof carries no inclusion member");
+		}
+		const checkpoint = objectAtKey(proof, "checkpoint");
+		if (checkpoint === undefined) {
+			return missingMaterial("checkpoint", "the proof carries no checkpoint member");
+		}
+		if (stringAt(proof, "profile") === null) return schema("proof.profile is missing");
+		if (stringAt(proof, "chain") === null) return schema("proof.chain is missing");
+		if (stringAt(proof, "mintEventHash") === null) return schema("proof.mintEventHash is missing");
+		if (inclusion.version !== 1) return schema("proof.inclusion.version is not 1");
+
+		this.bound = {
+			document,
+			receiptId,
+			minter,
+			signature,
+			event,
+			projection,
+			proof,
+			inclusion,
+			checkpoint,
+		};
+		return PASSED;
+	}
+
+	// ── Step 2: recompute `event.hash`, then §4's nine equalities ────────────
+	private stepEvent(): Resolution {
+		const { document, event, projection, proof, inclusion, checkpoint } = this.receipt;
+		const mismatch = (detail: string): Resolution => failure("EVENT_MISMATCH", detail);
+
+		// The chain must resolve before equality 2 or 8 can be evaluated at all —
+		// both read the REGISTERED form. An unregistered `proof.chain` is
+		// unresolvable trust material, not a mismatch.
+		const chainId = stringAt(proof, "chain") as string;
+		const chain = this.input.snapshot.chains.get(chainId);
+		if (chain === undefined) {
+			return missingMaterial("trustKey", `chain ${chainId} is not registered in the snapshot`);
+		}
+		this.chain = chain;
+
+		const eventHash = stringAt(event, "hash") as string;
+		if (canonicalHash(canonicalizeWithout(event, "hash")) !== eventHash) {
+			return mismatch("event.hash does not recompute from the embedded envelope");
+		}
+
+		// Equality 1.
+		if (stringAt(proof, "mintEventHash") !== eventHash) {
+			return mismatch("equality 1: proof.mintEventHash ≠ event.hash");
+		}
+		if (stringAt(inclusion, "leafHash") !== eventHash) {
+			return mismatch("equality 1: inclusion.leafHash ≠ event.hash");
+		}
+
+		// Equality 2 — canonical BYTES against the registered mintActor form, not
+		// field plucking: the closed union has a string form too, and the chain
+		// entry selects which one this vault uses.
+		if (event.kind !== UT1_MINT_EVENT_KIND) {
+			return mismatch(`equality 2: event.kind is not ${UT1_MINT_EVENT_KIND}`);
+		}
+		if (canonicalize(event.actor) !== canonicalize(chain.mintActor)) {
+			return mismatch("equality 2: event.actor is not the chain's registered mintActor");
+		}
+
+		// Equality 3 holds BY CONSTRUCTION and cannot be given a mutant: §4 says
+		// the projection and `event.data` "are the same object — no duplicate
+		// copies", and step 1's unknown-field walk refuses any second copy. There
+		// is nothing to compare, which is the strongest form of the guarantee.
+
+		const segmentFirstSequence = numberAt(checkpoint, "segmentFirstSequence");
+		const checkpointTreeSize = numberAt(checkpoint, "treeSize");
+		if (segmentFirstSequence === null || checkpointTreeSize === null) {
+			return mismatch("the checkpoint carries no segmentFirstSequence/treeSize to bind against");
+		}
+		const leafIndex = numberAt(inclusion, "leafIndex");
+		const sequence = numberAt(event, "sequence") as number;
+		if (leafIndex === null) return mismatch("inclusion.leafIndex is not an integer");
+		// Equality 4 — SEGMENT-RELATIVE (§4a: one tree per segment).
+		if (leafIndex !== sequence - segmentFirstSequence) {
+			return mismatch(
+				`equality 4: leafIndex ${leafIndex} ≠ sequence ${sequence} − segmentFirstSequence ${segmentFirstSequence}`,
+			);
+		}
+		if (leafIndex < 0 || leafIndex >= checkpointTreeSize) {
+			return mismatch(`equality 4: leafIndex ${leafIndex} is outside [0, ${checkpointTreeSize})`);
+		}
+		// Equality 5 — the leaf-hiding defence the fold cannot make: a proof can
+		// reach the signed root under a treeSize the checkpoint never signed.
+		if (numberAt(inclusion, "treeSize") !== checkpointTreeSize) {
+			return mismatch("equality 5: inclusion.treeSize ≠ checkpoint.treeSize");
+		}
+		// Equality 6.
+		if (stringAt(inclusion, "root") !== stringAt(checkpoint, "root")) {
+			return mismatch("equality 6: inclusion.root ≠ checkpoint.root");
+		}
+		// Equality 7 — the receipt/projection agreement half. `minter.kind` is
+		// step 4's (CLI spec §5's precedence rule: one condition, one code).
+		if (document.spec !== projection.spec || document.scope !== projection.scope) {
+			return mismatch("equality 7: receipt spec/scope disagree with the projection");
+		}
+		// Equality 8 — read out of the CHECKPOINT's own SIGNED payload first, so
+		// the statement says which chain it belongs to; the registry is a second
+		// fence, not the only one.
+		if (stringAt(inclusion, "segmentId") !== stringAt(checkpoint, "segmentId")) {
+			return mismatch("equality 8: inclusion.segmentId ≠ checkpoint.segmentId");
+		}
+		if (stringAt(checkpoint, "vaultId") !== chainId) {
+			return mismatch("equality 8: checkpoint.vaultId ≠ proof.chain");
+		}
+		const profile = stringAt(proof, "profile") as string;
+		if (stringAt(checkpoint, "profile") !== profile) {
+			return mismatch("equality 8: checkpoint.profile ≠ proof.profile");
+		}
+		// The verifier SELECTS §4a's equality set from this literal; it never
+		// infers the profile from the shapes it happens to see. A future ut-chain
+		// profile ships under a different literal and is not this build's.
+		if (profile !== UT1_PROFILE) {
+			return mismatch(`equality 8: proof.profile ${JSON.stringify(profile)} is not ut1's`);
+		}
+		if (chain.profile !== profile) {
+			return mismatch("equality 8: the registered chain profile disagrees with proof.profile");
+		}
+		// §4 keeps this "defensively" and names it redundant with equality 4, which
+		// is exactly what it is: `sequence < segmentFirstSequence` makes eq 4's
+		// leafIndex negative, and the range check above has already refused it. It
+		// is UNREACHABLE by construction and retained anyway, because the day
+		// someone loosens eq 4 this is what still holds the line. No fixture can
+		// cover it; saying so beats a vector that pretends to.
+		if (sequence < segmentFirstSequence) {
+			return mismatch("equality 8: event.sequence precedes checkpoint.segmentFirstSequence");
+		}
+		// Equality 9 — the mirror. Without it a conflicting top-level `work`
+		// renders as chain-attested when only the mint signature covers it.
+		// Both sides are guarded before `canonicalize` sees them. `canonical.ts`
+		// answers the JS value `undefined` for an absent input rather than the
+		// `null` §13 specifies, and a comparison resting on that quirk would be a
+		// correct answer for the wrong reason — and would move the day the
+		// canonicalization correction lands.
+		if (document.work === undefined) {
+			return mismatch("equality 9: receipt.work is REQUIRED and the mirror is absent");
+		}
+		if (projection.work === undefined) {
+			return mismatch("equality 9: the projection carries no work for the mirror to match");
+		}
+		if (canonicalize(document.work) !== canonicalize(projection.work)) {
+			return mismatch("equality 9: receipt.work is not the projection's work");
+		}
+		return PASSED;
+	}
+
+	// ── Step 3(a): arrival context. 3(b) is notApplicable offline, by rule ───
+	private stepRegistry(): Resolution {
+		const expected = this.input.arrivalId;
+		if (expected === undefined) {
+			// §7: "a receipt read from a file with no arrival context has nothing to
+			// compare and this half is reported as not-applicable, NOT as a pass".
+			this.arrival = "notApplicable";
+			return NOT_APPLICABLE;
+		}
+		if (expected !== this.receipt.receiptId) {
+			this.arrival = "failed";
+			return failure(
+				"ID_MISMATCH",
+				`the document's receiptId is ${this.receipt.receiptId}, but it arrived as ${expected}`,
+			);
+		}
+		this.arrival = "passed";
+		return PASSED;
+	}
+
+	// ── Step 4: the mint signature and its FULL authority binding ────────────
+	private stepSignature(): Resolution {
+		const { document, minter, signature, checkpoint } = this.receipt;
+		const invalid = (detail: string): Resolution => failure("SIG_INVALID", detail);
+
+		const keyId = stringAt(signature, "keyId") as string;
+		const key = this.input.snapshot.keys.get(keyId);
+		if (key === undefined) {
+			return missingMaterial("trustKey", `mint key ${keyId} is not in the pinned snapshot`);
+		}
+		if (key.role !== "mint") return invalid(`key ${keyId} is registered with role ${key.role}`);
+		if (key.minterKind !== stringAt(minter, "kind")) {
+			return invalid(
+				`minter.kind ${JSON.stringify(minter.kind)} disagrees with the key's registered minterKind`,
+			);
+		}
+		// Per-chain authority (R3-2): a domain-wide mint key confers NO authority
+		// over a chain that does not list it.
+		if (!this.boundChain.mintKeyIds.includes(keyId)) {
+			return invalid(`key ${keyId} is not in chains[].mintKeyIds for ${this.boundChain.vaultId}`);
+		}
+		// §8's v1 pin. Offline the snapshot carries no domain, so the literal is
+		// the only thing there is to check — and a lookalike domain is exactly the
+		// string an attacker supplies.
+		if (stringAt(minter, "trustDomain") !== UT1_TRUST_DOMAIN) {
+			return invalid(`minter.trustDomain is not the pinned literal ${UT1_TRUST_DOMAIN}`);
+		}
+		if (key.alg !== "ed25519") {
+			return invalid(`key ${keyId} is registered for ${key.alg}, not the receipt's ed25519`);
+		}
+		// The retired-MINT-key boundary, evaluated through the mint event's
+		// SEGMENT (§8). "State permitting" alone accepts a freshly-signed receipt
+		// from a retired key — the exact attack rotation exists to bound.
+		const segmentFirstSequence = numberAt(checkpoint, "segmentFirstSequence") as number;
+		const stateFailure = keyStatePermits(key, segmentFirstSequence);
+		if (stateFailure !== null) return invalid(stateFailure);
+
+		const preimage = RECEIPT_SIGNATURE_PREFIX + canonicalizeWithout(document, "signature");
+		if (!verifyEd25519(preimage, key.publicKey, stringAt(signature, "sig") as string)) {
+			return invalid(`the mint signature does not verify under key ${keyId}`);
+		}
+		return PASSED;
+	}
+
+	// ── Step 5: the inclusion path ───────────────────────────────────────────
+	private stepInclusion(): Resolution {
+		const { inclusion, checkpoint } = this.receipt;
+		// Reused verbatim from `verify.ts`: leaf `sha256(0x00‖hexDecode(leafHash))`,
+		// interior `sha256(0x01‖L‖R)`, odd-promote, and — the part a hand-rolled
+		// fold always misses — topology DERIVED from (leafIndex, treeSize) rather
+		// than taken from the supplied siblings (R3-3, PR #86).
+		const folded = verifyInclusionProof(
+			inclusion as unknown as MerkleInclusionProof,
+			stringAt(checkpoint, "root") as string,
+			numberAt(checkpoint, "treeSize") as number,
+		);
+		return folded
+			? PASSED
+			: failure("PROOF_INVALID", "the inclusion path does not fold to the signed root");
+	}
+
+	// ── Step 6: the checkpoint statement ─────────────────────────────────────
+	private stepCheckpoint(): Resolution {
+		const outcome = verifyCheckpointStatement(
+			this.receipt.checkpoint,
+			this.boundChain,
+			this.input.snapshot,
+		);
+		if (outcome.ok) return PASSED;
+		return outcome.missingTrustKey
+			? missingMaterial("trustKey", outcome.detail)
+			: failure("CHECKPOINT_INVALID", outcome.detail);
+	}
+
+	// ── Step 7: §2's semantic constraints ────────────────────────────────────
+	private stepSemantics(): Resolution {
+		const { projection } = this.receipt;
+		const detail = checkSemantics(projection);
+		if (detail !== null) return failure("SEMANTIC_INVALID", detail);
+		const spend = objectAtKey(projection, "spend") as JsonObject;
+		this.posture = {
+			delegation: stringAt(projection, "delegationPosture") as string,
+			usage: stringAt(spend, "usagePosture") as string,
+			pricing: stringAt(spend, "pricingPosture") as string,
+		};
+		return PASSED;
+	}
+
+	// ── Step 8: the one derivation, and the computed amount ──────────────────
+	private stepDerivations(): Resolution {
+		const { projection } = this.receipt;
+		const spend = objectAtKey(projection, "spend") as JsonObject;
+		// §2: `amountUsd` is never stored, so it cannot MISMATCH — step 8 computes
+		// it. `DERIVATION_MISMATCH` never refers to it.
+		this.amountUsd = amountUsdFromAssessed(numberAt(spend, "assessedUsertokens") as number);
+
+		const transferSet = projection.transferSet;
+		if (transferSet === undefined) {
+			// The >32-pair receipt: the root stays a COMMITMENT, checkable against
+			// disclosed data but not recomputable from the receipt alone.
+			return NOT_APPLICABLE;
+		}
+		const recomputed = canonicalHash(TRANSFER_SET_PREFIX + canonicalize(transferSet));
+		if (recomputed !== stringAt(projection, "transferSetRoot")) {
+			return failure(
+				"DERIVATION_MISMATCH",
+				"transferSetRoot is not the digest of the transferSet as given",
+			);
+		}
+		return PASSED;
+	}
+
+	private report(outcome: {
+		verdict: BaseVerdictReport["verdict"];
+		failure: BaseVerdictReport["failure"];
+		missing: BaseVerdictReport["missing"];
+	}): BaseVerdictReport {
+		const steps = {} as Record<BaseStepName, StepOutcome>;
+		for (const step of BASE_STEPS) {
+			// A step that never ran is `unavailable`, never `notApplicable`:
+			// `notApplicable` asserts the input could not exist in this context,
+			// which would be a claim about the receipt rather than about this run.
+			steps[step] = this.results.get(step) ?? { result: "unavailable" };
+		}
+		const verified: VerifiedMaterial | null =
+			outcome.verdict === "VERIFIED_CHECKPOINT" && this.bound !== null && this.chain !== null
+				? { document: this.bound.document, chain: this.chain, checkpoint: this.bound.checkpoint }
+				: null;
+		return {
+			verdict: outcome.verdict,
+			receiptId: this.receiptId,
+			steps,
+			// Both are `notApplicable` offline BY RULE (§7's Offline column, and
+			// CLI spec §5 for `predecessorLinkage`): the registry does not exist in
+			// this context and never could.
+			checks: {
+				registryBinding: NOT_APPLICABLE_OUTCOME,
+				predecessorLinkage: NOT_APPLICABLE_OUTCOME,
+			},
+			arrivalContext: { result: this.arrival, expected: this.input.arrivalId ?? null },
+			// The amount and its labels are released ONLY on a base pass, even
+			// though step 8 computes the amount before it checks the derivation.
+			// A verifier that hands a renderable total to a report about a
+			// TAMPERED receipt is one careless template away from printing it, and
+			// §2a's whole point is that an amount never travels without a scope
+			// its reader can trust. Withheld is not the same as absent: the
+			// failure names the step, and that is what the caller renders.
+			computed: {
+				amountUsd: outcome.verdict === "VERIFIED_CHECKPOINT" ? this.amountUsd : null,
+			},
+			posture: outcome.verdict === "VERIFIED_CHECKPOINT" ? this.posture : null,
+			failure: outcome.failure,
+			missing: outcome.missing,
+			verified,
+		};
+	}
+}
+
+function canonicalHash(preimage: string): string {
+	return createHash("sha256").update(preimage, "utf8").digest("hex");
+}
+
+/**
+ * receipt-spec §7 steps 1–8 over one receipt and one PINNED §8 snapshot.
+ *
+ * Offline and total: it performs no I/O, and it never throws — every refusal
+ * comes back as a verdict with the step, the code and the reason, because a
+ * thrown exception cannot be told apart from a crash by the caller that has to
+ * choose an exit code.
+ */
+export function verifyReceiptBase(input: ReceiptVerifyInput): BaseVerdictReport {
+	return new BaseRun(input).run();
 }
