@@ -74,8 +74,16 @@ async function collectFiles(basePath: string, currentPath: string): Promise<stri
 	let entries: Dirent[];
 	try {
 		entries = await readdir(currentPath, { withFileTypes: true, encoding: "utf-8" });
-	} catch {
-		return results;
+	} catch (err) {
+		// A directory we just saw in its parent's listing but cannot enumerate is a
+		// part of the vault we did not read. Returning the partial list made
+		// `createSnapshot` produce a snapshot MISSING files while reporting success —
+		// and a snapshot is the thing a restore trusts, so a silently short one is
+		// undetectable later by design. Fail the snapshot instead of writing a
+		// plausible, incomplete one.
+		throw new Error(
+			`Cannot enumerate vault directory for snapshot: ${currentPath} (${err instanceof Error ? err.message : String(err)})`,
+		);
 	}
 
 	for (const entry of entries) {
@@ -107,8 +115,15 @@ async function gatherVaultFiles(vaultPath: string): Promise<string[]> {
 	let topEntries: Dirent[];
 	try {
 		topEntries = await readdir(vaultPath, { withFileTypes: true, encoding: "utf-8" });
-	} catch {
-		return allFiles;
+	} catch (err) {
+		// ENOENT is the one honest empty: there is no vault, so there are no files
+		// and a zero-file snapshot states that truthfully. Every other failure
+		// (EACCES, EIO, ENOTDIR) means a vault we could not read, and answering
+		// "no files" there is the same false OK as the nested case above.
+		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return allFiles;
+		throw new Error(
+			`Cannot enumerate vault for snapshot: ${vaultPath} (${err instanceof Error ? err.message : String(err)})`,
+		);
 	}
 
 	for (const entry of topEntries) {

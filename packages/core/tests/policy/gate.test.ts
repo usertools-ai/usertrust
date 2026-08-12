@@ -16,6 +16,7 @@ import {
 	loadPolicies,
 	matchesScope,
 	type PolicyContext,
+	PolicyLoadError,
 } from "../../src/policy/gate.js";
 import type { FieldOperator, PolicyEffect } from "../../src/shared/types.js";
 
@@ -268,12 +269,21 @@ describe("operators", () => {
 			expect(result.matched).toHaveLength(0);
 		});
 
-		it("does not match non-string fields", () => {
+		it("a non-string subject is indeterminate, so a HARD rule still fires", () => {
+			// Was: matched 0. A number subject made `contains` return bare `false`,
+			// which ruleMatches reads as "rule did not match", skipping the guard.
+			// An unreadable subject is now "indeterminate", which is what
+			// fail-closed is built on.
 			const r = rule({
 				conditions: [{ field: "count", operator: "contains", value: "5" }],
 			});
-			const result = evaluatePolicy([r], { count: 5 });
-			expect(result.matched).toHaveLength(0);
+			expect(evaluatePolicy([r], { count: 5 }).matched).toHaveLength(1);
+			// A soft rule stays lenient, exactly as before.
+			const soft = rule({
+				enforcement: "soft",
+				conditions: [{ field: "count", operator: "contains", value: "5" }],
+			});
+			expect(evaluatePolicy([soft], { count: 5 }).matched).toHaveLength(0);
 		});
 	});
 
@@ -294,20 +304,22 @@ describe("operators", () => {
 			expect(result.matched).toHaveLength(0);
 		});
 
-		it("handles invalid regex gracefully", () => {
+		it("an unusable pattern is indeterminate, not a free pass", () => {
+			// Was: matched 0. `loadPolicies` now refuses such a rule outright; a
+			// programmatically-built one reaching the evaluator must not silently
+			// disable its own guard.
 			const r = rule({
 				conditions: [{ field: "text", operator: "regex", value: "[invalid" }],
 			});
-			const result = evaluatePolicy([r], { text: "anything" });
-			expect(result.matched).toHaveLength(0);
+			expect(evaluatePolicy([r], { text: "anything" }).matched).toHaveLength(1);
 		});
 
-		it("does not match non-string fields", () => {
+		it("a non-string subject is indeterminate, so a HARD rule still fires", () => {
+			// Was: matched 0 — a non-string subject skipped a hard regex guard.
 			const r = rule({
 				conditions: [{ field: "count", operator: "regex", value: "\\d+" }],
 			});
-			const result = evaluatePolicy([r], { count: 42 });
-			expect(result.matched).toHaveLength(0);
+			expect(evaluatePolicy([r], { count: 42 }).matched).toHaveLength(1);
 		});
 	});
 });
@@ -712,13 +724,15 @@ describe("loadPolicies", () => {
 		expect(rules).toEqual([]);
 	});
 
-	it("returns empty array for file with non-array, non-rules-object content (line 382)", () => {
+	it("THROWS for an object with no top-level rules key", () => {
 		const path = `/tmp/trust-test-no-rules-${Date.now()}.json`;
 		try {
-			// Object without "rules" key → should hit line 382
+			// Was: silently []. A document keyed anything-but-`rules` parsed fine and
+			// produced zero rules, so a whole policy file vanished without a word.
 			writeFileSync(path, JSON.stringify({ name: "not-rules", version: 1 }));
-			const rules = loadPolicies(path);
-			expect(rules).toEqual([]);
+			expect(() => loadPolicies(path)).toThrow(PolicyLoadError);
+			// The message names the keys that WERE found, so the fix is obvious.
+			expect(() => loadPolicies(path)).toThrow(/no top-level "rules" key.*name, version/s);
 		} finally {
 			try {
 				unlinkSync(path);
@@ -782,12 +796,11 @@ describe("loadPolicies", () => {
 		}
 	});
 
-	it("returns empty array for YAML with scalar content (line 382)", () => {
+	it("THROWS for YAML with scalar content", () => {
 		const path = `/tmp/trust-test-scalar-${Date.now()}.yml`;
 		try {
 			writeFileSync(path, "just-a-string\n");
-			const rules = loadPolicies(path);
-			expect(rules).toEqual([]);
+			expect(() => loadPolicies(path)).toThrow(PolicyLoadError);
 		} finally {
 			try {
 				unlinkSync(path);
@@ -797,12 +810,13 @@ describe("loadPolicies", () => {
 		}
 	});
 
-	it("returns empty array for invalid JSON (catch block)", () => {
+	it("THROWS for invalid JSON instead of silently disabling the policy", () => {
 		const path = `/tmp/trust-test-invalid-${Date.now()}.json`;
 		try {
+			// The headline case: a trailing comma or a stray character used to
+			// disable every custom rule in the file, silently.
 			writeFileSync(path, "{ broken json <<<");
-			const rules = loadPolicies(path);
-			expect(rules).toEqual([]);
+			expect(() => loadPolicies(path)).toThrow(/is not valid JSON/);
 		} finally {
 			try {
 				unlinkSync(path);
@@ -831,12 +845,15 @@ describe("loadPolicies", () => {
 		}
 	});
 
-	it("returns empty for null parsed value (line 382)", () => {
+	it("THROWS for an explicit null document — blank is empty, `null` is not", () => {
+		// Was: returned []. A file whose entire content is `null` (or YAML `~`) is
+		// something the author wrote, and it cannot carry rules — accepting it ran
+		// the governor on defaults while the file looked deliberate. A genuinely
+		// blank file is still a legitimate empty policy.
 		const path = `/tmp/trust-test-null-${Date.now()}.json`;
 		try {
 			writeFileSync(path, "null");
-			const rules = loadPolicies(path);
-			expect(rules).toEqual([]);
+			expect(() => loadPolicies(path)).toThrow(/explicit null document/);
 		} finally {
 			try {
 				unlinkSync(path);
@@ -922,12 +939,23 @@ describe("operator edge cases", () => {
 			expect(evaluatePolicy([r], { active: "true" }).matched).toHaveLength(0);
 		});
 
-		it("matches null value", () => {
+		it("distinguishes an explicit null from a path that did not resolve", () => {
 			const r = rule({
 				conditions: [{ field: "value", operator: "eq", value: null }],
 			});
+			// Present and null: the document carries the value the rule asks about,
+			// so the comparison is determinate and matches. Unchanged.
 			expect(evaluatePolicy([r], { value: null }).matched).toHaveLength(1);
-			expect(evaluatePolicy([r], {}).matched).toHaveLength(0);
+			// ABSENT: was 0 — an unresolved path answered "not null", skipping the
+			// guard. Absence and an explicit null are different facts; only the
+			// latter can answer this comparison.
+			expect(evaluatePolicy([r], {}).matched).toHaveLength(1);
+			// And a soft rule still stays lenient on the same input.
+			const soft = rule({
+				enforcement: "soft",
+				conditions: [{ field: "value", operator: "eq", value: null }],
+			});
+			expect(evaluatePolicy([soft], {}).matched).toHaveLength(0);
 		});
 	});
 
@@ -1048,15 +1076,20 @@ describe("operator edge cases", () => {
 			const r = rule({
 				conditions: [{ field: "role", operator: "in", value: [] }],
 			});
+			// A PRESENT value genuinely is not in an empty list — determinate "no".
 			expect(evaluatePolicy([r], { role: "admin" }).matched).toHaveLength(0);
-			expect(evaluatePolicy([r], { role: undefined }).matched).toHaveLength(0);
+			// An ABSENT value cannot be compared at all. Was 0 (silent allow); a
+			// HARD rule now fails closed.
+			expect(evaluatePolicy([r], { role: undefined }).matched).toHaveLength(1);
 		});
 
-		it("returns false when value is not an array", () => {
+		it("a non-array value is indeterminate, so a HARD rule fires", () => {
+			// Was 0. `loadPolicies` now rejects this rule at load; built by hand it
+			// must not silently disable its own guard.
 			const r = rule({
 				conditions: [{ field: "role", operator: "in", value: "admin" }],
 			});
-			expect(evaluatePolicy([r], { role: "admin" }).matched).toHaveLength(0);
+			expect(evaluatePolicy([r], { role: "admin" }).matched).toHaveLength(1);
 		});
 
 		it("matches undefined in array containing undefined", () => {
@@ -1075,11 +1108,11 @@ describe("operator edge cases", () => {
 			expect(evaluatePolicy([r], { provider: "anything" }).matched).toHaveLength(1);
 		});
 
-		it("returns false when value is not an array", () => {
+		it("a non-array value is indeterminate, so a HARD rule fires", () => {
 			const r = rule({
 				conditions: [{ field: "provider", operator: "not_in", value: "blocked" }],
 			});
-			expect(evaluatePolicy([r], { provider: "openai" }).matched).toHaveLength(0);
+			expect(evaluatePolicy([r], { provider: "openai" }).matched).toHaveLength(1);
 		});
 	});
 
@@ -1099,42 +1132,43 @@ describe("operator edge cases", () => {
 			expect(evaluatePolicy([r], { prompt: "this is Secret" }).matched).toHaveLength(1);
 		});
 
-		it("does not match when resolved is not a string", () => {
+		it("a non-string subject is indeterminate, so a HARD rule fires", () => {
+			// A number or null subject previously skipped a hard `contains` guard.
 			const r = rule({
 				conditions: [{ field: "data", operator: "contains", value: "x" }],
 			});
-			expect(evaluatePolicy([r], { data: 123 }).matched).toHaveLength(0);
-			expect(evaluatePolicy([r], { data: null }).matched).toHaveLength(0);
+			expect(evaluatePolicy([r], { data: 123 }).matched).toHaveLength(1);
+			expect(evaluatePolicy([r], { data: null }).matched).toHaveLength(1);
 		});
 
-		it("does not match when value is not a string", () => {
+		it("a non-string value is indeterminate, so a HARD rule fires", () => {
 			const r = rule({
 				conditions: [{ field: "prompt", operator: "contains", value: 123 as unknown as string }],
 			});
-			expect(evaluatePolicy([r], { prompt: "123" }).matched).toHaveLength(0);
+			expect(evaluatePolicy([r], { prompt: "123" }).matched).toHaveLength(1);
 		});
 	});
 
 	describe("regex — edge cases", () => {
-		it("handles invalid regex without crashing (returns false)", () => {
+		it("an unusable pattern is indeterminate without crashing", () => {
 			const r = rule({
 				conditions: [{ field: "text", operator: "regex", value: "(?P<invalid>" }],
 			});
-			expect(evaluatePolicy([r], { text: "test" }).matched).toHaveLength(0);
+			expect(evaluatePolicy([r], { text: "test" }).matched).toHaveLength(1);
 		});
 
-		it("does not match when resolved is not a string", () => {
+		it("a non-string subject is indeterminate, so a HARD rule fires", () => {
 			const r = rule({
 				conditions: [{ field: "count", operator: "regex", value: "\\d+" }],
 			});
-			expect(evaluatePolicy([r], { count: 42 }).matched).toHaveLength(0);
+			expect(evaluatePolicy([r], { count: 42 }).matched).toHaveLength(1);
 		});
 
-		it("does not match when value is not a string", () => {
+		it("a non-string value is indeterminate, so a HARD rule fires", () => {
 			const r = rule({
 				conditions: [{ field: "text", operator: "regex", value: 42 as unknown as string }],
 			});
-			expect(evaluatePolicy([r], { text: "42" }).matched).toHaveLength(0);
+			expect(evaluatePolicy([r], { text: "42" }).matched).toHaveLength(1);
 		});
 
 		it("matches complex regex patterns", () => {
@@ -1149,12 +1183,14 @@ describe("operator edge cases", () => {
 	});
 
 	describe("default/unknown operator (line 156)", () => {
-		it("returns false for unknown operator", () => {
+		it("an unknown operator is indeterminate — it must not disable its own guard", () => {
+			// Was: matched 0. An operator outside the union fell to `default:` and
+			// the rule never matched, with nothing reported. Such a rule is now
+			// refused by loadPolicies; one built in code fails closed.
 			const r = rule({
 				conditions: [{ field: "x", operator: "unknown_op" as unknown as FieldOperator, value: 1 }],
 			});
-			const result = evaluatePolicy([r], { x: 1 });
-			expect(result.matched).toHaveLength(0);
+			expect(evaluatePolicy([r], { x: 1 }).matched).toHaveLength(1);
 		});
 	});
 });

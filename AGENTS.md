@@ -684,11 +684,58 @@ escape hatch. User policy can only *add* rules.
 before the ledger's `debits_must_not_exceed_credits` ever engages.
 
 **Hard rules fail closed; soft rules stay lenient.** An indeterminate condition (missing or
-mistyped guarded field) is treated as *satisfied* for a hard rule, so the guard still fires.
+mistyped guarded field) is treated as *satisfied* for a hard rule, so the guard still fires. This
+holds for **every** value operator. It previously held for only `gt`/`gte`/`lt`/`lte`: `eq`, `in`,
+`contains` and `regex` returned a bare `false` on input they could not read, which `ruleMatches`
+reads as "did not match" rather than "could not evaluate". `exists`/`not_exists` are the deliberate
+exception: an unresolved field is what they measure, so for them absence is a determinate answer. An
+unknown operator is refused at load, and is indeterminate at runtime for a rule built in code.
+`undefined` means the path did not resolve and is unanswerable; an explicit `null` is a value the
+document carries and compares determinately.
 
-**Trusted policy-context fields are re-asserted AFTER the request-body spread.** Every
-`evaluatePolicy` call site builds context as `{ ...callerParams, ...trustedFields }`. The spread
-exists *precisely so* trusted fields can be re-asserted after it.
+**A policy file that cannot be honoured is refused, never silently emptied.** `loadPolicies` throws
+`PolicyLoadError`; `validatePolicyFile` reports every problem in one pass. It is all-or-nothing —
+one bad rule loads none of them, because loading the survivors would enforce a policy nobody wrote.
+An **absent** file stays legal (no policy is a valid deployment); a present-but-unreadable one does
+not, and the two are told apart by ENOENT rather than by an `existsSync` preflight, which answers
+false for a file inside a directory it cannot traverse. An explicit `null` document is refused —
+only a genuinely blank file is an empty policy. The document ROOT is strict as well as each rule and
+each condition, so a key placed outside the thing it was meant to apply to is refused rather than
+dropped, and an operand that could never match — a non-finite number for any operator, a map or list
+for an identity comparison — is refused rather than accepted as a rule that cannot enforce.
+*Prevents:* the pre-fix behaviour, where unparseable or unrecognised input resolved to an empty rule
+set with no throw and no log.
+
+**`usertrust policy validate` is the pre-flight, and `health` reports rule COUNT.** The loader
+refusing to start is only survivable if an operator can find out why before deploying, so
+`validatePolicyFile` reports every problem in one pass behind that command. It resolves its target
+exactly as the governor does — the configured value verbatim, no `existsSync` preflight — because a
+diagnostic that resolves a different file than the thing it diagnoses can pass while the deployment
+fails. `health` reports loaded AND ACTIVE counts, since `enabled: false` rules load and never fire:
+a violation count alone cannot distinguish an enforced policy from an unloaded one.
+
+**Host-owned policy-context fields are STRIPPED BEFORE the request-body spread.** Every
+`evaluatePolicy` call site builds context as `{ ...sanitizePolicyContext(callerParams),
+...trustedFields }`. The explicit assignments after the spread still say what each trusted field is,
+but they are no longer what makes it safe: a field someone forgets to re-assert is now simply
+**absent** rather than caller-chosen, and absent is the fail-closed answer.
+
+`HOST_CONTROLLED_POLICY_FIELDS` in `policy/gate.ts` is the stripped set.
+`CALLER_SUPPLIED_POLICY_FIELDS` is the deliberate complement, and
+`tests/harden/policy-context-fields.test.ts` reads the `PolicyContext` interface out of the source
+and requires every declared field to appear in exactly one of the two — so a newly added field
+cannot be left unclassified. *Why a mechanism and not one more literal:* the hand-maintained list
+had already been found incomplete once (`timestamp`, PR #95).
+
+**`scope` is deliberately NOT stripped, and this is not an oversight.** For `timestamp`, absence is
+the SAFE state — the gate falls back to the real clock. For `scope`, absence is the PERMISSIVE
+state: `ruleMatches` requires a non-empty `context.scope` for any rule carrying `scopePatterns`, and
+**nothing in `src/` populates it**. Stripping it would not close a hole; it would make every
+`scopePatterns` rule permanently inert. The two fields look like the same kind and are opposites.
+The live issue there is docs-vs-code — the docs present a `scopePatterns` rule as the flagship
+example and state that an absent `scopePatterns` "matches all scopes", i.e. that adding one narrows
+a live rule, while such a rule structurally never fires. Unresolved; do not "fix" it by adding
+`scope` to the stripped set.
 
 There are exactly three call sites, and **their field sets differ** — check against this list, do
 not assume they are the same:
@@ -706,10 +753,19 @@ real clock — read in LOCAL time by contract (`isWithinTimeWindow` uses `getDay
 changing that would silently re-time every deployed window). A host calling `evaluatePolicy`
 directly may still supply its own timestamp; it owns its clock.
 
-The obligation runs in **both** directions. New governance field on `PolicyContext` → re-assert it
-at every one of the three sites, **including asserting `undefined` when the honest value is
-unknown.** New call site → spread the caller's params *first*, then re-assert the whole set; a site
-that spreads last, or that re-asserts a subset, is the failure below.
+**A time window may WRAP midnight, and `startHour > endHour` is how you say so.** A wrapping window
+matches `hour >= startHour || hour < endHour`; a non-wrapping one applies each bound independently.
+`startHour === endHour` is zero-width and matches nothing — read it as "no hours", not "all hours".
+The `daysOfWeek` gate applies to the timestamp's OWN local day, so an overnight window restricted to
+Monday covers Monday 22:00–23:59 and Monday 00:00–05:59, not Tuesday's small hours. *Prevents:* the
+pre-fix behaviour, where the two bounds were applied independently, so a window whose `startHour`
+exceeded its `endHour` was unsatisfiable at every hour and imposed no constraint.
+
+The obligation runs in **both** directions. New governance field on `PolicyContext` → classify it in
+`HOST_CONTROLLED_POLICY_FIELDS` or `CALLER_SUPPLIED_POLICY_FIELDS` (the parity test fails until you
+do), and re-assert it at every one of the three sites, **including asserting `undefined` when the
+honest value is unknown.** New call site → `sanitizePolicyContext` the caller's params *first*, then
+assert the whole set; a site that spreads raw params, or spreads last, is the failure below.
 *Prevents:* a client POSTing `{"model": "...", "budgetFractionRemaining": 0.95}` and walking through
 a hard deny rule. Asserting `undefined` means the rule simply does not match — fail closed, rather
 than matching a number the caller chose. (An `exists`-guard alone makes this *worse*: only the
@@ -799,13 +855,27 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **eight** sanitizers, in two variants. Do not consolidate them onto the weaker one.
+There are **thirteen** sanitizers, in two variants. Do not consolidate them onto the weaker one.
+
+The entries below are deliberately NOT numbered. They used to be ("a seventh", "an eighth"), and
+adding one meant renumbering every later entry — so a new copy was added and the ordinals silently
+stopped matching the count. Adding a sanitizer means: add a bullet, and update the total above.
 
 - Six identical copies of `CONTROL_CHARS = /[\x00-\x1f\x7f]/g` plus a clip at 80, in
   `core/src/cli/verify.ts`, `verify/src/cli.ts`, and the `rekor-verify.ts` / `anchor-verify.ts`
   pairs. These must move together. The
   `biome-ignore lint/suspicious/noControlCharactersInRegex` on each is intentional — do not "fix" it.
-- An eighth, the **stronger** variant again: `forDisplay` in `verify/src/receipt.ts`, applied to
+- A **mirrored pair** of the stronger variant, `scrubForError`, in
+  `core/src/audit/verify.ts` and `verify/src/index.ts`. `verifyVault`'s
+  audit-directory enumeration error embeds a CALLER-SUPPLIED vault path, and the non-JSON CLI
+  prints it — so an escape sequence in that path could repaint the FAILED verdict the error exists
+  to produce. These two must move together, like the six above.
+- One more of the stronger variant, in `core/src/cli/snapshot.ts`. `createSnapshot`'s
+  enumeration failure embeds the VAULT PATH in its message and the human branch prints it through
+  `picocolors`, which wraps a string in SGR codes without sanitizing it. Copied rather than imported
+  from `cli/budget.ts`: that module statically imports `TrustTBClient` and therefore the native
+  `tigerbeetle-node` binding, and the snapshot command must not pull that in to print an error.
+- The stronger variant again: `forDisplay` in `verify/src/receipt.ts`, applied to
   every untrusted string the `--tx` receipt prints (model, error, transferId, timestamp, both
   chain hashes, and the `renderNotFound` txId, which is argv). The receipt reads `events.jsonl` —
   a file the party under audit owns — and prints it at the auditor. The unknown-model denial is
@@ -814,9 +884,20 @@ There are **eight** sanitizers, in two variants. Do not consolidate them onto th
   for the same reason it does in `budget.ts`. The UI is deliberately NOT patched: it renders
   these into DOM text nodes, where escapes are inert, and it displays this same already-scrubbed
   receipt string.
-- A seventh, independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
+- Independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
   also covers `0x80–0x9f`, the C1 range holding the 8-bit CSI/OSC introducers that the regex above
   does not match; it substitutes `?` rather than stripping; and it clips at 120.
+
+- Two more of the stronger variant, `scrubForTerminal` in `core/src/cli/policy.ts` and
+  `core/src/cli/health.ts`. Both quote operator-authored text back at a terminal: a policy file's
+  key names arrive inside zod issue messages, and the `policies` config value arrives as the path.
+  Each clips at 200 rather than 80 — a validation message cut to 80 loses the field path that makes
+  it actionable. **Neither applies to `--json`:** those paths escape C1 as `\uXXXX` at
+  serialization instead, via a local `toSafeJson`, because substituting or clipping would corrupt a
+  machine-readable field a consumer has to parse back. Escaping and scrubbing are not
+  interchangeable, and the choice belongs at the render site, not at the value's source — applying
+  the terminal scrubber inside the loader corrupted the JSON diagnostic in exactly that way before
+  it was moved.
 
 That C1 coverage is not an accident of style. `budget.ts` quotes attacker-controlled argv back to
 the operator in every invalid-value message, and its own comment names the attack

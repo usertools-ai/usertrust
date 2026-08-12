@@ -17,9 +17,11 @@ import {
 	type EntropyLevel,
 } from "../audit/entropy.js";
 import { verifyChain } from "../audit/verify.js";
+import { validatePolicyFile } from "../policy/gate.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
 import type { CliOptions } from "./init.js";
+import { DEFAULT_POLICIES_PATH, resolvePolicyPath } from "./policy-path.js";
 
 function loadEvents(vaultPath: string): AuditEvent[] {
 	const logPath = join(vaultPath, "audit", "events.jsonl");
@@ -36,6 +38,120 @@ function loadEvents(vaultPath: string): AuditEvent[] {
 	} catch {
 		return [];
 	}
+}
+
+/**
+ * Strip control characters from untrusted text before it reaches a terminal.
+ *
+ * Policy-file content is operator-authored but not necessarily trusted — an
+ * issue message can quote a key name straight out of the document. AGENTS.md
+ * requires sanitising BEFORE clipping, since a half-clipped escape is still an
+ * escape. Mirrors `CONTROL_CHARS`/`clipKey` in `cli/verify.ts`.
+ */
+/**
+ * Make untrusted text safe to echo to a terminal.
+ *
+ * Covers C0 AND C1 (0x80-0x9f), the range holding the 8-bit CSI/OSC introducers
+ * — a terminal honouring those can be repainted by a string the common
+ * C0-only regex passes through untouched. AGENTS.md records why `budget.ts`'s
+ * `forDisplay` is deliberately stronger than the other copies and must not be
+ * unified down onto them; this path has the same property (it echoes argv and
+ * config-supplied text), so it takes the strong form rather than adding another
+ * weak one. Substitutes rather than strips, so removing a byte cannot close two
+ * fragments into a plausible whole, and clips AFTER substituting.
+ */
+function scrubForTerminal(text: string, max = 200): string {
+	let out = "";
+	for (const ch of text) {
+		const code = ch.codePointAt(0) as number;
+		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : ch;
+	}
+	return out.length > max ? `${out.slice(0, max)}...` : out;
+}
+
+/**
+ * What the policy file would actually contribute to a governed call.
+ *
+ * `health` reported policy VIOLATIONS and nothing else, and `coloredTag()`
+ * renders zero hits as a green `[ok]`. A vault with no loaded rules and a vault
+ * with a fully satisfied policy were therefore indistinguishable on that line.
+ * Reporting how many rules actually LOAD — and how many are enabled — is what
+ * distinguishes "nothing was violated" from "nothing was enforced".
+ */
+function loadPolicyStatus(vaultPath: string): {
+	/** null when the config could not be resolved — there is no target to name. */
+	path: string | null;
+	/** Set only when the failure is the CONFIG rather than the policy file. */
+	configError?: string;
+	present: boolean;
+	rules: number;
+	active: number;
+	issues: number;
+	firstIssue: string | undefined;
+} {
+	// Shared with `cli/policy.ts` — see policy-path.ts. A config that cannot be
+	// read is reported, not replaced with the default: validating
+	// ./policies/default.yml and printing [ok] for a deployment whose config the
+	// governor rejects is a green light for a vault that cannot start.
+	const resolved = resolvePolicyPath(vaultPath);
+	if ("error" in resolved) {
+		// No policy target was resolved, so there is no path to report and nothing
+		// whose presence could be asserted. Naming the DEFAULT here attributed the
+		// failure to `policies/default.yml` — a file that may be perfectly fine and
+		// that the governor will never reach — and `present: true` claimed it had
+		// been looked at. The config is the subject of this failure; say so.
+		return {
+			path: null,
+			configError: resolved.error,
+			present: false,
+			rules: 0,
+			active: 0,
+			issues: 1,
+			firstIssue: resolved.error,
+		};
+	}
+	const rel = resolved.path;
+	const path = join(vaultPath, rel);
+	// No `existsSync` preflight — see validatePolicyFile. An absent file yields no
+	// issues and no rules, which is what `present: false` means here; anything
+	// else is a real problem and must not read as "no policy file".
+	const { rules, issues, present } = validatePolicyFile(path);
+	if (!present) {
+		return { path, present: false, rules: 0, active: 0, issues: 0, firstIssue: undefined };
+	}
+	// `enabled: false` rules load and are then skipped by `ruleMatches`, so a file
+	// of nothing but disabled rules is loaded-but-inert. Counting those as live
+	// would reproduce, one level along, exactly the confusion this line exists to
+	// remove: a green count next to no enforcement.
+	const active = rules.filter((r) => r.enabled !== false).length;
+	return {
+		path,
+		present: true,
+		rules: rules.length,
+		active,
+		issues: issues.length,
+		// RAW on purpose. Scrubbing here would substitute and clip BEFORE the output
+		// mode is chosen, so `--json` would report a corrupted diagnostic that
+		// `toSafeJson` cannot restore. The human branch scrubs where it prints;
+		// escaping and scrubbing are not interchangeable.
+		firstIssue: issues[0] === undefined ? undefined : `${issues[0].at}: ${issues[0].message}`,
+	};
+}
+
+/**
+ * Serialise with C1 escaped.
+ *
+ * The scrubber above is for HUMAN output: it substitutes and clips, which is
+ * right for a terminal and wrong for a machine-readable field — a consumer needs
+ * the real value back. So JSON escapes rather than substitutes, and nothing on
+ * the `--json` path is clipped.
+ */
+function toSafeJson(value: unknown): string {
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: escaping them is the intent
+	return JSON.stringify(value).replace(/[\u007f-\u009f]/g, (c) => {
+		const hex = c.charCodeAt(0).toString(16).padStart(4, "0");
+		return `\\u${hex}`;
+	});
 }
 
 function loadConfig(vaultPath: string): { budget: number } {
@@ -95,7 +211,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	if (!existsSync(vaultPath)) {
 		if (json) {
 			console.log(
-				JSON.stringify({
+				toSafeJson({
 					command: "health",
 					success: false,
 					data: { message: "No trust vault found. Run `usertrust init` first." },
@@ -109,6 +225,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 
 	const events = loadEvents(vaultPath);
 	const config = loadConfig(vaultPath);
+	const policyStatus = loadPolicyStatus(vaultPath);
 
 	// Convert audit events to entropy event inputs
 	const entropyEvents: EntropyEventInput[] = events.map((e) => ({
@@ -147,12 +264,25 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 
 	if (json) {
 		console.log(
-			JSON.stringify({
+			toSafeJson({
 				command: "health",
 				success: true,
 				data: {
 					score: report.score,
 					level: levelLabel(report.level),
+					policy: {
+						path: policyStatus.path,
+						...(policyStatus.configError !== undefined
+							? { configError: policyStatus.configError }
+							: {}),
+						present: policyStatus.present,
+						rulesLoaded: policyStatus.rules,
+						rulesActive: policyStatus.active,
+						issues: policyStatus.issues,
+						...(policyStatus.firstIssue !== undefined
+							? { firstIssue: policyStatus.firstIssue }
+							: {}),
+					},
 					signals: {
 						policyViolations: policyHits,
 						budgetUtilization: Number.parseFloat(budgetPct),
@@ -169,9 +299,58 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 
 	console.log(`Entropy score: ${report.score}/100 (${coloredLevel(report.level)})`);
 
+	// The policy PATH is config-supplied (`policies` in usertrust.config.json), so
+	// it is untrusted text on a terminal exactly like an issue message. Bound once
+	// here and used for every human-rendered branch below, rather than scrubbed at
+	// each print site — the JSON payload above keeps the raw value, since escaping
+	// is a rendering concern and truncating there would corrupt the field.
+	const safePath = policyStatus.path === null ? null : scrubForTerminal(policyStatus.path);
+
+	// Signal 0: what the policy file actually contributes. This line comes FIRST
+	// on purpose — a violation count is only meaningful once you know how many
+	// rules were in a position to be violated.
+	if (policyStatus.configError !== undefined) {
+		// The CONFIG failed, so no policy file was ever identified. Naming one here
+		// would point the operator at a file that is probably fine.
+		console.log(
+			`  Policy rules loaded:      0    ${pc.red("[CONFIG]")} ${scrubForTerminal(policyStatus.configError)}`,
+		);
+		console.log(
+			`${pc.red("      The governor resolves its policy path from this file, so it will not start.")}`,
+		);
+	} else if (!policyStatus.present) {
+		console.log(
+			`  Policy rules loaded:      0    ${pc.yellow("[none]")} no policy file at ${safePath} — built-in budget rules only`,
+		);
+	} else if (policyStatus.issues > 0) {
+		console.log(
+			`  Policy rules loaded:      0    ${pc.red("[INVALID]")} ${policyStatus.issues} problem(s) in ${safePath}`,
+		);
+		if (policyStatus.firstIssue !== undefined) {
+			console.log(`${pc.red(`      first: ${scrubForTerminal(policyStatus.firstIssue)}`)}`);
+		}
+		console.log(
+			`${pc.red("      NONE of this file's rules are enforced. Run `usertrust policy validate`.")}`,
+		);
+	} else if (policyStatus.rules === 0) {
+		console.log(
+			`  Policy rules loaded:      0    ${pc.yellow("[empty]")} file is valid but declares no rules`,
+		);
+	} else if (policyStatus.active === 0) {
+		console.log(
+			`  Policy rules loaded:      ${policyStatus.rules}    ${pc.yellow("[inert]")} all ${policyStatus.rules} are \`enabled: false\` — none can fire`,
+		);
+	} else if (policyStatus.active < policyStatus.rules) {
+		console.log(
+			`  Policy rules loaded:      ${policyStatus.active}/${policyStatus.rules} active    ${pc.green("[ok]")}`,
+		);
+	} else {
+		console.log(`  Policy rules loaded:      ${policyStatus.rules}    ${pc.green("[ok]")}`);
+	}
+
 	// Signal 1: Policy violations
-	const policyStatus = coloredTag(policySignal?.value ?? 0, policyHits);
-	console.log(`  Policy violations (30d):  ${policyHits}   ${policyStatus}`);
+	const policyTag = coloredTag(policySignal?.value ?? 0, policyHits);
+	console.log(`  Policy violations (30d):  ${policyHits}   ${policyTag}`);
 
 	// Signal 2: Budget utilization
 	const budgetStatus =
