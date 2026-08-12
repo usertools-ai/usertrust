@@ -587,3 +587,62 @@ describe("round-10 findings", () => {
 		expect(issues.some((i) => i.at.endsWith(".typo"))).toBe(true);
 	});
 });
+
+describe("round-11 findings", () => {
+	it("a blank file is an empty policy in BOTH formats", () => {
+		// `parseYaml("")` returns null while `JSON.parse("")` throws, so deciding
+		// blankness after the parse made the same empty file legal as YAML and a
+		// syntax error as JSON. Blankness is a property of the text.
+		for (const name of ["r11-blank.json", "r11-blank.yaml"]) {
+			expect(loadPolicies(write(name, "")), name).toEqual([]);
+			expect(loadPolicies(write(`ws-${name}`, "  \n\t ")), `ws-${name}`).toEqual([]);
+		}
+	});
+
+	it("reports every fault on a condition in ONE pass", () => {
+		// zod skips `.superRefine` the moment any declared field fails, so a typed
+		// base schema hid every other fault behind the first type error. Every base
+		// field is `unknown` now and the type checks live in the refinement, so the
+		// set is closed rather than one more field being added to it.
+		const p = write(
+			"r11-four-faults.json",
+			JSON.stringify({
+				rules: [
+					{
+						name: "r",
+						effect: "deny",
+						enforcement: "hard",
+						conditions: [{ field: 42, operator: "gt", value: "bad", typo: 1 }],
+					},
+				],
+			}),
+		);
+		const { issues } = validatePolicyFile(p);
+		expect(issues.some((i) => i.at.endsWith(".field"))).toBe(true);
+		expect(issues.some((i) => i.at.endsWith(".value"))).toBe(true);
+		expect(issues.some((i) => i.at.endsWith(".typo"))).toBe(true);
+	});
+
+	it("a missing or non-string operator is named, not crashed on", () => {
+		const mk = (cond: Record<string, unknown>) =>
+			JSON.stringify({
+				rules: [{ name: "r", effect: "deny", enforcement: "hard", conditions: [cond] }],
+			});
+		expect(() => loadPolicies(write("r11-no-op.json", mk({ field: "x", value: 1 })))).toThrow(
+			/must be an operator name, got nothing/,
+		);
+		expect(() =>
+			loadPolicies(write("r11-num-op.json", mk({ field: "x", operator: 7, value: 1 }))),
+		).toThrow(/must be an operator name, got number/);
+	});
+
+	it("a well-formed condition still loads unchanged", () => {
+		const rules = loadPolicies(write("r11-good.yaml", GOOD_YAML));
+		expect(rules).toHaveLength(1);
+		expect(rules[0]?.conditions[0]).toEqual({
+			field: "model",
+			operator: "contains",
+			value: "opus",
+		});
+	});
+});

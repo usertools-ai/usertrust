@@ -981,12 +981,16 @@ const FIELD_CONDITION_KEYS = new Set(["field", "operator", "value"]);
  */
 const FieldConditionSchema = z
 	.looseObject({
-		field: z.string().min(1, "must be a non-empty field path"),
-		// NOT `z.enum` here: a failing enum aborts the object parse, which skips the
-		// refinement below and hides every structural fault behind the operator
-		// error. The membership check moved into the refinement so all faults are
-		// reported together.
-		operator: z.string(),
+		// `.optional()` too: a MISSING key is still a base-parse failure otherwise
+		// ("expected nonoptional"), which aborts and skips the refinement — the same
+		// hiding, one step earlier. Presence is required in the refinement instead.
+		field: z.unknown().optional(),
+		// EVERY field is `unknown` so that NOTHING in the base parse can abort.
+		// zod skips `.superRefine` the moment any declared field fails, so a typed
+		// base schema hides every other fault behind the first type error — the
+		// one-pass contract broken once per field until the whole set was closed.
+		// The type checks live in the refinement below instead.
+		operator: z.unknown().optional(),
 		value: z.unknown().optional(),
 	})
 	.superRefine((fc, ctx) => {
@@ -999,7 +1003,23 @@ const FieldConditionSchema = z
 			});
 		}
 
+		if (typeof fc.field !== "string" || fc.field === "") {
+			ctx.addIssue({
+				code: "custom",
+				path: ["field"],
+				message: `must be a non-empty field path, got ${fc.field === undefined ? "nothing" : typeof fc.field}`,
+			});
+		}
+
 		const op = fc.operator as FieldOperator;
+		if (typeof fc.operator !== "string") {
+			ctx.addIssue({
+				code: "custom",
+				path: ["operator"],
+				message: `must be an operator name, got ${fc.operator === undefined ? "nothing" : typeof fc.operator}`,
+			});
+			return;
+		}
 		if (!(FIELD_OPERATORS as readonly string[]).includes(fc.operator)) {
 			ctx.addIssue({
 				code: "custom",
@@ -1179,6 +1199,12 @@ export function validatePolicyFile(path: string): PolicyLoadResult {
 	}
 
 	const rootIssues: PolicyLoadIssue[] = [];
+	// Blankness is a property of the TEXT, so it is decided before a parser is
+	// chosen. `parseYaml("")` returns null while `JSON.parse("")` throws, so
+	// deciding it after the parse made a blank file legal as YAML and a syntax
+	// error as JSON — the same file, two verdicts, by extension.
+	if (raw.trim() === "") return { rules: [], issues: [], present: true };
+
 	const isYaml = path.endsWith(".yml") || path.endsWith(".yaml");
 	let parsed: unknown;
 	try {
@@ -1196,11 +1222,10 @@ export function validatePolicyFile(path: string): PolicyLoadResult {
 		};
 	}
 
-	// A BLANK file is an empty policy. An explicit `null` / `~` is not: the author
-	// wrote something, and what they wrote cannot carry rules. Accepting it would
-	// run the governor on defaults while the file looked deliberate.
+	// Blank was handled above. Reaching here with `null` means the author wrote an
+	// explicit `null` / `~`, which cannot carry rules — accepting it would run the
+	// governor on defaults while the file looked deliberate.
 	if (parsed === null || parsed === undefined) {
-		if (raw.trim() === "") return { rules: [], issues: [], present: true };
 		return {
 			rules: [],
 			issues: [
