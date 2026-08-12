@@ -594,6 +594,55 @@ value was already checked. Both instances were found by reading for it: the cast
 unrepresentable `model` on every terminal of an intercepted call, and the declared `string` produced
 one on an `Authorization` that `abort()` then could not record.
 
+**A value you re-read is not the value you checked.** A guard that validates `x.field` and then
+lets the code below read `x.field` again for the money, the lookup or the write has checked
+*nothing* durable: `x` is the CALLER's object, every property access is a fresh read, and a getter
+or a `Proxy` answers each one independently. That is the guard being walked **through** rather than
+around, and it is not hypothetical — `settle()` read `auth.transferId` fourteen times,
+`governAction()` read `action.params` eight times and `action.cost` seven, and `abort()` read
+`auth.transferId` up to four. Two classes of damage, both measured on this branch: *audit* — a
+`SettleParams.chunksDelivered` that answers `7` at the guard and `NaN` at the append is refused
+after the delete and after the POST, and a `tool_use_failed` was written for an action that had
+SUCCEEDED; *money* — the liveness `activeAuths.get` and the `activeAuths.delete` that CLAIMS the
+entry were separate reads, so a handle honest at the check and not at the claim leaves the
+authorization alive through its own settle or abort, releasing one hold twice and committing
+`budgetSpent` for it. Reproduced on a 100_000 budget: `budgetRemaining` 100_648 after a double
+settle, 100_650 after abort-then-settle. **So: read the caller's object ONCE, into a local, at or
+above the guard, and let the check, the lookup, the money and the record all come from that one
+read** — the same D5 rule the token counts and the Merkle proof reads below already follow. Two
+limits, stated so nobody assumes more: a snapshot pins the value's IDENTITY at one instant, not the
+contents of an object reachable through it (a caller who mutates a nested field in place still
+changes what a later reader sees), and a snapshot does not imply a guard beside it — `settle()`'s
+`transferId` needs no representability check at all, because a value that survives
+`activeAuths.get` is provably one of our own `trustId("tx")` strings. The liveness check was already
+the stricter boundary; it just was not a boundary while the value it approved and the value written
+were different reads.
+*Prevents:* a boundary that is correct about the value it was shown and irrelevant to the bytes that
+get written — the defect surviving the fix, in a form that reads as fixed.
+
+**Validate before an irreversible step that CREATES an obligation to record; never block one that
+DISCHARGES it. Validate at CAPTURE, not at RECORD.** The boundary rule above says "before anything
+irreversible", and that is right up to the point where a terminal's whole job is *undoing* a
+reservation. `headless.abort()` voids a pending hold and gives the caller their money back; a
+refusal there — `assertAuditRepresentable` throwing ahead of the VOID — trades a lost audit line
+for a **stranded hold**, at callers that swallow, forever. The exchange is not worth making, so the
+guard moves UPSTREAM to the moment the value entered: `authorize()` validates `model` before the
+circuit breaker, before rate resolution, before the budget mutex and before the hold, where nothing
+is reserved yet and a refusal costs the caller only a corrected call. `abort()` is then unable to
+meet an unrecordable value rather than defended against one, and the property is asserted where it
+belongs — an `Authorization` that EXISTS carries a recordable `model` by construction. Two
+corollaries: this ordering is never satisfied by recording earlier (**an audit event must not
+precede the fact it attests**), and a discharge path still gets the *read-once* treatment above —
+snapshots throw nothing and skip nothing, so `abort()` takes them while remaining unguarded, and a
+test pins that it still voids when handed a poisoned handle. Hoist only the fields the release
+itself needs, though: a hoisted READ is still a caller-controlled accessor, and one that throws
+above the VOID strands the hold exactly like a guard would. `abort()`'s audit-only `model` is
+therefore read at the write, behind the discharge — measured, with the read hoisted, as a hold left
+unreleased.
+*Prevents:* both halves of the trap: a guard on the release path stranding money to protect a log
+line, and — the reason the guard was wanted there at all — a value reaching a terminal it cannot be
+written from, which capture-time validation makes unreachable instead.
+
 **Merkle hashing is RFC 6962 domain-separated.** Leaves `SHA-256(0x00 ‖ data)`, internal nodes
 `SHA-256(0x01 ‖ left ‖ right)`. **Odd nodes are promoted, not duplicated** — this avoids
 CVE-2012-2459.

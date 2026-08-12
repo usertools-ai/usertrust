@@ -1646,14 +1646,66 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		},
 
 		async abort(auth: Authorization, error?: unknown): Promise<void> {
+			// ── THE HANDLE IS READ ONCE, BEFORE IT DECIDES ANYTHING ───────────
+			// The same fix as `settle()`, on the same field, for the same reason:
+			// `auth` is the CALLER's object, so every `auth.transferId` was a fresh
+			// property access that a getter (or a Proxy) can answer differently. The
+			// liveness `get` below and the `delete` that CLAIMS the entry were
+			// separate reads, so a handle that is honest at the check and not at the
+			// claim left the entry in `activeAuths`: the authorization SURVIVES its
+			// own abort. It can then be settled — releasing the same hold a second
+			// time and committing `budgetSpent` for a call that was aborted.
+			// Measured pre-fix on a dry-run governor: `budgetRemaining` 100_650
+			// against a configured budget of 100_000. Money nobody allocated.
+			//
+			// SNAPSHOT, NEVER A GUARD. This function DISCHARGES an obligation — it
+			// voids a hold and gives the caller their money back — so it must never
+			// refuse. `assertAuditRepresentable` here would throw ahead of the VOID
+			// and strand the hold, which is exactly the trade the capture-time
+			// ruling rejects (see `authorize()`); the representability of `model` is
+			// guaranteed upstream instead. A snapshot throws nothing and skips
+			// nothing. It only makes every read below the same read, so the VOID
+			// still runs unconditionally on every path.
+			//
+			// WHAT IT DOES NOT BUY. A snapshot pins the IDENTITY of these values at
+			// one instant; it does not deep-freeze anything. `auth` stays the
+			// caller's object, and a caller who holds a reference and mutates a
+			// nested value in place still changes what a later reader sees. For
+			// these fields that is enough — they are primitives — but do not read
+			// this pattern as making a handed-over object immutable, and do not
+			// assume the same snapshot would be sufficient for an object-valued
+			// field (see `governAction`, where `action.params` is snapshotted for
+			// its identity and the guard still runs on the value it read).
+			//
+			// ONLY THE MONEY/IDENTITY FIELDS ARE HOISTED. `model` is deliberately
+			// NOT snapshotted here: it is read exactly once, so there is nothing to
+			// diverge, and it is AUDIT-ONLY. Every read hoisted above the VOID is a
+			// caller-controlled accessor that could throw ahead of the discharge,
+			// and an audit line is never worth a stranded hold — so it is read at
+			// the write, AFTER the money is back. A test pins that ordering.
+			//
+			// `transferId` and `estimatedCost` were already read before the VOID, so
+			// hoisting them adds no way to skip it. `proxyTransferId` is the one
+			// that does move: its old read sat inside the best-effort `catch`, so a
+			// throwing accessor was swallowed there and now escapes. That is the
+			// right side of the trade — a LIVE read lets a caller aim the VOID at
+			// another call's pending transfer (releasing money that is not theirs),
+			// while the snapshot leaves them only able to strand their own hold.
+			// The complete answer is to take the proxy id from the governor's own
+			// `capture`, as `destroy()` does, and never from the handle; that is a
+			// behaviour change beyond this fix and is ledgered, not done here.
+			const transferId = auth.transferId;
+			const proxyTransferId = auth.proxyTransferId;
+			const estimatedCost = auth.estimatedCost;
+
 			// Same lookup as settle, and the same reason: liveness and attribution come
 			// from one internal record. Still idempotent-silent, unlike settle.
-			const capture = activeAuths.get(auth.transferId);
+			const capture = activeAuths.get(transferId);
 			if (capture === undefined) {
 				// Already settled or aborted — idempotent
 				return;
 			}
-			activeAuths.delete(auth.transferId);
+			activeAuths.delete(transferId);
 
 			// Only the session wallet's own in-flight exposure is released here; an
 			// attributed hold never added to it (see authorize), and the VOID below is
@@ -1662,7 +1714,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// AUD-453: Acquire mutex for budget atomicity
 				const releaseLock = await budgetMutex.acquire();
 				try {
-					inFlightHoldTotal -= auth.estimatedCost;
+					inFlightHoldTotal -= estimatedCost;
 				} finally {
 					releaseLock();
 				}
@@ -1672,16 +1724,18 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const cb = breaker.get("headless" as never);
 			cb.recordFailure();
 
-			// VOID the pending hold
+			// VOID the pending hold. Both branches release money against the id the
+			// liveness check approved — a live read here could void a transfer that
+			// belongs to a different call, or none at all.
 			if (proxyConn != null && !isDryRun) {
 				try {
-					await proxyConn.void(auth.proxyTransferId ?? auth.transferId);
+					await proxyConn.void(proxyTransferId ?? transferId);
 				} catch {
 					// Best-effort void
 				}
 			} else if (engine != null && !isDryRun) {
 				try {
-					await engine.voidPendingSpend(auth.transferId);
+					await engine.voidPendingSpend(transferId);
 				} catch {
 					// Best-effort void
 				}
@@ -1699,8 +1753,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					kind: "llm_call_failed",
 					actor: "local",
 					data: {
+						// Audit-only and read exactly once — see the hoist block above
+						// for why this one stays here, behind the VOID.
 						model: auth.model,
-						transferId: auth.transferId,
+						transferId,
 						error:
 							error instanceof Error
 								? error.message.slice(0, 200)

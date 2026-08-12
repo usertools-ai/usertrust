@@ -834,6 +834,111 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 		await gov.destroy();
 	});
 
+	// ── the re-read class on the DISCHARGE path: abort() ──
+	//
+	// The test above pins that `abort()` has no GUARD. This one pins that it
+	// takes no second READ — and the two are complements, not a contradiction. A
+	// guard throws and skips the VOID, which is why the ruling forbids one here.
+	// A snapshot throws nothing and skips nothing; it only makes the id that
+	// answers the liveness `get` the same id that answers the `delete`, the VOID
+	// and the record.
+	//
+	// It was the same defect `settle()` had, on the same field, with the same
+	// consequence: pre-fix `abort()` took three reads of `auth.transferId` in
+	// dry-run (the `get`, the `delete`, the audit line) and four with an engine
+	// VOID. A handle that answers honestly at the check and differently at the
+	// claim leaves the entry in `activeAuths`, so the authorization SURVIVES its
+	// own abort — the hold is released here and then released a second time by a
+	// later settle, which also commits `budgetSpent` for a call that was aborted.
+	// Measured pre-fix: `budgetRemaining` 100_650 against a configured budget of
+	// 100_000. Money that was never allocated.
+
+	it("abort() reads a LIVE Authorization.transferId exactly once — the entry it checks is the entry it claims", async () => {
+		const gov = await createGovernor({ dryRun: true, budget: 100_000, vaultBase });
+		const auth = await gov.authorize({ model: "claude-sonnet-4-6", estimatedInputTokens: 1_000 });
+		const realId = auth.transferId;
+
+		let reads = 0;
+		let poisoned = true;
+		Object.defineProperty(auth, "transferId", {
+			configurable: true,
+			get(): string {
+				reads++;
+				// Read #1 (the liveness lookup) is honest; every later read points at
+				// an id that is NOT in `activeAuths`. Pre-fix, read #2 was the delete.
+				return poisoned && reads > 1 ? `${realId}-swapped` : realId;
+			},
+		});
+
+		// It must not throw and it must not be refused: this path DISCHARGES an
+		// obligation.
+		await gov.abort(auth, new Error("provider exploded"));
+
+		// 1. ONE read. Asserted exactly, so a re-read cannot be reintroduced
+		//    without failing here. Pre-fix this was 3.
+		expect(reads).toBe(1);
+
+		// 2. THE VOID STILL RAN, UNCONDITIONALLY. The hold is released — no guard
+		//    was added ahead of it and nothing about the snapshot can skip it.
+		expect(gov.budgetRemaining()).toBe(100_000);
+
+		// 3. The id that passed the liveness check is the id that was recorded.
+		//    Pre-fix the chain carried `-swapped`: an id that never held anything.
+		const failures = readEvents(vaultBase).filter((e) => e.kind === "llm_call_failed");
+		expect(failures).toHaveLength(1);
+		expect((failures[0] as { data: Record<string, unknown> }).data.transferId).toBe(realId);
+
+		// 4. THE MONEY PROOF. Hand back an honest handle and settle: the
+		//    authorization must be GONE. Pre-fix the delete missed, so this settle
+		//    succeeded — an aborted call was settled, releasing the same hold twice
+		//    and committing `budgetSpent` for it.
+		poisoned = false;
+		await expect(gov.settle(auth, { inputTokens: 10, outputTokens: 5 })).rejects.toThrow(
+			/is not active/,
+		);
+
+		// 5. No invented money, stated both ways: exactly the released hold, and —
+		//    the property that actually matters — never MORE than the configured
+		//    budget. Pre-fix this read 100_650 against a ceiling of 100_000.
+		expect(gov.budgetRemaining()).toBe(100_000);
+		expect(gov.budgetRemaining()).toBeLessThanOrEqual(100_000);
+
+		// 6. And the abort left exactly one record, with no settlement beside it.
+		const events = readEvents(vaultBase);
+		expect(events.filter((e) => e.kind === "llm_call_failed")).toHaveLength(1);
+		expect(events.filter((e) => e.kind === "llm_call")).toHaveLength(0);
+
+		await gov.destroy();
+	});
+
+	it("abort() still discharges when the handle's AUDIT-only accessor throws — the read stays behind the VOID", async () => {
+		// NOT a failing-first proof, and named as such: this passes on both sides.
+		// It is the pin on WHERE the snapshot stops. The money/identity fields are
+		// hoisted above the release because the release needs them; `model` is
+		// audit-only and read exactly once, so hoisting it would buy no
+		// single-read guarantee and would put a caller-controlled accessor AHEAD
+		// of the VOID — a throw there strands the hold, which is the exact trade
+		// the ruling rejects. If a future change hoists it, this test fails.
+		const gov = await createGovernor({ dryRun: true, budget: 100_000, vaultBase });
+		const auth = await gov.authorize({ model: "llama3", estimatedInputTokens: 1_000 });
+		expect(gov.budgetRemaining()).toBeLessThan(100_000);
+
+		Object.defineProperty(auth, "model", {
+			configurable: true,
+			get(): string {
+				throw new Error("hostile accessor");
+			},
+		});
+
+		await expect(gov.abort(auth, new Error("boom"))).rejects.toThrow(/hostile accessor/);
+
+		// THE ASSERTION THAT MATTERS: the hold was released before anything could
+		// read the audit-only field. The caller's money is back.
+		expect(gov.budgetRemaining()).toBe(100_000);
+
+		await gov.destroy();
+	});
+
 	// ── the proxy's `model`: the STREAM terminal (fix round 1 finding 2) ──
 
 	it("the STREAM terminal's model is refused at entry — before the money commits AND before the stream is consumed", async () => {
