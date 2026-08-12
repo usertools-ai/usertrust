@@ -461,8 +461,46 @@ describe("verifyTransaction — absences the normalizer must not invent", () => 
 			]);
 			const out = verifyTransaction(dir, "tx_r").receipt;
 			expect(out).toContain("FAILED");
+			// BOTH appear, and neither is presented as the other. The terminal's own
+			// error stays the reason; the detection is a separate observation. An
+			// earlier cut had the detection REPLACE the terminal error — which reads
+			// as "the anomaly caused this failure", and the anomaly is only causal
+			// when the cutoff actually took effect.
+			expect(out).toContain("Request was aborted");
+			expect(out).toContain("Anomaly flagged:");
 			expect(out).toContain("token rate exceeded");
-			expect(out).not.toContain("Request was aborted");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+	it("a SETTLED call still shows that the breaker flagged it", () => {
+		// The previous precedence dropped the detection entirely when the terminal
+		// settled, so a receipt for an unabortable stream that the detector had
+		// flagged showed no sign the breaker fired at all. It is an observation
+		// about the transfer, not a property of how the call ended.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-flagged-"));
+		try {
+			vault(dir, [
+				base({
+					kind: "anomaly_detected",
+					sequence: 1,
+					data: {
+						anomalyKind: "token_rate",
+						message: "token rate exceeded threshold",
+						transferId: "tx_s",
+					},
+				}),
+				base({
+					kind: "llm_call",
+					sequence: 2,
+					hash: "f".repeat(64),
+					data: { model: "claude-haiku-4-5-20251001", cost: 9, settled: true, transferId: "tx_s" },
+				}),
+			]);
+			const out = verifyTransaction(dir, "tx_s").receipt;
+			expect(out).toContain("SETTLED");
+			expect(out).toContain("Anomaly flagged:");
+			expect(out).toContain("token rate exceeded");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

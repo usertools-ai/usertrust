@@ -304,11 +304,13 @@ export function renderReceipt(data: ReceiptData): string {
 	// as `message` rather than `error` — the field the anomaly producer writes
 	// (`govern.ts:2077`) — so the reason block reads both.
 	const isDetection = DETECTION_KINDS.has(event.kind);
-	// A carried detection reason WINS over the terminal's generic error: an SDK's
-	// "Request was aborted" says how the call ended, the detector's message says
-	// why, and only the second is worth an auditor's attention.
-	const reason =
-		data.detectionReason ?? event.data.error ?? (isDetection ? event.data.message : undefined);
+	// The terminal's OWN error stays the reason. A carried detection is rendered
+	// SEPARATELY rather than replacing it, because the anomaly is not always the
+	// cause: when the emitter has no `abort()` the cutoff never took effect, so a
+	// later unrelated failure would have been captioned with the detector's
+	// message and read as anomaly-caused. Correlation is not causation, and a
+	// receipt that names the wrong cause is worse than one that names none.
+	const reason = event.data.error ?? (isDetection ? event.data.message : undefined);
 	const allVerified = chainVerified && merkleVerified;
 
 	const lines: string[] = [];
@@ -348,6 +350,21 @@ export function renderReceipt(data: ReceiptData): string {
 		for (let i = 0; i < wrapped.length; i++) {
 			const prefix = i === 0 ? errPrefix : indent;
 			lines.push(row(pad(`${prefix}${wrapped[i] as string}`)));
+		}
+	}
+
+	// A correlated detection, stated as an OBSERVATION about the transfer rather
+	// than as the terminal's cause. It appears whatever the terminal turned out to
+	// be — including a SETTLED one, where the previous precedence dropped it
+	// entirely and the receipt showed no sign the breaker had fired at all.
+	if (data.detectionReason !== undefined) {
+		lines.push(blank());
+		const prefix = "  Anomaly flagged: ";
+		const indent = " ".repeat(prefix.length);
+		const maxW = WIDTH - indent.length - 2;
+		const wrapped = wordWrap(forDisplay(data.detectionReason), maxW);
+		for (let i = 0; i < wrapped.length; i++) {
+			lines.push(row(pad(`${i === 0 ? prefix : indent}${wrapped[i] as string}`)));
 		}
 	}
 
