@@ -255,6 +255,12 @@ const DETECTION_KINDS = new Set(["anomaly_detected"]);
 
 function resolveStatus(event: TransactionEvent): string {
 	if (DENIAL_KINDS.has(event.kind)) return "DENIED";
+	// `stream_partial_delivery` is a FAILURE TERMINAL (AGENTS.md): the hold was
+	// voided and nothing settled. It is the record that proves a cutoff actually
+	// took effect, so a call the breaker stopped resolves here rather than sitting
+	// at PENDING forever. Its own `error` carries the reason, so the anomaly's
+	// message is not lost by preferring it over the detection.
+	if (event.kind === "stream_partial_delivery") return "FAILED";
 	if (event.kind === "llm_call_failed") return "FAILED";
 	if (event.data.settled === true) return "SETTLED";
 	return "PENDING";
@@ -279,7 +285,7 @@ export function renderReceipt(data: ReceiptData): string {
 	const model = event.data.model ?? "unknown";
 	const provider = detectProvider(model);
 	const cost = event.data.cost;
-	const isFailed = event.kind === "llm_call_failed";
+	const isFailed = event.kind === "llm_call_failed" || event.kind === "stream_partial_delivery";
 	// A denial spent nothing, so it renders no spend lines — but its `error` is
 	// the whole point of the receipt and must still be shown.
 	const isDenied = DENIAL_KINDS.has(event.kind);

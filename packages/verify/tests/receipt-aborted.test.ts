@@ -209,3 +209,84 @@ describe("verifyTransaction — an anomaly that did NOT stop the call", () => {
 		}
 	});
 });
+
+describe("verifyTransaction — terminal evidence and untrusted tails", () => {
+	function writeVault(dir: string, lines: Array<Record<string, unknown>>): void {
+		const auditDir = join(dir, "audit");
+		mkdirSync(auditDir, { recursive: true });
+		writeFileSync(
+			join(auditDir, "events.jsonl"),
+			`${lines.map((l) => JSON.stringify(l)).join("\n")}\n`,
+			"utf-8",
+		);
+	}
+	const ev = (over: Record<string, unknown>, i: number) => ({
+		actor: "local",
+		timestamp: `2026-08-12T00:00:0${i}.000Z`,
+		previousHash: "0".repeat(64),
+		sequence: i + 1,
+		hash: String.fromCharCode(97 + i).repeat(64),
+		...over,
+	});
+
+	it("a cutoff that TOOK EFFECT resolves to its failure terminal, not PENDING forever", () => {
+		// `finalizeStreamVoid` wins `finalizeOnce("void")` and then appends
+		// `stream_partial_delivery` with the same id. That record IS the evidence
+		// the abort completed — falling back to the detection left a finished call
+		// reading PENDING indefinitely.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-term-"));
+		try {
+			writeVault(dir, [
+				ev(
+					{
+						kind: "anomaly_detected",
+						data: { anomalyKind: "token_rate", message: "rate", transferId: "tx_9" },
+					},
+					0,
+				),
+				ev(
+					{
+						kind: "stream_partial_delivery",
+						data: { transferId: "tx_9", chunksDelivered: 3, error: "anomaly cutoff" },
+					},
+					1,
+				),
+			]);
+			const result = verifyTransaction(dir, "tx_9");
+			expect(result.receipt).toContain("FAILED");
+			expect(result.receipt).not.toContain("PENDING");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a tampered TAIL cannot break verification of an earlier transaction", () => {
+		// The old first-match lookup stopped AT the target; scanning the whole array
+		// reaches records after it, and `events.jsonl` is untrusted. A later object
+		// with a null `data` would throw on the dereference and take verification
+		// of an EARLIER transaction down with it.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-tail-"));
+		try {
+			writeVault(dir, [
+				ev(
+					{
+						kind: "llm_call",
+						data: {
+							model: "claude-haiku-4-5-20251001",
+							cost: 5,
+							settled: true,
+							transferId: "tx_a",
+						},
+					},
+					0,
+				),
+				ev({ kind: "llm_call", data: null }, 1),
+				ev({ kind: "llm_call" }, 2),
+			]);
+			expect(() => verifyTransaction(dir, "tx_a")).not.toThrow();
+			expect(verifyTransaction(dir, "tx_a").found).toBe(true);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});

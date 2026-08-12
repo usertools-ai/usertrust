@@ -652,23 +652,41 @@ export function verifyTransaction(
 
 	// Find the target event.
 	//
-	// A SETTLEMENT TERMINAL WINS over any earlier event sharing the id. Plain
-	// first-match was ambiguous whenever a call produced more than one record for
-	// one transfer, and the anomaly path makes that concrete: `govern.ts` appends
-	// `anomaly_detected` and only then calls `emitter.abort()` IF the emitter has
-	// one. A provider whose stream object lacks `abort` keeps streaming and
-	// settles normally on `finalMessage`, so the chain holds both the anomaly and
-	// a real `llm_call` — and first-match selected the anomaly, rendering a
-	// settled, billed call as ABORTED with its spend lines suppressed. A receipt
-	// that hides spend is worse than one that says PENDING: it is an affirmative
-	// false statement about money rather than an incomplete one.
+	// TERMINAL EVIDENCE OUTRANKS A DETECTION, and a settlement outranks a failure.
+	// Plain first-match was ambiguous for any transfer with more than one record,
+	// and the anomaly path makes that concrete in both directions:
 	//
-	// `settled` is the discriminator because it is exactly what a terminal has and
-	// a supplementary record does not, and it covers the dynamic `<action.kind>`
-	// terminals that cannot be enumerated here. Denials and unaborted anomalies
-	// still resolve to themselves — no terminal exists for them to lose to.
-	const matching = events.filter((e) => e.data.transferId === txId);
-	const targetEvent = matching.find((e) => e.data.settled !== undefined) ?? matching[0];
+	//   - `govern.ts` appends `anomaly_detected` and only then calls
+	//     `emitter.abort()` IF the emitter has one. A stream object without
+	//     `abort` keeps going and settles normally, so the chain holds the
+	//     detection AND a real `llm_call` — first-match picked the detection and
+	//     rendered a settled, billed call as stopped, hiding its spend.
+	//   - When the cutoff DOES take effect, `finalizeStreamVoid` wins
+	//     `finalizeOnce("void")` and appends `stream_partial_delivery` with the
+	//     same id (`govern.ts:1895`). That is the terminal evidence the abort
+	//     completed — AGENTS.md classifies it a failure terminal — so falling back
+	//     to the detection rendered a finished call as PENDING forever.
+	//
+	// `settled` marks a settlement terminal and covers the dynamic
+	// `<action.kind>` kinds that cannot be enumerated here; the failure terminals
+	// are named plus the `_failed` suffix.
+	//
+	// SHAPE-GUARDED. `events.jsonl` is untrusted, and unlike the old first-match
+	// lookup — which stopped AT the target — this scans the whole array, so it
+	// reaches records after it. A later object with a null or missing `data` would
+	// otherwise throw on the dereference and take down verification of an EARLIER
+	// transaction: a tampered tail breaking historical `--tx` checks.
+	const hasTxId = (e: TransactionEvent): boolean =>
+		e !== null && typeof e === "object" && typeof e.data?.transferId === "string";
+	const matching = events.filter((e) => hasTxId(e) && e.data.transferId === txId);
+	const isFailureTerminal = (e: TransactionEvent): boolean =>
+		e.kind === "stream_partial_delivery" ||
+		e.kind === "llm_call_failed" ||
+		e.kind.endsWith("_failed");
+	const targetEvent =
+		matching.find((e) => e.data.settled !== undefined) ??
+		matching.find(isFailureTerminal) ??
+		matching[0];
 
 	if (targetEvent === undefined) {
 		return {
