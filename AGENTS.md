@@ -630,6 +630,18 @@ throwing accessor strands the hold. The only two closures are to validate at CAP
 obligation exists (`authorize()` does this for `model` and `actor`), or to stop trusting caller
 object identity across the boundary at all and carry the value in state we own (the governor's
 `activeAuths` capture record).
+**A loop CONDITION is a read, and an AMOUNT is a value.** Both forms were introduced by the fixes for
+the rule above, which is why they are named here rather than left to be inferred. `canonicalize`
+wrote `for (let i = 0; i < value.length; i++)` over the caller's array, so the bound it checked was
+never the bound it iterated to: an element getter that sets `length = 0` made it emit `[0]` where
+`JSON.stringify` emits `[0,null]` — a position silently dropped by the loop whose entire purpose is
+that positions are never dropped — and a `Proxy` that appends on read made it UNBOUNDED, a hang
+inside `appendEvent`. And `abort()` hoisted `auth.estimatedCost` above the VOID on a path that never
+needed it, where a throwing getter stranded an attributed hold and a lying one resized the release
+(`budgetRemaining()` 150_000 against a configured budget of 100_000). Read the bound once into a
+local before the loop; take a released amount from the capture that recorded the increment, never
+from the handle — the release must be symmetric with the increment by construction, exactly as
+`sessionAccounted` already is.
 *Prevents:* a boundary that is correct about the value it was shown and irrelevant to the bytes that
 get written — the defect surviving the fix, in a form that reads as fixed.
 
