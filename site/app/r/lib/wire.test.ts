@@ -177,6 +177,12 @@ const EXPECTED_STATE: Record<string, { kind: PageState["kind"]; detail?: string 
 	"session-owner-estimated.json": { kind: "verified", detail: "verified_checkpoint" },
 	"session-workflow-attested.json": { kind: "verified", detail: "verified_checkpoint" },
 	"session-fallback.json": { kind: "verified", detail: "verified_checkpoint" },
+	// C28/C29 — postures a v1 minter may not emit and this page must still
+	// render (§2a's minting rule binds the MINTER; §7/R39 bind the VERIFIER).
+	// The verdict is untouched by the posture: these are ordinary green
+	// receipts whose amount carries a narrower scope label.
+	"commit-delegated-partial.json": { kind: "verified", detail: "verified_checkpoint" },
+	"commit-delegated-indeterminate.json": { kind: "verified", detail: "verified_checkpoint" },
 	"reserved.json": { kind: "pending", detail: "reserved" },
 	"reconciling.json": { kind: "pending", detail: "reconciling" },
 	"billed-unfinalized.json": { kind: "billedUnfinalized" },
@@ -1339,6 +1345,12 @@ test("coverage: no rejection vector ever reaches a green state", () => {
 	const greenKinds = new Set<PageState["kind"]>(["verified"]);
 	for (const entry of rejectionVectors) {
 		if (entry.kind !== "json") continue;
+		// A `historyWalk` vector is aimed at a consumer that RECOMPUTES the
+		// verdict. This page renders the resolver's verdict and never walks the
+		// served history (D2), so such a vector reaches green here correctly —
+		// and is asserted green below, so the exemption cannot silently widen
+		// into "some rejection vectors are allowed to pass".
+		if (entry.consumer === "historyWalk") continue;
 		for (const file of entry.files) {
 			const fixture = loadFixture<FixtureCase>(file);
 			const state = parseResolverResponse(toInput(fixture));
@@ -1358,6 +1370,33 @@ test("coverage: no rejection vector ever reaches a green state", () => {
 			raw: vector.wire.body == null ? null : JSON.stringify(vector.wire.body),
 		});
 		assert.equal(greenKinds.has(state.kind), false, `${vector.label} reached ${state.kind}`);
+	}
+});
+
+test("coverage: a historyWalk vector reaches green HERE, and that is the point", () => {
+	const walkVectors = rejectionVectors.filter((e) => e.consumer === "historyWalk");
+	assert.ok(
+		walkVectors.length > 0,
+		"at least one vector must exercise a clause this page cannot evaluate",
+	);
+	for (const entry of walkVectors) {
+		// The exemption in the test above is only honest if the exempted vector
+		// really is invisible to this page. If one of these ever goes red here,
+		// the page grew a verdict it is not supposed to compute (D2) — or the
+		// vector was misfiled and belongs back under the `page` consumer.
+		for (const file of entry.files) {
+			const state = parseFixture(file);
+			assert.equal(
+				state.kind,
+				"verified",
+				`${entry.id} (${file}) is declared invisible to the page, so it must render green here`,
+			);
+		}
+		assert.match(
+			entry.mustFailInto,
+			/NOT a page state/,
+			`${entry.id}: a historyWalk vector must say plainly that it is not a page state`,
+		);
 	}
 });
 

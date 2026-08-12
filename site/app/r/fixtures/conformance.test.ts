@@ -3,10 +3,11 @@
  * this file IS the fixture matrix's test, not a test written against
  * already-trusted fixtures. Two populations, two contracts:
  *
- *   - §8.1 CONFORMING fixtures (C1-C27) must pass every strict-schema
+ *   - §8.1 CONFORMING fixtures (C1-C29) must pass every strict-schema
  *     presence/exclusion rule AND the full §4.1 verdict algebra.
- *   - §8.2 EXPECTED-REJECTION vectors (X1-X7) must NEVER pass — each is
- *     asserted to fail CLOSED into its named state.
+ *   - §8.2 EXPECTED-REJECTION vectors (X1-X10) must NEVER pass — each is
+ *     asserted to fail CLOSED into its named state, for its NAMED CONSUMER
+ *     (X10's clause is invisible to the page by design — see `index.ts`).
  *
  * The R4 strict pipeline, the base58 ID-decode rule, and the §4.1 verdict
  * algebra are re-implemented LOCALLY below, deliberately not imported from
@@ -535,6 +536,111 @@ function checkFailureCodesArePlaced(verification: Verification): AlgebraResult {
 }
 
 // ---------------------------------------------------------------------------
+// The §2 key-set gate — this harness's own fail-closed rule
+// ---------------------------------------------------------------------------
+
+/**
+ * receipt-spec §2 enumerates the projection exhaustively, and its strict schema
+ * makes "any unknown field anywhere in a `ut1` document" a FAIL.
+ *
+ * Until v0.9 this suite enforced that rule field-by-field, by hand — so it
+ * could only ever detect drift its own transcription already knew about. When
+ * §2 gained `delegationPosture`, `types.ts` did not, and the corpus shipped 29
+ * receipts missing a REQUIRED field while this suite reported 42/42 green. A
+ * green answer over material the checker did not understand is exactly the
+ * defect §7 names — "a system that ACCEPTS WHAT IT CANNOT INTERPRET AND
+ * REPORTS SUCCESS" — one layer up, in the checker itself.
+ *
+ * So the rule is enforced from a declared key set, in BOTH directions:
+ * unknown-present AND known-absent. A future spec field that nobody
+ * transcribes now fails here instead of passing silently.
+ */
+const PROJECTION_ALWAYS_REQUIRED = [
+	"spec",
+	"scope",
+	"sessionId",
+	"generation",
+	"work",
+	"sessionAssociation",
+	"models",
+	"providers",
+	"startedAt",
+	"endedAt",
+	"spend",
+	"delegationPosture",
+	"pricing",
+	"transferSetRoot",
+] as const;
+
+/** Presence governed by a §2 rule; each is asserted individually below. */
+const PROJECTION_CONDITIONAL = ["prevGenerationEventHash", "workloadId", "transferSet"] as const;
+
+const SPEND_ALWAYS_REQUIRED = [
+	"assessedUsertokens",
+	"postedUsertokens",
+	"roundingAdjustment",
+	"transferCount",
+	"usagePosture",
+	"pricingPosture",
+] as const;
+
+/** §2a's four values — the VERIFIER's vocabulary, wider than v1 minting's. */
+const DELEGATION_POSTURES: readonly string[] = [
+	"selfDebitsOnly",
+	"includesSomeDelegated",
+	"includesAllDelegated",
+	"indeterminate",
+];
+
+function checkKeySet(
+	obj: Record<string, unknown>,
+	required: readonly string[],
+	conditional: readonly string[],
+	label: string,
+): AlgebraResult {
+	const known = new Set<string>([...required, ...conditional]);
+	const present = Object.keys(obj);
+	const missing = required.filter((k) => !(k in obj));
+	if (missing.length > 0) {
+		return { ok: false, reason: `${label} is missing REQUIRED §2 field(s): ${missing.join(", ")}` };
+	}
+	const unknown = present.filter((k) => !known.has(k));
+	if (unknown.length > 0) {
+		return {
+			ok: false,
+			reason: `${label} carries field(s) §2 does not enumerate: ${unknown.join(", ")} (strict schema)`,
+		};
+	}
+	return { ok: true };
+}
+
+function checkProjectionSchema(projection: Record<string, unknown>): AlgebraResult {
+	const outer = checkKeySet(
+		projection,
+		PROJECTION_ALWAYS_REQUIRED,
+		PROJECTION_CONDITIONAL,
+		"projection",
+	);
+	if (!outer.ok) return outer;
+
+	const spend = projection.spend as Record<string, unknown>;
+	const inner = checkKeySet(spend, SPEND_ALWAYS_REQUIRED, [], "projection.spend");
+	if (!inner.ok) return inner;
+
+	// §7: an unrecognized posture is a step-7 SEMANTIC_INVALID, and that is what
+	// makes the field forward-safe — a v1 verifier meeting a value a later spec
+	// adds FAILS CLOSED rather than rendering a total whose coverage it cannot
+	// interpret.
+	if (!DELEGATION_POSTURES.includes(projection.delegationPosture as string)) {
+		return {
+			ok: false,
+			reason: `delegationPosture "${String(projection.delegationPosture)}" is not one of §2a's four values`,
+		};
+	}
+	return { ok: true };
+}
+
+// ---------------------------------------------------------------------------
 // Helpers over loaded fixtures
 // ---------------------------------------------------------------------------
 
@@ -573,20 +679,24 @@ test("manifest: every rejection vector's files exist on disk", () => {
 	}
 });
 
-test("manifest: 28 conforming JSON files (C1-C27, C22 a pair)", () => {
+test("manifest: 30 conforming JSON files (C1-C29, C22 a pair)", () => {
 	const totalFiles = conformingFixtures.reduce((sum, e) => sum + e.files.length, 0);
-	assert.equal(conformingFixtures.length, 27, "27 rows C1-C27");
-	assert.equal(totalFiles, 28, "28 files total (C22 contributes 2)");
+	assert.equal(conformingFixtures.length, 29, "29 rows C1-C29");
+	assert.equal(totalFiles, 30, "30 files total (C22 contributes 2)");
 });
 
-test("manifest: 12 rejection JSON files across X1-X5, plus X6/X7 as TS modules", () => {
+test("manifest: 15 rejection JSON files across X1-X5 and X8-X10, plus X6/X7 as TS modules", () => {
 	const jsonEntries = rejectionVectors.filter((e) => e.kind === "json");
 	const totalJsonFiles = jsonEntries.reduce((sum, e) => sum + e.files.length, 0);
 	// X4 carries TWO files — one per half of R1's identity chain (the envelope
 	// half and the signed-receipt-document half); the §8.2 row names the
 	// receipt-document case, and only a file whose `body.receiptId` agrees with
 	// the route isolates it.
-	assert.equal(totalJsonFiles, 12, "X1(4) + X2(1) + X3(1) + X4(2) + X5(4) = 12");
+	assert.equal(
+		totalJsonFiles,
+		15,
+		"X1(4) + X2(1) + X3(1) + X4(2) + X5(4) + X8(1) + X9(1) + X10(1) = 15",
+	);
 	const tsEntries = rejectionVectors.filter((e) => e.kind === "ts-module");
 	assert.deepEqual(
 		tsEntries.map((e) => e.id),
@@ -645,6 +755,11 @@ for (const entry of conformingFixtures) {
 
 				// Presence/exclusion rules (receipt-spec §2).
 				const projection = success.receipt.event.data;
+
+				// §2's key set, both directions — see checkProjectionSchema.
+				const schema = checkProjectionSchema(projection as unknown as Record<string, unknown>);
+				assert.ok(schema.ok, `${file}: ${schema.reason}`);
+
 				if (projection.sessionAssociation === "workflowAttested") {
 					assert.ok(projection.workloadId, `${file}: workflowAttested requires workloadId present`);
 				} else {
@@ -894,6 +1009,71 @@ test("X4: id-mismatch — an otherwise-valid 200 whose receipt.receiptId != rout
 		fixture.routeParamId,
 		body.receipt.receiptId,
 		"R1 must be violated: route != receipt.receiptId",
+	);
+});
+
+test("X8/X9: a missing or unrecognized delegationPosture fails the §2 key-set gate", () => {
+	for (const id of ["X8", "X9"] as const) {
+		const entry = rejectionVectors.find((e) => e.id === id);
+		const fixture = loadFixtureCase(entry?.files[0] ?? "");
+		const body = fixture.wire.body as unknown as SuccessEnvelope;
+
+		// Everything ELSE about the envelope is conformant — that is what makes
+		// these vectors sharp. The resolver served a 200 whose own `semantics`
+		// step claims `passed` over a receipt that fails §7 step 7.
+		assert.equal(body.apiVersion, "1", `${id}: apiVersion must be conformant`);
+		assert.equal(
+			body.verification.steps.semantics.result,
+			"passed",
+			`${id}: semantics claims passed`,
+		);
+		const algebra = checkVerdictAlgebra(body);
+		assert.ok(algebra.ok, `${id}: the envelope-level algebra must be otherwise clean`);
+
+		// ...and the receipt still fails, because the gate reads §2, not the types.
+		const schema = checkProjectionSchema(
+			body.receipt.event.data as unknown as Record<string, unknown>,
+		);
+		assert.equal(schema.ok, false, `${id}: must fail the §2 key-set gate`);
+	}
+});
+
+test("X10: the served history breaks §7 contiguity and NOTHING else", () => {
+	const entry = rejectionVectors.find((e) => e.id === "X10");
+	const fixture = loadFixtureCase(entry?.files[0] ?? "");
+	const body = fixture.wire.body as unknown as SuccessEnvelope;
+	const history = body.checkpointHistory;
+	assert.ok(history && history.length >= 2, "X10 must serve a walkable history");
+
+	const [prev, next] = history;
+
+	// The clause under test, and the only one that may fail.
+	assert.notEqual(
+		next.segmentFirstSequence,
+		prev.segmentFirstSequence + prev.treeSize,
+		"X10's whole purpose is a broken contiguity arithmetic",
+	);
+
+	// Everything an ID-chain-only walker would look at is INTACT — which is why
+	// C6 (seg-9999 with prev=seg-9998) cannot substitute for this vector: it
+	// breaks the chain and the arithmetic together, so an implementation that
+	// never wrote the contiguity comparison still passes it.
+	assert.equal(next.previousSegmentId, prev.segmentId, "X10: the ID chain must stay intact");
+	assert.equal(next.previousSegmentRoot, prev.root, "X10: the lineage root edge must stay intact");
+	assert.equal(
+		new Set(history.map((c) => c.segmentId)).size,
+		history.length,
+		"X10: no repeated segmentId (that is a different §7 failure)",
+	);
+	deepStrictEqual(
+		body.receipt.proof.checkpoint,
+		next,
+		"X10: the embedded checkpoint must still appear EXACTLY in the history",
+	);
+	assert.equal(
+		body.receipt.proof.inclusion.leafIndex,
+		body.receipt.event.sequence - body.receipt.proof.checkpoint.segmentFirstSequence,
+		"X10: equality 4 must survive the reseat",
 	);
 });
 

@@ -166,6 +166,29 @@ export interface TransferPair {
 	settlementTransferId: string;
 }
 
+/**
+ * receipt-spec §2a — what the amount covers with respect to DELEGATED work.
+ *
+ * All four values are the VERIFIER's vocabulary. Conformant v1 MINTING emits
+ * only `selfDebitsOnly`, but minting and verifying are different verbs for
+ * different actors: the page must RECOGNIZE and RENDER the others per §7/R39.
+ * `includesAllDelegated` is recognized but unreachable in v1 — §2a requires
+ * signed evidence no format exists for yet, so §7's "reports a failure, not a
+ * total" applies to every instance of it.
+ */
+export type DelegationPosture =
+	| "selfDebitsOnly"
+	| "includesSomeDelegated"
+	| "includesAllDelegated"
+	| "indeterminate";
+
+const DELEGATION_POSTURES: readonly string[] = [
+	"selfDebitsOnly",
+	"includesSomeDelegated",
+	"includesAllDelegated",
+	"indeterminate",
+];
+
 /** The mint event's `data` — receipt-spec §2. */
 export interface Projection {
 	spec: "ut1";
@@ -183,6 +206,8 @@ export interface Projection {
 	startedAt: string;
 	endedAt: string;
 	spend: Spend;
+	/** REQUIRED (§2a). The page never renders an amount without it — R38. */
+	delegationPosture: DelegationPosture;
 	pricing: { tableVersions: string[] };
 	/** Present iff `transferCount <= 32`. */
 	transferSet?: TransferPair[];
@@ -1647,6 +1672,22 @@ function validateProjection(value: unknown, path: string): string | null {
 	if (attested && !isNonEmptyString(value.workloadId)) {
 		return `${path}.workloadId must be a non-empty string`;
 	}
+	// R38 — the page NEVER renders an amount without its posture label, so a
+	// missing or unrecognized `delegationPosture` fails closed to the
+	// protocol-error shell rather than rendering a total whose scope the reader
+	// would supply from assumption. It is a step-7 SEMANTIC_INVALID upstream
+	// (§2a/§7), and the page must not out-render its own verifier.
+	//
+	// Unrecognized-rather-than-missing is the forward-compatibility half: a v1
+	// page meeting a value a later spec adds fails closed here instead of
+	// rendering an amount whose coverage it cannot interpret.
+	if (!Object.hasOwn(value, "delegationPosture")) {
+		return `${path}.delegationPosture is REQUIRED (§2a) — an amount may not render without its posture`;
+	}
+	if (!DELEGATION_POSTURES.includes(value.delegationPosture as string)) {
+		return `${path}.delegationPosture must be one of §2a's four values`;
+	}
+
 	const generation = value.generation as number;
 	if (generation > 1 !== Object.hasOwn(value, "prevGenerationEventHash")) {
 		return `${path}.prevGenerationEventHash must be present iff generation > 1`;
