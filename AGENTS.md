@@ -799,12 +799,17 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **eight** sanitizers, in two variants. Do not consolidate them onto the weaker one.
+There are **nine** sanitizers, in two variants. Do not consolidate them onto the weaker one.
 
 - Six identical copies of `CONTROL_CHARS = /[\x00-\x1f\x7f]/g` plus a clip at 80, in
   `core/src/cli/verify.ts`, `verify/src/cli.ts`, and the `rekor-verify.ts` / `anchor-verify.ts`
   pairs. These must move together. The
   `biome-ignore lint/suspicious/noControlCharactersInRegex` on each is intentional — do not "fix" it.
+- A ninth, the **stronger** variant, in `core/src/cli/snapshot.ts`. `createSnapshot`'s
+  enumeration failure embeds the VAULT PATH in its message and the human branch prints it through
+  `picocolors`, which wraps a string in SGR codes without sanitizing it. Copied rather than imported
+  from `cli/budget.ts`: that module statically imports `TrustTBClient` and therefore the native
+  `tigerbeetle-node` binding, and the snapshot command must not pull that in to print an error.
 - An eighth, the **stronger** variant again: `forDisplay` in `verify/src/receipt.ts`, applied to
   every untrusted string the `--tx` receipt prints (model, error, transferId, timestamp, both
   chain hashes, and the `renderNotFound` txId, which is argv). The receipt reads `events.jsonl` —

@@ -17,6 +17,35 @@ import { VAULT_DIR } from "../shared/constants.js";
 import { createSnapshot, listSnapshots, restoreSnapshot } from "../snapshot/checkpoint.js";
 import type { CliOptions } from "./init.js";
 
+/** Untrusted text is clipped AFTER sanitizing, per the AGENTS.md ordering rule. */
+const MAX_ECHOED_LENGTH = 120;
+
+/**
+ * Sanitize untrusted text before it is printed to a terminal.
+ *
+ * The STRONGER of the repo's two sanitizer variants (see the sanitizer inventory
+ * in AGENTS.md — do not swap this for the narrower `/[\x00-\x1f\x7f]/g` strip).
+ * It also covers C1 (0x80–0x9f), which holds the 8-bit CSI and OSC introducers
+ * the narrow regex misses, and SUBSTITUTES rather than deletes so a scrubbed byte
+ * stays visible as evidence.
+ *
+ * Needed here because `createSnapshot`'s enumeration failure embeds the VAULT
+ * PATH in its message, and `picocolors` wraps a string in SGR codes without
+ * sanitizing it — so escape bytes in that path would repaint the failure as a
+ * success on the terminal of whoever ran the command. Copied rather than
+ * imported: the existing copy lives in `cli/budget.ts`, which statically imports
+ * `TrustTBClient` and therefore the native `tigerbeetle-node` binding, and the
+ * snapshot command must not pull that in to print an error string.
+ */
+function forDisplay(raw: string): string {
+	let out = "";
+	for (const ch of raw) {
+		const code = ch.codePointAt(0) as number;
+		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : ch;
+	}
+	return out.length > MAX_ECHOED_LENGTH ? `${out.slice(0, MAX_ECHOED_LENGTH)}...` : out;
+}
+
 export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const root = rootDir ?? process.cwd();
 	const vaultPath = join(root, VAULT_DIR);
@@ -68,7 +97,10 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			try {
 				meta = await createSnapshot(vaultPath, name);
 			} catch (err) {
-				const message = err instanceof Error ? err.message : String(err);
+				// Sanitize where the message is BUILT, so both branches carry the same
+				// scrubbed text. JSON.stringify escapes control characters itself, but
+				// the human branch prints through picocolors, which does not.
+				const message = forDisplay(err instanceof Error ? err.message : String(err));
 				if (json) {
 					console.log(
 						JSON.stringify({
