@@ -2,28 +2,31 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * The false-OK family: four places that answered "fine" to a question they
+ * The false-OK family: three places that answered "fine" to a question they
  * could not read.
  *
  * Each of these took the PERMISSIVE branch on uninterpretable input — an
  * unparseable date, an unlistable directory, a malformed PEM — and reported
  * success. None of them were detectable downstream, because the output of each
  * is indistinguishable from the genuine healthy case: an unexpired credential,
- * an empty vault, a trust set with no pins, a complete snapshot.
+ * an empty vault, a complete snapshot.
  *
- * They are grouped in one file deliberately. They live in four subsystems and
+ * They are grouped in one file deliberately. They live in three subsystems and
  * share no code, but they are one defect, and the next instance of it will be
  * found by someone reading this file rather than by someone reading any one of
- * the four modules.
+ * the three modules.
+ *
+ * The fourth member of this family — an unparseable `--successor-pin` — moved to
+ * its own branch: it edits a verdict lattice with precedence rules and needed
+ * three review rounds, and bundling it here let one hard change gate three
+ * one-liners.
  */
 
-import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { evaluateAnchoredVault, verifyAnchorChain } from "../../src/audit/anchor-verify.js";
 import { verifyVault } from "../../src/audit/verify.js";
 import type { CredentialScope } from "../../src/shared/types.js";
 import { createSnapshot } from "../../src/snapshot/checkpoint.js";
@@ -104,105 +107,6 @@ describe("false OK — an audit directory that cannot be enumerated", () => {
 		const result = verifyVault(vault);
 		expect(result.valid).toBe(true);
 		expect(result.chainLength).toBe(0);
-	});
-});
-
-describe("false OK — an unparseable --successor-pin", () => {
-	// A real root, so the run gets past the root-key guard and reaches the pins.
-	const rootPem = generateKeyPairSync("ed25519").publicKey.export({
-		type: "spki",
-		format: "pem",
-	}) as string;
-
-	it("REPORTS a pin it could not parse instead of dropping it", () => {
-		const result = verifyAnchorChain([], {
-			rootPem,
-			successorPinsPem: ["-----BEGIN PUBLIC KEY-----\nnot-a-key\n-----END PUBLIC KEY-----"],
-		} as Parameters<typeof verifyAnchorChain>[1]);
-		// The operator supplied a pin to CONSTRAIN which successor is acceptable.
-		// Silently discarding it verified against a weaker trust set than they
-		// asked for — and still reported success.
-		expect(result.errors.join(" ")).toMatch(/successor pin #1 is not a parseable PEM/i);
-	});
-
-	it("names WHICH pin failed when several are supplied", () => {
-		const result = verifyAnchorChain([], {
-			rootPem,
-			successorPinsPem: [rootPem, "garbage", rootPem],
-		} as Parameters<typeof verifyAnchorChain>[1]);
-		expect(result.errors.join(" ")).toMatch(/successor pin #2/i);
-	});
-
-	it("makes the PUBLIC verdict fail, not just an error string", () => {
-		// The finding Codex caught in the first cut of this fix: `errors` does not
-		// reach the verdict. `evaluateAnchoredVault` derives it from
-		// `invalidReasons` + `mismatchReasons` alone, so recording only the error
-		// left `verifyVaultWithAnchors` still answering ANCHORED_VERIFIED with exit
-		// 0 — the reported input error changed nothing an auditor would see. Assert
-		// at the level the verdict is actually read.
-		const result = verifyAnchorChain([], {
-			rootPem,
-			successorPinsPem: ["nope"],
-		} as Parameters<typeof verifyAnchorChain>[1]);
-		expect(result.invalidReasons).toContain("malformed-successor-pin");
-	});
-
-	it("classifies as INVALID rather than falling into the MISMATCH default", () => {
-		// An UNregistered reason lands in the default bucket at classification,
-		// which is MISMATCH — the most severe verdict and the wrong one. A mismatch
-		// means the anchors disagree with the vault; a malformed pin means the
-		// operator's own input could not be read.
-		const evaluation = evaluateAnchoredVault({
-			orderedHashes: [],
-			externalAnchors: [],
-			externalErrors: [],
-			mirrorAnchors: [],
-			mirrorErrors: [],
-			trust: { rootPem, successorPinsPem: ["nope"] },
-			witness: { requested: false },
-		} as Parameters<typeof evaluateAnchoredVault>[0]);
-		expect(evaluation.anchorState).not.toBe("ANCHOR_MISMATCH");
-	});
-
-	it("rejects a malformed pin on an UNANCHORED vault, where the check matters most", () => {
-		// The re-review finding. `evaluateAnchoredVault` returns UNANCHORED at the
-		// discovery step for an empty or legacy vault, BEFORE trust material is
-		// ever examined — so validating the pin inside `verifyAnchorChain` left
-		// exactly the case with nothing to check still answering valid, exit 0.
-		const evaluation = evaluateAnchoredVault({
-			orderedHashes: [],
-			externalAnchors: [],
-			externalErrors: [],
-			mirrorAnchors: [],
-			mirrorErrors: [],
-			trust: { rootPem, successorPinsPem: ["nope"] },
-			witness: { requested: false },
-		} as Parameters<typeof evaluateAnchoredVault>[0]);
-		expect(evaluation.anchorState).toBe("ANCHOR_INVALID");
-		expect(evaluation.anchorsValid).toBe(false);
-		expect(evaluation.reasons).toContain("malformed-successor-pin");
-	});
-
-	it("still reports UNANCHORED for an empty vault whose pins are fine", () => {
-		// The guard must not turn every unanchored vault into a failure.
-		const evaluation = evaluateAnchoredVault({
-			orderedHashes: [],
-			externalAnchors: [],
-			externalErrors: [],
-			mirrorAnchors: [],
-			mirrorErrors: [],
-			trust: { rootPem, successorPinsPem: [rootPem] },
-			witness: { requested: false },
-		} as Parameters<typeof evaluateAnchoredVault>[0]);
-		expect(evaluation.anchorState).toBe("UNANCHORED");
-	});
-
-	it("stays silent when every pin parses", () => {
-		const result = verifyAnchorChain([], {
-			rootPem,
-			successorPinsPem: [rootPem],
-		} as Parameters<typeof verifyAnchorChain>[1]);
-		expect(result.errors.join(" ")).not.toMatch(/parseable PEM/i);
 	});
 });
 
