@@ -186,3 +186,55 @@ describe("false OK — the fail-closed error must still be machine-readable", ()
 		}
 	});
 });
+
+describe("false OK — a documented count that stops matching reality", () => {
+	/**
+	 * AGENTS.md asserts an EXACT number of sanitizers and enumerates them. That
+	 * number went stale twice in this branch alone: once when the mirrored
+	 * `scrubForError` pair was added, and again when the count was corrected for
+	 * the snapshot copy while those two were still uncounted.
+	 *
+	 * A prose invariant nobody executes is the same shape as a health signal
+	 * nobody wired: it reads as authoritative and measures nothing. This test is
+	 * the seam — the count is now checked against the source rather than asserted.
+	 */
+	it("AGENTS.md's sanitizer count matches the sanitizers in src/", async () => {
+		const { readFile } = await import("node:fs/promises");
+		const { execSync } = await import("node:child_process");
+		const repoRoot = join(import.meta.dirname, "..", "..", "..", "..");
+
+		const agents = await readFile(join(repoRoot, "AGENTS.md"), "utf-8");
+		const declared = agents.match(/There are \*\*(\w+)\*\* sanitizers/)?.[1];
+		expect(declared).toBeDefined();
+
+		const WORDS: Record<string, number> = {
+			six: 6,
+			seven: 7,
+			eight: 8,
+			nine: 9,
+			ten: 10,
+			eleven: 11,
+			twelve: 12,
+			thirteen: 13,
+			fourteen: 14,
+		};
+		const declaredCount = WORDS[declared as string];
+		expect(declaredCount, `unrecognised number word "${declared}"`).toBeDefined();
+
+		// Count the real thing: each weak-variant file holds one copy, and each
+		// strong-variant definition is one copy.
+		const count = (pattern: string): number => {
+			const out = execSync(
+				`grep -rl '${pattern}' ${join(repoRoot, "packages")}/*/src --include='*.ts' || true`,
+				{ encoding: "utf-8" },
+			).trim();
+			return out === "" ? 0 : out.split("\n").length;
+		};
+		const actual =
+			count("CONTROL_CHARS = /\\[") +
+			count("function forDisplay") +
+			count("function scrubForError");
+
+		expect(actual).toBe(declaredCount);
+	});
+});
