@@ -163,6 +163,38 @@ export class LedgerUnavailableError extends Error {
 	}
 }
 
+/**
+ * The persisted spend ledger exists but could not be interpreted.
+ *
+ * `spend-ledger.json` carries cumulative spend ACROSS restarts, and its value
+ * seeds two things at startup: the in-process `budgetSpent`, and — via
+ * `max(0, budget - budgetSpent)` — the TigerBeetle enforcing wallet. A ledger
+ * that cannot be read is therefore not the same fact as a ledger that is not
+ * there. Absent means "nothing has been spent yet", which is true on a first
+ * run. Unreadable means "an unknown amount has been spent", and answering that
+ * with zero re-grants the full budget in both places at once.
+ *
+ * So this is thrown rather than defaulted. It is a startup error by design: the
+ * operator can delete the file to deliberately reset the ledger, or fix its
+ * permissions, and either way makes the choice knowingly.
+ */
+export class SpendLedgerUnreadableError extends Error {
+	public readonly cause_message: string;
+	public readonly hint: string;
+	public readonly docsUrl: string;
+
+	constructor(reason: string) {
+		const hint =
+			"Fix permissions on .usertrust/spend-ledger.json, restore it from a snapshot, or delete it to reset cumulative spend to zero.";
+		const docsUrl = "https://usertrust.ai/docs/errors/spend-ledger-unreadable";
+		super(`Spend ledger unreadable: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
+		this.name = "SpendLedgerUnreadableError";
+		this.cause_message = reason;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
+	}
+}
+
 export class AuditDegradedError extends Error {
 	public readonly cause_message: string;
 	public readonly hint: string;

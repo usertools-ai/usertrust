@@ -142,6 +142,7 @@ export {
 	LedgerUnavailableError,
 	PolicyDeniedError,
 	SkillVerificationError,
+	SpendLedgerUnreadableError,
 	VaultKeyMissingError,
 	VaultNotInitializedError,
 } from "./shared/errors.js";
