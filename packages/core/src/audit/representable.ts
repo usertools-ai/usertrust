@@ -50,7 +50,20 @@ import { canonicalize } from "./canonical.js";
 export function assertAuditRepresentable(eventKind: string, fields: Record<string, unknown>): void {
 	for (const field of Object.keys(fields)) {
 		try {
-			canonicalize(fields[field]);
+			// THE BYTES, NOT THE ABSENCE OF A THROW. A non-throwing `canonicalize`
+			// is not the writer's test — the writer parses what it is about to
+			// persist (`chain.ts`'s pre-fsync guard) and refuses bytes that do not
+			// read back. The two only agree BY CONSTRUCTION if this judges the same
+			// thing, and the gap is reachable: canonicalize's Date branch returns
+			// `JSON.stringify(value.toISOString())`, which is the JS value
+			// `undefined` — not a string, its declared return type notwithstanding —
+			// for a caller `Date` whose `toISOString` answers with `undefined` or a
+			// function. Nothing throws, so this waved it through; the token
+			// `undefined` then landed in the canonical text and only the writer
+			// refused it, i.e. after `governAction()` had executed and after the
+			// money moved. Which is the whole defect this module exists to prevent,
+			// arriving THROUGH the guard rather than around it.
+			JSON.parse(canonicalize(fields[field]));
 		} catch (err) {
 			throw new AuditDataInvalidError(
 				`${field} cannot be recorded on the audit chain: ${
