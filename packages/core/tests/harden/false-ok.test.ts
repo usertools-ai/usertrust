@@ -253,12 +253,17 @@ describe("false OK — a documented count that stops matching reality", () => {
 		// counted descriptions alongside implementations. The comparison itself is
 		// the signature and appears exactly once per sanitizer.
 		const strong = occurrences("code >= 0x7f && code <= 0x9f");
-		// Weaker variant: the shared control-character character class.
-		const weak = occurrences("CONTROL_CHARS = /\\[");
+		// Weaker variant: the character class ITSELF, bound to any name. Matching
+		// `CONTROL_CHARS` left half the guard name-based — a weak sanitizer under
+		// another constant name would have gone uncounted and a stale total would
+		// still have passed. The `= ` anchor keeps it to DEFINITIONS: the bare
+		// class also appears in two doc comments describing it, the same
+		// prose-counts-as-code trap the strong matcher fell into first.
+		const weak = occurrences("= /\\[\\\\x00-\\\\x1f\\\\x7f\\]/g");
 
 		expect(
 			strong + weak,
-			`AGENTS.md says ${declaredCount}; src/ contains ${strong} C1-covering + ${weak} CONTROL_CHARS = ${strong + weak}. ` +
+			`AGENTS.md says ${declaredCount}; src/ contains ${strong} C1-covering + ${weak} control-class = ${strong + weak}. ` +
 				"Add a bullet to the inventory and update the total — the entries are deliberately unnumbered so nothing needs renumbering.",
 		).toBe(declaredCount);
 	});

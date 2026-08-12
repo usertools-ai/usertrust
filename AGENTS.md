@@ -858,10 +858,11 @@ owns it: the count guard derives its root from its own file location, so it comp
 sanitizers against that tree's AGENTS.md, never one against the other.
 
 The total is pinned by `core/tests/harden/false-ok.test.ts`, which counts what a sanitizer DOES —
-the C1 comparison for the stronger variant, the `CONTROL_CHARS` class for the weaker — rather than
-matching known function names. An earlier version matched names and reported a smaller inventory
-than existed the moment one landed under a new name. So a new copy is counted whatever it is
-called: add a bullet here and update the total.
+the C1 comparison for the stronger variant, the control-character class for the weaker — rather
+than matching known function or constant names. Two earlier versions matched names — first the function names, then the
+`CONTROL_CHARS` binding — and each reported a smaller inventory than existed the moment a copy
+landed under a different name. So a new copy is counted whatever it is called, and whatever its
+constant is called: add a bullet here and update the total.
 
 The entries below are deliberately NOT numbered. They used to be ("a seventh", "an eighth"), and
 adding one meant renumbering every later entry — so a new copy was added and the ordinals silently
