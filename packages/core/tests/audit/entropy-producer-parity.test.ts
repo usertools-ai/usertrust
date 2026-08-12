@@ -16,6 +16,20 @@
  *
  * When a producer changes an event's shape, change it here too — and if that makes a
  * signal stop firing, the signal is what needs fixing, not this file.
+ *
+ * ── A FIXED KIND LIST IS A SMELL ──
+ *
+ * Wherever the producer's kinds are CALLER-SUPPLIED, matching on a hard-coded
+ * list of kinds is wrong by construction. `governActionImpl` writes
+ * `<action.kind>` on success and `<action.kind>_failed` on failure and drives the
+ * same circuit breaker an LLM call does, so a signal filtering on `llm_call` /
+ * `llm_call_failed` reported ZERO observations for an action-only deployment.
+ *
+ * That mistake was present in three signals at once, and two of them were fixed a
+ * round before the third — each signal had to learn it separately rather than
+ * once, which is exactly what this file was supposed to prevent and did not,
+ * because it pins NAMES and not SHAPE. Discriminate on structure instead:
+ * `settled` for a settlement terminal, a `_failed` suffix for a failure terminal.
  */
 
 import { readFileSync } from "node:fs";
