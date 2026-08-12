@@ -21,6 +21,8 @@ export interface TransactionEvent {
 		readonly cost?: number;
 		readonly settled?: boolean;
 		readonly error?: string;
+		/** The anomaly detector's reason — `anomaly_detected` writes `message`, not `error`. */
+		readonly message?: string;
 		readonly transferId: string;
 	};
 	readonly sequence: number;
@@ -219,8 +221,30 @@ function detectProvider(model: string): string {
  */
 const DENIAL_KINDS = new Set(["policy_denied", "ledger_rejected"]);
 
+/**
+ * An anomaly abort is the SAME defect class DENIED was added to fix, one step
+ * further along: the anomaly detector tripped mid-stream, the governor voided
+ * the hold, and the call died. It reaches here for two reasons that compound —
+ * `anomaly_detected` carries the call's `transferId`, and `verifyTransaction`
+ * selects the FIRST event matching that id, while an aborted stream never gets
+ * as far as writing an `llm_call`. So the anomaly event IS the receipt's
+ * subject.
+ *
+ * It carries no `settled` field, so without this arm it fell through to the
+ * `settled !== true` default and printed PENDING — "may still settle" for a
+ * call that was killed and never will.
+ *
+ * ABORTED rather than DENIED on purpose: a denial is a governance decision made
+ * BEFORE the provider was called and nothing was spent, whereas an anomaly
+ * abort interrupted a call already in flight, which may have consumed tokens
+ * the void returned. Collapsing the two would tell an auditor a killed call was
+ * refused.
+ */
+const ABORT_KINDS = new Set(["anomaly_detected"]);
+
 function resolveStatus(event: TransactionEvent): string {
 	if (DENIAL_KINDS.has(event.kind)) return "DENIED";
+	if (ABORT_KINDS.has(event.kind)) return "ABORTED";
 	if (event.kind === "llm_call_failed") return "FAILED";
 	if (event.data.settled === true) return "SETTLED";
 	return "PENDING";
@@ -249,6 +273,11 @@ export function renderReceipt(data: ReceiptData): string {
 	// A denial spent nothing, so it renders no spend lines — but its `error` is
 	// the whole point of the receipt and must still be shown.
 	const isDenied = DENIAL_KINDS.has(event.kind);
+	// An anomaly abort voided its hold, so it settled nothing and shows no spend
+	// either. Its reason arrives as `message` rather than `error` — the field the
+	// anomaly producer writes (`govern.ts:2077`) — so the reason block reads both.
+	const isAborted = ABORT_KINDS.has(event.kind);
+	const reason = event.data.error ?? (isAborted ? event.data.message : undefined);
 	const allVerified = chainVerified && merkleVerified;
 
 	const lines: string[] = [];
@@ -268,19 +297,22 @@ export function renderReceipt(data: ReceiptData): string {
 	lines.push(row(`${dotted("  Model", forDisplay(model), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Provider", provider, WIDTH - 1)} `));
 
-	if (!isFailed && !isDenied && cost !== undefined) {
+	if (!isFailed && !isDenied && !isAborted && cost !== undefined) {
 		lines.push(row(`${dotted("  Spend", `${cumulativeSpend} UT`, WIDTH - 1)} `));
 		lines.push(row(`${dotted("  Conversion", formatUsd(cumulativeSpend), WIDTH - 1)} `));
 	}
 
 	lines.push(row(`${dotted("  Status", status, WIDTH - 1)} `));
 
-	if ((isFailed || isDenied) && event.data.error) {
+	if ((isFailed || isDenied || isAborted) && reason) {
 		lines.push(blank());
-		const errPrefix = "  Error: ";
+		// "Aborted:" rather than "Error:" — the anomaly detector doing its job is
+		// not a fault, and labelling a working control as an error is how an
+		// operator learns to ignore it.
+		const errPrefix = isAborted ? "  Aborted: " : "  Error: ";
 		const indent = " ".repeat(errPrefix.length);
 		const maxW = WIDTH - indent.length - 2;
-		const wrapped = wordWrap(forDisplay(event.data.error), maxW);
+		const wrapped = wordWrap(forDisplay(reason), maxW);
 		for (let i = 0; i < wrapped.length; i++) {
 			const prefix = i === 0 ? errPrefix : indent;
 			lines.push(row(pad(`${prefix}${wrapped[i] as string}`)));
