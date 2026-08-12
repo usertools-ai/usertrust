@@ -252,23 +252,25 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 		await gov.destroy();
 	});
 
-	it("settle() refuses an unrecordable model on the caller's handle before the delete", async () => {
+	it("settle() takes the model from the GOVERNOR's capture — a mutated handle cannot reach the record", async () => {
 		const gov = await createGovernor({ dryRun: true, budget: 100_000, vaultBase });
 		const auth = await gov.authorize({ model: "claude-sonnet-4-6" });
 
-		// The Authorization is the CALLER's object and `settle` reads `model` off
-		// it, so a mutation between the two phases reaches `llm_call.data.model`.
+		// The Authorization is the CALLER's object, and `settle()` used to read
+		// `model` off it — so a mutation between the two phases reached
+		// `llm_call.data.model`, and an UNRECORDABLE one refused the settle
+		// outright. `SettleParams` carries no `model`, so there is no supported
+		// flow that settles against a different model than the one authorized:
+		// the value now comes from the governor's own capture, validated where it
+		// entered. A handle cannot relabel the record, and cannot block it either.
 		(auth as unknown as { model: unknown }).model = Symbol("not-a-model");
 
-		await expect(gov.settle(auth, { inputTokens: 1, outputTokens: 1 })).rejects.toBeInstanceOf(
-			AuditDataInvalidError,
-		);
-		expect(readEvents(vaultBase).filter((e) => e.kind === "llm_call")).toHaveLength(0);
-
-		// Repaired handle, same authorization, clean settle.
-		(auth as unknown as { model: unknown }).model = "claude-sonnet-4-6";
 		const receipt = await gov.settle(auth, { inputTokens: 1, outputTokens: 1 });
 		expect(receipt.settled).toBe(true);
+		expect(receipt.model).toBe("claude-sonnet-4-6");
+		const llmCalls = readEvents(vaultBase).filter((e) => e.kind === "llm_call");
+		expect(llmCalls).toHaveLength(1);
+		expect((llmCalls[0] as { data: Record<string, unknown> }).data.model).toBe("claude-sonnet-4-6");
 
 		await gov.destroy();
 	});
@@ -382,7 +384,7 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 		await gov.destroy();
 	});
 
-	it("settle() reads a LIVE Authorization.model exactly once, on the local scope where nothing else touches it", async () => {
+	it("settle() reads Authorization.model ZERO times — the read is gone, not merely deduplicated", async () => {
 		// `local` scope with no configured `local.models`: `resolveRates` never
 		// calls a string method on `model`, so a non-string reaches the append
 		// untouched. Same reachable path the govern-side stream test uses, and the
@@ -400,17 +402,57 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 			configurable: true,
 			get(): unknown {
 				reads++;
-				return reads === 1 ? "llama3" : Symbol("swapped");
+				return Symbol("swapped");
 			},
 		});
 
 		const receipt = await gov.settle(auth, { inputTokens: 10, outputTokens: 5 });
 
-		expect(reads).toBe(1);
+		// ONE read was the fix that made the check and the record agree. ZERO is
+		// the fix that makes the question unaskable: the endpoint scope and the
+		// model both come from the capture, so no caller accessor runs on this
+		// path at all — it cannot lie, and it cannot throw a terminal off the
+		// ledger either. Asserted exactly, so a re-read cannot come back.
+		expect(reads).toBe(0);
 		expect(receipt.settled).toBe(true);
 		const llmCalls = readEvents(vaultBase).filter((e) => e.kind === "llm_call");
 		expect(llmCalls).toHaveLength(1);
 		expect((llmCalls[0] as { data: Record<string, unknown> }).data.model).toBe("llama3");
+
+		await gov.destroy();
+	});
+
+	it("settle() meters with the CAPTURED endpoint scope even when the handle answers otherwise", async () => {
+		// A3 already says the settlement meters with the authorize-time scope, and
+		// `SettleParams` carries no endpoint field. It was still read off the
+		// caller's handle, so a mutation between the phases re-classified the call
+		// and re-priced it — the `model` defect one field over, on the value that
+		// picks the RATE TABLE.
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+			endpoint: { class: "local", runtime: "ollama" },
+		});
+		const auth = await gov.authorize({ model: "llama3", estimatedInputTokens: 1_000 });
+
+		let reads = 0;
+		Object.defineProperty(auth, "endpoint", {
+			configurable: true,
+			get(): unknown {
+				reads++;
+				return { class: "cloud", runtime: "unknown" };
+			},
+		});
+
+		const receipt = await gov.settle(auth, { inputTokens: 10, outputTokens: 5 });
+
+		expect(reads).toBe(0);
+		expect(receipt.endpoint).toEqual({ class: "local", runtime: "ollama" });
+		// The scope also picks the rate table, so this is the money half of the
+		// same assertion: a cloud re-classification of `llama3` would resolve
+		// against the unknown-model path instead of the local default.
+		expect(receipt.meter.rateSource).toBe("local-default");
 
 		await gov.destroy();
 	});
@@ -471,6 +513,92 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 		//    double release would show up here as MORE than this.
 		expect(gov.budgetRemaining()).toBe(100_000 - receipt.cost);
 		expect(readEvents(vaultBase).filter((e) => e.kind === "llm_call")).toHaveLength(1);
+
+		await gov.destroy();
+	});
+
+	// ── the window between the LOOKUP and the CLAIM ──
+	//
+	// A re-read was not the last way two terminals could run for one hold. The
+	// entry was looked up, then CALLER CODE ran — the `chunksDelivered` accessor
+	// and the guard over it — and only then was the entry claimed. Any accessor
+	// in that window can synchronously call `settle()` or `abort()` on the same
+	// handle: the nested terminal finds the entry still live, claims it, and runs
+	// all the way to its first `await`, which is PAST the delete, the release and
+	// the POST. The outer call's own `delete` then answers `false`, which nothing
+	// checks, and it carries on with the capture it read before the window. Both
+	// paths release the same hold and both account the same spend — and on the
+	// settle/abort pairing they race a POST against a VOID.
+	//
+	// The fix is the rule AGENTS.md already states for the ledger: CLAIM
+	// SYNCHRONOUSLY, before any caller code runs, and restore the entry only if
+	// the validation that follows refuses it. Narrowing the window is not a fix;
+	// the claim has to happen before the FIRST caller read, not merely nearer to
+	// it. The retry property the guard is here for is unchanged, because the
+	// restore is synchronous with the refusal — nothing can observe the gap.
+
+	it("settle() claims the hold BEFORE it runs caller code — a re-entrant settle cannot release it twice", async () => {
+		const gov = await createGovernor({ dryRun: true, budget: 100_000, vaultBase });
+		const auth = await gov.authorize({ model: "claude-sonnet-4-6", estimatedInputTokens: 1_000 });
+
+		let nested: Promise<unknown> | undefined;
+		const liveParams = {
+			inputTokens: 10,
+			outputTokens: 5,
+			get chunksDelivered(): number {
+				// Re-entry from inside the outer call's own validation window,
+				// synchronously, exactly as a caller-owned accessor can.
+				nested ??= gov.settle(auth, { inputTokens: 10, outputTokens: 5 }).then(
+					() => undefined,
+					(e: unknown) => e,
+				);
+				return 7;
+			},
+		};
+
+		const receipt = await gov.settle(auth, liveParams);
+
+		// The nested terminal found the entry ALREADY CLAIMED. Pre-fix it found it
+		// live, claimed it and settled, and the outer call then settled the same
+		// hold a second time.
+		expect(await nested).toBeInstanceOf(Error);
+		expect(((await nested) as Error).message).toMatch(/is not active/);
+
+		// ONE terminal for one hold: one event, one spend, one release. Pre-fix the
+		// chain carried two `llm_call` events and `budgetRemaining()` reported the
+		// hold released twice.
+		expect(readEvents(vaultBase).filter((e) => e.kind === "llm_call")).toHaveLength(1);
+		expect(gov.budgetRemaining()).toBe(100_000 - receipt.cost);
+		expect(receipt.chunksDelivered).toBe(7);
+
+		await gov.destroy();
+	});
+
+	it("settle() claims the hold BEFORE it runs caller code — a re-entrant abort cannot VOID it underneath", async () => {
+		const gov = await createGovernor({ dryRun: true, budget: 100_000, vaultBase });
+		const auth = await gov.authorize({ model: "claude-sonnet-4-6", estimatedInputTokens: 1_000 });
+
+		let nested: Promise<void> | undefined;
+		const liveParams = {
+			inputTokens: 10,
+			outputTokens: 5,
+			get chunksDelivered(): number {
+				nested ??= gov.abort(auth, new Error("re-entrant"));
+				return 7;
+			},
+		};
+
+		const receipt = await gov.settle(auth, liveParams);
+		await nested;
+
+		// `abort()` is idempotent-silent on a claimed entry, so the re-entrant call
+		// is a no-op: no VOID, no failure record, and the hold it could not claim
+		// is released exactly once — by the settle that owns it. Pre-fix the abort
+		// released the hold and recorded `llm_call_failed`, and the settle then
+		// released the SAME hold again and posted the spend on top.
+		expect(readEvents(vaultBase).filter((e) => e.kind === "llm_call")).toHaveLength(1);
+		expect(readEvents(vaultBase).filter((e) => e.kind === "llm_call_failed")).toHaveLength(0);
+		expect(gov.budgetRemaining()).toBe(100_000 - receipt.cost);
 
 		await gov.destroy();
 	});
@@ -1186,6 +1314,63 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 		try {
 			await expect(
 				writer.appendEvent({ kind: "tool_use", actor: "sys", data: { n: Number.NaN } }),
+			).rejects.toBeInstanceOf(AuditDataInvalidError);
+		} finally {
+			writer.release();
+		}
+	});
+
+	// ── the boundary judges the BYTES, not the absence of a throw ──
+	//
+	// `assertAuditRepresentable` accepted every input `canonicalize` did not
+	// throw on. But canonicalize's Date branch returns
+	// `JSON.stringify(value.toISOString())`, and `JSON.stringify` answers with the
+	// JS value `undefined` — not a string — for a `toISOString` that returns
+	// `undefined` or a function. No throw, so the boundary waved it through; the
+	// value then reached the canonical text as the bare token `undefined`, which
+	// the WRITER's parse guard refuses — after `governAction()` has executed and
+	// after the money moved, i.e. after the irreversible step this whole module
+	// exists to run ahead of. The boundary and the writer are supposed to agree BY
+	// CONSTRUCTION, and they only do if the boundary judges what the writer judges:
+	// the returned bytes.
+	//
+	// RESIDUAL, stated because it is not closed here: inside an ARRAY the same
+	// malformed Date is joined away rather than emitted, so `[bad]` canonicalizes
+	// to the parseable `[]` and BOTH guards accept it. That is a canonicalizer
+	// defect (the Date branch does not check its own `JSON.stringify` result the
+	// way the primitive branch does), not a boundary/writer disagreement — the two
+	// still answer identically, which is the property asserted below.
+
+	it("the boundary refuses canonical bytes that do not PARSE, not merely a throw", () => {
+		const malformed = (): Date => {
+			const d = new Date("2026-08-11T00:00:00.000Z");
+			(d as unknown as { toISOString: () => unknown }).toISOString = () => undefined;
+			return d;
+		};
+
+		// Pre-fix: canonicalize returns the JS value `undefined` here and never
+		// throws — its declared `string` return type is a cast, not a check.
+		expect(() => canonicalize(malformed())).not.toThrow();
+		expect(() => JSON.parse(canonicalize(malformed()))).toThrow();
+
+		// Top level and nested: both reach a writer that persists these bytes.
+		for (const value of [malformed(), { when: malformed() }, { a: { b: malformed() } }]) {
+			expect(() => assertAuditRepresentable("llm_call", { "x.y": value })).toThrow(
+				AuditDataInvalidError,
+			);
+		}
+	});
+
+	it("the boundary and the writer refuse the SAME malformed Date", async () => {
+		const d = new Date("2026-08-11T00:00:00.000Z");
+		(d as unknown as { toISOString: () => unknown }).toISOString = () => () => 1;
+
+		expect(() => assertAuditRepresentable("tool_use", { "x.y": d })).toThrow(AuditDataInvalidError);
+
+		const writer = createAuditWriter(vaultBase);
+		try {
+			await expect(
+				writer.appendEvent({ kind: "tool_use", actor: "sys", data: { when: d } }),
 			).rejects.toBeInstanceOf(AuditDataInvalidError);
 		} finally {
 			writer.release();

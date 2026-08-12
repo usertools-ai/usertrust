@@ -270,6 +270,33 @@ interface AuthorizationCapture {
 	 * `meteredEstimate` comment at the authorize-time computation.
 	 */
 	readonly meteredEstimate: number;
+	/**
+	 * The model this call was AUTHORIZED for, mirrored here from the same local
+	 * `authorize()` ran `assertAuditRepresentable` over — so what `settle()`
+	 * writes is provably recordable, and provably the model the hold was placed
+	 * against.
+	 *
+	 * The handle carries its own copy for reporting, and reading THAT is the
+	 * defect: `settle()` used to, so a caller who mutated `auth.model` between the
+	 * phases relabelled `llm_call.data.model` after the fact, and an unrecordable
+	 * one refused the settlement outright — a caller-owned accessor blocking a
+	 * terminal, the trade the `abort()` ruling rejects. `SettleParams` carries no
+	 * `model` field, so no supported flow settles against a different model than
+	 * it authorized: the handle is never the right source here.
+	 */
+	readonly model: string;
+	/**
+	 * The endpoint scope captured at authorize (A3) — already NORMALIZED, so it is
+	 * the full shape, unlike the Partial a caller may pass to `authorize()`.
+	 *
+	 * Same rule as `model` beside it, on the value that picks the RATE TABLE:
+	 * `SettleParams` carries no endpoint field by design, so a settle must meter
+	 * with the authorize-time scope. Reading it back off the handle let a caller
+	 * re-classify their own call between the phases and be priced against a
+	 * different table — and a throwing accessor there sat between the claim and
+	 * the POST, where a refusal strands the hold.
+	 */
+	readonly endpoint: EndpointInfo;
 }
 
 /** Parameters for authorizing an LLM call. */
@@ -1276,6 +1303,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					// same one without asking the caller.
 					hold: estCost,
 					meteredEstimate,
+					// The model and scope this hold was placed against, mirrored off the
+					// same locals `authorize()` validated and priced with. `settle()`
+					// reads them from HERE, never from the handle's reporting copies —
+					// the identity half of the treatment `hold` and `proxyTransferId`
+					// already get for the amount and the transfer.
+					model,
+					endpoint,
 				}),
 			);
 			return auth;
@@ -1299,8 +1333,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			//
 			// So: ONE read, into a local, ahead of the lookup, and nothing below
 			// touches `auth.transferId` again. This is the D5 rule the token counts
-			// and (above) `chunksDelivered`/`model` already follow, applied to the
-			// field that decides WHICH hold is being settled.
+			// and (below) `chunksDelivered` already follow, applied to the field
+			// that decides WHICH hold is being settled.
 			//
 			// It is also why this id needs no representability guard: a value that
 			// survives `activeAuths.get` is SameValueZero-equal to a key this module
@@ -1312,7 +1346,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			//
 			// `proxyTransferId` is deliberately NOT snapshotted alongside it: it is not
 			// read off the handle at all. The POST below takes it from the governor's
-			// own capture, the same place the release takes `hold` — see there.
+			// own capture, the same place the release takes `hold` — see there. Nor
+			// are `model` and `endpoint`, for the same reason one field further out:
+			// they decide the RATE, so they come from the capture too, and this
+			// function now reads exactly ONE thing off the caller's handle — the id
+			// above — plus `SettleParams`.
 			const transferId = auth.transferId;
 
 			// One `get` where there used to be `has` + a read off the caller's object:
@@ -1325,18 +1363,46 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				throw new Error(`Authorization ${transferId} is not active (already settled or aborted)`);
 			}
 
+			// ── CLAIM THE ENTRY BEFORE ANY CALLER CODE RUNS ───────────────────
+			// AGENTS.md, Money: exactly one ledger mutation per hold, CLAIMED
+			// SYNCHRONOUSLY. The claim used to sit after the validation below, which
+			// left a window between the lookup and the claim in which caller code —
+			// the `chunksDelivered` accessor — runs with the entry still live. An
+			// accessor that synchronously calls `settle(auth)` or `abort(auth)`
+			// re-enters this function, finds the hold unclaimed, takes it, and runs
+			// to its first `await`, which is PAST the delete, past the release and
+			// past the POST. This call's own `delete` then answers `false` — nothing
+			// read it — and it carries on with the `capture` it read before the
+			// window. Two terminals, one hold: the hold released twice
+			// (`inFlightHoldTotal` driven negative), the spend accounted twice, and
+			// on the settle/abort pairing a POST racing a VOID.
+			//
+			// Narrowing the window is not a fix. The claim has to happen before the
+			// FIRST caller read, so the validation below runs against a hold nobody
+			// else can take. There is no `await` between the claim and the restore,
+			// so no concurrent task can observe the gap either — only re-entrant
+			// caller code can, which is exactly the party being fenced out.
+			activeAuths.delete(transferId);
+
 			// ── VALIDATE BEFORE THE POINT OF NO RETURN ────────────────────────
 			// Validate everything you will need to durably record BEFORE you do
 			// anything you cannot undo. A guard that runs after the irreversible
 			// step isn't a guard, it's a notification.
 			//
-			// Both fields below reach `llm_call.data`, and that append is the LAST
-			// thing this function does — after the authorization is deleted (next
-			// line) and after the spend is posted. A `chunksDelivered: NaN` used to
-			// be discovered there, which handed the caller a failed settlement for
-			// money that had already moved and no authorization to retry against.
-			// Nothing here is written or reserved: it is the writer's own
-			// representability check, run early, on the values a caller supplied.
+			// `chunksDelivered` reaches `llm_call.data`, and that append is the LAST
+			// thing this function does — after the spend is posted. A
+			// `chunksDelivered: NaN` used to be discovered there, which handed the
+			// caller a failed settlement for money that had already moved and no
+			// authorization to retry against. Nothing here is written or reserved:
+			// it is the writer's own representability check, run early, on a value
+			// the caller supplied.
+			//
+			// THE CLAIM IS NOT THE POINT OF NO RETURN — it is reversible, and the
+			// `catch` below reverses it. Deleting the entry moves no money and
+			// writes nothing; restoring the SAME frozen capture leaves the
+			// authorization exactly as it was, so a refused settle still leaves the
+			// caller a live handle to correct the value and retry on. That retry is
+			// the load-bearing property of this guard and it is unchanged.
 			//
 			// The four token counts are absent on purpose — `sanitizeUsage` below
 			// clamps them to finite integers before they can reach either the money
@@ -1346,31 +1412,41 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// value is DROPPED rather than refused.
 			//
 			// ── VALIDATE THE BYTES YOU WILL WRITE, NOT A VALUE YOU RE-READ ────
-			// The two fields are snapshotted into locals HERE, and the guard, the
-			// chain event and the receipt all use those locals — nothing below
-			// touches `params` or `auth` for them again. A value you re-read is not
-			// the value you checked: every property access is a fresh read of an
-			// object the CALLER still owns, so a `SettleParams` that is a live
-			// object (a Proxy, or a getter over an accumulator the caller is still
-			// updating — the same shape the `reportedCounts` snapshot below is
-			// written for) can answer the guard with a recordable 7 and the writer
-			// with a NaN. That passes THROUGH the guard rather than around it, and
-			// lands the original defect intact: refused at the append, after the
-			// delete and after the POST, with no authorization left to retry.
-			// `chunksDelivered` alone was read four more times after the check
-			// (twice for the chain event, twice for the receipt), which is also
-			// four chances for the record and the receipt to disagree.
-			const chunksDelivered = params?.chunksDelivered;
-			const model = auth.model;
-			assertAuditRepresentable("llm_call", {
-				"SettleParams.chunksDelivered": chunksDelivered,
-				// The handle is the caller's own object and `model` rides into audit
-				// data below, so a mutation between authorize and settle lands there
-				// exactly like a bad `SettleParams` field would.
-				"Authorization.model": model,
-			});
+			// `chunksDelivered` is snapshotted into a local HERE, and the guard, the
+			// chain event and the receipt all use that local — nothing below touches
+			// `params` for it again. A value you re-read is not the value you
+			// checked: every property access is a fresh read of an object the CALLER
+			// still owns, so a `SettleParams` that is a live object (a Proxy, or a
+			// getter over an accumulator the caller is still updating — the same
+			// shape the `reportedCounts` snapshot below is written for) can answer
+			// the guard with a recordable 7 and the writer with a NaN. That passes
+			// THROUGH the guard rather than around it, and lands the original defect
+			// intact: refused at the append, after the claim and after the POST,
+			// with no authorization left to retry. `chunksDelivered` alone was read
+			// four more times after the check (twice for the chain event, twice for
+			// the receipt), which is also four chances for the record and the
+			// receipt to disagree.
+			//
+			// The READ ITSELF is inside the `try`, not just the guard: an accessor
+			// may throw as easily as it may lie, and a throw here must restore the
+			// entry for the same reason a refusal does.
+			let chunksDelivered: number | undefined;
+			try {
+				chunksDelivered = params?.chunksDelivered;
+				assertAuditRepresentable("llm_call", {
+					"SettleParams.chunksDelivered": chunksDelivered,
+				});
+			} catch (err) {
+				// Put the hold back exactly as it was — same frozen capture, same key.
+				activeAuths.set(transferId, capture);
+				throw err;
+			}
 
-			activeAuths.delete(transferId);
+			// `model` is the governor's own capture, not the handle: see
+			// `AuthorizationCapture.model`. It was validated at `authorize()`, where
+			// the caller supplied it, so it needs no guard here — and it can no
+			// longer be relabelled, or made to throw, by the party being settled.
+			const model = capture.model;
 
 			let callAuditDegraded = false;
 
@@ -1387,8 +1463,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				capture.costCenter === undefined ? {} : { costCenter: capture.costCenter };
 
 			// A3: settlement meters with the endpoint scope CAPTURED AT AUTHORIZE —
-			// SettleParams carries no endpoint field by design.
-			const endpoint = auth.endpoint ?? defaultEndpoint;
+			// SettleParams carries no endpoint field by design. FROM THE CAPTURE,
+			// like `model` above and `hold` below: the handle's copy is the caller's
+			// to rewrite, and this scope picks the rate table, so a swap between the
+			// phases re-prices the settlement against a table the hold was never
+			// placed under. It also sat after the claim, where a throwing accessor
+			// strands the hold.
+			const endpoint = capture.endpoint;
 			const rateInfo = resolveRates(model, endpoint.class, config);
 
 			// D5 — read the caller's object ONCE, into a local. The presence check
