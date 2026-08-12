@@ -403,6 +403,66 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 		await gov.destroy();
 	});
 
+	// ── the same class, on the field that decides WHICH hold is settled ──
+	//
+	// `auth.transferId` was the biggest instance of the re-read class and the
+	// last one left inside `settle()`: fourteen fresh property accesses on the
+	// caller's handle. Two of them are not merely audit data — the liveness `get`
+	// and the `delete` that CLAIMS the entry were separate reads, so a getter
+	// answering with the live id at the check and anything else at the claim left
+	// the entry in `activeAuths`. The authorization then survives its own
+	// settlement: settle it again and `budgetSpent` is committed twice while
+	// `inFlightHoldTotal` is released twice, driving it negative. The audit hole
+	// (an id that never held anything, written into `llm_call`,
+	// `settlement_ambiguous` and `settlement_shortfall` after the POST) is the
+	// smaller half of it.
+
+	it("settle() reads a LIVE Authorization.transferId exactly once — the entry it checks is the entry it claims", async () => {
+		const gov = await createGovernor({ dryRun: true, budget: 100_000, vaultBase });
+		const auth = await gov.authorize({ model: "claude-sonnet-4-6", estimatedInputTokens: 1_000 });
+		const realId = auth.transferId;
+
+		let reads = 0;
+		let poisoned = true;
+		Object.defineProperty(auth, "transferId", {
+			configurable: true,
+			get(): string {
+				reads++;
+				// Read #1 (the liveness lookup) is honest; every later read points at
+				// an id that is NOT in `activeAuths`. Pre-fix, read #2 was the delete.
+				return poisoned && reads > 1 ? `${realId}-swapped` : realId;
+			},
+		});
+
+		const receipt = await gov.settle(auth, { inputTokens: 10, outputTokens: 5 });
+
+		// 1. ONE read. Asserted exactly, so a re-read cannot be reintroduced
+		//    without failing here.
+		expect(reads).toBe(1);
+
+		// 2. The id that passed the liveness check is the id that was recorded —
+		//    on the receipt and on the chain. Pre-fix both carried `-swapped`.
+		expect(receipt.transferId).toBe(realId);
+		const llmCalls = readEvents(vaultBase).filter((e) => e.kind === "llm_call");
+		expect(llmCalls).toHaveLength(1);
+		expect((llmCalls[0] as { data: Record<string, unknown> }).data.transferId).toBe(realId);
+
+		// 3. THE MONEY PROOF. Hand back an honest handle and settle again: the
+		//    authorization must be GONE. Pre-fix the delete missed, so this second
+		//    settle succeeded and committed a second `budgetSpent`.
+		poisoned = false;
+		await expect(gov.settle(auth, { inputTokens: 10, outputTokens: 5 })).rejects.toThrow(
+			/is not active/,
+		);
+
+		// 4. One settle's worth of money, and the hold released exactly once — a
+		//    double release would show up here as MORE than this.
+		expect(gov.budgetRemaining()).toBe(100_000 - receipt.cost);
+		expect(readEvents(vaultBase).filter((e) => e.kind === "llm_call")).toHaveLength(1);
+
+		await gov.destroy();
+	});
+
 	it("a settle that never was still refuses a dead authorization first (ordering unchanged)", async () => {
 		const gov = await createGovernor({ dryRun: true, budget: 100_000, vaultBase });
 		const auth = await gov.authorize({ model: "claude-sonnet-4-6" });

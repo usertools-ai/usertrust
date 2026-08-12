@@ -1183,16 +1183,44 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		},
 
 		async settle(auth: Authorization, params?: SettleParams): Promise<TrustReceipt> {
+			// ── THE KEY IS READ ONCE, BEFORE IT DECIDES ANYTHING ──────────────
+			// `auth` is the CALLER's object and every `auth.transferId` is a fresh
+			// property access on it, so a handle carrying a getter (or a Proxy)
+			// answers each read independently. This one field used to be read
+			// fourteen times, and the two that matter were *different* reads: the
+			// liveness `get` below, and the `delete` that claims the entry. A getter
+			// that answers with the live id at the check and anything else at the
+			// claim leaves the entry in `activeAuths` — the authorization SURVIVES
+			// its own settlement and can be settled again, committing `budgetSpent`
+			// twice and driving `inFlightHoldTotal` negative. The same divergence
+			// puts an id that never held anything into `llm_call.data.transferId`,
+			// both `settlement_ambiguous` records, `settlement_shortfall`, the
+			// receipt and the synthetic hashes — every one of them written AFTER the
+			// spend is posted.
+			//
+			// So: ONE read, into a local, ahead of the lookup, and nothing below
+			// touches `auth.transferId` again. This is the D5 rule the token counts
+			// and (above) `chunksDelivered`/`model` already follow, applied to the
+			// field that decides WHICH hold is being settled.
+			//
+			// It is also why this id needs no representability guard: a value that
+			// survives `activeAuths.get` is SameValueZero-equal to a key this module
+			// inserted at `authorize()`, i.e. provably one of our own `trustId("tx")`
+			// strings. The liveness check is a STRICTER boundary than
+			// `assertAuditRepresentable` would be — but it only holds if the value
+			// that passed it is the value that gets written, which is exactly what
+			// the snapshot buys.
+			const transferId = auth.transferId;
+			const proxyTransferId = auth.proxyTransferId;
+
 			// One `get` where there used to be `has` + a read off the caller's object:
 			// the presence check and the attribution now come from the same internal
 			// record, so liveness and provenance cannot disagree. Semantics are
 			// unchanged — the first terminal claims the entry, every later one is
 			// refused.
-			const capture = activeAuths.get(auth.transferId);
+			const capture = activeAuths.get(transferId);
 			if (capture === undefined) {
-				throw new Error(
-					`Authorization ${auth.transferId} is not active (already settled or aborted)`,
-				);
+				throw new Error(`Authorization ${transferId} is not active (already settled or aborted)`);
 			}
 
 			// ── VALIDATE BEFORE THE POINT OF NO RETURN ────────────────────────
@@ -1240,7 +1268,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				"Authorization.model": model,
 			});
 
-			activeAuths.delete(auth.transferId);
+			activeAuths.delete(transferId);
 
 			let callAuditDegraded = false;
 
@@ -1362,7 +1390,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			let shortfallRecord: { posted: number; shortfall: number } | undefined;
 			if (proxyConn != null && !isDryRun) {
 				try {
-					await proxyConn.settle(auth.proxyTransferId ?? auth.transferId, actualCost);
+					await proxyConn.settle(proxyTransferId ?? transferId, actualCost);
 				} catch (postErr) {
 					settled = false;
 					await audit
@@ -1372,7 +1400,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							data: {
 								model,
 								cost: actualCost,
-								transferId: auth.transferId,
+								transferId,
 								error:
 									postErr instanceof Error
 										? postErr.message.slice(0, 200)
@@ -1389,7 +1417,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				try {
 					// Post the ACTUAL consumed cost (RECON #3), capped by the engine at
 					// the reserved hold; a truncation comes back as `shortfall`.
-					const postResult = await engine.postPendingSpend(auth.transferId, actualCost);
+					const postResult = await engine.postPendingSpend(transferId, actualCost);
 					if (postResult != null && postResult.shortfall > 0) {
 						postedCost = postResult.posted;
 						// EVENT ORDER: captured here, APPENDED after `llm_call` below.
@@ -1408,7 +1436,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							data: {
 								model,
 								cost: actualCost,
-								transferId: auth.transferId,
+								transferId,
 								error:
 									postErr instanceof Error
 										? postErr.message.slice(0, 200)
@@ -1424,7 +1452,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			}
 
 			// Audit event
-			const syntheticHash = createHash("sha256").update(auth.transferId).digest("hex");
+			const syntheticHash = createHash("sha256").update(transferId).digest("hex");
 			let auditHash = syntheticHash;
 			try {
 				const auditEvent = await audit.appendEvent({
@@ -1434,7 +1462,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						model,
 						cost: actualCost,
 						settled,
-						transferId: auth.transferId,
+						transferId,
 						usageSource,
 						// D5: the durable record. The receipt is a return value the
 						// caller may drop on the floor; THIS is what an auditor reads,
@@ -1477,7 +1505,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							actual: actualCost,
 							posted: shortfallRecord.posted,
 							shortfall: shortfallRecord.shortfall,
-							transferId: auth.transferId,
+							transferId,
 							...costCenterAudit,
 						},
 					})
@@ -1499,7 +1527,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							model,
 							cost: actualCost,
 							settled,
-							transferId: auth.transferId,
+							transferId,
 							...costCenterAudit,
 						},
 					},
@@ -1509,7 +1537,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 			// Pattern memory
 			if (config.patterns.enabled) {
-				const promptHash = createHash("sha256").update(auth.transferId).digest("hex");
+				const promptHash = createHash("sha256").update(transferId).digest("hex");
 				await recordPattern({
 					promptHash,
 					model,
@@ -1538,12 +1566,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				: undefined;
 
 			const receipt: TrustReceipt = {
-				transferId: auth.transferId,
+				transferId,
 				cost: actualCost,
 				budgetRemaining: config.budget - budgetSpent - inFlightHoldTotal,
 				auditHash,
 				chainPath: join(VAULT_DIR, "audit"),
-				receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${auth.transferId}` : null,
+				receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
 				settled,
 				model,
 				provider: "headless",
