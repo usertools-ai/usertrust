@@ -215,8 +215,7 @@ describe("false OK — a documented count that stops matching reality", () => {
 	 * producer call sites instead of inventing them.
 	 */
 	it("AGENTS.md's sanitizer count matches the sanitizers in src/", async () => {
-		const { readFile } = await import("node:fs/promises");
-		const { execSync } = await import("node:child_process");
+		const { readFile, readdir } = await import("node:fs/promises");
 		const repoRoot = join(import.meta.dirname, "..", "..", "..", "..");
 
 		const agents = await readFile(join(repoRoot, "AGENTS.md"), "utf-8");
@@ -239,35 +238,65 @@ describe("false OK — a documented count that stops matching reality", () => {
 		const declaredCount = WORDS[declared as string];
 		expect(declaredCount, `unrecognised number word "${declared}"`).toBeDefined();
 
-		// Count OCCURRENCES of each variant's signature, not files and not names.
-		// EXTENDED-REGEX, so the patterns can admit any identifier spelling.
-		const occurrences = (pattern: string): number => {
-			const out = execSync(
-				`grep -rhoE '${pattern}' ${join(repoRoot, "packages")}/*/src --include='*.ts' || true`,
-				{ encoding: "utf-8" },
-			).trim();
-			return out === "" ? 0 : out.split("\n").length;
+		/**
+		 * Strip comments and string literals, then collapse whitespace.
+		 *
+		 * This replaces a `grep -o` sweep, which was wrong at BOTH ends: it could
+		 * not see a signature that Biome had wrapped across lines (undercounting a
+		 * real copy), and it counted the same signature appearing inside a doc
+		 * comment or a string (overcounting prose as implementation). Line-oriented
+		 * text matching cannot distinguish code from writing about code.
+		 *
+		 * HONEST LIMIT: this is a lexical approximation, not a parse. It does not
+		 * model template literals with embedded expressions, regex literals
+		 * containing quote characters, or nested comment edge cases. It is enough
+		 * for the question asked — does a control-range comparison exist in code —
+		 * and if that ever stops being true, this comment is the place to escalate
+		 * to the TypeScript AST rather than adding another special case.
+		 */
+		const codeOnly = (src: string): string =>
+			src
+				.replace(/\/\*[\s\S]*?\*\//g, " ")
+				.replace(/\/\/[^\n]*/g, " ")
+				.replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+				.replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
+				.replace(/`(?:[^`\\]|\\.)*`/g, "``")
+				.replace(/\s+/g, " ");
+
+		const tsFiles = async (dir: string): Promise<string[]> => {
+			const out: string[] = [];
+			for (const e of await readdir(dir, { withFileTypes: true })) {
+				const full = join(dir, e.name);
+				if (e.isDirectory()) out.push(...(await tsFiles(full)));
+				else if (e.name.endsWith(".ts")) out.push(full);
+			}
+			return out;
 		};
-		// Stronger variant: the C1 comparison, with the local's NAME left open.
-		//
-		// Four rounds of correction landed here, each generalizing the part that had
-		// just failed and leaving the part that had not yet been tested:
-		//   1. matched three function NAMES        — missed a fourth name;
-		//   2. matched bare `0x9f`                 — counted two doc comments as code;
-		//   3. matched the constant `CONTROL_CHARS`— missed any other binding;
-		//   4. matched the literal `code >= ...`   — missed a local named `codePoint`.
-		//
-		// A matcher gets audited where it was last wrong. What survives all four is
-		// the SHAPE: the two range bounds and the operators between them, with every
-		// identifier a wildcard. The bounds are the behaviour; the names are not.
-		const strong = occurrences(">= *0x7f *&& *[A-Za-z_$][A-Za-z0-9_$]* *<= *0x9f");
-		// Weaker variant: the character class ITSELF, bound to any name. Matching
-		// `CONTROL_CHARS` left half the guard name-based — a weak sanitizer under
-		// another constant name would have gone uncounted and a stale total would
-		// still have passed. The `= ` anchor keeps it to DEFINITIONS: the bare
-		// class also appears in two doc comments describing it, the same
-		// prose-counts-as-code trap the strong matcher fell into first.
-		const weak = occurrences("= */\\[\\\\x00-\\\\x1f\\\\x7f\\]/g");
+
+		const pkgs = join(repoRoot, "packages");
+		const srcDirs = (await readdir(pkgs, { withFileTypes: true }))
+			.filter((e) => e.isDirectory())
+			.map((e) => join(pkgs, e.name, "src"));
+
+		let strong = 0;
+		let weak = 0;
+		// Identifiers are wildcards: the range bounds and operators are the
+		// behaviour, the names around them are incidental.
+		const STRONG = />= *0x7f *&& *[A-Za-z_$][A-Za-z0-9_$]* *<= *0x9f/g;
+		const WEAK = /= *\/\[\\x00-\\x1f\\x7f\]\/g/g;
+		for (const dir of srcDirs) {
+			let files: string[];
+			try {
+				files = await tsFiles(dir);
+			} catch {
+				continue; // package has no src/
+			}
+			for (const f of files) {
+				const code = codeOnly(await readFile(f, "utf-8"));
+				strong += code.match(STRONG)?.length ?? 0;
+				weak += code.match(WEAK)?.length ?? 0;
+			}
+		}
 
 		expect(
 			strong + weak,
