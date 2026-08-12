@@ -118,19 +118,44 @@ describe("usertrust health", () => {
 			"utf-8",
 		);
 
-		const writer = createAuditWriter(tempDir);
-		await writer.appendEvent({
-			kind: "llm_call",
-			actor: "test",
-			data: { cost: 150 },
-		});
-		writer.release();
+		// From the PERSISTED LEDGER, not from summing the log. Summing `llm_call`
+		// costs both over- and under-counted: it included cost-center calls, which
+		// debit an envelope and never move session `budgetSpent`, and omitted
+		// governed-action costs written under the dynamic action kinds.
+		// `spend-ledger.json` is the number the governor itself seeds from.
+		writeFileSync(
+			join(vaultPath, "spend-ledger.json"),
+			JSON.stringify({ budgetSpent: 150, updatedAt: new Date(0).toISOString() }),
+			"utf-8",
+		);
 
 		await run(tempDir);
 
 		const combined = logOutput.join("\n");
 		// 150/50000 = 0.3%
 		expect(combined).toContain("0.3%");
+	});
+
+	it("ABSTAINS on budget when no spend ledger exists", async () => {
+		// A vault with a budget but no persisted spend has no honest utilization
+		// figure. Reporting 0.0% is the display's floor; the SIGNAL abstains rather
+		// than scoring a fabricated denominator.
+		const vaultPath = join(tempDir, ".usertrust");
+		mkdirSync(join(vaultPath, "audit"), { recursive: true });
+		writeFileSync(
+			join(vaultPath, "usertrust.config.json"),
+			JSON.stringify({ budget: 50000 }),
+			"utf-8",
+		);
+
+		const writer = createAuditWriter(tempDir);
+		await writer.appendEvent({ kind: "llm_call", actor: "test", data: { cost: 150 } });
+		writer.release();
+
+		await run(tempDir);
+
+		// The log carries a cost, but no ledger exists — so it is NOT summed.
+		expect(logOutput.join("\n")).toContain("0.0%");
 	});
 
 	it("shows [ok] tags for zero-hit signals", async () => {

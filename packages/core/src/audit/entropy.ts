@@ -347,10 +347,18 @@ export function extractCircuitBreakerTrips(events: EntropyEventInput[]): Entropy
 		// driving the breaker exactly as an LLM workload does. Discriminated on
 		// `settled` and the `_failed` suffix rather than a kind list, because the
 		// action kinds are caller-supplied and cannot be enumerated here.
+		// `stream_partial_delivery` is a CALL TERMINAL and was missing. A thrown
+		// provider stream runs `finalizeStreamVoid`, which records a breaker
+		// failure and emits that kind — not `llm_call_failed`, and with no
+		// `settled`. Omitting it counted anomaly-aborted streams while ignoring
+		// ordinary failed ones, so one anomaly among nine stream errors reported
+		// 1/1 instead of 1/10: the rate was measured against the wrong population,
+		// which is the same error as counting nothing at all, only harder to see.
 		const isTerminal =
 			e.kind === "llm_call" ||
 			e.kind === "llm_call_failed" ||
 			e.kind === "anomaly_detected" ||
+			e.kind === "stream_partial_delivery" ||
 			e.data.settled !== undefined ||
 			e.kind.endsWith("_failed");
 		const legacyShape =
@@ -415,11 +423,27 @@ export function extractPatternMemoryHits(events: EntropyEventInput[]): EntropySi
 	let detections = 0;
 	let total = 0;
 
+	// A detection with no matching terminal must still COUNT as data. It is
+	// written BEFORE the hold and the provider call, so if the hold is then
+	// rejected or the stream fails, no terminal below matches — leaving hits > 0
+	// with total 0, which `computeEntropyScore` then discards as "no
+	// observations". The real detection would vanish from the score precisely
+	// when the call it flagged did not complete.
+	let unmatchedDetections = 0;
+
 	for (const e of events) {
 		if (e.kind === "injection_detected") {
 			detections++;
+			unmatchedDetections++;
 			continue;
 		}
+
+		// HEADLESS calls never ran injection detection at all. `createGovernor()`
+		// writes `llm_call` / `llm_call_failed` with `source: "headless"` and
+		// performs no scan, so counting them as clean scans diluted real matches in
+		// a mixed vault — a denominator padded with calls that could not have been
+		// hits. An unscanned call is not a clean one.
+		if (e.data.source === "headless") continue;
 
 		// BLOCK mode never emits `injection_detected` at all — the call is refused
 		// and the evidence rides on the denial as `injectionPatterns`
@@ -456,6 +480,11 @@ export function extractPatternMemoryHits(events: EntropyEventInput[]): EntropySi
 			detections++;
 		}
 	}
+
+	// Each detection with no terminal of its own contributes an observation, so a
+	// flagged call that never completed still reaches the score instead of being
+	// filtered out as no data.
+	total += Math.max(0, unmatchedDetections - Math.min(detections, total));
 
 	// Supplementary detections can exceed the terminal count in principle; the
 	// rate is a proportion, so it clamps rather than exceeding 1.

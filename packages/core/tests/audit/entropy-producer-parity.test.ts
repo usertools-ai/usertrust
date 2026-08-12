@@ -364,3 +364,59 @@ describe("governed actions exercise the same signals as llm calls", () => {
 		expect(s.hits).toBeGreaterThan(0);
 	});
 });
+
+describe("denominators must match the population the signal claims to measure", () => {
+	const term = (kind: string, data: Record<string, unknown>): EntropyEventInput => ({ kind, data });
+
+	it("ordinary failed streams are in the anomaly denominator", () => {
+		// `finalizeStreamVoid` emits `stream_partial_delivery` — not
+		// `llm_call_failed`, and with no `settled`. Omitting it measured anomaly
+		// aborts against a population that excluded every ordinary stream failure,
+		// so one anomaly among nine errors reported 1/1 instead of 1/10.
+		const events = [
+			term("anomaly_detected", { anomalyKind: "token_rate", transferId: "a" }),
+			...Array.from({ length: 9 }, (_, i) =>
+				term("stream_partial_delivery", { transferId: `s${i}`, error: "boom" }),
+			),
+		];
+		const s = extractCircuitBreakerTrips(events);
+		expect(s.total).toBe(10);
+		expect(s.hits).toBe(1);
+	});
+
+	it("headless calls are NOT counted as clean injection scans", () => {
+		// `createGovernor()` performs no injection detection, so its terminals are
+		// unscanned rather than clean. Counting them padded the denominator with
+		// calls that could not have been hits.
+		const scanned = [
+			term("llm_call", { cost: 1, settled: true, transferId: "t1" }),
+			term("injection_detected", { patterns: ["x"], score: 1 }),
+		];
+		const withHeadless = [
+			...scanned,
+			...Array.from({ length: 20 }, (_, i) =>
+				term("llm_call", { cost: 1, settled: true, transferId: `h${i}`, source: "headless" }),
+			),
+		];
+		expect(extractPatternMemoryHits(withHeadless).total).toBe(
+			extractPatternMemoryHits(scanned).total,
+		);
+	});
+
+	it("a detection whose call never completed still reaches the score", () => {
+		// `injection_detected` is written BEFORE the hold. If the hold is rejected,
+		// no terminal matches — leaving hits > 0 and total 0, which the composite
+		// discards as "no observations". The detection would vanish precisely when
+		// the call it flagged did not complete.
+		const events = [
+			term("injection_detected", { patterns: ["ignore previous"], score: 1 }),
+			term("ledger_rejected", { decision: "deny", transferId: "r1", estimatedCost: 5 }),
+		];
+		const s = extractPatternMemoryHits(events);
+		expect(s.total).toBeGreaterThan(0);
+		const report = computeEntropyScore(events);
+		expect(
+			report.signals.find((x) => x.condition === "pattern_memory_hits")?.total,
+		).toBeGreaterThan(0);
+	});
+});

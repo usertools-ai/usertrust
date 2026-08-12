@@ -16,7 +16,7 @@ import {
 	type EntropyEventInput,
 	type EntropyLevel,
 } from "../audit/entropy.js";
-import { verifyChain } from "../audit/verify.js";
+import { verifyVault } from "../audit/verify.js";
 import { validatePolicyFile } from "../policy/gate.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
@@ -167,6 +167,28 @@ function loadConfig(vaultPath: string): { budget: number } {
 	}
 }
 
+/**
+ * Cumulative SESSION spend, as the governor persists it.
+ *
+ * `spend-ledger.json` is what `createGovernor`/`trust` seed the session wallet
+ * from, so it is the only number that answers how much of this session's budget
+ * is gone. Returns `undefined` when it is absent or unreadable, so the caller can
+ * abstain rather than report a fabricated figure — deliberately NOT throwing,
+ * because `health` is a read-only diagnostic and must not refuse to run over a
+ * ledger the governor itself would refuse to start on. It reports what it can
+ * read and stays quiet about what it cannot.
+ */
+function loadPersistedSpend(vaultPath: string): number | undefined {
+	try {
+		const raw = readFileSync(join(vaultPath, "spend-ledger.json"), "utf-8");
+		const parsed = JSON.parse(raw) as { budgetSpent?: unknown };
+		const value = parsed.budgetSpent;
+		return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function levelLabel(level: EntropyLevel): string {
 	switch (level) {
 		case "low":
@@ -233,22 +255,42 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		data: e.data,
 	}));
 
-	// Verify chain integrity directly
-	const logPath = join(vaultPath, "audit", "events.jsonl");
-	const verification = verifyChain(logPath);
+	// Verify the WHOLE VAULT, not the live segment.
+	//
+	// `verifyChain(logPath)` walks `events.jsonl` alone. On a ROTATED vault that
+	// file's first event links to the previous segment rather than to genesis, and
+	// `.meta.sequence` is global — so a perfectly valid continuous vault fails it.
+	// Feeding that into the new critical floor would report CRITICAL on a healthy
+	// chain the moment a vault had ever rotated: the fix for "a tampered chain
+	// reads healthy" shipping "a healthy chain reads tampered", which is worse,
+	// because a monitor that cries wolf gets muted and then the real signal is
+	// gone too.
+	//
+	// `verifyVault` walks every segment as one chain. The two take DIFFERENT
+	// arguments — a log path versus the `.usertrust` directory — which is the
+	// distinction AGENTS.md flags as easy to get wrong, and I got it wrong by
+	// reaching for the one already in hand.
+	const verification = verifyVault(vaultPath);
 	const chainLabel = verification.valid ? "verified" : "FAILED";
 	const chainStatus = verification.valid ? "[ok]" : "[critical]";
 
-	// Compute budget utilization percentage
-	let spent = 0;
-	for (const e of events) {
-		if (e.kind !== "llm_call") continue;
-		const cost = e.data.cost;
-		if (typeof cost === "number") {
-			spent += cost;
-		}
-	}
-	const budgetPct = config.budget > 0 ? ((spent / config.budget) * 100).toFixed(1) : "0.0";
+	// SESSION spend comes from the persisted ledger, not from summing the log.
+	//
+	// Summing `llm_call.cost` was wrong in both directions at once: it INCLUDED
+	// cost-center calls, which debit an envelope and deliberately never move
+	// session `budgetSpent`, and it OMITTED governed-action costs, which are
+	// written under the dynamic action kinds. So attributed traffic could exhaust
+	// an untouched session budget on the display, and action-only traffic could
+	// leave a spent one reading unused.
+	//
+	// `spend-ledger.json` is the number the governor actually seeds from, so it is
+	// the only one that answers "how much of this session's budget is gone". When
+	// it cannot be read, `spent` stays undefined and the entropy signal ABSTAINS
+	// rather than scoring a fabricated denominator — the same rule the extractor
+	// already applies to a missing total.
+	const spent = loadPersistedSpend(vaultPath);
+	const budgetPct =
+		config.budget > 0 && spent !== undefined ? ((spent / config.budget) * 100).toFixed(1) : "0.0";
 
 	// BOTH facts are computed above and BOTH are passed in. Neither can be derived
 	// from the event stream: no producer writes a budget total, and chain validity
@@ -260,7 +302,7 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// This is also why the ORDER changed: verification and spend used to be
 	// computed AFTER the score that needed them.
 	const report = computeEntropyScore(entropyEvents, {
-		budget: { total: config.budget, spent },
+		budget: { total: config.budget, spent: spent ?? Number.NaN },
 		chain: { valid: verification.valid, errors: verification.errors },
 	});
 
