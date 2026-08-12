@@ -42,6 +42,7 @@ import { trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import { AuditDataInvalidError } from "../../src/shared/errors.js";
+import type { TrustReceipt } from "../../src/shared/types.js";
 
 vi.mock("tigerbeetle-node", () => ({
 	createClient: vi.fn(() => ({
@@ -80,6 +81,79 @@ function makeAnthropicMock() {
 			})),
 		},
 	};
+}
+
+/**
+ * An OpenAI-SDK-shaped client on a LOOPBACK baseURL, so `endpoint.class` is
+ * `"local"`.
+ *
+ * WHY LOCAL, AND WHY IT IS NOT A CONTRIVANCE. `model` is a CAST of the caller's
+ * own request object (`(params.model as string) ?? "unknown"`), so it can hold
+ * any value at runtime. On the CLOUD path `resolveRates` happens to call
+ * `model.startsWith(...)`, which throws a bare `TypeError` for a non-string —
+ * loudly, and before anything irreversible, but by accident rather than by
+ * design. On the LOCAL path with no configured `local.models`, `resolveRates`
+ * never touches `model` as a string at all, so the value sails through
+ * untouched and lands in `llm_call.data.model` at the stream terminal. That is
+ * the reachable case, and it is exactly the one the fix has to close.
+ */
+function makeLocalStreamClient(): {
+	client: Record<string, unknown>;
+	createFn: ReturnType<typeof vi.fn>;
+} {
+	const createFn = vi.fn(async () => {
+		async function* gen(): AsyncGenerator<unknown> {
+			yield { choices: [{ delta: { content: "Hello" } }] };
+			yield { choices: [], usage: { prompt_tokens: 100, completion_tokens: 50 } };
+		}
+		return gen();
+	});
+	return {
+		client: {
+			baseURL: "http://localhost:11434/v1",
+			chat: { completions: { create: createFn } },
+		},
+		createFn,
+	};
+}
+
+/** The same loopback client, but resolving a plain JSON completion. */
+function makeLocalJsonClient(): {
+	client: Record<string, unknown>;
+	createFn: ReturnType<typeof vi.fn>;
+} {
+	const createFn = vi.fn(async () => ({
+		id: "chatcmpl_1",
+		choices: [{ message: { role: "assistant", content: "Hello" } }],
+		usage: { prompt_tokens: 100, completion_tokens: 50 },
+	}));
+	return {
+		client: {
+			baseURL: "http://localhost:11434/v1",
+			chat: { completions: { create: createFn } },
+		},
+		createFn,
+	};
+}
+
+interface CallResult {
+	response: unknown;
+	receipt: TrustReceipt;
+}
+
+async function callChat(governed: unknown, params: Record<string, unknown>): Promise<CallResult> {
+	const g = governed as {
+		chat: { completions: { create: (p: Record<string, unknown>) => Promise<CallResult> } };
+	};
+	return g.chat.completions.create(params);
+}
+
+/** Drain a governed stream and await its receipt — the stream TERMINAL fires here. */
+async function drain(result: CallResult): Promise<TrustReceipt> {
+	for await (const _chunk of result.response as AsyncIterable<unknown>) {
+		// the caller owns the chunks; we only need the terminal
+	}
+	return (result.response as { receipt: Promise<TrustReceipt> }).receipt;
 }
 
 describe("HARDEN: validate caller-supplied audit-bound values before the point of no return", () => {
@@ -260,6 +334,103 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 		expect(readEvents(vaultBase)).toHaveLength(0);
 
 		await governed.destroy();
+	});
+
+	// ── the proxy's `model`: the STREAM terminal (fix round 1 finding 2) ──
+
+	it("the STREAM terminal's model is refused at entry — before the money commits AND before the stream is consumed", async () => {
+		const { client, createFn } = makeLocalStreamClient();
+		const governed = await trust(client, { budget: 100_000, vaultBase });
+
+		const err = await callChat(governed, {
+			model: Number.NaN,
+			messages: [{ role: "user", content: "hi" }],
+			stream: true,
+		}).then(
+			() => undefined,
+			(e: unknown) => e,
+		);
+
+		// 1. It throws at the boundary, with the caller's own field named.
+		expect(err).toBeInstanceOf(AuditDataInvalidError);
+		expect((err as Error).message).toContain("request.model");
+		expect((err as AuditDataInvalidError).eventKind).toBe("llm_call");
+
+		// 2. THE ASYMMETRY THIS TEST EXISTS FOR. On the stream path the `llm_call`
+		//    append runs AFTER the budget commit, AFTER persistSessionSpend(), and
+		//    AFTER the POST/settle. So before the fix the refusal arrived once the
+		//    money had committed AND the stream had been consumed — strictly less
+		//    recoverable than the settle() case, because a consumed stream cannot
+		//    be re-consumed and there is no authorization handle to retry against.
+		//    The provider was never called at all, which is what makes it a real
+		//    guard rather than a notification.
+		expect(createFn).toHaveBeenCalledTimes(0);
+		expect(readEvents(vaultBase)).toHaveLength(0);
+
+		// 3. THE RETRY — the whole point. A corrected model streams and settles on
+		//    a governor that was never left in a half-committed state.
+		const good = await callChat(governed, {
+			model: "llama3",
+			messages: [{ role: "user", content: "hi" }],
+			stream: true,
+		});
+		const receipt = await drain(good);
+		expect(receipt.settled).toBe(true);
+		expect(receipt.budgetRemaining).toBe(100_000 - receipt.cost);
+		expect(createFn).toHaveBeenCalledTimes(1);
+
+		const llmCalls = readEvents(vaultBase).filter((e) => e.kind === "llm_call");
+		expect(llmCalls).toHaveLength(1);
+		expect((llmCalls[0] as { data: Record<string, unknown> }).data.model).toBe("llama3");
+
+		await (governed as unknown as { destroy(): Promise<void> }).destroy();
+	});
+
+	it("the NON-STREAM twin is refused at the same boundary, before the provider is billed", async () => {
+		// The non-stream `llm_call` append at govern.ts:2417 already PRECEDES the
+		// budget commit, so on the money axis this path was never broken. It is
+		// still improved by the same one-line boundary: the provider call is the
+		// caller's own irreversible step (they are billed for it by the provider,
+		// whatever our ledger does), and refusing a model we could never record
+		// before making that call costs them nothing but a corrected retry.
+		const { client, createFn } = makeLocalJsonClient();
+		const governed = await trust(client, { budget: 100_000, vaultBase });
+
+		await expect(
+			callChat(governed, { model: () => "sneaky", messages: [{ role: "user", content: "hi" }] }),
+		).rejects.toBeInstanceOf(AuditDataInvalidError);
+		expect(createFn).toHaveBeenCalledTimes(0);
+		expect(readEvents(vaultBase)).toHaveLength(0);
+
+		// Same handle, corrected model: the governor was left in a clean state.
+		const { receipt } = await callChat(governed, {
+			model: "llama3",
+			messages: [{ role: "user", content: "hi" }],
+		});
+		expect(receipt.settled).toBe(true);
+		expect(receipt.budgetRemaining).toBe(100_000 - receipt.cost);
+		expect(createFn).toHaveBeenCalledTimes(1);
+
+		await (governed as unknown as { destroy(): Promise<void> }).destroy();
+	});
+
+	it('an absent model is still the string "unknown", not a refusal', async () => {
+		// `(params.model as string) ?? "unknown"` coalesces null/undefined, so the
+		// value the guard sees is already the recordable default. Validating the
+		// COALESCED value rather than the raw field is what keeps this legal.
+		const { client } = makeLocalStreamClient();
+		const governed = await trust(client, { budget: 100_000, vaultBase });
+
+		const result = await callChat(governed, {
+			messages: [{ role: "user", content: "hi" }],
+			stream: true,
+		});
+		const receipt = await drain(result);
+		expect(receipt.settled).toBe(true);
+		const llmCalls = readEvents(vaultBase).filter((e) => e.kind === "llm_call");
+		expect((llmCalls[0] as { data: Record<string, unknown> }).data.model).toBe("unknown");
+
+		await (governed as unknown as { destroy(): Promise<void> }).destroy();
 	});
 
 	// ── the writer stays the backstop ──

@@ -1134,6 +1134,41 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 			const params = (args[0] ?? {}) as Record<string, unknown>;
 			const model = (params.model as string) ?? "unknown";
+			// ── VALIDATE BEFORE THE POINT OF NO RETURN ────────────────────────
+			// Validate everything you will need to durably record BEFORE you do
+			// anything you cannot undo. A guard that runs after the irreversible
+			// step isn't a guard, it's a notification.
+			//
+			// `model` is a CAST, not a coercion: the proxy's `args` are `unknown[]`
+			// and the line above only coalesces null/undefined, so at RUNTIME this
+			// holds whatever the caller put on their own request object. It then
+			// rides into `data.model` on EVERY audit event this call can emit —
+			// `llm_call` on both terminals, both `settlement_ambiguous` sites,
+			// `settlement_shortfall`, `llm_call_failed`, and the denial events.
+			//
+			// WHY HERE AND NOT AT THE APPEND. The two terminals sit on opposite
+			// sides of the line, and the stream one is the bad side:
+			//
+			//   non-stream — the `llm_call` append PRECEDES the budget commit and
+			//                the POST, so a refusal there costs the caller only the
+			//                provider call they already made.
+			//   stream     — the `llm_call` append runs AFTER the budget commit,
+			//                AFTER persistSessionSpend(), and AFTER the POST/settle,
+			//                with the caller's chunks already delivered. A refusal
+			//                there arrives once the money has committed AND the
+			//                stream has been consumed, and unlike settle() there is
+			//                no authorization handle left to retry against — there
+			//                is no retry at all.
+			//
+			// One boundary check covers both, and it is deliberately placed at the
+			// value's source rather than at either terminal so a third terminal
+			// cannot be added on the wrong side of it. Nothing here is written or
+			// reserved; this is the writer's own representability check, run early.
+			//
+			// It validates the COALESCED value, not `params.model`: an absent model
+			// is legitimately recorded as the string "unknown", and refusing that
+			// would break every caller who omits the field.
+			assertAuditRepresentable("llm_call", { "request.model": model });
 			// P3-PROVIDER-BLINDSPOT: normalize the prompt-bearing payload across
 			// providers (Anthropic/OpenAI `messages` + `system`, Google `contents`) so
 			// PII/injection scanning, token estimation, redaction, and pattern hashing
