@@ -336,24 +336,19 @@ export function extractPiiDetections(events: EntropyEventInput[]): EntropySignal
  * reads as one in a thousand.
  */
 export function extractCircuitBreakerTrips(events: EntropyEventInput[]): EntropySignal {
-	let hits = 0;
-	let total = 0;
+	// KEYED BY TRANSFER, not by event. One anomaly-aborted stream writes BOTH
+	// `anomaly_detected` and `stream_partial_delivery` with the same transferId,
+	// so counting events made a single aborted call report hits=1 total=2
+	// value=0.5 — a call cannot be half-aborted. Each governed call contributes
+	// one observation and at most one hit.
+	const observed = new Set<string>();
+	const aborted = new Set<string>();
+	// Records with no transferId (legacy or malformed) still count, keyed by a
+	// per-event token so they cannot collide with each other or with a real id.
+	let anonymous = 0;
+	let anonymousHits = 0;
 
 	for (const e of events) {
-		// GOVERNED ACTIONS exercise the same breaker — `governActionImpl` calls
-		// `cb.recordFailure()` and emits `<action.kind>_failed` on failure and
-		// `<action.kind>` on success. Neither matched a hard-coded `llm_call` list,
-		// so an action-only deployment reported ZERO breaker observations while
-		// driving the breaker exactly as an LLM workload does. Discriminated on
-		// `settled` and the `_failed` suffix rather than a kind list, because the
-		// action kinds are caller-supplied and cannot be enumerated here.
-		// `stream_partial_delivery` is a CALL TERMINAL and was missing. A thrown
-		// provider stream runs `finalizeStreamVoid`, which records a breaker
-		// failure and emits that kind — not `llm_call_failed`, and with no
-		// `settled`. Omitting it counted anomaly-aborted streams while ignoring
-		// ordinary failed ones, so one anomaly among nine stream errors reported
-		// 1/1 instead of 1/10: the rate was measured against the wrong population,
-		// which is the same error as counting nothing at all, only harder to see.
 		const isTerminal =
 			e.kind === "llm_call" ||
 			e.kind === "llm_call_failed" ||
@@ -367,30 +362,29 @@ export function extractCircuitBreakerTrips(events: EntropyEventInput[]): Entropy
 			e.data.circuitBreaker !== undefined;
 		if (!isTerminal && !legacyShape) continue;
 
-		total++;
 		const state = e.data.circuitBreakerState ?? e.data.state;
 		const tripped = e.data.circuitBreakerTripped ?? e.data.tripped;
-
-		// `llm_call_failed` is an observation, NOT a hit. The breaker opens on the
-		// FIFTH consecutive failure by default, so counting the first ordinary
-		// provider error as a trip reports breaker trips that never happened —
-		// and a metric that cries wolf is one an operator learns to ignore.
-		// No producer emits a breaker OPEN transition today, so the only real
-		// abort evidence on the chain is `anomaly_detected`; the explicit
-		// state/tripped fields are honoured for any producer that adds one.
-		if (
+		// `llm_call_failed` is an observation, NOT a hit: the breaker opens on the
+		// fifth consecutive failure by default, so counting the first ordinary
+		// provider error as a trip reports trips that never happened.
+		const isHit =
 			e.kind === "anomaly_detected" ||
-			// A governed-action failure is the same `cb.recordFailure()` an
-			// `llm_call_failed` is, so it counts the same way: an observation of a
-			// failure, not of a trip.
 			state === "open" ||
 			state === "half-open" ||
-			tripped === true
-		) {
-			hits++;
+			tripped === true;
+
+		const id = e.data.transferId;
+		if (typeof id === "string" && id !== "") {
+			observed.add(id);
+			if (isHit) aborted.add(id);
+		} else {
+			anonymous++;
+			if (isHit) anonymousHits++;
 		}
 	}
 
+	const total = observed.size + anonymous;
+	const hits = aborted.size + anonymousHits;
 	return {
 		condition: "circuit_breaker_trips",
 		label: "Anomaly aborts",
@@ -459,10 +453,16 @@ export function extractPatternMemoryHits(events: EntropyEventInput[]): EntropySi
 		//   - a denial ONLY when it carries `injectionPatterns`. A denial can fire
 		//     before injection detection runs, so counting every denial would put
 		//     calls in the denominator that were never scanned.
+		//   - `stream_partial_delivery`, which is emitted AFTER injection scanning
+		//     when a stream fails. Excluding it meant clean failed streams never
+		//     entered the denominator while detected ones got a synthetic
+		//     observation, so one detection among nine clean failed streams
+		//     reported 1/1 instead of 1/10.
 		const reachedScanner =
 			e.data.settled !== undefined ||
 			e.kind === "llm_call" ||
 			e.kind === "llm_call_failed" ||
+			e.kind === "stream_partial_delivery" ||
 			e.kind.endsWith("_failed") ||
 			nonEmptyArray(e.data.injectionPatterns);
 		const legacyShape =

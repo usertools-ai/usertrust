@@ -179,8 +179,20 @@ function loadConfig(vaultPath: string): { budget: number } {
  * read and stays quiet about what it cannot.
  */
 function loadPersistedSpend(vaultPath: string): number | undefined {
+	let raw: string;
 	try {
-		const raw = readFileSync(join(vaultPath, "spend-ledger.json"), "utf-8");
+		raw = readFileSync(join(vaultPath, "spend-ledger.json"), "utf-8");
+	} catch (err) {
+		// ENOENT is the ONE honest zero — a vault that has never settled has spent
+		// nothing, and both governor loaders treat it exactly this way. Every other
+		// read failure means an UNKNOWN amount has been spent, and returning
+		// `undefined` for both made a corrupt ledger render "0.0% [ok]": the same
+		// absent-versus-unreadable conflation this repo fixed in the governor,
+		// reproduced here in the tool that reports on it.
+		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return 0;
+		return undefined;
+	}
+	try {
 		const parsed = JSON.parse(raw) as { budgetSpent?: unknown };
 		const value = parsed.budgetSpent;
 		return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
@@ -350,6 +362,16 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 						// that names the wrong thing is worse than one that moved.
 						anomalyAborts: cbHits,
 						injectionMatches: pmHits,
+						// DEPRECATED ALIASES. `health --json` is a machine-readable
+						// surface, so removing a key breaks parsers and schema
+						// validators on upgrade regardless of the value it used to
+						// carry — a validator asserting the key EXISTS fails even
+						// though it only ever saw 0. Removal belongs in a breaking
+						// release; the accurate names ship now beside the old ones.
+						/** @deprecated renamed to `anomalyAborts` — no breaker transition is recorded. */
+						circuitBreakerTrips: cbHits,
+						/** @deprecated renamed to `injectionMatches` — unrelated to pattern memory. */
+						patternMemoryHits: pmHits,
 					},
 				},
 			}),

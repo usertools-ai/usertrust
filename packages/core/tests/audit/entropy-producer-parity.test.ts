@@ -336,9 +336,14 @@ describe("governed actions exercise the same signals as llm calls", () => {
 	 * reports zero observations for an action-only deployment while that
 	 * deployment drives the breaker exactly as an LLM workload does.
 	 */
+	// DISTINCT ids per call. The breaker signal is keyed by transfer — one aborted
+	// stream writes both `anomaly_detected` and `stream_partial_delivery` under one
+	// id, and a call cannot be half-aborted — so a fixture reusing one id models
+	// one call, not two.
+	let actionSeq = 0;
 	const actionOk = (): EntropyEventInput => ({
 		kind: "tool_use",
-		data: { actionName: "bash", cost: 5, settled: true, transferId: "a-1" },
+		data: { actionName: "bash", cost: 5, settled: true, transferId: `a-ok-${actionSeq++}` },
 	});
 	const actionFailed = (): EntropyEventInput => ({
 		kind: "tool_use_failed",
@@ -418,5 +423,36 @@ describe("denominators must match the population the signal claims to measure", 
 		expect(
 			report.signals.find((x) => x.condition === "pattern_memory_hits")?.total,
 		).toBeGreaterThan(0);
+	});
+});
+
+describe("one governed call contributes one observation", () => {
+	it("an aborted stream is ONE call, not two events", () => {
+		// A real streaming anomaly writes `anomaly_detected` AND
+		// `stream_partial_delivery` under the same transferId. Counting events made
+		// a single aborted call report 1/2 — a call cannot be half-aborted.
+		const s = extractCircuitBreakerTrips([
+			{ kind: "anomaly_detected", data: { anomalyKind: "token_rate", transferId: "tx1" } },
+			{ kind: "stream_partial_delivery", data: { transferId: "tx1", error: "aborted" } },
+		]);
+		expect(s.total).toBe(1);
+		expect(s.hits).toBe(1);
+		expect(s.value).toBe(1);
+	});
+
+	it("clean failed streams are in the injection denominator", () => {
+		// `stream_partial_delivery` is emitted AFTER injection scanning, so a clean
+		// failed stream is a scanned call. Excluding it meant one detection among
+		// nine clean failures reported 1/1 instead of 1/10.
+		const events: EntropyEventInput[] = [
+			{ kind: "injection_detected", data: { patterns: ["x"], score: 1 } },
+			...Array.from({ length: 9 }, (_, i) => ({
+				kind: "stream_partial_delivery",
+				data: { transferId: `s${i}`, error: "boom" },
+			})),
+		];
+		const s = extractPatternMemoryHits(events);
+		expect(s.total).toBe(9);
+		expect(s.hits).toBe(1);
 	});
 });
