@@ -290,3 +290,92 @@ describe("verifyTransaction — terminal evidence and untrusted tails", () => {
 		}
 	});
 });
+
+describe("verifyTransaction — every hostile shape a valid-JSON record can take", () => {
+	/**
+	 * Three separate review findings were three CONSUMERS of one unchecked cast,
+	 * not three bugs: `kind.endsWith(...)`, the cumulative-spend walk over
+	 * `data.cost`, and `forDisplay` iterating `message`/`error`. Guarding each use
+	 * site would have been one guard per consumer and a fourth waiting to be
+	 * found. `normalizeEvent` makes the boundary honest instead.
+	 *
+	 * Each case here is valid JSON — the log is written by the party under audit,
+	 * so "it parsed" is the only thing that can be assumed about it.
+	 */
+	function vaultWith(dir: string, tail: Record<string, unknown>): string {
+		const auditDir = join(dir, "audit");
+		mkdirSync(auditDir, { recursive: true });
+		const target = {
+			kind: "llm_call",
+			actor: "local",
+			timestamp: "2026-08-12T00:00:00.000Z",
+			previousHash: "0".repeat(64),
+			sequence: 1,
+			hash: "a".repeat(64),
+			data: { model: "claude-haiku-4-5-20251001", cost: 5, settled: true, transferId: "tx_t" },
+		};
+		writeFileSync(
+			join(auditDir, "events.jsonl"),
+			`${JSON.stringify(target)}\n${JSON.stringify(tail)}\n`,
+			"utf-8",
+		);
+		return dir;
+	}
+
+	const hostile: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+		["data is null", { kind: "llm_call", data: null }],
+		["data is missing", { kind: "llm_call" }],
+		["data is an array", { kind: "llm_call", data: [1, 2, 3] }],
+		["kind is missing", { data: { transferId: "tx_t" } }],
+		["kind is a number", { kind: 42, data: { transferId: "tx_t" } }],
+		["cost is a string", { kind: "llm_call", data: { transferId: "tx_t", cost: "12" } }],
+		[
+			"message is an object",
+			{ kind: "anomaly_detected", data: { transferId: "tx_t", message: { a: 1 } } },
+		],
+		[
+			"error is a number",
+			{ kind: "stream_partial_delivery", data: { transferId: "tx_t", error: 7 } },
+		],
+		["the whole record is a scalar", {}],
+	];
+
+	for (const [label, tail] of hostile) {
+		it(`returns a verdict rather than throwing when ${label}`, () => {
+			const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-hostile-"));
+			try {
+				vaultWith(dir, tail);
+				expect(() => verifyTransaction(dir, "tx_t")).not.toThrow();
+				expect(verifyTransaction(dir, "tx_t").found).toBe(true);
+			} finally {
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+	}
+
+	it("a wrong-typed cost is ABSENT, not coerced into a plausible number", () => {
+		// Rendering `"12"` as a cost would be a different lie than crashing.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-coerce-"));
+		try {
+			const auditDir = join(dir, "audit");
+			mkdirSync(auditDir, { recursive: true });
+			writeFileSync(
+				join(auditDir, "events.jsonl"),
+				`${JSON.stringify({
+					kind: "llm_call",
+					actor: "local",
+					timestamp: "2026-08-12T00:00:00.000Z",
+					previousHash: "0".repeat(64),
+					sequence: 1,
+					hash: "b".repeat(64),
+					data: { transferId: "tx_c", cost: "999999", settled: true },
+				})}\n`,
+				"utf-8",
+			);
+			const out = verifyTransaction(dir, "tx_c").receipt;
+			expect(out).not.toContain("999999");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});

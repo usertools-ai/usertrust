@@ -602,6 +602,71 @@ export interface TransactionVerificationResult {
 }
 
 /**
+ * Coerce one parsed JSONL record into a GUARANTEED-shape `TransactionEvent`.
+ *
+ * `events.jsonl` is written by the party under audit, so `JSON.parse(...) as
+ * TransactionEvent` was a promise the data never made. Every consumer
+ * downstream then trusted it: `kind.endsWith(...)`, `data.transferId`,
+ * `data.cost`, and the renderer's `forDisplay` over `message`/`error` each
+ * dereference or iterate a value that a valid-JSON record can set to `null`, a
+ * number, or an object — turning a verification that should return a VERDICT
+ * into an uncaught throw.
+ *
+ * That mattered more after terminal ranking landed, because the old first-match
+ * lookup stopped AT the target and the ranking scan walks past it — so a
+ * malformed record appended to the tail could break verification of an EARLIER
+ * transaction. But guarding each use site is the wrong shape of fix: it is one
+ * guard per consumer, and the three found by review were three consumers, not
+ * three bugs. Normalizing once at the boundary makes the type honest instead,
+ * so nothing downstream needs to re-check.
+ *
+ * Wrong-typed values become absent rather than throwing or being coerced to a
+ * plausible-looking default: a `cost` of `"12"` is not a cost, and rendering it
+ * as one would be a different lie than crashing.
+ *
+ * Unknown keys are PRESERVED — this narrows the fields the verifier reads, and
+ * is not a schema that silently drops a field a future producer adds.
+ */
+function normalizeEvent(raw: unknown): TransactionEvent {
+	const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+	const num = (v: unknown): number | undefined =>
+		typeof v === "number" && Number.isFinite(v) ? v : undefined;
+
+	const o: Record<string, unknown> =
+		raw !== null && typeof raw === "object" && !Array.isArray(raw)
+			? (raw as Record<string, unknown>)
+			: {};
+	const d: Record<string, unknown> =
+		o.data !== null && typeof o.data === "object" && !Array.isArray(o.data)
+			? (o.data as Record<string, unknown>)
+			: {};
+
+	const model = str(d.model);
+	const cost = num(d.cost);
+	const error = str(d.error);
+	const message = str(d.message);
+
+	return {
+		id: str(o.id) ?? "",
+		timestamp: str(o.timestamp) ?? "",
+		previousHash: str(o.previousHash) ?? "",
+		kind: str(o.kind) ?? "",
+		actor: str(o.actor) ?? "",
+		data: {
+			...d,
+			...(model !== undefined ? { model } : { model: undefined }),
+			...(cost !== undefined ? { cost } : { cost: undefined }),
+			...(typeof d.settled === "boolean" ? { settled: d.settled } : { settled: undefined }),
+			...(error !== undefined ? { error } : { error: undefined }),
+			...(message !== undefined ? { message } : { message: undefined }),
+			transferId: str(d.transferId) ?? "",
+		} as TransactionEvent["data"],
+		sequence: num(o.sequence) ?? 0,
+		hash: str(o.hash) ?? "",
+	};
+}
+
+/**
  * Verify a single transaction and return a formatted receipt.
  *
  * Finds the event matching `txId` (by `data.transferId`) and verifies the
@@ -644,7 +709,7 @@ export function verifyTransaction(
 
 	for (let i = 0; i < lines.length; i++) {
 		try {
-			events.push(JSON.parse(lines[i] as string) as TransactionEvent);
+			events.push(normalizeEvent(JSON.parse(lines[i] as string)));
 		} catch {
 			parseErrors.push(`Event ${i + 1}: malformed JSON`);
 		}
@@ -676,9 +741,9 @@ export function verifyTransaction(
 	// reaches records after it. A later object with a null or missing `data` would
 	// otherwise throw on the dereference and take down verification of an EARLIER
 	// transaction: a tampered tail breaking historical `--tx` checks.
-	const hasTxId = (e: TransactionEvent): boolean =>
-		e !== null && typeof e === "object" && typeof e.data?.transferId === "string";
-	const matching = events.filter((e) => hasTxId(e) && e.data.transferId === txId);
+	// No per-use shape guard needed: `normalizeEvent` already guarantees `kind`
+	// is a string, `data` is an object, and `transferId` is a string.
+	const matching = events.filter((e) => e.data.transferId === txId);
 	const isFailureTerminal = (e: TransactionEvent): boolean =>
 		e.kind === "stream_partial_delivery" ||
 		e.kind === "llm_call_failed" ||
