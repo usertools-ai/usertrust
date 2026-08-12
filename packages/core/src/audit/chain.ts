@@ -505,20 +505,19 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 			// a symbol, NaN, Infinity). That is a caller bug — no retry writes it —
 			// so it is re-raised as AuditDataInvalidError rather than reaching a
 			// best-effort `.catch()` indistinguishable from a full disk.
-			let persisted: string;
+			let canonical: string;
 			let fullEvent: AuditEvent & { sequence: number };
 			try {
-				const canonical = canonicalize(event);
-				const hash = createHash("sha256").update(canonical).digest("hex");
-				fullEvent = { ...event, hash };
-				// HARDEN: persist the CANONICAL bytes, not JSON.stringify output. The
-				// hash pre-image is `canonicalize(event)`; the verifier recomputes
-				// `sha256(canonicalize(persisted − hash))`. For any value with a
-				// `toJSON` (e.g. Buffer) `JSON.stringify` diverges from `canonicalize`,
-				// which would make an untampered event verify as TAMPERED. canonicalize
-				// is idempotent over its own output, so the bytes hashed equal the bytes
-				// persisted and the verify pkg stays in lockstep (hash format unchanged).
-				persisted = canonicalize(fullEvent);
+				// ONE TRAVERSAL OF THE CALLER'S DATA — for the hash AND for the line.
+				// `event.data` is the caller's object, so every property access on it
+				// is a fresh read: canonicalizing it a SECOND time to produce the
+				// persisted bytes let a getter answer the hash with one value and the
+				// log with another. That signs one shape and stores another, and
+				// `JSON.parse(line)` cannot detect it — the line is internally
+				// consistent, it simply is not what was signed. The line is built from
+				// THESE bytes below, so there is no second traversal to disagree with.
+				canonical = canonicalize(event);
+				fullEvent = { ...event, hash: createHash("sha256").update(canonical).digest("hex") };
 			} catch (canonErr) {
 				throw new AuditDataInvalidError(
 					`${canonErr instanceof Error ? canonErr.message : String(canonErr)} (event ${event.id})`,
@@ -535,9 +534,21 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 			// (read.ts skips it, the next event's previousHash dangles, and the
 			// vault reads as tampered forever with the pre-image lost), so the
 			// cost of one JSON.parse before the fsync is not worth arguing about.
-			// Changes no hash: the check is on bytes `hash` already covers.
+			// Changes no hash: the check is on the bytes `hash` covers.
+			//
+			// The parse is LOAD-BEARING as well as defensive: what it returns is what
+			// the line is made of. HARDEN: the line is CANONICAL bytes, not
+			// JSON.stringify output — for any value with a `toJSON` (e.g. Buffer)
+			// JSON.stringify diverges from canonicalize, which would make an
+			// untampered event verify as TAMPERED. The verifier recomputes
+			// `sha256(canonicalize(line − hash))`, and canonicalize is idempotent over
+			// its own output, so re-canonicalizing the PARSED pre-image with `hash`
+			// reproduces `canonical` exactly, plus that one member in its sorted
+			// place. Parsed JSON is inert — no getters, no toJSON, nothing left to
+			// re-read — so those bytes cannot drift from the ones the hash covers.
+			let preImage: Record<string, unknown>;
 			try {
-				JSON.parse(persisted);
+				preImage = JSON.parse(canonical) as Record<string, unknown>;
 			} catch (parseErr) {
 				throw new AuditDataInvalidError(
 					`refusing to persist canonical bytes that do not parse as JSON (event ${event.id}): ${
@@ -546,6 +557,7 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 					input.kind,
 				);
 			}
+			const persisted = canonicalize({ ...preImage, hash });
 
 			const fd = openSync(logPath, "a");
 			try {

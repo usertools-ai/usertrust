@@ -38,7 +38,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { canonicalize } from "../../src/audit/canonical.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
 import { assertAuditRepresentable } from "../../src/audit/representable.js";
-import { trust } from "../../src/govern.js";
+import { type TrustEngine, trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import { AuditDataInvalidError, PolicyDeniedError } from "../../src/shared/errors.js";
@@ -78,6 +78,21 @@ function writeConfig(vaultBase: string, config: Record<string, unknown>): void {
 	const dir = join(vaultBase, VAULT_DIR);
 	mkdirSync(dir, { recursive: true });
 	writeFileSync(join(dir, "usertrust.config.json"), JSON.stringify(config));
+}
+
+/**
+ * A ledger engine that records what it was asked to do. Every other test here
+ * runs `dryRun`, which issues no VOID at all — this exists for the one case
+ * whose whole question is whether a hold was discharged.
+ */
+function makeRecordingEngine(): TrustEngine & { voidPendingSpend: ReturnType<typeof vi.fn> } {
+	return {
+		spendPending: vi.fn(async (p: { transferId: string }) => ({ transferId: p.transferId })),
+		postPendingSpend: vi.fn(async () => {}),
+		voidPendingSpend: vi.fn(async () => {}),
+		voidAllPending: vi.fn(async () => {}),
+		destroy: vi.fn(),
+	};
 }
 
 function makeAnthropicMock() {
@@ -664,6 +679,42 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 		expect(gov.budgetRemaining()).toBe(100_000 - receipt.cost);
 
 		await gov.destroy();
+	});
+
+	it("settle() does not restore a claimed hold into a governor the accessor DESTROYED", async () => {
+		// The one test here that needs a real (mock) engine rather than `dryRun`:
+		// what has to be observed is the VOID, and `dryRun` issues none.
+		const engine = makeRecordingEngine();
+		const gov = await createGovernor({ budget: 100_000, vaultBase, _engine: engine });
+		const auth = await gov.authorize({ model: "claude-sonnet-4-6", estimatedInputTokens: 1_000 });
+
+		let destroying: Promise<void> | undefined;
+		const liveParams = {
+			inputTokens: 10,
+			outputTokens: 5,
+			get chunksDelivered(): number {
+				// Synchronous teardown from inside the validation window, then a
+				// value the boundary must refuse — so the restore path runs with the
+				// governor already destroyed.
+				destroying ??= gov.destroy();
+				return Number.NaN;
+			},
+		};
+
+		await expect(gov.settle(auth, liveParams)).rejects.toBeInstanceOf(AuditDataInvalidError);
+		await destroying;
+
+		// `destroy()` sweeps `activeAuths`, and a CLAIMED hold is not in it — so
+		// the terminal holding the claim discharges it instead of handing it back.
+		// Pre-fix nothing voided this transfer: destroy's sweep had already passed
+		// and the catch reinserted the authorization behind it.
+		expect(engine.voidPendingSpend).toHaveBeenCalledWith(auth.transferId);
+
+		// And the hold is gone rather than resurrected: a later settle finds no
+		// authorization to run against the closed engine with.
+		await expect(gov.settle(auth, { inputTokens: 10, outputTokens: 5 })).rejects.toThrow(
+			/is not active/,
+		);
 	});
 
 	it("a settle that never was still refuses a dead authorization first (ordering unchanged)", async () => {

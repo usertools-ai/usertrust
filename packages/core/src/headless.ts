@@ -1429,7 +1429,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// writes nothing; restoring the SAME frozen capture leaves the
 			// authorization exactly as it was, so a refused settle still leaves the
 			// caller a live handle to correct the value and retry on. That retry is
-			// the load-bearing property of this guard and it is unchanged.
+			// the load-bearing property of this guard and it is unchanged — except
+			// where the caller code destroyed the governor, which leaves nothing to
+			// retry ON; see the catch.
 			//
 			// The four token counts are absent on purpose — `sanitizeUsage` below
 			// clamps them to finite integers before they can reach either the money
@@ -1464,6 +1466,33 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					"SettleParams.chunksDelivered": chunksDelivered,
 				});
 			} catch (err) {
+				if (destroyed) {
+					// The caller code we just ran tore the governor down. `destroy()`
+					// discharges what it finds in `activeAuths`, and a CLAIMED hold is
+					// by construction not in it — its sweep has already passed this
+					// transfer by. Putting the authorization back now resurrects it
+					// BEHIND that sweep: nothing will ever void its pending transfer,
+					// and the live handle the restore hands back can drive a later
+					// settle into a closed engine. So the claimed terminal finishes
+					// what destroy() could not see: the same best-effort VOID, against
+					// the same ids destroy() would have used, and the hold stays gone.
+					// (`destroyed` can only have flipped inside this try — there is no
+					// `await` between the claim and here.)
+					if (proxyConn != null && !isDryRun) {
+						try {
+							await proxyConn.void(capture.proxyTransferId ?? transferId);
+						} catch {
+							// Best-effort void
+						}
+					} else if (engine != null && !isDryRun) {
+						try {
+							await engine.voidPendingSpend(transferId);
+						} catch {
+							// Best-effort void
+						}
+					}
+					throw err;
+				}
 				// Put the hold back exactly as it was — same frozen capture, same key.
 				activeAuths.set(transferId, capture);
 				throw err;

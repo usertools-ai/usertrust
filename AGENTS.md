@@ -149,7 +149,10 @@ synchronously re-enter `settle()`/`abort()` on the same handle, and an unclaimed
 nested terminal take it and run past the delete, the release and the POST before the outer call
 resumes. `Map.delete` answering `false` is not a claim check if nobody reads it. So: claim the entry
 before the first caller read, and RESTORE it if the validation that follows refuses — a claim is
-reversible, a release is not.
+reversible, a release is not. **Unless that caller code destroyed the governor**: `destroy()`
+discharges what is in `activeAuths` and a claimed hold is not in it, so restoring one puts an
+authorization back BEHIND the sweep — never voided, and still settleable against a closed engine.
+The claimed terminal issues that VOID itself instead.
 *Prevents:* two terminals discharging one hold — the hold released twice (`inFlightHoldTotal`
 negative), the spend accounted twice, and a POST racing a VOID on the same pending transfer.
 
@@ -522,6 +525,13 @@ Estimates never model cache state.
 *Prevents:* for any value with a `toJSON` (e.g. `Buffer`), `JSON.stringify` diverges from
 `canonicalize` and an untampered event verifies as TAMPERED.
 
+**ONE traversal of the caller's data per event — the same bytes for the hash and for the line.**
+The line is built by re-canonicalizing the PARSED pre-image with `hash` added (parsed JSON is inert:
+no getters, no `toJSON`), never by traversing the caller's event a second time.
+*Prevents:* a getter that answers the second traversal differently makes the chain hash one value
+and persist another — and `JSON.parse(line)` cannot detect it, because the line is internally
+consistent and simply is not what was signed.
+
 **Canonicalization order is load-bearing.** Keys sorted alphabetically at every nesting level; an
 `undefined` **object value** stripped (the key is ABSENT, never `null` — absence is what the caller
 meant, and the `key-ABSENT` rules are built on it); `null` preserved; array order preserved;
@@ -665,9 +675,10 @@ inside `appendEvent`. **An ABSENCE TEST is a read as well**, the same rule one l
 third time this canonicalizer broke it: the object branch read `obj[key]` once to decide the key was
 present and again to serialize it, so a getter answering defined-then-`undefined` kept the key and
 wrote it as `{"k":null}` — an object value written as null, the one thing the key-ABSENT asymmetry
-forbids. Worse in general: the writer hashes `canonicalize(event)` and persists
-`canonicalize(fullEvent)`, two traversals of the same caller object, so a value that changes between
-them SIGNS ONE SHAPE AND STORES ANOTHER. Snapshot the property into a local before the test — in
+forbids. Worse in general: a value that changes between the hash pre-image and the persisted line
+SIGNS ONE SHAPE AND STORES ANOTHER — which is why the writer now takes ONE traversal for both (the
+Audit rule above), and why reading each property once is that same rule inside a traversal.
+Snapshot the property into a local before the test — in
 BOTH twins, byte-identically, and re-run the corpus gate, because it touches the hash function. And `abort()` hoisted `auth.estimatedCost` above the VOID on a path that never
 needed it, where a throwing getter stranded an attributed hold and a lying one resized the release
 (`budgetRemaining()` 150_000 against a configured budget of 100_000). Read the bound once into a

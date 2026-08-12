@@ -2498,6 +2498,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				cb.recordSuccess();
 
 				// g2. Failure mode 15.1: POST fails after LLM success
+				// D4 buffer, and NOT merely for event order (this path's `llm_call` is
+				// already written above): the shortfall append must not run inside the
+				// POST's own `try`. `isMustRecordAuditFailure` RETHROWS, and that throw
+				// landed in `catch (postErr)` — which reads any throw as "the POST
+				// failed". A caller value that makes only THIS record unrepresentable
+				// therefore relabelled a SUCCESSFUL post as ambiguous and then lost the
+				// must-record error in the ambiguous write's own `.catch`: settled
+				// false, no `auditDegraded`, nothing raised. Same shape as the stream
+				// terminal above and the headless twin.
+				let postShortfall: { posted: number; shortfall: number } | undefined;
 				if (engine != null && !isDryRun) {
 					try {
 						// Post the ACTUAL consumed cost (RECON #3), capped by the engine
@@ -2505,23 +2515,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						const postResult = await engine.postPendingSpend(transferId, actualCost);
 						if (postResult != null && postResult.shortfall > 0) {
 							postedCost = postResult.posted;
-							await audit
-								.appendEvent({
-									kind: "settlement_shortfall",
-									actor: "local",
-									data: {
-										model,
-										actual: actualCost,
-										posted: postResult.posted,
-										shortfall: postResult.shortfall,
-										transferId,
-										...costCenterAudit,
-									},
-								})
-								.catch((auditErr) => {
-									if (isMustRecordAuditFailure(auditErr)) throw auditErr;
-									callAuditDegraded = true;
-								});
+							postShortfall = { posted: postResult.posted, shortfall: postResult.shortfall };
 						}
 					} catch (postErr) {
 						// POST failed — LLM call succeeded but settlement is ambiguous
@@ -2544,6 +2538,31 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								callAuditDegraded = true;
 							});
 					}
+				}
+
+				// D4: the truncation correction, drained OUTSIDE the POST's catch (see
+				// the buffer above) and still advisory — a chain that cannot take it
+				// degrades the receipt and NEVER unwinds a settlement that already
+				// committed. Only a MUST-RECORD refusal escapes, and it escapes as
+				// itself.
+				if (postShortfall !== undefined) {
+					await audit
+						.appendEvent({
+							kind: "settlement_shortfall",
+							actor: "local",
+							data: {
+								model,
+								actual: actualCost,
+								posted: postShortfall.posted,
+								shortfall: postShortfall.shortfall,
+								transferId,
+								...costCenterAudit,
+							},
+						})
+						.catch((auditErr) => {
+							if (isMustRecordAuditFailure(auditErr)) throw auditErr;
+							callAuditDegraded = true;
+						});
 				}
 
 				// g3. Proxy settlement

@@ -28,7 +28,7 @@ import {
 	isMustRecordAuditFailure,
 	readAuditFailureKind,
 } from "../../src/audit/chain.js";
-import { trust } from "../../src/govern.js";
+import { type TrustEngine, trust } from "../../src/govern.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import { AuditDataInvalidError } from "../../src/shared/errors.js";
 
@@ -163,6 +163,47 @@ describe("HARDEN: AuditDataInvalidError is never swallowed by a caller", () => {
 		expect(events.filter((e) => e.kind === "tool_use")).toHaveLength(0);
 		// And the failure IS on the chain, so the refusal is not itself silent.
 		expect(events.filter((e) => e.kind === "tool_use_failed").length).toBeGreaterThan(0);
+
+		await governed.destroy();
+	});
+
+	it("a must-record shortfall failure is NOT relabelled as an ambiguous POST", async () => {
+		// The POST SUCCEEDS and reports a truncation; only the `settlement_shortfall`
+		// record is unrepresentable. Written inside the POST's own `try`, its
+		// rethrow landed in `catch (postErr)` — which reads any throw as "the POST
+		// failed", so a successful settlement was recorded as ambiguous and the
+		// must-record error died in the `.catch` of the ambiguous write.
+		const engine: TrustEngine = {
+			spendPending: vi.fn(async (p: { transferId: string }) => ({ transferId: p.transferId })),
+			postPendingSpend: vi.fn(async () => ({ posted: Number.NaN, shortfall: 6 })),
+			voidPendingSpend: vi.fn(async () => {}),
+			voidAllPending: vi.fn(async () => {}),
+			destroy: vi.fn(),
+		};
+		const governed = await trust(makeAnthropicMock(), {
+			budget: 100_000,
+			vaultBase: tmpVault,
+			_engine: engine,
+		});
+
+		await expect(
+			governed.messages.create({
+				model: "claude-sonnet-4-6",
+				max_tokens: 100,
+				messages: [{ role: "user", content: "hi" }],
+			}),
+		).rejects.toBeInstanceOf(AuditDataInvalidError);
+
+		const events = readEvents(tmpVault);
+		// The POST worked, so nothing may claim otherwise.
+		expect(events.filter((e) => e.kind === "settlement_ambiguous")).toHaveLength(0);
+		// The settlement itself is on the chain and untouched — this refusal is
+		// about the record of the GAP, and it never unwinds a committed spend.
+		expect(events.filter((e) => e.kind === "llm_call")).toHaveLength(1);
+		expect(events.filter((e) => e.kind === "settlement_shortfall")).toHaveLength(0);
+		// A2: the hold already claimed `settle`, so the outer catch issues no
+		// spurious VOID against an already-posted transfer.
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
 
 		await governed.destroy();
 	});

@@ -15,11 +15,12 @@
  *     value written as null, which is the exact asymmetry §13 and this
  *     canonicalizer's own comment forbid (`key-ABSENT (never null)`).
  *   - ONE VALUE, THEN ANOTHER. The general case, and the worse one: the writer
- *     HASHES one shape and PERSISTS another. `chain.ts` computes the hash over
- *     `canonicalize(event)` and then persists `canonicalize(fullEvent)` — two
- *     separate traversals of the same caller object — so a value that changes
- *     between them signs a document that does not say what was signed. That is
- *     the failure this whole module exists to prevent.
+ *     HASHES one shape and PERSISTS another. A value that changes between the
+ *     hash pre-image and the persisted line signs a document that does not say
+ *     what was signed. That is the failure this whole module exists to prevent,
+ *     and reading the property once closes it only WITHIN one traversal —
+ *     `chain.ts` used to run two of them over the same caller object, which the
+ *     last describe in this file pins at the writer.
  *
  * This is `a value you re-read is not the value you checked` — the invariant
  * this branch wrote into AGENTS.md and applied to every caller-owned handle in
@@ -33,9 +34,15 @@
  * which is worse than the defect.
  */
 
-import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { canonicalize as verifyCanonicalize } from "../../../verify/src/canonical.js";
 import { canonicalize as coreCanonicalize } from "../../src/audit/canonical.js";
+import { createAuditWriter } from "../../src/audit/chain.js";
+import { VAULT_DIR } from "../../src/shared/constants.js";
 
 const IMPLEMENTATIONS: ReadonlyArray<readonly [string, (value: unknown) => string]> = [
 	["core", coreCanonicalize],
@@ -128,6 +135,65 @@ describe.each(IMPLEMENTATIONS)(
 		});
 	},
 );
+
+/**
+ * ONE TRAVERSAL OF CALLER DATA PER EVENT — the same rule, one level up.
+ *
+ * Reading each property once makes a single traversal self-consistent; it
+ * cannot make TWO traversals agree. `chain.ts` hashed `canonicalize(event)` and
+ * then persisted `canonicalize(fullEvent)`, so a getter that answers a
+ * different value on the second traversal made the chain hash one value and
+ * store another — and `JSON.parse(line)` cannot detect it, because the line it
+ * parses is internally consistent and simply is not what was signed.
+ */
+describe("HARDEN: the writer canonicalizes the caller's event exactly ONCE", () => {
+	let root: string;
+	let writer: ReturnType<typeof createAuditWriter>;
+	let logPath: string;
+
+	beforeEach(() => {
+		root = mkdtempSync(join(tmpdir(), "harden-one-traversal-"));
+		writer = createAuditWriter(root);
+		logPath = join(root, VAULT_DIR, "audit", "events.jsonl");
+	});
+
+	afterEach(() => {
+		writer.release();
+		rmSync(root, { recursive: true, force: true });
+	});
+
+	it("hashes the value it persists when a data getter answers differently on each read", async () => {
+		await writer.appendEvent({ kind: "drift.test", actor: "sys", data: driftingValue() });
+		writer.release();
+
+		const line = readFileSync(logPath, "utf-8").trim();
+		const persisted = JSON.parse(line) as Record<string, unknown> & { hash: string };
+		const { hash: storedHash, ...preImage } = persisted;
+
+		// THE MEASUREMENT: the verifier's recomputation over the bytes on disk.
+		// Pre-fix the hash covered read #1 and the line carried read #2, so this
+		// event was unverifiable the instant it was written.
+		expect(createHash("sha256").update(coreCanonicalize(preImage)).digest("hex")).toBe(storedHash);
+		// And it is read #1 — the value that reached the hash — that is on disk.
+		expect((persisted.data as { k: number }).k).toBe(1);
+	});
+
+	it("still persists a CANONICAL line, byte-for-byte", async () => {
+		// The property the single-traversal form must not cost: the line is
+		// canonicalize's own output (never `JSON.stringify`, which diverges for
+		// any `toJSON`-bearing value), so the verifier recomputes the same bytes.
+		await writer.appendEvent({
+			kind: "canonical.test",
+			actor: "sys",
+			data: { z: 1, a: { n: [1, 2] }, blob: Buffer.from("hi") },
+		});
+		writer.release();
+
+		const line = readFileSync(logPath, "utf-8").trim();
+		expect(coreCanonicalize(JSON.parse(line))).toBe(line);
+		expect(line).not.toContain('"type":"Buffer"');
+	});
+});
 
 describe("the two canonicalizers answer these cases identically", () => {
 	it("core and verify agree byte-for-byte on a vanishing and a drifting value", () => {
