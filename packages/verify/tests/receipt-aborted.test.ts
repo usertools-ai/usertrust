@@ -545,3 +545,100 @@ describe("renderReceipt — a label describes its own event", () => {
 		}
 	});
 });
+
+describe("verifyTransaction — an appended tail cannot rewrite a settled verdict", () => {
+	function build(dir: string, recs: Array<Record<string, unknown>>): void {
+		const auditDir = join(dir, "audit");
+		mkdirSync(auditDir, { recursive: true });
+		writeFileSync(
+			join(auditDir, "events.jsonl"),
+			`${recs
+				.map((r, i) =>
+					JSON.stringify({
+						actor: "local",
+						timestamp: `2026-08-12T00:00:0${i}.000Z`,
+						previousHash: "0".repeat(64),
+						sequence: i + 1,
+						hash: String.fromCharCode(106 + i).repeat(64),
+						...r,
+					}),
+				)
+				.join("\n")}\n`,
+			"utf-8",
+		);
+	}
+
+	it("a later settled:true cannot override an earlier FAILURE", () => {
+		// The forgery this closes: the audited party owns `events.jsonl`, so it can
+		// append a hash-valid `settled: true` reusing a transferId AFTER an anchored
+		// failure. Ranking settlement above failure across the whole history made
+		// the receipt read SETTLED without touching the anchored prefix — so
+		// anchoring would not have caught it either. `finalizeOnce` makes
+		// first-terminal-wins a producer invariant; the verifier must honour it.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-forge-"));
+		try {
+			build(dir, [
+				{ kind: "llm_call_failed", data: { transferId: "tx_f", error: "provider 500" } },
+				{ kind: "llm_call", data: { transferId: "tx_f", cost: 999, settled: true } },
+			]);
+			const out = verifyTransaction(dir, "tx_f").receipt;
+			expect(out).toContain("FAILED");
+			expect(out).not.toContain("SETTLED");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a later settled:true cannot override an earlier DENIAL", () => {
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-forge2-"));
+		try {
+			build(dir, [
+				{ kind: "policy_denied", data: { transferId: "tx_d", decision: "deny", error: "refused" } },
+				{ kind: "llm_call", data: { transferId: "tx_d", cost: 999, settled: true } },
+			]);
+			const out = verifyTransaction(dir, "tx_d").receipt;
+			expect(out).toContain("DENIED");
+			expect(out).not.toContain("SETTLED");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("an anomaly appended AFTER the terminal does not decorate the receipt", () => {
+		// The receipt's inclusion proof covers the terminal, not an appended tail
+		// record — so showing that record's text under a verified heading presents
+		// forged evidence as proven. The producer writes detections BEFORE the
+		// terminal they explain, so anything after one is not evidence about it.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-decorate-"));
+		try {
+			build(dir, [
+				{ kind: "llm_call", data: { transferId: "tx_x", cost: 5, settled: true } },
+				{ kind: "anomaly_detected", data: { transferId: "tx_x", message: "FORGED anomaly text" } },
+			]);
+			const out = verifyTransaction(dir, "tx_x").receipt;
+			expect(out).toContain("SETTLED");
+			expect(out).not.toContain("FORGED anomaly text");
+			expect(out).not.toContain("Anomaly flagged:");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a detection PRECEDING its terminal is still surfaced", () => {
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-keep-"));
+		try {
+			build(dir, [
+				{ kind: "anomaly_detected", data: { transferId: "tx_k", message: "rate exceeded" } },
+				{
+					kind: "stream_partial_delivery",
+					data: { transferId: "tx_k", error: "Request was aborted" },
+				},
+			]);
+			const out = verifyTransaction(dir, "tx_k").receipt;
+			expect(out).toContain("Anomaly flagged:");
+			expect(out).toContain("rate exceeded");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});

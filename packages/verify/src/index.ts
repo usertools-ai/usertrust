@@ -806,10 +806,31 @@ export function verifyTransaction(
 		e.kind === "stream_partial_delivery" ||
 		e.kind === "llm_call_failed" ||
 		e.kind.endsWith("_failed");
-	const targetEvent =
-		matching.find((e) => e.data.settled !== undefined) ??
-		matching.find(isFailureTerminal) ??
-		matching[0];
+	// A DENIAL is conclusive too. It was missing from this predicate, so a later
+	// appended `settled: true` could still override an earlier `policy_denied` or
+	// `ledger_rejected` — the same forgery, one kind along. A refused call moved no
+	// money and will never settle, which is exactly what "terminal" means here.
+	const isDenialTerminal = (e: TransactionEvent): boolean =>
+		e.kind === "policy_denied" || e.kind === "ledger_rejected";
+	const isTerminal = (e: TransactionEvent): boolean =>
+		e.data.settled !== undefined || isFailureTerminal(e) || isDenialTerminal(e);
+
+	// FIRST TERMINAL IN CHAIN ORDER WINS. Not the best-TYPED terminal anywhere in
+	// the log — that was a forgery vector, and it was mine.
+	//
+	// Ranking settlement above failure across the WHOLE history let a LATER record
+	// override an EARLIER one. The audited party owns `events.jsonl`, so it could
+	// append a hash-valid `settled: true` reusing a transferId after an anchored
+	// FAILURE or DENIAL, and the receipt would read SETTLED — without altering the
+	// anchored prefix, so anchoring would not catch it either. `finalizeOnce`
+	// makes first-terminal-wins a producer invariant (AGENTS.md); a verifier that
+	// ranks by type instead of by order does not merely miss a forgery, it
+	// performs one.
+	//
+	// A DETECTION is still outranked, which is the whole point of scanning past
+	// the first match: `anomaly_detected` precedes its terminal by construction
+	// and is not conclusive on its own.
+	const targetEvent = matching.find(isTerminal) ?? matching[0];
 
 	if (targetEvent === undefined) {
 		return {
@@ -931,9 +952,18 @@ export function verifyTransaction(
 	// above the detection is right for status and wrong for reason: a successful
 	// anomaly cutoff selects `stream_partial_delivery`, whose `error` is the SDK's
 	// generic "Request was aborted" rather than what the detector observed.
-	const detection = matching.find((e) => e.kind === "anomaly_detected");
-	const detectionReason =
-		detection !== undefined && detection !== targetEvent ? detection.data.message : undefined;
+	// ONLY a detection that PRECEDES the selected terminal. The producer writes
+	// `anomaly_detected` before the terminal it explains, so anything after one is
+	// not evidence about it — and searching the whole history let an appended,
+	// UNANCHORED detection decorate a receipt whose inclusion proof covers only
+	// the terminal. That renders forged text under an INCLUSION VERIFIED heading,
+	// which is worse than showing nothing: the proof is real and the reader has no
+	// way to see that it does not cover the line beside it.
+	const targetIndex = matching.indexOf(targetEvent);
+	const detection = matching
+		.slice(0, targetIndex < 0 ? matching.length : targetIndex)
+		.find((e) => e.kind === "anomaly_detected");
+	const detectionReason = detection !== undefined ? detection.data.message : undefined;
 
 	const receiptData: ReceiptData = {
 		event: targetEvent,
