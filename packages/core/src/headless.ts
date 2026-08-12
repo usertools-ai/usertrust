@@ -510,7 +510,22 @@ async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promi
 		const handle = await open(tmpPath, "w");
 		try {
 			await handle.writeFile(JSON.stringify(data), "utf-8");
-			await handle.sync();
+			// FSYNC FAILURE IS NOT WRITE FAILURE. `sync()` is unsupported on some
+			// filesystems (EINVAL/ENOTSUP) and can fail transiently on others, and
+			// letting it escape sent the whole write into the outer catch — which
+			// unlinks the staging file and returns as if the spend had persisted.
+			// On a platform without fsync that silently discarded EVERY ledger
+			// write, and a first write discarded that way leaves NO ledger at all,
+			// which the loader correctly reads as zero and re-grants the whole
+			// budget. A durable-but-unsynced ledger is strictly better than none:
+			// degrade, record it, and still rename.
+			try {
+				await handle.sync();
+			} catch (syncErr) {
+				process.stderr.write(
+					`[usertrust] spend ledger not fsynced (${syncErr instanceof Error ? syncErr.message : String(syncErr)}) — the record is written but a power loss may lose it\n`,
+				);
+			}
 		} finally {
 			await handle.close();
 		}
@@ -529,9 +544,16 @@ async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promi
 		} catch {
 			// Platform does not support directory fsync — the rename still landed.
 		}
-	} catch {
-		// Best-effort — do not fail the LLM call over ledger persistence. Clean up
-		// our unique staging file if the rename never happened.
+	} catch (err) {
+		// Still best-effort — a settled call must not fail over ledger persistence,
+		// because the money has already moved. But SILENT is the part that was
+		// wrong: cleaning up and returning made a lost cumulative-spend write
+		// indistinguishable from a successful one, and the loss is invisible until
+		// the next startup seeds a budget that is too large. The operator gets a
+		// line on stderr, matching how audit degradation is already surfaced.
+		process.stderr.write(
+			`[usertrust] spend ledger write FAILED (${err instanceof Error ? err.message : String(err)}) — cumulative spend ${budgetSpent} was not persisted; the next start may under-count prior spend\n`,
+		);
 		await unlink(tmpPath).catch(() => {});
 	}
 }
