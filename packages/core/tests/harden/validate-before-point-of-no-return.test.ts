@@ -31,7 +31,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -41,7 +41,7 @@ import { assertAuditRepresentable } from "../../src/audit/representable.js";
 import { trust } from "../../src/govern.js";
 import { createGovernor } from "../../src/headless.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
-import { AuditDataInvalidError } from "../../src/shared/errors.js";
+import { AuditDataInvalidError, PolicyDeniedError } from "../../src/shared/errors.js";
 import type { TrustReceipt } from "../../src/shared/types.js";
 
 vi.mock("tigerbeetle-node", () => ({
@@ -66,6 +66,18 @@ function readEvents(vaultBase: string): Record<string, unknown>[] {
 		.split("\n")
 		.filter((l) => l.length > 0)
 		.map((l) => JSON.parse(l) as Record<string, unknown>);
+}
+
+/**
+ * Write a config file the governor will load from `vaultBase`. Only the actor
+ * tests need one: `unknownModelPolicy` is config-only (it is not a
+ * `GovernorOpts` field), and a governance DENIAL inside `authorize()` is the
+ * only place the caller's `actor` reaches the chain from this entry point.
+ */
+function writeConfig(vaultBase: string, config: Record<string, unknown>): void {
+	const dir = join(vaultBase, VAULT_DIR);
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(join(dir, "usertrust.config.json"), JSON.stringify(config));
 }
 
 function makeAnthropicMock() {
@@ -802,6 +814,137 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 		const failures = readEvents(vaultBase).filter((e) => e.kind === "llm_call_failed");
 		expect(failures).toHaveLength(1);
 		expect((failures[0] as { data: Record<string, unknown> }).data.model).toBe("llama3");
+
+		await gov.destroy();
+	});
+
+	// ── headless authorize(): the SECOND caller-supplied audit-bound value ──
+	//
+	// `actor` is the other one, and it is worse than `model`, because the event
+	// it poisons is the DENIAL record. `params.actor ?? "local"` is captured
+	// beside `model` and handed to `appendDenialEvent` as the event's `actor`
+	// field on every denial boundary in `authorize()`. `appendDenialEvent`
+	// deliberately swallows an append rejection and converts it to
+	// `auditDegraded` on the thrown error — correct for a transient writer fault,
+	// and catastrophic for a value that can NEVER be written: pre-fix, a symbol
+	// `actor` gave the caller a correct `PolicyDeniedError` with ZERO
+	// `policy_denied` events on the chain. The audited party could erase the
+	// record of their own violation, on demand, by choosing their own name.
+	//
+	// Same helper, same capture boundary, one line above where `model` is
+	// checked — so it is fixed here rather than ledgered.
+
+	it("authorize() refuses an unrecordable actor at CAPTURE — before the hold exists", async () => {
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+			endpoint: { class: "local" },
+		});
+		const budgetBefore = gov.budgetRemaining();
+
+		const err = await gov
+			.authorize({
+				model: "llama3",
+				actor: Symbol("anonymous") as unknown as string,
+				estimatedInputTokens: 1_000,
+			})
+			.then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+		// 1. It throws, naming the caller's own field — not our local.
+		expect(err).toBeInstanceOf(AuditDataInvalidError);
+		expect((err as Error).message).toContain("AuthorizeParams.actor");
+		expect((err as AuditDataInvalidError).eventKind).toBe("llm_call");
+
+		// 2. Nothing was reserved and nothing was written.
+		expect(gov.budgetRemaining()).toBe(budgetBefore);
+		expect(readEvents(vaultBase)).toHaveLength(0);
+
+		// 3. The whole unrecordable set is refused, not just symbols — and the
+		//    default is untouched: an OMITTED actor is still "local".
+		for (const bad of [() => "sneaky", Number.NaN, { nested: { deep: Number.NaN } }]) {
+			await expect(
+				gov.authorize({ model: "llama3", actor: bad as unknown as string }),
+			).rejects.toBeInstanceOf(AuditDataInvalidError);
+		}
+		expect(gov.budgetRemaining()).toBe(budgetBefore);
+
+		// 4. The governor is clean — a corrected actor authorizes and settles.
+		const auth = await gov.authorize({
+			model: "llama3",
+			actor: "ci-bot",
+			estimatedInputTokens: 1_000,
+		});
+		const receipt = await gov.settle(auth, { inputTokens: 10, outputTokens: 5 });
+		expect(receipt.settled).toBe(true);
+		expect(gov.budgetRemaining()).toBe(100_000 - receipt.cost);
+
+		await gov.destroy();
+	});
+
+	it("a caller can no longer take a PolicyDeniedError while erasing the policy_denied event", async () => {
+		// THE DEFECT, on the path that makes it matter. `unknownModelPolicy:
+		// "deny"` produces a real governance denial inside `authorize()`, whose
+		// `policy_denied` event carries the caller's own `actor`. Pre-fix this
+		// call rejected with a correct `PolicyDeniedError` and left NOTHING on the
+		// chain: the append threw on the unrecordable actor, `appendDenialEvent`
+		// caught it, and the caller walked away un-recorded.
+		writeConfig(vaultBase, { budget: 1_000_000, unknownModelPolicy: "deny" });
+		const gov = await createGovernor({ dryRun: true, vaultBase });
+
+		const err = await gov
+			.authorize({
+				model: "nowhere-model-9000",
+				actor: Symbol("nobody") as unknown as string,
+				messages: [{ role: "user", content: "hello" }],
+			})
+			.then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+		// The refusal is the ENTRY guard, not the denial — so the caller never
+		// reaches a state where a denial of theirs exists and its record does not.
+		expect(err).toBeInstanceOf(AuditDataInvalidError);
+		expect(err).not.toBeInstanceOf(PolicyDeniedError);
+		expect((err as Error).message).toContain("AuthorizeParams.actor");
+		expect(readEvents(vaultBase)).toHaveLength(0);
+
+		await gov.destroy();
+	});
+
+	it("the actor guard does not cost the denial record it exists to protect", async () => {
+		// The other half, and the reason the guard is at CAPTURE rather than
+		// bolted onto `appendDenialEvent`: a recordable actor must still get its
+		// denial written, with the caller's own name on it.
+		writeConfig(vaultBase, { budget: 1_000_000, unknownModelPolicy: "deny" });
+		const gov = await createGovernor({ dryRun: true, vaultBase });
+
+		await expect(
+			gov.authorize({
+				model: "nowhere-model-9000",
+				actor: "ci-bot",
+				messages: [{ role: "user", content: "hello" }],
+			}),
+		).rejects.toBeInstanceOf(PolicyDeniedError);
+
+		const denials = readEvents(vaultBase).filter((e) => e.kind === "policy_denied");
+		expect(denials).toHaveLength(1);
+		expect(denials[0]?.actor).toBe("ci-bot");
+		expect((denials[0] as { data: Record<string, unknown> }).data.denialClass).toBe(
+			"unknown_model",
+		);
+
+		// And the default path is unchanged: no actor supplied → "local".
+		await expect(
+			gov.authorize({ model: "nowhere-model-9001", messages: [{ role: "user", content: "hi" }] }),
+		).rejects.toBeInstanceOf(PolicyDeniedError);
+		const both = readEvents(vaultBase).filter((e) => e.kind === "policy_denied");
+		expect(both).toHaveLength(2);
+		expect(both[1]?.actor).toBe("local");
 
 		await gov.destroy();
 	});

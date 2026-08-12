@@ -869,8 +869,33 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// terminals cannot be handed one that they could not write.
 			// `transferId` and `proxyTransferId` are ours, `createdAt` is a clock
 			// read, and `estimatedCost` is computed — `model` is the only
-			// caller-supplied value on the handle that reaches the chain.
-			assertAuditRepresentable("llm_call", { "AuthorizeParams.model": model });
+			// caller-supplied value on the HANDLE that reaches the chain.
+			//
+			// `actor` is the other caller-supplied audit-bound value here, and it
+			// is checked on the same line for a different reason: it never rides
+			// the handle, it rides the DENIAL. Every denial boundary below hands it
+			// to `appendDenialEvent` as the `actor` FIELD of the `policy_denied` /
+			// `ledger_rejected` event — and that helper deliberately swallows an
+			// append rejection into `auditDegraded` on the error it rethrows, which
+			// is right for a transient writer fault and catastrophic for a value
+			// that can never be written. Measured pre-fix: `authorize({ actor:
+			// Symbol() })` on a denying policy returned the caller a correct
+			// `PolicyDeniedError` with ZERO `policy_denied` events on the chain. The
+			// audited party could erase the record of their own violation by
+			// choosing their own name — against the one party the chain exists to
+			// hold them accountable to.
+			//
+			// It is checked HERE, not at the append, for the reason the whole
+			// section is about: at the append the denial has already happened, and
+			// the only choices left are a lost record or a swallowed throw. At
+			// capture the caller is simply refused, before any denial exists to
+			// lose. And it is this helper, with the field key spelled the caller's
+			// way, because a second checker beside `assertAuditRepresentable` is a
+			// copy of the canonicalizer's rule and a copy drifts.
+			assertAuditRepresentable("llm_call", {
+				"AuthorizeParams.model": model,
+				"AuthorizeParams.actor": actor,
+			});
 
 			// Per-invocation denial evidence, filled by the throw sites and read by
 			// the boundaries below. A closure local, never an error property — see

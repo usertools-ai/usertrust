@@ -571,8 +571,14 @@ copy, and a copy drifts. It is not a write-ahead: nothing is appended, nothing i
 **an audit event must never precede the fact it attests**, so the ordering fix is always "validate
 earlier", never "record earlier". Wired at `headless.settle()` (before `activeAuths.delete`, so a
 refused settle leaves the authorization live and the caller can correct the value and retry on the
-same handle) and at `governAction()` (beside the existing `action.cost` check, so a bad `params`
-cannot make the action run and *then* be unrecordable). *Prevents:* `settle(auth, {
+same handle), at `governAction()` (beside the existing `action.cost` check, so a bad `params`
+cannot make the action run and *then* be unrecordable), and at `headless.authorize()` (`model` and
+`actor`, before the hold — see the CAPTURE rule below). **Wire EVERY entry point onto the audit
+path, not the one the defect was found on.** A boundary that guards one sibling and not the other
+is worse than an unguarded surface: the fence makes the next reader infer the gate beside it is
+also shut, so the unguarded call gets *harder* to find precisely because the codebase now looks
+defended. `authorize()`'s `actor` was that sibling, and it shipped guarded in the same PR as the
+`governAction()` fix for exactly this reason. *Prevents:* `settle(auth, {
 chunksDelivered: NaN })` — the authorization deleted, `postPendingSpend` committed, and only then
 `appendEvent` throwing: a failed settlement for money that had already moved, unretryable.
 *The writer's refusal stays the backstop* — the boundary does not replace it, and the two are
@@ -626,11 +632,20 @@ irreversible", and that is right up to the point where a terminal's whole job is
 reservation. `headless.abort()` voids a pending hold and gives the caller their money back; a
 refusal there — `assertAuditRepresentable` throwing ahead of the VOID — trades a lost audit line
 for a **stranded hold**, at callers that swallow, forever. The exchange is not worth making, so the
-guard moves UPSTREAM to the moment the value entered: `authorize()` validates `model` before the
-circuit breaker, before rate resolution, before the budget mutex and before the hold, where nothing
-is reserved yet and a refusal costs the caller only a corrected call. `abort()` is then unable to
+guard moves UPSTREAM to the moment the value entered: `authorize()` validates **both** of its
+caller-supplied audit-bound values — `model` and `actor` — before the circuit breaker, before rate
+resolution, before the budget mutex and before the hold, where nothing is reserved yet and a refusal
+costs the caller only a corrected call. `abort()` is then unable to
 meet an unrecordable value rather than defended against one, and the property is asserted where it
-belongs — an `Authorization` that EXISTS carries a recordable `model` by construction. Two
+belongs — an `Authorization` that EXISTS carries a recordable `model` by construction. `actor` is
+the same rule applied to a worse blast radius, and it is why the pair are checked on one line:
+`actor` never rides the handle, it rides the DENIAL — it is the `actor` field of every
+`policy_denied`/`ledger_rejected` event `authorize()` writes, and `appendDenialEvent` converts an
+append rejection into `auditDegraded` on the error it rethrows. So an unrecordable one returned the
+caller a correct `PolicyDeniedError` with **zero** events on the chain: the audited party erasing
+the record of their own violation by choosing their own name. Checking it at the append is not an
+option — by then the denial has happened and the only choices left are a lost record or a swallowed
+throw. Two
 corollaries: this ordering is never satisfied by recording earlier (**an audit event must not
 precede the fact it attests**), and a discharge path still gets the *read-once* treatment above —
 snapshots throw nothing and skip nothing, so `abort()` takes them while remaining unguarded, and a
