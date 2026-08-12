@@ -60,8 +60,13 @@ describe("usertrust health", () => {
 		expect(combined).toContain("Budget utilization");
 		expect(combined).toContain("Chain integrity");
 		expect(combined).toContain("PII detections");
-		expect(combined).toContain("Circuit breaker trips");
-		expect(combined).toContain("Pattern memory hits");
+		// RENAMED to what they measure. "Circuit breaker trips" counted no breaker
+		// transition — no producer emits one — and reported an anomaly abort as a
+		// trip; "Pattern memory hits" reported injection detections even with
+		// pattern memory disabled. Both lines now take their caption from
+		// `signal.label`, so a future rewiring cannot leave the name behind.
+		expect(combined).toContain("Anomaly aborts");
+		expect(combined).toContain("Injection pattern matches");
 	});
 
 	it("shows healthy status for empty vault", async () => {

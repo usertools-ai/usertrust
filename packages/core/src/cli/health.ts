@@ -233,8 +233,6 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		data: e.data,
 	}));
 
-	const report = computeEntropyScore(entropyEvents);
-
 	// Verify chain integrity directly
 	const logPath = join(vaultPath, "audit", "events.jsonl");
 	const verification = verifyChain(logPath);
@@ -251,6 +249,20 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		}
 	}
 	const budgetPct = config.budget > 0 ? ((spent / config.budget) * 100).toFixed(1) : "0.0";
+
+	// BOTH facts are computed above and BOTH are passed in. Neither can be derived
+	// from the event stream: no producer writes a budget total, and chain validity
+	// is a property of the log rather than of any event in it. Until this call
+	// carried them, those two signals abstained — so a tampered log or an
+	// exhausted budget still left the headline level reading "healthy", which is
+	// the exact failure the signal rewiring exists to remove.
+	//
+	// This is also why the ORDER changed: verification and spend used to be
+	// computed AFTER the score that needed them.
+	const report = computeEntropyScore(entropyEvents, {
+		budget: { total: config.budget, spent },
+		chain: { valid: verification.valid, errors: verification.errors },
+	});
 
 	// Signal values
 	const policySignal = report.signals.find((s) => s.condition === "policy_violations");
@@ -288,8 +300,14 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 						budgetUtilization: Number.parseFloat(budgetPct),
 						chainIntegrity: verification.valid,
 						piiDetections: piiHits,
-						circuitBreakerTrips: cbHits,
-						patternMemoryHits: pmHits,
+						// RENAMED to what they measure. `circuitBreakerTrips` counted no
+						// breaker transition — no producer emits one — and reported an
+						// anomaly abort as a trip; `patternMemoryHits` reported injection
+						// detections even with pattern memory disabled. Both previously
+						// always read 0, so nothing could depend on their values; a key
+						// that names the wrong thing is worse than one that moved.
+						anomalyAborts: cbHits,
+						injectionMatches: pmHits,
 					},
 				},
 			}),
@@ -367,11 +385,15 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	const piiStatus = coloredTag(piiSignal?.value ?? 0, piiHits);
 	console.log(`  PII detections (30d):    ${piiHits}   ${piiStatus}`);
 
-	// Signal 5: Circuit breaker trips
+	// Signals 5 and 6 take their label FROM THE SIGNAL rather than repeating it
+	// here. The two had drifted: the extractors were rewired to count anomaly
+	// aborts and injection matches while these lines still said "Circuit breaker
+	// trips" and "Pattern memory hits", so the display named one thing and
+	// measured another. Reading `signal.label` means a future rewiring cannot
+	// leave the caption behind.
 	const cbStatus = coloredTag(cbSignal?.value ?? 0, cbHits);
-	console.log(`  Circuit breaker trips:   ${cbHits}   ${cbStatus}`);
+	console.log(`  ${(cbSignal?.label ?? "Anomaly aborts").padEnd(24)} ${cbHits}   ${cbStatus}`);
 
-	// Signal 6: Pattern memory hits
 	const pmStatus = coloredTag(pmSignal?.value ?? 0, pmHits);
-	console.log(`  Pattern memory hits:     ${pmHits}   ${pmStatus}`);
+	console.log(`  ${(pmSignal?.label ?? "Injection matches").padEnd(24)} ${pmHits}   ${pmStatus}`);
 }

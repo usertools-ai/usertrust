@@ -204,8 +204,8 @@ describe("CLI --json flag", () => {
 						budgetUtilization: number;
 						chainIntegrity: boolean;
 						piiDetections: number;
-						circuitBreakerTrips: number;
-						patternMemoryHits: number;
+						anomalyAborts: number;
+						injectionMatches: number;
 					};
 				};
 			};
