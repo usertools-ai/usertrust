@@ -69,7 +69,13 @@ import {
 } from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
-import { derivePolicyHint, evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
+import {
+	derivePolicyHint,
+	evaluatePolicy,
+	type GateRule,
+	loadPolicies,
+	sanitizePolicyContext,
+} from "./policy/gate.js";
 import { detectInjection } from "./policy/injection.js";
 import { detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
@@ -1054,7 +1060,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 	const audit: AuditWriter = (isTestEnv ? opts?._audit : undefined) ?? createAuditWriter(vaultPath);
 
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
-	const loadedRules = existsSync(policiesPath) ? loadPolicies(policiesPath) : [];
+	// No `existsSync` preflight: it answers false for a file inside a directory
+	// it cannot traverse, which would report an unreadable policy as an absent
+	// one — silently replacing custom rules with the built-in defaults.
+	// `loadPolicies` distinguishes ENOENT (legitimately absent) from every other
+	// read failure (refused), so it must be called unconditionally.
+	const loadedRules = loadPolicies(policiesPath);
 	// P1-CUSTOM-POLICY-REPLACES (RECON #2): platform DEFAULT_RULES are ALWAYS
 	// enforced. mergePolicies is a safe concat — a custom policy file can only ADD
 	// deny/warn rules, never remove the budget/overshoot/exhausted guarantees. The
@@ -1426,7 +1437,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
 							: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
 					const policyResult = evaluatePolicy(policyRules, {
-						...params,
+						// Host-owned PolicyContext fields are stripped BEFORE the spread, not
+						// re-asserted after it. The explicit assignments below still say what
+						// each trusted field is — but a field someone forgets to re-assert is
+						// now simply ABSENT rather than caller-chosen, which is the fail-closed
+						// answer. See HOST_CONTROLLED_POLICY_FIELDS for why the hand-maintained
+						// list needed a mechanism behind it.
+						...sanitizePolicyContext(params),
 						model,
 						tier: config.tier,
 						estimated_cost: estimatedCost,
@@ -2851,7 +2868,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
 							: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
 					const policyResult = evaluatePolicy(policyRules, {
-						...(action.params ?? {}),
+						// Stripped before the spread — see the LLM path above.
+						...sanitizePolicyContext(action.params),
 						action_kind: action.kind,
 						action_name: action.name,
 						estimated_cost: action.cost,

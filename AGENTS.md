@@ -684,11 +684,50 @@ escape hatch. User policy can only *add* rules.
 before the ledger's `debits_must_not_exceed_credits` ever engages.
 
 **Hard rules fail closed; soft rules stay lenient.** An indeterminate condition (missing or
-mistyped guarded field) is treated as *satisfied* for a hard rule, so the guard still fires.
+mistyped guarded field) is treated as *satisfied* for a hard rule, so the guard still fires. This
+holds for **every** value operator. It previously held for only `gt`/`gte`/`lt`/`lte`: `eq`, `in`,
+`contains` and `regex` returned a bare `false` on input they could not read, which `ruleMatches`
+reads as "did not match" rather than "could not evaluate". `exists`/`not_exists` are the deliberate
+exception: an unresolved field is what they measure, so for them absence is a determinate answer. An
+unknown operator is refused at load, and is indeterminate at runtime for a rule built in code.
+`undefined` means the path did not resolve and is unanswerable; an explicit `null` is a value the
+document carries and compares determinately.
 
-**Trusted policy-context fields are re-asserted AFTER the request-body spread.** Every
-`evaluatePolicy` call site builds context as `{ ...callerParams, ...trustedFields }`. The spread
-exists *precisely so* trusted fields can be re-asserted after it.
+**A policy file that cannot be honoured is refused, never silently emptied.** `loadPolicies` throws
+`PolicyLoadError`; `validatePolicyFile` reports every problem in one pass. It is all-or-nothing —
+one bad rule loads none of them, because loading the survivors would enforce a policy nobody wrote.
+An **absent** file stays legal (no policy is a valid deployment); a present-but-unreadable one does
+not, and the two are told apart by ENOENT rather than by an `existsSync` preflight, which answers
+false for a file inside a directory it cannot traverse. An explicit `null` document is refused —
+only a genuinely blank file is an empty policy. The document ROOT is strict as well as each rule and
+each condition, so a key placed outside the thing it was meant to apply to is refused rather than
+dropped, and an operand that could never match — a non-finite number for any operator, a map or list
+for an identity comparison — is refused rather than accepted as a rule that cannot enforce.
+*Prevents:* the pre-fix behaviour, where unparseable or unrecognised input resolved to an empty rule
+set with no throw and no log.
+
+**Host-owned policy-context fields are STRIPPED BEFORE the request-body spread.** Every
+`evaluatePolicy` call site builds context as `{ ...sanitizePolicyContext(callerParams),
+...trustedFields }`. The explicit assignments after the spread still say what each trusted field is,
+but they are no longer what makes it safe: a field someone forgets to re-assert is now simply
+**absent** rather than caller-chosen, and absent is the fail-closed answer.
+
+`HOST_CONTROLLED_POLICY_FIELDS` in `policy/gate.ts` is the stripped set.
+`CALLER_SUPPLIED_POLICY_FIELDS` is the deliberate complement, and
+`tests/harden/policy-context-fields.test.ts` reads the `PolicyContext` interface out of the source
+and requires every declared field to appear in exactly one of the two — so a newly added field
+cannot be left unclassified. *Why a mechanism and not one more literal:* the hand-maintained list
+had already been found incomplete once (`timestamp`, PR #95).
+
+**`scope` is deliberately NOT stripped, and this is not an oversight.** For `timestamp`, absence is
+the SAFE state — the gate falls back to the real clock. For `scope`, absence is the PERMISSIVE
+state: `ruleMatches` requires a non-empty `context.scope` for any rule carrying `scopePatterns`, and
+**nothing in `src/` populates it**. Stripping it would not close a hole; it would make every
+`scopePatterns` rule permanently inert. The two fields look like the same kind and are opposites.
+The live issue there is docs-vs-code — the docs present a `scopePatterns` rule as the flagship
+example and state that an absent `scopePatterns` "matches all scopes", i.e. that adding one narrows
+a live rule, while such a rule structurally never fires. Unresolved; do not "fix" it by adding
+`scope` to the stripped set.
 
 There are exactly three call sites, and **their field sets differ** — check against this list, do
 not assume they are the same:
@@ -706,10 +745,19 @@ real clock — read in LOCAL time by contract (`isWithinTimeWindow` uses `getDay
 changing that would silently re-time every deployed window). A host calling `evaluatePolicy`
 directly may still supply its own timestamp; it owns its clock.
 
-The obligation runs in **both** directions. New governance field on `PolicyContext` → re-assert it
-at every one of the three sites, **including asserting `undefined` when the honest value is
-unknown.** New call site → spread the caller's params *first*, then re-assert the whole set; a site
-that spreads last, or that re-asserts a subset, is the failure below.
+**A time window may WRAP midnight, and `startHour > endHour` is how you say so.** A wrapping window
+matches `hour >= startHour || hour < endHour`; a non-wrapping one applies each bound independently.
+`startHour === endHour` is zero-width and matches nothing — read it as "no hours", not "all hours".
+The `daysOfWeek` gate applies to the timestamp's OWN local day, so an overnight window restricted to
+Monday covers Monday 22:00–23:59 and Monday 00:00–05:59, not Tuesday's small hours. *Prevents:* the
+pre-fix behaviour, where the two bounds were applied independently, so a window whose `startHour`
+exceeded its `endHour` was unsatisfiable at every hour and imposed no constraint.
+
+The obligation runs in **both** directions. New governance field on `PolicyContext` → classify it in
+`HOST_CONTROLLED_POLICY_FIELDS` or `CALLER_SUPPLIED_POLICY_FIELDS` (the parity test fails until you
+do), and re-assert it at every one of the three sites, **including asserting `undefined` when the
+honest value is unknown.** New call site → `sanitizePolicyContext` the caller's params *first*, then
+assert the whole set; a site that spreads raw params, or spreads last, is the failure below.
 *Prevents:* a client POSTing `{"model": "...", "budgetFractionRemaining": 0.95}` and walking through
 a hard deny rule. Asserting `undefined` means the rule simply does not match — fail closed, rather
 than matching a number the caller chose. (An `exists`-guard alone makes this *worse*: only the
