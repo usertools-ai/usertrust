@@ -455,3 +455,52 @@ describe("round-7 findings", () => {
 		expect(issues.some((i) => i.at === "file")).toBe(true);
 	});
 });
+
+describe("one-pass reporting holds for structural AND semantic faults together", () => {
+	it("reports an unknown key and a bad operand on the same condition", () => {
+		// zod skips `.superRefine` when the object parse fails, so a strict schema
+		// reported only the unknown key and the operator had to fix it and re-run to
+		// discover the second fault. The key check now lives inside the refinement,
+		// over a `looseObject` — `object` would strip the unknown key before the
+		// check could see it, which is the same silently-discarded-input shape.
+		const p = write(
+			"policy-both-faults.json",
+			JSON.stringify({
+				rules: [
+					{
+						name: "r",
+						effect: "deny",
+						enforcement: "hard",
+						conditions: [{ field: "x", operator: "gt", value: "not-a-number", typo: 1 }],
+					},
+				],
+			}),
+		);
+		const { issues } = validatePolicyFile(p);
+		expect(issues.some((i) => i.at.endsWith(".typo"))).toBe(true);
+		expect(issues.some((i) => i.at.endsWith(".value"))).toBe(true);
+		expect(issues.length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("still refuses an unknown key on its own", () => {
+		const p = write(
+			"policy-unknown-key-alone.json",
+			JSON.stringify({
+				rules: [
+					{
+						name: "r",
+						effect: "deny",
+						enforcement: "hard",
+						conditions: [{ field: "x", operator: "eq", value: 1, caseSensitive: false }],
+					},
+				],
+			}),
+		);
+		expect(() => loadPolicies(p)).toThrow(/unknown key on a condition/);
+	});
+
+	it("a valid condition still loads carrying only its own keys", () => {
+		const rules = loadPolicies(write("policy-clean-cond.yaml", GOOD_YAML));
+		expect(Object.keys(rules[0]?.conditions[0] ?? {})).toEqual(["field", "operator", "value"]);
+	});
+});

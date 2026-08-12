@@ -958,13 +958,40 @@ const STRING_VALUE_OPERATORS = new Set<FieldOperator>(["contains", "regex"]);
 /** Operators that read no `value` at all — they test presence. */
 const VALUELESS_OPERATORS = new Set<FieldOperator>(["exists", "not_exists"]);
 
+/** Keys a condition may carry. Checked inside the refinement, not by `strictObject`. */
+const FIELD_CONDITION_KEYS = new Set(["field", "operator", "value"]);
+
+/**
+ * NOT `strictObject`, deliberately.
+ *
+ * zod skips `.superRefine` when the object parse itself fails, so a condition
+ * carrying BOTH an unknown key and an unusable operand reported only the key —
+ * and the operator had to fix it and re-run to discover the second fault. That
+ * breaks the one-pass contract `policy validate` promises, in the same way the
+ * early returns did: a diagnostic that stops at the first problem makes the
+ * caller iterate.
+ *
+ * The unknown-key check therefore lives INSIDE the refinement alongside the
+ * semantic checks, so structural and semantic faults are collected together.
+ * `looseObject` rather than `object` because the latter STRIPS unknown keys
+ * before the refinement runs — the check would see a clean object and pass,
+ * which is the silently-discarded-input defect this file exists to close.
+ */
 const FieldConditionSchema = z
-	.strictObject({
+	.looseObject({
 		field: z.string().min(1, "must be a non-empty field path"),
 		operator: z.enum(FIELD_OPERATORS),
 		value: z.unknown().optional(),
 	})
 	.superRefine((fc, ctx) => {
+		for (const key of Object.keys(fc)) {
+			if (FIELD_CONDITION_KEYS.has(key)) continue;
+			ctx.addIssue({
+				code: "custom",
+				path: [key],
+				message: `unknown key on a condition. A condition carries only field, operator and value.`,
+			});
+		}
 		const op = fc.operator;
 		if (VALUELESS_OPERATORS.has(op)) return;
 		if (fc.value === undefined) {
