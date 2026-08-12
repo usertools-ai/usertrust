@@ -190,13 +190,29 @@ describe("false OK — the fail-closed error must still be machine-readable", ()
 describe("false OK — a documented count that stops matching reality", () => {
 	/**
 	 * AGENTS.md asserts an EXACT number of sanitizers and enumerates them. That
-	 * number went stale twice in this branch alone: once when the mirrored
-	 * `scrubForError` pair was added, and again when the count was corrected for
-	 * the snapshot copy while those two were still uncounted.
+	 * number went stale twice while this guard was being written: once when a
+	 * mirrored pair was added, and again when the count was corrected for a
+	 * different copy while that pair stayed uncounted.
 	 *
 	 * A prose invariant nobody executes is the same shape as a health signal
-	 * nobody wired: it reads as authoritative and measures nothing. This test is
-	 * the seam — the count is now checked against the source rather than asserted.
+	 * nobody wired: it reads as authoritative and measures nothing.
+	 *
+	 * ── WHY THIS MATCHES ON SHAPE, NOT ON NAMES ──
+	 *
+	 * The first version of this guard counted three known function NAMES. It
+	 * worked — it caught a stale count within a minute of the next AGENTS.md edit
+	 * — and it was wrong in the direction it exists to catch: a fourth sanitizer
+	 * landed under a fourth name (`scrubForTerminal`) and the counter reported
+	 * ELEVEN where THIRTEEN existed, failing a correct update. A counter that only
+	 * knows the names it was written with reports a smaller inventory than exists,
+	 * which is the same false OK this file is named for, one level up.
+	 *
+	 * So it counts what a sanitizer DOES. Both variants have an unmistakable
+	 * signature: the stronger one covers the C1 range and therefore names `0x9f`;
+	 * the weaker one is the `CONTROL_CHARS` character-class regex. Any future copy
+	 * under any name is counted, because the thing being counted is the behaviour
+	 * rather than the label — the same move as deriving fixtures from real
+	 * producer call sites instead of inventing them.
 	 */
 	it("AGENTS.md's sanitizer count matches the sanitizers in src/", async () => {
 		const { readFile } = await import("node:fs/promises");
@@ -205,7 +221,7 @@ describe("false OK — a documented count that stops matching reality", () => {
 
 		const agents = await readFile(join(repoRoot, "AGENTS.md"), "utf-8");
 		const declared = agents.match(/There are \*\*(\w+)\*\* sanitizers/)?.[1];
-		expect(declared).toBeDefined();
+		expect(declared, "AGENTS.md no longer states a sanitizer count").toBeDefined();
 
 		const WORDS: Record<string, number> = {
 			six: 6,
@@ -217,24 +233,33 @@ describe("false OK — a documented count that stops matching reality", () => {
 			twelve: 12,
 			thirteen: 13,
 			fourteen: 14,
+			fifteen: 15,
+			sixteen: 16,
 		};
 		const declaredCount = WORDS[declared as string];
 		expect(declaredCount, `unrecognised number word "${declared}"`).toBeDefined();
 
-		// Count the real thing: each weak-variant file holds one copy, and each
-		// strong-variant definition is one copy.
-		const count = (pattern: string): number => {
+		// Count OCCURRENCES of each variant's signature, not files and not names.
+		const occurrences = (pattern: string): number => {
 			const out = execSync(
-				`grep -rl '${pattern}' ${join(repoRoot, "packages")}/*/src --include='*.ts' || true`,
+				`grep -rho '${pattern}' ${join(repoRoot, "packages")}/*/src --include='*.ts' || true`,
 				{ encoding: "utf-8" },
 			).trim();
 			return out === "" ? 0 : out.split("\n").length;
 		};
-		const actual =
-			count("CONTROL_CHARS = /\\[") +
-			count("function forDisplay") +
-			count("function scrubForError");
+		// Stronger variant: match its BODY, not a mention of the range. The first
+		// cut of this matched bare `0x9f` and counted 7 where 5 exist, because two
+		// of the copies also name the range in their doc comment — a matcher that
+		// counted descriptions alongside implementations. The comparison itself is
+		// the signature and appears exactly once per sanitizer.
+		const strong = occurrences("code >= 0x7f && code <= 0x9f");
+		// Weaker variant: the shared control-character character class.
+		const weak = occurrences("CONTROL_CHARS = /\\[");
 
-		expect(actual).toBe(declaredCount);
+		expect(
+			strong + weak,
+			`AGENTS.md says ${declaredCount}; src/ contains ${strong} C1-covering + ${weak} CONTROL_CHARS = ${strong + weak}. ` +
+				"Add a bullet to the inventory and update the total — the entries are deliberately unnumbered so nothing needs renumbering.",
+		).toBe(declaredCount);
 	});
 });
