@@ -457,6 +457,69 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 		await gov.destroy();
 	});
 
+	it("the captured endpoint survives an IN-PLACE edit of the handle's object — the object-valued half", async () => {
+		// Reading from the capture is what closes `model`, a PRIMITIVE. It does not
+		// close `endpoint` on its own, and the test above only defends the property
+		// REPLACEMENT vector: `endpoint` is object-valued, and the handle and the
+		// capture were handed THE SAME OBJECT — for a governor-wide default, the
+		// single `normalizeEndpoint(opts.endpoint)` instance shared by every call.
+		// So `auth.endpoint.class = "cloud"` needed no getter and no
+		// `defineProperty`. It walked straight past a capture that "owns" a
+		// reference into caller-reachable memory, re-classified the hold's own
+		// record, re-priced the settlement against the cloud rate table, and — the
+		// part a per-call fix would miss — leaked into every LATER authorize() on
+		// the same governor.
+		//
+		// This is the residual `abort()` warns about in place: a snapshot pins
+		// identity, not contents, "and do not assume the same snapshot would be
+		// sufficient for an object-valued field". Closed by owning the VALUE and
+		// not just the reference — `normalizeEndpoint` freezes what it returns, so
+		// there is no edit for the capture to observe.
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+			endpoint: { class: "local", runtime: "ollama" },
+		});
+		const auth = await gov.authorize({ model: "llama3", estimatedInputTokens: 1_000 });
+
+		expect(auth.endpoint).toEqual({ class: "local", runtime: "ollama" });
+
+		// Frozen: strict-mode code throws, sloppy-mode code no-ops. Either is
+		// acceptable — what must never happen is the write LANDING. The assertions
+		// that follow are ordered money-first on purpose: pre-fix this edit landed,
+		// and the FIRST thing it changed was the price.
+		let threw = false;
+		try {
+			(auth.endpoint as unknown as { class: string }).class = "cloud";
+		} catch {
+			threw = true;
+		}
+
+		const receipt = await gov.settle(auth, { inputTokens: 10, outputTokens: 5 });
+		// Pre-fix: `{ class: "cloud", runtime: "ollama" }` and `rateSource:
+		// "fallback"` — a different rate table, i.e. a different `actualCost`
+		// POSTed for a hold that was priced local.
+		expect(receipt.endpoint).toEqual({ class: "local", runtime: "ollama" });
+		expect(receipt.meter.rateSource).toBe("local-default");
+
+		// The cross-call half: the default instance is shared, so a landed edit
+		// re-classified authorizations that had not been made yet.
+		const next = await gov.authorize({ model: "llama3", estimatedInputTokens: 1_000 });
+		expect(next.endpoint).toEqual({ class: "local", runtime: "ollama" });
+		const nextReceipt = await gov.settle(next, { inputTokens: 10, outputTokens: 5 });
+		expect(nextReceipt.endpoint).toEqual({ class: "local", runtime: "ollama" });
+		expect(nextReceipt.meter.rateSource).toBe("local-default");
+
+		// And the mechanism, asserted so a later refactor cannot quietly hand the
+		// caller a mutable scope again.
+		expect(threw || auth.endpoint?.class === "local").toBe(true);
+		expect(auth.endpoint?.class).toBe("local");
+		expect(Object.isFrozen(auth.endpoint)).toBe(true);
+
+		await gov.destroy();
+	});
+
 	// ── the same class, on the field that decides WHICH hold is settled ──
 	//
 	// `auth.transferId` was the biggest instance of the re-read class and the

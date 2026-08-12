@@ -295,6 +295,10 @@ interface AuthorizationCapture {
 	 * re-classify their own call between the phases and be priced against a
 	 * different table — and a throwing accessor there sat between the claim and
 	 * the POST, where a refusal strands the hold.
+	 *
+	 * `readonly` here binds the FIELD, not the object: unlike `model`, this value
+	 * is an object, and the handle holds the same instance. What makes it ours is
+	 * that `normalizeEndpoint` freezes it — see there.
 	 */
 	readonly endpoint: EndpointInfo;
 }
@@ -459,13 +463,28 @@ const VERIFY_URL_BASE = "https://verify.usertrust.dev";
  * Normalize a (possibly partial, e.g. untyped-JS-caller) endpoint shape into a
  * full EndpointInfo. Missing class defaults to "cloud" — the fail-EXPENSIVE
  * safe default — and missing runtime to "unknown".
+ *
+ * FROZEN, because this value is HANDED OUT. The same instance is the governor's
+ * `defaultEndpoint`, the `endpoint` on every `Authorization` handle built from
+ * it, and the `endpoint` on the governor's own `AuthorizationCapture`. Carrying
+ * a field on the capture makes it ours only if the VALUE is ours: for a
+ * primitive like `model` a reference the caller also holds is harmless, but an
+ * object-valued field is state the caller can still edit IN PLACE. Pre-freeze,
+ * `auth.endpoint.class = "cloud"` needed no getter and no `defineProperty` — it
+ * re-classified the hold's own record, re-priced the settlement against the
+ * cloud rate table (a different `actualCost` POSTed for a hold placed under the
+ * local one), and, because the default instance is shared, leaked into every
+ * LATER `authorize()` on the same governor. This is exactly the residual
+ * `abort()` documents ("do not assume the same snapshot would be sufficient for
+ * an object-valued field"), closed for this field at the one place both copies
+ * come from. Shallow is sufficient and complete: every member is a primitive.
  */
 function normalizeEndpoint(endpoint: Partial<EndpointInfo> | undefined): EndpointInfo {
-	return {
+	return Object.freeze({
 		class: endpoint?.class ?? "cloud",
 		runtime: endpoint?.runtime ?? "unknown",
 		...(endpoint?.baseURL !== undefined ? { baseURL: endpoint.baseURL } : {}),
-	};
+	});
 }
 
 // ── Async mutex (same as govern.ts AUD-453) ──
@@ -1308,6 +1327,14 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					// reads them from HERE, never from the handle's reporting copies —
 					// the identity half of the treatment `hold` and `proxyTransferId`
 					// already get for the amount and the transfer.
+					//
+					// `model` is a primitive, so the mirror is the whole fix for it.
+					// `endpoint` is OBJECT-VALUED and the handle above carries the very
+					// same instance, so mirroring the reference here would have left the
+					// value editable through `auth.endpoint` — the capture would own a
+					// pointer into caller-reachable memory and nothing more. It is
+					// frozen at `normalizeEndpoint`, where both copies are born; see
+					// there for what an in-place edit used to do to the price.
 					model,
 					endpoint,
 				}),
@@ -1469,6 +1496,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// phases re-prices the settlement against a table the hold was never
 			// placed under. It also sat after the claim, where a throwing accessor
 			// strands the hold.
+			//
+			// Reading from the capture is only half of it for THIS field, because it
+			// is object-valued: the capture holds the same instance the handle does,
+			// so an in-place `auth.endpoint.class = "cloud"` re-priced the settlement
+			// without ever replacing a property this function reads. The other half
+			// is the freeze at `normalizeEndpoint` — that is what makes this a value
+			// we own rather than a reference we share.
 			const endpoint = capture.endpoint;
 			const rateInfo = resolveRates(model, endpoint.class, config);
 
