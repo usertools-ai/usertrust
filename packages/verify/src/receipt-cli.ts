@@ -122,7 +122,8 @@ export const RECEIPT_USAGE = `Usage: usertrust-verify receipt <file> --trust <sn
 
   <file>                 The signed receipt document, or the resolver
                          envelope with --envelope. "-" reads stdin.
-  --trust <file>         REQUIRED. The pinned §8 well-known snapshot.
+  --trust <file>         REQUIRED. The pinned §8 well-known snapshot. "-"
+                         reads stdin, but only one input may do so.
   --envelope             <file> is the resolver's unsigned envelope; the
                          receipt input becomes its receiptBytes member.
   --expect-id <ctx>      Arrival context for step 3(a): a bare ut1_… id, a
@@ -216,6 +217,33 @@ export function parseReceiptArgs(argv: readonly string[]): ArgsResult {
 	if (file === undefined) return { kind: "error", message: "missing <file>" };
 	if (trust === undefined) {
 		return { kind: "error", message: "missing required --trust <snapshot.json>" };
+	}
+	/**
+	 * `-` in BOTH slots is a usage error, and the message must say WHY.
+	 *
+	 * Nothing about the two tokens is malformed — each is the legal stdin
+	 * filename — so this is not a parse failure but a PHYSICAL one: stdin is a
+	 * single unframed byte stream, and the two inputs are two independent JSON
+	 * documents. Whichever is read first consumes the stream; the second read
+	 * gets EOF and reports material that was in fact supplied as missing. There
+	 * is no framing to split them on, so the combination cannot be honoured at
+	 * all and the only sound answer is to refuse it up front, before either
+	 * read — exit 3, the "you typed the command wrong" bucket (CLI spec §6),
+	 * never exit 2, which is a statement about trust material.
+	 *
+	 * The refusal is phrased to END the operator's confusion. Both inputs are
+	 * JSON and both legitimately accept `-`, so this is a reasonable mistake to
+	 * make; "invalid arguments" would send them hunting for a typo in two
+	 * filenames that contain no typo.
+	 */
+	if (file === "-" && trust === "-") {
+		return {
+			kind: "error",
+			message:
+				'<file> and --trust were both given as "-": only one input can be read from stdin, ' +
+				"because the first read drains the stream and the second gets EOF. " +
+				"Pipe one and pass the other as a path.",
+		};
 	}
 	return { kind: "ok", args: { file, trust, envelope, expectId, json } };
 }
@@ -777,6 +805,17 @@ function describeIoError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * The ONE reader both inputs go through.
+ *
+ * `-` is the stdin filename in either slot (`isOptionToken` spares it in both,
+ * and §2 documents it on `<file>`), so resolving it is a property of reading an
+ * input, not of reading the receipt. When `--trust` bypassed this and called
+ * `io.readFile` directly, `usertrust-verify receipt r.json --trust -` looked
+ * for a file literally named `-`, and a piped snapshot came back UNVERIFIABLE
+ * "the pinned snapshot could not be read" — a false statement about material
+ * the operator had supplied. Both callers use this; neither resolves `-` itself.
+ */
 function readBytes(path: string, io: ReceiptCliIo): Buffer {
 	return path === "-" ? io.readStdin() : io.readFile(path);
 }
@@ -817,7 +856,7 @@ export function runReceiptCli(argv: readonly string[], io: ReceiptCliIo): Receip
 	// maps to two codes").
 	let trustBytes: Buffer;
 	try {
-		trustBytes = io.readFile(trust);
+		trustBytes = readBytes(trust, io);
 	} catch (error) {
 		return finish(
 			preRunReport({

@@ -226,12 +226,51 @@ describe("parseReceiptArgs", () => {
 				message: 'unknown flag "-x"',
 			});
 		}
-		// The stdin filename survives in BOTH slots — this is the token the rule
+		// The stdin filename survives in EITHER slot — this is the token the rule
 		// exists to spare, and `--trust -` is a legitimate way to pipe a snapshot.
-		expect(parseReceiptArgs(["-", "--trust", "-"])).toEqual({
+		// (Both at once is a separate, physical refusal; see below.)
+		expect(parseReceiptArgs(["-", "--trust", "t.json"])).toEqual({
 			kind: "ok",
-			args: { file: "-", trust: "-", envelope: false, expectId: undefined, json: false },
+			args: { file: "-", trust: "t.json", envelope: false, expectId: undefined, json: false },
 		});
+		expect(parseReceiptArgs(["receipt.json", "--trust", "-"])).toEqual({
+			kind: "ok",
+			args: { file: "receipt.json", trust: "-", envelope: false, expectId: undefined, json: false },
+		});
+	});
+
+	/**
+	 * `-` in BOTH slots is a usage error, and the message has to say WHY.
+	 *
+	 * It parsed fine — two independent filenames, each legal — and then failed
+	 * physically: stdin is ONE unframed byte stream, so whichever input is read
+	 * first drains it and the second read gets EOF. The user's mistake is a
+	 * reasonable one (both inputs are JSON, both accept `-`), so the refusal has
+	 * to end the confusion rather than start it: "invalid arguments" would send
+	 * an operator hunting for a typo in two filenames that are not typos.
+	 */
+	it("rejects `-` in BOTH slots with a message that explains the stream, not just the verdict", () => {
+		const parsed = parseReceiptArgs(["-", "--trust", "-"]);
+		expect(parsed.kind).toBe("error");
+		const message = (parsed as { readonly message: string }).message;
+		// The two inputs, named. Not "invalid arguments".
+		expect(message).toContain("--trust");
+		expect(message).toContain("stdin");
+		// The REASON, in the message itself — one stream cannot carry two
+		// documents, so only one input may come from it.
+		expect(message).toMatch(/only one/i);
+		// And it must survive the report's 240-char clip intact (no "…").
+		expect(message.length).toBeLessThanOrEqual(240);
+
+		const result = runReceiptCli(["-", "--trust", "-"], memoryIo({}, mint().receiptBytes));
+		expect(result.exitCode).toBe(3);
+		// Verbatim, ahead of the usage block — the explanation reaches the
+		// operator whole, not clipped to an ellipsis mid-sentence.
+		expect(result.stderr.startsWith(`${message}\n`)).toBe(true);
+		// Exit 3 is a statement about the COMMAND, so no verdict may be reported:
+		// stdout — the report channel, and the only thing `| jq` reads — stays
+		// empty, because nothing was read and nothing was verified.
+		expect(result.stdout).toBe("");
 	});
 
 	it("exits 3, not 2, when an unknown SHORT flag lands where a filename would", () => {
@@ -393,6 +432,79 @@ describe("exit codes", () => {
 		const bundle = mint();
 		const io = memoryIo({ "trust.json": bundle.snapshotBytes }, bundle.receiptBytes);
 		const result = runReceiptCli(["-", "--trust", "trust.json"], io);
+		expect(result.exitCode).toBe(0);
+	});
+
+	/**
+	 * All FOUR input combinations, asserted together.
+	 *
+	 * `--trust -` went to `io.readFile("-")` — there is no file named `-`, so a
+	 * piped snapshot came back UNVERIFIABLE (exit 2: "the pinned snapshot could
+	 * not be read") when it had in fact been supplied. The fix routes BOTH
+	 * inputs through the one stdin-aware reader, which is exactly the kind of
+	 * change that can over-reach: the three combinations that already worked
+	 * are pinned here in the same test so a later round cannot buy the piped
+	 * snapshot by breaking a path on disk.
+	 */
+	it("resolves `-` and a path independently in EITHER input slot", () => {
+		const bundle = mint();
+		const both = memoryIo({
+			"receipt.json": bundle.receiptBytes,
+			"trust.json": bundle.snapshotBytes,
+		});
+		// 1. Both on disk — the ordinary form, unaffected.
+		expect(runReceiptCli(["receipt.json", "--trust", "trust.json"], both).exitCode).toBe(0);
+		// 2. Receipt piped, snapshot on disk.
+		expect(
+			runReceiptCli(
+				["-", "--trust", "trust.json"],
+				memoryIo({ "trust.json": bundle.snapshotBytes }, bundle.receiptBytes),
+			).exitCode,
+		).toBe(0);
+		// 3. Snapshot piped, receipt on disk — the defect. Exit 0, not 2.
+		const pipedTrust = runReceiptCli(
+			["receipt.json", "--trust", "-"],
+			memoryIo({ "receipt.json": bundle.receiptBytes }, bundle.snapshotBytes),
+		);
+		expect(pipedTrust.exitCode).toBe(0);
+		expect(pipedTrust.stdout).not.toContain("UNVERIFIABLE");
+		// The snapshot really came from the stream: its identity is reported.
+		expect(pipedTrust.stdout).toContain("Trust snapshot: sha256:");
+		// 4. Both piped — refused as a usage error, before either read.
+		expect(runReceiptCli(["-", "--trust", "-"], memoryIo({}, bundle.receiptBytes)).exitCode).toBe(
+			3,
+		);
+	});
+
+	/**
+	 * A piped snapshot that cannot be read is still MISSING MATERIAL (exit 2),
+	 * not a usage error — routing `--trust -` through the stdin reader must not
+	 * move it into the exit-3 bucket, which CLI spec §6 reserves for "you typed
+	 * the command wrong". `--trust`'s two failure modes stay two code paths.
+	 */
+	it("2, not 3, when the PIPED snapshot cannot be read", () => {
+		const bundle = mint();
+		const result = runReceiptCli(
+			["receipt.json", "--trust", "-"],
+			memoryIo({ "receipt.json": bundle.receiptBytes }),
+		);
+		expect(result.exitCode).toBe(2);
+		expect(result.stdout).toContain("Verdict: UNVERIFIABLE");
+	});
+
+	/**
+	 * `--envelope` reads the SAME `<file>` slot, so the stdin route has to hold
+	 * with the wrapper in play too — an envelope on disk, its snapshot piped.
+	 */
+	it("`--trust -` also holds under --envelope", () => {
+		const bundle = mint();
+		const result = runReceiptCli(
+			["envelope.json", "--trust", "-", "--envelope"],
+			memoryIo(
+				{ "envelope.json": Buffer.from(JSON.stringify(bundle.envelope), "utf8") },
+				bundle.snapshotBytes,
+			),
+		);
 		expect(result.exitCode).toBe(0);
 	});
 });

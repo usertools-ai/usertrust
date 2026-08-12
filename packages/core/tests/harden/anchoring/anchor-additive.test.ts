@@ -242,6 +242,31 @@ describe("HARDEN: anchoring additive proofs", () => {
 		//     is null and the human report had nowhere else to say whether the
 		//     history was short, broken at an edge, or signed by the wrong key.
 		// Post-round total: 8401. 8700 leaves 299 lines of headroom.
+		//
+		// Rounds 4–6 under the same 8700 ceiling and the same amended §7 process
+		// — recorded here rather than each raising the number, because the
+		// headroom held. (a) re-verified at each: assertions 4 and 5 above still
+		// pass, `dependencies` is still `{}`, no file was vendored and no
+		// mirrored file was edited. (b) what was added, all of it closing Codex
+		// Tier-0 findings, none of it new surface:
+		//   · round 4 (16dc595, +1) — the arrival-context regating and the
+		//     absent/malformed split; the total this comment first recorded.
+		//   · round 5 (7ca7c44, +67) — `receipt-verify.ts` +35, `receipt-cli.ts`
+		//     +32: a malformed `--expect-id` trailer is a usage error, not an
+		//     arrival check that fails, and the caveat set follows the posture.
+		//   · round 6 (908907b, +97) — `receipt-verify.ts` +82, `receipt-cli.ts`
+		//     +15: the snapshot loader enforces what §8 FIXES rather than what a
+		//     step happens to read.
+		//   · round 7 (this one, +39) — `receipt-cli.ts` only, both findings CLI
+		//     INPUT handling, the verification-soundness classes being closed:
+		//     `--trust -` now goes through the one stdin-aware reader (it called
+		//     `io.readFile("-")`, so a piped snapshot came back UNVERIFIABLE —
+		//     a false statement about material that was supplied), and `-` in
+		//     BOTH slots is refused at parse time as a usage error, because one
+		//     unframed stream cannot carry two JSON documents. Most of the count
+		//     is the two comments recording why, plus the usage line.
+		// Post-round total: 8604. 8700 leaves 96 lines of headroom; the NEXT
+		// round raises the ceiling rather than trimming a Tier-0 comment to fit.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
