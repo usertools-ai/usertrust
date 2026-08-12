@@ -29,7 +29,6 @@ import {
 	type ReceiptExtensionMaterial,
 	type ReceiptReport,
 	type ReceiptVerdict,
-	readReceiptDocument,
 	readStrictJson,
 	receiptIdFromArrivalContext,
 	structurallyEqualJson,
