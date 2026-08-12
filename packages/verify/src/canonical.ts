@@ -54,8 +54,19 @@ export function canonicalize(value: unknown): string {
 		// to the unparseable `[1,,2]`. A hole and an in-array `undefined` are the
 		// same thing — absence at a position — and JSON writes both as `null`.
 		// The position cannot be dropped without re-indexing every later element.
+		//
+		// THE BOUND IS READ ONCE. `i < value.length` in the condition is a fresh
+		// property access on the CALLER's array every pass, so the length the loop
+		// iterates to is not the length it checked. An element getter that assigns
+		// `value.length = 0` ended it early — `[0]` where `JSON.stringify` gives
+		// `[0,null]`, a position silently dropped by the very loop that exists so
+		// positions are never dropped. A Proxy that appends on read makes the
+		// condition recede forever: an unbounded loop inside `appendEvent`, i.e. a
+		// hang on the audit WRITE path. Same rule as the caller-owned handles in
+		// `headless.ts` — a value you re-read is not the value you checked.
+		const length = value.length;
 		const items: string[] = [];
-		for (let i = 0; i < value.length; i++) {
+		for (let i = 0; i < length; i++) {
 			const element = value[i];
 			items.push(element === undefined ? "null" : canonicalize(element));
 		}
