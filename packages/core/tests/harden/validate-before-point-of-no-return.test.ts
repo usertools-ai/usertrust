@@ -1334,12 +1334,20 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 	// CONSTRUCTION, and they only do if the boundary judges what the writer judges:
 	// the returned bytes.
 	//
-	// RESIDUAL, stated because it is not closed here: inside an ARRAY the same
-	// malformed Date is joined away rather than emitted, so `[bad]` canonicalizes
-	// to the parseable `[]` and BOTH guards accept it. That is a canonicalizer
-	// defect (the Date branch does not check its own `JSON.stringify` result the
-	// way the primitive branch does), not a boundary/writer disagreement — the two
-	// still answer identically, which is the property asserted below.
+	// THE RESIDUAL THAT WAS STATED HERE IS NOW CLOSED AT THE SOURCE. It read:
+	// inside an ARRAY the same malformed Date is joined away rather than emitted,
+	// so `[bad]` canonicalizes to the parseable `[]` and BOTH guards accept it —
+	// a member dropped from the hash and from the record, which is the one thing
+	// this canonicalizer refuses to do for functions and symbols. The Date branch
+	// now applies the `typeof encoded !== "string"` check its sibling primitive
+	// branch always applied (both twins; `canonical.test.ts` and the verify
+	// package's own suite pin it at top level, nested and in an array), so
+	// canonicalize THROWS on this input and the array case has no output to
+	// accept. The boundary's parse remains, deliberately, for the same reason
+	// `appendEvent` keeps its own pre-fsync parse: the guard must not depend on a
+	// serializer staying correct. What is asserted below is therefore the
+	// PROPERTY — boundary and writer refuse the same inputs — not the one vehicle
+	// that used to reach past a non-parsing return.
 
 	it("the boundary refuses canonical bytes that do not PARSE, not merely a throw", () => {
 		const malformed = (): Date => {
@@ -1348,13 +1356,23 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 			return d;
 		};
 
-		// Pre-fix: canonicalize returns the JS value `undefined` here and never
-		// throws — its declared `string` return type is a cast, not a check.
-		expect(() => canonicalize(malformed())).not.toThrow();
-		expect(() => JSON.parse(canonicalize(malformed()))).toThrow();
+		// Pre-boundary-fix: canonicalize returned the JS value `undefined` here and
+		// never threw — its declared `string` return type was a cast, not a check —
+		// so a guard that only watched for a throw waved it through. The
+		// canonicalizer refuses it at its own Date branch now, which is the second
+		// of the two fixes and the reason this line reads `toThrow`.
+		expect(() => canonicalize(malformed())).toThrow(/not representable in audit data/);
 
-		// Top level and nested: both reach a writer that persists these bytes.
-		for (const value of [malformed(), { when: malformed() }, { a: { b: malformed() } }]) {
+		// Top level, nested, and INSIDE AN ARRAY — the position that used to be
+		// joined away into the parseable `[]`. All three reach a writer that
+		// persists these bytes.
+		for (const value of [
+			malformed(),
+			{ when: malformed() },
+			{ a: { b: malformed() } },
+			[malformed()],
+			{ list: [1, malformed(), 3] },
+		]) {
 			expect(() => assertAuditRepresentable("llm_call", { "x.y": value })).toThrow(
 				AuditDataInvalidError,
 			);

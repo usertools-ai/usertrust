@@ -54,15 +54,21 @@ export function assertAuditRepresentable(eventKind: string, fields: Record<strin
 			// is not the writer's test — the writer parses what it is about to
 			// persist (`chain.ts`'s pre-fsync guard) and refuses bytes that do not
 			// read back. The two only agree BY CONSTRUCTION if this judges the same
-			// thing, and the gap is reachable: canonicalize's Date branch returns
+			// thing, and the gap was reachable: canonicalize's Date branch returned
 			// `JSON.stringify(value.toISOString())`, which is the JS value
 			// `undefined` — not a string, its declared return type notwithstanding —
 			// for a caller `Date` whose `toISOString` answers with `undefined` or a
-			// function. Nothing throws, so this waved it through; the token
+			// function. Nothing threw, so this waved it through; the token
 			// `undefined` then landed in the canonical text and only the writer
 			// refused it, i.e. after `governAction()` had executed and after the
 			// money moved. Which is the whole defect this module exists to prevent,
 			// arriving THROUGH the guard rather than around it.
+			//
+			// That branch now checks its own output, so the vehicle is closed at the
+			// source and this parse has no known input left to catch. It stays for
+			// the reason `appendEvent` keeps its own pre-fsync parse: a guard that
+			// depends on the serializer staying correct is not a guard. Same rule as
+			// the writer's, one gate earlier.
 			JSON.parse(canonicalize(fields[field]));
 		} catch (err) {
 			throw new AuditDataInvalidError(

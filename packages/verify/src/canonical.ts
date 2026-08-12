@@ -25,7 +25,21 @@ export function canonicalize(value: unknown): string {
 	}
 	// Convert Date to ISO string to avoid double-quoting divergence
 	if (value instanceof Date) {
-		return JSON.stringify(value.toISOString());
+		// THE BRANCH CHECKS ITS OWN OUTPUT, exactly as the primitive branch below
+		// does. `toISOString` is a caller-overridable method, so this is the one
+		// place where a value we COMPUTED is still caller-supplied: an override
+		// answering with `undefined`, a function or a symbol makes `JSON.stringify`
+		// return the JS value `undefined` — not a string, the declared return type
+		// notwithstanding. At the top level that is the unparseable token
+		// `undefined`; inside an ARRAY it was worse, because `items.join(",")`
+		// erased it and `[bad]` canonicalized to the parseable `[]` — a member
+		// silently dropped from the hash and from the record, which is precisely
+		// what the refusal below exists to prevent for functions and symbols.
+		const encoded = JSON.stringify(value.toISOString());
+		if (typeof encoded !== "string") {
+			throw new Error("canonicalize: Date.toISOString() is not representable in audit data");
+		}
+		return encoded;
 	}
 	if (value === null) return "null";
 	// ut1 §13 clause 1: `undefined` and `null` BOTH serialize to `null` — at the

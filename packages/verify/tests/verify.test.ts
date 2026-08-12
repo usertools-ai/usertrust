@@ -267,6 +267,26 @@ describe("canonicalize", () => {
 		expect(() => canonicalize([Symbol("x")])).toThrow(/not representable in audit data/);
 	});
 
+	it("throws on a Date whose toISOString() does not return a string — never drops it", () => {
+		// The twin of the core test of the same name. A `toISOString` answering
+		// with `undefined` or a function makes `JSON.stringify` return the JS value
+		// `undefined`: unparseable at the top level, and silently joined away
+		// inside an array (`[bad]` → the parseable `[]`, a member dropped from the
+		// hash). The verifier must refuse exactly what the minter refuses, or the
+		// two disagree about what a chain says.
+		const bad = (iso: () => unknown): Date => {
+			const d = new Date("2026-08-11T00:00:00.000Z");
+			(d as unknown as { toISOString: () => unknown }).toISOString = iso;
+			return d;
+		};
+		for (const iso of [() => undefined, () => () => 1, () => Symbol("s")]) {
+			expect(() => canonicalize(bad(iso))).toThrow(/not representable in audit data/);
+			expect(() => canonicalize({ when: bad(iso) })).toThrow(/not representable in audit data/);
+			expect(() => canonicalize([bad(iso)])).toThrow(/not representable in audit data/);
+		}
+		expect(canonicalize(new Date("2026-08-11T00:00:00.000Z"))).toBe('"2026-08-11T00:00:00.000Z"');
+	});
+
 	it("strips undefined values from objects", () => {
 		const result = canonicalize({ a: 1, b: undefined, c: 3 });
 		expect(result).toBe('{"a":1,"c":3}');

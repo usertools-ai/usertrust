@@ -91,6 +91,32 @@ describe("canonicalize", () => {
 		expect(() => canonicalize([Symbol("x")])).toThrow(/not representable in audit data/);
 	});
 
+	it("throws on a Date whose toISOString() does not return a string — never drops it", () => {
+		// The Date branch hands `JSON.stringify` a value it COMPUTED from the
+		// caller's object, and it did not check what came back. A `toISOString`
+		// answering with `undefined` or a function makes `JSON.stringify` return
+		// the JS value `undefined` — not a string, the declared return type
+		// notwithstanding. At the top level that is unparseable text; INSIDE AN
+		// ARRAY `items.join(",")` erased it, so `[bad]` canonicalized to the
+		// parseable `[]` — a member silently dropped from the hash AND from the
+		// record, which is the one outcome this function refuses for functions and
+		// symbols one branch below. Same check, same refusal.
+		const bad = (iso: () => unknown): Date => {
+			const d = new Date("2026-08-11T00:00:00.000Z");
+			(d as unknown as { toISOString: () => unknown }).toISOString = iso;
+			return d;
+		};
+		for (const iso of [() => undefined, () => () => 1, () => Symbol("s")]) {
+			expect(() => canonicalize(bad(iso))).toThrow(/not representable in audit data/);
+			expect(() => canonicalize({ when: bad(iso) })).toThrow(/not representable in audit data/);
+			expect(() => canonicalize([bad(iso)])).toThrow(/not representable in audit data/);
+		}
+
+		// An ordinary Date is untouched: the check refuses only what could never
+		// be written back, so no existing hash moves.
+		expect(canonicalize(new Date("2026-08-11T00:00:00.000Z"))).toBe('"2026-08-11T00:00:00.000Z"');
+	});
+
 	it("never returns a string that fails JSON.parse", () => {
 		const holey: unknown[] = [];
 		holey[0] = 1;
