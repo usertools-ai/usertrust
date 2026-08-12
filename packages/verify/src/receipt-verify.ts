@@ -11,8 +11,9 @@
  * siblings only.
  *
  * This file grows across the ship. Today it holds step 1's STRICT BYTE READER,
- * the §8 TRUST-SNAPSHOT LOADER, and §7 steps 1–8 — the BASE verdict. Step 9's
- * extensions and the CLI surface land on top of it.
+ * the §8 TRUST-SNAPSHOT LOADER, §7 steps 1–8 — the BASE verdict — and §7 step
+ * 9's extension checks with the cumulative ladder. The CLI surface lands on
+ * top of it.
  *
  * Two rules govern everything here, and both are load-bearing rather than
  * stylistic:
@@ -1333,6 +1334,9 @@ export interface ReceiptVerifyInput {
 	readonly snapshot: TrustSnapshot;
 	/** The §12-validated ID the document arrived under. Omitted ⇒ 3(a) is n/a. */
 	readonly arrivalId?: string;
+	/** Step 9's OPTIONAL material, from the resolver envelope. Absent ⇒ the
+	 * extension checks have no input, which is `notApplicable`, not a failure. */
+	readonly extensions?: ReceiptExtensionMaterial;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2357,4 +2361,301 @@ function canonicalHash(preimage: string): string {
  */
 export function verifyReceiptBase(input: ReceiptVerifyInput): BaseVerdictReport {
 	return new BaseRun(input).run();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §7 step 9 — the EXTENSION checks, and the CUMULATIVE ladder.
+//
+// Step 9 is the only step that can make a verdict BETTER, and that inverts the
+// usual risk: everywhere else a missing rule shows up as a receipt that should
+// have been rejected, but here it shows up as a rung that was not earned — and
+// the output of an under-implemented walk is indistinguishable from that of a
+// complete one. So every clause of §7's history paragraph is written out
+// separately below, and each has a corpus mutant that upgrades without it.
+//
+// Two invariants hold over the whole section. **Upgrade-only:** an extension
+// result never becomes the run's `failure` and never touches `missing` (§7:
+// "Neither changes the base verdict from step 8"), because unsigned optional
+// material is exactly what an attacker can freely substitute and turning a
+// sound receipt red on it would be a denial of service against honest ones.
+// **Never a rescue:** the walk runs only on a base pass, gated on
+// `BaseVerdictReport.verified`, since material that could lift a failed receipt
+// would be material that carries one.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** §4a: the first segment's lineage edge is these fixed strings, exactly. */
+export const GENESIS_SENTINEL = "genesis";
+
+/** The two §7 step-9 checks. Both are named in output, never inferred. */
+export type ExtensionCheckName = "checkpointHistory" | "anchorEvidence";
+
+/**
+ * Step 9's inputs, as PARSED WIRE DATA from the resolver's unsigned envelope
+ * (§5) — untrusted in exactly the way the receipt is, and validated here rather
+ * than assumed because the envelope carried it. An ABSENT key means nothing was
+ * served, which is `notApplicable` and not `unavailable`; this offline CLI has
+ * nothing to fetch from and so can never produce the latter.
+ */
+export interface ReceiptExtensionMaterial {
+	readonly checkpointHistory?: JsonValue;
+	readonly anchorEvidence?: JsonValue;
+}
+
+export type ReceiptVerdict =
+	| "VERIFIED_CHECKPOINT"
+	| "VERIFIED_CHECKPOINT_HISTORY"
+	| "VERIFIED_ANCHORED"
+	| "FAILED"
+	| "UNVERIFIABLE";
+
+/** The nine §7 steps as the report names them. */
+export type ReportStepName = BaseStepName | "extensions";
+
+export interface ReceiptChecks {
+	readonly registryBinding: StepOutcome;
+	readonly predecessorLinkage: StepOutcome;
+	readonly checkpointHistory: StepOutcome;
+	/**
+	 * OMITTED — not `unavailable`, not `notApplicable` — when evidence was
+	 * supplied and this build declined to check it. See `unimplemented`.
+	 */
+	readonly anchorEvidence?: StepOutcome;
+}
+
+/**
+ * The base report widened by step 9. `receiptId`, `arrivalContext`, `computed`,
+ * `posture`, `failure`, `missing` and `verified` are INHERITED rather than
+ * restated: step 9 copies them through untouched, and two hand-written copies
+ * of one shape are two shapes that will eventually disagree.
+ */
+export interface ReceiptReport extends Omit<BaseVerdictReport, "verdict" | "steps" | "checks"> {
+	readonly verdict: ReceiptVerdict;
+	readonly steps: Readonly<Record<ReportStepName, StepOutcome>>;
+	readonly checks: ReceiptChecks;
+	/**
+	 * Checks this build DECLINED TO RUN, named out of band because §7 has no
+	 * vocabulary for them: its four values describe the INPUT (`notApplicable` =
+	 * cannot exist here; `unavailable` = exists but was unobtainable) and neither
+	 * describes a verifier that did not look. Reporting present-but-unchecked
+	 * evidence as `unavailable` would read as "we tried"; this field lets a
+	 * consumer machine-detect the gap instead of inferring it.
+	 */
+	readonly unimplemented: readonly ExtensionCheckName[];
+}
+
+const PASSED_OUTCOME: StepOutcome = { result: "passed" };
+const UNAVAILABLE_OUTCOME: StepOutcome = { result: "unavailable" };
+
+/** `history[3] (seg_000004)` — untrusted text, sanitized by the reporter. */
+function historyMemberLabel(index: number, member: JsonObject): string {
+	const segmentId = stringAt(member, "segmentId");
+	return segmentId === null ? `history[${index}]` : `history[${index}] (${segmentId})`;
+}
+
+/**
+ * §7's `VERIFIED_CHECKPOINT_HISTORY` predicate, clause by clause.
+ *
+ * Returns `null` when the served history earns the rung, or the reason it does
+ * not. Total: it never throws, which is why §4a's member list and its TYPES are
+ * checked (inside `verifyCheckpointStatement`) before `canonicalize` is handed
+ * a member.
+ *
+ * Chain identity comes from the REGISTERED `TrustChain`, not a second read of
+ * `proof`: step 2 has already bound `checkpoint.vaultId === proof.chain ===
+ * chain.vaultId` and the same for `profile`, so re-reading the document here
+ * would add unreachable guards and a second place for the two to drift.
+ */
+function walkCheckpointHistory(
+	supplied: JsonValue,
+	verified: VerifiedMaterial,
+	snapshot: TrustSnapshot,
+): string | null {
+	if (!Array.isArray(supplied)) return "the served checkpointHistory is not an array";
+	// A zero-length walk satisfies every per-member clause vacuously, so without
+	// this the emptiest possible input would be the cheapest upgrade in the
+	// system. §7 requires a history "from the DECLARED GENESIS BOUNDARY to a head
+	// at/after the receipt's segment", which is at minimum one checkpoint.
+	if (supplied.length === 0) return "the served checkpointHistory is empty";
+
+	const { chain, checkpoint } = verified;
+	// Byte equality over the whole signed statement INCLUDING `sig`. §7 says the
+	// embedded checkpoint "appears EXACTLY in the supplied history": a
+	// segmentId-keyed lookup would accept a different, internally valid, validly
+	// signed checkpoint for the same segment — which is the second-checkpoint
+	// integrity incident §4a makes a hard fail, arriving through the one door
+	// that was left open.
+	const embedded = canonicalize(checkpoint);
+
+	const seenSegmentIds = new Set<string>();
+	let previous: JsonObject | null = null;
+	let embeddedFound = false;
+
+	for (let index = 0; index < supplied.length; index += 1) {
+		const member = supplied[index] as JsonValue;
+		if (!isJsonObject(member)) return `history[${index}] is not a JSON object`;
+
+		// §4a's full v2 statement, the §8 lineage, the key's role, and its state
+		// evaluated at THIS member's own segment — the same function step 6 uses,
+		// because "every checkpoint's signature verifies under the §8 lineage"
+		// must reach the same answer for a history member as for the receipt's
+		// own. A second copy would be a second chance to weaken one of them.
+		//
+		// An unresolvable member key comes back as `missingTrustKey`, and here it
+		// is a FAILED EXTENSION, not missing material: CLI spec §5's
+		// unresolvable-key row is about the receipt's own trust material, and an
+		// extension can never demote the base verdict to UNVERIFIABLE.
+		const statement = verifyCheckpointStatement(member, chain, snapshot);
+		if (!statement.ok) return `${historyMemberLabel(index, member)}: ${statement.detail}`;
+
+		// The shape check inside `verifyCheckpointStatement` passed, so every §4a
+		// member is present and typed and the reads below are total.
+		const label = historyMemberLabel(index, member);
+		const segmentId = stringAt(member, "segmentId") as string;
+		const segmentFirstSequence = numberAt(member, "segmentFirstSequence") as number;
+
+		// §4a: `vaultId`/`profile` are SIGNED, so each statement says which chain
+		// it belongs to. A foreign member in an otherwise clean walk is exactly
+		// what one checkpoint key trusted by two vaults would produce.
+		if (stringAt(member, "vaultId") !== chain.vaultId) {
+			return `${label}: vaultId is not the receipt's chain ${chain.vaultId}`;
+		}
+		if (stringAt(member, "profile") !== chain.profile) {
+			return `${label}: profile is not the chain's registered ${chain.profile}`;
+		}
+
+		// §4a: exactly ONE checkpoint per segment, ever. This is what makes prefix
+		// ROLLBACK detectable rather than merely unlikely — a second checkpoint
+		// over the same segment is an integrity incident, not a later revision.
+		if (seenSegmentIds.has(segmentId)) {
+			return `${label}: segmentId appears more than once — §4a seals each segment with its single checkpoint`;
+		}
+		seenSegmentIds.add(segmentId);
+
+		if (previous === null) {
+			// §8's REGISTERED genesis, made checkable. A short history and an
+			// over-claimed one both fail here, which is the point: the served root
+			// is compared against the snapshot's `genesisSegmentId`, never against
+			// whatever the history happens to start with.
+			if (segmentId !== chain.genesisSegmentId) {
+				return `${label}: the history roots at ${segmentId}, not the registered genesis ${chain.genesisSegmentId}`;
+			}
+			// §4a: "genesis values exact". Accepting anything else would let a
+			// history claim a predecessor the registration says cannot exist.
+			if (
+				stringAt(member, "previousSegmentRoot") !== GENESIS_SENTINEL ||
+				stringAt(member, "previousSegmentId") !== GENESIS_SENTINEL
+			) {
+				return `${label}: the genesis checkpoint's previousSegment* are not the fixed string "${GENESIS_SENTINEL}"`;
+			}
+		} else {
+			const previousFirst = numberAt(previous, "segmentFirstSequence") as number;
+			const previousTreeSize = numberAt(previous, "treeSize") as number;
+			if (stringAt(member, "previousSegmentId") !== stringAt(previous, "segmentId")) {
+				return `${label}: previousSegmentId does not name the preceding checkpoint's segment`;
+			}
+			if (stringAt(member, "previousSegmentRoot") !== stringAt(previous, "root")) {
+				return `${label}: previousSegmentRoot is not the preceding checkpoint's root`;
+			}
+			// §7: "strictly increasing AND contiguous". The two are separate
+			// clauses because a zero-leaf predecessor satisfies the arithmetic
+			// while standing still.
+			if (segmentFirstSequence <= previousFirst) {
+				return `${label}: segmentFirstSequence ${segmentFirstSequence} does not strictly increase past ${previousFirst}`;
+			}
+			const expected = previousFirst + previousTreeSize;
+			// Both operands are safe integers; their SUM need not be, and an
+			// imprecise sum compares equal to values that are not it. The whole
+			// walk rests on this one comparison, so it refuses rather than guesses.
+			if (!Number.isSafeInteger(expected)) {
+				return `${label}: the contiguity sum ${previousFirst} + ${previousTreeSize} leaves the safe-integer range`;
+			}
+			if (segmentFirstSequence !== expected) {
+				return `${label}: segmentFirstSequence ${segmentFirstSequence} ≠ ${previousFirst} + ${previousTreeSize} — the walk has a gap`;
+			}
+		}
+
+		if (canonicalize(member) === embedded) embeddedFound = true;
+		previous = member;
+	}
+
+	// §7's "a head at/after the receipt's segment" needs no separate check: the
+	// receipt's own checkpoint is IN this walk, and the walk is strictly
+	// increasing, so the head is at or after it by construction. Saying that
+	// beats a second comparison that could disagree with the first.
+	if (!embeddedFound) {
+		return "the receipt's own checkpoint does not appear EXACTLY in the served history";
+	}
+	return null;
+}
+
+/**
+ * receipt-spec §7 steps 1–9 over one receipt, one PINNED §8 snapshot, and
+ * whatever optional material the resolver envelope carried.
+ *
+ * **The ladder is CUMULATIVE, and its top rung is unreachable here.**
+ * `VERIFIED_CHECKPOINT` is steps 1–8. `VERIFIED_CHECKPOINT_HISTORY` adds a
+ * clean history walk. `VERIFIED_ANCHORED` requires that history AND validated
+ * anchor evidence (§7; verify-page §4.1 rule 3 — "Rekor alone upgrades nothing
+ * past the checkpoint floor"). This build validates NO anchor evidence, so
+ * there is deliberately no branch below that returns it: writing one would be
+ * dead code that reads to the next maintainer as a live path. The blocker is
+ * normative, not schedule — no authority yet defines the artifact-hash preimage
+ * binding Rekor evidence to a `SegmentCheckpoint`'s signed payload, and
+ * `rekor-verify.ts` binds a vault `AnchorRecord`, a different object. When that
+ * rule lands, this becomes an ordinary §7 check and the rung becomes reachable.
+ *
+ * Offline and total, exactly like the base run: no I/O, and never a throw.
+ */
+export function verifyReceipt(input: ReceiptVerifyInput): ReceiptReport {
+	const base = verifyReceiptBase(input);
+	const material = input.extensions ?? {};
+	const suppliedHistory = material.checkpointHistory;
+	// Present at all ⇒ this build declined to look at it. That is true whatever
+	// the base verdict did, so it is reported the same way either way.
+	const anchorSupplied = material.anchorEvidence !== undefined;
+
+	let verdict: ReceiptVerdict = base.verdict;
+	let history: StepOutcome;
+	if (suppliedHistory === undefined) {
+		// Nothing was served. `notApplicable` — the input does not exist in this
+		// context — and that stays the true statement whatever the base run did.
+		history = NOT_APPLICABLE_OUTCOME;
+	} else if (base.verified === null) {
+		// Material WAS served and the walk did not run, because an extension
+		// upgrades a verdict and never rescues one. A step that never ran is
+		// `unavailable`; calling it `notApplicable` would assert something about
+		// the input rather than about this run.
+		history = UNAVAILABLE_OUTCOME;
+	} else {
+		const detail = walkCheckpointHistory(suppliedHistory, base.verified, input.snapshot);
+		if (detail === null) {
+			history = PASSED_OUTCOME;
+			verdict = "VERIFIED_CHECKPOINT_HISTORY";
+		} else {
+			history = { result: "failed", failure: { code: "HISTORY_INVALID", detail } };
+		}
+	}
+
+	return {
+		verdict,
+		receiptId: base.receiptId,
+		// The step ledger and the named check are the same fact, reported under
+		// the two names §7 and the `--json` shape each use for it.
+		steps: { ...base.steps, extensions: history },
+		checks: {
+			registryBinding: base.checks.registryBinding,
+			predecessorLinkage: base.checks.predecessorLinkage,
+			checkpointHistory: history,
+			...(anchorSupplied ? {} : { anchorEvidence: NOT_APPLICABLE_OUTCOME }),
+		},
+		arrivalContext: base.arrivalContext,
+		computed: base.computed,
+		posture: base.posture,
+		unimplemented: anchorSupplied ? ["anchorEvidence"] : [],
+		// §7 step 9 is upgrade-only: an extension result is never the run's
+		// failure, and the exit code is computed from these two fields.
+		failure: base.failure,
+		missing: base.missing,
+		verified: base.verified,
+	};
 }
