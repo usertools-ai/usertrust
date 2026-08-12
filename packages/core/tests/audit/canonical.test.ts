@@ -26,12 +26,14 @@ describe("canonicalize", () => {
 		expect(canonicalize(null)).toBe("null");
 	});
 
-	// INVERTED (was: `expect(canonicalize(undefined)).toBe(undefined)`). That green
-	// assertion PINNED the defect: canonicalize is typed `=> string` and returned a
-	// non-string, which is exactly how `{"f":undefined}` reached the audit log.
-	// `undefined` has no JSON representation, so it throws — same rule as NaN.
-	it("throws on top-level undefined — JSON cannot represent it", () => {
-		expect(() => canonicalize(undefined)).toThrow(/not representable in audit data/);
+	// INVERTED (was: `expect(canonicalize(undefined)).toBe(undefined)` — the JS
+	// value, not a string, which is how a non-string reached the audit line).
+	// ut1 §13 clause 1: a top-level `undefined` serializes to `null`, same as the
+	// normative proxy. It does NOT throw — throwing would diverge from the minter
+	// on the very input class this unifies. Only functions and symbols throw.
+	it("serializes a top-level undefined to null (ut1 §13 clause 1)", () => {
+		expect(canonicalize(undefined)).toBe("null");
+		expect(canonicalize(null)).toBe("null");
 	});
 
 	it("handles primitives", () => {

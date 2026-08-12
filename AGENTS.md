@@ -523,7 +523,7 @@ pre-image.
 governing rule is: if JSON can represent the value faithfully, represent it deterministically; if
 it cannot, **throw**. An array HOLE and an in-array `undefined` are the same thing — absence at a
 position — and are written as `null` (via an index loop, never `Array.map`, which SKIPS holes and
-produced the unparseable `[1,,2]`). Functions, symbols, and a top-level `undefined` throw; they are
+produced the unparseable `[1,,2]`). Functions and symbols throw; a top-level `undefined` serializes to `null` (§13 clause 1, matching the minter). Refusals are
 never omitted, because dropping a key signs a document missing a member the caller believed they
 committed — the same defect one layer quieter. Any change here must be MEASURED, not argued: only
 outputs that are currently unparseable may change, and

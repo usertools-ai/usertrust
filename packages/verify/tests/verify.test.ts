@@ -237,8 +237,8 @@ describe("canonicalize", () => {
 	// non-string, which is exactly how `{"f":undefined}` reached the audit log.
 	// `undefined` has no JSON representation, so it throws — same rule as NaN.
 	// Mirrors core/tests/audit/canonical.test.ts.
-	it("throws on top-level undefined — JSON cannot represent it", () => {
-		expect(() => canonicalize(undefined)).toThrow(/not representable in audit data/);
+	it("serializes a top-level undefined to null (ut1 §13 clause 1)", () => {
+		expect(canonicalize(undefined)).toBe("null");
 	});
 
 	it("writes an in-array undefined as null", () => {

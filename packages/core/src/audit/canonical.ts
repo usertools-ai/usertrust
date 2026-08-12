@@ -25,9 +25,17 @@ export function canonicalize(value: unknown): string {
 		return JSON.stringify(value.toISOString());
 	}
 	if (value === null) return "null";
+	// ut1 §13 clause 1: `undefined` and `null` BOTH serialize to `null` — at the
+	// top level, inside arrays, everywhere. A top-level `undefined` is not the JS
+	// value; it is the absence a caller means, and the normative proxy returns
+	// "null" for it. Throwing here would re-open a minter/verifier divergence on
+	// the exact input class this function exists to unify, just pointing the
+	// other way. Object VALUES that are undefined are still omitted (§2
+	// key-ABSENT); that asymmetry is deliberate.
+	if (value === undefined) return "null";
 	if (typeof value !== "object") {
-		// `JSON.stringify` returns `undefined` — NOT a string — for `undefined`,
-		// functions and symbols. Emitting it produced `{"f":undefined}`: an audit
+		// `JSON.stringify` returns `undefined` — NOT a string — for functions and
+		// symbols (top-level `undefined` is handled above). Emitting it produced `{"f":undefined}`: an audit
 		// line that cannot be parsed back. Refuse, for the same reason `NaN` is
 		// refused above, and refuse rather than OMIT: dropping the key would sign
 		// a document missing a member the caller believed they committed — the
