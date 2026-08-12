@@ -849,6 +849,14 @@ entire product for a verification tool.
 
 There are **eleven** sanitizers, in two variants. Do not consolidate them onto the weaker one.
 
+**A whole-repo command asserts over A TREE, not THE REPO.** This repo is worked in through several
+git worktrees at once, so `packages/*/src` means something different depending on where the command
+ran. The sanitizer count is 11 on one branch and 13 on another and BOTH are correct — they are
+counting different trees. The same class produced a false "master is red" alarm from a `biome check`
+run at a root that swept in sibling worktrees' configs. Scope a global assertion to the tree that
+owns it: the count guard derives its root from its own file location, so it compares a tree's
+sanitizers against that tree's AGENTS.md, never one against the other.
+
 The total is pinned by `core/tests/harden/false-ok.test.ts`, which counts what a sanitizer DOES —
 the C1 comparison for the stronger variant, the `CONTROL_CHARS` class for the weaker — rather than
 matching known function names. An earlier version matched names and reported a smaller inventory
