@@ -143,6 +143,16 @@ error and abort listener must route through it.
 *Prevents:* six stream consumption modes plus abort/error/end paths double-settling, or
 settle-then-void leaving the ledger holding a debit its accounting does not.
 
+**Synchronously means BEFORE any caller code runs, not merely before the first `await`.**
+`headless.settle()` looks the hold up, then reads the caller's `SettleParams`; a getter there can
+synchronously re-enter `settle()`/`abort()` on the same handle, and an unclaimed hold lets the
+nested terminal take it and run past the delete, the release and the POST before the outer call
+resumes. `Map.delete` answering `false` is not a claim check if nobody reads it. So: claim the entry
+before the first caller read, and RESTORE it if the validation that follows refuses — a claim is
+reversible, a release is not.
+*Prevents:* two terminals discharging one hold — the hold released twice (`inFlightHoldTotal`
+negative), the spend accounted twice, and a POST racing a VOID on the same pending transfer.
+
 **The settle/void asymmetry is deliberate. Do not "make it consistent."**
 - Usage-extraction failure *after a successful provider call* settles at the estimate, never voids.
 - A clean SSE close with no `message_stop` settles at the estimate rather than dangling.
@@ -569,9 +579,14 @@ and it calls `canonicalize` rather than re-deriving the rule, so the boundary an
 **by construction** — a second predicate spelling out "finite, not a function, not a symbol" is a
 copy, and a copy drifts. It is not a write-ahead: nothing is appended, nothing is reserved, and
 **an audit event must never precede the fact it attests**, so the ordering fix is always "validate
-earlier", never "record earlier". Wired at `headless.settle()` (before `activeAuths.delete`, so a
-refused settle leaves the authorization live and the caller can correct the value and retry on the
-same handle), at `governAction()` (beside the existing `action.cost` check, so a bad `params`
+earlier", never "record earlier". It also judges the BYTES `canonicalize` returns — it parses them,
+exactly as the writer's pre-fsync guard does — not merely that `canonicalize` did not throw; a
+non-throwing call that returns malformed text is the gap through which the boundary passes a value
+the writer then refuses, which is the defect arriving *through* the guard. Wired at
+`headless.settle()` (the guard runs AFTER `activeAuths.delete` claims the entry and RESTORES it on
+refusal — see the claim rule under Money — so the validation runs against a hold nobody else can
+take while a refused settle still leaves the authorization live for the caller to correct and
+retry), at `governAction()` (beside the existing `action.cost` check, so a bad `params`
 cannot make the action run and *then* be unrecordable), and at `headless.authorize()` (`model` and
 `actor`, before the hold — see the CAPTURE rule below). **Wire EVERY entry point onto the audit
 path, not the one the defect was found on.** A boundary that guards one sibling and not the other
@@ -636,7 +651,14 @@ wrote `for (let i = 0; i < value.length; i++)` over the caller's array, so the b
 never the bound it iterated to: an element getter that sets `length = 0` made it emit `[0]` where
 `JSON.stringify` emits `[0,null]` — a position silently dropped by the loop whose entire purpose is
 that positions are never dropped — and a `Proxy` that appends on read made it UNBOUNDED, a hang
-inside `appendEvent`. And `abort()` hoisted `auth.estimatedCost` above the VOID on a path that never
+inside `appendEvent`. **An ABSENCE TEST is a read as well**, the same rule one loop down and the
+third time this canonicalizer broke it: the object branch read `obj[key]` once to decide the key was
+present and again to serialize it, so a getter answering defined-then-`undefined` kept the key and
+wrote it as `{"k":null}` — an object value written as null, the one thing the key-ABSENT asymmetry
+forbids. Worse in general: the writer hashes `canonicalize(event)` and persists
+`canonicalize(fullEvent)`, two traversals of the same caller object, so a value that changes between
+them SIGNS ONE SHAPE AND STORES ANOTHER. Snapshot the property into a local before the test — in
+BOTH twins, byte-identically, and re-run the corpus gate, because it touches the hash function. And `abort()` hoisted `auth.estimatedCost` above the VOID on a path that never
 needed it, where a throwing getter stranded an attributed hold and a lying one resized the release
 (`budgetRemaining()` 150_000 against a configured budget of 100_000). Read the bound once into a
 local before the loop; take a released amount from the capture that recorded the increment, never
@@ -662,12 +684,17 @@ throwing accessor refused a discharge that never needed the value. All three ter
 from the capture. **Generalize it, with its current limit stated:** the release rule binds every
 field that decides WHOSE money moves or HOW MUCH — the identity of the transfer and the amount —
 and the handle's copy of such a field is reporting only, exactly as `costCenter` already is.
-It does NOT yet bind the fields that decide the RATE: `settle()` still reads `model` and `endpoint`
-off the handle (headless.ts ~1364, ~1391) and both feed `resolveRates()` → the priced `actualCost`
-that is POSTed, so a handle can settle at a different model's rate than its hold was priced
-against. Neither field is on `AuthorizationCapture` yet. That gap is real, it is ledgered, and it
-is named here rather than papered over — a doc that claims more than its code is the failure this
-very section exists to prevent.
+**It binds the fields that decide the RATE too.** `settle()` read `model` and `endpoint` off the
+handle, and both feed `resolveRates()` → the priced `actualCost` that is POSTed, so a handle could
+settle at a different model's rate than its hold was priced against — and the audit record could be
+relabelled with a model the call never ran. Neither is a judgement call to move: `SettleParams`
+carries no `model` and no `endpoint` field, so no supported flow settles against anything other
+than what it authorized. Both now sit on `AuthorizationCapture`, mirrored from the same locals
+`authorize()` validated and priced with, and `settle()` reads them from there — which also removes
+the last caller accessor that sat between the claim and the POST, where a throwing getter strands
+the hold. The handle keeps its copies, reporting only, exactly as `costCenter` and
+`proxyTransferId` do. `abort()` still reads `auth.model`, deliberately and at the write, behind the
+VOID: it is audit-only there and a discharge must never be blocked by the party being discharged.
 *Prevents:* a boundary that is correct about the value it was shown and irrelevant to the bytes that
 get written — the defect surviving the fix, in a form that reads as fixed.
 
