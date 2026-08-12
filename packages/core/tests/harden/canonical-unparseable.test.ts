@@ -100,9 +100,14 @@ describe("HARDEN: no unparseable line may ever reach the audit log", () => {
 		expect(verifyVault(join(root, VAULT_DIR)).valid).toBe(true);
 	});
 
-	it("a refusal is never silent — the writer degrades and dead-letters the payload", async () => {
-		// This is what makes the new throw survive a caller's bare `.catch(() => {})`:
-		// the drop is recorded by the writer itself, not only by the rejection.
+	it("a refusal degrades the writer and dead-letters the payload", async () => {
+		// Writer-side bookkeeping ONLY. It is deliberately NOT the thing that makes
+		// the refusal reach a caller — the DLQ `payload` is JSON.stringify'd, so it
+		// does not even preserve the function that caused the refusal, and under the
+		// default fail-open config a caller that swallows the rejection still
+		// completes its request. What makes the refusal survive a bare
+		// `.catch(() => {})` is the distinguished error type and the narrowed
+		// catches: see harden/audit-data-invalid-callers.test.ts.
 		await expect(
 			writer.appendEvent({ kind: "action", actor: "sys", data: { params: { f: () => 1 } } }),
 		).rejects.toThrow();

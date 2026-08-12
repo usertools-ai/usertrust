@@ -257,6 +257,14 @@ async function costCenterBalance(tb: TrustTBClient, accountId: bigint): Promise<
  * consumer code and is never discarded: it is warned to the console AND carried
  * on the outcome. Silence here would leave a committed transfer with no record
  * of which allocation lost its event, and no reason for the loss.
+ *
+ * Deliberately NOT narrowed with `isMustRecordAuditFailure`, unlike every
+ * settlement-path audit catch. Two reasons, both specific to this site: the
+ * `data` is three typed values (two `string`s and a `number`) that cannot carry
+ * anything JSON is unable to represent, and this runs AFTER the ledger transfer
+ * committed — rethrowing would tell a caller the allocation failed when it did
+ * not. This catch does not swallow: `auditFailed` and `auditFailureReason` ride
+ * out on the result, which is a stronger signal than a rejection here would be.
  */
 async function appendBudgetEvent(
 	auditWriter: BudgetAuditWriter | undefined,

@@ -23,6 +23,7 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
+import { AuditDataInvalidError } from "../shared/errors.js";
 import type { AuditEvent } from "../shared/types.js";
 import { canonicalize } from "./canonical.js";
 
@@ -58,6 +59,51 @@ export function readDurableEventHash(err: unknown): string | undefined {
 	if (err === null || typeof err !== "object") return undefined;
 	const value = (err as Record<symbol, unknown>)[DURABLE_EVENT_HASH];
 	return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * The `kind` of the audit event an append failed on, stamped onto EVERY error
+ * leaving `appendEvent` — transient failures included.
+ *
+ * It exists for {@link isMustRecordAuditFailure}. A follow-up that promotes,
+ * say, `injection_detected` from best-effort to must-record needs to know which
+ * event failed, and it must be able to learn that from the error alone —
+ * otherwise promotion means re-plumbing every catch site to carry the kind, and
+ * a promotion that expensive does not happen.
+ *
+ * A SYMBOL, for the same reasons as {@link DURABLE_EVENT_HASH}: invisible to
+ * `JSON.stringify` and `Object.keys`, impossible to collide with a real field.
+ */
+const AUDIT_FAILURE_KIND = Symbol.for("usertrust.audit.failureEventKind");
+
+/** Read the audit event kind an append failure was raised for. */
+export function readAuditFailureKind(err: unknown): string | undefined {
+	if (err === null || typeof err !== "object") return undefined;
+	const value = (err as Record<symbol, unknown>)[AUDIT_FAILURE_KIND];
+	return typeof value === "string" ? value : undefined;
+}
+
+/**
+ * THE ONE PLACE that decides whether a failed audit write must fail its caller.
+ *
+ * Every audit catch site in this codebase is written as
+ * `if (isMustRecordAuditFailure(err)) throw err;` before its existing
+ * best-effort handling, so the policy is decided here and nowhere else.
+ *
+ * Today it answers `true` for exactly one thing: {@link AuditDataInvalidError},
+ * a caller bug no retry can fix. It deliberately does NOT answer `true` for
+ * transient failures (disk full, lock contention, a torn write) — converting
+ * those into failed user requests at ~20 call sites is a different outage, not
+ * an improvement.
+ *
+ * HOW TO PROMOTE AN EVENT KIND TO MUST-RECORD (the follow-up this is shaped
+ * for, e.g. making `injection_detected` non-best-effort — a known gap, and
+ * deliberately NOT done here): add the kind to a set and test it against
+ * {@link readAuditFailureKind}, which is already stamped on every error the
+ * writer raises. No call site changes.
+ */
+export function isMustRecordAuditFailure(err: unknown): boolean {
+	return err instanceof AuditDataInvalidError;
 }
 
 export interface AuditWriter {
@@ -448,22 +494,38 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 				sequence,
 			};
 
-			const canonical = canonicalize(event);
-			const hash = createHash("sha256").update(canonical).digest("hex");
+			// ── PRE-FSYNC GUARD ───────────────────────────────────────────────
+			// Everything from here to the `openSync` below decides whether these
+			// bytes may become an audit line at all, and every refusal it makes is
+			// an AuditDataInvalidError — a DISTINGUISHED type, because a caller
+			// must be able to tell "this event can never be written" apart from
+			// "the write did not land this time". See isMustRecordAuditFailure.
 
-			const fullEvent: AuditEvent & { sequence: number } = {
-				...event,
-				hash,
-			};
-
-			// HARDEN: persist the CANONICAL bytes, not JSON.stringify output. The
-			// hash pre-image is `canonicalize(event)`; the verifier recomputes
-			// `sha256(canonicalize(persisted − hash))`. For any value with a
-			// `toJSON` (e.g. Buffer) `JSON.stringify` diverges from `canonicalize`,
-			// which would make an untampered event verify as TAMPERED. canonicalize
-			// is idempotent over its own output, so the bytes hashed equal the bytes
-			// persisted and the verify pkg stays in lockstep (hash format unchanged).
-			const persisted = canonicalize(fullEvent);
+			// canonicalize throws on every value JSON cannot represent (a function,
+			// a symbol, NaN, Infinity). That is a caller bug — no retry writes it —
+			// so it is re-raised as AuditDataInvalidError rather than reaching a
+			// best-effort `.catch()` indistinguishable from a full disk.
+			let persisted: string;
+			let fullEvent: AuditEvent & { sequence: number };
+			try {
+				const canonical = canonicalize(event);
+				const hash = createHash("sha256").update(canonical).digest("hex");
+				fullEvent = { ...event, hash };
+				// HARDEN: persist the CANONICAL bytes, not JSON.stringify output. The
+				// hash pre-image is `canonicalize(event)`; the verifier recomputes
+				// `sha256(canonicalize(persisted − hash))`. For any value with a
+				// `toJSON` (e.g. Buffer) `JSON.stringify` diverges from `canonicalize`,
+				// which would make an untampered event verify as TAMPERED. canonicalize
+				// is idempotent over its own output, so the bytes hashed equal the bytes
+				// persisted and the verify pkg stays in lockstep (hash format unchanged).
+				persisted = canonicalize(fullEvent);
+			} catch (canonErr) {
+				throw new AuditDataInvalidError(
+					`${canonErr instanceof Error ? canonErr.message : String(canonErr)} (event ${event.id})`,
+					input.kind,
+				);
+			}
+			const hash = fullEvent.hash;
 
 			// DEFENSE IN DEPTH: these bytes ARE the audit line, so refuse at the
 			// door anything that cannot be read back. canonicalize now throws on
@@ -477,10 +539,11 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 			try {
 				JSON.parse(persisted);
 			} catch (parseErr) {
-				throw new Error(
-					`audit: refusing to persist canonical bytes that do not parse as JSON (event ${event.id}): ${
+				throw new AuditDataInvalidError(
+					`refusing to persist canonical bytes that do not parse as JSON (event ${event.id}): ${
 						parseErr instanceof Error ? parseErr.message : String(parseErr)
 					}`,
+					input.kind,
 				);
 			}
 
@@ -515,6 +578,17 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 			if (durableHash !== undefined && err !== null && typeof err === "object") {
 				Object.defineProperty(err, DURABLE_EVENT_HASH, {
 					value: durableHash,
+					enumerable: false,
+					writable: false,
+					configurable: true,
+				});
+			}
+			// Stamp the kind on EVERY failure, transient ones included, so a
+			// follow-up can promote a kind to must-record by editing
+			// isMustRecordAuditFailure alone. See AUDIT_FAILURE_KIND.
+			if (err !== null && typeof err === "object") {
+				Object.defineProperty(err, AUDIT_FAILURE_KIND, {
+					value: input.kind,
 					enumerable: false,
 					writable: false,
 					configurable: true,

@@ -20,6 +20,13 @@ export type {
 	SpendVelocityConfig,
 	TokenRateConfig,
 } from "./anomaly/types.js";
+// The ONE predicate that separates "this audit event can never be written"
+// (a caller bug) from "the write did not land this time" (transient). Every
+// audit catch in this SDK asks it before falling back to best-effort handling;
+// it is exported so an embedder's own catch can ask the same question, and so
+// a future promotion of specific event kinds to must-record reaches embedders
+// without them changing a line. @see AuditDataInvalidError
+export { isMustRecordAuditFailure } from "./audit/chain.js";
 export type {
 	MerkleConsistencyProof,
 	MerkleInclusionProof,
@@ -135,6 +142,11 @@ export type { DenialAuditMetadata } from "./shared/errors.js";
 export {
 	AccountNotFoundError,
 	AnomalyError,
+	// The caller-bug half of an audit-write failure: this event can NEVER be
+	// written, as opposed to AuditDegradedError's "the write did not land".
+	// Exported so an embedder's own audit catch can make the same distinction
+	// the SDK's do — with `isMustRecordAuditFailure` as the predicate.
+	AuditDataInvalidError,
 	AuditDegradedError,
 	CredentialAccessDeniedError,
 	IdempotencyConflictError,

@@ -33,7 +33,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
-import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
+import { type AuditWriter, createAuditWriter, isMustRecordAuditFailure } from "./audit/chain.js";
 import {
 	appendDenialEvent,
 	classifyPolicyDenial,
@@ -1429,7 +1429,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 										...costCenterAudit,
 									},
 								})
-								.catch(() => {});
+								.catch((auditErr) => {
+									if (isMustRecordAuditFailure(auditErr)) throw auditErr;
+								});
 							// Feed the anomaly detector so cascading injections trip the breaker.
 							anomalyDetector.observe({
 								kind: "injection",
@@ -1704,7 +1706,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									...costCenterAudit,
 								},
 							})
-							.catch(() => {
+							.catch((auditErr) => {
+								if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 								callAuditDegraded = true;
 							});
 					}
@@ -1739,7 +1742,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									...costCenterAudit,
 								},
 							})
-							.catch(() => {
+							.catch((auditErr) => {
+								if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 								callAuditDegraded = true;
 							});
 					}
@@ -1785,7 +1789,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						data: auditEventData,
 					});
 					auditHash = auditEvent.hash;
-				} catch {
+				} catch (auditErr) {
+					if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 					callAuditDegraded = true;
 				}
 
@@ -1807,7 +1812,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								...costCenterAudit,
 							},
 						})
-						.catch(() => {
+						.catch((auditErr) => {
+							if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 							callAuditDegraded = true;
 						});
 				}
@@ -1910,7 +1916,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							})(),
 						},
 					})
-					.catch(() => {});
+					.catch((auditErr) => {
+						// NOT awaited, so this rethrow surfaces as an UNHANDLED REJECTION.
+						// Deliberate: there is no caller to return to here, and staying quiet
+						// about an event that can NEVER be written is the defect being fixed.
+						if (isMustRecordAuditFailure(auditErr)) throw auditErr;
+					});
 
 				if (proxyConn != null && !isDryRun) {
 					// AUD-460: Use the proxy's transferId for void
@@ -2083,7 +2094,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									...costCenterAudit,
 								},
 							})
-							.catch(() => {});
+							.catch((auditErr) => {
+								// NOT awaited, so this rethrow surfaces as an UNHANDLED REJECTION.
+								// Deliberate: there is no caller to return to here, and staying quiet
+								// about an event that can NEVER be written is the defect being fixed.
+								if (isMustRecordAuditFailure(auditErr)) throw auditErr;
+							});
 						// A1 best-effort mid-stream cutoff (full parity deferred). R1: flag
 						// this as a GOVERNANCE abort BEFORE aborting so the 'abort' handler
 						// VOIDs + records a breaker failure — same ledger + breaker outcome as
@@ -2294,7 +2310,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 											...costCenterAudit,
 										},
 									})
-									.catch(() => {});
+									.catch((auditErr) => {
+										// NOT awaited, so this rethrow surfaces as an UNHANDLED REJECTION.
+										// Deliberate: there is no caller to return to here, and staying quiet
+										// about an event that can NEVER be written is the defect being fixed.
+										if (isMustRecordAuditFailure(auditErr)) throw auditErr;
+									});
 								throw new AnomalyError(
 									verdict.kind,
 									verdict.message,
@@ -2398,7 +2419,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						data: auditData,
 					});
 					auditHash = auditEvent.hash;
-				} catch {
+				} catch (auditErr) {
+					if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 					// Failure mode 15.3: Audit degraded — mark + warn.
 					llmAuditFailed = true;
 					callAuditDegraded = true;
@@ -2460,7 +2482,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 										...costCenterAudit,
 									},
 								})
-								.catch(() => {
+								.catch((auditErr) => {
+									if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 									callAuditDegraded = true;
 								});
 						}
@@ -2479,7 +2502,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									...costCenterAudit,
 								},
 							})
-							.catch(() => {
+							.catch((auditErr) => {
+								if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 								// Audit also degraded — nothing more we can do
 								callAuditDegraded = true;
 							});
@@ -2508,7 +2532,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									...costCenterAudit,
 								},
 							})
-							.catch(() => {
+							.catch((auditErr) => {
+								if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 								callAuditDegraded = true;
 							});
 					}
@@ -2647,7 +2672,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							...costCenterAudit,
 						},
 					})
-					.catch(() => {
+					.catch((auditErr) => {
+						if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 						callAuditDegraded = true;
 					});
 
@@ -2839,7 +2865,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 										...costCenterAudit,
 									},
 								})
-								.catch(() => {});
+								.catch((auditErr) => {
+									if (isMustRecordAuditFailure(auditErr)) throw auditErr;
+								});
 						}
 					}
 
@@ -2962,7 +2990,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						},
 					});
 					auditHash = auditEvent.hash;
-				} catch {
+				} catch (auditErr) {
+					if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 					// Failure mode 15.3: Audit degraded — mark + warn.
 					actionAuditFailed = true;
 					callAuditDegraded = true;
@@ -3012,7 +3041,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									...costCenterAudit,
 								},
 							})
-							.catch(() => {
+							.catch((auditErr) => {
+								if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 								callAuditDegraded = true;
 							});
 					}
@@ -3039,7 +3069,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 									...costCenterAudit,
 								},
 							})
-							.catch(() => {
+							.catch((auditErr) => {
+								if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 								callAuditDegraded = true;
 							});
 					}
@@ -3145,7 +3176,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							...costCenterAudit,
 						},
 					})
-					.catch(() => {
+					.catch((auditErr) => {
+						if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 						callAuditDegraded = true;
 					});
 

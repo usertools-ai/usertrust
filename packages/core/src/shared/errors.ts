@@ -179,6 +179,46 @@ export class AuditDegradedError extends Error {
 	}
 }
 
+/**
+ * The audit event cannot be canonically represented AT ALL — a CALLER BUG, and
+ * categorically not the transient write failure `AuditDegradedError` covers.
+ *
+ * The line matters because best-effort audit sites legitimately tolerate
+ * transient failure: losing one advisory audit line to a full disk must not
+ * fail a user's request, which is what a `.catch(() => {})` was written for.
+ * This is the other thing entirely — not "the write did not land this time"
+ * but "this event can NEVER be written, and the caller believes it was".
+ * Swallowing that reports success over material the system could not handle,
+ * which is the canonicalizer defect relocated from the writer to the caller.
+ *
+ * So the two must never share a catch. Every audit catch site in this codebase
+ * asks {@link isMustRecordAuditFailure} first and rethrows when it answers
+ * `true`; the transient tolerance those sites want is preserved untouched.
+ *
+ * @see isMustRecordAuditFailure — the ONE place that decides "must record".
+ */
+export class AuditDataInvalidError extends Error {
+	public readonly cause_message: string;
+	/** The `kind` of the audit event that could not be written. */
+	public readonly eventKind: string;
+	public readonly hint: string;
+	public readonly docsUrl: string;
+
+	constructor(reason: string, eventKind: string) {
+		const hint =
+			"An audit event carried a value JSON cannot represent (a function, a symbol, NaN or Infinity). Fix the value at the call site — no retry can write this event.";
+		const docsUrl = "https://usertrust.ai/docs/errors/audit-data-invalid";
+		super(
+			`Audit data invalid (event kind "${eventKind}"): ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`,
+		);
+		this.name = "AuditDataInvalidError";
+		this.cause_message = reason;
+		this.eventKind = eventKind;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
+	}
+}
+
 export class CredentialAccessDeniedError extends Error {
 	public readonly credentialName: string;
 	public readonly reason: string;

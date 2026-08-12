@@ -536,8 +536,30 @@ the pre-image lost, so it is neither repairable nor distinguishable from real ta
 **`appendEvent` `JSON.parse`-validates the canonical bytes BEFORE the fsync** and refuses the
 append if they do not parse. Unreachable through the canonicalizer by design — that is the point:
 the writer must not depend on a serializer staying correct. Changes no hash (the check reads bytes
-that `hash` already covers), and a refusal still degrades the writer and dead-letters the payload,
-so a caller's `.catch(() => {})` cannot turn it into a silent drop.
+that `hash` already covers).
+
+**A refusal to canonicalize is `AuditDataInvalidError`, and no catch may swallow it.** The whole
+pre-fsync guard — the `canonicalize` calls and the `JSON.parse` check — raises that one type, which
+splits an audit-write failure in two. *Transient* (disk full, lock contention, a torn write) is what
+a best-effort `.catch(() => {})` was written for and stays tolerated: losing one advisory audit line
+must not fail a user's request. *Caller bug* (data that cannot be canonically represented at all) is
+categorically different — not "the write did not land this time" but "this event can NEVER be
+written, and the caller believes it was" — so **every** audit catch site in `govern.ts` and
+`headless.ts` opens with `if (isMustRecordAuditFailure(err)) throw err;` before its existing
+handling. `isMustRecordAuditFailure` is the ONE place that decides, and `appendEvent` stamps the
+event `kind` on every error it raises, so promoting specific kinds from best-effort to must-record
+(e.g. `injection_detected`, today fire-and-forget) edits that predicate and no call site.
+*Prevents:* the relocated defect. `audit.failClosed` defaults to **false**, so before the narrowing
+a `governAction({ params: { f: () => 1 } })` threw inside `appendEvent`, was swallowed by the
+action's `catch`, and still ran `releaseHoldAndCommit()` and `cb.recordSuccess()` — reporting
+success, with a receipt whose `auditHash` had no chain event behind it.
+*Two sites are deliberately NOT narrowed, both documented at the site:* `appendDenialEvent`
+(a denial reports failure and moved no money, so escalating would only replace a typed denial with
+an audit error) and `appendBudgetEvent` (runs after the transfer committed and already surfaces
+`auditFailed` on its result). Note what a refusal is NOT: under the default fail-open config the
+caller's request still completes unless the catch rethrows — a `degraded` flag, a stderr line, and
+a DLQ record (whose `payload` is `JSON.stringify`'d, so it does not preserve the offending
+function or symbol) are not a substitute for the throw reaching the caller.
 
 **Merkle hashing is RFC 6962 domain-separated.** Leaves `SHA-256(0x00 ‖ data)`, internal nodes
 `SHA-256(0x01 ‖ left ‖ right)`. **Odd nodes are promoted, not duplicated** — this avoids

@@ -256,6 +256,15 @@ function buildLedgerRejectedData(
  * The writer has already dead-lettered the payload by the time it throws; all
  * that is left to record is that the record is missing, which is what
  * `auditDegraded` says.
+ *
+ * That flatness is why this catch is deliberately NOT narrowed with
+ * `isMustRecordAuditFailure` the way every settlement-path audit catch is. The
+ * harm that narrowing prevents is reporting SUCCESS over an event that can
+ * never be written; a denial reports failure, moved no money, and its payload
+ * is built here from typed fields and `safeErrorText` — there is no caller
+ * value in it to be unrepresentable. Rethrowing would only replace the typed
+ * denial the operator needs with an audit error, which is the outcome the
+ * paragraph above rejects.
  */
 export async function appendDenialEvent(args: AppendDenialEventArgs): Promise<void> {
 	const { audit, actor, error, record, fields } = args;

@@ -42,7 +42,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
-import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
+import { type AuditWriter, createAuditWriter, isMustRecordAuditFailure } from "./audit/chain.js";
 import {
 	appendDenialEvent,
 	classifyPolicyDenial,
@@ -1334,7 +1334,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 								...costCenterAudit,
 							},
 						})
-						.catch(() => {
+						.catch((auditErr) => {
+							if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 							callAuditDegraded = true;
 						});
 				}
@@ -1369,7 +1370,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 								...costCenterAudit,
 							},
 						})
-						.catch(() => {
+						.catch((auditErr) => {
+							if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 							callAuditDegraded = true;
 						});
 				}
@@ -1408,7 +1410,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					},
 				});
 				auditHash = auditEvent.hash;
-			} catch {
+			} catch (auditErr) {
+				if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 				callAuditDegraded = true;
 			}
 
@@ -1430,7 +1433,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							...costCenterAudit,
 						},
 					})
-					.catch(() => {
+					.catch((auditErr) => {
+						if (isMustRecordAuditFailure(auditErr)) throw auditErr;
 						callAuditDegraded = true;
 					});
 			}
@@ -1595,7 +1599,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
 					},
 				})
-				.catch(() => {});
+				.catch((auditErr) => {
+					if (isMustRecordAuditFailure(auditErr)) throw auditErr;
+				});
 		},
 
 		async destroy(): Promise<void> {
