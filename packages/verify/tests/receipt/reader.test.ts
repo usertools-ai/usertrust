@@ -64,6 +64,7 @@ const REFUSED_SCHEMA: readonly string[] = [
 	"schema/non-integer",
 	"schema/negative-zero",
 	"schema/unsafe-integer",
+	"schema/fractional-token-rounds-to-integer",
 	"schema/unknown-top-level-field",
 	"schema/unknown-projection-field",
 	"schema/duplicate-projection-copy",
@@ -257,6 +258,45 @@ describe("the frozen numeric rules (§3 step 4)", () => {
 			path: "a.0.n",
 			value: Number.POSITIVE_INFINITY,
 		});
+	});
+
+	it("rejects a fractional TOKEN the parser rounds to a legal integer — before it is rounded", () => {
+		// The reason the pre-parse scan exists: information the parser destroys
+		// has to be checked before it is destroyed. `1.00000000000000001` has no
+		// double representation, so `JSON.parse` hands back exactly 1 and every
+		// value-level frozen check answers about a number the bytes never carried.
+		const rounded = JSON.parse('{"n":1.00000000000000001}') as { n: number };
+		expect(rounded.n).toBe(1);
+		expect(Number.isSafeInteger(rounded.n)).toBe(true);
+		// The value-level scan is blind to it by construction — not a defect of
+		// that function, a statement of what it can and cannot be asked.
+		expect(findNonFrozenNumber(rounded)).toBeNull();
+		// The scan over the TEXT is not.
+		const scan = scanJsonForDuplicateKeys('{"n":1.00000000000000001}', { frozenNumbers: true });
+		expect(scan.ok).toBe(false);
+		expect(scan.ok === false && scan.kind).toBe("numeric");
+	});
+
+	it("refuses the rounding receipt end to end, and still accepts the clean one", () => {
+		const attack = readReceiptDocument(
+			receiptBytesOf(vector("schema/fractional-token-rounds-to-integer")),
+		);
+		expect(attack.ok).toBe(false);
+		// FAILED / SCHEMA_INVALID (exit 1), not UNVERIFIABLE: the bytes parsed,
+		// and what they said is illegal.
+		expect(attack.ok === false && attack.refusal.kind).toBe("schema");
+		expect(attack.ok === false && attack.refusal.detail).toMatch(/non-integer/);
+		// No false positive: the same reader still accepts the untouched receipt.
+		expect(readReceiptDocument(mint().receiptBytes).ok).toBe(true);
+	});
+
+	it("leaves fractional literals ALONE where the frozen rules do not govern (§4)", () => {
+		// The §8 snapshot tolerates unknown members precisely so the open
+		// signing scheme can add them, and one may legitimately carry a
+		// fraction. Turning the frozen rules on for every document would brick
+		// it; they are the RECEIPT's rules.
+		expect(scanJsonForDuplicateKeys('{"n":1.5}').ok).toBe(true);
+		expect(scanJsonForDuplicateKeys('{"n":-0}').ok).toBe(true);
 	});
 
 	it("names the RULE it broke, not just the path — the refusal has to be actionable", () => {

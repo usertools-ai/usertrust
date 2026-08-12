@@ -807,6 +807,55 @@ describe("the last few reads a hostile document can bend", () => {
 		}
 	});
 
+	it("refuses an EMPTY required string — present-and-blank is not present", () => {
+		// Every one of these is SIGNED: the harness mints the empty value, so the
+		// preimage covers it, `event.hash` recomputes and the mint signature
+		// verifies. `typeof value === "string"` alone therefore hands a verdict of
+		// VERIFIED to a receipt with no session, no mint time and no repository —
+		// the §12/§2 identities the document exists to carry.
+		expect(
+			verifyMinted({ receiptBeforeSign: (r) => ({ ...r, mintedAt: "" }) }).failure,
+		).toMatchObject({ step: "schema", code: "SCHEMA_INVALID" });
+		expect(
+			verifyMinted({
+				receiptBeforeSign: (r) => ({
+					...r,
+					minter: { ...(r.minter as Record<string, unknown>), trustDomain: "" },
+				}),
+			}).failure,
+		).toMatchObject({ step: "schema", code: "SCHEMA_INVALID" });
+		expect(
+			verifyMinted({
+				projection: (p: Projection) => ({ ...p, sessionId: "" }),
+			}).failure,
+		).toMatchObject({ step: "semantics", code: "SEMANTIC_INVALID" });
+		expect(
+			verifyMinted({
+				projection: (p: Projection) => {
+					(p.work as Record<string, unknown>).repoId = "";
+					return p;
+				},
+			}).failure,
+		).toMatchObject({ step: "semantics", code: "SEMANTIC_INVALID" });
+	});
+
+	it("refuses a checkpoint key the snapshot registers for another algorithm", () => {
+		// The mint path binds `key.alg` to the receipt's `ed25519` (step 4). The
+		// checkpoint path verifies Ed25519 unconditionally, so a snapshot saying
+		// `ecdsa-p256` over Ed25519 material is silently overruled by the
+		// verifier's preference. Conflicting trust metadata is a refusal: §8's
+		// ambiguity rule, and the only reading under which the snapshot means
+		// what it says.
+		const actual = verifyMinted({
+			snapshot: (s) => {
+				const key = s.keys.find((k) => k.role === "checkpoint");
+				if (key !== undefined) key.alg = "ecdsa-p256";
+				return s;
+			},
+		});
+		expect(actual.failure).toMatchObject({ step: "checkpoint", code: "CHECKPOINT_INVALID" });
+	});
+
 	it("refuses a signature whose base64 is non-canonical before the helper sees it", () => {
 		// `Buffer.from(x, "base64")` decodes this to the SAME 64 bytes, so the
 		// reused Ed25519 helper would verify it happily — which is why the check

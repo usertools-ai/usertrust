@@ -920,8 +920,8 @@ Drop every line whose raw text contains `from "`, then require exact string equa
   lines **are** compared, so both packages must import the same names in the same order and may
   differ only in the module path.
 
-Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 7500 (a
-vendoring tripwire, raised 4200→6500→7200→7500 as `packages/verify` grew legitimate node-builtins-only
+Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 7800 (a
+vendoring tripwire, raised 4200→6500→7200→7500→7800 as `packages/verify` grew legitimate node-builtins-only
 surface — see `packages/core/tests/harden/anchoring/anchor-additive.test.ts` assertion 6 for the
 full raise history and rationale; raising it again should prompt "what was added?"), and the differential suites assert
 that core and verify produce identical verdicts *and identical error strings* on clean,

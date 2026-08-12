@@ -16,7 +16,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -33,6 +33,7 @@ import {
 	resolveEnvelope,
 	runReceiptCli,
 	SUPERSESSION_CAVEAT,
+	writeAllSync,
 } from "../../src/receipt-cli.js";
 import {
 	ALT_RECEIPT_ID,
@@ -157,6 +158,39 @@ describe("parseReceiptArgs", () => {
 	it("recognizes --help / -h", () => {
 		expect(parseReceiptArgs(["--help"])).toEqual({ kind: "help" });
 		expect(parseReceiptArgs(["-h"])).toEqual({ kind: "help" });
+	});
+
+	it("treats an OPTION token where a value is required as a MISSING value", () => {
+		// `--trust --help` is a typo, and swallowing the option token turns it
+		// into a filename: the tool then reports UNVERIFIABLE (exit 2, "the
+		// snapshot could not be read") for what is a usage error (exit 3), and
+		// `--help` — the one flag whose whole job is to answer immediately —
+		// silently does nothing. Same for `--expect-id`, where the swallowed
+		// token would become the arrival context.
+		for (const argv of [
+			["receipt.json", "--trust", "--help"],
+			["receipt.json", "--trust", "--json"],
+			["receipt.json", "--trust", "-h"],
+		]) {
+			expect(parseReceiptArgs(argv), argv.join(" ")).toEqual({
+				kind: "error",
+				message: "--trust requires a value",
+			});
+		}
+		expect(
+			parseReceiptArgs(["receipt.json", "--trust", "t.json", "--expect-id", "--json"]),
+		).toEqual({ kind: "error", message: "--expect-id requires a value" });
+		// A bare `-` is NOT an option token — it is the stdin filename, and the
+		// rule must not grow into a general "starts with a dash" ban.
+		expect(parseReceiptArgs(["-", "--trust", "t.json"])).toMatchObject({ kind: "ok" });
+	});
+
+	it("exits 3, not 2, when a value-flag swallows an option token", () => {
+		// The end-to-end half: the usage error must reach the exit code, since
+		// that is the CI contract the split exists for.
+		const result = runReceiptCli(["receipt.json", "--trust", "--help"], ioFor(mint()));
+		expect(result.exitCode).toBe(3);
+		expect(result.stderr).toContain("--trust requires a value");
 	});
 });
 
@@ -394,6 +428,62 @@ describe("--envelope", () => {
 		const report = jsonReport(result as { stdout: string });
 		expect(report.verdict).toBe("FAILED");
 		expect(report.failure?.step).toBe("envelope");
+	});
+
+	it("a copy that differs from the bytes ONLY by `-0` is still a disagreement", () => {
+		// R4 compares the strict-parsed BYTES against the convenience copy, and a
+		// canonical-string comparison cannot express this: §13's serializer
+		// renders `-0` as `0` (as does `JSON.stringify`), so the two documents
+		// canonicalize identically and the check reports agreement about two
+		// objects that are not the same object. `Object.is` is the only
+		// separator, and the copy is what a consumer reads — the whole reason R4
+		// exists is that the resolver can make the two disagree.
+		const bundle = mint({
+			projection: (p) => {
+				(p.spend as Record<string, unknown>).roundingAdjustment = 0;
+				return p;
+			},
+		});
+		const raw = JSON.stringify(bundle.envelope);
+		// Text surgery, not an object patch: `JSON.stringify` would erase the
+		// sign on the way out, so only the wire form can carry this vector.
+		const tampered = raw.replace('"roundingAdjustment":0', '"roundingAdjustment":-0');
+		expect(tampered).not.toBe(raw);
+
+		const outcome = resolveEnvelope(Buffer.from(tampered, "utf8"));
+		expect(outcome.kind).toBe("failed");
+		if (outcome.kind === "failed") {
+			expect(outcome.code).toBe("ENVELOPE_INVALID");
+			expect(outcome.detail).toContain("bytes↔copy");
+		}
+
+		const io = memoryIo({
+			"trust.json": bundle.snapshotBytes,
+			"envelope.json": Buffer.from(tampered, "utf8"),
+		});
+		const report = jsonReport(
+			runReceiptCli(["envelope.json", "--trust", "trust.json", "--envelope", "--json"], io),
+		);
+		expect(report.verdict).toBe("FAILED");
+		expect(report.failure?.step).toBe("envelope");
+	});
+
+	it("still accepts a copy whose KEY ORDER differs — order is not a disagreement", () => {
+		// The other direction, and the reason R4 was structural in the first
+		// place: the resolver may serialize its convenience copy in any order.
+		// Tightening the comparison must not turn that into an integrity failure.
+		const bundle = mint();
+		const copy = JSON.parse(bundle.receiptBytes.toString("utf8")) as Record<string, unknown>;
+		const reordered = Object.fromEntries(Object.entries(copy).reverse());
+		const io = memoryIo({
+			"trust.json": bundle.snapshotBytes,
+			"envelope.json": Buffer.from(
+				JSON.stringify({ ...bundle.envelope, receipt: reordered }),
+				"utf8",
+			),
+		});
+		const result = runReceiptCli(["envelope.json", "--trust", "trust.json", "--envelope"], io);
+		expect(result.exitCode).toBe(0);
 	});
 
 	it("anchorEvidence PRESENT is reported OUT OF BAND — omitted from checks, named in unimplemented, never a §7 value", () => {
@@ -756,6 +846,47 @@ describe("cli.ts dispatch", () => {
 	afterEach(() => {
 		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 	});
+
+	it("writeAllSync hands every byte to the OS before it returns", () => {
+		// `process.exit()` terminates the process without draining an
+		// unflushed stream, and on a POSIX PIPE — which is exactly what
+		// `usertrust-verify … --json | jq` creates — `process.stdout.write` is
+		// asynchronous. A report can therefore be truncated mid-JSON while the
+		// exit code says 0, which is the worst possible pairing: a consumer that
+		// checks the code gets a parse error, and one that does not gets half a
+		// verdict. Writing to the fd SYNCHRONOUSLY is what makes the subsequent
+		// exit safe, and a partial write (short count, or EAGAIN on a
+		// non-blocking pipe) has to be resumed, not dropped.
+		const dir = mkdtempSync(join(tmpdir(), "receipt-cli-flush-"));
+		dirs.push(dir);
+		const path = join(dir, "out.txt");
+		// Larger than any pipe buffer, so a single `write(2)` cannot satisfy it.
+		const payload = `${"verdict ".repeat(200_000)}\n`;
+		const fd = openSync(path, "w");
+		try {
+			writeAllSync(fd, payload);
+			writeAllSync(fd, ""); // a no-op, not a zero-length write
+		} finally {
+			closeSync(fd);
+		}
+		expect(readFileSync(path, "utf-8")).toBe(payload);
+	});
+
+	it("--json survives a PIPE intact: whole object on stdout, exit code preserved", () => {
+		// The `| jq` contract, end to end through the real entry point with
+		// stdout as a pipe (spawnSync always gives it one).
+		const { receipt, trust } = tmpBundle();
+		const res = spawnSync("npx", ["tsx", cli, "receipt", receipt, "--trust", trust, "--json"], {
+			cwd: repoRoot,
+			encoding: "utf-8",
+		});
+		expect(res.status).toBe(0);
+		const report = JSON.parse(res.stdout) as ReceiptCliReport;
+		expect(report.verdict).toBe("VERIFIED_CHECKPOINT");
+		expect(report.reportVersion).toBe(1);
+		// stdout carries the JSON and NOTHING else (CLI spec §6).
+		expect(res.stdout.trimEnd().endsWith("}")).toBe(true);
+	}, 30_000);
 
 	function tmpBundle(): { dir: string; receipt: string; trust: string } {
 		const dir = mkdtempSync(join(tmpdir(), "receipt-cli-dispatch-"));

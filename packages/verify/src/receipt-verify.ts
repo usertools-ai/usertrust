@@ -131,30 +131,62 @@ export function decodeUtf8Strict(bytes: Uint8Array): string | null {
  */
 const MAX_JSON_DEPTH = 128;
 
+/**
+ * `syntax` — the bytes are not a JSON document (UNVERIFIABLE: the material
+ * never arrived). `numeric` — they ARE a document, and a numeric LITERAL in it
+ * breaks §3's frozen rules (FAILED / `SCHEMA_INVALID`: a real negative answer).
+ * CLI spec §5's table makes that line decide the exit code, so the scan has to
+ * carry the class rather than let the caller guess it from the wording.
+ */
+export type JsonScanFailureKind = "syntax" | "numeric";
+
 export type JsonScanResult =
 	| { readonly ok: true }
-	| { readonly ok: false; readonly detail: string };
+	| { readonly ok: false; readonly kind: JsonScanFailureKind; readonly detail: string };
+
+export interface JsonScanOptions {
+	/**
+	 * Apply §3's frozen numeric rules to every numeric LITERAL. Off by default:
+	 * the frozen rules are the RECEIPT's (CLI spec §3 step 4). The §8 snapshot
+	 * tolerates unknown members precisely so the open signing scheme can add
+	 * them (§4), and the resolver's envelope is not a ut1 document at all.
+	 */
+	readonly frozenNumbers?: boolean;
+}
 
 const WHITESPACE = new Set([" ", "\t", "\n", "\r"]);
 const HEX_DIGIT = /^[0-9a-fA-F]$/;
 
+/** A scan failure carrying its class up through the recursive descent. */
+interface ScanFailure {
+	readonly kind: JsonScanFailureKind;
+	readonly detail: string;
+}
+
 class JsonScanner {
 	private pos = 0;
 
-	constructor(private readonly text: string) {}
+	constructor(
+		private readonly text: string,
+		private readonly frozenNumbers: boolean,
+	) {}
 
 	scan(): JsonScanResult {
 		if (this.text.charCodeAt(0) === 0xfeff) {
 			// Named explicitly. "unexpected character" would be true and useless:
 			// the operator needs to know the BOM was RETAINED and rejected, not
 			// that something invisible was somewhere.
-			return { ok: false, detail: "byte-order mark at offset 0: canonical JSON carries none" };
+			return {
+				ok: false,
+				kind: "syntax",
+				detail: "byte-order mark at offset 0: canonical JSON carries none",
+			};
 		}
 		const failure = this.value(0, "$");
-		if (failure !== null) return { ok: false, detail: failure };
+		if (failure !== null) return { ok: false, ...failure };
 		this.whitespace();
 		if (this.pos !== this.text.length) {
-			return { ok: false, detail: `trailing content at offset ${this.pos}` };
+			return { ok: false, kind: "syntax", detail: `trailing content at offset ${this.pos}` };
 		}
 		return { ok: true };
 	}
@@ -165,28 +197,28 @@ class JsonScanner {
 		}
 	}
 
-	/** Returns a failure detail, or `null` when one well-formed value was consumed. */
-	private value(depth: number, path: string): string | null {
+	/** Returns a failure, or `null` when one well-formed value was consumed. */
+	private value(depth: number, path: string): ScanFailure | null {
 		if (depth > MAX_JSON_DEPTH) {
-			return `nesting deeper than ${MAX_JSON_DEPTH} at ${path}`;
+			return syntax(`nesting deeper than ${MAX_JSON_DEPTH} at ${path}`);
 		}
 		this.whitespace();
 		const ch = this.text[this.pos];
-		if (ch === undefined) return `unexpected end of input at offset ${this.pos}`;
+		if (ch === undefined) return syntax(`unexpected end of input at offset ${this.pos}`);
 		if (ch === "{") return this.object(depth, path);
 		if (ch === "[") return this.array(depth, path);
 		if (ch === '"') return this.string();
-		if (ch === "-" || (ch >= "0" && ch <= "9")) return this.number();
+		if (ch === "-" || (ch >= "0" && ch <= "9")) return this.number(path);
 		for (const literal of ["true", "false", "null"]) {
 			if (this.text.startsWith(literal, this.pos)) {
 				this.pos += literal.length;
 				return null;
 			}
 		}
-		return `unexpected character ${JSON.stringify(ch)} at offset ${this.pos}`;
+		return syntax(`unexpected character ${JSON.stringify(ch)} at offset ${this.pos}`);
 	}
 
-	private object(depth: number, path: string): string | null {
+	private object(depth: number, path: string): ScanFailure | null {
 		this.pos += 1; // "{"
 		const seen = new Set<string>();
 		this.whitespace();
@@ -197,18 +229,18 @@ class JsonScanner {
 		for (;;) {
 			this.whitespace();
 			if (this.text[this.pos] !== '"') {
-				return `expected a member name at offset ${this.pos}`;
+				return syntax(`expected a member name at offset ${this.pos}`);
 			}
 			const start = this.pos;
 			const stringFailure = this.string();
 			if (stringFailure !== null) return stringFailure;
 			const key = JSON.parse(this.text.slice(start, this.pos)) as string;
 			if (seen.has(key)) {
-				return `duplicate JSON key ${JSON.stringify(key)} at ${path}`;
+				return syntax(`duplicate JSON key ${JSON.stringify(key)} at ${path}`);
 			}
 			seen.add(key);
 			this.whitespace();
-			if (this.text[this.pos] !== ":") return `expected ':' at offset ${this.pos}`;
+			if (this.text[this.pos] !== ":") return syntax(`expected ':' at offset ${this.pos}`);
 			this.pos += 1;
 			const valueFailure = this.value(depth + 1, `${path}.${key}`);
 			if (valueFailure !== null) return valueFailure;
@@ -222,11 +254,11 @@ class JsonScanner {
 				this.pos += 1;
 				return null;
 			}
-			return `expected ',' or '}' at offset ${this.pos}`;
+			return syntax(`expected ',' or '}' at offset ${this.pos}`);
 		}
 	}
 
-	private array(depth: number, path: string): string | null {
+	private array(depth: number, path: string): ScanFailure | null {
 		this.pos += 1; // "["
 		this.whitespace();
 		if (this.text[this.pos] === "]") {
@@ -248,46 +280,63 @@ class JsonScanner {
 				this.pos += 1;
 				return null;
 			}
-			return `expected ',' or ']' at offset ${this.pos}`;
+			return syntax(`expected ',' or ']' at offset ${this.pos}`);
 		}
 	}
 
-	private string(): string | null {
+	private string(): ScanFailure | null {
 		this.pos += 1; // opening quote
 		for (;;) {
 			const ch = this.text[this.pos];
-			if (ch === undefined) return `unterminated string at offset ${this.pos}`;
+			if (ch === undefined) return syntax(`unterminated string at offset ${this.pos}`);
 			if (ch === '"') {
 				this.pos += 1;
 				return null;
 			}
 			if (ch === "\\") {
 				const escaped = this.text[this.pos + 1];
-				if (escaped === undefined) return `unterminated escape at offset ${this.pos}`;
+				if (escaped === undefined) return syntax(`unterminated escape at offset ${this.pos}`);
 				if (escaped === "u") {
 					for (let i = 2; i < 6; i += 1) {
 						const digit = this.text[this.pos + i];
 						if (digit === undefined || !HEX_DIGIT.test(digit)) {
-							return `invalid \\u escape at offset ${this.pos}`;
+							return syntax(`invalid \\u escape at offset ${this.pos}`);
 						}
 					}
 					this.pos += 6;
 					continue;
 				}
 				if (!'"\\/bfnrt'.includes(escaped)) {
-					return `invalid escape ${JSON.stringify(escaped)} at offset ${this.pos}`;
+					return syntax(`invalid escape ${JSON.stringify(escaped)} at offset ${this.pos}`);
 				}
 				this.pos += 2;
 				continue;
 			}
 			if (ch.charCodeAt(0) < 0x20) {
-				return `raw control character in string at offset ${this.pos}`;
+				return syntax(`raw control character in string at offset ${this.pos}`);
 			}
 			this.pos += 1;
 		}
 	}
 
-	private number(): string | null {
+	/**
+	 * The JSON number grammar — and, when the frozen rules are on, §3 step 4
+	 * applied to the LITERAL rather than to what the parser makes of it.
+	 *
+	 * That distinction is the whole point of scanning the text. `JSON.parse`
+	 * ROUNDS: `1.00000000000000001` has no double representation, so it comes
+	 * back as exactly `1`, and every value-level check afterwards —
+	 * `Number.isInteger`, `Number.isSafeInteger`, `Object.is(n, -0)` — is asking
+	 * about a number the document never carried. Worse, everything downstream
+	 * then agrees: `canonicalize` re-serializes the ROUNDED value, so the event
+	 * hash recomputes, the §5 signature verifies, and the receipt is reported
+	 * VERIFIED while its bytes say something §13 forbids. Information the parser
+	 * destroys has to be checked before it is destroyed.
+	 *
+	 * The classification below reuses `describeNumberViolation`'s vocabulary so
+	 * one rule reads the same wherever it is enforced.
+	 */
+	private number(path: string): ScanFailure | null {
 		const start = this.pos;
 		if (this.text[this.pos] === "-") this.pos += 1;
 		if (this.text[this.pos] === "0") {
@@ -295,23 +344,44 @@ class JsonScanner {
 		} else {
 			const first = this.text[this.pos];
 			if (first === undefined || first < "1" || first > "9") {
-				return `invalid number at offset ${start}`;
+				return syntax(`invalid number at offset ${start}`);
 			}
 			while (this.isDigit(this.text[this.pos])) this.pos += 1;
 		}
+		// A fraction or an exponent means the literal is not an integer literal,
+		// whatever value it rounds to. `1e999` (Infinity) and `1e2` (100) are
+		// both refused, and both are correct: §2 declares no fractional domain
+		// and §13's canonical form for an integer never carries an exponent.
+		let fractional = false;
 		if (this.text[this.pos] === ".") {
+			fractional = true;
 			this.pos += 1;
-			if (!this.isDigit(this.text[this.pos])) return `invalid number at offset ${start}`;
+			if (!this.isDigit(this.text[this.pos])) return syntax(`invalid number at offset ${start}`);
 			while (this.isDigit(this.text[this.pos])) this.pos += 1;
 		}
 		const exponent = this.text[this.pos];
 		if (exponent === "e" || exponent === "E") {
+			fractional = true;
 			this.pos += 1;
 			const sign = this.text[this.pos];
 			if (sign === "+" || sign === "-") this.pos += 1;
-			if (!this.isDigit(this.text[this.pos])) return `invalid number at offset ${start}`;
+			if (!this.isDigit(this.text[this.pos])) return syntax(`invalid number at offset ${start}`);
 			while (this.isDigit(this.text[this.pos])) this.pos += 1;
 		}
+		if (!this.frozenNumbers) return null;
+
+		const literal = this.text.slice(start, this.pos);
+		const value = Number(literal);
+		const numeric = (rule: string): ScanFailure => ({
+			kind: "numeric",
+			detail: `${rule} at ${path} (literal ${literal})`,
+		});
+		// Ordered so each refusal names the rule an operator can act on, not
+		// merely the first clause that happened to catch it.
+		if (!Number.isFinite(value)) return numeric("non-finite number");
+		if (Object.is(value, -0)) return numeric("negative zero");
+		if (fractional) return numeric("non-integer number");
+		if (!Number.isSafeInteger(value)) return numeric("integer outside the safe range");
 		return null;
 	}
 
@@ -320,8 +390,15 @@ class JsonScanner {
 	}
 }
 
-export function scanJsonForDuplicateKeys(text: string): JsonScanResult {
-	return new JsonScanner(text).scan();
+function syntax(detail: string): ScanFailure {
+	return { kind: "syntax", detail };
+}
+
+export function scanJsonForDuplicateKeys(
+	text: string,
+	options: JsonScanOptions = {},
+): JsonScanResult {
+	return new JsonScanner(text, options.frozenNumbers === true).scan();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -396,6 +473,46 @@ export function findNonFrozenNumber(value: unknown, path = ""): NumberViolation 
  */
 export function findNonFiniteNumber(value: unknown, path = ""): NumberViolation | null {
 	return findNumber(value, (n) => !Number.isFinite(n), path);
+}
+
+/**
+ * Structural equality over two STRICT-PARSED JSON values (CLI spec §3's R4).
+ *
+ * Key ORDER is not a disagreement — the resolver may serialize its convenience
+ * copy however it likes — but everything else is, and that is why this is not
+ * a canonical-string comparison. `canonicalize` is a serializer, and a
+ * serializer's job is to erase distinctions: it renders `-0` as `0` (§13, and
+ * `JSON.stringify` too), so two documents that are not the same document
+ * produce the same string and R4 reports agreement about them. `Object.is` is
+ * the only thing that separates the two, and the copy is what a consumer
+ * reads. Comparing structurally also keeps `canonicalize` off this path
+ * entirely, so a hostile `1e999` in the copy is a disagreement rather than a
+ * throw — a throw is never a verdict here (§7).
+ *
+ * Total on `readStrictJson` output: no cycles (JSON has none), no `undefined`
+ * (JSON.parse produces none), and depth is already bounded by the scanner.
+ */
+export function structurallyEqualJson(a: JsonValue, b: JsonValue): boolean {
+	if (typeof a === "number" || typeof b === "number") {
+		return typeof a === "number" && typeof b === "number" && Object.is(a, b);
+	}
+	if (Array.isArray(a) || Array.isArray(b)) {
+		if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+		return a.every((entry, index) => structurallyEqualJson(entry, b[index] as JsonValue));
+	}
+	if (isJsonObject(a) || isJsonObject(b)) {
+		if (!isJsonObject(a) || !isJsonObject(b)) return false;
+		const keys = Object.keys(a);
+		if (keys.length !== Object.keys(b).length) return false;
+		// Duplicate keys are already refused by the scan, so a matching key COUNT
+		// plus per-key presence is a set comparison.
+		return keys.every(
+			(key) =>
+				Object.hasOwn(b, key) && structurallyEqualJson(a[key] as JsonValue, b[key] as JsonValue),
+		);
+	}
+	// string | boolean | null — `===` separates every pair of these.
+	return a === b;
 }
 
 export function describeNumberViolation(value: number): string {
@@ -692,13 +809,24 @@ function schemaRefusal(detail: string): ReadOutcome<never> {
 	return { ok: false, refusal: { kind: "schema", detail } };
 }
 
-/** Bytes → a JSON value, with fatal UTF-8, retained BOM and duplicate-key rejection. */
-export function readStrictJson(bytes: Uint8Array): ReadOutcome<JsonValue> {
+/**
+ * Bytes → a JSON value, with fatal UTF-8, retained BOM and duplicate-key
+ * rejection. With `frozenNumbers`, §3 step 4 is applied to every numeric
+ * LITERAL as well — and a literal that breaks it is a SCHEMA refusal, not an
+ * unparseable one: the bytes did become a document, and what it says is
+ * illegal (CLI spec §5's table, which is what picks the exit code).
+ */
+export function readStrictJson(
+	bytes: Uint8Array,
+	options: JsonScanOptions = {},
+): ReadOutcome<JsonValue> {
 	const text = decodeUtf8Strict(bytes);
 	if (text === null) return unparseable("not valid UTF-8 (decoded fatally, BOM retained)");
 
-	const scan = scanJsonForDuplicateKeys(text);
-	if (!scan.ok) return unparseable(scan.detail);
+	const scan = scanJsonForDuplicateKeys(text, options);
+	if (!scan.ok) {
+		return scan.kind === "numeric" ? schemaRefusal(scan.detail) : unparseable(scan.detail);
+	}
 
 	let parsed: JsonValue;
 	try {
@@ -719,7 +847,11 @@ export function readStrictJson(bytes: Uint8Array): ReadOutcome<JsonValue> {
  * parsed `receipt` copy (verify-page §4.1).
  */
 export function readReceiptDocument(bytes: Uint8Array): ReadOutcome<JsonObject> {
-	const parsed = readStrictJson(bytes);
+	// `frozenNumbers` is where §3 step 4 is actually decided — on the literals,
+	// before `JSON.parse` rounds them. The value-level sweep below stays as the
+	// second fence: it is what holds if a future caller ever hands this function
+	// an already-parsed document, and it costs one walk.
+	const parsed = readStrictJson(bytes, { frozenNumbers: true });
 	if (!parsed.ok) return parsed;
 	if (!isJsonObject(parsed.value)) {
 		return schemaRefusal("the receipt document is not a JSON object");
@@ -1386,17 +1518,38 @@ function missingMaterial(what: MissingWhat, detail: string): Resolution {
 // code for the absence.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * A REQUIRED string member. Empty is absent.
+ *
+ * `typeof value === "string"` alone answers yes to `""`, and every member read
+ * through here is an identity or a digest: a `sessionId`, a `mintedAt`, a
+ * `work.repoId`, a checkpoint's `vaultId`. A signed receipt can carry all of
+ * them blank — the harness mints one, the preimage covers the blanks, both
+ * signatures verify — and a verifier that accepts present-and-blank reports
+ * VERIFIED for a document that identifies nothing. The one non-empty helper
+ * the snapshot loader already uses (`nonEmptyString`) makes the same call for
+ * the same reason; this is that rule, applied to the receipt.
+ */
 function stringAt(object: JsonObject, key: string): string | null {
 	const value = object[key];
-	return typeof value === "string" ? value : null;
+	return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+/**
+ * An integer member, by §13's rules rather than JavaScript's.
+ *
+ * `Number.isSafeInteger(-0)` is TRUE, and `-0` then passes every comparison a
+ * reader might make afterwards (`-0 === 0`, `-0 < 0` is false) while
+ * `canonicalize` renders it as `0`. That combination is exactly a signature
+ * that verifies over bytes it did not sign the meaning of, and §13 forbids
+ * `-0` outright. The receipt's own numbers are already refused at the literal
+ * by `readReceiptDocument`; a history checkpoint's are NOT — step 9's members
+ * never pass through that reader — so the rule has to hold here too.
+ */
 function numberAt(object: JsonObject, key: string): number | null {
 	const value = object[key];
-	// The frozen reader has already rejected every non-safe-integer, so a number
-	// reaching here is one; the guard is belt, and it keeps this usable on the
-	// snapshot path too.
-	return typeof value === "number" && Number.isSafeInteger(value) ? value : null;
+	if (typeof value !== "number" || !Number.isSafeInteger(value)) return null;
+	return Object.is(value, -0) ? null : value;
 }
 
 function objectAtKey(object: JsonObject, key: string): JsonObject | undefined {
@@ -1551,6 +1704,18 @@ export function verifyCheckpointStatement(
 	}
 	if (key.role !== "checkpoint") {
 		return reject(`checkpoint key ${keyId} is registered with role ${key.role}`);
+	}
+	// The same binding step 4 makes for the mint key, and for the same reason:
+	// §4a fixes the v2 statement's signature as Ed25519, and this function
+	// verifies Ed25519 unconditionally. Without the check, a snapshot declaring
+	// `ecdsa-p256` for this keyId is silently overruled by the verifier's own
+	// preference — the trust document says one thing, the verifier does another,
+	// and the report claims the snapshot authorized it. Conflicting trust
+	// metadata is a refusal (§8: ambiguity → never a pass), not a preference.
+	if (key.alg !== "ed25519") {
+		return reject(
+			`checkpoint key ${keyId} is registered for ${key.alg}, not the ed25519 §4a fixes for the v2 statement`,
+		);
 	}
 	// Per-chain authority (R3-2): a domain-wide checkpoint key confers NO
 	// authority over a chain whose `checkpointRootKeyId` pins another lineage.

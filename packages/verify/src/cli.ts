@@ -24,7 +24,12 @@ import {
 	verifyVaultWithAnchors,
 	type WitnessInput,
 } from "./index.js";
-import { RECEIPT_DISPATCH_TOKEN, type ReceiptCliIo, runReceiptCli } from "./receipt-cli.js";
+import {
+	RECEIPT_DISPATCH_TOKEN,
+	type ReceiptCliIo,
+	runReceiptCli,
+	writeAllSync,
+} from "./receipt-cli.js";
 
 /**
  * `receipt` dispatch (CLI spec §2). MUST run before a single byte of the
@@ -35,6 +40,14 @@ import { RECEIPT_DISPATCH_TOKEN, type ReceiptCliIo, runReceiptCli } from "./rece
  * `vaultPath`. `process.exit` below is synchronous, so nothing after this
  * block — including the `const args = …` vault path — ever executes on this
  * branch.
+ *
+ * The output goes out through `writeAllSync` rather than
+ * `process.stdout.write`, and that is load-bearing rather than stylistic:
+ * `process.stdout` is ASYNCHRONOUS on a POSIX pipe, and `process.exit` does not
+ * drain it. `--json | jq` would then see a report truncated mid-object beside
+ * an exit code that says the receipt verified. The exit codes are the CI
+ * contract, so the fix is to make the bytes land BEFORE the exit, never to
+ * soften the exit.
  */
 if (process.argv[2] === RECEIPT_DISPATCH_TOKEN) {
 	const realIo: ReceiptCliIo = {
@@ -42,8 +55,8 @@ if (process.argv[2] === RECEIPT_DISPATCH_TOKEN) {
 		readStdin: () => readFileSync(0),
 	};
 	const result = runReceiptCli(process.argv.slice(3), realIo);
-	if (result.stdout.length > 0) process.stdout.write(result.stdout);
-	if (result.stderr.length > 0) process.stderr.write(result.stderr);
+	writeAllSync(1, result.stdout);
+	writeAllSync(2, result.stderr);
 	process.exit(result.exitCode);
 }
 

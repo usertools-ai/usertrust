@@ -15,7 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and runs §7 steps 1–9 entirely offline: the strict byte reader (canonical
   base64, fatal UTF-8 with `ignoreBOM: true`, pre-parse duplicate-key
   rejection, frozen numeric rules — non-integer / `-0` / non-safe-integer /
-  `Infinity`/`NaN` all rejected as VALUES, never as a thrown `canonicalize`),
+  `Infinity`/`NaN` refused on the numeric LITERAL during that same pre-parse
+  scan, never as a thrown `canonicalize`; checking the parsed VALUE instead
+  would be too late, because `JSON.parse` rounds `1.00000000000000001` to
+  exactly `1` and the receipt then verifies against a canonical preimage its
+  own bytes do not spell),
   the nine event-hash equalities, the mint signature (including the retired
   MINT-key boundary evaluated through the mint event's own segment, not
   merely "state permitting"), Merkle inclusion topology derived from
@@ -28,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   UNVERIFIABLE rather than reaching out for it. `--envelope` reads the
   receipt from the resolver envelope's byte-authoritative `receiptBytes`
   member (never its `receipt` convenience copy) and runs the R4 agreement
-  check between the two. `--expect-id` binds arrival context (a bare
+  check between the two — a STRUCTURAL comparison (`Object.is` on numbers,
+  key order ignored), not a canonical-string one, since a serializer erases
+  exactly the distinctions the check exists to find (`-0` renders as `0`). `--expect-id` binds arrival context (a bare
   `ut1_…`, a resolution URL, or a `Usertrust-Receipt:` trailer line).
   `--json` puts the machine-readable report on stdout ONLY — every
   diagnostic goes to stderr, so `| jq` is safe — with every field nullable

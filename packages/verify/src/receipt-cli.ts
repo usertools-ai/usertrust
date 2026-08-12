@@ -19,11 +19,10 @@
  * results, exactly like every other refusal in `receipt-verify.ts`.
  */
 
-import { canonicalize } from "./canonical.js";
+import { writeSync } from "node:fs";
 import { forDisplay } from "./receipt.js";
 import {
 	decodeCanonicalBase64,
-	findNonFiniteNumber,
 	isJsonObject,
 	type JsonValue,
 	loadTrustSnapshot,
@@ -33,6 +32,7 @@ import {
 	readReceiptDocument,
 	readStrictJson,
 	receiptIdFromArrivalContext,
+	structurallyEqualJson,
 	type TrustSnapshotIdentity,
 	verifyReceipt,
 } from "./receipt-verify.js";
@@ -51,6 +51,49 @@ export interface ReceiptCliResult {
 	readonly exitCode: 0 | 1 | 2 | 3;
 	readonly stdout: string;
 	readonly stderr: string;
+}
+
+/**
+ * Write every byte of `text` to `fd`, synchronously, before returning.
+ *
+ * `cli.ts` ends receipt mode with `process.exit(code)`, and that is deliberate:
+ * the exit codes ARE the contract (0/1/2/3), and nothing after the dispatch
+ * block may run. But `process.exit` terminates without draining an unflushed
+ * stream, and `process.stdout` is ASYNCHRONOUS when stdout is a POSIX pipe —
+ * which is precisely what `usertrust-verify … --json | jq` creates. The failure
+ * is the worst-shaped one available: a truncated report paired with a
+ * successful exit code, so a consumer that checks the code gets a JSON parse
+ * error and one that does not gets half a verdict.
+ *
+ * Writing to the fd is what makes the subsequent exit safe. Three cases the
+ * loop exists for:
+ *
+ *  - `write(2)` may accept fewer bytes than offered, so a short count is
+ *    RESUMED rather than dropped;
+ *  - a non-blocking pipe answers `EAGAIN` when its buffer is full, which means
+ *    "not yet", not "no" — retried;
+ *  - `EPIPE` means the reader is GONE (`… | head -1`). Stop writing and return:
+ *    there is nobody left to tell, the remaining bytes have no destination, and
+ *    the alternative — letting it escape into `cli.ts`'s top level — replaces
+ *    the verdict's exit code with an uncaught-exception 1, i.e. reports FAILED
+ *    for a receipt that verified. The exit code is the contract; a closed
+ *    reader must not be able to rewrite it.
+ *
+ * Any other errno is a real I/O failure and propagates.
+ */
+export function writeAllSync(fd: number, text: string): void {
+	if (text.length === 0) return;
+	const bytes = Buffer.from(text, "utf8");
+	let offset = 0;
+	while (offset < bytes.length) {
+		try {
+			offset += writeSync(fd, bytes, offset, bytes.length - offset);
+		} catch (error) {
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "EPIPE") return;
+			if (code !== "EAGAIN") throw error;
+		}
+	}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,7 +161,21 @@ export function parseReceiptArgs(argv: readonly string[]): ArgsResult {
 
 	for (let i = 0; i < argv.length; i += 1) {
 		const arg = argv[i] as string;
-		const next = (): string | undefined => argv[i + 1];
+		/**
+		 * The value for a value-taking flag, or `undefined` when there is none.
+		 *
+		 * An OPTION TOKEN is not a value. `--trust --help` is a typo, and
+		 * swallowing the token turns it into a filename: the tool then reports
+		 * UNVERIFIABLE (exit 2 — "the pinned snapshot could not be read") for
+		 * what is a usage error (exit 3), and `--help`, the one flag whose whole
+		 * job is to answer immediately, silently does nothing. A bare `-` is
+		 * deliberately NOT an option token: it is the stdin filename.
+		 */
+		const next = (): string | undefined => {
+			const candidate = argv[i + 1];
+			if (candidate === undefined) return undefined;
+			return candidate === "-h" || candidate.startsWith("--") ? undefined : candidate;
+		};
 		if (arg === "--help" || arg === "-h") return { kind: "help" };
 		if (arg === "--trust") {
 			const value = next();
@@ -400,20 +457,17 @@ export function resolveEnvelope(bytes: Uint8Array): EnvelopeOutcome {
 	const strict = readReceiptDocument(decoded);
 	if (strict.ok) {
 		const copy = envelope.receipt;
-		// `copy` is `readStrictJson`-parsed only (fatal UTF-8 + duplicate-key
-		// rejection) — it never ran through `readReceiptDocument`'s frozen
-		// numeric rules, so it can still carry a non-finite number at any
-		// nesting depth. `canonicalize` THROWS on those, and a throw is never
-		// a verdict mechanism here (this module's own header). A `copy` that
-		// fails this check cannot possibly equal `strict.value`, which the
-		// frozen reader has already guaranteed is finite throughout — so
-		// treat the violation as a bytes↔copy disagreement rather than
-		// reaching `canonicalize` with an unvalidated value at all.
-		const copyHasNonFiniteNumber = copy !== undefined && findNonFiniteNumber(copy) !== null;
-		const bytesMatchCopy =
-			copy !== undefined &&
-			!copyHasNonFiniteNumber &&
-			canonicalize(strict.value) === canonicalize(copy);
+		// STRUCTURAL, not canonical-string. `copy` is `readStrictJson`-parsed
+		// only (fatal UTF-8 + duplicate-key rejection) — it never ran through
+		// `readReceiptDocument`'s frozen numeric rules, so it can carry
+		// anything JSON can express, including values a serializer erases.
+		// `canonicalize` renders `-0` as `0` and THROWS on `1e999`; comparing
+		// its output would therefore report agreement between a copy and bytes
+		// that differ, and would make a hostile copy a crash rather than a
+		// verdict. `structurallyEqualJson` compares numbers with `Object.is`,
+		// ignores key ORDER (which is not a defect in a convenience copy), and
+		// never serializes either side.
+		const bytesMatchCopy = copy !== undefined && structurallyEqualJson(strict.value, copy);
 		const idsMatch =
 			typeof envelope.receiptId === "string" && envelope.receiptId === strict.value.receiptId;
 		if (!bytesMatchCopy || !idsMatch) {

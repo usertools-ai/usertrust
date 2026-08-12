@@ -798,6 +798,9 @@ describe("corpus floor", () => {
 			"schema/non-integer",
 			"schema/negative-zero",
 			"schema/unsafe-integer",
+			// The one the value-level rules cannot express: the parser rounds it
+			// away before any of them run.
+			"schema/fractional-token-rounds-to-integer",
 			"schema/unknown-top-level-field",
 			"schema/unknown-projection-field",
 		]) {

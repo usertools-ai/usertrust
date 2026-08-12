@@ -512,6 +512,29 @@ export const PARSE_VECTORS: readonly Vector[] = [
 			}),
 	},
 	{
+		// The frozen rules have to be applied to the LITERAL, not to the parsed
+		// value, because the parser destroys the evidence: `1.00000000000000001`
+		// is not representable as a double, so `JSON.parse` silently rounds it to
+		// exactly 1 and every value-level check afterwards — `Number.isInteger`,
+		// `Number.isSafeInteger` — is asking about a number the document never
+		// carried. Everything downstream then agrees with itself: the canonical
+		// preimage recomputes from the ROUNDED value, so `event.hash`, the §5
+		// signature and all nine equalities hold, and the receipt verifies while
+		// its bytes say something §13 forbids. This vector's `breaks: ["parse"]`
+		// is the independent proof: the harness's checker sees it through the
+		// canonical ROUND-TRIP (`canonicalize(parse(bytes)) !== bytes`), which is
+		// exactly the evidence the verifier throws away when it checks values.
+		name: "schema/fractional-token-rounds-to-integer",
+		what: "A fractional literal that JSON.parse rounds to a legal integer is refused on the TOKEN — a value-level frozen check cannot see it at all.",
+		mode: "receipt",
+		expect: failed("schema", "SCHEMA_INVALID"),
+		breaks: ["parse"],
+		build: () =>
+			mint({
+				bytes: (b) => replaceOnce(b, '"generation":1,', '"generation":1.00000000000000001,'),
+			}),
+	},
+	{
 		name: "schema/unknown-top-level-field",
 		what: "An unknown field in the SIGNED receipt fails (§5) even though the signature covers it.",
 		mode: "receipt",

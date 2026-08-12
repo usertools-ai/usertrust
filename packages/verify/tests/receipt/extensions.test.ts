@@ -354,6 +354,43 @@ describe("§7 step 9 — contiguity arithmetic", () => {
 		expect(report.checks.checkpointHistory.failure?.detail).toContain("safe-integer");
 	});
 
+	it("refuses `-0` in a served checkpoint — the walk's integers are §13's, not JavaScript's", () => {
+		// The gap this closes: history members never pass through
+		// `readReceiptDocument`, so the frozen numeric rules never see them, and
+		// the typed read standing in for those rules is `Number.isSafeInteger`,
+		// which answers TRUE for `-0`. Every downstream comparison agrees too
+		// (`-0 === 0`, `-0 < 0` is false), and `canonicalize` renders it as `0`,
+		// so the signature over the HONEST statement verifies over the dishonest
+		// bytes. Nothing in the walk can see the flip except `Object.is` — and
+		// §13 forbids `-0` outright.
+		//
+		// The genesis boundary is where it bites: a zero-based chain's first
+		// segment carries `segmentFirstSequence: 0`, and genesis is the one member
+		// with no predecessor to contradict it.
+		const bundle = mint({
+			segments: [
+				{ segmentId: "seg_000001", segmentFirstSequence: 0, treeSize: 4 },
+				{ segmentId: "seg_000002", segmentFirstSequence: 4, treeSize: 6 },
+				{ segmentId: "seg_000003", segmentFirstSequence: 10, treeSize: 7 },
+			],
+		});
+		// Through the WIRE, not by handing the verifier a JS object: the flip has
+		// to survive as text, which is exactly how a hostile resolver would serve
+		// it. (`JSON.stringify(-0)` is `"0"`, so the object route cannot express
+		// this vector at all.)
+		const served = JSON.stringify(bundle.history).replace(
+			'"segmentFirstSequence":0,',
+			'"segmentFirstSequence":-0,',
+		);
+		const history = JSON.parse(served) as JsonObject[];
+		expect(Object.is(history[0]?.segmentFirstSequence, -0)).toBe(true);
+
+		const report = runWithHistory(bundle, history as unknown as JsonValue);
+		// The base verdict is untouched — the receipt itself is clean.
+		expect(report.verdict).toBe("VERIFIED_CHECKPOINT");
+		expect(report.checks.checkpointHistory.failure?.code).toBe("HISTORY_INVALID");
+	});
+
 	it("refuses a history served out of order", () => {
 		// §7: segmentIds "appear once each, in strictly increasing
 		// segmentFirstSequence order". Sorting the input before walking would make

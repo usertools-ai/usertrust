@@ -158,11 +158,36 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// or the disclaimer strings to fit exactly — the spec's own
 		// instruction is to raise the number to fit the work, not the
 		// reverse.
+		//
+		// 7500 → 7800, the Codex Tier-0 review round (2026-08-12), same amended
+		// §7 process. (a) re-verified directly: assertions 4 and 5 above are the
+		// real invariant and both still pass — every import in
+		// packages/verify/src is `node:*` or `./`-relative (the only new one is
+		// `node:fs`'s `writeSync` in `receipt-cli.ts`) and `dependencies` is
+		// still `{}`. (b) what was added, +219 lines across three files, all of
+		// it CLOSING DEFECTS rather than adding surface:
+		//   · `receipt-verify.ts` +164 — the frozen numeric rules moved onto the
+		//     numeric LITERAL inside the pre-parse scanner (a fractional token
+		//     `JSON.parse` rounds to a legal integer was verifying, because
+		//     every value-level check ran after the rounding), the scan failure
+		//     now carrying its class so a numeric refusal is SCHEMA_INVALID and
+		//     not UNVERIFIABLE, `structurallyEqualJson` for R4, non-empty
+		//     required strings, `-0` refused where §13 forbids it, and the
+		//     checkpoint key's `alg` bound to ed25519 as the mint path already
+		//     binds it. Roughly half of those lines are the comments explaining
+		//     why each rule cannot be checked where it used to be.
+		//   · `receipt-cli.ts` +42 — `writeAllSync` (the `| jq` contract:
+		//     `process.exit` does not drain an async pipe), R4 through the
+		//     structural comparison, and option tokens refused where a value is
+		//     required.
+		//   · `cli.ts` +13 — routing the receipt branch's output through
+		//     `writeAllSync` before the exit.
+		// Post-review total: 7670. 7800 leaves 130 lines of headroom.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(7500);
+		expect(total).toBeLessThan(7800);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {
