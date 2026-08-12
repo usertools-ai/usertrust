@@ -9,7 +9,16 @@
  */
 
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -206,6 +215,64 @@ function assertInclusionAgree(
 	expect(core).toBe(pkg);
 	expect(core).toBe(expected);
 }
+
+describe("HARDEN: core vs verify pkg agree on I/O FAILURE paths", () => {
+	/**
+	 * The 13 cases above feed vaults that are READABLE — clean, truncated,
+	 * rotated, tampered, hostile-object-bearing. Every one tests divergence in
+	 * what the two verifiers make of CONTENT. None tests what they make of a
+	 * vault they cannot read at all.
+	 *
+	 * That gap is not hypothetical: it is exactly how a one-sided edit reached
+	 * review. The unreadable-audit-directory fix landed in
+	 * `core/src/audit/verify.ts` and not in `verify/src/index.ts`, so the
+	 * STANDALONE verifier — the artifact an auditor is pointed at precisely
+	 * INSTEAD of trusting the SDK — kept answering `valid: true` on a vault
+	 * nobody could open, and this suite stayed green throughout.
+	 *
+	 * A differential test that only feeds well-formed inputs measures half the
+	 * contract. These cases cover the other half.
+	 */
+	afterEach(() => {
+		for (const d of dirs.splice(0)) {
+			rmSync(d, { recursive: true, force: true });
+		}
+	});
+
+	it("14. audit dir present but unenumerable → both FAILED, neither claims 0 events", async () => {
+		const root = makeRoot("harden-diff-unreadable-");
+		const w = createAuditWriter(root);
+		await w.appendEvent({ kind: "a", actor: "sys", data: { n: 1 } });
+		w.release();
+
+		const vaultPath = join(root, VAULT_DIR);
+		const auditDir = join(vaultPath, "audit");
+		// Remove the main log so the segment scan is the only way in, then make the
+		// directory unlistable. This is the shape that used to verify clean.
+		unlinkSync(join(auditDir, "events.jsonl"));
+		chmodSync(auditDir, 0o000);
+		try {
+			// PROBE the precondition — root ignores mode 000 entirely, and a test
+			// that cannot establish its own setup must skip rather than assert.
+			let readable = true;
+			try {
+				readdirSync(auditDir);
+			} catch {
+				readable = false;
+			}
+			if (readable) return;
+			assertAgree(vaultPath, false);
+		} finally {
+			chmodSync(auditDir, 0o700);
+		}
+	});
+
+	it("15. audit dir absent entirely → both FAILED and agree", () => {
+		const root = makeRoot("harden-diff-noaudit-");
+		mkdirSync(join(root, VAULT_DIR), { recursive: true });
+		assertAgree(join(root, VAULT_DIR), false);
+	});
+});
 
 describe("HARDEN: core vs verify pkg agree on inclusion-proof topology", () => {
 	it("7. both generators produce proofs both verifiers accept (sizes 1..17)", () => {
