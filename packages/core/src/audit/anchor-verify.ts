@@ -895,6 +895,30 @@ export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvalu
 		};
 	};
 
+	// Step 1b — CALLER-SUPPLIED trust material, validated BEFORE anything about
+	// the vault is examined.
+	//
+	// Placement is the whole point. `verifyAnchorChain` also rejects a malformed
+	// pin, but it is only reached at step 4 — and step 2 below returns UNANCHORED
+	// for an empty or legacy vault before any of that runs. So validating only
+	// there left the exact case where it matters most still answering
+	// `valid: true`, exit 0: a vault with nothing to check, and an operator whose
+	// pin was never read. A pin the caller could not spell is an INPUT error, and
+	// it does not become acceptable because the vault turned out to be empty.
+	if (input.trust !== null) {
+		const badPins: number[] = [];
+		for (const [i, pem] of (input.trust.successorPinsPem ?? []).entries()) {
+			if (publicKeyFromPem(pem) === null) badPins.push(i + 1);
+		}
+		if (badPins.length > 0) {
+			for (const n of badPins) {
+				errors.push(`successor pin #${n} is not a parseable PEM`);
+				reasons.push("malformed-successor-pin");
+			}
+			return finish("ANCHOR_INVALID", []);
+		}
+	}
+
 	// Step 2 — discovery.
 	if (!anchorsPresent) {
 		return finish("UNANCHORED", []);

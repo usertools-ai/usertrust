@@ -164,6 +164,39 @@ describe("false OK — an unparseable --successor-pin", () => {
 		expect(evaluation.anchorState).not.toBe("ANCHOR_MISMATCH");
 	});
 
+	it("rejects a malformed pin on an UNANCHORED vault, where the check matters most", () => {
+		// The re-review finding. `evaluateAnchoredVault` returns UNANCHORED at the
+		// discovery step for an empty or legacy vault, BEFORE trust material is
+		// ever examined — so validating the pin inside `verifyAnchorChain` left
+		// exactly the case with nothing to check still answering valid, exit 0.
+		const evaluation = evaluateAnchoredVault({
+			orderedHashes: [],
+			externalAnchors: [],
+			externalErrors: [],
+			mirrorAnchors: [],
+			mirrorErrors: [],
+			trust: { rootPem, successorPinsPem: ["nope"] },
+			witness: { requested: false },
+		} as Parameters<typeof evaluateAnchoredVault>[0]);
+		expect(evaluation.anchorState).toBe("ANCHOR_INVALID");
+		expect(evaluation.anchorsValid).toBe(false);
+		expect(evaluation.reasons).toContain("malformed-successor-pin");
+	});
+
+	it("still reports UNANCHORED for an empty vault whose pins are fine", () => {
+		// The guard must not turn every unanchored vault into a failure.
+		const evaluation = evaluateAnchoredVault({
+			orderedHashes: [],
+			externalAnchors: [],
+			externalErrors: [],
+			mirrorAnchors: [],
+			mirrorErrors: [],
+			trust: { rootPem, successorPinsPem: [rootPem] },
+			witness: { requested: false },
+		} as Parameters<typeof evaluateAnchoredVault>[0]);
+		expect(evaluation.anchorState).toBe("UNANCHORED");
+	});
+
 	it("stays silent when every pin parses", () => {
 		const result = verifyAnchorChain([], {
 			rootPem,
