@@ -651,6 +651,17 @@ left to retry with, no terminal left to reach the ledger (the lying half measure
 the same 100_000 ceiling). Both terminals now take the amount from `capture.hold`, the
 write-premium-inflated number the increment used — never `meteredEstimate`, which is the
 un-inflated metering figure and would leave the counter short by the premium.
+**And an IDENTITY decides whose money moves**, which is the same rule one field over and the half
+with the larger blast radius. `settle()` and `abort()` took `proxyTransferId` — the id naming WHICH
+pending transfer to discharge — from the caller's handle, while that same field already sat on the
+`activeAuths` capture and `destroy()` already read it from there. Snapshotting it, which is what the
+rule above buys, pins WHEN a caller-owned accessor is read and does not make the answer ours: the
+caller still chose the transfer, including one belonging to another call. A wrong amount loses a
+number; a wrong id moves funds. Its read also sat above the lookup, the claim and the VOID, so a
+throwing accessor refused a discharge that never needed the value. All three terminals now take it
+from the capture. **Generalize it:** the release rule binds every field a terminal acts *on*, not
+only the amount it acts *with* — and the handle's copy of such a field is reporting only, exactly as
+`costCenter` already is.
 *Prevents:* a boundary that is correct about the value it was shown and irrelevant to the bytes that
 get written — the defect surviving the fix, in a form that reads as fixed.
 

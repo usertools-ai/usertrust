@@ -147,7 +147,16 @@ export interface Authorization {
 	transferId: string;
 	estimatedCost: number;
 	model: string;
-	/** The proxy's transferId when in proxy mode. */
+	/**
+	 * The proxy's transferId when in proxy mode.
+	 *
+	 * REPORTING ONLY, exactly like {@link Authorization.costCenter} below, and for
+	 * the same reason: it names WHICH pending transfer a terminal would discharge,
+	 * so a caller who could answer it would choose whose money moves. Writing to it
+	 * redirects nothing. `settle()`, `abort()` and `destroy()` all take this id from
+	 * the governor's own {@link AuthorizationCapture}, keyed by `transferId` and
+	 * unreachable from caller code — the same treatment `hold` gets for the amount.
+	 */
 	proxyTransferId?: string | undefined;
 	/** @internal Timestamp when authorization was created. */
 	createdAt: number;
@@ -189,6 +198,12 @@ export interface Authorization {
  * entire authorize→settle window.
  */
 interface AuthorizationCapture {
+	/**
+	 * The proxy's transferId for this call, or `undefined` outside proxy mode.
+	 * WHICH pending transfer the terminals discharge, and therefore whose money
+	 * moves — so it is read from here at every terminal (`settle()`, `abort()`,
+	 * `destroy()`) and never from the handle's reporting copy of it.
+	 */
 	readonly proxyTransferId: string | undefined;
 	/** The scope's cost center, or `undefined` for an unattributed call. */
 	readonly costCenter: string | undefined;
@@ -1294,8 +1309,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// `assertAuditRepresentable` would be — but it only holds if the value
 			// that passed it is the value that gets written, which is exactly what
 			// the snapshot buys.
+			//
+			// `proxyTransferId` is deliberately NOT snapshotted alongside it: it is not
+			// read off the handle at all. The POST below takes it from the governor's
+			// own capture, the same place the release takes `hold` — see there.
 			const transferId = auth.transferId;
-			const proxyTransferId = auth.proxyTransferId;
 
 			// One `get` where there used to be `has` + a read off the caller's object:
 			// the presence check and the attribution now come from the same internal
@@ -1497,7 +1515,17 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			let shortfallRecord: { posted: number; shortfall: number } | undefined;
 			if (proxyConn != null && !isDryRun) {
 				try {
-					await proxyConn.settle(proxyTransferId ?? transferId, actualCost);
+					// WHICH TRANSFER, FROM THE CAPTURE — same rule as HOW MUCH above.
+					// `capture.proxyTransferId` is the id the governor recorded when it
+					// placed the hold, so the POST lands on the transfer this
+					// authorization actually opened. The handle carries the same field
+					// for reporting, but reading it here would let a caller name a
+					// DIFFERENT call's pending transfer and post their spend against
+					// someone else's money — the identity half of the defect
+					// `capture.hold` closed for the amount, and worse, because a wrong
+					// number loses a record while a wrong id moves funds. `destroy()`
+					// has always taken it from the capture; both terminals now agree.
+					await proxyConn.settle(capture.proxyTransferId ?? transferId, actualCost);
 				} catch (postErr) {
 					settled = false;
 					await audit
@@ -1759,29 +1787,36 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// the hold. There are exactly two real closures: validate the value at
 			// CAPTURE, before any obligation exists (what `authorize()` does for
 			// `model` and `actor`), or stop trusting caller object identity across
-			// the boundary at all and carry the value in state we own (what the
-			// governor's own `capture` record is, and what the ledgered fix for
-			// `proxyTransferId` below actually is). Anything else is decoration.
+			// the boundary at all and carry the value in state we own (the governor's
+			// own `capture` record, which is where BOTH the amount and the proxy id
+			// now come from). Anything else is decoration.
 			//
-			// ONLY THE IDENTITY FIELDS ARE HOISTED, AND ONLY TWO OF THEM. `model` is
-			// deliberately NOT snapshotted here: it is read exactly once, so there is
-			// nothing to diverge, and it is AUDIT-ONLY. Every read hoisted above the
-			// VOID is a caller-controlled accessor that could throw ahead of the
-			// discharge, and an audit line is never worth a stranded hold — so it is
-			// read at the write, AFTER the money is back. A test pins that ordering.
+			// EXACTLY ONE FIELD IS HOISTED. `model` is deliberately NOT snapshotted
+			// here: it is read exactly once, so there is nothing to diverge, and it is
+			// AUDIT-ONLY. Every read hoisted above the VOID is a caller-controlled
+			// accessor that could throw ahead of the discharge, and an audit line is
+			// never worth a stranded hold — so it is read at the write, AFTER the
+			// money is back. A test pins that ordering.
 			//
 			// `transferId` was already read before the VOID (the liveness `get`), so
-			// hoisting it adds no way to skip it. `proxyTransferId` is the one that
-			// does move: its old read sat inside the best-effort `catch`, so a
-			// throwing accessor was swallowed there and now escapes. That is the
-			// right side of the trade — a LIVE read lets a caller aim the VOID at
-			// another call's pending transfer (releasing money that is not theirs),
-			// while the snapshot leaves them only able to strand their own hold.
-			// The complete answer is to take the proxy id from the governor's own
-			// `capture`, as `destroy()` does, and never from the handle; that is a
-			// behaviour change beyond this fix and is ledgered, not done here.
+			// hoisting it adds no way to skip it — and what survives that `get` is
+			// provably a key this module inserted at `authorize()`.
 			//
-			// THE AMOUNT IS NOT READ OFF THE HANDLE AT ALL — it comes from
+			// NEITHER THE PROXY ID NOR THE AMOUNT IS READ OFF THE HANDLE AT ALL. Both
+			// come from `capture` below, and for the same reason: a snapshot pins WHEN
+			// a caller-owned accessor is read, it does not make the answer ours.
+			// `proxyTransferId` is the sharper of the two, because it decides WHICH
+			// pending transfer the VOID releases — a handle answering with another
+			// call's transfer aimed the discharge at money that was not the caller's,
+			// and a wrong id moves funds where a wrong number only loses a record. Its
+			// read also sat above the lookup, the claim and the VOID, so a throwing
+			// accessor refused the discharge outright, on a path that never needed the
+			// value, and left the hold pending. The capture carries the id the governor
+			// recorded when it placed the hold, so the VOID releases the transfer this
+			// authorization actually opened; `destroy()` has always read it from there,
+			// and both terminals now agree with it.
+			//
+			// THE AMOUNT, one field over and the same rule — it comes from
 			// `capture.hold` below. It was hoisted here once, and that was a defect:
 			// the pre-hoist read sat inside `if (capture.sessionAccounted)`, which is
 			// FALSE for an attributed hold, so an attributed abort never touched the
@@ -1794,7 +1829,6 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// merely LIES from resizing the release (measured: `budgetRemaining()`
 			// 150_000 against a configured budget of 100_000).
 			const transferId = auth.transferId;
-			const proxyTransferId = auth.proxyTransferId;
 
 			// Same lookup as settle, and the same reason: liveness and attribution come
 			// from one internal record. Still idempotent-silent, unlike settle.
@@ -1825,12 +1859,14 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const cb = breaker.get("headless" as never);
 			cb.recordFailure();
 
-			// VOID the pending hold. Both branches release money against the id the
-			// liveness check approved — a live read here could void a transfer that
-			// belongs to a different call, or none at all.
+			// VOID the pending hold. Both branches release money against a transfer
+			// this authorization opened: the engine path against the id the liveness
+			// check approved, the proxy path against the id the governor recorded
+			// beside it when it placed the hold. Neither comes off the handle, so no
+			// accessor can aim this discharge at another call's money or refuse it.
 			if (proxyConn != null && !isDryRun) {
 				try {
-					await proxyConn.void(proxyTransferId ?? transferId);
+					await proxyConn.void(capture.proxyTransferId ?? transferId);
 				} catch {
 					// Best-effort void
 				}

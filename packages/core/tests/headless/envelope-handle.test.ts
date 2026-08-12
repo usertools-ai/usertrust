@@ -1203,3 +1203,210 @@ describe("settle() releases the hold the governor placed, not a number the calle
 		await gov.destroy();
 	});
 });
+
+// ---------------------------------------------------------------------------
+// BOTH TERMINALS DISCHARGE THE TRANSFER THE GOVERNOR CAPTURED
+// ---------------------------------------------------------------------------
+//
+// `capture.hold` settled HOW MUCH a terminal releases. This settles WHICH
+// transfer it releases, which is the same question one field over and the more
+// consequential half: an amount that is wrong loses a number, an identity that
+// is wrong moves someone else's money.
+//
+// `settle()` and `abort()` each read `auth.proxyTransferId` off the caller's
+// handle and discharged against `proxyTransferId ?? transferId`, while the
+// governor's own frozen capture already carried the same field and `destroy()`
+// already took it from there (`capture.proxyTransferId ?? txId`). Snapshotting
+// that read — which is all the previous rounds did — pins the value at one
+// instant; it does not make the value OURS. The handle answers with whatever
+// the caller put on it, so the caller still chose which pending transfer a
+// terminal discharged, including a transfer belonging to another call. The
+// liveness `get` proves `transferId` is one of ours; nothing proved that of the
+// id that actually reached the ledger.
+//
+// The POSITION of the read was the second damage, and it is the abort ruling
+// again: the snapshot sat ABOVE the lookup, the claim and the VOID, so a
+// throwing accessor rejected the terminal on a path that never needed the value
+// — abort refusing before the VOID leaves the hold pending with no handle left
+// to retry against.
+//
+// Both terminals now take the id from `capture`, exactly as they already take
+// `hold`, `sessionAccounted` and `costCenter`. The handle's `proxyTransferId` is
+// reporting only, like `costCenter` beside it, and neither terminal reads it.
+//
+// NOTE ON REACH: `proxyConn` is unconditionally null today (AUD-456 makes proxy
+// mode throw at construction), so the branch that consumes this id is dead until
+// proxy mode returns. These tests therefore pin the property that survives that
+// — the terminals do not consult the handle for it, on any path — rather than
+// asserting through a proxy seam that cannot be built.
+
+describe("settle() and abort() discharge the transfer the governor captured", () => {
+	let vaultBase: string;
+
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `headless-envelope-proxyid-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+		process.env.USERTRUST_TEST = "1";
+		vi.mocked(evaluatePolicy).mockClear();
+	});
+
+	afterEach(() => {
+		process.env.USERTRUST_TEST = "";
+		try {
+			rmSync(vaultBase, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+	});
+
+	async function governorWith(engine: EngineHandle, audit: AuditHandle): Promise<Governor> {
+		return await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: audit,
+		});
+	}
+
+	/**
+	 * The redirect: a handle that answers the proxy-id read with ANOTHER call's
+	 * transfer, and counts how often it is asked. Zero is the assertion — a
+	 * terminal that never consults the handle cannot be aimed with it.
+	 */
+	function aimAt(auth: Authorization, other: string): { reads: number } {
+		const seen = { reads: 0 };
+		Object.defineProperty(auth, "proxyTransferId", {
+			configurable: true,
+			get(): string {
+				seen.reads++;
+				return other;
+			},
+		});
+		return seen;
+	}
+
+	/** The field a terminal must not need is the field that throws. */
+	function poison(auth: Authorization): void {
+		Object.defineProperty(auth, "proxyTransferId", {
+			configurable: true,
+			get(): string {
+				throw new Error("hostile accessor");
+			},
+		});
+	}
+
+	it("POSTs against the captured transfer when the handle names another call's", async () => {
+		const engine = makeMockEngine({ balance: 50_000 });
+		const audit = makeMockAudit();
+		const gov = await governorWith(engine, audit);
+
+		const victim = await gov.authorize(AUTHORIZE);
+		const attacker = await gov.authorize(AUTHORIZE);
+		const seen = aimAt(attacker, victim.transferId);
+
+		const receipt = await gov.settle(attacker, { inputTokens: 80, outputTokens: 200 });
+
+		// The handle is not the source of the id, so it is not asked for it.
+		expect(seen.reads).toBe(0);
+		expect(receipt.settled).toBe(true);
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.postPendingSpend.mock.calls[0]?.[0]).toBe(attacker.transferId);
+		// The victim's hold is untouched: still live, still discharging on its own
+		// terms rather than on the attacker's terminal.
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		await expect(gov.abort(victim, new Error("provider exploded"))).resolves.toBeUndefined();
+		expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend.mock.calls[0]?.[0]).toBe(victim.transferId);
+
+		await gov.destroy();
+	});
+
+	it("settles a call whose handle's proxyTransferId accessor throws, and still POSTs", async () => {
+		const engine = makeMockEngine({ balance: 50_000 });
+		const audit = makeMockAudit();
+		const gov = await governorWith(engine, audit);
+
+		const auth = await gov.authorize(AUTHORIZE);
+		const transferId = auth.transferId;
+		poison(auth);
+
+		const receipt = await gov.settle(auth, { inputTokens: 80, outputTokens: 200 });
+
+		expect(receipt.settled).toBe(true);
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.postPendingSpend.mock.calls[0]?.[0]).toBe(transferId);
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(auditData(audit, "llm_call").transferId).toBe(transferId);
+
+		await gov.destroy();
+	});
+
+	it("VOIDs the captured transfer when the handle names another call's", async () => {
+		const engine = makeMockEngine({ balance: 50_000 });
+		const audit = makeMockAudit();
+		const gov = await governorWith(engine, audit);
+
+		const victim = await gov.authorize(AUTHORIZE);
+		const attacker = await gov.authorize(AUTHORIZE);
+		const seen = aimAt(attacker, victim.transferId);
+
+		await expect(gov.abort(attacker, new Error("provider exploded"))).resolves.toBeUndefined();
+
+		expect(seen.reads).toBe(0);
+		expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend.mock.calls[0]?.[0]).toBe(attacker.transferId);
+		// The victim can still settle: its transfer was never discharged by the
+		// abort next door.
+		const receipt = await gov.settle(victim, { inputTokens: 80, outputTokens: 200 });
+		expect(receipt.settled).toBe(true);
+		expect(engine.postPendingSpend.mock.calls[0]?.[0]).toBe(victim.transferId);
+
+		await gov.destroy();
+	});
+
+	it("VOIDs a hold whose handle's proxyTransferId accessor throws", async () => {
+		// The stranded-hold case: pre-fix the read sat above the lookup, the claim
+		// and the VOID, so a throwing accessor refused abort with the money still
+		// pending. A discharge must never be blocked by a caller's accessor.
+		const engine = makeMockEngine({ balance: 50_000 });
+		const audit = makeMockAudit();
+		const gov = await governorWith(engine, audit);
+
+		const auth = await gov.authorize(AUTHORIZE);
+		const transferId = auth.transferId;
+		expect(gov.budgetRemaining()).toBeLessThan(100_000);
+		poison(auth);
+
+		await expect(gov.abort(auth, new Error("provider exploded"))).resolves.toBeUndefined();
+
+		expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend.mock.calls[0]?.[0]).toBe(transferId);
+		expect(gov.budgetRemaining()).toBe(100_000);
+		expect(auditData(audit, "llm_call_failed").transferId).toBe(transferId);
+
+		await gov.destroy();
+	});
+
+	it("VOIDs an ATTRIBUTED hold whose handle's proxyTransferId accessor throws", async () => {
+		// The attributed path reaches neither the session release nor any other use
+		// of the field, so pre-fix the ONLY thing the read could do here was refuse
+		// the VOID and strand the envelope's money.
+		const engine = makeMockEngine({ balance: 50_000 });
+		const audit = makeMockAudit();
+		const gov = await governorWith(engine, audit);
+
+		const auth = await withCostCenter(COST_CENTER, () => gov.authorize(AUTHORIZE), SCOPE_OPTS);
+		const transferId = auth.transferId;
+		poison(auth);
+
+		await expect(gov.abort(auth, new Error("provider exploded"))).resolves.toBeUndefined();
+
+		expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend.mock.calls[0]?.[0]).toBe(transferId);
+		expect(auditData(audit, "llm_call_failed").costCenter).toBe(COST_CENTER);
+		expect(gov.budgetRemaining()).toBe(100_000);
+
+		await gov.destroy();
+	});
+});
