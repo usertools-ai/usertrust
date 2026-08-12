@@ -166,6 +166,29 @@ export interface TransferPair {
 	settlementTransferId: string;
 }
 
+/**
+ * receipt-spec §2a — what the amount covers with respect to DELEGATED work.
+ *
+ * All four values are the VERIFIER's vocabulary. Conformant v1 MINTING emits
+ * only `selfDebitsOnly`, but minting and verifying are different verbs for
+ * different actors: the page must RECOGNIZE and RENDER the others per §7/R39.
+ * `includesAllDelegated` is recognized but unreachable in v1 — §2a requires
+ * signed evidence no format exists for yet, so §7's "reports a failure, not a
+ * total" applies to every instance of it.
+ */
+export type DelegationPosture =
+	| "selfDebitsOnly"
+	| "includesSomeDelegated"
+	| "includesAllDelegated"
+	| "indeterminate";
+
+const DELEGATION_POSTURES: readonly string[] = [
+	"selfDebitsOnly",
+	"includesSomeDelegated",
+	"includesAllDelegated",
+	"indeterminate",
+];
+
 /** The mint event's `data` — receipt-spec §2. */
 export interface Projection {
 	spec: "ut1";
@@ -183,6 +206,8 @@ export interface Projection {
 	startedAt: string;
 	endedAt: string;
 	spend: Spend;
+	/** REQUIRED (§2a). The page never renders an amount without it — R38. */
+	delegationPosture: DelegationPosture;
 	pricing: { tableVersions: string[] };
 	/** Present iff `transferCount <= 32`. */
 	transferSet?: TransferPair[];
@@ -431,7 +456,8 @@ export type IntegrityCause =
 	  }
 	| { source: "page"; obligation: "R1"; detail: string }
 	| { source: "page"; obligation: "R3"; brokenEquality: BundleEquality; detail: string }
-	| { source: "page"; obligation: "R4"; stage: R4Stage; detail: string };
+	| { source: "page"; obligation: "R4"; stage: R4Stage; detail: string }
+	| { source: "page"; obligation: "R39"; detail: string };
 
 export interface InvalidIdState {
 	kind: "invalidId";
@@ -1647,6 +1673,22 @@ function validateProjection(value: unknown, path: string): string | null {
 	if (attested && !isNonEmptyString(value.workloadId)) {
 		return `${path}.workloadId must be a non-empty string`;
 	}
+	// R38 — the page NEVER renders an amount without its posture label, so a
+	// missing or unrecognized `delegationPosture` fails closed to the
+	// protocol-error shell rather than rendering a total whose scope the reader
+	// would supply from assumption. It is a step-7 SEMANTIC_INVALID upstream
+	// (§2a/§7), and the page must not out-render its own verifier.
+	//
+	// Unrecognized-rather-than-missing is the forward-compatibility half: a v1
+	// page meeting a value a later spec adds fails closed here instead of
+	// rendering an amount whose coverage it cannot interpret.
+	if (!Object.hasOwn(value, "delegationPosture")) {
+		return `${path}.delegationPosture is REQUIRED (§2a) — an amount may not render without its posture`;
+	}
+	if (!DELEGATION_POSTURES.includes(value.delegationPosture as string)) {
+		return `${path}.delegationPosture must be one of §2a's four values`;
+	}
+
 	const generation = value.generation as number;
 	if (generation > 1 !== Object.hasOwn(value, "prevGenerationEventHash")) {
 		return `${path}.prevGenerationEventHash must be present iff generation > 1`;
@@ -2088,6 +2130,41 @@ function parseSuccess(
 				source: "page",
 				obligation: "R1",
 				detail: `the receipt document names "${envelope.receipt.receiptId}", but the page asked about "${routeParamId}"`,
+			},
+			envelope.receiptId,
+		);
+	}
+
+	// §7 / R39's evidence clause — `includesAllDelegated` is RECOGNIZED but can
+	// never be GREEN in v1.
+	//
+	// It is the strongest claim in §2a's vocabulary: every causally attributable
+	// delegated debit, including transitive descendants, exactly once. §7 pins
+	// what backing that requires — "ONLY `includesAllDelegated` may be presented
+	// as the total cost of work caused by the subject, and only when its §2a
+	// signed evidence validates. A verifier presented with
+	// `includesAllDelegated` and no validating evidence reports a failure, not a
+	// total."
+	//
+	// No evidence format is specified in v1 (§2a: "unreachable until one is"),
+	// so validating evidence cannot exist and EVERY instance fails here, by
+	// construction rather than by policy. Accepting the value at the validation
+	// gate is correct — recognizing is not permitting (§2a vs §7) — but the gate
+	// is not the verdict, and rendering the strongest unbacked claim in the
+	// vocabulary as a green total is precisely the defect R38 exists to prevent,
+	// one value over.
+	//
+	// Integrity failure, not the protocol-error shell: the shell is for material
+	// the page cannot interpret, and this value is interpreted exactly. The
+	// receipt makes a claim its own spec forbids anyone from honouring yet.
+	if (envelope.receipt.event.data.delegationPosture === "includesAllDelegated") {
+		return integrityFailure(
+			routeParamId,
+			{
+				source: "page",
+				obligation: "R39",
+				detail:
+					"this receipt claims its amount covers all delegated work, a claim that requires signed evidence a verifier can validate — no such evidence format exists in this version, so the claim cannot be checked and must not be shown as a total",
 			},
 			envelope.receiptId,
 		);

@@ -115,6 +115,25 @@ export interface TransferPair {
 	settlementTransferId: string;
 }
 
+/**
+ * receipt-spec §2a — WHAT THE AMOUNT COVERS with respect to DELEGATED work.
+ *
+ * All four values are the VERIFIER's vocabulary. Conformant v1 MINTING emits
+ * only `selfDebitsOnly` (§2a's minting rule) — but minting and verifying are
+ * different verbs for different actors, so a verifier must RECOGNIZE and
+ * RENDER the others per §7/R39. Recognizing is not permitting, and a wire
+ * response carrying `includesSomeDelegated` or `indeterminate` is conformant.
+ *
+ * `includesAllDelegated` is unreachable in v1: §2a requires signed evidence an
+ * offline verifier can validate, and no such format is specified yet, so §7's
+ * "reports a failure, not a total" applies to every instance of it.
+ */
+export type DelegationPosture =
+	| "selfDebitsOnly"
+	| "includesSomeDelegated"
+	| "includesAllDelegated"
+	| "indeterminate";
+
 /** The mint event's `data` field — receipt-spec §2. */
 export interface Projection {
 	spec: "ut1";
@@ -135,6 +154,8 @@ export interface Projection {
 	startedAt: Iso8601Utc;
 	endedAt: Iso8601Utc;
 	spend: Spend;
+	/** REQUIRED (v0.9, §2a). Absence is a step-7 SEMANTIC_INVALID, never a default. */
+	delegationPosture: DelegationPosture;
 	pricing: { tableVersions: string[] };
 	/** present iff transferCount <= 32; ABSENT iff transferCount > 32 */
 	transferSet?: TransferPair[];

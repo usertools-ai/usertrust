@@ -128,7 +128,8 @@ export const UNVERIFIABLE_HEADLINE =
 export const UNVERIFIABLE_ALERTS_INTERNALLY = "the resolver alerts internally when this happens.";
 
 /**
- * The three page-side integrity obligations (R1/R3/R4) get their OWN honest
+ * The page-side integrity obligations (R1/R3/R4, and R39's evidence clause)
+ * get their OWN honest
  * headline — the resolver never told the page anything failed; the page's
  * own arrival-context / bundle / byte-authority checks caught the problem
  * before anything green (or the billedUnfinalized link) could render. §7:
@@ -142,6 +143,17 @@ export const PAGE_SIDE_R1_HEADLINE =
 export const PAGE_SIDE_R3_HEADLINE = "the billedUnfinalized bundle's own cross-checks do not hold";
 export const PAGE_SIDE_R4_HEADLINE =
 	"the signed receipt bytes do not agree with the receipt they are supposed to match";
+/**
+ * R39's evidence clause (§7). The wording deliberately names the CLAIM as the
+ * thing that cannot be checked, not the receipt as forged — a receipt reaching
+ * this state is well-formed, correctly signed, and honestly labeled; it simply
+ * asserts complete delegated-cost coverage, which §2a requires signed evidence
+ * to support and specifies no format for. Saying "this receipt is invalid"
+ * would overclaim; saying nothing would render the strongest claim in the
+ * vocabulary as a plain total.
+ */
+export const PAGE_SIDE_R39_HEADLINE =
+	"this receipt claims to cover all delegated work, and that claim cannot be checked in this version";
 
 /** The headline for an {@link IntegrityCause} — resolver-sourced or page-side. */
 export function integrityCauseHeadline(cause: IntegrityCause): string {
@@ -156,6 +168,8 @@ export function integrityCauseHeadline(cause: IntegrityCause): string {
 					return PAGE_SIDE_R3_HEADLINE;
 				case "R4":
 					return PAGE_SIDE_R4_HEADLINE;
+				case "R39":
+					return PAGE_SIDE_R39_HEADLINE;
 			}
 	}
 }

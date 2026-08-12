@@ -198,7 +198,18 @@ export const conformingFixtures: ConformingFixtureEntry[] = [
 	},
 ];
 
-export type RejectionVectorId = "X1" | "X2" | "X3" | "X4" | "X5" | "X6" | "X7";
+export type RejectionVectorId =
+	| "X1"
+	| "X2"
+	| "X3"
+	| "X4"
+	| "X5"
+	| "X6"
+	| "X7"
+	| "X8"
+	| "X9"
+	| "X10"
+	| "X11";
 
 export interface RejectionVectorEntry {
 	id: RejectionVectorId;
@@ -207,6 +218,23 @@ export interface RejectionVectorEntry {
 	files: string[];
 	mustFailInto: string;
 	exercises: string;
+	/**
+	 * WHICH CONSUMER this vector is aimed at. Defaults to `"page"`: the vector
+	 * must drive the verify page into a non-green state, and `wire.test.ts`
+	 * asserts exactly that over every `page` vector.
+	 *
+	 * `"historyWalk"` marks a vector the PAGE CANNOT AND MUST NOT CATCH. The
+	 * page renders the resolver's verdict and never recomputes one (design D2),
+	 * so a vector whose only defect is inside a served `checkpointHistory`
+	 * reaches a green page state CORRECTLY — the consumers that must reject it
+	 * are `usertrust-verify` and the resolver, which walk the history.
+	 *
+	 * This field exists so that exemption is STRUCTURAL and asserted rather
+	 * than a quiet special case inside a coverage test: a vector that cannot go
+	 * red at the page has to say so here and carry its own dedicated test, and
+	 * `wire.test.ts` asserts that too.
+	 */
+	consumer?: "page" | "historyWalk";
 }
 
 export const rejectionVectors: RejectionVectorEntry[] = [
@@ -284,5 +312,60 @@ export const rejectionVectors: RejectionVectorEntry[] = [
 		exercises:
 			"§12 decode vectors — valid 16-byte IDs (incl. leading-`1`s) as the passing controls, 16-22-char " +
 			"strings that do NOT decode to 16 bytes, non-canonical encodings (R2)",
+	},
+	{
+		id: "X8",
+		kind: "json",
+		files: ["posture-missing.json"],
+		mustFailInto: "protocol-error shell",
+		exercises:
+			"`delegationPosture` ABSENT from an otherwise-conformant 200 whose `steps.semantics` still claims " +
+			"`passed`. §2 makes the field REQUIRED and §7 makes absence a step-7 SEMANTIC_INVALID, so the resolver " +
+			"asserted a step that did not pass; R38 sends missing-or-unrecognized postures to the protocol-error " +
+			"shell, because the page must not out-render its own verifier. This is the shape the ENTIRE corpus had " +
+			"before v0.9 — 29 receipts, and a green suite",
+	},
+	{
+		id: "X9",
+		kind: "json",
+		files: ["posture-unrecognized.json"],
+		mustFailInto: "protocol-error shell",
+		exercises:
+			"`delegationPosture` PRESENT but not one of §2a's four values. This is the forward-compatibility " +
+			"guarantee made testable: a v1 verifier meeting a value some later spec adds must FAIL CLOSED rather " +
+			"than render a total whose coverage it cannot interpret (§7, R38). Untested, that guarantee is a comment",
+	},
+	{
+		id: "X10",
+		kind: "json",
+		files: ["history-noncontiguous.json"],
+		consumer: "historyWalk",
+		mustFailInto:
+			"HISTORY_INVALID from any consumer that WALKS the served history — NOT a page state. " +
+			"The page renders the resolver's verdict and does not walk (D2), so this vector is aimed at " +
+			"`usertrust-verify` and the resolver, and its envelope is deliberately §4-conformant",
+		exercises:
+			"§7's contiguity clause in ISOLATION: `next.segmentFirstSequence === prev.segmentFirstSequence + " +
+			"prev.treeSize`. The history seats seg-0002 at 500 where 1 + 400 = 401, while `previousSegmentId` and " +
+			"`previousSegmentRoot` stay correct and the receipt's embedded checkpoint still appears EXACTLY in the " +
+			"history. C6 breaks the ID chain AND the arithmetic at once (seg-9999 with prev=seg-9998), so an " +
+			"implementation that never wrote the contiguity comparison passes C6 for the wrong reason; only this " +
+			"vector catches it",
+	},
+	{
+		id: "X11",
+		kind: "json",
+		files: ["posture-all-delegated.json"],
+		mustFailInto: "integrity failure — recognized, but never green",
+		exercises:
+			"`delegationPosture: includesAllDelegated`, the STRONGEST claim in §2a's vocabulary (every causally " +
+			"attributable delegated debit, transitive descendants included, exactly once). §7 pins what backing it " +
+			"requires: only that value may be presented as the total cost of work caused by the subject, and only " +
+			"when its §2a signed evidence validates — a verifier given it WITHOUT validating evidence 'reports a " +
+			"failure, not a total'. No evidence format exists in v1 (§2a: unreachable until one is), so every " +
+			"instance fails by CONSTRUCTION rather than by policy. Accepting the value at the validation gate is " +
+			"correct (recognizing is not permitting, §2a vs §7) — but the gate is not the verdict, and this vector " +
+			"is what proves the difference. Integrity failure, not the protocol-error shell: the shell is for " +
+			"material the page cannot interpret, and this value is interpreted exactly",
 	},
 ];
