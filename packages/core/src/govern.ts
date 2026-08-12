@@ -1347,6 +1347,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						budget_remaining_after: gateRemaining - estimatedCost,
 						budgetFractionRemaining: tierFields.budgetFractionRemaining,
 						budgetRunwayHours: tierFields.budgetRunwayHours,
+						// P1-CLOCK-SHADOW: the gate's CLOCK is trusted-host input too.
+						// `ruleMatches` evaluates `timeWindows` against
+						// `context.timestamp ?? new Date()`, so a request body carrying
+						// `{"timestamp": "..."}` would otherwise choose whether a curfew rule
+						// fires — walking a call out of a live window, or into a dormant one.
+						// Asserted explicitly `undefined` for the same reason as the budget
+						// tier fields: absent is the honest value, and absent is what makes
+						// the gate read the REAL clock. Time windows are evaluated in LOCAL
+						// time by contract (`isWithinTimeWindow` uses getDay/getHours); this
+						// changes WHOSE clock the gate reads, never which zone it reads in.
+						timestamp: undefined,
 						// Structurally un-forgeable: this comes from the caller's own async
 						// execution context, which no request body can reach. Asserted after
 						// the spread like every other trusted field, `undefined` included.
@@ -2767,6 +2778,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// same assertion on the LLM path above.
 						budgetFractionRemaining: tierFields.budgetFractionRemaining,
 						budgetRunwayHours: tierFields.budgetRunwayHours,
+						// P1-CLOCK-SHADOW: same assertion, same reason as the LLM path above —
+						// `action.params` must not be able to pick the time a `timeWindows`
+						// rule is evaluated at. Explicit `undefined` sends the gate back to the
+						// real clock, which it reads in LOCAL time by contract.
+						timestamp: undefined,
 						// Structurally un-forgeable: it comes from this call's own async
 						// execution context, which `action.params` cannot reach.
 						cost_center: envelope?.attribution.costCenter,

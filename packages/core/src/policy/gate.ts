@@ -390,8 +390,23 @@ export interface PolicyContext extends Record<string, unknown> {
 	scope?: string[];
 	/** Optional time windows for temporal constraints */
 	timeWindows?: TimeWindow[];
-	/** Optional timestamp override (defaults to now) */
-	timestamp?: string;
+	/**
+	 * Optional evaluation-time override (defaults to now).
+	 *
+	 * TRUSTED HOST INPUT ONLY, exactly like the budget fields below: it is what
+	 * `ruleMatches` feeds to {@link isWithinTimeWindow}, so whoever writes it
+	 * decides whether a `timeWindows` rule fires at all. All three SDK call sites
+	 * spread the caller's params first and then re-assert this field as explicit
+	 * `undefined`, so a body carrying `{"timestamp": "..."}` cannot walk a call
+	 * out of a curfew window — or into one. A host driving `evaluatePolicy`
+	 * directly (a replay, a what-if, a backfilled audit) may still set it; that
+	 * host owns its own clock.
+	 *
+	 * Declared `| undefined` so a call site under `exactOptionalPropertyTypes`
+	 * can write the field explicitly as `undefined` to overwrite an untrusted
+	 * inbound value; the `??` fallback reads the result as absent either way.
+	 */
+	timestamp?: string | undefined;
 
 	/**
 	 * Budget telemetry for the cost center funding this call. Both fields are

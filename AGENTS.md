@@ -695,9 +695,16 @@ not assume they are the same:
 
 | Call site | Re-asserted after the spread |
 |---|---|
-| `govern.ts` — LLM path | `model`, `tier`, `estimated_cost`, `budget_remaining`, `budget_remaining_after`, `budgetFractionRemaining`, `budgetRunwayHours`, `cost_center` |
-| `govern.ts` — `governAction` | `action_kind`, `action_name`, `estimated_cost`, `budget_remaining`, `budget_remaining_after`, `tier`, `budgetFractionRemaining`, `budgetRunwayHours`, `cost_center` (**no `model`**) |
+| `govern.ts` — LLM path | `model`, `tier`, `estimated_cost`, `budget_remaining`, `budget_remaining_after`, `budgetFractionRemaining`, `budgetRunwayHours`, `timestamp`, `cost_center` |
+| `govern.ts` — `governAction` | `action_kind`, `action_name`, `estimated_cost`, `budget_remaining`, `budget_remaining_after`, `tier`, `budgetFractionRemaining`, `budgetRunwayHours`, `timestamp`, `cost_center` (**no `model`**) |
 | `headless.ts` — `authorize` | same set as the LLM path |
+
+`timestamp` is on that list because it is the gate's CLOCK: `ruleMatches` evaluates a rule's
+`timeWindows` against `context.timestamp ?? new Date()`, so a request body that sets it decides
+whether a curfew rule fires. All three sites assert it `undefined`, which sends the gate back to the
+real clock — read in LOCAL time by contract (`isWithinTimeWindow` uses `getDay`/`getHours`, and
+changing that would silently re-time every deployed window). A host calling `evaluatePolicy`
+directly may still supply its own timestamp; it owns its clock.
 
 The obligation runs in **both** directions. New governance field on `PolicyContext` → re-assert it
 at every one of the three sites, **including asserting `undefined` when the honest value is
