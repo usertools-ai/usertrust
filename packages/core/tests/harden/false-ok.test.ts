@@ -240,26 +240,34 @@ describe("false OK — a documented count that stops matching reality", () => {
 		expect(declaredCount, `unrecognised number word "${declared}"`).toBeDefined();
 
 		// Count OCCURRENCES of each variant's signature, not files and not names.
+		// EXTENDED-REGEX, so the patterns can admit any identifier spelling.
 		const occurrences = (pattern: string): number => {
 			const out = execSync(
-				`grep -rho '${pattern}' ${join(repoRoot, "packages")}/*/src --include='*.ts' || true`,
+				`grep -rhoE '${pattern}' ${join(repoRoot, "packages")}/*/src --include='*.ts' || true`,
 				{ encoding: "utf-8" },
 			).trim();
 			return out === "" ? 0 : out.split("\n").length;
 		};
-		// Stronger variant: match its BODY, not a mention of the range. The first
-		// cut of this matched bare `0x9f` and counted 7 where 5 exist, because two
-		// of the copies also name the range in their doc comment — a matcher that
-		// counted descriptions alongside implementations. The comparison itself is
-		// the signature and appears exactly once per sanitizer.
-		const strong = occurrences("code >= 0x7f && code <= 0x9f");
+		// Stronger variant: the C1 comparison, with the local's NAME left open.
+		//
+		// Four rounds of correction landed here, each generalizing the part that had
+		// just failed and leaving the part that had not yet been tested:
+		//   1. matched three function NAMES        — missed a fourth name;
+		//   2. matched bare `0x9f`                 — counted two doc comments as code;
+		//   3. matched the constant `CONTROL_CHARS`— missed any other binding;
+		//   4. matched the literal `code >= ...`   — missed a local named `codePoint`.
+		//
+		// A matcher gets audited where it was last wrong. What survives all four is
+		// the SHAPE: the two range bounds and the operators between them, with every
+		// identifier a wildcard. The bounds are the behaviour; the names are not.
+		const strong = occurrences(">= *0x7f *&& *[A-Za-z_$][A-Za-z0-9_$]* *<= *0x9f");
 		// Weaker variant: the character class ITSELF, bound to any name. Matching
 		// `CONTROL_CHARS` left half the guard name-based — a weak sanitizer under
 		// another constant name would have gone uncounted and a stale total would
 		// still have passed. The `= ` anchor keeps it to DEFINITIONS: the bare
 		// class also appears in two doc comments describing it, the same
 		// prose-counts-as-code trap the strong matcher fell into first.
-		const weak = occurrences("= /\\[\\\\x00-\\\\x1f\\\\x7f\\]/g");
+		const weak = occurrences("= */\\[\\\\x00-\\\\x1f\\\\x7f\\]/g");
 
 		expect(
 			strong + weak,
