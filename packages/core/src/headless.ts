@@ -224,6 +224,24 @@ interface AuthorizationCapture {
 	 */
 	readonly sessionAccounted: boolean;
 	/**
+	 * The amount this hold actually RESERVED — the write-premium-inflated
+	 * `estimatedCost`, i.e. exactly the number added to `inFlightHoldTotal` at
+	 * authorize when `sessionAccounted` is true. NOT `meteredEstimate`, which is
+	 * the un-inflated metering figure: releasing that would leave the counter
+	 * permanently short by the premium the reservation really took.
+	 *
+	 * Recorded here for the same reason as `sessionAccounted` beside it, one step
+	 * further: the flag decides WHETHER the release happens and this decides HOW
+	 * MUCH, and neither may come from the caller's handle. The public
+	 * `estimatedCost` is a property access on a caller-owned object, so a getter
+	 * can answer with a different number at the release than the increment used
+	 * (measured on `abort()`: `budgetRemaining()` 150_000 against a configured
+	 * budget of 100_000) or throw and stop `abort()` reaching the VOID at all.
+	 * A discharge path must not be able to be blocked, or resized, by the party
+	 * being discharged.
+	 */
+	readonly hold: number;
+	/**
 	 * The UN-INFLATED metering estimate (plain `inputPer1k`, unmodified rates),
 	 * captured at authorize time — never the write-premium-fattened hold
 	 * (`Authorization.estimatedCost`). `settle()`'s "no usage reported"
@@ -1235,6 +1253,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					costCenter: captured?.attribution.costCenter,
 					envelope: captured,
 					sessionAccounted: !envelopeDebited,
+					// The number the increment above used, so the release can use the
+					// same one without asking the caller.
+					hold: estCost,
 					meteredEstimate,
 				}),
 			);
@@ -1715,16 +1736,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// governor's own `capture` record is, and what the ledgered fix for
 			// `proxyTransferId` below actually is). Anything else is decoration.
 			//
-			// ONLY THE MONEY/IDENTITY FIELDS ARE HOISTED. `model` is deliberately
-			// NOT snapshotted here: it is read exactly once, so there is nothing to
-			// diverge, and it is AUDIT-ONLY. Every read hoisted above the VOID is a
-			// caller-controlled accessor that could throw ahead of the discharge,
-			// and an audit line is never worth a stranded hold — so it is read at
-			// the write, AFTER the money is back. A test pins that ordering.
+			// ONLY THE IDENTITY FIELDS ARE HOISTED, AND ONLY TWO OF THEM. `model` is
+			// deliberately NOT snapshotted here: it is read exactly once, so there is
+			// nothing to diverge, and it is AUDIT-ONLY. Every read hoisted above the
+			// VOID is a caller-controlled accessor that could throw ahead of the
+			// discharge, and an audit line is never worth a stranded hold — so it is
+			// read at the write, AFTER the money is back. A test pins that ordering.
 			//
-			// `transferId` and `estimatedCost` were already read before the VOID, so
-			// hoisting them adds no way to skip it. `proxyTransferId` is the one
-			// that does move: its old read sat inside the best-effort `catch`, so a
+			// `transferId` was already read before the VOID (the liveness `get`), so
+			// hoisting it adds no way to skip it. `proxyTransferId` is the one that
+			// does move: its old read sat inside the best-effort `catch`, so a
 			// throwing accessor was swallowed there and now escapes. That is the
 			// right side of the trade — a LIVE read lets a caller aim the VOID at
 			// another call's pending transfer (releasing money that is not theirs),
@@ -1732,9 +1753,21 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// The complete answer is to take the proxy id from the governor's own
 			// `capture`, as `destroy()` does, and never from the handle; that is a
 			// behaviour change beyond this fix and is ledgered, not done here.
+			//
+			// THE AMOUNT IS NOT READ OFF THE HANDLE AT ALL — it comes from
+			// `capture.hold` below. It was hoisted here once, and that was a defect:
+			// the pre-hoist read sat inside `if (capture.sessionAccounted)`, which is
+			// FALSE for an attributed hold, so an attributed abort never touched the
+			// accessor. Hoisting it put a caller-owned getter ahead of the lookup,
+			// the claim and the VOID on a path that does not need the value, and a
+			// throwing one then stranded the envelope hold — the exact trade this
+			// whole block rejects, arriving as a READ rather than as a guard. Moving
+			// it back inside the branch would fix only the attributed half; the
+			// governor's own capture fixes both, and it also stops a getter that
+			// merely LIES from resizing the release (measured: `budgetRemaining()`
+			// 150_000 against a configured budget of 100_000).
 			const transferId = auth.transferId;
 			const proxyTransferId = auth.proxyTransferId;
-			const estimatedCost = auth.estimatedCost;
 
 			// Same lookup as settle, and the same reason: liveness and attribution come
 			// from one internal record. Still idempotent-silent, unlike settle.
@@ -1747,12 +1780,15 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 			// Only the session wallet's own in-flight exposure is released here; an
 			// attributed hold never added to it (see authorize), and the VOID below is
-			// what returns the envelope's funds.
+			// what returns the envelope's funds. Both halves of the release — WHETHER
+			// (`sessionAccounted`) and HOW MUCH (`hold`) — come from the authorize-time
+			// capture, so it is symmetric with the increment by construction and the
+			// caller cannot reach either one.
 			if (capture.sessionAccounted) {
 				// AUD-453: Acquire mutex for budget atomicity
 				const releaseLock = await budgetMutex.acquire();
 				try {
-					inFlightHoldTotal -= estimatedCost;
+					inFlightHoldTotal -= capture.hold;
 				} finally {
 					releaseLock();
 				}

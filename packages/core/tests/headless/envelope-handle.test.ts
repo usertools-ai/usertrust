@@ -924,3 +924,138 @@ describe("headless session accounting excludes envelope spend", () => {
 		await gov.destroy();
 	});
 });
+
+// ---------------------------------------------------------------------------
+// abort() DISCHARGES: no caller accessor may block the VOID, or resize it
+// ---------------------------------------------------------------------------
+//
+// A REGRESSION THIS BRANCH INTRODUCED, and the failure the abort ruling exists
+// to prevent — reintroduced as a READ instead of a guard. `abort()` hoisted
+// `auth.estimatedCost` into a local above the lookup, the claim and the VOID.
+// Before the hoist it was read only inside `if (capture.sessionAccounted)`,
+// which is FALSE for an attributed hold, so an attributed abort never touched
+// the accessor at all. After it, a throwing `estimatedCost` getter rejects abort
+// on a path that never needed the value and leaves the ENVELOPE hold pending.
+//
+// The amount is now taken from the governor's own frozen capture, so abort reads
+// nothing off the caller's handle but the id the liveness check already proved is
+// one of ours. That is the second of the two real closures the abort comment
+// names — carry the value in state we own — and it is the same treatment
+// `sessionAccounted` already gets for the same reason: the release must be
+// symmetric with the increment, and it cannot be if the caller supplies it.
+// `capture.meteredEstimate` is deliberately NOT the value used: it is the
+// UN-INFLATED metering estimate, and releasing it would leave `inFlightHoldTotal`
+// permanently short by the write premium the hold actually reserved.
+
+describe("abort() discharges against the governor's own numbers, not the caller's accessors", () => {
+	let vaultBase: string;
+
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `headless-envelope-abort-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+		process.env.USERTRUST_TEST = "1";
+		vi.mocked(evaluatePolicy).mockClear();
+	});
+
+	afterEach(() => {
+		process.env.USERTRUST_TEST = "";
+		try {
+			rmSync(vaultBase, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+	});
+
+	async function governorWith(engine: EngineHandle, audit: AuditHandle): Promise<Governor> {
+		return await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: audit,
+		});
+	}
+
+	/** The hostile handle: the field abort must not need is the field that throws. */
+	function poison(auth: Authorization): void {
+		Object.defineProperty(auth, "estimatedCost", {
+			configurable: true,
+			get(): number {
+				throw new Error("hostile accessor");
+			},
+		});
+	}
+
+	it("VOIDs an ATTRIBUTED hold whose handle's estimatedCost accessor throws", async () => {
+		// THE REGRESSION CASE, stated on the authorization class it actually
+		// broke: attributed, so `sessionAccounted` is false and the pre-hoist code
+		// never read this field on this path.
+		const engine = makeMockEngine({ balance: 50_000 });
+		const audit = makeMockAudit();
+		const gov = await governorWith(engine, audit);
+
+		const auth = await withCostCenter(COST_CENTER, () => gov.authorize(AUTHORIZE), SCOPE_OPTS);
+		poison(auth);
+
+		await expect(gov.abort(auth, new Error("provider exploded"))).resolves.toBeUndefined();
+
+		// The money is back: the envelope's pending transfer is voided, against the
+		// id the liveness check approved.
+		expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.voidPendingSpend.mock.calls[0]?.[0]).toBe(auth.transferId);
+		// And the record still names the envelope the hold debited.
+		expect(auditData(audit, "llm_call_failed").costCenter).toBe(COST_CENTER);
+		// The authorization is discharged, not left alive to be released twice.
+		await expect(gov.settle(auth, { inputTokens: 80, outputTokens: 200 })).rejects.toThrow(
+			/is not active/,
+		);
+		// Session numbers never moved — an attributed hold never entered them.
+		expect(gov.budgetRemaining()).toBe(100_000);
+
+		await gov.destroy();
+	});
+
+	it("VOIDs an UNATTRIBUTED hold whose handle's estimatedCost accessor throws, and restores the budget", async () => {
+		// The session-accounted path reaches the release itself, so this one is only
+		// safe because the amount comes from the capture. A caller-owned accessor
+		// must not be able to prevent the VOID on ANY path.
+		const engine = makeMockEngine({ balance: 50_000 });
+		const gov = await governorWith(engine, makeMockAudit());
+
+		const auth = await gov.authorize(AUTHORIZE);
+		expect(gov.budgetRemaining()).toBeLessThan(100_000);
+		poison(auth);
+
+		await expect(gov.abort(auth, new Error("provider exploded"))).resolves.toBeUndefined();
+
+		expect(engine.voidPendingSpend).toHaveBeenCalledOnce();
+		expect(gov.budgetRemaining()).toBe(100_000);
+
+		await gov.destroy();
+	});
+
+	it("releases the hold the governor PLACED, not the number the handle reports at abort", async () => {
+		// The quieter half of the same defect: a live read lets a caller resize the
+		// release. Returning a number larger than the hold drives `inFlightHoldTotal`
+		// negative and hands the session more headroom than its configured budget —
+		// money nobody allocated, the same class of number `settle()`'s read-once fix
+		// measured at 100_650 against a ceiling of 100_000.
+		const engine = makeMockEngine({ balance: 50_000 });
+		const gov = await governorWith(engine, makeMockAudit());
+
+		const auth = await gov.authorize(AUTHORIZE);
+		const placed = auth.estimatedCost;
+		expect(placed).toBeGreaterThan(0);
+		Object.defineProperty(auth, "estimatedCost", {
+			configurable: true,
+			get: (): number => placed + 50_000,
+		});
+
+		await gov.abort(auth, new Error("provider exploded"));
+
+		expect(gov.budgetRemaining()).toBe(100_000);
+		expect(gov.budgetRemaining()).toBeLessThanOrEqual(100_000);
+
+		await gov.destroy();
+	});
+});
