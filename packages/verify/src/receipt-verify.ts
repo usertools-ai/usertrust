@@ -2781,11 +2781,31 @@ class BaseRun {
 
 		// Proof material is the UNVERIFIABLE case, not a schema failure: §7 lists
 		// "a proof or checkpoint that is not there" under missing material.
+		//
+		// ABSENT is not MALFORMED, and `objectAtKey` cannot tell them apart — it
+		// answers `undefined` for both, so `"proof": null` (or a string, or an
+		// array) reported "the receipt carries no proof" and bought exit 2. §7
+		// reserves UNVERIFIABLE for material that IS NOT THERE: "we could not
+		// check". A member that is present and is not the object §5 declares is a
+		// claim the receipt made and got wrong — FAILED / SCHEMA_INVALID, exit 1,
+		// "we checked, and this receipt is bad". The two exit codes are the CI
+		// contract, so PRESENCE is now decided separately from shape.
+		// JSON cannot express an `undefined` VALUE, so "the key is there and the
+		// value is not an object" is exactly `hasOwn && objectAtKey === undefined`.
+		const malformed = (holder: JsonObject, key: string): boolean =>
+			Object.hasOwn(holder, key) && objectAtKey(holder, key) === undefined;
+		if (malformed(document, "proof")) return schema("proof is present and is not an object");
 		const proof = objectAtKey(document, "proof");
 		if (proof === undefined) return missingMaterial("proof", "the receipt carries no proof");
+		if (malformed(proof, "inclusion")) {
+			return schema("proof.inclusion is present and is not an object");
+		}
 		const inclusion = objectAtKey(proof, "inclusion");
 		if (inclusion === undefined) {
 			return missingMaterial("proof", "the proof carries no inclusion member");
+		}
+		if (malformed(proof, "checkpoint")) {
+			return schema("proof.checkpoint is present and is not an object");
 		}
 		const checkpoint = objectAtKey(proof, "checkpoint");
 		if (checkpoint === undefined) {

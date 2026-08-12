@@ -365,6 +365,118 @@ describe("--envelope", () => {
 		expect(outcome.kind).toBe("missing");
 	});
 
+	// ── R4 is not conditional on the receipt being valid ──────────────────────
+	//
+	// The agreement check was gated on `readReceiptDocument` succeeding, so a
+	// resolver holding bytes that PARSE but fail the receipt schema could tamper
+	// with its own framing for free: the run reported SCHEMA_INVALID — a
+	// statement about the RECEIPT — and the envelope's lie about which receipt
+	// this is was never mentioned. §3 is explicit that a mismatch "is an
+	// ENVELOPE integrity failure, not SCHEMA_INVALID". R4's inputs are the
+	// decoded bytes and the framing; neither needs the bytes to be a valid ut1
+	// document, and the one thing the gate really requires is that the bytes are
+	// JSON at all (below which step 1 owns the report).
+	describe("R4 agreement is not gated on the receipt schema", () => {
+		/** Valid JSON, and not a valid receipt: an unknown top-level member. */
+		const schemaInvalidBytes = {
+			receiptAfterSign: (r: Record<string, unknown>) => ({
+				...r,
+				note: "unknown to §5",
+			}),
+		};
+
+		it("reports the ENVELOPE failure when the id is altered and the bytes are schema-invalid", () => {
+			const bundle = mint({
+				...schemaInvalidBytes,
+				envelope: (e) => ({ ...e, receiptId: ALT_RECEIPT_ID }),
+			});
+			const report = jsonReport(
+				runReceiptCli(
+					["envelope.json", "--trust", "trust.json", "--envelope", "--json"],
+					ioFor(bundle),
+				),
+			);
+			expect(report.verdict).toBe("FAILED");
+			expect(report.failure?.step).toBe("envelope");
+			expect(report.failure?.code).toBe("ENVELOPE_INVALID");
+			expect(report.failure?.detail).toContain("envelope-id↔receipt-id");
+		});
+
+		it("reports the ENVELOPE failure when the convenience copy is OMITTED", () => {
+			const bundle = mint({
+				...schemaInvalidBytes,
+				envelope: (e) => {
+					const { receipt: _dropped, ...rest } = e;
+					return rest;
+				},
+			});
+			const report = jsonReport(
+				runReceiptCli(
+					["envelope.json", "--trust", "trust.json", "--envelope", "--json"],
+					ioFor(bundle),
+				),
+			);
+			expect(report.failure?.step).toBe("envelope");
+			expect(report.failure?.detail).toContain("bytes↔copy");
+		});
+
+		it("reports the ENVELOPE failure when the copy is ALTERED", () => {
+			const bundle = mint({
+				...schemaInvalidBytes,
+				envelope: (e) => ({
+					...e,
+					receipt: { ...(e.receipt as Record<string, unknown>), scope: "tampered" },
+				}),
+			});
+			expect(
+				jsonReport(
+					runReceiptCli(
+						["envelope.json", "--trust", "trust.json", "--envelope", "--json"],
+						ioFor(bundle),
+					),
+				).failure?.step,
+			).toBe("envelope");
+		});
+
+		it("still lets step 1 own a schema-invalid receipt whose FRAMING is honest", () => {
+			// The no-false-positive half: R4 running earlier must not turn every
+			// bad receipt into an envelope failure. Here the framing agrees with
+			// the bytes exactly, so the only defect is the receipt's.
+			const report = jsonReport(
+				runReceiptCli(
+					["envelope.json", "--trust", "trust.json", "--envelope", "--json"],
+					ioFor(mint(schemaInvalidBytes)),
+				),
+			);
+			expect(report.verdict).toBe("FAILED");
+			expect(report.failure?.step).toBe("schema");
+			expect(report.failure?.code).toBe("SCHEMA_INVALID");
+		});
+
+		it("still leaves UNPARSEABLE bytes to step 1 — R4 has nothing to compare", () => {
+			const bundle = mint({
+				bytes: (b) => Buffer.concat([b, Buffer.from("!", "utf8")]),
+				envelope: (e) => ({ ...e, receiptId: ALT_RECEIPT_ID }),
+			});
+			const report = jsonReport(
+				runReceiptCli(
+					["envelope.json", "--trust", "trust.json", "--envelope", "--json"],
+					ioFor(bundle),
+				),
+			);
+			expect(report.verdict).toBe("UNVERIFIABLE");
+			expect(report.missing?.what).toBe("receiptBytes");
+		});
+
+		it("still verifies the clean envelope", () => {
+			const result = runReceiptCli(
+				["envelope.json", "--trust", "trust.json", "--envelope"],
+				ioFor(mint()),
+			);
+			expect(result.exitCode).toBe(0);
+		});
+	});
+
 	it("a receipt-bearing status with receiptBytes absent is UNVERIFIABLE (exit 2), not a usage error (exit 3) — fixer finding 2", () => {
 		const bundle = mint({ envelope: (e) => ({ ...e, receiptBytes: undefined }) });
 		const outcome = resolveEnvelope(Buffer.from(JSON.stringify(bundle.envelope), "utf8"));
@@ -783,6 +895,63 @@ describe("human report — the four named checks, on every verdict", () => {
 		expect(result.stdout).toContain("Verdict: UNVERIFIABLE");
 		expect(result.stdout).not.toContain("Steps:");
 		expect(result.stdout).not.toContain("Arrival check (3a):");
+	});
+
+	// ── A failed CHECK carries its detail into the human report ───────────────
+	//
+	// Step 9 is upgrade-only: a broken history never demotes the base verdict,
+	// so `report.failure` stays null and the `Failed step:` block — the one
+	// place the human report ever printed a detail — does not render. The reader
+	// was left with `Checkpoint history: failed` and, in the ledger,
+	// `extensions failed (HISTORY_INVALID)`. That does not distinguish a short
+	// history from a broken lineage edge from a checkpoint signed by the wrong
+	// key, and CLI spec §6 does not make `--json` the only honest mode.
+	describe("a failed extension check prints WHY, not just that it failed", () => {
+		const HISTORY_CASES: ReadonlyArray<readonly [string, Parameters<typeof mint>[0], string]> = [
+			[
+				"a broken lineage edge",
+				{
+					checkpointsUnsigned: (checkpoints) =>
+						checkpoints.map((c, i) =>
+							i === 1 ? { ...c, previousSegmentRoot: "b".repeat(64) } : c,
+						),
+				},
+				"previousSegmentRoot is not the preceding checkpoint's root",
+			],
+			[
+				"a history short of the registered genesis",
+				{ history: (h) => h.slice(1) },
+				"the registered genesis",
+			],
+			["an empty history", { history: () => [] }, "empty"],
+		];
+
+		for (const [label, options, needle] of HISTORY_CASES) {
+			it(`names ${label} in the human report`, () => {
+				const bundle = mint(options);
+				const result = runReceiptCli(
+					["envelope.json", "--trust", "trust.json", "--envelope"],
+					ioFor(bundle),
+				);
+				// The base verdict is untouched — this is the upgrade-only rule, and
+				// it is exactly why the detail had nowhere else to go.
+				expect(result.stdout).toContain("Verdict: VERIFIED_CHECKPOINT");
+				expect(result.exitCode).toBe(0);
+				expect(result.stdout).toContain("Checkpoint history: failed");
+				expect(result.stdout).toContain("HISTORY_INVALID");
+				expect(result.stdout, label).toContain(needle);
+			});
+		}
+
+		it("adds nothing to a check that passed or was notApplicable", () => {
+			const result = runReceiptCli(
+				["envelope.json", "--trust", "trust.json", "--envelope"],
+				ioFor(mint()),
+			);
+			expect(result.stdout).toContain("Checkpoint history: passed");
+			expect(result.stdout).toContain("Predecessor linkage: notApplicable");
+			expect(result.stdout).not.toContain("HISTORY_INVALID");
+		});
 	});
 });
 

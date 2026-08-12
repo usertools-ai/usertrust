@@ -211,11 +211,42 @@ describe("HARDEN: anchoring additive proofs", () => {
 		//     pre-run report, where nothing ran at all.
 		// Post-round total: 8192. 8400 leaves 208 lines of headroom rather than
 		// trimming a Tier-0 table to fit a number.
+		//
+		// 8400 → 8700, the THIRD Codex Tier-0 round (2026-08-12), same amended §7
+		// process. (a) re-verified directly: assertions 4 and 5 above still pass —
+		// every import in `packages/verify/src` is `node:*` or `./`-relative
+		// (`node:crypto`, `node:fs`, `node:path`, and nothing else) and
+		// `dependencies` is still `{}`; no file was vendored and no mirrored file
+		// was edited. (b) what was added, +209 lines across two files, every line
+		// of it closing a defect:
+		//   · `receipt-verify.ts` +157 — a REGRESSION the previous round
+		//     introduced plus three P1s of one class. The regression:
+		//     `walkFieldTable` asked `table[key] !== undefined`, and a plain
+		//     object answers that with `Object.prototype`, so a signed member
+		//     named `__proto__`/`constructor`/`toString` read as DECLARED and
+		//     reached VERIFIED_CHECKPOINT — fixed with `Object.hasOwn` plus
+		//     null-prototype tables (`fieldTable`), which is why the defect is now
+		//     inexpressible rather than merely absent. The class: AGREEMENT IS NOT
+		//     CONFORMANCE — §4a's fixed `event.actor`, §4a/§8's `minter.kind`
+		//     literal, and §8's one-material-one-keyId rule, each of which the
+		//     verifier had been deciding by comparing two attacker-supplied
+		//     documents to each other. Plus PRESENT-but-malformed `proof`/
+		//     `inclusion`/`checkpoint` moving from UNVERIFIABLE (exit 2) to
+		//     SCHEMA_INVALID (exit 1), which is the CI contract. Most of the count
+		//     is the prose recording WHY each rule cannot be an agreement, so the
+		//     fourth instance reads as an instance.
+		//   · `receipt-cli.ts` +38 — R4 agreement no longer gated on the receipt
+		//     schema (a resolver could rewrite its own framing for free whenever
+		//     the bytes failed §5), and `pushCheck`, which prints a failed §7
+		//     check's nested DETAIL: step 9 is upgrade-only, so `report.failure`
+		//     is null and the human report had nowhere else to say whether the
+		//     history was short, broken at an edge, or signed by the wrong key.
+		// Post-round total: 8401. 8700 leaves 299 lines of headroom.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(8400);
+		expect(total).toBeLessThan(8700);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {

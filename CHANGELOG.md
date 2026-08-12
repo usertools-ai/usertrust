@@ -201,6 +201,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The offline receipt verifier's field table declared `__proto__` (regression).**
+  The previous round closed a nine-instance format class by making the key set
+  and the declared format one declaration, walked once — and closed it with
+  `table[key] !== undefined`. The key comes from the document and the table was
+  an object literal, so `Object.prototype` answered on its behalf: a signed
+  member named `__proto__`, `constructor`, `toString`, `valueOf`,
+  `hasOwnProperty` (or any other prototype name) read as DECLARED, was then
+  skipped by the declared pass too (`Object.keys` yields no inherited name), and
+  so was checked by nobody. `JSON.parse` creates `__proto__` as an own data
+  property, so the member survives the wire and the canonical preimage covers
+  it: the mint signature verified over it and the receipt reached
+  `VERIFIED_CHECKPOINT` for a document §2 makes a hard FAIL. Fixed with
+  `Object.hasOwn` at the lookup AND null-prototype tables, so the defect is now
+  inexpressible rather than merely absent.
+- **Agreement is not conformance — three soundness holes with one root.** The
+  verifier decided three spec LITERALS by checking that the receipt agreed with
+  the pinned trust snapshot. Both are inputs, and two inputs agreeing proves
+  only that one party wrote both. (1) `receipt-spec` §4a fixes proxy-v1's
+  `event.actor` to exactly `{type:"system", id:"receipt-minter",
+  name:"receipt-minter"}`; a receipt carrying the string form, `null`, an
+  array, or that object plus a `tenant` member verified whenever the registered
+  `mintActor` was malformed identically. (2) §4a/§8 give v1 no SDK mint keys at
+  all, so `minter.kind` is the literal `proxy`; a snapshot registering
+  `minterKind: "sdk"` and a receipt claiming `"sdk"` agreed and verified. (3)
+  §8 hangs every rule it has — role, state, rotation boundary, lineage, vault
+  ownership — off a globally unique `keyId`, but identical key MATERIAL under
+  two keyIds was accepted: that let a revoked mint key be re-registered as
+  active under a second name and keep signing, and let one checkpoint lineage
+  be pinned by two vaults through two disjoint ID sets. Each literal is now
+  checked against the spec first, with the agreement kept as a second fence;
+  key material is unique across the snapshot.
+- **`proof`/`inclusion`/`checkpoint` present-but-malformed is FAILED, not
+  UNVERIFIABLE.** All three were read through a helper that answers `undefined`
+  for both "absent" and "not an object", so `"proof": null` reported missing
+  material and exit 2 — "we could not check" — for a receipt that made a claim
+  and got it wrong. §7 reserves UNVERIFIABLE for material that is not there;
+  present-and-malformed is `SCHEMA_INVALID` and exit 1. The two exit codes are
+  the CI contract.
+- **The `--envelope` R4 agreement check no longer depends on the receipt being
+  valid.** It ran only when the decoded bytes passed the full ut1 schema, so a
+  resolver holding bytes that parsed but failed §5 could omit or rewrite the
+  convenience copy and the envelope `receiptId` for free: the run reported
+  `SCHEMA_INVALID` — a statement about the receipt — and never mentioned that
+  the framing had lied about which receipt this was. R4 now runs on any bytes
+  that are JSON at all, which is also the symmetric comparison (neither side
+  runs the frozen numeric rules).
+- **A failed checkpoint-history walk prints WHY in the human report.** Step 9 is
+  upgrade-only, so a broken history leaves the base verdict — and
+  `report.failure` — untouched, and the human renderer's only detail line
+  belongs to that field. The reader saw `Checkpoint history: failed` and
+  nothing that distinguishes a short history from a broken lineage edge from a
+  checkpoint signed by the wrong key, with `--json` as the only way to find out.
+  The nested detail is now printed for every named §7 check that failed.
 - **`usertrust-verify --tx` scrubs control characters out of every untrusted
   receipt field.** The receipt renders strings read from `events.jsonl` — a file
   the party under audit owns — onto the terminal of the auditor checking it, so

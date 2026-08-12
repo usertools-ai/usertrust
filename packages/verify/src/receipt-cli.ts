@@ -458,16 +458,28 @@ export function resolveEnvelope(bytes: Uint8Array): EnvelopeOutcome {
 		return { kind: "missing", detail: "envelope.receiptBytes is not canonical base64" };
 	}
 
-	// R4, only checkable once the bytes at least strict-parse. When they
-	// don't, step 1 owns reporting it on the `verifyReceipt` call this
-	// function's caller makes next — a second "unparseable" message here
-	// would just be step 1's, spoken early.
-	const strict = readReceiptDocument(decoded);
+	// R4, checkable as soon as the bytes are JSON AT ALL — and no sooner. When
+	// they are not, step 1 owns reporting it on the `verifyReceipt` call this
+	// function's caller makes next; a second "unparseable" message here would
+	// just be step 1's, spoken early.
+	//
+	// It is deliberately NOT `readReceiptDocument`. R4 asks whether the
+	// FRAMING agrees with the bytes, and that question does not need the bytes
+	// to be a valid ut1 document — gating it on the full schema meant a
+	// resolver holding bytes that parsed but failed §5 could omit or rewrite
+	// the convenience copy and the envelope `receiptId` for free: the run
+	// reported SCHEMA_INVALID, a statement about the RECEIPT, and never
+	// mentioned that the envelope had lied about which receipt this was. §3 is
+	// explicit that a mismatch "is an ENVELOPE integrity failure, not
+	// SCHEMA_INVALID". Using the same `readStrictJson` on both sides also makes
+	// the comparison symmetric: the copy has never run through the frozen
+	// numeric rules either.
+	const strict = readStrictJson(decoded);
 	if (strict.ok) {
+		const bytesValue = strict.value;
 		const copy = envelope.receipt;
-		// STRUCTURAL, not canonical-string. `copy` is `readStrictJson`-parsed
-		// only (fatal UTF-8 + duplicate-key rejection) — it never ran through
-		// `readReceiptDocument`'s frozen numeric rules, so it can carry
+		// STRUCTURAL, not canonical-string. Neither side ran through
+		// `readReceiptDocument`'s frozen numeric rules, so both can carry
 		// anything JSON can express, including values a serializer erases.
 		// `canonicalize` renders `-0` as `0` and THROWS on `1e999`; comparing
 		// its output would therefore report agreement between a copy and bytes
@@ -475,9 +487,13 @@ export function resolveEnvelope(bytes: Uint8Array): EnvelopeOutcome {
 		// verdict. `structurallyEqualJson` compares numbers with `Object.is`,
 		// ignores key ORDER (which is not a defect in a convenience copy), and
 		// never serializes either side.
-		const bytesMatchCopy = copy !== undefined && structurallyEqualJson(strict.value, copy);
+		const bytesMatchCopy = copy !== undefined && structurallyEqualJson(bytesValue, copy);
+		// Bytes that are JSON but not an OBJECT carry no `receiptId`, so the
+		// envelope's claimed id agrees with nothing — a disagreement, not a
+		// reason to skip the equality.
+		const bytesReceiptId = isJsonObject(bytesValue) ? bytesValue.receiptId : undefined;
 		const idsMatch =
-			typeof envelope.receiptId === "string" && envelope.receiptId === strict.value.receiptId;
+			typeof envelope.receiptId === "string" && envelope.receiptId === bytesReceiptId;
 		if (!bytesMatchCopy || !idsMatch) {
 			// §3: "a mismatch is an ENVELOPE integrity failure, not
 			// SCHEMA_INVALID… a detail naming which of the three equalities
@@ -543,6 +559,28 @@ function describeStep(
 	return `  ${name.padEnd(12)} ${outcome.result}${detail}`;
 }
 
+/**
+ * One of §7's named checks — with its DETAIL when it failed.
+ *
+ * §7 step 9 is upgrade-only: a broken checkpoint history never demotes the
+ * base verdict, so `report.failure` stays null and the `Failed step:` block —
+ * the only place the human report ever printed a detail — does not render.
+ * That left the reader with `Checkpoint history: failed` and nothing else,
+ * which does not distinguish a short history from a broken lineage edge from a
+ * checkpoint signed by the wrong key. The detail exists, it is already
+ * sanitized by `sanitizeCliReport`, and CLI spec §6 does not make `--json` the
+ * only honest mode.
+ */
+function pushCheck(
+	lines: string[],
+	label: string,
+	outcome: { result: string; failure?: { code: string; detail: string } },
+): void {
+	const failure = outcome.failure;
+	lines.push(`${label}: ${outcome.result}${failure === undefined ? "" : ` (${failure.code})`}`);
+	if (failure !== undefined) lines.push(`  ${clip(failure.detail)}`);
+}
+
 function renderHumanReport(report: ReceiptCliReport): string {
 	const lines: string[] = [];
 	lines.push(`Verdict: ${report.verdict}`);
@@ -598,14 +636,14 @@ function renderHumanReport(report: ReceiptCliReport): string {
 		lines.push(
 			`Registry binding (3b): ${report.checks.registryBinding.result} — offline; no resolver was consulted (§7's Offline column)`,
 		);
-		lines.push(`Predecessor linkage: ${report.checks.predecessorLinkage.result}`);
-		lines.push(`Checkpoint history: ${report.checks.checkpointHistory.result}`);
+		pushCheck(lines, "Predecessor linkage", report.checks.predecessorLinkage);
+		pushCheck(lines, "Checkpoint history", report.checks.checkpointHistory);
 		// `anchorEvidence` is present in `checks` ONLY when evidence was absent
 		// (notApplicable, fully conformant per §5); when evidence was supplied
 		// it is omitted here and named in `unimplemented` instead — reporting
 		// both would claim a §7 result the CLI never produced.
 		if (report.checks.anchorEvidence !== undefined) {
-			lines.push(`Anchor evidence: ${report.checks.anchorEvidence.result}`);
+			pushCheck(lines, "Anchor evidence", report.checks.anchorEvidence);
 		}
 	}
 	if (report.unimplemented.length > 0) {

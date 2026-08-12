@@ -46,6 +46,7 @@ import {
 	mint,
 	type Projection,
 	SHORT_DECODE_RECEIPT_ID,
+	type UnsignedReceipt,
 } from "./harness.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -779,6 +780,70 @@ describe("step 1 — a required member that is simply not there", () => {
 		});
 		expect(actual.verdict).toBe("UNVERIFIABLE");
 		expect(actual.missing?.what).toBe("proof");
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ABSENT is not MALFORMED (CLI spec §5's table, receipt-spec §7).
+//
+// §7 lists "a proof or checkpoint that is not there" under MISSING MATERIAL,
+// which is UNVERIFIABLE and exit 2 — "we could not check". A member that is
+// PRESENT and is a `null`, a string or an array is a different statement: the
+// receipt made a claim and the claim is malformed, which is FAILED /
+// SCHEMA_INVALID and exit 1 — "we checked, and this receipt is bad".
+//
+// Step 1 read all three through `objectAtKey`, which answers `undefined` for
+// both, so a hostile `"proof": null` bought exit 2 from a CI gate that treats
+// exit 1 as the only real negative. The two codes are the CI contract, so
+// collapsing them is a defect and not a wording preference.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("step 1 — a proof member that is PRESENT and malformed", () => {
+	const NOT_AN_OBJECT: readonly unknown[] = [null, "proof", 7, true, [], [{}]];
+
+	function withProofMember(member: "proof" | "inclusion" | "checkpoint", value: unknown) {
+		return member === "proof"
+			? { receiptBeforeSign: (r: UnsignedReceipt) => ({ ...r, proof: value }) }
+			: {
+					receiptBeforeSign: (r: UnsignedReceipt) => ({
+						...r,
+						proof: { ...r.proof, [member]: value },
+					}),
+				};
+	}
+
+	for (const member of ["proof", "inclusion", "checkpoint"] as const) {
+		it(`${member} present as a non-object ⇒ FAILED / SCHEMA_INVALID, never UNVERIFIABLE`, () => {
+			for (const value of NOT_AN_OBJECT) {
+				const actual = verifyMinted(withProofMember(member, value));
+				expect(actual.verdict, `${member} = ${JSON.stringify(value)}`).toBe("FAILED");
+				expect(actual.failure, `${member} = ${JSON.stringify(value)}`).toMatchObject({
+					step: "schema",
+					code: "SCHEMA_INVALID",
+				});
+				expect(actual.missing, `${member} = ${JSON.stringify(value)}`).toBeNull();
+			}
+		});
+	}
+
+	it("keeps ABSENT on the UNVERIFIABLE side — the other half of the line", () => {
+		const cases: ReadonlyArray<readonly [string, string]> = [
+			["proof", "proof"],
+			["inclusion", "proof"],
+			["checkpoint", "checkpoint"],
+		];
+		for (const [member, missing] of cases) {
+			const actual = verifyMinted(
+				withProofMember(member as "proof" | "inclusion" | "checkpoint", undefined),
+			);
+			expect(actual.verdict, member).toBe("UNVERIFIABLE");
+			expect(actual.missing?.what, member).toBe(missing);
+			expect(actual.failure, member).toBeNull();
+		}
+	});
+
+	it("still verifies when all three are the objects §5 declares", () => {
+		expect(verifyMinted({}).verdict).toBe("VERIFIED_CHECKPOINT");
 	});
 });
 
