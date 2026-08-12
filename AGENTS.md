@@ -659,9 +659,15 @@ rule above buys, pins WHEN a caller-owned accessor is read and does not make the
 caller still chose the transfer, including one belonging to another call. A wrong amount loses a
 number; a wrong id moves funds. Its read also sat above the lookup, the claim and the VOID, so a
 throwing accessor refused a discharge that never needed the value. All three terminals now take it
-from the capture. **Generalize it:** the release rule binds every field a terminal acts *on*, not
-only the amount it acts *with* — and the handle's copy of such a field is reporting only, exactly as
-`costCenter` already is.
+from the capture. **Generalize it, with its current limit stated:** the release rule binds every
+field that decides WHOSE money moves or HOW MUCH — the identity of the transfer and the amount —
+and the handle's copy of such a field is reporting only, exactly as `costCenter` already is.
+It does NOT yet bind the fields that decide the RATE: `settle()` still reads `model` and `endpoint`
+off the handle (headless.ts ~1364, ~1391) and both feed `resolveRates()` → the priced `actualCost`
+that is POSTed, so a handle can settle at a different model's rate than its hold was priced
+against. Neither field is on `AuthorizationCapture` yet. That gap is real, it is ledgered, and it
+is named here rather than papered over — a doc that claims more than its code is the failure this
+very section exists to prevent.
 *Prevents:* a boundary that is correct about the value it was shown and irrelevant to the bytes that
 get written — the defect surviving the fix, in a form that reads as fixed.
 
