@@ -1100,6 +1100,74 @@ export const CHECKPOINT_VECTORS: readonly Vector[] = [
 			mint({ checkpointsUnsigned: (checkpoints) => checkpoints.map((c) => ({ ...c, v: 1 })) }),
 	},
 	{
+		// The mutant `v === 2` alone cannot see. Nothing here is broken
+		// cryptographically — the reduced payload is re-signed by the real
+		// checkpoint key and every signature verifies — but the statement is no
+		// longer §4a's, and the member it is missing is exactly the lineage edge
+		// v2 was introduced to authenticate ("rewritable while every signature
+		// verified"). A verifier that gates only on the version label accepts it.
+		name: "checkpoint/v2-lineage-member-stripped",
+		what: "§4a fixes the v2 signed payload's MEMBERS: a checkpoint stripped of previousSegmentRoot and re-signed is not a v2 statement.",
+		mode: "receipt",
+		expect: failed("checkpoint", "CHECKPOINT_INVALID"),
+		breaks: [],
+		build: () =>
+			mint({
+				checkpointsUnsigned: (checkpoints) =>
+					checkpoints.map((c) => {
+						const { previousSegmentRoot: _dropped, ...rest } = c;
+						return rest as typeof c;
+					}),
+			}),
+	},
+	{
+		// The same hole worn the other way round: a v1 `PublishedMerkleRoot`'s
+		// member subset, relabelled `v: 2` and signed. §4a says v1 objects never
+		// appear in receipts; a version label an attacker writes is not what
+		// keeps them out.
+		name: "checkpoint/v1-shaped-payload-relabelled-v2",
+		what: "A v1 PublishedMerkleRoot member subset re-signed under `v: 2` is still not a v2 statement — the label is not the payload.",
+		mode: "receipt",
+		expect: failed("checkpoint", "CHECKPOINT_INVALID"),
+		breaks: [],
+		build: () =>
+			mint({
+				checkpointsUnsigned: (checkpoints) =>
+					checkpoints.map(
+						(c) =>
+							({
+								v: 2,
+								vaultId: c.vaultId,
+								profile: c.profile,
+								root: c.root,
+								treeSize: c.treeSize,
+								segmentId: c.segmentId,
+								segmentFirstSequence: c.segmentFirstSequence,
+								keyId: c.keyId,
+							}) as typeof c,
+					),
+			}),
+	},
+	{
+		// Nothing OUTSIDE §4a's member list either — an extra member changes the
+		// canonical preimage, so a signature over it commits unspecified content.
+		// INSIDE the receipt step 1 owns this (§5's unknown-field rule, and CLI
+		// spec §5: the earlier step's code wins), which is what this vector pins.
+		// The step-6 half of the same rule exists for step 9's history
+		// checkpoints, which never pass through step 1 — asserted directly
+		// against `verifyCheckpointStatement` in `steps.test.ts`.
+		name: "checkpoint/extra-signed-member",
+		what: "An extra member in the embedded checkpoint is an unknown field in the signed receipt: step 1 owns it, not step 6.",
+		mode: "receipt",
+		expect: failed("schema", "SCHEMA_INVALID"),
+		breaks: [],
+		build: () =>
+			mint({
+				checkpointsUnsigned: (checkpoints) =>
+					checkpoints.map((c) => ({ ...c, publishedTo: "https://rekor.example/1" }) as typeof c),
+			}),
+	},
+	{
 		name: "checkpoint/signature-tampered",
 		what: "The checkpoint signature covers the whole unsigned payload (§4a) with NO domain prefix.",
 		mode: "receipt",
@@ -1321,6 +1389,31 @@ export const SEMANTIC_VECTORS: readonly Vector[] = [
 		"`repo` is ≤ 256 characters in canonical provider-URL form.",
 		(p) => {
 			work(p).repo = `github.com/usertools-ai/${"x".repeat(260)}`;
+		},
+	),
+	semantic(
+		// The half a length check cannot see, and the one that leaks: §2 makes a
+		// receipt a PUBLIC document and puts `repo` under "no local paths", right
+		// beside "Never present anywhere: … file paths, PII". A 39-character
+		// absolute path is well under 256 and names a customer.
+		"semantics/repo-local-path",
+		"`repo` is the canonical <providerHost>/<owner>/<name> form and NOTHING else — a local filesystem path is not it.",
+		(p) => {
+			work(p).repo = "/Users/cam/private/customer-acme/secret";
+		},
+	),
+	semantic(
+		"semantics/repo-with-credentials",
+		"…nor a remote string carrying credentials, which is the other form §2 names.",
+		(p) => {
+			work(p).repo = "https://cam:ghp_secret@github.com/usertools-ai/usertrust";
+		},
+	),
+	semantic(
+		"semantics/repo-with-branch-decoration",
+		"…nor branch or worktree decoration: `<providerHost>/<owner>/<name>` is three parts, not five.",
+		(p) => {
+			work(p).repo = "github.com/usertools-ai/usertrust/tree/main";
 		},
 	),
 	semantic(
@@ -1595,6 +1688,26 @@ export const SNAPSHOT_VECTORS: readonly Vector[] = [
 						`"keyId": "${MINT_KEY.keyId}",`,
 						`"state": "revoked",\n      "keyId": "${MINT_KEY.keyId}",`,
 					),
+			}),
+	},
+	{
+		// `1e999` is grammatical JSON that PARSES to Infinity, and `canonicalize`
+		// throws on Infinity. `mintActor` is the one snapshot value equality 2
+		// canonicalizes, so without a value-level guard this vector does not
+		// produce a verdict at all — it produces an uncaught exception, which the
+		// CLI can only turn into exit 1 (FAILED: a real negative answer about the
+		// receipt) for what §4 calls a structurally invalid snapshot (exit 2).
+		// The snapshot is spliced at the BYTE level because no JSON writer can
+		// emit this: `JSON.stringify(Infinity)` is `null`.
+		name: "snapshot/non-finite-number",
+		what: "A snapshot number that parses to Infinity is refused as a VALUE — canonicalize must never be the thing that decides a verdict by throwing.",
+		mode: "receipt",
+		expect: unverifiable("trustSnapshot"),
+		breaks: [],
+		build: () =>
+			mint({
+				snapshotBytes: (b) =>
+					replaceOnce(b, '"mintActor": {', '"mintActor": 1e999,\n      "retiredActor": {'),
 			}),
 	},
 	{

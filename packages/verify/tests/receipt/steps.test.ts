@@ -24,8 +24,10 @@ import { describe, expect, it } from "vitest";
 import {
 	amountUsdFromAssessed,
 	isCanonicalReceiptId,
+	type JsonObject,
 	loadTrustSnapshot,
 	receiptIdFromArrivalContext,
+	verifyCheckpointStatement,
 	verifyReceiptBase,
 } from "../../src/receipt-verify.js";
 import {
@@ -814,6 +816,111 @@ describe("the last few reads a hostile document can bend", () => {
 				checkpoints.map((c, i) => (i === 2 ? { ...c, sig: `${c.sig.slice(0, -1)}!` } : c)),
 		});
 		expect(actual.failure).toMatchObject({ step: "checkpoint", code: "CHECKPOINT_INVALID" });
+	});
+});
+
+describe("step 6 — §4a's member list, asserted where step 1 cannot reach", () => {
+	// `verifyCheckpointStatement` is exported because step 9 applies it to EVERY
+	// checkpoint in a supplied history, and those arrive from the resolver's
+	// envelope — they never pass through step 1's unknown-field walk or its
+	// frozen numeric reader. So step 6 has to be self-sufficient about what a
+	// §4a v2 statement IS, and these assert it directly rather than through a
+	// receipt whose step 1 would answer first.
+	function statement(patch: (c: JsonObject) => JsonObject) {
+		const bundle = mint();
+		const load = loadTrustSnapshot(bundle.snapshotBytes);
+		if (!load.ok) throw new Error(`fixture snapshot did not load: ${load.detail}`);
+		const chain = load.snapshot.chains.get("vlt_ut_proxy_prod_1");
+		if (chain === undefined) throw new Error("fixture snapshot registered no chain");
+		const original = bundle.history[bundle.history.length - 1] as unknown as JsonObject;
+		return verifyCheckpointStatement(patch({ ...original }), chain, load.snapshot);
+	}
+
+	it("accepts the statement as minted", () => {
+		expect(statement((c) => c)).toEqual({ ok: true });
+	});
+
+	it("refuses a member OUTSIDE §4a's list — an extra member is signed, unspecified content", () => {
+		const outcome = statement((c) => ({ ...c, publishedTo: "https://rekor.example/1" }));
+		expect(outcome.ok).toBe(false);
+		expect(outcome.ok === false && outcome.missingTrustKey).toBe(false);
+	});
+
+	it("refuses each §4a member's absence, one at a time", () => {
+		for (const member of [
+			"vaultId",
+			"profile",
+			"root",
+			"treeSize",
+			"segmentId",
+			"segmentFirstSequence",
+			"previousSegmentRoot",
+			"previousSegmentId",
+			"keyId",
+			"publishedAt",
+			"sig",
+		]) {
+			const outcome = statement((c) => {
+				const { [member]: _dropped, ...rest } = c;
+				return rest;
+			});
+			expect(outcome.ok, member).toBe(false);
+			// Not UNVERIFIABLE: an absent keyId is a malformed statement, not an
+			// unresolvable key — the material is present and it is wrong.
+			expect(outcome.ok === false && outcome.missingTrustKey, member).toBe(false);
+		}
+	});
+
+	it("returns a VERDICT, never a throw, on a history checkpoint carrying Infinity", () => {
+		// The value canonicalize throws on, in the one object step 9 canonicalizes
+		// on material the reader never vetted. §7: the verdict is a function of the
+		// step results, "not of an exception being thrown somewhere".
+		const outcome = statement((c) => ({ ...c, treeSize: Number.POSITIVE_INFINITY }));
+		expect(outcome.ok).toBe(false);
+	});
+});
+
+describe("step 7 — §2's canonical provider-URL form for work.repo", () => {
+	function withRepo(repo: unknown): Run {
+		return verifyMinted({
+			projection: (p: Projection) => {
+				(p.work as Record<string, unknown>).repo = repo;
+				return p;
+			},
+		});
+	}
+
+	it("accepts the forms §2's `<providerHost>/<owner>/<name>` describes", () => {
+		for (const repo of [
+			"github.com/usertools-ai/usertrust",
+			"gitlab.com/Some.Owner/some_repo-2",
+			"git.self-hosted.example.co.uk/team/repo",
+		]) {
+			expect(withRepo(repo).verdict, repo).toBe("VERIFIED_CHECKPOINT");
+		}
+	});
+
+	it("refuses everything §2 says it is NOT — a public document must not carry a path", () => {
+		for (const repo of [
+			"/Users/cam/private/customer-acme/secret",
+			"../../etc/passwd",
+			"github.com/usertools-ai/usertrust/tree/main",
+			"https://github.com/usertools-ai/usertrust",
+			"git@github.com:usertools-ai/usertrust.git",
+			"https://cam:ghp_secret@github.com/usertools-ai/usertrust",
+			"github.com/usertools-ai/usertrust#my-worktree",
+			"localhost/usertools-ai/usertrust",
+			"GitHub.com/usertools-ai/usertrust",
+			"github.com//usertrust",
+			"github.com/usertools-ai/",
+			"github.com/usertools-ai/..",
+			"",
+		]) {
+			expect(withRepo(repo).failure, repo).toMatchObject({
+				step: "semantics",
+				code: "SEMANTIC_INVALID",
+			});
+		}
 	});
 });
 

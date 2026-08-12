@@ -350,28 +350,51 @@ export interface NumberViolation {
 	readonly value: number;
 }
 
-/** The first offending number in document order, or `null`. */
-export function findNonFrozenNumber(value: unknown, path = ""): NumberViolation | null {
-	if (typeof value === "number") {
-		if (!Number.isFinite(value) || Object.is(value, -0) || !Number.isSafeInteger(value)) {
-			return { path, value };
-		}
-		return null;
-	}
+/** The first number in document order for which `offends` holds, or `null`. */
+function findNumber(
+	value: unknown,
+	offends: (n: number) => boolean,
+	path: string,
+): NumberViolation | null {
+	if (typeof value === "number") return offends(value) ? { path, value } : null;
 	if (Array.isArray(value)) {
 		for (let i = 0; i < value.length; i += 1) {
-			const found = findNonFrozenNumber(value[i], path === "" ? String(i) : `${path}.${i}`);
+			const found = findNumber(value[i], offends, join(path, String(i)));
 			if (found !== null) return found;
 		}
 		return null;
 	}
 	if (isJsonObject(value)) {
 		for (const key of Object.keys(value)) {
-			const found = findNonFrozenNumber(value[key], path === "" ? key : `${path}.${key}`);
+			const found = findNumber(value[key], offends, join(path, key));
 			if (found !== null) return found;
 		}
 	}
 	return null;
+}
+
+/** The first offending number in document order, or `null`. */
+export function findNonFrozenNumber(value: unknown, path = ""): NumberViolation | null {
+	return findNumber(
+		value,
+		(n) => !Number.isFinite(n) || Object.is(n, -0) || !Number.isSafeInteger(n),
+		path,
+	);
+}
+
+/**
+ * The NON-FINITE clause on its own, for documents the frozen rules do NOT
+ * govern — the §8 snapshot, whose unknown members are deliberately tolerated
+ * (CLI spec §4) and may one day carry a legitimate fraction.
+ *
+ * Non-finiteness is the clause that has to bind everywhere regardless, because
+ * it is the one `canonicalize` THROWS on. A thrown canonicalization is not a
+ * verdict — §7 is explicit that "the verdict is a function of those results,
+ * not of an exception being thrown somewhere" — so wherever a value can reach
+ * `canonicalize`, `1e999` has to be refused as a VALUE first.
+ */
+export function findNonFiniteNumber(value: unknown, path = ""): NumberViolation | null {
+	return findNumber(value, (n) => !Number.isFinite(n), path);
 }
 
 export function describeNumberViolation(value: number): string {
@@ -816,6 +839,21 @@ export function loadTrustSnapshot(bytes: Uint8Array): TrustSnapshotLoad {
 	if (!parsed.ok) return fail(parsed.refusal.detail);
 	if (!isJsonObject(parsed.value)) return fail("the trust snapshot is not a JSON object");
 	const document = parsed.value;
+
+	// The snapshot is not read by the frozen numeric reader — §4 tolerates
+	// unknown members precisely so the open signing scheme can add them — but the
+	// NON-FINITE clause still has to bind, and this is the document where it
+	// bites: `mintActor` is canonicalized by equality 2, `1e999` PARSES to
+	// Infinity, and `canonicalize` throws on it. Without this guard a snapshot
+	// carrying one takes `verifyReceiptBase` out through an uncaught exception —
+	// no verdict at all, and in the CLI an exit 1 (FAILED, "we checked and this
+	// receipt is bad") for what §4 classifies as a structurally invalid snapshot
+	// (UNVERIFIABLE, exit 2). Ambiguity → UNVERIFIABLE, never a throw.
+	const nonFinite = findNonFiniteNumber(document);
+	if (nonFinite !== null) {
+		const where = nonFinite.path === "" ? "the document root" : nonFinite.path;
+		return fail(`${describeNumberViolation(nonFinite.value)} at ${where}`);
+	}
 
 	const rawKeys = document.keys;
 	const rawChains = document.chains;
@@ -1422,6 +1460,63 @@ export type CheckpointOutcome =
 	| { readonly ok: true }
 	| { readonly ok: false; readonly missingTrustKey: boolean; readonly detail: string };
 
+/** §4a's v2 signed payload, by member and by type. `sig` closes the statement. */
+const CHECKPOINT_STRING_MEMBERS: readonly string[] = [
+	"vaultId",
+	"profile",
+	"root",
+	"segmentId",
+	"previousSegmentRoot",
+	"previousSegmentId",
+	"keyId",
+	"publishedAt",
+	"sig",
+];
+const CHECKPOINT_INTEGER_MEMBERS: readonly string[] = ["treeSize", "segmentFirstSequence"];
+
+/**
+ * §7 step 6's first clause, in full. `checkpoint.v === 2` is a LABEL, and a
+ * label is not the statement: §4a fixes the v2 canonical signed payload as
+ * exactly `{ v, vaultId, profile, root, treeSize, segmentId,
+ * segmentFirstSequence, previousSegmentRoot, previousSegmentId, keyId,
+ * publishedAt }` + `sig`, and every signature check downstream verifies
+ * whatever payload it is handed. Strip `previousSegmentRoot`, re-sign the
+ * reduced object, and the version gate, the lineage pin, the key state and the
+ * Ed25519 verification all still pass — while the unauthenticated lineage edge
+ * that v2 exists to close (§4a: "rewritable while every signature verified") is
+ * simply gone again. A statement missing a §4a member is not a §4a statement,
+ * whoever signed it, so the member list is checked BEFORE the signature.
+ *
+ * Nothing outside the list either. An extra member changes the canonical
+ * preimage, so tolerating one would let a checkpoint carry signed-but-
+ * unspecified content; step 1 already refuses that inside the receipt, but
+ * step 9's history checkpoints never pass through step 1. Bounding the member
+ * set also bounds the TYPES, which is what keeps `canonicalize` below reachable
+ * only by strings and safe integers — it can no longer be handed the `1e999`
+ * that would take this function out through a throw instead of a verdict.
+ */
+function checkpointStatementShape(checkpoint: JsonObject): string | null {
+	// A v1 `PublishedMerkleRoot` in a receipt is FAIL: its root-only signature
+	// leaves `treeSize` and the lineage edge unauthenticated.
+	if (checkpoint.v !== 2) {
+		return `checkpoint.v is ${JSON.stringify(checkpoint.v)}, not the v2 statement`;
+	}
+	for (const member of CHECKPOINT_STRING_MEMBERS) {
+		if (stringAt(checkpoint, member) === null) {
+			return `the v2 statement carries no ${member} — §4a fixes its signed payload exactly`;
+		}
+	}
+	for (const member of CHECKPOINT_INTEGER_MEMBERS) {
+		const value = numberAt(checkpoint, member);
+		if (value === null || value < 0) {
+			return `the v2 statement's ${member} is not a non-negative integer`;
+		}
+	}
+	const extra = unknownIn(checkpoint, CHECKPOINT_KEYS, "checkpoint");
+	if (extra !== null) return `${extra} is not a member of §4a's v2 signed payload`;
+	return null;
+}
+
 export function verifyCheckpointStatement(
 	checkpoint: JsonObject,
 	chain: TrustChain,
@@ -1433,18 +1528,14 @@ export function verifyCheckpointStatement(
 		detail,
 	});
 
-	// §7 step 6, first clause: a v1 `PublishedMerkleRoot` in a receipt is FAIL.
-	// Its root-only signature leaves `treeSize` and the lineage edge
-	// unauthenticated, which is exactly what v2 exists to close.
-	if (checkpoint.v !== 2) {
-		return reject(`checkpoint.v is ${JSON.stringify(checkpoint.v)}, not the v2 statement`);
-	}
-	const keyId = stringAt(checkpoint, "keyId");
-	if (keyId === null) return reject("checkpoint carries no keyId");
-	const segmentFirstSequence = numberAt(checkpoint, "segmentFirstSequence");
-	if (segmentFirstSequence === null) return reject("checkpoint carries no segmentFirstSequence");
-	const sig = stringAt(checkpoint, "sig");
-	if (sig === null) return reject("checkpoint carries no sig");
+	// §7 step 6's first clause: the version label AND §4a's member list, because
+	// the label alone is a gate a re-signed reduced payload walks straight
+	// through. Once this passes, every member is present and typed.
+	const shapeFailure = checkpointStatementShape(checkpoint);
+	if (shapeFailure !== null) return reject(shapeFailure);
+	const keyId = stringAt(checkpoint, "keyId") as string;
+	const segmentFirstSequence = numberAt(checkpoint, "segmentFirstSequence") as number;
+	const sig = stringAt(checkpoint, "sig") as string;
 
 	const key = snapshot.keys.get(keyId);
 	if (key === undefined) {
@@ -1510,6 +1601,40 @@ function sortedUniqueStrings(value: JsonValue | undefined, field: string): strin
 	return null;
 }
 
+/**
+ * §2's public-safety rule for `repo`, BOTH halves. The length half is the easy
+ * one; the half that matters is the FORM: "the CANONICAL PROVIDER URL FORM
+ * (`<providerHost>/<owner>/<name>`), ≤ 256 characters, and nothing else — no
+ * local paths, no remote strings with credentials, no branch or worktree
+ * decoration". A length-only check accepts
+ * `/Users/cam/private/customer-acme/secret` on a document §2 calls PUBLIC,
+ * which is the exact leak the rule exists to prevent.
+ *
+ * Three slash-separated parts, no more and no fewer. That one shape decides
+ * every case §2 enumerates: a local path has the wrong count (and an empty
+ * leading part), `https://host/o/n` has the wrong count, `u:p@host/o/n` has a
+ * host that is not a hostname, and `host/o/n/tree/main` has the wrong count.
+ * The host must be a dotted DNS name in LOWERCASE — DNS is case-insensitive, so
+ * two spellings of one host are two spellings of one repo, which is what
+ * "canonical" rules out — while `owner`/`name` keep their case, because
+ * providers do.
+ */
+const REPO_HOST = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+const REPO_PART = /^[A-Za-z0-9._-]+$/;
+
+function isCanonicalProviderRepo(repo: string): boolean {
+	if (repo.length > 256) return false;
+	const parts = repo.split("/");
+	if (parts.length !== 3) return false;
+	const [host, owner, name] = parts as [string, string, string];
+	if (!REPO_HOST.test(host)) return false;
+	for (const part of [owner, name]) {
+		// `.` and `..` are in the character class and are path traversal, not names.
+		if (!REPO_PART.test(part) || part === "." || part === "..") return false;
+	}
+	return true;
+}
+
 function checkWorkVariant(work: JsonObject): string | null {
 	const kind = stringAt(work, "kind");
 	if (kind === null || !WORK_KINDS.has(kind)) {
@@ -1520,8 +1645,8 @@ function checkWorkVariant(work: JsonObject): string | null {
 	const repo = work.repo;
 	if (repo !== undefined) {
 		// Public safety: `repo` is the canonical provider-URL form, ≤ 256 chars.
-		if (typeof repo !== "string" || repo.length > 256) {
-			return "work.repo is not a ≤256-character canonical provider URL";
+		if (typeof repo !== "string" || !isCanonicalProviderRepo(repo)) {
+			return "work.repo is not a ≤256-character <providerHost>/<owner>/<name> provider URL";
 		}
 	}
 

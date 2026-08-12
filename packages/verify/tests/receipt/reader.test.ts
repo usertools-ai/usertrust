@@ -67,6 +67,10 @@ const REFUSED_SCHEMA: readonly string[] = [
 	"schema/unknown-top-level-field",
 	"schema/unknown-projection-field",
 	"schema/duplicate-projection-copy",
+	// An extra member on the embedded checkpoint is an unknown field like any
+	// other: §4a's member list is closed, so `proof.checkpoint.publishedTo` never
+	// reaches step 6 from inside a receipt.
+	"checkpoint/extra-signed-member",
 ];
 
 const REFUSED = new Set<string>([...REFUSED_UNPARSEABLE, ...REFUSED_SCHEMA]);
