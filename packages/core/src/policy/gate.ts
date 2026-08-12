@@ -422,6 +422,10 @@ export function isWithinTimeWindow(
 		// Monday 00:00-05:59 — not Tuesday's small hours. That is the reading with
 		// the fewest surprises, and the only one that does not require inventing a
 		// notion of which day a wrapped window "belongs" to.
+		if (startHour !== undefined && endHour !== undefined && startHour > endHour) {
+			return hour >= startHour || hour < endHour;
+		}
+
 		// Non-wrapping: each bound is independent, and either may be omitted.
 		// `startHour === endHour` stays a zero-width window that matches nothing,
 		// which is what it did before; read it as "no hours", not "all hours".

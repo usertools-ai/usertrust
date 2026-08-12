@@ -743,6 +743,14 @@ real clock — read in LOCAL time by contract (`isWithinTimeWindow` uses `getDay
 changing that would silently re-time every deployed window). A host calling `evaluatePolicy`
 directly may still supply its own timestamp; it owns its clock.
 
+**A time window may WRAP midnight, and `startHour > endHour` is how you say so.** A wrapping window
+matches `hour >= startHour || hour < endHour`; a non-wrapping one applies each bound independently.
+`startHour === endHour` is zero-width and matches nothing — read it as "no hours", not "all hours".
+The `daysOfWeek` gate applies to the timestamp's OWN local day, so an overnight window restricted to
+Monday covers Monday 22:00–23:59 and Monday 00:00–05:59, not Tuesday's small hours. *Prevents:* the
+pre-fix behaviour, where the two bounds were applied independently, so a window whose `startHour`
+exceeded its `endHour` was unsatisfiable at every hour and imposed no constraint.
+
 The obligation runs in **both** directions. New governance field on `PolicyContext` → classify it in
 `HOST_CONTROLLED_POLICY_FIELDS` or `CALLER_SUPPLIED_POLICY_FIELDS` (the parity test fails until you
 do), and re-assert it at every one of the three sites, **including asserting `undefined` when the
