@@ -146,6 +146,13 @@ const INVALID_REASONS = new Set([
 	"range-invalid",
 	"sig-invalid",
 	"rekor-receipt-invalid",
+	// Caller-supplied trust material that cannot be parsed. Registered here
+	// deliberately: an UNregistered reason falls into the default bucket at the
+	// classification step, which is MISMATCH — the most severe verdict, and the
+	// wrong one. A mismatch means the anchors disagree with the vault; a
+	// malformed pin means the operator's own input could not be read, and
+	// blaming the vault for it sends them to the wrong investigation.
+	"malformed-successor-pin",
 ]);
 const NON_FAIL_REASONS = new Set(["no-trust-material", "witness-unreachable"]);
 
@@ -506,6 +513,13 @@ export function verifyAnchorChain(
 		const k = publicKeyFromPem(pem);
 		if (k === null) {
 			errors.push(`successor pin #${i + 1} is not a parseable PEM`);
+			// `errors` does NOT reach the verdict — `evaluateAnchoredVault` derives it
+			// from `invalidReasons` + `mismatchReasons` alone (see the `reasons.push`
+			// there). Recording only the error left `verifyVaultWithAnchors` still
+			// answering ANCHORED_VERIFIED with exit 0, so the fix would have reported
+			// the unreadable input in a field nothing consumed — the same false OK
+			// this change exists to remove, one level up.
+			invalidReasons.push("malformed-successor-pin");
 			continue;
 		}
 		const id = keyIdFromKeyObject(k);

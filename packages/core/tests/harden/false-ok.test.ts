@@ -19,11 +19,11 @@
 
 import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { verifyAnchorChain } from "../../src/audit/anchor-verify.js";
+import { evaluateAnchoredVault, verifyAnchorChain } from "../../src/audit/anchor-verify.js";
 import { verifyVault } from "../../src/audit/verify.js";
 import type { CredentialScope } from "../../src/shared/types.js";
 import { createSnapshot } from "../../src/snapshot/checkpoint.js";
@@ -133,6 +133,37 @@ describe("false OK — an unparseable --successor-pin", () => {
 		expect(result.errors.join(" ")).toMatch(/successor pin #2/i);
 	});
 
+	it("makes the PUBLIC verdict fail, not just an error string", () => {
+		// The finding Codex caught in the first cut of this fix: `errors` does not
+		// reach the verdict. `evaluateAnchoredVault` derives it from
+		// `invalidReasons` + `mismatchReasons` alone, so recording only the error
+		// left `verifyVaultWithAnchors` still answering ANCHORED_VERIFIED with exit
+		// 0 — the reported input error changed nothing an auditor would see. Assert
+		// at the level the verdict is actually read.
+		const result = verifyAnchorChain([], {
+			rootPem,
+			successorPinsPem: ["nope"],
+		} as Parameters<typeof verifyAnchorChain>[1]);
+		expect(result.invalidReasons).toContain("malformed-successor-pin");
+	});
+
+	it("classifies as INVALID rather than falling into the MISMATCH default", () => {
+		// An UNregistered reason lands in the default bucket at classification,
+		// which is MISMATCH — the most severe verdict and the wrong one. A mismatch
+		// means the anchors disagree with the vault; a malformed pin means the
+		// operator's own input could not be read.
+		const evaluation = evaluateAnchoredVault({
+			orderedHashes: [],
+			externalAnchors: [],
+			externalErrors: [],
+			mirrorAnchors: [],
+			mirrorErrors: [],
+			trust: { rootPem, successorPinsPem: ["nope"] },
+			witness: { requested: false },
+		} as Parameters<typeof evaluateAnchoredVault>[0]);
+		expect(evaluation.anchorState).not.toBe("ANCHOR_MISMATCH");
+	});
+
 	it("stays silent when every pin parses", () => {
 		const result = verifyAnchorChain([], {
 			rootPem,
@@ -151,10 +182,19 @@ describe("false OK — a snapshot built from an unreadable vault", () => {
 		await chmod(auditDir, 0o000);
 
 		try {
-			await expect(createSnapshot(vault, "snap")).rejects.toThrow(/enumerate/i);
-		} catch (err) {
-			// Root ignores the permission bits; the setup cannot hold there.
-			if (!(err instanceof Error) || !/rejects/.test(String(err))) throw err;
+			// PROBE, don't pattern-match the failure. Root ignores mode 000, and the
+			// previous guard tried to detect that by matching /rejects/ against
+			// Vitest's message — which says "instead of rejecting", so the guard
+			// rethrew instead of skipping. Ask the filesystem directly.
+			let readable = true;
+			try {
+				await readdir(auditDir);
+			} catch {
+				readable = false;
+			}
+			if (!readable) {
+				await expect(createSnapshot(vault, "snap")).rejects.toThrow(/enumerate/i);
+			}
 		} finally {
 			await chmod(auditDir, 0o700);
 		}
