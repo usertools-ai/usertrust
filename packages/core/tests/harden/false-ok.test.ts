@@ -295,8 +295,15 @@ describe("false OK — a documented count that stops matching reality", () => {
 		// a false POSITIVE can offset a genuinely REMOVED sanitizer and leave the
 		// stale total agreeing — two errors cancelling into a passing guard is the
 		// hardest failure here to notice, since nothing looks wrong at all.
+		// The HEX LITERALS are anchored too. `0x9f` is a prefix of `0x9fff`, so
+		// `cp >= 0x7f && cp <= 0x9fff` — a wide range check, not a C1 test —
+		// matched. Every token in this pattern now has to be a whole token: the
+		// identifier on both sides, and both bounds. That is the eighth round on
+		// this guard and the eighth token I had left unbounded, which is the
+		// lesson: "match the shape" is not one property, it is a property of every
+		// element, and I kept checking the one I had just been shown.
 		const STRONG =
-			/(?<![A-Za-z0-9_$])([A-Za-z_$][A-Za-z0-9_$]*) *>= *0x7f *&& *\1(?![A-Za-z0-9_$]) *<= *0x9f/g;
+			/(?<![A-Za-z0-9_$])([A-Za-z_$][A-Za-z0-9_$]*) *>= *0x7f(?![0-9a-fA-F]) *&& *\1(?![A-Za-z0-9_$]) *<= *0x9f(?![0-9a-fA-F])/g;
 		const WEAK = /= *\/\[\\x00-\\x1f\\x7f\]\/g/g;
 		for (const dir of srcDirs) {
 			let files: string[];
