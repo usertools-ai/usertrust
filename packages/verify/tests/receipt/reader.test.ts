@@ -33,6 +33,7 @@ import {
 import { ALL_VECTORS, SNAPSHOT_VECTORS, type Vector, vector } from "./fixtures.js";
 import {
 	CHECKPOINT_KEY,
+	FOREIGN_KEY,
 	MINT_KEY,
 	MINT_KEY_SUCCESSOR,
 	mint,
@@ -737,6 +738,95 @@ describe("loadTrustSnapshot — parsing and identity", () => {
 		if (!load.ok) return;
 		const lineage = load.snapshot.chains.get("vlt_ut_proxy_prod_1")?.checkpointLineage;
 		expect([...(lineage ?? [])].sort()).toEqual([CHECKPOINT_KEY.keyId, "utk_ckpt_2026_10"]);
+	});
+
+	/**
+	 * §8 RULES `genesisChoice: "newVault"` for ut1 (Cam, 2026-08-12), against
+	 * evidence: segment rotation has never run in production, there are zero
+	 * finalized segments, and `"backfill"` would have re-issued v2 statements
+	 * over nothing. So on a `proxy-v1` chain the member is not a two-valued
+	 * union — it has exactly one admissible value, and absent is not it.
+	 *
+	 * Nothing downstream can catch this. `genesisChoice` is a SNAPSHOT-ONLY fact:
+	 * no receipt field disagrees with it, so no §7 equality reaches it, and §7's
+	 * history walk happily roots at the registered `genesisSegmentId` whatever
+	 * the snapshot says produced it. The loader is the only place the rule can
+	 * live, and §8's own resolution for a document it does not admit is
+	 * UNVERIFIABLE, never a pass.
+	 *
+	 * Conditioned on the profile because the RULING is: a future ut-chain profile
+	 * ships under a different literal (§4a) and its genesis story is not this
+	 * one's. There is no evasion in that: a receipt can only reach the history
+	 * walk through equality 8, which pins `chain.profile === proof.profile ===
+	 * "proxy-v1"`.
+	 */
+	it("refuses a proxy-v1 chain whose genesisChoice is not §8's RULED newVault", () => {
+		for (const value of ["backfill", undefined]) {
+			const load = loadTrustSnapshot(
+				patched((s) => {
+					const chain = s.chains[0] as Record<string, unknown>;
+					if (value === undefined) delete chain.genesisChoice;
+					else chain.genesisChoice = value;
+				}),
+			);
+			expect(load.ok, String(value)).toBe(false);
+			expect(load.ok === false && load.detail).toMatch(/genesisChoice/);
+		}
+		// The conformant value loads — the rule refuses one snapshot, not the
+		// member.
+		expect(loadTrustSnapshot(mint().snapshotBytes).ok).toBe(true);
+	});
+
+	/**
+	 * §8 defines the boundary as "set at the moment its successor activates, and
+	 * equals the successor's first sealed segment's `segmentFirstSequence`", and
+	 * §4a makes `segmentFirstSequence` strictly increasing over sealed segments.
+	 * Together those fix the ORDER of the boundaries along a lineage: an older
+	 * key's boundary can never sit past a newer key's.
+	 *
+	 * A snapshot that inverts them is not a rounding error — it is the retirement
+	 * bound running backwards, which hands the OLDEST key in the lineage the
+	 * WIDEST window. `keyStatePermits` reads one entry, so it cannot see it, and
+	 * the checkpoint then verifies under a key that was rotated away long before
+	 * it was signed. Like `genesisChoice`, no receipt field disagrees with it, so
+	 * the loader is the only place it can be caught.
+	 */
+	it("refuses an activationSequence that runs BACKWARD along a rotation lineage", () => {
+		const rotated = (predecessorBoundary: number, successorBoundary: number): Buffer =>
+			patched((s) => {
+				const predecessor = s.keys.find((k) => k.keyId === CHECKPOINT_KEY.keyId);
+				if (predecessor !== undefined) {
+					predecessor.state = "retired";
+					predecessor.activationSequence = predecessorBoundary;
+				}
+				s.keys.push({
+					keyId: "utk_ckpt_2026_10",
+					alg: "ed25519",
+					publicKey: MINT_KEY_SUCCESSOR.publicKeyPem,
+					role: "checkpoint",
+					predecessorKeyId: CHECKPOINT_KEY.keyId,
+					state: "retired",
+					activationSequence: successorBoundary,
+				});
+				s.keys.push({
+					keyId: "utk_ckpt_2026_11",
+					alg: "ed25519",
+					publicKey: FOREIGN_KEY.publicKeyPem,
+					role: "checkpoint",
+					predecessorKeyId: "utk_ckpt_2026_10",
+					state: "active",
+				});
+			});
+
+		const inverted = loadTrustSnapshot(rotated(40, 18));
+		expect(inverted.ok).toBe(false);
+		expect(inverted.ok === false && inverted.detail).toMatch(/activationSequence/);
+
+		// Increasing is the conformant shape, and EQUAL is the honest encoding of
+		// a rotation whose successor sealed no segment before rotating again —
+		// only the inversion is refused.
+		expect(loadTrustSnapshot(rotated(18, 40)).ok).toBe(true);
+		expect(loadTrustSnapshot(rotated(18, 18)).ok).toBe(true);
 	});
 
 	it("refuses a snapshot missing the members every check consumes", () => {

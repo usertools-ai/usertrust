@@ -1641,6 +1641,35 @@ export function loadTrustSnapshot(bytes: Uint8Array): TrustSnapshotLoad {
 			}
 			genesisChoice = entry.genesisChoice as "backfill" | "newVault";
 		}
+		// §8 RULES ut1 to `genesisChoice: "newVault"` (Cam, 2026-08-12), against
+		// evidence: segment rotation has never run in production, so there are
+		// ZERO finalized segments and `"backfill"` would have re-issued v2
+		// statements over nothing. On a `proxy-v1` chain the member is therefore
+		// not a two-valued union — one value is admissible and absent is not it.
+		//
+		// This is the last SNAPSHOT-ONLY constraint in §8, and snapshot-only is
+		// exactly why it has to be here. No receipt field disagrees with
+		// `genesisChoice`, so no §7 equality reaches it, and step 9's walk roots
+		// the served history at the registered `genesisSegmentId` whatever the
+		// snapshot claims produced it — an internally perfect fabricated history
+		// satisfies every clause the walk has and takes the receipt to
+		// VERIFIED_CHECKPOINT_HISTORY. Where the constraint IS receipt-relative
+		// (`profile` at equality 8, `mintActor` at equality 2, `minterKind` at
+		// step 4) the spec puts the refusal at that step and calls it FAIL; here
+		// there is no such step, and §8's own resolution for a document it does
+		// not admit is UNVERIFIABLE.
+		//
+		// Conditioned on the profile because the RULING is scoped to ut1: a future
+		// ut-chain profile ships under a different literal (§4a) and its genesis
+		// story is not this one's, so a snapshot registering one alongside ut1
+		// must not be refused wholesale. There is no evasion in that — a receipt
+		// only reaches the walk through equality 8, which pins
+		// `chain.profile === proof.profile === UT1_PROFILE`.
+		if (profile === UT1_PROFILE && genesisChoice !== UT1_GENESIS_CHOICE) {
+			return fail(
+				`chain ${vaultId} is a ${UT1_PROFILE} chain whose genesisChoice is ${JSON.stringify(genesisChoice ?? null)} — §8 RULES ut1 to ${JSON.stringify(UT1_GENESIS_CHOICE)}`,
+			);
+		}
 		let headSegmentFirstSequence: number | undefined;
 		if (entry.headSegmentFirstSequence !== undefined) {
 			const value = safeNonNegativeInteger(entry.headSegmentFirstSequence);
@@ -1766,6 +1795,46 @@ function validateLineages(keys: ReadonlyMap<string, TrustKey>): string | null {
 			return `key ${predecessorKeyId} is active but ${successorKeyId} names it as predecessor — a rotated-away key has no activation boundary while it stays active`;
 		}
 	}
+
+	// §8's boundary has an ORDER, and the per-entry rules cannot see it.
+	//
+	// The boundary "is set at the moment its successor activates, and equals the
+	// successor's first sealed segment's `segmentFirstSequence`", and §4a makes
+	// `segmentFirstSequence` strictly increasing over sealed segments. So along
+	// `key0 → key1 → key2`, key0's boundary is key1's first segment and key1's is
+	// key2's — a later segment. The boundaries only ever move FORWARD.
+	//
+	// Inverted, they hand the OLDEST key in the lineage the WIDEST window:
+	// `keyStatePermits` reads one entry, so a checkpoint signed long after a key
+	// was rotated away verifies under it, in a document that otherwise looks like
+	// a clean rotation. That is the same defect shape the active-predecessor rule
+	// above closes, one level up — and, like it, nothing downstream can catch it,
+	// because no receipt field disagrees with a snapshot's own boundary set.
+	//
+	// EQUAL is admitted deliberately. A successor that seals no segment before
+	// rotating again has no "first sealed segment" of its own, and the honest
+	// encoding is then its predecessor's own boundary; refusing that would reject
+	// conformant trust material to catch nothing. Only backwards is refused.
+	//
+	// Keys with no boundary are SKIPPED rather than treated as zero: `revoked`
+	// verifies nothing "bounded or not" (§8), so its boundary is optional, and
+	// the comparison is made against the nearest ancestor that HAS one — which is
+	// transitively the same rule.
+	for (const key of keys.values()) {
+		const boundary = key.activationSequence;
+		if (boundary === undefined) continue;
+		let cursor = key.predecessorKeyId;
+		while (cursor !== undefined) {
+			const ancestor = keys.get(cursor) as TrustKey;
+			if (ancestor.activationSequence !== undefined) {
+				if (ancestor.activationSequence > boundary) {
+					return `key ${ancestor.keyId} precedes ${key.keyId} in one lineage but its activationSequence ${ancestor.activationSequence} is past ${key.keyId}'s ${boundary} — a retirement boundary never moves backwards`;
+				}
+				break;
+			}
+			cursor = ancestor.predecessorKeyId;
+		}
+	}
 	return null;
 }
 
@@ -1811,6 +1880,12 @@ function lineageOf(keys: ReadonlyMap<string, TrustKey>, pinned: string): Readonl
 export const RECEIPT_SIGNATURE_PREFIX = "usertrust/receipt-signature/v1\n";
 export const TRANSFER_SET_PREFIX = "usertrust/receipt-transfers/v1\n";
 export const UT1_PROFILE = "proxy-v1";
+/**
+ * §8's ruling, not a default: ut1's genesis IS the v2 cutover, because rotation
+ * never ran and `"backfill"` would have backfilled nothing. The union's other
+ * member stays in the vocabulary for a profile that is not this one.
+ */
+export const UT1_GENESIS_CHOICE = "newVault";
 export const UT1_MINT_EVENT_KIND = "receipt_settled";
 export const UT1_TRUST_DOMAIN = "usertrust.ai";
 export const UT1_SPEC = "ut1";
@@ -1960,9 +2035,16 @@ function receiptIdFromResolutionUrl(url: string): string | null {
  */
 export function receiptIdFromArrivalContext(context: string): string | null {
 	let text = context;
-	// "line endings may be LF or CRLF and the CR is not part of the value".
-	if (text.endsWith("\n")) text = text.slice(0, -1);
-	if (text.endsWith("\r")) text = text.slice(0, -1);
+	// "line endings may be LF or CRLF and the CR is not part of the value" — and
+	// those are the only two the format admits, so the CR comes off ONLY as half
+	// of a CRLF. Stripping `\n` and then `\r` as two independent slices also
+	// trimmed a LONE trailing CR, which is an old-Mac terminator the receipt
+	// format does not admit: the context then parsed as a clean bare id and
+	// passed step 3(a), the one check that binds a receipt to the artifact that
+	// cited it. A terminator the spec does not define is a usage error, not a
+	// value to be repaired — so the lone CR falls through to the rejection below.
+	if (text.endsWith("\r\n")) text = text.slice(0, -2);
+	else if (text.endsWith("\n")) text = text.slice(0, -1);
 	if (text.includes("\n") || text.includes("\r")) return null;
 
 	// Form 3 — the trailer line. Once the key matches, this IS the trailer

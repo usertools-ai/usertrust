@@ -146,6 +146,21 @@ type ArgsResult =
 	| { readonly kind: "error"; readonly message: string };
 
 /**
+ * EVERY leading-dash token except bare `-`.
+ *
+ * The rule is the SHAPE, not the two spellings the parser used to enumerate
+ * (`-h` and `--…`). A short flag it does not know — `-x`, `-v`, a mistyped
+ * `-trust` — is still a flag, and treating it as a filename is what turned
+ * `--trust -x` into UNVERIFIABLE (exit 2, a statement about trust material) and
+ * `receipt -x` into UNVERIFIABLE for the receipt, when both are usage errors
+ * (exit 3). A bare `-` is deliberately NOT one: it is the stdin filename, in
+ * both the positional slot and after `--trust`.
+ */
+function isOptionToken(token: string): boolean {
+	return token.startsWith("-") && token !== "-";
+}
+
+/**
  * Receipt mode's OWN parser (CLI spec §2's dispatch rule): every flag here is
  * unknown to the vault parser, so this must never fall through to it, and
  * every refusal below is a USAGE error (exit 3) — never the shared `usage()`,
@@ -173,7 +188,7 @@ export function parseReceiptArgs(argv: readonly string[]): ArgsResult {
 		const next = (): string | undefined => {
 			const candidate = argv[i + 1];
 			if (candidate === undefined) return undefined;
-			return candidate === "-h" || candidate.startsWith("--") ? undefined : candidate;
+			return isOptionToken(candidate) ? undefined : candidate;
 		};
 		if (arg === "--help" || arg === "-h") return { kind: "help" };
 		if (arg === "--trust") {
@@ -190,7 +205,7 @@ export function parseReceiptArgs(argv: readonly string[]): ArgsResult {
 			i += 1;
 		} else if (arg === "--json") {
 			json = true;
-		} else if (arg.startsWith("--")) {
+		} else if (isOptionToken(arg)) {
 			return { kind: "error", message: `unknown flag ${JSON.stringify(arg)}` };
 		} else if (file === undefined) {
 			file = arg;

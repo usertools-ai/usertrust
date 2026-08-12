@@ -1728,6 +1728,46 @@ export const SNAPSHOT_VECTORS: readonly Vector[] = [
 		},
 	),
 	snapshotVector(
+		"snapshot/activation-sequence-backward-in-lineage",
+		"§8 sets each boundary to the SUCCESSOR's first sealed segment and §4a makes those strictly increasing: a boundary running backwards hands the oldest key the widest window.",
+		(s) => {
+			const predecessor = keyEntry(s, CHECKPOINT_KEY.keyId);
+			predecessor.state = "retired";
+			predecessor.activationSequence = 40;
+			s.keys.push({
+				keyId: "utk_ckpt_2026_10",
+				alg: "ed25519",
+				publicKey: CHECKPOINT_KEY_SUCCESSOR.publicKeyPem,
+				role: "checkpoint",
+				predecessorKeyId: CHECKPOINT_KEY.keyId,
+				state: "retired",
+				activationSequence: 18,
+			});
+			s.keys.push({
+				keyId: "utk_ckpt_2026_11",
+				alg: "ed25519",
+				publicKey: FOREIGN_KEY.publicKeyPem,
+				role: "checkpoint",
+				predecessorKeyId: "utk_ckpt_2026_10",
+				state: "active",
+			});
+		},
+	),
+	snapshotVector(
+		"snapshot/genesis-choice-backfill",
+		'§8 RULES ut1 to `genesisChoice: "newVault"` — rotation never ran, so a `backfill` chain claims a history over segments that never existed.',
+		(s) => {
+			(s.chains[0] as { genesisChoice: string }).genesisChoice = "backfill";
+		},
+	),
+	snapshotVector(
+		"snapshot/genesis-choice-absent",
+		"§8's chains[] schema declares genesisChoice, and an absent one leaves WHICH history is being offered unstated — ambiguity is UNVERIFIABLE, not a default.",
+		(s) => {
+			delete (s.chains[0] as unknown as Record<string, unknown>).genesisChoice;
+		},
+	),
+	snapshotVector(
 		"snapshot/activation-sequence-missing-on-retired-key",
 		"A `retired` key without activationSequence has an UNEVALUABLE boundary — the deciding comparison is gone.",
 		(s) => {

@@ -187,6 +187,63 @@ describe("parseReceiptArgs", () => {
 		expect(parseReceiptArgs(["-", "--trust", "t.json"])).toMatchObject({ kind: "ok" });
 	});
 
+	/**
+	 * The rule is EVERY leading-dash token except bare `-`, not the two spellings
+	 * the parser happened to enumerate (`-h` and `--…`).
+	 *
+	 * A short flag the parser does not know — `-x`, `-v`, a mistyped `-trust` —
+	 * was neither an option token to `next()` nor an unknown flag to the loop, so
+	 * it became a FILENAME in both positions. `--trust -x` then reported
+	 * UNVERIFIABLE (exit 2: "the pinned snapshot could not be read") and
+	 * `receipt -x` reported the same for the receipt, when both are usage errors
+	 * (exit 3). CLI spec §6: no condition maps to two codes — and "you typed a
+	 * flag that does not exist" must never come back as a statement about trust
+	 * material.
+	 */
+	it("treats EVERY leading-dash token except bare `-` as an option token", () => {
+		for (const argv of [
+			["receipt.json", "--trust", "-x"],
+			["receipt.json", "--trust", "-v"],
+			["receipt.json", "--trust", "-trust"],
+			["receipt.json", "--trust", "--"],
+		]) {
+			expect(parseReceiptArgs(argv), argv.join(" ")).toEqual({
+				kind: "error",
+				message: "--trust requires a value",
+			});
+		}
+		expect(parseReceiptArgs(["receipt.json", "--trust", "t.json", "--expect-id", "-x"])).toEqual({
+			kind: "error",
+			message: "--expect-id requires a value",
+		});
+		// …and in the POSITIONAL slot, where it was becoming `<file>`.
+		for (const argv of [
+			["-x", "--trust", "t.json"],
+			["receipt.json", "--trust", "t.json", "-x"],
+		]) {
+			expect(parseReceiptArgs(argv), argv.join(" ")).toEqual({
+				kind: "error",
+				message: 'unknown flag "-x"',
+			});
+		}
+		// The stdin filename survives in BOTH slots — this is the token the rule
+		// exists to spare, and `--trust -` is a legitimate way to pipe a snapshot.
+		expect(parseReceiptArgs(["-", "--trust", "-"])).toEqual({
+			kind: "ok",
+			args: { file: "-", trust: "-", envelope: false, expectId: undefined, json: false },
+		});
+	});
+
+	it("exits 3, not 2, when an unknown SHORT flag lands where a filename would", () => {
+		const bundle = mint();
+		const swallowed = runReceiptCli(["receipt.json", "--trust", "-x"], ioFor(bundle));
+		expect(swallowed.exitCode).toBe(3);
+		expect(swallowed.stderr).toContain("--trust requires a value");
+		const positional = runReceiptCli(["-x", "--trust", "trust.json"], ioFor(bundle));
+		expect(positional.exitCode).toBe(3);
+		expect(positional.stderr).toContain("unknown flag");
+	});
+
 	it("exits 3, not 2, when a value-flag swallows an option token", () => {
 		// The end-to-end half: the usage error must reach the exit code, since
 		// that is the CI contract the split exists for.
@@ -279,6 +336,47 @@ describe("exit codes", () => {
 			ioFor(bundle, { "trust.json": Buffer.from("{not json", "utf8") }),
 		);
 		expect(result.exitCode).toBe(2);
+	});
+
+	/**
+	 * The whole point of the `genesisChoice` rule, stated where an operator sees
+	 * it: a snapshot that does not carry §8's RULED `newVault` must never buy a
+	 * history verdict. §7's walk roots the served history at the registered
+	 * `genesisSegmentId` and `genesisChoice` "tells the reader which history they
+	 * are being offered" — so a `backfill` claim on a ut1 chain offers a history
+	 * over segments the ruling says never existed (rotation has never run; there
+	 * are zero finalized segments). The walk itself cannot tell: a fabricated
+	 * history that is internally perfect satisfies every clause it has.
+	 */
+	it("2: a proxy-v1 chain not carrying genesisChoice newVault never earns the history rung", () => {
+		for (const patch of [
+			(c: Record<string, unknown>) => {
+				c.genesisChoice = "backfill";
+			},
+			(c: Record<string, unknown>) => {
+				delete c.genesisChoice;
+			},
+		]) {
+			const bundle = mint({
+				snapshot: (s) => {
+					patch(s.chains[0] as unknown as Record<string, unknown>);
+					return s;
+				},
+			});
+			const result = runReceiptCli(
+				["envelope.json", "--trust", "trust.json", "--envelope"],
+				ioFor(bundle),
+			);
+			expect(result.exitCode).toBe(2);
+			expect(result.stdout).toContain("Verdict: UNVERIFIABLE");
+			expect(result.stdout).not.toContain("VERIFIED_CHECKPOINT_HISTORY");
+		}
+		// The conformant snapshot still buys it — the rule refuses one value, not
+		// the rung.
+		expect(
+			runReceiptCli(["envelope.json", "--trust", "trust.json", "--envelope"], ioFor(mint()))
+				.exitCode,
+		).toBe(0);
 	});
 
 	it("3: an unknown flag is a usage error naming it, not the shared usage() exit 1", () => {

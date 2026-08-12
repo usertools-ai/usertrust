@@ -161,8 +161,37 @@ describe("§12 — arrival context extraction", () => {
 			`https://usertrust.ai/r/${DEFAULT_RECEIPT_ID}`,
 			`Usertrust-Receipt: https://usertrust.ai/r/${DEFAULT_RECEIPT_ID}`,
 			`Usertrust-Receipt: https://usertrust.ai/r/${DEFAULT_RECEIPT_ID}\r\n`,
+			// LF alone is the other admitted terminator, and it must keep working:
+			// the CR rule below strips CR only as half of a CRLF, never on its own.
+			`Usertrust-Receipt: https://usertrust.ai/r/${DEFAULT_RECEIPT_ID}\n`,
+			`${DEFAULT_RECEIPT_ID}\n`,
+			`${DEFAULT_RECEIPT_ID}\r\n`,
 		]) {
 			expect(receiptIdFromArrivalContext(context), context).toBe(DEFAULT_RECEIPT_ID);
+		}
+	});
+
+	/**
+	 * §12: "line endings may be LF or CRLF and the CR is not part of the value".
+	 * A LONE trailing CR is neither, so it is a usage error (exit 3) — and it was
+	 * being trimmed as if it were, because the terminator was stripped as two
+	 * INDEPENDENT slices (`\n`, then `\r`) rather than as the one CRLF the format
+	 * admits. Old Mac line endings, a `printf '…\r'`, or a value with a CR
+	 * embedded at the end are all inputs the spec does not admit, and step 3(a)
+	 * is the one check that binds a receipt to the artifact that cited it: it
+	 * must not pass on a string no conforming artifact can contain.
+	 */
+	it("rejects a LONE trailing CR — the format admits LF or CRLF, and CR is neither", () => {
+		for (const context of [
+			`${DEFAULT_RECEIPT_ID}\r`,
+			`https://usertrust.ai/r/${DEFAULT_RECEIPT_ID}\r`,
+			`Usertrust-Receipt: https://usertrust.ai/r/${DEFAULT_RECEIPT_ID}\r`,
+			// And a CR that is not terminal was already refused; it stays refused.
+			`${DEFAULT_RECEIPT_ID}\r${DEFAULT_RECEIPT_ID}`,
+			`Usertrust-Receipt: https://usertrust.ai/r/${DEFAULT_RECEIPT_ID}\r\r\n`,
+			`Usertrust-Receipt: https://usertrust.ai/r/${DEFAULT_RECEIPT_ID}\n\r`,
+		]) {
+			expect(receiptIdFromArrivalContext(context), JSON.stringify(context)).toBeNull();
 		}
 	});
 
