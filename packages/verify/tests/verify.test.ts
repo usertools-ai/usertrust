@@ -232,8 +232,39 @@ describe("canonicalize", () => {
 		expect(canonicalize(null)).toBe("null");
 	});
 
-	it("handles undefined", () => {
-		expect(canonicalize(undefined)).toBe(undefined);
+	// INVERTED (was: `expect(canonicalize(undefined)).toBe(undefined)`). That green
+	// assertion PINNED the defect: canonicalize is typed `=> string` and returned a
+	// non-string, which is exactly how `{"f":undefined}` reached the audit log.
+	// `undefined` has no JSON representation, so it throws — same rule as NaN.
+	// Mirrors core/tests/audit/canonical.test.ts.
+	it("throws on top-level undefined — JSON cannot represent it", () => {
+		expect(() => canonicalize(undefined)).toThrow(/not representable in audit data/);
+	});
+
+	it("writes an in-array undefined as null", () => {
+		const result = canonicalize([null, undefined, 1]);
+		expect(result).toBe("[null,null,1]");
+		expect(() => JSON.parse(result)).not.toThrow();
+	});
+
+	it("writes an array HOLE as null — Array.map skips holes, an index loop does not", () => {
+		const holey: number[] = [];
+		holey[0] = 1;
+		holey[2] = 2;
+		expect(1 in holey).toBe(false);
+		expect(canonicalize({ arr: holey })).toBe('{"arr":[1,null,2]}');
+	});
+
+	it("throws on a function value — never omits it", () => {
+		expect(() => canonicalize({ f: () => 1 })).toThrow(/not representable in audit data/);
+		expect(() => canonicalize(() => 1)).toThrow(/not representable in audit data/);
+		expect(() => canonicalize([() => 1])).toThrow(/not representable in audit data/);
+	});
+
+	it("throws on a symbol value — never omits it", () => {
+		expect(() => canonicalize({ s: Symbol("x") })).toThrow(/not representable in audit data/);
+		expect(() => canonicalize(Symbol("x"))).toThrow(/not representable in audit data/);
+		expect(() => canonicalize([Symbol("x")])).toThrow(/not representable in audit data/);
 	});
 
 	it("strips undefined values from objects", () => {

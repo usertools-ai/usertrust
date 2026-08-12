@@ -512,11 +512,32 @@ Estimates never model cache state.
 *Prevents:* for any value with a `toJSON` (e.g. `Buffer`), `JSON.stringify` diverges from
 `canonicalize` and an untampered event verifies as TAMPERED.
 
-**Canonicalization order is load-bearing.** Keys sorted alphabetically at every nesting level;
-`undefined` stripped; `null` preserved; array order preserved; `Date` → ISO string; `NaN` and
-`±Infinity` **throw**.
+**Canonicalization order is load-bearing.** Keys sorted alphabetically at every nesting level; an
+`undefined` **object value** stripped (the key is ABSENT, never `null` — absence is what the caller
+meant, and the `key-ABSENT` rules are built on it); `null` preserved; array order preserved;
+`Date` → ISO string; `NaN` and `±Infinity` **throw**.
 *Prevents:* `JSON.stringify` silently coercing `NaN`/`Infinity` to `null`, breaking the hash
 pre-image.
+
+**The canonicalizer never emits bytes that do not parse.** Its output IS the audit line, so the
+governing rule is: if JSON can represent the value faithfully, represent it deterministically; if
+it cannot, **throw**. An array HOLE and an in-array `undefined` are the same thing — absence at a
+position — and are written as `null` (via an index loop, never `Array.map`, which SKIPS holes and
+produced the unparseable `[1,,2]`). Functions, symbols, and a top-level `undefined` throw; they are
+never omitted, because dropping a key signs a document missing a member the caller believed they
+committed — the same defect one layer quieter. Any change here must be MEASURED, not argued: only
+outputs that are currently unparseable may change, and
+`hash_compatibility__only_unparseable_outputs_may_change` recanonicalizes a real 18k-event vault
+corpus under the frozen pre-fix implementation and the current one, requiring ZERO divergence.
+*Prevents:* `{"arr":[1,,2]}` / `{"f":undefined}` reaching `events.jsonl`, where `read.ts` skips the
+line, the next event's `previousHash` dangles, and the vault verifies as tampered forever — with
+the pre-image lost, so it is neither repairable nor distinguishable from real tampering.
+
+**`appendEvent` `JSON.parse`-validates the canonical bytes BEFORE the fsync** and refuses the
+append if they do not parse. Unreachable through the canonicalizer by design — that is the point:
+the writer must not depend on a serializer staying correct. Changes no hash (the check reads bytes
+that `hash` already covers), and a refusal still degrades the writer and dead-letters the payload,
+so a caller's `.catch(() => {})` cannot turn it into a silent drop.
 
 **Merkle hashing is RFC 6962 domain-separated.** Leaves `SHA-256(0x00 ‖ data)`, internal nodes
 `SHA-256(0x01 ‖ left ‖ right)`. **Odd nodes are promoted, not duplicated** — this avoids

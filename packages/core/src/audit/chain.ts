@@ -465,6 +465,25 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 			// persisted and the verify pkg stays in lockstep (hash format unchanged).
 			const persisted = canonicalize(fullEvent);
 
+			// DEFENSE IN DEPTH: these bytes ARE the audit line, so refuse at the
+			// door anything that cannot be read back. canonicalize now throws on
+			// every value JSON cannot represent, which makes this unreachable
+			// through it — that is the point: the writer must not depend on a
+			// serializer staying correct. An unparseable line is unrecoverable
+			// (read.ts skips it, the next event's previousHash dangles, and the
+			// vault reads as tampered forever with the pre-image lost), so the
+			// cost of one JSON.parse before the fsync is not worth arguing about.
+			// Changes no hash: the check is on bytes `hash` already covers.
+			try {
+				JSON.parse(persisted);
+			} catch (parseErr) {
+				throw new Error(
+					`audit: refusing to persist canonical bytes that do not parse as JSON (event ${event.id}): ${
+						parseErr instanceof Error ? parseErr.message : String(parseErr)
+					}`,
+				);
+			}
+
 			const fd = openSync(logPath, "a");
 			try {
 				writeSync(fd, `${persisted}\n`);
