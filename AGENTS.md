@@ -578,6 +578,22 @@ chunksDelivered: NaN })` — the authorization deleted, `postPendingSpend` commi
 *The writer's refusal stays the backstop* — the boundary does not replace it, and the two are
 tested against the same input set.
 
+**A cast is not a type, and a declared type is not a check.** `const model = (params.model as
+string) ?? "unknown"` — the interception path's read of its own `unknown[]` proxy arguments — is an
+assertion dressed as a validation: the cast converts nothing, `??` coalesces only `null` and
+`undefined`, and the `?? "unknown"` makes the line *look* defended while doing nothing whatever for
+a function or a symbol. At runtime that local holds exactly what the caller put on their own request
+object, and it rides into `data.model` on every audit event the call can emit. The same is true one
+level up, without any cast in sight: `AuthorizeParams.model` is declared `string`, and a JavaScript
+caller still hands it a symbol — which is why `headless.authorize()` validates it at CAPTURE, before
+the hold exists, rather than trusting the signature. **Treat any `as string` / `as Record<…>` over
+caller-derived data — and any declared type on an exported entry point — as caller-supplied, and
+validate it at runtime.** TypeScript describes intent; neither a type nor a cast executes.
+*Prevents:* the whole class the guards above exist for, re-entering through the belief that the
+value was already checked. Both instances were found by reading for it: the cast produced an
+unrepresentable `model` on every terminal of an intercepted call, and the declared `string` produced
+one on an `Authorization` that `abort()` then could not record.
+
 **Merkle hashing is RFC 6962 domain-separated.** Leaves `SHA-256(0x00 ‖ data)`, internal nodes
 `SHA-256(0x01 ‖ left ‖ right)`. **Odd nodes are promoted, not duplicated** — this avoids
 CVE-2012-2459.
