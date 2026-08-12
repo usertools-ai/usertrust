@@ -799,13 +799,27 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **eight** sanitizers, in two variants. Do not consolidate them onto the weaker one.
+There are **eleven** sanitizers, in two variants. Do not consolidate them onto the weaker one.
+
+The entries below are deliberately NOT numbered. They used to be ("a seventh", "an eighth"), and
+adding one meant renumbering every later entry — so a new copy was added and the ordinals silently
+stopped matching the count. Adding a sanitizer means: add a bullet, and update the total above.
 
 - Six identical copies of `CONTROL_CHARS = /[\x00-\x1f\x7f]/g` plus a clip at 80, in
   `core/src/cli/verify.ts`, `verify/src/cli.ts`, and the `rekor-verify.ts` / `anchor-verify.ts`
   pairs. These must move together. The
   `biome-ignore lint/suspicious/noControlCharactersInRegex` on each is intentional — do not "fix" it.
-- An eighth, the **stronger** variant again: `forDisplay` in `verify/src/receipt.ts`, applied to
+- A **mirrored pair** of the stronger variant, `scrubForError`, in
+  `core/src/audit/verify.ts` and `verify/src/index.ts`. `verifyVault`'s
+  audit-directory enumeration error embeds a CALLER-SUPPLIED vault path, and the non-JSON CLI
+  prints it — so an escape sequence in that path could repaint the FAILED verdict the error exists
+  to produce. These two must move together, like the six above.
+- One more of the stronger variant, in `core/src/cli/snapshot.ts`. `createSnapshot`'s
+  enumeration failure embeds the VAULT PATH in its message and the human branch prints it through
+  `picocolors`, which wraps a string in SGR codes without sanitizing it. Copied rather than imported
+  from `cli/budget.ts`: that module statically imports `TrustTBClient` and therefore the native
+  `tigerbeetle-node` binding, and the snapshot command must not pull that in to print an error.
+- The stronger variant again: `forDisplay` in `verify/src/receipt.ts`, applied to
   every untrusted string the `--tx` receipt prints (model, error, transferId, timestamp, both
   chain hashes, and the `renderNotFound` txId, which is argv). The receipt reads `events.jsonl` —
   a file the party under audit owns — and prints it at the auditor. The unknown-model denial is
@@ -814,7 +828,7 @@ There are **eight** sanitizers, in two variants. Do not consolidate them onto th
   for the same reason it does in `budget.ts`. The UI is deliberately NOT patched: it renders
   these into DOM text nodes, where escapes are inert, and it displays this same already-scrubbed
   receipt string.
-- A seventh, independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
+- Independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
   also covers `0x80–0x9f`, the C1 range holding the 8-bit CSI/OSC introducers that the regex above
   does not match; it substitutes `?` rather than stripping; and it clips at 120.
 
