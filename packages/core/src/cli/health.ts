@@ -301,8 +301,13 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// rather than scoring a fabricated denominator — the same rule the extractor
 	// already applies to a missing total.
 	const spent = loadPersistedSpend(vaultPath);
-	const budgetPct =
-		config.budget > 0 && spent !== undefined ? ((spent / config.budget) * 100).toFixed(1) : "0.0";
+	// UNKNOWN is not zero. A malformed, negative or unreadable `spend-ledger.json`
+	// means an unknown amount has been spent, and rendering "0.0% [ok]" reported
+	// the most reassuring possible answer to a question the tool could not answer
+	// — the same shape as every defect this branch removes, in the branch that
+	// removes them.
+	const budgetKnown = config.budget > 0 && spent !== undefined;
+	const budgetPct = budgetKnown ? (((spent as number) / config.budget) * 100).toFixed(1) : null;
 
 	// BOTH facts are computed above and BOTH are passed in. Neither can be derived
 	// from the event stream: no producer writes a budget total, and chain validity
@@ -351,7 +356,10 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 					},
 					signals: {
 						policyViolations: policyHits,
-						budgetUtilization: Number.parseFloat(budgetPct),
+						// null, not 0 — an unreadable ledger is unknown spend, and a
+						// machine consumer must be able to tell that apart from a vault
+						// that has genuinely spent nothing.
+						budgetUtilization: budgetPct === null ? null : Number.parseFloat(budgetPct),
 						chainIntegrity: verification.valid,
 						piiDetections: piiHits,
 						// RENAMED to what they measure. `circuitBreakerTrips` counted no
@@ -436,8 +444,13 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 
 	// Signal 2: Budget utilization
 	const budgetStatus =
-		Number.parseFloat(budgetPct) > 80 ? pc.yellow("[elevated]") : pc.green("[ok]");
-	console.log(`  Budget utilization:      ${budgetPct}% ${budgetStatus}`);
+		budgetPct === null
+			? pc.yellow("[unknown]")
+			: Number.parseFloat(budgetPct) > 80
+				? pc.yellow("[elevated]")
+				: pc.green("[ok]");
+	const budgetText = budgetPct === null ? "unreadable ledger" : `${budgetPct}%`;
+	console.log(`  Budget utilization:      ${budgetText} ${budgetStatus}`);
 
 	// Signal 3: Chain integrity
 	const chainColored = verification.valid

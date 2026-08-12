@@ -154,8 +154,30 @@ describe("usertrust health", () => {
 
 		await run(tempDir);
 
-		// The log carries a cost, but no ledger exists — so it is NOT summed.
+		// The log carries a cost, but no ledger exists — so it is NOT summed. An
+		// ABSENT ledger is the one honest zero: a vault that has never settled has
+		// spent nothing.
 		expect(logOutput.join("\n")).toContain("0.0%");
+	});
+
+	it("reports an UNREADABLE ledger as unknown, not as zero", async () => {
+		// Rendering "0.0% [ok]" for a corrupt ledger gives the most reassuring
+		// possible answer to a question the tool cannot answer.
+		const vaultPath = join(tempDir, ".usertrust");
+		mkdirSync(join(vaultPath, "audit"), { recursive: true });
+		writeFileSync(
+			join(vaultPath, "usertrust.config.json"),
+			JSON.stringify({ budget: 50000 }),
+			"utf-8",
+		);
+		writeFileSync(join(vaultPath, "spend-ledger.json"), '{"budgetSpent": ', "utf-8");
+
+		await run(tempDir);
+
+		const combined = logOutput.join("\n");
+		expect(combined).toContain("unreadable ledger");
+		expect(combined).toContain("[unknown]");
+		expect(combined).not.toContain("0.0% ");
 	});
 
 	it("shows [ok] tags for zero-hit signals", async () => {

@@ -408,56 +408,43 @@ export function extractCircuitBreakerTrips(events: EntropyEventInput[]): Entropy
  * `injection_detected` carrying the matched `patterns` array and a `score`.
  */
 export function extractPatternMemoryHits(events: EntropyEventInput[]): EntropySignal {
-	// `injection_detected` is SUPPLEMENTARY: in warn mode the same call also
-	// writes its ordinary terminal, so counting both as observations capped this
-	// at 0.5 even when every single call was flagged. It carries no `transferId`
-	// (`govern.ts:1425-1430`), so it cannot be correlated away — it contributes a
-	// HIT without contributing an observation, and the terminals supply the
-	// denominator.
-	let detections = 0;
-	let total = 0;
+	// KEYED BY TRANSFER, like the anomaly signal, and for the same three reasons.
+	//
+	//  - One scanned call can write MORE THAN ONE terminal: under `failClosed`
+	//    after a sticky audit degradation it appends its `llm_call` (or action
+	//    event), commits, then appends the matching `_failed` with the same id.
+	//    Counting events made one call two observations.
+	//  - `injection_detected` now carries its own `transferId` (`govern.ts`), so a
+	//    detection is attributed to ITS call. Reconciling aggregate counts
+	//    mis-attributed whenever a detected call was rejected and a different
+	//    clean call completed — reporting 1/1 where the truth was 1/2.
+	//  - A detection whose call never reached a terminal still has to count, or
+	//    the signal disappears exactly when the flagged call did not complete.
+	const scanned = new Set<string>();
+	const detected = new Set<string>();
+	let anonymousScanned = 0;
+	let anonymousDetected = 0;
 
-	// A detection with no matching terminal must still COUNT as data. It is
-	// written BEFORE the hold and the provider call, so if the hold is then
-	// rejected or the stream fails, no terminal below matches — leaving hits > 0
-	// with total 0, which `computeEntropyScore` then discards as "no
-	// observations". The real detection would vanish from the score precisely
-	// when the call it flagged did not complete.
-	let unmatchedDetections = 0;
+	const evidence = (e: EntropyEventInput): boolean =>
+		e.kind === "injection_detected" ||
+		nonEmptyArray(e.data.injectionPatterns) ||
+		nonEmptyArray(e.data.patterns) ||
+		e.data.patternMatch === true ||
+		e.data.anomalyDetected === true ||
+		e.data.recurringIssue === true;
 
 	for (const e of events) {
-		if (e.kind === "injection_detected") {
-			detections++;
-			unmatchedDetections++;
-			continue;
-		}
-
-		// HEADLESS calls never ran injection detection at all. `createGovernor()`
-		// writes `llm_call` / `llm_call_failed` with `source: "headless"` and
-		// performs no scan, so counting them as clean scans diluted real matches in
-		// a mixed vault — a denominator padded with calls that could not have been
-		// hits. An unscanned call is not a clean one.
+		// HEADLESS calls never ran injection detection. `createGovernor()` writes
+		// its terminals with `source: "headless"` and performs no scan, so counting
+		// them as clean scans padded the denominator with calls that could not have
+		// been hits. An unscanned call is not a clean one.
 		if (e.data.source === "headless") continue;
 
-		// BLOCK mode never emits `injection_detected` at all — the call is refused
-		// and the evidence rides on the denial as `injectionPatterns`
-		// (`denial-events.ts:207`). Skipping that shape made the signal blind in
-		// exactly the mode where injection was actually stopped.
-		//
-		// The denominator is outcomes KNOWN to have reached the scanner:
-		//   - anything carrying `settled` — `llm_call` and the dynamic
-		//     `<action.kind>` terminals, which are scanned too and were previously
-		//     excluded, so an action-only chain scored value 1 on total 0 and the
-		//     composite dropped the signal entirely;
-		//   - failure terminals, which were scanned before they failed;
-		//   - a denial ONLY when it carries `injectionPatterns`. A denial can fire
-		//     before injection detection runs, so counting every denial would put
-		//     calls in the denominator that were never scanned.
-		//   - `stream_partial_delivery`, which is emitted AFTER injection scanning
-		//     when a stream fails. Excluding it meant clean failed streams never
-		//     entered the denominator while detected ones got a synthetic
-		//     observation, so one detection among nine clean failed streams
-		//     reported 1/1 instead of 1/10.
+		const isDetection = e.kind === "injection_detected";
+		// Outcomes known to have reached the scanner. `stream_partial_delivery` is
+		// emitted AFTER scanning, so a failed stream is a scanned call; a denial
+		// counts only when it carries `injectionPatterns`, because a denial can
+		// fire before detection runs.
 		const reachedScanner =
 			e.data.settled !== undefined ||
 			e.kind === "llm_call" ||
@@ -467,34 +454,28 @@ export function extractPatternMemoryHits(events: EntropyEventInput[]): EntropySi
 			nonEmptyArray(e.data.injectionPatterns);
 		const legacyShape =
 			e.kind.includes("pattern") || e.kind.includes("memory") || e.data.patternMatch !== undefined;
-		if (!reachedScanner && !legacyShape) continue;
+		if (!isDetection && !reachedScanner && !legacyShape) continue;
 
-		total++;
-		if (
-			nonEmptyArray(e.data.injectionPatterns) ||
-			nonEmptyArray(e.data.patterns) ||
-			e.data.patternMatch === true ||
-			e.data.anomalyDetected === true ||
-			e.data.recurringIssue === true
-		) {
-			detections++;
+		const id = e.data.transferId;
+		const hasId = typeof id === "string" && id !== "";
+		if (hasId) {
+			scanned.add(id as string);
+			if (evidence(e)) detected.add(id as string);
+		} else {
+			// No id to key on — count it, but keep it out of the sets so it cannot
+			// collide with a real transfer or with another anonymous record.
+			anonymousScanned++;
+			if (evidence(e)) anonymousDetected++;
 		}
 	}
 
-	// Each detection with no terminal of its own contributes an observation, so a
-	// flagged call that never completed still reaches the score instead of being
-	// filtered out as no data.
-	total += Math.max(0, unmatchedDetections - Math.min(detections, total));
-
-	// Supplementary detections can exceed the terminal count in principle; the
-	// rate is a proportion, so it clamps rather than exceeding 1.
-	const hits = Math.min(detections, Math.max(total, detections));
-	const value = total > 0 ? Math.min(1, detections / total) : detections > 0 ? 1 : 0;
+	const total = scanned.size + anonymousScanned;
+	const hits = detected.size + anonymousDetected;
 
 	return {
 		condition: "pattern_memory_hits",
 		label: "Injection pattern matches",
-		value,
+		value: total > 0 ? Math.min(1, hits / total) : 0,
 		hits,
 		total,
 	};

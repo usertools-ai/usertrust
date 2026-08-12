@@ -121,10 +121,20 @@ const settlementAmbiguous = (): EntropyEventInput => ({
 	},
 });
 
-/** The injection scanner's event. */
-const injectionDetected = (): EntropyEventInput => ({
+/**
+ * The injection scanner's event. Carries `transferId` — the producer mints it
+ * before scanning, so a detection can be attributed to ITS call rather than
+ * reconciled against aggregate counts.
+ */
+const injectionDetected = (transferId = "inj-1"): EntropyEventInput => ({
 	kind: "injection_detected",
-	data: { actionKind: "tool", actionName: "bash", patterns: ["ignore previous"], score: 0.9 },
+	data: {
+		actionKind: "tool",
+		actionName: "bash",
+		patterns: ["ignore previous"],
+		score: 0.9,
+		transferId,
+	},
 });
 
 describe("entropy signals vs. what producers actually write", () => {
@@ -364,9 +374,17 @@ describe("governed actions exercise the same signals as llm calls", () => {
 	});
 
 	it("counts governed actions in the injection denominator", () => {
-		const s = extractPatternMemoryHits([actionOk(), actionOk(), injectionDetected()]);
+		// The detection carries the id of the call it flagged, so it correlates
+		// rather than adding a phantom observation.
+		const flagged = actionOk();
+		const clean = actionOk();
+		const s = extractPatternMemoryHits([
+			flagged,
+			clean,
+			injectionDetected(flagged.data.transferId as string),
+		]);
 		expect(s.total).toBe(2);
-		expect(s.hits).toBeGreaterThan(0);
+		expect(s.hits).toBe(1);
 	});
 });
 
@@ -445,7 +463,7 @@ describe("one governed call contributes one observation", () => {
 		// failed stream is a scanned call. Excluding it meant one detection among
 		// nine clean failures reported 1/1 instead of 1/10.
 		const events: EntropyEventInput[] = [
-			{ kind: "injection_detected", data: { patterns: ["x"], score: 1 } },
+			{ kind: "injection_detected", data: { patterns: ["x"], score: 1, transferId: "s0" } },
 			...Array.from({ length: 9 }, (_, i) => ({
 				kind: "stream_partial_delivery",
 				data: { transferId: `s${i}`, error: "boom" },
