@@ -24,11 +24,34 @@ import {
 	verifyVaultWithAnchors,
 	type WitnessInput,
 } from "./index.js";
+import { RECEIPT_DISPATCH_TOKEN, type ReceiptCliIo, runReceiptCli } from "./receipt-cli.js";
+
+/**
+ * `receipt` dispatch (CLI spec §2). MUST run before a single byte of the
+ * vault flag loop below: `argv[0] === "receipt"` is checked EXACTLY, every
+ * flag receipt mode defines is unknown to the vault parser (which would call
+ * `usage()` and exit 1 — FAILED, the wrong code for a usage mistake), and a
+ * bare positional named `receipt` would otherwise be consumed as
+ * `vaultPath`. `process.exit` below is synchronous, so nothing after this
+ * block — including the `const args = …` vault path — ever executes on this
+ * branch.
+ */
+if (process.argv[2] === RECEIPT_DISPATCH_TOKEN) {
+	const realIo: ReceiptCliIo = {
+		readFile: (path) => readFileSync(path),
+		readStdin: () => readFileSync(0),
+	};
+	const result = runReceiptCli(process.argv.slice(3), realIo);
+	if (result.stdout.length > 0) process.stdout.write(result.stdout);
+	if (result.stderr.length > 0) process.stderr.write(result.stderr);
+	process.exit(result.exitCode);
+}
 
 const args = process.argv.slice(2);
 
 function usage(): never {
 	console.log(`Usage: npx usertrust-verify <path-to-.usertrust> [options]
+       npx usertrust-verify receipt <file> --trust <snapshot.json> [options]
 
 Options:
   --tx <transferId>              Verify a single transaction (receipt)

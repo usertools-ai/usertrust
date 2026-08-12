@@ -137,18 +137,32 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// 7200 as baseline + a top-of-estimate 2600-line verifier + ~700 for the
 		// CLI surface; the baseline came in +89 and the verifier +62 over that
 		// estimate, so the 539 left for Task 5's CLI surface (cli.ts receipt
-		// dispatch + the report module) is ~151 short of what §7 intended to
-		// budget for it. 7200 is left standing because it is the ratified
-		// number and moving it again here would be exactly the self-authorization
-		// the amendment was written to end. If Task 5 crosses it, that task runs
-		// (a)/(b)/(c) and raises — which the amended §7 now permits — and the
-		// ~151 shortfall is carried in the PR residuals ledger so the raise is
-		// expected rather than discovered.
+		// dispatch + the report module) was ~151 short of what §7 intended to
+		// budget for it — and Task 5 did cross 7200, exactly as flagged.
+		//
+		// 7200 → 7500, Task 5 (2026-08-12), per the amended §7 process this
+		// comment discharges (b) for: (a) is the re-run offender-list check
+		// above (empty) plus a direct read of `dependencies: {}` in
+		// package.json — both hold, so nothing was vendored. What was added:
+		// `receipt-cli.ts` (new, 716 lines) — the CLI spec §2/§6 surface:
+		// argument parsing, the `--envelope` R4 agreement check, the `--json`
+		// and human report renderers (including the `sanitizeCliReport` pass
+		// that scrubs untrusted text in BOTH output formats, not just the
+		// human one), and the exit-code mapping, all `node:fs`/`./`-relative,
+		// I/O-injected for testability without a dependency — plus +23 lines
+		// in `cli.ts` for the `receipt` dispatch (must run before the vault
+		// flag loop, CLI spec §2) and +5 in `receipt.ts` for exporting its
+		// existing `forDisplay` sanitizer rather than writing a third copy
+		// (CLI spec §6). Post-Task-5 total: 6661 + 716 + 23 + 5 = 7405. 7500
+		// leaves 95 lines of headroom rather than shaving the report renderer
+		// or the disclaimer strings to fit exactly — the spec's own
+		// instruction is to raise the number to fit the work, not the
+		// reverse.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(7200);
+		expect(total).toBeLessThan(7500);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {
