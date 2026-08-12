@@ -56,22 +56,41 @@ function scrubForTerminal(text: string, max = 200): string {
 /** Default from `TrustConfigSchema.policies`. */
 const DEFAULT_POLICIES_PATH = "./policies/default.yml";
 
-/** Read just the `policies` key, tolerating a config that is otherwise unusable. */
-function readPoliciesPath(vaultDir: string): string {
+/**
+ * Read just the `policies` key. Tolerates a config that is otherwise unusable —
+ * a broken budget must not stop an operator diagnosing their policy — but NOT a
+ * config that cannot be read or parsed at all.
+ *
+ * Falling back to the default in that case validated a DIFFERENT file than the
+ * governor would load, so the command could exit 0 having checked something
+ * unrelated while startup failed. A diagnostic answering confidently about the
+ * wrong file is worse than one that refuses.
+ *
+ * The value is taken VERBATIM, including "". `TrustConfigSchema` accepts an empty
+ * string and both governors resolve it to the vault directory, where the load
+ * fails — so substituting the default there would report ok for a deployment that
+ * cannot start. A diagnostic must resolve its target the way the thing it
+ * diagnoses does.
+ */
+function readPoliciesPath(vaultDir: string): { path: string } | { error: string } {
+	const p = join(vaultDir, "usertrust.config.json");
+	if (!existsSync(p)) return { path: DEFAULT_POLICIES_PATH };
+	let raw: string;
 	try {
-		const p = join(vaultDir, "usertrust.config.json");
-		if (!existsSync(p)) return DEFAULT_POLICIES_PATH;
-		const cfg = JSON.parse(readFileSync(p, "utf-8")) as { policies?: string };
-		// The configured value VERBATIM, including "". `TrustConfigSchema` accepts
-		// an empty string and both governors resolve it to the vault directory,
-		// where the load fails — so substituting the default here would validate a
-		// different file than the one that runs, and report ok for a deployment
-		// that cannot start. A diagnostic must resolve its target the same way the
-		// thing it diagnoses does.
-		return typeof cfg.policies === "string" ? cfg.policies : DEFAULT_POLICIES_PATH;
-	} catch {
-		return DEFAULT_POLICIES_PATH;
+		raw = readFileSync(p, "utf-8");
+	} catch (err) {
+		return { error: `config cannot be read: ${(err as Error).message}` };
 	}
+	let cfg: { policies?: unknown };
+	try {
+		cfg = JSON.parse(raw) as { policies?: unknown };
+	} catch (err) {
+		return { error: `config is not valid JSON: ${(err as Error).message}` };
+	}
+	if (cfg.policies !== undefined && typeof cfg.policies !== "string") {
+		return { error: `config "policies" must be a string, got ${typeof cfg.policies}` };
+	}
+	return { path: typeof cfg.policies === "string" ? cfg.policies : DEFAULT_POLICIES_PATH };
 }
 
 /**
@@ -104,10 +123,13 @@ export async function run(
 		if (options.json) {
 			console.log(
 				toSafeJson({
-					ok: false,
-					error: "unknown_subcommand",
-					subcommand: sub,
-					reason: `Unknown policy subcommand. Expected: validate`,
+					command: "policy",
+					success: false,
+					data: {
+						error: "unknown_subcommand",
+						subcommand: sub,
+						reason: `Unknown policy subcommand. Expected: validate`,
+					},
 				}),
 			);
 		} else {
@@ -124,7 +146,24 @@ export async function run(
 	// a missing budget, which would make an operator fix their config before they
 	// could find out why their policy stopped enforcing. Linting the policy file
 	// must not depend on anything else being right.
-	const policiesRel = readPoliciesPath(join(vaultPath, VAULT_DIR));
+	const resolved = readPoliciesPath(join(vaultPath, VAULT_DIR));
+	if ("error" in resolved) {
+		if (options.json) {
+			console.log(
+				toSafeJson({
+					command: "policy",
+					success: false,
+					data: { error: "config_unreadable", reason: resolved.error },
+				}),
+			);
+		} else {
+			console.error(`${pc.red("[config]")} ${scrubForTerminal(resolved.error)}`);
+			console.error("The governor resolves its policy path from this file; fix it first.");
+		}
+		process.exitCode = 1;
+		return;
+	}
+	const policiesRel = resolved.path;
 	// An explicit path wins, so an operator can check a file before installing it.
 	const explicit = argv.find((a, i) => i > 0 && !a.startsWith("-"));
 	const policiesPath = explicit ?? join(vaultPath, VAULT_DIR, policiesRel);
@@ -147,10 +186,14 @@ export async function run(
 			if (options.json)
 				console.log(
 					toSafeJson({
-						ok: false,
-						path: policiesPath,
-						rules: 0,
-						issues: [{ at: "file", message: "does not exist" }],
+						command: "policy",
+						success: false,
+						data: {
+							path: policiesPath,
+							rules: 0,
+							active: 0,
+							issues: [{ at: "file", message: "does not exist" }],
+						},
 					}),
 				);
 			else console.log(`${pc.red("[missing]")} ${reason}`);
@@ -162,12 +205,15 @@ export async function run(
 		if (options.json)
 			console.log(
 				toSafeJson({
-					ok: true,
-					path: policiesPath,
-					rules: 0,
-					active: 0,
-					issues: [],
-					note: `No policy file — only the built-in budget rules apply.`,
+					command: "policy",
+					success: true,
+					data: {
+						path: policiesPath,
+						rules: 0,
+						active: 0,
+						issues: [],
+						note: `No policy file — only the built-in budget rules apply.`,
+					},
 				}),
 			);
 		else console.log(`${pc.yellow("[none]")} ${msg}`);
@@ -179,16 +225,19 @@ export async function run(
 	if (options.json) {
 		console.log(
 			toSafeJson({
-				ok: issues.length === 0,
-				path: policiesPath,
-				rules: rules.length,
-				// A file of `enabled: false` rules is indistinguishable from an active
-				// one of the same size without this: the human branch says `[inert]`
-				// and CI, which reads the JSON, saw only a total. `inert` is derived
-				// rather than left to the consumer, so the judgement lives in one place.
-				active: rules.filter((r) => r.enabled !== false).length,
-				inert: rules.length > 0 && rules.every((r) => r.enabled === false),
-				issues,
+				command: "policy",
+				success: issues.length === 0,
+				data: {
+					path: policiesPath,
+					rules: rules.length,
+					// A file of `enabled: false` rules is indistinguishable from an active
+					// one of the same size without this: the human branch says `[inert]`
+					// and CI, which reads the JSON, saw only a total. `inert` is derived
+					// rather than left to the consumer, so the judgement lives in one place.
+					active: rules.filter((r) => r.enabled !== false).length,
+					inert: rules.length > 0 && rules.every((r) => r.enabled === false),
+					issues,
+				},
 			}),
 		);
 		process.exitCode = issues.length === 0 ? 0 : 1;

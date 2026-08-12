@@ -107,13 +107,14 @@ describe("usertrust policy validate", () => {
 		writePolicy(GOOD_YAML.replace("operator: contains", "operator: contain"));
 		await run(tempDir, { json: true }, ["validate"]);
 		const payload = JSON.parse(out()) as {
-			ok: boolean;
-			rules: number;
-			issues: { at: string; message: string }[];
+			command: string;
+			success: boolean;
+			data: { rules: number; issues: { at: string; message: string }[] };
 		};
-		expect(payload.ok).toBe(false);
-		expect(payload.rules).toBe(0);
-		expect(payload.issues.length).toBeGreaterThan(0);
+		expect(payload.command).toBe("policy");
+		expect(payload.success).toBe(false);
+		expect(payload.data.rules).toBe(0);
+		expect(payload.data.issues.length).toBeGreaterThan(0);
 		expect(process.exitCode).toBe(1);
 	});
 
@@ -154,8 +155,8 @@ describe("usertrust policy validate", () => {
 		expect(out()).not.toContain(CSI);
 		expect(out()).toContain("\\u009b");
 		// Still valid JSON, and still round-trips to the real value.
-		const parsed = JSON.parse(out()) as { path: string };
-		expect(parsed.path).toContain(CSI);
+		const parsed = JSON.parse(out()) as { data: { path: string } };
+		expect(parsed.data.path).toContain(CSI);
 	});
 
 	it("validates the CONFIGURED path verbatim, including an empty one", async () => {
@@ -181,10 +182,12 @@ describe("usertrust policy validate", () => {
 			GOOD_YAML.replace("    enforcement: hard", "    enforcement: hard\n    enabled: false"),
 		);
 		await run(tempDir, { json: true }, ["validate"]);
-		const p = JSON.parse(out()) as { rules: number; active: number; inert: boolean };
-		expect(p.rules).toBe(1);
-		expect(p.active).toBe(0);
-		expect(p.inert).toBe(true);
+		const p = JSON.parse(out()) as {
+			data: { rules: number; active: number; inert: boolean };
+		};
+		expect(p.data.rules).toBe(1);
+		expect(p.data.active).toBe(0);
+		expect(p.data.inert).toBe(true);
 	});
 
 	it("--json carries RAW diagnostic values, not terminal-scrubbed ones", async () => {
@@ -196,9 +199,36 @@ describe("usertrust policy validate", () => {
 		await run(tempDir, { json: true }, [longSub]);
 		const raw = out();
 		expect(raw).not.toContain(CSI);
-		const p = JSON.parse(raw) as { subcommand: string };
+		const p = JSON.parse(raw) as { data: { subcommand: string } };
 		// Round-trips to the original, in full — neither substituted nor clipped.
-		expect(p.subcommand).toBe(longSub);
+		expect(p.data.subcommand).toBe(longSub);
+	});
+
+	it("follows the repo's {command, success, data} JSON envelope on every outcome", async () => {
+		// Every sibling command emits this shape and json-flag.test.ts asserts it.
+		// Emitting a bespoke top-level `{ok}` meant generic CLI automation read
+		// `success` as undefined for this command specifically — including on
+		// failures, where it matters most.
+		writePolicy(GOOD_YAML);
+		await run(tempDir, { json: true }, ["validate"]);
+		const ok = JSON.parse(out()) as { command: string; success: boolean; data: unknown };
+		expect(ok.command).toBe("policy");
+		expect(ok.success).toBe(true);
+		expect(ok.data).toBeDefined();
+	});
+
+	it("refuses an unreadable config instead of validating the default file", async () => {
+		// Falling back to ./policies/default.yml validated a DIFFERENT file than the
+		// governor would load, so the command could exit 0 having checked something
+		// unrelated while startup failed.
+		mkdirSync(join(tempDir, ".usertrust", "policies"), { recursive: true });
+		writeFileSync(join(tempDir, ".usertrust", "policies", "default.yml"), GOOD_YAML, "utf-8");
+		writeFileSync(join(tempDir, ".usertrust", "usertrust.config.json"), "{ broken", "utf-8");
+		await run(tempDir, { json: true }, ["validate"]);
+		const p = JSON.parse(out()) as { success: boolean; data: { error: string } };
+		expect(p.success).toBe(false);
+		expect(p.data.error).toBe("config_unreadable");
+		expect(process.exitCode).toBe(1);
 	});
 
 	it("rejects an unknown subcommand rather than silently validating", async () => {
