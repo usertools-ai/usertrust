@@ -504,3 +504,86 @@ describe("one-pass reporting holds for structural AND semantic faults together",
 		expect(Object.keys(rules[0]?.conditions[0] ?? {})).toEqual(["field", "operator", "value"]);
 	});
 });
+
+describe("round-10 findings", () => {
+	it("an explicit null document is refused; a blank one is an empty policy", () => {
+		for (const [name, body] of [
+			["null.json", "null"],
+			["null.yaml", "null\n"],
+			["tilde.yaml", "~\n"],
+		] as [string, string][]) {
+			expect(() => loadPolicies(write(`r10-${name}`, body)), name).toThrow(
+				/explicit null document/,
+			);
+		}
+		expect(loadPolicies(write("r10-blank.yaml", ""))).toEqual([]);
+		expect(loadPolicies(write("r10-whitespace.yaml", "\n  \n"))).toEqual([]);
+	});
+
+	it("an operand that can only compare by identity is refused", () => {
+		// A rule loaded from disk is freshly parsed, so an object operand can never
+		// share a reference with request data: `eq` never matches a structurally
+		// identical value and `neq` always does. The rule validates and cannot
+		// enforce, which is the shape this file exists to close.
+		const mk = (operator: string, value: unknown) =>
+			JSON.stringify({
+				rules: [
+					{
+						name: "r",
+						effect: "deny",
+						enforcement: "hard",
+						conditions: [{ field: "meta", operator, value }],
+					},
+				],
+			});
+		expect(() => loadPolicies(write("r10-eq-obj.json", mk("eq", { team: "x" })))).toThrow(
+			/compares by identity/,
+		);
+		expect(() => loadPolicies(write("r10-neq-arr.json", mk("neq", [1, 2])))).toThrow(
+			/compares by identity/,
+		);
+		expect(() => loadPolicies(write("r10-in-obj.json", mk("in", [{ a: 1 }, "ok"])))).toThrow(
+			/compares by identity/,
+		);
+	});
+
+	it("primitive operands are unaffected, including inside in/not_in", () => {
+		const mk = (operator: string, value: unknown) =>
+			JSON.stringify({
+				rules: [
+					{
+						name: "r",
+						effect: "deny",
+						enforcement: "hard",
+						conditions: [{ field: "m", operator, value }],
+					},
+				],
+			});
+		expect(loadPolicies(write("r10-eq-str.json", mk("eq", "opus")))).toHaveLength(1);
+		expect(loadPolicies(write("r10-in-prims.json", mk("in", ["a", 1, true, null])))).toHaveLength(
+			1,
+		);
+	});
+
+	it("an unknown operator and an unknown key are reported together", () => {
+		// `z.enum` aborted the object parse, skipping the refinement, so the key was
+		// hidden until the operator was fixed. Operator membership is checked in the
+		// refinement now, so nothing aborts ahead of the structural checks.
+		const p = write(
+			"r10-op-and-key.json",
+			JSON.stringify({
+				rules: [
+					{
+						name: "r",
+						effect: "deny",
+						enforcement: "hard",
+						conditions: [{ field: "x", operator: "contain", value: "y", typo: 1 }],
+					},
+				],
+			}),
+		);
+		const { issues } = validatePolicyFile(p);
+		expect(issues.some((i) => i.at.endsWith(".operator"))).toBe(true);
+		expect(issues.some((i) => i.at.endsWith(".typo"))).toBe(true);
+	});
+});

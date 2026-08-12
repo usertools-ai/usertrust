@@ -694,15 +694,17 @@ unknown operator is refused at load, and is indeterminate at runtime for a rule 
 document carries and compares determinately.
 
 **A policy file that cannot be honoured is refused, never silently emptied.** `loadPolicies` throws
-`PolicyLoadError`; `validatePolicyFile` reports every problem in one pass for `usertrust policy
-validate` and the health report. It is all-or-nothing — one bad rule loads none of them, because
-loading the survivors would enforce a policy nobody wrote. An **absent** file stays legal (no policy
-is a valid deployment); a present-but-unreadable one does not. The document ROOT is strict as well
-as each rule, so a key placed outside the rule it was meant to apply to is refused rather than
-dropped. *Prevents:* the pre-fix behaviour, where unparseable or unrecognised input resolved to an
-empty rule set with no throw and no log, and `usertrust health` — which reported violations rather
-than rule count — could not distinguish an enforced policy from an unloaded one. Health now reports
-loaded and ACTIVE rule counts, since `enabled: false` rules load and never fire.
+`PolicyLoadError`; `validatePolicyFile` reports every problem in one pass. It is all-or-nothing —
+one bad rule loads none of them, because loading the survivors would enforce a policy nobody wrote.
+An **absent** file stays legal (no policy is a valid deployment); a present-but-unreadable one does
+not, and the two are told apart by ENOENT rather than by an `existsSync` preflight, which answers
+false for a file inside a directory it cannot traverse. An explicit `null` document is refused —
+only a genuinely blank file is an empty policy. The document ROOT is strict as well as each rule and
+each condition, so a key placed outside the thing it was meant to apply to is refused rather than
+dropped, and an operand that could never match — a non-finite number for any operator, a map or list
+for an identity comparison — is refused rather than accepted as a rule that cannot enforce.
+*Prevents:* the pre-fix behaviour, where unparseable or unrecognised input resolved to an empty rule
+set with no throw and no log.
 
 **Host-owned policy-context fields are STRIPPED BEFORE the request-body spread.** Every
 `evaluatePolicy` call site builds context as `{ ...sanitizePolicyContext(callerParams),

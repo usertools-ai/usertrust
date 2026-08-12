@@ -845,12 +845,15 @@ describe("loadPolicies", () => {
 		}
 	});
 
-	it("returns empty for null parsed value (line 382)", () => {
+	it("THROWS for an explicit null document — blank is empty, `null` is not", () => {
+		// Was: returned []. A file whose entire content is `null` (or YAML `~`) is
+		// something the author wrote, and it cannot carry rules — accepting it ran
+		// the governor on defaults while the file looked deliberate. A genuinely
+		// blank file is still a legitimate empty policy.
 		const path = `/tmp/trust-test-null-${Date.now()}.json`;
 		try {
 			writeFileSync(path, "null");
-			const rules = loadPolicies(path);
-			expect(rules).toEqual([]);
+			expect(() => loadPolicies(path)).toThrow(/explicit null document/);
 		} finally {
 			try {
 				unlinkSync(path);

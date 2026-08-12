@@ -955,6 +955,8 @@ const NUMERIC_VALUE_OPERATORS = new Set<FieldOperator>(["gt", "gte", "lt", "lte"
 const ARRAY_VALUE_OPERATORS = new Set<FieldOperator>(["in", "not_in"]);
 /** Operators whose `value` must be a string. */
 const STRING_VALUE_OPERATORS = new Set<FieldOperator>(["contains", "regex"]);
+/** Operators whose comparison is `===` or `includes`, i.e. identity for objects. */
+const IDENTITY_COMPARED_OPERATORS = new Set<FieldOperator>(["eq", "neq", "in", "not_in"]);
 /** Operators that read no `value` at all — they test presence. */
 const VALUELESS_OPERATORS = new Set<FieldOperator>(["exists", "not_exists"]);
 
@@ -980,7 +982,11 @@ const FIELD_CONDITION_KEYS = new Set(["field", "operator", "value"]);
 const FieldConditionSchema = z
 	.looseObject({
 		field: z.string().min(1, "must be a non-empty field path"),
-		operator: z.enum(FIELD_OPERATORS),
+		// NOT `z.enum` here: a failing enum aborts the object parse, which skips the
+		// refinement below and hides every structural fault behind the operator
+		// error. The membership check moved into the refinement so all faults are
+		// reported together.
+		operator: z.string(),
 		value: z.unknown().optional(),
 	})
 	.superRefine((fc, ctx) => {
@@ -992,7 +998,16 @@ const FieldConditionSchema = z
 				message: `unknown key on a condition. A condition carries only field, operator and value.`,
 			});
 		}
-		const op = fc.operator;
+
+		const op = fc.operator as FieldOperator;
+		if (!(FIELD_OPERATORS as readonly string[]).includes(fc.operator)) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["operator"],
+				message: `unknown operator "${fc.operator}". One of: ${FIELD_OPERATORS.join(", ")}`,
+			});
+			return;
+		}
 		if (VALUELESS_OPERATORS.has(op)) return;
 		if (fc.value === undefined) {
 			ctx.addIssue({
@@ -1018,8 +1033,28 @@ const FieldConditionSchema = z
 		// `NUMERIC_VALUE_OPERATORS` left exactly that hole. Infinity is refused on
 		// the same grounds — a threshold nothing can cross is not a threshold.
 		//
-		// Array operands are deliberately NOT covered: `includes` uses SameValueZero,
-		// so `in: [.nan]` does match a NaN subject and is a rule that works.
+		// An OBJECT or ARRAY operand for an equality/membership test compares by
+		// IDENTITY. A rule loaded from disk is freshly parsed, so it can never share
+		// a reference with request data: `eq: {team: "x"}` never matches a
+		// structurally identical request and `neq` always does. Such a rule validates
+		// and cannot enforce, so it is refused rather than accepted.
+		if (IDENTITY_COMPARED_OPERATORS.has(op)) {
+			const operands = op === "in" || op === "not_in" ? (fc.value as unknown[]) : [fc.value];
+			if (Array.isArray(operands)) {
+				for (const [i, operand] of operands.entries()) {
+					if (operand === null || typeof operand !== "object") continue;
+					ctx.addIssue({
+						code: "custom",
+						path: op === "in" || op === "not_in" ? ["value", i] : ["value"],
+						message: `operator "${op}" compares by identity, so a ${Array.isArray(operand) ? "list" : "map"} operand can never match a value read from a request. Compare a primitive field instead.`,
+					});
+				}
+			}
+		}
+
+		// Array operands are deliberately NOT covered by the finite check below:
+		// `includes` uses SameValueZero, so `in: [.nan]` does match a NaN subject
+		// and is a rule that works.
 		if (typeof fc.value === "number" && !Number.isFinite(fc.value)) {
 			ctx.addIssue({
 				code: "custom",
@@ -1161,8 +1196,22 @@ export function validatePolicyFile(path: string): PolicyLoadResult {
 		};
 	}
 
-	// An empty document is an empty policy, not a broken one.
-	if (parsed === null || parsed === undefined) return { rules: [], issues: [], present: true };
+	// A BLANK file is an empty policy. An explicit `null` / `~` is not: the author
+	// wrote something, and what they wrote cannot carry rules. Accepting it would
+	// run the governor on defaults while the file looked deliberate.
+	if (parsed === null || parsed === undefined) {
+		if (raw.trim() === "") return { rules: [], issues: [], present: true };
+		return {
+			rules: [],
+			issues: [
+				{
+					at: "file",
+					message: `is an explicit null document, which carries no rules. Delete the file to run without a custom policy, or give it a \`rules:\` list.`,
+				},
+			],
+			present: true,
+		};
+	}
 
 	let rawRules: unknown;
 	if (Array.isArray(parsed)) {
