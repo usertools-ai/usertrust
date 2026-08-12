@@ -77,8 +77,21 @@ export function canonicalize(value: unknown): string {
 		// array position, a key that is not there is exactly what the caller meant
 		// — absence is faithful, so this is not a coercion. The spec's
 		// `key-ABSENT (never null)` rules and every live event depend on it.
-		if (obj[key] === undefined) continue;
-		parts.push(`${JSON.stringify(key)}:${canonicalize(obj[key])}`);
+		//
+		// THE PROPERTY IS READ ONCE. The absence test and the serialization were
+		// two fresh property accesses on the CALLER's object, so a getter (or a
+		// Proxy) answers each independently. Defined-then-`undefined` kept the key
+		// and then serialized the second answer through the top-level null rule:
+		// `{"k":null}`, an object value written as null, which is exactly the
+		// asymmetry this comment forbids. The general case is worse — the writer
+		// hashes `canonicalize(event)` and persists `canonicalize(fullEvent)`, two
+		// traversals of the same caller object, so a value that changes between
+		// them SIGNS ONE SHAPE AND STORES ANOTHER. Same rule as the array bound
+		// above and the caller-owned handles in `headless.ts`: a value you re-read
+		// is not the value you checked.
+		const propertyValue = obj[key];
+		if (propertyValue === undefined) continue;
+		parts.push(`${JSON.stringify(key)}:${canonicalize(propertyValue)}`);
 	}
 	return `{${parts.join(",")}}`;
 }
