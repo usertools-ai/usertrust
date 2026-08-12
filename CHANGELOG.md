@@ -89,6 +89,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this is an honesty gap, not a soundness one — but it means this ship's
   verifier is bug-compatible with the SDK minter, not §13-conformant.
 
+  **Every field the specs give a FORMAT is checked against it, and the check
+  is a table rather than a list of fixes.** Two review rounds found nine
+  soundness holes that were one hole nine times: the verifier checked
+  STRUCTURE (present? a string?) and never FORMAT (the thing §2 declares) —
+  a sibling hash of `<64 hex>zz` folded to the SAME root, because Node's hex
+  decoder stops at the first non-hex pair and drops the tail, so the proof
+  verified here and would FAIL under any decoder that refuses trailing junk;
+  `startedAt: "not-a-date"` verified; `sourceReservationReceiptId:
+  "not-an-id"` named no receipt and verified. The fix is not nine checks:
+  the key set and the declared format are now ONE declaration per member of
+  §5's document — RFC 3339 UTC "Z" with ms precision for every timestamp,
+  64-lowercase-hex for every digest, the FULL git OID at the length its
+  `oidAlg` selects, §12 canonical decode for every receipt ID, the keyed
+  `r1_`/`c1_` forms as the 32-byte MACs the resolver defines — walked once
+  for both purposes, with the owning §7 step recorded per field so step 1
+  never pre-empts a condition a normative equality names. A member cannot
+  enter the schema without saying what it is, which is what makes this a
+  closed class rather than nine patches; the corpus drives a sweep off that
+  table, so a member declared and then not enforced fails a test. The same
+  formats bind a SERVED history member at step 6, which is the only place
+  they can bind — those never pass through step 1's reader at all.
+
+  **A rotated-away key can no longer sign forever (§8).** The snapshot
+  loader refused an `activationSequence` on an `active` key and a `retired`
+  key without one, but both rules read a single entry; read across the
+  rotation LINK, a key that a successor names as its predecessor plainly
+  HAS a successor, so `active` is a contradiction — and one that pays,
+  because an active key has no upper bound, so the predecessor stayed in the
+  pinned lineage and kept verifying new material in a snapshot that looked
+  like a clean rotation. `retired` (boundary evaluable) and `revoked` (the
+  compromise path) remain legal predecessors; `active` does not. Relatedly,
+  `--expect-id` supplied on a run that failed before step 3 now reports
+  `unavailable` rather than `notApplicable`: §7 reserves the latter for an
+  input that could not exist in this context, and an arrival context the
+  operator typed plainly exists.
+
   Built against a from-scratch mint harness (Ed25519 keygen/sign, sha256,
   canonical JSON — node builtins only) that reaches canonical bytes by a
   path independent of the verifier's own `canonicalize`, so a shared

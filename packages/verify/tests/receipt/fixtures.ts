@@ -664,6 +664,55 @@ export const PARSE_VECTORS: readonly Vector[] = [
 		breaks: [],
 		build: () => mint({ receiptId: LONG_DECODE_RECEIPT_ID }),
 	},
+	{
+		// The FORMAT class, three vectors deep. Each is a member that is present,
+		// well-typed and NOT the thing §2/§5 declares — the shape a structure
+		// check cannot see, and the shape two review rounds kept finding.
+		//
+		// `breaks: []` is the whole point of this one: the appended `zz` is
+		// dropped by Node's hex decoder, so the siblings still fold to the signed
+		// root and the independent fact checker agrees the proof is INTACT. Only
+		// the declared format separates it from an honest receipt.
+		name: "schema/sibling-hash-non-hex",
+		what: "§4a: a sibling hash of `<64 hex>zz` folds to the SAME root — the decoder drops the tail, so nothing downstream can catch it.",
+		mode: "receipt",
+		expect: failed("schema", "SCHEMA_INVALID"),
+		breaks: [],
+		build: () =>
+			mint({
+				inclusion: (proof) => ({
+					...proof,
+					siblings: proof.siblings.map((sibling, index) =>
+						index === 0 ? { ...sibling, hash: `${sibling.hash}zz` } : sibling,
+					),
+				}),
+			}),
+	},
+	{
+		name: "schema/started-at-not-a-timestamp",
+		what: '§2: `startedAt` is RFC 3339 UTC "Z" with ms precision — a signed string that is not a time is not a chain timestamp.',
+		mode: "receipt",
+		expect: failed("schema", "SCHEMA_INVALID"),
+		breaks: [],
+		build: () => mint({ projection: projectionPatch((p) => (p.startedAt = "not-a-date")) }),
+	},
+	{
+		name: "schema/source-reservation-not-a-receipt-id",
+		what: "§2: the fallback session variant's `sourceReservationReceiptId` is a Ut1ReceiptId — the bidirectional link is the variant's whole purpose.",
+		mode: "receipt",
+		expect: failed("schema", "SCHEMA_INVALID"),
+		breaks: [],
+		build: () =>
+			mint({
+				projection: projectionPatch((p) => {
+					p.work = {
+						kind: "session",
+						repoId: "github.com:R_kgDOK1x2Yw",
+						origin: { kind: "billedUnfinalized", sourceReservationReceiptId: "not-an-id" },
+					};
+				}),
+			}),
+	},
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────

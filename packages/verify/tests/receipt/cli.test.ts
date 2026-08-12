@@ -543,6 +543,47 @@ describe("--expect-id", () => {
 		expect(result.exitCode).toBe(3);
 	});
 
+	it("reports `unavailable` when the check was requested but the run never got there", () => {
+		// §7's `notApplicable` means the input "does not exist in this context and
+		// never could". Here it exists — the operator typed it — and the run died
+		// before step 3, in this case before step 1: the trust file is missing, so
+		// nothing was compared. Reporting `notApplicable` would tell the operator
+		// their `--expect-id` could not have applied to this document, which is
+		// false, and is the same misstatement §7 rules out for a check a verifier
+		// declined to run.
+		const bundle = mint();
+		const io = ioFor(bundle);
+		const report = jsonReport(
+			runReceiptCli(
+				["receipt.json", "--trust", "absent.json", "--expect-id", DEFAULT_RECEIPT_ID, "--json"],
+				{
+					...io,
+					readFile: (path: string) => {
+						if (path === "absent.json") throw new Error("ENOENT: no such file");
+						return io.readFile(path);
+					},
+				},
+			),
+		);
+		expect(report.verdict).toBe("UNVERIFIABLE");
+		expect(report.arrivalContext).toEqual({
+			result: "unavailable",
+			expected: DEFAULT_RECEIPT_ID,
+		});
+	});
+
+	it("reports `unavailable` when a base step failed before step 3(a) ran", () => {
+		const bundle = mint({ projection: (p) => ({ ...p, startedAt: "not-a-date" }) });
+		const report = jsonReport(
+			runReceiptCli(
+				["receipt.json", "--trust", "trust.json", "--expect-id", DEFAULT_RECEIPT_ID, "--json"],
+				ioFor(bundle),
+			),
+		);
+		expect(report.failure?.step).toBe("schema");
+		expect(report.arrivalContext.result).toBe("unavailable");
+	});
+
 	it("omitting --expect-id makes 3(a) notApplicable, not a pass", () => {
 		const bundle = mint();
 		const report = jsonReport(

@@ -90,6 +90,12 @@ const SCHEMA_VERDICT_BUT_NOT_THE_READER: readonly string[] = [
 	"schema/signature-key-id-differs-from-minter",
 	"schema/receipt-id-decodes-short",
 	"schema/receipt-id-decodes-long",
+	// The FORMAT vectors land here for the same reason: §2/§5 formats are step
+	// 1's, but they are validated beside the §12 decode and the §5 literals
+	// rather than inside the byte reader, whose scope stays bytes → document.
+	"schema/sibling-hash-non-hex",
+	"schema/started-at-not-a-timestamp",
+	"schema/source-reservation-not-a-receipt-id",
 ];
 
 function receiptBytesOf(v: Vector): Buffer {
@@ -623,6 +629,16 @@ describe("loadTrustSnapshot — parsing and identity", () => {
 	it("pins a rotation lineage in BOTH directions from the pinned member", () => {
 		const load = loadTrustSnapshot(
 			patched((s) => {
+				// A CONFORMANT rotation: the predecessor is retired at the boundary
+				// its successor activates on. §8 gives an `active` key no upper
+				// bound because it "has no successor yet", so leaving the pinned key
+				// active while declaring a successor is the contradiction
+				// `validateLineages` now refuses — see the dedicated test below.
+				const predecessor = s.keys.find((k) => k.keyId === CHECKPOINT_KEY.keyId);
+				if (predecessor !== undefined) {
+					predecessor.state = "retired";
+					predecessor.activationSequence = 18;
+				}
 				s.keys.push({
 					keyId: "utk_ckpt_2026_10",
 					alg: "ed25519",

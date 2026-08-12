@@ -293,6 +293,8 @@ function preRunReport(outcome: {
 	readonly trustSnapshot: TrustSnapshotIdentity | null;
 	readonly failure?: CliFailure;
 	readonly missing?: CliMissing;
+	/** The §12-validated `--expect-id`, when the caller supplied one. */
+	readonly arrivalId?: string;
 }): ReceiptCliReport {
 	return {
 		reportVersion: 1,
@@ -301,7 +303,13 @@ function preRunReport(outcome: {
 		receiptId: null,
 		steps: null,
 		checks: null,
-		arrivalContext: { result: "notApplicable", expected: null },
+		// The same rule the base run applies: a supplied arrival context that
+		// never got compared is `unavailable`, not `notApplicable`. Nothing ran
+		// here at all, which makes it the clearest case of the two.
+		arrivalContext:
+			outcome.arrivalId === undefined
+				? { result: "notApplicable", expected: null }
+				: { result: "unavailable", expected: outcome.arrivalId },
 		computed: { amountUsd: null },
 		unimplemented: [],
 		posture: null,
@@ -731,6 +739,7 @@ export function runReceiptCli(argv: readonly string[], io: ReceiptCliIo): Receip
 				verdict: "UNVERIFIABLE",
 				trustSnapshot: null,
 				missing: { what: "trustSnapshot", detail: describeIoError(error) },
+				...(arrivalId === undefined ? {} : { arrivalId }),
 			}),
 			json,
 			[],
@@ -743,6 +752,7 @@ export function runReceiptCli(argv: readonly string[], io: ReceiptCliIo): Receip
 				verdict: "UNVERIFIABLE",
 				trustSnapshot: { sha256: trustLoad.sha256, version: null, predecessor: null },
 				missing: { what: "trustSnapshot", detail: trustLoad.detail },
+				...(arrivalId === undefined ? {} : { arrivalId }),
 			}),
 			json,
 			[],
@@ -762,6 +772,7 @@ export function runReceiptCli(argv: readonly string[], io: ReceiptCliIo): Receip
 				verdict: "UNVERIFIABLE",
 				trustSnapshot: snapshotIdentity,
 				missing: { what: "receiptBytes", detail: describeIoError(error) },
+				...(arrivalId === undefined ? {} : { arrivalId }),
 			}),
 			json,
 			[],
@@ -779,6 +790,7 @@ export function runReceiptCli(argv: readonly string[], io: ReceiptCliIo): Receip
 					verdict: "UNVERIFIABLE",
 					trustSnapshot: snapshotIdentity,
 					missing: { what: "receiptBytes", detail: outcome.detail },
+					...(arrivalId === undefined ? {} : { arrivalId }),
 				}),
 				json,
 				[],
@@ -790,6 +802,7 @@ export function runReceiptCli(argv: readonly string[], io: ReceiptCliIo): Receip
 					verdict: "FAILED",
 					trustSnapshot: snapshotIdentity,
 					failure: { step: "envelope", code: outcome.code, detail: outcome.detail },
+					...(arrivalId === undefined ? {} : { arrivalId }),
 				}),
 				json,
 				[],

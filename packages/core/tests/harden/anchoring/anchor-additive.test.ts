@@ -183,11 +183,39 @@ describe("HARDEN: anchoring additive proofs", () => {
 		//   · `cli.ts` +13 — routing the receipt branch's output through
 		//     `writeAllSync` before the exit.
 		// Post-review total: 7670. 7800 leaves 130 lines of headroom.
+		//
+		// 7800 → 8400, the Codex Tier-0 FORMAT round (2026-08-12), same amended
+		// §7 process. (a) re-verified directly: assertions 4 and 5 above still
+		// pass — every import in `packages/verify/src` is `node:*` or
+		// `./`-relative and `dependencies` is still `{}`; no file was vendored
+		// and no mirrored file was edited. (b) what was added, +509 lines across
+		// two files, all of it closing ONE defect class:
+		//   · `receipt-verify.ts` +496 — the FIELD TABLE. Two review rounds
+		//     found nine soundness holes that were one hole nine times: the
+		//     reader checked STRUCTURE and never FORMAT, so `<64 hex>zz` folded
+		//     to the same root (Node's hex decoder drops the tail),
+		//     `startedAt: "not-a-date"` verified, and `sourceReservationReceiptId`
+		//     named nothing. The fix is not nine checks: the key SET and the
+		//     declared FORMAT are now one declaration per member, walked once for
+		//     both purposes, with the owning §7 step recorded per field so step 1
+		//     cannot pre-empt an equality. The line cost is the table itself
+		//     (~180 lines of declarations, one per member of §5's document) plus
+		//     the format predicates and the prose deriving each from spec text —
+		//     which is the artifact that makes the class closed instead of the
+		//     next round's tenth instance. Also here: §8's retirement boundary
+		//     read across the rotation LINK (an `active` key with a declared
+		//     successor has no boundary, so a rotated-away key could sign
+		//     forever), and `--expect-id` reporting `unavailable` rather than
+		//     `notApplicable` when the run never reached step 3.
+		//   · `receipt-cli.ts` +13 — threading that arrival result through the
+		//     pre-run report, where nothing ran at all.
+		// Post-round total: 8192. 8400 leaves 208 lines of headroom rather than
+		// trimming a Tier-0 table to fit a number.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(7800);
+		expect(total).toBeLessThan(8400);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {

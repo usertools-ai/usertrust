@@ -523,147 +523,389 @@ export function describeNumberViolation(value: number): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Unknown-field rejection (§5: "Unknown fields in the signed receipt → FAIL";
-// §2: "any unknown field anywhere in a `ut1` document is FAIL").
+// The FIELD TABLE — every member of the signed receipt, declared ONCE, with
+// both the key set (§5: "Unknown fields in the signed receipt → FAIL"; §2:
+// "any unknown field anywhere in a `ut1` document is FAIL") and the member's
+// DECLARED FORMAT.
 //
-// A KEY-SET check, never a shape check. Missing members, wrong types and
-// presence RULES (`workloadId` iff `workflowAttested`, `transferSet` iff
-// `transferCount ≤ 32`) belong to steps 2 and 7, which own their failure codes.
-// Descending into a member whose value is not an object is therefore silence
-// here, not a pass — the step that consumes it reports it.
+// The table replaces the bare key SETS this file used to carry, and the reason
+// is a defect CLASS rather than tidiness. Two review rounds found nine holes
+// and they were one hole nine times: the reader checked STRUCTURE (present? a
+// string? a number?) and never FORMAT (the thing §2 says it is). `stringAt`
+// cannot tell `"2026-08-11T18:00:00.000Z"` from `"not-a-date"`, and nothing
+// downstream reads either as a time. A sibling hash of `<64 hex>zz` folds to
+// the SAME root, because Node's hex decoder stops at the first non-hex pair and
+// silently drops the tail — so the proof verifies here and FAILS under any
+// implementation whose decoder refuses trailing junk, which is an interop split
+// in a frozen format. `sourceReservationReceiptId: "not-an-id"` names no
+// receipt and passed. Patching the three named instances would have left every
+// other read in this file exactly as it was.
+//
+// So the key set and the format are ONE declaration now. A member cannot enter
+// the schema without saying what it is — every `FieldRule` names a format and
+// an owner — and `walkFieldTable` applies whatever the table says, in ONE
+// traversal shared by the unknown-field walk and the format pass. Two walkers
+// would be two chances to forget a subtree; one walker cannot visit a field for
+// one purpose and miss it for the other.
+//
+// `owner` records WHICH step reports a violation, because §7's steps own their
+// failure codes and CLI spec §5's precedence rule is explicit that step 1's
+// schema validation must not pre-empt a condition a normative equality names:
+//
+//  - `schema`     — step 1's own pass, `findFormatViolation` below.
+//  - `checkpoint` — §4a's v2 statement members, applied by
+//                   `checkpointStatementShape` so that a SERVED history member
+//                   (step 9), which never passes through this reader at all,
+//                   gets the identical rule.
+//  - `semantics`  — §2's enumerated public-safety and digest rules, which §7
+//                   step 7 owns by name (`proofId`, `workloadId`, `repo`,
+//                   `transferSetRoot`, `prevGenerationEventHash`, transfer IDs).
+//  - `event` / `signature` / `inclusion` — a hash an equality already pins (the
+//                   recompute is strictly stronger than any regex), the literal
+//                   step 4 binds to the snapshot, the sibling `position` step 5
+//                   compares against the DERIVED topology.
+//
+// A member with no declared syntax at all is `nonEmpty` and says so: §2 makes a
+// receipt a public document in which "every string needs a presence rule or a
+// syntax rule", and for an opaque server-generated handle the presence rule IS
+// the whole rule. Inventing a syntax for it would fail honest receipts, which
+// is the same defect wearing the other costume.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type KeySet = ReadonlySet<string>;
 
-const RECEIPT_KEYS: KeySet = new Set([
-	"spec",
-	"receiptId",
-	"scope",
-	"mintedAt",
-	"minter",
-	"work",
-	"event",
-	"proof",
-	"signature",
-]);
-const MINTER_KEYS: KeySet = new Set(["kind", "keyId", "trustDomain"]);
-const SIGNATURE_KEYS: KeySet = new Set(["alg", "keyId", "sig"]);
-const EVENT_KEYS: KeySet = new Set([
-	"id",
-	"timestamp",
-	"previousHash",
-	"kind",
-	"actor",
-	"data",
-	"sequence",
-	"hash",
-]);
-const PROOF_KEYS: KeySet = new Set([
-	"profile",
-	"chain",
-	"mintEventHash",
-	"inclusion",
-	"checkpoint",
-]);
-const INCLUSION_KEYS: KeySet = new Set([
-	"version",
-	"leafHash",
-	"leafIndex",
-	"treeSize",
-	"root",
-	"siblings",
-	"segmentId",
-]);
-const SIBLING_KEYS: KeySet = new Set(["hash", "position"]);
-const CHECKPOINT_KEYS: KeySet = new Set([
-	"v",
-	"vaultId",
-	"profile",
-	"root",
-	"treeSize",
-	"segmentId",
-	"segmentFirstSequence",
-	"previousSegmentRoot",
-	"previousSegmentId",
-	"keyId",
-	"publishedAt",
-	"sig",
-]);
-const PROJECTION_KEYS: KeySet = new Set([
-	"spec",
-	"scope",
-	"sessionId",
-	"generation",
-	"prevGenerationEventHash",
-	"work",
-	"sessionAssociation",
-	"workloadId",
-	"models",
-	"providers",
-	"startedAt",
-	"endedAt",
-	"spend",
-	"delegationPosture",
-	"pricing",
-	"transferSet",
-	"transferSetRoot",
-]);
-const SPEND_KEYS: KeySet = new Set([
-	"assessedUsertokens",
-	"postedUsertokens",
-	"roundingAdjustment",
-	"transferCount",
-	"usagePosture",
-	"pricingPosture",
-]);
-const PRICING_KEYS: KeySet = new Set(["tableVersions"]);
-const TRANSFER_PAIR_KEYS: KeySet = new Set(["authorizationTransferId", "settlementTransferId"]);
-const MEMBERSHIP_KEYS: KeySet = new Set(["status", "proofId"]);
-const ORIGIN_KEYS: KeySet = new Set(["kind", "sourceReservationReceiptId"]);
+/** Which §7 step reports a violation of the declared format. */
+export type FormatOwner =
+	| "schema"
+	| "event"
+	| "signature"
+	| "inclusion"
+	| "checkpoint"
+	| "semantics";
+
+/**
+ * The declared formats, each traceable to spec text:
+ *
+ *  - `hex64` — a SHA-256 digest, lowercase hex (§2's `objectSha256`
+ *    "lowercaseHex(SHA-256(gitPreimage))"; §4a's roots and event hashes).
+ *  - `hex64OrGenesis` — a root, or §4a's fixed genesis string.
+ *  - `hex32` — §2's "canonically-encoded transfer ID (lowercase-hex 128-bit
+ *    TigerBeetle ID, fixed length, no `0x`)".
+ *  - `gitOid` — §2's FULL git object ID, 40 or 64 lowercase hex SELECTED BY
+ *    the sibling `oidAlg` ("a display may truncate, the projection never
+ *    does"; the resolver: "FULL git object ID … <full 40/64-hex>").
+ *  - `rfc3339UtcMs` — §2's RFC 3339 UTC "Z", millisecond precision.
+ *  - `receiptId` — §12's canonical decode/re-encode, not the character count.
+ *  - `opaqueHandle` — §2's `[A-Za-z0-9._-]{1,128}` public-safety syntax.
+ *  - `keyedRepoId` — the plain immutable provider ID, or the keyed form
+ *    `"r1_" + base64url(HMAC-SHA-256(…))` (resolver round-9 F4) — a 32-byte
+ *    MAC, so the keyed arm has an exact decoded length.
+ *  - `keyedContentCommitment` — `"c1_" + base64url(HMAC-SHA-256(…))`, same.
+ *  - `providerRepoUrl` — §2's canonical `<providerHost>/<owner>/<name>`, ≤256.
+ *  - `canonicalBase64` — signature material, canonical (no appended junk).
+ *  - `nonEmpty` — a string the spec gives no syntax; presence is the rule.
+ *  - `integer` — a JSON number. The frozen numeric reader has already refused
+ *    `-0`, fractions and unsafe integers ANYWHERE in the document, so what is
+ *    left here is the TYPE; per-field ranges belong to the step that owns them.
+ *  - `literal` / `enum` — a fixed value or a closed set, checked by the step
+ *    that knows the vocabulary (never here: this pass has no verdict).
+ *  - `canonicalBytes` — `event.actor`, which equality 2 compares as canonical
+ *    bytes against the registered `mintActor`; §4a is explicit that this is one
+ *    comparison and not field plucking, so nothing descends into it.
+ */
+export type FormatName =
+	| "hex64"
+	| "hex64OrGenesis"
+	| "hex32"
+	| "gitOid"
+	| "rfc3339UtcMs"
+	| "receiptId"
+	| "opaqueHandle"
+	| "keyedRepoId"
+	| "keyedContentCommitment"
+	| "providerRepoUrl"
+	| "canonicalBase64"
+	| "nonEmpty"
+	| "integer"
+	| "literal"
+	| "enum"
+	| "canonicalBytes";
+
+const FORMAT_DESCRIPTIONS: Readonly<Record<FormatName, string>> = {
+	hex64: "64 lowercase hex characters",
+	hex64OrGenesis: '64 lowercase hex characters or the fixed string "genesis"',
+	hex32: "a canonical 128-bit lowercase-hex transfer ID",
+	gitOid: "a FULL lowercase-hex git object ID under its oidAlg",
+	rfc3339UtcMs: 'an RFC 3339 UTC "Z" timestamp with millisecond precision',
+	receiptId: "a canonical §12 ut1 receipt ID",
+	opaqueHandle: "an opaque [A-Za-z0-9._-]{1,128} handle",
+	keyedRepoId: 'a provider repository ID, or "r1_" + base64url of a 32-byte MAC',
+	keyedContentCommitment: '"c1_" + base64url of a 32-byte MAC',
+	providerRepoUrl: "a ≤256-character <providerHost>/<owner>/<name> provider URL",
+	canonicalBase64: "canonical base64",
+	nonEmpty: "a non-empty string",
+	integer: "an integer",
+	literal: "the literal its step pins",
+	enum: "a member of its closed value set",
+	canonicalBytes: "the canonical form its equality pins",
+};
+
+type FieldRule =
+	| { readonly kind: "scalar"; readonly format: FormatName; readonly owner: FormatOwner }
+	/** Every entry is a string in one format — `models`, `providers`, `tableVersions`. */
+	| { readonly kind: "stringArray"; readonly format: FormatName; readonly owner: FormatOwner }
+	| { readonly kind: "object"; readonly table: FieldTable }
+	| { readonly kind: "objectArray"; readonly table: FieldTable }
+	/** A `kind`-discriminated union: `work`, `contentBinding`. An UNLISTED
+	 * discriminant is step 7's union rule, not step 1's, so the walk stops. */
+	| { readonly kind: "union"; readonly tables: ReadonlyMap<string, FieldTable> }
+	/** Present, walked by nobody here — its owner compares it whole. */
+	| { readonly kind: "opaqueValue"; readonly owner: FormatOwner };
+
+type FieldTable = Readonly<Record<string, FieldRule>>;
+
+function at(owner: FormatOwner, format: FormatName): FieldRule {
+	return { kind: "scalar", format, owner };
+}
+function subtree(table: FieldTable): FieldRule {
+	return { kind: "object", table };
+}
+function subtrees(table: FieldTable): FieldRule {
+	return { kind: "objectArray", table };
+}
+function strings(owner: FormatOwner, format: FormatName): FieldRule {
+	return { kind: "stringArray", format, owner };
+}
+function variants(tables: ReadonlyMap<string, FieldTable>): FieldRule {
+	return { kind: "union", tables };
+}
+
+const MEMBERSHIP_FIELDS: FieldTable = {
+	// v1 FAILS CLOSED: `providerVerified` is the only ut1 value (step 7).
+	status: at("semantics", "literal"),
+	// §2's public-safety syntax, named there as step 7's.
+	proofId: at("semantics", "opaqueHandle"),
+};
+
+const ORIGIN_FIELDS: FieldTable = {
+	kind: at("semantics", "literal"),
+	// §2 types this `Ut1ReceiptId`: the fallback variant's whole purpose is the
+	// bidirectional link to the reservation receipt, and a string that is not a
+	// receipt ID cannot be that link.
+	sourceReservationReceiptId: at("schema", "receiptId"),
+};
+
+const CONTENT_BINDING_FIELDS_BY_KIND: ReadonlyMap<string, FieldTable> = new Map<string, FieldTable>(
+	[
+		["publicSha256", { kind: at("semantics", "literal"), sha256: at("schema", "hex64") }],
+		[
+			"privateHmacSha256V1",
+			{
+				kind: at("semantics", "literal"),
+				commitment: at("schema", "keyedContentCommitment"),
+			},
+		],
+	],
+);
 
 /** §2's discriminated union. An UNLISTED `kind` is step 7's, not step 1's. */
-const WORK_KEYS_BY_KIND: ReadonlyMap<string, KeySet> = new Map<string, KeySet>([
+const WORK_FIELDS_BY_KIND: ReadonlyMap<string, FieldTable> = new Map<string, FieldTable>([
 	[
 		"commit",
-		new Set(["kind", "repoId", "repo", "oid", "oidAlg", "objectSha256", "repositoryMembership"]),
+		{
+			kind: at("semantics", "enum"),
+			repoId: at("schema", "keyedRepoId"),
+			// §2 gives `repo` BOTH halves of its rule under step 7's public-safety
+			// list, so the whole member stays there rather than splitting in two.
+			repo: at("semantics", "providerRepoUrl"),
+			oid: at("schema", "gitOid"),
+			oidAlg: at("semantics", "enum"),
+			objectSha256: at("schema", "hex64"),
+			repositoryMembership: subtree(MEMBERSHIP_FIELDS),
+		},
 	],
 	[
 		"pr",
-		new Set([
-			"kind",
-			"repoId",
-			"repo",
-			"number",
-			"providerArtifactId",
-			"observedRevision",
-			"contentBinding",
-			"repositoryMembership",
-		]),
+		{
+			kind: at("semantics", "enum"),
+			repoId: at("schema", "keyedRepoId"),
+			repo: at("semantics", "providerRepoUrl"),
+			number: at("schema", "integer"),
+			providerArtifactId: at("schema", "nonEmpty"),
+			observedRevision: at("schema", "nonEmpty"),
+			contentBinding: variants(CONTENT_BINDING_FIELDS_BY_KIND),
+			repositoryMembership: subtree(MEMBERSHIP_FIELDS),
+		},
 	],
 	[
 		"issue",
-		new Set([
-			"kind",
-			"repoId",
-			"repo",
-			"number",
-			"providerArtifactId",
-			"observedRevision",
-			"contentBinding",
-			"repositoryMembership",
-		]),
+		{
+			kind: at("semantics", "enum"),
+			repoId: at("schema", "keyedRepoId"),
+			repo: at("semantics", "providerRepoUrl"),
+			number: at("schema", "integer"),
+			providerArtifactId: at("schema", "nonEmpty"),
+			observedRevision: at("schema", "nonEmpty"),
+			contentBinding: variants(CONTENT_BINDING_FIELDS_BY_KIND),
+			repositoryMembership: subtree(MEMBERSHIP_FIELDS),
+		},
 	],
-	// Both `session` variants in one set: `origin` present ⇒ fallback, absent ⇒
-	// ordinary, and §2 makes the two mutually exclusive rather than differently
-	// keyed. Which variant this is, and whether `origin` is legal on it, is
-	// step 7's ("`work` matching exactly one union variant").
-	["session", new Set(["kind", "repoId", "repo", "origin"])],
+	// Both `session` variants in one table: `origin` present ⇒ fallback, absent
+	// ⇒ ordinary, and §2 makes the two mutually exclusive rather than
+	// differently keyed. Which variant this is, and whether `origin` is legal on
+	// it, is step 7's ("`work` matching exactly one union variant").
+	[
+		"session",
+		{
+			kind: at("semantics", "enum"),
+			repoId: at("schema", "keyedRepoId"),
+			repo: at("semantics", "providerRepoUrl"),
+			origin: subtree(ORIGIN_FIELDS),
+		},
+	],
 ]);
 
-const CONTENT_BINDING_KEYS_BY_KIND: ReadonlyMap<string, KeySet> = new Map<string, KeySet>([
-	["publicSha256", new Set(["kind", "sha256"])],
-	["privateHmacSha256V1", new Set(["kind", "commitment"])],
-]);
+const SPEND_FIELDS: FieldTable = {
+	// Every range here is §2's enumerated semantic list — step 7's by name.
+	assessedUsertokens: at("semantics", "integer"),
+	postedUsertokens: at("semantics", "integer"),
+	roundingAdjustment: at("semantics", "integer"),
+	transferCount: at("semantics", "integer"),
+	usagePosture: at("semantics", "enum"),
+	pricingPosture: at("semantics", "enum"),
+};
+
+const PRICING_FIELDS: FieldTable = {
+	tableVersions: strings("semantics", "nonEmpty"),
+};
+
+const TRANSFER_PAIR_FIELDS: FieldTable = {
+	authorizationTransferId: at("semantics", "hex32"),
+	settlementTransferId: at("semantics", "hex32"),
+};
+
+const PROJECTION_FIELDS: FieldTable = {
+	spec: at("schema", "literal"),
+	scope: at("schema", "literal"),
+	// §9-A.c requires a unique identifier minted at session open (nonce/ULID) and
+	// pins no syntax; §2's decidable public-safety list names `proofId` and
+	// `workloadId` and not this. Presence is therefore the whole rule.
+	sessionId: at("schema", "nonEmpty"),
+	generation: at("semantics", "integer"),
+	prevGenerationEventHash: at("semantics", "hex64"),
+	work: variants(WORK_FIELDS_BY_KIND),
+	sessionAssociation: at("semantics", "enum"),
+	workloadId: at("semantics", "opaqueHandle"),
+	// Catalog MEMBERSHIP is not decidable from the receipt alone (§2); what is
+	// decidable — sorted-unique, and entries that are well-formed at all — is
+	// step 7's, beside the sort it shares a sentence with.
+	models: strings("semantics", "nonEmpty"),
+	providers: strings("semantics", "nonEmpty"),
+	startedAt: at("schema", "rfc3339UtcMs"),
+	endedAt: at("schema", "rfc3339UtcMs"),
+	spend: subtree(SPEND_FIELDS),
+	delegationPosture: at("semantics", "enum"),
+	pricing: subtree(PRICING_FIELDS),
+	transferSet: subtrees(TRANSFER_PAIR_FIELDS),
+	transferSetRoot: at("semantics", "hex64"),
+};
+
+const MINTER_FIELDS: FieldTable = {
+	// The VALUE is bound at step 4 against the key's registered `minterKind`;
+	// the snapshot decides the vocabulary, so there is nothing to pin here.
+	kind: at("schema", "nonEmpty"),
+	keyId: at("schema", "nonEmpty"),
+	// §8's v1 pin (`usertrust.ai`) is step 4's — one condition, one code.
+	trustDomain: at("signature", "literal"),
+};
+
+const SIGNATURE_FIELDS: FieldTable = {
+	alg: at("schema", "literal"),
+	keyId: at("schema", "nonEmpty"),
+	sig: at("schema", "canonicalBase64"),
+};
+
+const SIBLING_FIELDS: FieldTable = {
+	// The hole this table exists for. Unsigned by any statement of its own and
+	// hex-decoded by the fold, so a lenient decoder is the only thing standing
+	// between `<64 hex>zz` and a verdict.
+	hash: at("schema", "hex64"),
+	// Compared STRICTLY against the topology derived from (leafIndex, treeSize)
+	// in `verify.ts` — step 5 owns it, and the fold treats every non-"left"
+	// value as "right", which is exactly why it is compared and not read.
+	position: at("inclusion", "enum"),
+};
+
+const INCLUSION_FIELDS: FieldTable = {
+	version: at("schema", "literal"),
+	// Equality 1 pins these to `event.hash`, which step 2 RECOMPUTES — a
+	// stronger statement than the digest shape, and the equality's to report.
+	leafHash: at("event", "hex64"),
+	leafIndex: at("event", "integer"),
+	treeSize: at("event", "integer"),
+	root: at("event", "hex64"),
+	siblings: subtrees(SIBLING_FIELDS),
+	segmentId: at("schema", "nonEmpty"),
+};
+
+const CHECKPOINT_FIELDS: FieldTable = {
+	v: at("checkpoint", "literal"),
+	vaultId: at("checkpoint", "nonEmpty"),
+	profile: at("checkpoint", "nonEmpty"),
+	root: at("checkpoint", "hex64"),
+	treeSize: at("checkpoint", "integer"),
+	segmentId: at("checkpoint", "nonEmpty"),
+	segmentFirstSequence: at("checkpoint", "integer"),
+	// §4a: the lineage edge, or the fixed genesis string for the first segment.
+	previousSegmentRoot: at("checkpoint", "hex64OrGenesis"),
+	previousSegmentId: at("checkpoint", "nonEmpty"),
+	keyId: at("checkpoint", "nonEmpty"),
+	publishedAt: at("checkpoint", "rfc3339UtcMs"),
+	sig: at("checkpoint", "canonicalBase64"),
+};
+
+const PROOF_FIELDS: FieldTable = {
+	// Equality 8 selects §4a's equality set from this literal and cross-checks
+	// it against the registered chain — step 2's, by name.
+	profile: at("event", "literal"),
+	chain: at("schema", "nonEmpty"),
+	mintEventHash: at("event", "hex64"),
+	inclusion: subtree(INCLUSION_FIELDS),
+	checkpoint: subtree(CHECKPOINT_FIELDS),
+};
+
+const EVENT_FIELDS: FieldTable = {
+	id: at("schema", "nonEmpty"),
+	timestamp: at("schema", "rfc3339UtcMs"),
+	// The previous event's `hash`, which is `sha256(canonicalize(event − hash))`
+	// — the same digest domain, including the all-zero genesis sentinel.
+	previousHash: at("schema", "hex64"),
+	kind: at("event", "literal"),
+	actor: { kind: "opaqueValue", owner: "event" },
+	data: subtree(PROJECTION_FIELDS),
+	sequence: at("schema", "integer"),
+	hash: at("event", "hex64"),
+};
+
+const RECEIPT_FIELDS: FieldTable = {
+	spec: at("schema", "literal"),
+	receiptId: at("schema", "receiptId"),
+	scope: at("schema", "literal"),
+	mintedAt: at("schema", "rfc3339UtcMs"),
+	minter: subtree(MINTER_FIELDS),
+	// The §5 mirror. Equality 9 makes it canonically identical to the
+	// projection's `work`, and the same table validates both.
+	work: variants(WORK_FIELDS_BY_KIND),
+	event: subtree(EVENT_FIELDS),
+	proof: subtree(PROOF_FIELDS),
+	signature: subtree(SIGNATURE_FIELDS),
+};
+
+function keysOf(table: FieldTable): KeySet {
+	return new Set(Object.keys(table));
+}
+
+const CHECKPOINT_KEYS: KeySet = keysOf(CHECKPOINT_FIELDS);
 
 function join(path: string, key: string): string {
 	return path === "" ? key : `${path}.${key}`;
@@ -677,64 +919,212 @@ function unknownIn(value: JsonValue | undefined, allowed: KeySet, path: string):
 	return null;
 }
 
-function objectAt(parent: JsonValue | undefined, key: string): JsonObject | undefined {
-	if (!isJsonObject(parent)) return undefined;
-	const child = parent[key];
-	return isJsonObject(child) ? child : undefined;
+// ─────────────────────────────────────────────────────────────────────────────
+// The format predicates. Each is the spec's sentence, made decidable.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LOWERCASE_HEX_64 = /^[0-9a-f]{64}$/;
+const LOWERCASE_HEX_40 = /^[0-9a-f]{40}$/;
+const LOWERCASE_HEX_32 = /^[0-9a-f]{32}$/;
+const OPAQUE_ID = /^[A-Za-z0-9._-]{1,128}$/;
+const RFC3339_UTC_MS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+const BASE64URL_BODY = /^[A-Za-z0-9_-]+={0,2}$/;
+
+/**
+ * §2's RFC 3339 UTC "Z", millisecond precision — and a REAL instant.
+ *
+ * The regex alone accepts `2026-02-30T00:00:00.000Z`, a date that does not
+ * exist; `Date` accepts it too and silently rolls it to March 2nd. So the
+ * round-trip is the test: `toISOString()` emits exactly this grammar, and a
+ * string that survives it is both well-formed AND the instant it names. A
+ * rolled-over date fails because the round trip returns a different string.
+ *
+ * (Consequence, stated rather than discovered later: a leap second — RFC 3339's
+ * `23:59:60` — is refused. No JS minter can emit one through `toISOString`, and
+ * accepting a value this verifier cannot map to an instant would be the very
+ * thing §7 names.)
+ */
+function isRfc3339UtcMs(value: string): boolean {
+	if (!RFC3339_UTC_MS.test(value)) return false;
+	const parsed = new Date(value);
+	return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value;
 }
 
-function findUnknownWorkField(work: JsonValue | undefined, path: string): string | null {
-	if (!isJsonObject(work)) return null;
-	const kind = work.kind;
-	if (typeof kind !== "string") return null;
-	const allowed = WORK_KEYS_BY_KIND.get(kind);
-	if (allowed === undefined) return null;
-	const unknown = unknownIn(work, allowed, path);
-	if (unknown !== null) return unknown;
+/**
+ * `"<prefix>" + base64url(HMAC-SHA-256(…))` — the resolver's keyed forms
+ * (`r1_` for an undisclosed repo, `c1_` for a private content commitment).
+ *
+ * The MAC is 32 bytes, which is the whole check: the padded and unpadded
+ * spellings of base64url both decode to it, and `isCanonicalBase64` refuses a
+ * final sextet whose unused bits are non-zero — the alternative encoding that
+ * would otherwise let two strings name one commitment.
+ */
+function isKeyedMac(value: string, prefix: string): boolean {
+	if (!value.startsWith(prefix)) return false;
+	const body = value.slice(prefix.length);
+	if (!BASE64URL_BODY.test(body)) return false;
+	const standard = body.replaceAll("-", "+").replaceAll("_", "/");
+	const remainder = standard.length % 4;
+	const padded = remainder === 0 ? standard : standard + "=".repeat(4 - remainder);
+	if (!isCanonicalBase64(padded)) return false;
+	return Buffer.from(padded, "base64").length === 32;
+}
 
-	const membership = unknownIn(
-		work.repositoryMembership,
-		MEMBERSHIP_KEYS,
-		join(path, "repositoryMembership"),
-	);
-	if (membership !== null) return membership;
-
-	const origin = unknownIn(work.origin, ORIGIN_KEYS, join(path, "origin"));
-	if (origin !== null) return origin;
-
-	const binding = work.contentBinding;
-	if (isJsonObject(binding) && typeof binding.kind === "string") {
-		const bindingKeys = CONTENT_BINDING_KEYS_BY_KIND.get(binding.kind);
-		if (bindingKeys !== undefined) {
-			return unknownIn(binding, bindingKeys, join(path, "contentBinding"));
-		}
+/**
+ * One member against one declared format. `parent` is passed because exactly
+ * one format is context-dependent: §2's `oid` is the FULL object ID under the
+ * repository's own `oidAlg`, so its LENGTH is decided by a sibling member.
+ *
+ * `literal`, `enum` and `canonicalBytes` return `null` here by design — the
+ * step that knows the vocabulary reports those, and this pass has no verdict of
+ * its own to give them.
+ *
+ * The switch is TOTAL over `FormatName`, including formats that only a
+ * `semantics`-owned member declares today (`hex32`, `opaqueHandle`,
+ * `providerRepoUrl` — §2 assigns those three to step 7 by name, and step 7
+ * checks them with these same predicates). Writing them out is not dead code
+ * to be pruned: it is what makes moving a member between owners a one-word
+ * edit instead of a silent fall-through to `nonEmpty`, which is the failure
+ * mode this whole table exists to prevent.
+ */
+function formatViolation(
+	path: string,
+	value: JsonValue,
+	format: FormatName,
+	parent: JsonObject,
+): string | null {
+	const refuse = (): string => `${path} is not ${FORMAT_DESCRIPTIONS[format]}`;
+	switch (format) {
+		case "literal":
+		case "enum":
+		case "canonicalBytes":
+			return null;
+		case "integer":
+			// The frozen numeric reader has already refused `-0`, fractions and
+			// unsafe integers anywhere in the document, so the TYPE is what is left.
+			return typeof value === "number" ? null : refuse();
+		default:
+			break;
 	}
-	return null;
+	if (typeof value !== "string") return refuse();
+	switch (format) {
+		case "hex64":
+			return LOWERCASE_HEX_64.test(value) ? null : refuse();
+		case "hex64OrGenesis":
+			return value === GENESIS_SENTINEL || LOWERCASE_HEX_64.test(value) ? null : refuse();
+		case "hex32":
+			return LOWERCASE_HEX_32.test(value) ? null : refuse();
+		case "gitOid": {
+			// sha1 ⇒ 40, sha256 ⇒ 64. An `oidAlg` that is neither is step 7's enum
+			// failure, not this pass's — refusing it here would report the wrong
+			// condition under the wrong code.
+			const alg = parent.oidAlg;
+			if (alg === "sha1") return LOWERCASE_HEX_40.test(value) ? null : refuse();
+			if (alg === "sha256") return LOWERCASE_HEX_64.test(value) ? null : refuse();
+			return null;
+		}
+		case "rfc3339UtcMs":
+			return isRfc3339UtcMs(value) ? null : refuse();
+		case "receiptId":
+			return isCanonicalReceiptId(value) ? null : refuse();
+		case "opaqueHandle":
+			return OPAQUE_ID.test(value) ? null : refuse();
+		case "keyedRepoId":
+			// The plain arm is the provider's immutable ID, for which §2 pins no
+			// grammar; the KEYED arm is a construction, and a string that announces
+			// itself with `r1_` and is not one is a scope identifier that names
+			// nothing.
+			return !value.startsWith("r1_") || isKeyedMac(value, "r1_") ? null : refuse();
+		case "keyedContentCommitment":
+			return isKeyedMac(value, "c1_") ? null : refuse();
+		case "providerRepoUrl":
+			return isCanonicalProviderRepo(value) ? null : refuse();
+		case "canonicalBase64":
+			return isCanonicalBase64(value) ? null : refuse();
+		default:
+			return value.length > 0 ? null : refuse();
+	}
 }
 
-function findUnknownProjectionField(data: JsonValue | undefined, path: string): string | null {
-	if (!isJsonObject(data)) return null;
-	const unknown = unknownIn(data, PROJECTION_KEYS, path);
-	if (unknown !== null) return unknown;
+// ─────────────────────────────────────────────────────────────────────────────
+// The one traversal.
+// ─────────────────────────────────────────────────────────────────────────────
 
-	const work = findUnknownWorkField(data.work, join(path, "work"));
-	if (work !== null) return work;
+/**
+ * Called for every PRESENT member, with the rule the table declares for it —
+ * `undefined` when the table declares none, which is the unknown-field case.
+ * Returning a string stops the walk and becomes the refusal.
+ *
+ * Absent members are not visited, deliberately: presence RULES (`workloadId`
+ * iff `workflowAttested`, `transferSet` iff `transferCount ≤ 32`, the required
+ * members of §5) belong to the steps that own their codes, and a format pass
+ * that also decided presence would pre-empt every one of them.
+ */
+type FieldVisitor = (
+	parent: JsonObject,
+	path: string,
+	value: JsonValue,
+	rule: FieldRule | undefined,
+) => string | null;
 
-	const spend = unknownIn(data.spend, SPEND_KEYS, join(path, "spend"));
-	if (spend !== null) return spend;
+function walkFieldTable(
+	value: JsonValue | undefined,
+	table: FieldTable,
+	path: string,
+	visit: FieldVisitor,
+): string | null {
+	// Descending into a member whose value is not an object is SILENCE, not a
+	// pass — the step that consumes it reports the type it wanted.
+	if (!isJsonObject(value)) return null;
 
-	const pricing = unknownIn(data.pricing, PRICING_KEYS, join(path, "pricing"));
-	if (pricing !== null) return pricing;
+	// Unrecognized members of THIS level first, in document order, before
+	// anything descends. A document's key order is whatever its writer chose
+	// (canonical bytes sort them), so the walk cannot take its order from the
+	// document and still name the same member twice running.
+	for (const key of Object.keys(value)) {
+		if (table[key] !== undefined) continue;
+		const reported = visit(value, join(path, key), value[key] as JsonValue, undefined);
+		if (reported !== null) return reported;
+	}
 
-	const transferSet = data.transferSet;
-	if (Array.isArray(transferSet)) {
-		for (let i = 0; i < transferSet.length; i += 1) {
-			const pair = unknownIn(
-				transferSet[i],
-				TRANSFER_PAIR_KEYS,
-				`${join(path, "transferSet")}.${i}`,
-			);
-			if (pair !== null) return pair;
+	// Then the declared members, in TABLE order — the file's own reading order,
+	// so a refusal names the same member no matter how the bytes were written.
+	for (const key of Object.keys(table)) {
+		if (!Object.hasOwn(value, key)) continue;
+		const child = value[key] as JsonValue;
+		const childPath = join(path, key);
+		const rule = table[key] as FieldRule;
+		const reported = visit(value, childPath, child, rule);
+		if (reported !== null) return reported;
+		switch (rule.kind) {
+			case "object": {
+				const nested = walkFieldTable(child, rule.table, childPath, visit);
+				if (nested !== null) return nested;
+				break;
+			}
+			case "objectArray": {
+				if (!Array.isArray(child)) break;
+				for (let index = 0; index < child.length; index += 1) {
+					const nested = walkFieldTable(
+						child[index] as JsonValue,
+						rule.table,
+						`${childPath}.${index}`,
+						visit,
+					);
+					if (nested !== null) return nested;
+				}
+				break;
+			}
+			case "union": {
+				if (!isJsonObject(child) || typeof child.kind !== "string") break;
+				const nestedTable = rule.tables.get(child.kind);
+				if (nestedTable === undefined) break;
+				const nested = walkFieldTable(child, nestedTable, childPath, visit);
+				if (nested !== null) return nested;
+				break;
+			}
+			default:
+				break;
 		}
 	}
 	return null;
@@ -742,43 +1132,96 @@ function findUnknownProjectionField(data: JsonValue | undefined, path: string): 
 
 /** Path of the first unknown field in the SIGNED receipt, or `null`. */
 export function findUnknownReceiptField(receipt: JsonObject): string | null {
-	const top = unknownIn(receipt, RECEIPT_KEYS, "");
-	if (top !== null) return top;
+	return walkFieldTable(receipt, RECEIPT_FIELDS, "", (_parent, path, _value, rule) =>
+		rule === undefined ? path : null,
+	);
+}
 
-	const minter = unknownIn(receipt.minter, MINTER_KEYS, "minter");
-	if (minter !== null) return minter;
-
-	const signature = unknownIn(receipt.signature, SIGNATURE_KEYS, "signature");
-	if (signature !== null) return signature;
-
-	const work = findUnknownWorkField(receipt.work, "work");
-	if (work !== null) return work;
-
-	// `event.actor` is NOT walked. §4a fixes the actor as a closed union and
-	// equality 2 compares it as canonical BYTES, so an extra actor member is an
-	// EVENT_MISMATCH; reporting it as SCHEMA_INVALID here would name the wrong
-	// step for a condition a normative equality already owns (CLI spec §5).
-	const event = unknownIn(receipt.event, EVENT_KEYS, "event");
-	if (event !== null) return event;
-	const projection = findUnknownProjectionField(objectAt(receipt, "event")?.data, "event.data");
-	if (projection !== null) return projection;
-
-	const proof = unknownIn(receipt.proof, PROOF_KEYS, "proof");
-	if (proof !== null) return proof;
-
-	const proofObject = objectAt(receipt, "proof");
-	const inclusion = unknownIn(proofObject?.inclusion, INCLUSION_KEYS, "proof.inclusion");
-	if (inclusion !== null) return inclusion;
-
-	const siblings = objectAt(proofObject, "inclusion")?.siblings;
-	if (Array.isArray(siblings)) {
-		for (let i = 0; i < siblings.length; i += 1) {
-			const sibling = unknownIn(siblings[i], SIBLING_KEYS, `proof.inclusion.siblings.${i}`);
-			if (sibling !== null) return sibling;
+/** A visitor applying every format the given step OWNS, and no other. */
+function formatVisitorFor(owner: FormatOwner): FieldVisitor {
+	return (parent, path, value, rule) => {
+		if (rule === undefined) return null;
+		if (rule.kind === "scalar") {
+			return rule.owner === owner ? formatViolation(path, value, rule.format, parent) : null;
 		}
-	}
+		if (rule.kind !== "stringArray" || rule.owner !== owner || !Array.isArray(value)) return null;
+		for (let index = 0; index < value.length; index += 1) {
+			const entry = formatViolation(
+				`${path}.${index}`,
+				value[index] as JsonValue,
+				rule.format,
+				parent,
+			);
+			if (entry !== null) return entry;
+		}
+		return null;
+	};
+}
 
-	return unknownIn(proofObject?.checkpoint, CHECKPOINT_KEYS, "proof.checkpoint");
+const SCHEMA_FORMAT_VISITOR = formatVisitorFor("schema");
+const CHECKPOINT_FORMAT_VISITOR = formatVisitorFor("checkpoint");
+
+/**
+ * The first member of the SIGNED receipt whose value is not the format §2/§5
+ * declares for it — step 1's half of the table, the rest belonging to the steps
+ * named in `owner`.
+ */
+export function findFormatViolation(receipt: JsonObject): string | null {
+	return walkFieldTable(receipt, RECEIPT_FIELDS, "", SCHEMA_FORMAT_VISITOR);
+}
+
+export interface ReceiptFieldFormat {
+	/**
+	 * `event.data.startedAt`, `proof.inclusion.siblings[].hash`,
+	 * `work[commit].oid`, `event.data.work[pr].contentBinding[publicSha256].sha256`
+	 * — `[]` is every element of an array, `[name]` selects a union variant.
+	 */
+	readonly path: string;
+	readonly format: FormatName;
+	readonly owner: FormatOwner;
+}
+
+/**
+ * The table, FLATTENED — the enumeration that makes this a closed class rather
+ * than a sampled one.
+ *
+ * It exists because the failure mode here is silent: a member that no rule
+ * covers looks exactly like a member whose rule passes, and the only way to
+ * tell them apart is to list every member and say, one at a time, which rule
+ * applies. The corpus drives its coverage test off this list, so a member added
+ * to the schema without a format cannot be added at all (the type demands one),
+ * and a member whose format the walk never reaches fails that test rather than
+ * shipping as an unchecked field nobody remembers.
+ */
+export function receiptFieldFormats(): readonly ReceiptFieldFormat[] {
+	const out: ReceiptFieldFormat[] = [];
+	const flatten = (table: FieldTable, path: string): void => {
+		for (const [key, rule] of Object.entries(table)) {
+			const here = join(path, key);
+			switch (rule.kind) {
+				case "scalar":
+					out.push({ path: here, format: rule.format, owner: rule.owner });
+					break;
+				case "stringArray":
+					out.push({ path: `${here}[]`, format: rule.format, owner: rule.owner });
+					break;
+				case "opaqueValue":
+					out.push({ path: here, format: "canonicalBytes", owner: rule.owner });
+					break;
+				case "object":
+					flatten(rule.table, here);
+					break;
+				case "objectArray":
+					flatten(rule.table, `${here}[]`);
+					break;
+				default:
+					for (const [variant, table_] of rule.tables) flatten(table_, `${here}[${variant}]`);
+					break;
+			}
+		}
+	};
+	flatten(RECEIPT_FIELDS, "");
+	return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1229,6 +1672,34 @@ function validateLineages(keys: ReadonlyMap<string, TrustKey>): string | null {
 			cursor = keys.get(cursor)?.predecessorKeyId;
 		}
 	}
+
+	// §8's retirement boundary, from the side the loader could not see.
+	//
+	// The loader already refuses an `activationSequence` on an `active` key
+	// ("an active key has no upper bound … it has no successor yet") and refuses
+	// a `retired` key without one. Both read ONE entry. This is the same rule
+	// read across the LINK: a key that a successor names as its predecessor DOES
+	// have a successor, so `active` is a contradiction — and a contradiction that
+	// pays. `keyStatePermits` gives an `active` key no upper bound at all, so a
+	// rotated-away key whose entry was never moved off `active` keeps signing
+	// new material forever, in a snapshot that looks like a clean rotation and
+	// puts both keys in the pinned lineage. That is precisely the attack
+	// rotation exists to bound, arriving through the one door the per-entry
+	// rules left open.
+	//
+	// `retired` is the ordinary end state (its `activationSequence` is then
+	// required, so the boundary is evaluable) and `revoked` is the compromise
+	// path; both are legal predecessors. Only `active` is not.
+	//
+	// Checked AFTER the walks above so a snapshot that is BOTH cyclic and
+	// active-predecessor is still reported as cyclic: the cycle is the deeper
+	// defect and the corpus vector for it must keep isolating its own clause.
+	for (const [predecessorKeyId, successorKeyId] of successorOf) {
+		const predecessor = keys.get(predecessorKeyId) as TrustKey;
+		if (predecessor.state === "active") {
+			return `key ${predecessorKeyId} is active but ${successorKeyId} names it as predecessor — a rotated-away key has no activation boundary while it stays active`;
+		}
+	}
 	return null;
 }
 
@@ -1562,10 +2033,6 @@ function arrayAt(object: JsonObject, key: string): JsonValue[] | null {
 	return Array.isArray(value) ? value : null;
 }
 
-const LOWERCASE_HEX_64 = /^[0-9a-f]{64}$/;
-const LOWERCASE_HEX_32 = /^[0-9a-f]{32}$/;
-const OPAQUE_ID = /^[A-Za-z0-9._-]{1,128}$/;
-
 /** Canonical base64 FIRST, then the reused Ed25519 helper (CLI spec §4). */
 function verifyEd25519(preimage: string, key: KeyObject, sigBase64: string): boolean {
 	if (!isCanonicalBase64(sigBase64)) return false;
@@ -1671,7 +2138,13 @@ function checkpointStatementShape(checkpoint: JsonObject): string | null {
 	}
 	const extra = unknownIn(checkpoint, CHECKPOINT_KEYS, "checkpoint");
 	if (extra !== null) return `${extra} is not a member of §4a's v2 signed payload`;
-	return null;
+	// …and every member in the FORMAT §4a declares for it. The receipt's own
+	// checkpoint reaches this through step 6; a SERVED history member reaches it
+	// through step 9 and through nothing else — it never passes the step-1
+	// reader — so this is the only place the rule can hold for both. Without it
+	// a served history walks clean on roots that are not digests and a
+	// `publishedAt` that is not a time, each duly signed by the checkpoint key.
+	return walkFieldTable(checkpoint, CHECKPOINT_FIELDS, "checkpoint", CHECKPOINT_FORMAT_VISITOR);
 }
 
 export function verifyCheckpointStatement(
@@ -1756,12 +2229,24 @@ const DELEGATION_POSTURES = new Set([
 ]);
 const WORK_KINDS = new Set(["commit", "pr", "issue", "session"]);
 
-/** Sorted-unique, ASCII-lexicographic — one helper, three fields (§2). */
+/**
+ * Sorted-unique, ASCII-lexicographic — one helper, three fields (§2).
+ *
+ * The entries themselves get the only check §2 leaves an offline verifier:
+ * "everyone else checks only that entries are WELL-FORMED and that `custom`
+ * appears at most once". Catalog membership is not decidable from the receipt
+ * alone, uniqueness is the sort's job — and an EMPTY entry is the one
+ * well-formedness question that is decidable here. `""` sorts first and passes
+ * every comparison, so a receipt can name a blank model and still print a
+ * `models` line, which is a document that identifies nothing claiming to
+ * identify something.
+ */
 function sortedUniqueStrings(value: JsonValue | undefined, field: string): string | null {
 	if (!Array.isArray(value)) return `${field} is missing or not an array`;
 	let previous: string | null = null;
 	for (const entry of value) {
 		if (typeof entry !== "string") return `${field} carries a non-string entry`;
+		if (entry.length === 0) return `${field} carries an empty entry`;
 		if (previous !== null && !(previous < entry)) {
 			return `${field} is not sorted-unique ASCII-lexicographic at ${JSON.stringify(entry)}`;
 		}
@@ -2049,11 +2534,26 @@ class BaseRun {
 	private receiptId: string | null = null;
 	private amountUsd: string | null = null;
 	private posture: PostureLabels | null = null;
-	private arrival: CheckResultValue = "notApplicable";
+	/**
+	 * §7's four values describe the INPUT, so the starting value is a claim
+	 * about the run and has to be true before step 3 gets there.
+	 *
+	 * No arrival context ⇒ `notApplicable`: the input "does not exist in this
+	 * context and never could", which is §7's own canonical case. Context
+	 * SUPPLIED but step 3 never reached (an earlier step failed) ⇒ `unavailable`:
+	 * the input plainly exists — the operator handed it over — and the check did
+	 * not run. Reporting `notApplicable` there tells the reader their
+	 * `--expect-id` could not have applied to this document, which is false, and
+	 * it is the same misstatement §7 rules out for a check the verifier declined
+	 * to perform.
+	 */
+	private arrival: CheckResultValue;
 	private bound: BoundReceipt | null = null;
 	private chain: TrustChain | null = null;
 
-	constructor(private readonly input: ReceiptVerifyInput) {}
+	constructor(private readonly input: ReceiptVerifyInput) {
+		this.arrival = input.arrivalId === undefined ? "notApplicable" : "unavailable";
+	}
 
 	run(): BaseVerdictReport {
 		for (const step of BASE_STEPS) {
@@ -2195,6 +2695,16 @@ class BaseRun {
 		if (stringAt(proof, "chain") === null) return schema("proof.chain is missing");
 		if (stringAt(proof, "mintEventHash") === null) return schema("proof.mintEventHash is missing");
 		if (inclusion.version !== 1) return schema("proof.inclusion.version is not 1");
+
+		// §5 SHAPE, the half that was missing: every member present is the FORMAT
+		// §2/§5 declares for it, from the same table that decided which members may
+		// be present at all. It runs last inside step 1 so the named per-member
+		// refusals above keep their own wording, and it runs HERE rather than in
+		// `readReceiptDocument` because the reader's scope is deliberately narrow —
+		// bytes, duplicate keys, frozen numerics, key sets — and §12 decoding and
+		// the §5 literals already live at this level for the same reason.
+		const format = findFormatViolation(document);
+		if (format !== null) return schema(format);
 
 		this.bound = {
 			document,

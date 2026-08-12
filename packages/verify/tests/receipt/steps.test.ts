@@ -20,6 +20,7 @@
  *     means operationally.
  */
 
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
 	amountUsdFromAssessed,
@@ -412,6 +413,28 @@ function withWork(work: Record<string, unknown>): Run {
 
 const MEMBERSHIP = { status: "providerVerified", proofId: "pv_9f3a2c81d0" };
 const REPO_ID = "github.com:R_kgDOK1x2Yw";
+/**
+ * Well-formed placeholders, and the reason they have to be well formed: step 1
+ * now validates every member's DECLARED FORMAT (§2/§5), so a stand-in like
+ * `oid: "x"` is refused as a schema failure and a vector built to isolate a
+ * step-7 union rule would never reach step 7 at all. A mutant that fails for a
+ * reason other than the one it is named after proves nothing about the rule it
+ * was written for.
+ */
+const OID_SHA1 = "37df16d3a4c1b8e05f92d7a6c31e4b8079fa2d51";
+const OBJECT_SHA256 = "b".repeat(64);
+const CONTENT_SHA256 = "a".repeat(64);
+/** `"c1_" + base64url(HMAC-SHA-256(…))` — a 32-byte MAC, per the resolver. */
+const CONTENT_COMMITMENT = `c1_${createHash("sha256").update("usertrust/test-commitment").digest("base64url")}`;
+const COMMIT_WORK = {
+	kind: "commit",
+	repoId: REPO_ID,
+	oid: OID_SHA1,
+	oidAlg: "sha1",
+	objectSha256: OBJECT_SHA256,
+	repositoryMembership: MEMBERSHIP,
+};
+const PUBLIC_BINDING = { kind: "publicSha256", sha256: CONTENT_SHA256 };
 const ARTIFACT = {
 	repoId: REPO_ID,
 	number: 42,
@@ -425,7 +448,7 @@ describe("§2 — the `work` union's other variants", () => {
 		const actual = withWork({
 			...ARTIFACT,
 			kind: "pr",
-			contentBinding: { kind: "publicSha256", sha256: "a".repeat(64) },
+			contentBinding: { kind: "publicSha256", sha256: CONTENT_SHA256 },
 		});
 		expect(actual.verdict).toBe("VERIFIED_CHECKPOINT");
 	});
@@ -434,7 +457,7 @@ describe("§2 — the `work` union's other variants", () => {
 		const actual = withWork({
 			...ARTIFACT,
 			kind: "issue",
-			contentBinding: { kind: "privateHmacSha256V1", commitment: "c1_9f3a2c81d0" },
+			contentBinding: { kind: "privateHmacSha256V1", commitment: CONTENT_COMMITMENT },
 		});
 		expect(actual.verdict).toBe("VERIFIED_CHECKPOINT");
 	});
@@ -451,45 +474,55 @@ describe("§2 — the `work` union's other variants", () => {
 	});
 
 	it("fails every malformed variant at step 7, and never by throwing", () => {
+		// Every member here is well FORMED and wrong SEMANTICALLY: the variant does
+		// not match, a required member is absent, an enum is not a member of its
+		// set. Step 1's format pass has nothing to say about any of them, which is
+		// exactly what makes them step 7's.
 		const malformed: readonly Record<string, unknown>[] = [
 			{ kind: "workflow", repoId: REPO_ID },
 			{
 				kind: "commit",
-				oid: "x",
+				oid: OID_SHA1,
 				oidAlg: "sha1",
-				objectSha256: "y",
+				objectSha256: OBJECT_SHA256,
 				repositoryMembership: MEMBERSHIP,
 			},
 			{
 				kind: "commit",
 				repoId: REPO_ID,
 				oidAlg: "sha1",
-				objectSha256: "y",
+				objectSha256: OBJECT_SHA256,
 				repositoryMembership: MEMBERSHIP,
 			},
 			{
 				kind: "commit",
 				repoId: REPO_ID,
-				oid: "x",
+				oid: OID_SHA1,
 				oidAlg: "sha3",
-				objectSha256: "y",
+				objectSha256: OBJECT_SHA256,
 				repositoryMembership: MEMBERSHIP,
 			},
 			{
 				kind: "commit",
 				repoId: REPO_ID,
-				oid: "x",
+				oid: OID_SHA1,
 				oidAlg: "sha1",
 				repositoryMembership: MEMBERSHIP,
 			},
-			{ kind: "commit", repoId: REPO_ID, oid: "x", oidAlg: "sha1", objectSha256: "y" },
+			{
+				kind: "commit",
+				repoId: REPO_ID,
+				oid: OID_SHA1,
+				oidAlg: "sha1",
+				objectSha256: OBJECT_SHA256,
+			},
 			// v1 FAILS CLOSED on membership: "unverified" is not a ut1 value.
 			{
 				kind: "commit",
 				repoId: REPO_ID,
-				oid: "x",
+				oid: OID_SHA1,
 				oidAlg: "sha1",
-				objectSha256: "y",
+				objectSha256: OBJECT_SHA256,
 				repositoryMembership: { status: "unverified", proofId: "p" },
 			},
 			{ ...ARTIFACT, kind: "pr" },
@@ -499,8 +532,8 @@ describe("§2 — the `work` union's other variants", () => {
 			{
 				...ARTIFACT,
 				kind: "pr",
-				number: "42",
-				contentBinding: { kind: "publicSha256", sha256: "a" },
+				number: undefined,
+				contentBinding: { kind: "publicSha256", sha256: CONTENT_SHA256 },
 			},
 			{ kind: "session", repoId: REPO_ID, origin: { kind: "billedUnfinalized" } },
 			{
@@ -518,13 +551,68 @@ describe("§2 — the `work` union's other variants", () => {
 			});
 		}
 	});
+
+	it("fails every MIS-FORMATTED variant member at step 1 — the format is §5 shape", () => {
+		// The other half of the same union, and the half that used to verify. Each
+		// member below is PRESENT and is not the thing §2 declares it to be, which
+		// is a §5 shape failure rather than a semantic one: §2's step-7 list is
+		// exhaustive and names none of these, while CLI spec §5 binds step 1 to
+		// "§3's strict reader + §12 canonical ID decode + §5 shape".
+		const misformatted: readonly Record<string, unknown>[] = [
+			// A 32-bit prefix where §2 requires the FULL object ID — the exact
+			// transplant §7's consumer rule says a prefix never rules out.
+			{ ...COMMIT_WORK, oid: OID_SHA1.slice(0, 8) },
+			// sha256-shaped OID under a sha1 repository, and the reverse.
+			{ ...COMMIT_WORK, oid: OBJECT_SHA256 },
+			{ ...COMMIT_WORK, oid: OID_SHA1, oidAlg: "sha256" },
+			{ ...COMMIT_WORK, oid: OID_SHA1.toUpperCase() },
+			{ ...COMMIT_WORK, objectSha256: "not-a-digest" },
+			{ ...COMMIT_WORK, objectSha256: OBJECT_SHA256.toUpperCase() },
+			{ ...ARTIFACT, kind: "pr", number: "42", contentBinding: PUBLIC_BINDING },
+			{ ...ARTIFACT, kind: "pr", providerArtifactId: "", contentBinding: PUBLIC_BINDING },
+			{ ...ARTIFACT, kind: "pr", observedRevision: "", contentBinding: PUBLIC_BINDING },
+			{
+				...ARTIFACT,
+				kind: "pr",
+				contentBinding: { kind: "publicSha256", sha256: `${CONTENT_SHA256}zz` },
+			},
+			{
+				...ARTIFACT,
+				kind: "issue",
+				contentBinding: { kind: "privateHmacSha256V1", commitment: "c1_9f3a2c81d0" },
+			},
+			{
+				...ARTIFACT,
+				kind: "issue",
+				contentBinding: { kind: "privateHmacSha256V1", commitment: "not-a-commitment" },
+			},
+			// The keyed `r1_` scope form is a CONSTRUCTION, not a prefix: a string
+			// that announces itself as one and is not one names nothing.
+			{ ...COMMIT_WORK, repoId: "r1_not-a-mac" },
+			{
+				kind: "session",
+				repoId: REPO_ID,
+				origin: { kind: "billedUnfinalized", sourceReservationReceiptId: "not-an-id" },
+			},
+		];
+		for (const work of misformatted) {
+			const actual = withWork(work);
+			expect(actual.failure, JSON.stringify(work).slice(0, 90)).toMatchObject({
+				step: "schema",
+				code: "SCHEMA_INVALID",
+			});
+		}
+	});
 });
 
 describe("step 7 — a projection missing or mistyping what §2 enumerates", () => {
 	const broken: readonly [string, (p: Projection) => Projection][] = [
-		["sessionId absent", (p) => ({ ...p, sessionId: 7 })],
+		// ABSENT is step 7's; a member that is PRESENT and mistyped is step 1's
+		// §5 shape (see the format tests). The two are different conditions and
+		// §7's steps own their codes one apiece.
+		["sessionId absent", (p) => ({ ...p, sessionId: undefined as unknown as string })],
 		["startedAt absent", (p) => ({ ...p, startedAt: undefined as unknown as string })],
-		["endedAt absent", (p) => ({ ...p, endedAt: 0 })],
+		["endedAt absent", (p) => ({ ...p, endedAt: undefined as unknown as string })],
 		["generation below 1", (p) => ({ ...p, generation: 0 })],
 		["sessionAssociation unrecognized", (p) => ({ ...p, sessionAssociation: "assumed" })],
 		["workloadId not opaque", (p) => ({ ...p, workloadId: "wl 7c2f/4a91" })],
@@ -790,13 +878,13 @@ describe("the last few reads a hostile document can bend", () => {
 				...ARTIFACT,
 				kind: "pr",
 				providerArtifactId: undefined,
-				contentBinding: { kind: "publicSha256", sha256: "a" },
+				contentBinding: PUBLIC_BINDING,
 			},
 			{
 				...ARTIFACT,
 				kind: "pr",
 				observedRevision: undefined,
-				contentBinding: { kind: "publicSha256", sha256: "a" },
+				contentBinding: PUBLIC_BINDING,
 			},
 			{ kind: "session", repoId: REPO_ID, origin: "billedUnfinalized" },
 		]) {
@@ -824,11 +912,14 @@ describe("the last few reads a hostile document can bend", () => {
 				}),
 			}).failure,
 		).toMatchObject({ step: "schema", code: "SCHEMA_INVALID" });
+		// A blank `sessionId` is a §5 SHAPE failure now (step 1's format table),
+		// not a semantic one: §2's exhaustive step-7 list does not mention it, and
+		// the member is present — it just is not a session identifier.
 		expect(
 			verifyMinted({
 				projection: (p: Projection) => ({ ...p, sessionId: "" }),
 			}).failure,
-		).toMatchObject({ step: "semantics", code: "SEMANTIC_INVALID" });
+		).toMatchObject({ step: "schema", code: "SCHEMA_INVALID" });
 		expect(
 			verifyMinted({
 				projection: (p: Projection) => {
