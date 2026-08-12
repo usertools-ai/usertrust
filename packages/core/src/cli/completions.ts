@@ -29,10 +29,14 @@ _usertrust() {
     cur="\${COMP_WORDS[COMP_CWORD]}"
     prev="\${COMP_WORDS[COMP_CWORD-1]}"
 
-    commands="init inspect health verify snapshot tb completions"
+    commands="init inspect health policy verify snapshot tb completions"
     global_flags="--json --help"
 
     case "\${prev}" in
+        policy)
+            COMPREPLY=( $(compgen -W "validate" -- "\${cur}") )
+            return 0
+            ;;
         snapshot)
             COMPREPLY=( $(compgen -W "create restore list" -- "\${cur}") )
             return 0
@@ -76,6 +80,7 @@ _usertrust() {
         'init:Initialize trust vault'
         'inspect:Show trust bank statement'
         'health:Show entropy diagnostics'
+        'policy:Validate the policy file'
         'verify:Verify audit chain integrity'
         'snapshot:Create/restore vault snapshots'
         'tb:Manage TigerBeetle process'
@@ -99,6 +104,11 @@ _usertrust() {
             ;;
         args)
             case "\${words[1]}" in
+                policy)
+                    local -a policy_cmds
+                    policy_cmds=('validate:Check the policy file loads and would enforce')
+                    _describe 'policy subcommand' policy_cmds
+                    ;;
                 snapshot)
                     local -a snapshot_cmds
                     snapshot_cmds=('create:Create a snapshot' 'restore:Restore a snapshot' 'list:List snapshots')
@@ -134,6 +144,7 @@ complete -c usertrust -f
 complete -c usertrust -n '__fish_use_subcommand' -a init -d 'Initialize trust vault'
 complete -c usertrust -n '__fish_use_subcommand' -a inspect -d 'Show trust bank statement'
 complete -c usertrust -n '__fish_use_subcommand' -a health -d 'Show entropy diagnostics'
+complete -c usertrust -n '__fish_use_subcommand' -a policy -d 'Validate the policy file'
 complete -c usertrust -n '__fish_use_subcommand' -a verify -d 'Verify audit chain integrity'
 complete -c usertrust -n '__fish_use_subcommand' -a snapshot -d 'Create/restore vault snapshots'
 complete -c usertrust -n '__fish_use_subcommand' -a tb -d 'Manage TigerBeetle process'
@@ -142,6 +153,9 @@ complete -c usertrust -n '__fish_use_subcommand' -a completions -d 'Output shell
 # Global flags
 complete -c usertrust -l json -d 'Output machine-readable JSON'
 complete -c usertrust -l help -d 'Show help'
+
+# policy subcommands
+complete -c usertrust -n '__fish_seen_subcommand_from policy' -a validate -d 'Check the policy file loads and would enforce'
 
 # snapshot subcommands
 complete -c usertrust -n '__fish_seen_subcommand_from snapshot' -a create -d 'Create a snapshot'

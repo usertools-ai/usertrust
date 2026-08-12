@@ -233,7 +233,12 @@ describe("false OK — a documented count that stops matching reality", () => {
 		const actual =
 			count("CONTROL_CHARS = /\\[") +
 			count("function forDisplay") +
-			count("function scrubForError");
+			count("function scrubForError") +
+			// `scrubForTerminal` is the same strong variant under a third name, in
+			// cli/policy.ts and cli/health.ts. A counter that only knows the names it
+			// was written with reports a smaller inventory than exists — which is the
+			// false-OK this test is named for, one level up.
+			count("function scrubForTerminal");
 
 		expect(actual).toBe(declaredCount);
 	});
