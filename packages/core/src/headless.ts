@@ -97,7 +97,13 @@ import {
 import { publishableUsage, sanitizeUsage } from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
-import { derivePolicyHint, evaluatePolicy, type GateRule, loadPolicies } from "./policy/gate.js";
+import {
+	derivePolicyHint,
+	evaluatePolicy,
+	type GateRule,
+	loadPolicies,
+	sanitizePolicyContext,
+} from "./policy/gate.js";
 import { detectPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
@@ -816,7 +822,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	const audit: AuditWriter = (isTestEnv ? opts?._audit : undefined) ?? createAuditWriter(vaultPath);
 
 	const policiesPath = join(vaultPath, VAULT_DIR, config.policies);
-	const loadedRules = existsSync(policiesPath) ? loadPolicies(policiesPath) : [];
+	// No `existsSync` preflight: it answers false for a file inside a directory
+	// it cannot traverse, which would report an unreadable policy as an absent
+	// one — silently replacing custom rules with the built-in defaults.
+	// `loadPolicies` distinguishes ENOENT (legitimately absent) from every other
+	// read failure (refused), so it must be called unconditionally.
+	const loadedRules = loadPolicies(policiesPath);
 	// P1-CUSTOM-POLICY-REPLACES (RECON #2): platform DEFAULT_RULES are ALWAYS
 	// enforced (parity with trust()). mergePolicies is a safe concat — a custom
 	// policy file can only ADD deny/warn rules, never remove the
@@ -1092,7 +1103,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
 							: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
 					const policyResult = evaluatePolicy(policyRules, {
-						...(params.params ?? {}),
+						// Stripped before the spread. This site has the widest blast radius:
+						// packages/server wraps it, so `params.params` arrives in an HTTP
+						// request body from a remote tenant.
+						...sanitizePolicyContext(params.params),
 						model,
 						tier: config.tier,
 						estimated_cost: estCost,

@@ -39,6 +39,7 @@ A policy rule specifies conditions, scope, enforcement, and optional time window
 rules:
   - name: block-expensive-models
     description: Deny requests to opus-class models in production
+    effect: deny
     enforcement: hard
     priority: 10
     scopePatterns: ["production/*"]
