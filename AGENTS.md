@@ -986,7 +986,7 @@ Drop every line whose raw text contains `from "`, then require exact string equa
   lines **are** compared, so both packages must import the same names in the same order and may
   differ only in the module path.
 
-Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 4200 (a
+Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 4300 (a
 vendoring tripwire — raising it should prompt "what was added?"), and the differential suites assert
 that core and verify produce identical verdicts *and identical error strings* on clean,
 tail-truncated, segment-deleted, rotated, `toJSON`-bearing, and hand-tampered vaults.

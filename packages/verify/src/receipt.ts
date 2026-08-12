@@ -270,6 +270,12 @@ function resolveStatus(event: TransactionEvent): string {
 	// took effect, so a call the breaker stopped resolves here rather than sitting
 	// at PENDING forever. Its own `error` carries the reason, so the anomaly's
 	// message is not lost by preferring it over the detection.
+	// AMBIGUOUS, not SETTLED and not FAILED. The provider call succeeded and the
+	// POST did not, so the money may or may not have moved — and the whole point
+	// of this receipt is that it does not guess. Rendering it as either of the
+	// confident answers would be the verifier picking a side it has no evidence
+	// for.
+	if (event.kind === "settlement_ambiguous") return "AMBIGUOUS";
 	if (event.kind === "stream_partial_delivery") return "FAILED";
 	if (event.kind === "llm_call_failed") return "FAILED";
 	if (event.data.settled === true) return "SETTLED";
@@ -295,7 +301,10 @@ export function renderReceipt(data: ReceiptData): string {
 	const model = event.data.model ?? "unknown";
 	const provider = detectProvider(model);
 	const cost = event.data.cost;
-	const isFailed = event.kind === "llm_call_failed" || event.kind === "stream_partial_delivery";
+	const isFailed =
+		event.kind === "llm_call_failed" ||
+		event.kind === "stream_partial_delivery" ||
+		event.kind === "settlement_ambiguous";
 	// A denial spent nothing, so it renders no spend lines — but its `error` is
 	// the whole point of the receipt and must still be shown.
 	const isDenied = DENIAL_KINDS.has(event.kind);

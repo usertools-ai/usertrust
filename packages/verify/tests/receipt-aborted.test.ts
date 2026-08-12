@@ -642,3 +642,65 @@ describe("verifyTransaction — an appended tail cannot rewrite a settled verdic
 		}
 	});
 });
+
+describe("verifyTransaction — settlement ambiguity is conclusive", () => {
+	function mk(dir: string, recs: Array<Record<string, unknown>>): void {
+		const auditDir = join(dir, "audit");
+		mkdirSync(auditDir, { recursive: true });
+		writeFileSync(
+			join(auditDir, "events.jsonl"),
+			`${recs
+				.map((r, i) =>
+					JSON.stringify({
+						actor: "local",
+						timestamp: `2026-08-12T00:00:0${i}.000Z`,
+						previousHash: "0".repeat(64),
+						sequence: i + 1,
+						hash: String.fromCharCode(110 + i).repeat(64),
+						...r,
+					}),
+				)
+				.join("\n")}\n`,
+			"utf-8",
+		);
+	}
+
+	it("a later settled:true cannot rewrite an ambiguous settlement", () => {
+		// The producer writes `settlement_ambiguous` BEFORE the `llm_call` it
+		// corrects, so a crash or a failed second append can leave it as the only
+		// durable record. This is the most valuable forgery of the three, because it
+		// converts "we do not know whether this spend landed" into "it did".
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-amb-"));
+		try {
+			mk(dir, [
+				{
+					kind: "settlement_ambiguous",
+					data: { transferId: "tx_m", cost: 120, error: "pending_transfer_expired" },
+				},
+				{ kind: "llm_call", data: { transferId: "tx_m", cost: 120, settled: true } },
+			]);
+			const out = verifyTransaction(dir, "tx_m").receipt;
+			expect(out).toContain("AMBIGUOUS");
+			expect(out).not.toContain("SETTLED");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("renders AMBIGUOUS rather than guessing settled or failed", () => {
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-amb2-"));
+		try {
+			mk(dir, [
+				{
+					kind: "settlement_ambiguous",
+					data: { transferId: "tx_n", cost: 7, error: "post timed out" },
+				},
+			]);
+			const out = verifyTransaction(dir, "tx_n").receipt;
+			expect(out).toContain("AMBIGUOUS");
+			expect(out).toContain("post timed out");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});

@@ -812,8 +812,19 @@ export function verifyTransaction(
 	// money and will never settle, which is exactly what "terminal" means here.
 	const isDenialTerminal = (e: TransactionEvent): boolean =>
 		e.kind === "policy_denied" || e.kind === "ledger_rejected";
+	// `settlement_ambiguous` is CONCLUSIVE and comes FIRST. The producer appends it
+	// BEFORE the `llm_call` it corrects (`headless.ts:1425` then `:1484`;
+	// `govern.ts:1798` then `:1887`), so a crash or a failed second append can
+	// leave it as the only durable record of the outcome. Excluding it let a later
+	// hash-valid `settled: true` rewrite an ambiguous settlement into a clean one —
+	// the same forgery as the failure and denial cases, one kind along, and the
+	// most valuable one to forge because it converts "we do not know whether this
+	// spend landed" into "it did".
 	const isTerminal = (e: TransactionEvent): boolean =>
-		e.data.settled !== undefined || isFailureTerminal(e) || isDenialTerminal(e);
+		e.data.settled !== undefined ||
+		isFailureTerminal(e) ||
+		isDenialTerminal(e) ||
+		e.kind === "settlement_ambiguous";
 
 	// FIRST TERMINAL IN CHAIN ORDER WINS. Not the best-TYPED terminal anywhere in
 	// the log — that was a forgery vector, and it was mine.
