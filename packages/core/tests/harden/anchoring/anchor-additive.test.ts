@@ -102,11 +102,15 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// point the reviewer asks what was added. Raised from 3200 for the
 		// Phase-2 anchoring work (rekor-verify.ts, ~490 lines of node:crypto-only
 		// receipt verification — no vendored source). Current size ~3.3k lines.
+		// Raised 4200 → 6500 for the `usertrust-verify receipt` ship
+		// (receipt-verify.ts, receipt-spec §7's offline verifier — node builtins
+		// only, no vendored source). Exceeding 6500 is a STOP-and-review, not a
+		// second raise (CLI spec §7).
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(4200);
+		expect(total).toBeLessThan(6500);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {
