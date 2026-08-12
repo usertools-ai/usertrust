@@ -46,12 +46,8 @@
 							"repo": "github.com/usertrust-ai/usertrust"
 						},
 						"sessionAssociation": "ownerAsserted",
-						"models": [
-							"custom"
-						],
-						"providers": [
-							"anthropic"
-						],
+						"models": ["custom"],
+						"providers": ["anthropic"],
 						"startedAt": "2026-08-10T14:00:00.000Z",
 						"endedAt": "2026-08-10T14:12:00.000Z",
 						"spend": {
@@ -64,9 +60,7 @@
 						},
 						"delegationPosture": "selfDebitsOnly",
 						"pricing": {
-							"tableVersions": [
-								"2026-07-01"
-							]
+							"tableVersions": ["2026-07-01"]
 						},
 						"transferSet": [
 							{

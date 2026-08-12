@@ -58,12 +58,8 @@
 							}
 						},
 						"sessionAssociation": "ownerAsserted",
-						"models": [
-							"claude-sonnet-4-6"
-						],
-						"providers": [
-							"anthropic"
-						],
+						"models": ["claude-sonnet-4-6"],
+						"providers": ["anthropic"],
 						"startedAt": "2026-08-10T14:00:00.000Z",
 						"endedAt": "2026-08-10T14:12:00.000Z",
 						"spend": {
@@ -76,9 +72,7 @@
 						},
 						"delegationPosture": "includesSomeDelegated",
 						"pricing": {
-							"tableVersions": [
-								"2026-07-01"
-							]
+							"tableVersions": ["2026-07-01"]
 						},
 						"transferSet": [
 							{

@@ -59,13 +59,8 @@
 						},
 						"sessionAssociation": "workflowAttested",
 						"workloadId": "cbbf8bea06b7107c2eee0625",
-						"models": [
-							"claude-sonnet-4-6",
-							"custom"
-						],
-						"providers": [
-							"anthropic"
-						],
+						"models": ["claude-sonnet-4-6", "custom"],
+						"providers": ["anthropic"],
 						"startedAt": "2026-08-10T14:00:00.000Z",
 						"endedAt": "2026-08-10T14:12:00.000Z",
 						"spend": {
@@ -78,10 +73,7 @@
 						},
 						"delegationPosture": "selfDebitsOnly",
 						"pricing": {
-							"tableVersions": [
-								"2026-07-01",
-								"2026-07-15"
-							]
+							"tableVersions": ["2026-07-01", "2026-07-15"]
 						},
 						"transferSetRoot": "75fc8d513ef5a28ab4d90a9b837ee8f01bc728f045974bfe9644715aefa2d105"
 					},
