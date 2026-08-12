@@ -39,7 +39,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { CreateTransferStatus } from "tigerbeetle-node";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
@@ -106,6 +106,7 @@ import {
 	InsufficientBalanceError,
 	LedgerUnavailableError,
 	PolicyDeniedError,
+	SpendLedgerUnreadableError,
 } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
 import type { EndpointInfo, TrustConfig, TrustReceipt } from "./shared/types.js";
@@ -429,24 +430,47 @@ interface SpendLedger {
 
 async function loadSpendLedger(vaultBase: string): Promise<number> {
 	const ledgerPath = join(vaultBase, VAULT_DIR, "spend-ledger.json");
+	let raw: string;
 	try {
-		const raw = await readFile(ledgerPath, "utf-8");
-		const parsed: unknown = JSON.parse(raw);
-		if (
-			parsed != null &&
-			typeof parsed === "object" &&
-			"budgetSpent" in parsed &&
-			typeof (parsed as SpendLedger).budgetSpent === "number"
-		) {
-			const value = (parsed as SpendLedger).budgetSpent;
-			if (Number.isFinite(value) && value >= 0) {
-				return value;
-			}
-		}
-	} catch {
-		// No ledger file or corrupt — start from zero
+		raw = await readFile(ledgerPath, "utf-8");
+	} catch (err) {
+		// ENOENT is the ONE honest zero: no ledger means nothing has been spent,
+		// which is exactly true on a first run. Every OTHER read failure (EACCES,
+		// EIO, EISDIR) means a ledger that exists and could not be read, and
+		// answering that with zero is not a conservative default — it re-grants the
+		// whole budget in-process AND re-seeds the TigerBeetle enforcing wallet with
+		// it, because the seed is `max(0, budget - budgetSpent)`. Absent and
+		// unreadable are different facts and must not share an answer.
+		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return 0;
+		throw new SpendLedgerUnreadableError(
+			`${ledgerPath}: ${err instanceof Error ? err.message : String(err)}`,
+		);
 	}
-	return 0;
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		throw new SpendLedgerUnreadableError(`${ledgerPath}: not valid JSON`);
+	}
+
+	if (
+		parsed == null ||
+		typeof parsed !== "object" ||
+		!("budgetSpent" in parsed) ||
+		typeof (parsed as SpendLedger).budgetSpent !== "number"
+	) {
+		throw new SpendLedgerUnreadableError(`${ledgerPath}: no numeric "budgetSpent" field`);
+	}
+
+	const value = (parsed as SpendLedger).budgetSpent;
+	// A negative or non-finite cumulative spend is not a smaller number than we
+	// expected — it is a file we cannot reason about, and rounding it to zero is
+	// the same re-grant as an unreadable one.
+	if (!Number.isFinite(value) || value < 0) {
+		throw new SpendLedgerUnreadableError(`${ledgerPath}: budgetSpent is ${value}`);
+	}
+	return value;
 }
 
 async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promise<void> {
@@ -475,12 +499,75 @@ async function persistSpendLedger(vaultBase: string, budgetSpent: number): Promi
 			budgetSpent,
 			updatedAt: new Date().toISOString(),
 		};
-		// Atomic write: write UNIQUE tmp then rename over the target.
-		await writeFile(tmpPath, JSON.stringify(data), "utf-8");
+		// Atomic write: write UNIQUE tmp, FSYNC it, then rename over the target.
+		// The rename was already atomic, so no ordinary crash or restart could tear
+		// the target — but without the fsync, a power loss can make the rename
+		// durable while the bytes it points at are not, leaving a zero-length or
+		// partially-zeroed ledger. That file then reads as unreadable rather than
+		// as a smaller number, which loadSpendLedger now refuses rather than
+		// silently treating as zero spend. Durability here is what keeps that
+		// refusal rare instead of routine.
+		const handle = await open(tmpPath, "w");
+		try {
+			await handle.writeFile(JSON.stringify(data), "utf-8");
+			// FSYNC FAILURE IS NOT WRITE FAILURE. `sync()` is unsupported on some
+			// filesystems (EINVAL/ENOTSUP) and can fail transiently on others, and
+			// letting it escape sent the whole write into the outer catch — which
+			// unlinks the staging file and returns as if the spend had persisted.
+			// On a platform without fsync that silently discarded EVERY ledger
+			// write, and a first write discarded that way leaves NO ledger at all,
+			// which the loader correctly reads as zero and re-grants the whole
+			// budget. A durable-but-unsynced ledger is strictly better than none:
+			// degrade, record it, and still rename.
+			try {
+				await handle.sync();
+			} catch (syncErr) {
+				process.stderr.write(
+					`[usertrust] spend ledger not fsynced (${syncErr instanceof Error ? syncErr.message : String(syncErr)}) — the record is written but a power loss may lose it\n`,
+				);
+			}
+		} finally {
+			await handle.close();
+		}
 		await rename(tmpPath, ledgerPath);
-	} catch {
-		// Best-effort — do not fail the LLM call over ledger persistence. Clean up
-		// our unique staging file if the rename never happened.
+		// Fsync the DIRECTORY so the rename itself survives a power loss. Best
+		// effort: some platforms and filesystems refuse an O_RDONLY directory
+		// fsync, and failing the write over that would be worse than the residual
+		// risk it protects against.
+		try {
+			const dirHandle = await open(dir, "r");
+			try {
+				await dirHandle.sync();
+			} finally {
+				await dirHandle.close();
+			}
+		} catch (dirErr) {
+			// DISTINGUISH unsupported from failed. A blanket catch here read EIO,
+			// ENOSPC and EACCES as "this platform has no directory fsync" and
+			// reported success — so a real durability failure left the rename
+			// non-durable in silence, and a crash could restore an older ledger, or
+			// none at all on a first write, which reseeds a LARGER budget. Same
+			// conflation as the read path this branch exists to fix: "cannot" and
+			// "did not" are different facts.
+			const code = (dirErr as NodeJS.ErrnoException)?.code;
+			const unsupported =
+				code === "EINVAL" || code === "ENOTSUP" || code === "EPERM" || code === "EBADF";
+			if (!unsupported) {
+				process.stderr.write(
+					`[usertrust] spend ledger directory not fsynced (${dirErr instanceof Error ? dirErr.message : String(dirErr)}) — the rename may not survive a power loss\n`,
+				);
+			}
+		}
+	} catch (err) {
+		// Still best-effort — a settled call must not fail over ledger persistence,
+		// because the money has already moved. But SILENT is the part that was
+		// wrong: cleaning up and returning made a lost cumulative-spend write
+		// indistinguishable from a successful one, and the loss is invisible until
+		// the next startup seeds a budget that is too large. The operator gets a
+		// line on stderr, matching how audit degradation is already surfaced.
+		process.stderr.write(
+			`[usertrust] spend ledger write FAILED (${err instanceof Error ? err.message : String(err)}) — cumulative spend ${budgetSpent} was not persisted; the next start may under-count prior spend\n`,
+		);
 		await unlink(tmpPath).catch(() => {});
 	}
 }
@@ -1013,6 +1100,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						budget_remaining_after: gateRemaining - estCost,
 						budgetFractionRemaining: tierFields.budgetFractionRemaining,
 						budgetRunwayHours: tierFields.budgetRunwayHours,
+						// P1-CLOCK-SHADOW: the third re-assertion site, same assertion and same
+						// reason as govern.ts — `params.params` must not be able to pick the
+						// time a `timeWindows` rule is evaluated at. Explicit `undefined` sends
+						// the gate back to the real clock, which it reads in LOCAL time by
+						// contract.
+						timestamp: undefined,
 						// Structurally un-forgeable: this comes from the caller's own async
 						// execution context, which no request body can reach. Asserted after
 						// the spread like every other trusted field, `undefined` included.

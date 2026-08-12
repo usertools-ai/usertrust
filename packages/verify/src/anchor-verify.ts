@@ -146,6 +146,13 @@ const INVALID_REASONS = new Set([
 	"range-invalid",
 	"sig-invalid",
 	"rekor-receipt-invalid",
+	// Caller-supplied trust material that cannot be parsed. Registered here
+	// deliberately: an UNregistered reason falls into the default bucket at the
+	// classification step, which is MISMATCH — the most severe verdict, and the
+	// wrong one. A mismatch means the anchors disagree with the vault; a
+	// malformed pin means the operator's own input could not be read, and
+	// blaming the vault for it sends them to the wrong investigation.
+	"malformed-successor-pin",
 ]);
 const NON_FAIL_REASONS = new Set(["no-trust-material", "witness-unreachable"]);
 
@@ -494,13 +501,30 @@ export function verifyAnchorChain(
 	const knownKeys = new Map<string, KeyObject>();
 	const rootKeyId = keyIdFromKeyObject(rootKey);
 	knownKeys.set(rootKeyId, rootKey);
-	for (const pem of trust.successorPinsPem ?? []) {
+	// An UNPARSEABLE successor pin used to be dropped here in silence. Note the
+	// asymmetry it created with the root key a few lines above: an unparseable
+	// ROOT pushes "trust root public key is not a parseable PEM" and returns,
+	// while a mistyped or truncated `--successor-pin` simply vanished. The
+	// operator supplied a pin precisely to constrain which successor key is
+	// acceptable, so discarding it silently verifies against a WEAKER trust set
+	// than the one they asked for — and the run still reports success. A pin that
+	// cannot be read is an input error, not an absent constraint.
+	for (const [i, pem] of (trust.successorPinsPem ?? []).entries()) {
 		const k = publicKeyFromPem(pem);
-		if (k !== null) {
-			const id = keyIdFromKeyObject(k);
-			pinKeyIds.add(id);
-			knownKeys.set(id, k);
+		if (k === null) {
+			errors.push(`successor pin #${i + 1} is not a parseable PEM`);
+			// `errors` does NOT reach the verdict — `evaluateAnchoredVault` derives it
+			// from `invalidReasons` + `mismatchReasons` alone (see the `reasons.push`
+			// there). Recording only the error left `verifyVaultWithAnchors` still
+			// answering ANCHORED_VERIFIED with exit 0, so the fix would have reported
+			// the unreadable input in a field nothing consumed — the same false OK
+			// this change exists to remove, one level up.
+			invalidReasons.push("malformed-successor-pin");
+			continue;
 		}
+		const id = keyIdFromKeyObject(k);
+		pinKeyIds.add(id);
+		knownKeys.set(id, k);
 	}
 
 	// A mixed-vaultId set is rejected wholesale, BEFORE dedup can collapse a
@@ -871,9 +895,39 @@ export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvalu
 		};
 	};
 
+	// Step 1b — CALLER-SUPPLIED trust material, validated BEFORE anything about
+	// the vault is examined.
+	//
+	// Placement is the whole point. `verifyAnchorChain` also rejects a malformed
+	// pin, but it is only reached at step 4 — and step 2 below returns UNANCHORED
+	// for an empty or legacy vault before any of that runs. So validating only
+	// there left the exact case where it matters most still answering
+	// `valid: true`, exit 0: a vault with nothing to check, and an operator whose
+	// pin was never read. A pin the caller could not spell is an INPUT error, and
+	// it does not become acceptable because the vault turned out to be empty.
+	let malformedPins = 0;
+	if (input.trust !== null) {
+		for (const [i, pem] of (input.trust.successorPinsPem ?? []).entries()) {
+			if (publicKeyFromPem(pem) === null) {
+				errors.push(`successor pin #${i + 1} is not a parseable PEM`);
+				reasons.push("malformed-successor-pin");
+				malformedPins++;
+			}
+		}
+	}
+
 	// Step 2 — discovery.
+	//
+	// NO early return on a malformed pin when anchors are present. Returning here
+	// reported ANCHOR_INVALID and skipped every anchor-content check, so a
+	// malformed pin accompanying a FORK, a rollback, mixed vault ids or mirror
+	// disagreement would hide the stronger evidence — and the state machine's
+	// worst-state rule has MISMATCH outranking INVALID. The reason is recorded
+	// above and carried into the normal classification, which already picks the
+	// worst state. Only when there is nothing else to evaluate does the pin
+	// decide the verdict on its own.
 	if (!anchorsPresent) {
-		return finish("UNANCHORED", []);
+		return finish(malformedPins > 0 ? "ANCHOR_INVALID" : "UNANCHORED", []);
 	}
 
 	// Step 3 — trust material (before parse escalation, per constraints §4.2).

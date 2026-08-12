@@ -366,6 +366,9 @@ function projectionWith(overrides: Partial<Projection>): Projection {
 			usagePosture: "provider",
 			pricingPosture: "exact",
 		},
+		// §2a — REQUIRED, and the only value v1 minting may emit. Overridable
+		// like every other field, so a caller can build the postures R39 renders.
+		delegationPosture: "selfDebitsOnly",
 		pricing: { tableVersions: ["2026-07-01"] },
 		transferSet: [{ authorizationTransferId: "a", settlementTransferId: "b" }],
 		transferSetRoot: "4d".repeat(32),
