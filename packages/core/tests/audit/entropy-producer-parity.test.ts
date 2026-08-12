@@ -312,3 +312,41 @@ describe("drift detection — matched names must exist in the producer source", 
 		expect(corpus).not.toMatch(/\banomalyDetected\s*:/);
 	});
 });
+
+describe("governed actions exercise the same signals as llm calls", () => {
+	/**
+	 * `governActionImpl` writes `<action.kind>` on success and
+	 * `<action.kind>_failed` on failure, and calls `cb.recordFailure()` on the
+	 * SAME breaker. Kind lists cannot enumerate these — the action kind is
+	 * caller-supplied — so any signal keyed on a fixed list of `llm_call*` kinds
+	 * reports zero observations for an action-only deployment while that
+	 * deployment drives the breaker exactly as an LLM workload does.
+	 */
+	const actionOk = (): EntropyEventInput => ({
+		kind: "tool_use",
+		data: { actionName: "bash", cost: 5, settled: true, transferId: "a-1" },
+	});
+	const actionFailed = (): EntropyEventInput => ({
+		kind: "tool_use_failed",
+		data: { actionName: "bash", error: "boom", transferId: "a-2" },
+	});
+
+	it("counts governed actions in the breaker signal", () => {
+		const s = extractCircuitBreakerTrips([actionOk(), actionOk(), actionFailed()]);
+		expect(s.total).toBe(3);
+	});
+
+	it("counts governed actions in the settlement denominator", () => {
+		const s = extractChainIntegrity([
+			actionOk(),
+			{ kind: "settlement_ambiguous", data: { transferId: "a-3", error: "expired" } },
+		]);
+		expect(s.total).toBeGreaterThan(1);
+	});
+
+	it("counts governed actions in the injection denominator", () => {
+		const s = extractPatternMemoryHits([actionOk(), actionOk(), injectionDetected()]);
+		expect(s.total).toBe(2);
+		expect(s.hits).toBeGreaterThan(0);
+	});
+});

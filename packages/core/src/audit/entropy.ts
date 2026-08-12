@@ -340,8 +340,19 @@ export function extractCircuitBreakerTrips(events: EntropyEventInput[]): Entropy
 	let total = 0;
 
 	for (const e of events) {
+		// GOVERNED ACTIONS exercise the same breaker — `governActionImpl` calls
+		// `cb.recordFailure()` and emits `<action.kind>_failed` on failure and
+		// `<action.kind>` on success. Neither matched a hard-coded `llm_call` list,
+		// so an action-only deployment reported ZERO breaker observations while
+		// driving the breaker exactly as an LLM workload does. Discriminated on
+		// `settled` and the `_failed` suffix rather than a kind list, because the
+		// action kinds are caller-supplied and cannot be enumerated here.
 		const isTerminal =
-			e.kind === "llm_call" || e.kind === "llm_call_failed" || e.kind === "anomaly_detected";
+			e.kind === "llm_call" ||
+			e.kind === "llm_call_failed" ||
+			e.kind === "anomaly_detected" ||
+			e.data.settled !== undefined ||
+			e.kind.endsWith("_failed");
 		const legacyShape =
 			e.kind.includes("circuit") ||
 			e.kind.includes("breaker") ||
@@ -361,6 +372,9 @@ export function extractCircuitBreakerTrips(events: EntropyEventInput[]): Entropy
 		// state/tripped fields are honoured for any producer that adds one.
 		if (
 			e.kind === "anomaly_detected" ||
+			// A governed-action failure is the same `cb.recordFailure()` an
+			// `llm_call_failed` is, so it counts the same way: an observation of a
+			// failure, not of a trip.
 			state === "open" ||
 			state === "half-open" ||
 			tripped === true
