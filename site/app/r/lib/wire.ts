@@ -456,7 +456,8 @@ export type IntegrityCause =
 	  }
 	| { source: "page"; obligation: "R1"; detail: string }
 	| { source: "page"; obligation: "R3"; brokenEquality: BundleEquality; detail: string }
-	| { source: "page"; obligation: "R4"; stage: R4Stage; detail: string };
+	| { source: "page"; obligation: "R4"; stage: R4Stage; detail: string }
+	| { source: "page"; obligation: "R39"; detail: string };
 
 export interface InvalidIdState {
 	kind: "invalidId";
@@ -2129,6 +2130,41 @@ function parseSuccess(
 				source: "page",
 				obligation: "R1",
 				detail: `the receipt document names "${envelope.receipt.receiptId}", but the page asked about "${routeParamId}"`,
+			},
+			envelope.receiptId,
+		);
+	}
+
+	// §7 / R39's evidence clause — `includesAllDelegated` is RECOGNIZED but can
+	// never be GREEN in v1.
+	//
+	// It is the strongest claim in §2a's vocabulary: every causally attributable
+	// delegated debit, including transitive descendants, exactly once. §7 pins
+	// what backing that requires — "ONLY `includesAllDelegated` may be presented
+	// as the total cost of work caused by the subject, and only when its §2a
+	// signed evidence validates. A verifier presented with
+	// `includesAllDelegated` and no validating evidence reports a failure, not a
+	// total."
+	//
+	// No evidence format is specified in v1 (§2a: "unreachable until one is"),
+	// so validating evidence cannot exist and EVERY instance fails here, by
+	// construction rather than by policy. Accepting the value at the validation
+	// gate is correct — recognizing is not permitting (§2a vs §7) — but the gate
+	// is not the verdict, and rendering the strongest unbacked claim in the
+	// vocabulary as a green total is precisely the defect R38 exists to prevent,
+	// one value over.
+	//
+	// Integrity failure, not the protocol-error shell: the shell is for material
+	// the page cannot interpret, and this value is interpreted exactly. The
+	// receipt makes a claim its own spec forbids anyone from honouring yet.
+	if (envelope.receipt.event.data.delegationPosture === "includesAllDelegated") {
+		return integrityFailure(
+			routeParamId,
+			{
+				source: "page",
+				obligation: "R39",
+				detail:
+					"this receipt claims its amount covers all delegated work, a claim that requires signed evidence a verifier can validate — no such evidence format exists in this version, so the claim cannot be checked and must not be shown as a total",
 			},
 			envelope.receiptId,
 		);

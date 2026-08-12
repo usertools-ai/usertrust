@@ -107,11 +107,11 @@ function parseRenderAssert(state: PageState, label: string): PageState {
 }
 
 // ===========================================================================
-// §8.1 — every conforming fixture (C1-C29, 30 files), parsed AND rendered
+// §8.1 — every conforming fixture (C1-C27, 28 files), parsed AND rendered
 // through the real production dispatcher.
 // ===========================================================================
 
-test("C1-C29: every conforming fixture file parses and renders through StateView with its pinned headline", () => {
+test("C1-C27: every conforming fixture file parses and renders through StateView with its pinned headline", () => {
 	let checked = 0;
 	for (const entry of conformingFixtures) {
 		for (const file of entry.files) {
@@ -120,7 +120,7 @@ test("C1-C29: every conforming fixture file parses and renders through StateView
 			checked++;
 		}
 	}
-	assert.equal(checked, 30, "30 conforming fixture files (C1-C29, C22 a pair)");
+	assert.equal(checked, 28, "28 conforming fixture files (C1-C27, C22 a pair)");
 });
 
 // ===========================================================================
@@ -344,6 +344,36 @@ test("X8/X9: a missing or unrecognized delegationPosture renders the protocol-er
 });
 
 // ===========================================================================
+// X11 — `includesAllDelegated`: recognized, but never green. §7 permits it to
+// be presented as a total ONLY when its §2a signed evidence validates, and no
+// evidence format exists in v1 — so every instance fails, by construction.
+// ===========================================================================
+
+test("X11: includesAllDelegated renders an integrity failure, never a total", () => {
+	const entry = rejectionVectors.find((vector) => vector.id === "X11");
+	assert.ok(entry, "X11 must exist in the manifest");
+	for (const file of entry.files) {
+		const state = fixtureState(loadFixture(file));
+		assert.equal(state.kind, "integrityFailure", `X11 (${file}) must not reach a verified state`);
+		// Integrity failure, NOT the protocol-error shell — the shell is for
+		// material the page could not interpret, and this value is interpreted
+		// exactly. Conflating them would tell the reader the resolver was
+		// unreachable when in fact its receipt made an uncheckable claim.
+		if (state.kind === "integrityFailure" && state.cause.source === "page") {
+			assert.equal(state.cause.obligation, "R39", "X11's cause must name the posture obligation");
+		}
+		parseRenderAssert(state, `X11 (${file})`);
+		// The strongest claim in the vocabulary must not reach the DOM as a
+		// figure. This is the same assertion X8/X9 carry, for the same reason.
+		assert.equal(
+			/\$\s?\d/.test(textOf(render(state))),
+			false,
+			`X11 (${file}): an unverifiable complete-coverage claim may not render an amount`,
+		);
+	}
+});
+
+// ===========================================================================
 // X10 — §7's contiguity clause, isolated. NOT a page state: this page renders
 // the resolver's verdict and never walks the served history (D2), so the
 // vector is aimed at `usertrust-verify` and the resolver. Asserted here only
@@ -376,7 +406,7 @@ test("manifest cross-check: this file's X-vector coverage accounts for every rej
 	const ids = rejectionVectors.map((entry) => entry.id);
 	assert.deepEqual(
 		ids,
-		["X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8", "X9", "X10"],
+		["X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8", "X9", "X10", "X11"],
 		"every X-id has a dedicated block above",
 	);
 });

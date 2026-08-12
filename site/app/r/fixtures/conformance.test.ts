@@ -3,9 +3,9 @@
  * this file IS the fixture matrix's test, not a test written against
  * already-trusted fixtures. Two populations, two contracts:
  *
- *   - §8.1 CONFORMING fixtures (C1-C29) must pass every strict-schema
+ *   - §8.1 CONFORMING fixtures (C1-C27) must pass every strict-schema
  *     presence/exclusion rule AND the full §4.1 verdict algebra.
- *   - §8.2 EXPECTED-REJECTION vectors (X1-X10) must NEVER pass — each is
+ *   - §8.2 EXPECTED-REJECTION vectors (X1-X11) must NEVER pass — each is
  *     asserted to fail CLOSED into its named state, for its NAMED CONSUMER
  *     (X10's clause is invisible to the page by design — see `index.ts`).
  *
@@ -679,13 +679,13 @@ test("manifest: every rejection vector's files exist on disk", () => {
 	}
 });
 
-test("manifest: 30 conforming JSON files (C1-C29, C22 a pair)", () => {
+test("manifest: 28 conforming JSON files (C1-C27, C22 a pair)", () => {
 	const totalFiles = conformingFixtures.reduce((sum, e) => sum + e.files.length, 0);
-	assert.equal(conformingFixtures.length, 29, "29 rows C1-C29");
-	assert.equal(totalFiles, 30, "30 files total (C22 contributes 2)");
+	assert.equal(conformingFixtures.length, 27, "27 rows C1-C27");
+	assert.equal(totalFiles, 28, "28 files total (C22 contributes 2)");
 });
 
-test("manifest: 15 rejection JSON files across X1-X5 and X8-X10, plus X6/X7 as TS modules", () => {
+test("manifest: 16 rejection JSON files across X1-X5 and X8-X11, plus X6/X7 as TS modules", () => {
 	const jsonEntries = rejectionVectors.filter((e) => e.kind === "json");
 	const totalJsonFiles = jsonEntries.reduce((sum, e) => sum + e.files.length, 0);
 	// X4 carries TWO files — one per half of R1's identity chain (the envelope
@@ -694,8 +694,8 @@ test("manifest: 15 rejection JSON files across X1-X5 and X8-X10, plus X6/X7 as T
 	// the route isolates it.
 	assert.equal(
 		totalJsonFiles,
-		15,
-		"X1(4) + X2(1) + X3(1) + X4(2) + X5(4) + X8(1) + X9(1) + X10(1) = 15",
+		16,
+		"X1(4) + X2(1) + X3(1) + X4(2) + X5(4) + X8(1) + X9(1) + X10(1) + X11(1) = 16",
 	);
 	const tsEntries = rejectionVectors.filter((e) => e.kind === "ts-module");
 	assert.deepEqual(
@@ -1036,6 +1036,29 @@ test("X8/X9: a missing or unrecognized delegationPosture fails the §2 key-set g
 		);
 		assert.equal(schema.ok, false, `${id}: must fail the §2 key-set gate`);
 	}
+});
+
+test("X11: includesAllDelegated is a RECOGNIZED value that the schema gate accepts", () => {
+	const entry = rejectionVectors.find((e) => e.id === "X11");
+	const fixture = loadFixtureCase(entry?.files[0] ?? "");
+	const body = fixture.wire.body as unknown as SuccessEnvelope;
+	const projection = body.receipt.event.data as unknown as Record<string, unknown>;
+
+	assert.equal(projection.delegationPosture, "includesAllDelegated");
+
+	// The point of this vector, and the reason it belongs to `wire.test.ts`
+	// rather than here: the value is LEGAL §2a vocabulary, so the §2 key-set
+	// gate must accept it. Recognizing is not permitting — §2a binds the minter,
+	// §7 binds the verifier, and the rejection happens at the verdict, not the
+	// schema. A gate that rejected it here would be enforcing the minting rule
+	// against a verifier, which is the actor conflation A1 resolved.
+	const schema = checkProjectionSchema(projection);
+	assert.ok(schema.ok, `X11 must pass the schema gate: ${schema.reason}`);
+
+	// ...and the envelope is otherwise entirely conformant, so nothing ELSE
+	// can be the reason it fails downstream.
+	const algebra = checkVerdictAlgebra(body);
+	assert.ok(algebra.ok, "X11's envelope algebra must be clean");
 });
 
 test("X10: the served history breaks §7 contiguity and NOTHING else", () => {

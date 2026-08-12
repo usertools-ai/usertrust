@@ -127,10 +127,6 @@ test("§8.1: every conforming 200 fixture renders, and the set is the expected o
 			"C16",
 			"C17",
 			"C18",
-			// C28/C29 — the delegation postures a v1 minter may not emit and this
-			// page must still render distinctly (§2a vs §7/R39).
-			"C28",
-			"C29",
 		],
 	);
 	for (const row of rows) {

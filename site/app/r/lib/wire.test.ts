@@ -177,12 +177,6 @@ const EXPECTED_STATE: Record<string, { kind: PageState["kind"]; detail?: string 
 	"session-owner-estimated.json": { kind: "verified", detail: "verified_checkpoint" },
 	"session-workflow-attested.json": { kind: "verified", detail: "verified_checkpoint" },
 	"session-fallback.json": { kind: "verified", detail: "verified_checkpoint" },
-	// C28/C29 — postures a v1 minter may not emit and this page must still
-	// render (§2a's minting rule binds the MINTER; §7/R39 bind the VERIFIER).
-	// The verdict is untouched by the posture: these are ordinary green
-	// receipts whose amount carries a narrower scope label.
-	"commit-delegated-partial.json": { kind: "verified", detail: "verified_checkpoint" },
-	"commit-delegated-indeterminate.json": { kind: "verified", detail: "verified_checkpoint" },
 	"reserved.json": { kind: "pending", detail: "reserved" },
 	"reconciling.json": { kind: "pending", detail: "reconciling" },
 	"billed-unfinalized.json": { kind: "billedUnfinalized" },

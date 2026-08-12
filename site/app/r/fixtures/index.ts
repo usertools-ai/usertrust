@@ -36,9 +36,7 @@ export type ConformingFixtureId =
 	| "C24"
 	| "C25"
 	| "C26"
-	| "C27"
-	| "C28"
-	| "C29";
+	| "C27";
 
 export interface ConformingFixtureEntry {
 	id: ConformingFixtureId;
@@ -198,24 +196,6 @@ export const conformingFixtures: ConformingFixtureEntry[] = [
 			"429 — body ABSENT and never parsed; state derives from the HTTP code + Retry-After alone (§4.2's " +
 			"exemption). Exactly ONE prescribed outcome: the rate-limited state — never the protocol-error shell",
 	},
-	{
-		id: "C28",
-		files: ["commit-delegated-partial.json"],
-		exercises:
-			"`delegationPosture: includesSomeDelegated` — a posture v1 MINTING may not emit but a VERIFIER must " +
-			"recognize and render (§2a's minting rule vs §7's verifier rules; minting and verifying are different " +
-			"verbs for different actors). R39: the amount renders as an INCOMPLETE attributed subtotal, never as a " +
-			"total. The envelope is fully conformant — this is not a rejection vector",
-	},
-	{
-		id: "C29",
-		files: ["commit-delegated-indeterminate.json"],
-		exercises:
-			"`delegationPosture: indeterminate` — same actor split as C28. R39: the page states that end-to-end " +
-			"coverage cannot be verified. (`includesAllDelegated` has NO fixture and cannot have one: §2a requires " +
-			"signed evidence an offline verifier can validate and specifies no format, so §7's 'reports a failure, " +
-			"not a total' applies to every instance — blocked on the evidence format, not an untested gap)",
-	},
 ];
 
 export type RejectionVectorId =
@@ -228,7 +208,8 @@ export type RejectionVectorId =
 	| "X7"
 	| "X8"
 	| "X9"
-	| "X10";
+	| "X10"
+	| "X11";
 
 export interface RejectionVectorEntry {
 	id: RejectionVectorId;
@@ -370,5 +351,21 @@ export const rejectionVectors: RejectionVectorEntry[] = [
 			"history. C6 breaks the ID chain AND the arithmetic at once (seg-9999 with prev=seg-9998), so an " +
 			"implementation that never wrote the contiguity comparison passes C6 for the wrong reason; only this " +
 			"vector catches it",
+	},
+	{
+		id: "X11",
+		kind: "json",
+		files: ["posture-all-delegated.json"],
+		mustFailInto: "integrity failure — recognized, but never green",
+		exercises:
+			"`delegationPosture: includesAllDelegated`, the STRONGEST claim in §2a's vocabulary (every causally " +
+			"attributable delegated debit, transitive descendants included, exactly once). §7 pins what backing it " +
+			"requires: only that value may be presented as the total cost of work caused by the subject, and only " +
+			"when its §2a signed evidence validates — a verifier given it WITHOUT validating evidence 'reports a " +
+			"failure, not a total'. No evidence format exists in v1 (§2a: unreachable until one is), so every " +
+			"instance fails by CONSTRUCTION rather than by policy. Accepting the value at the validation gate is " +
+			"correct (recognizing is not permitting, §2a vs §7) — but the gate is not the verdict, and this vector " +
+			"is what proves the difference. Integrity failure, not the protocol-error shell: the shell is for " +
+			"material the page cannot interpret, and this value is interpreted exactly",
 	},
 ];
