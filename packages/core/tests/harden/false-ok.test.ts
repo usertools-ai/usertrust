@@ -282,14 +282,26 @@ describe("false OK — a documented count that stops matching reality", () => {
 		let weak = 0;
 		// Identifiers are wildcards: the range bounds and operators are the
 		// behaviour, the names around them are incidental.
-		const STRONG = />= *0x7f *&& *[A-Za-z_$][A-Za-z0-9_$]* *<= *0x9f/g;
+		// BOTH BOUNDS BIND ONE IDENTIFIER, via a back-reference. Without it this
+		// also matched `start >= 0x7f && end <= 0x9f` — an INTERVAL check over two
+		// variables, not a sanitizer testing a single code point. Unrelated code
+		// could then inflate the count, or offset a genuinely removed sanitizer so
+		// the total still agreed. A shape matcher has to match the shape, and two
+		// different variables is a different shape.
+		const STRONG = /([A-Za-z_$][A-Za-z0-9_$]*) *>= *0x7f *&& *\1 *<= *0x9f/g;
 		const WEAK = /= *\/\[\\x00-\\x1f\\x7f\]\/g/g;
 		for (const dir of srcDirs) {
 			let files: string[];
 			try {
 				files = await tsFiles(dir);
-			} catch {
-				continue; // package has no src/
+			} catch (err) {
+				// ONLY a genuinely absent directory is "no source". A blanket catch
+				// here read EACCES or an I/O error as an empty package, so a new
+				// sanitizer in an unreadable tree went uncounted and the stale total
+				// passed — the guard failing exactly the way the file it lives in is
+				// named for, in the guard written to catch that.
+				if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue;
+				throw err;
 			}
 			for (const f of files) {
 				const code = codeOnly(await readFile(f, "utf-8"));
