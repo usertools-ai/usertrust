@@ -535,8 +535,18 @@ it cannot, **throw**. An array HOLE and an in-array `undefined` are the same thi
 position — and are written as `null` (via an index loop, never `Array.map`, which SKIPS holes and
 produced the unparseable `[1,,2]`). Functions and symbols throw; a top-level `undefined` serializes to `null` (§13 clause 1, matching the minter). Refusals are
 never omitted, because dropping a key signs a document missing a member the caller believed they
-committed — the same defect one layer quieter. Any change here must be MEASURED, not argued: only
-outputs that are currently unparseable may change, and
+committed — the same defect one layer quieter. **Every branch that hands `JSON.stringify` a value
+checks what came back.** The Date branch is the one place the canonicalizer serializes a value it
+COMPUTED (`value.toISOString()`) rather than the caller's own, and `toISOString` is overridable: an
+override answering with `undefined`, a function or a symbol made `JSON.stringify` return the JS
+value `undefined`, which the declared `string` return type hides. Top level that is unparseable
+text; inside an array `items.join(",")` erased it, so `[bad]` became the parseable `[]` — the
+dropped member above, arriving through the one branch that did not apply the check its siblings
+did. A refusal may therefore replace an output that PARSED, in exactly this case: a line that lost
+a member is not a licence, and no chain can depend on it, because a persisted line reparses to
+strings and arrays — `JSON.parse` never yields a Date, a function or a symbol, so no live event can
+be recanonicalized back into the refused input. Any change here must be MEASURED, not argued: only
+outputs that are currently unparseable (or that silently dropped a member) may change, and
 `hash_compatibility__only_unparseable_outputs_may_change` recanonicalizes a real 18k-event vault
 corpus under the frozen pre-fix implementation and the current one, requiring ZERO divergence.
 *Prevents:* `{"arr":[1,,2]}` / `{"f":undefined}` reaching `events.jsonl`, where `read.ts` skips the
@@ -695,6 +705,16 @@ the last caller accessor that sat between the claim and the POST, where a throwi
 the hold. The handle keeps its copies, reporting only, exactly as `costCenter` and
 `proxyTransferId` do. `abort()` still reads `auth.model`, deliberately and at the write, behind the
 VOID: it is audit-only there and a discharge must never be blocked by the party being discharged.
+**Carrying an OBJECT-valued field on the capture is half a fix.** `model` is a primitive, so the
+mirror finishes it; `endpoint` is an object and the capture was handed the SAME INSTANCE the handle
+carries — for a governor-wide default, the one `normalizeEndpoint` result shared by every call — so
+`auth.endpoint.class = "cloud"` needed no getter and no `defineProperty`. It re-priced the
+settlement against the cloud table, relabelled the record, and leaked into every later
+`authorize()` on that governor, straight past a capture that owned nothing but a pointer into
+caller-reachable memory. What you own is the VALUE, not the reference: `normalizeEndpoint` freezes
+what it returns, at the one place both copies are born. Read the two closures in the `abort()`
+residual literally — "carry the value in state we own" means the contents, and a field being
+`readonly` binds the field, never the object.
 *Prevents:* a boundary that is correct about the value it was shown and irrelevant to the bytes that
 get written — the defect surviving the fix, in a form that reads as fixed.
 
