@@ -288,7 +288,15 @@ describe("false OK — a documented count that stops matching reality", () => {
 		// could then inflate the count, or offset a genuinely removed sanitizer so
 		// the total still agreed. A shape matcher has to match the shape, and two
 		// different variables is a different shape.
-		const STRONG = /([A-Za-z_$][A-Za-z0-9_$]*) *>= *0x7f *&& *\1 *<= *0x9f/g;
+		// ANCHORED AT BOTH ENDS of the identifier. An unanchored capture could start
+		// mid-token: in `start >= 0x7f && t <= 0x9f` the engine captures the final
+		// `t` of `start`, the backreference then matches the real `t`, and a
+		// two-variable interval check counts as a sanitizer. Which matters because
+		// a false POSITIVE can offset a genuinely REMOVED sanitizer and leave the
+		// stale total agreeing — two errors cancelling into a passing guard is the
+		// hardest failure here to notice, since nothing looks wrong at all.
+		const STRONG =
+			/(?<![A-Za-z0-9_$])([A-Za-z_$][A-Za-z0-9_$]*) *>= *0x7f *&& *\1(?![A-Za-z0-9_$]) *<= *0x9f/g;
 		const WEAK = /= *\/\[\\x00-\\x1f\\x7f\]\/g/g;
 		for (const dir of srcDirs) {
 			let files: string[];
