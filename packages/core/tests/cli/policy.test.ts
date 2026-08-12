@@ -174,6 +174,33 @@ describe("usertrust policy validate", () => {
 		expect(process.exitCode).toBe(1);
 	});
 
+	it("--json distinguishes an all-disabled file from an active one", async () => {
+		// The human branch said `[inert]` while --json emitted only a total, so CI
+		// could not tell a file of disabled rules from an equally sized live one.
+		writePolicy(
+			GOOD_YAML.replace("    enforcement: hard", "    enforcement: hard\n    enabled: false"),
+		);
+		await run(tempDir, { json: true }, ["validate"]);
+		const p = JSON.parse(out()) as { rules: number; active: number; inert: boolean };
+		expect(p.rules).toBe(1);
+		expect(p.active).toBe(0);
+		expect(p.inert).toBe(true);
+	});
+
+	it("--json carries RAW diagnostic values, not terminal-scrubbed ones", async () => {
+		// Scrubbing substitutes and clips, which is right for a terminal and
+		// unrecoverable for a consumer. Escaping happens at serialization instead.
+		const CSI = String.fromCharCode(0x9b);
+		const longSub = `bogus${CSI}${"x".repeat(60)}`;
+		writePolicy(GOOD_YAML);
+		await run(tempDir, { json: true }, [longSub]);
+		const raw = out();
+		expect(raw).not.toContain(CSI);
+		const p = JSON.parse(raw) as { subcommand: string };
+		// Round-trips to the original, in full — neither substituted nor clipped.
+		expect(p.subcommand).toBe(longSub);
+	});
+
 	it("rejects an unknown subcommand rather than silently validating", async () => {
 		writePolicy(GOOD_YAML);
 		await run(tempDir, { json: false }, ["lint"]);

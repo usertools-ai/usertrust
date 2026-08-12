@@ -98,10 +98,23 @@ export async function run(
 ): Promise<void> {
 	const sub = argv[0];
 	if (sub !== undefined && sub !== "validate") {
-		const reason = `Unknown policy subcommand: "${scrubForTerminal(sub, 40)}". Expected: validate`;
-		// A caller passing --json parses every outcome, including this one.
-		if (options.json) console.log(toSafeJson({ ok: false, error: "unknown_subcommand", reason }));
-		else console.error(reason);
+		// RAW for JSON, scrubbed for the terminal. `toSafeJson` escapes controls so
+		// a consumer parses back the real value; scrubbing first would substitute
+		// and clip it beyond recovery. Same split as `health --json`.
+		if (options.json) {
+			console.log(
+				toSafeJson({
+					ok: false,
+					error: "unknown_subcommand",
+					subcommand: sub,
+					reason: `Unknown policy subcommand. Expected: validate`,
+				}),
+			);
+		} else {
+			console.error(
+				`Unknown policy subcommand: "${scrubForTerminal(sub, 40)}". Expected: validate`,
+			);
+		}
 		process.exitCode = 2;
 		return;
 	}
@@ -130,7 +143,7 @@ export async function run(
 		// a CI step validate nothing and pass. Same distinction the loader draws
 		// between absent and unreadable.
 		if (explicit !== undefined) {
-			const reason = `No such policy file: ${safePath}`;
+			const reason = `No such policy file: ${safePath}`; // terminal only
 			if (options.json)
 				console.log(
 					toSafeJson({
@@ -144,9 +157,19 @@ export async function run(
 			process.exitCode = 1;
 			return;
 		}
+		// Terminal-only string; the JSON branch builds its own from raw values.
 		const msg = `No policy file at ${safePath} — only the built-in budget rules apply.`;
 		if (options.json)
-			console.log(toSafeJson({ ok: true, path: policiesPath, rules: 0, issues: [], note: msg }));
+			console.log(
+				toSafeJson({
+					ok: true,
+					path: policiesPath,
+					rules: 0,
+					active: 0,
+					issues: [],
+					note: `No policy file — only the built-in budget rules apply.`,
+				}),
+			);
 		else console.log(`${pc.yellow("[none]")} ${msg}`);
 		return;
 	}
@@ -159,6 +182,12 @@ export async function run(
 				ok: issues.length === 0,
 				path: policiesPath,
 				rules: rules.length,
+				// A file of `enabled: false` rules is indistinguishable from an active
+				// one of the same size without this: the human branch says `[inert]`
+				// and CI, which reads the JSON, saw only a total. `inert` is derived
+				// rather than left to the consumer, so the judgement lives in one place.
+				active: rules.filter((r) => r.enabled !== false).length,
+				inert: rules.length > 0 && rules.every((r) => r.enabled === false),
 				issues,
 			}),
 		);
