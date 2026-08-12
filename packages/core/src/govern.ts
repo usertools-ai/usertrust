@@ -41,6 +41,7 @@ import {
 	isGovernanceDenial,
 	toDenialRuleRefs,
 } from "./audit/denial-events.js";
+import { assertAuditRepresentable } from "./audit/representable.js";
 import { writeReceipt } from "./audit/rotation.js";
 import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
@@ -2711,6 +2712,34 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				`action.cost must be a non-negative finite number, got ${String(action.cost)}`,
 			);
 		}
+
+		// ── VALIDATE BEFORE THE POINT OF NO RETURN ────────────────────────────
+		// Validate everything you will need to durably record BEFORE you do
+		// anything you cannot undo. A guard that runs after the irreversible step
+		// isn't a guard, it's a notification. The `action.cost` check above is the
+		// same rule for the money; this is it for the record.
+		//
+		// WHERE THE LINE SITS ON THIS PATH. The `action.kind` audit event is
+		// appended BEFORE the budget commit and the POST, so on the MONEY axis this
+		// path was already on the right side and needs no reordering. It is
+		// `execute()` that is the point of no return here: the caller's action has
+		// run and its side effects cannot be recalled, and the event that records
+		// it is written afterwards. A `params` value the chain cannot carry
+		// therefore used to run the action and THEN refuse — the caller could not
+		// retry without repeating the side effect. Refusing here costs them a
+		// corrected call instead.
+		//
+		// Every field is caller-supplied and every one reaches audit data:
+		// `kind` is the event kind itself, `name`/`actor` and the whole of
+		// `params` land in `data`. `params` is `Record<string, unknown>`, so unlike
+		// the others it can carry a NaN, a function or a symbol from perfectly
+		// well-typed caller code — which is why it is the one that actually fires.
+		assertAuditRepresentable(typeof action.kind === "string" ? action.kind : "action", {
+			"action.kind": action.kind,
+			"action.name": action.name,
+			"action.actor": action.actor,
+			"action.params": action.params,
+		});
 
 		inFlightCount++;
 		let callAuditDegraded = false;

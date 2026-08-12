@@ -561,6 +561,23 @@ caller's request still completes unless the catch rethrows — a `degraded` flag
 a DLQ record (whose `payload` is `JSON.stringify`'d, so it does not preserve the offending
 function or symbol) are not a substitute for the throw reaching the caller.
 
+**Caller-supplied, audit-bound values are validated at the API BOUNDARY, before anything
+irreversible.** Validate everything you will need to durably record before you do anything you
+cannot undo; a guard that runs after the irreversible step isn't a guard, it's a notification.
+`assertAuditRepresentable(eventKind, fields)` (`audit/representable.ts`) is the one way to do it,
+and it calls `canonicalize` rather than re-deriving the rule, so the boundary and the writer agree
+**by construction** — a second predicate spelling out "finite, not a function, not a symbol" is a
+copy, and a copy drifts. It is not a write-ahead: nothing is appended, nothing is reserved, and
+**an audit event must never precede the fact it attests**, so the ordering fix is always "validate
+earlier", never "record earlier". Wired at `headless.settle()` (before `activeAuths.delete`, so a
+refused settle leaves the authorization live and the caller can correct the value and retry on the
+same handle) and at `governAction()` (beside the existing `action.cost` check, so a bad `params`
+cannot make the action run and *then* be unrecordable). *Prevents:* `settle(auth, {
+chunksDelivered: NaN })` — the authorization deleted, `postPendingSpend` committed, and only then
+`appendEvent` throwing: a failed settlement for money that had already moved, unretryable.
+*The writer's refusal stays the backstop* — the boundary does not replace it, and the two are
+tested against the same input set.
+
 **Merkle hashing is RFC 6962 domain-separated.** Leaves `SHA-256(0x00 ‖ data)`, internal nodes
 `SHA-256(0x01 ‖ left ‖ right)`. **Odd nodes are promoted, not duplicated** — this avoids
 CVE-2012-2459.

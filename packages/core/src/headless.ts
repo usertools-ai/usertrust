@@ -50,6 +50,7 @@ import {
 	isGovernanceDenial,
 	toDenialRuleRefs,
 } from "./audit/denial-events.js";
+import { assertAuditRepresentable } from "./audit/representable.js";
 import { writeReceipt } from "./audit/rotation.js";
 import { getCurrentCostCenter } from "./budget/attribution.js";
 // The money math and the validation doors are IMPORTED from `budget/context.ts`,
@@ -1193,6 +1194,34 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					`Authorization ${auth.transferId} is not active (already settled or aborted)`,
 				);
 			}
+
+			// ── VALIDATE BEFORE THE POINT OF NO RETURN ────────────────────────
+			// Validate everything you will need to durably record BEFORE you do
+			// anything you cannot undo. A guard that runs after the irreversible
+			// step isn't a guard, it's a notification.
+			//
+			// Both fields below reach `llm_call.data`, and that append is the LAST
+			// thing this function does — after the authorization is deleted (next
+			// line) and after the spend is posted. A `chunksDelivered: NaN` used to
+			// be discovered there, which handed the caller a failed settlement for
+			// money that had already moved and no authorization to retry against.
+			// Nothing here is written or reserved: it is the writer's own
+			// representability check, run early, on the values a caller supplied.
+			//
+			// The four token counts are absent on purpose — `sanitizeUsage` below
+			// clamps them to finite integers before they can reach either the money
+			// or the chain, so they are already guarded at their own boundary.
+			// `computeMs` is absent because it never reaches the chain: it lands on
+			// `receipt.meter` only, where A6 specifies that a non-finite or negative
+			// value is DROPPED rather than refused.
+			assertAuditRepresentable("llm_call", {
+				"SettleParams.chunksDelivered": params?.chunksDelivered,
+				// The handle is the caller's own object and `model` is read back off
+				// it below, so a mutation between authorize and settle lands in audit
+				// data exactly like a bad `SettleParams` field would.
+				"Authorization.model": auth.model,
+			});
+
 			activeAuths.delete(auth.transferId);
 
 			const model = auth.model;

@@ -136,13 +136,22 @@ describe("HARDEN: AuditDataInvalidError is never swallowed by a caller", () => {
 			vaultBase: tmpVault,
 		});
 
-		const execute = vi.fn(async () => "ran");
+		// A params object that is CLEAN at the boundary and becomes unrecordable
+		// while the action runs. `governAction` now validates caller-supplied
+		// audit-bound values at entry, so a statically bad `params` never reaches
+		// the writer at all (see `validate-before-point-of-no-return.test.ts`).
+		// This is the residue that still can: the caller owns the object, so it can
+		// change under us between the guard and the append — which is exactly the
+		// case this file exists for. The writer refuses, and the action path's
+		// catch must RETHROW rather than degrade to a synthetic hash.
+		const params: Record<string, unknown> = { path: "/etc/hosts" };
+		const execute = vi.fn(async () => {
+			params.f = () => 1;
+			return "ran";
+		});
 
 		await expect(
-			governed.governAction(
-				{ kind: "tool_use", name: "file_read", cost: 50, params: { f: () => 1 } },
-				execute,
-			),
+			governed.governAction({ kind: "tool_use", name: "file_read", cost: 50, params }, execute),
 		).rejects.toBeInstanceOf(AuditDataInvalidError);
 
 		// The action body DID run — the audit event is written after execution —
