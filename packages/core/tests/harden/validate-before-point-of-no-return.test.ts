@@ -261,6 +261,148 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 		await gov.destroy();
 	});
 
+	// ── the boundary must validate the bytes it will WRITE ──
+	//
+	// A CAST IS NOT A TYPE, and a value you re-read is not the value you checked.
+	// `settle()` validated `params?.chunksDelivered` and `auth.model` and then
+	// read BOTH again — twice each for the chain event, twice more for the
+	// receipt. Every read is a fresh property access on an object the caller
+	// still owns, so a `SettleParams` that is a live object (a Proxy, or a getter
+	// over a running accumulator — the exact shape the `reportedCounts` comment
+	// two screens below already anticipates) answers the boundary with one value
+	// and the writer with another. The guard then passes and the writer refuses,
+	// after the delete and after the POST: the original defect, intact, reached
+	// through the guard instead of around it.
+	//
+	// The rule the fix restores is the one D5 already applies to the four token
+	// counts: read the caller's object ONCE, into a local, and let the check, the
+	// money and the record all come from that one read.
+
+	it("settle() reads a LIVE SettleParams exactly once — the value it validated is the value it writes", async () => {
+		const gov = await createGovernor({ dryRun: true, budget: 100_000, vaultBase });
+		const auth = await gov.authorize({ model: "claude-sonnet-4-6", estimatedInputTokens: 1_000 });
+
+		let reads = 0;
+		const liveParams = {
+			inputTokens: 10,
+			outputTokens: 5,
+			// Answers the boundary with a recordable 7 and everything after it with
+			// NaN. A getter is the honest miniature of the real shape: an accumulator
+			// the caller is still updating while the settle runs.
+			get chunksDelivered(): number {
+				reads++;
+				return reads === 1 ? 7 : Number.NaN;
+			},
+		};
+
+		const receipt = await gov.settle(auth, liveParams);
+
+		// 1. ONE read. This is the whole fix: three reads (or five, counting the
+		//    receipt) is three chances for the caller's object to answer
+		//    differently, and the count is asserted exactly so a re-read cannot be
+		//    reintroduced without failing here.
+		expect(reads).toBe(1);
+
+		// 2. The settle SUCCEEDS, because the value the boundary approved is the
+		//    value that reaches the chain. Before the fix this rejected with
+		//    AuditDataInvalidError — after `activeAuths.delete`, after the budget
+		//    commit and after the POST, with no authorization left to retry
+		//    against and no event on the chain at all.
+		expect(receipt.settled).toBe(true);
+		expect(receipt.chunksDelivered).toBe(7);
+
+		// 3. The chain carries the SAME value the receipt does. Two independent
+		//    re-reads used to be able to disagree with each other as well as with
+		//    the guard, so this pins them to one snapshot.
+		const llmCalls = readEvents(vaultBase).filter((e) => e.kind === "llm_call");
+		expect(llmCalls).toHaveLength(1);
+		expect((llmCalls[0] as { data: Record<string, unknown> }).data.chunksDelivered).toBe(7);
+
+		// 4. The money moved exactly once, for this settle.
+		expect(gov.budgetRemaining()).toBe(100_000 - receipt.cost);
+
+		await gov.destroy();
+	});
+
+	it("settle() refuses a live SettleParams whose FIRST read is unrecordable, and the auth still retries", async () => {
+		const gov = await createGovernor({ dryRun: true, budget: 100_000, vaultBase });
+		const auth = await gov.authorize({ model: "claude-sonnet-4-6", estimatedInputTokens: 1_000 });
+
+		const budgetBefore = gov.budgetRemaining();
+		const eventsBefore = readEvents(vaultBase).length;
+
+		let reads = 0;
+		const liveParams = {
+			inputTokens: 10,
+			outputTokens: 5,
+			get chunksDelivered(): number {
+				reads++;
+				return Number.NaN;
+			},
+		};
+
+		const err = await gov.settle(auth, liveParams).then(
+			() => undefined,
+			(e: unknown) => e,
+		);
+
+		expect(err).toBeInstanceOf(AuditDataInvalidError);
+		expect((err as Error).message).toContain("SettleParams.chunksDelivered");
+		// Refused on the first read — the guard does not sample the caller's object
+		// repeatedly looking for a bad answer, it takes one and judges it.
+		expect(reads).toBe(1);
+		// Exact, not a lower bound: a write-ahead would show up as an extra line.
+		expect(gov.budgetRemaining()).toBe(budgetBefore);
+		expect(readEvents(vaultBase)).toHaveLength(eventsBefore);
+
+		// THE LOAD-BEARING ASSERTION: the authorization survived the refusal, so a
+		// corrected value settles on the same handle.
+		const receipt = await gov.settle(auth, {
+			inputTokens: 10,
+			outputTokens: 5,
+			chunksDelivered: 4,
+		});
+		expect(receipt.settled).toBe(true);
+		expect(receipt.chunksDelivered).toBe(4);
+		expect(gov.budgetRemaining()).toBe(100_000 - receipt.cost);
+		expect(readEvents(vaultBase).filter((e) => e.kind === "llm_call")).toHaveLength(1);
+
+		await gov.destroy();
+	});
+
+	it("settle() reads a LIVE Authorization.model exactly once, on the local scope where nothing else touches it", async () => {
+		// `local` scope with no configured `local.models`: `resolveRates` never
+		// calls a string method on `model`, so a non-string reaches the append
+		// untouched. Same reachable path the govern-side stream test uses, and the
+		// reason a cloud-scope TypeError is not a guard.
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+			endpoint: { class: "local" },
+		});
+		const auth = await gov.authorize({ model: "llama3", estimatedInputTokens: 1_000 });
+
+		let reads = 0;
+		Object.defineProperty(auth, "model", {
+			configurable: true,
+			get(): unknown {
+				reads++;
+				return reads === 1 ? "llama3" : Symbol("swapped");
+			},
+		});
+
+		const receipt = await gov.settle(auth, { inputTokens: 10, outputTokens: 5 });
+
+		expect(reads).toBe(1);
+		expect(receipt.settled).toBe(true);
+		const llmCalls = readEvents(vaultBase).filter((e) => e.kind === "llm_call");
+		expect(llmCalls).toHaveLength(1);
+		expect((llmCalls[0] as { data: Record<string, unknown> }).data.model).toBe("llama3");
+
+		await gov.destroy();
+	});
+
 	it("a settle that never was still refuses a dead authorization first (ordering unchanged)", async () => {
 		const gov = await createGovernor({ dryRun: true, budget: 100_000, vaultBase });
 		const auth = await gov.authorize({ model: "claude-sonnet-4-6" });

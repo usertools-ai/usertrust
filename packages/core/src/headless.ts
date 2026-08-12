@@ -1214,17 +1214,34 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// `computeMs` is absent because it never reaches the chain: it lands on
 			// `receipt.meter` only, where A6 specifies that a non-finite or negative
 			// value is DROPPED rather than refused.
+			//
+			// ── VALIDATE THE BYTES YOU WILL WRITE, NOT A VALUE YOU RE-READ ────
+			// The two fields are snapshotted into locals HERE, and the guard, the
+			// chain event and the receipt all use those locals — nothing below
+			// touches `params` or `auth` for them again. A value you re-read is not
+			// the value you checked: every property access is a fresh read of an
+			// object the CALLER still owns, so a `SettleParams` that is a live
+			// object (a Proxy, or a getter over an accumulator the caller is still
+			// updating — the same shape the `reportedCounts` snapshot below is
+			// written for) can answer the guard with a recordable 7 and the writer
+			// with a NaN. That passes THROUGH the guard rather than around it, and
+			// lands the original defect intact: refused at the append, after the
+			// delete and after the POST, with no authorization left to retry.
+			// `chunksDelivered` alone was read four more times after the check
+			// (twice for the chain event, twice for the receipt), which is also
+			// four chances for the record and the receipt to disagree.
+			const chunksDelivered = params?.chunksDelivered;
+			const model = auth.model;
 			assertAuditRepresentable("llm_call", {
-				"SettleParams.chunksDelivered": params?.chunksDelivered,
-				// The handle is the caller's own object and `model` is read back off
-				// it below, so a mutation between authorize and settle lands in audit
-				// data exactly like a bad `SettleParams` field would.
-				"Authorization.model": auth.model,
+				"SettleParams.chunksDelivered": chunksDelivered,
+				// The handle is the caller's own object and `model` rides into audit
+				// data below, so a mutation between authorize and settle lands there
+				// exactly like a bad `SettleParams` field would.
+				"Authorization.model": model,
 			});
 
 			activeAuths.delete(auth.transferId);
 
-			const model = auth.model;
 			let callAuditDegraded = false;
 
 			// A1 — forensic continuity: an attributed hold leaves an attributed record
@@ -1433,7 +1450,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						// P1-2: its own frozen copy.
 						appliedRates: copyAppliedRates(appliedRates),
 						pricingTableVersion: PRICING_TABLE_VERSION,
-						...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
+						// The snapshot taken at the guard, never a fresh read of the
+						// caller's object — see the boundary comment above.
+						...(chunksDelivered != null ? { chunksDelivered } : {}),
 						source: "headless",
 						...costCenterAudit,
 					},
@@ -1552,7 +1571,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					appliedRates: copyAppliedRates(appliedRates),
 					tableVersion: PRICING_TABLE_VERSION,
 				},
-				...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
+				// Same snapshot the chain event carries: the receipt and the durable
+				// record must not be able to report two different numbers.
+				...(chunksDelivered != null ? { chunksDelivered } : {}),
 				...(postedCost !== undefined ? { postedCost } : {}),
 				...(settledBudget !== undefined ? { budget: settledBudget } : {}),
 				...(callAuditDegraded ? { auditDegraded: true as const } : {}),
