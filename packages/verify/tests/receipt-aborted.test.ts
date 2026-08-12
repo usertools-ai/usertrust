@@ -506,3 +506,42 @@ describe("verifyTransaction — absences the normalizer must not invent", () => 
 		}
 	});
 });
+
+describe("renderReceipt — a label describes its own event", () => {
+	it("a terminal's error is labelled Error, even when an anomaly correlates", () => {
+		// The regression this pins: the prefix once depended on whether a detection
+		// correlated, so a terminal's "Request was aborted" was presented as the
+		// detector's observation while the real detector message printed separately
+		// below it. A correlated detection gets its own line; it does not get to
+		// rename someone else's error.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-label-"));
+		try {
+			const auditDir = join(dir, "audit");
+			mkdirSync(auditDir, { recursive: true });
+			const rec = (over: Record<string, unknown>, i: number) =>
+				JSON.stringify({
+					actor: "local",
+					timestamp: "2026-08-12T00:00:00.000Z",
+					previousHash: "0".repeat(64),
+					sequence: i,
+					hash: String.fromCharCode(103 + i).repeat(64),
+					...over,
+				});
+			writeFileSync(
+				join(auditDir, "events.jsonl"),
+				`${rec({ kind: "anomaly_detected", data: { anomalyKind: "token_rate", message: "rate exceeded", transferId: "tx_lbl" } }, 1)}\n${rec({ kind: "stream_partial_delivery", data: { transferId: "tx_lbl", error: "Request was aborted" } }, 2)}\n`,
+				"utf-8",
+			);
+			const out = verifyTransaction(dir, "tx_lbl").receipt;
+			// The terminal's own text, under the terminal's own label.
+			expect(out).toMatch(/Error:\s+Request was aborted/);
+			// The detection, separately, as an observation.
+			expect(out).toContain("Anomaly flagged:");
+			expect(out).toContain("rate exceeded");
+			// And never the terminal error dressed as the detector's finding.
+			expect(out).not.toMatch(/Anomaly:\s+Request was aborted/);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});

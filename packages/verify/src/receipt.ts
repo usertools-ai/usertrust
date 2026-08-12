@@ -339,11 +339,14 @@ export function renderReceipt(data: ReceiptData): string {
 
 	if ((isFailed || isDenied || isDetection) && reason) {
 		lines.push(blank());
-		// "Anomaly:" rather than "Error:" or "Aborted:" — the detector firing is
-		// not a fault, and it is not proof the call stopped. It names what was
-		// observed, which is the most this event supports.
-		const errPrefix =
-			isDetection || data.detectionReason !== undefined ? "  Anomaly: " : "  Error: ";
+		// The label describes THIS EVENT, and nothing else. `isDetection` alone —
+		// deliberately not `|| detectionReason !== undefined`, which labelled a
+		// TERMINAL's error "Anomaly:" whenever a detection happened to correlate,
+		// so "Request was aborted" or an unrelated provider failure was presented
+		// as the detector's observation while the real detector message printed
+		// separately below. The correlated detection has its own line; it does not
+		// get to rename someone else's error.
+		const errPrefix = isDetection ? "  Anomaly: " : "  Error: ";
 		const indent = " ".repeat(errPrefix.length);
 		const maxW = WIDTH - indent.length - 2;
 		const wrapped = wordWrap(forDisplay(reason), maxW);
