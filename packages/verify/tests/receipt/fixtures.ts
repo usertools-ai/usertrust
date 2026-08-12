@@ -122,6 +122,17 @@ export interface Expectation {
 		readonly check: CheckName;
 		readonly result: CheckResult;
 		readonly code?: FailureCode;
+		/**
+		 * A substring the reported `detail` MUST contain — i.e. WHICH clause
+		 * refused. `HISTORY_INVALID` is one code for a dozen rules, so a vector
+		 * that asserts only the code proves the walk refused, never that it
+		 * refused for the reason the vector is named after. Where a mutant is
+		 * the sole isolator of one clause, that distinction is the whole test:
+		 * without it, a mutant caught by an EARLIER clause reads as green while
+		 * the clause it was built for is dead. Declared where the vector's
+		 * subject is one specific clause; omitted where it is the walk as such.
+		 */
+		readonly detail?: string;
 	};
 	/** Checks this build declines to run — reported out of band, never as a §7 value. */
 	readonly unimplemented?: readonly CheckName[];
@@ -153,12 +164,22 @@ function unverifiable(missing: MissingWhat): Expectation {
 	return { verdict: "UNVERIFIABLE", missing, exitCode: 2 };
 }
 
-/** A step-9 failure NEVER demotes the base verdict (§7 step 9). */
-function historyFailed(): Expectation {
+/**
+ * A step-9 failure NEVER demotes the base verdict (§7 step 9).
+ *
+ * `detail` names the clause that must have done the refusing — pass it whenever
+ * the vector exists to isolate ONE clause of the walk.
+ */
+function historyFailed(detail?: string): Expectation {
 	return {
 		verdict: "VERIFIED_CHECKPOINT",
 		exitCode: 0,
-		extension: { check: "checkpointHistory", result: "failed", code: "HISTORY_INVALID" },
+		extension: {
+			check: "checkpointHistory",
+			result: "failed",
+			code: "HISTORY_INVALID",
+			...(detail === undefined ? {} : { detail }),
+		},
 	};
 }
 
@@ -1763,7 +1784,7 @@ export const HISTORY_VECTORS: readonly Vector[] = [
 		name: "history/broken-lineage-edge",
 		what: "v2 SIGNS the lineage edge, so a rewritten previousSegmentRoot has to be re-signed — and still fails the walk.",
 		mode: "envelope",
-		expect: historyFailed(),
+		expect: historyFailed("previousSegmentRoot is not the preceding checkpoint's root"),
 		breaks: [],
 		build: () =>
 			mint({
@@ -1771,6 +1792,24 @@ export const HISTORY_VECTORS: readonly Vector[] = [
 					checkpoints.map((c, i) =>
 						i === 1 ? { ...c, previousSegmentRoot: otherHash("broken-edge") } : c,
 					),
+			}),
+	},
+	{
+		name: "history/lineage-edge-id-rewritten",
+		what: "The edge has TWO halves: a member naming the wrong predecessor segment fails even with the right previousSegmentRoot.",
+		mode: "envelope",
+		// The `previousSegmentId` half is otherwise unfalsifiable: every other
+		// vector that breaks it also breaks `previousSegmentRoot` or contiguity,
+		// so deleting the id comparison is invisible to them. Here the root half
+		// and the arithmetic are both intact and the id is the only wrong fact,
+		// which is exactly the shape §7 names ("previousSegmentRoot/
+		// previousSegmentId equal the prior checkpoint's root/segmentId").
+		expect: historyFailed("previousSegmentId does not name the preceding checkpoint's segment"),
+		breaks: [],
+		build: () =>
+			mint({
+				checkpointsUnsigned: (checkpoints) =>
+					checkpoints.map((c, i) => (i === 1 ? { ...c, previousSegmentId: "seg_000099" } : c)),
 			}),
 	},
 	{
@@ -1797,9 +1836,35 @@ export const HISTORY_VECTORS: readonly Vector[] = [
 		name: "history/duplicate-segment-id",
 		what: "Exactly ONE checkpoint per segmentId — the rule that makes prefix ROLLBACK detectable rather than merely unlikely.",
 		mode: "envelope",
-		expect: historyFailed(),
+		// The mutant this rule EXISTS for is a second, validly signed checkpoint
+		// over an already-sealed segment — the integrity incident §4a forbids —
+		// and it has to arrive clean under every other clause or it proves
+		// nothing about this one. So it re-links to the head it duplicates
+		// (`previousSegmentId`/`previousSegmentRoot` = the head's own
+		// `segmentId`/`root`) and continues the arithmetic (`first + treeSize`),
+		// leaving the repeated `segmentId` as the single wrong fact. An
+		// out-of-place CLONE would not: the lineage-edge clause refuses it first
+		// and the duplicate rule is never reached, so deleting the rule would
+		// keep such a vector green.
+		expect: historyFailed("appears more than once"),
 		breaks: [],
-		build: () => mint({ history: (h) => [...h, structuredClone(h[1]) as SegmentCheckpoint] }),
+		build: () =>
+			mint({
+				history: (h) => {
+					const head = h[h.length - 1] as SegmentCheckpoint;
+					return [
+						...h,
+						resign({
+							...head,
+							root: otherHash("second-checkpoint-over-a-sealed-segment"),
+							previousSegmentId: head.segmentId,
+							previousSegmentRoot: head.root,
+							segmentFirstSequence: head.segmentFirstSequence + head.treeSize,
+							publishedAt: "2026-08-15T00:00:00.000Z",
+						}),
+					];
+				},
+			}),
 	},
 	{
 		name: "history/embedded-checkpoint-absent",

@@ -157,6 +157,13 @@ function assertExpectation(name: string, expected: Expectation, actual: ReceiptR
 		);
 		expect(actual.checks.checkpointHistory.result, name).toBe(extension.result);
 		expect(actual.checks.checkpointHistory.failure?.code, name).toBe(extension.code);
+		// WHICH clause refused, not merely that one did. `HISTORY_INVALID` covers
+		// a dozen rules, so a vector asserting the code alone stays green when an
+		// earlier clause catches its mutant — and the rule it was written for is
+		// then dead with nothing to show it.
+		if (extension.detail !== undefined) {
+			expect(actual.checks.checkpointHistory.failure?.detail, name).toContain(extension.detail);
+		}
 		// The step ledger and the named check are the same fact reported twice;
 		// they must never disagree.
 		expect(actual.steps.extensions, name).toEqual(actual.checks.checkpointHistory);
@@ -216,6 +223,10 @@ describe("§7 step 9 — history material the walk must refuse structurally", ()
 		const report = runWithHistory(mint(), []);
 		expect(report.verdict).toBe("VERIFIED_CHECKPOINT");
 		expect(report.checks.checkpointHistory.failure?.code).toBe("HISTORY_INVALID");
+		// Named, not merely refused: the embedded-checkpoint clause would also
+		// refuse an empty walk, so a code-only assertion leaves THIS guard free
+		// to be deleted. Pinning the detail keeps the length check load-bearing.
+		expect(report.checks.checkpointHistory.failure?.detail).toContain("empty");
 	});
 
 	it("refuses a member that is not a JSON object", () => {
@@ -227,6 +238,10 @@ describe("§7 step 9 — history material the walk must refuse structurally", ()
 			history[2] as JsonValue,
 		]);
 		expect(report.checks.checkpointHistory.failure?.code).toBe("HISTORY_INVALID");
+		// The §4a shape check would ALSO refuse a bare string (`v` is not 2), so
+		// without naming the clause this test cannot tell the type guard from its
+		// downstream backstop — and the guard could be deleted unobserved.
+		expect(report.checks.checkpointHistory.failure?.detail).toContain("is not a JSON object");
 	});
 
 	it("refuses a member that is not a §4a v2 statement", () => {
