@@ -18,6 +18,8 @@
  * signal stop firing, the signal is what needs fixing, not this file.
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	computeEntropyScore,
@@ -146,12 +148,18 @@ describe("entropy signals vs. what producers actually write", () => {
 			expect(s.hits).toBe(1);
 		});
 
-		it("falls back to summing llm_call costs when spend is unknown", () => {
+		it("ABSTAINS rather than summing chain costs when session spend is unknown", () => {
+			// It must NOT sum `llm_call.cost`. An attributed call debits its
+			// cost-center envelope and deliberately does not move session
+			// `budgetSpent`, so summing chain costs against the SESSION budget
+			// counts money the session never paid — cost-center-heavy traffic would
+			// report an untouched session budget as exhausted.
 			const events = Array.from({ length: 10 }, () => llmCall({ cost: 95 }));
 			const s = extractBudgetUtilization(events, {
 				budget: { total: 1000, spent: Number.NaN },
 			});
-			expect(s.value).toBeGreaterThan(0); // 950/1000 = 95%
+			expect(s.total).toBe(0);
+			expect(s.value).toBe(0);
 		});
 	});
 
@@ -223,5 +231,74 @@ describe("entropy signals vs. what producers actually write", () => {
 			expect(report.score).toBe(0);
 			expect(report.level).toBe("low");
 		});
+	});
+});
+
+// ── Drift detection against the producer SOURCE ──
+
+/**
+ * The fixtures above are hand-copied literals, and Codex correctly pointed out
+ * what that means: if `govern.ts` renames `piiDetected`, every test above stays
+ * green, because the fixture would be renamed only if a human noticed. A test
+ * whose fixtures and matchers were written together agrees with itself and with
+ * nothing else — which is precisely the criticism this file exists to make of
+ * the suite it supplements. It applied here too.
+ *
+ * These cases close that by reading the PRODUCER SOURCE. Every kind and field
+ * name the extractors match must still literally appear in the file that writes
+ * it, so a rename in `govern.ts` fails HERE rather than silently unwiring a
+ * signal again.
+ *
+ * It is a name-level check, not a semantic one — it cannot see a field that
+ * changes type or meaning. It is the strongest link available without booting a
+ * governor, and it catches the specific failure that produced this whole class:
+ * a consumer matching a name no producer writes.
+ */
+describe("drift detection — matched names must exist in the producer source", () => {
+	const SRC = join(import.meta.dirname, "..", "..", "src");
+	const govern = readFileSync(join(SRC, "govern.ts"), "utf-8");
+	const denials = readFileSync(join(SRC, "audit", "denial-events.ts"), "utf-8");
+	const corpus = `${govern}\n${denials}`;
+
+	const KINDS = [
+		"llm_call",
+		"llm_call_failed",
+		"anomaly_detected",
+		"injection_detected",
+		"settlement_ambiguous",
+		"policy_denied",
+		"ledger_rejected",
+	];
+
+	const FIELDS = [
+		"piiDetected", // signal 4, on llm_call
+		"piiTypes", // signal 4, on the denial path
+		"injectionPatterns", // signal 6, block mode
+		"patterns", // signal 6, warn mode
+		"decision", // signal 1
+		"transferId", // signals 3 and 6 correlate on this
+		"cost", // budget context fallback + receipts
+	];
+
+	it.each(KINDS)("producer still writes the kind %s", (kind) => {
+		expect(corpus).toContain(`"${kind}"`);
+	});
+
+	it.each(FIELDS)("producer still writes the field %s", (field) => {
+		expect(corpus).toMatch(new RegExp(`\\b${field}\\b`));
+	});
+
+	it("PII still rides as an ARRAY, which is the whole reason signal 4 was blind", () => {
+		// Pins the SHAPE, not just the name: `detection.types` is a string[], and a
+		// producer switching it to a boolean would silently re-break the matcher in
+		// the opposite direction.
+		expect(govern).toMatch(/piiDetected\s*=\s*\w+\.detection\.types/);
+	});
+
+	it("the anomaly reason is a KIND, never a data.anomalyDetected boolean", () => {
+		// The original near-miss: the extractor looked for `data.anomalyDetected`
+		// while the producer wrote the kind `anomaly_detected`. If a producer ever
+		// adds that boolean, this fails and the matcher should be revisited.
+		expect(corpus).not.toMatch(/\banomalyDetected\s*:/);
 	});
 });

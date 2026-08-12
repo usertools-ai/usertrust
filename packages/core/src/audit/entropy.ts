@@ -174,17 +174,17 @@ export function extractBudgetUtilization(
 		return { ...base, value: 0, hits: 0, total: 0 };
 	}
 
-	let spent = budget.spent;
-	if (!Number.isFinite(spent)) {
-		spent = 0;
-		for (const e of events) {
-			if (e.kind !== "llm_call") continue;
-			const cost = e.data.cost;
-			if (typeof cost === "number" && Number.isFinite(cost)) spent += cost;
-		}
+	// NO fallback to summing `llm_call.cost`. An ATTRIBUTED call debits its
+	// cost-center envelope and deliberately does NOT move session `budgetSpent`
+	// (AGENTS.md; `govern.ts` sessionShare), so summing chain costs against the
+	// SESSION budget counts money the session never paid — cost-center-heavy
+	// traffic would report an untouched session budget as exhausted. Only the
+	// caller knows the persisted session spend, so without it this abstains.
+	if (!Number.isFinite(budget.spent)) {
+		return { ...base, value: 0, hits: 0, total: 0 };
 	}
 
-	const utilization = Math.max(0, spent) / budget.total;
+	const utilization = Math.max(0, budget.spent) / budget.total;
 	const value =
 		utilization > BUDGET_PRESSURE_FLOOR
 			? Math.min(1, (utilization - BUDGET_PRESSURE_FLOOR) / (1 - BUDGET_PRESSURE_FLOOR))
@@ -220,30 +220,40 @@ export function extractChainIntegrity(
 	events: EntropyEventInput[],
 	context?: EntropyContext,
 ): EntropySignal {
-	let hits = 0;
-	let total = 0;
-
 	const chain = context?.chain;
-	if (chain !== undefined) {
-		total++;
-		if (!chain.valid || (chain.errors !== undefined && chain.errors.length > 0)) hits++;
-	}
+	const chainFailed =
+		chain !== undefined &&
+		(!chain.valid || (chain.errors !== undefined && chain.errors.length > 0));
 
-	// Rate, not presence: every settlement terminal is an observation, and the
-	// ambiguous ones are the failures. Counting only the failures would pin the
-	// signal near 1.0 on a single ambiguous settlement in a million clean calls.
+	// Desync rate, deduplicated BY TRANSFER. `settlement_ambiguous` is a
+	// CORRECTION appended alongside the same transfer's primary terminal, so
+	// counting events would score one failed settlement as 1/2 — and keying on
+	// `transferId` rather than on a list of kinds keeps this correct for the
+	// dynamic `<action.kind>` terminals, which cannot be enumerated here.
+	const observedTransfers = new Set<string>();
+	const ambiguousTransfers = new Set<string>();
 	for (const e of events) {
-		if (e.kind === "llm_call") total++;
-		else if (e.kind === "settlement_ambiguous") {
-			total++;
-			hits++;
-		}
+		const id = e.data.transferId;
+		if (typeof id !== "string" || id === "") continue;
+		observedTransfers.add(id);
+		if (e.kind === "settlement_ambiguous") ambiguousTransfers.add(id);
 	}
+	const desyncRate =
+		observedTransfers.size > 0 ? ambiguousTransfers.size / observedTransfers.size : 0;
+
+	// A failed chain verification is BINARY and DOMINATES. Averaging it into the
+	// desync rate made it `1 / (N + 1)`: one verification failure invalidates the
+	// entire chain no matter how many calls preceded it, so a large tampered
+	// vault would otherwise dilute its own tampering down to nearly nothing —
+	// the bigger the vault, the healthier it would look.
+	const value = chainFailed ? 1 : desyncRate;
+	const hits = (chainFailed ? 1 : 0) + ambiguousTransfers.size;
+	const total = (chain !== undefined ? 1 : 0) + observedTransfers.size;
 
 	return {
 		condition: "chain_integrity",
 		label: "Chain integrity failures",
-		value: total > 0 ? hits / total : 0,
+		value,
 		hits,
 		total,
 	};
@@ -329,9 +339,15 @@ export function extractCircuitBreakerTrips(events: EntropyEventInput[]): Entropy
 		const state = e.data.circuitBreakerState ?? e.data.state;
 		const tripped = e.data.circuitBreakerTripped ?? e.data.tripped;
 
+		// `llm_call_failed` is an observation, NOT a hit. The breaker opens on the
+		// FIFTH consecutive failure by default, so counting the first ordinary
+		// provider error as a trip reports breaker trips that never happened —
+		// and a metric that cries wolf is one an operator learns to ignore.
+		// No producer emits a breaker OPEN transition today, so the only real
+		// abort evidence on the chain is `anomaly_detected`; the explicit
+		// state/tripped fields are honoured for any producer that adds one.
 		if (
 			e.kind === "anomaly_detected" ||
-			e.kind === "llm_call_failed" ||
 			state === "open" ||
 			state === "half-open" ||
 			tripped === true
@@ -342,7 +358,7 @@ export function extractCircuitBreakerTrips(events: EntropyEventInput[]): Entropy
 
 	return {
 		condition: "circuit_breaker_trips",
-		label: "Circuit breaker / anomaly aborts",
+		label: "Anomaly aborts",
 		value: total > 0 ? hits / total : 0,
 		hits,
 		total,
@@ -363,32 +379,53 @@ export function extractCircuitBreakerTrips(events: EntropyEventInput[]): Entropy
  * `injection_detected` carrying the matched `patterns` array and a `score`.
  */
 export function extractPatternMemoryHits(events: EntropyEventInput[]): EntropySignal {
-	let hits = 0;
+	// `injection_detected` is SUPPLEMENTARY: in warn mode the same call also
+	// writes its ordinary terminal, so counting both as observations capped this
+	// at 0.5 even when every single call was flagged. It carries no `transferId`
+	// (`govern.ts:1425-1430`), so it cannot be correlated away — it contributes a
+	// HIT without contributing an observation, and the terminals supply the
+	// denominator.
+	let detections = 0;
 	let total = 0;
 
 	for (const e of events) {
-		const isScanned =
-			e.kind === "llm_call" || e.kind === "llm_call_failed" || e.kind === "injection_detected";
+		if (e.kind === "injection_detected") {
+			detections++;
+			continue;
+		}
+
+		// BLOCK mode never emits `injection_detected` at all — the call is refused
+		// and the evidence rides on the denial as `injectionPatterns`
+		// (`denial-events.ts:207`). Skipping that shape made the signal blind in
+		// exactly the mode where injection was actually stopped.
+		const isDenial = DENIAL_EVENT_KINDS.has(e.kind);
 		const legacyShape =
 			e.kind.includes("pattern") || e.kind.includes("memory") || e.data.patternMatch !== undefined;
-		if (!isScanned && !legacyShape) continue;
+		if (e.kind !== "llm_call" && e.kind !== "llm_call_failed" && !isDenial && !legacyShape) {
+			continue;
+		}
 
 		total++;
 		if (
-			e.kind === "injection_detected" ||
+			nonEmptyArray(e.data.injectionPatterns) ||
 			nonEmptyArray(e.data.patterns) ||
 			e.data.patternMatch === true ||
 			e.data.anomalyDetected === true ||
 			e.data.recurringIssue === true
 		) {
-			hits++;
+			detections++;
 		}
 	}
+
+	// Supplementary detections can exceed the terminal count in principle; the
+	// rate is a proportion, so it clamps rather than exceeding 1.
+	const hits = Math.min(detections, Math.max(total, detections));
+	const value = total > 0 ? Math.min(1, detections / total) : detections > 0 ? 1 : 0;
 
 	return {
 		condition: "pattern_memory_hits",
 		label: "Injection pattern matches",
-		value: total > 0 ? hits / total : 0,
+		value,
 		hits,
 		total,
 	};

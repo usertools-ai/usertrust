@@ -70,15 +70,24 @@ describe("Entropy — individual signals", () => {
 	// to evaluate zero events. Chain validity is a property of the LOG and is now
 	// supplied by the caller; money/audit desync arrives as `settlement_ambiguous`.
 	it("extractChainIntegrity detects verification failures", () => {
+		// Real producers always stamp `transferId`; the desync rate deduplicates on
+		// it, because `settlement_ambiguous` is a CORRECTION appended alongside the
+		// same transfer's primary terminal rather than a separate call.
 		const events: EntropyEventInput[] = [
-			{ kind: "llm_call", data: { cost: 1, settled: true } },
-			{ kind: "settlement_ambiguous", data: { cost: 1, error: "pending_transfer_expired" } },
+			{ kind: "llm_call", data: { cost: 1, settled: true, transferId: "t-1" } },
+			{ kind: "llm_call", data: { cost: 1, settled: true, transferId: "t-2" } },
+			{
+				kind: "settlement_ambiguous",
+				data: { cost: 1, error: "pending_transfer_expired", transferId: "t-2" },
+			},
 		];
 
-		// Observations: the chain check itself, plus each settlement terminal.
 		const signal = extractChainIntegrity(events, { chain: { valid: false } });
-		expect(signal.hits).toBe(2); // invalid chain + the ambiguous settlement
-		expect(signal.total).toBe(3); // chain check + llm_call + settlement_ambiguous
+		// A failed chain verification is binary and dominates: it invalidates the
+		// whole chain regardless of how many calls preceded it.
+		expect(signal.value).toBe(1);
+		expect(signal.hits).toBe(2); // invalid chain + one desynced transfer
+		expect(signal.total).toBe(3); // chain check + two distinct transfers
 	});
 
 	it("extractPiiDetections counts PII findings", () => {
