@@ -1013,6 +1013,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						budget_remaining_after: gateRemaining - estCost,
 						budgetFractionRemaining: tierFields.budgetFractionRemaining,
 						budgetRunwayHours: tierFields.budgetRunwayHours,
+						// P1-CLOCK-SHADOW: the third re-assertion site, same assertion and same
+						// reason as govern.ts — `params.params` must not be able to pick the
+						// time a `timeWindows` rule is evaluated at. Explicit `undefined` sends
+						// the gate back to the real clock, which it reads in LOCAL time by
+						// contract.
+						timestamp: undefined,
 						// Structurally un-forgeable: this comes from the caller's own async
 						// execution context, which no request body can reach. Asserted after
 						// the spread like every other trusted field, `undefined` included.
