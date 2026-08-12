@@ -73,10 +73,15 @@ const anomalyEvent = (message = "token rate exceeded: 5000 tok/s over threshold 
 	});
 
 describe("renderReceipt — an anomaly-killed call", () => {
-	it("renders ABORTED, not PENDING", () => {
+	it("does NOT claim the call was aborted", () => {
+		// The detection is emitted BEFORE the best-effort `emitter.abort()`, which
+		// may not exist. Three futures are still open at that moment: the void
+		// wins, the call settles anyway, or the terminal append fails. Asserting
+		// the first replaced an honestly-uncertain label with a confidently-wrong
+		// one — and no producer records that the void won, so the evidence for a
+		// terminal abort does not exist on the chain.
 		const output = renderReceipt(makeReceiptData({ event: anomalyEvent() }));
-		expect(output).toContain("ABORTED");
-		expect(output).not.toContain("PENDING");
+		expect(output).not.toContain("ABORTED");
 	});
 
 	it("does not claim the call was DENIED", () => {
@@ -88,11 +93,11 @@ describe("renderReceipt — an anomaly-killed call", () => {
 		expect(output).not.toContain("DENIED");
 	});
 
-	it("shows the reason from `message` — the field the producer writes", () => {
+	it("SURFACES the anomaly so an auditor knows the breaker fired", () => {
 		// The anomaly producer writes `message`; every other terminal writes
 		// `error`. Reading only `error` would render an abort with no reason at all.
 		const output = renderReceipt(makeReceiptData({ event: anomalyEvent() }));
-		expect(output).toContain("Aborted:");
+		expect(output).toContain("Anomaly:");
 		expect(output).toContain("token rate exceeded");
 	});
 
@@ -118,7 +123,6 @@ describe("renderReceipt — an anomaly-killed call", () => {
 	it("leaves a settled call rendering as SETTLED", () => {
 		const output = renderReceipt(makeReceiptData());
 		expect(output).toContain("SETTLED");
-		expect(output).not.toContain("ABORTED");
 	});
 });
 
@@ -173,13 +177,12 @@ describe("verifyTransaction — an anomaly that did NOT stop the call", () => {
 			expect(result.found).toBe(true);
 			// The billed call must not be reported as stopped, and its spend must show.
 			expect(result.receipt).toContain("SETTLED");
-			expect(result.receipt).not.toContain("ABORTED");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
-	it("a genuinely stopped call still resolves to the anomaly", () => {
+	it("an anomaly with no terminal surfaces the anomaly without asserting an outcome", () => {
 		// No settlement terminal exists, so nothing outranks the anomaly.
 		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-abort2-"));
 		try {
@@ -197,7 +200,10 @@ describe("verifyTransaction — an anomaly that did NOT stop the call", () => {
 			writeFileSync(join(auditDir, "events.jsonl"), `${JSON.stringify(ev)}\n`, "utf-8");
 
 			const result = verifyTransaction(dir, "tx_2");
-			expect(result.receipt).toContain("ABORTED");
+			// Still PENDING — the outcome genuinely is unresolved — but the anomaly
+			// is now visible rather than silent.
+			expect(result.receipt).toContain("Anomaly:");
+			expect(result.receipt).not.toContain("ABORTED");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 		}

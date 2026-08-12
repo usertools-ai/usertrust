@@ -222,29 +222,39 @@ function detectProvider(model: string): string {
 const DENIAL_KINDS = new Set(["policy_denied", "ledger_rejected"]);
 
 /**
- * An anomaly abort is the SAME defect class DENIED was added to fix, one step
- * further along: the anomaly detector tripped mid-stream, the governor voided
- * the hold, and the call died. It reaches here for two reasons that compound —
- * `anomaly_detected` carries the call's `transferId`, and `verifyTransaction`
- * selects the FIRST event matching that id, while an aborted stream never gets
- * as far as writing an `llm_call`. So the anomaly event IS the receipt's
- * subject.
+ * `anomaly_detected` is a DETECTION, not a terminal outcome — and this is the
+ * distinction the first cut of this change got wrong.
  *
- * It carries no `settled` field, so without this arm it fell through to the
- * `settled !== true` default and printed PENDING — "may still settle" for a
- * call that was killed and never will.
+ * The governor appends it and only THEN calls `emitter.abort()`, which is
+ * best-effort and may not exist on the provider's stream object. So at the moment
+ * this event is written, three futures are still open: the abort wins and the
+ * hold is voided; the abort is unavailable and the call settles normally; or the
+ * terminal append itself fails. Verification can also run while the call is still
+ * in flight.
  *
- * ABORTED rather than DENIED on purpose: a denial is a governance decision made
- * BEFORE the provider was called and nothing was spent, whereas an anomaly
- * abort interrupted a call already in flight, which may have consumed tokens
- * the void returned. Collapsing the two would tell an auditor a killed call was
- * refused.
+ * Rendering ABORTED from this event alone asserted the first of those three.
+ * That replaced an honestly-uncertain label with a confidently-wrong one: for an
+ * un-abortable stream it declared a call stopped while its hold was still pending
+ * and could still post, and suppressed the spend lines while doing it. PENDING
+ * was under-informative; ABORTED was false, on the artifact a third party is told
+ * to trust instead of us.
+ *
+ * So there is deliberately NO ABORTED status here. No producer records that the
+ * void won — `finalizeOnce("void")` leaves no event — so the evidence required to
+ * claim a terminal abort does not exist on the chain. What this change does
+ * instead is SURFACE the anomaly without asserting an outcome: the status stays
+ * PENDING, and the reason is printed so an auditor sees that the breaker fired
+ * and can go look. If an explicit abort-outcome event is added later, an ABORTED
+ * arm becomes derivable — from terminal evidence rather than from a detection.
+ *
+ * The other half of the original problem is real and is fixed at the selection
+ * layer in `index.ts`: when a terminal DOES exist for the transfer, it outranks
+ * this event, so a call that settled renders SETTLED with its spend.
  */
-const ABORT_KINDS = new Set(["anomaly_detected"]);
+const DETECTION_KINDS = new Set(["anomaly_detected"]);
 
 function resolveStatus(event: TransactionEvent): string {
 	if (DENIAL_KINDS.has(event.kind)) return "DENIED";
-	if (ABORT_KINDS.has(event.kind)) return "ABORTED";
 	if (event.kind === "llm_call_failed") return "FAILED";
 	if (event.data.settled === true) return "SETTLED";
 	return "PENDING";
@@ -273,11 +283,12 @@ export function renderReceipt(data: ReceiptData): string {
 	// A denial spent nothing, so it renders no spend lines — but its `error` is
 	// the whole point of the receipt and must still be shown.
 	const isDenied = DENIAL_KINDS.has(event.kind);
-	// An anomaly abort voided its hold, so it settled nothing and shows no spend
-	// either. Its reason arrives as `message` rather than `error` — the field the
-	// anomaly producer writes (`govern.ts:2077`) — so the reason block reads both.
-	const isAborted = ABORT_KINDS.has(event.kind);
-	const reason = event.data.error ?? (isAborted ? event.data.message : undefined);
+	// A detection carries no cost of its own, and asserting nothing about the
+	// outcome means asserting nothing about the spend either. Its reason arrives
+	// as `message` rather than `error` — the field the anomaly producer writes
+	// (`govern.ts:2077`) — so the reason block reads both.
+	const isDetection = DETECTION_KINDS.has(event.kind);
+	const reason = event.data.error ?? (isDetection ? event.data.message : undefined);
 	const allVerified = chainVerified && merkleVerified;
 
 	const lines: string[] = [];
@@ -297,19 +308,19 @@ export function renderReceipt(data: ReceiptData): string {
 	lines.push(row(`${dotted("  Model", forDisplay(model), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Provider", provider, WIDTH - 1)} `));
 
-	if (!isFailed && !isDenied && !isAborted && cost !== undefined) {
+	if (!isFailed && !isDenied && !isDetection && cost !== undefined) {
 		lines.push(row(`${dotted("  Spend", `${cumulativeSpend} UT`, WIDTH - 1)} `));
 		lines.push(row(`${dotted("  Conversion", formatUsd(cumulativeSpend), WIDTH - 1)} `));
 	}
 
 	lines.push(row(`${dotted("  Status", status, WIDTH - 1)} `));
 
-	if ((isFailed || isDenied || isAborted) && reason) {
+	if ((isFailed || isDenied || isDetection) && reason) {
 		lines.push(blank());
-		// "Aborted:" rather than "Error:" — the anomaly detector doing its job is
-		// not a fault, and labelling a working control as an error is how an
-		// operator learns to ignore it.
-		const errPrefix = isAborted ? "  Aborted: " : "  Error: ";
+		// "Anomaly:" rather than "Error:" or "Aborted:" — the detector firing is
+		// not a fault, and it is not proof the call stopped. It names what was
+		// observed, which is the most this event supports.
+		const errPrefix = isDetection ? "  Anomaly: " : "  Error: ";
 		const indent = " ".repeat(errPrefix.length);
 		const maxW = WIDTH - indent.length - 2;
 		const wrapped = wordWrap(forDisplay(reason), maxW);
