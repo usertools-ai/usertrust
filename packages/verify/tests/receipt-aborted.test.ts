@@ -19,7 +19,11 @@
  * the breaker killed.
  */
 
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { verifyTransaction } from "../src/index.js";
 import { type ReceiptData, renderReceipt, type TransactionEvent } from "../src/receipt.js";
 
 /** ESC, built from a code point so no literal control byte lives in this file. */
@@ -115,5 +119,87 @@ describe("renderReceipt — an anomaly-killed call", () => {
 		const output = renderReceipt(makeReceiptData());
 		expect(output).toContain("SETTLED");
 		expect(output).not.toContain("ABORTED");
+	});
+});
+
+describe("verifyTransaction — an anomaly that did NOT stop the call", () => {
+	/**
+	 * `govern.ts:2093-2094` appends `anomaly_detected` and only then calls
+	 * `emitter.abort()` IF the emitter has one. A provider whose stream object
+	 * lacks `abort` keeps streaming and settles normally, so the chain holds BOTH
+	 * the anomaly and a real `llm_call` for one transfer.
+	 *
+	 * Plain first-match selected the anomaly and rendered a settled, billed call
+	 * as ABORTED with its spend lines suppressed — an affirmative false statement
+	 * about money, which is worse than the PENDING the ABORTED arm replaced.
+	 */
+	it("resolves to the settlement terminal, not the earlier anomaly", () => {
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-abort-"));
+		try {
+			const auditDir = join(dir, "audit");
+			mkdirSync(auditDir, { recursive: true });
+			const lines = [
+				{
+					kind: "anomaly_detected",
+					actor: "local",
+					data: { anomalyKind: "token_rate", message: "rate exceeded", transferId: "tx_1" },
+					timestamp: "2026-08-12T00:00:00.000Z",
+					previousHash: "0".repeat(64),
+					sequence: 1,
+					hash: "a".repeat(64),
+				},
+				{
+					kind: "llm_call",
+					actor: "local",
+					data: {
+						model: "claude-haiku-4-5-20251001",
+						cost: 120,
+						settled: true,
+						transferId: "tx_1",
+					},
+					timestamp: "2026-08-12T00:00:01.000Z",
+					previousHash: "a".repeat(64),
+					sequence: 2,
+					hash: "b".repeat(64),
+				},
+			];
+			writeFileSync(
+				join(auditDir, "events.jsonl"),
+				`${lines.map((l) => JSON.stringify(l)).join("\n")}\n`,
+				"utf-8",
+			);
+
+			const result = verifyTransaction(dir, "tx_1");
+			expect(result.found).toBe(true);
+			// The billed call must not be reported as stopped, and its spend must show.
+			expect(result.receipt).toContain("SETTLED");
+			expect(result.receipt).not.toContain("ABORTED");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a genuinely stopped call still resolves to the anomaly", () => {
+		// No settlement terminal exists, so nothing outranks the anomaly.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-abort2-"));
+		try {
+			const auditDir = join(dir, "audit");
+			mkdirSync(auditDir, { recursive: true });
+			const ev = {
+				kind: "anomaly_detected",
+				actor: "local",
+				data: { anomalyKind: "token_rate", message: "rate exceeded", transferId: "tx_2" },
+				timestamp: "2026-08-12T00:00:00.000Z",
+				previousHash: "0".repeat(64),
+				sequence: 1,
+				hash: "c".repeat(64),
+			};
+			writeFileSync(join(auditDir, "events.jsonl"), `${JSON.stringify(ev)}\n`, "utf-8");
+
+			const result = verifyTransaction(dir, "tx_2");
+			expect(result.receipt).toContain("ABORTED");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

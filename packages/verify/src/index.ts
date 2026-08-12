@@ -650,8 +650,25 @@ export function verifyTransaction(
 		}
 	}
 
-	// Find the target event
-	const targetEvent = events.find((e) => e.data.transferId === txId);
+	// Find the target event.
+	//
+	// A SETTLEMENT TERMINAL WINS over any earlier event sharing the id. Plain
+	// first-match was ambiguous whenever a call produced more than one record for
+	// one transfer, and the anomaly path makes that concrete: `govern.ts` appends
+	// `anomaly_detected` and only then calls `emitter.abort()` IF the emitter has
+	// one. A provider whose stream object lacks `abort` keeps streaming and
+	// settles normally on `finalMessage`, so the chain holds both the anomaly and
+	// a real `llm_call` — and first-match selected the anomaly, rendering a
+	// settled, billed call as ABORTED with its spend lines suppressed. A receipt
+	// that hides spend is worse than one that says PENDING: it is an affirmative
+	// false statement about money rather than an incomplete one.
+	//
+	// `settled` is the discriminator because it is exactly what a terminal has and
+	// a supplementary record does not, and it covers the dynamic `<action.kind>`
+	// terminals that cannot be enumerated here. Denials and unaborted anomalies
+	// still resolve to themselves — no terminal exists for them to lose to.
+	const matching = events.filter((e) => e.data.transferId === txId);
+	const targetEvent = matching.find((e) => e.data.settled !== undefined) ?? matching[0];
 
 	if (targetEvent === undefined) {
 		return {
