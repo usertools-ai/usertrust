@@ -2741,10 +2741,32 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			throw new Error("TrustedClient has been destroyed");
 		}
 
+		// ── A VALUE YOU RE-READ IS NOT THE VALUE YOU CHECKED ──────────────────
+		// `action` is the CALLER's object and every `action.x` is a fresh property
+		// access on it, so a descriptor with a getter (or a Proxy) answers each
+		// read independently. Both guards below used to validate one read and the
+		// rest of the function used to take dozens more: `cost` was read seven
+		// times and `params` eight, which is the guard being walked THROUGH rather
+		// than around. Reproduced on this path: `params` answered the guard with
+		// `{path}` and the append with `{retries: NaN}`, so `execute()` ran, the
+		// `tool_use` event was refused, and a `tool_use_failed` was written for an
+		// action that SUCCEEDED; `cost` answered the AUD-466 guard with 50 and
+		// `inFlightHoldTotal` with NaN, which poisons `budgetRemaining()` for the
+		// life of the client.
+		//
+		// So: ONE read each, taken into a local AT the guard that validates it, and
+		// nothing below touches `action` again. This is the same D5 rule `settle()`
+		// applies to `chunksDelivered` / `model` / `transferId` — the check, the
+		// money and the record all come from one read. It pins the IDENTITY of
+		// `params`, not its contents: a caller who mutates in place the object it
+		// already handed us is a different (and deeper) hazard than one whose
+		// accessor answers twice.
+		const actionCost = action.cost;
+
 		// AUD-466: Validate cost to prevent budget inflation via negative values
-		if (!Number.isFinite(action.cost) || action.cost < 0) {
+		if (!Number.isFinite(actionCost) || actionCost < 0) {
 			throw new Error(
-				`action.cost must be a non-negative finite number, got ${String(action.cost)}`,
+				`action.cost must be a non-negative finite number, got ${String(actionCost)}`,
 			);
 		}
 
@@ -2769,11 +2791,15 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 		// `params` land in `data`. `params` is `Record<string, unknown>`, so unlike
 		// the others it can carry a NaN, a function or a symbol from perfectly
 		// well-typed caller code — which is why it is the one that actually fires.
-		assertAuditRepresentable(typeof action.kind === "string" ? action.kind : "action", {
-			"action.kind": action.kind,
-			"action.name": action.name,
-			"action.actor": action.actor,
-			"action.params": action.params,
+		const actionKind = action.kind;
+		const actionName = action.name;
+		const actionActor = action.actor;
+		const actionParams = action.params;
+		assertAuditRepresentable(typeof actionKind === "string" ? actionKind : "action", {
+			"action.kind": actionKind,
+			"action.name": actionName,
+			"action.actor": actionActor,
+			"action.params": actionParams,
 		});
 
 		inFlightCount++;
@@ -2801,7 +2827,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				await persistSpendLedger(vaultBase, budgetSpent);
 			};
 
-			const actor = action.actor ?? "local";
+			const actor = actionActor ?? "local";
 			const transferId = trustId("tx");
 
 			// Per-invocation denial evidence — see the identical record on the LLM
@@ -2809,7 +2835,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			const denial: DenialRecord = { denialClass: "policy" };
 
 			// a. Circuit breaker check (keyed by action kind)
-			const cb = breaker.get(action.kind as unknown as LLMClientKind);
+			const cb = breaker.get(actionKind as unknown as LLMClientKind);
 			cb.allowRequest();
 
 			// b. Acquire mutex for budget atomicity. The attributed-envelope preflight
@@ -2854,12 +2880,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							? envelopeTierFields(envelope.attribution, envelopeRemaining, Date.now())
 							: { budgetFractionRemaining: undefined, budgetRunwayHours: undefined };
 					const policyResult = evaluatePolicy(policyRules, {
-						...(action.params ?? {}),
-						action_kind: action.kind,
-						action_name: action.name,
-						estimated_cost: action.cost,
+						...(actionParams ?? {}),
+						action_kind: actionKind,
+						action_name: actionName,
+						estimated_cost: actionCost,
 						budget_remaining: gateRemaining,
-						budget_remaining_after: gateRemaining - action.cost,
+						budget_remaining_after: gateRemaining - actionCost,
 						tier: config.tier,
 						// P1-BUDGET-TIER-SHADOW: trusted-host input, asserted after the spread
 						// so `action.params` cannot inject a budget tier's own inputs. REAL for
@@ -2883,7 +2909,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						denial.denialClass = classifyPolicyDenial(policyResult.hardViolations);
 						denial.policyRules = toDenialRuleRefs(policyResult.hardViolations);
 						if (denial.denialClass === "budget_gate") {
-							denial.budget = { estimatedCost: action.cost, budgetRemaining: gateRemaining };
+							denial.budget = { estimatedCost: actionCost, budgetRemaining: gateRemaining };
 						}
 						throw new PolicyDeniedError(
 							reason,
@@ -2892,8 +2918,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					}
 
 					// d. PII check on action params
-					if (config.pii !== "off" && action.params != null) {
-						const piiResult = detectPII(action.params);
+					if (config.pii !== "off" && actionParams != null) {
+						const piiResult = detectPII(actionParams);
 						if (piiResult.found && config.pii === "block") {
 							denial.denialClass = "pii";
 							denial.piiTypes = piiResult.types;
@@ -2905,8 +2931,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					}
 
 					// d2. Injection detection on action params
-					if (config.injection !== "off" && action.params != null) {
-						const injectionResult = detectInjection(action.params);
+					if (config.injection !== "off" && actionParams != null) {
+						const injectionResult = detectInjection(actionParams);
 						if (injectionResult.detected) {
 							if (config.injection === "block") {
 								denial.denialClass = "injection";
@@ -2920,12 +2946,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							await audit
 								.appendEvent({
 									kind: "injection_detected",
-									actor: action.actor ?? "local",
+									actor: actionActor ?? "local",
 									data: {
 										patterns: injectionResult.patterns,
 										score: injectionResult.score,
-										actionName: action.name,
-										actionKind: action.kind,
+										actionName,
+										actionKind,
 										...costCenterAudit,
 									},
 								})
@@ -2939,8 +2965,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					if (proxyConn != null && !isDryRun) {
 						try {
 							const proxyResult = await proxyConn.spend({
-								model: action.name,
-								estimatedCost: action.cost,
+								model: actionName,
+								estimatedCost: actionCost,
 								actor,
 							});
 							proxyTransferId = proxyResult.transferId;
@@ -2953,7 +2979,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						try {
 							await engine.spendPending({
 								transferId,
-								amount: action.cost,
+								amount: actionCost,
 								// Attributed → the envelope pays. Unattributed → the key is
 								// OMITTED, not passed as undefined, so the engine's default (the
 								// session holding wallet) is reached by exactly the path it was
@@ -2979,7 +3005,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						envelopeDebited = envelope !== undefined;
 					}
 
-					inFlightHoldTotal += sessionShare(action.cost);
+					inFlightHoldTotal += sessionShare(actionCost);
 				} finally {
 					releaseBudgetLock();
 				}
@@ -2991,10 +3017,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						error: denialErr,
 						record: denial,
 						fields: {
-							actionKind: action.kind,
-							actionName: action.name,
+							actionKind,
+							actionName,
 							transferId,
-							estimatedCost: action.cost,
+							estimatedCost: actionCost,
 							...costCenterAudit,
 						},
 					});
@@ -3011,7 +3037,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					const releaseLock = await budgetMutex.acquire();
 					// `sessionShare` on both sides: skipping the increment obliges us to
 					// skip the decrement, or the counter drifts negative.
-					inFlightHoldTotal -= sessionShare(action.cost);
+					inFlightHoldTotal -= sessionShare(actionCost);
 					if (cost !== undefined) {
 						budgetSpent += sessionShare(cost);
 					}
@@ -3024,12 +3050,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				// i. Prepare params for audit — redact PII if configured.
 				let auditParams: Record<string, unknown> | undefined;
-				if (action.params != null) {
+				if (actionParams != null) {
 					if (config.pii === "warn" || config.pii === "redact") {
-						const redacted = redactPII(action.params);
+						const redacted = redactPII(actionParams);
 						auditParams = redacted.data as Record<string, unknown>;
 					} else {
-						auditParams = action.params;
+						auditParams = actionParams;
 					}
 				}
 
@@ -3042,11 +3068,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				let actionAuditFailed = false;
 				try {
 					const auditEvent = await audit.appendEvent({
-						kind: action.kind,
+						kind: actionKind,
 						actor,
 						data: {
-							actionName: action.name,
-							cost: action.cost,
+							actionName,
+							cost: actionCost,
 							settled: true,
 							transferId,
 							...costCenterAudit,
@@ -3060,7 +3086,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					actionAuditFailed = true;
 					callAuditDegraded = true;
 					process.stderr.write(
-						`[usertrust] audit degraded: failed to write ${action.kind} event for ${transferId}\n`,
+						`[usertrust] audit degraded: failed to write ${actionKind} event for ${transferId}\n`,
 					);
 				}
 
@@ -3075,7 +3101,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				// Release in-flight hold and commit budget under mutex — money moves only
 				// AFTER the action is audited.
-				await releaseHoldAndCommit(action.cost);
+				await releaseHoldAndCommit(actionCost);
 				await persistSessionSpend();
 
 				// g. Circuit breaker: record success
@@ -3086,7 +3112,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				if (engine != null && !isDryRun) {
 					try {
 						// Post the ACTUAL cost (RECON #3).
-						await engine.postPendingSpend(transferId, action.cost);
+						await engine.postPendingSpend(transferId, actionCost);
 					} catch (postErr) {
 						settled = false;
 						await audit
@@ -3094,9 +3120,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								kind: "settlement_ambiguous",
 								actor,
 								data: {
-									actionKind: action.kind,
-									actionName: action.name,
-									cost: action.cost,
+									actionKind,
+									actionName,
+									cost: actionCost,
 									transferId,
 									error:
 										postErr instanceof Error
@@ -3114,7 +3140,7 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				if (proxyConn != null && !isDryRun) {
 					try {
-						await proxyConn.settle(proxyTransferId ?? transferId, action.cost);
+						await proxyConn.settle(proxyTransferId ?? transferId, actionCost);
 					} catch (postErr) {
 						settled = false;
 						await audit
@@ -3122,9 +3148,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 								kind: "settlement_ambiguous",
 								actor,
 								data: {
-									actionKind: action.kind,
-									actionName: action.name,
-									cost: action.cost,
+									actionKind,
+									actionName,
+									cost: actionCost,
 									transferId,
 									error:
 										postErr instanceof Error
@@ -3153,12 +3179,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					writeReceipt(
 						vaultPath,
 						{
-							kind: action.kind,
+							kind: actionKind,
 							subsystem: "trust",
 							actor,
 							data: {
-								actionName: action.name,
-								cost: action.cost,
+								actionName,
+								cost: actionCost,
 								settled,
 								transferId,
 								...costCenterAudit,
@@ -3183,16 +3209,16 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 
 				const receipt: TrustReceipt = {
 					transferId,
-					cost: action.cost,
+					cost: actionCost,
 					budgetRemaining,
 					auditHash: callAuditDegraded ? "AUDIT_DEGRADED" : auditHash,
 					chainPath: join(VAULT_DIR, "audit"),
 					receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
 					settled,
-					model: action.name,
-					provider: action.kind,
+					model: actionName,
+					provider: actionKind,
 					timestamp: new Date().toISOString(),
-					actionKind: action.kind,
+					actionKind,
 					...(actionBudget !== undefined ? { budget: actionBudget } : {}),
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
 					...(proxyConn != null ? { proxyStub: true as const } : {}),
@@ -3226,10 +3252,10 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// Audit the failure
 				await audit
 					.appendEvent({
-						kind: `${action.kind}_failed`,
+						kind: `${actionKind}_failed`,
 						actor,
 						data: {
-							actionName: action.name,
+							actionName,
 							error: (() => {
 								const raw = err instanceof Error ? err.message : String(err);
 								return config.pii === "warn" || config.pii === "redact"

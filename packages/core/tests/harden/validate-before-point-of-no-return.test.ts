@@ -538,6 +538,302 @@ describe("HARDEN: validate caller-supplied audit-bound values before the point o
 		await governed.destroy();
 	});
 
+	// ── the SAME re-read class, on the action path (F2) ──
+	//
+	// `governAction` had both of `settle()`'s defects at once, and worse odds:
+	// `action` is the caller's object and the function used to take SEVEN fresh
+	// reads of `cost` and EIGHT of `params` after validating one of each. That is
+	// the guard being walked THROUGH, not around — the boundary was never wrong
+	// about the value it saw, it was shown a different one.
+	//
+	// `cost` is the more dangerous of the two, because it is the money: the
+	// AUD-466 finite/non-negative check, the PENDING hold, the `budgetSpent`
+	// commit, the POST amount and the receipt were five independent reads that a
+	// live object can answer five different ways.
+
+	it("governAction() reads a LIVE action.params exactly once — the value it validated is the value it writes", async () => {
+		const governed = await trust(makeAnthropicMock(), {
+			dryRun: true,
+			budget: 10_000,
+			vaultBase,
+		});
+		const execute = vi.fn(async () => "ran");
+
+		let reads = 0;
+		const action = {
+			kind: "tool_use",
+			name: "file_read",
+			cost: 50,
+			// Answers the guard with a recordable object and everything after it
+			// with one the chain cannot carry — the honest miniature of a caller
+			// whose descriptor is computed, or a Proxy over live request state.
+			get params(): Record<string, unknown> {
+				reads++;
+				return reads === 1 ? { path: "/etc/hosts" } : { retries: Number.NaN };
+			},
+		};
+
+		const { receipt } = await governed.governAction(action, execute);
+
+		// 1. ONE read. Exact, so a re-read cannot be reintroduced without failing
+		//    here. Pre-fix this was 8.
+		expect(reads).toBe(1);
+
+		// 2. The action ran and was RECORDED AS HAVING RUN. Pre-fix `execute()`
+		//    ran, the `tool_use` append was refused, and the catch wrote a
+		//    `tool_use_failed` for an action that had SUCCEEDED — the chain
+		//    actively lied about a side effect that had already happened.
+		expect(execute).toHaveBeenCalledTimes(1);
+		expect(receipt.settled).toBe(true);
+
+		const events = readEvents(vaultBase);
+		expect(events.filter((e) => e.kind === "tool_use")).toHaveLength(1);
+		expect(events.filter((e) => e.kind === "tool_use_failed")).toHaveLength(0);
+
+		// 3. The chain carries the params the guard approved, not a later read.
+		const toolUse = events.find((e) => e.kind === "tool_use") as { data: Record<string, unknown> };
+		expect(toolUse.data.params).toEqual({ path: "/etc/hosts" });
+
+		// 4. The money moved exactly once, for this action.
+		expect(receipt.budgetRemaining).toBe(10_000 - 50);
+
+		await governed.destroy();
+	});
+
+	it("governAction() reads a LIVE action.cost exactly once — the hold, the commit, the POST and the receipt are ONE number", async () => {
+		const governed = await trust(makeAnthropicMock(), {
+			dryRun: true,
+			budget: 10_000,
+			vaultBase,
+		});
+		const execute = vi.fn(async () => "ran");
+
+		let reads = 0;
+		const action = {
+			kind: "tool_use",
+			name: "file_read",
+			params: { path: "/etc/hosts" },
+			// Honest for the AUD-466 guard, unrecordable for everything after it.
+			get cost(): number {
+				reads++;
+				return reads === 1 ? 50 : Number.NaN;
+			},
+		};
+
+		const { receipt } = await governed.governAction(action, execute);
+
+		// 1. ONE read. Pre-fix this was 7.
+		expect(reads).toBe(1);
+
+		// 2. The cost the guard approved is the cost that was held, committed,
+		//    posted and receipted.
+		expect(receipt.cost).toBe(50);
+		expect(receipt.budgetRemaining).toBe(10_000 - 50);
+		const toolUse = readEvents(vaultBase).find((e) => e.kind === "tool_use") as {
+			data: Record<string, unknown>;
+		};
+		expect(toolUse.data.cost).toBe(50);
+
+		// 3. THE MONEY PROOF, and the reason this one is worse than the params
+		//    twin. `inFlightHoldTotal += action.cost` took its own read, so pre-fix
+		//    the counter absorbed a NaN and `budgetRemaining` was NaN for the
+		//    REST OF THE CLIENT'S LIFE — every later call's gate, receipt and
+		//    `budget_remaining_after` poisoned by one bad read on an unrelated
+		//    action. A second, ordinary action proves the counter is still a
+		//    number.
+		const next = await governed.governAction(
+			{ kind: "tool_use", name: "http_get", cost: 10, params: { url: "/x" } },
+			execute,
+		);
+		expect(next.receipt.budgetRemaining).toBe(10_000 - 50 - 10);
+		expect(Number.isNaN(next.receipt.budgetRemaining)).toBe(false);
+
+		await governed.destroy();
+	});
+
+	it("governAction() refuses a live action.params whose FIRST read is unrecordable — before execute(), and it retries clean", async () => {
+		const governed = await trust(makeAnthropicMock(), {
+			dryRun: true,
+			budget: 10_000,
+			vaultBase,
+		});
+		const execute = vi.fn(async () => "ran");
+
+		let reads = 0;
+		const err = await governed
+			.governAction(
+				{
+					kind: "tool_use",
+					name: "file_read",
+					cost: 50,
+					get params(): Record<string, unknown> {
+						reads++;
+						return { retries: Number.NaN };
+					},
+				},
+				execute,
+			)
+			.then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+		expect(err).toBeInstanceOf(AuditDataInvalidError);
+		expect((err as Error).message).toContain("action.params");
+		// The guard takes ONE read and judges it — it does not sample the caller's
+		// object repeatedly looking for a bad answer.
+		expect(reads).toBe(1);
+		// Exact, not a lower bound: `execute()` is the point of no return here.
+		expect(execute).toHaveBeenCalledTimes(0);
+		expect(readEvents(vaultBase)).toHaveLength(0);
+
+		// THE LOAD-BEARING ASSERTION: nothing was left half-done, so a corrected
+		// descriptor runs and settles on the same client.
+		const { receipt } = await governed.governAction(
+			{ kind: "tool_use", name: "file_read", cost: 50, params: { retries: 3 } },
+			execute,
+		);
+		expect(receipt.settled).toBe(true);
+		expect(receipt.budgetRemaining).toBe(10_000 - 50);
+		expect(execute).toHaveBeenCalledTimes(1);
+		expect(readEvents(vaultBase).filter((e) => e.kind === "tool_use")).toHaveLength(1);
+
+		await governed.destroy();
+	});
+
+	// ── headless authorize(): validate at CAPTURE, not at RECORD ──
+	//
+	// The ruling this section pins:
+	//
+	//   Validate before an irreversible step that CREATES an obligation to
+	//   record. Never block a step that DISCHARGES one. Validate at CAPTURE, not
+	//   at RECORD.
+	//
+	// `auth.model` reaches `abort()` from `params.model`, captured one call
+	// earlier. `abort()` DISCHARGES an obligation — it voids a hold and gives the
+	// caller their money back — so it must never be blocked, and a guard there
+	// would skip the VOID and strand the hold. The fix therefore moves upstream
+	// to the moment the value entered, where nothing is held yet and refusing
+	// costs the caller only a corrected call.
+	//
+	// Reproduced against the unguarded version, on `local` scope (where
+	// `resolveRates` never touches `model` as a string, so nothing incidentally
+	// rejects it): `authorize({ model: Symbol() })` returned a handle and placed
+	// the hold; `abort()` then released the money and threw
+	// `AuditDataInvalidError` with NO event on the chain — silent audit loss on
+	// the release path.
+
+	it("authorize() refuses an unrecordable model at CAPTURE — before the hold exists", async () => {
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+			endpoint: { class: "local" },
+		});
+		const budgetBefore = gov.budgetRemaining();
+
+		const err = await gov
+			.authorize({ model: Symbol("not-a-model") as unknown as string, estimatedInputTokens: 1_000 })
+			.then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+
+		// 1. It throws, naming the caller's own field.
+		expect(err).toBeInstanceOf(AuditDataInvalidError);
+		expect((err as Error).message).toContain("AuthorizeParams.model");
+		expect((err as AuditDataInvalidError).eventKind).toBe("llm_call");
+
+		// 2. NOTHING was reserved. This is the whole point of capture-time: there
+		//    is no hold to strand, so no terminal has to choose between releasing
+		//    money and writing a record. Pre-fix the hold landed (budget 100000 →
+		//    99999) and only `abort()` discovered the problem.
+		expect(gov.budgetRemaining()).toBe(budgetBefore);
+		expect(readEvents(vaultBase)).toHaveLength(0);
+
+		// 3. The governor is clean — a corrected model authorizes and settles.
+		const auth = await gov.authorize({ model: "llama3", estimatedInputTokens: 1_000 });
+		const receipt = await gov.settle(auth, { inputTokens: 10, outputTokens: 5 });
+		expect(receipt.settled).toBe(true);
+		expect(gov.budgetRemaining()).toBe(100_000 - receipt.cost);
+
+		await gov.destroy();
+	});
+
+	it("an Authorization that EXISTS always carries a recordable model — the property, not the abort path", async () => {
+		// Asserting the PROPERTY rather than testing `abort()` directly is the
+		// point of the ruling: `abort()` is deliberately unguarded, so the
+		// guarantee has to come from the fact that no handle carrying an
+		// unrecordable model can be constructed at all.
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+			endpoint: { class: "local" },
+		});
+
+		const unrecordable: unknown[] = [
+			Symbol("s"),
+			() => "sneaky",
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+			{ nested: { deep: Number.NaN } },
+		];
+		for (const bad of unrecordable) {
+			await expect(gov.authorize({ model: bad as string })).rejects.toBeInstanceOf(
+				AuditDataInvalidError,
+			);
+		}
+		// Not one of them left a hold behind.
+		expect(gov.budgetRemaining()).toBe(100_000);
+		expect(readEvents(vaultBase)).toHaveLength(0);
+
+		// And the handles that DO exist satisfy the property by construction: the
+		// same check the writer will run at the terminal already passes.
+		const auth = await gov.authorize({ model: "llama3", estimatedInputTokens: 1_000 });
+		expect(() =>
+			assertAuditRepresentable("llm_call", { "Authorization.model": auth.model }),
+		).not.toThrow();
+
+		// So the discharge path meets a value it can write: `abort()` voids the
+		// hold AND records it, with no guard of its own.
+		await gov.abort(auth, new Error("provider exploded"));
+		expect(gov.budgetRemaining()).toBe(100_000);
+		const failures = readEvents(vaultBase).filter((e) => e.kind === "llm_call_failed");
+		expect(failures).toHaveLength(1);
+		expect((failures[0] as { data: Record<string, unknown> }).data.model).toBe("llama3");
+
+		await gov.destroy();
+	});
+
+	it("abort() is still UNGUARDED — it releases the hold first and never refuses", async () => {
+		// A regression pin for the ruling's other half. `authorize()` cannot stop
+		// a caller from mutating the handle it already owns, so `abort()` can
+		// still be handed an unrecordable model. It must STILL void: the audit
+		// line is lost (loudly — the writer throws), but the caller's money comes
+		// back. A guard added to `abort()` would invert that and strand the hold,
+		// which is precisely the trade the ruling rejects.
+		const gov = await createGovernor({
+			dryRun: true,
+			budget: 100_000,
+			vaultBase,
+			endpoint: { class: "local" },
+		});
+		const auth = await gov.authorize({ model: "llama3", estimatedInputTokens: 1_000 });
+		// The hold is live and the session's exposure reflects it.
+		expect(gov.budgetRemaining()).toBeLessThan(100_000);
+
+		(auth as unknown as { model: unknown }).model = Symbol("mutated-after-capture");
+
+		await expect(gov.abort(auth, new Error("boom"))).rejects.toBeInstanceOf(AuditDataInvalidError);
+
+		// THE ASSERTION THAT MATTERS: the money came back anyway. The VOID runs
+		// before the append, and no guard was added ahead of it.
+		expect(gov.budgetRemaining()).toBe(100_000);
+
+		await gov.destroy();
+	});
+
 	// ── the proxy's `model`: the STREAM terminal (fix round 1 finding 2) ──
 
 	it("the STREAM terminal's model is refused at entry — before the money commits AND before the stream is consumed", async () => {

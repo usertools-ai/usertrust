@@ -838,6 +838,40 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const actor = params.actor ?? "local";
 			const messages = params.messages ?? [];
 
+			// ── VALIDATE AT CAPTURE, NOT AT RECORD ────────────────────────────
+			// Validate before an irreversible step that CREATES an obligation to
+			// record. Never block a step that DISCHARGES one. Validate at CAPTURE,
+			// not at RECORD — by the time you are recording, refusing is too late
+			// to be safe.
+			//
+			// `model` is caller-supplied, it is CAPTURED onto the `Authorization`
+			// below, and it is written into `llm_call.data.model` by `settle()` and
+			// into `llm_call_failed.data.model` by `abort()` — two calls that can
+			// happen minutes later, on a different task. `settle()` creates the
+			// obligation (money moves, the record must exist), so it guards; but
+			// `abort()` DISCHARGES one — its job is to void a hold and release the
+			// caller's money — and a guard there would skip the VOID and strand the
+			// hold. So `abort()` gets no guard, and instead is made unable to meet
+			// an unrecordable value in the first place.
+			//
+			// Here is where that value ENTERS: before the circuit breaker, before
+			// rate resolution, before the budget mutex, before the PENDING hold —
+			// before there is any obligation at all. Refusing costs the caller a
+			// corrected call; refusing at `abort()` would cost them a stranded hold.
+			// Reproduced against the unguarded version, on the `local` scope where
+			// `resolveRates` never touches `model` as a string: `authorize()`
+			// accepted a symbol, the hold landed, and `abort()` then released the
+			// money and threw `AuditDataInvalidError` with NO event on the chain —
+			// audit loss on exactly the path whose job is releasing money.
+			//
+			// The property this buys, which is what the tests assert: an
+			// Authorization that EXISTS always carries a recordable `model`, so the
+			// terminals cannot be handed one that they could not write.
+			// `transferId` and `proxyTransferId` are ours, `createdAt` is a clock
+			// read, and `estimatedCost` is computed — `model` is the only
+			// caller-supplied value on the handle that reaches the chain.
+			assertAuditRepresentable("llm_call", { "AuthorizeParams.model": model });
+
 			// Per-invocation denial evidence, filled by the throw sites and read by
 			// the boundaries below. A closure local, never an error property — see
 			// `govern.ts` for the full rationale.
