@@ -934,6 +934,21 @@ export const FIELD_OPERATORS = [
 	"regex",
 ] as const satisfies readonly FieldOperator[];
 
+/**
+ * Exhaustiveness in the OTHER direction.
+ *
+ * `satisfies readonly FieldOperator[]` only checks that everything listed is a
+ * member of the union — it does not check that every member is listed. A new
+ * `FieldOperator` would therefore compile cleanly while `z.enum(FIELD_OPERATORS)`
+ * rejected every policy file using it, which is the same shape as the defects
+ * this file exists to close: the guard reports success for a set it does not
+ * cover. This assertion fails to compile until the new member is added here,
+ * naming it in the error.
+ */
+type UnlistedOperator = Exclude<FieldOperator, (typeof FIELD_OPERATORS)[number]>;
+const _FIELD_OPERATORS_EXHAUSTIVE: UnlistedOperator extends never ? true : UnlistedOperator = true;
+void _FIELD_OPERATORS_EXHAUSTIVE;
+
 /** Operators whose `value` must be a number. */
 const NUMERIC_VALUE_OPERATORS = new Set<FieldOperator>(["gt", "gte", "lt", "lte"]);
 /** Operators whose `value` must be an array. */
