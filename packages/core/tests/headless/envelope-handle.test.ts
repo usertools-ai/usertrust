@@ -1059,3 +1059,147 @@ describe("abort() discharges against the governor's own numbers, not the caller'
 		await gov.destroy();
 	});
 });
+
+// ---------------------------------------------------------------------------
+// settle() RELEASES: the amount comes from the capture that recorded the increment
+// ---------------------------------------------------------------------------
+//
+// The SIBLING of the abort defect above, 340 lines earlier and left standing when
+// abort was fixed. `settle()`'s release read `inFlightHoldTotal -= auth.estimatedCost`
+// — the caller's handle — while the flag beside it (`capture.sessionAccounted`) and
+// the whole of `abort()`'s release already came from the governor's own record.
+//
+// Two damages, and the position of the read is what makes the first unrecoverable.
+// It sits AFTER `activeAuths.delete(transferId)` claims the entry and BEFORE the
+// POST:
+//   - a THROWING getter rejects settle with the authorization already discharged
+//     from `activeAuths` and the pending transfer neither posted nor voided. There
+//     is no handle left to retry with and no terminal left to reach the ledger, so
+//     the hold is stranded for the life of the process — the same outcome the abort
+//     ruling exists to prevent, on the terminal that reaches it first.
+//   - a LYING getter resizes the release: a number larger than the hold drives
+//     `inFlightHoldTotal` NEGATIVE and lifts `budgetRemaining()` above the
+//     configured budget, which is money nobody allocated (measured on `abort()`:
+//     150_000 against a ceiling of 100_000).
+//
+// The enabling field already exists: `capture.hold` is the write-premium-inflated
+// number `inFlightHoldTotal += estCost` actually added at authorize. Deliberately
+// NOT `capture.meteredEstimate`, which is the un-inflated metering figure and would
+// leave the counter permanently short by the premium the reservation took.
+
+describe("settle() releases the hold the governor placed, not a number the caller answers with", () => {
+	let vaultBase: string;
+
+	beforeEach(() => {
+		vaultBase = join(tmpdir(), `headless-envelope-settle-${randomUUID()}`);
+		mkdirSync(vaultBase, { recursive: true });
+		process.env.USERTRUST_TEST = "1";
+		vi.mocked(evaluatePolicy).mockClear();
+	});
+
+	afterEach(() => {
+		process.env.USERTRUST_TEST = "";
+		try {
+			rmSync(vaultBase, { recursive: true, force: true });
+		} catch {
+			// best-effort
+		}
+	});
+
+	async function governorWith(engine: EngineHandle, audit: AuditHandle): Promise<Governor> {
+		return await createGovernor({
+			budget: 100_000,
+			vaultBase,
+			parentUserId: PARENT,
+			_engine: engine,
+			_audit: audit,
+		});
+	}
+
+	it("settles an UNATTRIBUTED call whose handle's estimatedCost accessor throws, and still POSTS", async () => {
+		// The session-accounted path is the one that reaches the release, so this is
+		// the authorization class the throwing accessor actually breaks. Pre-fix the
+		// throw lands between the `activeAuths.delete` and the POST: settle rejects,
+		// the entry is gone, the pending transfer is still open.
+		const engine = makeMockEngine({ balance: 50_000 });
+		const audit = makeMockAudit();
+		const gov = await governorWith(engine, audit);
+
+		const auth = await gov.authorize(AUTHORIZE);
+		const transferId = auth.transferId;
+		expect(gov.budgetRemaining()).toBeLessThan(100_000);
+		Object.defineProperty(auth, "estimatedCost", {
+			configurable: true,
+			get(): number {
+				throw new Error("hostile accessor");
+			},
+		});
+
+		const receipt = await gov.settle(auth, { inputTokens: 80, outputTokens: 200 });
+
+		// The spend reached the ledger against the id the liveness check approved,
+		// and nothing was voided behind it.
+		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
+		expect(engine.postPendingSpend.mock.calls[0]?.[0]).toBe(transferId);
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(receipt.settled).toBe(true);
+		expect(receipt.cost).toBeGreaterThan(0);
+		// The hold is released in full and the spend committed: the ONLY movement
+		// left in the session numbers is this call's actual cost.
+		expect(gov.budgetRemaining()).toBe(100_000 - receipt.cost);
+		expect(receipt.budgetRemaining).toBe(100_000 - receipt.cost);
+		expect(await readPersistedSpend(vaultBase)).toBe(receipt.cost);
+		// The call is recorded, not lost to a refusal after the money moved.
+		expect(auditData(audit, "llm_call").transferId).toBe(transferId);
+
+		await gov.destroy();
+	});
+
+	it("releases the hold the governor PLACED, not the number the handle reports at settle", async () => {
+		// The quieter half: a live read lets the caller resize the release. A getter
+		// answering larger than the hold drives `inFlightHoldTotal` negative and hands
+		// the session more headroom than its configured budget.
+		const engine = makeMockEngine({ balance: 50_000 });
+		const gov = await governorWith(engine, makeMockAudit());
+
+		const auth = await gov.authorize(AUTHORIZE);
+		const placed = auth.estimatedCost;
+		expect(placed).toBeGreaterThan(0);
+		Object.defineProperty(auth, "estimatedCost", {
+			configurable: true,
+			get: (): number => placed + 50_000,
+		});
+
+		const receipt = await gov.settle(auth, { inputTokens: 80, outputTokens: 200 });
+
+		expect(gov.budgetRemaining()).toBe(100_000 - receipt.cost);
+		expect(gov.budgetRemaining()).toBeLessThanOrEqual(100_000);
+
+		await gov.destroy();
+	});
+
+	it("leaves an ATTRIBUTED settle's session numbers where they were, whatever the handle answers", async () => {
+		// The symmetry pin. `sessionAccounted` is false for an attributed hold, so
+		// there is no release to make and the amount must not be consulted at all —
+		// a hostile accessor changes nothing, on either side of the fix.
+		const engine = makeMockEngine({ balance: 50_000 });
+		const gov = await governorWith(engine, makeMockAudit());
+
+		const auth = await withCostCenter(COST_CENTER, () => gov.authorize(AUTHORIZE), SCOPE_OPTS);
+		expect(gov.budgetRemaining()).toBe(100_000);
+		Object.defineProperty(auth, "estimatedCost", {
+			configurable: true,
+			get(): number {
+				throw new Error("hostile accessor");
+			},
+		});
+
+		const receipt = await gov.settle(auth, { inputTokens: 80, outputTokens: 200 });
+
+		expect(receipt.settled).toBe(true);
+		expect(gov.budgetRemaining()).toBe(100_000);
+		expect(await readPersistedSpend(vaultBase)).toBeUndefined();
+
+		await gov.destroy();
+	});
+});

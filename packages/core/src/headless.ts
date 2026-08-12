@@ -235,10 +235,14 @@ interface AuthorizationCapture {
 	 * MUCH, and neither may come from the caller's handle. The public
 	 * `estimatedCost` is a property access on a caller-owned object, so a getter
 	 * can answer with a different number at the release than the increment used
-	 * (measured on `abort()`: `budgetRemaining()` 150_000 against a configured
-	 * budget of 100_000) or throw and stop `abort()` reaching the VOID at all.
-	 * A discharge path must not be able to be blocked, or resized, by the party
-	 * being discharged.
+	 * (measured: `budgetRemaining()` 150_000 on `abort()` and 149_967 on
+	 * `settle()`, both against a configured budget of 100_000) or throw and stop
+	 * the terminal reaching the ledger at all. A discharge path must not be able
+	 * to be blocked, or resized, by the party being discharged.
+	 *
+	 * BOTH terminals read this, not one: `abort()`'s release and `settle()`'s were
+	 * the same defect 340 lines apart, and fixing only the one a review named would
+	 * have left the other reachable by exactly the handle the first now refuses.
 	 */
 	readonly hold: number;
 	/**
@@ -1425,8 +1429,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				);
 			} else {
 				// FIX: the un-inflated metering estimate, never the fattened hold
-				// carried on `auth.estimatedCost` (see the `meteredEstimate`
-				// comment on `AuthorizationCapture`).
+				// (`capture.hold`, reported to the caller as `auth.estimatedCost`) —
+				// see the `meteredEstimate` comment on `AuthorizationCapture`. The two
+				// live side by side on the capture on purpose: this one answers "what
+				// did the call cost", `hold` answers "what did the reservation take",
+				// and the release below must use the second.
 				actualCost = capture.meteredEstimate;
 			}
 
@@ -1439,15 +1446,35 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// SESSION accounting, skipped in full when the ENVELOPE paid: this hold was
 			// never counted into `inFlightHoldTotal`, so releasing it here would drive
 			// that counter negative, and `budgetSpent` must not absorb envelope money it
-			// would then persist into the next run's holding-wallet seed. The flag is the
-			// authorize-time record, so the release can never be asymmetric with the
-			// increment.
+			// would then persist into the next run's holding-wallet seed.
+			//
+			// BOTH HALVES OF THE RELEASE COME FROM THE AUTHORIZE-TIME CAPTURE — WHETHER
+			// (`sessionAccounted`) and HOW MUCH (`hold`) — so it is symmetric with the
+			// increment by construction and the caller can reach neither. `hold` is the
+			// write-premium-inflated number `inFlightHoldTotal += estCost` actually
+			// added, deliberately NOT `capture.meteredEstimate` (the un-inflated
+			// metering figure, which would leave the counter permanently short by the
+			// premium the reservation took — and which is what the "no usage reported"
+			// fallback above charges, a different number for a different question).
+			//
+			// This used to read `auth.estimatedCost`, i.e. a property access on the
+			// caller's own object, and its POSITION is what made that unrecoverable
+			// rather than merely wrong: it sits AFTER the `activeAuths.delete` that
+			// claims the entry and BEFORE the POST. A throwing getter therefore rejected
+			// settle with the authorization already discharged and the pending transfer
+			// neither posted nor voided — no handle left to retry with, no terminal left
+			// to reach the ledger, the hold stranded for the life of the process. That is
+			// the failure the abort ruling exists to prevent, arriving on the terminal
+			// that reaches it first. A getter that merely LIES was the quieter half:
+			// answering larger than the hold drove `inFlightHoldTotal` negative and
+			// lifted `budgetRemaining()` above the configured budget (measured here:
+			// 149_967 against a ceiling of 100_000).
 			if (capture.sessionAccounted) {
 				// AUD-453: Acquire mutex for budget atomicity — prevents concurrent
 				// settle() calls from corrupting inFlightHoldTotal or budgetSpent.
 				const releaseLock = await budgetMutex.acquire();
 				try {
-					inFlightHoldTotal -= auth.estimatedCost;
+					inFlightHoldTotal -= capture.hold;
 					budgetSpent += actualCost;
 				} finally {
 					releaseLock();

@@ -641,7 +641,16 @@ needed it, where a throwing getter stranded an attributed hold and a lying one r
 (`budgetRemaining()` 150_000 against a configured budget of 100_000). Read the bound once into a
 local before the loop; take a released amount from the capture that recorded the increment, never
 from the handle — the release must be symmetric with the increment by construction, exactly as
-`sessionAccounted` already is.
+`sessionAccounted` already is. **The rule binds every release, not the one a review named**:
+`settle()`'s own `inFlightHoldTotal -= auth.estimatedCost` was the same read 340 lines earlier and
+was fixed in the same breath, because a rule stated unconditionally while a sibling still violates
+it is a doc that is broader than its code. There it was worse than on `abort()`, by POSITION: the
+read sat after the `activeAuths.delete` that claims the entry and before the POST, so a throwing
+getter discharged the authorization with the pending transfer neither posted nor voided — no handle
+left to retry with, no terminal left to reach the ledger (the lying half measured 149_967 against
+the same 100_000 ceiling). Both terminals now take the amount from `capture.hold`, the
+write-premium-inflated number the increment used — never `meteredEstimate`, which is the
+un-inflated metering figure and would leave the counter short by the premium.
 *Prevents:* a boundary that is correct about the value it was shown and irrelevant to the bytes that
 get written — the defect surviving the fix, in a form that reads as fixed.
 
