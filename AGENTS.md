@@ -622,7 +622,14 @@ changes what a later reader sees), and a snapshot does not imply a guard beside 
 `transferId` needs no representability check at all, because a value that survives
 `activeAuths.get` is provably one of our own `trustId("tx")` strings. The liveness check was already
 the stricter boundary; it just was not a boundary while the value it approved and the value written
-were different reads.
+were different reads. **That first residual is not closable by snapshotting harder** — read it as a
+limit of the technique, never as a TODO. A deep clone buys the copy's cost and no safety: it is
+built from whatever the caller's accessors answer at the instant you copy, so it moves the race
+instead of removing it, and on a discharge path it moves the race *above* the release, where a
+throwing accessor strands the hold. The only two closures are to validate at CAPTURE, before any
+obligation exists (`authorize()` does this for `model` and `actor`), or to stop trusting caller
+object identity across the boundary at all and carry the value in state we own (the governor's
+`activeAuths` capture record).
 *Prevents:* a boundary that is correct about the value it was shown and irrelevant to the bytes that
 get written — the defect surviving the fix, in a form that reads as fixed.
 

@@ -1702,6 +1702,19 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// field (see `governAction`, where `action.params` is snapshotted for
 			// its identity and the guard still runs on the value it read).
 			//
+			// AND THAT RESIDUAL IS NOT CLOSABLE BY SNAPSHOTTING HARDER. This is a
+			// limit of the technique, not a TODO: reach for a deep clone here and
+			// you buy the cost of copying and no safety, because the clone is still
+			// made from whatever the caller's accessors answer at the instant you
+			// copy — you have moved the race, not removed it, and on THIS path you
+			// would have moved it above the VOID, where a throwing accessor strands
+			// the hold. There are exactly two real closures: validate the value at
+			// CAPTURE, before any obligation exists (what `authorize()` does for
+			// `model` and `actor`), or stop trusting caller object identity across
+			// the boundary at all and carry the value in state we own (what the
+			// governor's own `capture` record is, and what the ledgered fix for
+			// `proxyTransferId` below actually is). Anything else is decoration.
+			//
 			// ONLY THE MONEY/IDENTITY FIELDS ARE HOISTED. `model` is deliberately
 			// NOT snapshotted here: it is read exactly once, so there is nothing to
 			// diverge, and it is AUDIT-ONLY. Every read hoisted above the VOID is a
