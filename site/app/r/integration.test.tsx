@@ -313,6 +313,90 @@ test("X7: every valid id vector is accepted by validateReceiptId (the passing co
 });
 
 // ===========================================================================
+// X8 / X9 — delegationPosture, missing and unrecognized. Both render the
+// protocol-error shell (R38): the page may not render an amount without its
+// posture label, because a reader supplies the missing scope from assumption
+// and the assumption is always "this is what the work cost".
+// ===========================================================================
+
+test("X8/X9: a missing or unrecognized delegationPosture renders the protocol-error shell", () => {
+	for (const id of ["X8", "X9"] as const) {
+		const entry = rejectionVectors.find((vector) => vector.id === id);
+		assert.ok(entry, `${id} must exist in the manifest`);
+		for (const file of entry.files) {
+			const state = fixtureState(loadFixture(file));
+			assert.equal(
+				state.kind,
+				"protocolError",
+				`${id} (${file}) must fail closed rather than render a total`,
+			);
+			parseRenderAssert(state, `${id} (${file})`);
+			// R38's whole point is that the amount never reaches the DOM. A page
+			// that failed closed but still painted the figure would satisfy the
+			// state check and defeat the obligation.
+			assert.equal(
+				/\$\s?\d/.test(textOf(render(state))),
+				false,
+				`${id} (${file}): no amount may render when the posture is unusable`,
+			);
+		}
+	}
+});
+
+// ===========================================================================
+// X11 — `includesAllDelegated`: recognized, but never green. §7 permits it to
+// be presented as a total ONLY when its §2a signed evidence validates, and no
+// evidence format exists in v1 — so every instance fails, by construction.
+// ===========================================================================
+
+test("X11: includesAllDelegated renders an integrity failure, never a total", () => {
+	const entry = rejectionVectors.find((vector) => vector.id === "X11");
+	assert.ok(entry, "X11 must exist in the manifest");
+	for (const file of entry.files) {
+		const state = fixtureState(loadFixture(file));
+		assert.equal(state.kind, "integrityFailure", `X11 (${file}) must not reach a verified state`);
+		// Integrity failure, NOT the protocol-error shell — the shell is for
+		// material the page could not interpret, and this value is interpreted
+		// exactly. Conflating them would tell the reader the resolver was
+		// unreachable when in fact its receipt made an uncheckable claim.
+		if (state.kind === "integrityFailure" && state.cause.source === "page") {
+			assert.equal(state.cause.obligation, "R39", "X11's cause must name the posture obligation");
+		}
+		parseRenderAssert(state, `X11 (${file})`);
+		// The strongest claim in the vocabulary must not reach the DOM as a
+		// figure. This is the same assertion X8/X9 carry, for the same reason.
+		assert.equal(
+			/\$\s?\d/.test(textOf(render(state))),
+			false,
+			`X11 (${file}): an unverifiable complete-coverage claim may not render an amount`,
+		);
+	}
+});
+
+// ===========================================================================
+// X10 — §7's contiguity clause, isolated. NOT a page state: this page renders
+// the resolver's verdict and never walks the served history (D2), so the
+// vector is aimed at `usertrust-verify` and the resolver. Asserted here only
+// to pin that the page's behaviour is the DECLARED one, so the exemption in
+// `wire.test.ts` cannot quietly widen.
+// ===========================================================================
+
+test("X10: the contiguity vector is invisible to this page, by design and by declaration", () => {
+	const entry = rejectionVectors.find((vector) => vector.id === "X10");
+	assert.ok(entry, "X10 must exist in the manifest");
+	assert.equal(entry.consumer, "historyWalk", "X10 must declare the consumer it targets");
+	for (const file of entry.files) {
+		const state = fixtureState(loadFixture(file));
+		assert.equal(
+			state.kind,
+			"verified",
+			`X10 (${file}) renders green here — the page does not walk`,
+		);
+		parseRenderAssert(state, `X10 (${file})`);
+	}
+});
+
+// ===========================================================================
 // Manifest-completeness cross-check — this file's coverage against the §8
 // manifest itself, so a fixture added to `fixtures/index.ts` without a
 // corresponding entry here is a visible, named gap rather than a silent one.
@@ -322,7 +406,7 @@ test("manifest cross-check: this file's X-vector coverage accounts for every rej
 	const ids = rejectionVectors.map((entry) => entry.id);
 	assert.deepEqual(
 		ids,
-		["X1", "X2", "X3", "X4", "X5", "X6", "X7"],
+		["X1", "X2", "X3", "X4", "X5", "X6", "X7", "X8", "X9", "X10", "X11"],
 		"every X-id has a dedicated block above",
 	);
 });

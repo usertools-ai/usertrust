@@ -54,8 +54,8 @@
 					"treeSize": 30,
 					"segmentId": "seg-0018",
 					"segmentFirstSequence": 8125590,
-					"previousSegmentRoot": "genesis",
-					"previousSegmentId": "genesis",
+					"previousSegmentRoot": "7e64952fb0e2e40a50858cd5c3c55f4ff42fc43c63eb6413ec25e8d2b24da3eb",
+					"previousSegmentId": "seg-0017",
 					"keyId": "checkpoint-key-2026-01",
 					"publishedAt": "2026-08-10T15:01:00.000Z",
 					"sig": "c3ludGhldGljLWNoZWNrcG9pbnQtc2lnOjpDMjE="

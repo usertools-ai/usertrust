@@ -216,8 +216,24 @@ const PROVIDER_EVENTS = [
 ];
 const PROVIDER_FINAL = { id: "msg_1", usage: { input_tokens: 100, output_tokens: 30 } };
 
-/** Let the self-driven stream + async governance settlement fully complete. */
-async function flush(ms = 40): Promise<void> {
+/**
+ * Let the self-driven stream + async governance settlement fully complete.
+ *
+ * This is a WALL-CLOCK budget, not a tick count, and these cases run with
+ * `dryRun: false` against a real temp vault — so the settle path does real disk
+ * I/O (`persistSpendLedger`) BEFORE it calls `postPendingSpend`, which is what
+ * the assertions here count. The budget therefore has to cover an fsync, and
+ * fsync latency spikes by an order of magnitude on a loaded machine.
+ *
+ * Measured on APFS/SSD: the settle-path write costs ~0.2ms without fsync and
+ * ~5.6ms with the file + directory fsync that durability requires. The old 40ms
+ * default cleared that by a hair when idle and failed intermittently under
+ * parallel load, surfacing as "never-consume → settle exactly once" seeing zero
+ * calls. Raised to 400ms for real headroom: these are timing floors, not
+ * timing assertions, so a generous budget costs a few seconds of suite time and
+ * buys determinism.
+ */
+async function flush(ms = 400): Promise<void> {
 	await new Promise<void>((r) => setTimeout(r, ms));
 }
 
