@@ -905,23 +905,29 @@ export function evaluateAnchoredVault(input: AnchorEvaluationInput): AnchorEvalu
 	// `valid: true`, exit 0: a vault with nothing to check, and an operator whose
 	// pin was never read. A pin the caller could not spell is an INPUT error, and
 	// it does not become acceptable because the vault turned out to be empty.
+	let malformedPins = 0;
 	if (input.trust !== null) {
-		const badPins: number[] = [];
 		for (const [i, pem] of (input.trust.successorPinsPem ?? []).entries()) {
-			if (publicKeyFromPem(pem) === null) badPins.push(i + 1);
-		}
-		if (badPins.length > 0) {
-			for (const n of badPins) {
-				errors.push(`successor pin #${n} is not a parseable PEM`);
+			if (publicKeyFromPem(pem) === null) {
+				errors.push(`successor pin #${i + 1} is not a parseable PEM`);
 				reasons.push("malformed-successor-pin");
+				malformedPins++;
 			}
-			return finish("ANCHOR_INVALID", []);
 		}
 	}
 
 	// Step 2 — discovery.
+	//
+	// NO early return on a malformed pin when anchors are present. Returning here
+	// reported ANCHOR_INVALID and skipped every anchor-content check, so a
+	// malformed pin accompanying a FORK, a rollback, mixed vault ids or mirror
+	// disagreement would hide the stronger evidence — and the state machine's
+	// worst-state rule has MISMATCH outranking INVALID. The reason is recorded
+	// above and carried into the normal classification, which already picks the
+	// worst state. Only when there is nothing else to evaluate does the pin
+	// decide the verdict on its own.
 	if (!anchorsPresent) {
-		return finish("UNANCHORED", []);
+		return finish(malformedPins > 0 ? "ANCHOR_INVALID" : "UNANCHORED", []);
 	}
 
 	// Step 3 — trust material (before parse escalation, per constraints §4.2).

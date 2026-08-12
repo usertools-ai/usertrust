@@ -196,6 +196,22 @@ interface ParsedEvent {
 }
 
 /**
+ * Scrub control characters out of a value on its way into an error string.
+ *
+ * These errors are printed by the non-JSON CLI, so an escape sequence inside one
+ * can repaint the verdict line it appears on. Substitutes rather than deletes, so
+ * a scrubbed byte stays visible as evidence.
+ */
+function scrubForError(raw: string): string {
+	let out = "";
+	for (const ch of raw) {
+		const code = ch.codePointAt(0) as number;
+		out += code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "?" : ch;
+	}
+	return out;
+}
+
+/**
  * Verify an entire `.usertrust` vault directory, anchored to the `.meta` head.
  *
  * Gathers `events.jsonl` plus every rotated `*.jsonl` segment, orders all events
@@ -230,8 +246,15 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 			// bill of health, exit 0, on a vault nobody could open. We cannot verify
 			// what we cannot list, and "0 events, all hashes valid" is a claim about
 			// evidence rather than an absence of it.
+			// SCRUBBED. Both halves are attacker-influenced: `auditDir` comes from a
+			// caller-supplied path and `err.message` embeds it. The non-JSON CLI
+			// prints this string, so an escape sequence in either could repaint the
+			// very FAILED verdict this error exists to produce — the terminal-forgery
+			// surface AGENTS.md already names for every other value on that output.
 			errors.push(
-				`Audit directory could not be enumerated: ${auditDir} (${err instanceof Error ? err.message : String(err)})`,
+				scrubForError(
+					`Audit directory could not be enumerated: ${auditDir} (${err instanceof Error ? err.message : String(err)})`,
+				),
 			);
 		}
 	}

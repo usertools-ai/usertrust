@@ -82,6 +82,12 @@ function assertAgree(vaultPath: string, expectedValid: boolean): void {
 	const pkg = pkgVerifyVault(vaultPath);
 	expect(core.valid).toBe(pkg.valid);
 	expect(core.chainLength).toBe(pkg.chainLength);
+	// ERROR STRINGS TOO. The parity contract is identical verdicts AND identical
+	// errors (AGENTS.md), and comparing only `valid` + `chainLength` let the two
+	// implementations diverge in what they SAY while agreeing on the boolean —
+	// which for a verifier is most of the product: an auditor acts on the reason,
+	// not on the exit code alone.
+	expect(core.errors).toEqual(pkg.errors);
 	expect(core.valid).toBe(expectedValid);
 }
 
