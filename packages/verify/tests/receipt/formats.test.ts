@@ -520,6 +520,86 @@ describe("§7 — an arrival context that was supplied but never compared", () =
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The regression the table itself introduced — end to end, on a receipt whose
+// every signature verifies.
+//
+// `walkFieldTable` asked `table[key] !== undefined`, and a plain object answers
+// that question with its PROTOTYPE. A signed member named `__proto__`,
+// `constructor`, `toString` … therefore read as DECLARED, and was then skipped
+// by the declared pass too (`Object.keys(table)` never yields an inherited
+// name), so it was checked by nobody and reached VERIFIED_CHECKPOINT.
+//
+// This is the end-to-end half of the unit vectors in `reader.test.ts`: the
+// member is planted BEFORE signing, so the preimage covers it, the mint
+// signature verifies over it, `event.hash` recomputes, and every one of §4's
+// nine equalities holds. Nothing but the unknown-field rule stands between it
+// and a verdict — which is precisely what makes it the test of that rule.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("§2/§5 — an unknown field named after an Object.prototype member", () => {
+	/** `r.__proto__ = v` runs the accessor and creates NO own property; only
+	 * `defineProperty` expresses the vector the wire can actually carry. */
+	function withOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+		Object.defineProperty(target, key, {
+			value,
+			enumerable: true,
+			writable: true,
+			configurable: true,
+		});
+	}
+
+	const NAMES: readonly string[] = ["__proto__", "constructor", "toString", "hasOwnProperty"];
+
+	it("is refused at step 1 even though the whole document verifies", () => {
+		for (const name of NAMES) {
+			const actual = verifyMinted({
+				receiptBeforeSign: (receipt) => {
+					const copy = { ...receipt } as Record<string, unknown>;
+					withOwn(copy, name, "smuggled");
+					return copy;
+				},
+			});
+			expectSchemaRefusal(actual, `top-level ${name}`);
+			expect(actual.failure?.detail, name).toContain(name);
+		}
+	});
+
+	it("is refused inside the projection, whose members the same table declares", () => {
+		for (const name of NAMES) {
+			const actual = verifyMinted({
+				projection: (p: Projection) => {
+					const copy = { ...p } as Record<string, unknown>;
+					withOwn(copy, name, "smuggled");
+					return copy;
+				},
+			});
+			expectSchemaRefusal(actual, `event.data.${name}`);
+		}
+	});
+
+	it("proves the premise: the smuggled member really is on the signed wire", () => {
+		// Without this the vector could rot into a tautology — a member the
+		// harness silently dropped would also "be refused", for the wrong reason.
+		const bundle = mint({
+			receiptBeforeSign: (receipt) => {
+				const copy = { ...receipt } as Record<string, unknown>;
+				withOwn(copy, "__proto__", "smuggled");
+				return copy;
+			},
+		});
+		const text = bundle.receiptBytes.toString("utf8");
+		expect(text).toContain('"__proto__":"smuggled"');
+		const reparsed = JSON.parse(text) as Record<string, unknown>;
+		expect(Object.hasOwn(reparsed, "__proto__")).toBe(true);
+		expect(Object.keys(reparsed)).toContain("__proto__");
+	});
+
+	it("still verifies the clean receipt — no prototype name is a declared member", () => {
+		expect(verifyMinted().verdict).toBe("VERIFIED_CHECKPOINT");
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The binding test: the CLASS, not the instances.
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -664,6 +664,29 @@ type FieldRule =
 
 type FieldTable = Readonly<Record<string, FieldRule>>;
 
+/**
+ * Every table is built through here, and the reason is a defect this table
+ * INTRODUCED while closing the format class.
+ *
+ * A table written as an object literal inherits `Object.prototype`, so
+ * `table["__proto__"]`, `table["constructor"]`, `table["toString"]` — every
+ * name on that prototype — answer with an inherited value rather than
+ * `undefined`. `walkFieldTable`'s unknown-field pass asked exactly that
+ * question, so a signed member named after any of them read as DECLARED; the
+ * declared pass then skipped it too, because `Object.keys(table)` never yields
+ * an inherited name. The member was checked by NOBODY and the receipt reached
+ * VERIFIED_CHECKPOINT — with a valid mint signature over it, since `JSON.parse`
+ * creates `__proto__` as an OWN data property and `canonicalize` covers it.
+ *
+ * The lookup site now uses `Object.hasOwn`, which is the fix. This is the
+ * second fence, and it is the one that survives the next edit: with no
+ * prototype there is no inherited value for a future `table[key]` to find, so
+ * the defect stops being expressible rather than merely being absent today.
+ */
+function fieldTable(entries: Record<string, FieldRule>): FieldTable {
+	return Object.assign(Object.create(null) as Record<string, FieldRule>, entries);
+}
+
 function at(owner: FormatOwner, format: FormatName): FieldRule {
 	return { kind: "scalar", format, owner };
 }
@@ -680,30 +703,33 @@ function variants(tables: ReadonlyMap<string, FieldTable>): FieldRule {
 	return { kind: "union", tables };
 }
 
-const MEMBERSHIP_FIELDS: FieldTable = {
+const MEMBERSHIP_FIELDS: FieldTable = fieldTable({
 	// v1 FAILS CLOSED: `providerVerified` is the only ut1 value (step 7).
 	status: at("semantics", "literal"),
 	// §2's public-safety syntax, named there as step 7's.
 	proofId: at("semantics", "opaqueHandle"),
-};
+});
 
-const ORIGIN_FIELDS: FieldTable = {
+const ORIGIN_FIELDS: FieldTable = fieldTable({
 	kind: at("semantics", "literal"),
 	// §2 types this `Ut1ReceiptId`: the fallback variant's whole purpose is the
 	// bidirectional link to the reservation receipt, and a string that is not a
 	// receipt ID cannot be that link.
 	sourceReservationReceiptId: at("schema", "receiptId"),
-};
+});
 
 const CONTENT_BINDING_FIELDS_BY_KIND: ReadonlyMap<string, FieldTable> = new Map<string, FieldTable>(
 	[
-		["publicSha256", { kind: at("semantics", "literal"), sha256: at("schema", "hex64") }],
+		[
+			"publicSha256",
+			fieldTable({ kind: at("semantics", "literal"), sha256: at("schema", "hex64") }),
+		],
 		[
 			"privateHmacSha256V1",
-			{
+			fieldTable({
 				kind: at("semantics", "literal"),
 				commitment: at("schema", "keyedContentCommitment"),
-			},
+			}),
 		],
 	],
 );
@@ -712,7 +738,7 @@ const CONTENT_BINDING_FIELDS_BY_KIND: ReadonlyMap<string, FieldTable> = new Map<
 const WORK_FIELDS_BY_KIND: ReadonlyMap<string, FieldTable> = new Map<string, FieldTable>([
 	[
 		"commit",
-		{
+		fieldTable({
 			kind: at("semantics", "enum"),
 			repoId: at("schema", "keyedRepoId"),
 			// §2 gives `repo` BOTH halves of its rule under step 7's public-safety
@@ -722,11 +748,11 @@ const WORK_FIELDS_BY_KIND: ReadonlyMap<string, FieldTable> = new Map<string, Fie
 			oidAlg: at("semantics", "enum"),
 			objectSha256: at("schema", "hex64"),
 			repositoryMembership: subtree(MEMBERSHIP_FIELDS),
-		},
+		}),
 	],
 	[
 		"pr",
-		{
+		fieldTable({
 			kind: at("semantics", "enum"),
 			repoId: at("schema", "keyedRepoId"),
 			repo: at("semantics", "providerRepoUrl"),
@@ -735,11 +761,11 @@ const WORK_FIELDS_BY_KIND: ReadonlyMap<string, FieldTable> = new Map<string, Fie
 			observedRevision: at("schema", "nonEmpty"),
 			contentBinding: variants(CONTENT_BINDING_FIELDS_BY_KIND),
 			repositoryMembership: subtree(MEMBERSHIP_FIELDS),
-		},
+		}),
 	],
 	[
 		"issue",
-		{
+		fieldTable({
 			kind: at("semantics", "enum"),
 			repoId: at("schema", "keyedRepoId"),
 			repo: at("semantics", "providerRepoUrl"),
@@ -748,7 +774,7 @@ const WORK_FIELDS_BY_KIND: ReadonlyMap<string, FieldTable> = new Map<string, Fie
 			observedRevision: at("schema", "nonEmpty"),
 			contentBinding: variants(CONTENT_BINDING_FIELDS_BY_KIND),
 			repositoryMembership: subtree(MEMBERSHIP_FIELDS),
-		},
+		}),
 	],
 	// Both `session` variants in one table: `origin` present ⇒ fallback, absent
 	// ⇒ ordinary, and §2 makes the two mutually exclusive rather than
@@ -756,16 +782,16 @@ const WORK_FIELDS_BY_KIND: ReadonlyMap<string, FieldTable> = new Map<string, Fie
 	// it, is step 7's ("`work` matching exactly one union variant").
 	[
 		"session",
-		{
+		fieldTable({
 			kind: at("semantics", "enum"),
 			repoId: at("schema", "keyedRepoId"),
 			repo: at("semantics", "providerRepoUrl"),
 			origin: subtree(ORIGIN_FIELDS),
-		},
+		}),
 	],
 ]);
 
-const SPEND_FIELDS: FieldTable = {
+const SPEND_FIELDS: FieldTable = fieldTable({
 	// Every range here is §2's enumerated semantic list — step 7's by name.
 	assessedUsertokens: at("semantics", "integer"),
 	postedUsertokens: at("semantics", "integer"),
@@ -773,18 +799,18 @@ const SPEND_FIELDS: FieldTable = {
 	transferCount: at("semantics", "integer"),
 	usagePosture: at("semantics", "enum"),
 	pricingPosture: at("semantics", "enum"),
-};
+});
 
-const PRICING_FIELDS: FieldTable = {
+const PRICING_FIELDS: FieldTable = fieldTable({
 	tableVersions: strings("semantics", "nonEmpty"),
-};
+});
 
-const TRANSFER_PAIR_FIELDS: FieldTable = {
+const TRANSFER_PAIR_FIELDS: FieldTable = fieldTable({
 	authorizationTransferId: at("semantics", "hex32"),
 	settlementTransferId: at("semantics", "hex32"),
-};
+});
 
-const PROJECTION_FIELDS: FieldTable = {
+const PROJECTION_FIELDS: FieldTable = fieldTable({
 	spec: at("schema", "literal"),
 	scope: at("schema", "literal"),
 	// §9-A.c requires a unique identifier minted at session open (nonce/ULID) and
@@ -808,24 +834,24 @@ const PROJECTION_FIELDS: FieldTable = {
 	pricing: subtree(PRICING_FIELDS),
 	transferSet: subtrees(TRANSFER_PAIR_FIELDS),
 	transferSetRoot: at("semantics", "hex64"),
-};
+});
 
-const MINTER_FIELDS: FieldTable = {
+const MINTER_FIELDS: FieldTable = fieldTable({
 	// The VALUE is bound at step 4 against the key's registered `minterKind`;
 	// the snapshot decides the vocabulary, so there is nothing to pin here.
 	kind: at("schema", "nonEmpty"),
 	keyId: at("schema", "nonEmpty"),
 	// §8's v1 pin (`usertrust.ai`) is step 4's — one condition, one code.
 	trustDomain: at("signature", "literal"),
-};
+});
 
-const SIGNATURE_FIELDS: FieldTable = {
+const SIGNATURE_FIELDS: FieldTable = fieldTable({
 	alg: at("schema", "literal"),
 	keyId: at("schema", "nonEmpty"),
 	sig: at("schema", "canonicalBase64"),
-};
+});
 
-const SIBLING_FIELDS: FieldTable = {
+const SIBLING_FIELDS: FieldTable = fieldTable({
 	// The hole this table exists for. Unsigned by any statement of its own and
 	// hex-decoded by the fold, so a lenient decoder is the only thing standing
 	// between `<64 hex>zz` and a verdict.
@@ -834,9 +860,9 @@ const SIBLING_FIELDS: FieldTable = {
 	// in `verify.ts` — step 5 owns it, and the fold treats every non-"left"
 	// value as "right", which is exactly why it is compared and not read.
 	position: at("inclusion", "enum"),
-};
+});
 
-const INCLUSION_FIELDS: FieldTable = {
+const INCLUSION_FIELDS: FieldTable = fieldTable({
 	version: at("schema", "literal"),
 	// Equality 1 pins these to `event.hash`, which step 2 RECOMPUTES — a
 	// stronger statement than the digest shape, and the equality's to report.
@@ -846,9 +872,9 @@ const INCLUSION_FIELDS: FieldTable = {
 	root: at("event", "hex64"),
 	siblings: subtrees(SIBLING_FIELDS),
 	segmentId: at("schema", "nonEmpty"),
-};
+});
 
-const CHECKPOINT_FIELDS: FieldTable = {
+const CHECKPOINT_FIELDS: FieldTable = fieldTable({
 	v: at("checkpoint", "literal"),
 	vaultId: at("checkpoint", "nonEmpty"),
 	profile: at("checkpoint", "nonEmpty"),
@@ -862,9 +888,9 @@ const CHECKPOINT_FIELDS: FieldTable = {
 	keyId: at("checkpoint", "nonEmpty"),
 	publishedAt: at("checkpoint", "rfc3339UtcMs"),
 	sig: at("checkpoint", "canonicalBase64"),
-};
+});
 
-const PROOF_FIELDS: FieldTable = {
+const PROOF_FIELDS: FieldTable = fieldTable({
 	// Equality 8 selects §4a's equality set from this literal and cross-checks
 	// it against the registered chain — step 2's, by name.
 	profile: at("event", "literal"),
@@ -872,9 +898,9 @@ const PROOF_FIELDS: FieldTable = {
 	mintEventHash: at("event", "hex64"),
 	inclusion: subtree(INCLUSION_FIELDS),
 	checkpoint: subtree(CHECKPOINT_FIELDS),
-};
+});
 
-const EVENT_FIELDS: FieldTable = {
+const EVENT_FIELDS: FieldTable = fieldTable({
 	id: at("schema", "nonEmpty"),
 	timestamp: at("schema", "rfc3339UtcMs"),
 	// The previous event's `hash`, which is `sha256(canonicalize(event − hash))`
@@ -885,9 +911,9 @@ const EVENT_FIELDS: FieldTable = {
 	data: subtree(PROJECTION_FIELDS),
 	sequence: at("schema", "integer"),
 	hash: at("event", "hex64"),
-};
+});
 
-const RECEIPT_FIELDS: FieldTable = {
+const RECEIPT_FIELDS: FieldTable = fieldTable({
 	spec: at("schema", "literal"),
 	receiptId: at("schema", "receiptId"),
 	scope: at("schema", "literal"),
@@ -899,7 +925,7 @@ const RECEIPT_FIELDS: FieldTable = {
 	event: subtree(EVENT_FIELDS),
 	proof: subtree(PROOF_FIELDS),
 	signature: subtree(SIGNATURE_FIELDS),
-};
+});
 
 function keysOf(table: FieldTable): KeySet {
 	return new Set(Object.keys(table));
@@ -1081,8 +1107,18 @@ function walkFieldTable(
 	// anything descends. A document's key order is whatever its writer chose
 	// (canonical bytes sort them), so the walk cannot take its order from the
 	// document and still name the same member twice running.
+	//
+	// `Object.hasOwn`, never `table[key] !== undefined`: the key comes from the
+	// DOCUMENT, and an indexed read answers with the prototype. This loop asked
+	// the wrong question and a member named `__proto__` (or `constructor`, or
+	// `toString`) was declared by `Object.prototype` on the table's behalf —
+	// then skipped by the declared loop below too, since `Object.keys(table)`
+	// yields no inherited name. Checked by nobody, and VERIFIED_CHECKPOINT with
+	// a mint signature over it. The tables are also null-prototype now (see
+	// `fieldTable`), so this is belt and braces on purpose: the question is
+	// right AND there is no wrong answer left to give.
 	for (const key of Object.keys(value)) {
-		if (table[key] !== undefined) continue;
+		if (Object.hasOwn(table, key)) continue;
 		const reported = visit(value, join(path, key), value[key] as JsonValue, undefined);
 		if (reported !== null) return reported;
 	}

@@ -453,6 +453,90 @@ describe("unknown-field rejection in the signed receipt (§5, §2)", () => {
 		((receipt.event as JsonObject).data as JsonObject).work = work;
 		expect(findUnknownReceiptField(receipt)).toBeNull();
 	});
+
+	// ── The regression the field table introduced ────────────────────────────
+	//
+	// The table closed the FORMAT class by making the key set and the declared
+	// format one declaration, walked once. It closed it with `table[key] !==
+	// undefined`, and a plain object resolves INHERITED properties: every name
+	// on `Object.prototype` — `__proto__`, `constructor`, `toString`, `valueOf`,
+	// `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`,
+	// `toLocaleString`, `__defineGetter__` … — answers "declared" for a table
+	// that declares none of them. The member is then invisible to BOTH halves of
+	// the walk: the unknown-field pass skips it, and the declared pass iterates
+	// `Object.keys(table)`, which never yields an inherited name either.
+	//
+	// `JSON.parse` creates `__proto__` as an OWN data property (it never invokes
+	// the setter), so the vector survives the wire, and `Object.keys` reports it,
+	// so `canonicalize` covers it and both signatures verify over it. The rule
+	// this defeats is §2's: "any unknown field anywhere in a `ut1` document is
+	// FAIL".
+	//
+	// Assignment cannot express the `__proto__` case — `r.__proto__ = 1` runs
+	// the accessor and creates no own property — which is exactly why a test
+	// written with `=` alone would report the class closed while it was open.
+	const defineOwn = (object: JsonObject, key: string, value: unknown): void => {
+		Object.defineProperty(object, key, {
+			value,
+			enumerable: true,
+			writable: true,
+			configurable: true,
+		});
+	};
+
+	const PROTOTYPE_NAMES: readonly string[] = [
+		"__proto__",
+		"constructor",
+		"toString",
+		"valueOf",
+		"hasOwnProperty",
+		"isPrototypeOf",
+		"propertyIsEnumerable",
+		"toLocaleString",
+	];
+
+	it("rejects an unknown field NAMED AFTER an Object.prototype member", () => {
+		for (const name of PROTOTYPE_NAMES) {
+			const receipt = base();
+			defineOwn(receipt, name, 1);
+			expect(findUnknownReceiptField(receipt), name).toBe(name);
+		}
+	});
+
+	it("rejects a prototype-named member at every nested level too", () => {
+		const nested: ReadonlyArray<readonly [string, (r: JsonObject) => JsonObject]> = [
+			["minter", (r) => r.minter as JsonObject],
+			["signature", (r) => r.signature as JsonObject],
+			["event", (r) => r.event as JsonObject],
+			["event.data", (r) => (r.event as JsonObject).data as JsonObject],
+			["event.data.spend", (r) => ((r.event as JsonObject).data as JsonObject).spend as JsonObject],
+			["proof", (r) => r.proof as JsonObject],
+			["proof.inclusion", (r) => (r.proof as JsonObject).inclusion as JsonObject],
+			["proof.checkpoint", (r) => (r.proof as JsonObject).checkpoint as JsonObject],
+			["work", (r) => r.work as JsonObject],
+			[
+				"proof.inclusion.siblings.0",
+				(r) =>
+					(
+						((r.proof as JsonObject).inclusion as JsonObject).siblings as JsonObject[]
+					)[0] as JsonObject,
+			],
+		];
+		for (const [path, select] of nested) {
+			for (const name of PROTOTYPE_NAMES) {
+				const receipt = base();
+				defineOwn(select(receipt), name, 1);
+				expect(findUnknownReceiptField(receipt), `${path}.${name}`).toBe(`${path}.${name}`);
+			}
+		}
+	});
+
+	it("still accepts the clean receipt — the table declares no prototype name", () => {
+		// The no-false-positive half. `Object.hasOwn` must not start refusing a
+		// member the table really does declare, and a null-prototype table must
+		// still enumerate every one of them.
+		expect(findUnknownReceiptField(base())).toBeNull();
+	});
 });
 
 describe("readReceiptDocument over the conformance corpus", () => {
