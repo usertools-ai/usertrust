@@ -58,7 +58,31 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 				}
 				return;
 			}
-			const meta = await createSnapshot(vaultPath, name);
+			// The enumeration failure this branch newly surfaces arrives as a THROW.
+			// Left unguarded it propagated through the top-level CLI, so
+			// `snapshot create --json` printed no JSON at all and Node emitted an
+			// uncaught stack trace — breaking the every-command JSON contract for
+			// exactly the failure path this change exists to expose. A fail-closed
+			// error that a machine consumer cannot read is only half-surfaced.
+			let meta: Awaited<ReturnType<typeof createSnapshot>>;
+			try {
+				meta = await createSnapshot(vaultPath, name);
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				if (json) {
+					console.log(
+						JSON.stringify({
+							command: "snapshot",
+							success: false,
+							data: { action: "create", message },
+						}),
+					);
+				} else {
+					console.log(pc.red(`Snapshot failed: ${message}`));
+				}
+				process.exitCode = 1;
+				return;
+			}
 			if (json) {
 				console.log(
 					JSON.stringify({

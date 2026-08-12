@@ -26,7 +26,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { verifyVault } from "../../src/audit/verify.js";
 import type { CredentialScope } from "../../src/shared/types.js";
 import { createSnapshot } from "../../src/snapshot/checkpoint.js";
@@ -142,5 +142,47 @@ describe("false OK — a snapshot built from an unreadable vault", () => {
 		await mkdir(join(vault, "audit"), { recursive: true });
 		writeFileSync(join(vault, "audit", "events.jsonl"), "{}\n", "utf-8");
 		await expect(createSnapshot(vault, "snap")).resolves.toBeDefined();
+	});
+});
+
+describe("false OK — the fail-closed error must still be machine-readable", () => {
+	it("snapshot create --json emits success:false rather than an uncaught throw", async () => {
+		// A fail-closed error a machine consumer cannot read is only half-surfaced.
+		// The new enumeration failure arrives as a throw, and unguarded it printed
+		// no JSON at all — breaking the every-command JSON contract on exactly the
+		// path this change exists to expose.
+		const vault = join(tmp, ".usertrust");
+		const auditDir = join(vault, "audit");
+		await mkdir(auditDir, { recursive: true });
+		await writeFile(join(auditDir, "events.jsonl"), "{}\n", "utf-8");
+		await chmod(auditDir, 0o000);
+
+		const logged: string[] = [];
+		const spy = vi.spyOn(console, "log").mockImplementation((m: unknown) => {
+			logged.push(String(m));
+		});
+		const argv = process.argv;
+		const exitCode = process.exitCode;
+		process.argv = ["node", "usertrust", "snapshot", "create", "snap", "--json"];
+		try {
+			let readable = true;
+			try {
+				await readdir(auditDir);
+			} catch {
+				readable = false;
+			}
+			if (!readable) {
+				const { run } = await import("../../src/cli/snapshot.js");
+				await run(tmp, { json: true } as never);
+				const out = logged.join("\n");
+				expect(() => JSON.parse(out) as unknown).not.toThrow();
+				expect(JSON.parse(out)).toMatchObject({ command: "snapshot", success: false });
+			}
+		} finally {
+			process.argv = argv;
+			process.exitCode = exitCode;
+			spy.mockRestore();
+			await chmod(auditDir, 0o700);
+		}
 	});
 });
