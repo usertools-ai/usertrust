@@ -23,9 +23,9 @@ export interface TransactionEvent {
 		readonly error?: string;
 		/** The anomaly detector's reason — `anomaly_detected` writes `message`, not `error`. */
 		readonly message?: string;
-		readonly transferId: string;
+		readonly transferId?: string | undefined;
 	};
-	readonly sequence: number;
+	readonly sequence?: number | undefined;
 	readonly hash: string;
 }
 
@@ -44,6 +44,16 @@ export interface ReceiptData {
 	 * Absent → the truthful unanchored default is rendered.
 	 */
 	readonly merkleLabel?: string | undefined;
+	/**
+	 * The DETECTOR's reason, carried across terminal selection.
+	 *
+	 * When an anomaly cutoff succeeds, the selected event is
+	 * `stream_partial_delivery`, whose `error` is whatever the SDK's abort
+	 * produced — "Request was aborted" — not the detector's own message. Ranking
+	 * the terminal above the detection is right for STATUS and wrong for REASON,
+	 * so the correlated detection message rides alongside rather than being lost.
+	 */
+	readonly detectionReason?: string | undefined;
 }
 
 // ── Formatting helpers ──
@@ -294,7 +304,11 @@ export function renderReceipt(data: ReceiptData): string {
 	// as `message` rather than `error` — the field the anomaly producer writes
 	// (`govern.ts:2077`) — so the reason block reads both.
 	const isDetection = DETECTION_KINDS.has(event.kind);
-	const reason = event.data.error ?? (isDetection ? event.data.message : undefined);
+	// A carried detection reason WINS over the terminal's generic error: an SDK's
+	// "Request was aborted" says how the call ended, the detector's message says
+	// why, and only the second is worth an auditor's attention.
+	const reason =
+		data.detectionReason ?? event.data.error ?? (isDetection ? event.data.message : undefined);
 	const allVerified = chainVerified && merkleVerified;
 
 	const lines: string[] = [];
@@ -309,7 +323,7 @@ export function renderReceipt(data: ReceiptData): string {
 	// ── Transaction details ──
 	lines.push(row(pad("  TRANSACTION RECEIPT")));
 	lines.push(divider());
-	lines.push(row(`${dotted("  TX", forDisplay(event.data.transferId), WIDTH - 1)} `));
+	lines.push(row(`${dotted("  TX", forDisplay(event.data.transferId ?? "(none)"), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Date", forDisplay(formatDate(event.timestamp)), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Model", forDisplay(model), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Provider", provider, WIDTH - 1)} `));
@@ -326,7 +340,8 @@ export function renderReceipt(data: ReceiptData): string {
 		// "Anomaly:" rather than "Error:" or "Aborted:" — the detector firing is
 		// not a fault, and it is not proof the call stopped. It names what was
 		// observed, which is the most this event supports.
-		const errPrefix = isDetection ? "  Anomaly: " : "  Error: ";
+		const errPrefix =
+			isDetection || data.detectionReason !== undefined ? "  Anomaly: " : "  Error: ";
 		const indent = " ".repeat(errPrefix.length);
 		const maxW = WIDTH - indent.length - 2;
 		const wrapped = wordWrap(forDisplay(reason), maxW);
@@ -342,7 +357,7 @@ export function renderReceipt(data: ReceiptData): string {
 	lines.push(row(pad("  CHAIN VERIFICATION")));
 	lines.push(divider());
 	lines.push(
-		row(`${dotted("  Position", `Event ${event.sequence} of ${chainLength}`, WIDTH - 1)} `),
+		row(`${dotted("  Position", `Event ${event.sequence ?? "?"} of ${chainLength}`, WIDTH - 1)} `),
 	);
 	lines.push(row(`${dotted("  Hash", forDisplay(truncHash(event.hash)), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Prev", forDisplay(truncHash(event.previousHash)), WIDTH - 1)} `));

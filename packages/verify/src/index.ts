@@ -659,9 +659,19 @@ function normalizeEvent(raw: unknown): TransactionEvent {
 			...(typeof d.settled === "boolean" ? { settled: d.settled } : { settled: undefined }),
 			...(error !== undefined ? { error } : { error: undefined }),
 			...(message !== undefined ? { message } : { message: undefined }),
-			transferId: str(d.transferId) ?? "",
+			// PRESERVED for the same reason, and a sharper one: defaulting to ""
+			// mapped every event WITHOUT a transferId onto the same empty id, so
+			// `--tx ""` (an unset shell variable) matched them and returned
+			// found/valid with exit 0 for a transaction that does not exist. A
+			// false OK, manufactured by the normalizer meant to prevent them.
+			...(str(d.transferId) !== undefined ? { transferId: str(d.transferId) } : {}),
 		} as TransactionEvent["data"],
-		sequence: num(o.sequence) ?? 0,
+		// PRESERVED, not defaulted. A legacy segment may legitimately carry no
+		// `sequence` (the v1 event schema allows it), and inventing 0 killed the
+		// `leafIndex + 1` fallback downstream: `pos` became 0, failed `pos >= 1`,
+		// and an otherwise covered event was marked INCLUSION UNVERIFIABLE. A
+		// default that looks like data is worse than an absence that reads as one.
+		...(num(o.sequence) !== undefined ? { sequence: num(o.sequence) } : {}),
 		hash: str(o.hash) ?? "",
 	};
 }
@@ -741,6 +751,19 @@ export function verifyTransaction(
 	// reaches records after it. A later object with a null or missing `data` would
 	// otherwise throw on the dereference and take down verification of an EARLIER
 	// transaction: a tampered tail breaking historical `--tx` checks.
+	// An EMPTY txId matches nothing, deliberately. `--tx "$TX_ID"` with an unset
+	// variable is a real invocation, and treating "" as a query would search for a
+	// transaction that cannot exist — the answer to which must be "not found",
+	// never a verified verdict with exit 0.
+	if (txId.trim() === "") {
+		return {
+			found: false,
+			valid: false,
+			receipt: renderNotFound(txId),
+			errors: ["No transaction id supplied"],
+		};
+	}
+
 	// No per-use shape guard needed: `normalizeEvent` already guarantees `kind`
 	// is a string, `data` is an object, and `transferId` is a string.
 	const matching = events.filter((e) => e.data.transferId === txId);
@@ -869,8 +892,17 @@ export function verifyTransaction(
 		if (evt === targetEvent) break;
 	}
 
+	// Carry the DETECTOR's reason across terminal selection. Ranking a terminal
+	// above the detection is right for status and wrong for reason: a successful
+	// anomaly cutoff selects `stream_partial_delivery`, whose `error` is the SDK's
+	// generic "Request was aborted" rather than what the detector observed.
+	const detection = matching.find((e) => e.kind === "anomaly_detected");
+	const detectionReason =
+		detection !== undefined && detection !== targetEvent ? detection.data.message : undefined;
+
 	const receiptData: ReceiptData = {
 		event: targetEvent,
+		...(detectionReason !== undefined ? { detectionReason } : {}),
 		chainLength: events.length,
 		merkleRoot,
 		merkleVerified,

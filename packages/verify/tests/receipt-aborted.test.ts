@@ -379,3 +379,92 @@ describe("verifyTransaction — every hostile shape a valid-JSON record can take
 		}
 	});
 });
+
+describe("verifyTransaction — absences the normalizer must not invent", () => {
+	function vault(dir: string, records: Array<Record<string, unknown>>): string {
+		const auditDir = join(dir, "audit");
+		mkdirSync(auditDir, { recursive: true });
+		writeFileSync(
+			join(auditDir, "events.jsonl"),
+			`${records.map((r) => JSON.stringify(r)).join("\n")}\n`,
+			"utf-8",
+		);
+		return dir;
+	}
+	const base = (over: Record<string, unknown>) => ({
+		actor: "local",
+		timestamp: "2026-08-12T00:00:00.000Z",
+		previousHash: "0".repeat(64),
+		hash: "d".repeat(64),
+		...over,
+	});
+
+	it("an EMPTY --tx is not found, never verified", () => {
+		// `--tx "$TX_ID"` with an unset variable is a real invocation. Defaulting a
+		// missing `transferId` to "" mapped every such event onto the empty id, so
+		// this returned found/valid with exit 0 for a transaction that cannot exist.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-empty-"));
+		try {
+			vault(dir, [
+				base({ kind: "injection_detected", sequence: 1, data: { patterns: ["x"], score: 1 } }),
+			]);
+			const result = verifyTransaction(dir, "");
+			expect(result.found).toBe(false);
+			expect(result.valid).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a legacy record with NO sequence keeps its absence", () => {
+		// The v1 event schema allows a sequence-less segment. Inventing 0 killed the
+		// `leafIndex + 1` fallback downstream, so `pos >= 1` failed and an otherwise
+		// covered event was reported INCLUSION UNVERIFIABLE.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-legacy-"));
+		try {
+			vault(dir, [
+				base({
+					kind: "llm_call",
+					data: { model: "claude-haiku-4-5-20251001", cost: 4, settled: true, transferId: "tx_l" },
+				}),
+			]);
+			const result = verifyTransaction(dir, "tx_l");
+			expect(result.found).toBe(true);
+			// Rendered as unknown rather than as event 0 of N.
+			expect(result.receipt).toMatch(/Event \? of/);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a successful cutoff keeps the DETECTOR's reason, not the SDK's", () => {
+		// `stream_partial_delivery.error` is whatever the SDK abort produced. Ranking
+		// the terminal above the detection is right for status and wrong for reason.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-reason-"));
+		try {
+			vault(dir, [
+				base({
+					kind: "anomaly_detected",
+					sequence: 1,
+					data: {
+						anomalyKind: "token_rate",
+						message: "token rate exceeded threshold",
+						transferId: "tx_r",
+					},
+				}),
+				base({
+					kind: "stream_partial_delivery",
+					sequence: 2,
+					hash: "e".repeat(64),
+					data: { transferId: "tx_r", chunksDelivered: 2, error: "Request was aborted" },
+				}),
+			]);
+			const out = verifyTransaction(dir, "tx_r").receipt;
+			expect(out).toContain("FAILED");
+			expect(out).toContain("token rate exceeded");
+			expect(out).not.toContain("Request was aborted");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
