@@ -704,3 +704,82 @@ describe("verifyTransaction — settlement ambiguity is conclusive", () => {
 		}
 	});
 });
+
+describe("verifyTransaction — certainty only ever decreases", () => {
+	function w(dir: string, recs: Array<Record<string, unknown>>): void {
+		const auditDir = join(dir, "audit");
+		mkdirSync(auditDir, { recursive: true });
+		writeFileSync(
+			join(auditDir, "events.jsonl"),
+			`${recs
+				.map((r, i) =>
+					JSON.stringify({
+						actor: "local",
+						timestamp: `2026-08-12T00:00:0${i}.000Z`,
+						previousHash: "0".repeat(64),
+						sequence: i + 1,
+						hash: String.fromCharCode(113 + i).repeat(64),
+						...r,
+					}),
+				)
+				.join("\n")}\n`,
+			"utf-8",
+		);
+	}
+
+	it("AUDIT-FIRST: an optimistic settled:true is corrected by a later ambiguity", () => {
+		// `govern.ts` writes the `llm_call` with `settled: true` BEFORE the POST and
+		// appends `settlement_ambiguous` only if the POST throws. First-terminal-wins
+		// alone printed SETTLED for an ordinary POST failure — the most common way
+		// this goes wrong in production, not an adversarial case.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-af-"));
+		try {
+			w(dir, [
+				{ kind: "llm_call", data: { transferId: "tx_af", cost: 120, settled: true } },
+				{
+					kind: "settlement_ambiguous",
+					data: { transferId: "tx_af", cost: 120, error: "post failed" },
+				},
+			]);
+			const out = verifyTransaction(dir, "tx_af").receipt;
+			expect(out).toContain("AMBIGUOUS");
+			expect(out).not.toContain("SETTLED");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("but a settlement still cannot override an earlier FAILURE", () => {
+		// The direction is the whole rule: reducing certainty is safe from anywhere,
+		// increasing it is the forgery.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-dir-"));
+		try {
+			w(dir, [
+				{ kind: "llm_call_failed", data: { transferId: "tx_dir", error: "provider 500" } },
+				{ kind: "llm_call", data: { transferId: "tx_dir", cost: 999, settled: true } },
+			]);
+			const out = verifyTransaction(dir, "tx_dir").receipt;
+			expect(out).toContain("FAILED");
+			expect(out).not.toContain("SETTLED");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("and ambiguity does not overwrite a DENIAL, which spent nothing", () => {
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-den-"));
+		try {
+			w(dir, [
+				{
+					kind: "policy_denied",
+					data: { transferId: "tx_den", decision: "deny", error: "refused" },
+				},
+				{ kind: "settlement_ambiguous", data: { transferId: "tx_den", error: "appended" } },
+			]);
+			const out = verifyTransaction(dir, "tx_den").receipt;
+			expect(out).toContain("DENIED");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});

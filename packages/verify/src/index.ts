@@ -841,7 +841,29 @@ export function verifyTransaction(
 	// A DETECTION is still outranked, which is the whole point of scanning past
 	// the first match: `anomaly_detected` precedes its terminal by construction
 	// and is not conclusive on its own.
-	const targetEvent = matching.find(isTerminal) ?? matching[0];
+	const firstTerminal = matching.find(isTerminal);
+
+	// AMBIGUITY DOWNGRADES A SETTLEMENT, from anywhere in the transfer's records.
+	//
+	// First-terminal-wins alone is wrong here because the two producers order
+	// these differently. The AUDIT-FIRST path writes the `llm_call` with an
+	// optimistic `settled: true` BEFORE the POST, then appends
+	// `settlement_ambiguous` only if the POST throws (`govern.ts`); the headless
+	// and stream paths append the ambiguity FIRST. Taking the first terminal in
+	// chain order therefore printed SETTLED for an ordinary POST failure.
+	//
+	// The safe generalisation is directional. A correction that REDUCES certainty
+	// can be honoured from anywhere, because forging one gains an attacker
+	// nothing — the worst it does is make a real settlement read as unknown. A
+	// record that INCREASES certainty must never override an earlier terminal,
+	// which is the forgery this selector already refuses. So: ambiguity beats a
+	// settlement, and nothing beats a failure or a denial.
+	const ambiguity = matching.find((e) => e.kind === "settlement_ambiguous");
+	const firstIsSettlement = firstTerminal?.data.settled !== undefined;
+	const targetEvent =
+		ambiguity !== undefined && (firstTerminal === undefined || firstIsSettlement)
+			? ambiguity
+			: (firstTerminal ?? matching[0]);
 
 	if (targetEvent === undefined) {
 		return {
