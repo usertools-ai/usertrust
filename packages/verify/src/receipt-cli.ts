@@ -23,6 +23,7 @@ import { canonicalize } from "./canonical.js";
 import { forDisplay } from "./receipt.js";
 import {
 	decodeCanonicalBase64,
+	findNonFiniteNumber,
 	isJsonObject,
 	type JsonValue,
 	loadTrustSnapshot,
@@ -365,18 +366,25 @@ export function resolveEnvelope(bytes: Uint8Array): EnvelopeOutcome {
 	}
 
 	const status = envelope.status;
-	const rawReceiptBytes = envelope.receiptBytes;
-	if (
-		typeof status !== "string" ||
-		!RECEIPT_BEARING_STATUSES.has(status) ||
-		typeof rawReceiptBytes !== "string"
-	) {
+	if (typeof status !== "string" || !RECEIPT_BEARING_STATUSES.has(status)) {
 		// §3: "a non-receipt envelope… exits 3 — the caller handed the wrong
 		// document to the wrong mode." Not a verdict at all: there is no
 		// receipt here to render one about.
 		return {
 			kind: "usage",
 			message: `the envelope's status is ${JSON.stringify(status)} — this is not a receipt-bearing response, so there is nothing for receipt mode to verify`,
+		};
+	}
+
+	// The status IS receipt-bearing, so an absent/non-string `receiptBytes` is
+	// a defect of THIS envelope, not a wrong-mode usage mistake (§5's table:
+	// "missing receiptBytes" is UNVERIFIABLE, exit 2 — the same split
+	// `runReceiptCli` already draws for the default-mode input).
+	const rawReceiptBytes = envelope.receiptBytes;
+	if (typeof rawReceiptBytes !== "string") {
+		return {
+			kind: "missing",
+			detail: `the envelope's status is ${JSON.stringify(status)} (receipt-bearing) but receiptBytes is ${rawReceiptBytes === undefined ? "absent" : "not a string"}`,
 		};
 	}
 
@@ -392,7 +400,20 @@ export function resolveEnvelope(bytes: Uint8Array): EnvelopeOutcome {
 	const strict = readReceiptDocument(decoded);
 	if (strict.ok) {
 		const copy = envelope.receipt;
-		const bytesMatchCopy = copy !== undefined && canonicalize(strict.value) === canonicalize(copy);
+		// `copy` is `readStrictJson`-parsed only (fatal UTF-8 + duplicate-key
+		// rejection) — it never ran through `readReceiptDocument`'s frozen
+		// numeric rules, so it can still carry a non-finite number at any
+		// nesting depth. `canonicalize` THROWS on those, and a throw is never
+		// a verdict mechanism here (this module's own header). A `copy` that
+		// fails this check cannot possibly equal `strict.value`, which the
+		// frozen reader has already guaranteed is finite throughout — so
+		// treat the violation as a bytes↔copy disagreement rather than
+		// reaching `canonicalize` with an unvalidated value at all.
+		const copyHasNonFiniteNumber = copy !== undefined && findNonFiniteNumber(copy) !== null;
+		const bytesMatchCopy =
+			copy !== undefined &&
+			!copyHasNonFiniteNumber &&
+			canonicalize(strict.value) === canonicalize(copy);
 		const idsMatch =
 			typeof envelope.receiptId === "string" && envelope.receiptId === strict.value.receiptId;
 		if (!bytesMatchCopy || !idsMatch) {
@@ -480,7 +501,15 @@ function renderHumanReport(report: ReceiptCliReport): string {
 		lines.push("");
 		lines.push(`Missing required material: ${clip(report.missing.what)}`);
 		lines.push(`  ${clip(report.missing.detail)}`);
-		return lines.join("\n");
+		// No early return: `missing` and `failure` are mutually exclusive (a
+		// run is either UNVERIFIABLE or FAILED, never both), but `verifyReceipt`
+		// can still have produced a partial step ledger and named checks before
+		// settling on UNVERIFIABLE (e.g. a receipt missing `proof`) — CLI spec
+		// §6 requires both in the human report, on every verdict, not just on
+		// success. Falling through lets the `steps`/`checks` blocks below run
+		// exactly as they do for FAILED/VERIFIED_*, guarded by their own
+		// `!== null` checks so a true pre-run refusal (steps/checks both null)
+		// still renders nothing extra.
 	}
 
 	if (report.failure !== null) {
@@ -507,7 +536,15 @@ function renderHumanReport(report: ReceiptCliReport): string {
 		lines.push(
 			`Registry binding (3b): ${report.checks.registryBinding.result} — offline; no resolver was consulted (§7's Offline column)`,
 		);
+		lines.push(`Predecessor linkage: ${report.checks.predecessorLinkage.result}`);
 		lines.push(`Checkpoint history: ${report.checks.checkpointHistory.result}`);
+		// `anchorEvidence` is present in `checks` ONLY when evidence was absent
+		// (notApplicable, fully conformant per §5); when evidence was supplied
+		// it is omitted here and named in `unimplemented` instead — reporting
+		// both would claim a §7 result the CLI never produced.
+		if (report.checks.anchorEvidence !== undefined) {
+			lines.push(`Anchor evidence: ${report.checks.anchorEvidence.result}`);
+		}
 	}
 	if (report.unimplemented.length > 0) {
 		lines.push("");

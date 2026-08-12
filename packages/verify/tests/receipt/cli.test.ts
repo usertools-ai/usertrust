@@ -14,8 +14,12 @@
  * testable without a build step or a subprocess.
  */
 
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import {
 	ARTIFACT_VACUUM_CAVEAT,
 	CHECKPOINT_RUNG_DISCLAIMER,
@@ -327,6 +331,71 @@ describe("--envelope", () => {
 		expect(outcome.kind).toBe("missing");
 	});
 
+	it("a receipt-bearing status with receiptBytes absent is UNVERIFIABLE (exit 2), not a usage error (exit 3) — fixer finding 2", () => {
+		const bundle = mint({ envelope: (e) => ({ ...e, receiptBytes: undefined }) });
+		const outcome = resolveEnvelope(Buffer.from(JSON.stringify(bundle.envelope), "utf8"));
+		expect(outcome.kind).toBe("missing");
+		if (outcome.kind === "missing") {
+			// The diagnostic must not claim the status is non-receipt-bearing —
+			// it IS receipt-bearing; the defect is the absent bytes.
+			expect(outcome.detail).toContain("receipt-bearing");
+			expect(outcome.detail).toContain("receiptBytes");
+		}
+
+		const result = runReceiptCli(
+			["envelope.json", "--trust", "trust.json", "--envelope", "--json"],
+			ioFor(bundle),
+		);
+		expect(result.exitCode).toBe(2);
+		const report = jsonReport(result);
+		expect(report.verdict).toBe("UNVERIFIABLE");
+		expect(report.missing?.what).toBe("receiptBytes");
+	});
+
+	it("a non-string receiptBytes on a receipt-bearing status is UNVERIFIABLE too, not swallowed into the same branch as a wrong-mode status", () => {
+		const bundle = mint({ envelope: (e) => ({ ...e, receiptBytes: 12345 as unknown as string }) });
+		const outcome = resolveEnvelope(Buffer.from(JSON.stringify(bundle.envelope), "utf8"));
+		expect(outcome.kind).toBe("missing");
+	});
+
+	it("a hostile non-finite number in the envelope's `receipt` convenience copy is a verdict, never an uncaught exception — fixer finding 1", () => {
+		const bundle = mint();
+		const rawEnvelope = JSON.stringify(bundle.envelope);
+		// `1e999` is syntactically a valid JSON number token that overflows to
+		// `Infinity` on parse — the exact vector `canonical.ts` throws on and
+		// `readStrictJson` (envelope-level parse) never rejects, because only
+		// the RECEIPT's strict reader runs the frozen numeric rules, never the
+		// envelope's `receipt` convenience copy.
+		const hostileEnvelope = rawEnvelope.replace('"receipt":{', '"receipt":{"hostile":1e999,');
+		expect(hostileEnvelope).not.toBe(rawEnvelope); // the splice actually landed
+
+		const outcome = resolveEnvelope(Buffer.from(hostileEnvelope, "utf8"));
+		expect(outcome.kind).toBe("failed");
+		if (outcome.kind === "failed") {
+			expect(outcome.code).toBe("ENVELOPE_INVALID");
+			expect(outcome.detail).toContain("bytes↔copy");
+		}
+
+		// End to end through the public entry point too — must return a
+		// `ReceiptCliResult`, never throw, and never manufacture a verdict via
+		// exit code 1 from an uncaught exception reaching `cli.ts`'s top level.
+		const io = memoryIo({
+			"trust.json": bundle.snapshotBytes,
+			"envelope.json": Buffer.from(hostileEnvelope, "utf8"),
+		});
+		let result: ReturnType<typeof runReceiptCli> | undefined;
+		expect(() => {
+			result = runReceiptCli(
+				["envelope.json", "--trust", "trust.json", "--envelope", "--json"],
+				io,
+			);
+		}).not.toThrow();
+		expect(result?.exitCode).toBe(1);
+		const report = jsonReport(result as { stdout: string });
+		expect(report.verdict).toBe("FAILED");
+		expect(report.failure?.step).toBe("envelope");
+	});
+
 	it("anchorEvidence PRESENT is reported OUT OF BAND — omitted from checks, named in unimplemented, never a §7 value", () => {
 		const bundle = mint({ envelope: (e) => ({ ...e, anchorEvidence: { kind: "RekorReceipt" } }) });
 		const report = jsonReport(
@@ -531,6 +600,62 @@ describe("human report honesty rules", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// receipt-spec §7: every named check reported by name, including a
+// `notApplicable` result — fixer finding 3 — and CLI spec §6's requirement
+// that the human report carry the step ledger and named checks on EVERY
+// verdict, not only on a pass — fixer finding 4.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("human report — the four named checks, on every verdict", () => {
+	it("a clean pass names all four §7 checks, including predecessorLinkage and anchorEvidence", () => {
+		const bundle = mint();
+		const result = runReceiptCli(["receipt.json", "--trust", "trust.json"], ioFor(bundle));
+		expect(result.stdout).toContain("Arrival check (3a):");
+		expect(result.stdout).toContain("Registry binding (3b):");
+		expect(result.stdout).toContain("Predecessor linkage: notApplicable");
+		expect(result.stdout).toContain("Checkpoint history:");
+		expect(result.stdout).toContain("Anchor evidence: notApplicable");
+	});
+
+	it("anchorEvidence is omitted from the checks lines when evidence was SUPPLIED — reported only via UNIMPLEMENTED, never a fabricated §7 value", () => {
+		const bundle = mint({ envelope: (e) => ({ ...e, anchorEvidence: { kind: "RekorReceipt" } }) });
+		const result = runReceiptCli(
+			["envelope.json", "--trust", "trust.json", "--envelope"],
+			ioFor(bundle),
+		);
+		expect(result.stdout).not.toContain("Anchor evidence:");
+		expect(result.stdout).toContain("UNIMPLEMENTED: anchorEvidence");
+	});
+
+	it("UNVERIFIABLE still carries the step ledger and the named checks — the early return used to discard both", () => {
+		const bundle = mint({
+			receiptBeforeSign: (r) => {
+				const { proof: _dropped, ...rest } = r;
+				return rest;
+			},
+		});
+		const result = runReceiptCli(["receipt.json", "--trust", "trust.json"], ioFor(bundle));
+		expect(result.stdout).toContain("Verdict: UNVERIFIABLE");
+		expect(result.stdout).toContain("Missing required material: proof");
+		// The ledger and the 3(a)/3(b) disclosure CLI spec §6 calls out by
+		// name — exactly what an auditor needs on the run that got furthest
+		// before stopping.
+		expect(result.stdout).toContain("Steps:");
+		expect(result.stdout).toContain("Arrival check (3a):");
+		expect(result.stdout).toContain("Registry binding (3b):");
+		expect(result.stdout).toContain("Predecessor linkage:");
+	});
+
+	it("a true pre-run refusal (e.g. an unreadable --trust file) still renders no steps/checks section — nothing to fabricate", () => {
+		const bundle = mint();
+		const result = runReceiptCli(["receipt.json", "--trust", "does-not-exist.json"], ioFor(bundle));
+		expect(result.stdout).toContain("Verdict: UNVERIFIABLE");
+		expect(result.stdout).not.toContain("Steps:");
+		expect(result.stdout).not.toContain("Arrival check (3a):");
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Terminal safety (AGENTS.md; CLI spec §6) — HARDEN-style, matching
 // `tests/harden/receipt-terminal-injection.test.ts`'s payload and method.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -606,4 +731,77 @@ it("--help prints the receipt-mode usage and exits 0", () => {
 	const result = runReceiptCli(["--help"], memoryIo({}));
 	expect(result.exitCode).toBe(0);
 	expect(result.stdout).toContain(RECEIPT_USAGE);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `cli.ts` dispatch (CLI spec §2) — everything above exercises `receipt-cli.ts`
+// directly, which says nothing about whether `cli.ts` ever routes argv into
+// it. These spawn the REAL built entry point (`npx tsx cli.ts …`, the same
+// pattern `anchor-bundle-terminal-injection.test.ts` uses for core's CLI) so a
+// broken, moved, or loosened dispatch check actually fails a test instead of
+// only a string-constant comparison.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("cli.ts dispatch", () => {
+	const repoRoot = join(import.meta.dirname, "..", "..", "..", "..");
+	const cli = join(repoRoot, "packages", "verify", "src", "cli.ts");
+	const dirs: string[] = [];
+
+	afterEach(() => {
+		for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	});
+
+	function tmpBundle(): { dir: string; receipt: string; trust: string } {
+		const dir = mkdtempSync(join(tmpdir(), "receipt-cli-dispatch-"));
+		dirs.push(dir);
+		const bundle = mint();
+		const receipt = join(dir, "receipt.json");
+		const trust = join(dir, "trust.json");
+		writeFileSync(receipt, bundle.receiptBytes);
+		writeFileSync(trust, bundle.snapshotBytes);
+		return { dir, receipt, trust };
+	}
+
+	it("`receipt` as argv[0] reaches receipt mode end to end (hazard a: a receipt flag must not fall through to the vault parser's usage(), exit 1)", () => {
+		const { receipt, trust } = tmpBundle();
+		const res = spawnSync("npx", ["tsx", cli, "receipt", receipt, "--trust", trust], {
+			cwd: repoRoot,
+			encoding: "utf-8",
+		});
+		// If the dispatch guard were absent, moved, or bypassed, `--trust`
+		// would be unknown to the vault flag loop and hit the SHARED usage(),
+		// which exits 1 and prints vault's own `--anchor-url` help text — the
+		// wrong code (FAILED) for a well-formed receipt-mode invocation.
+		expect(res.status).toBe(0);
+		expect(res.stdout).toContain("Verdict: VERIFIED_CHECKPOINT");
+		expect(res.stdout).not.toContain("--anchor-url");
+	}, 30_000);
+
+	it("`receipt` with no <file> gets receipt mode's OWN usage (exit 3), not the vault parser's (exit 1)", () => {
+		const res = spawnSync("npx", ["tsx", cli, "receipt"], {
+			cwd: repoRoot,
+			encoding: "utf-8",
+		});
+		expect(res.status).toBe(3);
+		expect(res.stderr).toContain("missing <file>");
+		// Vault's shared usage() text — must NOT appear; its presence would
+		// mean the vault parser ran instead of receipt mode's own handler.
+		expect(res.stderr).not.toContain("--anchor-url");
+		expect(res.stdout).toBe("");
+	}, 30_000);
+
+	it("the dispatch token is argv[2] EXACTLY — the literal string 'receipt' appearing elsewhere in argv must not trigger receipt mode (hazard b's mirror: a real vault invocation must not be hijacked)", () => {
+		// argv[2] is "does-not-exist" here, not "receipt" — "receipt" only
+		// appears as a FLAG VALUE. A dispatch check loosened to
+		// `argv.includes("receipt")` would wrongly enter receipt mode; the
+		// correct `argv[2] === "receipt"` check leaves this a vault-mode
+		// invocation, and `--trust` (unknown to the vault parser) hits the
+		// shared usage(), exit 1.
+		const res = spawnSync("npx", ["tsx", cli, "does-not-exist", "--trust", "receipt"], {
+			cwd: repoRoot,
+			encoding: "utf-8",
+		});
+		expect(res.status).toBe(1);
+		expect(res.stdout).toContain("--anchor-url");
+	}, 30_000);
 });
