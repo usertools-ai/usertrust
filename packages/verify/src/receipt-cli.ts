@@ -636,7 +636,16 @@ function readBytes(path: string, io: ReceiptCliIo): Buffer {
 
 export function runReceiptCli(argv: readonly string[], io: ReceiptCliIo): ReceiptCliResult {
 	const parsed = parseReceiptArgs(argv);
-	if (parsed.kind === "help") return { exitCode: 0, stdout: `${RECEIPT_USAGE}\n`, stderr: "" };
+	// Exit 3, not 0: §6's exit table is closed and reserves 0 for
+	// `VERIFIED_CHECKPOINT` or higher — no verdict was reached here, nothing
+	// was verified, and `--help` is recognized at ANY argv position (matching
+	// `-h`/`--help` in vault mode's own loop, cli.ts:241), so an unsanitized
+	// `<file>` argument of literally "--help" must not be able to make a
+	// scripted caller that keys on exit status believe a receipt verified.
+	// 3 puts it in the same "no verdict reached" bucket as every other usage
+	// refusal below, which is what receipt mode's dedicated exit-3 handler
+	// exists to guarantee (never the shared vault `usage()`, which exits 1).
+	if (parsed.kind === "help") return { exitCode: 3, stdout: `${RECEIPT_USAGE}\n`, stderr: "" };
 	if (parsed.kind === "error") return usageResult(parsed.message);
 	const { file, trust, envelope, expectId, json } = parsed.args;
 

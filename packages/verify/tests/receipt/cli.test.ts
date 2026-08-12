@@ -727,9 +727,15 @@ describe("terminal safety", () => {
 // Usage text.
 // ─────────────────────────────────────────────────────────────────────────────
 
-it("--help prints the receipt-mode usage and exits 0", () => {
+it("--help prints the receipt-mode usage and exits 3 (never 0 — no verdict was reached, and 0 is reserved for VERIFIED_CHECKPOINT or higher)", () => {
 	const result = runReceiptCli(["--help"], memoryIo({}));
-	expect(result.exitCode).toBe(0);
+	expect(result.exitCode).toBe(3);
+	expect(result.stdout).toContain(RECEIPT_USAGE);
+});
+
+it("--help recognized at any argv position does not leak exit 0 (an unsanitized <file> of literally '--help' must not read as verified)", () => {
+	const result = runReceiptCli(["r.json", "--trust", "t.json", "--help"], memoryIo({}));
+	expect(result.exitCode).toBe(3);
 	expect(result.stdout).toContain(RECEIPT_USAGE);
 });
 

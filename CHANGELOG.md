@@ -41,8 +41,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the code), 1 (FAILED, step + code named), 2 (UNVERIFIABLE, required
   material missing), 3 (usage error, receipt mode's own handler — never the
   shared vault `usage()`, which exits 1 and would misreport a typo as
-  FAILED). This is what the `/r/<receiptId>` verify page's download
-  affordance points at, closing the loop that entry above left open.
+  FAILED). `--help`/`-h` is recognized at any argv position, same as vault
+  mode's own loop, and also exits 3: no verdict was reached, so it must
+  never share 0 with `VERIFIED_CHECKPOINT` — an unsanitized `<file>`
+  argument of literally `--help` must not be able to read as verified to a
+  scripted caller keying on exit status alone. This is what the
+  `/r/<receiptId>` verify page's download affordance points at, closing the
+  loop that entry above left open.
 
   **Deliberately incomplete, and says so out loud rather than guessing.**
   Anchor (Rekor) evidence is reported OUT OF BAND, never as a §7 value: if
@@ -62,11 +67,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offline has no registry to check against — though both stay in the
   `--json` vocabulary for resolver-side consumers replaying a report.
 
+  **`packages/verify/src/canonical.ts` is left non-conformant with
+  receipt-spec §13 on this ship, deliberately.** §13's 79-case differential
+  found `core/src/audit/canonical.ts` and `verify/src/canonical.ts`
+  code-identical and bug-compatible with each other (`undefined` → the JS
+  value rather than `null`; `[1,undefined,2]` → `[1,,2]`; and two SILENT
+  divergences that stay valid, parseable JSON at a different digest —
+  `[undefined]` → `[]` and `{a:[undefined]}` → `{"a":[]}`) — and states
+  plainly that **"Core and verify MUST be corrected together; fixing verify
+  alone splits ut1's two implementations against each other, which is worse
+  than the status quo."** Correcting only this package's copy would do
+  exactly that split, so the fix is deferred to a follow-up that lands both
+  sides at once. The divergence is unreachable from parsed wire data (every
+  key in a ut1 document is a concrete JSON value, never `undefined`), so
+  this is an honesty gap, not a soundness one — but it means this ship's
+  verifier is bug-compatible with the SDK minter, not §13-conformant.
+
   Built against a from-scratch mint harness (Ed25519 keygen/sign, sha256,
   canonical JSON — node builtins only) that reaches canonical bytes by a
   path independent of the verifier's own `canonicalize`, so a shared
   preimage bug can't hide from the corpus; pinned first against
-  receipt-spec §13's byte-for-byte canonicalization golden vectors. Vault
+  receipt-spec §13's byte-for-byte canonicalization golden vectors — modulo
+  the non-conformant cases above, which the corpus does not exercise. Vault
   mode (`--tx`, `--bundle`, the differential anchor suites) is unchanged —
   same flags, same byte-for-byte behavior.
 
