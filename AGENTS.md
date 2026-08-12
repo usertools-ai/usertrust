@@ -706,6 +706,14 @@ for an identity comparison — is refused rather than accepted as a rule that ca
 *Prevents:* the pre-fix behaviour, where unparseable or unrecognised input resolved to an empty rule
 set with no throw and no log.
 
+**`usertrust policy validate` is the pre-flight, and `health` reports rule COUNT.** The loader
+refusing to start is only survivable if an operator can find out why before deploying, so
+`validatePolicyFile` reports every problem in one pass behind that command. It resolves its target
+exactly as the governor does — the configured value verbatim, no `existsSync` preflight — because a
+diagnostic that resolves a different file than the thing it diagnoses can pass while the deployment
+fails. `health` reports loaded AND ACTIVE counts, since `enabled: false` rules load and never fire:
+a violation count alone cannot distinguish an enforced policy from an unloaded one.
+
 **Host-owned policy-context fields are STRIPPED BEFORE the request-body spread.** Every
 `evaluatePolicy` call site builds context as `{ ...sanitizePolicyContext(callerParams),
 ...trustedFields }`. The explicit assignments after the spread still say what each trusted field is,
@@ -847,7 +855,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **eleven** sanitizers, in two variants. Do not consolidate them onto the weaker one.
+There are **thirteen** sanitizers, in two variants. Do not consolidate them onto the weaker one.
 
 The entries below are deliberately NOT numbered. They used to be ("a seventh", "an eighth"), and
 adding one meant renumbering every later entry — so a new copy was added and the ordinals silently
@@ -879,6 +887,17 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
 - Independent and deliberately **stronger**: `forDisplay` in `core/src/cli/budget.ts`. It
   also covers `0x80–0x9f`, the C1 range holding the 8-bit CSI/OSC introducers that the regex above
   does not match; it substitutes `?` rather than stripping; and it clips at 120.
+
+- Two more of the stronger variant, `scrubForTerminal` in `core/src/cli/policy.ts` and
+  `core/src/cli/health.ts`. Both quote operator-authored text back at a terminal: a policy file's
+  key names arrive inside zod issue messages, and the `policies` config value arrives as the path.
+  Each clips at 200 rather than 80 — a validation message cut to 80 loses the field path that makes
+  it actionable. **Neither applies to `--json`:** those paths escape C1 as `\uXXXX` at
+  serialization instead, via a local `toSafeJson`, because substituting or clipping would corrupt a
+  machine-readable field a consumer has to parse back. Escaping and scrubbing are not
+  interchangeable, and the choice belongs at the render site, not at the value's source — applying
+  the terminal scrubber inside the loader corrupted the JSON diagnostic in exactly that way before
+  it was moved.
 
 That C1 coverage is not an accident of style. `budget.ts` quotes attacker-controlled argv back to
 the operator in every invalid-value message, and its own comment names the attack
