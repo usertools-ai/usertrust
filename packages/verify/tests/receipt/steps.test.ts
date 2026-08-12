@@ -182,6 +182,48 @@ describe("§12 — arrival context extraction", () => {
 			expect(receiptIdFromArrivalContext(context), context).toBeNull();
 		}
 	});
+
+	/**
+	 * §12's trailer VALUE is "the full https URL" — the grammar is written out
+	 * as `"Usertrust-Receipt: https://usertrust.ai/r/" "ut1_" 16*22base58char`,
+	 * one production with the origin inside it, not a key followed by anything
+	 * that happens to name a receipt.
+	 *
+	 * Prefix-stripping into a common path made the three arrival forms one
+	 * form with two optional prefixes, so a trailer carrying a BARE id — or the
+	 * wrong scheme, or a foreign origin — reduced to a valid bare id and PASSED
+	 * the one check that binds a receipt to the artifact that cited it. No real
+	 * artifact carries those lines; accepting them means 3(a) can pass on a
+	 * string §12 says is not a trailer at all. That is a usage error (exit 3).
+	 */
+	it("rejects a trailer whose value is not the full resolution URL", () => {
+		for (const context of [
+			`Usertrust-Receipt: ${DEFAULT_RECEIPT_ID}`,
+			`Usertrust-Receipt: http://usertrust.ai/r/${DEFAULT_RECEIPT_ID}`,
+			`Usertrust-Receipt: https://evil.example/r/${DEFAULT_RECEIPT_ID}`,
+			`Usertrust-Receipt: https://usertrust.ai/${DEFAULT_RECEIPT_ID}`,
+			`Usertrust-Receipt: https://usertrust.ai/r/${SHORT_DECODE_RECEIPT_ID}`,
+			"Usertrust-Receipt: ",
+			"Usertrust-Receipt:",
+		]) {
+			expect(receiptIdFromArrivalContext(context), context).toBeNull();
+		}
+	});
+
+	/**
+	 * The mirror of the above: a form that is legal in ONE arrival context must
+	 * not be reachable by nesting it inside another. Each production is parsed
+	 * whole, so no prefix appears twice and no prefix is optional.
+	 */
+	it("rejects a nested or doubled arrival form", () => {
+		for (const context of [
+			`https://usertrust.ai/r/https://usertrust.ai/r/${DEFAULT_RECEIPT_ID}`,
+			`Usertrust-Receipt: Usertrust-Receipt: https://usertrust.ai/r/${DEFAULT_RECEIPT_ID}`,
+			`https://usertrust.ai/r/Usertrust-Receipt: https://usertrust.ai/r/${DEFAULT_RECEIPT_ID}`,
+		]) {
+			expect(receiptIdFromArrivalContext(context), context).toBeNull();
+		}
+	});
 });
 
 describe("§2 — amountUsd is COMPUTED on an integer path", () => {

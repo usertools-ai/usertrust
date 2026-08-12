@@ -247,19 +247,52 @@ export function exitCodeForReceiptVerdict(verdict: ReceiptCliReport["verdict"]):
 	return 0;
 }
 
-const VERIFIED_LIMITATIONS: readonly string[] = [
+/** The R-OUT obligations that hold whatever the amount covers. */
+const BASE_VERIFIED_LIMITATIONS: readonly string[] = [
 	"forkDisclaimer",
 	"artifactVacuum",
 	"supersessionUnknown",
-	"delegatedSpendExcluded",
 ];
 
-function limitationsFor(verdict: ReceiptCliReport["verdict"]): readonly string[] {
+/**
+ * The machine-readable half of §7's REQUIRED verifier behavior for
+ * `delegationPosture` — ONE caveat per value, keyed by the same value the
+ * human report keys `DELEGATION_LABELS` by.
+ *
+ * `delegatedSpendExcluded` used to be emitted on every verified verdict, which
+ * flatly contradicted the posture the same report stated: a JSON consumer
+ * reading `posture.delegation: "includesSomeDelegated"` and
+ * `limitations: [… "delegatedSpendExcluded"]` got two different answers about
+ * the amount's scope from one document, and the wrong one was the one written
+ * as a machine-readable fact.
+ *
+ * `includesAllDelegated` is absent by construction, not by omission: §2a makes
+ * it an integrity failure in v1 (no signed-evidence format exists), so it never
+ * reaches a verified verdict and therefore never reaches this table.
+ */
+export const DELEGATION_LIMITATIONS: Readonly<Record<string, string>> = {
+	selfDebitsOnly: "delegatedSpendExcluded",
+	includesSomeDelegated: "incompleteAttributedSubtotal",
+	indeterminate: "coverageNotVerifiable",
+};
+
+function limitationsFor(
+	verdict: ReceiptCliReport["verdict"],
+	posture: ReceiptReport["posture"],
+): readonly string[] {
 	// R-OUT obligations travel with every VERIFIED_* rung, not with the top
 	// rung alone (CLI spec §6: "the equivocation caveat… travelling WITH the
 	// history claim, never with the rung alone — PR #92's defect"). The base
 	// fork disclaimer and R-OUT-3/4 are unconditional at every rung too.
-	return verdict === "FAILED" || verdict === "UNVERIFIABLE" ? [] : VERIFIED_LIMITATIONS;
+	if (verdict === "FAILED" || verdict === "UNVERIFIABLE") return [];
+	// A verified verdict always carries a posture (step 7 releases it, and step
+	// 7 fails closed on a value it cannot interpret), so the fallback is
+	// unreachable — and it is `coverageNotVerifiable` rather than nothing
+	// because "we could not name what this amount covers" is exactly the
+	// statement that value makes. Emitting no delegation caveat at all would be
+	// the silent-scope defect §2a exists to close.
+	const delegation = posture === null ? undefined : DELEGATION_LIMITATIONS[posture.delegation];
+	return [...BASE_VERIFIED_LIMITATIONS, delegation ?? "coverageNotVerifiable"];
 }
 
 /** Builds the terminal report from a completed `ReceiptReport` run. */
@@ -278,7 +311,7 @@ function fromReceiptReport(
 		computed: report.computed,
 		unimplemented: report.unimplemented,
 		posture: report.posture,
-		limitations: limitationsFor(report.verdict),
+		limitations: limitationsFor(report.verdict, report.posture),
 		failure: report.failure,
 		missing: report.missing,
 	};
@@ -668,11 +701,11 @@ function renderHumanReport(report: ReceiptCliReport): string {
 	if (report.limitations.length > 0) {
 		lines.push("");
 		lines.push(CHECKPOINT_RUNG_DISCLAIMER);
-		if (report.limitations.includes("delegatedSpendExcluded") && report.posture !== null) {
-			// Nothing further to say beyond the label already printed above;
-			// the caveat is the label itself (§5's "the amount is never
-			// rendered without its label" obligation).
-		}
+		// The delegation caveat needs no line of its own at any posture: the
+		// `Amount:` line above already carries §7's per-value label, which is
+		// the same row `DELEGATION_LIMITATIONS` renders for `--json` (§5's "the
+		// amount is never rendered without its label" obligation). The two
+		// halves are keyed by one value so they cannot drift apart again.
 		if (
 			report.verdict === "VERIFIED_CHECKPOINT_HISTORY" ||
 			report.verdict === "VERIFIED_ANCHORED"

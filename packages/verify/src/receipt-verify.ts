@@ -1919,11 +1919,33 @@ export function isCanonicalReceiptId(id: string): boolean {
 	return base58Encode(decoded) === body;
 }
 
-const TRAILER_PREFIX = "Usertrust-Receipt: ";
+const TRAILER_KEY = "Usertrust-Receipt:";
 const RESOLUTION_URL_PREFIX = "https://usertrust.ai/r/";
+
+/** §12 form 2 — the resolution URL, whole. The origin and path are part of
+ * the production, so a foreign origin or a bare `http` scheme is not a
+ * shorter spelling of it, it is a different string. */
+function receiptIdFromResolutionUrl(url: string): string | null {
+	if (!url.startsWith(RESOLUTION_URL_PREFIX)) return null;
+	const id = url.slice(RESOLUTION_URL_PREFIX.length);
+	return isCanonicalReceiptId(id) ? id : null;
+}
 
 /**
  * The ID a receipt ARRIVED under, extracted from `--expect-id` (CLI spec §2).
+ *
+ * THREE forms, parsed SEPARATELY and each one WHOLE — a bare `ut1_…`, a
+ * resolution URL, and a §12 trailer line. They are not one form with two
+ * optional prefixes, and treating them that way is what made
+ * `Usertrust-Receipt: ut1_…` pass: strip the key, and what is left is a valid
+ * bare id. §12's trailer grammar is a single production —
+ * `"Usertrust-Receipt: https://usertrust.ai/r/" "ut1_" 16*22base58char` —
+ * whose VALUE is "the full https URL", so a trailer carrying anything else is
+ * not a trailer, and no artifact in the world carries the line we were
+ * accepting. Passing step 3(a) on it would report that the receipt is bound to
+ * the artifact that cited it, on the strength of a string an artifact could
+ * never contain — the one check that makes the binding is the one check that
+ * must not be satisfiable by a form nothing emits.
  *
  * §12's lexical rules are enforced rather than paraphrased: the key is
  * case-SENSITIVE, followed by exactly one `:` and exactly one space, the value
@@ -1932,9 +1954,9 @@ const RESOLUTION_URL_PREFIX = "https://usertrust.ai/r/";
  * this never searches — it matches from the start of the (single) line.
  *
  * `null` means the context is not a §12 form. That is a USAGE error for the
- * caller to report (exit 3), never a silent `notApplicable`: an unparseable
- * `--expect-id` that quietly disabled step 3(a) would answer a question the
- * operator did not ask.
+ * caller to report (exit 3), never a silent `notApplicable` and never a pass:
+ * an unparseable `--expect-id` that quietly disabled step 3(a) would answer a
+ * question the operator did not ask.
  */
 export function receiptIdFromArrivalContext(context: string): string | null {
 	let text = context;
@@ -1942,8 +1964,21 @@ export function receiptIdFromArrivalContext(context: string): string | null {
 	if (text.endsWith("\n")) text = text.slice(0, -1);
 	if (text.endsWith("\r")) text = text.slice(0, -1);
 	if (text.includes("\n") || text.includes("\r")) return null;
-	if (text.startsWith(TRAILER_PREFIX)) text = text.slice(TRAILER_PREFIX.length);
-	if (text.startsWith(RESOLUTION_URL_PREFIX)) text = text.slice(RESOLUTION_URL_PREFIX.length);
+
+	// Form 3 — the trailer line. Once the key matches, this IS the trailer
+	// production: it either satisfies §12 in full or it is malformed. It never
+	// falls back to another form.
+	if (text.startsWith(TRAILER_KEY)) {
+		const value = text.slice(TRAILER_KEY.length);
+		// "exactly one `:` then exactly one space" — a second space belongs to
+		// the value, where §12's grammar has no room for it.
+		if (!value.startsWith(" ")) return null;
+		return receiptIdFromResolutionUrl(value.slice(1));
+	}
+	// Form 2 — the resolution URL, likewise committed to once its origin
+	// matches, so a malformed one never re-reads as a bare id.
+	if (text.startsWith(RESOLUTION_URL_PREFIX)) return receiptIdFromResolutionUrl(text);
+	// Form 1 — the bare id.
 	return isCanonicalReceiptId(text) ? text : null;
 }
 

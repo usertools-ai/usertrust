@@ -23,6 +23,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	ARTIFACT_VACUUM_CAVEAT,
 	CHECKPOINT_RUNG_DISCLAIMER,
+	DELEGATION_LABELS,
+	DELEGATION_LIMITATIONS,
 	ESTIMATES_CAVEAT,
 	HISTORY_EQUIVOCATION_CAVEAT,
 	parseReceiptArgs,
@@ -655,6 +657,43 @@ describe("--expect-id", () => {
 		expect(result.exitCode).toBe(3);
 	});
 
+	it("accepts all three §12 arrival forms end to end", () => {
+		for (const context of [
+			DEFAULT_RECEIPT_ID,
+			`https://usertrust.ai/r/${DEFAULT_RECEIPT_ID}`,
+			`Usertrust-Receipt: https://usertrust.ai/r/${DEFAULT_RECEIPT_ID}`,
+		]) {
+			const bundle = mint();
+			const result = runReceiptCli(
+				["receipt.json", "--trust", "trust.json", "--expect-id", context, "--json"],
+				ioFor(bundle),
+			);
+			expect(result.exitCode, context).toBe(0);
+			expect(jsonReport(result).arrivalContext.result, context).toBe("passed");
+		}
+	});
+
+	it("a MALFORMED trailer is a usage error, never a passed arrival check", () => {
+		// The trailer is the only thing binding a receipt to the artifact that
+		// cited it. `Usertrust-Receipt: ut1_…` is not §12's grammar — its value
+		// is "the full https URL" — so no real artifact carries it, and passing
+		// 3(a) on it would report a binding that was never checked against
+		// anything an artifact could contain.
+		for (const context of [
+			`Usertrust-Receipt: ${DEFAULT_RECEIPT_ID}`,
+			`Usertrust-Receipt: http://usertrust.ai/r/${DEFAULT_RECEIPT_ID}`,
+			`Usertrust-Receipt: https://evil.example/r/${DEFAULT_RECEIPT_ID}`,
+		]) {
+			const bundle = mint();
+			const result = runReceiptCli(
+				["receipt.json", "--trust", "trust.json", "--expect-id", context],
+				ioFor(bundle),
+			);
+			expect(result.exitCode, context).toBe(3);
+			expect(result.stdout, context).toBe("");
+		}
+	});
+
 	it("reports `unavailable` when the check was requested but the run never got there", () => {
 		// §7's `notApplicable` means the input "does not exist in this context and
 		// never could". Here it exists — the operator typed it — and the run died
@@ -762,6 +801,54 @@ describe("--json", () => {
 		expect(report.computed.amountUsd).toBeNull();
 		expect(report.posture).toBeNull();
 		expect(report.limitations).toEqual([]);
+	});
+
+	it("names the limitation that is TRUE of the posture, on every posture", () => {
+		// §7's REQUIRED verifier behavior gives one caveat PER VALUE. Emitting
+		// `delegatedSpendExcluded` on every verdict contradicted the posture the
+		// same report stated: a consumer reading `posture.delegation` and
+		// `limitations` got two different answers about what the amount covers.
+		const cases = [
+			["selfDebitsOnly", "delegatedSpendExcluded"],
+			["includesSomeDelegated", "incompleteAttributedSubtotal"],
+			["indeterminate", "coverageNotVerifiable"],
+		] as const;
+		const allDelegationLimitations = cases.map(([, limitation]) => limitation);
+		for (const [posture, limitation] of cases) {
+			const bundle = mint({ projection: (p) => ({ ...p, delegationPosture: posture }) });
+			const report = jsonReport(
+				runReceiptCli(["receipt.json", "--trust", "trust.json", "--json"], ioFor(bundle)),
+			);
+			expect(report.verdict, posture).toBe("VERIFIED_CHECKPOINT");
+			expect(report.posture?.delegation, posture).toBe(posture);
+			expect(report.limitations, posture).toEqual([
+				"forkDisclaimer",
+				"artifactVacuum",
+				"supersessionUnknown",
+				limitation,
+			]);
+			// No OTHER posture's caveat rides along.
+			for (const other of allDelegationLimitations) {
+				if (other === limitation) continue;
+				expect(report.limitations, `${posture} must not claim ${other}`).not.toContain(other);
+			}
+		}
+	});
+
+	it("the human and JSON halves state the SAME posture", () => {
+		for (const posture of ["selfDebitsOnly", "includesSomeDelegated", "indeterminate"] as const) {
+			const bundle = mint({ projection: (p) => ({ ...p, delegationPosture: posture }) });
+			const human = runReceiptCli(["receipt.json", "--trust", "trust.json"], ioFor(bundle));
+			const report = jsonReport(
+				runReceiptCli(["receipt.json", "--trust", "trust.json", "--json"], ioFor(bundle)),
+			);
+			// The human report's label and the machine-readable limitation are two
+			// renderings of one §7 row, so they are keyed by the same value.
+			expect(human.stdout, posture).toContain(DELEGATION_LABELS[posture] as string);
+			expect(human.stdout, posture).toContain(`(${posture})`);
+			expect(report.limitations, posture).toContain(DELEGATION_LIMITATIONS[posture] as string);
+			expect(report.posture?.delegation, posture).toBe(posture);
+		}
 	});
 
 	it("UNVERIFIABLE carries no failure step or code, only missing", () => {
