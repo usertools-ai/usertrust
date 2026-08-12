@@ -898,6 +898,7 @@ verifier verifies nothing.
 | `core/src/audit/verify.ts` → `verifyVault`, `verifyVaultWithAnchors`, `exitCodeForAnchored` | `verify/src/index.ts` | differential tests |
 | `core/src/audit/merkle.ts` → all 7 Merkle functions | `verify/src/verify.ts` (there is **no** `merkle.ts` in verify) | differential tests |
 | `verify/src/receipt.ts` → `detectProvider` | mirrored *into* `core/src/export/markdown.ts` and `ui/src/shared/rows.ts` | comment only (verify is the source here) |
+| *(no core counterpart)* | `verify/src/receipt-verify.ts`, `verify/src/receipt-cli.ts` | **not mirrored, by design.** Core never mints a ut1 receipt-spec document — that is the stealth proxy's job — so there is nothing on the core side to keep in lockstep. Both files still sit inside the parity contract above (zero deps, `node:*`/`./`-relative imports only) and reuse `verify.ts`'s Merkle functions, `anchor-verify.ts`'s exported `verifySignatureRaw` + key parsing, and `canonical.ts`'s `canonicalize` rather than duplicating them a second time inside `packages/verify` itself. Recorded here so the next auditor does not go hunting a phantom `core/src` mirror for it. |
 
 Note the trap: `verify.ts` exists in **both** packages but they are different files with different
 contents.

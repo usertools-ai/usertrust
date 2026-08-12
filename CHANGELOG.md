@@ -9,6 +9,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`usertrust-verify receipt <file> --trust <snapshot.json>` — the offline
+  half of the trust story.** A zero-dependency, zero-network CLI mode that
+  reads a signed ut1 receipt plus a PINNED `receipt-spec` §8 trust snapshot
+  and runs §7 steps 1–9 entirely offline: the strict byte reader (canonical
+  base64, fatal UTF-8 with `ignoreBOM: true`, pre-parse duplicate-key
+  rejection, frozen numeric rules — non-integer / `-0` / non-safe-integer /
+  `Infinity`/`NaN` all rejected as VALUES, never as a thrown `canonicalize`),
+  the nine event-hash equalities, the mint signature (including the retired
+  MINT-key boundary evaluated through the mint event's own segment, not
+  merely "state permitting"), Merkle inclusion topology derived from
+  `(leafIndex, treeSize)`, the checkpoint signature and lineage pin, §2's
+  semantic constraints, the `transferSetRoot`/`amountUsd` derivation, and —
+  with `--envelope` — the full history walk back to the registered
+  `genesisSegmentId` with every checkpoint's signature re-verified under the
+  §8 lineage. `--trust` is required and never fetched: an implicit fetch
+  would silently unpin the verifier, so absent key material reports
+  UNVERIFIABLE rather than reaching out for it. `--envelope` reads the
+  receipt from the resolver envelope's byte-authoritative `receiptBytes`
+  member (never its `receipt` convenience copy) and runs the R4 agreement
+  check between the two. `--expect-id` binds arrival context (a bare
+  `ut1_…`, a resolution URL, or a `Usertrust-Receipt:` trailer line).
+  `--json` puts the machine-readable report on stdout ONLY — every
+  diagnostic goes to stderr, so `| jq` is safe — with every field nullable
+  on the failure path that cannot produce it, `delegationPosture` labels
+  travelling with `amountUsd` (an unlabelled or unrecognized posture fails
+  the semantic check rather than rendering an ambiguous total), and every
+  untrusted string (keyIds, snapshot version/predecessor, failure detail,
+  receipt IDs) control-character sanitized before truncation. Exit codes are
+  0 (`VERIFIED_CHECKPOINT` or higher — the rung itself is in the report, not
+  the code), 1 (FAILED, step + code named), 2 (UNVERIFIABLE, required
+  material missing), 3 (usage error, receipt mode's own handler — never the
+  shared vault `usage()`, which exits 1 and would misreport a typo as
+  FAILED). This is what the `/r/<receiptId>` verify page's download
+  affordance points at, closing the loop that entry above left open.
+
+  **Deliberately incomplete, and says so out loud rather than guessing.**
+  Anchor (Rekor) evidence is reported OUT OF BAND, never as a §7 value: if
+  absent the check is `notApplicable`; if present it is omitted from
+  `checks` and named in a top-level `unimplemented: ["anchorEvidence"]`,
+  because none of §7's four verdict values means "the verifier declined to
+  look" and claiming one would misstate why the check didn't run. The
+  verdict ladder is capped below `VERIFIED_ANCHORED` accordingly — no input
+  can upgrade past it — pending a normative artifact-hash rule binding
+  Rekor evidence to a `SegmentCheckpoint`'s signed payload, which belongs to
+  whoever mints anchors. Trust-snapshot signature verification is likewise
+  deferred to when receipt-spec §8's signing scheme ships; until then the
+  snapshot's structural rules (unique/resolvable keys, one-lineage-one-vault,
+  role/kind consistency, acyclic rotation, `activationSequence` bound to
+  `state`) are the only defense, and any violation is UNVERIFIABLE, never a
+  pass. `registryBinding` and `predecessorLinkage` report `notApplicable` —
+  offline has no registry to check against — though both stay in the
+  `--json` vocabulary for resolver-side consumers replaying a report.
+
+  Built against a from-scratch mint harness (Ed25519 keygen/sign, sha256,
+  canonical JSON — node builtins only) that reaches canonical bytes by a
+  path independent of the verifier's own `canonicalize`, so a shared
+  preimage bug can't hide from the corpus; pinned first against
+  receipt-spec §13's byte-for-byte canonicalization golden vectors. Vault
+  mode (`--tx`, `--bundle`, the differential anchor suites) is unchanged —
+  same flags, same byte-for-byte behavior.
+
 - **`/r/<receiptId>` — the public verify page a `Usertrust-Receipt` trailer
   resolves to (ships DARK, not yet live).** A read-only, unauthenticated
   page and two JSON siblings (`receipt.json`, `envelope.json`) that render
