@@ -241,7 +241,10 @@ describe("HARDEN: anchoring additive proofs", () => {
 		//     check's nested DETAIL: step 9 is upgrade-only, so `report.failure`
 		//     is null and the human report had nowhere else to say whether the
 		//     history was short, broken at an edge, or signed by the wrong key.
-		// Post-round total: 8401. 8700 leaves 299 lines of headroom.
+		// Post-round total: 8594. 8700 leaves 106 lines of headroom. (Recorded
+		// 2026-08-12 after the stdin round; the previous figure of 8401 had gone
+		// two rounds stale. The number in this comment is the artifact CLI spec
+		// §7 requires, so it is only honest if it is recomputed, not carried.)
 		//
 		// Rounds 4–6 under the same 8700 ceiling and the same amended §7 process
 		// — recorded here rather than each raising the number, because the
