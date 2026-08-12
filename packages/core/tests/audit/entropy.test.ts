@@ -204,9 +204,24 @@ describe("Entropy — composite score", () => {
 			{ kind: "anomaly_detected", data: { anomalyKind: "token_rate", metric: 9e9 } },
 		];
 
-		const report = computeEntropyScore(events, { chain: { valid: false } });
+		// A VALID chain — so the level comes from the event-derived signals alone.
+		const report = computeEntropyScore(events, { chain: { valid: true } });
 		expect(report.score).toBeGreaterThanOrEqual(30);
 		expect(report.level).toBe("elevated");
+	});
+
+	it("a FAILED chain verification cannot be averaged down to healthy", () => {
+		// Report-level dominance. Otherwise a tampered vault with otherwise-clean
+		// calls yields signal values [0, 1, 0, 0, 0] — mean 20, i.e. "low" — and a
+		// chain that failed verification reads as healthy because the unrelated
+		// signals were fine.
+		const events: EntropyEventInput[] = Array.from({ length: 50 }, (_, i) => ({
+			kind: "llm_call",
+			data: { cost: 1, settled: true, transferId: `t-${i}` },
+		}));
+
+		const report = computeEntropyScore(events, { chain: { valid: false } });
+		expect(report.level).toBe("critical");
 	});
 
 	it("classifies level as critical for score >= 60", () => {

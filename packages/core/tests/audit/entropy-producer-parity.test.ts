@@ -270,22 +270,32 @@ describe("drift detection — matched names must exist in the producer source", 
 		"ledger_rejected",
 	];
 
-	const FIELDS = [
-		"piiDetected", // signal 4, on llm_call
-		"piiTypes", // signal 4, on the denial path
-		"injectionPatterns", // signal 6, block mode
-		"patterns", // signal 6, warn mode
-		"decision", // signal 1
-		"transferId", // signals 3 and 6 correlate on this
-		"cost", // budget context fallback + receipts
+	/**
+	 * Each entry pins the field as an EMITTED KEY, not as an identifier that
+	 * merely occurs somewhere. The first cut of this check matched
+	 * `\bpatterns\b`, which `injectionResult.patterns` satisfies on the READ
+	 * side — so renaming the emitted key `patterns:` to `matches:` would have
+	 * left this green while the extractor stopped seeing warn-mode events. That
+	 * is the same half-measure this file exists to catch, inside the check
+	 * written to catch it.
+	 */
+	const EMITTED_KEYS: ReadonlyArray<readonly [string, RegExp]> = [
+		// Assigned onto the audit payload rather than written as a literal key.
+		["piiDetected", /auditData\.piiDetected\s*=|auditEventData\.piiDetected\s*=/],
+		["piiTypes", /\bpiiTypes\s*:/],
+		["injectionPatterns", /\binjectionPatterns\s*:/],
+		["patterns", /\bpatterns\s*:\s*injectionResult\.patterns/],
+		["decision", /\bdecision\s*:\s*"deny"/],
+		["transferId", /\btransferId\s*[,:]/],
+		["settled", /\bsettled\s*:/],
 	];
 
 	it.each(KINDS)("producer still writes the kind %s", (kind) => {
 		expect(corpus).toContain(`"${kind}"`);
 	});
 
-	it.each(FIELDS)("producer still writes the field %s", (field) => {
-		expect(corpus).toMatch(new RegExp(`\\b${field}\\b`));
+	it.each(EMITTED_KEYS)("producer still EMITS %s as a data key", (_name, pattern) => {
+		expect(corpus).toMatch(pattern);
 	});
 
 	it("PII still rides as an ARRAY, which is the whole reason signal 4 was blind", () => {

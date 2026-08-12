@@ -235,6 +235,19 @@ export function extractChainIntegrity(
 	for (const e of events) {
 		const id = e.data.transferId;
 		if (typeof id !== "string" || id === "") continue;
+		// SETTLEMENT ATTEMPTS only. A denial, an anomaly abort and a partial
+		// delivery all carry a `transferId` but never reached settlement, so
+		// counting them as observations diluted the rate against calls that could
+		// not have desynced: one ambiguous settlement among 99 denials read as a
+		// 1% desync rate when 100% of actual settlement attempts had failed.
+		// `settled` is the discriminator rather than a kind list, because the
+		// governed-action terminals are dynamic (`<action.kind>`) and cannot be
+		// enumerated from here.
+		const isSettlementAttempt =
+			e.data.settled !== undefined ||
+			e.kind === "settlement_ambiguous" ||
+			e.kind === "settlement_shortfall";
+		if (!isSettlementAttempt) continue;
 		observedTransfers.add(id);
 		if (e.kind === "settlement_ambiguous") ambiguousTransfers.add(id);
 	}
@@ -398,12 +411,25 @@ export function extractPatternMemoryHits(events: EntropyEventInput[]): EntropySi
 		// and the evidence rides on the denial as `injectionPatterns`
 		// (`denial-events.ts:207`). Skipping that shape made the signal blind in
 		// exactly the mode where injection was actually stopped.
-		const isDenial = DENIAL_EVENT_KINDS.has(e.kind);
+		//
+		// The denominator is outcomes KNOWN to have reached the scanner:
+		//   - anything carrying `settled` — `llm_call` and the dynamic
+		//     `<action.kind>` terminals, which are scanned too and were previously
+		//     excluded, so an action-only chain scored value 1 on total 0 and the
+		//     composite dropped the signal entirely;
+		//   - failure terminals, which were scanned before they failed;
+		//   - a denial ONLY when it carries `injectionPatterns`. A denial can fire
+		//     before injection detection runs, so counting every denial would put
+		//     calls in the denominator that were never scanned.
+		const reachedScanner =
+			e.data.settled !== undefined ||
+			e.kind === "llm_call" ||
+			e.kind === "llm_call_failed" ||
+			e.kind.endsWith("_failed") ||
+			nonEmptyArray(e.data.injectionPatterns);
 		const legacyShape =
 			e.kind.includes("pattern") || e.kind.includes("memory") || e.data.patternMatch !== undefined;
-		if (e.kind !== "llm_call" && e.kind !== "llm_call_failed" && !isDenial && !legacyShape) {
-			continue;
-		}
+		if (!reachedScanner && !legacyShape) continue;
 
 		total++;
 		if (
@@ -444,8 +470,11 @@ const EXTRACTORS: ReadonlyArray<
 	extractPatternMemoryHits,
 ];
 
+/** Score at or above which a report is "critical". */
+const CRITICAL_SCORE = 60;
+
 function classifyLevel(score: number): EntropyLevel {
-	if (score >= 60) return "critical";
+	if (score >= CRITICAL_SCORE) return "critical";
 	if (score >= 30) return "elevated";
 	return "low";
 }
@@ -474,7 +503,19 @@ export function computeEntropyScore(
 	const scored = signals.filter((s) => s.total > 0);
 	const sum = scored.reduce((acc, s) => acc + s.value, 0);
 	const rawScore = scored.length > 0 ? sum / scored.length : 0;
-	const score = Math.round(rawScore * 100);
+	let score = Math.round(rawScore * 100);
+
+	// DOMINANCE AT REPORT LEVEL, not only inside signal 3. Making the chain
+	// signal binary was necessary and not sufficient: a tampered vault with
+	// otherwise-clean calls yields signal values [0, 1, 0, 0, 0], whose mean is
+	// 20 — "low", i.e. healthy, for a chain that failed verification. Averaging a
+	// total loss of audit integrity against unrelated healthy signals is the same
+	// dilution one layer up. A chain that does not verify invalidates the whole
+	// audit claim, so nothing else can average it back down.
+	const chainSignal = signals.find((s) => s.condition === "chain_integrity");
+	if (chainSignal !== undefined && chainSignal.total > 0 && chainSignal.value >= 1) {
+		score = Math.max(score, CRITICAL_SCORE);
+	}
 
 	return {
 		score,
