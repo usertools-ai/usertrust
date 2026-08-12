@@ -1544,15 +1544,45 @@ export function loadTrustSnapshot(bytes: Uint8Array): TrustSnapshotLoad {
 	const lineageFailure = validateLineages(keys);
 	if (lineageFailure !== null) return fail(lineageFailure);
 
-	// §8's role separation: mint and checkpoint entries sharing key material
-	// collapse the very separation the two signatures rely on.
-	const materialRoles = new Map<string, TrustKeyRole>();
+	// §8's keyId is an IDENTITY, not a label — one material, one ID.
+	//
+	// The role clause is §8's own ("mint and checkpoint entries sharing key
+	// material collapse the very separation the two signatures rely on") and
+	// keeps its specific message, because an operator acts on which separation
+	// broke. The general clause behind it is the one a review round found
+	// missing, and it subsumes the first: EVERY rule this loader has — role,
+	// state, `activationSequence`, lineage membership, and the
+	// one-lineage-one-vault ownership below — is keyed by `keyId`, so two IDs
+	// over one signing capability let the document give every one of those rules
+	// two different answers about the same key. §8 resolves ambiguity as
+	// UNVERIFIABLE, never as a pass.
+	//
+	// Two instances, both live before this line:
+	//
+	//  · REVOCATION EVADED. Revoke `utk_mint_A` and re-register its material as
+	//    `utk_mint_B`/`active`, and a receipt naming B verifies under the
+	//    revoked key's own crypto. The state rules are per-ENTRY and could not
+	//    see it.
+	//  · ONE LINEAGE, TWO VAULTS. `lineageOwner` below compares keyIds, so the
+	//    identical checkpoint SPKI registered under a second ID produced two
+	//    DISJOINT lineages over one capability and walked past the rule §8 wrote
+	//    for exactly this ("a lineage trusted by two vaults makes the document
+	//    invalid" — `proof.chain` is receipt-signed only and could not settle
+	//    which vault a statement belonged to). With material unique, keyId and
+	//    capability are in bijection and the ID-keyed check below is sound
+	//    again.
+	const materialOwner = new Map<string, TrustKey>();
 	for (const key of keys.values()) {
-		const seen = materialRoles.get(key.materialId);
-		if (seen !== undefined && seen !== key.role) {
-			return fail(`key ${key.keyId} shares key material across the mint/checkpoint roles`);
+		const seen = materialOwner.get(key.materialId);
+		if (seen !== undefined) {
+			if (seen.role !== key.role) {
+				return fail(`key ${key.keyId} shares key material across the mint/checkpoint roles`);
+			}
+			return fail(
+				`keys ${seen.keyId} and ${key.keyId} register the same key material — §8 makes a keyId an identity, and two names for one key give every ID-keyed rule two answers`,
+			);
 		}
-		materialRoles.set(key.materialId, key.role);
+		materialOwner.set(key.materialId, key);
 	}
 
 	// ── chains[] ──────────────────────────────────────────────────────────────
@@ -1785,6 +1815,40 @@ export const UT1_MINT_EVENT_KIND = "receipt_settled";
 export const UT1_TRUST_DOMAIN = "usertrust.ai";
 export const UT1_SPEC = "ut1";
 export const UT1_SCOPE = "session";
+/** §4a/§8: ut1 v1 has no SDK mint keys at all, so this is a LITERAL. */
+export const UT1_MINTER_KIND = "proxy";
+
+/**
+ * §4a's proxy-v1 mint actor, EXACTLY — three members, these values, nothing
+ * else.
+ *
+ * AGREEMENT IS NOT CONFORMANCE. Equality 2 compares `event.actor` against the
+ * chain's registered `mintActor`, and until now that comparison was the whole
+ * rule. But both documents are inputs here: a receipt carrying
+ * `actor: "receipt-minter"`, or `null`, or the closed form plus a `tenant`
+ * member, verified whenever the pinned chain's `mintActor` was malformed the
+ * same way — and two inputs agreeing proves only that one party wrote both.
+ * Where the spec fixes a literal, the literal is checked against the SPEC
+ * first; the agreement is then a second, independent fence, not the only one.
+ */
+export const UT1_MINT_ACTOR: Readonly<Record<string, string>> = {
+	type: "system",
+	id: "receipt-minter",
+	name: "receipt-minter",
+};
+
+/** `event.actor` is §4a's closed form — the member SET as well as the values. */
+function isUt1MintActor(value: JsonValue | undefined): boolean {
+	if (!isJsonObject(value)) return false;
+	// The member set is closed, so a count plus per-member presence is the whole
+	// comparison — and `Object.hasOwn`, never an indexed read, because the
+	// document chooses these keys (see `walkFieldTable`'s own note).
+	if (Object.keys(value).length !== Object.keys(UT1_MINT_ACTOR).length) return false;
+	for (const [member, literal] of Object.entries(UT1_MINT_ACTOR)) {
+		if (!Object.hasOwn(value, member) || value[member] !== literal) return false;
+	}
+	return true;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // §12 — the receipt-ID rule.
@@ -2784,12 +2848,33 @@ class BaseRun {
 			return mismatch("equality 1: inclusion.leafHash ≠ event.hash");
 		}
 
-		// Equality 2 — canonical BYTES against the registered mintActor form, not
-		// field plucking: the closed union has a string form too, and the chain
-		// entry selects which one this vault uses.
+		// Equality 2, in two halves — and the FIRST one is not an equality.
+		//
+		// §4a fixes proxy-v1's mint actor to exactly
+		// `{type:"system", id:"receipt-minter", name:"receipt-minter"}`, and the
+		// canonical comparison below cannot see that: it compares two INPUTS, so
+		// a receipt carrying the string form (or `null`, or the closed form plus a
+		// `tenant`) verified whenever the pinned chain registered the identical
+		// malformation. Agreement proves the two documents came from one writer,
+		// which is precisely what an attacker supplying both already has.
+		//
+		// The literal is safe to apply here even though `proof.profile` is not
+		// pinned until equality 8 below: no receipt reaches a verdict under any
+		// other profile (equality 8 refuses everything but `UT1_PROFILE`), and no
+		// existing profile mutant touches the actor, so this cannot pre-empt the
+		// condition that vector isolates.
 		if (event.kind !== UT1_MINT_EVENT_KIND) {
 			return mismatch(`equality 2: event.kind is not ${UT1_MINT_EVENT_KIND}`);
 		}
+		if (!isUt1MintActor(event.actor)) {
+			return mismatch(
+				"equality 2: event.actor is not §4a's fixed proxy-v1 system actor, whatever the chain registers",
+			);
+		}
+		// Then the agreement, unchanged — canonical BYTES against the registered
+		// form, not field plucking (§4a is explicit that this is one comparison).
+		// It is a SECOND fence now rather than the only one: a chain registering
+		// some other actor still refuses this receipt.
 		if (canonicalize(event.actor) !== canonicalize(chain.mintActor)) {
 			return mismatch("equality 2: event.actor is not the chain's registered mintActor");
 		}
@@ -2911,7 +2996,23 @@ class BaseRun {
 			return missingMaterial("trustKey", `mint key ${keyId} is not in the pinned snapshot`);
 		}
 		if (key.role !== "mint") return invalid(`key ${keyId} is registered with role ${key.role}`);
-		if (key.minterKind !== stringAt(minter, "kind")) {
+		// AGREEMENT IS NOT CONFORMANCE, the same defect as equality 2's actor.
+		// §4a/§8 give ut1 v1 NO SDK mint keys — `minter.kind` is the literal
+		// `proxy`, and the snapshot does not get to widen the vocabulary. Until
+		// this line, a snapshot registering `minterKind: "sdk"` and a receipt
+		// claiming `"sdk"` agreed with each other and verified, which is a receipt
+		// asserting an authority v1 cannot confer, attested by a document the same
+		// party supplied. The literal is checked FIRST, against the spec.
+		const minterKind = stringAt(minter, "kind");
+		if (minterKind !== UT1_MINTER_KIND) {
+			return invalid(
+				`minter.kind ${JSON.stringify(minter.kind)} is not v1's pinned literal ${JSON.stringify(UT1_MINTER_KIND)}`,
+			);
+		}
+		// And only then the agreement, which still has work to do: a key
+		// registered for some other minterKind confers no authority over a receipt
+		// claiming `proxy`.
+		if (key.minterKind !== minterKind) {
 			return invalid(
 				`minter.kind ${JSON.stringify(minter.kind)} disagrees with the key's registered minterKind`,
 			);
