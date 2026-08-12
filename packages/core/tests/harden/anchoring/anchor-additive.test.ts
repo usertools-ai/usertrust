@@ -104,33 +104,46 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// receipt verification — no vendored source). Current size ~3.3k lines.
 		// Raised 4200 → 6500 for the `usertrust-verify receipt` ship
 		// (receipt-verify.ts, receipt-spec §7's offline verifier — node builtins
-		// only, no vendored source). Exceeding 6500 is a STOP-and-review, not a
-		// second raise (CLI spec §7).
+		// only, no vendored source).
 		//
-		// 6500 → 7200. THIS COMMENT IS THAT STOP-AND-REVIEW, and the answer it
-		// reached is that 6500 was arithmetically unable to hold the ship it was
-		// written for — the number was wrong, the implementation was not:
+		// 6500 → 7200, on the authority of CLI spec §7's line-cap paragraph as
+		// AMENDED 2026-08-12, which ratifies 7200, withdraws the "not a second
+		// raise" clause ("it presumed the first number was right"), and restates
+		// the LOC figure as a REVIEW PROMPT rather than a gate: crossing it
+		// obliges (a) re-verifying the import and dependency assertions directly,
+		// (b) recording here what was added and why it is not vendoring, and
+		// (c) raising the number to fit the work rather than trimming the work
+		// to fit the number. This comment discharges (b); assertions 4 and 5
+		// above ARE (a), and both pass — every import in packages/verify/src is
+		// still node:* or ./-relative and `dependencies` is still {}, so the
+		// thing this tripwire exists to catch did not happen. Nothing was
+		// trimmed: shaving prose off a Tier-0 verifier to fit a number games the
+		// tripwire instead of satisfying it.
 		//
-		//   · pre-ship baseline (7d685e6): 8 files, 3910 lines. Headroom under
-		//     6500: 2590.
-		//   · CLI spec §7's OWN estimate for this ship: 2000–2600 lines. A
-		//     top-of-estimate, perfectly disciplined verifier therefore lands at
-		//     6510 — over the cap before a single line of the CLI surface the
-		//     same ship requires, which §7 budgeted nothing for.
-		//   · actual: one added file, receipt-verify.ts at 2662 → 6572. That is
-		//     2.4% past the top of §7's estimate, not a runaway.
-		//   · the thing this tripwire exists to catch DID NOT HAPPEN: assertion 5
-		//     above passes, so every import in packages/verify/src is still
-		//     node:* or ./-relative and no vendored source entered the package.
-		//     Zero dependencies (assertion 4) likewise holds.
-		//   · +54 of the current total is master's own change to the MIRRORED
-		//     anchor-verify.ts, which this ship neither wrote nor may edit.
+		// What was added, and the arithmetic, counted by this test's own method
+		// (split("\n").length per .ts file in packages/verify/src):
 		//
-		// New number = the completed verifier post-merge (6626) + ~570 for the
-		// CLI surface. Shaving prose off a Tier-0 verifier to fit a number would
-		// game the tripwire rather than satisfy it, so nothing was trimmed.
-		// A THIRD raise needs the CLI spec's §7 line-cap paragraph amended
-		// first — this one is recorded as a deviation from it, not a precedent.
+		//   · pre-ship baseline (7d685e6, this branch's fork point): 8 files,
+		//     3910 lines.
+		//   · master has since moved to 3999 (+89) — anchor-verify.ts +54 AND
+		//     index.ts +35, both master's own work on files this ship neither
+		//     wrote nor (for the MIRRORED anchor-verify.ts) may edit.
+		//   · this ship adds exactly one file: receipt-verify.ts, 2662 lines,
+		//     receipt-spec §7 steps 1–9. No file was vendored; no mirrored file
+		//     was edited.
+		//   · post-merge total: 3999 + 2662 = 6661. Headroom under 7200: 539.
+		//
+		// Read the residual honestly rather than rounding it away. §7 derived
+		// 7200 as baseline + a top-of-estimate 2600-line verifier + ~700 for the
+		// CLI surface; the baseline came in +89 and the verifier +62 over that
+		// estimate, so the 539 left for Task 5's CLI surface (cli.ts receipt
+		// dispatch + the report module) is ~151 short of what §7 intended to
+		// budget for it. 7200 is left standing because it is the ratified
+		// number and moving it again here would be exactly the self-authorization
+		// the amendment was written to end. If Task 5 crosses it, that task runs
+		// (a)/(b)/(c) and raises — which the amended §7 now permits — and the
+		// ~151 shortfall is carried in the PR residuals ledger so the raise is
+		// expected rather than discovered.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
