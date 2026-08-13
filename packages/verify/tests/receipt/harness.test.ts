@@ -145,9 +145,30 @@ describe("canonicalization — receipt-spec §13 golden corpus", () => {
 		//
 		// NOT a defence of the defects. This ship deliberately does not touch
 		// `canonical.ts` (the correction is code-identical in core and verify, so
-		// it lands in both, as its own change). When it does land, THIS TEST GOES
-		// RED — which is the point: someone has to look, and the fix is to delete
-		// the row from the table below, never to loosen the harness.
+		// it lands in both, as its own change).
+		//
+		// ┌─ IF YOU ARE HERE BECAUSE THIS TEST WENT RED ─────────────────────────┐
+		// │ THAT IS THE DESIGNED OUTCOME, NOT A BROKEN ORACLE.                   │
+		// │                                                                      │
+		// │ A red row means the canonicalizer CONVERGED on the normative         │
+		// │ algorithm — receipt-spec §13 — and `src/canonical.ts` now gives the  │
+		// │ right answer where this table recorded a wrong one. The fix is to    │
+		// │ DELETE THAT ROW. Never loosen the harness, never relax an            │
+		// │ expectation, never skip the test: the harness is the INDEPENDENT     │
+		// │ oracle the whole conformance corpus rests on, and weakening it to    │
+		// │ quiet a red test destroys the only thing making the corpus mean      │
+		// │ anything. A corpus checked solely by the code it tests proves        │
+		// │ nothing.                                                             │
+		// │                                                                      │
+		// │ Context (2026-08-12): the correction was attempted on                │
+		// │ `ship/canonical-integrity` and that branch was TERMINATED after ten  │
+		// │ rounds — it introduced defects faster than review removed them. A    │
+		// │ restart is ledgered: canonicalize + the chain guard, three-round     │
+		// │ budget. Until that lands these seven rows are ACCURATE against       │
+		// │ master and this test is green. When it lands, delete the rows it     │
+		// │ fixed — one per row, checked against §13's conformance table, not    │
+		// │ wholesale.                                                           │
+		// └──────────────────────────────────────────────────────────────────────┘
 		const recorded: readonly (readonly [string, () => unknown, string | "THROW"])[] = [
 			["undefined", () => undefined, "undefined"],
 			["[1, undefined, 2]", () => [1, undefined, 2], "[1,,2]"],
