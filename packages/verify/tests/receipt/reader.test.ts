@@ -27,6 +27,7 @@ import {
 	isCanonicalBase64,
 	type JsonObject,
 	loadTrustSnapshot,
+	RECEIPT_NUMERIC_POLICY,
 	readReceiptDocument,
 	scanJsonForDuplicateKeys,
 } from "../../src/receipt-verify.js";
@@ -281,7 +282,9 @@ describe("the frozen numeric rules (§3 step 4)", () => {
 		// that function, a statement of what it can and cannot be asked.
 		expect(findNonFrozenNumber(rounded)).toBeNull();
 		// The scan over the TEXT is not.
-		const scan = scanJsonForDuplicateKeys('{"n":1.00000000000000001}', { frozenNumbers: true });
+		const scan = scanJsonForDuplicateKeys('{"n":1.00000000000000001}', {
+			policy: RECEIPT_NUMERIC_POLICY,
+		});
 		expect(scan.ok).toBe(false);
 		expect(scan.ok === false && scan.kind).toBe("numeric");
 	});

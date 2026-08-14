@@ -20,6 +20,7 @@ import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { canonicalize } from "../../src/canonical.js";
 import {
 	ARTIFACT_VACUUM_CAVEAT,
 	CHECKPOINT_RUNG_DISCLAIMER,
@@ -37,6 +38,7 @@ import {
 	SUPERSESSION_CAVEAT,
 	writeAllSync,
 } from "../../src/receipt-cli.js";
+import { structurallyEqualJson } from "../../src/receipt-verify.js";
 import {
 	ALT_RECEIPT_ID,
 	corruptBase64,
@@ -720,10 +722,15 @@ describe("--envelope", () => {
 		const bundle = mint();
 		const rawEnvelope = JSON.stringify(bundle.envelope);
 		// `1e999` is syntactically a valid JSON number token that overflows to
-		// `Infinity` on parse — the exact vector `canonical.ts` throws on and
-		// `readStrictJson` (envelope-level parse) never rejects, because only
-		// the RECEIPT's strict reader runs the frozen numeric rules, never the
-		// envelope's `receipt` convenience copy.
+		// `Infinity` on parse — the exact vector `canonical.ts` throws on.
+		//
+		// It is now refused one layer EARLIER than when this test was written.
+		// `$.receipt` is declared to be a ut1 receipt, so `ENVELOPE_NUMERIC_POLICY`
+		// applies the frozen rules to the convenience copy's literals and the
+		// reader rejects the token before `structurallyEqualJson` is ever called.
+		// The invariant this test exists for is unchanged and now holds a step
+		// sooner: a verdict, never a throw. The DETAIL is stronger too — it names
+		// the rule and the position instead of reporting a generic disagreement.
 		const hostileEnvelope = rawEnvelope.replace('"receipt":{', '"receipt":{"hostile":1e999,');
 		expect(hostileEnvelope).not.toBe(rawEnvelope); // the splice actually landed
 
@@ -731,7 +738,8 @@ describe("--envelope", () => {
 		expect(outcome.kind).toBe("failed");
 		if (outcome.kind === "failed") {
 			expect(outcome.code).toBe("ENVELOPE_INVALID");
-			expect(outcome.detail).toContain("bytes↔copy");
+			expect(outcome.detail).toContain("non-finite number");
+			expect(outcome.detail).toContain("$.receipt.hostile");
 		}
 
 		// End to end through the public entry point too — must return a
@@ -754,14 +762,20 @@ describe("--envelope", () => {
 		expect(report.failure?.step).toBe("envelope");
 	});
 
-	it("a copy that differs from the bytes ONLY by `-0` is still a disagreement", () => {
-		// R4 compares the strict-parsed BYTES against the convenience copy, and a
-		// canonical-string comparison cannot express this: §13's serializer
-		// renders `-0` as `0` (as does `JSON.stringify`), so the two documents
-		// canonicalize identically and the check reports agreement about two
-		// objects that are not the same object. `Object.is` is the only
-		// separator, and the copy is what a consumer reads — the whole reason R4
-		// exists is that the resolver can make the two disagree.
+	it("a copy that differs from the bytes ONLY by `-0` is refused — now by the frozen rule", () => {
+		// This vector used to be caught by R4's `Object.is` comparison, and it is
+		// now caught EARLIER and more precisely: `-0` is illegal at any position in
+		// a ut1 document (§13 forbids it outright), `$.receipt` is declared to be
+		// one, so `ENVELOPE_NUMERIC_POLICY` refuses the literal before the
+		// agreement check runs. Same verdict class, a detail that names the actual
+		// rule broken rather than calling it a structural disagreement.
+		//
+		// R4's own `Object.is` property has NOT lost its coverage — it moved from
+		// here to the direct `structurallyEqualJson` unit tests below, which is
+		// where it should always have been. Every value a serializer erases is a
+		// NUMBER, so with the copy's literals frozen there is no longer any
+		// envelope that can reach R4 carrying one; testing the comparator through
+		// an envelope that can no longer exist would be testing nothing.
 		const bundle = mint({
 			projection: (p) => {
 				(p.spend as Record<string, unknown>).roundingAdjustment = 0;
@@ -778,7 +792,8 @@ describe("--envelope", () => {
 		expect(outcome.kind).toBe("failed");
 		if (outcome.kind === "failed") {
 			expect(outcome.code).toBe("ENVELOPE_INVALID");
-			expect(outcome.detail).toContain("bytes↔copy");
+			expect(outcome.detail).toContain("negative zero");
+			expect(outcome.detail).toContain("roundingAdjustment");
 		}
 
 		const io = memoryIo({
@@ -790,6 +805,44 @@ describe("--envelope", () => {
 		);
 		expect(report.verdict).toBe("FAILED");
 		expect(report.failure?.step).toBe("envelope");
+	});
+
+	/**
+	 * R4's comparator, tested directly.
+	 *
+	 * These assertions used to ride on the two envelope vectors above. Freezing
+	 * the convenience copy's literals made those vectors refuse earlier, which is
+	 * correct but would have left `structurallyEqualJson`'s defining property
+	 * with no coverage at all — the quiet kind of regression, where a suite still
+	 * passes because a case stopped reaching the code it was aimed at. So the
+	 * property is asserted on the comparator itself, where no reader can pre-empt
+	 * it.
+	 */
+	describe("structurallyEqualJson separates what a serializer erases", () => {
+		it("`-0` and `0` are NOT equal, though both canonicalize to `0`", () => {
+			expect(canonicalize({ a: -0 })).toBe(canonicalize({ a: 0 }));
+			expect(structurallyEqualJson({ a: -0 }, { a: 0 })).toBe(false);
+			expect(structurallyEqualJson({ a: -0 }, { a: -0 })).toBe(true);
+		});
+
+		it("key ORDER is not a disagreement, but a key SET difference is", () => {
+			expect(structurallyEqualJson({ a: 1, b: 2 }, { b: 2, a: 1 })).toBe(true);
+			expect(structurallyEqualJson({ a: 1 }, { a: 1, b: 2 })).toBe(false);
+		});
+
+		it("never serializes either side, so a non-finite is a verdict and not a throw", () => {
+			// `canonicalize` THROWS on `1e999`; the comparator must not.
+			expect(() => canonicalize({ a: Number.POSITIVE_INFINITY })).toThrow();
+			expect(() => structurallyEqualJson({ a: Number.POSITIVE_INFINITY }, { a: 1 })).not.toThrow();
+			expect(structurallyEqualJson({ a: Number.POSITIVE_INFINITY }, { a: 1 })).toBe(false);
+		});
+
+		it("separates types a loose comparison would conflate", () => {
+			expect(structurallyEqualJson({ a: 1 }, { a: "1" })).toBe(false);
+			expect(structurallyEqualJson({ a: null }, { a: false })).toBe(false);
+			expect(structurallyEqualJson([1, 2], [1, 2])).toBe(true);
+			expect(structurallyEqualJson([1, 2], [2, 1])).toBe(false);
+		});
 	});
 
 	it("still accepts a copy whose KEY ORDER differs — order is not a disagreement", () => {

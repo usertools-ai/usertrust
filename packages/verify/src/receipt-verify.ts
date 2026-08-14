@@ -144,28 +144,78 @@ export type JsonScanResult =
 	| { readonly ok: true }
 	| { readonly ok: false; readonly kind: JsonScanFailureKind; readonly detail: string };
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The frozen-numeric POLICY.
+//
+// ONE rule, stated once, for every structure this verifier reads:
+//
+//   A DECLARED-INTEGER field whose value is covered by a signature — or which
+//   feeds a comparison against signed material — is validated on the LITERAL,
+//   before `JSON.parse` is allowed to round it.
+//
+// The rule follows the declared FIELD, never the file. That is the whole
+// correction. Three separate review rounds found the same defect in three
+// different documents — the receipt, the §8 snapshot, and the served checkpoint
+// history — and each was fixed only where it surfaced, because the scope was
+// derived from the instance that revealed it rather than from the property. A
+// policy keyed by declared-field identity has no "where it surfaced": a
+// structure either declares a position as an integer or it does not.
+//
+// The policy is a TREE, descended in lockstep with the document, and NOT a path
+// pattern. A pattern has to be matched against a path STRING, and a path string
+// built by concatenating raw JSON keys is ambiguous: an unknown top-level member
+// literally named `keys[0]` produces `$.keys[0].activationSequence`, the exact
+// text the real declared path produces. Matching it rejected a document §4
+// promises to accept. Descending the tree cannot express that confusion —
+// `members.get("keys[0]")` and `members.get("keys")` are different lookups — so
+// the ambiguity is not fixed here, it is unrepresentable.
+//
+// `ReadonlyMap` rather than an object, for the reason `fieldTable` documents:
+// an object literal answers `["__proto__"]` and `["constructor"]` with inherited
+// values, and a policy that says "declared" for a member nobody declared is the
+// same class of hole pointing the other way.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface NumericPolicy {
+	/**
+	 * Every number at or below this position is declared. For a CLOSED format
+	 * with no fractional domain — the ut1 receipt (§2), §4a's v2 checkpoint
+	 * statement — this is the accurate policy and not a blunt one: the schema
+	 * admits no member that could legitimately carry a fraction.
+	 */
+	readonly frozen?: true;
+	/** The number AT this position is declared. Its subtree is not. */
+	readonly integer?: true;
+	readonly members?: ReadonlyMap<string, NumericPolicy>;
+	/** Every element of an array shares one declaration. */
+	readonly elements?: NumericPolicy;
+}
+
+/** Every number below here is declared — a closed format with no fractions. */
+export const FROZEN_SUBTREE: NumericPolicy = { frozen: true };
+/** This one position is a declared integer; nothing below it is. */
+export const DECLARED_INTEGER: NumericPolicy = { integer: true };
+
+export function policyMembers(entries: Readonly<Record<string, NumericPolicy>>): NumericPolicy {
+	return { members: new Map(Object.entries(entries)) };
+}
+
+export function policyElements(of: NumericPolicy): NumericPolicy {
+	return { elements: of };
+}
+
 export interface JsonScanOptions {
 	/**
-	 * Apply §3's frozen numeric rules to every numeric LITERAL. Off by default:
-	 * the frozen rules are the RECEIPT's (CLI spec §3 step 4). The §8 snapshot
-	 * tolerates unknown members precisely so the open signing scheme can add
-	 * them (§4), and the resolver's envelope is not a ut1 document at all.
-	 */
-	readonly frozenNumbers?: boolean;
-	/**
-	 * Apply the same rules to the literals at these DOTTED PATHS only, for a
-	 * document the whole-document switch above is too broad for.
+	 * Which positions hold a declared integer. Absent ⇒ no position does, which
+	 * is the honest answer for a structure this verifier reads no integer out of.
 	 *
-	 * The §8 snapshot is that document: §4's tolerance of unknown members is a
-	 * deliberate forward-compatibility promise, and one of them may one day
-	 * legitimately carry a fraction — but the members this file READS as
-	 * integers are declared, not unknown, and a fractional literal in one of
-	 * them rounds to a legal integer before any value-level check can see it.
-	 * Scoping by path keeps the promise and closes the hole.
-	 *
-	 * Paths are the scanner's own: `$.keys[0].activationSequence`.
+	 * A fraction anywhere the policy does NOT name stays legal, everywhere. That
+	 * is the forward-compatibility promise §4 makes for the snapshot's unknown
+	 * members and §3 makes for the resolver's envelope, and it survives intact
+	 * because the constraint is attached to the declared field rather than to the
+	 * document that happens to carry it.
 	 */
-	readonly frozenNumberPaths?: (path: string) => boolean;
+	readonly policy?: NumericPolicy;
 }
 
 const WHITESPACE = new Set([" ", "\t", "\n", "\r"]);
@@ -177,17 +227,48 @@ interface ScanFailure {
 	readonly detail: string;
 }
 
+/**
+ * The policy for a MEMBER of a position governed by `policy`. `undefined` in,
+ * `undefined` out: once the walk leaves the declared region it stays outside it,
+ * which is what keeps unknown members free to carry fractions.
+ */
+function memberPolicy(policy: NumericPolicy | undefined, key: string): NumericPolicy | undefined {
+	if (policy === undefined) return undefined;
+	if (policy.frozen === true) return policy;
+	return policy.members?.get(key);
+}
+
+/** The same, for an array element. Every element shares one declaration. */
+function elementPolicy(policy: NumericPolicy | undefined): NumericPolicy | undefined {
+	if (policy === undefined) return undefined;
+	if (policy.frozen === true) return policy;
+	return policy.elements;
+}
+
+/**
+ * A path SEGMENT for diagnostics only — never for a decision.
+ *
+ * Escaped, because a raw key is not safe to concatenate: `{"a.b":…}` and
+ * `{"a":{"b":…}}` both render `$.a.b`, and a message that names two different
+ * positions identically is a message an operator cannot act on. The DECISION
+ * never reads this string (the policy is descended structurally), so this is the
+ * only remaining job the path has and it may as well do it unambiguously.
+ */
+function pathSegment(path: string, key: string): string {
+	return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key)
+		? `${path}.${key}`
+		: `${path}[${JSON.stringify(key)}]`;
+}
+
 class JsonScanner {
 	private pos = 0;
-	private readonly frozenNumbers: boolean;
-	private readonly frozenNumberPaths: ((path: string) => boolean) | undefined;
+	private readonly policy: NumericPolicy | undefined;
 
 	constructor(
 		private readonly text: string,
 		options: JsonScanOptions,
 	) {
-		this.frozenNumbers = options.frozenNumbers === true;
-		this.frozenNumberPaths = options.frozenNumberPaths;
+		this.policy = options.policy;
 	}
 
 	scan(): JsonScanResult {
@@ -201,7 +282,7 @@ class JsonScanner {
 				detail: "byte-order mark at offset 0: canonical JSON carries none",
 			};
 		}
-		const failure = this.value(0, "$");
+		const failure = this.value(0, "$", this.policy);
 		if (failure !== null) return { ok: false, ...failure };
 		this.whitespace();
 		if (this.pos !== this.text.length) {
@@ -217,17 +298,21 @@ class JsonScanner {
 	}
 
 	/** Returns a failure, or `null` when one well-formed value was consumed. */
-	private value(depth: number, path: string): ScanFailure | null {
+	private value(
+		depth: number,
+		path: string,
+		policy: NumericPolicy | undefined,
+	): ScanFailure | null {
 		if (depth > MAX_JSON_DEPTH) {
 			return syntax(`nesting deeper than ${MAX_JSON_DEPTH} at ${path}`);
 		}
 		this.whitespace();
 		const ch = this.text[this.pos];
 		if (ch === undefined) return syntax(`unexpected end of input at offset ${this.pos}`);
-		if (ch === "{") return this.object(depth, path);
-		if (ch === "[") return this.array(depth, path);
+		if (ch === "{") return this.object(depth, path, policy);
+		if (ch === "[") return this.array(depth, path, policy);
 		if (ch === '"') return this.string();
-		if (ch === "-" || (ch >= "0" && ch <= "9")) return this.number(path);
+		if (ch === "-" || (ch >= "0" && ch <= "9")) return this.number(path, policy);
 		for (const literal of ["true", "false", "null"]) {
 			if (this.text.startsWith(literal, this.pos)) {
 				this.pos += literal.length;
@@ -237,7 +322,11 @@ class JsonScanner {
 		return syntax(`unexpected character ${JSON.stringify(ch)} at offset ${this.pos}`);
 	}
 
-	private object(depth: number, path: string): ScanFailure | null {
+	private object(
+		depth: number,
+		path: string,
+		policy: NumericPolicy | undefined,
+	): ScanFailure | null {
 		this.pos += 1; // "{"
 		const seen = new Set<string>();
 		this.whitespace();
@@ -261,7 +350,7 @@ class JsonScanner {
 			this.whitespace();
 			if (this.text[this.pos] !== ":") return syntax(`expected ':' at offset ${this.pos}`);
 			this.pos += 1;
-			const valueFailure = this.value(depth + 1, `${path}.${key}`);
+			const valueFailure = this.value(depth + 1, pathSegment(path, key), memberPolicy(policy, key));
 			if (valueFailure !== null) return valueFailure;
 			this.whitespace();
 			const next = this.text[this.pos];
@@ -277,16 +366,21 @@ class JsonScanner {
 		}
 	}
 
-	private array(depth: number, path: string): ScanFailure | null {
+	private array(
+		depth: number,
+		path: string,
+		policy: NumericPolicy | undefined,
+	): ScanFailure | null {
 		this.pos += 1; // "["
 		this.whitespace();
 		if (this.text[this.pos] === "]") {
 			this.pos += 1;
 			return null;
 		}
+		const element = elementPolicy(policy);
 		let index = 0;
 		for (;;) {
-			const failure = this.value(depth + 1, `${path}[${index}]`);
+			const failure = this.value(depth + 1, `${path}[${index}]`, element);
 			if (failure !== null) return failure;
 			this.whitespace();
 			const next = this.text[this.pos];
@@ -355,7 +449,7 @@ class JsonScanner {
 	 * The classification below reuses `describeNumberViolation`'s vocabulary so
 	 * one rule reads the same wherever it is enforced.
 	 */
-	private number(path: string): ScanFailure | null {
+	private number(path: string, policy: NumericPolicy | undefined): ScanFailure | null {
 		const start = this.pos;
 		if (this.text[this.pos] === "-") this.pos += 1;
 		if (this.text[this.pos] === "0") {
@@ -387,7 +481,9 @@ class JsonScanner {
 			if (!this.isDigit(this.text[this.pos])) return syntax(`invalid number at offset ${start}`);
 			while (this.isDigit(this.text[this.pos])) this.pos += 1;
 		}
-		if (!this.frozenNumbers && this.frozenNumberPaths?.(path) !== true) return null;
+		// The ONE decision, and it is made on the POLICY NODE this walk arrived
+		// at — never on the path string above, which by this line is diagnostics.
+		if (policy?.frozen !== true && policy?.integer !== true) return null;
 
 		const literal = this.text.slice(start, this.pos);
 		const value = Number(literal);
@@ -952,6 +1048,123 @@ function keysOf(table: FieldTable): KeySet {
 
 const CHECKPOINT_KEYS: KeySet = keysOf(CHECKPOINT_FIELDS);
 
+// ─────────────────────────────────────────────────────────────────────────────
+// THE POLICY REGISTRY — every structure this verifier reads, and the declared
+// integers in it, in ONE place.
+//
+// Enumerated here rather than beside each reader, because "fixed where it was
+// found" is the defect this block exists to end. A reader that decides its own
+// numeric policy decides it from the document in front of it; a registry has to
+// answer for every structure at once, including the ones nobody attacked yet.
+//
+// `packages/verify` also reads FOUR structures that are not in this registry —
+// the anchors JSONL, the audit-log segment line, the Rekor receipt, and the
+// `--bundle` transport. Every one of them lives in a file the parity contract
+// MIRRORS into `packages/core` (AGENTS.md, "Mirrored files"), so the rule cannot
+// be added on this side alone without splitting the two implementations against
+// each other — which §13 already names as worse than a shared bug. They are
+// recorded, with their exposure, in `tests/receipt/numeric-policy.test.ts`'s
+// registry so that the next reader inherits the enumeration instead of
+// rediscovering it. That test FAILS if a parse site appears in either world
+// without an entry.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A position within a structure: a member name, or "every array element". */
+export const ELEMENT: unique symbol = Symbol.for("usertrust.numericPolicy.element");
+export type PolicyStep = string | typeof ELEMENT;
+
+/**
+ * The RECEIPT document. Frozen WHOLE, and that is the accurate policy rather
+ * than a conservative one: §2 declares no fractional domain anywhere in a ut1
+ * document, and §5 refuses unknown fields, so the schema admits no position at
+ * which a fraction could ever be legitimate.
+ */
+export const RECEIPT_NUMERIC_POLICY: NumericPolicy = FROZEN_SUBTREE;
+
+/**
+ * §4a's v2 checkpoint statement. Also frozen whole, for the same reason and on
+ * the same authority: `checkpointStatementShape` refuses ANY member outside
+ * `CHECKPOINT_KEYS`, so the member set is CLOSED and every number under it is
+ * declared — `v`, `treeSize`, `segmentFirstSequence`, and nothing else can
+ * exist. `v` matters as much as the other two: it is `!==`-compared against the
+ * literal `2`, so `2.0000000000000001` rounds into the version gate and is then
+ * re-canonicalized as `2` for the signature.
+ */
+export const CHECKPOINT_NUMERIC_POLICY: NumericPolicy = FROZEN_SUBTREE;
+
+/**
+ * Every position the FIELD TABLE declares as a number, as structured paths.
+ *
+ * This is the exhaustiveness ORACLE, and it is derived from the same table that
+ * already declares the schema — one source, so a new `at(owner, "integer")`
+ * cannot enter the receipt or the checkpoint without appearing here. The test
+ * asserts the live policy covers every position this returns; a declared
+ * integer that no policy reaches fails the build rather than waiting for a
+ * tenth review round to notice it.
+ *
+ * `literal` counts as numeric. A literal is a FIXED value, so a fraction is
+ * illegal at that position whatever its type; for the string literals it is
+ * inert, because the scanner never meets a number there.
+ */
+function declaredNumericPositions(table: FieldTable): PolicyStep[][] {
+	const found: PolicyStep[][] = [];
+	const walk = (current: FieldTable, prefix: PolicyStep[]): void => {
+		for (const [key, rule] of Object.entries(current)) {
+			const here: PolicyStep[] = [...prefix, key];
+			if (rule.kind === "scalar") {
+				if (rule.format === "integer" || rule.format === "literal") found.push(here);
+			} else if (rule.kind === "object") {
+				walk(rule.table, here);
+			} else if (rule.kind === "objectArray") {
+				walk(rule.table, [...here, ELEMENT]);
+			} else if (rule.kind === "union") {
+				for (const variant of rule.tables.values()) walk(variant, here);
+			}
+		}
+	};
+	walk(table, []);
+	return found;
+}
+
+export const RECEIPT_DECLARED_NUMERIC_POSITIONS: readonly (readonly PolicyStep[])[] =
+	declaredNumericPositions(RECEIPT_FIELDS);
+export const CHECKPOINT_DECLARED_NUMERIC_POSITIONS: readonly (readonly PolicyStep[])[] =
+	declaredNumericPositions(CHECKPOINT_FIELDS);
+
+/** Does `policy` freeze the literal at `position`? The coverage oracle's other half. */
+export function numericPolicyCovers(
+	policy: NumericPolicy | undefined,
+	position: readonly PolicyStep[],
+): boolean {
+	let node = policy;
+	for (const step of position) {
+		node = step === ELEMENT ? elementPolicy(node) : memberPolicy(node, step);
+	}
+	return node?.frozen === true || node?.integer === true;
+}
+
+/**
+ * The §8 snapshot's declared integers, derived from the PARSED SHAPE.
+ *
+ * The snapshot has no field table — its loader reads members ad hoc — so the
+ * declaration that already exists is the interface itself. `DeclaredIntegers<T>`
+ * maps every `number`-typed member of `T` to a REQUIRED policy entry, so adding
+ * `retiredAtSequence: number` to `TrustKey` and not declaring it here is a
+ * COMPILE error. That is the only kind of enumeration that cannot go stale: a
+ * hand-maintained list is correct the day it is written, and this one is checked
+ * by `tsc` on every build.
+ *
+ * `[NonNullable<T[K]>] extends [number]` and not `number extends T[K]`: the
+ * tuple wrapper stops the check distributing over unions, so `mintActor:
+ * JsonValue` — which merely INCLUDES `number` — is correctly excluded. §4a
+ * compares `mintActor` whole as canonical bytes and never plucks a field out of
+ * it, so it declares no integer position at all.
+ */
+type NumberTypedKeys<T> = {
+	[K in keyof T]-?: [NonNullable<T[K]>] extends [number] ? K : never;
+}[keyof T];
+type DeclaredIntegers<T> = { readonly [K in NumberTypedKeys<T>]-?: NumericPolicy };
+
 function join(path: string, key: string): string {
 	return path === "" ? key : `${path}.${key}`;
 }
@@ -1309,10 +1522,10 @@ function schemaRefusal(detail: string): ReadOutcome<never> {
 
 /**
  * Bytes → a JSON value, with fatal UTF-8, retained BOM and duplicate-key
- * rejection. With `frozenNumbers`, §3 step 4 is applied to every numeric
- * LITERAL as well — and a literal that breaks it is a SCHEMA refusal, not an
- * unparseable one: the bytes did become a document, and what it says is
- * illegal (CLI spec §5's table, which is what picks the exit code).
+ * rejection. Where `options.policy` declares an integer, §3 step 4 is applied
+ * to the numeric LITERAL as well — and a literal that breaks it is a SCHEMA
+ * refusal, not an unparseable one: the bytes did become a document, and what it
+ * says is illegal (CLI spec §5's table, which is what picks the exit code).
  */
 export function readStrictJson(
 	bytes: Uint8Array,
@@ -1345,11 +1558,11 @@ export function readStrictJson(
  * parsed `receipt` copy (verify-page §4.1).
  */
 export function readReceiptDocument(bytes: Uint8Array): ReadOutcome<JsonObject> {
-	// `frozenNumbers` is where §3 step 4 is actually decided — on the literals,
-	// before `JSON.parse` rounds them. The value-level sweep below stays as the
-	// second fence: it is what holds if a future caller ever hands this function
-	// an already-parsed document, and it costs one walk.
-	const parsed = readStrictJson(bytes, { frozenNumbers: true });
+	// The policy is where §3 step 4 is actually decided — on the literals, before
+	// `JSON.parse` rounds them. The value-level sweep below stays as the second
+	// fence: it is what holds if a future caller ever hands this function an
+	// already-parsed document, and it costs one walk.
+	const parsed = readStrictJson(bytes, { policy: RECEIPT_NUMERIC_POLICY });
 	if (!parsed.ok) return parsed;
 	if (!isJsonObject(parsed.value)) {
 		return schemaRefusal("the receipt document is not a JSON object");
@@ -1477,25 +1690,56 @@ function materialIdOf(key: KeyObject): string {
 }
 
 /**
- * Every member of the §8 snapshot this file reads as a NUMBER, by the scanner's
- * own dotted path.
- *
+ * The §8 snapshot. Scoped, NOT frozen whole, and the distinction is the §4
+ * forward-compatibility promise: the signing scheme is a live ship-gate item
+ * that will add members, and one of them may one day legitimately carry a
+ * fraction. What is declared is what this loader READS as a number —
  * `JSON.parse` rounds, so `18.000000000000001` reaches `safeNonNegativeInteger`
- * as exactly `18` and authorizes a key window the document never actually
- * declared — the same defect the receipt path fixed on its own bytes, arriving
- * on the snapshot, where the frozen rules were deliberately NOT applied. That
- * scoping decision was right about §4's unknown members and wrong about the
- * declared ones, and this pattern is exactly the difference: two members, at
- * their declared positions, and nothing else. A fraction anywhere else in the
- * document — including inside a member the signing scheme has yet to add — is
- * still legal, which is the forward-compatibility promise §4 makes.
+ * as exactly `18` and authorizes a key window the document never carried.
+ *
+ * The two entries below are type-checked against `TrustKey` and `TrustChain`,
+ * so the enumeration is the shape's, not a maintainer's memory of it.
  */
-const SNAPSHOT_INTEGER_PATHS =
-	/^\$\.(?:keys\[\d+\]\.activationSequence|chains\[\d+\]\.headSegmentFirstSequence)$/;
+const TRUST_KEY_INTEGERS: DeclaredIntegers<TrustKey> = {
+	activationSequence: DECLARED_INTEGER,
+};
+const TRUST_CHAIN_INTEGERS: DeclaredIntegers<TrustChain> = {
+	headSegmentFirstSequence: DECLARED_INTEGER,
+};
 
-function isSnapshotIntegerPath(path: string): boolean {
-	return SNAPSHOT_INTEGER_PATHS.test(path);
-}
+export const SNAPSHOT_NUMERIC_POLICY: NumericPolicy = policyMembers({
+	keys: policyElements(policyMembers(TRUST_KEY_INTEGERS)),
+	chains: policyElements(policyMembers(TRUST_CHAIN_INTEGERS)),
+});
+
+/**
+ * The resolver's §3 envelope. Not a ut1 document, and deliberately open at the
+ * top level — an unknown member the resolver adds tomorrow may carry anything.
+ * Two of its members are declared to BE structures this registry already
+ * governs, and they inherit those structures' policies rather than restating
+ * them:
+ *
+ *  - `receipt` — §3's convenience copy. It is not the byte authority, which is
+ *    exactly why it needs this: R4 compares it STRUCTURALLY against the parsed
+ *    receipt bytes, and a fractional literal in the copy rounds to the integer
+ *    the bytes carry, so the two "agree", the receipt verifies from its own
+ *    (frozen) bytes, and the run reports VERIFIED over an envelope whose copy
+ *    is not the document that was signed. A consumer reading the copy — which
+ *    is the only thing the copy is FOR — reads a value nobody signed.
+ *  - `checkpointHistory` — §7 step 9's served history. Each member is a §4a v2
+ *    statement whose signature is checked over `canonicalize(member)`, so a
+ *    fractional `treeSize` re-serializes to the signed integer and the walk
+ *    awards `VERIFIED_CHECKPOINT_HISTORY` for an unsigned mutation.
+ *
+ * `anchorEvidence` gets NO policy, and that is a real entry rather than an
+ * omission: this build validates none of it (`unimplemented: ["anchorEvidence"]`
+ * — no authority yet defines the binding), so it declares no integer here. The
+ * day that check lands, its format joins this registry with it.
+ */
+export const ENVELOPE_NUMERIC_POLICY: NumericPolicy = policyMembers({
+	receipt: RECEIPT_NUMERIC_POLICY,
+	checkpointHistory: policyElements(CHECKPOINT_NUMERIC_POLICY),
+});
 
 export function loadTrustSnapshot(bytes: Uint8Array): TrustSnapshotLoad {
 	const sha256 = createHash("sha256").update(bytes).digest("hex");
@@ -1504,8 +1748,28 @@ export function loadTrustSnapshot(bytes: Uint8Array): TrustSnapshotLoad {
 	let identity: TrustSnapshotIdentity = { sha256, version: null, predecessor: null };
 	const fail = (detail: string): TrustSnapshotLoad => ({ ok: false, sha256, identity, detail });
 
-	const parsed = readStrictJson(bytes, { frozenNumberPaths: isSnapshotIntegerPath });
-	if (!parsed.ok) return fail(parsed.refusal.detail);
+	const parsed = readStrictJson(bytes, { policy: SNAPSHOT_NUMERIC_POLICY });
+	if (!parsed.ok) {
+		// A `schema` refusal is the NUMERIC one, and it is a document-level defect:
+		// these bytes DID become a document, and R-OUT-1 ("the report always names
+		// the snapshot") does not stop applying because one literal was illegal.
+		// Null identity is reserved for bytes that never became a document at all,
+		// so reporting null/null here would classify a numeric refusal as
+		// unparseable in the one field an operator uses to tell the two apart.
+		//
+		// The identity is RECOVERED, never invented: the same reader, minus the one
+		// rule that refused it, still has to produce a JSON object before anything
+		// is read off it. Every other rule — UTF-8, the BOM, duplicate keys, the
+		// grammar, the depth cap — has already passed, so this re-read cannot
+		// succeed where the first failed for any reason but the numeric literal.
+		if (parsed.refusal.kind === "schema") {
+			const declared = readStrictJson(bytes);
+			if (declared.ok && isJsonObject(declared.value)) {
+				identity = snapshotIdentity(sha256, declared.value);
+			}
+		}
+		return fail(parsed.refusal.detail);
+	}
 	if (!isJsonObject(parsed.value)) return fail("the trust snapshot is not a JSON object");
 	const document = parsed.value;
 	identity = snapshotIdentity(sha256, document);

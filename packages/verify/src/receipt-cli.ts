@@ -23,6 +23,7 @@ import { writeSync } from "node:fs";
 import { forDisplay } from "./receipt.js";
 import {
 	decodeCanonicalBase64,
+	ENVELOPE_NUMERIC_POLICY,
 	isJsonObject,
 	type JsonValue,
 	loadTrustSnapshot,
@@ -483,9 +484,21 @@ type EnvelopeOutcome =
  * and the extraction of step 9's optional material.
  */
 export function resolveEnvelope(bytes: Uint8Array): EnvelopeOutcome {
-	const parsed = readStrictJson(bytes);
+	const parsed = readStrictJson(bytes, { policy: ENVELOPE_NUMERIC_POLICY });
 	if (!parsed.ok) {
-		return { kind: "missing", detail: `the envelope did not parse: ${parsed.refusal.detail}` };
+		// The refusal CLASS decides the verdict class, exactly as it does for the
+		// receipt (CLI spec §5's table). A `schema` refusal is the numeric one: the
+		// envelope IS a document and a member it DECLARES carries an illegal
+		// literal, which is a real negative answer about the envelope — the same
+		// class §3 already gives an unsupported `apiVersion` and a broken R4
+		// equality. Only bytes that never became a document are missing material.
+		return parsed.refusal.kind === "schema"
+			? {
+					kind: "failed",
+					code: "ENVELOPE_INVALID",
+					detail: `the envelope declares an illegal numeric literal: ${parsed.refusal.detail}`,
+				}
+			: { kind: "missing", detail: `the envelope did not parse: ${parsed.refusal.detail}` };
 	}
 	if (!isJsonObject(parsed.value)) {
 		return { kind: "missing", detail: "the envelope is not a JSON object" };
@@ -546,16 +559,22 @@ export function resolveEnvelope(bytes: Uint8Array): EnvelopeOutcome {
 	// reported SCHEMA_INVALID, a statement about the RECEIPT, and never
 	// mentioned that the envelope had lied about which receipt this was. §3 is
 	// explicit that a mismatch "is an ENVELOPE integrity failure, not
-	// SCHEMA_INVALID". Using the same `readStrictJson` on both sides also makes
-	// the comparison symmetric: the copy has never run through the frozen
-	// numeric rules either.
+	// SCHEMA_INVALID".
+	//
+	// No policy on THIS side, and that is not an asymmetry: `$.receipt` — the
+	// side an attacker can move independently — was frozen by the envelope scan
+	// above, and these bytes are frozen by `readReceiptDocument` in step 1, on
+	// the very next call this function's caller makes. Applying the receipt
+	// policy here as well would only change WHICH of the two refusals an operator
+	// sees for one document, and step 1's is the right one: the defect would be
+	// in the RECEIPT, and `SCHEMA_INVALID` is the code that says so.
 	const strict = readStrictJson(decoded);
 	if (strict.ok) {
 		const bytesValue = strict.value;
 		const copy = envelope.receipt;
-		// STRUCTURAL, not canonical-string. Neither side ran through
-		// `readReceiptDocument`'s frozen numeric rules, so both can carry
-		// anything JSON can express, including values a serializer erases.
+		// STRUCTURAL, not canonical-string. These BYTES have not yet run through
+		// `readReceiptDocument`, so this side can still carry anything JSON can
+		// express, including values a serializer erases.
 		// `canonicalize` renders `-0` as `0` and THROWS on `1e999`; comparing
 		// its output would therefore report agreement between a copy and bytes
 		// that differ, and would make a hostile copy a crash rather than a

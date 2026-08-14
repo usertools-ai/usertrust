@@ -300,11 +300,42 @@ describe("HARDEN: anchoring additive proofs", () => {
 		//     enumerated rather than rules nobody could derive, and the comments
 		//     are what stop the fourth from being a tenth review round.
 		// Post-round total: 8748. 8900 leaves 152 lines of headroom.
+		//
+		// Round 10 raises 8900 → 9200 (+287 used, 165 left). (a) re-verified:
+		// assertions 4 and 5 above still pass, `dependencies` is still `{}`, no
+		// file was vendored, no mirrored file was edited. (b) what was added:
+		// `receipt-verify.ts` +268 and `receipt-cli.ts` +19, all of it ONE change
+		// — the frozen-numeric rule stopped being a per-document switch and became
+		// a POLICY keyed by declared-field identity.
+		//
+		// This is the fourth round to pay for the same defect class, and the
+		// spend is deliberately front-loaded so there is no fifth. The class: a
+		// fractional literal that `JSON.parse` rounds to a legal integer passes
+		// every check, because the check reads the value the parser invented
+		// rather than the literal that was signed. Rounds at gate 1, gate 8 and
+		// gate 9 each fixed it in the one document where it surfaced. What went
+		// in this time is the ENUMERATION rather than a fourth instance:
+		//   · one `NumericPolicy` tree, descended in lockstep with the document,
+		//     replacing a whole-document boolean AND a path REGEX (the regex was
+		//     itself a defect — an unknown member named `keys[0]` aliased the real
+		//     declared path and was wrongly refused, breaking §4's forward-compat
+		//     promise);
+		//   · the enumeration is machine-checked three ways, which is the actual
+		//     product of this round: `tsc` fails on a new `number` member of
+		//     `TrustKey`/`TrustChain` with no policy entry; a coverage oracle
+		//     derived from the FIELD TABLES fails on a declared integer no policy
+		//     reaches; and a parse-site registry fails when any module in
+		//     `packages/verify/src` grows a `JSON.parse`/`readStrictJson` without a
+		//     written disposition. All three were proven to FAIL before being
+		//     trusted to pass.
+		// Most of the count is prose again, and for the same reason as round 9:
+		// what stops a fifth round is the written enumeration, not the predicate.
+		// Post-round total: 9035. 9200 leaves 165 lines of headroom.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(8900);
+		expect(total).toBeLessThan(9200);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {
