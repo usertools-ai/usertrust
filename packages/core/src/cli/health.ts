@@ -241,7 +241,7 @@ function loadConfig(vaultPath: string): { budget: number } {
  * ledger the governor itself would refuse to start on. It reports what it can
  * read and stays quiet about what it cannot.
  */
-function loadPersistedSpend(vaultPath: string, anySettled: boolean): number | undefined {
+function loadPersistedSpend(vaultPath: string, anyAttempt: boolean): number | undefined {
 	let raw: string;
 	try {
 		raw = readFileSync(join(vaultPath, "spend-ledger.json"), "utf-8");
@@ -259,7 +259,7 @@ function loadPersistedSpend(vaultPath: string, anySettled: boolean): number | un
 		// genuinely have zero session spend and still reads as unknown here. That
 		// is the fail-closed direction — "we cannot confirm zero" rather than a
 		// confident zero we have no evidence for.
-		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return anySettled ? undefined : 0;
+		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return anyAttempt ? undefined : 0;
 		return undefined;
 	}
 	try {
@@ -353,8 +353,21 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// distinction AGENTS.md flags as easy to get wrong, and I got it wrong by
 	// reaching for the one already in hand.
 	const verification = verifyVault(vaultPath);
-	const chainLabel = verification.valid ? "verified" : "FAILED";
-	const chainStatus = verification.valid ? "[ok]" : "[critical]";
+	// THE HEADLINE AND THIS LINE MUST HAVE THE SAME CAUSE. The chain-integrity
+	// SIGNAL counts settlement ambiguity as well as chain validity, and the report
+	// floors the composite at CRITICAL when it fires — but this line was derived
+	// from `verification.valid` alone. So a vault with a valid chain and one
+	// ambiguous settlement printed a CRITICAL headline above a green
+	// `verified [ok]`, with nothing on screen to explain it. An operator reading a
+	// severity with no visible cause concludes the tool is wrong, which is how a
+	// real signal gets ignored.
+	const ambiguous = events.filter((e) => e.kind === "settlement_ambiguous").length;
+	const chainLabel = !verification.valid
+		? "FAILED"
+		: ambiguous > 0
+			? `verified, ${ambiguous} settlement${ambiguous === 1 ? "" : "s"} ambiguous`
+			: "verified";
+	const chainStatus = verification.valid && ambiguous === 0 ? "[ok]" : "[critical]";
 
 	// SESSION spend comes from the persisted ledger, not from summing the log.
 	//
@@ -370,12 +383,28 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// it cannot be read, `spent` stays undefined and the entropy signal ABSTAINS
 	// rather than scoring a fabricated denominator — the same rule the extractor
 	// already applies to a missing total.
-	// A settled call is evidence that spend HAPPENED, which is what makes an
-	// absent ledger unknown rather than zero.
-	const anySettled = events.some(
-		(e) => (e as { data?: { settled?: unknown } }).data?.settled === true,
-	);
-	const spent = loadPersistedSpend(vaultPath, anySettled);
+	// A settlement ATTEMPT is evidence that spend happened — not a settlement.
+	//
+	// I keyed this on `settled === true` and reproduced, in a different file, the
+	// exact defect the receipt branch had just fixed: `settled` is a THREE-valued
+	// field, and its `false` case is the interesting one. `budgetSpent` is
+	// incremented BEFORE the provider POST, so a stream or headless failure leaves
+	// real spend recorded against a chain that says `settled: false` or
+	// `settlement_ambiguous`. If the first ledger write also failed, the old
+	// predicate stayed false, an absent ledger read as a genuine zero, and health
+	// printed "0.0% [ok]" over money that was actually spent.
+	//
+	// Ambiguity is the strongest case for "unknown", not the weakest: it means the
+	// producer itself could not say whether the spend landed.
+	const anyAttempt = events.some((e) => {
+		const data = (e as { data?: Record<string, unknown> }).data;
+		return (
+			data?.settled !== undefined ||
+			e.kind === "settlement_ambiguous" ||
+			e.kind === "settlement_shortfall"
+		);
+	});
+	const spent = loadPersistedSpend(vaultPath, anyAttempt);
 	// UNKNOWN is not zero. A malformed, negative or unreadable `spend-ledger.json`
 	// means an unknown amount has been spent, and rendering "0.0% [ok]" reported
 	// the most reassuring possible answer to a question the tool could not answer
@@ -538,9 +567,13 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	console.log(`  Budget utilization:      ${budgetText} ${budgetStatus}`);
 
 	// Signal 3: Chain integrity
-	const chainColored = verification.valid
-		? pc.green(`${chainLabel} ${chainStatus}`)
-		: pc.red(`${chainLabel} ${chainStatus}`);
+	// Coloured from the STATUS, not from `verification.valid` — keying the colour
+	// off a different condition than the tag would have printed `[critical]` in
+	// green, which is the same contradiction this fixes one layer further down.
+	const chainColored =
+		chainStatus === "[ok]"
+			? pc.green(`${chainLabel} ${chainStatus}`)
+			: pc.red(`${chainLabel} ${chainStatus}`);
 	console.log(`  Chain integrity:         ${chainColored}`);
 
 	// Signal 4: PII detections

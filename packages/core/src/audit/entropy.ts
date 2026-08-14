@@ -348,6 +348,30 @@ export function extractCircuitBreakerTrips(events: EntropyEventInput[]): Entropy
 	let anonymous = 0;
 	let anonymousHits = 0;
 
+	// A DETECTION IS NOT AN ABORT. `govern.ts` appends `anomaly_detected` and only
+	// THEN calls `emitter.abort()` if the emitter has one — so an emitter without
+	// `abort`, or a settlement that wins the race, leaves a detection followed by a
+	// perfectly ordinary settled call. Counting the detection made that a hit and
+	// reported an abort that never happened.
+	//
+	// This is the same rule the receipt verifier settled on for the same event,
+	// which is why it is stated the same way: a detection is evidence that
+	// something FIRED, never that the call STOPPED. Only a correlated failure
+	// terminal is evidence of the stop.
+	const stoppedIds = new Set<string>();
+	for (const e of events) {
+		const id = e.data.transferId;
+		if (typeof id !== "string" || id === "") continue;
+		if (
+			e.kind === "stream_partial_delivery" ||
+			e.kind === "llm_call_failed" ||
+			e.kind.endsWith("_failed") ||
+			e.data.settled === false
+		) {
+			stoppedIds.add(id);
+		}
+	}
+
 	for (const e of events) {
 		const isTerminal =
 			e.kind === "llm_call" ||
@@ -367,13 +391,16 @@ export function extractCircuitBreakerTrips(events: EntropyEventInput[]): Entropy
 		// `llm_call_failed` is an observation, NOT a hit: the breaker opens on the
 		// fifth consecutive failure by default, so counting the first ordinary
 		// provider error as a trip reports trips that never happened.
-		const isHit =
-			e.kind === "anomaly_detected" ||
-			state === "open" ||
-			state === "half-open" ||
-			tripped === true;
-
 		const id = e.data.transferId;
+		// A detection counts only where a correlated failure terminal shows the call
+		// actually stopped. With no transferId there is nothing to correlate against,
+		// so the legacy shape keeps its old behaviour rather than silently losing
+		// hits in old vaults — an under-count here would hide real aborts.
+		const correlatable = typeof id === "string" && id !== "";
+		const detectionStopped =
+			e.kind === "anomaly_detected" && (!correlatable || stoppedIds.has(id as string));
+		const isHit = detectionStopped || state === "open" || state === "half-open" || tripped === true;
+
 		if (typeof id === "string" && id !== "") {
 			observed.add(id);
 			if (isHit) aborted.add(id);

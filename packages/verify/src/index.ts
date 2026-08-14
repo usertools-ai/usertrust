@@ -241,7 +241,10 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 			// FAIL CLOSED — mirrors `core/src/audit/verify.ts`, error string included.
 			// Skipping made an unreadable segment indistinguishable from an absent
 			// one, so a vault nobody could open verified as clean.
-			errors.push(`Audit segment could not be read: ${basename(segmentFile)}`);
+			// SCRUBBED — mirrors core, error string included. The filename comes from
+			// the audited vault and both CLIs print it verbatim, so an escape in a
+			// segment's name could repaint the FAILED verdict.
+			errors.push(`Audit segment could not be read: ${scrubForError(basename(segmentFile))}`);
 			continue;
 		}
 		if (content === "") continue;

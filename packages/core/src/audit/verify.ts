@@ -304,7 +304,13 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 			// `valid: true, chainLength: 0`, and `health` printed `verified` for
 			// evidence nobody had opened. A vault that cannot be read is a vault
 			// that cannot be verified, which is a different answer from "clean".
-			errors.push(`Audit segment could not be read: ${basename(segmentFile)}`);
+			// SCRUBBED, like the enumeration error above it. The filename comes from
+			// the audited vault — a broken symlink can be NAMED with an ANSI escape —
+			// and both human-facing CLIs print this string verbatim, so an unscrubbed
+			// name lets the vault repaint the FAILED verdict this error exists to
+			// produce. I added this error immediately beneath one that already calls
+			// `scrubForError` for exactly that reason.
+			errors.push(`Audit segment could not be read: ${scrubForError(basename(segmentFile))}`);
 			continue;
 		}
 		if (content === "") continue;

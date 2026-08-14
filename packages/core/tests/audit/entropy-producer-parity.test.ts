@@ -214,12 +214,32 @@ describe("entropy signals vs. what producers actually write", () => {
 	});
 
 	describe("signal 5 — circuit breaker / anomaly aborts", () => {
-		it("fires on a real anomaly_detected", () => {
+		it("fires on a real anomaly_detected THAT STOPPED THE CALL", () => {
 			// No kind contains "circuit"/"breaker" and no producer writes
 			// `data.circuitBreaker`; `anomaly_detected` is the real shape.
-			const s = extractCircuitBreakerTrips([anomalyDetected(), llmCall()]);
-			expect(s.total).toBeGreaterThan(0);
-			expect(s.hits).toBeGreaterThan(0);
+			//
+			// But the detection alone is not the abort. `govern.ts` appends it and
+			// only THEN calls `emitter.abort()` if the emitter has one, so the
+			// correlated failure terminal is what shows the call actually stopped.
+			const stopped = extractCircuitBreakerTrips([
+				anomalyDetected(),
+				{ kind: "stream_partial_delivery", data: { transferId: "t-3", error: "anomaly cutoff" } },
+			]);
+			expect(stopped.total).toBeGreaterThan(0);
+			expect(stopped.hits).toBeGreaterThan(0);
+		});
+
+		it("does NOT count a detection whose call went on to settle", () => {
+			// An emitter without `abort`, or a settlement that wins the race, leaves
+			// a detection followed by an ordinary billed call. Counting that reported
+			// an abort that never happened — the same "a detection is not a terminal"
+			// rule the receipt verifier settled on for this exact event.
+			const settledAnyway = extractCircuitBreakerTrips([
+				anomalyDetected(),
+				llmCall({ transferId: "t-3" }),
+			]);
+			expect(settledAnyway.total).toBeGreaterThan(0);
+			expect(settledAnyway.hits).toBe(0);
 		});
 	});
 
@@ -398,6 +418,9 @@ describe("denominators must match the population the signal claims to measure", 
 		// so one anomaly among nine errors reported 1/1 instead of 1/10.
 		const events = [
 			term("anomaly_detected", { anomalyKind: "token_rate", transferId: "a" }),
+			// The cutoff that took effect, correlated to the detection above — the
+			// detection alone is not evidence the call stopped.
+			term("stream_partial_delivery", { transferId: "a", error: "anomaly cutoff" }),
 			...Array.from({ length: 9 }, (_, i) =>
 				term("stream_partial_delivery", { transferId: `s${i}`, error: "boom" }),
 			),
