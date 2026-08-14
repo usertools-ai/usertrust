@@ -216,6 +216,7 @@ describe("false OK — a documented count that stops matching reality", () => {
 	 */
 	it("AGENTS.md's sanitizer count matches the sanitizers in src/", async () => {
 		const { readFile, readdir } = await import("node:fs/promises");
+		const ts = (await import("typescript")).default;
 		const repoRoot = join(import.meta.dirname, "..", "..", "..", "..");
 
 		const agents = await readFile(join(repoRoot, "AGENTS.md"), "utf-8");
@@ -239,43 +240,85 @@ describe("false OK — a documented count that stops matching reality", () => {
 		expect(declaredCount, `unrecognised number word "${declared}"`).toBeDefined();
 
 		/**
-		 * MERGE NOTE (this file conflicted): the other side of this merge extended a
-		 * NAME LIST — `CONTROL_CHARS`, `forDisplay`, `scrubForError`, and then
-		 * `scrubForTerminal` when two more copies landed under a third name. That
-		 * extension was correct for the detector it was extending, and it is dropped
-		 * here only because this side removes the detector itself.
+		 * PARSE. Eleven review rounds went into this counter, and the honest summary
+		 * is that I picked a tool one level too weak, twice.
 		 *
-		 * Adding a name each time a copy appears under a new one is the very failure
-		 * this guard exists to catch, one level up: a counter that only knows the
-		 * names it was written with reports a smaller inventory than exists. Matching
-		 * on SHAPE counts `scrubForTerminal` — and anything under a fifth name —
-		 * without being told about it. Both names remain listed in AGENTS.md's
-		 * inventory prose, which is where a human reader needs them.
+		 * Rounds 1-10 tried to make a REGEX do lexing — names, the constant, literal
+		 * text, line-orientation, identifier binding, identifier boundaries, hex
+		 * boundaries, decimal and regex spellings, Unicode escapes inside
+		 * identifiers, `159.e3`. Each round widened the alphabet by one escape and
+		 * the next round found another, because a character class is not a token
+		 * boundary and JS identifiers and numerics are wider than any class.
+		 *
+		 * Round 11 tried a SCANNER, and it failed in the more dangerous direction:
+		 * it UNDER-counted, silently. `/` is regex-or-division, and that choice
+		 * needs parser context. Re-scanning every slash swallowed source until the
+		 * next one; re-scanning none broke real regex literals. Either way the token
+		 * stream desynchronised and whole sanitizers vanished from the count — the
+		 * guard reporting a smaller inventory than exists, which is precisely the
+		 * false OK this file is named for, produced by the fix for it.
+		 *
+		 * The parser answers all of it because it is the thing that actually knows:
+		 * `st` is one Identifier whose `.text` is resolved, `159.e3` is one
+		 * NumericLiteral whose value is 159000, comments and strings are not
+		 * expressions, and a `/` is a RegularExpressionLiteral only where one can
+		 * legally appear. `createSourceFile` needs no type-checker and no program.
+		 *
+		 * RESIDUAL LIMIT, unchanged and worth keeping honest: this matches a SHAPE,
+		 * not a semantics. A lookup table, an imported helper, or bounds computed at
+		 * runtime would still go uncounted, and no static matcher can fix that. The
+		 * guard catches a stale count for every form anyone has written; when a
+		 * genuinely new one appears the process is a bullet in AGENTS.md and a case
+		 * here.
 		 */
-		/**
-		 * Strip comments and string literals, then collapse whitespace.
-		 *
-		 * This replaces a `grep -o` sweep, which was wrong at BOTH ends: it could
-		 * not see a signature that Biome had wrapped across lines (undercounting a
-		 * real copy), and it counted the same signature appearing inside a doc
-		 * comment or a string (overcounting prose as implementation). Line-oriented
-		 * text matching cannot distinguish code from writing about code.
-		 *
-		 * HONEST LIMIT: this is a lexical approximation, not a parse. It does not
-		 * model template literals with embedded expressions, regex literals
-		 * containing quote characters, or nested comment edge cases. It is enough
-		 * for the question asked — does a control-range comparison exist in code —
-		 * and if that ever stops being true, this comment is the place to escalate
-		 * to the TypeScript AST rather than adding another special case.
-		 */
-		const codeOnly = (src: string): string =>
-			src
-				.replace(/\/\*[\s\S]*?\*\//g, " ")
-				.replace(/\/\/[^\n]*/g, " ")
-				.replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
-				.replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
-				.replace(/`(?:[^`\\]|\\.)*`/g, "``")
-				.replace(/\s+/g, " ");
+		const isNumericValue = (n: import("typescript").Node, want: number): boolean =>
+			ts.isNumericLiteral(n) && Number(n.text.replace(/_/g, "")) === want;
+
+		const countIn = (src: string, name: string): { strong: number; weak: number } => {
+			const sf = ts.createSourceFile(name, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+			let strong = 0;
+			let weak = 0;
+			const visit = (n: import("typescript").Node): void => {
+				// `<ident> >= 0x7f && <the same ident> <= 0x9f`, in any spelling of
+				// either bound. Comparing VALUES means 0x7f, 127 and 127.0 are one
+				// bound and 159e3 is not 159; comparing Identifier `.text` means the
+				// two operands must be the same variable, escapes resolved.
+				if (
+					ts.isBinaryExpression(n) &&
+					n.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
+				) {
+					const l = n.left;
+					const r = n.right;
+					if (
+						ts.isBinaryExpression(l) &&
+						l.operatorToken.kind === ts.SyntaxKind.GreaterThanEqualsToken &&
+						ts.isBinaryExpression(r) &&
+						r.operatorToken.kind === ts.SyntaxKind.LessThanEqualsToken &&
+						ts.isIdentifier(l.left) &&
+						ts.isIdentifier(r.left) &&
+						l.left.text === r.left.text &&
+						isNumericValue(l.right, 0x7f) &&
+						isNumericValue(r.right, 0x9f)
+					) {
+						strong++;
+					}
+				}
+				if (ts.isRegularExpressionLiteral(n)) {
+					// A POSITIVE character class spanning C1. `/[^\x80-\x9f]/` is the
+					// complement and `/\x80-\x9f/` is not a class at all — both counted
+					// before the class was actually inspected.
+					const m = /^\/\[(\^?)([\s\S]*?)\]/.exec(n.text);
+					if (m !== null && m[1] !== "^" && /\\x80-\\x9f|\\u0080-\\u009f/.test(m[2] as string)) {
+						strong++;
+					}
+					// The weaker variant: the shared C0 + DEL class, whatever it is bound to.
+					if (/^\/\[\\x00-\\x1f\\x7f\]/.test(n.text)) weak++;
+				}
+				ts.forEachChild(n, visit);
+			};
+			visit(sf);
+			return { strong, weak };
+		};
 
 		const tsFiles = async (dir: string): Promise<string[]> => {
 			const out: string[] = [];
@@ -294,89 +337,21 @@ describe("false OK — a documented count that stops matching reality", () => {
 
 		let strong = 0;
 		let weak = 0;
-		// Identifiers are wildcards: the range bounds and operators are the
-		// behaviour, the names around them are incidental.
-		// BOTH BOUNDS BIND ONE IDENTIFIER, via a back-reference. Without it this
-		// also matched `start >= 0x7f && end <= 0x9f` — an INTERVAL check over two
-		// variables, not a sanitizer testing a single code point. Unrelated code
-		// could then inflate the count, or offset a genuinely removed sanitizer so
-		// the total still agreed. A shape matcher has to match the shape, and two
-		// different variables is a different shape.
-		// ANCHORED AT BOTH ENDS of the identifier. An unanchored capture could start
-		// mid-token: in `start >= 0x7f && t <= 0x9f` the engine captures the final
-		// `t` of `start`, the backreference then matches the real `t`, and a
-		// two-variable interval check counts as a sanitizer. Which matters because
-		// a false POSITIVE can offset a genuinely REMOVED sanitizer and leave the
-		// stale total agreeing — two errors cancelling into a passing guard is the
-		// hardest failure here to notice, since nothing looks wrong at all.
-		// The HEX LITERALS are anchored too. `0x9f` is a prefix of `0x9fff`, so
-		// `cp >= 0x7f && cp <= 0x9fff` — a wide range check, not a C1 test —
-		// matched. Every token in this pattern now has to be a whole token: the
-		// identifier on both sides, and both bounds. That is the eighth round on
-		// this guard and the eighth token I had left unbounded, which is the
-		// lesson: "match the shape" is not one property, it is a property of every
-		// element, and I kept checking the one I had just been shown.
-		// TOKENIZE, then compare VALUES. Nine rounds of this guard were spent
-		// widening a character class one escape at a time — names, constant,
-		// literal text, line-orientation, identifier binding, identifier
-		// boundaries, hex boundaries — and round nine produced three more of the
-		// same: `159e3` and `0x9f_ff` are legal numeric literals whose shorter
-		// prefixes matched, and `αt >= 0x7f && t <= 0x9f` matched from the trailing
-		// `t` because an ASCII-only boundary does not know `α` is an identifier
-		// character.
-		//
-		// All three have one root: a boundary expressed as a character class is not
-		// a token boundary, and JS identifiers and numerics are both wider than
-		// ASCII. Patching the class again would have been the tenth instance of the
-		// habit this file documents, so this matches COMPLETE tokens — Unicode
-		// identifier classes, full numeric literals — and then asks what the
-		// numbers ARE rather than how they are spelled. `0x7f`, `127` and `127.0`
-		// are one bound; `159e3` is not 159.
-		//
-		// RESIDUAL LIMIT, stated rather than implied: this still cannot detect an
-		// arbitrary equivalent implementation — a lookup table, an imported helper,
-		// bounds computed at runtime. No pattern matcher can. The guard catches a
-		// stale count for every form anyone has written, not every form that could
-		// be; when a genuinely new one appears the process is a bullet in AGENTS.md
-		// and a pattern here. That is a limit, not a promise the test cannot keep.
-		const ID_TOKEN = "[\\p{ID_Start}_$][\\p{ID_Continue}$]*";
-		const NUM_TOKEN =
-			"0[xX][0-9a-fA-F][0-9a-fA-F_]*n?|\\d[\\d_]*(?:\\.[\\d_]+)?(?:[eE][+-]?\\d+)?n?";
-		const RANGE_CHECK = new RegExp(
-			`(?<![\\p{ID_Continue}$])(${ID_TOKEN}) *>= *(${NUM_TOKEN}) *&& *\\1(?![\\p{ID_Continue}$]) *<= *(${NUM_TOKEN})`,
-			"gu",
-		);
-		/** Numeric VALUE of a literal token, ignoring separators and BigInt suffix. */
-		const literalValue = (token: string): number =>
-			Number(token.replace(/_/g, "").replace(/n$/, ""));
-		/** A character class spanning C1, in either escape spelling. */
-		const STRONG_RE = /\\u0080-\\u009f|\\x80-\\x9f/g;
-
-		const WEAK = /= *\/\[\\x00-\\x1f\\x7f\]\/g/g;
 		for (const dir of srcDirs) {
 			let files: string[];
 			try {
 				files = await tsFiles(dir);
 			} catch (err) {
-				// ONLY a genuinely absent directory is "no source". A blanket catch
-				// here read EACCES or an I/O error as an empty package, so a new
-				// sanitizer in an unreadable tree went uncounted and the stale total
-				// passed — the guard failing exactly the way the file it lives in is
-				// named for, in the guard written to catch that.
+				// ONLY a genuinely absent directory is "no source". A blanket catch here
+				// read EACCES or an I/O error as an empty package, so a new sanitizer in
+				// an unreadable tree went uncounted and the stale total passed.
 				if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue;
 				throw err;
 			}
 			for (const f of files) {
-				const code = codeOnly(await readFile(f, "utf-8"));
-				for (const m of code.matchAll(RANGE_CHECK)) {
-					// C1 is 0x7f..0x9f however it is written. `0x7f`, `127` and
-					// `127.0` are the same bound; `159e3` is not 159.
-					if (literalValue(m[2] as string) === 0x7f && literalValue(m[3] as string) === 0x9f) {
-						strong++;
-					}
-				}
-				strong += code.match(STRONG_RE)?.length ?? 0;
-				weak += code.match(WEAK)?.length ?? 0;
+				const c = countIn(await readFile(f, "utf-8"), f);
+				strong += c.strong;
+				weak += c.weak;
 			}
 		}
 
