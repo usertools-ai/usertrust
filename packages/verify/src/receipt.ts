@@ -21,9 +21,11 @@ export interface TransactionEvent {
 		readonly cost?: number;
 		readonly settled?: boolean;
 		readonly error?: string;
-		readonly transferId: string;
+		/** The anomaly detector's reason — `anomaly_detected` writes `message`, not `error`. */
+		readonly message?: string;
+		readonly transferId?: string | undefined;
 	};
-	readonly sequence: number;
+	readonly sequence?: number | undefined;
 	readonly hash: string;
 }
 
@@ -42,6 +44,16 @@ export interface ReceiptData {
 	 * Absent → the truthful unanchored default is rendered.
 	 */
 	readonly merkleLabel?: string | undefined;
+	/**
+	 * The DETECTOR's reason, carried across terminal selection.
+	 *
+	 * When an anomaly cutoff succeeds, the selected event is
+	 * `stream_partial_delivery`, whose `error` is whatever the SDK's abort
+	 * produced — "Request was aborted" — not the detector's own message. Ranking
+	 * the terminal above the detection is right for STATUS and wrong for REASON,
+	 * so the correlated detection message rides alongside rather than being lost.
+	 */
+	readonly detectionReason?: string | undefined;
 }
 
 // ── Formatting helpers ──
@@ -219,8 +231,52 @@ function detectProvider(model: string): string {
  */
 const DENIAL_KINDS = new Set(["policy_denied", "ledger_rejected"]);
 
+/**
+ * `anomaly_detected` is a DETECTION, not a terminal outcome — and this is the
+ * distinction the first cut of this change got wrong.
+ *
+ * The governor appends it and only THEN calls `emitter.abort()`, which is
+ * best-effort and may not exist on the provider's stream object. So at the moment
+ * this event is written, three futures are still open: the abort wins and the
+ * hold is voided; the abort is unavailable and the call settles normally; or the
+ * terminal append itself fails. Verification can also run while the call is still
+ * in flight.
+ *
+ * Rendering ABORTED from this event alone asserted the first of those three.
+ * That replaced an honestly-uncertain label with a confidently-wrong one: for an
+ * un-abortable stream it declared a call stopped while its hold was still pending
+ * and could still post, and suppressed the spend lines while doing it. PENDING
+ * was under-informative; ABORTED was false, on the artifact a third party is told
+ * to trust instead of us.
+ *
+ * So there is deliberately NO ABORTED status here. No producer records that the
+ * void won — `finalizeOnce("void")` leaves no event — so the evidence required to
+ * claim a terminal abort does not exist on the chain. What this change does
+ * instead is SURFACE the anomaly without asserting an outcome: the status stays
+ * PENDING, and the reason is printed so an auditor sees that the breaker fired
+ * and can go look. If an explicit abort-outcome event is added later, an ABORTED
+ * arm becomes derivable — from terminal evidence rather than from a detection.
+ *
+ * The other half of the original problem is real and is fixed at the selection
+ * layer in `index.ts`: when a terminal DOES exist for the transfer, it outranks
+ * this event, so a call that settled renders SETTLED with its spend.
+ */
+const DETECTION_KINDS = new Set(["anomaly_detected"]);
+
 function resolveStatus(event: TransactionEvent): string {
 	if (DENIAL_KINDS.has(event.kind)) return "DENIED";
+	// `stream_partial_delivery` is a FAILURE TERMINAL (AGENTS.md): the hold was
+	// voided and nothing settled. It is the record that proves a cutoff actually
+	// took effect, so a call the breaker stopped resolves here rather than sitting
+	// at PENDING forever. Its own `error` carries the reason, so the anomaly's
+	// message is not lost by preferring it over the detection.
+	// AMBIGUOUS, not SETTLED and not FAILED. The provider call succeeded and the
+	// POST did not, so the money may or may not have moved — and the whole point
+	// of this receipt is that it does not guess. Rendering it as either of the
+	// confident answers would be the verifier picking a side it has no evidence
+	// for.
+	if (event.kind === "settlement_ambiguous") return "AMBIGUOUS";
+	if (event.kind === "stream_partial_delivery") return "FAILED";
 	if (event.kind === "llm_call_failed") return "FAILED";
 	if (event.data.settled === true) return "SETTLED";
 	return "PENDING";
@@ -245,10 +301,25 @@ export function renderReceipt(data: ReceiptData): string {
 	const model = event.data.model ?? "unknown";
 	const provider = detectProvider(model);
 	const cost = event.data.cost;
-	const isFailed = event.kind === "llm_call_failed";
+	const isFailed =
+		event.kind === "llm_call_failed" ||
+		event.kind === "stream_partial_delivery" ||
+		event.kind === "settlement_ambiguous";
 	// A denial spent nothing, so it renders no spend lines — but its `error` is
 	// the whole point of the receipt and must still be shown.
 	const isDenied = DENIAL_KINDS.has(event.kind);
+	// A detection carries no cost of its own, and asserting nothing about the
+	// outcome means asserting nothing about the spend either. Its reason arrives
+	// as `message` rather than `error` — the field the anomaly producer writes
+	// (`govern.ts:2077`) — so the reason block reads both.
+	const isDetection = DETECTION_KINDS.has(event.kind);
+	// The terminal's OWN error stays the reason. A carried detection is rendered
+	// SEPARATELY rather than replacing it, because the anomaly is not always the
+	// cause: when the emitter has no `abort()` the cutoff never took effect, so a
+	// later unrelated failure would have been captioned with the detector's
+	// message and read as anomaly-caused. Correlation is not causation, and a
+	// receipt that names the wrong cause is worse than one that names none.
+	const reason = event.data.error ?? (isDetection ? event.data.message : undefined);
 	const allVerified = chainVerified && merkleVerified;
 
 	const lines: string[] = [];
@@ -263,27 +334,49 @@ export function renderReceipt(data: ReceiptData): string {
 	// ── Transaction details ──
 	lines.push(row(pad("  TRANSACTION RECEIPT")));
 	lines.push(divider());
-	lines.push(row(`${dotted("  TX", forDisplay(event.data.transferId), WIDTH - 1)} `));
+	lines.push(row(`${dotted("  TX", forDisplay(event.data.transferId ?? "(none)"), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Date", forDisplay(formatDate(event.timestamp)), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Model", forDisplay(model), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Provider", provider, WIDTH - 1)} `));
 
-	if (!isFailed && !isDenied && cost !== undefined) {
+	if (!isFailed && !isDenied && !isDetection && cost !== undefined) {
 		lines.push(row(`${dotted("  Spend", `${cumulativeSpend} UT`, WIDTH - 1)} `));
 		lines.push(row(`${dotted("  Conversion", formatUsd(cumulativeSpend), WIDTH - 1)} `));
 	}
 
 	lines.push(row(`${dotted("  Status", status, WIDTH - 1)} `));
 
-	if ((isFailed || isDenied) && event.data.error) {
+	if ((isFailed || isDenied || isDetection) && reason) {
 		lines.push(blank());
-		const errPrefix = "  Error: ";
+		// The label describes THIS EVENT, and nothing else. `isDetection` alone —
+		// deliberately not `|| detectionReason !== undefined`, which labelled a
+		// TERMINAL's error "Anomaly:" whenever a detection happened to correlate,
+		// so "Request was aborted" or an unrelated provider failure was presented
+		// as the detector's observation while the real detector message printed
+		// separately below. The correlated detection has its own line; it does not
+		// get to rename someone else's error.
+		const errPrefix = isDetection ? "  Anomaly: " : "  Error: ";
 		const indent = " ".repeat(errPrefix.length);
 		const maxW = WIDTH - indent.length - 2;
-		const wrapped = wordWrap(forDisplay(event.data.error), maxW);
+		const wrapped = wordWrap(forDisplay(reason), maxW);
 		for (let i = 0; i < wrapped.length; i++) {
 			const prefix = i === 0 ? errPrefix : indent;
 			lines.push(row(pad(`${prefix}${wrapped[i] as string}`)));
+		}
+	}
+
+	// A correlated detection, stated as an OBSERVATION about the transfer rather
+	// than as the terminal's cause. It appears whatever the terminal turned out to
+	// be — including a SETTLED one, where the previous precedence dropped it
+	// entirely and the receipt showed no sign the breaker had fired at all.
+	if (data.detectionReason !== undefined) {
+		lines.push(blank());
+		const prefix = "  Anomaly flagged: ";
+		const indent = " ".repeat(prefix.length);
+		const maxW = WIDTH - indent.length - 2;
+		const wrapped = wordWrap(forDisplay(data.detectionReason), maxW);
+		for (let i = 0; i < wrapped.length; i++) {
+			lines.push(row(pad(`${i === 0 ? prefix : indent}${wrapped[i] as string}`)));
 		}
 	}
 
@@ -293,7 +386,7 @@ export function renderReceipt(data: ReceiptData): string {
 	lines.push(row(pad("  CHAIN VERIFICATION")));
 	lines.push(divider());
 	lines.push(
-		row(`${dotted("  Position", `Event ${event.sequence} of ${chainLength}`, WIDTH - 1)} `),
+		row(`${dotted("  Position", `Event ${event.sequence ?? "?"} of ${chainLength}`, WIDTH - 1)} `),
 	);
 	lines.push(row(`${dotted("  Hash", forDisplay(truncHash(event.hash)), WIDTH - 1)} `));
 	lines.push(row(`${dotted("  Prev", forDisplay(truncHash(event.previousHash)), WIDTH - 1)} `));

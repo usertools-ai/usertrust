@@ -101,12 +101,33 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// growing past it requires consciously editing this number — at which
 		// point the reviewer asks what was added. Raised from 3200 for the
 		// Phase-2 anchoring work (rekor-verify.ts, ~490 lines of node:crypto-only
-		// receipt verification — no vendored source). Current size ~3.3k lines.
+		// receipt verification — no vendored source).
+		//
+		// Raised again from 4200 for the receipt-hardening work. WHAT WAS ADDED,
+		// since answering that is the whole point of this tripwire: `normalizeEvent`
+		// in index.ts, which coerces each parsed `events.jsonl` record into a
+		// guaranteed shape so the untrusted log cannot turn verification into an
+		// uncaught throw; terminal-evidence ranking in the same file; and the
+		// anomaly-evidence line in receipt.ts. All hand-written, node-builtins-only,
+		// and roughly half of it explanatory comment. NO vendored source — which is
+		// the thing this number exists to catch, and the reason the honest response
+		// here was to raise it rather than to shave comments to duck it.
+		//
+		// Raised again from 4300, for two selection defects in the same file. WHAT
+		// WAS ADDED: `firstIsSettlement` now tests terminal KIND instead of the
+		// presence of `settled`, because `llm_call_failed` carries `settled: false`
+		// and a presence test let an appended ambiguity downgrade a FAILURE into
+		// "we do not know"; and the anomaly-evidence window is now bounded by the
+		// FIRST terminal rather than the selected one, because ambiguity moves the
+		// selection later and slid the boundary past an appended detection. Both are
+		// forgery vectors, both hand-written, node-builtins-only, no vendored
+		// source. I trimmed these comments twice trying to fit under 4300 before
+		// noticing this block already says not to do that.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(4200);
+		expect(total).toBeLessThan(4320);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {
