@@ -270,11 +270,41 @@ describe("HARDEN: anchoring additive proofs", () => {
 		//     is the two comments recording why, plus the usage line.
 		// Post-round total: 8604. 8700 leaves 96 lines of headroom; the NEXT
 		// round raises the ceiling rather than trimming a Tier-0 comment to fit.
+		//
+		// Rounds 8–9 are that next round, and the ceiling is raised to 8900 as
+		// promised — no Tier-0 comment was trimmed to fit under 8700. (a)
+		// re-verified: assertions 4 and 5 above still pass, `dependencies` is
+		// still `{}`, no file was vendored, no mirrored file was edited. (b) what
+		// was added, again all of it closing Tier-0 findings on rules that were
+		// already there:
+		//   · round 8 (c0ef624, +26) — `receipt-verify.ts` only: §8's
+		//     `activationSequence` is ONE number governing TWO keys and only the
+		//     predecessor's half was enforced, so a key rotated IN at segment 18
+		//     authenticated material from segment 11.
+		//   · round 9 (this one, +118) — `receipt-verify.ts` +101, `receipt-cli.ts`
+		//     +17, four findings, two of them a defect CLASS this budget keeps
+		//     paying for: a rule enforced at the wrong LAYER reports the wrong
+		//     VERDICT CLASS.
+		//       — round 8's own regression: a REVOKED predecessor legitimately
+		//         carries no boundary, so failing closed at use time returned
+		//         SIG_INVALID for a snapshot that was merely incomplete. Moved to
+		//         the loader as UNVERIFIABLE.
+		//       — the frozen numeric rules now reach the snapshot members §8
+		//         DECLARES as integers (and only those): `18.000000000000001`
+		//         rounds to `18` in `JSON.parse` and authorized a key window the
+		//         document never carried.
+		//       — a refused snapshot reports the version and predecessor it
+		//         declared (R-OUT-1), and step 3(a) is rendered beside the named
+		//         checks rather than inside them.
+		//     Most of the count is prose: three of the four are cases nobody
+		//     enumerated rather than rules nobody could derive, and the comments
+		//     are what stop the fourth from being a tenth review round.
+		// Post-round total: 8748. 8900 leaves 152 lines of headroom.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(8700);
+		expect(total).toBeLessThan(8900);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {
