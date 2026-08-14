@@ -388,6 +388,48 @@ describe("false OK — a documented count that stops matching reality", () => {
 			return { strong, weak };
 		};
 
+		/**
+		 * THE TWO DETECTORS MUST AGREE.
+		 *
+		 * This property has two implementations — a loop shape and a regex class —
+		 * and for one round they disagreed: the loop path counted a C1-only escaper
+		 * that the regex path correctly excluded. Neither was wrong on its own
+		 * terms. The defect was that nothing ever fed one construct through both.
+		 *
+		 * Each pair below is the SAME sanitizer written both ways. If the two paths
+		 * ever diverge again, this fails here rather than as a silently wrong total
+		 * — which is the only symptom the count itself would show.
+		 */
+		const EQUIVALENT_PAIRS: ReadonlyArray<
+			readonly [string, string, string, "strong" | "weak" | "none"]
+		> = [
+			[
+				"full neutralisation",
+				'export const f=(cp:number)=>cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f) ? "?" : "y";',
+				"export const r=/[\\x00-\\x1f\\x7f-\\x9f]/g;",
+				"strong",
+			],
+			[
+				"C1 only — an escaper, not a sanitizer",
+				'export const f=(cp:number)=>(cp >= 0x7f && cp <= 0x9f) ? "x" : "y";',
+				"export const r=/[\\u007f-\\u009f]/g;",
+				"none",
+			],
+		];
+		for (const [label, loopForm, regexForm, expected] of EQUIVALENT_PAIRS) {
+			const viaLoop = countIn(loopForm, "pair-loop.ts");
+			const viaRegex = countIn(regexForm, "pair-regex.ts");
+			const classify = (c: { strong: number; weak: number }): string =>
+				c.strong > 0 ? "strong" : c.weak > 0 ? "weak" : "none";
+			expect(classify(viaLoop), `${label}: the LOOP form classified as ${classify(viaLoop)}`).toBe(
+				expected,
+			);
+			expect(
+				classify(viaRegex),
+				`${label}: the REGEX form classified as ${classify(viaRegex)}, but the loop form said ${classify(viaLoop)} — the two detectors for one property have diverged`,
+			).toBe(expected);
+		}
+
 		const tsFiles = async (dir: string): Promise<string[]> => {
 			const out: string[] = [];
 			for (const e of await readdir(dir, { withFileTypes: true })) {
