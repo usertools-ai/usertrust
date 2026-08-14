@@ -859,7 +859,15 @@ export function verifyTransaction(
 	// which is the forgery this selector already refuses. So: ambiguity beats a
 	// settlement, and nothing beats a failure or a denial.
 	const ambiguity = matching.find((e) => e.kind === "settlement_ambiguous");
-	const firstIsSettlement = firstTerminal?.data.settled !== undefined;
+	// A SETTLEMENT is not "anything carrying `settled`": `llm_call_failed` records
+	// `settled: false`, so a presence test let ambiguity downgrade a FAILURE. That
+	// inverts the rule above — losing certainty is harmless on a settlement, but a
+	// failure is already the worst verdict, so moving it to "unknown" launders it.
+	const firstIsSettlement =
+		firstTerminal !== undefined &&
+		firstTerminal.data.settled !== undefined &&
+		!isFailureTerminal(firstTerminal) &&
+		!isDenialTerminal(firstTerminal);
 	const targetEvent =
 		ambiguity !== undefined && (firstTerminal === undefined || firstIsSettlement)
 			? ambiguity
@@ -992,9 +1000,14 @@ export function verifyTransaction(
 	// the terminal. That renders forged text under an INCLUSION VERIFIED heading,
 	// which is worse than showing nothing: the proof is real and the reader has no
 	// way to see that it does not cover the line beside it.
-	const targetIndex = matching.indexOf(targetEvent);
+	// THE BOUNDARY IS THE FIRST TERMINAL, NOT THE SELECTED ONE. Ambiguity moves
+	// `targetEvent` later, so using its position slid the boundary past an appended
+	// detection and let it decorate a receipt whose real terminal came first.
+	// Nothing after the first terminal is evidence about the outcome.
+	const boundary = firstTerminal ?? targetEvent;
+	const boundaryIndex = matching.indexOf(boundary);
 	const detection = matching
-		.slice(0, targetIndex < 0 ? matching.length : targetIndex)
+		.slice(0, boundaryIndex < 0 ? matching.length : boundaryIndex)
 		.find((e) => e.kind === "anomaly_detected");
 	const detectionReason = detection !== undefined ? detection.data.message : undefined;
 

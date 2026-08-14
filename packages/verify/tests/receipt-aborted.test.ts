@@ -229,6 +229,58 @@ describe("verifyTransaction — terminal evidence and untrusted tails", () => {
 		...over,
 	});
 
+	it("an appended ambiguity cannot launder a FAILURE into 'we do not know'", () => {
+		// `llm_call_failed` carries `settled: false`, so testing for the PRESENCE of
+		// `settled` classified a failure as a settlement — and ambiguity is allowed
+		// to downgrade a settlement. The result was that appending one record turned
+		// a definite failure into AMBIGUOUS.
+		//
+		// Reducing certainty is safe on a settlement and is NOT safe here: a failure
+		// is already the least favourable verdict, so moving it to "unknown" is a
+		// laundering step rather than a correction.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-launder-"));
+		try {
+			writeVault(dir, [
+				ev({ kind: "llm_call_failed", data: { transferId: "tx_l", settled: false } }, 0),
+				ev({ kind: "settlement_ambiguous", data: { transferId: "tx_l" } }, 1),
+			]);
+			const result = verifyTransaction(dir, "tx_l");
+			expect(result.receipt).toContain("FAILED");
+			expect(result.receipt).not.toContain("AMBIGUOUS");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("an anomaly appended AFTER the first terminal cannot decorate the receipt", () => {
+		// The detection window is bounded by the FIRST terminal, not by the selected
+		// one. When ambiguity legitimately downgrades a settlement the selected
+		// record moves later in the chain, and using its position slid the boundary
+		// past an appended detection — which then printed beside an INCLUSION
+		// VERIFIED heading that covers only the terminal.
+		//
+		// The producer cannot emit this order: it writes `anomaly_detected` BEFORE
+		// the terminal it explains.
+		const dir = mkdtempSync(join(tmpdir(), "usertrust-verify-decorate-"));
+		try {
+			writeVault(dir, [
+				ev({ kind: "llm_call", data: { transferId: "tx_d", settled: true, cost: 10 } }, 0),
+				ev(
+					{
+						kind: "anomaly_detected",
+						data: { transferId: "tx_d", anomalyKind: "token_rate", message: "FORGED" },
+					},
+					1,
+				),
+				ev({ kind: "settlement_ambiguous", data: { transferId: "tx_d" } }, 2),
+			]);
+			const result = verifyTransaction(dir, "tx_d");
+			expect(result.receipt).not.toContain("FORGED");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("a cutoff that TOOK EFFECT resolves to its failure terminal, not PENDING forever", () => {
 		// `finalizeStreamVoid` wins `finalizeOnce("void")` and then appends
 		// `stream_partial_delivery` with the same id. That record IS the evidence

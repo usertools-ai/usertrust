@@ -112,11 +112,22 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// and roughly half of it explanatory comment. NO vendored source — which is
 		// the thing this number exists to catch, and the reason the honest response
 		// here was to raise it rather than to shave comments to duck it.
+		//
+		// Raised again from 4300, for two selection defects in the same file. WHAT
+		// WAS ADDED: `firstIsSettlement` now tests terminal KIND instead of the
+		// presence of `settled`, because `llm_call_failed` carries `settled: false`
+		// and a presence test let an appended ambiguity downgrade a FAILURE into
+		// "we do not know"; and the anomaly-evidence window is now bounded by the
+		// FIRST terminal rather than the selected one, because ambiguity moves the
+		// selection later and slid the boundary past an appended detection. Both are
+		// forgery vectors, both hand-written, node-builtins-only, no vendored
+		// source. I trimmed these comments twice trying to fit under 4300 before
+		// noticing this block already says not to do that.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(4300);
+		expect(total).toBeLessThan(4320);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {
