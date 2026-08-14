@@ -1,0 +1,189 @@
+{
+	"routeParamId": "ut1_BHwXbQiKkgcrmiEyPr8AQH",
+	"wire": {
+		"httpStatus": 200,
+		"headers": {
+			"cache-control": "no-cache"
+		},
+		"body": {
+			"apiVersion": "1",
+			"receiptId": "ut1_BHwXbQiKkgcrmiEyPr8AQH",
+			"status": "verified_checkpoint",
+			"receiptBytes": "eyJzcGVjIjoidXQxIiwicmVjZWlwdElkIjoidXQxX0JId1hiUWlLa2djcm1pRXlQcjhBUUgiLCJzY29wZSI6InNlc3Npb24iLCJtaW50ZWRBdCI6IjIwMjYtMDgtMTBUMTQ6MTU6MDEuMDAwWiIsIm1pbnRlciI6eyJraW5kIjoicHJveHkiLCJrZXlJZCI6Im1pbnQta2V5LTIwMjYtMDEiLCJ0cnVzdERvbWFpbiI6InVzZXJ0cnVzdC5haSJ9LCJ3b3JrIjp7ImtpbmQiOiJzZXNzaW9uIiwicmVwb0lkIjoiZ2l0aHViLmNvbTpSX2tnRE9LMXgyWXciLCJyZXBvIjoiZ2l0aHViLmNvbS91c2VydHJ1c3QtYWkvdXNlcnRydXN0In0sImV2ZW50Ijp7ImlkIjoiMzkwMjkyZjIwZDUyZGI0ZGY3N2EwMmViZGNlZWY1YjkiLCJ0aW1lc3RhbXAiOiIyMDI2LTA4LTEwVDE0OjEyOjAxLjAwMFoiLCJwcmV2aW91c0hhc2giOiIxMjkwYTA3ZjE0Y2E2MDhlM2FmZDE1M2RmMjI0OWZmMWI2OTI2OWRmN2Y0MTI3ZGY0Mjk1ZDdkZTg0YjI3ZWEzIiwia2luZCI6InJlY2VpcHRfc2V0dGxlZCIsImFjdG9yIjp7InR5cGUiOiJzeXN0ZW0iLCJpZCI6InJlY2VpcHQtbWludGVyIiwibmFtZSI6InJlY2VpcHQtbWludGVyIn0sImRhdGEiOnsic3BlYyI6InV0MSIsInNjb3BlIjoic2Vzc2lvbiIsInNlc3Npb25JZCI6InNlc3NfNGMwZGQwZjI4ZTNkMTQyZTNlMTdhODgwOGQ3MDhjMjQiLCJnZW5lcmF0aW9uIjoxLCJ3b3JrIjp7ImtpbmQiOiJzZXNzaW9uIiwicmVwb0lkIjoiZ2l0aHViLmNvbTpSX2tnRE9LMXgyWXciLCJyZXBvIjoiZ2l0aHViLmNvbS91c2VydHJ1c3QtYWkvdXNlcnRydXN0In0sInNlc3Npb25Bc3NvY2lhdGlvbiI6IndvcmtmbG93QXR0ZXN0ZWQiLCJ3b3JrbG9hZElkIjoiYzg5ZWQ3MjdlMGE1ZWZhMTA3YTAzYTY5IiwibW9kZWxzIjpbImNsYXVkZS1zb25uZXQtNC02Il0sInByb3ZpZGVycyI6WyJhbnRocm9waWMiXSwic3RhcnRlZEF0IjoiMjAyNi0wOC0xMFQxNDowMDowMC4wMDBaIiwiZW5kZWRBdCI6IjIwMjYtMDgtMTBUMTQ6MTI6MDAuMDAwWiIsInNwZW5kIjp7ImFzc2Vzc2VkVXNlcnRva2VucyI6NjE3NTAsInBvc3RlZFVzZXJ0b2tlbnMiOjYxNzUwLCJyb3VuZGluZ0FkanVzdG1lbnQiOjIsInRyYW5zZmVyQ291bnQiOjUsInVzYWdlUG9zdHVyZSI6InByb3ZpZGVyIiwicHJpY2luZ1Bvc3R1cmUiOiJleGFjdCJ9LCJkZWxlZ2F0aW9uUG9zdHVyZSI6ImluY2x1ZGVzU29tZURlbGVnYXRlZCIsInByaWNpbmciOnsidGFibGVWZXJzaW9ucyI6WyIyMDI2LTA3LTAxIl19LCJ0cmFuc2ZlclNldCI6W3siYXV0aG9yaXphdGlvblRyYW5zZmVySWQiOiIxYjJjODc3MzQ3YzE2ZTFmNjA2MWJhMGJjZjUzNmMzMiIsInNldHRsZW1lbnRUcmFuc2ZlcklkIjoiMWE2MzY4YWVhYzcxNTM0MTE1ZjdmNTcwZWFmOGVjYWIifSx7ImF1dGhvcml6YXRpb25UcmFuc2ZlcklkIjoiZWUzNzQ2MTQwNDYzZjQ3ZGY3YzBkZjNjZTliZjcwMDkiLCJzZXR0bGVtZW50VHJhbnNmZXJJZCI6IjU1NWMxMzRhNDI4NWE4YmJmMDIyYWY1N2RkMzNkNzdlIn0seyJhdXRob3JpemF0aW9uVHJhbnNmZXJJZCI6Ijg0NDRhMDMzZDU4Njc3Zjg5OTI2MzlmNWMzNmZjMjk2Iiwic2V0dGxlbWVudFRyYW5zZmVySWQiOiJhYTBhNDViNmE1ZDVjYmZhNzMwMjczMzI2ZGY4N2YxZCJ9LHsiYXV0aG9yaXphdGlvblRyYW5zZmVySWQiOiIyYzZjM2E2ZTNjYzNmMjQ0YzFlZmE2MThjNzA5YzlhZiIsInNldHRsZW1lbnRUcmFuc2ZlcklkIjoiYjA1YzE5YzlkZTA3NGM0ZjM5NGVjMTQ2ODVhNTIwNTQifSx7ImF1dGhvcml6YXRpb25UcmFuc2ZlcklkIjoiNjFhNWI2NjhhMjNhMmY3OGZhYTFkMGIzYWRmZjk0YTYiLCJzZXR0bGVtZW50VHJhbnNmZXJJZCI6ImNjMGQzMmVkNjliYmQxYzNiMWNhZDliYzA3OGNjMzkwIn1dLCJ0cmFuc2ZlclNldFJvb3QiOiIwMjZjZDVmODVjOWY3ZmFiOWY1ZWQ2NThmMjYzN2U0YzgyZGE5ODBkM2I4ZTk0NzY4N2VmNTYxZjNmMDY5NWQxIn0sInNlcXVlbmNlIjo4MTI1NDExLCJoYXNoIjoiNWFmZGZjNWJiNWVlZWJkOGNhZWMzMWQ3YmY1MGI0ZmY0ZDgwYjI1NjIxNTY5N2I3YTk2ODc1MDFmYTFlZjQ1NiJ9LCJwcm9vZiI6eyJwcm9maWxlIjoicHJveHktdjEiLCJjaGFpbiI6InZhdWx0LXVzZXJ0cnVzdC1wcm9kLTEiLCJtaW50RXZlbnRIYXNoIjoiNWFmZGZjNWJiNWVlZWJkOGNhZWMzMWQ3YmY1MGI0ZmY0ZDgwYjI1NjIxNTY5N2I3YTk2ODc1MDFmYTFlZjQ1NiIsImluY2x1c2lvbiI6eyJ2ZXJzaW9uIjoxLCJsZWFmSGFzaCI6IjVhZmRmYzViYjVlZWViZDhjYWVjMzFkN2JmNTBiNGZmNGQ4MGIyNTYyMTU2OTdiN2E5Njg3NTAxZmExZWY0NTYiLCJsZWFmSW5kZXgiOjYxLCJ0cmVlU2l6ZSI6NjAsInJvb3QiOiJmNmNlZjg4NTcxOTUyNzU4MjNkNGI5M2U1YTNmY2NmYmZiNWEzOWM3ZDFkOGJjMGE1MGRjNmNiNGI5ODM4ZWVlIiwic2libGluZ3MiOlt7Imhhc2giOiJjZmY2Mzk3MTMzYzhlOTRlMmQ1MmM1NGVjYzFiYTNlYjZjZjc0Zjk5NTg3ZThjZTkzZjA3NmRkZWZhNDA4N2RhIiwicG9zaXRpb24iOiJsZWZ0In0seyJoYXNoIjoiMGMzNmI4YjhmOTA0M2NlOTMzODYyNzU3NWQ2ODFiOGU2YjMyNGZlY2I2YWE2NmY5MmJhODcxNzJiODE1YzRiNiIsInBvc2l0aW9uIjoicmlnaHQifSx7Imhhc2giOiJmZjVkMGNkZGM4MGJlZjBjZjYzODExYjU4ZDA5YTQyMmQzMzlhMGQ4ZDM4MzM1NWNlODY4NjAwZWM5YTQzZjkyIiwicG9zaXRpb24iOiJsZWZ0In1dLCJzZWdtZW50SWQiOiJzZWctMDAxNiJ9LCJjaGVja3BvaW50Ijp7InYiOjIsInZhdWx0SWQiOiJ2YXVsdC11c2VydHJ1c3QtcHJvZC0xIiwicHJvZmlsZSI6InByb3h5LXYxIiwicm9vdCI6ImY2Y2VmODg1NzE5NTI3NTgyM2Q0YjkzZTVhM2ZjY2ZiZmI1YTM5YzdkMWQ4YmMwYTUwZGM2Y2I0Yjk4MzhlZWUiLCJ0cmVlU2l6ZSI6NjAsInNlZ21lbnRJZCI6InNlZy0wMDE2Iiwic2VnbWVudEZpcnN0U2VxdWVuY2UiOjgxMjUzNTAsInByZXZpb3VzU2VnbWVudFJvb3QiOiJkODBmNjA3NzM0MjY4NTAxYTEzMTMwMmE1MzBhYTk3NTE0YWM3ZDFkOTFiMTNjNjdkNGI2NjQ2ZjczZDkxYzg4IiwicHJldmlvdXNTZWdtZW50SWQiOiJzZWctMDAxNSIsImtleUlkIjoiY2hlY2twb2ludC1rZXktMjAyNi0wMSIsInB1Ymxpc2hlZEF0IjoiMjAyNi0wOC0xMFQxNDoxNTowMC4wMDBaIiwic2lnIjoiYzNsdWRHaGxkR2xqTFdOb1pXTnJjRzlwYm5RdGMybG5PanBqTWpndGFXNWpiSFZrWlhNdGMyOXRaUzFrWld4bFoyRjBaV1E9In19LCJzaWduYXR1cmUiOnsiYWxnIjoiZWQyNTUxOSIsImtleUlkIjoibWludC1rZXktMjAyNi0wMSIsInNpZyI6ImMzbHVkR2hsZEdsakxXMXBiblF0YzJsbk9qcGpNamd0YVc1amJIVmtaWE10YzI5dFpTMWtaV3hsWjJGMFpXUT0ifX0=",
+			"receipt": {
+				"spec": "ut1",
+				"receiptId": "ut1_BHwXbQiKkgcrmiEyPr8AQH",
+				"scope": "session",
+				"mintedAt": "2026-08-10T14:15:01.000Z",
+				"minter": {
+					"kind": "proxy",
+					"keyId": "mint-key-2026-01",
+					"trustDomain": "usertrust.ai"
+				},
+				"work": {
+					"kind": "session",
+					"repoId": "github.com:R_kgDOK1x2Yw",
+					"repo": "github.com/usertrust-ai/usertrust"
+				},
+				"event": {
+					"id": "390292f20d52db4df77a02ebdceef5b9",
+					"timestamp": "2026-08-10T14:12:01.000Z",
+					"previousHash": "1290a07f14ca608e3afd153df2249ff1b69269df7f4127df4295d7de84b27ea3",
+					"kind": "receipt_settled",
+					"actor": {
+						"type": "system",
+						"id": "receipt-minter",
+						"name": "receipt-minter"
+					},
+					"data": {
+						"spec": "ut1",
+						"scope": "session",
+						"sessionId": "sess_4c0dd0f28e3d142e3e17a8808d708c24",
+						"generation": 1,
+						"work": {
+							"kind": "session",
+							"repoId": "github.com:R_kgDOK1x2Yw",
+							"repo": "github.com/usertrust-ai/usertrust"
+						},
+						"sessionAssociation": "workflowAttested",
+						"workloadId": "c89ed727e0a5efa107a03a69",
+						"models": ["claude-sonnet-4-6"],
+						"providers": ["anthropic"],
+						"startedAt": "2026-08-10T14:00:00.000Z",
+						"endedAt": "2026-08-10T14:12:00.000Z",
+						"spend": {
+							"assessedUsertokens": 61750,
+							"postedUsertokens": 61750,
+							"roundingAdjustment": 2,
+							"transferCount": 5,
+							"usagePosture": "provider",
+							"pricingPosture": "exact"
+						},
+						"delegationPosture": "includesSomeDelegated",
+						"pricing": {
+							"tableVersions": ["2026-07-01"]
+						},
+						"transferSet": [
+							{
+								"authorizationTransferId": "1b2c877347c16e1f6061ba0bcf536c32",
+								"settlementTransferId": "1a6368aeac71534115f7f570eaf8ecab"
+							},
+							{
+								"authorizationTransferId": "ee3746140463f47df7c0df3ce9bf7009",
+								"settlementTransferId": "555c134a4285a8bbf022af57dd33d77e"
+							},
+							{
+								"authorizationTransferId": "8444a033d58677f8992639f5c36fc296",
+								"settlementTransferId": "aa0a45b6a5d5cbfa730273326df87f1d"
+							},
+							{
+								"authorizationTransferId": "2c6c3a6e3cc3f244c1efa618c709c9af",
+								"settlementTransferId": "b05c19c9de074c4f394ec14685a52054"
+							},
+							{
+								"authorizationTransferId": "61a5b668a23a2f78faa1d0b3adff94a6",
+								"settlementTransferId": "cc0d32ed69bbd1c3b1cad9bc078cc390"
+							}
+						],
+						"transferSetRoot": "026cd5f85c9f7fab9f5ed658f2637e4c82da980d3b8e947687ef561f3f0695d1"
+					},
+					"sequence": 8125411,
+					"hash": "5afdfc5bb5eeebd8caec31d7bf50b4ff4d80b256215697b7a9687501fa1ef456"
+				},
+				"proof": {
+					"profile": "proxy-v1",
+					"chain": "vault-usertrust-prod-1",
+					"mintEventHash": "5afdfc5bb5eeebd8caec31d7bf50b4ff4d80b256215697b7a9687501fa1ef456",
+					"inclusion": {
+						"version": 1,
+						"leafHash": "5afdfc5bb5eeebd8caec31d7bf50b4ff4d80b256215697b7a9687501fa1ef456",
+						"leafIndex": 61,
+						"treeSize": 60,
+						"root": "f6cef8857195275823d4b93e5a3fccfbfb5a39c7d1d8bc0a50dc6cb4b9838eee",
+						"siblings": [
+							{
+								"hash": "cff6397133c8e94e2d52c54ecc1ba3eb6cf74f99587e8ce93f076ddefa4087da",
+								"position": "left"
+							},
+							{
+								"hash": "0c36b8b8f9043ce9338627575d681b8e6b324fecb6aa66f92ba87172b815c4b6",
+								"position": "right"
+							},
+							{
+								"hash": "ff5d0cddc80bef0cf63811b58d09a422d339a0d8d383355ce868600ec9a43f92",
+								"position": "left"
+							}
+						],
+						"segmentId": "seg-0016"
+					},
+					"checkpoint": {
+						"v": 2,
+						"vaultId": "vault-usertrust-prod-1",
+						"profile": "proxy-v1",
+						"root": "f6cef8857195275823d4b93e5a3fccfbfb5a39c7d1d8bc0a50dc6cb4b9838eee",
+						"treeSize": 60,
+						"segmentId": "seg-0016",
+						"segmentFirstSequence": 8125350,
+						"previousSegmentRoot": "d80f607734268501a131302a530aa97514ac7d1d91b13c67d4b6646f73d91c88",
+						"previousSegmentId": "seg-0015",
+						"keyId": "checkpoint-key-2026-01",
+						"publishedAt": "2026-08-10T14:15:00.000Z",
+						"sig": "c3ludGhldGljLWNoZWNrcG9pbnQtc2lnOjpjMjgtaW5jbHVkZXMtc29tZS1kZWxlZ2F0ZWQ="
+					}
+				},
+				"signature": {
+					"alg": "ed25519",
+					"keyId": "mint-key-2026-01",
+					"sig": "c3ludGhldGljLW1pbnQtc2lnOjpjMjgtaW5jbHVkZXMtc29tZS1kZWxlZ2F0ZWQ="
+				}
+			},
+			"verification": {
+				"trustSnapshotId": "usertrust-verify@2026-08-10T00:00:00Z",
+				"steps": {
+					"schema": {
+						"result": "passed"
+					},
+					"event": {
+						"result": "passed"
+					},
+					"registry": {
+						"result": "passed"
+					},
+					"signature": {
+						"result": "passed"
+					},
+					"inclusion": {
+						"result": "passed"
+					},
+					"checkpoint": {
+						"result": "passed"
+					},
+					"semantics": {
+						"result": "passed"
+					},
+					"derivations": {
+						"result": "passed"
+					},
+					"extensions": {
+						"result": "passed"
+					}
+				},
+				"checks": {
+					"registryBinding": {
+						"result": "passed"
+					},
+					"predecessorLinkage": {
+						"result": "notApplicable"
+					},
+					"checkpointHistory": {
+						"result": "notApplicable"
+					},
+					"anchorEvidence": {
+						"result": "notApplicable"
+					}
+				}
+			},
+			"advisories": []
+		}
+	}
+}

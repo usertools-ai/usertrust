@@ -9,10 +9,11 @@
  * turned into an assertion — "copy that the spec mandates is test-pinned so a
  * redesign cannot silently drop a disclaimer" (§8).
  *
- * Scope: the VERIFIED rungs (§8.1 C1-C18). C19-C27 are the non-green states,
- * which belong to the states pass — this file asserts only that they never
- * reach the verified renderer, which is the fail-closed half of the contract
- * this task owns.
+ * Scope: the VERIFIED rungs — §8.1 C1-C18 plus C28/C29, the two delegation
+ * postures a v1 minter never emits and a verifier must still render. C19-C27
+ * are the non-green states, which belong to the states pass; this file asserts
+ * only that they never reach the verified renderer, which is the fail-closed
+ * half of the contract this task owns.
  */
 
 import assert from "node:assert/strict";
@@ -26,11 +27,16 @@ import {
 	verifiedFixtureState,
 } from "./fixture-harness";
 import {
+	ANCHOR_BINDING_RESOLVER_ASSERTED,
 	ANCHOR_EXTERNAL_VISIBILITY,
+	amountFloorClaim,
+	amountUsdFromUsertokens,
 	BREAKDOWN_ROWS_NOTE,
 	CHAIN_CLOCK_CLAIM_NOTE,
 	CHAIN_COMMITTED_SPEND_FIELDS,
 	CUSTOM_MODEL_MEANING,
+	DELEGATION_POSTURE_LABEL,
+	DELEGATION_POSTURE_SCOPE,
 	DISPLAY_ANNEX_LABEL,
 	DISPLAY_NOT_ATTESTED,
 	EQUIVOCATION_CAVEAT,
@@ -47,6 +53,7 @@ import {
 	POSTURES_ARE_ATTESTED_ENUMS,
 	PRICING_TABLES_NOTE,
 	PROOF_ID_IS_A_HANDLE,
+	PROVIDER_SCOPED_CLAIM,
 	RECOMPUTE_IS_RESOLVER_ONLINE_CHECK,
 	REKOR_EVIDENCE_MEANING,
 	REPO_NAME_IS_NOT_SCOPE,
@@ -127,6 +134,8 @@ test("§8.1: every conforming 200 fixture renders, and the set is the expected o
 			"C16",
 			"C17",
 			"C18",
+			"C28",
+			"C29",
 		],
 	);
 	for (const row of rows) {
@@ -270,7 +279,22 @@ function mandatedStrings(state: VerifiedState): { needle: string; why: string }[
 					: TRANSFER_SET_ROOT_RECOMPUTABLE,
 			why: "R25 — the root's meaning tracks the pair list's presence",
 		},
+		{
+			needle: DELEGATION_POSTURE_SCOPE[projection.delegationPosture],
+			why: "R39 — the amount's scope, framed per posture value",
+		},
 	];
+	// R40 — the floor is the NAMED EXCEPTION, so it is asserted only where the
+	// posture earns one. Deriving the expectation from `amountFloorClaim` rather
+	// than from the posture keeps this sweep honest about which branch it is
+	// checking; C29's dedicated test asserts the refusal directly.
+	const floor = amountFloorClaim(
+		projection.delegationPosture,
+		amountUsdFromUsertokens(projection.spend.assessedUsertokens),
+	);
+	if (floor !== undefined) {
+		required.push({ needle: floor, why: "R40 — the amount renders as a floor on caused cost" });
+	}
 	if (envelope.receipt.work.kind !== "session") {
 		required.push(
 			{ needle: MEMBERSHIP_EPISTEMIC_SCOPE, why: "R26 — the minter's committed observation" },
@@ -433,6 +457,252 @@ test("R28: the display annex renders IFF the envelope served a display member", 
 			`${row.id}: display annex presence must track the display member`,
 		);
 		if (served) assertContains(text, DISPLAY_ANNEX_LABEL, `${row.id}: R28's explicit label`);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// R38-R41 — the amount's scope and bound, and the anchored rung's binding
+//
+// These are HONESTY OBLIGATIONS, so the copy is asserted verbatim (a paraphrase
+// that drifts is the defect) and the *absence* of interaction is asserted
+// structurally rather than by eyeballing the component.
+// ---------------------------------------------------------------------------
+
+/** HTML tags that never nest, so the ancestor walk below must not push them. */
+const VOID_TAGS = new Set([
+	"area",
+	"base",
+	"br",
+	"col",
+	"embed",
+	"hr",
+	"img",
+	"input",
+	"link",
+	"meta",
+	"param",
+	"source",
+	"track",
+	"wbr",
+	"path",
+	"rect",
+	"circle",
+	"line",
+	"polygon",
+	"polyline",
+	"stop",
+	"use",
+]);
+
+const TAG = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
+
+/**
+ * Every OPEN tag still on the stack at `index` — i.e. the ancestor chain of the
+ * text at that offset, each as its raw `<tag attrs>` string.
+ *
+ * This exists because "not behind interaction" is a claim about the DOM, and
+ * `!html.includes("<details")` is a claim about the whole document. The first
+ * survives someone adding an unrelated `<details>` elsewhere on the page; the
+ * second does not, so it would start failing for the wrong reason and get
+ * weakened. Walking the ancestors asserts exactly what R40/R41 require.
+ */
+function ancestorTags(html: string, index: number): string[] {
+	const stack: string[] = [];
+	TAG.lastIndex = 0;
+	for (let m = TAG.exec(html); m !== null && m.index < index; m = TAG.exec(html)) {
+		const [raw, closing, name, , selfClosing] = m;
+		if (VOID_TAGS.has(name.toLowerCase()) || selfClosing === "/") continue;
+		if (closing === "/") stack.pop();
+		else stack.push(raw);
+	}
+	return stack;
+}
+
+/**
+ * A mandated sentence as it appears in the MARKUP, not as it appears in the
+ * source. `textOf` decodes entities for text assertions, but the structural
+ * assertions below need offsets into the raw markup — and React escapes
+ * apostrophes as `&#x27;`, so a needle containing one would silently never
+ * match. Silently, because "not found" and "found, not gated" both look like a
+ * pass to a weaker check; this is why the search below asserts presence first.
+ */
+function escapeForMarkup(value: string): string {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#x27;");
+}
+
+/**
+ * R40/R41's negative: the disclosure is in the rendered output with no
+ * interaction — not inside a `<details>`, not a tooltip, not a collapsed
+ * container, and not carried by a `title` attribute.
+ */
+function assertNotBehindInteraction(html: string, plainNeedle: string, why: string): void {
+	const needle = escapeForMarkup(plainNeedle);
+	const index = html.indexOf(needle);
+	assert.notEqual(index, -1, `${why}: the disclosure is not in the rendered output at all`);
+	for (const tag of ancestorTags(html, index)) {
+		const name = tag.slice(1).split(/[\s>]/)[0].toLowerCase();
+		assert.ok(name !== "details" && name !== "summary", `${why}: ancestor ${name} gates it`);
+		assert.ok(!/\stitle=/.test(tag), `${why}: an ancestor carries a title tooltip — ${tag}`);
+		assert.ok(!/\shidden\b/.test(tag), `${why}: an ancestor is hidden — ${tag}`);
+		assert.ok(!/\saria-expanded=/.test(tag), `${why}: an ancestor is a disclosure widget — ${tag}`);
+		assert.ok(!/\srole="tooltip"/.test(tag), `${why}: an ancestor is a tooltip — ${tag}`);
+	}
+	// The disclosure's own text must not be an attribute VALUE either — a `title`
+	// containing the sentence renders nothing a reader sees without hovering.
+	assert.ok(
+		!new RegExp(`title="[^"]*${needle.slice(0, 24).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(
+			html,
+		),
+		`${why}: the sentence is carried by a title attribute`,
+	);
+}
+
+test("R38/R39: every verified render carries the amount's posture LABEL and its per-value framing", () => {
+	for (const row of conformingVerifiedRows()) {
+		const { html, text, state } = renderFixture(row.file);
+		const posture = state.envelope.receipt.event.data.delegationPosture;
+		assert.ok(
+			html.includes(`data-posture-role="amount scope" data-posture="${posture}"`),
+			`${row.id}: the amount's scope block must name the posture it renders`,
+		);
+		assertContains(text, DELEGATION_POSTURE_LABEL[posture], `${row.id}: R38's posture label`);
+		assertContains(text, DELEGATION_POSTURE_SCOPE[posture], `${row.id}: R39's per-value framing`);
+	}
+});
+
+test("R39/R40: the scope block sits BESIDE the amount — no spend field or posture chip intervenes", () => {
+	for (const row of conformingVerifiedRows()) {
+		const { html } = renderFixture(row.file);
+		const amount = html.indexOf('data-testid="amount-usd"');
+		const scope = html.indexOf('data-testid="amount-scope"');
+		const postures = html.indexOf('data-testid="postures"');
+		assert.ok(amount !== -1 && scope !== -1 && postures !== -1, `${row.id}: anatomy missing`);
+		assert.ok(amount < scope, `${row.id}: the scope block must follow the figure it qualifies`);
+		assert.ok(scope < postures, `${row.id}: the scope block is not a footnote under the chips`);
+		const between = html.slice(amount, scope);
+		assert.ok(
+			!between.includes("data-field="),
+			`${row.id}: a spend field separates the amount from its scope`,
+		);
+	}
+});
+
+test("R39/R40: neither the scope statement nor the floor claim is behind interaction", () => {
+	for (const row of conformingVerifiedRows()) {
+		const { html, state } = renderFixture(row.file);
+		const projection = state.envelope.receipt.event.data;
+		assertNotBehindInteraction(
+			html,
+			DELEGATION_POSTURE_SCOPE[projection.delegationPosture],
+			`${row.id}: R39's scope statement`,
+		);
+		const floor = amountFloorClaim(
+			projection.delegationPosture,
+			amountUsdFromUsertokens(projection.spend.assessedUsertokens),
+		);
+		if (floor !== undefined) {
+			assertNotBehindInteraction(html, floor, `${row.id}: R40's floor claim`);
+		}
+	}
+});
+
+test("R40: a selfDebitsOnly amount renders as a FLOOR on caused cost, beside the exact charged figure", () => {
+	const { html, text, state } = renderFixture("commit-checkpoint.json");
+	const projection = state.envelope.receipt.event.data;
+	assert.equal(projection.delegationPosture, "selfDebitsOnly");
+	const amountUsd = amountUsdFromUsertokens(projection.spend.assessedUsertokens);
+	const floor = amountFloorClaim("selfDebitsOnly", amountUsd);
+	assert.ok(floor, "selfDebitsOnly must earn a floor claim");
+	assertContains(text, floor ?? "", "R40's floor claim renders verbatim");
+	assertContains(text, `$${amountUsd}`, "the exact charged figure renders beside the bound");
+	assert.ok(html.includes('data-amount-bound="floor"'), "the bound is named in the DOM");
+	// ONE site. A sentence rendered twice is two copies that drift, and this
+	// wording is interim — it retires on parent-stamping, as a single-site edit.
+	assert.equal(
+		html.split('data-amount-bound="floor"').length - 1,
+		1,
+		"R40's floor claim must render at exactly one site",
+	);
+	assert.equal(
+		text.split(floor ?? " ").length - 1,
+		1,
+		"R40's floor sentence must appear once, not be restated elsewhere",
+	);
+	// The retired unconditional promise must not be restated — including in
+	// order to except it. Floor framing is what makes that unnecessary.
+	assertOmits(
+		text.replace(PROVIDER_SCOPED_CLAIM, " "),
+		"never understates",
+		"the retired unconditional promise must not reappear on the page",
+	);
+});
+
+test("R40 NEGATIVE GUARD — C29 indeterminate renders NO floor claim, in any form", () => {
+	// This is the guard on the whole amendment. Unknown coverage supports no
+	// bound in EITHER direction: the total may include cost the subject did not
+	// cause, so "at least $X was caused" can be flatly false.
+	const { html, text, state } = renderFixture("posture-indeterminate.json");
+	const projection = state.envelope.receipt.event.data;
+	assert.equal(projection.delegationPosture, "indeterminate");
+	assert.equal(
+		amountFloorClaim("indeterminate", "1.0000"),
+		undefined,
+		"the claims surface must refuse a floor for indeterminate",
+	);
+	assert.ok(!html.includes('data-amount-bound="floor"'), "no floor element may render");
+	assertOmits(text, "at least $", "no floor wording may reach the reader");
+	assertOmits(text, "was CAUSED by this subject", "no caused-cost bound may be asserted");
+	assertContains(text, DELEGATION_POSTURE_SCOPE.indeterminate, "R39's copy stands alone");
+});
+
+test("R40 NEGATIVE GUARD — C28 includesSomeDelegated inherits no bound either", () => {
+	// The precondition fails for a different reason (unproven constituents), and
+	// the default is *no claim* with the bound as the named exception. A single
+	// posture escaping that default would mean the floor had been applied
+	// globally with opt-outs, which is the shape the amendment forbids.
+	const { html, text, state } = renderFixture("posture-includes-some-delegated.json");
+	assert.equal(
+		state.envelope.receipt.event.data.delegationPosture,
+		"includesSomeDelegated",
+		"C28 must actually carry the posture it exists for",
+	);
+	assert.ok(!html.includes('data-amount-bound="floor"'), "no floor element may render");
+	assertOmits(text, "at least $", "no floor wording may reach the reader");
+	assertContains(
+		text,
+		DELEGATION_POSTURE_SCOPE.includesSomeDelegated,
+		"R39's incomplete-attributed-subtotal copy carries the row alone",
+	);
+});
+
+test("R41: every verified render states the anchored rung's binding is resolver-asserted, beside the rung", () => {
+	for (const row of conformingVerifiedRows()) {
+		const { html, text } = renderFixture(row.file);
+		assertContains(text, ANCHOR_BINDING_RESOLVER_ASSERTED, `${row.id}: R41's disclosure`);
+		assertNotBehindInteraction(html, ANCHOR_BINDING_RESOLVER_ASSERTED, `${row.id}: R41`);
+		// "Beside the rung" — inside the ANCHORED ladder item, not floating in the
+		// masthead. The rung's own `<li>` opens at `data-rung="verified_anchored"`
+		// and the disclosure must fall before the next rung boundary or the ladder's
+		// close, whichever comes first.
+		const rung = html.indexOf('data-rung="verified_anchored"');
+		const disclosure = html.indexOf('data-anchor-binding="resolver-asserted"');
+		assert.ok(rung !== -1 && disclosure !== -1, `${row.id}: anchored rung anatomy missing`);
+		assert.ok(rung < disclosure, `${row.id}: the disclosure must sit inside the anchored rung`);
+		assert.ok(
+			!html.slice(rung, disclosure).includes("</li>"),
+			`${row.id}: the disclosure escaped the anchored rung's own item`,
+		);
+		// Exactly ONE site — a sentence rendered twice is two copies that drift.
+		assert.equal(
+			html.split('data-anchor-binding="resolver-asserted"').length - 1,
+			1,
+			`${row.id}: R41's disclosure must render at exactly one site`,
+		);
 	}
 });
 

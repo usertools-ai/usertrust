@@ -679,10 +679,10 @@ test("manifest: every rejection vector's files exist on disk", () => {
 	}
 });
 
-test("manifest: 28 conforming JSON files (C1-C27, C22 a pair)", () => {
+test("manifest: 30 conforming JSON files (C1-C29, C22 a pair)", () => {
 	const totalFiles = conformingFixtures.reduce((sum, e) => sum + e.files.length, 0);
-	assert.equal(conformingFixtures.length, 27, "27 rows C1-C27");
-	assert.equal(totalFiles, 28, "28 files total (C22 contributes 2)");
+	assert.equal(conformingFixtures.length, 29, "29 rows C1-C29");
+	assert.equal(totalFiles, 30, "30 files total (C22 contributes 2)");
 });
 
 test("manifest: 16 rejection JSON files across X1-X5 and X8-X11, plus X6/X7 as TS modules", () => {

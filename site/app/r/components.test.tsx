@@ -19,20 +19,23 @@ import AnchorEvidencePanels from "./components/anchor-evidence";
 import CheckLedger from "./components/check-ledger";
 import DisplayAnnex from "./components/display-annex";
 import HashValue from "./components/hash-value";
-import PostureChips from "./components/posture-chips";
+import PostureChips, { AmountScope } from "./components/posture-chips";
 import ReceiptArtifact from "./components/receipt-artifact";
 import VerdictMasthead from "./components/verdict-masthead";
 import WorkClaims from "./components/work-claims";
 import { verifiedFixtureState } from "./fixture-harness";
 import {
 	ADVISORY_NEVER_ALTERS_VERDICT,
+	DELEGATION_POSTURE_SCOPE,
 	EQUIVOCATION_CAVEAT,
 	EQUIVOCATION_NON_GOAL,
 	EXTENSION_FAILURE_MEANING,
 	HISTORY_WALK_PROVED,
+	INCLUDES_ALL_DELEGATED_UNEVIDENCED,
 	LADDER,
 	NOT_APPLICABLE_MEANING,
 	POSTURES_ARE_ATTESTED_ENUMS,
+	type ReceiptClaims,
 	RUNG_EARNED_BY,
 	RUNG_VERDICT_WORD,
 	receiptClaims,
@@ -40,7 +43,7 @@ import {
 	trustSnapshotLine,
 	UNAVAILABLE_MEANING,
 } from "./lib/claims";
-import type { CheckEntry, Verification } from "./lib/wire";
+import type { CheckEntry, DelegationPosture, Verification } from "./lib/wire";
 
 function html(node: React.ReactElement): string {
 	return renderToStaticMarkup(node);
@@ -303,6 +306,88 @@ test("PostureChips: only paper-safe ink is used — the dark-ground accents are 
 		for (const forbidden of ["text-ut", "text-warning", "text-danger", "text-tim-ink"]) {
 			assert.ok(!markup.includes(forbidden), `${file}: ${forbidden} is not legible on paper`);
 		}
+	}
+});
+
+// ---------------------------------------------------------------------------
+// AmountScope (§6.2, R38-R40)
+//
+// `rendering.test.tsx` drives this through whole fixtures; these are the
+// combinations the fixture matrix cannot carry — chiefly the posture that
+// `wire.ts` refuses before a render ever happens.
+// ---------------------------------------------------------------------------
+
+/** A fixture's claims with one posture swapped, to reach branches the wire blocks. */
+function claimsWithPosture(file: string, posture: DelegationPosture): ReceiptClaims {
+	const receipt = verifiedFixtureState(file).envelope.receipt;
+	return receiptClaims({
+		...receipt,
+		event: {
+			...receipt.event,
+			data: { ...receipt.event.data, delegationPosture: posture },
+		},
+	});
+}
+
+test("AmountScope: the includesAllDelegated fallback renders UNEVIDENCED, never a total", () => {
+	// DEFENCE IN DEPTH, and the reason it is tested at the component: `wire.ts`
+	// fails this posture closed before the page renders, so the render layer's
+	// refusal is unreachable through a fixture — and an unreachable refusal that
+	// nobody exercises is a refusal nobody knows still works. If the parse-layer
+	// guard is ever moved, relaxed, or reordered, this is what still holds.
+	const claims = claimsWithPosture("commit-checkpoint.json", "includesAllDelegated");
+	const markup = html(<AmountScope claims={claims} />);
+	const text = textOf(markup);
+	assert.ok(text.includes(INCLUDES_ALL_DELEGATED_UNEVIDENCED), "the unevidenced framing renders");
+	assert.ok(!markup.includes('data-amount-bound="floor"'), "an unbacked claim earns no bound");
+	assert.ok(!text.includes("at least $"), "and no floor wording");
+	assert.equal(claims.amountFloor, undefined, "the claims surface granted no bound");
+});
+
+test("AmountScope: every posture renders its own framing, and only one earns a bound", () => {
+	const bounded: string[] = [];
+	for (const posture of [
+		"selfDebitsOnly",
+		"includesSomeDelegated",
+		"includesAllDelegated",
+		"indeterminate",
+	] as const) {
+		const claims = claimsWithPosture("commit-checkpoint.json", posture);
+		const markup = html(<AmountScope claims={claims} />);
+		assert.ok(
+			markup.includes(`data-posture="${posture}"`),
+			`${posture}: the scope block names the posture`,
+		);
+		assert.ok(
+			textOf(markup).includes(DELEGATION_POSTURE_SCOPE[posture]),
+			`${posture}: its own framing renders`,
+		);
+		if (markup.includes('data-amount-bound="floor"')) bounded.push(posture);
+	}
+	assert.deepEqual(bounded, ["selfDebitsOnly"], "the bound is the exception, never the default");
+});
+
+test("AmountScope: nothing in it is behind interaction — no details, summary, or title", () => {
+	for (const posture of ["selfDebitsOnly", "indeterminate"] as const) {
+		const markup = html(
+			<AmountScope claims={claimsWithPosture("commit-checkpoint.json", posture)} />,
+		);
+		assert.ok(
+			!markup.includes("<details"),
+			`${posture}: a disclosure requiring a click is a defence`,
+		);
+		assert.ok(!markup.includes("<summary"), `${posture}: no summary`);
+		assert.ok(!markup.includes("title="), `${posture}: no hover-only disclosure`);
+		assert.ok(!markup.includes("aria-expanded"), `${posture}: not a disclosure widget`);
+	}
+});
+
+test("AmountScope: only paper-safe ink is used — the dark-ground accents are forbidden here", () => {
+	const markup = html(
+		<AmountScope claims={claimsWithPosture("commit-checkpoint.json", "selfDebitsOnly")} />,
+	);
+	for (const forbidden of ["text-ut", "text-warning", "text-danger", "text-tim-ink"]) {
+		assert.ok(!markup.includes(forbidden), `${forbidden} is not legible on paper`);
 	}
 });
 

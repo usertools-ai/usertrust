@@ -187,6 +187,12 @@ const EXPECTED_STATE: Record<string, { kind: PageState["kind"]; detail?: string 
 	"unverifiable.json": { kind: "integrityFailure" },
 	"verification-unavailable.json": { kind: "verificationUnavailable" },
 	"rate-limited.json": { kind: "rateLimited" },
+	// C28/C29 — the two delegation postures a v1 minter never emits and a
+	// VERIFIER must still render. They are green 200s on purpose: recognizing is
+	// not permitting, so the value is legal here and the obligation is R39's
+	// copy, not a rejection.
+	"posture-includes-some-delegated.json": { kind: "verified", detail: "verified_checkpoint" },
+	"posture-indeterminate.json": { kind: "verified", detail: "verified_checkpoint" },
 };
 
 for (const entry of conformingFixtures) {

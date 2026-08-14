@@ -74,6 +74,41 @@ const ATTESTED_CHIP = "border-paper-emerald bg-paper-emerald font-bold text-pape
 const ASSERTED_CHIP = "border-paper-steel/60 font-normal text-paper-steel";
 const CAVEATED_CHIP = "border-paper-amber/60 font-normal text-paper-amber";
 
+/**
+ * R38/R39/R40 — the amount's SCOPE, rendered beside the amount it qualifies.
+ *
+ * Position is part of the obligation, not layout taste. R40's floor claim and
+ * R39's scope statement both render "beside the amount, never as a footnote and
+ * never behind interaction" — so this block sits directly under the figure in
+ * `SpendBlock`, above every other spend field, and there is deliberately no
+ * `<details>`, no tooltip and no `title` attribute anywhere in it. The other
+ * three postures stay at the foot of the block, where they have always been.
+ *
+ * The FLOOR line renders only where `amountFloorClaim` grants one. A posture
+ * that does not earn a bound gets its R39 copy alone — an `indeterminate`
+ * amount bounds nothing in either direction, and printing "at least $X" over it
+ * would be a new overclaim rather than a missing nicety.
+ *
+ * INTERIM: the floor wording retires on parent-stamping, which turns the figure
+ * into an exact total; `amountFloorClaim` is the single site to change.
+ */
+export function AmountScope({ claims }: { claims: ReceiptClaims }) {
+	return (
+		<div className="flex flex-col gap-2" data-testid="amount-scope">
+			{claims.amountFloor ? (
+				<p
+					className="text-[13px] font-bold leading-relaxed text-ink"
+					data-testid="amount-floor"
+					data-amount-bound="floor"
+				>
+					{claims.amountFloor}
+				</p>
+			) : null}
+			<PostureRow axis="amount scope" posture={claims.delegation} chipClass={ASSERTED_CHIP} />
+		</div>
+	);
+}
+
 export default function PostureChips({ claims }: { claims: ReceiptClaims }) {
 	const { association, usage, pricing } = claims;
 	return (
