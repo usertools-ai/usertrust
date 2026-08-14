@@ -8,7 +8,7 @@
  * Displays per-signal breakdown with status indicators.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import pc from "picocolors";
 import {
@@ -23,21 +23,84 @@ import type { AuditEvent } from "../shared/types.js";
 import type { CliOptions } from "./init.js";
 import { DEFAULT_POLICIES_PATH, resolvePolicyPath } from "./policy-path.js";
 
+/**
+ * Load the vault's events — EVERY segment, and validated rather than asserted.
+ *
+ * Two defects, one root each, both the same shape as this branch's P1.
+ *
+ * THE LIVE SEGMENT IS NOT THE VAULT. Moving the chain check to `verifyVault`
+ * fixed the integrity signal and left this loader reading `events.jsonl` alone,
+ * so on a rotated vault every entropy signal would have been computed from
+ * partial history and reported healthier than the truth — the same false OK the
+ * P1 was about, in the function next door. Half a fix for a defect class is the
+ * worst outcome available, because the remaining half is now covered by the
+ * claim that the class was handled.
+ *
+ * A CAST IS NOT A VALIDATION. `JSON.parse(line) as AuditEvent` asserted a shape
+ * onto bytes off disk; `AuditEvent.data` is required by the TYPE, which is a
+ * claim about what the writer emits, not a guarantee about what a file contains.
+ * An event without `data` — legacy, hand-written, truncated — crashed
+ * `usertrust health` outright at `entropy.ts:236`. The type stated the rule and
+ * the file was under no obligation to obey it.
+ */
 function loadEvents(vaultPath: string): AuditEvent[] {
-	const logPath = join(vaultPath, "audit", "events.jsonl");
-	if (!existsSync(logPath)) return [];
+	const auditDir = join(vaultPath, "audit");
+	if (!existsSync(auditDir)) return [];
 
+	const segments: string[] = [];
+	const mainLog = join(auditDir, "events.jsonl");
+	if (existsSync(mainLog)) segments.push(mainLog);
 	try {
-		const content = readFileSync(logPath, "utf-8").trim();
-		if (!content) return [];
-
-		return content
-			.split("\n")
-			.filter((l) => l.trim())
-			.map((line) => JSON.parse(line) as AuditEvent);
+		for (const entry of readdirSync(auditDir).sort()) {
+			if (entry.endsWith(".jsonl") && entry !== "events.jsonl") {
+				segments.push(join(auditDir, entry));
+			}
+		}
 	} catch {
-		return [];
+		// Directory read failure — fall back to whatever was already found.
 	}
+
+	const events: (AuditEvent & { sequence?: number })[] = [];
+	for (const segment of segments) {
+		let content: string;
+		try {
+			content = readFileSync(segment, "utf-8").trim();
+		} catch {
+			continue;
+		}
+		if (!content) continue;
+		for (const line of content.split("\n")) {
+			if (!line.trim()) continue;
+			let parsed: unknown;
+			try {
+				parsed = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			if (typeof parsed !== "object" || parsed === null) continue;
+			const record = parsed as Record<string, unknown>;
+			if (typeof record.kind !== "string") continue;
+			// `data` is defaulted, never invented: an absent one reads as no
+			// signals, which is what an event carrying none actually means.
+			const data =
+				typeof record.data === "object" && record.data !== null
+					? (record.data as Record<string, unknown>)
+					: {};
+			events.push({
+				...(record as unknown as AuditEvent),
+				data,
+				...(typeof record.sequence === "number" ? { sequence: record.sequence } : {}),
+			});
+		}
+	}
+
+	// Order by the persisted global sequence when every event carries one, so a
+	// rotated vault presents one chronological stream. Mixed presence keeps file
+	// order rather than inventing an ordering across two different conventions.
+	if (events.length > 0 && events.every((e) => typeof e.sequence === "number")) {
+		events.sort((a, b) => (a.sequence as number) - (b.sequence as number));
+	}
+	return events;
 }
 
 /**
