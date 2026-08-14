@@ -366,6 +366,19 @@ describe("false OK — a documented count that stops matching reality", () => {
 		const unwrap = (n: import("typescript").Node): import("typescript").Node =>
 			ts.isParenthesizedExpression(n) ? unwrap(n.expression) : n;
 
+		// Scanned rather than matched. A control-character CLASS here trips the same
+		// lint the real sanitizers suppress, and building one with `new RegExp` to
+		// dodge that gets auto-rewritten back into a literal by the formatter — so
+		// this check uses no regex at all. (`countIn` only reads `packages/*/src`, so
+		// nothing in this file is counted by the guard it implements.)
+		const hasControl = (s: string): boolean => {
+			for (const ch of s) {
+				const c = ch.codePointAt(0) as number;
+				if (c <= 0x1f || (c >= 0x7f && c <= 0x9f)) return true;
+			}
+			return false;
+		};
+
 		const isNumericValue = (n: import("typescript").Node, want: number): boolean =>
 			ts.isNumericLiteral(n) && Number(n.text.replace(/_/g, "")) === want;
 
@@ -378,26 +391,36 @@ describe("false OK — a documented count that stops matching reality", () => {
 		 * Both helpers return the identifier's name so the caller can require every
 		 * bound to constrain the SAME variable.
 		 */
-		const upperBound = (n: import("typescript").Node, inclusive: number): string | null => {
-			if (!ts.isBinaryExpression(n) || !ts.isIdentifier(n.left)) return null;
+		// Operands are unwrapped too — `(code) <= 0x1f` and `code <= (0x1f)` are the
+		// same assertion, and reading raw operands rejected both.
+		const upperBound = (node: import("typescript").Node, inclusive: number): string | null => {
+			const n = unwrap(node);
+			if (!ts.isBinaryExpression(n)) return null;
+			const left = unwrap(n.left);
+			const right = unwrap(n.right);
+			if (!ts.isIdentifier(left)) return null;
 			const k = n.operatorToken.kind;
-			if (k === ts.SyntaxKind.LessThanEqualsToken && isNumericValue(n.right, inclusive)) {
-				return n.left.text;
+			if (k === ts.SyntaxKind.LessThanEqualsToken && isNumericValue(right, inclusive)) {
+				return left.text;
 			}
-			if (k === ts.SyntaxKind.LessThanToken && isNumericValue(n.right, inclusive + 1)) {
-				return n.left.text;
+			if (k === ts.SyntaxKind.LessThanToken && isNumericValue(right, inclusive + 1)) {
+				return left.text;
 			}
 			return null;
 		};
 
-		const lowerBound = (n: import("typescript").Node, inclusive: number): string | null => {
-			if (!ts.isBinaryExpression(n) || !ts.isIdentifier(n.left)) return null;
+		const lowerBound = (node: import("typescript").Node, inclusive: number): string | null => {
+			const n = unwrap(node);
+			if (!ts.isBinaryExpression(n)) return null;
+			const left = unwrap(n.left);
+			const right = unwrap(n.right);
+			if (!ts.isIdentifier(left)) return null;
 			const k = n.operatorToken.kind;
-			if (k === ts.SyntaxKind.GreaterThanEqualsToken && isNumericValue(n.right, inclusive)) {
-				return n.left.text;
+			if (k === ts.SyntaxKind.GreaterThanEqualsToken && isNumericValue(right, inclusive)) {
+				return left.text;
 			}
-			if (k === ts.SyntaxKind.GreaterThanToken && isNumericValue(n.right, inclusive - 1)) {
-				return n.left.text;
+			if (k === ts.SyntaxKind.GreaterThanToken && isNumericValue(right, inclusive - 1)) {
+				return left.text;
 			}
 			return null;
 		};
@@ -424,6 +447,39 @@ describe("false OK — a documented count that stops matching reality", () => {
 
 		const countIn = (src: string, name: string): { strong: number; weak: number } => {
 			const sf = ts.createSourceFile(name, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+
+			// FIRST PASS: which regexes does this file actually replace WITH? A class
+			// that could sanitize is not a sanitizer — it has to be wired to a
+			// substitution. Collected up front because the binding and its use are
+			// arbitrarily far apart, and the classifier below sees only the literal.
+			const replacedNames = new Set<string>();
+			const replacedLiterals = new Set<import("typescript").Node>();
+			const collect = (n: import("typescript").Node): void => {
+				if (
+					ts.isCallExpression(n) &&
+					ts.isPropertyAccessExpression(n.expression) &&
+					(n.expression.name.text === "replace" || n.expression.name.text === "replaceAll") &&
+					n.arguments.length > 0
+				) {
+					const a0 = unwrap(n.arguments[0] as import("typescript").Node);
+					if (ts.isRegularExpressionLiteral(a0)) replacedLiterals.add(a0);
+					else if (ts.isIdentifier(a0)) replacedNames.add(a0.text);
+				}
+				ts.forEachChild(n, collect);
+			};
+			collect(sf);
+
+			const usedForReplacement = (lit: import("typescript").Node): boolean => {
+				if (replacedLiterals.has(lit)) return true;
+				const p = lit.parent;
+				return (
+					p !== undefined &&
+					ts.isVariableDeclaration(p) &&
+					ts.isIdentifier(p.name) &&
+					replacedNames.has(p.name.text)
+				);
+			};
+
 			let strong = 0;
 			let weak = 0;
 			const visit = (n: import("typescript").Node): void => {
@@ -455,8 +511,14 @@ describe("false OK — a documented count that stops matching reality", () => {
 				// rather than a conditional expression goes uncounted. That direction
 				// fails LOUDLY — the total reads low and the guard trips — which is
 				// the safe way for this matcher to be wrong.
+				// The replacement must also BE control-free. `isStringLiteral` alone
+				// accepted `? "\x1b" : ch` — a "sanitizer" that emits the escape it
+				// was meant to destroy, counted as strong. That is the read-HIGH
+				// direction: a real sanitizer could be swapped for that one and the
+				// total would still say thirteen.
 				if (ts.isConditionalExpression(n) && neutralisesControlRange(n.condition)) {
-					if (ts.isStringLiteral(unwrap(n.whenTrue))) strong++;
+					const rep = unwrap(n.whenTrue);
+					if (ts.isStringLiteral(rep) && !hasControl(rep.text)) strong++;
 				}
 				if (ts.isRegularExpressionLiteral(n)) {
 					// Classified by COVERAGE, not spelling. The stronger variant is the
@@ -470,7 +532,15 @@ describe("false OK — a documented count that stops matching reality", () => {
 					// preserves the byte from a sanitizer that destroys it, and keeps
 					// `/[\x00-\x1f\x7f-\x9f]/` — the direct regex equivalent of the
 					// loops — counted as the stronger variant it is.
-					const re = compileClass(n.text);
+					// AND IT MUST ACTUALLY BE USED TO REPLACE. `removesEmbedded` runs a
+					// synthetic replacement, which proves the regex COULD sanitize —
+					// not that the source does. A full-range class used only as
+					// `REJECT_CONTROLS.test(value)` is a DETECTOR, and one left behind
+					// after its `.replace` was deleted is nothing at all; both were
+					// counted, so removing a sanitizer while leaving its constant
+					// kept the inventory green. Read-HIGH, and the exact shape this
+					// file is named for.
+					const re = usedForReplacement(n) ? compileClass(n.text) : null;
 					if (
 						removesEmbedded(re, 0x00, 0x1f) &&
 						removesEmbedded(re, 0x7f, 0x7f) &&
@@ -504,13 +574,13 @@ describe("false OK — a documented count that stops matching reality", () => {
 			[
 				"full neutralisation",
 				'export const f=(cp:number)=>cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f) ? "?" : "y";',
-				"export const r=/[\\x00-\\x1f\\x7f-\\x9f]/g;",
+				"export const f=(s:string)=>s.replace(r,'?');export const r=/[\\x00-\\x1f\\x7f-\\x9f]/g;",
 				"strong",
 			],
 			[
 				"C1 only — an escaper, not a sanitizer",
 				'export const f=(cp:number)=>(cp >= 0x7f && cp <= 0x9f) ? "x" : "y";',
-				"export const r=/[\\u007f-\\u009f]/g;",
+				"export const f=(s:string)=>s.replace(r,'?');export const r=/[\\u007f-\\u009f]/g;",
 				"none",
 			],
 			[
@@ -518,7 +588,7 @@ describe("false OK — a documented count that stops matching reality", () => {
 				// the inclusive spelling let a half-open copy go uncounted.
 				"half-open bounds — the same range, spelled exclusively",
 				'export const f=(cp:number)=>cp < 0x20 || (cp >= 0x7f && cp < 0xa0) ? "?" : "y";',
-				"export const r=/[\\x00-\\x1f\\x7f-\\x9f]/g;",
+				"export const f=(s:string)=>s.replace(r,'?');export const r=/[\\x00-\\x1f\\x7f-\\x9f]/g;",
 				"strong",
 			],
 		];
@@ -549,6 +619,13 @@ describe("false OK — a documented count that stops matching reality", () => {
 				"escapes losslessly — re-encodes the byte instead of destroying it",
 				'export const f=(cp:number,ch:string)=>cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f) ? "\\\\u" + cp.toString(16) : ch;',
 			],
+			[
+				// Read-HIGH: a fixed string replacement was enough to count, so a
+				// "sanitizer" could EMIT the escape it exists to destroy and the
+				// inventory would still report thirteen.
+				"emits a control character as its replacement",
+				'export const f=(cp:number,ch:string)=>cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f) ? "\\x1b" : ch;',
+			],
 		];
 		for (const [label, src] of LOOP_DECOYS) {
 			const c = countIn(src, "loop-decoy.ts");
@@ -565,11 +642,25 @@ describe("false OK — a documented count that stops matching reality", () => {
 		// text untouched. A membership probe against a one-character subject counts
 		// both as sanitizers.
 		const REGEX_DECOYS: ReadonlyArray<readonly [string, string]> = [
-			["anchored to the whole string", "export const r=/^[\\x00-\\x1f\\x7f-\\x9f]$/g;"],
-			["anchored at the start", "export const r=/^[\\x00-\\x1f\\x7f-\\x9f]/g;"],
+			[
+				"anchored to the whole string",
+				"export const f=(s:string)=>s.replace(r,'?');export const r=/^[\\x00-\\x1f\\x7f-\\x9f]$/g;",
+			],
+			[
+				"anchored at the start",
+				"export const f=(s:string)=>s.replace(r,'?');export const r=/^[\\x00-\\x1f\\x7f-\\x9f]/g;",
+			],
 			[
 				"not global — strips the first control and leaves the rest of the sequence",
-				"export const r=/[\\x00-\\x1f\\x7f-\\x9f]/;",
+				"export const f=(s:string)=>s.replace(r,'?');export const r=/[\\x00-\\x1f\\x7f-\\x9f]/;",
+			],
+			[
+				// Read-HIGH, and the one that masks a DELETION: this class covers the
+				// whole control space and is never used to replace anything. Deleting
+				// a real sanitizer while leaving its constant behind — or keeping a
+				// detector that only tests — held the count at thirteen.
+				"a detector, not a sanitizer — tested against, never replaced with",
+				"export const r=/[\\x00-\\x1f\\x7f-\\x9f]/g;export const f=(s:string)=>r.test(s);",
 			],
 		];
 		for (const [label, src] of REGEX_DECOYS) {
