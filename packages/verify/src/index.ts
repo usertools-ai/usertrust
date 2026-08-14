@@ -238,7 +238,10 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 		try {
 			content = readFileSync(segmentFile, "utf-8").trim();
 		} catch {
-			// Unreadable segment (e.g. broken symlink) — skip.
+			// FAIL CLOSED — mirrors `core/src/audit/verify.ts`, error string included.
+			// Skipping made an unreadable segment indistinguishable from an absent
+			// one, so a vault nobody could open verified as clean.
+			errors.push(`Audit segment could not be read: ${basename(segmentFile)}`);
 			continue;
 		}
 		if (content === "") continue;

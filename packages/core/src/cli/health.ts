@@ -241,18 +241,25 @@ function loadConfig(vaultPath: string): { budget: number } {
  * ledger the governor itself would refuse to start on. It reports what it can
  * read and stays quiet about what it cannot.
  */
-function loadPersistedSpend(vaultPath: string): number | undefined {
+function loadPersistedSpend(vaultPath: string, anySettled: boolean): number | undefined {
 	let raw: string;
 	try {
 		raw = readFileSync(join(vaultPath, "spend-ledger.json"), "utf-8");
 	} catch (err) {
-		// ENOENT is the ONE honest zero — a vault that has never settled has spent
-		// nothing, and both governor loaders treat it exactly this way. Every other
-		// read failure means an UNKNOWN amount has been spent, and returning
-		// `undefined` for both made a corrupt ledger render "0.0% [ok]": the same
-		// absent-versus-unreadable conflation this repo fixed in the governor,
-		// reproduced here in the tool that reports on it.
-		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return 0;
+		// ENOENT is an honest zero ONLY on a vault that has never settled anything.
+		// `persistSpendLedger`'s first write can fail while the governor catches the
+		// error and settles the call anyway — so an absent ledger beside settled
+		// calls is not a fresh vault, it is a LOST ledger, and reporting "0.0% [ok]"
+		// for it is the same absent-versus-unreadable conflation this function
+		// already fixed one case of.
+		//
+		// The chain cannot narrow it further: cost-center attribution lives in
+		// `envelopeDebited`, which is internal to the governor and never reaches an
+		// event, so a vault whose settled calls were ALL envelope-attributed would
+		// genuinely have zero session spend and still reads as unknown here. That
+		// is the fail-closed direction — "we cannot confirm zero" rather than a
+		// confident zero we have no evidence for.
+		if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return anySettled ? undefined : 0;
 		return undefined;
 	}
 	try {
@@ -363,7 +370,12 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// it cannot be read, `spent` stays undefined and the entropy signal ABSTAINS
 	// rather than scoring a fabricated denominator — the same rule the extractor
 	// already applies to a missing total.
-	const spent = loadPersistedSpend(vaultPath);
+	// A settled call is evidence that spend HAPPENED, which is what makes an
+	// absent ledger unknown rather than zero.
+	const anySettled = events.some(
+		(e) => (e as { data?: { settled?: unknown } }).data?.settled === true,
+	);
+	const spent = loadPersistedSpend(vaultPath, anySettled);
 	// UNKNOWN is not zero. A malformed, negative or unreadable `spend-ledger.json`
 	// means an unknown amount has been spent, and rendering "0.0% [ok]" reported
 	// the most reassuring possible answer to a question the tool could not answer
@@ -512,7 +524,17 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			: Number.parseFloat(budgetPct) > 80
 				? pc.yellow("[elevated]")
 				: pc.green("[ok]");
-	const budgetText = budgetPct === null ? "unreadable ledger" : `${budgetPct}%`;
+	// TWO different unknowns, and naming the wrong one sends the operator to the
+	// wrong file. A null percentage means either the DENOMINATOR is unusable (no
+	// configured budget, or a malformed/non-positive one) or the NUMERATOR is
+	// (an unreadable or lost ledger). Reporting "unreadable ledger" for a config
+	// problem points at an artifact that may be perfectly fine.
+	const budgetText =
+		budgetPct !== null
+			? `${budgetPct}%`
+			: config.budget > 0
+				? "unreadable ledger"
+				: "no budget configured";
 	console.log(`  Budget utilization:      ${budgetText} ${budgetStatus}`);
 
 	// Signal 3: Chain integrity

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -451,6 +452,34 @@ describe("usertrust health — vault states", () => {
 		await run(tempDir);
 
 		expect(out()).toContain("verified");
+	});
+
+	it("does NOT report verified for a segment it could not read", async () => {
+		// The reachable half of the state I deferred as rotation work. I enumerated
+		// "an unreadable ARCHIVED segment is skipped silently" and set it aside
+		// because rotation does not exist — but the same `catch` covers the LIVE
+		// `events.jsonl`, which every vault has. Scoping a case by the file I
+		// imagined in it, rather than by the branch, turned a reachable false OK
+		// into deferred work.
+		await writeEvents(2);
+		await chmod(liveLog(), 0o000);
+		try {
+			let readable = true;
+			try {
+				readFileSync(liveLog(), "utf-8");
+			} catch {
+				readable = false;
+			}
+			// Root ignores mode bits; assert only where the setup can hold.
+			if (readable) return;
+
+			await run(tempDir);
+
+			expect(out()).not.toContain("verified");
+			expect(out()).toContain("FAILED");
+		} finally {
+			await chmod(liveLog(), 0o600);
+		}
 	});
 
 	it("surfaces a corrupt anchor instead of silently trusting the log", async () => {

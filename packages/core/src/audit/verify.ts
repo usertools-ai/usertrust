@@ -298,7 +298,13 @@ export function verifyVault(vaultPath: string): VaultVerificationResult {
 		try {
 			content = readFileSync(segmentFile, "utf-8").trim();
 		} catch {
-			// Unreadable segment (e.g. broken symlink) — skip.
+			// FAIL CLOSED. Skipping made a segment that could not be READ
+			// indistinguishable from one that did not exist: with `events.jsonl`
+			// present but unreadable and no usable `.meta`, this returned
+			// `valid: true, chainLength: 0`, and `health` printed `verified` for
+			// evidence nobody had opened. A vault that cannot be read is a vault
+			// that cannot be verified, which is a different answer from "clean".
+			errors.push(`Audit segment could not be read: ${basename(segmentFile)}`);
 			continue;
 		}
 		if (content === "") continue;
