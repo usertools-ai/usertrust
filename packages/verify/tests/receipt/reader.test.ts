@@ -33,10 +33,12 @@ import {
 import { ALL_VECTORS, SNAPSHOT_VECTORS, type Vector, vector } from "./fixtures.js";
 import {
 	CHECKPOINT_KEY,
+	CHECKPOINT_KEY_SUCCESSOR,
 	FOREIGN_KEY,
 	MINT_KEY,
 	MINT_KEY_SUCCESSOR,
 	mint,
+	replaceOnce,
 	type TrustSnapshot,
 } from "./harness.js";
 
@@ -668,6 +670,106 @@ describe("loadTrustSnapshot — parsing and identity", () => {
 			}),
 		);
 		expect(load.ok).toBe(true);
+	});
+
+	/**
+	 * The receipt-side defect (`schema/fractional-token-rounds-to-integer`), on
+	 * the SNAPSHOT side.
+	 *
+	 * `JSON.parse` ROUNDS: `18.000000000000001` has no double representation and
+	 * comes back as exactly `18`, so `safeNonNegativeInteger` — and every other
+	 * value-level check — is asking about a number the document never carried. A
+	 * malformed literal then authorizes a rounded key window, silently, and the
+	 * only place the distinction still exists is the TEXT.
+	 *
+	 * The frozen numeric rules were deliberately scoped to receipt bytes and NOT
+	 * to the snapshot, because §4 tolerates unknown snapshot members so the open
+	 * signing scheme can add them — and one of them may legitimately carry a
+	 * fraction. That scoping is right for the members nobody has declared yet and
+	 * wrong for the two this loader READS as integers, which is exactly how far
+	 * the rule below reaches.
+	 */
+	describe("the DECLARED integer members are checked on the literal, not on the rounded value", () => {
+		const INTEGER_MEMBERS = ["activationSequence", "headSegmentFirstSequence"] as const;
+
+		/** The clean snapshot, with `member`'s literal rewritten in the BYTES.
+		 * Both members are placed at 18 first so one needle serves both. */
+		const withLiteral = (member: string, literal: string): Buffer =>
+			mint({
+				snapshot: (s) => {
+					const key = s.keys.find((k) => k.keyId === CHECKPOINT_KEY.keyId);
+					if (key !== undefined) {
+						// A boundary needs a successor, or the per-entry rule refuses the
+						// entry before the literal is ever reached.
+						key.state = "retired";
+						key.activationSequence = 18;
+						s.keys.push({
+							keyId: CHECKPOINT_KEY_SUCCESSOR.keyId,
+							alg: "ed25519",
+							publicKey: CHECKPOINT_KEY_SUCCESSOR.publicKeyPem,
+							role: "checkpoint",
+							predecessorKeyId: CHECKPOINT_KEY.keyId,
+							state: "active",
+						});
+					}
+					const chain = s.chains[0];
+					if (chain !== undefined) chain.headSegmentFirstSequence = 18;
+					return s;
+				},
+				snapshotBytes: (b) => replaceOnce(b, `"${member}": 18`, `"${member}": ${literal}`),
+			}).snapshotBytes;
+
+		it("loads the conformant integer literal — the rule refuses a spelling, not a member", () => {
+			for (const member of INTEGER_MEMBERS) {
+				const load = loadTrustSnapshot(withLiteral(member, "18"));
+				expect(load.ok === true || load.detail, member).toBe(true);
+			}
+		});
+
+		for (const member of INTEGER_MEMBERS) {
+			it(`refuses a fractional ${member} that JSON.parse rounds back to a legal integer`, () => {
+				const load = loadTrustSnapshot(withLiteral(member, "18.000000000000001"));
+				expect(load.ok, member).toBe(false);
+				expect(load.ok === false && load.detail, member).toContain(member);
+				expect(load.ok === false && load.detail, member).toContain("non-integer number");
+				// The LITERAL, not the rounded value — an operator has to be able to
+				// find the byte that was wrong.
+				expect(load.ok === false && load.detail, member).toContain("18.000000000000001");
+			});
+
+			it(`refuses an exponent-form ${member}: §13's canonical integer never carries one`, () => {
+				const load = loadTrustSnapshot(withLiteral(member, "1.8e1"));
+				expect(load.ok, member).toBe(false);
+			});
+		}
+
+		it("leaves fractions LEGAL in unknown snapshot members — §4's forward-compat rule survives", () => {
+			// The scoping decision, asserted rather than assumed: the signing scheme
+			// is a live ship-gate item, and a rule that swept the whole document
+			// would brick every pinned CLI the day it lands carrying a float.
+			const load = loadTrustSnapshot(
+				patched((s) => {
+					s.snapshotSignature = { alg: "ed25519", sig: "AAAA", confidence: 0.5 };
+					s.rotationPolicy = { maxAgeDays: 90.5, activationSequence: 1.5 };
+				}),
+			);
+			expect(load.ok === true || load.detail).toBe(true);
+		});
+
+		it("still refuses a NON-FINITE literal anywhere, declared or not — canonicalize throws on it", () => {
+			// The one clause that binds over the whole document regardless of
+			// scoping, and it must not have been narrowed by the rule above.
+			const load = loadTrustSnapshot(
+				Buffer.from(
+					mint()
+						.snapshotBytes.toString("utf8")
+						.replace('"mintActor": {', '"huge": 1e999,\n  "mintActor": {'),
+					"utf8",
+				),
+			);
+			expect(load.ok).toBe(false);
+			expect(load.ok === false && load.detail).toContain("non-finite");
+		});
 	});
 
 	it("rejects duplicate JSON keys even though unknown MEMBERS are tolerated", () => {

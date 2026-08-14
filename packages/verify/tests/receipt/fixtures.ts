@@ -1845,6 +1845,30 @@ export const SNAPSHOT_VECTORS: readonly Vector[] = [
 			keyEntry(s, CHECKPOINT_KEY.keyId).state = "retired";
 		},
 	),
+	{
+		name: "snapshot/fractional-activation-sequence-rounds-to-integer",
+		what: "`schema/fractional-token-rounds-to-integer` on the SNAPSHOT side: a boundary literal JSON.parse rounds to a legal integer, refused on the TOKEN. §4's forward-compat scoping does not reach a member §8 declares an integer.",
+		mode: "receipt",
+		expect: unverifiable("trustSnapshot"),
+		breaks: [],
+		build: () =>
+			mint({
+				snapshot: snapshotPatch((s) => {
+					keyEntry(s, CHECKPOINT_KEY.keyId).state = "retired";
+					keyEntry(s, CHECKPOINT_KEY.keyId).activationSequence = 18;
+					s.keys.push({
+						keyId: CHECKPOINT_KEY_SUCCESSOR.keyId,
+						alg: "ed25519",
+						publicKey: CHECKPOINT_KEY_SUCCESSOR.publicKeyPem,
+						role: "checkpoint",
+						predecessorKeyId: CHECKPOINT_KEY.keyId,
+						state: "active",
+					});
+				}),
+				snapshotBytes: (b) =>
+					replaceOnce(b, '"activationSequence": 18', '"activationSequence": 18.000000000000001'),
+			}),
+	},
 	snapshotVector(
 		"snapshot/predecessor-without-activation-boundary",
 		"A `revoked` predecessor may omit activationSequence per ENTRY, but across the LINK that number is the live successor's LOWER bound — absent, the successor's window is unevaluable and the SNAPSHOT is what is incomplete.",

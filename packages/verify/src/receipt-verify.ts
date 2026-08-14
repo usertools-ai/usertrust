@@ -152,6 +152,20 @@ export interface JsonScanOptions {
 	 * them (§4), and the resolver's envelope is not a ut1 document at all.
 	 */
 	readonly frozenNumbers?: boolean;
+	/**
+	 * Apply the same rules to the literals at these DOTTED PATHS only, for a
+	 * document the whole-document switch above is too broad for.
+	 *
+	 * The §8 snapshot is that document: §4's tolerance of unknown members is a
+	 * deliberate forward-compatibility promise, and one of them may one day
+	 * legitimately carry a fraction — but the members this file READS as
+	 * integers are declared, not unknown, and a fractional literal in one of
+	 * them rounds to a legal integer before any value-level check can see it.
+	 * Scoping by path keeps the promise and closes the hole.
+	 *
+	 * Paths are the scanner's own: `$.keys[0].activationSequence`.
+	 */
+	readonly frozenNumberPaths?: (path: string) => boolean;
 }
 
 const WHITESPACE = new Set([" ", "\t", "\n", "\r"]);
@@ -165,11 +179,16 @@ interface ScanFailure {
 
 class JsonScanner {
 	private pos = 0;
+	private readonly frozenNumbers: boolean;
+	private readonly frozenNumberPaths: ((path: string) => boolean) | undefined;
 
 	constructor(
 		private readonly text: string,
-		private readonly frozenNumbers: boolean,
-	) {}
+		options: JsonScanOptions,
+	) {
+		this.frozenNumbers = options.frozenNumbers === true;
+		this.frozenNumberPaths = options.frozenNumberPaths;
+	}
 
 	scan(): JsonScanResult {
 		if (this.text.charCodeAt(0) === 0xfeff) {
@@ -368,7 +387,7 @@ class JsonScanner {
 			if (!this.isDigit(this.text[this.pos])) return syntax(`invalid number at offset ${start}`);
 			while (this.isDigit(this.text[this.pos])) this.pos += 1;
 		}
-		if (!this.frozenNumbers) return null;
+		if (!this.frozenNumbers && this.frozenNumberPaths?.(path) !== true) return null;
 
 		const literal = this.text.slice(start, this.pos);
 		const value = Number(literal);
@@ -398,7 +417,7 @@ export function scanJsonForDuplicateKeys(
 	text: string,
 	options: JsonScanOptions = {},
 ): JsonScanResult {
-	return new JsonScanner(text, options.frozenNumbers === true).scan();
+	return new JsonScanner(text, options).scan();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1443,18 +1462,41 @@ function materialIdOf(key: KeyObject): string {
 	return `sha256:${createHash("sha256").update(der).digest("hex")}`;
 }
 
+/**
+ * Every member of the §8 snapshot this file reads as a NUMBER, by the scanner's
+ * own dotted path.
+ *
+ * `JSON.parse` rounds, so `18.000000000000001` reaches `safeNonNegativeInteger`
+ * as exactly `18` and authorizes a key window the document never actually
+ * declared — the same defect the receipt path fixed on its own bytes, arriving
+ * on the snapshot, where the frozen rules were deliberately NOT applied. That
+ * scoping decision was right about §4's unknown members and wrong about the
+ * declared ones, and this pattern is exactly the difference: two members, at
+ * their declared positions, and nothing else. A fraction anywhere else in the
+ * document — including inside a member the signing scheme has yet to add — is
+ * still legal, which is the forward-compatibility promise §4 makes.
+ */
+const SNAPSHOT_INTEGER_PATHS =
+	/^\$\.(?:keys\[\d+\]\.activationSequence|chains\[\d+\]\.headSegmentFirstSequence)$/;
+
+function isSnapshotIntegerPath(path: string): boolean {
+	return SNAPSHOT_INTEGER_PATHS.test(path);
+}
+
 export function loadTrustSnapshot(bytes: Uint8Array): TrustSnapshotLoad {
 	const sha256 = createHash("sha256").update(bytes).digest("hex");
 	const fail = (detail: string): TrustSnapshotLoad => ({ ok: false, sha256, detail });
 
-	const parsed = readStrictJson(bytes);
+	const parsed = readStrictJson(bytes, { frozenNumberPaths: isSnapshotIntegerPath });
 	if (!parsed.ok) return fail(parsed.refusal.detail);
 	if (!isJsonObject(parsed.value)) return fail("the trust snapshot is not a JSON object");
 	const document = parsed.value;
 
-	// The snapshot is not read by the frozen numeric reader — §4 tolerates
-	// unknown members precisely so the open signing scheme can add them — but the
-	// NON-FINITE clause still has to bind, and this is the document where it
+	// The snapshot is not read by the frozen numeric reader WHOLESALE — §4
+	// tolerates unknown members precisely so the open signing scheme can add them,
+	// and only the declared integer members above are scanned — but the
+	// NON-FINITE clause still has to bind over ALL of it, and this is the document
+	// where it
 	// bites: `mintActor` is canonicalized by equality 2, `1e999` PARSES to
 	// Infinity, and `canonicalize` throws on it. Without this guard a snapshot
 	// carrying one takes `verifyReceiptBase` out through an uncaught exception —
