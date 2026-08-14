@@ -855,7 +855,10 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **thirteen** sanitizers, in two variants. Do not consolidate them onto the weaker one.
+There are **thirteen** sanitizers, in two variants: **seven** neutralise C1 and **six** do not. Do
+not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
+because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
+untouched. A total is not an inventory.
 
 **A whole-repo command asserts over A TREE, not THE REPO.** This repo is worked in through several
 git worktrees at once, so `packages/*/src` means something different depending on where the command

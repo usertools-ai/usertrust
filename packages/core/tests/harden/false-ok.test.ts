@@ -222,6 +222,14 @@ describe("false OK — a documented count that stops matching reality", () => {
 		const agents = await readFile(join(repoRoot, "AGENTS.md"), "utf-8");
 		const declared = agents.match(/There are \*\*(\w+)\*\* sanitizers/)?.[1];
 		expect(declared, "AGENTS.md no longer states a sanitizer count").toBeDefined();
+		// The two variants are declared and asserted SEPARATELY. Pinning only the
+		// total lets a strong sanitizer be replaced by a weak one — `strong` falls
+		// by one, `weak` rises by one, the sum is unchanged and the guard passes,
+		// while AGENTS.md's "do not consolidate them onto the weaker one" is
+		// exactly what just happened. Two errors cancelling into a false OK is the
+		// failure this file is named for, and the total-only assertion was it.
+		const declaredSplit = agents.match(/\*\*(\w+)\*\* neutralise C1 and \*\*(\w+)\*\* do not/);
+		expect(declaredSplit, "AGENTS.md no longer states the per-variant split").not.toBeNull();
 
 		const WORDS: Record<string, number> = {
 			six: 6,
@@ -238,6 +246,14 @@ describe("false OK — a documented count that stops matching reality", () => {
 		};
 		const declaredCount = WORDS[declared as string];
 		expect(declaredCount, `unrecognised number word "${declared}"`).toBeDefined();
+		const declaredStrong = WORDS[(declaredSplit as RegExpMatchArray)[1] as string];
+		const declaredWeak = WORDS[(declaredSplit as RegExpMatchArray)[2] as string];
+		expect(declaredStrong, "unrecognised strong-variant number word").toBeDefined();
+		expect(declaredWeak, "unrecognised weak-variant number word").toBeDefined();
+		expect(
+			(declaredStrong as number) + (declaredWeak as number),
+			"AGENTS.md's per-variant counts do not sum to its stated total",
+		).toBe(declaredCount);
 
 		/**
 		 * PARSE. Eleven review rounds went into this counter, and the honest summary
@@ -292,10 +308,27 @@ describe("false OK — a documented count that stops matching reality", () => {
 			}
 		};
 
-		const coversAll = (re: RegExp | null, lo: number, hi: number): boolean => {
+		/**
+		 * PROBE REPLACEMENT INSIDE REAL TEXT, because that is what a sanitizer does.
+		 *
+		 * Compiling the class stopped me modelling the regex grammar by hand, but I
+		 * then asked the compiled regex the wrong question: `.test` against a
+		 * ONE-CHARACTER subject. That accepts an anchored copy such as
+		 * `/^[\x00-\x1f\x7f]$/` — it matches a lone control, so it "covers" the
+		 * range, while `.replace` leaves every control embedded in an actual
+		 * terminal string untouched. A sanitizer that sanitizes nothing, counted.
+		 *
+		 * Membership was never the property. Substitution is. So each code point is
+		 * embedded between ordinary characters and the subject must come back with
+		 * the control gone and the surrounding text intact.
+		 */
+		const PRE = "ok";
+		const POST = "tail";
+		const removesEmbedded = (re: RegExp | null, lo: number, hi: number): boolean => {
 			if (re === null) return false;
 			for (let c = lo; c <= hi; c++) {
-				if (!re.test(String.fromCodePoint(c))) return false;
+				const subject = `${PRE}${String.fromCodePoint(c)}${POST}`;
+				if (subject.replace(re, "") !== `${PRE}${POST}`) return false;
 			}
 			return true;
 		};
@@ -309,9 +342,9 @@ describe("false OK — a documented count that stops matching reality", () => {
 		 * sanitizer, it is a different function that happens to subsume the range.
 		 * What separates them is not the ranges they cover but the text they spare.
 		 */
-		const SPARED = ["a", "Z", "0", " ", ".", "-", "/", "é", "漢"];
+		const SPARED_TEXT = "aZ0 .-/é漢";
 		const sparesOrdinaryText = (re: RegExp | null): boolean =>
-			re !== null && SPARED.every((c) => !re.test(c));
+			re !== null && SPARED_TEXT.replace(re, "") === SPARED_TEXT;
 
 		/** Parentheses are nodes; the shapes below are written without them. */
 		const unwrap = (n: import("typescript").Node): import("typescript").Node =>
@@ -377,8 +410,12 @@ describe("false OK — a documented count that stops matching reality", () => {
 					// `/[\x00-\x1f\x7f-\x9f]/` — the direct regex equivalent of the
 					// loops — counted as the stronger variant it is.
 					const re = compileClass(n.text);
-					if (coversAll(re, 0x00, 0x1f) && coversAll(re, 0x7f, 0x7f) && sparesOrdinaryText(re)) {
-						if (coversAll(re, 0x80, 0x9f)) strong++;
+					if (
+						removesEmbedded(re, 0x00, 0x1f) &&
+						removesEmbedded(re, 0x7f, 0x7f) &&
+						sparesOrdinaryText(re)
+					) {
+						if (removesEmbedded(re, 0x80, 0x9f)) strong++;
 						else weak++;
 					}
 				}
@@ -430,6 +467,24 @@ describe("false OK — a documented count that stops matching reality", () => {
 			).toBe(expected);
 		}
 
+		// REGEX-ONLY DECOYS. These have no loop counterpart, because the defect is
+		// in the regex's REACH rather than in the range it names: each one covers
+		// the whole control space and still leaves a control embedded in ordinary
+		// text untouched. A membership probe against a one-character subject counts
+		// both as sanitizers.
+		const REGEX_DECOYS: ReadonlyArray<readonly [string, string]> = [
+			["anchored to the whole string", "export const r=/^[\\x00-\\x1f\\x7f-\\x9f]$/g;"],
+			["anchored at the start", "export const r=/^[\\x00-\\x1f\\x7f-\\x9f]/g;"],
+		];
+		for (const [label, src] of REGEX_DECOYS) {
+			const c = countIn(src, "decoy.ts");
+			expect(
+				c.strong + c.weak,
+				`counted a regex that sanitizes nothing: ${label}. It matches a lone control, so a ` +
+					"membership probe accepts it, but `.replace` leaves controls inside real text in place.",
+			).toBe(0);
+		}
+
 		const tsFiles = async (dir: string): Promise<string[]> => {
 			const out: string[] = [];
 			for (const e of await readdir(dir, { withFileTypes: true })) {
@@ -465,10 +520,17 @@ describe("false OK — a documented count that stops matching reality", () => {
 			}
 		}
 
-		expect(
-			strong + weak,
-			`AGENTS.md says ${declaredCount}; src/ contains ${strong} C1-covering + ${weak} control-class = ${strong + weak}. ` +
-				"Add a bullet to the inventory and update the total — the entries are deliberately unnumbered so nothing needs renumbering.",
-		).toBe(declaredCount);
+		const inventory =
+			`AGENTS.md says ${declaredStrong} C1-covering + ${declaredWeak} control-class = ${declaredCount}; ` +
+			`src/ contains ${strong} + ${weak} = ${strong + weak}. ` +
+			"Add a bullet to the inventory and update BOTH the variant counts and the total — the " +
+			"entries are deliberately unnumbered so nothing needs renumbering.";
+
+		// Each variant is pinned on its own. The total is asserted too, but it is
+		// the weakest of the three: it is the only one a strong→weak swap leaves
+		// intact.
+		expect(strong, inventory).toBe(declaredStrong);
+		expect(weak, inventory).toBe(declaredWeak);
+		expect(strong + weak, inventory).toBe(declaredCount);
 	});
 });
