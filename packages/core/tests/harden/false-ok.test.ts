@@ -446,15 +446,23 @@ describe("false OK — a documented count that stops matching reality", () => {
 		};
 
 		const countIn = (src: string, name: string): { strong: number; weak: number } => {
-			// JSX needs `ScriptKind.TSX` or the parser rejects the file, and a
-			// rejected file contributes zero sanitizers — silently, and in the
-			// direction that masks a deletion.
-			const kind = name.endsWith(".tsx")
-				? ts.ScriptKind.TSX
-				: /\.(m|c)?js$/.test(name)
-					? ts.ScriptKind.JS
-					: ts.ScriptKind.TS;
-			const sf = ts.createSourceFile(name, src, ts.ScriptTarget.Latest, true, kind);
+			// ASK THE COMPILER WHICH DIALECT THIS IS. A wrong `ScriptKind` makes the
+			// parser reject the file outright, and a rejected file contributes zero
+			// sanitizers — silently, in the direction that masks a deletion.
+			//
+			// I hand-mapped extensions here, and it was wrong within one commit: I
+			// handled `.tsx` and left `.jsx`, having just written a comment about
+			// this exact trap. That is the third hand-rolled grammar model in this
+			// file and the third one to be wrong — after the regex class reader and
+			// the token scanner, both of which were also fixed by asking the
+			// implementation that already exists.
+			const sf = ts.createSourceFile(
+				name,
+				src,
+				ts.ScriptTarget.Latest,
+				true,
+				ts.getScriptKindFromFileName(name),
+			);
 
 			// FIRST PASS: which regexes does this file actually replace WITH? A class
 			// that could sanitize is not a sanitizer — it has to be wired to a
@@ -682,21 +690,30 @@ describe("false OK — a documented count that stops matching reality", () => {
 			).toBe(0);
 		}
 
+		// The dialects that hold executable source. JSON is a recognised kind but
+		// carries no code, and Unknown is everything else.
+		const SCANNABLE = new Set([
+			ts.ScriptKind.TS,
+			ts.ScriptKind.TSX,
+			ts.ScriptKind.JS,
+			ts.ScriptKind.JSX,
+		]);
+
 		const tsFiles = async (dir: string): Promise<string[]> => {
 			const out: string[] = [];
 			for (const e of await readdir(dir, { withFileTypes: true })) {
 				const full = join(dir, e.name);
-				if (e.isDirectory()) out.push(...(await tsFiles(full)));
-				// THE WHOLE JS/TS FAMILY, not a list I extend one entry at a time.
-				// I widened this to `.mjs` for the shipped hook and left `.tsx` out —
-				// the same partial fix, one extension along, in the file that keeps
-				// catching me making it. `packages/ui/src` holds seven `.tsx` files;
-				// none carries a sanitizer today, so the count is unaffected, but a
-				// sanitizer added there would have been invisible and deleting one
-				// would have gone unnoticed. An extension list is still an
-				// enumeration and will still drift — matching the family is the
-				// narrowest form that does not need extending per file type.
-				else if (/\.(m|c)?[jt]sx?$/.test(e.name)) out.push(full);
+				if (e.isDirectory()) {
+					if (!SKIP_DIRS.has(e.name)) out.push(...(await tsFiles(full)));
+				}
+				// A FILE IS SCANNABLE IFF THE COMPILER RECOGNISES A DIALECT FOR IT.
+				// This was `.ts`, then `.ts`-or-`.mjs`, then a family regex — three
+				// versions of the same enumeration, each missing the next extension.
+				// `getScriptKindFromFileName` is the mapping TypeScript itself uses,
+				// so the filter and the parser can no longer disagree about which
+				// files are source: `.json` and `.css` fall out as JSON/Unknown, and
+				// nothing needs extending when a new dialect appears.
+				else if (SCANNABLE.has(ts.getScriptKindFromFileName(e.name))) out.push(full);
 			}
 			return out;
 		};
@@ -712,12 +729,19 @@ describe("false OK — a documented count that stops matching reality", () => {
 		// behaviour is a question it turns out it cannot answer; whether the
 		// documented inventory matches the shipped tree is the one it exists for,
 		// and it was wrong about that from the start.
-		const pkgs = join(repoRoot, "packages");
-		const pkgDirs = (await readdir(pkgs, { withFileTypes: true })).filter((e) => e.isDirectory());
-		const srcDirs = pkgDirs.flatMap((e) => [
-			join(pkgs, e.name, "src"),
-			join(pkgs, e.name, "hooks"),
-		]);
+		// AND THE SCOPE IS AN EXCLUSION, NOT AN ALLOWLIST — because the two fail in
+		// opposite directions. An allowlist of `src/` + `hooks/` misses
+		// `core/bin/govern.ts`, a shipped CLI entry point that prints to a terminal;
+		// a sanitizer added there would be uncounted and deleting one would go
+		// unnoticed, SILENTLY. Excluding build output and tests instead scans a
+		// little more than it must — a sanitizer-shaped construct in a demo would
+		// push the count above the documented total — and that fails LOUDLY, which
+		// is the only direction this guard is allowed to be wrong in.
+		//
+		// The skip list is still an enumeration. The difference is that getting it
+		// wrong trips the guard instead of hiding from it.
+		const SKIP_DIRS = new Set(["node_modules", "dist", "coverage", ".turbo", "tests", "test"]);
+		const srcDirs = [join(repoRoot, "packages")];
 
 		let strong = 0;
 		let weak = 0;
