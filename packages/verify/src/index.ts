@@ -637,6 +637,81 @@ export interface TransactionVerificationResult {
 }
 
 /**
+ * Coerce one parsed JSONL record into a GUARANTEED-shape `TransactionEvent`.
+ *
+ * `events.jsonl` is written by the party under audit, so `JSON.parse(...) as
+ * TransactionEvent` was a promise the data never made. Every consumer
+ * downstream then trusted it: `kind.endsWith(...)`, `data.transferId`,
+ * `data.cost`, and the renderer's `forDisplay` over `message`/`error` each
+ * dereference or iterate a value that a valid-JSON record can set to `null`, a
+ * number, or an object — turning a verification that should return a VERDICT
+ * into an uncaught throw.
+ *
+ * That mattered more after terminal ranking landed, because the old first-match
+ * lookup stopped AT the target and the ranking scan walks past it — so a
+ * malformed record appended to the tail could break verification of an EARLIER
+ * transaction. But guarding each use site is the wrong shape of fix: it is one
+ * guard per consumer, and the three found by review were three consumers, not
+ * three bugs. Normalizing once at the boundary makes the type honest instead,
+ * so nothing downstream needs to re-check.
+ *
+ * Wrong-typed values become absent rather than throwing or being coerced to a
+ * plausible-looking default: a `cost` of `"12"` is not a cost, and rendering it
+ * as one would be a different lie than crashing.
+ *
+ * Unknown keys are PRESERVED — this narrows the fields the verifier reads, and
+ * is not a schema that silently drops a field a future producer adds.
+ */
+function normalizeEvent(raw: unknown): TransactionEvent {
+	const str = (v: unknown): string | undefined => (typeof v === "string" ? v : undefined);
+	const num = (v: unknown): number | undefined =>
+		typeof v === "number" && Number.isFinite(v) ? v : undefined;
+
+	const o: Record<string, unknown> =
+		raw !== null && typeof raw === "object" && !Array.isArray(raw)
+			? (raw as Record<string, unknown>)
+			: {};
+	const d: Record<string, unknown> =
+		o.data !== null && typeof o.data === "object" && !Array.isArray(o.data)
+			? (o.data as Record<string, unknown>)
+			: {};
+
+	const model = str(d.model);
+	const cost = num(d.cost);
+	const error = str(d.error);
+	const message = str(d.message);
+
+	return {
+		id: str(o.id) ?? "",
+		timestamp: str(o.timestamp) ?? "",
+		previousHash: str(o.previousHash) ?? "",
+		kind: str(o.kind) ?? "",
+		actor: str(o.actor) ?? "",
+		data: {
+			...d,
+			...(model !== undefined ? { model } : { model: undefined }),
+			...(cost !== undefined ? { cost } : { cost: undefined }),
+			...(typeof d.settled === "boolean" ? { settled: d.settled } : { settled: undefined }),
+			...(error !== undefined ? { error } : { error: undefined }),
+			...(message !== undefined ? { message } : { message: undefined }),
+			// PRESERVED for the same reason, and a sharper one: defaulting to ""
+			// mapped every event WITHOUT a transferId onto the same empty id, so
+			// `--tx ""` (an unset shell variable) matched them and returned
+			// found/valid with exit 0 for a transaction that does not exist. A
+			// false OK, manufactured by the normalizer meant to prevent them.
+			...(str(d.transferId) !== undefined ? { transferId: str(d.transferId) } : {}),
+		} as TransactionEvent["data"],
+		// PRESERVED, not defaulted. A legacy segment may legitimately carry no
+		// `sequence` (the v1 event schema allows it), and inventing 0 killed the
+		// `leafIndex + 1` fallback downstream: `pos` became 0, failed `pos >= 1`,
+		// and an otherwise covered event was marked INCLUSION UNVERIFIABLE. A
+		// default that looks like data is worse than an absence that reads as one.
+		...(num(o.sequence) !== undefined ? { sequence: num(o.sequence) } : {}),
+		hash: str(o.hash) ?? "",
+	};
+}
+
+/**
  * Verify a single transaction and return a formatted receipt.
  *
  * Finds the event matching `txId` (by `data.transferId`) and verifies the
@@ -679,14 +754,124 @@ export function verifyTransaction(
 
 	for (let i = 0; i < lines.length; i++) {
 		try {
-			events.push(JSON.parse(lines[i] as string) as TransactionEvent);
+			events.push(normalizeEvent(JSON.parse(lines[i] as string)));
 		} catch {
 			parseErrors.push(`Event ${i + 1}: malformed JSON`);
 		}
 	}
 
-	// Find the target event
-	const targetEvent = events.find((e) => e.data.transferId === txId);
+	// Find the target event.
+	//
+	// TERMINAL EVIDENCE OUTRANKS A DETECTION, and a settlement outranks a failure.
+	// Plain first-match was ambiguous for any transfer with more than one record,
+	// and the anomaly path makes that concrete in both directions:
+	//
+	//   - `govern.ts` appends `anomaly_detected` and only then calls
+	//     `emitter.abort()` IF the emitter has one. A stream object without
+	//     `abort` keeps going and settles normally, so the chain holds the
+	//     detection AND a real `llm_call` — first-match picked the detection and
+	//     rendered a settled, billed call as stopped, hiding its spend.
+	//   - When the cutoff DOES take effect, `finalizeStreamVoid` wins
+	//     `finalizeOnce("void")` and appends `stream_partial_delivery` with the
+	//     same id (`govern.ts:1895`). That is the terminal evidence the abort
+	//     completed — AGENTS.md classifies it a failure terminal — so falling back
+	//     to the detection rendered a finished call as PENDING forever.
+	//
+	// `settled` marks a settlement terminal and covers the dynamic
+	// `<action.kind>` kinds that cannot be enumerated here; the failure terminals
+	// are named plus the `_failed` suffix.
+	//
+	// SHAPE-GUARDED. `events.jsonl` is untrusted, and unlike the old first-match
+	// lookup — which stopped AT the target — this scans the whole array, so it
+	// reaches records after it. A later object with a null or missing `data` would
+	// otherwise throw on the dereference and take down verification of an EARLIER
+	// transaction: a tampered tail breaking historical `--tx` checks.
+	// An EMPTY txId matches nothing, deliberately. `--tx "$TX_ID"` with an unset
+	// variable is a real invocation, and treating "" as a query would search for a
+	// transaction that cannot exist — the answer to which must be "not found",
+	// never a verified verdict with exit 0.
+	if (txId.trim() === "") {
+		return {
+			found: false,
+			valid: false,
+			receipt: renderNotFound(txId),
+			errors: ["No transaction id supplied"],
+		};
+	}
+
+	// No per-use shape guard needed: `normalizeEvent` already guarantees `kind`
+	// is a string, `data` is an object, and `transferId` is a string.
+	const matching = events.filter((e) => e.data.transferId === txId);
+	const isFailureTerminal = (e: TransactionEvent): boolean =>
+		e.kind === "stream_partial_delivery" ||
+		e.kind === "llm_call_failed" ||
+		e.kind.endsWith("_failed");
+	// A DENIAL is conclusive too. It was missing from this predicate, so a later
+	// appended `settled: true` could still override an earlier `policy_denied` or
+	// `ledger_rejected` — the same forgery, one kind along. A refused call moved no
+	// money and will never settle, which is exactly what "terminal" means here.
+	const isDenialTerminal = (e: TransactionEvent): boolean =>
+		e.kind === "policy_denied" || e.kind === "ledger_rejected";
+	// `settlement_ambiguous` is CONCLUSIVE and comes FIRST. The producer appends it
+	// BEFORE the `llm_call` it corrects (`headless.ts:1425` then `:1484`;
+	// `govern.ts:1798` then `:1887`), so a crash or a failed second append can
+	// leave it as the only durable record of the outcome. Excluding it let a later
+	// hash-valid `settled: true` rewrite an ambiguous settlement into a clean one —
+	// the same forgery as the failure and denial cases, one kind along, and the
+	// most valuable one to forge because it converts "we do not know whether this
+	// spend landed" into "it did".
+	const isTerminal = (e: TransactionEvent): boolean =>
+		e.data.settled !== undefined ||
+		isFailureTerminal(e) ||
+		isDenialTerminal(e) ||
+		e.kind === "settlement_ambiguous";
+
+	// FIRST TERMINAL IN CHAIN ORDER WINS. Not the best-TYPED terminal anywhere in
+	// the log — that was a forgery vector, and it was mine.
+	//
+	// Ranking settlement above failure across the WHOLE history let a LATER record
+	// override an EARLIER one. The audited party owns `events.jsonl`, so it could
+	// append a hash-valid `settled: true` reusing a transferId after an anchored
+	// FAILURE or DENIAL, and the receipt would read SETTLED — without altering the
+	// anchored prefix, so anchoring would not catch it either. `finalizeOnce`
+	// makes first-terminal-wins a producer invariant (AGENTS.md); a verifier that
+	// ranks by type instead of by order does not merely miss a forgery, it
+	// performs one.
+	//
+	// A DETECTION is still outranked, which is the whole point of scanning past
+	// the first match: `anomaly_detected` precedes its terminal by construction
+	// and is not conclusive on its own.
+	const firstTerminal = matching.find(isTerminal);
+
+	// AMBIGUITY DOWNGRADES A SETTLEMENT, from anywhere in the transfer's records.
+	//
+	// First-terminal-wins alone is wrong here because the two producers order
+	// these differently. The AUDIT-FIRST path writes the `llm_call` with an
+	// optimistic `settled: true` BEFORE the POST, then appends
+	// `settlement_ambiguous` only if the POST throws (`govern.ts`); the headless
+	// and stream paths append the ambiguity FIRST. Taking the first terminal in
+	// chain order therefore printed SETTLED for an ordinary POST failure.
+	//
+	// The safe generalisation is directional. A correction that REDUCES certainty
+	// can be honoured from anywhere, because forging one gains an attacker
+	// nothing — the worst it does is make a real settlement read as unknown. A
+	// record that INCREASES certainty must never override an earlier terminal,
+	// which is the forgery this selector already refuses. So: ambiguity beats a
+	// settlement, and nothing beats a failure or a denial.
+	const ambiguity = matching.find((e) => e.kind === "settlement_ambiguous");
+	// A SETTLEMENT is not "anything carrying `settled`": `llm_call_failed` records
+	// `settled: false`, so a presence test let ambiguity downgrade a FAILURE. That
+	// inverts the rule above — losing certainty is harmless on a settlement, but a
+	// failure is already the worst verdict, so moving it to "unknown" launders it.
+	const firstIsSettlement =
+		firstTerminal !== undefined &&
+		firstTerminal.data.settled !== undefined &&
+		!isFailureTerminal(firstTerminal) &&
+		!isDenialTerminal(firstTerminal);
+	const targetEvent =
+		ambiguity !== undefined && (firstTerminal === undefined || firstIsSettlement)
+			? ambiguity
+			: (firstTerminal ?? matching[0]);
 
 	if (targetEvent === undefined) {
 		return {
@@ -804,8 +989,31 @@ export function verifyTransaction(
 		if (evt === targetEvent) break;
 	}
 
+	// Carry the DETECTOR's reason across terminal selection. Ranking a terminal
+	// above the detection is right for status and wrong for reason: a successful
+	// anomaly cutoff selects `stream_partial_delivery`, whose `error` is the SDK's
+	// generic "Request was aborted" rather than what the detector observed.
+	// ONLY a detection that PRECEDES the selected terminal. The producer writes
+	// `anomaly_detected` before the terminal it explains, so anything after one is
+	// not evidence about it — and searching the whole history let an appended,
+	// UNANCHORED detection decorate a receipt whose inclusion proof covers only
+	// the terminal. That renders forged text under an INCLUSION VERIFIED heading,
+	// which is worse than showing nothing: the proof is real and the reader has no
+	// way to see that it does not cover the line beside it.
+	// THE BOUNDARY IS THE FIRST TERMINAL, NOT THE SELECTED ONE. Ambiguity moves
+	// `targetEvent` later, so using its position slid the boundary past an appended
+	// detection and let it decorate a receipt whose real terminal came first.
+	// Nothing after the first terminal is evidence about the outcome.
+	const boundary = firstTerminal ?? targetEvent;
+	const boundaryIndex = matching.indexOf(boundary);
+	const detection = matching
+		.slice(0, boundaryIndex < 0 ? matching.length : boundaryIndex)
+		.find((e) => e.kind === "anomaly_detected");
+	const detectionReason = detection !== undefined ? detection.data.message : undefined;
+
 	const receiptData: ReceiptData = {
 		event: targetEvent,
+		...(detectionReason !== undefined ? { detectionReason } : {}),
 		chainLength: events.length,
 		merkleRoot,
 		merkleVerified,

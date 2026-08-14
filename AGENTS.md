@@ -986,8 +986,12 @@ Drop every line whose raw text contains `from "`, then require exact string equa
   lines **are** compared, so both packages must import the same names in the same order and may
   differ only in the module path.
 
-Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 4200 (a
-vendoring tripwire — raising it should prompt "what was added?"), and the differential suites assert
+Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 4320 (a
+vendoring tripwire — raising it should prompt "what was added?"; last raised from 4300 for two
+selection fixes in `index.ts` — terminal kind rather than the presence of `settled`, and an
+evidence window bounded by the FIRST terminal — both hand-written, no vendored source. The number
+lives in TWO places, here and in `anchor-additive.test.ts`; move both or the guard stops enforcing
+what this line claims), and the differential suites assert
 that core and verify produce identical verdicts *and identical error strings* on clean,
 tail-truncated, segment-deleted, rotated, `toJSON`-bearing, and hand-tampered vaults.
 
