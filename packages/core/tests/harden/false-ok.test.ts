@@ -272,86 +272,50 @@ describe("false OK — a documented count that stops matching reality", () => {
 		 * here.
 		 */
 		/**
-		 * INTERPRET the character class — what code points does it actually cover?
+		 * ASK THE ENGINE. A regex class has JavaScript's semantics, not mine — my
+		 * hand-written reader gave `/[\0-\30\x7f-\x9f]/` a different meaning than the
+		 * runtime does, because `\30` is a legacy octal escape and I read it as a
+		 * digit. That is the fourth time on this branch that hand-modelling a
+		 * grammar which already has an implementation produced a wrong answer, so
+		 * the class is compiled and probed instead of parsed.
 		 *
-		 * Round twelve was this same lesson one level down. Having stopped
-		 * string-matching TypeScript, I was still string-matching the regex
-		 * literal's own text: `strong` required the substring `\x80-\x9f` and
-		 * `weak` required a `]` immediately after `\x7f`. So
-		 * `/[\x00-\x1f\x7f-\x9f]/g` — the direct regex equivalent of the loops this
-		 * repo already ships, covering C0, DEL and C1 in one class — counted as
-		 * NEITHER, and the source could hold 14 sanitizers while the guard reported
-		 * 13. A character class has its own grammar, and matching its spelling is
-		 * the same mistake as matching a comparison's spelling.
-		 *
-		 * So the class is parsed into ranges and asked what it COVERS. The stronger
-		 * variant is the one that covers C1; the weaker covers C0 and DEL without
-		 * it. That is the actual distinction AGENTS.md draws between them, stated
-		 * as a property of behaviour rather than of syntax.
+		 * `g` and `y` are stripped: they make `.test` stateful via `lastIndex`, so a
+		 * probe loop would silently skip alternate characters.
 		 */
-		const parseClass = (text: string): { negated: boolean; ranges: [number, number][] } | null => {
-			const m = /^\/\[(\^?)([\s\S]*?)\]\/[a-z]*$/.exec(text);
+		const compileClass = (literal: string): RegExp | null => {
+			const m = /^\/([\s\S]*)\/([a-z]*)$/.exec(literal);
 			if (m === null) return null;
-			const body = m[2] as string;
-			const ranges: [number, number][] = [];
-			let i = 0;
-			const readAtom = (): number => {
-				if (body[i] !== "\\") return body.charCodeAt(i++);
-				i++;
-				const c = body[i];
-				if (c === "x") {
-					const h = body.slice(i + 1, i + 3);
-					i += 3;
-					return Number.parseInt(h, 16);
-				}
-				if (c === "u") {
-					if (body[i + 1] === "{") {
-						const e = body.indexOf("}", i);
-						const h = body.slice(i + 2, e);
-						i = e + 1;
-						return Number.parseInt(h, 16);
-					}
-					const h = body.slice(i + 1, i + 5);
-					i += 5;
-					return Number.parseInt(h, 16);
-				}
-				const simple: Record<string, number> = { n: 10, r: 13, t: 9, f: 12, v: 11, "0": 0, b: 8 };
-				i++;
-				return Object.hasOwn(simple, c as string)
-					? (simple[c as string] as number)
-					: (c as string).charCodeAt(0);
-			};
-			while (i < body.length) {
-				const before = i;
-				const a = readAtom();
-				if (Number.isNaN(a)) return null;
-				if (body[i] === "-" && i + 1 < body.length && body[i + 1] !== "]") {
-					i++;
-					const b = readAtom();
-					if (Number.isNaN(b)) return null;
-					ranges.push([a, b]);
-				} else {
-					ranges.push([a, a]);
-				}
-				// No progress means an escape shape this reader does not model; bail
-				// rather than spin, and let the count come out wrong loudly.
-				if (i <= before) return null;
+			try {
+				return new RegExp(m[1] as string, (m[2] as string).replace(/[gy]/g, ""));
+			} catch {
+				return null;
 			}
-			return { negated: m[1] === "^", ranges };
 		};
 
-		/** Does the class cover every code point in [lo, hi]? A negated class covers nothing here. */
-		const covers = (
-			cls: { negated: boolean; ranges: [number, number][] } | null,
-			lo: number,
-			hi: number,
-		): boolean => {
-			if (cls === null || cls.negated) return false;
+		const coversAll = (re: RegExp | null, lo: number, hi: number): boolean => {
+			if (re === null) return false;
 			for (let c = lo; c <= hi; c++) {
-				if (!cls.ranges.some(([a, b]) => c >= a && c <= b)) return false;
+				if (!re.test(String.fromCodePoint(c))) return false;
 			}
 			return true;
 		};
+
+		/**
+		 * A control sanitizer targets controls AND LEAVES ORDINARY TEXT ALONE.
+		 *
+		 * Without the second half, `/[^A-Za-z0-9._-]/` in `export/markdown.ts` counted
+		 * as one: an allowlist slugifier covers every control range incidentally,
+		 * because it excludes everything that is not alphanumeric. It is not a
+		 * sanitizer, it is a different function that happens to subsume the range.
+		 * What separates them is not the ranges they cover but the text they spare.
+		 */
+		const SPARED = ["a", "Z", "0", " ", ".", "-", "/", "é", "漢"];
+		const sparesOrdinaryText = (re: RegExp | null): boolean =>
+			re !== null && SPARED.every((c) => !re.test(c));
+
+		/** Parentheses are nodes; the shapes below are written without them. */
+		const unwrap = (n: import("typescript").Node): import("typescript").Node =>
+			ts.isParenthesizedExpression(n) ? unwrap(n.expression) : n;
 
 		const isNumericValue = (n: import("typescript").Node, want: number): boolean =>
 			ts.isNumericLiteral(n) && Number(n.text.replace(/_/g, "")) === want;
@@ -365,24 +329,39 @@ describe("false OK — a documented count that stops matching reality", () => {
 				// either bound. Comparing VALUES means 0x7f, 127 and 127.0 are one
 				// bound and 159e3 is not 159; comparing Identifier `.text` means the
 				// two operands must be the same variable, escapes resolved.
-				if (
-					ts.isBinaryExpression(n) &&
-					n.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
-				) {
-					const l = n.left;
-					const r = n.right;
+				// The FULL neutralisation shape: `<id> <= 0x1f || (<id> >= 0x7f && <id> <= 0x9f)`.
+				// Matching only the C1 half counted an ESCAPER — a loop-form
+				// `toSafeJson` handles C1 and leaves C0 to `JSON.stringify`, preserving
+				// the byte rather than destroying it. The regex path already excluded
+				// that; requiring C0 here makes the two paths agree, which they must,
+				// since they are two spellings of one question.
+				if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
+					const c0 = unwrap(n.left);
+					const rest = unwrap(n.right);
 					if (
-						ts.isBinaryExpression(l) &&
-						l.operatorToken.kind === ts.SyntaxKind.GreaterThanEqualsToken &&
-						ts.isBinaryExpression(r) &&
-						r.operatorToken.kind === ts.SyntaxKind.LessThanEqualsToken &&
-						ts.isIdentifier(l.left) &&
-						ts.isIdentifier(r.left) &&
-						l.left.text === r.left.text &&
-						isNumericValue(l.right, 0x7f) &&
-						isNumericValue(r.right, 0x9f)
+						ts.isBinaryExpression(c0) &&
+						c0.operatorToken.kind === ts.SyntaxKind.LessThanEqualsToken &&
+						ts.isIdentifier(c0.left) &&
+						isNumericValue(c0.right, 0x1f) &&
+						ts.isBinaryExpression(rest) &&
+						rest.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
 					) {
-						strong++;
+						const lo = unwrap(rest.left);
+						const hi = unwrap(rest.right);
+						if (
+							ts.isBinaryExpression(lo) &&
+							lo.operatorToken.kind === ts.SyntaxKind.GreaterThanEqualsToken &&
+							ts.isBinaryExpression(hi) &&
+							hi.operatorToken.kind === ts.SyntaxKind.LessThanEqualsToken &&
+							ts.isIdentifier(lo.left) &&
+							ts.isIdentifier(hi.left) &&
+							lo.left.text === c0.left.text &&
+							hi.left.text === c0.left.text &&
+							isNumericValue(lo.right, 0x7f) &&
+							isNumericValue(hi.right, 0x9f)
+						) {
+							strong++;
+						}
 					}
 				}
 				if (ts.isRegularExpressionLiteral(n)) {
@@ -397,9 +376,9 @@ describe("false OK — a documented count that stops matching reality", () => {
 					// preserves the byte from a sanitizer that destroys it, and keeps
 					// `/[\x00-\x1f\x7f-\x9f]/` — the direct regex equivalent of the
 					// loops — counted as the stronger variant it is.
-					const cls = parseClass(n.text);
-					if (covers(cls, 0x00, 0x1f) && covers(cls, 0x7f, 0x7f)) {
-						if (covers(cls, 0x80, 0x9f)) strong++;
+					const re = compileClass(n.text);
+					if (coversAll(re, 0x00, 0x1f) && coversAll(re, 0x7f, 0x7f) && sparesOrdinaryText(re)) {
+						if (coversAll(re, 0x80, 0x9f)) strong++;
 						else weak++;
 					}
 				}
