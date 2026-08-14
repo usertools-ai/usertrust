@@ -465,7 +465,18 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 						// machine consumer must be able to tell that apart from a vault
 						// that has genuinely spent nothing.
 						budgetUtilization: budgetPct === null ? null : Number.parseFloat(budgetPct),
-						chainIntegrity: verification.valid,
+						// THE THIRD SURFACE FOR ONE VERDICT. The headline floors on the
+						// chain signal and the human line reads it; this reported
+						// `verification.valid` alone, so a vault with a valid chain and an
+						// unresolvable settlement emitted `chainIntegrity: true` beside a
+						// CRITICAL score — and a machine consumer, which cannot see the
+						// human line, would have had no way to know why.
+						//
+						// I found this by asking, of my own fix, whether the distinction it
+						// draws is drawn on every member of its class. It was drawn on two
+						// of three.
+						chainIntegrity: chainSignal?.critical !== true,
+						...(ambiguousTransfers > 0 ? { ambiguousSettlements: ambiguousTransfers } : {}),
 						piiDetections: piiHits,
 						// RENAMED to what they measure. `circuitBreakerTrips` counted no
 						// breaker transition — no producer emits one — and reported an
