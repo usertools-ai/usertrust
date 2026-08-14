@@ -1511,10 +1511,10 @@ export function loadTrustSnapshot(bytes: Uint8Array): TrustSnapshotLoad {
 	identity = snapshotIdentity(sha256, document);
 
 	// The snapshot is not read by the frozen numeric reader WHOLESALE — §4
-	// tolerates unknown members precisely so the open signing scheme can add them,
-	// and only the declared integer members above are scanned — but the
-	// NON-FINITE clause still has to bind over ALL of it, and this is the document
-	// where it
+	// tolerates unknown members precisely so the open signing scheme can add
+	// them, and only the declared integer members above are scanned — but the
+	// NON-FINITE clause still has to bind over ALL of it, and this is the
+	// document where it
 	// bites: `mintActor` is canonicalized by equality 2, `1e999` PARSES to
 	// Infinity, and `canonicalize` throws on it. Without this guard a snapshot
 	// carrying one takes `verifyReceiptBase` out through an uncaught exception —
