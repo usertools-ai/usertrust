@@ -2273,7 +2273,11 @@ function canonicalizeWithout(object: JsonObject, key: string): string {
 // receipt from a retired key.
 // ─────────────────────────────────────────────────────────────────────────────
 
-function keyStatePermits(key: TrustKey, segmentFirstSequence: number): string | null {
+function keyStatePermits(
+	key: TrustKey,
+	segmentFirstSequence: number,
+	keys: ReadonlyMap<string, TrustKey>,
+): string | null {
 	if (key.state === "revoked") {
 		return `key ${key.keyId} is revoked — a revoked key verifies nothing, past or present`;
 	}
@@ -2283,6 +2287,28 @@ function keyStatePermits(key: TrustKey, segmentFirstSequence: number): string | 
 		const boundary = key.activationSequence;
 		if (boundary === undefined || !(segmentFirstSequence < boundary)) {
 			return `retired key ${key.keyId} signed material at segmentFirstSequence ${segmentFirstSequence}, at or after its successor's activation (${String(boundary)})`;
+		}
+	}
+	// §8's boundary is ONE number governing TWO keys, and enforcing it in one
+	// direction only leaves the other open. `activationSequence` sits on the
+	// PREDECESSOR and equals the successor's first sealed segment — so it is
+	// the predecessor's UPPER bound (above) and the successor's LOWER bound
+	// (here). Without this, a key rotated IN at segment 18 signs a checkpoint
+	// at segment 11 and verifies: a successor retroactively authenticating
+	// material from before it existed, which is the mirror image of a retired
+	// key signing after it was replaced.
+	const predecessorKeyId = key.predecessorKeyId;
+	if (predecessorKeyId !== undefined) {
+		const predecessor = keys.get(predecessorKeyId);
+		const activatedAt = predecessor?.activationSequence;
+		if (activatedAt === undefined) {
+			// Fail closed: the loader admits a lineage only when the predecessor
+			// is retired-or-revoked with a boundary, so reaching here means the
+			// snapshot changed shape underneath that rule.
+			return `key ${key.keyId} names predecessor ${predecessorKeyId}, whose activation boundary is unevaluable — the successor's lower bound cannot be checked`;
+		}
+		if (segmentFirstSequence < activatedAt) {
+			return `key ${key.keyId} signed material at segmentFirstSequence ${segmentFirstSequence}, BEFORE it activated (${activatedAt}) — a rotation successor cannot authenticate pre-rotation material`;
 		}
 	}
 	return null;
@@ -2414,7 +2440,7 @@ export function verifyCheckpointStatement(
 			`checkpoint key ${keyId} is outside the lineage pinned by ${chain.checkpointRootKeyId}`,
 		);
 	}
-	const stateFailure = keyStatePermits(key, segmentFirstSequence);
+	const stateFailure = keyStatePermits(key, segmentFirstSequence, snapshot.keys);
 	if (stateFailure !== null) return reject(stateFailure);
 
 	// §4a: the checkpoint preimage is `canonicalize(unsigned)` with NO domain
@@ -3172,7 +3198,7 @@ class BaseRun {
 		// SEGMENT (§8). "State permitting" alone accepts a freshly-signed receipt
 		// from a retired key — the exact attack rotation exists to bound.
 		const segmentFirstSequence = numberAt(checkpoint, "segmentFirstSequence") as number;
-		const stateFailure = keyStatePermits(key, segmentFirstSequence);
+		const stateFailure = keyStatePermits(key, segmentFirstSequence, this.input.snapshot.keys);
 		if (stateFailure !== null) return invalid(stateFailure);
 
 		const preimage = RECEIPT_SIGNATURE_PREFIX + canonicalizeWithout(document, "signature");
