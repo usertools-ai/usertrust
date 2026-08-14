@@ -271,6 +271,88 @@ describe("false OK — a documented count that stops matching reality", () => {
 		 * genuinely new one appears the process is a bullet in AGENTS.md and a case
 		 * here.
 		 */
+		/**
+		 * INTERPRET the character class — what code points does it actually cover?
+		 *
+		 * Round twelve was this same lesson one level down. Having stopped
+		 * string-matching TypeScript, I was still string-matching the regex
+		 * literal's own text: `strong` required the substring `\x80-\x9f` and
+		 * `weak` required a `]` immediately after `\x7f`. So
+		 * `/[\x00-\x1f\x7f-\x9f]/g` — the direct regex equivalent of the loops this
+		 * repo already ships, covering C0, DEL and C1 in one class — counted as
+		 * NEITHER, and the source could hold 14 sanitizers while the guard reported
+		 * 13. A character class has its own grammar, and matching its spelling is
+		 * the same mistake as matching a comparison's spelling.
+		 *
+		 * So the class is parsed into ranges and asked what it COVERS. The stronger
+		 * variant is the one that covers C1; the weaker covers C0 and DEL without
+		 * it. That is the actual distinction AGENTS.md draws between them, stated
+		 * as a property of behaviour rather than of syntax.
+		 */
+		const parseClass = (text: string): { negated: boolean; ranges: [number, number][] } | null => {
+			const m = /^\/\[(\^?)([\s\S]*?)\]\/[a-z]*$/.exec(text);
+			if (m === null) return null;
+			const body = m[2] as string;
+			const ranges: [number, number][] = [];
+			let i = 0;
+			const readAtom = (): number => {
+				if (body[i] !== "\\") return body.charCodeAt(i++);
+				i++;
+				const c = body[i];
+				if (c === "x") {
+					const h = body.slice(i + 1, i + 3);
+					i += 3;
+					return Number.parseInt(h, 16);
+				}
+				if (c === "u") {
+					if (body[i + 1] === "{") {
+						const e = body.indexOf("}", i);
+						const h = body.slice(i + 2, e);
+						i = e + 1;
+						return Number.parseInt(h, 16);
+					}
+					const h = body.slice(i + 1, i + 5);
+					i += 5;
+					return Number.parseInt(h, 16);
+				}
+				const simple: Record<string, number> = { n: 10, r: 13, t: 9, f: 12, v: 11, "0": 0, b: 8 };
+				i++;
+				return Object.hasOwn(simple, c as string)
+					? (simple[c as string] as number)
+					: (c as string).charCodeAt(0);
+			};
+			while (i < body.length) {
+				const before = i;
+				const a = readAtom();
+				if (Number.isNaN(a)) return null;
+				if (body[i] === "-" && i + 1 < body.length && body[i + 1] !== "]") {
+					i++;
+					const b = readAtom();
+					if (Number.isNaN(b)) return null;
+					ranges.push([a, b]);
+				} else {
+					ranges.push([a, a]);
+				}
+				// No progress means an escape shape this reader does not model; bail
+				// rather than spin, and let the count come out wrong loudly.
+				if (i <= before) return null;
+			}
+			return { negated: m[1] === "^", ranges };
+		};
+
+		/** Does the class cover every code point in [lo, hi]? A negated class covers nothing here. */
+		const covers = (
+			cls: { negated: boolean; ranges: [number, number][] } | null,
+			lo: number,
+			hi: number,
+		): boolean => {
+			if (cls === null || cls.negated) return false;
+			for (let c = lo; c <= hi; c++) {
+				if (!cls.ranges.some(([a, b]) => c >= a && c <= b)) return false;
+			}
+			return true;
+		};
+
 		const isNumericValue = (n: import("typescript").Node, want: number): boolean =>
 			ts.isNumericLiteral(n) && Number(n.text.replace(/_/g, "")) === want;
 
@@ -304,15 +386,22 @@ describe("false OK — a documented count that stops matching reality", () => {
 					}
 				}
 				if (ts.isRegularExpressionLiteral(n)) {
-					// A POSITIVE character class spanning C1. `/[^\x80-\x9f]/` is the
-					// complement and `/\x80-\x9f/` is not a class at all — both counted
-					// before the class was actually inspected.
-					const m = /^\/\[(\^?)([\s\S]*?)\]/.exec(n.text);
-					if (m !== null && m[1] !== "^" && /\\x80-\\x9f|\\u0080-\\u009f/.test(m[2] as string)) {
-						strong++;
+					// Classified by COVERAGE, not spelling. The stronger variant is the
+					// one whose class covers C1; the weaker covers C0 and DEL without it.
+					// A SANITIZER neutralises the whole control space: C0, DEL, and —
+					// for the stronger variant — C1. That is the discriminator, not the
+					// spelling, and it is the one AGENTS.md already draws: the `--json`
+					// paths ESCAPE C1 as `\uXXXX` with `/[\u007f-\u009f]/`, which
+					// handles only the upper part because `JSON.stringify` has already
+					// dealt with C0. Requiring C0 coverage separates an escaper that
+					// preserves the byte from a sanitizer that destroys it, and keeps
+					// `/[\x00-\x1f\x7f-\x9f]/` — the direct regex equivalent of the
+					// loops — counted as the stronger variant it is.
+					const cls = parseClass(n.text);
+					if (covers(cls, 0x00, 0x1f) && covers(cls, 0x7f, 0x7f)) {
+						if (covers(cls, 0x80, 0x9f)) strong++;
+						else weak++;
 					}
-					// The weaker variant: the shared C0 + DEL class, whatever it is bound to.
-					if (/^\/\[\\x00-\\x1f\\x7f\]/.test(n.text)) weak++;
 				}
 				ts.forEachChild(n, visit);
 			};
