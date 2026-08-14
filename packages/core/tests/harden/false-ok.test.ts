@@ -369,6 +369,59 @@ describe("false OK — a documented count that stops matching reality", () => {
 		const isNumericValue = (n: import("typescript").Node, want: number): boolean =>
 			ts.isNumericLiteral(n) && Number(n.text.replace(/_/g, "")) === want;
 
+		/**
+		 * BOUNDS ARE VALUES, NOT OPERATORS. `code < 0x20` and `code <= 0x1f` are the
+		 * same assertion about integers, and accepting only the inclusive spelling
+		 * meant a sanitizer written half-open went uncounted — the documented total
+		 * then reads low, which is the stale-count false OK this guard exists for.
+		 *
+		 * Both helpers return the identifier's name so the caller can require every
+		 * bound to constrain the SAME variable.
+		 */
+		const upperBound = (n: import("typescript").Node, inclusive: number): string | null => {
+			if (!ts.isBinaryExpression(n) || !ts.isIdentifier(n.left)) return null;
+			const k = n.operatorToken.kind;
+			if (k === ts.SyntaxKind.LessThanEqualsToken && isNumericValue(n.right, inclusive)) {
+				return n.left.text;
+			}
+			if (k === ts.SyntaxKind.LessThanToken && isNumericValue(n.right, inclusive + 1)) {
+				return n.left.text;
+			}
+			return null;
+		};
+
+		const lowerBound = (n: import("typescript").Node, inclusive: number): string | null => {
+			if (!ts.isBinaryExpression(n) || !ts.isIdentifier(n.left)) return null;
+			const k = n.operatorToken.kind;
+			if (k === ts.SyntaxKind.GreaterThanEqualsToken && isNumericValue(n.right, inclusive)) {
+				return n.left.text;
+			}
+			if (k === ts.SyntaxKind.GreaterThanToken && isNumericValue(n.right, inclusive - 1)) {
+				return n.left.text;
+			}
+			return null;
+		};
+
+		/** Does this expression assert the full control range over one identifier? */
+		const neutralisesControlRange = (node: import("typescript").Node): boolean => {
+			const n = unwrap(node);
+			if (!ts.isBinaryExpression(n) || n.operatorToken.kind !== ts.SyntaxKind.BarBarToken) {
+				return false;
+			}
+			const c0 = upperBound(unwrap(n.left), 0x1f);
+			if (c0 === null) return false;
+			const rest = unwrap(n.right);
+			if (
+				!ts.isBinaryExpression(rest) ||
+				rest.operatorToken.kind !== ts.SyntaxKind.AmpersandAmpersandToken
+			) {
+				return false;
+			}
+			const lo = lowerBound(unwrap(rest.left), 0x7f);
+			const hi = upperBound(unwrap(rest.right), 0x9f);
+			return lo === c0 && hi === c0;
+		};
+
 		const countIn = (src: string, name: string): { strong: number; weak: number } => {
 			const sf = ts.createSourceFile(name, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
 			let strong = 0;
@@ -384,34 +437,26 @@ describe("false OK — a documented count that stops matching reality", () => {
 				// the byte rather than destroying it. The regex path already excluded
 				// that; requiring C0 here makes the two paths agree, which they must,
 				// since they are two spellings of one question.
-				if (ts.isBinaryExpression(n) && n.operatorToken.kind === ts.SyntaxKind.BarBarToken) {
-					const c0 = unwrap(n.left);
-					const rest = unwrap(n.right);
-					if (
-						ts.isBinaryExpression(c0) &&
-						c0.operatorToken.kind === ts.SyntaxKind.LessThanEqualsToken &&
-						ts.isIdentifier(c0.left) &&
-						isNumericValue(c0.right, 0x1f) &&
-						ts.isBinaryExpression(rest) &&
-						rest.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken
-					) {
-						const lo = unwrap(rest.left);
-						const hi = unwrap(rest.right);
-						if (
-							ts.isBinaryExpression(lo) &&
-							lo.operatorToken.kind === ts.SyntaxKind.GreaterThanEqualsToken &&
-							ts.isBinaryExpression(hi) &&
-							hi.operatorToken.kind === ts.SyntaxKind.LessThanEqualsToken &&
-							ts.isIdentifier(lo.left) &&
-							ts.isIdentifier(hi.left) &&
-							lo.left.text === c0.left.text &&
-							hi.left.text === c0.left.text &&
-							isNumericValue(lo.right, 0x7f) &&
-							isNumericValue(hi.right, 0x9f)
-						) {
-							strong++;
-						}
-					}
+				// THE PREDICATE IS NOT THE SANITIZER — THE SUBSTITUTION IS.
+				//
+				// Counting on the range test alone counted the question rather than
+				// the answer: a loop that asks exactly this and then writes `ch`
+				// back, or emits a lossless `\uXXXX`, still scored as a sanitizer.
+				// Both PRESERVE the byte, and AGENTS.md counts neither — that is the
+				// same escaper-versus-sanitizer line the regex path already draws,
+				// and the loop path was drawing it one step too early.
+				//
+				// So the whole conditional is matched, and the taken branch must be a
+				// STRING LITERAL: a fixed replacement destroys the character, while
+				// `ch` preserves it and a computed escape re-encodes it. Every
+				// sanitizer in this tree is `out += <range> ? "?" : ch`.
+				//
+				// RESIDUAL, and deliberate: a sanitizer written as an `if` statement
+				// rather than a conditional expression goes uncounted. That direction
+				// fails LOUDLY — the total reads low and the guard trips — which is
+				// the safe way for this matcher to be wrong.
+				if (ts.isConditionalExpression(n) && neutralisesControlRange(n.condition)) {
+					if (ts.isStringLiteral(unwrap(n.whenTrue))) strong++;
 				}
 				if (ts.isRegularExpressionLiteral(n)) {
 					// Classified by COVERAGE, not spelling. The stronger variant is the
@@ -468,6 +513,14 @@ describe("false OK — a documented count that stops matching reality", () => {
 				"export const r=/[\\u007f-\\u009f]/g;",
 				"none",
 			],
+			[
+				// Same assertion about integers, different operators. Accepting only
+				// the inclusive spelling let a half-open copy go uncounted.
+				"half-open bounds — the same range, spelled exclusively",
+				'export const f=(cp:number)=>cp < 0x20 || (cp >= 0x7f && cp < 0xa0) ? "?" : "y";',
+				"export const r=/[\\x00-\\x1f\\x7f-\\x9f]/g;",
+				"strong",
+			],
 		];
 		for (const [label, loopForm, regexForm, expected] of EQUIVALENT_PAIRS) {
 			const viaLoop = countIn(loopForm, "pair-loop.ts");
@@ -481,6 +534,29 @@ describe("false OK — a documented count that stops matching reality", () => {
 				classify(viaRegex),
 				`${label}: the REGEX form classified as ${classify(viaRegex)}, but the loop form said ${classify(viaLoop)} — the two detectors for one property have diverged`,
 			).toBe(expected);
+		}
+
+		// LOOP DECOYS. Each asks the sanitizer's exact question and then declines to
+		// sanitize — the range predicate is identical to the real ones, and only the
+		// taken branch differs. Counting on the predicate alone counted the question
+		// rather than the answer.
+		const LOOP_DECOYS: ReadonlyArray<readonly [string, string]> = [
+			[
+				"preserves the character it just identified",
+				"export const f=(cp:number,ch:string)=>cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f) ? ch : ch;",
+			],
+			[
+				"escapes losslessly — re-encodes the byte instead of destroying it",
+				'export const f=(cp:number,ch:string)=>cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f) ? "\\\\u" + cp.toString(16) : ch;',
+			],
+		];
+		for (const [label, src] of LOOP_DECOYS) {
+			const c = countIn(src, "loop-decoy.ts");
+			expect(
+				c.strong + c.weak,
+				`counted a loop that does not sanitize: ${label}. Its range test is byte-identical ` +
+					"to a real sanitizer's; what differs is what it writes back.",
+			).toBe(0);
 		}
 
 		// REGEX-ONLY DECOYS. These have no loop counterpart, because the defect is
