@@ -239,6 +239,20 @@ describe("false OK — a documented count that stops matching reality", () => {
 		expect(declaredCount, `unrecognised number word "${declared}"`).toBeDefined();
 
 		/**
+		 * MERGE NOTE (this file conflicted): the other side of this merge extended a
+		 * NAME LIST — `CONTROL_CHARS`, `forDisplay`, `scrubForError`, and then
+		 * `scrubForTerminal` when two more copies landed under a third name. That
+		 * extension was correct for the detector it was extending, and it is dropped
+		 * here only because this side removes the detector itself.
+		 *
+		 * Adding a name each time a copy appears under a new one is the very failure
+		 * this guard exists to catch, one level up: a counter that only knows the
+		 * names it was written with reports a smaller inventory than exists. Matching
+		 * on SHAPE counts `scrubForTerminal` — and anything under a fifth name —
+		 * without being told about it. Both names remain listed in AGENTS.md's
+		 * inventory prose, which is where a human reader needs them.
+		 */
+		/**
 		 * Strip comments and string literals, then collapse whitespace.
 		 *
 		 * This replaces a `grep -o` sweep, which was wrong at BOTH ends: it could
