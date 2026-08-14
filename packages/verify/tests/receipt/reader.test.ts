@@ -663,6 +663,40 @@ describe("loadTrustSnapshot — parsing and identity", () => {
 		expect(load.snapshot.identity.predecessor).toBe("b".repeat(64));
 	});
 
+	it("carries the DECLARED version and predecessor through a structural REFUSAL too (R-OUT-1)", () => {
+		// The refusal is when an operator most needs to know WHICH snapshot: the
+		// two facts are readable the moment the document parses, long before any
+		// structural rule runs, so reporting the file as anonymous afterwards
+		// throws away identity the loader was already holding.
+		const load = loadTrustSnapshot(
+			patched((s) => {
+				s.version = "2026-08-12.1";
+				s.predecessorHash = "b".repeat(64);
+				s.chains.push(structuredClone(s.chains[0] as (typeof s.chains)[number]));
+			}),
+		);
+		expect(load.ok).toBe(false);
+		if (load.ok) return;
+		expect(load.detail).toMatch(/vaultId/);
+		expect(load.identity.sha256).toBe(load.sha256);
+		expect(load.identity.version).toBe("2026-08-12.1");
+		expect(load.identity.predecessor).toBe("b".repeat(64));
+	});
+
+	it("reports a null version and predecessor when the bytes never became a document", () => {
+		// The other side of the same rule: nothing was declared, so nothing is
+		// invented. `sha256` is the only identity such a file has.
+		const bytes = Buffer.from("not json at all\n", "utf8");
+		const load = loadTrustSnapshot(bytes);
+		expect(load.ok).toBe(false);
+		if (load.ok) return;
+		expect(load.identity).toEqual({
+			sha256: createHash("sha256").update(bytes).digest("hex"),
+			version: null,
+			predecessor: null,
+		});
+	});
+
 	it("tolerates unknown members — a v1 strict reader would brick every pinned CLI (§4)", () => {
 		const load = loadTrustSnapshot(
 			patched((s) => {

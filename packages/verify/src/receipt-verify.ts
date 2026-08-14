@@ -1428,7 +1428,21 @@ export interface TrustSnapshot {
 
 export type TrustSnapshotLoad =
 	| { readonly ok: true; readonly sha256: string; readonly snapshot: TrustSnapshot }
-	| { readonly ok: false; readonly sha256: string; readonly detail: string };
+	| {
+			readonly ok: false;
+			readonly sha256: string;
+			/**
+			 * R-OUT-1 again, on the arm where it is easy to drop: the report ALWAYS
+			 * names the snapshot, and a refusal is when an operator most needs to
+			 * know WHICH snapshot. `version` and `predecessor` are readable the
+			 * moment the document parses — before any structural rule runs — so a
+			 * refusal after that point carries them rather than reporting an
+			 * anonymous file. Both stay `null` when the bytes never became a
+			 * document: nothing was declared, so nothing is invented.
+			 */
+			readonly identity: TrustSnapshotIdentity;
+			readonly detail: string;
+	  };
 
 const TRUST_ROLES = new Set(["mint", "checkpoint"]);
 const TRUST_STATES = new Set(["active", "retired", "revoked"]);
@@ -1485,12 +1499,16 @@ function isSnapshotIntegerPath(path: string): boolean {
 
 export function loadTrustSnapshot(bytes: Uint8Array): TrustSnapshotLoad {
 	const sha256 = createHash("sha256").update(bytes).digest("hex");
-	const fail = (detail: string): TrustSnapshotLoad => ({ ok: false, sha256, detail });
+	// Widened the instant the document parses, so every refusal after that point
+	// carries the identity the document declared rather than an anonymous hash.
+	let identity: TrustSnapshotIdentity = { sha256, version: null, predecessor: null };
+	const fail = (detail: string): TrustSnapshotLoad => ({ ok: false, sha256, identity, detail });
 
 	const parsed = readStrictJson(bytes, { frozenNumberPaths: isSnapshotIntegerPath });
 	if (!parsed.ok) return fail(parsed.refusal.detail);
 	if (!isJsonObject(parsed.value)) return fail("the trust snapshot is not a JSON object");
 	const document = parsed.value;
+	identity = snapshotIdentity(sha256, document);
 
 	// The snapshot is not read by the frozen numeric reader WHOLESALE — §4
 	// tolerates unknown members precisely so the open signing scheme can add them,
@@ -1750,26 +1768,30 @@ export function loadTrustSnapshot(bytes: Uint8Array): TrustSnapshotLoad {
 		});
 	}
 
+	return { ok: true, sha256, snapshot: { identity, keys, chains } };
+}
+
+/**
+ * The snapshot's self-declared identity, read straight off a parsed document.
+ *
+ * Factored out because BOTH arms of `TrustSnapshotLoad` need it and only one of
+ * them used to have it: R-OUT-1 says the report always names the snapshot, and
+ * a run refused by a structural rule is not exempt — the two facts were already
+ * in hand when the rule fired.
+ */
+function snapshotIdentity(sha256: string, document: JsonObject): TrustSnapshotIdentity {
 	return {
-		ok: true,
 		sha256,
-		snapshot: {
-			identity: {
-				sha256,
-				version: typeof document.version === "string" ? document.version : null,
-				// §8 records only that "each snapshot embeds the hash of its
-				// predecessor"; the member's NAME lands with the signing scheme, so
-				// both spellings are read and neither is required.
-				predecessor:
-					typeof document.predecessorHash === "string"
-						? document.predecessorHash
-						: typeof document.predecessor === "string"
-							? document.predecessor
-							: null,
-			},
-			keys,
-			chains,
-		},
+		version: typeof document.version === "string" ? document.version : null,
+		// §8 records only that "each snapshot embeds the hash of its
+		// predecessor"; the member's NAME lands with the signing scheme, so
+		// both spellings are read and neither is required.
+		predecessor:
+			typeof document.predecessorHash === "string"
+				? document.predecessorHash
+				: typeof document.predecessor === "string"
+					? document.predecessor
+					: null,
 	};
 }
 

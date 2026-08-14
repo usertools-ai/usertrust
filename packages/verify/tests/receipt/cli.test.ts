@@ -1070,6 +1070,46 @@ describe("--json", () => {
 		expect(report.failure).toBeNull();
 		expect(report.missing?.what).toBe("trustSnapshot");
 	});
+
+	it("names the snapshot's DECLARED version and predecessor when the snapshot is what was refused (R-OUT-1)", () => {
+		// The run an operator has to triage from the report alone: the file
+		// parsed, said which snapshot it is, and then broke a §8 rule. Reporting
+		// it as `version: null` hides the one fact that says which artifact to go
+		// fix — and it was already in hand when the rule fired.
+		const bundle = mint({
+			snapshot: (s) => {
+				s.version = "2026-08-12.1";
+				s.predecessorHash = "b".repeat(64);
+				s.chains.push(structuredClone(s.chains[0] as (typeof s.chains)[number]));
+				return s;
+			},
+		});
+		const argv = ["receipt.json", "--trust", "trust.json"];
+		const report = jsonReport(runReceiptCli([...argv, "--json"], ioFor(bundle)));
+		expect(report.verdict).toBe("UNVERIFIABLE");
+		expect(report.missing?.what).toBe("trustSnapshot");
+		expect(report.trustSnapshot?.version).toBe("2026-08-12.1");
+		expect(report.trustSnapshot?.predecessor).toBe("b".repeat(64));
+
+		const human = runReceiptCli(argv, ioFor(bundle));
+		expect(human.stdout).toContain("(version 2026-08-12.1)");
+		expect(human.stdout).toContain(`(predecessor sha256:${"b".repeat(64)})`);
+	});
+
+	it("still reports a null version when the --trust bytes never became a document", () => {
+		// Nothing was declared, so nothing is invented: the identity of an
+		// unparseable file is its hash and nothing else.
+		const bundle = mint();
+		const report = jsonReport(
+			runReceiptCli(["receipt.json", "--trust", "junk.json", "--json"], {
+				...ioFor(bundle, { "junk.json": Buffer.from("not json at all\n", "utf8") }),
+			}),
+		);
+		expect(report.verdict).toBe("UNVERIFIABLE");
+		expect(report.trustSnapshot?.sha256).toMatch(/^[0-9a-f]{64}$/);
+		expect(report.trustSnapshot?.version).toBeNull();
+		expect(report.trustSnapshot?.predecessor).toBeNull();
+	});
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

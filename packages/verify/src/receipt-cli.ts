@@ -874,7 +874,13 @@ export function runReceiptCli(argv: readonly string[], io: ReceiptCliIo): Receip
 		return finish(
 			preRunReport({
 				verdict: "UNVERIFIABLE",
-				trustSnapshot: { sha256: trustLoad.sha256, version: null, predecessor: null },
+				// The loader's own identity, not a hash with two nulls stapled to
+				// it: a snapshot that PARSED and then broke a structural rule said
+				// which snapshot it is, and R-OUT-1 does not stop applying because
+				// the run ended badly. Only bytes that never became a document
+				// report `version`/`predecessor` as null, and the loader is what
+				// decides which case this is.
+				trustSnapshot: trustLoad.identity,
 				missing: { what: "trustSnapshot", detail: trustLoad.detail },
 				...(arrivalId === undefined ? {} : { arrivalId }),
 			}),
