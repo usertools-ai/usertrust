@@ -331,6 +331,54 @@ export const PASS_VECTORS: readonly Vector[] = [
 			}),
 	},
 	{
+		name: "pass/rotation-successor-at-activation",
+		what: "The OTHER half of §8's boundary: a successor signing the first segment it was entitled to (segmentFirstSequence === activationSequence) verifies.",
+		mode: "receipt",
+		expect: PASS,
+		breaks: [],
+		build: () =>
+			mint({
+				mintKey: MINT_KEY_SUCCESSOR,
+				snapshot: snapshotPatch((s) => {
+					keyEntry(s, MINT_KEY_SUCCESSOR.keyId).predecessorKeyId = MINT_KEY.keyId;
+					s.keys.push({
+						keyId: MINT_KEY.keyId,
+						alg: "ed25519",
+						publicKey: MINT_KEY.publicKeyPem,
+						role: "mint",
+						minterKind: "proxy",
+						state: "retired",
+						// The mint event's segment starts at 11, which is exactly where
+						// the successor activated. The bound is INCLUSIVE from below.
+						activationSequence: 11,
+					});
+				}),
+			}),
+	},
+	{
+		name: "pass/rotation-successor-under-revoked-predecessor",
+		what: "A REVOKED predecessor is a legal rotation link (§8 forbids only `active`), and its successor — in good standing, above the boundary — verifies.",
+		mode: "receipt",
+		expect: PASS,
+		breaks: [],
+		build: () =>
+			mint({
+				mintKey: MINT_KEY_SUCCESSOR,
+				snapshot: snapshotPatch((s) => {
+					keyEntry(s, MINT_KEY_SUCCESSOR.keyId).predecessorKeyId = MINT_KEY.keyId;
+					s.keys.push({
+						keyId: MINT_KEY.keyId,
+						alg: "ed25519",
+						publicKey: MINT_KEY.publicKeyPem,
+						role: "mint",
+						minterKind: "proxy",
+						state: "revoked",
+						activationSequence: 11,
+					});
+				}),
+			}),
+	},
+	{
 		name: "pass/delegation-posture-indeterminate",
 		what: "`indeterminate` is RECOGNIZED verifier vocabulary: it labels the amount, it does not fail (§7).",
 		mode: "receipt",
@@ -1030,6 +1078,29 @@ export const SIGNATURE_VECTORS: readonly Vector[] = [
 						state: "active",
 					});
 					(s.chains[0] as { mintKeyIds: string[] }).mintKeyIds.push(MINT_KEY_SUCCESSOR.keyId);
+				}),
+			}),
+	},
+	{
+		name: "signature/rotation-successor-before-activation",
+		what: "The mirror of the retired-key attack: a key rotated IN at 18 signing material from segment 11 — a successor retroactively authenticating pre-rotation material.",
+		mode: "receipt",
+		expect: failed("signature", "SIG_INVALID"),
+		breaks: [],
+		build: () =>
+			mint({
+				mintKey: MINT_KEY_SUCCESSOR,
+				snapshot: snapshotPatch((s) => {
+					keyEntry(s, MINT_KEY_SUCCESSOR.keyId).predecessorKeyId = MINT_KEY.keyId;
+					s.keys.push({
+						keyId: MINT_KEY.keyId,
+						alg: "ed25519",
+						publicKey: MINT_KEY.publicKeyPem,
+						role: "mint",
+						minterKind: "proxy",
+						state: "retired",
+						activationSequence: 18,
+					});
 				}),
 			}),
 	},
@@ -1772,6 +1843,25 @@ export const SNAPSHOT_VECTORS: readonly Vector[] = [
 		"A `retired` key without activationSequence has an UNEVALUABLE boundary — the deciding comparison is gone.",
 		(s) => {
 			keyEntry(s, CHECKPOINT_KEY.keyId).state = "retired";
+		},
+	),
+	snapshotVector(
+		"snapshot/predecessor-without-activation-boundary",
+		"A `revoked` predecessor may omit activationSequence per ENTRY, but across the LINK that number is the live successor's LOWER bound — absent, the successor's window is unevaluable and the SNAPSHOT is what is incomplete.",
+		(s) => {
+			// `revoked`, not `retired`: on a retired key the per-entry rule already
+			// requires the boundary, so only the revoked spelling reaches the
+			// across-the-link rule. Verdict is UNVERIFIABLE rather than a
+			// SIG_INVALID against the successor — no receipt is at fault here.
+			keyEntry(s, CHECKPOINT_KEY.keyId).state = "revoked";
+			s.keys.push({
+				keyId: CHECKPOINT_KEY_SUCCESSOR.keyId,
+				alg: "ed25519",
+				publicKey: CHECKPOINT_KEY_SUCCESSOR.publicKeyPem,
+				role: "checkpoint",
+				predecessorKeyId: CHECKPOINT_KEY.keyId,
+				state: "active",
+			});
 		},
 	),
 	snapshotVector(

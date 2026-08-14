@@ -446,29 +446,6 @@ describe("§8 — a key with a declared successor cannot stay `active`", () => {
 		}
 	});
 
-	it("accepts `retired` and `revoked` predecessors — the rule is about the boundary, not the link", () => {
-		for (const state of ["retired", "revoked"] as const) {
-			const bundle = mint(
-				rotated((s) => {
-					const predecessor = s.keys.find((k) => k.keyId === CHECKPOINT_KEY.keyId);
-					if (predecessor !== undefined) {
-						predecessor.state = state;
-						if (state === "retired") predecessor.activationSequence = 18;
-					}
-					s.keys.push({
-						keyId: CHECKPOINT_KEY_SUCCESSOR.keyId,
-						alg: "ed25519",
-						publicKey: CHECKPOINT_KEY_SUCCESSOR.publicKeyPem,
-						role: "checkpoint",
-						predecessorKeyId: CHECKPOINT_KEY.keyId,
-						state: "active",
-					});
-				}),
-			);
-			expect(loadTrustSnapshot(bundle.snapshotBytes).ok, state).toBe(true);
-		}
-	});
-
 	it("still reports a CYCLE as a cycle — the new rule does not steal its vector", () => {
 		const bundle = mint(
 			rotated((s) => {
@@ -489,6 +466,215 @@ describe("§8 — a key with a declared successor cannot stay `active`", () => {
 		expect(load.ok).toBe(false);
 		expect(load.ok === false && load.detail).toContain("cyclic");
 	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §8 — the PREDECESSOR MATRIX, enumerated from the loader's own requirements.
+//
+// Every rotation defect found on this branch has been a state nobody
+// enumerated, not a rule nobody could derive:
+//
+//  · the successor's LOWER bound was never wired at all, so a key rotated in at
+//    segment 18 authenticated material from segment 11;
+//  · wiring it then failed CLOSED on an absent boundary — and a `revoked`
+//    predecessor legitimately has none, because the per-entry rules require
+//    `activationSequence` iff `retired`. Every successor-signed receipt under a
+//    revoked predecessor came back SIG_INVALID: the wrong verdict CLASS, since
+//    nothing about the receipt was wrong and the trust DATA was what was
+//    missing.
+//
+// A test set assembled from those two incidents tests the past. This one is
+// assembled from the shape of the data instead: `state` has three values,
+// "named as a predecessor" is orthogonal to all three, and the boundary is
+// either present or not. Every cell is written down and answered, including the
+// cells no incident has ever visited.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("§8 — every predecessor state, enumerated rather than remembered", () => {
+	interface Cell {
+		readonly state: "active" | "retired" | "revoked";
+		readonly boundary: number | undefined;
+		/** `null` ⇒ the snapshot must LOAD. Otherwise: the refusal names this. */
+		readonly refusal: string | null;
+		readonly why: string;
+	}
+
+	const MATRIX: readonly Cell[] = [
+		{
+			state: "retired",
+			boundary: 18,
+			refusal: null,
+			why: "§8's ordinary rotation: the end state, and the boundary is required on it.",
+		},
+		{
+			state: "retired",
+			boundary: undefined,
+			refusal: "retired key",
+			why: "The per-entry rule, unchanged: `retired` without a boundary is already refused.",
+		},
+		{
+			state: "revoked",
+			boundary: 18,
+			refusal: null,
+			why: "ADMISSIBLE. §8 forbids a boundary only on `active` (no successor yet); the compromise path still ROTATED, so the number exists and the entry may carry it.",
+		},
+		{
+			state: "revoked",
+			boundary: undefined,
+			refusal: "carries no activationSequence",
+			why: "The regression cell. Per ENTRY the boundary is optional on `revoked`; across the LINK it is the live successor's lower bound, and its absence makes a question the verifier MUST ask unanswerable — a snapshot defect (UNVERIFIABLE), not a receipt defect.",
+		},
+		{
+			state: "active",
+			boundary: undefined,
+			refusal: "names it as predecessor",
+			why: "A key with a declared successor is not `active`. The message must stay this one — the new rule sits behind it.",
+		},
+		{
+			state: "active",
+			boundary: 18,
+			refusal: "carries an activationSequence",
+			why: "The per-entry contradiction fires first: an `active` key has no successor and so no boundary.",
+		},
+	];
+
+	/** `CHECKPOINT_KEY` rotated away to `CHECKPOINT_KEY_SUCCESSOR`, one cell. */
+	function snapshotFor(cell: Cell): Buffer {
+		return mint({
+			snapshot: (s) => {
+				const predecessor = s.keys.find((k) => k.keyId === CHECKPOINT_KEY.keyId);
+				if (predecessor === undefined) throw new Error("no checkpoint key");
+				predecessor.state = cell.state;
+				if (cell.boundary !== undefined) predecessor.activationSequence = cell.boundary;
+				s.keys.push({
+					keyId: CHECKPOINT_KEY_SUCCESSOR.keyId,
+					alg: "ed25519",
+					publicKey: CHECKPOINT_KEY_SUCCESSOR.publicKeyPem,
+					role: "checkpoint",
+					predecessorKeyId: CHECKPOINT_KEY.keyId,
+					state: "active",
+				});
+				return s;
+			},
+		}).snapshotBytes;
+	}
+
+	for (const cell of MATRIX) {
+		const label = `${cell.state} predecessor, boundary ${cell.boundary ?? "absent"}`;
+		it(`${label} — ${cell.refusal === null ? "LOADS" : "refused"}: ${cell.why}`, () => {
+			const load = loadTrustSnapshot(snapshotFor(cell));
+			if (cell.refusal === null) {
+				// `|| load.detail` so a red cell prints WHY it was refused.
+				expect(load.ok === true || load.detail, label).toBe(true);
+				return;
+			}
+			expect(load.ok, label).toBe(false);
+			expect(load.ok === false && load.detail, label).toContain(cell.refusal);
+		});
+	}
+
+	it("a predecessor NAMED but absent from the snapshot is refused as absent, not as unbounded", () => {
+		// The cell off the state axis entirely: there is no entry to carry a
+		// boundary, and the refusal must still say which fact is missing.
+		const bytes = mint({
+			snapshot: (s) => {
+				const successor = s.keys.find((k) => k.keyId === CHECKPOINT_KEY.keyId);
+				if (successor !== undefined) successor.predecessorKeyId = "utk_ghost";
+				return s;
+			},
+		}).snapshotBytes;
+		const load = loadTrustSnapshot(bytes);
+		expect(load.ok).toBe(false);
+		expect(load.ok === false && load.detail).toContain("absent from the snapshot");
+	});
+
+	it("a key with NO predecessor is untouched — the first key in every lineage", () => {
+		// The cell that costs the most if it is ever wrong: the clean corpus
+		// snapshot has no rotation at all, and a lower-bound rule that reaches it
+		// would reject every conformant receipt ever minted.
+		const bundle = mint();
+		expect(loadTrustSnapshot(bundle.snapshotBytes).ok).toBe(true);
+		expect(verifyMinted().failure).toBeNull();
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §8 — the boundary is ONE number governing TWO keys, so BOTH halves are
+// exercised: the successor that signs at or after it verifies, and the one that
+// signs below it does not. The first half is the half whose absence let the
+// regression ship.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("§8 — a rotation SUCCESSOR, on both sides of its activation", () => {
+	/** The successor signs the mint; the predecessor is rotated away at `boundary`. */
+	function successorMinted(state: "retired" | "revoked", boundary: number): MintOptions {
+		return {
+			mintKey: MINT_KEY_SUCCESSOR,
+			snapshot: (s) => {
+				const successor = s.keys.find((k) => k.keyId === MINT_KEY_SUCCESSOR.keyId);
+				if (successor === undefined) throw new Error("no mint key");
+				successor.predecessorKeyId = MINT_KEY.keyId;
+				s.keys.push({
+					keyId: MINT_KEY.keyId,
+					alg: "ed25519",
+					publicKey: MINT_KEY.publicKeyPem,
+					role: "mint",
+					minterKind: "proxy",
+					state,
+					activationSequence: boundary,
+				});
+				return s;
+			},
+		};
+	}
+
+	/** The successor signs the mint segment's checkpoint; earlier ones do not. */
+	function successorCheckpointed(state: "retired" | "revoked", boundary: number): MintOptions {
+		return {
+			checkpointSigner: (index) => (index === 2 ? CHECKPOINT_KEY_SUCCESSOR : CHECKPOINT_KEY),
+			snapshot: (s) => {
+				const predecessor = s.keys.find((k) => k.keyId === CHECKPOINT_KEY.keyId);
+				if (predecessor === undefined) throw new Error("no checkpoint key");
+				predecessor.state = state;
+				predecessor.activationSequence = boundary;
+				s.keys.push({
+					keyId: CHECKPOINT_KEY_SUCCESSOR.keyId,
+					alg: "ed25519",
+					publicKey: CHECKPOINT_KEY_SUCCESSOR.publicKeyPem,
+					role: "checkpoint",
+					predecessorKeyId: CHECKPOINT_KEY.keyId,
+					state: "active",
+				});
+				return s;
+			},
+		};
+	}
+
+	// The mint segment's `segmentFirstSequence` is 11, so a successor that
+	// activated AT 11 signed the first segment it was ever entitled to.
+	for (const state of ["retired", "revoked"] as const) {
+		it(`a successor of a ${state} key signs AT its activation and VERIFIES — the receipt half`, () => {
+			expect(verifyMinted(successorMinted(state, 11)).failure).toBeNull();
+		});
+
+		it(`a successor of a ${state} key signing BELOW its activation is SIG_INVALID`, () => {
+			expect(verifyMinted(successorMinted(state, 18)).failure).toMatchObject({
+				step: "signature",
+				code: "SIG_INVALID",
+			});
+		});
+
+		it(`a successor of a ${state} key signs AT its activation and VERIFIES — the checkpoint half`, () => {
+			expect(verifyMinted(successorCheckpointed(state, 11)).failure).toBeNull();
+		});
+
+		it(`a successor of a ${state} key checkpointing BELOW its activation is CHECKPOINT_INVALID`, () => {
+			expect(verifyMinted(successorCheckpointed(state, 18)).failure).toMatchObject({
+				step: "checkpoint",
+				code: "CHECKPOINT_INVALID",
+			});
+		});
+	}
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

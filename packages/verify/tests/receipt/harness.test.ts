@@ -797,6 +797,13 @@ describe("corpus floor", () => {
 			"pass/retired-checkpoint-key-in-bounds",
 			"signature/retired-mint-key-out-of-bounds",
 			"checkpoint/retired-key-out-of-bounds",
+			// §8's boundary governs TWO keys. The four above are the PREDECESSOR's
+			// half; these are the SUCCESSOR's, including the `revoked`-predecessor
+			// cell whose absence let a legitimate rotation report SIG_INVALID.
+			"pass/rotation-successor-at-activation",
+			"pass/rotation-successor-under-revoked-predecessor",
+			"signature/rotation-successor-before-activation",
+			"snapshot/predecessor-without-activation-boundary",
 			"signature/key-revoked",
 			"checkpoint/key-revoked",
 			"signature/key-wrong-role",

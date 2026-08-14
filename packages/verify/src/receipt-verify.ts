@@ -1796,6 +1796,35 @@ function validateLineages(keys: ReadonlyMap<string, TrustKey>): string | null {
 		}
 	}
 
+	// The same rule one step further: a predecessor carrying NO boundary at all.
+	//
+	// The per-entry rules require `activationSequence` on a `retired` key and
+	// forbid it on an `active` one, and the loop above refuses an `active`
+	// predecessor — which leaves `revoked`, whose boundary the per-entry rules
+	// make OPTIONAL because §8 says a revoked key verifies nothing "bounded or
+	// not". Read across the LINK, that optionality does not survive: the number
+	// is not only the predecessor's upper bound, it is the SUCCESSOR's lower
+	// bound, and the successor is very much alive. Without it, "did this
+	// successor sign material from before it activated?" is a question §8
+	// requires the verifier to ask and leaves it unable to answer.
+	//
+	// It is refused HERE, at load, rather than at the point of use, and the
+	// distinction is the VERDICT CLASS. Nothing is wrong with a receipt whose
+	// successor key is in good standing; what is incomplete is the trust
+	// DATA — a property of the SNAPSHOT, true of every receipt it will ever be
+	// asked about, and §8's own resolution for a document it cannot admit is
+	// UNVERIFIABLE. Failing at use time instead reports SIG_INVALID /
+	// CHECKPOINT_INVALID — "we checked, and this receipt is bad" — for a
+	// comparison the verifier never actually made. That is the same
+	// receipt-relative vs snapshot-only split `genesisChoice` and the backward
+	// boundary above are on this side of.
+	for (const [predecessorKeyId, successorKeyId] of successorOf) {
+		const predecessor = keys.get(predecessorKeyId) as TrustKey;
+		if (predecessor.activationSequence === undefined) {
+			return `key ${predecessorKeyId} is named as predecessor by ${successorKeyId} but carries no activationSequence — ${successorKeyId}'s lower bound is unevaluable, and an unanswerable question is UNVERIFIABLE`;
+		}
+	}
+
 	// §8's boundary has an ORDER, and the per-entry rules cannot see it.
 	//
 	// The boundary "is set at the moment its successor activates, and equals the
@@ -1816,10 +1845,12 @@ function validateLineages(keys: ReadonlyMap<string, TrustKey>): string | null {
 	// encoding is then its predecessor's own boundary; refusing that would reject
 	// conformant trust material to catch nothing. Only backwards is refused.
 	//
-	// Keys with no boundary are SKIPPED rather than treated as zero: `revoked`
-	// verifies nothing "bounded or not" (§8), so its boundary is optional, and
-	// the comparison is made against the nearest ancestor that HAS one — which is
-	// transitively the same rule.
+	// The walk to the nearest ancestor that HAS a boundary is retained even
+	// though the rule above now guarantees the FIRST one does: it states the
+	// comparison transitively, which is what makes it independent of how the
+	// boundary's presence happens to be enforced today. Treating an absent
+	// boundary as zero, rather than walking past it, would be the bug — it
+	// invents an ordering claim the document never made.
 	for (const key of keys.values()) {
 		const boundary = key.activationSequence;
 		if (boundary === undefined) continue;
@@ -2302,9 +2333,15 @@ function keyStatePermits(
 		const predecessor = keys.get(predecessorKeyId);
 		const activatedAt = predecessor?.activationSequence;
 		if (activatedAt === undefined) {
-			// Fail closed: the loader admits a lineage only when the predecessor
-			// is retired-or-revoked with a boundary, so reaching here means the
-			// snapshot changed shape underneath that rule.
+			// UNREACHABLE, deliberately kept. The LOADER owns this rule: it refuses
+			// any snapshot in which a named predecessor carries no
+			// `activationSequence`, because a missing lower bound is a defect in
+			// the SNAPSHOT (UNVERIFIABLE) and not in the receipt this function is
+			// judging (FAILED). Answering it here instead is what shipped the wrong
+			// verdict class for every successor of a `revoked` key. Left as a
+			// defensive assertion so a future loader change cannot silently turn
+			// the comparison below into a skip — but the rule lives in
+			// `validateLineages`, and that is where it must be changed.
 			return `key ${key.keyId} names predecessor ${predecessorKeyId}, whose activation boundary is unevaluable — the successor's lower bound cannot be checked`;
 		}
 		if (segmentFirstSequence < activatedAt) {
