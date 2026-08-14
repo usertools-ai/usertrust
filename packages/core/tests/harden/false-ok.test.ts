@@ -295,14 +295,21 @@ describe("false OK — a documented count that stops matching reality", () => {
 		 * grammar which already has an implementation produced a wrong answer, so
 		 * the class is compiled and probed instead of parsed.
 		 *
-		 * `g` and `y` are stripped: they make `.test` stateful via `lastIndex`, so a
-		 * probe loop would silently skip alternate characters.
+		 * THE FLAGS ARE PART OF THE BEHAVIOUR, so they are preserved verbatim.
+		 * An earlier version stripped `g` and `y` because they make `.test` stateful
+		 * through `lastIndex` — sound while the probe used `.test`, and obsolete the
+		 * moment it moved to `.replace`, which manages `lastIndex` itself. Keeping
+		 * the strip would have made `/[\x00-\x1f\x7f]/` indistinguishable from the
+		 * required global form, and a non-global sanitizer removes only the FIRST
+		 * control and leaves the rest of an escape sequence intact
+		 * (`AGENTS.md:882-884`). Stripping a flag to make probing convenient is
+		 * discarding the property being probed.
 		 */
 		const compileClass = (literal: string): RegExp | null => {
 			const m = /^\/([\s\S]*)\/([a-z]*)$/.exec(literal);
 			if (m === null) return null;
 			try {
-				return new RegExp(m[1] as string, (m[2] as string).replace(/[gy]/g, ""));
+				return new RegExp(m[1] as string, m[2] as string);
 			} catch {
 				return null;
 			}
@@ -321,14 +328,23 @@ describe("false OK — a documented count that stops matching reality", () => {
 		 * Membership was never the property. Substitution is. So each code point is
 		 * embedded between ordinary characters and the subject must come back with
 		 * the control gone and the surrounding text intact.
+		 *
+		 * TWO occurrences, not one. A single embedded control cannot tell a global
+		 * sanitizer from a non-global one — both remove it — so a probe built from
+		 * one control accepts `/[\x00-\x1f\x7f]/`, which at runtime strips the first
+		 * control of an escape sequence and leaves the remainder on the terminal.
+		 * The subject therefore contains the same control twice, separated by
+		 * ordinary text, and BOTH must be gone.
 		 */
 		const PRE = "ok";
+		const MID = "mid";
 		const POST = "tail";
 		const removesEmbedded = (re: RegExp | null, lo: number, hi: number): boolean => {
 			if (re === null) return false;
 			for (let c = lo; c <= hi; c++) {
-				const subject = `${PRE}${String.fromCodePoint(c)}${POST}`;
-				if (subject.replace(re, "") !== `${PRE}${POST}`) return false;
+				const ch = String.fromCodePoint(c);
+				const subject = `${PRE}${ch}${MID}${ch}${POST}`;
+				if (subject.replace(re, "") !== `${PRE}${MID}${POST}`) return false;
 			}
 			return true;
 		};
@@ -475,13 +491,19 @@ describe("false OK — a documented count that stops matching reality", () => {
 		const REGEX_DECOYS: ReadonlyArray<readonly [string, string]> = [
 			["anchored to the whole string", "export const r=/^[\\x00-\\x1f\\x7f-\\x9f]$/g;"],
 			["anchored at the start", "export const r=/^[\\x00-\\x1f\\x7f-\\x9f]/g;"],
+			[
+				"not global — strips the first control and leaves the rest of the sequence",
+				"export const r=/[\\x00-\\x1f\\x7f-\\x9f]/;",
+			],
 		];
 		for (const [label, src] of REGEX_DECOYS) {
 			const c = countIn(src, "decoy.ts");
 			expect(
 				c.strong + c.weak,
-				`counted a regex that sanitizes nothing: ${label}. It matches a lone control, so a ` +
-					"membership probe accepts it, but `.replace` leaves controls inside real text in place.",
+				`counted a regex that does not sanitize: ${label}. Each of these survives a probe ` +
+					"that is too weak in a different way — an anchored form passes a single-character " +
+					"subject, a non-global form passes a subject holding one control — and each leaves " +
+					"controls in real terminal text.",
 			).toBe(0);
 		}
 
