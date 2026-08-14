@@ -316,25 +316,42 @@ describe("false OK — a documented count that stops matching reality", () => {
 		// this guard and the eighth token I had left unbounded, which is the
 		// lesson: "match the shape" is not one property, it is a property of every
 		// element, and I kept checking the one I had just been shown.
-		// AND THE OTHER WAYS THE SAME RANGE IS WRITTEN. The rounds above all
-		// generalized the COMPARISON form; the range itself has other legitimate
-		// spellings, and a sanitizer using one would have gone uncounted:
-		//   - DECIMAL bounds — 127 and 159 are the same two numbers;
-		//   - a REGEX character class spanning C1, in either escape spelling.
+		// TOKENIZE, then compare VALUES. Nine rounds of this guard were spent
+		// widening a character class one escape at a time — names, constant,
+		// literal text, line-orientation, identifier binding, identifier
+		// boundaries, hex boundaries — and round nine produced three more of the
+		// same: `159e3` and `0x9f_ff` are legal numeric literals whose shorter
+		// prefixes matched, and `αt >= 0x7f && t <= 0x9f` matched from the trailing
+		// `t` because an ASCII-only boundary does not know `α` is an identifier
+		// character.
 		//
-		// RESIDUAL LIMIT, stated rather than implied: this cannot detect an
+		// All three have one root: a boundary expressed as a character class is not
+		// a token boundary, and JS identifiers and numerics are both wider than
+		// ASCII. Patching the class again would have been the tenth instance of the
+		// habit this file documents, so this matches COMPLETE tokens — Unicode
+		// identifier classes, full numeric literals — and then asks what the
+		// numbers ARE rather than how they are spelled. `0x7f`, `127` and `127.0`
+		// are one bound; `159e3` is not 159.
+		//
+		// RESIDUAL LIMIT, stated rather than implied: this still cannot detect an
 		// arbitrary equivalent implementation — a lookup table, an imported helper,
-		// bounds computed at runtime. No pattern matcher can. The honest
-		// consequence is that this guard catches a stale count for every form
-		// anyone has written, not for every form that could be written; when a
-		// genuinely new one appears, the process is a bullet in AGENTS.md and a
-		// pattern here. This comment is the record of why that is the process
-		// rather than a promise the test cannot keep.
-		const STRONG_HEX =
-			/(?<![A-Za-z0-9_$])([A-Za-z_$][A-Za-z0-9_$]*) *>= *0x7f(?![0-9a-fA-F]) *&& *\1(?![A-Za-z0-9_$]) *<= *0x9f(?![0-9a-fA-F])/g;
-		const STRONG_DEC =
-			/(?<![A-Za-z0-9_$])([A-Za-z_$][A-Za-z0-9_$]*) *>= *127(?![0-9]) *&& *\1(?![A-Za-z0-9_$]) *<= *159(?![0-9])/g;
+		// bounds computed at runtime. No pattern matcher can. The guard catches a
+		// stale count for every form anyone has written, not every form that could
+		// be; when a genuinely new one appears the process is a bullet in AGENTS.md
+		// and a pattern here. That is a limit, not a promise the test cannot keep.
+		const ID_TOKEN = "[\\p{ID_Start}_$][\\p{ID_Continue}$]*";
+		const NUM_TOKEN =
+			"0[xX][0-9a-fA-F][0-9a-fA-F_]*n?|\\d[\\d_]*(?:\\.[\\d_]+)?(?:[eE][+-]?\\d+)?n?";
+		const RANGE_CHECK = new RegExp(
+			`(?<![\\p{ID_Continue}$])(${ID_TOKEN}) *>= *(${NUM_TOKEN}) *&& *\\1(?![\\p{ID_Continue}$]) *<= *(${NUM_TOKEN})`,
+			"gu",
+		);
+		/** Numeric VALUE of a literal token, ignoring separators and BigInt suffix. */
+		const literalValue = (token: string): number =>
+			Number(token.replace(/_/g, "").replace(/n$/, ""));
+		/** A character class spanning C1, in either escape spelling. */
 		const STRONG_RE = /\\u0080-\\u009f|\\x80-\\x9f/g;
+
 		const WEAK = /= *\/\[\\x00-\\x1f\\x7f\]\/g/g;
 		for (const dir of srcDirs) {
 			let files: string[];
@@ -351,10 +368,14 @@ describe("false OK — a documented count that stops matching reality", () => {
 			}
 			for (const f of files) {
 				const code = codeOnly(await readFile(f, "utf-8"));
-				strong +=
-					(code.match(STRONG_HEX)?.length ?? 0) +
-					(code.match(STRONG_DEC)?.length ?? 0) +
-					(code.match(STRONG_RE)?.length ?? 0);
+				for (const m of code.matchAll(RANGE_CHECK)) {
+					// C1 is 0x7f..0x9f however it is written. `0x7f`, `127` and
+					// `127.0` are the same bound; `159e3` is not 159.
+					if (literalValue(m[2] as string) === 0x7f && literalValue(m[3] as string) === 0x9f) {
+						strong++;
+					}
+				}
+				strong += code.match(STRONG_RE)?.length ?? 0;
 				weak += code.match(WEAK)?.length ?? 0;
 			}
 		}
