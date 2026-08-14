@@ -446,7 +446,15 @@ describe("false OK — a documented count that stops matching reality", () => {
 		};
 
 		const countIn = (src: string, name: string): { strong: number; weak: number } => {
-			const sf = ts.createSourceFile(name, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+			// JSX needs `ScriptKind.TSX` or the parser rejects the file, and a
+			// rejected file contributes zero sanitizers — silently, and in the
+			// direction that masks a deletion.
+			const kind = name.endsWith(".tsx")
+				? ts.ScriptKind.TSX
+				: /\.(m|c)?js$/.test(name)
+					? ts.ScriptKind.JS
+					: ts.ScriptKind.TS;
+			const sf = ts.createSourceFile(name, src, ts.ScriptTarget.Latest, true, kind);
 
 			// FIRST PASS: which regexes does this file actually replace WITH? A class
 			// that could sanitize is not a sanitizer — it has to be wired to a
@@ -679,7 +687,16 @@ describe("false OK — a documented count that stops matching reality", () => {
 			for (const e of await readdir(dir, { withFileTypes: true })) {
 				const full = join(dir, e.name);
 				if (e.isDirectory()) out.push(...(await tsFiles(full)));
-				else if (e.name.endsWith(".ts") || e.name.endsWith(".mjs")) out.push(full);
+				// THE WHOLE JS/TS FAMILY, not a list I extend one entry at a time.
+				// I widened this to `.mjs` for the shipped hook and left `.tsx` out —
+				// the same partial fix, one extension along, in the file that keeps
+				// catching me making it. `packages/ui/src` holds seven `.tsx` files;
+				// none carries a sanitizer today, so the count is unaffected, but a
+				// sanitizer added there would have been invisible and deleting one
+				// would have gone unnoticed. An extension list is still an
+				// enumeration and will still drift — matching the family is the
+				// narrowest form that does not need extending per file type.
+				else if (/\.(m|c)?[jt]sx?$/.test(e.name)) out.push(full);
 			}
 			return out;
 		};
