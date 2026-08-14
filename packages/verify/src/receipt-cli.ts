@@ -700,7 +700,16 @@ function renderHumanReport(report: ReceiptCliReport): string {
 			lines.push(describeStep(name, outcome));
 		}
 	}
-	if (report.checks !== null) {
+	// 3(a) is reported BESIDE the named checks, never out of them. It is not one
+	// of §7's named checks and it does not come from the same place: a run that
+	// stops before `verifyReceipt` has `checks: null` and still has an honest
+	// answer about the arrival context the caller supplied — `unavailable`,
+	// because the operator typed an ID and nothing compared it. Gating the line
+	// on `checks` hid exactly the case `--expect-id` was passed to see, and left
+	// `--json` as the only mode that told the truth about it (CLI spec §6 does
+	// not make it that). Suppressed only when there is nothing to say: no
+	// arrival context supplied AND no run to report `notApplicable` for.
+	if (report.checks !== null || report.arrivalContext.expected !== null) {
 		lines.push("");
 		lines.push(
 			`Arrival check (3a): ${report.arrivalContext.result}` +
@@ -708,6 +717,8 @@ function renderHumanReport(report: ReceiptCliReport): string {
 					? ` (expected ${clip(report.arrivalContext.expected)})`
 					: ""),
 		);
+	}
+	if (report.checks !== null) {
 		lines.push(
 			`Registry binding (3b): ${report.checks.registryBinding.result} — offline; no resolver was consulted (§7's Offline column)`,
 		);

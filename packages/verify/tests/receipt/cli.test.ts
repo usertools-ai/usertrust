@@ -952,6 +952,33 @@ describe("--expect-id", () => {
 		);
 		expect(report.arrivalContext.result).toBe("notApplicable");
 	});
+
+	it("says `unavailable` in the HUMAN report too — 3(a) is not one of the named checks", () => {
+		// A pre-run refusal has `checks: null`, and the human report gated the
+		// arrival line on that block — so the operator who typed `--expect-id`
+		// saw nothing at all about it and had to reach for `--json` to learn the
+		// check never ran. Step 3(a) is reported beside the named checks, not
+		// out of them, and CLI spec §6 does not make `--json` the honest mode.
+		const bundle = mint();
+		const io = ioFor(bundle);
+		const result = runReceiptCli(
+			["receipt.json", "--trust", "absent.json", "--expect-id", DEFAULT_RECEIPT_ID],
+			{
+				...io,
+				readFile: (path: string) => {
+					if (path === "absent.json") throw new Error("ENOENT: no such file");
+					return io.readFile(path);
+				},
+			},
+		);
+		expect(result.stdout).toContain("Verdict: UNVERIFIABLE");
+		expect(result.stdout).toContain(
+			`Arrival check (3a): unavailable (expected ${DEFAULT_RECEIPT_ID})`,
+		);
+		// Still no fabricated ledger: nothing ran, so there is nothing to name.
+		expect(result.stdout).not.toContain("Steps:");
+		expect(result.stdout).not.toContain("Registry binding (3b):");
+	});
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
