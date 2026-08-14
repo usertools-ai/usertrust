@@ -6,6 +6,7 @@ const COMMANDS = [
 	"init",
 	"inspect",
 	"health",
+	"policy",
 	"verify",
 	"export",
 	"anchor",
@@ -81,6 +82,11 @@ switch (command) {
 	case "health":
 		await import("./health.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
+	case "policy": {
+		const rest = argv.slice(argv.indexOf("policy") + 1).filter((a) => a !== "--json");
+		await import("./policy.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
+		break;
+	}
 	case "verify":
 		await import("./verify.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
@@ -136,6 +142,7 @@ Commands:
   init          Initialize trust vault
   inspect       Show trust bank statement
   health        Show entropy diagnostics
+  policy        Validate the policy file before it has to matter
   verify        Verify audit chain integrity
   export        Export receipts as markdown (Obsidian-ready)
   anchor        External audit anchoring (signed checkpoints)

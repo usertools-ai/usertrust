@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
+import { unlinkSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { evaluatePolicy, type GateRule } from "../../src/policy/gate.js";
+import { evaluatePolicy, type GateRule, loadPolicies } from "../../src/policy/gate.js";
 
 const CATASTROPHIC = ["(a+)+$", "(.*)*$", "(\\d+)+$", "(a|a)*$", "(a|ab)*$"];
 
@@ -22,11 +23,46 @@ describe("safeRegExp structural ReDoS guard", () => {
 			const start = Date.now();
 			const result = evaluatePolicy(rules, { text: evil });
 			const elapsed = Date.now() - start;
-			// Pattern is rejected as unsafe → condition never matches → allow, fast.
+			// The ReDoS property is the TIME BOUND, and it is unchanged: safeRegExp
+			// still refuses the pattern structurally, without ever handing it to the
+			// engine.
 			expect(elapsed).toBeLessThan(1000);
-			expect(result.decision).toBe("allow");
+			// The DECISION changed, deliberately. This used to assert "allow": a hard
+			// rule whose pattern could not be compiled evaluated to "did not match"
+			// rather than "could not evaluate". An unusable guard is now
+			// indeterminate, and a hard rule fails closed on it.
+			expect(result.decision).toBe("deny");
 		});
 	}
+
+	it("refuses a catastrophic pattern at LOAD time, before it can be relied on", () => {
+		// The better outcome than either verdict: the operator is told while they
+		// still have the rule in front of them, rather than shipping a guard that
+		// cannot run.
+		const path = `/tmp/trust-redos-policy-${Date.now()}.json`;
+		try {
+			writeFileSync(
+				path,
+				JSON.stringify({
+					rules: [
+						{
+							name: "redos",
+							effect: "deny",
+							enforcement: "hard",
+							conditions: [{ field: "text", operator: "regex", value: "(a+)+$" }],
+						},
+					],
+				}),
+			);
+			expect(() => loadPolicies(path)).toThrow(/not a usable regular expression/);
+		} finally {
+			try {
+				unlinkSync(path);
+			} catch {
+				/* best effort */
+			}
+		}
+	});
 
 	it("still allows a safe regex to match", () => {
 		const rules: GateRule[] = [

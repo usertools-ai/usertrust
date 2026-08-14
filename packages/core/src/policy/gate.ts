@@ -18,6 +18,7 @@
 import { readFileSync } from "node:fs";
 import { minimatch } from "minimatch";
 import { parse as parseYaml } from "yaml";
+import { z } from "zod";
 import type {
 	FieldCondition,
 	FieldOperator,
@@ -280,10 +281,28 @@ function evaluateFieldCondition(fc: FieldCondition, context: Record<string, unkn
 		case "not_exists":
 			return resolved === undefined || resolved === null;
 
+		// Every operator below COMPARES a resolved value. If the field did not
+		// resolve, the comparison is not false — it is unanswerable, and only
+		// "indeterminate" carries that to `ruleMatches`, which is what makes a hard
+		// rule fail closed. Returning bare `false` here (the prior behaviour for
+		// eq/in/contains/regex) reads as "the rule did not match", which skips the
+		// guard rather than firing it.
+		//
+		// `exists`/`not_exists` are deliberately NOT in this set: an unresolved
+		// field is precisely what they measure, so for them it is a determinate
+		// answer, not a missing one.
+		// `undefined` here means the PATH did not resolve — the key is absent, or
+		// the walk ran off a non-object. That is unanswerable. An explicit `null`
+		// is different: it is a value the document actually carries, so a rule
+		// written `value: null` compares against it determinately. Conflating the
+		// two let a hard `eq: null` rule read an ABSENT field as "not null" and
+		// allow the call, which is the fail-open shape this file is fixing.
 		case "eq":
+			if (resolved === undefined) return "indeterminate";
 			return resolved === fc.value;
 
 		case "neq":
+			if (resolved === undefined) return "indeterminate";
 			return resolved !== fc.value;
 
 		case "gt":
@@ -302,21 +321,33 @@ function evaluateFieldCondition(fc: FieldCondition, context: Record<string, unkn
 			if (typeof resolved !== "number" || typeof fc.value !== "number") return "indeterminate";
 			return resolved <= fc.value;
 
+		// Membership reads the ARRAY, so an explicit `null` in the list is a value
+		// the author put there on purpose: `not_in: [null]` says "null is allowed".
+		// Only a path that did not resolve is unanswerable here.
 		case "in":
-			return Array.isArray(fc.value) && fc.value.includes(resolved);
+			if (!Array.isArray(fc.value)) return "indeterminate";
+			if (resolved === undefined) return "indeterminate";
+			return fc.value.includes(resolved);
 
 		case "not_in":
-			return Array.isArray(fc.value) && !fc.value.includes(resolved);
+			if (!Array.isArray(fc.value)) return "indeterminate";
+			if (resolved === undefined) return "indeterminate";
+			return !fc.value.includes(resolved);
 
 		case "contains":
-			return (
-				typeof resolved === "string" && typeof fc.value === "string" && resolved.includes(fc.value)
-			);
+			if (typeof fc.value !== "string") return "indeterminate";
+			// A non-string subject (absent, or an array/object the caller sent in
+			// place of the string the rule expects) cannot answer "contains".
+			if (typeof resolved !== "string") return "indeterminate";
+			return resolved.includes(fc.value);
 
 		case "regex": {
-			if (typeof resolved !== "string" || typeof fc.value !== "string") return false;
+			if (typeof fc.value !== "string") return "indeterminate";
+			if (typeof resolved !== "string") return "indeterminate";
 			const re = safeRegExp(fc.value);
-			if (re === null) return false;
+			// An unusable pattern is refused at load time; reaching here means the
+			// rule was built programmatically. Unanswerable, not "no".
+			if (re === null) return "indeterminate";
 			// Layer B (defense-in-depth): bound the scanned input so even a
 			// structural miss cannot be fed an unbounded string.
 			const input =
@@ -325,7 +356,12 @@ function evaluateFieldCondition(fc: FieldCondition, context: Record<string, unkn
 		}
 
 		default:
-			return false;
+			// Unreachable for a rule that came through `loadPolicies`, which rejects
+			// an unknown operator at load time. Still fails CLOSED rather than
+			// returning `false`, because `evaluatePolicy` is also called with
+			// programmatically-built rules that never touch the loader: a typo'd
+			// operator there used to disable the rule outright and allow the call.
+			return "indeterminate";
 	}
 }
 
@@ -370,8 +406,31 @@ export function isWithinTimeWindow(
 
 	return timeWindows.some((tw) => {
 		if (tw.daysOfWeek && !tw.daysOfWeek.includes(dayOfWeek)) return false;
-		if (tw.startHour !== undefined && hour < tw.startHour) return false;
-		if (tw.endHour !== undefined && hour >= tw.endHour) return false;
+
+		const { startHour, endHour } = tw;
+
+		// A window that WRAPS MIDNIGHT — `startHour > endHour`, e.g. an overnight
+		// window {startHour: 22, endHour: 6}.
+		//
+		// This was previously evaluated with the two half-open tests below applied
+		// independently, which for a wrapping window cannot both pass at any hour:
+		// 23 fails `hour >= endHour`, 02 fails `hour < startHour`. Such a window
+		// therefore imposed no constraint. Verified across all 24 hours.
+		//
+		// The day gate above is applied to the timestamp's OWN local day, so an
+		// overnight window restricted to Monday covers Monday 22:00-23:59 and
+		// Monday 00:00-05:59 — not Tuesday's small hours. That is the reading with
+		// the fewest surprises, and the only one that does not require inventing a
+		// notion of which day a wrapped window "belongs" to.
+		if (startHour !== undefined && endHour !== undefined && startHour > endHour) {
+			return hour >= startHour || hour < endHour;
+		}
+
+		// Non-wrapping: each bound is independent, and either may be omitted.
+		// `startHour === endHour` stays a zero-width window that matches nothing,
+		// which is what it did before; read it as "no hours", not "all hours".
+		if (startHour !== undefined && hour < startHour) return false;
+		if (endHour !== undefined && hour >= endHour) return false;
 		return true;
 	});
 }
@@ -556,6 +615,116 @@ export interface PolicyContext extends Record<string, unknown> {
 }
 
 /**
+ * The {@link PolicyContext} fields the HOST owns — a caller must never supply
+ * one, because each steers whether a rule fires rather than being data a rule
+ * reads, and for each there is a trustworthy host-side source that a
+ * caller-supplied value would displace.
+ *
+ * WHY THIS LIST EXISTS AS A VALUE. The three SDK call sites spread caller params
+ * and then re-assert the trusted fields by hand, one literal at a time, per the
+ * re-assertion invariant in AGENTS.md. That hand-maintained list has already been
+ * found incomplete once — `timestamp` was added to it in PR #95. Re-asserting a
+ * field only holds if somebody remembers to. STRIPPING the set covers the next
+ * one too, because a field absent from the explicit assignments after the spread
+ * is simply absent, and absent is the fail-closed value.
+ *
+ * `tests/harden/policy-context-fields.test.ts` reads this file and asserts that
+ * every field `PolicyContext` declares appears in EITHER this array or
+ * {@link CALLER_SUPPLIED_POLICY_FIELDS}, so adding a field to the interface
+ * without classifying it fails the suite. That is the same source-parity
+ * mechanism `shared/ids.ts` and `cli/budget.ts` are held together with.
+ */
+export const HOST_CONTROLLED_POLICY_FIELDS = [
+	"timestamp",
+	"budgetFractionRemaining",
+	"budgetRunwayHours",
+	"cost_center",
+] as const;
+
+/**
+ * Declared {@link PolicyContext} fields deliberately NOT stripped, and why.
+ *
+ * The parity test requires every declared field to appear in exactly one of
+ * these two lists, so a newly added field cannot be quietly omitted from both —
+ * whoever adds it has to make the trust call explicitly and record it here.
+ *
+ * - `scope` — CALLER-DECLARED CONTEXT, not a host secret. Unlike `timestamp`
+ *   (where the gate has a real clock to fall back on) there is no host-side
+ *   source for it on any SDK path: no call site in `src/` ever sets
+ *   `context.scope`, and the patterns it is matched against are file globs
+ *   (`src/routes/**`) describing where an agent is working — something only the
+ *   caller knows. Stripping it would not close a hole; it would make every
+ *   `scopePatterns` rule permanently inert, since `ruleMatches` requires a
+ *   non-empty context scope for such a rule to match at all. That trade is a
+ *   product decision (wire a host-side scope, or document scope as
+ *   self-declared and unsuitable for adversarial guards) and is tracked
+ *   separately rather than being made silently here.
+ * - `timeWindows` — read by nothing. `ruleMatches` consults `rule.timeWindows`;
+ *   `context.timeWindows` has no reader anywhere in the repo despite the
+ *   interface doc claiming it "enables time-window matching". Stripping a field
+ *   nothing reads would imply it once mattered. It wants deleting or wiring, not
+ *   sanitising.
+ */
+export const CALLER_SUPPLIED_POLICY_FIELDS = ["scope", "timeWindows"] as const;
+
+/**
+ * Context keys a governor ASSERTS itself, which `PolicyContext` does not declare.
+ *
+ * These ride the interface's index signature rather than being declared fields,
+ * so the parity test cannot see them — and **the three call sites assert
+ * different subsets**. `governAction` sets `action_kind`/`action_name` and
+ * deliberately no `model`; the LLM and headless paths set `model` and neither
+ * action key. A field one surface asserts is therefore unprotected on the
+ * surfaces that do not, and arrives from `...params` like any other caller key.
+ *
+ * Measured before this list existed: a hard `model contains opus` rule denied an
+ * action call with no model (absent -> indeterminate -> guard fires), and
+ * ALLOWED the same call when the caller supplied `model: "safe"` in
+ * `action.params` — the caller turning a hard guard off by answering a question
+ * that surface never asks. `action_kind` injected onto the LLM path likewise.
+ *
+ * So the UNION is stripped everywhere, not the per-surface subset. A key that is
+ * host-owned anywhere is caller-forbidden everywhere; each site then asserts the
+ * ones it genuinely knows.
+ */
+export const HOST_ASSERTED_CONTEXT_KEYS = [
+	"model",
+	"tier",
+	"estimated_cost",
+	"budget_remaining",
+	"budget_remaining_after",
+	"action_kind",
+	"action_name",
+] as const;
+
+/**
+ * Strip every host-owned field from caller-supplied params.
+ *
+ * Use this at the boundary, BEFORE the spread — `{ ...sanitizePolicyContext(params), … }` —
+ * rather than re-asserting fields after it. The difference matters: a
+ * re-assertion that someone forgets to write silently lets the caller's value
+ * through, whereas a field missing from the explicit set after this call is
+ * simply absent, and absent is the fail-closed answer for a hard rule.
+ *
+ * Arbitrary caller keys survive on purpose. They are what a policy addresses by
+ * dot-notation (`params.metadata.team`), and they steer nothing on their own —
+ * only the declared fields above do.
+ */
+export function sanitizePolicyContext<T extends Record<string, unknown>>(
+	callerSupplied: T | undefined,
+): Record<string, unknown> {
+	if (callerSupplied === undefined || callerSupplied === null) return {};
+	const out: Record<string, unknown> = { ...callerSupplied };
+	for (const field of HOST_CONTROLLED_POLICY_FIELDS) {
+		delete out[field];
+	}
+	for (const key of HOST_ASSERTED_CONTEXT_KEYS) {
+		delete out[key];
+	}
+	return out;
+}
+
+/**
  * Extended policy rule for the gate. Adds optional `id`, `description`,
  * `priority`, `enabled`, `scopePatterns`, and `timeWindows` fields to the
  * shared PolicyRule type.
@@ -690,6 +859,468 @@ export function evaluatePolicy(rules: GateRule[], context: PolicyContext): Polic
 // Policy file loading
 // ---------------------------------------------------------------------------
 
+/** One thing wrong with a policy file, addressed to the operator who wrote it. */
+export interface PolicyLoadIssue {
+	/** Dotted path to the offending node, e.g. `rules[2].conditions[0].operator`. */
+	readonly at: string;
+	readonly message: string;
+}
+
+/**
+ * A policy file exists but cannot be honoured as written.
+ *
+ * This is deliberately a THROW and not an empty rule set. The previous
+ * behaviour — `catch { return [] }` around a bare `as GateRule[]` — meant a tab
+ * character in the YAML, one wrong indent, a trailing comma, or a top-level key
+ * of `policies:` instead of `rules:` silently produced ZERO custom rules. Only
+ * the platform DEFAULT_RULES survived, every content/model/PII deny rule was
+ * gone, and nothing anywhere said so: no throw, no log, no audit event. The
+ * governor started normally, and `usertrust health` reported
+ * `Policy violations (30d): 0 [ok]` in green — because it counts violations,
+ * not rules, so the indicator read HEALTHIER the moment governance stopped
+ * existing.
+ *
+ * A policy that cannot be parsed is not a policy. Refusing to start is the only
+ * answer that cannot be mistaken for enforcement.
+ */
+export class PolicyLoadError extends Error {
+	readonly file: string;
+	readonly issues: readonly PolicyLoadIssue[];
+
+	constructor(file: string, issues: readonly PolicyLoadIssue[]) {
+		const detail = issues.map((i) => `  ${i.at}: ${i.message}`).join("\n");
+		super(`usertrust: policy file cannot be loaded: ${file}\n${detail}`);
+		this.name = "PolicyLoadError";
+		this.file = file;
+		this.issues = issues;
+	}
+}
+
+/** Outcome of reading a policy file without committing to throwing. */
+export interface PolicyLoadResult {
+	/** Rules that validated. Empty when `issues` is non-empty. */
+	readonly rules: GateRule[];
+	readonly issues: readonly PolicyLoadIssue[];
+	/**
+	 * Whether a file was actually there — ENOENT, and nothing else, answers false.
+	 *
+	 * Reported rather than left for the caller to re-derive, because the obvious
+	 * way to re-derive it is `existsSync`, which answers false for a file inside a
+	 * directory it cannot traverse. Every caller that asked that question
+	 * separately got "absent" for a file that was present and unreadable.
+	 */
+	readonly present: boolean;
+}
+
+/**
+ * The 12 operators, as a runtime value.
+ *
+ * `satisfies` pins it to {@link FieldOperator}, so adding a member to the type
+ * without adding it here is a compile error rather than a rule that loads and
+ * then never fires.
+ */
+export const FIELD_OPERATORS = [
+	"exists",
+	"not_exists",
+	"eq",
+	"neq",
+	"gt",
+	"gte",
+	"lt",
+	"lte",
+	"in",
+	"not_in",
+	"contains",
+	"regex",
+] as const satisfies readonly FieldOperator[];
+
+/**
+ * Exhaustiveness in the OTHER direction.
+ *
+ * `satisfies readonly FieldOperator[]` only checks that everything listed is a
+ * member of the union — it does not check that every member is listed. A new
+ * `FieldOperator` would therefore compile cleanly while `z.enum(FIELD_OPERATORS)`
+ * rejected every policy file using it, which is the same shape as the defects
+ * this file exists to close: the guard reports success for a set it does not
+ * cover. This assertion fails to compile until the new member is added here,
+ * naming it in the error.
+ */
+type UnlistedOperator = Exclude<FieldOperator, (typeof FIELD_OPERATORS)[number]>;
+const _FIELD_OPERATORS_EXHAUSTIVE: UnlistedOperator extends never ? true : UnlistedOperator = true;
+void _FIELD_OPERATORS_EXHAUSTIVE;
+
+/** Operators whose `value` must be a number. */
+const NUMERIC_VALUE_OPERATORS = new Set<FieldOperator>(["gt", "gte", "lt", "lte"]);
+/** Operators whose `value` must be an array. */
+const ARRAY_VALUE_OPERATORS = new Set<FieldOperator>(["in", "not_in"]);
+/** Operators whose `value` must be a string. */
+const STRING_VALUE_OPERATORS = new Set<FieldOperator>(["contains", "regex"]);
+/** Operators whose comparison is `===` or `includes`, i.e. identity for objects. */
+const IDENTITY_COMPARED_OPERATORS = new Set<FieldOperator>(["eq", "neq", "in", "not_in"]);
+/** Operators that read no `value` at all — they test presence. */
+const VALUELESS_OPERATORS = new Set<FieldOperator>(["exists", "not_exists"]);
+
+/** Keys a condition may carry. Checked inside the refinement, not by `strictObject`. */
+const FIELD_CONDITION_KEYS = new Set(["field", "operator", "value"]);
+
+/**
+ * NOT `strictObject`, deliberately.
+ *
+ * zod skips `.superRefine` when the object parse itself fails, so a condition
+ * carrying BOTH an unknown key and an unusable operand reported only the key —
+ * and the operator had to fix it and re-run to discover the second fault. That
+ * breaks the one-pass contract `policy validate` promises, in the same way the
+ * early returns did: a diagnostic that stops at the first problem makes the
+ * caller iterate.
+ *
+ * The unknown-key check therefore lives INSIDE the refinement alongside the
+ * semantic checks, so structural and semantic faults are collected together.
+ * `looseObject` rather than `object` because the latter STRIPS unknown keys
+ * before the refinement runs — the check would see a clean object and pass,
+ * which is the silently-discarded-input defect this file exists to close.
+ */
+const FieldConditionSchema = z
+	.looseObject({
+		// `.optional()` too: a MISSING key is still a base-parse failure otherwise
+		// ("expected nonoptional"), which aborts and skips the refinement — the same
+		// hiding, one step earlier. Presence is required in the refinement instead.
+		field: z.unknown().optional(),
+		// EVERY field is `unknown` so that NOTHING in the base parse can abort.
+		// zod skips `.superRefine` the moment any declared field fails, so a typed
+		// base schema hides every other fault behind the first type error — the
+		// one-pass contract broken once per field until the whole set was closed.
+		// The type checks live in the refinement below instead.
+		operator: z.unknown().optional(),
+		value: z.unknown().optional(),
+	})
+	.superRefine((fc, ctx) => {
+		for (const key of Object.keys(fc)) {
+			if (FIELD_CONDITION_KEYS.has(key)) continue;
+			ctx.addIssue({
+				code: "custom",
+				path: [key],
+				message: `unknown key on a condition. A condition carries only field, operator and value.`,
+			});
+		}
+
+		if (typeof fc.field !== "string" || fc.field === "") {
+			ctx.addIssue({
+				code: "custom",
+				path: ["field"],
+				message: `must be a non-empty field path, got ${fc.field === undefined ? "nothing" : typeof fc.field}`,
+			});
+		}
+
+		const op = fc.operator as FieldOperator;
+		if (typeof fc.operator !== "string") {
+			ctx.addIssue({
+				code: "custom",
+				path: ["operator"],
+				message: `must be an operator name, got ${fc.operator === undefined ? "nothing" : typeof fc.operator}`,
+			});
+			return;
+		}
+		if (!(FIELD_OPERATORS as readonly string[]).includes(fc.operator)) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["operator"],
+				message: `unknown operator "${fc.operator}". One of: ${FIELD_OPERATORS.join(", ")}`,
+			});
+			return;
+		}
+		if (VALUELESS_OPERATORS.has(op)) return;
+		if (fc.value === undefined) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["value"],
+				message: `operator "${op}" requires a value`,
+			});
+			return;
+		}
+		if (NUMERIC_VALUE_OPERATORS.has(op) && typeof fc.value !== "number") {
+			ctx.addIssue({
+				code: "custom",
+				path: ["value"],
+				message: `operator "${op}" compares numbers, but value is ${typeof fc.value}`,
+			});
+		}
+		// `typeof NaN === "number"`, and YAML spells it `.nan`. A non-finite operand
+		// makes a rule that validates cleanly and can never fire — the guard present
+		// in the file and absent in effect.
+		//
+		// Checked for EVERY operator, not only the numeric comparisons: `NaN === NaN`
+		// is false, so `eq: .nan` never matches either, and scoping this to
+		// `NUMERIC_VALUE_OPERATORS` left exactly that hole. Infinity is refused on
+		// the same grounds — a threshold nothing can cross is not a threshold.
+		//
+		// An OBJECT or ARRAY operand for an equality/membership test compares by
+		// IDENTITY. A rule loaded from disk is freshly parsed, so it can never share
+		// a reference with request data: `eq: {team: "x"}` never matches a
+		// structurally identical request and `neq` always does. Such a rule validates
+		// and cannot enforce, so it is refused rather than accepted.
+		if (IDENTITY_COMPARED_OPERATORS.has(op)) {
+			const operands = op === "in" || op === "not_in" ? (fc.value as unknown[]) : [fc.value];
+			if (Array.isArray(operands)) {
+				for (const [i, operand] of operands.entries()) {
+					if (operand === null || typeof operand !== "object") continue;
+					ctx.addIssue({
+						code: "custom",
+						path: op === "in" || op === "not_in" ? ["value", i] : ["value"],
+						message: `operator "${op}" compares by identity, so a ${Array.isArray(operand) ? "list" : "map"} operand can never match a value read from a request. Compare a primitive field instead.`,
+					});
+				}
+			}
+		}
+
+		// Array operands are deliberately NOT covered by the finite check below:
+		// `includes` uses SameValueZero, so `in: [.nan]` does match a NaN subject
+		// and is a rule that works.
+		if (typeof fc.value === "number" && !Number.isFinite(fc.value)) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["value"],
+				message: `operator "${op}" cannot use ${Number.isNaN(fc.value) ? "NaN" : String(fc.value)} as an operand: no value compares equal to it, so the rule would never fire`,
+			});
+		}
+		if (ARRAY_VALUE_OPERATORS.has(op) && !Array.isArray(fc.value)) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["value"],
+				message: `operator "${op}" needs an array value, but value is ${typeof fc.value}`,
+			});
+		}
+		if (STRING_VALUE_OPERATORS.has(op) && typeof fc.value !== "string") {
+			ctx.addIssue({
+				code: "custom",
+				path: ["value"],
+				message: `operator "${op}" needs a string value, but value is ${typeof fc.value}`,
+			});
+		}
+		// A pattern the evaluator would refuse at runtime is refused here instead,
+		// where the author can still see which rule it belonged to. `safeRegExp`
+		// rejects over-long patterns and catastrophic-backtracking shapes as well
+		// as syntactically invalid ones.
+		if (op === "regex" && typeof fc.value === "string" && safeRegExp(fc.value) === null) {
+			ctx.addIssue({
+				code: "custom",
+				path: ["value"],
+				message: "not a usable regular expression (invalid, too long, or unsafe to evaluate)",
+			});
+		}
+	});
+
+const TimeWindowSchema = z.strictObject({
+	daysOfWeek: z.array(z.number().int().min(0).max(6)).optional(),
+	startHour: z.number().int().min(0).max(23).optional(),
+	endHour: z.number().int().min(0).max(24).optional(),
+});
+
+/**
+ * STRICT on purpose — an unknown key is an ERROR, not something to drop.
+ *
+ * zod strips unrecognised keys by default, and that default is this very defect
+ * in miniature: a rule written with `scopePattern` (singular) would validate
+ * cleanly, load, and silently become an UNSCOPED global deny — the author
+ * believing it applies to production only, while it applies everywhere. The same
+ * default already bit this repo once on the settle wire, where two cache-token
+ * tiers "vanished silently on the wire" (packages/server/src/wire.ts).
+ *
+ * A validator that quietly discards what it does not understand is not a
+ * validator.
+ */
+const GateRuleSchema = z.strictObject({
+	id: z.string().optional(),
+	name: z.string().min(1),
+	description: z.string().optional(),
+	priority: z.number().optional(),
+	enabled: z.boolean().optional(),
+	effect: z.enum(["deny", "warn"]),
+	enforcement: z.enum(["hard", "soft"]),
+	severity: z.enum(["critical", "high", "medium", "low", "info"]).optional(),
+	conditions: z.array(FieldConditionSchema),
+	// A glob minimatch cannot compile is refused here rather than throwing from
+	// `matchesScope` mid-evaluation: a rule that raises `TypeError: pattern is too
+	// long` when a call happens to supply a scope replaces a policy VERDICT with an
+	// exception, which is a worse outcome than either allow or deny. minimatch's
+	// own ceiling is 65536.
+	scopePatterns: z
+		.array(
+			z
+				.string()
+				.max(65_535, "glob is too long for minimatch to compile (limit 65536)")
+				.refine(
+					(p) => {
+						try {
+							minimatch("probe", p);
+							return true;
+						} catch {
+							return false;
+						}
+					},
+					{ message: "is not a glob minimatch can compile" },
+				),
+		)
+		.optional(),
+	timeWindows: z.array(TimeWindowSchema).optional(),
+});
+
+/**
+ * Read and fully validate a policy file, reporting problems instead of throwing.
+ *
+ * This is the form the `policy validate` command and the health report use, so
+ * an operator can see every problem in one pass rather than fixing them one
+ * exception at a time. {@link loadPolicies} is the same work with a throw on the
+ * end.
+ *
+ * A file that is absent is NOT an issue — no policy file is a legitimate
+ * deployment. A file that is present and unreadable IS an issue, and the two are
+ * told apart by `ENOENT` rather than by an `existsSync` preflight: `existsSync`
+ * answers false for a file inside a directory it cannot traverse, which would
+ * report an unreadable policy as an absent one. Callers must therefore call this
+ * unconditionally rather than guarding it.
+ */
+export function validatePolicyFile(path: string): PolicyLoadResult {
+	let raw: string;
+	try {
+		raw = readFileSync(path, "utf-8");
+	} catch (err) {
+		// A file that is not there is not a broken policy — "no policy file" is a
+		// legitimate deployment, and both governor call sites already guard with
+		// `existsSync`. Anything else (permissions, a directory, an I/O fault) IS a
+		// problem: the operator put a policy there and we cannot read it, which is
+		// exactly the case that must not degrade to "no rules".
+		if ((err as NodeJS.ErrnoException).code === "ENOENT")
+			return { rules: [], issues: [], present: false };
+		return {
+			rules: [],
+			issues: [{ at: "file", message: `cannot be read: ${(err as Error).message}` }],
+			present: true,
+		};
+	}
+
+	const rootIssues: PolicyLoadIssue[] = [];
+	// Blankness is a property of the TEXT, so it is decided before a parser is
+	// chosen. `parseYaml("")` returns null while `JSON.parse("")` throws, so
+	// deciding it after the parse made a blank file legal as YAML and a syntax
+	// error as JSON — the same file, two verdicts, by extension.
+	if (raw.trim() === "") return { rules: [], issues: [], present: true };
+
+	const isYaml = path.endsWith(".yml") || path.endsWith(".yaml");
+	let parsed: unknown;
+	try {
+		parsed = isYaml ? parseYaml(raw) : JSON.parse(raw);
+	} catch (err) {
+		return {
+			rules: [],
+			issues: [
+				{
+					at: "file",
+					message: `is not valid ${isYaml ? "YAML" : "JSON"}: ${(err as Error).message}`,
+				},
+			],
+			present: true,
+		};
+	}
+
+	// Blank was handled above. Reaching here with `null` means the author wrote an
+	// explicit `null` / `~`, which cannot carry rules — accepting it would run the
+	// governor on defaults while the file looked deliberate.
+	if (parsed === null || parsed === undefined) {
+		return {
+			rules: [],
+			issues: [
+				{
+					at: "file",
+					message: `is an explicit null document, which carries no rules. Delete the file to run without a custom policy, or give it a \`rules:\` list.`,
+				},
+			],
+			present: true,
+		};
+	}
+
+	let rawRules: unknown;
+	if (Array.isArray(parsed)) {
+		rawRules = parsed;
+	} else if (typeof parsed === "object") {
+		const obj = parsed as Record<string, unknown>;
+		// The root is strict for the same reason every rule is: a misplaced
+		// top-level key — `scopePatterns` written outside the rule it was meant to
+		// narrow — would otherwise be dropped in silence, and the rules it was
+		// supposed to scope would apply everywhere.
+		// Root problems are ACCUMULATED, not returned early: `policy validate`
+		// promises every problem in one pass, and an operator who fixes the root
+		// key only to be shown a malformed rule next has been made to iterate.
+		for (const k of Object.keys(obj)) {
+			if (k === "rules") continue;
+			rootIssues.push({
+				at: `${k}`,
+				message: `unknown top-level key. A policy document carries only "rules"; a key placed here is not applied to anything.`,
+			});
+		}
+		if (!("rules" in obj)) {
+			// The silent-empty case that hid a whole policy file: a document keyed
+			// `policies:` (or anything else) used to parse fine and yield nothing.
+			// Name the keys we DID find so the fix is obvious.
+			const found = Object.keys(obj);
+			return {
+				rules: [],
+				// `rootIssues` first: the loop above already named every misplaced key,
+				// and replacing them with only the synthetic missing-key issue loses
+				// their locations — the one-pass contract broken a third way.
+				issues: [
+					...rootIssues,
+					{
+						at: "file",
+						message: `has no top-level "rules" key (found: ${found.length > 0 ? found.join(", ") : "no keys"}). Expected \`rules: [...]\` or a bare list of rules.`,
+					},
+				],
+				present: true,
+			};
+		}
+		rawRules = obj.rules;
+	} else {
+		return {
+			rules: [],
+			issues: [{ at: "file", message: `must be a list of rules or an object with a "rules" key` }],
+			present: true,
+		};
+	}
+
+	if (!Array.isArray(rawRules)) {
+		// Keep whatever the root check already found: discarding it here would make
+		// the operator fix `rules` and come back for the root key, which is the
+		// one-pass contract broken in the other direction.
+		return {
+			rules: [],
+			issues: [...rootIssues, { at: "rules", message: "must be a list" }],
+			present: true,
+		};
+	}
+
+	const issues: PolicyLoadIssue[] = [...rootIssues];
+	const rules: GateRule[] = [];
+	for (let i = 0; i < rawRules.length; i++) {
+		const result = GateRuleSchema.safeParse(rawRules[i]);
+		if (result.success) {
+			rules.push(result.data as GateRule);
+			continue;
+		}
+		for (const issue of result.error.issues) {
+			const segs = issue.path
+				.map((p) => (typeof p === "number" ? `[${p}]` : `.${String(p)}`))
+				.join("");
+			issues.push({ at: `rules[${i}]${segs}`, message: issue.message });
+		}
+	}
+
+	// All-or-nothing: a file with one bad rule loads none of them. Loading the
+	// survivors would enforce a policy the operator never wrote, which is the
+	// same silent-partial-application failure in a new costume.
+	return issues.length > 0
+		? { rules: [], issues, present: true }
+		: { rules, issues: [], present: true };
+}
+
 /**
  * Load policy rules from a JSON or YAML file.
  *
@@ -697,26 +1328,15 @@ export function evaluatePolicy(rules: GateRule[], context: PolicyContext): Polic
  * - `.json` files: expects `{ "rules": [...] }` or a bare array
  * - `.yml` / `.yaml` files: expects `rules: [...]` or a bare sequence
  *
- * Returns an empty array if the file cannot be read or parsed.
+ * @throws {PolicyLoadError} if the file is present but unreadable, unparseable,
+ * shaped wrongly, or contains a rule that would not enforce as written. It never
+ * returns a silently-empty rule set — see {@link PolicyLoadError}.
  *
  * @param path - Absolute or relative path to the policy file
- * @returns Array of policy rules
+ * @returns Array of validated policy rules
  */
 export function loadPolicies(path: string): GateRule[] {
-	try {
-		const raw = readFileSync(path, "utf-8");
-
-		const isYaml = path.endsWith(".yml") || path.endsWith(".yaml");
-		const parsed: unknown = isYaml ? parseYaml(raw) : JSON.parse(raw);
-
-		if (Array.isArray(parsed)) return parsed as GateRule[];
-		if (parsed !== null && typeof parsed === "object") {
-			const obj = parsed as Record<string, unknown>;
-			if (Array.isArray(obj.rules)) return obj.rules as GateRule[];
-		}
-
-		return [];
-	} catch {
-		return [];
-	}
+	const { rules, issues } = validatePolicyFile(path);
+	if (issues.length > 0) throw new PolicyLoadError(path, issues);
+	return rules;
 }
