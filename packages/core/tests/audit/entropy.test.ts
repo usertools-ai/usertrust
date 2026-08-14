@@ -401,3 +401,68 @@ describe("Entropy — chain integrity edge cases", () => {
 		expect(signal.total).toBe(0);
 	});
 });
+
+/**
+ * A DOMINANT SIGNAL CANNOT BE AVERAGED AWAY.
+ *
+ * The composite is a flat mean over live signals, so one saturated signal among
+ * four clean ones scores 20 — "healthy". A floor existed for chain failure and
+ * for nothing else, even though the comment beside it described the dilution as
+ * a class. These are the two members that were left out.
+ */
+describe("computeEntropyScore — severity is declared by the signal, not inferred", () => {
+	const clean: EntropyEventInput[] = [
+		{ kind: "llm_call", data: { settled: true, cost: 10, transferId: "t1" } },
+		{ kind: "llm_call", data: { settled: true, cost: 10, transferId: "t2" } },
+	];
+
+	it("an EXHAUSTED budget is critical, not a fifth of one", () => {
+		const report = computeEntropyScore(clean, {
+			budget: { total: 1000, spent: 1000 },
+			chain: { valid: true },
+		});
+		expect(report.level).toBe("critical");
+	});
+
+	it("an ordinary half-spent budget stays healthy", () => {
+		// The inverse, so the floor above is not just "always critical".
+		const report = computeEntropyScore(clean, {
+			budget: { total: 1000, spent: 500 },
+			chain: { valid: true },
+		});
+		expect(report.level).toBe("low");
+	});
+
+	it("ONE ambiguous settlement among clean ones is critical", () => {
+		// The old floor compared an ambiguity RATE against 1, so it only fired when
+		// EVERY settlement was ambiguous. One-of-two scored 0.5 and the headline
+		// stayed healthy while the chain line printed [critical].
+		const mixed: EntropyEventInput[] = [
+			{ kind: "llm_call", data: { settled: true, cost: 10, transferId: "t1" } },
+			{ kind: "settlement_ambiguous", data: { transferId: "t2" } },
+		];
+		const report = computeEntropyScore(mixed, {
+			budget: { total: 1000, spent: 10 },
+			chain: { valid: true },
+		});
+		expect(report.level).toBe("critical");
+		const chain = report.signals.find((s) => s.condition === "chain_integrity");
+		expect(chain?.critical).toBe(true);
+	});
+
+	it("a policy DENIAL is governance working, and never floors the score", () => {
+		// Denials are rate-like: a single denial saturating its signal must not
+		// report critical, or the monitor cries wolf and gets muted.
+		const denied: EntropyEventInput[] = [
+			{ kind: "policy_denied", data: { decision: "deny", transferId: "t1" } },
+		];
+		const report = computeEntropyScore(denied, {
+			budget: { total: 1000, spent: 10 },
+			chain: { valid: true },
+		});
+		const policy = report.signals.find((s) => s.condition === "policy_violations");
+		expect(policy?.value).toBe(1);
+		expect(policy?.critical).toBeUndefined();
+		expect(report.level).not.toBe("critical");
+	});
+});

@@ -70,6 +70,18 @@ export interface EntropySignal {
 	hits: number;
 	/** Total relevant events evaluated */
 	total: number;
+	/**
+	 * This signal ALONE justifies a critical headline, regardless of the others.
+	 *
+	 * Set by the extractor, which is the only place that knows what its own value
+	 * means. The composite previously inferred dominance from `value >= 1`, and
+	 * that works for a binary signal and silently fails for a RATE — where 1.0
+	 * means "every observation was bad" rather than "something disqualifying
+	 * happened". Signals that measure proportions (policy denials, PII, injection)
+	 * deliberately never set this: a single denial is governance working, and a
+	 * monitor that cries wolf gets muted, taking the real signal with it.
+	 */
+	critical?: boolean;
 }
 
 export type EntropyLevel = "low" | "elevated" | "critical";
@@ -190,7 +202,13 @@ export function extractBudgetUtilization(
 			? Math.min(1, (utilization - BUDGET_PRESSURE_FLOOR) / (1 - BUDGET_PRESSURE_FLOOR))
 			: 0;
 
-	return { ...base, value, hits: value > 0 ? 1 : 0, total: 1 };
+	// An EXHAUSTED budget is an operational state, not a proportion of one. With
+	// four other live signals clean, exhaustion scored 1 against their 0s for a
+	// mean of 20 — "healthy", at 100% utilization. That is the same averaging
+	// dilution the chain signal already had a floor for, and I fixed it there and
+	// left it here: I had identified the CLASS in the comment beside that floor
+	// and then applied it to one member.
+	return { ...base, value, hits: value > 0 ? 1 : 0, total: 1, critical: utilization >= 1 };
 }
 
 /**
@@ -269,6 +287,17 @@ export function extractChainIntegrity(
 		value,
 		hits,
 		total,
+		// PRESENCE, not rate. The composite used to floor on `value >= 1`, which for
+		// this signal is an ambiguity RATE — so it only fired when EVERY observed
+		// settlement was ambiguous. One ambiguous settlement beside one clean one
+		// scored 0.5, the headline stayed healthy, and the chain line printed
+		// `[critical]` right underneath it. Two readings of one fact, disagreeing.
+		//
+		// The signal knows whether it saw something disqualifying; the composite
+		// should not have to re-derive that from a number whose meaning it cannot
+		// see. A chain that failed, or a settlement nobody can resolve, is not a
+		// proportion of a problem.
+		critical: chainFailed || ambiguousTransfers.size > 0,
 	};
 }
 
@@ -563,8 +592,16 @@ export function computeEntropyScore(
 	// total loss of audit integrity against unrelated healthy signals is the same
 	// dilution one layer up. A chain that does not verify invalidates the whole
 	// audit claim, so nothing else can average it back down.
-	const chainSignal = signals.find((s) => s.condition === "chain_integrity");
-	if (chainSignal !== undefined && chainSignal.total > 0 && chainSignal.value >= 1) {
+	// ANY signal that declares itself critical floors the composite — the rule is
+	// no longer "chain, and only chain, and only when its rate saturates".
+	//
+	// The old form compared `chainSignal.value >= 1` and so encoded THREE things
+	// the composite had no business knowing: which signal dominates, that its
+	// value is binary rather than a rate, and that no other signal ever could.
+	// All three were wrong in different ways — budget exhaustion diluted to a
+	// score of 20, and a single ambiguous settlement among clean ones never
+	// reached the threshold at all.
+	if (scored.some((s) => s.critical === true)) {
 		score = Math.max(score, CRITICAL_SCORE);
 	}
 

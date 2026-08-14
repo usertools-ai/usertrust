@@ -353,21 +353,6 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 	// distinction AGENTS.md flags as easy to get wrong, and I got it wrong by
 	// reaching for the one already in hand.
 	const verification = verifyVault(vaultPath);
-	// THE HEADLINE AND THIS LINE MUST HAVE THE SAME CAUSE. The chain-integrity
-	// SIGNAL counts settlement ambiguity as well as chain validity, and the report
-	// floors the composite at CRITICAL when it fires — but this line was derived
-	// from `verification.valid` alone. So a vault with a valid chain and one
-	// ambiguous settlement printed a CRITICAL headline above a green
-	// `verified [ok]`, with nothing on screen to explain it. An operator reading a
-	// severity with no visible cause concludes the tool is wrong, which is how a
-	// real signal gets ignored.
-	const ambiguous = events.filter((e) => e.kind === "settlement_ambiguous").length;
-	const chainLabel = !verification.valid
-		? "FAILED"
-		: ambiguous > 0
-			? `verified, ${ambiguous} settlement${ambiguous === 1 ? "" : "s"} ambiguous`
-			: "verified";
-	const chainStatus = verification.valid && ambiguous === 0 ? "[ok]" : "[critical]";
 
 	// SESSION spend comes from the persisted ledger, not from summing the log.
 	//
@@ -426,6 +411,22 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		budget: { total: config.budget, spent: spent ?? Number.NaN },
 		chain: { valid: verification.valid, errors: verification.errors },
 	});
+
+	// THE LINE AND THE HEADLINE READ THE SAME SIGNAL — not two computations of one
+	// fact. My first attempt at this counted `settlement_ambiguous` EVENTS here
+	// while the signal counts distinct TRANSFERS, so two ambiguous records for one
+	// transfer would have disagreed; and an earlier version derived the tag from
+	// the new condition and the COLOUR from `verification.valid`, which would have
+	// printed `[critical]` in green. Every one of those is the same defect: one
+	// verdict, two sources, no obligation to agree.
+	const chainSignal = report.signals.find((s) => s.condition === "chain_integrity");
+	const ambiguousTransfers = (chainSignal?.hits ?? 0) - (verification.valid ? 0 : 1);
+	const chainLabel = !verification.valid
+		? "FAILED"
+		: ambiguousTransfers > 0
+			? `verified, ${ambiguousTransfers} settlement${ambiguousTransfers === 1 ? "" : "s"} ambiguous`
+			: "verified";
+	const chainStatus = chainSignal?.critical === true ? "[critical]" : "[ok]";
 
 	// Signal values
 	const policySignal = report.signals.find((s) => s.condition === "policy_violations");
