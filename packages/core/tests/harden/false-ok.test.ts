@@ -679,15 +679,28 @@ describe("false OK — a documented count that stops matching reality", () => {
 			for (const e of await readdir(dir, { withFileTypes: true })) {
 				const full = join(dir, e.name);
 				if (e.isDirectory()) out.push(...(await tsFiles(full)));
-				else if (e.name.endsWith(".ts")) out.push(full);
+				else if (e.name.endsWith(".ts") || e.name.endsWith(".mjs")) out.push(full);
 			}
 			return out;
 		};
 
+		// SHIPPED SOURCE, not `src/`. Twenty-two rounds went into whether this guard
+		// classifies a construct correctly, and the whole time it was looking in the
+		// wrong places: `packages/claude-code-plugin` ships `hooks/*.mjs` and has no
+		// `src/` at all, so `pre-tool-use.mjs`'s C0/DEL/C1 replacement — a real,
+		// shipped, strong sanitizer — was never counted, and deleting it would have
+		// gone unnoticed.
+		//
+		// That is a failure at this guard's ACTUAL job. Whether it can certify
+		// behaviour is a question it turns out it cannot answer; whether the
+		// documented inventory matches the shipped tree is the one it exists for,
+		// and it was wrong about that from the start.
 		const pkgs = join(repoRoot, "packages");
-		const srcDirs = (await readdir(pkgs, { withFileTypes: true }))
-			.filter((e) => e.isDirectory())
-			.map((e) => join(pkgs, e.name, "src"));
+		const pkgDirs = (await readdir(pkgs, { withFileTypes: true })).filter((e) => e.isDirectory());
+		const srcDirs = pkgDirs.flatMap((e) => [
+			join(pkgs, e.name, "src"),
+			join(pkgs, e.name, "hooks"),
+		]);
 
 		let strong = 0;
 		let weak = 0;

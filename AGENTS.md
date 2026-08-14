@@ -855,10 +855,24 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **thirteen** sanitizers, in two variants: **seven** neutralise C1 and **six** do not. Do
+There are **fourteen** sanitizers, in two variants: **eight** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
+
+**WHAT THE COUNT GUARD CLAIMS, AND WHAT IT DOES NOT.** It counts constructs matching the sanitizer
+SHAPES documented here. It does **not** certify that any of them neutralises anything. A green run
+means *the inventory has not drifted*; it never means *the terminal is safe*. The distinction is
+not pedantic — it was unwritten for twenty-two review rounds, during which the guard was measured
+against what its filename suggested (`false-ok.test.ts`) rather than against any stated claim, and
+acquired an ambition a static matcher cannot fulfil. **A source-text matcher cannot enforce a
+behavioural property**: `/[\x00-\x1f\x7f-\x9f](?=\w)/g` satisfies every structural check and every
+fixed probe context, and still leaves ESC untouched in `\x1b[2J`. There is no fixed point to reach,
+so the claim is bounded instead. Known limits, all of which let a NON-sanitizer be counted: a
+replacement argument that preserves or re-emits (`"$&"`, `(ch) => ch`), a ternary whose result is
+never appended, an identifier resolved file-wide rather than by scope, and context-dependent
+patterns as above. Behavioural safety is established by the tests that exercise these paths, not
+here.
 
 **A whole-repo command asserts over A TREE, not THE REPO.** This repo is worked in through several
 git worktrees at once, so `packages/*/src` means something different depending on where the command
@@ -916,6 +930,14 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   interchangeable, and the choice belongs at the render site, not at the value's source — applying
   the terminal scrubber inside the loader corrupted the JSON diagnostic in exactly that way before
   it was moved.
+- The stronger variant in a SHIPPED HOOK rather than a `src/` tree: `sanitizeReason` in
+  `claude-code-plugin/hooks/pre-tool-use.mjs`, which strips C0/DEL/C1 from server-provided text
+  before it becomes a permission-decision reason, and clips afterwards. This one was invisible to
+  the count guard for its entire existence, because the traversal walked `packages/*/src` and that
+  package has no `src/` — it ships `hooks/*.mjs`. It is listed last because it is the newest entry
+  to the *inventory*, not the newest code: it predates the guard that failed to see it. **Scope a
+  source-wide assertion by what SHIPS, not by the directory layout the other packages happen to
+  use** — that is the same lesson as the worktree note above, one level out.
 
 That C1 coverage is not an accident of style. `budget.ts` quotes attacker-controlled argv back to
 the operator in every invalid-value message, and its own comment names the attack
