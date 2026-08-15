@@ -18,8 +18,8 @@ async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClient<T>>
 ```typescript
 interface TrustOpts {
   configPath?: string;    // Path to usertrust.config.json
-  proxy?: string;         // Remote proxy URL — receipts include a verify URL
-  key?: string;           // API key for the proxy
+  proxy?: string;         // Deprecated — not implemented; setting this throws (AUD-456)
+  key?: string;           // Deprecated — proxy API key; unused because proxy throws
   budget?: number;        // Token budget override (in usertokens)
   tier?: string;          // Tier override (free | mini | pro | mega | ultra)
   dryRun?: boolean;       // Skip TigerBeetle — audit chain + policy still run
@@ -30,8 +30,8 @@ interface TrustOpts {
 | Option | Default | Description |
 |--------|---------|-------------|
 | `configPath` | `.usertrust/usertrust.config.json` | Path to the config file. Resolved relative to `vaultBase`. |
-| `proxy` | `undefined` | When set, receipts include a `receiptUrl` for remote verification. |
-| `key` | `undefined` | API key sent to the proxy for authentication. |
+| `proxy` | `undefined` | **Not implemented.** Setting this option throws (AUD-456). Use a local TigerBeetle or `dryRun` for enforcement. |
+| `key` | `undefined` | **Not implemented.** API key for the removed proxy. Unused; `proxy` throws first. |
 | `budget` | Config value or `10_000` | Total usertoken budget for this client. Overrides the config file value. |
 | `tier` | `"mini"` | Tier classification. Overrides the config file value. |
 | `dryRun` | `false` | Skip TigerBeetle entirely. Also enabled by `USERTRUST_DRY_RUN=true` env var. Useful for CI and testing. |

@@ -26,11 +26,11 @@
 			},
 			"proxy": {
 				"type": "string",
-				"description": "Remote governance proxy URL."
+				"description": "Not implemented. Remote proxy mode is removed; setting this throws (AUD-456). Use a local TigerBeetle or dryRun for enforcement."
 			},
 			"proxyKey": {
 				"type": "string",
-				"description": "API key for the governance proxy."
+				"description": "Not implemented. API key for the removed proxy; unused because proxy throws."
 			},
 			"id": {
 				"type": "string",
@@ -107,11 +107,11 @@
 			"label": "Dry Run Mode"
 		},
 		"proxy": {
-			"label": "Proxy URL",
-			"placeholder": "https://proxy.usertools.ai"
+			"label": "Proxy URL (not implemented)",
+			"placeholder": "not implemented — setting this throws"
 		},
 		"proxyKey": {
-			"label": "Proxy API Key",
+			"label": "Proxy API Key (not implemented)",
 			"sensitive": true
 		}
 	}

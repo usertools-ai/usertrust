@@ -56,7 +56,7 @@ agent call → OpenClaw → usertrust wrapStreamFn
 | `budget` | `number` | Session budget in usertokens (required). |
 | `dryRun` | `boolean` | Skip TigerBeetle; policy gate + audit still run. |
 | `vaultBase` | `string` | Vault location (defaults to the project root). |
-| `proxy` / `proxyKey` | `string` | Point at the hosted proxy for cross-agent budget enforcement. |
+| `proxy` / `proxyKey` | `string` | Not implemented. Setting `proxy` throws (AUD-456). Use a local TigerBeetle or `dryRun` for enforcement. |
 | `id` | `string` | ProviderPlugin id. Default: `usertrust`. |
 | `aliases` | `string[]` | Provider ids whose `wrapStreamFn` this plugin attaches to. Default: `anthropic`, `openai`, `google` — the `Model.provider` values live OpenClaw/pi-ai calls actually use. Not `openai-completions` / `openai-responses` (those are API transports on `model.api`). Pass `[]` to wrap only calls routed to `id`. |
 | `costCenters` | `object` | Operator-declared tool→envelope attribution + scarcity injection. See below. Absent: no attribution, no scarcity block. |

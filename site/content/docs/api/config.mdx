@@ -123,7 +123,7 @@ Default: `"mini"`. Classification tier for the client.
 
 ### proxy / key
 
-Optional. When `proxy` is set to a URL, receipts include a `receiptUrl` for remote verification. The `key` is sent as an API key to authenticate with the proxy.
+**Not implemented.** Remote proxy mode is removed (AUD-456). Passing `proxy` to `trust()` or `createGovernor()` throws. Use a local TigerBeetle (or `dryRun`) for enforcement. These keys remain on the schema so existing config files still parse; they do not enable a hosted path.
 
 ### policies
 
@@ -160,7 +160,7 @@ Default: `{ enabled: true, feedProxy: false }`.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `enabled` | `true` | Enable pattern memory for cost-based model routing |
-| `feedProxy` | `false` | Send pattern data to the proxy for aggregate analysis |
+| `feedProxy` | `false` | Unused. Reserved for a removed remote-proxy aggregation path; has no effect. |
 
 Pattern memory stores SHA-256 hashes of prompts (never raw text) mapped to model, cost, and success rate. Capped at 10,000 entries with FIFO eviction.
 
