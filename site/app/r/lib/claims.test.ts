@@ -539,21 +539,26 @@ test("R40: the floor restores the strong claim WITHOUT restating the retired unc
 });
 
 test("R41: the anchored rung's binding is resolver-asserted TODAY, not inherently uncheckable", () => {
-	// The distinction is load-bearing: one says our verification is incomplete,
-	// the other says our design is. The binding check exists; only the evidence
-	// that would let a third party apply it is unpublished, so the disclosure
-	// retires on publication rather than on rewording.
+	// The distinction is load-bearing: one says no binding is defined yet,
+	// the other says the design forbids one. The check does not exist to
+	// apply; publishing today's record would not make the rung checkable.
+	// The disclosure retires when a binding is defined, not on publication
+	// of an unbound record, and not by calling the gap permanent.
 	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /ASSERTED BY THE RESOLVER/);
 	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /today, independently checkable by no one/);
-	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /is not published yet/);
+	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /no normative binding is defined/);
 	assert.match(
 		ANCHOR_BINDING_RESOLVER_ASSERTED,
-		/What is missing is the published evidence, not the check/,
+		/What is missing is the binding, not merely published evidence/,
 	);
 	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /is not verified anchoring/);
 	assert.ok(
 		!/cannot ever|inherently|by design/i.test(ANCHOR_BINDING_RESOLVER_ASSERTED),
 		"the copy must not read as a permanent design limit",
+	);
+	assert.ok(
+		!/not the check|already exists|merely awaits/i.test(ANCHOR_BINDING_RESOLVER_ASSERTED),
+		"the copy must not claim a check that is only unpublished",
 	);
 });
 

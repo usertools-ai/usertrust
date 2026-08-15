@@ -605,23 +605,25 @@ export function amountFloorClaim(
 /**
  * R41 — the anchored rung is RESOLVER-ASSERTED.
  *
- * The binding rule that ties a transparency-log entry to a checkpoint's signed
- * payload EXISTS and is implemented; what is missing is that nothing publishes
- * the evidence a third party would need to apply it. So the honest statement is
- * about today's evidence, not about the design: the rung reports the resolver's
- * claim, and no one — this page, the offline CLI, a third party — can check it
- * for themselves yet. R8's copy alone would read as independently established
- * anchoring, which is the overclaim this corrects.
+ * No normative binding is defined today between a transparency-log entry and
+ * a `SegmentCheckpoint`. Publishing a record would not make the rung
+ * independently checkable, because there is no rule a third party could apply
+ * to that record. The honest statement is therefore about the binding, not
+ * about unpublished evidence: the rung reports the resolver's claim, and no
+ * one — this page, the offline CLI, a third party — can confirm it. R8's
+ * copy alone would read as independently established anchoring, which is the
+ * overclaim this corrects.
  *
  * The rung still renders: the resolver's claim is real and reporting it is
  * honest (D2 — the page renders the resolver's verdict, it does not compute
- * one). It simply must not be worded as verified anchoring.
+ * one). It simply must not be worded as verified anchoring, and it must not
+ * claim a check already exists that merely awaits publication.
  *
- * INTERIM: retires outright when the anchor record is SERVED, at which point
- * the binding becomes independently checkable and this sentence is deleted.
+ * INTERIM: retires when a binding is defined *and* the evidence a third
+ * party would need to apply it is served. Either half alone is not enough.
  */
 export const ANCHOR_BINDING_RESOLVER_ASSERTED =
-	"the anchor binding at this rung is ASSERTED BY THE RESOLVER and, today, independently checkable by no one: the evidence that would bind the log entry to this checkpoint's signed payload is not published yet, so no consumer — this page, the offline CLI, or a third party — can confirm the binding for itself. What is missing is the published evidence, not the check. Until it is served, this rung reports the resolver's claim and is not verified anchoring.";
+	"the anchor binding at this rung is ASSERTED BY THE RESOLVER and, today, independently checkable by no one: no normative binding is defined between a transparency-log entry and this checkpoint's signed payload, so no consumer — this page, the offline CLI, or a third party — can confirm the binding for itself. What is missing is the binding, not merely published evidence. Until that rule exists, this rung reports the resolver's claim and is not verified anchoring.";
 
 /** R24, VERBATIM — the `"custom"` literal renders honestly, never expanded, never hidden. */
 export const CUSTOM_MODEL_MEANING = "one or more non-catalog or custom-rate models";
