@@ -181,6 +181,7 @@ describeHostContract(`openclaw host contract (openclaw@${PINNED})`, () => {
 		const plugin = registered[0];
 		expect(plugin?.id).toBe("usertrust");
 		expect(plugin?.label).toBe("usertrust Governance");
+		expect(plugin?.aliases).toEqual(["anthropic", "openai", "google"]);
 		// `auth` is required by the pinned ProviderPlugin contract.
 		expect(Array.isArray(plugin?.auth)).toBe(true);
 		expect(typeof plugin?.wrapStreamFn).toBe("function");

@@ -1,6 +1,6 @@
 # usertrust-openclaw
 
-[`usertrust`](https://usertrust.ai) governance plugin for **OpenClaw**. Adds budget enforcement, policy gates, PII/injection scanning, and a hash-chained audit trail to every LLM call — with zero changes to your agent code. Install the plugin and every streamed call is governed.
+[`usertrust`](https://usertrust.ai) governance plugin for **OpenClaw**. Adds budget enforcement, policy gates, PII/injection scanning, and a hash-chained audit trail to streamed LLM calls whose provider id matches this plugin's `id` or `aliases`. OpenClaw has no host-wide stream-wrapper seam — a stock install attaches the wrapper via default `aliases` (`anthropic`, `openai`, `google`), the provider ids live calls actually use. Pass `aliases: []` to wrap only calls routed to `id` (`usertrust`).
 
 ## Install
 
@@ -57,6 +57,8 @@ agent call → OpenClaw → usertrust wrapStreamFn
 | `dryRun` | `boolean` | Skip TigerBeetle; policy gate + audit still run. |
 | `vaultBase` | `string` | Vault location (defaults to the project root). |
 | `proxy` / `proxyKey` | `string` | Point at the hosted proxy for cross-agent budget enforcement. |
+| `id` | `string` | ProviderPlugin id. Default: `usertrust`. |
+| `aliases` | `string[]` | Provider ids whose `wrapStreamFn` this plugin attaches to. Default: `anthropic`, `openai`, `google` — the `Model.provider` values live OpenClaw/pi-ai calls actually use. Not `openai-completions` / `openai-responses` (those are API transports on `model.api`). Pass `[]` to wrap only calls routed to `id`. |
 | `costCenters` | `object` | Operator-declared tool→envelope attribution + scarcity injection. See below. Absent: no attribution, no scarcity block. |
 
 Budget enforcement is **pre-spend**: because a stream's cost isn't known until it finishes, the estimate assumes the model's full output budget, so calls are denied conservatively rather than allowed to overshoot. Size `budget` accordingly.
@@ -160,12 +162,12 @@ Reproduced verbatim from the design spec (`docs/superpowers/specs/2026-08-07-shi
 
 **Where governance actually applies.** OpenClaw resolves `wrapStreamFn` per-provider, matching
 the call's provider id against the plugin's registered `id`/`aliases` — there is no host-wide
-stream-wrapper seam. Attribution and scarcity injection are wired everywhere the wrapper runs
-(`createGovernedStreamFn`, and any provider whose id the operator maps to `usertrust`), but a
-plugin registered under an id no live call ever routes through wraps nothing. This is a
-pre-existing gap in "zero code changes, every call governed," not something this feature
-introduces — register under the real provider ids in use, or wrap in host code via
-`createGovernedStreamFn`.
+stream-wrapper seam. A stock install sets `aliases` to `anthropic`, `openai`, and `google` so
+those live provider ids are wrapped; pass `aliases: []` to wrap only calls routed to `id`
+(`usertrust` unless overridden). Attribution and scarcity injection are wired everywhere the
+wrapper runs (`createGovernedStreamFn`, and any provider whose id matches), but a plugin
+registered under an id no live call ever routes through wraps nothing. For a provider outside
+the default list, add it to `aliases` or wrap in host code via `createGovernedStreamFn`.
 
 ### Scarcity injection
 
