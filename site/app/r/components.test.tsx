@@ -273,13 +273,15 @@ test("CheckLedger: an all-passed verification still renders every row (R9 shows 
 // PostureChips (§6.2, R20-R22)
 // ---------------------------------------------------------------------------
 
-test("PostureChips: the chips themselves carry no hover-only frame", () => {
+test("PostureChips: the epistemic frame sits above the later chips, not in a tooltip", () => {
 	const claims = receiptClaims(verifiedFixtureState("commit-checkpoint.json").envelope.receipt);
 	const markup = html(<PostureChips claims={claims} />);
+	assert.ok(textOf(markup).includes(POSTURES_ARE_ATTESTED_ENUMS));
 	assert.ok(!markup.includes("title="), "no hover-only disclosure of the frame");
 	assert.ok(
-		!textOf(markup).includes(POSTURES_ARE_ATTESTED_ENUMS),
-		"the frame lives once, in AmountScope, ahead of the first posture",
+		markup.indexOf(POSTURES_ARE_ATTESTED_ENUMS) <
+			markup.indexOf('data-posture-role="session association"'),
+		"the frame precedes the session/usage/pricing chips",
 	);
 });
 

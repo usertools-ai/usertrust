@@ -15,13 +15,12 @@ import { POSTURES_ARE_ATTESTED_ENUMS, type PostureClaim, type ReceiptClaims } fr
  * that carry a caveat (`estimated`/`mixed`, `conservative`) take the amber ink,
  * the ones that do not take steel.
  *
- * **The epistemic frame renders WITH them — and BEFORE the first posture
- * the reader meets.** A posture chip in isolation reads like a measurement;
- * `POSTURES_ARE_ATTESTED_ENUMS` is the sentence that stops it. That sentence
- * lives at the top of `AmountScope` (the amount's scope is a posture) rather
- * than at the foot of this block, so categorical "built ONLY" / "at least"
- * copy cannot precede the qualification that the verifier cannot confirm the
- * enum. It is never inside a tooltip.
+ * **The epistemic frame renders WITH them.** A posture chip in isolation reads
+ * like a measurement; `POSTURES_ARE_ATTESTED_ENUMS` is the sentence that stops
+ * it. It appears twice on purpose: at the top of `AmountScope` so "built ONLY"
+ * / "at least" cannot precede it, and again immediately above this block so
+ * the session/usage/pricing chips are not a printed page away from it on a
+ * long transfer list. It is never inside a tooltip.
  *
  * Paper ink only: the bright dark-ground accents measure 1.67-3.27:1 on
  * `--color-paper` and are forbidden as text there (globals.css). The paper-*
@@ -157,6 +156,7 @@ export default function PostureChips({ claims }: { claims: ReceiptClaims }) {
 	const { association, usage, pricing } = claims;
 	return (
 		<div className="flex flex-col gap-4" data-testid="postures">
+			<p className="text-[13px] leading-relaxed text-ink/70">{POSTURES_ARE_ATTESTED_ENUMS}</p>
 			<PostureRow
 				axis="session association"
 				posture={association}
