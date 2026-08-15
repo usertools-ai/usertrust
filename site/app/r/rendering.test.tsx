@@ -149,7 +149,7 @@ test("R5/R6: every verified render shows its rung word, all three rungs, and the
 		const { html, text, state } = renderFixture(row.file);
 		const word =
 			state.rung === "verified_anchored"
-				? "VERIFIED — ANCHORED"
+				? "VERIFIED — ANCHORED · RESOLVER-ASSERTED"
 				: state.rung === "verified_checkpoint_history"
 					? "VERIFIED — CHECKPOINT HISTORY"
 					: "VERIFIED — CHECKPOINT";
@@ -690,8 +690,15 @@ test("R40 NEGATIVE GUARD — C28 includesSomeDelegated inherits no bound either"
 
 test("R41: every verified render states the anchored rung's binding is resolver-asserted, beside the rung", () => {
 	for (const row of conformingVerifiedRows()) {
-		const { html, text } = renderFixture(row.file);
+		const { html, text, state } = renderFixture(row.file);
 		assertContains(text, ANCHOR_BINDING_RESOLVER_ASSERTED, `${row.id}: R41's disclosure`);
+		if (state.rung === "verified_anchored") {
+			assertContains(
+				text,
+				"VERIFIED — ANCHORED · RESOLVER-ASSERTED",
+				`${row.id}: the verdict WORD itself carries the qualification`,
+			);
+		}
 		assertNotBehindInteraction(html, ANCHOR_BINDING_RESOLVER_ASSERTED, `${row.id}: R41`);
 		// "Beside the rung" — inside the ANCHORED ladder item, not floating in the
 		// masthead. The rung's own `<li>` opens at `data-rung="verified_anchored"`
@@ -790,7 +797,7 @@ test("C2 commit-history.json — history rung, the served history, and R7's cave
 
 test("C3 commit-anchored.json — anchored rung, Rekor as the basis, S3 as context only", () => {
 	const { html, text } = renderFixture("commit-anchored.json");
-	assertContains(text, "VERIFIED — ANCHORED", "the anchored rung");
+	assertContains(text, "VERIFIED — ANCHORED · RESOLVER-ASSERTED", "the anchored rung");
 	assert.ok(html.includes('data-testid="rekor-evidence"'));
 	assert.ok(html.includes('data-anchor-standing="upheld"'));
 	assertContains(text, "https://rekor.usertrust.ai", "the log the evidence names");

@@ -64,12 +64,17 @@ export const LADDER: readonly LadderStatus[] = [
 /**
  * §7's masthead words. "The verdict is never color-only: the word IS the
  * verdict" (§6.1) — which is why these are the rendered text and not labels
- * attached to a green dot.
+ * attached to a green dot. `ogCardWord` is this string: a qualification
+ * that lives only in the ladder body never reaches the share card.
+ *
+ * R41: the anchored word carries `RESOLVER-ASSERTED` because the binding
+ * is not independently checkable. An unqualified "VERIFIED — ANCHORED"
+ * contradicts the disclosure that this is not verified anchoring.
  */
 export const RUNG_VERDICT_WORD: Record<LadderStatus, string> = {
 	verified_checkpoint: "VERIFIED — CHECKPOINT",
 	verified_checkpoint_history: "VERIFIED — CHECKPOINT HISTORY",
-	verified_anchored: "VERIFIED — ANCHORED",
+	verified_anchored: "VERIFIED — ANCHORED · RESOLVER-ASSERTED",
 };
 
 /** Short rung name for the three-step indicator (§6.1). */

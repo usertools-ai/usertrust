@@ -78,7 +78,7 @@ test("R5: the ladder is the three rungs, floor first, and every rung has its own
 	]);
 	assert.equal(RUNG_VERDICT_WORD.verified_checkpoint, "VERIFIED — CHECKPOINT");
 	assert.equal(RUNG_VERDICT_WORD.verified_checkpoint_history, "VERIFIED — CHECKPOINT HISTORY");
-	assert.equal(RUNG_VERDICT_WORD.verified_anchored, "VERIFIED — ANCHORED");
+	assert.equal(RUNG_VERDICT_WORD.verified_anchored, "VERIFIED — ANCHORED · RESOLVER-ASSERTED");
 	// Three DISTINCT verdicts (R5) — not one word with a suffix.
 	assert.equal(new Set(Object.values(RUNG_VERDICT_WORD)).size, 3);
 });
@@ -552,6 +552,11 @@ test("R41: the anchored rung's binding is resolver-asserted TODAY, not inherentl
 		/What is missing is the binding, not merely published evidence/,
 	);
 	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /is not verified anchoring/);
+	assert.match(
+		RUNG_VERDICT_WORD.verified_anchored,
+		/RESOLVER-ASSERTED/,
+		"the verdict word itself — masthead and share card — carries the qualification",
+	);
 	assert.ok(
 		!/cannot ever|inherently|by design/i.test(ANCHOR_BINDING_RESOLVER_ASSERTED),
 		"the copy must not read as a permanent design limit",
