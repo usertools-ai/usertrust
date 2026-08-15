@@ -1062,6 +1062,51 @@ test("X8/X9: a missing or unrecognized delegationPosture fails the §2 key-set g
 	}
 });
 
+/**
+ * Promotion-aware RFC 6962 sibling orientation. Copied here rather than
+ * imported: this harness re-derives the rules the fixtures must satisfy,
+ * it does not trust the production copy. A promoted last node has no
+ * sibling, so the path is walked, never derived as ceil(log2(treeSize)).
+ */
+function expectedPathTopology(leafIndex: number, treeSize: number): ("left" | "right")[] | null {
+	if (!Number.isSafeInteger(leafIndex) || !Number.isSafeInteger(treeSize)) return null;
+	if (leafIndex < 0 || leafIndex >= treeSize) return null;
+	const positions: ("left" | "right")[] = [];
+	let index = leafIndex;
+	let levelSize = treeSize;
+	while (levelSize > 1) {
+		const promoted = index === levelSize - 1 && levelSize % 2 === 1;
+		if (!promoted) positions.push(index % 2 === 0 ? "right" : "left");
+		index = Math.floor(index / 2);
+		levelSize = Math.ceil(levelSize / 2);
+	}
+	return positions;
+}
+
+test("C28/C29: newly added conforming proofs match the promotion-aware inclusion topology", () => {
+	// The rest of the corpus still carries the three-sibling dummy path
+	// the original verify-page fixtures shipped with. C28/C29 are new and
+	// were registered as inclusion-passed, so they are the ones that must
+	// not bless a path a real verifier rejects before the fold.
+	for (const file of ["posture-includes-some-delegated.json", "posture-indeterminate.json"]) {
+		const fixture = loadFixtureCase(file);
+		const body = fixture.wire.body as unknown as SuccessEnvelope;
+		const inclusion = body.receipt.proof.inclusion;
+		const expected = expectedPathTopology(inclusion.leafIndex, inclusion.treeSize);
+		assert.ok(expected, `${file}: (leafIndex, treeSize) must describe a real position`);
+		assert.equal(
+			inclusion.siblings.length,
+			expected.length,
+			`${file}: sibling count must match the derived path`,
+		);
+		assert.deepEqual(
+			inclusion.siblings.map((sibling) => sibling.position),
+			expected,
+			`${file}: every sibling position must match AGENTS.md:525-533`,
+		);
+	}
+});
+
 test("X11: includesAllDelegated is a RECOGNIZED value that the schema gate accepts", () => {
 	const entry = rejectionVectors.find((e) => e.id === "X11");
 	const fixture = loadFixtureCase(entry?.files[0] ?? "");
