@@ -228,7 +228,9 @@ const REGISTRY: Readonly<Record<string, ParseSiteDisposition>> = {
 	// a split worse than a shared bug, so any change here is a coordinated
 	// core+verify ship. Per-file disposition is tracked internally, not in this repo.
 	"index.ts": {
-		sites: 3,
+		// 3 → 4 when origin/master merged in on 2026-08-14. The registry refused the
+		// build until this line moved, which is the whole point of counting.
+		sites: 4,
 		policy:
 			"MIRRORED into packages/core — out of scope for this ship; disposition tracked " +
 			"internally. splitReceiptDocuments' parse is a well-formedness probe that keeps the " +
