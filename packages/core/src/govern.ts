@@ -1530,6 +1530,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 										patterns: injectionResult.patterns,
 										score: injectionResult.score,
 										model,
+										// The call this detection belongs to. Injection scanning runs
+										// BEFORE the hold, but `transferId` is already minted, so
+										// carrying it lets a consumer correlate a detection with its
+										// OWN call rather than reconciling aggregate counts — which
+										// mis-attributes whenever a detected call is rejected and a
+										// different clean call completes.
+										transferId,
 										...costCenterAudit,
 									},
 								})
@@ -2941,6 +2948,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 										score: injectionResult.score,
 										actionName: action.name,
 										actionKind: action.kind,
+										// The call this detection belongs to. Injection scanning runs
+										// BEFORE the hold, but `transferId` is already minted, so
+										// carrying it lets a consumer correlate a detection with its
+										// OWN call rather than reconciling aggregate counts — which
+										// mis-attributes whenever a detected call is rejected and a
+										// different clean call completes.
+										transferId,
 										...costCenterAudit,
 									},
 								})

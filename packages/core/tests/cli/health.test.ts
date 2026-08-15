@@ -1,7 +1,10 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { canonicalize } from "../../src/audit/canonical.js";
 import { createAuditWriter } from "../../src/audit/chain.js";
 import { run } from "../../src/cli/health.js";
 
@@ -60,8 +63,13 @@ describe("usertrust health", () => {
 		expect(combined).toContain("Budget utilization");
 		expect(combined).toContain("Chain integrity");
 		expect(combined).toContain("PII detections");
-		expect(combined).toContain("Circuit breaker trips");
-		expect(combined).toContain("Pattern memory hits");
+		// RENAMED to what they measure. "Circuit breaker trips" counted no breaker
+		// transition — no producer emits one — and reported an anomaly abort as a
+		// trip; "Pattern memory hits" reported injection detections even with
+		// pattern memory disabled. Both lines now take their caption from
+		// `signal.label`, so a future rewiring cannot leave the name behind.
+		expect(combined).toContain("Anomaly aborts");
+		expect(combined).toContain("Injection pattern matches");
 	});
 
 	it("shows healthy status for empty vault", async () => {
@@ -113,19 +121,66 @@ describe("usertrust health", () => {
 			"utf-8",
 		);
 
-		const writer = createAuditWriter(tempDir);
-		await writer.appendEvent({
-			kind: "llm_call",
-			actor: "test",
-			data: { cost: 150 },
-		});
-		writer.release();
+		// From the PERSISTED LEDGER, not from summing the log. Summing `llm_call`
+		// costs both over- and under-counted: it included cost-center calls, which
+		// debit an envelope and never move session `budgetSpent`, and omitted
+		// governed-action costs written under the dynamic action kinds.
+		// `spend-ledger.json` is the number the governor itself seeds from.
+		writeFileSync(
+			join(vaultPath, "spend-ledger.json"),
+			JSON.stringify({ budgetSpent: 150, updatedAt: new Date(0).toISOString() }),
+			"utf-8",
+		);
 
 		await run(tempDir);
 
 		const combined = logOutput.join("\n");
 		// 150/50000 = 0.3%
 		expect(combined).toContain("0.3%");
+	});
+
+	it("ABSTAINS on budget when no spend ledger exists", async () => {
+		// A vault with a budget but no persisted spend has no honest utilization
+		// figure. Reporting 0.0% is the display's floor; the SIGNAL abstains rather
+		// than scoring a fabricated denominator.
+		const vaultPath = join(tempDir, ".usertrust");
+		mkdirSync(join(vaultPath, "audit"), { recursive: true });
+		writeFileSync(
+			join(vaultPath, "usertrust.config.json"),
+			JSON.stringify({ budget: 50000 }),
+			"utf-8",
+		);
+
+		const writer = createAuditWriter(tempDir);
+		await writer.appendEvent({ kind: "llm_call", actor: "test", data: { cost: 150 } });
+		writer.release();
+
+		await run(tempDir);
+
+		// The log carries a cost, but no ledger exists — so it is NOT summed. An
+		// ABSENT ledger is the one honest zero: a vault that has never settled has
+		// spent nothing.
+		expect(logOutput.join("\n")).toContain("0.0%");
+	});
+
+	it("reports an UNREADABLE ledger as unknown, not as zero", async () => {
+		// Rendering "0.0% [ok]" for a corrupt ledger gives the most reassuring
+		// possible answer to a question the tool cannot answer.
+		const vaultPath = join(tempDir, ".usertrust");
+		mkdirSync(join(vaultPath, "audit"), { recursive: true });
+		writeFileSync(
+			join(vaultPath, "usertrust.config.json"),
+			JSON.stringify({ budget: 50000 }),
+			"utf-8",
+		);
+		writeFileSync(join(vaultPath, "spend-ledger.json"), '{"budgetSpent": ', "utf-8");
+
+		await run(tempDir);
+
+		const combined = logOutput.join("\n");
+		expect(combined).toContain("unreadable ledger");
+		expect(combined).toContain("[unknown]");
+		expect(combined).not.toContain("0.0% ");
 	});
 
 	it("shows [ok] tags for zero-hit signals", async () => {
@@ -259,5 +314,180 @@ describe("usertrust health — policy line", () => {
 		await run(tempDir, { json: false });
 		expect(out()).toContain("[none]");
 		expect(out()).toContain("built-in budget rules only");
+	});
+});
+
+/**
+ * VAULT STATES — enumerated from receipt-spec §8, not from the defects.
+ *
+ * The P1 this branch fixes is a chain check scoped to the live segment, which
+ * reports CRITICAL on a rotated healthy vault. §8 records that exact failure and
+ * the rule that follows from it: "derive the cases from this state list, never
+ * from the incidents. A test set assembled from bugs tests the past."
+ *
+ * The cases below are the states reachable through the writer, plus the one the
+ * fix exists for. Every vault here is built by the REAL writer so hashes,
+ * sequences and the anchor are genuine; the rotated case is produced by moving
+ * whole lines between files, which is what rotation does.
+ *
+ * DELIBERATELY OUT OF SCOPE, and named so the omission is recorded rather than
+ * silent — these are `verify.ts` ordering defects, not health defects, and they
+ * are preconditions for shipping `rotateSegment` (which has no definition
+ * anywhere in the repo today, so none of them is reachable):
+ *   - mixed `sequence` presence across segments falls back to file order, which
+ *     sorts the LIVE segment first and fails an intact chain;
+ *   - a stray non-chain `*.jsonl` in `audit/` is swept in as a segment;
+ *   - an unreadable archived segment is skipped silently.
+ */
+describe("usertrust health — vault states", () => {
+	let tempDir: string;
+	let logOutput: string[];
+
+	const out = () => logOutput.join("\n");
+	const auditDir = () => join(tempDir, ".usertrust", "audit");
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-health-states-"));
+		logOutput = [];
+		vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+			logOutput.push(args.map(String).join(" "));
+		});
+		mkdirSync(auditDir(), { recursive: true });
+		writeFileSync(
+			join(tempDir, ".usertrust", "usertrust.config.json"),
+			JSON.stringify({ budget: 50000 }),
+			"utf-8",
+		);
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	/** Append `count` real events through the writer, so the chain is genuine. */
+	const writeEvents = async (count: number) => {
+		const writer = createAuditWriter(tempDir);
+		for (let i = 0; i < count; i++) {
+			await writer.appendEvent({
+				kind: "llm.call",
+				actor: "test",
+				data: { model: "claude-sonnet", cost: 10 },
+			});
+		}
+		writer.release();
+	};
+
+	const liveLog = () => join(auditDir(), "events.jsonl");
+	const lines = () => readFileSync(liveLog(), "utf-8").trim().split("\n");
+
+	it("reports a ROTATED healthy vault as verified, not critical", async () => {
+		// The regression test for this branch's P1. A chain check scoped to the
+		// live segment starts its walk at the first event still in `events.jsonl`,
+		// whose previousHash points at an event now living in the archive — so it
+		// reports a mismatch on a chain that is completely intact, and the floor
+		// drives the composite to CRITICAL. Nothing is wrong with this vault.
+		await writeEvents(4);
+		const all = lines();
+		writeFileSync(join(auditDir(), "segment-0001.jsonl"), `${all.slice(0, 2).join("\n")}\n`);
+		writeFileSync(liveLog(), `${all.slice(2).join("\n")}\n`);
+
+		await run(tempDir);
+
+		expect(out()).toContain("verified");
+		expect(out()).not.toContain("FAILED");
+	});
+
+	it("still reports a real sequence gap as FAILED once rotation is in play", async () => {
+		// The other half of the pair, and the one that makes the test above mean
+		// something: a fix that reports "verified" unconditionally would satisfy
+		// the rotated case and destroy the signal. Deleting a committed event from
+		// the middle of the archive is exactly what the check exists to catch.
+		await writeEvents(4);
+		const all = lines();
+		writeFileSync(
+			join(auditDir(), "segment-0001.jsonl"),
+			`${[all[0] as string, all[2] as string].join("\n")}\n`,
+		);
+		writeFileSync(liveLog(), `${all[3] as string}\n`);
+
+		await run(tempDir);
+
+		expect(out()).toContain("FAILED");
+	});
+
+	it("reports deletion when the log is gone but the anchor records events", async () => {
+		await writeEvents(3);
+		rmSync(liveLog(), { force: true });
+
+		await run(tempDir);
+
+		expect(out()).toContain("FAILED");
+	});
+
+	it("verifies a single-segment vault whose events predate `sequence`", async () => {
+		// The legacy shape `verify.ts` keeps a file-order fallback for. A legacy
+		// segment is not a corrupt one, and must not read as tampering.
+		//
+		// Dropping the field means RE-CHAINING, not just re-hashing. Changing an
+		// event's body changes its hash, so its successor's `previousHash` has to
+		// be recomputed too — my first attempt at this fixture re-hashed each event
+		// in place and left the chain genuinely broken, which made the test fail
+		// for a reason that had nothing to do with the property under test.
+		let prev = "0".repeat(64);
+		const legacy: string[] = [];
+		for (let i = 1; i <= 3; i++) {
+			const body = {
+				id: `legacy-${i}`,
+				timestamp: `2026-08-14T00:00:0${i}.000Z`,
+				kind: "llm.call",
+				previousHash: prev,
+			};
+			const hash = createHash("sha256").update(canonicalize(body)).digest("hex");
+			legacy.push(JSON.stringify({ ...body, hash }));
+			prev = hash;
+		}
+		writeFileSync(liveLog(), `${legacy.join("\n")}\n`);
+
+		await run(tempDir);
+
+		expect(out()).toContain("verified");
+	});
+
+	it("does NOT report verified for a segment it could not read", async () => {
+		// The reachable half of the state I deferred as rotation work. I enumerated
+		// "an unreadable ARCHIVED segment is skipped silently" and set it aside
+		// because rotation does not exist — but the same `catch` covers the LIVE
+		// `events.jsonl`, which every vault has. Scoping a case by the file I
+		// imagined in it, rather than by the branch, turned a reachable false OK
+		// into deferred work.
+		await writeEvents(2);
+		await chmod(liveLog(), 0o000);
+		try {
+			let readable = true;
+			try {
+				readFileSync(liveLog(), "utf-8");
+			} catch {
+				readable = false;
+			}
+			// Root ignores mode bits; assert only where the setup can hold.
+			if (readable) return;
+
+			await run(tempDir);
+
+			expect(out()).not.toContain("verified");
+			expect(out()).toContain("FAILED");
+		} finally {
+			await chmod(liveLog(), 0o600);
+		}
+	});
+
+	it("surfaces a corrupt anchor instead of silently trusting the log", async () => {
+		await writeEvents(2);
+		writeFileSync(`${liveLog()}.meta`, "{not json", "utf-8");
+
+		await run(tempDir);
+
+		expect(out()).toContain("FAILED");
 	});
 });

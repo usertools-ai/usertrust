@@ -50,16 +50,14 @@ describe("Entropy — individual signals", () => {
 		expect(signal.total).toBe(0);
 	});
 
-	it("extractBudgetUtilization detects >80% usage", () => {
-		const events: EntropyEventInput[] = [
-			{ kind: "spend", data: { budget: 100, spent: 90 } }, // 90% → hit
-			{ kind: "spend", data: { budget: 100, spent: 50 } }, // 50% → no hit
-			{ kind: "spend", data: { budgetTotal: 1000, budgetRemaining: 100 } }, // 90% → hit
-		];
-
-		const signal = extractBudgetUtilization(events);
-		expect(signal.hits).toBe(2);
-		expect(signal.total).toBe(3);
+	// REWRITTEN: the `spend` kind and the `spent`/`budgetTotal` fields this used to
+	// assert are written by no producer anywhere in `src/`. Utilization now comes
+	// from the caller's context, which is what `cli/health.ts` already computed.
+	it("extractBudgetUtilization detects >80% usage from context", () => {
+		const signal = extractBudgetUtilization([], { budget: { total: 100, spent: 90 } });
+		expect(signal.hits).toBe(1);
+		expect(signal.total).toBe(1);
+		expect(signal.value).toBeGreaterThan(0);
 	});
 
 	it("extractBudgetUtilization returns 0 for no budget events", () => {
@@ -68,17 +66,28 @@ describe("Entropy — individual signals", () => {
 		expect(signal.value).toBe(0);
 	});
 
+	// REWRITTEN: no producer kind contains "audit"/"chain"/"verify", so this used
+	// to evaluate zero events. Chain validity is a property of the LOG and is now
+	// supplied by the caller; money/audit desync arrives as `settlement_ambiguous`.
 	it("extractChainIntegrity detects verification failures", () => {
+		// Real producers always stamp `transferId`; the desync rate deduplicates on
+		// it, because `settlement_ambiguous` is a CORRECTION appended alongside the
+		// same transfer's primary terminal rather than a separate call.
 		const events: EntropyEventInput[] = [
-			{ kind: "audit.verify", data: { valid: true } },
-			{ kind: "audit.verify", data: { valid: false } },
-			{ kind: "chain.check", data: { degraded: true } },
-			{ kind: "audit.verify", data: { errors: ["hash mismatch"] } },
+			{ kind: "llm_call", data: { cost: 1, settled: true, transferId: "t-1" } },
+			{ kind: "llm_call", data: { cost: 1, settled: true, transferId: "t-2" } },
+			{
+				kind: "settlement_ambiguous",
+				data: { cost: 1, error: "pending_transfer_expired", transferId: "t-2" },
+			},
 		];
 
-		const signal = extractChainIntegrity(events);
-		expect(signal.hits).toBe(3);
-		expect(signal.total).toBe(4);
+		const signal = extractChainIntegrity(events, { chain: { valid: false } });
+		// A failed chain verification is binary and dominates: it invalidates the
+		// whole chain regardless of how many calls preceded it.
+		expect(signal.value).toBe(1);
+		expect(signal.hits).toBe(2); // invalid chain + one desynced transfer
+		expect(signal.total).toBe(3); // chain check + two distinct transfers
 	});
 
 	it("extractPiiDetections counts PII findings", () => {
@@ -122,7 +131,7 @@ describe("Entropy — individual signals", () => {
 		// Only policy violations present
 		const policyOnly: EntropyEventInput[] = [{ kind: "policy.eval", data: { decision: "deny" } }];
 		const report = computeEntropyScore(policyOnly);
-		// 1 signal at 1.0, 5 signals at 0 → average = 1/6 → score ~17
+		// One signal at 1.0; signals with no observations abstain.
 		expect(report.score).toBeGreaterThan(0);
 		expect(report.score).toBeLessThanOrEqual(100);
 
@@ -183,23 +192,36 @@ describe("Entropy — composite score", () => {
 		expect(report.level).toBe("low");
 	});
 
+	// REWRITTEN with real producer kinds. The old version used `policy.eval`,
+	// `audit.verify` and `scan`, none of which any producer writes, and reached
+	// "elevated" only because two of its three signals were fictional. Under the
+	// flat six-way mean, signals with no observations voted zero and bounded what
+	// the live ones could express.
 	it("classifies level as elevated for score >= 30", () => {
-		// Need enough signals to push above 30
 		const events: EntropyEventInput[] = [
-			{ kind: "policy.eval", data: { decision: "deny" } },
-			{ kind: "audit.verify", data: { valid: false } },
-			{ kind: "scan", data: { piiDetected: true } },
+			{ kind: "policy_denied", data: { decision: "deny", denialClass: "policy" } },
+			{ kind: "llm_call", data: { cost: 1, settled: true, piiDetected: ["email"] } },
+			{ kind: "anomaly_detected", data: { anomalyKind: "token_rate", metric: 9e9 } },
 		];
 
-		const report = computeEntropyScore(events);
-		// Each of the 3 active signals is at 1.0
-		// policyViolations: 1/1 = 1.0
-		// chainIntegrity: 1/1 = 1.0
-		// piiDetections: 1/3 (all 3 events counted, 1 PII hit)
-		// budget: 0, circuit: 0, pattern: 0
-		// Sum ≈ 1.0 + 0 + 1.0 + 0.33 + 0 + 0 = 2.33, avg = 2.33/6 ≈ 0.389 → 39
+		// A VALID chain — so the level comes from the event-derived signals alone.
+		const report = computeEntropyScore(events, { chain: { valid: true } });
 		expect(report.score).toBeGreaterThanOrEqual(30);
 		expect(report.level).toBe("elevated");
+	});
+
+	it("a FAILED chain verification cannot be averaged down to healthy", () => {
+		// Report-level dominance. Otherwise a tampered vault with otherwise-clean
+		// calls yields signal values [0, 1, 0, 0, 0] — mean 20, i.e. "low" — and a
+		// chain that failed verification reads as healthy because the unrelated
+		// signals were fine.
+		const events: EntropyEventInput[] = Array.from({ length: 50 }, (_, i) => ({
+			kind: "llm_call",
+			data: { cost: 1, settled: true, transferId: `t-${i}` },
+		}));
+
+		const report = computeEntropyScore(events, { chain: { valid: false } });
+		expect(report.level).toBe("critical");
 	});
 
 	it("classifies level as critical for score >= 60", () => {
@@ -256,13 +278,9 @@ describe("Entropy — composite score", () => {
 });
 
 describe("Entropy — budget utilization edge cases", () => {
-	it("budgetRemaining/budgetTotal path with utilization <= 80% (no hit)", () => {
-		const events: EntropyEventInput[] = [
-			// 10% utilization via budgetRemaining/budgetTotal path
-			{ kind: "spend", data: { budgetTotal: 1000, budgetRemaining: 900 } },
-		];
-
-		const signal = extractBudgetUtilization(events);
+	it("utilization <= 80% is not a hit", () => {
+		// 10% utilization.
+		const signal = extractBudgetUtilization([], { budget: { total: 1000, spent: 100 } });
 		expect(signal.total).toBe(1);
 		expect(signal.hits).toBe(0);
 		expect(signal.value).toBe(0);
@@ -368,20 +386,83 @@ describe("Entropy — PII detection edge cases", () => {
 
 describe("Entropy — chain integrity edge cases", () => {
 	it("counts empty errors array as healthy", () => {
-		const events: EntropyEventInput[] = [
-			{ kind: "audit.verify", data: { valid: true, errors: [] } },
-		];
-
-		const signal = extractChainIntegrity(events);
+		const signal = extractChainIntegrity([], { chain: { valid: true, errors: [] } });
 		expect(signal.hits).toBe(0);
 		expect(signal.total).toBe(1);
 	});
 
-	it("events matching verify in kind are counted", () => {
+	// REPLACES "events matching verify in kind are counted", which asserted the
+	// defect itself: matching on a kind SUBSTRING is what made this signal look
+	// alive against invented kinds while evaluating nothing on a real chain.
+	it("does not invent observations from a kind substring", () => {
 		const events: EntropyEventInput[] = [{ kind: "verify.result", data: { valid: true } }];
 
 		const signal = extractChainIntegrity(events);
-		expect(signal.total).toBe(1);
-		expect(signal.hits).toBe(0);
+		expect(signal.total).toBe(0);
+	});
+});
+
+/**
+ * A DOMINANT SIGNAL CANNOT BE AVERAGED AWAY.
+ *
+ * The composite is a flat mean over live signals, so one saturated signal among
+ * four clean ones scores 20 — "healthy". A floor existed for chain failure and
+ * for nothing else, even though the comment beside it described the dilution as
+ * a class. These are the two members that were left out.
+ */
+describe("computeEntropyScore — severity is declared by the signal, not inferred", () => {
+	const clean: EntropyEventInput[] = [
+		{ kind: "llm_call", data: { settled: true, cost: 10, transferId: "t1" } },
+		{ kind: "llm_call", data: { settled: true, cost: 10, transferId: "t2" } },
+	];
+
+	it("an EXHAUSTED budget is critical, not a fifth of one", () => {
+		const report = computeEntropyScore(clean, {
+			budget: { total: 1000, spent: 1000 },
+			chain: { valid: true },
+		});
+		expect(report.level).toBe("critical");
+	});
+
+	it("an ordinary half-spent budget stays healthy", () => {
+		// The inverse, so the floor above is not just "always critical".
+		const report = computeEntropyScore(clean, {
+			budget: { total: 1000, spent: 500 },
+			chain: { valid: true },
+		});
+		expect(report.level).toBe("low");
+	});
+
+	it("ONE ambiguous settlement among clean ones is critical", () => {
+		// The old floor compared an ambiguity RATE against 1, so it only fired when
+		// EVERY settlement was ambiguous. One-of-two scored 0.5 and the headline
+		// stayed healthy while the chain line printed [critical].
+		const mixed: EntropyEventInput[] = [
+			{ kind: "llm_call", data: { settled: true, cost: 10, transferId: "t1" } },
+			{ kind: "settlement_ambiguous", data: { transferId: "t2" } },
+		];
+		const report = computeEntropyScore(mixed, {
+			budget: { total: 1000, spent: 10 },
+			chain: { valid: true },
+		});
+		expect(report.level).toBe("critical");
+		const chain = report.signals.find((s) => s.condition === "chain_integrity");
+		expect(chain?.critical).toBe(true);
+	});
+
+	it("a policy DENIAL is governance working, and never floors the score", () => {
+		// Denials are rate-like: a single denial saturating its signal must not
+		// report critical, or the monitor cries wolf and gets muted.
+		const denied: EntropyEventInput[] = [
+			{ kind: "policy_denied", data: { decision: "deny", transferId: "t1" } },
+		];
+		const report = computeEntropyScore(denied, {
+			budget: { total: 1000, spent: 10 },
+			chain: { valid: true },
+		});
+		const policy = report.signals.find((s) => s.condition === "policy_violations");
+		expect(policy?.value).toBe(1);
+		expect(policy?.critical).toBeUndefined();
+		expect(report.level).not.toBe("critical");
 	});
 });
