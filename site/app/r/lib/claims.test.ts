@@ -19,12 +19,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	ADVISORY_NEVER_ALTERS_VERDICT,
+	AMOUNT_SCOPE_CAPTION,
 	ANCHOR_BINDING_RESOLVER_ASSERTED,
 	ANCHOR_EXTERNAL_VISIBILITY,
 	ANCHOR_NOT_PROOF_OF_UNIQUENESS,
 	ANCHOR_PARTIAL_MITIGATION,
 	advisoryBand,
-	AMOUNT_SCOPE_CAPTION,
 	amountScopeCaption,
 	amountUsdFromUsertokens,
 	artifactComparison,
@@ -517,7 +517,10 @@ test("R40: every posture names the scope; none hedges the figure", () => {
 		assert.equal(caption, AMOUNT_SCOPE_CAPTION[posture]);
 		assert.ok(!/at least \$/i.test(caption), `${posture}: must not hedge the number`);
 		assert.ok(!/\$\d/.test(caption), `${posture}: must not restate the dollar figure`);
-		assert.ok(!/never understates/i.test(caption), `${posture}: must not restate the retired promise`);
+		assert.ok(
+			!/never understates/i.test(caption),
+			`${posture}: must not restate the retired promise`,
+		);
 	}
 	for (const framing of ALL_POSTURES.map((p) => delegationScopeClaim(p).claim)) {
 		assert.ok(!/never understates/i.test(framing), "R39 copy must not restate the retired promise");

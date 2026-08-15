@@ -27,9 +27,9 @@ import {
 	verifiedFixtureState,
 } from "./fixture-harness";
 import {
+	AMOUNT_SCOPE_CAPTION,
 	ANCHOR_BINDING_RESOLVER_ASSERTED,
 	ANCHOR_EXTERNAL_VISIBILITY,
-	AMOUNT_SCOPE_CAPTION,
 	amountScopeCaption,
 	amountUsdFromUsertokens,
 	BREAKDOWN_ROWS_NOTE,
