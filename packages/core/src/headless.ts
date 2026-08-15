@@ -878,6 +878,19 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	let inFlightHoldTotal = 0;
 	// Keyed by transferId, holding the GOVERNOR's capture — not the caller's handle.
 	const activeAuths = new Map<string, AuthorizationCapture>();
+	// AUD-001: claimed-but-never-POSTed. settle() deletes from activeAuths FIRST
+	// so a concurrent settle cannot double-POST. Pre-POST work (metering) is still
+	// sync today, but if it throws the hold is PENDING — this set is that cleanup
+	// path. Populated at claim; cleared the moment settle finishes the POST
+	// section (success, throw, or dry-run skip). A transport-ambiguous POST is
+	// NOT left here: TB may have committed, so abort must not void and session
+	// spend is counted fail-closed (next run seeds `max(0, budget − budgetSpent)`).
+	const unpostedHolds = new Map<string, AuthorizationCapture>();
+	// Holds whose POST is in flight. abort() is a silent no-op for these
+	// (does not void, does not recordFailure, does not write llm_call_failed).
+	// destroy() waits for this set to drain before voidAllPending(), matching
+	// trust()'s 5s in-flight wait — never void a hold whose POST is in flight.
+	const settling = new Set<string>();
 
 	// Finding-2 (RECON #4): serialized, monotonic spend-ledger persistence.
 	// budgetSpent only ever increases (settle adds actualCost >= 0; authorize and
@@ -1295,6 +1308,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				);
 			}
 			activeAuths.delete(auth.transferId);
+			// Claimed. Still PENDING. Pre-POST throw leaves the id here so
+			// abort()/destroy() can void a hold that never reached POST. The id
+			// moves off this path when POST begins (`settling`) and is never put
+			// back after a POST attempt — success or transport-ambiguous.
+			unpostedHolds.set(auth.transferId, capture);
 
 			const model = auth.model;
 			let callAuditDegraded = false;
@@ -1383,25 +1401,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// visible as the number it actually charges rather than as a hole.
 			const appliedRates = resolveAppliedRates(rateInfo.rates);
 
-			// SESSION accounting, skipped in full when the ENVELOPE paid: this hold was
-			// never counted into `inFlightHoldTotal`, so releasing it here would drive
-			// that counter negative, and `budgetSpent` must not absorb envelope money it
-			// would then persist into the next run's holding-wallet seed. The flag is the
-			// authorize-time record, so the release can never be asymmetric with the
-			// increment.
-			if (capture.sessionAccounted) {
-				// AUD-453: Acquire mutex for budget atomicity — prevents concurrent
-				// settle() calls from corrupting inFlightHoldTotal or budgetSpent.
-				const releaseLock = await budgetMutex.acquire();
-				try {
-					inFlightHoldTotal -= auth.estimatedCost;
-					budgetSpent += actualCost;
-				} finally {
-					releaseLock();
-				}
-				// Finding-2 (RECON #4): serialized monotonic persist — never regresses.
-				await persistSpend();
-			}
+			// SESSION accounting waits until after the POST attempt below. A
+			// pre-POST throw must not increment: the hold is still PENDING and
+			// abort/destroy will void it. A transport-ambiguous POST MUST
+			// increment (fail-closed): TB may have committed after retries, and
+			// treating that as unspent reseeds the next run too large.
 
 			// Circuit breaker: success
 			const cb = breaker.get("headless" as never);
@@ -1415,7 +1419,14 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// `settlement_shortfall` event may only be appended AFTER this call's
 			// `llm_call`, so it is parked here and drained below.
 			let shortfallRecord: { posted: number; shortfall: number } | undefined;
+			// Leave the pre-POST cleanup set BEFORE the await. A transport-ambiguous
+			// POST must not remain abort-voidable, and deleting after `settling`
+			// drops would open a window where abort voids a hold mid-commit.
+			unpostedHolds.delete(auth.transferId);
 			if (proxyConn != null && !isDryRun) {
+				// First terminal is settle. Park the id so concurrent abort() is a
+				// silent no-op and destroy() waits, rather than voiding mid-POST.
+				settling.add(auth.transferId);
 				try {
 					await proxyConn.settle(auth.proxyTransferId ?? auth.transferId, actualCost);
 				} catch (postErr) {
@@ -1438,8 +1449,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						.catch(() => {
 							callAuditDegraded = true;
 						});
+				} finally {
+					settling.delete(auth.transferId);
 				}
 			} else if (engine != null && !isDryRun) {
+				settling.add(auth.transferId);
 				try {
 					// Post the ACTUAL consumed cost (RECON #3), capped by the engine at
 					// the reserved hold; a truncation comes back as `shortfall`.
@@ -1473,7 +1487,31 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						.catch(() => {
 							callAuditDegraded = true;
 						});
+				} finally {
+					settling.delete(auth.transferId);
 				}
+			}
+
+			// SESSION accounting, skipped in full when the ENVELOPE paid: this hold was
+			// never counted into `inFlightHoldTotal`, so releasing it here would drive
+			// that counter negative, and `budgetSpent` must not absorb envelope money it
+			// would then persist into the next run's holding-wallet seed. The flag is the
+			// authorize-time record, so the release can never be asymmetric with the
+			// increment. Counted after a POST *attempt*, not only a confirmed success:
+			// a transport-ambiguous POST is treated as spent (fail-closed) so the next
+			// run cannot reseed as if the money never moved.
+			if (capture.sessionAccounted) {
+				// AUD-453: Acquire mutex for budget atomicity — prevents concurrent
+				// settle() calls from corrupting inFlightHoldTotal or budgetSpent.
+				const releaseLock = await budgetMutex.acquire();
+				try {
+					inFlightHoldTotal -= auth.estimatedCost;
+					budgetSpent += actualCost;
+				} finally {
+					releaseLock();
+				}
+				// Finding-2 (RECON #4): serialized monotonic persist — never regresses.
+				await persistSpend();
 			}
 
 			// Audit event
@@ -1633,12 +1671,34 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		async abort(auth: Authorization, error?: unknown): Promise<void> {
 			// Same lookup as settle, and the same reason: liveness and attribution come
 			// from one internal record. Still idempotent-silent, unlike settle.
-			const capture = activeAuths.get(auth.transferId);
-			if (capture === undefined) {
-				// Already settled or aborted — idempotent
+			// In-flight POST: first terminal is settle. A concurrent abort must
+			// not void (TB may be committing) and must not recordFailure /
+			// llm_call_failed — that would trip the provider circuit for a call
+			// that is settling, not failing.
+			if (settling.has(auth.transferId)) {
 				return;
 			}
-			activeAuths.delete(auth.transferId);
+			// AUD-001: a settle that threw BEFORE POST has already claimed the
+			// auth (deleted from activeAuths) but left the transfer PENDING.
+			// Look there first, then in the claimed-but-never-POSTed set. A miss
+			// in both is already posted, voided, or a transport-ambiguous POST
+			// (counted fail-closed, already wrote settlement_ambiguous + llm_call)
+			// — a cleanup abort must not throw, double-void, or look like an LLM
+			// failure.
+			let capture = activeAuths.get(auth.transferId);
+			if (capture !== undefined) {
+				activeAuths.delete(auth.transferId);
+			} else {
+				capture = unpostedHolds.get(auth.transferId);
+				if (capture === undefined) {
+					return;
+				}
+				unpostedHolds.delete(auth.transferId);
+			}
+			// Re-check: settle may have entered POST after we read unpostedHolds.
+			if (settling.has(auth.transferId)) {
+				return;
+			}
 
 			// Only the session wallet's own in-flight exposure is released here; an
 			// attributed hold never added to it (see authorize), and the VOID below is
@@ -1703,8 +1763,20 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			if (destroyed) return;
 			destroyed = true;
 
-			// Void all active authorizations (engine + proxy paths)
-			for (const [txId, capture] of activeAuths) {
+			// Never void a hold whose POST is in flight. Wait for settling to
+			// drain (same 5s bound as trust()) before sweeping leftovers.
+			const deadline = Date.now() + 5_000;
+			while (settling.size > 0 && Date.now() < deadline) {
+				await new Promise<void>((r) => setTimeout(r, 50));
+			}
+
+			// Void leftover authorizations (still-active + claimed-but-never-POSTed).
+			// The per-id walk is what the proxy path has; the engine sweep below
+			// is what trust() does. Walking claimed holds is what keeps abort's
+			// sibling from losing the void path after a pre-POST throw. A
+			// transport-ambiguous POST is NOT in unpostedHolds — do not treat
+			// it as a hold to void.
+			for (const [txId, capture] of [...activeAuths, ...unpostedHolds]) {
 				if (proxyConn != null && !isDryRun) {
 					try {
 						await proxyConn.void(capture.proxyTransferId ?? txId);
@@ -1720,6 +1792,22 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				}
 			}
 			activeAuths.clear();
+			unpostedHolds.clear();
+
+			// AUD-001 / AUD-461: same sweep trust() runs. pendingMap leftovers
+			// (a pre-POST claim that never made unpostedHolds, or a factory
+			// entry whose POST threw after TB committed) are best-effort: void
+			// of an already-posted transfer fails closed in the catch. This is
+			// NOT "void the hold" for an ambiguous POST — abort already refused
+			// that path. Then close the client: a voidAllPending throw must not
+			// skip destroy() and hang the process on the open TigerBeetle socket.
+			if (engine != null && typeof engine.voidAllPending === "function") {
+				try {
+					await engine.voidAllPending();
+				} catch {
+					// Best-effort — TigerBeetle auto-voids pending transfers after 300s.
+				}
+			}
 
 			// Flush audit
 			await audit.flush();
