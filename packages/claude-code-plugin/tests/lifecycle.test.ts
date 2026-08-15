@@ -52,7 +52,11 @@ function startFake(responder: Responder = okResponder): Promise<void> {
 async function seedState(
 	sessionId: string,
 	agentId: string,
-	pending: Array<{ toolUseId: string | null; transferId: string }>,
+	pending: Array<{
+		toolUseId: string | null;
+		transferId: string;
+		estimatedInputTokens?: number;
+	}>,
 ) {
 	for (const entry of pending) {
 		const entryKey = entry.toolUseId ?? entry.transferId;
@@ -85,7 +89,9 @@ afterEach(() => {
 describe("post-tool-use hook", () => {
 	it("settles the matching pending entry and deletes its file only after the 200", async () => {
 		await startFake();
-		await seedState("s1", "main", [{ toolUseId: "tu_1", transferId: "tx_1" }]);
+		await seedState("s1", "main", [
+			{ toolUseId: "tu_1", transferId: "tx_1", estimatedInputTokens: 4 },
+		]);
 		const result = await run("post-tool-use.mjs", {
 			session_id: "s1",
 			tool_use_id: "tu_1",
@@ -94,10 +100,46 @@ describe("post-tool-use hook", () => {
 		expect(result.code).toBe(0);
 		expect(requests).toHaveLength(1);
 		expect(requests[0]?.path).toBe("/v1/settle");
-		const body = requests[0]?.body as { transferId: string; outputTokens: number };
+		const body = requests[0]?.body as {
+			transferId: string;
+			inputTokens: number;
+			outputTokens: number;
+			usageSource: string;
+		};
 		expect(body.transferId).toBe("tx_1");
+		expect(body.inputTokens).toBe(4);
 		expect(body.outputTokens).toBe(3);
+		expect(body.usageSource).toBe("estimated");
 		expect(await readdir(stateDir)).toEqual([]);
+	});
+
+	it("re-estimates inputTokens from tool_input when the pending file has no estimate", async () => {
+		await startFake();
+		await seedState("s1", "main", [{ toolUseId: "tu_1", transferId: "tx_1" }]);
+		const result = await run("post-tool-use.mjs", {
+			session_id: "s1",
+			tool_use_id: "tu_1",
+			tool_input: { command: "ls" },
+			tool_response: "ok",
+		});
+		expect(result.code).toBe(0);
+		const body = requests[0]?.body as { inputTokens: number; outputTokens: number };
+		// JSON.stringify({command:"ls"}) is 16 chars -> 4 estimated tokens.
+		expect(body.inputTokens).toBe(4);
+		expect(body.outputTokens).toBe(1);
+	});
+
+	it("does not steal an unmatched tool_use_id — no settle, hold stays", async () => {
+		await startFake();
+		await seedState("s1", "main", [{ toolUseId: "tu_1", transferId: "tx_1" }]);
+		const result = await run("post-tool-use.mjs", {
+			session_id: "s1",
+			tool_use_id: "zzz",
+			tool_response: "x",
+		});
+		expect(result.code).toBe(0);
+		expect(requests).toHaveLength(0);
+		expect(await readdir(stateDir)).toEqual(["s1__main__tu_1.json"]);
 	});
 
 	it("exits 0 with no server call when nothing is pending", async () => {
@@ -161,8 +203,57 @@ describe("post-tool-use hook", () => {
 		expect(settles).toHaveLength(1);
 		// biome-ignore lint/correctness/noUnsafeOptionalChaining: settles[0] guaranteed present by the toHaveLength(1) assertion above
 		expect((settles[0]?.body as { transferId: string }).transferId).toBe("tx_scoped");
+		const settleBody = settles[0]?.body as {
+			inputTokens: number;
+			outputTokens: number;
+			usageSource: string;
+		};
+		// Authorize-time input estimate ({command:"ls"} → 4) is persisted and sent.
+		expect(settleBody.inputTokens).toBe(4);
+		expect(settleBody.outputTokens).toBe(1);
+		expect(settleBody.usageSource).toBe("estimated");
 		// main's hold is still present; only agent-A's was settled and cleared.
 		expect(await readdir(stateDir)).toEqual(["sess__main__tu_main.json"]);
+	});
+
+	it("a content-cap settle does not exceed the reserved hold on either leg", async () => {
+		const { MAX_CONTENT_CHARS, MAX_OUTPUT_TOKENS, estimateTokens } = await import(
+			"../hooks/lib.mjs"
+		);
+		const responder: Responder = (path) =>
+			path === "/v1/authorize"
+				? { status: 200, json: { transferId: "tx_cap", estimatedCost: 2 } }
+				: { status: 200, json: { settled: true } };
+		await startFake(responder);
+		const pre = await run("pre-tool-use.mjs", {
+			session_id: "sess",
+			tool_name: "Read",
+			tool_use_id: "tu_cap",
+			tool_input: { command: "x".repeat(40_000) },
+		});
+		expect(pre.code).toBe(0);
+		const auth = requests.find((r) => r.path === "/v1/authorize")?.body as {
+			estimatedInputTokens: number;
+			maxOutputTokens: number;
+		};
+		expect(auth.maxOutputTokens).toBe(MAX_OUTPUT_TOKENS);
+		const post = await run("post-tool-use.mjs", {
+			session_id: "sess",
+			tool_use_id: "tu_cap",
+			tool_response: "y".repeat(MAX_CONTENT_CHARS),
+		});
+		expect(post.code).toBe(0);
+		const settle = requests.find((r) => r.path === "/v1/settle")?.body as {
+			inputTokens: number;
+			outputTokens: number;
+		};
+		expect(settle.inputTokens).toBe(auth.estimatedInputTokens);
+		expect(settle.outputTokens).toBe(
+			estimateTokens(JSON.stringify("y".repeat(MAX_CONTENT_CHARS)).slice(0, MAX_CONTENT_CHARS)),
+		);
+		expect(auth.estimatedInputTokens + auth.maxOutputTokens).toBeGreaterThanOrEqual(
+			settle.inputTokens + settle.outputTokens,
+		);
 	});
 });
 

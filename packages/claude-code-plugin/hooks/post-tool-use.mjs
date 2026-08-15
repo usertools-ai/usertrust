@@ -6,6 +6,7 @@
 import {
 	clearPending,
 	estimateTokens,
+	MAX_CONTENT_CHARS,
 	readStdin,
 	serverRequest,
 	takePendingEntry,
@@ -18,9 +19,23 @@ try {
 	const agentId = input.agent_id ?? "main";
 	const entry = await takePendingEntry(sessionId, agentId, input.tool_use_id ?? null);
 	if (entry) {
+		// Price both legs. The authorize-time input estimate is persisted on the
+		// pending file; if an older file lacks it, re-estimate from tool_input
+		// when the host still sends it (AUD-004).
+		const inputTokens =
+			typeof entry.estimatedInputTokens === "number"
+				? entry.estimatedInputTokens
+				: input.tool_input != null
+					? estimateTokens(JSON.stringify(input.tool_input).slice(0, MAX_CONTENT_CHARS))
+					: undefined;
 		const response = await serverRequest("/v1/settle", {
 			transferId: entry.transferId,
-			outputTokens: estimateTokens(JSON.stringify(input.tool_response ?? "")),
+			...(inputTokens != null ? { inputTokens } : {}),
+			// Same 16 KiB cap as the output hold so a content-cap result cannot
+			// price above the reservation (AUD-004).
+			outputTokens: estimateTokens(
+				JSON.stringify(input.tool_response ?? "").slice(0, MAX_CONTENT_CHARS),
+			),
 			usageSource: "estimated",
 		});
 		if (response.status === 200) {
