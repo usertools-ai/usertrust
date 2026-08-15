@@ -834,6 +834,7 @@ test("C3 commit-anchored.json — anchored rung, Rekor as the basis, S3 as conte
 	assertContains(text, "1786450800", "integratedTime as evidence about the checkpoint (§10.13)");
 
 	// R8 — the surviving equivocation caveat, verbatim, plus the fork disclaimer.
+	assertContains(text, ANCHOR_BINDING_RESOLVER_ASSERTED, "R41 qualifies the Rekor card locally");
 	assertContains(text, ANCHOR_EXTERNAL_VISIBILITY, "R8's caveat, verbatim");
 	assertContains(text, "does not prove the signer never produced another", "R8's limit");
 	assertContains(text, FORK_DISCLAIMER, "R8: the fork disclaimer REMAINS at this rung");

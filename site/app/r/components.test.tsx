@@ -26,6 +26,7 @@ import WorkClaims from "./components/work-claims";
 import { verifiedFixtureState } from "./fixture-harness";
 import {
 	ADVISORY_NEVER_ALTERS_VERDICT,
+	ANCHOR_BINDING_RESOLVER_ASSERTED,
 	DELEGATION_POSTURE_SCOPE,
 	EQUIVOCATION_CAVEAT,
 	EQUIVOCATION_NON_GOAL,
@@ -619,6 +620,10 @@ test("AnchorEvidencePanels: a PASSED Rekor attachment carries R8's caveat; a FAI
 	);
 	assert.ok(passed.includes('data-anchor-standing="upheld"'));
 	assert.ok(passed.includes('data-testid="anchor-caveat"'));
+	assert.ok(
+		textOf(passed).includes(ANCHOR_BINDING_RESOLVER_ASSERTED),
+		"an upheld Rekor card carries R41 locally, not only on the masthead",
+	);
 
 	const failed = html(
 		<AnchorEvidencePanels
