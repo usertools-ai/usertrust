@@ -85,9 +85,10 @@ export default function VerdictMasthead({ rung }: { rung: LadderStatus }) {
 							    fine-print voice as the fork disclaimer, never behind
 							    interaction, and at exactly ONE site.
 
-							    INTERIM: retires outright once the anchor record is SERVED —
-							    the binding check exists, only its evidence is unpublished.
-							    Retirement is deleting this block and its constant. */}
+							    INTERIM: retires when a binding is defined and the evidence
+							    a third party would need to apply it is served. Either half
+							    alone is not enough. Retirement is deleting this block and
+							    its constant. */}
 							{step === "verified_anchored" ? (
 								<p
 									className="text-[13px] leading-relaxed text-white/70"
