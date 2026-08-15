@@ -1,4 +1,5 @@
 import {
+	ANCHOR_BINDING_RESOLVER_ASSERTED,
 	ANCHOR_EXTERNAL_VISIBILITY,
 	ANCHOR_NOT_PROOF_OF_UNIQUENESS,
 	ANCHOR_PARTIAL_MITIGATION,
@@ -30,11 +31,12 @@ import HashValue from "./hash-value";
  *
  * **S3 Object Lock evidence "must never render as a green anchor claim" (R8).**
  * The two formats therefore share no container, no color and no heading: Rekor
- * renders in the emerald voice as the independently-verifiable attachment it
- * is; the S3 probes render in the steel voice under their own
- * operator-asserted label. C4 (`commit-s3-only.json`) is the fixture that
- * proves the split — S3 evidence with no Rekor member must produce no anchor
- * claim anywhere on the page.
+ * renders in the emerald voice as the resolver's passed attachment check; the
+ * S3 probes render in the steel voice under their own operator-asserted label.
+ * C4 (`commit-s3-only.json`) is the fixture that proves the split — S3 evidence
+ * with no Rekor member must produce no anchor claim anywhere on the page. R41:
+ * an upheld Rekor card still carries the resolver-asserted qualifier, because
+ * no normative binding is defined between that log entry and this checkpoint.
  *
  * **A served member is not a passed check (R10).** `commit-anchor-failed.json`
  * carries a full Rekor attachment whose check result is `failed` /
@@ -172,14 +174,20 @@ function RekorPanel({ rekor, standing }: { rekor: Bag; standing: Standing }) {
 				) : null}
 			</dl>
 
-			{/* R8 — the caveat travels WITH an UPHELD anchor. On a failed or
-			    unavailable one there is no anchor claim to caveat, and printing
-			    the mitigation sentence anyway would read as one. */}
+			{/* R8 + R41 — the caveat travels WITH an UPHELD anchor. On a failed
+			    or unavailable one there is no anchor claim to caveat. R41 sits
+			    here as well as the masthead: this card is a standalone green
+			    panel and otherwise reasserts independently verified anchoring. */}
 			{standing.upheld ? (
-				<p className="mt-3 text-[13px] leading-relaxed text-white/70" data-testid="anchor-caveat">
-					{ANCHOR_PARTIAL_MITIGATION}: {ANCHOR_EXTERNAL_VISIBILITY} —{" "}
-					{ANCHOR_NOT_PROOF_OF_UNIQUENESS}
-				</p>
+				<div className="mt-3 flex flex-col gap-2" data-testid="anchor-caveat">
+					<p className="text-[13px] leading-relaxed text-white/70">
+						{ANCHOR_BINDING_RESOLVER_ASSERTED}
+					</p>
+					<p className="text-[13px] leading-relaxed text-white/70">
+						{ANCHOR_PARTIAL_MITIGATION}: {ANCHOR_EXTERNAL_VISIBILITY} —{" "}
+						{ANCHOR_NOT_PROOF_OF_UNIQUENESS}
+					</p>
+				</div>
 			) : null}
 		</div>
 	);

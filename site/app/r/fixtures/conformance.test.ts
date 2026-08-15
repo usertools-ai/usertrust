@@ -679,10 +679,10 @@ test("manifest: every rejection vector's files exist on disk", () => {
 	}
 });
 
-test("manifest: 28 conforming JSON files (C1-C27, C22 a pair)", () => {
+test("manifest: 30 conforming JSON files (C1-C29, C22 a pair)", () => {
 	const totalFiles = conformingFixtures.reduce((sum, e) => sum + e.files.length, 0);
-	assert.equal(conformingFixtures.length, 27, "27 rows C1-C27");
-	assert.equal(totalFiles, 28, "28 files total (C22 contributes 2)");
+	assert.equal(conformingFixtures.length, 29, "29 rows C1-C29");
+	assert.equal(totalFiles, 30, "30 files total (C22 contributes 2)");
 });
 
 test("manifest: 16 rejection JSON files across X1-X5 and X8-X11, plus X6/X7 as TS modules", () => {
@@ -830,6 +830,30 @@ for (const entry of conformingFixtures) {
 					amountUsd,
 					/^\d+\.\d{4}$/,
 					`${file}: amountUsd must derive cleanly to 4 decimals`,
+				);
+
+				// Inclusion indices must be structurally possible (AGENTS.md:
+				// 0 ≤ leafIndex < treeSize). A conforming fixture that claims
+				// inclusion passed with an out-of-range index blesses output a
+				// real verifier would reject before the scenario is reached.
+				const inclusion = success.receipt.proof.inclusion;
+				const checkpoint = success.receipt.proof.checkpoint;
+				assert.ok(
+					Number.isSafeInteger(inclusion.leafIndex) &&
+						Number.isSafeInteger(inclusion.treeSize) &&
+						inclusion.leafIndex >= 0 &&
+						inclusion.leafIndex < inclusion.treeSize,
+					`${file}: 0 ≤ leafIndex (${inclusion.leafIndex}) < treeSize (${inclusion.treeSize})`,
+				);
+				assert.equal(
+					inclusion.treeSize,
+					checkpoint.treeSize,
+					`${file}: inclusion.treeSize must match the signed checkpoint`,
+				);
+				assert.equal(
+					inclusion.leafIndex,
+					success.receipt.event.sequence - checkpoint.segmentFirstSequence,
+					`${file}: leafIndex === sequence - segmentFirstSequence (equality 4)`,
 				);
 
 				// The full §4.1 verdict algebra.
@@ -1035,6 +1059,51 @@ test("X8/X9: a missing or unrecognized delegationPosture fails the §2 key-set g
 			body.receipt.event.data as unknown as Record<string, unknown>,
 		);
 		assert.equal(schema.ok, false, `${id}: must fail the §2 key-set gate`);
+	}
+});
+
+/**
+ * Promotion-aware RFC 6962 sibling orientation. Copied here rather than
+ * imported: this harness re-derives the rules the fixtures must satisfy,
+ * it does not trust the production copy. A promoted last node has no
+ * sibling, so the path is walked, never derived as ceil(log2(treeSize)).
+ */
+function expectedPathTopology(leafIndex: number, treeSize: number): ("left" | "right")[] | null {
+	if (!Number.isSafeInteger(leafIndex) || !Number.isSafeInteger(treeSize)) return null;
+	if (leafIndex < 0 || leafIndex >= treeSize) return null;
+	const positions: ("left" | "right")[] = [];
+	let index = leafIndex;
+	let levelSize = treeSize;
+	while (levelSize > 1) {
+		const promoted = index === levelSize - 1 && levelSize % 2 === 1;
+		if (!promoted) positions.push(index % 2 === 0 ? "right" : "left");
+		index = Math.floor(index / 2);
+		levelSize = Math.ceil(levelSize / 2);
+	}
+	return positions;
+}
+
+test("C28/C29: newly added conforming proofs match the promotion-aware inclusion topology", () => {
+	// The rest of the corpus still carries the three-sibling dummy path
+	// the original verify-page fixtures shipped with. C28/C29 are new and
+	// were registered as inclusion-passed, so they are the ones that must
+	// not bless a path a real verifier rejects before the fold.
+	for (const file of ["posture-includes-some-delegated.json", "posture-indeterminate.json"]) {
+		const fixture = loadFixtureCase(file);
+		const body = fixture.wire.body as unknown as SuccessEnvelope;
+		const inclusion = body.receipt.proof.inclusion;
+		const expected = expectedPathTopology(inclusion.leafIndex, inclusion.treeSize);
+		assert.ok(expected, `${file}: (leafIndex, treeSize) must describe a real position`);
+		assert.equal(
+			inclusion.siblings.length,
+			expected.length,
+			`${file}: sibling count must match the derived path`,
+		);
+		assert.deepEqual(
+			inclusion.siblings.map((sibling) => sibling.position),
+			expected,
+			`${file}: every sibling position must match AGENTS.md:525-533`,
+		);
 	}
 });
 

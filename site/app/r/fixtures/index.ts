@@ -36,7 +36,9 @@ export type ConformingFixtureId =
 	| "C24"
 	| "C25"
 	| "C26"
-	| "C27";
+	| "C27"
+	| "C28"
+	| "C29";
 
 export interface ConformingFixtureEntry {
 	id: ConformingFixtureId;
@@ -195,6 +197,24 @@ export const conformingFixtures: ConformingFixtureEntry[] = [
 		exercises:
 			"429 — body ABSENT and never parsed; state derives from the HTTP code + Retry-After alone (§4.2's " +
 			"exemption). Exactly ONE prescribed outcome: the rate-limited state — never the protocol-error shell",
+	},
+	{
+		id: "C28",
+		files: ["posture-includes-some-delegated.json"],
+		exercises:
+			"`delegationPosture: includesSomeDelegated` on an otherwise-conformant 200 — a CONFORMING fixture, not a " +
+			"rejection vector: the value is legal verifier vocabulary, `steps.semantics` may honestly be `passed`, " +
+			"and the consumer's obligation is to RENDER it (recognizing is not permitting — the minting rule binds " +
+			"the minter, R39 binds the page). Exercises R39's incomplete-attributed-subtotal framing. R40 names " +
+			"the scope beneath an unqualified number and must not hedge it as 'at least $X'",
+	},
+	{
+		id: "C29",
+		files: ["posture-indeterminate.json"],
+		exercises:
+			"`delegationPosture: indeterminate` on an otherwise-conformant 200 — R39's end-to-end-coverage-cannot-be-" +
+			"verified framing. Unknown coverage still supports no bound in either direction — the figure is " +
+			"unqualified, and the caption must not restore 'at least $X was caused'",
 	},
 ];
 

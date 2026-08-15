@@ -1,4 +1,5 @@
 import {
+	ANCHOR_BINDING_RESOLVER_ASSERTED,
 	LADDER,
 	RUNG_EARNED_BY,
 	RUNG_SHORT_NAME,
@@ -75,6 +76,26 @@ export default function VerdictMasthead({ rung }: { rung: LadderStatus }) {
 										earned by:{" "}
 									</span>
 									{RUNG_EARNED_BY[step]}
+								</p>
+							) : null}
+							{/* R41 — the anchored rung is RESOLVER-ASSERTED, and says so
+							    BESIDE the rung, unconditionally: reached or not, the rung's
+							    own copy (here and in "earned by") otherwise reads as
+							    independently established anchoring. Rendered in the same
+							    fine-print voice as the fork disclaimer, never behind
+							    interaction, and at exactly ONE site.
+
+							    INTERIM: retires when a binding is defined and the evidence
+							    a third party would need to apply it is served. Either half
+							    alone is not enough. Retirement is deleting this block and
+							    its constant. */}
+							{step === "verified_anchored" ? (
+								<p
+									className="text-[13px] leading-relaxed text-white/70"
+									data-testid="anchor-binding-disclosure"
+									data-anchor-binding="resolver-asserted"
+								>
+									{ANCHOR_BINDING_RESOLVER_ASSERTED}
 								</p>
 							) : null}
 						</li>

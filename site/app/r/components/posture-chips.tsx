@@ -17,7 +17,10 @@ import { POSTURES_ARE_ATTESTED_ENUMS, type PostureClaim, type ReceiptClaims } fr
  *
  * **The epistemic frame renders WITH them.** A posture chip in isolation reads
  * like a measurement; `POSTURES_ARE_ATTESTED_ENUMS` is the sentence that stops
- * it, and it renders above the chips rather than inside a tooltip.
+ * it. It appears twice on purpose: at the top of `AmountScope` so "built ONLY"
+ * / "at least" cannot precede it, and again immediately above this block so
+ * the session/usage/pricing chips are not a printed page away from it on a
+ * long transfer list. It is never inside a tooltip.
  *
  * Paper ink only: the bright dark-ground accents measure 1.67-3.27:1 on
  * `--color-paper` and are forbidden as text there (globals.css). The paper-*
@@ -74,12 +77,70 @@ const ATTESTED_CHIP = "border-paper-emerald bg-paper-emerald font-bold text-pape
 const ASSERTED_CHIP = "border-paper-steel/60 font-normal text-paper-steel";
 const CAVEATED_CHIP = "border-paper-amber/60 font-normal text-paper-amber";
 
+/**
+ * R38/R39/R40 — the amount's SCOPE, rendered beneath the unqualified figure.
+ *
+ * Position is part of the obligation, not layout taste. The caption and R39
+ * both sit "beside the amount, never as a footnote and never behind
+ * interaction" — so this block sits directly under the figure in `SpendBlock`,
+ * above every other spend field, and there is deliberately no `<details>`, no
+ * tooltip and no `title` attribute anywhere in it.
+ *
+ * R40 is the unqualified number with its scope named beneath it. It is not a
+ * floor. The dollar figure above this block is the claim; this caption says
+ * what that number covers.
+ */
+export function AmountScope({ claims }: { claims: ReceiptClaims }) {
+	return (
+		<div className="flex flex-col gap-2" data-testid="amount-scope">
+			<p className="text-[13px] leading-relaxed text-ink/70" data-testid="epistemic-frame">
+				{POSTURES_ARE_ATTESTED_ENUMS}
+			</p>
+			<p
+				className="text-[13px] font-bold leading-relaxed text-ink"
+				data-testid="amount-caption"
+				data-amount-scope={claims.delegation.value}
+			>
+				{claims.amountCaption}
+			</p>
+			<PostureRow axis="amount scope" posture={claims.delegation} chipClass={ASSERTED_CHIP} />
+		</div>
+	);
+}
+
+export function SessionHeadlineScope({
+	claims,
+	tone,
+}: {
+	claims: ReceiptClaims;
+	tone: "paper" | "dark";
+}) {
+	const ink = tone === "paper" ? "text-ink/70" : "text-white/70";
+	return (
+		<div
+			className="flex flex-col gap-2"
+			data-testid={tone === "paper" ? "headline-amount-scope" : "work-amount-scope"}
+		>
+			<p className={`text-[13px] leading-relaxed ${ink}`}>{POSTURES_ARE_ATTESTED_ENUMS}</p>
+			{tone === "paper" ? (
+				<PostureRow axis="amount scope" posture={claims.delegation} chipClass={ASSERTED_CHIP} />
+			) : (
+				<div className="flex flex-col gap-1" data-posture={claims.delegation.value}>
+					<span className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+						amount scope · {claims.delegation.label}
+					</span>
+					<p className="text-[13px] leading-relaxed text-white/70">{claims.delegation.claim}</p>
+				</div>
+			)}
+		</div>
+	);
+}
+
 export default function PostureChips({ claims }: { claims: ReceiptClaims }) {
 	const { association, usage, pricing } = claims;
 	return (
 		<div className="flex flex-col gap-4" data-testid="postures">
 			<p className="text-[13px] leading-relaxed text-ink/70">{POSTURES_ARE_ATTESTED_ENUMS}</p>
-
 			<PostureRow
 				axis="session association"
 				posture={association}

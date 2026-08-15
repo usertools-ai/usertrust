@@ -37,6 +37,7 @@ import { type Bag, num, str } from "./unsigned-reads";
 import type {
 	Advisory,
 	CheckName,
+	DelegationPosture,
 	LadderStatus,
 	Projection,
 	ReceiptDocument,
@@ -63,12 +64,17 @@ export const LADDER: readonly LadderStatus[] = [
 /**
  * §7's masthead words. "The verdict is never color-only: the word IS the
  * verdict" (§6.1) — which is why these are the rendered text and not labels
- * attached to a green dot.
+ * attached to a green dot. `ogCardWord` is this string: a qualification
+ * that lives only in the ladder body never reaches the share card.
+ *
+ * R41: the anchored word carries `RESOLVER-ASSERTED` because the binding
+ * is not independently checkable. An unqualified "VERIFIED — ANCHORED"
+ * contradicts the disclosure that this is not verified anchoring.
  */
 export const RUNG_VERDICT_WORD: Record<LadderStatus, string> = {
 	verified_checkpoint: "VERIFIED — CHECKPOINT",
 	verified_checkpoint_history: "VERIFIED — CHECKPOINT HISTORY",
-	verified_anchored: "VERIFIED — ANCHORED",
+	verified_anchored: "VERIFIED — ANCHORED · RESOLVER-ASSERTED",
 };
 
 /** Short rung name for the three-step indicator (§6.1). */
@@ -215,6 +221,9 @@ export function amountUsdFromUsertokens(assessedUsertokens: number): string {
  * R13 — the headline claim, scoped to what the receipt EMBEDS, in the spec's
  * own words. Three forms, one per `work.kind`; `session` carries NO artifact
  * claim at all, which is why it takes the amount instead of an artifact.
+ * That `$X` is still an amount, so R39's scope (and the epistemic frame)
+ * render beside it on the paper and in `WorkClaims`. The figure itself is
+ * never qualified — R40 names the scope beneath it, once, in SpendBlock.
  */
 export function headlineClaim(work: Work, amountUsd: string): string {
 	switch (work.kind) {
@@ -373,9 +382,10 @@ export const FALLBACK_SESSION_ORIGIN =
 
 /**
  * The epistemic frame binding the whole posture group (receipt-spec §2,
- * round-1 P2-7). Rendered once above the postures, and echoed in the check
- * ledger's `semantics` meaning (§6.3) — a posture chip on its own reads like a
- * measurement, and this sentence is what stops it.
+ * round-1 P2-7). Rendered once at the top of `AmountScope` — the first
+ * posture the reader meets — and echoed in the check ledger's `semantics`
+ * meaning (§6.3). A posture chip on its own reads like a measurement, and
+ * this sentence is what stops it.
  */
 export const POSTURES_ARE_ATTESTED_ENUMS =
 	"postures are ATTESTED ENUMS, not verifier-established facts: the verifier checks enum validity and internal agreement — it CANNOT confirm them, because both are defined over per-constituent facts the projection deliberately does not carry.";
@@ -475,6 +485,138 @@ export function pricingPostureClaim(
 		claim: "every leg was priced from the published table at its committed version.",
 	};
 }
+
+// ===========================================================================
+// R38-R41 — `delegationPosture`: what the amount COVERS
+// ===========================================================================
+
+/**
+ * R38's other half. `wire.ts` already refuses to render an amount whose posture
+ * is missing or unrecognized (the fail-closed half); this is the LABEL half —
+ * the sentence that travels with every figure the page does render.
+ *
+ * The four values are the VERIFIER's vocabulary, wider than v1 minting's: a
+ * conformant v1 minter emits only `selfDebitsOnly`, and a verifier must
+ * recognize and render all four. Each gets its OWN framing (R39) because the
+ * distinction is the whole point — an amount rendered without its scope is an
+ * amount whose scope the reader supplies from assumption, and the assumption is
+ * always "this is what the work cost".
+ */
+export const DELEGATION_POSTURE_LABEL: Record<DelegationPosture, string> = {
+	selfDebitsOnly: "SELF-DEBITS ONLY",
+	includesSomeDelegated: "INCLUDES SOME DELEGATED",
+	includesAllDelegated: "INCLUDES ALL DELEGATED",
+	indeterminate: "INDETERMINATE",
+};
+
+/** R39 — `selfDebitsOnly`: DIRECT / self-account spend, delegated spend out of scope. */
+export const SELF_DEBITS_ONLY_SCOPE =
+	"this amount is DIRECT, self-account spend: it is built ONLY from debits charged to the receipt subject. Delegated spend is OUT OF SCOPE — work this subject caused a delegate to perform was charged to that delegate and is not counted in the figure above.";
+
+/** R39 — `includesSomeDelegated`: an INCOMPLETE attributed subtotal, bounding nothing. */
+export const INCLUDES_SOME_DELEGATED_SCOPE =
+	"this amount is an INCOMPLETE ATTRIBUTED SUBTOTAL: some causally attributable delegated debits are included, and coverage is NOT established. How much delegated spend is left out is unquantified, so the figure above bounds nothing and must not be read as the cost of the work this subject caused.";
+
+/**
+ * R39 — `indeterminate`: end-to-end coverage cannot be verified.
+ *
+ * Unknown coverage is not "probably self-debits". It admits BOTH directions:
+ * debits the subject did not cause may be in the total, and debits it did cause
+ * may be missing. That is why this value supports no bound. The figure is
+ * still printed unqualified; this sentence names the coverage, it does not
+ * hedge the number.
+ */
+export const INDETERMINATE_SCOPE =
+	"END-TO-END COVERAGE CANNOT BE VERIFIED for this amount: the minter could not establish which delegated debits, if any, it covers. Unknown coverage supports no bound in either direction — the figure above is neither a floor nor a ceiling on the cost of the work this subject caused.";
+
+/**
+ * R39 — `includesAllDelegated`, the UNEVIDENCED fallback.
+ *
+ * This is the only value that may be worded as the total cost of work caused by
+ * the subject, and only when signed evidence an offline verifier can validate
+ * accompanies it. No such evidence format is specified in this version, so the
+ * claim is currently unbackable — `wire.ts` fails the receipt closed before it
+ * reaches a render. This string is the render layer's own refusal, so the
+ * property does not depend on the parse layer remembering to hold it: if the
+ * value ever reaches an amount, it renders as an unevidenced claim, never as a
+ * total.
+ */
+export const INCLUDES_ALL_DELEGATED_UNEVIDENCED =
+	"this receipt claims its amount is the TOTAL COST OF WORK CAUSED BY THE SUBJECT — every causally attributable delegated debit, transitive descendants included, exactly once. That claim may be presented as a total ONLY when signed evidence a verifier can validate accompanies it, and no such evidence format exists in this version — so the claim is UNEVIDENCED, is checkable by no one, and is not presented here as a total.";
+
+/** R39's four framings, by value. */
+export const DELEGATION_POSTURE_SCOPE: Record<DelegationPosture, string> = {
+	selfDebitsOnly: SELF_DEBITS_ONLY_SCOPE,
+	includesSomeDelegated: INCLUDES_SOME_DELEGATED_SCOPE,
+	indeterminate: INDETERMINATE_SCOPE,
+	includesAllDelegated: INCLUDES_ALL_DELEGATED_UNEVIDENCED,
+};
+
+/**
+ * R38/R39 — the posture rendered as the attested claim it is, beside the amount
+ * it scopes. Same shape as the other three postures so it inherits their
+ * treatment rather than inventing a second one.
+ */
+export function delegationScopeClaim(delegationPosture: DelegationPosture): PostureClaim {
+	return {
+		value: delegationPosture,
+		label: DELEGATION_POSTURE_LABEL[delegationPosture],
+		claim: DELEGATION_POSTURE_SCOPE[delegationPosture],
+	};
+}
+
+/**
+ * R40 — the amount is the UNQUALIFIED number. The caption names the SCOPE
+ * beneath it. It never hedges the figure ("at least $X") and never restates
+ * the dollar amount — the figure already sits above this line.
+ *
+ * Cam reviewed the floor wording rendered and rejected it (2026-08-15):
+ * *"at least $X"* is a vague claim about an undefined quantity; *"$X charged
+ * to this session"* is an exact claim about a defined one. Honesty comes from
+ * naming the scope, not from hedging the number. Per-posture floor/no-floor
+ * branching therefore collapses: every posture states what its number covers.
+ *
+ * The `indeterminate` bound clause still holds — unknown coverage supports no
+ * bound in either direction — it simply is no longer an exception to a floor
+ * claim that no longer exists. That clause lives in
+ * {@link INDETERMINATE_SCOPE}, not here.
+ *
+ * Recorded so the next reader cannot restore the floor from a still-sound
+ * argument: the reasoning was good; the framing was rejected.
+ */
+export const AMOUNT_SCOPE_CAPTION: Record<DelegationPosture, string> = {
+	selfDebitsOnly: "Charged to this session · delegated work bills to the delegate",
+	includesSomeDelegated: "Incomplete attributed subtotal · coverage not established",
+	indeterminate: "Coverage unverified · this figure bounds nothing",
+	includesAllDelegated: "Unevidenced caused-total claim · not presented as a total",
+};
+
+export function amountScopeCaption(delegationPosture: DelegationPosture): string {
+	return AMOUNT_SCOPE_CAPTION[delegationPosture];
+}
+
+/**
+ * R41 — the anchored rung is RESOLVER-ASSERTED.
+ *
+ * No normative binding is defined today between a transparency-log entry and
+ * a `SegmentCheckpoint`. Publishing a record would not make the rung
+ * independently checkable, because there is no rule a third party could apply
+ * to that record. The honest statement is therefore about the binding, not
+ * about unpublished evidence: the rung reports the resolver's claim, and no
+ * one — this page, the offline CLI, a third party — can confirm it. R8's
+ * copy alone would read as independently established anchoring, which is the
+ * overclaim this corrects.
+ *
+ * The rung still renders: the resolver's claim is real and reporting it is
+ * honest (D2 — the page renders the resolver's verdict, it does not compute
+ * one). It simply must not be worded as verified anchoring, and it must not
+ * claim a check already exists that merely awaits publication.
+ *
+ * INTERIM: retires when a binding is defined *and* the evidence a third
+ * party would need to apply it is served. Either half alone is not enough.
+ */
+export const ANCHOR_BINDING_RESOLVER_ASSERTED =
+	"the anchor binding at this rung is ASSERTED BY THE RESOLVER and, today, independently checkable by no one: no normative binding is defined between a transparency-log entry and this checkpoint's signed payload, so no consumer — this page, the offline CLI, or a third party — can confirm the binding for itself. What is missing is the binding, not merely published evidence. Until that rule exists, this rung reports the resolver's claim and is not verified anchoring.";
 
 /** R24, VERBATIM — the `"custom"` literal renders honestly, never expanded, never hidden. */
 export const CUSTOM_MODEL_MEANING = "one or more non-catalog or custom-rate models";
@@ -881,6 +1023,10 @@ export interface ReceiptClaims {
 	association: ReturnType<typeof sessionAssociationPosture>;
 	usage: PostureClaim;
 	pricing: PostureClaim;
+	/** R38/R39 — what the amount COVERS, rendered beside the amount it scopes. */
+	delegation: PostureClaim;
+	/** R40 — the scope caption under the unqualified amount. Always present. */
+	amountCaption: string;
 	models: CatalogRendering;
 	providers: CatalogRendering;
 	transfers: TransferSetRendering;
@@ -915,6 +1061,8 @@ export function receiptClaims(receipt: ReceiptDocument): ReceiptClaims {
 		association: sessionAssociationPosture(projection),
 		usage: usagePostureClaim(projection.spend.usagePosture),
 		pricing: pricingPostureClaim(projection.spend.pricingPosture),
+		delegation: delegationScopeClaim(projection.delegationPosture),
+		amountCaption: amountScopeCaption(projection.delegationPosture),
 		models: catalogRendering(projection.models),
 		providers: catalogRendering(projection.providers),
 		transfers: transferSetRendering(projection),

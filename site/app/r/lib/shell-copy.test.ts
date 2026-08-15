@@ -195,6 +195,15 @@ test("ogCardWord IS shellHeadline — one source, never a second re-spelling", (
 	assert.equal(ogCardWord(state), shellHeadline(state));
 });
 
+test("ogCardWord for verified_anchored carries the resolver-asserted qualification", () => {
+	const state = {
+		kind: "verified",
+		rung: "verified_anchored",
+	} as unknown as PageState;
+	assert.equal(ogCardWord(state), "VERIFIED — ANCHORED · RESOLVER-ASSERTED");
+	assert.equal(ogCardWord(state), shellHeadline(state));
+});
+
 test("ogCardWord never contains a dollar figure — no fixture-derived amount ever reaches it", () => {
 	const states: PageState[] = [
 		{ kind: "pending", routeParamId: "x", receiptId: "x", status: "reserved" },

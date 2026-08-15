@@ -111,7 +111,7 @@ function parseRenderAssert(state: PageState, label: string): PageState {
 // through the real production dispatcher.
 // ===========================================================================
 
-test("C1-C27: every conforming fixture file parses and renders through StateView with its pinned headline", () => {
+test("C1-C29: every conforming fixture file parses and renders through StateView with its pinned headline", () => {
 	let checked = 0;
 	for (const entry of conformingFixtures) {
 		for (const file of entry.files) {
@@ -120,7 +120,7 @@ test("C1-C27: every conforming fixture file parses and renders through StateView
 			checked++;
 		}
 	}
-	assert.equal(checked, 28, "28 conforming fixture files (C1-C27, C22 a pair)");
+	assert.equal(checked, 30, "30 conforming fixture files (C1-C29, C22 a pair)");
 });
 
 // ===========================================================================

@@ -15,7 +15,7 @@ import {
 } from "../lib/claims";
 import type { ReceiptDocument } from "../lib/wire";
 import HashValue from "./hash-value";
-import PostureChips from "./posture-chips";
+import PostureChips, { AmountScope, SessionHeadlineScope } from "./posture-chips";
 
 /**
  * §6.2 — the receipt artifact: the human-readable CHAIN-COMMITTED claim set,
@@ -155,13 +155,17 @@ function SpendBlock({ claims }: { claims: ReceiptClaims }) {
 	const spend = projection.spend;
 	return (
 		<div className="flex flex-col gap-4" data-testid="spend-block">
-			<div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-				<span className="font-display text-3xl leading-none text-ink" data-testid="amount-usd">
-					${claims.amountUsd}
-				</span>
-				<span className="font-mono text-[13px] text-ink/70" data-testid="assessed-usertokens">
-					{spend.assessedUsertokens} ut assessed
-				</span>
+			<div className="flex flex-col gap-3">
+				<div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+					<span className="font-display text-3xl leading-none text-ink" data-testid="amount-usd">
+						${claims.amountUsd}
+					</span>
+					<span className="font-mono text-[13px] text-ink/70" data-testid="assessed-usertokens">
+						{spend.assessedUsertokens} ut assessed
+					</span>
+				</div>
+				{/* R38/R39/R40 — the unqualified amount, then its named scope. */}
+				<AmountScope claims={claims} />
 			</div>
 
 			<div className="grid gap-4 sm:grid-cols-2">
@@ -277,6 +281,9 @@ export default function ReceiptArtifact({
 				<p className="font-display text-2xl leading-tight text-ink" data-testid="headline-claim">
 					{claims.headline}
 				</p>
+				{claims.work.kind === "session" ? (
+					<SessionHeadlineScope claims={claims} tone="paper" />
+				) : null}
 
 				{claims.predecessor ? (
 					<p className="text-[13px] leading-relaxed text-ink/70" data-testid="predecessor-linkage">

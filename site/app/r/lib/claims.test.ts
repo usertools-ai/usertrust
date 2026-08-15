@@ -19,16 +19,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	ADVISORY_NEVER_ALTERS_VERDICT,
+	AMOUNT_SCOPE_CAPTION,
+	ANCHOR_BINDING_RESOLVER_ASSERTED,
 	ANCHOR_EXTERNAL_VISIBILITY,
 	ANCHOR_NOT_PROOF_OF_UNIQUENESS,
 	ANCHOR_PARTIAL_MITIGATION,
 	advisoryBand,
+	amountScopeCaption,
 	amountUsdFromUsertokens,
 	artifactComparison,
 	CHECK_ROWS,
 	CUSTOM_MODEL_MEANING,
 	catalogRendering,
 	DISPLAY_ANNEX_LABEL,
+	delegationScopeClaim,
 	EQUIVOCATION_CAVEAT,
 	ESTIMATES_NOT_UPPER_BOUND,
 	EXECUTION_METADATA_NOTE,
@@ -75,7 +79,7 @@ test("R5: the ladder is the three rungs, floor first, and every rung has its own
 	]);
 	assert.equal(RUNG_VERDICT_WORD.verified_checkpoint, "VERIFIED — CHECKPOINT");
 	assert.equal(RUNG_VERDICT_WORD.verified_checkpoint_history, "VERIFIED — CHECKPOINT HISTORY");
-	assert.equal(RUNG_VERDICT_WORD.verified_anchored, "VERIFIED — ANCHORED");
+	assert.equal(RUNG_VERDICT_WORD.verified_anchored, "VERIFIED — ANCHORED · RESOLVER-ASSERTED");
 	// Three DISTINCT verdicts (R5) — not one word with a suffix.
 	assert.equal(new Set(Object.values(RUNG_VERDICT_WORD)).size, 3);
 });
@@ -246,6 +250,7 @@ test("R13: the headline uses the FULL oid and the repoId — never a prefix, nev
 test("R14: session carries NO artifact claim and states the promotion-gate rule", () => {
 	const headline = headlineClaim(sessionWork, "0.7700");
 	assert.ok(!/attests/.test(headline), "a session headline never says it attests an artifact");
+	assert.match(headline, /\$0\.7700/, "R13's session form names the amount");
 	assert.equal(
 		SESSION_NON_ARTIFACT,
 		"a session receipt attests a governed session's spend and nothing about any commit, PR, or issue that happens to cite it.",
@@ -432,6 +437,123 @@ test("R21: estimated and mixed carry the NOT-an-upper-bound caveat; provider car
 	assert.ok(
 		!/never understates\.$/.test(provider.claim),
 		'the unconditional "never understates" is retired and must not appear',
+	);
+});
+
+// ---------------------------------------------------------------------------
+// R38-R41 — what the amount COVERS, what it BOUNDS, and the anchored rung
+// ---------------------------------------------------------------------------
+
+const ALL_POSTURES = [
+	"selfDebitsOnly",
+	"includesSomeDelegated",
+	"includesAllDelegated",
+	"indeterminate",
+] as const;
+
+test("R39: all four delegation postures render, and no two share a label or a framing", () => {
+	// "Identical rendering is forbidden" applied to the axis where it matters
+	// most: these four framings are the only thing separating a scoped figure
+	// from a total, and two that collapsed onto one string would read as one
+	// claim. A verifier must recognize all four even though v1 minting emits one.
+	const labels = new Set<string>();
+	const framings = new Set<string>();
+	for (const posture of ALL_POSTURES) {
+		const claim = delegationScopeClaim(posture);
+		assert.equal(claim.value, posture, `${posture}: the wire value renders as itself`);
+		assert.ok(claim.label.length > 0 && claim.claim.length > 0, `${posture}: nothing may be blank`);
+		labels.add(claim.label);
+		framings.add(claim.claim);
+	}
+	assert.equal(labels.size, 4, "four distinct labels");
+	assert.equal(framings.size, 4, "four distinct framings");
+});
+
+test("R39: selfDebitsOnly is DIRECT / self-account spend, delegated spend OUT OF SCOPE", () => {
+	const claim = delegationScopeClaim("selfDebitsOnly");
+	assert.equal(claim.label, "SELF-DEBITS ONLY");
+	assert.match(claim.claim, /DIRECT, self-account spend/);
+	assert.match(claim.claim, /built ONLY from debits charged to the receipt subject/);
+	assert.match(claim.claim, /Delegated spend is OUT OF SCOPE/);
+	assert.match(claim.claim, /charged to that delegate and is not counted/);
+});
+
+test("R39: includesSomeDelegated is an INCOMPLETE attributed subtotal that bounds nothing", () => {
+	const claim = delegationScopeClaim("includesSomeDelegated");
+	assert.match(claim.claim, /INCOMPLETE ATTRIBUTED SUBTOTAL/);
+	assert.match(claim.claim, /coverage is NOT established/);
+	assert.match(claim.claim, /must not be read as the cost of the work this subject caused/);
+});
+
+test("R39: indeterminate states end-to-end coverage CANNOT BE VERIFIED, and bounds nothing", () => {
+	const claim = delegationScopeClaim("indeterminate");
+	assert.match(claim.claim, /END-TO-END COVERAGE CANNOT BE VERIFIED/);
+	assert.match(claim.claim, /no bound in either direction/);
+	assert.match(claim.claim, /neither a floor nor a ceiling/);
+});
+
+test("R39: includesAllDelegated is an UNEVIDENCED claim, never worded as a total", () => {
+	// The one value that MAY be worded as the total cost of work caused by the
+	// subject — and only with validating signed evidence, a format this version
+	// does not specify. `wire.ts` fails such a receipt closed before it renders;
+	// this fallback is the render layer's own refusal, so the property does not
+	// depend on the parse layer remembering to hold it.
+	const claim = delegationScopeClaim("includesAllDelegated");
+	assert.match(claim.claim, /TOTAL COST OF WORK CAUSED BY THE SUBJECT/);
+	assert.match(claim.claim, /transitive descendants included, exactly once/);
+	assert.match(claim.claim, /ONLY when signed evidence a verifier can validate accompanies it/);
+	assert.match(claim.claim, /no such evidence format exists in this version/);
+	assert.match(claim.claim, /is not presented here as a total/);
+	assert.match(claim.claim, /UNEVIDENCED/);
+});
+
+test("R40: every posture names the scope; none hedges the figure", () => {
+	assert.equal(
+		amountScopeCaption("selfDebitsOnly"),
+		"Charged to this session · delegated work bills to the delegate",
+	);
+	for (const posture of ALL_POSTURES) {
+		const caption = amountScopeCaption(posture);
+		assert.equal(caption, AMOUNT_SCOPE_CAPTION[posture]);
+		assert.ok(!/at least \$/i.test(caption), `${posture}: must not hedge the number`);
+		assert.ok(!/\$\d/.test(caption), `${posture}: must not restate the dollar figure`);
+		assert.ok(
+			!/never understates/i.test(caption),
+			`${posture}: must not restate the retired promise`,
+		);
+	}
+	for (const framing of ALL_POSTURES.map((p) => delegationScopeClaim(p).claim)) {
+		assert.ok(!/never understates/i.test(framing), "R39 copy must not restate the retired promise");
+		assert.ok(!/at least \$/i.test(framing), "R39 copy must not hedge the figure");
+	}
+});
+
+test("R41: the anchored rung's binding is resolver-asserted TODAY, not inherently uncheckable", () => {
+	// The distinction is load-bearing: one says no binding is defined yet,
+	// the other says the design forbids one. The check does not exist to
+	// apply; publishing today's record would not make the rung checkable.
+	// The disclosure retires when a binding is defined, not on publication
+	// of an unbound record, and not by calling the gap permanent.
+	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /ASSERTED BY THE RESOLVER/);
+	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /today, independently checkable by no one/);
+	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /no normative binding is defined/);
+	assert.match(
+		ANCHOR_BINDING_RESOLVER_ASSERTED,
+		/What is missing is the binding, not merely published evidence/,
+	);
+	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /is not verified anchoring/);
+	assert.match(
+		RUNG_VERDICT_WORD.verified_anchored,
+		/RESOLVER-ASSERTED/,
+		"the verdict word itself — masthead and share card — carries the qualification",
+	);
+	assert.ok(
+		!/cannot ever|inherently|by design/i.test(ANCHOR_BINDING_RESOLVER_ASSERTED),
+		"the copy must not read as a permanent design limit",
+	);
+	assert.ok(
+		!/not the check|already exists|merely awaits/i.test(ANCHOR_BINDING_RESOLVER_ASSERTED),
+		"the copy must not claim a check that is only unpublished",
 	);
 });
 
