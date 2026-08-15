@@ -222,43 +222,40 @@ const REGISTRY: Readonly<Record<string, ParseSiteDisposition>> = {
 	},
 	"canonical.ts": { sites: 0, policy: "NO PARSE SITE — a serializer, not a reader." },
 	"constants.ts": { sites: 0, policy: "NO PARSE SITE — string constants only." },
-	// ── Mirrored into packages/core. Enumerated, and knowingly not fixed here. ─
+	// ── Mirrored into packages/core. Enumerated here so the assertion below stays
+	// exhaustive; the frozen numeric rule is deliberately NOT applied on this side.
+	// The parity contract holds the two implementations byte-identical and §13 rules
+	// a split worse than a shared bug, so any change here is a coordinated
+	// core+verify ship. Per-file disposition is tracked internally, not in this repo.
 	"index.ts": {
 		sites: 3,
 		policy:
-			"MIRRORED (AGENTS.md, Mirrored files) — KNOWN EXPOSED, deliberately not fixed here. " +
-			"Audit-log segment lines declare `sequence`, and the event hash is recomputed as " +
-			"canonicalize(JSON.parse(line)), so a fractional literal re-serializes to the signed integer. " +
-			"splitReceiptDocuments' parse is a well-formedness probe that keeps the raw text and is " +
-			"IMMUNE. The rule cannot land on this side alone: the parity contract holds the two " +
-			"implementations byte-identical and §13 rules a split worse than a shared bug.",
+			"MIRRORED into packages/core — out of scope for this ship; disposition tracked " +
+			"internally. splitReceiptDocuments' parse is a well-formedness probe that keeps the " +
+			"raw text and is IMMUNE.",
 	},
 	"verify.ts": {
 		sites: 2,
-		policy:
-			"MIRRORED — KNOWN EXPOSED, not fixed here. The `.meta` sidecar declares `sequence` (checked " +
-			"only with typeof), and each audit event is hashed as canonicalize(parsed). Same parity bar.",
+		policy: "MIRRORED into packages/core — out of scope for this ship; disposition tracked internally.",
 	},
 	"cli.ts": {
 		sites: 1,
 		policy:
-			"MIRRORED behaviourally on the --bundle path — KNOWN EXPOSED, not fixed here. parseBundle " +
-			"reads `v` post-parse and re-serializes every signed record with JSON.stringify, destroying " +
-			"the literal before parseAnchorRecord can ever see it.",
+			"MIRRORED behaviourally on the --bundle path — out of scope for this ship; " +
+			"disposition tracked internally.",
 	},
 	"anchor-verify.ts": {
 		sites: 2,
 		policy:
-			"FILE-DIFF MIRRORED and out of scope by explicit constraint — KNOWN EXPOSED. Anchor records " +
-			"declare v/anchorSeq/treeSize and their Ed25519 preimage is canonicalize(parsed).",
+			"FILE-DIFF MIRRORED and out of scope by explicit constraint; disposition tracked " +
+			"internally.",
 	},
 	"rekor-verify.ts": {
 		sites: 2,
 		policy:
-			"FILE-DIFF MIRRORED and out of scope by explicit constraint. MIXED: the receipt parse " +
-			"declares v/anchorSeq/log.{logIndex,treeSize,integratedTime} and the SET preimage " +
-			"re-serializes them — EXPOSED. The hashedrekord entry-body parse reads NO numbers and binds " +
-			"the raw bytes for both the leaf hash and the SET body — IMMUNE, and correctly so.",
+			"FILE-DIFF MIRRORED and out of scope by explicit constraint; disposition tracked " +
+			"internally. The hashedrekord entry-body parse reads NO numbers and binds the raw " +
+			"bytes for both the leaf hash and the SET body — IMMUNE, and correctly so.",
 	},
 };
 
