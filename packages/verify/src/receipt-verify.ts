@@ -1950,6 +1950,17 @@ export const SNAPSHOT_NUMERIC_POLICY: NumericPolicy = policyMembers({
  * — no authority yet defines the binding), so it declares no integer here. The
  * day that check lands, its format joins this registry with it.
  */
+/** Envelope framing only — the convenience copy. History is scanned separately
+ *  so an unsigned-history literal cannot become the run's `failure`. */
+export const ENVELOPE_FRAMING_NUMERIC_POLICY: NumericPolicy = policyMembers({
+	receipt: RECEIPT_NUMERIC_POLICY,
+});
+
+/** Served history only. A refusal here is `HISTORY_INVALID`, never envelope. */
+export const ENVELOPE_HISTORY_NUMERIC_POLICY: NumericPolicy = policyMembers({
+	checkpointHistory: policyElements(CHECKPOINT_NUMERIC_POLICY),
+});
+
 export const ENVELOPE_NUMERIC_POLICY: NumericPolicy = policyMembers({
 	receipt: RECEIPT_NUMERIC_POLICY,
 	checkpointHistory: policyElements(CHECKPOINT_NUMERIC_POLICY),
@@ -4092,6 +4103,14 @@ export type ExtensionCheckName = "checkpointHistory" | "anchorEvidence";
  */
 export interface ReceiptExtensionMaterial {
 	readonly checkpointHistory?: JsonValue;
+	/**
+	 * A frozen-numeric refusal of the served history, taken from the envelope
+	 * BYTES before `JSON.parse` rounded them. The rounded `checkpointHistory`
+	 * value must not be walked — it would award the history rung over a
+	 * literal nobody signed. Step 9 reports this as `HISTORY_INVALID` and
+	 * never as the run's `failure` (upgrade-only).
+	 */
+	readonly checkpointHistoryRefusal?: string;
 	readonly anchorEvidence?: JsonValue;
 }
 
@@ -4304,13 +4323,15 @@ export function verifyReceipt(input: ReceiptVerifyInput): ReceiptReport {
 	const base = verifyReceiptBase(input);
 	const material = input.extensions ?? {};
 	const suppliedHistory = material.checkpointHistory;
+	const historyRefusal = material.checkpointHistoryRefusal;
+	const historyServed = suppliedHistory !== undefined || historyRefusal !== undefined;
 	// Present at all ⇒ this build declined to look at it. That is true whatever
 	// the base verdict did, so it is reported the same way either way.
 	const anchorSupplied = material.anchorEvidence !== undefined;
 
 	let verdict: ReceiptVerdict = base.verdict;
 	let history: StepOutcome;
-	if (suppliedHistory === undefined) {
+	if (!historyServed) {
 		// Nothing was served. `notApplicable` — the input does not exist in this
 		// context — and that stays the true statement whatever the base run did.
 		history = NOT_APPLICABLE_OUTCOME;
@@ -4320,8 +4341,16 @@ export function verifyReceipt(input: ReceiptVerifyInput): ReceiptReport {
 		// `unavailable`; calling it `notApplicable` would assert something about
 		// the input rather than about this run.
 		history = UNAVAILABLE_OUTCOME;
+	} else if (historyRefusal !== undefined) {
+		// The literal was illegal on the wire. Do not walk the rounded value —
+		// that walk would award the rung over bytes the document never carried.
+		history = { result: "failed", failure: { code: "HISTORY_INVALID", detail: historyRefusal } };
 	} else {
-		const detail = walkCheckpointHistory(suppliedHistory, base.verified, input.snapshot);
+		const detail = walkCheckpointHistory(
+			suppliedHistory as JsonValue,
+			base.verified,
+			input.snapshot,
+		);
 		if (detail === null) {
 			history = PASSED_OUTCOME;
 			verdict = "VERIFIED_CHECKPOINT_HISTORY";

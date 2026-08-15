@@ -214,14 +214,13 @@ const REGISTRY: Readonly<Record<string, ParseSiteDisposition>> = {
 			"against TrustKey/TrustChain so a new number-typed member cannot compile without one.",
 	},
 	"receipt-cli.ts": {
-		sites: 2,
+		sites: 3,
 		policy:
-			"ENVELOPE_NUMERIC_POLICY — SCOPED: $.receipt inherits the receipt policy and " +
-			"$.checkpointHistory[] the checkpoint policy, while every other envelope member stays open " +
-			"for the resolver's extensions. anchorEvidence gets no policy because this build validates " +
-			"none of it and therefore declares no integer in it. The R4 re-read of the decoded receipt " +
-			"bytes gets no policy either: those bytes are frozen by readReceiptDocument in step 1, which " +
-			"owns the SCHEMA_INVALID code that correctly blames the receipt rather than the envelope.",
+			"ENVELOPE_FRAMING_NUMERIC_POLICY + ENVELOPE_HISTORY_NUMERIC_POLICY — two scans of the " +
+			"same envelope bytes: $.receipt is envelope integrity (ENVELOPE_INVALID); " +
+			"$.checkpointHistory[] is unsigned optional material (HISTORY_INVALID, upgrade-only). " +
+			"The composed ENVELOPE_NUMERIC_POLICY is the coverage oracle. The R4 re-read of the " +
+			"decoded receipt bytes gets no policy: those bytes are frozen by readReceiptDocument.",
 	},
 	// ── No parse site at all. Real entries, not omissions. ─────────────────────
 	"receipt.ts": {
@@ -447,41 +446,60 @@ describe("surface 3 — the served checkpoint history (the gate-9 defect)", () =
 		return { text: injectLiteral(JSON.stringify(bundle.envelope), literal), bundle };
 	};
 
-	it("refuses a fractional treeSize in a SERVED history member, naming rule and path", () => {
+	it("a fractional treeSize in SERVED history does not demote a valid receipt (upgrade-only)", () => {
 		const { text, bundle } = historyMutant((c) => ({ ...c, treeSize: asNumber }), roundsTo(4));
 		const result = runEnvelope(text, bundle);
-		expect(result.exitCode).toBe(1);
 		const report = JSON.parse(result.stdout) as {
 			verdict: string;
 			failure: { step: string; code: string; detail: string } | null;
+			checks: {
+				checkpointHistory: { result: string; failure?: { code: string; detail: string } };
+			};
 		};
-		// FAILED, not UNVERIFIABLE: the envelope IS a document and a member it
-		// DECLARES carries an illegal literal.
-		expect(report.verdict).toBe("FAILED");
-		expect(report.failure?.code).toBe("ENVELOPE_INVALID");
-		// The reason, not merely the refusal: ENVELOPE_INVALID is also what an R4
-		// disagreement and a bad apiVersion return, and neither is this.
-		expect(report.failure?.detail).toContain("illegal numeric literal");
-		expect(report.failure?.detail).toContain("$.checkpointHistory[0].treeSize");
+		// Unsigned history is attacker-substitutable. A literal that would have
+		// been ENVELOPE_INVALID before the base receipt ran is a denial of
+		// service against an honest receipt. The base stays VERIFIED_CHECKPOINT;
+		// the history check names the literal and the path.
+		expect(result.exitCode).toBe(0);
+		expect(report.verdict).toBe("VERIFIED_CHECKPOINT");
+		expect(report.failure).toBeNull();
+		expect(report.checks.checkpointHistory.result).toBe("failed");
+		expect(report.checks.checkpointHistory.failure?.code).toBe("HISTORY_INVALID");
+		expect(report.checks.checkpointHistory.failure?.detail).toContain("non-integer number");
+		expect(report.checks.checkpointHistory.failure?.detail).toContain(
+			"$.checkpointHistory[0].treeSize",
+		);
 	});
 
-	it("refuses a fractional `v` — the version label is signed material too", () => {
+	it("a fractional `v` is HISTORY_INVALID at the served-history path, not ENVELOPE_INVALID", () => {
 		const { text, bundle } = historyMutant((c) => ({ ...c, v: asNumber }), roundsTo(2));
 		const report = JSON.parse(runEnvelope(text, bundle).stdout) as {
-			failure: { detail: string } | null;
+			verdict: string;
+			failure: { code: string } | null;
+			checks: { checkpointHistory: { failure?: { code: string; detail: string } } };
 		};
-		expect(report.failure?.detail).toContain("$.checkpointHistory[0].v");
+		expect(report.verdict).toBe("VERIFIED_CHECKPOINT");
+		expect(report.failure).toBeNull();
+		expect(report.checks.checkpointHistory.failure?.code).toBe("HISTORY_INVALID");
+		expect(report.checks.checkpointHistory.failure?.detail).toContain("$.checkpointHistory[0].v");
 	});
 
-	it("refuses a fractional segmentFirstSequence", () => {
+	it("a fractional segmentFirstSequence is HISTORY_INVALID at the served-history path", () => {
 		const { text, bundle } = historyMutant(
 			(c) => ({ ...c, segmentFirstSequence: asNumber }),
 			roundsTo(1),
 		);
 		const report = JSON.parse(runEnvelope(text, bundle).stdout) as {
-			failure: { detail: string } | null;
+			verdict: string;
+			failure: { code: string } | null;
+			checks: { checkpointHistory: { failure?: { code: string; detail: string } } };
 		};
-		expect(report.failure?.detail).toContain("$.checkpointHistory[0].segmentFirstSequence");
+		expect(report.verdict).toBe("VERIFIED_CHECKPOINT");
+		expect(report.failure).toBeNull();
+		expect(report.checks.checkpointHistory.failure?.code).toBe("HISTORY_INVALID");
+		expect(report.checks.checkpointHistory.failure?.detail).toContain(
+			"$.checkpointHistory[0].segmentFirstSequence",
+		);
 	});
 
 	it("POSITIVE CONTROL: the untouched envelope still reaches VERIFIED_CHECKPOINT_HISTORY", () => {

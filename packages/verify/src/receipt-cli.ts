@@ -23,7 +23,8 @@ import { writeSync } from "node:fs";
 import { forDisplay } from "./receipt.js";
 import {
 	decodeCanonicalBase64,
-	ENVELOPE_NUMERIC_POLICY,
+	ENVELOPE_FRAMING_NUMERIC_POLICY,
+	ENVELOPE_HISTORY_NUMERIC_POLICY,
 	isJsonObject,
 	type JsonValue,
 	loadTrustSnapshot,
@@ -584,7 +585,10 @@ type EnvelopeOutcome =
  * and the extraction of step 9's optional material.
  */
 export function resolveEnvelope(bytes: Uint8Array): EnvelopeOutcome {
-	const parsed = readStrictJson(bytes, { policy: ENVELOPE_NUMERIC_POLICY });
+	// Framing first (receipt copy). History is scanned separately: an illegal
+	// literal in unsigned checkpointHistory must not become ENVELOPE_INVALID
+	// before the base receipt runs (upgrade-only / gate 15).
+	const parsed = readStrictJson(bytes, { policy: ENVELOPE_FRAMING_NUMERIC_POLICY });
 	if (!parsed.ok) {
 		// The refusal CLASS decides the verdict class, exactly as it does for the
 		// receipt (CLI spec §5's table). A `schema` refusal is the numeric one: the
@@ -706,10 +710,19 @@ export function resolveEnvelope(bytes: Uint8Array): EnvelopeOutcome {
 		}
 	}
 
+	// Same bytes, history policy only. A numeric refusal here is a statement
+	// about OPTIONAL unsigned material — pass it to step 9 as HISTORY_INVALID,
+	// never as the envelope failure, and never walk the rounded members.
+	const historyScan = readStrictJson(bytes, { policy: ENVELOPE_HISTORY_NUMERIC_POLICY });
+	const historyRefusal =
+		!historyScan.ok && historyScan.refusal.kind === "schema" ? historyScan.refusal.detail : null;
+
 	const extensions: ReceiptExtensionMaterial = {
-		...(envelope.checkpointHistory !== undefined
-			? { checkpointHistory: envelope.checkpointHistory as JsonValue }
-			: {}),
+		...(historyRefusal !== null
+			? { checkpointHistoryRefusal: historyRefusal }
+			: envelope.checkpointHistory !== undefined
+				? { checkpointHistory: envelope.checkpointHistory as JsonValue }
+				: {}),
 		...(envelope.anchorEvidence !== undefined
 			? { anchorEvidence: envelope.anchorEvidence as JsonValue }
 			: {}),
