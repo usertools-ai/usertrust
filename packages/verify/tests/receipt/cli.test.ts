@@ -45,6 +45,7 @@ import {
 	DEFAULT_RECEIPT_ID,
 	keyFromSeed,
 	type MintedBundle,
+	type MintOptions,
 	mint,
 } from "./harness.js";
 
@@ -400,32 +401,60 @@ describe("exit codes", () => {
 		// softening the numeric rule: close the brace and the SAME literal is a
 		// document saying something illegal — FAILED, exit 1.
 		expect(codeFor('{"spec":1.5}')).toBe(1);
+
+		// The SECOND way the same line was decided by the wrong question. The
+		// illegal literal is met first, and behind it sits a construct the strict
+		// scanner refuses but `JSON.parse` — the oracle that used to answer here —
+		// accepts: a duplicate key. So these bytes scored FAILED/exit 1, while the
+		// duplicate keys ALONE are exit 2. One document, two verdicts, chosen by
+		// which defect came first in the byte order.
+		expect(codeFor('{"x":1.5,"a":1,"a":2}')).toBe(2);
+		expect(codeFor('{"a":1,"a":2}')).toBe(2);
+		// POSITIVE CONTROL for that pair: no duplicate behind the literal and the
+		// numeric rule still lands on exit 1. The classification moved; the rule
+		// did not.
+		expect(codeFor('{"x":1.5,"a":1}')).toBe(1);
 	});
 
-	it("1: a forged event.hash stays FAILED even when the receipt also renames its chain", () => {
-		// Renaming `proof.chain` is an edit the receipt carries, and it used to
-		// buy exit 2 — "we could not check" — for a receipt whose own bytes
-		// already proved the event hash was forged.
-		const masked = mint({
-			eventAfterHash: (e) => ({ ...e, timestamp: "2026-08-11T18:42:14.007Z" }),
+	it("1: a receipt-local failure stays FAILED even inside a vault the snapshot cannot place", () => {
+		// `proof.chain` is receipt-carried, so an unresolvable chain is an edit an
+		// attacker can make, and it used to buy exit 2 — "we could not check" —
+		// for a receipt whose own bytes already proved a definite failure. The
+		// vault is renamed CONSISTENTLY here (receipt and every signed checkpoint)
+		// so nothing but the row's own defect is left to report.
+		const intoAnUnpinnedVault = (options: MintOptions): MintOptions => ({
+			...options,
+			checkpointsUnsigned: (cs) => cs.map((c) => ({ ...c, vaultId: "vlt_not_in_this_snapshot" })),
 			receiptBeforeSign: (r) => ({
 				...r,
 				proof: { ...r.proof, chain: "vlt_not_in_this_snapshot" },
 			}),
 		});
-		const result = runReceiptCli(["receipt.json", "--trust", "trust.json"], ioFor(masked));
-		expect(result.exitCode).toBe(1);
-		expect(result.stdout).toContain("Verdict: FAILED");
-		expect(result.stdout).toContain("EVENT_MISMATCH");
 
-		// CONTROL: an unresolvable chain over an INTACT receipt is still exit 2.
-		const honest = mint({
-			receiptBeforeSign: (r) => ({
-				...r,
-				proof: { ...r.proof, chain: "vlt_not_in_this_snapshot" },
-			}),
-		});
-		const unresolvable = runReceiptCli(["receipt.json", "--trust", "trust.json"], ioFor(honest));
+		// Two defects from opposite ends of step 2: the recompute, which sat ABOVE
+		// the old chain lookup, and equality 5, which sat below it.
+		const defects: ReadonlyArray<readonly [string, MintOptions]> = [
+			[
+				"a forged event.hash",
+				{ eventAfterHash: (e) => ({ ...e, timestamp: "2026-08-11T18:42:14.007Z" }) },
+			],
+			["equality 5", { inclusion: (p) => ({ ...p, treeSize: p.treeSize + 1 }) }],
+		];
+		for (const [label, options] of defects) {
+			const result = runReceiptCli(
+				["receipt.json", "--trust", "trust.json"],
+				ioFor(mint(intoAnUnpinnedVault(options))),
+			);
+			expect(result.exitCode, label).toBe(1);
+			expect(result.stdout, label).toContain("Verdict: FAILED");
+			expect(result.stdout, label).toContain("EVENT_MISMATCH");
+		}
+
+		// CONTROL: the SAME masking edit with no defect under it is still exit 2.
+		const unresolvable = runReceiptCli(
+			["receipt.json", "--trust", "trust.json"],
+			ioFor(mint(intoAnUnpinnedVault({}))),
+		);
 		expect(unresolvable.exitCode).toBe(2);
 		expect(unresolvable.stdout).toContain("Verdict: UNVERIFIABLE");
 	});

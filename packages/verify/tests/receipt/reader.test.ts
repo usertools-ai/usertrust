@@ -397,6 +397,88 @@ describe("a numeric refusal is classified only once the bytes are known to be a 
 	it("does not touch the accepting path — a clean receipt still reads", () => {
 		expect(readReceiptDocument(mint().receiptBytes).ok).toBe(true);
 	});
+
+	// ── The ORACLE, and why it is the scanner rather than `JSON.parse` ─────────
+	//
+	// "Did these bytes become a document?" has to be answered by THIS verifier's
+	// grammar, and `JSON.parse` is a weaker one: it accepts duplicate keys and
+	// unbounded nesting, both of which the strict scanner refuses as SYNTAX. A
+	// proxy that accepts more than the thing it stands in for disagrees with it
+	// somewhere, and here the disagreement is reachable by ordering: put the
+	// illegal literal FIRST and the one-pass scanner stops before it ever sees
+	// the scanner-invalid construct behind it.
+	//
+	// The fix re-runs the same scanner with the numeric axis switched off. The
+	// tests below therefore assert the CLASS — two different scanner-only
+	// constructs, each reached both alone and from behind a bad literal, landing
+	// on the same verdict either way.
+
+	/** `{"deep": [[[…]]]}` — `depth` nested arrays under one member. */
+	const nested = (depth: number, prefix = ""): string =>
+		`{${prefix}"deep":${"[".repeat(depth)}1${"]".repeat(depth)}}`;
+
+	it("proves the premise: `JSON.parse` really does accept what the scanner refuses", () => {
+		// Without this the vectors prove nothing — a construct the old oracle
+		// already rejected would be classified correctly for the wrong reason.
+		expect(() => JSON.parse('{"x":1.5,"a":1,"a":2}')).not.toThrow();
+		expect(() => JSON.parse(nested(400))).not.toThrow();
+		// And the strict scanner — with NO numeric policy, so only the grammar is
+		// speaking — refuses both. That is the disagreement, measured.
+		for (const text of ['{"a":1,"a":2}', nested(400)]) {
+			const scan = scanJsonForDuplicateKeys(text);
+			expect(scan.ok, text.slice(0, 24)).toBe(false);
+			expect(scan.ok === false && scan.kind, text.slice(0, 24)).toBe("syntax");
+		}
+	});
+
+	it("ATTACK: a duplicate key BEHIND an illegal literal is syntax, not schema", () => {
+		// Codex's vector. `1.5` is met first, so the numeric branch fires; the
+		// duplicate keys behind it are what actually decide the class.
+		const refusal = refusalFor('{"x":1.5,"a":1,"a":2}');
+		expect(refusal.kind).toBe("unparseable");
+		expect(refusal.detail).toMatch(/duplicate JSON key/);
+	});
+
+	it("ATTACK: excessive nesting BEHIND an illegal literal lands on the nesting refusal", () => {
+		// The second construct, and the one that shows this is a class rather than
+		// a duplicate-key special case. Not merely the same CLASS as nesting alone
+		// — the same DETAIL, because it is literally the same scanner saying it.
+		const behind = refusalFor(nested(400, '"x":1.5,'));
+		const alone = refusalFor(nested(400));
+		expect(alone.kind).toBe("unparseable");
+		expect(behind.kind).toBe("unparseable");
+		expect(behind.detail).toMatch(/nesting deeper than/);
+		expect(behind.detail).toBe(alone.detail);
+	});
+
+	it("the same holds for the duplicate-key pair — identical detail, literal or no literal", () => {
+		expect(refusalFor('{"x":1.5,"a":1,"a":2}').detail).toBe(refusalFor('{"a":1,"a":2}').detail);
+	});
+
+	it("POSITIVE CONTROL: a well-formed document with an illegal literal is STILL schema", () => {
+		// Load-bearing, and the assertion that stops this being "fixed" by
+		// weakening the numeric rule. Remove the duplicate and nothing else: the
+		// literal is still illegal, the bytes are still a document, and §5's table
+		// still says FAILED.
+		const refusal = refusalFor('{"x":1.5,"a":1}');
+		expect(refusal.kind).toBe("schema");
+		expect(refusal.detail).toMatch(/non-integer/);
+		expect(refusal.detail).toMatch(/\$\.x/);
+		// And with legal nesting behind it, which the scanner permits.
+		expect(refusalFor(nested(8, '"x":1.5,')).kind).toBe("schema");
+	});
+
+	it("POSITIVE CONTROL: legal nesting and unique keys still read on the ACCEPTING path", () => {
+		// The oracle runs on the refusal path only, so this is the direction that
+		// proves the added scan cannot reject a document the reader must accept.
+		expect(scanJsonForDuplicateKeys(nested(8)).ok).toBe(true);
+		// It got PAST the grammar and died at the field walk — named, so this
+		// cannot pass by refusing for the very reason it is meant to rule out.
+		const legal = refusalFor(nested(8));
+		expect(legal.kind).toBe("schema");
+		expect(legal.detail).toMatch(/unknown field/);
+		expect(readReceiptDocument(mint().receiptBytes).ok).toBe(true);
+	});
 });
 
 describe("unknown-field rejection in the signed receipt (§5, §2)", () => {
@@ -1461,5 +1543,188 @@ describe("§8 — a publicKey must SPAN the bytes it was decoded from", () => {
 		expect(loadTrustSnapshot(mint().snapshotBytes).ok).toBe(true);
 		// Line endings are the encoding's business, not the value's.
 		expect(loadWith(MINT_KEY.publicKeyPem.replace(/\n/g, "\r\n")).ok).toBe(true);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §8 — and the encoding must be THE canonical DER, AT EVERY DEPTH.
+//
+// The span check above reads the OUTER TLV. An SPKI is four nested TLVs, and a
+// length spelled in DER's long form where the short form would do is a second
+// encoding of one key at whichever of them it appears:
+//
+//   30 2a | 30 05 | 06 03 2b 65 70 | 03 21 00 ‖ 32 bytes     ← canonical
+//   30 2b | 30 81 05 | …                                     ← depth 2
+//   30 2b | 30 06 | 06 81 03 2b 65 70 | …                    ← depth 3
+//   30 2b | 30 05 | … | 03 81 21 00 ‖ 32 bytes               ← depth 2, sibling
+//
+// All three keep the outer length honest, so the outer span check waves them
+// through — and Node loads every one of them as the clean key. Adding an
+// inner-length check would have closed depth 2 and left depth 3; there is no
+// depth at which such an enumeration ends.
+//
+// So the rule is a ROUND TRIP. Node normalizes on parse, so exporting the
+// parsed key back to SPKI DER and demanding byte equality with the input
+// refuses every non-canonical spelling at once, including ones nobody here has
+// thought of. These tests grade that claim as a CLASS: the vector Codex named,
+// plus the same defect at a different depth, refused by the same check with the
+// same reason.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("§8 — a publicKey must be the CANONICAL DER of the key it decodes to", () => {
+	const CLEAN_DER = Buffer.from(MINT_KEY.publicKeySpkiBase64, "base64");
+	/** The 32-byte Ed25519 point, taken from the end rather than by a fixed offset. */
+	const RAW = CLEAN_DER.subarray(CLEAN_DER.length - 32);
+
+	type Depth = "canonical" | "outer" | "algorithm" | "oid" | "bitString";
+
+	/**
+	 * An Ed25519 SPKI assembled from its four TLVs, with exactly one of them
+	 * spelling its length in the long form. Assembled rather than hand-written
+	 * so the ENCLOSING lengths adapt: a long-form OID makes the
+	 * AlgorithmIdentifier one byte longer, and the mutant stays well-formed
+	 * everywhere except at the depth under test. A hand-written buffer would
+	 * have to be re-counted per depth, and a mis-count reads as a pass.
+	 */
+	const spki = (nonMinimalAt: Depth): Buffer => {
+		const len = (n: number, here: Depth): number[] => (nonMinimalAt === here ? [0x81, n] : [n]);
+		const oid = [0x06, ...len(3, "oid"), 0x2b, 0x65, 0x70];
+		const algorithm = [0x30, ...len(oid.length, "algorithm"), ...oid];
+		const bits = [0x00, ...RAW];
+		const bitString = [0x03, ...len(bits.length, "bitString"), ...bits];
+		const body = [...algorithm, ...bitString];
+		return Buffer.from([0x30, ...len(body.length, "outer"), ...body]);
+	};
+
+	const patched = (fn: (s: TrustSnapshot) => void): Buffer =>
+		mint({
+			snapshot: (s) => {
+				fn(s);
+				return s;
+			},
+		}).snapshotBytes;
+
+	const loadWith = (publicKey: string): ReturnType<typeof loadTrustSnapshot> =>
+		loadTrustSnapshot(
+			patched((s) => {
+				const entry = s.keys.find((k) => k.keyId === MINT_KEY.keyId);
+				if (entry) entry.publicKey = publicKey;
+			}),
+		);
+
+	const asPem = (der: Buffer): string =>
+		`-----BEGIN PUBLIC KEY-----\n${(der.toString("base64").match(/.{1,64}/g) ?? []).join("\n")}\n-----END PUBLIC KEY-----\n`;
+
+	/** The three that the OUTER span check cannot see. `outer` is listed apart. */
+	const INNER: readonly Depth[] = ["algorithm", "oid", "bitString"];
+
+	it("the builder is honest: `canonical` reproduces the real key byte for byte", () => {
+		// Everything below rests on the assembler, so it is checked against the
+		// key the harness actually minted before any mutant is trusted.
+		expect(spki("canonical")).toEqual(CLEAN_DER);
+		// And the named vector really is the one Codex named.
+		expect(spki("algorithm").subarray(0, 5).toString("hex")).toBe("302b308105");
+	});
+
+	it("proves the premise: the OUTER span check waves each of them through", () => {
+		// This is what makes them a different defect from the trailing-suffix one.
+		// The outer length is short-form and spans the buffer exactly, so the
+		// check that catches a suffix has nothing to say about any of these.
+		for (const depth of INNER) {
+			const der = spki(depth);
+			expect(der[0], depth).toBe(0x30);
+			expect(der[1], depth).toBeLessThan(0x80);
+			expect((der[1] as number) + 2, depth).toBe(der.length);
+			// One byte longer than the canonical encoding of the same key — so
+			// these ARE two byte strings, not a re-spelling of one.
+			expect(der.length, depth).toBe(CLEAN_DER.length + 1);
+			expect(der.equals(CLEAN_DER), depth).toBe(false);
+		}
+	});
+
+	it("proves the premise: Node loads every one of them AS THE CLEAN KEY", () => {
+		// Both arms, because a rule that holds for one encoding is not a rule.
+		for (const depth of INNER) {
+			const der = spki(depth);
+			for (const [arm, loaded] of [
+				["der", createPublicKey({ key: der, format: "der", type: "spki" })],
+				["pem", createPublicKey(asPem(der))],
+			] as const) {
+				expect(loaded.asymmetricKeyType, `${depth}/${arm}`).toBe("ed25519");
+				expect(loaded.export({ type: "spki", format: "der" }), `${depth}/${arm}`).toEqual(
+					CLEAN_DER,
+				);
+			}
+		}
+	});
+
+	it("REFUSES the non-minimal INNER length Codex named — and at TWO more depths", () => {
+		// Depth 2 (the AlgorithmIdentifier SEQUENCE) is the reported instance;
+		// depth 3 (inside the OID) and depth 2's sibling (the BIT STRING) are the
+		// proof that what was fixed is the class. One check, one reason, every
+		// depth — which is what a per-instance fix could not have produced.
+		for (const depth of INNER) {
+			for (const [arm, encoded] of [
+				["base64", spki(depth).toString("base64")],
+				["pem", asPem(spki(depth))],
+			] as const) {
+				const load = loadWith(encoded);
+				const where = `${depth}/${arm}`;
+				expect(load.ok, where).toBe(false);
+				expect(load.ok === false && load.detail, where).toContain(MINT_KEY.keyId);
+				expect(load.ok === false && load.detail, where).toContain(
+					"is not the canonical DER encoding of the key it decodes to",
+				);
+				// The byte counts, so the refusal is actionable rather than a shrug.
+				expect(load.ok === false && load.detail, where).toContain("45 byte(s) in");
+				expect(load.ok === false && load.detail, where).toContain("44 byte(s) back out");
+			}
+		}
+	});
+
+	it("the outer depth is refused too — by the span check, which keeps its wording", () => {
+		// Depth 1 is the one the earlier fix already covered. It is asserted here
+		// so the depth sweep is complete, and asserted at its OWN message so the
+		// two checks stay distinguishable: if this ever starts reporting the
+		// round-trip's reason, the span check has silently stopped running.
+		for (const [arm, encoded] of [
+			["base64", spki("outer").toString("base64")],
+			["pem", asPem(spki("outer"))],
+		] as const) {
+			const load = loadWith(encoded);
+			expect(load.ok, arm).toBe(false);
+			expect(load.ok === false && load.detail, arm).toContain("does not decode to one DER value");
+		}
+	});
+
+	it("POSITIVE CONTROL: ordinary SPKI base64 and ordinary PEM still load AND verify", () => {
+		// The direction a refusal-only suite cannot see, end to end on both arms:
+		// the round-trip must accept every conformant key in existence, and a
+		// comparison that were subtly wrong (a Buffer/Uint8Array identity check,
+		// say) would refuse all of them.
+		for (const encoding of ["pem", "spki"] as const) {
+			const bundle = mint({
+				snapshot: (s) => {
+					for (const entry of s.keys) {
+						const key = ALL_KEYS.find((k) => k.keyId === entry.keyId);
+						if (key) {
+							entry.publicKey = encoding === "pem" ? key.publicKeyPem : key.publicKeySpkiBase64;
+						}
+					}
+					return s;
+				},
+			});
+			const load = loadTrustSnapshot(bundle.snapshotBytes);
+			expect(load.ok === true || (load.ok === false && load.detail), encoding).toBe(true);
+			if (!load.ok) continue;
+			expect(
+				verifyReceiptBase({ receiptBytes: bundle.receiptBytes, snapshot: load.snapshot }).verdict,
+				encoding,
+			).toBe("VERIFIED_CHECKPOINT");
+		}
+		// And the assembler's own canonical output, through the loader, on both
+		// arms — the exact bytes the mutants were built from.
+		expect(loadWith(spki("canonical").toString("base64")).ok).toBe(true);
+		expect(loadWith(asPem(spki("canonical"))).ok).toBe(true);
 	});
 });

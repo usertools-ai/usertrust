@@ -43,6 +43,7 @@ import {
 	DEFAULT_RECEIPT_ID,
 	LEADING_ZERO_RECEIPT_ID,
 	LONG_DECODE_RECEIPT_ID,
+	type MintOptions,
 	mint,
 	type Projection,
 	SHORT_DECODE_RECEIPT_ID,
@@ -433,63 +434,133 @@ describe("failure-code precedence (CLI spec §5)", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Step 2's ORDER — the receipt's own bytes are judged before external material.
+// Step 2 is PARTITIONED — every receipt-local check, THEN the chain, then the
+// two comparisons that need it.
 //
-// `proof.chain` is carried by the RECEIPT, and resolving it against the
-// snapshot was the first thing step 2 did. So a receipt with a forged
-// `event.hash` — which recomputes from its own embedded envelope and needs no
-// snapshot at all — could be turned from "we checked and this is bad" (exit 1)
-// into "we could not check" (exit 2) by ALSO renaming its chain to something
-// unregistered. A definite integrity failure, masked by one extra edit, into
-// the exit code a CI gate is likeliest to tolerate.
+// `proof.chain` is carried by the RECEIPT, so an unregistered chain is an edit
+// an attacker can make. Any check that runs after the lookup can therefore be
+// masked: a definite failure (exit 1) becomes "we could not check" (exit 2),
+// the code a CI gate is likeliest to tolerate.
 //
-// Every case below is minted with the SAME two hooks so the pair is a matrix
-// and not two anecdotes: hash stale or intact × chain registered or not.
+// The FIRST correction moved the lookup down to equality 2 — the first
+// comparison that reads the registered form. That fixed the example it was
+// given (a forged `event.hash`, which sits above equality 2) and left
+// equalities 4 through 9 maskable, because they sit below it. So this suite
+// grades the CLASS: the matrix runs over the receipt-local defect as well as
+// over the chain, with rows drawn from above, below and at the very END of the
+// old lookup's position.
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe("step 2 — an unresolvable chain never masks an event-integrity failure", () => {
+describe("step 2 — an unresolvable chain never masks a receipt-local failure", () => {
 	const UNREGISTERED = "vlt_not_in_this_snapshot";
 
 	/**
-	 * `staleHash` edits a field AFTER the envelope is hashed, so `hash` stays
-	 * self-consistent with the proof and wrong for the envelope — the recompute
-	 * is the only check that can see it. `chain` is edited BEFORE signing so the
-	 * receipt stays properly signed and the mutant breaks exactly the facts it
-	 * names, with no second defect for a verdict to be blamed on.
+	 * One receipt-local defect per row, each decidable from the receipt's own
+	 * bytes with no snapshot at all, and each from a different part of step 2:
+	 * the recompute (ABOVE the old lookup), equalities 4/5/6 (below it) and
+	 * equality 9 (the very last receipt-local check there is).
+	 *
+	 * `eventAfterHash` edits a field AFTER the envelope is hashed, so `hash`
+	 * stays self-consistent with the proof and wrong for the envelope; every
+	 * other hook runs BEFORE signing, so the receipt stays properly signed and
+	 * each mutant breaks exactly the fact it names.
 	 */
-	function runWith(options: { staleHash: boolean; chain: string }): Run {
-		return verifyMinted({
-			...(options.staleHash
-				? { eventAfterHash: (e) => ({ ...e, timestamp: "2026-08-11T18:42:14.007Z" }) }
-				: {}),
-			receiptBeforeSign: (r) => ({ ...r, proof: { ...r.proof, chain: options.chain } }),
-		});
-	}
+	const RECEIPT_LOCAL: ReadonlyArray<readonly [string, MintOptions, RegExp]> = [
+		[
+			"a forged event.hash",
+			{ eventAfterHash: (e) => ({ ...e, timestamp: "2026-08-11T18:42:14.007Z" }) },
+			/does not recompute/,
+		],
+		["equality 4's leafIndex range", { inclusion: (p) => ({ ...p, leafIndex: 7 }) }, /equality 4/],
+		[
+			"equality 5's inclusion.treeSize ≠ checkpoint.treeSize",
+			{ inclusion: (p) => ({ ...p, treeSize: p.treeSize + 1 }) },
+			/equality 5/,
+		],
+		[
+			"equality 6's inclusion.root",
+			{ inclusion: (p) => ({ ...p, root: "0".repeat(64) }) },
+			/equality 6/,
+		],
+		[
+			"equality 9's absent work mirror",
+			{
+				receiptBeforeSign: (r) => {
+					const { work: _dropped, ...rest } = r;
+					return { ...rest };
+				},
+			},
+			/equality 9/,
+		],
+	];
 
-	it("ATTACK: a stale event.hash plus an unknown chain reports the INTEGRITY failure", () => {
-		const actual = runWith({ staleHash: true, chain: UNREGISTERED });
+	/**
+	 * The masking edit, and it is the STRONGEST one available rather than the
+	 * cheapest: `proof.chain` and every checkpoint's `vaultId` are renamed
+	 * TOGETHER, before signing. So the receipt stays perfectly self-consistent —
+	 * equality 8's `checkpoint.vaultId ≠ proof.chain` has nothing to catch — and
+	 * the ONLY thing wrong beyond the row's own defect is that the snapshot
+	 * cannot place the chain. That is the vault operator's own receipt under a
+	 * vault the verifier does not pin, which is exactly the shape of a laundering
+	 * attempt, and it leaves the row's defect as the single thing to report.
+	 */
+	const intoAnUnpinnedVault = (options: MintOptions): MintOptions => ({
+		...options,
+		checkpointsUnsigned: (cs) => cs.map((c) => ({ ...c, vaultId: UNREGISTERED })),
+		receiptBeforeSign: (r) => {
+			const patched = options.receiptBeforeSign?.(r) ?? { ...r };
+			const proof = patched.proof as Record<string, unknown>;
+			return { ...patched, proof: { ...proof, chain: UNREGISTERED } };
+		},
+	});
+
+	it.each(RECEIPT_LOCAL)(
+		"ATTACK: %s stays a DEFINITE failure inside a vault the snapshot cannot place",
+		(label, options, reason) => {
+			const actual = verifyMinted(intoAnUnpinnedVault(options));
+			expect(actual.verdict, label).toBe("FAILED");
+			expect(actual.failure, label).toMatchObject({ step: "event", code: "EVENT_MISMATCH" });
+			// By REASON, not merely by redness: a run that failed for some other
+			// reason — including a DIFFERENT receipt-local check — would score
+			// identically against a bare "is it red" assertion.
+			expect(actual.failure?.detail, label).toMatch(reason);
+			expect(actual.missing, label).toBeNull();
+		},
+	);
+
+	it.each(RECEIPT_LOCAL)(
+		"CONTROL: %s inside the PINNED vault fails at the IDENTICAL detail",
+		(label, options) => {
+			// The vault edit must change nothing whatsoever. If the two details
+			// differ, snapshot state is still leaking into a receipt-local answer.
+			const masked = verifyMinted(intoAnUnpinnedVault(options));
+			const plain = verifyMinted(options);
+			expect(plain.failure, label).toMatchObject({ step: "event", code: "EVENT_MISMATCH" });
+			expect(plain.failure?.detail, label).toBe(masked.failure?.detail);
+		},
+	);
+
+	it("a receipt-side rename ALONE is a definite failure — the receipt contradicts itself", () => {
+		// The case the previous round reported as UNVERIFIABLE, and the one that
+		// showed the nudge was not enough. Renaming only `proof.chain` leaves
+		// `checkpoint.vaultId` naming the old vault, and equality 8 settles that
+		// from the receipt's own bytes with no snapshot at all — but equality 8
+		// used to run AFTER the lookup, so the lookup answered first and a
+		// self-contradicting receipt bought "missing trust material".
+		const actual = verifyMinted({
+			receiptBeforeSign: (r) => ({ ...r, proof: { ...r.proof, chain: UNREGISTERED } }),
+		});
 		expect(actual.verdict).toBe("FAILED");
 		expect(actual.failure).toMatchObject({ step: "event", code: "EVENT_MISMATCH" });
-		// By REASON, not merely by redness: the recomputation is what refused,
-		// and a run that failed for some other reason would score identically.
-		expect(actual.failure?.detail).toMatch(/does not recompute/);
-		expect(actual.missing).toBeNull();
+		expect(actual.failure?.detail).toMatch(/equality 8: checkpoint\.vaultId/);
 	});
 
-	it("CONTROL: the same stale hash under the REGISTERED chain fails identically", () => {
-		// The chain edit must change nothing at all — if the two verdicts differ,
-		// the ordering is still leaking snapshot state into an integrity answer.
-		const masked = runWith({ staleHash: true, chain: UNREGISTERED });
-		const plain = runWith({ staleHash: true, chain: VAULT_ID });
-		expect(plain.failure).toMatchObject({ step: "event", code: "EVENT_MISMATCH" });
-		expect(plain.failure?.detail).toBe(masked.failure?.detail);
-	});
-
-	it("CONTROL: an unknown chain with an INTACT hash is still UNVERIFIABLE", () => {
-		// The other direction, and the one a fix that simply deleted the lookup
-		// would break: nothing about a genuinely unresolvable chain became a
-		// FAILED verdict. §7 keeps it as missing trust material.
-		const actual = runWith({ staleHash: false, chain: UNREGISTERED });
+	it("CONTROL: a chain that is unresolvable and NOTHING else is still UNVERIFIABLE", () => {
+		// The direction a fix that simply deleted the lookup would break, and the
+		// row that makes the matrix a matrix: the SAME masking edit, with no
+		// receipt-local defect underneath it, must still be missing trust
+		// material. §7 keeps it there.
+		const actual = verifyMinted(intoAnUnpinnedVault({}));
 		expect(actual.verdict).toBe("UNVERIFIABLE");
 		expect(actual.missing?.what).toBe("trustKey");
 		expect(actual.missing?.detail).toContain(UNREGISTERED);
@@ -504,8 +575,23 @@ describe("step 2 — an unresolvable chain never masks an event-integrity failur
 		expect(actual.missing?.what).toBe("trustKey");
 	});
 
-	it("CONTROL: intact hash, registered chain — still VERIFIED_CHECKPOINT", () => {
-		expect(runWith({ staleHash: false, chain: VAULT_ID }).verdict).toBe("VERIFIED_CHECKPOINT");
+	it("CONTROL: the two comparisons that DO need the chain still fire", () => {
+		// Phase 2 is not dead code. A partition that quietly dropped the
+		// chain-bound half would pass every assertion above it.
+		for (const name of [
+			"eq2/registered-mint-actor-form",
+			"eq8/chain-profile-mismatch-in-snapshot",
+		]) {
+			const actual = run(vector(name));
+			expect(actual.failure, name).toMatchObject({ step: "event", code: "EVENT_MISMATCH" });
+		}
+	});
+
+	it("CONTROL: an untouched receipt on the registered chain — still VERIFIED_CHECKPOINT", () => {
+		expect(
+			verifyMinted({ receiptBeforeSign: (r) => ({ ...r, proof: { ...r.proof, chain: VAULT_ID } }) })
+				.verdict,
+		).toBe("VERIFIED_CHECKPOINT");
 	});
 });
 

@@ -371,11 +371,34 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// is still `{}` — so the thing this tripwire exists to catch did not happen.
 		// Raised to fit the work, per this block's own standing instruction; 222
 		// lines of headroom rather than shaving master's hardening to duck a number.
+		//
+		// 9600 → 9900, for the SECOND round of tier-0 fixes on this branch
+		// (2026-08-14). Post-round total 9692, so 9600 would have failed by 92.
+		// WHAT WAS ADDED, all in `receipt-verify.ts` and all hand-written:
+		//   · a round-trip re-encode in `parseTrustPublicKey` — the parsed key is
+		//     exported back to SPKI DER and required to equal the input bytes, so a
+		//     non-minimal DER length at ANY nesting depth is refused instead of the
+		//     outer TLV alone (Node normalizes on parse, which is what makes one
+		//     comparison cover the whole class);
+		//   · `withoutNumericPolicy`, so the syntax oracle re-runs THIS verifier's
+		//     scanner with one axis removed rather than deferring to `JSON.parse`,
+		//     whose grammar is weaker (it accepts duplicate keys and unbounded
+		//     nesting) and therefore disagreed with the scanner it stood in for;
+		//   · step 2 split into a receipt-local phase and a free-function
+		//     chain-bound phase with a `ChainBoundClaims` boundary between them, so
+		//     "receipt-local checks run first" is enforced by SCOPE rather than by
+		//     call ordering.
+		// Roughly two thirds of the 149 lines is explanatory comment — the three
+		// notes saying why each fix is at a choke point, which is the thing that
+		// stops a third round on the same defects. NO vendored source, no new
+		// dependency; both invariants re-verified directly, every import in
+		// packages/verify/src is still `node:*` or `./`-relative and `dependencies`
+		// is still `{}`. 208 lines of headroom.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(9600);
+		expect(total).toBeLessThan(9900);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {

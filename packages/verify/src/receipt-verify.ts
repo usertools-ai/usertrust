@@ -516,6 +516,20 @@ export function scanJsonForDuplicateKeys(
 	return new JsonScanner(text, options).scan();
 }
 
+/**
+ * `options` with the numeric axis SUBTRACTED — every other axis carried through
+ * untouched.
+ *
+ * Written as a subtraction rather than as a fresh `{}` literal so it cannot
+ * drift: an axis added to `JsonScanOptions` tomorrow reaches the syntax oracle
+ * by inheritance, and nobody has to remember that a second call site exists.
+ * The one thing removed is the one thing the oracle must not re-apply.
+ */
+function withoutNumericPolicy(options: JsonScanOptions): JsonScanOptions {
+	const { policy: _numeric, ...rest } = options;
+	return rest;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The frozen numeric rules (CLI spec §3 step 4).
 //
@@ -1545,16 +1559,34 @@ export function readStrictJson(
 		// straight off that verdict reports FAILED for truncated bytes, where §5's
 		// table says unreadable material is UNVERIFIABLE/exit 2.
 		//
-		// So SYNTAX is settled first, and by the parser that would have produced
-		// the value on the accepting path rather than by a second opinion: it
-		// parses ⇒ the bytes ARE a document and the numeric refusal stands, in
-		// full; it does not ⇒ they never were one. The rule itself is untouched —
-		// this decides which of two true things to report, not whether to report.
-		try {
-			JSON.parse(text);
-		} catch (error) {
-			return unparseable(`JSON parse failed: ${(error as Error).message}`);
-		}
+		// So SYNTAX is settled first — and by THE SAME SCANNER, re-run with the
+		// numeric axis switched off, rather than by a second opinion.
+		//
+		// `JSON.parse` was that second opinion, and a second opinion is a proxy:
+		// it is a WEAKER grammar than the one this verifier enforces. It accepts
+		// duplicate keys, and nesting past `MAX_JSON_DEPTH`, which the scanner
+		// refuses as syntax. So `{"x":1.5,"a":1,"a":2}` — where the one-pass
+		// scanner stops at the literal before it ever reaches the duplicate —
+		// parsed cleanly and was reported schema/FAILED/exit 1, while the same
+		// duplicate keys ALONE are syntax/UNVERIFIABLE/exit 2. One construct,
+		// two verdicts, decided by which defect happened to come first in the
+		// byte order. A proxy that accepts more than the thing it stands in for
+		// disagrees with it SOMEWHERE, always; the only fix that does not leave
+		// another somewhere is to stop using a proxy.
+		//
+		// Same code path, same rules, ONE axis removed — so the two cannot drift,
+		// because there are no longer two. Hand-adding duplicate-key and depth
+		// checks to the oracle instead would rebuild the identical drift one
+		// level down.
+		//
+		// It refuses ⇒ the bytes were never a document, whatever else is also
+		// wrong with them; it passes ⇒ the numeric refusal stands, in full. The
+		// rule itself is untouched: this decides which of two true things to
+		// report, not whether to report. (A `numeric` verdict cannot come back
+		// from this call — the only line that emits one is behind a policy node,
+		// and there is no policy.)
+		const syntaxOnly = scanJsonForDuplicateKeys(text, withoutNumericPolicy(options));
+		if (!syntaxOnly.ok) return unparseable(syntaxOnly.detail);
 		return schemaRefusal(scan.detail);
 	}
 
@@ -1736,6 +1768,17 @@ export type TrustKeyMaterial =
  * receipts under material a strict DER verifier refuses outright, and the two
  * verifiers disagree about the same pinned bytes. §8 pins KEY MATERIAL, so the
  * encoding has to span the bytes it was decoded from.
+ *
+ * DIAGNOSTICS, NOT THE AUTHORITY. This reads the OUTER TLV, and the outer TLV
+ * is one level of a nested structure: `30 2b 30 81 05 …` spells the INNER
+ * AlgorithmIdentifier's length in the long form, spans its buffer exactly, and
+ * walks straight through here — and `06 81 03 2b 65 70` does the same one level
+ * deeper still, inside the OID. Reaching for an inner-length check next would
+ * fix level 2 and leave level 3; there is no depth at which the enumeration
+ * ends. The round-trip in `parseTrustPublicKey` is what actually decides, at
+ * every depth at once. What this buys, and the only reason it is retained, is
+ * that it can say HOW MANY bytes ran past the value — which a byte-inequality
+ * cannot.
  */
 function derValueLength(der: Uint8Array): number | null {
 	// SubjectPublicKeyInfo is a SEQUENCE; nothing else is a key here.
@@ -1787,15 +1830,30 @@ function spkiDerFromPem(pem: string): Buffer | null {
  * Both remaining rules are bound HERE rather than at the verify sites, because
  * this is the choke point every key passes through exactly once:
  *
- *  - the DER value must SPAN the bytes it was decoded from, on EITHER
- *    encoding; and
+ *  - the bytes must be THE canonical DER encoding of the key they decode to, on
+ *    EITHER encoding; and
  *  - the material must actually be Ed25519. ut1 permits nothing else — §5 pins
  *    the receipt signature's `alg` to the literal `ed25519` and §4a's
  *    checkpoint statements are signed the same way — and the label on the
  *    snapshot entry is a claim by the same document that supplies the key.
  *
- * The type check runs after BOTH arms for the same reason the length check
- * does: an arm-specific rule is a rule the other arm can be missing.
+ * The type check runs after BOTH arms for the same reason the round-trip does:
+ * an arm-specific rule is a rule the other arm can be missing.
+ *
+ * THE ROUND-TRIP IS THE RULE, and it is stated as one comparison rather than as
+ * a list of DER's encoding rules because a list has to be kept complete. Node
+ * NORMALIZES on parse: whatever spelling goes in, `export` hands back the one
+ * canonical encoding of the key that came out. So re-encoding and demanding
+ * byte equality with the input refuses every non-canonical spelling — a
+ * trailing suffix, a long-form length at the outer SEQUENCE, at the inner
+ * AlgorithmIdentifier, inside the OID, in the BIT STRING, and any depth or form
+ * neither this comment nor the reviewer who reads it has thought of. One check,
+ * the whole class, and nothing to keep in sync with a spec.
+ *
+ * Verified rather than assumed, on both arms and at three depths, in
+ * `reader.test.ts` — including the premise that Node really does accept each of
+ * those spellings and hand back the clean key, without which the vectors would
+ * be proving something else.
  */
 function parseTrustPublicKey(encoded: string): TrustKeyMaterial {
 	const isPem = encoded.startsWith("-----BEGIN ");
@@ -1808,6 +1866,9 @@ function parseTrustPublicKey(encoded: string): TrustKeyMaterial {
 				: "is not canonical base64",
 		};
 	}
+	// Diagnostics first, and only diagnostics: every refusal these two lines make
+	// the round-trip below makes too. They run first so the common case keeps the
+	// message that names the actual defect and counts the bytes.
 	const spanned = derValueLength(der);
 	if (spanned === null) return { ok: false, reason: "does not decode to one DER value" };
 	if (spanned !== der.length) {
@@ -1822,6 +1883,16 @@ function parseTrustPublicKey(encoded: string): TrustKeyMaterial {
 		return {
 			ok: false,
 			reason: `is ${String(key.asymmetricKeyType)} material, and ut1 verifies Ed25519 only`,
+		};
+	}
+	const canonicalDer = key.export({ type: "spki", format: "der" }) as Buffer;
+	if (!canonicalDer.equals(der)) {
+		return {
+			ok: false,
+			reason:
+				`is not the canonical DER encoding of the key it decodes to — ${der.length} byte(s) in, ` +
+				`${canonicalDer.length} byte(s) back out, and they differ. A second spelling of one key ` +
+				"is a second key as far as an independent verifier is concerned",
 		};
 	}
 	return { ok: true, key: key as Ed25519PublicKey };
@@ -2452,7 +2523,7 @@ export const UT1_MINT_ACTOR: Readonly<Record<string, string>> = {
 };
 
 /** `event.actor` is §4a's closed form — the member SET as well as the values. */
-function isUt1MintActor(value: JsonValue | undefined): boolean {
+function isUt1MintActor(value: JsonValue | undefined): value is JsonObject {
 	if (!isJsonObject(value)) return false;
 	// The member set is closed, so a count plus per-member presence is the whole
 	// comparison — and `Object.hasOwn`, never an indexed read, because the
@@ -3326,6 +3397,80 @@ interface BoundReceipt {
 	readonly checkpoint: JsonObject;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Step 2's PARTITION — and why it is a partition rather than a running order.
+//
+// The invariant: EVERY check decidable from the receipt alone runs before ANY
+// check that needs external trust material. A definite failure must never be
+// masked as "we could not check", because `proof.chain` is carried BY THE
+// RECEIPT — so an attacker who has already been caught by a receipt-local check
+// can rename it to something unregistered and convert exit 1 into exit 2, the
+// code a CI gate is likeliest to tolerate.
+//
+// Ordering the call sites by hand does not hold that. It was ordered by hand
+// once already, the lookup moved down to the first comparison that read the
+// registered form, and the equalities that came AFTER that comparison were
+// still maskable. The correction was a nudge, so it fixed the example.
+//
+// So the two phases are separated by SCOPE, and each direction is closed by the
+// type checker rather than by the next reviewer:
+//
+//  - phase 1 is a method that never resolves the chain, so a check needing
+//    registered material CANNOT be written there — there is no `chain` to
+//    write it against;
+//  - phase 2 is a FREE FUNCTION. It has no `this`, so it cannot reach the
+//    receipt at all, and a check that belongs in phase 1 cannot be smuggled
+//    into it without widening `ChainBoundClaims` — which is a visible edit to
+//    a named type, reviewed as such.
+//
+// A check added next year lands in the right phase because the wrong phase
+// does not compile, which is the only version of this rule that does not decay.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Everything phase 2 is allowed to see. Deliberately NOT the receipt: this is
+ * the list of facts §4 compares against the REGISTERED chain, and it is short
+ * because only two comparisons in the whole of step 2 need one.
+ */
+interface ChainBoundClaims {
+	/** The lookup key, and what a missing-material refusal names. */
+	readonly chainId: string;
+	/** Equality 2's second half — already checked against §4a's closed form. */
+	readonly actor: JsonValue;
+	/** Equality 8's registry half — already checked to be `UT1_PROFILE`. */
+	readonly profile: string;
+}
+
+type ReceiptLocalOutcome =
+	| { readonly ok: true; readonly claims: ChainBoundClaims }
+	| { readonly ok: false; readonly resolution: Resolution };
+
+/**
+ * Phase 2. The ONLY two comparisons in step 2 that need the registered chain.
+ *
+ * Both are second fences rather than the only ones — §4a's closed actor form
+ * and the `UT1_PROFILE` literal are checked in phase 1, against the spec — so
+ * nothing definite is lost by their running last.
+ */
+function chainBoundEqualities(chain: TrustChain, claims: ChainBoundClaims): Resolution {
+	// Equality 2, the agreement half — canonical BYTES against the registered
+	// form, not field plucking (§4a is explicit that this is one comparison).
+	if (canonicalize(claims.actor) !== canonicalize(chain.mintActor)) {
+		return failure(
+			"EVENT_MISMATCH",
+			"equality 2: event.actor is not the chain's registered mintActor",
+		);
+	}
+	// Equality 8, the registry cross-check.
+	if (chain.profile !== claims.profile) {
+		return failure(
+			"EVENT_MISMATCH",
+			"equality 8: the registered chain profile disagrees with proof.profile",
+		);
+	}
+	return PASSED;
+}
+
 class BaseRun {
 	private readonly results = new Map<BaseStepName, StepOutcome>();
 	private receiptId: string | null = null;
@@ -3538,9 +3683,43 @@ class BaseRun {
 	}
 
 	// ── Step 2: recompute `event.hash`, then §4's nine equalities ────────────
+	//
+	// TWO PHASES, and the split is the fix — not the running order inside them.
+	// The partition note above `ChainBoundClaims` says why, and says what stops
+	// a check landing in the wrong one.
 	private stepEvent(): Resolution {
+		// PHASE 1 — everything §4 can decide from the receipt's own bytes.
+		const local = this.receiptLocalEqualities();
+		if (!local.ok) return local.resolution;
+		const { chainId } = local.claims;
+
+		// THE BOUNDARY, and it is the only place external trust material enters
+		// step 2. Nothing receipt-local is left undecided by this line, so an
+		// unresolvable chain can mask only another unresolvable — never a proof of
+		// forgery. `missingMaterial` still describes the snapshot accurately for a
+		// receipt whose own bytes are intact: that case is unchanged, and is the
+		// control the corpus keeps (`snapshot/chain-not-registered`).
+		const chain = this.input.snapshot.chains.get(chainId);
+		if (chain === undefined) {
+			return missingMaterial("trustKey", `chain ${chainId} is not registered in the snapshot`);
+		}
+		this.chain = chain;
+
+		// PHASE 2 — the comparisons that need the registered form, and nothing else.
+		return chainBoundEqualities(chain, local.claims);
+	}
+
+	/**
+	 * Phase 1. Reads the receipt and NOTHING ELSE: there is no chain in scope
+	 * here, which is what makes "receipt-local" a property of the code rather
+	 * than a claim about it.
+	 */
+	private receiptLocalEqualities(): ReceiptLocalOutcome {
 		const { document, event, projection, proof, inclusion, checkpoint } = this.receipt;
-		const mismatch = (detail: string): Resolution => failure("EVENT_MISMATCH", detail);
+		const mismatch = (detail: string): ReceiptLocalOutcome => ({
+			ok: false,
+			resolution: failure("EVENT_MISMATCH", detail),
+		});
 
 		const chainId = stringAt(proof, "chain") as string;
 
@@ -3557,13 +3736,14 @@ class BaseRun {
 			return mismatch("equality 1: inclusion.leafHash ≠ event.hash");
 		}
 
-		// Equality 2, in two halves — and the FIRST one is not an equality.
+		// Equality 2's FIRST half — which is not an equality at all, and is the
+		// half that stands on the receipt alone.
 		//
 		// §4a fixes proxy-v1's mint actor to exactly
 		// `{type:"system", id:"receipt-minter", name:"receipt-minter"}`, and the
-		// canonical comparison below cannot see that: it compares two INPUTS, so
-		// a receipt carrying the string form (or `null`, or the closed form plus a
-		// `tenant`) verified whenever the pinned chain registered the identical
+		// canonical comparison in phase 2 cannot see that: it compares two INPUTS,
+		// so a receipt carrying the string form (or `null`, or the closed form plus
+		// a `tenant`) verified whenever the pinned chain registered the identical
 		// malformation. Agreement proves the two documents came from one writer,
 		// which is precisely what an attacker supplying both already has.
 		//
@@ -3579,37 +3759,6 @@ class BaseRun {
 			return mismatch(
 				"equality 2: event.actor is not §4a's fixed proxy-v1 system actor, whatever the chain registers",
 			);
-		}
-		// THE CHAIN RESOLVES HERE, at the first comparison that actually needs the
-		// registered form — not at the top of the step.
-		//
-		// Resolving it first made an UNVERIFIABLE verdict reachable by editing the
-		// receipt: `proof.chain` is receipt-carried, so renaming it to something
-		// the snapshot does not register returned exit 2 ("we could not check")
-		// BEFORE the recomputation above, which needs no snapshot at all and had
-		// already found the event hash forged. A definite integrity failure was
-		// convertible into "we do not know" by one unsigned-looking edit — and
-		// exit 2 is the code a CI gate is likeliest to tolerate.
-		//
-		// The ordering rule this follows: every check that stands on the receipt's
-		// OWN bytes runs before any check that needs external material, so
-		// unresolvable trust material can only ever mask another unresolvable, and
-		// never a proof of forgery. `missingMaterial` still describes the snapshot
-		// accurately for a receipt whose own bytes are intact — that case is
-		// unchanged, and is the control the corpus keeps
-		// (`snapshot/chain-not-registered`).
-		const chain = this.input.snapshot.chains.get(chainId);
-		if (chain === undefined) {
-			return missingMaterial("trustKey", `chain ${chainId} is not registered in the snapshot`);
-		}
-		this.chain = chain;
-
-		// Then the agreement, unchanged — canonical BYTES against the registered
-		// form, not field plucking (§4a is explicit that this is one comparison).
-		// It is a SECOND fence now rather than the only one: a chain registering
-		// some other actor still refuses this receipt.
-		if (canonicalize(event.actor) !== canonicalize(chain.mintActor)) {
-			return mismatch("equality 2: event.actor is not the chain's registered mintActor");
 		}
 
 		// Equality 3 holds BY CONSTRUCTION and cannot be given a mutant: §4 says
@@ -3667,9 +3816,6 @@ class BaseRun {
 		if (profile !== UT1_PROFILE) {
 			return mismatch(`equality 8: proof.profile ${JSON.stringify(profile)} is not ut1's`);
 		}
-		if (chain.profile !== profile) {
-			return mismatch("equality 8: the registered chain profile disagrees with proof.profile");
-		}
 		// §4 keeps this "defensively" and names it redundant with equality 4, which
 		// is exactly what it is: `sequence < segmentFirstSequence` makes eq 4's
 		// leafIndex negative, and the range check above has already refused it. It
@@ -3695,7 +3841,10 @@ class BaseRun {
 		if (canonicalize(document.work) !== canonicalize(projection.work)) {
 			return mismatch("equality 9: receipt.work is not the projection's work");
 		}
-		return PASSED;
+
+		// Every receipt-local equality has passed. What is handed over is only
+		// what the chain-bound half compares — the receipt itself does not travel.
+		return { ok: true, claims: { chainId, actor: event.actor, profile } };
 	}
 
 	// ── Step 3(a): arrival context. 3(b) is notApplicable offline, by rule ───
