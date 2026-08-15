@@ -148,13 +148,11 @@ test("§8.1: every conforming 200 fixture renders, and the set is the expected o
 test("R5/R6: every verified render shows its rung word, all three rungs, and the fork disclaimer", () => {
 	for (const row of conformingVerifiedRows()) {
 		const { html, text, state } = renderFixture(row.file);
-		const word =
-			state.rung === "verified_anchored"
-				? "VERIFIED — ANCHORED · RESOLVER-ASSERTED"
-				: state.rung === "verified_checkpoint_history"
-					? "VERIFIED — CHECKPOINT HISTORY"
-					: "VERIFIED — CHECKPOINT";
-		assertContains(text, word, `${row.id}: the verdict WORD is the verdict (§6.1)`);
+		assertContains(text, "Receipt", `${row.id}: the header names the artifact type`);
+		assert.ok(
+			html.includes(`data-rung="${state.rung}" data-rung-state="reached"`),
+			`${row.id}: the reached rung is marked on the card ladder`,
+		);
 		// R5 — which rungs exist ABOVE is part of the verdict.
 		for (const rung of [
 			"verified_checkpoint",
@@ -350,7 +348,10 @@ test("R10/R37: hostile UNSIGNED members never crash the render and never demote 
 		assert.equal(state.kind, "verified", `unsigned junk must not demote: ${JSON.stringify(graft)}`);
 		if (state.kind !== "verified") continue;
 		const markup = render(state);
-		assertContains(textOf(markup), "VERIFIED — CHECKPOINT", "the base verdict survives intact");
+		assert.ok(
+			markup.includes('data-rung="verified_checkpoint" data-rung-state="reached"'),
+			"the base verdict survives intact",
+		);
 		assert.ok(!markup.includes("[object Object]"), "nothing unreadable is rendered as an object");
 	}
 });
@@ -676,18 +677,13 @@ test("R40: a selfDebitsOnly amount is unqualified, with its scope named beneath 
 	assertContains(text, `$${amountUsd}`, "the figure is the unqualified number");
 	assertContains(text, caption, "R40 names the scope beneath the figure");
 	assert.ok(html.includes('data-testid="amount-caption"'), "the caption is in the DOM");
-	assert.ok(html.includes('data-testid="card-amount-caption"'), "the visitor card carries it too");
 	assert.ok(!html.includes('data-amount-bound="floor"'), "no floor attribute remains");
 	assert.equal(
 		html.split('data-testid="amount-caption"').length - 1,
 		1,
-		"the paper caption is still a single site",
+		"R40's caption must render at exactly one site",
 	);
-	assert.equal(
-		text.split(caption).length - 1,
-		2,
-		"card + paper, both from claims.amountCaption — a third copy is drift",
-	);
+	assert.equal(text.split(caption).length - 1, 1, "the caption must appear once");
 	assertOmits(text, "at least $", "the rejected floor wording must not reach the reader");
 	assertOmits(
 		text.replace(PROVIDER_SCOPED_CLAIM, " "),
@@ -725,15 +721,8 @@ test("R40 NEGATIVE GUARD — C28 includesSomeDelegated does not hedge the figure
 
 test("R41: every verified render states the anchored rung's binding is resolver-asserted, beside the rung", () => {
 	for (const row of conformingVerifiedRows()) {
-		const { html, text, state } = renderFixture(row.file);
+		const { html, text } = renderFixture(row.file);
 		assertContains(text, ANCHOR_BINDING_RESOLVER_ASSERTED, `${row.id}: R41's disclosure`);
-		if (state.rung === "verified_anchored") {
-			assertContains(
-				text,
-				"VERIFIED — ANCHORED · RESOLVER-ASSERTED",
-				`${row.id}: the verdict WORD itself carries the qualification`,
-			);
-		}
 		assertNotBehindInteraction(html, ANCHOR_BINDING_RESOLVER_ASSERTED, `${row.id}: R41`);
 		// "Beside the rung" — inside the ANCHORED ladder item, not floating in the
 		// masthead. The rung's own `<li>` opens at `data-rung="verified_anchored"`
@@ -764,7 +753,10 @@ test("C1 commit-checkpoint.json — floor rung, provider posture, attested workl
 	const { html, text } = renderFixture("commit-checkpoint.json");
 
 	// commit kind + floor rung + R6.
-	assertContains(text, "VERIFIED — CHECKPOINT", "C1 is the floor rung");
+	assert.ok(
+		html.includes('data-rung="verified_checkpoint" data-rung-state="reached"'),
+		"C1 is the floor rung",
+	);
 	const c1Anchor = html.match(/data-check="anchorEvidence"[\s\S]*?<\/tr>/)?.[0] ?? "";
 	assert.ok(c1Anchor.includes('data-result="notApplicable"'));
 	assert.ok(
@@ -824,7 +816,10 @@ test("C1 commit-checkpoint.json — floor rung, provider posture, attested workl
 
 test("C2 commit-history.json — history rung, the served history, and R7's caveat", () => {
 	const { html, text } = renderFixture("commit-history.json");
-	assertContains(text, "VERIFIED — CHECKPOINT HISTORY", "the history rung");
+	assert.ok(
+		html.includes('data-rung="verified_checkpoint_history" data-rung-state="reached"'),
+		"the history rung",
+	);
 	assert.ok(
 		html.includes('data-testid="checkpoint-history"'),
 		"the checkpointHistory member renders",
@@ -838,7 +833,10 @@ test("C2 commit-history.json — history rung, the served history, and R7's cave
 
 test("C3 commit-anchored.json — anchored rung, Rekor as the basis, S3 as context only", () => {
 	const { html, text } = renderFixture("commit-anchored.json");
-	assertContains(text, "VERIFIED — ANCHORED · RESOLVER-ASSERTED", "the anchored rung");
+	assert.ok(
+		html.includes('data-rung="verified_anchored" data-rung-state="reached"'),
+		"the anchored rung",
+	);
 	assert.ok(html.includes('data-testid="rekor-evidence"'));
 	assert.ok(html.includes('data-anchor-standing="upheld"'));
 	assertContains(text, "https://rekor.usertrust.ai", "the log the evidence names");
@@ -859,7 +857,10 @@ test("C3 commit-anchored.json — anchored rung, Rekor as the basis, S3 as conte
 test("C4 commit-s3-only.json — S3 evidence alone renders NO anchor claim", () => {
 	const { html, text, state } = renderFixture("commit-s3-only.json");
 	assert.equal(state.rung, "verified_checkpoint", "the status stays at the floor");
-	assertContains(text, "VERIFIED — CHECKPOINT", "no anchored word anywhere");
+	assert.ok(
+		html.includes('data-rung="verified_checkpoint" data-rung-state="reached"'),
+		"no anchored word anywhere",
+	);
 	assertOmits(text, "VERIFIED — ANCHORED", "R8: S3 upgrades no cryptographic verdict");
 	assert.ok(!html.includes('data-testid="rekor-evidence"'), "there is no Rekor attachment to show");
 	assertOmits(text, ANCHOR_EXTERNAL_VISIBILITY, "no anchor caveat without an anchor claim");
@@ -871,7 +872,10 @@ test("C4 commit-s3-only.json — S3 evidence alone renders NO anchor claim", () 
 test("C5 commit-anchor-failed.json — base verdict preserved, the failed extension NAMED", () => {
 	const { html, text, state } = renderFixture("commit-anchor-failed.json");
 	assert.equal(state.rung, "verified_checkpoint", "R10: capped below anchored, never demoted");
-	assertContains(text, "VERIFIED — CHECKPOINT", "the base verdict survives");
+	assert.ok(
+		html.includes('data-rung="verified_checkpoint" data-rung-state="reached"'),
+		"the base verdict survives",
+	);
 	const anchorRow = html.match(/data-check="anchorEvidence"[\s\S]*?<\/tr>/)?.[0] ?? "";
 	assert.ok(anchorRow.includes('data-result="failed"'));
 	assert.ok(anchorRow.includes('data-failure="ANCHOR_INVALID"'), "the failure code is named");
@@ -899,7 +903,10 @@ test("C6 commit-history-failed.json — base verdict preserved, HISTORY_INVALID 
 test("C7 commit-checks-unavailable.json — unavailable never degrades, and says so", () => {
 	const { html, text, state } = renderFixture("commit-checks-unavailable.json");
 	assert.equal(state.rung, "verified_checkpoint");
-	assertContains(text, "VERIFIED — CHECKPOINT", "R11: not an error page, not a paler green");
+	assert.ok(
+		html.includes('data-rung="verified_checkpoint" data-rung-state="reached"'),
+		"R11: not an error page, not a paler green",
+	);
 	const row = html.match(/data-check="checkpointHistory"[\s\S]*?<\/tr>/)?.[0] ?? "";
 	assert.ok(row.includes('data-result="unavailable"'));
 	assert.ok(row.includes("UNAVAILABLE"));
@@ -967,7 +974,10 @@ test("C12 commit-superseded-advisory.json — supersession is advisory, the verd
 	assertContains(text, "RECEIPT SUPERSEDED", "titled");
 	assertContains(text, "never alters this receipt's cryptographic verdict", "R33's rule");
 	assert.equal(state.rung, "verified_checkpoint", "the verdict treatment is unchanged");
-	assertContains(text, "VERIFIED — CHECKPOINT", "still a clean green");
+	assert.ok(
+		html.includes('data-rung="verified_checkpoint" data-rung-state="reached"'),
+		"still a clean green",
+	);
 });
 
 test("C13 pr-private.json — keyed repoId, SERVER-ASSISTED confirmation, the pr headline", () => {

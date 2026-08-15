@@ -2,11 +2,15 @@
 
 What a `Usertrust-Receipt` trailer resolves to. One public, read-only,
 unauthenticated URL — `https://usertrust.ai/r/ut1_<base58>` — that renders
-the resolver's answer as an honest verdict: what's chain-committed, what's
-minter-asserted, what's merely displayed. The page never computes a verdict
-itself (D2); every rung it renders was already decided by
-`api.usertools.ai/v1/receipts/*`, and every non-green outcome is loud, not
-swallowed.
+the resolver's answer as a receipt: action on the stage, invoice beneath,
+header names the artifact type. The page never computes a verdict itself
+(D2); the Proven ladder is the verdict, and every non-green outcome is
+loud, not swallowed.
+
+The §6 masthead + thermal-paper exhibit is retired. Honesty-critical copy
+(R5–R8, R18, R20–R27, R38–R41) lives on the visitor card. The check ledger,
+extension evidence, work-claims and display annex stay below as
+check-it-yourself surfaces, not a second receipt.
 
 Normative spec: `docs/specs/2026-08-11-verify-page-design.md` (DRAFT v0.3,
 frozen for this build). Authority order above this README:

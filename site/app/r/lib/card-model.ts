@@ -10,7 +10,7 @@
  */
 
 import { type ReceiptClaims, truncateForDisplay } from "./claims";
-import type { ReceiptDocument, VerifiedState, Work } from "./wire";
+import type { LadderStatus, ReceiptDocument, VerifiedState, Work } from "./wire";
 
 export type ActionPart =
 	| { kind: "text"; text: string; emphasis: boolean }
@@ -33,6 +33,9 @@ export interface ProofRung {
 	label: string;
 	detail: string;
 	state: "reached" | "pending";
+	/** The three spec rungs carry data-rung so R5 still holds on the card. */
+	specRung?: LadderStatus;
+	specState?: "reached" | "cleared" | "above";
 }
 
 export interface InvoiceLine {
@@ -170,6 +173,8 @@ export function proofRungs(state: VerifiedState, receipt: ReceiptDocument): Proo
 			label: "Checkpointed",
 			detail: `tree ${proof.inclusion.treeSize.toLocaleString("en-US")} · ${proof.checkpoint.segmentId}`,
 			state: stepPassed(state, "checkpoint") ? "reached" : "pending",
+			specRung: "verified_checkpoint",
+			specState: reachedIndex === 0 ? "reached" : reachedIndex > 0 ? "cleared" : "above",
 		},
 		{
 			id: "history",
@@ -183,12 +188,16 @@ export function proofRungs(state: VerifiedState, receipt: ReceiptDocument): Proo
 							? "unavailable"
 							: "pending",
 			state: reachedIndex >= 1 ? "reached" : "pending",
+			specRung: "verified_checkpoint_history",
+			specState: reachedIndex === 1 ? "reached" : reachedIndex > 1 ? "cleared" : "above",
 		},
 		{
 			id: "anchored",
 			label: "Anchored",
 			detail: reachedIndex >= 2 ? "resolver-asserted" : "pending",
 			state: reachedIndex >= 2 ? "reached" : "pending",
+			specRung: "verified_anchored",
+			specState: reachedIndex >= 2 ? "reached" : "above",
 		},
 	];
 }
