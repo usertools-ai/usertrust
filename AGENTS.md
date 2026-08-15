@@ -513,10 +513,14 @@ Estimates never model cache state.
 `canonicalize` and an untampered event verifies as TAMPERED.
 
 **Canonicalization order is load-bearing.** Keys sorted alphabetically at every nesting level;
-`undefined` stripped; `null` preserved; array order preserved; `Date` → ISO string; `NaN` and
-`±Infinity` **throw**.
-*Prevents:* `JSON.stringify` silently coercing `NaN`/`Infinity` to `null`, breaking the hash
-pre-image.
+object-value `undefined` stripped (key absent, never null); `null` preserved; array order
+preserved; **array holes and in-array `undefined` encode as `null`** via an index loop (`Array.map`
+skips holes; `join` turns a hole or `undefined` element into an empty slot, which is not JSON);
+top-level `undefined` is `null`; `Date` → ISO string; `NaN`, `±Infinity`, **functions and symbols
+throw**. The writer `JSON.parse`s the canonical bytes before the fsync and refuses them if they do
+not parse.
+*Prevents:* persisting `{arr:[1,,2]}` or `{"f":undefined}` as an audit line no reader can parse;
+`JSON.stringify` silently coercing `NaN`/`Infinity` to `null`, breaking the hash pre-image.
 
 **Merkle hashing is RFC 6962 domain-separated.** Leaves `SHA-256(0x00 ‖ data)`, internal nodes
 `SHA-256(0x01 ‖ left ‖ right)`. **Odd nodes are promoted, not duplicated** — this avoids
@@ -1010,7 +1014,7 @@ verifier verifies nothing.
 | `core/src/audit/anchor-verify.ts` | `verify/src/anchor-verify.ts` | file-diff test (differs in exactly 2 lines per side: the `GENESIS_HASH` import, and `./merkle.js` vs `./verify.js`) |
 | `core/src/audit/rekor-verify.ts` | `verify/src/rekor-verify.ts` | file-diff test (currently byte-identical) |
 | `core/src/cli/verify.ts` → the `--bundle` helpers (`CONTROL_CHARS`, `clipKey`, `parseBundle`, `readArtifact`, `readPinnedPem`, …) | `verify/src/cli.ts` | **behavioral only, and only on the `--bundle` path** — one test drives both CLIs against a hostile bundle key. No file-diff rule covers this pair, and the two files are not whole-file mirrors. |
-| `core/src/audit/canonical.ts` | `verify/src/canonical.ts` | behavioral tests only — **weakest link; hand-check it**. Code-identical (differ only in comments) and, per receipt-spec §13's 79-case differential, **both non-conformant with the spec in the same way** (`undefined`, `[1,undefined,2]`, and two SILENT valid-JSON divergences — `[undefined]`→`[]`, `{a:[undefined]}`→`{"a":[]}`). §13: "Core and verify MUST be corrected together" — fixing one alone would split the two implementations against each other, which is worse than today's shared bug. Unfixed as of the `usertrust-verify receipt` ship; see its CHANGELOG entry. |
+| `core/src/audit/canonical.ts` | `verify/src/canonical.ts` | behavioral tests only — **weakest link; hand-check it**. Code-identical (differ only in comments). Corrected together on `ship/canonicalize-guard` against receipt-spec §13: top-level `undefined` → `null`; in-array `undefined` and holes → `null`; functions/symbols throw. Remaining known divergence vs the harness oracle is **invalid-Date error identity** (`RangeError` from `toISOString` vs the harness's named throw) — not this cut. |
 | `core/src/audit/verify.ts` → `verifyChain` | `verify/src/verify.ts` | differential tests |
 | `core/src/audit/verify.ts` → `verifyVault`, `verifyVaultWithAnchors`, `exitCodeForAnchored` | `verify/src/index.ts` | differential tests |
 | `core/src/audit/merkle.ts` → all 7 Merkle functions | `verify/src/verify.ts` (there is **no** `merkle.ts` in verify) | differential tests |

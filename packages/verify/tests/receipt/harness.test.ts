@@ -101,13 +101,12 @@ describe("canonicalization — receipt-spec §13 golden corpus", () => {
 		});
 	}
 
-	// The two rows on which §13 records ALL THREE real implementations as
-	// defective. Unreachable from wire data — and precisely therefore the rows a
-	// harness written "from the spec" is most likely to have copied from the
-	// code it is supposed to be independent of.
+	// Unreachable from wire data — and precisely therefore the rows a harness
+	// written "from the spec" is most likely to have copied from the code it
+	// is supposed to be independent of.
 	it("throws on a value whose serialization is NOT A STRING, rather than emitting `undefined`", () => {
-		// `{"f":undefined}` is what every implementation produces today: not JSON,
-		// and a signature over a document missing a member nobody knows is missing.
+		// Production canonicalize now throws here too. The harness keeps its own
+		// error text so this file stays an independent oracle.
 		expect(() => canonicalizeNormative({ f: () => 1 })).toThrow(/no JSON serialization/);
 		expect(() => canonicalizeNormative(() => 1)).toThrow(/no JSON serialization/);
 		expect(() => canonicalizeNormative({ s: Symbol("x") })).toThrow(/no JSON serialization/);
@@ -143,9 +142,9 @@ describe("canonicalization — receipt-spec §13 golden corpus", () => {
 		// the two paths would agree everywhere, including on the answers §13 calls
 		// wrong, and the whole corpus would be self-referential.
 		//
-		// NOT a defence of the defects. This ship deliberately does not touch
-		// `canonical.ts` (the correction is code-identical in core and verify, so
-		// it lands in both, as its own change).
+		// NOT a defence of remaining defects. The hole/undefined/function rows
+		// were deleted when src converged on §13. This table is only what still
+		// diverges.
 		//
 		// ┌─ IF YOU ARE HERE BECAUSE THIS TEST WENT RED ─────────────────────────┐
 		// │ THAT IS THE DESIGNED OUTCOME, NOT A BROKEN ORACLE.                   │
@@ -160,22 +159,13 @@ describe("canonicalization — receipt-spec §13 golden corpus", () => {
 		// │ anything. A corpus checked solely by the code it tests proves        │
 		// │ nothing.                                                             │
 		// │                                                                      │
-		// │ Context (2026-08-12): the correction was attempted on                │
-		// │ `ship/canonical-integrity` and that branch was TERMINATED after ten  │
-		// │ rounds — it introduced defects faster than review removed them. A    │
-		// │ restart is ledgered: canonicalize + the chain guard, three-round     │
-		// │ budget. Until that lands these seven rows are ACCURATE against       │
-		// │ master and this test is green. When it lands, delete the rows it     │
-		// │ fixed — one per row, checked against §13's conformance table, not    │
-		// │ wholesale.                                                           │
+		// │ Context (2026-08-15): `ship/canonicalize-guard` landed the published │
+		// │ cut (canonicalize + write-guard). The six rows that recorded the     │
+		// │ hole / undefined / function defects were deleted because src now     │
+		// │ matches §13. The remaining row is Date error identity (RangeError    │
+		// │ from toISOString vs the harness's named throw) — not this cut.       │
 		// └──────────────────────────────────────────────────────────────────────┘
 		const recorded: readonly (readonly [string, () => unknown, string | "THROW"])[] = [
-			["undefined", () => undefined, "undefined"],
-			["[1, undefined, 2]", () => [1, undefined, 2], "[1,,2]"],
-			["[undefined]", () => [undefined], "[]"],
-			["{a:[undefined]}", () => ({ a: [undefined] }), '{"a":[]}'],
-			["[1, <hole>, 2]", () => sparse, "[1,,2]"],
-			["{f: () => 1}", () => ({ f: () => 1 }), '{"f":undefined}'],
 			["invalid Date", () => new Date("not a date"), "THROW"],
 		];
 		/** The harness's answer, with a throw as a first-class outcome. */

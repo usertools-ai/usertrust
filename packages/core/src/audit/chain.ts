@@ -464,6 +464,14 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 			// is idempotent over its own output, so the bytes hashed equal the bytes
 			// persisted and the verify pkg stays in lockstep (hash format unchanged).
 			const persisted = canonicalize(fullEvent);
+			// Defense in depth: refuse bytes no reader can parse. Unreachable
+			// through canonicalize after the §13 hole/function/symbol fix —
+			// the writer must not depend on the serializer staying correct.
+			try {
+				JSON.parse(persisted);
+			} catch {
+				throw new Error("appendEvent: canonical bytes are not JSON");
+			}
 
 			const fd = openSync(logPath, "a");
 			try {

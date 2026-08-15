@@ -27,7 +27,7 @@ describe("canonicalize", () => {
 	});
 
 	it("handles top-level undefined", () => {
-		expect(canonicalize(undefined)).toBe(undefined);
+		expect(canonicalize(undefined)).toBe("null");
 	});
 
 	it("handles primitives", () => {
@@ -53,9 +53,21 @@ describe("canonicalize", () => {
 
 	it("handles array with null and undefined elements", () => {
 		const result = canonicalize([null, undefined, 1]);
-		// canonicalize maps each element individually — undefined becomes the string "undefined"
-		// (from JSON.stringify(undefined)) and is joined without extra quoting
-		expect(result).toBe("[null,,1]");
+		expect(result).toBe("[null,null,1]");
+		expect(() => JSON.parse(result)).not.toThrow();
+	});
+
+	it("encodes array holes as null — the same absence-at-a-position as undefined", () => {
+		const sparse: unknown[] = [1];
+		sparse[2] = 2;
+		const result = canonicalize(sparse);
+		expect(result).toBe("[1,null,2]");
+		expect(() => JSON.parse(result)).not.toThrow();
+	});
+
+	it("refuses functions and symbols — they are not omitted", () => {
+		expect(() => canonicalize({ f: () => 1 })).toThrow(/functions and symbols/);
+		expect(() => canonicalize(Symbol("x"))).toThrow(/functions and symbols/);
 	});
 
 	it("handles empty object", () => {

@@ -30,6 +30,18 @@ describe("Audit Chain Writer", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
+	it("refuses a function in event data before any line is written", async () => {
+		const logPath = join(tempDir, VAULT_DIR, "audit", "events.jsonl");
+		await expect(
+			writer.appendEvent({
+				kind: "test.fn",
+				actor: "sys",
+				data: { f: () => 1 },
+			}),
+		).rejects.toThrow(/functions and symbols/);
+		expect(existsSync(logPath)).toBe(false);
+	});
+
 	it("creates JSONL file and writes first event with genesis hash", async () => {
 		const event = await writer.appendEvent({
 			kind: "test.event",
