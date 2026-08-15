@@ -30,6 +30,32 @@ describe("Audit Chain Writer", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
+	it("hashes and persists the same snapshot when data has an alternating getter", async () => {
+		let reads = 0;
+		const data: Record<string, unknown> = {};
+		Object.defineProperty(data, "n", {
+			enumerable: true,
+			get: () => {
+				reads += 1;
+				return reads;
+			},
+		});
+		const event = await writer.appendEvent({
+			kind: "test.getter",
+			actor: "sys",
+			data,
+		});
+		const logPath = join(tempDir, VAULT_DIR, "audit", "events.jsonl");
+		const persisted = JSON.parse(readFileSync(logPath, "utf-8").trim()) as {
+			hash: string;
+			data: { n: number };
+		};
+		const { hash, ...rest } = persisted;
+		expect(createHash("sha256").update(canonicalize(rest)).digest("hex")).toBe(hash);
+		expect(event.hash).toBe(hash);
+		expect(persisted.data.n).toBe(1);
+	});
+
 	it("refuses a function in event data before any line is written", async () => {
 		const logPath = join(tempDir, VAULT_DIR, "audit", "events.jsonl");
 		await expect(

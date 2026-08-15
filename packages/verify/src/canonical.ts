@@ -23,12 +23,11 @@ export function canonicalize(value: unknown): string {
 		return JSON.stringify(value.toISOString());
 	}
 	if (value === null || value === undefined) return "null";
+	if (typeof value === "function" || typeof value === "symbol") {
+		throw new Error("canonicalize: functions and symbols are not allowed in audit data");
+	}
 	if (typeof value !== "object") {
-		const serialized = JSON.stringify(value);
-		if (typeof serialized !== "string") {
-			throw new Error("canonicalize: functions and symbols are not allowed in audit data");
-		}
-		return serialized;
+		return JSON.stringify(value);
 	}
 	if (Array.isArray(value)) {
 		// Snapshot length once. `.map` skips holes; `join` turns a hole or an

@@ -451,22 +451,15 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 			const canonical = canonicalize(event);
 			const hash = createHash("sha256").update(canonical).digest("hex");
 
-			const fullEvent: AuditEvent & { sequence: number } = {
-				...event,
-				hash,
-			};
-
-			// HARDEN: persist the CANONICAL bytes, not JSON.stringify output. The
-			// hash pre-image is `canonicalize(event)`; the verifier recomputes
-			// `sha256(canonicalize(persisted − hash))`. For any value with a
-			// `toJSON` (e.g. Buffer) `JSON.stringify` diverges from `canonicalize`,
-			// which would make an untampered event verify as TAMPERED. canonicalize
-			// is idempotent over its own output, so the bytes hashed equal the bytes
-			// persisted and the verify pkg stays in lockstep (hash format unchanged).
-			const persisted = canonicalize(fullEvent);
-			// Defense in depth: refuse bytes no reader can parse. Unreachable
-			// through canonicalize after the §13 hole/function/symbol fix —
-			// the writer must not depend on the serializer staying correct.
+			// Persist FROM THE HASHED SNAPSHOT. A second canonicalize(fullEvent)
+			// would re-read caller-owned `data` (getters, toJSON). Parsed JSON
+			// is inert, so re-canonicalizing it plus `hash` cannot drift from
+			// the bytes the hash covers, and still puts `hash` in sort order.
+			const snapshot = JSON.parse(canonical) as Record<string, unknown>;
+			const persisted = canonicalize({ ...snapshot, hash });
+			const fullEvent = snapshot as unknown as AuditEvent & { sequence: number };
+			fullEvent.hash = hash;
+			// Defense in depth: refuse bytes no reader can parse.
 			try {
 				JSON.parse(persisted);
 			} catch {

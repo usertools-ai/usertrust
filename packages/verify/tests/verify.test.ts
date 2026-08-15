@@ -265,6 +265,12 @@ describe("canonicalize", () => {
 	it("refuses functions and symbols", () => {
 		expect(() => canonicalize({ f: () => 1 })).toThrow(/functions and symbols/);
 		expect(() => canonicalize(Symbol("x"))).toThrow(/functions and symbols/);
+		const withToJSON = (): { z: number; a: number } => ({ z: 1, a: 2 });
+		(withToJSON as { toJSON?: () => { z: number; a: number } }).toJSON = () => ({
+			z: 1,
+			a: 2,
+		});
+		expect(() => canonicalize(withToJSON)).toThrow(/functions and symbols/);
 	});
 
 	it("handles nested arrays", () => {
