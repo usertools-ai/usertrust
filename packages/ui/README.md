@@ -14,7 +14,7 @@ Then open `http://127.0.0.1:4180` (opens automatically unless `--no-open`).
 - **Live tail** — new events stream in over SSE as they are written; each appended event is re-verified (hash + linkage) before it renders. Tampering mid-session raises a red integrity banner.
 - **Row drill-in** — click a row for the full event payload and a one-click **Verify** that replays the independent `usertrust-verify` check and renders a thermal-receipt style result.
 - **Trends** — spend over time and cost by task type.
-- **Summary strip** — budget, spent/remaining UT, chain status, and anchor state, always visible.
+- **Summary strip** — budget, spent/remaining UT, chain status, and whether an anchor file is present (file presence, not a verification verdict), always visible.
 
 ## Usage
 

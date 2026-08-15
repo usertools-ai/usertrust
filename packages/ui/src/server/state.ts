@@ -19,11 +19,11 @@ export interface LedgerState {
 	byteOffset: number;
 }
 
-// ANCHOR-INTEGRATION: swap for real anchor verification when feat/external-anchoring lands.
-function anchorState(vaultPath: string): "unanchored" | "present" {
-	return existsSync(join(vaultPath, "audit", "anchors", "anchors.jsonl"))
-		? "present"
-		: "unanchored";
+// Presence of the mirror file is not a verdict — a planted empty/junk file
+// must not read as "anchored". verifyVaultWithAnchors needs a caller-pinned
+// genesis the UI server does not have.
+function anchorFile(vaultPath: string): "present" | "absent" {
+	return existsSync(join(vaultPath, "audit", "anchors", "anchors.jsonl")) ? "present" : "absent";
 }
 
 export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerState {
@@ -63,7 +63,7 @@ export function loadState(vaultPath: string, rowCap: number = ROW_CAP): LedgerSt
 				breakIndex: integrity.breakIndex,
 				errors: vault.errors,
 			},
-			anchorState: anchorState(vaultPath),
+			anchorFile: anchorFile(vaultPath),
 			rowCount: rows.length,
 			truncated,
 		},

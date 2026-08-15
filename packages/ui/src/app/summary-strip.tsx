@@ -110,10 +110,10 @@ export function SummaryStrip(props: {
 							tone={s.chain.valid ? "ok" : "bad"}
 						/>
 						<Stat
-							label="Anchor"
+							label="Anchor file"
 							value={
 								<span className="rounded-full border border-[var(--border)] bg-[var(--panel-2)] px-2 py-0.5 text-[11px] font-normal text-[var(--muted)]">
-									{s.anchorState}
+									{s.anchorFile}
 								</span>
 							}
 						/>
