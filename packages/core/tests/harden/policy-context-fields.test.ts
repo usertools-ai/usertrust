@@ -66,9 +66,10 @@ describe("PolicyContext trust classification is exhaustive", () => {
 		// If a refactor renames or reshapes the interface this test must fail loudly
 		// rather than pass over an empty set — a vacuous parity test is exactly the
 		// silent-success shape it exists to prevent.
-		expect(declared.length).toBeGreaterThanOrEqual(6);
+		expect(declared.length).toBeGreaterThanOrEqual(5);
 		expect(declared).toContain("timestamp");
 		expect(declared).toContain("cost_center");
+		expect(declared).not.toContain("timeWindows");
 	});
 
 	it("classifies EVERY declared field as host-controlled or caller-supplied", () => {
@@ -106,6 +107,11 @@ describe("PolicyContext trust classification is exhaustive", () => {
 	it("classifies scope as host-controlled — a caller must not satisfy scopePatterns", () => {
 		expect(HOST_CONTROLLED_POLICY_FIELDS).toContain("scope");
 		expect(CALLER_SUPPLIED_POLICY_FIELDS).not.toContain("scope");
+	});
+
+	it("declares no caller-supplied fields — unread timeWindows was deleted, not sanitised", () => {
+		expect(CALLER_SUPPLIED_POLICY_FIELDS).toEqual([]);
+		expect(CALLER_SUPPLIED_POLICY_FIELDS).not.toContain("timeWindows");
 	});
 });
 
@@ -173,12 +179,6 @@ describe("sanitizePolicyContext", () => {
 	it("strips caller-supplied scope — it is host-owned, not caller-declared", () => {
 		const clean = sanitizePolicyContext({ scope: ["prod/api"] });
 		expect(Object.hasOwn(clean, "scope")).toBe(false);
-	});
-
-	it("preserves the deliberately caller-supplied fields", () => {
-		const windows = [{ startHour: 9, endHour: 17 }];
-		const clean = sanitizePolicyContext({ timeWindows: windows });
-		expect(clean.timeWindows).toEqual(windows);
 	});
 
 	it("does not mutate its input", () => {

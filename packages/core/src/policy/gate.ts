@@ -441,8 +441,10 @@ export function isWithinTimeWindow(
 
 /**
  * Context passed into evaluatePolicy. Fields are available for dot-notation
- * resolution. The special keys `scope` and `timeWindows` enable glob and
- * time-window matching respectively.
+ * resolution. The special key `scope` enables glob matching. Time-window
+ * matching is a rule property (`rule.timeWindows` vs `context.timestamp`);
+ * there is no context-side window list — a host that used to put windows on
+ * the context got no curfew and no error.
  */
 export interface PolicyContext extends Record<string, unknown> {
 	/**
@@ -463,8 +465,6 @@ export interface PolicyContext extends Record<string, unknown> {
 	 * match: it does not "narrow a live rule", it stays inert.
 	 */
 	scope?: string[] | undefined;
-	/** Optional time windows for temporal constraints */
-	timeWindows?: TimeWindow[];
 	/**
 	 * Optional evaluation-time override (defaults to now).
 	 *
@@ -665,11 +665,11 @@ export const HOST_CONTROLLED_POLICY_FIELDS = [
  * these two lists, so a newly added field cannot be quietly omitted from both —
  * whoever adds it has to make the trust call explicitly and record it here.
  *
- * - `timeWindows` — read by nothing. `ruleMatches` consults `rule.timeWindows`;
- *   `context.timeWindows` has no reader anywhere in the repo despite the
- *   interface doc claiming it "enables time-window matching". Stripping a field
- *   nothing reads would imply it once mattered. It wants deleting or wiring, not
- *   sanitising.
+ * Empty on purpose. `timeWindows` used to live here: the interface declared it
+ * and the JSDoc claimed it enabled time-window matching, but `ruleMatches` only
+ * ever reads `rule.timeWindows` + `context.timestamp`. A host that put windows
+ * on the context got no curfew and no error. An unread field is deleted, not
+ * sanitised — stripping it would have implied it once mattered.
  *
  * `scope` used to live here as "caller-declared, no host source". That was
  * the AUD-002 hole: a remote tenant could volunteer a matching scope via
@@ -678,7 +678,7 @@ export const HOST_CONTROLLED_POLICY_FIELDS = [
  * {@link HOST_CONTROLLED_POLICY_FIELDS} — because `TrustConfig.scope` /
  * `TrustOpts.scope` is the host source. Do not move it back.
  */
-export const CALLER_SUPPLIED_POLICY_FIELDS = ["timeWindows"] as const;
+export const CALLER_SUPPLIED_POLICY_FIELDS = [] as const;
 
 /**
  * Context keys a governor ASSERTS itself, which `PolicyContext` does not declare.
