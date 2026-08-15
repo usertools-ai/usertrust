@@ -639,6 +639,23 @@ test("R13/R39: a session $X is the frozen headline, and its scope sits beside bo
 	}
 });
 
+test("visitor card: action on the stage, unqualified amount, CLI that shipped", () => {
+	const { html, text, state } = renderFixture("commit-checkpoint.json");
+	assert.ok(html.includes('data-testid="receipt-card"'), "the visitor card renders");
+	assertContains(text, "Committed", "action names the commit");
+	assertContains(text, "12283b89", "oid head, not the full headline claim");
+	assertContains(text, "Receipt", "header names the artifact type");
+	assertContains(
+		text,
+		`$${amountUsdFromUsertokens(state.envelope.receipt.event.data.spend.assessedUsertokens)}`,
+		"unqualified amount",
+	);
+	assertContains(text, AMOUNT_SCOPE_CAPTION.selfDebitsOnly, "R40 caption on the card");
+	assertContains(text, "npx usertrust-verify receipt", "§11 gate is met");
+	assertOmits(text, "Inference 0 ut", "zero line items stay cut");
+	assertOmits(text, "Budget remaining", "account state stays off the card");
+});
+
 test("R40: a selfDebitsOnly amount is unqualified, with its scope named beneath it", () => {
 	const { html, text, state } = renderFixture("commit-checkpoint.json");
 	const projection = state.envelope.receipt.event.data;
@@ -648,13 +665,18 @@ test("R40: a selfDebitsOnly amount is unqualified, with its scope named beneath 
 	assertContains(text, `$${amountUsd}`, "the figure is the unqualified number");
 	assertContains(text, caption, "R40 names the scope beneath the figure");
 	assert.ok(html.includes('data-testid="amount-caption"'), "the caption is in the DOM");
+	assert.ok(html.includes('data-testid="card-amount-caption"'), "the visitor card carries it too");
 	assert.ok(!html.includes('data-amount-bound="floor"'), "no floor attribute remains");
 	assert.equal(
 		html.split('data-testid="amount-caption"').length - 1,
 		1,
-		"R40's caption must render at exactly one site",
+		"the paper caption is still a single site",
 	);
-	assert.equal(text.split(caption).length - 1, 1, "the caption must appear once");
+	assert.equal(
+		text.split(caption).length - 1,
+		2,
+		"card + paper, both from claims.amountCaption — a third copy is drift",
+	);
 	assertOmits(text, "at least $", "the rejected floor wording must not reach the reader");
 	assertOmits(
 		text.replace(PROVIDER_SCOPED_CLAIM, " "),
