@@ -2,15 +2,17 @@
 // Copyright 2026 Usertools, Inc.
 
 /**
- * AUD-001 — headless settle() must not orphan a PENDING hold.
+ * AUD-001 — headless settle() must not orphan a PENDING hold, and must not
+ * void or under-count an in-flight or transport-ambiguous POST.
  *
  * settle() deletes the auth from `activeAuths` so a concurrent settle cannot
- * double-POST. If persistSpend or postPendingSpend then throws, the TB transfer
- * is still PENDING. abort() used to be a silent no-op (capture gone) and
- * destroy() never called voidAllPending(), so the hold sat until the 300s
- * auto-void — envelope over-deny — while session budgetSpent could already
- * have recorded money the ledger never posted (permanent capacity loss on
- * the next run's `max(0, budget − budgetSpent)` seed).
+ * double-POST. Pre-POST work (metering) can still throw — the hold is PENDING
+ * and abort()/destroy() must void it. Once `postPendingSpend` is in flight the
+ * id is in `settling`: abort() is a silent no-op and destroy() waits before
+ * voidAllPending(). A transport-ambiguous POST (TB may have committed) is
+ * counted fail-closed into budgetSpent and is NOT put back on the abort-void
+ * path — voiding it would drop a posted transfer, and skipping the increment
+ * would reseed the next run as if the spend never happened.
  */
 
 import { randomUUID } from "node:crypto";
@@ -113,6 +115,10 @@ function makeSilentAudit(): AuditWriter {
 	};
 }
 
+function appendedKinds(audit: AuditWriter): string[] {
+	return vi.mocked(audit.appendEvent).mock.calls.map(([input]) => input.kind);
+}
+
 function readPersistedSpend(vaultBase: string): number | undefined {
 	const path = join(vaultBase, VAULT_DIR, "spend-ledger.json");
 	if (!existsSync(path)) return undefined;
@@ -141,12 +147,12 @@ describe("AUD-001 headless claimed-but-unposted holds", () => {
 		}
 	});
 
-	async function governorWith(engine: TrackingEngine) {
+	async function governorWith(engine: TrackingEngine, audit: AuditWriter = makeSilentAudit()) {
 		return await createGovernor({
 			budget: BUDGET,
 			vaultBase,
 			_engine: engine,
-			_audit: makeSilentAudit(),
+			_audit: audit,
 		});
 	}
 
@@ -206,45 +212,52 @@ describe("AUD-001 headless claimed-but-unposted holds", () => {
 		expect(engine.pending.size).toBe(0);
 	});
 
-	it("postPendingSpend throw returns settled:false and abort/destroy still void; budgetSpent is not incremented", async () => {
+	it("postPendingSpend throw returns settled:false, counts spend fail-closed, abort does not void", async () => {
 		const engine = makeTrackingEngine({
 			post: async () => {
 				throw new Error("TigerBeetle POST failed");
 			},
 		});
-		const gov = await governorWith(engine);
+		const audit = makeSilentAudit();
+		const gov = await governorWith(engine, audit);
 
 		const auth = await gov.authorize(AUTHORIZE);
-		const remainingAfterHold = gov.budgetRemaining();
-		expect(remainingAfterHold).toBe(BUDGET - auth.estimatedCost);
+		expect(gov.budgetRemaining()).toBe(BUDGET - auth.estimatedCost);
 
 		const receipt = await gov.settle(auth, USAGE);
 		expect(receipt.settled).toBe(false);
 		expect(engine.posted).toEqual([]);
-		// Session counters must not record money the ledger never posted — the
-		// next run seeds `max(0, budget − budgetSpent)`. An early increment
-		// permanently shrinks capacity for a hold that is still PENDING.
-		expect(gov.budgetRemaining()).toBe(remainingAfterHold);
-		expect(readPersistedSpend(vaultBase)).toBeUndefined();
+		// Transport-ambiguous POST: TB may have committed after retries.
+		// Count as spent (fail-closed) so the next run cannot reseed as if
+		// the money never moved. Do NOT void — that would drop a posted transfer.
+		expect(gov.budgetRemaining()).toBe(BUDGET - receipt.cost);
+		expect(readPersistedSpend(vaultBase)).toBe(receipt.cost);
+		expect(appendedKinds(audit)).toContain("settlement_ambiguous");
+		expect(appendedKinds(audit)).toContain("llm_call");
 
 		// Second settle stays refused — the claim already happened.
 		await expect(gov.settle(auth, USAGE)).rejects.toThrow(
 			/already settled or aborted|is not active/,
 		);
 
+		const kindsBeforeAbort = appendedKinds(audit);
 		await gov.abort(auth);
-		expect(engine.voidPendingSpend).toHaveBeenCalledWith(auth.transferId);
-		expect(engine.voided).toEqual([auth.transferId]);
-		expect(gov.budgetRemaining()).toBe(BUDGET);
-		expect(readPersistedSpend(vaultBase)).toBeUndefined();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(appendedKinds(audit)).toEqual(kindsBeforeAbort);
+		expect(appendedKinds(audit)).not.toContain("llm_call_failed");
+		// Abort must not restore the session counters it never owned.
+		expect(gov.budgetRemaining()).toBe(BUDGET - receipt.cost);
+		expect(readPersistedSpend(vaultBase)).toBe(receipt.cost);
 
 		await gov.destroy();
-		// Already voided — destroy must still sweep, but not double-void this id.
+		// destroy may sweep leftover pendingMap entries via voidAllPending
+		// (best-effort; void of an already-posted transfer fails closed).
+		// That is not the abort-void path and must not look like unposted cleanup.
 		expect(engine.voidAllPending).toHaveBeenCalledOnce();
-		expect(engine.voided).toEqual([auth.transferId]);
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
 	});
 
-	it("postPendingSpend throw then destroy (no abort) voids the leftover pendingMap entry", async () => {
+	it("postPendingSpend throw then destroy does not treat the hold as unposted cleanup", async () => {
 		const engine = makeTrackingEngine({
 			post: async () => {
 				throw new Error("TigerBeetle POST failed");
@@ -255,15 +268,14 @@ describe("AUD-001 headless claimed-but-unposted holds", () => {
 		const auth = await gov.authorize(AUTHORIZE);
 		const receipt = await gov.settle(auth, USAGE);
 		expect(receipt.settled).toBe(false);
-		expect(engine.pending.has(auth.transferId)).toBe(true);
-		expect(readPersistedSpend(vaultBase)).toBeUndefined();
+		expect(readPersistedSpend(vaultBase)).toBe(receipt.cost);
+		expect(gov.budgetRemaining()).toBe(BUDGET - receipt.cost);
 
 		await gov.destroy();
 
 		expect(engine.voidAllPending).toHaveBeenCalledOnce();
-		expect(engine.voided).toContain(auth.transferId);
-		expect(engine.pending.size).toBe(0);
-		expect(readPersistedSpend(vaultBase)).toBeUndefined();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(readPersistedSpend(vaultBase)).toBe(receipt.cost);
 	});
 
 	it("successful settle does not double-void on destroy and budgetSpent matches posted cost", async () => {
@@ -290,24 +302,127 @@ describe("AUD-001 headless claimed-but-unposted holds", () => {
 		expect(readPersistedSpend(vaultBase)).toBe(receipt.cost);
 	});
 
-	it("destroy calls voidAllPending even when leftover entries are only in the claimed-but-unposted set", async () => {
-		const engine = makeTrackingEngine({
-			post: async () => {
-				throw new Error("TigerBeetle POST failed");
-			},
-		});
+	it("destroy voids leftover holds that settle claimed and then threw on before POST", async () => {
+		const engine = makeTrackingEngine();
 		const gov = await governorWith(engine);
 
 		const first = await gov.authorize(AUTHORIZE);
 		const second = await gov.authorize(AUTHORIZE);
-		await gov.settle(first, USAGE);
-		await gov.settle(second, USAGE);
+		for (const auth of [first, second]) {
+			Object.defineProperty(auth, "model", {
+				get(): string {
+					throw new Error("persistSpend-like throw after claim");
+				},
+			});
+			await expect(gov.settle(auth, USAGE)).rejects.toThrow("persistSpend-like throw after claim");
+		}
 		expect(engine.pending.size).toBe(2);
+		expect(readPersistedSpend(vaultBase)).toBeUndefined();
 
 		await gov.destroy();
 
 		expect(engine.voidAllPending).toHaveBeenCalledOnce();
 		expect(engine.pending.size).toBe(0);
 		expect(engine.voided).toEqual(expect.arrayContaining([first.transferId, second.transferId]));
+	});
+
+	it("abort during an in-flight POST does not void; settle completes as the sole terminal", async () => {
+		let releasePost!: () => void;
+		const postGate = new Promise<void>((resolve) => {
+			releasePost = resolve;
+		});
+		const engine = makeTrackingEngine({ post: () => postGate });
+		const audit = makeSilentAudit();
+		const gov = await governorWith(engine, audit);
+
+		const auth = await gov.authorize(AUTHORIZE);
+		const settleP = gov.settle(auth, USAGE);
+		await vi.waitFor(() => {
+			expect(engine.postPendingSpend).toHaveBeenCalledWith(auth.transferId, expect.any(Number));
+		});
+
+		await gov.abort(auth);
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(engine.voided).toEqual([]);
+		expect(appendedKinds(audit)).not.toContain("llm_call_failed");
+
+		releasePost();
+		const receipt = await settleP;
+		expect(receipt.settled).toBe(true);
+		expect(engine.posted).toEqual([auth.transferId]);
+		expect(engine.voided).toEqual([]);
+		expect(gov.budgetRemaining()).toBe(BUDGET - receipt.cost);
+		expect(readPersistedSpend(vaultBase)).toBe(receipt.cost);
+
+		await gov.destroy();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(engine.voided).not.toContain(auth.transferId);
+	});
+
+	it("abort during an in-flight POST that then throws does not void; spend is counted fail-closed", async () => {
+		let releasePost!: () => void;
+		const postGate = new Promise<void>((resolve) => {
+			releasePost = resolve;
+		});
+		const engine = makeTrackingEngine({
+			post: async () => {
+				await postGate;
+				throw new Error("TigerBeetle POST failed");
+			},
+		});
+		const audit = makeSilentAudit();
+		const gov = await governorWith(engine, audit);
+
+		const auth = await gov.authorize(AUTHORIZE);
+		const settleP = gov.settle(auth, USAGE);
+		await vi.waitFor(() => {
+			expect(engine.postPendingSpend).toHaveBeenCalled();
+		});
+
+		await gov.abort(auth);
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(appendedKinds(audit)).not.toContain("llm_call_failed");
+
+		releasePost();
+		const receipt = await settleP;
+		expect(receipt.settled).toBe(false);
+		expect(engine.posted).toEqual([]);
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+		expect(appendedKinds(audit)).not.toContain("llm_call_failed");
+		expect(gov.budgetRemaining()).toBe(BUDGET - receipt.cost);
+		expect(readPersistedSpend(vaultBase)).toBe(receipt.cost);
+
+		await gov.destroy();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+	});
+
+	it("destroy waits for an in-flight POST before voidAllPending", async () => {
+		let releasePost!: () => void;
+		const postGate = new Promise<void>((resolve) => {
+			releasePost = resolve;
+		});
+		const engine = makeTrackingEngine({ post: () => postGate });
+		const gov = await governorWith(engine);
+
+		const auth = await gov.authorize(AUTHORIZE);
+		const settleP = gov.settle(auth, USAGE);
+		await vi.waitFor(() => {
+			expect(engine.postPendingSpend).toHaveBeenCalled();
+		});
+
+		const destroyP = gov.destroy();
+		await new Promise<void>((r) => setTimeout(r, 30));
+		expect(engine.voidAllPending).not.toHaveBeenCalled();
+		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
+
+		releasePost();
+		const receipt = await settleP;
+		expect(receipt.settled).toBe(true);
+		await destroyP;
+
+		expect(engine.voidAllPending).toHaveBeenCalledOnce();
+		expect(engine.posted).toEqual([auth.transferId]);
+		expect(engine.voided).not.toContain(auth.transferId);
+		expect(readPersistedSpend(vaultBase)).toBe(receipt.cost);
 	});
 });
