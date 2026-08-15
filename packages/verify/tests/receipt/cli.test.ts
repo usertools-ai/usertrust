@@ -296,6 +296,325 @@ describe("parseReceiptArgs", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Single-occurrence options (CLI spec §2, §6).
+//
+// The shape this closes: an integration PINS `--trust` and then appends
+// caller-supplied arguments after it. Under last-one-wins parsing the appended
+// occurrence replaced the pinned snapshot in silence, and the tool exited 0 on
+// attacker-chosen trust material — an authority substitution that is, from the
+// exit code, indistinguishable from a verification. `--expect-id` carried the
+// same defect for the arrival binding.
+//
+// The fix is an INVERSION rather than two named flags: every option is
+// single-occurrence unless an explicit allow-list names it, and that list is
+// empty. So the tests below grade the CLASS — a repeat of anything in the
+// option surface is exit 3 — and grade the two authority-bearing bindings on
+// the consequence: NEITHER verdict is reachable, and the losing occurrence's
+// file is never opened.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("repeated options are usage errors, not silent replacements", () => {
+	/**
+	 * `memoryIo` with a read log. The only way to assert material was never
+	 * LOADED, as opposed to loaded and then not believed — a refusal that
+	 * happens after the attacker's file reaches a parser has already given away
+	 * reachable code, so "did not decide the verdict" is the weaker claim and
+	 * "was never opened" is the one worth pinning.
+	 */
+	function recordingIo(
+		files: Readonly<Record<string, Buffer>>,
+		reads: string[],
+		stdin?: Buffer,
+	): ReceiptCliIo {
+		const inner = memoryIo(files, stdin);
+		return {
+			readFile: (path: string) => {
+				reads.push(path);
+				return inner.readFile(path);
+			},
+			readStdin: () => {
+				reads.push("<stdin>");
+				return inner.readStdin();
+			},
+		};
+	}
+
+	function attackerSeed(label: string): Buffer {
+		return createHash("sha256").update(`receipt-cli-duplicate-flag/${label}`).digest();
+	}
+
+	it("a second --trust cannot replace a pinned one, and its snapshot is never read", () => {
+		// Two bundles with DISJOINT key material, so each receipt verifies under
+		// its own snapshot and fails under the other's. The disjointness is what
+		// makes the attack assertion mean something: a repeated `--trust` that
+		// produced the same verdict either way would prove nothing about which
+		// occurrence won.
+		const pinned = mint();
+		const attacker = mint({
+			mintKey: keyFromSeed("utk_mint_attacker", attackerSeed("mint")),
+			checkpointKey: keyFromSeed("utk_ckpt_attacker", attackerSeed("ckpt")),
+		});
+		const files = {
+			"receipt.json": attacker.receiptBytes,
+			"pinned.json": pinned.snapshotBytes,
+			"attacker.json": attacker.snapshotBytes,
+		};
+
+		// CONTROLS, load-bearing: the two snapshots really do disagree about this
+		// receipt, so "which --trust won" is observable in the exit code alone.
+		expect(
+			runReceiptCli(["receipt.json", "--trust", "attacker.json"], memoryIo(files)).exitCode,
+			"the attacker snapshot verifies the attacker receipt",
+		).toBe(0);
+		const underPinned = runReceiptCli(["receipt.json", "--trust", "pinned.json"], memoryIo(files));
+		expect(underPinned.exitCode, "the pinned snapshot refuses it").not.toBe(0);
+		expect(underPinned.exitCode, "…and refuses it with a VERDICT, not a usage error").not.toBe(3);
+
+		// THE ATTACK: the wrapper prepends its pinned `--trust`; the caller
+		// appends its own. This is the invocation that used to exit 0.
+		const reads: string[] = [];
+		const result = runReceiptCli(
+			["--trust", "pinned.json", "receipt.json", "--trust", "attacker.json"],
+			recordingIo(files, reads),
+		);
+		expect(result.exitCode).toBe(3);
+		// NEITHER verdict is produced — not the attacker's 0, not the pinned
+		// snapshot's refusal. stdout is the report channel and stays empty.
+		expect(result.stdout).toBe("");
+		expect(result.stderr).toContain("--trust");
+		expect(result.stderr).toMatch(/more than once/);
+		// The strongest form: the substituted snapshot was never OPENED, and
+		// neither was anything else. The refusal lands in the parser, before a
+		// single read.
+		expect(reads).toEqual([]);
+	});
+
+	it("a second --expect-id cannot replace a pinned arrival binding", () => {
+		const bundle = mint();
+		const files = { "receipt.json": bundle.receiptBytes, "trust.json": bundle.snapshotBytes };
+
+		// CONTROLS: the two arrival contexts disagree about this receipt — one
+		// fails step 3(a), the other passes it.
+		expect(
+			runReceiptCli(
+				["receipt.json", "--trust", "trust.json", "--expect-id", ALT_RECEIPT_ID],
+				memoryIo(files),
+			).exitCode,
+			"the pinned id FAILS 3(a)",
+		).toBe(1);
+		expect(
+			runReceiptCli(
+				["receipt.json", "--trust", "trust.json", "--expect-id", DEFAULT_RECEIPT_ID],
+				memoryIo(files),
+			).exitCode,
+			"the appended id passes it",
+		).toBe(0);
+
+		// THE ATTACK: the pinned binding is the one that would fail; the appended
+		// occurrence is the one that passes.
+		const reads: string[] = [];
+		const result = runReceiptCli(
+			[
+				"--expect-id",
+				ALT_RECEIPT_ID,
+				"receipt.json",
+				"--trust",
+				"trust.json",
+				"--expect-id",
+				DEFAULT_RECEIPT_ID,
+			],
+			recordingIo(files, reads),
+		);
+		expect(result.exitCode).toBe(3);
+		expect(result.stdout).toBe("");
+		expect(result.stderr).toContain("--expect-id");
+		expect(reads).toEqual([]);
+	});
+
+	it("a second POSITIONAL cannot replace <file>, in either order", () => {
+		const good = mint();
+		const evil = mint({
+			receiptAfterSign: (r) => ({
+				...r,
+				signature: {
+					...(r.signature as Record<string, unknown>),
+					sig: corruptBase64((r.signature as Record<string, string>).sig),
+				},
+			}),
+		});
+		// Both receipts are signed against the SAME snapshot's keys, so the one
+		// trust root grades both and the only difference is the receipt itself.
+		const files = {
+			"good.json": good.receiptBytes,
+			"evil.json": evil.receiptBytes,
+			"trust.json": good.snapshotBytes,
+		};
+
+		// CONTROLS: the two positionals disagree about the verdict.
+		expect(runReceiptCli(["good.json", "--trust", "trust.json"], memoryIo(files)).exitCode).toBe(0);
+		expect(runReceiptCli(["evil.json", "--trust", "trust.json"], memoryIo(files)).exitCode).toBe(1);
+
+		// The guard is about SLOT OCCUPANCY, not about which document is
+		// preferable, so it holds in both orders — including the one where the
+		// second positional is the honest receipt.
+		for (const argv of [
+			["good.json", "evil.json", "--trust", "trust.json"],
+			["evil.json", "good.json", "--trust", "trust.json"],
+		]) {
+			const reads: string[] = [];
+			const result = runReceiptCli(argv, recordingIo(files, reads));
+			expect(result.exitCode, argv.join(" ")).toBe(3);
+			expect(result.stdout, argv.join(" ")).toBe("");
+			expect(result.stderr, argv.join(" ")).toMatch(/more than once/);
+			expect(reads, argv.join(" ")).toEqual([]);
+		}
+	});
+
+	it("repeating a BOOLEAN is refused too — 'harmless' is a per-flag judgement that goes stale", () => {
+		// A repeated `--envelope`/`--json` changes nothing about what is loaded,
+		// so an exemption would look free. It is not: "harmless" has to be
+		// re-decided correctly for every flag anyone adds later, and the first
+		// time that judgement is wrong it is wrong silently. Default-deny costs
+		// nothing here and needs no judgement at all.
+		const bundle = mint();
+		for (const argv of [
+			["envelope.json", "--trust", "trust.json", "--envelope", "--envelope"],
+			["receipt.json", "--trust", "trust.json", "--json", "--json"],
+		]) {
+			const result = runReceiptCli(argv, ioFor(bundle));
+			expect(result.exitCode, argv.join(" ")).toBe(3);
+			// No report in EITHER format — in particular no JSON object for a
+			// `--json --json` caller to read a verdict out of.
+			expect(result.stdout, argv.join(" ")).toBe("");
+		}
+	});
+
+	it("an IDENTICAL repeat is refused as well — the rule is occupancy, not disagreement", () => {
+		// `--trust t.json --trust t.json` names one file twice, so nothing is
+		// substituted and a "same value" exemption would also look free. It is
+		// not: string equality is not identity of what will be LOADED, and every
+		// exemption is one more judgement that has to stay correct as the option
+		// surface grows.
+		expect(
+			runReceiptCli(
+				["receipt.json", "--trust", "trust.json", "--trust", "trust.json"],
+				ioFor(mint()),
+			).exitCode,
+		).toBe(3);
+	});
+
+	it("EVERY binding in the option surface is single-occurrence — a default, not a list of two", () => {
+		// The enumeration IS the test. Special-casing `--trust` and `--expect-id`
+		// would leave every other slot last-one-wins, and would leave the NEXT
+		// flag last-one-wins by default; this row set is what fails if the rule
+		// ever regresses to a list.
+		const bundle = mint();
+		const repeats: ReadonlyArray<readonly [string, readonly string[]]> = [
+			["--trust", ["receipt.json", "--trust", "trust.json", "--trust", "trust.json"]],
+			[
+				"--expect-id",
+				[
+					"receipt.json",
+					"--trust",
+					"trust.json",
+					"--expect-id",
+					DEFAULT_RECEIPT_ID,
+					"--expect-id",
+					DEFAULT_RECEIPT_ID,
+				],
+			],
+			["--envelope", ["envelope.json", "--trust", "trust.json", "--envelope", "--envelope"]],
+			["--json", ["receipt.json", "--trust", "trust.json", "--json", "--json"]],
+			["<file>", ["receipt.json", "receipt.json", "--trust", "trust.json"]],
+		];
+		for (const [binding, argv] of repeats) {
+			const result = runReceiptCli(argv, ioFor(bundle));
+			expect(result.exitCode, binding).toBe(3);
+			expect(result.stdout, binding).toBe("");
+			// The refusal NAMES the binding it refused, so an operator is not left
+			// diffing their own command line.
+			expect(result.stderr, binding).toContain(binding);
+			expect(result.stderr, binding).toContain("more than once");
+		}
+	});
+
+	it("`--help` and `-h` are ONE binding, and help still answers immediately", () => {
+		// Help returns on FIRST sight, so its own duplicate check is unreachable
+		// by construction — what this pins is that folding the alias into one
+		// binding did not break the flag whose entire job is to answer at once.
+		for (const argv of [
+			["--help", "--help"],
+			["-h", "--help"],
+			["--help", "-h"],
+		]) {
+			const result = runReceiptCli(argv, memoryIo({}));
+			expect(result.exitCode, argv.join(" ")).toBe(3);
+			expect(result.stdout, argv.join(" ")).toContain(RECEIPT_USAGE);
+		}
+	});
+
+	it("the refusal names the option and survives the report's 240-char clip", () => {
+		const argv = ["r.json", "--trust", "a.json", "--trust", "b.json"];
+		const parsed = parseReceiptArgs(argv);
+		expect(parsed.kind).toBe("error");
+		const message = (parsed as { readonly message: string }).message;
+		expect(message).toContain("--trust");
+		expect(message).toMatch(/more than once/);
+		// Whole, not clipped to an ellipsis mid-sentence.
+		expect(message.length).toBeLessThanOrEqual(240);
+		const result = runReceiptCli(argv, memoryIo({}));
+		expect(result.stderr.startsWith(`${message}\n`)).toBe(true);
+	});
+
+	it("POSITIVE CONTROL: every legitimate single-occurrence invocation still works", () => {
+		// A parser hardening that breaks ordinary invocation is a worse defect
+		// than the one it closes, and an all-refusal suite cannot detect it.
+		const bundle = mint();
+		const legitimate: ReadonlyArray<readonly [string, readonly string[]]> = [
+			["bare", ["receipt.json", "--trust", "trust.json"]],
+			["--json", ["receipt.json", "--trust", "trust.json", "--json"]],
+			["--expect-id", ["receipt.json", "--trust", "trust.json", "--expect-id", DEFAULT_RECEIPT_ID]],
+			["--envelope", ["envelope.json", "--trust", "trust.json", "--envelope"]],
+			[
+				"every option at once",
+				[
+					"envelope.json",
+					"--trust",
+					"trust.json",
+					"--envelope",
+					"--expect-id",
+					DEFAULT_RECEIPT_ID,
+					"--json",
+				],
+			],
+		];
+		for (const [label, argv] of legitimate) {
+			expect(runReceiptCli(argv, ioFor(bundle)).exitCode, label).toBe(0);
+		}
+		// `-` in each slot that accepts it — the stdin filename must not have
+		// become an option token, and claiming a slot must not have changed which
+		// reader resolves it.
+		expect(
+			runReceiptCli(
+				["-", "--trust", "trust.json"],
+				memoryIo({ "trust.json": bundle.snapshotBytes }, bundle.receiptBytes),
+			).exitCode,
+			"piped receipt",
+		).toBe(0);
+		expect(
+			runReceiptCli(
+				["receipt.json", "--trust", "-"],
+				memoryIo({ "receipt.json": bundle.receiptBytes }, bundle.snapshotBytes),
+			).exitCode,
+			"piped snapshot",
+		).toBe(0);
+		const help = runReceiptCli(["--help"], memoryIo({}));
+		expect(help.exitCode).toBe(3);
+		expect(help.stdout).toContain(RECEIPT_USAGE);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Dispatch token — the literal `cli.ts` compares `argv[0]` against EXACTLY.
 // ─────────────────────────────────────────────────────────────────────────────
 

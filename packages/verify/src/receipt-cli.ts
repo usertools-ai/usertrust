@@ -132,6 +132,9 @@ export const RECEIPT_USAGE = `Usage: usertrust-verify receipt <file> --trust <sn
   --json                 Machine-readable report on stdout; diagnostics on
                          stderr.
 
+Every option, and <file>, may be given AT MOST ONCE. A repeat is a usage
+error (3), never a silent replacement of the earlier value.
+
 Exit codes: 0 verified, 1 FAILED, 2 UNVERIFIABLE, 3 usage error.`;
 
 type ParsedReceiptArgs = {
@@ -162,11 +165,66 @@ function isOptionToken(token: string): boolean {
 	return token.startsWith("-") && token !== "-";
 }
 
+/** The binding an option token sets — one per SETTING, so aliases collapse. */
+type OptionBinding = "--help" | "--trust" | "--envelope" | "--expect-id" | "--json";
+
+/**
+ * CLI spec §2's option surface, and the parser's ONLY recognition path.
+ *
+ * Dispatching off this map rather than off a chain of `arg === "--…"` tests is
+ * what makes the single-occurrence rule below INHERITED instead of remembered:
+ * a flag added to the chain alone is not recognized at all — it falls through
+ * to `unknown flag`, a loud exit 3 — so there is no way to add an option that
+ * parses while skipping the duplicate check. `-h` maps to the `--help` binding
+ * because the constraint belongs to the SETTING, not to the spelling.
+ */
+const OPTION_BINDINGS: ReadonlyMap<string, OptionBinding> = new Map([
+	["--help", "--help"],
+	["-h", "--help"],
+	["--trust", "--trust"],
+	["--envelope", "--envelope"],
+	["--expect-id", "--expect-id"],
+	["--json", "--json"],
+]);
+
+/**
+ * The `<file>` positional, claimed through the same mechanism as the flags.
+ *
+ * It is not a special case: "the second occurrence silently replaces the
+ * first" is the same defect whether the slot is named by a flag or by
+ * position, so it gets the same guard rather than a parallel one.
+ */
+const POSITIONAL_BINDING = "<file>";
+
+/**
+ * Options that may legitimately be given more than once. **Empty, and the
+ * emptiness is the design — do not delete this as dead code.**
+ *
+ * The rule this set carves an exception out of is the inversion that closes
+ * the defect: EVERY option is single-occurrence UNLESS it is named here. The
+ * alternative — refusing a duplicate `--trust` and `--expect-id` by name —
+ * enumerates two flags and makes the THIRD one, whenever someone adds it,
+ * last-one-wins by default. That default is what let a wrapper pin `--trust`
+ * and then append caller-supplied arguments: the appended occurrence replaced
+ * the pinned snapshot in silence and the tool exited 0 on attacker-chosen
+ * trust material.
+ *
+ * So the mechanism has to exist even while the list is empty, because an empty
+ * allow-list plus a default-deny is precisely what a new flag must inherit
+ * without anyone remembering to. A future repeatable option (the vault parser
+ * already has several — `--anchor`, `--rekor-pubkey`) is added HERE, next to
+ * the reason it is safe, and every other option keeps the constraint for free.
+ */
+const REPEATABLE_OPTIONS: ReadonlySet<string> = new Set<string>();
+
 /**
  * Receipt mode's OWN parser (CLI spec §2's dispatch rule): every flag here is
  * unknown to the vault parser, so this must never fall through to it, and
  * every refusal below is a USAGE error (exit 3) — never the shared `usage()`,
  * which exits 1 (FAILED, the wrong code for "you typed the command wrong").
+ * A repeated option is one of those refusals: exit 3, no verdict, and — the
+ * property that matters — nothing is read, so the losing occurrence's file is
+ * never opened.
  */
 export function parseReceiptArgs(argv: readonly string[]): ArgsResult {
 	let file: string | undefined;
@@ -174,6 +232,28 @@ export function parseReceiptArgs(argv: readonly string[]): ArgsResult {
 	let envelope = false;
 	let expectId: string | undefined;
 	let json = false;
+
+	/**
+	 * Claims a binding for its first occurrence; returns the refusal message
+	 * for every occurrence after that (unless the binding is repeatable).
+	 *
+	 * `token` is named only when it DIFFERS from the binding — `-h` against the
+	 * `--help` binding, and the offending filename against `<file>`, where the
+	 * binding alone would not tell an operator which argument to remove.
+	 */
+	const seen = new Set<string>();
+	const claim = (binding: string, token: string): string | undefined => {
+		if (!seen.has(binding) || REPEATABLE_OPTIONS.has(binding)) {
+			seen.add(binding);
+			return undefined;
+		}
+		const at = token === binding ? "" : ` (at ${JSON.stringify(token)})`;
+		return (
+			`${binding} was given more than once${at}: a later occurrence would silently ` +
+			"replace the earlier one, so this is refused rather than resolved. " +
+			"Pass it exactly once."
+		);
+	};
 
 	for (let i = 0; i < argv.length; i += 1) {
 		const arg = argv[i] as string;
@@ -192,27 +272,47 @@ export function parseReceiptArgs(argv: readonly string[]): ArgsResult {
 			if (candidate === undefined) return undefined;
 			return isOptionToken(candidate) ? undefined : candidate;
 		};
-		if (arg === "--help" || arg === "-h") return { kind: "help" };
-		if (arg === "--trust") {
+		const binding = OPTION_BINDINGS.get(arg);
+		if (binding === undefined) {
+			// Not an option this parser accepts, so it is either an unknown flag
+			// or the `<file>` positional — which claims its slot exactly like a
+			// flag does, and refuses a second occupant for the same reason.
+			if (isOptionToken(arg)) {
+				return { kind: "error", message: `unknown flag ${JSON.stringify(arg)}` };
+			}
+			const duplicate = claim(POSITIONAL_BINDING, arg);
+			if (duplicate !== undefined) return { kind: "error", message: duplicate };
+			file = arg;
+			continue;
+		}
+		// BEFORE the option takes effect, and before its value is even read:
+		// the refusal must land while nothing has been assigned and nothing has
+		// been opened.
+		const duplicate = claim(binding, arg);
+		if (duplicate !== undefined) return { kind: "error", message: duplicate };
+
+		if (binding === "--help") return { kind: "help" };
+		if (binding === "--trust") {
 			const value = next();
 			if (value === undefined) return { kind: "error", message: "--trust requires a value" };
 			trust = value;
 			i += 1;
-		} else if (arg === "--envelope") {
+		} else if (binding === "--envelope") {
 			envelope = true;
-		} else if (arg === "--expect-id") {
+		} else if (binding === "--expect-id") {
 			const value = next();
 			if (value === undefined) return { kind: "error", message: "--expect-id requires a value" };
 			expectId = value;
 			i += 1;
-		} else if (arg === "--json") {
+		} else if (binding === "--json") {
 			json = true;
-		} else if (isOptionToken(arg)) {
-			return { kind: "error", message: `unknown flag ${JSON.stringify(arg)}` };
-		} else if (file === undefined) {
-			file = arg;
 		} else {
-			return { kind: "error", message: `unexpected extra argument ${JSON.stringify(arg)}` };
+			// `binding` is `never` here, so adding a member to `OptionBinding`
+			// without an arm above is a COMPILE error rather than an option that
+			// parses, claims its slot, and then quietly does nothing. Unreachable
+			// at runtime by construction.
+			const unhandled: never = binding;
+			return { kind: "error", message: `unhandled option ${JSON.stringify(String(unhandled))}` };
 		}
 	}
 	if (file === undefined) return { kind: "error", message: "missing <file>" };
