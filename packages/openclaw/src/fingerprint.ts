@@ -16,6 +16,11 @@
  * Equality is the ONLY operation ever performed on a fingerprint, and a digest
  * supports equality exactly as well as the JSON does — so the JSON is hashed
  * and discarded. Semantics are unchanged; the retained secret is gone.
+ *
+ * `id` and `aliases` are omitted: they only control OpenClaw routing of
+ * `wrapStreamFn` and are never forwarded to `createGovernor()`. Hashing them
+ * would refuse a second wrapper with the same governance settings but a
+ * different alias list (or default aliases vs explicit vs `[]`).
  */
 
 import { createHash } from "node:crypto";
@@ -33,7 +38,9 @@ export function fingerprintConfig(
 	config: UsertrustPluginConfig,
 	frozenCostCenters?: FrozenCostCenters,
 ): string {
-	const canonical = JSON.stringify(sortKeysDeep({ ...config, costCenters: frozenCostCenters }));
+	// Routing-only: `id`/`aliases` never reach createGovernor(). See file header.
+	const { id: _id, aliases: _aliases, ...governance } = config;
+	const canonical = JSON.stringify(sortKeysDeep({ ...governance, costCenters: frozenCostCenters }));
 	return createHash("sha256").update(canonical, "utf8").digest("hex");
 }
 

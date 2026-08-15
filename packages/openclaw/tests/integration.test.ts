@@ -88,6 +88,7 @@ describe("createUsertrustPlugin (factory)", () => {
 
 		expect(plugin.id).toBe("usertrust");
 		expect(plugin.label).toBe("usertrust Governance");
+		expect(plugin.aliases).toEqual(["anthropic", "openai", "google"]);
 		expect(typeof plugin.wrapStreamFn).toBe("function");
 	});
 

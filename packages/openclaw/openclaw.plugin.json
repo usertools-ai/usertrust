@@ -32,6 +32,16 @@
 				"type": "string",
 				"description": "API key for the governance proxy."
 			},
+			"id": {
+				"type": "string",
+				"minLength": 1,
+				"description": "ProviderPlugin id. Defaults to usertrust. Changing this is how the plugin itself registers as a different provider; attaching the wrapper to live providers is aliases, not this."
+			},
+			"aliases": {
+				"type": "array",
+				"items": { "type": "string", "minLength": 1 },
+				"description": "Provider ids whose wrapStreamFn this plugin attaches to. Default: anthropic, openai, google (the Model.provider values live calls use). Pass [] to wrap only calls routed to id."
+			},
 			"costCenters": {
 				"type": "object",
 				"additionalProperties": false,

@@ -1,7 +1,7 @@
 {
 	"name": "usertrust-openclaw",
 	"version": "3.3.1",
-	"description": "usertrust governance plugin for OpenClaw. Budget enforcement, audit trails, and policy gates for every LLM call — zero code changes.",
+	"description": "usertrust governance plugin for OpenClaw. Budget, policy, and audit for streamed LLM calls whose provider id matches this plugin's id or aliases (defaults: anthropic, openai, google).",
 	"license": "Apache-2.0",
 	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
 	"homepage": "https://usertrust.ai",

@@ -5,8 +5,11 @@
  * @usertrust/openclaw — usertrust governance plugin for OpenClaw
  *
  * Adds budget enforcement, policy gates, and hash-chained audit trails
- * to every LLM call in OpenClaw. Zero code changes required — install
- * the plugin and every call is governed.
+ * to streamed LLM calls whose provider id matches this plugin's `id` or
+ * `aliases`. OpenClaw has no host-wide wrapStreamFn seam — a stock
+ * install attaches the wrapper via default aliases (`anthropic`,
+ * `openai`, `google`), the provider ids live calls actually use. Pass
+ * `aliases: []` to wrap only calls routed to `id` (`usertrust`).
  *
  * Installation:
  *   openclaw plugins install @usertrust/openclaw
@@ -306,12 +309,58 @@ export default function register(api: OpenClawPluginApi): void {
 }
 
 /**
+ * Default wrapStreamFn aliases.
+ *
+ * Prevents the default-install gap: plugin `id` is `"usertrust"`, live
+ * calls route to anthropic/openai/google, and without these aliases
+ * wrapStreamFn never fires — zero budget, policy, or audit on the
+ * calls the package used to claim were governed. These strings are
+ * `Model.provider` values (`host-fixtures.ts`, pi-ai
+ * `models.generated.js`), not API transports (`openai-completions` /
+ * `openai-responses` live on `model.api` and would still wrap nothing).
+ */
+const DEFAULT_WRAP_ALIASES: readonly string[] = ["anthropic", "openai", "google"];
+
+function resolvePluginId(id: unknown): string {
+	if (id === undefined) return "usertrust";
+	if (typeof id !== "string" || id.length === 0) {
+		throw new Error("usertrust: id must be a non-empty string");
+	}
+	return id;
+}
+
+/**
+ * Absent → defaults. `[]` is the explicit opt-out (wrap only `id`).
+ * A copy either way so a caller mutating the config after construction
+ * cannot re-point the registered plugin at a different provider set.
+ */
+function resolveAliases(aliases: unknown): string[] {
+	if (aliases === undefined) {
+		return [...DEFAULT_WRAP_ALIASES];
+	}
+	if (!Array.isArray(aliases)) {
+		throw new Error("usertrust: aliases must be an array of non-empty strings");
+	}
+	const resolved: string[] = [];
+	for (let i = 0; i < aliases.length; i++) {
+		const entry = aliases[i];
+		if (typeof entry !== "string" || entry.length === 0) {
+			throw new Error(`usertrust: aliases[${i}] must be a non-empty string`);
+		}
+		resolved.push(entry);
+	}
+	return resolved;
+}
+
+/**
  * Factory: build an OpenClaw `ProviderPlugin` bound to a usertrust config.
  *
  * Use this when programmatically wiring usertrust into an OpenClaw runtime
  * (rather than going through the auto-discovery `register()` default).
  * The returned plugin's `wrapStreamFn` follows OpenClaw's provider-hook shape:
- * one context argument carrying the inner `streamFn`.
+ * one context argument carrying the inner `streamFn`. `aliases` defaults to
+ * the live provider ids (`anthropic`, `openai`, `google`); pass `[]` to wrap
+ * only calls routed to `id`.
  *
  * Init is lazy — the governor is created on the first wrapped call, not
  * at plugin construction time. This matches OpenClaw's lifecycle (plugins
@@ -334,13 +383,18 @@ export function createUsertrustPlugin(config: UsertrustPluginConfig): ProviderPl
 	const frozenCostCenters =
 		config.costCenters !== undefined ? normalizeCostCenters(config.costCenters) : undefined;
 	const getGovernor = lazyGovernor(config, frozenCostCenters);
+	const aliases = resolveAliases(config.aliases);
+	// Freeze the copy, not the caller's array — a later `plugin.aliases.push`
+	// must not silently retarget the registered wrapper.
+	Object.freeze(aliases);
 
 	return {
-		id: "usertrust",
+		id: resolvePluginId(config.id),
 		label: "usertrust Governance",
 		// `auth` is required by OpenClaw's ProviderPlugin contract. usertrust
 		// governs someone else's provider credentials and holds none of its own.
 		auth: [],
+		aliases,
 		wrapStreamFn(ctx): StreamFn | undefined {
 			const next = ctx.streamFn;
 			if (next == null) return undefined;

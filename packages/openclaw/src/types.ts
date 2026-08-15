@@ -468,6 +468,25 @@ export interface UsertrustPluginConfig {
 	 * by `normalizeCostCenters` at plugin CONSTRUCTION time, never lazily.
 	 */
 	costCenters?: CostCentersConfig;
+	/**
+	 * ProviderPlugin.id. Defaults to `"usertrust"` so existing registrations
+	 * keep matching. Override only if you need the plugin itself to BE a
+	 * different provider id; attaching the wrapper to live providers is
+	 * `aliases`, not this.
+	 */
+	id?: string;
+	/**
+	 * Provider ids whose `wrapStreamFn` this plugin should attach to.
+	 *
+	 * OpenClaw resolves the hook by matching the call's provider id against
+	 * this plugin's `id`/`aliases` — there is no host-wide wrap. Absent → the
+	 * default list (`anthropic`, `openai`, `google`): those are the
+	 * `Model.provider` values live OpenClaw/pi-ai calls actually use.
+	 * `openai-completions` / `openai-responses` are API transports
+	 * (`model.api`), not provider ids; aliasing them still wraps nothing.
+	 * Pass `[]` to wrap only calls routed to `id`.
+	 */
+	aliases?: string[];
 }
 
 // ── OpenClaw plugin registration ──

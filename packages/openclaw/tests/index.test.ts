@@ -84,6 +84,7 @@ describe("openclaw plugin entry point", () => {
 			const plugin = registerProviderMock.mock.calls[0]?.[0] as ProviderPlugin;
 			expect(plugin.id).toBe("usertrust");
 			expect(plugin.label).toBe("usertrust Governance");
+			expect(plugin.aliases).toEqual(["anthropic", "openai", "google"]);
 			expect(typeof plugin.wrapStreamFn).toBe("function");
 		});
 
@@ -110,6 +111,97 @@ describe("openclaw plugin entry point", () => {
 			});
 
 			expect(typeof wrapped).toBe("function");
+		});
+	});
+
+	describe("createUsertrustPlugin aliases", () => {
+		it("defaults aliases to the live OpenClaw/pi-ai provider ids", async () => {
+			const { createUsertrustPlugin } = await import("../src/index.js");
+			const plugin = createUsertrustPlugin({ budget: 100_000, dryRun: true });
+
+			expect(plugin.id).toBe("usertrust");
+			// Not openai-completions / openai-responses — those are API
+			// transports (`model.api`), not the provider ids wrapStreamFn matches.
+			expect(plugin.aliases).toEqual(["anthropic", "openai", "google"]);
+		});
+
+		it("passes through a configured aliases list", async () => {
+			const { createUsertrustPlugin } = await import("../src/index.js");
+			const plugin = createUsertrustPlugin({
+				budget: 100_000,
+				dryRun: true,
+				aliases: ["ollama", "openai"],
+			});
+
+			expect(plugin.aliases).toEqual(["ollama", "openai"]);
+		});
+
+		it("treats aliases: [] as an opt-out — wrap only calls routed to id", async () => {
+			const { createUsertrustPlugin } = await import("../src/index.js");
+			const plugin = createUsertrustPlugin({
+				budget: 100_000,
+				dryRun: true,
+				aliases: [],
+			});
+
+			expect(plugin.id).toBe("usertrust");
+			expect(plugin.aliases).toEqual([]);
+		});
+
+		it("honours a configured id, still defaulting aliases", async () => {
+			const { createUsertrustPlugin } = await import("../src/index.js");
+			const plugin = createUsertrustPlugin({
+				budget: 100_000,
+				dryRun: true,
+				id: "acme-proxy",
+			});
+
+			expect(plugin.id).toBe("acme-proxy");
+			expect(plugin.aliases).toEqual(["anthropic", "openai", "google"]);
+		});
+
+		it("copies aliases so a later mutation of the config cannot re-point the plugin", async () => {
+			const { createUsertrustPlugin } = await import("../src/index.js");
+			const aliases = ["anthropic"];
+			const plugin = createUsertrustPlugin({
+				budget: 100_000,
+				dryRun: true,
+				aliases,
+			});
+
+			aliases.push("evil");
+			expect(plugin.aliases).toEqual(["anthropic"]);
+		});
+
+		it("rejects an empty id", async () => {
+			const { createUsertrustPlugin } = await import("../src/index.js");
+			expect(() => createUsertrustPlugin({ budget: 100_000, dryRun: true, id: "" })).toThrow(
+				/id must be a non-empty string/,
+			);
+		});
+
+		it("rejects a non-array aliases value", async () => {
+			const { createUsertrustPlugin } = await import("../src/index.js");
+			expect(() =>
+				createUsertrustPlugin({
+					budget: 100_000,
+					dryRun: true,
+					// Runtime delivery is Record<string, unknown>; the cast is the
+					// hostile/malformed openclaw.json case this door exists for.
+					aliases: "anthropic" as unknown as string[],
+				}),
+			).toThrow(/aliases must be an array of non-empty strings/);
+		});
+
+		it("rejects an empty string inside aliases", async () => {
+			const { createUsertrustPlugin } = await import("../src/index.js");
+			expect(() =>
+				createUsertrustPlugin({
+					budget: 100_000,
+					dryRun: true,
+					aliases: ["anthropic", ""],
+				}),
+			).toThrow(/aliases\[1\] must be a non-empty string/);
 		});
 	});
 

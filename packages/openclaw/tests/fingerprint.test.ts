@@ -95,4 +95,13 @@ describe("fingerprintConfig", () => {
 			fingerprintConfig({ budget: 1, endpoint: { class: "local", runtime: "unknown" } }),
 		).not.toBe(fingerprintConfig({ budget: 1, endpoint: { class: "cloud", runtime: "unknown" } }));
 	});
+
+	it("omits routing-only id/aliases — they never reach createGovernor()", () => {
+		const base = fingerprintConfig({ budget: 1 });
+
+		expect(fingerprintConfig({ budget: 1, aliases: ["anthropic"] })).toBe(base);
+		expect(fingerprintConfig({ budget: 1, aliases: [] })).toBe(base);
+		expect(fingerprintConfig({ budget: 1, id: "other" })).toBe(base);
+		expect(fingerprintConfig({ budget: 2 })).not.toBe(base);
+	});
 });
