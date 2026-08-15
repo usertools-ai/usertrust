@@ -68,19 +68,3 @@ export const DEFAULT_RULES: GateRule[] = [
 export function mergePolicies(defaults: GateRule[], userRules: GateRule[]): GateRule[] {
 	return [...defaults, ...userRules];
 }
-
-/**
- * Custom condition check for budget-exceeded rule.
- * The default rules use two `exists` conditions as a prerequisite;
- * actual comparison is done via this helper since cross-field
- * comparison is not expressible with single-field operators alone.
- *
- * Usage:
- *   if (isBudgetExceeded(context)) { ... }
- */
-export function isBudgetExceeded(context: Record<string, unknown>): boolean {
-	const remaining = context.budget_remaining;
-	const estimated = context.estimated_cost;
-	if (typeof remaining !== "number" || typeof estimated !== "number") return false;
-	return remaining < estimated;
-}
