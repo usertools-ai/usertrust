@@ -233,7 +233,7 @@ describe("canonicalize", () => {
 	});
 
 	it("handles undefined", () => {
-		expect(canonicalize(undefined)).toBe(undefined);
+		expect(canonicalize(undefined)).toBe("null");
 	});
 
 	it("strips undefined values from objects", () => {
@@ -251,6 +251,32 @@ describe("canonicalize", () => {
 
 	it("handles arrays with mixed types", () => {
 		expect(canonicalize([1, "two", null, { a: 1 }])).toBe('[1,"two",null,{"a":1}]');
+	});
+
+	it("encodes in-array undefined and holes as null", () => {
+		expect(canonicalize([1, undefined, 2])).toBe("[1,null,2]");
+		const sparse: unknown[] = [1];
+		sparse[2] = 2;
+		expect(canonicalize(sparse)).toBe("[1,null,2]");
+		expect(canonicalize([undefined])).toBe("[null]");
+		expect(canonicalize({ a: [undefined] })).toBe('{"a":[null]}');
+	});
+
+	it("refuses functions and symbols", () => {
+		expect(() => canonicalize({ f: () => 1 })).toThrow(/functions and symbols/);
+		expect(() => canonicalize(Symbol("x"))).toThrow(/functions and symbols/);
+		const withToJSON = (): { z: number; a: number } => ({ z: 1, a: 2 });
+		(withToJSON as { toJSON?: () => { z: number; a: number } }).toJSON = () => ({
+			z: 1,
+			a: 2,
+		});
+		expect(() => canonicalize(withToJSON)).toThrow(/functions and symbols/);
+	});
+
+	it("refuses a Date whose toISOString does not return a string", () => {
+		const d = new Date("2026-08-15T00:00:00.000Z");
+		d.toISOString = () => ({ z: 1, a: 2 }) as unknown as string;
+		expect(() => canonicalize(d)).toThrow(/Date\.toISOString must return a string/);
 	});
 
 	it("handles nested arrays", () => {

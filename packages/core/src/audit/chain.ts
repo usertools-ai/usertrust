@@ -449,21 +449,24 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 			};
 
 			const canonical = canonicalize(event);
+			let snapshot: Record<string, unknown>;
+			try {
+				snapshot = JSON.parse(canonical) as Record<string, unknown>;
+			} catch {
+				throw new Error("appendEvent: canonical bytes are not JSON");
+			}
+			// Refuse drift: the hashed bytes must be what we would persist
+			// for the event (minus hash). A Date#toISOString that returns an
+			// object is valid JSON in insertion order; re-canonicalizing
+			// sorts it. Hash the first snapshot only if it is idempotent.
+			const normalized = canonicalize(snapshot);
+			if (normalized !== canonical) {
+				throw new Error("appendEvent: canonical snapshot is not idempotent");
+			}
 			const hash = createHash("sha256").update(canonical).digest("hex");
-
-			const fullEvent: AuditEvent & { sequence: number } = {
-				...event,
-				hash,
-			};
-
-			// HARDEN: persist the CANONICAL bytes, not JSON.stringify output. The
-			// hash pre-image is `canonicalize(event)`; the verifier recomputes
-			// `sha256(canonicalize(persisted − hash))`. For any value with a
-			// `toJSON` (e.g. Buffer) `JSON.stringify` diverges from `canonicalize`,
-			// which would make an untampered event verify as TAMPERED. canonicalize
-			// is idempotent over its own output, so the bytes hashed equal the bytes
-			// persisted and the verify pkg stays in lockstep (hash format unchanged).
-			const persisted = canonicalize(fullEvent);
+			const persisted = canonicalize({ ...snapshot, hash });
+			const fullEvent = snapshot as unknown as AuditEvent & { sequence: number };
+			fullEvent.hash = hash;
 
 			const fd = openSync(logPath, "a");
 			try {

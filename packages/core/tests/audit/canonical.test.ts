@@ -27,7 +27,7 @@ describe("canonicalize", () => {
 	});
 
 	it("handles top-level undefined", () => {
-		expect(canonicalize(undefined)).toBe(undefined);
+		expect(canonicalize(undefined)).toBe("null");
 	});
 
 	it("handles primitives", () => {
@@ -53,9 +53,33 @@ describe("canonicalize", () => {
 
 	it("handles array with null and undefined elements", () => {
 		const result = canonicalize([null, undefined, 1]);
-		// canonicalize maps each element individually — undefined becomes the string "undefined"
-		// (from JSON.stringify(undefined)) and is joined without extra quoting
-		expect(result).toBe("[null,,1]");
+		expect(result).toBe("[null,null,1]");
+		expect(() => JSON.parse(result)).not.toThrow();
+	});
+
+	it("encodes array holes as null — the same absence-at-a-position as undefined", () => {
+		const sparse: unknown[] = [1];
+		sparse[2] = 2;
+		const result = canonicalize(sparse);
+		expect(result).toBe("[1,null,2]");
+		expect(() => JSON.parse(result)).not.toThrow();
+	});
+
+	it("refuses functions and symbols — they are not omitted", () => {
+		expect(() => canonicalize({ f: () => 1 })).toThrow(/functions and symbols/);
+		expect(() => canonicalize(Symbol("x"))).toThrow(/functions and symbols/);
+		const withToJSON = (): { z: number; a: number } => ({ z: 1, a: 2 });
+		(withToJSON as { toJSON?: () => { z: number; a: number } }).toJSON = () => ({
+			z: 1,
+			a: 2,
+		});
+		expect(() => canonicalize(withToJSON)).toThrow(/functions and symbols/);
+	});
+
+	it("refuses a Date whose toISOString does not return a string", () => {
+		const d = new Date("2026-08-15T00:00:00.000Z");
+		d.toISOString = () => ({ z: 1, a: 2 }) as unknown as string;
+		expect(() => canonicalize(d)).toThrow(/Date\.toISOString must return a string/);
 	});
 
 	it("handles empty object", () => {

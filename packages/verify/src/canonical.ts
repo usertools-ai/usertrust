@@ -4,7 +4,8 @@
 /**
  * Deterministic JSON canonicalization for hash computation.
  * Sorts object keys alphabetically at every nesting level.
- * Strips undefined values. Preserves null. Arrays keep order.
+ * Object-value undefined is omitted (key absent). Array holes and in-array
+ * undefined encode as null. Functions and symbols throw.
  *
  * INTENTIONAL DUPLICATION: This is a zero-dep copy for the usertrust-verify
  * package. Do NOT import from usertrust.
@@ -19,19 +20,40 @@ export function canonicalize(value: unknown): string {
 	}
 	// Convert Date to ISO string to avoid double-quoting divergence
 	if (value instanceof Date) {
-		return JSON.stringify(value.toISOString());
+		const iso = value.toISOString();
+		if (typeof iso !== "string") {
+			throw new Error("canonicalize: Date.toISOString must return a string");
+		}
+		return JSON.stringify(iso);
 	}
-	if (value === null || value === undefined) return JSON.stringify(value);
-	if (typeof value !== "object") return JSON.stringify(value);
+	if (value === null || value === undefined) return "null";
+	if (typeof value === "function" || typeof value === "symbol") {
+		throw new Error("canonicalize: functions and symbols are not allowed in audit data");
+	}
+	if (typeof value !== "object") {
+		return JSON.stringify(value);
+	}
 	if (Array.isArray(value)) {
-		return `[${value.map((v) => canonicalize(v)).join(",")}]`;
+		// Snapshot length once. `.map` skips holes; `join` turns a hole or an
+		// in-array undefined into an empty slot — `{arr:[1,,2]}` is not JSON.
+		const rawLen = value.length;
+		if (typeof rawLen !== "number" || !Number.isFinite(rawLen) || rawLen < 0) {
+			throw new Error("canonicalize: array length is not a finite number");
+		}
+		const len = Math.min(Math.trunc(rawLen), Number.MAX_SAFE_INTEGER);
+		const items: string[] = [];
+		for (let i = 0; i < len; i++) {
+			items.push(canonicalize(value[i]));
+		}
+		return `[${items.join(",")}]`;
 	}
 	const obj = value as Record<string, unknown>;
 	const keys = Object.keys(obj).sort();
 	const parts: string[] = [];
 	for (const key of keys) {
-		if (obj[key] === undefined) continue;
-		parts.push(`${JSON.stringify(key)}:${canonicalize(obj[key])}`);
+		const member = obj[key];
+		if (member === undefined) continue;
+		parts.push(`${JSON.stringify(key)}:${canonicalize(member)}`);
 	}
 	return `{${parts.join(",")}}`;
 }

@@ -85,15 +85,17 @@ export function canonicalizeNormative(value: unknown): string {
 		if (Number.isNaN(value.getTime())) {
 			throw new Error("canonicalizeNormative: invalid Date in audit data");
 		}
-		return JSON.stringify(value.toISOString());
+		const iso = value.toISOString();
+		if (typeof iso !== "string") {
+			throw new Error("canonicalizeNormative: Date.toISOString must return a string");
+		}
+		return JSON.stringify(iso);
+	}
+	if (typeof value === "function" || typeof value === "symbol") {
+		throw new Error(`canonicalizeNormative: ${typeof value} has no JSON serialization`);
 	}
 	if (typeof value !== "object") {
-		const serialized = JSON.stringify(value);
-		if (typeof serialized !== "string") {
-			// Functions and symbols. §13 rule 4: reject, never emit.
-			throw new Error(`canonicalizeNormative: ${typeof value} has no JSON serialization`);
-		}
-		return serialized;
+		return JSON.stringify(value);
 	}
 	if (Array.isArray(value)) {
 		const parts: string[] = [];
