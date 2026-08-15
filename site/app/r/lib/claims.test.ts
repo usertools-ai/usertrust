@@ -24,7 +24,8 @@ import {
 	ANCHOR_NOT_PROOF_OF_UNIQUENESS,
 	ANCHOR_PARTIAL_MITIGATION,
 	advisoryBand,
-	amountFloorClaim,
+	AMOUNT_SCOPE_CAPTION,
+	amountScopeCaption,
 	amountUsdFromUsertokens,
 	artifactComparison,
 	CHECK_ROWS,
@@ -506,36 +507,22 @@ test("R39: includesAllDelegated is an UNEVIDENCED claim, never worded as a total
 	assert.match(claim.claim, /UNEVIDENCED/);
 });
 
-test("R40: the floor claim is granted to selfDebitsOnly and REFUSED to every other posture", () => {
-	// The default is NO claim, with the bound as the named exception. A posture
-	// whose soundness precondition fails must not silently inherit a bound.
-	const granted = amountFloorClaim("selfDebitsOnly", "4.8224");
-	assert.ok(granted, "selfDebitsOnly earns the bound");
-	assert.match(granted ?? "", /at least \$4\.8224 of spend was CAUSED by this subject/);
-	assert.match(granted ?? "", /exactly \$4\.8224 was CHARGED to this session/);
-	assert.match(granted ?? "", /delegated spend is never negative/);
-	assert.match(granted ?? "", /equal to or higher than this figure — never lower/);
-
+test("R40: every posture names the scope; none hedges the figure", () => {
+	assert.equal(
+		amountScopeCaption("selfDebitsOnly"),
+		"Charged to this session · delegated work bills to the delegate",
+	);
 	for (const posture of ALL_POSTURES) {
-		if (posture === "selfDebitsOnly") continue;
-		assert.equal(
-			amountFloorClaim(posture, "4.8224"),
-			undefined,
-			`${posture}: the precondition fails, so no bound may be inherited`,
-		);
+		const caption = amountScopeCaption(posture);
+		assert.equal(caption, AMOUNT_SCOPE_CAPTION[posture]);
+		assert.ok(!/at least \$/i.test(caption), `${posture}: must not hedge the number`);
+		assert.ok(!/\$\d/.test(caption), `${posture}: must not restate the dollar figure`);
+		assert.ok(!/never understates/i.test(caption), `${posture}: must not restate the retired promise`);
 	}
-});
-
-test("R40: the floor restores the strong claim WITHOUT restating the retired unconditional promise", () => {
-	// The premise correction this amendment rests on: the unconditional "never
-	// understates what the work cost" is retired, and the live form is scoped.
-	// Floor framing is precisely what lets the strong claim hold without
-	// resurrecting the retired sentence — including in order to except it.
-	const granted = amountFloorClaim("selfDebitsOnly", "1.0000") ?? "";
 	for (const framing of ALL_POSTURES.map((p) => delegationScopeClaim(p).claim)) {
 		assert.ok(!/never understates/i.test(framing), "R39 copy must not restate the retired promise");
+		assert.ok(!/at least \$/i.test(framing), "R39 copy must not hedge the figure");
 	}
-	assert.ok(!/never understates/i.test(granted), "R40 copy must not restate it either");
 });
 
 test("R41: the anchored rung's binding is resolver-asserted TODAY, not inherently uncheckable", () => {

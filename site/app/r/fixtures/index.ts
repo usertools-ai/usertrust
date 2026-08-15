@@ -205,18 +205,16 @@ export const conformingFixtures: ConformingFixtureEntry[] = [
 			"`delegationPosture: includesSomeDelegated` on an otherwise-conformant 200 — a CONFORMING fixture, not a " +
 			"rejection vector: the value is legal verifier vocabulary, `steps.semantics` may honestly be `passed`, " +
 			"and the consumer's obligation is to RENDER it (recognizing is not permitting — the minting rule binds " +
-			"the minter, R39 binds the page). Exercises R39's incomplete-attributed-subtotal framing AND R40's " +
-			"soundness precondition FAILING: coverage is not established, so no floor claim may be inherited",
+			"the minter, R39 binds the page). Exercises R39's incomplete-attributed-subtotal framing. R40 names " +
+			"the scope beneath an unqualified number and must not hedge it as 'at least $X'",
 	},
 	{
 		id: "C29",
 		files: ["posture-indeterminate.json"],
 		exercises:
 			"`delegationPosture: indeterminate` on an otherwise-conformant 200 — R39's end-to-end-coverage-cannot-be-" +
-			"verified framing, and the NEGATIVE guard on the whole R40 amendment: unknown coverage supports no bound " +
-			"in either direction, because the total may include cost the subject did not cause, so 'at least $X was " +
-			"caused' can be flatly false. This row is the fixture that fails if the floor claim is ever applied " +
-			"globally instead of per posture",
+			"verified framing. Unknown coverage still supports no bound in either direction — the figure is " +
+			"unqualified, and the caption must not restore 'at least $X was caused'",
 	},
 ];
 

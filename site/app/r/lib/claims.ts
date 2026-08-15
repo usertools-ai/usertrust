@@ -222,8 +222,8 @@ export function amountUsdFromUsertokens(assessedUsertokens: number): string {
  * own words. Three forms, one per `work.kind`; `session` carries NO artifact
  * claim at all, which is why it takes the amount instead of an artifact.
  * That `$X` is still an amount, so R39's scope (and the epistemic frame)
- * render beside it on the paper and in `WorkClaims`. R40's floor stays in
- * `SpendBlock` only — a bound printed twice is two copies that drift.
+ * render beside it on the paper and in `WorkClaims`. The figure itself is
+ * never qualified — R40 names the scope beneath it, once, in SpendBlock.
  */
 export function headlineClaim(work: Work, amountUsd: string): string {
 	switch (work.kind) {
@@ -522,8 +522,9 @@ export const INCLUDES_SOME_DELEGATED_SCOPE =
  *
  * Unknown coverage is not "probably self-debits". It admits BOTH directions:
  * debits the subject did not cause may be in the total, and debits it did cause
- * may be missing. That is why this value supports no bound — see
- * {@link amountFloorClaim}, which refuses it for exactly this reason.
+ * may be missing. That is why this value supports no bound. The figure is
+ * still printed unqualified; this sentence names the coverage, it does not
+ * hedge the number.
  */
 export const INDETERMINATE_SCOPE =
 	"END-TO-END COVERAGE CANNOT BE VERIFIED for this amount: the minter could not establish which delegated debits, if any, it covers. Unknown coverage supports no bound in either direction — the figure above is neither a floor nor a ceiling on the cost of the work this subject caused.";
@@ -565,46 +566,33 @@ export function delegationScopeClaim(delegationPosture: DelegationPosture): Post
 }
 
 /**
- * R40 — the FLOOR claim: the amount rendered as a lower bound on total caused
- * cost, alongside the exact charged figure.
+ * R40 — the amount is the UNQUALIFIED number. The caption names the SCOPE
+ * beneath it. It never hedges the figure ("at least $X") and never restates
+ * the dollar amount — the figure already sits above this line.
  *
- * Delegated spend is never negative, so a `selfDebitsOnly` amount — built only
- * from debits the subject itself incurred — is ALREADY a valid floor on the
- * cost of the work this subject caused. A floor cannot understate, because it
- * does not claim to be the total. So this is not an exception carved out of a
- * promise; it is the strong claim, made with the number the receipt already
- * carries.
+ * Cam reviewed the floor wording rendered and rejected it (2026-08-15):
+ * *"at least $X"* is a vague claim about an undefined quantity; *"$X charged
+ * to this session"* is an exact claim about a defined one. Honesty comes from
+ * naming the scope, not from hedging the number. Per-posture floor/no-floor
+ * branching therefore collapses: every posture states what its number covers.
  *
- * **The bound is PER-POSTURE, and three of the four values do not earn it.**
- * A posture whose soundness precondition fails degrades to its R39 copy alone
- * rather than silently inheriting a bound it cannot support:
+ * The `indeterminate` bound clause still holds — unknown coverage supports no
+ * bound in either direction — it simply is no longer an exception to a floor
+ * claim that no longer exists. That clause lives in
+ * {@link INDETERMINATE_SCOPE}, not here.
  *
- * - `selfDebitsOnly` — VALID. Every included debit is one the subject actually
- *   incurred, the omitted delegated spend is non-negative, and the charged
- *   figure is exact (§2 pins `posted === assessed`).
- * - `includesSomeDelegated` — REFUSED. A floor needs every included constituent
- *   to be provably caused by the subject, and the projection carries no
- *   per-constituent facts to establish that. Unreachable in v1 minting anyway.
- * - `indeterminate` — REFUSED, and asserting it here would be a NEW honesty
- *   defect rather than a missing nicety: if coverage is unknown, the total may
- *   include cost the subject did not cause, so "at least this much was caused"
- *   could be flatly false. Unknown coverage bounds nothing in either direction.
- * - `includesAllDelegated` — unnecessary (the value claims to BE the total) and
- *   unreachable pending the signed-evidence format.
- *
- * INTERIM: this framing retires on PARENT-STAMPING — attributing delegated
- * debits to the parent receipt as signed non-billing entries makes the figure
- * an exact total, at which point the floor wording is replaced by the total.
- *
- * This function is the ONLY place the string and its trigger condition live, so
- * retiring it is a single-site change.
+ * Recorded so the next reader cannot restore the floor from a still-sound
+ * argument: the reasoning was good; the framing was rejected.
  */
-export function amountFloorClaim(
-	delegationPosture: DelegationPosture,
-	amountUsd: string,
-): string | undefined {
-	if (delegationPosture !== "selfDebitsOnly") return undefined;
-	return `at least $${amountUsd} of spend was CAUSED by this subject, and exactly $${amountUsd} was CHARGED to this session. Delegated work is charged to the delegate and delegated spend is never negative, so the caused total is equal to or higher than this figure — never lower.`;
+export const AMOUNT_SCOPE_CAPTION: Record<DelegationPosture, string> = {
+	selfDebitsOnly: "Charged to this session · delegated work bills to the delegate",
+	includesSomeDelegated: "Incomplete attributed subtotal · coverage not established",
+	indeterminate: "Coverage unverified · this figure bounds nothing",
+	includesAllDelegated: "Unevidenced caused-total claim · not presented as a total",
+};
+
+export function amountScopeCaption(delegationPosture: DelegationPosture): string {
+	return AMOUNT_SCOPE_CAPTION[delegationPosture];
 }
 
 /**
@@ -1037,8 +1025,8 @@ export interface ReceiptClaims {
 	pricing: PostureClaim;
 	/** R38/R39 — what the amount COVERS, rendered beside the amount it scopes. */
 	delegation: PostureClaim;
-	/** R40 — the floor claim, present only where the posture earns one. */
-	amountFloor?: string;
+	/** R40 — the scope caption under the unqualified amount. Always present. */
+	amountCaption: string;
 	models: CatalogRendering;
 	providers: CatalogRendering;
 	transfers: TransferSetRendering;
@@ -1074,7 +1062,7 @@ export function receiptClaims(receipt: ReceiptDocument): ReceiptClaims {
 		usage: usagePostureClaim(projection.spend.usagePosture),
 		pricing: pricingPostureClaim(projection.spend.pricingPosture),
 		delegation: delegationScopeClaim(projection.delegationPosture),
-		amountFloor: amountFloorClaim(projection.delegationPosture, amountUsd),
+		amountCaption: amountScopeCaption(projection.delegationPosture),
 		models: catalogRendering(projection.models),
 		providers: catalogRendering(projection.providers),
 		transfers: transferSetRendering(projection),

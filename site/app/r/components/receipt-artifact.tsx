@@ -164,10 +164,7 @@ function SpendBlock({ claims }: { claims: ReceiptClaims }) {
 						{spend.assessedUsertokens} ut assessed
 					</span>
 				</div>
-				{/* R38/R39/R40 — the amount's bound and its scope, inside the same
-				    container as the figure. "Beside the amount, never a footnote and
-				    never behind interaction": moving this below the spend fields
-				    would satisfy neither. */}
+				{/* R38/R39/R40 — the unqualified amount, then its named scope. */}
 				<AmountScope claims={claims} />
 			</div>
 

@@ -335,16 +335,16 @@ function claimsWithPosture(file: string, posture: DelegationPosture): ReceiptCla
 	});
 }
 
-test("AmountScope: the epistemic frame is the first line, before the floor or the posture", () => {
+test("AmountScope: the epistemic frame is the first line, before the caption or the posture", () => {
 	const claims = claimsWithPosture("commit-checkpoint.json", "selfDebitsOnly");
 	const markup = html(<AmountScope claims={claims} />);
 	const frame = markup.indexOf('data-testid="epistemic-frame"');
-	const floor = markup.indexOf('data-testid="amount-floor"');
+	const caption = markup.indexOf('data-testid="amount-caption"');
 	const posture = markup.indexOf('data-posture="selfDebitsOnly"');
 	assert.ok(frame !== -1, "the frame renders in the scope block");
 	assert.ok(textOf(markup).includes(POSTURES_ARE_ATTESTED_ENUMS));
 	assert.ok(!markup.includes("title="), "no hover-only disclosure of the frame");
-	assert.ok(frame < floor, "the frame precedes the floor claim");
+	assert.ok(frame < caption, "the frame precedes the scope caption");
 	assert.ok(frame < posture, "the frame precedes the amount posture");
 });
 
@@ -358,13 +358,16 @@ test("AmountScope: the includesAllDelegated fallback renders UNEVIDENCED, never 
 	const markup = html(<AmountScope claims={claims} />);
 	const text = textOf(markup);
 	assert.ok(text.includes(INCLUDES_ALL_DELEGATED_UNEVIDENCED), "the unevidenced framing renders");
-	assert.ok(!markup.includes('data-amount-bound="floor"'), "an unbacked claim earns no bound");
+	assert.ok(!markup.includes('data-amount-bound="floor"'), "no floor attribute remains");
 	assert.ok(!text.includes("at least $"), "and no floor wording");
-	assert.equal(claims.amountFloor, undefined, "the claims surface granted no bound");
+	assert.equal(
+		claims.amountCaption,
+		"Unevidenced caused-total claim · not presented as a total",
+		"the caption names the gap without hedging a figure",
+	);
 });
 
-test("AmountScope: every posture renders its own framing, and only one earns a bound", () => {
-	const bounded: string[] = [];
+test("AmountScope: every posture names its scope; none qualifies the number", () => {
 	for (const posture of [
 		"selfDebitsOnly",
 		"includesSomeDelegated",
@@ -373,17 +376,19 @@ test("AmountScope: every posture renders its own framing, and only one earns a b
 	] as const) {
 		const claims = claimsWithPosture("commit-checkpoint.json", posture);
 		const markup = html(<AmountScope claims={claims} />);
+		const text = textOf(markup);
 		assert.ok(
 			markup.includes(`data-posture="${posture}"`),
 			`${posture}: the scope block names the posture`,
 		);
 		assert.ok(
-			textOf(markup).includes(DELEGATION_POSTURE_SCOPE[posture]),
+			text.includes(DELEGATION_POSTURE_SCOPE[posture]),
 			`${posture}: its own framing renders`,
 		);
-		if (markup.includes('data-amount-bound="floor"')) bounded.push(posture);
+		assert.ok(markup.includes('data-testid="amount-caption"'), `${posture}: caption present`);
+		assert.ok(!markup.includes('data-amount-bound="floor"'), `${posture}: no floor`);
+		assert.ok(!text.includes("at least $"), `${posture}: no floor wording`);
 	}
-	assert.deepEqual(bounded, ["selfDebitsOnly"], "the bound is the exception, never the default");
 });
 
 test("AmountScope: nothing in it is behind interaction — no details, summary, or title", () => {

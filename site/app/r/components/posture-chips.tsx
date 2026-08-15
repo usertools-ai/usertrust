@@ -78,25 +78,17 @@ const ASSERTED_CHIP = "border-paper-steel/60 font-normal text-paper-steel";
 const CAVEATED_CHIP = "border-paper-amber/60 font-normal text-paper-amber";
 
 /**
- * R38/R39/R40 — the amount's SCOPE, rendered beside the amount it qualifies.
+ * R38/R39/R40 — the amount's SCOPE, rendered beneath the unqualified figure.
  *
- * Position is part of the obligation, not layout taste. R40's floor claim and
- * R39's scope statement both render "beside the amount, never as a footnote and
- * never behind interaction" — so this block sits directly under the figure in
- * `SpendBlock`, above every other spend field, and there is deliberately no
- * `<details>`, no tooltip and no `title` attribute anywhere in it. The
- * epistemic frame is the first line of this block: the amount posture is the
- * first posture the reader meets, so the qualification that it is an attested
- * enum must arrive before the categorical copy, not after the other three
- * chips. Those three stay at the foot of the spend block.
+ * Position is part of the obligation, not layout taste. The caption and R39
+ * both sit "beside the amount, never as a footnote and never behind
+ * interaction" — so this block sits directly under the figure in `SpendBlock`,
+ * above every other spend field, and there is deliberately no `<details>`, no
+ * tooltip and no `title` attribute anywhere in it.
  *
- * The FLOOR line renders only where `amountFloorClaim` grants one. A posture
- * that does not earn a bound gets its R39 copy alone — an `indeterminate`
- * amount bounds nothing in either direction, and printing "at least $X" over it
- * would be a new overclaim rather than a missing nicety.
- *
- * INTERIM: the floor wording retires on parent-stamping, which turns the figure
- * into an exact total; `amountFloorClaim` is the single site to change.
+ * R40 is the unqualified number with its scope named beneath it. It is not a
+ * floor. The dollar figure above this block is the claim; this caption says
+ * what that number covers.
  */
 export function AmountScope({ claims }: { claims: ReceiptClaims }) {
 	return (
@@ -104,26 +96,18 @@ export function AmountScope({ claims }: { claims: ReceiptClaims }) {
 			<p className="text-[13px] leading-relaxed text-ink/70" data-testid="epistemic-frame">
 				{POSTURES_ARE_ATTESTED_ENUMS}
 			</p>
-			{claims.amountFloor ? (
-				<p
-					className="text-[13px] font-bold leading-relaxed text-ink"
-					data-testid="amount-floor"
-					data-amount-bound="floor"
-				>
-					{claims.amountFloor}
-				</p>
-			) : null}
+			<p
+				className="text-[13px] font-bold leading-relaxed text-ink"
+				data-testid="amount-caption"
+				data-amount-scope={claims.delegation.value}
+			>
+				{claims.amountCaption}
+			</p>
 			<PostureRow axis="amount scope" posture={claims.delegation} chipClass={ASSERTED_CHIP} />
 		</div>
 	);
 }
 
-/**
- * R13 session headlines name `$X`. That figure is still an amount, so R39
- * and the epistemic frame sit beside it — on the paper headline and again
- * where `WorkClaims` restates the same string. No floor here: R40 stays in
- * {@link AmountScope}, once.
- */
 export function SessionHeadlineScope({
 	claims,
 	tone,

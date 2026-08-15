@@ -29,7 +29,8 @@ import {
 import {
 	ANCHOR_BINDING_RESOLVER_ASSERTED,
 	ANCHOR_EXTERNAL_VISIBILITY,
-	amountFloorClaim,
+	AMOUNT_SCOPE_CAPTION,
+	amountScopeCaption,
 	amountUsdFromUsertokens,
 	BREAKDOWN_ROWS_NOTE,
 	CHAIN_CLOCK_CLAIM_NOTE,
@@ -284,17 +285,10 @@ function mandatedStrings(state: VerifiedState): { needle: string; why: string }[
 			why: "R39 — the amount's scope, framed per posture value",
 		},
 	];
-	// R40 — the floor is the NAMED EXCEPTION, so it is asserted only where the
-	// posture earns one. Deriving the expectation from `amountFloorClaim` rather
-	// than from the posture keeps this sweep honest about which branch it is
-	// checking; C29's dedicated test asserts the refusal directly.
-	const floor = amountFloorClaim(
-		projection.delegationPosture,
-		amountUsdFromUsertokens(projection.spend.assessedUsertokens),
-	);
-	if (floor !== undefined) {
-		required.push({ needle: floor, why: "R40 — the amount renders as a floor on caused cost" });
-	}
+	required.push({
+		needle: amountScopeCaption(projection.delegationPosture),
+		why: "R40 — the unqualified amount's scope is named beneath it",
+	});
 	if (envelope.receipt.work.kind !== "session") {
 		required.push(
 			{ needle: MEMBERSHIP_EPISTEMIC_SCOPE, why: "R26 — the minter's committed observation" },
@@ -598,7 +592,7 @@ test("R39/R40: the scope block sits BESIDE the amount — no spend field or post
 	}
 });
 
-test("R39/R40: neither the scope statement nor the floor claim is behind interaction", () => {
+test("R39/R40: neither the scope statement nor the caption is behind interaction", () => {
 	for (const row of conformingVerifiedRows()) {
 		const { html, state } = renderFixture(row.file);
 		const projection = state.envelope.receipt.event.data;
@@ -607,13 +601,11 @@ test("R39/R40: neither the scope statement nor the floor claim is behind interac
 			DELEGATION_POSTURE_SCOPE[projection.delegationPosture],
 			`${row.id}: R39's scope statement`,
 		);
-		const floor = amountFloorClaim(
-			projection.delegationPosture,
-			amountUsdFromUsertokens(projection.spend.assessedUsertokens),
+		assertNotBehindInteraction(
+			html,
+			amountScopeCaption(projection.delegationPosture),
+			`${row.id}: R40's scope caption`,
 		);
-		if (floor !== undefined) {
-			assertNotBehindInteraction(html, floor, `${row.id}: R40's floor claim`);
-		}
 	}
 });
 
@@ -636,8 +628,8 @@ test("R13/R39: a session $X is the frozen headline, and its scope sits beside bo
 			`${file}: paper scope precedes SpendBlock`,
 		);
 		assert.ok(
-			!html.slice(paperAt, spendScope).includes('data-amount-bound="floor"'),
-			`${file}: the headline companion does not carry the floor`,
+			!html.slice(paperAt, spendScope).includes('data-testid="amount-caption"'),
+			`${file}: the headline companion does not restate the spend caption`,
 		);
 		assertContains(
 			text,
@@ -647,32 +639,23 @@ test("R13/R39: a session $X is the frozen headline, and its scope sits beside bo
 	}
 });
 
-test("R40: a selfDebitsOnly amount renders as a FLOOR on caused cost, beside the exact charged figure", () => {
+test("R40: a selfDebitsOnly amount is unqualified, with its scope named beneath it", () => {
 	const { html, text, state } = renderFixture("commit-checkpoint.json");
 	const projection = state.envelope.receipt.event.data;
 	assert.equal(projection.delegationPosture, "selfDebitsOnly");
 	const amountUsd = amountUsdFromUsertokens(projection.spend.assessedUsertokens);
-	const floor = amountFloorClaim("selfDebitsOnly", amountUsd);
-	assert.ok(floor, "selfDebitsOnly must earn a floor claim");
-	assertContains(text, floor ?? "", "R40's floor claim renders verbatim");
-	assertContains(text, `$${amountUsd}`, "the exact charged figure renders beside the bound");
-	assert.ok(html.includes('data-amount-bound="floor"'), "the bound is named in the DOM");
-	// ONE site. A sentence rendered twice is two copies that drift, and this
-	// wording is interim — it retires on parent-stamping, as a single-site edit.
+	const caption = AMOUNT_SCOPE_CAPTION.selfDebitsOnly;
+	assertContains(text, `$${amountUsd}`, "the figure is the unqualified number");
+	assertContains(text, caption, "R40 names the scope beneath the figure");
+	assert.ok(html.includes('data-testid="amount-caption"'), "the caption is in the DOM");
+	assert.ok(!html.includes('data-amount-bound="floor"'), "no floor attribute remains");
 	assert.equal(
-		html.split('data-amount-bound="floor"').length - 1,
+		html.split('data-testid="amount-caption"').length - 1,
 		1,
-		"R40's floor claim must render at exactly one site",
+		"R40's caption must render at exactly one site",
 	);
-	const floorText = floor ?? "R40-floor-absent";
-	assert.notEqual(floorText, "R40-floor-absent", "selfDebitsOnly must produce a floor sentence");
-	assert.equal(
-		text.split(floorText).length - 1,
-		1,
-		"R40's floor sentence must appear once, not be restated elsewhere",
-	);
-	// The retired unconditional promise must not be restated — including in
-	// order to except it. Floor framing is what makes that unnecessary.
+	assert.equal(text.split(caption).length - 1, 1, "the caption must appear once");
+	assertOmits(text, "at least $", "the rejected floor wording must not reach the reader");
 	assertOmits(
 		text.replace(PROVIDER_SCOPED_CLAIM, " "),
 		"never understates",
@@ -680,41 +663,30 @@ test("R40: a selfDebitsOnly amount renders as a FLOOR on caused cost, beside the
 	);
 });
 
-test("R40 NEGATIVE GUARD — C29 indeterminate renders NO floor claim, in any form", () => {
-	// This is the guard on the whole amendment. Unknown coverage supports no
-	// bound in EITHER direction: the total may include cost the subject did not
-	// cause, so "at least $X was caused" can be flatly false.
+test("R40 NEGATIVE GUARD — C29 indeterminate still supports no bound", () => {
 	const { html, text, state } = renderFixture("posture-indeterminate.json");
 	const projection = state.envelope.receipt.event.data;
 	assert.equal(projection.delegationPosture, "indeterminate");
-	assert.equal(
-		amountFloorClaim("indeterminate", "1.0000"),
-		undefined,
-		"the claims surface must refuse a floor for indeterminate",
-	);
+	assertContains(text, AMOUNT_SCOPE_CAPTION.indeterminate, "the caption names the gap");
 	assert.ok(!html.includes('data-amount-bound="floor"'), "no floor element may render");
 	assertOmits(text, "at least $", "no floor wording may reach the reader");
-	assertOmits(text, "was CAUSED by this subject", "no caused-cost bound may be asserted");
-	assertContains(text, DELEGATION_POSTURE_SCOPE.indeterminate, "R39's copy stands alone");
+	assertContains(text, DELEGATION_POSTURE_SCOPE.indeterminate, "R39's copy stands");
 });
 
-test("R40 NEGATIVE GUARD — C28 includesSomeDelegated inherits no bound either", () => {
-	// The precondition fails for a different reason (unproven constituents), and
-	// the default is *no claim* with the bound as the named exception. A single
-	// posture escaping that default would mean the floor had been applied
-	// globally with opt-outs, which is the shape the amendment forbids.
+test("R40 NEGATIVE GUARD — C28 includesSomeDelegated does not hedge the figure", () => {
 	const { html, text, state } = renderFixture("posture-includes-some-delegated.json");
 	assert.equal(
 		state.envelope.receipt.event.data.delegationPosture,
 		"includesSomeDelegated",
 		"C28 must actually carry the posture it exists for",
 	);
+	assertContains(text, AMOUNT_SCOPE_CAPTION.includesSomeDelegated, "the caption names the gap");
 	assert.ok(!html.includes('data-amount-bound="floor"'), "no floor element may render");
 	assertOmits(text, "at least $", "no floor wording may reach the reader");
 	assertContains(
 		text,
 		DELEGATION_POSTURE_SCOPE.includesSomeDelegated,
-		"R39's incomplete-attributed-subtotal copy carries the row alone",
+		"R39's incomplete-attributed-subtotal copy still carries the row",
 	);
 });
 
