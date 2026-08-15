@@ -194,10 +194,19 @@ interface ParseSiteDisposition {
 const REGISTRY: Readonly<Record<string, ParseSiteDisposition>> = {
 	// ── Governed by the policy registry (this ship). ───────────────────────────
 	"receipt-verify.ts": {
-		// The scanner's member-name parse, `readStrictJson`'s own `JSON.parse`, and
-		// four `readStrictJson` calls (its recursive use, the receipt, the snapshot,
-		// and the snapshot's identity re-read on a numeric refusal).
-		sites: 6,
+		// The scanner's member-name parse, `readStrictJson`'s own `JSON.parse`, its
+		// SYNTAX ORACLE (below), and four `readStrictJson` calls (its recursive
+		// use, the receipt, the snapshot, and the snapshot's identity re-read on a
+		// numeric refusal).
+		//
+		// 6 → 7. The oracle parses the SAME text a second time, on the refusal path
+		// only, and DISCARDS the result: it asks one question — did these bytes
+		// form a document at all — because the scanner's left-to-right pass can
+		// refuse an illegal literal in bytes that never closed, and the answer
+		// picks FAILED (exit 1) or UNVERIFIABLE (exit 2). It reads no value, so it
+		// declares no integer and needs no policy; the policy-bearing parse of the
+		// same bytes is the `JSON.parse` on the accepting path directly below it.
+		sites: 7,
 		policy:
 			"RECEIPT_NUMERIC_POLICY — frozen WHOLE: §2 declares no fractional domain and §5 refuses " +
 			"unknown fields, so no position in a ut1 receipt could legitimately hold a fraction. " +

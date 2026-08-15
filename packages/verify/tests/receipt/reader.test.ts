@@ -17,8 +17,13 @@
  *    somewhere else, and no "reject the bad ones" suite can see it.
  */
 
-import { createHash, createPublicKey } from "node:crypto";
+import { createHash, createPublicKey, generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
+// `verifySignatureRaw` is the helper the verifier itself calls. The
+// algorithm-confusion premise below is asserted against THAT function rather
+// than a local re-implementation of it: a premise proved about a copy proves
+// nothing about the code under test.
+import { verifySignatureRaw } from "../../src/anchor-verify.js";
 import {
 	decodeCanonicalBase64,
 	decodeUtf8Strict,
@@ -30,16 +35,21 @@ import {
 	RECEIPT_NUMERIC_POLICY,
 	readReceiptDocument,
 	scanJsonForDuplicateKeys,
+	verifyReceiptBase,
 } from "../../src/receipt-verify.js";
 import { ALL_VECTORS, SNAPSHOT_VECTORS, type Vector, vector } from "./fixtures.js";
 import {
+	ALL_KEYS,
 	CHECKPOINT_KEY,
 	CHECKPOINT_KEY_SUCCESSOR,
+	checkpointPreimage,
 	FOREIGN_KEY,
+	type HarnessKey,
 	MINT_KEY,
 	MINT_KEY_SUCCESSOR,
 	mint,
 	replaceOnce,
+	type SegmentCheckpoint,
 	type TrustSnapshot,
 } from "./harness.js";
 
@@ -320,6 +330,72 @@ describe("the frozen numeric rules (§3 step 4)", () => {
 		expect(detailFor('{"spec":-0}')).toMatch(/negative zero/);
 		expect(detailFor('{"spec":1.5}')).toMatch(/non-integer/);
 		expect(detailFor('{"spec":9007199254740993}')).toMatch(/safe range/);
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WHICH refusal a numeric violation is — and it is not always the same one.
+//
+// §5's table splits on a single question: did these bytes become a document?
+// FAILED/exit 1 says "we read what it says and it is illegal"; UNVERIFIABLE/
+// exit 2 says "there was nothing to read". The scanner answers a DIFFERENT
+// question, in ONE left-to-right pass, and stops at the first violation it
+// meets — so on `{"spec":1.5,` it refuses at the literal and never learns the
+// document does not close. Classifying straight off that verdict reported
+// FAILED for bytes that are not a document at all.
+//
+// The rule itself is untouched, and the tests below are written to fail if it
+// is ever weakened to "fix" this: a WELL-FORMED document carrying the same
+// illegal literal is still FAILED, at the same detail. Only the classification
+// of truncated bytes moves.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("a numeric refusal is classified only once the bytes are known to be a document", () => {
+	const refusalFor = (json: string): { kind: string; detail: string } => {
+		const result = readReceiptDocument(Buffer.from(json, "utf8"));
+		expect(result.ok, json).toBe(false);
+		return result.ok ? { kind: "", detail: "" } : result.refusal;
+	};
+
+	it('proves the premise: the scanner really does refuse `{"spec":1.5,` as NUMERIC', () => {
+		// Without this the vector could pass for an unrelated reason — a syntax
+		// refusal that never reached the numeric branch scores identically.
+		const scan = scanJsonForDuplicateKeys('{"spec":1.5,', { policy: RECEIPT_NUMERIC_POLICY });
+		expect(scan.ok).toBe(false);
+		expect(scan.ok === false && scan.kind).toBe("numeric");
+	});
+
+	it("truncated bytes whose FIRST defect is an illegal literal are UNVERIFIABLE, not FAILED", () => {
+		expect(refusalFor('{"spec":1.5,').kind).toBe("unparseable");
+	});
+
+	it("POSITIVE CONTROL: a WELL-FORMED document with the same literal is still FAILED", () => {
+		// The rule is a policy about documents, and this is the half a weakened
+		// fix would break. Same literal, same declared position, closing brace —
+		// schema refusal, naming the rule, exactly as before.
+		const refusal = refusalFor('{"spec":1.5}');
+		expect(refusal.kind).toBe("schema");
+		expect(refusal.detail).toMatch(/non-integer/);
+	});
+
+	it("holds for every frozen numeric rule, not just the fractional one", () => {
+		for (const literal of ["1e999", "-0", "9007199254740993", "1.00000000000000001"]) {
+			expect(refusalFor(`{"spec":${literal},`).kind, literal).toBe("unparseable");
+			expect(refusalFor(`{"spec":${literal}}`).kind, literal).toBe("schema");
+		}
+	});
+
+	it("leaves the refusals that never went through the numeric branch alone", () => {
+		// Truncation with no declared literal in front of it was ALREADY
+		// unparseable, and a duplicate key in a document that closes was already
+		// unparseable too — the second is the one a "parse it and see" fix could
+		// have flipped, since `JSON.parse` accepts duplicate keys happily.
+		expect(refusalFor('{"spec":"ut1",').kind).toBe("unparseable");
+		expect(refusalFor('{"spec":"ut1","spec":"ut1"}').kind).toBe("unparseable");
+	});
+
+	it("does not touch the accepting path — a clean receipt still reads", () => {
+		expect(readReceiptDocument(mint().receiptBytes).ok).toBe(true);
 	});
 });
 
@@ -1076,5 +1152,314 @@ describe("loadTrustSnapshot — parsing and identity", () => {
 		for (const mutate of bad) {
 			expect(loadTrustSnapshot(patched(mutate)).ok).toBe(false);
 		}
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §8 — key material is Ed25519 BY TYPE, never by the label next to it.
+//
+// ALGORITHM CONFUSION. `verifyEd25519` reaches `crypto.verify(null, …)`, and
+// `null` there means "infer the algorithm from the key" — so the key material
+// decides which algorithm runs, and the snapshot's `alg` decides nothing at
+// all. A snapshot that labels an RSA key `alg: "ed25519"` therefore had its RSA
+// signatures verified, under a profile that permits Ed25519 only, and an
+// RSA-signed checkpoint could reach VERIFIED_CHECKPOINT.
+//
+// The constraint is bound at the LOADER, which is the one place every key
+// passes through, rather than at each verify site — and the type it returns is
+// what carries it, so a verify site added tomorrow inherits the check instead
+// of having to remember it. These tests grade the door, not the two rooms
+// behind it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("§8 — a snapshot key is refused on its MATERIAL, whatever its alg says", () => {
+	const patched = (fn: (s: TrustSnapshot) => void): Buffer =>
+		mint({
+			snapshot: (s) => {
+				fn(s);
+				return s;
+			},
+		}).snapshotBytes;
+
+	/**
+	 * A `HarnessKey` over material that is NOT Ed25519. Every one of these signs
+	 * through `crypto.sign(null, …)` exactly as the harness's Ed25519 keys do,
+	 * which is the whole problem: nothing about the CALL distinguishes them.
+	 */
+	function foreignMaterial(keyId: string, type: "rsa" | "ec" | "ed448"): HarnessKey {
+		const pair =
+			type === "rsa"
+				? generateKeyPairSync("rsa", { modulusLength: 2048 })
+				: type === "ec"
+					? generateKeyPairSync("ec", { namedCurve: "P-256" })
+					: generateKeyPairSync("ed448");
+		return {
+			keyId,
+			privateKey: pair.privateKey,
+			publicKey: pair.publicKey,
+			publicKeyPem: pair.publicKey.export({ type: "spki", format: "pem" }).toString(),
+			publicKeySpkiBase64: (
+				pair.publicKey.export({ type: "spki", format: "der" }) as Buffer
+			).toString("base64"),
+		};
+	}
+
+	const RSA = foreignMaterial(CHECKPOINT_KEY.keyId, "rsa");
+
+	it("proves the premise: an RSA signature VERIFIES through the Ed25519 helper", () => {
+		// The finding, reproduced against the real helper rather than argued. If
+		// this ever stops being true the vectors below become tautologies, and a
+		// tautology scores the same as a catch.
+		const preimage = "usertrust/algorithm-confusion-premise";
+		const signature = sign(null, Buffer.from(preimage, "utf8"), RSA.privateKey).toString("base64");
+		expect(verifySignatureRaw("ed25519", preimage, RSA.publicKey, signature)).toBe(true);
+		// And it is not RSA-specific: `null` infers from whatever key it is given.
+		const ed448 = foreignMaterial("utk_ed448", "ed448");
+		const sig448 = sign(null, Buffer.from(preimage, "utf8"), ed448.privateKey).toString("base64");
+		expect(verifySignatureRaw("ed25519", preimage, ed448.publicKey, sig448)).toBe(true);
+	});
+
+	it("refuses every non-Ed25519 key type at LOAD, naming the material it found", () => {
+		// Not "reject RSA": the door is the same width for every type that can
+		// sign, and a check written against the instance that revealed it would
+		// leave ECDSA and Ed448 through.
+		for (const type of ["rsa", "ec", "ed448"] as const) {
+			const key = foreignMaterial(MINT_KEY.keyId, type);
+			for (const encoding of ["pem", "spki"] as const) {
+				const load = loadTrustSnapshot(
+					patched((s) => {
+						const entry = s.keys.find((k) => k.keyId === MINT_KEY.keyId);
+						// The label stays `ed25519` — that is the attack.
+						if (entry) {
+							entry.publicKey = encoding === "pem" ? key.publicKeyPem : key.publicKeySpkiBase64;
+						}
+					}),
+				);
+				const where = `${type}/${encoding}`;
+				expect(load.ok, where).toBe(false);
+				expect(load.ok === false && load.detail, where).toContain(MINT_KEY.keyId);
+				expect(load.ok === false && load.detail, where).toContain("ut1 verifies Ed25519 only");
+				expect(load.ok === false && load.detail, where).toContain(
+					type === "ec" ? "ec material" : `${type} material`,
+				);
+			}
+		}
+	});
+
+	it("stops an RSA-signed CHECKPOINT end to end — the verdict is never reached", () => {
+		// The whole attack, minted: the checkpoint is signed with RSA and the
+		// snapshot registers the RSA public key under the checkpoint keyId, still
+		// labelled `ed25519`. The run cannot start, because the snapshot cannot
+		// load — §4 makes a key type the profile does not permit a structurally
+		// invalid SNAPSHOT (UNVERIFIABLE), not a failed verification of a good one.
+		const bundle = mint({
+			checkpointSigner: () => RSA,
+			snapshot: (s) => {
+				const entry = s.keys.find((k) => k.keyId === CHECKPOINT_KEY.keyId);
+				if (entry) entry.publicKey = RSA.publicKeyPem;
+				return s;
+			},
+		});
+		const load = loadTrustSnapshot(bundle.snapshotBytes);
+		expect(load.ok).toBe(false);
+		expect(load.ok === false && load.detail).toContain("rsa material");
+
+		// And the RSA signature it carries really would have satisfied step 6 —
+		// so the load-time refusal is what stands between it and the rung.
+		const checkpoint = (bundle.receipt.proof as { checkpoint: SegmentCheckpoint }).checkpoint;
+		const { sig, ...unsigned } = checkpoint;
+		expect(verifySignatureRaw("ed25519", checkpointPreimage(unsigned), RSA.publicKey, sig)).toBe(
+			true,
+		);
+	});
+
+	it("POSITIVE CONTROL: the real Ed25519 snapshot loads and its receipt verifies", () => {
+		// The direction a refusal-only suite cannot see. Both encodings, because
+		// the constraint sits after both arms of the parser.
+		for (const encoding of ["pem", "spki"] as const) {
+			const bundle = mint({
+				snapshot: (s) => {
+					for (const entry of s.keys) {
+						const key = ALL_KEYS.find((k) => k.keyId === entry.keyId);
+						if (key) {
+							entry.publicKey = encoding === "pem" ? key.publicKeyPem : key.publicKeySpkiBase64;
+						}
+					}
+					return s;
+				},
+			});
+			const load = loadTrustSnapshot(bundle.snapshotBytes);
+			expect(load.ok === true || (load.ok === false && load.detail), encoding).toBe(true);
+			if (!load.ok) continue;
+			const run = verifyReceiptBase({
+				receiptBytes: bundle.receiptBytes,
+				snapshot: load.snapshot,
+			});
+			expect(run.verdict, encoding).toBe("VERIFIED_CHECKPOINT");
+		}
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §8 — the pinned bytes are the KEY, and one key has one encoding.
+//
+// `createPublicKey` reads the leading SPKI value out of a DER buffer and
+// ignores everything after it, so `valid-SPKI-DER ‖ junk` loads as the same key
+// the clean bytes do. Two distinct byte strings then name one key: this
+// verifier accepts a snapshot that a strict DER verifier refuses outright, and
+// the two disagree about the same pinned material — which is exactly the
+// independent-verifiability property §8 exists to provide.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("§8 — a publicKey must SPAN the bytes it was decoded from", () => {
+	const patched = (fn: (s: TrustSnapshot) => void): Buffer =>
+		mint({
+			snapshot: (s) => {
+				fn(s);
+				return s;
+			},
+		}).snapshotBytes;
+
+	const CLEAN = MINT_KEY.publicKeySpkiBase64;
+	/** Canonical base64 of `SPKI DER ‖ n junk bytes`. */
+	const withSuffix = (n: number): string =>
+		Buffer.concat([Buffer.from(CLEAN, "base64"), Buffer.alloc(n, 0x2a)]).toString("base64");
+
+	const loadWith = (publicKey: string): ReturnType<typeof loadTrustSnapshot> =>
+		loadTrustSnapshot(
+			patched((s) => {
+				const entry = s.keys.find((k) => k.keyId === MINT_KEY.keyId);
+				if (entry) entry.publicKey = publicKey;
+			}),
+		);
+
+	it("proves the premise: Node loads the suffixed bytes AS THE CLEAN KEY", () => {
+		// Without this the vector proves nothing — a suffix Node already rejected
+		// would be refused here for a reason that has nothing to do with the fix.
+		const suffixed = createPublicKey({
+			key: Buffer.from(withSuffix(4), "base64"),
+			format: "der",
+			type: "spki",
+		});
+		expect(suffixed.export({ type: "spki", format: "der" })).toEqual(
+			createPublicKey(MINT_KEY.publicKeyPem).export({ type: "spki", format: "der" }),
+		);
+		// The two encodings really are different bytes — the ONLY thing that makes
+		// this an interop split rather than a re-spelling.
+		expect(withSuffix(4)).not.toBe(CLEAN);
+	});
+
+	it("refuses trailing bytes, and says how many ran past the value", () => {
+		for (const n of [1, 4, 64]) {
+			const load = loadWith(withSuffix(n));
+			expect(load.ok, `+${n}`).toBe(false);
+			expect(load.ok === false && load.detail, `+${n}`).toContain(
+				`carries ${n} byte(s) past the end of its SPKI DER value`,
+			);
+		}
+	});
+
+	it("the two byte strings do NOT both load — exactly one is the key", () => {
+		expect(loadWith(CLEAN).ok).toBe(true);
+		expect(loadWith(withSuffix(4)).ok).toBe(false);
+	});
+
+	it("POSITIVE CONTROL: the same key WITHOUT the suffix still verifies its receipt", () => {
+		const bundle = mint({
+			snapshot: (s) => {
+				const entry = s.keys.find((k) => k.keyId === MINT_KEY.keyId);
+				if (entry) entry.publicKey = CLEAN;
+				return s;
+			},
+		});
+		const load = loadTrustSnapshot(bundle.snapshotBytes);
+		expect(load.ok === true || (load.ok === false && load.detail)).toBe(true);
+		if (!load.ok) return;
+		expect(
+			verifyReceiptBase({ receiptBytes: bundle.receiptBytes, snapshot: load.snapshot }).verdict,
+		).toBe("VERIFIED_CHECKPOINT");
+	});
+
+	it("refuses the non-minimal DER spellings that would be a SECOND encoding", () => {
+		// A long-form length carrying what the short form could have said, and a
+		// leading zero length byte, are both a second way to write one key —
+		// the same defect as a suffix, wearing a hat.
+		const der = Buffer.from(CLEAN, "base64");
+		const body = der.subarray(2);
+		const longForm = Buffer.concat([Buffer.from([0x30, 0x81, body.length]), body]);
+		const leadingZero = Buffer.concat([Buffer.from([0x30, 0x82, 0x00, body.length]), body]);
+		for (const [name, bytes] of [
+			["long form for a short length", longForm],
+			["leading zero in the length", leadingZero],
+		] as const) {
+			const load = loadWith(bytes.toString("base64"));
+			expect(load.ok, name).toBe(false);
+			expect(load.ok === false && load.detail, name).toContain("does not decode to one DER value");
+		}
+	});
+
+	it("refuses every malformed DER HEADER, rather than trusting the length it reads", () => {
+		// The fail-closed arms of the length reader, each with a vector: a reader
+		// that trusted the header would compute a span from bytes that do not
+		// describe one, and a span computed from junk compares equal to the
+		// buffer length as easily as not.
+		const body = Buffer.from(CLEAN, "base64").subarray(2);
+		for (const [name, bytes] of [
+			["shorter than a header", Buffer.from([0x30])],
+			["not a SEQUENCE", Buffer.from([0x02, 0x01, 0x00])],
+			["BER's indefinite length", Buffer.concat([Buffer.from([0x30, 0x80]), body])],
+			["a length longer than any key", Buffer.concat([Buffer.from([0x30, 0x85]), body])],
+			["a length field truncated away", Buffer.from([0x30, 0x84, 0x00])],
+		] as const) {
+			const load = loadWith(bytes.toString("base64"));
+			expect(load.ok, name).toBe(false);
+			expect(load.ok === false && load.detail, name).toContain("does not decode to one DER value");
+		}
+		// And a well-formed SEQUENCE that spans its buffer but is not a key still
+		// reaches the parser and is refused there — the length gate is not a
+		// substitute for parsing.
+		const notAKey = loadWith(Buffer.from([0x30, 0x03, 0x02, 0x01, 0x00]).toString("base64"));
+		expect(notAKey.ok).toBe(false);
+		expect(notAKey.ok === false && notAKey.detail).toContain("does not parse");
+	});
+
+	it("refuses a PEM block that is not a PUBLIC KEY block", () => {
+		const load = loadWith(`-----BEGIN CERTIFICATE-----\n${CLEAN}\n-----END CERTIFICATE-----\n`);
+		expect(load.ok).toBe(false);
+		expect(load.ok === false && load.detail).toContain("is not a PEM SPKI block");
+	});
+
+	it("refuses the SAME suffix inside a PEM block — both arms, one rule", () => {
+		// This arm was nearly shipped unchecked on the strength of a probe that
+		// said Node refused it. Node does not: it accepts the suffix wrapped and
+		// unwrapped alike, and returns the clean key. Both spellings are asserted
+		// here because a rule that holds for one line-wrapping is not a rule.
+		const wrapped = (withSuffix(4).match(/.{1,64}/g) ?? []).join("\n");
+		for (const [name, body] of [
+			["one line", withSuffix(4)],
+			["wrapped at 64", wrapped],
+		] as const) {
+			const pem = `-----BEGIN PUBLIC KEY-----\n${body}\n-----END PUBLIC KEY-----\n`;
+			// The premise, per spelling: Node really does take these bytes.
+			expect(createPublicKey(pem).export({ type: "spki", format: "der" }), name).toEqual(
+				createPublicKey(MINT_KEY.publicKeyPem).export({ type: "spki", format: "der" }),
+			);
+			const load = loadWith(pem);
+			expect(load.ok, name).toBe(false);
+			expect(load.ok === false && load.detail, name).toContain(
+				"carries 4 byte(s) past the end of its SPKI DER value",
+			);
+		}
+	});
+
+	it("POSITIVE CONTROL: the ordinary PEM every snapshot carries still loads", () => {
+		// The default corpus snapshot is PEM-encoded, so this is also asserted by
+		// every other test in the package — stated here because the PEM arm just
+		// gained a parser of its own, and a too-strict envelope regex would refuse
+		// every conformant snapshot in existence.
+		expect(loadWith(MINT_KEY.publicKeyPem).ok).toBe(true);
+		expect(loadTrustSnapshot(mint().snapshotBytes).ok).toBe(true);
+		// Line endings are the encoding's business, not the value's.
+		expect(loadWith(MINT_KEY.publicKeyPem.replace(/\n/g, "\r\n")).ok).toBe(true);
 	});
 });

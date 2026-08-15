@@ -47,6 +47,7 @@ import {
 	type Projection,
 	SHORT_DECODE_RECEIPT_ID,
 	type UnsignedReceipt,
+	VAULT_ID,
 } from "./harness.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -428,6 +429,83 @@ describe("failure-code precedence (CLI spec §5)", () => {
 		for (const step of ["signature", "inclusion", "checkpoint", "semantics", "derivations"]) {
 			expect(actual.steps[step as "signature"].result, step).toBe("unavailable");
 		}
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Step 2's ORDER — the receipt's own bytes are judged before external material.
+//
+// `proof.chain` is carried by the RECEIPT, and resolving it against the
+// snapshot was the first thing step 2 did. So a receipt with a forged
+// `event.hash` — which recomputes from its own embedded envelope and needs no
+// snapshot at all — could be turned from "we checked and this is bad" (exit 1)
+// into "we could not check" (exit 2) by ALSO renaming its chain to something
+// unregistered. A definite integrity failure, masked by one extra edit, into
+// the exit code a CI gate is likeliest to tolerate.
+//
+// Every case below is minted with the SAME two hooks so the pair is a matrix
+// and not two anecdotes: hash stale or intact × chain registered or not.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("step 2 — an unresolvable chain never masks an event-integrity failure", () => {
+	const UNREGISTERED = "vlt_not_in_this_snapshot";
+
+	/**
+	 * `staleHash` edits a field AFTER the envelope is hashed, so `hash` stays
+	 * self-consistent with the proof and wrong for the envelope — the recompute
+	 * is the only check that can see it. `chain` is edited BEFORE signing so the
+	 * receipt stays properly signed and the mutant breaks exactly the facts it
+	 * names, with no second defect for a verdict to be blamed on.
+	 */
+	function runWith(options: { staleHash: boolean; chain: string }): Run {
+		return verifyMinted({
+			...(options.staleHash
+				? { eventAfterHash: (e) => ({ ...e, timestamp: "2026-08-11T18:42:14.007Z" }) }
+				: {}),
+			receiptBeforeSign: (r) => ({ ...r, proof: { ...r.proof, chain: options.chain } }),
+		});
+	}
+
+	it("ATTACK: a stale event.hash plus an unknown chain reports the INTEGRITY failure", () => {
+		const actual = runWith({ staleHash: true, chain: UNREGISTERED });
+		expect(actual.verdict).toBe("FAILED");
+		expect(actual.failure).toMatchObject({ step: "event", code: "EVENT_MISMATCH" });
+		// By REASON, not merely by redness: the recomputation is what refused,
+		// and a run that failed for some other reason would score identically.
+		expect(actual.failure?.detail).toMatch(/does not recompute/);
+		expect(actual.missing).toBeNull();
+	});
+
+	it("CONTROL: the same stale hash under the REGISTERED chain fails identically", () => {
+		// The chain edit must change nothing at all — if the two verdicts differ,
+		// the ordering is still leaking snapshot state into an integrity answer.
+		const masked = runWith({ staleHash: true, chain: UNREGISTERED });
+		const plain = runWith({ staleHash: true, chain: VAULT_ID });
+		expect(plain.failure).toMatchObject({ step: "event", code: "EVENT_MISMATCH" });
+		expect(plain.failure?.detail).toBe(masked.failure?.detail);
+	});
+
+	it("CONTROL: an unknown chain with an INTACT hash is still UNVERIFIABLE", () => {
+		// The other direction, and the one a fix that simply deleted the lookup
+		// would break: nothing about a genuinely unresolvable chain became a
+		// FAILED verdict. §7 keeps it as missing trust material.
+		const actual = runWith({ staleHash: false, chain: UNREGISTERED });
+		expect(actual.verdict).toBe("UNVERIFIABLE");
+		expect(actual.missing?.what).toBe("trustKey");
+		expect(actual.missing?.detail).toContain(UNREGISTERED);
+		expect(actual.failure).toBeNull();
+	});
+
+	it("CONTROL: the corpus vector that reaches it from the SNAPSHOT side is unmoved", () => {
+		// Same condition, produced by de-registering the chain rather than by
+		// renaming it in the receipt.
+		const actual = run(vector("snapshot/chain-not-registered"));
+		expect(actual.verdict).toBe("UNVERIFIABLE");
+		expect(actual.missing?.what).toBe("trustKey");
+	});
+
+	it("CONTROL: intact hash, registered chain — still VERIFIED_CHECKPOINT", () => {
+		expect(runWith({ staleHash: false, chain: VAULT_ID }).verdict).toBe("VERIFIED_CHECKPOINT");
 	});
 });
 

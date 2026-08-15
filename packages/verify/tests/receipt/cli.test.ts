@@ -380,6 +380,57 @@ describe("exit codes", () => {
 	});
 
 	/**
+	 * The 1-vs-2 line, on the two conditions where it was decided by something
+	 * other than the question §5's table asks. Both are graded at the EXIT CODE
+	 * here rather than at the refusal class, because the exit code is the CI
+	 * contract and it is what an operator's pipeline branches on.
+	 */
+	it("2 vs 1: truncated bytes are UNVERIFIABLE; the same literal in a CLOSED document is FAILED", () => {
+		const bundle = mint();
+		const codeFor = (json: string): number =>
+			runReceiptCli(
+				["receipt.json", "--trust", "trust.json"],
+				ioFor(bundle, { "receipt.json": Buffer.from(json, "utf8") }),
+			).exitCode;
+		// `{"spec":1.5,` never became a document — the illegal literal is simply
+		// the first thing the one-pass scanner met on the way to bytes that do
+		// not close.
+		expect(codeFor('{"spec":1.5,')).toBe(2);
+		// POSITIVE CONTROL, and the assertion that stops this being "fixed" by
+		// softening the numeric rule: close the brace and the SAME literal is a
+		// document saying something illegal — FAILED, exit 1.
+		expect(codeFor('{"spec":1.5}')).toBe(1);
+	});
+
+	it("1: a forged event.hash stays FAILED even when the receipt also renames its chain", () => {
+		// Renaming `proof.chain` is an edit the receipt carries, and it used to
+		// buy exit 2 — "we could not check" — for a receipt whose own bytes
+		// already proved the event hash was forged.
+		const masked = mint({
+			eventAfterHash: (e) => ({ ...e, timestamp: "2026-08-11T18:42:14.007Z" }),
+			receiptBeforeSign: (r) => ({
+				...r,
+				proof: { ...r.proof, chain: "vlt_not_in_this_snapshot" },
+			}),
+		});
+		const result = runReceiptCli(["receipt.json", "--trust", "trust.json"], ioFor(masked));
+		expect(result.exitCode).toBe(1);
+		expect(result.stdout).toContain("Verdict: FAILED");
+		expect(result.stdout).toContain("EVENT_MISMATCH");
+
+		// CONTROL: an unresolvable chain over an INTACT receipt is still exit 2.
+		const honest = mint({
+			receiptBeforeSign: (r) => ({
+				...r,
+				proof: { ...r.proof, chain: "vlt_not_in_this_snapshot" },
+			}),
+		});
+		const unresolvable = runReceiptCli(["receipt.json", "--trust", "trust.json"], ioFor(honest));
+		expect(unresolvable.exitCode).toBe(2);
+		expect(unresolvable.stdout).toContain("Verdict: UNVERIFIABLE");
+	});
+
+	/**
 	 * The whole point of the `genesisChoice` rule, stated where an operator sees
 	 * it: a snapshot that does not carry §8's RULED `newVault` must never buy a
 	 * history verdict. §7's walk roots the served history at the registered

@@ -1536,7 +1536,26 @@ export function readStrictJson(
 
 	const scan = scanJsonForDuplicateKeys(text, options);
 	if (!scan.ok) {
-		return scan.kind === "numeric" ? schemaRefusal(scan.detail) : unparseable(scan.detail);
+		if (scan.kind !== "numeric") return unparseable(scan.detail);
+		// A numeric refusal is a statement ABOUT A DOCUMENT: FAILED/exit 1 says
+		// "we read what these bytes say, and what they say is illegal". The
+		// scanner reaches the illegal literal in ONE left-to-right pass, so it can
+		// reach it in bytes that never became a document at all — `{"spec":1.5,`
+		// refuses at the literal and never learns the rest is missing. Classifying
+		// straight off that verdict reports FAILED for truncated bytes, where §5's
+		// table says unreadable material is UNVERIFIABLE/exit 2.
+		//
+		// So SYNTAX is settled first, and by the parser that would have produced
+		// the value on the accepting path rather than by a second opinion: it
+		// parses ⇒ the bytes ARE a document and the numeric refusal stands, in
+		// full; it does not ⇒ they never were one. The rule itself is untouched —
+		// this decides which of two true things to report, not whether to report.
+		try {
+			JSON.parse(text);
+		} catch (error) {
+			return unparseable(`JSON parse failed: ${(error as Error).message}`);
+		}
+		return schemaRefusal(scan.detail);
 	}
 
 	let parsed: JsonValue;
@@ -1615,7 +1634,12 @@ export interface TrustKey {
 	 * is explicitly ignored, and no verifier may derive anything from it.
 	 */
 	readonly activationSequence?: number;
-	readonly publicKey: KeyObject;
+	/**
+	 * Ed25519 BY TYPE, not by the entry's `alg` label. Only the loader's
+	 * `parseTrustPublicKey` produces one, so a step that reaches a key through
+	 * this member has the material constraint already applied to it.
+	 */
+	readonly publicKey: Ed25519PublicKey;
 	/** `sha256:…` over the SPKI DER — the identity used to spot shared material. */
 	readonly materialId: string;
 }
@@ -1680,16 +1704,127 @@ function safeNonNegativeInteger(value: JsonValue | undefined): number | null {
 }
 
 /**
- * §4's last structural rule. Encoding follows the in-repo convention
- * `anchor-verify.ts` already implements — PEM, or base64 SPKI DER — and the
- * parser is REUSED rather than reinvented. Canonical base64 is validated before
- * the reused helper sees the string, because `Buffer.from(x, "base64")` accepts
- * junk that decodes to the same bytes.
+ * A `KeyObject` whose MATERIAL has been checked to be Ed25519.
+ *
+ * The brand is the point. `verifyEd25519` calls `crypto.verify(null, …)`, and
+ * `null` there means "infer the algorithm from the key" — so an RSA, ECDSA or
+ * Ed448 key reaching that call verifies RSA, ECDSA or Ed448 signatures happily,
+ * whatever the document CALLED the key. That is algorithm confusion: the
+ * declared `alg` is trusted and the material is not constrained. A `KeyObject`
+ * parameter cannot express the difference, so every future verify site would
+ * have to remember the check — N copies of one fact, and a new site gets it
+ * wrong by default. Only `parseTrustPublicKey` mints this type, so the
+ * constraint is INHERITED instead: a site that has one of these has already had
+ * its material checked, and a site holding a bare `KeyObject` does not compile.
  */
-function parseTrustPublicKey(encoded: string): KeyObject | null {
-	if (encoded.startsWith("-----BEGIN ")) return publicKeyFromPem(encoded);
-	if (!isCanonicalBase64(encoded)) return null;
-	return publicKeyFromSpkiBase64(encoded);
+declare const ED25519_MATERIAL: unique symbol;
+export type Ed25519PublicKey = KeyObject & { readonly [ED25519_MATERIAL]: true };
+
+export type TrustKeyMaterial =
+	| { readonly ok: true; readonly key: Ed25519PublicKey }
+	/** Reads as the tail of "key <id> has a publicKey that …". */
+	| { readonly ok: false; readonly reason: string };
+
+/**
+ * The length of the ONE DER value starting at byte 0, or `null` when the header
+ * is not one — a truncated length, BER's indefinite form, or a non-minimal
+ * length DER forbids.
+ *
+ * `createPublicKey` reads the leading SPKI value and IGNORES whatever follows
+ * it, so `valid-SPKI-DER || extra bytes` loads as the same key the clean bytes
+ * do. Two distinct byte strings then name one key: the snapshot verifies
+ * receipts under material a strict DER verifier refuses outright, and the two
+ * verifiers disagree about the same pinned bytes. §8 pins KEY MATERIAL, so the
+ * encoding has to span the bytes it was decoded from.
+ */
+function derValueLength(der: Uint8Array): number | null {
+	// SubjectPublicKeyInfo is a SEQUENCE; nothing else is a key here.
+	if (der.length < 2 || der[0] !== 0x30) return null;
+	const lengthByte = der[1] as number;
+	if (lengthByte < 0x80) return 2 + lengthByte;
+	const count = lengthByte & 0x7f;
+	// 0 is BER's indefinite form, which DER forbids; >4 is longer than any key.
+	if (count === 0 || count > 4 || der.length < 2 + count) return null;
+	let contentLength = 0;
+	for (let i = 0; i < count; i += 1) contentLength = contentLength * 256 + (der[2 + i] as number);
+	// DER's minimal-length rule, both halves: no leading zero byte, and no long
+	// form carrying a length the short form could have. Either spelling would be
+	// a second encoding of one key, which is the defect above wearing a hat.
+	if (der[2] === 0 || contentLength < 0x80) return null;
+	return 2 + count + contentLength;
+}
+
+/**
+ * The DER inside a PEM SPKI block, or `null` when the string is not one.
+ *
+ * The PEM arm carries the SAME suffix defect as the base64 arm — Node accepts
+ * `-----BEGIN PUBLIC KEY-----` around `valid-SPKI-DER ‖ junk`, wrapped or not,
+ * and hands back the clean key. It was verified BY TEST that it does, after a
+ * first probe wrongly said Node refused it (the probe's line-wrapper had
+ * emitted a blank line, and the decoder was refusing THAT). So the bytes both
+ * arms will be judged on are recovered here and both go through one gate,
+ * rather than the base64 arm carrying a check the PEM arm is trusted to not
+ * need.
+ */
+const PEM_PUBLIC_KEY = /^-----BEGIN PUBLIC KEY-----([A-Za-z0-9+/=\s]*)-----END PUBLIC KEY-----\s*$/;
+
+function spkiDerFromPem(pem: string): Buffer | null {
+	const match = PEM_PUBLIC_KEY.exec(pem);
+	if (match === null) return null;
+	// Line breaks are the encoding's, not the value's; what remains must still be
+	// canonical base64, for the reason the other arm checks it.
+	return decodeCanonicalBase64((match[1] as string).replace(/\s+/g, ""));
+}
+
+/**
+ * §4's last structural rule, and the ONE place a snapshot's key material
+ * becomes usable. Encoding follows the in-repo convention `anchor-verify.ts`
+ * already implements — PEM, or base64 SPKI DER — and the parser is REUSED
+ * rather than reinvented. Canonical base64 is validated before the reused
+ * helper sees the string, because `Buffer.from(x, "base64")` accepts junk that
+ * decodes to the same bytes.
+ *
+ * Both remaining rules are bound HERE rather than at the verify sites, because
+ * this is the choke point every key passes through exactly once:
+ *
+ *  - the DER value must SPAN the bytes it was decoded from, on EITHER
+ *    encoding; and
+ *  - the material must actually be Ed25519. ut1 permits nothing else — §5 pins
+ *    the receipt signature's `alg` to the literal `ed25519` and §4a's
+ *    checkpoint statements are signed the same way — and the label on the
+ *    snapshot entry is a claim by the same document that supplies the key.
+ *
+ * The type check runs after BOTH arms for the same reason the length check
+ * does: an arm-specific rule is a rule the other arm can be missing.
+ */
+function parseTrustPublicKey(encoded: string): TrustKeyMaterial {
+	const isPem = encoded.startsWith("-----BEGIN ");
+	const der = isPem ? spkiDerFromPem(encoded) : decodeCanonicalBase64(encoded);
+	if (der === null) {
+		return {
+			ok: false,
+			reason: isPem
+				? "is not a PEM SPKI block whose body is canonical base64"
+				: "is not canonical base64",
+		};
+	}
+	const spanned = derValueLength(der);
+	if (spanned === null) return { ok: false, reason: "does not decode to one DER value" };
+	if (spanned !== der.length) {
+		return {
+			ok: false,
+			reason: `carries ${der.length - spanned} byte(s) past the end of its SPKI DER value`,
+		};
+	}
+	const key = isPem ? publicKeyFromPem(encoded) : publicKeyFromSpkiBase64(encoded);
+	if (key === null) return { ok: false, reason: "does not parse" };
+	if (key.asymmetricKeyType !== "ed25519") {
+		return {
+			ok: false,
+			reason: `is ${String(key.asymmetricKeyType)} material, and ut1 verifies Ed25519 only`,
+		};
+	}
+	return { ok: true, key: key as Ed25519PublicKey };
 }
 
 function materialIdOf(key: KeyObject): string {
@@ -1831,8 +1966,13 @@ export function loadTrustSnapshot(bytes: Uint8Array): TrustSnapshotLoad {
 
 		const encoded = nonEmptyString(entry.publicKey);
 		if (encoded === null) return fail(`key ${keyId} has no publicKey`);
-		const publicKey = parseTrustPublicKey(encoded);
-		if (publicKey === null) return fail(`key ${keyId} has a publicKey that does not parse`);
+		// A key type §8's ut1 profile does not permit makes the SNAPSHOT
+		// malformed, not the receipt wrong — so it refuses here, with every other
+		// structural violation, as UNVERIFIABLE. `fail` carries the reason, which
+		// is the difference between "this snapshot is unusable" and knowing why.
+		const material = parseTrustPublicKey(encoded);
+		if (!material.ok) return fail(`key ${keyId} has a publicKey that ${material.reason}`);
+		const publicKey = material.key;
 
 		if (entry.minterKind !== undefined && typeof entry.minterKind !== "string") {
 			return fail(`key ${keyId} has a non-string minterKind`);
@@ -2649,8 +2789,17 @@ function arrayAt(object: JsonObject, key: string): JsonValue[] | null {
 	return Array.isArray(value) ? value : null;
 }
 
-/** Canonical base64 FIRST, then the reused Ed25519 helper (CLI spec §4). */
-function verifyEd25519(preimage: string, key: KeyObject, sigBase64: string): boolean {
+/**
+ * Canonical base64 FIRST, then the reused Ed25519 helper (CLI spec §4).
+ *
+ * `key` is an `Ed25519PublicKey` and NOT a `KeyObject`, because the helper
+ * underneath passes `null` as the algorithm — "infer it from the key". A key of
+ * any other type would verify signatures of that other type here, so what
+ * constrains this call is the material, and the material is constrained at the
+ * loader. The type is how that constraint reaches this line: a caller holding
+ * an unchecked `KeyObject` cannot call this function at all.
+ */
+function verifyEd25519(preimage: string, key: Ed25519PublicKey, sigBase64: string): boolean {
 	if (!isCanonicalBase64(sigBase64)) return false;
 	return verifySignatureRaw("ed25519", preimage, key, sigBase64);
 }
@@ -3393,15 +3542,7 @@ class BaseRun {
 		const { document, event, projection, proof, inclusion, checkpoint } = this.receipt;
 		const mismatch = (detail: string): Resolution => failure("EVENT_MISMATCH", detail);
 
-		// The chain must resolve before equality 2 or 8 can be evaluated at all —
-		// both read the REGISTERED form. An unregistered `proof.chain` is
-		// unresolvable trust material, not a mismatch.
 		const chainId = stringAt(proof, "chain") as string;
-		const chain = this.input.snapshot.chains.get(chainId);
-		if (chain === undefined) {
-			return missingMaterial("trustKey", `chain ${chainId} is not registered in the snapshot`);
-		}
-		this.chain = chain;
 
 		const eventHash = stringAt(event, "hash") as string;
 		if (canonicalHash(canonicalizeWithout(event, "hash")) !== eventHash) {
@@ -3439,6 +3580,30 @@ class BaseRun {
 				"equality 2: event.actor is not §4a's fixed proxy-v1 system actor, whatever the chain registers",
 			);
 		}
+		// THE CHAIN RESOLVES HERE, at the first comparison that actually needs the
+		// registered form — not at the top of the step.
+		//
+		// Resolving it first made an UNVERIFIABLE verdict reachable by editing the
+		// receipt: `proof.chain` is receipt-carried, so renaming it to something
+		// the snapshot does not register returned exit 2 ("we could not check")
+		// BEFORE the recomputation above, which needs no snapshot at all and had
+		// already found the event hash forged. A definite integrity failure was
+		// convertible into "we do not know" by one unsigned-looking edit — and
+		// exit 2 is the code a CI gate is likeliest to tolerate.
+		//
+		// The ordering rule this follows: every check that stands on the receipt's
+		// OWN bytes runs before any check that needs external material, so
+		// unresolvable trust material can only ever mask another unresolvable, and
+		// never a proof of forgery. `missingMaterial` still describes the snapshot
+		// accurately for a receipt whose own bytes are intact — that case is
+		// unchanged, and is the control the corpus keeps
+		// (`snapshot/chain-not-registered`).
+		const chain = this.input.snapshot.chains.get(chainId);
+		if (chain === undefined) {
+			return missingMaterial("trustKey", `chain ${chainId} is not registered in the snapshot`);
+		}
+		this.chain = chain;
+
 		// Then the agreement, unchanged — canonical BYTES against the registered
 		// form, not field plucking (§4a is explicit that this is one comparison).
 		// It is a SECOND fence now rather than the only one: a chain registering
