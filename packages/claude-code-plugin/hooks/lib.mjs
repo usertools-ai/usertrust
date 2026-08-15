@@ -40,6 +40,14 @@ export function estimateTokens(text) {
 	return Math.max(1, Math.ceil(text.length / 4));
 }
 
+/** Shared 16 KiB content cap: tool_input is truncated here, and the output hold is sized to the same bound. */
+export const MAX_CONTENT_CHARS = 16 * 1024;
+
+// Conservative output hold: same 16 KiB cap as input, via estimateTokens, so a
+// settle of (input + output) at the cap cannot price above the reservation
+// (AUD-004). Leaving this at 1 under-debited the wallet on every large result.
+export const MAX_OUTPUT_TOKENS = estimateTokens("x".repeat(MAX_CONTENT_CHARS));
+
 function stateDir() {
 	return process.env.UT_CC_STATE_DIR ?? join(tmpdir(), "usertrust-cc");
 }
@@ -72,6 +80,12 @@ export async function recordPending(sessionId, agentId, entry) {
 			toolUseId: entry.toolUseId ?? null,
 			transferId: entry.transferId,
 			agentId: String(agentId ?? "main"),
+			// Persist the authorize-time input estimate so settle can price both
+			// legs. Without it, post-tool-use sent only outputTokens and a large
+			// result priced above the 1-token hold (AUD-004).
+			...(typeof entry.estimatedInputTokens === "number"
+				? { estimatedInputTokens: entry.estimatedInputTokens }
+				: {}),
 		}),
 	);
 	await rename(tmp, path);
@@ -109,6 +123,9 @@ export async function listPending(sessionId, agentId) {
 				agentId: entryAgent,
 				toolUseId: parsed.toolUseId ?? null,
 				transferId: parsed.transferId,
+				...(typeof parsed.estimatedInputTokens === "number"
+					? { estimatedInputTokens: parsed.estimatedInputTokens }
+					: {}),
 				mtimeMs,
 			});
 		} catch {
@@ -120,16 +137,17 @@ export async function listPending(sessionId, agentId) {
 }
 
 /**
- * Find the pending hold for a tool call within one agent's holds: match by
- * toolUseId, else the oldest entry. Does NOT delete — the caller clears the
- * file only after a successful settle (clearPending), so a failed settle leaves
- * the hold for Stop cleanup.
+ * Find the pending hold for a tool call within one agent's holds. A non-empty
+ * toolUseId matches that row or returns null — it must NOT fall through to
+ * another tool's reservation (AUD-005). The oldest-entry fallback is only for
+ * hosts that omit tool_use_id (missing/null/empty). Does NOT delete — the
+ * caller clears the file only after a successful settle (clearPending), so a
+ * failed settle leaves the hold for Stop cleanup.
  */
 export async function takePendingEntry(sessionId, agentId, toolUseId) {
 	const entries = await listPending(sessionId, agentId);
-	if (toolUseId) {
-		const match = entries.find((entry) => entry.toolUseId === toolUseId);
-		if (match) return match;
+	if (typeof toolUseId === "string" && toolUseId !== "") {
+		return entries.find((entry) => entry.toolUseId === toolUseId) ?? null;
 	}
 	return entries[0] ?? null;
 }

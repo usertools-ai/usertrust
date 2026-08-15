@@ -65,7 +65,7 @@ describe("pending state store (one file per hold)", () => {
 		]);
 	});
 
-	it("takePendingEntry matches by toolUseId within the agent, falls back to oldest, never deletes", async () => {
+	it("takePendingEntry matches by toolUseId within the agent and never deletes", async () => {
 		const { listPending, recordPending, takePendingEntry } = await import("../hooks/lib.mjs");
 		await recordPending("s", "main", { toolUseId: "a", transferId: "tx_a" });
 		await new Promise((resolve) => setTimeout(resolve, 20));
@@ -73,9 +73,38 @@ describe("pending state store (one file per hold)", () => {
 		expect((await takePendingEntry("s", "main", "b"))?.transferId).toBe("tx_b");
 		// Deletion happens only after a successful settle (clearPending), never on take.
 		expect(await listPending("s", "main")).toHaveLength(2);
-		expect((await takePendingEntry("s", "main", "zzz"))?.transferId).toBe("tx_a");
-		expect(await takePendingEntry("s", "main", null)).not.toBeNull();
 		expect(await takePendingEntry("empty-session", "main", null)).toBeNull();
+	});
+
+	it("unmatched non-empty toolUseId returns null and does not steal the oldest hold", async () => {
+		const { recordPending, takePendingEntry } = await import("../hooks/lib.mjs");
+		await recordPending("s", "main", { toolUseId: "a", transferId: "tx_a" });
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		await recordPending("s", "main", { toolUseId: "b", transferId: "tx_b" });
+		// A stale or concurrent-tool id must not settle someone else's reservation (AUD-005).
+		expect(await takePendingEntry("s", "main", "zzz")).toBeNull();
+	});
+
+	it("missing or empty toolUseId still returns the oldest entry", async () => {
+		const { recordPending, takePendingEntry } = await import("../hooks/lib.mjs");
+		await recordPending("s", "main", { toolUseId: "a", transferId: "tx_a" });
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		await recordPending("s", "main", { toolUseId: "b", transferId: "tx_b" });
+		// Hosts that never send tool_use_id keep the oldest-entry fallback.
+		expect((await takePendingEntry("s", "main", null))?.transferId).toBe("tx_a");
+		expect((await takePendingEntry("s", "main", undefined))?.transferId).toBe("tx_a");
+		expect((await takePendingEntry("s", "main", ""))?.transferId).toBe("tx_a");
+	});
+
+	it("persists the authorize-time input estimate so settle can price both legs", async () => {
+		const { listPending, recordPending, takePendingEntry } = await import("../hooks/lib.mjs");
+		await recordPending("s", "main", {
+			toolUseId: "a",
+			transferId: "tx_a",
+			estimatedInputTokens: 12,
+		});
+		expect((await listPending("s", "main"))[0]?.estimatedInputTokens).toBe(12);
+		expect((await takePendingEntry("s", "main", "a"))?.estimatedInputTokens).toBe(12);
 	});
 
 	it("takePendingEntry never crosses agents: an agent's toolUseId cannot match a sibling's hold", async () => {
@@ -120,6 +149,15 @@ describe("estimateTokens", () => {
 		const { estimateTokens } = await import("../hooks/lib.mjs");
 		expect(estimateTokens("")).toBe(1);
 		expect(estimateTokens("abcdefgh")).toBe(2);
+	});
+
+	it("sizes the 16 KiB output hold via the same estimator as input", async () => {
+		const { MAX_CONTENT_CHARS, MAX_OUTPUT_TOKENS, estimateTokens } = await import(
+			"../hooks/lib.mjs"
+		);
+		expect(MAX_CONTENT_CHARS).toBe(16 * 1024);
+		expect(MAX_OUTPUT_TOKENS).toBe(estimateTokens("x".repeat(MAX_CONTENT_CHARS)));
+		expect(MAX_OUTPUT_TOKENS).toBe(4096);
 	});
 });
 

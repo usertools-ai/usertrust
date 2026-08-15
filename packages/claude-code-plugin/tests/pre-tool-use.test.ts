@@ -80,8 +80,15 @@ describe("pre-tool-use hook", () => {
 			toolUseId: string;
 			transferId: string;
 			agentId: string;
+			estimatedInputTokens: number;
 		};
-		expect(entry).toEqual({ toolUseId: "tu_1", transferId: "tx_1", agentId: "main" });
+		// JSON.stringify({command:"ls"}) is 16 chars -> 4 estimated tokens.
+		expect(entry).toEqual({
+			toolUseId: "tu_1",
+			transferId: "tx_1",
+			agentId: "main",
+			estimatedInputTokens: 4,
+		});
 	});
 
 	it("records a subagent's reservation under its own agent_id bucket", async () => {
@@ -219,10 +226,37 @@ describe("pre-tool-use hook", () => {
 		expect(result.code).toBe(0);
 		const body = requests[0] as {
 			estimatedInputTokens: number;
+			maxOutputTokens: number;
 			messages: Array<{ content: string }>;
 		};
 		expect(body.messages[0]?.content.length).toBe(16_384);
 		expect(body.estimatedInputTokens).toBe(4096);
+		// Output hold is the same 16 KiB cap (4096 tokens), not 1 (AUD-004).
+		expect(body.maxOutputTokens).toBe(4096);
+	});
+
+	it("sizes the authorize hold on both legs so a content-cap settle cannot shortfall", async () => {
+		const { estimateTokens, MAX_CONTENT_CHARS, MAX_OUTPUT_TOKENS } = await import(
+			"../hooks/lib.mjs"
+		);
+		const port = await startFake(() => ({
+			status: 200,
+			json: { transferId: "tx_hold", estimatedCost: 1, model: "m", createdAt: 1 },
+		}));
+		const payload = { ...PAYLOAD, tool_input: { command: "x".repeat(40_000) } };
+		const result = await runHook(HOOK, payload, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expect(result.code).toBe(0);
+		const body = requests[0] as {
+			estimatedInputTokens: number;
+			maxOutputTokens: number;
+		};
+		expect(body.maxOutputTokens).toBe(MAX_OUTPUT_TOKENS);
+		expect(body.maxOutputTokens).toBeGreaterThan(1);
+		const settleAtCap = body.estimatedInputTokens + estimateTokens("x".repeat(MAX_CONTENT_CHARS));
+		expect(body.estimatedInputTokens + body.maxOutputTokens).toBeGreaterThanOrEqual(settleAtCap);
 	});
 
 	it("UT_CC_SEND_CONTENT=0 sends redacted content but a real size estimate", async () => {

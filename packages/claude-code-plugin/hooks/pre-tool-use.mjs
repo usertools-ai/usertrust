@@ -7,9 +7,17 @@
 // Content minimization: tool_input is truncated at 16 KiB before it is sent
 // (both message content and token estimation); UT_CC_SEND_CONTENT=0 replaces
 // the content with {"redacted":true} while keeping the size-based estimate.
-import { estimateTokens, readStdin, recordPending, serverRequest } from "./lib.mjs";
+// The output hold uses that same 16 KiB bound so a large tool_response cannot
+// price above the reservation (AUD-004).
+import {
+	estimateTokens,
+	MAX_CONTENT_CHARS,
+	MAX_OUTPUT_TOKENS,
+	readStdin,
+	recordPending,
+	serverRequest,
+} from "./lib.mjs";
 
-const MAX_CONTENT_CHARS = 16 * 1024;
 const MAX_REASON_CHARS = 500;
 
 /** Server-provided text goes through here: strip control chars, bound length. */
@@ -39,10 +47,13 @@ try {
 	const agentId = input.agent_id ?? "main";
 	const toolInput = JSON.stringify(input.tool_input ?? {}).slice(0, MAX_CONTENT_CHARS);
 	const content = process.env.UT_CC_SEND_CONTENT === "0" ? '{"redacted":true}' : toolInput;
+	const estimatedInputTokens = estimateTokens(toolInput);
 	const response = await serverRequest("/v1/authorize", {
 		model: process.env.UT_CC_MODEL ?? "claude-sonnet-4-6",
-		estimatedInputTokens: estimateTokens(toolInput),
-		maxOutputTokens: 1,
+		estimatedInputTokens,
+		// Both legs: a 1-token output hold under-debited every large tool result
+		// because settle prices the whole response (AUD-004).
+		maxOutputTokens: MAX_OUTPUT_TOKENS,
 		params: { hook: "PreToolUse", tool_name: input.tool_name ?? "unknown" },
 		actor: `claude-code:${sessionId}`,
 		messages: [{ role: "user", content }],
@@ -63,6 +74,7 @@ try {
 		await recordPending(sessionId, agentId, {
 			toolUseId: input.tool_use_id ?? null,
 			transferId: json.transferId,
+			estimatedInputTokens,
 		});
 		emit("allow", `usertrust: reserved ${json.transferId} (${json.estimatedCost} ut)`);
 	} else if (response.status === 402 || response.status === 403) {
