@@ -10,7 +10,12 @@ import { InsufficientBalanceError, PolicyDeniedError } from "usertrust";
 
 export interface FakeGovernorHandle {
 	governor: Governor;
-	calls: { authorized: string[]; settled: string[]; aborted: string[] };
+	calls: {
+		authorized: string[];
+		settled: string[];
+		aborted: string[];
+		settleParams: Array<SettleParams | undefined>;
+	};
 }
 
 export function createFakeGovernor(
@@ -19,7 +24,12 @@ export function createFakeGovernor(
 	let budget = opts.budget ?? 10_000;
 	let seq = 0;
 	const pending = new Map<string, Authorization>();
-	const calls = { authorized: [] as string[], settled: [] as string[], aborted: [] as string[] };
+	const calls = {
+		authorized: [] as string[],
+		settled: [] as string[],
+		aborted: [] as string[],
+		settleParams: [] as Array<SettleParams | undefined>,
+	};
 
 	const governor: Governor = {
 		async authorize(params: AuthorizeParams): Promise<Authorization> {
@@ -45,6 +55,7 @@ export function createFakeGovernor(
 			const cost = (params?.inputTokens ?? 0) + (params?.outputTokens ?? 0) || auth.estimatedCost;
 			budget += auth.estimatedCost - cost;
 			calls.settled.push(auth.transferId);
+			calls.settleParams.push(params);
 			return {
 				transferId: auth.transferId,
 				cost,

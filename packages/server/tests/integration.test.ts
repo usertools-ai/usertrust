@@ -51,6 +51,7 @@ describe("integration: real governor in dryRun mode", () => {
 				inputTokens: 200,
 				outputTokens: 40,
 				usageSource: "provider",
+				computeMs: 4709,
 			}),
 		});
 		expect(settleRes.status).toBe(200);
@@ -58,9 +59,11 @@ describe("integration: real governor in dryRun mode", () => {
 			settled: boolean;
 			auditHash: string;
 			transferId: string;
+			meter?: { computeMs?: number };
 		};
 		expect(receipt.settled).toBe(true);
 		expect(receipt.transferId).toBe(auth.transferId);
 		expect(receipt.auditHash).toMatch(/^[0-9a-f]{16,}$/);
+		expect(receipt.meter?.computeMs).toBe(4709);
 	});
 });
