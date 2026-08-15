@@ -15,9 +15,13 @@ import { POSTURES_ARE_ATTESTED_ENUMS, type PostureClaim, type ReceiptClaims } fr
  * that carry a caveat (`estimated`/`mixed`, `conservative`) take the amber ink,
  * the ones that do not take steel.
  *
- * **The epistemic frame renders WITH them.** A posture chip in isolation reads
- * like a measurement; `POSTURES_ARE_ATTESTED_ENUMS` is the sentence that stops
- * it, and it renders above the chips rather than inside a tooltip.
+ * **The epistemic frame renders WITH them — and BEFORE the first posture
+ * the reader meets.** A posture chip in isolation reads like a measurement;
+ * `POSTURES_ARE_ATTESTED_ENUMS` is the sentence that stops it. That sentence
+ * lives at the top of `AmountScope` (the amount's scope is a posture) rather
+ * than at the foot of this block, so categorical "built ONLY" / "at least"
+ * copy cannot precede the qualification that the verifier cannot confirm the
+ * enum. It is never inside a tooltip.
  *
  * Paper ink only: the bright dark-ground accents measure 1.67-3.27:1 on
  * `--color-paper` and are forbidden as text there (globals.css). The paper-*
@@ -81,8 +85,11 @@ const CAVEATED_CHIP = "border-paper-amber/60 font-normal text-paper-amber";
  * R39's scope statement both render "beside the amount, never as a footnote and
  * never behind interaction" — so this block sits directly under the figure in
  * `SpendBlock`, above every other spend field, and there is deliberately no
- * `<details>`, no tooltip and no `title` attribute anywhere in it. The other
- * three postures stay at the foot of the block, where they have always been.
+ * `<details>`, no tooltip and no `title` attribute anywhere in it. The
+ * epistemic frame is the first line of this block: the amount posture is the
+ * first posture the reader meets, so the qualification that it is an attested
+ * enum must arrive before the categorical copy, not after the other three
+ * chips. Those three stay at the foot of the spend block.
  *
  * The FLOOR line renders only where `amountFloorClaim` grants one. A posture
  * that does not earn a bound gets its R39 copy alone — an `indeterminate`
@@ -95,6 +102,9 @@ const CAVEATED_CHIP = "border-paper-amber/60 font-normal text-paper-amber";
 export function AmountScope({ claims }: { claims: ReceiptClaims }) {
 	return (
 		<div className="flex flex-col gap-2" data-testid="amount-scope">
+			<p className="text-[13px] leading-relaxed text-ink/70" data-testid="epistemic-frame">
+				{POSTURES_ARE_ATTESTED_ENUMS}
+			</p>
 			{claims.amountFloor ? (
 				<p
 					className="text-[13px] font-bold leading-relaxed text-ink"
@@ -113,8 +123,6 @@ export default function PostureChips({ claims }: { claims: ReceiptClaims }) {
 	const { association, usage, pricing } = claims;
 	return (
 		<div className="flex flex-col gap-4" data-testid="postures">
-			<p className="text-[13px] leading-relaxed text-ink/70">{POSTURES_ARE_ATTESTED_ENUMS}</p>
-
 			<PostureRow
 				axis="session association"
 				posture={association}

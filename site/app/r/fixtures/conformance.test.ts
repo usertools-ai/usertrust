@@ -832,6 +832,30 @@ for (const entry of conformingFixtures) {
 					`${file}: amountUsd must derive cleanly to 4 decimals`,
 				);
 
+				// Inclusion indices must be structurally possible (AGENTS.md:
+				// 0 ≤ leafIndex < treeSize). A conforming fixture that claims
+				// inclusion passed with an out-of-range index blesses output a
+				// real verifier would reject before the scenario is reached.
+				const inclusion = success.receipt.proof.inclusion;
+				const checkpoint = success.receipt.proof.checkpoint;
+				assert.ok(
+					Number.isSafeInteger(inclusion.leafIndex) &&
+						Number.isSafeInteger(inclusion.treeSize) &&
+						inclusion.leafIndex >= 0 &&
+						inclusion.leafIndex < inclusion.treeSize,
+					`${file}: 0 ≤ leafIndex (${inclusion.leafIndex}) < treeSize (${inclusion.treeSize})`,
+				);
+				assert.equal(
+					inclusion.treeSize,
+					checkpoint.treeSize,
+					`${file}: inclusion.treeSize must match the signed checkpoint`,
+				);
+				assert.equal(
+					inclusion.leafIndex,
+					success.receipt.event.sequence - checkpoint.segmentFirstSequence,
+					`${file}: leafIndex === sequence - segmentFirstSequence (equality 4)`,
+				);
+
 				// The full §4.1 verdict algebra.
 				const algebra = checkVerdictAlgebra(success);
 				assert.ok(algebra.ok, `${file}: verdict algebra violated: ${algebra.reason}`);

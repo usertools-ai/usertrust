@@ -581,9 +581,15 @@ test("R39/R40: the scope block sits BESIDE the amount — no spend field or post
 		const amount = html.indexOf('data-testid="amount-usd"');
 		const scope = html.indexOf('data-testid="amount-scope"');
 		const postures = html.indexOf('data-testid="postures"');
-		assert.ok(amount !== -1 && scope !== -1 && postures !== -1, `${row.id}: anatomy missing`);
+		const frame = html.indexOf('data-testid="epistemic-frame"');
+		assert.ok(
+			amount !== -1 && scope !== -1 && frame !== -1 && postures !== -1,
+			`${row.id}: anatomy missing`,
+		);
 		assert.ok(amount < scope, `${row.id}: the scope block must follow the figure it qualifies`);
+		assert.ok(scope < frame, `${row.id}: the epistemic frame is the first line of the scope block`);
 		assert.ok(scope < postures, `${row.id}: the scope block is not a footnote under the chips`);
+		assert.ok(frame < postures, `${row.id}: the frame precedes the remaining posture chips`);
 		const between = html.slice(amount, scope);
 		assert.ok(
 			!between.includes("data-field="),
@@ -628,8 +634,10 @@ test("R40: a selfDebitsOnly amount renders as a FLOOR on caused cost, beside the
 		1,
 		"R40's floor claim must render at exactly one site",
 	);
+	const floorText = floor ?? "R40-floor-absent";
+	assert.notEqual(floorText, "R40-floor-absent", "selfDebitsOnly must produce a floor sentence");
 	assert.equal(
-		text.split(floor ?? " ").length - 1,
+		text.split(floorText).length - 1,
 		1,
 		"R40's floor sentence must appear once, not be restated elsewhere",
 	);
@@ -957,7 +965,16 @@ test("C15 issue-public.json — the issue headline and DIRECT recomputation", ()
 test("C16 session-owner-estimated.json — non-artifact, estimate caveat, the custom literal", () => {
 	const { html, text } = renderFixture("session-owner-estimated.json");
 	// R13/R14 — a session headline makes NO artifact claim.
-	assertContains(text, "produced under this governed session — $0.7700", "R13's session form");
+	assertContains(text, "produced under this governed session", "R13's session form");
+	assertOmits(
+		text,
+		"produced under this governed session — $",
+		"the amount is not restated in the headline; it lives only beside its scope",
+	);
+	const headline = html.match(/data-testid="headline-claim"[^>]*>[^<]*/)?.[0] ?? "";
+	const workClaim = html.match(/data-testid="scope-claim"[^>]*>[^<]*/)?.[0] ?? "";
+	assert.ok(!headline.includes("$"), "the paper headline does not name the figure");
+	assert.ok(!workClaim.includes("$"), "WorkClaims restates the same unqualified-less headline");
 	assertOmits(text, "attests commit", "R14: no artifact claim");
 	assertContains(text, SESSION_NON_ARTIFACT, "R14, verbatim");
 	assertContains(text, SESSION_PROMOTION_GATE, "R14's promotion-gate rule");

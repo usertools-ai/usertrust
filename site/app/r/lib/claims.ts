@@ -215,9 +215,12 @@ export function amountUsdFromUsertokens(assessedUsertokens: number): string {
 /**
  * R13 — the headline claim, scoped to what the receipt EMBEDS, in the spec's
  * own words. Three forms, one per `work.kind`; `session` carries NO artifact
- * claim at all, which is why it takes the amount instead of an artifact.
+ * claim at all. The dollar figure is not restated here: it lives only in
+ * `SpendBlock`, beside the scope that says what it covers (R39/R40). A
+ * session headline that named the amount would present an unqualified figure
+ * in the header and again in `WorkClaims`.
  */
-export function headlineClaim(work: Work, amountUsd: string): string {
+export function headlineClaim(work: Work): string {
 	switch (work.kind) {
 		case "commit":
 			return `attests commit ${work.oid} in ${work.repoId}`;
@@ -226,7 +229,7 @@ export function headlineClaim(work: Work, amountUsd: string): string {
 		case "issue":
 			return `attests ${work.repoId} issue #${work.number} at revision ${work.observedRevision}`;
 		case "session":
-			return `produced under this governed session — $${amountUsd}`;
+			return "produced under this governed session";
 	}
 }
 
@@ -374,9 +377,10 @@ export const FALLBACK_SESSION_ORIGIN =
 
 /**
  * The epistemic frame binding the whole posture group (receipt-spec §2,
- * round-1 P2-7). Rendered once above the postures, and echoed in the check
- * ledger's `semantics` meaning (§6.3) — a posture chip on its own reads like a
- * measurement, and this sentence is what stops it.
+ * round-1 P2-7). Rendered once at the top of `AmountScope` — the first
+ * posture the reader meets — and echoed in the check ledger's `semantics`
+ * meaning (§6.3). A posture chip on its own reads like a measurement, and
+ * this sentence is what stops it.
  */
 export const POSTURES_ARE_ATTESTED_ENUMS =
 	"postures are ATTESTED ENUMS, not verifier-established facts: the verifier checks enum validity and internal agreement — it CANNOT confirm them, because both are defined over per-constituent facts the projection deliberately does not carry.";
@@ -1056,7 +1060,7 @@ export function receiptClaims(receipt: ReceiptDocument): ReceiptClaims {
 		projection,
 		work,
 		amountUsd,
-		headline: headlineClaim(work, amountUsd),
+		headline: headlineClaim(work),
 		repo: repoScope(work),
 		comparison: artifactComparison(work),
 		association: sessionAssociationPosture(projection),

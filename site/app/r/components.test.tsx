@@ -273,11 +273,14 @@ test("CheckLedger: an all-passed verification still renders every row (R9 shows 
 // PostureChips (§6.2, R20-R22)
 // ---------------------------------------------------------------------------
 
-test("PostureChips: the epistemic frame renders with the chips, not in a tooltip", () => {
+test("PostureChips: the chips themselves carry no hover-only frame", () => {
 	const claims = receiptClaims(verifiedFixtureState("commit-checkpoint.json").envelope.receipt);
 	const markup = html(<PostureChips claims={claims} />);
-	assert.ok(textOf(markup).includes(POSTURES_ARE_ATTESTED_ENUMS));
 	assert.ok(!markup.includes("title="), "no hover-only disclosure of the frame");
+	assert.ok(
+		!textOf(markup).includes(POSTURES_ARE_ATTESTED_ENUMS),
+		"the frame lives once, in AmountScope, ahead of the first posture",
+	);
 });
 
 test("PostureChips: attested is FILLED and asserted is OUTLINED — three channels of difference", () => {
@@ -328,6 +331,19 @@ function claimsWithPosture(file: string, posture: DelegationPosture): ReceiptCla
 		},
 	});
 }
+
+test("AmountScope: the epistemic frame is the first line, before the floor or the posture", () => {
+	const claims = claimsWithPosture("commit-checkpoint.json", "selfDebitsOnly");
+	const markup = html(<AmountScope claims={claims} />);
+	const frame = markup.indexOf('data-testid="epistemic-frame"');
+	const floor = markup.indexOf('data-testid="amount-floor"');
+	const posture = markup.indexOf('data-posture="selfDebitsOnly"');
+	assert.ok(frame !== -1, "the frame renders in the scope block");
+	assert.ok(textOf(markup).includes(POSTURES_ARE_ATTESTED_ENUMS));
+	assert.ok(!markup.includes("title="), "no hover-only disclosure of the frame");
+	assert.ok(frame < floor, "the frame precedes the floor claim");
+	assert.ok(frame < posture, "the frame precedes the amount posture");
+});
 
 test("AmountScope: the includesAllDelegated fallback renders UNEVIDENCED, never a total", () => {
 	// DEFENCE IN DEPTH, and the reason it is tested at the component: `wire.ts`
