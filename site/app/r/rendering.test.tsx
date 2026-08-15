@@ -644,6 +644,12 @@ test("visitor card: action on the stage, unqualified amount, CLI that shipped", 
 	assert.ok(html.includes('data-testid="receipt-card"'), "the visitor card renders");
 	assertContains(text, "Committed", "action names the commit");
 	assertContains(text, "12283b89", "oid head, not the full headline claim");
+	assertContains(
+		text,
+		"12283b89ad55b584c7959394a527e24da0ec1f5e",
+		"R17: full oid one interaction away",
+	);
+	assertContains(text, "github.com:R_kgDOK1x2Yw", "R18: repoId is the scope");
 	assertContains(text, "Receipt", "header names the artifact type");
 	assertContains(
 		text,
@@ -652,6 +658,11 @@ test("visitor card: action on the stage, unqualified amount, CLI that shipped", 
 	);
 	assertContains(text, AMOUNT_SCOPE_CAPTION.selfDebitsOnly, "R40 caption on the card");
 	assertContains(text, "npx usertrust-verify receipt", "§11 gate is met");
+	assertContains(
+		text,
+		"--trust",
+		"receipt mode requires --trust; a command without it is a usage error",
+	);
 	assertOmits(text, "Inference 0 ut", "zero line items stay cut");
 	assertOmits(text, "Budget remaining", "account state stays off the card");
 });

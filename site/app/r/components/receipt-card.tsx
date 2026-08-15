@@ -1,4 +1,6 @@
 import type { ReceiptCardModel } from "../lib/card-model";
+import { REPO_NAME_IS_NOT_SCOPE } from "../lib/claims";
+import HashValue from "./hash-value";
 
 /**
  * The visitor receipt — action on the stage, invoice beneath, header names
@@ -37,7 +39,11 @@ export default function ReceiptCard({ model }: { model: ReceiptCardModel }) {
 					</p>
 					<h2 className="mb-2 text-[29px] leading-[1.22] font-semibold tracking-[-0.028em] text-paper">
 						{model.action.parts.map((part) =>
-							part.emphasis ? (
+							part.kind === "hash" ? (
+								<span key={part.full} className="text-ut">
+									<HashValue value={part.full} label={part.label} head={part.head} />
+								</span>
+							) : part.emphasis ? (
 								<span key={part.text} className="text-ut">
 									{part.text}
 								</span>
@@ -47,6 +53,13 @@ export default function ReceiptCard({ model }: { model: ReceiptCardModel }) {
 						)}
 					</h2>
 					<p className="m-0 text-[13.5px] text-paper/62">{model.action.byline}</p>
+					{model.action.repoDisplayName !== undefined ? (
+						<p className="mt-2 text-[13px] text-paper/62" data-testid="card-repo-display">
+							<span className="font-mono text-paper/85">{model.action.repoDisplayName}</span>
+							{" — "}
+							{REPO_NAME_IS_NOT_SCOPE}
+						</p>
+					) : null}
 
 					{model.authority.length > 0 ? (
 						<div className="mt-[22px] rounded-[10px] border border-white/[0.09] bg-[#0c0c22] px-4 py-3.5">
@@ -138,7 +151,7 @@ export default function ReceiptCard({ model }: { model: ReceiptCardModel }) {
 						data-testid="verify-command"
 					>
 						npx <span className="font-normal text-ut">usertrust-verify</span> receipt{" "}
-						{model.receiptId}.json
+						{model.receiptId}.json --trust {"<snapshot.json>"}
 					</pre>
 				</div>
 			</section>

@@ -12,14 +12,15 @@
 import { type ReceiptClaims, truncateForDisplay } from "./claims";
 import type { ReceiptDocument, VerifiedState, Work } from "./wire";
 
-export interface ActionPart {
-	text: string;
-	emphasis: boolean;
-}
+export type ActionPart =
+	| { kind: "text"; text: string; emphasis: boolean }
+	| { kind: "hash"; label: string; full: string; head: number };
 
 export interface ActionHeadline {
 	parts: ActionPart[];
 	byline: string;
+	/** Mutable `repo` name, when the projection disclosed one. Never the scope. */
+	repoDisplayName?: string;
 }
 
 export interface AuthorityRow {
@@ -53,8 +54,19 @@ export interface ReceiptCardModel {
 	verifyCommand: string;
 }
 
-function oidHead(oid: string): string {
-	return oid.length <= 8 ? oid : oid.slice(0, 8);
+const OID_HEAD = 8;
+
+/** Visible concatenation for tests — hash parts contribute the truncated head. */
+export function actionVisibleText(action: ActionHeadline): string {
+	return action.parts
+		.map((part) =>
+			part.kind === "hash"
+				? part.full.length <= part.head
+					? part.full
+					: `${part.full.slice(0, part.head)}…`
+				: part.text,
+		)
+		.join("");
 }
 
 export function actionHeadline(work: Work, claims: ReceiptClaims): ActionHeadline {
@@ -62,41 +74,49 @@ export function actionHeadline(work: Work, claims: ReceiptClaims): ActionHeadlin
 	const association =
 		claims.association.weight === "attested" ? "workflow-attested" : "owner-asserted";
 	const byline = model === undefined ? association : `${association} · ${model}`;
+	// R18: repoId is the scope. The mutable name, if disclosed, is display metadata.
+	const repoDisplayName =
+		claims.repo.displayName !== undefined && claims.repo.displayName !== claims.repo.repoId
+			? claims.repo.displayName
+			: undefined;
 
 	switch (work.kind) {
 		case "commit":
 			return {
 				parts: [
-					{ text: "Committed ", emphasis: false },
-					{ text: oidHead(work.oid), emphasis: true },
-					{ text: " to ", emphasis: false },
-					{ text: claims.repo.label, emphasis: true },
+					{ kind: "text", text: "Committed ", emphasis: false },
+					{ kind: "hash", label: "commit oid", full: work.oid, head: OID_HEAD },
+					{ kind: "text", text: " to ", emphasis: false },
+					{ kind: "text", text: claims.repo.repoId, emphasis: true },
 				],
 				byline,
+				repoDisplayName,
 			};
 		case "pr":
 			return {
 				parts: [
-					{ text: "PR #", emphasis: false },
-					{ text: String(work.number), emphasis: true },
-					{ text: " in ", emphasis: false },
-					{ text: claims.repo.label, emphasis: true },
+					{ kind: "text", text: "PR #", emphasis: false },
+					{ kind: "text", text: String(work.number), emphasis: true },
+					{ kind: "text", text: " in ", emphasis: false },
+					{ kind: "text", text: claims.repo.repoId, emphasis: true },
 				],
 				byline,
+				repoDisplayName,
 			};
 		case "issue":
 			return {
 				parts: [
-					{ text: "Issue #", emphasis: false },
-					{ text: String(work.number), emphasis: true },
-					{ text: " in ", emphasis: false },
-					{ text: claims.repo.label, emphasis: true },
+					{ kind: "text", text: "Issue #", emphasis: false },
+					{ kind: "text", text: String(work.number), emphasis: true },
+					{ kind: "text", text: " in ", emphasis: false },
+					{ kind: "text", text: claims.repo.repoId, emphasis: true },
 				],
 				byline,
+				repoDisplayName,
 			};
 		case "session":
 			return {
-				parts: [{ text: "Governed session", emphasis: false }],
+				parts: [{ kind: "text", text: "Governed session", emphasis: false }],
 				byline,
 			};
 	}
@@ -204,6 +224,6 @@ export function receiptCardModel(state: VerifiedState, claims: ReceiptClaims): R
 		amountUsd: claims.amountUsd,
 		amountCaption: claims.amountCaption,
 		lines: invoiceLines(claims),
-		verifyCommand: `npx usertrust-verify receipt ${state.receiptId}.json`,
+		verifyCommand: `npx usertrust-verify receipt ${state.receiptId}.json --trust <snapshot.json>`,
 	};
 }
