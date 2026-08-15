@@ -514,7 +514,7 @@ test("R40: the floor claim is granted to selfDebitsOnly and REFUSED to every oth
 	assert.match(granted ?? "", /at least \$4\.8224 of spend was CAUSED by this subject/);
 	assert.match(granted ?? "", /exactly \$4\.8224 was CHARGED to this session/);
 	assert.match(granted ?? "", /delegated spend is never negative/);
-	assert.match(granted ?? "", /can only be higher than this figure — never lower/);
+	assert.match(granted ?? "", /equal to or higher than this figure — never lower/);
 
 	for (const posture of ALL_POSTURES) {
 		if (posture === "selfDebitsOnly") continue;

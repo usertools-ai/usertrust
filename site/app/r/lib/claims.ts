@@ -604,7 +604,7 @@ export function amountFloorClaim(
 	amountUsd: string,
 ): string | undefined {
 	if (delegationPosture !== "selfDebitsOnly") return undefined;
-	return `at least $${amountUsd} of spend was CAUSED by this subject, and exactly $${amountUsd} was CHARGED to this session. Delegated work is charged to the delegate and delegated spend is never negative, so the caused total can only be higher than this figure — never lower.`;
+	return `at least $${amountUsd} of spend was CAUSED by this subject, and exactly $${amountUsd} was CHARGED to this session. Delegated work is charged to the delegate and delegated spend is never negative, so the caused total is equal to or higher than this figure — never lower.`;
 }
 
 /**
