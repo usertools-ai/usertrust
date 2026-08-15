@@ -128,9 +128,9 @@ If multiple rules match, all hard violations result in denial. Soft violations a
 
 usertrust ships with three built-in rules:
 
-1. **zero-budget** -- Deny if the account has zero remaining budget (hard)
-2. **high-cost** -- Warn on requests estimated above a configurable threshold (soft)
-3. **budget-exhausted** -- Deny if estimated cost exceeds remaining budget (hard)
+1. **block-budget-overshoot** -- Deny when `budget_remaining_after` `lt` 0 (hard)
+2. **block-budget-exhausted** -- Deny when `budget_remaining` `lte` 0 (hard)
+3. **warn-high-cost** -- Warn when `estimated_cost` `gt` 1000 (soft)
 
 ## Further Reading
 
