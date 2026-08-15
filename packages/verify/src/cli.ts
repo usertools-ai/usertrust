@@ -24,11 +24,47 @@ import {
 	verifyVaultWithAnchors,
 	type WitnessInput,
 } from "./index.js";
+import {
+	RECEIPT_DISPATCH_TOKEN,
+	type ReceiptCliIo,
+	runReceiptCli,
+	writeAllSync,
+} from "./receipt-cli.js";
+
+/**
+ * `receipt` dispatch (CLI spec §2). MUST run before a single byte of the
+ * vault flag loop below: `argv[0] === "receipt"` is checked EXACTLY, every
+ * flag receipt mode defines is unknown to the vault parser (which would call
+ * `usage()` and exit 1 — FAILED, the wrong code for a usage mistake), and a
+ * bare positional named `receipt` would otherwise be consumed as
+ * `vaultPath`. `process.exit` below is synchronous, so nothing after this
+ * block — including the `const args = …` vault path — ever executes on this
+ * branch.
+ *
+ * The output goes out through `writeAllSync` rather than
+ * `process.stdout.write`, and that is load-bearing rather than stylistic:
+ * `process.stdout` is ASYNCHRONOUS on a POSIX pipe, and `process.exit` does not
+ * drain it. `--json | jq` would then see a report truncated mid-object beside
+ * an exit code that says the receipt verified. The exit codes are the CI
+ * contract, so the fix is to make the bytes land BEFORE the exit, never to
+ * soften the exit.
+ */
+if (process.argv[2] === RECEIPT_DISPATCH_TOKEN) {
+	const realIo: ReceiptCliIo = {
+		readFile: (path) => readFileSync(path),
+		readStdin: () => readFileSync(0),
+	};
+	const result = runReceiptCli(process.argv.slice(3), realIo);
+	writeAllSync(1, result.stdout);
+	writeAllSync(2, result.stderr);
+	process.exit(result.exitCode);
+}
 
 const args = process.argv.slice(2);
 
 function usage(): never {
 	console.log(`Usage: npx usertrust-verify <path-to-.usertrust> [options]
+       npx usertrust-verify receipt <file> --trust <snapshot.json> [options]
 
 Options:
   --tx <transferId>              Verify a single transaction (receipt)

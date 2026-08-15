@@ -192,8 +192,13 @@ function wordWrap(text: string, maxWidth: number): string[] {
  * the independent zero-dependency verifier and may not import from core; see
  * the sanitizer inventory in AGENTS.md, which forbids consolidating these onto
  * the weaker variant.
+ *
+ * EXPORTED (CLI spec §6, AGENTS.md's terminal-sanitization rule): `receipt`
+ * mode reports untrusted document text — keyIds, snapshot version strings,
+ * failure details, receipt IDs — to the same terminal, and needs the same
+ * defense. Exporting this beats writing a third copy of it.
  */
-function forDisplay(raw: string): string {
+export function forDisplay(raw: string): string {
 	let out = "";
 	for (const ch of raw) {
 		const code = ch.codePointAt(0) as number;

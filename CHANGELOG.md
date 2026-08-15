@@ -9,6 +9,131 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`usertrust-verify receipt <file> --trust <snapshot.json>` — the offline
+  half of the trust story.** A zero-dependency, zero-network CLI mode that
+  reads a signed ut1 receipt plus a PINNED `receipt-spec` §8 trust snapshot
+  and runs §7 steps 1–9 entirely offline: the strict byte reader (canonical
+  base64, fatal UTF-8 with `ignoreBOM: true`, pre-parse duplicate-key
+  rejection, frozen numeric rules — non-integer / `-0` / non-safe-integer /
+  `Infinity`/`NaN` refused on the numeric LITERAL during that same pre-parse
+  scan, never as a thrown `canonicalize`; checking the parsed VALUE instead
+  would be too late, because `JSON.parse` rounds `1.00000000000000001` to
+  exactly `1` and the receipt then verifies against a canonical preimage its
+  own bytes do not spell),
+  the nine event-hash equalities, the mint signature (including the retired
+  MINT-key boundary evaluated through the mint event's own segment, not
+  merely "state permitting"), Merkle inclusion topology derived from
+  `(leafIndex, treeSize)`, the checkpoint signature and lineage pin, §2's
+  semantic constraints, the `transferSetRoot`/`amountUsd` derivation, and —
+  with `--envelope` — the full history walk back to the registered
+  `genesisSegmentId` with every checkpoint's signature re-verified under the
+  §8 lineage. `--trust` is required and never fetched: an implicit fetch
+  would silently unpin the verifier, so absent key material reports
+  UNVERIFIABLE rather than reaching out for it. `--envelope` reads the
+  receipt from the resolver envelope's byte-authoritative `receiptBytes`
+  member (never its `receipt` convenience copy) and runs the R4 agreement
+  check between the two — a STRUCTURAL comparison (`Object.is` on numbers,
+  key order ignored), not a canonical-string one, since a serializer erases
+  exactly the distinctions the check exists to find (`-0` renders as `0`). `--expect-id` binds arrival context (a bare
+  `ut1_…`, a resolution URL, or a `Usertrust-Receipt:` trailer line).
+  `--json` puts the machine-readable report on stdout ONLY — every
+  diagnostic goes to stderr, so `| jq` is safe — with every field nullable
+  on the failure path that cannot produce it, `delegationPosture` labels
+  travelling with `amountUsd` (an unlabelled or unrecognized posture fails
+  the semantic check rather than rendering an ambiguous total), and every
+  untrusted string (keyIds, snapshot version/predecessor, failure detail,
+  receipt IDs) control-character sanitized before truncation. Exit codes are
+  0 (`VERIFIED_CHECKPOINT` or higher — the rung itself is in the report, not
+  the code), 1 (FAILED, step + code named), 2 (UNVERIFIABLE, required
+  material missing), 3 (usage error, receipt mode's own handler — never the
+  shared vault `usage()`, which exits 1 and would misreport a typo as
+  FAILED). `--help`/`-h` is recognized at any argv position, same as vault
+  mode's own loop, and also exits 3: no verdict was reached, so it must
+  never share 0 with `VERIFIED_CHECKPOINT` — an unsanitized `<file>`
+  argument of literally `--help` must not be able to read as verified to a
+  scripted caller keying on exit status alone. This is what the
+  `/r/<receiptId>` verify page's download affordance points at, closing the
+  loop that entry above left open.
+
+  **Deliberately incomplete, and says so out loud rather than guessing.**
+  Anchor (Rekor) evidence is reported OUT OF BAND, never as a §7 value: if
+  absent the check is `notApplicable`; if present it is omitted from
+  `checks` and named in a top-level `unimplemented: ["anchorEvidence"]`,
+  because none of §7's four verdict values means "the verifier declined to
+  look" and claiming one would misstate why the check didn't run. The
+  verdict ladder is capped below `VERIFIED_ANCHORED` accordingly — no input
+  can upgrade past it — pending a normative artifact-hash rule binding
+  Rekor evidence to a `SegmentCheckpoint`'s signed payload, which belongs to
+  whoever mints anchors. Trust-snapshot signature verification is likewise
+  deferred to when receipt-spec §8's signing scheme ships; until then the
+  snapshot's structural rules (unique/resolvable keys, one-lineage-one-vault,
+  role/kind consistency, acyclic rotation, `activationSequence` bound to
+  `state`) are the only defense, and any violation is UNVERIFIABLE, never a
+  pass. `registryBinding` and `predecessorLinkage` report `notApplicable` —
+  offline has no registry to check against — though both stay in the
+  `--json` vocabulary for resolver-side consumers replaying a report.
+
+  **`packages/verify/src/canonical.ts` is left non-conformant with
+  receipt-spec §13 on this ship, deliberately.** §13's 79-case differential
+  found `core/src/audit/canonical.ts` and `verify/src/canonical.ts`
+  code-identical and bug-compatible with each other (`undefined` → the JS
+  value rather than `null`; `[1,undefined,2]` → `[1,,2]`; and two SILENT
+  divergences that stay valid, parseable JSON at a different digest —
+  `[undefined]` → `[]` and `{a:[undefined]}` → `{"a":[]}`) — and states
+  plainly that **"Core and verify MUST be corrected together; fixing verify
+  alone splits ut1's two implementations against each other, which is worse
+  than the status quo."** Correcting only this package's copy would do
+  exactly that split, so the fix is deferred to a follow-up that lands both
+  sides at once. The divergence is unreachable from parsed wire data (every
+  key in a ut1 document is a concrete JSON value, never `undefined`), so
+  this is an honesty gap, not a soundness one — but it means this ship's
+  verifier is bug-compatible with the SDK minter, not §13-conformant.
+
+  **Every field the specs give a FORMAT is checked against it, and the check
+  is a table rather than a list of fixes.** Two review rounds found nine
+  soundness holes that were one hole nine times: the verifier checked
+  STRUCTURE (present? a string?) and never FORMAT (the thing §2 declares) —
+  a sibling hash of `<64 hex>zz` folded to the SAME root, because Node's hex
+  decoder stops at the first non-hex pair and drops the tail, so the proof
+  verified here and would FAIL under any decoder that refuses trailing junk;
+  `startedAt: "not-a-date"` verified; `sourceReservationReceiptId:
+  "not-an-id"` named no receipt and verified. The fix is not nine checks:
+  the key set and the declared format are now ONE declaration per member of
+  §5's document — RFC 3339 UTC "Z" with ms precision for every timestamp,
+  64-lowercase-hex for every digest, the FULL git OID at the length its
+  `oidAlg` selects, §12 canonical decode for every receipt ID, the keyed
+  `r1_`/`c1_` forms as the 32-byte MACs the resolver defines — walked once
+  for both purposes, with the owning §7 step recorded per field so step 1
+  never pre-empts a condition a normative equality names. A member cannot
+  enter the schema without saying what it is, which is what makes this a
+  closed class rather than nine patches; the corpus drives a sweep off that
+  table, so a member declared and then not enforced fails a test. The same
+  formats bind a SERVED history member at step 6, which is the only place
+  they can bind — those never pass through step 1's reader at all.
+
+  **A rotated-away key can no longer sign forever (§8).** The snapshot
+  loader refused an `activationSequence` on an `active` key and a `retired`
+  key without one, but both rules read a single entry; read across the
+  rotation LINK, a key that a successor names as its predecessor plainly
+  HAS a successor, so `active` is a contradiction — and one that pays,
+  because an active key has no upper bound, so the predecessor stayed in the
+  pinned lineage and kept verifying new material in a snapshot that looked
+  like a clean rotation. `retired` (boundary evaluable) and `revoked` (the
+  compromise path) remain legal predecessors; `active` does not. Relatedly,
+  `--expect-id` supplied on a run that failed before step 3 now reports
+  `unavailable` rather than `notApplicable`: §7 reserves the latter for an
+  input that could not exist in this context, and an arrival context the
+  operator typed plainly exists.
+
+  Built against a from-scratch mint harness (Ed25519 keygen/sign, sha256,
+  canonical JSON — node builtins only) that reaches canonical bytes by a
+  path independent of the verifier's own `canonicalize`, so a shared
+  preimage bug can't hide from the corpus; pinned first against
+  receipt-spec §13's byte-for-byte canonicalization golden vectors — modulo
+  the non-conformant cases above, which the corpus does not exercise. Vault
+  mode (`--tx`, `--bundle`, the differential anchor suites) is unchanged —
+  same flags, same byte-for-byte behavior.
+
 - **`/r/<receiptId>` — the public verify page a `Usertrust-Receipt` trailer
   resolves to (ships DARK, not yet live).** A read-only, unauthenticated
   page and two JSON siblings (`receipt.json`, `envelope.json`) that render
@@ -76,6 +201,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The offline receipt verifier's field table declared `__proto__` (regression).**
+  The previous round closed a nine-instance format class by making the key set
+  and the declared format one declaration, walked once — and closed it with
+  `table[key] !== undefined`. The key comes from the document and the table was
+  an object literal, so `Object.prototype` answered on its behalf: a signed
+  member named `__proto__`, `constructor`, `toString`, `valueOf`,
+  `hasOwnProperty` (or any other prototype name) read as DECLARED, was then
+  skipped by the declared pass too (`Object.keys` yields no inherited name), and
+  so was checked by nobody. `JSON.parse` creates `__proto__` as an own data
+  property, so the member survives the wire and the canonical preimage covers
+  it: the mint signature verified over it and the receipt reached
+  `VERIFIED_CHECKPOINT` for a document §2 makes a hard FAIL. Fixed with
+  `Object.hasOwn` at the lookup AND null-prototype tables, so the defect is now
+  inexpressible rather than merely absent.
+- **Agreement is not conformance — three soundness holes with one root.** The
+  verifier decided three spec LITERALS by checking that the receipt agreed with
+  the pinned trust snapshot. Both are inputs, and two inputs agreeing proves
+  only that one party wrote both. (1) `receipt-spec` §4a fixes proxy-v1's
+  `event.actor` to exactly `{type:"system", id:"receipt-minter",
+  name:"receipt-minter"}`; a receipt carrying the string form, `null`, an
+  array, or that object plus a `tenant` member verified whenever the registered
+  `mintActor` was malformed identically. (2) §4a/§8 give v1 no SDK mint keys at
+  all, so `minter.kind` is the literal `proxy`; a snapshot registering
+  `minterKind: "sdk"` and a receipt claiming `"sdk"` agreed and verified. (3)
+  §8 hangs every rule it has — role, state, rotation boundary, lineage, vault
+  ownership — off a globally unique `keyId`, but identical key MATERIAL under
+  two keyIds was accepted: that let a revoked mint key be re-registered as
+  active under a second name and keep signing, and let one checkpoint lineage
+  be pinned by two vaults through two disjoint ID sets. Each literal is now
+  checked against the spec first, with the agreement kept as a second fence;
+  key material is unique across the snapshot.
+- **`proof`/`inclusion`/`checkpoint` present-but-malformed is FAILED, not
+  UNVERIFIABLE.** All three were read through a helper that answers `undefined`
+  for both "absent" and "not an object", so `"proof": null` reported missing
+  material and exit 2 — "we could not check" — for a receipt that made a claim
+  and got it wrong. §7 reserves UNVERIFIABLE for material that is not there;
+  present-and-malformed is `SCHEMA_INVALID` and exit 1. The two exit codes are
+  the CI contract.
+- **The `--envelope` R4 agreement check no longer depends on the receipt being
+  valid.** It ran only when the decoded bytes passed the full ut1 schema, so a
+  resolver holding bytes that parsed but failed §5 could omit or rewrite the
+  convenience copy and the envelope `receiptId` for free: the run reported
+  `SCHEMA_INVALID` — a statement about the receipt — and never mentioned that
+  the framing had lied about which receipt this was. R4 now runs on any bytes
+  that are JSON at all, which is also the symmetric comparison (neither side
+  runs the frozen numeric rules).
+- **A failed checkpoint-history walk prints WHY in the human report.** Step 9 is
+  upgrade-only, so a broken history leaves the base verdict — and
+  `report.failure` — untouched, and the human renderer's only detail line
+  belongs to that field. The reader saw `Checkpoint history: failed` and
+  nothing that distinguishes a short history from a broken lineage edge from a
+  checkpoint signed by the wrong key, with `--json` as the only way to find out.
+  The nested detail is now printed for every named §7 check that failed.
 - **`usertrust-verify --tx` scrubs control characters out of every untrusted
   receipt field.** The receipt renders strings read from `events.jsonl` — a file
   the party under audit owns — onto the terminal of the auditor checking it, so

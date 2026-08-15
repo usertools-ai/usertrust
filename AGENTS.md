@@ -1009,11 +1009,12 @@ verifier verifies nothing.
 | `core/src/audit/anchor-verify.ts` | `verify/src/anchor-verify.ts` | file-diff test (differs in exactly 2 lines per side: the `GENESIS_HASH` import, and `./merkle.js` vs `./verify.js`) |
 | `core/src/audit/rekor-verify.ts` | `verify/src/rekor-verify.ts` | file-diff test (currently byte-identical) |
 | `core/src/cli/verify.ts` → the `--bundle` helpers (`CONTROL_CHARS`, `clipKey`, `parseBundle`, `readArtifact`, `readPinnedPem`, …) | `verify/src/cli.ts` | **behavioral only, and only on the `--bundle` path** — one test drives both CLIs against a hostile bundle key. No file-diff rule covers this pair, and the two files are not whole-file mirrors. |
-| `core/src/audit/canonical.ts` | `verify/src/canonical.ts` | behavioral tests only — **weakest link; hand-check it** |
+| `core/src/audit/canonical.ts` | `verify/src/canonical.ts` | behavioral tests only — **weakest link; hand-check it**. Code-identical (differ only in comments) and, per receipt-spec §13's 79-case differential, **both non-conformant with the spec in the same way** (`undefined`, `[1,undefined,2]`, and two SILENT valid-JSON divergences — `[undefined]`→`[]`, `{a:[undefined]}`→`{"a":[]}`). §13: "Core and verify MUST be corrected together" — fixing one alone would split the two implementations against each other, which is worse than today's shared bug. Unfixed as of the `usertrust-verify receipt` ship; see its CHANGELOG entry. |
 | `core/src/audit/verify.ts` → `verifyChain` | `verify/src/verify.ts` | differential tests |
 | `core/src/audit/verify.ts` → `verifyVault`, `verifyVaultWithAnchors`, `exitCodeForAnchored` | `verify/src/index.ts` | differential tests |
 | `core/src/audit/merkle.ts` → all 7 Merkle functions | `verify/src/verify.ts` (there is **no** `merkle.ts` in verify) | differential tests |
 | `verify/src/receipt.ts` → `detectProvider` | mirrored *into* `core/src/export/markdown.ts` and `ui/src/shared/rows.ts` | comment only (verify is the source here) |
+| *(no core counterpart)* | `verify/src/receipt-verify.ts`, `verify/src/receipt-cli.ts` | **not mirrored, by design.** Core never mints a ut1 receipt-spec document — that is the stealth proxy's job — so there is nothing on the core side to keep in lockstep. Both files still sit inside the parity contract above (zero deps, `node:*`/`./`-relative imports only) and reuse `verify.ts`'s Merkle functions, `anchor-verify.ts`'s exported `verifySignatureRaw` + key parsing, and `canonical.ts`'s `canonicalize` (see the row above for its known §13 non-conformance — inherited here, not introduced here) rather than duplicating them a second time inside `packages/verify` itself. Recorded here so the next auditor does not go hunting a phantom `core/src` mirror for it. |
 
 Note the trap: `verify.ts` exists in **both** packages but they are different files with different
 contents.
@@ -1035,12 +1036,14 @@ Drop every line whose raw text contains `from "`, then require exact string equa
   lines **are** compared, so both packages must import the same names in the same order and may
   differ only in the module path.
 
-Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 4320 (a
-vendoring tripwire — raising it should prompt "what was added?"; last raised from 4300 for two
-selection fixes in `index.ts` — terminal kind rather than the presence of `settled`, and an
-evidence window bounded by the FIRST terminal — both hand-written, no vendored source. The number
-lives in TWO places, here and in `anchor-additive.test.ts`; move both or the guard stops enforcing
-what this line claims), and the differential suites assert
+Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 9900 (a
+vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600→9900 on this line as
+`packages/verify` grew legitimate node-builtins-only surface, with master separately raising
+4200→4300→4320 for its own receipt-hardening work over the same period — both lineages are folded
+in here and both are recorded in `packages/core/tests/harden/anchoring/anchor-additive.test.ts`
+assertion 6, which holds the full raise history and rationale. The assertion there is the
+AUTHORITY and this line MUST be resynced whenever it moves; the number living in TWO places is
+why. Raising it again should prompt "what was added?"), and the differential suites assert
 that core and verify produce identical verdicts *and identical error strings* on clean,
 tail-truncated, segment-deleted, rotated, `toJSON`-bearing, and hand-tampered vaults.
 
