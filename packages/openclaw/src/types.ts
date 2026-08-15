@@ -445,7 +445,15 @@ export interface UsertrustPluginConfig {
 	tier?: "free" | "mini" | "pro" | "mega" | "ultra";
 	dryRun?: boolean;
 	configPath?: string;
+	/**
+	 * @deprecated AUD-456: Remote proxy mode is not implemented. Forwarded to
+	 * `createGovernor({ proxy })`, which throws. Use a local TigerBeetle or
+	 * `dryRun` for enforcement.
+	 */
 	proxy?: string;
+	/**
+	 * @deprecated AUD-456: Proxy API key. Unused — `proxy` throws first.
+	 */
 	proxyKey?: string;
 	/** Vault directory (audit chain, spend ledger). Defaults to cwd. */
 	vaultBase?: string;

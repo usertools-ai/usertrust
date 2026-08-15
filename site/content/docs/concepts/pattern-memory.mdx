@@ -81,6 +81,6 @@ A process-local async mutex serializes writes to prevent concurrent corruption.
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `patterns.enabled` | boolean | `true` | Enable or disable pattern recording |
-| `patterns.feedProxy` | boolean | `false` | Forward pattern data to a remote proxy for aggregation |
+| `patterns.feedProxy` | boolean | `false` | Unused. Reserved for a removed remote-proxy aggregation path; has no effect. |
 
 When `patterns.enabled` is `false`, `recordPattern()` is a no-op and `suggestModel()` always returns `null`.

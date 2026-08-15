@@ -14,7 +14,9 @@ Options passed to `trust()`. See [trust()](/docs/api/trust) for full documentati
 ```typescript
 interface TrustOpts {
   configPath?: string;
+  /** @deprecated Not implemented. Setting this throws (AUD-456). */
   proxy?: string;
+  /** @deprecated Proxy API key. Unused because proxy throws. */
   key?: string;
   budget?: number;
   tier?: string;
@@ -152,7 +154,9 @@ The full configuration schema. See [Configuration](/docs/api/config) for field-l
 type TrustConfig = {
   budget: number;
   tier: "free" | "mini" | "pro" | "mega" | "ultra";
+  /** @deprecated Remnant of removed remote-proxy mode. Does not connect. */
   proxy?: string;
+  /** @deprecated Proxy API key. Unused. */
   key?: string;
   policies: string;
   pii: "redact" | "warn" | "block" | "off";

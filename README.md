@@ -252,18 +252,9 @@ A counter in a database is not a financial ledger. `usertrust` uses the same dou
 | Offline-first | Local vault | Proxy required | Proxy required | Proxy required |
 | Open source | Apache 2.0 | Apache 2.0 | Proprietary | Apache 2.0 |
 
-## Upgrade path
+## Enforcement
 
-When you outgrow local mode, point at the proxy. One line:
-
-```typescript
-const client = await trust(new Anthropic(), {
-  proxy: "https://proxy.usertools.ai",
-  key: process.env.USERTOOLS_KEY,
-});
-```
-
-Same API. Same receipts. Now with cross-agent budget enforcement, centralized audit, and real-time dashboards.
+Budget enforcement is local. Connect a TigerBeetle instance for production, or pass `dryRun: true` to skip the ledger (audit and policy still run). Remote proxy mode is not implemented — passing `proxy` to `trust()` or `createGovernor()` throws.
 
 ## Verify
 
