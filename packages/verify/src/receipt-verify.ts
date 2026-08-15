@@ -1605,7 +1605,15 @@ export interface TrustKey {
 	readonly state: TrustKeyState;
 	readonly minterKind?: string;
 	readonly predecessorKeyId?: string;
-	/** §8's offline retirement boundary. Present iff `state === "retired"`. */
+	/**
+	 * §8's rotation boundary. Present iff the key is `retired` OR is named as
+	 * another key's `predecessorKeyId` — NOT `retired` alone.
+	 *
+	 * Meaningful ONLY through the lineage edge, as the predecessor's upper bound
+	 * and its successor's lower bound; never a property of the key carrying it.
+	 * So a `revoked` key no other key names as predecessor may carry a value that
+	 * is explicitly ignored, and no verifier may derive anything from it.
+	 */
 	readonly activationSequence?: number;
 	readonly publicKey: KeyObject;
 	/** `sha256:…` over the SPKI DER — the identity used to spot shared material. */

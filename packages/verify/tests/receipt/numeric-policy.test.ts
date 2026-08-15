@@ -236,7 +236,8 @@ const REGISTRY: Readonly<Record<string, ParseSiteDisposition>> = {
 	},
 	"verify.ts": {
 		sites: 2,
-		policy: "MIRRORED into packages/core — out of scope for this ship; disposition tracked internally.",
+		policy:
+			"MIRRORED into packages/core — out of scope for this ship; disposition tracked internally.",
 	},
 	"cli.ts": {
 		sites: 1,
