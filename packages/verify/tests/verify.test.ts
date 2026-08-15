@@ -1329,7 +1329,14 @@ describe("verifyVault", () => {
 		expect(result.merkleRoot).toBeNull();
 	});
 
-	it("skips reading a rotated segment file that was deleted (broken symlink)", () => {
+	it("FAILS on a segment it cannot read, rather than skipping it", () => {
+		// This asserted the opposite until a review pointed out what it was
+		// guaranteeing: that an unreadable segment is indistinguishable from an
+		// absent one. A dangling `*.jsonl` in `audit/` is a segment that EXISTED —
+		// verification cannot see its events, so it cannot attest to the chain, and
+		// `valid: true` there is a clean bill on evidence nobody opened. The same
+		// `catch` covers a live `events.jsonl` whose bytes are unreadable, which is
+		// how `usertrust health` came to print `verified` for a vault it never read.
 		const mainLines = buildChain([{ kind: "llm_call", actor: "local", data: { stable: true } }]);
 		writeChainToVault(vaultPath, mainLines);
 
@@ -1337,7 +1344,7 @@ describe("verifyVault", () => {
 		symlinkSync("/nonexistent/path/file.jsonl", brokenLink);
 
 		const result = verifyVault(vaultPath);
-		expect(result.valid).toBe(true);
-		expect(result.chainLength).toBe(1);
+		expect(result.valid).toBe(false);
+		expect(result.errors.join(" ")).toMatch(/could not be read/i);
 	});
 });

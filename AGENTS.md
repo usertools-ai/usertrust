@@ -855,7 +855,39 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **thirteen** sanitizers, in two variants. Do not consolidate them onto the weaker one.
+There are **fourteen** sanitizers, in two variants: **eight** neutralise C1 and **six** do not. Do
+not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
+because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
+untouched. A total is not an inventory.
+
+**WHAT THE COUNT GUARD CLAIMS, AND WHAT IT DOES NOT.** It counts constructs matching the sanitizer
+SHAPES documented here. It does **not** certify that any of them neutralises anything. A green run
+means *the inventory has not drifted*; it never means *the terminal is safe*. The distinction is
+not pedantic — it was unwritten for twenty-two review rounds, during which the guard was measured
+against what its filename suggested (`false-ok.test.ts`) rather than against any stated claim, and
+acquired an ambition a static matcher cannot fulfil. **A source-text matcher cannot enforce a
+behavioural property**: `/[\x00-\x1f\x7f-\x9f](?=\w)/g` satisfies every structural check and every
+fixed probe context, and still leaves ESC untouched in `\x1b[2J`. There is no fixed point to reach,
+so the claim is bounded instead. Known limits, all of which let a NON-sanitizer be counted: a
+replacement argument that preserves or re-emits (`"$&"`, `(ch) => ch`), a ternary whose result is
+never appended, an identifier resolved file-wide rather than by scope, and context-dependent
+patterns as above. Behavioural safety is established by the tests that exercise these paths, not
+here.
+
+**A whole-repo command asserts over A TREE, not THE REPO.** This repo is worked in through several
+git worktrees at once, so `packages/*/src` means something different depending on where the command
+ran. The sanitizer count is 11 on one branch and 13 on another and BOTH are correct — they are
+counting different trees. The same class produced a false "master is red" alarm from a `biome check`
+run at a root that swept in sibling worktrees' configs. Scope a global assertion to the tree that
+owns it: the count guard derives its root from its own file location, so it compares a tree's
+sanitizers against that tree's AGENTS.md, never one against the other.
+
+The total is pinned by `core/tests/harden/false-ok.test.ts`, which counts what a sanitizer DOES —
+the C1 comparison for the stronger variant, the control-character class for the weaker — rather
+than matching known function or constant names. Two earlier versions matched names — first the function names, then the
+`CONTROL_CHARS` binding — and each reported a smaller inventory than existed the moment a copy
+landed under a different name. So a new copy is counted whatever it is called, and whatever its
+constant is called: add a bullet here and update the total.
 
 The entries below are deliberately NOT numbered. They used to be ("a seventh", "an eighth"), and
 adding one meant renumbering every later entry — so a new copy was added and the ordinals silently
@@ -898,6 +930,23 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   interchangeable, and the choice belongs at the render site, not at the value's source — applying
   the terminal scrubber inside the loader corrupted the JSON diagnostic in exactly that way before
   it was moved.
+- The stronger variant in a SHIPPED HOOK rather than a `src/` tree: `sanitizeReason` in
+  `claude-code-plugin/hooks/pre-tool-use.mjs`, which strips C0/DEL/C1 from server-provided text
+  before it becomes a permission-decision reason, and clips afterwards. This one was invisible to
+  the count guard for its entire existence, because the traversal walked `packages/*/src` and that
+  package has no `src/` — it ships `hooks/*.mjs`. It is listed last because it is the newest entry
+  to the *inventory*, not the newest code: it predates the guard that failed to see it. **Scope a
+  source-wide assertion by what SHIPS, not by the directory layout the other packages happen to
+  use** — that is the same lesson as the worktree note above, one level out.
+
+**THE INVENTORY'S SCOPE IS DECLARED HERE, and the guard matches this sentence.** It covers
+`packages/*/src` — the TypeScript build inputs, which are what `files: ["dist"]` publishes — plus
+`packages/*/hooks`, the directory the plugin package actually ships. Everything else is **out of
+scope by decision**: `packages/core/bin/govern.ts` is dead code (see below), and demos, build
+configs and tests are not shipped. Three review rounds tried to infer this scope from the tree and
+produced, in order, too narrow, then too narrow again, then too wide — a scope that can be argued
+in both directions is one that has to be written down rather than derived. A file added outside
+this scope is invisible to the count guard; if it ships, widen this sentence and the guard together.
 
 That C1 coverage is not an accident of style. `budget.ts` quotes attacker-controlled argv back to
 the operator in every invalid-value message, and its own comment names the attack
@@ -987,11 +1036,14 @@ Drop every line whose raw text contains `from "`, then require exact string equa
   lines **are** compared, so both packages must import the same names in the same order and may
   differ only in the module path.
 
-Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 9200 (a
-vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200 as `packages/verify` grew legitimate
-node-builtins-only surface — see `packages/core/tests/harden/anchoring/anchor-additive.test.ts`
-assertion 6 for the full raise history and rationale; the assertion there is the authority and this
-line MUST be resynced whenever it moves; raising it again should prompt "what was added?"), and the differential suites assert
+Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 9600 (a
+vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600 on this line as
+`packages/verify` grew legitimate node-builtins-only surface, with master separately raising
+4200→4300→4320 for its own receipt-hardening work over the same period — both lineages are folded
+in here and both are recorded in `packages/core/tests/harden/anchoring/anchor-additive.test.ts`
+assertion 6, which holds the full raise history and rationale. The assertion there is the
+AUTHORITY and this line MUST be resynced whenever it moves; the number living in TWO places is
+why. Raising it again should prompt "what was added?"), and the differential suites assert
 that core and verify produce identical verdicts *and identical error strings* on clean,
 tail-truncated, segment-deleted, rotated, `toJSON`-bearing, and hand-tampered vaults.
 

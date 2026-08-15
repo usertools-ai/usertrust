@@ -331,11 +331,51 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// Most of the count is prose again, and for the same reason as round 9:
 		// what stops a fifth round is the written enumeration, not the predicate.
 		// Post-round total: 9035. 9200 leaves 165 lines of headroom.
+		//
+		// ── PARALLEL LINEAGE ON MASTER, merged in here. ──────────────────────
+		// While this branch went 4200 → 9200 for the receipt verifier, master
+		// independently raised 4200 → 4300 → 4320 for its own receipt-hardening
+		// work. Those lines are now IN this total, so their record belongs in this
+		// trail — a raise history that silently drops a branch's reasons stops
+		// being an audit trail. Master's entries, preserved verbatim in substance:
+		// receipt verification — no vendored source).
+		//
+		// Raised again from 4200 for the receipt-hardening work. WHAT WAS ADDED,
+		// since answering that is the whole point of this tripwire: `normalizeEvent`
+		// in index.ts, which coerces each parsed `events.jsonl` record into a
+		// guaranteed shape so the untrusted log cannot turn verification into an
+		// uncaught throw; terminal-evidence ranking in the same file; and the
+		// anomaly-evidence line in receipt.ts. All hand-written, node-builtins-only,
+		// and roughly half of it explanatory comment. NO vendored source — which is
+		// the thing this number exists to catch, and the reason the honest response
+		// here was to raise it rather than to shave comments to duck it.
+		//
+		// Raised again from 4300, for two selection defects in the same file. WHAT
+		// WAS ADDED: `firstIsSettlement` now tests terminal KIND instead of the
+		// presence of `settled`, because `llm_call_failed` carries `settled: false`
+		// and a presence test let an appended ambiguity downgrade a FAILURE into
+		// "we do not know"; and the anomaly-evidence window is now bounded by the
+		// FIRST terminal rather than the selected one, because ambiguity moves the
+		// selection later and slid the boundary past an appended detection. Both are
+		// forgery vectors, both hand-written, node-builtins-only, no vendored
+		// source. I trimmed these comments twice trying to fit under 4300 before
+		// noticing this block already says not to do that.
+		//
+		// 9200 → 9600, merging origin/master into this branch (2026-08-14). NOT new
+		// surface from this ship: the merge folded in master's own receipt-hardening
+		// work — index.ts +222 and receipt.ts +111 — plus +10 here for a doc-comment
+		// correction on `activationSequence`. Recomputed rather than assumed: the
+		// post-merge total is 9378, which the 9200 ceiling would have failed. (a) was
+		// re-verified directly and both invariants hold — every import in
+		// packages/verify/src is still `node:*` or `./`-relative, and `dependencies`
+		// is still `{}` — so the thing this tripwire exists to catch did not happen.
+		// Raised to fit the work, per this block's own standing instruction; 222
+		// lines of headroom rather than shaving master's hardening to duck a number.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(9200);
+		expect(total).toBeLessThan(9600);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {
