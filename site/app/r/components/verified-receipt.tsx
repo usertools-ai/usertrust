@@ -5,23 +5,17 @@ import AdvisoryBands from "./advisory-bands";
 import AnchorEvidencePanels from "./anchor-evidence";
 import CheckLedger from "./check-ledger";
 import DisplayAnnex from "./display-annex";
-import ReceiptArtifact from "./receipt-artifact";
 import ReceiptCard from "./receipt-card";
-import VerdictMasthead from "./verdict-masthead";
 import WorkClaims from "./work-claims";
 
 /**
- * The visitor card is first: action → proven → invoice → verify command,
- * matching `docs/specs/receipt-page/`. Advisories stay above it so a
- * superseded receipt says so before the reader starts the audit motion.
+ * The visitor card IS the receipt. Advisories stay above it so a superseded
+ * receipt says so before the audit motion starts. Ledger, extension evidence,
+ * work-claims and the display annex stay below as the check-it-yourself
+ * surfaces — they are not a second receipt.
  *
- * The §6 verify exhibit (masthead, paper, ledger, annex) stays below. Those
- * surfaces still carry the honesty-critical copy the rendering tests pin
- * (fork disclaimer, check ledger, R13 comparison). Cutting them is a spec
- * amendment, not a silent restyle.
- *
- * The verify command on the card is now licensed: `usertrust-verify receipt`
- * shipped in #106. §11's gate on that command has been met.
+ * The §6 masthead and thermal-paper artifact are gone from this page. Their
+ * honesty-critical copy (R5–R8, R18, R20–R27, R38–R41) moved onto the card.
  */
 export default function VerifiedReceipt({ state }: { state: VerifiedState }) {
 	const { envelope } = state;
@@ -34,9 +28,7 @@ export default function VerifiedReceipt({ state }: { state: VerifiedState }) {
 			data-state="verified"
 		>
 			<AdvisoryBands advisories={envelope.advisories} />
-			<ReceiptCard model={card} />
-			<VerdictMasthead rung={state.rung} />
-			<ReceiptArtifact receipt={envelope.receipt} claims={claims} />
+			<ReceiptCard model={card} claims={claims} receipt={envelope.receipt} rung={state.rung} />
 			<CheckLedger verification={envelope.verification} membershipNote={claims.membershipNote} />
 			<AnchorEvidencePanels
 				anchorEvidence={envelope.anchorEvidence}

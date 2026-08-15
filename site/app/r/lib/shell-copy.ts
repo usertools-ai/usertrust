@@ -24,7 +24,7 @@
  * test.ts` asserts them directly, and D1/R37's "the two never share copy"
  * rule is a property of these three exact strings.
  */
-import { LEDGER_ROWS, RUNG_VERDICT_WORD } from "./claims";
+import { LEDGER_ROWS } from "./claims";
 import type { CheckName, IntegrityCause, PageState, RetryAfter, StepName } from "./wire";
 
 // ===========================================================================
@@ -198,6 +198,13 @@ export function retryAfterLine(retryAfter: RetryAfter | undefined): string | nul
 }
 
 // ===========================================================================
+// Verified (200) — the visitor card names the artifact type
+// ===========================================================================
+
+/** Header of the live receipt. The Proven ladder is the verdict; this is not. */
+export const RECEIPT_ARTIFACT_HEADLINE = "Receipt";
+
+// ===========================================================================
 // The headline this task renders for a given {@link PageState}.
 // ===========================================================================
 
@@ -215,13 +222,11 @@ export function shellHeadline(state: PageState): string {
 			return PROTOCOL_ERROR_HEADLINE;
 		case "verificationUnavailable":
 			return VERIFICATION_UNAVAILABLE_HEADLINE;
-		// The §6 anatomy renders the verified rungs (`components/verified-receipt`),
-		// so this branch is only a fallback for a caller that wants a headline
-		// string. It DELEGATES to `claims.ts` rather than rebuilding the word from
-		// the status enum: two independent ways of spelling the verdict is exactly
-		// the drift the §8 copy pins exist to prevent.
+		// The visitor card's header names the artifact type, not the rung.
+		// The Proven ladder is the verdict. OG and the integration pin share
+		// this string so a share card cannot say something the page does not.
 		case "verified":
-			return RUNG_VERDICT_WORD[state.rung];
+			return RECEIPT_ARTIFACT_HEADLINE;
 		case "pending":
 			return state.status === "reserved" ? RESERVED_HEADLINE : RECONCILING_HEADLINE;
 		case "terminalNoReceipt":
