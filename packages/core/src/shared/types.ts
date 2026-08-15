@@ -243,6 +243,28 @@ export const TrustConfigSchema = z.object({
 			}
 		})
 		.optional(),
+	/**
+	 * Operator-declared policy scopes this governor's calls run under.
+	 *
+	 * OPTIONAL, and it must stay optional: a governor that never uses
+	 * `scopePatterns` rules needs none, and every config written before this
+	 * field existed keeps parsing to exactly the same object (no key
+	 * materialises, no default is invented).
+	 *
+	 * TRUSTED-OPERATOR input, same boundary as budget/parentUserId. Never
+	 * derive it from end-user or request data: `scopePatterns` match THIS
+	 * value, so a request-body `scope` would let a tenant volunteer into (or,
+	 * if we treated it as authority, dodge) a scoped deny.
+	 *
+	 * Each entry is a non-empty path-like label. Control characters, spaces,
+	 * and glob metacharacters are refused — globs belong on the rule, not on
+	 * the host scope — so a scope cannot carry a terminal-repaint into an
+	 * audit message that quotes it.
+	 */
+	scope: z
+		.array(z.string().regex(/^[a-zA-Z0-9._@:+/-]{1,128}$/))
+		.max(32)
+		.optional(),
 	policies: z.string().default("./policies/default.yml"),
 	pii: z.enum(["redact", "warn", "block", "off"]).default("warn"),
 	injection: z.enum(["block", "warn", "off"]).default("warn"),

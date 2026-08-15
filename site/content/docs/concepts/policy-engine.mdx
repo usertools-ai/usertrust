@@ -35,6 +35,9 @@ interface PolicyResult {
 A policy rule specifies conditions, scope, enforcement, and optional time windows:
 
 ```yaml
+# usertrust.config.json — operator-declared host scope (required for the rule below)
+# { "budget": 100000, "scope": ["production/api"] }
+
 # .usertrust/policies/default.yml
 rules:
   - name: block-expensive-models
@@ -76,7 +79,14 @@ See [Policy Operators](/docs/policy/operators) for detailed usage and examples o
 
 ## Scope Matching
 
-Scopes use [minimatch](https://github.com/isaacs/minimatch) glob patterns to target specific contexts:
+`scopePatterns` match the **operator-declared** `scope` on the governor or config — never request content. Set it the same way you set `budget` or `parentUserId`:
+
+```ts
+await trust(client, { scope: ["production/api"] });
+// or in usertrust.config.json: { "scope": ["production/api"] }
+```
+
+The patterns themselves are [minimatch](https://github.com/isaacs/minimatch) globs:
 
 ```yaml
 scopePatterns: ["production/*"]          # all production sub-scopes
@@ -84,7 +94,9 @@ scopePatterns: ["development/**"]        # development and all nested scopes
 scopePatterns: ["*/billing"]             # billing scope in any environment
 ```
 
-If a rule has no `scopePatterns` field, it matches all scopes.
+If the operator sets no `scope`, a rule with `scopePatterns` never matches — adding a pattern does not "narrow a live rule"; it stays inert until the host declares a matching scope. A request body / `params.params.scope` cannot volunteer one.
+
+If a rule has no `scopePatterns` field, it matches all calls.
 
 ## Time Windows
 

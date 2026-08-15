@@ -727,23 +727,24 @@ and requires every declared field to appear in exactly one of the two — so a n
 cannot be left unclassified. *Why a mechanism and not one more literal:* the hand-maintained list
 had already been found incomplete once (`timestamp`, PR #95).
 
-**`scope` is deliberately NOT stripped, and this is not an oversight.** For `timestamp`, absence is
-the SAFE state — the gate falls back to the real clock. For `scope`, absence is the PERMISSIVE
-state: `ruleMatches` requires a non-empty `context.scope` for any rule carrying `scopePatterns`, and
-**nothing in `src/` populates it**. Stripping it would not close a hole; it would make every
-`scopePatterns` rule permanently inert. The two fields look like the same kind and are opposites.
-The live issue there is docs-vs-code — the docs present a `scopePatterns` rule as the flagship
-example and state that an absent `scopePatterns` "matches all scopes", i.e. that adding one narrows
-a live rule, while such a rule structurally never fires. Unresolved; do not "fix" it by adding
-`scope` to the stripped set.
+**`scope` is host-owned.** The operator declares it on `TrustConfig.scope` / `TrustOpts.scope`
+(same trusted-operator boundary as `parentUserId` / `budget`). All three `evaluatePolicy` sites
+assert `config.scope` after `sanitizePolicyContext(...)`, **including `undefined` when the operator
+declared none**. `scope` is in `HOST_CONTROLLED_POLICY_FIELDS`, so a request body /
+`params.params.scope` cannot volunteer a match. `ruleMatches` still requires a non-empty
+`context.scope` for any rule carrying `scopePatterns`: if the operator sets no `scope`, a scoped
+rule never matches (it does not "narrow a live rule"). An absent `scopePatterns` still matches all
+calls. Do not move `scope` back to `CALLER_SUPPLIED_POLICY_FIELDS` — that was AUD-002, the hole
+where a remote tenant could satisfy the docs' flagship production-only deny and an honest host
+never could.
 
 There are exactly three call sites, and **their field sets differ** — check against this list, do
 not assume they are the same:
 
 | Call site | Re-asserted after the spread |
 |---|---|
-| `govern.ts` — LLM path | `model`, `tier`, `estimated_cost`, `budget_remaining`, `budget_remaining_after`, `budgetFractionRemaining`, `budgetRunwayHours`, `timestamp`, `cost_center` |
-| `govern.ts` — `governAction` | `action_kind`, `action_name`, `estimated_cost`, `budget_remaining`, `budget_remaining_after`, `tier`, `budgetFractionRemaining`, `budgetRunwayHours`, `timestamp`, `cost_center` (**no `model`**) |
+| `govern.ts` — LLM path | `model`, `tier`, `estimated_cost`, `budget_remaining`, `budget_remaining_after`, `budgetFractionRemaining`, `budgetRunwayHours`, `timestamp`, `cost_center`, `scope` |
+| `govern.ts` — `governAction` | `action_kind`, `action_name`, `estimated_cost`, `budget_remaining`, `budget_remaining_after`, `tier`, `budgetFractionRemaining`, `budgetRunwayHours`, `timestamp`, `cost_center`, `scope` (**no `model`**) |
 | `headless.ts` — `authorize` | same set as the LLM path |
 
 `timestamp` is on that list because it is the gate's CLOCK: `ruleMatches` evaluates a rule's

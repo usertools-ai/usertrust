@@ -445,8 +445,24 @@ export function isWithinTimeWindow(
  * time-window matching respectively.
  */
 export interface PolicyContext extends Record<string, unknown> {
-	/** Optional scope patterns to match against rule scope conditions */
-	scope?: string[];
+	/**
+	 * Operator-declared scopes this call runs under — the value
+	 * `scopePatterns` is matched against.
+	 *
+	 * TRUSTED HOST INPUT ONLY. Its value is `TrustConfig.scope` /
+	 * `TrustOpts.scope`, never request content. All three SDK call sites
+	 * strip a caller-supplied `scope` and then re-assert the host value —
+	 * including asserting `undefined` when the operator declared none — so
+	 * a body carrying `{"scope": ["production/api"]}` cannot volunteer
+	 * into a `scopePatterns` deny, and cannot satisfy one the host did not
+	 * opt into.
+	 *
+	 * Declared `| undefined` so a call site under `exactOptionalPropertyTypes`
+	 * can write the field explicitly as `undefined` to overwrite an untrusted
+	 * inbound value. Absent / empty means a `scopePatterns` rule does not
+	 * match: it does not "narrow a live rule", it stays inert.
+	 */
+	scope?: string[] | undefined;
 	/** Optional time windows for temporal constraints */
 	timeWindows?: TimeWindow[];
 	/**
@@ -639,6 +655,7 @@ export const HOST_CONTROLLED_POLICY_FIELDS = [
 	"budgetFractionRemaining",
 	"budgetRunwayHours",
 	"cost_center",
+	"scope",
 ] as const;
 
 /**
@@ -648,24 +665,20 @@ export const HOST_CONTROLLED_POLICY_FIELDS = [
  * these two lists, so a newly added field cannot be quietly omitted from both —
  * whoever adds it has to make the trust call explicitly and record it here.
  *
- * - `scope` — CALLER-DECLARED CONTEXT, not a host secret. Unlike `timestamp`
- *   (where the gate has a real clock to fall back on) there is no host-side
- *   source for it on any SDK path: no call site in `src/` ever sets
- *   `context.scope`, and the patterns it is matched against are file globs
- *   (`src/routes/**`) describing where an agent is working — something only the
- *   caller knows. Stripping it would not close a hole; it would make every
- *   `scopePatterns` rule permanently inert, since `ruleMatches` requires a
- *   non-empty context scope for such a rule to match at all. That trade is a
- *   product decision (wire a host-side scope, or document scope as
- *   self-declared and unsuitable for adversarial guards) and is tracked
- *   separately rather than being made silently here.
  * - `timeWindows` — read by nothing. `ruleMatches` consults `rule.timeWindows`;
  *   `context.timeWindows` has no reader anywhere in the repo despite the
  *   interface doc claiming it "enables time-window matching". Stripping a field
  *   nothing reads would imply it once mattered. It wants deleting or wiring, not
  *   sanitising.
+ *
+ * `scope` used to live here as "caller-declared, no host source". That was
+ * the AUD-002 hole: a remote tenant could volunteer a matching scope via
+ * `params.params.scope`, and an honest host never set one, so the docs'
+ * flagship `scopePatterns` deny never fired. It is host-owned now — see
+ * {@link HOST_CONTROLLED_POLICY_FIELDS} — because `TrustConfig.scope` /
+ * `TrustOpts.scope` is the host source. Do not move it back.
  */
-export const CALLER_SUPPLIED_POLICY_FIELDS = ["scope", "timeWindows"] as const;
+export const CALLER_SUPPLIED_POLICY_FIELDS = ["timeWindows"] as const;
 
 /**
  * Context keys a governor ASSERTS itself, which `PolicyContext` does not declare.

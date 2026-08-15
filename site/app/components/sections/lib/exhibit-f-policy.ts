@@ -2,9 +2,11 @@
  * Exhibit F data. Two real GateRules in the exact YAML shape
  * packages/core/src/policy/gate.ts loadPolicies() accepts (`rules:` list;
  * conditions use the shared FieldCondition {field, operator, value};
- * scopePatterns are minimatch globs; timeWindows use daysOfWeek/startHour/
- * endHour). Context field names are the ones govern.ts actually asserts:
- * model, estimated_cost, cost_center.
+ * scopePatterns are minimatch globs and only fire when the operator
+ * declared a matching `scope` on the governor/config — they are not an
+ * out-of-the-box guard against request content; timeWindows use
+ * daysOfWeek/startHour/endHour). Context field names are the ones
+ * govern.ts actually asserts: model, estimated_cost, cost_center, scope.
  *
  * Kept out of JSX so no digit literal appears in marketing JSX text
  * (check-facts) and so the node:test suite plus the engine-validation
@@ -66,6 +68,7 @@ export const POLICY_LINES: PolicyLine[] = [
 			{ t: ', value: "^gpt-x" }' },
 		],
 	},
+	{ segs: [{ t: "    # fires only if the operator set scope matching agents/research/**" }] },
 	{ segs: [{ t: '    scopePatterns: ["agents/research/**"]' }] },
 	{
 		segs: [{ t: "    timeWindows: [{ daysOfWeek: [1, 2, 3, 4, 5], startHour: 9, endHour: 18 }]" }],

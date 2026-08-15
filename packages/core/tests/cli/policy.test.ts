@@ -87,7 +87,7 @@ describe("usertrust policy validate", () => {
 		expect(process.exitCode).toBeUndefined();
 	});
 
-	it("flags a scopePatterns rule as conditional on a caller-supplied scope", async () => {
+	it("flags a scopePatterns rule as inert unless the operator declared a host scope", async () => {
 		writePolicy(`rules:
   - id: prod-only
     name: Prod only
@@ -100,7 +100,8 @@ describe("usertrust policy validate", () => {
         value: opus
 `);
 		await run(tempDir, { json: false }, ["validate"]);
-		expect(out()).toContain("only matches calls that supply a matching context scope");
+		expect(out()).toContain("matches only the operator-declared scope on the governor/config");
+		expect(out()).toContain("with no host scope this rule never fires");
 	});
 
 	it("--json reports ok/rules/issues machine-readably", async () => {
