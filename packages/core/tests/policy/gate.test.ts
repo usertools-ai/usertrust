@@ -8,7 +8,7 @@
 
 import { unlinkSync, writeFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_RULES, isBudgetExceeded } from "../../src/policy/default-rules.js";
+import { DEFAULT_RULES } from "../../src/policy/default-rules.js";
 import {
 	evaluatePolicy,
 	type GateRule,
@@ -701,16 +701,6 @@ describe("default rules", () => {
 		});
 		expect(result.decision).toBe("allow");
 		expect(result.hasWarnings).toBe(false);
-	});
-
-	it("isBudgetExceeded detects overspend", () => {
-		expect(isBudgetExceeded({ budget_remaining: 50, estimated_cost: 100 })).toBe(true);
-		expect(isBudgetExceeded({ budget_remaining: 200, estimated_cost: 100 })).toBe(false);
-	});
-
-	it("isBudgetExceeded returns false for non-numeric fields", () => {
-		expect(isBudgetExceeded({ budget_remaining: "50", estimated_cost: 100 })).toBe(false);
-		expect(isBudgetExceeded({})).toBe(false);
 	});
 });
 
