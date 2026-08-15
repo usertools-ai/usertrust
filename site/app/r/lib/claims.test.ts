@@ -219,22 +219,25 @@ const sessionWork: Work = { kind: "session", repoId: "github.com:R_kgDOK1x2Yw" }
 
 test("R13: the three headline forms are the spec's own words, per kind", () => {
 	assert.equal(
-		headlineClaim(commitWork),
+		headlineClaim(commitWork, "4.8224"),
 		"attests commit 12283b89ad55b584c7959394a527e24da0ec1f5e in github.com:R_kgDOK1x2Yw",
 	);
 	assert.equal(
-		headlineClaim(prWork),
+		headlineClaim(prWork, "0.3300"),
 		"attests r1_9f2a7c31e8b4 PR #412 at revision 4a7459a0ca3e4a9882985df4baa1079fc40ada00",
 	);
 	assert.equal(
-		headlineClaim(issueWork),
+		headlineClaim(issueWork, "0.0600"),
 		"attests github.com:R_kgDOK1x2Yw issue #231 at revision e4689855dad05ef1b6ee459c7e354ad1f41d65dc",
 	);
-	assert.equal(headlineClaim(sessionWork), "produced under this governed session");
+	assert.equal(
+		headlineClaim(sessionWork, "0.7700"),
+		"produced under this governed session — $0.7700",
+	);
 });
 
 test("R13: the headline uses the FULL oid and the repoId — never a prefix, never the name", () => {
-	const headline = headlineClaim(commitWork);
+	const headline = headlineClaim(commitWork, "4.8224");
 	assert.ok(headline.includes(commitWork.kind === "commit" ? commitWork.oid : ""));
 	assert.ok(headline.includes("github.com:R_kgDOK1x2Yw"));
 	assert.ok(
@@ -244,12 +247,9 @@ test("R13: the headline uses the FULL oid and the repoId — never a prefix, nev
 });
 
 test("R14: session carries NO artifact claim and states the promotion-gate rule", () => {
-	const headline = headlineClaim(sessionWork);
+	const headline = headlineClaim(sessionWork, "0.7700");
 	assert.ok(!/attests/.test(headline), "a session headline never says it attests an artifact");
-	assert.ok(
-		!headline.includes("$"),
-		"the amount lives only beside its scope, never in the headline",
-	);
+	assert.match(headline, /\$0\.7700/, "R13's session form names the amount");
 	assert.equal(
 		SESSION_NON_ARTIFACT,
 		"a session receipt attests a governed session's spend and nothing about any commit, PR, or issue that happens to cite it.",

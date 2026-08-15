@@ -617,6 +617,36 @@ test("R39/R40: neither the scope statement nor the floor claim is behind interac
 	}
 });
 
+test("R13/R39: a session $X is the frozen headline, and its scope sits beside both restatements", () => {
+	for (const file of [
+		"session-owner-estimated.json",
+		"session-workflow-attested.json",
+		"session-fallback.json",
+	]) {
+		const { html, text, state } = renderFixture(file);
+		assert.equal(state.envelope.receipt.work.kind, "session", file);
+		assertContains(text, "produced under this governed session — $", `${file}: R13 names $X`);
+		const paperAt = html.indexOf('data-testid="headline-amount-scope"');
+		const workAt = html.indexOf('data-testid="work-amount-scope"');
+		const spendScope = html.indexOf('data-testid="amount-scope"');
+		assert.ok(paperAt !== -1, `${file}: paper companion`);
+		assert.ok(workAt !== -1, `${file}: WorkClaims companion`);
+		assert.ok(
+			spendScope !== -1 && paperAt < spendScope,
+			`${file}: paper scope precedes SpendBlock`,
+		);
+		assert.ok(
+			!html.slice(paperAt, spendScope).includes('data-amount-bound="floor"'),
+			`${file}: the headline companion does not carry the floor`,
+		);
+		assertContains(
+			text,
+			DELEGATION_POSTURE_SCOPE[state.envelope.receipt.event.data.delegationPosture],
+			`${file}: R39's framing reaches the page`,
+		);
+	}
+});
+
 test("R40: a selfDebitsOnly amount renders as a FLOOR on caused cost, beside the exact charged figure", () => {
 	const { html, text, state } = renderFixture("commit-checkpoint.json");
 	const projection = state.envelope.receipt.event.data;
@@ -971,17 +1001,11 @@ test("C15 issue-public.json — the issue headline and DIRECT recomputation", ()
 
 test("C16 session-owner-estimated.json — non-artifact, estimate caveat, the custom literal", () => {
 	const { html, text } = renderFixture("session-owner-estimated.json");
-	// R13/R14 — a session headline makes NO artifact claim.
-	assertContains(text, "produced under this governed session", "R13's session form");
-	assertOmits(
-		text,
-		"produced under this governed session — $",
-		"the amount is not restated in the headline; it lives only beside its scope",
-	);
-	const headline = html.match(/data-testid="headline-claim"[^>]*>[^<]*/)?.[0] ?? "";
-	const workClaim = html.match(/data-testid="scope-claim"[^>]*>[^<]*/)?.[0] ?? "";
-	assert.ok(!headline.includes("$"), "the paper headline does not name the figure");
-	assert.ok(!workClaim.includes("$"), "WorkClaims restates the same unqualified-less headline");
+	// R13/R14 — a session headline makes NO artifact claim; $X is the
+	// frozen form, scoped beside the figure rather than dropped.
+	assertContains(text, "produced under this governed session — $0.7700", "R13's session form");
+	assert.ok(html.includes('data-testid="headline-amount-scope"'), "R39 sits beside the paper $X");
+	assert.ok(html.includes('data-testid="work-amount-scope"'), "R39 sits beside WorkClaims' $X");
 	assertOmits(text, "attests commit", "R14: no artifact claim");
 	assertContains(text, SESSION_NON_ARTIFACT, "R14, verbatim");
 	assertContains(text, SESSION_PROMOTION_GATE, "R14's promotion-gate rule");

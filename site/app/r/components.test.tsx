@@ -637,6 +637,16 @@ test("AnchorEvidencePanels: a PASSED Rekor attachment carries R8's caveat; a FAI
 // WorkClaims (R13/R14/R15) and ReceiptArtifact (§6.2)
 // ---------------------------------------------------------------------------
 
+test("WorkClaims: a session restatement of $X carries R39 and no floor", () => {
+	const claims = receiptClaims(
+		verifiedFixtureState("session-owner-estimated.json").envelope.receipt,
+	);
+	const markup = html(<WorkClaims claims={claims} />);
+	assert.ok(markup.includes('data-testid="work-amount-scope"'));
+	assert.ok(textOf(markup).includes(claims.delegation.claim), "R39 sits beside the restated $X");
+	assert.ok(!markup.includes('data-amount-bound="floor"'), "R40 stays on the paper SpendBlock");
+});
+
 test("WorkClaims: every axis of the per-kind comparison renders, in order", () => {
 	for (const [file, axes] of [
 		["commit-checkpoint.json", ["IDENTITY", "BYTES", "BYTES, OUTSIDE PROMOTION"]],

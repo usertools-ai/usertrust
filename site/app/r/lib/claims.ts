@@ -220,12 +220,12 @@ export function amountUsdFromUsertokens(assessedUsertokens: number): string {
 /**
  * R13 — the headline claim, scoped to what the receipt EMBEDS, in the spec's
  * own words. Three forms, one per `work.kind`; `session` carries NO artifact
- * claim at all. The dollar figure is not restated here: it lives only in
- * `SpendBlock`, beside the scope that says what it covers (R39/R40). A
- * session headline that named the amount would present an unqualified figure
- * in the header and again in `WorkClaims`.
+ * claim at all, which is why it takes the amount instead of an artifact.
+ * That `$X` is still an amount, so R39's scope (and the epistemic frame)
+ * render beside it on the paper and in `WorkClaims`. R40's floor stays in
+ * `SpendBlock` only — a bound printed twice is two copies that drift.
  */
-export function headlineClaim(work: Work): string {
+export function headlineClaim(work: Work, amountUsd: string): string {
 	switch (work.kind) {
 		case "commit":
 			return `attests commit ${work.oid} in ${work.repoId}`;
@@ -234,7 +234,7 @@ export function headlineClaim(work: Work): string {
 		case "issue":
 			return `attests ${work.repoId} issue #${work.number} at revision ${work.observedRevision}`;
 		case "session":
-			return "produced under this governed session";
+			return `produced under this governed session — $${amountUsd}`;
 	}
 }
 
@@ -1067,7 +1067,7 @@ export function receiptClaims(receipt: ReceiptDocument): ReceiptClaims {
 		projection,
 		work,
 		amountUsd,
-		headline: headlineClaim(work),
+		headline: headlineClaim(work, amountUsd),
 		repo: repoScope(work),
 		comparison: artifactComparison(work),
 		association: sessionAssociationPosture(projection),

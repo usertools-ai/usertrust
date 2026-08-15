@@ -15,7 +15,7 @@ import {
 } from "../lib/claims";
 import type { ReceiptDocument } from "../lib/wire";
 import HashValue from "./hash-value";
-import PostureChips, { AmountScope } from "./posture-chips";
+import PostureChips, { AmountScope, SessionHeadlineScope } from "./posture-chips";
 
 /**
  * §6.2 — the receipt artifact: the human-readable CHAIN-COMMITTED claim set,
@@ -284,6 +284,9 @@ export default function ReceiptArtifact({
 				<p className="font-display text-2xl leading-tight text-ink" data-testid="headline-claim">
 					{claims.headline}
 				</p>
+				{claims.work.kind === "session" ? (
+					<SessionHeadlineScope claims={claims} tone="paper" />
+				) : null}
 
 				{claims.predecessor ? (
 					<p className="text-[13px] leading-relaxed text-ink/70" data-testid="predecessor-linkage">

@@ -1,4 +1,5 @@
 import { NEVER_ARTIFACT_VERIFIED, type ReceiptClaims } from "../lib/claims";
+import { SessionHeadlineScope } from "./posture-chips";
 
 /**
  * R13/R14/R15 — "verify against your artifact".
@@ -31,6 +32,9 @@ export default function WorkClaims({ claims }: { claims: ReceiptClaims }) {
 				<p className="text-[13px] leading-relaxed text-white/85" data-testid="scope-claim">
 					{claims.headline}
 				</p>
+				{claims.work.kind === "session" ? (
+					<SessionHeadlineScope claims={claims} tone="dark" />
+				) : null}
 				<p className="text-[13px] leading-relaxed text-white/70">{NEVER_ARTIFACT_VERIFIED}</p>
 
 				<dl className="flex flex-col gap-4">

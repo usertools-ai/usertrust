@@ -119,6 +119,40 @@ export function AmountScope({ claims }: { claims: ReceiptClaims }) {
 	);
 }
 
+/**
+ * R13 session headlines name `$X`. That figure is still an amount, so R39
+ * and the epistemic frame sit beside it — on the paper headline and again
+ * where `WorkClaims` restates the same string. No floor here: R40 stays in
+ * {@link AmountScope}, once.
+ */
+export function SessionHeadlineScope({
+	claims,
+	tone,
+}: {
+	claims: ReceiptClaims;
+	tone: "paper" | "dark";
+}) {
+	const ink = tone === "paper" ? "text-ink/70" : "text-white/70";
+	return (
+		<div
+			className="flex flex-col gap-2"
+			data-testid={tone === "paper" ? "headline-amount-scope" : "work-amount-scope"}
+		>
+			<p className={`text-[13px] leading-relaxed ${ink}`}>{POSTURES_ARE_ATTESTED_ENUMS}</p>
+			{tone === "paper" ? (
+				<PostureRow axis="amount scope" posture={claims.delegation} chipClass={ASSERTED_CHIP} />
+			) : (
+				<div className="flex flex-col gap-1" data-posture={claims.delegation.value}>
+					<span className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+						amount scope · {claims.delegation.label}
+					</span>
+					<p className="text-[13px] leading-relaxed text-white/70">{claims.delegation.claim}</p>
+				</div>
+			)}
+		</div>
+	);
+}
+
 export default function PostureChips({ claims }: { claims: ReceiptClaims }) {
 	const { association, usage, pricing } = claims;
 	return (
