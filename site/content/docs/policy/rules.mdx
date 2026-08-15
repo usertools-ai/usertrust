@@ -74,9 +74,9 @@ timeWindows:
 
 Three rules ship by default:
 
-1. **zero-budget** — Block if budget is 0 (hard deny)
-2. **high-cost** — Warn on estimated cost > 1000 UT (soft warn)
-3. **budget-exhausted** — Block if remaining budget < estimated cost (hard deny)
+1. **block-budget-overshoot** — Deny when `budget_remaining_after` `lt` 0 (hard)
+2. **block-budget-exhausted** — Deny when `budget_remaining` `lte` 0 (hard)
+3. **warn-high-cost** — Warn when `estimated_cost` `gt` 1000 (soft)
 
 ## PolicyResult
 
