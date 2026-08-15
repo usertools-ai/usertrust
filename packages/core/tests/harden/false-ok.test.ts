@@ -217,6 +217,38 @@ describe("false OK — a documented count that stops matching reality", () => {
 	it("AGENTS.md's sanitizer count matches the sanitizers in src/", async () => {
 		const { readFile, readdir } = await import("node:fs/promises");
 		const ts = (await import("typescript")).default;
+
+		/**
+		 * TypeScript's own filename-to-dialect mapping, reached through an OWNED
+		 * declaration.
+		 *
+		 * `getScriptKindFromFileName` is a runtime export that is absent from the
+		 * public `.d.ts`, so calling it through `typeof ts` is a TS2339 — invisible
+		 * here only because vitest transpiles without type-checking, and invisible
+		 * to CI because `packages/core/tsconfig.json` includes `src` and not
+		 * `tests`. Two instruments that look like they cover this file and do not.
+		 *
+		 * Asking the compiler is still the right call — it is the only thing that
+		 * knows which dialect a filename means, and hand-mapping extensions was
+		 * wrong twice. What changes is that the dependency is now DECLARED, and
+		 * absence is LOUD: a TypeScript that drops this export fails the guard with
+		 * a sentence saying so, rather than returning `undefined` and quietly
+		 * scanning nothing.
+		 */
+		const scriptKindOf = (fileName: string): import("typescript").ScriptKind => {
+			const fn = (
+				ts as unknown as {
+					getScriptKindFromFileName?: (f: string) => import("typescript").ScriptKind;
+				}
+			).getScriptKindFromFileName;
+			if (typeof fn !== "function") {
+				throw new Error(
+					"typescript no longer exports getScriptKindFromFileName — the sanitizer scan " +
+						"cannot determine file dialects, and would otherwise scan nothing and pass.",
+				);
+			}
+			return fn(fileName);
+		};
 		const repoRoot = join(import.meta.dirname, "..", "..", "..", "..");
 
 		const agents = await readFile(join(repoRoot, "AGENTS.md"), "utf-8");
@@ -456,13 +488,7 @@ describe("false OK — a documented count that stops matching reality", () => {
 			// file and the third one to be wrong — after the regex class reader and
 			// the token scanner, both of which were also fixed by asking the
 			// implementation that already exists.
-			const sf = ts.createSourceFile(
-				name,
-				src,
-				ts.ScriptTarget.Latest,
-				true,
-				ts.getScriptKindFromFileName(name),
-			);
+			const sf = ts.createSourceFile(name, src, ts.ScriptTarget.Latest, true, scriptKindOf(name));
 
 			// FIRST PASS: which regexes does this file actually replace WITH? A class
 			// that could sanitize is not a sanitizer — it has to be wired to a
@@ -713,7 +739,7 @@ describe("false OK — a documented count that stops matching reality", () => {
 				// so the filter and the parser can no longer disagree about which
 				// files are source: `.json` and `.css` fall out as JSON/Unknown, and
 				// nothing needs extending when a new dialect appears.
-				else if (SCANNABLE.has(ts.getScriptKindFromFileName(e.name))) out.push(full);
+				else if (SCANNABLE.has(scriptKindOf(e.name))) out.push(full);
 			}
 			return out;
 		};
