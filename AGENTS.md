@@ -939,6 +939,15 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   source-wide assertion by what SHIPS, not by the directory layout the other packages happen to
   use** — that is the same lesson as the worktree note above, one level out.
 
+**THE INVENTORY'S SCOPE IS DECLARED HERE, and the guard matches this sentence.** It covers
+`packages/*/src` — the TypeScript build inputs, which are what `files: ["dist"]` publishes — plus
+`packages/*/hooks`, the directory the plugin package actually ships. Everything else is **out of
+scope by decision**: `packages/core/bin/govern.ts` is dead code (see below), and demos, build
+configs and tests are not shipped. Three review rounds tried to infer this scope from the tree and
+produced, in order, too narrow, then too narrow again, then too wide — a scope that can be argued
+in both directions is one that has to be written down rather than derived. A file added outside
+this scope is invisible to the count guard; if it ships, widen this sentence and the guard together.
+
 That C1 coverage is not an accident of style. `budget.ts` quotes attacker-controlled argv back to
 the operator in every invalid-value message, and its own comment names the attack
 (`--allocated $'\x1b]0;pwned\x07\x1b[2J'`). "Unifying" it onto the six-copy regex would silently

@@ -755,19 +755,27 @@ describe("false OK — a documented count that stops matching reality", () => {
 		// behaviour is a question it turns out it cannot answer; whether the
 		// documented inventory matches the shipped tree is the one it exists for,
 		// and it was wrong about that from the start.
-		// AND THE SCOPE IS AN EXCLUSION, NOT AN ALLOWLIST — because the two fail in
-		// opposite directions. An allowlist of `src/` + `hooks/` misses
-		// `core/bin/govern.ts`, a shipped CLI entry point that prints to a terminal;
-		// a sanitizer added there would be uncounted and deleting one would go
-		// unnoticed, SILENTLY. Excluding build output and tests instead scans a
-		// little more than it must — a sanitizer-shaped construct in a demo would
-		// push the count above the documented total — and that fails LOUDLY, which
-		// is the only direction this guard is allowed to be wrong in.
+		// THE SCOPE IS DECLARED, because three rounds proved it cannot be inferred.
 		//
-		// The skip list is still an enumeration. The difference is that getting it
-		// wrong trips the guard instead of hiding from it.
+		// It was `src/` (missed the shipped hook), then `src/` + `hooks/`, then
+		// "everything except build output and tests" — and that last one swung too
+		// wide: it swept in `core/bin/govern.ts`, which AGENTS.md states in as many
+		// words is DEAD CODE, outside both `include: ["src"]` and `files: ["dist"]`.
+		// I argued for the widening on the grounds that this file was a shipped CLI
+		// entry point. It is not, and the document I was editing in the same commit
+		// said so. I asserted a fact about shipping instead of reading the one place
+		// that records it.
+		//
+		// So the scope stops being a guess. AGENTS.md declares what the inventory
+		// covers — the TypeScript build inputs (`src/`) and the directory the plugin
+		// package actually ships (`hooks/`) — and this matches that declaration
+		// exactly. Dead code, demos and build configs are out of scope BY DECISION,
+		// which is checkable, rather than by an accident of traversal, which is not.
 		const SKIP_DIRS = new Set(["node_modules", "dist", "coverage", ".turbo", "tests", "test"]);
-		const srcDirs = [join(repoRoot, "packages")];
+		const pkgs = join(repoRoot, "packages");
+		const srcDirs = (await readdir(pkgs, { withFileTypes: true }))
+			.filter((e) => e.isDirectory())
+			.flatMap((e) => [join(pkgs, e.name, "src"), join(pkgs, e.name, "hooks")]);
 
 		let strong = 0;
 		let weak = 0;
