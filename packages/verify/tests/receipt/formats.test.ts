@@ -45,6 +45,7 @@ import {
 	CHECKPOINT_KEY,
 	CHECKPOINT_KEY_SUCCESSOR,
 	checkpointPreimage,
+	FOREIGN_KEY,
 	MINT_KEY,
 	MINT_KEY_SUCCESSOR,
 	type MintOptions,
@@ -595,6 +596,181 @@ describe("§8 — every predecessor state, enumerated rather than remembered", (
 		const bundle = mint();
 		expect(loadTrustSnapshot(bundle.snapshotBytes).ok).toBe(true);
 		expect(verifyMinted().failure).toBeNull();
+	});
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// §8 — the LINEAGE TAIL, the other half of the orthogonal axis.
+//
+// The matrix above enumerates the three `state` values against a successor that
+// is always present. "Named as some other key's predecessor" is orthogonal to
+// `state`, and every cell up there populates the NAMED half. The unnamed half —
+// the tail of the lineage — is a different question, and §8 answers it
+// differently: the boundary "is meaningful ONLY through the lineage edge … it
+// is NEVER a property of the key that carries it, standing alone". So a REVOKED
+// key that nothing names as its predecessor may carry a boundary, that value is
+// EXPLICITLY IGNORED, no verifier may derive anything from it, and the snapshot
+// LOADS.
+//
+// The defect that closed this cell was a false REFUSAL, which is the direction
+// no "reject the bad ones" suite can see: `retired @18 → revoked @11`, tail,
+// came back UNVERIFIABLE for an inversion between a live boundary and an inert
+// one.
+//
+// Relaxing an ordering rule is also exactly how the OPPOSITE defect ships, so
+// the controls here carry as much weight as the cure, and they are chosen to
+// fail if the skip is one step wider than §8 makes it: the same inversion is
+// still refused the moment a successor NAMES the revoked key (the number is a
+// live lower bound then), still refused on a RETIRED tail (whose boundary is
+// its own upper bound at `keyStatePermits`, edge or no edge), the ancestor's
+// own window does not grow to meet the ignored number, and the tail key itself
+// buys nothing by carrying it — it is revoked, so it verifies nothing at all.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("§8 — a REVOKED lineage tail carries an INERT boundary", () => {
+	/**
+	 * `CHECKPOINT_KEY` rotated away at `ancestorBoundary`, to a tail carrying
+	 * `boundary`. `named: true` pushes a third key naming the tail — which is
+	 * precisely what stops it being a tail.
+	 */
+	function rotatedToTail(options: {
+		readonly state: "retired" | "revoked";
+		readonly boundary: number;
+		readonly named?: boolean;
+		readonly ancestorBoundary?: number;
+	}): MintOptions {
+		return {
+			snapshot: (s) => {
+				const ancestor = s.keys.find((k) => k.keyId === CHECKPOINT_KEY.keyId);
+				if (ancestor === undefined) throw new Error("no checkpoint key");
+				ancestor.state = "retired";
+				ancestor.activationSequence = options.ancestorBoundary ?? 18;
+				s.keys.push({
+					keyId: CHECKPOINT_KEY_SUCCESSOR.keyId,
+					alg: "ed25519",
+					publicKey: CHECKPOINT_KEY_SUCCESSOR.publicKeyPem,
+					role: "checkpoint",
+					predecessorKeyId: CHECKPOINT_KEY.keyId,
+					state: options.state,
+					activationSequence: options.boundary,
+				});
+				if (options.named === true) {
+					s.keys.push({
+						keyId: FOREIGN_KEY.keyId,
+						alg: "ed25519",
+						publicKey: FOREIGN_KEY.publicKeyPem,
+						role: "checkpoint",
+						predecessorKeyId: CHECKPOINT_KEY_SUCCESSOR.keyId,
+						state: "active",
+					});
+				}
+				return s;
+			},
+		};
+	}
+
+	function loadFor(options: MintOptions): ReturnType<typeof loadTrustSnapshot> {
+		return loadTrustSnapshot(mint(options).snapshotBytes);
+	}
+
+	it("LOADS a revoked tail whose boundary runs backward — nothing reads it", () => {
+		// The exact conformant lineage that was refused: retired @18 → revoked @11,
+		// no key naming the revoked one. `11 < 18` is an inversion only if the
+		// second number means something, and §8 says this one does not.
+		const rotation = rotatedToTail({ state: "revoked", boundary: 11 });
+		const load = loadFor(rotation);
+		expect(load.ok === true || load.detail).toBe(true);
+		// And the receipt underneath it verifies: the ancestor is retired at 18,
+		// the mint segment starts at 11, so the key that actually signed is inside
+		// its own window. A snapshot that loads but fails every receipt would be
+		// the same refusal wearing a different verdict code.
+		expect(verifyMinted(rotation).failure).toBeNull();
+	});
+
+	it("LOADS a revoked tail whose boundary runs forward — the ordered spelling is unchanged", () => {
+		expect(loadFor(rotatedToTail({ state: "revoked", boundary: 40 })).ok).toBe(true);
+	});
+
+	it("still REFUSES the same inversion once a successor NAMES the revoked key", () => {
+		// The control that decides whether the skip is scoped to §8's rule or is
+		// just a hole: one extra key, naming the revoked one, turns the ignored
+		// number into that successor's lower bound — and the ordering rule governs
+		// again.
+		const load = loadFor(rotatedToTail({ state: "revoked", boundary: 11, named: true }));
+		expect(load.ok).toBe(false);
+		expect(load.ok === false && load.detail).toContain(
+			"a retirement boundary never moves backwards",
+		);
+	});
+
+	it("still REFUSES the same inversion on a RETIRED tail — only `revoked` is inert", () => {
+		// §8 makes the boundary inert on a revoked tail because a revoked key
+		// verifies nothing. A RETIRED tail is the opposite case: §8 admits it
+		// ("a retired key whose successor is not registered in THIS snapshot
+		// carries a boundary without being named") and `keyStatePermits` reads
+		// that number as the key's own upper bound, edge or no edge.
+		const load = loadFor(rotatedToTail({ state: "retired", boundary: 11 }));
+		expect(load.ok).toBe(false);
+		expect(load.ok === false && load.detail).toContain(
+			"a retirement boundary never moves backwards",
+		);
+	});
+
+	it("does not widen the ANCESTOR's window to reach the ignored number", () => {
+		// The ancestor is retired at 11 and the mint segment's checkpoint starts at
+		// 11 — at the boundary, not below it, so §8 fails it. The revoked tail
+		// carries 5, which sits below the ancestor's boundary; if "ignored" had
+		// leaked into "the lineage's real boundary is the lowest one", or into
+		// skipping the ancestor's own check, this receipt would pass.
+		const rotation = rotatedToTail({ state: "revoked", boundary: 5, ancestorBoundary: 11 });
+		const load = loadFor(rotation);
+		expect(load.ok === true || load.detail).toBe(true);
+		const run = verifyMinted(rotation);
+		expect(run.failure).toMatchObject({ step: "checkpoint", code: "CHECKPOINT_INVALID" });
+		expect(run.failure?.detail).toContain("at or after its successor's activation");
+	});
+
+	it("buys the revoked tail NOTHING as a checkpoint signer — it verifies nothing", () => {
+		// The attack the inert boundary might have been worth carrying: 11 is the
+		// mint segment's `segmentFirstSequence`, so a key whose window opened at 11
+		// would be exactly entitled to sign this checkpoint. Revocation is checked
+		// before any boundary is, and it is not a window — it is a floor.
+		const attack: MintOptions = {
+			...rotatedToTail({ state: "revoked", boundary: 11 }),
+			checkpointSigner: (index) => (index === 2 ? CHECKPOINT_KEY_SUCCESSOR : CHECKPOINT_KEY),
+		};
+		const run = verifyMinted(attack);
+		expect(run.failure).toMatchObject({ step: "checkpoint", code: "CHECKPOINT_INVALID" });
+		expect(run.failure?.detail).toContain("is revoked");
+	});
+
+	it("buys the revoked tail NOTHING as a mint signer either — the receipt half", () => {
+		// Same attack through the other key role, because §8 states ONE rule for
+		// both and a skip written at the lineage level would apply to both.
+		const attack: MintOptions = {
+			mintKey: MINT_KEY_SUCCESSOR,
+			snapshot: (s) => {
+				const tail = s.keys.find((k) => k.keyId === MINT_KEY_SUCCESSOR.keyId);
+				if (tail === undefined) throw new Error("no mint key");
+				tail.predecessorKeyId = MINT_KEY.keyId;
+				tail.state = "revoked";
+				tail.activationSequence = 11;
+				s.keys.push({
+					keyId: MINT_KEY.keyId,
+					alg: "ed25519",
+					publicKey: MINT_KEY.publicKeyPem,
+					role: "mint",
+					minterKind: "proxy",
+					state: "retired",
+					activationSequence: 18,
+				});
+				return s;
+			},
+		};
+		expect(loadTrustSnapshot(mint(attack).snapshotBytes).ok).toBe(true);
+		const run = verifyMinted(attack);
+		expect(run.failure).toMatchObject({ step: "signature", code: "SIG_INVALID" });
+		expect(run.failure?.detail).toContain("is revoked");
 	});
 });
 

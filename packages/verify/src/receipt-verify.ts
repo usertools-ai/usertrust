@@ -2179,9 +2179,41 @@ function validateLineages(keys: ReadonlyMap<string, TrustKey>): string | null {
 	// boundary's presence happens to be enforced today. Treating an absent
 	// boundary as zero, rather than walking past it, would be the bug — it
 	// invents an ordering claim the document never made.
+	//
+	// THE INERT CELL IS NOT ORDERED, because ordering it is READING it. §8:
+	// `activationSequence` "is meaningful ONLY through the lineage edge — as the
+	// predecessor's upper bound and its successor's lower bound … NEVER a
+	// property of the key that carries it, standing alone", so a `revoked` key
+	// that nothing names as its predecessor carries a number that is EXPLICITLY
+	// IGNORED and from which "no verifier may derive anything". Comparing it with
+	// an ancestor derives something: it turns a conformant lineage — retired at
+	// 18, rotated to a key later revoked, whose own boundary sits at 11 and whose
+	// successor was never registered here — into UNVERIFIABLE. A false refusal on
+	// trust material, which is the direction a corpus of hostile vectors cannot
+	// see.
+	//
+	// It grants an attacker nothing because the cell governs no acceptance
+	// decision in either direction. Outgoing: no key names it, so the number is
+	// nobody's lower bound. Incoming: `keyStatePermits` refuses a `revoked` key
+	// before it reads any boundary at all — revocation is a floor, not a window,
+	// so the key verifies nothing whatever the number says.
+	//
+	// Scoped to exactly that cell, in BOTH of its conditions, because either one
+	// alone is a hole:
+	//  · a `retired` tail keeps the check. §8 admits a retired key "whose
+	//    successor is not registered in THIS snapshot", and `keyStatePermits`
+	//    reads its boundary as that key's own upper bound — the edge is not what
+	//    makes a retired key's number matter.
+	//  · a `revoked` key that IS named keeps it. The number is then its
+	//    successor's lower bound, and that successor may be `active`.
+	// The ANCESTOR arm below needs no such guard and must not grow one: being
+	// walked to as an ancestor means some key named it, which is the edge — so an
+	// inert boundary is unreachable there, and a skip written for it would be
+	// fail-open code no test could ever reach.
 	for (const key of keys.values()) {
 		const boundary = key.activationSequence;
 		if (boundary === undefined) continue;
+		if (key.state === "revoked" && !successorOf.has(key.keyId)) continue;
 		let cursor = key.predecessorKeyId;
 		while (cursor !== undefined) {
 			const ancestor = keys.get(cursor) as TrustKey;
