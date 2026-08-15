@@ -887,7 +887,7 @@ export const CHECK_ROWS: readonly LedgerRow[] = [
 		label: "ANCHOR EVIDENCE",
 		group: "checks",
 		meaning:
-			"extension: Rekor evidence validates against the AUDITOR'S pinned log key. The resolver asserts the anchored rung from this check; no normative binding is defined, so a pass is not independently verified anchoring. Upgrade-only: can never demote the base verdict. S3 Object Lock probes are not this check's input.",
+			"extension: Rekor evidence validates against the AUDITOR'S pinned log key. When this check passes, the resolver asserts the anchored rung from it; no normative binding is defined, so a pass is not independently verified anchoring. Upgrade-only: can never demote the base verdict. S3 Object Lock probes are not this check's input.",
 	},
 ];
 

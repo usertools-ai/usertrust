@@ -710,7 +710,15 @@ test("R41: the anchorEvidence ledger row does not treat a Rekor pass as independ
 		!/earns the anchored rung/i.test(anchor.meaning),
 		"a pass must not be worded as independently earning the anchored rung",
 	);
-	assert.match(anchor.meaning, /resolver asserts/i);
+	assert.match(
+		anchor.meaning,
+		/When this check passes, the resolver asserts/,
+		"the assertion is conditional — the same string renders on failed and n/a rows",
+	);
+	assert.ok(
+		!/The resolver asserts the anchored rung from this check/i.test(anchor.meaning),
+		"must not claim the resolver is asserting the rung on this receipt regardless of result",
+	);
 	assert.match(anchor.meaning, /no normative binding is defined/);
 	assert.match(anchor.meaning, /not independently verified anchoring/);
 	assert.match(anchor.meaning, /AUDITOR'S pinned log key/);

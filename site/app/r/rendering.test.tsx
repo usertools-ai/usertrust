@@ -732,6 +732,12 @@ test("C1 commit-checkpoint.json — floor rung, provider posture, attested workl
 
 	// commit kind + floor rung + R6.
 	assertContains(text, "VERIFIED — CHECKPOINT", "C1 is the floor rung");
+	const c1Anchor = html.match(/data-check="anchorEvidence"[\s\S]*?<\/tr>/)?.[0] ?? "";
+	assert.ok(c1Anchor.includes('data-result="notApplicable"'));
+	assert.ok(
+		c1Anchor.includes("When this check passes"),
+		"n/a row must not present-tense claim the resolver is asserting the anchored rung",
+	);
 	assertContains(
 		text,
 		"attests commit 12283b89ad55b584c7959394a527e24da0ec1f5e in github.com:R_kgDOK1x2Yw",
@@ -836,6 +842,10 @@ test("C5 commit-anchor-failed.json — base verdict preserved, the failed extens
 	const anchorRow = html.match(/data-check="anchorEvidence"[\s\S]*?<\/tr>/)?.[0] ?? "";
 	assert.ok(anchorRow.includes('data-result="failed"'));
 	assert.ok(anchorRow.includes('data-failure="ANCHOR_INVALID"'), "the failure code is named");
+	assert.ok(
+		anchorRow.includes("When this check passes"),
+		"failed row must not present-tense claim the resolver is asserting the anchored rung",
+	);
 	// The served Rekor attachment must NOT read as a green anchor chip.
 	assert.ok(html.includes('data-anchor-standing="not-upheld"'), "R10: never a green anchor chip");
 	assertOmits(text, ANCHOR_EXTERNAL_VISIBILITY, "a failed anchor has no mitigation to claim");
