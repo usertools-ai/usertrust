@@ -92,6 +92,26 @@ describe("HTTP control plane", () => {
 		expect(fake.calls.settled).toHaveLength(1);
 	});
 
+	it("forwards computeMs from the settle body to governor.settle()", async () => {
+		const { base, fake } = await start();
+		const auth = (await (
+			await post(base, "/v1/authorize", {
+				model: "llama3.2",
+				estimatedInputTokens: 10,
+				maxOutputTokens: 5,
+			})
+		).json()) as { transferId: string };
+		const settleRes = await post(base, "/v1/settle", {
+			transferId: auth.transferId,
+			inputTokens: 10,
+			outputTokens: 2,
+			computeMs: 4709,
+		});
+		expect(settleRes.status).toBe(200);
+		expect(fake.calls.settleParams).toHaveLength(1);
+		expect(fake.calls.settleParams[0]?.computeMs).toBe(4709);
+	});
+
 	it("abort voids the pending hold", async () => {
 		const { base, fake } = await start();
 		const auth = (await (

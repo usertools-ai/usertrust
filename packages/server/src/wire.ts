@@ -24,6 +24,11 @@ export const SettleRequestSchema = z.object({
 	cacheWriteTokens: z.number().int().nonnegative().optional(),
 	chunksDelivered: z.number().int().nonnegative().optional(),
 	usageSource: z.enum(["provider", "estimated"]).optional(),
+	// Same silent-strip as the D4 cache tiers: computeMs is already a
+	// documented SettleParams / receipt.meter field. Without this key, an
+	// HTTP settle carrying Ollama eval_duration returns 200 with the field
+	// gone. Not .int() — core accepts any finite non-negative number.
+	computeMs: z.number().finite().nonnegative().optional(),
 });
 
 export const AbortRequestSchema = z.object({

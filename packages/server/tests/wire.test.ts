@@ -68,6 +68,37 @@ describe("request schemas", () => {
 			SettleRequestSchema.parse({ transferId: "tx_1", cacheWriteTokens: 1.5 }),
 		).toThrow();
 	});
+
+	it("round-trips computeMs on settle (schema used to STRIP it)", () => {
+		const parsed = SettleRequestSchema.parse({
+			transferId: "tx_1",
+			inputTokens: 100,
+			outputTokens: 50,
+			computeMs: 4709,
+		});
+		expect(parsed.computeMs).toBe(4709);
+		expect(parsed).toEqual({
+			transferId: "tx_1",
+			inputTokens: 100,
+			outputTokens: 50,
+			computeMs: 4709,
+		});
+	});
+
+	it("computeMs stays optional and rejects negative / non-finite values", () => {
+		expect(SettleRequestSchema.parse({ transferId: "tx_1" }).computeMs).toBeUndefined();
+		// Core SettleParams accepts any finite non-negative number, including
+		// fractions — do not .int() this field the way the token counts are.
+		expect(SettleRequestSchema.parse({ transferId: "tx_1", computeMs: 1.5 }).computeMs).toBe(1.5);
+		expect(SettleRequestSchema.parse({ transferId: "tx_1", computeMs: 0 }).computeMs).toBe(0);
+		expect(() => SettleRequestSchema.parse({ transferId: "tx_1", computeMs: -1 })).toThrow();
+		expect(() =>
+			SettleRequestSchema.parse({ transferId: "tx_1", computeMs: Number.NaN }),
+		).toThrow();
+		expect(() =>
+			SettleRequestSchema.parse({ transferId: "tx_1", computeMs: Number.POSITIVE_INFINITY }),
+		).toThrow();
+	});
 });
 
 describe("toHttpError", () => {

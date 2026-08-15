@@ -38,6 +38,10 @@ curl -s localhost:4519/v1/settle -H "Authorization: Bearer $KEY" \
 cache rates for the model still price those tokens at the input rate — see the money invariants
 in `AGENTS.md` — omitting the fields is not the same as reporting zero cache activity.
 
+`/v1/settle` also accepts `computeMs` (optional, finite and non-negative): wall-clock compute
+duration in milliseconds, as reported by local runtimes (e.g. Ollama `eval_duration`). It
+passes through to `receipt.meter.computeMs` and is not a pricing input.
+
 ## Endpoints
 
 | Method | Path            | Auth   | Purpose                                             |
