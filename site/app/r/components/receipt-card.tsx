@@ -219,13 +219,31 @@ export default function ReceiptCard({
 								custom — {CUSTOM_MODEL_MEANING}
 							</p>
 						) : null}
-						<p className="mt-3 text-[13px] text-ink/70">
+						<p className="mt-3 text-[13px] text-ink/70" data-testid="posted-usertokens">
+							posted {claims.projection.spend.postedUsertokens.toLocaleString("en-US")} ut
+						</p>
+						<p className="mt-3 text-[13px] text-ink/70" data-testid="rounding-adjustment">
+							rounding {claims.projection.spend.roundingAdjustment.toLocaleString("en-US")} ut
+						</p>
+						<div className="mt-3 text-[13px] text-ink/70">
 							<span data-transfer-set={transfers.rootIsCommitment ? "commitment" : "list"}>
-								transfer-set root
+								<HashValue value={transfers.root} label="transferSetRoot" tone="paper" />
 							</span>
 							{" — "}
 							{transfers.rootMeaning}
-						</p>
+						</div>
+						{transfers.pairs !== undefined ? (
+							<ul
+								className="mt-2 flex flex-col gap-1 font-mono text-xs text-ink/70"
+								data-testid="transfer-pairs"
+							>
+								{transfers.pairs.map((pair) => (
+									<li key={pair.authorizationTransferId} className="break-all">
+										{pair.authorizationTransferId} → {pair.settlementTransferId}
+									</li>
+								))}
+							</ul>
+						) : null}
 						<div className="mt-3 grid gap-3 sm:grid-cols-2" data-testid="timestamps">
 							<div data-clock-claim="minter-asserted" className="flex flex-col gap-1">
 								<span className="font-mono text-xs uppercase tracking-[0.12em] text-paper-amber">
