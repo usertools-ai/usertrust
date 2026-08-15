@@ -698,6 +698,42 @@ test("§6.3: the anchorEvidence row names the AUDITOR's pinned key, never one th
 	assert.match(anchor.meaning, /can never demote the base verdict/);
 });
 
+test("R41: the anchorEvidence ledger row does not treat a Rekor pass as independently earning the anchored rung", () => {
+	const anchors = CHECK_ROWS.filter((row) => row.name === "anchorEvidence");
+	assert.equal(
+		anchors.length,
+		1,
+		"exactly one anchorEvidence row — a second could keep the old earn-claim",
+	);
+	const anchor = anchors[0];
+	assert.ok(
+		!/earns the anchored rung/i.test(anchor.meaning),
+		"a pass must not be worded as independently earning the anchored rung",
+	);
+	assert.match(
+		anchor.meaning,
+		/When this check passes, the resolver asserts/,
+		"the assertion is conditional — the same string renders on failed and n/a rows",
+	);
+	assert.ok(
+		!/The resolver asserts the anchored rung from this check/i.test(anchor.meaning),
+		"must not claim the resolver is asserting the rung on this receipt regardless of result",
+	);
+	assert.match(anchor.meaning, /no normative binding is defined/);
+	assert.match(anchor.meaning, /not independently verified anchoring/);
+	assert.match(anchor.meaning, /AUDITOR'S pinned log key/);
+	assert.match(anchor.meaning, /can never demote the base verdict/);
+	assert.match(anchor.meaning, /S3 Object Lock probes are not this check's input/);
+	assert.ok(
+		!/cannot ever|inherently|by design/i.test(anchor.meaning),
+		"the copy must not read as a permanent design limit",
+	);
+	assert.ok(
+		!/not the check|already exists|merely awaits/i.test(anchor.meaning),
+		"the copy must not claim a check that is only unpublished",
+	);
+});
+
 // ---------------------------------------------------------------------------
 // R33/R34 — advisories
 // ---------------------------------------------------------------------------
