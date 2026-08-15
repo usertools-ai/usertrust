@@ -12,9 +12,10 @@ export interface SummaryPayload {
 	spentUt: number;
 	remainingUt: number;
 	chain: { events: number; valid: boolean; breakIndex: number | null; errors: string[] };
-	// ANCHOR-INTEGRATION: presence-only placeholder until external anchoring
-	// lands on master; "present" means <vault>/audit/anchors/anchors.jsonl exists.
-	anchorState: "unanchored" | "present";
+	// File presence only — not a verification verdict. The UI has no
+	// operator-pinned genesis, and inventing one from the vault under audit
+	// would violate "anchor trust never comes from the vault under audit".
+	anchorFile: "present" | "absent";
 	rowCount: number;
 	truncated: boolean;
 }

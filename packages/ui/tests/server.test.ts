@@ -68,13 +68,13 @@ describe("usertrust-ui server", () => {
 		const summary = (await res.json()) as {
 			spentUt: number;
 			chain: { events: number; valid: boolean };
-			anchorState: string;
+			anchorFile: string;
 			rowCount: number;
 			truncated: boolean;
 		};
 		expect(summary.spentUt).toBe(15);
 		expect(summary.chain).toMatchObject({ events: 3, valid: true });
-		expect(summary.anchorState).toBe("unanchored");
+		expect(summary.anchorFile).toBe("absent");
 		expect(summary.rowCount).toBe(3);
 		expect(summary.truncated).toBe(false);
 	});

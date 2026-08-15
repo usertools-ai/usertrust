@@ -78,4 +78,20 @@ describe("loadState", () => {
 		const state = loadState(vaultPath, 2);
 		expect(state.rows.map((r) => r.integrity)).toEqual(["verified", "after-break"]);
 	});
+
+	it("reports an absent anchors.jsonl as file-absent, not as a verdict", async () => {
+		await seed(1);
+		const state = loadState(vaultPath);
+		expect(state.summary.anchorFile).toBe("absent");
+		expect(state.summary).not.toHaveProperty("anchorState");
+	});
+
+	it("reports a planted empty anchors.jsonl as file-present, not as anchored", async () => {
+		await seed(1);
+		mkdirSync(join(vaultPath, "audit", "anchors"), { recursive: true });
+		writeFileSync(join(vaultPath, "audit", "anchors", "anchors.jsonl"), "");
+		const state = loadState(vaultPath);
+		expect(state.summary.anchorFile).toBe("present");
+		expect(state.summary).not.toHaveProperty("anchorState");
+	});
 });
