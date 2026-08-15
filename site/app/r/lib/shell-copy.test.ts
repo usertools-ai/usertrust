@@ -195,12 +195,12 @@ test("ogCardWord IS shellHeadline — one source, never a second re-spelling", (
 	assert.equal(ogCardWord(state), shellHeadline(state));
 });
 
-test("ogCardWord for verified_anchored carries the resolver-asserted qualification", () => {
+test("ogCardWord for a verified receipt is the artifact type, not a rung word", () => {
 	const state = {
 		kind: "verified",
 		rung: "verified_anchored",
 	} as unknown as PageState;
-	assert.equal(ogCardWord(state), "VERIFIED — ANCHORED · RESOLVER-ASSERTED");
+	assert.equal(ogCardWord(state), "Receipt");
 	assert.equal(ogCardWord(state), shellHeadline(state));
 });
 
