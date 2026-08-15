@@ -878,6 +878,14 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	let inFlightHoldTotal = 0;
 	// Keyed by transferId, holding the GOVERNOR's capture — not the caller's handle.
 	const activeAuths = new Map<string, AuthorizationCapture>();
+	// AUD-001: claimed-but-unposted. settle() deletes from activeAuths FIRST so a
+	// concurrent settle cannot double-POST; the hold is still PENDING until
+	// postPendingSpend succeeds. Without this set, abort() is a silent no-op
+	// (`capture === undefined`) and destroy() never sees the id — the TB transfer
+	// sits until the 300s auto-void (envelope over-deny) and session budgetSpent
+	// may already have recorded money the ledger never posted (next run seeds
+	// `max(0, budget − budgetSpent)` and permanently shrinks capacity).
+	const unpostedHolds = new Map<string, AuthorizationCapture>();
 
 	// Finding-2 (RECON #4): serialized, monotonic spend-ledger persistence.
 	// budgetSpent only ever increases (settle adds actualCost >= 0; authorize and
@@ -1295,6 +1303,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				);
 			}
 			activeAuths.delete(auth.transferId);
+			// Claimed. Still PENDING. abort()/destroy() void through this set until
+			// POST succeeds — deleting from activeAuths alone used to orphan the hold.
+			unpostedHolds.set(auth.transferId, capture);
 
 			const model = auth.model;
 			let callAuditDegraded = false;
@@ -1383,25 +1394,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// visible as the number it actually charges rather than as a hole.
 			const appliedRates = resolveAppliedRates(rateInfo.rates);
 
-			// SESSION accounting, skipped in full when the ENVELOPE paid: this hold was
-			// never counted into `inFlightHoldTotal`, so releasing it here would drive
-			// that counter negative, and `budgetSpent` must not absorb envelope money it
-			// would then persist into the next run's holding-wallet seed. The flag is the
-			// authorize-time record, so the release can never be asymmetric with the
-			// increment.
-			if (capture.sessionAccounted) {
-				// AUD-453: Acquire mutex for budget atomicity — prevents concurrent
-				// settle() calls from corrupting inFlightHoldTotal or budgetSpent.
-				const releaseLock = await budgetMutex.acquire();
-				try {
-					inFlightHoldTotal -= auth.estimatedCost;
-					budgetSpent += actualCost;
-				} finally {
-					releaseLock();
-				}
-				// Finding-2 (RECON #4): serialized monotonic persist — never regresses.
-				await persistSpend();
-			}
+			// SESSION accounting waits for POST success below. Incrementing
+			// budgetSpent (and persisting it) before the ledger post is how a
+			// failed POST permanently shrank the next run's holding-wallet seed
+			// for money that never moved (AUD-001).
 
 			// Circuit breaker: success
 			const cb = breaker.get("headless" as never);
@@ -1474,6 +1470,35 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							callAuditDegraded = true;
 						});
 				}
+			}
+
+			if (settled) {
+				// POST succeeded — or dry-run / no engine, where there is no PENDING
+				// transfer to void. Drop the void path so abort/destroy cannot
+				// void-after-post a transfer the ledger already committed.
+				unpostedHolds.delete(auth.transferId);
+			}
+
+			// SESSION accounting, skipped in full when the ENVELOPE paid: this hold was
+			// never counted into `inFlightHoldTotal`, so releasing it here would drive
+			// that counter negative, and `budgetSpent` must not absorb envelope money it
+			// would then persist into the next run's holding-wallet seed. The flag is the
+			// authorize-time record, so the release can never be asymmetric with the
+			// increment. Only after a successful POST: an increment that outruns the
+			// ledger is the next run seeding `max(0, budget − budgetSpent)` for money
+			// that is still PENDING (or already auto-voided) — permanent over-deny.
+			if (settled && capture.sessionAccounted) {
+				// AUD-453: Acquire mutex for budget atomicity — prevents concurrent
+				// settle() calls from corrupting inFlightHoldTotal or budgetSpent.
+				const releaseLock = await budgetMutex.acquire();
+				try {
+					inFlightHoldTotal -= auth.estimatedCost;
+					budgetSpent += actualCost;
+				} finally {
+					releaseLock();
+				}
+				// Finding-2 (RECON #4): serialized monotonic persist — never regresses.
+				await persistSpend();
 			}
 
 			// Audit event
@@ -1633,12 +1658,21 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		async abort(auth: Authorization, error?: unknown): Promise<void> {
 			// Same lookup as settle, and the same reason: liveness and attribution come
 			// from one internal record. Still idempotent-silent, unlike settle.
-			const capture = activeAuths.get(auth.transferId);
-			if (capture === undefined) {
-				// Already settled or aborted — idempotent
-				return;
+			// AUD-001: a failed settle has already claimed the auth (deleted from
+			// activeAuths) but left the transfer PENDING. Look there first, then in
+			// the claimed-but-unposted set — a miss in both is already posted or
+			// voided, and a second abort must not throw or double-void.
+			let capture = activeAuths.get(auth.transferId);
+			if (capture !== undefined) {
+				activeAuths.delete(auth.transferId);
+			} else {
+				capture = unpostedHolds.get(auth.transferId);
+				if (capture === undefined) {
+					// Already settled or aborted — idempotent
+					return;
+				}
+				unpostedHolds.delete(auth.transferId);
 			}
-			activeAuths.delete(auth.transferId);
 
 			// Only the session wallet's own in-flight exposure is released here; an
 			// attributed hold never added to it (see authorize), and the VOID below is
@@ -1703,8 +1737,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			if (destroyed) return;
 			destroyed = true;
 
-			// Void all active authorizations (engine + proxy paths)
-			for (const [txId, capture] of activeAuths) {
+			// Void leftover authorizations (still-active + claimed-but-unposted).
+			// The per-id walk is what the proxy path has; the engine sweep below
+			// is what trust() does. Walking claimed holds is what keeps abort's
+			// sibling from losing the void path after settle() has claimed.
+			for (const [txId, capture] of [...activeAuths, ...unpostedHolds]) {
 				if (proxyConn != null && !isDryRun) {
 					try {
 						await proxyConn.void(capture.proxyTransferId ?? txId);
@@ -1720,6 +1757,21 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				}
 			}
 			activeAuths.clear();
+			unpostedHolds.clear();
+
+			// AUD-001 / AUD-461: same sweep trust() runs. pendingMap entries the
+			// per-id walk can miss (a claim that never made unpostedHolds, a
+			// factory-internal leftover) stay PENDING until the 300s auto-void
+			// otherwise — envelope over-deny. Best-effort, then close the client:
+			// a voidAllPending throw must not skip destroy() and hang the process
+			// on the open TigerBeetle socket.
+			if (engine != null && typeof engine.voidAllPending === "function") {
+				try {
+					await engine.voidAllPending();
+				} catch {
+					// Best-effort — TigerBeetle auto-voids pending transfers after 300s.
+				}
+			}
 
 			// Flush audit
 			await audit.flush();
