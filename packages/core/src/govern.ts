@@ -143,6 +143,16 @@ export interface TrustOpts {
 	 */
 	parentUserId?: string | undefined;
 	/**
+	 * Operator-declared policy scopes this governor's calls run under.
+	 * Overrides `scope` in the config file, and is validated by the same
+	 * charset at construction (see `TrustConfigSchema.scope`).
+	 *
+	 * SECURITY: TRUSTED-OPERATOR input, same boundary as budget/parentUserId —
+	 * never derive it from end-user or request data. `scopePatterns` rules
+	 * match THIS value; a request-body `scope` is stripped and ignored.
+	 */
+	scope?: string[] | undefined;
+	/**
 	 * Dry-run mode — skips TigerBeetle, audit-chain-only.
 	 * Also enabled by USERTRUST_DRY_RUN=true env var.
 	 */
@@ -1038,11 +1048,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			...(raw as Record<string, unknown>),
 			...(opts?.budget !== undefined ? { budget: opts.budget } : {}),
 			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
+			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
 		});
 	} else {
 		config = TrustConfigSchema.parse({
 			budget: opts?.budget ?? DEFAULT_BUDGET,
 			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
+			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
 		});
 	}
 
@@ -1466,6 +1478,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// execution context, which no request body can reach. Asserted after
 						// the spread like every other trusted field, `undefined` included.
 						cost_center: envelope?.attribution.costCenter,
+						// AUD-002: host-owned, not caller-declared. A request-body `scope`
+						// is stripped above; this is the operator's TrustConfig/TrustOpts
+						// value, `undefined` included, so a tenant cannot volunteer into
+						// a scopePatterns deny the host did not opt into.
+						scope: config.scope,
 					});
 					if (policyResult.decision === "deny") {
 						const reason =
@@ -2898,6 +2915,9 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						// Structurally un-forgeable: it comes from this call's own async
 						// execution context, which `action.params` cannot reach.
 						cost_center: envelope?.attribution.costCenter,
+						// AUD-002: same host assertion as the LLM path — `action.params.scope`
+						// must not satisfy a scopePatterns rule the operator did not declare.
+						scope: config.scope,
 					});
 					if (policyResult.decision === "deny") {
 						const reason =

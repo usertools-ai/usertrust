@@ -102,6 +102,46 @@ describe("PolicyContext trust classification is exhaustive", () => {
 		const both = CALLER_SUPPLIED_POLICY_FIELDS.filter((f) => host.has(f));
 		expect(both, "a field cannot be both host-controlled and caller-supplied").toEqual([]);
 	});
+
+	it("classifies scope as host-controlled — a caller must not satisfy scopePatterns", () => {
+		expect(HOST_CONTROLLED_POLICY_FIELDS).toContain("scope");
+		expect(CALLER_SUPPLIED_POLICY_FIELDS).not.toContain("scope");
+	});
+});
+
+const GOVERN_SRC = join(dirname(fileURLToPath(import.meta.url)), "../../src/govern.ts");
+const HEADLESS_SRC = join(dirname(fileURLToPath(import.meta.url)), "../../src/headless.ts");
+
+describe("host scope is re-asserted at all three evaluatePolicy sites", () => {
+	function evaluatePolicyBlocks(src: string): string[] {
+		const blocks: string[] = [];
+		let from = 0;
+		while (from < src.length) {
+			const at = src.indexOf("evaluatePolicy(", from);
+			if (at < 0) break;
+			const open = src.indexOf("{", at);
+			if (open < 0) break;
+			// Each call site is a single object literal closed by `});`.
+			const close = src.indexOf("});", open);
+			if (close < 0) break;
+			blocks.push(src.slice(open, close));
+			from = close + 3;
+		}
+		return blocks;
+	}
+
+	it("every evaluatePolicy object literal asserts scope: config.scope", () => {
+		const blocks = [
+			...evaluatePolicyBlocks(readFileSync(GOVERN_SRC, "utf-8")),
+			...evaluatePolicyBlocks(readFileSync(HEADLESS_SRC, "utf-8")),
+		];
+		// Three sites: LLM path, governAction, headless authorize. A fourth
+		// would be a new surface that forgot the table in AGENTS.md.
+		expect(blocks.length).toBe(3);
+		for (const [i, block] of blocks.entries()) {
+			expect(block, `site ${i + 1} does not assert host scope`).toMatch(/scope:\s*config\.scope/);
+		}
+	});
 });
 
 describe("sanitizePolicyContext", () => {
@@ -111,6 +151,7 @@ describe("sanitizePolicyContext", () => {
 			budgetFractionRemaining: 0.95,
 			budgetRunwayHours: 999,
 			cost_center: "someone-elses-envelope",
+			scope: ["production/api"],
 		};
 		const clean = sanitizePolicyContext(hostile);
 		for (const f of HOST_CONTROLLED_POLICY_FIELDS) {
@@ -129,9 +170,15 @@ describe("sanitizePolicyContext", () => {
 		expect(Object.hasOwn(clean, "timestamp")).toBe(false);
 	});
 
-	it("preserves the deliberately caller-supplied fields", () => {
+	it("strips caller-supplied scope — it is host-owned, not caller-declared", () => {
 		const clean = sanitizePolicyContext({ scope: ["prod/api"] });
-		expect(clean.scope).toEqual(["prod/api"]);
+		expect(Object.hasOwn(clean, "scope")).toBe(false);
+	});
+
+	it("preserves the deliberately caller-supplied fields", () => {
+		const windows = [{ startHour: 9, endHour: 17 }];
+		const clean = sanitizePolicyContext({ timeWindows: windows });
+		expect(clean.timeWindows).toEqual(windows);
 	});
 
 	it("does not mutate its input", () => {

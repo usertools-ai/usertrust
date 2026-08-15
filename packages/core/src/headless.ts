@@ -132,7 +132,9 @@ export type { EnvelopeDescriptor, EnvelopeStatus } from "./budget/context.js";
  *
  * The envelope identity `parentUserId` is INHERITED from TrustOpts — one field
  * and one validation rule across both governors, so a cost center derives the
- * same account whichever one holds the client.
+ * same account whichever one holds the client. Host-owned policy `scope` is
+ * inherited the same way — `scopePatterns` match that value, never request
+ * content.
  */
 export interface GovernorOpts extends TrustOpts {
 	/**
@@ -800,11 +802,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			...(raw as Record<string, unknown>),
 			...(opts?.budget !== undefined ? { budget: opts.budget } : {}),
 			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
+			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
 		});
 	} else {
 		config = TrustConfigSchema.parse({
 			budget: opts?.budget ?? DEFAULT_BUDGET,
 			...(opts?.parentUserId !== undefined ? { parentUserId: opts.parentUserId } : {}),
+			...(opts?.scope !== undefined ? { scope: opts.scope } : {}),
 		});
 	}
 
@@ -1137,6 +1141,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						// execution context, which no request body can reach. Asserted after
 						// the spread like every other trusted field, `undefined` included.
 						cost_center: envelope?.attribution.costCenter,
+						// AUD-002: host-owned. This site has the widest blast radius —
+						// packages/server wraps it, so `params.params.scope` arrives in an
+						// HTTP body from a remote tenant. Assert the operator's config/opts
+						// value, `undefined` included.
+						scope: config.scope,
 					});
 					if (policyResult.decision === "deny") {
 						const reason =

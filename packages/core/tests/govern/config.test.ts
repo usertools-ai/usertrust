@@ -381,3 +381,21 @@ describe("TrustConfigSchema — parentUserId", () => {
 		expect(() => defineConfig({ budget: 1000, parentUserId: "" } as never)).toThrow();
 	});
 });
+
+describe("TrustConfigSchema — scope", () => {
+	it("accepts a path-like host scope (AUD-002)", () => {
+		const config = defineConfig({ budget: 1000, scope: ["production/api"] } as never);
+		expect(config.scope).toEqual(["production/api"]);
+	});
+
+	it("leaves configs that never mention it byte-identical", () => {
+		const before = defineConfig({ budget: 1000, tier: "pro" } as never);
+		expect(before.scope).toBeUndefined();
+		expect(Object.hasOwn(before, "scope")).toBe(false);
+	});
+
+	it("refuses a glob or a control character — those belong on the rule, not the host scope", () => {
+		expect(() => defineConfig({ budget: 1000, scope: ["production/*"] } as never)).toThrow();
+		expect(() => defineConfig({ budget: 1000, scope: ["prod\u001b[2J"] } as never)).toThrow();
+	});
+});

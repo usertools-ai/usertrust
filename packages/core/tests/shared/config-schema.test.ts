@@ -151,3 +151,28 @@ describe("TrustConfigSchema — new onboarding fields", () => {
 		expect(config.pricing).toBe("recommended");
 	});
 });
+
+describe("TrustConfigSchema — scope", () => {
+	it("accepts a path-like host scope", () => {
+		const config = TrustConfigSchema.parse({
+			budget: 50_000,
+			scope: ["production/api", "staging"],
+		});
+		expect(config.scope).toEqual(["production/api", "staging"]);
+	});
+
+	it("leaves configs that never mention it byte-identical", () => {
+		const config = TrustConfigSchema.parse({ budget: 50_000, tier: "pro" });
+		expect(config.scope).toBeUndefined();
+		// The optional field must not materialise a key — a config round-tripped
+		// through the schema is what an operator diffs against their file.
+		expect(Object.hasOwn(config, "scope")).toBe(false);
+	});
+
+	it("refuses an empty entry, control characters, spaces, and glob metacharacters", () => {
+		expect(() => TrustConfigSchema.parse({ budget: 50_000, scope: [""] })).toThrow();
+		expect(() => TrustConfigSchema.parse({ budget: 50_000, scope: ["prod uction"] })).toThrow();
+		expect(() => TrustConfigSchema.parse({ budget: 50_000, scope: ["prod\u0000"] })).toThrow();
+		expect(() => TrustConfigSchema.parse({ budget: 50_000, scope: ["production/*"] })).toThrow();
+	});
+});

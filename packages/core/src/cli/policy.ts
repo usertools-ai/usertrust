@@ -280,13 +280,14 @@ export async function run(
 		const enf = r.enforcement === "hard" ? pc.red("hard") : pc.yellow("soft");
 		const enabled = r.enabled === false ? pc.dim(" (disabled)") : "";
 		console.log(`  ${pc.green("✓")} ${label}  [${r.effect}/${enf}]${enabled}`);
-		// A scopePatterns rule only ever matches a context that carries a matching
-		// `scope`, and no governed call path populates one. Saying so here is the
-		// difference between a rule an operator believes is live and one that is.
+		// A scopePatterns rule only ever matches the operator-declared host
+		// `scope` on the governor/config. Request-body scope is stripped. With
+		// no host scope the rule is inert — saying so here is the difference
+		// between a rule an operator believes is live and one that is.
 		if (r.scopePatterns !== undefined && r.scopePatterns.length > 0) {
 			console.log(
 				pc.yellow(
-					`      note: scoped to ${scrubForTerminal(r.scopePatterns.join(", "), 120)} — only matches calls that supply a matching context scope`,
+					`      note: scoped to ${scrubForTerminal(r.scopePatterns.join(", "), 120)} — matches only the operator-declared scope on the governor/config; with no host scope this rule never fires`,
 				),
 			);
 		}
