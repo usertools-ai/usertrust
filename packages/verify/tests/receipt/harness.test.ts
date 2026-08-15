@@ -110,6 +110,13 @@ describe("canonicalization — receipt-spec §13 golden corpus", () => {
 		expect(() => canonicalizeNormative({ f: () => 1 })).toThrow(/no JSON serialization/);
 		expect(() => canonicalizeNormative(() => 1)).toThrow(/no JSON serialization/);
 		expect(() => canonicalizeNormative({ s: Symbol("x") })).toThrow(/no JSON serialization/);
+		const withToJSON = (): { z: number; a: number } => ({ z: 1, a: 2 });
+		(withToJSON as { toJSON?: () => { z: number; a: number } }).toJSON = () => ({
+			z: 1,
+			a: 2,
+		});
+		expect(() => canonicalizeNormative(withToJSON)).toThrow(/no JSON serialization/);
+		expect(() => srcCanonicalize(withToJSON)).toThrow(/functions and symbols/);
 	});
 
 	it("throws a DELIBERATE, IDENTIFIABLE error on an invalid Date — never a bare RangeError", () => {

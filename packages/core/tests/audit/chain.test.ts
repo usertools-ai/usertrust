@@ -56,6 +56,20 @@ describe("Audit Chain Writer", () => {
 		expect(persisted.data.n).toBe(1);
 	});
 
+	it("refuses a Date whose toISOString returns an object before any line is written", async () => {
+		const logPath = join(tempDir, VAULT_DIR, "audit", "events.jsonl");
+		const when = new Date("2026-08-15T00:00:00.000Z");
+		when.toISOString = () => ({ z: 1, a: 2 }) as unknown as string;
+		await expect(
+			writer.appendEvent({
+				kind: "test.date",
+				actor: "sys",
+				data: { when },
+			}),
+		).rejects.toThrow(/Date\.toISOString must return a string/);
+		expect(existsSync(logPath)).toBe(false);
+	});
+
 	it("refuses a function in event data before any line is written", async () => {
 		const logPath = join(tempDir, VAULT_DIR, "audit", "events.jsonl");
 		await expect(

@@ -76,6 +76,12 @@ describe("canonicalize", () => {
 		expect(() => canonicalize(withToJSON)).toThrow(/functions and symbols/);
 	});
 
+	it("refuses a Date whose toISOString does not return a string", () => {
+		const d = new Date("2026-08-15T00:00:00.000Z");
+		d.toISOString = () => ({ z: 1, a: 2 }) as unknown as string;
+		expect(() => canonicalize(d)).toThrow(/Date\.toISOString must return a string/);
+	});
+
 	it("handles empty object", () => {
 		expect(canonicalize({})).toBe("{}");
 	});

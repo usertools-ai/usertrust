@@ -449,22 +449,24 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 			};
 
 			const canonical = canonicalize(event);
-			const hash = createHash("sha256").update(canonical).digest("hex");
-
-			// Persist FROM THE HASHED SNAPSHOT. A second canonicalize(fullEvent)
-			// would re-read caller-owned `data` (getters, toJSON). Parsed JSON
-			// is inert, so re-canonicalizing it plus `hash` cannot drift from
-			// the bytes the hash covers, and still puts `hash` in sort order.
-			const snapshot = JSON.parse(canonical) as Record<string, unknown>;
-			const persisted = canonicalize({ ...snapshot, hash });
-			const fullEvent = snapshot as unknown as AuditEvent & { sequence: number };
-			fullEvent.hash = hash;
-			// Defense in depth: refuse bytes no reader can parse.
+			let snapshot: Record<string, unknown>;
 			try {
-				JSON.parse(persisted);
+				snapshot = JSON.parse(canonical) as Record<string, unknown>;
 			} catch {
 				throw new Error("appendEvent: canonical bytes are not JSON");
 			}
+			// Refuse drift: the hashed bytes must be what we would persist
+			// for the event (minus hash). A Date#toISOString that returns an
+			// object is valid JSON in insertion order; re-canonicalizing
+			// sorts it. Hash the first snapshot only if it is idempotent.
+			const normalized = canonicalize(snapshot);
+			if (normalized !== canonical) {
+				throw new Error("appendEvent: canonical snapshot is not idempotent");
+			}
+			const hash = createHash("sha256").update(canonical).digest("hex");
+			const persisted = canonicalize({ ...snapshot, hash });
+			const fullEvent = snapshot as unknown as AuditEvent & { sequence: number };
+			fullEvent.hash = hash;
 
 			const fd = openSync(logPath, "a");
 			try {

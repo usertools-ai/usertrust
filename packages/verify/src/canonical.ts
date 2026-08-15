@@ -20,7 +20,11 @@ export function canonicalize(value: unknown): string {
 	}
 	// Convert Date to ISO string to avoid double-quoting divergence
 	if (value instanceof Date) {
-		return JSON.stringify(value.toISOString());
+		const iso = value.toISOString();
+		if (typeof iso !== "string") {
+			throw new Error("canonicalize: Date.toISOString must return a string");
+		}
+		return JSON.stringify(iso);
 	}
 	if (value === null || value === undefined) return "null";
 	if (typeof value === "function" || typeof value === "symbol") {
