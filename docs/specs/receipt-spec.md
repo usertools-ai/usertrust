@@ -1,6 +1,10 @@
-# Receipt Spec + ID Format — DRAFT v0.6 (usertrust drafts, stealth reviews)
+# Receipt Spec + ID Format — DRAFT v0.9.5 (usertrust drafts, stealth reviews)
 
-Status: **DRAFT v0.6 (post fresh-eyes round) — the stealth v0.3 review's
+Status: **DRAFT v0.9.5** — the version-history block below is the authority;
+v0.9.2–v0.9.4 amendments were recorded inline before this bump, so the jump
+from the long-standing v0.6 title is history catching up, not versions
+skipped. The v0.6-era narrative that follows stands as history:
+**(post fresh-eyes round) — the stealth v0.3 review's
 rulings applied to the v0.5 text (the handoff's "v0.4 actions", executed
 post-v0.5), then the 2026-08-10 fresh-eyes review's rulings (6 Blocking /
 12 Important / 12 Minor), then **Codex round-4's REVISE rulings (7 P1 /
@@ -23,6 +27,26 @@ movement, no verdict round):** §10.15's binding path corrected to
 cumulative; §10.1's binding-qualifier list completed with the
 `billedUnfinalized` exception. Surfaced by the resolver transcription gate
 (stealth PR #823), which adopted the correct readings from §4/§7.
+
+**v0.9.5 (2026-08-16): the v0.2 resolver companion ADOPTED as normative, and
+§6a RE-PINNED to it.** §6a's own rule is that a later companion round is never
+taken automatically — "taking them requires an explicit version bump of THIS
+document (v0.x) that re-reads the section and re-pins the hash" — so this
+entry IS that bump, and it records what the re-read found. The pinned artifact
+moves from the v0.7-corrected usertrust copy (`sha256:6260043a…`) to the v0.2
+companion-updated resolver spec, now held in THIS repo's `docs/specs/`; the
+digest itself lives in §6a and is not restated here, so there is one place to
+update. The re-read confirmed two things. (1) All three previously-deferred
+in-pin corrections are present in the pinned section: the anchor-clock
+paragraph retired (§10.13), the separate-billing-identities sentence retired
+(§10.16), and the two stale `claimsHash` residues removed (§10.2). (2) ONE
+override remains LIVE rather than absorbed — the pinned Mint-lifecycle
+description of the 410 `billedUnfinalized` bundle, which §10.15 AMENDS (most
+of the bundle survives; the `payload.receiptId` binding and `publishedRoot`
+are replaced, `chain`/`profile` added — §6a states it precisely). That live
+override is the concrete reason the adoption is pinned by hash rather than
+tracking the companion's head. **Companion rounds after this one still do NOT
+adopt automatically.**
 
 **v0.9.1 (2026-08-12): §13 CORRECTED — do not build against v0.8/v0.9's §13.**
 A 79-case differential across all three real implementations proved the
@@ -832,7 +856,7 @@ The resolver spec's "Mint lifecycle — normative constraints" section is
 **adopted as normative for §6, by reference and in full** — reserve →
 work → finalize, with every hardening it carries. The adoption is **PINNED
 BY CONTENT HASH (round-4 P1-5)**: it binds that section as of
-**`sha256:4d7103e7692d15fc07602efe67bfd7ea364dd4880c5f4d9b690b88e0b94a5b9a`**
+**`sha256:0cde890a58d65313d49e9c8fc188b426c7db25e21c9b2f76cbf7916a97c7f108`**
 — the COMPLETE digest of `docs/specs/receipt-resolver-api.md`, this
 directory's copy: the v0.2 companion-updated resolver spec, adopted as the
 normative companion 2026-08-16, whose pinned section carries the three
@@ -852,9 +876,16 @@ THIS document (v0.x) that re-reads the section and re-pins the hash. v0.6's
 pinned text still contains a description this spec must override — it gives
 the 410 `billedUnfinalized` bundle as `{ status, receiptId, linkedReceiptId,
 transferSetRoot, terminalEvent: { event, inclusion, publishedRoot } }`, bound
-through `terminalEvent.event.payload.receiptId`, and §10.15 retires every one
-of those terms (the ut1 projection carries no `receiptId`, and
-`publishedRoot` is a v1 object that never appears in ut1 responses). The
+through `terminalEvent.event.payload.receiptId`. §10.15 does NOT retire that
+bundle wholesale — it **amends** it, which is why the override has to be read
+rather than assumed in either direction. SURVIVING unchanged: `status`, BOTH
+IDs (`receiptId` and `linkedReceiptId`), `transferSetRoot`,
+`terminalEvent.event`, and `terminalEvent.inclusion`. REPLACED: the
+request binding through `terminalEvent.event.payload.receiptId`, which becomes
+the registry write `originalReceiptId → terminalEvent.event.hash`; and
+`publishedRoot`, which becomes a `SegmentCheckpoint` v2 statement. ADDED:
+`chain` and `profile` alongside them, so the terminal proof names its vault
+and equality set exactly as §5's `proof` does. The
 companion says so itself, in a paragraph OUTSIDE the pin that explicitly
 supersedes the pinned description — which is exactly the class of thing
 automatic adoption would import silently, in the direction that matters: the

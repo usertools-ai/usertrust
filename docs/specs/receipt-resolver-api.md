@@ -568,10 +568,29 @@ shape). Four tiers, and a consumer must not blur them:
                                          // page). The VERIFIER's vocabulary is four values —
                                          // `selfDebitsOnly` | `includesSomeDelegated` |
                                          // `includesAllDelegated` | `indeterminate` — but
-                                         // CONFORMANT v1 MINTING EMITS ONLY `selfDebitsOnly`;
-                                         // the other three are values a verifier MUST
-                                         // recognize and RENDER, never reject (§2a's
-                                         // v0.9.2 correction: two verbs, two actors).
+                                         // CONFORMANT v1 MINTING EMITS ONLY `selfDebitsOnly`.
+                                         // The other three are NOT one class:
+                                         // `includesSomeDelegated` and `indeterminate` are
+                                         // values a verifier MUST recognize and RENDER with
+                                         // §7's copy, never reject (§2a's v0.9.2 correction:
+                                         // two verbs, two actors — v1 MINTING refuses to emit
+                                         // them; a VERIFIER handles them).
+                                         // `includesAllDelegated` IS DIFFERENT and must not
+                                         // be lumped in with them. §7, pinned condition
+                                         // (v0.9.2): it "may be presented as the total cost of
+                                         // work caused by the subject" ONLY when its §2a
+                                         // SIGNED EVIDENCE validates, and "`includesAllDelegated`
+                                         // WITHOUT validating evidence is an integrity FAILURE
+                                         // (409-shaped), NOT the protocol-error shell" — it is
+                                         // a receipt making a claim it cannot substantiate,
+                                         // which is what a failed step is for. §2a specifies
+                                         // NO evidence format in v1, so §7 calls the failure
+                                         // "permanent in v1 by construction". CONSEQUENCE FOR
+                                         // THIS API: a v1 resolver MUST NOT serve, and a v1
+                                         // minter MUST NOT emit, `includesAllDelegated`; a
+                                         // consumer meeting it without validated evidence
+                                         // FAILS it (409 `SEMANTIC_INVALID`), never renders it
+                                         // with a caveat.
                                          // Absence is NOT benign: the shipped page fails
                                          // closed to the protocol-error shell on a missing OR
                                          // unrecognized value rather than render an amount
@@ -859,16 +878,32 @@ shape). Four tiers, and a consumer must not blur them:
     "spendBreakdown": [                  // §10.11: the recompute basis, DISPLAY DATA — named
                                          // `spendBreakdown`, as the shipped consumer reads it.
                                          // ROW SHAPE IS THE CONSUMER'S: provider, model, tier,
-                                         // usertokens, and nothing else. The richer per-row
-                                         // pricing provenance an earlier revision drew here
-                                         // (pricedAsTier, pricingTableSha256,
-                                         // pricingDeployment, tokens, ratePer1k) is NOT part
-                                         // of the shape the page consumes; table-level
-                                         // provenance lives in `pricingTables` above. A
+                                         // usertokens, and nothing else. **THESE WIRE ROWS ARE
+                                         // A PROJECTION, NOT THE RECOMPUTE BASIS.** The richer
+                                         // per-row material (usageTier, pricedAsTier,
+                                         // pricingTableVersion/Sha256, pricingDeployment,
+                                         // tokens, ratePer1k, candidateTiers, adapter policy)
+                                         // lives in the resolver's INTERNAL pricing snapshot,
+                                         // which is where the triple cross-check and the
+                                         // recompute equation run — see "The breakdown rows
+                                         // are display data" below. Table-level provenance the
+                                         // page does show lives in `pricingTables` above. A
                                          // session that spans a pricing-table deployment
-                                         // still gets TWO rows for the same tuple, each at
-                                         // the rate actually applied (round-4 F5) — never a
-                                         // blended rate that exists in no published table
+                                         // still gets TWO internal rows for the same tuple,
+                                         // each at the rate actually applied (round-4 F5) —
+                                         // never a blended rate that exists in no published
+                                         // table — and they project to two wire rows.
+                                         // Each row's `usertokens` is
+                                         // `round-half-even(tokens × ratePer1k / 1000)` and is
+                                         // NOT a term in the equation, which uses the RAW
+                                         // products; the rounded values therefore need not sum
+                                         // to `a`. Worked, for this example
+                                         // (rates 30 / 3 / 150 usertokens per 1k):
+                                         //   812441 × 30/1000 = 24373.23 → 24373
+                                         //   7614240 ×  3/1000 = 22842.72 → 22843
+                                         //      6627 × 150/1000 =   994.05 →   994
+                                         //   raw Σ = 48210.00 = `a`; a + 14 = 48224 =
+                                         //   assessedUsertokens
       { "provider": "anthropic", "model": "claude-fable-5",
         "tier": "input", "usertokens": 24373 },
       { "provider": "anthropic", "model": "claude-fable-5",
@@ -984,12 +1019,26 @@ spec's H2 model deliberately dropped the commitment rather than pretending
 otherwise. What replaces it is narrower and stronger where it counts: the
 TOTALS and `roundingAdjustment` are chain-committed in the projection.
 Everything the rows are still good for is therefore **resolver-side and
-display-grade**, and none of it is a verifier verdict:
+display-grade**, and none of it is a verifier verdict.
+
+**SCOPE, stated before the rules so nothing below is read against the wire
+shape.** Everything in this section operates on the resolver's **INTERNAL
+pricing snapshot** — the per-constituent rows carrying `usageTier`,
+`pricedAsTier`, `pricingTableVersion`/`Sha256`, the deployment reference,
+`tokens`, and `ratePer1k`. Those fields are the cross-check's and the
+equation's required INPUTS, and they are **not on the wire**:
+`display.spendBreakdown` is a four-member PROJECTION of them (provider, model,
+tier, usertokens) shaped for the page. A reader must not conclude from the
+wire rows that these checks are unperformed, nor try to run them against the
+projection — the inputs are not there, by design, because the page renders
+totals rather than re-deriving them. Nothing here is served, signed, or
+offline-checkable:
 
 - **Row → table → deployment is a TRIPLE cross-check the RESOLVER performs
-  online**, not an offline claim: each row's table reference must equal
-  exactly one `display.pricingTables[]` entry AND the table referenced by the
-  signed deployment record, and `ratePer1k` validates ONLY against that one
+  online** over that internal snapshot, not an offline claim: each internal
+  row's table reference must equal exactly one entry in the resolver's
+  pricing-table set AND the table referenced by the signed deployment record,
+  and `ratePer1k` validates ONLY against that one
   table — matching a row to a table by its claimed rate would be circular.
   Rates are not self-authenticating (round-22 F3): the signed, immutable
   pricing-table registry is what authenticates them, and a row that fails this
@@ -1178,7 +1227,20 @@ Design intents behind the shape:
      Together these bind request → document → event without a payload-embedded
      ID. → `ID_MISMATCH`
   4. **Mint signature**, with key role `mint`, the `minterKind` binding, and a
-     PERMITTING key state. → `SIG_INVALID`
+     PERMITTING key state — plus TWO acceptance conditions §8 requires and
+     neither of which is optional: **(i)** `minter.trustDomain ===
+     "usertrust.ai"` (§8: "`minter.trustDomain`, v1 pinned `usertrust.ai`",
+     which is also the origin the key material is fetched from,
+     `https://<trustDomain>/.well-known/usertrust-verify`); **(ii)**
+     membership of the signing `keyId` in the BOUND CHAIN's `mintKeyIds` (§8's
+     per-chain authority binding, R3-2: "`mintKeyIds` lists the mint keys
+     permitted over it", and "a domain-wide `role: "checkpoint"` key confers
+     NO authority over chains that don't pin it" — the same containment rule
+     governs mint keys through `mintKeyIds`). A key that verifies the BYTES
+     but is not permitted over THIS vault is `failed`, never a pass:
+     otherwise any key in the trust domain could mint for any vault, which is
+     precisely the authority the per-chain binding exists to withhold.
+     → `SIG_INVALID`
   5. **Inclusion path.** `leaf = sha256(0x00 ‖ hexDecode(leafHash))`,
      `interior = sha256(0x01 ‖ left ‖ right)` over decoded bytes, odd nodes
      promoting. **Topology validation is NORMATIVE:** derive the expected path
@@ -1191,11 +1253,36 @@ Design intents behind the shape:
   6. **Checkpoint.** `checkpoint.v === 2` (a v1 `PublishedMerkleRoot` in a
      receipt is FAIL), then its signature under a key with role `checkpoint`,
      in a permitting state, and in the rotation lineage pinned by this chain's
-     `checkpointRootKeyId` — and, when that key is `retired`, the offline
-     boundary `checkpoint.segmentFirstSequence < key.activationSequence`. A
-     retired key signing at or after its successor's activation is a FRESH
-     signature from a retired key: a base failure HERE, not a warning, and not
-     something only a full-history walk could catch. → `CHECKPOINT_INVALID`
+     `checkpointRootKeyId` — and then the **activation boundary, which binds
+     BOTH SIDES of every lineage edge.** §8 states the rule as "one value, two
+     keys, two directions": the predecessor's `activationSequence` is
+     simultaneously that key's UPPER bound and its successor's LOWER bound,
+     and "wiring one direction leaves the other open, and a key rotated in at
+     segment N could otherwise sign material from before N". Both are
+     therefore checked:
+     - **Upper bound (retired predecessor):** a `retired` key verifies ONLY
+       `checkpoint.segmentFirstSequence < key.activationSequence`. A retired
+       key signing at or after its successor's activation is a FRESH signature
+       from a retired key: a base failure HERE, not a warning, and not
+       something only a full-history walk could catch.
+     - **Lower bound (successor):** a key verifies NOTHING below its
+       predecessor's `activationSequence` — `checkpoint.segmentFirstSequence
+       >= predecessor.activationSequence`. This is the direction that stops a
+       rotated-in key authenticating pre-rotation material.
+     - **Ordered and evaluable, or fail closed:** `activationSequence` values
+       along a lineage MUST be ordered — §8: "an inversion silently widens the
+       OLDEST key's window" — and a predecessor carrying no
+       `activationSequence` leaves its successor with no evaluable lower
+       bound. An inverted or unevaluable boundary is never resolved in the
+       signature's favour; per §8 a snapshot that cannot answer the question
+       is refused at the LOADER as `UNVERIFIABLE`, and this resolver does not
+       serve a 200 verified under one.
+     An `active` key has no upper bound (its `activationSequence` is absent —
+     it has no successor yet); a `revoked` key verifies nothing, bounded or
+     not. **The same boundary discipline governs MINT keys** (step 4): §8 —
+     "MINT keys have no segment-indexed material of their own; their
+     retirement boundary is the mint event's segment, evaluated the same way
+     through the receipt's checkpoint." → `CHECKPOINT_INVALID`
   7. **Semantic validation** — exactly the spec §2 enumerated constraints,
      every one decidable from the receipt alone: sorted-unique arrays; the
      `transferSet` presence RULE; `0 < postedUsertokens ===
@@ -1423,7 +1510,12 @@ Design intents behind the shape:
 > than edited:** this section still describes the 410 `billedUnfinalized`
 > bundle as `{ status, receiptId, linkedReceiptId, transferSetRoot,
 > terminalEvent: { event, inclusion, publishedRoot } }`, bound through
-> `terminalEvent.event.payload.receiptId`. Every one of those terms is retired
+> `terminalEvent.event.payload.receiptId`. That description is AMENDED, not
+> retired wholesale: `status`, both IDs, `transferSetRoot`,
+> `terminalEvent.event`, and `terminalEvent.inclusion` all SURVIVE; only the
+> `payload.receiptId` binding (now the registry write `originalReceiptId →
+> terminalEvent.event.hash`) and `publishedRoot` (now a `SegmentCheckpoint` v2
+> statement) are replaced, with `chain` and `profile` ADDED
 > — see "The 410 `billedUnfinalized` bundle SUPERSEDES…" below, which states
 > the governing shape, and receipt-spec §6a, which cites this same override as
 > its live reason for pinning by hash instead of tracking this document's
@@ -1749,7 +1841,28 @@ receipt and no verification to report.
                                            // without them the terminal proof is
                                            // unverifiable in exactly the way an
                                            // unlabeled receipt would be
-    "event":      { /* §4a proxy envelope, field-complete */ },
+    "event": {                             // §4a proxy envelope, field-complete
+      "kind": "billing_terminal_no_receipt",  // §14: `event.kind` is the CHAIN's
+                                           // vocabulary and is snake_case — the terminal
+                                           // event that RECORDS the terminal, not to be
+                                           // "normalized" into the camelCase ut1
+                                           // discriminator `billedUnfinalized` that
+                                           // REFERENCES it. Renaming across that boundary
+                                           // is a format break, never a cleanup
+      "data": {                            // THE COMMITTED members the linkage check reads
+        "receiptId": "ut1_…",              // the reserved, unfinalized ID
+        "linkedReceiptId": "ut1_…",        // the spend-only session receipt
+        "transferSetRoot": "…"             // ← THE AUTHORITATIVE ROOT. The bundle's
+                                           // top-level `transferSetRoot` is an UNSIGNED
+                                           // envelope field a resolver could set to
+                                           // anything; this one is committed in the signed
+                                           // event. All THREE must agree — committed root
+                                           // === bundle field === linked receipt's root —
+                                           // and a terminal event committing no readable
+                                           // `transferSetRoot` fails the linkage outright
+      }
+      /* plus id, timestamp, previousHash, actor, sequence, hash */
+    },
     "inclusion":  { /* MerkleInclusionProof */ },
     "checkpoint": { /* SegmentCheckpoint v2 */ }
   }
