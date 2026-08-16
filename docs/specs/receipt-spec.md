@@ -106,7 +106,8 @@ recorded (§11 ship gate): the zero-dep verifier gains a second profile
 cost B1-(1) accepts for not blocking mint on a chain migration.
 Interface owner: usertrust (`packages/core` + `packages/verify`). Consumers:
 the stealth proxy mint endpoint (`apps/api`), the resolver API
-(`docs/specs/receipt-resolver-api.md` in stealth — companion), the public
+(`docs/specs/receipt-resolver-api.md`, this repo's copy — the normative
+companion, pinned by §6a; stealth owns the interface), the public
 verify page at `usertrust.ai/r/<id>`, and the commit-trailer convention.
 Conflicts resolve in THIS document's favor. Companion updates required: §10.
 
@@ -831,21 +832,33 @@ The resolver spec's "Mint lifecycle — normative constraints" section is
 **adopted as normative for §6, by reference and in full** — reserve →
 work → finalize, with every hardening it carries. The adoption is **PINNED
 BY CONTENT HASH (round-4 P1-5)**: it binds that section as of
-**`sha256:6260043a360e61f2e138c3d2f7832b3b9d1718f188ea1f56f04c0e9b9f62e18e`**
+**`sha256:67e986a99da43e2414d830c56ff09881dd98881387d5ec60e47fabfec693f0df`**
 — the COMPLETE digest of `docs/specs/receipt-resolver-api.md`, this
-directory's copy: round-35 PLUS the three deferred in-pin corrections
-applied at the v0.7 re-pin (anchor-clock paragraph retired per §10.13;
+directory's copy: the v0.2 companion-updated resolver spec, adopted as the
+normative companion 2026-08-16, whose pinned section carries the three
+corrections the v0.7 re-pin took (anchor-clock paragraph retired per §10.13;
 "separate billing identities" sentence retired per §10.16; the two stale
-in-pin `claimsHash` mentions removed — the prior pinned digest was
-`sha256:4c293c35fd9473ba474ff967a2d215e8fa399a43aaa36cb395a9747ca81c04d1`)
+in-pin `claimsHash` mentions removed). The pin's chain, oldest first:
+`sha256:4c293c35fd9473ba474ff967a2d215e8fa399a43aaa36cb395a9747ca81c04d1`
+(v0.1, the round-35 draft) →
+`sha256:6260043a360e61f2e138c3d2f7832b3b9d1718f188ea1f56f04c0e9b9f62e18e`
+(the v0.7-corrected copy those three corrections produced) → the digest
+above, which supersedes it
 (verify with `shasum -a 256`; a truncated
 prefix is not a pin) — and NOT whatever that file says later. Later companion rounds do
 NOT adopt automatically; taking them requires an explicit version bump of
 THIS document (v0.x) that re-reads the section and re-pins the hash. v0.6's
 "later merged rounds adopt automatically" was unsafe and is retracted: the
-pinned text already contains a rule this spec must override (its "Parallel
-work uses separate billing identities" — see §10.16), which is exactly the
-class of thing automatic adoption would import silently.
+pinned text still contains a description this spec must override — it gives
+the 410 `billedUnfinalized` bundle as `{ status, receiptId, linkedReceiptId,
+transferSetRoot, terminalEvent: { event, inclusion, publishedRoot } }`, bound
+through `terminalEvent.event.payload.receiptId`, and §10.15 retires every one
+of those terms (the ut1 projection carries no `receiptId`, and
+`publishedRoot` is a v1 object that never appears in ut1 responses). The
+companion says so itself, in a paragraph OUTSIDE the pin that explicitly
+supersedes the pinned description — which is exactly the class of thing
+automatic adoption would import silently, in the direction that matters: the
+pinned bytes stay stale by design, and only a named re-read catches it.
 The round-35 additions are adopted by name so the pin cannot be misread:
 **PricedTier/UsageTier domains** (`PricedTier = input | output | cacheRead
 | cacheWrite`; `UsageTier = PricedTier | "unknown"`, with `pricedAsTier`
@@ -1846,8 +1859,12 @@ than `Co-Authored-By`).
     and v1 `PublishedMerkleRoot` do
     not appear in ut1 responses any more than they do in ut1 receipts.
 16. **Retired: "Parallel work uses separate billing identities."** The
-    pinned companion text (§6a's hash pin) still carries that sentence, and
-    it directly contradicts the stealth ruling this spec adopted: separate
+    sentence is gone from the pinned companion — the v0.7 re-pin retired it
+    and the current §6a pin carries no trace of it — so this item now records
+    a completed retirement rather than an override still in force. Its
+    normative content stands on its own, independent of what the pin says:
+    the sentence directly contradicted the stealth ruling this spec adopted,
+    because separate
     per-job billing identities REOPEN the shopping attack one level up
     (cheap call under key A, expensive work under key B, finalize A). The
     normative rule is the one §6a adopted — **all descendant keys share ONE
