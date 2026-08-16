@@ -557,6 +557,26 @@ shape). Four tiers, and a consumer must not blur them:
           "pricingPosture": "exact"      // exact | conservative — the RATE-side posture (see
                                          // "Amount fidelity" below)
         },
+        "delegationPosture": "selfDebitsOnly",  // REQUIRED (receipt-spec §2a, v0.9) — WHAT THE
+                                         // AMOUNT COVERS with respect to DELEGATED work. a2a
+                                         // delegation holds are always-released (stealth
+                                         // #829), so delegated cost debits the DELEGATE and a
+                                         // parent session's amount EXCLUDES work it caused —
+                                         // technically correct and universally misread, which
+                                         // is why the posture is chain-committed rather than
+                                         // left to page copy (the OFFLINE verifier has no
+                                         // page). The VERIFIER's vocabulary is four values —
+                                         // `selfDebitsOnly` | `includesSomeDelegated` |
+                                         // `includesAllDelegated` | `indeterminate` — but
+                                         // CONFORMANT v1 MINTING EMITS ONLY `selfDebitsOnly`;
+                                         // the other three are values a verifier MUST
+                                         // recognize and RENDER, never reject (§2a's
+                                         // v0.9.2 correction: two verbs, two actors).
+                                         // Absence is NOT benign: the shipped page fails
+                                         // closed to the protocol-error shell on a missing OR
+                                         // unrecognized value rather than render an amount
+                                         // whose scope the reader would supply from
+                                         // assumption (step-7 SEMANTIC_INVALID upstream)
         "pricing": { "tableVersions": ["2026-08-08"] },  // sorted unique; a session may span
                                          // versions. NOTE what is committed here: the
                                          // VERSIONS only — no content hashes, no deployment
@@ -726,15 +746,48 @@ shape). Four tiers, and a consumer must not blur them:
   // extension outage may sit at a lower rung than an earlier one, and
   // consumers cache verdicts per response (ETag), never across them.
   //
-  // "anchorEvidence": { /* RekorReceipt */ }   // ── UNSIGNED, OPTIONAL. Rekor = the repo's
-  //                                      // existing RekorReceipt shape (stored bytes +
-  //                                      // artifact hash + log inclusion proof + signed log
-  //                                      // checkpoint + pinned log key), independently
-  //                                      // verifiable offline → upgrades the status to
-  //                                      // `verified_anchored`. S3 Object Lock evidence is
+  // "anchorEvidence": { "rekor": { /* RekorReceipt */ },
+  //                     "s3ObjectLock": { /* optional probe */ } }
+  //                                      // ── UNSIGNED, OPTIONAL. A CONTAINER, not a
+  //                                      // single-format union: the Rekor evidence is the
+  //                                      // `rekor` MEMBER, with an optional `s3ObjectLock`
+  //                                      // sibling. `rekor` = the repo's existing
+  //                                      // RekorReceipt shape (stored bytes + artifact hash
+  //                                      // + log inclusion proof + signed log checkpoint +
+  //                                      // pinned log key). ONLY `rekor` can move the
+  //                                      // ladder: S3 Object Lock evidence is
   //                                      // OPERATOR-ASSERTED configuration probing
-  //                                      // (anchor-doctor output): it is labeled as such and
-  //                                      // can NEVER by itself reach `verified_anchored`.
+  //                                      // (anchor-doctor output), labeled as such, and can
+  //                                      // NEVER by itself reach `verified_anchored` — an
+  //                                      // `anchorEvidence` carrying only an S3 probe is no
+  //                                      // anchor evidence at all for ladder purposes.
+  //                                      //
+  //                                      // ⚠ THE ANCHORED RUNG IS RESOLVER-ASSERTED, NOT
+  //                                      // INDEPENDENTLY VERIFIED — and this document does
+  //                                      // not claim otherwise. NO normative binding is
+  //                                      // defined between a transparency-log entry and this
+  //                                      // receipt's `SegmentCheckpoint`: nothing ties the
+  //                                      // RekorReceipt's artifactHash to the checkpoint's
+  //                                      // SIGNED PAYLOAD, so no consumer — this page, the
+  //                                      // offline CLI, or a third party — can confirm the
+  //                                      // binding for itself. What is missing is the
+  //                                      // BINDING, not merely published evidence, so
+  //                                      // publishing more would not make the rung checkable.
+  //                                      // Consequences, both live today: the offline
+  //                                      // verifier CAPS its ladder below `verified_anchored`
+  //                                      // (no input can upgrade past it) and reports Rekor
+  //                                      // out of band in `unimplemented: ["anchorEvidence"]`
+  //                                      // rather than as a §7 verdict value; and the page
+  //                                      // renders the rung LABELED resolver-asserted, never
+  //                                      // as established anchoring.
+  //                                      // OPEN ITEM — owned by the mint/anchor design, NOT
+  //                                      // settled here: define the artifactHash ↔
+  //                                      // `SegmentCheckpoint` binding rule AND serve the
+  //                                      // evidence a third party needs to apply it. Either
+  //                                      // half alone does not retire this. Defining that
+  //                                      // rule is a design decision for whoever mints
+  //                                      // anchors; this document records the gap and holds
+  //                                      // the cap rather than inventing a binding.
   //                                      // Here it is `unavailable` — the evidence exists but
   //                                      // could not be fetched, which is a clean 200 at the
   //                                      // floor status and never a 503 (§10.4)
@@ -754,19 +807,31 @@ shape). Four tiers, and a consumer must not blur them:
                                          // attested and the page MUST label it. Everything
                                          // here still obeys the spec's public-safety rules —
                                          // unsigned does not mean unpublished
-    "amountUsd": "4.8224",               // COMPUTED, never stored: assessedUsertokens / 10000
-                                         // by integer quotient/remainder, exactly four
-                                         // decimals, no floating point. It is the one display
-                                         // value that IS reproducible from signed material —
-                                         // a pure function of a chain-committed field — so a
-                                         // verifier EMITS it rather than comparing it; it can
-                                         // never "mismatch" (step 8)
-    "agent": "minidev",                  // §10.6: the draft's execution.agent / .interactive
-    "interactive": false,                // are NOT in the projection and are display data
-                                         // here. They may NOT be reintroduced as
-                                         // "minter-asserted work-class fields" — v0.6 removed
-                                         // the minter-asserted `work` class entirely, and
-                                         // these two are neither work nor committed
+                                         // NOTE: `amountUsd` is NOT a member here, and must
+                                         // not be re-added. The USD figure is DERIVED by the
+                                         // consumer, never served: R23 — "`amountUsd` is never
+                                         // stored; it is DERIVED for display as
+                                         // `assessedUsertokens / 10000` by integer quotient/
+                                         // remainder (no float), rendered with exactly four
+                                         // decimals (receipt-spec §2). The page recomputes it
+                                         // from `assessedUsertokens` rather than trusting a
+                                         // wire string." It is the one display value fully
+                                         // reproducible from signed material — a pure function
+                                         // of a chain-committed field — so a verifier EMITS it
+                                         // rather than comparing it, and it can never
+                                         // "mismatch" (step 8). Serving one would invite a
+                                         // consumer to trust a string the chain never
+                                         // committed, which is exactly what deriving avoids
+    "execution": {                       // §10.6: the draft's execution.agent / .interactive
+      "agent": true,                     // are NOT in the projection and are display data
+      "interactive": false               // here — NESTED under `execution`, as the shipped
+    },                                   // consumer reads them. BOTH ARE BOOLEAN FLAGS (R31:
+                                         // "anything else is not a flag"), so an agent NAME
+                                         // is not a legal value and a non-boolean is dropped
+                                         // rather than rendered. They may NOT be reintroduced
+                                         // as "minter-asserted work-class fields" — v0.6
+                                         // removed the minter-asserted `work` class entirely,
+                                         // and these two are neither work nor committed
                                          // NOTE: extension availability is NOT reported
                                          // here. v0.2 briefly improvised a
                                          // `display.extensions` member because §10.4
@@ -776,38 +841,40 @@ shape). Four tiers, and a consumer must not blur them:
                                          // the top-level `verification.checks` above, so
                                          // the improvisation is DROPPED — one place
                                          // reports check results, and it is not `display`
-    "pricingTables": [                   // §10.5b: content hashes and deployment records are
-                                         // NOT chain-committed in ut1 (the projection commits
-                                         // pricing.tableVersions and nothing more), so they
-                                         // live here, labeled, or are dropped. They must
-                                         // NEVER render as if the chain vouched for them
-      { "pricingTableVersion": "2026-08-08", "pricingTableSha256": "…" }
-    ],
-    "breakdown": [                       // §10.11: the recompute basis, DISPLAY DATA. One row
-                                         // per (provider, model, usageTier, pricedAsTier,
-                                         // pricingDeployment, adapterPolicy?, ratePer1k). A
-                                         // session that spans a pricing-table deployment gets
-                                         // TWO rows for the same tuple, each at the rate
-                                         // actually applied (round-4 F5) — never a blended
-                                         // rate that exists in no published table
+    "pricingTables": {                   // §10.5b: content hashes and deployment records are
+      "hashes": ["…"],                   // NOT chain-committed in ut1 (the projection commits
+      "pricingDeployment": "deploy_…"    // pricing.tableVersions and nothing more), so they
+    },                                   // live here, labeled, or are dropped. They must
+                                         // NEVER render as if the chain vouched for them.
+                                         // OBJECT-shaped, as the shipped consumer reads it:
+                                         // `hashes` a string list, `pricingDeployment` an
+                                         // OPTIONAL string — not the array of
+                                         // {version, sha256} records an earlier revision drew
+    "recomputedTotal": {                 // §10.11: the resolver's DISPLAY-GRADE recompute,
+      "a": 48210,                        // never a verifier verdict — `a + roundingAdjustment
+      "roundingAdjustment": 14,          // === total`, and `total` must equal the projection's
+      "total": 48224                     // chain-committed assessedUsertokens. Served as three
+    },                                   // NUMBERS, as the consumer reads it, never as a
+                                         // pre-rendered equation string
+    "spendBreakdown": [                  // §10.11: the recompute basis, DISPLAY DATA — named
+                                         // `spendBreakdown`, as the shipped consumer reads it.
+                                         // ROW SHAPE IS THE CONSUMER'S: provider, model, tier,
+                                         // usertokens, and nothing else. The richer per-row
+                                         // pricing provenance an earlier revision drew here
+                                         // (pricedAsTier, pricingTableSha256,
+                                         // pricingDeployment, tokens, ratePer1k) is NOT part
+                                         // of the shape the page consumes; table-level
+                                         // provenance lives in `pricingTables` above. A
+                                         // session that spans a pricing-table deployment
+                                         // still gets TWO rows for the same tuple, each at
+                                         // the rate actually applied (round-4 F5) — never a
+                                         // blended rate that exists in no published table
       { "provider": "anthropic", "model": "claude-fable-5",
-        "usageTier": "input", "pricedAsTier": "input",
-        "pricingTableVersion": "2026-08-08", "pricingTableSha256": "…",
-        "pricingDeployment": { "deploymentId": "deploy_…",
-          "registryVersion": "2026-08-08", "registrySha256": "…" },
-        "tokens": 812441, "ratePer1k": "30", "usertokens": 24373 },
+        "tier": "input", "usertokens": 24373 },
       { "provider": "anthropic", "model": "claude-fable-5",
-        "usageTier": "cacheRead", "pricedAsTier": "cacheRead",
-        "pricingTableVersion": "2026-08-08", "pricingTableSha256": "…",
-        "pricingDeployment": { "deploymentId": "deploy_…",
-          "registryVersion": "2026-08-08", "registrySha256": "…" },
-        "tokens": 7614210, "ratePer1k": "3", "usertokens": 22843 },
+        "tier": "cacheRead", "usertokens": 22843 },
       { "provider": "anthropic", "model": "claude-fable-5",
-        "usageTier": "output", "pricedAsTier": "output",
-        "pricingTableVersion": "2026-08-08", "pricingTableSha256": "…",
-        "pricingDeployment": { "deploymentId": "deploy_…",
-          "registryVersion": "2026-08-08", "registrySha256": "…" },
-        "tokens": 6621, "ratePer1k": "150", "usertokens": 993 }
+        "tier": "output", "usertokens": 994 }
     ]
   }
 }
@@ -899,7 +966,12 @@ question.
 `SCHEMA_INVALID` (step 1), `EVENT_MISMATCH` (2), `ID_MISMATCH` (3, both
 halves), `SIG_INVALID` (4), `PROOF_INVALID` (5), `CHECKPOINT_INVALID` (6),
 `SEMANTIC_INVALID` (7), `DERIVATION_MISMATCH` (8), `HISTORY_INVALID`
-(`checkpointHistory`), `ANCHOR_INVALID` (`anchorEvidence`). Each code is legal
+(`checkpointHistory`), `ANCHOR_INVALID` (`anchorEvidence`), and
+**`PREDECESSOR_MISMATCH` (`predecessorLinkage`)** — ELEVEN codes, not ten.
+The eleventh was added at receipt-spec v0.7 to close the gap this document's
+round-2 F3 escalated: the union previously assigned NO code to
+`predecessorLinkage`, so the 409 required by the resolution above could not be
+reported schema-validly at all. Each code is legal
 ONLY on its own step or check; an unknown or misplaced code is a schema
 failure and fails closed. `SCHEMA_INVALID` is the one code §7 does not name —
 §4 owns step 1's wire name.
@@ -1346,8 +1418,17 @@ Design intents behind the shape:
 > re-pin took all three previously-deferred corrections at once — the
 > anchor-clock paragraph retired (§10.13), the separate-billing-identities
 > sentence retired (§10.16), and both stale in-pin `claimsHash` mentions
-> removed (§10.2 residue) — so this section and the rest of v0.2 now agree;
-> no known-stale passages remain. Edits here require a coordinated re-pin,
+> removed (§10.2 residue). Those three are settled.
+> **One known-stale passage SURVIVES, deliberately, and is overridden rather
+> than edited:** this section still describes the 410 `billedUnfinalized`
+> bundle as `{ status, receiptId, linkedReceiptId, transferSetRoot,
+> terminalEvent: { event, inclusion, publishedRoot } }`, bound through
+> `terminalEvent.event.payload.receiptId`. Every one of those terms is retired
+> — see "The 410 `billedUnfinalized` bundle SUPERSEDES…" below, which states
+> the governing shape, and receipt-spec §6a, which cites this same override as
+> its live reason for pinning by hash instead of tracking this document's
+> head. Read the pinned bundle description as HISTORY; the superseding
+> paragraph governs. Edits here require a coordinated re-pin,
 > never a unilateral change.
 
 ## Mint lifecycle — normative constraints on the resolver's semantics
@@ -1975,7 +2056,7 @@ concrete shape for something §10 described abstractly.
 | §4.1 | `verification` — `trustSnapshotId` plus the nine step results and four named online-check results, four-valued, so the verdict function's INPUTS are on the wire. Required on 200 and 409. |
 | §4.1 | `advisories[]` — required on 200, may be empty; `revisionSuperseded`, `receiptSuperseded`, `generationAddendum`, with unknown kinds rendered generically and never verdict-affecting. |
 | §4.1 | **The verdict algebra**, complete and binding on this API: mandatory-steps-all-passed (with `unavailable`/`notApplicable` equally disqualifying), the named non-mandatory results, and extension-caps-status with a CUMULATIVE ladder. A 200 that violates it is a resolver bug. |
-| §4.1 | The **closed failure-code union** — ten codes, each legal only on its own step/check, no free text; `SCHEMA_INVALID` is §4's own name for step 1. |
+| §4.1 | The **closed failure-code union** — ten codes at transcription time, each legal only on its own step/check, no free text; `SCHEMA_INVALID` is §4's own name for step 1. **Now ELEVEN:** receipt-spec v0.7 added `PREDECESSOR_MISMATCH` (legal only on `predecessorLinkage`) in response to round-2 F3, and verify-page v0.5 carries the matching eleven-code union — see R3-F1 below. |
 | §4.2 | The concrete non-receipt bodies, including the amended 410 bundle, and the `verification`-bearing 409. |
 | §4.2 | **The 429 exemption** — body never parsed, state from status code + `Retry-After` alone, never the protocol-error shell. |
 | §3/R37 | Version discipline: unknown MEMBERS under `apiVersion: "1"` tolerated, unknown VERSIONS and statuses fail closed; plus two obligations on this API — the HTTP code and body `status` must agree on body-bearing responses, and no status code outside the enumerated allowed set (completed by F6 below). |
