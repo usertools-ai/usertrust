@@ -27,6 +27,7 @@ import {
 	createPublicKey,
 	sign as cryptoSign,
 	generateKeyPairSync,
+	randomBytes,
 	randomUUID,
 } from "node:crypto";
 import {
@@ -162,16 +163,64 @@ export interface AnchorIdentity {
 	 * minted before key history existed — callers fall back to the current key.
 	 */
 	keyHistory?: { keyId: string; publicKeySpki: string }[];
+	/**
+	 * Every ECDSA witness key this vault has been configured to submit Rekor
+	 * entries under, oldest first, each carrying the ROOT's delegation over it.
+	 * Submission credentials, never evidence: no verification verdict depends on
+	 * these. Present so an auditor enumerating the public log can follow the
+	 * index across a witness-key change instead of reading a rotation as the
+	 * index simply ending.
+	 */
+	witnessKeyHistory?: WitnessKeyEntry[];
 }
 
 /**
- * Atomic identity.json write: temp file + fsync + rename. A bare in-place
- * writeFileSync could be truncated by a crash mid-write, wedging the vault
- * between "no anchor identity" (emitter) and "identity already exists" (init).
+ * A witness key plus the root's delegation authorizing it (spec §3.3). The
+ * delegation is what stops a throwaway key: without it, anyone could submit an
+ * authentic payload hash under a one-off key, present the receipt, and leave the
+ * canonical index empty while every check passed.
+ */
+export interface WitnessKeyEntry {
+	keyId: string;
+	/** MUST be P-256. Verification rejects any other key type rather than trying it. */
+	publicKeySpki: string;
+	/** Ed25519, by the root, over the length-prefixed §3.3 delegation preimage. */
+	delegationSig: string;
+	/**
+	 * Which root epoch signed it. Resolved against the VERIFIED rotation lineage
+	 * from the auditor's pinned genesis root — never against keyHistory, which
+	 * the party under audit controls.
+	 */
+	delegatedByKeyId: string;
+	/** Monotonic from 1. Contiguity is what makes an omitted revocation visible. */
+	delegationIndex: number;
+	/** Anchor-seq range this delegation authorizes; closing it is how revocation works. */
+	effectiveFromAnchorSeq: number;
+	effectiveUntilAnchorSeq: number;
+}
+
+/**
+ * Atomic identity.json write: temp file + fsync + rename + DIRECTORY fsync.
+ *
+ * Three things here are load-bearing, and two of them were absent before the
+ * witness-key work needed this path to be trustworthy:
+ *
+ * - A bare in-place writeFileSync could be truncated by a crash mid-write,
+ *   wedging the vault between "no anchor identity" (emitter) and "identity
+ *   already exists" (init).
+ * - The temp name carries RANDOM bytes, not just the pid. Two concurrent
+ *   writers in one process (an emitter and a CLI command in the same host)
+ *   shared `identity.json.tmp-<pid>`, so one could rename a file the other was
+ *   still writing — publishing a torn identity that reads as valid JSON.
+ * - The DIRECTORY is fsync'd after the rename. Without it, the rename itself is
+ *   not durable, so "persisted before we act on it" was false across a crash
+ *   even though the file's own bytes were fsync'd. The witness-key mint depends
+ *   on that ordering being real (spec §5.2).
  */
 function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
-	const path = join(anchorsDir(rootDir), "identity.json");
-	const tmp = `${path}.tmp-${process.pid}`;
+	const dir = anchorsDir(rootDir);
+	const path = join(dir, "identity.json");
+	const tmp = `${path}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
 	const fd = openSync(tmp, "w", 0o600);
 	try {
 		writeSync(fd, JSON.stringify(identity, null, "\t"));
@@ -180,14 +229,159 @@ function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
 		closeSync(fd);
 	}
 	renameSync(tmp, path);
+	// POSIX: a rename is only durable once the containing directory is synced.
+	// Best-effort by platform (Windows cannot open a directory this way); the
+	// repo's supported targets and CI are POSIX, so this is the real path.
+	try {
+		const dirFd = openSync(dir, "r");
+		try {
+			fsyncSync(dirFd);
+		} finally {
+			closeSync(dirFd);
+		}
+	} catch {
+		/* platform does not support directory fsync */
+	}
 }
 
-/** Persist the durable anchorSeq high-water (never decreases). */
-function bumpAnchorHighWater(rootDir: string, anchorSeq: number): void {
-	const identity = readAnchorIdentity(rootDir);
-	if (identity === null) return;
-	if ((identity.lastAnchorSeq ?? 0) >= anchorSeq) return;
-	writeIdentityFile(rootDir, { ...identity, lastAnchorSeq: anchorSeq });
+/**
+ * The ONE writer for `identity.json` after minting. Every mutation goes through
+ * here: read under the lock, mutate, merge-check, write atomically.
+ *
+ * `heldLock` is explicit rather than inferred. Callers inside the emitter's
+ * advisory lock (the emission path) pass `true`; everyone else passes `false`
+ * and acquires. Inferring it from the in-process lock set would silently let a
+ * caller that FORGOT to lock ride on some unrelated component's lock — the
+ * failure would be invisible and intermittent, which is the worst kind here.
+ *
+ * *Prevents:* the read-modify-write race this function exists for. Before it,
+ * `bumpAnchorHighWater` and the rotation update each did their own
+ * read → spread → write with no serialization, so a write that started from a
+ * stale read could overwrite a newer `lastAnchorSeq` — rolling back the durable
+ * high-water, which the anchoring-monotonicity invariant exists to make
+ * impossible (re-minting an occupied position in an append-only external store
+ * is permanent, unrewritable fork evidence). The same race silently dropped
+ * `keyHistory` entries, stranding records whose signing key nothing could name.
+ */
+function updateAnchorIdentity(
+	rootDir: string,
+	mutate: (current: AnchorIdentity) => AnchorIdentity,
+	opts: { heldLock: boolean },
+): AnchorIdentity | null {
+	const apply = (): AnchorIdentity | null => {
+		// Re-read UNDER the lock. The caller's copy may predate another writer.
+		const current = readAnchorIdentity(rootDir);
+		if (current === null) return null;
+		const next = mergeIdentity(current, mutate(current));
+		// A no-op mutation writes nothing. `bumpAnchorHighWater` is called on every
+		// emission and is usually a no-op once the high-water is current; rewriting
+		// identity.json each time would burn a needless fsync pair on the emission
+		// path and widen the crash window over a file nothing asked to change.
+		if (JSON.stringify(next) === JSON.stringify(current)) return current;
+		writeIdentityFile(rootDir, next);
+		return next;
+	};
+	if (opts.heldLock) return apply();
+	const release = tryAcquireAnchorLock(anchorsDir(rootDir));
+	if (release === null) {
+		// Fail closed rather than busy-wait. The lock is held only across an
+		// emission, so a retry moments later succeeds; proceeding unlocked is
+		// exactly the race above.
+		throw new Error(
+			"anchor identity is locked by an in-flight emission — retry once it completes",
+		);
+	}
+	try {
+		return apply();
+	} finally {
+		release();
+	}
+}
+
+/**
+ * Merge a proposed identity onto the one actually on disk. Union and monotonic,
+ * never last-writer-wins, because the proposal was computed from a read that may
+ * already be stale.
+ */
+function mergeIdentity(current: AnchorIdentity, proposed: AnchorIdentity): AnchorIdentity {
+	if (proposed.vaultId !== current.vaultId) {
+		// Refuse rather than pick a winner: a wrong vaultId re-homes every signed
+		// record in the vault, and no automatic resolution is defensible.
+		throw new Error("refusing to change an anchor identity's vaultId");
+	}
+	const mergedKeys = unionByKeyId(current.keyHistory, proposed.keyHistory);
+	const mergedWitness = unionByKeyId(current.witnessKeyHistory, proposed.witnessKeyHistory);
+	return {
+		...proposed,
+		// Monotonic: a stale writer must never lower the durable high-water.
+		...(maxDefined(current.lastAnchorSeq, proposed.lastAnchorSeq) !== undefined
+			? { lastAnchorSeq: maxDefined(current.lastAnchorSeq, proposed.lastAnchorSeq) as number }
+			: {}),
+		...(mergedKeys !== undefined ? { keyHistory: mergedKeys } : {}),
+		...(mergedWitness !== undefined ? { witnessKeyHistory: mergedWitness } : {}),
+	};
+}
+
+function maxDefined(a: number | undefined, b: number | undefined): number | undefined {
+	if (a === undefined) return b;
+	if (b === undefined) return a;
+	return Math.max(a, b);
+}
+
+/**
+ * Union two history lists by `keyId`, preserving order and preferring the
+ * PROPOSED entry for a keyId present in both (that is the deliberate update);
+ * every entry unique to `current` survives. Dropping one would strand records
+ * signed under it — the sink could no longer name the key that signed them.
+ */
+function unionByKeyId<T extends { keyId: string }>(
+	current: T[] | undefined,
+	proposed: T[] | undefined,
+): T[] | undefined {
+	if (current === undefined && proposed === undefined) return undefined;
+	const merged = new Map<string, T>();
+	for (const entry of current ?? []) merged.set(entry.keyId, entry);
+	for (const entry of proposed ?? []) merged.set(entry.keyId, entry);
+	return [...merged.values()];
+}
+
+/**
+ * Refuse to write a private key inside the vault it vouches for (AC-6.2).
+ *
+ * Canonicalize BOTH sides before comparing: a relative path (e.g.
+ * ".usertrust/keys/anchor.pem") would never match an absolute prefix, and
+ * symlinked temp dirs (macOS /var → /private/var) would defeat a plain
+ * resolve() comparison — either way silently landing the key inside the vault.
+ *
+ * ONE copy of this rule, called for the anchor key and the witness key alike.
+ * The witness key is a submission credential and not evidence, so the parent
+ * spec's "the vault must not contain what vouches for it" does not literally
+ * apply to it — but a key inside the vault is collateral damage of any ordinary
+ * vault operation (a restore, a sync, an `rm -rf .usertrust`), and losing the
+ * witness key splits the published index that anchor enumeration counts against.
+ * A second, laxer placement rule would also be an invitation for the anchor key
+ * to drift into it, at which point AC-6.2 is dead and nothing reports it.
+ */
+function refuseKeyInsideVault(rootDir: string, keyFile: string, what: string): void {
+	const vaultAbs = realResolve(join(rootDir, VAULT_DIR));
+	if (keyFile === vaultAbs || keyFile.startsWith(vaultAbs + sep)) {
+		throw new Error(`Refusing to write the ${what} private key inside the vault (AC-6.2)`);
+	}
+}
+
+/**
+ * Persist the durable anchorSeq high-water (never decreases).
+ *
+ * `heldLock` mirrors `updateAnchorIdentity`: the emission path already owns the
+ * advisory lock, the resume path does not.
+ */
+function bumpAnchorHighWater(rootDir: string, anchorSeq: number, heldLock: boolean): void {
+	updateAnchorIdentity(
+		rootDir,
+		(identity) =>
+			(identity.lastAnchorSeq ?? 0) >= anchorSeq ? identity : { ...identity, lastAnchorSeq: anchorSeq },
+		{ heldLock },
+	);
 }
 
 export function anchorsDir(rootDir: string): string {
@@ -258,17 +452,9 @@ export function initAnchorIdentity(
 		"base64",
 	);
 
-	// Canonicalize BOTH sides before comparing: a relative --key-file (e.g.
-	// ".usertrust/keys/anchor.pem") would never match an absolute prefix, and
-	// symlinked temp dirs (macOS /var → /private/var) would defeat a plain
-	// resolve() comparison — either way silently landing the signing key
-	// inside the vault it vouches for (AC-6.2).
 	const keyFile = realResolve(opts?.keyFile ?? defaultKeyPath(vaultId));
 	const keyDir = join(keyFile, "..");
-	const vaultAbs = realResolve(join(rootDir, VAULT_DIR));
-	if (keyFile === vaultAbs || keyFile.startsWith(vaultAbs + sep)) {
-		throw new Error("Refusing to write the anchor private key inside the vault (AC-6.2)");
-	}
+	refuseKeyInsideVault(rootDir, keyFile, "anchor");
 	mkdirSync(keyDir, { recursive: true, mode: 0o700 });
 	writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }) as string, {
 		mode: 0o600,
@@ -838,7 +1024,7 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 					};
 				}
 				appendToMirror(orphan);
-				bumpAnchorHighWater(rootDir, orphan.anchorSeq);
+				bumpAnchorHighWater(rootDir, orphan.anchorSeq, true);
 				tail = orphan;
 			}
 
@@ -911,7 +1097,7 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 			appendToMirror(record);
 			// High-water AFTER the mirror append is fsync'd, so a crash leaves
 			// high-water ≤ mirror tail (never ahead of what exists).
-			bumpAnchorHighWater(rootDir, record.anchorSeq);
+			bumpAnchorHighWater(rootDir, record.anchorSeq, true);
 			trackPublish(record);
 			return { emitted: true, record };
 		} finally {
@@ -1070,7 +1256,7 @@ export function resumeAnchorMirror(rootDir: string, latestRecordRaw: string): An
 	}
 	// Re-seeding advances the durable high-water so the next emission allocates
 	// from the re-seeded tail, not from a stale value.
-	bumpAnchorHighWater(rootDir, record.anchorSeq);
+	bumpAnchorHighWater(rootDir, record.anchorSeq, false);
 	return record;
 }
 
@@ -1110,20 +1296,24 @@ export function recordRotatedIdentity(
 	rootDir: string,
 	next: { keyId: string; publicKeySpki: string },
 ): void {
-	const identity = readAnchorIdentity(rootDir);
-	if (identity === null) {
+	const updated = updateAnchorIdentity(
+		rootDir,
+		(identity) => {
+			// An identity minted before key history seeds one from its current
+			// epoch, so the pre-rotation key is not lost by upgrading mid-life.
+			const history = identity.keyHistory ?? [
+				{ keyId: identity.keyId, publicKeySpki: identity.publicKeySpki },
+			];
+			return {
+				...identity,
+				keyId: next.keyId,
+				publicKeySpki: next.publicKeySpki,
+				keyHistory: [...history.filter((entry) => entry.keyId !== next.keyId), next],
+			};
+		},
+		{ heldLock: false },
+	);
+	if (updated === null) {
 		throw new Error("No anchor identity to rotate");
 	}
-	// An identity minted before key history seeds one from its current epoch, so
-	// the pre-rotation key is not lost by upgrading mid-life.
-	const history = identity.keyHistory ?? [
-		{ keyId: identity.keyId, publicKeySpki: identity.publicKeySpki },
-	];
-	const updated: AnchorIdentity = {
-		...identity,
-		keyId: next.keyId,
-		publicKeySpki: next.publicKeySpki,
-		keyHistory: [...history.filter((entry) => entry.keyId !== next.keyId), next],
-	};
-	writeIdentityFile(rootDir, updated);
 }
