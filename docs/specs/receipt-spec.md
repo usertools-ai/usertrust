@@ -166,7 +166,7 @@ event is unchanged and is NOT the mint event — it predates settlement
 
 The **projection** is the value of the mint event's `data` field. Every
 field is chain-committed and Merkle-provable (R1-F1/F3). The block below
-ENUMERATES what v0.6 commits — including the fields §6a/§6 introduced
+ENUMERATES what v0.9.5 commits — including the fields §6a/§6 introduced
 (`work`, `sessionAssociation`, `workloadId`, `prevGenerationEventHash`) —
 because the
 strict schema stays: any unknown field anywhere in a `ut1` document is FAIL,
