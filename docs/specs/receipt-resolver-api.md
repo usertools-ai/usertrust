@@ -10,10 +10,18 @@ and any third-party verifier.
 
 **Normative inputs, in authority order:**
 
-1. **`receipt-spec.md` — v0.6-final, FROZEN** (usertrust). This document
-   treats the receipt ID as opaque and defers its format, the canonical
-   projection, the canonicalization algorithm, and the signature scheme to
-   that spec. Conflicts resolve in its favor, always. Its **§10** enumerates
+1. **`receipt-spec.md` — v0.9.5, the ADOPTED revision** (usertrust). This
+   document treats the receipt ID as opaque and defers its format, the
+   canonical projection, the canonicalization algorithm, and the signature
+   scheme to that spec. **Conflicts resolve in its favor, always** — the
+   precedence rule is unchanged and is not weakened by naming a later
+   revision. The revision cited here moved off v0.6-final because this API now
+   transcribes material v0.6 did not carry: the REQUIRED `delegationPosture`
+   and its §7 verifier behavior (v0.9), `PREDECESSOR_MISMATCH` (v0.7), §8's
+   key-history and activation-boundary model, and §14's two `kind`
+   vocabularies. Declaring v0.6 while requiring v0.9 fields was the same
+   two-contracts-one-version defect the spec's own title bump fixed, pointing
+   the other way. Its **§10** enumerates
    the sixteen companion updates this revision applies.
 2. **`2026-08-11-verify-page-design.md` — v0.5, FROZEN FOR BUILD** (usertrust;
    v0.3 froze the schema, v0.4 carried the registryBinding conformity
@@ -527,8 +535,11 @@ shape). Four tiers, and a consumer must not blur them:
           "assessedUsertokens": 48224,   // metered-or-estimated assessed cost, summed with
                                          // the ledger's PER-TRANSFER rounding.
                                          // WORKED EXAMPLE (round-4 F1 — the numbers below
-                                         // actually satisfy the equation): raw products
-                                         // 24373.23 + 22842.63 + 993.15 = 48209.01;
+                                         // actually satisfy the equation, and are the SAME
+                                         // internal snapshot the display breakdown further
+                                         // down projects; one response never carries two):
+                                         // raw products
+                                         // 24373.23 + 22842.72 + 994.05 = 48210.00;
                                          // A = ceil → 48210; + roundingAdjustment 14 = 48224
           "postedUsertokens": 48224,     // ledger-POSTed total over the POSTed pairs. In ut1
                                          // this MUST EQUAL assessedUsertokens — the adopted
@@ -933,13 +944,22 @@ question.
 2. **Named non-mandatory results:** `derivations` is `passed` or
    `notApplicable` (the latter exactly when `transferSet` is absent) — never
    `failed` or `unavailable` on a 200, because that recompute needs nothing
-   outside the receipt. `steps.extensions` (the step-9 SUMMARY) may hold any
-   result, **but never a summary-level `failure` code** (round-3 gate, F3):
-   the union's codes are each legal only on their own named check —
-   `HISTORY_INVALID` on `checks.checkpointHistory`, `ANCHOR_INVALID` on
-   `checks.anchorEvidence` — and a singular member could not summarize both
-   failing anyway. The summary aggregates RESULTS (`failed` iff any named
-   extension check failed); the codes live solely under the named checks. **`registryBinding` MUST be `passed` on every
+   outside the receipt. `steps.extensions` (the step-9 SUMMARY) **is never
+   `failed`**: it holds `passed`, `notApplicable`, or `unavailable`, and never
+   carries a summary-level `failure` code (round-3 gate, F3). Both halves are
+   one rule, not two, and the earlier phrasing — "may hold any result… `failed`
+   iff any named extension check failed" — described a state that **cannot be
+   serialized at all.** The closed-code rule below requires a code on every
+   `failed` entry, and `extensions` owns no code, so a `failed` summary is
+   refused in BOTH directions: without one it is "failed but names no failure
+   code", with one it "carries a failure code but owns none". The union's
+   codes are each legal only on their own named check — `HISTORY_INVALID` on
+   `checks.checkpointHistory`, `ANCHOR_INVALID` on `checks.anchorEvidence`,
+   `PREDECESSOR_MISMATCH` on `checks.predecessorLinkage` — and a singular
+   member could not summarize two of them failing anyway. **A failing
+   extension is reported on its NAMED check, carrying that check's code;** the
+   summary aggregates only the non-failure results, and the consequence of the
+   failure is carried by the status cap in rule 3, not by the summary. **`registryBinding` MUST be `passed` on every
    resolver-issued 200.** The registry is this API's own backing store — §6
    writes `receiptId → event.hash` and `event.hash → signed bytes` in the same
    atomic registry write, so a resolver that read the bytes it is serving
@@ -950,7 +970,17 @@ question.
    conflicting final binding → **409 `ID_MISMATCH`**. `unavailable` and
    `notApplicable` for this check are reserved for OFFLINE verification
    reports, whose actor genuinely cannot query a registry (§7's rule,
-   unchanged for that actor). `predecessorLinkage` is `passed`,
+   unchanged for that actor). **Do not "correct" this against receipt-spec
+   §7** — that section is titled "Verification procedure and verdicts
+   (offline)" and its one-rule-covers-every-online-check paragraph ("the CHECK
+   reports `unavailable`… and never becomes a 503") binds the OFFLINE
+   verifier, whose premise is that it has no registry. Reading it onto the
+   resolver is the ACTOR CONFLATION this document escalated (round-1 F3) and
+   that was fixed at source; the shipped consumer now enforces the resolver
+   side directly — a 200 whose `registryBinding` is not `passed` is rejected,
+   because "the registry IS the resolver's backing store, so `unavailable`
+   would assert 'I read the registry for the bytes but not for the binding'".
+   Two actors, two rules, one check name. `predecessorLinkage` is `passed`,
    `notApplicable` (generation 1), or `unavailable`.
    **`registryBinding: failed` or `predecessorLinkage: failed`
    on a 200 is INVALID** — those two fail only on a POSITIVE CONTRADICTION (a
@@ -980,10 +1010,23 @@ question.
    > classified there as a conformity correction to receipt-spec §10.1. The
    > page-side consequence: a 200 whose `registryBinding` is not `passed` is
    > treated as a protocol error.
-3. **Extension checks CAP the status, and the ladder is CUMULATIVE:**
-   `verified_checkpoint_history` REQUIRES `checkpointHistory: passed`;
+3. **Extension checks CAP the status, the ladder is CUMULATIVE, and a rung
+   REQUIRES THE SERVED EVIDENCE — a `passed` result alone does not earn it:**
+   `verified_checkpoint_history` REQUIRES `checkpointHistory: passed` **and a
+   NON-EMPTY `checkpointHistory` member in the envelope**;
    `verified_anchored` REQUIRES `anchorEvidence: passed` **AND**
-   `checkpointHistory: passed` (§7's "additionally" chains the rungs). An
+   `checkpointHistory: passed` (§7's "additionally" chains the rungs) **and an
+   `anchorEvidence` member carrying a `rekor` attachment**. The evidence half
+   is not decorative: a `passed` result whose evidence the envelope does not
+   serve is capped exactly as `unavailable` is, because "the history rung
+   cannot render without the history it walked (D1)", and an `anchorEvidence`
+   member with no Rekor attachment is capped because "S3 Object Lock evidence
+   is operator-asserted configuration that upgrades no cryptographic verdict
+   and must never render as a green anchor claim (R8)". An EMPTY
+   `checkpointHistory` array counts as absent — a walk over nothing proves
+   nothing. Serving `checkpointHistory: passed` while omitting the member
+   (for instance because the `?include=checkpointHistory` opt-in was not
+   honored) therefore yields `verified_checkpoint`, never the history rung. An
    extension that is `failed` or `unavailable` NEVER demotes the base verdict
    — but it CAPS the status at the rung below that extension, and a status
    above its cap is a protocol error.
@@ -1283,13 +1326,27 @@ Design intents behind the shape:
      "MINT keys have no segment-indexed material of their own; their
      retirement boundary is the mint event's segment, evaluated the same way
      through the receipt's checkpoint." → `CHECKPOINT_INVALID`
-  7. **Semantic validation** — exactly the spec §2 enumerated constraints,
-     every one decidable from the receipt alone: sorted-unique arrays; the
+  7. **Semantic validation** — exactly the spec §2 enumerated constraints.
+     MOST are decidable from the receipt alone: sorted-unique arrays; the
      `transferSet` presence RULE; `0 < postedUsertokens ===
      assessedUsertokens`; `0 ≤ roundingAdjustment ≤ transferCount`;
      presence/exclusion (`prevGenerationEventHash` iff `generation > 1`,
      `workloadId` iff `workflowAttested`, `origin` iff the fallback session
-     variant); posture ENUM validity. **Postures are ATTESTED ENUMS, not
+     variant); posture ENUM validity; and the public-safety SYNTAX
+     (`proofId`/`workloadId` matching `[A-Za-z0-9._-]{1,128}`, `repo` when
+     present ≤ 256 characters in canonical provider-URL form).
+     **ONE constraint is NOT receipt-decidable and takes an EXTERNAL INPUT:
+     catalog MEMBERSHIP of `models[]`/`providers[]`.** §2 is explicit —
+     "Catalog MEMBERSHIP of `models[]`/`providers[]` is not decidable from the
+     receipt alone — a verifier holding the published pricing catalog checks
+     it, and everyone else checks only that entries are well-formed and that
+     `"custom"` appears at most once." **The published catalog is therefore a
+     named verification INPUT to this step,** not something the receipt
+     carries. THIS resolver holds the catalog and checks membership; a
+     verifier without it performs the narrower well-formedness check and must
+     not report membership it never tested — claiming the stronger check from
+     the weaker input is precisely the accept-what-you-cannot-verify failure
+     the postures below are written against. **Postures are ATTESTED ENUMS, not
      verifier-established facts** — a verifier checks that `usagePosture` and
      `pricingPosture` are legal values and internally consistent, and that
      consumers render them; it CANNOT confirm them, because both are defined
@@ -1411,14 +1468,27 @@ Design intents behind the shape:
   cache-read split this exposes is the 7-8× story made visible.
 
   **What a skeptic can recompute, and at what grade.** The equation survives,
-  but as the RESOLVER's display-grade ONLINE check over the unsigned `display`
-  rows — never a verifier verdict, and never a claim step 8 makes (§10.5,
+  but as the RESOLVER's display-grade ONLINE check over its INTERNAL pricing
+  snapshot — never a verifier verdict, and never a claim step 8 makes (§10.5,
   §10.11):
 
   ```
-  A = ceil( Σ tokens × ratePer1k / 1000 )              // over display.breakdown
+  A = ceil( Σ tokens × ratePer1k / 1000 )   // over the RESOLVER'S INTERNAL
+                                            // pricing-snapshot rows. NOT over
+                                            // `display.spendBreakdown`: those
+                                            // four-member wire rows carry no
+                                            // `tokens` and no `ratePer1k` (see
+                                            // SCOPE under "The breakdown rows
+                                            // are display data"), and the Σ is
+                                            // over RAW per-row products, never
+                                            // the rows' rounded `usertokens`
   A + roundingAdjustment === postedUsertokens === assessedUsertokens
   ```
+
+  The member named here used to be `display.breakdown`, which no longer
+  exists under that name or that shape; a reader who tried to run the equation
+  against the wire rows would find the inputs missing and could reasonably
+  conclude the check is unperformed. It is performed — one layer in.
 
   A `packages/verify` run neither has the rows nor needs them: no verification
   step may depend on material outside the receipt. What the CHAIN commits —
