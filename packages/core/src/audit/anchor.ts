@@ -287,9 +287,7 @@ function updateAnchorIdentity(
 		// Fail closed rather than busy-wait. The lock is held only across an
 		// emission, so a retry moments later succeeds; proceeding unlocked is
 		// exactly the race above.
-		throw new Error(
-			"anchor identity is locked by an in-flight emission — retry once it completes",
-		);
+		throw new Error("anchor identity is locked by an in-flight emission — retry once it completes");
 	}
 	try {
 		return apply();
@@ -379,7 +377,9 @@ function bumpAnchorHighWater(rootDir: string, anchorSeq: number, heldLock: boole
 	updateAnchorIdentity(
 		rootDir,
 		(identity) =>
-			(identity.lastAnchorSeq ?? 0) >= anchorSeq ? identity : { ...identity, lastAnchorSeq: anchorSeq },
+			(identity.lastAnchorSeq ?? 0) >= anchorSeq
+				? identity
+				: { ...identity, lastAnchorSeq: anchorSeq },
 		{ heldLock },
 	);
 }
