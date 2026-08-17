@@ -1,4 +1,4 @@
-# Receipt Resolver API — v0.2 (companion-updated against receipt-spec v0.6-final)
+# Receipt Resolver API — v0.2 (normative companion; adopted authority: receipt-spec v0.9.5)
 
 Status: **v0.2 — the SIXTEEN §10 companion updates applied, and the verify
 page's §4 concrete response schema adopted.** All sixteen §10 items now land
@@ -1964,8 +1964,13 @@ surviving cross-checks, which a consumer runs BEFORE rendering or following
 the link, are `routeParamId === body.receiptId`,
 `body.linkedReceiptId === linkedReceipt.receiptId`,
 `linkedReceipt.work.origin.sourceReservationReceiptId === body.receiptId`,
-and transfer-set-root equality across the terminal event and the fallback
-receipt. Any mismatch is an integrity failure and no link is rendered —
+**both committed terminal-event IDs against their body counterparts —
+`terminalEvent.event.data.receiptId === body.receiptId` AND
+`terminalEvent.event.data.linkedReceiptId === body.linkedReceiptId` (the
+event schema above calls these committed linkage data; without this pair a
+dishonest resolver pairs a valid terminal proof with a DIFFERENT linked
+receipt)** — and transfer-set-root equality across the terminal event and
+the fallback receipt. Any mismatch is an integrity failure and no link is rendered —
 otherwise an untrusted resolver answers a request for ID B with a fully valid
 terminal bundle for ID A.
 
