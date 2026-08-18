@@ -84,124 +84,191 @@ export const LITELLM_FIELDS = [
 export const MODELS_DEV_FIELDS = ["input", "output", "cache_read", "cache_write"] as const;
 
 /**
- * How many MAPPED rows must carry a field before we believe it still exists.
+ * WHICH MAPPED MODELS CARRY WHICH OPTIONAL CACHE TIER, per source.
  *
- * Counted over mapped vendor rows only, never the whole corpus. A corpus-wide
- * count is satisfied by rows this tool never reads: a mapped provider could
- * rename a cache field while a handful of unrelated or reseller rows kept the
- * old name, and the sentinel would pass while every mapped row normalized that
- * tier to `undefined` — full coverage, exit 0, stale cache pricing.
+ * Aggregate counts are not enough, and this is the third narrowing of the same
+ * check. A single shared floor is cleared by unaffected rows. Per-field totals
+ * are still only a LOWER BOUND, so an upstream ADDITION creates headroom: once
+ * one row gains `cache_write`, a later loss on a different row keeps the total
+ * at or above the baseline and passes. That row still answers from input and
+ * output, so mapping coverage stays full and the comparison silently skips the
+ * missing tier.
  *
- * PER FIELD, PER SOURCE — never one shared number. A shared floor of 3 is
- * cleared by three unaffected rows while a PARTIAL rename (one provider, or one
- * field) quietly strips the tier from every other mapped row. The affected rows
- * still answer, because input/output survive, so mapping coverage stays full
- * and a changed cache rate can be classified `agree` — worst on a one-source
- * model like `kimi-k3`, where nothing else can contradict it.
+ * Only a per-(source, model, tier) expectation closes it: a specific model
+ * losing a specific tier is then a specific, named failure. Measured against
+ * the live feeds on 2026-08-18.
  *
- * Baselines measured against the mapped rows on 2026-08-18. They are a FLOOR,
- * not an equality: upstream adding cache rates to more models is fine, losing
- * them is not. A legitimate drop (a model leaving a feed) is an explicit,
- * reviewable edit here — the same rule as the coverage floors in compare.mts.
+ * Adding a tier upstream is fine and is not enforced here. Losing one listed
+ * below fails the run, and removing an entry is a deliberate, reviewable edit.
  */
-const LITELLM_FIELD_BASELINE: Record<string, number> = {
-	litellm_provider: 17,
-	input_cost_per_token: 17,
-	output_cost_per_token: 17,
-	cache_read_input_token_cost: 17,
-	cache_creation_input_token_cost: 8,
-};
+const EXPECTED_CACHE_TIERS: ReadonlySet<string> = new Set([
+	"litellm:claude-fable-5:cacheRead",
+	"litellm:claude-fable-5:cacheWrite",
+	"litellm:claude-haiku-4-5:cacheRead",
+	"litellm:claude-haiku-4-5:cacheWrite",
+	"litellm:claude-opus-4-6:cacheRead",
+	"litellm:claude-opus-4-6:cacheWrite",
+	"litellm:claude-opus-4-8:cacheRead",
+	"litellm:claude-opus-4-8:cacheWrite",
+	"litellm:claude-opus-5:cacheRead",
+	"litellm:claude-opus-5:cacheWrite",
+	"litellm:claude-sonnet-4-6:cacheRead",
+	"litellm:claude-sonnet-4-6:cacheWrite",
+	"litellm:claude-sonnet-5:cacheRead",
+	"litellm:claude-sonnet-5:cacheWrite",
+	"litellm:deepseek-chat:cacheRead",
+	"litellm:deepseek-reasoner:cacheRead",
+	"litellm:gemini-2.5-flash:cacheRead",
+	"litellm:gemini-2.5-pro:cacheRead",
+	"litellm:gpt-4o-mini:cacheRead",
+	"litellm:gpt-4o:cacheRead",
+	"litellm:gpt-5.4:cacheRead",
+	"litellm:gpt-5.6-sol:cacheRead",
+	"litellm:gpt-5.6-sol:cacheWrite",
+	"litellm:o3:cacheRead",
+	"litellm:o4-mini:cacheRead",
+	"models.dev:claude-fable-5:cacheRead",
+	"models.dev:claude-fable-5:cacheWrite",
+	"models.dev:claude-haiku-4-5:cacheRead",
+	"models.dev:claude-haiku-4-5:cacheWrite",
+	"models.dev:claude-opus-4-6:cacheRead",
+	"models.dev:claude-opus-4-6:cacheWrite",
+	"models.dev:claude-opus-4-8:cacheRead",
+	"models.dev:claude-opus-4-8:cacheWrite",
+	"models.dev:claude-opus-5:cacheRead",
+	"models.dev:claude-opus-5:cacheWrite",
+	"models.dev:claude-sonnet-4-6:cacheRead",
+	"models.dev:claude-sonnet-4-6:cacheWrite",
+	"models.dev:claude-sonnet-5:cacheRead",
+	"models.dev:claude-sonnet-5:cacheWrite",
+	"models.dev:deepseek-chat:cacheRead",
+	"models.dev:deepseek-reasoner:cacheRead",
+	"models.dev:gemini-2.5-flash:cacheRead",
+	"models.dev:gemini-2.5-pro:cacheRead",
+	"models.dev:gpt-4o-mini:cacheRead",
+	"models.dev:gpt-4o:cacheRead",
+	"models.dev:gpt-5.4:cacheRead",
+	"models.dev:gpt-5.6-sol:cacheRead",
+	"models.dev:gpt-5.6-sol:cacheWrite",
+	"models.dev:kimi-k3:cacheRead",
+	"models.dev:o3:cacheRead",
+	"models.dev:o4-mini:cacheRead",
+]);
 
-const MODELS_DEV_FIELD_BASELINE: Record<string, number> = {
-	input: 19,
-	output: 19,
-	cache_read: 18,
-	cache_write: 8,
-};
+/** Required fields, which every mapped row must carry to be usable at all. */
+const REQUIRED_LITELLM_FIELDS = [
+	"litellm_provider",
+	"input_cost_per_token",
+	"output_cost_per_token",
+] as const;
+const REQUIRED_MODELS_DEV_FIELDS = ["input", "output"] as const;
 
 /**
  * Is this field carrying a value the normalizer could actually use?
  *
  * `litellm_provider` is an attribution string; every other tracked field is a
- * price and must be a finite non-negative number.
+ * price and must be a finite non-negative number. Presence of a NAME is not
+ * presence of a RATE — an upstream keeping a deprecated key holding `null`
+ * would clear any check written with `in`.
  */
 function isUsable(field: string, value: unknown): boolean {
 	if (field === "litellm_provider") return typeof value === "string" && value.length > 0;
 	return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
-function assertFieldsPresent(
-	source: string,
-	counts: Map<string, number>,
-	baseline: Record<string, number>,
-): void {
-	const short = [...counts.entries()]
-		.filter(([f, n]) => n < (baseline[f] ?? 0))
-		.map(([f, n]) => `${f} (${n} of ${baseline[f]} mapped rows)`);
-	if (short.length > 0) {
-		throw new SourceError(
-			`${source}: field coverage fell below the recorded baseline — schema likely changed: ${short.join(", ")}. ` +
-				"Refusing to report a comparison that silently skipped these tiers. If upstream legitimately " +
-				"dropped these models, lower the baseline in sources.mts deliberately.",
-		);
-	}
+function raiseSchemaError(source: string, problems: string[]): void {
+	if (problems.length === 0) return;
+	throw new SourceError(
+		`${source}: schema/coverage regression — ${problems.join("; ")}. ` +
+			"Refusing to report a comparison that silently skipped these rates. If upstream " +
+			"legitimately dropped them, update the expectations in sources.mts deliberately.",
+	);
 }
 
 /**
- * Verify LiteLLM still publishes every field this tool reads, BY NAME, against
- * the fetched corpus. Throws SourceError (exit 2 — "could not check") rather
- * than letting a rename degrade into a clean-looking run.
+ * Verify LiteLLM still publishes, for every MAPPED VENDOR ROW, the fields this
+ * tool reads. Throws SourceError (exit 2 — "could not check") rather than
+ * letting a rename degrade into a clean-looking run.
  *
  * Called at INGEST (see run.mts), not from `normalizeLiteLLM`: the normalizers
- * are pure transforms and are driven from small fixtures, which by construction
- * cannot satisfy an occurrence floor meant for a 3,000-row corpus.
+ * are pure transforms driven from small fixtures, which by construction cannot
+ * satisfy an expectation measured against the live feed.
  */
-export function assertLiteLLMSchema(raw: unknown, map: Record<string, ModelSourceMap>): void {
+export function assertLiteLLMSchema(
+	raw: unknown,
+	map: Record<string, ModelSourceMap>,
+	expectedTiers: ReadonlySet<string> = EXPECTED_CACHE_TIERS,
+): void {
 	if (typeof raw !== "object" || raw === null) {
 		throw new SourceError("LiteLLM: response is not an object");
 	}
 	const table = raw as Record<string, unknown>;
-	const counts = new Map(LITELLM_FIELDS.map((f) => [f, 0]));
-	for (const entry of Object.values(map)) {
+	const problems: string[] = [];
+
+	for (const [model, entry] of Object.entries(map)) {
 		if (entry.litellm === null) continue;
 		const row = table[entry.litellm.key];
 		if (typeof row !== "object" || row === null) continue;
 		const r = row as Record<string, unknown>;
-		// Only rows this tool actually reads, at the vendor it actually reads them
-		// from. A reseller row keeping an old field name proves nothing.
+		// Vendor pin: a reseller row keeping an old field name proves nothing.
 		if (r.litellm_provider !== entry.litellm.provider) continue;
-		for (const f of LITELLM_FIELDS) {
-			// USABLE values, not merely present keys. An upstream that keeps a
-			// deprecated key around holding `null` (or a string) while the numeric
-			// price moves elsewhere would clear a `in`-based floor while the
-			// normalizer silently dropped every value — full coverage, exit 0,
-			// cache comparison disabled. Presence of a name is not presence of a
-			// rate.
-			if (isUsable(f, r[f])) counts.set(f, (counts.get(f) ?? 0) + 1);
+
+		for (const f of REQUIRED_LITELLM_FIELDS) {
+			if (!isUsable(f, r[f])) problems.push(`${model} lost required ${f}`);
+		}
+		if (
+			expectedTiers.has(`litellm:${model}:cacheRead`) &&
+			!isUsable("cache_read_input_token_cost", r.cache_read_input_token_cost)
+		) {
+			problems.push(`${model} lost cache_read_input_token_cost`);
+		}
+		if (
+			expectedTiers.has(`litellm:${model}:cacheWrite`) &&
+			!isUsable("cache_creation_input_token_cost", r.cache_creation_input_token_cost)
+		) {
+			problems.push(`${model} lost cache_creation_input_token_cost`);
 		}
 	}
-	assertFieldsPresent("LiteLLM", counts, LITELLM_FIELD_BASELINE);
+	raiseSchemaError("LiteLLM", problems);
 }
 
-/** The same sentinel for models.dev, walked over every provider's models. */
-export function assertModelsDevSchema(raw: unknown, map: Record<string, ModelSourceMap>): void {
+/** The same per-model sentinel for models.dev. */
+export function assertModelsDevSchema(
+	raw: unknown,
+	map: Record<string, ModelSourceMap>,
+	expectedTiers: ReadonlySet<string> = EXPECTED_CACHE_TIERS,
+): void {
 	if (typeof raw !== "object" || raw === null) {
 		throw new SourceError("models.dev: response is not an object");
 	}
 	const providers = raw as Record<string, { models?: Record<string, unknown> } | undefined>;
-	const counts = new Map(MODELS_DEV_FIELDS.map((f) => [f, 0]));
-	for (const entry of Object.values(map)) {
+	const problems: string[] = [];
+
+	for (const [model, entry] of Object.entries(map)) {
 		if (entry.modelsDev === null) continue;
 		// Vendor-pinned by construction: the provider is indexed, never scanned.
-		const model = providers[entry.modelsDev.provider]?.models?.[entry.modelsDev.id];
-		const cost = (model as { cost?: unknown } | null)?.cost;
+		const found = providers[entry.modelsDev.provider]?.models?.[entry.modelsDev.id];
+		const cost = (found as { cost?: unknown } | null)?.cost;
 		if (typeof cost !== "object" || cost === null) continue;
 		const c = cost as Record<string, unknown>;
-		for (const f of MODELS_DEV_FIELDS) {
-			if (isUsable(f, c[f])) counts.set(f, (counts.get(f) ?? 0) + 1);
+
+		for (const f of REQUIRED_MODELS_DEV_FIELDS) {
+			if (!isUsable(f, c[f])) problems.push(`${model} lost required ${f}`);
+		}
+		if (
+			expectedTiers.has(`models.dev:${model}:cacheRead`) &&
+			!isUsable("cache_read", c.cache_read)
+		) {
+			problems.push(`${model} lost cache_read`);
+		}
+		if (
+			expectedTiers.has(`models.dev:${model}:cacheWrite`) &&
+			!isUsable("cache_write", c.cache_write)
+		) {
+			problems.push(`${model} lost cache_write`);
 		}
 	}
-	assertFieldsPresent("models.dev", counts, MODELS_DEV_FIELD_BASELINE);
+	raiseSchemaError("models.dev", problems);
 }
 
 /**

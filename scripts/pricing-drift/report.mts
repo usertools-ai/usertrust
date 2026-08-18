@@ -17,6 +17,7 @@ const HEADINGS: Record<Exclude<Outcome, "agree">, string> = {
 	disagree: "Disagrees with upstream, not allowlisted",
 	"deviation-stale": "Stale allowlist entry — upstream now agrees, remove the exemption",
 	unmapped: "In PRICING_TABLE but absent from MODEL_MAP — provenance undecided",
+	"malformed-rate": "Required rate is not a finite non-negative number in PRICING_TABLE",
 	"source-conflict": "Sources contradict each other — no value proposed",
 	"deviation-expected": "Expected deviation (ours is higher — conservative, allowed)",
 	uncorroborated: "No upstream source — shipped without any external check",
@@ -24,6 +25,7 @@ const HEADINGS: Record<Exclude<Outcome, "agree">, string> = {
 
 /** Order matters: failing outcomes first, so the issue opens on what to fix. */
 const SECTION_ORDER: Exclude<Outcome, "agree">[] = [
+	"malformed-rate",
 	"understated",
 	"disagree",
 	"deviation-stale",
@@ -95,6 +97,7 @@ export function renderReport(report: DriftReport, ctx: ReportContext): string {
 		`| **Disagreed** | **${counts.disagree}** |`,
 		`| **Stale allowlist** | **${counts["deviation-stale"]}** |`,
 		`| **Unmapped** | **${counts.unmapped}** |`,
+		`| **Malformed rate** | **${counts["malformed-rate"]}** |`,
 		"",
 		`Coverage: **${report.mappings}/${report.expectedMappings}** source→model mappings answered ` +
 			`(across **${corroborated}/${expectedCorroborated}** models). The gate is per-mapping: a model ` +
@@ -198,6 +201,7 @@ export function renderSummary(report: DriftReport): string {
 		`disagree=${counts.disagree}`,
 		`stale=${counts["deviation-stale"]}`,
 		`unmapped=${counts.unmapped}`,
+		`malformed=${counts["malformed-rate"]}`,
 		`coverage=${report.mappings}/${report.expectedMappings} mappings`,
 	].join(" ");
 }

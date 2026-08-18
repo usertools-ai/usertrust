@@ -63,7 +63,9 @@ export type Outcome =
 	/** No upstream source publishes this model. Reported, does not fail. */
 	| "uncorroborated"
 	/** In PRICING_TABLE but absent from MODEL_MAP. FAILS. */
-	| "unmapped";
+	| "unmapped"
+	/** A required tier in our own table is not a finite non-negative number. FAILS. */
+	| "malformed-rate";
 
 /** Outcomes that make the run fail with exit 1. */
 const FAILING: ReadonlySet<Outcome> = new Set<Outcome>([
@@ -71,6 +73,7 @@ const FAILING: ReadonlySet<Outcome> = new Set<Outcome>([
 	"understated",
 	"disagree",
 	"unmapped",
+	"malformed-rate",
 ]);
 
 export function isFailing(outcome: Outcome): boolean {
@@ -145,6 +148,7 @@ function emptyCounts(): Record<Outcome, number> {
 		"source-conflict": 0,
 		uncorroborated: 0,
 		unmapped: 0,
+		"malformed-rate": 0,
 	};
 }
 
@@ -242,6 +246,33 @@ export function compareTable(input: CompareInput): DriftReport {
 				note: "present in PRICING_TABLE but absent from MODEL_MAP — provenance undecided",
 			});
 			counts.unmapped++;
+			continue;
+		}
+
+		// OUR OWN TABLE IS VALIDATED FIRST. `rawTier` rejects a non-finite value,
+		// so an `inputPer1k` of Infinity or NaN would fall through the cache-absence
+		// path — required tiers are merely excluded from `cacheGaps` — and emit no
+		// diff at all, reporting `agree` for a model whose metered cost is not a
+		// number. A malformed rate is a failure of the table, not agreement with
+		// upstream, and it is caught before any comparison is attempted.
+		// Finite AND non-negative. `rawTier` alone accepts -1, and a negative input
+		// rate is not a rate — for the CACHE tiers a negative value has a defined
+		// meaning (it resolves to inputPer1k, per the canonical resolver), but for
+		// input and output there is nothing to fall back to.
+		const malformed = REQUIRED_TIERS.filter((t) => {
+			const v = rawTier(ours, t);
+			return v === undefined || v < 0;
+		});
+		if (malformed.length > 0) {
+			findings.push({
+				model,
+				outcome: "malformed-rate",
+				diffs: [],
+				cacheGaps: [],
+				sources: [],
+				note: `required tier(s) ${malformed.join(", ")} are not finite non-negative numbers in PRICING_TABLE`,
+			});
+			counts["malformed-rate"]++;
 			continue;
 		}
 

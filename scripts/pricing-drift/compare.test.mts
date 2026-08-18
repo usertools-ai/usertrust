@@ -684,3 +684,26 @@ describe("absolute floor breaches are visible, not just fatal", () => {
 		assert.equal(r.failed, false);
 	});
 });
+
+// ── regressions from the sixth review ─────────────────────────────────────
+
+describe("our own table is validated before comparison", () => {
+	for (const bad of [Number.POSITIVE_INFINITY, Number.NaN, -1] as const) {
+		it(`FAILS a required tier of ${String(bad)} instead of reporting agree`, () => {
+			// rawTier rejects a non-finite value, so this would fall through the
+			// cache-absence path (required tiers are merely excluded from cacheGaps),
+			// emit no diff, and report `agree` for a model whose metered cost is not
+			// a number.
+			const r = run({ "test-model": { inputPer1k: bad, outputPer1k: 250 } });
+			assert.equal(r.counts["malformed-rate"], 1);
+			assert.equal(r.counts.agree, 0);
+			assert.equal(r.failed, true);
+		});
+	}
+
+	it("keeps a valid table clean", () => {
+		const r = run({ "test-model": MATCHING });
+		assert.equal(r.counts["malformed-rate"], 0);
+		assert.equal(r.failed, false);
+	});
+});

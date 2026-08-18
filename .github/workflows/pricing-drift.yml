@@ -90,7 +90,7 @@ jobs:
       # still fail the job — they just do not rewrite shared state.
       - name: File or update the tracking issue
         if: >-
-          always() && github.ref_name == github.event.repository.default_branch &&
+          always() && github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch &&
           (steps.selftest.outcome != 'success' || steps.drift.outputs.exit_code != '0')
         env:
           GH_TOKEN: ${{ github.token }}
@@ -152,7 +152,7 @@ jobs:
       # reflects the current state rather than the worst state ever seen.
       - name: Close the tracking issue on a clean run
         if: >-
-          github.ref_name == github.event.repository.default_branch &&
+          github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch &&
           steps.selftest.outcome == 'success' && steps.drift.outputs.exit_code == '0'
         env:
           GH_TOKEN: ${{ github.token }}

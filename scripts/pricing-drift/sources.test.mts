@@ -28,6 +28,16 @@ import {
 	SourceError,
 } from "./sources.mts";
 
+/** Expected cache tiers for the fixture rows, mirroring the shipped set. */
+const CORPUS_TIERS: ReadonlySet<string> = new Set(
+	Array.from({ length: 40 }, (_, i) => [
+		`litellm:model-${i}:cacheRead`,
+		`litellm:model-${i}:cacheWrite`,
+		`models.dev:model-${i}:cacheRead`,
+		`models.dev:model-${i}:cacheWrite`,
+	]).flat(),
+);
+
 /** A map covering every fixture row, so the scoped sentinel can see them. */
 const CORPUS_MAP: Record<string, ModelSourceMap> = Object.fromEntries(
 	Array.from({ length: 40 }, (_, i) => [
@@ -79,7 +89,7 @@ function modelsDevCorpus(rename?: { from: string; to: string }) {
 
 describe("LiteLLM schema sentinel", () => {
 	it("accepts a healthy corpus", () => {
-		assert.doesNotThrow(() => assertLiteLLMSchema(litellmCorpus(), CORPUS_MAP));
+		assert.doesNotThrow(() => assertLiteLLMSchema(litellmCorpus(), CORPUS_MAP, CORPUS_TIERS));
 	});
 
 	it("REFUSES when a required field is renamed", () => {
@@ -105,6 +115,7 @@ describe("LiteLLM schema sentinel", () => {
 						to: "cache_write_input_token_cost",
 					}),
 					CORPUS_MAP,
+					CORPUS_TIERS,
 				),
 			(e: unknown) =>
 				e instanceof SourceError && /cache_creation_input_token_cost/.test((e as Error).message),
@@ -112,13 +123,16 @@ describe("LiteLLM schema sentinel", () => {
 	});
 
 	it("REFUSES a non-object response", () => {
-		assert.throws(() => assertLiteLLMSchema("a bare string", CORPUS_MAP), SourceError);
+		assert.throws(
+			() => assertLiteLLMSchema("a bare string", CORPUS_MAP, CORPUS_TIERS),
+			SourceError,
+		);
 	});
 });
 
 describe("models.dev schema sentinel", () => {
 	it("accepts a healthy corpus", () => {
-		assert.doesNotThrow(() => assertModelsDevSchema(modelsDevCorpus(), CORPUS_MAP));
+		assert.doesNotThrow(() => assertModelsDevSchema(modelsDevCorpus(), CORPUS_MAP, CORPUS_TIERS));
 	});
 
 	it("REFUSES when a cost field is renamed", () => {
@@ -127,15 +141,32 @@ describe("models.dev schema sentinel", () => {
 				assertModelsDevSchema(
 					modelsDevCorpus({ from: "cache_write", to: "cacheWrite" }),
 					CORPUS_MAP,
+					CORPUS_TIERS,
 				),
 			(e: unknown) => e instanceof SourceError && /cache_write/.test((e as Error).message),
 		);
 	});
 
-	it("REFUSES when the whole cost object disappears", () => {
+	it("REFUSES when a required cost field is lost on a mapped model", () => {
+		const corpus = modelsDevCorpus();
+		delete (corpus.testvendor.models["model-0"] as { cost: Record<string, unknown> }).cost.input;
 		assert.throws(
-			() => assertModelsDevSchema({ testvendor: { models: { a: {} } } }, CORPUS_MAP),
-			SourceError,
+			() => assertModelsDevSchema(corpus, CORPUS_MAP, CORPUS_TIERS),
+			(e: unknown) =>
+				e instanceof SourceError && /model-0 lost required input/.test((e as Error).message),
+		);
+	});
+
+	it("names the SPECIFIC model that lost a tier, not just a count", () => {
+		// The aggregate-count version passed here: one row losing cache_write
+		// while 39 keep it clears any total-based floor.
+		const corpus = modelsDevCorpus();
+		delete (corpus.testvendor.models["model-7"] as { cost: Record<string, unknown> }).cost
+			.cache_write;
+		assert.throws(
+			() => assertModelsDevSchema(corpus, CORPUS_MAP, CORPUS_TIERS),
+			(e: unknown) =>
+				e instanceof SourceError && /model-7 lost cache_write/.test((e as Error).message),
 		);
 	});
 });
