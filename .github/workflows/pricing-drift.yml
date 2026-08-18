@@ -37,6 +37,29 @@ jobs:
           cache: npm
       - run: npm ci
 
+      # Is the commit we checked out STILL the default branch's head? The ref
+      # predicates below prove only that the event ref is NAMED after the
+      # default branch. Re-running an old scheduled run, or master advancing
+      # while this run is in flight, would otherwise let a stale verdict close
+      # or overwrite the current tracking issue — publishing a clean result for
+      # a tree that is no longer master.
+      - name: Resolve the current default-branch head
+        id: head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          current="$(gh api "repos/${{ github.repository }}/commits/${{ github.event.repository.default_branch }}" --jq .sha)"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "checked_out=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          if [ "$current" = "${{ github.sha }}" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::checked-out ${{ github.sha }} is no longer the default-branch head ($current); issue state will not be mutated"
+          fi
+
       # The checker's own tests run BEFORE the live check, so the positive
       # control gates every run. An instrument's verdict is never evidence about
       # the instrument: if this step fails, the comparison below is not
@@ -59,7 +82,20 @@ jobs:
         run: |
           set +e
           npm run --silent drift:check -- --out drift-report.md
-          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          code=$?
+          set -e
+          # A ZERO EXIT WITHOUT A REPORT IS NOT A CLEAN RESULT. npm or tsx can
+          # exit 0 having produced nothing — for instance if run.mts's
+          # direct-entry guard stops matching and main() never runs. The upload
+          # step only warns on a missing file, the failure predicate is false,
+          # and the clean step would then CLOSE a live tracking issue. A
+          # non-empty report is part of the zero-exit contract, so absence is
+          # re-coded to 2 ("could not check") rather than believed.
+          if [ "$code" = "0" ] && [ ! -s drift-report.md ]; then
+            echo "exit 0 but no drift-report.md was written — recording as could-not-check"
+            code=2
+          fi
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
 
       - name: Upload the report
         if: always()
@@ -90,7 +126,9 @@ jobs:
       # still fail the job — they just do not rewrite shared state.
       - name: File or update the tracking issue
         if: >-
-          always() && github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch &&
+          always() && github.ref_type == 'branch' &&
+          github.ref_name == github.event.repository.default_branch &&
+          steps.head.outputs.fresh == 'true' &&
           (steps.selftest.outcome != 'success' || steps.drift.outputs.exit_code != '0')
         env:
           GH_TOKEN: ${{ github.token }}
@@ -152,7 +190,9 @@ jobs:
       # reflects the current state rather than the worst state ever seen.
       - name: Close the tracking issue on a clean run
         if: >-
-          github.ref_type == 'branch' && github.ref_name == github.event.repository.default_branch &&
+          github.ref_type == 'branch' &&
+          github.ref_name == github.event.repository.default_branch &&
+          steps.head.outputs.fresh == 'true' &&
           steps.selftest.outcome == 'success' && steps.drift.outputs.exit_code == '0'
         env:
           GH_TOKEN: ${{ github.token }}

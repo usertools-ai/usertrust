@@ -26,6 +26,7 @@ import {
 	normalizeLiteLLM,
 	normalizeModelsDev,
 	SourceError,
+	usertokensPer1kFromUsdPerMTok,
 } from "./sources.mts";
 
 /** Expected cache tiers for the fixture rows, mirroring the shipped set. */
@@ -217,5 +218,22 @@ describe("cache gaps reach the report", () => {
 		});
 		assert.match(md, /Cache tiers upstream publishes that our table omits/);
 		assert.match(md, /test-model/);
+	});
+});
+
+describe("unit conversion rejects overflow", () => {
+	it("REFUSES a finite rate that overflows to Infinity", () => {
+		// 1e308 * 10 is Infinity. The row would stay non-null and satisfy mapping
+		// coverage while resolveTier filtered the value back out, leaving a
+		// one-source model `agree` with neither required tier compared.
+		assert.throws(() => usertokensPer1kFromUsdPerMTok(1e308), SourceError);
+	});
+
+	it("REFUSES a non-finite input outright", () => {
+		assert.throws(() => usertokensPer1kFromUsdPerMTok(Number.POSITIVE_INFINITY), SourceError);
+	});
+
+	it("still converts ordinary rates against the real table", () => {
+		assert.equal(usertokensPer1kFromUsdPerMTok(5), 50);
 	});
 });

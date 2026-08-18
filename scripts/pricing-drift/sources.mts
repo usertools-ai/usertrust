@@ -45,10 +45,19 @@ export const MODELS_DEV_URL = "https://models.dev/api.json";
  * A unit conversion whose only specification is a comment is not specified.
  */
 export function usertokensPer1kFromUsdPerMTok(usdPerMTok: number): number {
-	// Round to 6dp: the inputs are decimal prices but arrive as binary floats
-	// (LiteLLM stores 5e-06 per token, and 5e-06 * 1e7 is 50.000000000000007).
-	// Table rates are given to at most 4dp, so 6dp cannot mask a real difference.
-	return Math.round(usdPerMTok * 10 * 1e6) / 1e6;
+	// A FINITE input can overflow to Infinity (1e308 * 10). The row would stay
+	// non-null and satisfy mapping coverage, while `resolveTier` filters the
+	// non-finite value back out — leaving a one-source model classified `agree`
+	// without either required tier having been compared. Absence created by
+	// arithmetic is still absence read as agreement.
+	if (!Number.isFinite(usdPerMTok)) {
+		throw new SourceError(`non-finite rate before conversion: ${usdPerMTok}`);
+	}
+	const converted = Math.round(usdPerMTok * 10 * 1e6) / 1e6;
+	if (!Number.isFinite(converted)) {
+		throw new SourceError(`rate overflowed unit conversion: ${usdPerMTok} $/MTok`);
+	}
+	return converted;
 }
 
 /** LiteLLM publishes per-TOKEN USD; convert to per-MTok, then to usertokens. */

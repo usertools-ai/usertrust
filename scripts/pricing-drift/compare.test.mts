@@ -707,3 +707,45 @@ describe("our own table is validated before comparison", () => {
 		assert.equal(r.failed, false);
 	});
 });
+
+// ── regressions from the seventh review ───────────────────────────────────
+
+describe("an allowlist cannot absorb a conflicted tier", () => {
+	it("reports conflict when one tier is allowlisted-conservative and another straddles", () => {
+		// ours 75/250; sources 50/200 and 50/300. Input is a definitive
+		// conservative deviation (allowlisted). Output straddles our rate — one
+		// source prices it ABOVE us. Labelling the whole model
+		// `deviation-expected` would claim "ours is higher" while that is false
+		// for output. An allowlist excuses a deviation we understand; it cannot
+		// excuse a tier nobody can adjudicate.
+		const r = run(
+			{ "test-model": { inputPer1k: 75, outputPer1k: 250 } },
+			{
+				deviations: { "test-model": { reason: "documented" } },
+				litellm: litellmRaw({ input_cost_per_token: 5e-6, output_cost_per_token: 2e-5 }),
+				modelsDev: modelsDevRaw({ input: 5, output: 30 }),
+			},
+		);
+		assert.equal(r.counts["source-conflict"], 1);
+		assert.equal(r.counts["deviation-expected"], 0);
+	});
+
+	it("still reports deviation-expected when nothing conflicts", () => {
+		const r = run(
+			{ "test-model": { inputPer1k: 75, outputPer1k: 250 } },
+			{ deviations: { "test-model": { reason: "documented" } } },
+		);
+		assert.equal(r.counts["deviation-expected"], 1);
+		assert.equal(r.failed, false);
+	});
+});
+
+describe("malformed findings keep their answered sources", () => {
+	it("does not invent a coverage breach alongside a malformed rate", () => {
+		const r = run({ "test-model": { inputPer1k: Number.NaN, outputPer1k: 250 } });
+		assert.equal(r.counts["malformed-rate"], 1);
+		assert.deepEqual(r.findings[0]?.sources, ["litellm", "models.dev"]);
+		assert.equal(r.mappings, 2, "both sources answered and must still be counted");
+		assert.deepEqual(r.missingMappings, [], "no mapping actually went missing");
+	});
+});

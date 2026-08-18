@@ -249,6 +249,17 @@ export function compareTable(input: CompareInput): DriftReport {
 			continue;
 		}
 
+		// Sources are collected BEFORE the malformed check so a malformed finding
+		// still reports who answered. `mappings` and `corroborated` are derived
+		// from finding.sources, so hard-coding [] here invented a coverage breach
+		// with an empty `missingMappings` — a second, false failure reason
+		// attached to a real one.
+		const answeredEarly: { name: string; rates: SourceRates }[] = [];
+		for (const [name, normalized] of Object.entries(sources)) {
+			const r = normalized[model];
+			if (r) answeredEarly.push({ name, rates: r });
+		}
+
 		// OUR OWN TABLE IS VALIDATED FIRST. `rawTier` rejects a non-finite value,
 		// so an `inputPer1k` of Infinity or NaN would fall through the cache-absence
 		// path — required tiers are merely excluded from `cacheGaps` — and emit no
@@ -269,18 +280,14 @@ export function compareTable(input: CompareInput): DriftReport {
 				outcome: "malformed-rate",
 				diffs: [],
 				cacheGaps: [],
-				sources: [],
+				sources: answeredEarly.map((a) => a.name),
 				note: `required tier(s) ${malformed.join(", ")} are not finite non-negative numbers in PRICING_TABLE`,
 			});
 			counts["malformed-rate"]++;
 			continue;
 		}
 
-		const answered: { name: string; rates: SourceRates }[] = [];
-		for (const [name, normalized] of Object.entries(sources)) {
-			const r = normalized[model];
-			if (r) answered.push({ name, rates: r });
-		}
+		const answered = answeredEarly;
 		const sourceNames = answered.map((a) => a.name);
 
 		if (answered.length === 0) {
@@ -421,7 +428,15 @@ export function compareTable(input: CompareInput): DriftReport {
 		// plain disagreement. Same defect, same file, one abstraction higher.
 		const definitive = diffs.filter((d) => !d.conflicted);
 
-		if (definitive.length === 0 && anyConflict) {
+		// A model-wide allowlist must NOT absorb a conflicted tier. For ours
+		// 75/250 against sources 50/200 and 50/300, input is a definitive
+		// conservative deviation but output straddles our rate — labelling the
+		// whole model `deviation-expected` reports "ours is higher" while one
+		// source prices output above us. An allowlist excuses a deviation we
+		// understand; it cannot excuse a tier nobody can adjudicate.
+		const definitiveFailing = definitive.length > 0 && deviations[model] === undefined;
+
+		if (anyConflict && !definitiveFailing) {
 			findings.push({
 				model,
 				outcome: "source-conflict",
