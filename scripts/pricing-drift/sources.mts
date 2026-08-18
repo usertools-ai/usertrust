@@ -93,6 +93,17 @@ export const MODELS_DEV_FIELDS = ["input", "output", "cache_read", "cache_write"
  */
 const SCHEMA_MIN_OCCURRENCES = 5;
 
+/**
+ * Is this field carrying a value the normalizer could actually use?
+ *
+ * `litellm_provider` is an attribution string; every other tracked field is a
+ * price and must be a finite non-negative number.
+ */
+function isUsable(field: string, value: unknown): boolean {
+	if (field === "litellm_provider") return typeof value === "string" && value.length > 0;
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
 function assertFieldsPresent(source: string, counts: Map<string, number>): void {
 	const missing = [...counts.entries()]
 		.filter(([, n]) => n < SCHEMA_MIN_OCCURRENCES)
@@ -121,8 +132,15 @@ export function assertLiteLLMSchema(raw: unknown): void {
 	const counts = new Map(LITELLM_FIELDS.map((f) => [f, 0]));
 	for (const row of Object.values(raw as Record<string, unknown>)) {
 		if (typeof row !== "object" || row === null) continue;
+		const r = row as Record<string, unknown>;
 		for (const f of LITELLM_FIELDS) {
-			if (f in (row as Record<string, unknown>)) counts.set(f, (counts.get(f) ?? 0) + 1);
+			// USABLE values, not merely present keys. An upstream that keeps a
+			// deprecated key around holding `null` (or a string) while the numeric
+			// price moves elsewhere would clear a `in`-based floor while the
+			// normalizer silently dropped every value — full coverage, exit 0,
+			// cache comparison disabled. Presence of a name is not presence of a
+			// rate.
+			if (isUsable(f, r[f])) counts.set(f, (counts.get(f) ?? 0) + 1);
 		}
 	}
 	assertFieldsPresent("LiteLLM", counts);
@@ -140,8 +158,9 @@ export function assertModelsDevSchema(raw: unknown): void {
 		for (const model of Object.values(models as Record<string, unknown>)) {
 			const cost = (model as { cost?: unknown } | null)?.cost;
 			if (typeof cost !== "object" || cost === null) continue;
+			const c = cost as Record<string, unknown>;
 			for (const f of MODELS_DEV_FIELDS) {
-				if (f in (cost as Record<string, unknown>)) counts.set(f, (counts.get(f) ?? 0) + 1);
+				if (isUsable(f, c[f])) counts.set(f, (counts.get(f) ?? 0) + 1);
 			}
 		}
 	}

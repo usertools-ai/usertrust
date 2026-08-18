@@ -98,10 +98,15 @@ export async function main(argv: string[]): Promise<number> {
 	});
 
 	if (outFile !== undefined) writeFileSync(outFile, markdown, "utf-8");
-	process.stdout.write(asJson ? `${JSON.stringify(report, null, 2)}\n` : `${markdown}\n`);
+	// `report.failed` alone cannot explain an orphaned allowlist entry — that
+	// check lives outside compareTable, so a machine consumer would see
+	// `failed: false` next to a non-zero exit and have nothing to read.
+	const failed = report.failed || orphans.length > 0;
+	const payload = { ...report, orphanDeviations: orphans, failed };
+	process.stdout.write(asJson ? `${JSON.stringify(payload, null, 2)}\n` : `${markdown}\n`);
 	process.stderr.write(`pricing-drift: ${renderSummary(report)}\n`);
 
-	return report.failed || orphans.length > 0 ? 1 : 0;
+	return failed ? 1 : 0;
 }
 
 // Only self-execute when run directly, so the tests can import `main`.

@@ -78,7 +78,14 @@ describe("positive control", () => {
 		const f = r.findings[0];
 		assert.equal(f?.outcome, "understated");
 		assert.deepEqual(f?.diffs, [
-			{ tier: "inputPer1k", ours: 5, effective: 5, upstream: 50, conflicted: false },
+			{
+				tier: "inputPer1k",
+				ours: 5,
+				effective: 5,
+				upstream: 50,
+				upstreamMax: 50,
+				conflicted: false,
+			},
 		]);
 	});
 
@@ -431,5 +438,69 @@ describe("tiers merge across every source", () => {
 		assert.equal(a.counts.understated, b.counts.understated);
 		assert.equal(a.failed, b.failed);
 		assert.equal(a.failed, true, "1 < 62.5 is understatement either way");
+	});
+});
+
+// ── regressions from the second review ────────────────────────────────────
+
+describe("definitive diffs outrank source conflict", () => {
+	it("FAILS a unanimous mismatch even when another tier conflicts", () => {
+		// ours 75/250; sources 50/200 and 50/250. Input is unanimous at 50 and
+		// ours contradicts it — a real, unallowlisted disagreement. Output
+		// conflicts. Previously the conflict won and the run passed.
+		const r = run(
+			{ "test-model": { inputPer1k: 75, outputPer1k: 250 } },
+			{
+				litellm: litellmRaw({ input_cost_per_token: 5e-6, output_cost_per_token: 2e-5 }),
+				modelsDev: modelsDevRaw({ input: 5, output: 25 }),
+			},
+		);
+		assert.equal(r.counts.disagree, 1);
+		assert.equal(r.counts["source-conflict"], 0);
+		assert.equal(r.failed, true);
+	});
+
+	it("still reports source-conflict when EVERY diff is conflicted", () => {
+		const r = run(
+			{ "test-model": MATCHING },
+			{ modelsDev: modelsDevRaw({ input: 2.5, output: 12.5 }) },
+		);
+		assert.equal(r.counts["source-conflict"], 1);
+		assert.equal(r.failed, false);
+	});
+});
+
+describe("an omitted tier is benign only above EVERY source", () => {
+	it("does not call a gap conservative when it sits inside the source range", () => {
+		// Our fallback meters at 50. Sources publish 5 and 62.5 — we are above one
+		// and below the other, so the tier is neither understated nor safe.
+		const r = run(
+			{ "test-model": MATCHING },
+			{
+				litellm: litellmRaw({ cache_read_input_token_cost: 5e-7 }), // 5
+				modelsDev: modelsDevRaw({ input: 5, output: 25, cache_read: 6.25 }), // 62.5
+			},
+		);
+		assert.equal(r.findings[0]?.cacheGaps.length, 0, "must not be filed as a safe gap");
+		const d = r.findings[0]?.diffs.find((x) => x.tier === "cacheReadPer1k");
+		assert.equal(d?.conflicted, true);
+		assert.equal(d?.upstream, 5);
+		assert.equal(d?.upstreamMax, 62.5);
+	});
+});
+
+describe("effective rates use the SDK's own resolver", () => {
+	it("meters a NEGATIVE cache rate at inputPer1k, as costFromRates does", () => {
+		// resolveAppliedRates guards on `>= 0`, so a negative rate resolves to
+		// inputPer1k. A local `?? inputPer1k` would have compared -5 instead —
+		// a monitor resolving rates differently from the thing it monitors.
+		const r = run(
+			{ "test-model": { ...MATCHING, cacheReadPer1k: -5 } },
+			{
+				litellm: litellmRaw({ cache_read_input_token_cost: 5e-7 }),
+				modelsDev: modelsDevRaw({ input: 5, output: 25, cache_read: 0.5 }),
+			},
+		);
+		assert.equal(r.counts.understated, 0, "-5 resolves to 50, which is above upstream 5");
 	});
 });

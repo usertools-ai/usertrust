@@ -20,6 +20,7 @@
  */
 
 import type { ModelRates } from "../../packages/core/src/ledger/pricing.js";
+import { resolveAppliedRates } from "../../packages/core/src/ledger/pricing.js";
 import type { ModelSourceMap } from "./model-map.mts";
 import type { SourceRates } from "./sources.mts";
 
@@ -71,6 +72,8 @@ export interface TierDiff {
 	effective: number;
 	/** Lowest value any source publishes for this tier. */
 	upstream: number;
+	/** Highest value any source publishes. Differs from `upstream` on conflict. */
+	upstreamMax: number;
 	/** True when the sources disagree with each other on this tier. */
 	conflicted: boolean;
 }
@@ -131,21 +134,37 @@ function rawTier(rates: ModelRates, tier: Tier): number | undefined {
 }
 
 /**
- * What our table actually METERS a tier at — the D1 resolution.
+ * What our table actually METERS a tier at, THROUGH THE CANONICAL RESOLVER.
  *
  * An omitted cache tier is priced at `inputPer1k` by `costFromRates`. That is
  * conservative for a cache-READ discount (~0.1x input) but NOT for a
  * cache-WRITE premium (1.25x input), where falling back to `inputPer1k`
  * UNDERSTATES by 20%. Understatement therefore has to be judged on the
  * effective rate, never on field presence.
+ *
+ * `resolveAppliedRates` is used rather than a local `?? inputPer1k`, because
+ * AGENTS.md forbids a second D1 resolution site — and the duplicate had already
+ * diverged: a NEGATIVE finite cache rate is metered at `inputPer1k` by the SDK
+ * (its guard is `>= 0`) but would have been compared as negative here. A
+ * monitor that resolves rates differently from the thing it monitors is
+ * measuring the wrong quantity.
  */
 function effectiveRate(rates: ModelRates, tier: Tier): number {
-	return rawTier(rates, tier) ?? rates.inputPer1k;
+	return resolveAppliedRates(rates)[tier];
 }
 
-/** One tier resolved across every answering source. */
+/**
+ * One tier resolved across every answering source.
+ *
+ * BOTH ends of the range are retained. The minimum alone cannot answer
+ * "is our rate conservative?": with sources at 50 and 70 and our fallback at
+ * 60, we are above one and below the other, which is neither understatement
+ * nor a benign gap — and a report showing only 50 would call it conservative
+ * while hiding the source that says otherwise.
+ */
 interface TierConsensus {
 	min: number;
+	max: number;
 	conflicted: boolean;
 }
 
@@ -154,7 +173,11 @@ function resolveTier(answered: { rates: SourceRates }[], tier: Tier): TierConsen
 		.map((a) => a.rates[tier])
 		.filter((v): v is number => v !== undefined && Number.isFinite(v));
 	if (values.length === 0) return null;
-	return { min: Math.min(...values), conflicted: new Set(values).size > 1 };
+	return {
+		min: Math.min(...values),
+		max: Math.max(...values),
+		conflicted: new Set(values).size > 1,
+	};
 }
 
 export interface CompareInput {
@@ -230,27 +253,55 @@ export function compareTable(input: CompareInput): DriftReport {
 					ours: raw ?? null,
 					effective,
 					upstream: up.min,
+					upstreamMax: up.max,
 					conflicted: up.conflicted,
 				});
 				continue;
 			}
 
 			if (raw === undefined) {
-				// Omitted tier metering at or above upstream: conservative
-				// overstatement through the D1 fallback. Reported, never failed.
-				if (!REQUIRED_TIERS.includes(tier)) cacheGaps.push(tier);
+				// An omitted tier is only BENIGN if it meters at or above EVERY
+				// source. Between min and max it is above one source and below
+				// another — not understatement, but not conservative either, so it
+				// is reported as a conflicted diff rather than filed as a safe gap.
+				if (effective >= up.max) {
+					if (!REQUIRED_TIERS.includes(tier)) cacheGaps.push(tier);
+				} else {
+					diffs.push({
+						tier,
+						ours: null,
+						effective,
+						upstream: up.min,
+						upstreamMax: up.max,
+						conflicted: true,
+					});
+				}
 				continue;
 			}
 
 			// A conflicted tier proposes no value, so nothing beyond the
 			// understatement check above can be concluded from it.
 			if (up.conflicted) {
-				diffs.push({ tier, ours: raw, effective, upstream: up.min, conflicted: true });
+				diffs.push({
+					tier,
+					ours: raw,
+					effective,
+					upstream: up.min,
+					upstreamMax: up.max,
+					conflicted: true,
+				});
 				continue;
 			}
 
 			if (raw !== up.min) {
-				diffs.push({ tier, ours: raw, effective, upstream: up.min, conflicted: false });
+				diffs.push({
+					tier,
+					ours: raw,
+					effective,
+					upstream: up.min,
+					upstreamMax: up.max,
+					conflicted: false,
+				});
 			}
 		}
 
@@ -273,7 +324,18 @@ export function compareTable(input: CompareInput): DriftReport {
 			continue;
 		}
 
-		if (anyConflict) {
+		// DEFINITIVE DIFFS OUTRANK CONFLICT. A tier every source agrees on, that
+		// our table contradicts, is a finding regardless of what the sources do
+		// on some OTHER tier — otherwise ours 75/250 against 50/200 and 50/250
+		// returns a non-failing `source-conflict` while input is a unanimous,
+		// unallowlisted mismatch.
+		//
+		// This is the round-1 understatement fix reappearing one level up: that
+		// round stopped conflict from masking understatement but left it masking
+		// plain disagreement. Same defect, same file, one abstraction higher.
+		const definitive = diffs.filter((d) => !d.conflicted);
+
+		if (definitive.length === 0 && anyConflict) {
 			findings.push({
 				model,
 				outcome: "source-conflict",

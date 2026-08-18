@@ -42,10 +42,14 @@ jobs:
       # the instrument: if this step fails, the comparison below is not
       # trustworthy and the job stops here.
       - name: Test the checker (includes the positive control)
+        id: selftest
         run: npm run drift:test
 
       - name: Check the pricing table against upstream
         id: drift
+        # Runs even when the self-test failed, so the reporting step below can
+        # distinguish "instrument broken" from "never got that far".
+        if: always()
         # Capture the exit status at the only moment it exists rather than
         # grepping the output for a marker afterwards. A marker inside the
         # output is evidence the producer chose to emit it; the process's exit
@@ -71,23 +75,43 @@ jobs:
       # exact failure mode this tool exists to prevent: nobody watches a cron
       # job's status page. "The check did not run" is a finding, not a
       # transient to be swallowed.
+      # `always()`, deliberately, and NOT the anti-pattern it resembles. The
+      # rule against `always()` applies to a step that reports SUCCESS — a
+      # healthcheck ping gated that way reads healthy for runs that failed.
+      # This step reports FAILURE, so gating it on success() is what breaks it:
+      # if `drift:test` fails, every later step is implicitly skipped and the
+      # monitor merely turns red, recording nothing. An instrument that could
+      # not run is exactly what this tool must not swallow.
       - name: File or update the tracking issue
-        if: steps.drift.outputs.exit_code != '0'
+        if: always() && (steps.selftest.outcome != 'success' || steps.drift.outputs.exit_code != '0')
         env:
           GH_TOKEN: ${{ github.token }}
-          EXIT_CODE: ${{ steps.drift.outputs.exit_code }}
+          EXIT_CODE: ${{ steps.drift.outputs.exit_code || 'none' }}
+          SELFTEST: ${{ steps.selftest.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
 
-          if [ "$EXIT_CODE" = "2" ]; then
+          # A drift report is only credible when the checker exited 1 AND
+          # actually wrote one. npm/tsx dying before run.mts produces a status
+          # of 1, 127 or 137 with no report on disk; treating that as drift
+          # would `cat` a missing file and abort this step under `set -e`,
+          # producing no issue at all. Anything else routes to could-not-run.
+          if [ "$SELFTEST" != "success" ] || [ "$EXIT_CODE" != "1" ] || [ ! -s drift-report.md ]; then
             TITLE="Pricing drift check could not run"
             {
               echo "# The pricing drift check did not run"
               echo
-              echo "A source was unreachable or its schema no longer matches, so **no comparison"
-              echo "was performed**. This is not a clean result — treat the table as unchecked"
-              echo "until a run completes."
+              echo "**No comparison was performed.** This is not a clean result — treat the"
+              echo "table as unchecked until a run completes."
+              echo
+              echo "- checker self-test: \`$SELFTEST\`"
+              echo "- checker exit code: \`$EXIT_CODE\` (0 clean / 1 drift / 2 source or schema failure)"
+              echo "- report written: \`$([ -s drift-report.md ] && echo yes || echo no)\`"
+              echo
+              echo "A self-test failure means the instrument itself is broken and its verdict"
+              echo "would not have been trustworthy. An exit code outside 0/1/2 means the"
+              echo "process died before it could report."
               echo
               echo "[Run log]($RUN_URL)"
               echo
@@ -115,7 +139,7 @@ jobs:
       # Close the tracking issue once a run comes back clean, so the label
       # reflects the current state rather than the worst state ever seen.
       - name: Close the tracking issue on a clean run
-        if: steps.drift.outputs.exit_code == '0'
+        if: steps.selftest.outcome == 'success' && steps.drift.outputs.exit_code == '0'
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -132,7 +156,8 @@ jobs:
       # `success()`, never `always()`: an always-gated ping reports HEALTHY for
       # runs that failed, which is worse than having no monitor at all.
       - name: Fail the job when the check did not pass
-        if: steps.drift.outputs.exit_code != '0'
+        if: always() && (steps.selftest.outcome != 'success' || steps.drift.outputs.exit_code != '0')
         run: |
-          echo "pricing-drift exited ${{ steps.drift.outputs.exit_code }}"
+          echo "self-test: ${{ steps.selftest.outcome }}"
+          echo "pricing-drift exit: ${{ steps.drift.outputs.exit_code || 'none' }}"
           exit 1

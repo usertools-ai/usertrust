@@ -36,10 +36,14 @@ const SECTION_ORDER: Exclude<Outcome, "agree">[] = [
 function renderTiers(f: ModelFinding): string {
 	if (f.diffs.length === 0) return "—";
 	return f.diffs
-		.map(
-			(d) =>
-				`\`${d.tier}\` ours **${d.ours === null ? "not published" : d.ours}** vs **${d.upstream}**`,
-		)
+		.map((d) => {
+			const ours = d.ours === null ? `not published (meters at ${d.effective})` : String(d.ours);
+			// Show the RANGE when the sources disagree. Printing only the minimum
+			// would describe a rate sitting between two sources as if one of them
+			// did not exist.
+			const up = d.upstream === d.upstreamMax ? `${d.upstream}` : `${d.upstream}–${d.upstreamMax}`;
+			return `\`${d.tier}\` ours **${ours}** vs **${up}**`;
+		})
 		.join("; ");
 }
 
