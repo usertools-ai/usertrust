@@ -23,6 +23,7 @@ import {
 	verifyVault,
 	verifyVaultWithAnchors,
 	type WitnessInput,
+	type WitnessLogReport,
 } from "../audit/verify.js";
 import { VAULT_DIR } from "../shared/constants.js";
 import type { CliOptions } from "./init.js";
@@ -44,6 +45,7 @@ interface AnchorFlags {
 	params: AnchorVerifyParams;
 	requireAnchor: boolean;
 	requireExternalAnchor: boolean;
+	requireWitness: boolean;
 }
 
 const KNOWN_VERIFY_FLAGS = new Set([
@@ -63,6 +65,7 @@ const KNOWN_VERIFY_FLAGS = new Set([
 	"--successor-pin",
 	"--require-anchor",
 	"--require-external-anchor",
+	"--require-witness",
 	"--max-anchor-age",
 	"--max-unanchored-events",
 	"--vault-id",
@@ -181,6 +184,7 @@ async function parseAnchorFlags(argv: string[]): Promise<AnchorFlags> {
 	const successorPinFiles: string[] = [];
 	let requireAnchor = false;
 	let requireExternalAnchor = false;
+	let requireWitness = false;
 	let maxAnchorAgeMs: number | undefined;
 	let maxUnanchoredEvents: number | undefined;
 	let vaultId: string | undefined;
@@ -204,6 +208,7 @@ async function parseAnchorFlags(argv: string[]): Promise<AnchorFlags> {
 			if (v !== undefined) successorPinFiles.push(v);
 		} else if (arg === "--require-anchor") requireAnchor = true;
 		else if (arg === "--require-external-anchor") requireExternalAnchor = true;
+		else if (arg === "--require-witness") requireWitness = true;
 		else if (arg === "--max-anchor-age") {
 			const v = next();
 			if (v === undefined) throw new Error("--max-anchor-age requires a value");
@@ -265,7 +270,8 @@ async function parseAnchorFlags(argv: string[]): Promise<AnchorFlags> {
 		bundleFile !== undefined ||
 		rekorReceiptFiles.length > 0 ||
 		requireAnchor ||
-		requireExternalAnchor;
+		requireExternalAnchor ||
+		requireWitness;
 	const trust =
 		pubkeyFile !== undefined
 			? {
@@ -279,6 +285,7 @@ async function parseAnchorFlags(argv: string[]): Promise<AnchorFlags> {
 		anchorMode,
 		requireAnchor,
 		requireExternalAnchor,
+		requireWitness,
 		params: {
 			externalAnchorsRaw,
 			rekorReceiptsRaw,
@@ -300,6 +307,26 @@ async function parseAnchorFlags(argv: string[]): Promise<AnchorFlags> {
  */
 function formatAttestedMs(ms: number): string {
 	return Number.isFinite(ms) && Math.abs(ms) <= 8.64e15 ? new Date(ms).toISOString() : `${ms} ms`;
+}
+
+/**
+ * Render the transparency-log witness state. ALWAYS called on the anchored
+ * path, including — especially — when nothing was witnessed.
+ *
+ * An operator reading "Vault integrity: VERIFIED (externally anchored)" with no
+ * witness line cannot tell a witnessed vault from one that never was, which is
+ * exactly how this repo's Rekor sink stayed non-functional for six months. The
+ * library reports the state; printing it is what makes the absence visible to
+ * the person who has to act on it.
+ */
+function printWitnessLine(w: WitnessLogReport): void {
+	const detail = `${w.covered}/${w.anchors} anchors covered`;
+	if (w.state === "WITNESS_VERIFIED") {
+		console.log(pc.green(`Witness log: ${w.state} (${detail})`));
+		return;
+	}
+	const reasons = w.reasons.length > 0 ? ` [${w.reasons.join(", ")}]` : "";
+	console.log(pc.yellow(`Witness log: ${w.state} (${detail})${reasons}`));
 }
 
 export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
@@ -345,12 +372,17 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 		const exitCode = exitCodeForAnchored(result, {
 			requireAnchor: flags.requireAnchor,
 			requireExternalAnchor: flags.requireExternalAnchor,
+			requireWitness: flags.requireWitness,
 		});
 		if (json) {
 			console.log(
 				JSON.stringify({
 					command: "verify",
-					success: result.valid,
+					// NOT `result.valid` alone. A witness gate can exit 1 while the
+					// chain itself is valid, and a consumer reading the body rather
+					// than $? would have been told the run succeeded — the exact
+					// silent success this surface exists to remove.
+					success: result.valid && exitCode === 0,
 					data: {
 						valid: result.valid,
 						chainLength: result.chainLength,
@@ -374,6 +406,10 @@ export async function run(rootDir?: string, opts?: CliOptions): Promise<void> {
 			}
 		}
 		console.log(`Anchor state: ${result.anchorState} (source: ${result.anchoring.anchorSource})`);
+		// ALWAYS printed, including — especially — when nothing was witnessed.
+		// An operator seeing "VERIFIED (externally anchored)" with no witness line
+		// cannot tell a witnessed vault from one that never was.
+		printWitnessLine(result.anchoring.witnessLog);
 		if (result.anchoring.latestAnchor) {
 			const la = result.anchoring.latestAnchor;
 			console.log(`Latest anchor: #${la.anchorSeq} treeSize ${la.treeSize} (${la.timestamp})`);

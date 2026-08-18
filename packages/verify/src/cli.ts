@@ -79,6 +79,8 @@ Options:
   --vault-id <uuid>              Expected vaultId
   --require-anchor               Strict: UNANCHORED/UNVERIFIABLE/STALE exit 1
   --require-external-anchor      Strict: exit 0 only for externally anchored
+  --require-witness              Strict: exit 0 only when every anchor is
+                                 covered by a verified transparency-log receipt
   --max-anchor-age <dur>         Freshness policy, e.g. 1h, 30m (operator-claimed time)
   --max-unanchored-events <n>    Freshness policy (clock-independent; preferred)`);
 	process.exit(1);
@@ -215,6 +217,7 @@ const successorPinFiles: string[] = [];
 let vaultId: string | undefined;
 let requireAnchor = false;
 let requireExternalAnchor = false;
+let requireWitness = false;
 let maxAnchorAgeMs: number | undefined;
 let maxUnanchoredEvents: number | undefined;
 
@@ -237,6 +240,7 @@ for (let i = 0; i < args.length; i++) {
 	else if (arg === "--vault-id") vaultId = next();
 	else if (arg === "--require-anchor") requireAnchor = true;
 	else if (arg === "--require-external-anchor") requireExternalAnchor = true;
+	else if (arg === "--require-witness") requireWitness = true;
 	else if (arg === "--max-anchor-age") maxAnchorAgeMs = parseDurationMs(next());
 	else if (arg === "--max-unanchored-events") {
 		const rawEvents = next();
@@ -265,7 +269,8 @@ const anchorMode =
 	bundleFile !== undefined ||
 	rekorReceiptFiles.length > 0 ||
 	requireAnchor ||
-	requireExternalAnchor;
+	requireExternalAnchor ||
+	requireWitness;
 
 async function buildAnchorParams(): Promise<AnchorVerifyParams> {
 	const externalAnchorsRaw: string[] = anchorFiles.map(readArtifact);
@@ -387,7 +392,7 @@ if (txId !== undefined) {
 		process.exit(
 			exitCodeForAnchored(
 				{ valid: true, anchorState: result.anchorState, anchoring: result.anchoring },
-				{ requireAnchor, requireExternalAnchor },
+				{ requireAnchor, requireExternalAnchor, requireWitness },
 			),
 		);
 	}
@@ -436,4 +441,12 @@ console.log("Hash algorithm: SHA-256");
 if (result.chainLength > 0) {
 	console.log(`All hashes: valid (${result.validHashes}/${result.chainLength})`);
 }
-process.exit(exitCodeForAnchored(result, { requireAnchor, requireExternalAnchor }));
+// ALWAYS printed, including — especially — when nothing was witnessed. An
+// auditor reading "VERIFIED (externally anchored)" with no witness line cannot
+// tell a witnessed vault from one that never was.
+{
+	const w = result.anchoring.witnessLog;
+	const reasons = w.reasons.length > 0 ? ` [${w.reasons.join(", ")}]` : "";
+	console.log(`Witness log: ${w.state} (${w.covered}/${w.anchors} anchors covered)${reasons}`);
+}
+process.exit(exitCodeForAnchored(result, { requireAnchor, requireExternalAnchor, requireWitness }));

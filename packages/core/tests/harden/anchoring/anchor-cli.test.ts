@@ -91,3 +91,72 @@ describe("HARDEN: core `verify` CLI rejects unknown flags", () => {
 		expect(process.exitCode).toBe(1);
 	});
 });
+
+describe("HARDEN: the verify CLI makes the ABSENCE of witnessing visible (Codex #128 F6)", () => {
+	it("prints a witness line on an anchored vault with no receipts, instead of only VERIFIED", async () => {
+		// The human-facing half of G5. The library reported the witness state
+		// from the first commit, but neither CLI rendered it — so an operator
+		// still read "VERIFIED (externally anchored)" and exit 0 with nothing
+		// saying the transparency-log leg had never run. That is the silent
+		// success this work exists to remove, surviving in the one place a
+		// person actually looks.
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.argv = ["node", "usertrust", "verify", "--anchors", s.storeFile];
+		const { lines, restore } = captureLog();
+		try {
+			await verifyRun(s.root, { json: false });
+		} finally {
+			restore();
+		}
+		const out = lines.join("\n");
+		expect(out).toMatch(/Witness log: WITNESS_UNKNOWN/);
+		expect(out).toMatch(/anchors covered/);
+	});
+
+	it("--require-witness exits 1 on that same vault, while the default still exits 0", async () => {
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+
+		// Default: unchanged. A vault that verified clean yesterday still does.
+		process.argv = ["node", "usertrust", "verify", "--anchors", s.storeFile];
+		let cap = captureLog();
+		try {
+			await verifyRun(s.root, { json: false });
+		} finally {
+			cap.restore();
+		}
+		expect(process.exitCode).toBe(0);
+
+		// Opt in, and the same vault is refused.
+		process.exitCode = 0;
+		process.argv = ["node", "usertrust", "verify", "--anchors", s.storeFile, "--require-witness"];
+		cap = captureLog();
+		try {
+			await verifyRun(s.root, { json: false });
+		} finally {
+			cap.restore();
+		}
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("--json does not report success:true when the witness gate fails", async () => {
+		// A consumer reading the body rather than $? would otherwise be told the
+		// run succeeded while the process exited 1.
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.argv = ["node", "usertrust", "verify", "--anchors", s.storeFile, "--require-witness"];
+		const { lines, restore } = captureLog();
+		try {
+			await verifyRun(s.root, { json: true });
+		} finally {
+			restore();
+		}
+		const payload = JSON.parse(lines.join("")) as {
+			success: boolean;
+			data: { anchoring: unknown };
+		};
+		expect(payload.success).toBe(false);
+		expect(process.exitCode).toBe(1);
+	});
+});
