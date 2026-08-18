@@ -124,11 +124,17 @@ export async function main(argv: string[]): Promise<number> {
 
 // Only self-execute when run directly, so the tests can import `main`.
 if (process.argv[1]?.endsWith("run.mts") === true) {
+	// `process.exitCode`, never `process.exit()`. A forced exit can terminate the
+	// process while stdout is still buffered, truncating the Markdown or leaving
+	// `--json` invalid — a successful check reporting a corrupt result. Setting
+	// the code lets Node drain and exit on its own.
 	main(process.argv.slice(2))
-		.then((code) => process.exit(code))
+		.then((code) => {
+			process.exitCode = code;
+		})
 		.catch((err: unknown) => {
 			// An unexpected throw is "could not check", not "nothing found".
 			process.stderr.write(`pricing-drift: UNEXPECTED FAILURE — ${String(err)}\n`);
-			process.exit(2);
+			process.exitCode = 2;
 		});
 }

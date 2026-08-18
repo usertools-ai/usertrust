@@ -237,3 +237,43 @@ describe("unit conversion rejects overflow", () => {
 		assert.equal(usertokensPer1kFromUsdPerMTok(5), 50);
 	});
 });
+
+describe("structural loss is a SCHEMA failure, absence is not", () => {
+	it("REFUSES a LiteLLM row that has lost litellm_provider entirely", () => {
+		// Distinct from a row belonging to another vendor, which is expected.
+		// Losing the pin field itself means every mapped row would fail the
+		// vendor check and normalize away — schema failure (exit 2), not drift.
+		const corpus = litellmCorpus() as Record<string, Record<string, unknown>>;
+		for (const row of Object.values(corpus)) delete row.litellm_provider;
+		assert.throws(
+			() => assertLiteLLMSchema(corpus, CORPUS_MAP, CORPUS_TIERS),
+			(e: unknown) =>
+				e instanceof SourceError && /missing litellm_provider/.test((e as Error).message),
+		);
+	});
+
+	it("ACCEPTS a row that simply belongs to another vendor", () => {
+		const corpus = litellmCorpus() as Record<string, Record<string, unknown>>;
+		for (const row of Object.values(corpus)) row.litellm_provider = "someone-else";
+		// Not a schema change: the pin works, it just does not match. Coverage
+		// reports the missing mappings instead.
+		assert.doesNotThrow(() => assertLiteLLMSchema(corpus, CORPUS_MAP, CORPUS_TIERS));
+	});
+
+	it("REFUSES a models.dev model whose cost object vanished", () => {
+		const corpus = modelsDevCorpus() as { testvendor: { models: Record<string, unknown> } };
+		corpus.testvendor.models["model-3"] = { name: "still here, no cost" };
+		assert.throws(
+			() => assertModelsDevSchema(corpus, CORPUS_MAP, CORPUS_TIERS),
+			(e: unknown) =>
+				e instanceof SourceError &&
+				/model-3 is present but its cost object is missing/.test((e as Error).message),
+		);
+	});
+
+	it("ACCEPTS a model that is simply absent from the feed", () => {
+		const corpus = modelsDevCorpus() as { testvendor: { models: Record<string, unknown> } };
+		delete corpus.testvendor.models["model-3"];
+		assert.doesNotThrow(() => assertModelsDevSchema(corpus, CORPUS_MAP, CORPUS_TIERS));
+	});
+});

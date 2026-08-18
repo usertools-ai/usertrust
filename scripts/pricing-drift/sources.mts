@@ -217,9 +217,19 @@ export function assertLiteLLMSchema(
 	for (const [model, entry] of Object.entries(map)) {
 		if (entry.litellm === null) continue;
 		const row = table[entry.litellm.key];
+		// An ABSENT row is not a schema change — the model may simply have left
+		// the feed, which coverage reports as a named missing mapping (exit 1).
 		if (typeof row !== "object" || row === null) continue;
 		const r = row as Record<string, unknown>;
-		// Vendor pin: a reseller row keeping an old field name proves nothing.
+		// A row that exists but has LOST `litellm_provider` is a different thing:
+		// the field this tool pins on is gone, so every mapped row would silently
+		// fail the vendor check and normalize away. That is a schema failure
+		// (exit 2), and skipping it here would misreport it as ordinary drift.
+		if (!("litellm_provider" in r)) {
+			problems.push(`${model} row is missing litellm_provider entirely`);
+			continue;
+		}
+		// A row belonging to a DIFFERENT vendor is expected and fine.
 		if (r.litellm_provider !== entry.litellm.provider) continue;
 
 		for (const f of REQUIRED_LITELLM_FIELDS) {
@@ -257,8 +267,15 @@ export function assertModelsDevSchema(
 		if (entry.modelsDev === null) continue;
 		// Vendor-pinned by construction: the provider is indexed, never scanned.
 		const found = providers[entry.modelsDev.provider]?.models?.[entry.modelsDev.id];
-		const cost = (found as { cost?: unknown } | null)?.cost;
-		if (typeof cost !== "object" || cost === null) continue;
+		// Absent model: not a schema change, coverage names it. Present model
+		// whose `cost` object has vanished: the structure this tool reads is
+		// gone, which is a schema failure and must not degrade into drift.
+		if (typeof found !== "object" || found === null) continue;
+		const cost = (found as { cost?: unknown }).cost;
+		if (typeof cost !== "object" || cost === null) {
+			problems.push(`${model} is present but its cost object is missing`);
+			continue;
+		}
 		const c = cost as Record<string, unknown>;
 
 		for (const f of REQUIRED_MODELS_DEV_FIELDS) {
