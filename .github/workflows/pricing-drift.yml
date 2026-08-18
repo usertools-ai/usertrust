@@ -143,7 +143,8 @@ jobs:
         if: >-
           always() && github.ref_type == 'branch' &&
           github.ref_name == github.event.repository.default_branch &&
-          (steps.selftest.outcome != 'success' || steps.drift.outputs.exit_code != '0')
+          (steps.selftest.outcome != 'success' || steps.drift.outputs.exit_code != '0' ||
+           steps.head2.outputs.fresh != 'true')
         env:
           GH_TOKEN: ${{ github.token }}
           # Without this, a failed checkout leaves no git remote and `gh` cannot
@@ -152,6 +153,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           EXIT_CODE: ${{ steps.drift.outputs.exit_code || 'none' }}
           SELFTEST: ${{ steps.selftest.outcome }}
+          FRESH: ${{ steps.head2.outputs.fresh }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -161,7 +163,11 @@ jobs:
           # of 1, 127 or 137 with no report on disk; treating that as drift
           # would `cat` a missing file and abort this step under `set -e`,
           # producing no issue at all. Anything else routes to could-not-run.
-          if [ "$SELFTEST" != "success" ] || [ "$EXIT_CODE" != "1" ] || [ ! -s drift-report.md ]; then
+          # A STALE OR UNVERIFIED HEAD IS A COULD-NOT-CHECK STATE, even when the
+          # comparison itself came back clean: the tree that was checked is not
+          # the one master is serving, so the current table was never examined.
+          # A green run here would assert something no run established.
+          if [ "$FRESH" != "true" ] || [ "$SELFTEST" != "success" ] || [ "$EXIT_CODE" != "1" ] || [ ! -s drift-report.md ]; then
             TITLE="Pricing drift check could not run"
             {
               echo "# The pricing drift check did not run"
@@ -192,7 +198,12 @@ jobs:
           EXISTING="$(gh issue list --label pricing-drift --state open \
             --json number --jq '.[0].number // empty')"
 
-          if [ -n "$EXISTING" ]; then
+          if [ -n "$EXISTING" ] && [ "$FRESH" != "true" ]; then
+            # Stale runs COMMENT, never edit. Overwriting a live drift issue's
+            # body with "could not run" would erase the findings a fresh run
+            # established, which is a worse outcome than the staleness itself.
+            gh issue comment "$EXISTING" --body-file issue-body.md
+          elif [ -n "$EXISTING" ]; then
             gh issue edit "$EXISTING" --title "$TITLE" --body-file issue-body.md
             gh issue comment "$EXISTING" --body "Re-checked $(date -u +%Y-%m-%dT%H:%M:%SZ) — see updated body. [Run log]($RUN_URL)"
           else
@@ -234,8 +245,17 @@ jobs:
       # `success()`, never `always()`: an always-gated ping reports HEALTHY for
       # runs that failed, which is worse than having no monitor at all.
       - name: Fail the job when the check did not pass
-        if: always() && (steps.selftest.outcome != 'success' || steps.drift.outputs.exit_code != '0')
+        if: >-
+          always() && (steps.selftest.outcome != 'success' ||
+          steps.drift.outputs.exit_code != '0' ||
+          (github.ref_type == 'branch' &&
+           github.ref_name == github.event.repository.default_branch &&
+           steps.head2.outputs.fresh != 'true'))
         run: |
-          echo "self-test: ${{ steps.selftest.outcome }}"
-          echo "pricing-drift exit: ${{ steps.drift.outputs.exit_code || 'none' }}"
+          echo "self-test:  ${{ steps.selftest.outcome }}"
+          echo "drift exit: ${{ steps.drift.outputs.exit_code || 'none' }}"
+          echo "head fresh: ${{ steps.head2.outputs.fresh }}"
+          # A clean comparison against a tree that is no longer master has not
+          # checked the shipped table. Green here would be a result no run
+          # earned.
           exit 1
