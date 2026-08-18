@@ -3594,15 +3594,61 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 		clusterId: tbClusterId,
 	});
 
-	// Treasury (unconstrained) funds a per-session enforcing holding wallet.
-	await tbClient.createTreasury();
-	const treasury = tbClient.getTreasuryId();
+	// tigerbeetle-node has NO request timeout to configure — ClientInitArgs is
+	// cluster_id + replica_addresses and nothing else — and it treats an
+	// unreachable or unresponsive cluster as transient: it retries the handshake
+	// forever and its promise NEVER rejects. So "no cluster running", the single
+	// most likely production misconfiguration, did not surface as the
+	// LedgerUnavailableError the caller is written to catch; it hung
+	// createGovernor()/trust() for good, which hung every request behind it. A
+	// caller-side deadline is the only mechanism the client leaves available.
+	const connectTimeoutMs = config.tigerbeetle.connectTimeoutMs;
+	const withConnectDeadline = async <T>(what: string, op: Promise<T>): Promise<T> => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				op,
+				// Deliberately NOT unref'd: this timer is the loud failure. Unref'ing it
+				// would let a process whose only pending work is a dead TB handshake exit
+				// silently instead of reporting the outage. It is always cleared below.
+				new Promise<never>((_resolve, reject) => {
+					timer = setTimeout(() => {
+						reject(
+							new Error(
+								`TigerBeetle ${what} did not answer within ${connectTimeoutMs}ms ` +
+									`(addresses: ${tbAddresses.join(", ")})`,
+							),
+						);
+					}, connectTimeoutMs);
+				}),
+			]);
+		} finally {
+			clearTimeout(timer);
+		}
+	};
 
-	// Enforcing holding wallet (debits_must_not_exceed_credits), funded with the
-	// remaining session budget so cumulative pending debits cannot exceed it.
-	// A FRESH account id per session prevents double-funding a deterministic
-	// account across restarts (which would inflate the TB-enforced budget).
-	const holdingId = await tbClient.createFundedBudgetWallet(seedBudget);
+	let treasury: bigint;
+	let holdingId: bigint;
+	try {
+		// Treasury (unconstrained) funds a per-session enforcing holding wallet.
+		await withConnectDeadline("createTreasury", tbClient.createTreasury());
+		treasury = tbClient.getTreasuryId();
+
+		// Enforcing holding wallet (debits_must_not_exceed_credits), funded with the
+		// remaining session budget so cumulative pending debits cannot exceed it.
+		// A FRESH account id per session prevents double-funding a deterministic
+		// account across restarts (which would inflate the TB-enforced budget).
+		holdingId = await withConnectDeadline(
+			"createFundedBudgetWallet",
+			tbClient.createFundedBudgetWallet(seedBudget),
+		);
+	} catch (err) {
+		// The client keeps retrying on its own handles after the deadline fires. Without
+		// this the caller's retry loop leaks a live client — and its health-check timer —
+		// on every attempt, each one still hammering the dead cluster.
+		tbClient.destroy();
+		throw err;
+	}
 
 	// Pending transfer mapping (trustId string -> TB id + the reserved amount).
 	// heldAmount is what postPendingSpend caps against: TigerBeetle REJECTS a post

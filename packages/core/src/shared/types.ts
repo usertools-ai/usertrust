@@ -300,6 +300,14 @@ export const TrustConfigSchema = z.object({
 		.object({
 			addresses: z.array(z.string()).default(["127.0.0.1:3001"]),
 			clusterId: z.number().int().nonnegative().default(0),
+			// Deadline for the two-request handshake that builds the funded holding
+			// wallet. tigerbeetle-node offers NO request timeout of its own
+			// (ClientInitArgs is cluster_id + replica_addresses, nothing else) and
+			// retries an unreachable cluster forever without ever rejecting, so this
+			// is the only thing standing between "no cluster running" and a governor
+			// that never finishes being constructed. Raise it for a loaded or remote
+			// cluster; a healthy local node answers in well under a second.
+			connectTimeoutMs: z.number().int().positive().default(5_000),
 		})
 		.prefault({}),
 	providers: z
