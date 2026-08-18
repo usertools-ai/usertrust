@@ -1,0 +1,138 @@
+name: pricing-drift
+
+# Weekly cross-check of packages/core/src/ledger/pricing.ts against two
+# independently-maintained public rate tables (LiteLLM and models.dev, both
+# MIT). The table ships to customers in the published `usertrust` package and
+# PRICING_TABLE_VERSION is a hand-typed constant, so nothing else in this repo
+# would notice a rate going stale.
+#
+# This workflow REPORTS ONLY. It does not edit pricing.ts, bump the table
+# version, or commit — `contents: read` means GitHub itself refuses a push, so
+# a bad upstream value cannot reach the table through this path. A human
+# adjudicates every rate change.
+
+on:
+  schedule:
+    # 07:00 UTC every Monday.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: pricing-drift
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # The checker's own tests run BEFORE the live check, so the positive
+      # control gates every run. An instrument's verdict is never evidence about
+      # the instrument: if this step fails, the comparison below is not
+      # trustworthy and the job stops here.
+      - name: Test the checker (includes the positive control)
+        run: npm run drift:test
+
+      - name: Check the pricing table against upstream
+        id: drift
+        # Capture the exit status at the only moment it exists rather than
+        # grepping the output for a marker afterwards. A marker inside the
+        # output is evidence the producer chose to emit it; the process's exit
+        # status is evidence the run happened.
+        #
+        #   0 = clean   1 = drift/understatement/coverage breach   2 = could not check
+        run: |
+          set +e
+          npm run --silent drift:check -- --out drift-report.md
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pricing-drift-report
+          path: drift-report.md
+          retention-days: 90
+          if-no-files-found: warn
+
+      # An issue is filed for exit 2 (could not check) as well as exit 1
+      # (found something). A weekly scheduled job that merely goes red is the
+      # exact failure mode this tool exists to prevent: nobody watches a cron
+      # job's status page. "The check did not run" is a finding, not a
+      # transient to be swallowed.
+      - name: File or update the tracking issue
+        if: steps.drift.outputs.exit_code != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXIT_CODE: ${{ steps.drift.outputs.exit_code }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EXIT_CODE" = "2" ]; then
+            TITLE="Pricing drift check could not run"
+            {
+              echo "# The pricing drift check did not run"
+              echo
+              echo "A source was unreachable or its schema no longer matches, so **no comparison"
+              echo "was performed**. This is not a clean result — treat the table as unchecked"
+              echo "until a run completes."
+              echo
+              echo "[Run log]($RUN_URL)"
+              echo
+              if [ -s drift-report.md ]; then cat drift-report.md; fi
+            } > issue-body.md
+          else
+            TITLE="Pricing table drift detected"
+            { cat drift-report.md; echo; echo "[Run log]($RUN_URL)"; } > issue-body.md
+          fi
+
+          # Dedupe on the label so the repo gets ONE tracking issue, not 52 a
+          # year. An existing open issue is updated in place.
+          EXISTING="$(gh issue list --label pricing-drift --state open \
+            --json number --jq '.[0].number // empty')"
+
+          if [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --title "$TITLE" --body-file issue-body.md
+            gh issue comment "$EXISTING" --body "Re-checked $(date -u +%Y-%m-%dT%H:%M:%SZ) — see updated body. [Run log]($RUN_URL)"
+          else
+            gh label create pricing-drift --color FBCA04 \
+              --description "Rate table diverges from upstream sources" 2>/dev/null || true
+            gh issue create --title "$TITLE" --label pricing-drift --body-file issue-body.md
+          fi
+
+      # Close the tracking issue once a run comes back clean, so the label
+      # reflects the current state rather than the worst state ever seen.
+      - name: Close the tracking issue on a clean run
+        if: steps.drift.outputs.exit_code == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          EXISTING="$(gh issue list --label pricing-drift --state open \
+            --json number --jq '.[0].number // empty')"
+          if [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" \
+              --comment "Pricing drift check is clean as of this run. [Run log]($RUN_URL)"
+          fi
+
+      # NO HEALTHCHECK PING. If one is ever added it MUST be gated on
+      # `success()`, never `always()`: an always-gated ping reports HEALTHY for
+      # runs that failed, which is worse than having no monitor at all.
+      - name: Fail the job when the check did not pass
+        if: steps.drift.outputs.exit_code != '0'
+        run: |
+          echo "pricing-drift exited ${{ steps.drift.outputs.exit_code }}"
+          exit 1
