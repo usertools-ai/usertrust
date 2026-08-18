@@ -83,7 +83,15 @@ try {
 			`usertrust ${sanitizeReason(json?.error, "denied")}: ${sanitizeReason(json?.reason)}`,
 		);
 	} else {
-		throw new Error(`unexpected governance response ${response.status}`);
+		// Carry the server's own words through. It names the failing dependency
+		// (`ledger_unavailable`, `governor_timeout`), and that is the difference
+		// between a blocked tool call an operator can diagnose in one read and a
+		// bare status code in a hook nobody is looking at.
+		const detail =
+			typeof json?.error === "string" && json.error !== ""
+				? `${sanitizeReason(json.error)}: ${sanitizeReason(json.reason)}`
+				: "no detail in response body";
+		throw new Error(`unexpected governance response ${response.status} — ${detail}`);
 	}
 } catch (err) {
 	if (process.env.UT_FAIL_OPEN === "1") {

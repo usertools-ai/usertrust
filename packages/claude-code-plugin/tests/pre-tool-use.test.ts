@@ -185,6 +185,30 @@ describe("pre-tool-use hook", () => {
 		expect(await readdir(stateDir)).toEqual([]);
 	});
 
+	it("names the failing dependency when the server answers 503", async () => {
+		// usertools-ai/usertrust#133: a blocked tool call that says only "503" sends
+		// the operator looking through a hook nobody is watching. The server labels
+		// its own outage; the block has to repeat the label.
+		const port = await startFake(() => ({
+			status: 503,
+			json: {
+				error: "ledger_unavailable",
+				reason: "TigerBeetle createTreasury did not answer within 5000ms",
+			},
+		}));
+		const result = await runHook(HOOK, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		// Still fail-closed: a governance product that opens under an outage is
+		// decorative. What changes is that the block is diagnosable.
+		expect(result.code).toBe(2);
+		expect(result.stderr).toContain("503");
+		expect(result.stderr).toContain("ledger_unavailable");
+		expect(result.stderr).toContain("TigerBeetle");
+		expect(await readdir(stateDir)).toEqual([]);
+	});
+
 	it("UT_FAIL_OPEN=1 allows with a warning when the server is unreachable", async () => {
 		const result = await runHook(HOOK, PAYLOAD, {
 			...baseEnv,
