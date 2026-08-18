@@ -96,12 +96,13 @@ export function renderReport(report: DriftReport, ctx: ReportContext): string {
 		`| **Stale allowlist** | **${counts["deviation-stale"]}** |`,
 		`| **Unmapped** | **${counts.unmapped}** |`,
 		"",
-		`Coverage: **${corroborated}/${expectedCorroborated}** models the map claims a source for were ` +
-			"actually answered.",
+		`Coverage: **${report.mappings}/${report.expectedMappings}** source→model mappings answered ` +
+			`(across **${corroborated}/${expectedCorroborated}** models). The gate is per-mapping: a model ` +
+			"answered by one source when the map names two has lost an independent check.",
 		"",
 	];
 
-	if (corroborated < expectedCorroborated) {
+	if (report.mappings < report.expectedMappings || corroborated < expectedCorroborated) {
 		out.push(
 			"> ❌ **Coverage floor breached.** Fewer models were answered than the map expects. " +
 				"This usually means a source changed its schema and matches are silently evaporating — " +
@@ -167,7 +168,7 @@ export function renderReport(report: DriftReport, ctx: ReportContext): string {
 
 /** Terse stdout summary. The Markdown above goes to the issue; this goes to the log. */
 export function renderSummary(report: DriftReport): string {
-	const { counts, corroborated, expectedCorroborated } = report;
+	const { counts } = report;
 	return [
 		`agree=${counts.agree}`,
 		`deviation=${counts["deviation-expected"]}`,
@@ -177,6 +178,6 @@ export function renderSummary(report: DriftReport): string {
 		`disagree=${counts.disagree}`,
 		`stale=${counts["deviation-stale"]}`,
 		`unmapped=${counts.unmapped}`,
-		`coverage=${corroborated}/${expectedCorroborated}`,
+		`coverage=${report.mappings}/${report.expectedMappings} mappings`,
 	].join(" ");
 }

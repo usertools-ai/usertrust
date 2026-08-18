@@ -504,3 +504,63 @@ describe("effective rates use the SDK's own resolver", () => {
 		assert.equal(r.counts.understated, 0, "-5 resolves to 50, which is above upstream 5");
 	});
 });
+
+// ── regressions from the third review ─────────────────────────────────────
+
+describe("coverage is enforced per source→model mapping", () => {
+	it("FAILS when one mapped source drops a model the other still answers", () => {
+		// The model-level count cannot see this: `sources.length > 0` keeps the
+		// model "corroborated" while an entire independent check has vanished.
+		const r = run(
+			{ "test-model": MATCHING },
+			{
+				litellm: { "renamed-away": { litellm_provider: "testvendor" } },
+				modelsDev: modelsDevRaw(),
+			},
+		);
+		assert.equal(r.corroborated, 1, "still corroborated at model granularity");
+		assert.equal(r.mappings, 1);
+		assert.equal(r.expectedMappings, 2);
+		assert.equal(r.failed, true, "a lost independent check must fail the run");
+	});
+
+	it("passes when every mapped source answers", () => {
+		const r = run({ "test-model": MATCHING });
+		assert.equal(r.mappings, 2);
+		assert.equal(r.expectedMappings, 2);
+		assert.equal(r.failed, false);
+	});
+});
+
+describe("conflict reporting does not overclaim", () => {
+	it("never says our rate exceeds every source when it sits in range", () => {
+		const r = run(
+			{ "test-model": { inputPer1k: 60, outputPer1k: 250 } },
+			{
+				litellm: litellmRaw({ input_cost_per_token: 5e-6 }), // 50
+				modelsDev: modelsDevRaw({ input: 7, output: 25 }), // 70
+			},
+		);
+		assert.equal(r.counts["source-conflict"], 1);
+		assert.doesNotMatch(String(r.findings[0]?.note), /not below any of them/);
+		assert.match(String(r.findings[0]?.note), /no definitive upstream value/);
+	});
+
+	it("keeps the conflicting range even when the omitted tier is conservative", () => {
+		// Fallback 50 exceeds both 0.5 and 5, so it is a safe gap — but the
+		// sources still disagree, so the model lands in source-conflict and the
+		// report must show the values rather than an empty dash.
+		const r = run(
+			{ "test-model": MATCHING },
+			{
+				litellm: litellmRaw({ cache_read_input_token_cost: 5e-8 }), // 0.5
+				modelsDev: modelsDevRaw({ input: 5, output: 25, cache_read: 0.5 }), // 5
+			},
+		);
+		assert.equal(r.counts["source-conflict"], 1);
+		assert.deepEqual(r.findings[0]?.cacheGaps, ["cacheReadPer1k"]);
+		const d = r.findings[0]?.diffs.find((x) => x.tier === "cacheReadPer1k");
+		assert.equal(d?.upstream, 0.5);
+		assert.equal(d?.upstreamMax, 5);
+	});
+});

@@ -96,8 +96,17 @@ export interface ModelFinding {
 export interface DriftReport {
 	findings: ModelFinding[];
 	counts: Record<Outcome, number>;
+	/** Models with at least one answering source (human-facing summary). */
 	corroborated: number;
 	expectedCorroborated: number;
+	/**
+	 * Answered (source, model) PAIRS — the quantity the coverage gate actually
+	 * enforces. Counting models is too coarse: if LiteLLM drops `gpt-4o` while
+	 * models.dev still answers, the model stays "corroborated" and a whole
+	 * independent check disappears with the floor unmoved.
+	 */
+	mappings: number;
+	expectedMappings: number;
 	exhaustive: boolean;
 	failed: boolean;
 }
@@ -266,6 +275,20 @@ export function compareTable(input: CompareInput): DriftReport {
 				// is reported as a conflicted diff rather than filed as a safe gap.
 				if (effective >= up.max) {
 					if (!REQUIRED_TIERS.includes(tier)) cacheGaps.push(tier);
+					// Conservative, but if the sources disagreed on this tier the model
+					// is still classified `source-conflict` — and with no diff recorded
+					// the report would render "—", hiding the very values that caused
+					// the conflict.
+					if (up.conflicted) {
+						diffs.push({
+							tier,
+							ours: null,
+							effective,
+							upstream: up.min,
+							upstreamMax: up.max,
+							conflicted: true,
+						});
+					}
 				} else {
 					diffs.push({
 						tier,
@@ -342,7 +365,11 @@ export function compareTable(input: CompareInput): DriftReport {
 				diffs,
 				cacheGaps,
 				sources: sourceNames,
-				note: "sources disagree with each other; no value proposed. Our rate is not below any of them.",
+				// Deliberately does NOT claim our rate exceeds every source: with
+				// sources at 50 and 70 and ours at 60 that would be false, and this
+				// outcome does not fail, so the note would falsely reassure. All that
+				// is true here is that no definitive value can be selected.
+				note: "sources disagree with each other; no definitive upstream value can be selected. Our rate is not below the lowest of them.",
 			});
 			counts["source-conflict"]++;
 			continue;
@@ -395,13 +422,33 @@ export function compareTable(input: CompareInput): DriftReport {
 		([m, e]) => m in table && (e.litellm !== null || e.modelsDev !== null),
 	).length;
 
+	// THE GATE IS PER-MAPPING. Every source the map names for a model must have
+	// answered for it. A model corroborated by one source when the map promised
+	// two has lost an independent check, and a model-level count cannot see it:
+	// if LiteLLM drops `gpt-4o` while models.dev still answers, the model stays
+	// "corroborated" and the floor never moves.
+	const expectedMappings = Object.entries(map)
+		.filter(([m]) => m in table)
+		.reduce((n, [, e]) => n + (e.litellm !== null ? 1 : 0) + (e.modelsDev !== null ? 1 : 0), 0);
+	const mappings = findings.reduce((n, f) => n + f.sources.length, 0);
+
 	const exhaustive = assertExhaustive(counts, Object.keys(table).length);
 	const failed =
 		findings.some((f) => isFailing(f.outcome)) ||
+		mappings < expectedMappings ||
 		corroborated < expectedCorroborated ||
 		!exhaustive;
 
-	return { findings, counts, corroborated, expectedCorroborated, exhaustive, failed };
+	return {
+		findings,
+		counts,
+		corroborated,
+		expectedCorroborated,
+		mappings,
+		expectedMappings,
+		exhaustive,
+		failed,
+	};
 }
 
 /** Every model carrying a reported cache gap, whatever its outcome. */
