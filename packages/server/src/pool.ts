@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Governor, TrustOpts } from "usertrust";
 import { createGovernor } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
+import { withDeadline } from "./deadline.js";
 
 export type GovernorFactory = (opts: TrustOpts) => Promise<Governor>;
 
@@ -43,6 +44,16 @@ export class GovernorPool {
 	async destroyAll(): Promise<void> {
 		const all = [...this.governors.values()];
 		this.governors.clear();
-		await Promise.allSettled(all.map(async (p) => (await p).destroy()));
+		await Promise.allSettled(
+			all.map(async (p) => {
+				// Bounded, because a governor whose CONSTRUCTION never settles would pin
+				// close() open forever — the same unbounded await that stopped
+				// /v1/authorize from ever answering. There is nothing to destroy until it
+				// exists, so give up waiting and let shutdown finish rather than hanging
+				// the process on a ledger that is already unreachable.
+				const governor = await withDeadline("pool.get", p, this.config.requestTimeoutMs);
+				await governor.destroy();
+			}),
+		);
 	}
 }

@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import type { Authorization } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
 import { resolveTenant } from "./config.js";
+import { withDeadline as withDeadlineMs } from "./deadline.js";
 import { EventBus } from "./events.js";
 import type { GovernorFactory } from "./pool.js";
 import { GovernorPool } from "./pool.js";
@@ -98,6 +99,26 @@ export function createUsertrustServer(opts: {
 		return token;
 	}
 
+	/**
+	 * Bound a governor interaction so a stalled dependency cannot pin an HTTP
+	 * request open forever.
+	 *
+	 * The ledger client this ultimately calls has no timeout of its own and retries
+	 * an unreachable cluster indefinitely without ever rejecting, so "TigerBeetle is
+	 * down" arrives here as a promise that simply never settles — indistinguishable,
+	 * from the socket, from a governor that is merely slow. `usertrust-claude-code`
+	 * resolves that ambiguity by failing CLOSED, which turns a dependency outage into
+	 * a client that blocks every tool call. Answering 503 is the whole point: it is
+	 * information, where a hang is not.
+	 *
+	 * The core-side `tigerbeetle.connectTimeoutMs` normally fires first and gives the
+	 * far more useful `ledger_unavailable`; this is the backstop for every OTHER way a
+	 * governor call can stall, including a cluster that dies AFTER the governor was
+	 * built (which no construction-time deadline can see).
+	 */
+	const withDeadline = <T>(what: string, op: Promise<T>): Promise<T> =>
+		withDeadlineMs(what, op, config.requestTimeoutMs);
+
 	async function handleAuthorize(
 		tenant: TenantConfig,
 		body: unknown,
@@ -111,9 +132,9 @@ export function createUsertrustServer(opts: {
 			});
 			return;
 		}
-		const governor = await pool.get(tenant);
+		const governor = await withDeadline("pool.get", pool.get(tenant));
 		try {
-			const auth = await governor.authorize(parsed.data);
+			const auth = await withDeadline("authorize", governor.authorize(parsed.data));
 			pending.set(auth.transferId, { auth, tenantId: tenant.id, createdAt: Date.now() });
 			bus.publish(tenant.id, {
 				type: "authorized",
@@ -130,7 +151,13 @@ export function createUsertrustServer(opts: {
 			});
 		} catch (err) {
 			const mapped = toHttpError(err);
-			const shadow = config.enforcement === "evaluate_only" && mapped.status !== 500;
+			// Shadow mode reports what enforcement WOULD have decided, so it may only
+			// swallow governance verdicts (4xx). Infrastructure failures must stay
+			// failures: this read `!== 500` until `ledger_unavailable` and
+			// `governor_timeout` started answering 503, at which point a ledger outage
+			// would have been reported to the caller as a clean 200 "would_deny" — a
+			// dependency outage laundered into a policy opinion.
+			const shadow = config.enforcement === "evaluate_only" && mapped.status < 500;
 			bus.publish(tenant.id, {
 				type: "denied",
 				error: mapped.body.error,
@@ -173,7 +200,12 @@ export function createUsertrustServer(opts: {
 		// the entry so a transient settle error stays retryable.
 		pending.delete(transferId);
 		try {
-			const governor = await pool.get(tenant);
+			const governor = await withDeadline("pool.get", pool.get(tenant));
+			// NOT deadlined: a timed-out settle has an UNKNOWN outcome on the money path
+			// (the post may land in the ledger afterwards), and the catch below re-inserts
+			// the pending entry to keep it retryable — so timing out here would invite a
+			// double-settle. Governor CONSTRUCTION above is bounded because it has no such
+			// ambiguity: a governor either exists or it does not.
 			const receipt = await governor.settle(entry.auth, usage);
 			bus.publish(tenant.id, {
 				type: "settled",
@@ -209,7 +241,9 @@ export function createUsertrustServer(opts: {
 		// Atomic claim with re-insert on failure (same contract as settle).
 		pending.delete(transferId);
 		try {
-			const governor = await pool.get(tenant);
+			const governor = await withDeadline("pool.get", pool.get(tenant));
+			// Not deadlined, for the same reason as settle: an abort that timed out may
+			// still void the hold.
 			await governor.abort(entry.auth, parsed.data.error);
 		} catch (err) {
 			pending.set(transferId, entry);
@@ -293,7 +327,7 @@ export function createUsertrustServer(opts: {
 			return;
 		}
 		if (req.method === "GET" && url === "/v1/budget") {
-			const governor = await pool.get(tenant);
+			const governor = await withDeadline("pool.get", pool.get(tenant));
 			sendJson(res, 200, { remaining: governor.budgetRemaining() });
 			return;
 		}
@@ -336,7 +370,7 @@ export function createUsertrustServer(opts: {
 		const tenant = config.tenants.find((t) => t.id === entry.tenantId);
 		if (tenant) {
 			try {
-				const governor = await pool.get(tenant);
+				const governor = await withDeadline("pool.get", pool.get(tenant));
 				await governor.abort(entry.auth, reason);
 			} catch {
 				// Best-effort — the Governor's own destroy()/reconciliation voids

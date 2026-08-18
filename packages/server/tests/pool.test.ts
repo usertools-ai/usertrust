@@ -20,6 +20,7 @@ function config(): ServerConfig {
 		stateDir: "/tmp/utsrv-pool",
 		enforcement: "enforce",
 		pendingTtlMs: 300_000,
+		requestTimeoutMs: 10_000,
 		dryRun: true,
 		tenants: [TENANT_A, TENANT_B],
 	};

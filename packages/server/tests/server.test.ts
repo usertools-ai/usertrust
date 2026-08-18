@@ -1,3 +1,4 @@
+import type { Governor } from "usertrust";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ServerConfig } from "../src/config.js";
 import { hashKey } from "../src/config.js";
@@ -14,6 +15,7 @@ function config(overrides: Partial<ServerConfig> = {}): ServerConfig {
 		stateDir: "/tmp/utsrv-http",
 		enforcement: "enforce",
 		pendingTtlMs: 300_000,
+		requestTimeoutMs: 10_000,
 		dryRun: true,
 		tenants: [{ id: "acme", keyHash: hashKey(KEY) }],
 		...overrides,
@@ -364,4 +366,85 @@ describe("edge cases and failure paths", () => {
 		expect(api.SettleRequestSchema).toBeDefined();
 		expect(api.AbortRequestSchema).toBeDefined();
 	});
+});
+
+/**
+ * The server's OWN deadline, as distinct from the ledger's.
+ *
+ * `tigerbeetle.connectTimeoutMs` only bounds governor CONSTRUCTION. A cluster that
+ * dies AFTER a governor is built stalls inside `authorize()` instead, where no
+ * construction-time deadline can see it — and the ledger client still never
+ * rejects. This is the backstop for that, and for any other way a governor call
+ * can fail to return.
+ *
+ * Driven through the injectable factory rather than a real dead cluster, because
+ * the point under test is the SERVER's timeout, and a real cluster would trip the
+ * earlier core deadline first and never reach this code.
+ */
+describe("request deadline — a stalled governor answers, it does not hang", () => {
+	/** A governor whose authorize() never settles: the post-construction stall. */
+	function hangingGovernor(): Governor {
+		const fake = createFakeGovernor().governor;
+		return {
+			...fake,
+			authorize: () => new Promise<never>(() => {}),
+		};
+	}
+
+	it("answers 503 governor_timeout instead of holding the request open", async () => {
+		const governor = hangingGovernor();
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 300 }),
+			factory: async () => governor,
+		});
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+
+		const startedAt = Date.now();
+		const res = await post(base, "/v1/authorize", { model: "claude-sonnet-4-6" });
+		const elapsedMs = Date.now() - startedAt;
+
+		expect(res.status).toBe(503);
+		const body = (await res.json()) as { error: string; reason: string };
+		expect(body.error).toBe("governor_timeout");
+		// Name what stalled — "internal error" would not tell an operator which
+		// dependency to look at.
+		expect(body.reason).toContain("authorize");
+		expect(elapsedMs).toBeLessThan(10_000);
+	}, 20_000);
+
+	it("does not shadow the timeout into a 200 would_deny under evaluate_only", async () => {
+		// An unanswered call has an UNKNOWN outcome. Reporting it as `would_deny`
+		// would claim enforcement reached a verdict it never reached.
+		const governor = hangingGovernor();
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 300, enforcement: "evaluate_only" }),
+			factory: async () => governor,
+		});
+		const { port } = await server.listen();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", {
+			model: "claude-sonnet-4-6",
+		});
+		expect(res.status).toBe(503);
+		const body = (await res.json()) as { error: string; shadow?: boolean };
+		expect(body.shadow).toBeUndefined();
+		expect(body.error).toBe("governor_timeout");
+	}, 20_000);
+
+	it("bounds governor CONSTRUCTION too, not just the call", async () => {
+		// pool.get() is where the reported outage actually lived: createGovernor()
+		// never returned, so the request never reached authorize() at all.
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 300 }),
+			factory: () => new Promise<never>(() => {}),
+		});
+		const { port } = await server.listen();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", {
+			model: "claude-sonnet-4-6",
+		});
+		expect(res.status).toBe(503);
+		const body = (await res.json()) as { error: string; reason: string };
+		expect(body.error).toBe("governor_timeout");
+		expect(body.reason).toContain("pool.get");
+	}, 20_000);
 });

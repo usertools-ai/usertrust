@@ -3,6 +3,7 @@
 
 export type { ServerConfig, TenantConfig } from "./config.js";
 export { hashKey, loadServerConfig, resolveTenant } from "./config.js";
+export { GovernorTimeoutError, withDeadline } from "./deadline.js";
 export type { ServerEvent } from "./events.js";
 export { EventBus } from "./events.js";
 export type { GovernorFactory } from "./pool.js";

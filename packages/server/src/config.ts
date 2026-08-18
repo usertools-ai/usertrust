@@ -23,6 +23,15 @@ const ServerConfigSchema = z.object({
 	enforcement: z.enum(["enforce", "evaluate_only"]).default("enforce"),
 	pendingTtlMs: z.number().int().positive().default(300_000),
 	dryRun: z.boolean().default(false),
+	// Ceiling on a single governor interaction. A governance server that HANGS is
+	// strictly worse than one that errors: the caller cannot tell "slow" from
+	// "dead", and usertrust-claude-code's PreToolUse hook fails CLOSED, so an
+	// unbounded wait there is not a slow tool call but a blocked one
+	// (usertools-ai/usertrust#130). Keep this comfortably ABOVE
+	// tigerbeetle.connectTimeoutMs so a ledger outage surfaces as the specific
+	// `ledger_unavailable` rather than as this generic timeout, and BELOW the
+	// client's own timeout so the client sees a real 503 instead of giving up first.
+	requestTimeoutMs: z.number().int().positive().default(10_000),
 	tenants: z.array(TenantSchema).min(1),
 });
 
