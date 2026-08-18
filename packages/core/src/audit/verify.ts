@@ -499,16 +499,35 @@ export function foldWitnessLog(
 	let nCovered = 0;
 	let nUnknown = 0;
 	let nInvalid = 0;
-	for (const seq of anchorSeqs) {
+	const present = [...new Set(anchorSeqs)].sort((a, b) => a - b);
+	for (const seq of present) {
 		if (invalid.has(seq)) nInvalid++;
 		else if (covered.has(seq)) nCovered++;
 		else nUnknown++;
+	}
+	// ANCHORS IMPLIED BY THE SEQUENCE BUT NOT PRESENT COUNT AS UNKNOWN.
+	//
+	// anchorSeq is 1-based and contiguous by construction, so a vault whose
+	// newest anchor is 10 asserts that 1..9 existed. `partial-history` is
+	// deliberately ACCEPTED for anchorState — an auditor may legitimately hold
+	// only recent anchors — but for the witness question those nine positions
+	// are not "fine", they are unshown. Folding over only the records in hand
+	// let a single covered anchor at seq 10 return WITNESS_VERIFIED and pass
+	// --require-witness while nine anchors went unaccounted for. That is the
+	// same vacuous truth this fold exists to prevent, one level up: there the
+	// missing thing was an anchor with no receipt, here it is an anchor with no
+	// record.
+	const highest = present.at(-1) ?? 0;
+	const impliedMissing = highest - present.length;
+	if (impliedMissing > 0) {
+		nUnknown += impliedMissing;
+		reasons.push("witness-history-gap");
 	}
 	// An empty fold must never read as success: a chain with no anchors has no
 	// witness claim to make, and reporting VERIFIED over zero anchors is the
 	// vacuous truth again, one level up.
 	let state: WitnessLogState;
-	if (anchorSeqs.length === 0) {
+	if (present.length === 0) {
 		state = "WITNESS_UNKNOWN";
 		reasons.push("witness-no-anchors");
 	} else if (nInvalid > 0) {
@@ -518,15 +537,16 @@ export function foldWitnessLog(
 		state = "WITNESS_UNKNOWN";
 		// No emission-time declaration exists yet, so "no receipt" cannot be
 		// distinguished from an anchor that was never meant to be witnessed at
-		// all. Both are UNKNOWN
-		// rather than one of them being quietly treated as fine.
+		// all. Both are UNKNOWN rather than one being quietly treated as fine.
 		reasons.push("witness-undeclared");
 	} else {
 		state = "WITNESS_VERIFIED";
 	}
 	return {
 		state,
-		anchors: anchorSeqs.length,
+		// The IMPLIED history length, not the number of records supplied, so the
+		// three counts always sum to it and a gap cannot hide in the difference.
+		anchors: nCovered + nUnknown + nInvalid,
 		covered: nCovered,
 		unknown: nUnknown,
 		invalid: nInvalid,

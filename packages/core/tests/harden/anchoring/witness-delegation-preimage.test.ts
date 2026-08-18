@@ -108,6 +108,30 @@ describe("witnessDelegationPreimage", () => {
 		).toBeNull();
 	});
 
+	it("lone surrogates cannot collide onto one preimage (Codex #128 F1)", () => {
+		// "\uD800" and "\uD801" are DISTINCT non-empty strings that both encode
+		// to U+FFFD, so before the round-trip guard they produced identical bytes
+		// and one root signature authorized two different delegations. vaultId is
+		// never validated as a UUID, so it is attacker-chosen.
+		expect(witnessDelegationPreimage({ ...base, vaultId: "\uD800" })).toBeNull();
+		expect(witnessDelegationPreimage({ ...base, vaultId: "\uD801" })).toBeNull();
+		expect(witnessDelegationPreimage({ ...base, witnessKeyId: "\uDFFF" })).toBeNull();
+		expect(witnessDelegationPreimage({ ...base, delegatedByKeyId: "a\uD800b" })).toBeNull();
+		// A well-formed astral pair is legitimate and must still encode.
+		expect(witnessDelegationPreimage({ ...base, vaultId: "\u{1F600}" })).not.toBeNull();
+	});
+
+	it("delegationIndex above u32 returns null instead of throwing (Codex #128 F7)", () => {
+		// 2**32 IS a safe integer, so the safe-integer check passed it through to
+		// writeUInt32BE, which throws ERR_OUT_OF_RANGE — breaking the "returns
+		// null, never throws" contract on the untrusted verification path.
+		expect(Number.isSafeInteger(2 ** 32)).toBe(true);
+		expect(() => witnessDelegationPreimage({ ...base, delegationIndex: 2 ** 32 })).not.toThrow();
+		expect(witnessDelegationPreimage({ ...base, delegationIndex: 2 ** 32 })).toBeNull();
+		// The boundary itself still encodes.
+		expect(witnessDelegationPreimage({ ...base, delegationIndex: 0xff_ff_ff_ff })).not.toBeNull();
+	});
+
 	it("the open-ended sentinel survives a JSON round-trip exactly", () => {
 		// 2^64-1 would not; that is why the sentinel is 2^53-1.
 		const parsed = JSON.parse(JSON.stringify({ n: OPEN_ENDED_ANCHOR_SEQ })).n;

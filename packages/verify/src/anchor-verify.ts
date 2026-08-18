@@ -381,10 +381,25 @@ export function witnessDelegationPreimage(fields: WitnessDelegationFields): Uint
 		effectiveUntilAnchorSeq,
 	} = fields;
 	if (vaultId === "" || witnessKeyId === "" || delegatedByKeyId === "") return null;
+	// LONE SURROGATES COLLIDE. "\uD800" and "\uD801" are distinct, non-empty
+	// JavaScript strings, but UTF-8 encoding replaces each unpaired surrogate
+	// with U+FFFD — so both produce the SAME preimage bytes and one root
+	// signature would authorize two different delegations. `vaultId` is only
+	// ever validated as non-empty, never as a UUID, so it is attacker-chosen.
+	// The round-trip is the exact property required: the encoding must be
+	// lossless, or the prefixes below are protecting bytes that no longer
+	// distinguish the inputs they came from.
+	for (const value of [vaultId, witnessKeyId, delegatedByKeyId]) {
+		if (Buffer.from(value, "utf8").toString("utf8") !== value) return null;
+	}
 	if (witnessSpkiDer.length === 0) return null;
 	// delegationIndex starts at 1: a 0 would make "no delegations" and "the first
 	// delegation" indistinguishable in a contiguity check.
+	// Safe-integer alone is not enough: 2**32 is a safe integer and passes, then
+	// writeUInt32BE throws ERR_OUT_OF_RANGE — breaking this function's stated
+	// "returns null, never throws" contract on the untrusted verification path.
 	if (!Number.isSafeInteger(delegationIndex) || delegationIndex < 1) return null;
+	if (delegationIndex > 0xff_ff_ff_ff) return null;
 	if (!Number.isSafeInteger(effectiveFromAnchorSeq) || effectiveFromAnchorSeq < 0) return null;
 	if (!Number.isSafeInteger(effectiveUntilAnchorSeq) || effectiveUntilAnchorSeq < 0) return null;
 	if (effectiveUntilAnchorSeq < effectiveFromAnchorSeq) return null;

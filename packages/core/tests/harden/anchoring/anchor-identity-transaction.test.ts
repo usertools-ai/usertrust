@@ -104,9 +104,21 @@ describe("identity.json — single transactional writer", () => {
 		);
 		// resumeAnchorMirror bumps the durable high-water, so it takes the lock
 		// too. Deliberate behaviour change: it previously wrote regardless.
+		const mirrorPath = join(anchorsDir(root), "anchors.jsonl");
+		const before = readFileSync(mirrorPath, "utf-8");
+
 		expect(() => resumeAnchorMirror(root, JSON.stringify(record))).toThrow(
 			/locked by an in-flight emission/,
 		);
+
+		// THE PART THE FIRST VERSION OF THIS TEST MISSED (Codex #128 F3).
+		// Asserting only the throw let a refusal that had ALREADY appended to the
+		// mirror pass as correct. A caller seeing a refusal while the state moved
+		// is worse than either outcome alone: a concurrent emitter holding the
+		// tail it read a moment earlier can mint the same anchorSeq, which is
+		// permanent fork evidence in an append-only store.
+		expect(readFileSync(mirrorPath, "utf-8")).toBe(before);
+		expect((readAnchorIdentity(root) as AnchorIdentity).lastAnchorSeq).toBeUndefined();
 	});
 
 	// NOTE ON THESE TWO: they are REGRESSION guards on `recordRotatedIdentity`,

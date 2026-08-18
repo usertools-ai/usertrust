@@ -230,8 +230,14 @@ function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
 	}
 	renameSync(tmp, path);
 	// POSIX: a rename is only durable once the containing directory is synced.
-	// Best-effort by platform (Windows cannot open a directory this way); the
-	// repo's supported targets and CI are POSIX, so this is the real path.
+	//
+	// The catch is NARROW on purpose. Swallowing every error here made the
+	// function report success after a REAL durability failure — EIO, ENOSPC,
+	// EDQUOT — so callers acted on an update that a crash could still undo, and
+	// nothing anywhere said so. That is the silent-success class: accept what
+	// you cannot handle and report success. Only the errnos that mean "this
+	// platform cannot open a directory for fsync" (Windows) are suppressed;
+	// everything else is a genuine I/O failure and propagates.
 	try {
 		const dirFd = openSync(dir, "r");
 		try {
@@ -239,8 +245,11 @@ function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
 		} finally {
 			closeSync(dirFd);
 		}
-	} catch {
-		/* platform does not support directory fsync */
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException).code;
+		if (code !== "EISDIR" && code !== "EPERM" && code !== "EACCES" && code !== "ENOTSUP") {
+			throw err;
+		}
 	}
 }
 
@@ -1239,24 +1248,44 @@ export function resumeAnchorMirror(rootDir: string, latestRecordRaw: string): An
 		);
 	}
 	const dir = anchorsDir(rootDir);
-	const mirror = readMirrorRecords(dir);
-	const tail = mirror.records.at(-1);
-	if (tail !== undefined && tail.anchorSeq >= record.anchorSeq) {
-		throw new Error(
-			`resume: mirror already at anchorSeq ${tail.anchorSeq} (supplied ${record.anchorSeq})`,
-		);
-	}
 	mkdirSync(dir, { recursive: true });
-	const fd = openSync(join(dir, "anchors.jsonl"), "a", 0o600);
-	try {
-		writeSync(fd, `${canonicalize(record)}\n`);
-		fsyncSync(fd);
-	} finally {
-		closeSync(fd);
+	// TAKE THE LOCK BEFORE TOUCHING THE MIRROR, not after.
+	//
+	// This previously appended to anchors.jsonl and only then bumped the
+	// high-water, which is where the lock was acquired. A resume racing a live
+	// emission therefore MUTATED THE MIRROR AND THEN THREW: the caller saw a
+	// refusal while the state had already changed, and a concurrent emitter
+	// holding the tail it read a moment earlier could mint the same anchorSeq —
+	// permanent, unrewritable fork evidence in the append-only store, which is
+	// exactly what the anchoring-monotonicity invariant exists to prevent.
+	// Reading the tail under the lock also closes the check-then-act between
+	// "mirror is behind" and the append.
+	const release = tryAcquireAnchorLock(dir);
+	if (release === null) {
+		throw new Error("anchor identity is locked by an in-flight emission — retry once it completes");
 	}
-	// Re-seeding advances the durable high-water so the next emission allocates
-	// from the re-seeded tail, not from a stale value.
-	bumpAnchorHighWater(rootDir, record.anchorSeq, false);
+	try {
+		const mirror = readMirrorRecords(dir);
+		const tail = mirror.records.at(-1);
+		if (tail !== undefined && tail.anchorSeq >= record.anchorSeq) {
+			throw new Error(
+				`resume: mirror already at anchorSeq ${tail.anchorSeq} (supplied ${record.anchorSeq})`,
+			);
+		}
+		const fd = openSync(join(dir, "anchors.jsonl"), "a", 0o600);
+		try {
+			writeSync(fd, `${canonicalize(record)}\n`);
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		// Re-seeding advances the durable high-water so the next emission
+		// allocates from the re-seeded tail, not from a stale value. We already
+		// hold the lock, so this must NOT try to take it again.
+		bumpAnchorHighWater(rootDir, record.anchorSeq, true);
+	} finally {
+		release();
+	}
 	return record;
 }
 

@@ -69,6 +69,39 @@ describe("foldWitnessLog", () => {
 		expect(r.invalid).toBe(1);
 	});
 
+	it("a lone covered anchor at seq 10 is NOT verified (Codex #128 F2)", () => {
+		// anchorSeq is 1-based and contiguous, so a newest anchor of 10 asserts
+		// that 1..9 existed. Folding over only the records in hand returned
+		// WITNESS_VERIFIED and passed --require-witness while nine anchors went
+		// unaccounted for. `partial-history` is legitimately accepted for
+		// anchorState; it is not a witness claim.
+		const r = foldWitnessLog([10], report([10]));
+		expect(r.state).toBe("WITNESS_UNKNOWN");
+		expect(r.unknown).toBe(9);
+		expect(r.covered).toBe(1);
+		expect(r.reasons).toContain("witness-history-gap");
+	});
+
+	it("a gap in the middle of the history is unknown, not verified", () => {
+		const r = foldWitnessLog([1, 2, 5], report([1, 2, 5]));
+		expect(r.state).toBe("WITNESS_UNKNOWN");
+		expect(r.unknown).toBe(2); // seq 3 and 4
+		expect(r.reasons).toContain("witness-history-gap");
+	});
+
+	it("a contiguous fully covered history is still VERIFIED", () => {
+		// The guard must not make the good case unreachable.
+		const r = foldWitnessLog([1, 2, 3], report([1, 2, 3]));
+		expect(r.state).toBe("WITNESS_VERIFIED");
+		expect(r.reasons).not.toContain("witness-history-gap");
+	});
+
+	it("duplicate anchorSeqs do not inflate the count", () => {
+		const r = foldWitnessLog([1, 1, 2, 2], report([1, 2]));
+		expect(r.anchors).toBe(2);
+		expect(r.state).toBe("WITNESS_VERIFIED");
+	});
+
 	it("counts every anchor exactly once", () => {
 		const r = foldWitnessLog([1, 2, 3, 4], report([1], [2]));
 		expect(r.covered + r.unknown + r.invalid).toBe(r.anchors);
