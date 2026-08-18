@@ -17,6 +17,7 @@ import type { ModelRates } from "../../packages/core/src/ledger/pricing.js";
 import { PRICING_TABLE } from "../../packages/core/src/ledger/pricing.js";
 import { compareTable, orphanDeviations } from "./compare.mts";
 import type { ModelSourceMap } from "./model-map.mts";
+import { renderReport } from "./report.mts";
 import { normalizeLiteLLM, normalizeModelsDev, usertokensPer1kFromUsdPerMTok } from "./sources.mts";
 
 // ── fixtures ──────────────────────────────────────────────────────────────
@@ -51,6 +52,7 @@ function run(
 		deviations?: Record<string, { reason: string }>;
 		litellm?: unknown;
 		modelsDev?: unknown;
+		floors?: { minMappings?: number; minCorroboratedModels?: number };
 	} = {},
 ) {
 	const map = opts.map ?? MAP;
@@ -58,6 +60,7 @@ function run(
 		table,
 		map,
 		deviations: opts.deviations ?? {},
+		...(opts.floors !== undefined ? { floors: opts.floors } : {}),
 		sources: {
 			litellm: normalizeLiteLLM(opts.litellm ?? litellmRaw(), map),
 			"models.dev": normalizeModelsDev(opts.modelsDev ?? modelsDevRaw(), map),
@@ -626,5 +629,58 @@ describe("missing mappings are NAMED, not just counted", () => {
 			{ litellm: { "renamed-away": { litellm_provider: "testvendor" } } },
 		);
 		assert.deepEqual(r.missingMappings, ["litellm:test-model"]);
+	});
+});
+
+// ── regressions from the fifth review ─────────────────────────────────────
+
+describe("range classification uses the effective rate", () => {
+	it("FAILS a malformed cache rate that METERS above every source", () => {
+		// cacheReadPer1k -5 resolves to inputPer1k (50) under the canonical rule.
+		// Sources conflict at 5 and 10, so comparing raw -5 would read as in-range
+		// and pass, while the SDK actually charges 50.
+		const r = run(
+			{ "test-model": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: -5 } },
+			{
+				litellm: litellmRaw({ cache_read_input_token_cost: 5e-7 }), // 5
+				modelsDev: modelsDevRaw({ input: 5, output: 25, cache_read: 1 }), // 10
+			},
+		);
+		assert.equal(r.counts.disagree, 1);
+		assert.equal(r.counts["source-conflict"], 0);
+		assert.equal(r.failed, true);
+	});
+});
+
+describe("absolute floor breaches are visible, not just fatal", () => {
+	it("records the breach on the report so the issue states a reason", () => {
+		// Both counts match their derived expectation, every model agrees, and
+		// nothing is missing — the only signal is the absolute floor.
+		const r = run(
+			{ "test-model": MATCHING },
+			{ floors: { minMappings: 99, minCorroboratedModels: 99 } },
+		);
+		assert.equal(r.counts.agree, 1);
+		assert.deepEqual(r.missingMappings, []);
+		assert.equal(r.mappings, r.expectedMappings);
+		assert.equal(r.floors.breached, true);
+		assert.equal(r.failed, true);
+
+		const md = renderReport(r, {
+			tableVersion: "test",
+			fetchedAt: "now",
+			sourceUrls: {},
+			orphanDeviations: [],
+		});
+		assert.match(md, /Absolute coverage floor breached/);
+	});
+
+	it("does not report a breach when the floors are met", () => {
+		const r = run(
+			{ "test-model": MATCHING },
+			{ floors: { minMappings: 2, minCorroboratedModels: 1 } },
+		);
+		assert.equal(r.floors.breached, false);
+		assert.equal(r.failed, false);
 	});
 });

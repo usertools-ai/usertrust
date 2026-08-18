@@ -111,6 +111,17 @@ export function renderReport(report: DriftReport, ctx: ReportContext): string {
 		);
 	}
 
+	if (report.floors.breached) {
+		out.push(
+			`> ❌ **Absolute coverage floor breached.** ${report.mappings} mappings ` +
+				`(floor ${report.floors.minMappings}) across ${corroborated} models ` +
+				`(floor ${report.floors.minCorroboratedModels}). These floors are checked in rather than ` +
+				"derived from `MODEL_MAP`, so this fires even when the map's own expectation is satisfied — " +
+				"which is exactly the case where every model can read `agree` while coverage has shrunk.",
+			"",
+		);
+	}
+
 	if (report.mappings < report.expectedMappings || corroborated < expectedCorroborated) {
 		out.push(
 			"> ❌ **Coverage floor breached.** Fewer models were answered than the map expects. " +

@@ -82,8 +82,16 @@ jobs:
       # if `drift:test` fails, every later step is implicitly skipped and the
       # monitor merely turns red, recording nothing. An instrument that could
       # not run is exactly what this tool must not swallow.
+      # ISSUE MUTATION IS RESTRICTED TO THE DEFAULT BRANCH. `workflow_dispatch`
+      # accepts any ref, and checkout honours it, but the tracking issue is
+      # repository-wide: a run from a clean feature branch would close an issue
+      # describing drift on master, and a dirty branch would overwrite it with
+      # findings that are not master's. Non-default refs still run the check and
+      # still fail the job — they just do not rewrite shared state.
       - name: File or update the tracking issue
-        if: always() && (steps.selftest.outcome != 'success' || steps.drift.outputs.exit_code != '0')
+        if: >-
+          always() && github.ref_name == github.event.repository.default_branch &&
+          (steps.selftest.outcome != 'success' || steps.drift.outputs.exit_code != '0')
         env:
           GH_TOKEN: ${{ github.token }}
           # Without this, a failed checkout leaves no git remote and `gh` cannot
@@ -143,7 +151,9 @@ jobs:
       # Close the tracking issue once a run comes back clean, so the label
       # reflects the current state rather than the worst state ever seen.
       - name: Close the tracking issue on a clean run
-        if: steps.selftest.outcome == 'success' && steps.drift.outputs.exit_code == '0'
+        if: >-
+          github.ref_name == github.event.repository.default_branch &&
+          steps.selftest.outcome == 'success' && steps.drift.outputs.exit_code == '0'
         env:
           GH_TOKEN: ${{ github.token }}
           # Without this, a failed checkout leaves no git remote and `gh` cannot

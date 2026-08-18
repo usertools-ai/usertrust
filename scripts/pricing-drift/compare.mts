@@ -125,6 +125,8 @@ export interface DriftReport {
 	expectedMappings: number;
 	/** `source:model` pairs the map promised that no source answered. */
 	missingMappings: string[];
+	/** Absolute floors applied, and whether either was breached. */
+	floors: { minMappings: number; minCorroboratedModels: number; breached: boolean };
 	exhaustive: boolean;
 	failed: boolean;
 }
@@ -338,7 +340,10 @@ export function compareTable(input: CompareInput): DriftReport {
 					effective,
 					upstream: up.min,
 					upstreamMax: up.max,
-					conflicted: raw <= up.max,
+					// `effective`, not `raw`: a negative cache rate meters at inputPer1k
+					// under the canonical rule, so raw -5 against sources 5/10 would
+					// read as in-range when the SDK is actually charging 50.
+					conflicted: effective <= up.max,
 				});
 				continue;
 			}
@@ -477,13 +482,20 @@ export function compareTable(input: CompareInput): DriftReport {
 	}
 	missingMappings.sort();
 
+	const minMappings = input.floors?.minMappings ?? 0;
+	const minCorroboratedModels = input.floors?.minCorroboratedModels ?? 0;
+	// Surfaced on the report, not just folded into `failed`. Both counts can
+	// match their derived expectation while sitting below the absolute floor —
+	// no missing mappings, every model `agree`, and an issue with no stated
+	// reason unless this is rendered.
+	const floorsBreached = mappings < minMappings || corroborated < minCorroboratedModels;
+
 	const exhaustive = assertExhaustive(counts, Object.keys(table).length);
 	const failed =
 		findings.some((f) => isFailing(f.outcome)) ||
 		mappings < expectedMappings ||
 		corroborated < expectedCorroborated ||
-		mappings < (input.floors?.minMappings ?? 0) ||
-		corroborated < (input.floors?.minCorroboratedModels ?? 0) ||
+		floorsBreached ||
 		!exhaustive;
 
 	return {
@@ -494,6 +506,7 @@ export function compareTable(input: CompareInput): DriftReport {
 		mappings,
 		expectedMappings,
 		missingMappings,
+		floors: { minMappings, minCorroboratedModels, breached: floorsBreached },
 		exhaustive,
 		failed,
 	};

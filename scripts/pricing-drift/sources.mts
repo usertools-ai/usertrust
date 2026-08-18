@@ -92,11 +92,32 @@ export const MODELS_DEV_FIELDS = ["input", "output", "cache_read", "cache_write"
  * old name, and the sentinel would pass while every mapped row normalized that
  * tier to `undefined` — full coverage, exit 0, stale cache pricing.
  *
- * >1 deliberately, so one surviving legacy row cannot clear the bar. Today 17
- * mapped LiteLLM rows carry input/output/cache-read and 8 carry cache-write,
- * so 3 sits well below the real floor and far above zero.
+ * PER FIELD, PER SOURCE — never one shared number. A shared floor of 3 is
+ * cleared by three unaffected rows while a PARTIAL rename (one provider, or one
+ * field) quietly strips the tier from every other mapped row. The affected rows
+ * still answer, because input/output survive, so mapping coverage stays full
+ * and a changed cache rate can be classified `agree` — worst on a one-source
+ * model like `kimi-k3`, where nothing else can contradict it.
+ *
+ * Baselines measured against the mapped rows on 2026-08-18. They are a FLOOR,
+ * not an equality: upstream adding cache rates to more models is fine, losing
+ * them is not. A legitimate drop (a model leaving a feed) is an explicit,
+ * reviewable edit here — the same rule as the coverage floors in compare.mts.
  */
-const SCHEMA_MIN_OCCURRENCES = 3;
+const LITELLM_FIELD_BASELINE: Record<string, number> = {
+	litellm_provider: 17,
+	input_cost_per_token: 17,
+	output_cost_per_token: 17,
+	cache_read_input_token_cost: 17,
+	cache_creation_input_token_cost: 8,
+};
+
+const MODELS_DEV_FIELD_BASELINE: Record<string, number> = {
+	input: 19,
+	output: 19,
+	cache_read: 18,
+	cache_write: 8,
+};
 
 /**
  * Is this field carrying a value the normalizer could actually use?
@@ -109,14 +130,19 @@ function isUsable(field: string, value: unknown): boolean {
 	return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
-function assertFieldsPresent(source: string, counts: Map<string, number>): void {
-	const missing = [...counts.entries()]
-		.filter(([, n]) => n < SCHEMA_MIN_OCCURRENCES)
-		.map(([f, n]) => `${f} (seen ${n}x)`);
-	if (missing.length > 0) {
+function assertFieldsPresent(
+	source: string,
+	counts: Map<string, number>,
+	baseline: Record<string, number>,
+): void {
+	const short = [...counts.entries()]
+		.filter(([f, n]) => n < (baseline[f] ?? 0))
+		.map(([f, n]) => `${f} (${n} of ${baseline[f]} mapped rows)`);
+	if (short.length > 0) {
 		throw new SourceError(
-			`${source}: expected field(s) absent or nearly absent — schema changed: ${missing.join(", ")}. ` +
-				"Refusing to report a comparison that silently skipped these tiers.",
+			`${source}: field coverage fell below the recorded baseline — schema likely changed: ${short.join(", ")}. ` +
+				"Refusing to report a comparison that silently skipped these tiers. If upstream legitimately " +
+				"dropped these models, lower the baseline in sources.mts deliberately.",
 		);
 	}
 }
@@ -154,7 +180,7 @@ export function assertLiteLLMSchema(raw: unknown, map: Record<string, ModelSourc
 			if (isUsable(f, r[f])) counts.set(f, (counts.get(f) ?? 0) + 1);
 		}
 	}
-	assertFieldsPresent("LiteLLM", counts);
+	assertFieldsPresent("LiteLLM", counts, LITELLM_FIELD_BASELINE);
 }
 
 /** The same sentinel for models.dev, walked over every provider's models. */
@@ -175,7 +201,7 @@ export function assertModelsDevSchema(raw: unknown, map: Record<string, ModelSou
 			if (isUsable(f, c[f])) counts.set(f, (counts.get(f) ?? 0) + 1);
 		}
 	}
-	assertFieldsPresent("models.dev", counts);
+	assertFieldsPresent("models.dev", counts, MODELS_DEV_FIELD_BASELINE);
 }
 
 /**
