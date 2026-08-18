@@ -1,5 +1,5 @@
 import type { Governor } from "usertrust";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ServerConfig } from "../src/config.js";
 import { hashKey } from "../src/config.js";
 import * as api from "../src/index.js";
@@ -429,6 +429,35 @@ describe("request deadline — a stalled governor answers, it does not hang", ()
 		const body = (await res.json()) as { error: string; shadow?: boolean };
 		expect(body.shadow).toBeUndefined();
 		expect(body.error).toBe("governor_timeout");
+	}, 20_000);
+
+	it("voids an authorization that lands AFTER the deadline gave up on it", async () => {
+		// A deadline abandons the call; it does not cancel it. The ledger hold is real
+		// and its transferId reached nobody, so nothing can ever settle it. AGENTS.md
+		// gives every hold exactly one terminal outcome — abandoning it silently
+		// retires part of the tenant's budget on every timeout.
+		const fake = createFakeGovernor();
+		const slow: Governor = {
+			...fake.governor,
+			authorize: async (params) => {
+				await new Promise((resolve) => setTimeout(resolve, 400));
+				return fake.governor.authorize(params);
+			},
+		};
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 150 }),
+			factory: async () => slow,
+		});
+		const { port } = await server.listen();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", {
+			model: "claude-sonnet-4-6",
+		});
+		expect(res.status).toBe(503);
+		// Nothing settleable was handed back, so nothing is pending server-side...
+		expect(server.pendingCount()).toBe(0);
+		// ...and the hold the ledger did take must be given back.
+		await vi.waitFor(() => expect(fake.calls.aborted).toHaveLength(1), { timeout: 5_000 });
+		expect(fake.calls.aborted[0]).toBe(fake.calls.authorized[0]);
 	}, 20_000);
 
 	it("bounds governor CONSTRUCTION too, not just the call", async () => {

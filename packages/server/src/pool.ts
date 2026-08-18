@@ -51,7 +51,18 @@ export class GovernorPool {
 				// /v1/authorize from ever answering. There is nothing to destroy until it
 				// exists, so give up waiting and let shutdown finish rather than hanging
 				// the process on a ledger that is already unreachable.
-				const governor = await withDeadline("pool.get", p, this.config.requestTimeoutMs);
+				const governor = await withDeadline(
+					"pool.get",
+					p,
+					this.config.requestTimeoutMs,
+					// Construction that lands after shutdown gave up waiting still produced a
+					// live governor holding a TigerBeetle client, and AGENTS.md is explicit
+					// that an undestroyed client is what keeps the event loop from draining —
+					// so abandoning it does not just leak, it can stop the process exiting.
+					(late) => {
+						void late.destroy().catch(() => {});
+					},
+				);
 				await governor.destroy();
 			}),
 		);

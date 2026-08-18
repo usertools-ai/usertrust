@@ -116,8 +116,11 @@ export function createUsertrustServer(opts: {
 	 * governor call can stall, including a cluster that dies AFTER the governor was
 	 * built (which no construction-time deadline can see).
 	 */
-	const withDeadline = <T>(what: string, op: Promise<T>): Promise<T> =>
-		withDeadlineMs(what, op, config.requestTimeoutMs);
+	const withDeadline = <T>(
+		what: string,
+		op: Promise<T>,
+		onAbandoned?: (value: T) => void,
+	): Promise<T> => withDeadlineMs(what, op, config.requestTimeoutMs, onAbandoned);
 
 	async function handleAuthorize(
 		tenant: TenantConfig,
@@ -134,7 +137,29 @@ export function createUsertrustServer(opts: {
 		}
 		const governor = await withDeadline("pool.get", pool.get(tenant));
 		try {
-			const auth = await withDeadline("authorize", governor.authorize(parsed.data));
+			const auth = await withDeadline("authorize", governor.authorize(parsed.data), (late) => {
+				// The deadline abandoned this authorize, but the ledger did not: the hold
+				// exists and its transferId reached nobody, so no client can ever settle or
+				// abort it. AGENTS.md gives every hold exactly one terminal outcome and makes
+				// no exception for "the server stopped waiting" — without this, each timed-out
+				// authorize permanently retires part of the tenant's budget, and a retry loop
+				// against a slow ledger exhausts it while every request reports a timeout.
+				const reason = "authorize abandoned after server deadline";
+				void governor
+					.abort(late, reason)
+					.then(() => {
+						bus.publish(tenant.id, {
+							type: "aborted",
+							transferId: late.transferId,
+							reason,
+							at: new Date().toISOString(),
+						});
+					})
+					.catch(() => {
+						// Best-effort, like the sweeper's abortEntry: the governor's own
+						// destroy()/pending reconciliation voids whatever is left.
+					});
+			});
 			pending.set(auth.transferId, { auth, tenantId: tenant.id, createdAt: Date.now() });
 			bus.publish(tenant.id, {
 				type: "authorized",
