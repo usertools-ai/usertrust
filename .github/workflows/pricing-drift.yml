@@ -86,6 +86,10 @@ jobs:
         if: always() && (steps.selftest.outcome != 'success' || steps.drift.outputs.exit_code != '0')
         env:
           GH_TOKEN: ${{ github.token }}
+          # Without this, a failed checkout leaves no git remote and `gh` cannot
+          # infer the repo — it exits under `set -e` and the could-not-run case
+          # files no issue at all, which is the one case that most needs one.
+          GH_REPO: ${{ github.repository }}
           EXIT_CODE: ${{ steps.drift.outputs.exit_code || 'none' }}
           SELFTEST: ${{ steps.selftest.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -142,6 +146,10 @@ jobs:
         if: steps.selftest.outcome == 'success' && steps.drift.outputs.exit_code == '0'
         env:
           GH_TOKEN: ${{ github.token }}
+          # Without this, a failed checkout leaves no git remote and `gh` cannot
+          # infer the repo — it exits under `set -e` and the could-not-run case
+          # files no issue at all, which is the one case that most needs one.
+          GH_REPO: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail

@@ -28,6 +28,17 @@ import {
 	SourceError,
 } from "./sources.mts";
 
+/** A map covering every fixture row, so the scoped sentinel can see them. */
+const CORPUS_MAP: Record<string, ModelSourceMap> = Object.fromEntries(
+	Array.from({ length: 40 }, (_, i) => [
+		`model-${i}`,
+		{
+			litellm: { key: `model-${i}`, provider: "testvendor" },
+			modelsDev: { provider: "testvendor", id: `model-${i}` },
+		},
+	]),
+);
+
 /** A corpus big enough to clear the occurrence floor, as the real one is. */
 function litellmCorpus(rename?: { from: string; to: string }) {
 	const rows: Record<string, Record<string, unknown>> = {};
@@ -68,7 +79,7 @@ function modelsDevCorpus(rename?: { from: string; to: string }) {
 
 describe("LiteLLM schema sentinel", () => {
 	it("accepts a healthy corpus", () => {
-		assert.doesNotThrow(() => assertLiteLLMSchema(litellmCorpus()));
+		assert.doesNotThrow(() => assertLiteLLMSchema(litellmCorpus(), CORPUS_MAP));
 	});
 
 	it("REFUSES when a required field is renamed", () => {
@@ -76,6 +87,7 @@ describe("LiteLLM schema sentinel", () => {
 			() =>
 				assertLiteLLMSchema(
 					litellmCorpus({ from: "input_cost_per_token", to: "cost_per_input_token" }),
+					CORPUS_MAP,
 				),
 			(e: unknown) => e instanceof SourceError && /input_cost_per_token/.test((e as Error).message),
 		);
@@ -92,6 +104,7 @@ describe("LiteLLM schema sentinel", () => {
 						from: "cache_creation_input_token_cost",
 						to: "cache_write_input_token_cost",
 					}),
+					CORPUS_MAP,
 				),
 			(e: unknown) =>
 				e instanceof SourceError && /cache_creation_input_token_cost/.test((e as Error).message),
@@ -99,24 +112,31 @@ describe("LiteLLM schema sentinel", () => {
 	});
 
 	it("REFUSES a non-object response", () => {
-		assert.throws(() => assertLiteLLMSchema("a bare string"), SourceError);
+		assert.throws(() => assertLiteLLMSchema("a bare string", CORPUS_MAP), SourceError);
 	});
 });
 
 describe("models.dev schema sentinel", () => {
 	it("accepts a healthy corpus", () => {
-		assert.doesNotThrow(() => assertModelsDevSchema(modelsDevCorpus()));
+		assert.doesNotThrow(() => assertModelsDevSchema(modelsDevCorpus(), CORPUS_MAP));
 	});
 
 	it("REFUSES when a cost field is renamed", () => {
 		assert.throws(
-			() => assertModelsDevSchema(modelsDevCorpus({ from: "cache_write", to: "cacheWrite" })),
+			() =>
+				assertModelsDevSchema(
+					modelsDevCorpus({ from: "cache_write", to: "cacheWrite" }),
+					CORPUS_MAP,
+				),
 			(e: unknown) => e instanceof SourceError && /cache_write/.test((e as Error).message),
 		);
 	});
 
 	it("REFUSES when the whole cost object disappears", () => {
-		assert.throws(() => assertModelsDevSchema({ testvendor: { models: { a: {} } } }), SourceError);
+		assert.throws(
+			() => assertModelsDevSchema({ testvendor: { models: { a: {} } } }, CORPUS_MAP),
+			SourceError,
+		);
 	});
 });
 

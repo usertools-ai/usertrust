@@ -20,7 +20,12 @@
 
 import { writeFileSync } from "node:fs";
 import { PRICING_TABLE, PRICING_TABLE_VERSION } from "../../packages/core/src/ledger/pricing.js";
-import { compareTable, orphanDeviations } from "./compare.mts";
+import {
+	compareTable,
+	MIN_CORROBORATED_MODELS,
+	MIN_MAPPINGS,
+	orphanDeviations,
+} from "./compare.mts";
 import { EXPECTED_DEVIATIONS, MODEL_MAP } from "./model-map.mts";
 import { renderReport, renderSummary } from "./report.mts";
 import {
@@ -66,8 +71,8 @@ export async function main(argv: string[]): Promise<number> {
 		// the run would exit 0 with cache comparison silently disabled. That is the
 		// exact failure this tool exists to catch, so it must not be able to happen
 		// TO this tool.
-		assertLiteLLMSchema(litellmRaw);
-		assertModelsDevSchema(modelsDevRaw);
+		assertLiteLLMSchema(litellmRaw, MODEL_MAP);
+		assertModelsDevSchema(modelsDevRaw, MODEL_MAP);
 		sources = {
 			litellm: normalizeLiteLLM(litellmRaw, MODEL_MAP),
 			"models.dev": normalizeModelsDev(modelsDevRaw, MODEL_MAP),
@@ -87,6 +92,14 @@ export async function main(argv: string[]): Promise<number> {
 		map: MODEL_MAP,
 		deviations: EXPECTED_DEVIATIONS,
 		sources,
+		// The absolute floors, applied only to the SHIPPED table and map. The
+		// derived expectation catches a source dropping a model; these catch the
+		// map itself being weakened, which the derived one cannot see because it
+		// is computed from that same map.
+		floors: {
+			minMappings: MIN_MAPPINGS,
+			minCorroboratedModels: MIN_CORROBORATED_MODELS,
+		},
 	});
 	const orphans = orphanDeviations(PRICING_TABLE, EXPECTED_DEVIATIONS);
 

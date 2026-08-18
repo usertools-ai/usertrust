@@ -31,6 +31,22 @@ export type Tier = (typeof TIERS)[number];
 /** Tiers that must be present on both sides for a model to count as corroborated. */
 const REQUIRED_TIERS: readonly Tier[] = ["inputPer1k", "outputPer1k"];
 
+/**
+ * CHECKED-IN COVERAGE FLOORS, deliberately NOT derived from MODEL_MAP.
+ *
+ * The derived expectation catches a source dropping a model. It cannot catch
+ * the map itself being weakened: setting one model's `litellm` to `null`
+ * lowers the actual AND the expected count together, so 35/35 passes and an
+ * independent check is lost with the gate unmoved. A gate computed from the
+ * thing it is guarding is not a gate.
+ *
+ * Both are enforced. Lowering either number is an explicit, reviewable edit —
+ * which is the point: a model legitimately leaving a feed should require
+ * someone to say so.
+ */
+export const MIN_CORROBORATED_MODELS = 19;
+export const MIN_MAPPINGS = 36;
+
 export type Outcome =
 	/** Corroborated and matching on every compared tier. THE ONLY SILENT OUTCOME. */
 	| "agree"
@@ -107,6 +123,8 @@ export interface DriftReport {
 	 */
 	mappings: number;
 	expectedMappings: number;
+	/** `source:model` pairs the map promised that no source answered. */
+	missingMappings: string[];
 	exhaustive: boolean;
 	failed: boolean;
 }
@@ -194,6 +212,12 @@ export interface CompareInput {
 	map: Record<string, ModelSourceMap>;
 	deviations: Record<string, { reason: string }>;
 	sources: Record<string, Record<string, SourceRates | null>>;
+	/**
+	 * Absolute coverage floors. Passed in rather than hardcoded here so this
+	 * function stays drivable from small fixtures; run.mts supplies the shipped
+	 * `MIN_MAPPINGS` / `MIN_CORROBORATED_MODELS`. Default 0 = derived checks only.
+	 */
+	floors?: { minMappings?: number; minCorroboratedModels?: number };
 }
 
 export function compareTable(input: CompareInput): DriftReport {
@@ -302,8 +326,11 @@ export function compareTable(input: CompareInput): DriftReport {
 				continue;
 			}
 
-			// A conflicted tier proposes no value, so nothing beyond the
-			// understatement check above can be concluded from it.
+			// A conflicted tier proposes no value — EXCEPT when our rate sits
+			// outside the range entirely. Above every source it matches none of
+			// them, so the disagreement is definite even though the sources argue
+			// about where the true value is. Only a rate INSIDE the range is
+			// genuinely undecidable.
 			if (up.conflicted) {
 				diffs.push({
 					tier,
@@ -311,7 +338,7 @@ export function compareTable(input: CompareInput): DriftReport {
 					effective,
 					upstream: up.min,
 					upstreamMax: up.max,
-					conflicted: true,
+					conflicted: raw <= up.max,
 				});
 				continue;
 			}
@@ -432,11 +459,31 @@ export function compareTable(input: CompareInput): DriftReport {
 		.reduce((n, [, e]) => n + (e.litellm !== null ? 1 : 0) + (e.modelsDev !== null ? 1 : 0), 0);
 	const mappings = findings.reduce((n, f) => n + f.sources.length, 0);
 
+	// Which (source, model) pairs the map promised and did not get — named, not
+	// merely counted, so the issue says WHICH check disappeared.
+	const missingMappings: string[] = [];
+	for (const [model, entry] of Object.entries(map)) {
+		if (!(model in table)) continue;
+		const answered = new Set(
+			Object.entries(sources)
+				.filter(([, norm]) => norm[model])
+				.map(([name]) => name),
+		);
+		if (entry.litellm !== null && !answered.has("litellm"))
+			missingMappings.push(`litellm:${model}`);
+		if (entry.modelsDev !== null && !answered.has("models.dev")) {
+			missingMappings.push(`models.dev:${model}`);
+		}
+	}
+	missingMappings.sort();
+
 	const exhaustive = assertExhaustive(counts, Object.keys(table).length);
 	const failed =
 		findings.some((f) => isFailing(f.outcome)) ||
 		mappings < expectedMappings ||
 		corroborated < expectedCorroborated ||
+		mappings < (input.floors?.minMappings ?? 0) ||
+		corroborated < (input.floors?.minCorroboratedModels ?? 0) ||
 		!exhaustive;
 
 	return {
@@ -446,6 +493,7 @@ export function compareTable(input: CompareInput): DriftReport {
 		expectedCorroborated,
 		mappings,
 		expectedMappings,
+		missingMappings,
 		exhaustive,
 		failed,
 	};

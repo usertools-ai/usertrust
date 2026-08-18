@@ -564,3 +564,67 @@ describe("conflict reporting does not overclaim", () => {
 		assert.equal(d?.upstreamMax, 5);
 	});
 });
+
+// ── regressions from the fourth review ────────────────────────────────────
+
+describe("a rate above EVERY source is definite drift", () => {
+	it("FAILS when ours exceeds both conflicting sources", () => {
+		// Sources at 50 and 70, ours at 100. They disagree about where the truth
+		// is, but none of them supports 100 — the mismatch is definite even though
+		// the sources argue.
+		const r = run(
+			{ "test-model": { inputPer1k: 100, outputPer1k: 250 } },
+			{
+				litellm: litellmRaw({ input_cost_per_token: 5e-6 }),
+				modelsDev: modelsDevRaw({ input: 7, output: 25 }),
+			},
+		);
+		assert.equal(r.counts.disagree, 1);
+		assert.equal(r.counts["source-conflict"], 0);
+		assert.equal(r.failed, true);
+	});
+
+	it("still treats a rate INSIDE the range as undecidable", () => {
+		const r = run(
+			{ "test-model": { inputPer1k: 60, outputPer1k: 250 } },
+			{
+				litellm: litellmRaw({ input_cost_per_token: 5e-6 }),
+				modelsDev: modelsDevRaw({ input: 7, output: 25 }),
+			},
+		);
+		assert.equal(r.counts["source-conflict"], 1);
+		assert.equal(r.failed, false);
+	});
+});
+
+describe("absolute coverage floors", () => {
+	it("FAILS when the map itself is weakened, which the derived count cannot see", () => {
+		// Dropping a source from the map lowers actual AND expected together, so
+		// the derived check passes. Only a checked-in floor notices.
+		const weakened: Record<string, ModelSourceMap> = {
+			"test-model": { litellm: null, modelsDev: { provider: "testvendor", id: "test-model" } },
+		};
+		const r = compareTable({
+			table: { "test-model": MATCHING },
+			map: weakened,
+			deviations: {},
+			sources: {
+				litellm: normalizeLiteLLM(litellmRaw(), weakened),
+				"models.dev": normalizeModelsDev(modelsDevRaw(), weakened),
+			},
+			floors: { minMappings: 2, minCorroboratedModels: 1 },
+		});
+		assert.equal(r.mappings, r.expectedMappings, "derived check is satisfied");
+		assert.equal(r.failed, true, "the absolute floor must still fail it");
+	});
+});
+
+describe("missing mappings are NAMED, not just counted", () => {
+	it("identifies which source stopped answering for which model", () => {
+		const r = run(
+			{ "test-model": MATCHING },
+			{ litellm: { "renamed-away": { litellm_provider: "testvendor" } } },
+		);
+		assert.deepEqual(r.missingMappings, ["litellm:test-model"]);
+	});
+});

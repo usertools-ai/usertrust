@@ -84,14 +84,19 @@ export const LITELLM_FIELDS = [
 export const MODELS_DEV_FIELDS = ["input", "output", "cache_read", "cache_write"] as const;
 
 /**
- * How many rows must carry a field before we believe it still exists.
+ * How many MAPPED rows must carry a field before we believe it still exists.
  *
- * >1 deliberately: a single surviving legacy row would let a rename pass a
- * "appears at least once" check. Both corpora carry thousands of entries, so
- * any live field appears in the hundreds; 5 is far below the real floor and far
- * above the noise.
+ * Counted over mapped vendor rows only, never the whole corpus. A corpus-wide
+ * count is satisfied by rows this tool never reads: a mapped provider could
+ * rename a cache field while a handful of unrelated or reseller rows kept the
+ * old name, and the sentinel would pass while every mapped row normalized that
+ * tier to `undefined` — full coverage, exit 0, stale cache pricing.
+ *
+ * >1 deliberately, so one surviving legacy row cannot clear the bar. Today 17
+ * mapped LiteLLM rows carry input/output/cache-read and 8 carry cache-write,
+ * so 3 sits well below the real floor and far above zero.
  */
-const SCHEMA_MIN_OCCURRENCES = 5;
+const SCHEMA_MIN_OCCURRENCES = 3;
 
 /**
  * Is this field carrying a value the normalizer could actually use?
@@ -125,14 +130,20 @@ function assertFieldsPresent(source: string, counts: Map<string, number>): void 
  * are pure transforms and are driven from small fixtures, which by construction
  * cannot satisfy an occurrence floor meant for a 3,000-row corpus.
  */
-export function assertLiteLLMSchema(raw: unknown): void {
+export function assertLiteLLMSchema(raw: unknown, map: Record<string, ModelSourceMap>): void {
 	if (typeof raw !== "object" || raw === null) {
 		throw new SourceError("LiteLLM: response is not an object");
 	}
+	const table = raw as Record<string, unknown>;
 	const counts = new Map(LITELLM_FIELDS.map((f) => [f, 0]));
-	for (const row of Object.values(raw as Record<string, unknown>)) {
+	for (const entry of Object.values(map)) {
+		if (entry.litellm === null) continue;
+		const row = table[entry.litellm.key];
 		if (typeof row !== "object" || row === null) continue;
 		const r = row as Record<string, unknown>;
+		// Only rows this tool actually reads, at the vendor it actually reads them
+		// from. A reseller row keeping an old field name proves nothing.
+		if (r.litellm_provider !== entry.litellm.provider) continue;
 		for (const f of LITELLM_FIELDS) {
 			// USABLE values, not merely present keys. An upstream that keeps a
 			// deprecated key around holding `null` (or a string) while the numeric
@@ -147,21 +158,21 @@ export function assertLiteLLMSchema(raw: unknown): void {
 }
 
 /** The same sentinel for models.dev, walked over every provider's models. */
-export function assertModelsDevSchema(raw: unknown): void {
+export function assertModelsDevSchema(raw: unknown, map: Record<string, ModelSourceMap>): void {
 	if (typeof raw !== "object" || raw === null) {
 		throw new SourceError("models.dev: response is not an object");
 	}
+	const providers = raw as Record<string, { models?: Record<string, unknown> } | undefined>;
 	const counts = new Map(MODELS_DEV_FIELDS.map((f) => [f, 0]));
-	for (const provider of Object.values(raw as Record<string, unknown>)) {
-		const models = (provider as { models?: unknown } | null)?.models;
-		if (typeof models !== "object" || models === null) continue;
-		for (const model of Object.values(models as Record<string, unknown>)) {
-			const cost = (model as { cost?: unknown } | null)?.cost;
-			if (typeof cost !== "object" || cost === null) continue;
-			const c = cost as Record<string, unknown>;
-			for (const f of MODELS_DEV_FIELDS) {
-				if (isUsable(f, c[f])) counts.set(f, (counts.get(f) ?? 0) + 1);
-			}
+	for (const entry of Object.values(map)) {
+		if (entry.modelsDev === null) continue;
+		// Vendor-pinned by construction: the provider is indexed, never scanned.
+		const model = providers[entry.modelsDev.provider]?.models?.[entry.modelsDev.id];
+		const cost = (model as { cost?: unknown } | null)?.cost;
+		if (typeof cost !== "object" || cost === null) continue;
+		const c = cost as Record<string, unknown>;
+		for (const f of MODELS_DEV_FIELDS) {
+			if (isUsable(f, c[f])) counts.set(f, (counts.get(f) ?? 0) + 1);
 		}
 	}
 	assertFieldsPresent("models.dev", counts);

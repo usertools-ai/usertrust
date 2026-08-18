@@ -102,6 +102,15 @@ export function renderReport(report: DriftReport, ctx: ReportContext): string {
 		"",
 	];
 
+	if (report.missingMappings.length > 0) {
+		out.push(
+			`> ❌ **Mappings that did not answer:** \`${report.missingMappings.join("`, `")}\` — ` +
+				"the map names these sources for these models and they returned nothing. Counting alone " +
+				"would not say WHICH independent check disappeared.",
+			"",
+		);
+	}
+
 	if (report.mappings < report.expectedMappings || corroborated < expectedCorroborated) {
 		out.push(
 			"> ❌ **Coverage floor breached.** Fewer models were answered than the map expects. " +
