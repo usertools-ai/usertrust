@@ -382,9 +382,107 @@ export interface AnchorVerifyParams {
 	readonly nowMs?: number | undefined;
 }
 
+/**
+ * Whether the transparency-log witness leg can be shown to have run.
+ *
+ * This exists because its ABSENCE was invisible. `verifySuppliedRekorReceipts`
+ * returns null when no receipts are supplied, so a vault that has never been
+ * witnessed verified BYTE-IDENTICALLY to one that had, and reported
+ * ANCHORED_VERIFIED while doing it. A verifier that cannot report the absence of
+ * its own strongest evidence is one investigation away from the same failure —
+ * and this repo's Rekor sink was structurally non-functional for six months
+ * without a single verdict noticing.
+ *
+ * REACHABILITY IN THIS INCREMENT, stated rather than implied: only
+ * WITNESS_VERIFIED, WITNESS_UNKNOWN and WITNESS_INVALID can currently be
+ * produced. WITNESS_ABSENT, WITNESS_UNPROVEN and WITNESS_PARTIAL all require
+ * knowing whether an anchor was SUPPOSED to be witnessed, which needs the
+ * emission-time sink declaration that is not built yet. They are declared here
+ * because they are the spec's lattice and adding them later is not a type
+ * change — but do not read them as implemented.
+ */
+export type WitnessLogState =
+	| "WITNESS_VERIFIED"
+	| "WITNESS_PARTIAL"
+	| "WITNESS_UNPROVEN"
+	| "WITNESS_ABSENT"
+	| "WITNESS_UNKNOWN"
+	| "WITNESS_INVALID";
+
+export interface WitnessLogReport {
+	state: WitnessLogState;
+	/** Every anchor in the vault is counted; none may be skipped (see foldWitnessLog). */
+	anchors: number;
+	covered: number;
+	unknown: number;
+	invalid: number;
+	reasons: string[];
+}
+
+/**
+ * Fold per-anchor outcomes into one state, worst-wins.
+ *
+ * THE FOLD IS OVER ANCHORS, NOT OVER RECEIPTS. Folding over receipts would let
+ * an anchor with no receipt contribute nothing and vanish, so nine covered
+ * anchors beside one unwitnessed one would read as fully verified — the
+ * vacuous-truth failure this whole surface exists to prevent. Every anchor
+ * contributes exactly one outcome, and WITNESS_VERIFIED requires all of them to
+ * be covered.
+ *
+ * Severity order (worst first): invalid > unknown > covered.
+ */
+export function foldWitnessLog(
+	anchorSeqs: readonly number[],
+	rekor: RekorReport | null,
+): WitnessLogReport {
+	const covered = new Set(rekor?.coveredAnchorSeqs ?? []);
+	const invalid = new Set(rekor?.invalidAnchorSeqs ?? []);
+	const reasons: string[] = [];
+	let nCovered = 0;
+	let nUnknown = 0;
+	let nInvalid = 0;
+	for (const seq of anchorSeqs) {
+		if (invalid.has(seq)) nInvalid++;
+		else if (covered.has(seq)) nCovered++;
+		else nUnknown++;
+	}
+	// An empty fold must never read as success: a chain with no anchors has no
+	// witness claim to make, and reporting VERIFIED over zero anchors is the
+	// vacuous truth again, one level up.
+	let state: WitnessLogState;
+	if (anchorSeqs.length === 0) {
+		state = "WITNESS_UNKNOWN";
+		reasons.push("witness-no-anchors");
+	} else if (nInvalid > 0) {
+		state = "WITNESS_INVALID";
+		reasons.push("witness-receipt-invalid");
+	} else if (nUnknown > 0) {
+		state = "WITNESS_UNKNOWN";
+		// No emission-time declaration exists yet, so "no receipt" cannot be
+		// distinguished from an anchor that was never meant to be witnessed at
+		// all. Both are UNKNOWN
+		// rather than one of them being quietly treated as fine.
+		reasons.push("witness-undeclared");
+	} else {
+		state = "WITNESS_VERIFIED";
+	}
+	return {
+		state,
+		anchors: anchorSeqs.length,
+		covered: nCovered,
+		unknown: nUnknown,
+		invalid: nInvalid,
+		reasons,
+	};
+}
+
 export interface RekorReport {
 	receiptsVerified: number;
 	receiptsFailed: number;
+	/** anchorSeqs with at least one receipt that VERIFIED. */
+	coveredAnchorSeqs: number[];
+	/** anchorSeqs with at least one receipt that FAILED. */
+	invalidAnchorSeqs: number[];
 	/** Max attested time among verified receipts of the NEWEST anchor (ms). */
 	latestAttestedTimeMs: number | null;
 	errors: string[];
@@ -406,6 +504,12 @@ export interface AnchoringReport {
 	warnings: string[];
 	/** Present only when transparency-log receipts were supplied. */
 	rekor?: RekorReport;
+	/**
+	 * ALWAYS present, deliberately — unlike `rekor?` above. An absent field is
+	 * how "never witnessed" stayed invisible; a state that must be rendered is
+	 * how it stops being.
+	 */
+	witnessLog: WitnessLogReport;
 }
 
 export interface AnchoredVaultVerificationResult extends VaultVerificationResult {
@@ -473,6 +577,8 @@ function verifySuppliedRekorReceipts(
 	const latestSeq = [...merged].sort((a, b) => b.treeSize - a.treeSize)[0]?.anchorSeq ?? null;
 
 	const errors: string[] = [];
+	const coveredSeqs = new Set<number>();
+	const invalidSeqs = new Set<number>();
 	let receiptsVerified = 0;
 	let receiptsFailed = 0;
 	let latestAttestedTimeMs: number | null = null;
@@ -512,10 +618,12 @@ function verifySuppliedRekorReceipts(
 			}
 			if (verified === null) {
 				receiptsFailed++;
+				invalidSeqs.add(receipt.anchorSeq);
 				errors.push(...firstErrors);
 				continue;
 			}
 			receiptsVerified++;
+			coveredSeqs.add(receipt.anchorSeq);
 			if (receipt.anchorSeq === latestSeq && verified.attestedTimeMs !== null) {
 				latestAttestedTimeMs =
 					latestAttestedTimeMs === null
@@ -524,7 +632,16 @@ function verifySuppliedRekorReceipts(
 			}
 		}
 	}
-	return { receiptsVerified, receiptsFailed, latestAttestedTimeMs, errors };
+	return {
+		receiptsVerified,
+		receiptsFailed,
+		coveredAnchorSeqs: [...coveredSeqs]
+			.filter((seq) => !invalidSeqs.has(seq))
+			.sort((a, b) => a - b),
+		invalidAnchorSeqs: [...invalidSeqs].sort((a, b) => a - b),
+		latestAttestedTimeMs,
+		errors,
+	};
 }
 
 /**
@@ -583,6 +700,12 @@ export function verifyVaultWithAnchors(
 			? worseAnchorState(evaluation.anchorState, "ANCHOR_INVALID")
 			: evaluation.anchorState,
 		anchoring: {
+			witnessLog: foldWitnessLog(
+				[...new Set([...externalRecords, ...mirror.records].map((r) => r.anchorSeq))].sort(
+					(a, b) => a - b,
+				),
+				rekor,
+			),
 			anchorSource: evaluation.anchorSource,
 			anchorCount: evaluation.anchorCount,
 			latestAnchor: evaluation.latestAnchor,
@@ -606,9 +729,9 @@ export function exitCodeForAnchored(
 	result: {
 		valid: boolean;
 		anchorState: AnchorState;
-		anchoring: { anchorSource: AnchorSource };
+		anchoring: { anchorSource: AnchorSource; witnessLog?: WitnessLogReport };
 	},
-	opts?: { requireAnchor?: boolean; requireExternalAnchor?: boolean },
+	opts?: { requireAnchor?: boolean; requireExternalAnchor?: boolean; requireWitness?: boolean },
 ): number {
 	if (!result.valid) return 1;
 	if (
@@ -623,6 +746,10 @@ export function exitCodeForAnchored(
 		opts?.requireExternalAnchor === true &&
 		(result.anchorState !== "ANCHORED_VERIFIED" || result.anchoring.anchorSource !== "external")
 	) {
+		return 1;
+	}
+	// Opt-in, like the two above: default exit codes are unchanged.
+	if (opts?.requireWitness === true && result.anchoring.witnessLog?.state !== "WITNESS_VERIFIED") {
 		return 1;
 	}
 	return 0;
