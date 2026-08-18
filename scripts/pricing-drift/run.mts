@@ -24,6 +24,8 @@ import { compareTable, orphanDeviations } from "./compare.mts";
 import { EXPECTED_DEVIATIONS, MODEL_MAP } from "./model-map.mts";
 import { renderReport, renderSummary } from "./report.mts";
 import {
+	assertLiteLLMSchema,
+	assertModelsDevSchema,
 	fetchJson,
 	LITELLM_URL,
 	MODELS_DEV_URL,
@@ -58,6 +60,14 @@ export async function main(argv: string[]): Promise<number> {
 
 	let sources: Record<string, Record<string, ReturnType<typeof normalizeLiteLLM>[string]>>;
 	try {
+		// Schema sentinels FIRST. A renamed optional field (say
+		// `cache_creation_input_token_cost`) would otherwise leave input/output
+		// resolving normally — every row still answered, coverage still full — and
+		// the run would exit 0 with cache comparison silently disabled. That is the
+		// exact failure this tool exists to catch, so it must not be able to happen
+		// TO this tool.
+		assertLiteLLMSchema(litellmRaw);
+		assertModelsDevSchema(modelsDevRaw);
 		sources = {
 			litellm: normalizeLiteLLM(litellmRaw, MODEL_MAP),
 			"models.dev": normalizeModelsDev(modelsDevRaw, MODEL_MAP),

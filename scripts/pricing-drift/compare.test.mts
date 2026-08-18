@@ -17,13 +17,7 @@ import type { ModelRates } from "../../packages/core/src/ledger/pricing.js";
 import { PRICING_TABLE } from "../../packages/core/src/ledger/pricing.js";
 import { compareTable, orphanDeviations } from "./compare.mts";
 import type { ModelSourceMap } from "./model-map.mts";
-import {
-	LITELLM_FIELDS,
-	MODELS_DEV_FIELDS,
-	normalizeLiteLLM,
-	normalizeModelsDev,
-	usertokensPer1kFromUsdPerMTok,
-} from "./sources.mts";
+import { normalizeLiteLLM, normalizeModelsDev, usertokensPer1kFromUsdPerMTok } from "./sources.mts";
 
 // ── fixtures ──────────────────────────────────────────────────────────────
 
@@ -83,7 +77,9 @@ describe("positive control", () => {
 		assert.equal(r.failed, true);
 		const f = r.findings[0];
 		assert.equal(f?.outcome, "understated");
-		assert.deepEqual(f?.diffs, [{ tier: "inputPer1k", ours: 5, upstream: 50 }]);
+		assert.deepEqual(f?.diffs, [
+			{ tier: "inputPer1k", ours: 5, effective: 5, upstream: 50, conflicted: false },
+		]);
 	});
 
 	it("negative control: the same harness PASSES a matching table", () => {
@@ -302,26 +298,13 @@ describe("unit conversion", () => {
 	});
 });
 
-// ── schema pin (spec §7 case 6) ───────────────────────────────────────────
-
-describe("upstream schema", () => {
-	it("names the LiteLLM fields it depends on, so a rename fails by name", () => {
-		assert.deepEqual(
-			[...LITELLM_FIELDS],
-			[
-				"litellm_provider",
-				"input_cost_per_token",
-				"output_cost_per_token",
-				"cache_read_input_token_cost",
-				"cache_creation_input_token_cost",
-			],
-		);
-	});
-
-	it("names the models.dev fields it depends on", () => {
-		assert.deepEqual([...MODELS_DEV_FIELDS], ["input", "output", "cache_read", "cache_write"]);
-	});
-});
+// ── schema pin ────────────────────────────────────────────────────────────
+//
+// The real pin lives in sources.test.mts, which drives assertLiteLLMSchema /
+// assertModelsDevSchema against realistic corpora with fields renamed. The
+// test that used to live here asserted LITELLM_FIELDS against a hardcoded copy
+// of itself — a constant compared to itself proves nothing about upstream, and
+// it read as coverage while providing none.
 
 // ── the real map against the real table ───────────────────────────────────
 
@@ -343,5 +326,110 @@ describe("shipped map vs shipped table", () => {
 	it("carries no allowlist entry for a model outside the table", async () => {
 		const { EXPECTED_DEVIATIONS } = await import("./model-map.mts");
 		assert.deepEqual(orphanDeviations(PRICING_TABLE, EXPECTED_DEVIATIONS), []);
+	});
+});
+
+// ── regressions from the first review ─────────────────────────────────────
+//
+// Four P1s and a P2, and three of the P1s were the same underlying mistake:
+// electing ONE source as "the" consensus instead of resolving each tier across
+// all of them. These tests exist so that mistake cannot come back.
+
+describe("understatement cannot hide behind an omitted tier", () => {
+	it("FAILS when an omitted cache-WRITE tier meters below upstream", () => {
+		// The assumption this kills: "omitted tier => D1 fallback => conservative
+		// overstatement". True for a cache-READ discount (~0.1x input); FALSE for
+		// a cache-WRITE premium (1.25x input), where falling back to inputPer1k
+		// understates by 20%. Judged on the effective rate, never on presence.
+		const r = run(
+			{ "test-model": MATCHING }, // omits cacheWritePer1k -> meters at 50
+			{
+				litellm: litellmRaw({ cache_creation_input_token_cost: 6.25e-6 }), // 62.5
+				modelsDev: modelsDevRaw({ input: 5, output: 25, cache_write: 6.25 }),
+			},
+		);
+		assert.equal(r.counts.understated, 1, "a cache-write premium we omit is understatement");
+		assert.equal(r.failed, true);
+		assert.equal(r.findings[0]?.cacheGaps.length, 0, "not a benign gap");
+	});
+
+	it("still reports a genuinely conservative omitted tier as a gap", () => {
+		const r = run(
+			{ "test-model": MATCHING },
+			{
+				litellm: litellmRaw({ cache_read_input_token_cost: 5e-7 }), // 5 < 50
+				modelsDev: modelsDevRaw({ input: 5, output: 25, cache_read: 0.5 }),
+			},
+		);
+		assert.equal(r.counts.agree, 1);
+		assert.deepEqual(r.findings[0]?.cacheGaps, ["cacheReadPer1k"]);
+	});
+});
+
+describe("understatement survives cross-source conflict", () => {
+	it("FAILS when ours is below BOTH conflicting sources", () => {
+		// ours 50; sources 60 and 70. They disagree, but we are low on either
+		// reading, so "we cannot say which is right" is no defence.
+		const r = run(
+			{ "test-model": { inputPer1k: 50, outputPer1k: 250 } },
+			{
+				litellm: litellmRaw({ input_cost_per_token: 6e-6 }),
+				modelsDev: modelsDevRaw({ input: 7, output: 25 }),
+			},
+		);
+		assert.equal(r.counts.understated, 1);
+		assert.equal(r.counts["source-conflict"], 0);
+		assert.equal(r.failed, true);
+	});
+
+	it("FAILS an understated tier even when a DIFFERENT tier conflicts", () => {
+		const r = run(
+			{ "test-model": { inputPer1k: 10, outputPer1k: 250 } }, // input low on both
+			{
+				litellm: litellmRaw({ output_cost_per_token: 3e-5 }), // output conflicts
+				modelsDev: modelsDevRaw({ input: 5, output: 25 }),
+			},
+		);
+		assert.equal(r.counts.understated, 1);
+		assert.equal(r.failed, true);
+	});
+
+	it("reports conflict (without failing) when ours is not below any source", () => {
+		const r = run(
+			{ "test-model": MATCHING },
+			{ modelsDev: modelsDevRaw({ input: 2.5, output: 12.5 }) },
+		);
+		assert.equal(r.counts["source-conflict"], 1);
+		assert.equal(r.failed, false);
+	});
+});
+
+describe("tiers merge across every source", () => {
+	it("does not discard a tier only ONE source publishes", () => {
+		// LiteLLM omits cache-write, models.dev publishes it. Electing LiteLLM as
+		// the consensus would drop that value entirely — no diff, no gap.
+		const r = run(
+			{ "test-model": { ...MATCHING, cacheWritePer1k: 999 } },
+			{
+				litellm: litellmRaw(),
+				modelsDev: modelsDevRaw({ input: 5, output: 25, cache_write: 6.25 }),
+			},
+		);
+		const tiers = r.findings[0]?.diffs.map((d) => d.tier) ?? [];
+		assert.ok(tiers.includes("cacheWritePer1k"), "single-source tier must still be compared");
+	});
+
+	it("gives the SAME verdict whichever source is listed first", () => {
+		const table = { "test-model": { ...MATCHING, cacheWritePer1k: 1 } };
+		const litellm = normalizeLiteLLM(litellmRaw(), MAP);
+		const modelsDev = normalizeModelsDev(
+			modelsDevRaw({ input: 5, output: 25, cache_write: 6.25 }),
+			MAP,
+		);
+		const a = compareTable({ table, map: MAP, deviations: {}, sources: { litellm, modelsDev } });
+		const b = compareTable({ table, map: MAP, deviations: {}, sources: { modelsDev, litellm } });
+		assert.equal(a.counts.understated, b.counts.understated);
+		assert.equal(a.failed, b.failed);
+		assert.equal(a.failed, true, "1 < 62.5 is understatement either way");
 	});
 });

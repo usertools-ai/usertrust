@@ -10,7 +10,7 @@
  */
 
 import type { DriftReport, ModelFinding, Outcome } from "./compare.mts";
-import { isFailing } from "./compare.mts";
+import { cacheGapFindings, isFailing } from "./compare.mts";
 
 const HEADINGS: Record<Exclude<Outcome, "agree">, string> = {
 	understated: "Understated — our rate is BELOW upstream (never allowlistable)",
@@ -123,6 +123,26 @@ export function renderReport(report: DriftReport, ctx: ReportContext): string {
 	}
 
 	for (const outcome of SECTION_ORDER) out.push(renderSection(outcome, report.findings));
+
+	// Cache gaps are rendered from ALL findings, not from SECTION_ORDER. They
+	// attach to `agree` models too, and `agree` has no section — so a model whose
+	// input/output match while our cache field is omitted would otherwise produce
+	// no row at all, silently contradicting "every gap is reported".
+	const gaps = cacheGapFindings(report);
+	if (gaps.length > 0) {
+		out.push(
+			`### ℹ️ Cache tiers upstream publishes that our table omits (${gaps.length})`,
+			"",
+			"These meter at `inputPer1k` through the D1 fallback, at or above the upstream rate — " +
+				"overstatement, not a defect. A gap that metered BELOW upstream would appear under " +
+				"*Understated* instead.",
+			"",
+			...gaps.map(
+				(f) => `- **\`${f.model}\`** — \`${f.cacheGaps.join("`, `")}\` _(${f.sources.join(", ")})_`,
+			),
+			"",
+		);
+	}
 
 	out.push(
 		"---",

@@ -3,13 +3,20 @@
  *
  * THE POSTURE: every model in PRICING_TABLE is assigned EXACTLY ONE outcome,
  * the outcome counts must sum to the table size, and **only `agree` is
- * silent**. Every other outcome
- * reports by construction. Enumerating the cases that deserve a mention is the
- * wrong default — it fails toward silence, which is the failure mode this whole
- * tool exists to prevent.
+ * silent**. Every other outcome reports by construction. Enumerating the cases
+ * that deserve a mention is the wrong default — it fails toward silence, which
+ * is the failure mode this whole tool exists to prevent.
  *
- * The exhaustiveness is mechanical (`assertExhaustive` below), not a
- * hand-maintained list that drifts from the union.
+ * COMPARISON IS PER-TIER AND SPANS EVERY SOURCE. Each of the four tiers is
+ * resolved independently across all answering sources, because the alternative
+ * — electing one source as "the" consensus — discards tiers the other source
+ * publishes and makes the verdict depend on source ORDER. Three of the four P1
+ * findings in this file's first review were variations on that one mistake.
+ *
+ * UNDERSTATEMENT IS PROVEN AGAINST THE MINIMUM upstream value, and it is
+ * checked BEFORE conflict, BEFORE the allowlist, and on tiers our table omits.
+ * If our metered rate is below EVERY value any source publishes, disagreement
+ * among those sources does not rescue it: it is low on all readings.
  */
 
 import type { ModelRates } from "../../packages/core/src/ledger/pricing.js";
@@ -20,8 +27,8 @@ import type { SourceRates } from "./sources.mts";
 export const TIERS = ["inputPer1k", "outputPer1k", "cacheReadPer1k", "cacheWritePer1k"] as const;
 export type Tier = (typeof TIERS)[number];
 
-/** Tiers that MUST be present on both sides for a model to count as corroborated. */
-const REQUIRED_TIERS: Tier[] = ["inputPer1k", "outputPer1k"];
+/** Tiers that must be present on both sides for a model to count as corroborated. */
+const REQUIRED_TIERS: readonly Tier[] = ["inputPer1k", "outputPer1k"];
 
 export type Outcome =
 	/** Corroborated and matching on every compared tier. THE ONLY SILENT OUTCOME. */
@@ -30,7 +37,7 @@ export type Outcome =
 	| "deviation-expected"
 	/** Allowlisted, but the model now agrees — the exemption outlived its reason. FAILS. */
 	| "deviation-stale"
-	/** Ours is BELOW a consensus upstream rate. Never allowlistable. FAILS. */
+	/** Ours meters below EVERY upstream value on some tier. Never allowlistable. FAILS. */
 	| "understated"
 	/** Ours differs upward with no allowlist entry. FAILS. */
 	| "disagree"
@@ -55,37 +62,43 @@ export function isFailing(outcome: Outcome): boolean {
 
 export interface TierDiff {
 	tier: Tier;
-	/** `null` when our table omits this tier (priced at inputPer1k via D1). */
+	/** `null` when our table omits this tier outright. */
 	ours: number | null;
+	/**
+	 * What our table actually METERS this tier at: `ours` when the field is
+	 * present, `inputPer1k` when it is omitted (the D1 fallback).
+	 */
+	effective: number;
+	/** Lowest value any source publishes for this tier. */
 	upstream: number;
+	/** True when the sources disagree with each other on this tier. */
+	conflicted: boolean;
 }
 
 export interface ModelFinding {
 	model: string;
 	outcome: Outcome;
-	/** Per-tier mismatches, for the report. */
 	diffs: TierDiff[];
-	/** Tiers upstream publishes that our table omits (we price them at inputPer1k). */
+	/**
+	 * Tiers upstream publishes that our table omits AND that meter at or above
+	 * upstream through the `inputPer1k` fallback — genuine conservative
+	 * overstatement. A gap that meters BELOW upstream is understatement; it
+	 * lands in `diffs` under outcome `understated` instead.
+	 */
 	cacheGaps: Tier[];
-	/** Which sources answered for this model. */
 	sources: string[];
-	/** Map note (why there is no source) or deviation reason. */
 	note?: string;
 }
 
 export interface DriftReport {
 	findings: ModelFinding[];
 	counts: Record<Outcome, number>;
-	/** Models with at least one answering source. */
 	corroborated: number;
-	/** Models the MAP claims should be corroborated — the coverage floor. */
 	expectedCorroborated: number;
-	/** True when every model was assigned an outcome and the counts sum correctly. */
 	exhaustive: boolean;
 	failed: boolean;
 }
 
-/** Compile-time + runtime proof that the Outcome union is fully handled. */
 function assertExhaustive(counts: Record<Outcome, number>, total: number): boolean {
 	return Object.values(counts).reduce((a, b) => a + b, 0) === total;
 }
@@ -106,33 +119,48 @@ function emptyCounts(): Record<Outcome, number> {
 /**
  * Read one tier off our table WITHOUT resolving it through `effectiveCacheRate`.
  *
- * This is deliberate and load-bearing (spec §5.1). `pricing.ts` omits a cache
- * field wherever the provider publishes no rate, and `costFromRates` then
- * prices those tokens at `inputPer1k` — conservative overstatement by design.
- * Resolving our side before comparing would make an omitted tier compare as
- * `inputPer1k` against upstream's real discount and read as a disagreement,
- * inverting the row's meaning. Compare raw fields; interpret absence explicitly.
+ * Deliberate. `pricing.ts` omits a cache field wherever the provider publishes
+ * no rate; resolving our side before comparing would make an omitted tier
+ * compare as `inputPer1k` against upstream's real discount and read as a
+ * disagreement. Absence is interpreted explicitly instead — see `effectiveRate`
+ * for the one question that genuinely needs the D1 resolution.
  */
-function ourTier(rates: ModelRates, tier: Tier): number | undefined {
+function rawTier(rates: ModelRates, tier: Tier): number | undefined {
 	const v = rates[tier];
 	return typeof v === "number" && Number.isFinite(v) ? v : undefined;
 }
 
-/** Do two sources agree on every tier they both publish? */
-function sourcesAgree(a: SourceRates, b: SourceRates): boolean {
-	return TIERS.every((t) => {
-		const x = a[t];
-		const y = b[t];
-		if (x === undefined || y === undefined) return true;
-		return x === y;
-	});
+/**
+ * What our table actually METERS a tier at — the D1 resolution.
+ *
+ * An omitted cache tier is priced at `inputPer1k` by `costFromRates`. That is
+ * conservative for a cache-READ discount (~0.1x input) but NOT for a
+ * cache-WRITE premium (1.25x input), where falling back to `inputPer1k`
+ * UNDERSTATES by 20%. Understatement therefore has to be judged on the
+ * effective rate, never on field presence.
+ */
+function effectiveRate(rates: ModelRates, tier: Tier): number {
+	return rawTier(rates, tier) ?? rates.inputPer1k;
+}
+
+/** One tier resolved across every answering source. */
+interface TierConsensus {
+	min: number;
+	conflicted: boolean;
+}
+
+function resolveTier(answered: { rates: SourceRates }[], tier: Tier): TierConsensus | null {
+	const values = answered
+		.map((a) => a.rates[tier])
+		.filter((v): v is number => v !== undefined && Number.isFinite(v));
+	if (values.length === 0) return null;
+	return { min: Math.min(...values), conflicted: new Set(values).size > 1 };
 }
 
 export interface CompareInput {
 	table: Record<string, ModelRates>;
 	map: Record<string, ModelSourceMap>;
 	deviations: Record<string, { reason: string }>;
-	/** Normalized, vendor-pinned source outputs, keyed by source name. */
 	sources: Record<string, Record<string, SourceRates | null>>;
 }
 
@@ -159,7 +187,6 @@ export function compareTable(input: CompareInput): DriftReport {
 			continue;
 		}
 
-		// Collect the sources that actually answered for this model.
 		const answered: { name: string; rates: SourceRates }[] = [];
 		for (const [name, normalized] of Object.entries(sources)) {
 			const r = normalized[model];
@@ -180,63 +207,55 @@ export function compareTable(input: CompareInput): DriftReport {
 			continue;
 		}
 
-		// Sources that contradict EACH OTHER: report, propose nothing. We cannot
-		// say which is right, so failing here would be a permanently-red row.
-		const conflict = answered.some(
-			(a, i) => i > 0 && !sourcesAgree(a.rates, (answered[0] as { rates: SourceRates }).rates),
-		);
-		if (conflict) {
-			const diffs: TierDiff[] = [];
-			for (const t of TIERS) {
-				const vals = answered.map((a) => a.rates[t]).filter((v): v is number => v !== undefined);
-				if (new Set(vals).size > 1) {
-					const our = ourTier(ours, t);
-					// `null`, never NaN: an omitted tier is a fact about our table,
-					// and NaN in a report reads as a broken number instead.
-					diffs.push({ tier: t, ours: our ?? null, upstream: Math.min(...vals) });
-				}
-			}
-			findings.push({
-				model,
-				outcome: "source-conflict",
-				diffs,
-				cacheGaps: [],
-				sources: sourceNames,
-			});
-			counts["source-conflict"]++;
-			continue;
-		}
-
-		// Sources agree with each other (or there is only one): their shared value
-		// is the consensus this model is measured against.
-		const consensus = (answered[0] as { rates: SourceRates }).rates;
 		const diffs: TierDiff[] = [];
 		const cacheGaps: Tier[] = [];
 		let understated = false;
+		let anyConflict = false;
 
-		for (const t of TIERS) {
-			const up = consensus[t];
-			if (up === undefined) continue;
-			const our = ourTier(ours, t);
-			if (our === undefined) {
-				// Upstream publishes a tier we omit. Our effective rate is inputPer1k
-				// (the D1 fallback) — an overstatement, so never a failure — but it
-				// is a real gap and is always reported.
-				if (!REQUIRED_TIERS.includes(t)) cacheGaps.push(t);
+		for (const tier of TIERS) {
+			const up = resolveTier(answered, tier);
+			if (up === null) continue; // no source publishes this tier
+			if (up.conflicted) anyConflict = true;
+
+			const raw = rawTier(ours, tier);
+			const effective = effectiveRate(ours, tier);
+
+			// UNDERSTATEMENT IS PROVEN AGAINST THE MINIMUM. Metering below every
+			// value any source publishes means we are low on all readings, so
+			// neither cross-source disagreement nor the allowlist can rescue it.
+			if (effective < up.min) {
+				understated = true;
+				diffs.push({
+					tier,
+					ours: raw ?? null,
+					effective,
+					upstream: up.min,
+					conflicted: up.conflicted,
+				});
 				continue;
 			}
-			if (our !== up) {
-				diffs.push({ tier: t, ours: our, upstream: up });
-				if (our < up) understated = true;
+
+			if (raw === undefined) {
+				// Omitted tier metering at or above upstream: conservative
+				// overstatement through the D1 fallback. Reported, never failed.
+				if (!REQUIRED_TIERS.includes(tier)) cacheGaps.push(tier);
+				continue;
+			}
+
+			// A conflicted tier proposes no value, so nothing beyond the
+			// understatement check above can be concluded from it.
+			if (up.conflicted) {
+				diffs.push({ tier, ours: raw, effective, upstream: up.min, conflicted: true });
+				continue;
+			}
+
+			if (raw !== up.min) {
+				diffs.push({ tier, ours: raw, effective, upstream: up.min, conflicted: false });
 			}
 		}
 
 		const deviation = deviations[model];
 
-		// UNDERSTATEMENT IS CHECKED BEFORE THE ALLOWLIST AND IGNORES IT.
-		// There is no field that permits it and no path that reaches a pass with
-		// our rate below a corroborated upstream rate. This is what enforces the
-		// D1 invariant rather than restating it.
 		if (understated) {
 			findings.push({
 				model,
@@ -254,9 +273,20 @@ export function compareTable(input: CompareInput): DriftReport {
 			continue;
 		}
 
+		if (anyConflict) {
+			findings.push({
+				model,
+				outcome: "source-conflict",
+				diffs,
+				cacheGaps,
+				sources: sourceNames,
+				note: "sources disagree with each other; no value proposed. Our rate is not below any of them.",
+			});
+			counts["source-conflict"]++;
+			continue;
+		}
+
 		if (diffs.length === 0) {
-			// Matches upstream. If an allowlist entry still names it, the exemption
-			// has outlived its reason and must be removed.
 			if (deviation !== undefined) {
 				findings.push({
 					model,
@@ -274,7 +304,6 @@ export function compareTable(input: CompareInput): DriftReport {
 			continue;
 		}
 
-		// Ours differs upward on at least one tier.
 		if (deviation !== undefined) {
 			findings.push({
 				model,
@@ -295,11 +324,11 @@ export function compareTable(input: CompareInput): DriftReport {
 		(f) => f.sources.length > 0 && f.outcome !== "uncorroborated",
 	).length;
 
-	// THE COVERAGE FLOOR (spec §6.1) is DERIVED from the map, not a transcribed
-	// constant: every model the map claims a source for must actually have been
-	// answered. If models.dev renames `cost.cache_read`, a naive checker finds no
-	// mismatches and reports a clean sweep — of nothing. This turns that silence
-	// into a failure, and it self-maintains as models are added.
+	// THE COVERAGE FLOOR is DERIVED from the map, never a transcribed constant:
+	// every model the map claims a source for must actually have been answered.
+	// If a source renames a field, a naive checker finds no mismatches and
+	// reports a clean sweep — of nothing. This turns that silence into a
+	// failure, and it self-maintains as models are added.
 	const expectedCorroborated = Object.entries(map).filter(
 		([m, e]) => m in table && (e.litellm !== null || e.modelsDev !== null),
 	).length;
@@ -313,11 +342,14 @@ export function compareTable(input: CompareInput): DriftReport {
 	return { findings, counts, corroborated, expectedCorroborated, exhaustive, failed };
 }
 
+/** Every model carrying a reported cache gap, whatever its outcome. */
+export function cacheGapFindings(report: DriftReport): ModelFinding[] {
+	return report.findings.filter((f) => f.cacheGaps.length > 0);
+}
+
 /**
- * Allowlist entries naming a model that is not in PRICING_TABLE at all. Kept
- * separate from the per-model walk because there is no table row to hang it on,
- * but it is the same class as `deviation-stale`: an exemption with nothing left
- * to exempt.
+ * Allowlist entries naming a model that is not in PRICING_TABLE at all — the
+ * same class as `deviation-stale`: an exemption with nothing left to exempt.
  */
 export function orphanDeviations(
 	table: Record<string, ModelRates>,

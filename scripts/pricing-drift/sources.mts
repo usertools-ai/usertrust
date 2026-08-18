@@ -62,9 +62,15 @@ function optionalRate(v: unknown): number | undefined {
 }
 
 /**
- * The LiteLLM fields this tool depends on. Named as a constant so the schema
- * test can assert them BY NAME — an upstream rename then fails with a message
- * saying which field moved, rather than as a mysterious coverage collapse.
+ * The LiteLLM fields this tool depends on, checked AGAINST THE FETCHED DATA by
+ * `assertLiteLLMSchema` — not merely listed.
+ *
+ * Listing them and asserting the list in a unit test proves nothing: it
+ * compares a constant to itself. The failure that matters is a rename of an
+ * OPTIONAL field — `cache_creation_input_token_cost` moves, every cache value
+ * silently becomes `undefined`, input/output still resolve so every row still
+ * counts as answered, coverage stays full, and the run exits 0 with cache
+ * comparison quietly disabled. Only a check against real data catches that.
  */
 export const LITELLM_FIELDS = [
 	"litellm_provider",
@@ -76,6 +82,71 @@ export const LITELLM_FIELDS = [
 
 /** The models.dev fields this tool depends on, same reasoning. */
 export const MODELS_DEV_FIELDS = ["input", "output", "cache_read", "cache_write"] as const;
+
+/**
+ * How many rows must carry a field before we believe it still exists.
+ *
+ * >1 deliberately: a single surviving legacy row would let a rename pass a
+ * "appears at least once" check. Both corpora carry thousands of entries, so
+ * any live field appears in the hundreds; 5 is far below the real floor and far
+ * above the noise.
+ */
+const SCHEMA_MIN_OCCURRENCES = 5;
+
+function assertFieldsPresent(source: string, counts: Map<string, number>): void {
+	const missing = [...counts.entries()]
+		.filter(([, n]) => n < SCHEMA_MIN_OCCURRENCES)
+		.map(([f, n]) => `${f} (seen ${n}x)`);
+	if (missing.length > 0) {
+		throw new SourceError(
+			`${source}: expected field(s) absent or nearly absent — schema changed: ${missing.join(", ")}. ` +
+				"Refusing to report a comparison that silently skipped these tiers.",
+		);
+	}
+}
+
+/**
+ * Verify LiteLLM still publishes every field this tool reads, BY NAME, against
+ * the fetched corpus. Throws SourceError (exit 2 — "could not check") rather
+ * than letting a rename degrade into a clean-looking run.
+ *
+ * Called at INGEST (see run.mts), not from `normalizeLiteLLM`: the normalizers
+ * are pure transforms and are driven from small fixtures, which by construction
+ * cannot satisfy an occurrence floor meant for a 3,000-row corpus.
+ */
+export function assertLiteLLMSchema(raw: unknown): void {
+	if (typeof raw !== "object" || raw === null) {
+		throw new SourceError("LiteLLM: response is not an object");
+	}
+	const counts = new Map(LITELLM_FIELDS.map((f) => [f, 0]));
+	for (const row of Object.values(raw as Record<string, unknown>)) {
+		if (typeof row !== "object" || row === null) continue;
+		for (const f of LITELLM_FIELDS) {
+			if (f in (row as Record<string, unknown>)) counts.set(f, (counts.get(f) ?? 0) + 1);
+		}
+	}
+	assertFieldsPresent("LiteLLM", counts);
+}
+
+/** The same sentinel for models.dev, walked over every provider's models. */
+export function assertModelsDevSchema(raw: unknown): void {
+	if (typeof raw !== "object" || raw === null) {
+		throw new SourceError("models.dev: response is not an object");
+	}
+	const counts = new Map(MODELS_DEV_FIELDS.map((f) => [f, 0]));
+	for (const provider of Object.values(raw as Record<string, unknown>)) {
+		const models = (provider as { models?: unknown } | null)?.models;
+		if (typeof models !== "object" || models === null) continue;
+		for (const model of Object.values(models as Record<string, unknown>)) {
+			const cost = (model as { cost?: unknown } | null)?.cost;
+			if (typeof cost !== "object" || cost === null) continue;
+			for (const f of MODELS_DEV_FIELDS) {
+				if (f in (cost as Record<string, unknown>)) counts.set(f, (counts.get(f) ?? 0) + 1);
+			}
+		}
+	}
+	assertFieldsPresent("models.dev", counts);
+}
 
 /**
  * Normalize LiteLLM's table, VENDOR-PINNED.
