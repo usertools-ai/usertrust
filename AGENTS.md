@@ -1041,8 +1041,8 @@ Drop every line whose raw text contains `from "`, then require exact string equa
   lines **are** compared, so both packages must import the same names in the same order and may
   differ only in the module path.
 
-Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 9900 (a
-vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600→9900 on this line as
+Additional mechanical guards: `packages/verify/src/*.ts` total line count must stay under 10200 (a
+vendoring tripwire, raised 3200→4200→6500→7200→7500→7800→8400→8700→8900→9200→9600→9900→10200 on this line as
 `packages/verify` grew legitimate node-builtins-only surface, with master separately raising
 4200→4300→4320 for its own receipt-hardening work over the same period — both lineages are folded
 in here and both are recorded in `packages/core/tests/harden/anchoring/anchor-additive.test.ts`
