@@ -44,7 +44,11 @@ function renderTiers(f: ModelFinding): string {
 			// would describe a rate sitting between two sources as if one of them
 			// did not exist.
 			const up = d.upstream === d.upstreamMax ? `${d.upstream}` : `${d.upstream}–${d.upstreamMax}`;
-			return `\`${d.tier}\` ours **${ours}** vs **${up}**`;
+			// Attribute to the sources that publish THIS tier, not to every source
+			// that answered for the model — otherwise a cache-tier difference is
+			// credited to a source that never stated a cache rate.
+			const by = d.publishedBy.length > 0 ? ` per ${d.publishedBy.join(" + ")}` : "";
+			return `\`${d.tier}\` ours **${ours}** vs **${up}**${by}`;
 		})
 		.join("; ");
 }
@@ -57,7 +61,9 @@ function renderSection(outcome: Exclude<Outcome, "agree">, findings: ModelFindin
 	const lines = [`### ${marker} ${HEADINGS[outcome]} (${rows.length})`, ""];
 
 	for (const f of rows) {
-		const srcs = f.sources.length > 0 ? ` _(${f.sources.join(", ")})_` : "";
+		// Model-level: which sources answered at all. Per-tier attribution is
+		// rendered inside renderTiers, where the distinction actually matters.
+		const srcs = f.sources.length > 0 ? ` _(answered: ${f.sources.join(", ")})_` : "";
 		lines.push(`- **\`${f.model}\`** — ${renderTiers(f)}${srcs}`);
 		if (f.note !== undefined) lines.push(`  - ${f.note}`);
 		if (f.cacheGaps.length > 0) {

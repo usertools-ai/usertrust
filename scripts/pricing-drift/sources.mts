@@ -213,13 +213,17 @@ export function assertLiteLLMSchema(
 	}
 	const table = raw as Record<string, unknown>;
 	const problems: string[] = [];
+	let expected = 0;
+	let found = 0;
 
 	for (const [model, entry] of Object.entries(map)) {
 		if (entry.litellm === null) continue;
+		expected++;
 		const row = table[entry.litellm.key];
 		// An ABSENT row is not a schema change — the model may simply have left
 		// the feed, which coverage reports as a named missing mapping (exit 1).
 		if (typeof row !== "object" || row === null) continue;
+		found++;
 		const r = row as Record<string, unknown>;
 		// A row that exists but has LOST `litellm_provider` is a different thing:
 		// the field this tool pins on is gone, so every mapped row would silently
@@ -248,6 +252,16 @@ export function assertLiteLLMSchema(
 			problems.push(`${model} lost cache_creation_input_token_cost`);
 		}
 	}
+	// ONE absent row is a model leaving the feed (coverage names it, exit 1).
+	// EVERY absent row is the table's SHAPE having changed — `{}`, or a new
+	// wrapper around the rows — and the per-row loop then finds nothing to
+	// complain about, so `problems` stays empty and the sentinel passes. Total
+	// absence must not be the quietest outcome.
+	if (expected > 0 && found === 0) {
+		problems.push(
+			`no mapped row was found at all (${expected} expected) — the response shape has changed`,
+		);
+	}
 	raiseSchemaError("LiteLLM", problems);
 }
 
@@ -262,16 +276,20 @@ export function assertModelsDevSchema(
 	}
 	const providers = raw as Record<string, { models?: Record<string, unknown> } | undefined>;
 	const problems: string[] = [];
+	let expected = 0;
+	let found = 0;
 
 	for (const [model, entry] of Object.entries(map)) {
 		if (entry.modelsDev === null) continue;
+		expected++;
 		// Vendor-pinned by construction: the provider is indexed, never scanned.
-		const found = providers[entry.modelsDev.provider]?.models?.[entry.modelsDev.id];
+		const foundModel = providers[entry.modelsDev.provider]?.models?.[entry.modelsDev.id];
 		// Absent model: not a schema change, coverage names it. Present model
 		// whose `cost` object has vanished: the structure this tool reads is
 		// gone, which is a schema failure and must not degrade into drift.
-		if (typeof found !== "object" || found === null) continue;
-		const cost = (found as { cost?: unknown }).cost;
+		if (typeof foundModel !== "object" || foundModel === null) continue;
+		found++;
+		const cost = (foundModel as { cost?: unknown }).cost;
 		if (typeof cost !== "object" || cost === null) {
 			problems.push(`${model} is present but its cost object is missing`);
 			continue;
@@ -293,6 +311,13 @@ export function assertModelsDevSchema(
 		) {
 			problems.push(`${model} lost cache_write`);
 		}
+	}
+	// Same rule as LiteLLM: total absence is a shape change, not 19 coincidental
+	// model removals.
+	if (expected > 0 && found === 0) {
+		problems.push(
+			`no mapped model was found at all (${expected} expected) — the response shape has changed`,
+		);
 	}
 	raiseSchemaError("models.dev", problems);
 }

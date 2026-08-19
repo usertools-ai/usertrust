@@ -87,6 +87,7 @@ describe("positive control", () => {
 				effective: 5,
 				upstream: 50,
 				upstreamMax: 50,
+				publishedBy: ["litellm", "models.dev"],
 				conflicted: false,
 			},
 		]);
@@ -747,5 +748,25 @@ describe("malformed findings keep their answered sources", () => {
 		assert.deepEqual(r.findings[0]?.sources, ["litellm", "models.dev"]);
 		assert.equal(r.mappings, 2, "both sources answered and must still be counted");
 		assert.deepEqual(r.missingMappings, [], "no mapping actually went missing");
+	});
+});
+
+// ── regressions from the connector's review threads ───────────────────────
+
+describe("tier differences are attributed to their publishing sources", () => {
+	it("credits only the source that publishes a differing cache tier", () => {
+		// Both sources answer input/output; only LiteLLM publishes cache-read.
+		// Listing both beside that comparison would attribute a rate to a source
+		// that never stated it.
+		const r = run(
+			{ "test-model": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 99 } },
+			{
+				litellm: litellmRaw({ cache_read_input_token_cost: 5e-7 }),
+				modelsDev: modelsDevRaw({ input: 5, output: 25 }),
+			},
+		);
+		const d = r.findings[0]?.diffs.find((x) => x.tier === "cacheReadPer1k");
+		assert.deepEqual(d?.publishedBy, ["litellm"], "only litellm publishes this tier");
+		assert.deepEqual(r.findings[0]?.sources, ["litellm", "models.dev"], "both still answered");
 	});
 });

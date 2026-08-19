@@ -95,6 +95,16 @@ export interface TierDiff {
 	upstreamMax: number;
 	/** True when the sources disagree with each other on this tier. */
 	conflicted: boolean;
+	/**
+	 * The sources that actually publish THIS tier.
+	 *
+	 * Not the model's answering sources: when both answer input/output but only
+	 * one publishes the cache tier that differs, rendering both beside that
+	 * comparison attributes a rate to a source that never stated it. A reader
+	 * checking the other source finds nothing and cannot tell whether the tool
+	 * or the source is wrong.
+	 */
+	publishedBy: string[];
 }
 
 export interface ModelFinding {
@@ -199,17 +209,24 @@ interface TierConsensus {
 	min: number;
 	max: number;
 	conflicted: boolean;
+	publishedBy: string[];
 }
 
-function resolveTier(answered: { rates: SourceRates }[], tier: Tier): TierConsensus | null {
-	const values = answered
-		.map((a) => a.rates[tier])
-		.filter((v): v is number => v !== undefined && Number.isFinite(v));
-	if (values.length === 0) return null;
+function resolveTier(
+	answered: { name: string; rates: SourceRates }[],
+	tier: Tier,
+): TierConsensus | null {
+	const publishing = answered.filter((a) => {
+		const v = a.rates[tier];
+		return v !== undefined && Number.isFinite(v);
+	});
+	if (publishing.length === 0) return null;
+	const values = publishing.map((a) => a.rates[tier] as number);
 	return {
 		min: Math.min(...values),
 		max: Math.max(...values),
 		conflicted: new Set(values).size > 1,
+		publishedBy: publishing.map((a) => a.name),
 	};
 }
 
@@ -327,6 +344,7 @@ export function compareTable(input: CompareInput): DriftReport {
 					effective,
 					upstream: up.min,
 					upstreamMax: up.max,
+					publishedBy: up.publishedBy,
 					conflicted: up.conflicted,
 				});
 				continue;
@@ -350,6 +368,7 @@ export function compareTable(input: CompareInput): DriftReport {
 							effective,
 							upstream: up.min,
 							upstreamMax: up.max,
+							publishedBy: up.publishedBy,
 							conflicted: true,
 						});
 					}
@@ -360,6 +379,7 @@ export function compareTable(input: CompareInput): DriftReport {
 						effective,
 						upstream: up.min,
 						upstreamMax: up.max,
+						publishedBy: up.publishedBy,
 						conflicted: true,
 					});
 				}
@@ -378,6 +398,7 @@ export function compareTable(input: CompareInput): DriftReport {
 					effective,
 					upstream: up.min,
 					upstreamMax: up.max,
+					publishedBy: up.publishedBy,
 					// `effective`, not `raw`: a negative cache rate meters at inputPer1k
 					// under the canonical rule, so raw -5 against sources 5/10 would
 					// read as in-range when the SDK is actually charging 50.
@@ -393,6 +414,7 @@ export function compareTable(input: CompareInput): DriftReport {
 					effective,
 					upstream: up.min,
 					upstreamMax: up.max,
+					publishedBy: up.publishedBy,
 					conflicted: false,
 				});
 			}
