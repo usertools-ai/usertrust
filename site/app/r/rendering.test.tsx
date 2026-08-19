@@ -789,6 +789,15 @@ test("C1 commit-checkpoint.json — floor rung, provider posture, attested workl
 
 	// transferSet PRESENT → the root is a recomputable digest, not a commitment.
 	assert.ok(html.includes('data-transfer-set="list"'));
+	assertContains(
+		text,
+		"4da354006b3b4df1950f88bda7ff3dc2f97ce252b1356ed609f571f3a7e5e6bc",
+		"the committed transfer-set root is on the card",
+	);
+	assert.ok(html.includes('data-testid="transfer-pairs"'), "the pair list is mounted");
+	assertContains(text, "8e0acd4a11f889633970583fad76a040", "a pair from the list renders");
+	assert.ok(html.includes('data-testid="posted-usertokens"'), "posted total is on the card");
+	assertContains(text, "rounding 14 ut", "roundingAdjustment is on the card");
 	assertOmits(text, TRANSFER_SET_ROOT_COMMITMENT, "R25: a present list is not a commitment");
 
 	// R9 — trustSnapshotId rendered.
