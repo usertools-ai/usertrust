@@ -80,7 +80,7 @@ import { detectInjection } from "./policy/injection.js";
 import { detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
-import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
+import { DEFAULT_BUDGET, DEFAULT_TB_CONNECT_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
@@ -3602,7 +3602,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 	// LedgerUnavailableError the caller is written to catch; it hung
 	// createGovernor()/trust() for good, which hung every request behind it. A
 	// caller-side deadline is the only mechanism the client leaves available.
-	const connectTimeoutMs = config.tigerbeetle.connectTimeoutMs;
+	const connectTimeoutMs = config.tigerbeetle.connectTimeoutMs ?? DEFAULT_TB_CONNECT_TIMEOUT_MS;
 	// ONE budget for the whole handshake, not one per call. Per-call timeouts do not
 	// bound the handshake: a treasury that answers slowly followed by a stalled wallet
 	// took nearly 2x the configured value, which let the SERVER's generic request

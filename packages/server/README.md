@@ -23,11 +23,22 @@ node -e "console.log(require('node:crypto').createHash('sha256').update(process.
 ```
 
 That config runs with `"dryRun": false` — the default — so it needs a reachable
-TigerBeetle (`npx usertrust tb start`, default `127.0.0.1:3001`). Without one, every
-`/v1/authorize` answers `503 ledger_unavailable` after `tigerbeetle.connectTimeoutMs`;
-add `"dryRun": true` to run the governor with no ledger at all. Check the port is
-actually TigerBeetle and not something else of yours — the failure looks identical
-whether nothing is listening or the wrong thing is.
+TigerBeetle on `127.0.0.1:3001`. Without one, every `/v1/authorize` answers
+`503 ledger_unavailable` after `tigerbeetle.connectTimeoutMs`; add `"dryRun": true`
+to run the governor with no ledger at all.
+
+`npx usertrust tb start` does NOT start one — it prints "not yet implemented". Run
+it directly:
+
+```bash
+tigerbeetle format --cluster=0 --replica=0 --replica-count=1 ./0_0.tigerbeetle
+tigerbeetle start --addresses=3001 ./0_0.tigerbeetle
+```
+
+Check the port is actually TigerBeetle and not something else of yours — the failure
+looks identical whether nothing is listening or the wrong thing is, because the
+client connects and then waits forever for a reply in a protocol the listener does
+not speak.
 
 ```bash
 usertrust-server --config usertrust-server.config.json
@@ -94,6 +105,25 @@ every single time. Raising these without raising your client's timeout re-breaks
 `/v1/settle` and `/v1/abort` deliberately bound only governor CONSTRUCTION, not the
 settle/abort call itself: a timed-out settle has an unknown outcome on the money path (the
 post may still land), and reporting it as failed would invite a double-settle.
+
+### Known residual: reclaiming a late authorization records a provider failure
+
+When `/v1/authorize` times out and the governor's `authorize()` lands afterwards, the
+server voids the now-unreachable hold by calling `Governor.abort()`. That is the only
+void path the Governor exposes, and it unconditionally does `recordFailure()` on the
+provider circuit breaker and appends an `llm_call_failed` audit event — but **no
+provider call ever happened**; the authorization merely arrived late.
+
+Consequences: five such timeouts open the provider circuit and start rejecting
+requests that would otherwise succeed, and the audit chain carries a call-failure
+record for a call that was never made. So the cleanup degrades the system it is
+cleaning up.
+
+Deliberately NOT fixed here. The correct fix is a neutral void — release the hold
+without provider-failure accounting — which means new Governor API and a decision
+about which audit event truthfully describes "hold released, no call attempted".
+That is frozen-format territory and deserves a designed answer rather than one
+invented alongside an outage fix. Found by Codex review of `67d6637`.
 
 ## Keys
 

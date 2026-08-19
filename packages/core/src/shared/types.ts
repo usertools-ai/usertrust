@@ -307,6 +307,11 @@ export const TrustConfigSchema = z.object({
 			// is the only thing standing between "no cluster running" and a governor
 			// that never finishes being constructed.
 			//
+			// OPTIONAL, not `.default()`: `TrustConfig` is this schema's inferred OUTPUT
+			// and is publicly exported, so a defaulted field becomes REQUIRED for every
+			// TypeScript consumer — `tigerbeetle: { addresses, clusterId }` would stop
+			// compiling (TS2741). The default is DEFAULT_TB_CONNECT_TIMEOUT_MS.
+			//
 			// 3s because this deadline is only useful if its ERROR OUTRUNS THE CALLER.
 			// usertrust-claude-code aborts its HTTP request at 5s, so a 5s deadline here
 			// answered at ~5.03s and the client had already given up — the caller saw a
@@ -314,7 +319,7 @@ export const TrustConfigSchema = z.object({
 			// exists to produce, every time. A healthy local node answers in well under a
 			// second; raise it for a loaded or remote cluster, and raise the caller's
 			// timeout with it.
-			connectTimeoutMs: z.number().int().positive().default(3_000),
+			connectTimeoutMs: z.number().int().positive().optional(),
 		})
 		.prefault({}),
 	providers: z

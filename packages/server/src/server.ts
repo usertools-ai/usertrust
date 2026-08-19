@@ -397,13 +397,17 @@ export function createUsertrustServer(opts: {
 		transferId: string,
 		entry: PendingEntry,
 		reason: string,
+		shared?: Deadline,
 	): Promise<void> {
 		const tenant = config.tenants.find((t) => t.id === entry.tenantId);
 		if (tenant) {
-			// One budget across both awaits, for the same reason as authorize: close()
-			// abandons N holds in sequence, so a per-await bound would let shutdown take
-			// N x requestTimeoutMs.
-			const abortDeadline = newDeadline();
+			// The budget is the CALLER's when one is passed. The previous version created
+			// it here and the comment already said why that is wrong — close() awaits
+			// entries sequentially, so a per-entry budget makes shutdown N x
+			// requestTimeoutMs — and then created it here anyway. The prose predicted the
+			// bug and was ignored by its own author; `sweeps N stalled holds within ONE
+			// budget` is now the test that would have caught it.
+			const abortDeadline = shared ?? newDeadline();
 			try {
 				const governor = await abortDeadline.run("pool.get", pool.get(tenant));
 				// Bounded, unlike the /v1/abort route. This path is best-effort by
@@ -469,8 +473,12 @@ export function createUsertrustServer(opts: {
 			// layer as the backstop.
 			const remaining = [...pending.entries()];
 			pending.clear();
+			// ONE budget for the whole sweep. Shutdown must be bounded by a number the
+			// operator configured, not by that number times however many holds happened
+			// to be open.
+			const shutdownDeadline = newDeadline();
 			for (const [transferId, entry] of remaining) {
-				await abortEntry(transferId, entry, "server shutdown");
+				await abortEntry(transferId, entry, "server shutdown", shutdownDeadline);
 				bus.publish(entry.tenantId, {
 					type: "aborted",
 					transferId,

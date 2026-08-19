@@ -64,7 +64,14 @@ export class GovernorPool {
 						void late.destroy().catch(() => {});
 					},
 				);
-				await governor.destroy();
+				// destroy() is bounded too, not just construction. It voids pending transfers
+				// BEFORE closing the native client, and that void is a ledger request — which
+				// never rejects when the cluster is gone. So a governor built while
+				// TigerBeetle was healthy and destroyed after it died hangs close() forever,
+				// which is the shutdown hang again by a third route: bounding construction
+				// only moved it. AGENTS.md requires every governor to be destroyed; when the
+				// ledger will not let that finish, shutdown proceeds regardless.
+				await withDeadline("destroy", governor.destroy(), requestTimeoutOf(this.config));
 			}),
 		);
 	}

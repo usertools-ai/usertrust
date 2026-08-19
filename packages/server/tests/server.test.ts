@@ -560,6 +560,68 @@ describe("request deadline — a stalled governor answers, it does not hang", ()
 		expect(elapsedMs).toBeLessThan(750);
 	}, 20_000);
 
+	it("sweeps N stalled holds within ONE budget, not N budgets", async () => {
+		// close() awaits pending holds sequentially. A per-entry budget makes shutdown
+		// N x requestTimeoutMs — which the code comment in abortEntry predicted and the
+		// code then did anyway. Shutdown must be bounded by the number the operator
+		// configured, not that number times however many holds happened to be open.
+		const fake = createFakeGovernor({ budget: 1_000_000 });
+		const stalling: Governor = {
+			...fake.governor,
+			abort: () => new Promise<never>(() => {}),
+		};
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 300 }),
+			factory: async () => stalling,
+		});
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+		for (let i = 0; i < 4; i++) {
+			expect((await post(base, "/v1/authorize", { model: "claude-sonnet-4-6" })).status).toBe(200);
+		}
+		expect(server.pendingCount()).toBe(4);
+
+		const startedAt = Date.now();
+		await server.close();
+		const elapsedMs = Date.now() - startedAt;
+		server = undefined;
+		// One 300ms budget for all four, not 4 x 300ms. Bounded well below the 1200ms
+		// the per-entry version took, with room for a loaded machine.
+		expect(elapsedMs).toBeLessThan(900);
+	}, 20_000);
+
+	it("shuts down when the governor's own destroy() stalls", async () => {
+		// destroy() voids pending transfers BEFORE closing the native client, and that
+		// void is a ledger request — which never rejects when the cluster is gone. So a
+		// governor built while TigerBeetle was healthy and destroyed after it died hung
+		// close() forever: bounding construction only moved the hang.
+		const fake = createFakeGovernor();
+		const stalling: Governor = {
+			...fake.governor,
+			destroy: () => new Promise<never>(() => {}),
+		};
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 250 }),
+			factory: async () => stalling,
+		});
+		const { port } = await server.listen();
+		// Force the pool to actually hold a governor.
+		expect(
+			(
+				await fetch(`http://127.0.0.1:${port}/v1/budget`, {
+					headers: { authorization: `Bearer ${KEY}` },
+				})
+			).status,
+		).toBe(200);
+
+		const outcome = await Promise.race([
+			server.close().then(() => "closed" as const),
+			new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 8_000)),
+		]);
+		expect(outcome).toBe("closed");
+		server = undefined;
+	}, 20_000);
+
 	it("bounds governor CONSTRUCTION too, not just the call", async () => {
 		// pool.get() is where the reported outage actually lived: createGovernor()
 		// never returned, so the request never reached authorize() at all.
