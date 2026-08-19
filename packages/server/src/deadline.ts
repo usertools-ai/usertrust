@@ -68,7 +68,13 @@ export class Deadline {
 	 * for "the server stopped waiting", so late arrivals are reclaimed here.
 	 */
 	async run<T>(what: string, op: Promise<T>, onAbandoned?: (value: T) => void): Promise<T> {
-		let timedOut = false;
+		// Exhausted BEFORE the race is even assembled — e.g. a cold tenant where
+		// governor construction spent the whole budget. Promise reactions run before
+		// timers, so a `setTimeout(..., 0)` loses to an already-fulfilled `op`: the
+		// value would be returned to a caller that has long since timed out, and
+		// `onAbandoned` would be skipped, leaving the hold to the TTL sweep. Decide on
+		// the CLOCK, not on a race the clock cannot win.
+		let timedOut = this.remainingMs() === 0;
 		if (onAbandoned !== undefined) {
 			// Attached BEFORE the race, so nothing can land in the gap. A late REJECTION
 			// produced nothing to reclaim and is swallowed deliberately: by then it has no
@@ -91,6 +97,12 @@ export class Deadline {
 				},
 				() => {},
 			);
+		}
+		// AFTER the continuation is attached, never before: an op refused on the clock
+		// still has to be reclaimed, and returning early without a listener is how a
+		// hold gets stranded.
+		if (timedOut) {
+			throw new GovernorTimeoutError(what, this.budgetMs);
 		}
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {

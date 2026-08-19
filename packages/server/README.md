@@ -31,8 +31,11 @@ to run the governor with no ledger at all.
 it directly:
 
 ```bash
-tigerbeetle format --cluster=0 --replica=0 --replica-count=1 ./0_0.tigerbeetle
-tigerbeetle start --addresses=3001 ./0_0.tigerbeetle
+# LOCAL DEVELOPMENT ONLY. --development on BOTH commands (this repo's CI does the
+# same): without it they fail wherever Direct I/O is unavailable, and cluster 0 with
+# a single replica is reserved for testing — TigerBeetle warns about it on startup.
+tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development ./0_0.tigerbeetle
+tigerbeetle start --addresses=3001 --development ./0_0.tigerbeetle
 ```
 
 Check the port is actually TigerBeetle and not something else of yours — the failure

@@ -107,7 +107,12 @@ import {
 import { detectPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
-import { DEFAULT_BUDGET, DEFAULT_TB_CONNECT_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
+import {
+	DEFAULT_BUDGET,
+	DEFAULT_TB_CONNECT_TIMEOUT_MS,
+	TEARDOWN_VOID_BUDGET_MS,
+	VAULT_DIR,
+} from "./shared/constants.js";
 import {
 	InsufficientBalanceError,
 	LedgerUnavailableError,
@@ -1840,21 +1845,36 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// sibling from losing the void path after a pre-POST throw. A
 			// transport-ambiguous POST is NOT in unpostedHolds — do not treat
 			// it as a hold to void.
-			for (const [txId, capture] of [...activeAuths, ...unpostedHolds]) {
-				if (proxyConn != null && !isDryRun) {
-					try {
-						await proxyConn.void(capture.proxyTransferId ?? txId);
-					} catch {
-						// Best-effort void
-					}
-				} else if (engine != null && !isDryRun) {
-					try {
-						await engine.voidPendingSpend(txId);
-					} catch {
-						// Best-effort void
+			// BOUNDED as a whole. Every void here is a ledger request, and an unreachable
+			// cluster never rejects one — so an unbounded sweep meant a dead ledger could
+			// stop teardown before it ever closed the client, which is the process-will-
+			// not-exit failure destroy() exists to prevent. Abandoning the void is safe:
+			// TigerBeetle auto-voids pending transfers after 300s. Not finishing teardown
+			// is not safe.
+			const voidDeadlineAt = Date.now() + TEARDOWN_VOID_BUDGET_MS;
+			const remainingVoidMs = (): number => Math.max(0, voidDeadlineAt - Date.now());
+			const perHoldVoids = (async () => {
+				for (const [txId, capture] of [...activeAuths, ...unpostedHolds]) {
+					if (remainingVoidMs() === 0) break;
+					if (proxyConn != null && !isDryRun) {
+						try {
+							await proxyConn.void(capture.proxyTransferId ?? txId);
+						} catch {
+							// Best-effort void
+						}
+					} else if (engine != null && !isDryRun) {
+						try {
+							await engine.voidPendingSpend(txId);
+						} catch {
+							// Best-effort void
+						}
 					}
 				}
-			}
+			})();
+			await Promise.race([
+				perHoldVoids.catch(() => {}),
+				new Promise<void>((resolve) => setTimeout(resolve, remainingVoidMs())),
+			]);
 			activeAuths.clear();
 			unpostedHolds.clear();
 
@@ -1866,11 +1886,17 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// that path. Then close the client: a voidAllPending throw must not
 			// skip destroy() and hang the process on the open TigerBeetle socket.
 			if (engine != null && typeof engine.voidAllPending === "function") {
-				try {
-					await engine.voidAllPending();
-				} catch {
-					// Best-effort — TigerBeetle auto-voids pending transfers after 300s.
-				}
+				// Raced, not just try/caught. The existing comment above already said a
+				// voidAllPending THROW must not skip destroy() — but the failure that
+				// actually happens is a HANG, which a catch does not cover, and the ledger
+				// client never rejects.
+				const sweep = engine.voidAllPending();
+				await Promise.race([
+					sweep.catch(() => {
+						// Best-effort — TigerBeetle auto-voids pending transfers after 300s.
+					}),
+					new Promise<void>((resolve) => setTimeout(resolve, remainingVoidMs())),
+				]);
 			}
 
 			// Flush audit

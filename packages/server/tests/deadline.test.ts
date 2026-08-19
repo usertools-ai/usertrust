@@ -61,6 +61,28 @@ describe("Deadline", () => {
 		expect(seen).toEqual([]);
 	}, 10_000);
 
+	it("refuses an already-fulfilled op when the budget is already spent", async () => {
+		// Promise reactions run before timers, so racing an already-fulfilled `op`
+		// against `setTimeout(..., 0)` returns the value — to a caller that has long
+		// since timed out — and skips the reclamation. The decision has to come from the
+		// clock, not from a race the clock cannot win.
+		const deadline = new Deadline(60);
+		// Spend the budget WITHOUT timing out the first call — the caller is still
+		// waiting at this point; it is the clock that has run out.
+		await deadline.run("first", new Promise((resolve) => setTimeout(resolve, 10)));
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(deadline.remainingMs()).toBe(0);
+		const seen: string[] = [];
+		await expect(
+			deadline.run("second", Promise.resolve("already here"), (value) => {
+				seen.push(value);
+			}),
+		).rejects.toBeInstanceOf(GovernorTimeoutError);
+		// And the value it refused is still reclaimed rather than stranded.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(seen).toEqual(["already here"]);
+	}, 10_000);
+
 	it("contains a cleanup that rejects, instead of taking the process down", async () => {
 		// `onAbandoned` is typed void-returning, but an async function is assignable to
 		// it — so a cleanup that rejects hands back a promise nobody observes, and an

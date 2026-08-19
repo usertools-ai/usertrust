@@ -80,7 +80,12 @@ import { detectInjection } from "./policy/injection.js";
 import { detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
-import { DEFAULT_BUDGET, DEFAULT_TB_CONNECT_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
+import {
+	DEFAULT_BUDGET,
+	DEFAULT_TB_CONNECT_TIMEOUT_MS,
+	TEARDOWN_VOID_BUDGET_MS,
+	VAULT_DIR,
+} from "./shared/constants.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
@@ -3321,7 +3326,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// TigerBeetle auto-voids pending transfers after 300s, but
 			// explicit voiding releases holds immediately.
 			if (engine != null && typeof engine.voidAllPending === "function") {
-				await engine.voidAllPending();
+				// Bounded AND caught, so teardown always reaches engine.destroy() below.
+				// Voiding is a ledger request; an unreachable cluster never rejects one, and
+				// an open TigerBeetle client is what keeps the event loop from draining
+				// (AGENTS.md). Abandoning the void is safe — TigerBeetle auto-voids pending
+				// transfers after 300s — while a process that will not exit is not.
+				const sweep = engine.voidAllPending();
+				await Promise.race([
+					sweep.catch(() => {
+						// Best-effort; the 300s auto-void is the backstop.
+					}),
+					new Promise<void>((resolve) => setTimeout(resolve, TEARDOWN_VOID_BUDGET_MS)),
+				]);
 			}
 
 			// Flush audit writes

@@ -158,10 +158,14 @@ export class LedgerUnavailableError extends Error {
 		// the FIRST thing an operator with no cluster sees, so it has to be a command
 		// that works. Also check what is on the port: a foreign listener hangs the
 		// client exactly like an absent one.
+		// --development on BOTH commands: without it these fail on hosts where Direct I/O
+		// is unavailable, which is most laptops. This is a LOCAL cluster — cluster 0 with
+		// one replica is reserved for testing, and TigerBeetle says so on startup.
 		const hint =
-			"Start TigerBeetle (tigerbeetle format --cluster=0 --replica=0 --replica-count=1 " +
-			"./0_0.tigerbeetle && tigerbeetle start --addresses=3001 ./0_0.tigerbeetle) " +
-			"or use { dryRun: true } to skip the ledger.";
+			"Start TigerBeetle for local development (tigerbeetle format --cluster=0 " +
+			"--replica=0 --replica-count=1 --development ./0_0.tigerbeetle && tigerbeetle " +
+			"start --addresses=3001 --development ./0_0.tigerbeetle) or use " +
+			"{ dryRun: true } to skip the ledger.";
 		const docsUrl = "https://usertrust.ai/docs/errors/ledger-unavailable";
 		super(`Ledger unavailable: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
 		this.name = "LedgerUnavailableError";

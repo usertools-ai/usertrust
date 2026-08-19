@@ -90,6 +90,9 @@ describe("domain errors", () => {
 		// connect deadline makes it the first thing an operator with no cluster sees.
 		expect(err.hint).not.toContain("usertrust tb start");
 		expect(err.hint).toContain("tigerbeetle format");
+		// --development on BOTH commands, or they fail wherever Direct I/O is
+		// unavailable — which is most machines an operator will read this on.
+		expect(err.hint.match(/--development/g)).toHaveLength(2);
 		expect(err.hint).toContain("--addresses=3001");
 		expect(err.hint).toContain("dryRun: true");
 		expect(err.docsUrl).toBe("https://usertrust.ai/docs/errors/ledger-unavailable");
