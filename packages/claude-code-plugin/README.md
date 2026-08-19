@@ -119,6 +119,12 @@ implemented" — or run the server with `"dryRun": true` to skip the ledger:
 # this): without it these fail on hosts where Direct I/O is unavailable, and
 # cluster 0 with one replica is reserved for testing — TigerBeetle says so on
 # startup. A production ledger is a real cluster, not this.
+#
+# CHECK THE VERSION FIRST. The client must not be newer than the server, and a
+# mismatch is not a connection error — the cluster starts, accepts the socket, and
+# EVICTS the client ("your client is too new"), so recovery still ends in
+# ledger_unavailable and looks like the original fault:
+#   tigerbeetle version   # must match the tigerbeetle-node in packages/core/package.json
 tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development ./0_0.tigerbeetle
 tigerbeetle start --addresses=3001 --development ./0_0.tigerbeetle   # 3001 is the client default
 ```

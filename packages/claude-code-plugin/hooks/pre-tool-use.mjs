@@ -2,11 +2,10 @@
 // Fail-closed: if governance cannot be reached (or answers with a malformed
 // body), the tool call is blocked (exit 2) unless UT_FAIL_OPEN=1.
 //
-// 402/403/429 are VERDICTS, not failures, so they deny regardless of UT_FAIL_OPEN.
-// 429 (anomaly) used to fall through to the generic error path, where fail-open
-// turned an anomaly cutoff into an allow — so the documented promise that fail-open
-// only softens transport and server failures was false for exactly the verdict most
-// likely to fire during an incident. Output
+// 402/403/429 carrying the server's own error code are VERDICTS, not failures, and
+// deny regardless of UT_FAIL_OPEN. 429 used to fall through to the generic error
+// path, where fail-open turned an anomaly cutoff into an allow. The body check
+// matters in the other direction: a proxy's 429 is not a verdict (see isVerdict). Output
 // contract adapted from the AGT Claude Code plugin's stdin-JSON
 // permissionDecision convention (MIT — see repository NOTICE).
 //
@@ -31,6 +30,26 @@ function sanitizeReason(value, fallback = "unspecified") {
 	const text = typeof value === "string" && value !== "" ? value : fallback;
 	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control chars is the point
 	return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+}
+
+/**
+ * A STATUS ALONE IS NOT A VERDICT — the contract is status AND body.
+ *
+ * Anything between this hook and the governance server can produce these codes for
+ * its own reasons: a proxy or load-shedder answers 429 with HTML, a WAF answers 403.
+ * Treating the bare status as a governance decision turns infrastructure throttling
+ * into a hard denial that `UT_FAIL_OPEN=1` cannot soften — the opposite of the
+ * documented posture, and it fires exactly when a site is already struggling.
+ *
+ * A response that does not match the contract is therefore an ERROR, not a verdict:
+ * fail-closed by default, and softened by UT_FAIL_OPEN like any other failure to
+ * reach governance. Unknown future deny codes fall here too, which is the
+ * conservative direction — the dangerous mistake would be reading a real policy
+ * denial as a transport error and allowing it.
+ */
+function isVerdict(status, json) {
+	const expected = { 402: "budget_exceeded", 403: "policy_denied", 429: "anomaly" }[status];
+	return expected !== undefined && json?.error === expected;
 }
 
 function emit(decision, reason) {
@@ -83,7 +102,7 @@ try {
 			estimatedInputTokens,
 		});
 		emit("allow", `usertrust: reserved ${json.transferId} (${json.estimatedCost} ut)`);
-	} else if (response.status === 402 || response.status === 403 || response.status === 429) {
+	} else if (isVerdict(response.status, json)) {
 		emit(
 			"deny",
 			`usertrust ${sanitizeReason(json?.error, "denied")}: ${sanitizeReason(json?.reason)}`,

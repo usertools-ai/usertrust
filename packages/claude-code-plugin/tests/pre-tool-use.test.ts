@@ -250,6 +250,37 @@ describe("pre-tool-use hook", () => {
 		expect(await readdir(stateDir)).toEqual([]);
 	});
 
+	it("treats an infrastructure 429 as a failure, not a verdict", async () => {
+		// A proxy or load-shedder answers 429 with its own body. Reading the bare status
+		// as a governance decision turns infrastructure throttling into a hard denial
+		// that UT_FAIL_OPEN cannot soften — and it fires exactly when a site is already
+		// struggling. The contract is status AND body.
+		const port = await startFake(() => ({
+			status: 429,
+			json: { message: "Too Many Requests" },
+		}));
+		const result = await runHook(HOOK, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+			UT_FAIL_OPEN: "1",
+		});
+		expect(result.code).toBe(0);
+		const output = JSON.parse(result.stdout) as HookOutput;
+		expect(output.hookSpecificOutput.permissionDecision).toBe("allow");
+		expect(output.hookSpecificOutput.permissionDecisionReason).toContain("ungoverned");
+	});
+
+	it("still denies an infrastructure 429 when fail-open is OFF", async () => {
+		// The softening is UT_FAIL_OPEN's job, not the classifier's: without it, an
+		// unreachable-governance response still blocks. Fail-closed stays the default.
+		const port = await startFake(() => ({ status: 429, json: { message: "Too Many Requests" } }));
+		const result = await runHook(HOOK, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expect(result.code).toBe(2);
+	});
+
 	it("UT_FAIL_OPEN=1 allows with a warning when the server is unreachable", async () => {
 		const result = await runHook(HOOK, PAYLOAD, {
 			...baseEnv,

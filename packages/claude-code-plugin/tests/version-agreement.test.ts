@@ -20,25 +20,36 @@
  * add it here.
  */
 
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { glob } from "tinyglobby";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = join(import.meta.dirname, "..", "..", "..");
 
+/** Every .json under `dir`, dot-directories included, node_modules excluded. */
+function jsonFilesUnder(dir: string): string[] {
+	const found: string[] = [];
+	for (const entry of readdirSync(dir, { withFileTypes: true })) {
+		if (entry.name === "node_modules") continue;
+		const full = join(dir, entry.name);
+		if (entry.isDirectory()) found.push(...jsonFilesUnder(full));
+		else if (entry.name.endsWith(".json")) found.push(full);
+	}
+	return found;
+}
+
 describe("plugin version agreement", () => {
-	it("declares one version across every manifest that gates delivery", async () => {
-		const files = await glob(["packages/claude-code-plugin/**/*.json", ".claude-plugin/*.json"], {
-			cwd: REPO_ROOT,
-			ignore: ["**/node_modules/**"],
-			absolute: false,
-			// REQUIRED: the manifests live in DOT-directories (`.claude-plugin/`), which
-			// globs skip by default. Without this the sweep silently misses the very file
-			// whose staleness caused the defect — and the size assertion below is what
-			// caught that while writing this test.
-			dot: true,
-		});
+	it("declares one version across every manifest that gates delivery", () => {
+		// node:fs rather than a glob library: this is a RELEASE guard, and it was
+		// importing `tinyglobby` — undeclared in both manifests and present only because
+		// the current lockfile happens to hoist it out of Vitest. A non-hoisted install
+		// would have made the guard fail to LOAD, which is the one failure a guard must
+		// not have. It also had to be told to look inside dot-directories, and the
+		// manifests live in one.
+		const files = [
+			...jsonFilesUnder(join(REPO_ROOT, "packages/claude-code-plugin")),
+			...jsonFilesUnder(join(REPO_ROOT, ".claude-plugin")),
+		].map((absolute) => relative(REPO_ROOT, absolute));
 
 		const declared = new Map<string, string>();
 		for (const relative of files) {
