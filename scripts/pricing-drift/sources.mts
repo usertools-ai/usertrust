@@ -110,7 +110,7 @@ export const MODELS_DEV_FIELDS = ["input", "output", "cache_read", "cache_write"
  * Adding a tier upstream is fine and is not enforced here. Losing one listed
  * below fails the run, and removing an entry is a deliberate, reviewable edit.
  */
-const EXPECTED_CACHE_TIERS: ReadonlySet<string> = new Set([
+export const EXPECTED_TIERS: ReadonlySet<string> = new Set([
 	"litellm:claude-fable-5:cacheRead",
 	"litellm:claude-fable-5:cacheWrite",
 	"litellm:claude-haiku-4-5:cacheRead",
@@ -206,7 +206,7 @@ function raiseSchemaError(source: string, problems: string[]): void {
 export function assertLiteLLMSchema(
 	raw: unknown,
 	map: Record<string, ModelSourceMap>,
-	expectedTiers: ReadonlySet<string> = EXPECTED_CACHE_TIERS,
+	expectedTiers: ReadonlySet<string> = EXPECTED_TIERS,
 ): void {
 	if (typeof raw !== "object" || raw === null) {
 		throw new SourceError("LiteLLM: response is not an object");
@@ -269,7 +269,7 @@ export function assertLiteLLMSchema(
 export function assertModelsDevSchema(
 	raw: unknown,
 	map: Record<string, ModelSourceMap>,
-	expectedTiers: ReadonlySet<string> = EXPECTED_CACHE_TIERS,
+	expectedTiers: ReadonlySet<string> = EXPECTED_TIERS,
 ): void {
 	if (typeof raw !== "object" || raw === null) {
 		throw new SourceError("models.dev: response is not an object");
