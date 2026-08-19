@@ -23,8 +23,30 @@ const HEADINGS: Record<Exclude<Outcome, "agree">, string> = {
 	uncorroborated: "No upstream source — shipped without any external check",
 };
 
-/** Order matters: failing outcomes first, so the issue opens on what to fix. */
-const SECTION_ORDER: Exclude<Outcome, "agree">[] = [
+/** Short labels for the summary table. Total Record: a new outcome cannot omit one. */
+const SUMMARY_LABELS: Record<Exclude<Outcome, "agree">, string> = {
+	understated: "Understated",
+	disagree: "Disagreed",
+	"deviation-stale": "Stale allowlist",
+	unmapped: "Unmapped",
+	"malformed-rate": "Malformed rate",
+	"source-conflict": "Sources conflict",
+	"deviation-expected": "Expected deviation (ours higher)",
+	uncorroborated: "No upstream source",
+};
+
+/**
+ * Order matters: failing outcomes first, so the issue opens on what to fix.
+ *
+ * EXHAUSTIVENESS IS COMPILE-ENFORCED (see `_sectionOrderIsExhaustive` below).
+ * `HEADINGS` is a total Record, so a new outcome cannot be added without a
+ * heading — but this ARRAY is what drives rendering, and an array omission
+ * compiles cleanly and silently drops the outcome from every report. A new
+ * failing outcome would then be counted, would fail the run, and would appear
+ * nowhere in the issue explaining why. Exhaustiveness that depends on
+ * remembering is a failure rate, not a guarantee.
+ */
+const SECTION_ORDER = [
 	"malformed-rate",
 	"understated",
 	"disagree",
@@ -33,7 +55,28 @@ const SECTION_ORDER: Exclude<Outcome, "agree">[] = [
 	"source-conflict",
 	"deviation-expected",
 	"uncorroborated",
-];
+] as const satisfies readonly Exclude<Outcome, "agree">[];
+
+/**
+ * Compile-time proof that SECTION_ORDER covers every non-`agree` outcome.
+ * Omit one and this stops type-checking, naming the missing member.
+ *
+ * `as const` above is LOAD-BEARING. With the array annotated
+ * `Exclude<Outcome, "agree">[]` instead, `(typeof SECTION_ORDER)[number]` is
+ * the DECLARED element type — every outcome — so `_Uncovered` is `never`
+ * whatever the array actually contains, and this check passes vacuously. It
+ * did exactly that when first written, and only a mutation (deleting a member
+ * and confirming the build breaks) revealed it. A guard is not verified by
+ * being present.
+ */
+type _AssertNever<T extends never> = T;
+type _Uncovered = Exclude<Exclude<Outcome, "agree">, (typeof SECTION_ORDER)[number]>;
+// `_AssertNever`, not `const x: _Uncovered[] = []`. That form is ALSO vacuous:
+// an empty array is assignable to `T[]` for every T, so it passes whatever
+// `_Uncovered` resolves to. Two plausible-looking versions of this guard were
+// dead before this one — both caught by deleting a member and checking that
+// the build actually breaks, neither by reading the code.
+export type _SectionOrderIsExhaustive = _AssertNever<_Uncovered>;
 
 function renderTiers(f: ModelFinding): string {
 	if (f.diffs.length === 0) return "—";
@@ -95,15 +138,15 @@ export function renderReport(report: DriftReport, ctx: ReportContext): string {
 		"",
 		"| Outcome | Count |",
 		"| --- | --- |",
+		// DERIVED from SECTION_ORDER, which is itself compile-checked for
+		// exhaustiveness. Hand-listing these rows meant a new outcome could be
+		// counted, could fail the run, and could still appear in no table and no
+		// section — present in the verdict, absent from the report explaining it.
 		`| Agreed with upstream | ${counts.agree} |`,
-		`| Expected deviation (ours higher) | ${counts["deviation-expected"]} |`,
-		`| Sources conflict | ${counts["source-conflict"]} |`,
-		`| No upstream source | ${counts.uncorroborated} |`,
-		`| **Understated** | **${counts.understated}** |`,
-		`| **Disagreed** | **${counts.disagree}** |`,
-		`| **Stale allowlist** | **${counts["deviation-stale"]}** |`,
-		`| **Unmapped** | **${counts.unmapped}** |`,
-		`| **Malformed rate** | **${counts["malformed-rate"]}** |`,
+		...SECTION_ORDER.map((o) => {
+			const label = SUMMARY_LABELS[o];
+			return isFailing(o) ? `| **${label}** | **${counts[o]}** |` : `| ${label} | ${counts[o]} |`;
+		}),
 		"",
 		`Coverage: **${report.mappings}/${report.expectedMappings}** source→model mappings answered ` +
 			`(across **${corroborated}/${expectedCorroborated}** models). The gate is per-mapping: a model ` +
