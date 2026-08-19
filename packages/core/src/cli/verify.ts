@@ -189,8 +189,33 @@ async function parseAnchorFlags(argv: string[]): Promise<AnchorFlags> {
 	let maxUnanchoredEvents: number | undefined;
 	let vaultId: string | undefined;
 	for (let i = 0; i < argv.length; i++) {
-		const arg = argv[i] as string;
-		const next = (): string | undefined => argv[++i];
+		const raw = argv[i] as string;
+		// `--flag=value` is parsed here so a value that legitimately begins with
+		// "-" can still be passed; the space-separated form refuses one.
+		const eq = raw.startsWith("--") ? raw.indexOf("=") : -1;
+		const arg = eq > 0 ? raw.slice(0, eq) : raw;
+		const inlineValue = eq > 0 ? raw.slice(eq + 1) : undefined;
+		/**
+		 * A FLAG IS NEVER A VALUE.
+		 *
+		 * This previously took the next token unconditionally, so
+		 * `--vault-id --require-witness` consumed the GATE as the vault id: the
+		 * run then verified unanchored, printed no witness line, and exited 0.
+		 * A strict flag silently disarmed by an adjacent flag is the worst shape
+		 * available for a CI gate — the pipeline stays green while checking
+		 * nothing. Mirrors `requireValue` in cli/budget.ts, including the
+		 * `--flag=value` escape it names.
+		 */
+		const next = (): string | undefined => {
+			if (inlineValue !== undefined) return inlineValue;
+			const v = argv[i + 1];
+			if (v === undefined) throw new Error(`${arg} requires a value`);
+			if (v.startsWith("-")) {
+				throw new Error(`${arg} requires a value (write ${arg}=${v} to pass it literally)`);
+			}
+			i++;
+			return v;
+		};
 		if (arg === "--anchor" || arg === "--anchors") {
 			const v = next();
 			if (v !== undefined) anchorFiles.push(v);

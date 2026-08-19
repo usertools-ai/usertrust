@@ -160,3 +160,49 @@ describe("HARDEN: the verify CLI makes the ABSENCE of witnessing visible (Codex 
 		expect(process.exitCode).toBe(1);
 	});
 });
+
+describe("HARDEN: a flag is never consumed as another flag's value (Codex #128-r2 F1)", () => {
+	it("--vault-id --require-witness refuses instead of swallowing the gate", async () => {
+		// The worst shape available for a CI gate: `--vault-id` ate
+		// `--require-witness` as its value, so the run verified UNANCHORED,
+		// printed no witness line, and exited 0 — the pipeline stays green while
+		// checking nothing. Mirrors requireValue in cli/budget.ts.
+		const s = await makeAnchoredVault(2);
+		process.chdir(s.root);
+		process.argv = ["node", "usertrust", "verify", "--vault-id", "--require-witness"];
+		const { lines, restore } = captureLog();
+		let threw = "";
+		try {
+			await verifyRun(s.root, { json: false });
+		} catch (e) {
+			threw = e instanceof Error ? e.message : String(e);
+		} finally {
+			restore();
+		}
+		expect(`${threw}${lines.join("\n")}`).toMatch(/--vault-id requires a value/);
+	});
+
+	it("the --flag=value escape still allows a value that begins with a dash", async () => {
+		// Refusing dash-leading values without an escape would make legitimate
+		// ids unpassable, so the guard must not be a dead end.
+		const s = await makeAnchoredVault(2);
+		process.chdir(s.root);
+		process.argv = [
+			"node",
+			"usertrust",
+			"verify",
+			"--vault-id=-weird-id",
+			"--anchors",
+			s.storeFile,
+		];
+		const { lines, restore } = captureLog();
+		try {
+			await verifyRun(s.root, { json: false });
+		} finally {
+			restore();
+		}
+		// It parsed as a vault id (mismatching this vault) rather than erroring
+		// on the flag itself.
+		expect(lines.join("\n")).not.toMatch(/requires a value/);
+	});
+});

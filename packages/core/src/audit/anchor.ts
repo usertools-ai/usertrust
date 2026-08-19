@@ -246,10 +246,14 @@ function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
 			closeSync(dirFd);
 		}
 	} catch (err) {
-		const code = (err as NodeJS.ErrnoException).code;
-		if (code !== "EISDIR" && code !== "EPERM" && code !== "EACCES" && code !== "ENOTSUP") {
-			throw err;
-		}
+		// PLATFORM-GATED, not errno-gated. The first cut suppressed EACCES and
+		// EPERM everywhere, which on POSIX are REAL failures: a directory whose
+		// write and rename succeed can still refuse to open for fsync, and the
+		// identity then reported success with the rename not durable. Suppress
+		// only where directory fsync is genuinely unavailable — Windows, which
+		// cannot open a directory this way at all — and let every POSIX error
+		// through.
+		if (process.platform !== "win32") throw err;
 	}
 }
 
@@ -1072,6 +1076,25 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 				};
 			}
 			if (tail !== null && tail.treeSize === snap.sequence && rotation === undefined) {
+				// DRAIN BEFORE DECLARING NOTHING TO DO.
+				//
+				// The outbox IS the delivery intent: a record still sitting in it
+				// has not been published. The self-heal above only re-appends
+				// orphans AHEAD of the mirror tail, so a record that reached the
+				// mirror but never reached a sink was invisible to both paths —
+				// `anchor now` returned "no-new-events" and the CLI exited 0
+				// saying nothing needed anchoring, while the record sat
+				// undelivered forever.
+				//
+				// That became reachable when the identity fsync stopped being
+				// swallowed: the high-water bump sits between the mirror append
+				// and trackPublish, so a genuine I/O failure there skips
+				// publication entirely. Making one silent failure loud created a
+				// quieter one downstream, which is why this drains rather than
+				// re-ordering the durability sequence the comment above pins.
+				for (const undelivered of pendingOutboxRecords(dir)) {
+					trackPublish(undelivered);
+				}
 				return { emitted: false, reason: "no-new-events" };
 			}
 			const tree = buildMerkleTree(snap.hashes.slice(0, snap.sequence));
