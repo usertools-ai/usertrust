@@ -7,7 +7,7 @@ import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import type { Authorization } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
-import { resolveTenant } from "./config.js";
+import { requestTimeoutOf, resolveTenant } from "./config.js";
 import { withDeadline as withDeadlineMs } from "./deadline.js";
 import { EventBus } from "./events.js";
 import type { GovernorFactory } from "./pool.js";
@@ -120,7 +120,7 @@ export function createUsertrustServer(opts: {
 		what: string,
 		op: Promise<T>,
 		onAbandoned?: (value: T) => void,
-	): Promise<T> => withDeadlineMs(what, op, config.requestTimeoutMs, onAbandoned);
+	): Promise<T> => withDeadlineMs(what, op, requestTimeoutOf(config), onAbandoned);
 
 	async function handleAuthorize(
 		tenant: TenantConfig,

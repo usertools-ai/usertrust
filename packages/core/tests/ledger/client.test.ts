@@ -1469,8 +1469,10 @@ describe("TrustTBClient", () => {
 				addresses: ["3000"],
 				onAlert,
 			});
-			alertClient.destroy(); // Stop health check interval
-
+			// NOT destroyed first: destruction is terminal, so a destroyed client
+			// refuses to reconnect and this suite would be asserting on that refusal
+			// instead of on _doReconnect's backoff. The health-check interval is 30s
+			// and this test advances 16s, so it never fires anyway. Destroyed at the end.
 			mockCreateClient.mockImplementation(() => {
 				throw new Error("cannot connect");
 			});
@@ -1490,6 +1492,7 @@ describe("TrustTBClient", () => {
 				expect.any(Object),
 			);
 
+			alertClient.destroy();
 			resetCreateClient();
 			logSpy.mockRestore();
 			errorSpy.mockRestore();
@@ -1501,8 +1504,8 @@ describe("TrustTBClient", () => {
 			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 			client.destroy();
 
+			// Same reason as above: kept alive so reconnect() actually reconnects.
 			const noAlertClient = new TrustTBClient({ addresses: ["3000"] });
-			noAlertClient.destroy();
 
 			mockCreateClient.mockImplementation(() => {
 				throw new Error("cannot connect");
@@ -1516,6 +1519,7 @@ describe("TrustTBClient", () => {
 
 			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("[usertrust]"));
 
+			noAlertClient.destroy();
 			resetCreateClient();
 			warnSpy.mockRestore();
 			logSpy.mockRestore();
@@ -1524,8 +1528,9 @@ describe("TrustTBClient", () => {
 
 		it("reconnect deduplicates concurrent calls", async () => {
 			client.destroy();
+			// Kept alive: a destroyed client refuses to reconnect at all, which would
+			// make the dedup assertion vacuous.
 			const testClient = new TrustTBClient({ addresses: ["3000"] });
-			testClient.destroy();
 
 			// reconnect() deduplicates via reconnectPromise
 			const p1 = testClient.reconnect();
@@ -1536,6 +1541,7 @@ describe("TrustTBClient", () => {
 
 			// createClient called: constructor + 1 reconnect (deduplicated)
 			expect(mockCreateClient).toHaveBeenCalledTimes(3); // main client + testClient + reconnect
+			testClient.destroy();
 		});
 	});
 

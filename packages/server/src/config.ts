@@ -16,6 +16,8 @@ const TenantSchema = z.object({
 	configPath: z.string().optional(),
 });
 
+export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+
 const ServerConfigSchema = z.object({
 	host: z.string().default("127.0.0.1"),
 	port: z.number().int().min(1).max(65535).default(4519),
@@ -31,12 +33,30 @@ const ServerConfigSchema = z.object({
 	// tigerbeetle.connectTimeoutMs so a ledger outage surfaces as the specific
 	// `ledger_unavailable` rather than as this generic timeout, and BELOW the
 	// client's own timeout so the client sees a real 503 instead of giving up first.
-	requestTimeoutMs: z.number().int().positive().default(10_000),
+	requestTimeoutMs: z.number().int().positive().default(DEFAULT_REQUEST_TIMEOUT_MS),
 	tenants: z.array(TenantSchema).min(1),
 });
 
 export type TenantConfig = z.infer<typeof TenantSchema>;
 export type ServerConfig = z.infer<typeof ServerConfigSchema>;
+
+/**
+ * The request deadline, for a config that may not have come through
+ * {@link ServerConfigSchema}.
+ *
+ * `createUsertrustServer` and `GovernorPool` are both exported, so a caller can
+ * hand either one a hand-built config object — including one written before
+ * `requestTimeoutMs` existed. Only `loadServerConfig` applies the schema defaults.
+ * `setTimeout(fn, undefined)` fires on the next tick, so without this every
+ * request from such a caller would answer an instant `governor_timeout`: adding
+ * the field would have BROKEN the programmatic path rather than defaulting it.
+ */
+export function requestTimeoutOf(config: ServerConfig): number {
+	const value = (config as { requestTimeoutMs?: unknown }).requestTimeoutMs;
+	return typeof value === "number" && Number.isFinite(value) && value > 0
+		? value
+		: DEFAULT_REQUEST_TIMEOUT_MS;
+}
 
 export function hashKey(key: string): string {
 	return createHash("sha256").update(key, "utf-8").digest("hex");

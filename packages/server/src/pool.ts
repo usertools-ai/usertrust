@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { Governor, TrustOpts } from "usertrust";
 import { createGovernor } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
+import { requestTimeoutOf } from "./config.js";
 import { withDeadline } from "./deadline.js";
 
 export type GovernorFactory = (opts: TrustOpts) => Promise<Governor>;
@@ -54,7 +55,7 @@ export class GovernorPool {
 				const governor = await withDeadline(
 					"pool.get",
 					p,
-					this.config.requestTimeoutMs,
+					requestTimeoutOf(this.config),
 					// Construction that lands after shutdown gave up waiting still produced a
 					// live governor holding a TigerBeetle client, and AGENTS.md is explicit
 					// that an undestroyed client is what keeps the event loop from draining —

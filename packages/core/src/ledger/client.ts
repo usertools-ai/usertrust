@@ -122,6 +122,16 @@ export class TrustTBClient {
 	private onAlert?: (message: string, meta: Record<string, unknown>) => void;
 	private healthCheckInterval: ReturnType<typeof setInterval> | null = null;
 	private reconnectPromise: Promise<void> | null = null;
+	/**
+	 * Destruction is TERMINAL. Without this, `destroy()` could not stop the client:
+	 * tigerbeetle-node rejects an in-flight request with "Client was closed.", which
+	 * `isConnectionError` classifies as reconnectable, so `withReconnect` built a
+	 * FRESH client and retried — resurrecting exactly what the caller destroyed, and
+	 * leaving it retrying against a cluster nobody is waiting on any more. Observed
+	 * as `[TB] Reconnection attempt 1/5` logged immediately after a governor gave up
+	 * on an unreachable ledger.
+	 */
+	private destroyed = false;
 
 	constructor(opts: TrustTBClientOptions) {
 		this.opts = {
@@ -176,6 +186,11 @@ export class TrustTBClient {
 	}
 
 	async reconnect(): Promise<void> {
+		// A destroyed client must never come back. Checked here as well as in
+		// withReconnect so no future caller can reopen one by another route.
+		if (this.destroyed) {
+			throw new Error("TigerBeetle client was destroyed; not reconnecting");
+		}
 		if (this.reconnectPromise) return this.reconnectPromise;
 		this.reconnectPromise = this._doReconnect().finally(() => {
 			this.reconnectPromise = null;
@@ -219,7 +234,10 @@ export class TrustTBClient {
 		try {
 			return await fn();
 		} catch (err) {
-			if (this.isConnectionError(err)) {
+			// `!this.destroyed` is the load-bearing half: "Client was closed." IS a
+			// connection error by every other measure, and after destroy() it is the
+			// EXPECTED one. Retrying it is what turned teardown into resurrection.
+			if (this.isConnectionError(err) && !this.destroyed) {
 				await this.reconnect();
 				return await fn();
 			}
@@ -835,6 +853,9 @@ export class TrustTBClient {
 	}
 
 	destroy(): void {
+		// Set BEFORE closing the client: closing rejects the in-flight request, and
+		// that rejection must already see a destroyed client or it will reconnect.
+		this.destroyed = true;
 		if (this.healthCheckInterval) {
 			clearInterval(this.healthCheckInterval);
 			this.healthCheckInterval = null;

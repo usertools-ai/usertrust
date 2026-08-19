@@ -460,6 +460,39 @@ describe("request deadline — a stalled governor answers, it does not hang", ()
 		expect(fake.calls.aborted[0]).toBe(fake.calls.authorized[0]);
 	}, 20_000);
 
+	it("applies the default timeout for a config that never saw the schema", async () => {
+		// createUsertrustServer is exported, so a caller can hand it a hand-built
+		// config — including one written before requestTimeoutMs existed. Only
+		// loadServerConfig applies the schema defaults, and setTimeout(fn, undefined)
+		// fires on the next tick: without a runtime fallback, adding this field would
+		// have turned every request from such a caller into an instant
+		// governor_timeout. Adding a field must not break the callers who predate it.
+		const { requestTimeoutMs: _omitted, ...withoutTimeout } = config();
+		const fake = createFakeGovernor();
+		// Deliberately NOT instant. `setTimeout(fn, undefined)` coerces to 1ms rather
+		// than to "no timeout", so an authorize that resolves in the same tick wins
+		// that race and the missing default stays invisible. Any real governor takes
+		// longer than a tick — a ledger round trip is milliseconds at best — so the
+		// test has to as well, or it pins nothing.
+		const realistic: Governor = {
+			...fake.governor,
+			authorize: async (params) => {
+				await new Promise((resolve) => setTimeout(resolve, 60));
+				return fake.governor.authorize(params);
+			},
+		};
+		server = createUsertrustServer({
+			config: withoutTimeout as ServerConfig,
+			factory: async () => realistic,
+		});
+		const { port } = await server.listen();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", {
+			model: "claude-sonnet-4-6",
+		});
+		expect(res.status).toBe(200);
+		expect(fake.calls.authorized).toHaveLength(1);
+	}, 20_000);
+
 	it("bounds governor CONSTRUCTION too, not just the call", async () => {
 		// pool.get() is where the reported outage actually lived: createGovernor()
 		// never returned, so the request never reached authorize() at all.
