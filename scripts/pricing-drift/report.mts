@@ -111,7 +111,9 @@ function renderSection(outcome: Exclude<Outcome, "agree">, findings: ModelFindin
 		if (f.note !== undefined) lines.push(`  - ${f.note}`);
 		if (f.cacheGaps.length > 0) {
 			lines.push(
-				`  - upstream publishes \`${f.cacheGaps.join("`, `")}\` which our table omits ` +
+				`  - upstream also publishes ${f.cacheGaps
+					.map((g) => `\`${g.tier}\` (per ${g.publishedBy.join(" + ")})`)
+					.join(", ")} which our table omits ` +
 					"(priced at `inputPer1k` via the D1 fallback — overstatement, not a defect)",
 			);
 		}
@@ -214,9 +216,13 @@ export function renderReport(report: DriftReport, ctx: ReportContext): string {
 				"overstatement, not a defect. A gap that metered BELOW upstream would appear under " +
 				"*Understated* instead.",
 			"",
-			...gaps.map(
-				(f) => `- **\`${f.model}\`** — \`${f.cacheGaps.join("`, `")}\` _(${f.sources.join(", ")})_`,
-			),
+			...gaps.map((f) => {
+				// Per-gap publishers, not the model's answering sources: when both
+				// sources answer input/output but only one publishes the omitted
+				// tier, listing both credits it to a source that never stated it.
+				const parts = f.cacheGaps.map((g) => `\`${g.tier}\` per ${g.publishedBy.join(" + ")}`);
+				return `- **\`${f.model}\`** — ${parts.join("; ")}`;
+			}),
 			"",
 		);
 	}

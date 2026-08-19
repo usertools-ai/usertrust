@@ -345,7 +345,12 @@ export function normalizeLiteLLM(
 		if (entry.litellm === null) continue;
 
 		const row = table[entry.litellm.key];
-		if (row === undefined) continue;
+		// `typeof !== object || null`, not `=== undefined`. A retained key holding
+		// `null` passes an undefined-only check and the next dereference throws a
+		// TypeError, collapsing a NAMED missing-mapping report into a generic
+		// exit-2. The sentinel already treats such a row as absent; normalization
+		// must agree with it.
+		if (typeof row !== "object" || row === null) continue;
 		// The vendor pin. Not a lint — a reseller row here is a wrong number.
 		if (row.litellm_provider !== entry.litellm.provider) continue;
 

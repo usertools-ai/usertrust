@@ -197,7 +197,10 @@ describe("cache tiers", () => {
 		);
 		assert.equal(r.counts.agree, 1);
 		assert.equal(r.failed, false);
-		assert.deepEqual(r.findings[0]?.cacheGaps, ["cacheReadPer1k"]);
+		assert.deepEqual(
+			r.findings[0]?.cacheGaps.map((g) => g.tier),
+			["cacheReadPer1k"],
+		);
 	});
 
 	it("compares our RAW field, never the effectiveCacheRate resolution", () => {
@@ -373,7 +376,10 @@ describe("understatement cannot hide behind an omitted tier", () => {
 			},
 		);
 		assert.equal(r.counts.agree, 1);
-		assert.deepEqual(r.findings[0]?.cacheGaps, ["cacheReadPer1k"]);
+		assert.deepEqual(
+			r.findings[0]?.cacheGaps.map((g) => g.tier),
+			["cacheReadPer1k"],
+		);
 	});
 });
 
@@ -562,7 +568,10 @@ describe("conflict reporting does not overclaim", () => {
 			},
 		);
 		assert.equal(r.counts["source-conflict"], 1);
-		assert.deepEqual(r.findings[0]?.cacheGaps, ["cacheReadPer1k"]);
+		assert.deepEqual(
+			r.findings[0]?.cacheGaps.map((g) => g.tier),
+			["cacheReadPer1k"],
+		);
 		const d = r.findings[0]?.diffs.find((x) => x.tier === "cacheReadPer1k");
 		assert.equal(d?.upstream, 0.5);
 		assert.equal(d?.upstreamMax, 5);
@@ -768,5 +777,40 @@ describe("tier differences are attributed to their publishing sources", () => {
 		const d = r.findings[0]?.diffs.find((x) => x.tier === "cacheReadPer1k");
 		assert.deepEqual(d?.publishedBy, ["litellm"], "only litellm publishes this tier");
 		assert.deepEqual(r.findings[0]?.sources, ["litellm", "models.dev"], "both still answered");
+	});
+});
+
+// ── regressions from the twelfth review ───────────────────────────────────
+
+describe("cache gaps carry their own publishers", () => {
+	it("credits an omitted tier only to the source that publishes it", () => {
+		// Both sources answer input/output; only LiteLLM publishes cache-read,
+		// which our table omits. Listing both would send a reader to check a
+		// source that never stated a cache rate.
+		const r = run(
+			{ "test-model": MATCHING },
+			{
+				litellm: litellmRaw({ cache_read_input_token_cost: 5e-7 }),
+				modelsDev: modelsDevRaw({ input: 5, output: 25 }),
+			},
+		);
+		assert.deepEqual(r.findings[0]?.cacheGaps, [
+			{ tier: "cacheReadPer1k", publishedBy: ["litellm"] },
+		]);
+		assert.deepEqual(r.findings[0]?.sources, ["litellm", "models.dev"]);
+	});
+});
+
+describe("a null upstream row is skipped, not dereferenced", () => {
+	it("reports a named missing mapping rather than throwing", () => {
+		// A retained key holding `null` passes an `=== undefined` check and the
+		// next dereference throws, collapsing a named report into a generic
+		// exit-2 "could not check".
+		const r = run(
+			{ "test-model": MATCHING },
+			{ litellm: { "test-model": null }, modelsDev: modelsDevRaw() },
+		);
+		assert.deepEqual(r.missingMappings, ["litellm:test-model"]);
+		assert.equal(r.failed, true);
 	});
 });

@@ -107,6 +107,17 @@ export interface TierDiff {
 	publishedBy: string[];
 }
 
+/**
+ * A tier upstream publishes that our table omits, with the sources that
+ * actually publish it — never the model's full answering set. Same reason as
+ * `TierDiff.publishedBy`: crediting a cache tier to a source that never stated
+ * one sends a reader to check something that was never there.
+ */
+export interface CacheGap {
+	tier: Tier;
+	publishedBy: string[];
+}
+
 export interface ModelFinding {
 	model: string;
 	outcome: Outcome;
@@ -117,7 +128,7 @@ export interface ModelFinding {
 	 * overstatement. A gap that meters BELOW upstream is understatement; it
 	 * lands in `diffs` under outcome `understated` instead.
 	 */
-	cacheGaps: Tier[];
+	cacheGaps: CacheGap[];
 	sources: string[];
 	note?: string;
 }
@@ -321,7 +332,7 @@ export function compareTable(input: CompareInput): DriftReport {
 		}
 
 		const diffs: TierDiff[] = [];
-		const cacheGaps: Tier[] = [];
+		const cacheGaps: CacheGap[] = [];
 		let understated = false;
 		let anyConflict = false;
 
@@ -356,7 +367,9 @@ export function compareTable(input: CompareInput): DriftReport {
 				// another — not understatement, but not conservative either, so it
 				// is reported as a conflicted diff rather than filed as a safe gap.
 				if (effective >= up.max) {
-					if (!REQUIRED_TIERS.includes(tier)) cacheGaps.push(tier);
+					if (!REQUIRED_TIERS.includes(tier)) {
+						cacheGaps.push({ tier, publishedBy: up.publishedBy });
+					}
 					// Conservative, but if the sources disagreed on this tier the model
 					// is still classified `source-conflict` — and with no diff recorded
 					// the report would render "—", hiding the very values that caused

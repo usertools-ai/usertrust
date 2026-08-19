@@ -93,6 +93,12 @@ jobs:
           echo "exit_code=$code" >> "$GITHUB_OUTPUT"
 
       - name: Upload the report
+        # NON-FATAL. The artifact is a convenience; the tracking issue is the
+        # real channel. An upload failure after a CLEAN comparison satisfies
+        # neither the issue predicate nor the failure predicate, so the job
+        # would end red having filed nothing — a scheduled failure with no
+        # record, which is the state this workflow exists to prevent.
+        continue-on-error: true
         if: always()
         uses: actions/upload-artifact@v7
         with:
