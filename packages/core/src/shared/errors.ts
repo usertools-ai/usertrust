@@ -152,8 +152,16 @@ export class LedgerUnavailableError extends Error {
 	public readonly docsUrl: string;
 
 	constructor(reason: string) {
+		// NOT "npx usertrust tb start": that subcommand is a stub — it prints "not yet
+		// implemented" (cli/tb.ts) and suggests port 3000 while the client defaults to
+		// 3001. Harmless while this error was unreachable; the connect deadline makes it
+		// the FIRST thing an operator with no cluster sees, so it has to be a command
+		// that works. Also check what is on the port: a foreign listener hangs the
+		// client exactly like an absent one.
 		const hint =
-			'Start TigerBeetle with "npx usertrust tb start" or use { dryRun: true } to skip the ledger.';
+			"Start TigerBeetle (tigerbeetle format --cluster=0 --replica=0 --replica-count=1 " +
+			"./0_0.tigerbeetle && tigerbeetle start --addresses=3001 ./0_0.tigerbeetle) " +
+			"or use { dryRun: true } to skip the ledger.";
 		const docsUrl = "https://usertrust.ai/docs/errors/ledger-unavailable";
 		super(`Ledger unavailable: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
 		this.name = "LedgerUnavailableError";

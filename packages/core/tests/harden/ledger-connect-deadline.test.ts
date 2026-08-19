@@ -96,6 +96,8 @@ describe("ledger connect deadline — an unreachable TigerBeetle fails loud", ()
 			// The operator has to be able to act on it: name the ledger and the way out.
 			expect(err.message).toContain("Ledger unavailable");
 			expect(err.message).toContain("dryRun");
+			// The hint must name a command that WORKS — "npx usertrust tb start" is a stub.
+			expect(err.message).not.toContain("usertrust tb start");
 			// Pin the DEADLINE as the thing that ended it. Without this the assertion
 			// above would also pass on a client that happened to reject on its own,
 			// which is not the behaviour being guaranteed here.

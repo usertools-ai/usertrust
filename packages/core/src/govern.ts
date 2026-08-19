@@ -3603,6 +3603,12 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 	// createGovernor()/trust() for good, which hung every request behind it. A
 	// caller-side deadline is the only mechanism the client leaves available.
 	const connectTimeoutMs = config.tigerbeetle.connectTimeoutMs;
+	// ONE budget for the whole handshake, not one per call. Per-call timeouts do not
+	// bound the handshake: a treasury that answers slowly followed by a stalled wallet
+	// took nearly 2x the configured value, which let the SERVER's generic request
+	// timeout fire first and replace the actionable `ledger_unavailable` with an
+	// opaque one — and direct SDK callers simply never got the bound they configured.
+	const handshakeEndsAt = Date.now() + connectTimeoutMs;
 	const withConnectDeadline = async <T>(what: string, op: Promise<T>): Promise<T> => {
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
@@ -3612,14 +3618,17 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 				// would let a process whose only pending work is a dead TB handshake exit
 				// silently instead of reporting the outage. It is always cleared below.
 				new Promise<never>((_resolve, reject) => {
-					timer = setTimeout(() => {
-						reject(
-							new Error(
-								`TigerBeetle ${what} did not answer within ${connectTimeoutMs}ms ` +
-									`(addresses: ${tbAddresses.join(", ")})`,
-							),
-						);
-					}, connectTimeoutMs);
+					timer = setTimeout(
+						() => {
+							reject(
+								new Error(
+									`TigerBeetle ${what} did not answer within ${connectTimeoutMs}ms ` +
+										`(addresses: ${tbAddresses.join(", ")})`,
+								),
+							);
+						},
+						Math.max(0, handshakeEndsAt - Date.now()),
+					);
 				}),
 			]);
 		} finally {

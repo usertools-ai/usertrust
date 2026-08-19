@@ -482,7 +482,7 @@ describe("request deadline — a stalled governor answers, it does not hang", ()
 			},
 		};
 		server = createUsertrustServer({
-			config: withoutTimeout as ServerConfig,
+			config: withoutTimeout,
 			factory: async () => realistic,
 		});
 		const { port } = await server.listen();
@@ -522,6 +522,42 @@ describe("request deadline — a stalled governor answers, it does not hang", ()
 		]);
 		expect(outcome).toBe("closed");
 		server = undefined; // already closed; afterEach must not close it twice
+	}, 20_000);
+
+	it("spends ONE budget across construction and the call, not one each", async () => {
+		// Per-await timeouts do not bound a request. A cold tenant waits for the
+		// governor and THEN for authorize, so two 4s timeouts are an 8s request — past
+		// the 5s at which usertrust-claude-code aborts. The client would be gone before
+		// its own server answered, and an authorize landing in that window records a
+		// hold whose transferId nobody ever received.
+		const fake = createFakeGovernor();
+		const slowBoth: Governor = {
+			...fake.governor,
+			authorize: async (params) => {
+				await new Promise((resolve) => setTimeout(resolve, 400));
+				return fake.governor.authorize(params);
+			},
+		};
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 500 }),
+			factory: async () => {
+				await new Promise((resolve) => setTimeout(resolve, 400));
+				return slowBoth;
+			},
+		});
+		const { port } = await server.listen();
+
+		const startedAt = Date.now();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", {
+			model: "claude-sonnet-4-6",
+		});
+		const elapsedMs = Date.now() - startedAt;
+
+		// 400ms construction + 400ms authorize = 800ms of work against a 500ms budget.
+		// Shared, that is a timeout; restarted per await it would be two 500ms windows
+		// and a 200 at ~800ms.
+		expect(res.status).toBe(503);
+		expect(elapsedMs).toBeLessThan(750);
 	}, 20_000);
 
 	it("bounds governor CONSTRUCTION too, not just the call", async () => {

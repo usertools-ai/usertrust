@@ -42,7 +42,13 @@ const ServerConfigSchema = z.object({
 	// `ledger_unavailable` rather than this generic timeout; below the caller's HTTP
 	// timeout so the caller is still listening when either one arrives. Raising this
 	// without raising the caller's timeout re-breaks the ordering silently.
-	requestTimeoutMs: z.number().int().positive().default(DEFAULT_REQUEST_TIMEOUT_MS),
+	// OPTIONAL, not `.default()`. `ServerConfig` is this schema's inferred OUTPUT and
+	// is the public argument type of `createUsertrustServer`/`GovernorPool`, so a
+	// defaulted field becomes REQUIRED for every TypeScript caller — adding it would
+	// break existing object literals with TS2741 rather than defaulting them. The
+	// default lives in `requestTimeoutOf` instead, which is one place, applies to
+	// hand-built and file-loaded configs alike, and cannot drift from the type.
+	requestTimeoutMs: z.number().int().positive().optional(),
 	tenants: z.array(TenantSchema).min(1),
 });
 
@@ -61,7 +67,7 @@ export type ServerConfig = z.infer<typeof ServerConfigSchema>;
  * the field would have BROKEN the programmatic path rather than defaulting it.
  */
 export function requestTimeoutOf(config: ServerConfig): number {
-	const value = (config as { requestTimeoutMs?: unknown }).requestTimeoutMs;
+	const value = config.requestTimeoutMs;
 	return typeof value === "number" && Number.isFinite(value) && value > 0
 		? value
 		: DEFAULT_REQUEST_TIMEOUT_MS;
