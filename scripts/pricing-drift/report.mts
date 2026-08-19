@@ -82,7 +82,18 @@ function renderTiers(f: ModelFinding): string {
 	if (f.diffs.length === 0) return "—";
 	return f.diffs
 		.map((d) => {
-			const ours = d.ours === null ? `not published (meters at ${d.effective})` : String(d.ours);
+			// Print the EFFECTIVE rate whenever it differs from the raw field.
+			// A negative cache entry is preserved by `rawTier` but replaced with
+			// `inputPer1k` by the canonical resolver, so `cacheReadPer1k: -5`
+			// against sources at 5–10 would read "ours -5" while classification
+			// and metering both used 50 — a report contradicting its own heading
+			// on the one number that represents money.
+			const ours =
+				d.ours === null
+					? `not published (meters at ${d.effective})`
+					: d.ours === d.effective
+						? String(d.ours)
+						: `${d.ours} (meters at ${d.effective})`;
 			// Show the RANGE when the sources disagree. Printing only the minimum
 			// would describe a rate sitting between two sources as if one of them
 			// did not exist.

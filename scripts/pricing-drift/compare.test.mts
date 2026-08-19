@@ -814,3 +814,25 @@ describe("a null upstream row is skipped, not dereferenced", () => {
 		assert.equal(r.failed, true);
 	});
 });
+
+describe("the report states the rate actually metered", () => {
+	it("shows the effective rate when a negative cache entry differs from raw", () => {
+		// rawTier preserves -5; the canonical resolver meters it at inputPer1k.
+		// Printing only the raw value contradicts the classification, on the one
+		// number in the report that represents money.
+		const r = run(
+			{ "test-model": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: -5 } },
+			{
+				litellm: litellmRaw({ cache_read_input_token_cost: 5e-7 }),
+				modelsDev: modelsDevRaw({ input: 5, output: 25, cache_read: 1 }),
+			},
+		);
+		const md = renderReport(r, {
+			tableVersion: "test",
+			fetchedAt: "now",
+			sourceUrls: {},
+			orphanDeviations: [],
+		});
+		assert.match(md, /-5 \(meters at 50\)/);
+	});
+});
