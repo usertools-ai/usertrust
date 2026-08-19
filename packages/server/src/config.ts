@@ -16,7 +16,7 @@ const TenantSchema = z.object({
 	configPath: z.string().optional(),
 });
 
-export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+export const DEFAULT_REQUEST_TIMEOUT_MS = 4_000;
 
 const ServerConfigSchema = z.object({
 	host: z.string().default("127.0.0.1"),
@@ -29,10 +29,19 @@ const ServerConfigSchema = z.object({
 	// strictly worse than one that errors: the caller cannot tell "slow" from
 	// "dead", and usertrust-claude-code's PreToolUse hook fails CLOSED, so an
 	// unbounded wait there is not a slow tool call but a blocked one
-	// (usertools-ai/usertrust#130). Keep this comfortably ABOVE
-	// tigerbeetle.connectTimeoutMs so a ledger outage surfaces as the specific
-	// `ledger_unavailable` rather than as this generic timeout, and BELOW the
-	// client's own timeout so the client sees a real 503 instead of giving up first.
+	// (usertools-ai/usertrust#130).
+	//
+	// The whole chain has to be MONOTONIC or the specific error loses a race to the
+	// generic one, which is what happened at the first attempt at these numbers:
+	//
+	//   tigerbeetle.connectTimeoutMs (3s)  <  requestTimeoutMs (4s)
+	//     <  the caller's HTTP timeout (5s in usertrust-claude-code)
+	//     <  the caller's outer/process timeout (15s for that plugin's hook)
+	//
+	// Above connectTimeoutMs so a ledger outage reports as the actionable
+	// `ledger_unavailable` rather than this generic timeout; below the caller's HTTP
+	// timeout so the caller is still listening when either one arrives. Raising this
+	// without raising the caller's timeout re-breaks the ordering silently.
 	requestTimeoutMs: z.number().int().positive().default(DEFAULT_REQUEST_TIMEOUT_MS),
 	tenants: z.array(TenantSchema).min(1),
 });

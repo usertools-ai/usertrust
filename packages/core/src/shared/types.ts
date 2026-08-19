@@ -305,9 +305,16 @@ export const TrustConfigSchema = z.object({
 			// (ClientInitArgs is cluster_id + replica_addresses, nothing else) and
 			// retries an unreachable cluster forever without ever rejecting, so this
 			// is the only thing standing between "no cluster running" and a governor
-			// that never finishes being constructed. Raise it for a loaded or remote
-			// cluster; a healthy local node answers in well under a second.
-			connectTimeoutMs: z.number().int().positive().default(5_000),
+			// that never finishes being constructed.
+			//
+			// 3s because this deadline is only useful if its ERROR OUTRUNS THE CALLER.
+			// usertrust-claude-code aborts its HTTP request at 5s, so a 5s deadline here
+			// answered at ~5.03s and the client had already given up — the caller saw a
+			// generic transport error instead of the labelled `ledger_unavailable` this
+			// exists to produce, every time. A healthy local node answers in well under a
+			// second; raise it for a loaded or remote cluster, and raise the caller's
+			// timeout with it.
+			connectTimeoutMs: z.number().int().positive().default(3_000),
 		})
 		.prefault({}),
 	providers: z

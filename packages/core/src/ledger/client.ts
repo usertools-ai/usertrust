@@ -201,6 +201,13 @@ export class TrustTBClient {
 	private async _doReconnect(): Promise<void> {
 		const maxRetries = 5;
 		for (let attempt = 0; attempt < maxRetries; attempt++) {
+			// Re-checked EVERY iteration, not just on entry: the backoff below sleeps up
+			// to 8s, and a destroy() landing during that sleep would otherwise be undone
+			// by the next iteration assigning a fresh native client — teardown completing
+			// while the client it tore down comes back.
+			if (this.destroyed) {
+				throw new Error("TigerBeetle client was destroyed; not reconnecting");
+			}
 			try {
 				console.log(`[TB] Reconnection attempt ${attempt + 1}/${maxRetries}`);
 				try {

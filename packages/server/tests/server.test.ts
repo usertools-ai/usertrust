@@ -493,6 +493,37 @@ describe("request deadline — a stalled governor answers, it does not hang", ()
 		expect(fake.calls.authorized).toHaveLength(1);
 	}, 20_000);
 
+	it("shuts down even when the shutdown abort itself stalls", async () => {
+		// close() awaits the best-effort abort of every pending hold BEFORE
+		// pool.destroyAll(). An unbounded abort there does not merely fail to void a
+		// hold — it stops teardown from ever reaching the governor destroy that would
+		// have voided it, so a stalled ledger hangs shutdown. Same defect as the one
+		// this PR exists to fix, one path over.
+		const fake = createFakeGovernor();
+		const stalling: Governor = {
+			...fake.governor,
+			abort: () => new Promise<never>(() => {}),
+		};
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 200 }),
+			factory: async () => stalling,
+		});
+		const { port } = await server.listen();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", {
+			model: "claude-sonnet-4-6",
+		});
+		expect(res.status).toBe(200);
+		expect(server.pendingCount()).toBe(1);
+
+		const closed = server.close().then(() => "closed" as const);
+		const outcome = await Promise.race([
+			closed,
+			new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 8_000)),
+		]);
+		expect(outcome).toBe("closed");
+		server = undefined; // already closed; afterEach must not close it twice
+	}, 20_000);
+
 	it("bounds governor CONSTRUCTION too, not just the call", async () => {
 		// pool.get() is where the reported outage actually lived: createGovernor()
 		// never returned, so the request never reached authorize() at all.

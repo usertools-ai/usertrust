@@ -396,7 +396,14 @@ export function createUsertrustServer(opts: {
 		if (tenant) {
 			try {
 				const governor = await withDeadline("pool.get", pool.get(tenant));
-				await governor.abort(entry.auth, reason);
+				// Bounded, unlike the /v1/abort route. This path is best-effort by
+				// construction (the catch below swallows) and it runs during shutdown and
+				// the sweep, where close() awaits it BEFORE pool.destroyAll() — so a
+				// stalled ledger here does not merely fail to void a hold, it prevents
+				// teardown from ever reaching the governor destroy that would void it
+				// anyway. The route keeps its unbounded abort because there a caller is
+				// waiting to be told the outcome; nobody is waiting here.
+				await withDeadline("abort", governor.abort(entry.auth, reason));
 			} catch {
 				// Best-effort — the Governor's own destroy()/reconciliation voids
 				// anything the control plane fails to abort here.

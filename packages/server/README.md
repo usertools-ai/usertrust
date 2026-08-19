@@ -75,12 +75,21 @@ call, it is a blocked one.
 
 | Setting | Default | Bounds |
 | --- | --- | --- |
-| `tigerbeetle.connectTimeoutMs` (tenant's usertrust config) | 5 s | Building a governor: the TigerBeetle handshake. Yields `503 ledger_unavailable`. |
-| `requestTimeoutMs` (server config) | 10 s | Any governor call that stalls some other way — including a cluster that dies AFTER the governor was built. Yields `503 governor_timeout`. |
+| `tigerbeetle.connectTimeoutMs` (tenant's usertrust config) | 3 s | Building a governor: the TigerBeetle handshake. Yields `503 ledger_unavailable`. |
+| `requestTimeoutMs` (server config) | 4 s | Any governor call that stalls some other way — including a cluster that dies AFTER the governor was built. Yields `503 governor_timeout`. |
 
-Keep `connectTimeoutMs` below `requestTimeoutMs`, so a ledger outage reports as the
-specific `ledger_unavailable` rather than the generic timeout, and keep `requestTimeoutMs`
-below your client's own timeout, so the client sees a real 503 instead of giving up first.
+The whole chain must be **monotonic**, or the specific error loses a race to the generic
+one:
+
+```
+connectTimeoutMs (3s)  <  requestTimeoutMs (4s)  <  your client's HTTP timeout  <  its outer timeout
+```
+
+That is not hypothetical. These defaults were first set to 5s and 10s "below the client's
+15s timeout" — but `usertrust-claude-code`'s 15s is its hook *process* timeout, while its
+HTTP request aborts at **5s**. A 5s ledger deadline answered at ~5.03s, so the client had
+already given up and the user saw a generic transport error instead of the labelled 503,
+every single time. Raising these without raising your client's timeout re-breaks it.
 
 `/v1/settle` and `/v1/abort` deliberately bound only governor CONSTRUCTION, not the
 settle/abort call itself: a timed-out settle has an unknown outcome on the money path (the

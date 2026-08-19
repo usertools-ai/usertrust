@@ -1526,6 +1526,40 @@ describe("TrustTBClient", () => {
 			errorSpy.mockRestore();
 		});
 
+		it("stops mid-backoff when the client is destroyed", async () => {
+			// _doReconnect retries five times with exponential backoff (up to 8s asleep).
+			// Checking `destroyed` only on ENTRY let a destroy() landing during a sleep be
+			// undone by the next iteration, which assigns a fresh native client — teardown
+			// completing while the client it tore down comes back, and per AGENTS.md an
+			// undestroyed TigerBeetle client is what keeps the process from exiting.
+			const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+			const midFlight = new TrustTBClient({ addresses: ["3000"] });
+			mockCreateClient.mockImplementation(() => {
+				throw new Error("cannot connect");
+			});
+			const callsBeforeDestroy = mockCreateClient.mock.calls.length;
+
+			const promise = midFlight.reconnect().catch((e: Error) => e);
+			// First attempt fails and the loop enters its 1s backoff.
+			await vi.advanceTimersByTimeAsync(100);
+			midFlight.destroy();
+			// Drain every remaining backoff window (1+2+4+8=15s).
+			await vi.advanceTimersByTimeAsync(16_000);
+
+			const err = await promise;
+			expect((err as Error).message).toMatch(/destroyed/i);
+			// The load-bearing assertion: no further client was constructed after the
+			// destroy. Exactly one attempt ran, the one already in flight.
+			expect(mockCreateClient.mock.calls.length).toBe(callsBeforeDestroy + 1);
+
+			resetCreateClient();
+			warnSpy.mockRestore();
+			logSpy.mockRestore();
+			errorSpy.mockRestore();
+		});
+
 		it("reconnect deduplicates concurrent calls", async () => {
 			client.destroy();
 			// Kept alive: a destroyed client refuses to reconnect at all, which would
