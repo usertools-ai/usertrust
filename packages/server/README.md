@@ -22,6 +22,32 @@ node -e "console.log(require('node:crypto').createHash('sha256').update(process.
 }
 ```
 
+That config runs with `"dryRun": false` — the default — so it needs a reachable
+TigerBeetle on `127.0.0.1:3001`. Without one, every `/v1/authorize` answers
+`503 ledger_unavailable` after `tigerbeetle.connectTimeoutMs`; add `"dryRun": true`
+to run the governor with no ledger at all.
+
+`npx usertrust tb start` does NOT start one — it prints "not yet implemented". Run
+it directly:
+
+```bash
+# LOCAL DEVELOPMENT ONLY. --development on BOTH commands (this repo's CI does the
+# same): without it they fail wherever Direct I/O is unavailable, and cluster 0 with
+# a single replica is reserved for testing — TigerBeetle warns about it on startup.
+#
+# CHECK `tigerbeetle version` FIRST: it must match the tigerbeetle-node pinned in
+# packages/core/package.json. A client newer than the server is NOT a connection
+# error — the cluster accepts the socket and then EVICTS the client, so this reads
+# as ledger_unavailable and looks identical to having no cluster at all.
+tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development ./0_0.tigerbeetle
+tigerbeetle start --addresses=3001 --development ./0_0.tigerbeetle
+```
+
+Check the port is actually TigerBeetle and not something else of yours — the failure
+looks identical whether nothing is listening or the wrong thing is, because the
+client connects and then waits forever for a reply in a protocol the listener does
+not speak.
+
 ```bash
 usertrust-server --config usertrust-server.config.json
 
@@ -54,8 +80,58 @@ passes through to `receipt.meter.computeMs` and is not a pricing input.
 | GET    | `/v1/health`    | none   | Liveness                                            |
 
 Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthorized`,
-`404 not_found` (unknown/already-settled transferId), `413 too_large` (1 MiB body cap).
+`404 not_found` (unknown/already-settled transferId), `413 too_large` (1 MiB body cap),
+`503 ledger_unavailable` (TigerBeetle unreachable — the `reason` names the addresses tried),
+`503 governor_timeout` (the governor did not answer within `requestTimeoutMs`).
 Pending holds not settled within `pendingTtlMs` (default 5 min) are swept and aborted.
+
+## Timeouts
+
+Every request is bounded, because a governance server that HANGS is strictly worse than
+one that errors: a caller cannot tell "slow" from "dead", and `usertrust-claude-code`
+resolves that ambiguity by failing CLOSED — so an unbounded wait there is not a slow tool
+call, it is a blocked one.
+
+| Setting | Default | Bounds |
+| --- | --- | --- |
+| `tigerbeetle.connectTimeoutMs` (tenant's usertrust config) | 3 s | Building a governor: the TigerBeetle handshake. Yields `503 ledger_unavailable`. |
+| `requestTimeoutMs` (server config) | 4 s | Any governor call that stalls some other way — including a cluster that dies AFTER the governor was built. Yields `503 governor_timeout`. |
+
+The whole chain must be **monotonic**, or the specific error loses a race to the generic
+one:
+
+```
+connectTimeoutMs (3s)  <  requestTimeoutMs (4s)  <  your client's HTTP timeout  <  its outer timeout
+```
+
+That is not hypothetical. These defaults were first set to 5s and 10s "below the client's
+15s timeout" — but `usertrust-claude-code`'s 15s is its hook *process* timeout, while its
+HTTP request aborts at **5s**. A 5s ledger deadline answered at ~5.03s, so the client had
+already given up and the user saw a generic transport error instead of the labelled 503,
+every single time. Raising these without raising your client's timeout re-breaks it.
+
+`/v1/settle` and `/v1/abort` deliberately bound only governor CONSTRUCTION, not the
+settle/abort call itself: a timed-out settle has an unknown outcome on the money path (the
+post may still land), and reporting it as failed would invite a double-settle.
+
+### Known residual: reclaiming a late authorization records a provider failure
+
+When `/v1/authorize` times out and the governor's `authorize()` lands afterwards, the
+server voids the now-unreachable hold by calling `Governor.abort()`. That is the only
+void path the Governor exposes, and it unconditionally does `recordFailure()` on the
+provider circuit breaker and appends an `llm_call_failed` audit event — but **no
+provider call ever happened**; the authorization merely arrived late.
+
+Consequences: five such timeouts open the provider circuit and start rejecting
+requests that would otherwise succeed, and the audit chain carries a call-failure
+record for a call that was never made. So the cleanup degrades the system it is
+cleaning up.
+
+Deliberately NOT fixed here. The correct fix is a neutral void — release the hold
+without provider-failure accounting — which means new Governor API and a decision
+about which audit event truthfully describes "hold released, no call attempted".
+That is frozen-format territory and deserves a designed answer rather than one
+invented alongside an outage fix. Found by Codex review of `67d6637`.
 
 ## Keys
 
@@ -72,6 +148,11 @@ In `evaluate_only` mode a denial is converted into a shadow allow: the client re
 `denied` event with `shadow: true` is emitted. No reservation is created — a `shadowId`
 is not a `transferId` and cannot be settled or aborted (those routes 404). This is the
 server-layer semantic; other usertrust layers define their own evaluate-only behavior.
+
+Only governance verdicts (4xx) are shadowed. Infrastructure failures (5xx — including
+`ledger_unavailable` and `governor_timeout`) are returned as failures even in
+`evaluate_only`: reporting an outage as `would_deny` would tell an operator their policy
+reached a verdict at the exact moment nothing evaluated one.
 
 ## Audit authority
 

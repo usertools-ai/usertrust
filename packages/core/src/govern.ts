@@ -80,7 +80,13 @@ import { detectInjection } from "./policy/injection.js";
 import { detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
-import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
+import {
+	DEFAULT_BUDGET,
+	DEFAULT_TB_CONNECT_TIMEOUT_MS,
+	TEARDOWN_VOID_BUDGET_MS,
+	VAULT_DIR,
+} from "./shared/constants.js";
+import { raceWithBudget } from "./shared/deadline.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
@@ -3321,7 +3327,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			// TigerBeetle auto-voids pending transfers after 300s, but
 			// explicit voiding releases holds immediately.
 			if (engine != null && typeof engine.voidAllPending === "function") {
-				await engine.voidAllPending();
+				// Bounded AND caught, so teardown always reaches engine.destroy() below.
+				// Voiding is a ledger request; an unreachable cluster never rejects one, and
+				// an open TigerBeetle client is what keeps the event loop from draining
+				// (AGENTS.md). Abandoning the void is safe — TigerBeetle auto-voids pending
+				// transfers after 300s — while a process that will not exit is not.
+				await raceWithBudget(
+					engine.voidAllPending().catch(() => {
+						// Best-effort; the 300s auto-void is the backstop.
+					}),
+					TEARDOWN_VOID_BUDGET_MS,
+				);
 			}
 
 			// Flush audit writes
@@ -3594,15 +3610,89 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 		clusterId: tbClusterId,
 	});
 
-	// Treasury (unconstrained) funds a per-session enforcing holding wallet.
-	await tbClient.createTreasury();
-	const treasury = tbClient.getTreasuryId();
+	// tigerbeetle-node has NO request timeout to configure — ClientInitArgs is
+	// cluster_id + replica_addresses and nothing else — and it treats an
+	// unreachable or unresponsive cluster as transient: it retries the handshake
+	// forever and its promise NEVER rejects. So "no cluster running", the single
+	// most likely production misconfiguration, did not surface as the
+	// LedgerUnavailableError the caller is written to catch; it hung
+	// createGovernor()/trust() for good, which hung every request behind it. A
+	// caller-side deadline is the only mechanism the client leaves available.
+	const connectTimeoutMs = config.tigerbeetle.connectTimeoutMs ?? DEFAULT_TB_CONNECT_TIMEOUT_MS;
+	// ONE budget for the whole handshake, not one per call. Per-call timeouts do not
+	// bound the handshake: a treasury that answers slowly followed by a stalled wallet
+	// took nearly 2x the configured value, which let the SERVER's generic request
+	// timeout fire first and replace the actionable `ledger_unavailable` with an
+	// opaque one — and direct SDK callers simply never got the bound they configured.
+	const handshakeEndsAt = Date.now() + connectTimeoutMs;
+	const expired = (): boolean => Date.now() >= handshakeEndsAt;
+	const overdue = (what: string): Error =>
+		new Error(
+			`TigerBeetle ${what} did not answer within ${connectTimeoutMs}ms ` +
+				`(addresses: ${tbAddresses.join(", ")})`,
+		);
+	const withConnectDeadline = async <T>(what: string, op: Promise<T>): Promise<T> => {
+		// Checked on the way IN and on the way OUT, because winning a race is not the
+		// same as being on time: promise reactions run before timers, so a call that
+		// completes as the budget expires beats its own overdue 0ms timer, and the NEXT
+		// call is then issued against a budget that is already gone. Two sequential
+		// calls could therefore take ~2x connectTimeoutMs and still report success.
+		if (expired()) {
+			throw overdue(what);
+		}
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let value: T;
+		try {
+			value = await Promise.race([
+				op,
+				// Deliberately NOT unref'd: this timer is the loud failure. Unref'ing it
+				// would let a process whose only pending work is a dead TB handshake exit
+				// silently instead of reporting the outage. It is always cleared below.
+				new Promise<never>((_resolve, reject) => {
+					timer = setTimeout(
+						() => {
+							reject(
+								new Error(
+									`TigerBeetle ${what} did not answer within ${connectTimeoutMs}ms ` +
+										`(addresses: ${tbAddresses.join(", ")})`,
+								),
+							);
+						},
+						Math.max(0, handshakeEndsAt - Date.now()),
+					);
+				}),
+			]);
+		} finally {
+			clearTimeout(timer);
+		}
+		if (expired()) {
+			throw overdue(what);
+		}
+		return value;
+	};
 
-	// Enforcing holding wallet (debits_must_not_exceed_credits), funded with the
-	// remaining session budget so cumulative pending debits cannot exceed it.
-	// A FRESH account id per session prevents double-funding a deterministic
-	// account across restarts (which would inflate the TB-enforced budget).
-	const holdingId = await tbClient.createFundedBudgetWallet(seedBudget);
+	let treasury: bigint;
+	let holdingId: bigint;
+	try {
+		// Treasury (unconstrained) funds a per-session enforcing holding wallet.
+		await withConnectDeadline("createTreasury", tbClient.createTreasury());
+		treasury = tbClient.getTreasuryId();
+
+		// Enforcing holding wallet (debits_must_not_exceed_credits), funded with the
+		// remaining session budget so cumulative pending debits cannot exceed it.
+		// A FRESH account id per session prevents double-funding a deterministic
+		// account across restarts (which would inflate the TB-enforced budget).
+		holdingId = await withConnectDeadline(
+			"createFundedBudgetWallet",
+			tbClient.createFundedBudgetWallet(seedBudget),
+		);
+	} catch (err) {
+		// The client keeps retrying on its own handles after the deadline fires. Without
+		// this the caller's retry loop leaks a live client — and its health-check timer —
+		// on every attempt, each one still hammering the dead cluster.
+		tbClient.destroy();
+		throw err;
+	}
 
 	// Pending transfer mapping (trustId string -> TB id + the reserved amount).
 	// heldAmount is what postPendingSpend caps against: TigerBeetle REJECTS a post

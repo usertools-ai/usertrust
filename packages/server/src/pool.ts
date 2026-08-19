@@ -5,6 +5,8 @@ import { join } from "node:path";
 import type { Governor, TrustOpts } from "usertrust";
 import { createGovernor } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
+import { requestTimeoutOf } from "./config.js";
+import { withDeadline } from "./deadline.js";
 
 export type GovernorFactory = (opts: TrustOpts) => Promise<Governor>;
 
@@ -43,6 +45,34 @@ export class GovernorPool {
 	async destroyAll(): Promise<void> {
 		const all = [...this.governors.values()];
 		this.governors.clear();
-		await Promise.allSettled(all.map(async (p) => (await p).destroy()));
+		await Promise.allSettled(
+			all.map(async (p) => {
+				// Bounded, because a governor whose CONSTRUCTION never settles would pin
+				// close() open forever — the same unbounded await that stopped
+				// /v1/authorize from ever answering. There is nothing to destroy until it
+				// exists, so give up waiting and let shutdown finish rather than hanging
+				// the process on a ledger that is already unreachable.
+				const governor = await withDeadline(
+					"pool.get",
+					p,
+					requestTimeoutOf(this.config),
+					// Construction that lands after shutdown gave up waiting still produced a
+					// live governor holding a TigerBeetle client, and AGENTS.md is explicit
+					// that an undestroyed client is what keeps the event loop from draining —
+					// so abandoning it does not just leak, it can stop the process exiting.
+					(late) => {
+						void late.destroy().catch(() => {});
+					},
+				);
+				// destroy() is bounded too, not just construction. It voids pending transfers
+				// BEFORE closing the native client, and that void is a ledger request — which
+				// never rejects when the cluster is gone. So a governor built while
+				// TigerBeetle was healthy and destroyed after it died hangs close() forever,
+				// which is the shutdown hang again by a third route: bounding construction
+				// only moved it. AGENTS.md requires every governor to be destroyed; when the
+				// ledger will not let that finish, shutdown proceeds regardless.
+				await withDeadline("destroy", governor.destroy(), requestTimeoutOf(this.config));
+			}),
+		);
 	}
 }

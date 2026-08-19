@@ -7,7 +7,8 @@ import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import type { Authorization } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
-import { resolveTenant } from "./config.js";
+import { requestTimeoutOf, resolveTenant } from "./config.js";
+import { Deadline } from "./deadline.js";
 import { EventBus } from "./events.js";
 import type { GovernorFactory } from "./pool.js";
 import { GovernorPool } from "./pool.js";
@@ -98,6 +99,34 @@ export function createUsertrustServer(opts: {
 		return token;
 	}
 
+	/**
+	 * Bound a governor interaction so a stalled dependency cannot pin an HTTP
+	 * request open forever.
+	 *
+	 * The ledger client this ultimately calls has no timeout of its own and retries
+	 * an unreachable cluster indefinitely without ever rejecting, so "TigerBeetle is
+	 * down" arrives here as a promise that simply never settles — indistinguishable,
+	 * from the socket, from a governor that is merely slow. `usertrust-claude-code`
+	 * resolves that ambiguity by failing CLOSED, which turns a dependency outage into
+	 * a client that blocks every tool call. Answering 503 is the whole point: it is
+	 * information, where a hang is not.
+	 *
+	 * The core-side `tigerbeetle.connectTimeoutMs` normally fires first and gives the
+	 * far more useful `ledger_unavailable`; this is the backstop for every OTHER way a
+	 * governor call can stall, including a cluster that dies AFTER the governor was
+	 * built (which no construction-time deadline can see).
+	 */
+	/**
+	 * One budget for the whole request, drawn down by each await.
+	 *
+	 * Per-await timeouts do not bound a request: a cold tenant waits for governor
+	 * construction and THEN for the governor call, so two 4s timeouts are an 8s
+	 * request — past the 5s at which usertrust-claude-code aborts. The client would
+	 * be gone before its own server answered, and worse, an authorize landing in
+	 * that window records a hold whose transferId nobody received.
+	 */
+	const newDeadline = (): Deadline => new Deadline(requestTimeoutOf(config));
+
 	async function handleAuthorize(
 		tenant: TenantConfig,
 		body: unknown,
@@ -111,9 +140,32 @@ export function createUsertrustServer(opts: {
 			});
 			return;
 		}
-		const governor = await pool.get(tenant);
+		const deadline = newDeadline();
+		const governor = await deadline.run("pool.get", pool.get(tenant));
 		try {
-			const auth = await governor.authorize(parsed.data);
+			const auth = await deadline.run("authorize", governor.authorize(parsed.data), (late) => {
+				// The deadline abandoned this authorize, but the ledger did not: the hold
+				// exists and its transferId reached nobody, so no client can ever settle or
+				// abort it. AGENTS.md gives every hold exactly one terminal outcome and makes
+				// no exception for "the server stopped waiting" — without this, each timed-out
+				// authorize permanently retires part of the tenant's budget, and a retry loop
+				// against a slow ledger exhausts it while every request reports a timeout.
+				const reason = "authorize abandoned after server deadline";
+				void governor
+					.abort(late, reason)
+					.then(() => {
+						bus.publish(tenant.id, {
+							type: "aborted",
+							transferId: late.transferId,
+							reason,
+							at: new Date().toISOString(),
+						});
+					})
+					.catch(() => {
+						// Best-effort, like the sweeper's abortEntry: the governor's own
+						// destroy()/pending reconciliation voids whatever is left.
+					});
+			});
 			pending.set(auth.transferId, { auth, tenantId: tenant.id, createdAt: Date.now() });
 			bus.publish(tenant.id, {
 				type: "authorized",
@@ -130,7 +182,13 @@ export function createUsertrustServer(opts: {
 			});
 		} catch (err) {
 			const mapped = toHttpError(err);
-			const shadow = config.enforcement === "evaluate_only" && mapped.status !== 500;
+			// Shadow mode reports what enforcement WOULD have decided, so it may only
+			// swallow governance verdicts (4xx). Infrastructure failures must stay
+			// failures: this read `!== 500` until `ledger_unavailable` and
+			// `governor_timeout` started answering 503, at which point a ledger outage
+			// would have been reported to the caller as a clean 200 "would_deny" — a
+			// dependency outage laundered into a policy opinion.
+			const shadow = config.enforcement === "evaluate_only" && mapped.status < 500;
 			bus.publish(tenant.id, {
 				type: "denied",
 				error: mapped.body.error,
@@ -173,7 +231,12 @@ export function createUsertrustServer(opts: {
 		// the entry so a transient settle error stays retryable.
 		pending.delete(transferId);
 		try {
-			const governor = await pool.get(tenant);
+			const governor = await newDeadline().run("pool.get", pool.get(tenant));
+			// NOT deadlined: a timed-out settle has an UNKNOWN outcome on the money path
+			// (the post may land in the ledger afterwards), and the catch below re-inserts
+			// the pending entry to keep it retryable — so timing out here would invite a
+			// double-settle. Governor CONSTRUCTION above is bounded because it has no such
+			// ambiguity: a governor either exists or it does not.
 			const receipt = await governor.settle(entry.auth, usage);
 			bus.publish(tenant.id, {
 				type: "settled",
@@ -209,7 +272,9 @@ export function createUsertrustServer(opts: {
 		// Atomic claim with re-insert on failure (same contract as settle).
 		pending.delete(transferId);
 		try {
-			const governor = await pool.get(tenant);
+			const governor = await newDeadline().run("pool.get", pool.get(tenant));
+			// Not deadlined, for the same reason as settle: an abort that timed out may
+			// still void the hold.
 			await governor.abort(entry.auth, parsed.data.error);
 		} catch (err) {
 			pending.set(transferId, entry);
@@ -293,7 +358,7 @@ export function createUsertrustServer(opts: {
 			return;
 		}
 		if (req.method === "GET" && url === "/v1/budget") {
-			const governor = await pool.get(tenant);
+			const governor = await newDeadline().run("pool.get", pool.get(tenant));
 			sendJson(res, 200, { remaining: governor.budgetRemaining() });
 			return;
 		}
@@ -332,12 +397,27 @@ export function createUsertrustServer(opts: {
 		transferId: string,
 		entry: PendingEntry,
 		reason: string,
+		shared?: Deadline,
 	): Promise<void> {
 		const tenant = config.tenants.find((t) => t.id === entry.tenantId);
 		if (tenant) {
+			// The budget is the CALLER's when one is passed. The previous version created
+			// it here and the comment already said why that is wrong — close() awaits
+			// entries sequentially, so a per-entry budget makes shutdown N x
+			// requestTimeoutMs — and then created it here anyway. The prose predicted the
+			// bug and was ignored by its own author; `sweeps N stalled holds within ONE
+			// budget` is now the test that would have caught it.
+			const abortDeadline = shared ?? newDeadline();
 			try {
-				const governor = await pool.get(tenant);
-				await governor.abort(entry.auth, reason);
+				const governor = await abortDeadline.run("pool.get", pool.get(tenant));
+				// Bounded, unlike the /v1/abort route. This path is best-effort by
+				// construction (the catch below swallows) and it runs during shutdown and
+				// the sweep, where close() awaits it BEFORE pool.destroyAll() — so a
+				// stalled ledger here does not merely fail to void a hold, it prevents
+				// teardown from ever reaching the governor destroy that would void it
+				// anyway. The route keeps its unbounded abort because there a caller is
+				// waiting to be told the outcome; nobody is waiting here.
+				await abortDeadline.run("abort", governor.abort(entry.auth, reason));
 			} catch {
 				// Best-effort — the Governor's own destroy()/reconciliation voids
 				// anything the control plane fails to abort here.
@@ -393,8 +473,12 @@ export function createUsertrustServer(opts: {
 			// layer as the backstop.
 			const remaining = [...pending.entries()];
 			pending.clear();
+			// ONE budget for the whole sweep. Shutdown must be bounded by a number the
+			// operator configured, not by that number times however many holds happened
+			// to be open.
+			const shutdownDeadline = newDeadline();
 			for (const [transferId, entry] of remaining) {
-				await abortEntry(transferId, entry, "server shutdown");
+				await abortEntry(transferId, entry, "server shutdown", shutdownDeadline);
 				bus.publish(entry.tenantId, {
 					type: "aborted",
 					transferId,

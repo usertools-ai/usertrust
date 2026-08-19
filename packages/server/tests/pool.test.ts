@@ -1,5 +1,5 @@
 import type { TrustOpts } from "usertrust";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ServerConfig, TenantConfig } from "../src/config.js";
 import { hashKey } from "../src/config.js";
 import { GovernorPool } from "../src/pool.js";
@@ -20,6 +20,7 @@ function config(): ServerConfig {
 		stateDir: "/tmp/utsrv-pool",
 		enforcement: "enforce",
 		pendingTtlMs: 300_000,
+		requestTimeoutMs: 10_000,
 		dryRun: true,
 		tenants: [TENANT_A, TENANT_B],
 	};
@@ -87,4 +88,32 @@ describe("GovernorPool", () => {
 		await pool.destroyAll();
 		expect(destroyed).toBe(2);
 	});
+});
+
+describe("GovernorPool.destroyAll — construction that lands after shutdown", () => {
+	it("destroys a governor that resolves after the shutdown deadline", async () => {
+		// AGENTS.md: callers MUST destroy every governor or the process hangs on the
+		// TigerBeetle client — an open client is exactly what keeps the event loop
+		// from draining, so an abandoned late governor does not merely leak, it can
+		// stop the process exiting. destroyAll() gave up waiting; the governor still
+		// arrived.
+		const fake = createFakeGovernor();
+		let destroyed = false;
+		const governor = {
+			...fake.governor,
+			destroy: async () => {
+				destroyed = true;
+			},
+		};
+		const pool = new GovernorPool({ ...config(), requestTimeoutMs: 100 }, async () => {
+			await new Promise((resolve) => setTimeout(resolve, 400));
+			return governor;
+		});
+		void pool.get(TENANT_A);
+		await pool.destroyAll();
+		// destroyAll returned without waiting it out...
+		expect(destroyed).toBe(false);
+		// ...but the governor is still destroyed once it exists.
+		await vi.waitFor(() => expect(destroyed).toBe(true), { timeout: 5_000 });
+	}, 20_000);
 });
