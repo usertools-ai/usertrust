@@ -83,6 +83,28 @@ describe("Deadline", () => {
 		expect(seen).toEqual(["already here"]);
 	}, 10_000);
 
+	it("observes a late rejection even when no cleanup was supplied", async () => {
+		// The reclamation continuation was attached only when `onAbandoned` was given —
+		// so on the early-timeout path with no cleanup, `op` had NO handler at all. A
+		// slow factory can exhaust the budget, return a promise, get its 503, and reject
+		// a second later into nothing: an unhandled rejection that can terminate Node.
+		// Most callers pass no cleanup, so this was the common path, not the rare one.
+		const deadline = new Deadline(60);
+		await deadline.run("first", new Promise((resolve) => setTimeout(resolve, 10)));
+		await new Promise((resolve) => setTimeout(resolve, 80));
+
+		let failLate: ((err: Error) => void) | undefined;
+		const op = new Promise<string>((_resolve, reject) => {
+			failLate = reject;
+		});
+		await expect(deadline.run("second", op)).rejects.toBeInstanceOf(GovernorTimeoutError);
+		failLate?.(new Error("landed as a failure, after nobody was listening"));
+		// An escaped rejection shows up as an unhandled error for this file and a
+		// non-zero exit, not as a failed assertion here.
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(true).toBe(true);
+	}, 10_000);
+
 	it("contains a cleanup that rejects, instead of taking the process down", async () => {
 		// `onAbandoned` is typed void-returning, but an async function is assignable to
 		// it — so a cleanup that rejects hands back a promise nobody observes, and an

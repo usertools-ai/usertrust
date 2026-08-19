@@ -113,6 +113,7 @@ import {
 	TEARDOWN_VOID_BUDGET_MS,
 	VAULT_DIR,
 } from "./shared/constants.js";
+import { raceWithBudget } from "./shared/deadline.js";
 import {
 	InsufficientBalanceError,
 	LedgerUnavailableError,
@@ -1871,10 +1872,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					}
 				}
 			})();
-			await Promise.race([
+			await raceWithBudget(
 				perHoldVoids.catch(() => {}),
-				new Promise<void>((resolve) => setTimeout(resolve, remainingVoidMs())),
-			]);
+				remainingVoidMs(),
+			);
 			activeAuths.clear();
 			unpostedHolds.clear();
 
@@ -1890,13 +1891,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// voidAllPending THROW must not skip destroy() — but the failure that
 				// actually happens is a HANG, which a catch does not cover, and the ledger
 				// client never rejects.
-				const sweep = engine.voidAllPending();
-				await Promise.race([
-					sweep.catch(() => {
+				await raceWithBudget(
+					engine.voidAllPending().catch(() => {
 						// Best-effort — TigerBeetle auto-voids pending transfers after 300s.
 					}),
-					new Promise<void>((resolve) => setTimeout(resolve, remainingVoidMs())),
-				]);
+					remainingVoidMs(),
+				);
 			}
 
 			// Flush audit

@@ -75,29 +75,31 @@ export class Deadline {
 		// `onAbandoned` would be skipped, leaving the hold to the TTL sweep. Decide on
 		// the CLOCK, not on a race the clock cannot win.
 		let timedOut = this.remainingMs() === 0;
-		if (onAbandoned !== undefined) {
-			// Attached BEFORE the race, so nothing can land in the gap. A late REJECTION
-			// produced nothing to reclaim and is swallowed deliberately: by then it has no
-			// listener left, and an unhandled rejection would take the process down over a
-			// failure the caller was already told about.
-			op.then(
-				(value) => {
-					if (!timedOut) return;
-					// The cleanup's OWN failure must not become an unhandled rejection
-					// either. This callback is typed `void`-returning, but an async function
-					// is assignable to that, so a caller can hand back a promise we would
-					// otherwise drop — and dropping a rejected one can terminate Node.
-					// Cleanup is best-effort by nature; the governor's own
-					// destroy/reconciliation is the backstop.
-					try {
-						void Promise.resolve(onAbandoned(value)).catch(() => {});
-					} catch {
-						/* a synchronous throw from cleanup is equally non-fatal */
-					}
-				},
-				() => {},
-			);
-		}
+		// ALWAYS attached, and always BEFORE the race — including on the early-timeout
+		// path below, which returns without ever assembling one. `op` outlives this call
+		// on every timeout path, so an unobserved rejection becomes an unhandled
+		// rejection that can terminate Node: a slow factory can exhaust the budget,
+		// return a promise, get its 503, and reject a second later into nothing. The
+		// rejection is swallowed deliberately — by then it has no listener left and the
+		// caller was already told — but it must be OBSERVED. Guarding this attachment on
+		// `onAbandoned` being present was the bug.
+		op.then(
+			(value) => {
+				if (!timedOut || onAbandoned === undefined) return;
+				// The cleanup's OWN failure must not become an unhandled rejection
+				// either. This callback is typed `void`-returning, but an async function
+				// is assignable to that, so a caller can hand back a promise we would
+				// otherwise drop — and dropping a rejected one can terminate Node.
+				// Cleanup is best-effort by nature; the governor's own
+				// destroy/reconciliation is the backstop.
+				try {
+					void Promise.resolve(onAbandoned(value)).catch(() => {});
+				} catch {
+					/* a synchronous throw from cleanup is equally non-fatal */
+				}
+			},
+			() => {},
+		);
 		// AFTER the continuation is attached, never before: an op refused on the clock
 		// still has to be reclaimed, and returning early without a listener is how a
 		// hold gets stranded.

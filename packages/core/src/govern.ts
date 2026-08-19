@@ -86,6 +86,7 @@ import {
 	TEARDOWN_VOID_BUDGET_MS,
 	VAULT_DIR,
 } from "./shared/constants.js";
+import { raceWithBudget } from "./shared/deadline.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
@@ -3331,13 +3332,12 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// an open TigerBeetle client is what keeps the event loop from draining
 				// (AGENTS.md). Abandoning the void is safe — TigerBeetle auto-voids pending
 				// transfers after 300s — while a process that will not exit is not.
-				const sweep = engine.voidAllPending();
-				await Promise.race([
-					sweep.catch(() => {
+				await raceWithBudget(
+					engine.voidAllPending().catch(() => {
 						// Best-effort; the 300s auto-void is the backstop.
 					}),
-					new Promise<void>((resolve) => setTimeout(resolve, TEARDOWN_VOID_BUDGET_MS)),
-				]);
+					TEARDOWN_VOID_BUDGET_MS,
+				);
 			}
 
 			// Flush audit writes
