@@ -16,7 +16,7 @@
 		"fleet:test": "node --import tsx --test scripts/fleet/*.test.mts",
 		"drift:check": "tsx scripts/pricing-drift/run.mts",
 		"drift:test": "node --import tsx --test scripts/pricing-drift/*.test.mts",
-		"typecheck": "tsc -b && tsc -p packages/core/tsconfig.type-tests.json && tsc -p packages/openclaw/tsconfig.type-tests.json",
+		"typecheck": "tsc -b && tsc -p packages/core/tsconfig.type-tests.json && tsc -p packages/openclaw/tsconfig.type-tests.json && tsc -p scripts/pricing-drift/tsconfig.json",
 		"typecheck:types": "tsc -p packages/core/tsconfig.type-tests.json"
 	},
 	"devDependencies": {

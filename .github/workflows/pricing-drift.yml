@@ -167,7 +167,12 @@ jobs:
           # comparison itself came back clean: the tree that was checked is not
           # the one master is serving, so the current table was never examined.
           # A green run here would assert something no run established.
+          # CONCLUSIVE means: the instrument worked, the tree was current, and a
+          # real comparison produced a real report. Only a conclusive run has
+          # standing to REPLACE what an earlier conclusive run established.
+          CONCLUSIVE=yes
           if [ "$FRESH" != "true" ] || [ "$SELFTEST" != "success" ] || [ "$EXIT_CODE" != "1" ] || [ ! -s drift-report.md ]; then
+            CONCLUSIVE=no
             TITLE="Pricing drift check could not run"
             {
               echo "# The pricing drift check did not run"
@@ -198,10 +203,13 @@ jobs:
           EXISTING="$(gh issue list --label pricing-drift --state open \
             --json number --jq '.[0].number // empty')"
 
-          if [ -n "$EXISTING" ] && [ "$FRESH" != "true" ]; then
-            # Stale runs COMMENT, never edit. Overwriting a live drift issue's
-            # body with "could not run" would erase the findings a fresh run
-            # established, which is a worse outcome than the staleness itself.
+          if [ -n "$EXISTING" ] && [ "$CONCLUSIVE" != "yes" ]; then
+            # EVERY inconclusive result comments; only a conclusive one edits.
+            # Scoping this to stale heads alone was too narrow: a FRESH run whose
+            # source returned 500 also reaches here, and replacing a live drift
+            # body with a generic could-not-run notice erases findings that a
+            # working run established. Losing a real finding to a transient
+            # outage is strictly worse than the outage.
             gh issue comment "$EXISTING" --body-file issue-body.md
           elif [ -n "$EXISTING" ]; then
             gh issue edit "$EXISTING" --title "$TITLE" --body-file issue-body.md
