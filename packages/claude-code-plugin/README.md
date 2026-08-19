@@ -17,11 +17,18 @@ PostToolUse settles, Stop/SubagentStop abort anything left hanging.
    `openssl rand -hex 32`
 2. Add its SHA-256 hash to your `usertrust-server` config, set `"enforcement":
    "evaluate_only"`, and start the server. **Both halves are required for stage 1** —
-   `enforcement` defaults to `enforce`, and `UT_FAIL_OPEN=1` only covers transport and
-   server failures. It does NOT soften a **402 / 403 / 429** — budget, policy, and
-   anomaly verdicts are enforced denials in every stage — so a matching policy, an
-   exhausted budget, or an anomaly cutoff would block tool calls on a server left at
-   its default.
+   `enforcement` defaults to `enforce`, and `UT_FAIL_OPEN=1` does NOT soften a
+   **402 / 403 / 429** — budget, policy, and anomaly verdicts are enforced denials in
+   every stage — so a matching policy, an exhausted budget, or an anomaly cutoff would
+   block tool calls on a server left at its default.
+
+   > **What `UT_FAIL_OPEN=1` does soften, and it is more than "the server is down":**
+   > every response that is not a verdict, including **401 unauthorized**. A missing,
+   > stale, or wrong `UT_SERVER_KEY` therefore runs the whole session **ungoverned and
+   > silently** in stages 1-2 — the hook allows with a "proceeding ungoverned" warning
+   > that is easy to miss in a passing session. Verify with `/v1/budget` before
+   > trusting a stage-2 deny rate: a tenant that never authorizes anything also never
+   > denies anything.
 3. Export the plugin environment before launching Claude Code:
 
 ```sh
@@ -73,7 +80,9 @@ server that can never authorize anything still reports healthy:
 
 ```sh
 # 1. Liveness — necessary, NOT sufficient. This says nothing about the ledger.
-curl -fsS "$UT_SERVER_URL/v1/health"
+#    Bounded too: a black-holed host or a stalled DNS/connect blocks for minutes
+#    here, and the preflight never reaches the request that actually matters.
+curl -fsS --max-time 5 "$UT_SERVER_URL/v1/health"
 
 # 2. The one that matters: a real authorize, with your real key, bounded.
 #    --max-time 5 MATCHES THE HOOK (hooks/lib.mjs aborts at 5s). A more generous
@@ -106,8 +115,12 @@ not. Start one — `npx usertrust tb start` does NOT do this, it prints "not yet
 implemented" — or run the server with `"dryRun": true` to skip the ledger:
 
 ```sh
-tigerbeetle format --cluster=0 --replica=0 --replica-count=1 ./0_0.tigerbeetle
-tigerbeetle start --addresses=3001 ./0_0.tigerbeetle    # 3001 is the client default
+# LOCAL DEVELOPMENT ONLY. --development on BOTH commands (the repo's own CI does
+# this): without it these fail on hosts where Direct I/O is unavailable, and
+# cluster 0 with one replica is reserved for testing — TigerBeetle says so on
+# startup. A production ledger is a real cluster, not this.
+tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development ./0_0.tigerbeetle
+tigerbeetle start --addresses=3001 --development ./0_0.tigerbeetle   # 3001 is the client default
 ```
 
 Check what is actually on that port, too: a foreign listener hangs the ledger client
