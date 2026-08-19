@@ -15,7 +15,12 @@ PostToolUse settles, Stop/SubagentStop abort anything left hanging.
 
 1. Generate a tenant key (high-entropy secret — this is an API-key model, not a password):
    `openssl rand -hex 32`
-2. Add its SHA-256 hash to your `usertrust-server` config and start the server.
+2. Add its SHA-256 hash to your `usertrust-server` config, set `"enforcement":
+   "evaluate_only"`, and start the server. **Both halves are required for stage 1** —
+   `enforcement` defaults to `enforce`, and `UT_FAIL_OPEN=1` only covers transport and
+   server failures. It does NOT soften a 402/403, which the hook enforces as a real
+   deny, so a matching policy or an exhausted budget would block tool calls on a server
+   left at its default.
 3. Export the plugin environment before launching Claude Code:
 
 ```sh
@@ -70,15 +75,23 @@ server that can never authorize anything still reports healthy:
 curl -fsS "$UT_SERVER_URL/v1/health"
 
 # 2. The one that matters: a real authorize, with your real key, bounded.
-TX=$(curl -fsS --max-time 20 "$UT_SERVER_URL/v1/authorize" \
+#    NOT `-f`: that discards the body on an HTTP error, which is exactly the
+#    body carrying the reason you are running this to find out.
+BODY=$(curl -sS --max-time 20 -w '\n%{http_code}' "$UT_SERVER_URL/v1/authorize" \
   -H "Authorization: Bearer $UT_SERVER_KEY" -H "content-type: application/json" \
-  -d '{"model":"claude-sonnet-4-6","estimatedInputTokens":200,"maxOutputTokens":100}' \
-  | node -pe 'JSON.parse(require("fs").readFileSync(0)).transferId')
+  -d '{"model":"claude-sonnet-4-6","estimatedInputTokens":200,"maxOutputTokens":100}')
+CODE=$(printf '%s' "$BODY" | tail -n1)
+printf '%s\n' "$BODY" | sed '$d'          # the response — read it if CODE is not 200
 
-# 3. Give the hold back, so the preflight does not itself leak budget.
-curl -fsS --max-time 20 "$UT_SERVER_URL/v1/abort" \
-  -H "Authorization: Bearer $UT_SERVER_KEY" -H "content-type: application/json" \
-  -d "{\"transferId\":\"$TX\"}"
+# 3. Only on success: give the hold back, so the preflight does not itself leak budget.
+if [ "$CODE" = "200" ]; then
+  TX=$(printf '%s' "$BODY" | sed '$d' | node -pe 'JSON.parse(require("fs").readFileSync(0)).transferId')
+  curl -sS --max-time 20 "$UT_SERVER_URL/v1/abort" \
+    -H "Authorization: Bearer $UT_SERVER_KEY" -H "content-type: application/json" \
+    -d "{\"transferId\":\"$TX\"}"
+else
+  echo "preflight FAILED with HTTP $CODE — do not enter stage 3"
+fi
 ```
 
 If step 2 returns `503 ledger_unavailable`, the server is up but its TigerBeetle is
@@ -107,15 +120,27 @@ tool call blocking instead of one curl printing an error.
 If the governance server is unreachable, times out, answers 5xx, or returns a
 malformed body, the PreToolUse hook exits 2 and the tool call is **blocked**.
 Set `UT_FAIL_OPEN=1` to invert this: the call proceeds with an explicit
-"proceeding ungoverned" warning. This is stage 3 above; do not arrive here by
-accident.
+"proceeding ungoverned" warning — that is stage 1 or 2 above, depending on the
+server's `enforcement`. Blocking is **stage 3**, the posture you get by leaving
+`UT_FAIL_OPEN` unset; do not arrive there by accident.
 
 A block repeats whatever the server said, so the stderr line names the cause —
 e.g. `unexpected governance response 503 — ledger_unavailable: TigerBeetle …`
-rather than a bare status code. The server bounds its own work
-(`requestTimeoutMs`, default 10s) below this hook's 15s timeout, specifically so
-that a stalled dependency reaches you as a labelled 503 you can read instead of a
-hook timeout you have to guess at. Policy (403) and budget (402) denials are
+rather than a bare status code.
+
+For that to be reachable the timeouts have to be **monotonic**, and there are two
+different client timeouts here, which is easy to get wrong:
+
+```
+server ledger deadline (3s)  <  server request deadline (4s)
+  <  this hook's HTTP abort (5s, hooks/lib.mjs)  <  the hook process timeout (15s, hooks.json)
+```
+
+The 15s in `hooks.json` bounds the **process**; the HTTP request itself aborts at
+**5s**. So a server whose own deadline is longer than 5s can only ever reach you as
+a generic transport error — its labelled 503 arrives after you stopped listening. If
+you raise `requestTimeoutMs` past 5s, raise `hooks/lib.mjs`'s abort with it or the
+diagnosis above goes away. Policy (403) and budget (402) denials are
 always enforced denials, not failures. PostToolUse/Stop/SubagentStop never
 block — the tool already ran; failed settlements leave the hold on disk for
 Stop cleanup, and the server's pending-TTL sweep voids anything orphaned.
