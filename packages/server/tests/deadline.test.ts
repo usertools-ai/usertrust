@@ -105,6 +105,38 @@ describe("Deadline", () => {
 		expect(true).toBe(true);
 	}, 10_000);
 
+	it("refuses a value that WINS the race but arrives after the budget", async () => {
+		// The scenario is a stalled event loop, and it is reproducible rather than
+		// theoretical. `op` resolves from a timer due at 30ms and the deadline's timer is
+		// due at 50ms; the loop is then blocked synchronously past both. When it resumes,
+		// Node runs the earlier timer first and drains microtasks before the next one —
+		// so `op`'s reaction settles the race while the budget is already spent. Winning
+		// a race is not the same as being on time.
+		const deadline = new Deadline(50);
+		const op = new Promise<string>((resolve) => setTimeout(() => resolve("late winner"), 30));
+		setTimeout(() => {
+			const until = Date.now() + 120;
+			while (Date.now() < until) {
+				// Deliberate synchronous stall: this is the condition under test.
+			}
+		}, 10);
+
+		const seen: string[] = [];
+		const settled = await deadline
+			.run("op", op, (value) => {
+				seen.push(value);
+			})
+			.then(
+				() => "resolved" as const,
+				(err: unknown) => err,
+			);
+
+		expect(settled).toBeInstanceOf(GovernorTimeoutError);
+		// And the value it refused is reclaimed rather than silently kept — for
+		// /v1/authorize that value is a ledger hold nobody can settle.
+		expect(seen).toEqual(["late winner"]);
+	}, 10_000);
+
 	it("contains a cleanup that rejects, instead of taking the process down", async () => {
 		// `onAbandoned` is typed void-returning, but an async function is assignable to
 		// it — so a cleanup that rejects hands back a promise nobody observes, and an

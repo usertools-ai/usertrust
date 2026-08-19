@@ -32,7 +32,7 @@ describe("teardown does not delay process exit", () => {
 		// pure overhead and a leaked timer is pure delay.
 		writeFileSync(
 			script,
-			`import { createGovernor } from "${join(REPO_ROOT, "packages/core/dist/headless.js")}";
+			`import { createGovernor } from "${join(REPO_ROOT, "packages/core/src/headless.ts")}";
 const governor = await createGovernor({ vaultBase: ${JSON.stringify(dir)}, dryRun: true, budget: 1000 });
 await governor.destroy();
 process.stdout.write("destroyed");
@@ -41,13 +41,20 @@ process.stdout.write("destroyed");
 			"utf-8",
 		);
 
+		// Run through `tsx` against SOURCE, not `dist/`. `dist/` is gitignored and the CI
+		// test job runs vitest straight after `npm ci` with no build, so a child
+		// importing dist fails with ERR_MODULE_NOT_FOUND on every clean checkout — and
+		// vitest's source alias does not reach a child process. Confirmed by deleting
+		// dist/ locally, which reproduced exactly that.
+		const tsx = join(REPO_ROOT, "node_modules", ".bin", "tsx");
 		const startedAt = Date.now();
-		const out = execFileSync(process.execPath, [script], { encoding: "utf-8", timeout: 60_000 });
+		const out = execFileSync(tsx, [script], { encoding: "utf-8", timeout: 120_000 });
 		const elapsedMs = Date.now() - startedAt;
 
 		expect(out).toContain("destroyed");
 		// A leaked 5s teardown timer shows up here and nowhere else. Generous, since
-		// this pays Node startup and module load too.
+		// this pays Node startup and a TypeScript transform too — but still strictly
+		// under the 5s budget, which is what makes the leak detectable at all.
 		expect(elapsedMs).toBeLessThan(4_500);
 	}, 90_000);
 });

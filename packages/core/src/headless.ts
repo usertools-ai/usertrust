@@ -653,10 +653,25 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 	// timeout fire first and replace the actionable `ledger_unavailable` with an
 	// opaque one — and direct SDK callers simply never got the bound they configured.
 	const handshakeEndsAt = Date.now() + connectTimeoutMs;
+	const expired = (): boolean => Date.now() >= handshakeEndsAt;
+	const overdue = (what: string): Error =>
+		new Error(
+			`TigerBeetle ${what} did not answer within ${connectTimeoutMs}ms ` +
+				`(addresses: ${tbAddresses.join(", ")})`,
+		);
 	const withConnectDeadline = async <T>(what: string, op: Promise<T>): Promise<T> => {
+		// Checked on the way IN and on the way OUT, because winning a race is not the
+		// same as being on time: promise reactions run before timers, so a call that
+		// completes as the budget expires beats its own overdue 0ms timer, and the NEXT
+		// call is then issued against a budget that is already gone. Two sequential
+		// calls could therefore take ~2x connectTimeoutMs and still report success.
+		if (expired()) {
+			throw overdue(what);
+		}
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		let value: T;
 		try {
-			return await Promise.race([
+			value = await Promise.race([
 				op,
 				// Deliberately NOT unref'd: this timer is the loud failure. Unref'ing it
 				// would let a process whose only pending work is a dead TB handshake exit
@@ -678,6 +693,10 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 		} finally {
 			clearTimeout(timer);
 		}
+		if (expired()) {
+			throw overdue(what);
+		}
+		return value;
 	};
 
 	let treasury: bigint;

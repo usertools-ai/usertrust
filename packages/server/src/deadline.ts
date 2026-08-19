@@ -83,32 +83,38 @@ export class Deadline {
 		// rejection is swallowed deliberately — by then it has no listener left and the
 		// caller was already told — but it must be OBSERVED. Guarding this attachment on
 		// `onAbandoned` being present was the bug.
+		// Cleanup runs at most once, from whichever path notices the value is late.
+		let reclaimed = false;
+		const reclaim = (value: T): void => {
+			if (reclaimed || onAbandoned === undefined) return;
+			reclaimed = true;
+			// The cleanup's OWN failure must not become an unhandled rejection either. This
+			// callback is typed `void`-returning, but an async function is assignable to
+			// that, so a caller can hand back a promise we would otherwise drop — and
+			// dropping a rejected one can terminate Node. Cleanup is best-effort by nature;
+			// the governor's own destroy/reconciliation is the backstop.
+			try {
+				void Promise.resolve(onAbandoned(value)).catch(() => {});
+			} catch {
+				/* a synchronous throw from cleanup is equally non-fatal */
+			}
+		};
 		op.then(
 			(value) => {
-				if (!timedOut || onAbandoned === undefined) return;
-				// The cleanup's OWN failure must not become an unhandled rejection
-				// either. This callback is typed `void`-returning, but an async function
-				// is assignable to that, so a caller can hand back a promise we would
-				// otherwise drop — and dropping a rejected one can terminate Node.
-				// Cleanup is best-effort by nature; the governor's own
-				// destroy/reconciliation is the backstop.
-				try {
-					void Promise.resolve(onAbandoned(value)).catch(() => {});
-				} catch {
-					/* a synchronous throw from cleanup is equally non-fatal */
-				}
+				if (timedOut) reclaim(value);
 			},
 			() => {},
 		);
 		// AFTER the continuation is attached, never before: an op refused on the clock
-		// still has to be reclaimed, and returning early without a listener is how a
-		// hold gets stranded.
+		// still has to be reclaimed, and returning early without a listener is how a hold
+		// gets stranded.
 		if (timedOut) {
 			throw new GovernorTimeoutError(what, this.budgetMs);
 		}
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		let value: T;
 		try {
-			return await Promise.race([
+			value = await Promise.race([
 				op,
 				new Promise<never>((_resolve, reject) => {
 					timer = setTimeout(() => {
@@ -122,6 +128,19 @@ export class Deadline {
 		} finally {
 			clearTimeout(timer);
 		}
+		// THE CLOCK DECIDES ON THE WAY OUT TOO — the third site that needed saying so.
+		// Promise reactions run before timers, so an event loop delayed across `endsAt`
+		// lets a queued `op` reaction settle before the overdue timer callback: the value
+		// comes back with the budget already spent, `timedOut` still false, and the
+		// continuation above declines to reclaim it. For /v1/authorize that is a hold
+		// retained after the caller has gone. Winning a race is not the same as being on
+		// time.
+		if (this.remainingMs() === 0) {
+			timedOut = true;
+			reclaim(value);
+			throw new GovernorTimeoutError(what, this.budgetMs);
+		}
+		return value;
 	}
 }
 

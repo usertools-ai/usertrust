@@ -34,6 +34,11 @@ it directly:
 # LOCAL DEVELOPMENT ONLY. --development on BOTH commands (this repo's CI does the
 # same): without it they fail wherever Direct I/O is unavailable, and cluster 0 with
 # a single replica is reserved for testing — TigerBeetle warns about it on startup.
+#
+# CHECK `tigerbeetle version` FIRST: it must match the tigerbeetle-node pinned in
+# packages/core/package.json. A client newer than the server is NOT a connection
+# error — the cluster accepts the socket and then EVICTS the client, so this reads
+# as ledger_unavailable and looks identical to having no cluster at all.
 tigerbeetle format --cluster=0 --replica=0 --replica-count=1 --development ./0_0.tigerbeetle
 tigerbeetle start --addresses=3001 --development ./0_0.tigerbeetle
 ```
