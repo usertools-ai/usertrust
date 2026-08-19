@@ -228,6 +228,28 @@ describe("pre-tool-use hook", () => {
 		expect(result.stderr.length).toBeLessThan(1000);
 	});
 
+	it("denies a 429 anomaly verdict even with UT_FAIL_OPEN=1", async () => {
+		// An anomaly cutoff is a VERDICT, not a transport failure. It used to fall
+		// through to the generic error path, where fail-open turned it into an allow —
+		// so the documented promise that fail-open only softens transport and server
+		// failures was false for exactly the verdict most likely to fire mid-incident,
+		// and stage 2 silently did not enforce it.
+		const port = await startFake(() => ({
+			status: 429,
+			json: { error: "anomaly", reason: "spend rate 8x baseline" },
+		}));
+		const result = await runHook(HOOK, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+			UT_FAIL_OPEN: "1",
+		});
+		expect(result.code).toBe(0);
+		const output = JSON.parse(result.stdout) as HookOutput;
+		expect(output.hookSpecificOutput.permissionDecision).toBe("deny");
+		expect(output.hookSpecificOutput.permissionDecisionReason).toContain("anomaly");
+		expect(await readdir(stateDir)).toEqual([]);
+	});
+
 	it("UT_FAIL_OPEN=1 allows with a warning when the server is unreachable", async () => {
 		const result = await runHook(HOOK, PAYLOAD, {
 			...baseEnv,

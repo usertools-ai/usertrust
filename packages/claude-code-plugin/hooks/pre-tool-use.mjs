@@ -1,6 +1,12 @@
 // PreToolUse: authorize a spend reservation before the tool executes.
 // Fail-closed: if governance cannot be reached (or answers with a malformed
-// body), the tool call is blocked (exit 2) unless UT_FAIL_OPEN=1. Output
+// body), the tool call is blocked (exit 2) unless UT_FAIL_OPEN=1.
+//
+// 402/403/429 are VERDICTS, not failures, so they deny regardless of UT_FAIL_OPEN.
+// 429 (anomaly) used to fall through to the generic error path, where fail-open
+// turned an anomaly cutoff into an allow — so the documented promise that fail-open
+// only softens transport and server failures was false for exactly the verdict most
+// likely to fire during an incident. Output
 // contract adapted from the AGT Claude Code plugin's stdin-JSON
 // permissionDecision convention (MIT — see repository NOTICE).
 //
@@ -77,7 +83,7 @@ try {
 			estimatedInputTokens,
 		});
 		emit("allow", `usertrust: reserved ${json.transferId} (${json.estimatedCost} ut)`);
-	} else if (response.status === 402 || response.status === 403) {
+	} else if (response.status === 402 || response.status === 403 || response.status === 429) {
 		emit(
 			"deny",
 			`usertrust ${sanitizeReason(json?.error, "denied")}: ${sanitizeReason(json?.reason)}`,

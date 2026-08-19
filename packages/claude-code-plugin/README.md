@@ -18,9 +18,10 @@ PostToolUse settles, Stop/SubagentStop abort anything left hanging.
 2. Add its SHA-256 hash to your `usertrust-server` config, set `"enforcement":
    "evaluate_only"`, and start the server. **Both halves are required for stage 1** —
    `enforcement` defaults to `enforce`, and `UT_FAIL_OPEN=1` only covers transport and
-   server failures. It does NOT soften a 402/403, which the hook enforces as a real
-   deny, so a matching policy or an exhausted budget would block tool calls on a server
-   left at its default.
+   server failures. It does NOT soften a **402 / 403 / 429** — budget, policy, and
+   anomaly verdicts are enforced denials in every stage — so a matching policy, an
+   exhausted budget, or an anomaly cutoff would block tool calls on a server left at
+   its default.
 3. Export the plugin environment before launching Claude Code:
 
 ```sh
@@ -89,9 +90,12 @@ printf '%s\n' "$BODY" | sed '$d'          # the response — read it if CODE is 
 # 3. Only on success: give the hold back, so the preflight does not itself leak budget.
 if [ "$CODE" = "200" ]; then
   TX=$(printf '%s' "$BODY" | sed '$d' | node -pe 'JSON.parse(require("fs").readFileSync(0)).transferId')
-  curl -sS --max-time 5 "$UT_SERVER_URL/v1/abort" \
+  ACODE=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "$UT_SERVER_URL/v1/abort" \
     -H "Authorization: Bearer $UT_SERVER_KEY" -H "content-type: application/json" \
-    -d "{\"transferId\":\"$TX\"}"
+    -d "{\"transferId\":\"$TX\"}")
+  # Check the abort too. Unchecked, the preflight reports success while leaving a
+  # hold reserved until the pending-TTL sweep — a probe that quietly costs budget.
+  [ "$ACODE" = "200" ] || echo "preflight WARNING: abort returned HTTP $ACODE — hold $TX stays reserved until the TTL sweep"
 else
   echo "preflight FAILED with HTTP $CODE — do not enter stage 3"
 fi
@@ -159,8 +163,8 @@ The 15s in `hooks.json` bounds the **process**; the HTTP request itself aborts a
 **5s**. So a server whose own deadline is longer than 5s can only ever reach you as
 a generic transport error — its labelled 503 arrives after you stopped listening. If
 you raise `requestTimeoutMs` past 5s, raise `hooks/lib.mjs`'s abort with it or the
-diagnosis above goes away. Policy (403) and budget (402) denials are
-always enforced denials, not failures. PostToolUse/Stop/SubagentStop never
+diagnosis above goes away. Policy (403), budget (402), and anomaly (429) responses are
+always enforced denials, not failures — `UT_FAIL_OPEN` does not soften a verdict. PostToolUse/Stop/SubagentStop never
 block — the tool already ran; failed settlements leave the hold on disk for
 Stop cleanup, and the server's pending-TTL sweep voids anything orphaned.
 
