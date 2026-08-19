@@ -18,7 +18,14 @@
  * leaves nothing behind.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -154,6 +161,35 @@ describe("identity.json — single transactional writer", () => {
 		// (Pins the caller, not the merge — see the note above.)
 		recordRotatedIdentity(root, { keyId: "sha256:next", publicKeySpki: "CCCC" });
 		expect((readAnchorIdentity(root) as AnchorIdentity).lastAnchorSeq).toBe(12);
+	});
+
+	it("a POSIX directory-fsync failure is NOT reported as success (Codex #128-r2 R3)", () => {
+		// The reviewer's own reproduction. A directory can be writable and
+		// renameable while refusing to OPEN for read — mode 0o300 is exactly
+		// that — so fsync of the directory fails with EACCES. Suppressing EACCES
+		// globally (the first cut of the F5 fix) meant the identity write
+		// returned success with the rename not durable: a crash could then
+		// restore the older identity and high-water, and nothing said so.
+		const { root } = vault();
+		const dir = anchorsDir(root);
+		const before = readAnchorIdentity(root) as AnchorIdentity;
+		chmodSync(dir, 0o300);
+		try {
+			expect(() =>
+				recordRotatedIdentity(root, { keyId: "sha256:next", publicKeySpki: "EEEE" }),
+			).toThrow(/EACCES|EPERM/);
+		} finally {
+			// Restore before cleanup, or the tmp teardown cannot traverse it.
+			chmodSync(dir, 0o700);
+		}
+		// Be precise about what the throw does and does not mean. The rename
+		// SUCCEEDS — the new identity is on disk — and only the directory fsync
+		// fails, so this is not a rollback. What the throw buys is that nobody is
+		// told the write was DURABLE when it was not; a crash here could still
+		// restore the previous identity and high-water, and the caller now knows
+		// that instead of proceeding on a false guarantee.
+		expect((readAnchorIdentity(root) as AnchorIdentity).keyId).toBe("sha256:next");
+		expect(before.keyId).not.toBe("sha256:next");
 	});
 
 	it("leaves no temp file behind, and the temp name is not pid-only", () => {
