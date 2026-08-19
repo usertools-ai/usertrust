@@ -115,8 +115,10 @@ function fullCorpus(perturb?: (model: string, rates: { input: number; output: nu
 			};
 		}
 		if (entry.modelsDev) {
-			modelsDev[entry.modelsDev.provider] ??= { models: {} };
-			const p = modelsDev[entry.modelsDev.provider];
+			const p: { models: Record<string, unknown> } = modelsDev[entry.modelsDev.provider] ?? {
+				models: {},
+			};
+			modelsDev[entry.modelsDev.provider] = p;
 			p.models[entry.modelsDev.id] = {
 				cost: {
 					input: rates.input,
