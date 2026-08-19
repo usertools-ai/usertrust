@@ -18,13 +18,18 @@ PostToolUse settles, Stop/SubagentStop abort anything left hanging.
 2. Add its SHA-256 hash to your `usertrust-server` config, set `"enforcement":
    "evaluate_only"`, and start the server.
 
-   > **Use a server with no enforced tenants on it for stages 1-2.** `enforcement` is a
+   > **Stage 1 needs a server with no enforced tenants on it.** `enforcement` is a
    > **server-wide** field, not per-tenant: setting `evaluate_only` to roll out ONE
    > tenant converts every other tenant's budget, policy, and anomaly denials on that
    > server into shadow responses. Rolling out one agent would silently stop enforcing
-   > for everyone else, and nothing in the response tells them. Run stages 1-2 against
-   > a separate server (a different port and `stateDir` is enough) and point the plugin
-   > at your enforcing server only when you enter stage 3.
+   > for everyone else, and nothing in the response tells them. So run stage 1 against
+   > a separate instance (a different port and `stateDir` is enough).
+   >
+   > **Switch to the server you will actually run on at the start of STAGE 2, not
+   > stage 3.** Stage 2 is where a wrong key, an unreachable ledger, or a different
+   > policy on that server is supposed to surface — while fail-open still protects
+   > you. Discovering any of them in stage 3 means discovering them as blocked tool
+   > calls. Everything you test in stage 2 must be the thing you keep in stage 3.
 
    **Both halves are required for stage 1** —
    `enforcement` defaults to `enforce`, and `UT_FAIL_OPEN=1` does NOT soften a
@@ -84,55 +89,44 @@ would be a surprise rather than a Tuesday.
 
 ### Before you enter stage 3
 
-Prove the server actually completes a round trip with the *real* tenant key — not
-just that it is listening. `/v1/health` answers without touching the ledger, so a
+Prove the real path completes a round trip against the **server you will run on**,
+with the **real tenant key**. `/v1/health` answers without touching the ledger, so a
 server that can never authorize anything still reports healthy:
 
 ```sh
-# 1. Liveness — necessary, NOT sufficient. This says nothing about the ledger.
-#    Bounded too: a black-holed host or a stalled DNS/connect blocks for minutes
-#    here, and the preflight never reaches the request that actually matters.
+# 1. Liveness — necessary, NOT sufficient. Says nothing about the ledger.
 curl -fsS --max-time 5 "$UT_SERVER_URL/v1/health"
 
-# 2. The one that matters: a real authorize, with your real key, bounded.
-#    Sends the model the HOOK will send (UT_CC_MODEL), not a hardcoded one: if
-#    policy denies the configured model the probe must fail, and if it denies only
-#    the default the probe must not.
-#    --max-time 5 MATCHES THE HOOK (hooks/lib.mjs aborts at 5s). A more generous
-#    probe is worse than none: it passes on a server taking 8s, declares stage 3
-#    safe, and then every real tool call fails closed at 5s.
-#    NOT `-f`: that discards the body on an HTTP error, which is exactly the
-#    body carrying the reason you are running this to find out.
-BODY=$(curl -sS --max-time 5 -w '\n%{http_code}' "$UT_SERVER_URL/v1/authorize" \
-  -H "Authorization: Bearer $UT_SERVER_KEY" -H "content-type: application/json" \
-  -d "{\"model\":\"${UT_CC_MODEL:-claude-sonnet-4-6}\",\"estimatedInputTokens\":200,\"maxOutputTokens\":100}")
-CODE=$(printf '%s' "$BODY" | tail -n1)
-printf '%s\n' "$BODY" | sed '$d'          # the response — read it if CODE is not 200
+# 2. The one that matters: RUN THE HOOK ITSELF. Not a curl that resembles it.
+PLUGIN=~/.claude/plugins/usertrust-claude-code   # or this repo's packages/claude-code-plugin
+echo '{"session_id":"ut-preflight","tool_name":"Bash","tool_input":{"command":"echo preflight"}}' \
+  | node "$PLUGIN/hooks/pre-tool-use.mjs"; echo "  <- exit $?"
 
-# 3. Only on success: give the hold back, so the preflight does not itself leak budget.
-if [ "$CODE" = "200" ]; then
-  # Validate the BODY, not just the status. A misrouted URL hitting a catch-all that
-  # answers `200 {}` prints "undefined" here and exits 0, so the probe passes — while
-  # the real hook rejects a 200 without a non-empty transferId and blocks every tool
-  # call in stage 3. A readiness check that is laxer than the thing it predicts is
-  # worse than none.
-  TX=$(printf '%s' "$BODY" | sed '$d' | node -pe '
-    const tx = JSON.parse(require("fs").readFileSync(0)).transferId;
-    if (typeof tx !== "string" || tx === "") { console.error("no transferId in authorize response"); process.exit(1); }
-    tx') || { echo "preflight FAILED: authorize returned 200 without a transferId — check UT_SERVER_URL"; exit 1; }
-  ACODE=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "$UT_SERVER_URL/v1/abort" \
-    -H "Authorization: Bearer $UT_SERVER_KEY" -H "content-type: application/json" \
-    -d "{\"transferId\":\"$TX\"}")
-  # Check the abort too. Unchecked, the preflight reports success while leaving a
-  # hold reserved until the pending-TTL sweep — a probe that quietly costs budget.
-  [ "$ACODE" = "200" ] || echo "preflight WARNING: abort returned HTTP $ACODE — hold $TX stays reserved until the TTL sweep"
-else
-  echo "preflight FAILED with HTTP $CODE — do not enter stage 3"
-fi
+# 3. Release the hold through the shipped cleanup, so the probe costs nothing.
+echo '{"session_id":"ut-preflight"}' | node "$PLUGIN/hooks/stop.mjs"
 ```
 
-If step 2 returns `503 ledger_unavailable`, the server is up but its TigerBeetle is
-not. Start one — `npx usertrust tb start` does NOT do this, it prints "not yet
+**Why the hook and not a `curl`:** a hand-written probe has to re-state the model,
+the output reservation, the request timeout, the content handling and the auth
+header — and it drifts from the hook silently, in the direction that says "ready".
+Three separate versions of this check were wrong in exactly that way: a 20s timeout
+against a hook that aborts at 5s, a hardcoded model against a hook that sends
+`UT_CC_MODEL`, and a 100-token reservation against a hook that reserves ~4096 — the
+last of which passes on a budget that then denies every real call with `402`, which
+`UT_FAIL_OPEN` cannot soften. Running the hook cannot drift, because it **is** the
+deployed path.
+
+Read the result:
+
+- `"permissionDecision":"allow"` and exit 0 — ready.
+- `"permissionDecision":"deny"` — governance is working and is denying you; fix the
+  policy or the budget, not the plumbing.
+- exit **2** — the hook failed closed. The stderr line names the cause, e.g.
+  `503 — ledger_unavailable: TigerBeetle …`. This is what stage 3 would do to every
+  tool call. **Do not enter stage 3.**
+
+If it reports `503 ledger_unavailable`, the server is up but its TigerBeetle is not.
+Start one — `npx usertrust tb start` does NOT do this, it prints "not yet
 implemented" — or run the server with `"dryRun": true` to skip the ledger:
 
 ```sh
@@ -151,66 +145,7 @@ tigerbeetle start --addresses=3001 --development ./0_0.tigerbeetle   # 3001 is t
 ```
 
 Check what is actually on that port, too: a foreign listener hangs the ledger client
-exactly like an absent one, and the default 3001 is a popular port.
-
-Do not enter stage 3 until step 2 succeeds; in stage 3 that same failure is every
-tool call blocking instead of one curl printing an error.
-
-## Environment variables
-
-| Variable             | Default                  | Meaning                                          |
-| -------------------- | ------------------------ | ------------------------------------------------ |
-| `UT_SERVER_URL`      | `http://127.0.0.1:4519`  | Base URL of your usertrust-server                |
-| `UT_SERVER_KEY`      | (empty)                  | Tenant bearer key                                |
-| `UT_CC_MODEL`        | `claude-sonnet-4-6`      | Model name used for cost estimation              |
-| `UT_CC_STATE_DIR`    | `$TMPDIR/usertrust-cc`   | Directory for pending-hold state files           |
-| `UT_CC_SEND_CONTENT` | `1`                      | `0` sends `{"redacted":true}` instead of content |
-| `UT_FAIL_OPEN`       | unset                    | `1` allows tool calls when governance is down (stages 1-2) |
-
-> **Caution:** `UT_SERVER_URL` and `UT_SERVER_KEY` are read from the environment,
-> and every PreToolUse authorization sends the tenant key (and tool input as
-> message content) to that URL — point them only at a `usertrust-server` you host
-> and control, never a third-party or untrusted endpoint.
-
-## Fail-closed semantics
-
-If the governance server is unreachable, times out, answers 5xx, or returns a
-malformed body, the PreToolUse hook exits 2 and the tool call is **blocked**.
-Set `UT_FAIL_OPEN=1` to invert this: the call proceeds with an explicit
-"proceeding ungoverned" warning — that is stage 1 or 2 above, depending on the
-server's `enforcement`. Blocking is **stage 3**, the posture you get by leaving
-`UT_FAIL_OPEN` unset; do not arrive there by accident.
-
-A block repeats whatever the server said, so the stderr line names the cause —
-e.g. `unexpected governance response 503 — ledger_unavailable: TigerBeetle …`
-rather than a bare status code.
-
-> **Requires `usertrust-server` >= 3.3.2.** Earlier servers have no request
-> deadline and map a ledger failure to an opaque `500 internal`, so against one of
-> those a stalled ledger still reaches you as a client-side timeout with no
-> diagnosis. The hook change above is safe either way — it repeats whatever it is
-> given — but the labelled 503 it repeats comes from the server.
-
-For that to be reachable the timeouts have to be **monotonic**, and there are two
-different client timeouts here, which is easy to get wrong:
-
-```
-server ledger deadline (3s)  <  server request deadline (4s)
-  <  this hook's HTTP abort (5s, hooks/lib.mjs)  <  the hook process timeout (15s, hooks.json)
-```
-
-The 15s in `hooks.json` bounds the **process**; the HTTP request itself aborts at
-**5s**. So a server whose own deadline is longer than 5s can only ever reach you as
-a generic transport error — its labelled 503 arrives after you stopped listening. If
-you raise `requestTimeoutMs` past 5s, raise `hooks/lib.mjs`'s abort with it or the
-diagnosis above goes away. Policy (403), budget (402), and anomaly (429) responses are
-always enforced denials, not failures — `UT_FAIL_OPEN` does not soften a verdict. PostToolUse/Stop/SubagentStop never
-block — the tool already ran; failed settlements leave the hold on disk for
-Stop cleanup, and the server's pending-TTL sweep voids anything orphaned.
-
-If the server runs in `evaluate_only` mode, denials come back as shadow
-responses: the hook allows the call and surfaces a "would_deny" reason —
-nothing is reserved or settled for shadow decisions.
+exactly like an absent one, and 3001 is a popular port.
 
 ## Content flow and audit
 
