@@ -147,6 +147,64 @@ tigerbeetle start --addresses=3001 --development ./0_0.tigerbeetle   # 3001 is t
 Check what is actually on that port, too: a foreign listener hangs the ledger client
 exactly like an absent one, and 3001 is a popular port.
 
+## Environment variables
+
+| Variable             | Default                  | Meaning                                          |
+| -------------------- | ------------------------ | ------------------------------------------------ |
+| `UT_SERVER_URL`      | `http://127.0.0.1:4519`  | Base URL of your usertrust-server                |
+| `UT_SERVER_KEY`      | (empty)                  | Tenant bearer key                                |
+| `UT_CC_MODEL`        | `claude-sonnet-4-6`      | Model name used for cost estimation              |
+| `UT_CC_STATE_DIR`    | `$TMPDIR/usertrust-cc`   | Directory for pending-hold state files           |
+| `UT_CC_SEND_CONTENT` | `1`                      | `0` sends `{"redacted":true}` instead of content |
+| `UT_FAIL_OPEN`       | unset                    | `1` allows tool calls when governance is down (stages 1-2) |
+
+> **Caution:** `UT_SERVER_URL` and `UT_SERVER_KEY` are read from the environment,
+> and every PreToolUse authorization sends the tenant key (and tool input as
+> message content) to that URL — point them only at a `usertrust-server` you host
+> and control, never a third-party or untrusted endpoint.
+
+## Fail-closed semantics
+
+If the governance server is unreachable, times out, answers 5xx, or returns a
+malformed body, the PreToolUse hook exits 2 and the tool call is **blocked**.
+Set `UT_FAIL_OPEN=1` to invert this: the call proceeds with an explicit
+"proceeding ungoverned" warning — that is stage 1 or 2 above, depending on the
+server's `enforcement`. Blocking is **stage 3**, the posture you get by leaving
+`UT_FAIL_OPEN` unset; do not arrive there by accident.
+
+A block repeats whatever the server said, so the stderr line names the cause —
+e.g. `unexpected governance response 503 — ledger_unavailable: TigerBeetle …`
+rather than a bare status code.
+
+> **Requires `usertrust-server` >= 3.3.2, WHICH IS NOT MERGED YET.** The shipped
+> server (3.3.1) has no request deadline and maps a ledger failure to an opaque
+> `500 internal`, so against it a stalled ledger reaches you as a client-side
+> timeout with no diagnosis. The hook change is safe either way — it repeats
+> whatever it is given — but the labelled 503 it repeats comes from the server, and
+> that work is tracked separately. Everything else in this guide works against
+> 3.3.1; only the labelled reason is unavailable.
+
+For that to be reachable the timeouts have to be **monotonic**, and there are two
+different client timeouts here, which is easy to get wrong:
+
+```
+server ledger deadline (3s)  <  server request deadline (4s)
+  <  this hook's HTTP abort (5s, hooks/lib.mjs)  <  the hook process timeout (15s, hooks.json)
+```
+
+The 15s in `hooks.json` bounds the **process**; the HTTP request itself aborts at
+**5s**. So a server whose own deadline is longer than 5s can only ever reach you as
+a generic transport error — its labelled 503 arrives after you stopped listening. If
+you raise `requestTimeoutMs` past 5s, raise `hooks/lib.mjs`'s abort with it or the
+diagnosis above goes away. Policy (403), budget (402), and anomaly (429) responses are
+always enforced denials, not failures — `UT_FAIL_OPEN` does not soften a verdict. PostToolUse/Stop/SubagentStop never
+block — the tool already ran; failed settlements leave the hold on disk for
+Stop cleanup, and the server's pending-TTL sweep voids anything orphaned.
+
+If the server runs in `evaluate_only` mode, denials come back as shadow
+responses: the hook allows the call and surfaces a "would_deny" reason —
+nothing is reserved or settled for shadow decisions.
+
 ## Content flow and audit
 
 PreToolUse sends the stringified `tool_input` (truncated at 16 KiB) to your
