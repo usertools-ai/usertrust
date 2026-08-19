@@ -209,6 +209,25 @@ describe("pre-tool-use hook", () => {
 		expect(await readdir(stateDir)).toEqual([]);
 	});
 
+	it("clips an oversized outage detail before it reaches stderr", async () => {
+		// emit() bounds what it writes; the fail-closed stderr path does not, so an
+		// unbounded server `reason` would flood the hook diagnostics this detail exists
+		// to improve. AGENTS.md records sanitize-THEN-clip as the rule for this hook.
+		const port = await startFake(() => ({
+			status: 503,
+			json: { error: "ledger_unavailable", reason: "x".repeat(5000) },
+		}));
+		const result = await runHook(HOOK, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expect(result.code).toBe(2);
+		expect(result.stderr).toContain("ledger_unavailable");
+		// The whole stderr line carries a prefix as well, so bound generously — what
+		// matters is that 5000 characters of server-controlled text did not land here.
+		expect(result.stderr.length).toBeLessThan(1000);
+	});
+
 	it("UT_FAIL_OPEN=1 allows with a warning when the server is unreachable", async () => {
 		const result = await runHook(HOOK, PAYLOAD, {
 			...baseEnv,

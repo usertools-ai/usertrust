@@ -75,9 +75,12 @@ server that can never authorize anything still reports healthy:
 curl -fsS "$UT_SERVER_URL/v1/health"
 
 # 2. The one that matters: a real authorize, with your real key, bounded.
+#    --max-time 5 MATCHES THE HOOK (hooks/lib.mjs aborts at 5s). A more generous
+#    probe is worse than none: it passes on a server taking 8s, declares stage 3
+#    safe, and then every real tool call fails closed at 5s.
 #    NOT `-f`: that discards the body on an HTTP error, which is exactly the
 #    body carrying the reason you are running this to find out.
-BODY=$(curl -sS --max-time 20 -w '\n%{http_code}' "$UT_SERVER_URL/v1/authorize" \
+BODY=$(curl -sS --max-time 5 -w '\n%{http_code}' "$UT_SERVER_URL/v1/authorize" \
   -H "Authorization: Bearer $UT_SERVER_KEY" -H "content-type: application/json" \
   -d '{"model":"claude-sonnet-4-6","estimatedInputTokens":200,"maxOutputTokens":100}')
 CODE=$(printf '%s' "$BODY" | tail -n1)
@@ -86,7 +89,7 @@ printf '%s\n' "$BODY" | sed '$d'          # the response — read it if CODE is 
 # 3. Only on success: give the hold back, so the preflight does not itself leak budget.
 if [ "$CODE" = "200" ]; then
   TX=$(printf '%s' "$BODY" | sed '$d' | node -pe 'JSON.parse(require("fs").readFileSync(0)).transferId')
-  curl -sS --max-time 20 "$UT_SERVER_URL/v1/abort" \
+  curl -sS --max-time 5 "$UT_SERVER_URL/v1/abort" \
     -H "Authorization: Bearer $UT_SERVER_KEY" -H "content-type: application/json" \
     -d "{\"transferId\":\"$TX\"}"
 else
@@ -95,7 +98,17 @@ fi
 ```
 
 If step 2 returns `503 ledger_unavailable`, the server is up but its TigerBeetle is
-not — start it (`npx usertrust tb start`) or run the server with `"dryRun": true`.
+not. Start one — `npx usertrust tb start` does NOT do this, it prints "not yet
+implemented" — or run the server with `"dryRun": true` to skip the ledger:
+
+```sh
+tigerbeetle format --cluster=0 --replica=0 --replica-count=1 ./0_0.tigerbeetle
+tigerbeetle start --addresses=3001 ./0_0.tigerbeetle    # 3001 is the client default
+```
+
+Check what is actually on that port, too: a foreign listener hangs the ledger client
+exactly like an absent one, and the default 3001 is a popular port.
+
 Do not enter stage 3 until step 2 succeeds; in stage 3 that same failure is every
 tool call blocking instead of one curl printing an error.
 
@@ -127,6 +140,12 @@ server's `enforcement`. Blocking is **stage 3**, the posture you get by leaving
 A block repeats whatever the server said, so the stderr line names the cause —
 e.g. `unexpected governance response 503 — ledger_unavailable: TigerBeetle …`
 rather than a bare status code.
+
+> **Requires `usertrust-server` >= 3.3.2.** Earlier servers have no request
+> deadline and map a ledger failure to an opaque `500 internal`, so against one of
+> those a stalled ledger still reaches you as a client-side timeout with no
+> diagnosis. The hook change above is safe either way — it repeats whatever it is
+> given — but the labelled 503 it repeats comes from the server.
 
 For that to be reachable the timeouts have to be **monotonic**, and there are two
 different client timeouts here, which is easy to get wrong:

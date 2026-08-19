@@ -87,10 +87,16 @@ try {
 		// (`ledger_unavailable`, `governor_timeout`), and that is the difference
 		// between a blocked tool call an operator can diagnose in one read and a
 		// bare status code in a hook nobody is looking at.
-		const detail =
+		// Clipped as well as sanitized. `emit()` bounds what it writes, but this detail
+		// reaches stderr through the fail-closed path below, which does not — so an
+		// unbounded server `reason` would flood the hook diagnostics it is meant to
+		// improve. AGENTS.md records sanitize-then-clip as the rule for this exact
+		// function; sanitizing alone is half of it.
+		const detail = (
 			typeof json?.error === "string" && json.error !== ""
 				? `${sanitizeReason(json.error)}: ${sanitizeReason(json.reason)}`
-				: "no detail in response body";
+				: "no detail in response body"
+		).slice(0, MAX_REASON_CHARS);
 		throw new Error(`unexpected governance response ${response.status} — ${detail}`);
 	}
 } catch (err) {
