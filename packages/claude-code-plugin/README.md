@@ -16,7 +16,17 @@ PostToolUse settles, Stop/SubagentStop abort anything left hanging.
 1. Generate a tenant key (high-entropy secret — this is an API-key model, not a password):
    `openssl rand -hex 32`
 2. Add its SHA-256 hash to your `usertrust-server` config, set `"enforcement":
-   "evaluate_only"`, and start the server. **Both halves are required for stage 1** —
+   "evaluate_only"`, and start the server.
+
+   > **Use a server with no enforced tenants on it for stages 1-2.** `enforcement` is a
+   > **server-wide** field, not per-tenant: setting `evaluate_only` to roll out ONE
+   > tenant converts every other tenant's budget, policy, and anomaly denials on that
+   > server into shadow responses. Rolling out one agent would silently stop enforcing
+   > for everyone else, and nothing in the response tells them. Run stages 1-2 against
+   > a separate server (a different port and `stateDir` is enough) and point the plugin
+   > at your enforcing server only when you enter stage 3.
+
+   **Both halves are required for stage 1** —
    `enforcement` defaults to `enforce`, and `UT_FAIL_OPEN=1` does NOT soften a
    **402 / 403 / 429** — budget, policy, and anomaly verdicts are enforced denials in
    every stage — so a matching policy, an exhausted budget, or an anomaly cutoff would
@@ -85,6 +95,9 @@ server that can never authorize anything still reports healthy:
 curl -fsS --max-time 5 "$UT_SERVER_URL/v1/health"
 
 # 2. The one that matters: a real authorize, with your real key, bounded.
+#    Sends the model the HOOK will send (UT_CC_MODEL), not a hardcoded one: if
+#    policy denies the configured model the probe must fail, and if it denies only
+#    the default the probe must not.
 #    --max-time 5 MATCHES THE HOOK (hooks/lib.mjs aborts at 5s). A more generous
 #    probe is worse than none: it passes on a server taking 8s, declares stage 3
 #    safe, and then every real tool call fails closed at 5s.
@@ -92,13 +105,21 @@ curl -fsS --max-time 5 "$UT_SERVER_URL/v1/health"
 #    body carrying the reason you are running this to find out.
 BODY=$(curl -sS --max-time 5 -w '\n%{http_code}' "$UT_SERVER_URL/v1/authorize" \
   -H "Authorization: Bearer $UT_SERVER_KEY" -H "content-type: application/json" \
-  -d '{"model":"claude-sonnet-4-6","estimatedInputTokens":200,"maxOutputTokens":100}')
+  -d "{\"model\":\"${UT_CC_MODEL:-claude-sonnet-4-6}\",\"estimatedInputTokens\":200,\"maxOutputTokens\":100}")
 CODE=$(printf '%s' "$BODY" | tail -n1)
 printf '%s\n' "$BODY" | sed '$d'          # the response — read it if CODE is not 200
 
 # 3. Only on success: give the hold back, so the preflight does not itself leak budget.
 if [ "$CODE" = "200" ]; then
-  TX=$(printf '%s' "$BODY" | sed '$d' | node -pe 'JSON.parse(require("fs").readFileSync(0)).transferId')
+  # Validate the BODY, not just the status. A misrouted URL hitting a catch-all that
+  # answers `200 {}` prints "undefined" here and exits 0, so the probe passes — while
+  # the real hook rejects a 200 without a non-empty transferId and blocks every tool
+  # call in stage 3. A readiness check that is laxer than the thing it predicts is
+  # worse than none.
+  TX=$(printf '%s' "$BODY" | sed '$d' | node -pe '
+    const tx = JSON.parse(require("fs").readFileSync(0)).transferId;
+    if (typeof tx !== "string" || tx === "") { console.error("no transferId in authorize response"); process.exit(1); }
+    tx') || { echo "preflight FAILED: authorize returned 200 without a transferId — check UT_SERVER_URL"; exit 1; }
   ACODE=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' "$UT_SERVER_URL/v1/abort" \
     -H "Authorization: Bearer $UT_SERVER_KEY" -H "content-type: application/json" \
     -d "{\"transferId\":\"$TX\"}")
