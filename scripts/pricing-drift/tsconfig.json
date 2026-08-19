@@ -1,18 +1,18 @@
 {
-  // The drift checker's own typecheck. `scripts/` is covered by NO project in
-  // the root tsconfig, and `drift:test` runs through transpile-only tsx — so
-  // the compile-time exhaustiveness guard in report.mts was never executed by
-  // anything except a hand-run tsc. A guard that only fires when someone
-  // remembers to fire it has the failure rate of remembering.
-  //
-  // Wired into `npm run typecheck`, so CI runs it on every push and PR.
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "noEmit": true,
-    "allowImportingTsExtensions": true,
-    "module": "nodenext",
-    "moduleResolution": "nodenext",
-    "types": ["node"]
-  },
-  "include": ["**/*.mts"]
+	// The drift checker's own typecheck. `scripts/` is covered by NO project in
+	// the root tsconfig, and `drift:test` runs through transpile-only tsx — so
+	// the compile-time exhaustiveness guard in report.mts was never executed by
+	// anything except a hand-run tsc. A guard that only fires when someone
+	// remembers to fire it has the failure rate of remembering.
+	//
+	// Wired into `npm run typecheck`, so CI runs it on every push and PR.
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"allowImportingTsExtensions": true,
+		"module": "nodenext",
+		"moduleResolution": "nodenext",
+		"types": ["node"]
+	},
+	"include": ["**/*.mts"]
 }
