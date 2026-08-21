@@ -207,10 +207,21 @@ async function parseAnchorFlags(argv: string[]): Promise<AnchorFlags> {
 		 * `--flag=value` escape it names.
 		 */
 		const next = (): string | undefined => {
-			if (inlineValue !== undefined) return inlineValue;
+			if (inlineValue !== undefined) {
+				// `--pubkey=` is a typo, not an empty path. Accepting it handed ""
+				// to readFileSync and produced an uncaught stack trace.
+				if (inlineValue === "") throw new Error(`${arg} requires a value`);
+				return inlineValue;
+			}
 			const v = argv[i + 1];
 			if (v === undefined) throw new Error(`${arg} requires a value`);
-			if (v.startsWith("-")) {
+			// A BARE "-" IS A VALUE, NOT A FLAG — it means stdin, it is documented
+			// (packages/verify/README.md), and `readArtifact` special-cases it.
+			// The first cut of this guard rejected every leading dash and broke
+			// `--anchor -`, `--bundle -` and `--rekor-receipts -`: a security fix
+			// that silently removed a working, documented feature. Reject flags,
+			// not dashes.
+			if (v !== "-" && v.startsWith("-")) {
 				throw new Error(`${arg} requires a value (write ${arg}=${v} to pass it literally)`);
 			}
 			i++;

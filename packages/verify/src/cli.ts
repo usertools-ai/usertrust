@@ -234,10 +234,19 @@ for (let i = 0; i < args.length; i++) {
 	// witness line, and exited 0 — a strict flag silently disarmed by an
 	// adjacent flag, which leaves a CI pipeline green while checking nothing.
 	const next = (): string => {
-		if (inlineValue !== undefined) return inlineValue;
+		if (inlineValue !== undefined) {
+			if (inlineValue === "") {
+				console.error(`${arg} requires a value`);
+				process.exit(2);
+			}
+			return inlineValue;
+		}
 		const v = args[i + 1];
 		if (v === undefined) usage();
-		if (v.startsWith("-")) {
+		// A bare "-" means stdin — documented in README and special-cased by
+		// readArtifact. Reject flags, not dashes; the first cut broke
+		// `--anchor -`, `--bundle -` and `--rekor-receipts -`.
+		if (v !== "-" && v.startsWith("-")) {
 			console.error(`${arg} requires a value (write ${arg}=${v} to pass it literally)`);
 			process.exit(2);
 		}

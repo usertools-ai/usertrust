@@ -253,7 +253,13 @@ function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
 		// only where directory fsync is genuinely unavailable — Windows, which
 		// cannot open a directory this way at all — and let every POSIX error
 		// through.
-		if (process.platform !== "win32") throw err;
+		// Platform AND errno. win32 alone still swallowed EIO, ENOSPC, ENOENT and
+		// EDQUOT — real durability failures — under cover of "unsupported
+		// operation". Only the errnos that mean "this platform will not open a
+		// directory for fsync" are suppressed, and only there.
+		const code = (err as NodeJS.ErrnoException).code;
+		const unsupportedOnWindows = code === "EPERM" || code === "EACCES" || code === "EISDIR";
+		if (process.platform !== "win32" || !unsupportedOnWindows) throw err;
 	}
 }
 
@@ -1092,8 +1098,26 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 				// publication entirely. Making one silent failure loud created a
 				// quieter one downstream, which is why this drains rather than
 				// re-ordering the durability sequence the comment above pins.
-				for (const undelivered of pendingOutboxRecords(dir)) {
-					trackPublish(undelivered);
+				// ONE call, not one per record: publishRecord already drains the
+				// entire backlog oldest-first. Queuing per pending record made
+				// each queued call re-drain everything — with [1,2] pending the
+				// observed delivery was [1,2,2], and every failing cycle grew the
+				// work queue.
+				const undelivered = pendingOutboxRecords(dir);
+				if (undelivered.length > 0) {
+					const oldest = undelivered[0] as AnchorRecord;
+					trackPublish(oldest);
+					// A DISTINCT reason, because "no-new-events" is EXEMPTED from
+					// the CLI's non-zero exit. Reporting undelivered records under
+					// the reason that means "nothing to do" is how a permanent
+					// sink failure printed "Nothing to anchor" and exited 0 with
+					// records still pending — the drain fixed the delivery attempt
+					// and left the REPORTING lying, which is the same silent
+					// success one layer out.
+					return {
+						emitted: false,
+						reason: `outbox-pending (${undelivered.length} undelivered; retrying)`,
+					};
 				}
 				return { emitted: false, reason: "no-new-events" };
 			}

@@ -206,3 +206,47 @@ describe("HARDEN: a flag is never consumed as another flag's value (Codex #128-r
 		expect(lines.join("\n")).not.toMatch(/requires a value/);
 	});
 });
+
+describe("HARDEN: the flag-value guard must not eat documented syntax (#128-r3 F3)", () => {
+	it('a bare "-" is still accepted as a value — it means stdin', async () => {
+		// THE REGRESSION. Rejecting every leading dash to close the
+		// `--vault-id --require-witness` hole also rejected `--anchor -`,
+		// `--bundle -` and `--rekor-receipts -`, which are documented in
+		// packages/verify/README.md and special-cased by readArtifact. A
+		// security fix that silently deletes a working documented feature is
+		// not a fix. Reject FLAGS, not dashes.
+		const s = await makeAnchoredVault(2);
+		process.chdir(s.root);
+		process.argv = ["node", "usertrust", "verify", "--anchor", "-"];
+		const { lines, restore } = captureLog();
+		let threw = "";
+		try {
+			await verifyRun(s.root, { json: false });
+		} catch (e) {
+			threw = e instanceof Error ? e.message : String(e);
+		} finally {
+			restore();
+		}
+		// It must not be refused BY THE PARSER. (Reading stdin may fail for
+		// other reasons in-process; what is pinned here is that "-" reached the
+		// flag as its value.)
+		expect(`${threw}${lines.join("\n")}`).not.toMatch(/--anchor requires a value/);
+	});
+
+	it("an empty inline value is a typo, not an empty path", async () => {
+		// `--pubkey=` previously slid through and handed "" to readFileSync.
+		const s = await makeAnchoredVault(2);
+		process.chdir(s.root);
+		process.argv = ["node", "usertrust", "verify", "--pubkey="];
+		const { lines, restore } = captureLog();
+		let threw = "";
+		try {
+			await verifyRun(s.root, { json: false });
+		} catch (e) {
+			threw = e instanceof Error ? e.message : String(e);
+		} finally {
+			restore();
+		}
+		expect(`${threw}${lines.join("\n")}`).toMatch(/--pubkey requires a value/);
+	});
+});
