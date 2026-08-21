@@ -1082,43 +1082,6 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 				};
 			}
 			if (tail !== null && tail.treeSize === snap.sequence && rotation === undefined) {
-				// DRAIN BEFORE DECLARING NOTHING TO DO.
-				//
-				// The outbox IS the delivery intent: a record still sitting in it
-				// has not been published. The self-heal above only re-appends
-				// orphans AHEAD of the mirror tail, so a record that reached the
-				// mirror but never reached a sink was invisible to both paths —
-				// `anchor now` returned "no-new-events" and the CLI exited 0
-				// saying nothing needed anchoring, while the record sat
-				// undelivered forever.
-				//
-				// That became reachable when the identity fsync stopped being
-				// swallowed: the high-water bump sits between the mirror append
-				// and trackPublish, so a genuine I/O failure there skips
-				// publication entirely. Making one silent failure loud created a
-				// quieter one downstream, which is why this drains rather than
-				// re-ordering the durability sequence the comment above pins.
-				// ONE call, not one per record: publishRecord already drains the
-				// entire backlog oldest-first. Queuing per pending record made
-				// each queued call re-drain everything — with [1,2] pending the
-				// observed delivery was [1,2,2], and every failing cycle grew the
-				// work queue.
-				const undelivered = pendingOutboxRecords(dir);
-				if (undelivered.length > 0) {
-					const oldest = undelivered[0] as AnchorRecord;
-					trackPublish(oldest);
-					// A DISTINCT reason, because "no-new-events" is EXEMPTED from
-					// the CLI's non-zero exit. Reporting undelivered records under
-					// the reason that means "nothing to do" is how a permanent
-					// sink failure printed "Nothing to anchor" and exited 0 with
-					// records still pending — the drain fixed the delivery attempt
-					// and left the REPORTING lying, which is the same silent
-					// success one layer out.
-					return {
-						emitted: false,
-						reason: `outbox-pending (${undelivered.length} undelivered; retrying)`,
-					};
-				}
 				return { emitted: false, reason: "no-new-events" };
 			}
 			const tree = buildMerkleTree(snap.hashes.slice(0, snap.sequence));
@@ -1151,10 +1114,22 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 			// verifies as tampering.
 			writeOutboxEntry(dir, record);
 			appendToMirror(record);
+			// PUBLICATION IS SCHEDULED BEFORE THE HIGH-WATER BUMP, and the
+			// durability order is untouched by that: trackPublish writes nothing
+			// durable, it only queues a network publish, so outbox → mirror →
+			// high-water still holds.
+			//
+			// It moved because the bump sits between the mirror append and
+			// publication and CAN THROW — once a genuine directory-fsync failure
+			// stopped being swallowed, a throw there skipped publication entirely
+			// and stranded a fully minted record in the outbox with nothing to
+			// retry it. Scheduling first makes the stranding impossible instead
+			// of detectable-after-the-fact; the throw still propagates, which is
+			// what the fsync fix wanted.
+			trackPublish(record);
 			// High-water AFTER the mirror append is fsync'd, so a crash leaves
 			// high-water ≤ mirror tail (never ahead of what exists).
 			bumpAnchorHighWater(rootDir, record.anchorSeq, true);
-			trackPublish(record);
 			return { emitted: true, record };
 		} finally {
 			release();

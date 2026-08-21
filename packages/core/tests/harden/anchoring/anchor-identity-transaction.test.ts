@@ -203,3 +203,30 @@ describe("identity.json — single transactional writer", () => {
 		expect(() => JSON.parse(readFileSync(identityPath(root), "utf-8"))).not.toThrow();
 	});
 });
+
+describe("HARDEN: a throwing high-water bump cannot strand an unpublished record", () => {
+	it("publication is scheduled BEFORE the bump that can throw (#128-r3 F1 root cause)", () => {
+		// The stranding this prevents: the bump sits between the mirror append
+		// and publication, and once a genuine directory-fsync failure stopped
+		// being swallowed it could throw there — skipping trackPublish and
+		// leaving a fully minted record in the outbox with nothing to retry it.
+		//
+		// Pinned STRUCTURALLY rather than behaviourally on purpose. The
+		// behavioural version needs a real fsync failure mid-emission, and the
+		// earlier attempt to cover this with a drain produced a defect in each
+		// of two consecutive review rounds — a corrupt outbox entry still
+		// reporting exit 0, and a successful retry still reporting failure.
+		// Ordering is the whole fix, so ordering is what the test pins.
+		const src = readFileSync(join(import.meta.dirname, "../../../src/audit/anchor.ts"), "utf-8");
+		const publish = src.indexOf("trackPublish(record);");
+		const bump = src.indexOf("bumpAnchorHighWater(rootDir, record.anchorSeq, true);");
+		expect(publish).toBeGreaterThan(-1);
+		expect(bump).toBeGreaterThan(-1);
+		expect(publish).toBeLessThan(bump);
+		// And both still sit after the mirror append, so the durability order
+		// outbox -> mirror -> high-water is unchanged by the move.
+		const mirror = src.indexOf("appendToMirror(record);");
+		expect(mirror).toBeGreaterThan(-1);
+		expect(mirror).toBeLessThan(publish);
+	});
+});
