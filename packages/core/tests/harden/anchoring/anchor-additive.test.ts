@@ -398,7 +398,27 @@ describe("HARDEN: anchoring additive proofs", () => {
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
 		}
-		expect(total).toBeLessThan(9900);
+		// 9900 → 10200, for the Rekor witness-key ship (spec §3.3). What was
+		// added to packages/verify/src: the witness-delegation preimage —
+		// WITNESS_DELEGATION_TAG, OPEN_ENDED_ANCHOR_SEQ,
+		// witnessDelegationPreimage and its two u32be/u64be helpers, ~100 lines
+		// in anchor-verify.ts. It is MIRRORED, so it lands in this package by
+		// obligation, not by choice: the verifier recomputes the delegation
+		// preimage to check Axis B (is this witness key root-delegated?), and a
+		// verifier that imported core's copy would be verifying with the code it
+		// is meant to check independently.
+		//
+		// Discharging (a): assertions 4 and 5 above still pass — every import in
+		// packages/verify/src is node:* or ./-relative, and `dependencies` is
+		// still {}. The new code uses node:buffer's global Buffer and nothing
+		// else. Nothing was vendored.
+		// Discharging (c): raised to fit the work. Nothing was trimmed.
+		//
+		// HEADS-UP for the next raise, recorded so it is not a surprise: later
+		// stages of this same ship (Axis A/B split in rekor-verify.ts, the
+		// witness-state lattice in index.ts) will add more here and will need
+		// their own raise with their own accounting. Do not pre-raise for them.
+		expect(total).toBeLessThan(10200);
 	});
 
 	it("7. mirror parity: anchor-verify.ts is byte-identical across packages modulo import paths", () => {
