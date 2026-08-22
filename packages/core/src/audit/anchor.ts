@@ -285,7 +285,7 @@ function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
 function updateAnchorIdentity(
 	rootDir: string,
 	mutate: (current: AnchorIdentity) => AnchorIdentity,
-	opts: { heldLock: boolean },
+	opts: { heldLock: boolean; mustSucceed?: boolean },
 ): AnchorIdentity | null {
 	const apply = (): AnchorIdentity | null => {
 		// Re-read UNDER the lock. The caller's copy may predate another writer.
@@ -301,18 +301,54 @@ function updateAnchorIdentity(
 		return next;
 	};
 	if (opts.heldLock) return apply();
-	const release = tryAcquireAnchorLock(anchorsDir(rootDir));
-	if (release === null) {
-		// Fail closed rather than busy-wait. The lock is held only across an
-		// emission, so a retry moments later succeeds; proceeding unlocked is
-		// exactly the race above.
-		throw new Error("anchor identity is locked by an in-flight emission — retry once it completes");
+
+	// `mustSucceed` callers CANNOT be left un-applied, so they wait rather than
+	// refuse on first contention.
+	//
+	// Rotation is the case, and refusing there is worse than waiting: the
+	// emitter has ALREADY appended the cross-signed successor to the mirror and
+	// released its lock before the identity update runs. A single non-blocking
+	// attempt that loses a race leaves the mirror naming the successor while
+	// identity.json still names the predecessor — the old signer is then
+	// rejected by the epoch guard, and re-running rotation cannot repair it
+	// because the successor is already minted. The comment at the CLI call site
+	// says identity.json MUST advance in lockstep; a throw there breaks exactly
+	// that.
+	//
+	// Bounded, not unbounded: the lock is only held across an emission, so a
+	// short wait clears it. If it genuinely does not, the throw names the repair
+	// rather than leaving an operator with a desynced vault and no next step.
+	// 15 x 100ms = 1.5s. An emission that has not cleared in 1.5s is already
+	// pathological, and the message below names the repair rather than stranding
+	// the operator. Deliberately NOT larger: the first cut used 5s, which put the
+	// test that exercises this 13ms under vitest's 5s timeout — a guard whose own
+	// test flakes under load is not a guard you can rely on.
+	const attempts = opts.mustSucceed === true ? 15 : 1;
+	for (let attempt = 0; attempt < attempts; attempt++) {
+		const release = tryAcquireAnchorLock(anchorsDir(rootDir));
+		if (release !== null) {
+			try {
+				return apply();
+			} finally {
+				release();
+			}
+		}
+		if (attempt < attempts - 1) sleepMs(100);
 	}
-	try {
-		return apply();
-	} finally {
-		release();
-	}
+	throw new Error(
+		opts.mustSucceed === true
+			? "anchor identity is locked by an in-flight emission and did not clear — the mirror may name a successor that identity.json does not; re-run `usertrust anchor rotate --resume-identity` once emissions are idle"
+			: "anchor identity is locked by an in-flight emission — retry once it completes",
+	);
+}
+
+/**
+ * Block this thread for `ms`. Deliberately synchronous: every caller on this
+ * path is sync, and making them async would push the change through the emitter
+ * and both CLIs for a wait measured in milliseconds.
+ */
+function sleepMs(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 /**
@@ -1362,7 +1398,7 @@ export function recordRotatedIdentity(
 				keyHistory: [...history.filter((entry) => entry.keyId !== next.keyId), next],
 			};
 		},
-		{ heldLock: false },
+		{ heldLock: false, mustSucceed: true },
 	);
 	if (updated === null) {
 		throw new Error("No anchor identity to rotate");

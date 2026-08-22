@@ -79,9 +79,12 @@ describe("identity.json — single transactional writer", () => {
 		writeFileSync(identityPath(root), JSON.stringify({ ...before, lastAnchorSeq: 9 }));
 		holdLockAsForeignProcess(root);
 
+		// Rotation WAITS rather than refusing on first contention, then gives up
+		// with a message that names the repair — because the mirror may already
+		// name the successor by this point and a bare refusal strands the vault.
 		expect(() =>
 			recordRotatedIdentity(root, { keyId: "sha256:next", publicKeySpki: "AAAA" }),
-		).toThrow(/locked by an in-flight emission/);
+		).toThrow(/did not clear .* re-run `usertrust anchor rotate --resume-identity`/);
 
 		// The refusal is the point: nothing was written, so nothing was rolled back.
 		const after = readAnchorIdentity(root) as AnchorIdentity;
@@ -134,6 +137,22 @@ describe("identity.json — single transactional writer", () => {
 	// fresh, because `mutate()` is handed a copy re-read under the lock. What they
 	// pin is that a rotation does not drop these fields, which is a real thing to
 	// break and was worth catching; they are simply not evidence for the merge.
+	it("rotation SUCCEEDS on the legitimate uncontended path", () => {
+		// The direction the other test does not cover. A guard proven only on its
+		// failing case can be one that never goes green — two lanes shipped
+		// exactly that tonight — so the waiting path has to be shown to complete
+		// normally when nothing holds the lock.
+		const { root } = vault();
+		const before = readAnchorIdentity(root) as AnchorIdentity;
+		const t0 = Date.now();
+		recordRotatedIdentity(root, { keyId: "sha256:next", publicKeySpki: "ZZZZ" });
+		// It must not have burned the retry budget to get there.
+		expect(Date.now() - t0).toBeLessThan(500);
+		const after = readAnchorIdentity(root) as AnchorIdentity;
+		expect(after.keyId).toBe("sha256:next");
+		expect(after.keyId).not.toBe(before.keyId);
+	});
+
 	it("a rotation does not drop the durable high-water or the superseded key", () => {
 		const { root } = vault();
 		const before = readAnchorIdentity(root) as AnchorIdentity;
