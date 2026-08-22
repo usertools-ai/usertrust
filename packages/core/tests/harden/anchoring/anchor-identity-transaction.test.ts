@@ -18,6 +18,7 @@
  * leaves nothing behind.
  */
 
+import { spawn } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
@@ -137,6 +138,48 @@ describe("identity.json — single transactional writer", () => {
 	// fresh, because `mutate()` is handed a copy re-read under the lock. What they
 	// pin is that a rotation does not drop these fields, which is a real thing to
 	// break and was worth catching; they are simply not evidence for the merge.
+	it("rotation RETRIES and completes when the lock clears mid-wait", () => {
+		// THE TEST THAT ACTUALLY EXERCISES THE WAIT. Mutation showed the previous
+		// pair proved nothing about retrying: reverting to refuse-on-first-
+		// contention left all of them green, because they only pinned the repair
+		// MESSAGE and the uncontended path.
+		//
+		// A synchronous wait cannot be released from this thread, so the lock is
+		// held by a real short-lived CHILD process. While it lives the lock is
+		// foreign-and-alive (refused); once it exits the pid is dead and the
+		// stale-reclaim path takes it. Rotation must therefore span the gap.
+		const { root } = vault();
+		const dir = anchorsDir(root);
+		mkdirSync(dir, { recursive: true });
+		// The holder is pid 1 (always alive, never us) so every attempt while the
+		// FILE exists is refused as a live foreign lock. A detached shell removes
+		// the file mid-wait, which is what lets a later attempt's O_EXCL create
+		// succeed.
+		//
+		// NOT a short-lived child whose pid goes stale: this thread's wait is
+		// synchronous, so Node never handles SIGCHLD while it blocks, the exited
+		// child stays a ZOMBIE, and `kill(pid, 0)` keeps reporting it alive. That
+		// version of this test failed for a reason that had nothing to do with the
+		// code under test.
+		const lockPath = join(dir, ".anchor-writer.lock");
+		writeFileSync(lockPath, JSON.stringify({ pid: 1, startedAt: new Date().toISOString() }), {
+			mode: 0o600,
+		});
+		spawn("/bin/sh", ["-c", `sleep 0.4; rm -f '${lockPath}'`], {
+			stdio: "ignore",
+			detached: true,
+		}).unref();
+
+		const t0 = Date.now();
+		recordRotatedIdentity(root, { keyId: "sha256:next", publicKeySpki: "YYYY" });
+		const waited = Date.now() - t0;
+
+		// It completed rather than refusing...
+		expect((readAnchorIdentity(root) as AnchorIdentity).keyId).toBe("sha256:next");
+		// ...and it genuinely waited for the holder instead of walking straight in.
+		expect(waited).toBeGreaterThan(150);
+	});
+
 	it("rotation SUCCEEDS on the legitimate uncontended path", () => {
 		// The direction the other test does not cover. A guard proven only on its
 		// failing case can be one that never goes green — two lanes shipped
