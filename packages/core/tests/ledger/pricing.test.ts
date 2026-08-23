@@ -587,6 +587,22 @@ describe("PRICING_TABLE rates audit (D1)", () => {
 		}
 	});
 
+	// promo-window-understatement. The golden above already pins sonnet-5 at
+	// 30/150, but it fails as "pins all four tiers for claude-sonnet-5" — a name
+	// that gives no reason, so the natural response is to update the golden and
+	// move on. That is the failure this test exists to prevent: it names the
+	// consequence, so lowering the row fails with the reason attached.
+	it("promo-window-understatement: sonnet-5 holds the POST-promo rate, never the $2/$10 promo", () => {
+		const rates = PRICING_TABLE["claude-sonnet-5"];
+		// $3/$15 per MTok — the standard rate effective 2026-09-01. The $2/$10
+		// introductory pricing running through 2026-08-31 is deliberately NOT
+		// entered: it would understate, and because these rates size the hold and
+		// the settle debit, an understating row lets a capped agent spend past
+		// its cap. Overstating during the promo is the safe direction (D1).
+		expect(rates?.inputPer1k).toBe(30);
+		expect(rates?.outputPer1k).toBe(150);
+	});
+
 	it("prices cache reads at or below base input, and cache writes at or above", () => {
 		for (const [model, rates] of Object.entries(PRICING_TABLE)) {
 			if (rates.cacheReadPer1k !== undefined) {

@@ -104,6 +104,19 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	// understatement is the dangerous direction, and D1 prefers conservative
 	// overstatement during the promo window. The 1-hour write ($6) collapses
 	// to the 5m rate under the documented approximation.
+	//
+	// THIS ROW HOLDS THE STANDARD RATE, and keeps holding it after the promo
+	// lapses — nothing needs doing on 2026-09-01; the row simply stops differing
+	// from the published card.
+	//
+	// Spelled out because lowering it to a promotional rate does not look like a
+	// mistake while you are making it: read cold against a card showing $2/$10,
+	// this row looks 50% high and reads like a stale entry. It is not. These
+	// rates size the TigerBeetle hold and the settle debit (govern.ts), so a row
+	// that understates does not merely misreport — it lets a capped agent spend
+	// past its cap. Overstatement is the fail-safe direction (D1).
+	// `promo-window-understatement` in tests/ledger/pricing.test.ts fails if this
+	// row is lowered.
 	"claude-sonnet-5": {
 		inputPer1k: 30,
 		outputPer1k: 150,
