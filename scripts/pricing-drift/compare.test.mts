@@ -836,3 +836,27 @@ describe("the report states the rate actually metered", () => {
 		assert.match(md, /-5 \(meters at 50\)/);
 	});
 });
+
+// ── source precedence: catalogs vote once ─────────────────────────────────
+
+describe("agreement among derivatives is not independent confirmation", () => {
+	it("reports TWO catalogs agreeing as ONE evidence tier", () => {
+		// LiteLLM and models.dev both derive from the provider's page and both
+		// lag promotional changes. Counting them as 2 inflates confidence in
+		// exactly the case where verification matters most — a rate that just
+		// moved. Measured 2026-08-22: both said 50/300 for gpt-5.6-sol while
+		// OpenAI's page said 40/200, footnoted promotional. Acting on "three-way
+		// agreement" would have overcharged output 50% on the most-used model.
+		const r = run({ "test-model": MATCHING });
+		assert.deepEqual(r.findings[0]?.sources, ["litellm", "models.dev"]);
+		assert.equal(r.findings[0]?.evidence, 1, "two catalogs are one evidence tier");
+	});
+
+	it("gives an unanswered model zero evidence, not zero sources", () => {
+		const r = run(
+			{ "test-model": MATCHING },
+			{ litellm: { x: {} }, modelsDev: { y: { models: {} } } },
+		);
+		assert.equal(r.findings[0]?.evidence, 0);
+	});
+});

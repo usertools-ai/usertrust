@@ -28,6 +28,57 @@ export interface SourceRates {
 /** Raised when a source is unreachable or its schema no longer matches. */
 export class SourceError extends Error {}
 
+/**
+ * SOURCE PRECEDENCE — the ordering that decides whose number wins, and how
+ * many votes each tier of evidence gets.
+ *
+ * `catalog` sources are NOT independent of each other. LiteLLM and models.dev
+ * both derive from the providers' published pages and both lag promotional
+ * changes, so N of them agreeing is ONE upstream fact with N mirrors. Counting
+ * them as N confirmations inflates confidence in exactly the case where
+ * verification matters most: a rate that recently moved.
+ *
+ * Measured 2026-08-22. Both catalogs — and this repo's own table — priced
+ * `gpt-5.6-sol` at 50/300. OpenAI's page said 40/200, footnoted *promotional
+ * through 2026-11-21*. Acting on "three-way agreement" would have overcharged
+ * output by 50% on the most-used model, with three sources apparently
+ * confirming it.
+ *
+ * The correction that came out of that, and it is narrower than "the catalogs
+ * were wrong": before calling a disagreement an error, ask WHICH QUESTION EACH
+ * SIDE IS ANSWERING. List vs promotional, standard vs priority service tier,
+ * base vs context-cliff, 5m vs 1h cache-write are different questions, and a
+ * catalog silently answers whichever one it was built from.
+ */
+export type SourceTier = "billed" | "provider" | "catalog";
+
+/** Higher wins. Equal tiers do not outrank each other; they corroborate. */
+export const SOURCE_PRECEDENCE: Record<SourceTier, number> = {
+	/** What the provider actually charged. Nothing outranks it. */
+	billed: 3,
+	/** The provider's own published page. Outranks every third party. */
+	provider: 2,
+	/** Third-party catalogs. Collectively worth ONE vote, never N. */
+	catalog: 1,
+};
+
+/** Which tier each configured source belongs to. */
+export const SOURCE_TIERS: Record<string, SourceTier> = {
+	litellm: "catalog",
+	"models.dev": "catalog",
+};
+
+/**
+ * Distinct EVIDENCE TIERS among the sources that answered — not a source count.
+ *
+ * This is the number that may be reported as corroboration. Two catalogs
+ * agreeing is 1, not 2. A catalog agreeing with a provider page is 2.
+ */
+export function evidenceWeight(sourceNames: readonly string[]): number {
+	const tiers = new Set(sourceNames.map((n) => SOURCE_TIERS[n] ?? "catalog"));
+	return tiers.size;
+}
+
 export const LITELLM_URL =
 	"https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 export const MODELS_DEV_URL = "https://models.dev/api.json";

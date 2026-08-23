@@ -117,7 +117,14 @@ function renderSection(outcome: Exclude<Outcome, "agree">, findings: ModelFindin
 	for (const f of rows) {
 		// Model-level: which sources answered at all. Per-tier attribution is
 		// rendered inside renderTiers, where the distinction actually matters.
-		const srcs = f.sources.length > 0 ? ` _(answered: ${f.sources.join(", ")})_` : "";
+		// Report EVIDENCE TIERS, not a source count. Two catalogs agreeing is one
+		// upstream fact with two mirrors; printing "2 sources" invites a reader to
+		// treat it as independent confirmation, which is what nearly shipped a
+		// 50% overcharge on gpt-5.6-sol.
+		const srcs =
+			f.sources.length > 0
+				? ` _(${f.sources.join(", ")} — ${f.evidence} evidence tier${f.evidence === 1 ? "" : "s"})_`
+				: "";
 		lines.push(`- **\`${f.model}\`** — ${renderTiers(f)}${srcs}`);
 		if (f.note !== undefined) lines.push(`  - ${f.note}`);
 		if (f.cacheGaps.length > 0) {

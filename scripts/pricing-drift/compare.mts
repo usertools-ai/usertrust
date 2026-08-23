@@ -23,6 +23,7 @@ import type { ModelRates } from "../../packages/core/src/ledger/pricing.js";
 import { resolveAppliedRates } from "../../packages/core/src/ledger/pricing.js";
 import type { ModelSourceMap } from "./model-map.mts";
 import type { SourceRates } from "./sources.mts";
+import { evidenceWeight } from "./sources.mts";
 
 /** The four tiers, compared independently. */
 export const TIERS = ["inputPer1k", "outputPer1k", "cacheReadPer1k", "cacheWritePer1k"] as const;
@@ -130,6 +131,16 @@ export interface ModelFinding {
 	 */
 	cacheGaps: CacheGap[];
 	sources: string[];
+	/**
+	 * Distinct EVIDENCE TIERS behind this finding — not a source count.
+	 *
+	 * Two third-party catalogs agreeing is **1**, because they are not
+	 * independent: both derive from the provider's page and both lag
+	 * promotional changes. A catalog agreeing with the provider's own page is 2.
+	 * This is the number a reader may treat as corroboration; `sources.length`
+	 * is not, and reading it as such nearly shipped a 50% overcharge.
+	 */
+	evidence: number;
 	note?: string;
 }
 
@@ -271,6 +282,7 @@ export function compareTable(input: CompareInput): DriftReport {
 				diffs: [],
 				cacheGaps: [],
 				sources: [],
+				evidence: 0,
 				note: "present in PRICING_TABLE but absent from MODEL_MAP — provenance undecided",
 			});
 			counts.unmapped++;
@@ -309,6 +321,7 @@ export function compareTable(input: CompareInput): DriftReport {
 				diffs: [],
 				cacheGaps: [],
 				sources: answeredEarly.map((a) => a.name),
+				evidence: evidenceWeight(answeredEarly.map((a) => a.name)),
 				note: `required tier(s) ${malformed.join(", ")} are not finite non-negative numbers in PRICING_TABLE`,
 			});
 			counts["malformed-rate"]++;
@@ -325,6 +338,7 @@ export function compareTable(input: CompareInput): DriftReport {
 				diffs: [],
 				cacheGaps: [],
 				sources: [],
+				evidence: 0,
 				...(mapping.note !== undefined ? { note: mapping.note } : {}),
 			});
 			counts.uncorroborated++;
@@ -442,6 +456,7 @@ export function compareTable(input: CompareInput): DriftReport {
 				diffs,
 				cacheGaps,
 				sources: sourceNames,
+				evidence: evidenceWeight(sourceNames),
 				...(deviation !== undefined
 					? {
 							note: `allowlisted, but the allowlist CANNOT suppress understatement: ${deviation.reason}`,
@@ -478,6 +493,7 @@ export function compareTable(input: CompareInput): DriftReport {
 				diffs,
 				cacheGaps,
 				sources: sourceNames,
+				evidence: evidenceWeight(sourceNames),
 				// Deliberately does NOT claim our rate exceeds every source: with
 				// sources at 50 and 70 and ours at 60 that would be false, and this
 				// outcome does not fail, so the note would falsely reassure. All that
@@ -496,11 +512,19 @@ export function compareTable(input: CompareInput): DriftReport {
 					diffs,
 					cacheGaps,
 					sources: sourceNames,
+					evidence: evidenceWeight(sourceNames),
 					note: `upstream now agrees; remove this allowlist entry: ${deviation.reason}`,
 				});
 				counts["deviation-stale"]++;
 			} else {
-				findings.push({ model, outcome: "agree", diffs, cacheGaps, sources: sourceNames });
+				findings.push({
+					model,
+					outcome: "agree",
+					diffs,
+					cacheGaps,
+					sources: sourceNames,
+					evidence: evidenceWeight(sourceNames),
+				});
 				counts.agree++;
 			}
 			continue;
@@ -513,11 +537,19 @@ export function compareTable(input: CompareInput): DriftReport {
 				diffs,
 				cacheGaps,
 				sources: sourceNames,
+				evidence: evidenceWeight(sourceNames),
 				note: deviation.reason,
 			});
 			counts["deviation-expected"]++;
 		} else {
-			findings.push({ model, outcome: "disagree", diffs, cacheGaps, sources: sourceNames });
+			findings.push({
+				model,
+				outcome: "disagree",
+				diffs,
+				cacheGaps,
+				sources: sourceNames,
+				evidence: evidenceWeight(sourceNames),
+			});
 			counts.disagree++;
 		}
 	}
