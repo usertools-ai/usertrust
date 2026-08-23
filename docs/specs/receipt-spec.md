@@ -40,11 +40,29 @@ companion is corrected to the array form.
 Because §6a pins the COMPLETE digest of that file, an edit anywhere in it
 moves the pin even when the adopted section does not change — which is the
 case here, and it was verified rather than assumed: the "Mint lifecycle"
-section is **byte-identical** across the change
-(`sha256:cc5415c054cad415eedb9a6b4759fa59c70c9b5b5a889866e27ffceab45ccaf3`
-over the section's 272 lines, before and after). This bump is therefore the
-explicit re-read-and-re-pin §6a requires, and the re-read's finding is that
-**nothing inside the pin moved**. No normative movement in §6.
+section is **byte-identical** across the change,
+`sha256:4662f3ad2d363b6211c2599451cfd3d70fc447eab1b6e3bf5a459801f4e25c38`
+before and after.
+
+**Reproduce it exactly** — a digest published without its extraction boundary
+is not evidence, because the reader cannot tell which bytes it covers:
+
+```
+from the '## Mint lifecycle' heading, through the byte BEFORE the next
+'## ' heading, trailing newline EXCLUDED — exactly 17,961 bytes
+```
+
+Stated in BYTES on purpose. A line count is not a boundary: this span is "270
+lines" by `wc -l` and 271 by splitting on newlines, because the final line
+carries no terminator — so a count invites the same ambiguity the digest is
+supposed to remove. An earlier draft of this entry published a digest over a
+span that silently included the terminating `## Errors` heading; the claim was
+true and the number was real, but nobody could have reproduced it from the
+text, which makes it decoration rather than evidence.
+
+This bump is therefore the explicit re-read-and-re-pin §6a requires, and the
+re-read's finding is that **nothing inside the pin moved**. No normative
+movement in §6.
 
 **v0.9.5 (2026-08-16): the v0.2 resolver companion ADOPTED as normative, and
 §6a RE-PINNED to it.** §6a's own rule is that a later companion round is never
@@ -1216,9 +1234,22 @@ which is how rejected wording returns.
 now (verify-page design R39/R40 at v0.9). What it requires of any consumer is
 the unqualified number plus its scope line — **not** a restated bound. The
 earlier carve-out recorded `usertrust-verify receipt` as non-conformant for
-omitting floor framing; R40 removed the requirement, so that basis for
-non-conformance no longer exists. Any consumer is measured against the scope
-line above.
+omitting *floor framing*; R40 removed that requirement, so that basis for
+non-conformance no longer exists.
+
+**A different, narrower carve-out remains, and is named here rather than left
+silent.** R40 removed the floor; it explicitly PRESERVED the `indeterminate`
+rule that unknown coverage supports no bound in either direction. The shipped
+CLI does not state that half: `DELEGATION_LABELS.indeterminate`
+(`packages/verify/src/receipt-cli.ts`) renders only *"end-to-end coverage that
+cannot be verified"*, and the human report deliberately adds no separate
+delegation caveat at any posture. So for `indeterminate` receipts
+`usertrust-verify receipt` is **non-conformant to this clause**, as a named
+ledgered follow-up, and must not be described as conformant.
+
+Recorded because the alternative is worse: dropping the carve-out along with
+the floor requirement would have left a real gap with nothing naming it, which
+reads as conformance. A removed marker is not the same as a closed gap.
 - **ONLY `includesAllDelegated` may be presented as the total cost of work
   caused by the subject** — and only when its §2a signed evidence validates.
   **Pinned condition (v0.9.2): `includesAllDelegated` WITHOUT validating
