@@ -777,11 +777,18 @@ shape). Four tiers, and a consumer must not blur them:
   // consumers cache verdicts per response (ETag), never across them.
   //
   // "anchorEvidence": { "rekor": { /* RekorReceipt */ },
-  //                     "s3ObjectLock": { /* optional probe */ } }
+  //                     "s3ObjectLock": [ /* DoctorReport, 0..n */ ] }
   //                                      // ── UNSIGNED, OPTIONAL. A CONTAINER, not a
   //                                      // single-format union: the Rekor evidence is the
   //                                      // `rekor` MEMBER, with an optional `s3ObjectLock`
-  //                                      // sibling. `rekor` = the repo's existing
+  //                                      // sibling. `s3ObjectLock` is an ARRAY of
+  //                                      // `DoctorReport` — it carries one entry per probed
+  //                                      // sink, and the panel renders the set. An OBJECT
+  //                                      // here is silently treated as absent by the deployed
+  //                                      // page (`Array.isArray` gate in
+  //                                      // `anchor-evidence.tsx`), which fails quiet on
+  //                                      // exactly the evidence the panel exists to show.
+  //                                      // `rekor` = the repo's existing
   //                                      // RekorReceipt shape (stored bytes + artifact hash
   //                                      // + log inclusion proof + signed log checkpoint +
   //                                      // pinned log key). ONLY `rekor` can move the

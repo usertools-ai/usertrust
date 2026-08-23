@@ -1,6 +1,6 @@
-# Receipt Spec + ID Format — DRAFT v0.9.5 (usertrust drafts, stealth reviews)
+# Receipt Spec + ID Format — DRAFT v0.9.6 (usertrust drafts, stealth reviews)
 
-Status: **DRAFT v0.9.5** — the version-history block below is the authority;
+Status: **DRAFT v0.9.6** — the version-history block below is the authority;
 v0.9.2–v0.9.4 amendments were recorded inline before this bump, so the jump
 from the long-standing v0.6 title is history catching up, not versions
 skipped. The v0.6-era narrative that follows stands as history:
@@ -27,6 +27,42 @@ movement, no verdict round):** §10.15's binding path corrected to
 cumulative; §10.1's binding-qualifier list completed with the
 `billedUnfinalized` exception. Surfaced by the resolver transcription gate
 (stealth PR #823), which adopted the correct readings from §4/§7.
+
+**v0.9.6 (2026-08-23): §6a RE-PINNED after an out-of-pin companion fix
+(usertrust #139 item 3).** The resolver companion's `anchorEvidence` example
+specified `s3ObjectLock` as an OBJECT; the deployed verify page declares
+`DoctorReport[]` (`site/app/r/fixtures/types.ts`) and accepts it only through
+an `Array.isArray` gate (`site/app/r/components/anchor-evidence.tsx`), so a
+conforming resolver's Object-Lock evidence rendered as nothing at all — a
+fail-quiet on precisely the evidence that panel exists to display. The
+companion is corrected to the array form.
+
+Because §6a pins the COMPLETE digest of that file, an edit anywhere in it
+moves the pin even when the adopted section does not change — which is the
+case here, and it was verified rather than assumed: the "Mint lifecycle"
+section is **byte-identical** across the change,
+`sha256:4662f3ad2d363b6211c2599451cfd3d70fc447eab1b6e3bf5a459801f4e25c38`
+before and after.
+
+**Reproduce it exactly** — a digest published without its extraction boundary
+is not evidence, because the reader cannot tell which bytes it covers:
+
+```
+from the '## Mint lifecycle' heading, through the byte BEFORE the next
+'## ' heading, trailing newline EXCLUDED — exactly 17,961 bytes
+```
+
+Stated in BYTES on purpose. A line count is not a boundary: this span is "270
+lines" by `wc -l` and 271 by splitting on newlines, because the final line
+carries no terminator — so a count invites the same ambiguity the digest is
+supposed to remove. An earlier draft of this entry published a digest over a
+span that silently included the terminating `## Errors` heading; the claim was
+true and the number was real, but nobody could have reproduced it from the
+text, which makes it decoration rather than evidence.
+
+This bump is therefore the explicit re-read-and-re-pin §6a requires, and the
+re-read's finding is that **nothing inside the pin moved**. No normative
+movement in §6.
 
 **v0.9.5 (2026-08-16): the v0.2 resolver companion ADOPTED as normative, and
 §6a RE-PINNED to it.** §6a's own rule is that a later companion round is never
@@ -856,7 +892,7 @@ The resolver spec's "Mint lifecycle — normative constraints" section is
 **adopted as normative for §6, by reference and in full** — reserve →
 work → finalize, with every hardening it carries. The adoption is **PINNED
 BY CONTENT HASH (round-4 P1-5)**: it binds that section as of
-**`sha256:e793a1c72fab65f9b80e2c759caca12d24e39361b6d3dc3b4ca20c33d8938041`**
+**`sha256:403ac455b8a62c2ebe500e92e577406d7a14bb065e766d06e6ce90a731d1e853`**
 — the COMPLETE digest of `docs/specs/receipt-resolver-api.md`, this
 directory's copy: the v0.2 companion-updated resolver spec, adopted as the
 normative companion 2026-08-16, whose pinned section carries the three
@@ -866,8 +902,9 @@ in-pin `claimsHash` mentions removed). The pin's chain, oldest first:
 `sha256:4c293c35fd9473ba474ff967a2d215e8fa399a43aaa36cb395a9747ca81c04d1`
 (v0.1, the round-35 draft) →
 `sha256:6260043a360e61f2e138c3d2f7832b3b9d1718f188ea1f56f04c0e9b9f62e18e`
-(the v0.7-corrected copy those three corrections produced) → the digest
-above, which supersedes it
+(the v0.7-corrected copy those three corrections produced) →
+`sha256:e793a1c72fab65f9b80e2c759caca12d24e39361b6d3dc3b4ca20c33d8938041`
+(the v0.2 companion adopted at v0.9.5) → the digest above, which supersedes it
 (verify with `shasum -a 256`; a truncated
 prefix is not a pin) — and NOT whatever that file says later. Later companion rounds do
 NOT adopt automatically; taking them requires an explicit version bump of
@@ -1175,35 +1212,44 @@ The earlier argument that a `selfDebitsOnly` amount is a valid lower bound
 on caused cost remains *true* and is *not how the page speaks*. Keep it out
 of the rendered claim.
 
-**The floor claim is CONDITIONAL, and the precondition is:** *the amount covers
-a subset of costs actually caused by the subject, and everything omitted is
-non-negative.* It does not hold uniformly.
+**Every posture renders its number unqualified and names its scope beneath it.**
+There is no posture-dependent bound, because there is no bound: the postures
+differ in *what the number covers*, which the scope line states, not in *how
+strongly the number may be claimed*.
 
-| posture | floor | why |
-|---|---|---|
-| `selfDebitsOnly` | **valid** | caused-by-subject subset; omitted delegated spend non-negative; charged figure exact (`posted === assessed`) |
-| `includesSomeDelegated` | valid **only** if every included constituent is provably caused by the subject; else degrade | unproven constituents break the subset premise |
-| `indeterminate` | **INVALID — a new honesty defect** | **unknown coverage supports no bound in either direction**; the total may include costs NOT caused by the subject, so "at least $X was caused" can be flatly FALSE |
-| `includesAllDelegated` | unnecessary (it IS the total) | unreachable pending §2a signed evidence |
+| posture | what the scope line must say |
+|---|---|
+| `selfDebitsOnly` | direct / self-account spend; delegated spend is out of scope |
+| `includesSomeDelegated` | an INCOMPLETE attributed subtotal |
+| `indeterminate` | end-to-end coverage cannot be verified — unknown coverage supports no bound in either direction |
+| `includesAllDelegated` | the total cost of work caused by the subject — only when its §2a signed evidence validates (unreachable in v1) |
 
-**A posture whose precondition fails degrades to its plain label above and MUST
-NOT silently inherit a bound.** The default is *no claim*, with the bound as the
-named exception — never a global reframe that postures opt out of. **The
-mechanical guard is a negative assertion: `indeterminate` renders NO floor
-claim.** (Same discipline as §8's inherit-by-default rule, pointed the other
-way: nobody has to remember to suppress it.)
+The scope statement may not sit behind interaction — not a `<details>`, tooltip,
+or accordion. *A disclosure that requires a click is a defence, not a
+disclosure.* And the retired floor promise must not be restated anywhere,
+**including in order to except it**: an exception names the thing it excepts,
+which is how rejected wording returns.
 
-Neither the floor claim nor the scope statement may sit behind interaction —
-not a `<details>`, tooltip, or accordion. *A disclosure that requires a click is
-a defence, not a disclosure.* And the retired unconditional promise must not be
-restated anywhere, **including in order to except it**; floor framing is exactly
-what lets the strong claim hold without resurrecting that sentence.
+**Conformance, stated so nothing ships silently.** This clause binds the PAGE
+now (verify-page design R39/R40 at v0.9). What it requires of any consumer is
+the unqualified number plus its scope line — **not** a restated bound. The
+earlier carve-out recorded `usertrust-verify receipt` as non-conformant for
+omitting *floor framing*; R40 removed that requirement, so that basis for
+non-conformance no longer exists.
 
-**Conformance carve-out, stated so nothing ships silently.** This clause binds
-the PAGE now (verify-page design R39/R40 at v0.9). `usertrust-verify receipt` is
-in flight and implements posture labelling but NOT floor framing: it is
-**non-conformant to this clause on merge**, as a named ledgered follow-up, and
-must not be described as conformant.
+**A different, narrower carve-out remains, and is named here rather than left
+silent.** R40 removed the floor; it explicitly PRESERVED the `indeterminate`
+rule that unknown coverage supports no bound in either direction. The shipped
+CLI does not state that half: `DELEGATION_LABELS.indeterminate`
+(`packages/verify/src/receipt-cli.ts`) renders only *"end-to-end coverage that
+cannot be verified"*, and the human report deliberately adds no separate
+delegation caveat at any posture. So for `indeterminate` receipts
+`usertrust-verify receipt` is **non-conformant to this clause**, as a named
+ledgered follow-up, and must not be described as conformant.
+
+Recorded because the alternative is worse: dropping the carve-out along with
+the floor requirement would have left a real gap with nothing naming it, which
+reads as conformance. A removed marker is not the same as a closed gap.
 - **ONLY `includesAllDelegated` may be presented as the total cost of work
   caused by the subject** — and only when its §2a signed evidence validates.
   **Pinned condition (v0.9.2): `includesAllDelegated` WITHOUT validating
