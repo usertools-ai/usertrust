@@ -54,7 +54,11 @@ export class GovernorPool {
 				// the process on a ledger that is already unreachable.
 				const governor = await withDeadline(
 					"pool.get",
-					p,
+					// `p` is ALREADY in flight — it is the pool's stored construction promise, so
+					// the thunk closes over it rather than starting anything. A fresh `withDeadline`
+					// budget is never zero at entry (`requestTimeoutMs` is validated positive), so
+					// this thunk is always invoked and the reclamation below is always wired up.
+					() => p,
 					requestTimeoutOf(this.config),
 					// Construction that lands after shutdown gave up waiting still produced a
 					// live governor holding a TigerBeetle client, and AGENTS.md is explicit
@@ -71,7 +75,7 @@ export class GovernorPool {
 				// which is the shutdown hang again by a third route: bounding construction
 				// only moved it. AGENTS.md requires every governor to be destroyed; when the
 				// ledger will not let that finish, shutdown proceeds regardless.
-				await withDeadline("destroy", governor.destroy(), requestTimeoutOf(this.config));
+				await withDeadline("destroy", () => governor.destroy(), requestTimeoutOf(this.config));
 			}),
 		);
 	}

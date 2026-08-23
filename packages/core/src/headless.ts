@@ -659,15 +659,25 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			`TigerBeetle ${what} did not answer within ${connectTimeoutMs}ms ` +
 				`(addresses: ${tbAddresses.join(", ")})`,
 		);
-	const withConnectDeadline = async <T>(what: string, op: Promise<T>): Promise<T> => {
+	const withConnectDeadline = async <T>(what: string, start: () => Promise<T>): Promise<T> => {
 		// Checked on the way IN and on the way OUT, because winning a race is not the
 		// same as being on time: promise reactions run before timers, so a call that
 		// completes as the budget expires beats its own overdue 0ms timer, and the NEXT
 		// call is then issued against a budget that is already gone. Two sequential
 		// calls could therefore take ~2x connectTimeoutMs and still report success.
+		//
+		// Takes a THUNK so that the way-IN check actually gates the work. While this took
+		// a promise, `withConnectDeadline("createTreasury", tbClient.createTreasury())`
+		// evaluated its argument first: the ledger request was issued and THEN the clock
+		// was consulted, so the guard could never prevent the call it guards. Worse, the
+		// throw below left that live promise with no listener at all — the race is never
+		// assembled on this path — and the caller's `catch` destroys the client, which
+		// rejects the in-flight request into nothing: an unhandled rejection that can
+		// terminate Node. Starting the work after the check removes both at once.
 		if (expired()) {
 			throw overdue(what);
 		}
+		const op = start();
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let value: T;
 		try {
@@ -703,15 +713,14 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 	let holdingId: bigint;
 	try {
 		// Treasury (unconstrained) funds a per-session enforcing holding wallet.
-		await withConnectDeadline("createTreasury", tbClient.createTreasury());
+		await withConnectDeadline("createTreasury", () => tbClient.createTreasury());
 		treasury = tbClient.getTreasuryId();
 
 		// Enforcing holding wallet (debits_must_not_exceed_credits), funded with the
 		// remaining session budget so cumulative pending debits cannot exceed it.
 		// A FRESH account id per session prevents double-funding a deterministic
 		// account across restarts (which would inflate the TB-enforced budget).
-		holdingId = await withConnectDeadline(
-			"createFundedBudgetWallet",
+		holdingId = await withConnectDeadline("createFundedBudgetWallet", () =>
 			tbClient.createFundedBudgetWallet(seedBudget),
 		);
 	} catch (err) {

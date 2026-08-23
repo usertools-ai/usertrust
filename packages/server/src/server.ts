@@ -141,31 +141,35 @@ export function createUsertrustServer(opts: {
 			return;
 		}
 		const deadline = newDeadline();
-		const governor = await deadline.run("pool.get", pool.get(tenant));
+		const governor = await deadline.run("pool.get", () => pool.get(tenant));
 		try {
-			const auth = await deadline.run("authorize", governor.authorize(parsed.data), (late) => {
-				// The deadline abandoned this authorize, but the ledger did not: the hold
-				// exists and its transferId reached nobody, so no client can ever settle or
-				// abort it. AGENTS.md gives every hold exactly one terminal outcome and makes
-				// no exception for "the server stopped waiting" — without this, each timed-out
-				// authorize permanently retires part of the tenant's budget, and a retry loop
-				// against a slow ledger exhausts it while every request reports a timeout.
-				const reason = "authorize abandoned after server deadline";
-				void governor
-					.abort(late, reason)
-					.then(() => {
-						bus.publish(tenant.id, {
-							type: "aborted",
-							transferId: late.transferId,
-							reason,
-							at: new Date().toISOString(),
+			const auth = await deadline.run(
+				"authorize",
+				() => governor.authorize(parsed.data),
+				(late) => {
+					// The deadline abandoned this authorize, but the ledger did not: the hold
+					// exists and its transferId reached nobody, so no client can ever settle or
+					// abort it. AGENTS.md gives every hold exactly one terminal outcome and makes
+					// no exception for "the server stopped waiting" — without this, each timed-out
+					// authorize permanently retires part of the tenant's budget, and a retry loop
+					// against a slow ledger exhausts it while every request reports a timeout.
+					const reason = "authorize abandoned after server deadline";
+					void governor
+						.abort(late, reason)
+						.then(() => {
+							bus.publish(tenant.id, {
+								type: "aborted",
+								transferId: late.transferId,
+								reason,
+								at: new Date().toISOString(),
+							});
+						})
+						.catch(() => {
+							// Best-effort, like the sweeper's abortEntry: the governor's own
+							// destroy()/pending reconciliation voids whatever is left.
 						});
-					})
-					.catch(() => {
-						// Best-effort, like the sweeper's abortEntry: the governor's own
-						// destroy()/pending reconciliation voids whatever is left.
-					});
-			});
+				},
+			);
 			pending.set(auth.transferId, { auth, tenantId: tenant.id, createdAt: Date.now() });
 			bus.publish(tenant.id, {
 				type: "authorized",
@@ -231,7 +235,7 @@ export function createUsertrustServer(opts: {
 		// the entry so a transient settle error stays retryable.
 		pending.delete(transferId);
 		try {
-			const governor = await newDeadline().run("pool.get", pool.get(tenant));
+			const governor = await newDeadline().run("pool.get", () => pool.get(tenant));
 			// NOT deadlined: a timed-out settle has an UNKNOWN outcome on the money path
 			// (the post may land in the ledger afterwards), and the catch below re-inserts
 			// the pending entry to keep it retryable — so timing out here would invite a
@@ -272,7 +276,7 @@ export function createUsertrustServer(opts: {
 		// Atomic claim with re-insert on failure (same contract as settle).
 		pending.delete(transferId);
 		try {
-			const governor = await newDeadline().run("pool.get", pool.get(tenant));
+			const governor = await newDeadline().run("pool.get", () => pool.get(tenant));
 			// Not deadlined, for the same reason as settle: an abort that timed out may
 			// still void the hold.
 			await governor.abort(entry.auth, parsed.data.error);
@@ -358,7 +362,7 @@ export function createUsertrustServer(opts: {
 			return;
 		}
 		if (req.method === "GET" && url === "/v1/budget") {
-			const governor = await newDeadline().run("pool.get", pool.get(tenant));
+			const governor = await newDeadline().run("pool.get", () => pool.get(tenant));
 			sendJson(res, 200, { remaining: governor.budgetRemaining() });
 			return;
 		}
@@ -409,7 +413,7 @@ export function createUsertrustServer(opts: {
 			// budget` is now the test that would have caught it.
 			const abortDeadline = shared ?? newDeadline();
 			try {
-				const governor = await abortDeadline.run("pool.get", pool.get(tenant));
+				const governor = await abortDeadline.run("pool.get", () => pool.get(tenant));
 				// Bounded, unlike the /v1/abort route. This path is best-effort by
 				// construction (the catch below swallows) and it runs during shutdown and
 				// the sweep, where close() awaits it BEFORE pool.destroyAll() — so a
@@ -417,7 +421,7 @@ export function createUsertrustServer(opts: {
 				// teardown from ever reaching the governor destroy that would void it
 				// anyway. The route keeps its unbounded abort because there a caller is
 				// waiting to be told the outcome; nobody is waiting here.
-				await abortDeadline.run("abort", governor.abort(entry.auth, reason));
+				await abortDeadline.run("abort", () => governor.abort(entry.auth, reason));
 			} catch {
 				// Best-effort — the Governor's own destroy()/reconciliation voids
 				// anything the control plane fails to abort here.

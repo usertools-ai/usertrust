@@ -53,36 +53,40 @@ export class Deadline {
 	}
 
 	/**
-	 * Resolve `op`, or reject with {@link GovernorTimeoutError} once the budget is
-	 * spent. The error reports the whole budget rather than the slice this await
-	 * got: the caller configured a request bound, and that is the number explaining
-	 * what happened to their request.
+	 * Run `start()` under the budget, or reject with {@link GovernorTimeoutError}.
+	 * The error reports the whole budget rather than the slice this await got: the
+	 * caller configured a request bound, and that is the number explaining what
+	 * happened to their request.
 	 *
-	 * `onAbandoned` is the other half of the bargain, and callers whose `op`
+	 * Takes a THUNK, not a promise, and that is the load-bearing part. While this
+	 * took a promise, `run("authorize", governor.authorize(...))` had already issued
+	 * the ledger call by the time the argument was evaluated — so every "check the
+	 * clock first" guard checked it strictly after the thing it was meant to gate,
+	 * and a refusal still left real work running with nobody holding its handle.
+	 *
+	 * `onAbandoned` is the other half of the bargain, and callers whose work
 	 * produces anything durable MUST pass it. A deadline abandons the operation; it
-	 * does not stop it. So an `op` landing after we have already answered still
+	 * does not stop it. So an op landing after we have already answered still
 	 * created something real — a ledger hold, a live governor — now unreachable by
 	 * every ordinary path, because the handle that would reach it went nowhere. Two
 	 * AGENTS.md invariants say what happens next: every hold takes exactly one
 	 * terminal outcome, and every governor is destroyed. Neither has an exception
 	 * for "the server stopped waiting", so late arrivals are reclaimed here.
 	 */
-	async run<T>(what: string, op: Promise<T>, onAbandoned?: (value: T) => void): Promise<T> {
-		// Exhausted BEFORE the race is even assembled — e.g. a cold tenant where
-		// governor construction spent the whole budget. Promise reactions run before
-		// timers, so a `setTimeout(..., 0)` loses to an already-fulfilled `op`: the
-		// value would be returned to a caller that has long since timed out, and
-		// `onAbandoned` would be skipped, leaving the hold to the TTL sweep. Decide on
-		// the CLOCK, not on a race the clock cannot win.
-		let timedOut = this.remainingMs() === 0;
-		// ALWAYS attached, and always BEFORE the race — including on the early-timeout
-		// path below, which returns without ever assembling one. `op` outlives this call
-		// on every timeout path, so an unobserved rejection becomes an unhandled
-		// rejection that can terminate Node: a slow factory can exhaust the budget,
-		// return a promise, get its 503, and reject a second later into nothing. The
-		// rejection is swallowed deliberately — by then it has no listener left and the
-		// caller was already told — but it must be OBSERVED. Guarding this attachment on
-		// `onAbandoned` being present was the bug.
+	async run<T>(
+		what: string,
+		start: () => Promise<T>,
+		onAbandoned?: (value: T) => void,
+	): Promise<T> {
+		// Exhausted BEFORE the work is started — e.g. a cold tenant where governor
+		// construction spent the whole budget. Nothing is issued on this path, which is
+		// strictly stronger than issuing it and reclaiming afterwards: there is no hold
+		// to strand, no governor to destroy, and no unobserved promise to reject into
+		// nothing. Decide on the CLOCK, and decide before starting.
+		if (this.remainingMs() === 0) {
+			throw new GovernorTimeoutError(what, this.budgetMs);
+		}
+		let timedOut = false;
 		// Cleanup runs at most once, from whichever path notices the value is late.
 		let reclaimed = false;
 		const reclaim = (value: T): void => {
@@ -99,18 +103,19 @@ export class Deadline {
 				/* a synchronous throw from cleanup is equally non-fatal */
 			}
 		};
+		const op = start();
+		// ALWAYS attached, and always BEFORE the race. `op` outlives this call on every
+		// timeout path, so an unobserved rejection becomes an unhandled rejection that can
+		// terminate Node: a slow factory can exhaust the budget, get its 503, and reject a
+		// second later into nothing. The rejection is swallowed deliberately — by then it
+		// has no listener left and the caller was already told — but it must be OBSERVED.
+		// Guarding this attachment on `onAbandoned` being present was the bug.
 		op.then(
 			(value) => {
 				if (timedOut) reclaim(value);
 			},
 			() => {},
 		);
-		// AFTER the continuation is attached, never before: an op refused on the clock
-		// still has to be reclaimed, and returning early without a listener is how a hold
-		// gets stranded.
-		if (timedOut) {
-			throw new GovernorTimeoutError(what, this.budgetMs);
-		}
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		let value: T;
 		try {
@@ -125,6 +130,24 @@ export class Deadline {
 					}, this.remainingMs());
 				}),
 			]);
+		} catch (err) {
+			// THE CLOCK DECIDES ON THE FAILURE PATH TOO. A rejection that wins the race jumps
+			// straight out through `finally` and skipped the post-race check below, so this
+			// helper decided on the clock for values and on the RACE for errors. Past the
+			// budget the server has no basis to assert any verdict at all: `server.ts` shadows
+			// every mapped status under 500, so a late 4xx came back as a clean
+			// `200 {"decision":"would_deny"}` on a request whose deadline had already blown —
+			// the same laundering of a dependency failure into a policy opinion this package
+			// already fixed once for 503s. Cost of converting every late rejection, accepted
+			// deliberately: a late `LedgerUnavailableError` names the TigerBeetle addresses and
+			// this reports `governor_timeout` instead. An ON-TIME one still surfaces unchanged,
+			// and both map to 503, so only the reason string is lost — worth it to keep the
+			// clock the single decider and to keep HTTP status mapping out of this file.
+			if (this.remainingMs() === 0) {
+				timedOut = true;
+				throw new GovernorTimeoutError(what, this.budgetMs);
+			}
+			throw err;
 		} finally {
 			clearTimeout(timer);
 		}
@@ -147,9 +170,9 @@ export class Deadline {
 /** A one-await budget. Prefer a shared {@link Deadline} when several awaits serve one request. */
 export async function withDeadline<T>(
 	what: string,
-	op: Promise<T>,
+	start: () => Promise<T>,
 	timeoutMs: number,
 	onAbandoned?: (value: T) => void,
 ): Promise<T> {
-	return new Deadline(timeoutMs).run(what, op, onAbandoned);
+	return new Deadline(timeoutMs).run(what, start, onAbandoned);
 }
