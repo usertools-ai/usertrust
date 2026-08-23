@@ -321,6 +321,114 @@ export function anchorSigningPreimage(record: AnchorRecord): string {
 	return canonicalize(rest);
 }
 
+/**
+ * Domain tag for a witness-key delegation (witness-key spec §3.3). MUST stay
+ * prefix-disjoint from every other signing preimage in this repo — anchor and
+ * checkpoint preimages begin with canonical JSON, and the ut1 receipt signature
+ * uses "usertrust/receipt-signature/v1\n". Two domains sharing a preimage set is
+ * how a signature over one thing gets replayed as a signature over another.
+ */
+export const WITNESS_DELEGATION_TAG = "usertrust:witness-delegation:v1";
+
+/**
+ * Open-ended upper bound for a delegation's anchorSeq range.
+ *
+ * 2^53-1, NOT 2^64-1. The obvious choice for a u64 field cannot be represented
+ * exactly as a JavaScript number, and this codebase validates every parsed
+ * integer with Number.isSafeInteger — so a 2^64-1 sentinel would round-trip
+ * through JSON as something other than what was signed, and fail its own
+ * validation. The field is encoded as u64be for cross-implementation clarity;
+ * the VALUE stays inside the safe-integer range.
+ */
+export const OPEN_ENDED_ANCHOR_SEQ = Number.MAX_SAFE_INTEGER;
+
+export interface WitnessDelegationFields {
+	vaultId: string;
+	witnessKeyId: string;
+	/** SPKI DER of the P-256 witness public key. */
+	witnessSpkiDer: Uint8Array;
+	/** The ROOT key epoch making the delegation. */
+	delegatedByKeyId: string;
+	/** Monotonic from 1; contiguity is what makes an omitted revocation visible. */
+	delegationIndex: number;
+	effectiveFromAnchorSeq: number;
+	effectiveUntilAnchorSeq: number;
+}
+
+/**
+ * The exact bytes a witness-key delegation is signed over.
+ *
+ * EVERY VARIABLE-LENGTH FIELD CARRIES A u32be BYTE-LENGTH PREFIX. Without them
+ * the fields concatenate ambiguously and two different delegations can share one
+ * preimage — the same failure the cost-center derivation documents, and it is
+ * reachable here because `vaultId` is only ever validated as a non-empty string,
+ * never as a UUID. Byte lengths, not code-unit counts, so a second
+ * implementation in another language derives identical bytes.
+ *
+ * Returns null rather than throwing on anything it cannot encode exactly: this
+ * runs on untrusted input on the verification side, where a throw out of a
+ * checking function is itself a defect. Fail closed — an unverifiable delegation
+ * is not a valid one.
+ */
+export function witnessDelegationPreimage(fields: WitnessDelegationFields): Uint8Array | null {
+	const {
+		vaultId,
+		witnessKeyId,
+		witnessSpkiDer,
+		delegatedByKeyId,
+		delegationIndex,
+		effectiveFromAnchorSeq,
+		effectiveUntilAnchorSeq,
+	} = fields;
+	if (vaultId === "" || witnessKeyId === "" || delegatedByKeyId === "") return null;
+	// LONE SURROGATES COLLIDE. "\uD800" and "\uD801" are distinct, non-empty
+	// JavaScript strings, but UTF-8 encoding replaces each unpaired surrogate
+	// with U+FFFD — so both produce the SAME preimage bytes and one root
+	// signature would authorize two different delegations. `vaultId` is only
+	// ever validated as non-empty, never as a UUID, so it is attacker-chosen.
+	// The round-trip is the exact property required: the encoding must be
+	// lossless, or the prefixes below are protecting bytes that no longer
+	// distinguish the inputs they came from.
+	for (const value of [vaultId, witnessKeyId, delegatedByKeyId]) {
+		if (Buffer.from(value, "utf8").toString("utf8") !== value) return null;
+	}
+	if (witnessSpkiDer.length === 0) return null;
+	// delegationIndex starts at 1: a 0 would make "no delegations" and "the first
+	// delegation" indistinguishable in a contiguity check.
+	// Safe-integer alone is not enough: 2**32 is a safe integer and passes, then
+	// writeUInt32BE throws ERR_OUT_OF_RANGE — breaking this function's stated
+	// "returns null, never throws" contract on the untrusted verification path.
+	if (!Number.isSafeInteger(delegationIndex) || delegationIndex < 1) return null;
+	if (delegationIndex > 0xff_ff_ff_ff) return null;
+	if (!Number.isSafeInteger(effectiveFromAnchorSeq) || effectiveFromAnchorSeq < 0) return null;
+	if (!Number.isSafeInteger(effectiveUntilAnchorSeq) || effectiveUntilAnchorSeq < 0) return null;
+	if (effectiveUntilAnchorSeq < effectiveFromAnchorSeq) return null;
+
+	const parts: Uint8Array[] = [Buffer.from(WITNESS_DELEGATION_TAG, "utf8")];
+	for (const value of [vaultId, witnessKeyId]) {
+		const bytes = Buffer.from(value, "utf8");
+		parts.push(u32be(bytes.length), bytes);
+	}
+	parts.push(u32be(witnessSpkiDer.length), witnessSpkiDer);
+	const by = Buffer.from(delegatedByKeyId, "utf8");
+	parts.push(u32be(by.length), by);
+	parts.push(u32be(delegationIndex));
+	parts.push(u64be(effectiveFromAnchorSeq), u64be(effectiveUntilAnchorSeq));
+	return Buffer.concat(parts);
+}
+
+function u32be(n: number): Uint8Array {
+	const b = Buffer.alloc(4);
+	b.writeUInt32BE(n);
+	return b;
+}
+
+function u64be(n: number): Uint8Array {
+	const b = Buffer.alloc(8);
+	b.writeBigUInt64BE(BigInt(n));
+	return b;
+}
+
 /** sha256 hex of the signing pre-image — what the successor's prevAnchorHash carries. */
 export function anchorPayloadHash(record: AnchorRecord): string {
 	return createHash("sha256").update(anchorSigningPreimage(record), "utf8").digest("hex");
