@@ -23,7 +23,7 @@ import type { ModelRates } from "../../packages/core/src/ledger/pricing.js";
 import { resolveAppliedRates } from "../../packages/core/src/ledger/pricing.js";
 import type { ModelSourceMap } from "./model-map.mts";
 import type { SourceRates } from "./sources.mts";
-import { evidenceWeight } from "./sources.mts";
+import { evidenceWeight, SOURCE_PRECEDENCE, SOURCE_TIERS } from "./sources.mts";
 
 /** The four tiers, compared independently. */
 export const TIERS = ["inputPer1k", "outputPer1k", "cacheReadPer1k", "cacheWritePer1k"] as const;
@@ -231,7 +231,16 @@ interface TierConsensus {
 	min: number;
 	max: number;
 	conflicted: boolean;
+	/** Sources at the DECIDING tier — the ones this consensus is computed from. */
 	publishedBy: string[];
+	/**
+	 * Sources a higher tier outranked, as `name=value`. Kept so a reader can see
+	 * what was superseded and why the number differs from a catalog they might
+	 * check by hand. `evidenceWeight` already collapses catalogs to one vote;
+	 * this is the other half of the same doctrine — higher tiers WIN rather than
+	 * merely counting once.
+	 */
+	outrankedBy: string[];
 }
 
 function resolveTier(
@@ -243,12 +252,35 @@ function resolveTier(
 		return v !== undefined && Number.isFinite(v);
 	});
 	if (publishing.length === 0) return null;
-	const values = publishing.map((a) => a.rates[tier] as number);
+
+	// PRECEDENCE DECIDES BEFORE CONSENSUS DOES. Computing min/max across every
+	// publisher treats a provider's own page and a stale third-party catalog as
+	// equal witnesses, which is exactly the inversion SOURCE_PRECEDENCE exists to
+	// prevent: provider=50 against a stale catalog=40 and our table at 40 has an
+	// empty `min` gap, so it lands as a non-failing `source-conflict` while we
+	// meter 20% under what the provider actually publishes. Resolve to the
+	// highest tier PRESENT, then let equals corroborate within it — the doc's own
+	// rule, "higher wins; equal tiers do not outrank each other".
+	//
+	// An unmapped source defaults to `catalog`, the LOWEST tier, deliberately: a
+	// newly added source must not silently outrank the provider by omission from
+	// SOURCE_TIERS. It can only ever under-claim authority, never over-claim it.
+	const rank = (name: string) => SOURCE_PRECEDENCE[SOURCE_TIERS[name] ?? "catalog"];
+	const topRank = Math.max(...publishing.map((a) => rank(a.name)));
+	const deciding = publishing.filter((a) => rank(a.name) === topRank);
+	const outranked = publishing.filter((a) => rank(a.name) !== topRank);
+
+	const values = deciding.map((a) => a.rates[tier] as number);
 	return {
 		min: Math.min(...values),
 		max: Math.max(...values),
 		conflicted: new Set(values).size > 1,
-		publishedBy: publishing.map((a) => a.name),
+		publishedBy: deciding.map((a) => a.name),
+		// Outranked sources are RECORDED, not dropped. Their values are why a
+		// reader would otherwise see an unexplained number; silently discarding
+		// them would hide the disagreement the same way an unrendered conflict
+		// does elsewhere in this file.
+		outrankedBy: outranked.map((a) => `${a.name}=${a.rates[tier]}`),
 	};
 }
 
@@ -604,8 +636,17 @@ export function compareTable(input: CompareInput): DriftReport {
 	const floorsBreached = mappings < minMappings || corroborated < minCorroboratedModels;
 
 	const exhaustive = assertExhaustive(counts, Object.keys(table).length);
+	// FAIL ON THE SET, NOT ONLY ITS COUNT. `missingMappings` names exactly which
+	// promised mappings did not answer; `mappings < expectedMappings` only asks
+	// whether the TOTAL came up short. Those diverge the moment the source set
+	// changes: an extra source answering elsewhere compensates numerically, the
+	// count reaches its expectation, and a mapping that vanished stays in
+	// `missingMappings` while `failed` reads false — a real regression masked by
+	// an unrelated success. The set is already computed and sorted above; using
+	// it costs nothing and removes the compensation path entirely.
 	const failed =
 		findings.some((f) => isFailing(f.outcome)) ||
+		missingMappings.length > 0 ||
 		mappings < expectedMappings ||
 		corroborated < expectedCorroborated ||
 		floorsBreached ||

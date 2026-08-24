@@ -18,7 +18,12 @@ import { PRICING_TABLE } from "../../packages/core/src/ledger/pricing.js";
 import { compareTable, orphanDeviations } from "./compare.mts";
 import type { ModelSourceMap } from "./model-map.mts";
 import { renderReport } from "./report.mts";
-import { normalizeLiteLLM, normalizeModelsDev, usertokensPer1kFromUsdPerMTok } from "./sources.mts";
+import {
+	normalizeLiteLLM,
+	normalizeModelsDev,
+	SOURCE_TIERS,
+	usertokensPer1kFromUsdPerMTok,
+} from "./sources.mts";
 
 // ── fixtures ──────────────────────────────────────────────────────────────
 
@@ -858,5 +863,121 @@ describe("agreement among derivatives is not independent confirmation", () => {
 			{ litellm: { x: {} }, modelsDev: { y: { models: {} } } },
 		);
 		assert.equal(r.findings[0]?.evidence, 0);
+	});
+});
+
+// ── source precedence: higher tiers WIN, they do not merely vote once ──────
+
+describe("a higher-tier source outranks a catalog rather than averaging with it", () => {
+	// SOURCE_TIERS is config, and no provider-tier source is wired yet — which is
+	// exactly why the defect was latent and why these tests register one. They
+	// restore it afterwards so no other case inherits the change.
+	const withProvider = (name: string, fn: () => void) => {
+		SOURCE_TIERS[name] = "provider";
+		try {
+			fn();
+		} finally {
+			delete SOURCE_TIERS[name];
+		}
+	};
+
+	// The catalogs are STALE here — they still publish the OLD rate that agrees
+	// with our table. That is the whole scenario: if they published the provider's
+	// number there would be nothing for precedence to decide, and a test that
+	// leaves them at their default passes with or without the fix (measured — it
+	// did, on the first mutation run).
+	const threeWay = (ours: ModelRates, providerIn: number, staleIn = 40) =>
+		compareTable({
+			table: { "test-model": ours },
+			map: MAP,
+			deviations: {},
+			sources: {
+				litellm: normalizeLiteLLM(
+					litellmRaw({ input_cost_per_token: staleIn / 10 / 1_000_000 }),
+					MAP,
+				),
+				"models.dev": normalizeModelsDev(modelsDevRaw({ inputPer1k: staleIn }), MAP),
+				"provider-page": {
+					"test-model": { inputPer1k: providerIn, outputPer1k: 250 },
+				},
+			},
+		});
+
+	it("FAILS as understated when the provider publishes above our rate and a stale catalog agrees with us", () => {
+		// The measured shape from 2026-08-22: provider says 50, a lagging catalog
+		// still says 40, we meter 40. Averaging every publisher gives min=40, our
+		// 40 is not below it, and the run lands as a NON-FAILING source-conflict
+		// while we under-meter by 20% against the only authoritative source.
+		withProvider("provider-page", () => {
+			const r = threeWay({ inputPer1k: 40, outputPer1k: 250 }, 50);
+			assert.equal(
+				r.findings[0]?.outcome,
+				"understated",
+				"provider outranks the catalog: understatement must be proven against IT",
+			);
+			assert.equal(r.failed, true, "an understated rate must fail the run");
+		});
+	});
+
+	it("records what it outranked instead of silently discarding it", () => {
+		withProvider("provider-page", () => {
+			const r = threeWay({ inputPer1k: 40, outputPer1k: 250 }, 50);
+			const diff = r.findings[0]?.diffs.find((d) => d.tier === "inputPer1k");
+			assert.ok(diff, "the understated input tier must be reported, not just counted");
+			assert.deepEqual(
+				diff?.publishedBy,
+				["provider-page"],
+				"only the deciding tier publishes the consensus",
+			);
+		});
+	});
+
+	it("still lets EQUAL tiers corroborate — precedence must not collapse a real catalog conflict", () => {
+		// Guard against over-correction: with no higher tier present, two catalogs
+		// disagreeing is still a conflict. Precedence decides BETWEEN tiers; it
+		// says nothing within one.
+		const r = run(
+			{ "test-model": MATCHING },
+			{
+				litellm: litellmRaw(),
+				modelsDev: modelsDevRaw({ inputPer1k: 999 }),
+			},
+		);
+		assert.equal(r.findings[0]?.evidence, 1, "two catalogs remain one tier");
+	});
+});
+
+describe("coverage failure keys on the missing SET, not a compensating count", () => {
+	it("FAILS when a promised mapping vanishes and an extra source makes the count whole", () => {
+		// litellm promised `test-model` and does not answer; a third source does.
+		// The pair COUNT reaches its expectation (2 == 2) while the named set still
+		// holds `litellm:test-model`. Keying failure on the count alone lets an
+		// unrelated success mask a real regression — the coverage check reports
+		// clean precisely when a check disappeared.
+		const r = compareTable({
+			table: { "test-model": MATCHING },
+			map: MAP,
+			deviations: {},
+			sources: {
+				litellm: {},
+				"models.dev": normalizeModelsDev(modelsDevRaw(), MAP),
+				"provider-page": { "test-model": MATCHING },
+			},
+		});
+		assert.deepEqual(
+			r.missingMappings,
+			["litellm:test-model"],
+			"the vanished mapping must still be NAMED",
+		);
+		assert.equal(
+			r.mappings >= r.expectedMappings,
+			true,
+			"and the count must be whole — otherwise this tests nothing",
+		);
+		assert.equal(
+			r.failed,
+			true,
+			"a named missing mapping fails the run even when the count is satisfied",
+		);
 	});
 });
