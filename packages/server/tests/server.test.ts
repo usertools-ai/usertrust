@@ -330,7 +330,11 @@ describe("edge cases and failure paths", () => {
 			config: config(),
 			factory: async () => fake.governor,
 		});
-		await expect(unstarted.close()).resolves.toBeUndefined();
+		// close() now REPORTS what teardown achieved rather than returning nothing.
+		// Nothing was ever created here, so the honest report is an empty one — and
+		// crucially `abandoned` is empty, because "nothing to tear down" and "tore
+		// down but gave up" must never look alike.
+		await expect(unstarted.close()).resolves.toEqual({ completed: 0, abandoned: [] });
 	});
 
 	it("listen() rejects when the port is already taken", async () => {
@@ -601,7 +605,11 @@ describe("request deadline — a stalled governor answers, it does not hang", ()
 			destroy: () => new Promise<never>(() => {}),
 		};
 		server = createUsertrustServer({
-			config: config({ requestTimeoutMs: 250 }),
+			// `shutdownTimeoutMs`, not `requestTimeoutMs` — teardown no longer shares
+			// the request budget, which is the whole point of the fix: at the old
+			// defaults a 4s request timeout pre-empted a 4-5s settling destroy() on
+			// EVERY shutdown during settlement, by arithmetic rather than bad luck.
+			config: config({ requestTimeoutMs: 250, shutdownTimeoutMs: 250 }),
 			factory: async () => stalling,
 		});
 		const { port } = await server.listen();
@@ -615,10 +623,21 @@ describe("request deadline — a stalled governor answers, it does not hang", ()
 		).toBe(200);
 
 		const outcome = await Promise.race([
-			server.close().then(() => "closed" as const),
-			new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 8_000)),
+			server.close().then((report) => ({ kind: "closed" as const, report })),
+			new Promise<{ kind: "hung" }>((resolve) =>
+				setTimeout(() => resolve({ kind: "hung" }), 8_000),
+			),
 		]);
-		expect(outcome).toBe("closed");
+		expect(outcome.kind).toBe("closed");
+		// AND IT SAYS SO. Not hanging was never the whole requirement — the previous
+		// version asserted only that close() returned, which is exactly what a
+		// truncated teardown reported as success looks like from the outside. A
+		// stalled destroy() is abandoned work on the money path and the report has
+		// to carry that, or the CLI cannot decline to exit 0.
+		if (outcome.kind === "closed") {
+			expect(outcome.report.abandoned).toHaveLength(1);
+			expect(outcome.report.completed).toBe(0);
+		}
 		server = undefined;
 	}, 20_000);
 

@@ -18,6 +18,24 @@ const TenantSchema = z.object({
 
 export const DEFAULT_REQUEST_TIMEOUT_MS = 4_000;
 
+/**
+ * Shutdown teardown gets its OWN budget, because it is not a request.
+ *
+ * A request timeout bounds how long a CALLER waits for an answer. Teardown
+ * bounds how long we wait for money-path work to finish — voiding pending
+ * transfers, flushing and releasing the audit writer. Sharing one number made
+ * the collision arithmetic rather than unlucky: `destroy()` is documented to
+ * wait up to 5s for in-flight work (AGENTS.md:118), the request default is 4s,
+ * so ANY shutdown during settlement pre-empted teardown by construction.
+ *
+ * This larger default makes that collision unlikely. It does NOT make it
+ * impossible — a shorter `shutdownTimeoutMs` is still valid configuration, and
+ * a wedged ledger can exceed any budget. The property that holds at every
+ * configuration is the one in `destroyAll`: an expired budget is reported as
+ * INCOMPLETE teardown, never as a clean shutdown.
+ */
+export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 15_000;
+
 const ServerConfigSchema = z.object({
 	host: z.string().default("127.0.0.1"),
 	port: z.number().int().min(1).max(65535).default(4519),
@@ -49,6 +67,8 @@ const ServerConfigSchema = z.object({
 	// default lives in `requestTimeoutOf` instead, which is one place, applies to
 	// hand-built and file-loaded configs alike, and cannot drift from the type.
 	requestTimeoutMs: z.number().int().positive().optional(),
+	// Teardown is not a request; see DEFAULT_SHUTDOWN_TIMEOUT_MS.
+	shutdownTimeoutMs: z.number().int().positive().optional(),
 	tenants: z.array(TenantSchema).min(1),
 });
 
@@ -66,6 +86,13 @@ export type ServerConfig = z.infer<typeof ServerConfigSchema>;
  * request from such a caller would answer an instant `governor_timeout`: adding
  * the field would have BROKEN the programmatic path rather than defaulting it.
  */
+export function shutdownTimeoutOf(config: ServerConfig): number {
+	const value = config.shutdownTimeoutMs;
+	return typeof value === "number" && Number.isFinite(value) && value > 0
+		? value
+		: DEFAULT_SHUTDOWN_TIMEOUT_MS;
+}
+
 export function requestTimeoutOf(config: ServerConfig): number {
 	const value = config.requestTimeoutMs;
 	return typeof value === "number" && Number.isFinite(value) && value > 0

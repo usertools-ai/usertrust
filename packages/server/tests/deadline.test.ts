@@ -302,3 +302,49 @@ describe("Deadline.run — the PRE-START refusal, and what it does NOT wire", ()
 		expect(reclaimed).toBe(false);
 	});
 });
+
+describe("Deadline.run — a SYNCHRONOUS throw is decided on the clock too", () => {
+	it("converts a late synchronous failure into a timeout", async () => {
+		// The fourth clock site. A factory may validly throw before returning a
+		// promise; if it spends the budget first, the error skipped the post-race
+		// check entirely — and for an evaluate-only authorize a late
+		// PolicyDeniedError comes back as a clean 200 would_deny on a request whose
+		// deadline had already blown.
+		const denied = new Error("policy denied: budget exceeded");
+		denied.name = "PolicyDeniedError";
+		const deadline = new Deadline(20);
+		const settled = await deadline
+			.run("authorize", () => {
+				// Burn the whole budget, then fail synchronously.
+				const until = Date.now() + 40;
+				while (Date.now() < until) {
+					/* spin — a synchronous factory that overruns */
+				}
+				throw denied;
+			})
+			.then(
+				() => "resolved" as const,
+				(err: unknown) => err,
+			);
+		expect(settled).toBeInstanceOf(GovernorTimeoutError);
+		expect(settled).not.toBe(denied);
+	}, 10_000);
+
+	it("still reports an ON-TIME synchronous failure as itself", async () => {
+		// Positive control for the conversion above: a run that turned EVERY
+		// synchronous throw into a timeout would pass the previous test while
+		// destroying the error reporting the server depends on.
+		const denied = new Error("policy denied: budget exceeded");
+		denied.name = "PolicyDeniedError";
+		const settled = await new Deadline(5_000)
+			.run("authorize", () => {
+				throw denied;
+			})
+			.then(
+				() => "resolved" as const,
+				(err: unknown) => err,
+			);
+		expect(settled).toBe(denied);
+		expect(settled).not.toBeInstanceOf(GovernorTimeoutError);
+	}, 10_000);
+});

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { Governor, TrustOpts } from "usertrust";
 import { createGovernor } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
-import { requestTimeoutOf } from "./config.js";
+import { requestTimeoutOf, shutdownTimeoutOf } from "./config.js";
 import { withDeadline } from "./deadline.js";
 
 export type GovernorFactory = (opts: TrustOpts) => Promise<Governor>;
@@ -15,6 +15,16 @@ export type GovernorFactory = (opts: TrustOpts) => Promise<Governor>;
  * vaultBase directories (separate audit chains + spend ledgers) and per-tenant
  * budget/tier overrides. The factory is injectable for tests.
  */
+/**
+ * What a shutdown teardown actually achieved. `abandoned` is non-empty exactly
+ * when a governor's teardown was cut short — the caller must not report a clean
+ * shutdown in that case.
+ */
+export interface TeardownReport {
+	completed: number;
+	abandoned: Array<{ reason: string }>;
+}
+
 export class GovernorPool {
 	private readonly governors = new Map<string, Promise<Governor>>();
 
@@ -42,10 +52,25 @@ export class GovernorPool {
 		return created;
 	}
 
-	async destroyAll(): Promise<void> {
+	/**
+	 * Tear every governor down, and SAY WHETHER IT FINISHED.
+	 *
+	 * This returned `Promise<void>` over `Promise.allSettled`, which discarded
+	 * every outcome — so a teardown cut short by its own deadline was
+	 * structurally unreportable, and `close()` resolved identically whether the
+	 * money path had flushed or been abandoned mid-void. The CLI then exited 0 on
+	 * both. The deadline was not the defect; modelling its EXPIRY AS SUCCESS was.
+	 *
+	 * The budget still exists and still must: `destroy()` voids pending transfers
+	 * before closing the native client, and a void is a ledger request that never
+	 * rejects when the cluster is gone, so an unbounded wait is the original
+	 * shutdown hang by another route. What changes is that giving up waiting is
+	 * now a REPORTED outcome rather than an indistinguishable one.
+	 */
+	async destroyAll(): Promise<TeardownReport> {
 		const all = [...this.governors.values()];
 		this.governors.clear();
-		await Promise.allSettled(
+		const results = await Promise.allSettled(
 			all.map(async (p) => {
 				// Bounded, because a governor whose CONSTRUCTION never settles would pin
 				// close() open forever — the same unbounded await that stopped
@@ -102,8 +127,22 @@ export class GovernorPool {
 				// which is the shutdown hang again by a third route: bounding construction
 				// only moved it. AGENTS.md requires every governor to be destroyed; when the
 				// ledger will not let that finish, shutdown proceeds regardless.
-				await withDeadline("destroy", () => governor.destroy(), requestTimeoutOf(this.config));
+				await withDeadline(
+					"destroy",
+					() => governor.destroy(),
+					// The TEARDOWN budget, not the request budget. Sharing one number made
+					// the collision arithmetic: destroy() waits up to 5s for in-flight work
+					// and the request default is 4s, so any shutdown during settlement
+					// pre-empted the money-path teardown by construction.
+					shutdownTimeoutOf(this.config),
+				);
 			}),
 		);
+		const abandoned = results
+			.filter((r): r is PromiseRejectedResult => r.status === "rejected")
+			.map((r) => ({
+				reason: r.reason instanceof Error ? r.reason.message : String(r.reason),
+			}));
+		return { completed: results.length - abandoned.length, abandoned };
 	}
 }

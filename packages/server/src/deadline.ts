@@ -103,7 +103,28 @@ export class Deadline {
 				/* a synchronous throw from cleanup is equally non-fatal */
 			}
 		};
-		const op = start();
+		// THE CLOCK DECIDES ON A SYNCHRONOUS FAILURE TOO — the fourth site, and the
+		// one the other three did not cover. A Promise-returning factory or an
+		// injected governor method may validly `throw` before it ever returns a
+		// promise. If `start()` spends the remaining budget and then throws here,
+		// the error bypasses the post-race check below entirely: for an
+		// evaluate-only authorize a late `PolicyDeniedError` comes back as a clean
+		// `200 {"decision":"would_deny"}` on a request whose deadline had already
+		// blown — exactly the laundering of a dependency failure into a policy
+		// opinion the catch below exists to prevent, arriving by the one route it
+		// cannot see.
+		//
+		// Nothing is reclaimed on this path and nothing needs to be: the throw means
+		// no promise was produced, so there is no in-flight work to strand.
+		let op: Promise<T>;
+		try {
+			op = start();
+		} catch (err) {
+			if (this.remainingMs() === 0) {
+				throw new GovernorTimeoutError(what, this.budgetMs);
+			}
+			throw err;
+		}
 		// ALWAYS attached, and always BEFORE the race. `op` outlives this call on every
 		// timeout path, so an unobserved rejection becomes an unhandled rejection that can
 		// terminate Node: a slow factory can exhaust the budget, get its 503, and reject a

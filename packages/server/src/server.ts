@@ -11,7 +11,7 @@ import { requestTimeoutOf, resolveTenant } from "./config.js";
 import { Deadline } from "./deadline.js";
 import { EventBus } from "./events.js";
 import type { GovernorFactory } from "./pool.js";
-import { GovernorPool } from "./pool.js";
+import { type TeardownReport, GovernorPool } from "./pool.js";
 import {
 	AbortRequestSchema,
 	AuthorizeRequestSchema,
@@ -39,7 +39,12 @@ interface PendingEntry {
 
 export interface UsertrustServer {
 	listen(): Promise<{ port: number }>;
-	close(): Promise<void>;
+	/**
+	 * Shut down and REPORT what teardown achieved. A non-empty `abandoned` means
+	 * a governor's money-path teardown was cut short by the shutdown budget —
+	 * the process must not present that as a clean exit.
+	 */
+	close(): Promise<TeardownReport>;
 	readonly bus: EventBus;
 	readonly pool: GovernorPool;
 	pendingCount(): number;
@@ -470,7 +475,7 @@ export function createUsertrustServer(opts: {
 				});
 			});
 		},
-		async close(): Promise<void> {
+		async close(): Promise<TeardownReport> {
 			if (sweeper) clearInterval(sweeper);
 			// Abort every remaining pending hold (best-effort) so the control plane
 			// and the ledger stay consistent; Governor.destroy() voids at the ledger
@@ -495,7 +500,7 @@ export function createUsertrustServer(opts: {
 				httpServer.closeAllConnections();
 				httpServer.close(() => resolve());
 			});
-			await pool.destroyAll();
+			return await pool.destroyAll();
 		},
 	};
 }
