@@ -265,3 +265,40 @@ describe("Deadline", () => {
 		expect(true).toBe(true);
 	}, 10_000);
 });
+
+describe("Deadline.run — the PRE-START refusal, and what it does NOT wire", () => {
+	it("throws without invoking start, so onAbandoned never exists to reclaim in-flight work", async () => {
+		// This is the premise behind GovernorPool.destroyAll's reclamation being
+		// attached to the construction promise rather than to the deadline alone.
+		// `run` decides on the clock BEFORE calling `start()`: on an exhausted
+		// budget it throws immediately, so neither the thunk nor `onAbandoned` is
+		// ever reached. A caller that registers cleanup ONLY through `onAbandoned`
+		// therefore has no cleanup at all on this path — and if the work it was
+		// guarding is already running (as the pool's stored construction promise
+		// is), that work lands unobserved holding a live TigerBeetle client.
+		const deadline = new Deadline(1);
+		// Exhaust it before run() is reached. In production this needs only a clock
+		// tick between construction and the call; here it is made deterministic.
+		await new Promise((resolve) => setTimeout(resolve, 5));
+
+		let startInvoked = false;
+		let reclaimed = false;
+		await expect(
+			deadline.run(
+				"pre-start",
+				async () => {
+					startInvoked = true;
+					return "value";
+				},
+				() => {
+					reclaimed = true;
+				},
+			),
+		).rejects.toBeInstanceOf(GovernorTimeoutError);
+
+		expect(startInvoked).toBe(false);
+		// The load-bearing assertion: no reclamation hook ran, because none was
+		// ever wired. Anything already in flight is the caller's problem to observe.
+		expect(reclaimed).toBe(false);
+	});
+});

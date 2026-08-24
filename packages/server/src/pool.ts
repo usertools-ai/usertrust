@@ -52,22 +52,49 @@ export class GovernorPool {
 				// /v1/authorize from ever answering. There is nothing to destroy until it
 				// exists, so give up waiting and let shutdown finish rather than hanging
 				// the process on a ledger that is already unreachable.
-				const governor = await withDeadline(
-					"pool.get",
-					// `p` is ALREADY in flight — it is the pool's stored construction promise, so
-					// the thunk closes over it rather than starting anything. A fresh `withDeadline`
-					// budget is never zero at entry (`requestTimeoutMs` is validated positive), so
-					// this thunk is always invoked and the reclamation below is always wired up.
-					() => p,
-					requestTimeoutOf(this.config),
-					// Construction that lands after shutdown gave up waiting still produced a
-					// live governor holding a TigerBeetle client, and AGENTS.md is explicit
-					// that an undestroyed client is what keeps the event loop from draining —
-					// so abandoning it does not just leak, it can stop the process exiting.
-					(late) => {
-						void late.destroy().catch(() => {});
-					},
-				);
+				// Reclamation is attached to a scope-level ONCE flag rather than to the
+				// deadline alone, because the deadline may never wire it up.
+				//
+				// The previous comment here claimed a fresh budget "is never zero at entry
+				// … so this thunk is always invoked and the reclamation below is always
+				// wired up". That is false, and it is the reason the gap survived review.
+				// `Deadline.run` decides on the CLOCK BEFORE calling `start()` — it throws
+				// on `remainingMs() === 0` at deadline.ts:86, ahead of the thunk. With a
+				// small but perfectly valid `requestTimeoutMs` (1ms is validated positive),
+				// a single clock tick between constructing the deadline and calling `run`
+				// exhausts the budget, so the thunk is never invoked and `onAbandoned`
+				// never exists. `p` is in flight regardless: it lands, produces a live
+				// governor holding a TigerBeetle client, and nothing destroys it —
+				// AGENTS.md:118-123 is explicit that an undestroyed client is what keeps
+				// the event loop from draining, so this does not merely leak, it can stop
+				// the process exiting. Registering cleanup against the wrapper that may
+				// never start, instead of the work that is already running, is the bug.
+				let reclaimedLate = false;
+				const reclaimLate = (late: Awaited<typeof p>): void => {
+					if (reclaimedLate) return;
+					reclaimedLate = true;
+					void late.destroy().catch(() => {});
+				};
+				let governor: Awaited<typeof p>;
+				try {
+					governor = await withDeadline(
+						"pool.get",
+						// `p` is ALREADY in flight — the pool's stored construction promise, so
+						// the thunk closes over it rather than starting anything.
+						() => p,
+						requestTimeoutOf(this.config),
+						// The post-start path: construction that lands after shutdown gave up
+						// waiting. Still reclaimed here, and the flag makes it once-only.
+						reclaimLate,
+					);
+				} catch (err) {
+					// The PRE-START path: the deadline refused before the thunk existed, so
+					// `onAbandoned` was never wired. `p` is still running and still owns a
+					// client. Observe it here — the flag means this is a no-op when the
+					// timeout happened after start and `reclaimLate` already fired.
+					void p.then(reclaimLate, () => {});
+					throw err;
+				}
 				// destroy() is bounded too, not just construction. It voids pending transfers
 				// BEFORE closing the native client, and that void is a ledger request — which
 				// never rejects when the cluster is gone. So a governor built while
