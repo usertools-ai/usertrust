@@ -8,6 +8,7 @@ import Anthropic from "@anthropic-ai/sdk";
 
 // dryRun: true — skips TigerBeetle so you can try instantly.
 // Audit chain and policy engine still run.
+// You still need a provider API key — dryRun skips the ledger, not the provider call.
 const client = await trust(new Anthropic(), { dryRun: true, budget: 50_000 });
 
 const { response, receipt } = await client.messages.create({
@@ -74,6 +75,15 @@ npx usertrust init
 ```
 
 This creates a `.usertrust/` vault in your project root with default config, policies, and an empty audit chain.
+
+Both module systems work on Node ≥ 22.12:
+
+```js
+import { trust } from "usertrust";        // ESM
+const { trust } = require("usertrust");   // CJS
+```
+
+The package ships a single ESM build; `require()` loads it through Node's built-in `require(esm)` support, which landed unflagged in 22.12. There is no second CJS build, so a process gets exactly one copy of the module graph — and therefore one budget mutex and one set of in-flight hold accounting — whichever way you load it. On Node 22.0–22.11 `require("usertrust")` fails with `ERR_REQUIRE_ESM`; `import` works on any Node ≥ 22.
 
 ## Integration
 

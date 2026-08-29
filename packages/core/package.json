@@ -36,16 +36,19 @@
 	},
 	"exports": {
 		".": {
+			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js",
-			"types": "./dist/index.d.ts"
+			"require": "./dist/index.js"
 		},
 		"./headless": {
+			"types": "./dist/headless.d.ts",
 			"import": "./dist/headless.js",
-			"types": "./dist/headless.d.ts"
+			"require": "./dist/headless.js"
 		},
 		"./pricing": {
+			"types": "./dist/ledger/pricing.d.ts",
 			"import": "./dist/ledger/pricing.js",
-			"types": "./dist/ledger/pricing.d.ts"
+			"require": "./dist/ledger/pricing.js"
 		}
 	},
 	"dependencies": {
