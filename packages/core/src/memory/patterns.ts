@@ -46,6 +46,17 @@ const MAX_ENTRIES = 10_000;
  * the window on a clean shutdown, which is the case that is actually
  * recoverable.
  *
+ * RAISING THIS CONSTANT WIDENS A SECOND WINDOW, not just the crash one. A
+ * FAILED write (ENOSPC, a read-only vault, a permissions change) now costs up
+ * to PERSIST_EVERY - 1 records where it used to cost 1, because that many
+ * records rode on the one write that failed. Same acceptance argument — this
+ * is a best-effort, never-fsynced cache — but it is a real widening and it
+ * scales linearly with this number, so weigh both windows before changing it.
+ * `tests/memory/patterns-debounce.test.ts` pins that a failed write still
+ * costs no record while the PROCESS survives: the records stay in the cache
+ * and a later successful flush carries them. Only losing the process loses
+ * them.
+ *
  * The file format and the atomic tmp + rename write are UNCHANGED. Only the
  * frequency changes, so there is nothing to migrate and no new corruption
  * mode: an append-only log would be O(1) per call but can tear mid-append,
