@@ -402,6 +402,37 @@ function writeDeadLetter(
 	}
 }
 
+// ── Byte-complete writes ──
+
+/**
+ * Write every byte of `bytes` to `fd`, looping until the buffer is drained.
+ *
+ * `writeSync` is allowed to return a SHORT count — it is `write(2)`, not a
+ * promise to write everything — and a single unchecked call therefore silently
+ * truncates a line under memory pressure, a signal, or a pipe-like fd. A
+ * truncated audit line is an unparseable record: `getLastEvent` cannot read the
+ * tail back, and `verifyChain` reports the vault as broken with no way to tell
+ * a torn write from tampering.
+ *
+ * The loop takes a Buffer rather than a string on purpose: the return value
+ * counts BYTES, so slicing a string by that count would cut multi-byte UTF-8
+ * characters in half at exactly the moment the write went short.
+ */
+function writeAll(fd: number, bytes: Buffer): void {
+	let offset = 0;
+	while (offset < bytes.length) {
+		const written = writeSync(fd, bytes, offset, bytes.length - offset);
+		// A non-advancing write would spin forever. Fail loudly instead: the
+		// caller's degrade-and-dead-letter path can act on a throw.
+		if (written <= 0) {
+			throw new Error(
+				`appendEvent: write made no progress (${offset}/${bytes.length} bytes written)`,
+			);
+		}
+		offset += written;
+	}
+}
+
 // ── Per-event chain step ──
 
 /** One event, chained, canonicalized and hashed — with no I/O performed. */
@@ -462,6 +493,40 @@ function buildChainedEvent(
 	return { event: fullEvent, line: persisted, hash, sequence };
 }
 
+// ── Group commit ──
+
+/**
+ * The flush every caller who wrote during one event-loop gap shares.
+ *
+ * `fd` is opened by the batch's first writer and closed by its flush, so every
+ * member's bytes go through ONE descriptor and one `fsyncSync` covers all of
+ * them. `lastHash`/`lastSequence` track the batch's final event, which is what
+ * the `.meta` sidecar records — once per flush rather than once per event.
+ */
+interface FlushBatch {
+	fd: number;
+	members: FlushMember[];
+	lastHash: string;
+	lastSequence: number;
+	/**
+	 * Resolves when the flush has finished, whether it succeeded or not — it is
+	 * a completion signal for `flush()`, never a verdict. Each member carries
+	 * its own outcome on its own promise, so a failed batch must not turn into
+	 * a rejected `flush()`.
+	 */
+	done: Promise<void>;
+	finish: () => void;
+}
+
+/** One caller riding a shared flush, with the event it is owed. */
+interface FlushMember {
+	input: AppendEventInput;
+	event: AuditEvent & { sequence: number };
+	hash: string;
+	resolve: (event: AuditEvent) => void;
+	reject: (err: unknown) => void;
+}
+
 // ── Factory ──
 
 /**
@@ -485,72 +550,244 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 	let degraded = false;
 	let writeFailures = 0;
 
+	let pendingBatch: FlushBatch | undefined;
+
+	/**
+	 * Join the batch now accepting writes, opening one if none is.
+	 *
+	 * The batching window is the EVENT-LOOP GAP, not the duration of the
+	 * flush: `writeSync` and `fsyncSync` block the thread, so nothing can
+	 * arrive while a flush runs and a design that tries to accumulate arrivals
+	 * during one batches nothing. `setImmediate` yields the rest of this turn —
+	 * including the whole microtask chain by which the mutex hands off to the
+	 * next caller — so everyone queued behind the mutex lands in one batch.
+	 */
+	function openBatch(): FlushBatch {
+		const existing = pendingBatch;
+		if (existing) return existing;
+		const fd = openSync(logPath, "a");
+		let finish: (() => void) | undefined;
+		const done = new Promise<void>((resolve) => {
+			finish = resolve;
+		});
+		const batch: FlushBatch = {
+			fd,
+			members: [],
+			lastHash: "",
+			lastSequence: 0,
+			done,
+			finish: finish as () => void,
+		};
+		pendingBatch = batch;
+		setImmediate(() => {
+			runFlush(batch);
+		});
+		return batch;
+	}
+
+	/** Degrade bookkeeping for ONE failed event. Identical for both paths. */
+	function recordFailure(input: AppendEventInput, err: unknown): void {
+		degraded = true;
+		writeFailures++;
+		console.warn("[AUDIT] Audit trail degraded — write failed", {
+			error: err instanceof Error ? err.message : String(err),
+		});
+		writeDeadLetter(vaultPath, {
+			source: "audit.chain.appendEvent",
+			payload: input,
+			error: err instanceof Error ? err.message : String(err),
+			timestamp: new Date().toISOString(),
+		});
+	}
+
+	function defineDurableHash(target: object, durableHash: string): void {
+		Object.defineProperty(target, DURABLE_EVENT_HASH, {
+			value: durableHash,
+			enumerable: false,
+			writable: false,
+			configurable: true,
+		});
+	}
+
+	/**
+	 * The rejection handed to ONE member of a failed flush.
+	 *
+	 * `DURABLE_EVENT_HASH` is a per-EVENT handle: it means "this caller's event
+	 * is on the chain at this hash". A batch that failed after the log fsync
+	 * has every member's bytes durable, so each member needs its OWN hash —
+	 * decorating one shared error instance would overwrite the property once
+	 * per member and hand everybody the LAST member's hash, i.e. a correlation
+	 * handle pointing at somebody else's record, which is worse than none.
+	 *
+	 * A single-member batch still rejects with the ORIGINAL instance, because
+	 * that is exactly what the writer did before batching existed and what
+	 * `harden/denial-meta-failure.test.ts` reads the hash back off. A shared
+	 * failure with nothing durable to attach likewise passes the original
+	 * through untouched.
+	 */
+	function memberRejection(
+		err: unknown,
+		durableHash: string | undefined,
+		shared: boolean,
+	): unknown {
+		if (durableHash === undefined || err === null || typeof err !== "object") return err;
+		if (!shared) {
+			defineDurableHash(err, durableHash);
+			return err;
+		}
+		// Only an Error can be faithfully re-carried. Anything else keeps the
+		// original and simply goes without a handle — under-claiming durability
+		// is the safe direction, the same call the pre-batching writer made
+		// when `closeSync` failed.
+		if (!(err instanceof Error)) return err;
+		const carrier = new Error(err.message);
+		carrier.name = err.name;
+		if (err.stack !== undefined) carrier.stack = err.stack;
+		// errno / code / syscall / path — the own enumerable fields a caller
+		// switches on. `message` and `stack` are non-enumerable and set above.
+		Object.assign(carrier, err);
+		defineDurableHash(carrier, durableHash);
+		return carrier;
+	}
+
+	/** Persist the batch's last hash for cross-segment chain continuity. */
+	function writeSidecar(lastHash: string, sequence: number): void {
+		const metaPath = `${logPath}.meta`;
+		const metaFd = openSync(metaPath, "w");
+		try {
+			writeAll(metaFd, Buffer.from(JSON.stringify({ lastHash, sequence }), "utf-8"));
+			fsyncSync(metaFd);
+		} finally {
+			closeSync(metaFd);
+		}
+	}
+
+	/**
+	 * Flush one batch: one fsync for the log, one sidecar write, then settle
+	 * every member. Fully synchronous, so no caller can slip a write in between
+	 * the fsync and the settles.
+	 */
+	function runFlush(batch: FlushBatch): void {
+		if (pendingBatch === batch) pendingBatch = undefined;
+		try {
+			if (batch.members.length === 0) {
+				// The batch's only writer threw before joining, so there is
+				// nothing to flush and nobody to tell. Any partial bytes it left
+				// behind are covered by the next batch's fsync, exactly as they
+				// were when each append opened the log for itself.
+				closeSync(batch.fd);
+				return;
+			}
+
+			// Set ONLY once the log bytes are fsync'd AND the descriptor closed
+			// cleanly. Everything after that point can still throw (the sidecar
+			// above all) and every member's event is on the chain regardless —
+			// see DURABLE_EVENT_HASH. A close that itself fails leaves this
+			// unset: under-claiming durability is the safe direction.
+			let durable = false;
+			let failed = false;
+			let error: unknown;
+			try {
+				try {
+					fsyncSync(batch.fd);
+				} finally {
+					closeSync(batch.fd);
+				}
+				durable = true;
+				writeSidecar(batch.lastHash, batch.lastSequence);
+			} catch (err) {
+				failed = true;
+				error = err;
+			}
+
+			if (!failed) {
+				for (const member of batch.members) member.resolve(member.event);
+				return;
+			}
+
+			const shared = batch.members.length > 1;
+			try {
+				for (const member of batch.members) recordFailure(member.input, error);
+			} finally {
+				// EVERY member settles, whatever the bookkeeping above did. A
+				// throwing console or dead-letter write must never strand a
+				// caller on a promise that resolves nowhere.
+				for (const member of batch.members) {
+					let rejection: unknown = error;
+					try {
+						rejection = memberRejection(error, durable ? member.hash : undefined, shared);
+					} catch {
+						// A decoration failure costs the correlation handle, never
+						// the rejection itself.
+					}
+					member.reject(rejection);
+				}
+			}
+		} catch (err) {
+			// `runFlush` is a `setImmediate` callback, so anything escaping it is
+			// an UNCAUGHT exception that takes down the host process the governor
+			// is embedded in — the same failure the anchoring emitter's
+			// capture-never-reject rule exists to prevent. Every member has
+			// already been settled by the paths above (the `finally` there runs
+			// before this catch), so there is nobody left to tell: degrade, say
+			// so, and keep the process alive.
+			degraded = true;
+			console.error("[AUDIT] Audit flush raised after settling its batch", err);
+		} finally {
+			batch.finish();
+		}
+	}
+
 	async function appendEvent(input: AppendEventInput): Promise<AuditEvent> {
 		const release = await mutex.acquire();
-		// Set ONLY once the log bytes are fsync'd. Everything after that point can
-		// still throw (the sidecar above all), and the event is on the chain
-		// regardless — see DURABLE_EVENT_HASH.
-		let durableHash: string | undefined;
+		let settled: Promise<AuditEvent>;
 		try {
 			acquireProcessLock(logPath, locksByDir, writerId);
 
 			const last = getLastEvent(logPath, lastEventCache);
-			const {
-				event: fullEvent,
-				line,
-				hash,
-				sequence,
-			} = buildChainedEvent(input, last?.hash ?? GENESIS_HASH, (last?.sequence ?? 0) + 1);
+			const built = buildChainedEvent(input, last?.hash ?? GENESIS_HASH, (last?.sequence ?? 0) + 1);
 
-			const fd = openSync(logPath, "a");
-			try {
-				writeSync(fd, `${line}\n`);
-				fsyncSync(fd);
-			} finally {
-				closeSync(fd);
-			}
-			lastEventCache.set(logPath, { hash, sequence });
-			// The bytes are fsync'd: this event is on the chain even if the sidecar
-			// write below throws. Deliberately set AFTER `closeSync` has run, so a
-			// close that itself fails leaves this unset — under-claiming durability
-			// is the safe direction here.
-			durableHash = hash;
+			// Write only THIS event's line, and do not flush it: the shared
+			// fsync happens after the mutex is released, which is the whole
+			// point. Holding the money-adjacent write lock across a 2 ms flush
+			// is what capped throughput at one event per flush.
+			const batch = openBatch();
+			writeAll(batch.fd, Buffer.from(`${built.line}\n`, "utf-8"));
 
-			// Persist last hash to sidecar for cross-segment chain continuity
-			const metaPath = `${logPath}.meta`;
-			const metaFd = openSync(metaPath, "w");
-			try {
-				writeSync(metaFd, JSON.stringify({ lastHash: hash, sequence }));
-				fsyncSync(metaFd);
-			} finally {
-				closeSync(metaFd);
-			}
+			// The tail must advance HERE, before the mutex is released, or the
+			// next caller in this same batch chains onto the previous event and
+			// forks the chain. The bytes are in the file (not yet durable),
+			// which is precisely what the next line must chain onto.
+			lastEventCache.set(logPath, { hash: built.hash, sequence: built.sequence });
+			batch.lastHash = built.hash;
+			batch.lastSequence = built.sequence;
 
-			return fullEvent;
+			let resolve: ((event: AuditEvent) => void) | undefined;
+			let reject: ((err: unknown) => void) | undefined;
+			settled = new Promise<AuditEvent>((res, rej) => {
+				resolve = res;
+				reject = rej;
+			});
+			batch.members.push({
+				input,
+				event: built.event,
+				hash: built.hash,
+				resolve: resolve as (event: AuditEvent) => void,
+				reject: reject as (err: unknown) => void,
+			});
 		} catch (err) {
-			degraded = true;
-			writeFailures++;
-			if (durableHash !== undefined && err !== null && typeof err === "object") {
-				Object.defineProperty(err, DURABLE_EVENT_HASH, {
-					value: durableHash,
-					enumerable: false,
-					writable: false,
-					configurable: true,
-				});
-			}
-			console.warn("[AUDIT] Audit trail degraded — write failed", {
-				error: err instanceof Error ? err.message : String(err),
-			});
-			writeDeadLetter(vaultPath, {
-				source: "audit.chain.appendEvent",
-				payload: input,
-				error: err instanceof Error ? err.message : String(err),
-				timestamp: new Date().toISOString(),
-			});
+			// Nothing of this event reached the chain: `buildChainedEvent` does
+			// no I/O, and a write that threw is never flushed by this caller.
+			// So this caller fails ALONE and without a DURABLE_EVENT_HASH —
+			// members that already wrote into the batch are unaffected.
+			recordFailure(input, err);
 			throw err;
 		} finally {
 			release();
 		}
+		// Durability before return: this resolves only once an fsync covering
+		// these bytes has completed.
+		return await settled;
 	}
 
 	function getWriteFailures(): number {
@@ -562,8 +799,12 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 	}
 
 	async function flush(): Promise<void> {
+		// The mutex is drained first, so every append already queued has WRITTEN
+		// by the time we look for a batch to wait on.
 		const release = await mutex.acquire();
+		const batch = pendingBatch;
 		release();
+		if (batch) await batch.done;
 	}
 
 	function releaseWriter(): void {
