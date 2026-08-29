@@ -625,6 +625,66 @@ function looksLikeStreamOptionsRejection(err: unknown): boolean {
 	return candidates.some((c) => typeof c === "string" && STREAM_OPTIONS_REJECTION_RE.test(c));
 }
 
+/**
+ * Markers a provider emits when it rejects the CREDENTIAL ITSELF:
+ * `authentication_error` (Anthropic and OpenAI error type), `invalid_api_key`
+ * (OpenAI code), `invalid x-api-key` (Anthropic message text).
+ */
+const PROVIDER_AUTH_FAILURE_RE = /authentication_error|invalid_api_key|invalid\s+x-api-key/i;
+
+/**
+ * FIRST-RUN-A: does `err` say the PROVIDER refused the API key? Used only to
+ * append a human-facing hint to the provider's own error (the chain still records
+ * the verbatim wire text), so the reader learns that governance ran and the key is
+ * what failed.
+ *
+ * **401 ONLY — never 403.** A 403 is valid-key-but-no-access: model permission, org
+ * policy, billing suspension, geo restriction, moderation, or a WAF. "Set a provider
+ * key" is the wrong fix for every one of them, and wrong guidance is worse than none.
+ * For the same reason an explicit non-401 numeric status is authoritative and ends the
+ * check: a 429 or a 5xx carrying auth-shaped text is a rate limit or an outage, and
+ * pointing its reader at their key sends them to the wrong fix.
+ *
+ * The whole body is exception-safe. This runs INSIDE the governor's outer catch, and
+ * every property it probes may be a getter or a Proxy trap that throws — a throw here
+ * would REPLACE the provider's error with this function's own, which is precisely the
+ * failure the hint exists to prevent. Unclassifiable means no hint.
+ */
+function looksLikeProviderAuthFailure(err: unknown): boolean {
+	try {
+		if (err == null || typeof err !== "object") {
+			return err instanceof Error && PROVIDER_AUTH_FAILURE_RE.test(err.message);
+		}
+		const e = err as Record<string, unknown>;
+		const status = e.status ?? e.statusCode;
+		if (typeof status === "number") return status === 401;
+		const candidates: unknown[] = [e.message, e.body];
+		if (err instanceof Error) candidates.push(err.message);
+		const nested = e.error;
+		if (nested != null && typeof nested === "object") {
+			const n = nested as Record<string, unknown>;
+			candidates.push(n.message, n.type, n.code);
+		}
+		const response = e.response;
+		if (typeof response === "string") {
+			candidates.push(response);
+		} else if (response != null && typeof response === "object") {
+			const r = response as Record<string, unknown>;
+			candidates.push(r.data, r.body);
+		}
+		return candidates.some((c) => typeof c === "string" && PROVIDER_AUTH_FAILURE_RE.test(c));
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * TEST-ONLY alias. `looksLikeProviderAuthFailure` is module-private; nothing
+ * re-exports it from an entry point (`index.ts` names its exports individually), so
+ * this widens the test surface, not the public API.
+ */
+export { looksLikeProviderAuthFailure as _looksLikeProviderAuthFailure };
+
 // ── AUD-457: Budget persistence helpers ──
 
 interface SpendLedger {
