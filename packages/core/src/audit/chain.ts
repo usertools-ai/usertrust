@@ -402,6 +402,66 @@ function writeDeadLetter(
 	}
 }
 
+// ── Per-event chain step ──
+
+/** One event, chained, canonicalized and hashed — with no I/O performed. */
+interface ChainedEvent {
+	/** The event as it will be returned to the caller, `hash` included. */
+	event: AuditEvent & { sequence: number };
+	/** The exact bytes to persist, WITHOUT the trailing newline. */
+	line: string;
+	hash: string;
+	sequence: number;
+}
+
+/**
+ * Build the next event in the chain from `previousHash` / `sequence`.
+ *
+ * Split out of `appendEvent` so the flush can run this per event without the
+ * per-event work drifting from what a single append used to do. The order of
+ * the four steps below is load-bearing and unchanged: canonicalize, refuse
+ * bytes that are not JSON, refuse a snapshot that is not idempotent, and only
+ * then hash. Performs NO I/O — every throw here happens before anything is
+ * written, which is what lets a caller whose build fails reject alone.
+ */
+function buildChainedEvent(
+	input: AppendEventInput,
+	previousHash: string,
+	sequence: number,
+): ChainedEvent {
+	const event: Omit<AuditEvent, "hash"> & { sequence: number } = {
+		id: randomUUID(),
+		timestamp: new Date().toISOString(),
+		previousHash,
+		kind: input.kind,
+		actor: input.actor,
+		data: input.data,
+		sequence,
+	};
+
+	const canonical = canonicalize(event);
+	let snapshot: Record<string, unknown>;
+	try {
+		snapshot = JSON.parse(canonical) as Record<string, unknown>;
+	} catch {
+		throw new Error("appendEvent: canonical bytes are not JSON");
+	}
+	// Refuse drift: the hashed bytes must be what we would persist
+	// for the event (minus hash). A Date#toISOString that returns an
+	// object is valid JSON in insertion order; re-canonicalizing
+	// sorts it. Hash the first snapshot only if it is idempotent.
+	const normalized = canonicalize(snapshot);
+	if (normalized !== canonical) {
+		throw new Error("appendEvent: canonical snapshot is not idempotent");
+	}
+	const hash = createHash("sha256").update(canonical).digest("hex");
+	const persisted = canonicalize({ ...snapshot, hash });
+	const fullEvent = snapshot as unknown as AuditEvent & { sequence: number };
+	fullEvent.hash = hash;
+
+	return { event: fullEvent, line: persisted, hash, sequence };
+}
+
 // ── Factory ──
 
 /**
@@ -435,42 +495,16 @@ export function createAuditWriter(vaultPath: string): AuditWriter {
 			acquireProcessLock(logPath, locksByDir, writerId);
 
 			const last = getLastEvent(logPath, lastEventCache);
-			const previousHash = last?.hash ?? GENESIS_HASH;
-			const sequence = (last?.sequence ?? 0) + 1;
-
-			const event: Omit<AuditEvent, "hash"> & { sequence: number } = {
-				id: randomUUID(),
-				timestamp: new Date().toISOString(),
-				previousHash,
-				kind: input.kind,
-				actor: input.actor,
-				data: input.data,
+			const {
+				event: fullEvent,
+				line,
+				hash,
 				sequence,
-			};
-
-			const canonical = canonicalize(event);
-			let snapshot: Record<string, unknown>;
-			try {
-				snapshot = JSON.parse(canonical) as Record<string, unknown>;
-			} catch {
-				throw new Error("appendEvent: canonical bytes are not JSON");
-			}
-			// Refuse drift: the hashed bytes must be what we would persist
-			// for the event (minus hash). A Date#toISOString that returns an
-			// object is valid JSON in insertion order; re-canonicalizing
-			// sorts it. Hash the first snapshot only if it is idempotent.
-			const normalized = canonicalize(snapshot);
-			if (normalized !== canonical) {
-				throw new Error("appendEvent: canonical snapshot is not idempotent");
-			}
-			const hash = createHash("sha256").update(canonical).digest("hex");
-			const persisted = canonicalize({ ...snapshot, hash });
-			const fullEvent = snapshot as unknown as AuditEvent & { sequence: number };
-			fullEvent.hash = hash;
+			} = buildChainedEvent(input, last?.hash ?? GENESIS_HASH, (last?.sequence ?? 0) + 1);
 
 			const fd = openSync(logPath, "a");
 			try {
-				writeSync(fd, `${persisted}\n`);
+				writeSync(fd, `${line}\n`);
 				fsyncSync(fd);
 			} finally {
 				closeSync(fd);
