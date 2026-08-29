@@ -633,6 +633,13 @@ function looksLikeStreamOptionsRejection(err: unknown): boolean {
 const PROVIDER_AUTH_FAILURE_RE = /authentication_error|invalid_api_key|invalid\s+x-api-key/i;
 
 /**
+ * Appended to the provider's OWN message, never substituted for it. It says two
+ * things a bare 401 with `interceptCall` in its stack does not: governance ran,
+ * and the credential is what failed.
+ */
+const PROVIDER_AUTH_HINT = " — usertrust is running; set a provider key to complete the call.";
+
+/**
  * FIRST-RUN-A: does `err` say the PROVIDER refused the API key? Used only to
  * append a human-facing hint to the provider's own error (the chain still records
  * the verbatim wire text), so the reader learns that governance ran and the key is
@@ -2380,6 +2387,13 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				return { response: streamObj, receipt: estimatedReceipt };
 			};
 
+			// FIRST-RUN-A: the exact value the PROVIDER threw, for this invocation only.
+			// The outer catch below is reached by far more than the provider call —
+			// policy hooks, the audit writer, the ledger, and the proxy connection all
+			// throw through it — so the auth hint is gated on object IDENTITY with this
+			// local rather than on classifying whatever happens to arrive. A PROXY 401
+			// must never be answered with "set a provider key".
+			let providerError: unknown;
 			try {
 				let response: unknown;
 				try {
@@ -2392,13 +2406,21 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 					// other error — transient network failures, unrelated 5xx — rethrows
 					// the ORIGINAL immediately rather than duplicating compute and masking
 					// the root cause.
+					providerError = callErr;
 					if (preInjectionArgs == null || !looksLikeStreamOptionsRejection(callErr)) {
 						throw callErr;
 					}
-					response = await (originalFn as (...a: unknown[]) => unknown).apply(
-						thisArg,
-						preInjectionArgs,
-					);
+					try {
+						response = await (originalFn as (...a: unknown[]) => unknown).apply(
+							thisArg,
+							preInjectionArgs,
+						);
+					} catch (retryErr) {
+						// The retry is the provider call that actually reached the caller;
+						// its error is the one the hint may describe, not the first one.
+						providerError = retryErr;
+						throw retryErr;
+					}
 				}
 
 				// A1: Anthropic messages.stream / beta.messages.stream helper. The
@@ -2848,6 +2870,42 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 						cost: 0,
 						success: false,
 					}).catch(() => {});
+				}
+
+				// FIRST-RUN-A: name usertrust as HEALTHY when the provider refused the
+				// key. `dryRun` skips the ledger, not the provider, so the quickstart's
+				// first failure is a raw 401 whose stack names `interceptCall` — it reads
+				// as a usertrust fault when governance in fact did its whole job.
+				//
+				// Three things this must NOT do, each load-bearing:
+				//   1. It APPENDS to the original instance. No wrap, no `cause`, no
+				//      prototype change — consumers key retry logic on
+				//      `instanceof Anthropic.AuthenticationError` and `err.status === 401`,
+				//      and `envelope-threading.test.ts` pins same-object identity for the
+				//      denial path for the same reason.
+				//   2. It runs AFTER the `llm_call_failed` append above, so the chain
+				//      records the provider's verbatim wire text and only the
+				//      human-facing message carries our prose.
+				//   3. It only augments the object the PROVIDER threw. Everything else
+				//      reaching this catch — a proxy 401, a policy hook, the audit
+				//      writer, the ledger — keeps its own message.
+				//
+				// The GUARD is inside the try, not just the mutation: `instanceof` runs a
+				// prototype lookup a hostile error can trap, and `message` may be frozen
+				// or getter-only. Adding a cosmetic hint must never convert a provider
+				// error into a different throw — silence here is correct, because the
+				// original propagates either way. Same reasoning as the classifier's own
+				// catch, applied one level out.
+				try {
+					if (err === providerError && err instanceof Error && looksLikeProviderAuthFailure(err)) {
+						// Idempotent: the same instance can pass through twice (an SDK that
+						// caches its auth error, a caller retrying with what it caught).
+						if (!err.message.includes(PROVIDER_AUTH_HINT)) {
+							err.message += PROVIDER_AUTH_HINT;
+						}
+					}
+				} catch {
+					// Unhintable. The provider's error is what matters and it is untouched.
 				}
 
 				throw err;
