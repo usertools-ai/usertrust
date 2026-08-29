@@ -2843,6 +2843,17 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				}
 
 				// k. Audit the failure
+				// FIRST-RUN-A: strip any hint a PREVIOUS pass appended to THIS SAME
+				// instance. The hint mutates the caller's own error object, and an SDK
+				// that caches its auth error (or a caller retrying with what it caught)
+				// can send the same instance through twice. Without this, the second
+				// pass would serialize the already-hinted message and the chain would
+				// record usertrust's prose as the provider's wire text — the audit trail
+				// attributing words to the provider it never sent.
+				// Stripping here makes "the chain records verbatim" hold BY CONSTRUCTION
+				// rather than by the ordering of two statements 50 lines apart, which is
+				// the only version of the property that survives a future edit.
+				const wireText = String(err).replaceAll(PROVIDER_AUTH_HINT, "");
 				await audit
 					.appendEvent({
 						kind: "llm_call_failed",
@@ -2851,8 +2862,8 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							model,
 							error:
 								config.pii === "warn" || config.pii === "redact"
-									? (redactPII(String(err)).data as string).slice(0, 200)
-									: String(err),
+									? (redactPII(wireText).data as string).slice(0, 200)
+									: wireText,
 							transferId,
 							...costCenterAudit,
 						},

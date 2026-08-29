@@ -197,4 +197,40 @@ describe("FIRST-RUN-A: the hint rides the ORIGINAL provider error", () => {
 		expect(failed).toContain("invalid x-api-key");
 		expect(failed).not.toContain("usertrust is running");
 	});
+
+	it("keeps the chain verbatim when the SAME instance passes through TWICE", async () => {
+		// Regression for a defect found independently by the security review and the
+		// Codex gate. The hint mutates the CALLER's error object and that mutation
+		// persists, so an SDK that caches its auth error — or a caller retrying with
+		// what it caught — can send one instance through twice. Before the fix, pass 2
+		// serialized the already-hinted message and the chain recorded usertrust's
+		// prose as the provider's wire text: the audit trail attributing words to the
+		// provider it never sent.
+		//
+		// The gap sat exactly BETWEEN the two tests above — "at most once" drives two
+		// passes but only reads the message; "VERBATIM" reads the chain but drives one
+		// pass. Neither could see it. This one does both halves at once.
+		const thrown = Object.assign(new Error("401 invalid x-api-key"), { status: 401 });
+		const first = await callThrowing(thrown);
+		first.destroy();
+		const second = await callThrowing(thrown);
+		second.destroy();
+
+		// Identity and idempotence still hold on the second pass.
+		expect(second.caught).toBe(thrown);
+		expect((second.caught as Error).message.match(/usertrust is running/g)).toHaveLength(1);
+
+		const chain = await readFile(
+			join(tmpVault, ".usertrust", "audit", "events.jsonl"),
+			"utf-8",
+		).catch(() => "");
+		const failed = chain.split("\n").filter((l) => l.includes('"llm_call_failed"'));
+		// Both passes must be audited — a chain missing pass 2 would make the
+		// assertions below vacuously true.
+		expect(failed.length).toBeGreaterThanOrEqual(2);
+		for (const line of failed) {
+			expect(line).toContain("invalid x-api-key");
+			expect(line).not.toContain("usertrust is running");
+		}
+	});
 });
