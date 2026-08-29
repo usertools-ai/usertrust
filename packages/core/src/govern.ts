@@ -3492,6 +3492,20 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			//
 			// `.catch(() => {})` matches both `recordPattern` sites: pattern memory
 			// is best-effort and must never turn a clean shutdown into a throw.
+			//
+			// KNOWN LIMITATION, accepted: `destroyFn` has no `try`/`finally`
+			// anywhere, so a throw in ANY earlier step — `voidAllPending`,
+			// `audit.flush`, `audit.release`, `engine.destroy`, `proxyConn.destroy`
+			// — skips this flush and loses the tail (up to PERSIST_EVERY - 1
+			// records). Acceptable here only because pattern memory is best-effort
+			// and nothing on the governed path reads it back. Do NOT fix that by
+			// wrapping this one call in a `finally`: teardown has a WORSE version of
+			// the same gap — a throw in `voidAllPending`, the first step, skips
+			// `audit.release()` and strands the advisory audit lock for the life of
+			// the process — and a `finally` around only the flush would read as
+			// though teardown were error-safe when the lock release still is not.
+			// Whoever makes teardown genuinely error-safe should move this call
+			// inside their `finally`.
 			await flushPatterns().catch(() => {});
 		};
 
