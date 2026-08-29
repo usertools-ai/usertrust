@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	_resetPatternCache,
+	flushPatterns,
 	getPatternStats,
 	hashPrompt,
 	recordPattern,
@@ -51,6 +52,14 @@ describe("Pattern Memory", () => {
 				vaultPath,
 			);
 
+			// REQUIRED, not ceremony — do not delete this line. Persistence is
+			// amortised over PERSIST_EVERY records, so the file is DELIBERATELY
+			// stale between flushes and holds nothing at all below that
+			// threshold. Without the flush this reads a file that does not exist
+			// (or still holds the seeded array), which is the debounce working,
+			// not a regression. The content assertions below are unchanged: what
+			// this file pins is what gets WRITTEN, never when.
+			await flushPatterns(vaultPath);
 			const filePath = join(vaultPath, "patterns", "memory.json");
 			const raw = await readFile(filePath, "utf-8");
 			const entries = JSON.parse(raw) as Array<Record<string, unknown>>;
@@ -191,6 +200,14 @@ describe("Pattern Memory", () => {
 			expect(stats.totalEntries).toBe(10_000);
 
 			// The very first entry (model-0) should have been evicted
+			// REQUIRED, not ceremony — do not delete this line. Persistence is
+			// amortised over PERSIST_EVERY records, so the file is DELIBERATELY
+			// stale between flushes and holds nothing at all below that
+			// threshold. Without the flush this reads a file that does not exist
+			// (or still holds the seeded array), which is the debounce working,
+			// not a regression. The content assertions below are unchanged: what
+			// this file pins is what gets WRITTEN, never when.
+			await flushPatterns(vaultPath);
 			const filePath = join(vaultPath, "patterns", "memory.json");
 			const raw = await readFile(filePath, "utf-8");
 			const stored = JSON.parse(raw) as Array<{ model: string }>;
