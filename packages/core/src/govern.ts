@@ -67,7 +67,7 @@ import {
 	sanitizeUsage,
 	type UsageWireShape,
 } from "./ledger/usage.js";
-import { recordPattern } from "./memory/patterns.js";
+import { flushPatterns, recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import {
 	derivePolicyHint,
@@ -3468,6 +3468,45 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 			if (proxyConn != null) {
 				proxyConn.destroy();
 			}
+
+			// Pattern memory persists at most once per PERSIST_EVERY records, so
+			// the tail of a run is still only in memory here. This runs after the
+			// in-flight drain above, so records from calls that were still
+			// executing are included.
+			//
+			// LAST, not next to the drain: `destroy()` is routinely called
+			// fire-and-forget (`void governed.destroy()`), so every `await` before
+			// `audit.release()` widens the window in which a governor constructed
+			// against the same vault is refused the advisory audit lock. Putting
+			// the flush after the release keeps that teardown timing byte-identical
+			// to what it was — `provider-auth-hint.test.ts`'s two-pass case fails
+			// on the second pass's missing `llm_call_failed` event otherwise.
+			// Pattern memory depends on neither the audit writer nor the engine, so
+			// it has nothing to lose by going last.
+			//
+			// NO ARGUMENT, deliberately: both `recordPattern` call sites above pass
+			// no vaultPath, so their cache is keyed on the `VAULT_DIR` default.
+			// Passing `vaultBase` would flush a DIFFERENT, empty cache entry — a
+			// silent no-op that also names the wrong file (`<base>/patterns/`
+			// rather than `<base>/.usertrust/patterns/`).
+			//
+			// `.catch(() => {})` matches both `recordPattern` sites: pattern memory
+			// is best-effort and must never turn a clean shutdown into a throw.
+			//
+			// KNOWN LIMITATION, accepted: `destroyFn` has no `try`/`finally`
+			// anywhere, so a throw in ANY earlier step — `voidAllPending`,
+			// `audit.flush`, `audit.release`, `engine.destroy`, `proxyConn.destroy`
+			// — skips this flush and loses the tail (up to PERSIST_EVERY - 1
+			// records). Acceptable here only because pattern memory is best-effort
+			// and nothing on the governed path reads it back. Do NOT fix that by
+			// wrapping this one call in a `finally`: teardown has a WORSE version of
+			// the same gap — a throw in `voidAllPending`, the first step, skips
+			// `audit.release()` and strands the advisory audit lock for the life of
+			// the process — and a `finally` around only the flush would read as
+			// though teardown were error-safe when the lock release still is not.
+			// Whoever makes teardown genuinely error-safe should move this call
+			// inside their `finally`.
+			await flushPatterns().catch(() => {});
 		};
 
 		if (kind === "anthropic") {
