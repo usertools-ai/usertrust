@@ -57,7 +57,7 @@
 		"picocolors": "^1.1.1",
 		"tigerbeetle-node": "^0.17.9",
 		"yaml": "^2.8.3",
-		"zod": "^4.4.3"
+		"zod": "^4.5.1"
 	},
 	"scripts": {
 		"build": "tsc",
