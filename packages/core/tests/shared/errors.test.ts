@@ -84,9 +84,17 @@ describe("domain errors", () => {
 		expect(err.name).toBe("LedgerUnavailableError");
 		expect(err.cause_message).toBe("connection refused");
 		expect(err).toBeInstanceOf(Error);
-		expect(err.hint).toBe(
-			'Start TigerBeetle with "npx usertrust tb start" or use { dryRun: true } to skip the ledger.',
-		);
+		// The hint must name a command that WORKS. `usertrust tb start` is a stub — it
+		// prints "not yet implemented" (cli/tb.ts) and names port 3000 while the client
+		// defaults to 3001. That was harmless while this error was unreachable; the
+		// connect deadline makes it the first thing an operator with no cluster sees.
+		expect(err.hint).not.toContain("usertrust tb start");
+		expect(err.hint).toContain("tigerbeetle format");
+		// --development on BOTH commands, or they fail wherever Direct I/O is
+		// unavailable — which is most machines an operator will read this on.
+		expect(err.hint.match(/--development/g)).toHaveLength(2);
+		expect(err.hint).toContain("--addresses=3001");
+		expect(err.hint).toContain("dryRun: true");
 		expect(err.docsUrl).toBe("https://usertrust.ai/docs/errors/ledger-unavailable");
 		expect(err.message).toContain("Ledger unavailable: connection refused");
 		expect(err.message).toContain("\n\n  Hint: ");

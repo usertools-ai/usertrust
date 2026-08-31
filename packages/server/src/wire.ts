@@ -1,8 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { AnomalyError, InsufficientBalanceError, PolicyDeniedError } from "usertrust";
+import {
+	AnomalyError,
+	InsufficientBalanceError,
+	LedgerUnavailableError,
+	PolicyDeniedError,
+} from "usertrust";
 import { z } from "zod";
+import { GovernorTimeoutError } from "./deadline.js";
 
 export const AuthorizeRequestSchema = z.object({
 	model: z.string().min(1),
@@ -82,6 +88,16 @@ export function toHttpError(err: unknown): {
 	}
 	if (err instanceof AnomalyError) {
 		return { status: 429, body: { error: "anomaly", reason: err.message } };
+	}
+	// The ledger being down is an INFRASTRUCTURE outage, not a governance verdict,
+	// and it is the one 5xx an operator can actually act on — so it says so, and
+	// carries the cause instead of collapsing into "internal error". 503 also tells
+	// a fail-closed client (the PreToolUse hook) that retrying later is meaningful.
+	if (err instanceof LedgerUnavailableError) {
+		return { status: 503, body: { error: "ledger_unavailable", reason: err.cause_message } };
+	}
+	if (err instanceof GovernorTimeoutError) {
+		return { status: 503, body: { error: "governor_timeout", reason: err.message } };
 	}
 	return { status: 500, body: { error: "internal", reason: "internal error" } };
 }

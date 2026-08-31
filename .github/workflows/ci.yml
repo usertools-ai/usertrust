@@ -231,6 +231,7 @@ jobs:
           packages/core/tests/integration/tigerbeetle.tb.test.ts
           packages/core/tests/integration/budget-envelope.tb.test.ts
           packages/openclaw/tests/envelope-integration.test.ts
+          packages/server/tests/server.tb.test.ts
 
   site-build:
     name: site-build
