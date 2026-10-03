@@ -172,6 +172,119 @@ describe("TrustTBClient", () => {
 		});
 	});
 
+	describe("deriveTransferId — caller-derived, replay-stable transfer ids", () => {
+		// Known answers computed OUTSIDE the implementation (spec: sha256("usertrust:transfer:v1"
+		// ‖ u32be(|key|) ‖ key ‖ u32be(|role|) ‖ role), first 16 bytes, big-endian). Spelled out,
+		// never imported, so a change to the tag, the prefixes or the truncation breaks this suite.
+		it("matches the pinned known answers", () => {
+			expect(TrustTBClient.deriveTransferId("hold_abc", "reserve")).toBe(
+				190411108171799431193897451097933127363n,
+			);
+			expect(TrustTBClient.deriveTransferId("hold_abc", "post")).toBe(
+				43913240389687540348147399847899468541n,
+			);
+		});
+		it("is byte-exact: UTF-8 byte-length prefixes, no normalization", () => {
+			// A code-unit prefix writes 1 for "é" and derives
+			// 134930262461771036684470827474203006676n instead. Computed outside the implementation.
+			expect(TrustTBClient.deriveTransferId("\u00e9", "void")).toBe(
+				245476495538107330846557025272128287149n,
+			);
+			expect(TrustTBClient.deriveTransferId("\u00e9", "void")).not.toBe(
+				TrustTBClient.deriveTransferId("e\u0301", "void"),
+			);
+		});
+		it("length prefixes make key/role boundary shifts distinct", () => {
+			const d = TrustTBClient.deriveTransferId.bind(TrustTBClient);
+			expect(d("ab", "c")).not.toBe(d("a", "bc"));
+			expect(d("a", "")).not.toBe(d("", "a"));
+		});
+		it("is disjoint from the account-id derivations", () => {
+			const id = TrustTBClient.deriveTransferId("acme", "billing");
+			expect(id).not.toBe(TrustTBClient.deriveCostCenterAccountId("acme", "billing"));
+			expect(id).not.toBe(TrustTBClient.deriveAccountId("acme"));
+		});
+	});
+
+	describe("caller-supplied transfer ids (cross-restart idempotency)", () => {
+		const held = TrustTBClient.deriveTransferId("hold_abc", "reserve");
+		const post = TrustTBClient.deriveTransferId("hold_abc", "post");
+		const voidId = TrustTBClient.deriveTransferId("hold_abc", "void");
+
+		it("createPendingTransfer submits and returns the supplied id", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([]);
+			const id = await client.createPendingTransfer({
+				debitAccountId: 1n,
+				creditAccountId: 2n,
+				amount: 100,
+				code: XFER_SPEND,
+				transferId: held,
+			});
+			expect(id).toBe(held);
+			expect(mockCreateTransfers.mock.calls[0]?.[0][0].id).toBe(held);
+		});
+
+		it("postTransfer and voidTransfer submit and return the supplied id", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([]).mockResolvedValueOnce([]);
+			expect(await client.postTransfer(held, 42, { transferId: post })).toBe(post);
+			expect(mockCreateTransfers.mock.calls[0]?.[0][0].id).toBe(post);
+			expect(await client.voidTransfer(held, { transferId: voidId })).toBe(voidId);
+			expect(mockCreateTransfers.mock.calls[1]?.[0][0].id).toBe(voidId);
+		});
+
+		// The point of the option: a FRESH process replaying a durable intent derives the same
+		// id, so the ledger answers `exists` for a post that already committed before the crash —
+		// success, not a second post and not a failure.
+		it("a replay from a fresh client after a restart is answered `exists` and succeeds", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([]);
+			await client.postTransfer(held, 42, { transferId: post });
+			client.destroy();
+
+			const restarted = new TrustTBClient({ addresses: ["3000"] });
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]); // exists
+			const replayed = await restarted.postTransfer(held, 42, {
+				transferId: TrustTBClient.deriveTransferId("hold_abc", "post"),
+			});
+			expect(replayed).toBe(post);
+			expect(mockCreateTransfers.mock.calls[1]?.[0][0].id).toBe(post);
+			restarted.destroy();
+		});
+
+		it("a replay with DIFFERENT terms under the same id still throws", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 39 }]); // exists_with_different_amount
+			await expect(client.postTransfer(held, 43, { transferId: post })).rejects.toThrow(
+				"Post transfer failed",
+			);
+		});
+
+		it.each([
+			["zero", 0n],
+			["negative", -1n],
+			["the reserved maximum", (1n << 128n) - 1n],
+			["above 128 bits", 1n << 128n],
+		])("refuses %s as a transfer id without touching the ledger", async (_name, bad) => {
+			await expect(
+				client.createPendingTransfer({
+					debitAccountId: 1n,
+					creditAccountId: 2n,
+					amount: 1,
+					code: XFER_SPEND,
+					transferId: bad,
+				}),
+			).rejects.toThrow(RangeError);
+			await expect(client.postTransfer(1n, 1, { transferId: bad })).rejects.toThrow(RangeError);
+			await expect(client.voidTransfer(1n, { transferId: bad })).rejects.toThrow(RangeError);
+			expect(mockCreateTransfers).not.toHaveBeenCalled();
+		});
+
+		it("omitting the id keeps minting a fresh one per call (unchanged behaviour)", async () => {
+			mockCreateTransfers.mockResolvedValue([]);
+			const a = await client.postTransfer(1n);
+			const b = await client.postTransfer(1n);
+			expect(a).not.toBe(b);
+		});
+	});
+
 	describe("createUserWallet", () => {
 		it("creates account and returns account ID", async () => {
 			mockCreateAccounts.mockResolvedValueOnce([]);

@@ -71,6 +71,28 @@ export const XFER_BUDGET_GRANT = 9;
 // share preimages. The KAT suite pins these bytes: changing them breaks every known answer.
 const COST_CENTER_DOMAIN_TAG = Buffer.from("usertrust:cost-center:v1", "utf8");
 
+// Domain tag for caller-derived TRANSFER ids (deriveTransferId). Prefix-free against
+// "wallet:" and "usertrust:cost-center:v1" under the same policy as above, although transfer
+// and account ids already live in separate TigerBeetle namespaces. The KAT suite pins it.
+const TRANSFER_ID_DOMAIN_TAG = Buffer.from("usertrust:transfer:v1", "utf8");
+
+// TigerBeetle reserves 0 and 2^128 - 1; a transfer may use neither as its id.
+const MAX_TRANSFER_ID = (1n << 128n) - 1n;
+
+/**
+ * Validate a caller-supplied transfer id, or mint a fresh one. Callers that need a
+ * transfer to be idempotent ACROSS process restarts (a durable replay, not just a
+ * reconnect retry) pass an id derived from their own durable key — see
+ * {@link TrustTBClient.deriveTransferId}.
+ */
+function transferIdOrFresh(transferId: bigint | undefined): bigint {
+	if (transferId === undefined) return tbId();
+	if (transferId <= 0n || transferId >= MAX_TRANSFER_ID) {
+		throw new RangeError(`Transfer id must be in (0, 2^128 - 1): ${transferId}`);
+	}
+	return transferId;
+}
+
 /**
  * Per-account available/pending/total balance, shared by {@link TrustTBClient.lookupBalance}
  * and {@link TrustTBClient.lookupBalances} so the overflow guards live in exactly ONE
@@ -256,6 +278,28 @@ export class TrustTBClient {
 		lenCc.writeUInt32BE(cc.length);
 		const digest = createHash("sha256")
 			.update(Buffer.concat([COST_CENTER_DOMAIN_TAG, lenParent, parent, lenCc, cc]))
+			.digest("hex");
+		return BigInt(`0x${digest.slice(0, 32)}`);
+	}
+
+	/**
+	 * A deterministic TRANSFER id for a caller's durable `(key, role)` — e.g. a hold key and
+	 * `"reserve" | "post" | "void"` — so a replay after a crash resubmits the SAME id and
+	 * TigerBeetle answers `exists` (every field identical) instead of creating a second
+	 * transfer. Same encoding discipline as {@link deriveCostCenterAccountId}: domain tag, then
+	 * UTF-8 byte-length-prefixed parts, sha256, first 16 BYTES big-endian. Pure and total; it
+	 * never validates or normalizes. The 2^-128-scale chance of a reserved value (0 or
+	 * 2^128 - 1) is refused at the door ({@link transferIdOrFresh}), not remapped here.
+	 */
+	static deriveTransferId(key: string, role: string): bigint {
+		const k = Buffer.from(key, "utf8");
+		const r = Buffer.from(role, "utf8");
+		const lenK = Buffer.alloc(4);
+		lenK.writeUInt32BE(k.length);
+		const lenR = Buffer.alloc(4);
+		lenR.writeUInt32BE(r.length);
+		const digest = createHash("sha256")
+			.update(Buffer.concat([TRANSFER_ID_DOMAIN_TAG, lenK, k, lenR, r]))
 			.digest("hex");
 		return BigInt(`0x${digest.slice(0, 32)}`);
 	}
@@ -590,8 +634,10 @@ export class TrustTBClient {
 		userData128?: bigint;
 		userData64?: bigint;
 		userData32?: number;
+		/** Caller-supplied id for cross-restart idempotency; minted fresh when omitted. */
+		transferId?: bigint;
 	}): Promise<bigint> {
-		const transferId = tbId();
+		const transferId = transferIdOrFresh(p.transferId);
 		const transfer: Transfer = {
 			id: transferId,
 			debit_account_id: p.debitAccountId,
@@ -612,10 +658,11 @@ export class TrustTBClient {
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
-			// `exists` IS SUCCESS HERE. transferId is generated above, OUTSIDE the
-			// withReconnect closure, so a retry after a connection error resubmits the
-			// same unique id; TigerBeetle deduplicates on it and answers `exists` only
-			// when every field of the submitted transfer matches the one already
+			// `exists` IS SUCCESS HERE. transferId is fixed above, OUTSIDE the
+			// withReconnect closure (minted, or supplied by a caller replaying a durable
+			// intent), so a retry or replay resubmits the same id; TigerBeetle
+			// deduplicates on it and answers `exists` only when every field of the
+			// submitted transfer matches the one already
 			// committed (a mismatch is a distinct exists_with_different_* code that
 			// still throws). Receiving it is therefore proof the reservation landed.
 			// Throwing would report a failed reservation against funds TB is already
@@ -634,8 +681,12 @@ export class TrustTBClient {
 		return transferId;
 	}
 
-	async postTransfer(pendingId: bigint, amount?: number): Promise<bigint> {
-		const postId = tbId();
+	async postTransfer(
+		pendingId: bigint,
+		amount?: number,
+		opts?: { transferId?: bigint },
+	): Promise<bigint> {
+		const postId = transferIdOrFresh(opts?.transferId);
 		const transfer: Transfer = {
 			id: postId,
 			debit_account_id: 0n,
@@ -656,10 +707,11 @@ export class TrustTBClient {
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
-			// `exists` IS SUCCESS HERE. postId is generated above, OUTSIDE the
-			// withReconnect closure, so a retry after a connection error resubmits the
-			// same unique id; TigerBeetle deduplicates on it and answers `exists` only
-			// when every field of the submitted transfer matches the one already
+			// `exists` IS SUCCESS HERE. postId is fixed above, OUTSIDE the
+			// withReconnect closure (minted, or supplied by a caller replaying a durable
+			// intent), so a retry or replay resubmits the same id; TigerBeetle
+			// deduplicates on it and answers `exists` only when every field of the
+			// submitted transfer matches the one already
 			// committed (a mismatch is a distinct exists_with_different_* code that
 			// still throws). Receiving it is therefore proof the debit settled.
 			// Throwing would report a failed settlement for money that moved — and the
@@ -678,8 +730,8 @@ export class TrustTBClient {
 		return postId;
 	}
 
-	async voidTransfer(pendingId: bigint): Promise<bigint> {
-		const voidId = tbId();
+	async voidTransfer(pendingId: bigint, opts?: { transferId?: bigint }): Promise<bigint> {
+		const voidId = transferIdOrFresh(opts?.transferId);
 		const transfer: Transfer = {
 			id: voidId,
 			debit_account_id: 0n,
@@ -700,10 +752,11 @@ export class TrustTBClient {
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
-			// `exists` IS SUCCESS HERE. voidId is generated above, OUTSIDE the
-			// withReconnect closure, so a retry after a connection error resubmits the
-			// same unique id; TigerBeetle deduplicates on it and answers `exists` only
-			// when every field of the submitted transfer matches the one already
+			// `exists` IS SUCCESS HERE. voidId is fixed above, OUTSIDE the
+			// withReconnect closure (minted, or supplied by a caller replaying a durable
+			// intent), so a retry or replay resubmits the same id; TigerBeetle
+			// deduplicates on it and answers `exists` only when every field of the
+			// submitted transfer matches the one already
 			// committed (a mismatch is a distinct exists_with_different_* code that
 			// still throws). Receiving it is therefore proof the hold was released.
 			// Throwing would fail the caller's cleanup path over a reservation TB has
