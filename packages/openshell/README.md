@@ -8,7 +8,7 @@ A supervisor middleware for [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShe
 3. allow or deny the call;
 4. settle to actual usage from the response, with a hash-chained receipt.
 
-This first slice is the pure core. It has no network, ledger or storage yet:
+The pure core, plus the hold journal. There is no network or ledger wiring yet:
 
 | Module | What it does |
 |---|---|
@@ -17,6 +17,7 @@ This first slice is the pure core. It has no network, ledger or storage yet:
 | `settle` | Classifies a response: void, settle at the hold (body unreadable), or which body mode to read. |
 | `usage` | Incremental usage parsers for Anthropic and OpenAI, JSON and SSE. Their result does not depend on how the body is split into units. |
 | `hold-key` | The deterministic hold key from `(sandbox_id, request_id)`. |
+| `journal` | The hold journal: one SQLite file per host (`node:sqlite`, WAL). It is the compare-and-set store that gives each hold **exactly one** terminal state:<ul><li>a caller wins only when exactly one row changed;</li><li>a busy lock **throws** and is never reported as a lost claim;</li><li>a reservation reads the debt, checks the headroom, places the hold and records it in **one** transaction;</li><li>each debt change applies once per ledger transfer;</li><li>the sweeper has a work list for each of its jobs.</li></ul>Every write transaction also takes an in-process lock, because one can stay open across a ledger call. |
 | `reasons` | Deny reason codes, checked against OpenShell's `^[a-z][a-z0-9_]{0,63}$`. |
 
 ## Spec gaps (decisions taken here, flagged for review)
