@@ -92,7 +92,12 @@ export { createGovernor } from "./headless.js";
 // The ledger client is the required first argument of every budget entry point
 // above. Without it at the root those functions can be imported but never
 // called: the argument is unnameable and unconstructible outside this package.
-export { TrustTBClient } from "./ledger/client.js";
+export {
+	PendingReplayError,
+	TransferIdRetiredError,
+	TransferReplayMismatchError,
+	TrustTBClient,
+} from "./ledger/client.js";
 export type { ModelRates, RateResolution } from "./ledger/pricing.js";
 // Pricing
 export {

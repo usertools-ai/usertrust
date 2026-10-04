@@ -170,6 +170,36 @@ closure, so a reconnect retry resubmits the same id and TigerBeetle deduplicates
 moved — then voiding an already-posted transfer. The converse is the likelier mistake: mint the
 transfer id *inside* the `withReconnect` closure and a retry submits a **fresh** id, TigerBeetle has
 nothing to deduplicate against, and the caller double-spends.
+*Caller-supplied ids extend this across restarts.* `createPendingTransfer({ transferId })`,
+`postTransfer(id, amount, { transferId })` and `voidTransfer(id, { transferId })` accept an id the
+caller derives from its own durable key — `TrustTBClient.deriveTransferId(key, role)`, which hashes
+`"usertrust:transfer:v1"` ‖ u32be(|key|) ‖ key ‖ u32be(|role|) ‖ role (first 16 bytes; a third
+prefix-free domain tag). A replay after a process restart then resubmits the SAME id, and `exists`
+means the earlier attempt of that intent committed. The caller's obligation is to replay with
+**identical fields** — a different amount under the same id is `exists_with_different_amount`,
+which still throws. **`exists` is verified for a caller-supplied id:** TigerBeetle answers plain
+`exists` (not `exists_with_different_amount`) to a post-pending replay whose amount is >= the pending
+amount when the original post consumed it all, so the client looks the stored transfer up and
+compares every field the caller set (a field TigerBeetle inherits from the pending transfer is
+skipped); any difference is a `TransferReplayMismatchError`. **A failed id is retired:** once an
+id's first attempt fails, every later attempt answers `id_already_failed`
+(`TransferIdRetiredError`), so a derived `(key, role)` that failed can never succeed — derive a new
+role for a new attempt. **A pending replay is never a reservation:** a pending transfer's stored
+record is immutable — posting, voiding or expiring the hold changes nothing on the row TigerBeetle
+returns — so a verified `exists` for a caller-supplied PENDING id cannot tell a live hold from one
+already spent, released or expired. `createPendingTransfer` throws `PendingReplayError` instead of
+returning the id; the caller re-reserves under a new role (e.g. `"reserve#2"`) or denies, and may
+void the old id if it holds it (that void fails harmlessly once the hold is no longer pending).
+Reporting it as reserved would be an overspend path. *Accepted residue (it fails closed):* a lost
+reply on a hold that DID commit also yields `PendingReplayError` although the hold is live, so a
+re-reserve holds the amount twice until the first hold leaves — at its timeout, or, with
+`timeoutSeconds: 0` (no expiry), only when the caller voids it; such a caller must void the old id
+itself. Post and void replays are unaffected. All three
+error types are exported from the package entry. Omitted, every call mints a fresh `tbId()` exactly
+as before, and a minted id's `exists` needs no lookup (its only replay is an identical reconnect
+retry). 0, negatives,
+2^128 − 1 (reserved by TigerBeetle) and anything wider than 128 bits are refused at the door with a
+`RangeError`, before the ledger is touched.
 *Two exceptions, both requiring `created`:* `createTreasury`, and `createFundedBudgetWallet`. The
 latter's id comes from `tbId()` — **random, not derived** — so the precondition above does not hold
 for it: an `exists` there is a genuine id collision, not a retry. Accepting it would return someone
