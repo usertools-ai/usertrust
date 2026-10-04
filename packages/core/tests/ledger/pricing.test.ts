@@ -926,3 +926,35 @@ describe("warnCacheRateMigration (D8 migration warning)", () => {
 		expect(stderrSpy).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("isModelPriced (a caller that must refuse an unpriced model)", () => {
+	it("is true for a table model, a prefix variant and a custom rate; false for an unknown model", async () => {
+		const { isModelPriced } = await import("../../src/ledger/pricing.js");
+		expect(isModelPriced("claude-sonnet-4-6")).toBe(true);
+		expect(isModelPriced("claude-sonnet-4-6-20991231")).toBe(true); // prefix
+		expect(isModelPriced("my-model", { "my-model": { inputPer1k: 1, outputPer1k: 2 } })).toBe(true);
+		expect(isModelPriced("totally-unknown-model-xyz")).toBe(false);
+		expect(isModelPriced("constructor")).toBe(false); // inherited keys are not rates
+		expect(isModelPriced("__proto__")).toBe(false);
+	});
+
+	it("agrees with getModelRates: priced exactly when the lookup does NOT fall back", async () => {
+		const { FALLBACK_RATE, PRICING_TABLE, getModelRates, isModelPriced } = await import(
+			"../../src/ledger/pricing.js"
+		);
+		const probes = [
+			...Object.keys(PRICING_TABLE),
+			...Object.keys(PRICING_TABLE).map((k) => `${k}-variant`),
+			"",
+			"x",
+			"gpt",
+			"claude",
+			"toString",
+			"hasOwnProperty",
+			"unknown-model",
+		];
+		for (const m of probes) {
+			expect(isModelPriced(m), m).toBe(getModelRates(m) !== FALLBACK_RATE);
+		}
+	});
+});
