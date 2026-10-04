@@ -177,11 +177,13 @@ caller derives from its own durable key — `TrustTBClient.deriveTransferId(key,
 prefix-free domain tag). A replay after a process restart then resubmits the SAME id, and `exists`
 means the earlier attempt of that intent committed. The caller's obligation is to replay with
 **identical fields** — a different amount under the same id is `exists_with_different_amount`,
-which still throws. **`exists` is verified for a caller-supplied id:** TigerBeetle answers plain
-`exists` (not `exists_with_different_amount`) to a post-pending replay whose amount is >= the pending
-amount when the original post consumed it all, so the client looks the stored transfer up and
-compares every field the caller set (a field TigerBeetle inherits from the pending transfer is
-skipped); any difference is a `TransferReplayMismatchError`. **A failed id is retired:** once an
+which still throws. **`exists` is verified for a caller-supplied id**, as defence in depth: the
+client looks the stored transfer up and compares every field the caller set (a field TigerBeetle
+inherits from the pending transfer is skipped); any difference is a `TransferReplayMismatchError`.
+Measured against a real TigerBeetle 0.17.9 (`packages/core/tests/integration/replay.tb.test.ts`),
+the server itself refuses every amount-changing post replay with `exists_with_different_amount` —
+a larger amount after a full post, and `amount_max` after a partial one; the only amount it answers
+plain `exists` for is `amount_max` after a FULL post, which is the same intent. **A failed id is retired:** once an
 id's first attempt fails, every later attempt answers `id_already_failed`
 (`TransferIdRetiredError`), so a derived `(key, role)` that failed can never succeed — derive a new
 role for a new attempt. **A pending replay is never a reservation:** a pending transfer's stored
