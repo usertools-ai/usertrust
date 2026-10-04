@@ -152,7 +152,9 @@ function parse(
 ) {
 	const p = createUsageParser(route, mode);
 	for (const u of units) p.push(u);
-	return p.end();
+	const r = p.end();
+	// The usage, or WHY the caller settles at the hold.
+	return r.kind === "usage" ? r.usage : r.why;
 }
 
 /** `bytes` cut at the given offsets, plus an EMPTY final unit. */
@@ -208,7 +210,7 @@ describe("usage parsers: the result is identical under ANY split into units", ()
 	});
 });
 
-describe("usage parsers: no provider usage → null (settle at the hold, never a fabricated count)", () => {
+describe("usage parsers: no complete provider usage → settle at the hold, never a fabricated count", () => {
 	it("a stream with no usage event", () => {
 		expect(
 			parse("openai.chat", "STREAM_BYTES", [
@@ -219,25 +221,23 @@ describe("usage parsers: no provider usage → null (settle at the hold, never a
 					]),
 				),
 			]),
-		).toBeNull();
+		).toBe("truncated");
 	});
 	it("half-reported usage (output only) is not provider usage", () => {
-		const body = sse([["message_delta", { type: "message_delta", usage: { output_tokens: 15 } }]]);
-		expect(parse("anthropic.messages", "STREAM_BYTES", [enc(body)])).toBeNull();
+		const body = sse([
+			["message_delta", { type: "message_delta", usage: { output_tokens: 15 } }],
+			["message_stop", { type: "message_stop" }],
+		]);
+		expect(parse("anthropic.messages", "STREAM_BYTES", [enc(body)])).toBe("no-usage");
 	});
 	it("a JSON body that is not JSON, not an object, or has no usage", () => {
-		expect(parse("openai.chat", "WHOLE_BODY_BYTES", [enc("{nope")])).toBeNull();
-		expect(parse("openai.chat", "WHOLE_BODY_BYTES", [enc("[1]")])).toBeNull();
-		expect(parse("openai.chat", "WHOLE_BODY_BYTES", [enc("{}")])).toBeNull();
+		expect(parse("openai.chat", "WHOLE_BODY_BYTES", [enc("{nope")])).toBe("unparseable");
+		expect(parse("openai.chat", "WHOLE_BODY_BYTES", [enc("[1]")])).toBe("unparseable");
+		expect(parse("openai.chat", "WHOLE_BODY_BYTES", [enc("{}")])).toBe("no-usage");
 	});
 	it("a JSON body over the payload maximum", () => {
 		const big = new Uint8Array(4 * 1024 * 1024 + 1);
-		expect(parse("openai.chat", "WHOLE_BODY_BYTES", [big])).toBeNull();
-	});
-	it("an SSE line over the line limit gives up rather than buffering without bound", () => {
-		const line = enc(`data: ${"x".repeat(1024 * 1024 + 10)}`);
-		const tail = enc(`\n\n${sse([[null, { usage: { prompt_tokens: 1, completion_tokens: 1 } }]])}`);
-		expect(parse("openai.chat", "STREAM_BYTES", [line, tail])).toBeNull();
+		expect(parse("openai.chat", "WHOLE_BODY_BYTES", [big])).toBe("too-large");
 	});
 	it("a non-JSON data line and an event with no data are ignored, not fatal", () => {
 		const body = `event: ping\n\ndata: not json\n\n${sse([[null, { usage: { prompt_tokens: 2, completion_tokens: 3 } }]])}`;
@@ -252,5 +252,118 @@ describe("usage parsers: no provider usage → null (settle at the hold, never a
 			inputTokens: 2,
 			outputTokens: 3,
 		});
+	});
+});
+
+describe("#166 P1: a TRUNCATED stream settles at the hold, never at the usage seen so far", () => {
+	const anthropic = FIXTURES[0];
+	const responses = FIXTURES[2];
+	if (!anthropic || !responses) throw new Error("fixtures");
+	/** The fixture's body cut just BEFORE the event named `at` (its `event:` line). */
+	const cutBefore = (body: string, at: string) => {
+		const i = body.indexOf(`event: ${at}\n`);
+		if (i < 0) throw new Error(at);
+		return body.slice(0, i);
+	};
+
+	it("anthropic: cut after message_start, after content, and before message_stop", () => {
+		for (const at of ["content_block_delta", "message_delta", "message_stop"]) {
+			const body = cutBefore(anthropic.body, at);
+			expect(parse("anthropic.messages", "STREAM_BYTES", [enc(body)]), at).toBe("truncated");
+		}
+	});
+	it("anthropic: every byte-prefix of the stream short of message_stop is truncated", () => {
+		const bytes = enc(anthropic.body);
+		const stop = anthropic.body.indexOf('data: {"type":"message_stop"}');
+		for (let n = 0; n < stop; n += 3) {
+			expect(parse("anthropic.messages", "STREAM_BYTES", [bytes.slice(0, n)]), `prefix ${n}`).toBe(
+				"truncated",
+			);
+		}
+	});
+	it("anthropic: a mid-stream error event (no message_stop) is truncated", () => {
+		const body =
+			cutBefore(anthropic.body, "message_delta") +
+			sse([["error", { type: "error", error: { type: "overloaded_error", message: "x" } }]]);
+		expect(parse("anthropic.messages", "STREAM_BYTES", [enc(body)])).toBe("truncated");
+	});
+	it("responses: a stream with no terminal event is truncated", () => {
+		const body = cutBefore(responses.body, "response.completed");
+		expect(parse("openai.responses", "STREAM_BYTES", [enc(body)])).toBe("truncated");
+	});
+	it("responses: an incomplete or failed response WITH usage settles on that usage", () => {
+		for (const type of ["response.incomplete", "response.failed"]) {
+			const body = sse([
+				[type, { type, response: { id: "r", usage: { input_tokens: 40, output_tokens: 9 } } }],
+			]);
+			expect(parse("openai.responses", "STREAM_BYTES", [enc(body)]), type).toEqual({
+				inputTokens: 40,
+				outputTokens: 9,
+				cacheReadTokens: 0,
+				cacheWriteTokens: 0,
+				source: "provider",
+			});
+		}
+	});
+	it("responses: a terminal event WITHOUT usage settles at the hold", () => {
+		const body = sse([
+			["response.failed", { type: "response.failed", response: { id: "r", usage: null } }],
+		]);
+		expect(parse("openai.responses", "STREAM_BYTES", [enc(body)])).toBe("no-usage");
+	});
+	it("usage after the terminal event is not read", () => {
+		const body =
+			anthropic.body +
+			sse([["message_delta", { type: "message_delta", usage: { output_tokens: 1 } }]]);
+		expect(parse("anthropic.messages", "STREAM_BYTES", [enc(body)])).toMatchObject({
+			outputTokens: 15,
+		});
+	});
+});
+
+describe("#166 P2: the SSE bounds do not depend on the split", () => {
+	const usageTail = sse([[null, { usage: { prompt_tokens: 1, completion_tokens: 1 } }]]);
+	const overLine = `data: ${"x".repeat(1024 * 1024 + 10)}\n\n${usageTail}`;
+	const underLine = `data: ${"x".repeat(1024 * 1024 - 100)}\n\n${usageTail}`;
+
+	it("a line over the bound is refused whole, split at the newline, or split anywhere", () => {
+		const bytes = enc(overLine);
+		const nl = overLine.indexOf("\n");
+		for (const units of [
+			[bytes],
+			split(bytes, [nl]),
+			split(bytes, [nl + 1]),
+			split(bytes, [65_536]),
+			split(bytes, [65_536, nl - 3]),
+		]) {
+			expect(parse("openai.chat", "STREAM_BYTES", units)).toBe("line-too-long");
+		}
+	});
+	it("control: a line under the bound parses whole and split", () => {
+		const bytes = enc(underLine);
+		for (const units of [
+			[bytes],
+			split(bytes, [65_536]),
+			split(bytes, [underLine.indexOf("\n")]),
+		]) {
+			expect(parse("openai.chat", "STREAM_BYTES", units)).toMatchObject({ inputTokens: 1 });
+		}
+	});
+	it("a long NON-data line (a comment) gets the same answer whole and split", () => {
+		// Not buffered as data, so only the line bound sees it: without the bound on
+		// a COMPLETED line, one unit parsed the usage and a split gave up.
+		const comment = `: ${"x".repeat(1024 * 1024 + 10)}\n\n${usageTail}`;
+		const bytes = enc(comment);
+		for (const units of [
+			[bytes],
+			split(bytes, [65_536]),
+			split(bytes, [comment.indexOf("\n") + 1]),
+		]) {
+			expect(parse("openai.chat", "STREAM_BYTES", units)).toBe("line-too-long");
+		}
+	});
+	it("one event's data across many short lines is bounded like one line", () => {
+		const many = `${"data: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n".repeat(20_000)}\n${usageTail}`;
+		expect(parse("openai.chat", "STREAM_BYTES", [enc(many)])).toBe("line-too-long");
 	});
 });

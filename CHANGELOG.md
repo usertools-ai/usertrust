@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`isModelPriced(model, customRates?)`** — true only when a model has rates of
+  its OWN: an operator custom rate or an EXACT pricing-table entry. It is for a
+  caller that must refuse what it cannot price exactly rather than bill it at a
+  guess. It is deliberately stricter than `getModelRates`, whose prefix match
+  prices a variant (`o3-pro`, a dated snapshot, a `-pro` or `-fast` tier) at its
+  base model's row; `getModelRates` is unchanged.
+
 - **`usertrust-verify receipt <file> --trust <snapshot.json>` — the offline
   half of the trust story.** A zero-dependency, zero-network CLI mode that
   reads a signed ut1 receipt plus a PINNED `receipt-spec` §8 trust snapshot
