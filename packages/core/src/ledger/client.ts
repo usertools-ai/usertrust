@@ -914,7 +914,12 @@ export class TrustTBClient {
 				res.status !== CreateTransferStatus.created &&
 				res.status !== CreateTransferStatus.exists
 			) {
-				throw new Error(`Void transfer failed: ${CreateTransferStatus[res.status] ?? res.status}`);
+				// A TBTransferError like every other transfer path, so a caller can tell an
+				// already-expired hold (pending_transfer_expired) from a real failure by code.
+				throw new TBTransferError(
+					res.status,
+					`Void transfer failed: ${CreateTransferStatus[res.status] ?? res.status}`,
+				);
 			}
 		}
 		return voidId;

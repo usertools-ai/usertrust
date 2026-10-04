@@ -287,7 +287,8 @@ export class HoldJournal {
 	/** The token of the transaction now open, or null. */
 	private active: object | null = null;
 	private readonly retries: number;
-	private readonly ledgerTimeoutMs: number;
+	/** The deadline on each ledger call a reservation makes inside its transaction (ms). */
+	readonly ledgerTimeoutMs: number;
 	private readonly placementGraceMs: number;
 	private readonly now: () => number;
 
