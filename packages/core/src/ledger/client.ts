@@ -65,6 +65,12 @@ export class TransferReplayMismatchError extends TBTransferError {
  * re-reserves under a NEW id (a new role, e.g. `"reserve#2"`) or denies; if it still holds
  * the old id it may void it, which fails harmlessly when the hold is no longer pending.
  * Extends TBTransferError so existing catch sites still match; `code` is `exists`.
+ *
+ * Accepted residue (fail closed): if the FIRST attempt's reply was lost after the hold
+ * committed, the retry sees `exists` and gets this error although the hold IS live. The
+ * caller's re-reserve then holds the amount twice until the first hold leaves — at its
+ * timeout, or, with `timeoutSeconds: 0` (no expiry), only when it is voided. A caller that
+ * uses `timeoutSeconds: 0` must void the old id itself; nothing else will release it.
  */
 export class PendingReplayError extends TBTransferError {
 	constructor(public readonly transferId: bigint) {
@@ -758,6 +764,9 @@ export class TrustTBClient {
 		/** Caller-supplied id for cross-restart idempotency; minted fresh when omitted. */
 		transferId?: bigint;
 	}): Promise<bigint> {
+		// Decided ONCE, synchronously, before any await: re-reading `p.transferId` after the
+		// await would let a caller that mutates its options mid-call skip verification.
+		const callerSupplied = p.transferId !== undefined;
 		const transferId = transferIdOrFresh(p.transferId);
 		const transfer: Transfer = {
 			id: transferId,
@@ -780,7 +789,7 @@ export class TrustTBClient {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
 			// A caller-supplied id: `exists` must be VERIFIED, and a retired id is its own error.
-			if (p.transferId !== undefined) {
+			if (callerSupplied) {
 				await this.settleCallerSuppliedStatus(res.status, transfer);
 				// Verified, and still a REPLAY: a pending record cannot say whether the hold is
 				// live, spent, released or expired, so it is never reported as reserved.
@@ -816,6 +825,7 @@ export class TrustTBClient {
 		amount?: number,
 		opts?: { transferId?: bigint },
 	): Promise<bigint> {
+		const callerSupplied = opts?.transferId !== undefined; // decided before any await
 		const postId = transferIdOrFresh(opts?.transferId);
 		const transfer: Transfer = {
 			id: postId,
@@ -838,8 +848,7 @@ export class TrustTBClient {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
 			// A caller-supplied id: `exists` must be VERIFIED, and a retired id is its own error.
-			if (opts?.transferId !== undefined)
-				await this.settleCallerSuppliedStatus(res.status, transfer);
+			if (callerSupplied) await this.settleCallerSuppliedStatus(res.status, transfer);
 			// `exists` IS SUCCESS HERE. postId is fixed above, OUTSIDE the
 			// withReconnect closure (minted, or supplied by a caller replaying a durable
 			// intent), so a retry or replay resubmits the same id; TigerBeetle
@@ -864,6 +873,7 @@ export class TrustTBClient {
 	}
 
 	async voidTransfer(pendingId: bigint, opts?: { transferId?: bigint }): Promise<bigint> {
+		const callerSupplied = opts?.transferId !== undefined; // decided before any await
 		const voidId = transferIdOrFresh(opts?.transferId);
 		const transfer: Transfer = {
 			id: voidId,
@@ -886,8 +896,7 @@ export class TrustTBClient {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
 			// A caller-supplied id: `exists` must be VERIFIED, and a retired id is its own error.
-			if (opts?.transferId !== undefined)
-				await this.settleCallerSuppliedStatus(res.status, transfer);
+			if (callerSupplied) await this.settleCallerSuppliedStatus(res.status, transfer);
 			// `exists` IS SUCCESS HERE. voidId is fixed above, OUTSIDE the
 			// withReconnect closure (minted, or supplied by a caller replaying a durable
 			// intent), so a retry or replay resubmits the same id; TigerBeetle

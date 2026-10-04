@@ -431,6 +431,49 @@ describe("TrustTBClient", () => {
 			await expect(client.voidTransfer(held, { transferId: voidId })).resolves.toBe(voidId);
 		});
 
+		// "Caller-supplied" is decided ONCE, before any await: a caller that mutates its
+		// options object while the call is in flight must not be able to skip verification.
+		it("createPendingTransfer: deleting transferId mid-call does not skip the replay rule", async () => {
+			const opts = {
+				debitAccountId: 1n,
+				creditAccountId: 2n,
+				amount: 100,
+				code: XFER_SPEND,
+				transferId: held as bigint | undefined,
+			};
+			mockCreateTransfers.mockImplementationOnce(async () => {
+				delete opts.transferId; // mutated while createTransfers is awaited
+				return [{ status: 46 }];
+			});
+			mockLookupTransfers.mockResolvedValueOnce([storedPending()]);
+			await expect(client.createPendingTransfer(opts)).rejects.toThrow(PendingReplayError);
+		});
+
+		it("postTransfer: deleting transferId mid-call does not skip verification", async () => {
+			const opts: { transferId?: bigint } = { transferId: post };
+			mockCreateTransfers.mockImplementationOnce(async () => {
+				delete opts.transferId;
+				return [{ status: 46 }];
+			});
+			mockLookupTransfers.mockResolvedValueOnce([storedPost(100n)]);
+			await expect(client.postTransfer(held, 150, opts)).rejects.toThrow(
+				TransferReplayMismatchError,
+			);
+		});
+
+		it("voidTransfer: deleting transferId mid-call does not skip verification", async () => {
+			const opts: { transferId?: bigint } = { transferId: voidId };
+			mockCreateTransfers.mockImplementationOnce(async () => {
+				delete opts.transferId;
+				return [{ status: 46 }];
+			});
+			// The stored void points at a DIFFERENT pending transfer: verification must catch it.
+			mockLookupTransfers.mockResolvedValueOnce([
+				{ ...storedPost(0n), id: voidId, flags: 4, pending_id: 999n },
+			]);
+			await expect(client.voidTransfer(held, opts)).rejects.toThrow(TransferReplayMismatchError);
+		});
+
 		it("a MINTED id's `exists` (a reconnect retry) needs no lookup — unchanged", async () => {
 			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]);
 			await client.postTransfer(held, 100);

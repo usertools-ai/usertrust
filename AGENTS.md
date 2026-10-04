@@ -190,7 +190,11 @@ returns — so a verified `exists` for a caller-supplied PENDING id cannot tell 
 already spent, released or expired. `createPendingTransfer` throws `PendingReplayError` instead of
 returning the id; the caller re-reserves under a new role (e.g. `"reserve#2"`) or denies, and may
 void the old id if it holds it (that void fails harmlessly once the hold is no longer pending).
-Reporting it as reserved would be an overspend path. Post and void replays are unaffected. All three
+Reporting it as reserved would be an overspend path. *Accepted residue (it fails closed):* a lost
+reply on a hold that DID commit also yields `PendingReplayError` although the hold is live, so a
+re-reserve holds the amount twice until the first hold leaves — at its timeout, or, with
+`timeoutSeconds: 0` (no expiry), only when the caller voids it; such a caller must void the old id
+itself. Post and void replays are unaffected. All three
 error types are exported from the package entry. Omitted, every call mints a fresh `tbId()` exactly
 as before, and a minted id's `exists` needs no lookup (its only replay is an identical reconnect
 retry). 0, negatives,
