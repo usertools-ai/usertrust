@@ -2,12 +2,18 @@
 // Copyright 2026 Usertools, Inc.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { HoldJournal, JournalBusyError } from "../src/journal.js";
+import {
+	HoldJournal,
+	JournalBusyError,
+	JournalUnavailableError,
+	loadSqlite,
+	MIN_NODE_FOR_JOURNAL,
+} from "../src/journal.js";
 
 const dirs: string[] = [];
 const journals: HoldJournal[] = [];
@@ -39,6 +45,37 @@ const open = (j: HoldJournal, holdId: string, budgetId = "b", amount = 100) =>
 		availableCredit: () => 1e9,
 		placeHold: () => {},
 	});
+
+describe("hold journal: node:sqlite is required, and its absence says so", () => {
+	it("a runtime without node:sqlite gets JournalUnavailableError naming the requirement — not an opaque import failure", () => {
+		const missing = () => {
+			const e = new Error("No such built-in module: node:sqlite") as Error & { code: string };
+			e.code = "ERR_UNKNOWN_BUILTIN_MODULE";
+			throw e;
+		};
+		let caught: unknown;
+		try {
+			loadSqlite(missing);
+		} catch (e) {
+			caught = e;
+		}
+		expect(caught).toBeInstanceOf(JournalUnavailableError);
+		expect((caught as Error).message).toContain(`Node >= ${MIN_NODE_FOR_JOURNAL}`);
+		expect((caught as Error).message).toContain(process.versions.node);
+		expect((caught as Error & { cause: { code: string } }).cause.code).toBe(
+			"ERR_UNKNOWN_BUILTIN_MODULE",
+		);
+		expect(() => loadSqlite(() => ({}))).toThrow(JournalUnavailableError);
+	});
+
+	it("engines.node pins the same minimum, and this runtime meets it", () => {
+		const pkg = JSON.parse(readFileSync(join(__dirname, "..", "package.json"), "utf8"));
+		expect(pkg.engines?.node).toBe(`>=${MIN_NODE_FOR_JOURNAL}`);
+		const [maj = 0, min = 0] = process.versions.node.split(".").map(Number);
+		expect(maj > 22 || (maj === 22 && min >= 13), `Node ${process.versions.node}`).toBe(true);
+		expect(typeof loadSqlite().DatabaseSync).toBe("function");
+	});
+});
 
 describe("hold journal: the compare-and-set", () => {
 	it("a transition wins exactly once; a second claim from the same state loses", async () => {

@@ -20,10 +20,42 @@
  *   an in-process lock.
  *
  * Built on `node:sqlite` (Node ≥ 22.13, no dependency; still marked experimental
- * by Node).
+ * by Node). It is loaded when a journal is OPENED, not at import, so a runtime
+ * without it gets {@link JournalUnavailableError} naming the requirement instead of
+ * an opaque module-resolution failure at load time.
  */
 
-import { DatabaseSync } from "node:sqlite";
+import { createRequire } from "node:module";
+import type { DatabaseSync } from "node:sqlite";
+
+/** The Node version the journal needs (`engines.node` in package.json says the same). */
+export const MIN_NODE_FOR_JOURNAL = "22.13.0";
+
+export class JournalUnavailableError extends Error {
+	constructor(cause: unknown) {
+		super(
+			`the hold journal needs node:sqlite (Node >= ${MIN_NODE_FOR_JOURNAL}); this runtime is Node ${process.versions.node} and could not load it`,
+			{ cause },
+		);
+		this.name = "JournalUnavailableError";
+	}
+}
+
+type SqliteModule = { DatabaseSync: typeof DatabaseSync };
+type ModuleLoader = (id: string) => unknown;
+const nodeRequire: ModuleLoader = createRequire(import.meta.url);
+
+/** Loads node:sqlite, or throws {@link JournalUnavailableError}. `load` is a test seam. */
+export function loadSqlite(load: ModuleLoader = nodeRequire): SqliteModule {
+	try {
+		const mod = load("node:sqlite") as Partial<SqliteModule> | undefined;
+		if (typeof mod?.DatabaseSync !== "function")
+			throw new TypeError("node:sqlite has no DatabaseSync");
+		return mod as SqliteModule;
+	} catch (err) {
+		throw new JournalUnavailableError(err);
+	}
+}
 
 export type HoldState =
 	| "open"
@@ -145,7 +177,8 @@ export class HoldJournal {
 	}
 
 	static open(path: string, opts: JournalOptions = {}): HoldJournal {
-		const db = new DatabaseSync(path);
+		const { DatabaseSync: Database } = loadSqlite();
+		const db = new Database(path);
 		db.exec("PRAGMA journal_mode = WAL");
 		const j = new HoldJournal(db, opts);
 		j.migrate();
