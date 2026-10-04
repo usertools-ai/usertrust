@@ -1,0 +1,275 @@
+name: pricing-drift
+
+# Weekly cross-check of packages/core/src/ledger/pricing.ts against two
+# independently-maintained public rate tables (LiteLLM and models.dev, both
+# MIT). The table ships to customers in the published `usertrust` package and
+# PRICING_TABLE_VERSION is a hand-typed constant, so nothing else in this repo
+# would notice a rate going stale.
+#
+# This workflow REPORTS ONLY. It does not edit pricing.ts, bump the table
+# version, or commit — `contents: read` means GitHub itself refuses a push, so
+# a bad upstream value cannot reach the table through this path. A human
+# adjudicates every rate change.
+
+on:
+  schedule:
+    # 07:00 UTC every Monday.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: pricing-drift
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      # FRESHNESS IS PROBED FIRST, and with `always()`, because it is API-only:
+      # it needs neither the checkout nor node. Placed after them (as it first
+      # was) a `npm ci` failure skips it, the reporting step then finds no
+      # `fresh` output and skips too — leaving a red scheduled run and NO
+      # could-not-run issue. That is the failure this workflow exists to
+      # prevent, reintroduced by the guard added to prevent a different one.
+      - name: Resolve the default-branch head (before)
+        id: head
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          current="$(gh api "repos/${{ github.repository }}/commits/${{ github.event.repository.default_branch }}" --jq .sha)"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          [ "$current" = "${{ github.sha }}" ] && echo "fresh=true" >> "$GITHUB_OUTPUT" || echo "fresh=false" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+
+      # The checker's own tests run BEFORE the live check, so the positive
+      # control gates every run. An instrument's verdict is never evidence about
+      # the instrument: if this step fails, the comparison below is not
+      # trustworthy and the job stops here.
+      - name: Test the checker (includes the positive control)
+        id: selftest
+        run: npm run drift:test
+
+      - name: Check the pricing table against upstream
+        id: drift
+        # Runs even when the self-test failed, so the reporting step below can
+        # distinguish "instrument broken" from "never got that far".
+        if: always()
+        # Capture the exit status at the only moment it exists rather than
+        # grepping the output for a marker afterwards. A marker inside the
+        # output is evidence the producer chose to emit it; the process's exit
+        # status is evidence the run happened.
+        #
+        #   0 = clean   1 = drift/understatement/coverage breach   2 = could not check
+        run: |
+          set +e
+          npm run --silent drift:check -- --out drift-report.md
+          code=$?
+          set -e
+          # A ZERO EXIT WITHOUT A REPORT IS NOT A CLEAN RESULT. npm or tsx can
+          # exit 0 having produced nothing — for instance if run.mts's
+          # direct-entry guard stops matching and main() never runs. The upload
+          # step only warns on a missing file, the failure predicate is false,
+          # and the clean step would then CLOSE a live tracking issue. A
+          # non-empty report is part of the zero-exit contract, so absence is
+          # re-coded to 2 ("could not check") rather than believed.
+          if [ "$code" = "0" ] && [ ! -s drift-report.md ]; then
+            echo "exit 0 but no drift-report.md was written — recording as could-not-check"
+            code=2
+          fi
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the report
+        # NON-FATAL. The artifact is a convenience; the tracking issue is the
+        # real channel. An upload failure after a CLEAN comparison satisfies
+        # neither the issue predicate nor the failure predicate, so the job
+        # would end red having filed nothing — a scheduled failure with no
+        # record, which is the state this workflow exists to prevent.
+        continue-on-error: true
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pricing-drift-report
+          path: drift-report.md
+          retention-days: 90
+          if-no-files-found: warn
+
+      # An issue is filed for exit 2 (could not check) as well as exit 1
+      # (found something). A weekly scheduled job that merely goes red is the
+      # exact failure mode this tool exists to prevent: nobody watches a cron
+      # job's status page. "The check did not run" is a finding, not a
+      # transient to be swallowed.
+      # RE-PROBED here, immediately before any mutation. The first sample was
+      # taken before the self-test and a live network comparison; master can
+      # advance in that window, and `fresh` would still read true.
+      - name: Resolve the default-branch head (after)
+        id: head2
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          current="$(gh api "repos/${{ github.repository }}/commits/${{ github.event.repository.default_branch }}" --jq .sha)" || current="unknown"
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          if [ "$current" = "${{ github.sha }}" ] && [ "${{ steps.head.outputs.fresh }}" = "true" ]; then
+            echo "fresh=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "fresh=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::${{ github.sha }} is not the current default-branch head ($current); will not CLOSE the tracking issue"
+          fi
+
+      # `always()`, deliberately, and NOT the anti-pattern it resembles. The
+      # rule against `always()` applies to a step that reports SUCCESS — a
+      # healthcheck ping gated that way reads healthy for runs that failed.
+      # This step reports FAILURE, so gating it on success() is what breaks it:
+      # if `drift:test` fails, every later step is implicitly skipped and the
+      # monitor merely turns red, recording nothing. An instrument that could
+      # not run is exactly what this tool must not swallow.
+      # ISSUE MUTATION IS RESTRICTED TO THE DEFAULT BRANCH. `workflow_dispatch`
+      # accepts any ref, and checkout honours it, but the tracking issue is
+      # repository-wide: a run from a clean feature branch would close an issue
+      # describing drift on master, and a dirty branch would overwrite it with
+      # findings that are not master's. Non-default refs still run the check and
+      # still fail the job — they just do not rewrite shared state.
+      - name: File or update the tracking issue
+        if: >-
+          always() && github.ref_type == 'branch' &&
+          github.ref_name == github.event.repository.default_branch &&
+          (steps.selftest.outcome != 'success' || steps.drift.outputs.exit_code != '0' ||
+           steps.head2.outputs.fresh != 'true')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Without this, a failed checkout leaves no git remote and `gh` cannot
+          # infer the repo — it exits under `set -e` and the could-not-run case
+          # files no issue at all, which is the one case that most needs one.
+          GH_REPO: ${{ github.repository }}
+          EXIT_CODE: ${{ steps.drift.outputs.exit_code || 'none' }}
+          SELFTEST: ${{ steps.selftest.outcome }}
+          FRESH: ${{ steps.head2.outputs.fresh }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # A drift report is only credible when the checker exited 1 AND
+          # actually wrote one. npm/tsx dying before run.mts produces a status
+          # of 1, 127 or 137 with no report on disk; treating that as drift
+          # would `cat` a missing file and abort this step under `set -e`,
+          # producing no issue at all. Anything else routes to could-not-run.
+          # A STALE OR UNVERIFIED HEAD IS A COULD-NOT-CHECK STATE, even when the
+          # comparison itself came back clean: the tree that was checked is not
+          # the one master is serving, so the current table was never examined.
+          # A green run here would assert something no run established.
+          # CONCLUSIVE means: the instrument worked, the tree was current, and a
+          # real comparison produced a real report. Only a conclusive run has
+          # standing to REPLACE what an earlier conclusive run established.
+          CONCLUSIVE=yes
+          if [ "$FRESH" != "true" ] || [ "$SELFTEST" != "success" ] || [ "$EXIT_CODE" != "1" ] || [ ! -s drift-report.md ]; then
+            CONCLUSIVE=no
+            TITLE="Pricing drift check could not run"
+            {
+              echo "# The pricing drift check did not run"
+              echo
+              echo "**No comparison was performed.** This is not a clean result — treat the"
+              echo "table as unchecked until a run completes."
+              echo
+              echo "- checker self-test: \`$SELFTEST\`"
+              echo "- checker exit code: \`$EXIT_CODE\` (0 clean / 1 drift / 2 source or schema failure)"
+              echo "- report written: \`$([ -s drift-report.md ] && echo yes || echo no)\`"
+            echo "- checked-out SHA is current default-branch head: \`${{ steps.head2.outputs.fresh }}\`"
+              echo
+              echo "A self-test failure means the instrument itself is broken and its verdict"
+              echo "would not have been trustworthy. An exit code outside 0/1/2 means the"
+              echo "process died before it could report."
+              echo
+              echo "[Run log]($RUN_URL)"
+              echo
+              if [ -s drift-report.md ]; then cat drift-report.md; fi
+            } > issue-body.md
+          else
+            TITLE="Pricing table drift detected"
+            { cat drift-report.md; echo; echo "[Run log]($RUN_URL)"; } > issue-body.md
+          fi
+
+          # Dedupe on the label so the repo gets ONE tracking issue, not 52 a
+          # year. An existing open issue is updated in place.
+          EXISTING="$(gh issue list --label pricing-drift --state open \
+            --json number --jq '.[0].number // empty')"
+
+          if [ -n "$EXISTING" ] && [ "$CONCLUSIVE" != "yes" ]; then
+            # EVERY inconclusive result comments; only a conclusive one edits.
+            # Scoping this to stale heads alone was too narrow: a FRESH run whose
+            # source returned 500 also reaches here, and replacing a live drift
+            # body with a generic could-not-run notice erases findings that a
+            # working run established. Losing a real finding to a transient
+            # outage is strictly worse than the outage.
+            gh issue comment "$EXISTING" --body-file issue-body.md
+          elif [ -n "$EXISTING" ]; then
+            gh issue edit "$EXISTING" --title "$TITLE" --body-file issue-body.md
+            gh issue comment "$EXISTING" --body "Re-checked $(date -u +%Y-%m-%dT%H:%M:%SZ) — see updated body. [Run log]($RUN_URL)"
+          else
+            gh label create pricing-drift --color FBCA04 \
+              --description "Rate table diverges from upstream sources" 2>/dev/null || true
+            gh issue create --title "$TITLE" --label pricing-drift --body-file issue-body.md
+          fi
+
+      # Close the tracking issue once a run comes back clean, so the label
+      # reflects the current state rather than the worst state ever seen.
+      # ASYMMETRIC ON PURPOSE. Filing a failure issue does NOT require verified
+      # freshness — if we cannot establish it, reporting anyway is the safe
+      # error. CLOSING requires it positively, sampled on BOTH sides of the
+      # comparison, because closing on unknown state is how a live drift issue
+      # disappears. Never let "we could not tell" resolve toward silence.
+      - name: Close the tracking issue on a clean run
+        if: >-
+          github.ref_type == 'branch' &&
+          github.ref_name == github.event.repository.default_branch &&
+          steps.head.outputs.fresh == 'true' && steps.head2.outputs.fresh == 'true' &&
+          steps.selftest.outcome == 'success' && steps.drift.outputs.exit_code == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Without this, a failed checkout leaves no git remote and `gh` cannot
+          # infer the repo — it exits under `set -e` and the could-not-run case
+          # files no issue at all, which is the one case that most needs one.
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          EXISTING="$(gh issue list --label pricing-drift --state open \
+            --json number --jq '.[0].number // empty')"
+          if [ -n "$EXISTING" ]; then
+            gh issue close "$EXISTING" \
+              --comment "Pricing drift check is clean as of this run. [Run log]($RUN_URL)"
+          fi
+
+      # NO HEALTHCHECK PING. If one is ever added it MUST be gated on
+      # `success()`, never `always()`: an always-gated ping reports HEALTHY for
+      # runs that failed, which is worse than having no monitor at all.
+      - name: Fail the job when the check did not pass
+        if: >-
+          always() && (steps.selftest.outcome != 'success' ||
+          steps.drift.outputs.exit_code != '0' ||
+          (github.ref_type == 'branch' &&
+           github.ref_name == github.event.repository.default_branch &&
+           steps.head2.outputs.fresh != 'true'))
+        run: |
+          echo "self-test:  ${{ steps.selftest.outcome }}"
+          echo "drift exit: ${{ steps.drift.outputs.exit_code || 'none' }}"
+          echo "head fresh: ${{ steps.head2.outputs.fresh }}"
+          # A clean comparison against a tree that is no longer master has not
+          # checked the shipped table. Green here would be a result no run
+          # earned.
+          exit 1

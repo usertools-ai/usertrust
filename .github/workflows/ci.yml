@@ -70,6 +70,13 @@ jobs:
           --coverage.thresholds.branches=84
           --coverage.thresholds.functions=90
           --coverage.thresholds.statements=92
+      # The pricing-drift checker's decision rules, run at PR time. These are
+      # PURE — no network — so they add no flake; the live comparison against
+      # upstream stays in the weekly pricing-drift workflow. Without this step
+      # a PR that breaks compare.mts would not surface until the next Monday.
+      - name: Pricing-drift checker unit tests
+        run: npm run drift:test
+
       - name: Upload coverage artifact
         if: always()
         uses: actions/upload-artifact@v7
