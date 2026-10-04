@@ -63,6 +63,8 @@ vi.mock("tigerbeetle-node", () => ({
 		31: "exceeds_pending_transfer_amount",
 		// The real binding's value — a transfer with this id already committed.
 		exists: 46,
+		// The real binding's value — this id's FIRST attempt failed; it is retired.
+		id_already_failed: 68,
 	},
 	amount_max: (1n << 128n) - 1n,
 }));
@@ -74,6 +76,8 @@ import {
 	CODE_USER_WALLET,
 	LEDGER_USERTOKENS,
 	TBTransferError,
+	TransferIdRetiredError,
+	TransferReplayMismatchError,
 	TrustTBClient,
 	XFER_A2A_DELEGATION,
 	XFER_ALLOCATION,
@@ -242,6 +246,25 @@ describe("TrustTBClient", () => {
 
 			const restarted = new TrustTBClient({ addresses: ["3000"] });
 			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]); // exists
+			// …and the STORED post is this very intent (same pending id, same amount), which
+			// the client now verifies before treating `exists` as success.
+			mockLookupTransfers.mockResolvedValueOnce([
+				{
+					id: post,
+					debit_account_id: 1n,
+					credit_account_id: 2n,
+					amount: 42n,
+					pending_id: held,
+					user_data_128: 0n,
+					user_data_64: 0n,
+					user_data_32: 0,
+					timeout: 0,
+					ledger: LEDGER_USERTOKENS,
+					code: XFER_SPEND,
+					flags: 2,
+					timestamp: 1n,
+				},
+			]);
 			const replayed = await restarted.postTransfer(held, 42, {
 				transferId: TrustTBClient.deriveTransferId("hold_abc", "post"),
 			});
@@ -275,6 +298,97 @@ describe("TrustTBClient", () => {
 			await expect(client.postTransfer(1n, 1, { transferId: bad })).rejects.toThrow(RangeError);
 			await expect(client.voidTransfer(1n, { transferId: bad })).rejects.toThrow(RangeError);
 			expect(mockCreateTransfers).not.toHaveBeenCalled();
+		});
+
+		// TigerBeetle reports plain `exists` for a post-pending REPLAY whose amount is >= the
+		// pending amount when the original post consumed it all — so `exists` alone does not
+		// prove the stored transfer is THIS intent. A caller-supplied id is verified against
+		// the stored transfer before `exists` counts as success.
+		const storedPost = (amount: bigint) => ({
+			id: post,
+			debit_account_id: 1n,
+			credit_account_id: 2n,
+			amount,
+			pending_id: held,
+			user_data_128: 0n,
+			user_data_64: 0n,
+			user_data_32: 0,
+			timeout: 0,
+			ledger: LEDGER_USERTOKENS,
+			code: XFER_SPEND,
+			flags: 2, // post_pending_transfer
+			timestamp: 1n,
+		});
+
+		it("REGRESSION: post 100, then replay the same id with 150 -> refused, not success", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]); // TB: plain `exists`
+			mockLookupTransfers.mockResolvedValueOnce([storedPost(100n)]);
+			await expect(client.postTransfer(held, 150, { transferId: post })).rejects.toThrow(
+				TransferReplayMismatchError,
+			);
+		});
+
+		it("an identical replay (same amount) is still success, after one lookup", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]);
+			mockLookupTransfers.mockResolvedValueOnce([storedPost(100n)]);
+			await expect(client.postTransfer(held, 100, { transferId: post })).resolves.toBe(post);
+			expect(mockLookupTransfers).toHaveBeenCalledTimes(1);
+		});
+
+		it("a replay that left the amount to TigerBeetle (amount_max) accepts the stored amount", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]);
+			mockLookupTransfers.mockResolvedValueOnce([storedPost(100n)]);
+			await expect(client.postTransfer(held, undefined, { transferId: post })).resolves.toBe(post);
+		});
+
+		it("a replay against a DIFFERENT pending transfer is refused", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]);
+			mockLookupTransfers.mockResolvedValueOnce([{ ...storedPost(100n), pending_id: 999n }]);
+			await expect(client.postTransfer(held, 100, { transferId: post })).rejects.toThrow(
+				TransferReplayMismatchError,
+			);
+		});
+
+		it("a replayed pending transfer is compared on amount, accounts and code", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]);
+			mockLookupTransfers.mockResolvedValueOnce([
+				{ ...storedPost(100n), id: held, pending_id: 0n, flags: 1, timeout: 300 },
+			]);
+			await expect(
+				client.createPendingTransfer({
+					debitAccountId: 1n,
+					creditAccountId: 2n,
+					amount: 120,
+					code: XFER_SPEND,
+					transferId: held,
+				}),
+			).rejects.toThrow(TransferReplayMismatchError);
+		});
+
+		it("`exists` with no stored transfer to compare is refused, never assumed", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]);
+			mockLookupTransfers.mockResolvedValueOnce([]);
+			await expect(client.postTransfer(held, 100, { transferId: post })).rejects.toThrow(
+				TransferReplayMismatchError,
+			);
+		});
+
+		it("a MINTED id's `exists` (a reconnect retry) needs no lookup — unchanged", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]);
+			await client.postTransfer(held, 100);
+			expect(mockLookupTransfers).not.toHaveBeenCalled();
+		});
+
+		it("id_already_failed on a caller-supplied id is a distinct, retired-id error", async () => {
+			// The first attempt under this derived (key, role) FAILED; TigerBeetle remembers,
+			// and every later attempt with the same id fails too. The caller must derive a
+			// new id (a new role), not retry.
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 68 }]);
+			const err = await client
+				.postTransfer(held, 100, { transferId: post })
+				.catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(TransferIdRetiredError);
+			expect(err).toBeInstanceOf(TBTransferError); // existing catch sites still match
 		});
 
 		it("omitting the id keeps minting a fresh one per call (unchanged behaviour)", async () => {

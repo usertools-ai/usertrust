@@ -177,7 +177,15 @@ caller derives from its own durable key — `TrustTBClient.deriveTransferId(key,
 prefix-free domain tag). A replay after a process restart then resubmits the SAME id, and `exists`
 means the earlier attempt of that intent committed. The caller's obligation is to replay with
 **identical fields** — a different amount under the same id is `exists_with_different_amount`,
-which still throws. Omitted, every call mints a fresh `tbId()` exactly as before. 0, negatives,
+which still throws. **`exists` is verified for a caller-supplied id:** TigerBeetle answers plain
+`exists` (not `exists_with_different_amount`) to a post-pending replay whose amount is >= the pending
+amount when the original post consumed it all, so the client looks the stored transfer up and
+compares every field the caller set (a field TigerBeetle inherits from the pending transfer is
+skipped); any difference is a `TransferReplayMismatchError`. **A failed id is retired:** once an
+id's first attempt fails, every later attempt answers `id_already_failed`
+(`TransferIdRetiredError`), so a derived `(key, role)` that failed can never succeed — derive a new
+role for a new attempt. Omitted, every call mints a fresh `tbId()` exactly as before, and a minted
+id's `exists` needs no lookup (its only replay is an identical reconnect retry). 0, negatives,
 2^128 − 1 (reserved by TigerBeetle) and anything wider than 128 bits are refused at the door with a
 `RangeError`, before the ledger is touched.
 *Two exceptions, both requiring `created`:* `createTreasury`, and `createFundedBudgetWallet`. The

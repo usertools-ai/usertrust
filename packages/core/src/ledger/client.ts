@@ -35,6 +35,43 @@ export class TBTransferError extends Error {
 	}
 }
 
+/**
+ * A caller-supplied transfer id was answered `exists`, but the STORED transfer is not the
+ * one this call describes. TigerBeetle reports plain `exists` (not
+ * `exists_with_different_amount`) for a post-pending replay whose amount is >= the pending
+ * amount when the original post consumed it all — so `exists` alone does not prove the
+ * replay is the same intent. `field` names the first difference. Extends TBTransferError so
+ * existing catch sites still match; `code` is `exists`.
+ */
+export class TransferReplayMismatchError extends TBTransferError {
+	constructor(
+		public readonly transferId: bigint,
+		public readonly field: string,
+	) {
+		super(
+			CreateTransferStatus.exists,
+			`Transfer ${transferId} exists with a different ${field}: a replay must resubmit the same intent`,
+		);
+		this.name = "TransferReplayMismatchError";
+	}
+}
+
+/**
+ * The FIRST attempt under this caller-supplied id failed (e.g. `exceeds_credits`), and
+ * TigerBeetle answers `id_already_failed` to every later attempt with the same id: a
+ * derived `(key, role)` is permanently retired once it fails. Retrying cannot succeed —
+ * the caller must derive a different id. Distinct from a transient failure on purpose.
+ */
+export class TransferIdRetiredError extends TBTransferError {
+	constructor(public readonly transferId: bigint) {
+		super(
+			CreateTransferStatus.id_already_failed,
+			`Transfer id ${transferId} is retired: its first attempt failed, and the same id can never succeed`,
+		);
+		this.name = "TransferIdRetiredError";
+	}
+}
+
 // Ledger ID: all usertokens live on ledger 1
 export const LEDGER_USERTOKENS = 1;
 
@@ -290,6 +327,15 @@ export class TrustTBClient {
 	 * UTF-8 byte-length-prefixed parts, sha256, first 16 BYTES big-endian. Pure and total; it
 	 * never validates or normalizes. The 2^-128-scale chance of a reserved value (0 or
 	 * 2^128 - 1) is refused at the door ({@link transferIdOrFresh}), not remapped here.
+	 *
+	 * Two consequences of a derived id, both enforced by the client:
+	 * - `exists` is VERIFIED against the stored transfer before it counts as success
+	 *   ({@link TransferReplayMismatchError}): TigerBeetle answers plain `exists` to some
+	 *   non-identical post-pending replays.
+	 * - An id whose FIRST attempt failed is retired for good: TigerBeetle answers
+	 *   `id_already_failed` to every later attempt, surfaced as {@link TransferIdRetiredError}.
+	 *   Retrying after, say, a top-up cannot succeed under the same `(key, role)` — derive a
+	 *   new role (e.g. `"post#2"`) for the new attempt.
 	 */
 	static deriveTransferId(key: string, role: string): bigint {
 		const k = Buffer.from(key, "utf8");
@@ -625,6 +671,58 @@ export class TrustTBClient {
 		return this.treasuryId;
 	}
 
+	/**
+	 * A caller-supplied id answered `exists`: confirm the STORED transfer is the one `submitted`
+	 * describes before treating it as success (see {@link TransferReplayMismatchError}). A
+	 * submitted field TigerBeetle fills in from the pending transfer (0 ids/ledger/code/user
+	 * data on a post or void, `amount_max` or 0 for the amount) is skipped; every other field
+	 * must match exactly. A minted id needs none of this: its only replay is a reconnect retry
+	 * of the identical transfer.
+	 */
+	private async assertReplayMatches(submitted: Transfer): Promise<void> {
+		const stored = await this.lookupTransfer(submitted.id);
+		if (!stored) throw new TransferReplayMismatchError(submitted.id, "record (none found)");
+		const resolvesPending =
+			(submitted.flags &
+				(TransferFlags.post_pending_transfer | TransferFlags.void_pending_transfer)) !==
+			0;
+		const inherited = (v: bigint | number) => resolvesPending && (v === 0n || v === 0);
+		const checks: Array<[string, bigint | number, bigint | number]> = [
+			["flags", submitted.flags, stored.flags],
+			["pending_id", submitted.pending_id, stored.pending_id],
+			["debit_account_id", submitted.debit_account_id, stored.debit_account_id],
+			["credit_account_id", submitted.credit_account_id, stored.credit_account_id],
+			["ledger", submitted.ledger, stored.ledger],
+			["code", submitted.code, stored.code],
+			["timeout", submitted.timeout, stored.timeout],
+			["user_data_128", submitted.user_data_128, stored.user_data_128],
+			["user_data_64", submitted.user_data_64, stored.user_data_64],
+			["user_data_32", submitted.user_data_32, stored.user_data_32],
+		];
+		for (const [field, want, got] of checks) {
+			if (inherited(want)) continue;
+			if (want !== got) throw new TransferReplayMismatchError(submitted.id, field);
+		}
+		// amount_max (post) and 0 (void) mean "whatever the pending transfer holds".
+		const amountInherited =
+			resolvesPending && (submitted.amount === amount_max || submitted.amount === 0n);
+		if (!amountInherited && submitted.amount !== stored.amount) {
+			throw new TransferReplayMismatchError(submitted.id, "amount");
+		}
+	}
+
+	/**
+	 * The shared `exists` / `id_already_failed` handling for a caller-supplied id. Returns
+	 * normally when the result is a verified success; throws otherwise. Callers keep their
+	 * own message for every other status.
+	 */
+	private async settleCallerSuppliedStatus(status: number, submitted: Transfer): Promise<void> {
+		if (status === CreateTransferStatus.id_already_failed) {
+			throw new TransferIdRetiredError(submitted.id);
+		}
+		if (status === CreateTransferStatus.exists) await this.assertReplayMatches(submitted);
+	}
+
 	async createPendingTransfer(p: {
 		debitAccountId: bigint;
 		creditAccountId: bigint;
@@ -658,6 +756,8 @@ export class TrustTBClient {
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
+			// A caller-supplied id: `exists` must be VERIFIED, and a retired id is its own error.
+			if (p.transferId !== undefined) await this.settleCallerSuppliedStatus(res.status, transfer);
 			// `exists` IS SUCCESS HERE. transferId is fixed above, OUTSIDE the
 			// withReconnect closure (minted, or supplied by a caller replaying a durable
 			// intent), so a retry or replay resubmits the same id; TigerBeetle
@@ -707,6 +807,9 @@ export class TrustTBClient {
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
+			// A caller-supplied id: `exists` must be VERIFIED, and a retired id is its own error.
+			if (opts?.transferId !== undefined)
+				await this.settleCallerSuppliedStatus(res.status, transfer);
 			// `exists` IS SUCCESS HERE. postId is fixed above, OUTSIDE the
 			// withReconnect closure (minted, or supplied by a caller replaying a durable
 			// intent), so a retry or replay resubmits the same id; TigerBeetle
@@ -752,6 +855,9 @@ export class TrustTBClient {
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
+			// A caller-supplied id: `exists` must be VERIFIED, and a retired id is its own error.
+			if (opts?.transferId !== undefined)
+				await this.settleCallerSuppliedStatus(res.status, transfer);
 			// `exists` IS SUCCESS HERE. voidId is fixed above, OUTSIDE the
 			// withReconnect closure (minted, or supplied by a caller replaying a durable
 			// intent), so a retry or replay resubmits the same id; TigerBeetle
