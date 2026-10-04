@@ -57,6 +57,26 @@ export class TransferReplayMismatchError extends TBTransferError {
 }
 
 /**
+ * A caller-supplied PENDING transfer id was answered `exists` (fields verified): this is a
+ * replay, and it must never be read as "reserved". A pending transfer's stored record is
+ * immutable — posting, voiding or expiring the hold changes nothing on the row TigerBeetle
+ * returns — so the client cannot tell a live hold from one already spent, released or
+ * expired. Treating the replay as a live reservation is an overspend path. The caller
+ * re-reserves under a NEW id (a new role, e.g. `"reserve#2"`) or denies; if it still holds
+ * the old id it may void it, which fails harmlessly when the hold is no longer pending.
+ * Extends TBTransferError so existing catch sites still match; `code` is `exists`.
+ */
+export class PendingReplayError extends TBTransferError {
+	constructor(public readonly transferId: bigint) {
+		super(
+			CreateTransferStatus.exists,
+			`Pending transfer ${transferId} already exists: a replayed reservation is not a live hold — reserve under a new id`,
+		);
+		this.name = "PendingReplayError";
+	}
+}
+
+/**
  * The FIRST attempt under this caller-supplied id failed (e.g. `exceeds_credits`), and
  * TigerBeetle answers `id_already_failed` to every later attempt with the same id: a
  * derived `(key, role)` is permanently retired once it fails. Retrying cannot succeed —
@@ -328,10 +348,13 @@ export class TrustTBClient {
 	 * never validates or normalizes. The 2^-128-scale chance of a reserved value (0 or
 	 * 2^128 - 1) is refused at the door ({@link transferIdOrFresh}), not remapped here.
 	 *
-	 * Two consequences of a derived id, both enforced by the client:
+	 * Three consequences of a derived id, all enforced by the client:
 	 * - `exists` is VERIFIED against the stored transfer before it counts as success
 	 *   ({@link TransferReplayMismatchError}): TigerBeetle answers plain `exists` to some
 	 *   non-identical post-pending replays.
+	 * - A replayed PENDING transfer is never "reserved" ({@link PendingReplayError}): its
+	 *   stored record cannot say whether the hold is still live. Re-reserve under a new role
+	 *   or deny. Post and void replays are unaffected.
 	 * - An id whose FIRST attempt failed is retired for good: TigerBeetle answers
 	 *   `id_already_failed` to every later attempt, surfaced as {@link TransferIdRetiredError}.
 	 *   Retrying after, say, a top-up cannot succeed under the same `(key, role)` — derive a
@@ -757,7 +780,14 @@ export class TrustTBClient {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
 			// A caller-supplied id: `exists` must be VERIFIED, and a retired id is its own error.
-			if (p.transferId !== undefined) await this.settleCallerSuppliedStatus(res.status, transfer);
+			if (p.transferId !== undefined) {
+				await this.settleCallerSuppliedStatus(res.status, transfer);
+				// Verified, and still a REPLAY: a pending record cannot say whether the hold is
+				// live, spent, released or expired, so it is never reported as reserved.
+				if (res.status === CreateTransferStatus.exists) {
+					throw new PendingReplayError(transferId);
+				}
+			}
 			// `exists` IS SUCCESS HERE. transferId is fixed above, OUTSIDE the
 			// withReconnect closure (minted, or supplied by a caller replaying a durable
 			// intent), so a retry or replay resubmits the same id; TigerBeetle

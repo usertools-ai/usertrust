@@ -184,8 +184,16 @@ compares every field the caller set (a field TigerBeetle inherits from the pendi
 skipped); any difference is a `TransferReplayMismatchError`. **A failed id is retired:** once an
 id's first attempt fails, every later attempt answers `id_already_failed`
 (`TransferIdRetiredError`), so a derived `(key, role)` that failed can never succeed — derive a new
-role for a new attempt. Omitted, every call mints a fresh `tbId()` exactly as before, and a minted
-id's `exists` needs no lookup (its only replay is an identical reconnect retry). 0, negatives,
+role for a new attempt. **A pending replay is never a reservation:** a pending transfer's stored
+record is immutable — posting, voiding or expiring the hold changes nothing on the row TigerBeetle
+returns — so a verified `exists` for a caller-supplied PENDING id cannot tell a live hold from one
+already spent, released or expired. `createPendingTransfer` throws `PendingReplayError` instead of
+returning the id; the caller re-reserves under a new role (e.g. `"reserve#2"`) or denies, and may
+void the old id if it holds it (that void fails harmlessly once the hold is no longer pending).
+Reporting it as reserved would be an overspend path. Post and void replays are unaffected. All three
+error types are exported from the package entry. Omitted, every call mints a fresh `tbId()` exactly
+as before, and a minted id's `exists` needs no lookup (its only replay is an identical reconnect
+retry). 0, negatives,
 2^128 − 1 (reserved by TigerBeetle) and anything wider than 128 bits are refused at the door with a
 `RangeError`, before the ledger is touched.
 *Two exceptions, both requiring `created`:* `createTreasury`, and `createFundedBudgetWallet`. The

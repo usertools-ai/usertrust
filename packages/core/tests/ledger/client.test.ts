@@ -75,6 +75,7 @@ import {
 	CODE_PLATFORM_TREASURY,
 	CODE_USER_WALLET,
 	LEDGER_USERTOKENS,
+	PendingReplayError,
 	TBTransferError,
 	TransferIdRetiredError,
 	TransferReplayMismatchError,
@@ -371,6 +372,63 @@ describe("TrustTBClient", () => {
 			await expect(client.postTransfer(held, 100, { transferId: post })).rejects.toThrow(
 				TransferReplayMismatchError,
 			);
+		});
+
+		// A PENDING replay can never mean "reserved". A pending transfer's stored record is
+		// immutable — posting, voiding or expiring it changes nothing on the row TigerBeetle
+		// returns — so a verified `exists` cannot tell a live hold from a spent or released one.
+		// Every one of these is the SAME observation to the client, and each must throw.
+		const storedPending = () => ({
+			id: held,
+			debit_account_id: 1n,
+			credit_account_id: 2n,
+			amount: 100n,
+			pending_id: 0n,
+			user_data_128: 0n,
+			user_data_64: 0n,
+			user_data_32: 0,
+			timeout: 300,
+			ledger: LEDGER_USERTOKENS,
+			code: XFER_SPEND,
+			flags: 1, // pending
+			timestamp: 1n,
+		});
+		const replayPending = () =>
+			client.createPendingTransfer({
+				debitAccountId: 1n,
+				creditAccountId: 2n,
+				amount: 100,
+				code: XFER_SPEND,
+				transferId: held,
+			});
+		it.each([
+			["immediately (the hold may still be live)"],
+			["after the hold EXPIRED (nothing is held)"],
+			["after the hold was POSTED (the money is spent)"],
+			["after the hold was VOIDED (the money was released)"],
+		])("a pending replay %s throws PendingReplayError — never 'reserved'", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]); // exists
+			mockLookupTransfers.mockResolvedValueOnce([storedPending()]); // fields match
+			const err = await replayPending().catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(PendingReplayError);
+			expect(err).toBeInstanceOf(TBTransferError); // existing catch sites still match
+		});
+
+		it("a pending replay with DIFFERENT terms is still a mismatch, not a replay", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]);
+			mockLookupTransfers.mockResolvedValueOnce([{ ...storedPending(), amount: 90n }]);
+			await expect(replayPending()).rejects.toThrow(TransferReplayMismatchError);
+		});
+
+		it("post and void replays are unchanged: a verified `exists` is still success", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]);
+			mockLookupTransfers.mockResolvedValueOnce([storedPost(100n)]);
+			await expect(client.postTransfer(held, 100, { transferId: post })).resolves.toBe(post);
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]);
+			mockLookupTransfers.mockResolvedValueOnce([
+				{ ...storedPost(100n), id: voidId, flags: 4 }, // void_pending_transfer
+			]);
+			await expect(client.voidTransfer(held, { transferId: voidId })).resolves.toBe(voidId);
 		});
 
 		it("a MINTED id's `exists` (a reconnect retry) needs no lookup — unchanged", async () => {
