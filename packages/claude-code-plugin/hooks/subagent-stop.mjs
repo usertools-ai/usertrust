@@ -1,5 +1,6 @@
-// SubagentStop: post the stopping subagent's remaining transcript usage, then
-// terminate the holds belonging to that subagent — and ONLY that subagent's.
+// SubagentStop: settle the stopping subagent's leftover holds that carry usage,
+// post its remaining transcript usage (unresolved settles first), then give back
+// its holds that carry none — that subagent's, and ONLY that subagent's.
 //
 // session_id is shared across the parent and all subagents, so a whole-session
 // sweep here would touch the parent's and sibling subagents' in-flight holds.
@@ -8,15 +9,18 @@
 // "main" bucket: giving back a still-running agent's hold is worse than an
 // orphan, and PostToolUse settles / the Stop sweep (which also posts every
 // subagent's remainder) / the server's pending-TTL sweep are the backstops.
-// Leftover holds follow Stop's rule: settled if usage was assigned, else given back.
+// Leftover holds follow Stop's rule and order: settled first if usage was
+// assigned (an unresolved one is then retried by the remainder step), else given
+// back last.
 import { cleanup, readStdin, usageMode } from "./lib.mjs";
-import { LEFTOVER_RESERVE_MS, postRemainder, settleAssignedHolds } from "./transcript.mjs";
+import { CLEANUP_RESERVE_MS, postRemainder, settleAssignedHolds } from "./transcript.mjs";
 
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
 	const sessionId = input.session_id ?? "unknown";
 	const agentId = input.agent_id;
 	if (typeof agentId === "string" && agentId !== "") {
+		await settleAssignedHolds(sessionId, agentId);
 		if (usageMode() === "transcript") {
 			try {
 				const result = await postRemainder({
@@ -25,7 +29,7 @@ try {
 					agentTypeHint: input.agent_type,
 					input,
 					hook: "SubagentStop",
-					reserveMs: LEFTOVER_RESERVE_MS,
+					reserveMs: CLEANUP_RESERVE_MS,
 				});
 				if (result.skipped !== undefined) {
 					process.stderr.write(
@@ -41,7 +45,6 @@ try {
 				);
 			}
 		}
-		await settleAssignedHolds(sessionId, agentId);
 		await cleanup(sessionId, agentId);
 	} else {
 		process.stderr.write(

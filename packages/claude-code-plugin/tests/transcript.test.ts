@@ -12,6 +12,7 @@
 // PostToolUse SETTLES it at their counts — no abort on the normal path. What no
 // hold picked up is posted by Stop/SubagentStop, one authorize→settle per model.
 
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	appendFile,
@@ -21,12 +22,14 @@ import {
 	readdir,
 	readFile,
 	rm,
+	stat,
 	utimes,
 	writeFile,
 } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hashKey } from "../../server/src/config.js";
 import { createUsertrustServer, type UsertrustServer } from "../../server/src/server.js";
@@ -70,8 +73,8 @@ let real: UsertrustServer | undefined;
 let port: number;
 let requests: Recorded[];
 let delayMs: number;
-/** What the fake server's /v1/health publishes: none, an older server, unless a test says. */
-let capabilities: string[];
+/** What the fake server's /v1/health publishes: none, an older server, unless a test says. Null: health fails. */
+let capabilities: string[] | null;
 
 type Responder = (path: string, body: Record<string, unknown>) => { status: number; json: unknown };
 
@@ -143,7 +146,11 @@ function startServer(responder: Responder | { forwardTo: string; key: string }):
 async function health(
 	responder: Responder | { forwardTo: string; key: string },
 ): Promise<{ status: number; json: unknown }> {
-	if (typeof responder === "function") return { status: 200, json: { status: "ok", capabilities } };
+	if (typeof responder === "function") {
+		return capabilities === null
+			? { status: 503, json: { error: "unavailable" } }
+			: { status: 200, json: { status: "ok", capabilities } };
+	}
 	const r = await fetch(`${responder.forwardTo}/v1/health`);
 	return { status: r.status, json: await r.json() };
 }
@@ -684,6 +691,23 @@ describe("idempotency and concurrency", () => {
 			"claims",
 		]);
 	});
+
+	it("a stale lock is reclaimed ONCE: a late reclaimer never removes its replacement, and two at once never both win", async () => {
+		// The interleavings need one process (tests/helpers/lock-probe.mjs): whole
+		// hook processes cannot be made to hit them.
+		const dir = await mkdtemp(join(tmpdir(), "utcc-tx-lock-"));
+		const { stdout } = await promisify(execFile)(process.execPath, [
+			join(import.meta.dirname, "helpers", "lock-probe.mjs"),
+			dir,
+		]);
+		expect(JSON.parse(stdout)).toEqual({
+			first: true,
+			late: false,
+			ownerAfterLate: "A",
+			bothWon: 0,
+			noneWon: 0,
+		});
+	});
 });
 
 describe("hardening", () => {
@@ -1133,8 +1157,9 @@ describe("with a server that honours keys, principal and release (usertrust #205
 		await run("pre-tool-use.mjs", preInput("tu_1"));
 		const post = await run("post-tool-use.mjs", postInput("tu_1"));
 		expect(post.stderr).toContain("unresolved");
-		// No hygiene release: the retry needs the hold, if the server still has it.
-		expect(releases()).toHaveLength(0);
+		expect(post.stderr).toContain("NOT recorded yet");
+		// Given back for hygiene, never aborted: the retry authorizes afresh.
+		expect(releases().map((r) => r.body.transferId)).toEqual(["tx_1"]);
 		expect(aborts()).toHaveLength(0);
 		const parked = (await readCursor()) as CursorV2;
 		expect(parked.accounted).toEqual([]);
@@ -1155,7 +1180,7 @@ describe("with a server that honours keys, principal and release (usertrust #205
 		expect(requests).toHaveLength(before);
 	});
 
-	it("a settle that failed BEFORE posting: the retry gets the same hold back by its key and charges it once", async () => {
+	it("a settle that failed BEFORE posting: given back, then charged once under its key by the retry", async () => {
 		const server = keyedServer();
 		server.faults.set("tx_1", "500-before-post");
 		await startServer(server.responder);
@@ -1163,14 +1188,14 @@ describe("with a server that honours keys, principal and release (usertrust #205
 		await run("pre-tool-use.mjs", preInput("tu_1"));
 		await run("post-tool-use.mjs", postInput("tu_1"));
 		expect(server.charges).toHaveLength(0);
+		expect(releases().map((r) => r.body.transferId)).toEqual(["tx_1"]);
 		await run("stop.mjs", stopInput());
-		expect(transferOf(authorizes().at(-1))).toBe("tx_1");
 		expect(settles().map((s) => [s.body.transferId, s.status])).toEqual([
 			["tx_1", 500],
-			["tx_1", 200],
+			["tx_2", 200],
 		]);
 		expect(server.charges).toEqual([
-			{ key: keyOf("main", ["msg_a"]), transferId: "tx_1", inputTokens: 5 },
+			{ key: keyOf("main", ["msg_a"]), transferId: "tx_2", inputTokens: 5 },
 		]);
 		expect((await readCursor()).accounted).toEqual(["msg_a"]);
 	});
@@ -1245,13 +1270,13 @@ describe("with a server that honours keys, principal and release (usertrust #205
 		server.authorizeFault.status = 503;
 		await run("stop.mjs", stopInput());
 		expect(Object.keys(((await readCursor()) as CursorV2).unresolved)).toEqual([key]);
-		// It answers again, hands the live hold back, and rejects the retry's settle.
+		// It answers again, and rejects the retry's settle.
 		server.authorizeFault.status = null;
-		server.faults.set("tx_1", "400");
+		server.faults.set("tx_2", "400");
 		await run("stop.mjs", stopInput());
 		expect(settles().map((r) => [r.body.transferId, r.status])).toEqual([
 			["tx_1", 500],
-			["tx_1", 400],
+			["tx_2", 400],
 		]);
 		const parked = (await readCursor()) as CursorV2;
 		expect(Object.keys(parked.unresolved)).toEqual([key]);
@@ -1361,6 +1386,140 @@ describe("with a server that honours keys, principal and release (usertrust #205
 		expect(releases().map((r) => r.body)).toEqual([
 			{ transferId: "tx_1", reason: "session ended with unsettled hold" },
 		]);
+	});
+});
+
+describe("state that is lost, slow or unwritable", () => {
+	it("a REMOVED cursor re-posts nothing: this agent's claims say what it already posted", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(4, 4)));
+		await run("stop.mjs", stopInput());
+		await rm(cursorPath());
+		await appendMain(responseEntries("msg_b", SONNET, u(5, 5)));
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([4, 5]);
+		expect((await readCursor()).accounted.sort()).toEqual(["msg_a", "msg_b"]);
+	});
+
+	it("a message whose claim cannot be made is NOT posted, says so, and posts once it can", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(4, 4)));
+		await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
+		// Not a directory: every claim under it fails.
+		await writeFile(join(stateDir, "transcripts", "claims"), "");
+		const stop = await run("stop.mjs", stopInput());
+		expect(stop.stderr).toContain("could not be claimed");
+		expect(stop.stderr).toContain("NOT posted");
+		expect(settles()).toHaveLength(0);
+		await rm(join(stateDir, "transcripts", "claims"));
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([4]);
+	});
+
+	it("an unkeyed 200 whose receipt says settled: false is claimed, and says the usage may be unrecorded", async () => {
+		await startServer((path, body) =>
+			path === "/v1/settle" ? { status: 200, json: { settled: false } } : okResponder(path, body),
+		);
+		await writeMain(responseEntries("msg_a", SONNET, u(4, 4)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		const post = await run("post-tool-use.mjs", postInput("tu_1"));
+		expect(post.stderr).toContain("claimed");
+		expect(post.stderr).toContain("may be unrecorded");
+		// The hold is spent: nothing to give back.
+		expect(aborts()).toHaveLength(0);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+	});
+
+	it("capabilities UNKNOWN (health fails): no key, no principal — and the hook says so", async () => {
+		capabilities = null;
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(4, 4)));
+		const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
+		expect(pre.code).toBe(0);
+		expect(pre.stderr).toContain("capabilities are unknown");
+		expect(authorizes()[0]?.body).not.toHaveProperty("idempotencyKey");
+		expect(authorizes()[0]?.body).not.toHaveProperty("principal");
+	});
+
+	it("a settling hold's age is the settle's, not the hold's: a long tool never reads as a dead settle", async () => {
+		capabilities = [...ALL_CAPABILITIES];
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(4, 4)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		// The tool ran for 11 minutes.
+		const hold = join(stateDir, `${SESSION}__main__tu_1.json`);
+		const old = new Date(Date.now() - 11 * 60_000);
+		await utimes(hold, old, old);
+		delayMs = 1_500;
+		const posting = run("post-tool-use.mjs", postInput("tu_1"));
+		const settling = join(stateDir, `${SESSION}__main__tu_1.settling`);
+		let age = Number.NaN;
+		for (let i = 0; i < 100 && Number.isNaN(age); i += 1) {
+			age = await stat(settling).then(
+				(info) => Date.now() - info.mtimeMs,
+				() => Number.NaN,
+			);
+			if (Number.isNaN(age)) await new Promise((r) => setTimeout(r, 20));
+		}
+		expect(age).toBeLessThan(60_000);
+		expect((await posting).code).toBe(0);
+	});
+
+	it("a keyed remainder is parked as unresolved BEFORE its call: a hook killed mid-call leaves it to be retried", async () => {
+		capabilities = [...ALL_CAPABILITIES];
+		const server = keyedServer();
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(4, 4)));
+		delayMs = 1_500;
+		const stopping = run("stop.mjs", stopInput());
+		let parked: string[] = [];
+		for (let i = 0; i < 100 && parked.length === 0; i += 1) {
+			parked = await readFile(cursorPath(), "utf-8").then(
+				(text) => Object.keys((JSON.parse(text) as CursorV2).unresolved ?? {}),
+				() => [],
+			);
+			if (parked.length === 0) await new Promise((r) => setTimeout(r, 20));
+		}
+		expect(parked).toEqual([keyOf("main", ["msg_a"])]);
+		await stopping;
+		// And once the call returns, the vehicle is done.
+		expect(((await readCursor()) as CursorV2).unresolved).toEqual({});
+		expect(server.charges).toHaveLength(1);
+	});
+
+	it("Stop settles a leftover hold FIRST, so an unresolved one is retried by that same Stop", async () => {
+		capabilities = [...ALL_CAPABILITIES];
+		const server = keyedServer();
+		server.faults.set("tx_1", "post-then-500");
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(4, 4)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		// The tool was interrupted: no PostToolUse. One Stop settles and resolves it.
+		await run("stop.mjs", stopInput());
+		expect(server.charges).toHaveLength(1);
+		const cursor = (await readCursor()) as CursorV2;
+		expect(cursor.unresolved).toEqual({});
+		expect(cursor.accounted).toEqual(["msg_a"]);
+	});
+
+	it("an already-settled window is journalled before the cursor: the record survives a failed cursor write", async () => {
+		capabilities = [...ALL_CAPABILITIES];
+		const server = keyedServer();
+		server.charged.add(keyOf("main", ["msg_a"]));
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		const journal = (await readdir(stateDir)).filter((n) => n.endsWith(".done"));
+		expect(journal).toHaveLength(1);
+		expect(JSON.parse(await readFile(join(stateDir, journal[0] ?? ""), "utf-8"))).toMatchObject({
+			agentId: "main",
+			assignedIds: ["msg_a"],
+			outcome: "settled",
+		});
+		// The next lock holder applies and removes it.
+		await run("stop.mjs", stopInput());
+		expect((await readdir(stateDir)).filter((n) => n.endsWith(".done"))).toEqual([]);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
 	});
 });
 

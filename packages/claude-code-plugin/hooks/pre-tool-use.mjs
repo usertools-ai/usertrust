@@ -36,6 +36,7 @@ import {
 	releaseHold,
 	serverCapabilities,
 	serverRequest,
+	timeLeft,
 } from "./lib.mjs";
 import { holdInputTokens, prepareWindow, safeName } from "./transcript.mjs";
 
@@ -83,37 +84,47 @@ try {
 	try {
 		const transcriptMode = prepared.mode === "transcript";
 		// What the server honours decides what this hold may carry (see lib.mjs).
-		const capabilities = transcriptMode ? await serverCapabilities() : new Set();
-		const keyed = capabilities.has("idempotency-key");
-		const principal =
-			transcriptMode && capabilities.has("principal") ? prepared.principal : undefined;
+		// Unknown (a failed probe) reads as absent here: a key is sent only to a server
+		// known to honour it.
+		const capabilities = transcriptMode ? await serverCapabilities() : null;
+		const keyed = capabilities?.has("idempotency-key") ?? false;
+		const principal = capabilities?.has("principal") ? prepared.principal : undefined;
 		let window = transcriptMode ? prepared.window : null;
 		const fallbackModel = prepared.lastModel ?? process.env.UT_CC_MODEL ?? "claude-sonnet-4-6";
+		// Never past the hook's own budget: a hook killed mid-call leaves the tool
+		// ungoverned and this agent's lock held.
+		const callTimeout = () => Math.min(5_000, timeLeft() - 500);
 		const authorize = () =>
-			serverRequest("/v1/authorize", {
-				model: window?.model ?? fallbackModel,
-				// Both legs: a 1-token output hold under-debited every large tool result
-				// because settle prices the whole response (AUD-004). A window's usage is
-				// ADDED, so the pre-call budget check still covers the upcoming tool.
-				estimatedInputTokens: estimatedInputTokens + (window ? holdInputTokens(window.counts) : 0),
-				maxOutputTokens: MAX_OUTPUT_TOKENS + (window ? Math.max(1, window.counts.outputTokens) : 0),
-				params: window
-					? {
-							hook: "PreToolUse",
-							tool_name: input.tool_name ?? "unknown",
-							usageOrigin: "transcript",
-							agent_id: agentId,
-							agent_type: prepared.agentType,
-							messages: window.ids.length,
-						}
-					: { hook: "PreToolUse", tool_name: input.tool_name ?? "unknown" },
-				actor: window
-					? `claude-code:${sessionId}:${prepared.agentType}:${safeName(agentId, "main")}`
-					: `claude-code:${sessionId}`,
-				messages: [{ role: "user", content }],
-				...(window && keyed ? { idempotencyKey: prepared.key } : {}),
-				...(principal === undefined ? {} : { principal }),
-			});
+			serverRequest(
+				"/v1/authorize",
+				{
+					model: window?.model ?? fallbackModel,
+					// Both legs: a 1-token output hold under-debited every large tool result
+					// because settle prices the whole response (AUD-004). A window's usage is
+					// ADDED, so the pre-call budget check still covers the upcoming tool.
+					estimatedInputTokens:
+						estimatedInputTokens + (window ? holdInputTokens(window.counts) : 0),
+					maxOutputTokens:
+						MAX_OUTPUT_TOKENS + (window ? Math.max(1, window.counts.outputTokens) : 0),
+					params: window
+						? {
+								hook: "PreToolUse",
+								tool_name: input.tool_name ?? "unknown",
+								usageOrigin: "transcript",
+								agent_id: agentId,
+								agent_type: prepared.agentType,
+								messages: window.ids.length,
+							}
+						: { hook: "PreToolUse", tool_name: input.tool_name ?? "unknown" },
+					actor: window
+						? `claude-code:${sessionId}:${prepared.agentType}:${safeName(agentId, "main")}`
+						: `claude-code:${sessionId}`,
+					messages: [{ role: "user", content }],
+					...(window && keyed ? { idempotencyKey: prepared.key } : {}),
+					...(principal === undefined ? {} : { principal }),
+				},
+				{ timeoutMs: callTimeout() },
+			);
 		let response = await authorize();
 		if (window && keyed && isAlreadySettled(response)) {
 			// An earlier settle of exactly this window landed, though the cursor never
@@ -155,7 +166,13 @@ try {
 				});
 			} catch (err) {
 				// Unrecorded, the hold could never be settled: give it back now.
-				await releaseHold(json.transferId, "pending hold could not be recorded").catch(() => {});
+				await releaseHold(json.transferId, "pending hold could not be recorded", {
+					timeoutMs: Math.max(250, callTimeout()),
+				}).catch((giveBack) => {
+					process.stderr.write(
+						`usertrust: hold ${json.transferId} could not be given back (${giveBack instanceof Error ? giveBack.message : String(giveBack)}); the server's TTL sweep releases it\n`,
+					);
+				});
 				throw err;
 			}
 			await prepared.commit?.(json.transferId);

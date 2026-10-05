@@ -27,7 +27,7 @@ import {
 	takePendingEntry,
 	usageMode,
 } from "./lib.mjs";
-import { estimateReasonFor, settleTranscriptHold } from "./transcript.mjs";
+import { estimateReasonFor, OUTCOME_NOTES, settleTranscriptHold } from "./transcript.mjs";
 
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
@@ -39,7 +39,7 @@ try {
 		const result = await settleTranscriptHold(sessionId, entry);
 		if (result.outcome !== "settled" && result.outcome !== "returned") {
 			process.stderr.write(
-				`usertrust: transcript hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}\n`,
+				`usertrust: transcript hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}\n`,
 			);
 		}
 	} else if (entry) {

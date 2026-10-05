@@ -18,7 +18,7 @@
 // it and their counts; transcript.mjs journals its outcome beside it
 // (<hold>.settling, <hold>.done), names listPending never returns.
 import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 export class TransportError extends Error {
@@ -52,8 +52,18 @@ export const MAX_CONTENT_CHARS = 16 * 1024;
 // (AUD-004). Leaving this at 1 under-debited the wallet on every large result.
 export const MAX_OUTPUT_TOKENS = estimateTokens("x".repeat(MAX_CONTENT_CHARS));
 
+/**
+ * Where the plugin keeps its state: pending holds, and the transcript cursors and
+ * message claims that say what was already posted. DURABLE on purpose, beside
+ * Claude Code's own data (its transcripts live in the same config dir): state lost
+ * while its transcripts survive would be read as "nothing posted yet". A temp dir
+ * is not durable — macOS purges files untouched for three days.
+ */
 export function stateRoot() {
-	return process.env.UT_CC_STATE_DIR ?? join(tmpdir(), "usertrust-cc");
+	return (
+		process.env.UT_CC_STATE_DIR ??
+		join(process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"), "usertrust-cc")
+	);
 }
 
 const stateDir = stateRoot;
@@ -252,10 +262,13 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 let capabilitiesRead;
 
 /**
- * The server's published capabilities (`/v1/health` `capabilities`), read once per
- * hook process; an empty set for a server that publishes none, or cannot be
- * reached. Never cached on disk: a cache could still claim keys after the server
- * was downgraded to one that strips them.
+ * What the server honours (`/v1/health` `capabilities`), read once per hook
+ * process. Never cached on disk: a cache could still claim keys after the server
+ * was downgraded to one that strips them. Resolves to a Set — empty for an older
+ * server, which publishes none — or to null when it is UNKNOWN: the probe failed
+ * or ran out of time (noted on stderr, once). Unknown is not absent: a caller must
+ * not send a key it cannot know is honoured, and must not treat a server that can
+ * release as one that cannot (its abort would count as a breaker failure).
  *
  * WHY THIS GATES ANYTHING: an older usertrust-server's schemas STRIP request keys
  * they do not know. It would accept an `idempotencyKey` and drop it in silence —
@@ -264,22 +277,39 @@ let capabilitiesRead;
 export function serverCapabilities() {
 	capabilitiesRead ??= (async () => {
 		const base = process.env.UT_SERVER_URL ?? "http://127.0.0.1:4519";
-		const timeoutMs = Math.min(1_000, timeLeft());
-		if (!(timeoutMs > 0)) return new Set();
+		const timeoutMs = Math.min(2_000, timeLeft());
+		const unknown = (why) => {
+			process.stderr.write(
+				`usertrust: the server's capabilities are unknown (${why}) — this hook sends no idempotency key or principal\n`,
+			);
+			return null;
+		};
+		if (!(timeoutMs > 0)) return unknown("hook time budget spent");
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), timeoutMs);
 		try {
 			const response = await fetch(`${base}/v1/health`, { signal: controller.signal });
+			if (!response.ok) return unknown(`health returned ${response.status}`);
 			const json = await response.json();
 			const list = Array.isArray(json?.capabilities) ? json.capabilities : [];
 			return new Set(list.filter((c) => typeof c === "string"));
-		} catch {
-			return new Set();
+		} catch (err) {
+			return unknown(err instanceof Error ? err.message : String(err));
 		} finally {
 			clearTimeout(timeout);
 		}
 	})();
 	return capabilitiesRead;
+}
+
+/** True only when the server published the capability; unknown reads as false. */
+export async function serverHonours(capability) {
+	return (await serverCapabilities())?.has(capability) ?? false;
+}
+
+/** A server's answer that it has no such route at all: an older server, not a refusal. */
+export function isUnknownRoute(response) {
+	return response.status === 404 && response.json?.reason === "unknown route";
 }
 
 /**
@@ -294,19 +324,21 @@ export function isAlreadySettled(response) {
 /**
  * Give a hold back WITHOUT calling it a failure: `/v1/release` on a server that
  * has it, so a hold that simply was not needed records no breaker failure and no
- * `llm_call_failed` (usertrust #204). An older server has only `/v1/abort`.
+ * `llm_call_failed` (usertrust #204). An older server has only `/v1/abort`. With
+ * the capabilities unknown, release is tried first: only a server that answers it
+ * has no such route gets the abort.
  */
 export async function releaseHold(transferId, reason, { timeoutMs = 5000 } = {}) {
 	const capabilities = await serverCapabilities();
-	return capabilities.has("release")
-		? {
-				route: "release",
-				...(await serverRequest("/v1/release", { transferId, reason }, { timeoutMs })),
-			}
-		: {
-				route: "abort",
-				...(await serverRequest("/v1/abort", { transferId, error: reason }, { timeoutMs })),
-			};
+	if (capabilities === null || capabilities.has("release")) {
+		const released = await serverRequest("/v1/release", { transferId, reason }, { timeoutMs });
+		if (capabilities !== null || !isUnknownRoute(released))
+			return { route: "release", ...released };
+	}
+	return {
+		route: "abort",
+		...(await serverRequest("/v1/abort", { transferId, error: reason }, { timeoutMs })),
+	};
 }
 
 /**

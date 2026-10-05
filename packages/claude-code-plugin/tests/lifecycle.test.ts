@@ -278,13 +278,47 @@ describe("stop.mjs aborts every hold across all agents", () => {
 	});
 
 	it("logs non-200 abort responses to stderr but still exits 0 and clears state", async () => {
-		await startFake(() => ({ status: 500, json: { error: "internal" } }));
+		// An older server: health answers without capabilities, everything else fails.
+		await startFake((path) =>
+			path === "/v1/health"
+				? { status: 200, json: { ok: true } }
+				: { status: 500, json: { error: "internal" } },
+		);
 		await seedState("s3", "main", [{ toolUseId: "a", transferId: "tx_a" }]);
 		const result = await run("stop.mjs", { session_id: "s3" });
 		expect(result.code).toBe(0);
 		expect(result.stderr).toContain("abort");
 		expect(result.stderr).toContain("500");
 		expect(await readdir(stateDir)).toEqual([]);
+	});
+
+	it("capabilities UNKNOWN (health fails): a hold is released, never aborted — an abort counts as a breaker failure", async () => {
+		await startFake((path) =>
+			path === "/v1/health"
+				? { status: 503, json: { error: "unavailable" } }
+				: { status: 200, json: { released: true } },
+		);
+		await seedState("s4", "main", [{ toolUseId: "a", transferId: "tx_a" }]);
+		const result = await run("stop.mjs", { session_id: "s4" });
+		expect(result.code).toBe(0);
+		expect(result.stderr).toContain("capabilities are unknown");
+		const paths = requests.map((r) => r.path).filter((p) => p !== "/v1/health");
+		expect(paths).toEqual(["/v1/release"]);
+	});
+
+	it("capabilities UNKNOWN and no release route — an older server: falls back to abort", async () => {
+		await startFake((path) =>
+			path === "/v1/health"
+				? { status: 503, json: { error: "unavailable" } }
+				: path === "/v1/release"
+					? { status: 404, json: { error: "not_found", reason: "unknown route" } }
+					: { status: 200, json: { aborted: true } },
+		);
+		await seedState("s5", "main", [{ toolUseId: "a", transferId: "tx_a" }]);
+		const result = await run("stop.mjs", { session_id: "s5" });
+		expect(result.code).toBe(0);
+		const paths = requests.map((r) => r.path).filter((p) => p !== "/v1/health");
+		expect(paths).toEqual(["/v1/release", "/v1/abort"]);
 	});
 });
 

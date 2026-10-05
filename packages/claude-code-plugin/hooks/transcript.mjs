@@ -48,8 +48,8 @@
 // INVARIANTS:
 //  1. Every hold is terminated EXACTLY ONCE: settled when usage was assigned to
 //     it, given back when none was. A failed settle's hold is given back for
-//     hygiene, except an unresolved one, which its retry gets back by its key
-//     (or the server's TTL sweep releases).
+//     hygiene (the server's TTL sweep is the backstop). An unresolved vehicle's
+//     retry is a new authorize under its key, not the old hold.
 //  2. Every transcript message id is posted AT MOST ONCE. Across agents: the
 //     first agent to CLAIM an id (`selectOwn`) is the only one that posts it.
 //     Within the agent: an id is assigned to one hold (and settled with it),
@@ -99,12 +99,14 @@ import {
 	rm,
 	stat,
 	unlink,
+	utimes,
 	writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
 	clearPending,
 	isAlreadySettled,
+	isUnknownRoute,
 	listPending,
 	releaseHold,
 	sanitize,
@@ -139,8 +141,10 @@ const ID_HISTORY = 10_000;
 const MAX_ID_CHARS = 256;
 const CALL_TIMEOUT_MS = 3_000;
 const MIN_CALL_MS = 250;
-/** Stop/SubagentStop keep this much of the budget for settling leftover holds. */
-export const LEFTOVER_RESERVE_MS = 3_000;
+/** Stop/SubagentStop keep this much of the budget for giving back holds without usage. */
+export const CLEANUP_RESERVE_MS = 3_000;
+/** Claiming new message ids stops while less than this is left of the hook's budget. */
+const CLAIM_FLOOR_MS = 6_000;
 
 const AUTHORIZING = "authorizing";
 const REMAINDER = "remainder";
@@ -496,9 +500,9 @@ function denyIds(cursor, ids) {
 
 /**
  * Exclusive per-(session, agent) lock: an atomic mkdir holding an ownership
- * token. A lock older than STALE_LOCK_MS is reclaimed by renaming it aside —
- * only one rename can win — and released only by the holder whose token is
- * still inside. Any failure reads as busy. Returns a release fn or null.
+ * token. A lock older than STALE_LOCK_MS belongs to a crashed holder and is
+ * reclaimed (`replaceStaleLock`); a lock is released only by the holder whose
+ * token is still inside. Any failure reads as busy. Returns a release fn or null.
  */
 async function acquireLock(path, { waitMs = 0 } = {}) {
 	const lock = `${path}.lock`;
@@ -528,26 +532,71 @@ async function tryLock(lock, token) {
 		if (err?.code !== "EEXIST") return false;
 		try {
 			if (Date.now() - (await stat(lock)).mtimeMs < STALE_LOCK_MS) return false;
-			const aside = `${lock}.stale.${process.pid}.${randomBytes(6).toString("hex")}`;
-			await rename(lock, aside);
-			// Between our stat and our rename another reclaimer may have replaced
-			// the stale lock with a live one; if we moved a live lock, put it back.
-			if (Date.now() - (await stat(aside)).mtimeMs < STALE_LOCK_MS) {
-				await rename(aside, lock).catch(() => {});
-				return false;
-			}
-			await rm(aside, { recursive: true, force: true });
-			await mkdir(lock);
+			return await replaceStaleLock(lock, token, await lockOwner(lock));
 		} catch {
 			return false;
 		}
 	}
+	return writeOwner(lock, token);
+}
+
+/** The token inside a lock; "" when it has none (its holder died before writing it). */
+async function lockOwner(lock) {
+	try {
+		return await readFile(join(lock, "owner"), "utf-8");
+	} catch (err) {
+		if (err?.code === "ENOENT") return "";
+		throw err;
+	}
+}
+
+async function writeOwner(lock, token) {
 	try {
 		await writeFile(join(lock, "owner"), token, { flag: "wx", mode: 0o600 });
 		return true;
 	} catch {
-		await rm(lock, { recursive: true, force: true }).catch(() => {});
+		// Never removed here: the directory may no longer be the one this call made.
+		// An ownerless lock goes stale and is reclaimed.
 		return false;
+	}
+}
+
+/**
+ * Take over a STALE lock — one judged stale while it named `observed` as its owner
+ * — and ONLY that lock. Two rules close the reclaim race:
+ *  - one reclaimer per stale owner: a mutex file named by that owner's token,
+ *    created exclusively, so no two reclaimers remove-and-recreate at once;
+ *  - remove only what was judged: the lock must still name `observed`, and still
+ *    be stale. A lock another reclaimer already replaced names its new holder,
+ *    and is left alone.
+ * Exported for tests.
+ */
+export async function replaceStaleLock(lock, token, observed) {
+	const mutex = `${lock}.reclaim.${createHash("sha256").update(observed).digest("hex").slice(0, 16)}`;
+	try {
+		await writeFile(mutex, token, { flag: "wx", mode: 0o600 });
+	} catch (err) {
+		// Another reclaimer holds it — or died holding it: a stale mutex is cleared
+		// for the next attempt.
+		if (err?.code === "EEXIST") {
+			const age = await stat(mutex).then(
+				(info) => Date.now() - info.mtimeMs,
+				() => 0,
+			);
+			if (age > STALE_LOCK_MS) await unlink(mutex).catch(() => {});
+		}
+		return false;
+	}
+	try {
+		if ((await lockOwner(lock)) !== observed) return false;
+		if (Date.now() - (await stat(lock)).mtimeMs < STALE_LOCK_MS) return false;
+		await rm(lock, { recursive: true, force: true });
+		await mkdir(lock);
+		return await writeOwner(lock, token);
+	} catch {
+		return false;
+	} finally {
+		await unlink(mutex).catch(() => {});
 	}
 }
 
@@ -747,34 +796,53 @@ function selectNew(cursor, live) {
  * a copy of its ancestor's entries — the same message ids, rewritten to the fork's
  * own agentId (measured) — so a cursor per agent would post that usage once more
  * per fork. The first agent of any session to claim an id owns it, for good: the
- * claim is a file published exclusively, named by the id's SHA-256. An id that
- * another agent owns is accounted here as posted there; one whose claim cannot be
- * made or read is left for a later settle point, never posted unverified.
+ * claim is a file published exclusively, named by the id's SHA-256. An id another
+ * agent owns is accounted here as posted there, and so is one this agent claimed
+ * that its cursor has no record of claiming: the cursor was reset or removed since,
+ * and the id was posted then (or lost with it) — never again. An id whose claim
+ * cannot be made or read is left for a later settle point, never posted
+ * unverified, and said so on stderr.
  */
 async function selectOwn(opened) {
 	const { cursor } = opened;
 	const own = [];
+	const failed = new Map();
 	for (const m of selectNew(cursor, opened.live)) {
 		if (m.claimed) {
 			own.push(m);
 			continue;
 		}
-		const holder = await claimHolder(opened.claimsDir, m.id, opened.owner);
-		if (holder === opened.owner) {
+		// Each claim is file I/O: never let them eat the time the calls need.
+		if (timeLeft() < CLAIM_FLOOR_MS) continue;
+		const claim = await claimHolder(opened.claimsDir, m.id, opened.owner);
+		if (claim.holder === opened.owner && claim.created) {
 			const state = cursor.partial.get(m.id);
 			if (state !== undefined) state.claimed = true;
 			own.push(m);
-		} else if (holder !== null) {
+		} else if (claim.holder !== null) {
 			accountIds(cursor, [m.id]);
+		} else {
+			failed.set(claim.code, (failed.get(claim.code) ?? 0) + 1);
 		}
+	}
+	if (failed.size > 0) {
+		const total = [...failed.values()].reduce((sum, n) => sum + n, 0);
+		const codes = [...failed.keys()].join(", ");
+		process.stderr.write(
+			`usertrust: ${total} transcript message(s) could not be claimed (${codes}) — NOT posted; tried again at the next settle point\n`,
+		);
 	}
 	return own;
 }
 
+/** Errors that mean the state dir's filesystem cannot make hard links. */
+const LINKLESS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK"]);
+
 /**
- * Who holds the claim on a message id — `owner`, if nobody did — or null when the
- * claim can be neither made nor read. Published by link(2), which never replaces
- * an existing name, so a claim is whole the moment it exists.
+ * The claim on a message id: `{ holder, created }` — `created` when this call made
+ * it — or `{ holder: null, code }` when it can be neither made nor read. Published
+ * by link(2), which never replaces an existing name, so a claim is whole the moment
+ * it exists; on a filesystem without hard links, by an exclusive create.
  */
 async function claimHolder(claimsDir, id, owner) {
 	const digest = createHash("sha256").update(id).digest("hex");
@@ -785,17 +853,26 @@ async function claimHolder(claimsDir, id, owner) {
 		await mkdir(dir, { recursive: true, mode: 0o700 });
 		await writeFile(tmp, owner, { mode: 0o600 });
 		await link(tmp, path);
-		return owner;
+		return { holder: owner, created: true };
 	} catch (err) {
-		if (err?.code !== "EEXIST") return null;
+		if (LINKLESS.has(err?.code)) {
+			try {
+				await writeFile(path, owner, { flag: "wx", mode: 0o600 });
+				return { holder: owner, created: true };
+			} catch (exclusive) {
+				if (exclusive?.code !== "EEXIST") return { holder: null, code: exclusive?.code ?? "error" };
+			}
+		} else if (err?.code !== "EEXIST") {
+			return { holder: null, code: err?.code ?? "error" };
+		}
 	} finally {
 		await unlink(tmp).catch(() => {});
 	}
 	try {
 		const holder = await readFile(path, "utf-8");
-		return holder === "" ? null : holder;
-	} catch {
-		return null;
+		return holder === "" ? { holder: null, code: "EMPTY" } : { holder, created: false };
+	} catch (err) {
+		return { holder: null, code: err?.code ?? "error" };
 	}
 }
 
@@ -973,10 +1050,11 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 		return empty(cursor.lastModel, agentType);
 	}
 	let decided = false;
+	const key = window === null ? null : vehicleKey(sessionId, agentId, window.ids);
 	return {
 		mode: "transcript",
 		window,
-		key: window === null ? null : vehicleKey(sessionId, agentId, window.ids),
+		key,
 		agentType: agentType.name,
 		agentTypeRaw: agentType.raw,
 		principal: principalFor(sessionId, agentId, agentType.raw),
@@ -999,9 +1077,25 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 			// settle of exactly these messages landed, though this cursor never heard.
 			if (window === null || decided) return;
 			decided = true;
+			// Journalled first, like a settled hold, so the next lock holder accounts
+			// these ids even if the cursor write below fails: left "authorizing", they
+			// would be released after five minutes into a window under another key.
+			const journal = join(
+				stateRoot(),
+				`${sanitize(sessionId)}__${sanitize(agentId)}__${sanitize(key)}.done`,
+			);
+			const record = { agentId, assignedIds: window.ids, outcome: "settled" };
+			const journalled = await writeAtomic(journal, JSON.stringify(record)).then(
+				() => true,
+				() => false,
+			);
 			accountIds(cursor, window.ids);
 			await opened.save().catch((err) => {
-				process.stderr.write(`usertrust: cursor not updated — ${errText(err)}\n`);
+				process.stderr.write(
+					journalled
+						? `usertrust: cursor not updated — ${errText(err)}\n`
+						: `usertrust: ${window.ids.length} message(s) already charged could be posted again: neither the journal nor the cursor could be written (${errText(err)})\n`,
+				);
 			});
 		},
 		async abandon() {
@@ -1035,11 +1129,12 @@ async function hygieneRelease(transferId, why) {
  *    the key's charge stands;
  *  - `released`: the server proved nothing posted (400; 404 when unkeyed);
  *  - `unresolved` (keyed only): it may or may not have posted — a 404, a 5xx, no
- *    answer, or a 200 whose receipt says `settled: false`. Retried as itself under
- *    its key, which the server charges at most once; the hold is left for that
- *    retry, which gets it back by its key;
+ *    answer, or a receipt that says `settled: false`. Retried as itself under its
+ *    key: the server answers `already_settled` if this settle landed, or places a
+ *    hold for the key and charges it once;
  *  - `claimed` (unkeyed only): it may have posted, so its ids are never retried.
- * A `released` or `claimed` hold is given back for hygiene.
+ * Every hold that is not settled is given back for hygiene (the server re-queues a
+ * hold after a failed settle), except one a `settled: false` receipt says is spent.
  */
 async function settleAt(transferId, counts, { keyed }) {
 	let settle;
@@ -1050,27 +1145,33 @@ async function settleAt(transferId, counts, { keyed }) {
 			{ timeoutMs: callTimeout() },
 		);
 	} catch (err) {
-		const reason = `settle unreachable: ${errText(err)}`;
-		if (keyed) return { outcome: "unresolved", reason };
 		await hygieneRelease(transferId, "transcript settle unanswered");
-		return { outcome: "claimed", reason };
+		return {
+			outcome: keyed ? "unresolved" : "claimed",
+			reason: `settle unreachable: ${errText(err)}`,
+		};
 	}
 	return settleOutcome(transferId, settle, keyed);
 }
 
 async function settleOutcome(transferId, settle, keyed) {
 	if (settle.status === 200) {
-		if (keyed && settle.json?.settled === false) {
-			return { outcome: "unresolved", reason: "the ledger post is ambiguous (settled: false)" };
+		// `settled: false`: the server's ledger post was ambiguous. The hold is spent,
+		// and whether it charged is unknown.
+		if (settle.json?.settled === false) {
+			const reason = "the ledger post is ambiguous (settled: false)";
+			return keyed
+				? { outcome: "unresolved", reason }
+				: { outcome: "claimed", reason: `${reason}; the usage may be unrecorded` };
 		}
 		return { outcome: "settled" };
 	}
 	if (keyed && isAlreadySettled(settle)) return { outcome: "settled" };
-	const reason = `settle returned ${settle.status}`;
-	if (keyed && settle.status !== 400) return { outcome: "unresolved", reason };
 	await hygieneRelease(transferId, "transcript settle failed");
-	const outcome = settle.status === 400 || settle.status === 404 ? "released" : "claimed";
-	return { outcome, reason };
+	const reason = `settle returned ${settle.status}`;
+	if (settle.status === 400) return { outcome: "released", reason };
+	if (keyed) return { outcome: "unresolved", reason };
+	return { outcome: settle.status === 404 ? "released" : "claimed", reason };
 }
 
 /**
@@ -1079,23 +1180,26 @@ async function settleOutcome(transferId, settle, keyed) {
  * release gets the old settle at zero, which costs its 1-unit floor.
  */
 async function returnEmptyHold(transferId) {
-	if (!(await serverCapabilities()).has("release")) {
-		const zero = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-		return settleAt(transferId, zero, { keyed: false });
+	const capabilities = await serverCapabilities();
+	if (capabilities === null || capabilities.has("release")) {
+		try {
+			const response = await serverRequest(
+				"/v1/release",
+				{ transferId, reason: "no transcript usage was assigned to this hold" },
+				{ timeoutMs: callTimeout() },
+			);
+			if (response.status === 200) return { outcome: "returned" };
+			// Capabilities unknown, and the server has no release route: an older one.
+			if (capabilities !== null || !isUnknownRoute(response)) {
+				return { outcome: "unreturned", reason: `release returned ${response.status}` };
+			}
+		} catch (err) {
+			// The server's pending-TTL sweep releases it.
+			return { outcome: "unreturned", reason: `release unreachable: ${errText(err)}` };
+		}
 	}
-	try {
-		const response = await releaseHold(
-			transferId,
-			"no transcript usage was assigned to this hold",
-			{ timeoutMs: callTimeout() },
-		);
-		return response.status === 200
-			? { outcome: "returned" }
-			: { outcome: "unreturned", reason: `release returned ${response.status}` };
-	} catch (err) {
-		// The server's pending-TTL sweep releases it.
-		return { outcome: "unreturned", reason: `release unreachable: ${errText(err)}` };
-	}
+	const zero = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+	return settleAt(transferId, zero, { keyed: false });
 }
 
 /**
@@ -1121,9 +1225,16 @@ export async function settleTranscriptHold(sessionId, entry) {
 	const base = livePath.slice(0, -".json".length);
 	try {
 		await rename(livePath, `${base}.settling`);
-	} catch {
-		return { outcome: "skipped", reason: "another hook is settling this hold" };
+	} catch (err) {
+		if (err?.code === "ENOENT") {
+			return { outcome: "skipped", reason: "another hook is settling this hold" };
+		}
+		return { outcome: "deferred", reason: `hold could not be claimed (${err?.code ?? "error"})` };
 	}
+	// A rename keeps the hold's own mtime: from authorize, maybe long ago. The
+	// journal reads a .settling file's age as how long a settle has been in flight.
+	const now = new Date();
+	await utimes(`${base}.settling`, now, now).catch(() => {});
 	const keyed = typeof entry.idempotencyKey === "string";
 	const result = await settleAt(entry.transferId, counts, { keyed });
 	try {
@@ -1146,12 +1257,22 @@ export async function settleTranscriptHold(sessionId, entry) {
 			}),
 		);
 		await unlink(`${base}.settling`).catch(() => {});
-	} catch {
-		// The .settling file stays; once stale, its ids are accounted (claimed).
+	} catch (err) {
+		// The .settling file stays: once stale, its settle reads as unknown — retried
+		// under its key, or (unkeyed) its ids stay claimed.
+		process.stderr.write(
+			`usertrust: hold ${entry.transferId} ${result.outcome}, but the outcome could not be journalled (${err?.code ?? errText(err)}); a later settle point treats it as unknown\n`,
+		);
 	}
 	await reconcileAgent(sessionId, entry.agentId);
 	return result;
 }
+
+/** What an outcome means for the usage, where its name alone does not say. */
+export const OUTCOME_NOTES = new Map([
+	["unresolved", "; its usage is NOT recorded yet, and is retried under its key at the next Stop"],
+	["claimed", "; its usage may be unrecorded, and is never retried (no key)"],
+]);
 
 /** Stop/SubagentStop: SETTLE every leftover hold that carries assigned usage. */
 export async function settleAssignedHolds(sessionId, agentId) {
@@ -1160,7 +1281,7 @@ export async function settleAssignedHolds(sessionId, agentId) {
 		const result = await settleTranscriptHold(sessionId, entry);
 		if (result.outcome !== "settled") {
 			process.stderr.write(
-				`usertrust: leftover hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}\n`,
+				`usertrust: leftover hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}\n`,
 			);
 		}
 	}
@@ -1185,17 +1306,20 @@ export async function postRemainder({ sessionId, agentId, agentTypeHint, input, 
 		await opened.save();
 		if (fresh.length === 0 && cursor.unresolved.size === 0) return summary;
 		// What the server honours decides what these calls may carry (see lib.mjs).
+		// Unknown (a failed probe) reads as absent: no key, no principal, no retry.
 		const capabilities = await serverCapabilities();
-		const keyed = capabilities.has("idempotency-key");
+		const keyed = capabilities?.has("idempotency-key") ?? false;
 		const principalOf = (rawType) =>
-			capabilities.has("principal") ? principalFor(sessionId, agentId, rawType) : undefined;
+			capabilities?.has("principal") ? principalFor(sessionId, agentId, rawType) : undefined;
 		const agentType = await agentTypeFor(opened.transcriptPath, agentId, agentTypeHint);
 
 		// A retry under a key the server would strip could post twice: unresolved
 		// vehicles wait for a server that honours keys.
 		if (!keyed && cursor.unresolved.size > 0) {
 			summary.notes.push(
-				`${cursor.unresolved.size} unresolved settle(s) wait for a server that honours idempotency keys`,
+				capabilities === null
+					? `${cursor.unresolved.size} unresolved settle(s) not retried: the server's capabilities are unknown`
+					: `${cursor.unresolved.size} unresolved settle(s) wait for a server that honours idempotency keys`,
 			);
 		}
 		for (const [key, vehicle] of keyed ? [...cursor.unresolved] : []) {
@@ -1242,11 +1366,14 @@ export async function postRemainder({ sessionId, agentId, agentTypeHint, input, 
 				break;
 			}
 			const ids = messages.map((m) => m.id);
-			// CLAIM first: from here on a crash can only lose this usage, never repeat it.
-			for (const id of ids) cursor.assigned.set(id, REMAINDER);
-			await opened.save();
 			const counts = sumCounts(messages);
 			const key = keyed ? vehicleKey(sessionId, agentId, ids) : undefined;
+			// CLAIM first, before anything could post it. Under a key the group is
+			// parked as an unresolved vehicle, so a hook killed mid-call leaves it to be
+			// retried as itself; without one, a crash can only lose it, never repeat it.
+			if (key === undefined) for (const id of ids) cursor.assigned.set(id, REMAINDER);
+			else cursor.unresolved.set(key, { ids, model, agentType: agentType.raw, ...counts });
+			await opened.save();
 			const result = await postGroup({
 				sessionId,
 				agentId,
@@ -1260,11 +1387,11 @@ export async function postRemainder({ sessionId, agentId, agentTypeHint, input, 
 				principal: principalOf(agentType.raw),
 				retry: false,
 			});
+			// An unresolved vehicle stays parked; any other outcome is final for it.
+			if (key !== undefined && result.outcome !== "unresolved") cursor.unresolved.delete(key);
 			if (result.outcome === "settled" || result.outcome === "claimed") accountIds(cursor, ids);
 			else if (result.outcome === "denied") denyIds(cursor, ids);
-			else if (result.outcome === "unresolved" && key !== undefined) {
-				keepUnresolved(cursor, key, { ids, model, agentType: agentType.raw, ...counts });
-			} else releaseIds(cursor, ids);
+			else if (result.outcome !== "unresolved") releaseIds(cursor, ids);
 			await opened.save();
 			if (result.outcome === "settled") summary.posted += ids.length;
 			else if (result.outcome === "denied") {
@@ -1367,10 +1494,11 @@ async function postGroup({
 			{ timeoutMs },
 		);
 	} catch (err) {
-		const reason = `settle unreachable: ${errText(err)}`;
-		if (key !== undefined) return { outcome: "unresolved", reason };
 		await hygieneRelease(transferId, "transcript settle unanswered");
-		return { outcome: "claimed", reason };
+		return {
+			outcome: key === undefined ? "claimed" : "unresolved",
+			reason: `settle unreachable: ${errText(err)}`,
+		};
 	}
 	const result = await settleOutcome(transferId, settle, key !== undefined);
 	return retry && result.outcome === "released" ? { ...result, outcome: "unresolved" } : result;
