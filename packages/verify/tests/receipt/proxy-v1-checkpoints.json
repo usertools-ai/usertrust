@@ -2,169 +2,11 @@
 	"checkpointPublicKeySpkiBase64": "MCowBQYDK2VwAyEARSufghtL+f40TFunvTs3nwz3CiYqKvj+JTmhwOed5VQ=",
 	"segments": [
 		{
-			"event": {
-				"id": "evt_xgen_3",
-				"timestamp": "2026-10-05T00:00:03.000Z",
-				"previousHash": "6a83792605a4704d25f9203441401173e7f4341a4cf8236d76276fecd287deee",
-				"kind": "receipt_settled",
-				"actor": {
-					"type": "system",
-					"id": "receipt-minter",
-					"name": "receipt-minter"
-				},
-				"data": {
-					"spec": "ut1",
-					"scope": "session",
-					"sessionId": "01K2Q7V8ZC4M6N0PABCDEF3XYZ",
-					"generation": 1,
-					"work": {
-						"kind": "commit",
-						"repoId": "github.com:R_kgDOK1x2Yw",
-						"repo": "github.com/usertools-ai/usertrust",
-						"oid": "37df16d3a4c1b8e05f92d7a6c31e4b8079fa2d51",
-						"oidAlg": "sha1",
-						"objectSha256": "2634371f09ec18c8d4f55557be21dee1ae07a8829d484cd39d7a61d60b5da625",
-						"repositoryMembership": {
-							"status": "providerVerified",
-							"proofId": "pv_9f3a2c81d0"
-						}
-					},
-					"sessionAssociation": "workflowAttested",
-					"workloadId": "wl_7c2f4a91b8",
-					"models": ["claude-opus-4-5", "claude-sonnet-4-5"],
-					"providers": ["anthropic"],
-					"startedAt": "2026-08-11T18:00:00.000Z",
-					"endedAt": "2026-08-11T18:42:13.512Z",
-					"spend": {
-						"assessedUsertokens": 48224,
-						"postedUsertokens": 48224,
-						"roundingAdjustment": 14,
-						"transferCount": 22,
-						"usagePosture": "provider",
-						"pricingPosture": "exact"
-					},
-					"delegationPosture": "selfDebitsOnly",
-					"pricing": {
-						"tableVersions": ["2026-08-01"]
-					},
-					"transferSetRoot": "2ac22934267ae7ce5ad6382aa192c7b1f0c6f517ae10941b392f889177eab8f0",
-					"transferSet": [
-						{
-							"authorizationTransferId": "839fa69cf95e91d417ae004e979b6aa1",
-							"settlementTransferId": "3cd2180f808130887556f49a3c0c79a9"
-						},
-						{
-							"authorizationTransferId": "70022de8402cb080beba7eff3a3dac7c",
-							"settlementTransferId": "7c6ca5c8e0114f3fa031bc995289f92e"
-						},
-						{
-							"authorizationTransferId": "794b66981d842c63b9eac65a07a99027",
-							"settlementTransferId": "2b6759e1413f68ce605c9214da5ac1d4"
-						},
-						{
-							"authorizationTransferId": "04f18164b6eefa32a13ce5dbad12a43e",
-							"settlementTransferId": "961b9400fd45bcf85386feb6202ac58f"
-						},
-						{
-							"authorizationTransferId": "96c704c5230c79cc9b5e401982b35f98",
-							"settlementTransferId": "1888e7b5b46317b0172897e0b3a465c8"
-						},
-						{
-							"authorizationTransferId": "9ef6e7531dc448dbbd5f8ed5c6893a5a",
-							"settlementTransferId": "d4939fabec30ff1315cb3671447210cb"
-						},
-						{
-							"authorizationTransferId": "6aa0b055500e0e50cd8fcc2b6303f00a",
-							"settlementTransferId": "bec12e355b1421dce8b199d3c71aa48e"
-						},
-						{
-							"authorizationTransferId": "d80080bc1f949b00a38b6704d745b92a",
-							"settlementTransferId": "07e5c4c29e902bd74707a2d05f08281a"
-						},
-						{
-							"authorizationTransferId": "935f84e90871f727c89a93b181c31f76",
-							"settlementTransferId": "ccf12d568ec96d089879e4720dbef8cd"
-						},
-						{
-							"authorizationTransferId": "07b7571afcd135d8a04e296c22f5def7",
-							"settlementTransferId": "83218b4121d728e99d12866c4d0778e9"
-						},
-						{
-							"authorizationTransferId": "777bab9fcdeb5f3651a3101a99d3b89a",
-							"settlementTransferId": "0a2735409f0649850949dcc2071ad464"
-						},
-						{
-							"authorizationTransferId": "b254bad9db65db9aeb500e1a5ac392c0",
-							"settlementTransferId": "b74d9326f137a2e43fcdf2f963cd8457"
-						},
-						{
-							"authorizationTransferId": "a4e566d4bdbb80771049a6cb24131474",
-							"settlementTransferId": "e43eb5619b43bc20d43575ae765a6748"
-						},
-						{
-							"authorizationTransferId": "f8c3f7a1dcce3035e49e4fc1c322cba6",
-							"settlementTransferId": "baf87adc3b5e2a61d89454626cc17bfd"
-						},
-						{
-							"authorizationTransferId": "b7c0f4bc03623a7cfb21f335766c6a26",
-							"settlementTransferId": "1764a46332adcb3caa96f361c60220f2"
-						},
-						{
-							"authorizationTransferId": "abf7a1c7284acd776238aac644bb1145",
-							"settlementTransferId": "59d6691779a032b1de1d586fb857f7d8"
-						},
-						{
-							"authorizationTransferId": "b467f03b0b29dd747c25a8af006df155",
-							"settlementTransferId": "8eff603704174f5bcef870637c4e41cf"
-						},
-						{
-							"authorizationTransferId": "c43f5554e702f43d4f8ccf4a38b8e227",
-							"settlementTransferId": "fda728c4e4d439a0adea2352a0f424bb"
-						},
-						{
-							"authorizationTransferId": "c90c28a26319e40634960bbfb82f84e9",
-							"settlementTransferId": "ba3b83e95110f6ef754064a9cf3d8e4b"
-						},
-						{
-							"authorizationTransferId": "d82e12121d8dd3ce78a8a568784ee00c",
-							"settlementTransferId": "071a12102b83dd1d59e5ba5f74368959"
-						},
-						{
-							"authorizationTransferId": "ebf245ae7bf2c348159ec1a912c98595",
-							"settlementTransferId": "83239ef107db28e01378356173e01d3f"
-						},
-						{
-							"authorizationTransferId": "86c15cc09e509e24bcb175d2ccfcd33a",
-							"settlementTransferId": "4eca69fddf1d6a9ccf637ef08a942139"
-						}
-					]
-				},
-				"sequence": 3,
-				"hash": "0bda7f78e9e02645e4586323b1bdc845935f9c8377e5b7131eb1085955f2bdd0"
-			},
-			"inclusion": {
-				"version": 1,
-				"leafHash": "0bda7f78e9e02645e4586323b1bdc845935f9c8377e5b7131eb1085955f2bdd0",
-				"leafIndex": 2,
-				"treeSize": 4,
-				"root": "3587cd3b5a01689c349a33cb60c457b774fd47f6b79bc7e0fa4bb48cf6e3cd07",
-				"segmentId": "seg-1-00000000000000000000000000000001",
-				"siblings": [
-					{
-						"hash": "78d30cd3b8ace2422c600efef387b83574a2eac7b512d10af6d1c3eb870fb906",
-						"position": "right"
-					},
-					{
-						"hash": "11aa50932327e339d45f21b9ac44cf6561c0fc6f7cc834ccb26a1aca3d41647c",
-						"position": "left"
-					}
-				]
-			},
 			"signed": {
 				"v": 2,
 				"vaultId": "vlt_ut_proxy_prod_1",
 				"profile": "proxy-v1",
-				"root": "3587cd3b5a01689c349a33cb60c457b774fd47f6b79bc7e0fa4bb48cf6e3cd07",
+				"root": "f32f141f2fb32faa0bb6b54325c538c882c159f9bf2fa8eded2b3212e858f733",
 				"treeSize": 4,
 				"segmentId": "seg-1-00000000000000000000000000000001",
 				"segmentFirstSequence": 1,
@@ -175,211 +17,1287 @@
 				"publishedAt": "2026-10-05T01:00:00.000Z",
 				"publishedTo": "pending",
 				"reference": "",
-				"signature": "2jobidecLRiRM3gfTklEZ5uMIpkXk9obIjGNWxB1frFEp28VhN2UsyaXP2P9MwwFrRYOp0/ZXGXkX6HDK1zXAw==",
+				"signature": "lcH10cxLsmshoRNYU77VtM37P9zUlHeLWm0kSFHw4G0Wc629Slx4Zy7YVcHsUkwzUebcxspqxqoPEUFt4ACdBQ==",
 				"publicKey": "MCowBQYDK2VwAyEARSufghtL+f40TFunvTs3nwz3CiYqKvj+JTmhwOed5VQ="
-			}
+			},
+			"mints": [
+				{
+					"event": {
+						"id": "evt_xgen_1",
+						"timestamp": "2026-10-05T00:00:01.000Z",
+						"previousHash": "0000000000000000000000000000000000000000000000000000000000000000",
+						"kind": "receipt_settled",
+						"actor": {
+							"type": "system",
+							"id": "receipt-minter",
+							"name": "receipt-minter"
+						},
+						"data": {
+							"spec": "ut1",
+							"scope": "session",
+							"sessionId": "01K2Q7V8ZC4M6N0PXGEN000001",
+							"generation": 1,
+							"work": {
+								"kind": "session",
+								"repoId": "github.com:R_kgDOK1x2Yw",
+								"repo": "github.com/usertools-ai/usertrust"
+							},
+							"sessionAssociation": "workflowAttested",
+							"workloadId": "wl_7c2f4a91b8",
+							"models": ["claude-opus-4-5", "claude-sonnet-4-5"],
+							"providers": ["anthropic"],
+							"startedAt": "2026-08-11T18:00:00.000Z",
+							"endedAt": "2026-08-11T18:42:13.512Z",
+							"spend": {
+								"assessedUsertokens": 48224,
+								"postedUsertokens": 48224,
+								"roundingAdjustment": 14,
+								"transferCount": 22,
+								"usagePosture": "provider",
+								"pricingPosture": "exact"
+							},
+							"delegationPosture": "selfDebitsOnly",
+							"pricing": {
+								"tableVersions": ["2026-08-01"]
+							},
+							"transferSetRoot": "2ac22934267ae7ce5ad6382aa192c7b1f0c6f517ae10941b392f889177eab8f0",
+							"transferSet": [
+								{
+									"authorizationTransferId": "839fa69cf95e91d417ae004e979b6aa1",
+									"settlementTransferId": "3cd2180f808130887556f49a3c0c79a9"
+								},
+								{
+									"authorizationTransferId": "70022de8402cb080beba7eff3a3dac7c",
+									"settlementTransferId": "7c6ca5c8e0114f3fa031bc995289f92e"
+								},
+								{
+									"authorizationTransferId": "794b66981d842c63b9eac65a07a99027",
+									"settlementTransferId": "2b6759e1413f68ce605c9214da5ac1d4"
+								},
+								{
+									"authorizationTransferId": "04f18164b6eefa32a13ce5dbad12a43e",
+									"settlementTransferId": "961b9400fd45bcf85386feb6202ac58f"
+								},
+								{
+									"authorizationTransferId": "96c704c5230c79cc9b5e401982b35f98",
+									"settlementTransferId": "1888e7b5b46317b0172897e0b3a465c8"
+								},
+								{
+									"authorizationTransferId": "9ef6e7531dc448dbbd5f8ed5c6893a5a",
+									"settlementTransferId": "d4939fabec30ff1315cb3671447210cb"
+								},
+								{
+									"authorizationTransferId": "6aa0b055500e0e50cd8fcc2b6303f00a",
+									"settlementTransferId": "bec12e355b1421dce8b199d3c71aa48e"
+								},
+								{
+									"authorizationTransferId": "d80080bc1f949b00a38b6704d745b92a",
+									"settlementTransferId": "07e5c4c29e902bd74707a2d05f08281a"
+								},
+								{
+									"authorizationTransferId": "935f84e90871f727c89a93b181c31f76",
+									"settlementTransferId": "ccf12d568ec96d089879e4720dbef8cd"
+								},
+								{
+									"authorizationTransferId": "07b7571afcd135d8a04e296c22f5def7",
+									"settlementTransferId": "83218b4121d728e99d12866c4d0778e9"
+								},
+								{
+									"authorizationTransferId": "777bab9fcdeb5f3651a3101a99d3b89a",
+									"settlementTransferId": "0a2735409f0649850949dcc2071ad464"
+								},
+								{
+									"authorizationTransferId": "b254bad9db65db9aeb500e1a5ac392c0",
+									"settlementTransferId": "b74d9326f137a2e43fcdf2f963cd8457"
+								},
+								{
+									"authorizationTransferId": "a4e566d4bdbb80771049a6cb24131474",
+									"settlementTransferId": "e43eb5619b43bc20d43575ae765a6748"
+								},
+								{
+									"authorizationTransferId": "f8c3f7a1dcce3035e49e4fc1c322cba6",
+									"settlementTransferId": "baf87adc3b5e2a61d89454626cc17bfd"
+								},
+								{
+									"authorizationTransferId": "b7c0f4bc03623a7cfb21f335766c6a26",
+									"settlementTransferId": "1764a46332adcb3caa96f361c60220f2"
+								},
+								{
+									"authorizationTransferId": "abf7a1c7284acd776238aac644bb1145",
+									"settlementTransferId": "59d6691779a032b1de1d586fb857f7d8"
+								},
+								{
+									"authorizationTransferId": "b467f03b0b29dd747c25a8af006df155",
+									"settlementTransferId": "8eff603704174f5bcef870637c4e41cf"
+								},
+								{
+									"authorizationTransferId": "c43f5554e702f43d4f8ccf4a38b8e227",
+									"settlementTransferId": "fda728c4e4d439a0adea2352a0f424bb"
+								},
+								{
+									"authorizationTransferId": "c90c28a26319e40634960bbfb82f84e9",
+									"settlementTransferId": "ba3b83e95110f6ef754064a9cf3d8e4b"
+								},
+								{
+									"authorizationTransferId": "d82e12121d8dd3ce78a8a568784ee00c",
+									"settlementTransferId": "071a12102b83dd1d59e5ba5f74368959"
+								},
+								{
+									"authorizationTransferId": "ebf245ae7bf2c348159ec1a912c98595",
+									"settlementTransferId": "83239ef107db28e01378356173e01d3f"
+								},
+								{
+									"authorizationTransferId": "86c15cc09e509e24bcb175d2ccfcd33a",
+									"settlementTransferId": "4eca69fddf1d6a9ccf637ef08a942139"
+								}
+							]
+						},
+						"sequence": 1,
+						"hash": "657deb831d75b985e482838da018667eb60ee984b4ec914e33c785fd9132edbd"
+					},
+					"inclusion": {
+						"version": 1,
+						"leafHash": "657deb831d75b985e482838da018667eb60ee984b4ec914e33c785fd9132edbd",
+						"leafIndex": 0,
+						"treeSize": 4,
+						"root": "f32f141f2fb32faa0bb6b54325c538c882c159f9bf2fa8eded2b3212e858f733",
+						"segmentId": "seg-1-00000000000000000000000000000001",
+						"siblings": [
+							{
+								"hash": "fd4b3d8c233d1260188baac651d27b28fe9083246bd929474122ddf4d5c187be",
+								"position": "right"
+							},
+							{
+								"hash": "09544859d034a87a875d819c6fee2f15b44df9eff483b1f2188e62d59d25ea0f",
+								"position": "right"
+							}
+						]
+					}
+				},
+				{
+					"event": {
+						"id": "evt_xgen_2",
+						"timestamp": "2026-10-05T00:00:02.000Z",
+						"previousHash": "657deb831d75b985e482838da018667eb60ee984b4ec914e33c785fd9132edbd",
+						"kind": "receipt_settled",
+						"actor": {
+							"type": "system",
+							"id": "receipt-minter",
+							"name": "receipt-minter"
+						},
+						"data": {
+							"spec": "ut1",
+							"scope": "session",
+							"sessionId": "01K2Q7V8ZC4M6N0PXGEN000002",
+							"generation": 1,
+							"work": {
+								"kind": "session",
+								"repoId": "github.com:R_kgDOK1x2Yw",
+								"repo": "github.com/usertools-ai/usertrust"
+							},
+							"sessionAssociation": "workflowAttested",
+							"workloadId": "wl_7c2f4a91b8",
+							"models": ["claude-opus-4-5", "claude-sonnet-4-5"],
+							"providers": ["anthropic"],
+							"startedAt": "2026-08-11T18:00:00.000Z",
+							"endedAt": "2026-08-11T18:42:13.512Z",
+							"spend": {
+								"assessedUsertokens": 48224,
+								"postedUsertokens": 48224,
+								"roundingAdjustment": 14,
+								"transferCount": 22,
+								"usagePosture": "provider",
+								"pricingPosture": "exact"
+							},
+							"delegationPosture": "selfDebitsOnly",
+							"pricing": {
+								"tableVersions": ["2026-08-01"]
+							},
+							"transferSetRoot": "2ac22934267ae7ce5ad6382aa192c7b1f0c6f517ae10941b392f889177eab8f0",
+							"transferSet": [
+								{
+									"authorizationTransferId": "839fa69cf95e91d417ae004e979b6aa1",
+									"settlementTransferId": "3cd2180f808130887556f49a3c0c79a9"
+								},
+								{
+									"authorizationTransferId": "70022de8402cb080beba7eff3a3dac7c",
+									"settlementTransferId": "7c6ca5c8e0114f3fa031bc995289f92e"
+								},
+								{
+									"authorizationTransferId": "794b66981d842c63b9eac65a07a99027",
+									"settlementTransferId": "2b6759e1413f68ce605c9214da5ac1d4"
+								},
+								{
+									"authorizationTransferId": "04f18164b6eefa32a13ce5dbad12a43e",
+									"settlementTransferId": "961b9400fd45bcf85386feb6202ac58f"
+								},
+								{
+									"authorizationTransferId": "96c704c5230c79cc9b5e401982b35f98",
+									"settlementTransferId": "1888e7b5b46317b0172897e0b3a465c8"
+								},
+								{
+									"authorizationTransferId": "9ef6e7531dc448dbbd5f8ed5c6893a5a",
+									"settlementTransferId": "d4939fabec30ff1315cb3671447210cb"
+								},
+								{
+									"authorizationTransferId": "6aa0b055500e0e50cd8fcc2b6303f00a",
+									"settlementTransferId": "bec12e355b1421dce8b199d3c71aa48e"
+								},
+								{
+									"authorizationTransferId": "d80080bc1f949b00a38b6704d745b92a",
+									"settlementTransferId": "07e5c4c29e902bd74707a2d05f08281a"
+								},
+								{
+									"authorizationTransferId": "935f84e90871f727c89a93b181c31f76",
+									"settlementTransferId": "ccf12d568ec96d089879e4720dbef8cd"
+								},
+								{
+									"authorizationTransferId": "07b7571afcd135d8a04e296c22f5def7",
+									"settlementTransferId": "83218b4121d728e99d12866c4d0778e9"
+								},
+								{
+									"authorizationTransferId": "777bab9fcdeb5f3651a3101a99d3b89a",
+									"settlementTransferId": "0a2735409f0649850949dcc2071ad464"
+								},
+								{
+									"authorizationTransferId": "b254bad9db65db9aeb500e1a5ac392c0",
+									"settlementTransferId": "b74d9326f137a2e43fcdf2f963cd8457"
+								},
+								{
+									"authorizationTransferId": "a4e566d4bdbb80771049a6cb24131474",
+									"settlementTransferId": "e43eb5619b43bc20d43575ae765a6748"
+								},
+								{
+									"authorizationTransferId": "f8c3f7a1dcce3035e49e4fc1c322cba6",
+									"settlementTransferId": "baf87adc3b5e2a61d89454626cc17bfd"
+								},
+								{
+									"authorizationTransferId": "b7c0f4bc03623a7cfb21f335766c6a26",
+									"settlementTransferId": "1764a46332adcb3caa96f361c60220f2"
+								},
+								{
+									"authorizationTransferId": "abf7a1c7284acd776238aac644bb1145",
+									"settlementTransferId": "59d6691779a032b1de1d586fb857f7d8"
+								},
+								{
+									"authorizationTransferId": "b467f03b0b29dd747c25a8af006df155",
+									"settlementTransferId": "8eff603704174f5bcef870637c4e41cf"
+								},
+								{
+									"authorizationTransferId": "c43f5554e702f43d4f8ccf4a38b8e227",
+									"settlementTransferId": "fda728c4e4d439a0adea2352a0f424bb"
+								},
+								{
+									"authorizationTransferId": "c90c28a26319e40634960bbfb82f84e9",
+									"settlementTransferId": "ba3b83e95110f6ef754064a9cf3d8e4b"
+								},
+								{
+									"authorizationTransferId": "d82e12121d8dd3ce78a8a568784ee00c",
+									"settlementTransferId": "071a12102b83dd1d59e5ba5f74368959"
+								},
+								{
+									"authorizationTransferId": "ebf245ae7bf2c348159ec1a912c98595",
+									"settlementTransferId": "83239ef107db28e01378356173e01d3f"
+								},
+								{
+									"authorizationTransferId": "86c15cc09e509e24bcb175d2ccfcd33a",
+									"settlementTransferId": "4eca69fddf1d6a9ccf637ef08a942139"
+								}
+							]
+						},
+						"sequence": 2,
+						"hash": "0f56abaff38f00e17f101356b2a4ec57dee91e394ae5ecba17e1ffdd80259ae2"
+					},
+					"inclusion": {
+						"version": 1,
+						"leafHash": "0f56abaff38f00e17f101356b2a4ec57dee91e394ae5ecba17e1ffdd80259ae2",
+						"leafIndex": 1,
+						"treeSize": 4,
+						"root": "f32f141f2fb32faa0bb6b54325c538c882c159f9bf2fa8eded2b3212e858f733",
+						"segmentId": "seg-1-00000000000000000000000000000001",
+						"siblings": [
+							{
+								"hash": "39937079583d56bfb64283d2566eaf7ac06ec8b6899b5e8f657a4c18b366930b",
+								"position": "left"
+							},
+							{
+								"hash": "09544859d034a87a875d819c6fee2f15b44df9eff483b1f2188e62d59d25ea0f",
+								"position": "right"
+							}
+						]
+					}
+				},
+				{
+					"event": {
+						"id": "evt_xgen_3",
+						"timestamp": "2026-10-05T00:00:03.000Z",
+						"previousHash": "0f56abaff38f00e17f101356b2a4ec57dee91e394ae5ecba17e1ffdd80259ae2",
+						"kind": "receipt_settled",
+						"actor": {
+							"type": "system",
+							"id": "receipt-minter",
+							"name": "receipt-minter"
+						},
+						"data": {
+							"spec": "ut1",
+							"scope": "session",
+							"sessionId": "01K2Q7V8ZC4M6N0PXGEN000003",
+							"generation": 1,
+							"work": {
+								"kind": "session",
+								"repoId": "github.com:R_kgDOK1x2Yw",
+								"repo": "github.com/usertools-ai/usertrust"
+							},
+							"sessionAssociation": "workflowAttested",
+							"workloadId": "wl_7c2f4a91b8",
+							"models": ["claude-opus-4-5", "claude-sonnet-4-5"],
+							"providers": ["anthropic"],
+							"startedAt": "2026-08-11T18:00:00.000Z",
+							"endedAt": "2026-08-11T18:42:13.512Z",
+							"spend": {
+								"assessedUsertokens": 48224,
+								"postedUsertokens": 48224,
+								"roundingAdjustment": 14,
+								"transferCount": 22,
+								"usagePosture": "provider",
+								"pricingPosture": "exact"
+							},
+							"delegationPosture": "selfDebitsOnly",
+							"pricing": {
+								"tableVersions": ["2026-08-01"]
+							},
+							"transferSetRoot": "2ac22934267ae7ce5ad6382aa192c7b1f0c6f517ae10941b392f889177eab8f0",
+							"transferSet": [
+								{
+									"authorizationTransferId": "839fa69cf95e91d417ae004e979b6aa1",
+									"settlementTransferId": "3cd2180f808130887556f49a3c0c79a9"
+								},
+								{
+									"authorizationTransferId": "70022de8402cb080beba7eff3a3dac7c",
+									"settlementTransferId": "7c6ca5c8e0114f3fa031bc995289f92e"
+								},
+								{
+									"authorizationTransferId": "794b66981d842c63b9eac65a07a99027",
+									"settlementTransferId": "2b6759e1413f68ce605c9214da5ac1d4"
+								},
+								{
+									"authorizationTransferId": "04f18164b6eefa32a13ce5dbad12a43e",
+									"settlementTransferId": "961b9400fd45bcf85386feb6202ac58f"
+								},
+								{
+									"authorizationTransferId": "96c704c5230c79cc9b5e401982b35f98",
+									"settlementTransferId": "1888e7b5b46317b0172897e0b3a465c8"
+								},
+								{
+									"authorizationTransferId": "9ef6e7531dc448dbbd5f8ed5c6893a5a",
+									"settlementTransferId": "d4939fabec30ff1315cb3671447210cb"
+								},
+								{
+									"authorizationTransferId": "6aa0b055500e0e50cd8fcc2b6303f00a",
+									"settlementTransferId": "bec12e355b1421dce8b199d3c71aa48e"
+								},
+								{
+									"authorizationTransferId": "d80080bc1f949b00a38b6704d745b92a",
+									"settlementTransferId": "07e5c4c29e902bd74707a2d05f08281a"
+								},
+								{
+									"authorizationTransferId": "935f84e90871f727c89a93b181c31f76",
+									"settlementTransferId": "ccf12d568ec96d089879e4720dbef8cd"
+								},
+								{
+									"authorizationTransferId": "07b7571afcd135d8a04e296c22f5def7",
+									"settlementTransferId": "83218b4121d728e99d12866c4d0778e9"
+								},
+								{
+									"authorizationTransferId": "777bab9fcdeb5f3651a3101a99d3b89a",
+									"settlementTransferId": "0a2735409f0649850949dcc2071ad464"
+								},
+								{
+									"authorizationTransferId": "b254bad9db65db9aeb500e1a5ac392c0",
+									"settlementTransferId": "b74d9326f137a2e43fcdf2f963cd8457"
+								},
+								{
+									"authorizationTransferId": "a4e566d4bdbb80771049a6cb24131474",
+									"settlementTransferId": "e43eb5619b43bc20d43575ae765a6748"
+								},
+								{
+									"authorizationTransferId": "f8c3f7a1dcce3035e49e4fc1c322cba6",
+									"settlementTransferId": "baf87adc3b5e2a61d89454626cc17bfd"
+								},
+								{
+									"authorizationTransferId": "b7c0f4bc03623a7cfb21f335766c6a26",
+									"settlementTransferId": "1764a46332adcb3caa96f361c60220f2"
+								},
+								{
+									"authorizationTransferId": "abf7a1c7284acd776238aac644bb1145",
+									"settlementTransferId": "59d6691779a032b1de1d586fb857f7d8"
+								},
+								{
+									"authorizationTransferId": "b467f03b0b29dd747c25a8af006df155",
+									"settlementTransferId": "8eff603704174f5bcef870637c4e41cf"
+								},
+								{
+									"authorizationTransferId": "c43f5554e702f43d4f8ccf4a38b8e227",
+									"settlementTransferId": "fda728c4e4d439a0adea2352a0f424bb"
+								},
+								{
+									"authorizationTransferId": "c90c28a26319e40634960bbfb82f84e9",
+									"settlementTransferId": "ba3b83e95110f6ef754064a9cf3d8e4b"
+								},
+								{
+									"authorizationTransferId": "d82e12121d8dd3ce78a8a568784ee00c",
+									"settlementTransferId": "071a12102b83dd1d59e5ba5f74368959"
+								},
+								{
+									"authorizationTransferId": "ebf245ae7bf2c348159ec1a912c98595",
+									"settlementTransferId": "83239ef107db28e01378356173e01d3f"
+								},
+								{
+									"authorizationTransferId": "86c15cc09e509e24bcb175d2ccfcd33a",
+									"settlementTransferId": "4eca69fddf1d6a9ccf637ef08a942139"
+								}
+							]
+						},
+						"sequence": 3,
+						"hash": "00e91fd76f2c7ef0d547121ec44e98b733fb220f3a6a248c5390cb102754f363"
+					},
+					"inclusion": {
+						"version": 1,
+						"leafHash": "00e91fd76f2c7ef0d547121ec44e98b733fb220f3a6a248c5390cb102754f363",
+						"leafIndex": 2,
+						"treeSize": 4,
+						"root": "f32f141f2fb32faa0bb6b54325c538c882c159f9bf2fa8eded2b3212e858f733",
+						"segmentId": "seg-1-00000000000000000000000000000001",
+						"siblings": [
+							{
+								"hash": "52a97bac393efc4dc945bfa615dc7e8f30882bdd2d6f8761888249c0026d56f3",
+								"position": "right"
+							},
+							{
+								"hash": "142d8ca0d403d30b15e6fc0c99414fdd20a4e391e1927d67cef47c5b69fa2ee8",
+								"position": "left"
+							}
+						]
+					}
+				}
+			]
 		},
 		{
-			"event": {
-				"id": "evt_xgen_7",
-				"timestamp": "2026-10-05T00:00:07.000Z",
-				"previousHash": "6c257058e89848230d6e37c398f7a919bb73abb3119a04de73f9b8afade4e835",
-				"kind": "receipt_settled",
-				"actor": {
-					"type": "system",
-					"id": "receipt-minter",
-					"name": "receipt-minter"
-				},
-				"data": {
-					"spec": "ut1",
-					"scope": "session",
-					"sessionId": "01K2Q7V8ZC4M6N0PABCDEF3XYZ",
-					"generation": 1,
-					"work": {
-						"kind": "commit",
-						"repoId": "github.com:R_kgDOK1x2Yw",
-						"repo": "github.com/usertools-ai/usertrust",
-						"oid": "37df16d3a4c1b8e05f92d7a6c31e4b8079fa2d51",
-						"oidAlg": "sha1",
-						"objectSha256": "2634371f09ec18c8d4f55557be21dee1ae07a8829d484cd39d7a61d60b5da625",
-						"repositoryMembership": {
-							"status": "providerVerified",
-							"proofId": "pv_9f3a2c81d0"
-						}
-					},
-					"sessionAssociation": "workflowAttested",
-					"workloadId": "wl_7c2f4a91b8",
-					"models": ["claude-opus-4-5", "claude-sonnet-4-5"],
-					"providers": ["anthropic"],
-					"startedAt": "2026-08-11T18:00:00.000Z",
-					"endedAt": "2026-08-11T18:42:13.512Z",
-					"spend": {
-						"assessedUsertokens": 48224,
-						"postedUsertokens": 48224,
-						"roundingAdjustment": 14,
-						"transferCount": 22,
-						"usagePosture": "provider",
-						"pricingPosture": "exact"
-					},
-					"delegationPosture": "selfDebitsOnly",
-					"pricing": {
-						"tableVersions": ["2026-08-01"]
-					},
-					"transferSetRoot": "2ac22934267ae7ce5ad6382aa192c7b1f0c6f517ae10941b392f889177eab8f0",
-					"transferSet": [
-						{
-							"authorizationTransferId": "839fa69cf95e91d417ae004e979b6aa1",
-							"settlementTransferId": "3cd2180f808130887556f49a3c0c79a9"
-						},
-						{
-							"authorizationTransferId": "70022de8402cb080beba7eff3a3dac7c",
-							"settlementTransferId": "7c6ca5c8e0114f3fa031bc995289f92e"
-						},
-						{
-							"authorizationTransferId": "794b66981d842c63b9eac65a07a99027",
-							"settlementTransferId": "2b6759e1413f68ce605c9214da5ac1d4"
-						},
-						{
-							"authorizationTransferId": "04f18164b6eefa32a13ce5dbad12a43e",
-							"settlementTransferId": "961b9400fd45bcf85386feb6202ac58f"
-						},
-						{
-							"authorizationTransferId": "96c704c5230c79cc9b5e401982b35f98",
-							"settlementTransferId": "1888e7b5b46317b0172897e0b3a465c8"
-						},
-						{
-							"authorizationTransferId": "9ef6e7531dc448dbbd5f8ed5c6893a5a",
-							"settlementTransferId": "d4939fabec30ff1315cb3671447210cb"
-						},
-						{
-							"authorizationTransferId": "6aa0b055500e0e50cd8fcc2b6303f00a",
-							"settlementTransferId": "bec12e355b1421dce8b199d3c71aa48e"
-						},
-						{
-							"authorizationTransferId": "d80080bc1f949b00a38b6704d745b92a",
-							"settlementTransferId": "07e5c4c29e902bd74707a2d05f08281a"
-						},
-						{
-							"authorizationTransferId": "935f84e90871f727c89a93b181c31f76",
-							"settlementTransferId": "ccf12d568ec96d089879e4720dbef8cd"
-						},
-						{
-							"authorizationTransferId": "07b7571afcd135d8a04e296c22f5def7",
-							"settlementTransferId": "83218b4121d728e99d12866c4d0778e9"
-						},
-						{
-							"authorizationTransferId": "777bab9fcdeb5f3651a3101a99d3b89a",
-							"settlementTransferId": "0a2735409f0649850949dcc2071ad464"
-						},
-						{
-							"authorizationTransferId": "b254bad9db65db9aeb500e1a5ac392c0",
-							"settlementTransferId": "b74d9326f137a2e43fcdf2f963cd8457"
-						},
-						{
-							"authorizationTransferId": "a4e566d4bdbb80771049a6cb24131474",
-							"settlementTransferId": "e43eb5619b43bc20d43575ae765a6748"
-						},
-						{
-							"authorizationTransferId": "f8c3f7a1dcce3035e49e4fc1c322cba6",
-							"settlementTransferId": "baf87adc3b5e2a61d89454626cc17bfd"
-						},
-						{
-							"authorizationTransferId": "b7c0f4bc03623a7cfb21f335766c6a26",
-							"settlementTransferId": "1764a46332adcb3caa96f361c60220f2"
-						},
-						{
-							"authorizationTransferId": "abf7a1c7284acd776238aac644bb1145",
-							"settlementTransferId": "59d6691779a032b1de1d586fb857f7d8"
-						},
-						{
-							"authorizationTransferId": "b467f03b0b29dd747c25a8af006df155",
-							"settlementTransferId": "8eff603704174f5bcef870637c4e41cf"
-						},
-						{
-							"authorizationTransferId": "c43f5554e702f43d4f8ccf4a38b8e227",
-							"settlementTransferId": "fda728c4e4d439a0adea2352a0f424bb"
-						},
-						{
-							"authorizationTransferId": "c90c28a26319e40634960bbfb82f84e9",
-							"settlementTransferId": "ba3b83e95110f6ef754064a9cf3d8e4b"
-						},
-						{
-							"authorizationTransferId": "d82e12121d8dd3ce78a8a568784ee00c",
-							"settlementTransferId": "071a12102b83dd1d59e5ba5f74368959"
-						},
-						{
-							"authorizationTransferId": "ebf245ae7bf2c348159ec1a912c98595",
-							"settlementTransferId": "83239ef107db28e01378356173e01d3f"
-						},
-						{
-							"authorizationTransferId": "86c15cc09e509e24bcb175d2ccfcd33a",
-							"settlementTransferId": "4eca69fddf1d6a9ccf637ef08a942139"
-						}
-					]
-				},
-				"sequence": 7,
-				"hash": "cc68ff38dd7ad772523934ec1231499e3304bb29a0743d33eb213cda84ff5980"
-			},
-			"inclusion": {
-				"version": 1,
-				"leafHash": "cc68ff38dd7ad772523934ec1231499e3304bb29a0743d33eb213cda84ff5980",
-				"leafIndex": 3,
-				"treeSize": 6,
-				"root": "c95f9c460ee0872203fbcc5ebfa930fac37f85fa38688d3dd93d2bcce9e847d9",
-				"segmentId": "seg-5-00000000000000000000000000000002",
-				"siblings": [
-					{
-						"hash": "4edcb14b151a5b869ca1d35c4d31f6ba5aa4242940645a298b4dbc1d0b978a89",
-						"position": "left"
-					},
-					{
-						"hash": "c4506bfee81ea9cd0c2798bf0df32ae2fa3e1e8e3e847d81de173fbeb768b137",
-						"position": "left"
-					},
-					{
-						"hash": "2a3c2cbeed997c1bd3ae0b36c73044db0ed2ff9e4f9597854813cfb8ca59254f",
-						"position": "right"
-					}
-				]
-			},
 			"signed": {
 				"v": 2,
 				"vaultId": "vlt_ut_proxy_prod_1",
 				"profile": "proxy-v1",
-				"root": "c95f9c460ee0872203fbcc5ebfa930fac37f85fa38688d3dd93d2bcce9e847d9",
+				"root": "ebe7415527eb44ecb49d88df573ea31ebe554fd14be0fb67a23471d1bbdfc6e6",
 				"treeSize": 6,
 				"segmentId": "seg-5-00000000000000000000000000000002",
 				"segmentFirstSequence": 5,
-				"previousSegmentRoot": "3587cd3b5a01689c349a33cb60c457b774fd47f6b79bc7e0fa4bb48cf6e3cd07",
+				"previousSegmentRoot": "f32f141f2fb32faa0bb6b54325c538c882c159f9bf2fa8eded2b3212e858f733",
 				"previousSegmentId": "seg-1-00000000000000000000000000000001",
-				"segmentStartPreviousHash": "e914c1050d2b31ca299e21f013b21b0c876d654a4898b902b8ed6a055de42f26",
+				"segmentStartPreviousHash": "2d82c77a5f47806de0281da02e54fd92d13f6e241abc9bafeb31be84ee6de2c5",
 				"keyId": "utk_ckpt_2026_08",
 				"publishedAt": "2026-10-05T01:01:00.000Z",
 				"publishedTo": "pending",
 				"reference": "",
-				"signature": "x2+8/+pQwTo2cl8sRVIm+MiWM57Q3Lsy/HAndQmuzfyCvLJAvRhsHsHybGVbnqUCWz6iKQmIJQeMDF1Ps0XIAw==",
+				"signature": "cdK0BJEw1aroFUygd+T4bee4O2Sne2zE8MO2ukw9FhshG1NxNs8pHmE3nZgRW2sI57zvVMk0j1rZQQDDk6lHCQ==",
 				"publicKey": "MCowBQYDK2VwAyEARSufghtL+f40TFunvTs3nwz3CiYqKvj+JTmhwOed5VQ="
-			}
+			},
+			"mints": [
+				{
+					"event": {
+						"id": "evt_xgen_5",
+						"timestamp": "2026-10-05T00:00:05.000Z",
+						"previousHash": "2d82c77a5f47806de0281da02e54fd92d13f6e241abc9bafeb31be84ee6de2c5",
+						"kind": "receipt_settled",
+						"actor": {
+							"type": "system",
+							"id": "receipt-minter",
+							"name": "receipt-minter"
+						},
+						"data": {
+							"spec": "ut1",
+							"scope": "session",
+							"sessionId": "01K2Q7V8ZC4M6N0PXGEN000005",
+							"generation": 1,
+							"work": {
+								"kind": "session",
+								"repoId": "github.com:R_kgDOK1x2Yw",
+								"repo": "github.com/usertools-ai/usertrust"
+							},
+							"sessionAssociation": "workflowAttested",
+							"workloadId": "wl_7c2f4a91b8",
+							"models": ["claude-opus-4-5", "claude-sonnet-4-5"],
+							"providers": ["anthropic"],
+							"startedAt": "2026-08-11T18:00:00.000Z",
+							"endedAt": "2026-08-11T18:42:13.512Z",
+							"spend": {
+								"assessedUsertokens": 48224,
+								"postedUsertokens": 48224,
+								"roundingAdjustment": 14,
+								"transferCount": 22,
+								"usagePosture": "provider",
+								"pricingPosture": "exact"
+							},
+							"delegationPosture": "selfDebitsOnly",
+							"pricing": {
+								"tableVersions": ["2026-08-01"]
+							},
+							"transferSetRoot": "2ac22934267ae7ce5ad6382aa192c7b1f0c6f517ae10941b392f889177eab8f0",
+							"transferSet": [
+								{
+									"authorizationTransferId": "839fa69cf95e91d417ae004e979b6aa1",
+									"settlementTransferId": "3cd2180f808130887556f49a3c0c79a9"
+								},
+								{
+									"authorizationTransferId": "70022de8402cb080beba7eff3a3dac7c",
+									"settlementTransferId": "7c6ca5c8e0114f3fa031bc995289f92e"
+								},
+								{
+									"authorizationTransferId": "794b66981d842c63b9eac65a07a99027",
+									"settlementTransferId": "2b6759e1413f68ce605c9214da5ac1d4"
+								},
+								{
+									"authorizationTransferId": "04f18164b6eefa32a13ce5dbad12a43e",
+									"settlementTransferId": "961b9400fd45bcf85386feb6202ac58f"
+								},
+								{
+									"authorizationTransferId": "96c704c5230c79cc9b5e401982b35f98",
+									"settlementTransferId": "1888e7b5b46317b0172897e0b3a465c8"
+								},
+								{
+									"authorizationTransferId": "9ef6e7531dc448dbbd5f8ed5c6893a5a",
+									"settlementTransferId": "d4939fabec30ff1315cb3671447210cb"
+								},
+								{
+									"authorizationTransferId": "6aa0b055500e0e50cd8fcc2b6303f00a",
+									"settlementTransferId": "bec12e355b1421dce8b199d3c71aa48e"
+								},
+								{
+									"authorizationTransferId": "d80080bc1f949b00a38b6704d745b92a",
+									"settlementTransferId": "07e5c4c29e902bd74707a2d05f08281a"
+								},
+								{
+									"authorizationTransferId": "935f84e90871f727c89a93b181c31f76",
+									"settlementTransferId": "ccf12d568ec96d089879e4720dbef8cd"
+								},
+								{
+									"authorizationTransferId": "07b7571afcd135d8a04e296c22f5def7",
+									"settlementTransferId": "83218b4121d728e99d12866c4d0778e9"
+								},
+								{
+									"authorizationTransferId": "777bab9fcdeb5f3651a3101a99d3b89a",
+									"settlementTransferId": "0a2735409f0649850949dcc2071ad464"
+								},
+								{
+									"authorizationTransferId": "b254bad9db65db9aeb500e1a5ac392c0",
+									"settlementTransferId": "b74d9326f137a2e43fcdf2f963cd8457"
+								},
+								{
+									"authorizationTransferId": "a4e566d4bdbb80771049a6cb24131474",
+									"settlementTransferId": "e43eb5619b43bc20d43575ae765a6748"
+								},
+								{
+									"authorizationTransferId": "f8c3f7a1dcce3035e49e4fc1c322cba6",
+									"settlementTransferId": "baf87adc3b5e2a61d89454626cc17bfd"
+								},
+								{
+									"authorizationTransferId": "b7c0f4bc03623a7cfb21f335766c6a26",
+									"settlementTransferId": "1764a46332adcb3caa96f361c60220f2"
+								},
+								{
+									"authorizationTransferId": "abf7a1c7284acd776238aac644bb1145",
+									"settlementTransferId": "59d6691779a032b1de1d586fb857f7d8"
+								},
+								{
+									"authorizationTransferId": "b467f03b0b29dd747c25a8af006df155",
+									"settlementTransferId": "8eff603704174f5bcef870637c4e41cf"
+								},
+								{
+									"authorizationTransferId": "c43f5554e702f43d4f8ccf4a38b8e227",
+									"settlementTransferId": "fda728c4e4d439a0adea2352a0f424bb"
+								},
+								{
+									"authorizationTransferId": "c90c28a26319e40634960bbfb82f84e9",
+									"settlementTransferId": "ba3b83e95110f6ef754064a9cf3d8e4b"
+								},
+								{
+									"authorizationTransferId": "d82e12121d8dd3ce78a8a568784ee00c",
+									"settlementTransferId": "071a12102b83dd1d59e5ba5f74368959"
+								},
+								{
+									"authorizationTransferId": "ebf245ae7bf2c348159ec1a912c98595",
+									"settlementTransferId": "83239ef107db28e01378356173e01d3f"
+								},
+								{
+									"authorizationTransferId": "86c15cc09e509e24bcb175d2ccfcd33a",
+									"settlementTransferId": "4eca69fddf1d6a9ccf637ef08a942139"
+								}
+							]
+						},
+						"sequence": 5,
+						"hash": "8c6d5e30c510bd680b58aa46c41213cdd160ef2b4682d475d9ea2a2c03f8d3d4"
+					},
+					"inclusion": {
+						"version": 1,
+						"leafHash": "8c6d5e30c510bd680b58aa46c41213cdd160ef2b4682d475d9ea2a2c03f8d3d4",
+						"leafIndex": 1,
+						"treeSize": 6,
+						"root": "ebe7415527eb44ecb49d88df573ea31ebe554fd14be0fb67a23471d1bbdfc6e6",
+						"segmentId": "seg-5-00000000000000000000000000000002",
+						"siblings": [
+							{
+								"hash": "d8b9d1934c9dde5f4f1cb3f10fdf01577cf511bb6a74b14cb5100df2a9b792ce",
+								"position": "left"
+							},
+							{
+								"hash": "72393de9530dd3a20e01b06d2c1634884a7cc5bc913388a48dd479cf22fed968",
+								"position": "right"
+							},
+							{
+								"hash": "431a2da490dd1a38f4ecfaf56f571cf4ea20c09391ee96b74d86ca0dc895d2fe",
+								"position": "right"
+							}
+						]
+					}
+				},
+				{
+					"event": {
+						"id": "evt_xgen_6",
+						"timestamp": "2026-10-05T00:00:06.000Z",
+						"previousHash": "8c6d5e30c510bd680b58aa46c41213cdd160ef2b4682d475d9ea2a2c03f8d3d4",
+						"kind": "receipt_settled",
+						"actor": {
+							"type": "system",
+							"id": "receipt-minter",
+							"name": "receipt-minter"
+						},
+						"data": {
+							"spec": "ut1",
+							"scope": "session",
+							"sessionId": "01K2Q7V8ZC4M6N0PXGEN000006",
+							"generation": 1,
+							"work": {
+								"kind": "session",
+								"repoId": "github.com:R_kgDOK1x2Yw",
+								"repo": "github.com/usertools-ai/usertrust"
+							},
+							"sessionAssociation": "workflowAttested",
+							"workloadId": "wl_7c2f4a91b8",
+							"models": ["claude-opus-4-5", "claude-sonnet-4-5"],
+							"providers": ["anthropic"],
+							"startedAt": "2026-08-11T18:00:00.000Z",
+							"endedAt": "2026-08-11T18:42:13.512Z",
+							"spend": {
+								"assessedUsertokens": 48224,
+								"postedUsertokens": 48224,
+								"roundingAdjustment": 14,
+								"transferCount": 22,
+								"usagePosture": "provider",
+								"pricingPosture": "exact"
+							},
+							"delegationPosture": "selfDebitsOnly",
+							"pricing": {
+								"tableVersions": ["2026-08-01"]
+							},
+							"transferSetRoot": "2ac22934267ae7ce5ad6382aa192c7b1f0c6f517ae10941b392f889177eab8f0",
+							"transferSet": [
+								{
+									"authorizationTransferId": "839fa69cf95e91d417ae004e979b6aa1",
+									"settlementTransferId": "3cd2180f808130887556f49a3c0c79a9"
+								},
+								{
+									"authorizationTransferId": "70022de8402cb080beba7eff3a3dac7c",
+									"settlementTransferId": "7c6ca5c8e0114f3fa031bc995289f92e"
+								},
+								{
+									"authorizationTransferId": "794b66981d842c63b9eac65a07a99027",
+									"settlementTransferId": "2b6759e1413f68ce605c9214da5ac1d4"
+								},
+								{
+									"authorizationTransferId": "04f18164b6eefa32a13ce5dbad12a43e",
+									"settlementTransferId": "961b9400fd45bcf85386feb6202ac58f"
+								},
+								{
+									"authorizationTransferId": "96c704c5230c79cc9b5e401982b35f98",
+									"settlementTransferId": "1888e7b5b46317b0172897e0b3a465c8"
+								},
+								{
+									"authorizationTransferId": "9ef6e7531dc448dbbd5f8ed5c6893a5a",
+									"settlementTransferId": "d4939fabec30ff1315cb3671447210cb"
+								},
+								{
+									"authorizationTransferId": "6aa0b055500e0e50cd8fcc2b6303f00a",
+									"settlementTransferId": "bec12e355b1421dce8b199d3c71aa48e"
+								},
+								{
+									"authorizationTransferId": "d80080bc1f949b00a38b6704d745b92a",
+									"settlementTransferId": "07e5c4c29e902bd74707a2d05f08281a"
+								},
+								{
+									"authorizationTransferId": "935f84e90871f727c89a93b181c31f76",
+									"settlementTransferId": "ccf12d568ec96d089879e4720dbef8cd"
+								},
+								{
+									"authorizationTransferId": "07b7571afcd135d8a04e296c22f5def7",
+									"settlementTransferId": "83218b4121d728e99d12866c4d0778e9"
+								},
+								{
+									"authorizationTransferId": "777bab9fcdeb5f3651a3101a99d3b89a",
+									"settlementTransferId": "0a2735409f0649850949dcc2071ad464"
+								},
+								{
+									"authorizationTransferId": "b254bad9db65db9aeb500e1a5ac392c0",
+									"settlementTransferId": "b74d9326f137a2e43fcdf2f963cd8457"
+								},
+								{
+									"authorizationTransferId": "a4e566d4bdbb80771049a6cb24131474",
+									"settlementTransferId": "e43eb5619b43bc20d43575ae765a6748"
+								},
+								{
+									"authorizationTransferId": "f8c3f7a1dcce3035e49e4fc1c322cba6",
+									"settlementTransferId": "baf87adc3b5e2a61d89454626cc17bfd"
+								},
+								{
+									"authorizationTransferId": "b7c0f4bc03623a7cfb21f335766c6a26",
+									"settlementTransferId": "1764a46332adcb3caa96f361c60220f2"
+								},
+								{
+									"authorizationTransferId": "abf7a1c7284acd776238aac644bb1145",
+									"settlementTransferId": "59d6691779a032b1de1d586fb857f7d8"
+								},
+								{
+									"authorizationTransferId": "b467f03b0b29dd747c25a8af006df155",
+									"settlementTransferId": "8eff603704174f5bcef870637c4e41cf"
+								},
+								{
+									"authorizationTransferId": "c43f5554e702f43d4f8ccf4a38b8e227",
+									"settlementTransferId": "fda728c4e4d439a0adea2352a0f424bb"
+								},
+								{
+									"authorizationTransferId": "c90c28a26319e40634960bbfb82f84e9",
+									"settlementTransferId": "ba3b83e95110f6ef754064a9cf3d8e4b"
+								},
+								{
+									"authorizationTransferId": "d82e12121d8dd3ce78a8a568784ee00c",
+									"settlementTransferId": "071a12102b83dd1d59e5ba5f74368959"
+								},
+								{
+									"authorizationTransferId": "ebf245ae7bf2c348159ec1a912c98595",
+									"settlementTransferId": "83239ef107db28e01378356173e01d3f"
+								},
+								{
+									"authorizationTransferId": "86c15cc09e509e24bcb175d2ccfcd33a",
+									"settlementTransferId": "4eca69fddf1d6a9ccf637ef08a942139"
+								}
+							]
+						},
+						"sequence": 6,
+						"hash": "63e5819d03182951e92f6363c9d245a5b8c305a32c57a01b52d886ca62a8968c"
+					},
+					"inclusion": {
+						"version": 1,
+						"leafHash": "63e5819d03182951e92f6363c9d245a5b8c305a32c57a01b52d886ca62a8968c",
+						"leafIndex": 2,
+						"treeSize": 6,
+						"root": "ebe7415527eb44ecb49d88df573ea31ebe554fd14be0fb67a23471d1bbdfc6e6",
+						"segmentId": "seg-5-00000000000000000000000000000002",
+						"siblings": [
+							{
+								"hash": "9b2f6970342ff5c4e7cb7583cacc51b9b5be316660505d26ea3859a147538fc6",
+								"position": "right"
+							},
+							{
+								"hash": "db5a559606738c11e183e348d34624ec76215874040cb3a1a957691162737395",
+								"position": "left"
+							},
+							{
+								"hash": "431a2da490dd1a38f4ecfaf56f571cf4ea20c09391ee96b74d86ca0dc895d2fe",
+								"position": "right"
+							}
+						]
+					}
+				},
+				{
+					"event": {
+						"id": "evt_xgen_7",
+						"timestamp": "2026-10-05T00:00:07.000Z",
+						"previousHash": "63e5819d03182951e92f6363c9d245a5b8c305a32c57a01b52d886ca62a8968c",
+						"kind": "receipt_settled",
+						"actor": {
+							"type": "system",
+							"id": "receipt-minter",
+							"name": "receipt-minter"
+						},
+						"data": {
+							"spec": "ut1",
+							"scope": "session",
+							"sessionId": "01K2Q7V8ZC4M6N0PXGEN000007",
+							"generation": 1,
+							"work": {
+								"kind": "session",
+								"repoId": "github.com:R_kgDOK1x2Yw",
+								"repo": "github.com/usertools-ai/usertrust"
+							},
+							"sessionAssociation": "workflowAttested",
+							"workloadId": "wl_7c2f4a91b8",
+							"models": ["claude-opus-4-5", "claude-sonnet-4-5"],
+							"providers": ["anthropic"],
+							"startedAt": "2026-08-11T18:00:00.000Z",
+							"endedAt": "2026-08-11T18:42:13.512Z",
+							"spend": {
+								"assessedUsertokens": 48224,
+								"postedUsertokens": 48224,
+								"roundingAdjustment": 14,
+								"transferCount": 22,
+								"usagePosture": "provider",
+								"pricingPosture": "exact"
+							},
+							"delegationPosture": "selfDebitsOnly",
+							"pricing": {
+								"tableVersions": ["2026-08-01"]
+							},
+							"transferSetRoot": "2ac22934267ae7ce5ad6382aa192c7b1f0c6f517ae10941b392f889177eab8f0",
+							"transferSet": [
+								{
+									"authorizationTransferId": "839fa69cf95e91d417ae004e979b6aa1",
+									"settlementTransferId": "3cd2180f808130887556f49a3c0c79a9"
+								},
+								{
+									"authorizationTransferId": "70022de8402cb080beba7eff3a3dac7c",
+									"settlementTransferId": "7c6ca5c8e0114f3fa031bc995289f92e"
+								},
+								{
+									"authorizationTransferId": "794b66981d842c63b9eac65a07a99027",
+									"settlementTransferId": "2b6759e1413f68ce605c9214da5ac1d4"
+								},
+								{
+									"authorizationTransferId": "04f18164b6eefa32a13ce5dbad12a43e",
+									"settlementTransferId": "961b9400fd45bcf85386feb6202ac58f"
+								},
+								{
+									"authorizationTransferId": "96c704c5230c79cc9b5e401982b35f98",
+									"settlementTransferId": "1888e7b5b46317b0172897e0b3a465c8"
+								},
+								{
+									"authorizationTransferId": "9ef6e7531dc448dbbd5f8ed5c6893a5a",
+									"settlementTransferId": "d4939fabec30ff1315cb3671447210cb"
+								},
+								{
+									"authorizationTransferId": "6aa0b055500e0e50cd8fcc2b6303f00a",
+									"settlementTransferId": "bec12e355b1421dce8b199d3c71aa48e"
+								},
+								{
+									"authorizationTransferId": "d80080bc1f949b00a38b6704d745b92a",
+									"settlementTransferId": "07e5c4c29e902bd74707a2d05f08281a"
+								},
+								{
+									"authorizationTransferId": "935f84e90871f727c89a93b181c31f76",
+									"settlementTransferId": "ccf12d568ec96d089879e4720dbef8cd"
+								},
+								{
+									"authorizationTransferId": "07b7571afcd135d8a04e296c22f5def7",
+									"settlementTransferId": "83218b4121d728e99d12866c4d0778e9"
+								},
+								{
+									"authorizationTransferId": "777bab9fcdeb5f3651a3101a99d3b89a",
+									"settlementTransferId": "0a2735409f0649850949dcc2071ad464"
+								},
+								{
+									"authorizationTransferId": "b254bad9db65db9aeb500e1a5ac392c0",
+									"settlementTransferId": "b74d9326f137a2e43fcdf2f963cd8457"
+								},
+								{
+									"authorizationTransferId": "a4e566d4bdbb80771049a6cb24131474",
+									"settlementTransferId": "e43eb5619b43bc20d43575ae765a6748"
+								},
+								{
+									"authorizationTransferId": "f8c3f7a1dcce3035e49e4fc1c322cba6",
+									"settlementTransferId": "baf87adc3b5e2a61d89454626cc17bfd"
+								},
+								{
+									"authorizationTransferId": "b7c0f4bc03623a7cfb21f335766c6a26",
+									"settlementTransferId": "1764a46332adcb3caa96f361c60220f2"
+								},
+								{
+									"authorizationTransferId": "abf7a1c7284acd776238aac644bb1145",
+									"settlementTransferId": "59d6691779a032b1de1d586fb857f7d8"
+								},
+								{
+									"authorizationTransferId": "b467f03b0b29dd747c25a8af006df155",
+									"settlementTransferId": "8eff603704174f5bcef870637c4e41cf"
+								},
+								{
+									"authorizationTransferId": "c43f5554e702f43d4f8ccf4a38b8e227",
+									"settlementTransferId": "fda728c4e4d439a0adea2352a0f424bb"
+								},
+								{
+									"authorizationTransferId": "c90c28a26319e40634960bbfb82f84e9",
+									"settlementTransferId": "ba3b83e95110f6ef754064a9cf3d8e4b"
+								},
+								{
+									"authorizationTransferId": "d82e12121d8dd3ce78a8a568784ee00c",
+									"settlementTransferId": "071a12102b83dd1d59e5ba5f74368959"
+								},
+								{
+									"authorizationTransferId": "ebf245ae7bf2c348159ec1a912c98595",
+									"settlementTransferId": "83239ef107db28e01378356173e01d3f"
+								},
+								{
+									"authorizationTransferId": "86c15cc09e509e24bcb175d2ccfcd33a",
+									"settlementTransferId": "4eca69fddf1d6a9ccf637ef08a942139"
+								}
+							]
+						},
+						"sequence": 7,
+						"hash": "e8e1af5f41ffb2c15e1d6af37d311c6912084988d593d5237b5ba48116309511"
+					},
+					"inclusion": {
+						"version": 1,
+						"leafHash": "e8e1af5f41ffb2c15e1d6af37d311c6912084988d593d5237b5ba48116309511",
+						"leafIndex": 3,
+						"treeSize": 6,
+						"root": "ebe7415527eb44ecb49d88df573ea31ebe554fd14be0fb67a23471d1bbdfc6e6",
+						"segmentId": "seg-5-00000000000000000000000000000002",
+						"siblings": [
+							{
+								"hash": "df0e13078c8e739411a49b80bbd0fc335f69007c6dbe4bb32de09e5e92b2a340",
+								"position": "left"
+							},
+							{
+								"hash": "db5a559606738c11e183e348d34624ec76215874040cb3a1a957691162737395",
+								"position": "left"
+							},
+							{
+								"hash": "431a2da490dd1a38f4ecfaf56f571cf4ea20c09391ee96b74d86ca0dc895d2fe",
+								"position": "right"
+							}
+						]
+					}
+				},
+				{
+					"event": {
+						"id": "evt_xgen_9",
+						"timestamp": "2026-10-05T00:00:09.000Z",
+						"previousHash": "e1f5dff04f431b31f44fff39373396a40e5e6fad81fc328e65c4bbdbcf949211",
+						"kind": "receipt_settled",
+						"actor": {
+							"type": "system",
+							"id": "receipt-minter",
+							"name": "receipt-minter"
+						},
+						"data": {
+							"spec": "ut1",
+							"scope": "session",
+							"sessionId": "01K2Q7V8ZC4M6N0PXGEN000009",
+							"generation": 1,
+							"work": {
+								"kind": "session",
+								"repoId": "github.com:R_kgDOK1x2Yw",
+								"repo": "github.com/usertools-ai/usertrust"
+							},
+							"sessionAssociation": "workflowAttested",
+							"workloadId": "wl_7c2f4a91b8",
+							"models": ["claude-opus-4-5", "claude-sonnet-4-5"],
+							"providers": ["anthropic"],
+							"startedAt": "2026-08-11T18:00:00.000Z",
+							"endedAt": "2026-08-11T18:42:13.512Z",
+							"spend": {
+								"assessedUsertokens": 48224,
+								"postedUsertokens": 48224,
+								"roundingAdjustment": 14,
+								"transferCount": 22,
+								"usagePosture": "provider",
+								"pricingPosture": "exact"
+							},
+							"delegationPosture": "selfDebitsOnly",
+							"pricing": {
+								"tableVersions": ["2026-08-01"]
+							},
+							"transferSetRoot": "2ac22934267ae7ce5ad6382aa192c7b1f0c6f517ae10941b392f889177eab8f0",
+							"transferSet": [
+								{
+									"authorizationTransferId": "839fa69cf95e91d417ae004e979b6aa1",
+									"settlementTransferId": "3cd2180f808130887556f49a3c0c79a9"
+								},
+								{
+									"authorizationTransferId": "70022de8402cb080beba7eff3a3dac7c",
+									"settlementTransferId": "7c6ca5c8e0114f3fa031bc995289f92e"
+								},
+								{
+									"authorizationTransferId": "794b66981d842c63b9eac65a07a99027",
+									"settlementTransferId": "2b6759e1413f68ce605c9214da5ac1d4"
+								},
+								{
+									"authorizationTransferId": "04f18164b6eefa32a13ce5dbad12a43e",
+									"settlementTransferId": "961b9400fd45bcf85386feb6202ac58f"
+								},
+								{
+									"authorizationTransferId": "96c704c5230c79cc9b5e401982b35f98",
+									"settlementTransferId": "1888e7b5b46317b0172897e0b3a465c8"
+								},
+								{
+									"authorizationTransferId": "9ef6e7531dc448dbbd5f8ed5c6893a5a",
+									"settlementTransferId": "d4939fabec30ff1315cb3671447210cb"
+								},
+								{
+									"authorizationTransferId": "6aa0b055500e0e50cd8fcc2b6303f00a",
+									"settlementTransferId": "bec12e355b1421dce8b199d3c71aa48e"
+								},
+								{
+									"authorizationTransferId": "d80080bc1f949b00a38b6704d745b92a",
+									"settlementTransferId": "07e5c4c29e902bd74707a2d05f08281a"
+								},
+								{
+									"authorizationTransferId": "935f84e90871f727c89a93b181c31f76",
+									"settlementTransferId": "ccf12d568ec96d089879e4720dbef8cd"
+								},
+								{
+									"authorizationTransferId": "07b7571afcd135d8a04e296c22f5def7",
+									"settlementTransferId": "83218b4121d728e99d12866c4d0778e9"
+								},
+								{
+									"authorizationTransferId": "777bab9fcdeb5f3651a3101a99d3b89a",
+									"settlementTransferId": "0a2735409f0649850949dcc2071ad464"
+								},
+								{
+									"authorizationTransferId": "b254bad9db65db9aeb500e1a5ac392c0",
+									"settlementTransferId": "b74d9326f137a2e43fcdf2f963cd8457"
+								},
+								{
+									"authorizationTransferId": "a4e566d4bdbb80771049a6cb24131474",
+									"settlementTransferId": "e43eb5619b43bc20d43575ae765a6748"
+								},
+								{
+									"authorizationTransferId": "f8c3f7a1dcce3035e49e4fc1c322cba6",
+									"settlementTransferId": "baf87adc3b5e2a61d89454626cc17bfd"
+								},
+								{
+									"authorizationTransferId": "b7c0f4bc03623a7cfb21f335766c6a26",
+									"settlementTransferId": "1764a46332adcb3caa96f361c60220f2"
+								},
+								{
+									"authorizationTransferId": "abf7a1c7284acd776238aac644bb1145",
+									"settlementTransferId": "59d6691779a032b1de1d586fb857f7d8"
+								},
+								{
+									"authorizationTransferId": "b467f03b0b29dd747c25a8af006df155",
+									"settlementTransferId": "8eff603704174f5bcef870637c4e41cf"
+								},
+								{
+									"authorizationTransferId": "c43f5554e702f43d4f8ccf4a38b8e227",
+									"settlementTransferId": "fda728c4e4d439a0adea2352a0f424bb"
+								},
+								{
+									"authorizationTransferId": "c90c28a26319e40634960bbfb82f84e9",
+									"settlementTransferId": "ba3b83e95110f6ef754064a9cf3d8e4b"
+								},
+								{
+									"authorizationTransferId": "d82e12121d8dd3ce78a8a568784ee00c",
+									"settlementTransferId": "071a12102b83dd1d59e5ba5f74368959"
+								},
+								{
+									"authorizationTransferId": "ebf245ae7bf2c348159ec1a912c98595",
+									"settlementTransferId": "83239ef107db28e01378356173e01d3f"
+								},
+								{
+									"authorizationTransferId": "86c15cc09e509e24bcb175d2ccfcd33a",
+									"settlementTransferId": "4eca69fddf1d6a9ccf637ef08a942139"
+								}
+							]
+						},
+						"sequence": 9,
+						"hash": "b2abdbac6622f701e9775118601c1dc577a3b0cec8b31ca1e27e24c2abc65a97"
+					},
+					"inclusion": {
+						"version": 1,
+						"leafHash": "b2abdbac6622f701e9775118601c1dc577a3b0cec8b31ca1e27e24c2abc65a97",
+						"leafIndex": 5,
+						"treeSize": 6,
+						"root": "ebe7415527eb44ecb49d88df573ea31ebe554fd14be0fb67a23471d1bbdfc6e6",
+						"segmentId": "seg-5-00000000000000000000000000000002",
+						"siblings": [
+							{
+								"hash": "c9a2f32b884247fb8f1fa780f7d300023ec59e59edb36b73b1200b2e06b05521",
+								"position": "left"
+							},
+							{
+								"hash": "858b9f65f0c9fc4883b34d881d33f8bf0211ad411149ded643a1b1582744f2db",
+								"position": "left"
+							}
+						]
+					}
+				}
+			]
 		},
 		{
 			"signed": {
 				"v": 2,
 				"vaultId": "vlt_ut_proxy_prod_1",
 				"profile": "proxy-v1",
-				"root": "67f76135a9afb7014a211d3d35885ce20854db38525e3be58e959001d3655fec",
-				"treeSize": 4,
+				"root": "c709a68de63cb069060b24214352b28018417f286d8fd2f6aab442cf86f002af",
+				"treeSize": 3,
 				"segmentId": "seg-10-00000000000000000000000000000003",
 				"segmentFirstSequence": 10,
-				"previousSegmentRoot": "c95f9c460ee0872203fbcc5ebfa930fac37f85fa38688d3dd93d2bcce9e847d9",
+				"previousSegmentRoot": "ebe7415527eb44ecb49d88df573ea31ebe554fd14be0fb67a23471d1bbdfc6e6",
 				"previousSegmentId": "seg-5-00000000000000000000000000000002",
-				"segmentStartPreviousHash": "45e11f09dfb1fc84d23b927f88d0b29e45637c102f5f552b95b7f9495a25abf2",
+				"segmentStartPreviousHash": "b2abdbac6622f701e9775118601c1dc577a3b0cec8b31ca1e27e24c2abc65a97",
 				"keyId": "utk_ckpt_2026_08",
 				"publishedAt": "2026-10-05T01:02:00.000Z",
 				"publishedTo": "pending",
 				"reference": "",
-				"signature": "bC2Yb26qbZcpDX/I0b7QQoBFlEK6D6u1ZO+DvlArVjk/tg/dUmld06S4Z7s/uLbubeWAg4zWsPSTnk3h9CYBBA==",
+				"signature": "xnaJHA2ZrDutJ+hVke30hduK7E5zws4V9ZYrgpi96USq7t8WRDZjvmwH4TuQfOu1CoWu6lbG9eZm1zXaxmJFCQ==",
 				"publicKey": "MCowBQYDK2VwAyEARSufghtL+f40TFunvTs3nwz3CiYqKvj+JTmhwOed5VQ="
-			}
+			},
+			"mints": [
+				{
+					"event": {
+						"id": "evt_xgen_11",
+						"timestamp": "2026-10-05T00:00:11.000Z",
+						"previousHash": "31d0bdda29c89f1213fe6f856aac338d4247967eb41db8039c804a434023cf13",
+						"kind": "receipt_settled",
+						"actor": {
+							"type": "system",
+							"id": "receipt-minter",
+							"name": "receipt-minter"
+						},
+						"data": {
+							"spec": "ut1",
+							"scope": "session",
+							"sessionId": "01K2Q7V8ZC4M6N0PXGEN000011",
+							"generation": 1,
+							"work": {
+								"kind": "session",
+								"repoId": "github.com:R_kgDOK1x2Yw",
+								"repo": "github.com/usertools-ai/usertrust"
+							},
+							"sessionAssociation": "workflowAttested",
+							"workloadId": "wl_7c2f4a91b8",
+							"models": ["claude-opus-4-5", "claude-sonnet-4-5"],
+							"providers": ["anthropic"],
+							"startedAt": "2026-08-11T18:00:00.000Z",
+							"endedAt": "2026-08-11T18:42:13.512Z",
+							"spend": {
+								"assessedUsertokens": 48224,
+								"postedUsertokens": 48224,
+								"roundingAdjustment": 14,
+								"transferCount": 22,
+								"usagePosture": "provider",
+								"pricingPosture": "exact"
+							},
+							"delegationPosture": "selfDebitsOnly",
+							"pricing": {
+								"tableVersions": ["2026-08-01"]
+							},
+							"transferSetRoot": "2ac22934267ae7ce5ad6382aa192c7b1f0c6f517ae10941b392f889177eab8f0",
+							"transferSet": [
+								{
+									"authorizationTransferId": "839fa69cf95e91d417ae004e979b6aa1",
+									"settlementTransferId": "3cd2180f808130887556f49a3c0c79a9"
+								},
+								{
+									"authorizationTransferId": "70022de8402cb080beba7eff3a3dac7c",
+									"settlementTransferId": "7c6ca5c8e0114f3fa031bc995289f92e"
+								},
+								{
+									"authorizationTransferId": "794b66981d842c63b9eac65a07a99027",
+									"settlementTransferId": "2b6759e1413f68ce605c9214da5ac1d4"
+								},
+								{
+									"authorizationTransferId": "04f18164b6eefa32a13ce5dbad12a43e",
+									"settlementTransferId": "961b9400fd45bcf85386feb6202ac58f"
+								},
+								{
+									"authorizationTransferId": "96c704c5230c79cc9b5e401982b35f98",
+									"settlementTransferId": "1888e7b5b46317b0172897e0b3a465c8"
+								},
+								{
+									"authorizationTransferId": "9ef6e7531dc448dbbd5f8ed5c6893a5a",
+									"settlementTransferId": "d4939fabec30ff1315cb3671447210cb"
+								},
+								{
+									"authorizationTransferId": "6aa0b055500e0e50cd8fcc2b6303f00a",
+									"settlementTransferId": "bec12e355b1421dce8b199d3c71aa48e"
+								},
+								{
+									"authorizationTransferId": "d80080bc1f949b00a38b6704d745b92a",
+									"settlementTransferId": "07e5c4c29e902bd74707a2d05f08281a"
+								},
+								{
+									"authorizationTransferId": "935f84e90871f727c89a93b181c31f76",
+									"settlementTransferId": "ccf12d568ec96d089879e4720dbef8cd"
+								},
+								{
+									"authorizationTransferId": "07b7571afcd135d8a04e296c22f5def7",
+									"settlementTransferId": "83218b4121d728e99d12866c4d0778e9"
+								},
+								{
+									"authorizationTransferId": "777bab9fcdeb5f3651a3101a99d3b89a",
+									"settlementTransferId": "0a2735409f0649850949dcc2071ad464"
+								},
+								{
+									"authorizationTransferId": "b254bad9db65db9aeb500e1a5ac392c0",
+									"settlementTransferId": "b74d9326f137a2e43fcdf2f963cd8457"
+								},
+								{
+									"authorizationTransferId": "a4e566d4bdbb80771049a6cb24131474",
+									"settlementTransferId": "e43eb5619b43bc20d43575ae765a6748"
+								},
+								{
+									"authorizationTransferId": "f8c3f7a1dcce3035e49e4fc1c322cba6",
+									"settlementTransferId": "baf87adc3b5e2a61d89454626cc17bfd"
+								},
+								{
+									"authorizationTransferId": "b7c0f4bc03623a7cfb21f335766c6a26",
+									"settlementTransferId": "1764a46332adcb3caa96f361c60220f2"
+								},
+								{
+									"authorizationTransferId": "abf7a1c7284acd776238aac644bb1145",
+									"settlementTransferId": "59d6691779a032b1de1d586fb857f7d8"
+								},
+								{
+									"authorizationTransferId": "b467f03b0b29dd747c25a8af006df155",
+									"settlementTransferId": "8eff603704174f5bcef870637c4e41cf"
+								},
+								{
+									"authorizationTransferId": "c43f5554e702f43d4f8ccf4a38b8e227",
+									"settlementTransferId": "fda728c4e4d439a0adea2352a0f424bb"
+								},
+								{
+									"authorizationTransferId": "c90c28a26319e40634960bbfb82f84e9",
+									"settlementTransferId": "ba3b83e95110f6ef754064a9cf3d8e4b"
+								},
+								{
+									"authorizationTransferId": "d82e12121d8dd3ce78a8a568784ee00c",
+									"settlementTransferId": "071a12102b83dd1d59e5ba5f74368959"
+								},
+								{
+									"authorizationTransferId": "ebf245ae7bf2c348159ec1a912c98595",
+									"settlementTransferId": "83239ef107db28e01378356173e01d3f"
+								},
+								{
+									"authorizationTransferId": "86c15cc09e509e24bcb175d2ccfcd33a",
+									"settlementTransferId": "4eca69fddf1d6a9ccf637ef08a942139"
+								}
+							]
+						},
+						"sequence": 11,
+						"hash": "6bc1efba9cc0906d2b9414276f51de5f5c8056248430ca32a1a91b73dd2e6e06"
+					},
+					"inclusion": {
+						"version": 1,
+						"leafHash": "6bc1efba9cc0906d2b9414276f51de5f5c8056248430ca32a1a91b73dd2e6e06",
+						"leafIndex": 2,
+						"treeSize": 3,
+						"root": "c709a68de63cb069060b24214352b28018417f286d8fd2f6aab442cf86f002af",
+						"segmentId": "seg-10-00000000000000000000000000000003",
+						"siblings": [
+							{
+								"hash": "9f9abc50cf25c2c3590bff8fe2b65230b1a1e926012c5cd2bbb4652ad1395100",
+								"position": "left"
+							}
+						]
+					}
+				}
+			]
 		}
 	]
 }

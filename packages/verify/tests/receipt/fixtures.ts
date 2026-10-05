@@ -217,6 +217,29 @@ function work(projection: Projection): Record<string, unknown> {
 	return projection.work as Record<string, unknown>;
 }
 
+/**
+ * Well-formed ARTIFACT variants. The default mint is a `session` receipt (§2,
+ * v0.9.6 refuses the artifact variants), so a vector about one builds it here.
+ */
+const MEMBERSHIP = { status: "providerVerified", proofId: "pv_9f3a2c81d0" };
+const COMMIT_WORK = {
+	kind: "commit",
+	repoId: "github.com:R_kgDOK1x2Yw",
+	repo: "github.com/usertools-ai/usertrust",
+	oid: "37df16d3a4c1b8e05f92d7a6c31e4b8079fa2d51",
+	oidAlg: "sha1",
+	objectSha256: otherHash("commit-object"),
+	repositoryMembership: MEMBERSHIP,
+};
+const ARTIFACT_WORK = {
+	repoId: "github.com:R_kgDOK1x2Yw",
+	number: 42,
+	providerArtifactId: "PR_kwDOK1x2Yw6h3Qm2",
+	observedRevision: "2026-08-11T18:00:00.000Z",
+	contentBinding: { kind: "publicSha256", sha256: otherHash("artifact-content") },
+	repositoryMembership: MEMBERSHIP,
+};
+
 /** Re-sign a checkpoint whose unsigned payload was edited. */
 function resign(checkpoint: SegmentCheckpoint, signer = CHECKPOINT_KEY): SegmentCheckpoint {
 	const { sig: _dropped, ...unsigned } = checkpoint;
@@ -255,6 +278,48 @@ export const PASS_VECTORS: readonly Vector[] = [
 		expect: PASS_HISTORY,
 		breaks: [],
 		build: () => mint({ mintSegmentIndex: 0, mintLeafIndex: 2 }),
+	},
+	{
+		// The control for the chain-link binding: an honest receipt at leaf 1 of a
+		// non-genesis segment, whose level-0 sibling IS the signed link.
+		name: "pass/non-genesis-leaf-1",
+		what: "At leaf 1 of a non-genesis segment the level-0 sibling is hashLeaf(previousSegmentRoot), and it verifies.",
+		mode: "envelope",
+		expect: PASS_HISTORY,
+		breaks: [],
+		build: () => mint({ mintLeafIndex: 1 }),
+	},
+	{
+		// The control for the leaf-2 node: built from the honest link and the
+		// honest predecessor, it is the level-1 sibling the tree holds.
+		name: "pass/non-genesis-leaf-2",
+		what: "At leaf 2 of a non-genesis segment the level-1 sibling is node(leaf(link), leaf(predecessor)), and it verifies.",
+		mode: "envelope",
+		expect: PASS_HISTORY,
+		breaks: [],
+		build: () => mint({ mintLeafIndex: 2 }),
+	},
+	{
+		// …and its GENESIS counterpart: leaf 1 of a genesis segment has an EVENT
+		// to its left, not a chain link, so the chain-link binding must not apply
+		// there — the predecessor binding does, and holds.
+		name: "pass/genesis-segment-leaf-1",
+		what: "Leaf 1 of a GENESIS segment has its predecessor event to its left, not a chain link, and it verifies.",
+		mode: "envelope",
+		expect: PASS_HISTORY,
+		breaks: [],
+		build: () => mint({ mintSegmentIndex: 0, mintLeafIndex: 1 }),
+	},
+	{
+		// The control for the successor binding: the receipt's event is its
+		// segment's FINAL event, and the served successor signs exactly it.
+		name: "pass/final-event-with-successor",
+		what: "A receipt at its segment's last leaf, with the successor served: its signed start hash IS event.hash.",
+		mode: "envelope",
+		expect: PASS_HISTORY,
+		breaks: [],
+		build: () =>
+			mint({ mintSegmentIndex: 1, mintLeafIndex: 6, history: (_history, all) => [...all] }),
 	},
 	{
 		name: "pass/transfer-set-absent-above-32",
@@ -733,7 +798,9 @@ export const PARSE_VECTORS: readonly Vector[] = [
 		// `breaks: []` is the whole point of this one: the appended `zz` is
 		// dropped by Node's hex decoder, so the siblings still fold to the signed
 		// root and the independent fact checker agrees the proof is INTACT. Only
-		// the declared format separates it from an honest receipt.
+		// the declared format separates it from an honest receipt. Sibling 1, not
+		// 0: at the default leaf 3 sibling 0 is a node equality 4 recomputes
+		// (§4a, v0.9.6) and compares as a string, so it would be caught twice.
 		name: "schema/sibling-hash-non-hex",
 		what: "§4a: a sibling hash of `<64 hex>zz` folds to the SAME root — the decoder drops the tail, so nothing downstream can catch it.",
 		mode: "receipt",
@@ -744,7 +811,7 @@ export const PARSE_VECTORS: readonly Vector[] = [
 				inclusion: (proof) => ({
 					...proof,
 					siblings: proof.siblings.map((sibling, index) =>
-						index === 0 ? { ...sibling, hash: `${sibling.hash}zz` } : sibling,
+						index === 1 ? { ...sibling, hash: `${sibling.hash}zz` } : sibling,
 					),
 				}),
 			}),
@@ -877,6 +944,58 @@ export const EVENT_VECTORS: readonly Vector[] = [
 			}),
 	},
 	{
+		// §4a (v0.9.6): at leaf 1 of a non-genesis segment the proof's level-0
+		// sibling IS leaf 0, the chain link. Here the tree is built over a forged
+		// leaf 0 and everything downstream — the fold, the root, the signed
+		// checkpoint — agrees with the forgery. Only the signed
+		// `previousSegmentRoot` still names the real predecessor.
+		name: "eq4/chain-link-leaf-forged",
+		what: "At leaf 1 of a non-genesis segment the level-0 sibling must be hashLeaf(checkpoint.previousSegmentRoot).",
+		mode: "receipt",
+		expect: failed("event", "EVENT_MISMATCH"),
+		breaks: ["eq4"],
+		build: () => mint({ mintLeafIndex: 1, chainLinkLeaf: () => otherHash("forged-chain-link") }),
+	},
+	{
+		// One level up: at leaf 2 the level-1 sibling is the node over leaf 0 (the
+		// chain link) and leaf 1 (the receipt's predecessor, `event.previousHash`),
+		// so the receipt rebuilds it from its own signed values.
+		name: "eq4/chain-link-leaf-2-forged",
+		what: "At leaf 2 of a non-genesis segment the level-1 sibling must be node(leaf(previousSegmentRoot), leaf(event.previousHash)).",
+		mode: "receipt",
+		expect: failed("event", "EVENT_MISMATCH"),
+		breaks: ["eq4"],
+		build: () => mint({ mintLeafIndex: 2, chainLinkLeaf: () => otherHash("forged-chain-link") }),
+	},
+	{
+		// The tree's leaves ARE the hash chain: at an odd leaf the level-0 sibling
+		// is the receipt's predecessor event. Here the event links elsewhere, and
+		// hash, tree, proof and both signatures are consistent with that claim.
+		name: "eq4/predecessor-forged",
+		what: "At an odd leaf the level-0 sibling must be the leaf of the event the receipt's previousHash names.",
+		mode: "receipt",
+		expect: failed("event", "EVENT_MISMATCH"),
+		breaks: ["eq4"],
+		build: () => mint({ event: (e) => ({ ...e, previousHash: otherHash("not-the-predecessor") }) }),
+	},
+	{
+		// The same binding from the checkpoint's side: the tree is honest and the
+		// signed lineage edge is the lie.
+		name: "eq4/chain-link-root-resigned",
+		what: "At leaf 1, a checkpoint re-signed over another previousSegmentRoot no longer names the tree's leaf 0.",
+		mode: "receipt",
+		expect: failed("event", "EVENT_MISMATCH"),
+		breaks: ["eq4"],
+		build: () =>
+			mint({
+				mintLeafIndex: 1,
+				checkpointsUnsigned: (checkpoints) =>
+					checkpoints.map((c, i) =>
+						i === 2 ? { ...c, previousSegmentRoot: otherHash("another-predecessor-root") } : c,
+					),
+			}),
+	},
+	{
 		// Leaf 0 of a non-genesis segment is the chain link, never an event. The
 		// sequence here makes equality 4's arithmetic hold at index 0, so only the
 		// offset lower bound refuses it at step 2 (the fold and eq 8's defensive
@@ -1000,7 +1119,7 @@ export const EVENT_VECTORS: readonly Vector[] = [
 			mint({
 				receiptBeforeSign: (r) => ({
 					...r,
-					work: { ...(r.work as Record<string, unknown>), oid: "0".repeat(40) },
+					work: { ...(r.work as Record<string, unknown>), repoId: "github.com:R_kgDOOther99" },
 				}),
 			}),
 	},
@@ -1238,6 +1357,10 @@ export const SIGNATURE_VECTORS: readonly Vector[] = [
 
 export const INCLUSION_VECTORS: readonly Vector[] = [
 	{
+		// Sibling 1, not 0: at the default leaf 3 the level-0 sibling is the
+		// predecessor event's leaf, which step 2 recomputes (§4a, v0.9.6). The
+		// level-1 node covers leaves the receipt does not carry, so only the fold
+		// can catch it.
 		name: "inclusion/sibling-hash-tampered",
 		what: "The fold no longer reaches the signed root.",
 		mode: "receipt",
@@ -1248,7 +1371,7 @@ export const INCLUSION_VECTORS: readonly Vector[] = [
 				inclusion: (p) => ({
 					...p,
 					siblings: p.siblings.map((s, i) =>
-						i === 0 ? { ...s, hash: otherHash("sibling-0") } : s,
+						i === 1 ? { ...s, hash: otherHash("sibling-1") } : s,
 					),
 				}),
 			}),
@@ -1670,10 +1793,39 @@ export const SEMANTIC_VECTORS: readonly Vector[] = [
 		},
 	),
 	semantic(
+		// v0.9.6 refuses every artifact variant at step 7 anyway, so this vector
+		// alone no longer isolates the proofId rule; steps.test.ts pins the detail.
 		"semantics/proof-id-syntax",
 		"Public-safety syntax: proofId matches [A-Za-z0-9._-]{1,128} — an opaque handle, never a description.",
 		(p) => {
-			(work(p).repositoryMembership as Record<string, unknown>).proofId = "cam@usertools.ai";
+			p.work = {
+				...COMMIT_WORK,
+				repositoryMembership: { ...MEMBERSHIP, proofId: "someone@example.com" },
+			};
+		},
+	),
+	// §2 (v0.9.6): an artifact variant fails even WELL FORMED — its provider
+	// proofs are bound by nothing a verifier holds, so a verified status would
+	// certify a claim nobody checked.
+	semantic(
+		"semantics/work-commit-refused",
+		"A well-formed commit variant is an artifact claim v1 refuses: its provider proofs are unverifiable.",
+		(p) => {
+			p.work = { ...COMMIT_WORK };
+		},
+	),
+	semantic(
+		"semantics/work-pr-refused",
+		"A well-formed pr variant is an artifact claim v1 refuses: its provider proofs are unverifiable.",
+		(p) => {
+			p.work = { ...ARTIFACT_WORK, kind: "pr" };
+		},
+	),
+	semantic(
+		"semantics/work-issue-refused",
+		"A well-formed issue variant is an artifact claim v1 refuses: its provider proofs are unverifiable.",
+		(p) => {
+			p.work = { ...ARTIFACT_WORK, kind: "issue" };
 		},
 	),
 	semantic(
@@ -2164,6 +2316,27 @@ export const HISTORY_VECTORS: readonly Vector[] = [
 			mint({
 				checkpointsUnsigned: (checkpoints) =>
 					checkpoints.map((c, i) => (i === 1 ? { ...c, previousSegmentId: "seg_000099" } : c)),
+			}),
+	},
+	{
+		// §4a (v0.9.6): a successor's segmentStartPreviousHash is its
+		// predecessor's FINAL event hash. When the receipt's event sits at its
+		// segment's last leaf, that final event is in hand — and here the served
+		// successor, validly re-signed, says the chain continued from another.
+		name: "history/successor-start-hash-not-final-event",
+		what: "At its segment's last leaf the receipt's event is the one the successor's chain starts from; a successor signing another start hash fails.",
+		mode: "envelope",
+		expect: historyFailed("though that event is the preceding segment's final event"),
+		breaks: [],
+		build: () =>
+			mint({
+				mintSegmentIndex: 1,
+				mintLeafIndex: 6,
+				checkpointsUnsigned: (checkpoints) =>
+					checkpoints.map((c, i) =>
+						i === 2 ? { ...c, segmentStartPreviousHash: otherHash("another-final-event") } : c,
+					),
+				history: (_history, all) => [...all],
 			}),
 	},
 	{

@@ -48,6 +48,7 @@ import {
 	mint,
 	otherHash,
 	type Projection,
+	type SegmentCheckpoint,
 	SHORT_DECODE_RECEIPT_ID,
 	type UnsignedReceipt,
 	VAULT_ID,
@@ -632,10 +633,11 @@ describe("§2a — delegationPosture is load-bearing offline", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Paths the corpus does not reach, because every corpus receipt is a
-// `kind: "commit"` receipt with every member present. They are still legal ut1
-// documents and still Tier-0 code, so they are minted here rather than left as
-// the one arm of the union nobody ever ran.
+// Paths the corpus does not reach, because every corpus receipt is an ordinary
+// `kind: "session"` receipt with every member present. The artifact variants
+// are still WIRE-legal and still Tier-0 code — v0.9.6 refuses them at step 7,
+// after their shape checks — so they are minted here rather than left as the
+// arms of the union nobody ever ran.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function verifyMinted(options: Parameters<typeof mint>[0]): Run {
@@ -682,22 +684,43 @@ const ARTIFACT = {
 };
 
 describe("§2 — the `work` union's other variants", () => {
-	it("verifies a pr receipt under the publicSha256 content binding", () => {
-		const actual = withWork({
-			...ARTIFACT,
-			kind: "pr",
-			contentBinding: { kind: "publicSha256", sha256: CONTENT_SHA256 },
-		});
-		expect(actual.verdict).toBe("VERIFIED_CHECKPOINT");
+	/** v0.9.6: a well-formed artifact variant reaches step 7 and is refused there. */
+	function expectArtifactRefused(actual: Run, kind: string): void {
+		expect(actual.verdict, kind).toBe("FAILED");
+		expect(actual.failure, kind).toMatchObject({ step: "semantics", code: "SEMANTIC_INVALID" });
+		expect(actual.failure?.detail, kind).toContain(`work.kind ${kind} is an artifact claim`);
+	}
+
+	it("refuses a WELL-FORMED commit, pr or issue receipt at step 7 — an artifact claim (v0.9.6)", () => {
+		expectArtifactRefused(withWork(COMMIT_WORK), "commit");
+		expectArtifactRefused(
+			withWork({
+				...ARTIFACT,
+				kind: "pr",
+				contentBinding: { kind: "publicSha256", sha256: CONTENT_SHA256 },
+			}),
+			"pr",
+		);
+		expectArtifactRefused(
+			withWork({
+				...ARTIFACT,
+				kind: "issue",
+				contentBinding: { kind: "privateHmacSha256V1", commitment: CONTENT_COMMITMENT },
+			}),
+			"issue",
+		);
 	});
 
-	it("verifies an issue receipt under the privateHmacSha256V1 commitment", () => {
+	it("names a MALFORMED artifact variant's own defect before the refusal", () => {
+		// The shape checks run first, so the refusal never masks a public-safety
+		// failure: a proofId that is a description is still reported as one.
 		const actual = withWork({
-			...ARTIFACT,
-			kind: "issue",
-			contentBinding: { kind: "privateHmacSha256V1", commitment: CONTENT_COMMITMENT },
+			...COMMIT_WORK,
+			repositoryMembership: { ...MEMBERSHIP, proofId: "someone@example.com" },
 		});
-		expect(actual.verdict).toBe("VERIFIED_CHECKPOINT");
+		expect(actual.failure).toMatchObject({ step: "semantics", code: "SEMANTIC_INVALID" });
+		expect(actual.failure?.detail).toContain("proofId");
+		expect(actual.failure?.detail).not.toContain("artifact claim");
 	});
 
 	it("verifies both session variants — membership is EXEMPT where there is no artifact", () => {
@@ -1176,13 +1199,24 @@ describe("bindings the corpus cannot express with a commit receipt", () => {
 
 	it("a LATER event's previousHash is not bound to the start hash", () => {
 		// Only the first event links to the segment start; leaf offset+1 links to
-		// a predecessor inside the segment, which the receipt cannot see.
-		const actual = verifyMinted({
-			mintSegmentIndex: 2,
-			mintLeafIndex: 2,
-			event: (e) => ({ ...e, previousHash: otherHash("an-in-segment-predecessor") }),
+		// its predecessor inside the segment — leaf 1, not the start hash.
+		const bundle = mint({ mintSegmentIndex: 2, mintLeafIndex: 2 });
+		const event = bundle.receipt.event as { previousHash: string };
+		const checkpoint = (bundle.receipt.proof as { checkpoint: SegmentCheckpoint }).checkpoint;
+		expect(event.previousHash).not.toBe(checkpoint.segmentStartPreviousHash);
+		expect(verifyMinted({ mintSegmentIndex: 2, mintLeafIndex: 2 }).failure).toBeNull();
+		// Where no proof node exposes the predecessor (an even leaf past 2), its
+		// value is unbound; at leaf 2 it is bound through the node over leaves 0
+		// and 1 (§4a, v0.9.6).
+		const elsewhere = <E extends { previousHash: string }>(e: E): E => ({
+			...e,
+			previousHash: otherHash("an-in-segment-predecessor"),
 		});
-		expect(actual.failure).toBeNull();
+		expect(verifyMinted({ mintLeafIndex: 4, event: elsewhere }).failure).toBeNull();
+		expect(verifyMinted({ mintLeafIndex: 2, event: elsewhere }).failure).toMatchObject({
+			step: "event",
+			code: "EVENT_MISMATCH",
+		});
 	});
 
 	it("rejects a checkpoint with no segmentFirstSequence to bind the leaf against", () => {
