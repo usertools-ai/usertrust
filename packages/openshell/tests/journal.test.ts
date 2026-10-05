@@ -15,6 +15,8 @@ import {
 	LedgerDeadlineError,
 	loadSqlite,
 	MIN_NODE_FOR_JOURNAL,
+	OrphanRiskError,
+	PlacementHorizonError,
 } from "../src/journal.js";
 
 const dirs: string[] = [];
@@ -687,5 +689,127 @@ describe("hold journal: two OS processes racing on one file", { timeout: 120_000
 		for (const i of [...rp.won, ...rq.won]) admitted.set(i, (admitted.get(i) ?? 0) + 1);
 		const notExactlyOne = [...Array(N).keys()].filter((i) => admitted.get(i) !== 1);
 		expect(notExactlyOne, "budgets that did not admit exactly one hold").toEqual([]);
+	});
+});
+
+describe("#167: an abandoned placement may still land — `voiding` waits out the placement horizon", () => {
+	const ambiguous = (j: HoldJournal, holdId = "h1") =>
+		j.reserve({
+			holdId,
+			budgetId: "b",
+			amount: 10,
+			ttlAt: 1_000,
+			availableCredit: () => 1e9,
+			placeHold: () => {
+				throw new Error("lost response");
+			},
+		});
+
+	it("P1: a NOT-FOUND void before ttlAt + grace is refused — the row stays `voiding` (in flight) for a re-void", async () => {
+		let now = 1_000;
+		const { j } = fresh({ placementGraceMs: 60_000, now: () => now });
+		await expect(ambiguous(j)).rejects.toThrow("lost response");
+		await expect(
+			j.writeTx(() => j.cas("h1", "voiding", "voided", { terminalKind: "voided_not_found" })),
+		).rejects.toBeInstanceOf(PlacementHorizonError);
+		expect(j.get("h1")?.state).toBe("voiding");
+		expect(j.inFlight().map((r) => r.holdId)).toContain("h1");
+		now = 1_000 + 60_000; // the horizon has passed: a late create can no longer land
+		expect(
+			await j.writeTx(() => j.cas("h1", "voiding", "voided", { terminalKind: "voided_not_found" })),
+		).toBe(true);
+	});
+
+	it("P1: the late create LANDS after the refused not-found: the next void finds it and finalizes as voided, at any time", async () => {
+		const { j } = fresh({ placementGraceMs: 60_000, now: () => 1_000 });
+		await expect(ambiguous(j)).rejects.toThrow("lost response");
+		await expect(
+			j.writeTx(() => j.cas("h1", "voiding", "voided", { terminalKind: "voided_not_found" })),
+		).rejects.toBeInstanceOf(PlacementHorizonError);
+		// …the abandoned create lands; the re-void now voids a real pending transfer.
+		expect(
+			await j.writeTx(() => j.cas("h1", "voiding", "voided", { terminalKind: "voided" })),
+		).toBe(true);
+		expect(j.get("h1")).toMatchObject({ state: "voided", terminalKind: "voided" });
+	});
+
+	it("P3: the deadline error tells the truth — placeHold may still land (committed `voiding`); availableCredit placed nothing", async () => {
+		const { j } = fresh({ ledgerTimeoutMs: 20 });
+		const hang = () => new Promise<never>(() => {});
+		const place = j.reserve({
+			holdId: "a",
+			budgetId: "b",
+			amount: 1,
+			ttlAt: 1,
+			availableCredit: () => 1e9,
+			placeHold: hang,
+		});
+		await expect(place).rejects.toThrow(/may still land.*voiding/);
+		const credit = j.reserve({
+			holdId: "c",
+			budgetId: "b",
+			amount: 1,
+			ttlAt: 1,
+			availableCredit: hang,
+			placeHold: () => {},
+		});
+		await expect(credit).rejects.toThrow(/nothing was placed; reservation rolled back/);
+		expect(j.get("c")).toBeUndefined();
+	});
+
+	it("P3: a `voiding` row that cannot be written fails LOUDLY as an orphan risk", async () => {
+		const { j } = fresh();
+		const writer = (j as unknown as { db: DatabaseSync }).db;
+		await expect(
+			j.reserve({
+				holdId: "h1",
+				budgetId: "b",
+				amount: 10,
+				ttlAt: 1_000,
+				availableCredit: () => 1e9,
+				placeHold: () => {
+					writer.exec("DROP TABLE hold"); // inside the transaction: rolled back with it
+					throw new Error("lost response");
+				},
+			}),
+		).rejects.toBeInstanceOf(OrphanRiskError);
+		expect(j.get("h1"), "the table is back (DDL rolled back) and holds no row").toBeUndefined();
+	});
+
+	it("P3: applyDebt validates its fields", async () => {
+		const { j } = fresh();
+		for (const [b, t, d] of [
+			["", "t", 1],
+			["b", "", 1],
+			["b", "t", 1.5],
+			["b", "t", Number.NaN],
+		] as const) {
+			await expect(
+				j.writeTx(() => j.applyDebt(b, t, d)),
+				`${b}/${t}/${d}`,
+			).rejects.toBeInstanceOf(TypeError);
+		}
+	});
+
+	it("P3: a read BUSY on the read connection ends in JournalBusyError (after the retries), never a raw SQLITE_BUSY", async () => {
+		const { j } = fresh({ busyTimeoutMs: 5, busyRetries: 2 });
+		await open(j, "h1");
+		// A reader whose every query is SQLITE_BUSY (errcode 5) — a live lock cannot be forced
+		// on demand against a WAL reader from a test, so the busy answer is substituted.
+		const real = (j as unknown as { reader: DatabaseSync }).reader;
+		let attempts = 0;
+		(j as unknown as { reader: unknown }).reader = {
+			prepare: () => {
+				attempts += 1;
+				throw Object.assign(new Error("database is locked"), { errcode: 5 });
+			},
+		};
+		try {
+			expect(() => j.get("h1")).toThrow(JournalBusyError);
+			expect(attempts, "retried busyRetries + 1 times").toBe(3);
+		} finally {
+			(j as unknown as { reader: DatabaseSync }).reader = real;
+		}
+		expect(j.get("h1")?.state).toBe("open");
 	});
 });

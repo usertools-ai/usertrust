@@ -127,14 +127,51 @@ export interface JournalOptions {
 	 * reservation (rolled back) instead of holding the write lock indefinitely.
 	 */
 	ledgerTimeoutMs?: number;
+	/**
+	 * How long after a hold's `ttlAt` an abandoned placement could still land (the
+	 * deadline plus the ledger client's own retries). A NOT-FOUND void finalizes a
+	 * hold only after `ttlAt + placementGraceMs` (default 10 minutes).
+	 *
+	 * Note the budgets: another PROCESS waiting for the write lock gives up after
+	 * about `busyTimeoutMs × (busyRetries + 1)` (≈ 300 ms by default) and fails closed
+	 * with JournalBusyError, while one reservation may hold the lock for up to two
+	 * ledger deadlines. Size `busyTimeoutMs`/`busyRetries` for the deadline when several
+	 * processes share a journal, or accept that they fail closed under a slow ledger.
+	 */
+	placementGraceMs?: number;
+	/** The clock (epoch ms); a test seam. */
+	now?: () => number;
 }
 
 export class LedgerDeadlineError extends Error {
 	constructor(op: string, ms: number) {
 		super(
-			`hold journal: ${op} did not answer within ${ms} ms (inside the write lock) — reservation rolled back`,
+			op === "placeHold"
+				? `hold journal: placeHold did not answer within ${ms} ms — the placement may still land, so the hold is committed as \`voiding\` (never rolled back into an orphan)`
+				: `hold journal: ${op} did not answer within ${ms} ms (inside the write lock) — nothing was placed; reservation rolled back`,
 		);
 		this.name = "LedgerDeadlineError";
+	}
+}
+
+/** `voiding → voided` on a NOT-FOUND void before the placement horizon: a late create may still land. */
+export class PlacementHorizonError extends Error {
+	constructor(holdId: string, horizonAt: number) {
+		super(
+			`hold journal: ${holdId} cannot be finalized as voided-not-found before ${new Date(horizonAt).toISOString()} — an abandoned placement may still land; re-void until the ledger reports it voided or expired`,
+		);
+		this.name = "PlacementHorizonError";
+	}
+}
+
+/** The `voiding` row of an ambiguous placement could not be written: a ledger hold may exist with no row. */
+export class OrphanRiskError extends Error {
+	constructor(holdId: string, cause: unknown) {
+		super(
+			`hold journal: ORPHAN RISK — the placement of ${holdId} failed ambiguously AND its \`voiding\` row could not be written; a pending ledger hold may exist with no journal row (it expires at its ledger timeout)`,
+			{ cause },
+		);
+		this.name = "OrphanRiskError";
 	}
 }
 
@@ -217,7 +254,10 @@ export interface ReserveInput {
 	 * Place the pending transfer. MUST use the transfer id derived from `holdId`
 	 * (never a fresh one), so a retry can never place a SECOND hold: a transfer
 	 * already under that id is either confirmed as this same still-pending hold
-	 * (success) or refused (throw). Throwing rolls the whole reservation back.
+	 * (success) or refused (throw). It MUST create the pending transfer with a
+	 * ledger-side timeout that expires no later than `ttlAt`, so a placement that
+	 * lands after the journal gave up on it expires by itself. A throw or a missed
+	 * deadline is AMBIGUOUS: the row is committed as `voiding`, and the error rethrown.
 	 */
 	placeHold: () => Promise<void> | void;
 }
@@ -240,6 +280,8 @@ export class HoldJournal {
 	private active: object | null = null;
 	private readonly retries: number;
 	private readonly ledgerTimeoutMs: number;
+	private readonly placementGraceMs: number;
+	private readonly now: () => number;
 
 	private constructor(
 		private readonly db: DatabaseSync,
@@ -248,6 +290,8 @@ export class HoldJournal {
 	) {
 		this.retries = opts.busyRetries ?? 2;
 		this.ledgerTimeoutMs = opts.ledgerTimeoutMs ?? 5_000;
+		this.placementGraceMs = opts.placementGraceMs ?? 10 * 60_000;
+		this.now = opts.now ?? Date.now;
 	}
 
 	static open(path: string, opts: JournalOptions = {}): HoldJournal {
@@ -290,11 +334,6 @@ export class HoldJournal {
 		this.db.close();
 	}
 
-	/** The connection a read uses: the writer inside its own transaction, the reader otherwise. */
-	private conn(): DatabaseSync {
-		return this.inThisTx() ? this.db : this.reader;
-	}
-
 	private inThisTx(): boolean {
 		const t = this.tx.getStore();
 		return t !== undefined && t === this.active;
@@ -332,7 +371,10 @@ export class HoldJournal {
 	 * `BEGIN IMMEDIATE` (retried while busy, then {@link JournalBusyError}), then
 	 * `fn`, then COMMIT. Anything `fn` throws rolls back and rethrows. A body that
 	 * returns a promise is refused (rolled back): a claim COMMITS before any ledger
-	 * call. A writeTx inside another is refused loudly (it would deadlock).
+	 * call. The refusal rolls back the JOURNAL only — a ledger call the body already
+	 * dispatched before returning its promise is not unsent, which is why the rule is
+	 * "never call the ledger in a claim", not "the journal will catch it". A writeTx
+	 * inside another is refused loudly (it would deadlock).
 	 */
 	writeTx<T>(fn: () => T): Promise<T> {
 		return this.runTx(() => {
@@ -427,6 +469,16 @@ export class HoldJournal {
 		if (!TRANSITIONS.some(([f, t]) => f === from && t === to)) {
 			throw new Error(`hold journal: illegal transition ${from} → ${to}`);
 		}
+		if (from === "voiding" && to === "voided" && set.terminalKind === "voided_not_found") {
+			// The ledger says the transfer does not exist. An abandoned placement (the call
+			// timed out but was never cancelled) may still create it; finalizing now would
+			// leave that late hold with nothing to void it. Wait out the horizon.
+			const row = this.get(holdId);
+			if (row !== undefined) {
+				const horizonAt = row.ttlAt + this.placementGraceMs;
+				if (this.now() < horizonAt) throw new PlacementHorizonError(holdId, horizonAt);
+			}
+		}
 		const result = this.db
 			.prepare(
 				`UPDATE hold SET state = ?,
@@ -444,17 +496,26 @@ export class HoldJournal {
 		return Number(result.changes) === 1;
 	}
 
+	/** A read: on the writer inside this caller's transaction; on the reader otherwise, busy-retried. */
+	private read<T>(q: (db: DatabaseSync) => T): T {
+		if (this.inThisTx()) return q(this.db);
+		return HoldJournal.retryBusy(this.retries, () => q(this.reader));
+	}
+
 	get(holdId: string): HoldRow | undefined {
-		const r = this.conn().prepare("SELECT * FROM hold WHERE hold_id = ?").get(holdId) as
-			| RawRow
-			| undefined;
+		const r = this.read(
+			(db) => db.prepare("SELECT * FROM hold WHERE hold_id = ?").get(holdId) as RawRow | undefined,
+		);
 		return r === undefined ? undefined : toRow(r);
 	}
 
 	debtOf(budgetId: string): number {
-		const r = this.conn().prepare("SELECT amount FROM debt WHERE budget_id = ?").get(budgetId) as
-			| { amount: number }
-			| undefined;
+		const r = this.read(
+			(db) =>
+				db.prepare("SELECT amount FROM debt WHERE budget_id = ?").get(budgetId) as
+					| { amount: number }
+					| undefined,
+		);
 		return r?.amount ?? 0;
 	}
 
@@ -498,19 +559,23 @@ export class HoldJournal {
 				// response, a deadline). Rolling the row back would orphan it, so the row is COMMITTED
 				// as `voiding`: the release path voids the derived id (a hold that was never placed
 				// voids as not-found), and a retry sees `voiding` and is refused — never placed twice.
-				this.db
-					.prepare(
-						"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, intent_json) VALUES (?, ?, 'voiding', ?, ?, ?)",
-					)
-					.run(
-						input.holdId,
-						input.budgetId,
-						input.amount,
-						input.ttlAt,
-						JSON.stringify({
-							ambiguousPlacement: err instanceof Error ? err.message : String(err),
-						}),
-					);
+				try {
+					this.db
+						.prepare(
+							"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, intent_json) VALUES (?, ?, 'voiding', ?, ?, ?)",
+						)
+						.run(
+							input.holdId,
+							input.budgetId,
+							input.amount,
+							input.ttlAt,
+							JSON.stringify({
+								ambiguousPlacement: err instanceof Error ? err.message : String(err),
+							}),
+						);
+				} catch (insertErr) {
+					throw new OrphanRiskError(input.holdId, insertErr);
+				}
 				return { ambiguous: err };
 			}
 			this.db
@@ -547,6 +612,14 @@ export class HoldJournal {
 	 */
 	applyDebt(budgetId: string, transferId: string, delta: number): boolean {
 		this.requireTx("applyDebt");
+		if (typeof budgetId !== "string" || budgetId.length === 0)
+			throw new TypeError("hold journal: applyDebt: budgetId must be a non-empty string");
+		if (typeof transferId !== "string" || transferId.length === 0)
+			throw new TypeError("hold journal: applyDebt: transferId must be a non-empty string");
+		if (!Number.isSafeInteger(delta))
+			throw new TypeError(
+				`hold journal: applyDebt: delta must be a safe integer, got ${String(delta)}`,
+			);
 		const marker = this.db
 			.prepare("INSERT OR IGNORE INTO applied (transfer_id, budget_id, delta) VALUES (?, ?, ?)")
 			.run(transferId, budgetId, delta);
@@ -573,30 +646,33 @@ export class HoldJournal {
 
 	/** `open` holds whose TTL (plus grace) has passed: the sweeper's work list. */
 	openPast(nowMs: number): HoldRow[] {
-		return (
-			this.conn()
-				.prepare("SELECT * FROM hold WHERE state = 'open' AND ttl_at < ? ORDER BY ttl_at")
-				.all(nowMs) as unknown as RawRow[]
+		return this.read(
+			(db) =>
+				db
+					.prepare("SELECT * FROM hold WHERE state = 'open' AND ttl_at < ? ORDER BY ttl_at")
+					.all(nowMs) as unknown as RawRow[],
 		).map(toRow);
 	}
 
 	/** Rows in a non-terminal, non-open state: a claim whose winner may have crashed. */
 	inFlight(): HoldRow[] {
-		return (
-			this.conn()
-				.prepare("SELECT * FROM hold WHERE state IN ('settling','voiding','expiring')")
-				.all() as unknown as RawRow[]
+		return this.read(
+			(db) =>
+				db
+					.prepare("SELECT * FROM hold WHERE state IN ('settling','voiding','expiring')")
+					.all() as unknown as RawRow[],
 		).map(toRow);
 	}
 
 	/** Terminal rows whose terminal event was never recorded. */
 	terminalWithoutEvent(): HoldRow[] {
-		return (
-			this.conn()
-				.prepare(
-					"SELECT * FROM hold WHERE state IN ('settled','voided','expired') AND terminal_event_hash IS NULL",
-				)
-				.all() as unknown as RawRow[]
+		return this.read(
+			(db) =>
+				db
+					.prepare(
+						"SELECT * FROM hold WHERE state IN ('settled','voided','expired') AND terminal_event_hash IS NULL",
+					)
+					.all() as unknown as RawRow[],
 		).map(toRow);
 	}
 
