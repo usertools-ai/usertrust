@@ -45,6 +45,4 @@ a floor that no longer exists.
 
 Do not restore `"at least $"` on this page. The longer design-doc R40 (DRAFT
 v0.9) and `receipt-spec.md` §7 bound clause were written before this review;
-they are amended in the private spec copies
-(`usertools-stealth/docs/specs/from-usertrust/` and
-`usertools-stealth/docs/specs/receipt-page/README.md`).
+they are amended in the operator's private copies of those documents.

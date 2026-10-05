@@ -231,8 +231,8 @@ GET https://api.usertools.ai/v1/receipts/{receiptId}
 
   **Key provisioning and custody are specified elsewhere, deliberately.**
   The resolver service key lands with the MINT-KEY work under the EC2 custody
-  pattern (receipt-spec §9-A H1: key material lives on the EC2 proxy host,
-  never mini2, env-file custody consistent with the existing SurrealDB/Clerk
+  pattern (receipt-spec §9-A H1: key material lives on the EC2 proxy host
+  and no other host, env-file custody consistent with the proxy's existing
   secrets, or KMS if a rotation ceremony is wanted). Page-side key handling —
   storage, rotation, and the egress allow-list the page presents — is the
   same verify-page ship-gate addendum. Both are cited here, not specified
@@ -402,7 +402,7 @@ shape). Four tiers, and a consumer must not blur them:
                                          // recognized in order to be refused)
       "repoId": "github.com:R_kgDOK1x2Yw",  // NORMATIVE scope: immutable provider-scoped ID
                                          // (keyed r1_… form for private repos) — round-12
-      "repo": "github.com/usertools-ai/usertools-stealth",  // OPTIONAL display-at-mint
+      "repo": "github.com/example-org/example-repo",  // OPTIONAL display-at-mint
                                          // metadata, and ABSENT unless disclosure is
                                          // authorized (spec §2: provider-verified PUBLIC
                                          // visibility, or a recorded operator authorization);
@@ -1551,8 +1551,8 @@ Design intents behind the shape:
   row plus persisted exact adapter posture), `"conservative"` when any leg
   used an allowlisted fallback mapping that can only round UP.
 
-  Proxy reality today: Anthropic traffic (the dominant path — Claude Code /
-  minidev) is priced EXACTLY, all four token tiers extracted and rated.
+  Proxy reality today: Anthropic traffic (the dominant path, coding agents)
+  is priced EXACTLY, all four token tiers extracted and rated.
   OpenAI/Gemini adapters zero the cache counts and bill the full prompt at the
   input rate — cached tokens priced at full freight, i.e. conservatively HIGH,
   the same posture as the SDK's D1 invariant by a different route. The
@@ -2379,7 +2379,7 @@ receipt can be produced at all:
    audit subsystem (plaintext `MERKLE_SIGNING_KEY`, undocumented in both
    `.env.example` files, ephemeral outside production). The spec REJECTS
    shared material: a distinct mint key must be provisioned, custody on the
-   **EC2 proxy host** (never mini2), and both env keys documented.
+   **EC2 proxy host** and no other host, and both env keys documented.
 6. **`sessionId` nonce migration** — today's `sessionId` is a content hash and
    collides across concurrent runs; the spec requires a nonce/ULID minted at
    session open.

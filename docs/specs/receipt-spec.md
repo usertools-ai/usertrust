@@ -780,8 +780,8 @@ receiptId = "ut1_" + base58btc( random 16 bytes, mint-side namespace )
 ### 4a. The proxy profile (v0.6 — B1 ratified: bind ut1 to proxy formats)
 
 Every claim in this section is defined against ONE chain profile —
-**`profile: "proxy-v1"`, the stealth proxy's real machinery**
-(`apps/api/src/governance/audit/`) — which the minting chain implements
+**`profile: "proxy-v1"`, the stealth proxy's real machinery** (its
+audit-chain module) — which the minting chain implements
 TODAY, modulo the checkpoint extension below:
 
 - **Event-hash rule:** `hash = sha256(canonicalize(event − hash))` with
@@ -1132,7 +1132,7 @@ The resolver spec's "Mint lifecycle — normative constraints" section is
 **adopted as normative for §6, by reference and in full** — reserve →
 work → finalize, with every hardening it carries. The adoption is **PINNED
 BY CONTENT HASH (round-4 P1-5)**: it binds that section as of
-**`sha256:4dee160785a72c1edd6ba6906984ab3da2e874cc29fe0ed6684ccd6a3b0acf46`**
+**`sha256:b7f8939808466c50a75abecda695c383ab051754f7060e35e786c4e3a4366ddb`**
 — the COMPLETE digest of `docs/specs/receipt-resolver-api.md`, this
 directory's copy: the v0.3 resolver companion (v0.10's cluster states, all
 OUTSIDE the pinned section), whose pinned section is byte-identical to the v0.2
@@ -1218,7 +1218,7 @@ Consequences fixed here:
 - `sessionAssociation: "workflowAttested" | "ownerAsserted"` joins the
   projection (review hardening 5): `workflowAttested` ONLY when a trusted
   execution workflow controlled the reservation, the model traffic, the
-  workspace, and the artifact creation (the orchestrated minidev pipeline
+  workspace, and the artifact creation (an orchestrated execution pipeline
   qualifies; a human hand-writing the trailer is `ownerAsserted`). The
   "workload identity is chain-committed" requirement is discharged by a
   NAMED projection field: **`workloadId`** (§2) — the SERVER-ASSIGNED
@@ -1946,10 +1946,10 @@ them, and both cite this document.
 ### 9-A. §9 answers — CONFIRMED by the stealth review (2026-08-08), with rulings
 
 Stealth's review confirmed a–c below and added: **(H1) key custody targets
-the EC2 proxy host, never mini2** (the mint worker/registry/chain all live
-in `apps/api` on EC2; mini2 is the trading desk and keeps dev/infra off it;
-env-file custody consistent with the existing SurrealDB/Clerk secrets, or
-KMS if rotation ceremony is wanted; §8's mint-key ≠ checkpoint-key rule
+the EC2 proxy host, and no other host** (the mint worker, registry and
+chain all live in the proxy service on that host; env-file custody
+consistent with the proxy's existing secrets, or KMS if rotation ceremony is
+wanted; §8's mint-key ≠ checkpoint-key rule
 enforced by the key-registry document). Durability (a) is restated by the
 review as the INTENT-before-TB rule — the §6a lifecycle carries it;
 `sessionId` (c) is the STABLE SCOPE IDENTIFIER, and the reservation handle
@@ -1959,7 +1959,7 @@ billing principal at a time; each generation reserves its own `receiptId`)
 uniqueness + closure requirements are owned here.
 
 - a. **Not durable today.** A mint-worker queue is buildable on the existing
-  WakeManager.rehydrate + desk/store CAS pattern, but session→transfer
+  proxy's existing rehydrate-and-CAS store pattern, but session→transfer
   linkage (the ID-pair model, §6a) is
   not currently mintable: no intent precedes the TB side effect, Score and
   passthrough paths write no session linkage, and the one query truncates at
@@ -1975,8 +1975,8 @@ uniqueness + closure requirements are owned here.
   receipt has no `sessionId`; its scope is `(account, window)`, §15.)*
   **Today's sessionId is a content hash and collides across concurrent
   runs.** Spec requirement (normative): `sessionId` MUST be a unique
-  identifier minted at session open (nonce/ULID — the desk-planner nonce
-  pattern), never a content hash. Ownership resolved (pre-review conflict 13):
+  identifier minted at session open (a nonce or ULID), never a content
+  hash. Ownership resolved (pre-review conflict 13):
   the companion's reservation-under-exclusive-billing-principal model is
   adopted as the DEFINITION of the reservation; this spec owns the scope
   ID's uniqueness + closure requirements.
@@ -2409,8 +2409,8 @@ Ship gate before mint-endpoint implementation:
       resolver's two-point durability rule; `authorizedMaxUsertokens`
       ceiling invariants per the same section.
 - [x] **DONE (v0.8) — see §13.** Canonicalization frozen as a normative appendix covering **the
-      PROXY's `canonical.ts`** (`apps/api/src/governance/audit/canonical.ts`
-      — B1-(1) makes it the normative implementation; the SDK's is the
+      PROXY's `canonical.ts`** (the proxy's audit canonicalizer — B1-(1)
+      makes it the normative implementation; the SDK's is the
       cross-check) (complete algorithm:
       key sorting, UTF-8/surrogate policy, safe-integer-only numbers, no
       NaN/±Inf/−0, absent ≠ null, duplicate keys rejected, escaping).
@@ -2676,8 +2676,8 @@ under both implementations and require zero divergence. An argument that the
 invariant holds is not evidence that it does.
 
 **And the binding form of that test must be one CI can RUN (ruled 2026-08-12).**
-A real-vault corpus lives at `~/.usertrust-fleet`, which does not exist on a
-runner — so a test written against it `skipIf`s in CI, and **a skipped test
+A real-vault corpus lives only on the operator's own machines, which a
+runner does not have — so a test written against it `skipIf`s in CI, and **a skipped test
 reads as green**, which is the defect class this appendix exists to catch. Nor
 may vault events be committed to a public repository. The artifact that
 satisfies both constraints is a **committed corpus of canonical BYTE PAIRS** —
