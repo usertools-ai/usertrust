@@ -976,7 +976,7 @@ export const ADVISORY_FIELD_NOT_SERVED = "(not served)";
  * that withholds them: a cluster receipt's public page ties the receipt to no
  * other receipt and no repository, advisories included.
  */
-export const OTHER_RECEIPT_WITHHELD = "This public page names no other receipt.";
+export const OTHER_RECEIPT_WITHHELD = "This public page names no other receipt or revision.";
 
 function advisoryText(advisory: Advisory, key: string): string {
 	return str(advisory as Bag, key) ?? ADVISORY_FIELD_NOT_SERVED;

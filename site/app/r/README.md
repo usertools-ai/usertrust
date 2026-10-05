@@ -84,8 +84,12 @@ the brand site's kit (`https://usertrust.ai/kit/lattice.js`,
 `https://usertrust.ai/kit/fonts/*.woff2`, served with
 `access-control-allow-origin: *`): `components/lattice-field.tsx` appends the
 script after mount with `data-theme="usertrust"` (gold; without it the kit draws
-its multi-colour settlement spectrum), and `brand.css` points `@font-face` at
-the kit with `font-display: swap` and system fallbacks. If the kit is
+its multi-colour settlement spectrum), pinned by Subresource Integrity
+(`LATTICE_INTEGRITY`, a sha384, fetched with `crossOrigin="anonymous"`), and
+`brand.css` points `@font-face` at the kit with `font-display: swap` and system
+fallbacks. The script runs on the page that shows the verdict, so any other
+bytes are refused and the field fails closed; a kit update is a reviewed change
+to that one constant. If the kit is
 unreachable the page renders on its plain ground in system fonts.
 `brand-assets.test.tsx` fails if a font file or a lattice copy is ever added
 under `site/app/r/`.

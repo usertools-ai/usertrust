@@ -267,12 +267,16 @@ function ClusterReceiptDetails({
 				<p className="mb-2.5 text-xs font-medium tracking-[0.15em] text-paper/38 uppercase">
 					Claim
 				</p>
-				<h2
-					className="m-0 text-[17px] leading-[1.45] font-medium tracking-[-0.01em] text-paper"
-					data-testid="scope-claim"
-				>
-					{claims.headline}
-				</h2>
+				{/* The claim restates the amount, so its scope label sits beside it (R38). */}
+				<div className="flex flex-wrap items-baseline gap-x-3 gap-y-2">
+					<h2
+						className="m-0 text-[17px] leading-[1.45] font-medium tracking-[-0.01em] text-paper"
+						data-testid="scope-claim"
+					>
+						{claims.headline}
+					</h2>
+					<ScopeChip claims={claims} testId="claim-scope-chip" />
+				</div>
 			</div>
 
 			<div className="flex flex-col gap-4 rounded-[var(--r-row)] border border-white/[0.09] bg-white/[0.03] px-4 py-3.5">
@@ -476,7 +480,12 @@ function ClusterComparison({ claims }: { claims: ClusterReceiptClaims }) {
 			</div>
 
 			<div className="flex flex-col gap-4 p-4">
-				<p className="text-[13px] leading-relaxed text-white/85">{claims.headline}</p>
+				<div className="flex flex-wrap items-baseline gap-x-3 gap-y-2">
+					<p className="text-[13px] leading-relaxed text-white/85" data-testid="comparison-claim">
+						{claims.headline}
+					</p>
+					<ScopeChip claims={claims} testId="comparison-scope-chip" />
+				</div>
 				<p className="text-[13px] leading-relaxed text-white/70">{NEVER_ARTIFACT_VERIFIED}</p>
 
 				<dl className="flex flex-col gap-4">

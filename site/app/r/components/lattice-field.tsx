@@ -12,6 +12,19 @@ import { useEffect } from "react";
 export const LATTICE_SRC = "https://usertrust.ai/kit/lattice.js";
 
 /**
+ * The exact bytes of that script this page runs (Subresource Integrity). The
+ * script is not in this repository, and it runs on the page that shows the
+ * verdict and the amount, so the browser refuses any other bytes: a changed
+ * kit file fails to load and the field fails closed (no lattice, nothing else
+ * changes). Updating it is a reviewed one-line change here, with the hash of
+ * the new file: `curl -s <LATTICE_SRC> | openssl dgst -sha384 -binary |
+ * openssl base64 -A`. The kit serves it with `access-control-allow-origin: *`,
+ * which a CORS-mode (`crossOrigin = "anonymous"`) integrity check needs.
+ */
+export const LATTICE_INTEGRITY =
+	"sha384-7yb4l6jM/tzLwkgPjiRrtn1uHNkOZ8hLcY+Z5WE/A7SzN6uozT02+rYtRhKK2oNg";
+
+/**
  * Appends the kit's lattice script once, in the usertrust theme. The kit reads
  * its theme from the script element's `data-theme`; without it the field draws
  * the usertools settlement spectrum, green and red included, behind a receipt
@@ -21,6 +34,8 @@ export const LATTICE_SRC = "https://usertrust.ai/kit/lattice.js";
 export function appendLatticeScript(doc: Document): void {
 	if (doc.querySelector(`script[src="${LATTICE_SRC}"]`)) return;
 	const script = doc.createElement("script");
+	script.integrity = LATTICE_INTEGRITY;
+	script.crossOrigin = "anonymous";
 	script.src = LATTICE_SRC;
 	script.async = true;
 	script.dataset.theme = "usertrust";

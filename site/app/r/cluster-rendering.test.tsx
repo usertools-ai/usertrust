@@ -260,6 +260,21 @@ for (const c of CASES) {
 			assert.ok(!before.includes(testid(id)), `${id} is not in the glance`);
 		}
 		assert.equal(textOf(element(inside, testid("scope-claim"))), c.claim, "§15.14's claim");
+		// Every restatement of the amount carries its scope label, right after it (R38).
+		const label = textOf(element(before, testid("amount-scope-chip")));
+		for (const [claim, chip] of [
+			["scope-claim", "claim-scope-chip"],
+			["comparison-claim", "comparison-scope-chip"],
+		]) {
+			assert.equal(textOf(element(inside, testid(claim))), c.claim, `${claim} restates the amount`);
+			const chipHtml = element(inside, testid(chip));
+			assert.equal(textOf(chipHtml), label, `${chip}: the same label as the glance`);
+			const claimEnd =
+				inside.indexOf(element(inside, testid(claim))) + element(inside, testid(claim)).length;
+			const chipAt = inside.indexOf(chipHtml);
+			assert.ok(chipAt >= claimEnd, `${chip} follows ${claim}`);
+			assert.equal(textOf(inside.slice(claimEnd, chipAt)), "", `${chip} sits right after ${claim}`);
+		}
 		assert.ok(inside.includes('data-clock-claim="ledger"'), "the window, in ledger time");
 		assert.ok(inside.includes('data-clock-claim="minter-asserted"'), "R27: mintedAt");
 		assert.ok(inside.includes('data-clock-claim="chain-committed"'), "R27: settlements");

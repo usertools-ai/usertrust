@@ -88,11 +88,18 @@ const CAVEATED_CHIP = "border-paper-amber/60 font-normal text-paper-amber";
  * glance card's whole answer to "what does this number cover"; the title is the
  * one-line meaning, and the full sentences are in the card's Details.
  */
-export function ScopeChip({ claims }: { claims: Pick<ReceiptClaims, "delegation"> }) {
+export function ScopeChip({
+	claims,
+	testId = "amount-scope-chip",
+}: {
+	claims: Pick<ReceiptClaims, "delegation">;
+	/** Where it repeats beside a restated amount, its own test ID. */
+	testId?: string;
+}) {
 	return (
 		<span
 			className={`inline-block rounded-sm border px-2 py-0.5 font-mono text-[12px] uppercase tracking-[0.12em] ${ASSERTED_CHIP}`}
-			data-testid="amount-scope-chip"
+			data-testid={testId}
 			data-posture={claims.delegation.value}
 			title={
 				DELEGATION_POSTURE_SHORT[claims.delegation.value as DelegationPosture] ??

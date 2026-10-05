@@ -10,7 +10,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
-import LatticeField, { appendLatticeScript, LATTICE_SRC } from "./components/lattice-field";
+import LatticeField, {
+	appendLatticeScript,
+	LATTICE_INTEGRITY,
+	LATTICE_SRC,
+} from "./components/lattice-field";
 
 const ROUTE_DIR = fileURLToPath(new URL(".", import.meta.url));
 const KIT = "https://usertrust.ai/kit/";
@@ -68,12 +72,24 @@ test("the lattice loads from the brand kit at runtime, and the field stays a dec
 });
 
 test("the kit's lattice script is appended once, in the usertrust (gold) theme", () => {
-	type FakeScript = { src: string; async: boolean; dataset: Record<string, string> };
+	type FakeScript = {
+		src: string;
+		async: boolean;
+		integrity: string;
+		crossOrigin: string | null;
+		dataset: Record<string, string>;
+	};
 	const appended: FakeScript[] = [];
 	const doc = {
 		querySelector: (selector: string) =>
 			appended.find((script) => selector === `script[src="${script.src}"]`) ?? null,
-		createElement: (): FakeScript => ({ src: "", async: false, dataset: {} }),
+		createElement: (): FakeScript => ({
+			src: "",
+			async: false,
+			integrity: "",
+			crossOrigin: null,
+			dataset: {},
+		}),
 		body: { appendChild: (script: FakeScript) => appended.push(script) },
 	} as unknown as Document;
 	appendLatticeScript(doc);
@@ -82,6 +98,23 @@ test("the kit's lattice script is appended once, in the usertrust (gold) theme",
 	assert.equal(appended[0]?.src, LATTICE_SRC);
 	assert.equal(appended[0]?.async, true);
 	assert.equal(appended[0]?.dataset.theme, "usertrust", "gold, never the settlement spectrum");
+	// Pinned: the browser runs these bytes or nothing.
+	assert.equal(appended[0]?.integrity, LATTICE_INTEGRITY);
+	assert.equal(
+		appended[0]?.crossOrigin,
+		"anonymous",
+		"a CORS fetch, so the integrity check can run",
+	);
+});
+
+test("the lattice's integrity pin is the reviewed sha384 of the kit's lattice.js", () => {
+	// The hash of the 27,327-byte file the kit served when this pin was set.
+	// A kit update must change this line, and so this test, in review.
+	assert.equal(
+		LATTICE_INTEGRITY,
+		"sha384-7yb4l6jM/tzLwkgPjiRrtn1uHNkOZ8hLcY+Z5WE/A7SzN6uozT02+rYtRhKK2oNg",
+	);
+	assert.match(LATTICE_INTEGRITY, /^sha384-[A-Za-z0-9+/]{64}$/);
 });
 
 test("no source under site/app/r/ points at a local font or a vendored lattice", () => {
