@@ -29,6 +29,7 @@ import {
 	checkpointPreimage,
 	corruptBase64,
 	DEFAULT_RECEIPT_ID,
+	DEFAULT_SEGMENTS,
 	type FactName,
 	FOREIGN_KEY,
 	GAPPED_SEGMENTS,
@@ -242,6 +243,18 @@ export const PASS_VECTORS: readonly Vector[] = [
 		expect: PASS_HISTORY,
 		breaks: [],
 		build: () => mint(),
+	},
+	{
+		// §4a (v0.9.6): a GENESIS segment holds no chain-link leaf, so its offset
+		// is 0 and leafIndex is exactly `sequence − first`. Every other vector
+		// mints in a non-genesis segment (offset 1); this one keeps the other
+		// arm of the rule — and the genesis start hash — exercised end to end.
+		name: "pass/genesis-segment-mint",
+		what: "A receipt minted in the GENESIS segment: chain-link offset 0, all-zero segmentStartPreviousHash, history of one.",
+		mode: "envelope",
+		expect: PASS_HISTORY,
+		breaks: [],
+		build: () => mint({ mintSegmentIndex: 0, mintLeafIndex: 2 }),
 	},
 	{
 		name: "pass/transfer-set-absent-above-32",
@@ -517,7 +530,7 @@ export const PARSE_VECTORS: readonly Vector[] = [
 		mode: "receipt",
 		expect: unverifiable("receiptBytes"),
 		breaks: ["parse"],
-		build: () => mint({ bytes: (b) => replaceOnce(b, '"sequence":14', '"sequence":NaN') }),
+		build: () => mint({ bytes: (b) => replaceOnce(b, '"sequence":13', '"sequence":NaN') }),
 	},
 	{
 		name: "schema/infinity-value",
@@ -536,7 +549,7 @@ export const PARSE_VECTORS: readonly Vector[] = [
 		mode: "receipt",
 		expect: failed("schema", "SCHEMA_INVALID"),
 		breaks: ["parse"],
-		build: () => mint({ bytes: (b) => replaceOnce(b, '"sequence":14', '"sequence":14.5') }),
+		build: () => mint({ bytes: (b) => replaceOnce(b, '"sequence":13', '"sequence":13.5') }),
 	},
 	{
 		name: "schema/negative-zero",
@@ -822,11 +835,62 @@ export const EVENT_VECTORS: readonly Vector[] = [
 	},
 	{
 		name: "eq4/sequence-shifted",
-		what: "Equality 4: leafIndex === event.sequence − checkpoint.segmentFirstSequence (segment-relative).",
+		what: "Equality 4: leafIndex === event.sequence − checkpoint.segmentFirstSequence + offset (segment-relative).",
 		mode: "receipt",
 		expect: failed("event", "EVENT_MISMATCH"),
 		breaks: ["eq4"],
-		build: () => mint({ event: (e) => ({ ...e, sequence: e.sequence + 1 }) }),
+		build: () => mint({ event: (e) => ({ ...e, sequence: e.sequence - 1 }) }),
+	},
+	{
+		// The v0.9.5 formula, minted honestly: a non-genesis segment's event at
+		// tree index 3 declared as sequence `first + 3`, as a minter that forgot
+		// the chain-link leaf would declare it. Hash, tree, proof and both
+		// signatures are all consistent with that claim — only equality 4 is not.
+		name: "eq4/v095-formula-non-genesis",
+		what: "A non-genesis receipt whose leafIndex is `sequence − first` (v0.9.5, no chain-link offset) fails equality 4.",
+		mode: "receipt",
+		expect: failed("event", "EVENT_MISMATCH"),
+		breaks: ["eq4"],
+		build: () =>
+			mint({
+				event: (e) => ({
+					...e,
+					sequence:
+						(DEFAULT_SEGMENTS[2] as { segmentFirstSequence: number }).segmentFirstSequence + 3,
+				}),
+			}),
+	},
+	{
+		// §4a (v0.9.6): segmentStartPreviousHash is the previousHash of the
+		// segment's FIRST event. Here the receipt's event is that first event
+		// (leaf `offset`) and links somewhere else — everything else, both
+		// signatures included, is consistent.
+		name: "eq4/first-event-start-hash-mismatch",
+		what: "The segment's first event must link to the checkpoint's signed segmentStartPreviousHash.",
+		mode: "receipt",
+		expect: failed("event", "EVENT_MISMATCH"),
+		breaks: ["eq4"],
+		build: () =>
+			mint({
+				mintLeafIndex: 1,
+				event: (e) => ({ ...e, previousHash: otherHash("not-the-segment-start") }),
+			}),
+	},
+	{
+		// Leaf 0 of a non-genesis segment is the chain link, never an event. The
+		// sequence here makes equality 4's arithmetic hold at index 0, so only the
+		// offset lower bound refuses it at step 2 (the fold and eq 8's defensive
+		// clause would catch it later).
+		name: "eq4/chain-link-leaf-claimed",
+		what: "A non-genesis proof at leafIndex 0 claims the chain-link leaf: equality 4's range is [offset, treeSize).",
+		mode: "receipt",
+		expect: failed("event", "EVENT_MISMATCH"),
+		breaks: ["eq4", "eq8", "inclusionProof"],
+		build: () =>
+			mint({
+				event: (e) => ({ ...e, sequence: e.sequence - 3 }),
+				inclusion: (p) => ({ ...p, leafIndex: 0 }),
+			}),
 	},
 	{
 		name: "eq4/leaf-index-out-of-range",
@@ -1282,6 +1346,70 @@ export const CHECKPOINT_VECTORS: readonly Vector[] = [
 						const { previousSegmentRoot: _dropped, ...rest } = c;
 						return rest as typeof c;
 					}),
+			}),
+	},
+	{
+		// v0.9.6 adds `segmentStartPreviousHash` to the signed payload because the
+		// minting chain has always signed it. The v0.9.5 eleven-member statement
+		// was never minted for real, so it is refused even when validly signed —
+		// strictness over compatibility with a shape that has no population.
+		name: "checkpoint/v096-start-hash-stripped",
+		what: "A checkpoint without segmentStartPreviousHash — the v0.9.5 eleven-member payload, re-signed — is not a v2 statement.",
+		mode: "receipt",
+		expect: failed("checkpoint", "CHECKPOINT_INVALID"),
+		breaks: [],
+		build: () =>
+			mint({
+				checkpointsUnsigned: (checkpoints) =>
+					checkpoints.map((c) => {
+						const { segmentStartPreviousHash: _dropped, ...rest } = c;
+						return rest as typeof c;
+					}),
+			}),
+	},
+	{
+		name: "checkpoint/start-hash-dropped-after-signing",
+		what: "Dropping segmentStartPreviousHash from a checkpoint signed over all twelve members fails — the member set first, the signature behind it.",
+		mode: "receipt",
+		expect: failed("checkpoint", "CHECKPOINT_INVALID"),
+		breaks: ["checkpointSignature"],
+		build: () =>
+			mint({
+				checkpointsAfterSign: (checkpoints) =>
+					checkpoints.map((c) => {
+						const { segmentStartPreviousHash: _dropped, ...rest } = c;
+						return rest as typeof c;
+					}),
+			}),
+	},
+	{
+		name: "checkpoint/genesis-start-hash-not-zero",
+		what: "A genesis statement's segmentStartPreviousHash is the all-zero chain genesis, exactly (§4a, v0.9.6).",
+		mode: "receipt",
+		expect: failed("checkpoint", "CHECKPOINT_INVALID"),
+		breaks: [],
+		build: () =>
+			mint({
+				mintSegmentIndex: 0,
+				mintLeafIndex: 2,
+				checkpointsUnsigned: (checkpoints) =>
+					checkpoints.map((c, i) =>
+						i === 0 ? { ...c, segmentStartPreviousHash: otherHash("not-the-genesis-hash") } : c,
+					),
+			}),
+	},
+	{
+		name: "checkpoint/successor-start-hash-zero",
+		what: "A non-genesis statement cannot claim the all-zero chain genesis as its start hash (§4a, v0.9.6).",
+		mode: "receipt",
+		expect: failed("checkpoint", "CHECKPOINT_INVALID"),
+		breaks: [],
+		build: () =>
+			mint({
+				checkpointsUnsigned: (checkpoints) =>
+					checkpoints.map((c, i) =>
+						i === 0 ? c : { ...c, segmentStartPreviousHash: "0".repeat(64) },
+					),
 			}),
 	},
 	{
@@ -2052,11 +2180,29 @@ export const HISTORY_VECTORS: readonly Vector[] = [
 	},
 	{
 		name: "history/segment-first-sequence-gap",
-		what: "Contiguity is arithmetic: next.segmentFirstSequence === prev.segmentFirstSequence + prev.treeSize.",
+		what: "Contiguity is arithmetic: next.segmentFirstSequence === prev.segmentFirstSequence + prev.treeSize − prev's chain-link offset.",
 		mode: "envelope",
 		expect: historyFailed(),
 		breaks: [],
 		build: () => mint({ segments: GAPPED_SEGMENTS }),
+	},
+	{
+		// v0.9.5's arithmetic, `first + treeSize`, applied across a NON-genesis
+		// predecessor: it counts that predecessor's chain-link leaf as an event,
+		// so the successor starts one sequence late — a real gap.
+		name: "history/v095-contiguity-formula",
+		what: "Contiguity across a non-genesis predecessor subtracts its chain-link leaf; v0.9.5's `first + treeSize` leaves a gap.",
+		mode: "envelope",
+		expect: historyFailed("the walk has a gap"),
+		breaks: [],
+		build: () =>
+			mint({
+				segments: [
+					{ segmentId: "seg_000001", segmentFirstSequence: 1, treeSize: 4 },
+					{ segmentId: "seg_000002", segmentFirstSequence: 5, treeSize: 7 },
+					{ segmentId: "seg_000003", segmentFirstSequence: 12, treeSize: 7 },
+				],
+			}),
 	},
 	{
 		name: "history/duplicate-segment-id",
@@ -2067,7 +2213,8 @@ export const HISTORY_VECTORS: readonly Vector[] = [
 		// and it has to arrive clean under every other clause or it proves
 		// nothing about this one. So it re-links to the head it duplicates
 		// (`previousSegmentId`/`previousSegmentRoot` = the head's own
-		// `segmentId`/`root`) and continues the arithmetic (`first + treeSize`),
+		// `segmentId`/`root`) and continues the arithmetic (`first + treeSize −
+		// 1`, the head being non-genesis and so carrying a chain-link leaf),
 		// leaving the repeated `segmentId` as the single wrong fact. An
 		// out-of-place CLONE would not: the lineage-edge clause refuses it first
 		// and the duplicate rule is never reached, so deleting the rule would
@@ -2085,7 +2232,7 @@ export const HISTORY_VECTORS: readonly Vector[] = [
 							root: otherHash("second-checkpoint-over-a-sealed-segment"),
 							previousSegmentId: head.segmentId,
 							previousSegmentRoot: head.root,
-							segmentFirstSequence: head.segmentFirstSequence + head.treeSize,
+							segmentFirstSequence: head.segmentFirstSequence + head.treeSize - 1,
 							publishedAt: "2026-08-15T00:00:00.000Z",
 						}),
 					];

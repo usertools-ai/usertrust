@@ -110,6 +110,44 @@ the R40 framing and a reproducible pin recipe.
 - **The pin.** It is recomputed by whichever revision lands last, because every
   edit to the companion moves it.
 
+**v0.9.6 (2026-10-05): §4a CAUGHT UP TO THE CHAIN IT DESCRIBES — the
+checkpoint's twelfth signed member, and the chain-link leaf.** Every proxy-v1
+checkpoint ever minted differs from the v0.9.5 text in two ways, and the
+reference verifier written from that text rejected all of them. The minted
+shape is the authority here, because it is the only one with a population;
+the text moves, the chain does not.
+(1) **`segmentStartPreviousHash` is a member of the v2 SIGNED payload**
+(§4a, "Checkpoint statement"): the `previousHash` that the segment's first
+event links to — the predecessor segment's final event hash, or for the
+genesis segment the chain's all-zero genesis hash (64 `0` characters, the
+same value the first event's own `previousHash` carries). It binds the
+segment's hash-chain start into the signature, so the boundary between two
+sealed segments is authenticated on the event chain as well as on the tree
+lineage. Without it in the member list a verifier rejects the real statement
+as carrying an unknown member; with it dropped, the signature fails.
+(2) **A non-genesis segment's tree holds a CHAIN-LINK LEAF at index 0** — the
+predecessor's `root`, hashed as a leaf like any other — so its first event is
+leaf 1 and `treeSize` counts the link. Equality 4 gains the offset
+(`+ 0` genesis, `+ 1` otherwise, read from the signed `previousSegmentRoot`),
+its range starts at the offset, and the same offset corrects §6's covering
+condition and §7's history contiguity (`next.first === prev.first +
+prev.treeSize − offset(prev)`). (3) §7's history walk names what happens at
+a member that is not a v2 statement: it stops, with a named `HISTORY_INVALID`.
+**Compatibility: NONE is extended, deliberately.** The v0.9.5 eleven-member
+statement and the offset-free equality 4 were never minted for real. The
+only objects in that shape are this repo's own: the verifier's conformance
+corpus, regenerated in the minted shape by this revision, and the verify
+page's display fixtures, whose signatures are synthetic placeholders that no
+verifier could ever have accepted (their realignment is display work, tracked
+separately). So a verifier accepts ONLY the twelve-member statement and ONLY
+the offset rule.
+Accepting both would let one checkpoint key sign two readings of the same
+segment, which is the ambiguity §8 refuses. The pinned resolver companion
+(§6a) still transcribes the v0.9.5 member list and equality 4 in its proof
+block; this section OVERRIDES those transcriptions under the companion's own
+precedence rule (conflicts resolve in this document's favor), and the pin is
+deliberately NOT moved for it — the companion is corrected in its own round.
+
 **v0.9.5 (2026-08-16): the v0.2 resolver companion ADOPTED as normative, and
 §6a RE-PINNED to it.** §6a's own rule is that a later companion round is never
 taken automatically — "taking them requires an explicit version bump of THIS
@@ -703,16 +741,25 @@ TODAY, modulo the checkpoint extension below:
   sides — unchanged by B1.)
 - **Tree scope: ONE TREE PER SEGMENT (proxy reality; merkle-types.ts:8).**
   `segmentId` is NORMATIVE and load-bearing; `leafIndex` is
-  segment-relative. Equality 4 becomes
-  `inclusion.leafIndex === event.sequence − checkpoint.segmentFirstSequence`
-  (the checkpoint carries `segmentFirstSequence` for exactly this). The
+  segment-relative. **Chain-link leaf (v0.9.6):** when a segment is
+  sealed, its successor's tree starts with ONE leaf before any event — the
+  sealed segment's `root`, carried in the raw-hash position and hashed as a
+  leaf (`sha256(0x00 || hexDecode(root))`) exactly as an event hash is. It
+  has no sequence. So a segment's **chain-link offset** is
+  `0` when `checkpoint.previousSegmentRoot === "genesis"` and `1`
+  otherwise; its first event is leaf `offset`; and `treeSize` counts the
+  link (event leaves = `treeSize − offset`). Equality 4 becomes
+  `inclusion.leafIndex === event.sequence − checkpoint.segmentFirstSequence
+  + offset` (the checkpoint carries `segmentFirstSequence` for exactly this,
+  and the offset is read from its SIGNED `previousSegmentRoot`). The
   SDK's global tree is NOT this profile; ut-chain convergence is the
   ledgered future project (headline).
 - **Checkpoint statement: `SegmentCheckpoint` v2** — a VERSIONED extension
   of the proxy's `PublishedMerkleRoot` whose canonical SIGNED payload is:
   `{ v: 2, vaultId, profile, root, treeSize, segmentId,
-  segmentFirstSequence, previousSegmentRoot, previousSegmentId, keyId,
-  publishedAt }`,
+  segmentFirstSequence, previousSegmentRoot, previousSegmentId,
+  segmentStartPreviousHash, keyId, publishedAt }` — exactly these twelve
+  members (v0.9.6 added `segmentStartPreviousHash`; see the version entry),
   `sig` = base64 Ed25519 over `canonicalize(unsigned)`. This closes BOTH
   pre-existing holes the stealth review named: the root-only signature
   (treeSize unauthenticated → leaf-hiding) and the unauthenticated lineage
@@ -728,6 +775,19 @@ TODAY, modulo the checkpoint extension below:
   vaults). Genesis:
   `previousSegmentRoot`/`previousSegmentId` are the fixed strings
   `"genesis"` for the first segment; contiguity checks are normative in §7.
+  **`segmentStartPreviousHash` (v0.9.6)** is 64 lowercase hex: the
+  `previousHash` the segment's first event carries — the predecessor
+  segment's final event hash. For the genesis segment it is the chain's
+  all-zero genesis hash, `"0000…0000"` (64 `0` characters), never the
+  string `"genesis"`. The two are tied: a statement whose
+  `previousSegmentRoot` is `"genesis"` MUST carry the all-zero value, and
+  one whose `previousSegmentRoot` is a root MUST NOT (a successor's first
+  event links to a real event); either mismatch is FAIL at step 6. Nothing
+  else in a checkpoint carries the predecessor's last event hash, so §7's
+  history walk cannot cross-check the value between members; what it buys is
+  that the chain-start a verifier or archiver recomputes from is SIGNED. When
+  the receipt's own event is the segment's first event, equality 4 binds the
+  two directly.
   `publishedTo` does not exist in the signed statement (publication is
   evidence, not proof — R3-8 unchanged), and neither does `reference` —
   v0.5 carried an anchor locator here, but publication evidence lives
@@ -813,15 +873,22 @@ contradicted it) (proxy profile: the audit writer's envelope
   way and the mint worker adapts.)
 - Checkpoint: `SegmentCheckpoint` v2, §4a — `{ v: 2, vaultId, profile, root,
   treeSize, segmentId, segmentFirstSequence, previousSegmentRoot,
-  previousSegmentId, keyId, publishedAt, sig }`.
+  previousSegmentId, segmentStartPreviousHash, keyId, publishedAt, sig }`.
 - **Required equalities** (verifier MUST enforce, R2-1 as revised by B1):
   1. `event.hash === proof.mintEventHash === inclusion.leafHash`
   2. `event.kind === "receipt_settled"`; `canonicalize(event.actor)` equals the
      canonical form of the chain's registered `mintActor` (§4a/§8)
   3. `event.data` canonicalizes byte-identically to the §2 projection the
      receipt claims (they are the same object — no duplicate copies)
-  4. `inclusion.leafIndex === event.sequence − checkpoint.segmentFirstSequence`,
-     and `0 ≤ leafIndex < checkpoint.treeSize`
+  4. `inclusion.leafIndex === event.sequence − checkpoint.segmentFirstSequence
+     + offset`, and `offset ≤ leafIndex < checkpoint.treeSize`, where
+     `offset` is the §4a chain-link offset (`0` iff
+     `checkpoint.previousSegmentRoot === "genesis"`, else `1`; v0.9.6). The
+     lower bound is the offset, not 0: a non-genesis leaf 0 is the chain
+     link, and no event is ever proved at it. And when `leafIndex === offset`
+     the receipt's event IS the segment's first event, so
+     `event.previousHash === checkpoint.segmentStartPreviousHash` (v0.9.6 —
+     the signed chain start must be the one the event actually links to).
   5. `inclusion.treeSize === checkpoint.treeSize`
   6. `inclusion.root === checkpoint.root`
   7. `receipt.scope/spec` agree with the projection; `minter.kind` agrees
@@ -939,7 +1006,8 @@ session OPEN
      checkpoint forces rotation, so this wait is for the seal, and the
      checkpoint it yields can never be superseded for that segment).
      Covering means checkpoint.segmentId === proof segment and
-     segmentFirstSequence ≤ event.sequence < segmentFirstSequence + treeSize
+     segmentFirstSequence ≤ event.sequence <
+     segmentFirstSequence + treeSize − offset (§4a's chain-link offset)
   → sign (the §5 body's work mirrors the projection's verified work, §6a —
      equality 9);
      persist signed bytes durably
@@ -1162,7 +1230,17 @@ Levels (renamed, R2-2 — names must not overclaim):
   passes — each checkpoint's `previousSegmentRoot`/`previousSegmentId`
   equal the prior checkpoint's `root`/`segmentId`, genesis values exact,
   no gaps, `segmentFirstSequence` strictly increasing and contiguous
-  (`next.segmentFirstSequence === prev.segmentFirstSequence + prev.treeSize`);
+  (`next.segmentFirstSequence === prev.segmentFirstSequence + (prev.treeSize
+  − offset(prev))`, evaluated in that order or exactly — the sum is refused
+  outside the safe-integer range — where `offset(prev)` is `prev`'s §4a chain-link offset —
+  its `treeSize` counts a link leaf that is not an event; v0.9.6);
+  **a member that is not a v2 statement STOPS the walk (v0.9.6)** — `v`
+  other than `2` (e.g. a v1 `PublishedMerkleRoot`), any of §4a's twelve
+  members absent, or any member outside them, signed or not: the walk does
+  not skip it, does not infer its lineage, and does not continue past it.
+  The `checkpointHistory` check is `failed` with code `HISTORY_INVALID` and a
+  detail that names the member's position and the §4a rule it breaks; as
+  with every step-9 failure the base verdict is unchanged;
   every checkpoint's `vaultId`/`profile` equal the receipt's `proof.chain`/
   `proof.profile` (they are signed now — §4a);
   and the receipt's embedded checkpoint appears EXACTLY in the supplied

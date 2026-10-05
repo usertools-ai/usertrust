@@ -331,7 +331,7 @@ function asObject(value: unknown): Json | null {
  *
  * The harness emits CANONICAL bytes, which buys an independent check for free:
  * any surviving byte mutation either fails to parse or fails the canonical
- * round-trip. The numeric scan covers what a round-trip cannot see — `14.5`
+ * round-trip. The numeric scan covers what a round-trip cannot see — `13.5`
  * canonicalizes back to itself.
  */
 function parses(bytes: Buffer): Json | null {
@@ -458,15 +458,21 @@ function brokenFacts(vector: Vector, bundle: MintedBundle): FactName[] {
 	// vocabulary so the gap is visible rather than quietly absent; see the
 	// dedicated test below.
 
-	// Equality 4 — segment-relative leaf index, in range.
+	// Equality 4 — segment-relative leaf index, shifted past a non-genesis
+	// segment's chain-link leaf (§4a, v0.9.6), and in range.
 	if (event !== null && inclusion !== null && checkpoint !== null) {
+		const offset = checkpoint.previousSegmentRoot === "genesis" ? 0 : 1;
 		const expectedIndex =
-			Number(event.sequence) - Number(checkpoint.segmentFirstSequence as number);
+			Number(event.sequence) - Number(checkpoint.segmentFirstSequence as number) + offset;
 		const inRange =
 			typeof inclusion.leafIndex === "number" &&
-			inclusion.leafIndex >= 0 &&
+			inclusion.leafIndex >= offset &&
 			inclusion.leafIndex < Number(checkpoint.treeSize);
-		if (inclusion.leafIndex !== expectedIndex || !inRange) broken.push("eq4");
+		// At leaf `offset` the event IS the segment's first event, so it links to
+		// the signed start hash (§4a, v0.9.6).
+		const firstEventLinks =
+			inclusion.leafIndex !== offset || event.previousHash === checkpoint.segmentStartPreviousHash;
+		if (inclusion.leafIndex !== expectedIndex || !inRange || !firstEventLinks) broken.push("eq4");
 	}
 
 	// Equalities 5, 6, 8 — the inclusion/checkpoint bindings.
@@ -583,11 +589,13 @@ describe("a minted receipt is real proxy-v1 material", () => {
 		expect(data.spec).toBe("ut1");
 	});
 
-	it("equality 4 — leafIndex is SEGMENT-relative and in range", () => {
+	it("equality 4 — leafIndex is SEGMENT-relative, past the chain-link leaf, and in range", () => {
+		// The default mint segment is non-genesis: its leaf 0 is the chain link.
+		expect(checkpoint.previousSegmentRoot).not.toBe("genesis");
 		expect(inclusion.leafIndex).toBe(
-			Number(event.sequence) - Number(checkpoint.segmentFirstSequence),
+			Number(event.sequence) - Number(checkpoint.segmentFirstSequence) + 1,
 		);
-		expect(inclusion.leafIndex).toBeGreaterThanOrEqual(0);
+		expect(inclusion.leafIndex).toBeGreaterThanOrEqual(1);
 		expect(inclusion.leafIndex).toBeLessThan(Number(checkpoint.treeSize));
 	});
 
