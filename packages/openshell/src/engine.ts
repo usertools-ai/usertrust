@@ -22,7 +22,7 @@ import {
 	PlacementHorizonError,
 	type Reservation,
 } from "./journal.js";
-import { type LedgerPort, transferIdFor } from "./ledger.js";
+import { debtAccountLabel, type LedgerPort, transferIdFor } from "./ledger.js";
 
 export interface EngineOptions {
 	/** The hold's lifetime, in whole seconds: the TigerBeetle pending timeout. */
@@ -73,7 +73,15 @@ export type SettleOutcome =
 	 * passed): the actual usage must take the late-settlement path, never a post.
 	 */
 	| { outcome: "late_required"; state: HoldState }
-	/** A settlement against a voided or unknown hold: an incident, no ledger operation. */
+	/**
+	 * The ledger cannot yet confirm the post's outcome (its id is retired and the read-back is
+	 * inconclusive): the hold stays `settling`; settle again later — never a throw loop.
+	 */
+	| { outcome: "in_flight" }
+	/**
+	 * A settlement against a voided or unknown hold, or one the ledger reports as voided or
+	 * never placed: an incident, no ledger operation.
+	 */
 	| { outcome: "incident"; state: HoldState | "missing" };
 
 export type ReleaseOutcome =
@@ -109,20 +117,25 @@ export class HoldEngine {
 	}
 
 	/**
-	 * Reserve atomically with the budget's debt. The journal bounds both in-lock ledger
+	 * Reserve atomically with the budget's debt. A budget id the ledger cannot name a debt
+	 * account for is refused FIRST ({@link BudgetIdError}): its overage could never be charged. The journal bounds both in-lock ledger
 	 * calls by its own deadline and commits an ambiguous placement as `voiding`. Throws on
 	 * a busy journal or a ledger failure: the request path fails closed on any throw.
 	 */
 	async reserve(p: { holdKey: string; budgetId: string; amount: number }): Promise<ReserveOutcome> {
+		debtAccountLabel(p.budgetId); // throws before anything is placed
+		// The ledger's timeout starts when the placement COMMITS — somewhere in
+		// [now, now + the journal's placement deadline]. So the hold can be released by the
+		// ledger as EARLY as admitBy (now + lifetime): admission is judged against it. ttlAt is
+		// the LATEST (for a placement that lands in time): the sweeper's deadline and the
+		// placement horizon's base (a later landing is what the placement grace covers).
+		const admitBy = this.now() + this.opts.holdTtlSeconds * 1000;
 		const r = await this.journal.reserve({
 			holdId: p.holdKey,
 			budgetId: p.budgetId,
 			amount: p.amount,
-			// The ledger's timeout starts when the placement COMMITS, which is at most the
-			// journal's placement deadline after now: ttlAt is no earlier than the ledger's
-			// expiry for any placement that lands in time (a later landing is what the
-			// journal's placement grace covers).
-			ttlAt: this.now() + this.opts.holdTtlSeconds * 1000 + this.ms,
+			admitBy,
+			ttlAt: admitBy + this.ms,
 			availableCredit: (holdId) => this.ledger.available(p.budgetId, holdId),
 			placeHold: () =>
 				this.ledger.placeHold({
@@ -179,6 +192,10 @@ export class HoldEngine {
 			);
 			return { outcome: "late_required", state: "expired" };
 		}
+		if (posted === "unknown") return { outcome: "in_flight" };
+		if (posted === "voided" || posted === "not_found") {
+			return { outcome: "incident", state: "settling" };
+		}
 		if (intent.overage > 0) {
 			// The charge runs OUTSIDE any journal transaction (writeTx takes a synchronous
 			// body); its derived id makes a replay after a crash a verified no-op.
@@ -217,6 +234,8 @@ export class HoldEngine {
 		}
 		const voided = await within("release", this.ms, () => this.ledger.release({ holdKey }));
 		if (voided === "posted") return { outcome: "incident", state: "voiding" };
+		// A retired void id the read-back cannot yet confirm: stays `voiding`, released again.
+		if (voided === "unknown") return { outcome: "in_flight" };
 		if (voided === "not_found") {
 			// Never placed — or an abandoned placement not landed YET. The journal finalizes
 			// `voided_not_found` only past ttlAt + its placement grace (the horizon rule).

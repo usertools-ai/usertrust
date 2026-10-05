@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { HoldEngine } from "../src/engine.js";
 import { HoldJournal, LedgerDeadlineError } from "../src/journal.js";
 import {
+	BudgetIdError,
 	type LedgerPort,
 	type PostOutcome,
 	transferIdFor,
@@ -25,6 +26,9 @@ class FakeLedger implements LedgerPort {
 	debt = new Map<string, number>();
 	expired = new Set<string>(); // hold keys the ledger's own timeout has voided
 	crashAfter: "post" | "chargeDebt" | null = null;
+	/** Answer the next post / release with this outcome (a retired id's read-back). */
+	postAnswer: PostOutcome | null = null;
+	releaseAnswer: VoidOutcome | null = null;
 	hang: "placeHold" | null = null;
 
 	private once(id: bigint, amount: number): boolean {
@@ -55,12 +59,14 @@ class FakeLedger implements LedgerPort {
 		this.balances.set(p.budgetId, (this.balances.get(p.budgetId) ?? 0) - p.amount);
 	}
 	async post(p: { holdKey: string; amount: number }): Promise<PostOutcome> {
+		if (this.postAnswer !== null) return this.postAnswer;
 		if (this.expired.has(p.holdKey)) return "expired";
 		this.once(transferIdFor(p.holdKey, "post"), p.amount);
 		this.crash("post");
 		return "done";
 	}
 	async release(p: { holdKey: string }): Promise<VoidOutcome> {
+		if (this.releaseAnswer !== null) return this.releaseAnswer;
 		if (!this.has(p.holdKey, "reserve")) return "not_found";
 		if (this.has(p.holdKey, "post")) return "posted";
 		if (this.expired.has(p.holdKey)) return "expired";
@@ -336,5 +342,64 @@ describe("hold engine: release (a non-2xx response)", () => {
 		expect(await engine.release("k1")).toEqual({ outcome: "incident", state: "voiding" });
 		expect(journal.get("k1")?.state).toBe("voiding");
 		expect(ledger.count("k1", "void")).toBe(0);
+	});
+});
+
+describe("#174 r1: the three unbilled-cost paths", () => {
+	it("P1 admission: a retry after the EARLIEST ledger expiry (admitBy) and before ttlAt is refused hold_expired", async () => {
+		const { journal, engine, clock } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 10 });
+		expect(journal.get("k1")).toMatchObject({
+			admitBy: 1_000 + 900_000,
+			ttlAt: 1_000 + 900_000 + 50,
+		});
+		clock.now = 1_000 + 900_000 + 10; // the ledger may already have released it
+		expect(await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 10 })).toEqual({
+			admitted: false,
+			reason: "hold_expired",
+		});
+	});
+
+	it("P1 budget id: an id the debt account cannot be named for is refused BEFORE anything is placed", async () => {
+		const { journal, ledger, engine } = setup();
+		await expect(
+			engine.reserve({ holdKey: "k1", budgetId: "team::a", amount: 10 }),
+		).rejects.toBeInstanceOf(BudgetIdError);
+		expect(ledger.count("k1", "reserve")).toBe(0);
+		expect(journal.get("k1")).toBeUndefined();
+	});
+
+	it("P1 retired post id: an outcome the read-back cannot confirm leaves the hold `settling` (in flight), never a throw; a confirmed expiry then routes it to late settlement", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		ledger.postAnswer = "unknown";
+		expect(await engine.settle("k1", { post: 60, overage: 0 })).toEqual({ outcome: "in_flight" });
+		expect(journal.get("k1")?.state).toBe("settling");
+		ledger.postAnswer = "expired"; // the read-back confirms it later
+		expect(await engine.settle("k1", { post: 60, overage: 0 })).toEqual({
+			outcome: "late_required",
+			state: "expired",
+		});
+	});
+
+	it("a post the ledger answers as voided or never placed is an incident, the row left `settling`", async () => {
+		for (const answer of ["voided", "not_found"] as const) {
+			const { journal, ledger, engine } = setup();
+			await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+			ledger.postAnswer = answer;
+			expect(await engine.settle("k1", { post: 60, overage: 0 }), answer).toEqual({
+				outcome: "incident",
+				state: "settling",
+			});
+			expect(journal.get("k1")?.state, answer).toBe("settling");
+		}
+	});
+
+	it("P1 retired void id: an inconclusive read-back leaves the hold `voiding` (in flight), never a throw", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		ledger.releaseAnswer = "unknown";
+		expect(await engine.release("k1")).toEqual({ outcome: "in_flight" });
+		expect(journal.get("k1")?.state).toBe("voiding");
 	});
 });

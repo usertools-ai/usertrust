@@ -11,7 +11,7 @@
  * money twice.
  */
 
-import { TBTransferError, TrustTBClient, XFER_SPEND } from "usertrust";
+import { TBTransferError, TransferIdRetiredError, TrustTBClient, XFER_SPEND } from "usertrust";
 
 export type TransferRole = "reserve" | "post" | "void" | "overage" | "late";
 
@@ -20,8 +20,15 @@ export function transferIdFor(holdKey: string, role: TransferRole): bigint {
 	return TrustTBClient.deriveTransferId(holdKey, role);
 }
 
-/** A post: done, or the pending transfer the ledger itself expired (its timeout passed first). */
-export type PostOutcome = "done" | "expired";
+/**
+ * A post of the hold's pending transfer:
+ * - `done`: posted now, or already posted under the `post` id;
+ * - `expired`: the ledger's own timeout released it first;
+ * - `voided` / `not_found`: it was voided, or never placed — an incident, nothing to post;
+ * - `unknown`: the `post` id is RETIRED (an earlier attempt failed) and the ledger's read-back
+ *   cannot yet confirm the outcome — retry later; never a throw loop.
+ */
+export type PostOutcome = "done" | "expired" | "voided" | "not_found" | "unknown";
 
 /**
  * A void of the hold's pending transfer:
@@ -29,9 +36,10 @@ export type PostOutcome = "done" | "expired";
  * - `expired`: the ledger's own timeout released it first;
  * - `not_found`: no pending transfer under the reserve id — never placed, OR an abandoned
  *   placement that has not landed yet (the journal decides by its placement horizon);
- * - `posted`: the hold was already posted — nothing to void.
+ * - `posted`: the hold was already posted — nothing to void;
+ * - `unknown`: the `void` id is RETIRED and the read-back cannot yet confirm — retry later.
  */
-export type VoidOutcome = "done" | "expired" | "not_found" | "posted";
+export type VoidOutcome = "done" | "expired" | "not_found" | "posted" | "unknown";
 
 export interface LedgerPort {
 	/**
@@ -74,18 +82,72 @@ export interface TigerBeetleLedgerOptions {
 	walletFor: (budgetId: string) => bigint;
 	/** Where holds and debt are credited. */
 	treasuryId: bigint;
+	/**
+	 * How far past a pending transfer's own timeout (by its ledger timestamp) the read-back
+	 * waits before calling it expired: room for the clock difference between this host and
+	 * the cluster. Default 60 s.
+	 */
+	expirySkewMs?: number;
+	now?: () => number;
 }
 
-/** A budget's debt account label: deterministic, so every process finds the same account. */
+/** A budget id the ledger cannot name a debt account for. */
+export class BudgetIdError extends Error {
+	constructor(budgetId: string, why: string) {
+		super(`budget id ${JSON.stringify(budgetId)} cannot be used: ${why}`);
+		this.name = "BudgetIdError";
+	}
+}
+
+/**
+ * A budget's debt account label: deterministic, so every process finds the same account.
+ * Throws {@link BudgetIdError} for an id the escrow namespace refuses (core quarantines `::`,
+ * `LEGACY_COST_CENTER_SEPARATOR`): such a budget's overage could never be charged, so it is
+ * refused BEFORE a hold is placed, never discovered after a post.
+ */
 export function debtAccountLabel(budgetId: string): string {
+	if (budgetId.includes("::")) {
+		throw new BudgetIdError(budgetId, '"::" is reserved and cannot name a debt account');
+	}
 	return `openshell-debt.${budgetId}`;
 }
 
+/** What the ledger's own records say about a hold, read back by its derived ids. */
+type Observed = "posted" | "voided" | "not_found" | "expired" | "unknown";
+
 export class TigerBeetleLedger implements LedgerPort {
+	private readonly now: () => number;
+	private readonly expirySkewMs: number;
+
 	constructor(
 		private readonly tb: TrustTBClient,
 		private readonly opts: TigerBeetleLedgerOptions,
-	) {}
+	) {
+		this.now = opts.now ?? Date.now;
+		this.expirySkewMs = opts.expirySkewMs ?? 60_000;
+	}
+
+	/**
+	 * A RETIRED id (TigerBeetle answers `id_already_failed` to every attempt after a failed
+	 * first one) says nothing about the hold, so its state is read back: our `post` or `void`
+	 * transfer exists → posted / voided; no reserve transfer → not found; the reserve's own
+	 * timeout (from its ledger timestamp) passed by more than the skew → expired. Anything else
+	 * is `unknown`: the caller retries later, and a not-yet-expired hold resolves at its timeout.
+	 */
+	private async observe(holdKey: string): Promise<Observed> {
+		const [reserve, post, voided] = await Promise.all([
+			this.tb.lookupTransfer(transferIdFor(holdKey, "reserve")),
+			this.tb.lookupTransfer(transferIdFor(holdKey, "post")),
+			this.tb.lookupTransfer(transferIdFor(holdKey, "void")),
+		]);
+		if (post !== null) return "posted";
+		if (voided !== null) return "voided";
+		if (reserve === null) return "not_found";
+		if (reserve.timeout === 0) return "unknown"; // no ledger expiry at all
+		const expiresAtNs = reserve.timestamp + BigInt(reserve.timeout) * 1_000_000_000n;
+		const nowNs = BigInt(Math.floor(this.now())) * 1_000_000n;
+		return nowNs > expiresAtNs + BigInt(this.expirySkewMs) * 1_000_000n ? "expired" : "unknown";
+	}
 
 	/**
 	 * The wallet's available balance, plus this hold's own reserve amount when a transfer
@@ -125,7 +187,20 @@ export class TigerBeetleLedger implements LedgerPort {
 			});
 			return "done";
 		} catch (err) {
-			if (err instanceof TBTransferError && err.code === PENDING_TRANSFER_EXPIRED) return "expired";
+			if (err instanceof TransferIdRetiredError) {
+				const seen = await this.observe(p.holdKey);
+				return seen === "posted" ? "done" : seen;
+			}
+			if (err instanceof TBTransferError) {
+				switch (err.code) {
+					case PENDING_TRANSFER_EXPIRED:
+						return "expired";
+					case PENDING_TRANSFER_ALREADY_VOIDED:
+						return "voided";
+					case PENDING_TRANSFER_NOT_FOUND:
+						return "not_found";
+				}
+			}
 			throw err;
 		}
 	}
@@ -137,6 +212,10 @@ export class TigerBeetleLedger implements LedgerPort {
 			});
 			return "done";
 		} catch (err) {
+			if (err instanceof TransferIdRetiredError) {
+				const seen = await this.observe(p.holdKey);
+				return seen === "voided" ? "done" : seen;
+			}
 			if (err instanceof TBTransferError) {
 				switch (err.code) {
 					case PENDING_TRANSFER_ALREADY_VOIDED:

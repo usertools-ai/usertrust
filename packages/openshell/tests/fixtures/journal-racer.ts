@@ -45,13 +45,16 @@ if (mode === "cas") {
 	// It refuses NOTHING, so a double admission shows up as two open holds.
 	const ledger = new DatabaseSync(ledgerPath as string);
 	ledger.exec("PRAGMA busy_timeout = 5000");
+	const live = Date.now() + 3_600_000;
 	for (let i = 0; i < count; i++) {
 		const r = await untilNotBusy(() =>
 			journal.reserve({
 				holdId: `${role}-${i}`,
 				budgetId: `b${i}`,
 				amount: 100,
-				ttlAt: Date.now() + 3_600_000, // live for the whole race: a placement past ttlAt is refused
+				// Live for the whole race: a placement past the admission deadline is refused.
+				ttlAt: live,
+				admitBy: live,
 				availableCredit: () =>
 					(
 						ledger.prepare("SELECT available FROM bal WHERE budget = ?").get(`b${i}`) as {

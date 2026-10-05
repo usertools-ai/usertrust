@@ -29,6 +29,7 @@ export {
 	type HoldState,
 	JournalBusyError,
 	type JournalOptions,
+	JournalSchemaError,
 	JournalUnavailableError,
 	LedgerDeadlineError,
 	loadSqlite,
@@ -41,6 +42,7 @@ export {
 	TERMINAL_STATES,
 } from "./journal.js";
 export {
+	BudgetIdError,
 	debtAccountLabel,
 	type LedgerPort,
 	type PostOutcome,

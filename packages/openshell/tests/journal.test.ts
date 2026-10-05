@@ -11,6 +11,7 @@ import {
 	HoldConflictError,
 	HoldJournal,
 	JournalBusyError,
+	JournalSchemaError,
 	JournalUnavailableError,
 	LedgerDeadlineError,
 	loadSqlite,
@@ -49,6 +50,7 @@ const open = (j: HoldJournal, holdId: string, budgetId = "b", amount = 100) =>
 		budgetId,
 		amount,
 		ttlAt: 1_000,
+		admitBy: 1_000,
 		availableCredit: () => 1e9,
 		placeHold: () => {},
 	});
@@ -140,6 +142,7 @@ describe("hold journal: BUSY is never a lost CAS", () => {
 				budgetId: "b",
 				amount: 1,
 				ttlAt: 0,
+				admitBy: 0,
 				availableCredit: () => 10,
 				placeHold: () => void placed++,
 			}),
@@ -161,6 +164,7 @@ describe("hold journal: one writer inside the process too", () => {
 			budgetId: "b",
 			amount: 10,
 			ttlAt: 1_000,
+			admitBy: 1_000,
 			availableCredit: () => 1e9,
 			placeHold: async () => {
 				order.push("1:begin");
@@ -205,6 +209,7 @@ describe("hold journal: one writer inside the process too", () => {
 			budgetId: "b",
 			amount: 10,
 			ttlAt: 1_000,
+			admitBy: 1_000,
 			availableCredit: () => 1e9,
 			placeHold: async () => {
 				entered();
@@ -230,6 +235,7 @@ describe("hold journal: one writer inside the process too", () => {
 			budgetId: "b",
 			amount: 10,
 			ttlAt: 1_000,
+			admitBy: 1_000,
 			availableCredit: () => 1e9,
 			placeHold: () => {
 				nested = j.writeTx(() => 1);
@@ -246,6 +252,7 @@ describe("hold journal: one writer inside the process too", () => {
 				budgetId: "b",
 				amount: 10,
 				ttlAt: 1_000,
+				admitBy: 1_000,
 				availableCredit: () => 1e9,
 				placeHold: () => new Promise<void>(() => {}),
 			}),
@@ -273,6 +280,7 @@ describe("hold journal: one writer inside the process too", () => {
 			budgetId: "b",
 			amount: 10,
 			ttlAt: 1_000,
+			admitBy: 1_000,
 			availableCredit: () => 1e9,
 			placeHold: async () => {
 				j.applyDebt("b", "t-1", 50); // inside reserve's own transaction: allowed
@@ -341,6 +349,7 @@ describe("hold journal: reservation is atomic with the debt it is checked agains
 			budgetId: "b",
 			amount: 100,
 			ttlAt: 5,
+			admitBy: 5,
 			availableCredit: () => 100,
 			placeHold: () => void placed++,
 		});
@@ -357,6 +366,7 @@ describe("hold journal: reservation is atomic with the debt it is checked agains
 			budgetId: "b",
 			amount: 100,
 			ttlAt: 0,
+			admitBy: 0,
 			availableCredit: () => 120,
 			placeHold: () => void placed++,
 		});
@@ -371,6 +381,7 @@ describe("hold journal: reservation is atomic with the debt it is checked agains
 			budgetId: "b",
 			amount: 10,
 			ttlAt: 0,
+			admitBy: 0,
 			availableCredit: () => 100,
 			placeHold: () => void placed++,
 		};
@@ -389,6 +400,7 @@ describe("hold journal: reservation is atomic with the debt it is checked agains
 				budgetId: "b",
 				amount: 10,
 				ttlAt: 0,
+				admitBy: 0,
 				availableCredit: () => 100,
 				placeHold: () => {
 					placed += 1;
@@ -419,6 +431,7 @@ describe("hold journal: reservation is atomic with the debt it is checked agains
 				budgetId: "b",
 				amount: 10,
 				ttlAt: 0,
+				admitBy: 0,
 				availableCredit: () => {
 					throw new Error("ledger down");
 				},
@@ -438,6 +451,7 @@ describe("#167: reserve's contract — validated input, the same hold only, and 
 			budgetId: "b",
 			amount: 10,
 			ttlAt: 1_000,
+			admitBy: 1_000,
 			availableCredit: () => {
 				calls += 1;
 				return 1e9;
@@ -455,6 +469,8 @@ describe("#167: reserve's contract — validated input, the same hold only, and 
 			{ holdId: "" },
 			{ budgetId: "" },
 			{ ttlAt: Number.POSITIVE_INFINITY },
+			{ admitBy: Number.NaN },
+			{ admitBy: 2_000 }, // after ttlAt (1,000): the earliest expiry cannot be after the latest
 		]) {
 			await expect(j.reserve({ ...base, ...bad }), JSON.stringify(bad)).rejects.toBeInstanceOf(
 				TypeError,
@@ -478,6 +494,7 @@ describe("#167: reserve's contract — validated input, the same hold only, and 
 			budgetId: "b",
 			amount: 100,
 			ttlAt: 1_000,
+			admitBy: 1_000,
 			availableCredit: () => 1e9,
 			placeHold: async () => {
 				now = finishAt; // the ledger answered this late
@@ -516,6 +533,7 @@ describe("#167: reserve's contract — validated input, the same hold only, and 
 				budgetId: "b",
 				amount: 100,
 				ttlAt: 1_000,
+				admitBy: 1_000,
 				availableCredit: () => {
 					asked++;
 					return 1e9;
@@ -537,6 +555,7 @@ describe("#167: reserve's contract — validated input, the same hold only, and 
 					budgetId: "b",
 					amount: 100,
 					ttlAt: 1_000,
+					admitBy: 1_000,
 					availableCredit: () => bad,
 					placeHold: () => void placed++,
 				}),
@@ -555,6 +574,7 @@ describe("#167: reserve's contract — validated input, the same hold only, and 
 			budgetId: "b",
 			amount: 10,
 			ttlAt: 1_000,
+			admitBy: 1_000,
 			availableCredit: (holdId) => {
 				seen.push(holdId);
 				return 1e9;
@@ -661,6 +681,7 @@ describe("hold journal: the sweeper's work lists", () => {
 				budgetId: "b",
 				amount: 1,
 				ttlAt: ttl,
+				admitBy: ttl,
 				availableCredit: () => 100,
 				placeHold: () => {},
 			});
@@ -791,6 +812,7 @@ describe("#167: an abandoned placement may still land — `voiding` waits out th
 			budgetId: "b",
 			amount: 10,
 			ttlAt: 1_000,
+			admitBy: 1_000,
 			availableCredit: () => 1e9,
 			placeHold: () => {
 				throw new Error("lost response");
@@ -836,6 +858,7 @@ describe("#167: an abandoned placement may still land — `voiding` waits out th
 			budgetId: "b",
 			amount: 1,
 			ttlAt: 1,
+			admitBy: 1,
 			availableCredit: () => 1e9,
 			placeHold: hang,
 		});
@@ -845,6 +868,7 @@ describe("#167: an abandoned placement may still land — `voiding` waits out th
 			budgetId: "b",
 			amount: 1,
 			ttlAt: 1,
+			admitBy: 1,
 			availableCredit: hang,
 			placeHold: () => {},
 		});
@@ -861,6 +885,7 @@ describe("#167: an abandoned placement may still land — `voiding` waits out th
 				budgetId: "b",
 				amount: 10,
 				ttlAt: 1_000,
+				admitBy: 1_000,
 				availableCredit: () => 1e9,
 				placeHold: () => {
 					writer.exec("DROP TABLE hold"); // inside the transaction: rolled back with it
@@ -935,5 +960,64 @@ describe("#167: a retry past the hold's lifetime is refused; the reservation err
 		]) {
 			expect(typeof (root as Record<string, unknown>)[name], name).toBe("function");
 		}
+	});
+});
+
+describe("#174 P1: admission is judged by the EARLIEST ledger expiry (admitBy), never by ttlAt", () => {
+	// admitBy 1,000 (the earliest the ledger can release the hold), ttlAt 1,050 (the latest).
+	const reserve = (j: HoldJournal, placeHold: () => void = () => {}) =>
+		j.reserve({
+			holdId: "h1",
+			budgetId: "b",
+			amount: 100,
+			ttlAt: 1_050,
+			admitBy: 1_000,
+			availableCredit: () => 1e9,
+			placeHold,
+		});
+
+	it("a retry of an `open` row between admitBy and ttlAt is refused hold_expired: the ledger hold may already be gone", async () => {
+		let now = 0;
+		const { j } = fresh({ now: () => now });
+		await expect(reserve(j)).resolves.toEqual({ admitted: true, existing: false });
+		expect(j.get("h1")).toMatchObject({ ttlAt: 1_050, admitBy: 1_000 });
+		now = 1_010; // past the earliest expiry, before the latest
+		await expect(reserve(j)).resolves.toEqual({
+			admitted: false,
+			reason: "hold_expired",
+			existing: true,
+		});
+	});
+
+	it("a fresh reservation, or a placement that answers, between admitBy and ttlAt is not admitted", async () => {
+		let now = 1_010;
+		const { j } = fresh({ now: () => now });
+		let placed = 0;
+		await expect(reserve(j, () => void placed++)).resolves.toEqual({
+			admitted: false,
+			reason: "hold_expired",
+			existing: false,
+		});
+		expect(placed, "nothing placed past the admission deadline").toBe(0);
+		now = 0;
+		const late = fresh({ now: () => now }).j;
+		await expect(
+			reserve(late, () => {
+				now = 1_020; // the ledger answered after admitBy, before ttlAt
+			}),
+		).resolves.toEqual({ admitted: false, reason: "hold_expired", existing: false });
+		expect(late.get("h1")?.state).toBe("voiding");
+	});
+
+	it("a journal written before admit_by existed is refused at open, never read with ttl_at in its place", () => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-old-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		const raw = new DatabaseSync(path);
+		raw.exec(
+			"CREATE TABLE hold (hold_id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, state TEXT NOT NULL, amount INTEGER NOT NULL, ttl_at INTEGER NOT NULL, intent_json TEXT, terminal_kind TEXT, terminal_event_hash TEXT, reserved_seq INTEGER)",
+		);
+		raw.close();
+		expect(() => HoldJournal.open(path)).toThrow(JournalSchemaError);
 	});
 });

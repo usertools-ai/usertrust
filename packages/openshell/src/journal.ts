@@ -107,8 +107,16 @@ export interface HoldRow {
 	budgetId: string;
 	state: HoldState;
 	amount: number;
-	/** Epoch ms after which the sweeper may expire an `open` hold. */
+	/**
+	 * Epoch ms: the LATEST the ledger's own timeout can release the hold (an upper bound).
+	 * The sweeper expires an `open` hold past it, and the placement horizon counts from it.
+	 */
 	ttlAt: number;
+	/**
+	 * Epoch ms: the EARLIEST the ledger's own timeout can release the hold (a lower bound).
+	 * Nothing is admitted at or past it: neither a retry of an `open` row nor a placement.
+	 */
+	admitBy: number;
 	/** The settlement (or late-settlement) intent, written WITH the claim. */
 	intent: unknown;
 	terminalKind: string | null;
@@ -164,6 +172,14 @@ export class PlacementHorizonError extends Error {
 	}
 }
 
+/** The journal file was written by an older schema this code cannot read safely. */
+export class JournalSchemaError extends Error {
+	constructor(why: string) {
+		super(`hold journal: unsupported schema — ${why}; recreate the journal file`);
+		this.name = "JournalSchemaError";
+	}
+}
+
 /** The `voiding` row of an ambiguous placement could not be written: a ledger hold may exist with no row. */
 export class OrphanRiskError extends Error {
 	constructor(holdId: string, cause: unknown) {
@@ -202,6 +218,7 @@ interface RawRow {
 	state: HoldState;
 	amount: number;
 	ttl_at: number;
+	admit_by: number;
 	intent_json: string | null;
 	terminal_kind: string | null;
 	terminal_event_hash: string | null;
@@ -215,6 +232,7 @@ function toRow(r: RawRow): HoldRow {
 		state: r.state,
 		amount: r.amount,
 		ttlAt: r.ttl_at,
+		admitBy: r.admit_by,
 		intent: r.intent_json === null ? null : JSON.parse(r.intent_json),
 		terminalKind: r.terminal_kind,
 		terminalEventHash: r.terminal_event_hash,
@@ -250,8 +268,18 @@ export interface ReserveInput {
 	budgetId: string;
 	/** A positive safe integer (usertokens). */
 	amount: number;
-	/** Epoch ms; finite. */
+	/**
+	 * Epoch ms; finite. The LATEST the ledger's timeout can release this hold (its timeout
+	 * starts when the placement commits): the sweeper's deadline and the placement horizon's base.
+	 */
 	ttlAt: number;
+	/**
+	 * Epoch ms; finite, and not after `ttlAt`. The EARLIEST the ledger's timeout can release
+	 * this hold — the clock read BEFORE the placement plus the hold's lifetime. Admission is
+	 * judged against it: a retry of an `open` row, and the placement itself, are refused
+	 * (`hold_expired`) at or past it, because from then on the ledger hold may be gone.
+	 */
+	admitBy: number;
 	/**
 	 * Usertokens the budget can still reserve (the ledger's available credit),
 	 * EXCLUDING any pending transfer this `holdId` already placed — an orphan from
@@ -279,6 +307,9 @@ function validateReserve(input: ReserveInput): void {
 	if (!Number.isSafeInteger(input.amount) || input.amount <= 0)
 		throw bad(`amount must be a positive safe integer, got ${String(input.amount)}`);
 	if (!Number.isFinite(input.ttlAt)) throw bad("ttlAt must be finite");
+	if (!Number.isFinite(input.admitBy)) throw bad("admitBy must be finite");
+	if (input.admitBy > input.ttlAt)
+		throw bad("admitBy (the earliest ledger expiry) must not be after ttlAt (the latest)");
 }
 
 export class HoldJournal {
@@ -349,6 +380,13 @@ export class HoldJournal {
 	}
 
 	private static migrate(db: DatabaseSync): void {
+		// A journal written before the admission deadline existed has no `admit_by` to judge an
+		// `open` row by; reading its `ttl_at` (an upper bound) in its place would admit after the
+		// ledger may have released the hold. Refused, never guessed (the package is unreleased).
+		const cols = db.prepare("PRAGMA table_info(hold)").all() as Array<{ name: string }>;
+		if (cols.length > 0 && !cols.some((c) => c.name === "admit_by")) {
+			throw new JournalSchemaError("the hold table has no admit_by column");
+		}
 		db.exec(`
 			CREATE TABLE IF NOT EXISTS hold (
 				hold_id TEXT PRIMARY KEY,
@@ -357,6 +395,7 @@ export class HoldJournal {
 					('open','settling','settled','voiding','voided','expiring','expired')),
 				amount INTEGER NOT NULL CHECK (amount > 0),
 				ttl_at INTEGER NOT NULL,
+				admit_by INTEGER NOT NULL,
 				intent_json TEXT,
 				terminal_kind TEXT,
 				terminal_event_hash TEXT,
@@ -554,12 +593,12 @@ export class HoldJournal {
 					return { admitted: false, reason: "not_open", existing: true };
 				// An `open` row is NOT proof of a live ledger hold once its lifetime has passed
 				// (a restart, a delayed sweeper): the pending transfer may have expired. Fail closed.
-				if (this.now() >= existing.ttlAt)
+				if (this.now() >= existing.admitBy)
 					return { admitted: false, reason: "hold_expired", existing: true };
 				return { admitted: true, existing: true };
 			}
 			// Nothing is placed for a hold whose lifetime has already passed.
-			if (this.now() >= input.ttlAt)
+			if (this.now() >= input.admitBy)
 				return { admitted: false, reason: "hold_expired", existing: false };
 			const debt = this.debtOf(input.budgetId);
 			const available = await this.bounded("availableCredit", () =>
@@ -585,13 +624,14 @@ export class HoldJournal {
 				try {
 					this.db
 						.prepare(
-							"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, intent_json) VALUES (?, ?, 'voiding', ?, ?, ?)",
+							"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by, intent_json) VALUES (?, ?, 'voiding', ?, ?, ?, ?)",
 						)
 						.run(
 							input.holdId,
 							input.budgetId,
 							input.amount,
 							input.ttlAt,
+							input.admitBy,
 							JSON.stringify({
 								ambiguousPlacement: err instanceof Error ? err.message : String(err),
 							}),
@@ -604,25 +644,26 @@ export class HoldJournal {
 			// A placement that answered at or past ttlAt is NOT a live reservation: the ledger's
 			// pending transfer may already have expired. It is never forwarded on; the row is
 			// committed `voiding`, so the release path voids it under the placement-horizon rule.
-			if (this.now() >= input.ttlAt) {
+			if (this.now() >= input.admitBy) {
 				this.db
 					.prepare(
-						"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, intent_json) VALUES (?, ?, 'voiding', ?, ?, ?)",
+						"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by, intent_json) VALUES (?, ?, 'voiding', ?, ?, ?, ?)",
 					)
 					.run(
 						input.holdId,
 						input.budgetId,
 						input.amount,
 						input.ttlAt,
+						input.admitBy,
 						JSON.stringify({ placedPastTtl: true }),
 					);
 				return { admitted: false, reason: "hold_expired", existing: false };
 			}
 			this.db
 				.prepare(
-					"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at) VALUES (?, ?, 'open', ?, ?)",
+					"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by) VALUES (?, ?, 'open', ?, ?, ?)",
 				)
-				.run(input.holdId, input.budgetId, input.amount, input.ttlAt);
+				.run(input.holdId, input.budgetId, input.amount, input.ttlAt, input.admitBy);
 			return { admitted: true, existing: false };
 		}).then((out) => {
 			// The `voiding` row is committed; the placement's own error is the answer.
