@@ -31,16 +31,46 @@ export interface GateConfig {
 	/** Operator rates; a model priced here counts as priced. */
 	customRates?: Record<string, ModelRates>;
 	/**
-	 * Tokens charged per image in the input bound. CONSERVATIVE defaults above the
-	 * providers' documented per-image maxima as read at the time of writing;
-	 * operator-configurable, and a candidate for measurement (README "Spec gaps").
+	 * Tokens charged per image in the input bound, for a model NOT named in
+	 * {@link imageTokenMaxByModel}: at or above the provider's documented maximum
+	 * for ANY of its models (README "Image bounds").
 	 */
 	imageTokenMax: Record<Provider, number>;
+	/** Per-model image maxima (exact model names), where the documented maximum is lower. */
+	imageTokenMaxByModel: Record<string, number>;
+	/**
+	 * Input tokens the PROVIDER adds when a request carries tools (its tool-use
+	 * system prompt), which the body's bytes do not contain.
+	 */
+	toolOverheadTokens: Record<Provider, number>;
 }
+
+/**
+ * OpenAI tile-based models: base + 8 tiles × per-tile tokens (the most tiles one
+ * image scales to: 768 × 2048 px). Patch-based models are not listed — they fall
+ * back to the provider maximum.
+ */
+const OPENAI_TILE_IMAGE_MAX: Record<string, number> = {
+	"gpt-4o": 85 + 8 * 170,
+	"gpt-4.1": 85 + 8 * 170,
+	"gpt-5": 70 + 8 * 140,
+	"gpt-5.1": 70 + 8 * 140,
+	o1: 75 + 8 * 150,
+	o3: 75 + 8 * 150,
+};
 
 export const DEFAULT_GATE_CONFIG: GateConfig = {
 	routes: DEFAULT_ROUTE_CONFIG,
-	imageTokenMax: { anthropic: 2_000, openai: 4_000 },
+	imageTokenMax: {
+		// The high-resolution tier (Claude 4.7 and later): 4,784 visual tokens per image.
+		anthropic: 4_784,
+		// The patch limit (30,000 per image) × the largest documented multiplier (2.46).
+		openai: 73_800,
+	},
+	imageTokenMaxByModel: OPENAI_TILE_IMAGE_MAX,
+	// Anthropic's largest documented tool-use system prompt is 804 tokens. OpenAI
+	// documents none: function definitions are billed as input — the body's bytes.
+	toolOverheadTokens: { anthropic: 1_024, openai: 0 },
 };
 
 export interface GateRequest {
@@ -53,7 +83,7 @@ export interface GateRequest {
 export interface RequestMutations {
 	/** Request headers to remove (lowercase). */
 	removeHeaders: string[];
-	/** A replacement body, when one is needed. */
+	/** The body to forward. Always set on ALLOW: the re-serialized parse the gate checked. */
 	body?: Uint8Array;
 }
 
@@ -233,6 +263,12 @@ function chatChecks(body: Json, w: Walk): void {
 			refuse(w, DenyReason.requestUnparseable, "message");
 			return;
 		}
+		if (m.audio !== undefined && m.audio !== null) {
+			// An earlier audio response referenced by id: the provider expands it into
+			// input the body's bytes do not bound.
+			refuse(w, DenyReason.providerContextUnsupported, "message:audio");
+			return;
+		}
 		const content = m.content;
 		if (content === undefined || content === null || typeof content === "string") continue;
 		if (!Array.isArray(content)) {
@@ -265,8 +301,6 @@ function chatChecks(body: Json, w: Walk): void {
 }
 
 // ── OpenAI /v1/responses ──
-
-const RESPONSES_PASS_ITEMS = new Set(["function_call", "function_call_output", "reasoning"]);
 
 function responsesContent(content: unknown, w: Walk): void {
 	if (content === undefined || typeof content === "string") return;
@@ -324,16 +358,177 @@ function responsesChecks(body: Json, w: Walk): void {
 		const type = item.type ?? (typeof item.role === "string" ? "message" : undefined);
 		if (type === "message") {
 			responsesContent(item.content, w);
+		} else if (type === "function_call_output") {
+			// A tool's output may be content parts (images, files): the SAME allowlist and
+			// image counting as a message, or an image is billed and never bounded.
+			responsesContent(item.output, w);
+		} else if (type === "reasoning") {
+			// Without encrypted_content the item is a REFERENCE to stored reasoning the
+			// provider expands; only a self-contained item is bounded by its bytes.
+			if (typeof item.encrypted_content !== "string") {
+				refuse(w, DenyReason.providerContextUnsupported, "reasoning:stored");
+				return;
+			}
 		} else if (type === "item_reference") {
 			refuse(w, DenyReason.providerContextUnsupported, "item_reference");
 			return;
-		} else if (typeof type !== "string" || !RESPONSES_PASS_ITEMS.has(type)) {
+		} else if (type !== "function_call") {
 			refuse(w, DenyReason.contentUnsupported, `item:${String(type)}`);
 			return;
 		}
 		if (w.deny) return;
 	}
 }
+
+// ── top-level fields: an allowlist per route, and the tiers priced above standard ──
+
+/**
+ * Every top-level field a route may carry. A field not named is DENIED — including
+ * one that does not exist yet — and so is a documented field whose billing v1 does
+ * not bound: Anthropic `fallbacks` (a second attempt at another model's rates),
+ * `compaction`, `context_management`, `diagnostics`; OpenAI `audio`, `prediction`,
+ * `moderation`, `prompt_cache_options` / `prompt_cache_retention` (cache writes and
+ * extended retention priced off the table), `context_management`, `access_programs`.
+ */
+const TOP_LEVEL: Record<MeteredRoute, ReadonlySet<string>> = {
+	"anthropic.messages": new Set([
+		"model",
+		"max_tokens",
+		"messages",
+		"system",
+		"metadata",
+		"stop_sequences",
+		"stream",
+		"temperature",
+		"top_k",
+		"top_p",
+		"tools",
+		"tool_choice",
+		"thinking",
+		"service_tier",
+		"speed",
+		"inference_geo",
+		"cache_control",
+		"output_config",
+		"output_format",
+	]),
+	"openai.chat": new Set([
+		"model",
+		"messages",
+		"max_completion_tokens",
+		"max_tokens",
+		"frequency_penalty",
+		"presence_penalty",
+		"function_call",
+		"functions",
+		"logit_bias",
+		"logprobs",
+		"top_logprobs",
+		"metadata",
+		"modalities",
+		"n",
+		"parallel_tool_calls",
+		"prompt_cache_key",
+		"reasoning_effort",
+		"response_format",
+		"safety_identifier",
+		"seed",
+		"service_tier",
+		"stop",
+		"store",
+		"stream",
+		"stream_options",
+		"temperature",
+		"tool_choice",
+		"tools",
+		"top_p",
+		"user",
+		"verbosity",
+	]),
+	"openai.responses": new Set([
+		"model",
+		"input",
+		"instructions",
+		"max_output_tokens",
+		"max_tool_calls",
+		"metadata",
+		"parallel_tool_calls",
+		"prompt_cache_key",
+		"reasoning",
+		"safety_identifier",
+		"service_tier",
+		"store",
+		"stream",
+		"stream_options",
+		"temperature",
+		"text",
+		"tool_choice",
+		"tools",
+		"top_logprobs",
+		"top_p",
+		"truncation",
+		"user",
+		"include",
+		"background",
+	]),
+};
+
+/** OpenAI tiers at or BELOW standard rates. Absent and "auto" are pinned to "default". */
+const OPENAI_TIERS = new Set(["default", "flex"]);
+
+/**
+ * Deny a tier priced above the table's standard rates, then any field off the
+ * route's allowlist. Returns the OpenAI service tier to forward (pinned).
+ */
+function topLevelChecks(route: MeteredRoute, body: Json, w: Walk): string | undefined {
+	if (route === "anthropic.messages") {
+		// Fast mode bills premium rates; a US-only region bills 1.1×. service_tier
+		// ("auto" / "standard_only") carries no per-token premium.
+		if (body.speed !== undefined && body.speed !== "standard") {
+			refuse(w, DenyReason.pricingTierUnsupported, `speed:${String(body.speed)}`);
+			return undefined;
+		}
+		if (body.inference_geo !== undefined && body.inference_geo !== "global") {
+			refuse(w, DenyReason.pricingTierUnsupported, `inference_geo:${String(body.inference_geo)}`);
+			return undefined;
+		}
+		const tier = body.service_tier;
+		if (tier !== undefined && tier !== "auto" && tier !== "standard_only") {
+			refuse(w, DenyReason.pricingTierUnsupported, `service_tier:${String(tier)}`);
+			return undefined;
+		}
+	}
+	let pinned: string | undefined;
+	if (route !== "anthropic.messages") {
+		// Absent or "auto" means the PROJECT's configured tier, which the gate cannot
+		// see and may be priority: pin it to "default" in the forwarded body.
+		const tier = body.service_tier;
+		if (tier === undefined || tier === null || tier === "auto") pinned = "default";
+		else if (typeof tier === "string" && OPENAI_TIERS.has(tier)) pinned = tier;
+		else {
+			refuse(w, DenyReason.pricingTierUnsupported, `service_tier:${String(tier)}`);
+			return undefined;
+		}
+		if (route === "openai.responses" && body.instructions != null) {
+			if (typeof body.instructions !== "string") {
+				refuse(w, DenyReason.contentUnsupported, "instructions");
+				return undefined;
+			}
+		}
+	}
+	const allowed = TOP_LEVEL[route];
+	for (const k of Object.keys(body)) {
+		if (!allowed.has(k)) {
+			refuse(w, DenyReason.parameterUnsupported, `param:${k}`);
+			return undefined;
+		}
+	}
+	return pinned;
+}
+
+const hasTools = (body: Json) =>
+	(Array.isArray(body.tools) && body.tools.length > 0) ||
+	(Array.isArray(body.functions) && body.functions.length > 0);
 
 // ── output limit ──
 
@@ -380,6 +575,7 @@ export function evaluateRequest(
 	if (match.route === "anthropic.messages") anthropicChecks(body, w);
 	else if (match.route === "openai.chat") chatChecks(body, w);
 	else responsesChecks(body, w);
+	const serviceTier = w.deny ? undefined : topLevelChecks(match.route, body, w);
 	if (w.deny) return { decision: "deny", ...w.deny };
 
 	const maxOutputTokens = maxOutput(match.route, body);
@@ -390,11 +586,35 @@ export function evaluateRequest(
 		return { decision: "deny", reason: DenyReason.modelUnpriced, detail: model };
 	}
 
-	// The input bound: every byte of the body is at most one token (no tokenizer emits
-	// a token for less than a byte, and JSON framing outweighs the providers' template
-	// tokens), except inline image data, which is billed per image instead.
+	const streaming = body.stream === true;
+	// The FORWARDED body is always this parse re-serialized, so the provider reads
+	// exactly the document the gate checked: with duplicate keys, the gate and the
+	// provider's parser could otherwise keep different values.
+	const forwarded: Json = { ...body };
+	if (serviceTier !== undefined) forwarded.service_tier = serviceTier;
+	if (match.route === "openai.chat" && streaming) {
+		// Without it a chat-completions stream carries no usage. /v1/responses reports
+		// usage in its terminal event.
+		forwarded.stream_options = {
+			...(isObject(body.stream_options) ? body.stream_options : {}),
+			include_usage: true,
+		};
+	}
+	const bytes = new TextEncoder().encode(JSON.stringify(forwarded));
+	if (bytes.byteLength > MAX_BODY_BYTES) throw new BodyTooLargeError(bytes.byteLength);
+
+	// The input bound, on the bytes the provider RECEIVES: every byte is at most one
+	// token (no tokenizer emits a token for less than a byte, and JSON framing
+	// outweighs the providers' template tokens), except inline image data, which is
+	// billed per image instead.
+	const perImage = Object.hasOwn(config.imageTokenMaxByModel, model)
+		? (config.imageTokenMaxByModel[model] ?? config.imageTokenMax[match.provider])
+		: config.imageTokenMax[match.provider];
 	const inputTokenBound =
-		req.body.byteLength - w.inlineBytes + w.images * config.imageTokenMax[match.provider];
+		bytes.byteLength -
+		w.inlineBytes +
+		w.images * perImage +
+		(hasTools(body) ? config.toolOverheadTokens[match.provider] : 0);
 	const rates = getModelRates(model, config.customRates);
 	// Priced at the DEARER of the input and cache-write tiers: a prompt the provider
 	// writes to its cache bills above plain input.
@@ -403,19 +623,11 @@ export function evaluateRequest(
 		costFromRates(rates, 0, maxOutputTokens, 0, inputTokenBound),
 	);
 
-	const streaming = body.stream === true;
 	const mutations: RequestMutations = {
 		// Response bodies are inspectable only when not content-coded.
 		removeHeaders: ["accept-encoding"],
+		body: bytes,
 	};
-	if (match.route === "openai.chat" && streaming) {
-		// Without it a chat-completions stream carries no usage. /v1/responses is never
-		// mutated: its stream reports usage in `response.completed`.
-		const so = isObject(body.stream_options) ? body.stream_options : {};
-		mutations.body = new TextEncoder().encode(
-			JSON.stringify({ ...body, stream_options: { ...so, include_usage: true } }),
-		);
-	}
 	return {
 		decision: "allow",
 		hold: { route: match.route, model, inputTokenBound, maxOutputTokens, amount, streaming },

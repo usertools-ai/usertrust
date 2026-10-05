@@ -31,6 +31,10 @@ export const DenyReason = {
 	maxOutputUnbounded: "max_output_unbounded",
 	/** A content part or input item of a type v1 does not bound. */
 	contentUnsupported: "content_unsupported",
+	/** A tier, speed or region priced ABOVE the table's standard rates. */
+	pricingTierUnsupported: "pricing_tier_unsupported",
+	/** A top-level request field not on the route's allowlist. */
+	parameterUnsupported: "parameter_unsupported",
 } as const;
 
 export type DenyReason = (typeof DenyReason)[keyof typeof DenyReason];

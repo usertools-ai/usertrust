@@ -76,12 +76,22 @@ describe("route matching — default-deny", () => {
 		expect(DEFAULT_ROUTE_CONFIG.passthrough).toEqual([]);
 		const config = {
 			...DEFAULT_ROUTE_CONFIG,
-			passthrough: [{ method: "get", path: "/v1/models" }],
+			passthrough: [{ host: "API.OpenAI.com:443", method: "get", path: "/v1/models" }],
 		};
 		expect(matchRoute("GET", "api.openai.com", "/v1/models", config)).toEqual({
 			kind: "passthrough",
 		});
 		expect(matchRoute("POST", "api.openai.com", "/v1/models", config).kind).toBe("unsupported");
+	});
+
+	it("#166 P2: a passthrough entry is pinned to its HOST — the same path elsewhere is denied", () => {
+		const config = {
+			...DEFAULT_ROUTE_CONFIG,
+			passthrough: [{ host: "api.openai.com", method: "GET", path: "/v1/models" }],
+		};
+		for (const host of ["api.anthropic.com", "evil.example", "api.openai.com.evil.example", ""]) {
+			expect(matchRoute("GET", host, "/v1/models", config).kind, host).toBe("unsupported");
+		}
 	});
 });
 

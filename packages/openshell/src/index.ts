@@ -43,4 +43,10 @@ export {
 	type ResponseHead,
 } from "./settle.js";
 export { type SettlementAmounts, settlementAmounts } from "./settlement.js";
-export { createUsageParser, type UsageParser } from "./usage.js";
+export {
+	createUsageParser,
+	MAX_SSE_LINE,
+	type UnreadableWhy,
+	type UsageParser,
+	type UsageResult,
+} from "./usage.js";

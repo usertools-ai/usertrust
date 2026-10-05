@@ -8,10 +8,11 @@ export interface RouteConfig {
 	/** Host (lowercase, no port) → the provider whose wire it speaks. */
 	hosts: Record<string, Provider>;
 	/**
-	 * Non-billable routes passed through UNMETERED, e.g. `GET /v1/models`.
+	 * Non-billable routes passed through UNMETERED, e.g. `GET api.openai.com
+	 * /v1/models`. Each names its HOST: the same path on another host is denied.
 	 * Empty by default: an unlisted route is denied, never assumed free.
 	 */
-	passthrough: Array<{ method: string; path: string }>;
+	passthrough: Array<{ host: string; method: string; path: string }>;
 }
 
 export const DEFAULT_ROUTE_CONFIG: RouteConfig = {
@@ -56,14 +57,17 @@ export function matchRoute(
 ): RouteMatch {
 	const m = method.toUpperCase();
 	const p = normalizePath(path);
-	const provider = Object.hasOwn(config.hosts, normalizeHost(host))
-		? config.hosts[normalizeHost(host)]
-		: undefined;
+	const h = normalizeHost(host);
+	const provider = Object.hasOwn(config.hosts, h) ? config.hosts[h] : undefined;
 	if (provider !== undefined && m === "POST" && Object.hasOwn(METERED[provider], p)) {
 		const route = METERED[provider][p];
 		if (route !== undefined) return { kind: "metered", provider, route };
 	}
-	if (config.passthrough.some((r) => r.method.toUpperCase() === m && normalizePath(r.path) === p)) {
+	const passes = config.passthrough.some(
+		(r) =>
+			normalizeHost(r.host) === h && r.method.toUpperCase() === m && normalizePath(r.path) === p,
+	);
+	if (passes) {
 		return { kind: "passthrough" };
 	}
 	return { kind: "unsupported" };
