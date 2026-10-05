@@ -24,3 +24,12 @@ describe("ledger replay errors are exported from the package entry", () => {
 		expect(pkg.XFER_SPEND).toBe(XFER_SPEND);
 	});
 });
+
+describe("the audit writer is exported from the package entry (1c-core)", () => {
+	it("createAuditWriter and AuditWriterLockHeldError are the same values as the module's", async () => {
+		const chain = await import("../../src/audit/chain.js");
+		expect(pkg.createAuditWriter).toBe(chain.createAuditWriter);
+		expect(pkg.AuditWriterLockHeldError).toBe(chain.AuditWriterLockHeldError);
+		expect(new pkg.AuditWriterLockHeldError("x")).toBeInstanceOf(Error);
+	});
+});

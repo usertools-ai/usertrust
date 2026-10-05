@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { canonicalize } from "../../src/audit/canonical.js";
-import { createAuditWriter } from "../../src/audit/chain.js";
+import { AuditWriterLockHeldError, createAuditWriter } from "../../src/audit/chain.js";
 import { GENESIS_HASH, VAULT_DIR } from "../../src/shared/constants.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
@@ -560,6 +560,79 @@ describe("Audit Chain Writer — advisory lock", () => {
 			freshWriter.release();
 			rmSync(freshDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("Audit Chain Writer — lockAtCreate (the lock taken in the factory)", () => {
+	let tempDir: string;
+	const writers: Array<ReturnType<typeof createAuditWriter>> = [];
+	const lockPath = () => join(tempDir, ".usertrust", "audit", ".audit-writer.lock");
+	const heldByAnotherProcess = () => {
+		mkdirSync(join(tempDir, ".usertrust", "audit"), { recursive: true });
+		// The parent PID is a live process other than this one (the existing pattern above).
+		writeFileSync(
+			lockPath(),
+			JSON.stringify({ pid: process.ppid, startedAt: "2020-01-01T00:00:00Z" }),
+		);
+	};
+
+	beforeEach(() => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-audit-eager-"));
+	});
+	afterEach(() => {
+		for (const w of writers.splice(0)) w.release();
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	it("takes the lock at creation, before any append", () => {
+		writers.push(createAuditWriter(tempDir, { lockAtCreate: true }));
+		expect(existsSync(lockPath())).toBe(true);
+		expect(JSON.parse(readFileSync(lockPath(), "utf-8")).pid).toBe(process.pid);
+	});
+
+	it("a lock held by another LIVE process fails the FACTORY with AuditWriterLockHeldError (still an Error, same message)", () => {
+		heldByAnotherProcess();
+		let caught: unknown;
+		try {
+			writers.push(createAuditWriter(tempDir, { lockAtCreate: true }));
+		} catch (e) {
+			caught = e;
+		}
+		expect(caught).toBeInstanceOf(AuditWriterLockHeldError);
+		expect(caught).toBeInstanceOf(Error);
+		expect(String((caught as Error).message)).toBe(
+			`Audit writer lock held by PID ${process.ppid}. Only one process may write to the audit log. Lock file: ${lockPath()}`,
+		);
+	});
+
+	it("a second eager writer on the same vault in THIS process fails at creation", () => {
+		writers.push(createAuditWriter(tempDir, { lockAtCreate: true }));
+		expect(() => createAuditWriter(tempDir, { lockAtCreate: true })).toThrow(
+			AuditWriterLockHeldError,
+		);
+	});
+
+	it("an eager writer appends normally, and after release() the next eager writer takes the lock", async () => {
+		const w = createAuditWriter(tempDir, { lockAtCreate: true });
+		const e = await w.appendEvent({ kind: "test.eager", actor: "sys", data: {} });
+		expect(e.previousHash).toBe(GENESIS_HASH);
+		w.release();
+		expect(existsSync(lockPath())).toBe(false);
+		writers.push(createAuditWriter(tempDir, { lockAtCreate: true }));
+		expect(existsSync(lockPath())).toBe(true);
+	});
+
+	it("control — the default is unchanged: creation succeeds, and the held lock fails only the first append, with the same message", async () => {
+		heldByAnotherProcess();
+		const w = createAuditWriter(tempDir);
+		writers.push(w);
+		const err = await w
+			.appendEvent({ kind: "test.lazy", actor: "sys", data: {} })
+			.catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(AuditWriterLockHeldError);
+		expect(String((err as Error).message)).toContain(
+			`Audit writer lock held by PID ${process.ppid}`,
+		);
 	});
 });
 

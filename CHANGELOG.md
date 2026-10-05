@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The audit writer is exported, with an eager lock.** `createAuditWriter`, `AuditWriter`, `AppendEventInput`, `CreateAuditWriterOptions` and `AuditWriterLockHeldError` are now exported from the package entry. `createAuditWriter(vaultPath, { lockAtCreate: true })` takes the vault's advisory lock in the factory, so a second writer fails at creation with `AuditWriterLockHeldError` instead of at its first append. That second writer can be another live process, or another live writer in the same process. The default (`lockAtCreate` omitted or `false`) is unchanged: the lock is taken at the first append.
+
 - **`isModelPriced(model, customRates?)`** — true only when a model has rates of
   its OWN: an operator custom rate or an EXACT pricing-table entry. It is for a
   caller that must refuse what it cannot price exactly rather than bill it at a
@@ -443,6 +445,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   working, not a regression.
 
 ### Changed
+
+- **A held audit-writer lock throws `AuditWriterLockHeldError`** (minor, additive). It used to be a plain `Error`. It is now a subclass of `Error` with the **same message**, so existing `catch` blocks and message checks behave as before, and a caller can now tell "held" apart from other failures with `instanceof`.
+- **`TrustTBClient.immediateTransfer` verifies a caller-supplied id like the other transfer paths** (#178). With a `transferId` supplied: an `exists` answer is verified against the stored transfer (a mismatch throws `TransferReplayMismatchError`), and an id whose first attempt failed throws `TransferIdRetiredError` (still a `TBTransferError` with code `id_already_failed`), as `createPendingTransfer`, `postTransfer` and `voidTransfer` already did. A minted id (no `transferId`) is unchanged.
 
 - **`TrustTBClient.voidTransfer` throws `TBTransferError` on failure** (minor, additive). It used to throw a plain `Error`; it now throws the same `TBTransferError` every other transfer path throws, carrying the TigerBeetle status as `code`. That lets a caller tell an already-expired hold (`pending_transfer_expired`) from a real failure. The message is unchanged ("Void transfer failed: …"), and `TBTransferError` extends `Error`, so existing `catch`, `instanceof Error` and message-matching callers behave exactly as before.
 

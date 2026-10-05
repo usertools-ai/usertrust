@@ -935,6 +935,8 @@ export class TrustTBClient {
 		userData64?: bigint;
 		userData32?: number;
 	}): Promise<bigint> {
+		// Decided ONCE, synchronously, before any await (as on the other transfer paths).
+		const callerSupplied = p.transferId !== undefined;
 		const transferId = p.transferId ?? tbId();
 		const transfer: Transfer = {
 			id: transferId,
@@ -956,6 +958,10 @@ export class TrustTBClient {
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
+			// A caller-supplied id: `exists` is VERIFIED against the stored transfer, and a
+			// retired id (`id_already_failed`) is TransferIdRetiredError — the same contract as
+			// createPendingTransfer, postTransfer and voidTransfer (#178).
+			if (callerSupplied) await this.settleCallerSuppliedStatus(res.status, transfer);
 			// `exists` IS SUCCESS HERE. The transfer id is generated above, OUTSIDE the
 			// withReconnect closure, so a retry after a connection error resubmits the
 			// same unique id; TigerBeetle deduplicates on it and answers `exists`, which
