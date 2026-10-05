@@ -1,4 +1,12 @@
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	unlinkSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -16,16 +24,25 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 const enoentOnce = { armed: false };
 vi.mock("node:fs", async (importOriginal) => {
 	const fs = await importOriginal<typeof import("node:fs")>();
-	const realpathSync = ((p: string, o?: unknown) => {
-		if (enoentOnce.armed) {
-			enoentOnce.armed = false;
-			throw Object.assign(new Error(`ENOENT: no such file or directory, realpath '${p}'`), {
-				code: "ENOENT",
-			});
-		}
-		return (fs.realpathSync as (p: string, o?: unknown) => string)(p, o);
-	}) as typeof fs.realpathSync;
-	realpathSync.native = fs.realpathSync.native;
+	// Both forms are armed: the lock key uses `.native` (#195 r1), and a mock that left it
+	// unarmed would stop exercising the window at all.
+	const arm =
+		<F extends (p: string, o?: unknown) => string>(real: F) =>
+		(p: string, o?: unknown) => {
+			if (enoentOnce.armed) {
+				enoentOnce.armed = false;
+				throw Object.assign(new Error(`ENOENT: no such file or directory, realpath '${p}'`), {
+					code: "ENOENT",
+				});
+			}
+			return real(p, o);
+		};
+	const realpathSync = arm(
+		fs.realpathSync as (p: string, o?: unknown) => string,
+	) as typeof fs.realpathSync;
+	realpathSync.native = arm(
+		fs.realpathSync.native as (p: string, o?: unknown) => string,
+	) as typeof fs.realpathSync.native;
 	return { ...fs, realpathSync, default: { ...fs, realpathSync } };
 });
 
@@ -37,6 +54,40 @@ const cleanups: Array<() => void> = [];
 afterEach(() => {
 	enoentOnce.armed = false;
 	for (const c of cleanups.splice(0)) c();
+});
+
+/** Is the filesystem under `dir` case-insensitive (APFS's default)? */
+function caseInsensitive(dir: string): boolean {
+	const probe = join(dir, "CaseProbe");
+	mkdirSync(probe);
+	const yes = existsSync(join(dir, "caseprobe"));
+	rmSync(probe, { recursive: true, force: true });
+	return yes;
+}
+const scratch = mkdtempSync(join(tmpdir(), "trust-audit-case-"));
+const CASE_INSENSITIVE = caseInsensitive(scratch);
+rmSync(scratch, { recursive: true, force: true });
+
+describe("#195 r1: one key per directory on a case-insensitive volume", () => {
+	it.skipIf(!CASE_INSENSITIVE)(
+		"a CASE-variant spelling of a live writer's vault is refused (AuditWriterLockHeldError) — and the live lock is untouched",
+		() => {
+			const parent = mkdtempSync(join(tmpdir(), "trust-audit-case-"));
+			const vault = join(parent, "VaultDir");
+			mkdirSync(vault);
+			const a = createAuditWriter(vault, { lockAtCreate: true });
+			cleanups.push(() => {
+				a.release();
+				rmSync(parent, { recursive: true, force: true });
+			});
+			const lockPath = join(vault, ".usertrust", "audit", ".audit-writer.lock");
+			const before = readFileSync(lockPath, "utf-8");
+			expect(() => createAuditWriter(join(parent, "vaultdir"), { lockAtCreate: true })).toThrow(
+				AuditWriterLockHeldError,
+			);
+			expect(readFileSync(lockPath, "utf-8")).toBe(before);
+		},
+	);
 });
 
 describe("#182.1: a lock is never keyed on a non-canonical spelling", () => {

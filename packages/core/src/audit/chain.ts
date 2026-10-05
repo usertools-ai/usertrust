@@ -197,14 +197,17 @@ function tryCleanStaleLock(candidateLockPath: string, dir: string): boolean {
  * second writer in this process misses the first writer's entry, meets EEXIST, and "reclaims"
  * the LIVE same-PID lock as stale — two live writers, a silently forked chain (AUD-471's class).
  *
- * ALWAYS the realpath — no fallback (#182.1). A directory that does not exist cannot hold the lock
+ * ALWAYS the native realpath — no fallback (#182.1), and the filesystem's own case (#195 r1). A directory that does not exist cannot hold the lock
  * file (its open fails ENOENT anyway), so a `resolve()` fallback could only ever key a lock in
  * the window where ANOTHER process creates the directory between this call and the open — under
  * a spelling that misses a live writer's realpath key and "reclaims" its lock. An ENOENT here is
  * thrown, exactly as the open would have thrown it.
  */
 function canonicalDir(dir: string): string {
-	return realpathSync(dir);
+	// `.native` (realpath(3)): it also returns the filesystem's own CASE. The JS realpath
+	// resolves symlinks but keeps the caller's case, so on a case-insensitive volume (APFS's
+	// default) `Vault` and `vault` were two keys for one directory (#195 r1).
+	return realpathSync.native(dir);
 }
 
 function acquireProcessLock(
