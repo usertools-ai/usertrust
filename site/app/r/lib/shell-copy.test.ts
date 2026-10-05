@@ -12,6 +12,7 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
+import { plainState } from "./plain-copy";
 import {
 	BILLED_UNFINALIZED_HEADLINE,
 	BILLED_UNFINALIZED_REGISTER_NOTE,
@@ -190,18 +191,18 @@ test("shellHeadline dispatches every non-verified kind to its pinned constant", 
 // same source as the page's own headline — never a dollar amount.
 // ===========================================================================
 
-test("ogCardWord IS shellHeadline — one source, never a second re-spelling", () => {
+test("ogCardWord is the page's own plain word — the card says what the page leads with", () => {
 	const state: PageState = { kind: "unknownReceipt", routeParamId: "x", receiptId: "x" };
-	assert.equal(ogCardWord(state), shellHeadline(state));
+	assert.equal(ogCardWord(state), "Not found");
+	assert.equal(ogCardWord(state), plainState(state).word);
 });
 
-test("ogCardWord for a verified receipt is the artifact type, not a rung word", () => {
+test("ogCardWord for a verified receipt is the plain verdict, not a rung word", () => {
 	const state = {
 		kind: "verified",
 		rung: "verified_anchored",
 	} as unknown as PageState;
-	assert.equal(ogCardWord(state), "Receipt");
-	assert.equal(ogCardWord(state), shellHeadline(state));
+	assert.equal(ogCardWord(state), "Verified");
 });
 
 test("ogCardWord never contains a dollar figure — no fixture-derived amount ever reaches it", () => {

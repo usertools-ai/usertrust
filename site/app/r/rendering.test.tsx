@@ -593,20 +593,44 @@ test("R39/R40: the scope block sits BESIDE the amount — no spend field or post
 	}
 });
 
-test("R39/R40: neither the scope statement nor the caption is behind interaction", () => {
+/**
+ * The amended R38-R41 rule (Cam's "brief receipt" ruling): the amount's posture
+ * LABEL is one chip, visible next to the figure; the full sentences are in the
+ * card's single Details disclosure, one click away. A sentence "in Details" is
+ * inside a `<details>`; the chip must not be.
+ */
+function assertInDetails(html: string, plainNeedle: string, why: string): void {
+	const open = html.indexOf("<details");
+	assert.ok(open !== -1, `${why}: the page has no Details disclosure`);
+	assert.ok(
+		html.slice(open).includes(escapeForMarkup(plainNeedle)),
+		`${why}: expected inside the Details disclosure`,
+	);
+}
+
+test("R38-R40 (amended): the scope CHIP is visible beside the amount; the full sentences are in Details", () => {
 	for (const row of conformingVerifiedRows()) {
 		const { html, state } = renderFixture(row.file);
-		const projection = state.envelope.receipt.event.data;
-		assertNotBehindInteraction(
-			html,
-			DELEGATION_POSTURE_SCOPE[projection.delegationPosture],
-			`${row.id}: R39's scope statement`,
+		const posture = state.envelope.receipt.event.data.delegationPosture;
+		const amount = html.indexOf('data-testid="amount-usd"');
+		const chip = html.indexOf('data-testid="amount-scope-chip"');
+		const details = html.indexOf("<details");
+		assert.ok(
+			amount !== -1 && chip > amount && chip < details,
+			`${row.id}: chip beside the amount, above the fold`,
 		);
-		assertNotBehindInteraction(
-			html,
-			amountScopeCaption(projection.delegationPosture),
-			`${row.id}: R40's scope caption`,
+		assert.ok(!html.slice(amount, chip).includes("<details"), `${row.id}: nothing gates the chip`);
+		const chipTag = html.slice(chip, html.indexOf("</span>", chip));
+		assert.ok(
+			chipTag.includes(`>${DELEGATION_POSTURE_LABEL[posture]}`),
+			`${row.id}: R38 — the chip IS the posture label`,
 		);
+		assert.ok(
+			chipTag.includes(`title="${escapeForMarkup(DELEGATION_POSTURE_SCOPE[posture])}"`),
+			`${row.id}: the chip's title is the one-line meaning`,
+		);
+		assertInDetails(html, DELEGATION_POSTURE_SCOPE[posture], `${row.id}: R39's scope statement`);
+		assertInDetails(html, amountScopeCaption(posture), `${row.id}: R40's scope caption`);
 	}
 });
 
@@ -719,28 +743,36 @@ test("R40 NEGATIVE GUARD — C28 includesSomeDelegated does not hedge the figure
 	);
 });
 
-test("R41: every verified render states the anchored rung's binding is resolver-asserted, beside the rung", () => {
+test("R41 (amended): the anchored rung is tagged resolver-asserted in the glance; the full sentence is in Details", () => {
 	for (const row of conformingVerifiedRows()) {
 		const { html, text } = renderFixture(row.file);
 		assertContains(text, ANCHOR_BINDING_RESOLVER_ASSERTED, `${row.id}: R41's disclosure`);
-		assertNotBehindInteraction(html, ANCHOR_BINDING_RESOLVER_ASSERTED, `${row.id}: R41`);
-		// "Beside the rung" — inside the ANCHORED ladder item, not floating in the
-		// masthead. The rung's own `<li>` opens at `data-rung="verified_anchored"`
-		// and the disclosure must fall before the next rung boundary or the ladder's
-		// close, whichever comes first.
+		assertInDetails(html, ANCHOR_BINDING_RESOLVER_ASSERTED, `${row.id}: R41's full sentence`);
+		// The glance's level strip: the anchored item names it, before Details.
 		const rung = html.indexOf('data-rung="verified_anchored"');
-		const disclosure = html.indexOf('data-anchor-binding="resolver-asserted"');
-		assert.ok(rung !== -1 && disclosure !== -1, `${row.id}: anchored rung anatomy missing`);
-		assert.ok(rung < disclosure, `${row.id}: the disclosure must sit inside the anchored rung`);
+		const details = html.indexOf("<details");
+		assert.ok(rung !== -1 && rung < details, `${row.id}: the anchored level is in the glance`);
+		const item = html.slice(rung, html.indexOf("</li>", rung));
 		assert.ok(
-			!html.slice(rung, disclosure).includes("</li>"),
-			`${row.id}: the disclosure escaped the anchored rung's own item`,
+			item.includes("resolver-asserted"),
+			`${row.id}: the glance item says resolver-asserted`,
 		);
-		// Exactly ONE site — a sentence rendered twice is two copies that drift.
+		// Exactly ONE site for the full sentence.
 		assert.equal(
 			html.split('data-anchor-binding="resolver-asserted"').length - 1,
 			1,
-			`${row.id}: R41's disclosure must render at exactly one site`,
+			`${row.id}: R41's full sentence must render at exactly one site`,
+		);
+		// ...and it sits inside the anchored ladder item in Details.
+		const proven = html.indexOf('data-rung="verified_anchored"', details);
+		const full = html.indexOf('data-anchor-binding="resolver-asserted"');
+		assert.ok(
+			proven !== -1 && proven < full,
+			`${row.id}: the sentence sits inside the anchored rung`,
+		);
+		assert.ok(
+			!html.slice(proven, full).includes("</li>"),
+			`${row.id}: the sentence escaped the anchored rung's own item`,
 		);
 	}
 });

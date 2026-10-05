@@ -35,9 +35,9 @@ export const contentType = "image/png";
 const GROUND = "#0a0a1a";
 
 const REGISTER_INK: Record<ReturnType<typeof ogCardRegister>, string> = {
-	green: "#34d399", // --color-ut
-	warning: "#f59e0b", // --color-warning
-	danger: "#ef4444", // --color-danger
+	green: "#30D158", // --approve
+	warning: "#FFB020", // --info
+	danger: "#FF5B5B", // --stakes
 	neutral: "#ffffff",
 };
 
