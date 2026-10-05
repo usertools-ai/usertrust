@@ -20,6 +20,7 @@
  * caller that fetched first and validated second would still have leaked a
  * request for a route param that can never name a receipt.
  */
+import { resolverAttributionHeaders, serviceKeyFromEnv } from "./reader-attribution";
 import {
 	type PageState,
 	parseResolverResponse,
@@ -66,6 +67,13 @@ export interface ResolveOptions {
 	/** Overrides {@link resolverBaseUrl} for a single call (tests). */
 	baseUrl?: string;
 	timeoutMs?: number;
+	/**
+	 * The visitor's PLATFORM-ATTESTED IP (`readerIpFromPlatformHeaders`), sent
+	 * as `Usertrust-Reader-IP` only together with the service key.
+	 */
+	readerIp?: string;
+	/** Overrides `USERTRUST_RESOLVER_SERVICE_KEY` (tests). */
+	serviceKey?: string;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -120,7 +128,10 @@ export async function resolveVerifyPageState(
 			method: "GET",
 			cache: "no-store",
 			signal: controller.signal,
-			headers: { Accept: "application/json" },
+			headers: {
+				Accept: "application/json",
+				...resolverAttributionHeaders(options.serviceKey ?? serviceKeyFromEnv(), options.readerIp),
+			},
 		});
 	} catch (error) {
 		clearTimeout(timer);

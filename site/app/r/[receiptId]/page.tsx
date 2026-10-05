@@ -1,5 +1,7 @@
+import { headers } from "next/headers";
 import StateView from "../components/state-view";
 import { verifyPageMetadata } from "../lib/metadata";
+import { readerIpFromPlatformHeaders } from "../lib/reader-attribution";
 import { resolvePageState } from "../lib/resolve";
 
 /**
@@ -34,7 +36,9 @@ export default async function VerifyReceiptPage({ params }: PageProps) {
 	// `resolvePageState`, not `resolveVerifyPageState` directly: the ONE
 	// caller that renders (and may follow) the `billedUnfinalized` link
 	// needs R3's cross-check run first (`lib/resolve.ts`'s own doc comment).
-	const state = await resolvePageState(receiptId);
+	const state = await resolvePageState(receiptId, {
+		readerIp: readerIpFromPlatformHeaders(await headers()),
+	});
 
 	return (
 		<main>
