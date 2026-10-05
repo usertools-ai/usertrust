@@ -115,6 +115,20 @@ export type ReleaseOutcome =
 	/** The ledger says the hold was POSTED: no void, and the row is left for an operator. */
 	| { outcome: "incident"; state: "voiding" };
 
+/**
+ * A settlement intent that breaks its contract: `post` and `overage` safe non-negative
+ * integers, `post` at most the hold, and an overage only with the hold posted in full (an
+ * overage means the actual exceeded the hold). Refused at the claim: nothing is posted.
+ */
+export class InvalidSettlementIntentError extends Error {
+	constructor(why: string) {
+		super(`hold engine: invalid settlement intent — ${why}`);
+		this.name = "InvalidSettlementIntentError";
+	}
+}
+
+const isUsertokens = (v: unknown): boolean => Number.isSafeInteger(v) && (v as number) >= 0;
+
 /** A frozen copy of the two numbers a settlement acts on. */
 function snapshotIntent(i: SettlementIntent): Readonly<SettlementIntent> {
 	return Object.freeze({ post: i.post, overage: i.overage });
@@ -193,10 +207,30 @@ export class HoldEngine {
 		// Snapshotted BEFORE any await (#174 r3): the claim writes it after the lock wait, and the
 		// debt recorded and the overage charged must be the same number.
 		const intent = snapshotIntent(given);
+		if (!isUsertokens(intent.post) || !isUsertokens(intent.overage)) {
+			throw new InvalidSettlementIntentError(
+				`post and overage must be safe non-negative integers, got ${String(intent.post)} / ${String(intent.overage)}`,
+			);
+		}
 		// The claim and the overage's DEBT commit together: from the moment the overage is
 		// known, the next reservation sees it — never after the ledger charge (#174 r1: a
 		// reservation in that gap read the old debt and admitted past the budget).
 		const claim = await this.journal.writeTx(() => {
+			// Judged against the hold INSIDE the claim transaction, before the row can move: a
+			// throw rolls it back, so a broken intent is never claimed, stored or posted.
+			const open = this.journal.get(holdKey);
+			if (open?.state === "open") {
+				if (intent.post > open.amount) {
+					throw new InvalidSettlementIntentError(
+						`post ${intent.post} exceeds the hold ${open.amount}`,
+					);
+				}
+				if (intent.overage > 0 && intent.post !== open.amount) {
+					throw new InvalidSettlementIntentError(
+						`an overage of ${intent.overage} with post ${intent.post}: the hold (${open.amount}) is posted in full first`,
+					);
+				}
+			}
 			if (this.journal.cas(holdKey, "open", "settling", { intent })) {
 				const row = this.journal.get(holdKey);
 				if (row !== undefined && intent.overage > 0) {
@@ -266,7 +300,7 @@ export class HoldEngine {
 		if (intent.overage > 0) {
 			// The debt is already recorded (with the claim). The ledger charge runs OUTSIDE any
 			// journal transaction; its derived id makes a replay after a crash a verified no-op.
-			await within("chargeDebt", this.ms, () =>
+			const charged = await within("chargeDebt", this.ms, () =>
 				this.ledger.chargeDebt({
 					budgetId: row.budgetId,
 					holdKey,
@@ -274,6 +308,9 @@ export class HoldEngine {
 					amount: intent.overage,
 				}),
 			);
+			// Both ids retired and nothing charged: stays `settling` (its debt is already
+			// recorded, so nothing over-admits); settle again later.
+			if (charged === "unknown") return { outcome: "in_flight" };
 		}
 		await this.journal.writeTx(() =>
 			this.journal.cas(holdKey, "settling", "settled", { terminalKind: "settled" }),

@@ -4,6 +4,7 @@
 export {
 	type EngineOptions,
 	HoldEngine,
+	InvalidSettlementIntentError,
 	LedgerTimeoutError,
 	PlacementWindowError,
 	type ReleaseOutcome,
@@ -45,6 +46,7 @@ export {
 } from "./journal.js";
 export {
 	BudgetIdError,
+	type ChargeOutcome,
 	debtAccountLabel,
 	type LedgerPort,
 	type PostOutcome,

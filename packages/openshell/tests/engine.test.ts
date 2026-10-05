@@ -5,10 +5,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { HoldEngine, PlacementWindowError } from "../src/engine.js";
+import { HoldEngine, InvalidSettlementIntentError, PlacementWindowError } from "../src/engine.js";
 import { HoldJournal, LedgerDeadlineError } from "../src/journal.js";
 import {
 	BudgetIdError,
+	type ChargeOutcome,
 	type LedgerPort,
 	type PostOutcome,
 	transferIdFor,
@@ -39,6 +40,8 @@ class FakeLedger implements LedgerPort {
 	onAvailable: (() => void) | null = null;
 	/** While set, chargeDebt waits on it: the gap between the claim and the ledger charge. */
 	chargeGate: Promise<void> | null = null;
+	/** Answer every chargeDebt with this outcome (both ids retired, nothing charged). */
+	chargeAnswer: ChargeOutcome | null = null;
 	hang: "placeHold" | null = null;
 
 	private once(id: bigint, amount: number): boolean {
@@ -96,12 +99,14 @@ class FakeLedger implements LedgerPort {
 		holdKey: string;
 		role: "overage" | "late";
 		amount: number;
-	}): Promise<void> {
+	}): Promise<ChargeOutcome> {
 		if (this.chargeGate !== null) await this.chargeGate;
+		if (this.chargeAnswer !== null) return this.chargeAnswer;
 		if (this.once(transferIdFor(p.holdKey, p.role), p.amount)) {
 			this.debt.set(p.budgetId, (this.debt.get(p.budgetId) ?? 0) + p.amount);
 		}
 		this.crash("chargeDebt");
+		return "done";
 	}
 	/** How many distinct transfers of a role were applied for a hold (0 or 1). */
 	count(holdKey: string, role: Parameters<typeof transferIdFor>[1]): number {
@@ -533,5 +538,62 @@ describe("#174 r3: the caller's objects are snapshotted before any await", () =>
 		expect(journal.debtOf("b")).toBe(25);
 		expect(ledger.debt.get("b"), "charged what was recorded").toBe(25);
 		expect(ledger.applied.get(transferIdFor("k1", "post").toString())).toBe(100);
+	});
+});
+
+describe("#176: the settlement intent is validated at the claim", () => {
+	const broken: Array<[string, { post: number; overage: number }]> = [
+		["post NaN", { post: Number.NaN, overage: 0 }],
+		["post negative", { post: -1, overage: 0 }],
+		["post fractional", { post: 1.5, overage: 0 }],
+		["overage negative", { post: 100, overage: -5 }],
+		["overage Infinity", { post: 100, overage: Number.POSITIVE_INFINITY }],
+		["post above the hold", { post: 101, overage: 0 }],
+		["an overage with the hold not posted in full", { post: 60, overage: 30 }],
+	];
+	for (const [name, intent] of broken) {
+		it(`${name}: refused — the row stays open, nothing posted, no debt`, async () => {
+			const { journal, ledger, engine } = setup();
+			await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+			await expect(engine.settle("k1", intent)).rejects.toBeInstanceOf(
+				InvalidSettlementIntentError,
+			);
+			expect(journal.get("k1")?.state).toBe("open");
+			expect(ledger.count("k1", "post")).toBe(0);
+			expect(journal.debtOf("b")).toBe(0);
+		});
+	}
+
+	it("control: the boundaries pass — post equal to the hold with an overage, and post zero", async () => {
+		for (const intent of [
+			{ post: 100, overage: 7 },
+			{ post: 0, overage: 0 },
+		]) {
+			const { engine } = setup();
+			await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+			expect(await engine.settle("k1", intent), JSON.stringify(intent)).toMatchObject({
+				outcome: "settled",
+			});
+		}
+	});
+
+	it("a resume of a `settling` hold acts on its STORED intent: a duplicate caller's intent is not judged", async () => {
+		const { engine, ledger } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		ledger.crashAfter = "post";
+		await expect(engine.settle("k1", { post: 80, overage: 0 })).rejects.toThrow(/died after post/);
+		expect(await engine.settle("k1", { post: 999, overage: 0 })).toEqual({
+			outcome: "settled",
+			resumed: true,
+		});
+	});
+
+	it("both overage ids retired and nothing charged: the hold stays `settling` (in flight), its debt already recorded", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		ledger.chargeAnswer = "unknown";
+		expect(await engine.settle("k1", { post: 100, overage: 20 })).toEqual({ outcome: "in_flight" });
+		expect(journal.get("k1")?.state).toBe("settling");
+		expect(journal.debtOf("b")).toBe(20);
 	});
 });

@@ -11,7 +11,13 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PendingReplayError, TrustTBClient } from "usertrust";
+import {
+	PendingReplayError,
+	TBTransferError,
+	TransferIdRetiredError,
+	TrustTBClient,
+	XFER_SPEND,
+} from "usertrust";
 import { afterEach, describe, expect, it } from "vitest";
 import { HoldEngine } from "../src/engine.js";
 import { HoldJournal } from "../src/journal.js";
@@ -321,8 +327,73 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		expect((await walletAcct())?.debits_pending, "nothing placed").toBe(0n);
 	});
 
+	it("#176 FACT PIN (0.17.9): a repeated post after expiry is code 35 both times, and an over-amount post is code 31 both times — neither retires its id", async () => {
+		const { tb, ledger, budgetId, key } = await setup(1_000);
+		const code = async (f: () => Promise<unknown>) => {
+			try {
+				await f();
+				return "ok";
+			} catch (e) {
+				if (e instanceof TransferIdRetiredError) return "retired";
+				return e instanceof TBTransferError ? e.code : "other";
+			}
+		};
+		const k = key();
+		await ledger.placeHold({ budgetId, holdKey: k, amount: 10, timeoutSeconds: 1 });
+		await new Promise((r) => setTimeout(r, 2_500));
+		const post = () =>
+			tb.postTransfer(transferIdFor(k, "reserve"), 5, { transferId: transferIdFor(k, "post") });
+		expect([await code(post), await code(post)]).toEqual([35, 35]);
+		const k2 = key();
+		await ledger.placeHold({ budgetId, holdKey: k2, amount: 10, timeoutSeconds: 900 });
+		const over = () =>
+			tb.postTransfer(transferIdFor(k2, "reserve"), 20, { transferId: transferIdFor(k2, "post") });
+		expect([await code(over), await code(over)]).toEqual([31, 31]);
+		// And the contrast that makes the pin meaningful: a not-found post DOES retire its id.
+		const k3 = key();
+		const missing = () =>
+			tb.postTransfer(transferIdFor(k3, "reserve"), 5, { transferId: transferIdFor(k3, "post") });
+		expect([await code(missing), await code(missing)]).toEqual([25, "retired"]);
+	}, 15_000);
+
+	it("#176: a RETIRED overage id (its first charge failed: debit_account_not_found) is read back and charged ONCE under overage-retry — settled, never a throw loop", async () => {
+		const { tb, treasury, engine, budgetId, journal, key } = await setup(1_000);
+		const k = key();
+		await engine.reserve({ holdKey: k, budgetId, amount: 100 });
+		// The crashed earlier attempt: the overage id failed and is now retired.
+		await expect(
+			tb.immediateTransfer({
+				debitAccountId: TrustTBClient.deriveAccountId(`missing-${k}`),
+				creditAccountId: treasury,
+				amount: 40,
+				code: XFER_SPEND,
+				transferId: transferIdFor(k, "overage"),
+			}),
+		).rejects.toThrow();
+		expect(await engine.settle(k, { post: 100, overage: 40 })).toEqual({
+			outcome: "settled",
+			resumed: false,
+		});
+		const debtAcct = await tb.ensureEscrowAccount(debtAccountLabel(budgetId));
+		expect((await tb.lookupAccounts([debtAcct]))[0]?.debits_posted, "charged once").toBe(40n);
+		expect(await tb.lookupTransfer(transferIdFor(k, "overage-retry"))).not.toBeNull();
+		expect(journal.debtOf(budgetId)).toBe(40);
+		// A repeat charges nothing more (overage-retry exists; the read-back says done).
+		expect(await engine.settle(k, { post: 100, overage: 40 })).toEqual({ outcome: "duplicate" });
+		expect((await tb.lookupAccounts([debtAcct]))[0]?.debits_posted).toBe(40n);
+	});
+
 	it("control: every role's id is distinct and stable for a hold", () => {
-		const roles = ["reserve", "post", "void", "overage", "late"] as const;
+		const roles = [
+			"reserve",
+			"post",
+			"void",
+			"void-late",
+			"overage",
+			"overage-retry",
+			"late",
+			"late-retry",
+		] as const;
 		const ids = roles.map((r) => transferIdFor("k", r));
 		expect(new Set(ids.map(String)).size).toBe(roles.length);
 		expect(transferIdFor("k", "post")).toBe(transferIdFor("k", "post"));

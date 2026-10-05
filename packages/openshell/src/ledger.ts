@@ -18,7 +18,22 @@ import { TBTransferError, TransferIdRetiredError, TrustTBClient, XFER_SPEND } fr
  * attempt (#174 r1): it is tried only once the read-back shows the reserve transfer exists, so
  * its own first attempt cannot be a not-found.
  */
-export type TransferRole = "reserve" | "post" | "void" | "void-late" | "overage" | "late";
+export type TransferRole =
+	| "reserve"
+	| "post"
+	| "void"
+	| "void-late"
+	| "overage"
+	| "overage-retry"
+	| "late"
+	| "late-retry";
+
+/**
+ * A debt charge:
+ * - `done`: charged now, or already charged under the role's id or its `-retry` id;
+ * - `unknown`: both ids are RETIRED and neither transfer exists — retry later; never a throw loop.
+ */
+export type ChargeOutcome = "done" | "unknown";
 
 /** The ledger transfer id for one role of one hold. */
 export function transferIdFor(holdKey: string, role: TransferRole): bigint {
@@ -79,7 +94,7 @@ export interface LedgerPort {
 		holdKey: string;
 		role: "overage" | "late";
 		amount: number;
-	}): Promise<void>;
+	}): Promise<ChargeOutcome>;
 }
 
 // CreateTransferStatus (tigerbeetle-node 0.17).
@@ -87,6 +102,7 @@ const PENDING_TRANSFER_NOT_FOUND = 25;
 const PENDING_TRANSFER_ALREADY_POSTED = 33;
 const PENDING_TRANSFER_ALREADY_VOIDED = 34;
 const PENDING_TRANSFER_EXPIRED = 35;
+const ID_ALREADY_FAILED = 68;
 
 export interface TigerBeetleLedgerOptions {
 	/** The budget's spending wallet (a balance-constrained account). */
@@ -265,14 +281,37 @@ export class TigerBeetleLedger implements LedgerPort {
 		holdKey: string;
 		role: "overage" | "late";
 		amount: number;
-	}): Promise<void> {
+	}): Promise<ChargeOutcome> {
 		const debtAccount = await this.tb.ensureEscrowAccount(debtAccountLabel(p.budgetId));
-		await this.tb.immediateTransfer({
-			debitAccountId: debtAccount,
-			creditAccountId: this.opts.treasuryId,
-			amount: p.amount,
-			code: XFER_SPEND,
-			transferId: transferIdFor(p.holdKey, p.role),
-		});
+		const charge = (role: TransferRole) =>
+			this.tb.immediateTransfer({
+				debitAccountId: debtAccount,
+				creditAccountId: this.opts.treasuryId,
+				amount: p.amount,
+				code: XFER_SPEND,
+				transferId: transferIdFor(p.holdKey, role),
+			});
+		const retired = (err: unknown) =>
+			err instanceof TBTransferError && err.code === ID_ALREADY_FAILED;
+		try {
+			await charge(p.role);
+			return "done";
+		} catch (err) {
+			if (!retired(err)) throw err;
+		}
+		// The role's id is RETIRED (measured on 0.17.9: e.g. debit_account_not_found retires an
+		// immediate transfer's id, and every later attempt answers id_already_failed). A failed
+		// transfer is never stored, so the read-back proves the debt was not charged under it —
+		// and only then is it charged ONCE under the second deterministic id.
+		const retryRole: TransferRole = p.role === "overage" ? "overage-retry" : "late-retry";
+		if ((await this.tb.lookupTransfer(transferIdFor(p.holdKey, p.role))) !== null) return "done";
+		try {
+			await charge(retryRole);
+			return "done";
+		} catch (err) {
+			if (!retired(err)) throw err;
+			const landed = await this.tb.lookupTransfer(transferIdFor(p.holdKey, retryRole));
+			return landed === null ? "unknown" : "done";
+		}
 	}
 }
