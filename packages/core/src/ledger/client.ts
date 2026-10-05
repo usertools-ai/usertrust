@@ -937,7 +937,9 @@ export class TrustTBClient {
 	}): Promise<bigint> {
 		// Decided ONCE, synchronously, before any await (as on the other transfer paths).
 		const callerSupplied = p.transferId !== undefined;
-		const transferId = p.transferId ?? tbId();
+		// The same range check as the sibling transfer paths (#183): 0, 2^128 - 1 and anything
+		// outside (0, 2^128 - 1) throw RangeError before any client call.
+		const transferId = transferIdOrFresh(p.transferId);
 		const transfer: Transfer = {
 			id: transferId,
 			debit_account_id: p.debitAccountId,

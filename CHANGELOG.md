@@ -214,6 +214,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`TrustTBClient.immediateTransfer` range-checks a caller-supplied id like its siblings** (#183). An id outside (0, 2^128 − 1) — 0, 2^128 − 1, a negative, or wider — now throws `RangeError` before any client call, as `createPendingTransfer`, `postTransfer` and `voidTransfer` already did. It previously failed later (TigerBeetle refuses 0 and 2^128 − 1, and a negative or wider value throws at serialisation); no transfer was ever created.
+
 - **Two spellings of one vault could fork its audit chain.** The audit writer's in-process lock registry was keyed on the vault path as written, so a second writer opening the same vault through a relative path or a symlink (including macOS's `/tmp` → `/private/tmp`) missed the first writer's entry, found the lock file, and "reclaimed" that LIVE same-process lock as stale. That left two live writers on one chain, which forks it silently. Every lock key now uses the directory's real path (`realpathSync`), on both `createAuditWriter` and `withAuditWriterLock`, so the second writer gets `AuditWriterLockHeldError` and the first writer's lock is untouched. The lock-held message now names the lock file by its real path. (Present since the in-process registry was added; reachable by integrators now that `createAuditWriter` is exported.)
 
 - **The offline receipt verifier's field table declared `__proto__` (regression).**
