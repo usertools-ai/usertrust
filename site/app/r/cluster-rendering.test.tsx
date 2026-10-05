@@ -156,7 +156,11 @@ const CASES: ClusterCase[] = [
 		previous: "ut1_3oMvgmMUkN4TNz2hiVEiRd",
 		skipped: {
 			headline: "3 earlier windows weren’t receipted",
-			spans: ["22:06:26 → 22:08:26 UTC", "22:38:26 → 22:39:26 UTC", "23:19:26 → 23:24:26 UTC"],
+			spans: [
+				"Oct 5 · 22:06:26 → 22:08:26 UTC",
+				"Oct 5 · 22:38:26 → 22:39:26 UTC",
+				"Oct 5 · 23:19:26 → 23:24:26 UTC",
+			],
 			reasons: ["cluster-void", "estimated-transfer", "cluster-void"],
 		},
 	},
@@ -173,7 +177,7 @@ const CASES: ClusterCase[] = [
 		skipped: {
 			headline:
 				"20 earlier windows weren’t receipted — the first 16 are listed; windowsRoot commits all 20",
-			spans: ["04:53:20 → 04:56:20 UTC"],
+			spans: ["Oct 5 · 04:53:20 → 04:56:20 UTC"],
 			reasons: [
 				"snapshot-missing",
 				"unknown-provider",

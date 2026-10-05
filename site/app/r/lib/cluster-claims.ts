@@ -137,9 +137,18 @@ export function ledgerWindowSpan(windowStart: string, windowEnd: string): string
 		: `${utcDay(start)} ${utcMinute(start)} → ${utcDay(end)} ${utcMinute(end)} UTC`;
 }
 
-/** One refused window's bounds as "22:06:26 → 22:08:26 UTC". */
+/**
+ * One refused window's bounds WITH its UTC day: a skipped window can precede
+ * this receipt by hours or days, and a bare clock time would leave the reader
+ * to guess which day it was. "Oct 5 · 22:06:26 → 22:08:26 UTC" within a day,
+ * "Oct 5 23:58:01 → Oct 6 00:02:10 UTC" across midnight.
+ */
 export function skippedWindowSpan(windowStart: string, windowEnd: string): string {
-	return `${utcSecond(ledgerDate(windowStart))} → ${utcSecond(ledgerDate(windowEnd))} UTC`;
+	const start = ledgerDate(windowStart);
+	const end = ledgerDate(windowEnd);
+	return start.toISOString().slice(0, 10) === end.toISOString().slice(0, 10)
+		? `${utcDay(start)} · ${utcSecond(start)} → ${utcSecond(end)} UTC`
+		: `${utcDay(start)} ${utcSecond(start)} → ${utcDay(end)} ${utcSecond(end)} UTC`;
 }
 
 /**
@@ -243,6 +252,14 @@ export const SKIPPED_NOTE =
  */
 export const WINDOW_TRANSFERS_ROOT_MEANING =
 	"commits every ledger transfer of this agent key's account inside the window — charges, voided holds and credits alike — in ledger order. It is a COMMITMENT: checkable by someone with ledger access, never recomputed from this receipt, so this page never marks it passed.";
+
+/**
+ * R25's recomputable case, worded for a cluster receipt: the shared sentence
+ * credits the OFFLINE verifier, which does not read cluster receipts yet. The
+ * resolver's step 8 is what recomputed this root (the DERIVATIONS row).
+ */
+export const CLUSTER_TRANSFER_SET_ROOT_RECOMPUTABLE =
+	"the recomputable digest of the pair list — recomputed by verification step 8 (the check ledger's DERIVATIONS row), from the pairs this receipt lists.";
 
 /** The trust a cluster receipt asks for, named: completeness is SIGNED, not checkable here. */
 export const CLUSTER_COMPLETENESS_TRUST =
@@ -418,7 +435,7 @@ export function clusterReceiptClaims(receipt: ClusterReceiptDocument): ClusterRe
 		delegation: delegationScopeClaim(projection.delegationPosture),
 		amountCaption: CLUSTER_AMOUNT_SCOPE_CAPTION[projection.delegationPosture],
 		catalog: catalogRendering(projection.models),
-		transfers: transferSetRendering(projection),
+		transfers: clusterTransferSetRendering(projection),
 		windowTransfers: {
 			root: projection.windowTransfersRoot,
 			count: projection.windowTransferCount,
@@ -439,4 +456,12 @@ export function clusterReceiptClaims(receipt: ClusterReceiptDocument): ClusterRe
 			},
 		],
 	};
+}
+
+/** R25's split, with the cluster wording for the recomputable case. */
+function clusterTransferSetRendering(projection: ClusterProjection): TransferSetRendering {
+	const rendering = transferSetRendering(projection);
+	return rendering.rootIsCommitment
+		? rendering
+		: { ...rendering, rootMeaning: CLUSTER_TRANSFER_SET_ROOT_RECOMPUTABLE };
 }
