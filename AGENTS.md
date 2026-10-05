@@ -180,7 +180,8 @@ governor no longer holds — a TTL release, a restart — goes to `recordUnheldS
 (with that hold's transferId) when the key can still be settled, an authorize or POST in flight
 waited out first, `AlreadySettledError` when its charge stands, and otherwise a
 `settlement_unrecoverable` record (key hash, principal, reported usage) whose append failure is
-thrown, never swallowed; an exact in-process retry is answered without a second record.
+thrown, never swallowed; an exact in-process retry is answered without a second record — one that
+arrives while the first is still being appended waits for it and shares its outcome.
 usertrust-server answers 410 and counts it on `/v1/health`, and bounds its TTL so the sweep always
 releases a hold BEFORE the ledger's own pending timeout expires it — a settle that reaches an
 expired hold is recorded only as ambiguous. A keyless unknown settle stays a 404: without the key's

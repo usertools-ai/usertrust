@@ -367,7 +367,7 @@ export type UnheldSettlementOutcome =
 	| {
 			/** No live hold and no charge: the reported usage is recorded as unrecoverable. */
 			readonly outcome: "unrecoverable";
-			/** False for an exact retry this governor had already recorded — no second record. */
+			/** False for an exact retry of a settle this governor recorded — no second record. */
 			readonly recorded: boolean;
 	  };
 
@@ -508,7 +508,9 @@ export interface Governor {
 	 *  - otherwise → appends `settlement_unrecoverable` (the key's SHA-256, the
 	 *    principal, the reported usage) and answers `{ outcome: "unrecoverable" }`.
 	 *    An exact in-process retry (same key, same usage) is answered with
-	 *    `recorded: false` and no second record.
+	 *    `recorded: false` and no second record — also one that arrives while the
+	 *    first record is still being appended: it waits for that append and shares
+	 *    its outcome, a failure included.
 	 *
 	 * The charge itself is still recoverable by the caller: a fresh `authorize()`
 	 * under the same key, then `settle()`, posts under the key's anchor. This records
@@ -1371,6 +1373,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// Fingerprints of the late settles `recordUnheldSettlement` has recorded, so an
 	// exact retry is not recorded twice. In-process, and bounded.
 	const recordedUnheld = new Set<string>();
+	// The same fingerprints while their record is still being appended: a retry
+	// that arrives meanwhile waits for that append and shares its outcome. Bounded
+	// by the appends in flight; each entry leaves when its append settles.
+	const recordingUnheld = new Map<string, Promise<unknown>>();
 
 	// The vault's persisted scope, read (or created) on the FIRST keyed call only —
 	// a governor that never sees a key never writes the file. A failed read is not
@@ -2616,12 +2622,22 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					]),
 				)
 				.digest("hex");
+			// Retries that arrive TOGETHER are exact retries too: the first claims the
+			// fingerprint before its append awaits, and a retry that finds the claim
+			// waits for that append rather than starting a second. It answers only once
+			// the record has landed, and a record that did not land rejects it too —
+			// never `recorded: false` for a record that does not exist.
+			const recording = recordingUnheld.get(fingerprint);
+			if (recording !== undefined) {
+				await recording;
+				return { outcome: "unrecoverable", recorded: false };
+			}
 			if (recordedUnheld.has(fingerprint)) return { outcome: "unrecoverable", recorded: false };
 
 			// NOT caught. A settle that cannot charge, whose record did not land
 			// either, is exactly the silent loss this method exists to prevent, so the
 			// caller hears about a failed append.
-			await audit.appendEvent({
+			const append = audit.appendEvent({
 				kind: "settlement_unrecoverable",
 				actor: "local",
 				data: {
@@ -2637,6 +2653,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					...principalRecord(principal),
 				},
 			});
+			// Claimed in the same synchronous run that started the append, so no other
+			// call can pass the checks above in between. Released however the append
+			// ends: one that failed leaves nothing remembered, and the next retry
+			// records.
+			recordingUnheld.set(fingerprint, append);
+			try {
+				await append;
+			} finally {
+				recordingUnheld.delete(fingerprint);
+			}
 			// Bounded, oldest first out: a forgotten fingerprint costs one duplicate
 			// record, never a lost one.
 			if (recordedUnheld.size >= RECORDED_UNHELD_MAX) {

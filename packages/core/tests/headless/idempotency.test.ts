@@ -335,13 +335,17 @@ function posts(): Xfer[] {
 
 interface AuditHandle extends AuditWriter {
 	events: AppendEventInput[];
+	/** While set, every append waits for it before it lands. */
+	holdAppends: null | Promise<void>;
 }
 
 function makeAudit(): AuditHandle {
 	const events: AppendEventInput[] = [];
-	return {
+	const handle: AuditHandle = {
 		events,
+		holdAppends: null,
 		appendEvent: vi.fn(async (input: AppendEventInput): Promise<AuditEvent> => {
+			if (handle.holdAppends !== null) await handle.holdAppends;
 			events.push(input);
 			return {
 				id: randomUUID(),
@@ -358,6 +362,7 @@ function makeAudit(): AuditHandle {
 		flush: vi.fn(async () => {}),
 		release: vi.fn(),
 	};
+	return handle;
 }
 
 // ── Engine rows: govern.ts's createTBEngine, by name ──
@@ -1033,6 +1038,13 @@ describe("createGovernor — caller idempotency keys", () => {
 			cacheReadTokens: 0,
 			cacheWriteTokens: 0,
 		};
+		// Settled into values at once, so no rejection is ever unhandled while a
+		// test still holds a ledger or audit call.
+		const settledValue = (p: Promise<unknown>): Promise<unknown> =>
+			p.then(
+				(v) => v,
+				(e: unknown) => e,
+			);
 
 		it("after a restart: no live hold and no charge → settlement_unrecoverable, carrying the key's hash, the principal and the usage", async () => {
 			const { gov: before } = await governor();
@@ -1101,15 +1113,10 @@ describe("createGovernor — caller idempotency keys", () => {
 				).toBe(true),
 			);
 
-			// Settled into values at once, so neither rejection is ever unhandled while
-			// the POST is still held.
-			const outcome = (p: Promise<unknown>): Promise<unknown> =>
-				p.then(
-					(v) => v,
-					(e: unknown) => e,
-				);
-			const late = outcome(gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }));
-			const replay = outcome(gov.authorize({ ...AUTHORIZE, idempotencyKey: "call-1" }));
+			const late = settledValue(
+				gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }),
+			);
+			const replay = settledValue(gov.authorize({ ...AUTHORIZE, idempotencyKey: "call-1" }));
 			releasePosts();
 
 			expect((await settling).settled).toBe(true);
@@ -1201,6 +1208,76 @@ describe("createGovernor — caller idempotency keys", () => {
 			await expect(
 				gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }),
 			).rejects.toThrow("audit: disk full");
+			// Nothing is remembered of it: the retry records the loss.
+			await expect(
+				gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }),
+			).resolves.toEqual({ outcome: "unrecoverable", recorded: true });
+			expect(audit.events.map((e) => e.kind)).toEqual(["settlement_unrecoverable"]);
+		});
+
+		it("exact retries that arrive TOGETHER share one record — the retry answers once it has landed", async () => {
+			// A client resends before its first answer arrives. Were the remembered
+			// fingerprints the only check, both calls would pass it before either append
+			// landed: one loss recorded, and counted on the server's health, twice.
+			const { gov, audit } = await governor();
+			let land: () => void = () => {};
+			audit.holdAppends = new Promise<void>((resolve) => {
+				land = resolve;
+			});
+			let retryAnswered = false;
+			const first = settledValue(
+				gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }),
+			);
+			const retry = settledValue(
+				gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }),
+			).then((value) => {
+				retryAnswered = true;
+				return value;
+			});
+			// Both have read the anchor (nothing charged); one macrotask turn more lets
+			// every continuation after that read run.
+			await vi.waitFor(() => expect(mockClient.lookupTransfers).toHaveBeenCalledTimes(2));
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			expect(audit.appendEvent).toHaveBeenCalledTimes(1);
+			// Answered now, the retry would be vouching for a record still in flight.
+			expect(retryAnswered).toBe(false);
+			land();
+
+			expect(await first).toEqual({ outcome: "unrecoverable", recorded: true });
+			expect(await retry).toEqual({ outcome: "unrecoverable", recorded: false });
+			expect(audit.events.map((e) => e.kind)).toEqual(["settlement_unrecoverable"]);
+		});
+
+		it("a record that did not land fails every retry that waited on it, and leaves nothing remembered", async () => {
+			const { gov, audit } = await governor();
+			let fail: () => void = () => {};
+			const failing = new Promise<void>((resolve) => {
+				fail = resolve;
+			});
+			vi.mocked(audit.appendEvent).mockImplementationOnce(async () => {
+				await failing;
+				throw new Error("audit: disk full");
+			});
+			const first = settledValue(
+				gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }),
+			);
+			const retry = settledValue(
+				gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }),
+			);
+			await vi.waitFor(() => expect(mockClient.lookupTransfers).toHaveBeenCalledTimes(2));
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			fail();
+
+			expect(await first).toEqual(new Error("audit: disk full"));
+			expect(await retry).toEqual(new Error("audit: disk full"));
+			expect(audit.appendEvent).toHaveBeenCalledTimes(1);
+			expect(audit.events).toHaveLength(0);
+			// The claim went with the failed append: the next retry records the loss.
+			await expect(
+				gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }),
+			).resolves.toEqual({ outcome: "unrecoverable", recorded: true });
+			expect(audit.events.map((e) => e.kind)).toEqual(["settlement_unrecoverable"]);
 		});
 
 		it("usage without the provider label records the label and no four-tier block (D5)", async () => {
