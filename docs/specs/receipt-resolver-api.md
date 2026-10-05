@@ -785,7 +785,8 @@ shape). Four tiers, and a consumer must not blur them:
       "schema":      { "result": "passed" },   // 1 — SCHEMA_INVALID (the wire name for
                                          //     step 1 is owned by §4; §7 names 2–9)
       "event":       { "result": "passed" },   // 2 — EVENT_MISMATCH
-      "registry":    { "result": "passed" },   // 3 — ID_MISMATCH (both halves)
+      "registry":    { "result": "passed" },   // 3 — ID_MISMATCH (both halves; v0.3, cluster:
+                                         //     also (d), the derived-ID recompute)
       "signature":   { "result": "passed" },   // 4 — SIG_INVALID
       "inclusion":   { "result": "passed" },   // 5 — PROOF_INVALID
       "checkpoint":  { "result": "passed" },   // 6 — CHECKPOINT_INVALID
@@ -1347,11 +1348,16 @@ Design intents behind the shape:
      it `notApplicable`. A binding to a DIFFERENT event, or a missing binding
      for an ID served as final, is `failed` — never a fallback to (a);
      (c) equality 3 above, which ties the projection to the event;
-     (d) v0.3, cluster receipts — ALWAYS, offline: the document's
-     `receiptId` recomputes from its own `{vaultId: proof.chain, account,
-     windowStart}` (receipt-spec §15.9, its step 3(c)). A mismatch is
-     `failed`. The resolver runs it on every read that serves a cluster
-     receipt, as the Endpoint section requires.
+     (d) v0.3, `scope: "cluster"` ONLY — ALWAYS, offline. A cluster ID is
+     DERIVED, not reservation-issued, so the reservation wording above
+     describes the reserved session kind and (d) applies on top of (a)–(c).
+     The document's `receiptId` must recompute from its own `{vaultId:
+     proof.chain, account, windowStart}` (receipt-spec §15.9, its step 3(c)).
+     The result is reported under `steps.registry`, like (a) and (b), and a
+     mismatch is `failed` with `ID_MISMATCH`. The resolver runs it on every
+     read that serves a cluster receipt, as the Endpoint section requires.
+     Route, body and registry agreeing on an ID that does not derive is
+     still a 409.
      Together these bind request → document → event without a payload-embedded
      ID. → `ID_MISMATCH`
   4. **Mint signature**, with key role `mint`, the `minterKind` binding, and a

@@ -1132,7 +1132,7 @@ The resolver spec's "Mint lifecycle — normative constraints" section is
 **adopted as normative for §6, by reference and in full** — reserve →
 work → finalize, with every hardening it carries. The adoption is **PINNED
 BY CONTENT HASH (round-4 P1-5)**: it binds that section as of
-**`sha256:f8db57ae69eee35bd1bdb6b60aee6feeeadfa9b36f0935b40d66c07aaed4c073`**
+**`sha256:4dee160785a72c1edd6ba6906984ab3da2e874cc29fe0ed6684ccd6a3b0acf46`**
 — the COMPLETE digest of `docs/specs/receipt-resolver-api.md`, this
 directory's copy: the v0.3 resolver companion (v0.10's cluster states, all
 OUTSIDE the pinned section), whose pinned section is byte-identical to the v0.2
