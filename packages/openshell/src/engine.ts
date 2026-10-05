@@ -115,6 +115,65 @@ export type ReleaseOutcome =
 	/** The ledger says the hold was POSTED: no void, and the row is left for an operator. */
 	| { outcome: "incident"; state: "voiding" };
 
+/**
+ * A debt charge the ledger refuses for good: both the role's id and its `-retry` id are
+ * retired and neither landed. The row carries the incident; an operator must act on it.
+ */
+export class DebtChargeFailedError extends Error {
+	constructor(
+		public readonly holdKey: string,
+		public readonly role: "overage" | "late",
+		public readonly transferIds: readonly [string, string],
+	) {
+		super(
+			`hold engine: the ${role} debt for hold ${holdKey} can never be charged — transfer ids ${transferIds[0]} and ${transferIds[1]} are both retired and neither landed; the row carries a debt_charge_failed incident`,
+		);
+		this.name = "DebtChargeFailedError";
+	}
+}
+
+/**
+ * A settlement intent that breaks its contract: `post` and `overage` safe non-negative
+ * integers, `post` at most the hold, and an overage only with the hold posted in full (an
+ * overage means the actual exceeded the hold). Refused at the claim: nothing is posted.
+ */
+export class InvalidSettlementIntentError extends Error {
+	constructor(why: string) {
+		super(`hold engine: invalid settlement intent — ${why}`);
+		this.name = "InvalidSettlementIntentError";
+	}
+}
+
+const isUsertokens = (v: unknown): boolean => Number.isSafeInteger(v) && (v as number) >= 0;
+
+/** What is wrong with an intent's NUMBERS alone (no hold needed), or null. */
+function numbersProblem(i: unknown): string | null {
+	if (typeof i !== "object" || i === null) return `the intent is not an object (${String(i)})`;
+	const { post, overage } = i as Record<string, unknown>;
+	if (!isUsertokens(post) || !isUsertokens(overage)) {
+		return `post and overage must be safe non-negative integers, got ${String(post)} / ${String(overage)}`;
+	}
+	return null;
+}
+
+/**
+ * THE settlement-intent contract, judged against the hold it settles: safe non-negative
+ * integers; `post` at most the hold; an overage only with the hold posted in full (an overage
+ * means the actual exceeded the hold). One predicate, applied at the claim (a fresh intent is
+ * refused and the row stays open) and at the start of EVERY completion — fresh or resumed — so
+ * no stored intent, from any engine version, is posted or charged unless it passes.
+ */
+function intentProblem(i: unknown, hold: number): string | null {
+	const numbers = numbersProblem(i);
+	if (numbers !== null) return numbers;
+	const { post, overage } = i as SettlementIntent;
+	if (post > hold) return `post ${post} exceeds the hold ${hold}`;
+	if (overage > 0 && post !== hold) {
+		return `an overage of ${overage} with post ${post}: the hold (${hold}) is posted in full first`;
+	}
+	return null;
+}
+
 /** A frozen copy of the two numbers a settlement acts on. */
 function snapshotIntent(i: SettlementIntent): Readonly<SettlementIntent> {
 	return Object.freeze({ post: i.post, overage: i.overage });
@@ -193,10 +252,19 @@ export class HoldEngine {
 		// Snapshotted BEFORE any await (#174 r3): the claim writes it after the lock wait, and the
 		// debt recorded and the overage charged must be the same number.
 		const intent = snapshotIntent(given);
+		const numbers = numbersProblem(intent);
+		if (numbers !== null) throw new InvalidSettlementIntentError(numbers);
 		// The claim and the overage's DEBT commit together: from the moment the overage is
 		// known, the next reservation sees it — never after the ledger charge (#174 r1: a
 		// reservation in that gap read the old debt and admitted past the budget).
 		const claim = await this.journal.writeTx(() => {
+			// Judged against the hold INSIDE the claim transaction, before the row can move: a
+			// throw rolls it back, so a broken intent is never claimed, stored or posted.
+			const open = this.journal.get(holdKey);
+			if (open?.state === "open") {
+				const problem = intentProblem(intent, open.amount);
+				if (problem !== null) throw new InvalidSettlementIntentError(problem);
+			}
 			if (this.journal.cas(holdKey, "open", "settling", { intent })) {
 				const row = this.journal.get(holdKey);
 				if (row !== undefined && intent.overage > 0) {
@@ -234,10 +302,27 @@ export class HoldEngine {
 		stored: SettlementIntent,
 		resumed: boolean,
 	): Promise<SettleOutcome> {
-		const intent = snapshotIntent(stored); // nothing outside this call can change it now
 		const row = this.journal.get(holdKey);
 		if (row === undefined) return { outcome: "incident", state: "missing" };
 		if (row.state === "settled") return { outcome: "duplicate" };
+		// A recorded incident cannot be completed by settling again: no ledger call.
+		if (row.incident !== null) return { outcome: "incident", state: row.state };
+		// THE choke point: every completion — a fresh claim or a resume of a stored intent (one
+		// written by ANY engine version, e.g. a row carried over by the v0 migration) — passes the
+		// same contract before anything is posted or charged. A stored intent that fails it is a
+		// terminal incident, recorded once; no ledger call is made, and recorded debt is left as is.
+		const problem = intentProblem(stored, row.amount);
+		if (problem !== null) {
+			await this.journal.writeTx(() =>
+				this.journal.recordIncident(holdKey, {
+					kind: "invalid_stored_intent",
+					problem,
+					intent: stored,
+				}),
+			);
+			return { outcome: "incident", state: row.state };
+		}
+		const intent = snapshotIntent(stored); // nothing outside this call can change it now
 		const posted = await within("post", this.ms, () =>
 			this.ledger.post({ holdKey, amount: intent.post }),
 		);
@@ -266,7 +351,7 @@ export class HoldEngine {
 		if (intent.overage > 0) {
 			// The debt is already recorded (with the claim). The ledger charge runs OUTSIDE any
 			// journal transaction; its derived id makes a replay after a crash a verified no-op.
-			await within("chargeDebt", this.ms, () =>
+			const charged = await within("chargeDebt", this.ms, () =>
 				this.ledger.chargeDebt({
 					budgetId: row.budgetId,
 					holdKey,
@@ -274,6 +359,14 @@ export class HoldEngine {
 					amount: intent.overage,
 				}),
 			);
+			// Both ids retired and nothing charged: TERMINAL. The row is marked (so replay and the
+			// sweeper stop treating it as in flight), then the failure is raised, loud. Its debt is
+			// already recorded, so admission stays bounded — but the ledger never carries it.
+			if (charged !== "done") {
+				const incident = { kind: "debt_charge_failed", ...charged, amount: intent.overage };
+				await this.journal.writeTx(() => this.journal.recordIncident(holdKey, incident));
+				throw new DebtChargeFailedError(holdKey, charged.role, charged.transferIds);
+			}
 		}
 		await this.journal.writeTx(() =>
 			this.journal.cas(holdKey, "settling", "settled", { terminalKind: "settled" }),

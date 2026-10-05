@@ -572,6 +572,15 @@ function topLevelChecks(route: MeteredRoute, body: Json, w: Walk): string | unde
 				return undefined;
 			}
 		}
+		// The VALUE is checked too (#175): a non-boolean include_usage would be forwarded as
+		// sent on a non-streaming call and on Responses.
+		if (
+			Object.hasOwn(body.stream_options, "include_usage") &&
+			typeof body.stream_options.include_usage !== "boolean"
+		) {
+			refuse(w, DenyReason.parameterUnsupported, "stream_options.include_usage");
+			return undefined;
+		}
 	}
 	const allowed = TOP_LEVEL[route];
 	for (const k of Object.keys(body)) {

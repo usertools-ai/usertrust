@@ -121,6 +121,11 @@ export interface HoldRow {
 	intent: unknown;
 	terminalKind: string | null;
 	terminalEventHash: string | null;
+	/**
+	 * A terminal INCIDENT an operator must act on (e.g. a debt charge the ledger can never
+	 * take), recorded once. A row carrying one is not in flight: replay and the sweeper skip it.
+	 */
+	incident: unknown;
 	reservedSeq: number | null;
 }
 
@@ -172,10 +177,44 @@ export class PlacementHorizonError extends Error {
 	}
 }
 
-/** The journal file was written by an older schema this code cannot read safely. */
+/**
+ * The hold journal's schema version (`PRAGMA user_version`). Version 0 is a file written before
+ * versioning existed; one in the shape the slice-1b journal wrote (admit_by, no incident_json)
+ * is MIGRATED to this version at open. Every other version is refused.
+ */
+export const JOURNAL_SCHEMA_VERSION = 2;
+
+/** The journal's tables, in both schema versions. */
+const JOURNAL_TABLES: readonly string[] = ["hold", "debt", "applied"];
+
+/** The hold table's columns as the slice-1b code wrote them (schema version 0). */
+const V0_HOLD_COLUMNS: readonly string[] = [
+	"hold_id",
+	"budget_id",
+	"state",
+	"amount",
+	"ttl_at",
+	"admit_by",
+	"intent_json",
+	"terminal_kind",
+	"terminal_event_hash",
+	"reserved_seq",
+];
+
+/** The hold table's columns at this version (2): v0's plus the incident. */
+const V2_HOLD_COLUMNS: readonly string[] = [...V0_HOLD_COLUMNS, "incident_json"];
+
+/**
+ * The journal file was written by a schema this code cannot read safely. The file is LEFT
+ * UNTOUCHED: it may hold open or settling holds and recorded debt, so it must never be deleted
+ * or recreated to get past this — that would forget the debt (admission would over-admit) and
+ * drop every hold still in flight.
+ */
 export class JournalSchemaError extends Error {
 	constructor(why: string) {
-		super(`hold journal: unsupported schema — ${why}; recreate the journal file`);
+		super(
+			`hold journal: unsupported schema — ${why}. The file is left untouched. Do NOT delete or recreate it while it holds open or settling holds or any debt: that forgets the debt (over-admitting) and drops every hold in flight. Run a usertrust-openshell version that reads this schema, or drain the journal first.`,
+		);
 		this.name = "JournalSchemaError";
 	}
 }
@@ -223,6 +262,7 @@ interface RawRow {
 	terminal_kind: string | null;
 	terminal_event_hash: string | null;
 	reserved_seq: number | null;
+	incident_json: string | null;
 }
 
 function toRow(r: RawRow): HoldRow {
@@ -236,6 +276,7 @@ function toRow(r: RawRow): HoldRow {
 		intent: r.intent_json === null ? null : JSON.parse(r.intent_json),
 		terminalKind: r.terminal_kind,
 		terminalEventHash: r.terminal_event_hash,
+		incident: r.incident_json === null ? null : JSON.parse(r.incident_json),
 		reservedSeq: r.reserved_seq,
 	};
 }
@@ -338,21 +379,28 @@ export class HoldJournal {
 		const { DatabaseSync: Database } = loadSqlite();
 		const busy = `PRAGMA busy_timeout = ${Math.max(0, Math.floor(opts.busyTimeoutMs ?? 100))}`;
 		const db = new Database(path);
-		// busy_timeout FIRST: switching to WAL and migrating take locks and can themselves be
-		// busy — another process may hold the write lock. Both run under the same retry policy
-		// as a write transaction, ending in JournalBusyError, never a raw SQLITE_BUSY.
-		db.exec(busy);
-		const retries = opts.busyRetries ?? 2;
-		const mode = HoldJournal.retryBusy(retries, () =>
-			db.prepare("PRAGMA journal_mode = WAL").get(),
-		) as { journal_mode?: unknown } | undefined;
-		if (String(mode?.journal_mode).toLowerCase() !== "wal") {
-			db.close();
-			throw new Error(
-				`hold journal: ${path} did not enter WAL mode (journal_mode = ${String(mode?.journal_mode)}) — the read connection and the cross-process CAS depend on it`,
-			);
+		try {
+			// busy_timeout FIRST: switching to WAL and migrating take locks and can themselves be
+			// busy — another process may hold the write lock. Both run under the same retry policy
+			// as a write transaction, ending in JournalBusyError, never a raw SQLITE_BUSY.
+			db.exec(busy);
+			const retries = opts.busyRetries ?? 2;
+			// A file this code must refuse is refused BEFORE anything writes to it (the WAL switch
+			// writes the header and creates -wal/-shm): a refused file is left byte-for-byte as it was.
+			HoldJournal.retryBusy(retries, () => HoldJournal.classifySnapshot(db));
+			const mode = HoldJournal.retryBusy(retries, () =>
+				db.prepare("PRAGMA journal_mode = WAL").get(),
+			) as { journal_mode?: unknown } | undefined;
+			if (String(mode?.journal_mode).toLowerCase() !== "wal") {
+				throw new Error(
+					`hold journal: ${path} did not enter WAL mode (journal_mode = ${String(mode?.journal_mode)}) — the read connection and the cross-process CAS depend on it`,
+				);
+			}
+			HoldJournal.retryBusy(retries, () => HoldJournal.migrate(db));
+		} catch (err) {
+			db.close(); // no handle leaks from a refused or failed open
+			throw err;
 		}
-		HoldJournal.retryBusy(retries, () => HoldJournal.migrate(db));
 		const reader = new Database(path, { readOnly: true });
 		reader.exec(busy);
 		return new HoldJournal(db, reader, opts);
@@ -379,39 +427,112 @@ export class HoldJournal {
 		return t !== undefined && t === this.active;
 	}
 
-	private static migrate(db: DatabaseSync): void {
+	/**
+	 * What the file is, read-only — each answer defined POSITIVELY, and everything else refused
+	 * ({@link JournalSchemaError}):
+	 * - `fresh`: version 0 or this version AND no tables at all (a new, empty file);
+	 * - `current`: this version, exactly this code's tables, and exactly its hold columns;
+	 * - `v0`: version 0, exactly the slice-1b tables, and exactly its hold columns.
+	 * So a file holding ANY other tables (another application's, a foreign schema) is never
+	 * adopted as fresh, whatever the version says, and no unknown shape is ever migrated.
+	 */
+	private static classify(db: DatabaseSync): "fresh" | "current" | "v0" {
+		const version = (db.prepare("PRAGMA user_version").get() as { user_version: number })
+			.user_version;
+		// Only version 0 (never stamped) or this version is readable at all: any OTHER version (a
+		// newer one, 1, or a negative one, which the pragma accepts) is a schema this code does not
+		// know, whatever tables the file has.
+		if (version !== 0 && version !== JOURNAL_SCHEMA_VERSION) {
+			throw new JournalSchemaError(
+				`schema version ${version}, this code reads ${JOURNAL_SCHEMA_VERSION}`,
+			);
+		}
+		const tables = (
+			db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
+				name: string;
+			}>
+		).map((t) => t.name);
+		if (tables.length === 0) return "fresh";
+		const cols = (db.prepare("PRAGMA table_info(hold)").all() as Array<{ name: string }>).map(
+			(c) => c.name,
+		);
 		// A journal written before the admission deadline existed has no `admit_by` to judge an
 		// `open` row by; reading its `ttl_at` (an upper bound) in its place would admit after the
-		// ledger may have released the hold. Refused, never guessed (the package is unreleased).
-		const cols = db.prepare("PRAGMA table_info(hold)").all() as Array<{ name: string }>;
-		if (cols.length > 0 && !cols.some((c) => c.name === "admit_by")) {
+		// ledger may have released the hold. Refused, never guessed.
+		if (cols.length > 0 && !cols.includes("admit_by")) {
 			throw new JournalSchemaError("the hold table has no admit_by column");
 		}
-		db.exec(`
-			CREATE TABLE IF NOT EXISTS hold (
-				hold_id TEXT PRIMARY KEY,
-				budget_id TEXT NOT NULL,
-				state TEXT NOT NULL CHECK (state IN
-					('open','settling','settled','voiding','voided','expiring','expired')),
-				amount INTEGER NOT NULL CHECK (amount > 0),
-				ttl_at INTEGER NOT NULL,
-				admit_by INTEGER NOT NULL,
-				intent_json TEXT,
-				terminal_kind TEXT,
-				terminal_event_hash TEXT,
-				reserved_seq INTEGER
-			);
-			CREATE INDEX IF NOT EXISTS hold_state_ttl ON hold (state, ttl_at);
-			CREATE TABLE IF NOT EXISTS debt (
-				budget_id TEXT PRIMARY KEY,
-				amount INTEGER NOT NULL CHECK (amount >= 0)
-			);
-			CREATE TABLE IF NOT EXISTS applied (
-				transfer_id TEXT PRIMARY KEY,
-				budget_id TEXT NOT NULL,
-				delta INTEGER NOT NULL
-			);
-		`);
+		const same = (a: readonly string[], b: readonly string[]) =>
+			[...a].sort().join(",") === [...b].sort().join(",");
+		const tablesMatch = same(tables, JOURNAL_TABLES);
+		if (version === JOURNAL_SCHEMA_VERSION && tablesMatch && same(cols, V2_HOLD_COLUMNS)) {
+			return "current";
+		}
+		if (version === 0 && tablesMatch && same(cols, V0_HOLD_COLUMNS)) return "v0";
+		throw new JournalSchemaError(
+			`schema version ${version} (an unrecognised shape: tables ${[...tables].sort().join(", ")}), this code reads ${JOURNAL_SCHEMA_VERSION}`,
+		);
+	}
+
+	/**
+	 * {@link classify} under ONE read transaction: its two reads (the version, then the columns)
+	 * see one snapshot, so an opener racing a migration that COMMITS between them cannot see a
+	 * v0 version with the v2 column and refuse a healthy file. A read transaction takes no write
+	 * lock and changes nothing on disk.
+	 */
+	private static classifySnapshot(db: DatabaseSync): "fresh" | "current" | "v0" {
+		db.exec("BEGIN");
+		try {
+			return HoldJournal.classify(db);
+		} finally {
+			db.exec("COMMIT");
+		}
+	}
+
+	/**
+	 * Create or migrate the schema in ONE write transaction, re-deciding INSIDE it: a second
+	 * opener that raced the first one waits on the lock, then finds the file already current
+	 * and does nothing (never a "duplicate column"). A v0 file gains `incident_json` and its
+	 * version stamp together, so a crash cannot leave it half-migrated; every row and all debt
+	 * are kept.
+	 */
+	private static migrate(db: DatabaseSync): void {
+		db.exec("BEGIN IMMEDIATE");
+		try {
+			const kind = HoldJournal.classify(db);
+			if (kind === "v0") db.exec("ALTER TABLE hold ADD COLUMN incident_json TEXT");
+			db.exec(`
+				CREATE TABLE IF NOT EXISTS hold (
+					hold_id TEXT PRIMARY KEY,
+					budget_id TEXT NOT NULL,
+					state TEXT NOT NULL CHECK (state IN
+						('open','settling','settled','voiding','voided','expiring','expired')),
+					amount INTEGER NOT NULL CHECK (amount > 0),
+					ttl_at INTEGER NOT NULL,
+					admit_by INTEGER NOT NULL,
+					intent_json TEXT,
+					terminal_kind TEXT,
+					terminal_event_hash TEXT,
+					reserved_seq INTEGER,
+					incident_json TEXT
+				);
+				CREATE INDEX IF NOT EXISTS hold_state_ttl ON hold (state, ttl_at);
+				CREATE TABLE IF NOT EXISTS debt (
+					budget_id TEXT PRIMARY KEY,
+					amount INTEGER NOT NULL CHECK (amount >= 0)
+				);
+				CREATE TABLE IF NOT EXISTS applied (
+					transfer_id TEXT PRIMARY KEY,
+					budget_id TEXT NOT NULL,
+					delta INTEGER NOT NULL
+				);
+			`);
+			if (kind !== "current") db.exec(`PRAGMA user_version = ${JOURNAL_SCHEMA_VERSION}`);
+			db.exec("COMMIT");
+		} catch (err) {
+			db.exec("ROLLBACK");
+			throw err;
+		}
 	}
 
 	/**
@@ -742,14 +863,38 @@ export class HoldJournal {
 		).map(toRow);
 	}
 
-	/** Rows in a non-terminal, non-open state: a claim whose winner may have crashed. */
+	/**
+	 * Rows in a non-terminal, non-open state: a claim whose winner may have crashed. A row
+	 * carrying an incident is NOT in flight — nothing can complete it; see {@link incidents}.
+	 */
 	inFlight(): HoldRow[] {
 		return this.read(
 			(db) =>
 				db
-					.prepare("SELECT * FROM hold WHERE state IN ('settling','voiding','expiring')")
+					.prepare(
+						"SELECT * FROM hold WHERE state IN ('settling','voiding','expiring') AND incident_json IS NULL",
+					)
 					.all() as unknown as RawRow[],
 		).map(toRow);
+	}
+
+	/** Rows carrying a terminal incident: an operator must act on each. */
+	incidents(): HoldRow[] {
+		return this.read(
+			(db) =>
+				db
+					.prepare("SELECT * FROM hold WHERE incident_json IS NOT NULL")
+					.all() as unknown as RawRow[],
+		).map(toRow);
+	}
+
+	/** Record a terminal incident on a row, once. Must run inside {@link writeTx}. */
+	recordIncident(holdId: string, incident: unknown): boolean {
+		this.requireTx("recordIncident");
+		const r = this.db
+			.prepare("UPDATE hold SET incident_json = ? WHERE hold_id = ? AND incident_json IS NULL")
+			.run(JSON.stringify(incident), holdId);
+		return Number(r.changes) === 1;
 	}
 
 	/** Terminal rows whose terminal event was never recorded. */

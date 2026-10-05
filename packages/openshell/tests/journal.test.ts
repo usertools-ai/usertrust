@@ -2,7 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	HoldConflictError,
 	HoldJournal,
+	JOURNAL_SCHEMA_VERSION,
 	JournalBusyError,
 	JournalSchemaError,
 	JournalUnavailableError,
@@ -709,6 +710,7 @@ describe("hold journal: the sweeper's work lists", () => {
 // ── Two OS processes on one journal file ──
 
 const RACER = join(__dirname, "fixtures", "journal-racer.ts");
+const OPENER = join(__dirname, "fixtures", "journal-opener.ts");
 const REPO_ROOT = join(__dirname, "..", "..", "..");
 
 type RacerResult = {
@@ -1042,5 +1044,278 @@ describe("#172: writeTx's refusal of an async body leaves no unhandled rejection
 			process.off("unhandledRejection", onUnhandled);
 		}
 		expect(unhandled).toEqual([]);
+	});
+});
+
+describe("#177: the journal schema carries a version", () => {
+	it("a file stamped with another schema version is refused at open; a fresh file is stamped", () => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-ver-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		HoldJournal.open(path).close();
+		const raw = new DatabaseSync(path);
+		expect(
+			(raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+		).toBe(JOURNAL_SCHEMA_VERSION);
+		raw.exec("PRAGMA user_version = 1");
+		raw.close();
+		expect(() => HoldJournal.open(path)).toThrow(JournalSchemaError);
+	});
+});
+
+describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refused into a recreate", () => {
+	// The exact schema master's #174 journal wrote (admit_by, no incident_json, user_version 0).
+	const SCHEMA_174 = `
+		CREATE TABLE hold (
+			hold_id TEXT PRIMARY KEY,
+			budget_id TEXT NOT NULL,
+			state TEXT NOT NULL CHECK (state IN
+				('open','settling','settled','voiding','voided','expiring','expired')),
+			amount INTEGER NOT NULL CHECK (amount > 0),
+			ttl_at INTEGER NOT NULL,
+			admit_by INTEGER NOT NULL,
+			intent_json TEXT,
+			terminal_kind TEXT,
+			terminal_event_hash TEXT,
+			reserved_seq INTEGER
+		);
+		CREATE INDEX hold_state_ttl ON hold (state, ttl_at);
+		CREATE TABLE debt (budget_id TEXT PRIMARY KEY, amount INTEGER NOT NULL CHECK (amount >= 0));
+		CREATE TABLE applied (transfer_id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, delta INTEGER NOT NULL);
+	`;
+	const file = (setup: (raw: DatabaseSync) => void) => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-v0-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		const raw = new DatabaseSync(path);
+		raw.exec("PRAGMA journal_mode = WAL");
+		setup(raw);
+		raw.close();
+		return path;
+	};
+
+	it("a #174-shaped v0 file opens and migrates to v2 with its debt and its open and settling rows intact", () => {
+		const path = file((raw) => {
+			raw.exec(SCHEMA_174);
+			raw.exec(
+				"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by) VALUES ('h-open', 'b', 'open', 100, 9000, 8000)",
+			);
+			raw.exec(
+				`INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by, intent_json) VALUES ('h-settling', 'b', 'settling', 100, 9000, 8000, '{"post":100,"overage":40}')`,
+			);
+			raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 40)");
+			raw.exec("INSERT INTO applied (transfer_id, budget_id, delta) VALUES ('t-1', 'b', 40)");
+		});
+		const j = HoldJournal.open(path, { now: () => 0 });
+		journals.push(j);
+		expect(j.debtOf("b"), "the recorded debt survives").toBe(40);
+		expect(j.get("h-open")).toMatchObject({
+			state: "open",
+			amount: 100,
+			admitBy: 8000,
+			incident: null,
+		});
+		expect(j.inFlight().map((r) => r.holdId)).toEqual(["h-settling"]);
+		const raw = new DatabaseSync(path);
+		expect(
+			(raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+		).toBe(2);
+		raw.close();
+	});
+
+	it("the migrated file takes an incident (the new column exists)", async () => {
+		const path = file((raw) => {
+			raw.exec(SCHEMA_174);
+			raw.exec(
+				"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by) VALUES ('h1', 'b', 'settling', 100, 9000, 8000)",
+			);
+		});
+		const j = HoldJournal.open(path, { now: () => 0 });
+		journals.push(j);
+		expect(await j.writeTx(() => j.recordIncident("h1", { kind: "x" }))).toBe(true);
+		expect(j.incidents().map((r) => r.holdId)).toEqual(["h1"]);
+	});
+
+	it("a NEWER schema version is refused and the file left untouched; the remedy never advises recreating it", () => {
+		const path = file((raw) => {
+			raw.exec(SCHEMA_174);
+			raw.exec("ALTER TABLE hold ADD COLUMN incident_json TEXT");
+			raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 7)");
+			raw.exec("PRAGMA user_version = 3");
+		});
+		let err: unknown;
+		try {
+			HoldJournal.open(path);
+		} catch (e) {
+			err = e;
+		}
+		expect(err).toBeInstanceOf(JournalSchemaError);
+		const msg = String((err as Error).message);
+		expect(msg).toContain("schema version 3, this code reads 2");
+		expect(msg).toContain(
+			"Do NOT delete or recreate it while it holds open or settling holds or any debt",
+		);
+		expect(msg).not.toMatch(/; recreate the journal file/);
+		const raw = new DatabaseSync(path);
+		expect(
+			(raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+		).toBe(3);
+		expect(
+			(raw.prepare("SELECT amount FROM debt WHERE budget_id = 'b'").get() as { amount: number })
+				.amount,
+		).toBe(7);
+		raw.close();
+	});
+
+	it("(a) N processes opening ONE v0 file together all succeed — the migration is decided inside the write lock (never a duplicate column)", async () => {
+		for (let round = 0; round < 5; round++) {
+			const path = file((raw) => {
+				raw.exec(SCHEMA_174);
+				raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 40)");
+				raw.exec(
+					"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by) VALUES ('h-open', 'b', 'open', 100, 9000, 8000)",
+				);
+			});
+			const dir = join(path, "..");
+			const go = join(dir, `go-${round}`);
+			const opener = (i: number) =>
+				new Promise<void>((resolve, reject) => {
+					const child = spawn(
+						process.execPath,
+						[
+							"--no-warnings",
+							"--import",
+							"tsx",
+							OPENER,
+							path,
+							go,
+							join(dir, `r${round}-${i}.ready`),
+						],
+						{ cwd: REPO_ROOT },
+					);
+					let err = "";
+					child.stderr.on("data", (d) => (err += d));
+					child.on("exit", (code) =>
+						code === 0 ? resolve() : reject(new Error(`opener ${i} exited ${code}: ${err}`)),
+					);
+				});
+			const all = Promise.all([0, 1, 2, 3, 4, 5].map(opener));
+			while (
+				readdirSync(dir).filter((f) => f.startsWith(`r${round}-`) && f.endsWith(".ready")).length <
+				6
+			) {
+				await new Promise((r) => setTimeout(r, 5));
+			}
+			writeFileSync(go, "");
+			await all;
+			const j = HoldJournal.open(path, { now: () => 0 });
+			journals.push(j);
+			expect(j.debtOf("b")).toBe(40);
+			expect(j.get("h-open")?.state).toBe("open");
+		}
+	}, 120_000);
+
+	it("(c) a NEWER version is refused even with NO hold table — never stamped down to 2 and given tables", () => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-v3-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		const raw = new DatabaseSync(path);
+		raw.exec("PRAGMA user_version = 3");
+		raw.close();
+		expect(() => HoldJournal.open(path)).toThrow(/schema version 3, this code reads 2/);
+		const after = new DatabaseSync(path);
+		expect(
+			(after.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+		).toBe(3);
+		expect(after.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()).toEqual([]);
+		after.close();
+	});
+
+	it("#181: a file at version 1, or a NEGATIVE version, with NO hold table is refused — never adopted as fresh; bytes untouched, no -wal/-shm", () => {
+		for (const v of [1, -1]) {
+			const dir = mkdtempSync(join(tmpdir(), "openshell-journal-v-other-"));
+			dirs.push(dir);
+			const path = join(dir, "holds.db");
+			const raw = new DatabaseSync(path); // rollback mode, no hold table
+			raw.exec("CREATE TABLE other_schema (x INTEGER)");
+			raw.exec("INSERT INTO other_schema (x) VALUES (42)");
+			raw.exec(`PRAGMA user_version = ${v}`);
+			raw.close();
+			const before = readFileSync(path);
+			expect(() => HoldJournal.open(path), String(v)).toThrow(
+				new RegExp(`schema version ${v}, this code reads 2`),
+			);
+			expect(readFileSync(path).equals(before), `${v}: the bytes are unchanged`).toBe(true);
+			expect(existsSync(`${path}-wal`), String(v)).toBe(false);
+			expect(existsSync(`${path}-shm`), String(v)).toBe(false);
+		}
+	});
+
+	it("#177 r6 (B): a file holding ANY other table is never adopted — a v0 or a v2 journal plus a foreign table is refused, bytes untouched", () => {
+		for (const [name, extra] of [
+			["v0 + a foreign table", ""],
+			[
+				"v2 + a foreign table",
+				"ALTER TABLE hold ADD COLUMN incident_json TEXT; PRAGMA user_version = 2;",
+			],
+		] as const) {
+			const dir = mkdtempSync(join(tmpdir(), "openshell-journal-foreign-"));
+			dirs.push(dir);
+			const path = join(dir, "holds.db");
+			const raw = new DatabaseSync(path); // rollback mode
+			raw.exec(SCHEMA_174);
+			raw.exec(extra);
+			raw.exec("CREATE TABLE someone_elses (x INTEGER)");
+			raw.close();
+			const before = readFileSync(path);
+			expect(() => HoldJournal.open(path), name).toThrow(/an unrecognised shape: tables/);
+			expect(readFileSync(path).equals(before), `${name}: bytes unchanged`).toBe(true);
+			expect(existsSync(`${path}-wal`), name).toBe(false);
+		}
+	});
+
+	it("#177 r6 (B): a v0-versioned file with ONLY foreign tables (no hold table) is not fresh — refused", () => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-foreign0-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		const raw = new DatabaseSync(path);
+		raw.exec("CREATE TABLE app_data (x INTEGER)");
+		raw.exec("INSERT INTO app_data (x) VALUES (1)");
+		raw.close();
+		const before = readFileSync(path);
+		expect(() => HoldJournal.open(path)).toThrow(/an unrecognised shape: tables app_data/);
+		expect(readFileSync(path).equals(before)).toBe(true);
+	});
+
+	it("(d) a refused ROLLBACK-mode file is left byte-for-byte untouched: no WAL switch, no -wal or -shm files", () => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-rollback-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		const raw = new DatabaseSync(path); // default rollback (delete) journal mode
+		raw.exec(SCHEMA_174);
+		raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 7)");
+		raw.exec("PRAGMA user_version = 3");
+		raw.close();
+		const before = readFileSync(path);
+		expect(() => HoldJournal.open(path)).toThrow(JournalSchemaError);
+		expect(readFileSync(path).equals(before), "the bytes are unchanged").toBe(true);
+		expect(existsSync(`${path}-wal`)).toBe(false);
+		expect(existsSync(`${path}-shm`)).toBe(false);
+	});
+
+	it("(b) a v0 file with the #174 columns PLUS an unknown one is refused — the predicate is the full column set", () => {
+		const path = file((raw) => {
+			raw.exec(SCHEMA_174);
+			raw.exec("ALTER TABLE hold ADD COLUMN mystery TEXT");
+		});
+		expect(() => HoldJournal.open(path)).toThrow(/schema version 0 \(an unrecognised shape/);
+	});
+
+	it("a v0 file that is NOT the #174 shape is refused, not migrated", () => {
+		const path = file((raw) => {
+			raw.exec(SCHEMA_174);
+			raw.exec("ALTER TABLE hold ADD COLUMN incident_json TEXT"); // v0 yet already has it: unknown
+		});
+		expect(() => HoldJournal.open(path)).toThrow(/schema version 0 \(an unrecognised shape/);
 	});
 });

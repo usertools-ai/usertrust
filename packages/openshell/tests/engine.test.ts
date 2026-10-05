@@ -4,11 +4,18 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { HoldEngine, PlacementWindowError } from "../src/engine.js";
+import {
+	DebtChargeFailedError,
+	HoldEngine,
+	InvalidSettlementIntentError,
+	PlacementWindowError,
+} from "../src/engine.js";
 import { HoldJournal, LedgerDeadlineError } from "../src/journal.js";
 import {
 	BudgetIdError,
+	type ChargeOutcome,
 	type LedgerPort,
 	type PostOutcome,
 	transferIdFor,
@@ -39,6 +46,8 @@ class FakeLedger implements LedgerPort {
 	onAvailable: (() => void) | null = null;
 	/** While set, chargeDebt waits on it: the gap between the claim and the ledger charge. */
 	chargeGate: Promise<void> | null = null;
+	/** Answer every chargeDebt with this outcome (both ids retired, nothing charged). */
+	chargeAnswer: ChargeOutcome | null = null;
 	hang: "placeHold" | null = null;
 
 	private once(id: bigint, amount: number): boolean {
@@ -96,12 +105,14 @@ class FakeLedger implements LedgerPort {
 		holdKey: string;
 		role: "overage" | "late";
 		amount: number;
-	}): Promise<void> {
+	}): Promise<ChargeOutcome> {
 		if (this.chargeGate !== null) await this.chargeGate;
+		if (this.chargeAnswer !== null) return this.chargeAnswer;
 		if (this.once(transferIdFor(p.holdKey, p.role), p.amount)) {
 			this.debt.set(p.budgetId, (this.debt.get(p.budgetId) ?? 0) + p.amount);
 		}
 		this.crash("chargeDebt");
+		return "done";
 	}
 	/** How many distinct transfers of a role were applied for a hold (0 or 1). */
 	count(holdKey: string, role: Parameters<typeof transferIdFor>[1]): number {
@@ -533,5 +544,134 @@ describe("#174 r3: the caller's objects are snapshotted before any await", () =>
 		expect(journal.debtOf("b")).toBe(25);
 		expect(ledger.debt.get("b"), "charged what was recorded").toBe(25);
 		expect(ledger.applied.get(transferIdFor("k1", "post").toString())).toBe(100);
+	});
+});
+
+describe("#176: the settlement intent is validated at the claim", () => {
+	const broken: Array<[string, { post: number; overage: number }]> = [
+		["post NaN", { post: Number.NaN, overage: 0 }],
+		["post negative", { post: -1, overage: 0 }],
+		["post fractional", { post: 1.5, overage: 0 }],
+		["overage negative", { post: 100, overage: -5 }],
+		["overage Infinity", { post: 100, overage: Number.POSITIVE_INFINITY }],
+		["post above the hold", { post: 101, overage: 0 }],
+		["an overage with the hold not posted in full", { post: 60, overage: 30 }],
+	];
+	for (const [name, intent] of broken) {
+		it(`${name}: refused — the row stays open, nothing posted, no debt`, async () => {
+			const { journal, ledger, engine } = setup();
+			await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+			await expect(engine.settle("k1", intent)).rejects.toBeInstanceOf(
+				InvalidSettlementIntentError,
+			);
+			expect(journal.get("k1")?.state).toBe("open");
+			expect(ledger.count("k1", "post")).toBe(0);
+			expect(journal.debtOf("b")).toBe(0);
+		});
+	}
+
+	it("control: the boundaries pass — post equal to the hold with an overage, and post zero", async () => {
+		for (const intent of [
+			{ post: 100, overage: 7 },
+			{ post: 0, overage: 0 },
+		]) {
+			const { engine } = setup();
+			await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+			expect(await engine.settle("k1", intent), JSON.stringify(intent)).toMatchObject({
+				outcome: "settled",
+			});
+		}
+	});
+
+	it("a resume of a `settling` hold acts on its STORED intent: a duplicate caller's intent is not judged", async () => {
+		const { engine, ledger } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		ledger.crashAfter = "post";
+		await expect(engine.settle("k1", { post: 80, overage: 0 })).rejects.toThrow(/died after post/);
+		expect(await engine.settle("k1", { post: 999, overage: 0 })).toEqual({
+			outcome: "settled",
+			resumed: true,
+		});
+	});
+
+	it("both overage ids retired and nothing charged: TERMINAL — a loud DebtChargeFailedError naming both ids, the row marked (not in flight), and a later settle makes no ledger call", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		ledger.chargeAnswer = { failed: true, role: "overage", transferIds: ["111", "222"] };
+		const err = await engine.settle("k1", { post: 100, overage: 20 }).catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(DebtChargeFailedError);
+		expect((err as DebtChargeFailedError).transferIds).toEqual(["111", "222"]);
+		expect(String((err as Error).message)).toMatch(/111.*222/);
+		expect(journal.get("k1")).toMatchObject({
+			state: "settling",
+			incident: {
+				kind: "debt_charge_failed",
+				role: "overage",
+				transferIds: ["111", "222"],
+				amount: 20,
+			},
+		});
+		expect(
+			journal.inFlight().map((r) => r.holdId),
+			"never re-reported as in flight",
+		).toEqual([]);
+		expect(journal.incidents().map((r) => r.holdId)).toEqual(["k1"]);
+		expect(journal.debtOf("b"), "admission stays bounded").toBe(20);
+		ledger.chargeAnswer = null;
+		const posts = ledger.count("k1", "post");
+		expect(await engine.settle("k1", { post: 100, overage: 20 })).toEqual({
+			outcome: "incident",
+			state: "settling",
+		});
+		expect(ledger.count("k1", "post")).toBe(posts);
+		expect(ledger.count("k1", "overage"), "no further charge attempt").toBe(0);
+	});
+});
+
+describe("#177 r6 (A): EVERY completion — a resume of a stored intent included — passes the intent contract", () => {
+	it("a v0 `settling` row written by the pre-validation engine ({post:60, overage:30} on a 100 hold) is migrated, then RESUMED into a terminal invalid_stored_intent incident — no post, no charge, debt unchanged", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-engine-v0-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		const raw = new DatabaseSync(path);
+		raw.exec("PRAGMA journal_mode = WAL");
+		raw.exec(`
+			CREATE TABLE hold (
+				hold_id TEXT PRIMARY KEY, budget_id TEXT NOT NULL,
+				state TEXT NOT NULL CHECK (state IN ('open','settling','settled','voiding','voided','expiring','expired')),
+				amount INTEGER NOT NULL CHECK (amount > 0), ttl_at INTEGER NOT NULL, admit_by INTEGER NOT NULL,
+				intent_json TEXT, terminal_kind TEXT, terminal_event_hash TEXT, reserved_seq INTEGER
+			);
+			CREATE INDEX hold_state_ttl ON hold (state, ttl_at);
+			CREATE TABLE debt (budget_id TEXT PRIMARY KEY, amount INTEGER NOT NULL CHECK (amount >= 0));
+			CREATE TABLE applied (transfer_id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, delta INTEGER NOT NULL);
+		`);
+		raw.exec(
+			`INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by, intent_json) VALUES ('h1', 'b', 'settling', 100, 2000000, 1900000, '{"post":60,"overage":30}')`,
+		);
+		raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 30)"); // recorded with the claim
+		raw.close();
+		const journal = HoldJournal.open(path, { now: () => 1_000, ledgerTimeoutMs: 50 });
+		journals.push(journal);
+		const ledger = new FakeLedger();
+		const engine = new HoldEngine(journal, ledger, { holdTtlSeconds: 900, now: () => 1_000 });
+		// A duplicate settlement (any intent) loses the claim and RESUMES the stored one.
+		expect(await engine.settle("h1", { post: 100, overage: 0 })).toEqual({
+			outcome: "incident",
+			state: "settling",
+		});
+		expect(journal.get("h1")).toMatchObject({
+			state: "settling",
+			incident: { kind: "invalid_stored_intent", intent: { post: 60, overage: 30 } },
+		});
+		expect(ledger.count("h1", "post"), "no post").toBe(0);
+		expect(ledger.count("h1", "overage"), "no charge").toBe(0);
+		expect(journal.debtOf("b"), "recorded debt left as is").toBe(30);
+		expect(journal.inFlight()).toEqual([]);
+		expect(await engine.settle("h1", { post: 100, overage: 0 })).toEqual({
+			outcome: "incident",
+			state: "settling",
+		});
+		expect(ledger.count("h1", "post")).toBe(0);
 	});
 });

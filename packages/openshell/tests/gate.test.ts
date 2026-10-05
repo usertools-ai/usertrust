@@ -662,6 +662,22 @@ describe("#166 MEDIUM: the gate refuses running usage counts", () => {
 		expect(chat({ stream: true, stream_options: { include_usage: true } }).decision).toBe("allow");
 		expect(chat({ stream: true }).decision, "absent").toBe("allow");
 	});
+	it("#175: include_usage, when present, must be a boolean — null, a string or an object is DENIED on every OpenAI route, streaming or not", () => {
+		for (const r of [chat, responses]) {
+			for (const stream of [true, false]) {
+				for (const v of [null, "x", {}, 1]) {
+					const out = r({ stream, stream_options: { include_usage: v } });
+					expect(denied(out), `${JSON.stringify(v)} stream=${stream}`).toBe(
+						"parameter_unsupported",
+					);
+					if (out.decision === "deny") expect(out.detail).toBe("stream_options.include_usage");
+				}
+			}
+		}
+		expect(chat({ stream: false, stream_options: { include_usage: false } }).decision).toBe(
+			"allow",
+		);
+	});
 	it("#168: only allowlisted stream_options keys are forwarded — any other key, or a non-object, is DENIED", () => {
 		for (const r of [chat, responses]) {
 			for (const so of [{ foo: 1 }, { include_usage: true, include_obfuscation: false }]) {

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **openshell: the hold journal's schema is versioned** (`PRAGMA user_version`, now 2). A journal written by the slice-1b code (version 0, with `admit_by` and without `incident_json`) is **migrated at open** in one transaction: the `incident_json` column is added and version 2 is stamped together, and every hold row and all recorded debt are kept. The migration is decided inside the write lock, so concurrent openers of one file all succeed. Any other version (newer, whatever tables the file has, or a v0 whose columns differ from that schema) is refused with `JournalSchemaError` before anything is written: the file is left byte-for-byte untouched, with no WAL switch. The error never advises recreating a journal: doing so would forget recorded debt and drop holds in flight.
+
 - **The audit writer is exported, with an eager lock.** `createAuditWriter`, `AuditWriter`, `AppendEventInput`, `CreateAuditWriterOptions` and `AuditWriterLockHeldError` are now exported from the package entry. `createAuditWriter(vaultPath, { lockAtCreate: true })` takes the vault's advisory lock in the factory, so a second writer fails at creation with `AuditWriterLockHeldError` instead of at its first append. That second writer can be another live process, or another live writer in the same process. The default (`lockAtCreate` omitted or `false`) is unchanged: the lock is taken at the first append.
 
 - **`isModelPriced(model, customRates?)`** — true only when a model has rates of

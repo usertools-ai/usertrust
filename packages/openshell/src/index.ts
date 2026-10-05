@@ -2,8 +2,10 @@
 // Copyright 2026 Usertools, Inc.
 
 export {
+	DebtChargeFailedError,
 	type EngineOptions,
 	HoldEngine,
+	InvalidSettlementIntentError,
 	LedgerTimeoutError,
 	PlacementWindowError,
 	type ReleaseOutcome,
@@ -29,6 +31,7 @@ export {
 	HoldJournal,
 	type HoldRow,
 	type HoldState,
+	JOURNAL_SCHEMA_VERSION,
 	JournalBusyError,
 	type JournalOptions,
 	JournalSchemaError,
@@ -45,6 +48,7 @@ export {
 } from "./journal.js";
 export {
 	BudgetIdError,
+	type ChargeOutcome,
 	debtAccountLabel,
 	type LedgerPort,
 	type PostOutcome,
