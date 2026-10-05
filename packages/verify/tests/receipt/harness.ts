@@ -292,14 +292,15 @@ export interface TransferPair {
 	settlementTransferId: string;
 }
 
-export interface CommitWork {
-	kind: "commit";
+/**
+ * §2's ordinary `session` variant — the corpus default, because v1 verifiers
+ * refuse the artifact variants (`commit`/`pr`/`issue`) even when well formed
+ * (§2, v0.9.6). Tests that exercise an artifact variant build it explicitly.
+ */
+export interface SessionWork {
+	kind: "session";
 	repoId: string;
 	repo?: string;
-	oid: string;
-	oidAlg: "sha1" | "sha256";
-	objectSha256: string;
-	repositoryMembership: { status: "providerVerified"; proofId: string };
 }
 
 /**
@@ -608,14 +609,10 @@ export function buildProjection(options: ProjectionOptions = {}): Projection {
 	const transferCount = options.transferCount ?? 22;
 	const generation = options.generation ?? 1;
 	const pairs = transferPairs(transferCount);
-	const work: CommitWork = {
-		kind: "commit",
+	const work: SessionWork = {
+		kind: "session",
 		repoId: "github.com:R_kgDOK1x2Yw",
 		repo: "github.com/usertools-ai/usertrust",
-		oid: "37df16d3a4c1b8e05f92d7a6c31e4b8079fa2d51",
-		oidAlg: "sha1",
-		objectSha256: sha256Hex("usertrust/test-commit-object"),
-		repositoryMembership: { status: "providerVerified", proofId: "pv_9f3a2c81d0" },
 	};
 	const projection: Projection = {
 		spec: "ut1",
@@ -676,6 +673,10 @@ export interface MintOptions {
 	readonly eventAfterHash?: (e: EventEnvelope) => EventEnvelope;
 	/** Replace the leaf the mint event occupies (proves inclusion of something else). */
 	readonly mintLeaf?: (eventHash: string) => string;
+	/** Replace the chain-link leaf (leaf 0) of non-genesis segment `segmentIndex`.
+	 * The tree, the proof and the checkpoint are built over the result, so the
+	 * signed `previousSegmentRoot` is the only thing left that disagrees. */
+	readonly chainLinkLeaf?: (previousRoot: string, segmentIndex: number) => string;
 	readonly inclusion?: (p: HarnessInclusionProof) => HarnessInclusionProof;
 	/** Tweak every unsigned checkpoint before signing — signatures stay valid. */
 	readonly checkpointsUnsigned?: (c: UnsignedCheckpoint[]) => UnsignedCheckpoint[];
@@ -691,7 +692,11 @@ export interface MintOptions {
 	readonly bytes?: (b: Buffer) => Buffer;
 	readonly snapshot?: (s: TrustSnapshot) => TrustSnapshot;
 	readonly snapshotBytes?: (b: Buffer) => Buffer;
-	readonly history?: (h: SegmentCheckpoint[]) => SegmentCheckpoint[];
+	/** `all` is every segment's signed checkpoint, past the mint segment too. */
+	readonly history?: (
+		h: SegmentCheckpoint[],
+		all: readonly SegmentCheckpoint[],
+	) => SegmentCheckpoint[];
 	readonly envelope?: (e: ResolverEnvelope) => ResolverEnvelope;
 }
 
@@ -709,6 +714,8 @@ export interface MintedBundle {
 	readonly snapshotBytes: Buffer;
 	/** Genesis → the mint segment, one checkpoint per segment. */
 	readonly history: readonly SegmentCheckpoint[];
+	/** Every segment's signed checkpoint, including any AFTER the mint segment. */
+	readonly checkpoints: readonly SegmentCheckpoint[];
 	readonly envelope: ResolverEnvelope;
 	readonly segments: readonly MintedSegment[];
 	readonly mintSegmentIndex: number;
@@ -752,14 +759,15 @@ export function mint(options: MintOptions = {}): MintedBundle {
 
 	// 2. Event envelope; hash over the envelope minus `hash`. The segment's
 	//    FIRST event links to the segment's signed start hash (§4a, v0.9.6);
-	//    any later event links to a filler predecessor.
+	//    any later event links to the leaf before it — the tree's leaves ARE
+	//    the hash chain, which is what lets a verifier recompute that leaf.
 	let unsignedEvent: Omit<EventEnvelope, "hash"> = {
 		id: "evt_01K2Q7WD5J3N8H4TB2MYE0PXQR",
 		timestamp: "2026-08-11T18:42:14.006Z",
 		previousHash:
 			mintLeafIndex === chainLinkOffset(mintSegmentIndex)
 				? segmentStartHash(segmentSpecs, mintSegmentIndex)
-				: sha256Hex("usertrust/test-previous-event"),
+				: fillerLeaf(mintSegment.segmentId, mintLeafIndex - 1),
 		kind: MINT_EVENT_KIND,
 		actor: { ...MINT_ACTOR },
 		data: projection,
@@ -782,7 +790,11 @@ export function mint(options: MintOptions = {}): MintedBundle {
 		const leaves: string[] = [];
 		for (let i = 0; i < spec.treeSize; i += 1) {
 			if (i === 0 && previous !== undefined) {
-				leaves.push(previous.root);
+				leaves.push(
+					options.chainLinkLeaf
+						? options.chainLinkLeaf(previous.root, segmentIndex)
+						: previous.root,
+				);
 			} else if (segmentIndex === mintSegmentIndex && i === mintLeafIndex) {
 				leaves.push(options.mintLeaf ? options.mintLeaf(event.hash) : event.hash);
 			} else {
@@ -904,7 +916,7 @@ export function mint(options: MintOptions = {}): MintedBundle {
 
 	// 9. History (genesis → the mint segment) + the resolver envelope.
 	let history: SegmentCheckpoint[] = checkpoints.slice(0, mintSegmentIndex + 1);
-	if (options.history) history = options.history(history);
+	if (options.history) history = options.history(history, checkpoints);
 
 	// The convenience copy mirrors the emitted bytes. When a byte vector made
 	// those bytes unparseable, it falls back to the pre-mutation document —
@@ -933,6 +945,7 @@ export function mint(options: MintOptions = {}): MintedBundle {
 		snapshot,
 		snapshotBytes,
 		history,
+		checkpoints,
 		envelope,
 		segments: minted,
 		mintSegmentIndex,

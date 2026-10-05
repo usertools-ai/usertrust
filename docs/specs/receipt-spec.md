@@ -149,6 +149,24 @@ its range starts at the offset, and the same offset corrects §6's covering
 condition and §7's history contiguity (`next.first === prev.first +
 prev.treeSize − offset(prev)`). (3) §7's history walk names what happens at
 a member that is not a v2 statement: it stops, with a named `HISTORY_INVALID`.
+(4) **Every value the receipt exposes is BOUND, or declared unbound.** A
+value the receipt carries and two signatures authenticate is still
+unchecked until something compares it. So equality 4 binds the segment's
+first event to the signed `segmentStartPreviousHash`, and binds every proof
+node the receipt can RECOMPUTE: the chain link (the signed
+`previousSegmentRoot`) and the receipt's predecessor event
+(`event.previousHash` — the tree's leaves are the hash chain) wherever the
+proof exposes them. §7's history walk binds a served successor's signed
+`segmentStartPreviousHash` to the receipt's `event.hash` when that event is
+its segment's final leaf. (5) **The artifact `work` variants are REFUSED.**
+`commit`, `pr` and `issue` fail step 7 even when well formed (§2's semantic
+list): their provider proofs are bound by nothing a verifier holds, so a
+verified status would certify a claim nobody checked. Only the `session`
+variants verify in v1 — a deliberate NARROWING: an artifact receipt v0.9.5
+would have certified now fails. (6) **A sealed segment holds at least one
+event**, so a statement's `treeSize` exceeds its chain-link offset; a
+history's FINAL member is the one this binds, because no successor ever
+reads its `treeSize`.
 **Compatibility: NONE is extended, deliberately.** The v0.9.5 eleven-member
 statement and the offset-free equality 4 were never minted for real. The
 only objects in that shape are this repo's own: the verifier's conformance
@@ -160,7 +178,8 @@ the offset rule.
 Accepting both would let one checkpoint key sign two readings of the same
 segment, which is the ambiguity §8 refuses. The pinned resolver companion
 (§6a) still transcribes the v0.9.5 member list and equality 4 in its proof
-block; this section OVERRIDES those transcriptions under the companion's own
+block, and still presents the artifact `work` variants as verifiable; this
+section OVERRIDES those transcriptions under the companion's own
 precedence rule (conflicts resolve in this document's favor), and the pin is
 deliberately NOT moved for it — the companion is corrected in its own round.
 
@@ -339,7 +358,9 @@ so what is not enumerated here cannot be sent.
   "work": {                      // CHAIN-COMMITTED and VERIFIED (§6a, B2) — the
                                  // resolver's discriminated union. COMMIT variant
                                  // inline; pr / issue / session variants by reference
-                                 // (enumerated under the block)
+                                 // (enumerated under the block). v0.9.6: a v1
+                                 // VERIFIER refuses this variant and the other two
+                                 // artifact variants (§2's semantic list)
     "kind": "commit",
     "repoId": "github.com:R_kgDOK1x2Yw",  // NORMATIVE scope: the provider's IMMUTABLE
                                  // repository ID, or the keyed "r1_…" form for
@@ -420,7 +441,10 @@ so what is not enumerated here cannot be sent.
 
 - **The `work` union's other variants** (normative, per §6a and the
   resolver's discriminated union — every variant carries `repoId` as the
-  NORMATIVE scope, and `repo` only under the disclosure rule below):
+  NORMATIVE scope, and `repo` only under the disclosure rule below). v0.9.6:
+  a v1 verifier REFUSES the three artifact variants (`commit` above, `pr`,
+  `issue`) — see the semantic list — so their definitions say what it
+  recognizes in order to refuse, not what it certifies:
   - `pr` / `issue`: `{ kind, repoId, repo?, number, providerArtifactId,
     observedRevision, contentBinding } & { repositoryMembership }`, where
     `contentBinding` is the resolver's EXACTLY-ONE union
@@ -535,6 +559,16 @@ so what is not enumerated here cannot be sent.
     "workflowAttested"`; `work` matching exactly one union variant (with
     `origin` present iff the fallback session variant);
     `sessionAssociation` present; scope-forbidden fields absent.
+  - **The artifact variants are FAIL (v0.9.6).** `work.kind` `commit`, `pr`
+    or `issue` fails even when every member is well formed: the provider
+    proofs it carries — `repositoryMembership.proofId`, the
+    `oid`/`objectSha256` binding, `contentBinding` — are bound by nothing a
+    verifier can check from the receipt and its trust material, so any
+    verified status would certify an unchecked claim. This is §2a's rule for
+    `includesAllDelegated` applied to `work`: a claim with no validating
+    evidence format is a failed step, permanent in v1 until one exists. The
+    shape rules here still apply first, so a malformed variant names its own
+    defect. Only the two `session` variants verify.
   - **Postures are ATTESTED ENUMS, not verifier-established facts.** The
     verifier checks that `usagePosture` ∈ {provider, mixed, estimated} and
     `pricingPosture` ∈ {exact, conservative}, and that consumers render
@@ -763,10 +797,17 @@ TODAY, modulo the checkpoint extension below:
   has no sequence. So a segment's **chain-link offset** is
   `0` when `checkpoint.previousSegmentRoot === "genesis"` and `1`
   otherwise; its first event is leaf `offset`; and `treeSize` counts the
-  link (event leaves = `treeSize − offset`). Equality 4 becomes
+  link (event leaves = `treeSize − offset`). A segment is never sealed
+  empty, so a v2 statement has `treeSize > offset` — at least 1 for the
+  genesis segment, 2 for a successor — and one claiming fewer is FAIL at
+  step 6 and stops §7's history walk. Equality 4 becomes
   `inclusion.leafIndex === event.sequence − checkpoint.segmentFirstSequence
   + offset` (the checkpoint carries `segmentFirstSequence` for exactly this,
-  and the offset is read from its SIGNED `previousSegmentRoot`). The
+  and the offset is read from its SIGNED `previousSegmentRoot`). Where the
+  inclusion proof exposes a node built only from the link and the
+  receipt's predecessor event — at leaves 1 and 2 — equality 4 binds it to
+  that signed root; further right the link shares a node with leaves the
+  receipt does not carry. The
   SDK's global tree is NOT this profile; ut-chain convergence is the
   ledgered future project (headline).
 - **Checkpoint statement: `SegmentCheckpoint` v2** — a VERSIONED extension
@@ -802,7 +843,8 @@ TODAY, modulo the checkpoint extension below:
   history walk cannot cross-check the value between members; what it buys is
   that the chain-start a verifier or archiver recomputes from is SIGNED. When
   the receipt's own event is the segment's first event, equality 4 binds the
-  two directly.
+  two directly; when it is the segment's FINAL event, §7's history walk binds
+  a served successor's `segmentStartPreviousHash` to it.
   `publishedTo` does not exist in the signed statement (publication is
   evidence, not proof — R3-8 unchanged), and neither does `reference` —
   v0.5 carried an anchor locator here, but publication evidence lives
@@ -904,6 +946,26 @@ contradicted it) (proxy profile: the audit writer's envelope
      the receipt's event IS the segment's first event, so
      `event.previousHash === checkpoint.segmentStartPreviousHash` (v0.9.6 —
      the signed chain start must be the one the event actually links to).
+     And every proof node the receipt can RECOMPUTE is the node the tree
+     holds (v0.9.6). Besides its own leaf the receipt knows two raw leaves:
+     a non-genesis segment's leaf 0, the chain link
+     `checkpoint.previousSegmentRoot`, and the leaf before its own when that
+     is an event of the segment — the predecessor, `event.previousHash`,
+     because the tree's leaves ARE the hash chain. So with
+     `leaf(x) = sha256(0x00 || hexDecode(x))` and
+     `node(l, r) = sha256(0x01 || l || r)`: at an ODD `leafIndex`,
+     `siblings[0].hash` is `leaf(previousSegmentRoot)` when
+     `leafIndex === offset === 1` and `leaf(event.previousHash)` otherwise;
+     at `leafIndex === 2` with `offset === 1`, the level-1 sibling —
+     `siblings[0]` when `treeSize === 3` promotes leaf 2 at level 0,
+     `siblings[1]` otherwise — is `node(leaf(previousSegmentRoot),
+     leaf(event.previousHash))`. No other sibling is recomputable. These
+     comparisons, like the first-event one above, fail CLOSED: a missing
+     sibling, or an operand that is not a digest, fails them as surely as a
+     wrong value. They are decidable from the receipt alone, so step 2 makes
+     them before it resolves the chain; a later step's refusal of the same
+     malformed member could be masked as `UNVERIFIABLE` by a receipt naming
+     an unregistered chain.
   5. `inclusion.treeSize === checkpoint.treeSize`
   6. `inclusion.root === checkpoint.root`
   7. `receipt.scope/spec` agree with the projection; `minter.kind` agrees
@@ -943,7 +1005,8 @@ contradicted it) (proxy profile: the audit writer's envelope
                                          // `work` (canonically identical bytes), never an
                                          // independent assertion. Non-commit variants
                                          // take the §2 union's other shapes, mirrored
-                                         // the same way
+                                         // the same way. (v0.9.6: a v1 verifier
+                                         // refuses the artifact variants, §2)
   "event": { /* §4 envelope, verbatim */ },
   "proof": {
     "profile": "proxy-v1",               // §4a — names the equality set the verifier
@@ -1248,9 +1311,15 @@ Levels (renamed, R2-2 — names must not overclaim):
   − offset(prev))`, evaluated in that order or exactly — the sum is refused
   outside the safe-integer range — where `offset(prev)` is `prev`'s §4a chain-link offset —
   its `treeSize` counts a link leaf that is not an event; v0.9.6);
+  when the receipt's event sits at its segment's LAST leaf
+  (`leafIndex === treeSize − 1`), the checkpoint that follows the embedded
+  one carries `segmentStartPreviousHash === event.hash` (v0.9.6 — that event
+  is the final one its successor's chain starts from; at any other leaf the
+  final event is not in hand and nothing carries it);
   **a member that is not a v2 statement STOPS the walk (v0.9.6)** — `v`
   other than `2` (e.g. a v1 `PublishedMerkleRoot`), any of §4a's twelve
-  members absent, or any member outside them, signed or not: the walk does
+  members absent, any member outside them, or a `treeSize` that holds no
+  event (§4a), signed or not: the walk does
   not skip it, does not infer its lineage, and does not continue past it.
   The `checkpointHistory` check is `failed` with code `HISTORY_INVALID` and a
   detail that names the member's position and the §4a rule it breaks; as
@@ -1425,8 +1494,9 @@ Steps, given receipt + trust-domain key material (§8):
    → `CHECKPOINT_INVALID`
 7. Semantic validation — exactly §2's enumerated semantic-validation
    constraints (presence/exclusion rules, `0 < posted === assessed`,
-   `0 ≤ roundingAdjustment ≤ transferCount`, posture enum validity), all
-   decidable from the receipt alone. The resolver's display-grade
+   `0 ≤ roundingAdjustment ≤ transferCount`, posture enum validity, the
+   refusal of the artifact `work` variants), all decidable from the receipt
+   alone. The resolver's display-grade
    `A + roundingAdjustment` recomputation is NOT part of this step: it needs
    the unsigned breakdown rows (§2, H2). This step owns the OFFLINE half of
    generation linkage (`prevGenerationEventHash` present iff
@@ -1575,6 +1645,12 @@ steps, zero dependencies, zero core imports (parity contract). `VERIFIED_*`
 never implies "not later superseded" (§8).
 
 ### Verification consumers (the B2 transplant rule — verification side)
+
+**v0.9.6:** a v1 verifier REFUSES the artifact `work` variants (§2's
+semantic list), so in v1 every receipt a consumer can verify is a `session`
+receipt and a promotion gate — which requires `kind === "commit"` — accepts
+none. The per-kind artifact rules below stand for the version in which an
+evidence format makes those variants verifiable.
 
 Every verdict above is about the RECEIPT. None of them says the receipt
 belongs to the artifact that showed it to you: a trailer copied into a

@@ -370,11 +370,12 @@ describe("§7 step 9 — contiguity arithmetic", () => {
 		expect(report.checks.checkpointHistory.failure?.detail).toContain("safe-integer");
 	});
 
-	it("refuses a zero-leaf predecessor that stands still", () => {
-		// §7 asks for "strictly increasing AND contiguous", and this is why the
-		// two are separate clauses rather than one: with `prev.treeSize === 0` the
-		// contiguity sum is satisfied by a successor that never moves, so the
-		// arithmetic alone would walk a chain of empty segments forever.
+	it("refuses a zero-leaf predecessor at its own statement, before the arithmetic", () => {
+		// With `prev.treeSize === 0` the contiguity sum is satisfied by a
+		// successor that never moves, so the arithmetic alone would walk a chain
+		// of empty segments forever. §4a (v0.9.6) refuses the empty statement
+		// itself — a sealed segment holds at least one event — which also covers
+		// the FINAL member, whose treeSize no successor ever reads.
 		const bundle = mint();
 		const history = historyOf(bundle);
 		const { sig: _g, ...genesis } = history[0] as unknown as SegmentCheckpoint;
@@ -383,6 +384,22 @@ describe("§7 step 9 — contiguity arithmetic", () => {
 		const report = runWithHistory(bundle, [
 			resign({ ...genesis, treeSize: 0 }),
 			resign(standingStill),
+			history[2] as JsonValue,
+		]);
+		expect(report.checks.checkpointHistory.failure?.code).toBe("HISTORY_INVALID");
+		expect(report.checks.checkpointHistory.failure?.detail).toContain("holds no event leaf");
+	});
+
+	it("refuses a member that does not move past its predecessor", () => {
+		// The other half of "strictly increasing AND contiguous": a non-empty
+		// member that starts where its predecessor starts.
+		const bundle = mint();
+		const history = historyOf(bundle);
+		const { sig: _g, ...genesis } = history[0] as unknown as SegmentCheckpoint;
+		const { sig: _s, ...second } = history[1] as unknown as SegmentCheckpoint;
+		const report = runWithHistory(bundle, [
+			history[0] as JsonValue,
+			resign({ ...second, segmentFirstSequence: genesis.segmentFirstSequence }),
 			history[2] as JsonValue,
 		]);
 		expect(report.checks.checkpointHistory.failure?.code).toBe("HISTORY_INVALID");
