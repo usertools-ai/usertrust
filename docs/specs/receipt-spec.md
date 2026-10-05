@@ -54,7 +54,7 @@ session kind is RESERVED — defined, never issued. §6a is re-pinned.**
 - the amount and `transferSetRoot` are the POSTED holds, as §6a pairs.
   `windowTransfersRoot` commits EVERY transfer of the account in the window;
 - `account` is a KEYED public handle, never a ledger ID;
-- a closed window that cannot be minted is REFUSED with one of 22 closed
+- a closed window that cannot be minted is REFUSED with one of 23 closed
   reasons, and the account's next receipt discloses it.
 
 **Why that still meets the rule it replaces.** The retired rule was "reserve
@@ -1050,7 +1050,7 @@ session OPEN
 > **Carried into §15 by reference** — rules that are not session machinery:
 > - the logical-transfer ID-PAIR model;
 > - POST-only spend membership;
-> - `timeout = 0` on every hold (§15.2 RA-1);
+> - `timeout = 0` on every armed hold (§15.2 RA-1);
 > - the hold-as-ceiling invariant chain.
 >
 > **The pin moved at v0.10 for an out-of-pin edit only.** The re-read and its
@@ -1060,7 +1060,7 @@ The resolver spec's "Mint lifecycle — normative constraints" section is
 **adopted as normative for §6, by reference and in full** — reserve →
 work → finalize, with every hardening it carries. The adoption is **PINNED
 BY CONTENT HASH (round-4 P1-5)**: it binds that section as of
-**`sha256:bca8481eee4a135ec33fef9f8437326c580456303b603707391f65acb0014bbe`**
+**`sha256:310f0d6bd045ad51e24338ed31abed98d36b8c219b34a31f525f5f8bebe4c070`**
 — the COMPLETE digest of `docs/specs/receipt-resolver-api.md`, this
 directory's copy: the v0.3 resolver companion (v0.10's cluster states, all
 OUTSIDE the pinned section), whose pinned section is byte-identical to the v0.2
@@ -1433,8 +1433,8 @@ Steps, given receipt + trust-domain key material (§8):
      plus the cluster rules — the `account` handle's format, the window fields
      and `θ`'s bounds, the OFFLINE half of the receipt chain
      (`previousReceiptId` well-formed and not the receipt's own ID;
-     `skippedSincePrevious` well-formed and ordered, and before the window
-     when its list is complete), the
+     `skippedSincePrevious` well-formed and ordered, every listed window
+     before this one), the
      chain-clock order `startedAt ≤ endedAt ≤ event.timestamp`, §15.8's
      `work`, and scope-forbidden fields absent. The ONLINE half of the chain is
      the named `predecessorLinkage` check, reported separately.
@@ -2395,7 +2395,7 @@ Ship gate before mint-endpoint implementation:
         every refusal disclosed by the next receipt (§15.5, §15.10);
       - new reservations refused.
 - [ ] **Receipt-account configuration:**
-      - RA-1, `timeout = 0` on every hold;
+      - RA-1, `timeout = 0` on every armed hold;
       - RA-2, no client-supplied (`imported`) timestamps;
       - RA-3, every governed charge a debit hold — each measured on the
         deployed ledger, not asserted.
@@ -2743,7 +2743,7 @@ the rule's own reasoning:**
 - The two rows marked v0.10 in the table are RULE-DERIVED, not
   corpus-verified: the conforming corpus has no cluster fixture yet, and that
   is a §11 ship-gate row.
-- **The extension: the 22 `skippedSincePrevious` reasons are kebab-case.**
+- **The extension: the 23 `skippedSincePrevious` reasons are kebab-case.**
   They are the minter's refusal codes, transcribed verbatim and frozen by this
   spec (§15.6). They are values of a `reason` field, not a `kind`, a posture
   or a union discriminator. As with `event.kind`, the casing tells a reader
@@ -2852,12 +2852,24 @@ fixing the scope BEFORE the work. Clusters achieve it in four ways:
   transfer, on ANY account.
 - **Debit hold.** A pending transfer whose debit account is `A`. `H(A)` is the
   set of them.
+  - A hold is **ARMED** when the operator wrote a durable admission record for
+    it BEFORE creating it. That record is what the settlement path and the
+    sweep of abandoned holds track the hold by. Every armed hold carries
+    `timeout = 0` (RA-1).
+  - A hold with no admission record is **UNARMED**: it was created outside that
+    path, nothing tracks it to a post or a void, and it may carry a ledger
+    timeout.
   - A hold is **POSTED** when the ledger commits the post that resolves it,
     which forms a §6a pair.
   - A hold is **VOIDED** when the ledger commits the void that resolves it.
-  - A hold is **open** until either commits. `res(h)` is the post or void
-    that resolved `h`. It names `h` (`pending_id`) and carries `h`'s accounts,
-    so it is itself a transfer of `A`.
+  - A hold is **EXPIRED** when it carries a timeout and the ledger clock has
+    reached its expiry instant, `ts(h) + timeout × 10^9` (the timeout is in
+    seconds). The ledger then accepts no post or void for it, and records no
+    transfer for the expiry.
+  - A hold is **open** until it is posted, voided or expired. `res(h)` is the
+    post or void that resolved `h`. It names `h` (`pending_id`) and carries
+    `h`'s accounts, so it is itself a transfer of `A`. For an expired hold,
+    `ts(res(h))` means its expiry instant.
 - **Activity end `end(W)`** of a set of holds `W`: the latest of their
   timestamps and their resolutions' timestamps,
   `max over h ∈ W of max(ts(h), ts(res(h)))`. It is UNBOUNDED while any member
@@ -2888,9 +2900,10 @@ define only what the ledger does not.
   account on either side, ascending by timestamp, paged by timestamp.
 - **The clock:** `query_transfers` with no filter, reversed, limit 1, returns
   the ledger's latest transfer. Its timestamp is closure's evidence (§15.4).
-- **No expiry, and no chosen time:** `timeout = 0`, and no `imported` flag
-  (RA-1, RA-2). Every hold ends in a transfer, and no client chooses a
-  timestamp.
+- **Expiry, and no chosen time:** an armed hold carries `timeout = 0`, so it
+  ends in a transfer (RA-1). An unarmed hold's ledger timeout gives it a
+  computable expiry instant: its timestamp plus its timeout. No transfer
+  carries the `imported` flag (RA-2), so no client chooses a timestamp.
 
 The ledger has no idle-window primitive and no heartbeat. §15.3 and §15.4
 define the window over the primitives above, and v1 adds no heartbeat (§15.4).
@@ -2898,11 +2911,12 @@ define the window over the primitives above, and v1 adds no heartbeat (§15.4).
 **Receipt-account invariants.** These bind the minter and its ledger
 configuration. Each is measured on the deployed system (§11), not assumed.
 
-- **RA-1. No hold can expire.** Every hold carries `timeout = 0`, as §6a
-  already requires of receipt-bound holds. An expired pending transfer can be
-  neither posted nor voided, so the hold would never resolve, its window would
-  never close (§15.4), and every later window of the account would wait behind
-  it (§15.5). An expired hold is an integrity incident.
+- **RA-1. No ARMED hold can expire.** Every armed hold carries `timeout = 0`,
+  as §6a already requires of receipt-bound holds, so it ends in a post or a
+  void. An armed hold that expired anyway is an integrity incident, and its
+  window is refused (`cluster-void`, §15.5). An UNARMED hold may expire. Its
+  expiry counts as its resolution (above), so it never holds a window open
+  forever, and its window is refused (`unarmed-hold`, §15.5).
 - **RA-2. No transfer of a receipt account carries a client-supplied
   timestamp** (TigerBeetle's `imported` flag). A chosen timestamp would let a
   transfer's creator place a window boundary, which the ruling forbids.
@@ -2959,7 +2973,7 @@ thresholds.
 
 A window `W` of `A` is **CLOSED** iff both hold:
 
-- **(a)** every hold in it is resolved — posted or voided; and
+- **(a)** every hold in it is resolved — posted, voided or expired; and
 - **(b) LEDGER-TIME EVIDENCE:** the ledger clock satisfies
   `L ≥ windowEnd + θ_W`.
 
@@ -2986,9 +3000,11 @@ can never move. Its completeness is a fixed fact, not a race.
   heartbeat — a transfer committed only to advance the clock, on an account
   that is not a receipt account — would be a separate change.
 - **A stuck hold blocks closure; it never shortens a window.** An abandoned
-  hold stays open until the operator's sweep of abandoned holds voids it. That
-  void is not pre-provider, so the window then closes UNMINTABLE
-  (`cluster-void`, §15.5), and the account's next receipt discloses it.
+  ARMED hold stays open until the operator's sweep of abandoned holds voids it.
+  That void is not pre-provider, so the window then closes UNMINTABLE
+  (`cluster-void`, §15.5), and the account's next receipt discloses it. An
+  abandoned UNARMED hold stays open until its ledger timeout expires it, and
+  its window is refused (`unarmed-hold`).
   - Until the sweep, every later hold of the account joins that window, so one
     abandoned hold carries the later charges into the refused window with it.
   - The disclosure shows the refused window's span and reason. How soon the
@@ -2996,29 +3012,44 @@ can never move. Its completeness is a fixed fact, not a race.
 
 ### 15.5 Mintability, refusal and order
 
-A CLOSED window is **MINTABLE** iff all of these hold:
+A CLOSED window is **MINTABLE** iff every condition below holds. They are
+checked in this order, and the first one that fails names the window's single
+refusal reason. Within a condition, holds are taken in timestamp order.
 
-1. every hold in it is **POSTED, or VOIDED pre-provider** (§15.2).
+1. **Every hold is ARMED** (§15.2). An unarmed hold went through no
+   settlement path, so there is no settlement record to price it from or to
+   wait for. Otherwise → `unarmed-hold`.
+2. **Every hold is POSTED, or VOIDED pre-provider** (§15.2).
    - A pre-provider void is excluded from the pairs, but is still a member: it
      moved the boundaries like any hold.
-   - **ANY other void makes the window UNMINTABLE.** A void after the request
-     could have reached a provider can hide work the provider billed, and
-     minting would understate it.
-2. it has **at least one POSTED hold**;
-3. **every POSTED hold maps to a priced record whose snapshot hashes to what
+   - **Any other void makes the window UNMINTABLE, and so does an armed hold
+     that expired.** A void after the request could have reached a provider
+     can hide work the provider billed, and minting would understate it.
+     → `cluster-void`.
+   - A void whose recorded reason is not visible yet → WAITING.
+3. **At least one hold is POSTED.** Otherwise → `empty-cluster`.
+4. **Every POSTED hold maps to a priced record whose snapshot hashes to what
    its settlement event committed**, and whose posted amount is the one that
    event recorded. The price the receipt sums is the price the chain recorded
-   at settlement;
-4. every POSTED pair reconciles across the ledger, the operator's store and
-   the audit chain (§1's oracle). While a record is still missing, the window
-   WAITS; records that disagree refuse it (`evidence-inconsistent`);
-5. the projection satisfies every §15.6 rule — e.g. `posted === assessed`, the
-   rounding bound, public safety — and passes the minter's own v1 refusals: an
-   estimate-settled transfer or a non-exact rate gets no receipt rather than a
-   wrong amount;
-6. its mint evidence is consistent: at most one `receipt_settled` event exists
-   for the window, and it equals the projection; the anchor matches; and no
-   posted pair is already consumed by another receipt (§15.10).
+   at settlement. A record or event not written yet → WAITING. Otherwise →
+   `snapshot-missing`, `posted-amount-mismatch`, `snapshot-not-on-chain`,
+   `snapshot-unverifiable` or `unknown-provider`.
+5. **The projection can be built under every §15.6 rule** — e.g. `posted ===
+   assessed`, the rounding bound, public safety — **and passes the minter's
+   own v1 refusals**: an estimate-settled transfer or a non-exact rate gets no
+   receipt rather than a wrong amount. Otherwise → `bad-account`,
+   `bad-window`, `bad-repo-id`, `estimated-transfer`, `non-exact-rate`,
+   `posted-assessed-mismatch`, `duplicate-transfer`, `bad-transfer-id`,
+   `bad-amount` or `rounding-out-of-bounds`.
+6. **The mint event is consistent:** at most one `receipt_settled` event
+   exists for the window, and it equals the projection (otherwise →
+   `duplicate-mint-event` or `mint-event-mismatch`). Once its segment is
+   sealed, the anchor matches (otherwise → `anchor-mismatch`).
+7. **Every POSTED pair reconciles** across the ledger, the operator's store
+   and the audit chain (§1's oracle). Records that disagree →
+   `evidence-inconsistent`; a check that could not run → WAITING.
+8. **No POSTED pair is already consumed by another receipt** (§15.10).
+   Otherwise → `consumed-by-another-receipt`.
 
 **Three outcomes, and no fourth.**
 
@@ -3129,7 +3160,7 @@ and §14's rule is that a meaning, once frozen, is never reused for another.
   ```
   S = every refused window between them, ascending, each as
       { "windowStart": canonical u64 decimal, "windowEnd": canonical u64 decimal,
-        "reason": one of the 22 reasons below }
+        "reason": one of the 23 reasons below }
   skippedSincePrevious = { "count":       the length of S,
                            "windows":     the first min(count, 16) entries of S,
                            "windowsRoot": lowercase hex of SHA-256(
@@ -3141,21 +3172,22 @@ and §14's rule is that a meaning, once frozen, is never reused for another.
     since the previous receipt was genuinely idle.
   - `windowsRoot` commits ALL of `S`, including any entries past the
     sixteenth.
-- **The reasons are a CLOSED list of 22: the mint's own refusal reasons
-  (§15.5).**
-  - The window's holds: `cluster-void` (a void that was not pre-provider,
-    including the sweep of an abandoned hold) and `empty-cluster` (no posted
-    hold).
-  - A posted hold's priced record: `snapshot-missing`,
-    `snapshot-not-on-chain`, `snapshot-unverifiable`,
-    `posted-amount-mismatch` and `unknown-provider`.
-  - The projection's own rules: `bad-account`, `bad-window`, `bad-repo-id`,
-    `estimated-transfer`, `non-exact-rate`, `posted-assessed-mismatch`,
-    `duplicate-transfer`, `bad-transfer-id`, `bad-amount` and
-    `rounding-out-of-bounds`.
-  - The mint event and its evidence: `duplicate-mint-event`,
+- **The reasons are a CLOSED list of 23: the mint's own refusal reasons,
+  each named by the §15.5 condition that yields it.**
+  - The window's holds (conditions 1–3): `unarmed-hold` (a hold with no
+    admission record), `cluster-void` (a void that was not pre-provider,
+    including the sweep of an abandoned armed hold, or an armed hold that
+    expired) and `empty-cluster` (no posted hold).
+  - A posted hold's priced record (4): `snapshot-missing`,
+    `posted-amount-mismatch`, `snapshot-not-on-chain`,
+    `snapshot-unverifiable` and `unknown-provider`.
+  - The projection's own rules (5): `bad-account`, `bad-window`,
+    `bad-repo-id`, `estimated-transfer`, `non-exact-rate`,
+    `posted-assessed-mismatch`, `duplicate-transfer`, `bad-transfer-id`,
+    `bad-amount` and `rounding-out-of-bounds`.
+  - The mint event and its evidence (6–7): `duplicate-mint-event`,
     `mint-event-mismatch`, `anchor-mismatch` and `evidence-inconsistent`.
-  - One receipt per charge: `consumed-by-another-receipt`.
+  - One receipt per charge (8): `consumed-by-another-receipt`.
 
   A reason outside the list fails step 7. Adding one is a revision of this
   spec.
@@ -3208,8 +3240,10 @@ decided from the receipt alone, and EXHAUSTIVE for §7 step 7 on this scope.
   - the members ascending and disjoint: each `windowEnd` strictly below the
     next member's `windowStart`;
   - `windowsRoot` 64 lowercase hex characters;
-  - when `count ≤ 16`, the last member's `windowEnd` strictly below the
-    receipt's `windowStart`.
+  - EVERY member's `windowEnd` strictly below the receipt's `windowStart`,
+    whatever `count` is. The members are the FIRST `min(count, 16)` refused
+    windows, ascending, so even a truncated list precedes this window, and
+    checking its last member suffices.
 - **`windowTransfersRoot`:** 64 lowercase hex characters.
   **`windowTransferCount`:** a non-negative integer in §13's safe range.
 - **`startedAt ≤ endedAt ≤ event.timestamp`.** All three are on ONE clock, the
@@ -3354,9 +3388,15 @@ registry access checks the chain. The resolver does so on every read.
   window. The result is `notApplicable`, as at session generation 1.
 - **`previousReceiptId` present:** exactly one registry row binds that ID, and
   - it is the same vault (`proof.chain`) and the same `account`;
+  - the row is not trusted for its own window: its ID re-derives from its own
+    `(vault, account, windowStart)` (§15.9), and `prev.windowStart ≤
+    prev.windowEnd < windowStart`;
   - `prev.windowEnd + prev.idleThresholdNs ≤ windowStart`;
-  - no receipt of the account lies strictly between the two windows; and
-  - the first skipped window, if any, starts after `prev.windowEnd`.
+  - the first skipped window, if any, starts at or after `prev.windowEnd +
+    prev.idleThresholdNs`. A hold inside the predecessor's idle gap would have
+    joined the predecessor's window, so no skipped window can start there;
+    clearing `prev.windowEnd` alone is not enough; and
+  - no receipt of the account lies strictly between the two windows.
 
   The result is `passed`.
 - **Anything else is `failed` → `PREDECESSOR_MISMATCH`**, its existing code,
@@ -3392,8 +3432,8 @@ chain-committed:
 - `[windowStart, windowEnd]` is ONE WHOLE window of the account under §15.3,
   cut with `θ_W = idleThresholdNs`, and it was CLOSED (§15.4) when minted;
 - `transferSet`/`transferSetRoot` is exactly the window's POSTED holds, each
-  with its settlement, and every other hold of the window was voided
-  pre-provider;
+  with its settlement; every hold of the window was armed; and every other
+  hold of the window was voided pre-provider;
 - `previousReceiptId` is the account's previous minted receipt, or, when
   absent, there is none;
 - `skippedSincePrevious` lists every window of the account between the two
@@ -3432,9 +3472,9 @@ ONE window. It does not claim:
 
 - **the window's transfers:** that `windowTransfersRoot` is the ledger's list,
   which is never published;
-- **the charges:** that the pairs are ALL the window's posted holds, that every
-  excluded hold was voided pre-provider, and that `spend` is what the ledger
-  posted;
+- **the charges:** that the pairs are ALL the window's posted holds, that
+  every hold was armed, that every excluded hold was voided pre-provider, and
+  that `spend` is what the ledger posted;
 - **the window's bounds:** that it is whole, and that it was closed when
   minted;
 - **`transferSetRoot` past 32 pairs**, which is a commitment only;
@@ -3464,7 +3504,8 @@ it as "complete" or "independently complete".
 
 1. that no transfer of the account in the window is missing from
    `windowTransfersRoot`, and no posted hold from the pairs;
-2. that every excluded hold was voided pre-provider;
+2. that every hold in the window was armed, and every excluded hold was
+   voided pre-provider;
 3. that the window's boundaries are §15.3's for the signed `θ_W`, and that it
    closed on ledger-time evidence (§15.4);
 4. that `skippedSincePrevious` lists every window since the previous receipt,
@@ -3650,10 +3691,13 @@ that window (§15.6).
 - `previousReceiptId` equal to the receipt's own `receiptId`;
 - `skippedSincePrevious` with `count` 0, with `windows` not exactly
   `min(count, 16)` long, with members out of order or overlapping, with a
-  reason outside the closed list, or — when `count ≤ 16` — with its last
-  `windowEnd` at or after `windowStart`;
+  reason outside the closed list, or with a listed `windowEnd` at or after
+  `windowStart` — including when `count > 16`;
 - a `windowsRoot` that does not recompute when `count ≤ 16` →
   `DERIVATION_MISMATCH`;
 - a `receiptId` derived with the vault omitted, or with the inputs in another
   shape (e.g. a `chain` key);
+- with a predecessor in the registry: a first skipped window that starts
+  before `prev.windowEnd + prev.idleThresholdNs`, or a predecessor row whose
+  ID does not re-derive from its own fields → `PREDECESSOR_MISMATCH`;
 - a 202 or 410 resolver response for a cluster ID — a protocol error.

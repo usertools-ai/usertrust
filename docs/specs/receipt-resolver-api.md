@@ -1953,11 +1953,18 @@ for its idle threshold (10 minutes by default, set per agent within 60 s to
 
 - **`previousReceiptId` absent:** the account has no receipt before this
   window → `notApplicable`.
-- **`previousReceiptId` present:** exactly one registry row binds that ID, for
-  the same vault and the same `account`; `prev.windowEnd +
-  prev.idleThresholdNs ≤ windowStart`; no receipt of the account lies strictly
-  between the two windows; and the first skipped window, if any, starts after
-  `prev.windowEnd` → `passed`.
+- **`previousReceiptId` present:** exactly one registry row binds that ID,
+  for the same vault and the same `account`, and then:
+  - the row is not trusted for its own window: its ID re-derives from its own
+    `(vault, account, windowStart)`, and `prev.windowStart ≤ prev.windowEnd <
+    windowStart`;
+  - `prev.windowEnd + prev.idleThresholdNs ≤ windowStart`;
+  - the first skipped window, if any, starts at or after `prev.windowEnd +
+    prev.idleThresholdNs`, because a hold inside the predecessor's idle gap
+    would have joined the predecessor's window;
+  - no receipt of the account lies strictly between the two windows.
+
+  All of these hold → `passed`.
 - **Anything else** → `failed` with `PREDECESSOR_MISMATCH`, answered 409.
 - **Never `unavailable` on a 200.** The registry is this API's own store, so
   the reasoning that makes `registryBinding` mandatory (see "The verdict
