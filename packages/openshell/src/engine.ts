@@ -257,21 +257,35 @@ export class HoldEngine {
 			if (actual > 0) this.journal.applyDebt(row.budgetId, this.lateId(holdKey), actual);
 			return true;
 		});
-		// THE PRIMITIVE: `late_settled` only when a late disposition is POSITIVELY on the row
-		// (recorded, charged, or the terminal zero) — read back, never assumed. A row that took
-		// an incident (now or before this call: e.g. a concurrent expiry the ledger disagreed
-		// with) cannot record this cost: the cost is attached to the incident for an operator to
-		// bill, and the answer is `incident`, never a false success.
-		const after = this.journal.get(holdKey);
-		if (after === undefined) return { outcome: "incident", state: "missing" };
-		if (after.incident !== null || after.lateState === "none") {
-			await this.journal.writeTx(() =>
-				this.journal.recordUnbilled(holdKey, { kind: "late_settlement", intent, actual }),
-			);
-			return { outcome: "incident", state: after.state };
-		}
+		// The ledger charge runs outside any transaction (a no-op unless the row is `recorded` and
+		// carries no incident). Its result is NOT assumed: the answer comes next.
 		await this.chargeLate(holdKey);
-		return { outcome: "late_settled", state, resumed: !recorded };
+		// THE PRIMITIVE: the answer comes from ONE transaction's view of the row, read AFTER the
+		// charge attempt — so no incident can land between the view and the answer:
+		// - `charged` or `zero` → `late_settled` (billed, or nothing to bill);
+		// - otherwise, an incident on the row (before, or concurrently with, this call — e.g. a
+		//   finishExpiry whose ledger disagreed) → `incident`, the cost attached to it in the same
+		//   transaction (`unbilled`: the intent, the actual amount, and whether a late amount was
+		//   recorded), so an operator can bill it;
+		// - otherwise (recorded, no incident: the charge did not complete) → `in_flight`, for the
+		//   sweep to charge. Never a success that was not observed.
+		return this.journal.writeTx((): SettleOutcome => {
+			const now = this.journal.get(holdKey);
+			if (now === undefined) return { outcome: "incident", state: "missing" };
+			if (now.lateState === "charged" || now.lateState === "zero") {
+				return { outcome: "late_settled", state, resumed: !recorded };
+			}
+			if (now.incident !== null) {
+				this.journal.recordUnbilled(holdKey, {
+					kind: "late_settlement",
+					intent,
+					actual,
+					lateRecorded: now.lateState === "recorded",
+				});
+				return { outcome: "incident", state: now.state };
+			}
+			return { outcome: "in_flight" };
+		});
 	}
 
 	/**

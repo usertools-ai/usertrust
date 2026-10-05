@@ -801,6 +801,45 @@ describe("#185 r1 P1: `late_settled` only when a late disposition is POSITIVELY 
 		expect(journal.debtOf("b")).toBe(0);
 	});
 
+	it("#185 r2 P1: an expiry incident that lands AFTER recordLate commits and BEFORE the charge: the answer is `incident` (one post-charge view), unbilled says the late amount WAS recorded, nothing charged", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await journal.writeTx(() => journal.cas("k1", "open", "expiring"));
+		const other = HoldJournal.open(join(dirs[dirs.length - 1] as string, "holds.db"), {
+			now: () => 1_000,
+		});
+		journals.push(other);
+		const realWriteTx = journal.writeTx.bind(journal);
+		let calls = 0;
+		journal.writeTx = (async (fn: () => unknown) => {
+			const out = await realWriteTx(fn as () => never);
+			calls += 1;
+			if (calls === 2) {
+				// Transaction 1 is settle's claim (lost to `expiring`); transaction 2 is recordLate's,
+				// which has just COMMITTED — finishExpiry's incident lands now, before the charge.
+				await other.writeTx(() =>
+					other.recordIncident("k1", { kind: "expiry_ledger_disagrees", voided: "posted" }),
+				);
+			}
+			return out;
+		}) as typeof journal.writeTx;
+		expect(await engine.settle("k1", { post: 60, overage: 0 })).toEqual({
+			outcome: "incident",
+			state: "expiring",
+		});
+		journal.writeTx = realWriteTx;
+		expect(journal.get("k1")).toMatchObject({
+			lateState: "recorded",
+			lateAmount: 60,
+			incident: {
+				kind: "expiry_ledger_disagrees",
+				unbilled: { kind: "late_settlement", actual: 60, lateRecorded: true },
+			},
+		});
+		expect(ledger.count("k1", "late"), "never charged").toBe(0);
+		expect(journal.debtOf("b"), "the recorded debt keeps admission bounded").toBe(60);
+	});
+
 	it("a settlement arriving at a row that ALREADY carries an incident: `incident`, the cost attached once", async () => {
 		const { journal, ledger, engine } = setup();
 		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
@@ -972,6 +1011,20 @@ describe("1c-1: the independent detector", () => {
 		for (const i of [Number.NaN, Number.POSITIVE_INFINITY, 0, -5]) {
 			expect(() => new HoldDetector(journal, { sweepIntervalMs: i }), String(i)).toThrow(TypeError);
 		}
+	});
+
+	it("#185 r2: the sweep interval is SNAPSHOTTED at construction — a caller mutating its opts afterwards changes nothing", async () => {
+		const { journal, engine, clock } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await engine.sweep(); // heartbeat at t = 1,000
+		const opts = { sweepIntervalMs: 30_000, now: () => clock.now };
+		const d = new HoldDetector(journal, opts);
+		opts.sweepIntervalMs = Number.NaN; // would make BOTH thresholds NaN if read live
+		clock.now = TTL_AT + 60_000 + 60_001; // past the overdue bound; the heartbeat long stale
+		const r = d.check();
+		if (!r.readable) throw new Error("readable");
+		// Both uses of the interval: the stale-heartbeat check AND the overdue threshold.
+		expect(r.incidents.map((i) => i.kind)).toEqual(["sweeper_stale", "open_overdue"]);
 	});
 
 	it("an EMPTY journal with a fresh heartbeat reads as readable, zero incidents — distinct from an unreadable one", async () => {

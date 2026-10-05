@@ -48,10 +48,12 @@ export type DetectorReading =
 export class HoldDetector {
 	private readonly now: () => number;
 	private readonly graceMs: number;
+	/** Snapshotted at construction, like the grace: a caller mutating its opts later changes nothing. */
+	private readonly intervalMs: number;
 
 	constructor(
 		private readonly journal: HoldJournal,
-		private readonly opts: DetectorOptions,
+		opts: DetectorOptions, // read once here; every value used later is snapshotted
 	) {
 		if (!Number.isSafeInteger(opts.sweepIntervalMs) || opts.sweepIntervalMs <= 0) {
 			throw new TypeError("hold detector: sweepIntervalMs must be a positive whole number");
@@ -66,12 +68,13 @@ export class HoldDetector {
 		}
 		this.now = opts.now ?? Date.now;
 		this.graceMs = opts.expiryGraceMs ?? 60_000;
+		this.intervalMs = opts.sweepIntervalMs;
 	}
 
 	/** One check. Never throws for a read: a read that fails is the `readable: false` reading. */
 	check(): DetectorReading {
 		const now = this.now();
-		const overdueBefore = now - this.graceMs - 2 * this.opts.sweepIntervalMs;
+		const overdueBefore = now - this.graceMs - 2 * this.intervalMs;
 		let open: HoldRow[];
 		let inFlight: HoldRow[];
 		let late: HoldRow[];
@@ -88,7 +91,7 @@ export class HoldDetector {
 		}
 		const incidents: DetectorIncident[] = [];
 		if (heartbeat === null) incidents.push({ kind: "sweeper_never_ran" });
-		else if (now - heartbeat > 2 * this.opts.sweepIntervalMs) {
+		else if (now - heartbeat > 2 * this.intervalMs) {
 			incidents.push({ kind: "sweeper_stale", heartbeatAt: heartbeat, ageMs: now - heartbeat });
 		}
 		if (open.length > 0)
