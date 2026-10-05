@@ -1094,7 +1094,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		return path;
 	};
 
-	it("a #174-shaped v0 file opens and migrates to v3 with its debt and its open and settling rows intact", () => {
+	it("a #174-shaped v0 file opens and migrates to the current version (v4) with its debt and its open and settling rows intact", () => {
 		const path = file((raw) => {
 			raw.exec(SCHEMA_174);
 			raw.exec(
@@ -1119,7 +1119,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		const raw = new DatabaseSync(path);
 		expect(
 			(raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
-		).toBe(3);
+		).toBe(4);
 		raw.close();
 	});
 
@@ -1141,7 +1141,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 			raw.exec(SCHEMA_174);
 			raw.exec("ALTER TABLE hold ADD COLUMN incident_json TEXT");
 			raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 7)");
-			raw.exec("PRAGMA user_version = 4");
+			raw.exec("PRAGMA user_version = 5");
 		});
 		let err: unknown;
 		try {
@@ -1151,7 +1151,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		}
 		expect(err).toBeInstanceOf(JournalSchemaError);
 		const msg = String((err as Error).message);
-		expect(msg).toContain("schema version 4, this code reads 3");
+		expect(msg).toContain("schema version 5, this code reads 4");
 		expect(msg).toContain(
 			"Do NOT delete or recreate it while it holds open or settling holds or any debt",
 		);
@@ -1159,7 +1159,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		const raw = new DatabaseSync(path);
 		expect(
 			(raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
-		).toBe(4);
+		).toBe(5);
 		expect(
 			(raw.prepare("SELECT amount FROM debt WHERE budget_id = 'b'").get() as { amount: number })
 				.amount,
@@ -1215,18 +1215,18 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		}
 	}, 120_000);
 
-	it("(c) a NEWER version is refused even with NO hold table — never stamped down to 3 and given tables", () => {
+	it("(c) a NEWER version is refused even with NO hold table — never stamped down to 4 and given tables", () => {
 		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-v3-"));
 		dirs.push(dir);
 		const path = join(dir, "holds.db");
 		const raw = new DatabaseSync(path);
-		raw.exec("PRAGMA user_version = 4");
+		raw.exec("PRAGMA user_version = 5");
 		raw.close();
-		expect(() => HoldJournal.open(path)).toThrow(/schema version 4, this code reads 3/);
+		expect(() => HoldJournal.open(path)).toThrow(/schema version 5, this code reads 4/);
 		const after = new DatabaseSync(path);
 		expect(
 			(after.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
-		).toBe(4);
+		).toBe(5);
 		expect(after.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()).toEqual([]);
 		after.close();
 	});
@@ -1243,7 +1243,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 			raw.close();
 			const before = readFileSync(path);
 			expect(() => HoldJournal.open(path), String(v)).toThrow(
-				new RegExp(`schema version ${v}, this code reads 3`),
+				new RegExp(`schema version ${v}, this code reads 4`),
 			);
 			expect(readFileSync(path).equals(before), `${v}: the bytes are unchanged`).toBe(true);
 			expect(existsSync(`${path}-wal`), String(v)).toBe(false);
@@ -1294,7 +1294,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		const raw = new DatabaseSync(path); // default rollback (delete) journal mode
 		raw.exec(SCHEMA_174);
 		raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 7)");
-		raw.exec("PRAGMA user_version = 4");
+		raw.exec("PRAGMA user_version = 5");
 		raw.close();
 		const before = readFileSync(path);
 		expect(() => HoldJournal.open(path)).toThrow(JournalSchemaError);
@@ -1356,7 +1356,7 @@ describe("1c-1: schema v3 — the v2 migration and the exact-shape classifier (#
 		return v;
 	};
 
-	it("a #177-shaped v2 file migrates to v3: rows, debt and incidents intact, the late columns empty", () => {
+	it("a #177-shaped v2 file migrates to the current version (v4): rows, debt and incidents intact, the late columns empty", () => {
 		const path = dbFile((raw) => {
 			raw.exec(SCHEMA_V2);
 			raw.exec(
@@ -1366,7 +1366,7 @@ describe("1c-1: schema v3 — the v2 migration and the exact-shape classifier (#
 		});
 		const j = HoldJournal.open(path, { now: () => 0 });
 		journals.push(j);
-		expect(version(path)).toBe(3);
+		expect(version(path)).toBe(4);
 		expect(j.debtOf("b")).toBe(12);
 		expect(j.get("h1")).toMatchObject({
 			incident: { kind: "x" },
@@ -1377,14 +1377,14 @@ describe("1c-1: schema v3 — the v2 migration and the exact-shape classifier (#
 		expect(j.heartbeat()).toBeNull();
 	});
 
-	it("a v0 file migrates straight through to v3", () => {
+	it("a v0 file migrates straight through to the current version (v4)", () => {
 		const path = dbFile((raw) => {
 			raw.exec(SCHEMA_V0);
 			raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 3)");
 		});
 		const j = HoldJournal.open(path, { now: () => 0 });
 		journals.push(j);
-		expect(version(path)).toBe(3);
+		expect(version(path)).toBe(4);
 		expect(j.debtOf("b")).toBe(3);
 	});
 

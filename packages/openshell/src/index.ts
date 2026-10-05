@@ -2,6 +2,13 @@
 // Copyright 2026 Usertools, Inc.
 
 export {
+	AuditChainUnverifiableError,
+	type AuditPort,
+	HOLD_EVENT_ACTOR,
+	type HoldEventKind,
+	VaultAudit,
+} from "./audit.js";
+export {
 	type DetectorIncident,
 	type DetectorOptions,
 	type DetectorReading,
@@ -74,6 +81,7 @@ export {
 	type RouteConfig,
 	type RouteMatch,
 } from "./routes.js";
+export { type OpenshellRuntime, type RuntimeOptions, startRuntime } from "./runtime.js";
 export {
 	type BodyMode,
 	classifyResponse,

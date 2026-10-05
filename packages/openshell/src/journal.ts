@@ -135,6 +135,8 @@ export interface HoldRow {
 	 */
 	lateState: LateState;
 	lateAmount: number | null;
+	/** The hash of the late-settlement correction event, once appended (slice 1c-2). */
+	lateEventHash: string | null;
 }
 
 export interface JournalOptions {
@@ -190,7 +192,7 @@ export class PlacementHorizonError extends Error {
  * has an exact shape in {@link SHAPES}; a file at one of the older ones is MIGRATED to this
  * version at open (one transaction). Every other version is refused.
  */
-export const JOURNAL_SCHEMA_VERSION = 3;
+export const JOURNAL_SCHEMA_VERSION = 4;
 
 /** The hold table's columns as the slice-1b code wrote them (schema version 0). */
 const V0_HOLD_COLUMNS: readonly string[] = [
@@ -207,6 +209,17 @@ const V0_HOLD_COLUMNS: readonly string[] = [
 ];
 const V2_HOLD_COLUMNS: readonly string[] = [...V0_HOLD_COLUMNS, "incident_json"];
 const V3_HOLD_COLUMNS: readonly string[] = [...V2_HOLD_COLUMNS, "late_amount", "late_state"];
+/** v4 (slice 1c-2): the hash of the late-settlement correction event, recorded once. */
+const V4_HOLD_COLUMNS: readonly string[] = [...V3_HOLD_COLUMNS, "late_event_hash"];
+
+/** The audit events a hold records once each (slice 1c-2). */
+export type EventSlot = "reserved" | "terminal" | "late";
+
+/** An event on the audit chain: its hash and its sequence number. */
+export interface RecordedEvent {
+	hash: string;
+	sequence: number;
+}
 
 /** A hold's late-settlement disposition (see {@link HoldRow.lateState}). */
 export type LateState = "none" | "recorded" | "charged" | "zero";
@@ -238,6 +251,7 @@ const SHAPE_TRIGGERS: Readonly<Record<number, Readonly<Record<string, string>>>>
 	0: {},
 	2: {},
 	3: V3_TRIGGERS,
+	4: V3_TRIGGERS,
 };
 
 const SHAPES: Readonly<Record<number, Readonly<Record<string, readonly string[]>>>> = {
@@ -245,6 +259,12 @@ const SHAPES: Readonly<Record<number, Readonly<Record<string, readonly string[]>
 	2: { hold: V2_HOLD_COLUMNS, debt: DEBT_COLUMNS, applied: APPLIED_COLUMNS },
 	3: {
 		hold: V3_HOLD_COLUMNS,
+		debt: DEBT_COLUMNS,
+		applied: APPLIED_COLUMNS,
+		meta: ["key", "value"],
+	},
+	4: {
+		hold: V4_HOLD_COLUMNS,
 		debt: DEBT_COLUMNS,
 		applied: APPLIED_COLUMNS,
 		meta: ["key", "value"],
@@ -312,6 +332,7 @@ interface RawRow {
 	incident_json: string | null;
 	late_amount: number | null;
 	late_state: LateState;
+	late_event_hash: string | null;
 }
 
 function toRow(r: RawRow): HoldRow {
@@ -328,6 +349,7 @@ function toRow(r: RawRow): HoldRow {
 		incident: r.incident_json === null ? null : JSON.parse(r.incident_json),
 		lateState: r.late_state,
 		lateAmount: r.late_amount,
+		lateEventHash: r.late_event_hash,
 		reservedSeq: r.reserved_seq,
 	};
 }
@@ -489,7 +511,7 @@ export class HoldJournal {
 	 *   columns ({@link SHAPES}), and exactly its triggers, by name and sql ({@link SHAPE_TRIGGERS}:
 	 *   none before v3; v3's two late-state guards).
 	 */
-	private static classify(db: DatabaseSync): "fresh" | 0 | 2 | 3 {
+	private static classify(db: DatabaseSync): "fresh" | 0 | 2 | 3 | 4 {
 		const version = (db.prepare("PRAGMA user_version").get() as { user_version: number })
 			.user_version;
 		const shape = SHAPES[version];
@@ -536,7 +558,7 @@ export class HoldJournal {
 			triggersExact &&
 			same(tables, Object.keys(shape)) &&
 			tables.every((t) => same(columnsOf(t), shape[t] ?? []));
-		if (exact) return version as 0 | 2 | 3;
+		if (exact) return version as 0 | 2 | 3 | 4;
 		const found = objects.map((o) => (o.type === "table" ? o.name : `trigger ${o.name}`));
 		throw new JournalSchemaError(
 			`schema version ${version} (an unrecognised shape: tables ${found.sort().join(", ")}), this code reads ${JOURNAL_SCHEMA_VERSION}`,
@@ -548,7 +570,7 @@ export class HoldJournal {
 	 * a migration that COMMITS between them cannot see a half-old, half-new file and refuse a
 	 * healthy one. A read transaction takes no write lock and changes nothing on disk.
 	 */
-	private static classifySnapshot(db: DatabaseSync): "fresh" | 0 | 2 | 3 {
+	private static classifySnapshot(db: DatabaseSync): "fresh" | 0 | 2 | 3 | 4 {
 		db.exec("BEGIN");
 		try {
 			return HoldJournal.classify(db);
@@ -606,6 +628,10 @@ export class HoldJournal {
 					CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 				`);
 				for (const sql of Object.values(V3_TRIGGERS)) db.exec(sql);
+			}
+			if (kind === "fresh" || kind === 0 || kind === 2 || kind === 3) {
+				// The audit events (slice 1c-2): the late-settlement correction's hash, once.
+				db.exec("ALTER TABLE hold ADD COLUMN late_event_hash TEXT");
 				db.exec(`PRAGMA user_version = ${JOURNAL_SCHEMA_VERSION}`);
 			}
 			db.exec("COMMIT");
@@ -1076,16 +1102,83 @@ export class HoldJournal {
 		return Number(r.changes) === 1;
 	}
 
-	/** Terminal rows whose terminal event was never recorded. */
+	/** Terminal rows (no incident) whose terminal event was never recorded. */
 	terminalWithoutEvent(): HoldRow[] {
 		return this.read(
 			(db) =>
 				db
 					.prepare(
-						"SELECT * FROM hold WHERE state IN ('settled','voided','expired') AND terminal_event_hash IS NULL",
+						"SELECT * FROM hold WHERE state IN ('settled','voided','expired') AND terminal_event_hash IS NULL AND incident_json IS NULL",
 					)
 					.all() as unknown as RawRow[],
 		).map(toRow);
+	}
+
+	/** Rows (no incident) whose `reserved` event was never recorded. */
+	reservedWithoutEvent(): HoldRow[] {
+		return this.read(
+			(db) =>
+				db
+					.prepare("SELECT * FROM hold WHERE reserved_seq IS NULL AND incident_json IS NULL")
+					.all() as unknown as RawRow[],
+		).map(toRow);
+	}
+
+	/** Late settlements (charged or zero, no incident) whose correction event was never recorded. */
+	lateWithoutEvent(): HoldRow[] {
+		return this.read(
+			(db) =>
+				db
+					.prepare(
+						"SELECT * FROM hold WHERE late_state IN ('charged','zero') AND late_event_hash IS NULL AND incident_json IS NULL",
+					)
+					.all() as unknown as RawRow[],
+		).map(toRow);
+	}
+
+	/**
+	 * Record one of a hold's audit events ONCE, as ONE critical section under the journal's write
+	 * lock (`BEGIN IMMEDIATE` held across `produce`, bounded by the journal's deadline): the row
+	 * is re-read, its slot checked, `produce` run (it scans the chain, then appends if the event
+	 * is absent), and the result written to the slot in the same transaction. Two sweepers, or a
+	 * sweeper and a settlement, can therefore never both see "no event" and both append.
+	 *
+	 * Eligibility, defined POSITIVELY per slot (anything else is `not_eligible`, nothing done):
+	 * - `reserved`: the row exists and carries no incident;
+	 * - `terminal`: the row is `settled`, `voided` or `expired`, with no incident;
+	 * - `late`: its late settlement is `charged` or `zero`, with no incident.
+	 * The slot already set is `already` (nothing appended).
+	 */
+	recordEventOnce(
+		holdId: string,
+		slot: EventSlot,
+		produce: (row: HoldRow) => Promise<RecordedEvent>,
+	): Promise<"recorded" | "already" | "not_eligible"> {
+		return this.runTx(async () => {
+			const row = this.get(holdId);
+			if (row === undefined || row.incident !== null) return "not_eligible" as const;
+			const set =
+				slot === "reserved"
+					? row.reservedSeq !== null
+					: slot === "terminal"
+						? row.terminalEventHash !== null
+						: row.lateEventHash !== null;
+			if (set) return "already" as const;
+			const eligible =
+				slot === "reserved" ||
+				(slot === "terminal" && TERMINAL_STATES.has(row.state)) ||
+				(slot === "late" && (row.lateState === "charged" || row.lateState === "zero"));
+			if (!eligible) return "not_eligible" as const;
+			const ev = await this.bounded(`audit ${slot} event`, () => produce(row));
+			const sql =
+				slot === "reserved"
+					? "UPDATE hold SET reserved_seq = ? WHERE hold_id = ? AND reserved_seq IS NULL"
+					: slot === "terminal"
+						? "UPDATE hold SET terminal_event_hash = ? WHERE hold_id = ? AND terminal_event_hash IS NULL"
+						: "UPDATE hold SET late_event_hash = ? WHERE hold_id = ? AND late_event_hash IS NULL";
+			this.db.prepare(sql).run(slot === "reserved" ? ev.sequence : ev.hash, holdId);
+			return "recorded" as const;
+		});
 	}
 
 	/** Record the terminal event's hash, once. Must run inside {@link writeTx}. */
