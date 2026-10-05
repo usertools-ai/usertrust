@@ -428,6 +428,9 @@ export class HoldJournal {
 		return this.runTx(() => {
 			const out = fn();
 			if (isThenable(out)) {
+				// The refused body may still reject later; that is not this caller's to handle,
+				// and an unhandled rejection can end the process (#172).
+				(out as PromiseLike<unknown>).then(undefined, () => {});
 				throw new Error(
 					"hold journal: writeTx takes a SYNCHRONOUS body — a claim commits before any ledger call; only reserve holds a transaction across one",
 				);

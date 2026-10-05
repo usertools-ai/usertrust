@@ -15,6 +15,7 @@ export {
 	DEFAULT_GATE_CONFIG,
 	evaluateRequest,
 	type GateConfig,
+	GateConfigError,
 	type GateRequest,
 	type GateResult,
 	type Hold,

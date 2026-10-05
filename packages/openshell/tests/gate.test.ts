@@ -7,9 +7,11 @@ import {
 	BodyTooLargeError,
 	DEFAULT_GATE_CONFIG,
 	evaluateRequest,
+	GateConfigError,
 	type GateResult,
 	MAX_BODY_BYTES,
 } from "../src/gate.js";
+import { settleHold } from "../src/settlement.js";
 
 const ANTHROPIC = "api.anthropic.com";
 const OPENAI = "api.openai.com";
@@ -169,11 +171,11 @@ describe("the request gate: what is metered is ALLOWED with a priced hold", () =
 });
 
 describe("the request gate: mutations", () => {
-	it("a streaming chat call gets stream_options.include_usage, keeping its other options", () => {
-		const r = chat({ stream: true, stream_options: { foo: 1 } });
+	it("a streaming chat call gets stream_options.include_usage — the gate's own value, whatever the client sent", () => {
+		const r = chat({ stream: true, stream_options: { include_usage: false } });
 		if (r.decision !== "allow") throw new Error("expected allow");
 		const sent = JSON.parse(new TextDecoder().decode(r.mutations.body));
-		expect(sent.stream_options).toEqual({ foo: 1, include_usage: true });
+		expect(sent.stream_options).toEqual({ include_usage: true });
 		expect(sent.messages).toEqual([{ role: "user", content: "hi" }]);
 		expect(r.hold.streaming).toBe(true);
 	});
@@ -658,10 +660,131 @@ describe("#166 MEDIUM: the gate refuses running usage counts", () => {
 	});
 	it("control: an ordinary stream_options still passes", () => {
 		expect(chat({ stream: true, stream_options: { include_usage: true } }).decision).toBe("allow");
+		expect(chat({ stream: true }).decision, "absent").toBe("allow");
+	});
+	it("#168: only allowlisted stream_options keys are forwarded — any other key, or a non-object, is DENIED", () => {
+		for (const r of [chat, responses]) {
+			for (const so of [{ foo: 1 }, { include_usage: true, include_obfuscation: false }]) {
+				const out = r({ stream: true, stream_options: so });
+				expect(denied(out), JSON.stringify(so)).toBe("parameter_unsupported");
+				if (out.decision === "deny") expect(out.detail).toMatch(/^stream_options\./);
+			}
+			// null too: a key that is present is checked; when not streaming it would be forwarded.
+			for (const so of [null, "x", 1, [], true]) {
+				// Not streaming, so nothing replaces it: it would have been forwarded as sent.
+				expect(denied(r({ stream_options: so })), JSON.stringify(so)).toBe("parameter_unsupported");
+			}
+		}
 	});
 	it("P1: the hold carries the rates it was priced with", () => {
 		const r = chat();
 		if (r.decision !== "allow") throw new Error("expected allow");
 		expect(r.hold.rates).toEqual(getModelRates("gpt-4o"));
+	});
+});
+
+describe("#169: the hold's worst case includes the cache-read tier", () => {
+	it("an operator rate whose cache read is dearer than input and cache write: a call read entirely from cache settles within its hold", () => {
+		const config = {
+			...DEFAULT_GATE_CONFIG,
+			customRates: {
+				"op-model": { inputPer1k: 1, outputPer1k: 2, cacheReadPer1k: 9, cacheWritePer1k: 3 },
+			},
+		};
+		const r = gate(
+			OPENAI,
+			"/v1/chat/completions",
+			{ model: "op-model", max_completion_tokens: 50, messages: [{ role: "user", content: "hi" }] },
+			config,
+		);
+		if (r.decision !== "allow") throw new Error("expected allow");
+		const s = settleHold(r.hold, {
+			inputTokens: 0,
+			outputTokens: r.hold.maxOutputTokens,
+			cacheReadTokens: r.hold.inputTokenBound,
+			cacheWriteTokens: 0,
+		});
+		expect(s.overage).toBe(0);
+		expect(r.hold.amount).toBe(
+			costFromRates(config.customRates["op-model"], 0, 50, r.hold.inputTokenBound, 0),
+		);
+	});
+});
+
+describe("#170: the returned Hold is frozen", () => {
+	it("a mutation of the hold or its rates throws (ESM is strict) and changes nothing", () => {
+		const r = chat();
+		if (r.decision !== "allow") throw new Error("expected allow");
+		const amount = r.hold.amount;
+		expect(Object.isFrozen(r.hold)).toBe(true);
+		expect(Object.isFrozen(r.hold.rates)).toBe(true);
+		expect(() => {
+			(r.hold as { amount: number }).amount = 1;
+		}).toThrow(TypeError);
+		expect(() => {
+			(r.hold.rates as { inputPer1k: number }).inputPer1k = 0;
+		}).toThrow(TypeError);
+		expect(r.hold.amount).toBe(amount);
+	});
+});
+
+describe("#171: the image and tool token config is validated — a bad value refuses, never lowers the bound", () => {
+	const image = { type: "image_url", image_url: { url: "https://example.com/a.png" } };
+	const withImage = { messages: [{ role: "user", content: [image] }] };
+	// Anthropic's tool shape: the tool-overhead bound is Anthropic's (OpenAI documents none).
+	const tools = { tools: [{ name: "f", input_schema: { type: "object" } }] };
+	const bad = [-1, Number.NaN, Number.POSITIVE_INFINITY, 1.5, "10", undefined];
+	const run = (
+		config: typeof DEFAULT_GATE_CONFIG,
+		extra: Record<string, unknown>,
+		host = OPENAI,
+	) =>
+		host === OPENAI
+			? gate(
+					OPENAI,
+					"/v1/chat/completions",
+					{ model: "gpt-4o", max_completion_tokens: 5, messages: [], ...extra },
+					config,
+				)
+			: gate(
+					ANTHROPIC,
+					"/v1/messages",
+					{ model: "claude-sonnet-4-6", max_tokens: 5, messages: [], ...extra },
+					config,
+				);
+	it("imageTokenMax, imageTokenMaxByModel and toolOverheadTokens: negative, NaN, Infinity, fractional, non-number or missing throw GateConfigError", () => {
+		for (const v of bad) {
+			const configs = [
+				{
+					...DEFAULT_GATE_CONFIG,
+					imageTokenMax: { ...DEFAULT_GATE_CONFIG.imageTokenMax, openai: v },
+				},
+				{
+					...DEFAULT_GATE_CONFIG,
+					imageTokenMaxByModel: { ...DEFAULT_GATE_CONFIG.imageTokenMaxByModel, "gpt-4o": v },
+				},
+				{
+					...DEFAULT_GATE_CONFIG,
+					toolOverheadTokens: { ...DEFAULT_GATE_CONFIG.toolOverheadTokens, anthropic: v },
+				},
+			] as unknown as (typeof DEFAULT_GATE_CONFIG)[];
+			// Refused whatever the request carries: a bad config is refused, not just a bad bound.
+			for (const config of configs) {
+				expect(() => run(config, {}), String(v)).toThrow(GateConfigError);
+				expect(() => run(config, {}, ANTHROPIC), String(v)).toThrow(GateConfigError);
+			}
+		}
+	});
+	it("a missing provider entry is refused", () => {
+		const config = {
+			...DEFAULT_GATE_CONFIG,
+			toolOverheadTokens: { openai: 0 },
+		} as unknown as typeof DEFAULT_GATE_CONFIG;
+		expect(() => run(config, tools, ANTHROPIC)).toThrow(GateConfigError);
+	});
+	it("control: zero is a valid bound, and the defaults pass", () => {
+		const zero = { ...DEFAULT_GATE_CONFIG, toolOverheadTokens: { anthropic: 0, openai: 0 } };
+		expect(run(zero, tools, ANTHROPIC).decision).toBe("allow");
+		expect(run(DEFAULT_GATE_CONFIG, withImage).decision).toBe("allow");
 	});
 });
