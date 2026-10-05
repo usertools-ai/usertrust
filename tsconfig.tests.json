@@ -1,0 +1,24 @@
+{
+	"extends": "./tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"declaration": false,
+		"declarationMap": false,
+		"sourceMap": false,
+		"composite": false,
+		"paths": {
+			"usertrust": ["./packages/core/src/index.ts"],
+			"usertrust/headless": ["./packages/core/src/headless.ts"],
+			"usertrust-verify": ["./packages/verify/src/index.ts"]
+		}
+	},
+	"include": ["packages/*/tests/**/*.ts"],
+	// Typechecked in the `openclaw-contract` job (packages/openclaw/tsconfig.contract-openclaw.json),
+	// where openclaw — an optional peer `npm ci` may or may not install — is present at its pinned
+	// version. Here its resolution would depend on the environment, and so would the baseline.
+	"exclude": [
+		"packages/openclaw/tests/contract-openclaw.test-d.ts",
+		"packages/openclaw/tests/contract.test.ts",
+		"packages/openclaw/tests/host-fixtures.ts"
+	]
+}
