@@ -108,19 +108,24 @@ test("page-side integrity causes keep their own plain line (never worded as a re
 	assert.ok(!lines.has(resolver), "none reuses the resolver's line");
 });
 
-test("the resource footer is present and links only to pages that exist", async () => {
+test("the resource footer is usertrust.ai's: docs, github, npm, licence and the part-of line", async () => {
 	const { default: SiteFooter, FOOTER_LINKS } = await import("./components/site-footer");
 	const html = renderToStaticMarkup(<SiteFooter />);
 	assert.ok(html.includes('data-testid="site-footer"'), "the footer renders");
+	assert.deepEqual(
+		FOOTER_LINKS.map((l) => l.label),
+		["docs", "github", "npm", "licence"],
+		"exactly the links the usertrust.ai footer carries",
+	);
 	for (const link of FOOTER_LINKS) {
 		assert.ok(html.includes(`href="${link.href}"`), `${link.label} is linked`);
 		assert.ok(link.href.startsWith("https://"), "absolute: this page is served from another host");
 	}
-	const labels = FOOTER_LINKS.map((l) => l.label);
-	for (const wanted of ["what is a receipt?", "verify it yourself", "docs", "github"]) {
-		assert.ok(labels.includes(wanted), `${wanted} is in the footer`);
+	assert.ok(html.includes("part of"), "the part-of line is present");
+	assert.ok(html.includes('href="https://usertools.ai"'), "and links usertools.ai");
+	for (const missing of ["/privacy", "/status", "/support"]) {
+		assert.ok(!html.includes(missing), `no ${missing} link: that page does not exist yet`);
 	}
-	assert.ok(!html.includes("/privacy"), "no privacy link: that page does not exist yet");
 	const { readFileSync } = await import("node:fs");
 	const layout = readFileSync(new URL("./layout.tsx", import.meta.url), "utf8");
 	assert.ok(
