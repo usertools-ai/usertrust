@@ -138,7 +138,7 @@ function WorkBlock({ claims }: { claims: ReceiptClaims }) {
 			{claims.fallbackOrigin ? (
 				<Field label="origin — billed, unfinalized" note={claims.fallbackOrigin.note}>
 					<a
-						className="focus-ring font-mono text-[13px] underline decoration-ink/30 underline-offset-2"
+						className="ut-link focus-ring font-mono text-[13px]"
 						href={`/r/${claims.fallbackOrigin.sourceReservationReceiptId}`}
 					>
 						{claims.fallbackOrigin.sourceReservationReceiptId}

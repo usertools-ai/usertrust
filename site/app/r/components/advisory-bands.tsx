@@ -44,10 +44,7 @@ export default function AdvisoryBands({ advisories }: { advisories: Advisory[] }
 						<p className="mt-2 text-[13px] leading-relaxed text-white/85">{band.body}</p>
 						{band.linkedReceiptId ? (
 							<p className="mt-2 font-mono text-[12px] text-white/70">
-								<a
-									className="focus-ring underline decoration-warning/50 underline-offset-2 hover:text-white"
-									href={`/r/${band.linkedReceiptId}`}
-								>
+								<a className="ut-link focus-ring" href={`/r/${band.linkedReceiptId}`}>
 									{band.linkedReceiptId}
 								</a>
 							</p>

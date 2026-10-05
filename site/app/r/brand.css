@@ -17,44 +17,61 @@
 @font-face{font-family:'JetBrains Mono';src:url('./fonts/JetBrainsMono-Regular.woff2') format('woff2');font-weight:400;font-display:swap}
 @font-face{font-family:'JetBrains Mono';src:url('./fonts/JetBrainsMono-Medium.woff2') format('woff2');font-weight:500 700;font-display:swap}
 
+/* ── tokens: ONE block. Names and values are the shared usertools set (dark
+      appearance); the --color-* lines below only point this route's existing
+      component classes at them. Gold is the usertrust BRAND (the mark and links)
+      and never means pass or fail; status is the four colours. ───────────── */
 .ut-r{
-  --ink:#FFFFFF; --body:#9A9AA2; --line:rgba(255,255,255,.11);
-  --page:#08080A; --line-quiet:rgba(255,255,255,.06); --line-dash:rgba(255,255,255,.20);
-  --gold:#E8B54B; --gold-lo:#B98C2E; --silver:#C8CCD4; --silver-lo:#7E8490;
+  color-scheme:dark;
+  --bg:#000000;      --surface:#101012;
+  --text:#FFFFFF;    --text-2:#98989E;
+  --approve:#30D158; --info:#FFB020; --words:#4DA3FF; --stakes:#FF5B5B; --alert:#FF7A2F;
+  --line-quiet:rgba(255,255,255,.06); --line:rgba(255,255,255,.10); --line-strong:rgba(255,255,255,.16);
+  --line-dash:rgba(255,255,255,.20);
+  --brand:#E8B54B;   --brand-on:#000000;  --silver:#C8CCD4;
+  --sans:'Usertools Sans','Geist Variable',-apple-system,BlinkMacSystemFont,sans-serif;
+  --mono:'JetBrains Mono',ui-monospace,'SF Mono',SFMono-Regular,Menlo,monospace;
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px; --sp-7:48px;
+  --r-mark:7px; --r-row:12px; --r-tile:16px; --r-card:24px; --r-pill:999px;
+  --e-1:0 4px 10px rgba(0,0,0,.12);
+  --ease-out:cubic-bezier(.22,.61,.36,1); --ease-settle:cubic-bezier(.2,.9,.25,1.1);
+  --t-fast:.2s; --t-base:.28s; --t-spring:.45s;
 
-  /* the site-wide tokens, re-pointed */
-  --color-brand-bg:#08080A;
-  --color-terminal:#0B0B0F;
-  --color-ut:#E8B54B;            /* the accent: a reached rung, a passed check */
-  --color-tim:#C8CCD4;
-  --color-tim-ink:#C8CCD4;
-  --color-warning:#FF7A2F;
-  --color-paper:#FFFFFF;         /* text on the dark ground */
-  --color-ink:#C8CCD4;           /* secondary text inside panels */
-  --color-paper-emerald:#E8B54B;
-  --color-paper-amber:#FF9A5C;
-  --color-paper-red:#F87171;
-  --color-paper-steel:#C8CCD4;
-  --font-sans:'Usertools Sans','Geist Variable',-apple-system,BlinkMacSystemFont,sans-serif;
-  --font-mono:'JetBrains Mono',ui-monospace,'SF Mono',SFMono-Regular,Menlo,monospace;
-  --font-display:var(--font-sans);
+  /* this route's component classes, pointed at the tokens above */
+  --color-brand-bg:var(--bg);
+  --color-terminal:var(--surface);
+  --color-ut:var(--approve);              /* a reached rung, a passed check: green */
+  --color-warning:var(--info);            /* advisories and operational notes: amber */
+  --color-danger:var(--stakes);
+  --color-danger-ink:var(--stakes);
+  --color-tim:var(--words);
+  --color-tim-ink:var(--words);
+  --color-paper:var(--text);              /* text on the dark ground */
+  --color-ink:var(--silver);              /* secondary text inside panels */
+  --color-paper-emerald:var(--approve);
+  --color-paper-amber:var(--info);
+  --color-paper-red:var(--stakes);
+  --color-paper-steel:var(--words);
+  --font-sans:var(--sans);
+  --font-mono:var(--mono);
+  --font-display:var(--sans);
 
   min-height:100vh;
-  color:#fff;
-  font-family:var(--font-sans);
+  color:var(--text);
+  font-family:var(--sans);
   font-size:15px;
   line-height:1.6;
+  /* pure black ground; the lattice glow is a neutral layer on top */
   background:
-    radial-gradient(118% 78% at 50% -6%,rgba(232,181,75,.10) 0%,rgba(232,181,75,0) 62%),
-    radial-gradient(88% 66% at 12% 104%,rgba(200,204,212,.05) 0%,rgba(200,204,212,0) 66%),
-    linear-gradient(180deg,#0B0B10 0%,#08080A 56%,#0A0A11 100%);
+    radial-gradient(118% 78% at 50% -6%,rgba(200,204,212,.07) 0%,rgba(200,204,212,0) 62%),
+    var(--bg);
 }
 
 /* ── the mark. Cloned from usertrust.ai's nav: Usertools Sans 700 in a pill,
       26px box, 18.5px glyph, -.045em, a .7px same-colour stroke with
       paint-order:stroke fill. Not rebuilt by eye. ───────────────────────── */
 .ut-r .brand{display:inline-flex;align-items:center;gap:9px}
-.ut-r .brand .mark{width:26px;height:26px;border-radius:7px;background:var(--gold);color:#08080A;
+.ut-r .brand .mark{width:26px;height:26px;border-radius:var(--r-mark);background:var(--brand);color:var(--brand-on);
              display:grid;place-items:center;
              font:700 18.5px/1 'Usertools Sans',system-ui,sans-serif;letter-spacing:-.045em;
              -webkit-text-stroke:.7px currentColor;paint-order:stroke fill}
@@ -64,15 +81,17 @@
 @media(min-width:640px){.ut-r-nav{padding:0 24px}}
 .ut-r-nav a{color:inherit;text-decoration:none}
 .ut-r-nav .where{font:500 10.5px/1 var(--font-mono);letter-spacing:.14em;
-                 text-transform:uppercase;color:var(--silver-lo)}
+                 text-transform:uppercase;color:var(--text-2)}
 
 /* the receipt's torn top edge, drawn not pictured (usertrust.ai .receipt::before) */
 .ut-r .ut-perf{position:relative;margin-top:9px}
+.ut-r .ut-link{color:var(--brand);text-decoration:underline;text-decoration-color:rgba(232,181,75,.4);text-underline-offset:2px}
+.ut-r .ut-link:hover{color:#fff}
 .ut-r .ut-perf::before{content:'';position:absolute;left:-1px;right:-1px;top:-6px;height:7px;
   background:radial-gradient(circle at 8px 0,transparent 0 5px,var(--line) 5px 5.9px,transparent 6px) repeat-x;
   background-size:16px 7px}
 
 /* the copy chip's tooltip was a light chip on paper; keep it dark here */
-.ut-r .chit{background:#16161c;color:#EDEDF2;border:1px solid var(--line)}
+.ut-r .chit{background:var(--surface);color:var(--text);border:1px solid var(--line-strong)}
 .ut-r a{text-underline-offset:2px}
-.ut-r ::selection{background:rgba(232,181,75,.35)}
+.ut-r ::selection{background:rgba(255,255,255,.25)}

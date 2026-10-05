@@ -41,11 +41,11 @@ export default function ReceiptCard({
 	return (
 		<div className="flex flex-col gap-4" data-testid="receipt-card">
 			<section
-				className="ut-perf rounded-[0_0_14px_14px] border border-white/[0.11] bg-[#0B0B0F]/80 backdrop-blur-[13px]"
+				className="ut-perf rounded-[0_0_var(--r-card)_var(--r-card)] border border-[var(--line)] bg-[var(--surface)]"
 				data-testid="receipt-card-body"
 			>
 				<header className="flex items-center gap-2.5 border-b border-white/[0.09] bg-white/[0.03] px-6 py-3.5">
-					<span className="size-[7px] shrink-0 rounded-full bg-ut shadow-[0_0_0_3px_rgba(232,181,75,0.16)]" />
+					<span className="size-[7px] shrink-0 rounded-full bg-ut shadow-[0_0_0_3px_rgba(48,209,88,0.16)]" />
 					<span className="text-[13px] font-semibold tracking-tight text-ut">Receipt</span>
 					<span className="font-mono text-[12.5px] text-paper/60">{model.receiptIdShort}</span>
 					<span className="ml-auto font-mono text-xs text-paper/38">{model.publicUrl}</span>
@@ -55,14 +55,14 @@ export default function ReceiptCard({
 					<p className="mb-2.5 text-xs font-medium tracking-[0.15em] text-paper/38 uppercase">
 						Action
 					</p>
-					<h2 className="mb-2 text-[29px] leading-[1.22] font-semibold tracking-[-0.028em] text-paper">
+					<h2 className="mb-2 text-[29px] leading-[1.22] font-semibold tracking-[-0.028em] text-paper/70">
 						{model.action.parts.map((part) =>
 							part.kind === "hash" ? (
-								<span key={part.full} className="text-ut">
+								<span key={part.full} className="text-paper">
 									<HashValue value={part.full} label={part.label} head={part.head} />
 								</span>
 							) : part.emphasis ? (
-								<span key={part.text} className="text-ut">
+								<span key={part.text} className="text-paper">
 									{part.text}
 								</span>
 							) : (
@@ -72,7 +72,7 @@ export default function ReceiptCard({
 					</h2>
 					<p className="m-0 text-[13.5px] text-paper/62">{model.action.byline}</p>
 					{work.kind === "session" ? (
-						<div className="mt-3 rounded-[10px] border border-white/[0.11] bg-white/[0.03] p-3 text-ink">
+						<div className="mt-3 rounded-[var(--r-row)] border border-[var(--line)] bg-white/[0.03] p-3 text-ink">
 							<SessionHeadlineScope claims={claims} tone="paper" />
 						</div>
 					) : null}
@@ -100,7 +100,7 @@ export default function ReceiptCard({
 						<p className="mt-2 text-[13px] text-paper/62">
 							{claims.fallbackOrigin.note}{" "}
 							<a
-								className="font-mono text-ut underline decoration-ut/40 underline-offset-2"
+								className="ut-link font-mono"
 								href={`/r/${claims.fallbackOrigin.sourceReservationReceiptId}`}
 							>
 								{claims.fallbackOrigin.sourceReservationReceiptId}
@@ -109,7 +109,7 @@ export default function ReceiptCard({
 					) : null}
 
 					{model.authority.length > 0 ? (
-						<div className="mt-[22px] rounded-[10px] border border-white/[0.09] bg-white/[0.03] px-4 py-3.5">
+						<div className="mt-[22px] rounded-[var(--r-row)] border border-white/[0.09] bg-white/[0.03] px-4 py-3.5">
 							<div className="mb-2.5 text-xs font-medium tracking-[0.15em] text-paper/38 uppercase">
 								Authority
 							</div>
@@ -202,7 +202,7 @@ export default function ReceiptCard({
 					>
 						${model.amountUsd}
 					</div>
-					<div className="mt-4 rounded-[10px] border border-white/[0.11] bg-white/[0.03] p-4 text-ink">
+					<div className="mt-4 rounded-[var(--r-row)] border border-[var(--line)] bg-white/[0.03] p-4 text-ink">
 						<AmountScope claims={claims} />
 						<div className="mt-4">
 							<PostureChips claims={claims} />
@@ -261,7 +261,7 @@ export default function ReceiptCard({
 						className="overflow-x-auto rounded-lg border border-white/[0.09] bg-black/40 px-3.5 py-3 font-mono text-xs whitespace-pre text-paper/62"
 						data-testid="verify-command"
 					>
-						npx <span className="font-normal text-ut">usertrust-verify</span> receipt{" "}
+						npx <span className="font-normal text-paper">usertrust-verify</span> receipt{" "}
 						{model.receiptId}.json --trust {"<snapshot.json>"}
 					</pre>
 				</div>
