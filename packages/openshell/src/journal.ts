@@ -86,6 +86,9 @@ const TRANSITIONS: ReadonlyArray<readonly [HoldState, HoldState]> = [
 	["open", "voiding"],
 	["open", "expiring"],
 	["settling", "settled"],
+	// A late settlement that POSTED the still-pending hold after the sweeper's claim: it
+	// and the sweeper's `expiring → expired` race on the same CAS — exactly one wins.
+	["expiring", "settled"],
 	// The ledger confirmed the pending transfer expired before the post landed.
 	["settling", "expired"],
 	["voiding", "voided"],
@@ -251,21 +254,35 @@ export class HoldJournal {
 		const { DatabaseSync: Database } = loadSqlite();
 		const busy = `PRAGMA busy_timeout = ${Math.max(0, Math.floor(opts.busyTimeoutMs ?? 100))}`;
 		const db = new Database(path);
-		// busy_timeout FIRST: switching to WAL takes a lock and can itself be busy.
+		// busy_timeout FIRST: switching to WAL and migrating take locks and can themselves be
+		// busy — another process may hold the write lock. Both run under the same retry policy
+		// as a write transaction, ending in JournalBusyError, never a raw SQLITE_BUSY.
 		db.exec(busy);
-		const mode = db.prepare("PRAGMA journal_mode = WAL").get() as
-			| { journal_mode?: unknown }
-			| undefined;
+		const retries = opts.busyRetries ?? 2;
+		const mode = HoldJournal.retryBusy(retries, () =>
+			db.prepare("PRAGMA journal_mode = WAL").get(),
+		) as { journal_mode?: unknown } | undefined;
 		if (String(mode?.journal_mode).toLowerCase() !== "wal") {
 			db.close();
 			throw new Error(
 				`hold journal: ${path} did not enter WAL mode (journal_mode = ${String(mode?.journal_mode)}) — the read connection and the cross-process CAS depend on it`,
 			);
 		}
-		HoldJournal.migrate(db);
+		HoldJournal.retryBusy(retries, () => HoldJournal.migrate(db));
 		const reader = new Database(path, { readOnly: true });
 		reader.exec(busy);
 		return new HoldJournal(db, reader, opts);
+	}
+
+	private static retryBusy<T>(retries: number, op: () => T): T {
+		for (let attempt = 1; ; attempt++) {
+			try {
+				return op();
+			} catch (err) {
+				if (!isBusy(err)) throw err;
+				if (attempt > retries) throw new JournalBusyError(attempt);
+			}
+		}
 	}
 
 	close(): void {
@@ -453,7 +470,7 @@ export class HoldJournal {
 		} catch (err) {
 			return Promise.reject(err);
 		}
-		return this.runTx(async () => {
+		return this.runTx<Reservation | { ambiguous: unknown }>(async () => {
 			const existing = this.get(input.holdId);
 			if (existing !== undefined) {
 				// A retry answers from its row ONLY when it is the same hold.
@@ -474,13 +491,38 @@ export class HoldJournal {
 			if (available - debt < input.amount) {
 				return { admitted: false, reason: "budget_exceeded", existing: false };
 			}
-			await this.bounded("placeHold", () => input.placeHold());
+			try {
+				await this.bounded("placeHold", () => input.placeHold());
+			} catch (err) {
+				// AMBIGUOUS: the ledger may have placed the hold even though the call failed (a lost
+				// response, a deadline). Rolling the row back would orphan it, so the row is COMMITTED
+				// as `voiding`: the release path voids the derived id (a hold that was never placed
+				// voids as not-found), and a retry sees `voiding` and is refused — never placed twice.
+				this.db
+					.prepare(
+						"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, intent_json) VALUES (?, ?, 'voiding', ?, ?, ?)",
+					)
+					.run(
+						input.holdId,
+						input.budgetId,
+						input.amount,
+						input.ttlAt,
+						JSON.stringify({
+							ambiguousPlacement: err instanceof Error ? err.message : String(err),
+						}),
+					);
+				return { ambiguous: err };
+			}
 			this.db
 				.prepare(
 					"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at) VALUES (?, ?, 'open', ?, ?)",
 				)
 				.run(input.holdId, input.budgetId, input.amount, input.ttlAt);
 			return { admitted: true, existing: false };
+		}).then((out) => {
+			// The `voiding` row is committed; the placement's own error is the answer.
+			if ("ambiguous" in out) throw out.ambiguous;
+			return out;
 		});
 	}
 
@@ -508,7 +550,19 @@ export class HoldJournal {
 		const marker = this.db
 			.prepare("INSERT OR IGNORE INTO applied (transfer_id, budget_id, delta) VALUES (?, ?, ?)")
 			.run(transferId, budgetId, delta);
-		if (Number(marker.changes) !== 1) return false;
+		if (Number(marker.changes) !== 1) {
+			// A replay of the SAME transfer is a no-op; the same id with different fields is a bug
+			// that would otherwise leave debt on the wrong budget or amount, silently.
+			const seen = this.db
+				.prepare("SELECT budget_id, delta FROM applied WHERE transfer_id = ?")
+				.get(transferId) as { budget_id: string; delta: number } | undefined;
+			if (seen === undefined || seen.budget_id !== budgetId || seen.delta !== delta) {
+				throw new Error(
+					`hold journal: transfer ${transferId} was applied with budget ${String(seen?.budget_id)}, delta ${String(seen?.delta)}; replayed with budget ${budgetId}, delta ${delta}`,
+				);
+			}
+			return false;
+		}
 		this.db
 			.prepare(
 				"INSERT INTO debt (budget_id, amount) VALUES (?, ?) ON CONFLICT (budget_id) DO UPDATE SET amount = amount + excluded.amount",

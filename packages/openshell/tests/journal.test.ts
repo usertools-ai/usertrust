@@ -245,7 +245,9 @@ describe("hold journal: one writer inside the process too", () => {
 				placeHold: () => new Promise<void>(() => {}),
 			}),
 		).rejects.toBeInstanceOf(LedgerDeadlineError);
-		expect(j.get("r1"), "no row").toBeUndefined();
+		expect(j.get("r1")?.state, "ambiguous (the call may still land): committed as voiding").toBe(
+			"voiding",
+		);
 		await expect(open(j, "r2"), "the next reservation is not wedged").resolves.toMatchObject({
 			admitted: true,
 		});
@@ -373,9 +375,10 @@ describe("hold journal: reservation is atomic with the debt it is checked agains
 		await j.writeTx(() => j.cas("h1", "open", "voiding"));
 		expect(await j.reserve(input)).toEqual({ admitted: false, reason: "not_open", existing: true });
 	});
-	it("a placement that throws rolls the reservation back", async () => {
+	it("a placement that throws is AMBIGUOUS: the row is committed as `voiding` (never orphaned), the error rethrown, and a retry is refused — never placed twice", async () => {
 		const { j } = fresh();
-		await expect(
+		let placed = 0;
+		const attempt = () =>
 			j.reserve({
 				holdId: "h1",
 				budgetId: "b",
@@ -383,10 +386,40 @@ describe("hold journal: reservation is atomic with the debt it is checked agains
 				ttlAt: 0,
 				availableCredit: () => 100,
 				placeHold: () => {
+					placed += 1;
 					throw new Error("ledger timeout");
 				},
+			});
+		await expect(attempt()).rejects.toThrow("ledger timeout");
+		const row = j.get("h1");
+		expect(row?.state).toBe("voiding");
+		expect(row?.intent).toEqual({ ambiguousPlacement: "ledger timeout" });
+		expect(
+			j.inFlight().map((r) => r.holdId),
+			"the release path's work list",
+		).toContain("h1");
+		await expect(attempt()).resolves.toEqual({
+			admitted: false,
+			reason: "not_open",
+			existing: true,
+		});
+		expect(placed, "the retry placed nothing").toBe(1);
+	});
+
+	it("an availableCredit failure placed nothing: rolled back, no row", async () => {
+		const { j } = fresh();
+		await expect(
+			j.reserve({
+				holdId: "h1",
+				budgetId: "b",
+				amount: 10,
+				ttlAt: 0,
+				availableCredit: () => {
+					throw new Error("ledger down");
+				},
+				placeHold: () => {},
 			}),
-		).rejects.toThrow("ledger timeout");
+		).rejects.toThrow("ledger down");
 		expect(j.get("h1")).toBeUndefined();
 	});
 });
@@ -465,6 +498,59 @@ describe("hold journal: debt changes apply exactly once per transfer", () => {
 		expect(await j.writeTx(() => j.applyDebt("b", "late:h2", 5))).toBe(true);
 		expect(j.debtOf("b")).toBe(30);
 		expect(() => j.applyDebt("b", "x", 1)).toThrow(/inside its own writeTx/);
+	});
+});
+
+describe("#167 connector folds", () => {
+	it("P1: a late settlement can finish from `expiring` — it and the sweeper's expiry race on one CAS, exactly one wins", async () => {
+		const { j } = fresh();
+		await open(j, "h1");
+		await open(j, "h2");
+		await j.writeTx(() => j.cas("h1", "open", "expiring"));
+		await j.writeTx(() => j.cas("h2", "open", "expiring"));
+		// h1: the late settlement wins, the sweeper loses.
+		expect(
+			await j.writeTx(() => j.cas("h1", "expiring", "settled", { terminalKind: "late_settled" })),
+		).toBe(true);
+		expect(await j.writeTx(() => j.cas("h1", "expiring", "expired"))).toBe(false);
+		expect(j.get("h1")).toMatchObject({ state: "settled", terminalKind: "late_settled" });
+		// h2: the sweeper wins, the late settlement loses.
+		expect(await j.writeTx(() => j.cas("h2", "expiring", "expired"))).toBe(true);
+		expect(await j.writeTx(() => j.cas("h2", "expiring", "settled"))).toBe(false);
+	});
+
+	it("P2: a debt-marker replay with DIFFERENT fields throws; the same replay is a quiet no-op", async () => {
+		const { j } = fresh();
+		expect(await j.writeTx(() => j.applyDebt("b", "t1", 40))).toBe(true);
+		expect(await j.writeTx(() => j.applyDebt("b", "t1", 40))).toBe(false);
+		await expect(j.writeTx(() => j.applyDebt("b", "t1", 41))).rejects.toThrow(
+			/applied with budget b, delta 40/,
+		);
+		await expect(j.writeTx(() => j.applyDebt("other", "t1", 40))).rejects.toThrow(
+			/replayed with budget other/,
+		);
+		expect(j.debtOf("b")).toBe(40);
+		expect(j.debtOf("other")).toBe(0);
+	});
+
+	it("P2: opening a journal while another process holds the write lock retries, then throws JournalBusyError — never a raw SQLITE_BUSY", () => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		const holder = new DatabaseSync(path);
+		holder.exec("PRAGMA journal_mode = WAL");
+		holder.exec("BEGIN IMMEDIATE");
+		try {
+			expect(() => HoldJournal.open(path, { busyTimeoutMs: 5, busyRetries: 1 })).toThrow(
+				JournalBusyError,
+			);
+		} finally {
+			holder.exec("ROLLBACK");
+			holder.close();
+		}
+		const j = HoldJournal.open(path, { busyTimeoutMs: 5, busyRetries: 1 });
+		journals.push(j);
+		expect(j.get("nothing")).toBeUndefined();
 	});
 });
 
