@@ -679,7 +679,9 @@ TODAY, modulo the checkpoint extension below:
   event links to a real event); either mismatch is FAIL at step 6. Nothing
   else in a checkpoint carries the predecessor's last event hash, so §7's
   history walk cannot cross-check the value between members; what it buys is
-  that the chain-start a verifier or archiver recomputes from is SIGNED.
+  that the chain-start a verifier or archiver recomputes from is SIGNED. When
+  the receipt's own event is the segment's first event, equality 4 binds the
+  two directly.
   `publishedTo` does not exist in the signed statement (publication is
   evidence, not proof — R3-8 unchanged), and neither does `reference` —
   v0.5 carried an anchor locator here, but publication evidence lives
@@ -777,7 +779,10 @@ contradicted it) (proxy profile: the audit writer's envelope
      `offset` is the §4a chain-link offset (`0` iff
      `checkpoint.previousSegmentRoot === "genesis"`, else `1`; v0.9.6). The
      lower bound is the offset, not 0: a non-genesis leaf 0 is the chain
-     link, and no event is ever proved at it.
+     link, and no event is ever proved at it. And when `leafIndex === offset`
+     the receipt's event IS the segment's first event, so
+     `event.previousHash === checkpoint.segmentStartPreviousHash` (v0.9.6 —
+     the signed chain start must be the one the event actually links to).
   5. `inclusion.treeSize === checkpoint.treeSize`
   6. `inclusion.root === checkpoint.root`
   7. `receipt.scope/spec` agree with the projection; `minter.kind` agrees
@@ -1059,8 +1064,9 @@ Levels (renamed, R2-2 — names must not overclaim):
   passes — each checkpoint's `previousSegmentRoot`/`previousSegmentId`
   equal the prior checkpoint's `root`/`segmentId`, genesis values exact,
   no gaps, `segmentFirstSequence` strictly increasing and contiguous
-  (`next.segmentFirstSequence === prev.segmentFirstSequence + prev.treeSize
-  − offset(prev)`, where `offset(prev)` is `prev`'s §4a chain-link offset —
+  (`next.segmentFirstSequence === prev.segmentFirstSequence + (prev.treeSize
+  − offset(prev))`, evaluated in that order or exactly — the sum is refused
+  outside the safe-integer range — where `offset(prev)` is `prev`'s §4a chain-link offset —
   its `treeSize` counts a link leaf that is not an event; v0.9.6);
   **a member that is not a v2 statement STOPS the walk (v0.9.6)** — `v`
   other than `2` (e.g. a v1 `PublishedMerkleRoot`), any of §4a's twelve

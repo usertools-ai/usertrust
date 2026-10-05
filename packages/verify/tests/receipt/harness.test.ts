@@ -468,7 +468,11 @@ function brokenFacts(vector: Vector, bundle: MintedBundle): FactName[] {
 			typeof inclusion.leafIndex === "number" &&
 			inclusion.leafIndex >= offset &&
 			inclusion.leafIndex < Number(checkpoint.treeSize);
-		if (inclusion.leafIndex !== expectedIndex || !inRange) broken.push("eq4");
+		// At leaf `offset` the event IS the segment's first event, so it links to
+		// the signed start hash (§4a, v0.9.6).
+		const firstEventLinks =
+			inclusion.leafIndex !== offset || event.previousHash === checkpoint.segmentStartPreviousHash;
+		if (inclusion.leafIndex !== expectedIndex || !inRange || !firstEventLinks) broken.push("eq4");
 	}
 
 	// Equalities 5, 6, 8 — the inclusion/checkpoint bindings.

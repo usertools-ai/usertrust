@@ -350,6 +350,26 @@ describe("§7 step 9 — the §8 lineage binds every member, not just the receip
 });
 
 describe("§7 step 9 — contiguity arithmetic", () => {
+	it("subtracts the chain-link offset BEFORE adding — the intermediate sum cannot round", () => {
+		// first 9007199254740990 + treeSize 3 − offset 1: evaluated left to right
+		// the sum rounds to 9007199254740992 and the subtraction lands on the SAFE
+		// 9007199254740991, so a successor claiming it walked clean although the
+		// true value, 9007199254740992, is past the safe range.
+		const bundle = mint();
+		const history = historyOf(bundle);
+		const { sig: _g, ...genesis } = history[0] as unknown as SegmentCheckpoint;
+		const { sig: _s, ...second } = history[1] as unknown as SegmentCheckpoint;
+		const { sig: _t, ...third } = history[2] as unknown as SegmentCheckpoint;
+		const report = runWithHistory(bundle, [
+			resign({ ...genesis, segmentFirstSequence: 9007199254740980, treeSize: 10 }),
+			resign({ ...second, segmentFirstSequence: 9007199254740990, treeSize: 3 }),
+			resign({ ...third, segmentFirstSequence: 9007199254740991 }),
+		]);
+		expect(report.verdict).toBe("VERIFIED_CHECKPOINT");
+		expect(report.checks.checkpointHistory.failure?.code).toBe("HISTORY_INVALID");
+		expect(report.checks.checkpointHistory.failure?.detail).toContain("safe-integer");
+	});
+
 	it("refuses a zero-leaf predecessor that stands still", () => {
 		// §7 asks for "strictly increasing AND contiguous", and this is why the
 		// two are separate clauses rather than one: with `prev.treeSize === 0` the

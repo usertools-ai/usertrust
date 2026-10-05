@@ -567,6 +567,20 @@ function fillerLeaf(segmentId: string, index: number): string {
 	return sha256Hex(`usertrust/test-filler/${segmentId}/${index}`);
 }
 
+/**
+ * Segment `index`'s signed `segmentStartPreviousHash`: the chain genesis, or the
+ * predecessor's LAST leaf — a filler event hash, since the mint event never sits
+ * in a predecessor. Must agree with what step 5 of `mint` signs.
+ */
+function segmentStartHash(specs: readonly SegmentSpec[], index: number): string {
+	if (index === 0) return GENESIS_START_HASH;
+	const previous = specs[index - 1] as SegmentSpec;
+	if (previous.treeSize - 1 < chainLinkOffset(index - 1)) {
+		throw new RangeError("segmentStartHash: the predecessor holds no event leaf");
+	}
+	return fillerLeaf(previous.segmentId, previous.treeSize - 1);
+}
+
 export function transferPairs(count: number): TransferPair[] {
 	const pairs: TransferPair[] = [];
 	for (let i = 0; i < count; i += 1) {
@@ -736,11 +750,16 @@ export function mint(options: MintOptions = {}): MintedBundle {
 	let projection = buildProjection(options.projectionOptions);
 	if (options.projection) projection = options.projection(projection);
 
-	// 2. Event envelope; hash over the envelope minus `hash`.
+	// 2. Event envelope; hash over the envelope minus `hash`. The segment's
+	//    FIRST event links to the segment's signed start hash (§4a, v0.9.6);
+	//    any later event links to a filler predecessor.
 	let unsignedEvent: Omit<EventEnvelope, "hash"> = {
 		id: "evt_01K2Q7WD5J3N8H4TB2MYE0PXQR",
 		timestamp: "2026-08-11T18:42:14.006Z",
-		previousHash: sha256Hex("usertrust/test-previous-event"),
+		previousHash:
+			mintLeafIndex === chainLinkOffset(mintSegmentIndex)
+				? segmentStartHash(segmentSpecs, mintSegmentIndex)
+				: sha256Hex("usertrust/test-previous-event"),
 		kind: MINT_EVENT_KIND,
 		actor: { ...MINT_ACTOR },
 		data: projection,

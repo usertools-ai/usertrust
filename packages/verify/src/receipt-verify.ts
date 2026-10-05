@@ -3838,6 +3838,19 @@ class BaseRun {
 				`equality 4: leafIndex ${leafIndex} is outside [${offset}, ${checkpointTreeSize})`,
 			);
 		}
+		// At leaf `offset` the receipt's event IS the segment's first event, and
+		// §4a defines the signed `segmentStartPreviousHash` as exactly that event's
+		// `previousHash` (v0.9.6). Both are in the receipt, so the equality is
+		// checkable offline; without it a checkpoint whose signed chain start
+		// contradicts its own first event would verify.
+		if (
+			leafIndex === offset &&
+			stringAt(event, "previousHash") !== stringAt(checkpoint, "segmentStartPreviousHash")
+		) {
+			return mismatch(
+				"equality 4: the segment's first event's previousHash ≠ checkpoint.segmentStartPreviousHash",
+			);
+		}
 		// Equality 5 — the leaf-hiding defence the fold cannot make: a proof can
 		// reach the signed root under a treeSize the checkpoint never signed.
 		if (numberAt(inclusion, "treeSize") !== checkpointTreeSize) {
@@ -4323,15 +4336,18 @@ function walkCheckpointHistory(
 			if (segmentFirstSequence <= previousFirst) {
 				return `${label}: segmentFirstSequence ${segmentFirstSequence} does not strictly increase past ${previousFirst}`;
 			}
-			const expected = previousFirst + previousTreeSize - previousOffset;
+			// The offset comes off the tree size BEFORE the addition: `first +
+			// treeSize − offset` can round in the intermediate sum and land back
+			// on a safe integer that is not the true value.
+			const expected = previousFirst + (previousTreeSize - previousOffset);
 			// Both operands are safe integers; their SUM need not be, and an
 			// imprecise sum compares equal to values that are not it. The whole
 			// walk rests on this one comparison, so it refuses rather than guesses.
 			if (!Number.isSafeInteger(expected)) {
-				return `${label}: the contiguity sum ${previousFirst} + ${previousTreeSize} leaves the safe-integer range`;
+				return `${label}: the contiguity sum ${previousFirst} + (${previousTreeSize} − ${previousOffset}) leaves the safe-integer range`;
 			}
 			if (segmentFirstSequence !== expected) {
-				return `${label}: segmentFirstSequence ${segmentFirstSequence} ≠ ${previousFirst} + ${previousTreeSize} − ${previousOffset} — the walk has a gap`;
+				return `${label}: segmentFirstSequence ${segmentFirstSequence} ≠ ${previousFirst} + (${previousTreeSize} − ${previousOffset}) — the walk has a gap`;
 			}
 		}
 

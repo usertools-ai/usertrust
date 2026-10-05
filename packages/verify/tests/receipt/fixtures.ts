@@ -861,6 +861,22 @@ export const EVENT_VECTORS: readonly Vector[] = [
 			}),
 	},
 	{
+		// §4a (v0.9.6): segmentStartPreviousHash is the previousHash of the
+		// segment's FIRST event. Here the receipt's event is that first event
+		// (leaf `offset`) and links somewhere else — everything else, both
+		// signatures included, is consistent.
+		name: "eq4/first-event-start-hash-mismatch",
+		what: "The segment's first event must link to the checkpoint's signed segmentStartPreviousHash.",
+		mode: "receipt",
+		expect: failed("event", "EVENT_MISMATCH"),
+		breaks: ["eq4"],
+		build: () =>
+			mint({
+				mintLeafIndex: 1,
+				event: (e) => ({ ...e, previousHash: otherHash("not-the-segment-start") }),
+			}),
+	},
+	{
 		// Leaf 0 of a non-genesis segment is the chain link, never an event. The
 		// sequence here makes equality 4's arithmetic hold at index 0, so only the
 		// offset lower bound refuses it at step 2 (the fold and eq 8's defensive

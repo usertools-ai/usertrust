@@ -41,10 +41,12 @@ import {
 import {
 	ALT_RECEIPT_ID,
 	DEFAULT_RECEIPT_ID,
+	GENESIS_START_HASH,
 	LEADING_ZERO_RECEIPT_ID,
 	LONG_DECODE_RECEIPT_ID,
 	type MintOptions,
 	mint,
+	otherHash,
 	type Projection,
 	SHORT_DECODE_RECEIPT_ID,
 	type UnsignedReceipt,
@@ -1128,9 +1130,59 @@ describe("bindings the corpus cannot express with a commit receipt", () => {
 	});
 
 	it("a GENESIS segment's range starts at 0 — it has no chain-link leaf", () => {
+		// Leaf 0 of a genesis segment is its FIRST event, so it carries the
+		// all-zero chain genesis as its previousHash — the signed start hash.
+		const bundle = mint({ mintSegmentIndex: 0, mintLeafIndex: 0 });
+		expect((bundle.receipt.event as { previousHash: string }).previousHash).toBe(
+			GENESIS_START_HASH,
+		);
 		const actual = verifyMinted({ mintSegmentIndex: 0, mintLeafIndex: 0 });
 		expect(actual.failure).toBeNull();
 		expect(actual.verdict).toBe("VERIFIED_CHECKPOINT");
+	});
+
+	// §4a (v0.9.6): segmentStartPreviousHash IS the previousHash of the
+	// segment's first event. When the receipt's own event is that first event
+	// (leafIndex === offset) the two are both in the receipt and must agree.
+	it.each([
+		["genesis (offset 0)", 0, 0],
+		["non-genesis (offset 1)", 2, 1],
+	])(
+		"a %s segment's first event that links to its signed start hash verifies",
+		(_label, mintSegmentIndex, mintLeafIndex) => {
+			const actual = verifyMinted({ mintSegmentIndex, mintLeafIndex });
+			expect(actual.failure).toBeNull();
+			expect(actual.verdict).toBe("VERIFIED_CHECKPOINT");
+		},
+	);
+
+	it.each([
+		["genesis (offset 0)", 0, 0],
+		["non-genesis (offset 1)", 2, 1],
+	])(
+		"a %s segment's first event that CONTRADICTS the signed start hash fails",
+		(_label, mintSegmentIndex, mintLeafIndex) => {
+			const actual = verifyMinted({
+				mintSegmentIndex,
+				mintLeafIndex,
+				event: (e) => ({ ...e, previousHash: otherHash("not-the-segment-start") }),
+			});
+			expect(actual.failure).toMatchObject({ step: "event", code: "EVENT_MISMATCH" });
+			expect(actual.failure?.detail).toMatch(
+				/first event's previousHash ≠ checkpoint\.segmentStartPreviousHash/,
+			);
+		},
+	);
+
+	it("a LATER event's previousHash is not bound to the start hash", () => {
+		// Only the first event links to the segment start; leaf offset+1 links to
+		// a predecessor inside the segment, which the receipt cannot see.
+		const actual = verifyMinted({
+			mintSegmentIndex: 2,
+			mintLeafIndex: 2,
+			event: (e) => ({ ...e, previousHash: otherHash("an-in-segment-predecessor") }),
+		});
+		expect(actual.failure).toBeNull();
 	});
 
 	it("rejects a checkpoint with no segmentFirstSequence to bind the leaf against", () => {
