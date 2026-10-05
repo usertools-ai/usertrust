@@ -95,3 +95,16 @@
 .ut-r .chit{background:var(--surface);color:var(--text);border:1px solid var(--line-strong)}
 .ut-r a{text-underline-offset:2px}
 .ut-r ::selection{background:rgba(255,255,255,.25)}
+
+/* the one Details disclosure, and the glance card's level strip */
+.ut-r .ut-details{border:1px solid var(--line);border-radius:var(--r-row);background:rgba(255,255,255,.02)}
+.ut-r .ut-details>summary{cursor:pointer;list-style:none;padding:12px 16px;min-height:44px;display:flex;align-items:center;
+  gap:8px;font:500 11px/1 var(--sans);letter-spacing:1.4px;text-transform:uppercase;color:var(--text-2)}
+.ut-r .ut-details>summary::-webkit-details-marker{display:none}
+.ut-r .ut-details>summary::before{content:'+';font:500 14px/1 var(--mono);color:var(--text-2)}
+.ut-r .ut-details[open]>summary::before{content:'\2212'}
+.ut-r .ut-details>summary:hover{color:var(--text)}
+.ut-r .ut-details>summary:focus-visible{outline:2px solid var(--words);outline-offset:2px;border-radius:var(--r-row)}
+.ut-r .ut-details-body{padding:4px 16px 20px;display:flex;flex-direction:column;gap:16px}
+.ut-r .ut-levels{display:grid;grid-template-columns:1fr 1fr;gap:2px 16px}
+.ut-r .ut-levels>li:last-child{grid-column:1/-1}

@@ -4,8 +4,9 @@ import type { VerifiedState } from "../lib/wire";
 import AdvisoryBands from "./advisory-bands";
 import AnchorEvidencePanels from "./anchor-evidence";
 import CheckLedger from "./check-ledger";
+import Details from "./details";
 import DisplayAnnex from "./display-annex";
-import ReceiptCard from "./receipt-card";
+import ReceiptCard, { ReceiptDetails } from "./receipt-card";
 import WorkClaims from "./work-claims";
 
 /**
@@ -26,15 +27,28 @@ export default function VerifiedReceipt({ state }: { state: VerifiedState }) {
 		<article className="flex flex-col gap-8 py-7" data-state="verified">
 			<AdvisoryBands advisories={envelope.advisories} />
 			<ReceiptCard model={card} claims={claims} receipt={envelope.receipt} rung={state.rung} />
-			<CheckLedger verification={envelope.verification} membershipNote={claims.membershipNote} />
-			<AnchorEvidencePanels
-				anchorEvidence={envelope.anchorEvidence}
-				checkpointHistory={envelope.checkpointHistory}
-				checks={envelope.verification.checks}
-				rung={state.rung}
-			/>
-			<WorkClaims claims={claims} />
-			<DisplayAnnex display={envelope.display} />
+			<Details>
+				<div className="flex flex-col gap-8">
+					<ReceiptDetails
+						model={card}
+						claims={claims}
+						receipt={envelope.receipt}
+						rung={state.rung}
+					/>
+					<CheckLedger
+						verification={envelope.verification}
+						membershipNote={claims.membershipNote}
+					/>
+					<AnchorEvidencePanels
+						anchorEvidence={envelope.anchorEvidence}
+						checkpointHistory={envelope.checkpointHistory}
+						checks={envelope.verification.checks}
+						rung={state.rung}
+					/>
+					<WorkClaims claims={claims} />
+					<DisplayAnnex display={envelope.display} />
+				</div>
+			</Details>
 		</article>
 	);
 }
