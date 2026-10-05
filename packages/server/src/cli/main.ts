@@ -20,7 +20,25 @@ async function main(): Promise<void> {
 	process.stderr.write(`usertrust-server listening on ${config.host}:${port}\n`);
 	const shutdown = async (): Promise<void> => {
 		process.stderr.write("usertrust-server shutting down — voiding pending holds\n");
-		await server.close();
+		const report = await server.close();
+		// EXIT 0 MEANS TEARDOWN FINISHED, and nothing else.
+		//
+		// This exited 0 unconditionally, so a governor abandoned mid-void — pending
+		// transfers unvoided, audit writer unflushed — was indistinguishable from a
+		// clean stop by every signal the operator has. An incomplete teardown is a
+		// money-path fact and it leaves loudly, on stderr and in the exit code.
+		if (report.abandoned.length > 0) {
+			for (const { reason } of report.abandoned) {
+				process.stderr.write(`usertrust-server TEARDOWN INCOMPLETE: ${reason}\n`);
+			}
+			process.stderr.write(
+				`usertrust-server terminated with teardown incomplete — ` +
+					`${report.abandoned.length} of ${report.abandoned.length + report.completed} ` +
+					`governor(s) did not finish voiding and flushing. Pending transfers may ` +
+					`remain open at the ledger; reconcile before restarting.\n`,
+			);
+			process.exit(75); // EX_TEMPFAIL — the work is unfinished, not misconfigured
+		}
 		process.exit(0);
 	};
 	process.on("SIGINT", () => void shutdown());

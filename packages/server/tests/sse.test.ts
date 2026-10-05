@@ -13,6 +13,7 @@ function config(overrides: Partial<ServerConfig> = {}): ServerConfig {
 		stateDir: "/tmp/utsrv-sse",
 		enforcement: "enforce",
 		pendingTtlMs: 50,
+		requestTimeoutMs: 10_000,
 		dryRun: true,
 		tenants: [{ id: "acme", keyHash: hashKey(KEY) }],
 		...overrides,

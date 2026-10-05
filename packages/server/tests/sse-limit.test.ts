@@ -14,6 +14,7 @@ function config(): ServerConfig {
 		stateDir: "/tmp/utsrv-sse-cap",
 		enforcement: "enforce",
 		pendingTtlMs: 50,
+		requestTimeoutMs: 10_000,
 		dryRun: true,
 		tenants: [
 			{ id: "acme", keyHash: hashKey(KEY_A) },

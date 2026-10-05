@@ -233,6 +233,7 @@ jobs:
           packages/core/tests/integration/replay.tb.test.ts
           packages/openshell/tests/engine.tb.test.ts
           packages/openclaw/tests/envelope-integration.test.ts
+          packages/server/tests/server.tb.test.ts
 
   site-build:
     name: site-build

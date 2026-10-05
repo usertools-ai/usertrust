@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import type { Governor } from "usertrust";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ServerConfig } from "../src/config.js";
 import { hashKey } from "../src/config.js";
 import * as api from "../src/index.js";
@@ -14,6 +15,7 @@ function config(overrides: Partial<ServerConfig> = {}): ServerConfig {
 		stateDir: "/tmp/utsrv-http",
 		enforcement: "enforce",
 		pendingTtlMs: 300_000,
+		requestTimeoutMs: 10_000,
 		dryRun: true,
 		tenants: [{ id: "acme", keyHash: hashKey(KEY) }],
 		...overrides,
@@ -328,7 +330,11 @@ describe("edge cases and failure paths", () => {
 			config: config(),
 			factory: async () => fake.governor,
 		});
-		await expect(unstarted.close()).resolves.toBeUndefined();
+		// close() now REPORTS what teardown achieved rather than returning nothing.
+		// Nothing was ever created here, so the honest report is an empty one — and
+		// crucially `abandoned` is empty, because "nothing to tear down" and "tore
+		// down but gave up" must never look alike.
+		await expect(unstarted.close()).resolves.toEqual({ completed: 0, abandoned: [] });
 	});
 
 	it("listen() rejects when the port is already taken", async () => {
@@ -364,4 +370,291 @@ describe("edge cases and failure paths", () => {
 		expect(api.SettleRequestSchema).toBeDefined();
 		expect(api.AbortRequestSchema).toBeDefined();
 	});
+});
+
+/**
+ * The server's OWN deadline, as distinct from the ledger's.
+ *
+ * `tigerbeetle.connectTimeoutMs` only bounds governor CONSTRUCTION. A cluster that
+ * dies AFTER a governor is built stalls inside `authorize()` instead, where no
+ * construction-time deadline can see it — and the ledger client still never
+ * rejects. This is the backstop for that, and for any other way a governor call
+ * can fail to return.
+ *
+ * Driven through the injectable factory rather than a real dead cluster, because
+ * the point under test is the SERVER's timeout, and a real cluster would trip the
+ * earlier core deadline first and never reach this code.
+ */
+describe("request deadline — a stalled governor answers, it does not hang", () => {
+	/** A governor whose authorize() never settles: the post-construction stall. */
+	function hangingGovernor(): Governor {
+		const fake = createFakeGovernor().governor;
+		return {
+			...fake,
+			authorize: () => new Promise<never>(() => {}),
+		};
+	}
+
+	it("answers 503 governor_timeout instead of holding the request open", async () => {
+		const governor = hangingGovernor();
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 300 }),
+			factory: async () => governor,
+		});
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+
+		const startedAt = Date.now();
+		const res = await post(base, "/v1/authorize", { model: "claude-sonnet-4-6" });
+		const elapsedMs = Date.now() - startedAt;
+
+		expect(res.status).toBe(503);
+		const body = (await res.json()) as { error: string; reason: string };
+		expect(body.error).toBe("governor_timeout");
+		// Name what stalled — "internal error" would not tell an operator which
+		// dependency to look at.
+		expect(body.reason).toContain("authorize");
+		expect(elapsedMs).toBeLessThan(10_000);
+	}, 20_000);
+
+	it("does not shadow the timeout into a 200 would_deny under evaluate_only", async () => {
+		// An unanswered call has an UNKNOWN outcome. Reporting it as `would_deny`
+		// would claim enforcement reached a verdict it never reached.
+		const governor = hangingGovernor();
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 300, enforcement: "evaluate_only" }),
+			factory: async () => governor,
+		});
+		const { port } = await server.listen();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", {
+			model: "claude-sonnet-4-6",
+		});
+		expect(res.status).toBe(503);
+		const body = (await res.json()) as { error: string; shadow?: boolean };
+		expect(body.shadow).toBeUndefined();
+		expect(body.error).toBe("governor_timeout");
+	}, 20_000);
+
+	it("voids an authorization that lands AFTER the deadline gave up on it", async () => {
+		// A deadline abandons the call; it does not cancel it. The ledger hold is real
+		// and its transferId reached nobody, so nothing can ever settle it. AGENTS.md
+		// gives every hold exactly one terminal outcome — abandoning it silently
+		// retires part of the tenant's budget on every timeout.
+		const fake = createFakeGovernor();
+		const slow: Governor = {
+			...fake.governor,
+			authorize: async (params) => {
+				await new Promise((resolve) => setTimeout(resolve, 400));
+				return fake.governor.authorize(params);
+			},
+		};
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 150 }),
+			factory: async () => slow,
+		});
+		const { port } = await server.listen();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", {
+			model: "claude-sonnet-4-6",
+		});
+		expect(res.status).toBe(503);
+		// Nothing settleable was handed back, so nothing is pending server-side...
+		expect(server.pendingCount()).toBe(0);
+		// ...and the hold the ledger did take must be given back.
+		await vi.waitFor(() => expect(fake.calls.aborted).toHaveLength(1), { timeout: 5_000 });
+		expect(fake.calls.aborted[0]).toBe(fake.calls.authorized[0]);
+	}, 20_000);
+
+	it("applies the default timeout for a config that never saw the schema", async () => {
+		// createUsertrustServer is exported, so a caller can hand it a hand-built
+		// config — including one written before requestTimeoutMs existed. Only
+		// loadServerConfig applies the schema defaults, and setTimeout(fn, undefined)
+		// fires on the next tick: without a runtime fallback, adding this field would
+		// have turned every request from such a caller into an instant
+		// governor_timeout. Adding a field must not break the callers who predate it.
+		const { requestTimeoutMs: _omitted, ...withoutTimeout } = config();
+		const fake = createFakeGovernor();
+		// Deliberately NOT instant. `setTimeout(fn, undefined)` coerces to 1ms rather
+		// than to "no timeout", so an authorize that resolves in the same tick wins
+		// that race and the missing default stays invisible. Any real governor takes
+		// longer than a tick — a ledger round trip is milliseconds at best — so the
+		// test has to as well, or it pins nothing.
+		const realistic: Governor = {
+			...fake.governor,
+			authorize: async (params) => {
+				await new Promise((resolve) => setTimeout(resolve, 60));
+				return fake.governor.authorize(params);
+			},
+		};
+		server = createUsertrustServer({
+			config: withoutTimeout,
+			factory: async () => realistic,
+		});
+		const { port } = await server.listen();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", {
+			model: "claude-sonnet-4-6",
+		});
+		expect(res.status).toBe(200);
+		expect(fake.calls.authorized).toHaveLength(1);
+	}, 20_000);
+
+	it("shuts down even when the shutdown abort itself stalls", async () => {
+		// close() awaits the best-effort abort of every pending hold BEFORE
+		// pool.destroyAll(). An unbounded abort there does not merely fail to void a
+		// hold — it stops teardown from ever reaching the governor destroy that would
+		// have voided it, so a stalled ledger hangs shutdown. Same defect as the one
+		// this PR exists to fix, one path over.
+		const fake = createFakeGovernor();
+		const stalling: Governor = {
+			...fake.governor,
+			abort: () => new Promise<never>(() => {}),
+		};
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 200 }),
+			factory: async () => stalling,
+		});
+		const { port } = await server.listen();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", {
+			model: "claude-sonnet-4-6",
+		});
+		expect(res.status).toBe(200);
+		expect(server.pendingCount()).toBe(1);
+
+		const closed = server.close().then(() => "closed" as const);
+		const outcome = await Promise.race([
+			closed,
+			new Promise<"hung">((resolve) => setTimeout(() => resolve("hung"), 8_000)),
+		]);
+		expect(outcome).toBe("closed");
+		server = undefined; // already closed; afterEach must not close it twice
+	}, 20_000);
+
+	it("spends ONE budget across construction and the call, not one each", async () => {
+		// Per-await timeouts do not bound a request. A cold tenant waits for the
+		// governor and THEN for authorize, so two 4s timeouts are an 8s request — past
+		// the 5s at which usertrust-claude-code aborts. The client would be gone before
+		// its own server answered, and an authorize landing in that window records a
+		// hold whose transferId nobody ever received.
+		const fake = createFakeGovernor();
+		const slowBoth: Governor = {
+			...fake.governor,
+			authorize: async (params) => {
+				await new Promise((resolve) => setTimeout(resolve, 400));
+				return fake.governor.authorize(params);
+			},
+		};
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 500 }),
+			factory: async () => {
+				await new Promise((resolve) => setTimeout(resolve, 400));
+				return slowBoth;
+			},
+		});
+		const { port } = await server.listen();
+
+		const startedAt = Date.now();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", {
+			model: "claude-sonnet-4-6",
+		});
+		const elapsedMs = Date.now() - startedAt;
+
+		// 400ms construction + 400ms authorize = 800ms of work against a 500ms budget.
+		// Shared, that is a timeout; restarted per await it would be two 500ms windows
+		// and a 200 at ~800ms.
+		expect(res.status).toBe(503);
+		expect(elapsedMs).toBeLessThan(750);
+	}, 20_000);
+
+	it("sweeps N stalled holds within ONE budget, not N budgets", async () => {
+		// close() awaits pending holds sequentially. A per-entry budget makes shutdown
+		// N x requestTimeoutMs — which the code comment in abortEntry predicted and the
+		// code then did anyway. Shutdown must be bounded by the number the operator
+		// configured, not that number times however many holds happened to be open.
+		const fake = createFakeGovernor({ budget: 1_000_000 });
+		const stalling: Governor = {
+			...fake.governor,
+			abort: () => new Promise<never>(() => {}),
+		};
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 300 }),
+			factory: async () => stalling,
+		});
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+		for (let i = 0; i < 4; i++) {
+			expect((await post(base, "/v1/authorize", { model: "claude-sonnet-4-6" })).status).toBe(200);
+		}
+		expect(server.pendingCount()).toBe(4);
+
+		const startedAt = Date.now();
+		await server.close();
+		const elapsedMs = Date.now() - startedAt;
+		server = undefined;
+		// One 300ms budget for all four, not 4 x 300ms. Bounded well below the 1200ms
+		// the per-entry version took, with room for a loaded machine.
+		expect(elapsedMs).toBeLessThan(900);
+	}, 20_000);
+
+	it("shuts down when the governor's own destroy() stalls", async () => {
+		// destroy() voids pending transfers BEFORE closing the native client, and that
+		// void is a ledger request — which never rejects when the cluster is gone. So a
+		// governor built while TigerBeetle was healthy and destroyed after it died hung
+		// close() forever: bounding construction only moved the hang.
+		const fake = createFakeGovernor();
+		const stalling: Governor = {
+			...fake.governor,
+			destroy: () => new Promise<never>(() => {}),
+		};
+		server = createUsertrustServer({
+			// `shutdownTimeoutMs`, not `requestTimeoutMs` — teardown no longer shares
+			// the request budget, which is the whole point of the fix: at the old
+			// defaults a 4s request timeout pre-empted a 4-5s settling destroy() on
+			// EVERY shutdown during settlement, by arithmetic rather than bad luck.
+			config: config({ requestTimeoutMs: 250, shutdownTimeoutMs: 250 }),
+			factory: async () => stalling,
+		});
+		const { port } = await server.listen();
+		// Force the pool to actually hold a governor.
+		expect(
+			(
+				await fetch(`http://127.0.0.1:${port}/v1/budget`, {
+					headers: { authorization: `Bearer ${KEY}` },
+				})
+			).status,
+		).toBe(200);
+
+		const outcome = await Promise.race([
+			server.close().then((report) => ({ kind: "closed" as const, report })),
+			new Promise<{ kind: "hung" }>((resolve) =>
+				setTimeout(() => resolve({ kind: "hung" }), 8_000),
+			),
+		]);
+		expect(outcome.kind).toBe("closed");
+		// AND IT SAYS SO. Not hanging was never the whole requirement — the previous
+		// version asserted only that close() returned, which is exactly what a
+		// truncated teardown reported as success looks like from the outside. A
+		// stalled destroy() is abandoned work on the money path and the report has
+		// to carry that, or the CLI cannot decline to exit 0.
+		if (outcome.kind === "closed") {
+			expect(outcome.report.abandoned).toHaveLength(1);
+			expect(outcome.report.completed).toBe(0);
+		}
+		server = undefined;
+	}, 20_000);
+
+	it("bounds governor CONSTRUCTION too, not just the call", async () => {
+		// pool.get() is where the reported outage actually lived: createGovernor()
+		// never returned, so the request never reached authorize() at all.
+		server = createUsertrustServer({
+			config: config({ requestTimeoutMs: 300 }),
+			factory: () => new Promise<never>(() => {}),
+		});
+		const { port } = await server.listen();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", {
+			model: "claude-sonnet-4-6",
+		});
+		expect(res.status).toBe(503);
+		const body = (await res.json()) as { error: string; reason: string };
+		expect(body.error).toBe("governor_timeout");
+		expect(body.reason).toContain("pool.get");
+	}, 20_000);
 });
