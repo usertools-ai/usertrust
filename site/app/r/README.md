@@ -89,7 +89,16 @@ its multi-colour settlement spectrum), pinned by Subresource Integrity
 `brand.css` points `@font-face` at the kit with `font-display: swap` and system
 fallbacks. The script runs on the page that shows the verdict, so any other
 bytes are refused and the field fails closed; a kit update is a reviewed change
-to that one constant. If the kit is
+to that one constant.
+
+The kit's fonts dress the chrome only (the nav and the footer). CSS cannot pin
+a font, and a replaced font could remap glyphs so the verdict or the amount
+looks unlike the text the page renders, so everything inside the receipt
+renders in system stacks (`--verify-sans`, `--verify-mono`, tabular figures)
+that load nothing. `verify-typography.test.tsx` enumerates every external URL
+the route names and fails on any that is not a pinned script, a chrome-only
+font, a link, or the server-side resolver read, and on any brand family that
+reaches a selector outside the chrome. If the kit is
 unreachable the page renders on its plain ground in system fonts.
 `brand-assets.test.tsx` fails if a font file or a lattice copy is ever added
 under `site/app/r/`.
