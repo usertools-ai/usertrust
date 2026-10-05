@@ -331,7 +331,7 @@ function asObject(value: unknown): Json | null {
  *
  * The harness emits CANONICAL bytes, which buys an independent check for free:
  * any surviving byte mutation either fails to parse or fails the canonical
- * round-trip. The numeric scan covers what a round-trip cannot see — `14.5`
+ * round-trip. The numeric scan covers what a round-trip cannot see — `13.5`
  * canonicalizes back to itself.
  */
 function parses(bytes: Buffer): Json | null {
@@ -458,15 +458,48 @@ function brokenFacts(vector: Vector, bundle: MintedBundle): FactName[] {
 	// vocabulary so the gap is visible rather than quietly absent; see the
 	// dedicated test below.
 
-	// Equality 4 — segment-relative leaf index, in range.
+	// Equality 4 — segment-relative leaf index, shifted past a non-genesis
+	// segment's chain-link leaf (§4a, v0.9.6), and in range.
 	if (event !== null && inclusion !== null && checkpoint !== null) {
+		const offset = checkpoint.previousSegmentRoot === "genesis" ? 0 : 1;
 		const expectedIndex =
-			Number(event.sequence) - Number(checkpoint.segmentFirstSequence as number);
+			Number(event.sequence) - Number(checkpoint.segmentFirstSequence as number) + offset;
 		const inRange =
 			typeof inclusion.leafIndex === "number" &&
-			inclusion.leafIndex >= 0 &&
+			inclusion.leafIndex >= offset &&
 			inclusion.leafIndex < Number(checkpoint.treeSize);
-		if (inclusion.leafIndex !== expectedIndex || !inRange) broken.push("eq4");
+		// At leaf `offset` the event IS the segment's first event, so it links to
+		// the signed start hash (§4a, v0.9.6).
+		const firstEventLinks =
+			inclusion.leafIndex !== offset || event.previousHash === checkpoint.segmentStartPreviousHash;
+		// Every proof node the receipt can RECOMPUTE (§4a, v0.9.6): at an odd leaf
+		// the level-0 sibling is the leaf before — the chain link at leaf 1 of a
+		// non-genesis segment, else the predecessor event — and at leaf 2 of a
+		// non-genesis segment the level-1 node over leaves 0 and 1 (sibling 0
+		// when treeSize 3 promotes leaf 2 at level 0, else sibling 1).
+		// The comparison fails CLOSED: a missing sibling, or an operand that is
+		// not a digest, cannot be the node.
+		const digest = (value: unknown): string | null =>
+			typeof value === "string" && /^[0-9a-f]{64}$/.test(value) ? value : null;
+		const leafOf = (raw: string | null): string | null =>
+			raw === null ? null : merkleLeafHash(raw);
+		const index = inclusion.leafIndex;
+		const link = digest(checkpoint.previousSegmentRoot);
+		const previous = digest(event.previousHash);
+		let node: readonly [number, string | null] | null = null;
+		if (typeof index === "number" && index % 2 === 1) {
+			node = [0, leafOf(index - 1 >= offset ? previous : link)];
+		} else if (index === 2 && offset === 1) {
+			const position = Number(checkpoint.treeSize) === 3 ? 0 : 1;
+			const [left, right] = [leafOf(link), leafOf(previous)];
+			node = [position, left === null || right === null ? null : merkleInteriorHash(left, right)];
+		}
+		const siblings = Array.isArray(inclusion.siblings) ? inclusion.siblings : [];
+		const exposed = node === null ? undefined : asObject(siblings[node[0]])?.hash;
+		const nodeBound = node === null || (node[1] !== null && exposed === node[1]);
+		if (inclusion.leafIndex !== expectedIndex || !inRange || !firstEventLinks || !nodeBound) {
+			broken.push("eq4");
+		}
 	}
 
 	// Equalities 5, 6, 8 — the inclusion/checkpoint bindings.
@@ -583,11 +616,13 @@ describe("a minted receipt is real proxy-v1 material", () => {
 		expect(data.spec).toBe("ut1");
 	});
 
-	it("equality 4 — leafIndex is SEGMENT-relative and in range", () => {
+	it("equality 4 — leafIndex is SEGMENT-relative, past the chain-link leaf, and in range", () => {
+		// The default mint segment is non-genesis: its leaf 0 is the chain link.
+		expect(checkpoint.previousSegmentRoot).not.toBe("genesis");
 		expect(inclusion.leafIndex).toBe(
-			Number(event.sequence) - Number(checkpoint.segmentFirstSequence),
+			Number(event.sequence) - Number(checkpoint.segmentFirstSequence) + 1,
 		);
-		expect(inclusion.leafIndex).toBeGreaterThanOrEqual(0);
+		expect(inclusion.leafIndex).toBeGreaterThanOrEqual(1);
 		expect(inclusion.leafIndex).toBeLessThan(Number(checkpoint.treeSize));
 	});
 

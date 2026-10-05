@@ -4,7 +4,7 @@
 this public repo so the next page change cannot restore the rejected wording
 from a still-sound argument.
 
-Cam reviewed the amount rendered and **rejected the floor.** `"at least $X of
+The rendered amount was reviewed, and **the floor was rejected.** `"at least $X of
 spend was CAUSED…"` is a vague claim about an undefined quantity. The
 replacement is the **unqualified number, with its scope named beneath it:**
 
@@ -17,21 +17,41 @@ Honesty comes from naming the scope, not from hedging the figure. Every
 delegation posture states what its number covers. None of them qualifies the
 number itself.
 
+**v0.10 — cluster receipts name an agent key and a window, not a session.**
+Every receipt issued is a cluster receipt (`receipt-spec.md` §15). A cluster
+receipt covers every charge to one agent key's account over a system-defined
+window, so its scope line names the key:
+
+```
+$0.4820
+Charged to this agent key · delegated work bills to the delegate
+```
+
+The claim line it accompanies is "charged to this agent key between
+`<windowStart>` and `<windowEnd>` — $X", with the window's ledger timestamps
+rendered as RFC 3339 UTC. The scoped never-understates sentence reads "never
+understates the ledger-POSTed charges to this agent key in this window".
+
+- **The rule does not change.** The number stays unqualified, its scope stays
+  named beneath it, and no floor is restored.
+- **The session form above belongs to the reserved session kind**, which is
+  defined and never issued. A page renders each receipt with its own kind's
+  sentence, selected by `scope`, and never one kind's sentence under the
+  other's number.
+
 The `indeterminate` bound clause still holds — unknown coverage supports no
 bound in either direction — and lives in the R39 copy, not as an exception to
 a floor that no longer exists.
 
 Do not restore `"at least $"` on this page. The longer design-doc R40 (DRAFT
 v0.9) and `receipt-spec.md` §7 bound clause were written before this review;
-they are amended in the private spec copies
-(`usertools-stealth/docs/specs/from-usertrust/` and
-`usertools-stealth/docs/specs/receipt-page/README.md`).
+they are amended in the operator's private copies of those documents.
 
 ## Amendment 2026-10-05: the brief receipt
 
-**Decided by Cam:** a receipt is read at a glance and should be brief. The
-verified page leads with one card (the verdict, the amount, **one scope chip**,
-what it covers, when, and a short ID); everything else is behind one collapsed
+**Decided:** a receipt is read at a glance and should be brief. The verified
+page leads with one card (the verdict, the amount, **one scope chip**, what it
+covers, when, and a short ID); everything else is behind one collapsed
 "Details". Nothing is removed from the page.
 
 What this changes, and what it does not:
@@ -66,10 +86,13 @@ What this changes, and what it does not:
 
 - **The lead.** The plain word and line come first; the full wording is one
   disclosure away. Nothing is removed from the page.
-- **The share card.** Its one word is now the page's plain word, so
-  `ogCardWord` no longer equals `shellHeadline`. Its receipt-specific content
-  is still only that word and the short receipt ID: no amount, no kind, no
-  work claim.
+- **The share card.** Its word is the page's plain word, so `ogCardWord` no
+  longer equals `shellHeadline`. On a verified receipt the card also carries
+  the amount; it carries no receipt ID, no account handle and no other
+  receipt's ID. This replaces the earlier default for the card (verdict only,
+  amount on the page): the amount is what a receipt is shared for, and an ID
+  or a handle is what would tie it back to someone. The amount's posture label
+  stays on the page.
 - **Unchanged:** each state's register (except the 404's, below), and the rule
   that nothing short of verified is ever green.
 - **The 404 (receipt-spec v0.10 §15.13).** Every 404 reads "no receipt under
@@ -80,12 +103,25 @@ What this changes, and what it does not:
   whether one is coming. A 404 is therefore neutral: never rendered as
   forgery, and never green. The loud "never allocated — integrity red flag"
   rendering is retired for every ID.
-- **The cluster receipt's glance** shows the agent handle; the ledger window,
-  with its duration and idle threshold; the governed calls it covers, with
-  their models and provider; the link to the previous receipt; and the
-  skipped-windows disclosure. That disclosure is NEVER folded into Details: it
-  is an honesty disclosure, and a gap the receipt admits is read with the
-  receipt, not after a click.
+- **The cluster receipt's glance** is headed "Receipt", as every kind is; its
+  kind is shown in Details as `SPEC ut1 · SCOPE cluster`. It shows the ledger
+  window, with its duration and idle threshold; the governed calls it covers,
+  with their models and provider; and the skipped-windows disclosure. That
+  disclosure is NEVER folded into Details: it is an honesty disclosure, and a
+  gap the receipt admits is read with the receipt, not after a click.
 
 Tests pin the plain layer, the card's word and the 404
 (`site/app/r/brief.test.tsx`, `states.test.tsx`, `lib/shell-copy.test.ts`).
+
+### Nothing on the page ties a receipt back to whoever it charged
+
+The public page renders no account handle, no previous receipt's ID or link to
+it, and no repository, in the glance, in Details or on the share card. The
+predecessor check still reports its result, without an ID; skipped windows
+show their times and reasons, without IDs. The signed bytes are served
+unchanged (`receipt.json`, `envelope.json`), so they still carry those fields
+until a later spec version changes the document itself.
+
+Tests pin it for every cluster fixture (`site/app/r/cluster-rendering.test.tsx`):
+no `a1_` anywhere in the render, no `ut1_` but the receipt's own, no
+`repoId`, and no share-card line carrying either prefix.

@@ -255,10 +255,21 @@ describe("a declared format is also a TYPE — a member of the wrong type is not
 });
 
 describe("§2/§4a — the digests that were presence-only", () => {
+	// An explicit commit base: the default mint is a SESSION receipt, and
+	// spreading a patch over it would plant unknown members — refused at step 1
+	// for the wrong reason, which reads exactly like the right one.
 	const commitWork = (patch: Record<string, unknown>): MintOptions => ({
 		projection: (p: Projection) => ({
 			...p,
-			work: { ...(p.work as Record<string, unknown>), ...patch },
+			work: {
+				kind: "commit",
+				repoId: "github.com:R_kgDOK1x2Yw",
+				oid: "37df16d3a4c1b8e05f92d7a6c31e4b8079fa2d51",
+				oidAlg: "sha1",
+				objectSha256: "b".repeat(64),
+				repositoryMembership: { status: "providerVerified", proofId: "pv_9f3a2c81d0" },
+				...patch,
+			},
 		}),
 	});
 
@@ -281,9 +292,11 @@ describe("§2/§4a — the digests that were presence-only", () => {
 			verifyMinted(commitWork({ oid: "a".repeat(40), oidAlg: "sha256" })),
 			"sha1-length OID under sha256",
 		);
-		expect(verifyMinted(commitWork({ oid: "a".repeat(64), oidAlg: "sha256" })).verdict).toBe(
-			"VERIFIED_CHECKPOINT",
-		);
+		// Well formed: step 1 accepts it, and only step 7's v0.9.6 refusal of
+		// artifact claims stops it — never the format.
+		expect(
+			verifyMinted(commitWork({ oid: "a".repeat(64), oidAlg: "sha256" })).failure,
+		).toMatchObject({ step: "semantics", code: "SEMANTIC_INVALID" });
 	});
 
 	it("refuses an `event.previousHash` that is not the previous event's digest shape", () => {
@@ -291,10 +304,12 @@ describe("§2/§4a — the digests that were presence-only", () => {
 			verifyMinted({ event: (e) => ({ ...e, previousHash: "genesis" }) }),
 			"previousHash genesis",
 		);
-		// The all-zero genesis sentinel IS a digest shape and stays legal.
-		expect(verifyMinted({ event: (e) => ({ ...e, previousHash: "0".repeat(64) }) }).verdict).toBe(
-			"VERIFIED_CHECKPOINT",
-		);
+		// The all-zero genesis sentinel IS a digest shape and stays legal — shown
+		// at leaf 4, where no proof node pins the predecessor (§4a, v0.9.6).
+		expect(
+			verifyMinted({ mintLeafIndex: 4, event: (e) => ({ ...e, previousHash: "0".repeat(64) }) })
+				.verdict,
+		).toBe("VERIFIED_CHECKPOINT");
 	});
 
 	it("refuses a lineage edge that is not a digest, at step 6", () => {
@@ -1081,11 +1096,8 @@ describe("the field table is CLOSED — every declared format is enforced", () =
 		});
 	}
 
-	it("and accepts every variant when its members ARE well formed — no false positives", () => {
+	it("and passes step 1 for every variant whose members ARE well formed — no false positives", () => {
 		for (const path of [
-			"work[commit].oid",
-			"work[pr].contentBinding[publicSha256].sha256",
-			"work[issue].contentBinding[privateHmacSha256V1].commitment",
 			"work[session].repoId",
 			"work[session].origin.sourceReservationReceiptId",
 		]) {
@@ -1093,6 +1105,18 @@ describe("the field table is CLOSED — every declared format is enforced", () =
 			expect(verifyMinted({ projection: (p: Projection) => ({ ...p, work }) }).verdict, path).toBe(
 				"VERIFIED_CHECKPOINT",
 			);
+		}
+		// The artifact variants pass step 1 too; step 7 then refuses them as
+		// claims no verifier can check (v0.9.6), which is not a format failure.
+		for (const path of [
+			"work[commit].oid",
+			"work[pr].contentBinding[publicSha256].sha256",
+			"work[issue].contentBinding[privateHmacSha256V1].commitment",
+		]) {
+			const work = workForPath(path) as Record<string, unknown>;
+			const actual = verifyMinted({ projection: (p: Projection) => ({ ...p, work }) });
+			expect(actual.failure, path).toMatchObject({ step: "semantics", code: "SEMANTIC_INVALID" });
+			expect(actual.failure?.detail, path).toContain("is an artifact claim");
 		}
 	});
 });
