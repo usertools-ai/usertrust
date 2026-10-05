@@ -154,14 +154,22 @@ export function createUsertrustServer(opts: {
 			});
 			return;
 		}
+		// The TTL clock starts NOW, before any ledger I/O this request causes: the
+		// ledger's own pending timeout starts when the reserve commits, which may be
+		// long before a slow (or retried) authorize returns. Started after it, the
+		// sweep could come due only after the ledger had already expired the hold.
+		const requestedAt = Date.now();
 		const governor = await pool.get(tenant);
 		try {
 			const auth = await governor.authorize(parsed.data);
-			// A keyed replay answers with the SAME live hold. It is already pending (or
-			// mid-terminal) here, so it neither restarts the TTL clock nor announces a
-			// second hold that does not exist.
-			if (!pending.has(auth.transferId) && !terminating.has(auth.transferId)) {
-				pending.set(auth.transferId, { auth, tenantId: tenant.id, createdAt: Date.now() });
+			const held = pending.get(auth.transferId);
+			if (held !== undefined) {
+				// A keyed replay answers with the SAME live hold: it neither restarts the
+				// TTL clock nor announces a second hold. Its clock only ever moves EARLIER
+				// — the request that started this hold may be the one answering second.
+				held.createdAt = Math.min(held.createdAt, requestedAt);
+			} else if (!terminating.has(auth.transferId)) {
+				pending.set(auth.transferId, { auth, tenantId: tenant.id, createdAt: requestedAt });
 				bus.publish(tenant.id, {
 					type: "authorized",
 					transferId: auth.transferId,

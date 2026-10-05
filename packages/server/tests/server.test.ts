@@ -650,6 +650,58 @@ describe("caller idempotency keys and principal (#205)", () => {
 		expect(await server?.sweepExpired(firstSeen + 1_005)).toBe(1);
 	});
 
+	it("the TTL clock starts when the request ARRIVES, before the ledger I/O: a slow authorize cannot push the sweep past the ledger's own expiry", async () => {
+		const fake = createFakeGovernor();
+		const place = fake.governor.authorize.bind(fake.governor);
+		fake.governor.authorize = async (params) => {
+			// The reserve commits at once; its reply comes back 300 ms later (a lost
+			// reply and a reconnect, say). The ledger's clock is already running.
+			const auth = await place(params);
+			await new Promise((resolve) => setTimeout(resolve, 300));
+			return auth;
+		};
+		server = createUsertrustServer({
+			config: config({ pendingTtlMs: 1_000 }),
+			factory: async () => fake.governor,
+		});
+		const { port } = await server.listen();
+		const sent = Date.now();
+		await post(`http://127.0.0.1:${port}`, "/v1/authorize", { model: "m" });
+
+		// Due by the request's arrival. A clock started after the reply would not be
+		// due for another ~300 ms.
+		expect(await server.sweepExpired(sent + 1_150)).toBe(1);
+	});
+
+	it("concurrent requests for one keyed hold keep the EARLIEST clock, whichever answers first", async () => {
+		const fake = createFakeGovernor();
+		const place = fake.governor.authorize.bind(fake.governor);
+		let first = true;
+		fake.governor.authorize = async (params) => {
+			const auth = await place(params);
+			if (first) {
+				first = false;
+				await new Promise((resolve) => setTimeout(resolve, 300));
+			}
+			return auth;
+		};
+		server = createUsertrustServer({
+			config: config({ pendingTtlMs: 1_000 }),
+			factory: async () => fake.governor,
+		});
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+		const sent = Date.now();
+		const placing = post(base, "/v1/authorize", { model: "m", idempotencyKey: "call-1" });
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		// The replay answers first, ~100 ms after the hold's own request arrived.
+		await post(base, "/v1/authorize", { model: "m", idempotencyKey: "call-1" });
+		await placing;
+
+		expect(server.pendingCount()).toBe(1);
+		expect(await server.sweepExpired(sent + 1_050)).toBe(1);
+	});
+
 	it("an already-charged key is 409 already_settled at authorize", async () => {
 		const fake = createFakeGovernor();
 		fake.governor.authorize = async () => {
