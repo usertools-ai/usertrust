@@ -2406,7 +2406,11 @@ Ship gate before mint-endpoint implementation:
       - RA-1, `timeout = 0` on every armed hold;
       - RA-2, no client-supplied (`imported`) timestamps;
       - RA-3, every governed charge a debit hold — each measured on the
-        deployed ledger, not asserted.
+        deployed ledger, not asserted;
+      - RA-4, no unarmed hold with `timeout = 0`. It is a convention, so it
+        is measured but not enforced, and the minter carries §15.2's
+        defensive rule, reading admission records after the account's
+        transfers.
 - [ ] **`packages/verify`:**
       - the cluster schema, selected by `scope` (§15.6);
       - step 3(c), step 7's cluster list, and step 8's second root;
@@ -2875,10 +2879,24 @@ fixing the scope BEFORE the work. Clusters achieve it in four ways:
     reached its expiry instant, `ts(h) + timeout × 10^9` (the timeout is in
     seconds). The ledger then accepts no post or void for it, and records no
     transfer for the expiry.
-  - A hold is **open** until it is posted, voided or expired. `res(h)` is the
-    post or void that resolved `h`. It names `h` (`pending_id`) and carries
-    `h`'s accounts, so it is itself a transfer of `A`. For an expired hold,
-    `ts(res(h))` means its expiry instant.
+  - **Defensive rule: an UNARMED hold with `timeout = 0` that is neither
+    posted nor voided counts as RESOLVED at its own timestamp.** It cannot
+    expire, and nothing tracks it to a post or a void, so without this rule it
+    would hold its window open, and with it the account's chain, forever.
+    - Whether a hold is armed MUST be read AFTER the account's transfers. An
+      admission record is written BEFORE its hold exists, so in that order an
+      armed hold is never taken for unarmed.
+    - This resolution is an assumption, not a ledger fact. If such a hold is
+      posted or voided later, windows not yet minted are re-cut with that
+      resolution. Minted windows never are (§15.3).
+    - No current producer path creates such a hold, but nothing enforces
+      that (RA-4). The rule is defense in depth, and its window is refused in
+      any case (§15.5).
+  - A hold is **open** until it is posted, voided or expired, or the
+    defensive rule resolves it. `res(h)` is the post or void that resolved
+    `h`. It names `h` (`pending_id`) and carries `h`'s accounts, so it is
+    itself a transfer of `A`. For an expired hold, `ts(res(h))` means its
+    expiry instant. For a hold the defensive rule resolves, it means `ts(h)`.
 - **Activity end `end(W)`** of a set of holds `W`: the latest of their
   timestamps and their resolutions' timestamps,
   `max over h ∈ W of max(ts(h), ts(res(h)))`. It is UNBOUNDED while any member
@@ -2920,8 +2938,9 @@ define only what the ledger does not.
   the ledger's latest transfer. Its timestamp is closure's evidence (§15.4).
 - **Expiry, and no chosen time:** an armed hold carries `timeout = 0`, so it
   ends in a transfer (RA-1). An unarmed hold's ledger timeout gives it a
-  computable expiry instant: its timestamp plus its timeout. No transfer
-  carries the `imported` flag (RA-2), so no client chooses a timestamp.
+  computable expiry instant: its timestamp plus its timeout. An unarmed hold
+  with no timeout falls under the defensive rule above. No transfer carries
+  the `imported` flag (RA-2), so no client chooses a timestamp.
 
 The ledger has no idle-window primitive and no heartbeat. §15.3 and §15.4
 define the window over the primitives above, and v1 adds no heartbeat (§15.4).
@@ -2932,9 +2951,10 @@ configuration. Each is measured on the deployed system (§11), not assumed.
 - **RA-1. No ARMED hold can expire.** Every armed hold carries `timeout = 0`,
   as §6a already requires of receipt-bound holds, so it ends in a post or a
   void. An armed hold that expired anyway is an integrity incident, and its
-  window is refused (`cluster-void`, §15.5). An UNARMED hold may expire. Its
-  expiry counts as its resolution (above), so it never holds a window open
-  forever, and its window is refused (`unarmed-hold`, §15.5).
+  window is refused (`cluster-void`, §15.5). An UNARMED hold either expires,
+  which counts as its resolution, or, with `timeout = 0`, the defensive rule
+  resolves it at its own timestamp (above). Either way it never holds a
+  window open forever, and its window is refused (`unarmed-hold`, §15.5).
 - **RA-2. No transfer of a receipt account carries a client-supplied
   timestamp** (TigerBeetle's `imported` flag). A chosen timestamp would let a
   transfer's creator place a window boundary, which the ruling forbids.
@@ -2946,6 +2966,11 @@ configuration. Each is measured on the deployed system (§11), not assumed.
   - Were governed calls charged by single-phase debits, a receipt would
     understate the account's charges without any rule here noticing. That is
     why this is an invariant rather than an assumption.
+- **RA-4. No unarmed hold carries `timeout = 0` — a producer CONVENTION,
+  stated as an operator invariant.** A hold's ledger timeout defaults to
+  300 s, and only the ARMED paths pass `timeout = 0`, each right after it
+  records the admission. Nothing enforces this, and a third party cannot
+  check it. That is why §15.2's defensive rule exists.
 
 ### 15.3 The window — system-defined (RULED)
 
@@ -2991,7 +3016,8 @@ exactly these windows.
 
 A window `W` of `A` is **CLOSED** iff both hold:
 
-- **(a)** every hold in it is resolved — posted, voided or expired; and
+- **(a)** every hold in it is resolved — posted, voided or expired, or by
+  §15.2's defensive rule; and
 - **(b) LEDGER-TIME EVIDENCE:** the ledger clock satisfies
   `L ≥ windowEnd + θ_W`.
 
@@ -3009,7 +3035,10 @@ window from that later read.
 
 **(b) makes closure irrevocable.** Ledger timestamps strictly increase in
 commit order. So a closed window can never gain a member, and its activity end
-can never move. Its completeness is a fixed fact, not a race.
+can never move. Its completeness is a fixed fact, not a race. The one
+exception is a hold that §15.2's defensive rule resolved and the ledger later
+resolves for real. That window is refused either way, and only windows not
+yet minted are re-cut.
 
 - **The minter's clock never decides closure.** It decides only WHEN to look.
 - **No heartbeat in v1.** An idle LEDGER does not advance `L`. A window then
@@ -3021,8 +3050,9 @@ can never move. Its completeness is a fixed fact, not a race.
   ARMED hold stays open until the operator's sweep of abandoned holds voids it.
   That void is not pre-provider, so the window then closes UNMINTABLE
   (`cluster-void`, §15.5), and the account's next receipt discloses it. An
-  abandoned UNARMED hold stays open until its ledger timeout expires it, and
-  its window is refused (`unarmed-hold`).
+  abandoned UNARMED hold resolves when its ledger timeout expires it, or at
+  once by §15.2's defensive rule if it has none. Its window is refused
+  (`unarmed-hold`).
   - Until the sweep, every later hold of the account joins that window, so one
     abandoned hold carries the later charges into the refused window with it.
   - The disclosure shows the refused window's span and reason. How soon the
@@ -3511,6 +3541,9 @@ ONE window. It does not claim:
 - **θ's history:** that the account's `θ` never changed after its first
   hold. v0.10 makes it immutable (§15.2), and a history of changes is
   reserved for a later version;
+- **unarmed holds with no timeout:** that none exists. RA-4 is a producer
+  convention that nothing enforces, and §15.2's defensive rule keeps the
+  account's chain moving if one does;
 - **identity:** which ledger account the handle names.
 
 Those are facts about the operator's ledger and records, which a third party
