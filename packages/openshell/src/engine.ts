@@ -9,9 +9,10 @@
  * running the same steps again:
  *   1. claim `open → settling`, WRITING the intent (post, overage) with the claim;
  *   2. post the hold (`post` id);
+ *   (the overage's DEBT is recorded once with the claim, so the next reservation sees
+ *   it at once; a confirmed expiry reverses it with the `expired` transition);
  *   3. charge any overage to the budget's debt account (`overage` id), OUTSIDE any
- *      journal transaction, then record it once (`applyDebt`) in a synchronous one —
- *      a crash between the two replays the charge (same id, verified) and records once;
+ *      journal transaction — a crash replays it (same id, verified);
  *   4. `settling → settled`.
  * The receipt event (step 5) and the late-settlement path are the next slice.
  */
@@ -111,6 +112,11 @@ export class HoldEngine {
 		this.now = opts.now ?? Date.now;
 	}
 
+	/** The applied-marker id of a hold's overage debt: the ledger transfer it records. */
+	private overageId(holdKey: string): string {
+		return transferIdFor(holdKey, "overage").toString();
+	}
+
 	/** The journal's deadline, applied to the ledger calls made outside its lock too. */
 	private get ms(): number {
 		return this.journal.ledgerTimeoutMs;
@@ -152,7 +158,24 @@ export class HoldEngine {
 
 	/** Settle a hold to the given intent; the loser of the claim acts BY STATE. */
 	async settle(holdKey: string, intent: SettlementIntent): Promise<SettleOutcome> {
-		const claim = await this.journal.claimSettlement(holdKey, intent);
+		// The claim and the overage's DEBT commit together: from the moment the overage is
+		// known, the next reservation sees it — never after the ledger charge (#174 r1: a
+		// reservation in that gap read the old debt and admitted past the budget).
+		const claim = await this.journal.writeTx(() => {
+			if (this.journal.cas(holdKey, "open", "settling", { intent })) {
+				const row = this.journal.get(holdKey);
+				if (row !== undefined && intent.overage > 0) {
+					this.journal.applyDebt(row.budgetId, this.overageId(holdKey), intent.overage);
+				}
+				return { won: true } as const;
+			}
+			const row = this.journal.get(holdKey);
+			return {
+				won: false,
+				state: row?.state ?? "missing",
+				intent: row?.intent ?? null,
+			} as const;
+		});
 		if (claim.won) return this.completeSettlement(holdKey, intent, false);
 		switch (claim.state) {
 			case "settling":
@@ -184,12 +207,20 @@ export class HoldEngine {
 		);
 		if (posted === "expired") {
 			// A CONFIRMED expiry from the ledger: the hold's one terminal is `expired`, and
-			// the actual usage goes through the late-settlement path.
-			await this.journal.writeTx(() =>
-				this.journal.cas(holdKey, "settling", "expired", {
+			// the actual usage goes through the late-settlement path. The overage debt recorded
+			// with the claim was never charged: it is reversed in the same transaction (once).
+			await this.journal.writeTx(() => {
+				const moved = this.journal.cas(holdKey, "settling", "expired", {
 					terminalKind: "hold_expired_unsettled",
-				}),
-			);
+				});
+				if (moved && intent.overage > 0) {
+					this.journal.applyDebt(
+						row.budgetId,
+						`${this.overageId(holdKey)}:reversed`,
+						-intent.overage,
+					);
+				}
+			});
 			return { outcome: "late_required", state: "expired" };
 		}
 		if (posted === "unknown") return { outcome: "in_flight" };
@@ -197,8 +228,8 @@ export class HoldEngine {
 			return { outcome: "incident", state: "settling" };
 		}
 		if (intent.overage > 0) {
-			// The charge runs OUTSIDE any journal transaction (writeTx takes a synchronous
-			// body); its derived id makes a replay after a crash a verified no-op.
+			// The debt is already recorded (with the claim). The ledger charge runs OUTSIDE any
+			// journal transaction; its derived id makes a replay after a crash a verified no-op.
 			await within("chargeDebt", this.ms, () =>
 				this.ledger.chargeDebt({
 					budgetId: row.budgetId,
@@ -206,13 +237,6 @@ export class HoldEngine {
 					role: "overage",
 					amount: intent.overage,
 				}),
-			);
-			await this.journal.writeTx(() =>
-				this.journal.applyDebt(
-					row.budgetId,
-					transferIdFor(holdKey, "overage").toString(),
-					intent.overage,
-				),
 			);
 		}
 		await this.journal.writeTx(() =>

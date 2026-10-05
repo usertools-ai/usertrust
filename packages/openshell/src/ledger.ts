@@ -13,7 +13,12 @@
 
 import { TBTransferError, TransferIdRetiredError, TrustTBClient, XFER_SPEND } from "usertrust";
 
-export type TransferRole = "reserve" | "post" | "void" | "overage" | "late";
+/**
+ * `void-late` voids a placement that LANDED after the `void` id was retired by a not-found
+ * attempt (#174 r1): it is tried only once the read-back shows the reserve transfer exists, so
+ * its own first attempt cannot be a not-found.
+ */
+export type TransferRole = "reserve" | "post" | "void" | "void-late" | "overage" | "late";
 
 /** The ledger transfer id for one role of one hold. */
 export function transferIdFor(holdKey: string, role: TransferRole): bigint {
@@ -135,13 +140,14 @@ export class TigerBeetleLedger implements LedgerPort {
 	 * is `unknown`: the caller retries later, and a not-yet-expired hold resolves at its timeout.
 	 */
 	private async observe(holdKey: string): Promise<Observed> {
-		const [reserve, post, voided] = await Promise.all([
+		const [reserve, post, voided, voidedLate] = await Promise.all([
 			this.tb.lookupTransfer(transferIdFor(holdKey, "reserve")),
 			this.tb.lookupTransfer(transferIdFor(holdKey, "post")),
 			this.tb.lookupTransfer(transferIdFor(holdKey, "void")),
+			this.tb.lookupTransfer(transferIdFor(holdKey, "void-late")),
 		]);
 		if (post !== null) return "posted";
-		if (voided !== null) return "voided";
+		if (voided !== null || voidedLate !== null) return "voided";
 		if (reserve === null) return "not_found";
 		if (reserve.timeout === 0) return "unknown"; // no ledger expiry at all
 		const expiresAtNs = reserve.timestamp + BigInt(reserve.timeout) * 1_000_000_000n;
@@ -206,14 +212,21 @@ export class TigerBeetleLedger implements LedgerPort {
 	}
 
 	async release(p: { holdKey: string }): Promise<VoidOutcome> {
+		return this.voidWith(p.holdKey, "void");
+	}
+
+	private async voidWith(holdKey: string, role: "void" | "void-late"): Promise<VoidOutcome> {
 		try {
-			await this.tb.voidTransfer(transferIdFor(p.holdKey, "reserve"), {
-				transferId: transferIdFor(p.holdKey, "void"),
+			await this.tb.voidTransfer(transferIdFor(holdKey, "reserve"), {
+				transferId: transferIdFor(holdKey, role),
 			});
 			return "done";
 		} catch (err) {
 			if (err instanceof TransferIdRetiredError) {
-				const seen = await this.observe(p.holdKey);
+				const seen = await this.observe(holdKey);
+				// The reserve exists and is unresolved, but the `void` id was retired by a
+				// not-found attempt: the placement landed LATE. Void it now under `void-late`.
+				if (seen === "unknown" && role === "void") return this.voidWith(holdKey, "void-late");
 				return seen === "voided" ? "done" : seen;
 			}
 			if (err instanceof TBTransferError) {

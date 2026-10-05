@@ -277,6 +277,30 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		expect(journal.get(k)).toMatchObject({ state: "voided", terminalKind: "voided_not_found" });
 	});
 
+	it("#174 r1 connector: a placement that LANDS after the void id was retired is voided at once under `void-late` (not left until its timeout)", async () => {
+		const { engine, ledger, budgetId, journal, walletAcct, key } = await setup(1_000);
+		const k = key();
+		await expect(
+			journal.reserve({
+				holdId: k,
+				budgetId,
+				amount: 10,
+				ttlAt: Date.now() + 60_000,
+				admitBy: Date.now() + 30_000,
+				availableCredit: () => 1_000,
+				placeHold: () => {
+					throw new Error("lost before the ledger");
+				},
+			}),
+		).rejects.toThrow(/lost before the ledger/);
+		expect(await engine.release(k)).toEqual({ outcome: "in_flight" }); // retires the `void` id
+		await ledger.placeHold({ budgetId, holdKey: k, amount: 10, timeoutSeconds: 900 }); // it landed
+		expect((await walletAcct())?.debits_pending).toBe(10n);
+		expect(await engine.release(k)).toEqual({ outcome: "voided" });
+		expect(journal.get(k)).toMatchObject({ state: "voided", terminalKind: "voided" });
+		expect((await walletAcct())?.debits_pending, "released now, not at its timeout").toBe(0n);
+	});
+
 	it("#174 r1 P1: a budget id with `::` is refused at reserve — nothing pending — and is exactly what the escrow namespace refuses", async () => {
 		const { tb, engine, walletAcct, key } = await setup(1_000);
 		await expect(

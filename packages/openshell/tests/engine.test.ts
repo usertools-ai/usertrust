@@ -29,6 +29,8 @@ class FakeLedger implements LedgerPort {
 	/** Answer the next post / release with this outcome (a retired id's read-back). */
 	postAnswer: PostOutcome | null = null;
 	releaseAnswer: VoidOutcome | null = null;
+	/** While set, chargeDebt waits on it: the gap between the claim and the ledger charge. */
+	chargeGate: Promise<void> | null = null;
 	hang: "placeHold" | null = null;
 
 	private once(id: bigint, amount: number): boolean {
@@ -79,6 +81,7 @@ class FakeLedger implements LedgerPort {
 		role: "overage" | "late";
 		amount: number;
 	}): Promise<void> {
+		if (this.chargeGate !== null) await this.chargeGate;
 		if (this.once(transferIdFor(p.holdKey, p.role), p.amount)) {
 			this.debt.set(p.budgetId, (this.debt.get(p.budgetId) ?? 0) + p.amount);
 		}
@@ -213,14 +216,14 @@ describe("hold engine: settle — exactly one post, exactly one terminal", () =>
 		expect(ledger.applied.get(transferIdFor("k1", "post").toString())).toBe(80);
 		expect(journal.get("k1")?.state).toBe("settled");
 	});
-	it("a crash after the debt charge and before it is recorded: the resume records it ONCE", async () => {
+	it("a crash after the ledger's debt charge: the debt was recorded WITH the claim, and the resume neither charges nor records it twice", async () => {
 		const { journal, ledger, engine } = setup();
 		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
 		ledger.crashAfter = "chargeDebt";
 		await expect(engine.settle("k1", { post: 100, overage: 25 })).rejects.toThrow(
 			/died after chargeDebt/,
 		);
-		expect(journal.debtOf("b"), "the journal write rolled back with the crash").toBe(0);
+		expect(journal.debtOf("b"), "recorded with the claim, before any ledger call").toBe(25);
 		await engine.settle("k1", { post: 100, overage: 25 });
 		expect(ledger.debt.get("b")).toBe(25);
 		expect(journal.debtOf("b")).toBe(25);
@@ -401,5 +404,44 @@ describe("#174 r1: the three unbilled-cost paths", () => {
 		ledger.releaseAnswer = "unknown";
 		expect(await engine.release("k1")).toEqual({ outcome: "in_flight" });
 		expect(journal.get("k1")?.state).toBe("voiding");
+	});
+});
+
+describe("#174 r1 connector: the overage's debt blocks reservations from the moment it is known", () => {
+	it("a reservation in the gap between the claim and the ledger's debt charge sees the debt (no admission past the budget)", async () => {
+		const { journal, ledger, engine } = setup(200);
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		let open!: () => void;
+		ledger.chargeGate = new Promise<void>((r) => {
+			open = r;
+		});
+		const settling = engine.settle("k1", { post: 100, overage: 50 });
+		await new Promise((r) => setTimeout(r, 10)); // the charge is in flight
+		expect(journal.debtOf("b")).toBe(50);
+		// 100 available − 50 debt < 100: refused (it was admitted while the debt was unrecorded).
+		expect(await engine.reserve({ holdKey: "k2", budgetId: "b", amount: 100 })).toEqual({
+			admitted: false,
+			reason: "budget_exceeded",
+		});
+		open();
+		expect(await settling).toEqual({ outcome: "settled", resumed: false });
+		expect(journal.debtOf("b")).toBe(50);
+		expect(ledger.debt.get("b")).toBe(50);
+	});
+
+	it("a confirmed expiry reverses the overage debt recorded with the claim (it was never charged), once", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		ledger.expired.add("k1");
+		expect(await engine.settle("k1", { post: 100, overage: 30 })).toEqual({
+			outcome: "late_required",
+			state: "expired",
+		});
+		expect(journal.debtOf("b")).toBe(0);
+		expect(ledger.count("k1", "overage")).toBe(0);
+		expect(await engine.settle("k1", { post: 100, overage: 30 })).toMatchObject({
+			outcome: "late_required",
+		});
+		expect(journal.debtOf("b"), "a repeat reverses nothing more").toBe(0);
 	});
 });
