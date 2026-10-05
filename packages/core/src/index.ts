@@ -94,9 +94,11 @@ export { createGovernor } from "./headless.js";
 // called: the argument is unnameable and unconstructible outside this package.
 export {
 	PendingReplayError,
+	TBTransferError,
 	TransferIdRetiredError,
 	TransferReplayMismatchError,
 	TrustTBClient,
+	XFER_SPEND,
 } from "./ledger/client.js";
 export type { ModelRates, RateResolution } from "./ledger/pricing.js";
 // Pricing

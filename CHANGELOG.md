@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prices a variant (`o3-pro`, a dated snapshot, a `-pro` or `-fast` tier) at its
   base model's row; `getModelRates` is unchanged.
 
+- **Core exports `TBTransferError` and `XFER_SPEND`** from the package entry. `TBTransferError` is the base of the replay errors already exported, so a caller can read a failed transfer's `code` without an internal import.
+
 - **`usertrust-verify receipt <file> --trust <snapshot.json>` — the offline
   half of the trust story.** A zero-dependency, zero-network CLI mode that
   reads a signed ut1 receipt plus a PINNED `receipt-spec` §8 trust snapshot
@@ -439,6 +441,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it as informational, dropped it during (de)serialization, or stored a
   one-based sequence number will start failing verification. That is the fix
   working, not a regression.
+
+### Changed
+
+- **`TrustTBClient.voidTransfer` throws `TBTransferError` on failure** (minor, additive). It used to throw a plain `Error`; it now throws the same `TBTransferError` every other transfer path throws, carrying the TigerBeetle status as `code`. That lets a caller tell an already-expired hold (`pending_transfer_expired`) from a real failure. The message is unchanged ("Void transfer failed: …"), and `TBTransferError` extends `Error`, so existing `catch`, `instanceof Error` and message-matching callers behave exactly as before.
 
 ## [3.0.0] - 2026-08-03
 

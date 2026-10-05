@@ -2,6 +2,16 @@
 // Copyright 2026 Usertools, Inc.
 
 export {
+	type EngineOptions,
+	HoldEngine,
+	LedgerTimeoutError,
+	PlacementWindowError,
+	type ReleaseOutcome,
+	type ReserveOutcome,
+	type SettlementIntent,
+	type SettleOutcome,
+} from "./engine.js";
+export {
 	BodyTooLargeError,
 	DEFAULT_GATE_CONFIG,
 	evaluateRequest,
@@ -21,6 +31,7 @@ export {
 	type HoldState,
 	JournalBusyError,
 	type JournalOptions,
+	JournalSchemaError,
 	JournalUnavailableError,
 	LedgerDeadlineError,
 	loadSqlite,
@@ -32,6 +43,17 @@ export {
 	type SettlementClaim,
 	TERMINAL_STATES,
 } from "./journal.js";
+export {
+	BudgetIdError,
+	debtAccountLabel,
+	type LedgerPort,
+	type PostOutcome,
+	TigerBeetleLedger,
+	type TigerBeetleLedgerOptions,
+	type TransferRole,
+	transferIdFor,
+	type VoidOutcome,
+} from "./ledger.js";
 export { DenyReason, REASON_CODE_PATTERN } from "./reasons.js";
 export {
 	DEFAULT_ROUTE_CONFIG,

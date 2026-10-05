@@ -1011,6 +1011,22 @@ describe("TrustTBClient", () => {
 			await expect(client.voidTransfer(123n)).rejects.toThrow("Void transfer failed");
 		});
 
+		it("a failure is a TBTransferError carrying the status, like every other transfer path", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 35 }]); // pending_transfer_expired
+			const err = await client.voidTransfer(123n).then(
+				() => null,
+				(e: unknown) => e,
+			);
+			expect(err).toBeInstanceOf(TBTransferError);
+			// Additive for existing callers: still an Error, still caught by `catch (e: Error)`.
+			expect(err).toBeInstanceOf(Error);
+			expect(Object.getPrototypeOf(TBTransferError.prototype)).toBe(Error.prototype);
+			expect((err as TBTransferError).code).toBe(35);
+			// The message keeps its prefix (existing catch sites match on it); this file's
+			// tigerbeetle-node mock has no name for 35, so the status renders as a number.
+			expect((err as Error).message).toMatch(/^Void transfer failed: /);
+		});
+
 		it("throws when error array element is undefined", async () => {
 			mockCreateTransfers.mockResolvedValueOnce([undefined]);
 			await expect(client.voidTransfer(123n)).rejects.toThrow("Unknown account/transfer error");
