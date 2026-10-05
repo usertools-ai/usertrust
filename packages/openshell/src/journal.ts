@@ -184,6 +184,9 @@ export class PlacementHorizonError extends Error {
  */
 export const JOURNAL_SCHEMA_VERSION = 2;
 
+/** The journal's tables, in both schema versions. */
+const JOURNAL_TABLES: readonly string[] = ["hold", "debt", "applied"];
+
 /** The hold table's columns as the slice-1b code wrote them (schema version 0). */
 const V0_HOLD_COLUMNS: readonly string[] = [
 	"hold_id",
@@ -197,6 +200,9 @@ const V0_HOLD_COLUMNS: readonly string[] = [
 	"terminal_event_hash",
 	"reserved_seq",
 ];
+
+/** The hold table's columns at this version (2): v0's plus the incident. */
+const V2_HOLD_COLUMNS: readonly string[] = [...V0_HOLD_COLUMNS, "incident_json"];
 
 /**
  * The journal file was written by a schema this code cannot read safely. The file is LEFT
@@ -422,42 +428,49 @@ export class HoldJournal {
 	}
 
 	/**
-	 * What the file is, read-only: `fresh` (no hold table yet), `current` (this version), or
-	 * `v0` — a file written by the slice-1b code before versioning, in exactly that schema.
-	 * Anything else throws {@link JournalSchemaError}: a NEWER version whatever tables it has,
-	 * a hold table without `admit_by`, or an unrecognised shape.
+	 * What the file is, read-only — each answer defined POSITIVELY, and everything else refused
+	 * ({@link JournalSchemaError}):
+	 * - `fresh`: version 0 or this version AND no tables at all (a new, empty file);
+	 * - `current`: this version, exactly this code's tables, and exactly its hold columns;
+	 * - `v0`: version 0, exactly the slice-1b tables, and exactly its hold columns.
+	 * So a file holding ANY other tables (another application's, a foreign schema) is never
+	 * adopted as fresh, whatever the version says, and no unknown shape is ever migrated.
 	 */
 	private static classify(db: DatabaseSync): "fresh" | "current" | "v0" {
 		const version = (db.prepare("PRAGMA user_version").get() as { user_version: number })
 			.user_version;
-		if (version > JOURNAL_SCHEMA_VERSION) {
-			throw new JournalSchemaError(
-				`schema version ${version}, this code reads ${JOURNAL_SCHEMA_VERSION}`,
-			);
-		}
-		// Only version 0 (never stamped) or this version can be adopted as fresh: any OTHER version
-		// (1, or a negative one, which the pragma accepts) is a schema this code does not know,
-		// even with no hold table — adopting it would hide whatever holds or debt it stores.
+		// Only version 0 (never stamped) or this version is readable at all: any OTHER version (a
+		// newer one, 1, or a negative one, which the pragma accepts) is a schema this code does not
+		// know, whatever tables the file has.
 		if (version !== 0 && version !== JOURNAL_SCHEMA_VERSION) {
 			throw new JournalSchemaError(
 				`schema version ${version}, this code reads ${JOURNAL_SCHEMA_VERSION}`,
 			);
 		}
+		const tables = (
+			db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
+				name: string;
+			}>
+		).map((t) => t.name);
+		if (tables.length === 0) return "fresh";
 		const cols = (db.prepare("PRAGMA table_info(hold)").all() as Array<{ name: string }>).map(
 			(c) => c.name,
 		);
-		if (cols.length === 0) return "fresh";
 		// A journal written before the admission deadline existed has no `admit_by` to judge an
 		// `open` row by; reading its `ttl_at` (an upper bound) in its place would admit after the
 		// ledger may have released the hold. Refused, never guessed.
-		if (!cols.includes("admit_by")) {
+		if (cols.length > 0 && !cols.includes("admit_by")) {
 			throw new JournalSchemaError("the hold table has no admit_by column");
 		}
-		if (version === JOURNAL_SCHEMA_VERSION) return "current";
-		const v0 = [...V0_HOLD_COLUMNS].sort().join(",");
-		if (version === 0 && [...cols].sort().join(",") === v0) return "v0";
+		const same = (a: readonly string[], b: readonly string[]) =>
+			[...a].sort().join(",") === [...b].sort().join(",");
+		const tablesMatch = same(tables, JOURNAL_TABLES);
+		if (version === JOURNAL_SCHEMA_VERSION && tablesMatch && same(cols, V2_HOLD_COLUMNS)) {
+			return "current";
+		}
+		if (version === 0 && tablesMatch && same(cols, V0_HOLD_COLUMNS)) return "v0";
 		throw new JournalSchemaError(
-			`schema version ${version}${version === 0 ? " (an unrecognised shape)" : ""}, this code reads ${JOURNAL_SCHEMA_VERSION}`,
+			`schema version ${version} (an unrecognised shape: tables ${[...tables].sort().join(", ")}), this code reads ${JOURNAL_SCHEMA_VERSION}`,
 		);
 	}
 

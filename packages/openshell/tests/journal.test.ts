@@ -1251,6 +1251,42 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		}
 	});
 
+	it("#177 r6 (B): a file holding ANY other table is never adopted — a v0 or a v2 journal plus a foreign table is refused, bytes untouched", () => {
+		for (const [name, extra] of [
+			["v0 + a foreign table", ""],
+			[
+				"v2 + a foreign table",
+				"ALTER TABLE hold ADD COLUMN incident_json TEXT; PRAGMA user_version = 2;",
+			],
+		] as const) {
+			const dir = mkdtempSync(join(tmpdir(), "openshell-journal-foreign-"));
+			dirs.push(dir);
+			const path = join(dir, "holds.db");
+			const raw = new DatabaseSync(path); // rollback mode
+			raw.exec(SCHEMA_174);
+			raw.exec(extra);
+			raw.exec("CREATE TABLE someone_elses (x INTEGER)");
+			raw.close();
+			const before = readFileSync(path);
+			expect(() => HoldJournal.open(path), name).toThrow(/an unrecognised shape: tables/);
+			expect(readFileSync(path).equals(before), `${name}: bytes unchanged`).toBe(true);
+			expect(existsSync(`${path}-wal`), name).toBe(false);
+		}
+	});
+
+	it("#177 r6 (B): a v0-versioned file with ONLY foreign tables (no hold table) is not fresh — refused", () => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-foreign0-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		const raw = new DatabaseSync(path);
+		raw.exec("CREATE TABLE app_data (x INTEGER)");
+		raw.exec("INSERT INTO app_data (x) VALUES (1)");
+		raw.close();
+		const before = readFileSync(path);
+		expect(() => HoldJournal.open(path)).toThrow(/an unrecognised shape: tables app_data/);
+		expect(readFileSync(path).equals(before)).toBe(true);
+	});
+
 	it("(d) a refused ROLLBACK-mode file is left byte-for-byte untouched: no WAL switch, no -wal or -shm files", () => {
 		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-rollback-"));
 		dirs.push(dir);
@@ -1272,7 +1308,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 			raw.exec(SCHEMA_174);
 			raw.exec("ALTER TABLE hold ADD COLUMN mystery TEXT");
 		});
-		expect(() => HoldJournal.open(path)).toThrow(/schema version 0 \(an unrecognised shape\)/);
+		expect(() => HoldJournal.open(path)).toThrow(/schema version 0 \(an unrecognised shape/);
 	});
 
 	it("a v0 file that is NOT the #174 shape is refused, not migrated", () => {
@@ -1280,6 +1316,6 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 			raw.exec(SCHEMA_174);
 			raw.exec("ALTER TABLE hold ADD COLUMN incident_json TEXT"); // v0 yet already has it: unknown
 		});
-		expect(() => HoldJournal.open(path)).toThrow(/schema version 0 \(an unrecognised shape\)/);
+		expect(() => HoldJournal.open(path)).toThrow(/schema version 0 \(an unrecognised shape/);
 	});
 });

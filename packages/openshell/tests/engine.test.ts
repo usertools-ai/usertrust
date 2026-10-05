@@ -4,6 +4,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	DebtChargeFailedError,
@@ -624,5 +625,53 @@ describe("#176: the settlement intent is validated at the claim", () => {
 		});
 		expect(ledger.count("k1", "post")).toBe(posts);
 		expect(ledger.count("k1", "overage"), "no further charge attempt").toBe(0);
+	});
+});
+
+describe("#177 r6 (A): EVERY completion — a resume of a stored intent included — passes the intent contract", () => {
+	it("a v0 `settling` row written by the pre-validation engine ({post:60, overage:30} on a 100 hold) is migrated, then RESUMED into a terminal invalid_stored_intent incident — no post, no charge, debt unchanged", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-engine-v0-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		const raw = new DatabaseSync(path);
+		raw.exec("PRAGMA journal_mode = WAL");
+		raw.exec(`
+			CREATE TABLE hold (
+				hold_id TEXT PRIMARY KEY, budget_id TEXT NOT NULL,
+				state TEXT NOT NULL CHECK (state IN ('open','settling','settled','voiding','voided','expiring','expired')),
+				amount INTEGER NOT NULL CHECK (amount > 0), ttl_at INTEGER NOT NULL, admit_by INTEGER NOT NULL,
+				intent_json TEXT, terminal_kind TEXT, terminal_event_hash TEXT, reserved_seq INTEGER
+			);
+			CREATE INDEX hold_state_ttl ON hold (state, ttl_at);
+			CREATE TABLE debt (budget_id TEXT PRIMARY KEY, amount INTEGER NOT NULL CHECK (amount >= 0));
+			CREATE TABLE applied (transfer_id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, delta INTEGER NOT NULL);
+		`);
+		raw.exec(
+			`INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by, intent_json) VALUES ('h1', 'b', 'settling', 100, 2000000, 1900000, '{"post":60,"overage":30}')`,
+		);
+		raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 30)"); // recorded with the claim
+		raw.close();
+		const journal = HoldJournal.open(path, { now: () => 1_000, ledgerTimeoutMs: 50 });
+		journals.push(journal);
+		const ledger = new FakeLedger();
+		const engine = new HoldEngine(journal, ledger, { holdTtlSeconds: 900, now: () => 1_000 });
+		// A duplicate settlement (any intent) loses the claim and RESUMES the stored one.
+		expect(await engine.settle("h1", { post: 100, overage: 0 })).toEqual({
+			outcome: "incident",
+			state: "settling",
+		});
+		expect(journal.get("h1")).toMatchObject({
+			state: "settling",
+			incident: { kind: "invalid_stored_intent", intent: { post: 60, overage: 30 } },
+		});
+		expect(ledger.count("h1", "post"), "no post").toBe(0);
+		expect(ledger.count("h1", "overage"), "no charge").toBe(0);
+		expect(journal.debtOf("b"), "recorded debt left as is").toBe(30);
+		expect(journal.inFlight()).toEqual([]);
+		expect(await engine.settle("h1", { post: 100, overage: 0 })).toEqual({
+			outcome: "incident",
+			state: "settling",
+		});
+		expect(ledger.count("h1", "post")).toBe(0);
 	});
 });
