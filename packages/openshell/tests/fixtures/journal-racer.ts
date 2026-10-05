@@ -51,7 +51,7 @@ if (mode === "cas") {
 				holdId: `${role}-${i}`,
 				budgetId: `b${i}`,
 				amount: 100,
-				ttlAt: 0,
+				ttlAt: Date.now() + 3_600_000, // live for the whole race: a placement past ttlAt is refused
 				availableCredit: () =>
 					(
 						ledger.prepare("SELECT available FROM bal WHERE budget = ?").get(`b${i}`) as {

@@ -25,7 +25,10 @@ function fresh(opts?: Parameters<typeof HoldJournal.open>[1]) {
 	const dir = mkdtempSync(join(tmpdir(), "openshell-journal-"));
 	dirs.push(dir);
 	const path = join(dir, "holds.db");
-	const j = HoldJournal.open(path, opts);
+	// The fixtures' ttlAt values are small epoch numbers (0, 1, 5, 1,000): a test that does not
+	// set its own clock stands just BEFORE all of them, so every fixture hold is still live.
+	// Under Date.now each one had expired decades ago (#167 MEDIUM P1 made that visible).
+	const j = HoldJournal.open(path, { now: () => -1, ...opts });
 	journals.push(j);
 	return { j, path, dir };
 }
@@ -468,6 +471,41 @@ describe("#167: reserve's contract — validated input, the same hold only, and 
 		await expect(open(j, "h1", "other-budget", 100)).rejects.toBeInstanceOf(HoldConflictError);
 	});
 
+	it("#167 MEDIUM P1: a placement that completes AFTER ttlAt is not admitted — the row is committed `voiding`, hold_expired, never forwarded", async () => {
+		let now = 0;
+		const { j } = fresh({ now: () => now });
+		const slow = (finishAt: number) => ({
+			budgetId: "b",
+			amount: 100,
+			ttlAt: 1_000,
+			availableCredit: () => 1e9,
+			placeHold: async () => {
+				now = finishAt; // the ledger answered this late
+			},
+		});
+		await expect(j.reserve({ holdId: "late", ...slow(1_000) })).resolves.toEqual({
+			admitted: false,
+			reason: "hold_expired",
+			existing: false,
+		});
+		expect(j.get("late")?.state, "the release path voids it").toBe("voiding");
+		now = 0;
+		await expect(
+			j.reserve({ holdId: "late", ...slow(0) }),
+			"a retry is never placed again",
+		).resolves.toEqual({
+			admitted: false,
+			reason: "not_open",
+			existing: true,
+		});
+		now = 0;
+		await expect(j.reserve({ holdId: "in-time", ...slow(999) })).resolves.toEqual({
+			admitted: true,
+			existing: false,
+		});
+		expect(j.get("in-time")?.state).toBe("open");
+	});
+
 	it("availableCredit is told WHICH hold is reserving (it must exclude that hold's own orphaned transfer)", async () => {
 		const { j } = fresh();
 		const seen: string[] = [];
@@ -500,6 +538,19 @@ describe("hold journal: debt changes apply exactly once per transfer", () => {
 		expect(await j.writeTx(() => j.applyDebt("b", "late:h2", 5))).toBe(true);
 		expect(j.debtOf("b")).toBe(30);
 		expect(() => j.applyDebt("b", "x", 1)).toThrow(/inside its own writeTx/);
+	});
+
+	it("#167 MEDIUM P2: a repayment (negative delta) applies while the total stays >= 0; below zero is refused and changes nothing", async () => {
+		const { j } = fresh();
+		expect(await j.writeTx(() => j.applyDebt("b", "overage:h1", 30))).toBe(true);
+		expect(await j.writeTx(() => j.applyDebt("b", "repay:1", -20))).toBe(true);
+		expect(j.debtOf("b")).toBe(10);
+		expect(await j.writeTx(() => j.applyDebt("b", "repay:2", -10))).toBe(true);
+		expect(j.debtOf("b")).toBe(0);
+		await expect(j.writeTx(() => j.applyDebt("b", "repay:3", -1))).rejects.toThrow();
+		expect(j.debtOf("b"), "the refused repayment rolled back with its marker").toBe(0);
+		await expect(j.writeTx(() => j.applyDebt("fresh-budget", "repay:4", -1))).rejects.toThrow();
+		expect(j.debtOf("fresh-budget")).toBe(0);
 	});
 });
 

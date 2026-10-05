@@ -590,6 +590,23 @@ export class HoldJournal {
 				}
 				return { ambiguous: err };
 			}
+			// A placement that answered at or past ttlAt is NOT a live reservation: the ledger's
+			// pending transfer may already have expired. It is never forwarded on; the row is
+			// committed `voiding`, so the release path voids it under the placement-horizon rule.
+			if (this.now() >= input.ttlAt) {
+				this.db
+					.prepare(
+						"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, intent_json) VALUES (?, ?, 'voiding', ?, ?, ?)",
+					)
+					.run(
+						input.holdId,
+						input.budgetId,
+						input.amount,
+						input.ttlAt,
+						JSON.stringify({ placedPastTtl: true }),
+					);
+				return { admitted: false, reason: "hold_expired", existing: false };
+			}
 			this.db
 				.prepare(
 					"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at) VALUES (?, ?, 'open', ?, ?)",
@@ -648,11 +665,15 @@ export class HoldJournal {
 			}
 			return false;
 		}
+		// Two statements, not an upsert: SQLite checks `amount >= 0` on an upsert's PROPOSED
+		// insert row before DO UPDATE, so a repayment (negative delta) always failed. The CHECK
+		// still applies to the UPDATE's result — debt never goes below zero.
 		this.db
 			.prepare(
-				"INSERT INTO debt (budget_id, amount) VALUES (?, ?) ON CONFLICT (budget_id) DO UPDATE SET amount = amount + excluded.amount",
+				"INSERT INTO debt (budget_id, amount) VALUES (?, 0) ON CONFLICT (budget_id) DO NOTHING",
 			)
-			.run(budgetId, delta);
+			.run(budgetId);
+		this.db.prepare("UPDATE debt SET amount = amount + ? WHERE budget_id = ?").run(delta, budgetId);
 		return true;
 	}
 
