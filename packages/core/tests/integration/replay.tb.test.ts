@@ -188,6 +188,47 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — caller-supplied transfer id r
 		expect(acct?.debits_pending).toBe(0n);
 	});
 
+	it("row 6 (#178): an IMMEDIATE transfer whose first attempt failed is retired — after a top-up the same caller id is TransferIdRetiredError", async () => {
+		const { tb, treasury, wallet } = await setup(50);
+		const r = callerId("debit");
+		const debit = {
+			debitAccountId: wallet,
+			creditAccountId: treasury,
+			amount: 100,
+			code: XFER_SPEND,
+			transferId: r,
+		};
+		const first = await tb.immediateTransfer(debit).catch((e: unknown) => e);
+		expect(first).toBeInstanceOf(TBTransferError);
+		expect(first).not.toBeInstanceOf(TransferIdRetiredError); // the real code, not 68
+		await tb.immediateTransfer({
+			debitAccountId: treasury,
+			creditAccountId: wallet,
+			amount: 100,
+			code: XFER_ALLOCATION,
+		});
+		const second = await tb.immediateTransfer(debit).catch((e: unknown) => e);
+		expect(second).toBeInstanceOf(TransferIdRetiredError);
+		expect((second as TBTransferError).code).toBe(68);
+		const [acct] = await tb.lookupAccounts([wallet]);
+		expect(acct?.debits_posted, "neither attempt moved money").toBe(0n);
+	});
+
+	it("row 6b (#178): an IDENTICAL immediate replay under a caller id is verified and accepted; the account is debited once", async () => {
+		const { tb, treasury, wallet } = await setup(500);
+		const debit = {
+			debitAccountId: wallet,
+			creditAccountId: treasury,
+			amount: 120,
+			code: XFER_SPEND,
+			transferId: callerId("debit"),
+		};
+		expect(await tb.immediateTransfer(debit)).toBe(debit.transferId);
+		expect(await tb.immediateTransfer(debit)).toBe(debit.transferId);
+		const [acct] = await tb.lookupAccounts([wallet]);
+		expect(acct?.debits_posted).toBe(120n);
+	});
+
 	it("row 5: a VOID replayed with the same id succeeds, and the hold is released once", async () => {
 		const { tb, treasury, wallet } = await setup(1000);
 		const pending = await tb.createPendingTransfer({
