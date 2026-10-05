@@ -48,8 +48,20 @@ export const MAX_CONTENT_CHARS = 16 * 1024;
 // (AUD-004). Leaving this at 1 under-debited the wallet on every large result.
 export const MAX_OUTPUT_TOKENS = estimateTokens("x".repeat(MAX_CONTENT_CHARS));
 
-function stateDir() {
+export function stateRoot() {
 	return process.env.UT_CC_STATE_DIR ?? join(tmpdir(), "usertrust-cc");
+}
+
+const stateDir = stateRoot;
+
+/**
+ * Where real usage comes from. `transcript` (default): Claude Code's own
+ * session transcript, falling back to the per-call estimate — labelled
+ * `estimated` — only when the transcript is missing or corrupt. `estimate`:
+ * the per-call estimate only.
+ */
+export function usageMode() {
+	return process.env.UT_CC_USAGE === "estimate" ? "estimate" : "transcript";
 }
 
 function sanitize(part) {
