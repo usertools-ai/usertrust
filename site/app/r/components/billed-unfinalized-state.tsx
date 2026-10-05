@@ -103,10 +103,7 @@ export default function BilledUnfinalizedStateView({ state }: { state: BilledUnf
 				<p className="text-[13px] leading-relaxed text-white/70" data-testid="fallback-link">
 					this reservation billed but was never finalized into a receipt of its own. the same spend
 					is recorded on a spend-only fallback session receipt:{" "}
-					<a
-						className="focus-ring underline decoration-white/40 underline-offset-2 hover:text-white"
-						href={`/r/${state.linkedReceiptId}`}
-					>
+					<a className="ut-link focus-ring" href={`/r/${state.linkedReceiptId}`}>
 						{state.linkedReceiptId}
 					</a>
 				</p>
