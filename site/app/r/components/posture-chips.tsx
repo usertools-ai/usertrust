@@ -1,4 +1,10 @@
-import { POSTURES_ARE_ATTESTED_ENUMS, type PostureClaim, type ReceiptClaims } from "../lib/claims";
+import {
+	DELEGATION_POSTURE_SHORT,
+	POSTURES_ARE_ATTESTED_ENUMS,
+	type PostureClaim,
+	type ReceiptClaims,
+} from "../lib/claims";
+import type { DelegationPosture } from "../lib/wire";
 
 /**
  * R20-R22 — the three postures, rendered ON PAPER as the attested claims they
@@ -82,13 +88,16 @@ const CAVEATED_CHIP = "border-paper-amber/60 font-normal text-paper-amber";
  * glance card's whole answer to "what does this number cover"; the title is the
  * one-line meaning, and the full sentences are in the card's Details.
  */
-export function ScopeChip({ claims }: { claims: ReceiptClaims }) {
+export function ScopeChip({ claims }: { claims: Pick<ReceiptClaims, "delegation"> }) {
 	return (
 		<span
 			className={`inline-block rounded-sm border px-2 py-0.5 font-mono text-[12px] uppercase tracking-[0.12em] ${ASSERTED_CHIP}`}
 			data-testid="amount-scope-chip"
 			data-posture={claims.delegation.value}
-			title={claims.delegation.claim}
+			title={
+				DELEGATION_POSTURE_SHORT[claims.delegation.value as DelegationPosture] ??
+				claims.delegation.claim
+			}
 		>
 			{claims.delegation.label}
 		</span>
@@ -107,7 +116,11 @@ export function ScopeChip({ claims }: { claims: ReceiptClaims }) {
  * floor. The dollar figure above this block is the claim; this caption says
  * what that number covers.
  */
-export function AmountScope({ claims }: { claims: ReceiptClaims }) {
+export function AmountScope({
+	claims,
+}: {
+	claims: Pick<ReceiptClaims, "delegation" | "amountCaption">;
+}) {
 	return (
 		<div className="flex flex-col gap-2" data-testid="amount-scope">
 			<p className="text-[13px] leading-relaxed text-ink/70" data-testid="epistemic-frame">
@@ -153,22 +166,35 @@ export function SessionHeadlineScope({
 	);
 }
 
-export default function PostureChips({ claims }: { claims: ReceiptClaims }) {
+/**
+ * `association` is the session kind's posture. A cluster receipt has none — it
+ * is minted for an agent key's ledger window, not for an associated session —
+ * so the row is omitted rather than rendered empty or defaulted.
+ */
+export default function PostureChips({
+	claims,
+}: {
+	claims: Pick<ReceiptClaims, "usage" | "pricing"> & {
+		association?: ReceiptClaims["association"];
+	};
+}) {
 	const { association, usage, pricing } = claims;
 	return (
 		<div className="flex flex-col gap-4" data-testid="postures">
 			<p className="text-[13px] leading-relaxed text-ink/70">{POSTURES_ARE_ATTESTED_ENUMS}</p>
-			<PostureRow
-				axis="session association"
-				posture={association}
-				chipClass={association.weight === "attested" ? ATTESTED_CHIP : ASSERTED_CHIP}
-			>
-				{association.workloadId ? (
-					<p className="font-mono text-[12px] text-ink/70">
-						workloadId <span className="text-ink">{association.workloadId}</span>
-					</p>
-				) : null}
-			</PostureRow>
+			{association ? (
+				<PostureRow
+					axis="session association"
+					posture={association}
+					chipClass={association.weight === "attested" ? ATTESTED_CHIP : ASSERTED_CHIP}
+				>
+					{association.workloadId ? (
+						<p className="font-mono text-[12px] text-ink/70">
+							workloadId <span className="text-ink">{association.workloadId}</span>
+						</p>
+					) : null}
+				</PostureRow>
+			) : null}
 
 			<PostureRow
 				axis="usage posture"

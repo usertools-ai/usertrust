@@ -38,6 +38,7 @@ import {
 	CUSTOM_MODEL_MEANING,
 	DELEGATION_POSTURE_LABEL,
 	DELEGATION_POSTURE_SCOPE,
+	DELEGATION_POSTURE_SHORT,
 	DISPLAY_ANNEX_LABEL,
 	DISPLAY_NOT_ATTESTED,
 	EQUIVOCATION_CAVEAT,
@@ -549,10 +550,20 @@ test("R38-R40 (amended): the scope CHIP is visible beside the amount; the full s
 			`${row.id}: R38 — the chip IS the posture label`,
 		);
 		assert.ok(
-			chipTag.includes(`title="${escapeForMarkup(DELEGATION_POSTURE_SCOPE[posture])}"`),
-			`${row.id}: the chip's title is the one-line meaning`,
+			chipTag.includes(`title="${escapeForMarkup(DELEGATION_POSTURE_SHORT[posture])}"`),
+			`${row.id}: the chip's title is the one-line SHORT meaning`,
 		);
-		assertInDetails(html, DELEGATION_POSTURE_SCOPE[posture], `${row.id}: R39's scope statement`);
+		// The short form is a fold, not a cut: the FULL R39 sentence (with its
+		// bound clause) is still on the page, one disclosure away.
+		assert.ok(
+			DELEGATION_POSTURE_SCOPE[posture].length > DELEGATION_POSTURE_SHORT[posture].length,
+			`${row.id}: the chip carries the short form, Details the full one`,
+		);
+		assertInDetails(
+			html,
+			DELEGATION_POSTURE_SCOPE[posture],
+			`${row.id}: R39's FULL scope statement`,
+		);
 		assertInDetails(html, amountScopeCaption(posture), `${row.id}: R40's scope caption`);
 	}
 });

@@ -10,7 +10,14 @@
  */
 
 import { type ReceiptClaims, truncateForDisplay } from "./claims";
-import type { LadderStatus, ReceiptDocument, VerifiedState, Work } from "./wire";
+import type {
+	ClusterReceiptDocument,
+	LadderStatus,
+	ReceiptDocument,
+	VerifiedClusterState,
+	VerifiedState,
+	Work,
+} from "./wire";
 
 export type ActionPart =
 	| { kind: "text"; text: string; emphasis: boolean }
@@ -144,11 +151,23 @@ export function authorityRows(claims: ReceiptClaims): AuthorityRow[] {
 	return rows;
 }
 
-function stepPassed(state: VerifiedState, name: "signature" | "inclusion" | "checkpoint"): boolean {
+function stepPassed(
+	state: VerifiedState | VerifiedClusterState,
+	name: "signature" | "inclusion" | "checkpoint",
+): boolean {
 	return state.envelope.verification.steps[name].result === "passed";
 }
 
-export function proofRungs(state: VerifiedState, receipt: ReceiptDocument): ProofRung[] {
+/**
+ * The Proven ladder reads only the proof machinery both receipt kinds share
+ * (signature, chain position, checkpoint) and the resolver's step results, so
+ * one function serves both — a second copy for clusters could drift from the
+ * rung the session card shows for the same evidence.
+ */
+export function proofRungs(
+	state: VerifiedState | VerifiedClusterState,
+	receipt: ReceiptDocument | ClusterReceiptDocument,
+): ProofRung[] {
 	const { signature, proof, event } = receipt;
 	const history = state.envelope.verification.checks.checkpointHistory.result;
 	const reachedIndex = (
