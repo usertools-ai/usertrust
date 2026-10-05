@@ -389,3 +389,43 @@ export const rejectionVectors: RejectionVectorEntry[] = [
 			"material the page cannot interpret, and this value is interpreted exactly",
 	},
 ];
+
+export type ClusterConformingFixtureId = "CL1" | "CL2" | "CL3" | "CL4";
+
+export interface ClusterConformingFixtureEntry {
+	id: ClusterConformingFixtureId;
+	/** Relative to this directory. */
+	files: string[];
+	exercises: string;
+}
+
+/**
+ * receipt-spec v0.10 §15 — CLUSTER receipts. A separate population so the
+ * session corpus (C1-C29) and its counts stay exactly as they are.
+ */
+export const clusterConformingFixtures: ClusterConformingFixtureEntry[] = [
+	{
+		id: "CL1",
+		files: ["cluster/first.json"],
+		exercises:
+			"an agent key's FIRST receipt: no previousReceiptId (predecessorLinkage notApplicable), nothing skipped, repoId key-ABSENT, transferSet listed, 10-minute idle threshold",
+	},
+	{
+		id: "CL2",
+		files: ["cluster/chained.json"],
+		exercises:
+			"the same key's next receipt: previousReceiptId names CL1 (predecessorLinkage passed), repoId present, two models/providers",
+	},
+	{
+		id: "CL3",
+		files: ["cluster/skipped.json"],
+		exercises:
+			"chained to CL2 with skippedSincePrevious count 3 (<= 16: every window listed, windowsRoot recomputable): cluster-void x2, estimated-transfer",
+	},
+	{
+		id: "CL4",
+		files: ["cluster/skipped-overflow.json"],
+		exercises:
+			"another key's FIRST receipt with skippedSincePrevious count 20 (16 listed, windowsRoot a commitment), transferCount 40 (transferSet ABSENT, derivations notApplicable), the custom model literal, conservative pricing, a 1-hour idle threshold",
+	},
+];

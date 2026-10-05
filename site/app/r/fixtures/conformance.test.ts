@@ -9,6 +9,10 @@
  *     asserted to fail CLOSED into its named state, for its NAMED CONSUMER
  *     (X10's clause is invisible to the page by design — see `index.ts`).
  *
+ * A third population, appended at the end: CLUSTER receipts (receipt-spec
+ * v0.10 §15) — the four conforming fixtures CL1-CL4 and the cluster vectors,
+ * checked against this file's own re-implementation of the cluster contract.
+ *
  * The R4 strict pipeline, the base58 ID-decode rule, and the §4.1 verdict
  * algebra are re-implemented LOCALLY below, deliberately not imported from
  * (a not-yet-existing) `app/r/lib/wire.ts` — that module is Task 2's
@@ -23,13 +27,20 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import {
+	applyClusterVector,
+	type ClusterVector,
+	CONTRACT_SKIP_REASONS,
+	clusterVectors,
+} from "./cluster-vectors";
 import { idVectors } from "./id-vectors";
-import { conformingFixtures, rejectionVectors } from "./index";
+import { clusterConformingFixtures, conformingFixtures, rejectionVectors } from "./index";
 import { protocolVectors } from "./protocol-vectors";
 import type {
 	BilledUnfinalizedEnvelope,
 	BilledUnfinalizedMutantCase,
 	CheckResult,
+	ClusterSuccessEnvelope,
 	FixtureCase,
 	SuccessEnvelope,
 	Verification,
@@ -1335,4 +1346,717 @@ test("X7: the passing controls actually differ in leading-zero-byte shape", () =
 		decoded.some((d) => d && d[0] !== 0),
 		"at least one valid control must have no leading zero byte",
 	);
+});
+
+// ===========================================================================
+// receipt-spec v0.10 §15 — CLUSTER receipts: CL1-CL4 and the cluster vectors
+// ===========================================================================
+//
+// The cluster contract, re-implemented here from the contract text and never
+// imported from `lib/wire.ts`, for the reason everything above is: two
+// implementations agreeing over one corpus is the evidence, and one importing
+// the other is not. The scope is split in two on purpose:
+//
+//   - `checkClusterReceipt` is the CONTRACT the page enforces — shapes,
+//     formats, bounds, the skipped-window rules, equality 9, self-predecessor
+//     and the cluster predecessor algebra. It runs on every vector, boundary
+//     controls included.
+//   - The DERIVATIONS — the receipt-ID recompute, the event hash,
+//     transferSetRoot, windowsRoot, the sibling topology and equalities
+//     1/4/5/6/8 — run ONLY on the four conforming fixtures. A boundary control
+//     legitimately moves `windowStart` without re-deriving the ID and must
+//     still be accepted, exactly as the page (which never derives) accepts it.
+
+const CL_DOCUMENT_KEYS = [
+	"spec",
+	"receiptId",
+	"scope",
+	"mintedAt",
+	"minter",
+	"work",
+	"event",
+	"proof",
+	"signature",
+] as const;
+
+const CL_PROJECTION_REQUIRED = [
+	"spec",
+	"scope",
+	"account",
+	"windowStart",
+	"windowEnd",
+	"idleThresholdNs",
+	"windowTransfersRoot",
+	"windowTransferCount",
+	"work",
+	"models",
+	"providers",
+	"startedAt",
+	"endedAt",
+	"spend",
+	"delegationPosture",
+	"pricing",
+	"transferSetRoot",
+] as const;
+
+/** Each one's PRESENCE is a claim, governed by its own rule below. */
+const CL_PROJECTION_OPTIONAL = [
+	"transferSet",
+	"previousReceiptId",
+	"skippedSincePrevious",
+] as const;
+
+const CL_SKIP_REASONS = [
+	"cluster-void",
+	"snapshot-missing",
+	"snapshot-not-on-chain",
+	"snapshot-unverifiable",
+	"unknown-provider",
+	"posted-amount-mismatch",
+	"empty-cluster",
+	"bad-account",
+	"bad-window",
+	"bad-repo-id",
+	"estimated-transfer",
+	"non-exact-rate",
+	"posted-assessed-mismatch",
+	"duplicate-transfer",
+	"bad-transfer-id",
+	"bad-amount",
+	"rounding-out-of-bounds",
+	"duplicate-mint-event",
+	"mint-event-mismatch",
+	"anchor-mismatch",
+	"evidence-inconsistent",
+	"consumed-by-another-receipt",
+	"unarmed-hold",
+] as const;
+
+/**
+ * The embedded checkpoint a cluster receipt carries: the twelve signed members
+ * (receipt-spec v0.9.6 added `segmentStartPreviousHash` as the twelfth) plus `sig`.
+ */
+const CL_CHECKPOINT_KEYS = [
+	"v",
+	"vaultId",
+	"profile",
+	"root",
+	"treeSize",
+	"segmentId",
+	"segmentFirstSequence",
+	"previousSegmentRoot",
+	"previousSegmentId",
+	"segmentStartPreviousHash",
+	"keyId",
+	"publishedAt",
+	"sig",
+] as const;
+
+type Rec = Record<string, unknown>;
+
+const isRec = (value: unknown): value is Rec =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+const isFilledString = (value: unknown): value is string =>
+	typeof value === "string" && value.length > 0;
+const isStringList = (value: unknown): boolean =>
+	Array.isArray(value) && value.every((item) => typeof item === "string");
+const HEX_64 = /^[0-9a-f]{64}$/;
+const isHex64 = (value: unknown): boolean => typeof value === "string" && HEX_64.test(value);
+const refuse = (reason: string): AlgebraResult => ({ ok: false, reason });
+
+/** A canonical u64 decimal string as a BigInt, or null — never a float, never a lexical compare. */
+function u64(value: unknown): bigint | null {
+	if (typeof value !== "string" || !/^(0|[1-9][0-9]{0,19})$/.test(value)) return null;
+	const n = BigInt(value);
+	return n <= BigInt("18446744073709551615") ? n : null;
+}
+
+/** §15's handle rule: "a1_", then §12's two decode rules on the body — 16 bytes, canonical re-encode. */
+function isCanonicalHandle(value: unknown): boolean {
+	if (typeof value !== "string") return false;
+	const body = /^a1_([1-9A-HJ-NP-Za-km-z]{16,22})$/.exec(value)?.[1];
+	if (body === undefined) return false;
+	const decoded = base58Decode(body);
+	return decoded !== null && decoded.length === 16 && base58Encode(decoded) === body;
+}
+
+/** §15.8: the provider's `provider:opaqueId`, or the keyed `r1_` form — no URL syntax. */
+const CL_REPO_ID = /^(?:[a-z0-9.-]+:[A-Za-z0-9_=-]{1,200}|r1_[A-Za-z0-9_-]{1,200})$/;
+
+function checkClusterWork(work: unknown, label: string): AlgebraResult {
+	if (!isRec(work)) return refuse(`${label} is not an object`);
+	const keys = checkKeySet(work, ["kind"], ["repoId"], label);
+	if (!keys.ok) return keys;
+	if (work.kind !== "cluster") return refuse(`${label}.kind is not "cluster"`);
+	if ("repoId" in work && !(typeof work.repoId === "string" && CL_REPO_ID.test(work.repoId))) {
+		return refuse(`${label}.repoId is present but in neither §15.8 form`);
+	}
+	return { ok: true };
+}
+
+function checkSkippedSincePrevious(skipped: unknown, windowStart: bigint): AlgebraResult {
+	if (!isRec(skipped)) return refuse("skippedSincePrevious is present but not an object");
+	const keys = checkKeySet(
+		skipped,
+		["count", "windows", "windowsRoot"],
+		[],
+		"skippedSincePrevious",
+	);
+	if (!keys.ok) return keys;
+	const { count, windows } = skipped;
+	if (typeof count !== "number" || !Number.isInteger(count) || count < 1) {
+		return refuse("skippedSincePrevious.count is not an integer >= 1");
+	}
+	if (!Array.isArray(windows) || windows.length !== Math.min(count, 16)) {
+		return refuse("skippedSincePrevious.windows does not list exactly min(count, 16) windows");
+	}
+	if (!isHex64(skipped.windowsRoot)) return refuse("skippedSincePrevious.windowsRoot is not hex64");
+	let previousEnd: bigint | null = null;
+	for (const [index, entry] of windows.entries()) {
+		const label = `skippedSincePrevious.windows[${index}]`;
+		if (!isRec(entry)) return refuse(`${label} is not an object`);
+		const entryKeys = checkKeySet(entry, ["windowStart", "windowEnd", "reason"], [], label);
+		if (!entryKeys.ok) return entryKeys;
+		const start = u64(entry.windowStart);
+		const end = u64(entry.windowEnd);
+		if (start === null || end === null) return refuse(`${label} bounds are not canonical u64`);
+		if (start > end) return refuse(`${label} ends before it starts`);
+		if (!(CL_SKIP_REASONS as readonly unknown[]).includes(entry.reason)) {
+			return refuse(`${label}.reason is not one of the 23`);
+		}
+		if (previousEnd !== null && !(previousEnd < start)) {
+			return refuse(`${label} is not after the previous window (ascending and disjoint)`);
+		}
+		if (!(end < windowStart)) return refuse(`${label} does not end before the receipt's window`);
+		previousEnd = end;
+	}
+	return { ok: true };
+}
+
+/** The document and projection rules — the schema half of `checkClusterReceipt`. */
+function checkClusterSchema(receipt: unknown): AlgebraResult {
+	if (!isRec(receipt)) return refuse("receipt is not an object");
+	const documentKeys = checkKeySet(receipt, CL_DOCUMENT_KEYS, [], "cluster receipt");
+	if (!documentKeys.ok) return documentKeys;
+	if (receipt.spec !== "ut1") return refuse('receipt.spec is not "ut1"');
+	if (receipt.scope !== "cluster")
+		return refuse(`receipt.scope is ${JSON.stringify(receipt.scope)}`);
+	if (!isFilledString(receipt.receiptId) || !isFilledString(receipt.mintedAt)) {
+		return refuse("receipt.receiptId and receipt.mintedAt must be non-empty strings");
+	}
+	for (const member of ["minter", "event", "proof", "signature"]) {
+		if (!isRec(receipt[member])) return refuse(`receipt.${member} is not an object`);
+	}
+	const documentWork = checkClusterWork(receipt.work, "receipt.work");
+	if (!documentWork.ok) return documentWork;
+
+	const data = (receipt.event as Rec).data;
+	if (!isRec(data)) return refuse("event.data is not an object");
+	const dataKeys = checkKeySet(data, CL_PROJECTION_REQUIRED, CL_PROJECTION_OPTIONAL, "event.data");
+	if (!dataKeys.ok) return dataKeys;
+	if (data.spec !== "ut1" || data.scope !== "cluster") {
+		return refuse('event.data.spec/scope are not "ut1"/"cluster"');
+	}
+	if (!isCanonicalHandle(data.account))
+		return refuse("event.data.account is not a canonical a1_ handle");
+	const windowStart = u64(data.windowStart);
+	const windowEnd = u64(data.windowEnd);
+	if (windowStart === null || windowEnd === null)
+		return refuse("window bounds are not canonical u64");
+	if (windowEnd < windowStart) return refuse("windowEnd < windowStart");
+	const idle = u64(data.idleThresholdNs);
+	if (idle === null || idle < BigInt("60000000000") || idle > BigInt("86400000000000")) {
+		return refuse("idleThresholdNs is not a canonical u64 in [60 s, 24 h]");
+	}
+	if (!isHex64(data.windowTransfersRoot)) return refuse("windowTransfersRoot is not hex64");
+	const projectionWork = checkClusterWork(data.work, "event.data.work");
+	if (!projectionWork.ok) return projectionWork;
+	if (!isStringList(data.models) || !isStringList(data.providers)) {
+		return refuse("models/providers are not string lists");
+	}
+	if (!isFilledString(data.startedAt) || !isFilledString(data.endedAt)) {
+		return refuse("startedAt/endedAt are not non-empty strings");
+	}
+
+	// §2's shared rules, as the session section reads them (SPEND_ALWAYS_REQUIRED,
+	// DELEGATION_POSTURES), plus the closed key sets §15 adds.
+	const spend = data.spend;
+	if (!isRec(spend)) return refuse("spend is not an object");
+	const spendKeys = checkKeySet(spend, SPEND_ALWAYS_REQUIRED, [], "event.data.spend");
+	if (!spendKeys.ok) return spendKeys;
+	const integerAtLeast = (value: unknown, min: number): boolean =>
+		typeof value === "number" && Number.isInteger(value) && value >= min;
+	if (
+		!integerAtLeast(spend.assessedUsertokens, 1) ||
+		!integerAtLeast(spend.postedUsertokens, 1) ||
+		!integerAtLeast(spend.roundingAdjustment, 0) ||
+		!integerAtLeast(spend.transferCount, 1)
+	) {
+		return refuse("a spend integer is outside its §2 range");
+	}
+	if (!["provider", "mixed", "estimated"].includes(spend.usagePosture as string)) {
+		return refuse("spend.usagePosture is outside §2's enum");
+	}
+	if (!["exact", "conservative"].includes(spend.pricingPosture as string)) {
+		return refuse("spend.pricingPosture is outside §2's enum");
+	}
+	if (!DELEGATION_POSTURES.includes(data.delegationPosture as string)) {
+		return refuse("delegationPosture is not one of §2a's four values");
+	}
+	const pricing = data.pricing;
+	if (!isRec(pricing)) return refuse("pricing is not an object");
+	const pricingKeys = checkKeySet(pricing, ["tableVersions"], [], "event.data.pricing");
+	if (!pricingKeys.ok) return pricingKeys;
+	if (!isStringList(pricing.tableVersions))
+		return refuse("pricing.tableVersions is not a string list");
+	if (!isHex64(data.transferSetRoot)) return refuse("transferSetRoot is not hex64");
+	const transferCount = spend.transferCount as number;
+	if ("transferSet" in data !== transferCount <= 32) {
+		return refuse("transferSet is not present exactly when transferCount <= 32");
+	}
+	if ("transferSet" in data) {
+		if (!Array.isArray(data.transferSet)) return refuse("transferSet is not a list");
+		for (const [index, pair] of data.transferSet.entries()) {
+			const label = `event.data.transferSet[${index}]`;
+			if (!isRec(pair)) return refuse(`${label} is not an object`);
+			const pairKeys = checkKeySet(
+				pair,
+				["authorizationTransferId", "settlementTransferId"],
+				[],
+				label,
+			);
+			if (!pairKeys.ok) return pairKeys;
+			if (
+				!isFilledString(pair.authorizationTransferId) ||
+				!isFilledString(pair.settlementTransferId)
+			) {
+				return refuse(`${label} does not carry two transfer-ID strings`);
+			}
+		}
+	}
+	const windowTransferCount = data.windowTransferCount;
+	if (typeof windowTransferCount !== "number" || !Number.isInteger(windowTransferCount)) {
+		return refuse("windowTransferCount is not an integer");
+	}
+	if (windowTransferCount < 2 * transferCount)
+		return refuse("windowTransferCount < 2 × transferCount");
+
+	if ("previousReceiptId" in data) {
+		const previous = data.previousReceiptId;
+		if (typeof previous !== "string" || !isCanonicalUt1Id(previous).valid) {
+			return refuse("previousReceiptId is present but not a canonical ut1 ID");
+		}
+		if (previous === receipt.receiptId) return refuse("previousReceiptId names the receipt itself");
+	}
+	if ("skippedSincePrevious" in data) {
+		const skipped = checkSkippedSincePrevious(data.skippedSincePrevious, windowStart);
+		if (!skipped.ok) return skipped;
+	}
+	try {
+		deepStrictEqual(receipt.work, data.work);
+	} catch {
+		return refuse("equality 9: receipt.work does not mirror event.data.work");
+	}
+	return { ok: true };
+}
+
+/**
+ * The cluster half of §4.1 rule 2: a named predecessor must be `passed`; with
+ * none named, `passed` or `notApplicable`; never `unavailable` on a 200.
+ */
+function checkClusterPredecessorAlgebra(body: Rec): AlgebraResult {
+	const result = (body.verification as Verification).checks.predecessorLinkage.result;
+	const data = ((body.receipt as Rec).event as Rec).data as Rec;
+	const named = "previousReceiptId" in data;
+	const legal = named ? result === "passed" : result === "passed" || result === "notApplicable";
+	return legal
+		? { ok: true }
+		: refuse(`predecessorLinkage "${result}" with previousReceiptId ${named ? "named" : "absent"}`);
+}
+
+/** The cluster contract the page enforces — schema, then the cluster predecessor algebra. */
+function checkClusterReceipt(body: Rec): AlgebraResult {
+	const schema = checkClusterSchema(body.receipt);
+	return schema.ok ? checkClusterPredecessorAlgebra(body) : schema;
+}
+
+/**
+ * The session-section algebra helpers read only `status`, `verification` and
+ * the evidence members, which a cluster envelope carries identically — the
+ * signed document is the only thing §15 changed.
+ */
+const asAlgebraInput = (body: unknown): SuccessEnvelope => body as SuccessEnvelope;
+
+type HarnessGate = "accepted" | "schema" | "placement" | "algebra" | "R1" | "R39" | "R4";
+
+/**
+ * Which gate of this harness refuses an applied vector, walked in the page's
+ * own order — schema, failure-code placement, the §4.1 algebra (session rules,
+ * then the cluster half), R1, R39, R4 — so a vector that broke two rules would
+ * show up as a disagreement on the gate, not hide behind the first.
+ */
+function harnessGate(applied: ReturnType<typeof applyClusterVector>): {
+	gate: HarnessGate;
+	reason: string;
+} {
+	const { body, routeParamId } = applied;
+	const receipt = body.receipt as Rec;
+	const schema = checkClusterSchema(receipt);
+	if (!schema.ok) return { gate: "schema", reason: schema.reason ?? "" };
+	const placement = checkFailureCodesArePlaced(body.verification as Verification);
+	if (!placement.ok) return { gate: "placement", reason: placement.reason ?? "" };
+	const algebra = checkVerdictAlgebra(asAlgebraInput(body));
+	if (!algebra.ok) return { gate: "algebra", reason: algebra.reason ?? "" };
+	const clusterAlgebra = checkClusterPredecessorAlgebra(body);
+	if (!clusterAlgebra.ok) return { gate: "algebra", reason: clusterAlgebra.reason ?? "" };
+	if (body.receiptId !== routeParamId || receipt.receiptId !== routeParamId) {
+		return { gate: "R1", reason: "route, envelope and signed document disagree on the ID" };
+	}
+	if (((receipt.event as Rec).data as Rec).delegationPosture === "includesAllDelegated") {
+		return { gate: "R39", reason: "includesAllDelegated cannot be green in v1" };
+	}
+	const r4 = r4StrictPipeline(body.receiptBytes as string, receipt);
+	if (!r4.ok) return { gate: "R4", reason: r4.reason ?? "" };
+	return { gate: "accepted", reason: "" };
+}
+
+function expectedGate(vector: ClusterVector): HarnessGate {
+	const { expect } = vector;
+	if (expect.kind === "verified") return "accepted";
+	if (expect.kind === "integrityFailure") return expect.obligation;
+	return expect.reason === "schemaInvalid" ? "schema" : "algebra";
+}
+
+/** §13's shape for these values: sorted keys at every level, `JSON.stringify` leaves. */
+function canonicalize(value: unknown): string {
+	if (Array.isArray(value)) return `[${value.map(canonicalize).join(",")}]`;
+	if (isRec(value)) {
+		const keys = Object.keys(value).sort();
+		return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalize(value[key])}`).join(",")}}`;
+	}
+	return JSON.stringify(value);
+}
+
+const sha256 = (text: string): Buffer => createHash("sha256").update(text, "utf8").digest();
+const sha256Hex = (text: string): string => sha256(text).toString("hex");
+
+/** receipt-spec v0.10 §15.9 — the cluster receipt ID, from what the receipt itself commits. */
+function clusterReceiptId(idInputs: Rec): string {
+	const digest = sha256(`usertrust/cluster-receipt-id/v1\n${canonicalize(idInputs)}`);
+	return `ut1_${base58Encode(digest.subarray(0, 16))}`;
+}
+
+function loadClusterFixture(file: string): { routeParamId: string; httpStatus: number; body: Rec } {
+	const fixture = loadJson<FixtureCase<ClusterSuccessEnvelope>>(file);
+	return {
+		routeParamId: fixture.routeParamId,
+		httpStatus: fixture.wire.httpStatus,
+		body: fixture.wire.body as unknown as Rec,
+	};
+}
+
+test("cluster manifest: CL1-CL4 — exactly 4 rows, 4 files on disk, every route a canonical ut1 ID", () => {
+	assert.deepEqual(
+		clusterConformingFixtures.map((entry) => entry.id),
+		["CL1", "CL2", "CL3", "CL4"],
+	);
+	const files = clusterConformingFixtures.flatMap((entry) => entry.files);
+	assert.equal(files.length, 4, "one file per row");
+	for (const file of files) {
+		assert.doesNotThrow(() => readFileSync(join(DIR, file)), `missing file ${file}`);
+		const { routeParamId } = loadClusterFixture(file);
+		const id = isCanonicalUt1Id(routeParamId);
+		assert.ok(id.valid, `${file}: routeParamId ${routeParamId} ${id.reason}`);
+	}
+	// The session corpus is a separate population, and its counts do not move.
+	assert.equal(conformingFixtures.length, 29);
+});
+
+for (const entry of clusterConformingFixtures) {
+	const [file] = entry.files;
+
+	test(`${entry.id} (${file}): conforms to the cluster contract and the §4.1 algebra`, () => {
+		const { routeParamId, httpStatus, body } = loadClusterFixture(file);
+		const receipt = body.receipt as Rec;
+		const data = (receipt.event as Rec).data as Rec;
+		const spend = data.spend as Rec;
+
+		assert.equal(httpStatus, 200);
+		assert.equal(body.apiVersion, "1");
+		assert.ok(
+			["verified_checkpoint", "verified_checkpoint_history", "verified_anchored"].includes(
+				body.status as string,
+			),
+			`${file}: a 200 carries a ladder status`,
+		);
+		// R1 — the identity chain.
+		assert.equal(body.receiptId, routeParamId, `${file}: envelope.receiptId === route`);
+		assert.equal(receipt.receiptId, routeParamId, `${file}: receipt.receiptId === route (R1)`);
+		// R4 — the strict receiptBytes pipeline.
+		const r4 = r4StrictPipeline(body.receiptBytes as string, receipt);
+		assert.ok(r4.ok, `${file}: R4 strict pipeline failed: ${r4.reason}`);
+		// The contract, the §4.1 algebra, and the closed failure-code union.
+		const contract = checkClusterReceipt(body);
+		assert.ok(contract.ok, `${file}: ${contract.reason}`);
+		const algebra = checkVerdictAlgebra(asAlgebraInput(body));
+		assert.ok(algebra.ok, `${file}: verdict algebra violated: ${algebra.reason}`);
+		const codes = checkFailureCodesArePlaced(body.verification as Verification);
+		assert.ok(codes.ok, `${file}: failure-code placement violated: ${codes.reason}`);
+		// §2's spend relations, as the session section checks them on its corpus.
+		assert.equal(spend.postedUsertokens, spend.assessedUsertokens, `${file}: posted === assessed`);
+		const transferCount = spend.transferCount as number;
+		const rounding = spend.roundingAdjustment as number;
+		assert.ok(
+			rounding >= 0 && rounding <= transferCount,
+			`${file}: 0 <= rounding <= transferCount`,
+		);
+		if (Array.isArray(data.transferSet)) {
+			assert.equal(data.transferSet.length, transferCount, `${file}: transferSet.length`);
+		}
+	});
+
+	test(`${entry.id} (${file}): its proof and every derivation it carries recompute`, () => {
+		const { body } = loadClusterFixture(file);
+		const receipt = body.receipt as Rec;
+		const event = receipt.event as Rec;
+		const data = event.data as Rec;
+		const proof = receipt.proof as Rec;
+		const inclusion = proof.inclusion as Rec;
+		const checkpoint = proof.checkpoint as Rec;
+		const leafIndex = inclusion.leafIndex as number;
+		const treeSize = inclusion.treeSize as number;
+		const sequence = event.sequence as number;
+		const segmentFirstSequence = checkpoint.segmentFirstSequence as number;
+
+		// Equality 1.
+		assert.equal(proof.mintEventHash, event.hash, `${file}: proof.mintEventHash === event.hash`);
+		assert.equal(inclusion.leafHash, event.hash, `${file}: inclusion.leafHash === event.hash`);
+		// Equality 4, with receipt-spec v0.9.6's chain-link offset: leaf 0 of every
+		// segment after the first is the link to the previous segment, so the
+		// event's leaf sits one past its sequence offset.
+		const offset = checkpoint.previousSegmentRoot === "genesis" ? 0 : 1;
+		assert.equal(
+			leafIndex,
+			sequence - segmentFirstSequence + offset,
+			`${file}: leafIndex === sequence − segmentFirstSequence + ${offset} (equality 4)`,
+		);
+		assert.ok(
+			Number.isSafeInteger(leafIndex) && offset <= leafIndex && leafIndex < treeSize,
+			`${file}: ${offset} <= leafIndex (${leafIndex}) < treeSize (${treeSize})`,
+		);
+		assert.ok(sequence >= segmentFirstSequence, `${file}: sequence >= segmentFirstSequence`);
+		// Equalities 5, 6 and 8.
+		assert.equal(inclusion.treeSize, checkpoint.treeSize, `${file}: equality 5`);
+		assert.equal(inclusion.root, checkpoint.root, `${file}: equality 6`);
+		assert.equal(inclusion.segmentId, checkpoint.segmentId, `${file}: equality 8 (segmentId)`);
+		assert.equal(checkpoint.vaultId, proof.chain, `${file}: equality 8 (vaultId === proof.chain)`);
+		assert.equal(checkpoint.profile, proof.profile, `${file}: equality 8 (profile)`);
+		// The 13-member embedded checkpoint, and the genesis tie between its two
+		// boundary members: only the first segment links to nothing.
+		const checkpointKeys = checkKeySet(checkpoint, CL_CHECKPOINT_KEYS, [], "proof.checkpoint");
+		assert.ok(checkpointKeys.ok, `${file}: ${checkpointKeys.reason}`);
+		assert.equal(
+			checkpoint.previousSegmentRoot === "genesis",
+			checkpoint.segmentStartPreviousHash === "0".repeat(64),
+			`${file}: previousSegmentRoot is "genesis" exactly when segmentStartPreviousHash is 64 zeros`,
+		);
+		// The promotion-aware sibling path for (leafIndex, treeSize).
+		const expectedPath = expectedPathTopology(leafIndex, treeSize);
+		assert.ok(expectedPath, `${file}: (leafIndex, treeSize) must describe a real position`);
+		assert.deepEqual(
+			(inclusion.siblings as { position: string }[]).map((sibling) => sibling.position),
+			expectedPath,
+			`${file}: every sibling position must match the derived path`,
+		);
+		// The event hash: sha256(canonicalize(event − hash)).
+		const { hash, ...unhashed } = event;
+		assert.equal(sha256Hex(canonicalize(unhashed)), hash, `${file}: event.hash recomputes`);
+		// transferSetRoot, when the pairs are listed.
+		if ("transferSet" in data) {
+			assert.equal(
+				sha256Hex(`usertrust/receipt-transfers/v1\n${canonicalize(data.transferSet)}`),
+				data.transferSetRoot,
+				`${file}: transferSetRoot recomputes over the listed pairs`,
+			);
+		}
+		// windowsRoot, when the list is complete (count <= 16).
+		const skipped = data.skippedSincePrevious as Rec | undefined;
+		const windowsComplete = skipped !== undefined && (skipped.count as number) <= 16;
+		if (skipped !== undefined && windowsComplete) {
+			assert.equal(
+				sha256Hex(`usertrust/receipt-skipped-windows/v1\n${canonicalize(skipped.windows)}`),
+				skipped.windowsRoot,
+				`${file}: windowsRoot recomputes over the complete list`,
+			);
+		}
+		// Step 8 is notApplicable exactly when there is nothing to recompute.
+		const steps = (body.verification as Verification).steps;
+		assert.equal(
+			steps.derivations.result,
+			"transferSet" in data || windowsComplete ? "passed" : "notApplicable",
+			`${file}: derivations is passed iff a root is recomputable`,
+		);
+		// The receipt ID, from the chain, the handle and the window start.
+		assert.equal(
+			clusterReceiptId({
+				vaultId: proof.chain,
+				account: data.account,
+				windowStart: data.windowStart,
+			}),
+			receipt.receiptId,
+			`${file}: the receipt ID recomputes (receipt-spec v0.10 §15.9)`,
+		);
+	});
+}
+
+test("CL1 → CL2 → CL3: one account's chain, satisfying the link the resolver checked as passed", () => {
+	const [first, chained, skipped, overflow] = clusterConformingFixtures.map(
+		(entry) => loadClusterFixture(entry.files[0]).body.receipt as Rec,
+	);
+	const dataOf = (receipt: Rec): Rec => (receipt.event as Rec).data as Rec;
+	const chainOf = (receipt: Rec): unknown => (receipt.proof as Rec).chain;
+
+	for (const [previous, next] of [
+		[first, chained],
+		[chained, skipped],
+	]) {
+		assert.equal(dataOf(next).previousReceiptId, previous.receiptId, "next names previous");
+		assert.equal(dataOf(next).account, dataOf(previous).account, "the same account");
+		assert.equal(chainOf(next), chainOf(previous), "the same vault");
+		const previousEnd = BigInt(dataOf(previous).windowEnd as string);
+		const previousIdle = BigInt(dataOf(previous).idleThresholdNs as string);
+		assert.ok(
+			previousEnd + previousIdle <= BigInt(dataOf(next).windowStart as string),
+			"prev.windowEnd + prev.idleThresholdNs <= windowStart",
+		);
+	}
+	// The contract's rule for the first skipped window needs the predecessor's
+	// row, so only the resolver can check it on a live receipt (the page never
+	// does); here it is checked on the fixtures, which carry both rows.
+	const firstSkipped = ((dataOf(skipped).skippedSincePrevious as Rec).windows as Rec[])[0];
+	assert.ok(
+		BigInt(firstSkipped.windowStart as string) >=
+			BigInt(dataOf(chained).windowEnd as string) +
+				BigInt(dataOf(chained).idleThresholdNs as string),
+		"CL3's first skipped window starts at least one idle threshold after CL2's window ends",
+	);
+	// CL4 is ANOTHER account's first receipt.
+	assert.notEqual(dataOf(overflow).account, dataOf(first).account);
+	assert.equal("previousReceiptId" in dataOf(first), false);
+	assert.equal("previousReceiptId" in dataOf(overflow), false);
+});
+
+test("cluster derivations: receipt-spec v0.10 §15.15's known answers, reproduced independently", () => {
+	// Positive controls for every derivation the fixture tests above trust: if
+	// this harness's canonicalize, SHA-256 framing or base58 drifted, the
+	// fixtures could still agree with it — these values come from the spec.
+	const account = "a1_LaVASNboDGARWVkgiqzrkF";
+	const start = "1791234567890123456";
+	assert.equal(
+		sha256Hex(
+			`usertrust/cluster-receipt-id/v1\n${canonicalize({ vaultId: "vault_example", account, windowStart: start })}`,
+		),
+		"2c64e45fd890281ef822c32f44025a2e231c469845cb944745e3def0ea55b882",
+	);
+	const rows: [string, string, string, string][] = [
+		["vault_example", account, start, "ut1_6UxMu41H9LYXJYXV2CEfoK"],
+		["vault_example", account, "1791234567890123457", "ut1_Hgh1y6opsgk6P9ivuxgDwv"],
+		["vault_other", account, start, "ut1_5a64JCujs5reBDEfKV1Riz"],
+		["vault_example", "a1_4HsRUMjopC7DXxL78ne2uk", start, "ut1_XapFpVyWfxM8V6vsJT5Hho"],
+	];
+	for (const [vaultId, handle, windowStart, expected] of rows) {
+		assert.equal(clusterReceiptId({ vaultId, account: handle, windowStart }), expected);
+	}
+	const windowTransfers = [
+		{ id: "00000000000000000000000000000101", timestamp: "1791234567890123456" },
+		{ id: "00000000000000000000000000000102", timestamp: "1791234599000000000" },
+		{ id: "00000000000000000000000000000103", timestamp: "1791234601000000000" },
+	];
+	assert.equal(
+		sha256Hex(`usertrust/receipt-window-transfers/v1\n${canonicalize(windowTransfers)}`),
+		"6ebaf8d020840898bac59226eb8f6c06c87f3205dfc18f14eed3ad03572768e1",
+	);
+	const skippedWindows = [
+		{
+			windowStart: "1791230000000000000",
+			windowEnd: "1791230042000000000",
+			reason: "cluster-void",
+		},
+		{
+			windowStart: "1791232000000000000",
+			windowEnd: "1791232005000000000",
+			reason: "empty-cluster",
+		},
+	];
+	assert.equal(
+		sha256Hex(`usertrust/receipt-skipped-windows/v1\n${canonicalize(skippedWindows)}`),
+		"463cf739347ff9813d903a1dd0052b6fd765d84e81efca763b784758c9053be4",
+	);
+	// Both spec handles pass the format rule this harness applies to `account`.
+	assert.ok(isCanonicalHandle(account));
+	assert.ok(isCanonicalHandle("a1_4HsRUMjopC7DXxL78ne2uk"));
+});
+
+test("cluster derivations: negative controls — the same inputs in another shape are NOT the ID", () => {
+	// The known answer above could also pass a derivation that ignored its key
+	// names; these prove the shape is load-bearing.
+	const account = "a1_LaVASNboDGARWVkgiqzrkF";
+	const windowStart = "1791234567890123456";
+	const id = "ut1_6UxMu41H9LYXJYXV2CEfoK";
+	assert.notEqual(clusterReceiptId({ chain: "vault_example", account, windowStart }), id);
+	assert.notEqual(clusterReceiptId({ account, windowStart }), id);
+});
+
+test("cluster vectors: the harness refuses each rejection vector at its named gate, and accepts every boundary control", () => {
+	for (const vector of clusterVectors) {
+		const { gate, reason } = harnessGate(applyClusterVector(vector));
+		assert.equal(
+			gate,
+			expectedGate(vector),
+			`${vector.label} — ${vector.rule}${reason ? ` (harness: ${reason})` : ""}`,
+		);
+	}
+});
+
+test("cluster vectors: 140 in all, 42 of them boundary controls that must still verify", () => {
+	assert.equal(clusterVectors.length, 140);
+	assert.equal(clusterVectors.filter((vector) => vector.expect.kind === "verified").length, 42);
+	assert.equal(
+		new Set(clusterVectors.map((vector) => vector.label)).size,
+		140,
+		"labels are unique",
+	);
+});
+
+test("cluster vectors: every vector changes its base fixture — no control is vacuous", () => {
+	// A boundary control whose mutation silently failed to apply would verify
+	// for free. The one exception is deliberate and pinned: CL3's middle window
+	// already carries "estimated-transfer", and the 23-reason sweep includes it.
+	// The signed bytes are compared PARSED: the re-encode reorders keys even
+	// when nothing changed, and R4 is key-order-agnostic too.
+	const fingerprint = (routeParamId: string, body: Rec): string => {
+		const { receiptBytes, ...unsigned } = body;
+		const signed: unknown = JSON.parse(
+			Buffer.from(receiptBytes as string, "base64").toString("utf8"),
+		);
+		return canonicalize({ routeParamId, unsigned, signed });
+	};
+	const unchanged = clusterVectors
+		.filter((vector) => {
+			const applied = applyClusterVector(vector);
+			const base = loadClusterFixture(vector.base);
+			return (
+				fingerprint(applied.routeParamId, applied.body) ===
+				fingerprint(base.routeParamId, base.body)
+			);
+		})
+		.map((vector) => vector.label);
+	assert.deepEqual(unchanged, [
+		'boundary: skip reason "estimated-transfer" on CL3\'s middle window',
+	]);
+});
+
+test("cluster vectors: the harness's 23 skip reasons are the vectors' 23, in the contract's order", () => {
+	assert.deepEqual([...CL_SKIP_REASONS], [...CONTRACT_SKIP_REASONS]);
+	assert.equal(new Set(CL_SKIP_REASONS).size, 23);
 });

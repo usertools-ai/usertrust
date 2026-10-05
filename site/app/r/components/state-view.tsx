@@ -22,7 +22,24 @@ import VerifiedReceipt from "./verified-receipt";
 export default function StateView({ state }: { state: PageState }) {
 	switch (state.kind) {
 		case "verified":
-			return <VerifiedReceipt state={state} />;
+			if (state.scope === "session") return <VerifiedReceipt state={state} />;
+			// A cluster receipt (receipt-spec v0.10 §15) now PARSES, but there is no
+			// cluster card yet, and the session card would print claims the receipt
+			// never made (a governed session, an association posture). Until the
+			// cluster renderer lands it fails closed into the protocol-error shell —
+			// where the page put every cluster receipt before it could parse one —
+			// never green, and never a thrown render.
+			return (
+				<ProtocolErrorStateView
+					state={{
+						kind: "protocolError",
+						routeParamId: state.routeParamId,
+						reason: "schemaInvalid",
+						detail: "this page cannot render a cluster receipt (receipt-spec v0.10 §15) yet",
+						httpStatus: 200,
+					}}
+				/>
+			);
 		case "pending":
 			return <PendingStateView state={state} />;
 		case "terminalNoReceipt":
