@@ -12,7 +12,7 @@ post-v0.5), then the 2026-08-10 fresh-eyes review's rulings (6 Blocking /
 the `work`-mirror equality, `posted === assessed`, the hash-pinned
 companion adoption, the per-kind transplant rule, and a representable key
 rotation model — all applied in place at the interface owner's direction;
-version deliberately held at v0.6. B1 RESOLVED by Cam's
+version deliberately held at v0.6. B1 RESOLVED by
 ratification (2026-08-10): ut1 binds to the PROXY's formats — this REVERSES
 v0.5's §4a headline (ut-chain profile), which was flagged for exactly this
 veto. B2 resolved by adopting the resolver spec's reserve→finalize lifecycle
@@ -247,11 +247,11 @@ NON-CONFORMANCE in `packages/verify/src/canonical.ts` recorded (it renders
 `[1, undefined, 2]` as `[1,,2]` — not valid JSON — where normative is
 `[1,null,2]`; both verified by executing the real modules). Correcting the
 verify copy ships with the `usertrust-verify receipt` CLI, its first ut1
-consumer. (2) §8 records Cam's `genesisChoice: "newVault"` ruling with its
+consumer. (2) §8 records the `genesisChoice: "newVault"` ruling with its
 evidence. **RESOLVED in v0.9 (see below).** Delegated-work posture — since a2a
 delegation holds are always-released, delegated cost debits the
-DELEGATE, so a parent session's receipt EXCLUDES it. Cam ruled "the page states
-it" for now; the offline verifier has no page, so unless the posture is
+DELEGATE, so a parent session's receipt EXCLUDES it. The ruling was "the page
+states it" for now; the offline verifier has no page, so unless the posture is
 chain-committed the CLI prints an understated total with no caveat available to
 it. Proposed minimal fix pending ratification: a REQUIRED `delegationPosture:
 "selfOnly" | "includesDelegated"` on the §2 projection.
@@ -281,7 +281,7 @@ smaller change that ships sooner: the proxy's leaf/interior/odd-promotion and
 event-hash rules already match the SDK verbatim, so the delta is envelope
 shape, segment-relative indexing, and the checkpoint statement — NOT a
 production audit-layer migration carried as a rider on the mint feature
-(the operator's recommendation; Cam ratified). The ut-chain convergence (v0.5's
+(the operator's recommendation, ratified). The ut-chain convergence (v0.5's
 choice) is LEDGERED as a deliberate future project, not abandoned. Trade-off
 recorded (§11 ship gate): the zero-dep verifier gains a second profile
 (`profile: "proxy-v1"`) instead of validating proxy receipts unchanged — the
@@ -1132,7 +1132,7 @@ The resolver spec's "Mint lifecycle — normative constraints" section is
 **adopted as normative for §6, by reference and in full** — reserve →
 work → finalize, with every hardening it carries. The adoption is **PINNED
 BY CONTENT HASH (round-4 P1-5)**: it binds that section as of
-**`sha256:b84968568765228f255ff49c8c45e0a3eb91e661ec63b55bd7c84cc4f56e4008`**
+**`sha256:93ce316d61b7c297482c3363da4e3a2bf0bb086f980e1fae3d6ca55831575929`**
 — the COMPLETE digest of `docs/specs/receipt-resolver-api.md`, this
 directory's copy: the v0.3 resolver companion (v0.10's cluster states, all
 OUTSIDE the pinned section), whose pinned section is byte-identical to the v0.2
@@ -1776,7 +1776,7 @@ them, and both cite this document.
   (short) or claims to start earlier (unregistered) never earns
   `VERIFIED_CHECKPOINT_HISTORY`. Like `mintActor`, the pair is immutable for
   the life of the vault — moving a genesis is a new `vaultId`.
-  **RULED for ut1 (Cam, 2026-08-12): `genesisChoice: "newVault"` — genesis IS
+  **RULED for ut1 (2026-08-12): `genesisChoice: "newVault"` — genesis IS
   the v2 cutover.** The choice was made against evidence, not preference: the
   receipt-chain sweep found segment rotation has NEVER run in production
   (`rotateSegment` has no DEFINITION and no caller anywhere in source — the
@@ -2164,7 +2164,7 @@ than `Co-Authored-By`).
    verification step (4), retired in full by §10.14) is retired —
    push-gating must not depend on external sink availability, and the
    status ladder makes the state honest on the wire. Rationale stands
-   unless Cam overrides.
+   unless the interface owner overrides it.
 8. The §6a reservation state is **ALIGNED, not added** (round-4 P2-4): the
    draft's Errors table already carries 202 `{status: "reserved"}` with
    `Cache-Control: no-store`, and this spec confirms it unchanged — the
@@ -2362,8 +2362,8 @@ the resolver companion at its v0.3, outside the pinned section.
     On every read serving a cluster receipt, the resolver recomputes §15.9's
     ID from the stored receipt, in addition to route = body = registry, and
     checks `predecessorLinkage` against its registry (§15.10).
-    - A non-recomputing ID is a 409 with `ID_MISMATCH`; a broken chain link is
-      a 409 with `PREDECESSOR_MISMATCH`.
+    - A non-recomputing ID, or a broken chain link, is the 409 stated once in
+      §15.13.
     - On a 200, `predecessorLinkage` is `passed`, or `notApplicable` for an
       account's first receipt. It is never `unavailable`, for the reason
       `registryBinding` never is: the registry is the resolver's own store.
@@ -2399,7 +2399,7 @@ claims (§2).
 
 Ship gate before mint-endpoint implementation:
 - [ ] **B1 decision record (this document, v0.6):** proxy profile ratified
-      by Cam 2026-08-10; trade-off recorded in the headline (second verifier
+      2026-08-10; trade-off recorded in the headline (second verifier
       profile vs. no chain migration riding the mint feature); ut-chain
       convergence ledgered as a future project.
 - [ ] **Pricing-snapshot ledger migration precedes the mint endpoint** (new
@@ -2562,7 +2562,7 @@ against it (§7 consumers, `kind: "cluster"`). A cluster ID is derivable once
 the window's first hold commits, so a trailer may cite it before its receipt
 exists. Until the receipt is minted, the ID resolves 404 (§15.13).
 
-The swap replaces `Co-Authored-By` (Cam's
+The swap replaces `Co-Authored-By` (a
 2026-08-08 directive); repo convention docs update lands with the swap, in
 lockstep.
 
@@ -3175,15 +3175,36 @@ refusal reason. Within a condition, holds are taken in timestamp order.
    at settlement. A record or event not written yet → WAITING. Otherwise →
    `snapshot-missing`, `posted-amount-mismatch`, `snapshot-not-on-chain`,
    `snapshot-unverifiable` or `unknown-provider`.
-5. **The projection can be built under every §15.6 rule** — e.g. `posted ===
-   assessed`, the rounding bound, public safety — **and passes the minter's
-   own v1 refusals**: an estimate-settled transfer or a non-exact rate gets no
-   receipt rather than a wrong amount. Otherwise → `bad-account`,
-   `bad-window`, `bad-repo-id`, `estimated-transfer`, `non-exact-rate`,
-   `posted-assessed-mismatch`, `duplicate-transfer`, `bad-transfer-id`,
-   `bad-amount` or `rounding-out-of-bounds`.
+5. **The projection can be built under every §15.6 rule, and passes the
+   minter's own v1 refusals**: an estimate-settled transfer, or a non-exact
+   rate, gets no receipt rather than a wrong amount. Every §15.6 rule that
+   can fail maps to EXACTLY ONE reason:
+
+   | §15.6 rule that fails | Reason |
+   |---|---|
+   | the `account` format | `bad-account` |
+   | the window fields, `θ`'s bounds, `skippedSincePrevious`, `windowTransfersRoot` or `windowTransferCount` (including `≥ 2 × transferCount`) | `bad-window` |
+   | `work`, or the `repoId` syntax | `bad-repo-id` |
+   | a transfer ID that is not canonical, or a pair whose two IDs are equal | `bad-transfer-id` |
+   | a transfer ID that repeats | `duplicate-transfer` |
+   | an estimate-settled constituent, the only way `usagePosture` could be other than `provider` | `estimated-transfer` |
+   | a rate that is not an exact catalog rate. This is also `models`' public-safety rule: a model outside the catalog is never published, so `"custom"` never appears in v1 | `non-exact-rate` |
+   | `providers`' public-safety rule: a constituent whose provider is not in the catalog (found at condition 4) | `unknown-provider` |
+   | `pricing.tableVersions`: a constituent snapshot whose table version is missing or malformed | `snapshot-unverifiable` |
+   | `posted === assessed` | `posted-assessed-mismatch` |
+   | an amount that is not a positive safe integer, or a constituent with no priced rows | `bad-amount` |
+   | the rounding bound | `rounding-out-of-bounds` |
+   | `transferCount ≥ 1` (found at condition 3) | `empty-cluster` |
+   | `startedAt`/`endedAt` that are not RFC 3339 UTC to the millisecond, or `startedAt > endedAt`: the chain's own settlement times disagree with its order | `evidence-inconsistent` |
+
+   Everything else in §15.6 holds by construction: the sorted-unique
+   lists, the fixed `scope`, `delegationPosture` and `work.kind`, the
+   transfer-set root, `previousReceiptId` (taken from the registry), and the
+   key set. A failure there is a defect in the minter, never a disclosed
+   refusal.
 6. **The mint event is consistent:** at most one `receipt_settled` event
-   exists for the window, and it equals the projection (otherwise →
+   exists for the window, it equals the projection, and its `timestamp` is
+   not earlier than `endedAt`, the last settlement it cites (otherwise →
    `duplicate-mint-event` or `mint-event-mismatch`). Once its segment is
    sealed, the anchor matches (otherwise → `anchor-mismatch`).
 7. **Every POSTED pair reconciles** across the ledger, the operator's store
@@ -3330,6 +3351,8 @@ and §14's rule is that a meaning, once frozen, is never reused for another.
     `bad-amount` and `rounding-out-of-bounds`.
   - The mint event and its evidence (6–7): `duplicate-mint-event`,
     `mint-event-mismatch`, `anchor-mismatch` and `evidence-inconsistent`.
+    `evidence-inconsistent` also covers condition 5's chain settlement times
+    that disagree with their order.
   - One receipt per charge (8): `consumed-by-another-receipt`.
 
   A reason outside the list fails step 7. Adding one is a revision of this
@@ -3636,7 +3659,7 @@ ONE window. It does not claim:
 **WITH REGISTRY ACCESS** — the resolver, on every read:
 
 - **K5.** The chain link: `predecessorLinkage` (§15.10). →
-  `PREDECESSOR_MISMATCH`, a 409.
+  `PREDECESSOR_MISMATCH`, the 409 of §15.13.
 
 **WITH A SECOND RECEIPT** of the same `(proof.chain, account)` in hand:
 
@@ -3778,7 +3801,7 @@ These are the companion items §10.17–§10.22, applied in the companion's v0.3
 | 200 | the R3-8 ladder | A minted cluster receipt. The envelope is unchanged (`apiVersion: "1"`): the new kind lives INSIDE the signed receipt, never in the envelope. `checks.registryBinding` is `passed`; `checks.predecessorLinkage` is `passed`, or `notApplicable` for an account's first receipt, never `unavailable` (§15.10). | strong `ETag`. `If-None-Match` uses WEAK comparison, evaluated only AFTER a successful verification → 304. `?include=checkpointHistory` is a distinct representation with its own `ETag`. |
 | 304 | — | A successful revalidation, after verification. | |
 | 404 | `"unknown"` | **Every ID with no minted receipt.** For a cluster ID that includes a window still open, closed but not reconciled, with its mint event appended but not yet sealed, or refused. | `Cache-Control: public, no-cache, max-age=0, must-revalidate` — FROZEN. Storage is allowed; every reuse revalidates at the origin, so a cached 404 never outlives publication. |
-| 409 | `"unverifiable"` | The stored artifact fails its own verification — including a cluster receipt whose ID does not recompute (§15.9, `ID_MISMATCH`), or whose predecessor link fails (§15.10, `PREDECESSOR_MISMATCH`). The body carries `verification`: the nine steps, the four named checks, and the closed codes. | `Cache-Control: no-store` |
+| 409 | `"unverifiable"` | The stored artifact fails its own verification, including the two cluster cases stated once below the table. The body carries `verification`: the nine steps, the four named checks, and the closed codes. | `Cache-Control: no-store` |
 | 429 | — | Rate-limited. The body is never parsed. | `Cache-Control: no-store` + `Retry-After` |
 | 503 | `"verificationUnavailable"` | The key registry or the receipt store is unreachable. The body is `{apiVersion, status}`, with NO `receiptId`. | `Cache-Control: no-store` + `Retry-After: 30` (digits only) |
 
@@ -3794,6 +3817,20 @@ These are the companion items §10.17–§10.22, applied in the companion's v0.3
   ("unminted → 404"). A pre-mint answer for a DERIVABLE ID would also be an
   unauthenticated oracle for "account A had activity starting at time T".
 
+**The cluster 409 — stated ONCE here; every other mention points here.** A
+stored cluster receipt is never served when either check fails:
+
+- its ID does not recompute from its own `{vaultId: proof.chain, account,
+  windowStart}` (§15.9);
+- or its predecessor link fails (§15.10).
+
+The answer is HTTP `409`, with body `status: "unverifiable"` and
+`Cache-Control: no-store`. Its `verification` block names the failure with
+§7's closed codes. A non-recomputing ID is `steps.registry` `failed` with
+`ID_MISMATCH`. A broken link is `checks.predecessorLinkage` `failed` with
+`PREDECESSOR_MISMATCH`. That holds even when route, body and registry agree
+on the ID.
+
 **The 404 rendering CHANGES for every ID.** A cluster ID cited before minting is
 indistinguishable from one that will never exist, so a consumer renders every
 404 as **"no receipt under this ID yet"**. It explains that a cluster receipt
@@ -3805,7 +3842,8 @@ A 404 is never rendered as forgery, and never green. The LOUD "never allocated
 **Identity binding on every read** (§10.1, §10.15) is unchanged, with two
 additions. The resolver recomputes the cluster ID (§15.9) from the stored
 receipt, in addition to route = body = registry. And it checks
-`predecessorLinkage` against its registry (§15.10). Either failure is a 409.
+`predecessorLinkage` against its registry (§15.10). Either failure is the 409
+stated above.
 
 ### 15.14 Rendering
 
@@ -3903,6 +3941,18 @@ corpus. They use `θ = 600000000000` (10 minutes) and `T =
   - The post lies between `W₂`'s end and `h₃`, so it is in no window.
   - `W₂` is unaffected and mintable on its own merits. `W₁`'s refusal,
     disclosed by the next receipt, covers `h₁`.
+
+**Refusal vectors.** These are for the minter's corpus, one per §15.5
+mapping that was previously left implicit:
+
+- a constituent whose snapshot prices a model with anything other than an
+  exact catalog rate → `non-exact-rate`;
+- a constituent whose provider is not in the catalog → `unknown-provider`;
+- a constituent snapshot with an empty table version → `snapshot-unverifiable`;
+- settlement events whose first `settledAt` is later than their last, so
+  `startedAt > endedAt` → `evidence-inconsistent`;
+- a `receipt_settled` event timestamped earlier than `endedAt` →
+  `mint-event-mismatch`.
 
 **Negative vectors** the corpus MUST also carry:
 

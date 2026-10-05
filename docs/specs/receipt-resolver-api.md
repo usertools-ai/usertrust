@@ -107,7 +107,7 @@ event, never a companion edit.
 
 ## Purpose
 
-A receipt trailer on a commit/PR/issue replaces `Co-Authored-By` (Cam's
+A receipt trailer on a commit/PR/issue replaces `Co-Authored-By` (a
 universal rule, 2026-08-08). The trailer is only as good as what the ID
 resolves to. This API is the resolution: public, unauthenticated, cacheable
 proof that the proxy executed and billed the work — model, timestamps, **$
@@ -152,7 +152,7 @@ GET https://api.usertools.ai/v1/receipts/{receiptId}
   side), which calls this API. The trailer cites the pretty URL, never this
   endpoint.
 - **Rate limiting — dedicated reader-IP header with service-key
-  authentication (Cam's ruling, 2026-08-10; option (b) ratified, superseding
+  authentication (ruled 2026-08-10; option (b) ratified, superseding
   the forwarded-`X-Forwarded-For` form).** Limits are per READER and generous
   — it's a public verifier, but it sits in front of the ledger. The problem
   the ruling solves is that the verify page fetches SERVER-SIDE with
@@ -266,7 +266,8 @@ GET https://api.usertools.ai/v1/receipts/{receiptId}
   the receipt's own `{vaultId: proof.chain, account, windowStart}`
   (receipt-spec §15.9), and the resolver recomputes it on every read that
   serves one, in addition to route = body = registry. A stored cluster receipt
-  whose ID does not recompute is a 409 `unverifiable`, never served.
+  whose ID does not recompute is never served: it answers the 409 receipt-spec
+  §15.13 states once.
 - **Caching (Codex F3, tightened by round-2 F1):** 200 → `Cache-Control:
   public, no-cache` plus a strong `ETag`; clients revalidate every render.
   **Verification precedes conditional-request evaluation**: the resolver
@@ -1357,7 +1358,7 @@ Design intents behind the shape:
      mismatch is `failed` with `ID_MISMATCH`. The resolver runs it on every
      read that serves a cluster receipt, as the Endpoint section requires.
      Route, body and registry agreeing on an ID that does not derive is
-     still a 409.
+     still the 409 of receipt-spec §15.13.
      Together these bind request → document → event without a payload-embedded
      ID. → `ID_MISMATCH`
   4. **Mint signature**, with key role `mint`, the `minterKind` binding, and a
@@ -1980,7 +1981,7 @@ for its idle threshold (10 minutes by default, set per agent within 60 s to
 |---|---|---|
 | 200 | `verified_checkpoint` / `verified_checkpoint_history` / `verified_anchored` | A MINTED cluster receipt: the same envelope, the same ladder, the same `apiVersion` as any receipt (§10.17). The signed receipt's shape is governed by `scope`, under the receipt spec's strict schema. `checks.registryBinding` is `passed`. `checks.predecessorLinkage` is `passed`, or `notApplicable` for an account's first receipt — never `unavailable`. |
 | 404 | `"unknown"` | **Any ID with no minted receipt.** For a derived cluster ID that includes a window that is still open, closed but not reconciled, with its mint event appended but not yet sealed, or refused (it never gets a receipt). Caching is unchanged: `public, no-cache, max-age=0, must-revalidate`. The round-21 reasoning — a fresh cached 404 can never observe the answer that follows — is now the ORDINARY case rather than an edge. |
-| 409 | `"unverifiable"` | As in the Errors table, plus two cluster cases: a stored cluster receipt whose ID does not recompute from its own `{vaultId, account, windowStart}` (`ID_MISMATCH`, §10.20), and one whose predecessor link fails (`PREDECESSOR_MISMATCH` on `checks.predecessorLinkage`, §10.20). |
+| 409 | `"unverifiable"` | As in the Errors table, plus the two cluster cases receipt-spec §15.13 states once, with their codes: an ID that does not recompute, and a predecessor link that fails. |
 | 503, 304, 429 | as in the Errors table | Unchanged. |
 
 **The receipt chain, checked on every read (§15.10).** The resolver checks
@@ -2000,7 +2001,8 @@ for its idle threshold (10 minutes by default, set per agent within 60 s to
   - no receipt of the account lies strictly between the two windows.
 
   All of these hold → `passed`.
-- **Anything else** → `failed` with `PREDECESSOR_MISMATCH`, answered 409.
+- **Anything else** → `failed` with `PREDECESSOR_MISMATCH`, answered with
+  the 409 of receipt-spec §15.13.
 - **Never `unavailable` on a 200.** The registry is this API's own store, so
   the reasoning that makes `registryBinding` mandatory (see "The verdict
   algebra") applies unchanged. A registry the resolver cannot reach is a 503.
@@ -2249,7 +2251,7 @@ consumer could not obtain a trustworthy answer at all.
    canonical URL is display-at-mint metadata only; the git object ID is
    always the FULL oid + algorithm. The spec tightened the display half into a
    presence rule: `repo` is ABSENT unless disclosure is authorized, so this is
-   no longer Cam's per-commit call but a mint-side authorization check.
+   no longer a per-commit judgement call but a mint-side authorization check.
 2. ~~Proof size bound~~ **RESOLVED (Codex F1 remediation, revised by
    §10.10):** the receipt attests exactly ONE leaf — the `receipt_settled`
    mint event, embedded as the chain's real envelope. The proof structures are
@@ -2299,7 +2301,7 @@ consumer could not obtain a trustworthy answer at all.
    key-custody design a distributed npm package cannot satisfy (it must never
    embed the trust domain's mint key) and is deferred to `ut2`.
 
-## Sequencing / gating (from Cam's plan)
+## Sequencing / gating (from the delivery plan)
 
 **Prerequisite migration (round-13 F3):** per-transfer pricing metadata —
 `pricingTableVersion`, the applied tier rates, and the sanitized usage
@@ -2444,7 +2446,7 @@ command).
 | 17 | Minted cluster receipts are served at 200 on the unchanged envelope and ladder; `apiVersion` unchanged (header status; "Cluster receipts — states and identity"). |
 | 18 | 202 `reserved`/`reconciling` and the 410 terminals are states of the reserved session kind, never emitted. A cluster ID has no 202, no 410, and no pre-mint state ("Cluster receipts"; the Errors scope note; Status ladder; Non-receipt bodies). |
 | 19 | 404 covers every unminted ID, including derived cluster IDs. Caching is unchanged; the 404 rendering changes to "no receipt under this ID yet" (Caching; the Errors 404 row; "Cluster receipts"). |
-| 20 | The derived-ID recompute joins identity binding on every read serving a cluster receipt, and `predecessorLinkage` checks the account's receipt chain against the registry. A non-recomputing ID is a 409 `ID_MISMATCH`, a broken link a 409 `PREDECESSOR_MISMATCH`; on a 200 the chain check is `passed` or `notApplicable`, never `unavailable` (Endpoint, identity binding; the verification steps' step 3 (d); the 200 example; "The verdict algebra"; "Cluster receipts"). |
+| 20 | The derived-ID recompute joins identity binding on every read serving a cluster receipt, and `predecessorLinkage` checks the account's receipt chain against the registry. Either failure is the 409 receipt-spec §15.13 states once; on a 200 the chain check is `passed` or `notApplicable`, never `unavailable` (Endpoint, identity binding; the verification steps' step 3 (d); the 200 example; "The verdict algebra"; "Cluster receipts"). |
 | 21 | No failure code is added. `COMPLETENESS_MISMATCH` and `WINDOW_CONFLICT` are results of the receipt spec's completeness audit and of a two-receipt consumer rule, never emitted by a resolver; the four named checks are unchanged, so there is no `ledgerCompleteness` member ("Cluster receipts"). |
 | 22 | Cluster rendering sentences: claim line, R40 scope line, scoped never-understates ("Cluster receipts"). |
 | v0.9.6 | The proof-block transcriptions caught up with receipt-spec v0.9.6, which overrode them and left this correction to the companion's own round. The 200 example's checkpoint carries the twelfth signed member, `segmentStartPreviousHash`. Equality 4 carries the chain-link offset, in the example and in the verification steps. The example's event sequence moves to 8123420 so that its `leafIndex` 21, and with it the sibling sides, stays valid for a non-genesis segment. The example's `commit` work variant is marked as refused (v0.9.6), and the equality-4 transcription points to v0.9.6's recomputable proof-node bindings and `treeSize > offset`, which it does not restate. |
@@ -2487,14 +2489,14 @@ concrete shape for something §10 described abstractly.
 | §4.2 | **The 429 exemption** — body never parsed, state from status code + `Retry-After` alone, never the protocol-error shell. |
 | §3/R37 | Version discipline: unknown MEMBERS under `apiVersion: "1"` tolerated, unknown VERSIONS and statuses fail closed; plus two obligations on this API — the HTTP code and body `status` must agree on body-bearing responses, and no status code outside the enumerated allowed set (completed by F6 below). |
 
-**Adopted AFTER the v0.2 transcription — a Cam ruling, not a §10 item:**
+**Adopted AFTER the v0.2 transcription — a ruling, not a §10 item:**
 
 | Source | Adopted |
 |---|---|
-| **Cam's ruling, 2026-08-10 (option (b) ratified)** | **Rate limiting: dedicated reader-IP header with service-key authentication.** The verify-page service authenticates with a service key; a valid key from the KNOWN EGRESS unlocks trust in **`Usertrust-Reader-IP`**, and the per-reader limit applies to the address it carries. That header is the ONLY attribution header: inbound `X-Forwarded-For` is now IGNORED ENTIRELY, on every request. An absent header on an authenticated request falls back to a keyed page-service allowance as the floor, and a MALFORMED value (non-single-value or non-IP-literal) degrades to the same floor — **never a rejection; the request is still served.** The page CONSTRUCTS the value from the platform-attested client IP (on Vercel, the platform's own trusted source), never derived from or merged with inbound `X-Forwarded-For`. **Ratification history:** the first form of this ruling forwarded a single-valued `X-Forwarded-For`; option (b) superseded it on the deciding fact that **the page's hosting platform rewrites `X-Forwarded-For` in transit**, putting that header's semantics under infrastructure neither side controls. Header NAME fixed at `Usertrust-Reader-IP` — no `X-` prefix (RFC 6648 deprecates it; matches the `Usertrust-Receipt` convention); the working name `X-Usertrust-Reader-IP` in cross-instance coordination syncs to this. This REPLACES the open coordination item v0.2 raised from verify-page §11/D1 — that item is now closed. Cited, not specified: the service key lands with the mint-key work under the EC2 custody pattern (§9-A H1), and both page-side key handling and header construction are the usertrust verify-page ship-gate addendum. The service key is rate-limit attribution only, never access — the endpoint stays public and the "no auth'd variants" non-goal is intact. |
+| **Ruling, 2026-08-10 (option (b) ratified)** | **Rate limiting: dedicated reader-IP header with service-key authentication.** The verify-page service authenticates with a service key; a valid key from the KNOWN EGRESS unlocks trust in **`Usertrust-Reader-IP`**, and the per-reader limit applies to the address it carries. That header is the ONLY attribution header: inbound `X-Forwarded-For` is now IGNORED ENTIRELY, on every request. An absent header on an authenticated request falls back to a keyed page-service allowance as the floor, and a MALFORMED value (non-single-value or non-IP-literal) degrades to the same floor — **never a rejection; the request is still served.** The page CONSTRUCTS the value from the platform-attested client IP (on Vercel, the platform's own trusted source), never derived from or merged with inbound `X-Forwarded-For`. **Ratification history:** the first form of this ruling forwarded a single-valued `X-Forwarded-For`; option (b) superseded it on the deciding fact that **the page's hosting platform rewrites `X-Forwarded-For` in transit**, putting that header's semantics under infrastructure neither side controls. Header NAME fixed at `Usertrust-Reader-IP` — no `X-` prefix (RFC 6648 deprecates it; matches the `Usertrust-Receipt` convention); the working name `X-Usertrust-Reader-IP` in cross-instance coordination syncs to this. This REPLACES the open coordination item v0.2 raised from verify-page §11/D1 — that item is now closed. Cited, not specified: the service key lands with the mint-key work under the EC2 custody pattern (§9-A H1), and both page-side key handling and header construction are the usertrust verify-page ship-gate addendum. The service key is rate-limit attribution only, never access — the endpoint stays public and the "no auth'd variants" non-goal is intact. |
 
 **Gate round-1 remediation — review findings, distinct from both the
-§10 items and the Cam ruling:**
+§10 items and that ruling:**
 
 | Finding | Applied |
 |---|---|

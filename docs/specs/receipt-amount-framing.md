@@ -4,7 +4,7 @@
 this public repo so the next page change cannot restore the rejected wording
 from a still-sound argument.
 
-Cam reviewed the amount rendered and **rejected the floor.** `"at least $X of
+The rendered amount was reviewed, and **the floor was rejected.** `"at least $X of
 spend was CAUSED…"` is a vague claim about an undefined quantity. The
 replacement is the **unqualified number, with its scope named beneath it:**
 
