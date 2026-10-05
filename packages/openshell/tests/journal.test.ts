@@ -361,7 +361,7 @@ describe("hold journal: reservation is atomic with the debt it is checked agains
 		expect(placed, "no hold placed").toBe(0);
 	});
 	it("a retried evaluation of the same hold places nothing and answers from the row", async () => {
-		const { j } = fresh();
+		const { j } = fresh({ now: () => -1 }); // inside the hold's lifetime (ttlAt 0)
 		let placed = 0;
 		const input = {
 			holdId: "h1",
@@ -461,7 +461,7 @@ describe("#167: reserve's contract — validated input, the same hold only, and 
 	});
 
 	it("a retry answers from the row only when it is the SAME hold; different fields are a conflict", async () => {
-		const { j } = fresh();
+		const { j } = fresh({ now: () => 0 }); // inside the hold's lifetime (ttlAt 1,000)
 		await open(j, "h1", "b", 100);
 		await expect(open(j, "h1", "b", 100)).resolves.toEqual({ admitted: true, existing: true });
 		await expect(open(j, "h1", "b", 999)).rejects.toBeInstanceOf(HoldConflictError);
@@ -811,5 +811,34 @@ describe("#167: an abandoned placement may still land — `voiding` waits out th
 			(j as unknown as { reader: DatabaseSync }).reader = real;
 		}
 		expect(j.get("h1")?.state).toBe("open");
+	});
+});
+
+describe("#167: a retry past the hold's lifetime is refused; the reservation errors are exported", () => {
+	it("P1: an `open` row whose ttlAt has passed is NOT proof of a live hold — the retry is refused hold_expired", async () => {
+		let now = 0;
+		const { j } = fresh({ now: () => now });
+		await open(j, "h1"); // ttlAt 1,000
+		await expect(open(j, "h1")).resolves.toEqual({ admitted: true, existing: true });
+		now = 1_000; // the lifetime (and the ledger's pending timeout, by contract) has passed
+		await expect(open(j, "h1")).resolves.toEqual({
+			admitted: false,
+			reason: "hold_expired",
+			existing: true,
+		});
+	});
+
+	it("P2: every error reserve and its neighbours throw is importable from the package root", async () => {
+		const root = await import("../src/index.js");
+		for (const name of [
+			"HoldConflictError",
+			"LedgerDeadlineError",
+			"OrphanRiskError",
+			"PlacementHorizonError",
+			"JournalBusyError",
+			"JournalUnavailableError",
+		]) {
+			expect(typeof (root as Record<string, unknown>)[name], name).toBe("function");
+		}
 	});
 });

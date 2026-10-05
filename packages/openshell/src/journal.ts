@@ -228,7 +228,15 @@ export type SettlementClaim =
 
 export type Reservation =
 	| { admitted: true; existing: boolean }
-	| { admitted: false; reason: "budget_exceeded" | "not_open"; existing: boolean };
+	| {
+			admitted: false;
+			/**
+			 * `hold_expired`: a retry found its `open` row past `ttlAt` — the ledger's
+			 * pending transfer may already have expired, so nothing is forwarded on it.
+			 */
+			reason: "budget_exceeded" | "not_open" | "hold_expired";
+			existing: boolean;
+	  };
 
 /**
  * A reservation. The ledger calls are made INSIDE the journal's write transaction,
@@ -541,9 +549,13 @@ export class HoldJournal {
 						`row: budget ${existing.budgetId}, amount ${existing.amount}; request: budget ${input.budgetId}, amount ${input.amount}`,
 					);
 				}
-				return existing.state === "open"
-					? { admitted: true, existing: true }
-					: { admitted: false, reason: "not_open", existing: true };
+				if (existing.state !== "open")
+					return { admitted: false, reason: "not_open", existing: true };
+				// An `open` row is NOT proof of a live ledger hold once its lifetime has passed
+				// (a restart, a delayed sweeper): the pending transfer may have expired. Fail closed.
+				if (this.now() >= existing.ttlAt)
+					return { admitted: false, reason: "hold_expired", existing: true };
+				return { admitted: true, existing: true };
 			}
 			const debt = this.debtOf(input.budgetId);
 			const available = await this.bounded("availableCredit", () =>
