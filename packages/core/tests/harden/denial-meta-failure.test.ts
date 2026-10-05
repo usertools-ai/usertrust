@@ -25,11 +25,16 @@ vi.mock("node:fs", async (importOriginal) => {
 	return {
 		...actual,
 		default: actual,
-		// ONLY the sidecar's own `openSync(path, "w")`. The log's `"a"`, the DLQ's
-		// `"a"` and the lock file's numeric O_EXCL flags all fall through, so this
-		// reproduces a sidecar-only failure rather than a general write outage.
+		// ONLY the sidecar's own open: its private temp file `<log>.meta.<uuid>.tmp` (the
+		// anchor is written there and renamed into place, #194), or the anchor itself opened
+		// "w" (the older in-place write). The log's `"a"`, the DLQ's `"a"` and the lock's own
+		// temp file all fall through, so this reproduces a sidecar-only failure rather than a
+		// general write outage.
 		openSync: (path: unknown, flags?: unknown, mode?: unknown) => {
-			if (typeof path === "string" && path.endsWith(".meta") && flags === "w") {
+			const sidecar =
+				typeof path === "string" &&
+				((path.endsWith(".meta") && flags === "w") || /\.meta\.[0-9a-f-]+\.tmp$/.test(path));
+			if (sidecar) {
 				const err = new Error(`EACCES: permission denied, open '${path}'`);
 				(err as NodeJS.ErrnoException).code = "EACCES";
 				throw err;

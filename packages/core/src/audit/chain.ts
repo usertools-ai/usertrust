@@ -9,23 +9,109 @@
  * semantics are enforced via advisory file lock + in-process async mutex.
  */
 
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
 	closeSync,
 	existsSync,
 	constants as fsConstants,
 	fsyncSync,
+	linkSync,
 	mkdirSync,
 	openSync,
 	readFileSync,
+	readlinkSync,
 	realpathSync,
+	renameSync,
+	statSync,
 	unlinkSync,
 	writeSync,
 } from "node:fs";
+import { uptime } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
 import { canonicalize } from "./canonical.js";
+
+// ── Durable writes ──
+
+/**
+ * Write EVERY byte of `data`, or throw (#194.1). `writeSync` may write fewer bytes than asked
+ * (a nearly full disk, a signal); ignoring its count reported a partial line as appended and
+ * durable — a torn tail with a durability claim on it. A write that makes no progress throws.
+ */
+function writeFully(fd: number, data: string): void {
+	const buf = Buffer.from(data, "utf-8");
+	let off = 0;
+	while (off < buf.length) {
+		const n = writeSync(fd, buf, off, buf.length - off);
+		if (n <= 0) {
+			throw new Error(`audit write made no progress (${off} of ${buf.length} bytes written)`);
+		}
+		off += n;
+	}
+}
+
+/**
+ * Replace the `.meta` head anchor ATOMICALLY: written and fsync'd to a private temp file, then
+ * renamed over the anchor. Rewriting it in place (open "w" truncates first) left an EMPTY or
+ * half-written anchor after a crash mid-write — one that reads as corrupt and refuses every
+ * append and verification. Now the anchor is always the old one or the new one.
+ */
+export function writeAnchorAtomically(metaPath: string, content: string): void {
+	const tmp = `${metaPath}.${randomUUID()}.tmp`;
+	const fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+	try {
+		try {
+			writeFully(fd, content);
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		renameSync(tmp, metaPath);
+	} catch (err) {
+		try {
+			unlinkSync(tmp);
+		} catch {
+			/* renamed, or never created */
+		}
+		throw err;
+	}
+	// The parent-directory fsync makes the RENAME durable. Only an UNSUPPORTED directory fsync
+	// (EINVAL/ENOTSUP/EOPNOTSUPP/EISDIR) is best effort; a genuine failure (EIO, …) propagates into
+	// appendEvent's degraded-append / durable-hash contract instead of reporting a durable anchor a
+	// crash could roll back (#196 r2 P2).
+	let dfd: number | undefined;
+	try {
+		dfd = openSync(dirname(metaPath), "r");
+		fsyncSync(dfd);
+	} catch (err) {
+		if (!isUnsupportedDirSync(err)) throw err;
+	} finally {
+		if (dfd !== undefined) closeSync(dfd);
+	}
+}
+
+/** A directory fsync the platform does not support — the only directory-sync error that is best effort. */
+export function isUnsupportedDirSync(err: unknown): boolean {
+	const code = err instanceof Error && "code" in err ? (err as { code?: string }).code : undefined;
+	return code === "EINVAL" || code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "EISDIR";
+}
+
+/**
+ * The log ends in a TORN line — bytes after its last newline, from an append that never
+ * completed. Nothing is appended after it: the new line would be concatenated onto the torn
+ * bytes, burying them mid-file. `usertrust audit quarantine-tail` moves a torn tail aside,
+ * recorded on the chain.
+ */
+export class AuditTornTailError extends Error {
+	constructor(logPath: string, bytes: number) {
+		super(
+			`Audit log ${logPath} ends in a torn line (${bytes} byte(s) after its last newline). Refusing to append. Run \`usertrust audit quarantine-tail\` to move it aside, recorded on the chain.`,
+		);
+		this.name = "AuditTornTailError";
+	}
+}
 
 // ── Types ──
 
@@ -135,59 +221,136 @@ interface LockEntry {
  */
 const inProcessLockOwners = new Map<string, string>();
 
+/** Pause the thread for `ms` (the lock path is synchronous end to end). */
+function sleepSync(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** How long a lock may stay incomplete before it reads as abandoned rather than mid-write. */
+const INCOMPLETE_LOCK_GRACE_MS = 60_000;
+
 /**
- * Check if a lock file is stale (held by a dead process).
- * Returns true if stale and cleaned up, false if held by a live process.
- * Throws if the lock is actively held.
+ * What a lock file says, classified POSITIVELY — every state its bytes can be in:
+ *  - `gone`: it no longer exists (its holder released it);
+ *  - `parsed`: a JSON object with a numeric `pid`;
+ *  - `incomplete`: empty, or a JSON object cut short (a writer mid-write, from a version that
+ *    created the file before writing it);
+ *  - `garbage`: anything else.
+ */
+type LockReading =
+	| { kind: "gone" }
+	| { kind: "parsed"; lock: { pid: number; bootId?: unknown; bootTime?: unknown } }
+	| { kind: "incomplete"; mtimeMs: number }
+	| { kind: "garbage" };
+
+function readLock(path: string): LockReading {
+	let content: string;
+	let mtimeMs: number;
+	try {
+		content = readFileSync(path, "utf-8");
+		mtimeMs = statSync(path).mtimeMs;
+	} catch (err: unknown) {
+		if (err instanceof Error && "code" in err && (err as { code?: string }).code === "ENOENT") {
+			return { kind: "gone" };
+		}
+		throw err;
+	}
+	try {
+		const parsed = JSON.parse(content) as { pid?: unknown };
+		if (parsed !== null && typeof parsed === "object" && typeof parsed.pid === "number") {
+			return { kind: "parsed", lock: parsed as { pid: number } };
+		}
+		return { kind: "garbage" };
+	} catch {
+		const t = content.trim();
+		return t === "" || t.startsWith("{") ? { kind: "incomplete", mtimeMs } : { kind: "garbage" };
+	}
+}
+
+/**
+ * Check if a lock file is stale (held by a dead process, or written in a previous boot).
+ * Returns true if stale and cleaned up (or already gone). Throws AuditWriterLockHeldError if it
+ * is held — including a lock that is still being WRITTEN (#194.3): an incomplete lock is
+ * re-read briefly and, while it is younger than the grace, read as held, never as corrupt.
  */
 function tryCleanStaleLock(candidateLockPath: string, dir: string): boolean {
-	try {
-		const content = readFileSync(candidateLockPath, "utf-8");
-		const lockData = JSON.parse(content) as { pid: number };
-		if (lockData.pid === process.pid && !inProcessLockOwners.has(dir)) {
-			// Same PID but no live writer registered for this dir → the lock is
-			// from a crashed prior instance (the registry is cleared on release)
-			// or a recycled PID. A live sibling is caught earlier by the registry
-			// guard in acquireProcessLock, which throws before we ever get here.
-			console.warn(
-				`[AUDIT] Reclaiming stale same-PID lock (PID ${process.pid}). Previous process exited without releasing the lock.`,
+	let reading = readLock(candidateLockPath);
+	for (let i = 0; i < 20 && reading.kind === "incomplete"; i++) {
+		sleepSync(5);
+		reading = readLock(candidateLockPath);
+	}
+	if (reading.kind === "gone") return true;
+	if (reading.kind === "incomplete") {
+		if (Date.now() - reading.mtimeMs < INCOMPLETE_LOCK_GRACE_MS) {
+			throw new AuditWriterLockHeldError(
+				`Audit writer lock is being written by another writer (incomplete). Retry. Lock file: ${candidateLockPath}`,
 			);
-			unlinkSync(candidateLockPath);
-			return true;
 		}
-		try {
-			process.kill(lockData.pid, 0);
-			// Process is alive — lock is held
+		// Incomplete for longer than any write takes: an abandoned lock.
+		unlinkQuietly(candidateLockPath);
+		return true;
+	}
+	if (reading.kind === "garbage") {
+		// Corrupt lock file — remove it
+		unlinkQuietly(candidateLockPath);
+		return true;
+	}
+	const lockData = reading.lock;
+	if (fromPreviousBoot(lockData)) {
+		// #194.4: a PID recorded before this boot names no process of this boot.
+		console.warn(
+			`[AUDIT] Reclaiming a lock written in a previous boot (PID ${lockData.pid}). Lock file: ${candidateLockPath}`,
+		);
+		unlinkSync(candidateLockPath);
+		return true;
+	}
+	// BEFORE the same-PID branch and the probe (#196 r2 P2): containers often run their writer as
+	// PID 1, so a live writer in ANOTHER namespace can carry this process's own PID.
+	if (fromForeignPidNamespace(lockData as { pidNs?: unknown })) {
+		throw new AuditWriterLockHeldError(
+			`Audit writer lock held by PID ${lockData.pid} in ANOTHER PID namespace (${String((lockData as { pidNs?: unknown }).pidNs)}); this process cannot probe it, so it is never reclaimed. Remove it by hand only if that writer is gone. Lock file: ${candidateLockPath}`,
+		);
+	}
+	if (lockData.pid === process.pid && !inProcessLockOwners.has(dir)) {
+		// Same PID but no live writer registered for this dir → the lock is
+		// from a crashed prior instance (the registry is cleared on release)
+		// or a recycled PID. A live sibling is caught earlier by the registry
+		// guard in acquireProcessLock, which throws before we ever get here.
+		console.warn(
+			`[AUDIT] Reclaiming stale same-PID lock (PID ${process.pid}). Previous process exited without releasing the lock.`,
+		);
+		unlinkSync(candidateLockPath);
+		return true;
+	}
+	try {
+		process.kill(lockData.pid, 0);
+		// Process is alive — lock is held
+		throw new AuditWriterLockHeldError(
+			`Audit writer lock held by PID ${lockData.pid}. Only one process may write to the audit log. Lock file: ${candidateLockPath}`,
+		);
+	} catch (killErr: unknown) {
+		if (killErr instanceof AuditWriterLockHeldError) throw killErr;
+		const code =
+			killErr instanceof Error && "code" in killErr
+				? (killErr as { code?: string }).code
+				: undefined;
+		if (code === "EPERM") {
 			throw new AuditWriterLockHeldError(
 				`Audit writer lock held by PID ${lockData.pid}. Only one process may write to the audit log. Lock file: ${candidateLockPath}`,
 			);
-		} catch (killErr: unknown) {
-			if (killErr instanceof Error && "code" in killErr) {
-				const code = (killErr as { code?: string }).code;
-				if (code === "ESRCH") {
-					// Process is dead — stale lock
-					unlinkSync(candidateLockPath);
-					return true;
-				}
-				if (code === "EPERM") {
-					throw new AuditWriterLockHeldError(
-						`Audit writer lock held by PID ${lockData.pid}. Only one process may write to the audit log. Lock file: ${candidateLockPath}`,
-					);
-				}
-			}
-			throw killErr;
 		}
-	} catch (parseErr) {
-		if (parseErr instanceof AuditWriterLockHeldError) {
-			throw parseErr;
-		}
-		// Corrupt lock file — remove it
-		try {
-			unlinkSync(candidateLockPath);
-		} catch {
-			/* best effort */
-		}
+		// ESRCH: the process is dead — a stale lock. (Any other answer from the probe was
+		// treated as stale before #194, and still is.)
+		unlinkQuietly(candidateLockPath);
 		return true;
+	}
+}
+
+function unlinkQuietly(path: string): void {
+	try {
+		unlinkSync(path);
+	} catch {
+		/* best effort */
 	}
 }
 
@@ -236,63 +399,158 @@ function acquireProcessLock(
 		pid: process.pid,
 		writerId,
 		startedAt: new Date().toISOString(),
+		...bootIdentity(),
 	});
 
 	// First attempt: atomic exclusive create
-	try {
-		const fd = openSync(
-			candidateLockPath,
-			fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
-			0o600,
-		);
-		try {
-			writeSync(fd, lockContent);
-			fsyncSync(fd);
-		} finally {
-			// AUD-459: Close fd immediately — lock semantics rely on file existence, not open fd
-			closeSync(fd);
-		}
+	if (createLockAtomically(candidateLockPath, lockContent, writerId)) {
 		locksByDir.set(dir, { path: candidateLockPath, writerId });
 		inProcessLockOwners.set(dir, writerId);
 		return;
-	} catch (err: unknown) {
-		if (!(err instanceof Error && "code" in err && (err as { code?: string }).code === "EEXIST")) {
-			throw err;
-		}
-		// File exists — check if stale
 	}
+	// File exists — check if stale
 
 	// Lock file exists — check if it's stale and clean up if so
 	tryCleanStaleLock(candidateLockPath, dir);
 
 	// Second attempt after stale lock cleanup. If another process raced us and
 	// already re-created the lock, EEXIST here means they won — report as held.
-	try {
-		const fd = openSync(
-			candidateLockPath,
-			fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL,
-			0o600,
+	if (!createLockAtomically(candidateLockPath, lockContent, writerId)) {
+		throw new AuditWriterLockHeldError(
+			`Audit writer lock acquired by another process during stale lock cleanup. Lock file: ${candidateLockPath}`,
 		);
+	}
+	locksByDir.set(dir, { path: candidateLockPath, writerId });
+	inProcessLockOwners.set(dir, writerId);
+}
+
+/**
+ * Create the lock file ATOMICALLY with its full content (#194.3): the content is written and
+ * fsync'd to a private temp file, then hard-linked into place — `link` fails with EEXIST if the
+ * lock exists, and a lock that exists is never empty or half-written (the old O_EXCL-then-write
+ * left a window in which another starter read "" as corrupt and deleted a LIVE lock).
+ * Returns false when the lock already exists.
+ */
+function createLockAtomically(lockPath: string, content: string, writerId: string): boolean {
+	const tmp = `${lockPath}.${writerId}.tmp`;
+	const fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+	try {
 		try {
-			writeSync(fd, lockContent);
+			writeFully(fd, content);
 			fsyncSync(fd);
 		} finally {
+			// AUD-459: Close fd immediately — lock semantics rely on file existence, not open fd
 			closeSync(fd);
 		}
-		locksByDir.set(dir, { path: candidateLockPath, writerId });
-		inProcessLockOwners.set(dir, writerId);
-	} catch (retryErr: unknown) {
-		if (
-			retryErr instanceof Error &&
-			"code" in retryErr &&
-			(retryErr as { code?: string }).code === "EEXIST"
-		) {
-			throw new AuditWriterLockHeldError(
-				`Audit writer lock acquired by another process during stale lock cleanup. Lock file: ${candidateLockPath}`,
-			);
+		try {
+			linkSync(tmp, lockPath);
+			return true;
+		} catch (err: unknown) {
+			const code =
+				err instanceof Error && "code" in err ? (err as { code?: string }).code : undefined;
+			if (code === "EEXIST") return false;
+			if (code === "EPERM" || code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "ENOSYS") {
+				// #196 r1 P3: the lock is created by hard link so it is never visible half-written.
+				// Filesystems without link() (exFAT/FAT, some network and FUSE mounts) cannot host a
+				// vault's writer — fail closed and say why (LIMITATIONS.md), never fall back to the racy
+				// O_EXCL-then-write this replaced.
+				throw new Error(
+					`Audit writer lock cannot be created: this filesystem does not support hard links (${code}). A vault's audit directory must live on a filesystem with link() — see LIMITATIONS.md. Lock file: ${lockPath}`,
+				);
+			}
+			throw err;
 		}
-		throw retryErr;
+	} finally {
+		try {
+			unlinkSync(tmp);
+		} catch {
+			/* best effort */
+		}
 	}
+}
+
+/**
+ * This boot's identity, recorded in the lock (#194.4): a PID from a PREVIOUS boot says nothing
+ * about this one — after a reboot the PID may be reused by an unrelated live process, and the
+ * stale lock would read as held forever.
+ *
+ * ONLY an EXACT per-boot id may reclaim a lock (#196 r1 P1): Linux's
+ * `/proc/sys/kernel/random/boot_id`, macOS's `sysctl kern.bootsessionuuid`. The uptime-derived
+ * boot time is still recorded, for diagnosis only — it moves with every wall-clock step, and
+ * reclaiming a lock on it deleted a LIVE writer's lock after a clock adjustment of more than the
+ * old 30 s tolerance, forking the chain. Read once per process: a boot id cannot change while
+ * this process lives.
+ */
+let cachedBootId: string | undefined;
+function exactBootId(): string | undefined {
+	if (cachedBootId !== undefined) return cachedBootId;
+	let id: string | undefined;
+	try {
+		if (process.platform === "linux") {
+			id = readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim() || undefined;
+		} else if (process.platform === "darwin") {
+			id =
+				execFileSync("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"], {
+					encoding: "utf-8",
+					timeout: 2_000,
+					stdio: ["ignore", "pipe", "ignore"],
+				}).trim() || undefined;
+		}
+	} catch {
+		id = undefined; // unknown → the PID probe decides (never a time estimate)
+	}
+	// Cache only a SUCCESSFUL read (#196 r2 P3): a transient failure (a sysctl timeout under load)
+	// must not leave every lock this process writes without a boot id for its whole lifetime.
+	if (id !== undefined) cachedBootId = id;
+	return id;
+}
+
+/**
+ * This process's PID NAMESPACE (#196 r2 P2): containers on one Linux host share `boot_id`, but
+ * `kill(pid, 0)` sees only the caller's own PID namespace — a writer in another container probes as
+ * ESRCH (or as an unrelated process) and its LIVE lock would be reclaimed. Linux: the
+ * `/proc/self/ns/pid` link target (`pid:[<inode>]`); elsewhere none (one namespace).
+ */
+function pidNamespace(): string | undefined {
+	if (process.platform !== "linux") return undefined;
+	try {
+		const ns = readlinkSync("/proc/self/ns/pid");
+		return /^pid:\[\d+\]$/.test(ns) ? ns : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function bootIdentity(): { bootId?: string; bootTime: number; pidNs?: string } {
+	const bootId = exactBootId();
+	const pidNs = pidNamespace();
+	const bootTime = Math.round(Date.now() / 1000 - uptime()); // diagnostic only
+	return {
+		...(bootId === undefined ? {} : { bootId }),
+		bootTime,
+		...(pidNs === undefined ? {} : { pidNs }),
+	};
+}
+
+/**
+ * Was this lock written from ANOTHER PID namespace (in this boot)? Then this process's
+ * `kill(pid, 0)` cannot see its writer, and the lock is HELD — never reclaimed by a probe that is
+ * looking in the wrong namespace. Positive only: both sides carry a namespace and they differ.
+ */
+function fromForeignPidNamespace(lock: { pidNs?: unknown }): boolean {
+	const now = pidNamespace();
+	return typeof lock.pidNs === "string" && now !== undefined && lock.pidNs !== now;
+}
+
+/**
+ * Was this lock written in a PREVIOUS boot? ONLY when the lock and this boot both carry an EXACT
+ * boot id and they differ. Anything else — no id on either side, a pre-#194 lock, a boot time
+ * however far off — is NOT a previous-boot verdict: the `kill(pid, 0)` probe decides, and a live
+ * PID holds (a reboot-reused PID then holds too, as before #194: fail-closed, never a fork).
+ */
+function fromPreviousBoot(lock: { bootId?: unknown; bootTime?: unknown }): boolean {
+	const now = exactBootId();
+	return typeof lock.bootId === "string" && now !== undefined && lock.bootId !== now;
 }
 
 // AUD-459: fd is closed immediately after writing PID content.
@@ -348,7 +606,13 @@ function getLastEvent(logPath: string, cache: Map<string, CachedTail>): CachedTa
 
 	if (!existsSync(logPath)) return null;
 
-	const content = readFileSync(logPath, "utf-8").trim();
+	const raw = readFileSync(logPath, "utf-8");
+	// #194: a log whose last byte is not a newline ends in a TORN line. Appending would
+	// concatenate onto it; refuse, and let the operator quarantine it (recorded on the chain).
+	if (raw.length > 0 && !raw.endsWith("\n")) {
+		throw new AuditTornTailError(logPath, Buffer.byteLength(raw.slice(raw.lastIndexOf("\n") + 1)));
+	}
+	const content = raw.trim();
 	if (!content) {
 		const metaPath = `${logPath}.meta`;
 		if (existsSync(metaPath)) {
@@ -517,9 +781,18 @@ export function createAuditWriter(
 			const fullEvent = snapshot as unknown as AuditEvent & { sequence: number };
 			fullEvent.hash = hash;
 
-			const fd = openSync(logPath, "a");
+			// O_NOFOLLOW: an append never writes THROUGH a symlinked log into a file outside the
+			// vault (#196 r2 P1's class). Mode as `openSync(path, "a")` created it (0o666 & ~umask).
+			const fd = openSync(
+				logPath,
+				fsConstants.O_WRONLY |
+					fsConstants.O_APPEND |
+					fsConstants.O_CREAT |
+					(fsConstants.O_NOFOLLOW ?? 0),
+				0o666,
+			);
 			try {
-				writeSync(fd, `${persisted}\n`);
+				writeFully(fd, `${persisted}\n`);
 				fsyncSync(fd);
 			} finally {
 				closeSync(fd);
@@ -533,18 +806,15 @@ export function createAuditWriter(
 
 			// Persist last hash to sidecar for cross-segment chain continuity
 			const metaPath = `${logPath}.meta`;
-			const metaFd = openSync(metaPath, "w");
-			try {
-				writeSync(metaFd, JSON.stringify({ lastHash: hash, sequence }));
-				fsyncSync(metaFd);
-			} finally {
-				closeSync(metaFd);
-			}
+			writeAnchorAtomically(metaPath, JSON.stringify({ lastHash: hash, sequence }));
 
 			return fullEvent;
 		} catch (err) {
 			degraded = true;
 			writeFailures++;
+			// The cached tail may no longer be the log's tail (a partial write): the next append
+			// re-reads the log, and refuses a torn one.
+			lastEventCache.delete(logPath);
 			if (durableHash !== undefined && err !== null && typeof err === "object") {
 				Object.defineProperty(err, DURABLE_EVENT_HASH, {
 					value: durableHash,

@@ -22,6 +22,7 @@ export type {
 } from "./anomaly/types.js";
 export {
 	type AppendEventInput,
+	AuditTornTailError,
 	type AuditWriter,
 	AuditWriterLockHeldError,
 	type CreateAuditWriterOptions,
@@ -42,8 +43,15 @@ export {
 	verifyConsistencyProof,
 	verifyInclusionProof,
 } from "./audit/merkle.js";
-export type { ChainIntegrity, PersistedAuditEvent } from "./audit/read.js";
 // Vault reading (shared by CLI + usertrust-ui)
+export {
+	AuditQuarantineRefusedError,
+	QUARANTINE_EVENT_KIND,
+	type QuarantineResult,
+	quarantineTornTail,
+	type TornTail,
+} from "./audit/quarantine.js";
+export type { ChainIntegrity, PersistedAuditEvent } from "./audit/read.js";
 export { deriveChainIntegrity, loadBudgetConfig, readLedgerEvents } from "./audit/read.js";
 export type { ChainVerificationResult, VaultVerificationResult } from "./audit/verify.js";
 export { verifyChain, verifyVault } from "./audit/verify.js";
