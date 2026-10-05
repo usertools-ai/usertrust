@@ -937,3 +937,26 @@ describe("#167: a retry past the hold's lifetime is refused; the reservation err
 		}
 	});
 });
+
+describe("#172: writeTx's refusal of an async body leaves no unhandled rejection", () => {
+	it("a REJECTING async body: the refusal is still thrown, and nothing is left unhandled", async () => {
+		const { j } = fresh();
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => unhandled.push(reason);
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			await expect(
+				j.writeTx(() =>
+					(async () => {
+						await new Promise((r) => setTimeout(r, 5));
+						throw new Error("the async body failed later");
+					})(),
+				),
+			).rejects.toThrow(/SYNCHRONOUS body/);
+			await new Promise((r) => setTimeout(r, 50)); // the body rejects after the refusal
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+		expect(unhandled).toEqual([]);
+	});
+});

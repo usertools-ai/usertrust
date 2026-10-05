@@ -87,22 +87,26 @@ export interface RequestMutations {
 	body?: Uint8Array;
 }
 
+/**
+ * A priced hold. Read-only to the type checker, deeply (#173): it is frozen at runtime too,
+ * so a write fails to compile rather than throwing in strict code.
+ */
 export interface Hold {
-	route: MeteredRoute;
-	model: string;
+	readonly route: MeteredRoute;
+	readonly model: string;
 	/** The conservative input-token bound the hold was priced on. */
-	inputTokenBound: number;
+	readonly inputTokenBound: number;
 	/** The request's own output limit. */
-	maxOutputTokens: number;
+	readonly maxOutputTokens: number;
 	/** Usertokens to reserve: a ceiling the call cannot exceed in the normal case. */
-	amount: number;
-	streaming: boolean;
+	readonly amount: number;
+	readonly streaming: boolean;
 	/**
 	 * The rates the hold was priced with, SNAPSHOTTED here. Settlement prices the usage
 	 * with these — never by re-resolving the model, whose operator rates may have
 	 * changed (become cheaper) between the reservation and the settlement.
 	 */
-	rates: ModelRates;
+	readonly rates: Readonly<ModelRates>;
 }
 
 export type GateResult =
@@ -117,6 +121,37 @@ export class BodyTooLargeError extends Error {
 		this.name = "BodyTooLargeError";
 	}
 }
+
+/**
+ * The operator's token config cannot price a hold: a negative, NaN, infinite, fractional or
+ * missing image or tool bound would LOWER the input bound, so an admitted call could settle
+ * above its reservation. Thrown (the middleware fails, so OpenShell's fail-closed default
+ * blocks the call) — never a silent fall-back to a default.
+ */
+export class GateConfigError extends Error {
+	constructor(public readonly field: string) {
+		super(`gate config: ${field} must be a non-negative safe integer`);
+		this.name = "GateConfigError";
+	}
+}
+
+const PROVIDERS: readonly Provider[] = ["anthropic", "openai"];
+const isTokenCount = (v: unknown): boolean => Number.isSafeInteger(v) && (v as number) >= 0;
+
+/** Every image and tool bound, whatever this request carries (#171). */
+function validateTokenConfig(config: GateConfig): void {
+	for (const p of PROVIDERS) {
+		if (!isTokenCount(config.imageTokenMax?.[p])) throw new GateConfigError(`imageTokenMax.${p}`);
+		if (!isTokenCount(config.toolOverheadTokens?.[p]))
+			throw new GateConfigError(`toolOverheadTokens.${p}`);
+	}
+	for (const [model, v] of Object.entries(config.imageTokenMaxByModel ?? {})) {
+		if (!isTokenCount(v)) throw new GateConfigError(`imageTokenMaxByModel.${model}`);
+	}
+}
+
+/** The stream_options keys a request may carry (#168): the gate sets include_usage itself. */
+const STREAM_OPTION_KEYS: ReadonlySet<string> = new Set(["include_usage"]);
 
 type Json = Record<string, unknown>;
 const isObject = (v: unknown): v is Json =>
@@ -522,12 +557,21 @@ function topLevelChecks(route: MeteredRoute, body: Json, w: Walk): string | unde
 			}
 		}
 	}
-	// `stream_options.continuous_usage_stats` makes vLLM-style upstreams report usage on
-	// EVERY chunk. The parser settles on the last usage before [DONE], but a request that
-	// asks for running counts is refused outright rather than relied on.
-	if (isObject(body.stream_options) && "continuous_usage_stats" in body.stream_options) {
-		refuse(w, DenyReason.parameterUnsupported, "stream_options.continuous_usage_stats");
-		return undefined;
+	// stream_options is an ALLOWLIST (#168): a key a provider adds later (e.g. vLLM's
+	// `continuous_usage_stats`, which reports usage on EVERY chunk) could change how, or
+	// whether, the stream reports the usage the hold settles from — refused until reviewed.
+	// A non-object is refused too: when not streaming it would be forwarded as sent.
+	if (Object.hasOwn(body, "stream_options")) {
+		if (!isObject(body.stream_options)) {
+			refuse(w, DenyReason.parameterUnsupported, "stream_options.type");
+			return undefined;
+		}
+		for (const k of Object.keys(body.stream_options)) {
+			if (!STREAM_OPTION_KEYS.has(k)) {
+				refuse(w, DenyReason.parameterUnsupported, `stream_options.${k}`);
+				return undefined;
+			}
+		}
 	}
 	const allowed = TOP_LEVEL[route];
 	for (const k of Object.keys(body)) {
@@ -585,6 +629,7 @@ export function evaluateRequest(
 	req: GateRequest,
 	config: GateConfig = DEFAULT_GATE_CONFIG,
 ): GateResult {
+	validateTokenConfig(config); // a config that cannot price a hold is refused first (#171)
 	const match = matchRoute(req.method, req.host, req.path, config.routes);
 	if (match.kind === "unsupported")
 		return { decision: "deny", reason: DenyReason.routeUnsupported };
@@ -651,11 +696,13 @@ export function evaluateRequest(
 	// A FROZEN COPY: getModelRates returns the operator's own object, and an in-place edit after
 	// authorize must not change what this hold settles at. ModelRates is flat numbers.
 	const rates: ModelRates = Object.freeze({ ...getModelRates(model, config.customRates) });
-	// Priced at the DEARER of the input and cache-write tiers: a prompt the provider
-	// writes to its cache bills above plain input.
+	// Priced at the DEAREST input tier: plain input, cache write (a prompt the provider writes
+	// to its cache bills above plain input) and cache read (#169: an operator's rate may price
+	// a cache read above both). Each tier is linear, so no split of the bound costs more.
 	const amount = Math.max(
 		costFromRates(rates, inputTokenBound, maxOutputTokens),
 		costFromRates(rates, 0, maxOutputTokens, 0, inputTokenBound),
+		costFromRates(rates, 0, maxOutputTokens, inputTokenBound, 0),
 	);
 
 	const mutations: RequestMutations = {
@@ -665,7 +712,16 @@ export function evaluateRequest(
 	};
 	return {
 		decision: "allow",
-		hold: { route: match.route, model, inputTokenBound, maxOutputTokens, amount, streaming, rates },
+		// Frozen (#170): what this hold settles at is fixed at authorize; `rates` is frozen above.
+		hold: Object.freeze({
+			route: match.route,
+			model,
+			inputTokenBound,
+			maxOutputTokens,
+			amount,
+			streaming,
+			rates,
+		}),
 		mutations,
 	};
 }
