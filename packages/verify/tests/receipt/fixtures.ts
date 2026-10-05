@@ -2319,6 +2319,25 @@ export const HISTORY_VECTORS: readonly Vector[] = [
 			}),
 	},
 	{
+		// §4a (v0.9.6): a sealed segment holds at least one event, so its
+		// treeSize exceeds the chain-link offset. The FINAL member is the one
+		// that needs the rule: its treeSize is otherwise read only by a
+		// successor's contiguity sum, and it has no successor.
+		name: "history/final-member-holds-no-event",
+		what: "A history whose final, non-genesis member claims treeSize 0 is refused at that statement — no successor would ever read it.",
+		mode: "envelope",
+		expect: historyFailed("holds no event leaf"),
+		breaks: [],
+		build: () =>
+			mint({
+				mintSegmentIndex: 1,
+				mintLeafIndex: 3,
+				checkpointsUnsigned: (checkpoints) =>
+					checkpoints.map((c, i) => (i === 2 ? { ...c, treeSize: 0 } : c)),
+				history: (_history, all) => [...all],
+			}),
+	},
+	{
 		// §4a (v0.9.6): a successor's segmentStartPreviousHash is its
 		// predecessor's FINAL event hash. When the receipt's event sits at its
 		// segment's last leaf, that final event is in hand — and here the served

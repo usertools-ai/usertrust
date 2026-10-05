@@ -1461,22 +1461,63 @@ const HISTORY_ROWS: readonly Row[] = [
 	},
 	{
 		id: "history.member.not-increasing",
-		value:
-			"a member that holds only its chain link, so its successor's first sequence stands still",
+		value: "a member re-signed to start where its predecessor starts",
 		boundTo: "§7: segmentFirstSequence strictly increasing, beside contiguity",
 		covers: [],
 		run: () =>
 			verify(
+				resignedCheckpoint((c) => ({ ...c, segmentFirstSequence: 1 }), 1),
 				{
-					segments: [
-						{ segmentId: "seg_000001", segmentFirstSequence: 1, treeSize: 4 },
-						{ segmentId: "seg_000002", segmentFirstSequence: 5, treeSize: 1 },
-						{ segmentId: "seg_000003", segmentFirstSequence: 5, treeSize: 7 },
-					],
+					history: true,
+				},
+			),
+		expect: historyFailed("does not strictly increase"),
+	},
+	{
+		id: "history.member.empty-final",
+		value: "the FINAL member, non-genesis, re-signed with treeSize 0",
+		boundTo: "§4a: a sealed segment holds at least one event (treeSize > offset)",
+		covers: [],
+		run: () =>
+			verify(
+				{
+					mintSegmentIndex: 1,
+					mintLeafIndex: 3,
+					...WITH_SUCCESSOR,
+					...resignedCheckpoint((c) => ({ ...c, treeSize: 0 }), 2),
 				},
 				{ history: true },
 			),
-		expect: historyFailed("does not strictly increase"),
+		expect: historyFailed("holds no event leaf"),
+	},
+	{
+		id: "history.member.link-only-final",
+		value: "the FINAL member, non-genesis, re-signed with treeSize 1 — its chain link and no event",
+		boundTo: "§4a: a sealed segment holds at least one event (treeSize > offset)",
+		covers: [],
+		run: () =>
+			verify(
+				{
+					mintSegmentIndex: 1,
+					mintLeafIndex: 3,
+					...WITH_SUCCESSOR,
+					...resignedCheckpoint((c) => ({ ...c, treeSize: 1 }), 2),
+				},
+				{ history: true },
+			),
+		expect: historyFailed("holds no event leaf"),
+	},
+	{
+		id: "history.member.empty-genesis",
+		value: "the GENESIS member re-signed with treeSize 0",
+		boundTo: "§4a: a sealed segment holds at least one event (treeSize > offset)",
+		covers: [],
+		run: () =>
+			verify(
+				resignedCheckpoint((c) => ({ ...c, treeSize: 0 }), 0),
+				{ history: true },
+			),
+		expect: historyFailed("holds no event leaf"),
 	},
 	{
 		id: "history.member.embedded-absent",

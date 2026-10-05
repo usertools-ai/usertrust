@@ -65,7 +65,10 @@ its segment's final leaf. (5) **The artifact `work` variants are REFUSED.**
 list): their provider proofs are bound by nothing a verifier holds, so a
 verified status would certify a claim nobody checked. Only the `session`
 variants verify in v1 — a deliberate NARROWING: an artifact receipt v0.9.5
-would have certified now fails.
+would have certified now fails. (6) **A sealed segment holds at least one
+event**, so a statement's `treeSize` exceeds its chain-link offset; a
+history's FINAL member is the one this binds, because no successor ever
+reads its `treeSize`.
 **Compatibility: NONE is extended, deliberately.** The v0.9.5 eleven-member
 statement and the offset-free equality 4 were never minted for real. The
 only objects in that shape are this repo's own: the verifier's conformance
@@ -673,7 +676,10 @@ TODAY, modulo the checkpoint extension below:
   has no sequence. So a segment's **chain-link offset** is
   `0` when `checkpoint.previousSegmentRoot === "genesis"` and `1`
   otherwise; its first event is leaf `offset`; and `treeSize` counts the
-  link (event leaves = `treeSize − offset`). Equality 4 becomes
+  link (event leaves = `treeSize − offset`). A segment is never sealed
+  empty, so a v2 statement has `treeSize > offset` — at least 1 for the
+  genesis segment, 2 for a successor — and one claiming fewer is FAIL at
+  step 6 and stops §7's history walk. Equality 4 becomes
   `inclusion.leafIndex === event.sequence − checkpoint.segmentFirstSequence
   + offset` (the checkpoint carries `segmentFirstSequence` for exactly this,
   and the offset is read from its SIGNED `previousSegmentRoot`). Where the
@@ -1132,7 +1138,8 @@ Levels (renamed, R2-2 — names must not overclaim):
   final event is not in hand and nothing carries it);
   **a member that is not a v2 statement STOPS the walk (v0.9.6)** — `v`
   other than `2` (e.g. a v1 `PublishedMerkleRoot`), any of §4a's twelve
-  members absent, or any member outside them, signed or not: the walk does
+  members absent, any member outside them, or a `treeSize` that holds no
+  event (§4a), signed or not: the walk does
   not skip it, does not infer its lineage, and does not continue past it.
   The `checkpointHistory` check is `failed` with code `HISTORY_INVALID` and a
   detail that names the member's position and the §4a rule it breaks; as

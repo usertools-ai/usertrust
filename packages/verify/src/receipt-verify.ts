@@ -3052,6 +3052,13 @@ function checkpointStatementShape(checkpoint: JsonObject): string | null {
 			? "the genesis statement's segmentStartPreviousHash is not the all-zero chain genesis"
 			: "a non-genesis statement's segmentStartPreviousHash is the all-zero chain genesis";
 	}
+	// §4a (v0.9.6): a sealed segment holds at least ONE event — the minting
+	// chain never seals an empty one — so `treeSize` exceeds the chain-link
+	// offset. Without this a FINAL history member claiming no events walks
+	// clean: its `treeSize` is read only by a successor's contiguity sum.
+	if ((numberAt(checkpoint, "treeSize") as number) <= chainLinkOffset(checkpoint)) {
+		return "the statement's treeSize holds no event leaf — a sealed segment holds at least one";
+	}
 	return null;
 }
 
@@ -4439,9 +4446,10 @@ function walkCheckpointHistory(
 			) {
 				return `${label}: segmentStartPreviousHash is not the receipt's event.hash, though that event is the preceding segment's final event`;
 			}
-			// §7: "strictly increasing AND contiguous". The two are separate
-			// clauses because a predecessor with no EVENT leaves (treeSize 0, or a
-			// lone chain link) satisfies the arithmetic while standing still.
+			// §7: "strictly increasing AND contiguous". A predecessor with no EVENT
+			// leaf would satisfy the arithmetic while standing still; the shape
+			// check now refuses that statement first, and this clause refuses a
+			// member that runs backwards.
 			if (segmentFirstSequence <= previousFirst) {
 				return `${label}: segmentFirstSequence ${segmentFirstSequence} does not strictly increase past ${previousFirst}`;
 			}

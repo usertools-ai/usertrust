@@ -405,14 +405,15 @@ describe("HARDEN: anchoring additive proofs", () => {
 		// is still `{}`. 96 lines of headroom.
 		//
 		// 10000 → 10100, for the same amendment's review round 2 (2026-10-05).
-		// Post-change total 10030, so 10000 failed by 30. WHAT WAS ADDED, all in
+		// Post-change total 10038, so 10000 failed by 38. WHAT WAS ADDED, all in
 		// `receipt-verify.ts`: the bindings the amendment's boundaries expose —
 		// the first event's previousHash, every proof node the receipt can
 		// recompute (the chain link at leaf 1, the predecessor at an odd leaf, the
-		// node over both at leaf 2), a served successor's start hash — and the
-		// refusal of the artifact `work` variants. NO vendored source, no new
+		// node over both at leaf 2), a served successor's start hash, a sealed
+		// segment's floor of one event — and the refusal of the artifact `work`
+		// variants. NO vendored source, no new
 		// dependency: the new imports are `hashLeaf` / `hashInternal` from
-		// `./verify.js`, and `dependencies` is still `{}`. 70 lines of headroom.
+		// `./verify.js`, and `dependencies` is still `{}`. 62 lines of headroom.
 		let total = 0;
 		for (const file of readdirSync(VERIFY_SRC).filter((f) => f.endsWith(".ts"))) {
 			total += readFileSync(join(VERIFY_SRC, file), "utf-8").split("\n").length;
