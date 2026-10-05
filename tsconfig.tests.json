@@ -1,0 +1,16 @@
+{
+	"extends": "./tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"declaration": false,
+		"declarationMap": false,
+		"sourceMap": false,
+		"composite": false,
+		"paths": {
+			"usertrust": ["./packages/core/src/index.ts"],
+			"usertrust/headless": ["./packages/core/src/headless.ts"],
+			"usertrust-verify": ["./packages/verify/src/index.ts"]
+		}
+	},
+	"include": ["packages/*/tests/**/*.ts"]
+}

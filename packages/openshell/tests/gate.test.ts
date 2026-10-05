@@ -719,6 +719,7 @@ describe("#169: the hold's worst case includes the cache-read tier", () => {
 			outputTokens: r.hold.maxOutputTokens,
 			cacheReadTokens: r.hold.inputTokenBound,
 			cacheWriteTokens: 0,
+			source: "provider",
 		});
 		expect(s.overage).toBe(0);
 		expect(r.hold.amount).toBe(

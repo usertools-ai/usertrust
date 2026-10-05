@@ -41,14 +41,21 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # `npm run typecheck` = `tsc -b` + the two type-test projects
-      # (packages/core, packages/openclaw), because a bare `tsc -b` never compiles
-      # a .test-d.ts. That is what makes the F5 TrustedClient type-surface guard
-      # (trusted-client-types.test-d.ts) and the pi-ai half of the openclaw host
-      # contract (packages/openclaw/tests/contract.test-d.ts) gate every push. The
-      # openclaw half of that contract needs a package `npm ci` does not install;
-      # it is proven in the `openclaw-contract` job instead.
+      # `npm run typecheck` = `tsc -b` + the three type-test projects
+      # (packages/core, packages/openclaw, packages/openshell), because a bare
+      # `tsc -b` never compiles a .test-d.ts. That is what makes the F5
+      # TrustedClient type-surface guard (trusted-client-types.test-d.ts) and the
+      # pi-ai half of the openclaw host contract (packages/openclaw/tests/
+      # contract.test-d.ts) gate every push. The openclaw half of that contract
+      # needs a package `npm ci` does not install; it is proven in the
+      # `openclaw-contract` job instead.
+      # It then typechecks every package's TESTS (#193: tsconfig.tests.json) under
+      # a ratchet: errors are frozen per file and code in
+      # tsconfig.tests.baseline.json, and a new or grown one fails, as does a
+      # fixed one until the baseline is tightened.
       - run: npm run typecheck
+      # The ratchet's own comparison logic (scripts/typecheck-tests.test.mts).
+      - run: npm run typecheck-tests:test
 
   test:
     name: test
