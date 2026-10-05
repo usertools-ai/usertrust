@@ -19,7 +19,9 @@ concurrency:
 jobs:
   lint:
     name: lint
-    runs-on: ubuntu-latest
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v7
@@ -32,7 +34,9 @@ jobs:
 
   typecheck:
     name: typecheck
-    runs-on: ubuntu-latest
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v7
@@ -59,7 +63,9 @@ jobs:
 
   test:
     name: test
-    runs-on: ubuntu-latest
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@v7
@@ -87,7 +93,9 @@ jobs:
 
   openclaw-contract:
     name: openclaw-contract
-    runs-on: ubuntu-latest
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     # The proving ground for the openclaw half of the host contract.
     #
@@ -165,7 +173,9 @@ jobs:
 
   tb-integration:
     name: tb-integration
-    runs-on: ubuntu-latest
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     # Additive job: runs in parallel with lint/typecheck/test and gates none of them
     # (nothing `needs:` it). It stands up a real single-node TigerBeetle cluster and
@@ -243,7 +253,9 @@ jobs:
 
   site-build:
     name: site-build
-    runs-on: ubuntu-latest
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.pull_request.draft == false
     # The site is a standalone npm project outside the workspaces (own lockfile).
     # Evidence fixtures are committed, so this build needs no TigerBeetle and no
