@@ -41,10 +41,13 @@ export function timeSpan(startedAt: string, endedAt: string): string {
 	const a = new Date(startedAt);
 	const b = new Date(endedAt);
 	if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return `${startedAt} → ${endedAt}`;
-	const day = (d: Date) => `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+	// A span across a year boundary names both years; "same day" is the full UTC date.
+	const crossesYear = a.getUTCFullYear() !== b.getUTCFullYear();
+	const day = (d: Date) =>
+		`${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}${crossesYear ? `, ${d.getUTCFullYear()}` : ""}`;
 	const clock = (d: Date) =>
 		`${String(d.getUTCHours()).padStart(2, "0")}:${String(d.getUTCMinutes()).padStart(2, "0")}`;
-	return day(a) === day(b)
+	return a.toISOString().slice(0, 10) === b.toISOString().slice(0, 10)
 		? `${day(a)} · ${clock(a)}–${clock(b)} UTC`
 		: `${day(a)} ${clock(a)} → ${day(b)} ${clock(b)} UTC`;
 }
@@ -88,10 +91,7 @@ export default function ReceiptCard({
 
 	return (
 		<div data-testid="receipt-card">
-			<section
-				className="ut-perf rounded-[0_0_var(--r-card)_var(--r-card)] border border-[var(--line)] bg-[var(--surface)]"
-				data-testid="receipt-card-body"
-			>
+			<section className="ut-card" data-testid="receipt-card-body">
 				<header className="flex items-center gap-2.5 border-b border-white/[0.09] bg-white/[0.03] px-6 py-3.5">
 					<span className="size-[7px] shrink-0 rounded-full bg-ut shadow-[0_0_0_3px_rgba(48,209,88,0.16)]" />
 					<span className="text-[13px] font-semibold tracking-tight text-ut">Receipt</span>

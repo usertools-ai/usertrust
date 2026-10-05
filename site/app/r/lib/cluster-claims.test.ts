@@ -17,18 +17,15 @@ import {
 	LEDGER_ROWS,
 	POSTURES_ARE_ATTESTED_ENUMS,
 	SESSION_PROMOTION_GATE,
-	UNDISCLOSED_PRIVATE_REPO,
 	usagePostureClaim,
 } from "./claims";
 import {
-	ACCOUNT_HANDLE_MEANING,
 	CLUSTER_AMOUNT_SCOPE_CAPTION,
 	CLUSTER_COMPLETENESS_TRUST,
 	CLUSTER_LEDGER_ROWS,
 	CLUSTER_NON_ARTIFACT,
 	CLUSTER_OFFLINE_VERIFIER_PENDING,
 	CLUSTER_PROVIDER_SCOPED_CLAIM,
-	CLUSTER_REPO_NOTE,
 	CLUSTER_SIGNED_BYTES_LABEL,
 	CLUSTER_TRANSFER_SET_ROOT_LISTED,
 	CLUSTER_TRANSFER_SET_ROOT_RECOMPUTABLE,
@@ -45,15 +42,13 @@ import {
 	ledgerWindowSpan,
 	modelsLine,
 	NS_PER_MS,
-	PREVIOUS_RECEIPT_LABEL,
-	PREVIOUS_RECEIPT_NOTE,
 	SETTLEMENT_TIMES_NOTE,
 	SKIPPED_NOTE,
 	skippedHeadline,
 	skippedWindowSpan,
 	WINDOW_TRANSFERS_ROOT_MEANING,
 } from "./cluster-claims";
-import type { ClusterReceiptDocument, SkippedSincePrevious } from "./wire";
+import type { SkippedSincePrevious } from "./wire";
 
 /** Ledger nanoseconds for an RFC 3339 instant, plus a sub-millisecond remainder. */
 function nsAt(iso: string, extraNs = 0): string {
@@ -128,15 +123,6 @@ test("every cluster sentence, pinned character for character", () => {
 			"chain timestamps of the first and last settlement in this window — clock CLAIMS on the audit chain's clock, not the ledger's. They are not the window, and no order between the two clocks is checked.",
 		],
 		[
-			ACCOUNT_HANDLE_MEANING,
-			"an opaque handle for the ledger account this agent key spends from. It is not the agent key and not a ledger ID, and nothing on this page can turn it into either.",
-		],
-		[PREVIOUS_RECEIPT_LABEL, "Previous receipt"],
-		[
-			PREVIOUS_RECEIPT_NOTE,
-			"this agent key's previous minted receipt. The resolver checked the link: exactly one earlier receipt of this key, closed at least one idle threshold before this window began, with no receipt of the key in between.",
-		],
-		[
 			SKIPPED_NOTE,
 			"each is earlier activity on this agent key that the minter refused to mint; the reason codes are its own. A skipped window is never a receipt and never an amount.",
 		],
@@ -151,10 +137,6 @@ test("every cluster sentence, pinned character for character", () => {
 		[
 			CLUSTER_NON_ARTIFACT,
 			"a cluster receipt attests one agent key's charges over one ledger window, and nothing about any commit, PR, or issue that happens to cite it.",
-		],
-		[
-			CLUSTER_REPO_NOTE,
-			"the repository this agent key is configured for — a property of the key, not a claim about any commit, PR, or issue.",
 		],
 		[CLUSTER_SIGNED_BYTES_LABEL, "Download the signed receipt (its exact bytes)"],
 		[
@@ -357,9 +339,6 @@ test("CL1 first.json: a first receipt — no predecessor, nothing skipped, no re
 	assert.equal(claims.covers, "2 governed calls");
 	assert.equal(claims.models, "claude-sonnet-4-5");
 	assert.equal(claims.providers, "anthropic");
-	assert.equal(claims.account, "a1_LaVASNboDGARWVkgiqzrkF");
-	assert.equal(claims.repo, undefined);
-	assert.equal(claims.previousReceiptId, undefined);
 	assert.equal(claims.skipped, undefined);
 	assert.equal(claims.amountCaption, CLUSTER_AMOUNT_SCOPE_CAPTION.selfDebitsOnly);
 	assert.equal(claims.delegation.value, "selfDebitsOnly");
@@ -390,26 +369,24 @@ test("CL2 chained.json: the named predecessor and a disclosed repository", () =>
 	assert.equal(claims.covers, "3 governed calls");
 	assert.equal(claims.models, "claude-sonnet-4-5 · gpt-5");
 	assert.equal(claims.providers, "anthropic · openai");
-	assert.equal(claims.previousReceiptId, "ut1_6UxMu41H9LYXJYXV2CEfoK");
-	assert.deepEqual(claims.repo, {
-		repoId: "github.com:R_kgDOK1x2Yw",
-		undisclosed: false,
-		label: "github.com:R_kgDOK1x2Yw",
-	});
 	assert.equal(claims.skipped, undefined);
 });
 
-test("CL2 with a keyed r1_ repoId: the repository renders as undisclosed, never as its key", () => {
-	const receipt = structuredClone(
-		verifiedClusterFixtureState("cluster/chained.json").envelope.receipt,
-	) as ClusterReceiptDocument;
-	receipt.work = { kind: "cluster", repoId: "r1_9f2a7c31e8b4" };
-	receipt.event.data.work = { kind: "cluster", repoId: "r1_9f2a7c31e8b4" };
-	assert.deepEqual(clusterReceiptClaims(receipt, "passed").repo, {
-		repoId: "r1_9f2a7c31e8b4",
-		undisclosed: true,
-		label: UNDISCLOSED_PRIVATE_REPO,
-	});
+test("privacy by construction: the view model carries no handle, no predecessor ID, no repository", () => {
+	// The page renders from this model alone, so a field it does not carry is a
+	// field no component can render by accident. The signed receipt still has
+	// all three; the wire validates them.
+	for (const file of [
+		"cluster/first.json",
+		"cluster/chained.json",
+		"cluster/skipped.json",
+		"cluster/skipped-overflow.json",
+	]) {
+		const claims = claimsOf(file) as unknown as Record<string, unknown>;
+		for (const key of ["account", "repo", "repoId", "previousReceiptId"]) {
+			assert.equal(Object.hasOwn(claims, key), false, `${file}: ${key}`);
+		}
+	}
 });
 
 test("CL3 skipped.json: three refused windows, every one listed with its span, duration and reason", () => {
@@ -417,7 +394,6 @@ test("CL3 skipped.json: three refused windows, every one listed with its span, d
 	assert.equal(claims.amountUsd, "0.3150");
 	assert.equal(claims.duration, "48 s");
 	assert.equal(claims.covers, "1 governed call");
-	assert.equal(claims.previousReceiptId, "ut1_3oMvgmMUkN4TNz2hiVEiRd");
 	assert.deepEqual(claims.skipped, {
 		headline: "3 earlier windows weren’t receipted",
 		windows: [
@@ -455,9 +431,6 @@ test("CL4 skipped-overflow.json: 20 refused, 16 listed; no transfer list; custom
 	assert.equal(claims.covers, "40 governed calls");
 	assert.equal(claims.models, `claude-opus-4-1 · gpt-5 · ${CUSTOM_MODEL_MEANING}`);
 	assert.equal(claims.catalog.hasCustom, true);
-	assert.equal(claims.account, "a1_4HsRUMjopC7DXxL78ne2uk");
-	assert.equal(claims.repo, undefined);
-	assert.equal(claims.previousReceiptId, undefined);
 	assert.equal(
 		claims.skipped?.headline,
 		"20 earlier windows weren’t receipted — the first 16 are listed; windowsRoot commits all 20",

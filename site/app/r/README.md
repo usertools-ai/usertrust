@@ -78,12 +78,22 @@ route's PR description rather than duplicated here.
 
 ## The brand field
 
-The page sits on the usertools dot-lattice, in gold: one wave on load, then
-frozen (a receipt has nothing to watch). `vendor/lattice.js` is a byte-for-byte
-copy of the usertools site kit's lattice, loaded by `components/lattice-field.tsx`
-after mount. Never edit it here: `lattice-vendor.test.tsx` pins its sha256. To
-update, copy the new file and its new hash together. Reduced motion, a missing
-WebGL context and a hidden tab are handled inside the module.
+The page sits on the usertools dot-lattice, in gold. **No brand asset lives in
+this repository.** The lattice script and the fonts are loaded at runtime from
+the brand site's kit (`https://usertrust.ai/kit/lattice.js`,
+`https://usertrust.ai/kit/fonts/*.woff2`, served with
+`access-control-allow-origin: *`): `components/lattice-field.tsx` appends the
+script after mount with `data-theme="usertrust"` (gold; without it the kit draws
+its multi-colour settlement spectrum), and `brand.css` points `@font-face` at
+the kit with `font-display: swap` and system fallbacks. If the kit is
+unreachable the page renders on its plain ground in system fonts.
+`brand-assets.test.tsx` fails if a font file or a lattice copy is ever added
+under `site/app/r/`.
+
+The kit's current lattice animates while the tab is visible (a still frame
+under reduced motion, stopped while hidden). The canvas also carries
+`data-accent="gold"` and `data-mode="wave-once"`, which later kit versions read
+to wave once and then freeze; the page picks that up with no change here.
 
 ## Cluster receipts (receipt-spec v0.10 §15)
 

@@ -27,7 +27,7 @@
  * test.ts` asserts them directly, and D1/R37's "the two never share copy"
  * rule is a property of these three exact strings.
  */
-import { LEDGER_ROWS, PLAIN_VERDICT_VERIFIED } from "./claims";
+import { amountUsdFromUsertokens, LEDGER_ROWS, PLAIN_VERDICT_VERIFIED } from "./claims";
 import { plainState } from "./plain-copy";
 import type { CheckName, IntegrityCause, PageState, RetryAfter, StepName } from "./wire";
 
@@ -280,6 +280,18 @@ export function shellHeadline(state: PageState): string {
  */
 export function ogCardWord(state: PageState): string {
 	return state.kind === "verified" ? PLAIN_VERDICT_VERIFIED : plainState(state).word;
+}
+
+/**
+ * The share card's second line, on a VERIFIED receipt only: the amount, the
+ * same `$X.XXXX` the page derives (R23), and nothing else — no receipt ID, no
+ * account handle, no other receipt's ID. Decided 2026-10-05: a share card
+ * carries the verdict and the amount, and nothing that ties the receipt back
+ * to whoever it charged.
+ */
+export function ogCardAmount(state: PageState): string | undefined {
+	if (state.kind !== "verified") return undefined;
+	return `$${amountUsdFromUsertokens(state.envelope.receipt.event.data.spend.assessedUsertokens)}`;
 }
 
 /** The card's register, mirroring the page's own (never green for a non-`verified` state). */

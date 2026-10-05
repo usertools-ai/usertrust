@@ -12,6 +12,7 @@
  * cluster receipt yet.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import StateView from "./components/state-view";
@@ -26,22 +27,19 @@ import {
 	PROVIDER_SCOPED_CLAIM,
 } from "./lib/claims";
 import {
-	ACCOUNT_HANDLE_MEANING,
 	CLUSTER_AMOUNT_SCOPE_CAPTION,
 	CLUSTER_COMPLETENESS_TRUST,
 	CLUSTER_LEDGER_ROWS,
 	CLUSTER_NON_ARTIFACT,
 	CLUSTER_OFFLINE_VERIFIER_PENDING,
 	CLUSTER_PROVIDER_SCOPED_CLAIM,
-	CLUSTER_REPO_NOTE,
 	CLUSTER_SIGNED_BYTES_LABEL,
 	LEDGER_TIME_NOTE,
-	PREVIOUS_RECEIPT_LABEL,
-	PREVIOUS_RECEIPT_NOTE,
 	SETTLEMENT_TIMES_NOTE,
 	SKIPPED_NOTE,
 	WINDOW_TRANSFERS_ROOT_MEANING,
 } from "./lib/cluster-claims";
+import { ogCardAmount, ogCardWord } from "./lib/shell-copy";
 import type { ClusterReceiptDocument } from "./lib/wire";
 
 // ---------------------------------------------------------------------------
@@ -110,12 +108,9 @@ interface ClusterCase {
 	id: string;
 	file: string;
 	amount: string;
-	agent: string;
 	window: string;
 	covers: string;
 	claim: string;
-	repo: boolean;
-	previous?: string;
 	skipped?: { headline: string; spans: string[]; reasons: string[] };
 }
 
@@ -124,36 +119,28 @@ const CASES: ClusterCase[] = [
 		id: "CL1",
 		file: "cluster/first.json",
 		amount: "$4.8224",
-		agent: "a1_LaVASNboDGARWVkgiqzrkF",
 		window: "Oct 5 · 21:09–21:14 UTC 4 min 51 s · closes after 10 min idle",
 		covers: "2 governed calls",
 		claim:
 			"charged to this agent key between 2026-10-05T21:09:27.890Z and 2026-10-05T21:14:19.000Z — $4.8224",
-		repo: false,
 	},
 	{
 		id: "CL2",
 		file: "cluster/chained.json",
 		amount: "$12.0000",
-		agent: "a1_LaVASNboDGARWVkgiqzrkF",
 		window: "Oct 5 · 21:39–21:51 UTC 12 min 7 s · closes after 10 min idle",
 		covers: "3 governed calls",
 		claim:
 			"charged to this agent key between 2026-10-05T21:39:19.123Z and 2026-10-05T21:51:26.123Z — $12.0000",
-		repo: true,
-		previous: "ut1_6UxMu41H9LYXJYXV2CEfoK",
 	},
 	{
 		id: "CL3",
 		file: "cluster/skipped.json",
 		amount: "$0.3150",
-		agent: "a1_LaVASNboDGARWVkgiqzrkF",
 		window: "Oct 5 · 23:44–23:45 UTC 48 s · closes after 10 min idle",
 		covers: "1 governed call",
 		claim:
 			"charged to this agent key between 2026-10-05T23:44:26.123Z and 2026-10-05T23:45:14.123Z — $0.3150",
-		repo: true,
-		previous: "ut1_3oMvgmMUkN4TNz2hiVEiRd",
 		skipped: {
 			headline: "3 earlier windows weren’t receipted",
 			spans: [
@@ -168,12 +155,10 @@ const CASES: ClusterCase[] = [
 		id: "CL4",
 		file: "cluster/skipped-overflow.json",
 		amount: "$245.0000",
-		agent: "a1_4HsRUMjopC7DXxL78ne2uk",
 		window: "Oct 6 · 20:53–21:34 UTC 41 min 13 s · closes after 1 h idle",
 		covers: "40 governed calls",
 		claim:
 			"charged to this agent key between 2026-10-06T20:53:20.000Z and 2026-10-06T21:34:33.000Z — $245.0000",
-		repo: false,
 		skipped: {
 			headline:
 				"20 earlier windows weren’t receipted — the first 16 are listed; windowsRoot commits all 20",
@@ -208,7 +193,6 @@ const GLANCE_IDS = [
 	"amount-usd",
 	"amount-scope-chip",
 	"glance-facts",
-	"cluster-agent",
 	"cluster-window",
 	"covers",
 ];
@@ -254,7 +238,6 @@ for (const c of CASES) {
 			"R38: the posture label beside the figure",
 		);
 
-		assert.equal(textOf(element(before, testid("cluster-agent"))), c.agent, "the FULL handle");
 		assert.equal(textOf(element(before, testid("cluster-window"))), c.window);
 		assert.equal(textOf(element(before, testid("covers"))), c.covers);
 	});
@@ -277,7 +260,6 @@ for (const c of CASES) {
 		for (const sentence of [
 			LEDGER_TIME_NOTE,
 			SETTLEMENT_TIMES_NOTE,
-			ACCOUNT_HANDLE_MEANING,
 			FORK_DISCLAIMER,
 			NEVER_ARTIFACT_VERIFIED,
 			CLUSTER_NON_ARTIFACT,
@@ -288,22 +270,45 @@ for (const c of CASES) {
 		}
 	});
 
-	test(`${c.id} ${c.file}: the previous receipt is a link in the glance iff the receipt names one`, () => {
-		const { html, before, inside } = render(c.file);
-		if (c.previous === undefined) {
-			assert.ok(!html.includes(testid("previous-receipt")), "no predecessor, no link");
-			assert.ok(!textOf(html).includes(PREVIOUS_RECEIPT_NOTE));
-			return;
+	test(`${c.id} ${c.file}: PRIVACY — nothing on the page ties the receipt back to whoever it charged`, () => {
+		const fixture = loadFixture(c.file);
+		const { html, before, inside } = renderWire(fixture);
+		const receipt = receiptOf(fixture);
+		const data = receipt.event.data;
+		// No account handle, anywhere.
+		assert.ok(!html.includes("a1_"), "no a1_ handle in any render");
+		assert.ok(!html.includes(data.account), "and not the handle's body either");
+		// No other receipt's ID: the only ut1_ is this receipt's own.
+		const ids = new Set([...html.matchAll(/ut1_[1-9A-HJ-NP-Za-km-z]+/g)].map((m) => m[0]));
+		for (const id of ids)
+			assert.ok(receipt.receiptId.startsWith(id.replace(/…$/, "")), `foreign ID ${id}`);
+		if (data.previousReceiptId !== undefined) {
+			assert.ok(!html.includes(data.previousReceiptId), "no previous receipt's ID");
+			assert.ok(!html.includes(`/r/${data.previousReceiptId}`), "and no link to it");
 		}
-		const link = element(before, testid("previous-receipt"));
-		assert.ok(link.startsWith("<a "), "a real link");
-		assert.ok(link.includes(`href="/r/${c.previous}"`), "to the predecessor's own page");
-		assert.ok(link.includes(`title="${c.previous}"`), "the full ID one hover away");
-		assert.ok(textOf(before).includes(PREVIOUS_RECEIPT_LABEL));
-		assert.ok(
-			textOf(inside).includes(PREVIOUS_RECEIPT_NOTE),
-			"and what the link means, in Details",
+		// No repository, in either form.
+		if (data.work.repoId !== undefined) assert.ok(!html.includes(data.work.repoId), "no repoId");
+		assert.ok(!html.includes("data-repo-label"), "no repository line");
+		// The header is "Receipt"; the kind is technical metadata in Details only.
+		const glanceText = textOf(
+			before.replace(/<span[^>]*data-reason="[^"]*"[^>]*>[^<]*<\/span>/g, ""),
 		);
+		assert.ok(!/cluster/i.test(glanceText), `no "cluster" wording on the glance: ${glanceText}`);
+		assert.equal(textOf(element(inside, testid("spec-scope"))), "SPEC ut1 · SCOPE cluster");
+		// The predecessor check still reports its result — with no ID.
+		const row = html.match(/data-check="predecessorLinkage"[\s\S]*?<\/tr>/)?.[0] ?? "";
+		assert.ok(
+			row.includes(
+				`data-result="${data.previousReceiptId === undefined ? "notApplicable" : "passed"}"`,
+			),
+		);
+		assert.ok(!/ut1_/.test(row), "the predecessor row names no receipt");
+		// The share card: the verdict word and the amount, nothing else.
+		const state = fixtureState(fixture);
+		for (const line of [ogCardWord(state), ogCardAmount(state) ?? ""]) {
+			assert.ok(!/a1_|ut1_/.test(line), `share card line: ${line}`);
+		}
+		assert.equal(ogCardAmount(state), c.amount);
 	});
 
 	test(`${c.id} ${c.file}: refused windows are ALWAYS visible in the glance, never folded, never an amount`, () => {
@@ -346,14 +351,6 @@ for (const c of CASES) {
 			"1 session",
 		]) {
 			assert.ok(!text.includes(banned), `no "${banned}"`);
-		}
-
-		if (c.repo) {
-			assert.ok(inside.includes('data-repo-label="disclosed"'), "the repository line");
-			assert.ok(textOf(inside).includes(CLUSTER_REPO_NOTE));
-		} else {
-			assert.ok(!html.includes("data-repo-label"), "no repository, no line");
-			assert.ok(!text.includes(CLUSTER_REPO_NOTE));
 		}
 
 		const verify = element(inside, testid("cluster-verify"));
@@ -429,4 +426,38 @@ test("dispatch: a session receipt still renders the session card; a cluster one 
 	assert.ok(cluster.html.includes('data-scope="cluster"'), "the cluster view");
 	assert.ok(!cluster.html.includes(testid("receipt-card")), "never the session card");
 	assert.ok(!cluster.html.includes("cannot render a cluster receipt"), "no longer the error shell");
+});
+
+// ---------------------------------------------------------------------------
+// The card's edge (Cam's v7): clean and straight, a 12px radius, a 1px neutral
+// hairline, a faint inner top highlight — no torn or perforated edge, no gold.
+// ---------------------------------------------------------------------------
+
+test("EDGE: both cards wear the clean edge — 12px radius, neutral hairline, no perforation, no gold", () => {
+	const css = readFileSync(new URL("./brand.css", import.meta.url), "utf8").replace(
+		/\/\*[\s\S]*?\*\//g,
+		"",
+	);
+	const rule = css.match(/\.ut-r \.ut-card\{([^}]*)\}/)?.[1];
+	assert.ok(rule, "brand.css defines .ut-r .ut-card");
+	assert.match(rule, /border-radius:var\(--r-row\)/);
+	assert.match(css, /--r-row:12px;/);
+	assert.match(rule, /border:1px solid var\(--line\)/);
+	assert.match(css, /--line:rgba\(255,255,255,\.10\);/);
+	assert.match(rule, /box-shadow:inset 0 1px 0 rgba\(255,255,255,\.06\)/);
+	assert.doesNotMatch(
+		rule,
+		/gradient|mask|clip-path|--brand|232,\s*181,\s*75/i,
+		"no zigzag, punch hole or gold",
+	);
+	assert.doesNotMatch(css, /ut-perf|perforat/i, "no perforation rule survives");
+	for (const file of [
+		"session-owner-estimated.json",
+		"cluster/first.json",
+		"cluster/skipped.json",
+	]) {
+		const { html } = render(file);
+		assert.equal(occurrences(html, 'class="ut-card"'), 1, `${file}: one card, on the clean edge`);
+		assert.doesNotMatch(html, /ut-perf/, file);
+	}
 });

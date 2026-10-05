@@ -1,26 +1,20 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { ImageResponse } from "next/og";
-import { truncateForDisplay } from "../lib/claims";
 import { resolvePageState } from "../lib/resolve";
-import { ogCardRegister, ogCardWord } from "../lib/shell-copy";
+import { ogCardAmount, ogCardRegister, ogCardWord } from "../lib/shell-copy";
 
 /**
- * `/r/<receiptId>`'s share card — spec §12 open question 1, resolved to its
- * OWN stated default (b), unanswered: "verdict-only card, amount on the
- * page." The card renders exactly ONE piece of receipt-specific content —
- * `ogCardWord`, which IS `shellHeadline`, the same string the page itself
- * renders as its verdict/state headline — plus the truncated receipt ID for
- * disambiguation. No kind, no work claim, and NO dollar amount: "Amounts
- * are public by directive and the flex is deliberate — but a share card
- * broadcasts the spend figure into every link unfurl, ahead of the reader
- * seeing the disclaimers," which is precisely the risk (b) declines.
+ * `/r/<receiptId>`'s share card: the verdict word (`ogCardWord`, the plain word
+ * the page itself leads with) and, on a verified receipt, the amount
+ * (`ogCardAmount`). Nothing else: no receipt ID, no account handle, no linked
+ * receipt — a share card is broadcast into every link unfurl, and it must not
+ * tie a receipt back to whoever it charged (decided 2026-10-05).
  *
- * Per-request, not `force-static` (contrast `app/og/route.tsx`, the
- * site-wide card, which IS static): the word depends on live resolver state,
- * and the route's `Cache-Control: no-store` mirrors D1/R35's rule for the
- * page itself — a share card is a secondary artifact, but caching a stale
- * verdict at the edge would still be a cached wrong answer by another road.
+ * The card renders in the image renderer's default font: no font file is read
+ * from this repository, which carries no brand assets.
+ *
+ * Per-request, not `force-static`: the word depends on live resolver state, and
+ * the route's `Cache-Control: no-store` mirrors the page's own rule (D1/R35) —
+ * caching a stale verdict at the edge would be a cached wrong answer.
  *
  * `resolvePageState`, not `resolveVerifyPageState`: `billedUnfinalized`'s
  * card register (danger) is a function of the FINAL state after R3's
@@ -49,14 +43,8 @@ export default async function Image({ params }: RouteContext) {
 	const { receiptId } = await params;
 	const state = await resolvePageState(receiptId);
 	const word = ogCardWord(state).toUpperCase();
+	const amount = ogCardAmount(state);
 	const ink = REGISTER_INK[ogCardRegister(state)];
-	const { display: idDisplay } = truncateForDisplay(receiptId, 18);
-
-	const dir = join(process.cwd(), "app/og");
-	const [khandBold, khandSemi] = await Promise.all([
-		readFile(join(dir, "Khand-Bold.ttf")),
-		readFile(join(dir, "Khand-SemiBold.ttf")),
-	]);
 
 	return new ImageResponse(
 		<div
@@ -68,7 +56,6 @@ export default async function Image({ params }: RouteContext) {
 				justifyContent: "center",
 				padding: "80px",
 				background: GROUND,
-				fontFamily: "Khand",
 			}}
 		>
 			<div
@@ -76,7 +63,6 @@ export default async function Image({ params }: RouteContext) {
 					display: "flex",
 					color: "rgba(255,255,255,0.5)",
 					fontSize: 30,
-					fontWeight: 600,
 					letterSpacing: 2,
 				}}
 			>
@@ -88,32 +74,29 @@ export default async function Image({ params }: RouteContext) {
 					marginTop: 28,
 					color: ink,
 					fontSize: word.length > 40 ? 56 : 84,
-					fontWeight: 700,
 					lineHeight: 1.05,
 					letterSpacing: "-0.01em",
 				}}
 			>
 				{word}
 			</div>
-			<div
-				style={{
-					display: "flex",
-					marginTop: 44,
-					color: "rgba(255,255,255,0.4)",
-					fontSize: 28,
-					fontWeight: 600,
-				}}
-			>
-				{idDisplay}
-			</div>
+			{amount === undefined ? null : (
+				<div
+					style={{
+						display: "flex",
+						marginTop: 36,
+						color: "#ffffff",
+						fontSize: 64,
+						letterSpacing: "-0.02em",
+					}}
+				>
+					{amount}
+				</div>
+			)}
 		</div>,
 		{
 			width: size.width,
 			height: size.height,
-			fonts: [
-				{ name: "Khand", data: khandBold, weight: 700, style: "normal" },
-				{ name: "Khand", data: khandSemi, weight: 600, style: "normal" },
-			],
 			headers: { "Cache-Control": "no-store" },
 		},
 	);

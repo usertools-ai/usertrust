@@ -33,7 +33,6 @@ import {
 	SESSION_PROMOTION_GATE,
 	type TransferSetRendering,
 	transferSetRendering,
-	UNDISCLOSED_PRIVATE_REPO,
 	usagePostureClaim,
 } from "./claims";
 import type {
@@ -207,12 +206,13 @@ export const SETTLEMENT_TIMES_NOTE =
 	"chain timestamps of the first and last settlement in this window — clock CLAIMS on the audit chain's clock, not the ledger's. They are not the window, and no order between the two clocks is checked.";
 
 // ===========================================================================
-// The agent key, the chain of receipts, and the windows that got none
+// What the window covers, and the windows that got none
 // ===========================================================================
 
-/** §15.7 — what the `a1_` handle is, and the two things it is NOT. */
-export const ACCOUNT_HANDLE_MEANING =
-	"an opaque handle for the ledger account this agent key spends from. It is not the agent key and not a ledger ID, and nothing on this page can turn it into either.";
+// Privacy, by construction: this model carries NOTHING that ties a receipt
+// back to whoever it charged — no account handle, no previous receipt's ID, no
+// repository. The wire still validates those signed fields; the page never
+// receives them here, so no component can render one by accident.
 
 /** "23 governed calls" — one per settled transfer pair. */
 export function coversLine(transferCount: number): string {
@@ -228,12 +228,6 @@ export function modelsLine(models: string[]): string {
 	const { catalog, hasCustom } = catalogRendering(models);
 	return (hasCustom ? [...catalog, CUSTOM_MODEL_MEANING] : catalog).join(" · ");
 }
-
-export const PREVIOUS_RECEIPT_LABEL = "Previous receipt";
-
-/** What the predecessor link means — and that the RESOLVER checked it (a 200 requires `passed`). */
-export const PREVIOUS_RECEIPT_NOTE =
-	"this agent key's previous minted receipt. The resolver checked the link: exactly one earlier receipt of this key, closed at least one idle threshold before this window began, with no receipt of the key in between.";
 
 /**
  * §15.6 — the refused windows' headline. Past 16 the list is truncated, and
@@ -282,10 +276,6 @@ export const CLUSTER_COMPLETENESS_TRUST =
 /** R14 for the cluster kind — a defined NON-artifact, exactly as a session receipt is. */
 export const CLUSTER_NON_ARTIFACT =
 	"a cluster receipt attests one agent key's charges over one ledger window, and nothing about any commit, PR, or issue that happens to cite it.";
-
-/** §15.8 — `repoId` is a property of the key's account, never of one receipt. */
-export const CLUSTER_REPO_NOTE =
-	"the repository this agent key is configured for — a property of the key, not a claim about any commit, PR, or issue.";
 
 /** R15 — the comparison a reader must make, for a receipt that has no artifact to compare. */
 export function clusterComparison(): ComparisonStep[] {
@@ -341,13 +331,6 @@ export const CLUSTER_LEDGER_ROWS: readonly LedgerRow[] = LEDGER_ROWS.map((row) =
 // Derived view model — one pass over a verified cluster receipt
 // ===========================================================================
 
-/** R18's split for the cluster kind: the keyed `r1_` form never renders as its key. */
-export interface ClusterRepo {
-	repoId: string;
-	undisclosed: boolean;
-	label: string;
-}
-
 /** One listed refused window, ready to render. Never an amount: the wire carries none. */
 export interface SkippedWindowView {
 	startUtc: string;
@@ -372,11 +355,6 @@ export interface ClusterReceiptClaims {
 	/** `modelsLine` — "" when the receipt names none. */
 	models: string;
 	providers: string;
-	account: string;
-	/** Present iff the account is bound to a repository (`repoId` key-present). */
-	repo?: ClusterRepo;
-	/** Present iff the receipt names its predecessor; the wire requires `predecessorLinkage: passed` then. */
-	previousReceiptId?: string;
 	/** Present iff `skippedSincePrevious` is: the listed windows only, never the unlisted rest. */
 	skipped?: { headline: string; windows: SkippedWindowView[] };
 	usage: PostureClaim;
@@ -412,7 +390,6 @@ export function clusterReceiptClaims(
 	const amountUsd = amountUsdFromUsertokens(spend.assessedUsertokens);
 	const windowStartUtc = ledgerNsToUtc(projection.windowStart);
 	const windowEndUtc = ledgerNsToUtc(projection.windowEnd);
-	const repoId = projection.work.repoId;
 	const skipped = projection.skippedSincePrevious;
 	const pricing = pricingPostureClaim(spend.pricingPosture);
 	const versions = projection.pricing.tableVersions.join(" · ");
@@ -429,16 +406,6 @@ export function clusterReceiptClaims(
 		covers: coversLine(spend.transferCount),
 		models: modelsLine(projection.models),
 		providers: projection.providers.join(" · "),
-		account: projection.account,
-		repo:
-			repoId === undefined
-				? undefined
-				: {
-						repoId,
-						undisclosed: repoId.startsWith("r1_"),
-						label: repoId.startsWith("r1_") ? UNDISCLOSED_PRIVATE_REPO : repoId,
-					},
-		previousReceiptId: projection.previousReceiptId,
 		skipped:
 			skipped === undefined
 				? undefined

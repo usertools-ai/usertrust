@@ -22,6 +22,7 @@ import DisplayAnnex from "./components/display-annex";
 import HashValue from "./components/hash-value";
 import PostureChips, { AmountScope } from "./components/posture-chips";
 import ReceiptArtifact from "./components/receipt-artifact";
+import { timeSpan } from "./components/receipt-card";
 import VerdictMasthead from "./components/verdict-masthead";
 import WorkClaims from "./components/work-claims";
 import { verifiedFixtureState } from "./fixture-harness";
@@ -820,7 +821,7 @@ test("Details: the summary and its marker clear 4.5:1 on the glass, whatever the
 	const grounds: Array<[string, Rgb]> = [
 		["the glass on plain --bg", underGlass(bg)],
 		// The case the review flagged: the field's commonest lit grade, gold
-		// rgb(255,203,100), at the shader's 0.95 lit-alpha cap (vendor/lattice.js).
+		// rgb(255,203,100), at the shader's 0.95 lit-alpha cap (the kit's lattice.js).
 		["a lit gold dot under the glass", underGlass(over([255, 203, 100], 0.95, bg))],
 		// The bound. The field also draws points lighter than that gold (its
 		// silver-white grade, and near-white unlit points), but nothing brighter
@@ -870,4 +871,23 @@ test("paper surfaces keep the paper palette: ink on paper ≥ 4.5:1, mirrored fr
 			assert.ok(accent >= 4.5, `${token} on paper: ${accent.toFixed(2)}:1`);
 		}
 	}
+});
+
+test("timeSpan: one UTC day reads as one day; a year apart is never the same day", () => {
+	assert.equal(
+		timeSpan("2026-08-10T14:00:00.000Z", "2026-08-10T14:12:00.000Z"),
+		"Aug 10 · 14:00–14:12 UTC",
+	);
+	assert.equal(
+		timeSpan("2026-08-10T23:50:00.000Z", "2026-08-11T00:10:00.000Z"),
+		"Aug 10 23:50 → Aug 11 00:10 UTC",
+	);
+	assert.equal(
+		timeSpan("2025-08-10T14:00:00.000Z", "2026-08-10T14:12:00.000Z"),
+		"Aug 10, 2025 14:00 → Aug 10, 2026 14:12 UTC",
+	);
+	assert.equal(
+		timeSpan("not-a-date", "2026-08-10T14:12:00.000Z"),
+		"not-a-date → 2026-08-10T14:12:00.000Z",
+	);
 });

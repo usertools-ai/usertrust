@@ -11,21 +11,16 @@ import {
 	RUNG_EARNED_BY,
 	RUNG_SHORT_NAME,
 	rungDisclaimers,
-	truncateForDisplay,
 } from "../lib/claims";
 import {
-	ACCOUNT_HANDLE_MEANING,
 	CLUSTER_COMPLETENESS_TRUST,
 	CLUSTER_LEDGER_ROWS,
 	CLUSTER_OFFLINE_VERIFIER_PENDING,
-	CLUSTER_REPO_NOTE,
 	CLUSTER_SIGNED_BYTES_LABEL,
 	type ClusterReceiptClaims,
 	clusterReceiptClaims,
 	LEDGER_TIME_LABEL,
 	LEDGER_TIME_NOTE,
-	PREVIOUS_RECEIPT_LABEL,
-	PREVIOUS_RECEIPT_NOTE,
 	SETTLEMENT_TIMES_NOTE,
 	SKIPPED_NOTE,
 } from "../lib/cluster-claims";
@@ -42,8 +37,15 @@ import PostureChips, { AmountScope, ScopeChip } from "./posture-chips";
  * A verified CLUSTER receipt (receipt-spec v0.10 §15): every charge to one
  * agent key inside one ledger window. Same brief layout, markup and classes as
  * the session receipt (`verified-receipt.tsx`): a glance card, then the page's
- * ONE Details disclosure holding everything else. Four rules are specific to
- * this kind, and each one exists to stop a concrete overclaim:
+ * ONE Details disclosure holding everything else. Five rules are specific to
+ * this kind, each to stop a concrete overclaim or leak:
+ *
+ *   - Nothing that ties the receipt back to whoever it charged renders
+ *     ANYWHERE on the page: not the account handle, not the previous
+ *     receipt's ID or a link to it, not the repository. The parser still
+ *     validates those signed fields; the page only declines to surface them,
+ *     and `predecessorLinkage` reports its result with no ID. The glance's
+ *     header says "Receipt": the kind is technical metadata, in Details.
  *
  *   - The refused windows (`skippedSincePrevious`) render IN THE GLANCE, always
  *     visible, never inside a `<details>`: "this key spent and got no receipt"
@@ -86,7 +88,7 @@ export default function VerifiedClusterReceipt({ state }: { state: VerifiedClust
 	);
 }
 
-/** The glance: verdict, level strip, amount and its scope chip, the window's facts, the chain. */
+/** The glance: verdict, level strip, amount and its scope chip, the window's facts, the skipped windows. */
 function ClusterReceiptCard({
 	receiptId,
 	claims,
@@ -99,10 +101,10 @@ function ClusterReceiptCard({
 	const providerCount = claims.projection.providers.length;
 	return (
 		<div data-testid="cluster-receipt-card">
-			<section className="ut-perf rounded-[0_0_var(--r-card)_var(--r-card)] border border-[var(--line)] bg-[var(--surface)]">
+			<section className="ut-card">
 				<header className="flex items-center gap-2.5 border-b border-white/[0.09] bg-white/[0.03] px-6 py-3.5">
 					<span className="size-[7px] shrink-0 rounded-full bg-ut shadow-[0_0_0_3px_rgba(48,209,88,0.16)]" />
-					<span className="text-[13px] font-semibold tracking-tight text-ut">Cluster receipt</span>
+					<span className="text-[13px] font-semibold tracking-tight text-ut">Receipt</span>
 					<span className="ml-auto font-mono text-[12.5px]" data-testid="receipt-short-id">
 						<HashValue value={receiptId} label="receipt ID" head={10} />
 					</span>
@@ -130,15 +132,6 @@ function ClusterReceiptCard({
 					</div>
 
 					<dl className="m-0 flex flex-col gap-1 text-[13.5px]" data-testid="glance-facts">
-						<div className="flex items-baseline justify-between gap-4">
-							<dt className="shrink-0 text-paper/38">Agent</dt>
-							<dd
-								className="m-0 text-right font-mono text-[13px] break-all text-paper"
-								data-testid="cluster-agent"
-							>
-								{claims.account}
-							</dd>
-						</div>
 						<div className="flex items-baseline justify-between gap-4">
 							<dt className="shrink-0 text-paper/38">Window</dt>
 							<dd
@@ -173,12 +166,9 @@ function ClusterReceiptCard({
 						) : null}
 					</dl>
 
-					{claims.skipped !== undefined || claims.previousReceiptId !== undefined ? (
+					{claims.skipped !== undefined ? (
 						<div className="flex flex-col gap-3 border-t border-white/[0.09] pt-4">
-							{claims.skipped !== undefined ? <SkippedWindows skipped={claims.skipped} /> : null}
-							{claims.previousReceiptId !== undefined ? (
-								<PreviousReceiptLink receiptId={claims.previousReceiptId} />
-							) : null}
+							<SkippedWindows skipped={claims.skipped} />
 						</div>
 					) : null}
 				</div>
@@ -259,38 +249,6 @@ function SkippedWindows({ skipped }: { skipped: NonNullable<ClusterReceiptClaims
 	);
 }
 
-/**
- * The key's previous receipt. The wire only reaches a verified state when the
- * resolver's `predecessorLinkage` PASSED for a named predecessor, so this link
- * is a checked one. The label sits beside the link; the link's accessible name
- * carries it, and the full ID is in `title` (the visible one is truncated).
- */
-function PreviousReceiptLink({ receiptId }: { receiptId: string }) {
-	return (
-		<div className="flex flex-wrap items-center justify-between gap-x-4 text-[13.5px]">
-			<span className="text-paper/38">{PREVIOUS_RECEIPT_LABEL}</span>
-			<a
-				className="ut-link inline-flex min-h-11 items-center gap-1.5 font-mono text-[13px]"
-				href={`/r/${receiptId}`}
-				title={receiptId}
-				aria-label={`${PREVIOUS_RECEIPT_LABEL} ${receiptId}`}
-				data-testid="previous-receipt"
-			>
-				<svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-					<path
-						d="M10 3.5 5.5 8l4.5 4.5"
-						stroke="currentColor"
-						strokeWidth="1.5"
-						strokeLinecap="round"
-						strokeLinejoin="round"
-					/>
-				</svg>
-				{truncateForDisplay(receiptId).display}
-			</a>
-		</div>
-	);
-}
-
 /** Everything that is not the glance, for the page's single Details disclosure. */
 function ClusterReceiptDetails({
 	state,
@@ -333,44 +291,18 @@ function ClusterReceiptDetails({
 						idle threshold {claims.idleThreshold} · {projection.idleThresholdNs} ns
 					</span>
 				</div>
-				<div className="flex flex-col gap-1">
-					<span className="font-mono text-xs uppercase tracking-[0.12em] text-paper/38">
-						account handle
-					</span>
-					<span className="font-mono text-[13px] break-all text-paper">{claims.account}</span>
-					<span className="text-xs leading-relaxed text-ink/70">{ACCOUNT_HANDLE_MEANING}</span>
-				</div>
+				<p
+					className="m-0 font-mono text-xs tracking-[0.12em] text-paper/62"
+					data-testid="spec-scope"
+				>
+					SPEC {receipt.spec} · SCOPE {receipt.scope}
+				</p>
 			</div>
 
-			{claims.repo !== undefined ||
-			claims.previousReceiptId !== undefined ||
-			claims.skipped !== undefined ? (
-				<div className="flex flex-col gap-2">
-					{claims.repo !== undefined ? (
-						<p className="m-0 text-[13px] text-paper/62">
-							<span data-repo-label={claims.repo.undisclosed ? "undisclosed" : "disclosed"}>
-								{claims.repo.label}
-							</span>
-							{" — "}
-							{CLUSTER_REPO_NOTE}
-						</p>
-					) : null}
-					{claims.previousReceiptId !== undefined ? (
-						<p className="m-0 text-[13px] text-paper/62">
-							{PREVIOUS_RECEIPT_LABEL}{" "}
-							<a className="ut-link font-mono break-all" href={`/r/${claims.previousReceiptId}`}>
-								{claims.previousReceiptId}
-							</a>
-							{" — "}
-							{PREVIOUS_RECEIPT_NOTE}
-						</p>
-					) : null}
-					{claims.skipped !== undefined ? (
-						<p className="m-0 text-[13px] text-paper/62">
-							{claims.skipped.headline} — {SKIPPED_NOTE}
-						</p>
-					) : null}
-				</div>
+			{claims.skipped !== undefined ? (
+				<p className="m-0 text-[13px] text-paper/62">
+					{claims.skipped.headline} — {SKIPPED_NOTE}
+				</p>
 			) : null}
 
 			<div>

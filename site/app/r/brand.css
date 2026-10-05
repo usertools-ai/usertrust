@@ -8,14 +8,18 @@
  * keep their class names and the page's logic is untouched. The rest of the
  * site keeps its own palette.
  *
- * Fonts are bundled from this directory (not /public) so they ship under
- * /_next/static, which usertrust.ai already proxies to this app.
+ * No brand asset lives in this public repo. The fonts (and the lattice, see
+ * components/lattice-field.tsx) are loaded at runtime from the brand site's
+ * kit, https://usertrust.ai/kit/, which serves them with
+ * `access-control-allow-origin: *` — so they load both through usertrust.ai's
+ * /r/ rewrite and on verify.usertrust.ai. `font-display: swap` and the system
+ * fallbacks in --sans / --mono keep every receipt readable if the kit is down.
  */
-@font-face{font-family:'Usertools Sans';src:url('./fonts/UsertoolsSans-Regular.woff2') format('woff2');font-weight:400;font-display:swap}
-@font-face{font-family:'Usertools Sans';src:url('./fonts/UsertoolsSans-Medium.woff2') format('woff2');font-weight:500;font-display:swap}
-@font-face{font-family:'Usertools Sans';src:url('./fonts/UsertoolsSans-Bold.woff2') format('woff2');font-weight:700;font-display:swap}
-@font-face{font-family:'JetBrains Mono';src:url('./fonts/JetBrainsMono-Regular.woff2') format('woff2');font-weight:400;font-display:swap}
-@font-face{font-family:'JetBrains Mono';src:url('./fonts/JetBrainsMono-Medium.woff2') format('woff2');font-weight:500 700;font-display:swap}
+@font-face{font-family:'Usertools Sans';src:url('https://usertrust.ai/kit/fonts/UsertoolsSans-Regular.woff2') format('woff2');font-weight:400;font-display:swap}
+@font-face{font-family:'Usertools Sans';src:url('https://usertrust.ai/kit/fonts/UsertoolsSans-Medium.woff2') format('woff2');font-weight:500;font-display:swap}
+@font-face{font-family:'Usertools Sans';src:url('https://usertrust.ai/kit/fonts/UsertoolsSans-Bold.woff2') format('woff2');font-weight:700;font-display:swap}
+@font-face{font-family:'JetBrains Mono';src:url('https://usertrust.ai/kit/fonts/JetBrainsMono-Regular.woff2') format('woff2');font-weight:400;font-display:swap}
+@font-face{font-family:'JetBrains Mono';src:url('https://usertrust.ai/kit/fonts/JetBrainsMono-Medium.woff2') format('woff2');font-weight:500 700;font-display:swap}
 
 /* ── tokens: ONE block. Names and values are the shared usertools set (dark
       appearance); the --color-* lines below only point this route's existing
@@ -83,13 +87,13 @@
 .ut-r-nav .where{font:500 10.5px/1 var(--font-mono);letter-spacing:.14em;
                  text-transform:uppercase;color:var(--text-2)}
 
-/* the receipt's torn top edge, drawn not pictured (usertrust.ai .receipt::before) */
-.ut-r .ut-perf{position:relative;margin-top:9px}
+/* the receipt card's edge: clean and straight, the brand's dark-glass panel
+   radius, a 1px NEUTRAL hairline and a faint inner top highlight. No torn or
+   perforated edge, and no gold: gold is the mark and links only. */
+.ut-r .ut-card{position:relative;overflow:hidden;border-radius:var(--r-row);border:1px solid var(--line);
+  background:var(--surface);box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}
 .ut-r .ut-link{color:var(--brand);text-decoration:underline;text-decoration-color:rgba(232,181,75,.4);text-underline-offset:2px}
 .ut-r .ut-link:hover{color:#fff}
-.ut-r .ut-perf::before{content:'';position:absolute;left:-1px;right:-1px;top:-6px;height:7px;
-  background:radial-gradient(circle at 8px 0,transparent 0 5px,var(--line) 5px 5.9px,transparent 6px) repeat-x;
-  background-size:16px 7px}
 
 /* the copy chip's tooltip was a light chip on paper; keep it dark here */
 .ut-r .chit{background:var(--surface);color:var(--text);border:1px solid var(--line-strong)}
@@ -126,7 +130,7 @@
 .ut-r footer.site .part a{font:inherit;color:var(--silver);border-bottom:1px solid rgba(255,255,255,.26)}
 .ut-r footer.site .part a:hover{color:var(--brand);border-bottom-color:var(--brand)}
 
-/* ── the brand field (the shared lattice, gold, one wave then frozen) ─────────
+/* ── the brand field (the shared lattice from the kit, gold) ─────────────────
       Fixed behind everything; content sits above it. Solid and glass surfaces
       keep the text legible where the wave passes. */
 .ut-r #field{position:fixed;inset:0;width:100%;height:100%;display:block;pointer-events:none;z-index:0}
