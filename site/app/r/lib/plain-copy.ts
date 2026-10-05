@@ -62,8 +62,15 @@ export function plainState(state: Exclude<PageState, { kind: "verified" }>): Pla
 				line: "This work was billed, but its receipt was never finalized.",
 				register: "danger",
 			};
+		// receipt-spec v0.10 §15.13: every 404 reads "no receipt under this ID
+		// yet". An ID can be cited before its receipt is minted, so this is
+		// never worded as forgery, never danger, and never green.
 		case "unknownReceipt":
-			return { word: "Not found", line: "This receipt ID was never issued.", register: "danger" };
+			return {
+				word: "No receipt yet",
+				line: "There's no receipt under this ID yet. Receipts are minted after the agent key goes idle — 10 minutes by default — and its audit segment seals.",
+				register: "neutral",
+			};
 		case "integrityFailure":
 			return { word: "Not verified", line: plainIntegrityLine(state.cause), register: "danger" };
 		case "invalidId":
