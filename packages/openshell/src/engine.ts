@@ -260,31 +260,65 @@ export class HoldEngine {
 		// The ledger charge runs outside any transaction (a no-op unless the row is `recorded` and
 		// carries no incident). Its result is NOT assumed: the answer comes next.
 		await this.chargeLate(holdKey);
-		// THE PRIMITIVE: the answer comes from ONE transaction's view of the row, read AFTER the
-		// charge attempt — so no incident can land between the view and the answer:
-		// - `charged` or `zero` → `late_settled` (billed, or nothing to bill);
-		// - otherwise, an incident on the row (before, or concurrently with, this call — e.g. a
-		//   finishExpiry whose ledger disagreed) → `incident`, the cost attached to it in the same
-		//   transaction (`unbilled`: the intent, the actual amount, and whether a late amount was
-		//   recorded), so an operator can bill it;
-		// - otherwise (recorded, no incident: the charge did not complete) → `in_flight`, for the
-		//   sweep to charge. Never a success that was not observed.
+		return this.lateAnswer(holdKey, intent, actual, state, !recorded);
+	}
+
+	/**
+	 * THE answer to a late settlement, from ONE transaction's view of the row, read AFTER the
+	 * charge attempt. THE RULE (for every outcome in this engine): an INCIDENT OUTRANKS EVERY
+	 * SUCCESS — it is checked first.
+	 * - an incident on the row → `incident`, with the late settlement attached in the same
+	 *   transaction (`unbilled`: the intent, the actual amount, whether a late amount was
+	 *   recorded, and whether the ledger took the charge), for an operator;
+	 * - else `charged` or `zero` → `late_settled` (billed, or nothing to bill);
+	 * - else (recorded, the charge did not complete) → `in_flight`, for the sweep.
+	 */
+	private lateAnswer(
+		holdKey: string,
+		intent: Readonly<SettlementIntent>,
+		actual: number,
+		state: "expiring" | "expired",
+		resumed: boolean,
+	): Promise<SettleOutcome> {
 		return this.journal.writeTx((): SettleOutcome => {
 			const now = this.journal.get(holdKey);
 			if (now === undefined) return { outcome: "incident", state: "missing" };
-			if (now.lateState === "charged" || now.lateState === "zero") {
-				return { outcome: "late_settled", state, resumed: !recorded };
-			}
 			if (now.incident !== null) {
+				const onLedger =
+					typeof now.incident === "object" &&
+					(now.incident as Record<string, unknown>).late_charged_on_ledger !== undefined;
 				this.journal.recordUnbilled(holdKey, {
 					kind: "late_settlement",
 					intent,
 					actual,
-					lateRecorded: now.lateState === "recorded",
+					lateRecorded: now.lateState !== "none",
+					lateCharged: now.lateState === "charged" || onLedger,
 				});
 				return { outcome: "incident", state: now.state };
 			}
+			if (now.lateState === "charged" || now.lateState === "zero") {
+				return { outcome: "late_settled", state, resumed };
+			}
 			return { outcome: "in_flight" };
+		});
+	}
+
+	/**
+	 * A terminal transition decided by ONE transaction's view of the final row, the incident
+	 * FIRST: `moved` when the row moved `from → to`; `incident` when the row carries one (the
+	 * journal's CAS never moves an incident row); otherwise the state another writer left it in.
+	 */
+	private finalTransition(
+		holdKey: string,
+		from: HoldState,
+		to: HoldState,
+		set: { terminalKind: string },
+	): Promise<"moved" | "incident" | HoldState | "missing"> {
+		return this.journal.writeTx(() => {
+			const row = this.journal.get(holdKey);
+			if (row === undefined) return "missing";
+			if (row.incident !== null) return "incident";
+			return this.journal.cas(holdKey, from, to, set) ? "moved" : row.state;
 		});
 	}
 
@@ -308,7 +342,16 @@ export class HoldEngine {
 			await this.journal.writeTx(() => this.journal.recordIncident(holdKey, incident));
 			throw new DebtChargeFailedError(holdKey, charged.role, charged.transferIds);
 		}
-		await this.journal.writeTx(() => this.journal.markLateCharged(holdKey));
+		// The ledger TOOK the charge. Marked `charged` — unless the row became an incident
+		// meanwhile (markLateCharged never moves an incident row): then the fact is written onto
+		// the incident, never lost.
+		await this.journal.writeTx(() => {
+			if (!this.journal.markLateCharged(holdKey)) {
+				if (this.journal.get(holdKey)?.incident !== null) {
+					this.journal.recordLedgerChargedOnIncident(holdKey, amount);
+				}
+			}
+		});
 	}
 
 	/** The applied-marker id of a hold's overage debt: the ledger transfer it records. */
@@ -472,7 +515,7 @@ export class HoldEngine {
 				}
 			});
 			await this.chargeLate(holdKey);
-			return { outcome: "late_settled", state: "expired", resumed };
+			return this.lateAnswer(holdKey, intent, actual, "expired", resumed);
 		}
 		if (posted === "unknown") return { outcome: "in_flight" };
 		if (posted === "voided" || posted === "not_found") {
@@ -498,10 +541,13 @@ export class HoldEngine {
 				throw new DebtChargeFailedError(holdKey, charged.role, charged.transferIds);
 			}
 		}
-		await this.journal.writeTx(() =>
-			this.journal.cas(holdKey, "settling", "settled", { terminalKind: "settled" }),
-		);
-		return { outcome: "settled", resumed };
+		const fin = await this.finalTransition(holdKey, "settling", "settled", {
+			terminalKind: "settled",
+		});
+		if (fin === "moved" || fin === "settled")
+			return { outcome: "settled", resumed: fin !== "moved" || resumed };
+		if (fin === "missing") return { outcome: "incident", state: "missing" };
+		return { outcome: "incident", state: fin === "incident" ? "settling" : fin };
 	}
 
 	/**
@@ -522,23 +568,26 @@ export class HoldEngine {
 		if (voided === "not_found") {
 			// Never placed — or an abandoned placement not landed YET. The journal finalizes
 			// `voided_not_found` only past ttlAt + its placement grace (the horizon rule).
+			let fin: "moved" | "incident" | HoldState | "missing";
 			try {
-				await this.journal.writeTx(() =>
-					this.journal.cas(holdKey, "voiding", "voided", { terminalKind: "voided_not_found" }),
-				);
+				fin = await this.finalTransition(holdKey, "voiding", "voided", {
+					terminalKind: "voided_not_found",
+				});
 			} catch (err) {
 				if (err instanceof PlacementHorizonError) return { outcome: "in_flight" };
 				throw err;
 			}
-			return { outcome: "voided" };
+			return fin === "moved" || fin === "voided"
+				? { outcome: "voided" }
+				: { outcome: "incident", state: "voiding" };
 		}
 		// Voided now or before, or expired by the ledger: nothing was charged either way.
-		await this.journal.writeTx(() =>
-			this.journal.cas(holdKey, "voiding", "voided", {
-				terminalKind: voided === "expired" ? "voided_expired" : "voided",
-			}),
-		);
-		return { outcome: "voided" };
+		const fin = await this.finalTransition(holdKey, "voiding", "voided", {
+			terminalKind: voided === "expired" ? "voided_expired" : "voided",
+		});
+		return fin === "moved" || fin === "voided"
+			? { outcome: "voided" }
+			: { outcome: "incident", state: "voiding" };
 	}
 
 	/**
@@ -642,9 +691,9 @@ export class HoldEngine {
 			);
 			return "incident";
 		}
-		await this.journal.writeTx(() =>
-			this.journal.cas(holdKey, "expiring", "expired", { terminalKind: "hold_expired_unsettled" }),
-		);
-		return "expired";
+		const fin = await this.finalTransition(holdKey, "expiring", "expired", {
+			terminalKind: "hold_expired_unsettled",
+		});
+		return fin === "moved" || fin === "expired" ? "expired" : "incident";
 	}
 }

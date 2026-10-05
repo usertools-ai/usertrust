@@ -864,6 +864,147 @@ describe("#185 r1 P1: `late_settled` only when a late disposition is POSITIVELY 
 	});
 });
 
+describe("#185 r3: an INCIDENT OUTRANKS EVERY SUCCESS — every outcome, one final view, the incident first", () => {
+	/** A second connection on the same file: the "concurrent" writer of the incident. */
+	const otherOn = () => {
+		const other = HoldJournal.open(join(dirs[dirs.length - 1] as string, "holds.db"), {
+			now: () => 1_000,
+		});
+		journals.push(other);
+		return (holdId: string) =>
+			other.writeTx(() => other.recordIncident(holdId, { kind: "concurrent_incident" }));
+	};
+
+	it("R1 (the connector's window): the incident lands AFTER the ledger took the late charge and BEFORE it was marked — `incident`, the charge recorded on the incident (never lost), charged once", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await journal.writeTx(() => journal.cas("k1", "open", "expiring"));
+		const incident = otherOn();
+		const realCharge = ledger.chargeDebt.bind(ledger);
+		ledger.chargeDebt = async (p) => {
+			const out = await realCharge(p);
+			await incident("k1"); // the ledger has the charge; the row turns incident now
+			return out;
+		};
+		expect(await engine.settle("k1", { post: 60, overage: 0 })).toEqual({
+			outcome: "incident",
+			state: "expiring",
+		});
+		expect(journal.get("k1")).toMatchObject({
+			lateState: "recorded", // markLateCharged never moves an incident row
+			incident: {
+				kind: "concurrent_incident",
+				late_charged_on_ledger: 60,
+				unbilled: { actual: 60, lateRecorded: true, lateCharged: true },
+			},
+		});
+		expect(ledger.applied.get(transferIdFor("k1", "late").toString()), "charged once").toBe(60);
+		expect(journal.lateUncharged(), "never charged again").toEqual([]);
+	});
+
+	it("R6: an incident that lands AFTER the late charge was MARKED (a `charged` row) still outranks the success — `incident`, lateCharged true", async () => {
+		const { journal, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await journal.writeTx(() => journal.cas("k1", "open", "expiring"));
+		const incident = otherOn();
+		const realWriteTx = journal.writeTx.bind(journal);
+		let calls = 0;
+		journal.writeTx = (async (fn: () => unknown) => {
+			const out = await realWriteTx(fn as () => never);
+			calls += 1;
+			// 1 the claim (lost to expiring), 2 recordLate, 3 markLateCharged — then the incident.
+			if (calls === 3) await incident("k1");
+			return out;
+		}) as typeof journal.writeTx;
+		expect(await engine.settle("k1", { post: 60, overage: 0 })).toEqual({
+			outcome: "incident",
+			state: "expiring",
+		});
+		journal.writeTx = realWriteTx;
+		expect(journal.get("k1")).toMatchObject({
+			lateState: "charged",
+			incident: { unbilled: { lateRecorded: true, lateCharged: true } },
+		});
+	});
+
+	it("R7: an incident that lands after a ZERO disposition still outranks it — `incident`, not late_settled", async () => {
+		const { journal, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await journal.writeTx(() => journal.cas("k1", "open", "expiring"));
+		const incident = otherOn();
+		const realWriteTx = journal.writeTx.bind(journal);
+		let calls = 0;
+		journal.writeTx = (async (fn: () => unknown) => {
+			const out = await realWriteTx(fn as () => never);
+			calls += 1;
+			if (calls === 2) await incident("k1"); // after recordLate recorded `zero`
+			return out;
+		}) as typeof journal.writeTx;
+		expect(await engine.settle("k1", { post: 0, overage: 0 })).toEqual({
+			outcome: "incident",
+			state: "expiring",
+		});
+		journal.writeTx = realWriteTx;
+		expect(journal.get("k1")).toMatchObject({
+			lateState: "zero",
+			incident: { unbilled: { actual: 0, lateRecorded: true, lateCharged: false } },
+		});
+	});
+
+	it("R2: the journal's CAS never moves a row carrying an incident", async () => {
+		const { journal, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await journal.writeTx(() => journal.recordIncident("k1", { kind: "x" }));
+		expect(await journal.writeTx(() => journal.cas("k1", "open", "settling"))).toBe(false);
+		expect(journal.get("k1")?.state).toBe("open");
+	});
+
+	it("R3: completeSettlement — an incident that lands after the POST is `incident`, never `settled`", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		const incident = otherOn();
+		const realPost = ledger.post.bind(ledger);
+		ledger.post = async (p) => {
+			const out = await realPost(p);
+			await incident("k1");
+			return out;
+		};
+		expect(await engine.settle("k1", { post: 40, overage: 0 })).toEqual({
+			outcome: "incident",
+			state: "settling",
+		});
+		expect(journal.get("k1")?.state).toBe("settling");
+	});
+
+	it("R4/R5: finishExpiry and release — an incident between the void and the final transition is reported as an incident, never expired / voided", async () => {
+		const exp = setup();
+		await exp.engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		exp.ledger.expired.add("k1");
+		const expIncident = otherOn();
+		const realRelease = exp.ledger.release.bind(exp.ledger);
+		exp.ledger.release = async (p) => {
+			const out = await realRelease(p);
+			await expIncident("k1");
+			return out;
+		};
+		exp.clock.now = SWEEPABLE;
+		expect(await exp.engine.sweep()).toMatchObject({ expired: [], incidents: ["k1"] });
+		expect(exp.journal.get("k1")?.state).toBe("expiring");
+
+		const rel = setup();
+		await rel.engine.reserve({ holdKey: "k2", budgetId: "b", amount: 100 });
+		const relIncident = otherOn();
+		const realRelease2 = rel.ledger.release.bind(rel.ledger);
+		rel.ledger.release = async (p) => {
+			const out = await realRelease2(p);
+			await relIncident("k2");
+			return out;
+		};
+		expect(await rel.engine.release("k2")).toEqual({ outcome: "incident", state: "voiding" });
+		expect(rel.journal.get("k2")?.state).toBe("voiding");
+	});
+});
+
 describe("1c-1: the sweeper", () => {
 	it("expires an `open` hold only PAST ttlAt + grace, by the ledger's answer (`expired`, hold_expired_unsettled), and writes its heartbeat", async () => {
 		const { journal, ledger, engine, clock } = setup();

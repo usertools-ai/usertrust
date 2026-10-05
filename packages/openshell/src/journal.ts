@@ -711,6 +711,11 @@ export class HoldJournal {
 	 * THE compare-and-set. Must run inside {@link writeTx}. Returns true only when
 	 * exactly one row moved `from → to`.
 	 */
+	/**
+	 * The compare-and-set every transition uses: `from → to` only when the row is in `from`
+	 * AND CARRIES NO INCIDENT. An incident is terminal: no transition from it is legal, so the
+	 * rule lives here, once, rather than at each caller. False when nothing changed.
+	 */
 	cas(
 		holdId: string,
 		from: HoldState,
@@ -736,7 +741,7 @@ export class HoldJournal {
 				`UPDATE hold SET state = ?,
 					intent_json = COALESCE(?, intent_json),
 					terminal_kind = COALESCE(?, terminal_kind)
-				 WHERE hold_id = ? AND state = ?`,
+				 WHERE hold_id = ? AND state = ? AND incident_json IS NULL`,
 			)
 			.run(
 				to,
@@ -996,7 +1001,7 @@ export class HoldJournal {
 		this.requireTx("markLateCharged");
 		const r = this.db
 			.prepare(
-				"UPDATE hold SET late_state = 'charged' WHERE hold_id = ? AND late_state = 'recorded'",
+				"UPDATE hold SET late_state = 'charged' WHERE hold_id = ? AND late_state = 'recorded' AND incident_json IS NULL",
 			)
 			.run(holdId);
 		return Number(r.changes) === 1;
@@ -1044,6 +1049,21 @@ export class HoldJournal {
 				"UPDATE hold SET incident_json = json_set(incident_json, '$.unbilled', json(?)) WHERE hold_id = ? AND incident_json IS NOT NULL AND json_extract(incident_json, '$.unbilled') IS NULL",
 			)
 			.run(JSON.stringify(unbilled), holdId);
+		return Number(r.changes) === 1;
+	}
+
+	/**
+	 * The ledger TOOK a late charge for a row that became an incident meanwhile (so the row could
+	 * not be marked `charged`): record that fact on the incident, once, so it is never lost — the
+	 * operator sees "charged on the ledger" next to the incident. Inside {@link writeTx}.
+	 */
+	recordLedgerChargedOnIncident(holdId: string, amount: number): boolean {
+		this.requireTx("recordLedgerChargedOnIncident");
+		const r = this.db
+			.prepare(
+				"UPDATE hold SET incident_json = json_set(incident_json, '$.late_charged_on_ledger', ?) WHERE hold_id = ? AND incident_json IS NOT NULL AND json_extract(incident_json, '$.late_charged_on_ledger') IS NULL",
+			)
+			.run(amount, holdId);
 		return Number(r.changes) === 1;
 	}
 
