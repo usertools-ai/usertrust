@@ -214,7 +214,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Every package's tests are typechecked (#193).** The packages' tsconfigs include `src` only, so a test could assert on the wrong shape and still pass. `tsconfig.tests.json` now typechecks `packages/*/tests`, run by `npm run typecheck` under a ratchet: the 438 existing errors are frozen per file and error code in `tsconfig.tests.baseline.json`; a new or grown one fails, and a fixed one fails until the baseline is tightened (`npm run typecheck:tests -- --update`). openshell's tests start at zero.
+- **Every package's tests are typechecked (#193).** The packages' tsconfigs include `src` only, so a test could assert on the wrong shape and still pass. `tsconfig.tests.json` now typechecks `packages/*/tests`, run by `npm run typecheck` under a ratchet: the 414 existing errors (outside the openclaw host contract, which its own job typechecks) are frozen per file and error code in `tsconfig.tests.baseline.json`; a new or grown one fails, and a fixed one fails until the baseline is tightened (`npm run typecheck:tests -- --update`). openshell's tests start at zero.
 
 - **`TrustTBClient.immediateTransfer` range-checks a caller-supplied id like its siblings** (#183). An id outside (0, 2^128 − 1) — 0, 2^128 − 1, a negative, or wider — now throws `RangeError` before any client call, as `createPendingTransfer`, `postTransfer` and `voidTransfer` already did. It previously failed later (TigerBeetle refuses 0 and 2^128 − 1, and a negative or wider value throws at serialisation); no transfer was ever created.
 
