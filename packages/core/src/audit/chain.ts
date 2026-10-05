@@ -20,6 +20,7 @@ import {
 	openSync,
 	readFileSync,
 	realpathSync,
+	renameSync,
 	statSync,
 	unlinkSync,
 	writeSync,
@@ -46,6 +47,43 @@ function writeFully(fd: number, data: string): void {
 			throw new Error(`audit write made no progress (${off} of ${buf.length} bytes written)`);
 		}
 		off += n;
+	}
+}
+
+/**
+ * Replace the `.meta` head anchor ATOMICALLY: written and fsync'd to a private temp file, then
+ * renamed over the anchor. Rewriting it in place (open "w" truncates first) left an EMPTY or
+ * half-written anchor after a crash mid-write — one that reads as corrupt and refuses every
+ * append and verification. Now the anchor is always the old one or the new one.
+ */
+function writeAnchorAtomically(metaPath: string, content: string): void {
+	const tmp = `${metaPath}.${randomUUID()}.tmp`;
+	const fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
+	try {
+		try {
+			writeFully(fd, content);
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		renameSync(tmp, metaPath);
+	} catch (err) {
+		try {
+			unlinkSync(tmp);
+		} catch {
+			/* renamed, or never created */
+		}
+		throw err;
+	}
+	try {
+		const dfd = openSync(dirname(metaPath), "r");
+		try {
+			fsyncSync(dfd);
+		} finally {
+			closeSync(dfd);
+		}
+	} catch {
+		/* a directory fsync is not supported everywhere; the rename itself is atomic */
 	}
 }
 
@@ -683,13 +721,7 @@ export function createAuditWriter(
 
 			// Persist last hash to sidecar for cross-segment chain continuity
 			const metaPath = `${logPath}.meta`;
-			const metaFd = openSync(metaPath, "w");
-			try {
-				writeFully(metaFd, JSON.stringify({ lastHash: hash, sequence }));
-				fsyncSync(metaFd);
-			} finally {
-				closeSync(metaFd);
-			}
+			writeAnchorAtomically(metaPath, JSON.stringify({ lastHash: hash, sequence }));
 
 			return fullEvent;
 		} catch (err) {

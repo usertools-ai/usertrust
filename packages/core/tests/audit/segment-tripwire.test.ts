@@ -55,6 +55,7 @@ const KNOWN_JSONL: Record<string, string[]> = {
 /** Every rename in core's audit layer, by file: anything new is a possible rotation. */
 const KNOWN_RENAMES: Record<string, number> = {
 	"audit/anchor.ts": 2, // identity.json's atomic write; the anchor lock's atomic reclaim
+	"audit/chain.ts": 1, // the .meta head anchor's atomic replace (writeAnchorAtomically) — NOT the log
 };
 
 function sources(dir: string): string[] {
@@ -96,5 +97,11 @@ describe("TRIPWIRE: core writes ONE audit log file (no segment rotation)", () =>
 		}
 		expect(found, ROTATION_MESSAGE).toEqual(KNOWN_JSONL);
 		expect(renames, ROTATION_MESSAGE).toEqual(KNOWN_RENAMES);
+		// chain.ts's one rename replaces the .meta anchor, never the log.
+		const chain = readFileSync(join(root, "audit", "chain.ts"), "utf-8");
+		expect(
+			[...chain.matchAll(/\brename(?:Sync)?\s*\(([^)]*)\)/g)].map((m) => m[1]),
+			ROTATION_MESSAGE,
+		).toEqual(["tmp, metaPath"]);
 	});
 });

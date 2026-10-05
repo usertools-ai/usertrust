@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,11 +8,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
  * `half` writes half of what it is asked each call (progress, so a writer that loops completes);
  * `stall` writes half once and then makes no progress (a full disk).
  */
-const mode: { now: "half" | "stall" | null; stalled: boolean } = { now: null, stalled: false };
+const mode: { now: "half" | "stall" | null; stalled: boolean; skip: number } = {
+	now: null,
+	stalled: false,
+	skip: 0,
+};
 vi.mock("node:fs", async (importOriginal) => {
 	const fs = await importOriginal<typeof import("node:fs")>();
 	const writeSync = ((fd: number, data: unknown, ...rest: unknown[]) => {
-		if (mode.now !== null) {
+		if (mode.now !== null && mode.skip > 0) {
+			mode.skip--;
+		} else if (mode.now !== null) {
 			const buf = typeof data === "string" ? Buffer.from(data, "utf-8") : (data as Buffer);
 			const offset = typeof rest[0] === "number" ? rest[0] : 0;
 			const length = typeof rest[1] === "number" ? rest[1] : buf.length - offset;
@@ -37,6 +43,7 @@ const dirs: string[] = [];
 afterEach(() => {
 	mode.now = null;
 	mode.stalled = false;
+	mode.skip = 0;
 	for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 function vault() {
@@ -81,6 +88,25 @@ describe("#194.1: an append writes EVERY byte, or fails without claiming durabil
 		await w2.appendEvent({ kind: "test.after", actor: "sys", data: {} });
 		w2.release();
 		expect(verifyVault(join(v, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 3 });
+	});
+
+	it("#191 r1 (reviewer2): the .meta anchor write STALLING mid-way leaves the OLD anchor whole — never an empty or half-written one", async () => {
+		const v = vault();
+		const w = createAuditWriter(v, { lockAtCreate: true });
+		await w.appendEvent({ kind: "test.before", actor: "sys", data: {} });
+		const metaPath = `${logOf(v)}.meta`;
+		const before = readFileSync(metaPath, "utf-8");
+		mode.skip = 1; // the log line lands whole; the anchor write then stalls
+		mode.now = "stall";
+		const err = await w
+			.appendEvent({ kind: "test.next", actor: "sys", data: {} })
+			.catch((e: unknown) => e);
+		mode.now = null;
+		w.release();
+		expect(readDurableEventHash(err), "the log line is durable").toBeDefined();
+		expect(readFileSync(metaPath, "utf-8")).toBe(before);
+		expect(JSON.parse(before)).toMatchObject({ sequence: 1 });
+		expect(readdirSync(join(v, VAULT_DIR, "audit")).filter((f) => f.endsWith(".tmp"))).toEqual([]);
 	});
 
 	it("#194.3: a lock whose content cannot be written whole is NEVER created (no empty or partial lock file is ever visible)", () => {
