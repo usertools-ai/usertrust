@@ -44,15 +44,15 @@ passes through to `receipt.meter.computeMs` and is not a pricing input.
 
 ## Endpoints
 
-| Method | Path            | Auth   | Purpose                                             |
-| ------ | --------------- | ------ | --------------------------------------------------- |
-| POST   | `/v1/authorize` | Bearer | Phase 1: policy gate + PENDING budget hold          |
-| POST   | `/v1/settle`    | Bearer | Phase 2a: post actual usage, returns a TrustReceipt |
-| POST   | `/v1/abort`     | Bearer | Phase 2b: void the hold for a FAILED call           |
-| POST   | `/v1/release`   | Bearer | Phase 2c: void a hold that is not a failure         |
-| GET    | `/v1/budget`    | Bearer | Remaining tenant budget                             |
-| GET    | `/v1/events`    | Bearer | SSE stream of tenant governance events              |
-| GET    | `/v1/health`    | none   | Liveness, plus the `settlementsUnrecoverable` count |
+| Method | Path            | Auth   | Purpose                                              |
+| ------ | --------------- | ------ | ---------------------------------------------------- |
+| POST   | `/v1/authorize` | Bearer | Phase 1: policy gate + PENDING budget hold           |
+| POST   | `/v1/settle`    | Bearer | Phase 2a: post actual usage, returns a TrustReceipt  |
+| POST   | `/v1/abort`     | Bearer | Phase 2b: void the hold for a FAILED call            |
+| POST   | `/v1/release`   | Bearer | Phase 2c: void a hold that is not a failure          |
+| GET    | `/v1/budget`    | Bearer | Remaining tenant budget                              |
+| GET    | `/v1/events`    | Bearer | SSE stream of tenant governance events               |
+| GET    | `/v1/health`    | none   | Liveness, `capabilities`, `settlementsUnrecoverable` |
 
 Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthorized`,
 `404 not_found` (unknown/already-settled transferId), `409 already_settled`, `409 hold_active`,
@@ -60,17 +60,20 @@ Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthor
 
 `/v1/abort` means the call failed: it records a circuit-breaker failure and `llm_call_failed`.
 `/v1/release` means the hold is no longer needed: the same void, recorded as `hold_released`,
-with no breaker failure. Pending holds not settled within `pendingTtlMs` (default 4 min) are
-swept and **released** (`pending_expired` on SSE); shutdown releases the rest (`released`).
-`pendingTtlMs` may not exceed 269 999: the sweep runs every 30 s and must release a hold before
-the ledger's own 300 s pending timeout expires it, or a late settle could not be recorded as
-`settlement_unrecoverable`.
+with no breaker failure. Pending holds not settled within `pendingTtlMs` (default and maximum
+240 000 ms) are swept and **released** (`pending_expired` on SSE); shutdown releases the rest
+(`released`). The sweep runs every 30 s, claims every due hold at once and releases them
+concurrently, so each is out of the server's hands a full interval before the ledger's own 300 s
+pending timeout; a late settle then reaches the `settlement_unrecoverable` path, never an expired
+hold.
 
 ### Idempotency keys and `principal`
 
 `/v1/authorize` accepts an optional `idempotencyKey` (1–256 printable ASCII characters, no
 spaces) and an optional `principal` (`{ id, type, origin? }`, each 1–128 characters of
-`[A-Za-z0-9._:-]`). Keys are scoped per tenant: each tenant's vault (`stateDir/<tenant>`)
+`[A-Za-z0-9._:-]`). **Check `/v1/health` `capabilities` first:** an older server strips request
+keys it does not know, so it would accept an `idempotencyKey` and silently ignore it. Keys are
+scoped per tenant: each tenant's vault (`stateDir/<tenant>`)
 persists a random scope id on its first keyed call, so two deployments sharing one ledger cluster
 never share keys, and a restarted server still recognises the keys it charged.
 

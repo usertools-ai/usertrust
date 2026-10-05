@@ -55,6 +55,19 @@ describe("HTTP control plane", () => {
 		expect(body.name).toBe("usertrust-server");
 	});
 
+	it("health names the capabilities a client must not assume an older server has", async () => {
+		// An older server strips unknown request keys, so a client that retried a
+		// settle under an idempotencyKey that server silently dropped would post twice.
+		const { base } = await start();
+		const body = (await (await fetch(`${base}/v1/health`)).json()) as { capabilities: string[] };
+		expect(body.capabilities).toEqual([
+			"release",
+			"idempotency-key",
+			"principal",
+			"settlement-unrecoverable",
+		]);
+	});
+
 	it("rejects missing or wrong bearer key with 401", async () => {
 		const { base } = await start();
 		expect((await fetch(`${base}/v1/budget`)).status).toBe(401);
@@ -488,6 +501,42 @@ describe("release (#204)", () => {
 		expect(server.pendingCount()).toBe(1);
 		expect((await post(base, "/v1/release", { transferId: auth.transferId })).status).toBe(200);
 		expect(server.pendingCount()).toBe(0);
+	});
+
+	it("the sweep CLAIMS every due hold at once, then releases them concurrently", async () => {
+		// Released one after another, a batch of expired holds eats the margin before
+		// the ledger's own timeout; and a hold still in `pending` when the ledger
+		// expires it can reach a normal settle and be recorded only as ambiguous.
+		const fake = createFakeGovernor();
+		const started: string[] = [];
+		let openGate: () => void = () => {};
+		const gate = new Promise<void>((resolve) => {
+			openGate = resolve;
+		});
+		const original = fake.governor.release.bind(fake.governor);
+		fake.governor.release = async (auth, reason) => {
+			started.push(auth.transferId);
+			await gate;
+			return original(auth, reason);
+		};
+		server = createUsertrustServer({ config: config(), factory: async () => fake.governor });
+		const { port } = await server.listen();
+		const base = `http://127.0.0.1:${port}`;
+		const ids: string[] = [];
+		for (let i = 0; i < 3; i++) ids.push((await authorize(base)).body.transferId);
+
+		const sweeping = server.sweepExpired(Date.now() + 600_000);
+		// Claimed before any release has run, let alone finished.
+		expect(server.pendingCount()).toBe(0);
+		// All three releases in flight together while the gate is shut.
+		await vi.waitFor(() => expect(started.sort()).toEqual([...ids].sort()));
+		// A settle that arrives meanwhile is never a normal settle of a claimed hold.
+		expect((await post(base, "/v1/settle", { transferId: ids[0] })).status).toBe(404);
+		expect(fake.calls.settled).toHaveLength(0);
+
+		openGate();
+		expect(await sweeping).toBe(3);
+		expect(fake.calls.released.map((r) => r.transferId).sort()).toEqual([...ids].sort());
 	});
 
 	it("the TTL sweep releases — never aborts — and keeps its pending_expired event", async () => {

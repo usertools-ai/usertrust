@@ -37,6 +37,19 @@ const MAX_SSE_BUFFER_BYTES = 1024 * 1024;
  * would send a call ahead with no hold, or repeat one already paid for.
  */
 const SHADOWABLE_STATUSES = new Set([402, 403, 429]);
+/**
+ * What this server honours beyond the base two-phase API, published on /v1/health
+ * for a client that must not assume it. An older server's request schemas STRIP
+ * unknown keys, so an `idempotencyKey` it does not understand is dropped in silence
+ * — and a client that retried an ambiguous settle "safely" under its key would post
+ * twice. A client checks this list before relying on any of these.
+ */
+const SERVER_CAPABILITIES = Object.freeze([
+	"release",
+	"idempotency-key",
+	"principal",
+	"settlement-unrecoverable",
+]);
 
 interface PendingEntry {
 	auth: Authorization;
@@ -442,6 +455,7 @@ export function createUsertrustServer(opts: {
 				ok: true,
 				name: SERVER_NAME,
 				version: SERVER_VERSION,
+				capabilities: SERVER_CAPABILITIES,
 				// A count, never a tenant id or a key: this endpoint is unauthenticated.
 				settlementsUnrecoverable,
 			});
@@ -513,19 +527,34 @@ export function createUsertrustServer(opts: {
 	}
 
 	async function sweepExpired(now: number = Date.now()): Promise<number> {
-		let swept = 0;
+		// CLAIM the whole due batch first, synchronously: from here no settle can reach
+		// these holds (a late one takes the unheld path), so none of them can be POSTed
+		// after the ledger's own timeout has expired it. Then release them CONCURRENTLY:
+		// the batch takes about one release's latency however many holds expired
+		// together, instead of one after another eating the margin MAX_PENDING_TTL_MS
+		// leaves before that timeout.
+		const due: Array<[string, PendingEntry]> = [];
 		for (const [transferId, entry] of pending) {
 			if (now - entry.createdAt < config.pendingTtlMs) continue;
 			pending.delete(transferId);
-			swept += 1;
-			await releaseEntry(entry, "pending TTL expired");
-			bus.publish(entry.tenantId, {
-				type: "pending_expired",
-				transferId,
-				at: new Date().toISOString(),
-			});
+			terminating.add(transferId);
+			due.push([transferId, entry]);
 		}
-		return swept;
+		await Promise.all(
+			due.map(async ([transferId, entry]) => {
+				try {
+					await releaseEntry(entry, "pending TTL expired");
+				} finally {
+					terminating.delete(transferId);
+				}
+				bus.publish(entry.tenantId, {
+					type: "pending_expired",
+					transferId,
+					at: new Date().toISOString(),
+				});
+			}),
+		);
+		return due.length;
 	}
 
 	return {

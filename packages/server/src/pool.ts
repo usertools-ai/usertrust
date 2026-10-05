@@ -45,9 +45,15 @@ export class GovernorPool {
 					typeof governor.release !== "function" ||
 					typeof governor.recordUnheldSettlement !== "function"
 				) {
-					throw new Error(
-						"governor factory returned a Governor without release() or recordUnheldSettlement(); build it with usertrust's createGovernor() of this version",
-					);
+					// Destroyed before it is dropped: it may already hold a ledger client,
+					// and once the cache forgets it nothing else could ever close it.
+					return Promise.resolve(governor.destroy?.())
+						.catch(() => {})
+						.then(() => {
+							throw new Error(
+								"governor factory returned a Governor without release() or recordUnheldSettlement(); build it with usertrust's createGovernor() of this version",
+							);
+						});
 				}
 				return governor;
 			})

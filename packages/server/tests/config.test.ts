@@ -34,6 +34,9 @@ describe("loadServerConfig", () => {
 		// 300 s is the ledger's pending timeout; the sweep runs every 30 s, so a hold
 		// with this TTL could still be pending here when TigerBeetle voids it.
 		await expect(loadServerConfig(await writeConfig({ pendingTtlMs: 300_000 }))).rejects.toThrow();
+		// A full sweep interval to claim the hold, and a second one of margin.
+		expect(MAX_PENDING_TTL_MS).toBe(300_000 - 2 * 30_000);
+		await expect(loadServerConfig(await writeConfig({ pendingTtlMs: 269_999 }))).rejects.toThrow();
 		await expect(
 			loadServerConfig(await writeConfig({ pendingTtlMs: MAX_PENDING_TTL_MS })),
 		).resolves.toBeDefined();

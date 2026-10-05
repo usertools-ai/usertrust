@@ -60,17 +60,27 @@ describe("GovernorPool", () => {
 		expect(seen.map((o) => o.vaultBase)).toEqual(["/tmp/utsrv-pool/a", "/tmp/utsrv-pool/b"]);
 	});
 
-	it("refuses a governor without release(), loudly — and does not cache it", async () => {
-		// Every TTL sweep would otherwise fail inside a best-effort catch, silently.
+	it("refuses a governor without release(), loudly — destroying it first, and not caching it", async () => {
+		// Every TTL sweep would otherwise fail inside a best-effort catch, silently. The
+		// refused governor may already hold a ledger client: once the cache forgets it,
+		// nothing else could close it.
 		let attempts = 0;
+		let destroyed = 0;
 		const pool = new GovernorPool(config(), async () => {
 			attempts += 1;
 			const { governor } = createFakeGovernor();
-			return { ...governor, release: undefined } as unknown as typeof governor;
+			return {
+				...governor,
+				release: undefined,
+				destroy: async () => {
+					destroyed += 1;
+				},
+			} as unknown as typeof governor;
 		});
 		await expect(pool.get(TENANT_A)).rejects.toThrow(/release\(\)/);
 		await expect(pool.get(TENANT_A)).rejects.toThrow(/release\(\)/);
 		expect(attempts).toBe(2);
+		expect(destroyed).toBe(2);
 	});
 
 	it("concurrent get() for the same tenant creates a single governor", async () => {
