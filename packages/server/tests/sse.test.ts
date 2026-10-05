@@ -129,7 +129,7 @@ describe("SSE + shadow + sweep", () => {
 		expect(authorizeCalls).toBe(1);
 	});
 
-	it("sweepExpired aborts stale pending holds", async () => {
+	it("sweepExpired RELEASES stale pending holds — an expired hold is not a failed call (#204)", async () => {
 		const fake = createFakeGovernor();
 		server = createUsertrustServer({ config: config(), factory: async () => fake.governor });
 		const { port } = await server.listen();
@@ -142,6 +142,8 @@ describe("SSE + shadow + sweep", () => {
 		const swept = await server.sweepExpired(Date.now() + 60_000);
 		expect(swept).toBe(1);
 		expect(server.pendingCount()).toBe(0);
-		expect(fake.calls.aborted).toHaveLength(1);
+		expect(fake.calls.released).toHaveLength(1);
+		expect(fake.calls.released[0]?.reason).toBe("pending TTL expired");
+		expect(fake.calls.aborted).toHaveLength(0);
 	});
 });

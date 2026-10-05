@@ -111,4 +111,39 @@ describe("statusOf", () => {
 		expect(policyDenied?.costUt).toBeUndefined();
 		expect(ledgerRejected?.costUt).toBeUndefined();
 	});
+
+	it("labels a released hold released — never pending, never failed", () => {
+		// No `settled` field, so the default arm read a hold that can never settle
+		// as one that still might.
+		const [ttl, duplicate] = toLedgerRows(
+			[
+				evt({
+					kind: "hold_released",
+					data: { model: "m", transferId: "tx_1", reason: "pending TTL expired" },
+				}),
+				evt({
+					id: "id-2",
+					sequence: 2,
+					kind: "settlement_duplicate",
+					data: { model: "m", transferId: "tx_2", idempotencyKeyHash: "a".repeat(64) },
+				}),
+			],
+			{ valid: true, breakIndex: null },
+		);
+		expect(statusOf(ttl as never)).toBe("released");
+		expect(statusOf(duplicate as never)).toBe("released");
+	});
+
+	it("labels an unrecoverable settlement unrecoverable — real spend nothing charged", () => {
+		const [row] = toLedgerRows(
+			[
+				evt({
+					kind: "settlement_unrecoverable",
+					data: { idempotencyKeyHash: "a".repeat(64), usageSource: "provider" },
+				}),
+			],
+			{ valid: true, breakIndex: null },
+		);
+		expect(statusOf(row as never)).toBe("unrecoverable");
+	});
 });

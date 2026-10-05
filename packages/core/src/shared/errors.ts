@@ -146,6 +146,36 @@ export class IdempotencyConflictError extends Error {
 	}
 }
 
+/**
+ * A caller idempotency key whose charge the LEDGER already holds.
+ *
+ * TigerBeetle is the record of "already charged": a keyed call's post goes in under
+ * a transfer id derived from the key alone, so at most one post per key can ever
+ * commit, across processes and restarts. This is the answer when that post exists —
+ * at authorize (no hold is created) and at settle (a concurrent duplicate's own hold
+ * is released, never posted).
+ *
+ * It is a REFUSAL OF A DUPLICATE, not a failure of the call: the first charge stands
+ * and nothing about it is in doubt. The message never carries the key; callers
+ * correlate on their own key, and the chain records only its SHA-256.
+ */
+export class AlreadySettledError extends Error {
+	public readonly reason: string;
+	public readonly hint: string;
+	public readonly docsUrl: string;
+
+	constructor(reason = "this idempotency key has already been charged") {
+		const hint =
+			"The first charge under this idempotency key stands. Do not retry the key; use a new key for a new intent.";
+		const docsUrl = "https://usertrust.ai/docs/errors/already-settled";
+		super(`Already settled: ${reason}\n\n  Hint: ${hint}\n  Docs: ${docsUrl}`);
+		this.name = "AlreadySettledError";
+		this.reason = reason;
+		this.hint = hint;
+		this.docsUrl = docsUrl;
+	}
+}
+
 export class LedgerUnavailableError extends Error {
 	public readonly cause_message: string;
 	public readonly hint: string;

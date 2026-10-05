@@ -3,7 +3,21 @@
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { DEFAULT_PENDING_TIMEOUT_SECONDS } from "usertrust";
 import { z } from "zod";
+
+/** How often the server sweeps pending holds older than `pendingTtlMs`. */
+export const SWEEP_INTERVAL_MS = 30_000;
+
+/**
+ * The longest `pendingTtlMs` the sweep can honour. A hold is released by the first
+ * sweep after its TTL, so up to one sweep interval late, and the ledger voids it on
+ * its own at `DEFAULT_PENDING_TIMEOUT_SECONDS`. The release must land first: a
+ * settle that reaches a hold the LEDGER already expired fails its POST and is
+ * recorded only as ambiguous, while a settle after the release is recorded as
+ * unrecoverable and counted (/v1/health) — the record the late settle is owed.
+ */
+export const MAX_PENDING_TTL_MS = DEFAULT_PENDING_TIMEOUT_SECONDS * 1000 - SWEEP_INTERVAL_MS - 1;
 
 const TenantSchema = z.object({
 	// Interpolated into a filesystem path (pool.ts vaultBase), so it must not be
@@ -21,7 +35,8 @@ const ServerConfigSchema = z.object({
 	port: z.number().int().min(1).max(65535).default(4519),
 	stateDir: z.string().default(".usertrust-server"),
 	enforcement: z.enum(["enforce", "evaluate_only"]).default("enforce"),
-	pendingTtlMs: z.number().int().positive().default(300_000),
+	// Four minutes: a full sweep interval of margin under MAX_PENDING_TTL_MS.
+	pendingTtlMs: z.number().int().positive().max(MAX_PENDING_TTL_MS).default(240_000),
 	dryRun: z.boolean().default(false),
 	tenants: z.array(TenantSchema).min(1),
 });

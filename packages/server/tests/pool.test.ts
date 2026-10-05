@@ -1,4 +1,4 @@
-import type { TrustOpts } from "usertrust";
+import type { GovernorOpts, TrustOpts } from "usertrust";
 import { describe, expect, it } from "vitest";
 import type { ServerConfig, TenantConfig } from "../src/config.js";
 import { hashKey } from "../src/config.js";
@@ -19,7 +19,7 @@ function config(): ServerConfig {
 		port: 0,
 		stateDir: "/tmp/utsrv-pool",
 		enforcement: "enforce",
-		pendingTtlMs: 300_000,
+		pendingTtlMs: 240_000,
 		dryRun: true,
 		tenants: [TENANT_A, TENANT_B],
 	};
@@ -44,6 +44,33 @@ describe("GovernorPool", () => {
 		expect(seen[1]?.budget).toBeUndefined();
 		expect(seen[1]?.tier).toBe("mini");
 		expect(seen[1]?.configPath).toBe("/tmp/utsrv-pool/b.config.json");
+	});
+
+	it("passes NO idempotencyScope: each tenant's own vault persists one", async () => {
+		// A tenant id would collide across deployments that share a ledger cluster;
+		// a vault path would change with stateDir. The vault's persisted id does neither.
+		const seen: GovernorOpts[] = [];
+		const pool = new GovernorPool(config(), async (opts) => {
+			seen.push(opts);
+			return createFakeGovernor().governor;
+		});
+		await pool.get(TENANT_A);
+		await pool.get(TENANT_B);
+		expect(seen.map((o) => o.idempotencyScope)).toEqual([undefined, undefined]);
+		expect(seen.map((o) => o.vaultBase)).toEqual(["/tmp/utsrv-pool/a", "/tmp/utsrv-pool/b"]);
+	});
+
+	it("refuses a governor without release(), loudly — and does not cache it", async () => {
+		// Every TTL sweep would otherwise fail inside a best-effort catch, silently.
+		let attempts = 0;
+		const pool = new GovernorPool(config(), async () => {
+			attempts += 1;
+			const { governor } = createFakeGovernor();
+			return { ...governor, release: undefined } as unknown as typeof governor;
+		});
+		await expect(pool.get(TENANT_A)).rejects.toThrow(/release\(\)/);
+		await expect(pool.get(TENANT_A)).rejects.toThrow(/release\(\)/);
+		expect(attempts).toBe(2);
 	});
 
 	it("concurrent get() for the same tenant creates a single governor", async () => {

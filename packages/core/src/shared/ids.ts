@@ -97,6 +97,40 @@ export function parentUserIdRefusal(value: unknown): string | null {
 	return null;
 }
 
+/**
+ * A caller idempotency key: 1–256 characters of printable ASCII, space excluded.
+ * Narrow on purpose. The key becomes part of a transfer-id preimage, so a key that
+ * looks the same as another but differs in invisible bytes (a trailing newline, a
+ * zero-width joiner, a different Unicode normalization) would silently be a
+ * different key, and charge twice.
+ */
+export const IDEMPOTENCY_KEY_PATTERN = /^[\x21-\x7e]{1,256}$/;
+
+/**
+ * One field of a `principal` (`id`, `type`, `origin`): 1–128 characters of
+ * `[A-Za-z0-9._:-]`. No whitespace, control characters or ANSI escapes, so a
+ * recorded principal is safe to print in an auditor's terminal.
+ */
+export const PRINCIPAL_FIELD_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/**
+ * The AUTHORITATIVE idempotency-key rule. Returns `null` when the key is legal and
+ * the reason otherwise, like {@link parentUserIdRefusal}, so the governor's door and
+ * an integration's own wire validation refuse exactly the same keys.
+ */
+export function idempotencyKeyRefusal(value: unknown): string | null {
+	return typeof value === "string" && IDEMPOTENCY_KEY_PATTERN.test(value)
+		? null
+		: "must be 1–256 characters of printable ASCII, with no spaces or control characters";
+}
+
+/** The AUTHORITATIVE rule for one `principal` field — see {@link PRINCIPAL_FIELD_PATTERN}. */
+export function principalFieldRefusal(value: unknown): string | null {
+	return typeof value === "string" && PRINCIPAL_FIELD_PATTERN.test(value)
+		? null
+		: `must match ${PRINCIPAL_FIELD_PATTERN.source}`;
+}
+
 /** FNV-1a 32-bit hash */
 export function fnv1a32(str: string): number {
 	let hash = 0x811c9dc5;

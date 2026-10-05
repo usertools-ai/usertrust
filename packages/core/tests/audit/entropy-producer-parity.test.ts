@@ -497,3 +497,42 @@ describe("one governed call contributes one observation", () => {
 		expect(s.hits).toBe(1);
 	});
 });
+
+describe("a released hold is neutral (#204)", () => {
+	/** `headless.ts` `releaseClaimedHold` — the TTL sweep's terminal. */
+	const holdReleased = (transferId = "r-1"): EntropyEventInput => ({
+		kind: "hold_released",
+		data: {
+			model: "claude-sonnet-4-6",
+			transferId,
+			reason: "pending TTL expired",
+			source: "headless",
+		},
+	});
+	/** `headless.ts` settle's duplicate path — written after the hold's release. */
+	const settlementDuplicate = (transferId = "r-1"): EntropyEventInput => ({
+		kind: "settlement_duplicate",
+		data: {
+			model: "claude-sonnet-4-6",
+			transferId,
+			idempotencyKeyHash: "a".repeat(64),
+			source: "headless",
+		},
+	});
+
+	it("is never an abort, however many there are", () => {
+		// Five TTL sweeps booked as failures opened the breaker on a healthy provider;
+		// the health signal must not repeat that by counting them as stops.
+		const releases = Array.from({ length: 5 }, (_, i) => holdReleased(`r-${i}`));
+		const s = extractCircuitBreakerTrips([llmCall(), ...releases, settlementDuplicate("r-0")]);
+		expect(s.hits).toBe(0);
+	});
+
+	it("is never a desync or a policy violation", () => {
+		const events = [llmCall(), holdReleased(), settlementDuplicate()];
+		const chain = extractChainIntegrity(events, { chain: { valid: true } });
+		expect(chain.hits).toBe(0);
+		expect(chain.critical).toBe(false);
+		expect(extractPolicyViolations(events).hits).toBe(0);
+	});
+});

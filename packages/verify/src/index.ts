@@ -25,6 +25,7 @@ import {
 import { canonicalize } from "./canonical.js";
 import { GENESIS_HASH } from "./constants.js";
 import {
+	RELEASE_KINDS,
 	type ReceiptData,
 	renderNotFound,
 	renderReceipt,
@@ -686,6 +687,7 @@ function normalizeEvent(raw: unknown): TransactionEvent {
 	const cost = num(d.cost);
 	const error = str(d.error);
 	const message = str(d.message);
+	const reason = str(d.reason);
 
 	return {
 		id: str(o.id) ?? "",
@@ -700,6 +702,7 @@ function normalizeEvent(raw: unknown): TransactionEvent {
 			...(typeof d.settled === "boolean" ? { settled: d.settled } : { settled: undefined }),
 			...(error !== undefined ? { error } : { error: undefined }),
 			...(message !== undefined ? { message } : { message: undefined }),
+			...(reason !== undefined ? { reason } : { reason: undefined }),
 			// PRESERVED for the same reason, and a sharper one: defaulting to ""
 			// mapped every event WITHOUT a transferId onto the same empty id, so
 			// `--tx ""` (an unset shell variable) matched them and returned
@@ -830,6 +833,7 @@ export function verifyTransaction(
 		e.data.settled !== undefined ||
 		isFailureTerminal(e) ||
 		isDenialTerminal(e) ||
+		RELEASE_KINDS.has(e.kind) ||
 		e.kind === "settlement_ambiguous";
 
 	// FIRST TERMINAL IN CHAIN ORDER WINS. Not the best-TYPED terminal anywhere in

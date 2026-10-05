@@ -2,7 +2,7 @@
 
 Self-hostable HTTP control plane for the [usertrust](https://github.com/usertools/usertrust)
 governance kernel. Wraps the headless Governor's two-phase lifecycle
-(authorize → settle/abort) with per-tenant isolation, bearer-key auth, and SSE telemetry.
+(authorize → settle/abort/release) with per-tenant isolation, bearer-key auth, and SSE telemetry.
 
 ## Quickstart
 
@@ -48,14 +48,48 @@ passes through to `receipt.meter.computeMs` and is not a pricing input.
 | ------ | --------------- | ------ | --------------------------------------------------- |
 | POST   | `/v1/authorize` | Bearer | Phase 1: policy gate + PENDING budget hold          |
 | POST   | `/v1/settle`    | Bearer | Phase 2a: post actual usage, returns a TrustReceipt |
-| POST   | `/v1/abort`     | Bearer | Phase 2b: void the hold for a failed call           |
+| POST   | `/v1/abort`     | Bearer | Phase 2b: void the hold for a FAILED call           |
+| POST   | `/v1/release`   | Bearer | Phase 2c: void a hold that is not a failure         |
 | GET    | `/v1/budget`    | Bearer | Remaining tenant budget                             |
 | GET    | `/v1/events`    | Bearer | SSE stream of tenant governance events              |
-| GET    | `/v1/health`    | none   | Liveness                                            |
+| GET    | `/v1/health`    | none   | Liveness, plus the `settlementsUnrecoverable` count |
 
 Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthorized`,
-`404 not_found` (unknown/already-settled transferId), `413 too_large` (1 MiB body cap).
-Pending holds not settled within `pendingTtlMs` (default 5 min) are swept and aborted.
+`404 not_found` (unknown/already-settled transferId), `409 already_settled`, `409 hold_active`,
+`410 settlement_unrecoverable`, `413 too_large` (1 MiB body cap), `503 ledger_unavailable`.
+
+`/v1/abort` means the call failed: it records a circuit-breaker failure and `llm_call_failed`.
+`/v1/release` means the hold is no longer needed: the same void, recorded as `hold_released`,
+with no breaker failure. Pending holds not settled within `pendingTtlMs` (default 4 min) are
+swept and **released** (`pending_expired` on SSE); shutdown releases the rest (`released`).
+`pendingTtlMs` may not exceed 269 999: the sweep runs every 30 s and must release a hold before
+the ledger's own 300 s pending timeout expires it, or a late settle could not be recorded as
+`settlement_unrecoverable`.
+
+### Idempotency keys and `principal`
+
+`/v1/authorize` accepts an optional `idempotencyKey` (1–256 printable ASCII characters, no
+spaces) and an optional `principal` (`{ id, type, origin? }`, each 1–128 characters of
+`[A-Za-z0-9._:-]`). Keys are scoped per tenant: each tenant's vault (`stateDir/<tenant>`)
+persists a random scope id on its first keyed call, so two deployments sharing one ledger cluster
+never share keys, and a restarted server still recognises the keys it charged.
+
+- A replay while the first hold is live answers with the same `transferId` — never a second hold.
+- A key whose charge already posted is `409 already_settled`, at authorize or at settle; the
+  ledger allows at most one charge per key, across restarts.
+- `principal` labels every record the hold leaves (and the receipt). It never selects a wallet
+  and never enters the policy gate.
+
+A settle whose hold the server no longer holds (its TTL released it, or the server restarted)
+is a plain `404` — unless it carries its `idempotencyKey`. Then the usage it reports is
+recorded on the tenant's chain as `settlement_unrecoverable` and the answer is
+`410 settlement_unrecoverable` (or `409 already_settled` when the key's charge stands, or
+`409 hold_active` — naming the live hold's `transferId` — when the key has a live hold under another
+`transferId`). A settle still in flight for the key is waited out first. To charge the usage,
+authorize again under the same key and settle.
+
+In `evaluate_only` mode only governance decisions (402, 403, 429) become shadow allows; a ledger
+outage (`503`) or an already-charged key (`409`) is returned as is.
 
 ## Keys
 

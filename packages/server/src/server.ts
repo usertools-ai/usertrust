@@ -5,15 +5,17 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import type { Authorization } from "usertrust";
+import type { Authorization, Principal, SettleParams } from "usertrust";
+import { AlreadySettledError, sanitizeReleaseReason } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
-import { resolveTenant } from "./config.js";
+import { MAX_PENDING_TTL_MS, resolveTenant, SWEEP_INTERVAL_MS } from "./config.js";
 import { EventBus } from "./events.js";
 import type { GovernorFactory } from "./pool.js";
 import { GovernorPool } from "./pool.js";
 import {
 	AbortRequestSchema,
 	AuthorizeRequestSchema,
+	ReleaseRequestSchema,
 	SettleRequestSchema,
 	toHttpError,
 } from "./wire.js";
@@ -24,11 +26,17 @@ const SERVER_NAME = "usertrust-server";
  * version can never drift from the published package again (Addendum D5). */
 const SERVER_VERSION = (createRequire(import.meta.url)("../package.json") as { version: string })
 	.version;
-const SWEEP_INTERVAL_MS = 30_000;
 /** Max concurrent SSE streams a single tenant may hold open at once. */
 const MAX_SSE_PER_TENANT = 8;
 /** Drop an SSE subscriber whose kernel send buffer backs up past this. */
 const MAX_SSE_BUFFER_BYTES = 1024 * 1024;
+/**
+ * The statuses a governance DECISION produces (policy 403, budget 402, anomaly 429)
+ * — the only refusals `evaluate_only` turns into a shadow allow. A ledger outage
+ * (503) or a key already charged (409) is not a decision to shadow: allowing it
+ * would send a call ahead with no hold, or repeat one already paid for.
+ */
+const SHADOWABLE_STATUSES = new Set([402, 403, 429]);
 
 interface PendingEntry {
 	auth: Authorization;
@@ -50,9 +58,22 @@ export function createUsertrustServer(opts: {
 	factory?: GovernorFactory;
 }): UsertrustServer {
 	const { config } = opts;
+	// The loader's schema enforces this too; a config built in code skips the schema.
+	if (config.pendingTtlMs > MAX_PENDING_TTL_MS) {
+		throw new Error(
+			`pendingTtlMs ${config.pendingTtlMs} must be at most ${MAX_PENDING_TTL_MS}: the sweep has to release a hold before the ledger expires it`,
+		);
+	}
 	const bus = new EventBus();
 	const pool = opts.factory ? new GovernorPool(config, opts.factory) : new GovernorPool(config);
 	const pending = new Map<string, PendingEntry>();
+	// Holds CLAIMED out of `pending` by a terminal that has not finished yet. A
+	// keyed authorize replayed in that window gets the same handle back, and must
+	// not re-insert it: the hold is being settled, aborted or released.
+	const terminating = new Set<string>();
+	// Late settles recorded as `settlement_unrecoverable` since this process
+	// started — real spend no settle could charge. Reported on /v1/health.
+	let settlementsUnrecoverable = 0;
 	// Live SSE stream count per tenant id, enforcing MAX_SSE_PER_TENANT.
 	const sseCounts = new Map<string, number>();
 	let httpServer: Server | undefined;
@@ -114,14 +135,19 @@ export function createUsertrustServer(opts: {
 		const governor = await pool.get(tenant);
 		try {
 			const auth = await governor.authorize(parsed.data);
-			pending.set(auth.transferId, { auth, tenantId: tenant.id, createdAt: Date.now() });
-			bus.publish(tenant.id, {
-				type: "authorized",
-				transferId: auth.transferId,
-				model: auth.model,
-				estimatedCost: auth.estimatedCost,
-				at: new Date().toISOString(),
-			});
+			// A keyed replay answers with the SAME live hold. It is already pending (or
+			// mid-terminal) here, so it neither restarts the TTL clock nor announces a
+			// second hold that does not exist.
+			if (!pending.has(auth.transferId) && !terminating.has(auth.transferId)) {
+				pending.set(auth.transferId, { auth, tenantId: tenant.id, createdAt: Date.now() });
+				bus.publish(tenant.id, {
+					type: "authorized",
+					transferId: auth.transferId,
+					model: auth.model,
+					estimatedCost: auth.estimatedCost,
+					at: new Date().toISOString(),
+				});
+			}
 			sendJson(res, 200, {
 				transferId: auth.transferId,
 				estimatedCost: auth.estimatedCost,
@@ -130,7 +156,8 @@ export function createUsertrustServer(opts: {
 			});
 		} catch (err) {
 			const mapped = toHttpError(err);
-			const shadow = config.enforcement === "evaluate_only" && mapped.status !== 500;
+			const shadow =
+				config.enforcement === "evaluate_only" && SHADOWABLE_STATUSES.has(mapped.status);
 			bus.publish(tenant.id, {
 				type: "denied",
 				error: mapped.body.error,
@@ -163,15 +190,20 @@ export function createUsertrustServer(opts: {
 			sendJson(res, 400, { error: "bad_request", reason: "invalid settle request" });
 			return;
 		}
-		const { transferId, ...usage } = parsed.data;
+		const { transferId, idempotencyKey, principal, ...usage } = parsed.data;
 		const entry = pending.get(transferId);
 		if (!entry || entry.tenantId !== tenant.id) {
+			if (idempotencyKey !== undefined) {
+				await handleUnheldSettle(tenant, transferId, { idempotencyKey, principal, usage }, res);
+				return;
+			}
 			sendJson(res, 404, { error: "not_found", reason: "unknown transferId" });
 			return;
 		}
 		// Atomic claim: first concurrent caller wins; a governor failure re-inserts
 		// the entry so a transient settle error stays retryable.
 		pending.delete(transferId);
+		terminating.add(transferId);
 		try {
 			const governor = await pool.get(tenant);
 			const receipt = await governor.settle(entry.auth, usage);
@@ -184,7 +216,83 @@ export function createUsertrustServer(opts: {
 			});
 			sendJson(res, 200, receipt);
 		} catch (err) {
-			pending.set(transferId, entry);
+			if (err instanceof AlreadySettledError) {
+				// NOT retryable: another hold already charged this key, and the
+				// governor released this one. Re-inserting it would leave a hold the
+				// ledger no longer has, waiting for a TTL sweep.
+				bus.publish(tenant.id, {
+					type: "released",
+					transferId,
+					reason: "already settled under this idempotency key",
+					at: new Date().toISOString(),
+				});
+			} else {
+				pending.set(transferId, entry);
+			}
+			const mapped = toHttpError(err);
+			sendJson(res, mapped.status, mapped.body);
+		} finally {
+			terminating.delete(transferId);
+		}
+	}
+
+	/**
+	 * A keyed settle for a hold this server does not hold — its TTL released it, or
+	 * the server restarted since it was authorized. Real spend no settle can charge
+	 * any more must never vanish into a 404, so the governor records it:
+	 *  - 410 `settlement_unrecoverable`: recorded on the tenant's chain, counted on
+	 *    /v1/health, announced over SSE;
+	 *  - 409 `already_settled`: the key's charge stands (a retry of a settle that
+	 *    already landed);
+	 *  - 409 `hold_active`: the key has a live hold here under another transferId,
+	 *    which the response names.
+	 */
+	async function handleUnheldSettle(
+		tenant: TenantConfig,
+		transferId: string,
+		late: {
+			idempotencyKey: string;
+			principal: Principal | undefined;
+			usage: Pick<
+				SettleParams,
+				"inputTokens" | "outputTokens" | "cacheReadTokens" | "cacheWriteTokens" | "usageSource"
+			>;
+		},
+		res: ServerResponse,
+	): Promise<void> {
+		try {
+			const governor = await pool.get(tenant);
+			const found = await governor.recordUnheldSettlement({
+				idempotencyKey: late.idempotencyKey,
+				usage: late.usage,
+				principal: late.principal,
+			});
+			if (found.outcome === "held") {
+				// The tenant presented the key, so it may learn which of its holds the
+				// key is on — and settle that one.
+				sendJson(res, 409, {
+					error: "hold_active",
+					reason: "this idempotency key has a live hold: settle it by its own transferId",
+					transferId: found.transferId,
+				});
+				return;
+			}
+			// An exact retry the governor had already recorded is answered the same way,
+			// but is not a second loss: count and announce only what was recorded.
+			if (found.recorded) {
+				settlementsUnrecoverable += 1;
+				bus.publish(tenant.id, {
+					type: "settlement_unrecoverable",
+					transferId,
+					at: new Date().toISOString(),
+				});
+			}
+			sendJson(res, 410, {
+				error: "settlement_unrecoverable",
+				reason:
+					"the hold this settle names is gone and nothing was charged under its key; the usage is recorded. Authorize again under the same idempotencyKey and settle to charge it.",
+			});
+		} catch (err) {
 			const mapped = toHttpError(err);
 			sendJson(res, mapped.status, mapped.body);
 		}
@@ -208,6 +316,7 @@ export function createUsertrustServer(opts: {
 		}
 		// Atomic claim with re-insert on failure (same contract as settle).
 		pending.delete(transferId);
+		terminating.add(transferId);
 		try {
 			const governor = await pool.get(tenant);
 			await governor.abort(entry.auth, parsed.data.error);
@@ -216,6 +325,8 @@ export function createUsertrustServer(opts: {
 			const mapped = toHttpError(err);
 			sendJson(res, mapped.status, mapped.body);
 			return;
+		} finally {
+			terminating.delete(transferId);
 		}
 		bus.publish(tenant.id, {
 			type: "aborted",
@@ -224,6 +335,50 @@ export function createUsertrustServer(opts: {
 			at: new Date().toISOString(),
 		});
 		sendJson(res, 200, { aborted: true, transferId });
+	}
+
+	/**
+	 * `/v1/release` — give a hold back without calling it a failure (#204). The same
+	 * atomic claim and re-insert-on-failure contract as abort; only the meaning of
+	 * the terminal differs: no circuit-breaker failure, `hold_released` on the chain.
+	 */
+	async function handleRelease(
+		tenant: TenantConfig,
+		body: unknown,
+		res: ServerResponse,
+	): Promise<void> {
+		const parsed = ReleaseRequestSchema.safeParse(body);
+		if (!parsed.success) {
+			sendJson(res, 400, { error: "bad_request", reason: "invalid release request" });
+			return;
+		}
+		const { transferId, reason } = parsed.data;
+		const entry = pending.get(transferId);
+		if (!entry || entry.tenantId !== tenant.id) {
+			sendJson(res, 404, { error: "not_found", reason: "unknown transferId" });
+			return;
+		}
+		pending.delete(transferId);
+		terminating.add(transferId);
+		try {
+			const governor = await pool.get(tenant);
+			await governor.release(entry.auth, reason);
+		} catch (err) {
+			pending.set(transferId, entry);
+			const mapped = toHttpError(err);
+			sendJson(res, mapped.status, mapped.body);
+			return;
+		} finally {
+			terminating.delete(transferId);
+		}
+		bus.publish(tenant.id, {
+			type: "released",
+			transferId,
+			// What the chain recorded, by the governor's own rule — never the raw body.
+			reason: sanitizeReleaseReason(reason),
+			at: new Date().toISOString(),
+		});
+		sendJson(res, 200, { released: true, transferId });
 	}
 
 	function handleEvents(tenant: TenantConfig, req: IncomingMessage, res: ServerResponse): void {
@@ -283,7 +438,13 @@ export function createUsertrustServer(opts: {
 	async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		const url = req.url ?? "/";
 		if (req.method === "GET" && url === "/v1/health") {
-			sendJson(res, 200, { ok: true, name: SERVER_NAME, version: SERVER_VERSION });
+			sendJson(res, 200, {
+				ok: true,
+				name: SERVER_NAME,
+				version: SERVER_VERSION,
+				// A count, never a tenant id or a key: this endpoint is unauthenticated.
+				settlementsUnrecoverable,
+			});
 			return;
 		}
 		const key = bearerKey(req);
@@ -303,7 +464,10 @@ export function createUsertrustServer(opts: {
 		}
 		if (
 			req.method === "POST" &&
-			(url === "/v1/authorize" || url === "/v1/settle" || url === "/v1/abort")
+			(url === "/v1/authorize" ||
+				url === "/v1/settle" ||
+				url === "/v1/abort" ||
+				url === "/v1/release")
 		) {
 			const raw = await readBody(req);
 			if (raw === null) {
@@ -322,25 +486,28 @@ export function createUsertrustServer(opts: {
 			}
 			if (url === "/v1/authorize") await handleAuthorize(tenant, body, res);
 			else if (url === "/v1/settle") await handleSettle(tenant, body, res);
+			else if (url === "/v1/release") await handleRelease(tenant, body, res);
 			else await handleAbort(tenant, body, res);
 			return;
 		}
 		sendJson(res, 404, { error: "not_found", reason: "unknown route" });
 	}
 
-	async function abortEntry(
-		transferId: string,
-		entry: PendingEntry,
-		reason: string,
-	): Promise<void> {
+	/**
+	 * The TTL sweep's and shutdown's terminal: RELEASE, never abort. Neither is a
+	 * failed call, and booking them as one recorded `llm_call_failed` and fed the
+	 * circuit breaker — five expired holds in a row opened it on a healthy provider
+	 * (#204).
+	 */
+	async function releaseEntry(entry: PendingEntry, reason: string): Promise<void> {
 		const tenant = config.tenants.find((t) => t.id === entry.tenantId);
 		if (tenant) {
 			try {
 				const governor = await pool.get(tenant);
-				await governor.abort(entry.auth, reason);
+				await governor.release(entry.auth, reason);
 			} catch {
 				// Best-effort — the Governor's own destroy()/reconciliation voids
-				// anything the control plane fails to abort here.
+				// anything the control plane fails to release here.
 			}
 		}
 	}
@@ -351,7 +518,7 @@ export function createUsertrustServer(opts: {
 			if (now - entry.createdAt < config.pendingTtlMs) continue;
 			pending.delete(transferId);
 			swept += 1;
-			await abortEntry(transferId, entry, "pending TTL expired");
+			await releaseEntry(entry, "pending TTL expired");
 			bus.publish(entry.tenantId, {
 				type: "pending_expired",
 				transferId,
@@ -388,15 +555,15 @@ export function createUsertrustServer(opts: {
 		},
 		async close(): Promise<void> {
 			if (sweeper) clearInterval(sweeper);
-			// Abort every remaining pending hold (best-effort) so the control plane
+			// Release every remaining pending hold (best-effort) so the control plane
 			// and the ledger stay consistent; Governor.destroy() voids at the ledger
-			// layer as the backstop.
+			// layer as the backstop. A shutdown is not a failed call.
 			const remaining = [...pending.entries()];
 			pending.clear();
 			for (const [transferId, entry] of remaining) {
-				await abortEntry(transferId, entry, "server shutdown");
+				await releaseEntry(entry, "server shutdown");
 				bus.publish(entry.tenantId, {
-					type: "aborted",
+					type: "released",
 					transferId,
 					reason: "server shutdown",
 					at: new Date().toISOString(),

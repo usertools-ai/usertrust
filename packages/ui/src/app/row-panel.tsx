@@ -214,7 +214,7 @@ export function RowPanel(props: { row: LedgerRow; onClose(): void }): React.JSX.
 
 	const status = statusOf(row);
 	const statusTone =
-		status === "failed" || status === "denied"
+		status === "failed" || status === "denied" || status === "unrecoverable"
 			? "text-[var(--danger)]"
 			: status === "pending"
 				? "text-[var(--amber)]"
