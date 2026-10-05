@@ -328,7 +328,16 @@ test("CheckLedger: failed rows use danger-INK, the sanctioned red for 12-14px te
 		!/text-danger(?!-ink)/.test(failedRow),
 		"12-14px red text takes --color-danger-ink; full --color-danger is for 16px and up (H2)",
 	);
-	// Legibility itself, measured: the ink's resolved value on both solid grounds.
+	// Legibility itself, measured on the ground the row actually renders on.
+	// The ledger sits inside Details, whose GLASS lets the lattice through, so it
+	// carries its own SOLID --surface: over the glass alone this red measured
+	// about 3.75:1 above a lit dot. The class is pinned so the measurement
+	// below is of the real ground, not a convenient one.
+	assert.match(markup, /data-testid="check-ledger"/, "the ledger renders");
+	assert.ok(
+		/class="[^"]*bg-\[var\(--surface,#101012\)\][^"]*"[^>]*data-testid="check-ledger"/.test(markup),
+		"the check ledger sits on a solid --surface, never on the Details glass",
+	);
 	const ink = resolveToken(declared(".ut-r", "--color-danger-ink"));
 	for (const ground of ["--bg", "--surface"]) {
 		const background = resolveToken(declared(".ut-r", ground));
@@ -829,4 +838,36 @@ test("Details: the summary and its marker clear 4.5:1 on the glass, whatever the
 		}
 	}
 	assert.deepEqual(failures, []);
+});
+
+test("paper surfaces keep the paper palette: ink on paper ≥ 4.5:1, mirrored from the site's own tokens", () => {
+	// The route re-points --color-paper/--color-ink to the dark brand; a
+	// .paper-surface (the terminal states' stub) must get the paper values back,
+	// or it renders silver on white (about 1.6:1).
+	const paper = declared(".ut-r .paper-surface", "--color-paper");
+	const ink = declared(".ut-r .paper-surface", "--color-ink");
+	const ratio = contrast(ink, paper);
+	assert.ok(ratio >= 4.5, `ink ${ink} on paper ${paper}: ${ratio.toFixed(2)}:1`);
+	// A mirror is only worth its byte-exactness: every value equals globals.css's :root.
+	const globals = readFileSync(new URL("../globals.css", import.meta.url), "utf8");
+	for (const token of [
+		"--color-paper",
+		"--color-ink",
+		"--color-paper-emerald",
+		"--color-paper-amber",
+		"--color-paper-red",
+		"--color-paper-steel",
+	]) {
+		const source = new RegExp(`${token}:\\s*(#[0-9a-fA-F]{6})`).exec(globals)?.[1];
+		assert.ok(source, `globals.css declares ${token}`);
+		assert.equal(
+			declared(".ut-r .paper-surface", token).toLowerCase(),
+			source.toLowerCase(),
+			token,
+		);
+		if (token !== "--color-paper" && token !== "--color-ink") {
+			const accent = contrast(declared(".ut-r .paper-surface", token), paper);
+			assert.ok(accent >= 4.5, `${token} on paper: ${accent.toFixed(2)}:1`);
+		}
+	}
 });

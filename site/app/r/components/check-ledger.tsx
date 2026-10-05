@@ -88,7 +88,7 @@ export default function CheckLedger({
 }) {
 	return (
 		<section
-			className="lift-1 rounded-xl border border-white/10 bg-white/[0.02]"
+			className="lift-1 rounded-xl border border-white/10 bg-[var(--surface,#101012)]"
 			data-testid="check-ledger"
 			aria-labelledby="check-ledger-title"
 		>

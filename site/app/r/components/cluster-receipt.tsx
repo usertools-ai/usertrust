@@ -59,7 +59,10 @@ import PostureChips, { AmountScope, ScopeChip } from "./posture-chips";
  */
 export default function VerifiedClusterReceipt({ state }: { state: VerifiedClusterState }) {
 	const { envelope } = state;
-	const claims = clusterReceiptClaims(envelope.receipt);
+	const claims = clusterReceiptClaims(
+		envelope.receipt,
+		envelope.verification.steps.derivations.result,
+	);
 
 	return (
 		<article className="flex flex-col gap-8 py-7" data-state="verified" data-scope="cluster">
@@ -332,7 +335,7 @@ function ClusterReceiptDetails({
 				</div>
 				<div className="flex flex-col gap-1">
 					<span className="font-mono text-xs uppercase tracking-[0.12em] text-paper/38">
-						agent key
+						account handle
 					</span>
 					<span className="font-mono text-[13px] break-all text-paper">{claims.account}</span>
 					<span className="text-xs leading-relaxed text-ink/70">{ACCOUNT_HANDLE_MEANING}</span>

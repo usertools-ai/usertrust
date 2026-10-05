@@ -44,6 +44,7 @@ import type {
 	SkippedSincePrevious,
 	SkipReason,
 	Spend,
+	StepResult,
 } from "./wire";
 
 // ===========================================================================
@@ -141,14 +142,24 @@ export function ledgerWindowSpan(windowStart: string, windowEnd: string): string
  * One refused window's bounds WITH its UTC day: a skipped window can precede
  * this receipt by hours or days, and a bare clock time would leave the reader
  * to guess which day it was. "Oct 5 · 22:06:26 → 22:08:26 UTC" within a day,
- * "Oct 5 23:58:01 → Oct 6 00:02:10 UTC" across midnight.
+ * "Oct 5 23:58:01 → Oct 6 00:02:10 UTC" across midnight. A window from another
+ * UTC year than `referenceYear` (the receipt window's) states its year too —
+ * "Oct 5 2025 · …" — or a refusal a year old would read as the same day.
  */
-export function skippedWindowSpan(windowStart: string, windowEnd: string): string {
+export function skippedWindowSpan(
+	windowStart: string,
+	windowEnd: string,
+	referenceYear?: number,
+): string {
 	const start = ledgerDate(windowStart);
 	const end = ledgerDate(windowEnd);
+	const day = (date: Date) =>
+		referenceYear === undefined || date.getUTCFullYear() === referenceYear
+			? utcDay(date)
+			: `${utcDay(date)} ${date.getUTCFullYear()}`;
 	return start.toISOString().slice(0, 10) === end.toISOString().slice(0, 10)
-		? `${utcDay(start)} · ${utcSecond(start)} → ${utcSecond(end)} UTC`
-		: `${utcDay(start)} ${utcSecond(start)} → ${utcDay(end)} ${utcSecond(end)} UTC`;
+		? `${day(start)} · ${utcSecond(start)} → ${utcSecond(end)} UTC`
+		: `${day(start)} ${utcSecond(start)} → ${day(end)} ${utcSecond(end)} UTC`;
 }
 
 /**
@@ -258,6 +269,9 @@ export const WINDOW_TRANSFERS_ROOT_MEANING =
  * credits the OFFLINE verifier, which does not read cluster receipts yet. The
  * resolver's step 8 is what recomputed this root (the DERIVATIONS row).
  */
+export const CLUSTER_TRANSFER_SET_ROOT_LISTED =
+	"the digest of the pair list this receipt lists — recomputable from it by verification step 8; the check ledger's DERIVATIONS row shows what the resolver's own run found.";
+
 export const CLUSTER_TRANSFER_SET_ROOT_RECOMPUTABLE =
 	"the recomputable digest of the pair list — recomputed by verification step 8 (the check ledger's DERIVATIONS row), from the pairs this receipt lists.";
 
@@ -384,7 +398,15 @@ export interface ClusterReceiptClaims {
 	lines: InvoiceLine[];
 }
 
-export function clusterReceiptClaims(receipt: ClusterReceiptDocument): ClusterReceiptClaims {
+/**
+ * `derivations` is the resolver's step-8 result for THIS receipt: the
+ * transfer-set sentence says the root WAS recomputed only when that row says
+ * so, never because the pairs happen to be listed.
+ */
+export function clusterReceiptClaims(
+	receipt: ClusterReceiptDocument,
+	derivations: StepResult,
+): ClusterReceiptClaims {
 	const projection = receipt.event.data;
 	const { spend } = projection;
 	const amountUsd = amountUsdFromUsertokens(spend.assessedUsertokens);
@@ -425,7 +447,11 @@ export function clusterReceiptClaims(receipt: ClusterReceiptDocument): ClusterRe
 						windows: skipped.windows.map((window) => ({
 							startUtc: ledgerNsToUtc(window.windowStart),
 							endUtc: ledgerNsToUtc(window.windowEnd),
-							span: skippedWindowSpan(window.windowStart, window.windowEnd),
+							span: skippedWindowSpan(
+								window.windowStart,
+								window.windowEnd,
+								ledgerDate(projection.windowStart).getUTCFullYear(),
+							),
 							duration: durationLabel(window.windowStart, window.windowEnd),
 							reason: window.reason,
 						})),
@@ -435,7 +461,7 @@ export function clusterReceiptClaims(receipt: ClusterReceiptDocument): ClusterRe
 		delegation: delegationScopeClaim(projection.delegationPosture),
 		amountCaption: CLUSTER_AMOUNT_SCOPE_CAPTION[projection.delegationPosture],
 		catalog: catalogRendering(projection.models),
-		transfers: clusterTransferSetRendering(projection),
+		transfers: clusterTransferSetRendering(projection, derivations),
 		windowTransfers: {
 			root: projection.windowTransfersRoot,
 			count: projection.windowTransferCount,
@@ -458,10 +484,22 @@ export function clusterReceiptClaims(receipt: ClusterReceiptDocument): ClusterRe
 	};
 }
 
-/** R25's split, with the cluster wording for the recomputable case. */
-function clusterTransferSetRendering(projection: ClusterProjection): TransferSetRendering {
+/**
+ * R25's split, with cluster wording for the listed case: "recomputed" only
+ * when the resolver's DERIVATIONS row passed; otherwise only "recomputable",
+ * because a sentence must not claim a check its own ledger row does not show.
+ */
+function clusterTransferSetRendering(
+	projection: ClusterProjection,
+	derivations: StepResult,
+): TransferSetRendering {
 	const rendering = transferSetRendering(projection);
-	return rendering.rootIsCommitment
-		? rendering
-		: { ...rendering, rootMeaning: CLUSTER_TRANSFER_SET_ROOT_RECOMPUTABLE };
+	if (rendering.rootIsCommitment) return rendering;
+	return {
+		...rendering,
+		rootMeaning:
+			derivations === "passed"
+				? CLUSTER_TRANSFER_SET_ROOT_RECOMPUTABLE
+				: CLUSTER_TRANSFER_SET_ROOT_LISTED,
+	};
 }

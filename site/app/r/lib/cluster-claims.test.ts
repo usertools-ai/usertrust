@@ -30,6 +30,7 @@ import {
 	CLUSTER_PROVIDER_SCOPED_CLAIM,
 	CLUSTER_REPO_NOTE,
 	CLUSTER_SIGNED_BYTES_LABEL,
+	CLUSTER_TRANSFER_SET_ROOT_LISTED,
 	CLUSTER_TRANSFER_SET_ROOT_RECOMPUTABLE,
 	clusterComparison,
 	clusterHeadlineClaim,
@@ -337,7 +338,8 @@ test("CLUSTER_LEDGER_ROWS keeps the ledger's rows and order, and differs in EXAC
 // ---------------------------------------------------------------------------
 
 function claimsOf(file: string) {
-	return clusterReceiptClaims(verifiedClusterFixtureState(file).envelope.receipt);
+	const { envelope } = verifiedClusterFixtureState(file);
+	return clusterReceiptClaims(envelope.receipt, envelope.verification.steps.derivations.result);
 }
 
 test("CL1 first.json: a first receipt — no predecessor, nothing skipped, no repository", () => {
@@ -403,7 +405,7 @@ test("CL2 with a keyed r1_ repoId: the repository renders as undisclosed, never 
 	) as ClusterReceiptDocument;
 	receipt.work = { kind: "cluster", repoId: "r1_9f2a7c31e8b4" };
 	receipt.event.data.work = { kind: "cluster", repoId: "r1_9f2a7c31e8b4" };
-	assert.deepEqual(clusterReceiptClaims(receipt).repo, {
+	assert.deepEqual(clusterReceiptClaims(receipt, "passed").repo, {
 		repoId: "r1_9f2a7c31e8b4",
 		undisclosed: true,
 		label: UNDISCLOSED_PRIVATE_REPO,
@@ -467,4 +469,40 @@ test("CL4 skipped-overflow.json: 20 refused, 16 listed; no transfer list; custom
 	assert.equal(claims.transfers.rootIsCommitment, true);
 	assert.equal(claims.pricing.value, "conservative");
 	assert.equal(claims.windowTransfers.count, 86);
+});
+
+test("a listed transfer set says RECOMPUTED only when the resolver's DERIVATIONS row passed", () => {
+	const { envelope } = verifiedClusterFixtureState("cluster/first.json");
+	assert.equal(
+		clusterReceiptClaims(envelope.receipt, "passed").transfers.rootMeaning,
+		CLUSTER_TRANSFER_SET_ROOT_RECOMPUTABLE,
+	);
+	// The page never claims a check its own ledger row does not show.
+	for (const result of ["notApplicable", "unavailable", "failed"] as const) {
+		assert.equal(
+			clusterReceiptClaims(envelope.receipt, result).transfers.rootMeaning,
+			CLUSTER_TRANSFER_SET_ROOT_LISTED,
+			result,
+		);
+	}
+	// Above 32 pairs the root is a commitment, whatever the row says.
+	const overflow = verifiedClusterFixtureState("cluster/skipped-overflow.json").envelope.receipt;
+	assert.equal(clusterReceiptClaims(overflow, "notApplicable").transfers.rootIsCommitment, true);
+	assert.equal(
+		CLUSTER_TRANSFER_SET_ROOT_LISTED,
+		"the digest of the pair list this receipt lists — recomputable from it by verification step 8; the check ledger's DERIVATIONS row shows what the resolver's own run found.",
+	);
+});
+
+test("skippedWindowSpan names the YEAR when a refused window is from another year than the receipt", () => {
+	// 2025-10-05T21:00:00Z → 21:01:00Z, against a receipt window in 2026.
+	assert.equal(
+		skippedWindowSpan("1759698000000000000", "1759698060000000000", 2026),
+		"Oct 5 2025 · 21:00:00 → 21:01:00 UTC",
+	);
+	// Same year as the receipt: no year, exactly as before.
+	assert.equal(
+		skippedWindowSpan("1791237986123456789", "1791238106123456789", 2026),
+		"Oct 5 · 22:06:26 → 22:08:26 UTC",
+	);
 });
