@@ -116,6 +116,23 @@ export type ReleaseOutcome =
 	| { outcome: "incident"; state: "voiding" };
 
 /**
+ * A debt charge the ledger refuses for good: both the role's id and its `-retry` id are
+ * retired and neither landed. The row carries the incident; an operator must act on it.
+ */
+export class DebtChargeFailedError extends Error {
+	constructor(
+		public readonly holdKey: string,
+		public readonly role: "overage" | "late",
+		public readonly transferIds: readonly [string, string],
+	) {
+		super(
+			`hold engine: the ${role} debt for hold ${holdKey} can never be charged — transfer ids ${transferIds[0]} and ${transferIds[1]} are both retired and neither landed; the row carries a debt_charge_failed incident`,
+		);
+		this.name = "DebtChargeFailedError";
+	}
+}
+
+/**
  * A settlement intent that breaks its contract: `post` and `overage` safe non-negative
  * integers, `post` at most the hold, and an overage only with the hold posted in full (an
  * overage means the actual exceeded the hold). Refused at the claim: nothing is posted.
@@ -272,6 +289,8 @@ export class HoldEngine {
 		const row = this.journal.get(holdKey);
 		if (row === undefined) return { outcome: "incident", state: "missing" };
 		if (row.state === "settled") return { outcome: "duplicate" };
+		// A recorded incident cannot be completed by settling again: no ledger call.
+		if (row.incident !== null) return { outcome: "incident", state: row.state };
 		const posted = await within("post", this.ms, () =>
 			this.ledger.post({ holdKey, amount: intent.post }),
 		);
@@ -308,9 +327,14 @@ export class HoldEngine {
 					amount: intent.overage,
 				}),
 			);
-			// Both ids retired and nothing charged: stays `settling` (its debt is already
-			// recorded, so nothing over-admits); settle again later.
-			if (charged === "unknown") return { outcome: "in_flight" };
+			// Both ids retired and nothing charged: TERMINAL. The row is marked (so replay and the
+			// sweeper stop treating it as in flight), then the failure is raised, loud. Its debt is
+			// already recorded, so admission stays bounded — but the ledger never carries it.
+			if (charged !== "done") {
+				const incident = { kind: "debt_charge_failed", ...charged, amount: intent.overage };
+				await this.journal.writeTx(() => this.journal.recordIncident(holdKey, incident));
+				throw new DebtChargeFailedError(holdKey, charged.role, charged.transferIds);
+			}
 		}
 		await this.journal.writeTx(() =>
 			this.journal.cas(holdKey, "settling", "settled", { terminalKind: "settled" }),

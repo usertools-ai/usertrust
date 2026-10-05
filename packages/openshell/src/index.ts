@@ -2,6 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 export {
+	DebtChargeFailedError,
 	type EngineOptions,
 	HoldEngine,
 	InvalidSettlementIntentError,
@@ -30,6 +31,7 @@ export {
 	HoldJournal,
 	type HoldRow,
 	type HoldState,
+	JOURNAL_SCHEMA_VERSION,
 	JournalBusyError,
 	type JournalOptions,
 	JournalSchemaError,

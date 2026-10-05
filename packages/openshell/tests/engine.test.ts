@@ -5,7 +5,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { HoldEngine, InvalidSettlementIntentError, PlacementWindowError } from "../src/engine.js";
+import {
+	DebtChargeFailedError,
+	HoldEngine,
+	InvalidSettlementIntentError,
+	PlacementWindowError,
+} from "../src/engine.js";
 import { HoldJournal, LedgerDeadlineError } from "../src/journal.js";
 import {
 	BudgetIdError,
@@ -588,12 +593,36 @@ describe("#176: the settlement intent is validated at the claim", () => {
 		});
 	});
 
-	it("both overage ids retired and nothing charged: the hold stays `settling` (in flight), its debt already recorded", async () => {
+	it("both overage ids retired and nothing charged: TERMINAL — a loud DebtChargeFailedError naming both ids, the row marked (not in flight), and a later settle makes no ledger call", async () => {
 		const { journal, ledger, engine } = setup();
 		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
-		ledger.chargeAnswer = "unknown";
-		expect(await engine.settle("k1", { post: 100, overage: 20 })).toEqual({ outcome: "in_flight" });
-		expect(journal.get("k1")?.state).toBe("settling");
-		expect(journal.debtOf("b")).toBe(20);
+		ledger.chargeAnswer = { failed: true, role: "overage", transferIds: ["111", "222"] };
+		const err = await engine.settle("k1", { post: 100, overage: 20 }).catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(DebtChargeFailedError);
+		expect((err as DebtChargeFailedError).transferIds).toEqual(["111", "222"]);
+		expect(String((err as Error).message)).toMatch(/111.*222/);
+		expect(journal.get("k1")).toMatchObject({
+			state: "settling",
+			incident: {
+				kind: "debt_charge_failed",
+				role: "overage",
+				transferIds: ["111", "222"],
+				amount: 20,
+			},
+		});
+		expect(
+			journal.inFlight().map((r) => r.holdId),
+			"never re-reported as in flight",
+		).toEqual([]);
+		expect(journal.incidents().map((r) => r.holdId)).toEqual(["k1"]);
+		expect(journal.debtOf("b"), "admission stays bounded").toBe(20);
+		ledger.chargeAnswer = null;
+		const posts = ledger.count("k1", "post");
+		expect(await engine.settle("k1", { post: 100, overage: 20 })).toEqual({
+			outcome: "incident",
+			state: "settling",
+		});
+		expect(ledger.count("k1", "post")).toBe(posts);
+		expect(ledger.count("k1", "overage"), "no further charge attempt").toBe(0);
 	});
 });

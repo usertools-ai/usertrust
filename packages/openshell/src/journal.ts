@@ -121,6 +121,11 @@ export interface HoldRow {
 	intent: unknown;
 	terminalKind: string | null;
 	terminalEventHash: string | null;
+	/**
+	 * A terminal INCIDENT an operator must act on (e.g. a debt charge the ledger can never
+	 * take), recorded once. A row carrying one is not in flight: replay and the sweeper skip it.
+	 */
+	incident: unknown;
 	reservedSeq: number | null;
 }
 
@@ -173,6 +178,9 @@ export class PlacementHorizonError extends Error {
 }
 
 /** The journal file was written by an older schema this code cannot read safely. */
+/** The hold journal's schema version (`PRAGMA user_version`). */
+export const JOURNAL_SCHEMA_VERSION = 2;
+
 export class JournalSchemaError extends Error {
 	constructor(why: string) {
 		super(`hold journal: unsupported schema — ${why}; recreate the journal file`);
@@ -223,6 +231,7 @@ interface RawRow {
 	terminal_kind: string | null;
 	terminal_event_hash: string | null;
 	reserved_seq: number | null;
+	incident_json: string | null;
 }
 
 function toRow(r: RawRow): HoldRow {
@@ -236,6 +245,7 @@ function toRow(r: RawRow): HoldRow {
 		intent: r.intent_json === null ? null : JSON.parse(r.intent_json),
 		terminalKind: r.terminal_kind,
 		terminalEventHash: r.terminal_event_hash,
+		incident: r.incident_json === null ? null : JSON.parse(r.incident_json),
 		reservedSeq: r.reserved_seq,
 	};
 }
@@ -387,6 +397,15 @@ export class HoldJournal {
 		if (cols.length > 0 && !cols.some((c) => c.name === "admit_by")) {
 			throw new JournalSchemaError("the hold table has no admit_by column");
 		}
+		// From here on the schema carries a version: a file of any other version is refused.
+		const version = (db.prepare("PRAGMA user_version").get() as { user_version: number })
+			.user_version;
+		if (cols.length > 0 && version !== JOURNAL_SCHEMA_VERSION) {
+			throw new JournalSchemaError(
+				`schema version ${version}, this code reads ${JOURNAL_SCHEMA_VERSION}`,
+			);
+		}
+		db.exec(`PRAGMA user_version = ${JOURNAL_SCHEMA_VERSION}`);
 		db.exec(`
 			CREATE TABLE IF NOT EXISTS hold (
 				hold_id TEXT PRIMARY KEY,
@@ -399,7 +418,8 @@ export class HoldJournal {
 				intent_json TEXT,
 				terminal_kind TEXT,
 				terminal_event_hash TEXT,
-				reserved_seq INTEGER
+				reserved_seq INTEGER,
+				incident_json TEXT
 			);
 			CREATE INDEX IF NOT EXISTS hold_state_ttl ON hold (state, ttl_at);
 			CREATE TABLE IF NOT EXISTS debt (
@@ -742,14 +762,38 @@ export class HoldJournal {
 		).map(toRow);
 	}
 
-	/** Rows in a non-terminal, non-open state: a claim whose winner may have crashed. */
+	/**
+	 * Rows in a non-terminal, non-open state: a claim whose winner may have crashed. A row
+	 * carrying an incident is NOT in flight — nothing can complete it; see {@link incidents}.
+	 */
 	inFlight(): HoldRow[] {
 		return this.read(
 			(db) =>
 				db
-					.prepare("SELECT * FROM hold WHERE state IN ('settling','voiding','expiring')")
+					.prepare(
+						"SELECT * FROM hold WHERE state IN ('settling','voiding','expiring') AND incident_json IS NULL",
+					)
 					.all() as unknown as RawRow[],
 		).map(toRow);
+	}
+
+	/** Rows carrying a terminal incident: an operator must act on each. */
+	incidents(): HoldRow[] {
+		return this.read(
+			(db) =>
+				db
+					.prepare("SELECT * FROM hold WHERE incident_json IS NOT NULL")
+					.all() as unknown as RawRow[],
+		).map(toRow);
+	}
+
+	/** Record a terminal incident on a row, once. Must run inside {@link writeTx}. */
+	recordIncident(holdId: string, incident: unknown): boolean {
+		this.requireTx("recordIncident");
+		const r = this.db
+			.prepare("UPDATE hold SET incident_json = ? WHERE hold_id = ? AND incident_json IS NULL")
+			.run(JSON.stringify(incident), holdId);
+		return Number(r.changes) === 1;
 	}
 
 	/** Terminal rows whose terminal event was never recorded. */

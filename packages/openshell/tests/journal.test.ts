@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	HoldConflictError,
 	HoldJournal,
+	JOURNAL_SCHEMA_VERSION,
 	JournalBusyError,
 	JournalSchemaError,
 	JournalUnavailableError,
@@ -1042,5 +1043,21 @@ describe("#172: writeTx's refusal of an async body leaves no unhandled rejection
 			process.off("unhandledRejection", onUnhandled);
 		}
 		expect(unhandled).toEqual([]);
+	});
+});
+
+describe("#177: the journal schema carries a version", () => {
+	it("a file stamped with another schema version is refused at open; a fresh file is stamped", () => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-ver-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		HoldJournal.open(path).close();
+		const raw = new DatabaseSync(path);
+		expect(
+			(raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+		).toBe(JOURNAL_SCHEMA_VERSION);
+		raw.exec("PRAGMA user_version = 1");
+		raw.close();
+		expect(() => HoldJournal.open(path)).toThrow(JournalSchemaError);
 	});
 });

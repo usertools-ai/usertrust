@@ -31,9 +31,13 @@ export type TransferRole =
 /**
  * A debt charge:
  * - `done`: charged now, or already charged under the role's id or its `-retry` id;
- * - `unknown`: both ids are RETIRED and neither transfer exists — retry later; never a throw loop.
+ * - `failed`: BOTH ids are RETIRED and neither transfer exists. A retired id can never succeed
+ *   and there is no third, so this is TERMINAL — an incident an operator must act on (the
+ *   ledger refuses the charge persistently, e.g. a closed account), never "retry later".
  */
-export type ChargeOutcome = "done" | "unknown";
+export type ChargeOutcome =
+	| "done"
+	| { failed: true; role: "overage" | "late"; transferIds: [string, string] };
 
 /** The ledger transfer id for one role of one hold. */
 export function transferIdFor(holdKey: string, role: TransferRole): bigint {
@@ -311,7 +315,15 @@ export class TigerBeetleLedger implements LedgerPort {
 		} catch (err) {
 			if (!retired(err)) throw err;
 			const landed = await this.tb.lookupTransfer(transferIdFor(p.holdKey, retryRole));
-			return landed === null ? "unknown" : "done";
+			if (landed !== null) return "done";
+			return {
+				failed: true,
+				role: p.role,
+				transferIds: [
+					transferIdFor(p.holdKey, p.role).toString(),
+					transferIdFor(p.holdKey, retryRole).toString(),
+				],
+			};
 		}
 	}
 }
