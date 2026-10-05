@@ -78,13 +78,30 @@ const ASSERTED_CHIP = "border-paper-steel/60 font-normal text-paper-steel";
 const CAVEATED_CHIP = "border-paper-amber/60 font-normal text-paper-amber";
 
 /**
+ * R38 — the amount's posture LABEL, as ONE chip beside the figure. It is the
+ * glance card's whole answer to "what does this number cover"; the title is the
+ * one-line meaning, and the full sentences are in the card's Details.
+ */
+export function ScopeChip({ claims }: { claims: ReceiptClaims }) {
+	return (
+		<span
+			className={`inline-block rounded-sm border px-2 py-0.5 font-mono text-[12px] uppercase tracking-[0.12em] ${ASSERTED_CHIP}`}
+			data-testid="amount-scope-chip"
+			data-posture={claims.delegation.value}
+			title={claims.delegation.claim}
+		>
+			{claims.delegation.label}
+		</span>
+	);
+}
+
+/**
  * R38/R39/R40 — the amount's SCOPE, rendered beneath the unqualified figure.
  *
- * Position is part of the obligation, not layout taste. The caption and R39
- * both sit "beside the amount, never as a footnote and never behind
- * interaction" — so this block sits directly under the figure in `SpendBlock`,
- * above every other spend field, and there is deliberately no `<details>`, no
- * tooltip and no `title` attribute anywhere in it.
+ * This is the FULL scope block: frame, caption and the posture row with its
+ * R39 sentence. On the page it is the first thing in the receipt's Details; the
+ * glance card carries only {@link ScopeChip} beside the figure (amended
+ * 2026-10-05). The block itself still has no `<details>`, tooltip or `title`.
  *
  * R40 is the unqualified number with its scope named beneath it. It is not a
  * floor. The dollar figure above this block is the claim; this caption says

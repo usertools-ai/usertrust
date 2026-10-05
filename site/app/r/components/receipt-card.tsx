@@ -12,7 +12,6 @@ import {
 	REPO_NAME_IS_NOT_SCOPE,
 	type ReceiptClaims,
 	RUNG_EARNED_BY,
-	RUNG_FINE_PRINT_SHORT,
 	RUNG_SHORT_NAME,
 	rungDisclaimers,
 	TRAILER_CITES_GENERATION_ONE,
@@ -20,7 +19,7 @@ import {
 } from "../lib/claims";
 import type { LadderStatus, ReceiptDocument } from "../lib/wire";
 import HashValue from "./hash-value";
-import PostureChips, { AmountScope, SessionHeadlineScope } from "./posture-chips";
+import PostureChips, { AmountScope, ScopeChip, SessionHeadlineScope } from "./posture-chips";
 
 /**
  * The receipt is a glance: the verdict, the amount, what it covers, when, and
@@ -28,10 +27,11 @@ import PostureChips, { AmountScope, SessionHeadlineScope } from "./posture-chips
  * ledger, the CLI command) is in {@link ReceiptDetails}, folded behind ONE
  * "Details" disclosure by the page. Nothing was removed; it moved.
  *
- * What stays on the glance, and why: the spec says a few sentences may never
- * sit behind interaction (the amount's scope and posture label, R38-R40; the
- * anchoring disclosure beside its rung, R41) and that each rung's limit is
- * fine print, not hidden (R6-R8). Each is a single short sentence here.
+ * What the glance carries of the spec's honesty rules (amended 2026-10-05, see
+ * `docs/specs/receipt-amount-framing.md`): the amount's posture LABEL as one
+ * chip beside the figure (R38), and a level strip whose anchored level says
+ * "resolver-asserted" (R41). The full R38-R41 sentences and R6-R8's verbatim
+ * disclaimers are in the Details, one disclosure away.
  */
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -127,34 +127,21 @@ export default function ReceiptCard({
 											{state === "above" ? "○" : "✓"}
 										</span>{" "}
 										{RUNG_SHORT_NAME[step].toLowerCase()}
-										{step === "verified_anchored" ? (
-											<p
-												className="mt-1 text-[13px] leading-relaxed text-paper/62"
-												data-testid="anchor-binding-disclosure"
-												data-anchor-binding="resolver-asserted"
-											>
-												{ANCHOR_BINDING_RESOLVER_ASSERTED}
-											</p>
-										) : null}
+										{step === "verified_anchored" ? " · resolver-asserted" : ""}
 									</li>
 								);
 							})}
 						</ol>
-						<p className="text-[13px] leading-relaxed text-paper/62" data-testid="rung-fine-print">
-							{RUNG_FINE_PRINT_SHORT[rung]}
-						</p>
 					</div>
 
-					<div className="flex flex-col gap-2">
+					<div className="flex flex-wrap items-center gap-x-4 gap-y-2">
 						<div
 							className="font-mono text-[44px] leading-none font-semibold tracking-[-0.04em] text-paper"
 							data-testid="amount-usd"
 						>
 							${model.amountUsd}
 						</div>
-						<div className="rounded-[var(--r-row)] border border-[var(--line)] bg-white/[0.03] p-3 text-ink">
-							<AmountScope claims={claims} />
-						</div>
+						<ScopeChip claims={claims} />
 					</div>
 
 					<dl className="m-0 flex flex-col gap-1 text-[13.5px]" data-testid="glance-facts">
@@ -310,6 +297,15 @@ export function ReceiptDetails({
 										earned by: {RUNG_EARNED_BY[item.specRung]}
 									</p>
 								) : null}
+								{item.specRung === "verified_anchored" ? (
+									<p
+										className="ml-[26px] text-[13px] leading-relaxed text-paper/62"
+										data-testid="anchor-binding-disclosure"
+										data-anchor-binding="resolver-asserted"
+									>
+										{ANCHOR_BINDING_RESOLVER_ASSERTED}
+									</p>
+								) : null}
 							</li>
 						);
 					})}
@@ -329,7 +325,10 @@ export function ReceiptDetails({
 			<div className="flex flex-col gap-3">
 				<h3 className="text-xs font-medium tracking-[0.15em] text-paper/38 uppercase">Invoice</h3>
 				<div className="rounded-[var(--r-row)] border border-[var(--line)] bg-white/[0.03] p-4 text-ink">
-					<PostureChips claims={claims} />
+					<AmountScope claims={claims} />
+					<div className="mt-4">
+						<PostureChips claims={claims} />
+					</div>
 					{claims.models.hasCustom ? (
 						<p className="mt-3 font-mono text-xs text-ink/70" data-custom-literal="">
 							custom — {CUSTOM_MODEL_MEANING}

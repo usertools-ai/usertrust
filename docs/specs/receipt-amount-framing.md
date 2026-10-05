@@ -26,3 +26,30 @@ v0.9) and `receipt-spec.md` §7 bound clause were written before this review;
 they are amended in the private spec copies
 (`usertools-stealth/docs/specs/from-usertrust/` and
 `usertools-stealth/docs/specs/receipt-page/README.md`).
+
+## Amendment 2026-10-05: the brief receipt
+
+**Decided by Cam:** a receipt is read at a glance and should be brief. The
+verified page leads with one card (the verdict, the amount, **one scope chip**,
+what it covers, when, and a short ID); everything else is behind one collapsed
+"Details". Nothing is removed from the page.
+
+What this changes, and what it does not:
+
+- **R38 / R39 / R40.** The amount's posture label is the chip, **visible next to
+  the amount** (its `title` is the one-line meaning). The full scope statement,
+  the scope caption and the attested-enums line are on the page, **one
+  disclosure away**. They are no longer required to sit above the fold. The
+  rule that the amount never renders without its posture label is unchanged.
+- **R41.** The level strip on the card labels the anchored level
+  "resolver-asserted"; the full sentence sits beside the anchored rung in
+  Details, rendered once.
+- **R6 / R7 / R8.** The verbatim rung disclaimers are unchanged and are in
+  Details.
+- **Unchanged:** the floor stays rejected, `indeterminate` still supports no
+  bound in either direction, and the retired unconditional promise must not be
+  restated anywhere. The page still never computes a verdict.
+
+Tests pin the new shape (`site/app/r/rendering.test.tsx`, `brief.test.tsx`):
+the chip is outside any `<details>` and sits right after the amount; the
+sentences are inside the one `<details>`.

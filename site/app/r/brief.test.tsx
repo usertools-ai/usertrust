@@ -9,7 +9,6 @@ import { test } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import StateView from "./components/state-view";
 import { fixtureState, loadFixture } from "./fixture-harness";
-import { RUNG_FINE_PRINT_SHORT } from "./lib/claims";
 import { plainState } from "./lib/plain-copy";
 
 function render(file: string): { html: string; before: string; inside: string } {
@@ -35,20 +34,15 @@ test("a verified receipt: the glance is the card, the rest is ONE Details", () =
 	for (const id of [
 		"verdict",
 		"amount-usd",
-		"amount-scope",
+		"amount-scope-chip",
 		"covers",
 		"time-span",
 		"receipt-short-id",
-		"rung-fine-print",
-		"anchor-binding-disclosure",
+		"levels",
 	]) {
 		assert.ok(before.includes(`data-testid="${id}"`), `${id} is in the glance`);
 	}
 	assert.ok(text(before).includes("Verified"), "the verdict is one plain word");
-	assert.ok(
-		text(before).includes(RUNG_FINE_PRINT_SHORT.verified_checkpoint),
-		"the rung's limit is visible",
-	);
 	for (const id of [
 		"receipt-details",
 		"verify-command",

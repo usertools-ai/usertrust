@@ -107,23 +107,8 @@ export const RUNG_EARNED_BY: Record<LadderStatus, string> = {
 export const PLAIN_VERDICT_VERIFIED = "Verified";
 
 /**
- * R6/R7/R8's fine print, one visible sentence per rung. The verbatim
- * disclaimers ({@link FORK_DISCLAIMER}, {@link EQUIVOCATION_CAVEAT}, the
- * Rekor wording) are unchanged and sit in Details; this is the short form that
- * stays on the glance card so the rung is never read without its limit.
- */
-export const RUNG_FINE_PRINT_SHORT: Record<LadderStatus, string> = {
-	verified_checkpoint:
-		"Signed and checkpointed. This does not prove the log is one consistent history; a signer could fork it.",
-	verified_checkpoint_history:
-		"The checkpoint history checks out, but a key holder could still show different histories to different people.",
-	verified_anchored:
-		"Anchoring only partly limits forks; a key holder could still show different histories.",
-};
-
-/**
- * R6, VERBATIM IN FORCE (receipt-spec §7, `VERIFIED_CHECKPOINT`). Rendered as
- * the rung's fine print, "not hidden behind interaction" (§7).
+ * R6, VERBATIM IN FORCE (receipt-spec §7, `VERIFIED_CHECKPOINT`). Rendered in
+ * full in the card's Details (amended 2026-10-05: not above the fold).
  */
 export const FORK_DISCLAIMER =
 	"this level does NOT prove whole-chain linear consistency, anchor-sequence continuity, or external immutability — a checkpoint signer could sign a fork.";
