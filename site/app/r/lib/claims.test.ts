@@ -31,6 +31,8 @@ import {
 	CHECK_ROWS,
 	CUSTOM_MODEL_MEANING,
 	catalogRendering,
+	DELEGATION_POSTURE_SCOPE,
+	DELEGATION_POSTURE_SHORT,
 	DISPLAY_ANNEX_LABEL,
 	delegationScopeClaim,
 	EQUIVOCATION_CAVEAT,
@@ -387,9 +389,10 @@ test("the posture preamble states the ATTESTED-ENUM frame verbatim (P2-7)", () =
 		/postures are ATTESTED ENUMS, not verifier-established facts/,
 	);
 	assert.match(POSTURES_ARE_ATTESTED_ENUMS, /CANNOT confirm them/);
-	// The glance card keeps this to one short line; the longer reason (the
-	// projection carries no per-constituent facts) is no longer part of the pin.
-	assert.ok(POSTURES_ARE_ATTESTED_ENUMS.length < 120, "one short line");
+	assert.match(
+		POSTURES_ARE_ATTESTED_ENUMS,
+		/per-constituent facts the projection deliberately does not carry/,
+	);
 });
 
 test("R20: the two sessionAssociation postures render DISTINCTLY — identical rendering is forbidden", () => {
@@ -473,7 +476,8 @@ test("R39: selfDebitsOnly is DIRECT / self-account spend, delegated spend OUT OF
 	assert.equal(claim.label, "SELF-DEBITS ONLY");
 	assert.match(claim.claim, /DIRECT, self-account spend/);
 	assert.match(claim.claim, /built ONLY from debits charged to the receipt subject/);
-	assert.match(claim.claim, /delegated spend is OUT OF SCOPE/);
+	assert.match(claim.claim, /Delegated spend is OUT OF SCOPE/);
+	assert.match(claim.claim, /charged to that delegate and is not counted/);
 });
 
 test("R39: includesSomeDelegated is an INCOMPLETE attributed subtotal that bounds nothing", () => {
@@ -487,6 +491,7 @@ test("R39: indeterminate states end-to-end coverage CANNOT BE VERIFIED, and boun
 	const claim = delegationScopeClaim("indeterminate");
 	assert.match(claim.claim, /END-TO-END COVERAGE CANNOT BE VERIFIED/);
 	assert.match(claim.claim, /no bound in either direction/);
+	assert.match(claim.claim, /neither a floor nor a ceiling/);
 });
 
 test("R39: includesAllDelegated is an UNEVIDENCED claim, never worded as a total", () => {
@@ -497,8 +502,10 @@ test("R39: includesAllDelegated is an UNEVIDENCED claim, never worded as a total
 	// depend on the parse layer remembering to hold it.
 	const claim = delegationScopeClaim("includesAllDelegated");
 	assert.match(claim.claim, /TOTAL COST OF WORK CAUSED BY THE SUBJECT/);
-	assert.match(claim.claim, /no signed evidence exists to check it/);
-	assert.match(claim.claim, /not presented as a total/);
+	assert.match(claim.claim, /transitive descendants included, exactly once/);
+	assert.match(claim.claim, /ONLY when signed evidence a verifier can validate accompanies it/);
+	assert.match(claim.claim, /no such evidence format exists in this version/);
+	assert.match(claim.claim, /is not presented here as a total/);
 	assert.match(claim.claim, /UNEVIDENCED/);
 });
 
@@ -532,6 +539,10 @@ test("R41: the anchored rung's binding is resolver-asserted TODAY, not inherentl
 	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /ASSERTED BY THE RESOLVER/);
 	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /today, independently checkable by no one/);
 	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /no normative binding is defined/);
+	assert.match(
+		ANCHOR_BINDING_RESOLVER_ASSERTED,
+		/What is missing is the binding, not merely published evidence/,
+	);
 	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /is not verified anchoring/);
 	assert.match(
 		RUNG_VERDICT_WORD.verified_anchored,
@@ -766,5 +777,38 @@ test("every advisory band states that it is advisory-only", () => {
 	];
 	for (const advisory of advisories) {
 		assert.ok(advisoryBand(advisory).body.includes(ADVISORY_NEVER_ALTERS_VERDICT));
+	}
+});
+
+// ===========================================================================
+// The brief card's SHORT forms (amended 2026-10-05) — a fold, never a cut
+// ===========================================================================
+
+test("DELEGATION_POSTURE_SHORT: one short line per posture, each keeping its load-bearing clause", () => {
+	assert.deepEqual(
+		Object.keys(DELEGATION_POSTURE_SHORT).sort(),
+		Object.keys(DELEGATION_POSTURE_SCOPE).sort(),
+		"one short form for every posture the full sentences cover",
+	);
+	for (const [posture, short] of Object.entries(DELEGATION_POSTURE_SHORT) as [
+		keyof typeof DELEGATION_POSTURE_SHORT,
+		string,
+	][]) {
+		assert.ok(
+			short.length < DELEGATION_POSTURE_SCOPE[posture].length,
+			`${posture}: the short form is shorter than the full sentence it folds`,
+		);
+	}
+	assert.match(DELEGATION_POSTURE_SHORT.selfDebitsOnly, /DIRECT, self-account spend/);
+	assert.match(DELEGATION_POSTURE_SHORT.selfDebitsOnly, /delegated spend is OUT OF SCOPE/);
+	assert.match(DELEGATION_POSTURE_SHORT.includesSomeDelegated, /INCOMPLETE ATTRIBUTED SUBTOTAL/);
+	assert.match(DELEGATION_POSTURE_SHORT.includesSomeDelegated, /coverage is NOT established/);
+	assert.match(DELEGATION_POSTURE_SHORT.indeterminate, /END-TO-END COVERAGE CANNOT BE VERIFIED/);
+	assert.match(DELEGATION_POSTURE_SHORT.indeterminate, /no bound in either direction/);
+	assert.match(DELEGATION_POSTURE_SHORT.includesAllDelegated, /UNEVIDENCED/);
+	assert.match(DELEGATION_POSTURE_SHORT.includesAllDelegated, /not presented as a total/);
+	// The retired floor never returns, in either form.
+	for (const short of Object.values(DELEGATION_POSTURE_SHORT)) {
+		assert.doesNotMatch(short, /at least \$/);
 	}
 });
