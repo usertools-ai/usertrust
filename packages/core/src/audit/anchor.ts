@@ -27,6 +27,7 @@ import {
 	createPublicKey,
 	sign as cryptoSign,
 	generateKeyPairSync,
+	randomBytes,
 	randomUUID,
 } from "node:crypto";
 import {
@@ -162,16 +163,64 @@ export interface AnchorIdentity {
 	 * minted before key history existed — callers fall back to the current key.
 	 */
 	keyHistory?: { keyId: string; publicKeySpki: string }[];
+	/**
+	 * Every ECDSA witness key this vault has been configured to submit Rekor
+	 * entries under, oldest first, each carrying the ROOT's delegation over it.
+	 * Submission credentials, never evidence: no verification verdict depends on
+	 * these. Present so an auditor enumerating the public log can follow the
+	 * index across a witness-key change instead of reading a rotation as the
+	 * index simply ending.
+	 */
+	witnessKeyHistory?: WitnessKeyEntry[];
 }
 
 /**
- * Atomic identity.json write: temp file + fsync + rename. A bare in-place
- * writeFileSync could be truncated by a crash mid-write, wedging the vault
- * between "no anchor identity" (emitter) and "identity already exists" (init).
+ * A witness key plus the root's delegation authorizing it (spec §3.3). The
+ * delegation is what stops a throwaway key: without it, anyone could submit an
+ * authentic payload hash under a one-off key, present the receipt, and leave the
+ * canonical index empty while every check passed.
+ */
+export interface WitnessKeyEntry {
+	keyId: string;
+	/** MUST be P-256. Verification rejects any other key type rather than trying it. */
+	publicKeySpki: string;
+	/** Ed25519, by the root, over the length-prefixed §3.3 delegation preimage. */
+	delegationSig: string;
+	/**
+	 * Which root epoch signed it. Resolved against the VERIFIED rotation lineage
+	 * from the auditor's pinned genesis root — never against keyHistory, which
+	 * the party under audit controls.
+	 */
+	delegatedByKeyId: string;
+	/** Monotonic from 1. Contiguity is what makes an omitted revocation visible. */
+	delegationIndex: number;
+	/** Anchor-seq range this delegation authorizes; closing it is how revocation works. */
+	effectiveFromAnchorSeq: number;
+	effectiveUntilAnchorSeq: number;
+}
+
+/**
+ * Atomic identity.json write: temp file + fsync + rename + DIRECTORY fsync.
+ *
+ * Three things here are load-bearing, and two of them were absent before the
+ * witness-key work needed this path to be trustworthy:
+ *
+ * - A bare in-place writeFileSync could be truncated by a crash mid-write,
+ *   wedging the vault between "no anchor identity" (emitter) and "identity
+ *   already exists" (init).
+ * - The temp name carries RANDOM bytes, not just the pid. Two concurrent
+ *   writers in one process (an emitter and a CLI command in the same host)
+ *   shared `identity.json.tmp-<pid>`, so one could rename a file the other was
+ *   still writing — publishing a torn identity that reads as valid JSON.
+ * - The DIRECTORY is fsync'd after the rename. Without it, the rename itself is
+ *   not durable, so "persisted before we act on it" was false across a crash
+ *   even though the file's own bytes were fsync'd. The witness-key mint depends
+ *   on that ordering being real (spec §5.2).
  */
 function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
-	const path = join(anchorsDir(rootDir), "identity.json");
-	const tmp = `${path}.tmp-${process.pid}`;
+	const dir = anchorsDir(rootDir);
+	const path = join(dir, "identity.json");
+	const tmp = `${path}.tmp-${process.pid}-${randomBytes(6).toString("hex")}`;
 	const fd = openSync(tmp, "w", 0o600);
 	try {
 		writeSync(fd, JSON.stringify(identity, null, "\t"));
@@ -180,14 +229,214 @@ function writeIdentityFile(rootDir: string, identity: AnchorIdentity): void {
 		closeSync(fd);
 	}
 	renameSync(tmp, path);
+	// POSIX: a rename is only durable once the containing directory is synced.
+	//
+	// The catch is NARROW on purpose. Swallowing every error here made the
+	// function report success after a REAL durability failure — EIO, ENOSPC,
+	// EDQUOT — so callers acted on an update that a crash could still undo, and
+	// nothing anywhere said so. That is the silent-success class: accept what
+	// you cannot handle and report success. Only the errnos that mean "this
+	// platform cannot open a directory for fsync" (Windows) are suppressed;
+	// everything else is a genuine I/O failure and propagates.
+	try {
+		const dirFd = openSync(dir, "r");
+		try {
+			fsyncSync(dirFd);
+		} finally {
+			closeSync(dirFd);
+		}
+	} catch (err) {
+		// PLATFORM-GATED, not errno-gated. The first cut suppressed EACCES and
+		// EPERM everywhere, which on POSIX are REAL failures: a directory whose
+		// write and rename succeed can still refuse to open for fsync, and the
+		// identity then reported success with the rename not durable. Suppress
+		// only where directory fsync is genuinely unavailable — Windows, which
+		// cannot open a directory this way at all — and let every POSIX error
+		// through.
+		// Platform AND errno. win32 alone still swallowed EIO, ENOSPC, ENOENT and
+		// EDQUOT — real durability failures — under cover of "unsupported
+		// operation". Only the errnos that mean "this platform will not open a
+		// directory for fsync" are suppressed, and only there.
+		const code = (err as NodeJS.ErrnoException).code;
+		const unsupportedOnWindows = code === "EPERM" || code === "EACCES" || code === "EISDIR";
+		if (process.platform !== "win32" || !unsupportedOnWindows) throw err;
+	}
 }
 
-/** Persist the durable anchorSeq high-water (never decreases). */
-function bumpAnchorHighWater(rootDir: string, anchorSeq: number): void {
-	const identity = readAnchorIdentity(rootDir);
-	if (identity === null) return;
-	if ((identity.lastAnchorSeq ?? 0) >= anchorSeq) return;
-	writeIdentityFile(rootDir, { ...identity, lastAnchorSeq: anchorSeq });
+/**
+ * The ONE writer for `identity.json` after minting. Every mutation goes through
+ * here: read under the lock, mutate, merge-check, write atomically.
+ *
+ * `heldLock` is explicit rather than inferred. Callers inside the emitter's
+ * advisory lock (the emission path) pass `true`; everyone else passes `false`
+ * and acquires. Inferring it from the in-process lock set would silently let a
+ * caller that FORGOT to lock ride on some unrelated component's lock — the
+ * failure would be invisible and intermittent, which is the worst kind here.
+ *
+ * *Prevents:* the read-modify-write race this function exists for. Before it,
+ * `bumpAnchorHighWater` and the rotation update each did their own
+ * read → spread → write with no serialization, so a write that started from a
+ * stale read could overwrite a newer `lastAnchorSeq` — rolling back the durable
+ * high-water, which the anchoring-monotonicity invariant exists to make
+ * impossible (re-minting an occupied position in an append-only external store
+ * is permanent, unrewritable fork evidence). The same race silently dropped
+ * `keyHistory` entries, stranding records whose signing key nothing could name.
+ */
+function updateAnchorIdentity(
+	rootDir: string,
+	mutate: (current: AnchorIdentity) => AnchorIdentity,
+	opts: { heldLock: boolean; mustSucceed?: boolean },
+): AnchorIdentity | null {
+	const apply = (): AnchorIdentity | null => {
+		// Re-read UNDER the lock. The caller's copy may predate another writer.
+		const current = readAnchorIdentity(rootDir);
+		if (current === null) return null;
+		const next = mergeIdentity(current, mutate(current));
+		// A no-op mutation writes nothing. `bumpAnchorHighWater` is called on every
+		// emission and is usually a no-op once the high-water is current; rewriting
+		// identity.json each time would burn a needless fsync pair on the emission
+		// path and widen the crash window over a file nothing asked to change.
+		if (JSON.stringify(next) === JSON.stringify(current)) return current;
+		writeIdentityFile(rootDir, next);
+		return next;
+	};
+	if (opts.heldLock) return apply();
+
+	// `mustSucceed` callers CANNOT be left un-applied, so they wait rather than
+	// refuse on first contention.
+	//
+	// Rotation is the case, and refusing there is worse than waiting: the
+	// emitter has ALREADY appended the cross-signed successor to the mirror and
+	// released its lock before the identity update runs. A single non-blocking
+	// attempt that loses a race leaves the mirror naming the successor while
+	// identity.json still names the predecessor — the old signer is then
+	// rejected by the epoch guard, and re-running rotation cannot repair it
+	// because the successor is already minted. The comment at the CLI call site
+	// says identity.json MUST advance in lockstep; a throw there breaks exactly
+	// that.
+	//
+	// Bounded, not unbounded: the lock is only held across an emission, so a
+	// short wait clears it. If it genuinely does not, the throw names the repair
+	// rather than leaving an operator with a desynced vault and no next step.
+	// 15 x 100ms = 1.5s. An emission that has not cleared in 1.5s is already
+	// pathological, and the message below names the repair rather than stranding
+	// the operator. Deliberately NOT larger: the first cut used 5s, which put the
+	// test that exercises this 13ms under vitest's 5s timeout — a guard whose own
+	// test flakes under load is not a guard you can rely on.
+	const attempts = opts.mustSucceed === true ? 15 : 1;
+	for (let attempt = 0; attempt < attempts; attempt++) {
+		const release = tryAcquireAnchorLock(anchorsDir(rootDir));
+		if (release !== null) {
+			try {
+				return apply();
+			} finally {
+				release();
+			}
+		}
+		if (attempt < attempts - 1) sleepMs(100);
+	}
+	throw new Error(
+		opts.mustSucceed === true
+			? "anchor identity is locked by an in-flight emission and did not clear — the mirror may name a successor that identity.json does not; re-run `usertrust anchor rotate --resume-identity` once emissions are idle"
+			: "anchor identity is locked by an in-flight emission — retry once it completes",
+	);
+}
+
+/**
+ * Block this thread for `ms`. Deliberately synchronous: every caller on this
+ * path is sync, and making them async would push the change through the emitter
+ * and both CLIs for a wait measured in milliseconds.
+ */
+function sleepMs(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Merge a proposed identity onto the one actually on disk. Union and monotonic,
+ * never last-writer-wins, because the proposal was computed from a read that may
+ * already be stale.
+ */
+function mergeIdentity(current: AnchorIdentity, proposed: AnchorIdentity): AnchorIdentity {
+	if (proposed.vaultId !== current.vaultId) {
+		// Refuse rather than pick a winner: a wrong vaultId re-homes every signed
+		// record in the vault, and no automatic resolution is defensible.
+		throw new Error("refusing to change an anchor identity's vaultId");
+	}
+	const mergedKeys = unionByKeyId(current.keyHistory, proposed.keyHistory);
+	const mergedWitness = unionByKeyId(current.witnessKeyHistory, proposed.witnessKeyHistory);
+	return {
+		...proposed,
+		// Monotonic: a stale writer must never lower the durable high-water.
+		...(maxDefined(current.lastAnchorSeq, proposed.lastAnchorSeq) !== undefined
+			? { lastAnchorSeq: maxDefined(current.lastAnchorSeq, proposed.lastAnchorSeq) as number }
+			: {}),
+		...(mergedKeys !== undefined ? { keyHistory: mergedKeys } : {}),
+		...(mergedWitness !== undefined ? { witnessKeyHistory: mergedWitness } : {}),
+	};
+}
+
+function maxDefined(a: number | undefined, b: number | undefined): number | undefined {
+	if (a === undefined) return b;
+	if (b === undefined) return a;
+	return Math.max(a, b);
+}
+
+/**
+ * Union two history lists by `keyId`, preserving order and preferring the
+ * PROPOSED entry for a keyId present in both (that is the deliberate update);
+ * every entry unique to `current` survives. Dropping one would strand records
+ * signed under it — the sink could no longer name the key that signed them.
+ */
+function unionByKeyId<T extends { keyId: string }>(
+	current: T[] | undefined,
+	proposed: T[] | undefined,
+): T[] | undefined {
+	if (current === undefined && proposed === undefined) return undefined;
+	const merged = new Map<string, T>();
+	for (const entry of current ?? []) merged.set(entry.keyId, entry);
+	for (const entry of proposed ?? []) merged.set(entry.keyId, entry);
+	return [...merged.values()];
+}
+
+/**
+ * Refuse to write a private key inside the vault it vouches for (AC-6.2).
+ *
+ * Canonicalize BOTH sides before comparing: a relative path (e.g.
+ * ".usertrust/keys/anchor.pem") would never match an absolute prefix, and
+ * symlinked temp dirs (macOS /var → /private/var) would defeat a plain
+ * resolve() comparison — either way silently landing the key inside the vault.
+ *
+ * ONE copy of this rule, called for the anchor key and the witness key alike.
+ * The witness key is a submission credential and not evidence, so the parent
+ * spec's "the vault must not contain what vouches for it" does not literally
+ * apply to it — but a key inside the vault is collateral damage of any ordinary
+ * vault operation (a restore, a sync, an `rm -rf .usertrust`), and losing the
+ * witness key splits the published index that anchor enumeration counts against.
+ * A second, laxer placement rule would also be an invitation for the anchor key
+ * to drift into it, at which point AC-6.2 is dead and nothing reports it.
+ */
+function refuseKeyInsideVault(rootDir: string, keyFile: string, what: string): void {
+	const vaultAbs = realResolve(join(rootDir, VAULT_DIR));
+	if (keyFile === vaultAbs || keyFile.startsWith(vaultAbs + sep)) {
+		throw new Error(`Refusing to write the ${what} private key inside the vault (AC-6.2)`);
+	}
+}
+
+/**
+ * Persist the durable anchorSeq high-water (never decreases).
+ *
+ * `heldLock` mirrors `updateAnchorIdentity`: the emission path already owns the
+ * advisory lock, the resume path does not.
+ */
+function bumpAnchorHighWater(rootDir: string, anchorSeq: number, heldLock: boolean): void {
+	updateAnchorIdentity(
+		rootDir,
+		(identity) =>
+			(identity.lastAnchorSeq ?? 0) >= anchorSeq
+				? identity
+				: { ...identity, lastAnchorSeq: anchorSeq },
+		{ heldLock },
+	);
 }
 
 export function anchorsDir(rootDir: string): string {
@@ -258,17 +507,9 @@ export function initAnchorIdentity(
 		"base64",
 	);
 
-	// Canonicalize BOTH sides before comparing: a relative --key-file (e.g.
-	// ".usertrust/keys/anchor.pem") would never match an absolute prefix, and
-	// symlinked temp dirs (macOS /var → /private/var) would defeat a plain
-	// resolve() comparison — either way silently landing the signing key
-	// inside the vault it vouches for (AC-6.2).
 	const keyFile = realResolve(opts?.keyFile ?? defaultKeyPath(vaultId));
 	const keyDir = join(keyFile, "..");
-	const vaultAbs = realResolve(join(rootDir, VAULT_DIR));
-	if (keyFile === vaultAbs || keyFile.startsWith(vaultAbs + sep)) {
-		throw new Error("Refusing to write the anchor private key inside the vault (AC-6.2)");
-	}
+	refuseKeyInsideVault(rootDir, keyFile, "anchor");
 	mkdirSync(keyDir, { recursive: true, mode: 0o700 });
 	writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }) as string, {
 		mode: 0o600,
@@ -838,7 +1079,7 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 					};
 				}
 				appendToMirror(orphan);
-				bumpAnchorHighWater(rootDir, orphan.anchorSeq);
+				bumpAnchorHighWater(rootDir, orphan.anchorSeq, true);
 				tail = orphan;
 			}
 
@@ -909,10 +1150,22 @@ export function createAnchorEmitter(rootDir: string, config: AnchoringConfig): A
 			// verifies as tampering.
 			writeOutboxEntry(dir, record);
 			appendToMirror(record);
+			// PUBLICATION IS SCHEDULED BEFORE THE HIGH-WATER BUMP, and the
+			// durability order is untouched by that: trackPublish writes nothing
+			// durable, it only queues a network publish, so outbox → mirror →
+			// high-water still holds.
+			//
+			// It moved because the bump sits between the mirror append and
+			// publication and CAN THROW — once a genuine directory-fsync failure
+			// stopped being swallowed, a throw there skipped publication entirely
+			// and stranded a fully minted record in the outbox with nothing to
+			// retry it. Scheduling first makes the stranding impossible instead
+			// of detectable-after-the-fact; the throw still propagates, which is
+			// what the fsync fix wanted.
+			trackPublish(record);
 			// High-water AFTER the mirror append is fsync'd, so a crash leaves
 			// high-water ≤ mirror tail (never ahead of what exists).
-			bumpAnchorHighWater(rootDir, record.anchorSeq);
-			trackPublish(record);
+			bumpAnchorHighWater(rootDir, record.anchorSeq, true);
 			return { emitted: true, record };
 		} finally {
 			release();
@@ -1053,24 +1306,44 @@ export function resumeAnchorMirror(rootDir: string, latestRecordRaw: string): An
 		);
 	}
 	const dir = anchorsDir(rootDir);
-	const mirror = readMirrorRecords(dir);
-	const tail = mirror.records.at(-1);
-	if (tail !== undefined && tail.anchorSeq >= record.anchorSeq) {
-		throw new Error(
-			`resume: mirror already at anchorSeq ${tail.anchorSeq} (supplied ${record.anchorSeq})`,
-		);
-	}
 	mkdirSync(dir, { recursive: true });
-	const fd = openSync(join(dir, "anchors.jsonl"), "a", 0o600);
-	try {
-		writeSync(fd, `${canonicalize(record)}\n`);
-		fsyncSync(fd);
-	} finally {
-		closeSync(fd);
+	// TAKE THE LOCK BEFORE TOUCHING THE MIRROR, not after.
+	//
+	// This previously appended to anchors.jsonl and only then bumped the
+	// high-water, which is where the lock was acquired. A resume racing a live
+	// emission therefore MUTATED THE MIRROR AND THEN THREW: the caller saw a
+	// refusal while the state had already changed, and a concurrent emitter
+	// holding the tail it read a moment earlier could mint the same anchorSeq —
+	// permanent, unrewritable fork evidence in the append-only store, which is
+	// exactly what the anchoring-monotonicity invariant exists to prevent.
+	// Reading the tail under the lock also closes the check-then-act between
+	// "mirror is behind" and the append.
+	const release = tryAcquireAnchorLock(dir);
+	if (release === null) {
+		throw new Error("anchor identity is locked by an in-flight emission — retry once it completes");
 	}
-	// Re-seeding advances the durable high-water so the next emission allocates
-	// from the re-seeded tail, not from a stale value.
-	bumpAnchorHighWater(rootDir, record.anchorSeq);
+	try {
+		const mirror = readMirrorRecords(dir);
+		const tail = mirror.records.at(-1);
+		if (tail !== undefined && tail.anchorSeq >= record.anchorSeq) {
+			throw new Error(
+				`resume: mirror already at anchorSeq ${tail.anchorSeq} (supplied ${record.anchorSeq})`,
+			);
+		}
+		const fd = openSync(join(dir, "anchors.jsonl"), "a", 0o600);
+		try {
+			writeSync(fd, `${canonicalize(record)}\n`);
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		// Re-seeding advances the durable high-water so the next emission
+		// allocates from the re-seeded tail, not from a stale value. We already
+		// hold the lock, so this must NOT try to take it again.
+		bumpAnchorHighWater(rootDir, record.anchorSeq, true);
+	} finally {
+		release();
+	}
 	return record;
 }
 
@@ -1110,20 +1383,24 @@ export function recordRotatedIdentity(
 	rootDir: string,
 	next: { keyId: string; publicKeySpki: string },
 ): void {
-	const identity = readAnchorIdentity(rootDir);
-	if (identity === null) {
+	const updated = updateAnchorIdentity(
+		rootDir,
+		(identity) => {
+			// An identity minted before key history seeds one from its current
+			// epoch, so the pre-rotation key is not lost by upgrading mid-life.
+			const history = identity.keyHistory ?? [
+				{ keyId: identity.keyId, publicKeySpki: identity.publicKeySpki },
+			];
+			return {
+				...identity,
+				keyId: next.keyId,
+				publicKeySpki: next.publicKeySpki,
+				keyHistory: [...history.filter((entry) => entry.keyId !== next.keyId), next],
+			};
+		},
+		{ heldLock: false, mustSucceed: true },
+	);
+	if (updated === null) {
 		throw new Error("No anchor identity to rotate");
 	}
-	// An identity minted before key history seeds one from its current epoch, so
-	// the pre-rotation key is not lost by upgrading mid-life.
-	const history = identity.keyHistory ?? [
-		{ keyId: identity.keyId, publicKeySpki: identity.publicKeySpki },
-	];
-	const updated: AnchorIdentity = {
-		...identity,
-		keyId: next.keyId,
-		publicKeySpki: next.publicKeySpki,
-		keyHistory: [...history.filter((entry) => entry.keyId !== next.keyId), next],
-	};
-	writeIdentityFile(rootDir, updated);
 }

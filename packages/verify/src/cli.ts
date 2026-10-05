@@ -23,6 +23,7 @@ import {
 	verifyVault,
 	verifyVaultWithAnchors,
 	type WitnessInput,
+	type WitnessLogReport,
 } from "./index.js";
 import {
 	RECEIPT_DISPATCH_TOKEN,
@@ -79,6 +80,8 @@ Options:
   --vault-id <uuid>              Expected vaultId
   --require-anchor               Strict: UNANCHORED/UNVERIFIABLE/STALE exit 1
   --require-external-anchor      Strict: exit 0 only for externally anchored
+  --require-witness              Strict: exit 0 only when every anchor is
+                                 covered by a verified transparency-log receipt
   --max-anchor-age <dur>         Freshness policy, e.g. 1h, 30m (operator-claimed time)
   --max-unanchored-events <n>    Freshness policy (clock-independent; preferred)`);
 	process.exit(1);
@@ -215,14 +218,38 @@ const successorPinFiles: string[] = [];
 let vaultId: string | undefined;
 let requireAnchor = false;
 let requireExternalAnchor = false;
+let requireWitness = false;
 let maxAnchorAgeMs: number | undefined;
 let maxUnanchoredEvents: number | undefined;
 
 for (let i = 0; i < args.length; i++) {
-	const arg = args[i] as string;
+	const raw = args[i] as string;
+	// `--flag=value` so a value that legitimately begins with "-" is still
+	// passable; the space-separated form refuses one.
+	const eq = raw.startsWith("--") ? raw.indexOf("=") : -1;
+	const arg = eq > 0 ? raw.slice(0, eq) : raw;
+	const inlineValue = eq > 0 ? raw.slice(eq + 1) : undefined;
+	// A FLAG IS NEVER A VALUE. `--vault-id --require-witness` previously consumed
+	// the gate as the vault id, so the run verified unanchored, printed no
+	// witness line, and exited 0 — a strict flag silently disarmed by an
+	// adjacent flag, which leaves a CI pipeline green while checking nothing.
 	const next = (): string => {
+		if (inlineValue !== undefined) {
+			if (inlineValue === "") {
+				console.error(`${arg} requires a value`);
+				process.exit(2);
+			}
+			return inlineValue;
+		}
 		const v = args[i + 1];
 		if (v === undefined) usage();
+		// A bare "-" means stdin — documented in README and special-cased by
+		// readArtifact. Reject flags, not dashes; the first cut broke
+		// `--anchor -`, `--bundle -` and `--rekor-receipts -`.
+		if (v !== "-" && v.startsWith("-")) {
+			console.error(`${arg} requires a value (write ${arg}=${v} to pass it literally)`);
+			process.exit(2);
+		}
 		i++;
 		return v;
 	};
@@ -237,6 +264,7 @@ for (let i = 0; i < args.length; i++) {
 	else if (arg === "--vault-id") vaultId = next();
 	else if (arg === "--require-anchor") requireAnchor = true;
 	else if (arg === "--require-external-anchor") requireExternalAnchor = true;
+	else if (arg === "--require-witness") requireWitness = true;
 	else if (arg === "--max-anchor-age") maxAnchorAgeMs = parseDurationMs(next());
 	else if (arg === "--max-unanchored-events") {
 		const rawEvents = next();
@@ -265,7 +293,8 @@ const anchorMode =
 	bundleFile !== undefined ||
 	rekorReceiptFiles.length > 0 ||
 	requireAnchor ||
-	requireExternalAnchor;
+	requireExternalAnchor ||
+	requireWitness;
 
 async function buildAnchorParams(): Promise<AnchorVerifyParams> {
 	const externalAnchorsRaw: string[] = anchorFiles.map(readArtifact);
@@ -372,6 +401,17 @@ function printAnchorSection(result: AnchoredVaultVerificationResult): void {
 	}
 }
 
+/**
+ * Render the transparency-log witness state. Called on EVERY path that reports
+ * an anchored verdict — full-vault and --tx alike. An affirmative verdict
+ * printed without this line cannot be told apart from one whose witness leg
+ * never ran, which is the absence this whole surface exists to make visible.
+ */
+function printWitnessLine(w: WitnessLogReport): void {
+	const reasons = w.reasons.length > 0 ? ` [${w.reasons.join(", ")}]` : "";
+	console.log(`Witness log: ${w.state} (${w.covered}/${w.anchors} anchors covered)${reasons}`);
+}
+
 // ── Single transaction mode ──
 if (txId !== undefined) {
 	const params = anchorMode ? await buildAnchorParams() : undefined;
@@ -384,10 +424,18 @@ if (txId !== undefined) {
 	// so silently ignoring them here would let an UNANCHORED receipt pass a
 	// --require-external-anchor pipeline.
 	if (result.anchorState !== undefined && result.anchoring !== undefined) {
+		// The witness line belongs here TOO, and printing it before the exit is
+		// the whole point: --tx previously printed an affirmative "* VERIFIED *"
+		// receipt and left through the gate below with nothing on screen about
+		// the transparency log. Under --require-witness that meant exit 1 beside
+		// a receipt that still read as a pass — the operator sees the
+		// affirmation, not the reason. An anchored transaction with no witness
+		// evidence must say so on the same page as its verdict.
+		printWitnessLine(result.anchoring.witnessLog);
 		process.exit(
 			exitCodeForAnchored(
 				{ valid: true, anchorState: result.anchorState, anchoring: result.anchoring },
-				{ requireAnchor, requireExternalAnchor },
+				{ requireAnchor, requireExternalAnchor, requireWitness },
 			),
 		);
 	}
@@ -436,4 +484,8 @@ console.log("Hash algorithm: SHA-256");
 if (result.chainLength > 0) {
 	console.log(`All hashes: valid (${result.validHashes}/${result.chainLength})`);
 }
-process.exit(exitCodeForAnchored(result, { requireAnchor, requireExternalAnchor }));
+// ALWAYS printed, including — especially — when nothing was witnessed. An
+// auditor reading "VERIFIED (externally anchored)" with no witness line cannot
+// tell a witnessed vault from one that never was.
+printWitnessLine(result.anchoring.witnessLog);
+process.exit(exitCodeForAnchored(result, { requireAnchor, requireExternalAnchor, requireWitness }));

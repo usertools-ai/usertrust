@@ -49,10 +49,19 @@ describe("HARDEN: Rekor receipts in verifyVaultWithAnchors", () => {
 		expect(result.anchoring.rekor).toEqual({
 			receiptsVerified: 1,
 			receiptsFailed: 0,
+			// Per-anchor coverage, so the witness fold can be over ANCHORS rather
+			// than over receipts — an anchor with no receipt must contribute an
+			// outcome instead of vanishing from the count.
+			coveredAnchorSeqs: [1],
+			invalidAnchorSeqs: [],
 			latestAttestedTimeMs: ATTESTED_SECONDS * 1000,
 			errors: [],
 		});
+		// This vault has exactly one anchor and it is covered, so the witness leg
+		// is fully accounted for.
+		expect(result.anchoring.witnessLog.state).toBe("WITNESS_VERIFIED");
 		expect(exitCodeForAnchored(result)).toBe(0);
+		expect(exitCodeForAnchored(result, { requireWitness: true })).toBe(0);
 	});
 
 	it("2. no receipts supplied ⇒ no rekor block at all (additive)", async () => {

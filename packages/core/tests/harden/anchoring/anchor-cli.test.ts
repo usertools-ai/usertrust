@@ -91,3 +91,162 @@ describe("HARDEN: core `verify` CLI rejects unknown flags", () => {
 		expect(process.exitCode).toBe(1);
 	});
 });
+
+describe("HARDEN: the verify CLI makes the ABSENCE of witnessing visible (Codex #128 F6)", () => {
+	it("prints a witness line on an anchored vault with no receipts, instead of only VERIFIED", async () => {
+		// The human-facing half of G5. The library reported the witness state
+		// from the first commit, but neither CLI rendered it — so an operator
+		// still read "VERIFIED (externally anchored)" and exit 0 with nothing
+		// saying the transparency-log leg had never run. That is the silent
+		// success this work exists to remove, surviving in the one place a
+		// person actually looks.
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.argv = ["node", "usertrust", "verify", "--anchors", s.storeFile];
+		const { lines, restore } = captureLog();
+		try {
+			await verifyRun(s.root, { json: false });
+		} finally {
+			restore();
+		}
+		const out = lines.join("\n");
+		expect(out).toMatch(/Witness log: WITNESS_UNKNOWN/);
+		expect(out).toMatch(/anchors covered/);
+	});
+
+	it("--require-witness exits 1 on that same vault, while the default still exits 0", async () => {
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+
+		// Default: unchanged. A vault that verified clean yesterday still does.
+		process.argv = ["node", "usertrust", "verify", "--anchors", s.storeFile];
+		let cap = captureLog();
+		try {
+			await verifyRun(s.root, { json: false });
+		} finally {
+			cap.restore();
+		}
+		expect(process.exitCode).toBe(0);
+
+		// Opt in, and the same vault is refused.
+		process.exitCode = 0;
+		process.argv = ["node", "usertrust", "verify", "--anchors", s.storeFile, "--require-witness"];
+		cap = captureLog();
+		try {
+			await verifyRun(s.root, { json: false });
+		} finally {
+			cap.restore();
+		}
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("--json does not report success:true when the witness gate fails", async () => {
+		// A consumer reading the body rather than $? would otherwise be told the
+		// run succeeded while the process exited 1.
+		const s = await makeAnchoredVault(3);
+		process.chdir(s.root);
+		process.argv = ["node", "usertrust", "verify", "--anchors", s.storeFile, "--require-witness"];
+		const { lines, restore } = captureLog();
+		try {
+			await verifyRun(s.root, { json: true });
+		} finally {
+			restore();
+		}
+		const payload = JSON.parse(lines.join("")) as {
+			success: boolean;
+			data: { anchoring: unknown };
+		};
+		expect(payload.success).toBe(false);
+		expect(process.exitCode).toBe(1);
+	});
+});
+
+describe("HARDEN: a flag is never consumed as another flag's value (Codex #128-r2 F1)", () => {
+	it("--vault-id --require-witness refuses instead of swallowing the gate", async () => {
+		// The worst shape available for a CI gate: `--vault-id` ate
+		// `--require-witness` as its value, so the run verified UNANCHORED,
+		// printed no witness line, and exited 0 — the pipeline stays green while
+		// checking nothing. Mirrors requireValue in cli/budget.ts.
+		const s = await makeAnchoredVault(2);
+		process.chdir(s.root);
+		process.argv = ["node", "usertrust", "verify", "--vault-id", "--require-witness"];
+		const { lines, restore } = captureLog();
+		let threw = "";
+		try {
+			await verifyRun(s.root, { json: false });
+		} catch (e) {
+			threw = e instanceof Error ? e.message : String(e);
+		} finally {
+			restore();
+		}
+		expect(`${threw}${lines.join("\n")}`).toMatch(/--vault-id requires a value/);
+	});
+
+	it("the --flag=value escape still allows a value that begins with a dash", async () => {
+		// Refusing dash-leading values without an escape would make legitimate
+		// ids unpassable, so the guard must not be a dead end.
+		const s = await makeAnchoredVault(2);
+		process.chdir(s.root);
+		process.argv = [
+			"node",
+			"usertrust",
+			"verify",
+			"--vault-id=-weird-id",
+			"--anchors",
+			s.storeFile,
+		];
+		const { lines, restore } = captureLog();
+		try {
+			await verifyRun(s.root, { json: false });
+		} finally {
+			restore();
+		}
+		// It parsed as a vault id (mismatching this vault) rather than erroring
+		// on the flag itself.
+		expect(lines.join("\n")).not.toMatch(/requires a value/);
+	});
+});
+
+describe("HARDEN: the flag-value guard must not eat documented syntax (#128-r3 F3)", () => {
+	it('a bare "-" is still accepted as a value — it means stdin', async () => {
+		// THE REGRESSION. Rejecting every leading dash to close the
+		// `--vault-id --require-witness` hole also rejected `--anchor -`,
+		// `--bundle -` and `--rekor-receipts -`, which are documented in
+		// packages/verify/README.md and special-cased by readArtifact. A
+		// security fix that silently deletes a working documented feature is
+		// not a fix. Reject FLAGS, not dashes.
+		const s = await makeAnchoredVault(2);
+		process.chdir(s.root);
+		process.argv = ["node", "usertrust", "verify", "--anchor", "-"];
+		const { lines, restore } = captureLog();
+		let threw = "";
+		try {
+			await verifyRun(s.root, { json: false });
+		} catch (e) {
+			threw = e instanceof Error ? e.message : String(e);
+		} finally {
+			restore();
+		}
+		// It must not be refused BY THE PARSER. (Reading stdin may fail for
+		// other reasons in-process; what is pinned here is that "-" reached the
+		// flag as its value.)
+		expect(`${threw}${lines.join("\n")}`).not.toMatch(/--anchor requires a value/);
+	});
+
+	it("an empty inline value is a typo, not an empty path", async () => {
+		// `--pubkey=` previously slid through and handed "" to readFileSync.
+		const s = await makeAnchoredVault(2);
+		process.chdir(s.root);
+		process.argv = ["node", "usertrust", "verify", "--pubkey="];
+		const { lines, restore } = captureLog();
+		let threw = "";
+		try {
+			await verifyRun(s.root, { json: false });
+		} catch (e) {
+			threw = e instanceof Error ? e.message : String(e);
+		} finally {
+			restore();
+		}
+		expect(`${threw}${lines.join("\n")}`).toMatch(/--pubkey requires a value/);
+	});
+});
