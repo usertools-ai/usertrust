@@ -1613,11 +1613,17 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 				principal?: unknown;
 			};
 		});
-		// This server honours keys and principal: each authorize carrying usage went
-		// in under its vehicle key, and every receipt names the agent.
+		// A dryRun server claims no `idempotency-key` (no ledger anchor: a retry after
+		// a settle would charge again), so no key is sent; it records the principal,
+		// on every receipt.
 		for (const a of authorizes()) {
 			expect(a.status).toBe(200);
-			expect(a.body.idempotencyKey).toMatch(/^cc:[0-9a-f]{48}$/);
+			expect(a.body).not.toHaveProperty("idempotencyKey");
+			expect(a.body.principal).toEqual({
+				id: "main",
+				type: "main",
+				origin: `claude-code:${SESSION}`,
+			});
 		}
 		for (const receipt of receipts) {
 			expect(receipt.principal).toEqual({

@@ -36,7 +36,7 @@ export UT_SERVER_KEY="<the key from step 1>"
 | `UT_SERVER_KEY`      | (empty)                  | Tenant bearer key                                |
 | `UT_CC_MODEL`        | `claude-sonnet-4-6`      | Model for an estimate hold before any transcript model is known |
 | `UT_CC_USAGE`        | `transcript`             | `estimate` settles per-call estimates only       |
-| `UT_CC_STATE_DIR`    | `$TMPDIR/usertrust-cc`   | Directory for pending-hold and transcript state  |
+| `UT_CC_STATE_DIR`    | `~/.claude/usertrust-cc` | Pending holds, and what was already posted (keep it; see below) |
 | `UT_CC_SEND_CONTENT` | `1`                      | `0` sends `{"redacted":true}` instead of content |
 | `UT_FAIL_OPEN`       | unset                    | `1` allows tool calls when governance is down (see below) |
 
@@ -64,9 +64,9 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
 - **The remainder.** What no hold carried — another model's responses, a final
   answer with no tool call — is posted at SubagentStop (that subagent) and Stop
   (the parent and every subagent, so one whose SubagentStop never fired is still
-  accounted), one authorize→settle per model. Stop then SETTLES a leftover hold
-  that has usage assigned (its tool was interrupted, but the model turn was
-  billed) and gives back one that has none.
+  accounted), one authorize→settle per model. Before that, Stop SETTLES a leftover
+  hold that has usage assigned (its tool was interrupted, but the model turn was
+  billed); after it, Stop gives back the holds that have none.
 - **Empty holds are given back.** A hold no usage was assigned to (a parallel tool
   call in the same response, say) is RELEASED at PostToolUse: no charge, and not a
   failure. A server without `/v1/release` gets the old settle at zero usage, which
@@ -101,7 +101,10 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   the same vehicle (same key, same responses, same counts). The server answers
   `409 already_settled` if the first settle landed, or charges them now; it never
   charges them twice. An unresolved vehicle is never folded into a new window, and
-  waits for a server that honours keys rather than be retried without one.
+  waits for a server that honours keys rather than be retried without one. A
+  remainder is parked this way before its call, so a hook killed mid-call leaves
+  it to be retried too. A `dryRun` server does not claim keys (it has no ledger to
+  anchor them), so against one the plugin keeps the at-most-once rule below.
 - **At most once, otherwise.** Per (session, agent) a cursor records which
   response ids are assigned, accounted or denied. An id is claimed before anything
   could post it and released only when the server proved nothing was posted (the
@@ -109,11 +112,14 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   key, a settle that answers 5xx or not at all may have posted, so its ids stay
   claimed and the hold is given back for hygiene: an outage can lose usage, but
   never post it twice. A cursor that exists but cannot be read is never treated as
-  empty — transcript usage is not posted until it is fixed or removed.
+  empty — transcript usage is not posted until it is fixed or removed. Removing it
+  re-posts nothing: the agent's claims (below) still say what it posted.
 - **What the server honours** is read from its unauthenticated `/v1/health`
   `capabilities` once per hook, and never cached on disk: an older server strips
   request fields it does not know, so it would accept a key and silently ignore
-  it.
+  it. When the read fails, nothing is assumed either way: no key or principal is
+  sent, and a hold is still released — falling back to abort only on a server
+  that has no release route — with a note on stderr.
 - **Denied usage.** If the remainder's authorize is refused (402 budget, 403
   policy, 429 anomaly), those responses are marked `denied` and never retried, and
   a stderr note gives the token counts that could not be recorded.
@@ -122,10 +128,14 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   settled as `usageSource: "estimated"`, with a stderr note giving the reason — and
   its transcript is never read again, so no usage is ever counted both as an
   estimate and as real. `UT_CC_USAGE=estimate` does the same for every agent.
-- **Private state.** Cursors live in `$UT_CC_STATE_DIR/transcripts/`, created
-  `0700`; if that directory is not a real directory owned by you without group or
-  other write access, transcript accounting is off for that run and holds settle
-  at the estimate.
+- **Private, durable state.** Cursors and claims live in
+  `$UT_CC_STATE_DIR/transcripts/`, created `0700`; if that directory is not a real
+  directory owned by you without group or other write access, transcript
+  accounting is off for that run and holds settle at the estimate. The default is
+  `~/.claude/usertrust-cc` (`$CLAUDE_CONFIG_DIR/usertrust-cc` when that is set),
+  beside Claude Code's own transcripts — not a temp dir, which the OS may purge:
+  **deleting the state dir while transcripts remain re-posts their usage.** A
+  message whose claim cannot be made is not posted, and a stderr note says so.
 - **Hook time budget.** Each hook gives up after about 10 seconds (the hooks'
   timeout is 15), and Stop keeps time back to settle leftover holds; whatever it
   could not reach is posted at the next settle point.
