@@ -17,6 +17,7 @@ import {
 	LedgerDeadlineError,
 	loadSqlite,
 	MIN_NODE_FOR_JOURNAL,
+	normalizeSql,
 	OrphanRiskError,
 	PlacementHorizonError,
 } from "../src/journal.js";
@@ -1477,5 +1478,54 @@ describe("#185 r1: the DATABASE enforces the legal late-settlement states (v3's 
 		);
 		raw.close();
 		expect(() => HoldJournal.open(path)).toThrow(/an unrecognised shape/);
+	});
+});
+
+describe("#188.3: trigger SQL is compared by what it SAYS, not its layout", () => {
+	it("normalizeSql: whitespace and line breaks collapse; literals, case and conditions do not", () => {
+		const a =
+			"CREATE TRIGGER t BEFORE INSERT ON hold WHEN NOT (x > 0) BEGIN SELECT RAISE(ABORT, 'a  b'); END";
+		const b =
+			"CREATE TRIGGER t\n\tBEFORE INSERT ON hold\n  WHEN NOT ( x > 0 )\nBEGIN\n  SELECT RAISE( ABORT , 'a  b' ) ;\nEND";
+		expect(normalizeSql(b)).toBe(normalizeSql(a));
+		expect(normalizeSql(a.replace("x > 0", "x >= 0"))).not.toBe(normalizeSql(a));
+		expect(normalizeSql(a.replace("'a  b'", "'a b'")), "inside a literal: verbatim").not.toBe(
+			normalizeSql(a),
+		);
+		expect(normalizeSql(a.replace("'a  b'", "'A  b'"))).not.toBe(normalizeSql(a));
+	});
+
+	it("a current journal whose triggers are stored REFLOWED still opens; one whose trigger SAYS something else is refused, untouched", () => {
+		for (const [name, change, opens] of [
+			[
+				"reflowed",
+				(sql: string) =>
+					sql.replaceAll(" WHEN ", "\n    WHEN\n      ").replaceAll(" BEGIN ", "\nBEGIN\n  "),
+				true,
+			],
+			["a changed condition", (sql: string) => sql.replace("NOT (", "NOT NOT ("), false],
+		] as const) {
+			const dir = mkdtempSync(join(tmpdir(), "openshell-journal-trig-"));
+			dirs.push(dir);
+			const path = join(dir, "holds.db");
+			HoldJournal.open(path).close();
+			const raw = new DatabaseSync(path);
+			const triggers = raw
+				.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'trigger'")
+				.all() as Array<{ name: string; sql: string }>;
+			expect(triggers.length, name).toBeGreaterThan(0);
+			for (const t of triggers) {
+				raw.exec(`DROP TRIGGER ${t.name}`);
+				raw.exec(change(t.sql));
+			}
+			raw.close();
+			const before = readFileSync(path);
+			if (opens) {
+				HoldJournal.open(path).close();
+			} else {
+				expect(() => HoldJournal.open(path), name).toThrow(JournalSchemaError);
+				expect(readFileSync(path).equals(before), `${name}: untouched`).toBe(true);
+			}
+		}
 	});
 });

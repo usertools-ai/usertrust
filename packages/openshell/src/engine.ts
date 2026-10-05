@@ -53,6 +53,12 @@ export interface SweepReport {
 	replayed: Array<{ holdId: string; outcome: string }>;
 	/** Recorded late settlements the ledger took this sweep. */
 	lateCharged: string[];
+	/**
+	 * Incident rows with a RECORDED late settlement, probed on the ledger this sweep (#188): was
+	 * its `late` / `late-retry` charge there? `true` is written onto the incident as
+	 * `late_charged_on_ledger`; `false` as `late_absent_from_ledger_at` (re-probed every sweep).
+	 */
+	lateProbed: Array<{ holdId: string; landed: boolean }>;
 	/** Rows whose step threw, with the error: the next sweep tries them again. */
 	errors: Array<{ holdId: string; error: unknown }>;
 }
@@ -519,6 +525,16 @@ export class HoldEngine {
 		}
 		if (posted === "unknown") return { outcome: "in_flight" };
 		if (posted === "voided" || posted === "not_found") {
+			// A DEFINITIVE ledger answer that contradicts the claim: recorded as an incident
+			// (#188), so it survives a restart and the sweep stops replaying the same call. The
+			// intent rides on it, for billing.
+			await this.journal.writeTx(() =>
+				this.journal.recordIncident(holdKey, {
+					kind: "settlement_ledger_disagrees",
+					ledgerAnswer: posted,
+					intent,
+				}),
+			);
 			return { outcome: "incident", state: "settling" };
 		}
 		if (intent.overage > 0) {
@@ -562,7 +578,17 @@ export class HoldEngine {
 			// A release that never completed, or an ambiguous placement: resume it.
 		}
 		const voided = await within("release", this.ms, () => this.ledger.release({ holdKey }));
-		if (voided === "posted") return { outcome: "incident", state: "voiding" };
+		if (voided === "posted") {
+			// DEFINITIVE: the hold this release was to void was POSTED. Recorded as an incident
+			// (#188): never voided, and the sweep stops replaying the release.
+			await this.journal.writeTx(() =>
+				this.journal.recordIncident(holdKey, {
+					kind: "release_ledger_disagrees",
+					ledgerAnswer: "posted",
+				}),
+			);
+			return { outcome: "incident", state: "voiding" };
+		}
 		// A retired void id the read-back cannot yet confirm: stays `voiding`, released again.
 		if (voided === "unknown") return { outcome: "in_flight" };
 		if (voided === "not_found") {
@@ -611,6 +637,7 @@ export class HoldEngine {
 			inFlight: [],
 			replayed: [],
 			lateCharged: [],
+			lateProbed: [],
 			errors: [],
 		};
 		await this.journal.writeTx(() => this.journal.recordHeartbeat(now));
@@ -620,7 +647,7 @@ export class HoldEngine {
 		// obligations, each attempted once.
 		const touched = new Set<string>();
 		const attempt = async (
-			obligation: "advance" | "late",
+			obligation: "advance" | "late" | "late-probe",
 			holdId: string,
 			step: () => Promise<void>,
 		) => {
@@ -667,6 +694,23 @@ export class HoldEngine {
 				if (this.journal.get(row.holdId)?.lateState === "charged") {
 					report.lateCharged.push(row.holdId);
 				}
+			});
+		}
+		// A late charge that LANDED on the ledger and whose mark was lost (a crash between the two,
+		// on a row that took an incident meanwhile) is never retried — chargeLate skips incident
+		// rows. Probe the ledger for every such row, so the incident says what the ledger holds and
+		// an operator never bills it twice.
+		for (const row of this.journal.lateRecordedOnIncident()) {
+			await attempt("late-probe", row.holdId, async () => {
+				const landed = await within("lateChargeLanded", this.ms, () =>
+					this.ledger.lateChargeLanded(row.holdId),
+				);
+				await this.journal.writeTx(() =>
+					landed
+						? this.journal.recordLedgerChargedOnIncident(row.holdId, row.lateAmount ?? 0)
+						: this.journal.recordLateAbsentOnIncident(row.holdId, now),
+				);
+				report.lateProbed.push({ holdId: row.holdId, landed });
 			});
 		}
 		return report;

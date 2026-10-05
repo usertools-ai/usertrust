@@ -118,6 +118,12 @@ class FakeLedger implements LedgerPort {
 		this.crash("chargeDebt");
 		return "done";
 	}
+	/** Probes the sweep made for a landed late charge. */
+	probes: string[] = [];
+	async lateChargeLanded(holdKey: string): Promise<boolean> {
+		this.probes.push(holdKey);
+		return this.has(holdKey, "late") || this.has(holdKey, "late-retry");
+	}
 	/** How many distinct transfers of a role were applied for a hold (0 or 1). */
 	count(holdKey: string, role: Parameters<typeof transferIdFor>[1]): number {
 		return this.applied.has(transferIdFor(holdKey, role).toString()) ? 1 : 0;
@@ -794,7 +800,7 @@ describe("#185 r1 P1: `late_settled` only when a late disposition is POSITIVELY 
 			lateState: "none",
 			incident: {
 				kind: "expiry_ledger_disagrees",
-				unbilled: { kind: "late_settlement", actual: 60, intent: { post: 60, overage: 0 } },
+				unbilled: [{ kind: "late_settlement", actual: 60, intent: { post: 60, overage: 0 } }],
 			},
 		});
 		expect(ledger.count("k1", "late"), "nothing charged").toBe(0);
@@ -833,7 +839,7 @@ describe("#185 r1 P1: `late_settled` only when a late disposition is POSITIVELY 
 			lateAmount: 60,
 			incident: {
 				kind: "expiry_ledger_disagrees",
-				unbilled: { kind: "late_settlement", actual: 60, lateRecorded: true },
+				unbilled: [{ kind: "late_settlement", actual: 60, lateRecorded: true }],
 			},
 		});
 		expect(ledger.count("k1", "late"), "never charged").toBe(0);
@@ -849,8 +855,17 @@ describe("#185 r1 P1: `late_settled` only when a late disposition is POSITIVELY 
 			outcome: "incident",
 			state: "expiring",
 		});
-		await engine.settle("k1", { post: 99, overage: 0 }); // a second caller: the first cost stays
-		expect(journal.get("k1")?.incident).toMatchObject({ unbilled: { actual: 40 } });
+		// #188.2: a second, CONFLICTING lost settlement is APPENDED — never dropped — and an
+		// identical retry of either is not appended twice.
+		await engine.settle("k1", { post: 99, overage: 0 });
+		await engine.settle("k1", { post: 40, overage: 0 });
+		await engine.settle("k1", { post: 99, overage: 0 });
+		const unbilled = (journal.get("k1")?.incident as { unbilled: unknown[] }).unbilled;
+		expect(unbilled).toHaveLength(2);
+		expect(unbilled).toMatchObject([
+			{ actual: 40, intent: { post: 40 } },
+			{ actual: 99, intent: { post: 99 } },
+		]);
 		expect(ledger.count("k1", "late")).toBe(0);
 	});
 
@@ -895,7 +910,7 @@ describe("#185 r3: an INCIDENT OUTRANKS EVERY SUCCESS — every outcome, one fin
 			incident: {
 				kind: "concurrent_incident",
 				late_charged_on_ledger: 60,
-				unbilled: { actual: 60, lateRecorded: true, lateCharged: true },
+				unbilled: [{ actual: 60, lateRecorded: true, lateCharged: true }],
 			},
 		});
 		expect(ledger.applied.get(transferIdFor("k1", "late").toString()), "charged once").toBe(60);
@@ -923,7 +938,7 @@ describe("#185 r3: an INCIDENT OUTRANKS EVERY SUCCESS — every outcome, one fin
 		journal.writeTx = realWriteTx;
 		expect(journal.get("k1")).toMatchObject({
 			lateState: "charged",
-			incident: { unbilled: { lateRecorded: true, lateCharged: true } },
+			incident: { unbilled: [{ lateRecorded: true, lateCharged: true }] },
 		});
 	});
 
@@ -947,7 +962,7 @@ describe("#185 r3: an INCIDENT OUTRANKS EVERY SUCCESS — every outcome, one fin
 		journal.writeTx = realWriteTx;
 		expect(journal.get("k1")).toMatchObject({
 			lateState: "zero",
-			incident: { unbilled: { actual: 0, lateRecorded: true, lateCharged: false } },
+			incident: { unbilled: [{ actual: 0, lateRecorded: true, lateCharged: false }] },
 		});
 	});
 
@@ -1265,5 +1280,100 @@ describe("1c-1: the independent detector", () => {
 			},
 		]);
 		expect(r.counts).toEqual({ open: 0, inFlight: 2, lateUncharged: 1, rowIncidents: 1 });
+	});
+});
+
+describe("#188.2: unbilled is a LIST — every different lost settlement kept", () => {
+	it("an incident carrying a single-object `unbilled` (earlier code) is read as a one-element list: a conflicting settlement is appended after it", async () => {
+		const { journal, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await journal.writeTx(() => journal.cas("k1", "open", "expiring"));
+		await journal.writeTx(() =>
+			journal.recordIncident("k1", {
+				kind: "expiry_ledger_disagrees",
+				unbilled: { kind: "late_settlement", intent: { post: 10, overage: 0 }, actual: 10 },
+			}),
+		);
+		await engine.settle("k1", { post: 70, overage: 0 });
+		expect((journal.get("k1")?.incident as { unbilled: unknown }).unbilled).toMatchObject([
+			{ actual: 10 },
+			{ actual: 70 },
+		]);
+	});
+});
+
+describe("#188 (#185 LOW r4): the sweep probes the ledger for a late charge on an incident row", () => {
+	it("a charge that LANDED, its mark lost (a crash), on a row that took an incident: the probe writes it onto the incident — probed once, never charged again", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await journal.writeTx(() => journal.cas("k1", "open", "expiring"));
+		ledger.crashAfter = "chargeDebt"; // the late charge lands, then the process dies
+		await expect(engine.settle("k1", { post: 60, overage: 0 })).rejects.toThrow(/died/);
+		expect(journal.get("k1")).toMatchObject({ lateState: "recorded" });
+		await journal.writeTx(() => journal.recordIncident("k1", { kind: "expiry_ledger_disagrees" }));
+		expect((await engine.sweep()).lateProbed).toEqual([{ holdId: "k1", landed: true }]);
+		expect(journal.get("k1")?.incident).toMatchObject({ late_charged_on_ledger: 60 });
+		await engine.sweep();
+		expect(ledger.probes, "probed once: a landed charge is final").toEqual(["k1"]);
+		expect(ledger.count("k1", "late")).toBe(1);
+	});
+
+	it("a charge that never landed: the probe records WHEN it was absent, and probes again every sweep", async () => {
+		const { journal, ledger, engine, clock } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await journal.writeTx(() => journal.cas("k1", "open", "expiring"));
+		ledger.chargeGate = new Promise(() => {}); // the charge never completes
+		await expect(engine.settle("k1", { post: 60, overage: 0 })).rejects.toThrow();
+		ledger.chargeGate = null;
+		await journal.writeTx(() => journal.recordIncident("k1", { kind: "expiry_ledger_disagrees" }));
+		expect((await engine.sweep()).lateProbed).toEqual([{ holdId: "k1", landed: false }]);
+		expect(journal.get("k1")?.incident).toMatchObject({ late_absent_from_ledger_at: clock.now });
+		clock.now += 5_000;
+		await engine.sweep();
+		expect(journal.get("k1")?.incident).toMatchObject({ late_absent_from_ledger_at: clock.now });
+		expect(ledger.probes).toEqual(["k1", "k1"]);
+		expect(ledger.count("k1", "late"), "a probe never charges").toBe(0);
+	});
+});
+
+describe("#188 (#185 connector): a DEFINITIVE ledger answer contradicting the claim is RECORDED as an incident", () => {
+	for (const answer of ["voided", "not_found"] as const) {
+		it(`the post answers \`${answer}\`: an incident recorded with the answer and the intent — the sweep never replays it, the detector raises it`, async () => {
+			const { journal, ledger, engine, clock } = setup();
+			await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+			let posts = 0;
+			ledger.onPost = () => {
+				posts++;
+			};
+			ledger.postAnswer = answer;
+			expect(await engine.settle("k1", { post: 40, overage: 0 })).toEqual({
+				outcome: "incident",
+				state: "settling",
+			});
+			expect(journal.get("k1")?.incident).toEqual({
+				kind: "settlement_ledger_disagrees",
+				ledgerAnswer: answer,
+				intent: { post: 40, overage: 0 },
+			});
+			await engine.sweep();
+			expect(posts, "never replayed").toBe(1);
+			const det = new HoldDetector(journal, {
+				sweepIntervalMs: 10_000,
+				now: () => clock.now,
+			}).check();
+			expect(det.readable && det.incidents.map((i) => i.kind)).toContain("row_incident");
+		});
+	}
+
+	it("the release answers `posted`: an incident recorded — never voided, never replayed", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		ledger.releaseAnswer = "posted";
+		expect(await engine.release("k1")).toEqual({ outcome: "incident", state: "voiding" });
+		expect(journal.get("k1")?.incident).toEqual({
+			kind: "release_ledger_disagrees",
+			ledgerAnswer: "posted",
+		});
+		expect(journal.inFlight()).toEqual([]);
 	});
 });

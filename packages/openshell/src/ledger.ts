@@ -99,6 +99,11 @@ export interface LedgerPort {
 		role: "overage" | "late";
 		amount: number;
 	}): Promise<ChargeOutcome>;
+	/**
+	 * Is a late-settlement charge for the hold ON the ledger — its `late` or `late-retry`
+	 * transfer? A read: it charges nothing. (The sweep's probe for incident rows, #188.)
+	 */
+	lateChargeLanded(holdKey: string): Promise<boolean>;
 }
 
 // CreateTransferStatus (tigerbeetle-node 0.17).
@@ -279,6 +284,14 @@ export class TigerBeetleLedger implements LedgerPort {
 			}
 			throw err;
 		}
+	}
+
+	async lateChargeLanded(holdKey: string): Promise<boolean> {
+		const [late, retry] = await Promise.all([
+			this.tb.lookupTransfer(transferIdFor(holdKey, "late")),
+			this.tb.lookupTransfer(transferIdFor(holdKey, "late-retry")),
+		]);
+		return late !== null || retry !== null;
 	}
 
 	async chargeDebt(p: {

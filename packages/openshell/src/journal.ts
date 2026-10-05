@@ -229,6 +229,42 @@ const DEBT_COLUMNS: readonly string[] = ["budget_id", "amount"];
 const APPLIED_COLUMNS: readonly string[] = ["transfer_id", "budget_id", "delta"];
 
 /**
+ * A trigger's SQL with only its LAYOUT normalised (#188.3): runs of whitespace outside string
+ * literals become one space, and spaces next to `(`, `)`, `,` and `;` are dropped. Literals are
+ * kept verbatim, case included — so a SQLite that stores the same trigger with different line
+ * breaks or indentation still matches, and any change to what the trigger SAYS does not.
+ */
+export function normalizeSql(sql: string | null): string {
+	if (sql === null) return "";
+	let out = "";
+	let inLiteral = false;
+	let pendingSpace = false;
+	for (let i = 0; i < sql.length; i++) {
+		const c = sql[i] as string;
+		if (inLiteral) {
+			out += c;
+			if (c === "'") {
+				if (sql[i + 1] === "'") {
+					out += "'";
+					i++;
+				} else inLiteral = false;
+			}
+			continue;
+		}
+		if (/\s/.test(c)) {
+			pendingSpace = out.length > 0;
+			continue;
+		}
+		const punct = "(),;".includes(c);
+		if (pendingSpace && !punct && !"(,".includes(out.at(-1) as string)) out += " ";
+		pendingSpace = false;
+		out += c;
+		if (c === "'") inLiteral = true;
+	}
+	return out;
+}
+
+/**
  * The EXACT shape of every version this code reads: each table and its columns (#184: every
  * table's columns, not only hold's). A file is one of these, or it is fresh (no objects at all),
  * or it is refused.
@@ -531,7 +567,12 @@ export class HoldJournal {
 			same(
 				triggers.map((t) => t.name),
 				Object.keys(expectedTriggers),
-			) && triggers.every((t) => t.sql === expectedTriggers[t.name]);
+			) &&
+			triggers.every(
+				(t) =>
+					expectedTriggers[t.name] !== undefined &&
+					normalizeSql(t.sql) === normalizeSql(expectedTriggers[t.name] as string),
+			);
 		const exact =
 			triggersExact &&
 			same(tables, Object.keys(shape)) &&
@@ -1040,16 +1081,36 @@ export class HoldJournal {
 
 	/**
 	 * Attach the actual cost of a settlement that could NOT be recorded (the row already carries
-	 * an incident) to that incident, once, so an operator can bill it. Inside {@link writeTx}.
+	 * an incident) to that incident, so an operator can bill it. `unbilled` is a LIST (#188.2):
+	 * every DIFFERENT lost settlement is appended — a second, conflicting one is never dropped —
+	 * and an identical one (same kind and intent: a retried duplicate) is not appended twice. An
+	 * `unbilled` written as a single object by earlier code is read as a one-element list.
+	 * Returns whether an entry was appended. Inside {@link writeTx}.
 	 */
-	recordUnbilled(holdId: string, unbilled: unknown): boolean {
+	recordUnbilled(
+		holdId: string,
+		unbilled: { kind: string; intent: unknown } & Record<string, unknown>,
+	): boolean {
 		this.requireTx("recordUnbilled");
-		const r = this.db
-			.prepare(
-				"UPDATE hold SET incident_json = json_set(incident_json, '$.unbilled', json(?)) WHERE hold_id = ? AND incident_json IS NOT NULL AND json_extract(incident_json, '$.unbilled') IS NULL",
-			)
-			.run(JSON.stringify(unbilled), holdId);
-		return Number(r.changes) === 1;
+		const row = this.db.prepare("SELECT incident_json FROM hold WHERE hold_id = ?").get(holdId) as
+			| { incident_json: string | null }
+			| undefined;
+		if (row === undefined || row.incident_json === null) return false;
+		const incident = JSON.parse(row.incident_json) as Record<string, unknown>;
+		const prior = incident.unbilled;
+		const list: Array<Record<string, unknown>> = Array.isArray(prior)
+			? (prior as Array<Record<string, unknown>>)
+			: prior === undefined || prior === null
+				? []
+				: [prior as Record<string, unknown>];
+		const key = (e: { kind?: unknown; intent?: unknown }) =>
+			JSON.stringify([e.kind, e.intent ?? null]);
+		if (list.some((e) => key(e) === key(unbilled))) return false;
+		incident.unbilled = [...list, unbilled];
+		this.db
+			.prepare("UPDATE hold SET incident_json = ? WHERE hold_id = ?")
+			.run(JSON.stringify(incident), holdId);
+		return true;
 	}
 
 	/**
@@ -1064,6 +1125,36 @@ export class HoldJournal {
 				"UPDATE hold SET incident_json = json_set(incident_json, '$.late_charged_on_ledger', ?) WHERE hold_id = ? AND incident_json IS NOT NULL AND json_extract(incident_json, '$.late_charged_on_ledger') IS NULL",
 			)
 			.run(amount, holdId);
+		return Number(r.changes) === 1;
+	}
+
+	/**
+	 * Incident rows with a late settlement RECORDED but not known to be on the ledger: the sweep
+	 * probes the ledger for them (#188 / #185 LOW r4), because chargeLate never charges an
+	 * incident row and a crash between the charge landing and its mark leaves this exact state.
+	 */
+	lateRecordedOnIncident(): HoldRow[] {
+		return this.read(
+			(db) =>
+				db
+					.prepare(
+						"SELECT * FROM hold WHERE incident_json IS NOT NULL AND late_state = 'recorded' AND json_extract(incident_json, '$.late_charged_on_ledger') IS NULL",
+					)
+					.all() as unknown as RawRow[],
+		).map(toRow);
+	}
+
+	/**
+	 * The sweep probed the ledger and found NO late charge for this incident row: record when
+	 * (overwritten by every later probe; superseded once a probe finds it). Inside {@link writeTx}.
+	 */
+	recordLateAbsentOnIncident(holdId: string, atMs: number): boolean {
+		this.requireTx("recordLateAbsentOnIncident");
+		const r = this.db
+			.prepare(
+				"UPDATE hold SET incident_json = json_set(incident_json, '$.late_absent_from_ledger_at', ?) WHERE hold_id = ? AND incident_json IS NOT NULL AND json_extract(incident_json, '$.late_charged_on_ledger') IS NULL",
+			)
+			.run(atMs, holdId);
 		return Number(r.changes) === 1;
 	}
 
