@@ -557,10 +557,20 @@ export class HoldJournal {
 					return { admitted: false, reason: "hold_expired", existing: true };
 				return { admitted: true, existing: true };
 			}
+			// Nothing is placed for a hold whose lifetime has already passed.
+			if (this.now() >= input.ttlAt)
+				return { admitted: false, reason: "hold_expired", existing: false };
 			const debt = this.debtOf(input.budgetId);
 			const available = await this.bounded("availableCredit", () =>
 				input.availableCredit(input.holdId),
 			);
+			// A malformed balance (NaN, negative, fractional) would make the comparison below
+			// false and admit past the debt limit: fail closed before anything is placed.
+			if (!Number.isSafeInteger(available) || available < 0) {
+				throw new TypeError(
+					`hold journal: availableCredit must return a non-negative safe integer, got ${String(available)}`,
+				);
+			}
 			if (available - debt < input.amount) {
 				return { admitted: false, reason: "budget_exceeded", existing: false };
 			}

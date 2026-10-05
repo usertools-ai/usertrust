@@ -506,6 +506,47 @@ describe("#167: reserve's contract — validated input, the same hold only, and 
 		expect(j.get("in-time")?.state).toBe("open");
 	});
 
+	it("#167 connector P1: a fresh reservation whose ttlAt has already passed places nothing and writes no row", async () => {
+		const { j } = fresh({ now: () => 1_000 });
+		let placed = 0;
+		let asked = 0;
+		await expect(
+			j.reserve({
+				holdId: "dead",
+				budgetId: "b",
+				amount: 100,
+				ttlAt: 1_000,
+				availableCredit: () => {
+					asked++;
+					return 1e9;
+				},
+				placeHold: () => void placed++,
+			}),
+		).resolves.toEqual({ admitted: false, reason: "hold_expired", existing: false });
+		expect([placed, asked]).toEqual([0, 0]);
+		expect(j.get("dead")).toBeUndefined();
+	});
+
+	it("#167 connector P2: an availableCredit that is not a non-negative safe integer fails closed — nothing placed, no row", async () => {
+		for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY, "100" as unknown as number]) {
+			const { j } = fresh();
+			let placed = 0;
+			await expect(
+				j.reserve({
+					holdId: "h",
+					budgetId: "b",
+					amount: 100,
+					ttlAt: 1_000,
+					availableCredit: () => bad,
+					placeHold: () => void placed++,
+				}),
+				String(bad),
+			).rejects.toThrow(/availableCredit must return a non-negative safe integer/);
+			expect(placed, String(bad)).toBe(0);
+			expect(j.get("h"), String(bad)).toBeUndefined();
+		}
+	});
+
 	it("availableCredit is told WHICH hold is reserving (it must exclude that hold's own orphaned transfer)", async () => {
 		const { j } = fresh();
 		const seen: string[] = [];
@@ -757,9 +798,10 @@ describe("#167: an abandoned placement may still land — `voiding` waits out th
 		});
 
 	it("P1: a NOT-FOUND void before ttlAt + grace is refused — the row stays `voiding` (in flight) for a re-void", async () => {
-		let now = 1_000;
+		let now = 0; // reserved while the hold is live…
 		const { j } = fresh({ placementGraceMs: 60_000, now: () => now });
 		await expect(ambiguous(j)).rejects.toThrow("lost response");
+		now = 1_000; // …voided at ttlAt, still inside the placement horizon
 		await expect(
 			j.writeTx(() => j.cas("h1", "voiding", "voided", { terminalKind: "voided_not_found" })),
 		).rejects.toBeInstanceOf(PlacementHorizonError);
@@ -772,8 +814,10 @@ describe("#167: an abandoned placement may still land — `voiding` waits out th
 	});
 
 	it("P1: the late create LANDS after the refused not-found: the next void finds it and finalizes as voided, at any time", async () => {
-		const { j } = fresh({ placementGraceMs: 60_000, now: () => 1_000 });
+		let now = 0; // reserved while the hold is live…
+		const { j } = fresh({ placementGraceMs: 60_000, now: () => now });
 		await expect(ambiguous(j)).rejects.toThrow("lost response");
+		now = 1_000; // …voided at ttlAt, still inside the placement horizon
 		await expect(
 			j.writeTx(() => j.cas("h1", "voiding", "voided", { terminalKind: "voided_not_found" })),
 		).rejects.toBeInstanceOf(PlacementHorizonError);
