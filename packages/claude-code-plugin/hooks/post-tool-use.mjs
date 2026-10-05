@@ -69,6 +69,12 @@ try {
 			usageSource: "estimated",
 		});
 		if (response.status === 200) {
+			if (response.json?.settled === false) {
+				// The server's ledger post was ambiguous: the hold is spent either way.
+				process.stderr.write(
+					`usertrust: settle ${entry.transferId} — the ledger post is ambiguous (settled: false); the usage may be unrecorded\n`,
+				);
+			}
 			await clearPending(sessionId, agentId, entry.entryKey);
 		} else {
 			process.stderr.write(

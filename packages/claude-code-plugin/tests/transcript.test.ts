@@ -704,8 +704,10 @@ describe("idempotency and concurrency", () => {
 			first: true,
 			late: false,
 			ownerAfterLate: "A",
-			bothWon: 0,
-			noneWon: 0,
+			// One holder: the second reclaimer waits out the first's mutex, then finds
+			// the lock no longer the one it judged stale.
+			won: [true, false],
+			ownerAfterRace: "B",
 		});
 	});
 });
@@ -975,6 +977,18 @@ describe("estimate holds", () => {
 		});
 		// The transcript is never read and no transcript state is created.
 		expect(await readdir(stateDir)).toEqual([]);
+	});
+
+	it("an estimate settle whose receipt says settled: false says the usage may be unrecorded", async () => {
+		await startServer((path, body) =>
+			path === "/v1/settle" ? { status: 200, json: { settled: false } } : okResponder(path, body),
+		);
+		const env = { UT_CC_USAGE: "estimate" };
+		await run("pre-tool-use.mjs", preInput("tu_1"), env);
+		const post = await run("post-tool-use.mjs", postInput("tu_1"), env);
+		expect(post.stderr).toContain("may be unrecorded");
+		// The hold is spent: its file goes, as on any 200.
+		expect(await holdFiles()).toEqual([]);
 	});
 
 	it("a dead server never blocks or throws out of a settle point", async () => {
