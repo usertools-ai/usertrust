@@ -9,6 +9,7 @@
  * semantics are enforced via advisory file lock + in-process async mutex.
  */
 
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
 	closeSync,
@@ -428,8 +429,17 @@ function createLockAtomically(lockPath: string, content: string, writerId: strin
 			linkSync(tmp, lockPath);
 			return true;
 		} catch (err: unknown) {
-			if (err instanceof Error && "code" in err && (err as { code?: string }).code === "EEXIST") {
-				return false;
+			const code =
+				err instanceof Error && "code" in err ? (err as { code?: string }).code : undefined;
+			if (code === "EEXIST") return false;
+			if (code === "EPERM" || code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "ENOSYS") {
+				// #196 r1 P3: the lock is created by hard link so it is never visible half-written.
+				// Filesystems without link() (exFAT/FAT, some network and FUSE mounts) cannot host a
+				// vault's writer — fail closed and say why (LIMITATIONS.md), never fall back to the racy
+				// O_EXCL-then-write this replaced.
+				throw new Error(
+					`Audit writer lock cannot be created: this filesystem does not support hard links (${code}). A vault's audit directory must live on a filesystem with link() — see LIMITATIONS.md. Lock file: ${lockPath}`,
+				);
 			}
 			throw err;
 		}
@@ -445,36 +455,52 @@ function createLockAtomically(lockPath: string, content: string, writerId: strin
 /**
  * This boot's identity, recorded in the lock (#194.4): a PID from a PREVIOUS boot says nothing
  * about this one — after a reboot the PID may be reused by an unrelated live process, and the
- * stale lock would read as held forever. Linux: the kernel's boot id; everywhere: the boot time
- * (seconds), derived from the uptime.
+ * stale lock would read as held forever.
+ *
+ * ONLY an EXACT per-boot id may reclaim a lock (#196 r1 P1): Linux's
+ * `/proc/sys/kernel/random/boot_id`, macOS's `sysctl kern.bootsessionuuid`. The uptime-derived
+ * boot time is still recorded, for diagnosis only — it moves with every wall-clock step, and
+ * reclaiming a lock on it deleted a LIVE writer's lock after a clock adjustment of more than the
+ * old 30 s tolerance, forking the chain. Read once per process: a boot id cannot change while
+ * this process lives.
  */
-function bootIdentity(): { bootId?: string; bootTime: number } {
-	let bootId: string | undefined;
+let cachedBootId: string | null | undefined;
+function exactBootId(): string | undefined {
+	if (cachedBootId !== undefined) return cachedBootId ?? undefined;
+	let id: string | undefined;
 	try {
-		bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim() || undefined;
+		if (process.platform === "linux") {
+			id = readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim() || undefined;
+		} else if (process.platform === "darwin") {
+			id =
+				execFileSync("/usr/sbin/sysctl", ["-n", "kern.bootsessionuuid"], {
+					encoding: "utf-8",
+					timeout: 2_000,
+					stdio: ["ignore", "pipe", "ignore"],
+				}).trim() || undefined;
+		}
 	} catch {
-		bootId = undefined;
+		id = undefined; // unknown → the PID probe decides (never a time estimate)
 	}
-	const bootTime = Math.round(Date.now() / 1000 - uptime());
+	cachedBootId = id ?? null;
+	return id;
+}
+
+function bootIdentity(): { bootId?: string; bootTime: number } {
+	const bootId = exactBootId();
+	const bootTime = Math.round(Date.now() / 1000 - uptime()); // diagnostic only
 	return bootId === undefined ? { bootTime } : { bootId, bootTime };
 }
 
-/** Boot-time tolerance (s): the uptime-derived boot time jitters with clock adjustments. */
-const BOOT_TIME_TOLERANCE_S = 30;
-
 /**
- * Was this lock written in a PREVIOUS boot? Defined positively: both carry a boot id and they
- * differ; or the lock carries a boot time more than the tolerance away from this boot's. A lock
- * with neither (written before #194) is judged by its PID alone, as before.
+ * Was this lock written in a PREVIOUS boot? ONLY when the lock and this boot both carry an EXACT
+ * boot id and they differ. Anything else — no id on either side, a pre-#194 lock, a boot time
+ * however far off — is NOT a previous-boot verdict: the `kill(pid, 0)` probe decides, and a live
+ * PID holds (a reboot-reused PID then holds too, as before #194: fail-closed, never a fork).
  */
 function fromPreviousBoot(lock: { bootId?: unknown; bootTime?: unknown }): boolean {
-	const now = bootIdentity();
-	if (typeof lock.bootId === "string" && now.bootId !== undefined)
-		return lock.bootId !== now.bootId;
-	if (typeof lock.bootTime === "number") {
-		return Math.abs(lock.bootTime - now.bootTime) > BOOT_TIME_TOLERANCE_S;
-	}
-	return false;
+	const now = exactBootId();
+	return typeof lock.bootId === "string" && now !== undefined && lock.bootId !== now;
 }
 
 // AUD-459: fd is closed immediately after writing PID content.

@@ -202,7 +202,7 @@ interface ParsedEvent {
  * can repaint the verdict line it appears on. Substitutes rather than deletes, so
  * a scrubbed byte stays visible as evidence.
  */
-function scrubForError(raw: string): string {
+export function scrubForError(raw: string): string {
 	let out = "";
 	for (const ch of raw) {
 		const code = ch.codePointAt(0) as number;

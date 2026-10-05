@@ -75,14 +75,48 @@ describe("#194.3: a lock is created whole, and an incomplete one reads as HELD",
 	});
 });
 
-describe("#194.4: a lock from a PREVIOUS boot is stale, whatever its PID now names", () => {
-	it("a live PID recorded in a previous boot (boot time an hour off): reclaimed", () => {
+describe("#194.4 / #196 r1: a lock from a PREVIOUS boot (by EXACT boot id) is stale; a time estimate never reclaims", () => {
+	it("#196 r1 P1: a live PID whose recorded boot TIME is an hour off (a clock step), same or no boot id: HELD — never reclaimed on a time estimate", () => {
 		const boot = currentBoot();
 		const v = vault();
-		writeFileSync(lockOf(v), JSON.stringify({ pid: process.ppid, bootTime: boot.bootTime - 3600 }));
-		const w = createAuditWriter(v, { lockAtCreate: true });
-		releases.push(() => w.release());
-		expect(JSON.parse(readFileSync(lockOf(v), "utf-8"))).toMatchObject({ pid: process.pid });
+		// The boot-time estimate moves with every wall-clock step; reclaiming on it deleted a LIVE
+		// lock and forked the chain. Only an exact boot id may reclaim.
+		writeFileSync(
+			lockOf(v),
+			JSON.stringify({
+				pid: process.ppid,
+				...(boot.bootId === undefined ? {} : { bootId: boot.bootId }),
+				bootTime: boot.bootTime - 3600,
+			}),
+		);
+		expect(() => createAuditWriter(v, { lockAtCreate: true })).toThrow(AuditWriterLockHeldError);
+	});
+
+	it("a live PID recorded under a DIFFERENT exact boot id: reclaimed (where this host has an exact id)", () => {
+		const boot = currentBoot();
+		const v = vault();
+		writeFileSync(
+			lockOf(v),
+			JSON.stringify({
+				pid: process.ppid,
+				bootId: "00000000-0000-0000-0000-000000000000",
+				bootTime: boot.bootTime,
+			}),
+		);
+		if (boot.bootId === undefined) {
+			// No exact id on this host: the probe decides, and a live PID holds.
+			expect(() => createAuditWriter(v, { lockAtCreate: true })).toThrow(AuditWriterLockHeldError);
+		} else {
+			const w = createAuditWriter(v, { lockAtCreate: true });
+			releases.push(() => w.release());
+			expect(JSON.parse(readFileSync(lockOf(v), "utf-8"))).toMatchObject({ pid: process.pid });
+		}
+	});
+
+	it("this host records an EXACT boot id on linux and darwin", () => {
+		if (process.platform === "linux" || process.platform === "darwin") {
+			expect(typeof currentBoot().bootId).toBe("string");
+		}
 	});
 
 	it("the same live PID recorded in THIS boot: held", () => {

@@ -94,6 +94,19 @@ If you need multiple concurrent workers, give each its own vault. Merging or
 centralizing chains is a control-plane concern, not something the core SDK
 pretends to solve today.
 
+**A lock is reclaimed only on evidence, never on a time estimate.** A lock left by a
+crashed writer is reclaimed when its PID is dead, or when it was written in a previous
+boot — judged ONLY by the kernel's exact per-boot id (`/proc/sys/kernel/random/boot_id` on
+Linux, `kern.bootsessionuuid` on macOS). Where no exact boot id exists, a lock whose PID is
+alive is held, even if that PID was reused after a reboot: the operator removes it by hand.
+That is the safe direction, because a wrongly reclaimed live lock forks the chain.
+
+**The vault's audit directory must support hard links.** The writer lock is created by
+hard-linking a fully written temp file into place, so no starter ever sees a half-written
+lock. Filesystems without `link()` — exFAT/FAT, and some network and FUSE mounts — cannot
+host a vault: the writer refuses to start and says so. It does not fall back to a create-then-write
+lock, which reintroduces the race in which a live lock is read as corrupt and deleted.
+
 ## 6. Anomaly governance ships conservative defaults and expects calibration
 
 Anomaly detection is opt-in (`anomaly.enabled: true`) and tuned to catch
