@@ -22,7 +22,7 @@
  * reservation, never strand a posted hold in `settling` with its overage uncharged.
  */
 
-import { AuditChainUnverifiableError, type AuditPort, type HoldEventKind } from "./audit.js";
+import { type AuditPort, classifyAuditFailure, type HoldEventKind } from "./audit.js";
 import {
 	type AuditReset,
 	type EventSlot,
@@ -546,6 +546,30 @@ export class HoldEngine {
 			throw new Error(`hold engine: the audit chain is ${st.state}, not broken — nothing to reset`);
 		}
 		const full = await audit.verifyFull(null);
+		// IDEMPOTENT (#191 r2 P3): a reset that died after appending its event and before
+		// journaling it left that event on the chain, after the broken checkpoint. Reuse it — never
+		// append a second reset for the same finding.
+		const after = st.checkpoint?.sequence ?? 0;
+		const orphan = [...full.tail]
+			.reverse()
+			.find((e) => e.kind === "openshell.audit.reset" && e.sequence > after);
+		if (orphan !== undefined) {
+			const reset: AuditReset = {
+				at: this.now(),
+				operator: by.operator,
+				reason: by.reason,
+				previous: st.checkpoint,
+				verifiedHead: full.checkpoint,
+				resetEvent: { hash: orphan.hash, sequence: orphan.sequence },
+			};
+			await this.journal.writeTx(() =>
+				this.journal.applyAuditReset(reset, full.tail, full.checkpoint),
+			);
+			this.fullVerifiedAt = this.now();
+			return reset;
+		}
+		// The writer's cached tail may predate the repair (#191 r2 P2): re-read it before appending.
+		audit.resync();
 		const rec = await audit.record(
 			"openshell.audit.reset",
 			full.checkpoint.sequence,
@@ -887,14 +911,24 @@ export class HoldEngine {
 				report.auditVerify = "broken";
 			} else if (this.fullVerifiedAt === null || now - this.fullVerifiedAt >= this.fullVerifyMs) {
 				try {
-					await audit.verifyFull(st.state === "valid" ? st.checkpoint : null);
+					const full = await audit.verifyFull(st.state === "valid" ? st.checkpoint : null);
+					// `unset` → `valid` (#191 r2 P3): a genesis verify that succeeded establishes the
+					// checkpoint, so the first record does not verify from genesis again.
+					if (st.state === "unset") {
+						await this.journal.writeTx(() =>
+							this.journal.establishAuditCheckpoint(full.tail, full.checkpoint),
+						);
+					}
 					this.fullVerifiedAt = now;
 					report.auditVerify = "ok";
 				} catch (error) {
-					const definite =
-						error instanceof AuditChainUnverifiableError && error.scope === "history";
+					// THE classifier: `history` (a finding, or anything not positively transient or
+					// tail) → broken; `tail` / `transient` → `error`, retried, nothing changed.
+					const definite = classifyAuditFailure(error) === "history";
 					if (definite) {
-						await this.journal.writeTx(() => this.journal.markAuditBroken(error.message));
+						await this.journal.writeTx(() =>
+							this.journal.markAuditBroken(error instanceof Error ? error.message : String(error)),
+						);
 					}
 					report.auditVerify = definite ? "broken" : "error";
 					report.errors.push({ holdId: "(audit chain)", error });

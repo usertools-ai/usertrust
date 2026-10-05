@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	appendFileSync,
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -26,6 +27,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	AuditChainUnverifiableError,
 	type AuditPort,
+	AuditTransientError,
+	classifyAuditFailure,
 	HOLD_EVENT_ACTOR,
 	type HoldEventKind,
 	type RefusalScope,
@@ -112,12 +115,17 @@ class FakeAudit implements AuditPort {
 			this.beforeAppend?.();
 			const fail = this.failNext;
 			this.failNext = null;
-			if (fail === "refuse") throw new Error("audit append refused");
+			// An append failure is an I/O failure — modelled as the errno a disk would raise, which
+			// THE classifier reads as transient (never a finding about the chain).
+			if (fail === "refuse")
+				throw Object.assign(new Error("EIO: audit append refused"), { code: "EIO" });
 			const sequence = this.events.length + 1;
 			const ev = { hash: `h${sequence}`, sequence, kind, data };
 			this.events.push(ev);
 			this.appends++;
-			if (fail === "die_after") throw new Error("process died after the append");
+			if (fail === "die_after") {
+				throw Object.assign(new Error("EIO: process died after the append"), { code: "EIO" });
+			}
 			return {
 				event: { hash: ev.hash, sequence },
 				tail: [...tail, { kind, holdId: data.holdId, sequence, hash: ev.hash }],
@@ -142,7 +150,7 @@ class FakeAudit implements AuditPort {
 		return {
 			checkpoint: this.cp(this.events.length),
 			tail: this.events
-				.filter((e) => e.kind.startsWith("openshell.hold."))
+				.filter((e) => e.kind.startsWith("openshell.")) // as the real port: hold events and resets
 				.map((e) => ({
 					kind: e.kind,
 					holdId: String(e.data.holdId),
@@ -150,6 +158,11 @@ class FakeAudit implements AuditPort {
 					hash: e.hash,
 				})),
 		};
+	}
+
+	resyncs = 0;
+	resync(): void {
+		this.resyncs++;
 	}
 
 	of(holdId: string, kind: HoldEventKind) {
@@ -906,20 +919,27 @@ describe("#191 r1 B: VaultAudit verifies from the checkpoint — and refuses a c
 		expect(lines(v)).toHaveLength(3);
 	});
 
-	it("the anchor exactly ONE behind at the head's predecessor (the sidecar write failed) is accepted; any other disagreement refuses", async () => {
+	it("#191 r2: an anchor BEHIND the head (repeated sidecar failures) is accepted when the chain reaches it; one whose hash is not the event's at its sequence refuses", async () => {
 		const v = vault();
 		writeChain(v, 3);
-		const second = JSON.parse(lines(v)[1] as string) as { hash: string };
-		writeFileSync(`${eventsFile(v)}.meta`, JSON.stringify({ lastHash: second.hash, sequence: 2 }));
+		const first = JSON.parse(lines(v)[0] as string) as { hash: string };
+		writeFileSync(`${eventsFile(v)}.meta`, JSON.stringify({ lastHash: first.hash, sequence: 1 }));
 		const a = VaultAudit.open(v);
 		closers.push(() => a.release());
 		expect(
 			(await a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null)).event.sequence,
 		).toBe(4);
-		writeFileSync(`${eventsFile(v)}.meta`, JSON.stringify({ lastHash: second.hash, sequence: 2 }));
+		writeFileSync(
+			`${eventsFile(v)}.meta`,
+			JSON.stringify({ lastHash: "d".repeat(64), sequence: 2 }),
+		);
 		await expect(
 			a.record("openshell.hold.reserved", 0, { holdId: "k2" }, null),
 		).rejects.toBeInstanceOf(AuditChainUnverifiableError);
+		writeFileSync(`${eventsFile(v)}.meta`, JSON.stringify({ lastHash: first.hash, sequence: 9 }));
+		await expect(a.record("openshell.hold.reserved", 0, { holdId: "k2" }, null)).rejects.toThrow(
+			/ahead of the chain/,
+		);
 	});
 
 	it("a TORN final line (no newline) refuses", async () => {
@@ -1052,6 +1072,200 @@ describe("#191 r2 (reviewer2's P1): a CONSISTENT rewrite of verified history is 
 		await expect(
 			engine.reserve({ holdKey: "k2", budgetId: "b", amount: 10 }),
 		).rejects.toBeInstanceOf(AuditChainBrokenError);
+	});
+});
+
+describe("#191 r3: THE classifier — every input class to exactly one reading", () => {
+	const errno = (code: string) => Object.assign(new Error(`${code}: x`), { code });
+	const named = (name: string) => Object.assign(new Error(name), { name });
+	const ROWS: Array<[string, unknown, "history" | "tail" | "transient"]> = [
+		["a history-scoped refusal", new AuditChainUnverifiableError("x", "history"), "history"],
+		["a tail-scoped refusal", new AuditChainUnverifiableError("x", "tail"), "tail"],
+		["AuditTransientError", new AuditTransientError("x", "EIO"), "transient"],
+		...[
+			"EACCES",
+			"EPERM",
+			"EIO",
+			"EAGAIN",
+			"EBUSY",
+			"EINTR",
+			"EMFILE",
+			"ENFILE",
+			"ENOMEM",
+			"ENOSPC",
+			"EROFS",
+			"ETIMEDOUT",
+		].map((c) => [`errno ${c}`, errno(c), "transient"] as [string, unknown, "transient"]),
+		["the journal's deadline", named("LedgerDeadlineError"), "transient"],
+		["the journal busy", named("JournalBusyError"), "transient"],
+		["an unknown errno (ENOTDIR)", errno("ENOTDIR"), "history"],
+		["an unknown errno (EISDIR)", errno("EISDIR"), "history"],
+		["a TypeError (a shape the code did not expect)", new TypeError("x"), "history"],
+		["a plain Error", new Error("x"), "history"],
+		["a thrown non-Error", "boom", "history"],
+		["undefined", undefined, "history"],
+	];
+	for (const [name, err, want] of ROWS) {
+		it(`${name} → ${want}`, () => {
+			expect(classifyAuditFailure(err)).toBe(want);
+		});
+	}
+});
+
+describe("#191 r3: every line SHAPE is a refusal with a position — never a TypeError", () => {
+	const SHAPES: Array<[string, string]> = [
+		["null", "null"],
+		["an array", "[]"],
+		["a string", '"x"'],
+		["a number", "42"],
+		["an empty object", "{}"],
+		["no previousHash", JSON.stringify({ hash: "a".repeat(64), sequence: 1 })],
+		[
+			"a non-integer sequence",
+			JSON.stringify({ hash: "a".repeat(64), previousHash: GENESIS_HASH, sequence: 1.5 }),
+		],
+		["a non-hex hash", JSON.stringify({ hash: "zz", previousHash: GENESIS_HASH, sequence: 1 })],
+	];
+	for (const [name, line] of SHAPES) {
+		it(`${name}, BEFORE the checkpoint (rewritten, padded): verifyFull refuses as history`, async () => {
+			const v = vault();
+			writeChain(v, 3);
+			const a = VaultAudit.open(v);
+			closers.push(() => a.release());
+			const rec = await a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null);
+			const ls = lines(v);
+			const width = (ls[0] as string).length;
+			ls[0] = line.length < width ? line + " ".repeat(width - line.length) : line;
+			writeFileSync(eventsFile(v), `${ls.join("\n")}\n`);
+			const err = await a.verifyFull(rec.checkpoint).catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(AuditChainUnverifiableError);
+			expect(classifyAuditFailure(err)).toBe("history");
+		});
+		it(`${name}, AFTER the checkpoint: the record refuses as tail`, async () => {
+			const v = vault();
+			writeChain(v, 2);
+			const a = VaultAudit.open(v);
+			closers.push(() => a.release());
+			const rec = await a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null);
+			appendFileSync(eventsFile(v), `${line}\n`);
+			const err = await a
+				.record("openshell.hold.settled", rec.event.sequence, { holdId: "k1" }, rec.checkpoint)
+				.catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(AuditChainUnverifiableError);
+			expect(classifyAuditFailure(err)).toBe("tail");
+		});
+	}
+});
+
+describe("#191 r3: I/O is read from a real stat/open — never existsSync", () => {
+	const root = typeof process.getuid === "function" && process.getuid() === 0;
+	it.skipIf(root)(
+		"an UNREADABLE log (EACCES) is transient — not 'the log is gone' — and changes nothing",
+		async () => {
+			const v = vault();
+			writeChain(v, 2);
+			const a = VaultAudit.open(v);
+			closers.push(() => a.release());
+			const rec = await a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null);
+			chmodSync(eventsFile(v), 0o000);
+			closers.push(() => chmodSync(eventsFile(v), 0o600));
+			const full = await a.verifyFull(rec.checkpoint).catch((e: unknown) => e);
+			expect(full).toBeInstanceOf(AuditTransientError);
+			const recd = await a
+				.record("openshell.hold.settled", 2, { holdId: "k1" }, rec.checkpoint)
+				.catch((e: unknown) => e);
+			expect(classifyAuditFailure(recd)).toBe("transient");
+		},
+	);
+
+	it.skipIf(root)(
+		"a log whose STAT fails (EACCES: the audit dir readable but not searchable) is transient — never 'the log is gone'",
+		async () => {
+			const v = vault();
+			writeChain(v, 2);
+			const a = VaultAudit.open(v);
+			closers.push(() => a.release());
+			const rec = await a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null);
+			const dir = join(v, VAULT_DIR, "audit");
+			chmodSync(dir, 0o600); // readdir works (r); stat on an entry does not (no x)
+			closers.push(() => chmodSync(dir, 0o700));
+			const err = await a.verifyFull(rec.checkpoint).catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(AuditTransientError);
+		},
+	);
+
+	it("a log path that is a DIRECTORY is not transient (an unknown errno fails toward broken)", async () => {
+		const v = vault();
+		mkdirSync(eventsFile(v), { recursive: true });
+		const a = VaultAudit.open(v);
+		closers.push(() => a.release());
+		const err = await a.verifyFull(null).catch((e: unknown) => e);
+		expect(classifyAuditFailure(err)).toBe("history");
+	});
+});
+
+describe("#191 r3: the engine maps failures through THE classifier", () => {
+	it("a TypeError from the port's full verify (unrecognised) → broken; an EIO → error, unchanged", async () => {
+		const { journal, audit, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		audit.verifyThrowsOnce = Object.assign(new Error("EIO: read"), { code: "EIO" });
+		expect((await engine.sweep()).auditVerify).toBe("error");
+		expect(journal.auditState()).toMatchObject({ state: "valid" });
+		audit.verifyThrowsOnce = new TypeError("Cannot destructure property 'hash' of null");
+		expect((await engine.sweep()).auditVerify).toBe("broken");
+		expect(journal.auditState()).toMatchObject({ state: "broken" });
+	});
+
+	it("a successful startup verify ESTABLISHES the checkpoint (unset → valid) — no record needed", async () => {
+		const { journal, engine } = setup();
+		expect(journal.auditState()).toEqual({ state: "unset" });
+		expect((await engine.sweep()).auditVerify).toBe("ok");
+		expect(journal.auditState()).toMatchObject({ state: "valid" });
+	});
+});
+
+describe("#191 r3: the operator reset — refreshed writer, idempotent", () => {
+	it("a chain REPAIRED to a new valid head under the LIVE port: the reset re-reads the writer's tail and its event chains onto the new head", async () => {
+		const v = vault();
+		writeChain(v, 2);
+		const a = VaultAudit.open(v);
+		closers.push(() => a.release());
+		const clock = { now: 1_000 };
+		const journal = openJournal(join(tmp("openshell-r3-"), "holds.db"), clock);
+		const ledger = new FakeLedger();
+		ledger.balances.set("b", 1_000);
+		const engine = new HoldEngine(journal, ledger, {
+			holdTtlSeconds: 900,
+			now: () => clock.now,
+			audit: a,
+		});
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		rewriteConsistently(v, (e) => {
+			(e.data as { amount?: number }).amount = 1;
+		});
+		expect((await engine.sweep()).auditVerify).toBe("broken");
+		const reset = await engine.resetAuditChain({ operator: "ops", reason: "repaired" });
+		expect(reset.resetEvent.sequence).toBe(4);
+		expect(
+			verifyVault(join(v, VAULT_DIR)).valid,
+			"the reset event chains onto the repaired head",
+		).toBe(true);
+		expect(journal.auditState()).toMatchObject({ state: "valid" });
+	});
+
+	it("a reset that died after appending its event is FINISHED by the next reset — never a second reset event", async () => {
+		const { journal, audit, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		audit.broken = true;
+		await engine.sweep();
+		audit.broken = false;
+		// The orphan: a reset event on the chain after the broken checkpoint, never journaled.
+		await audit.record("openshell.audit.reset", 0, { holdId: "(audit chain)" }, null);
+		const before = audit.events.length;
+		await engine.resetAuditChain({ operator: "ops", reason: "retry" });
+		expect(audit.events.length, "no second reset event").toBe(before);
+		expect(audit.resyncs, "reused, so no append and no resync").toBe(0);
+		expect(journal.auditState()).toMatchObject({ state: "valid" });
 	});
 });
 

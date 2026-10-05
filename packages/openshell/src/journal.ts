@@ -39,6 +39,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import type { DatabaseSync } from "node:sqlite";
+import { classifyAuditFailure } from "./audit.js";
 
 /** The Node version the journal needs (`engines.node` in package.json says the same). */
 export const MIN_NODE_FOR_JOURNAL = "22.13.0";
@@ -291,15 +292,6 @@ export interface ChainRecord {
 	event: RecordedEvent;
 	tail: ChainHoldEvent[];
 	checkpoint: ChainCheckpoint;
-}
-
-/** A refusal whose scope is `history` (see audit.ts's RefusalScope), recognised structurally. */
-function isHistoryRefusal(err: unknown): boolean {
-	return (
-		err instanceof Error &&
-		err.name === "AuditChainUnverifiableError" &&
-		(err as Error & { scope?: unknown }).scope === "history"
-	);
 }
 
 /**
@@ -1267,6 +1259,9 @@ export class HoldJournal {
 		slot: EventSlot,
 		produce: (row: HoldRow, from: ChainCheckpoint | null) => Promise<ChainRecord>,
 	): Promise<"recorded" | "already" | "not_eligible"> {
+		// Only a failure of `produce` (the port, or its deadline) is classified: the journal's own
+		// errors (busy, SQLite) say nothing about the chain and never mark it broken.
+		let produceFailure: { err: unknown } | undefined;
 		return this.runTx(async () => {
 			const st = this.auditState();
 			if (st.state === "broken") throw new AuditChainBrokenError(st.reason);
@@ -1287,9 +1282,15 @@ export class HoldJournal {
 					predecessor &&
 					(row.lateState === "charged" || row.lateState === "zero"));
 			if (!eligible) return "not_eligible" as const;
-			const rec = await this.bounded(`audit ${slot} event`, () =>
-				produce(row, st.state === "valid" ? st.checkpoint : null),
-			);
+			let rec: ChainRecord;
+			try {
+				rec = await this.bounded(`audit ${slot} event`, () =>
+					produce(row, st.state === "valid" ? st.checkpoint : null),
+				);
+			} catch (err) {
+				produceFailure = { err };
+				throw err;
+			}
 			for (const e of rec.tail) this.absorb(e);
 			const sql =
 				slot === "reserved"
@@ -1301,8 +1302,9 @@ export class HoldJournal {
 			this.setMeta("audit_checkpoint", JSON.stringify(rec.checkpoint));
 			return "recorded" as const;
 		}).catch(async (err: unknown) => {
-			// A DEFINITE finding about verified history: the checkpoint goes `broken` (kept).
-			if (isHistoryRefusal(err)) {
+			// THE classifier (audit.ts): a `history` reading — a definite finding, or any failure
+			// not positively recognised as transient or tail — moves the checkpoint to `broken`.
+			if (produceFailure?.err === err && classifyAuditFailure(err) === "history") {
 				await this.writeTx(() => this.markAuditBroken((err as Error).message));
 			}
 			throw err;
@@ -1348,6 +1350,23 @@ export class HoldJournal {
 				"INSERT INTO meta (key, value) VALUES ('audit_broken', ?) ON CONFLICT (key) DO NOTHING",
 			)
 			.run(JSON.stringify({ reason, at: this.now() }));
+	}
+
+	/**
+	 * `unset` → `valid` from a successful FULL verification (#191 r2 P3): the sweep's genesis
+	 * verify establishes the checkpoint, absorbing every hold event, so the first record does not
+	 * verify from genesis again under the write lock. Only while still `unset` (a record may have
+	 * established it meanwhile; `broken` is never left this way). Must run inside {@link writeTx}.
+	 */
+	establishAuditCheckpoint(tail: ChainHoldEvent[], checkpoint: ChainCheckpoint): boolean {
+		this.requireTx("establishAuditCheckpoint");
+		const present = this.db
+			.prepare("SELECT key FROM meta WHERE key IN ('audit_checkpoint', 'audit_broken')")
+			.all();
+		if (present.length > 0) return false;
+		for (const e of tail) this.absorb(e);
+		this.setMeta("audit_checkpoint", JSON.stringify(checkpoint));
+		return true;
 	}
 
 	/**

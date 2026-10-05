@@ -23,12 +23,12 @@ import { createHash } from "node:crypto";
 import {
 	closeSync,
 	createReadStream,
-	existsSync,
 	fstatSync,
 	openSync,
 	readdirSync,
 	readFileSync,
 	readSync,
+	statSync,
 } from "node:fs";
 import { join } from "node:path";
 import {
@@ -79,6 +79,11 @@ export interface AuditPort {
 	verifyFull(
 		checkpoint: ChainCheckpoint | null,
 	): Promise<{ checkpoint: ChainCheckpoint; tail: ChainHoldEvent[] }>;
+	/**
+	 * Forget the writer's cached tail, so the next append re-reads the log (#191 r2): an operator
+	 * reset after the chain was repaired or rewritten under this live port. The lock is kept.
+	 */
+	resync(): void;
 }
 
 /**
@@ -103,11 +108,119 @@ export class AuditChainUnverifiableError extends Error {
 	}
 }
 
+/**
+ * An I/O failure that is NOT a finding about the chain: an errno on the allow-list below, read
+ * from a real `stat`/`open`/`read`/`readdir` (never `existsSync`, which answers `false` for
+ * EACCES and EIO as for ENOENT). Nothing changes; the caller retries.
+ */
+export class AuditTransientError extends Error {
+	constructor(
+		why: string,
+		readonly code: string,
+	) {
+		super(`openshell audit: a transient I/O failure (${code}) — ${why}; retried, nothing changed`);
+		this.name = "AuditTransientError";
+	}
+}
+
+/** The ONLY errnos read as transient (#191 r2): environment, not evidence. Anything else is not. */
+export const TRANSIENT_ERRNOS: ReadonlySet<string> = new Set([
+	"EACCES",
+	"EPERM",
+	"EIO",
+	"EAGAIN",
+	"EBUSY",
+	"EINTR",
+	"EMFILE",
+	"ENFILE",
+	"ENOMEM",
+	"ENOSPC",
+	"EROFS",
+	"ETIMEDOUT",
+]);
+
+/**
+ * THE classifier (#191 r2): every failure a record or a verification can meet maps to exactly
+ * one of three readings, defined POSITIVELY —
+ *  - `tail`: an {@link AuditChainUnverifiableError} scoped `tail` (the bytes after the
+ *    checkpoint): this record is refused, nothing changes;
+ *  - `transient`: an {@link AuditTransientError}, an error whose errno is on
+ *    {@link TRANSIENT_ERRNOS}, or the journal's own deadline / busy errors: retried, nothing
+ *    changes;
+ *  - `history`: EVERYTHING ELSE — a `history`-scoped refusal, and any error not recognised
+ *    above (a TypeError, an unknown errno, …). An unrecognised failure fails toward `broken`.
+ */
+export function classifyAuditFailure(err: unknown): RefusalScope | "transient" {
+	if (err instanceof AuditChainUnverifiableError) return err.scope;
+	if (err instanceof AuditTransientError) return "transient";
+	if (err instanceof Error) {
+		if (err.name === "LedgerDeadlineError" || err.name === "JournalBusyError") return "transient";
+		const code = (err as NodeJS.ErrnoException).code;
+		if (typeof code === "string" && TRANSIENT_ERRNOS.has(code)) return "transient";
+	}
+	return "history";
+}
+
+/** An fs failure: transient iff its errno is on the allow-list; otherwise a `history` finding. */
+function ioFailure(err: unknown, what: string): never {
+	const code = err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
+	if (typeof code === "string" && TRANSIENT_ERRNOS.has(code))
+		throw new AuditTransientError(what, code);
+	throw new AuditChainUnverifiableError(`${what}: ${code ?? String(err)}`, "history");
+}
+
+/** ENOENT → null; an allow-listed errno → transient; anything else → `history`. */
+function statOrAbsent(path: string, what: string): { size: number; isFile: boolean } | null {
+	try {
+		const st = statSync(path);
+		return { size: st.size, isFile: st.isFile() };
+	} catch (err) {
+		if (err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT") return null;
+		return ioFailure(err, what);
+	}
+}
+
 type ChainEvent = Record<string, unknown> & {
 	hash: string;
 	previousHash: string;
 	sequence: number;
 };
+
+/**
+ * Parse one line STRICTLY into an event shape: a non-null, non-array object with a 64-hex
+ * `hash`, a string `previousHash` and a safe-integer `sequence`. Every parse or shape failure is
+ * an {@link AuditChainUnverifiableError} with the given scope — never a TypeError (#191 r2: a
+ * checkpointed line rewritten to `null` threw a TypeError that read as transient).
+ */
+function parseEvent(raw: string, where: string, scope: RefusalScope): ChainEvent {
+	let e: unknown;
+	try {
+		e = JSON.parse(raw);
+	} catch {
+		throw new AuditChainUnverifiableError(`${where} does not parse`, scope);
+	}
+	if (e === null || typeof e !== "object" || Array.isArray(e)) {
+		throw new AuditChainUnverifiableError(`${where} is not an event object`, scope);
+	}
+	const o = e as Record<string, unknown>;
+	if (
+		typeof o.hash !== "string" ||
+		!/^[0-9a-f]{64}$/.test(o.hash) ||
+		typeof o.previousHash !== "string" ||
+		!Number.isSafeInteger(o.sequence)
+	) {
+		throw new AuditChainUnverifiableError(
+			`${where} is missing or mistypes hash / previousHash / sequence`,
+			scope,
+		);
+	}
+	return o as ChainEvent;
+}
+
+function hashesToContent(e: ChainEvent): boolean {
+	const { hash, ...rest } = e;
+	return createHash("sha256").update(canonicalize(rest)).digest("hex") === hash;
+}
 
 /** One event verified as the successor of (`prevHash`, `prevSeq`): its link, sequence and hash. */
 function verifyLink(
@@ -117,25 +230,21 @@ function verifyLink(
 	scope: RefusalScope,
 ): ChainEvent {
 	const where = `sequence ${prevSeq + 1}`;
-	let e: Record<string, unknown>;
-	try {
-		e = JSON.parse(raw) as Record<string, unknown>;
-	} catch {
-		throw new AuditChainUnverifiableError(`${where} does not parse`, scope);
-	}
-	const { hash, ...rest } = e;
-	if (typeof hash !== "string" || e.previousHash !== prevHash || e.sequence !== prevSeq + 1) {
+	const e = parseEvent(raw, where, scope);
+	if (e.previousHash !== prevHash || e.sequence !== prevSeq + 1) {
 		throw new AuditChainUnverifiableError(`${where} does not follow sequence ${prevSeq}`, scope);
 	}
-	if (createHash("sha256").update(canonicalize(rest)).digest("hex") !== hash) {
+	if (!hashesToContent(e)) {
 		throw new AuditChainUnverifiableError(`${where}: its hash does not match its content`, scope);
 	}
-	return e as ChainEvent;
+	return e;
 }
 
 function holdEvent(e: ChainEvent): ChainHoldEvent | null {
 	const holdId = (e.data as { holdId?: unknown } | undefined)?.holdId;
-	if (typeof e.kind !== "string" || !e.kind.startsWith("openshell.hold.")) return null;
+	// Every openshell event: hold events (absorbed into their rows) and audit resets (found by a
+	// retried reset, never absorbed).
+	if (typeof e.kind !== "string" || !e.kind.startsWith("openshell.")) return null;
 	if (typeof holdId !== "string") return null;
 	return { kind: e.kind, holdId, sequence: e.sequence, hash: e.hash };
 }
@@ -190,11 +299,7 @@ export class VaultAudit implements AuditPort {
 		this.refuseSegments();
 		const read = this.readFrom(from);
 		// Without a checkpoint this read IS the verification of history; past one, it is the tail.
-		this.checkAnchor(
-			read.checkpoint,
-			read.headPrev,
-			from === null || from.sequence === 0 ? "history" : "tail",
-		);
+		this.checkAnchor(from, read.events, read.checkpoint);
 		this.lastScanned = read.events.length;
 		const tail = read.events.map(holdEvent).filter((e) => e !== null);
 		const found = tail.find(
@@ -241,27 +346,21 @@ export class VaultAudit implements AuditPort {
 		let pos = 0;
 		let headPrev: string | null = null;
 		if (cp !== GENESIS) {
-			const nl = buf.indexOf(0x0a);
-			let ok = nl >= 0 && cp.lineStart + nl + 1 === cp.offset;
-			if (ok) {
-				try {
-					const e = JSON.parse(buf.subarray(0, nl).toString("utf-8")) as Record<string, unknown>;
-					const { hash, ...rest } = e;
-					ok =
-						hash === cp.hash &&
-						e.sequence === cp.sequence &&
-						createHash("sha256").update(canonicalize(rest)).digest("hex") === hash;
-					headPrev = typeof e.previousHash === "string" ? e.previousHash : null;
-				} catch {
-					ok = false;
-				}
-			}
-			if (!ok) {
-				throw new AuditChainUnverifiableError(
+			const gone = () =>
+				new AuditChainUnverifiableError(
 					`the verified checkpoint (sequence ${cp.sequence}) is no longer on the chain — truncated or rewritten`,
 					"history",
 				);
+			const nl = buf.indexOf(0x0a);
+			if (nl < 0 || cp.lineStart + nl + 1 !== cp.offset) throw gone();
+			let e: ChainEvent;
+			try {
+				e = parseEvent(buf.subarray(0, nl).toString("utf-8"), "the checkpoint's line", "history");
+			} catch {
+				throw gone();
 			}
+			if (e.hash !== cp.hash || e.sequence !== cp.sequence || !hashesToContent(e)) throw gone();
+			headPrev = e.previousHash;
 			pos = nl + 1;
 		}
 		// From genesis, every line is history being verified; past a checkpoint, the tail.
@@ -291,29 +390,57 @@ export class VaultAudit implements AuditPort {
 	}
 
 	/**
-	 * The `.meta` head anchor must agree with the verified head — the two states core's writer
-	 * accepts: the anchor IS the head, or it is exactly one behind at the head's predecessor (the
-	 * log fsync'd, the sidecar write failed). No anchor: a legacy vault, as `verifyVault` allows.
-	 * An anchor ahead of the head is a truncation and refuses.
+	 * The `.meta` head anchor must agree with the verified chain (#191 r2), defined POSITIVELY:
+	 * absent (a legacy vault, as `verifyVault` allows); or at or behind the verified head, where
+	 * the event at the anchor's sequence — the checkpoint's own, or one of this read's verified
+	 * events — carries the anchor's hash; or BELOW the checkpoint, which the checkpoint already
+	 * guards (a truncation there fails the checkpoint's line). An anchor behind by several events
+	 * is accepted when the chain reaches it: it lags only by appends whose sidecar write failed.
+	 * An anchor ahead of the head, unreadable, malformed, or not on the chain refuses — `history`
+	 * when this read verifies from genesis, `tail` past a checkpoint.
 	 */
-	private checkAnchor(head: ChainCheckpoint, headPrev: string | null, scope: RefusalScope): void {
+	private checkAnchor(
+		from: ChainCheckpoint | null,
+		events: ChainEvent[],
+		head: ChainCheckpoint,
+	): void {
+		const cp = from === null || from.sequence === 0 ? GENESIS : from;
+		const scope: RefusalScope = cp === GENESIS ? "history" : "tail";
 		const metaPath = `${this.logPath}.meta`;
-		if (!existsSync(metaPath)) return;
-		let a: { lastHash?: unknown; sequence?: unknown };
+		let text: string;
 		try {
-			a = JSON.parse(readFileSync(metaPath, "utf-8")) as typeof a;
+			text = readFileSync(metaPath, "utf-8");
+		} catch (err) {
+			if (err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT") return;
+			ioFailure(err, "the .meta head anchor cannot be read");
+		}
+		let a: unknown;
+		try {
+			a = JSON.parse(text);
 		} catch {
 			throw new AuditChainUnverifiableError("the .meta head anchor does not parse", scope);
 		}
-		const isHead = a.sequence === head.sequence && a.lastHash === head.hash;
-		const oneBehind =
-			head.sequence > 0 && a.sequence === head.sequence - 1 && a.lastHash === headPrev;
-		if (!isHead && !oneBehind) {
+		const o = a as { lastHash?: unknown; sequence?: unknown } | null;
+		if (
+			o === null ||
+			typeof o !== "object" ||
+			typeof o.lastHash !== "string" ||
+			!Number.isSafeInteger(o.sequence) ||
+			(o.sequence as number) < 0
+		) {
+			throw new AuditChainUnverifiableError("the .meta head anchor is malformed", scope);
+		}
+		const seq = o.sequence as number;
+		const refuse = (why: string): never => {
 			throw new AuditChainUnverifiableError(
-				`the .meta head anchor (sequence ${String(a.sequence)}) disagrees with the verified head (sequence ${head.sequence}) — truncated or rewritten`,
+				`the .meta head anchor (sequence ${seq}) ${why} (the verified head is sequence ${head.sequence}) — truncated or rewritten`,
 				scope,
 			);
-		}
+		};
+		if (seq > head.sequence) refuse("is ahead of the chain");
+		if (seq < cp.sequence) return; // below the checkpoint: the checkpoint guards it
+		const at = seq === cp.sequence ? cp.hash : events.find((e) => e.sequence === seq)?.hash;
+		if (at === undefined || at !== o.lastHash) refuse("is not on the verified chain");
 	}
 
 	async verifyFull(
@@ -322,19 +449,29 @@ export class VaultAudit implements AuditPort {
 		this.refuseSegments();
 		const cp = checkpoint === null || checkpoint.sequence === 0 ? null : checkpoint;
 		const tail: ChainHoldEvent[] = [];
-		if (!existsSync(this.logPath)) {
+		const st = statOrAbsent(this.logPath, "the log cannot be read");
+		if (st === null) {
 			if (cp !== null) throw new AuditChainUnverifiableError("the log is gone", "history");
 			return { checkpoint: GENESIS, tail };
 		}
+		if (!st.isFile) throw new AuditChainUnverifiableError("the log is not a file", "history");
 		// Up to the checkpoint: those bytes are immutable while this port holds the lock, so a
 		// concurrent record (which appends after them) cannot race this read. Without one, to the
 		// end as it is now. Streamed, so the event loop is never held for the whole chain.
-		const end = cp === null ? sizeOf(this.logPath) : cp.offset;
+		const end = cp === null ? st.size : cp.offset;
 		let reached: ChainCheckpoint = GENESIS;
 		let offset = 0;
 		let carry: Buffer = Buffer.alloc(0);
 		if (end > 0) {
-			for await (const chunk of createReadStream(this.logPath, { start: 0, end: end - 1 })) {
+			const stream = createReadStream(this.logPath, { start: 0, end: end - 1 });
+			const chunks = (async function* () {
+				try {
+					for await (const c of stream) yield c as Buffer;
+				} catch (err) {
+					ioFailure(err, "the log cannot be read");
+				}
+			})();
+			for await (const chunk of chunks) {
 				carry = carry.length === 0 ? (chunk as Buffer) : Buffer.concat([carry, chunk as Buffer]);
 				let pos = 0;
 				for (let nl = carry.indexOf(0x0a); nl >= 0; nl = carry.indexOf(0x0a, pos)) {
@@ -381,6 +518,10 @@ export class VaultAudit implements AuditPort {
 		return { checkpoint: cp ?? reached, tail };
 	}
 
+	resync(): void {
+		this.writer.invalidateTail();
+	}
+
 	/** Release the vault's audit lock. */
 	release(): void {
 		this.writer.release();
@@ -388,10 +529,14 @@ export class VaultAudit implements AuditPort {
 
 	/** Core's writer appends only `events.jsonl`; a segmented chain is refused, not half-read. */
 	private refuseSegments(): void {
-		if (!existsSync(this.auditDir)) return;
-		const other = readdirSync(this.auditDir).filter(
-			(f) => f.endsWith(".jsonl") && f !== "events.jsonl",
-		);
+		let entries: string[];
+		try {
+			entries = readdirSync(this.auditDir);
+		} catch (err) {
+			if (err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT") return;
+			ioFailure(err, "the audit directory cannot be listed");
+		}
+		const other = entries.filter((f) => f.endsWith(".jsonl") && f !== "events.jsonl");
 		if (other.length > 0) {
 			throw new AuditChainUnverifiableError(
 				`the chain has other segments (${other.join(", ")}), which this middleware does not verify`,
@@ -401,11 +546,16 @@ export class VaultAudit implements AuditPort {
 	}
 
 	private readBytes(start: number): Buffer {
-		if (!existsSync(this.logPath)) {
-			if (start > 0) throw new AuditChainUnverifiableError("the log is gone", "history");
-			return Buffer.alloc(0);
+		let fd: number;
+		try {
+			fd = openSync(this.logPath, "r");
+		} catch (err) {
+			if (err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT") {
+				if (start > 0) throw new AuditChainUnverifiableError("the log is gone", "history");
+				return Buffer.alloc(0);
+			}
+			return ioFailure(err, "the log cannot be opened");
 		}
-		const fd = openSync(this.logPath, "r");
 		try {
 			const size = fstatSync(fd).size;
 			if (size < start) {
@@ -417,7 +567,12 @@ export class VaultAudit implements AuditPort {
 			const buf = Buffer.alloc(size - start);
 			let got = 0;
 			while (got < buf.length) {
-				const n = readSync(fd, buf, got, buf.length - got, start + got);
+				let n: number;
+				try {
+					n = readSync(fd, buf, got, buf.length - got, start + got);
+				} catch (err) {
+					return ioFailure(err, "the log cannot be read");
+				}
 				if (n === 0) break;
 				got += n;
 			}
@@ -425,14 +580,5 @@ export class VaultAudit implements AuditPort {
 		} finally {
 			closeSync(fd);
 		}
-	}
-}
-
-function sizeOf(path: string): number {
-	const fd = openSync(path, "r");
-	try {
-		return fstatSync(fd).size;
-	} finally {
-		closeSync(fd);
 	}
 }

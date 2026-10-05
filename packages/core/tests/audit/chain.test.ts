@@ -813,7 +813,7 @@ describe("Audit Chain Writer — getLastEvent edge cases", () => {
 		writer2.release();
 	});
 
-	it("returns genesis hash when JSONL is corrupt and .meta is also corrupt", async () => {
+	it("#191 r2 (…DlfS): a corrupt last line AND a corrupt .meta REFUSES — a corrupt anchor is never read as a missing one", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "trust-audit-all-corrupt-"));
 		const auditDir = join(tempDir, VAULT_DIR, "audit");
 		mkdirSync(auditDir, { recursive: true });
@@ -823,13 +823,23 @@ describe("Audit Chain Writer — getLastEvent edge cases", () => {
 		writeFileSync(`${logPath}.meta`, "ALSO_NOT_VALID_JSON");
 
 		const writer = createAuditWriter(tempDir);
-		const event = await writer.appendEvent({
-			kind: "test.allCorrupt",
-			actor: "sys",
-			data: {},
-		});
+		await expect(
+			writer.appendEvent({ kind: "test.allCorrupt", actor: "sys", data: {} }),
+		).rejects.toBeInstanceOf(AuditTailMismatchError);
+		writer.release();
+	});
 
-		expect(event.previousHash).toBe(GENESIS_HASH);
+	it("#191 r2 (…DlfS): an EMPTY log with a corrupt .meta refuses too", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-audit-empty-corrupt-meta-"));
+		const auditDir = join(tempDir, VAULT_DIR, "audit");
+		mkdirSync(auditDir, { recursive: true });
+		const logPath = join(auditDir, "events.jsonl");
+		writeFileSync(logPath, "");
+		writeFileSync(`${logPath}.meta`, JSON.stringify({ lastHash: 7, sequence: "x" }));
+		const writer = createAuditWriter(tempDir);
+		await expect(
+			writer.appendEvent({ kind: "test.emptyCorrupt", actor: "sys", data: {} }),
+		).rejects.toBeInstanceOf(AuditTailMismatchError);
 		writer.release();
 	});
 });
@@ -1057,6 +1067,28 @@ describe("#191: the log's tail must agree with its .meta head anchor before an a
 		const ev = (await appendFresh()) as { hash: string; sequence: number };
 		expect(ev.sequence).toBe(4);
 		expect(JSON.parse(readFileSync(meta(), "utf-8"))).toEqual({ lastHash: ev.hash, sequence: 4 });
+	});
+
+	it("#191 r2: an anchor SEVERAL events behind (repeated sidecar failures) is accepted when the chain from it to the tail verifies — and the anchor catches up", async () => {
+		const first = JSON.parse(lines()[0] as string) as { hash: string };
+		writeFileSync(meta(), JSON.stringify({ lastHash: first.hash, sequence: 1 }));
+		const ev = (await appendFresh()) as { hash: string; sequence: number };
+		expect(ev.sequence).toBe(4);
+		expect(JSON.parse(readFileSync(meta(), "utf-8"))).toEqual({ lastHash: ev.hash, sequence: 4 });
+	});
+
+	it("#191 r2: an anchor behind whose hash is NOT the event's at that sequence refuses", async () => {
+		writeFileSync(meta(), JSON.stringify({ lastHash: "e".repeat(64), sequence: 1 }));
+		await expect(appendFresh()).rejects.toBeInstanceOf(AuditTailMismatchError);
+	});
+
+	it("#191 r2: an anchor behind with an event between it and the tail REWRITTEN refuses", async () => {
+		const first = JSON.parse(lines()[0] as string) as { hash: string };
+		writeFileSync(meta(), JSON.stringify({ lastHash: first.hash, sequence: 1 }));
+		const ls = lines();
+		ls[1] = (ls[1] as string).replace('"i":1', '"i":7');
+		writeFileSync(log(), `${ls.join("\n")}\n`);
+		await expect(appendFresh()).rejects.toBeInstanceOf(AuditTailMismatchError);
 	});
 
 	it("no anchor at all (a legacy, unanchored vault) appends, as verifyVault allows", async () => {
