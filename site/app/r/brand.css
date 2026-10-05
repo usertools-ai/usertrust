@@ -108,3 +108,16 @@
 .ut-r .ut-details-body{padding:4px 16px 20px;display:flex;flex-direction:column;gap:16px}
 .ut-r .ut-levels{display:grid;grid-template-columns:1fr 1fr;gap:2px 16px}
 .ut-r .ut-levels>li:last-child{grid-column:1/-1}
+
+/* ── footer: cloned from usertrust.ai (footer.site). Solid ground, a quiet
+      hairline above, 13px mono links, the part-of line at 12px. ──────────── */
+.ut-r footer.site{margin-top:clamp(34px,4vw,60px);background:var(--bg);border-top:1px solid var(--line-quiet)}
+.ut-r footer.site .wrap{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:16px;
+  max-width:680px;margin:0 auto;padding:24px 16px 32px}
+@media(min-width:640px){.ut-r footer.site .wrap{padding-left:24px;padding-right:24px}}
+.ut-r footer.site .flinks{z-index:auto;display:flex;flex-wrap:wrap;gap:8px 24px}
+.ut-r footer.site a{font:400 13px/1 var(--mono);color:var(--text-2);text-decoration:none}
+.ut-r footer.site a:hover{color:var(--text)}
+.ut-r footer.site .part{margin:0;font:400 12px/1 var(--mono);color:var(--text-2)}
+.ut-r footer.site .part a{font:inherit;color:var(--silver);border-bottom:1px solid rgba(255,255,255,.26)}
+.ut-r footer.site .part a:hover{color:var(--brand);border-bottom-color:var(--brand)}

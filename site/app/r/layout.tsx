@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import SiteFooter from "./components/site-footer";
 import "./brand.css";
 
 /**
@@ -20,7 +21,8 @@ export default function ReceiptRouteLayout({ children }: { children: ReactNode }
 				</a>
 				<span className="where">receipt</span>
 			</nav>
-			<div className="mx-auto max-w-[680px] px-4 pb-16 sm:px-6">{children}</div>
+			<div className="mx-auto max-w-[680px] px-4 pb-6 sm:px-6">{children}</div>
+			<SiteFooter />
 		</div>
 	);
 }
