@@ -1371,7 +1371,7 @@ describe("1c-1: schema v3 — the v2 migration and the exact-shape classifier (#
 		expect(j.get("h1")).toMatchObject({
 			incident: { kind: "x" },
 			lateAmount: null,
-			lateCharged: false,
+			lateState: "none",
 		});
 		expect(j.get("h2")).toMatchObject({ state: "open", lateAmount: null });
 		expect(j.heartbeat()).toBeNull();
@@ -1424,5 +1424,58 @@ describe("1c-1: schema v3 — the v2 migration and the exact-shape classifier (#
 		const before = readFileSync(path);
 		expect(() => HoldJournal.open(path)).toThrow(/trigger sneaky/);
 		expect(readFileSync(path).equals(before)).toBe(true);
+	});
+});
+
+describe("#185 r1: the DATABASE enforces the legal late-settlement states (v3's triggers)", () => {
+	const fresh3 = () => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-late-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		HoldJournal.open(path).close();
+		const raw = new DatabaseSync(path);
+		raw.exec(
+			"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by) VALUES ('h1', 'b', 'expired', 100, 9000, 8000)",
+		);
+		return { path, raw };
+	};
+
+	it("an illegal pair is aborted by the database — charged or recorded without an amount, zero with an amount, none with an amount", () => {
+		const { raw } = fresh3();
+		for (const [state, amount] of [
+			["charged", "NULL"],
+			["recorded", "NULL"],
+			["zero", "5"],
+			["none", "5"],
+			["recorded", "0"],
+		] as const) {
+			expect(
+				() =>
+					raw.exec(
+						`UPDATE hold SET late_state = '${state}', late_amount = ${amount} WHERE hold_id = 'h1'`,
+					),
+				`${state}/${amount}`,
+			).toThrow(/illegal late settlement state/);
+		}
+		expect(() =>
+			raw.exec(
+				"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by, late_state) VALUES ('h2', 'b', 'expired', 1, 1, 1, 'charged')",
+			),
+		).toThrow(/illegal late settlement state/);
+		// The legal ones pass.
+		raw.exec("UPDATE hold SET late_state = 'zero', late_amount = 0 WHERE hold_id = 'h1'");
+		raw.exec("UPDATE hold SET late_state = 'none', late_amount = NULL WHERE hold_id = 'h1'");
+		raw.exec("UPDATE hold SET late_state = 'recorded', late_amount = 7 WHERE hold_id = 'h1'");
+		raw.close();
+	});
+
+	it("the triggers are part of v3's exact shape: one of them altered is refused at open", () => {
+		const { path, raw } = fresh3();
+		raw.exec("DROP TRIGGER hold_late_legal_update");
+		raw.exec(
+			"CREATE TRIGGER hold_late_legal_update BEFORE UPDATE OF late_state, late_amount ON hold BEGIN SELECT 1; END",
+		);
+		raw.close();
+		expect(() => HoldJournal.open(path)).toThrow(/an unrecognised shape/);
 	});
 });

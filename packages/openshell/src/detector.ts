@@ -56,6 +56,14 @@ export class HoldDetector {
 		if (!Number.isSafeInteger(opts.sweepIntervalMs) || opts.sweepIntervalMs <= 0) {
 			throw new TypeError("hold detector: sweepIntervalMs must be a positive whole number");
 		}
+		if (
+			opts.expiryGraceMs !== undefined &&
+			(!Number.isSafeInteger(opts.expiryGraceMs) || opts.expiryGraceMs < 0)
+		) {
+			// As the engine refuses it: NaN or Infinity here would make every threshold NaN, and
+			// a NaN comparison is never true — the detector would report nothing, ever.
+			throw new TypeError("hold detector: expiryGraceMs must be a non-negative whole number");
+		}
 		this.now = opts.now ?? Date.now;
 		this.graceMs = opts.expiryGraceMs ?? 60_000;
 	}

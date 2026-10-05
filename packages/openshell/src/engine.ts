@@ -43,8 +43,12 @@ export interface EngineOptions {
 
 /** What one {@link HoldEngine.sweep} did. A row whose step threw is reported, never fatal. */
 export interface SweepReport {
-	/** Holds the sweeper moved `open → expiring → expired` (or left `expiring`, in flight). */
+	/** Holds the sweeper moved `open → expiring → expired`. */
 	expired: string[];
+	/** Holds the sweeper claimed whose void the ledger answered posted or not found: incidents. */
+	incidents: string[];
+	/** Holds the sweeper claimed whose void it cannot confirm yet: left `expiring`, in flight. */
+	inFlight: string[];
 	/** In-flight rows replayed (`settling`, `voiding`, `expiring`), with what each returned. */
 	replayed: Array<{ holdId: string; outcome: string }>;
 	/** Recorded late settlements the ledger took this sweep. */
@@ -172,6 +176,10 @@ function numbersProblem(i: unknown): string | null {
 	if (!isUsertokens(post) || !isUsertokens(overage)) {
 		return `post and overage must be safe non-negative integers, got ${String(post)} / ${String(overage)}`;
 	}
+	// The actual cost (post + overage) is charged as one amount: it must be one too.
+	if (!Number.isSafeInteger((post as number) + (overage as number))) {
+		return `post + overage must be a safe integer, got ${String(post)} + ${String(overage)}`;
+	}
 	return null;
 }
 
@@ -239,17 +247,29 @@ export class HoldEngine {
 	): Promise<SettleOutcome> {
 		const row = this.journal.get(holdKey);
 		if (row === undefined) return { outcome: "incident", state: "missing" };
-		if (row.incident !== null) return { outcome: "incident", state: row.state };
 		const problem = intentProblem(intent, row.amount);
 		if (problem !== null) throw new InvalidSettlementIntentError(problem);
 		const actual = intent.post + intent.overage;
+		// Recorded FIRST, zero included (a terminal `zero`, no transfer): whichever disposition is
+		// recorded first is final, so a later, conflicting settlement can never charge it.
 		const recorded = await this.journal.writeTx(() => {
-			if (actual > 0 && this.journal.recordLate(holdKey, actual)) {
-				this.journal.applyDebt(row.budgetId, this.lateId(holdKey), actual);
-				return true;
-			}
-			return false;
+			if (!this.journal.recordLate(holdKey, actual)) return false;
+			if (actual > 0) this.journal.applyDebt(row.budgetId, this.lateId(holdKey), actual);
+			return true;
 		});
+		// THE PRIMITIVE: `late_settled` only when a late disposition is POSITIVELY on the row
+		// (recorded, charged, or the terminal zero) — read back, never assumed. A row that took
+		// an incident (now or before this call: e.g. a concurrent expiry the ledger disagreed
+		// with) cannot record this cost: the cost is attached to the incident for an operator to
+		// bill, and the answer is `incident`, never a false success.
+		const after = this.journal.get(holdKey);
+		if (after === undefined) return { outcome: "incident", state: "missing" };
+		if (after.incident !== null || after.lateState === "none") {
+			await this.journal.writeTx(() =>
+				this.journal.recordUnbilled(holdKey, { kind: "late_settlement", intent, actual }),
+			);
+			return { outcome: "incident", state: after.state };
+		}
 		await this.chargeLate(holdKey);
 		return { outcome: "late_settled", state, resumed: !recorded };
 	}
@@ -261,7 +281,9 @@ export class HoldEngine {
 	 */
 	private async chargeLate(holdKey: string): Promise<void> {
 		const row = this.journal.get(holdKey);
-		if (row === undefined || row.lateAmount === null || row.lateCharged) return;
+		// Only a `recorded` late settlement is charged: `none`, `charged` and the terminal `zero`
+		// have nothing to send.
+		if (row === undefined || row.lateState !== "recorded" || row.lateAmount === null) return;
 		if (row.incident !== null) return;
 		const amount = row.lateAmount;
 		const charged = await within("chargeDebt", this.ms, () =>
@@ -429,7 +451,9 @@ export class HoldEngine {
 						-intent.overage,
 					);
 				}
-				if (actual > 0 && this.journal.recordLate(holdKey, actual)) {
+				// Any actual amount is recorded, zero included (a terminal `zero`): the first
+				// recorded disposition wins, so no later settlement can charge this hold.
+				if (this.journal.recordLate(holdKey, actual) && actual > 0) {
 					this.journal.applyDebt(row.budgetId, this.lateId(holdKey), actual);
 				}
 			});
@@ -518,7 +542,14 @@ export class HoldEngine {
 	 */
 	async sweep(): Promise<SweepReport> {
 		const now = this.now();
-		const report: SweepReport = { expired: [], replayed: [], lateCharged: [], errors: [] };
+		const report: SweepReport = {
+			expired: [],
+			incidents: [],
+			inFlight: [],
+			replayed: [],
+			lateCharged: [],
+			errors: [],
+		};
 		await this.journal.writeTx(() => this.journal.recordHeartbeat(now));
 		// Each OBLIGATION of a row is attempted at most once per sweep: a row the expiry step
 		// claimed (and failed to finish) is not replayed again in the same sweep — the next sweep
@@ -545,8 +576,11 @@ export class HoldEngine {
 					this.journal.cas(row.holdId, "open", "expiring"),
 				);
 				if (!won) return; // a settlement or a release claimed it first: theirs
-				await this.finishExpiry(row.holdId);
-				report.expired.push(row.holdId);
+				// Reported by what the ledger answered — never `expired` unless it expired.
+				const outcome = await this.finishExpiry(row.holdId);
+				if (outcome === "expired") report.expired.push(row.holdId);
+				else if (outcome === "incident") report.incidents.push(row.holdId);
+				else report.inFlight.push(row.holdId);
 			});
 		}
 		for (const row of this.journal.inFlight()) {
@@ -567,7 +601,7 @@ export class HoldEngine {
 		for (const row of this.journal.lateUncharged()) {
 			await attempt("late", row.holdId, async () => {
 				await this.chargeLate(row.holdId);
-				if (this.journal.get(row.holdId)?.lateCharged === true) {
+				if (this.journal.get(row.holdId)?.lateState === "charged") {
 					report.lateCharged.push(row.holdId);
 				}
 			});
@@ -585,7 +619,7 @@ export class HoldEngine {
 	 * - unconfirmed (a retired void id the read-back cannot settle yet) → left `expiring`, in
 	 *   flight for the next sweep.
 	 */
-	private async finishExpiry(holdKey: string): Promise<string> {
+	private async finishExpiry(holdKey: string): Promise<"expired" | "incident" | "in_flight"> {
 		const voided = await within("release", this.ms, () => this.ledger.release({ holdKey }));
 		if (voided === "unknown") return "in_flight";
 		if (voided === "posted" || voided === "not_found") {

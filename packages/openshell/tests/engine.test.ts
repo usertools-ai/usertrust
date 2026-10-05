@@ -299,7 +299,7 @@ describe("hold engine: settle — exactly one post, exactly one terminal", () =>
 			state: "expired",
 			terminalKind: "hold_expired_unsettled",
 			lateAmount: 60,
-			lateCharged: true,
+			lateState: "charged",
 		});
 		expect(ledger.count("k1", "post")).toBe(0);
 		expect(ledger.applied.get(transferIdFor("k1", "late").toString())).toBe(60);
@@ -315,7 +315,7 @@ describe("hold engine: settle — exactly one post, exactly one terminal", () =>
 			resumed: false,
 		});
 		expect(ledger.count("k1", "post")).toBe(0);
-		expect(journal.get("k1")).toMatchObject({ lateAmount: 60, lateCharged: true });
+		expect(journal.get("k1")).toMatchObject({ lateAmount: 60, lateState: "charged" });
 		// A duplicate acts on the STORED amount: no second charge.
 		expect(await engine.settle("k1", { post: 99, overage: 0 })).toEqual({
 			outcome: "late_settled",
@@ -727,6 +727,104 @@ describe("1c-1: the late path enforces the same intent contract", () => {
 	});
 });
 
+describe("#185 r1: a zero-cost late settlement is a TERMINAL disposition, not an absence", () => {
+	it("{0,0} late-settles as `zero` (no transfer); a later, conflicting {60,0} charges NOTHING and leaves debt unchanged; a duplicate {0,0} is idempotent", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await journal.writeTx(() => journal.cas("k1", "open", "expiring"));
+		expect(await engine.settle("k1", { post: 0, overage: 0 })).toEqual({
+			outcome: "late_settled",
+			state: "expiring",
+			resumed: false,
+		});
+		expect(journal.get("k1")).toMatchObject({ lateState: "zero", lateAmount: 0 });
+		expect(await engine.settle("k1", { post: 60, overage: 0 })).toMatchObject({
+			outcome: "late_settled",
+			resumed: true,
+		});
+		expect(journal.get("k1")).toMatchObject({ lateState: "zero", lateAmount: 0 });
+		expect(ledger.count("k1", "late"), "never charged").toBe(0);
+		expect(journal.debtOf("b"), "debt unchanged").toBe(0);
+		expect(await engine.settle("k1", { post: 0, overage: 0 })).toMatchObject({ resumed: true });
+		expect(journal.lateUncharged()).toEqual([]);
+	});
+
+	it("the same through a confirmed expired post: {0,0} records `zero`, and nothing later can charge the hold", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		ledger.expired.add("k1");
+		expect(await engine.settle("k1", { post: 0, overage: 0 })).toMatchObject({
+			outcome: "late_settled",
+			state: "expired",
+		});
+		expect(journal.get("k1")).toMatchObject({ state: "expired", lateState: "zero" });
+		await engine.settle("k1", { post: 60, overage: 0 });
+		expect(ledger.count("k1", "late")).toBe(0);
+		expect(journal.debtOf("b")).toBe(0);
+	});
+});
+
+describe("#185 r1 P1: `late_settled` only when a late disposition is POSITIVELY recorded", () => {
+	it("an expiry incident that lands BETWEEN settleLate's read and its write: the answer is `incident`, the actual cost is attached to it for billing, nothing is charged", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await journal.writeTx(() => journal.cas("k1", "open", "expiring"));
+		// A second connection on the same file plays finishExpiry's incident, interleaved.
+		const other = HoldJournal.open(join(dirs[dirs.length - 1] as string, "holds.db"), {
+			now: () => 1_000,
+		});
+		journals.push(other);
+		const realWriteTx = journal.writeTx.bind(journal);
+		let interleaved = false;
+		journal.writeTx = (async (fn: () => unknown) => {
+			if (!interleaved) {
+				interleaved = true;
+				await other.writeTx(() =>
+					other.recordIncident("k1", { kind: "expiry_ledger_disagrees", voided: "posted" }),
+				);
+			}
+			return realWriteTx(fn as () => never);
+		}) as typeof journal.writeTx;
+		expect(await engine.settle("k1", { post: 60, overage: 0 })).toEqual({
+			outcome: "incident",
+			state: "expiring",
+		});
+		journal.writeTx = realWriteTx;
+		expect(journal.get("k1")).toMatchObject({
+			lateState: "none",
+			incident: {
+				kind: "expiry_ledger_disagrees",
+				unbilled: { kind: "late_settlement", actual: 60, intent: { post: 60, overage: 0 } },
+			},
+		});
+		expect(ledger.count("k1", "late"), "nothing charged").toBe(0);
+		expect(journal.debtOf("b")).toBe(0);
+	});
+
+	it("a settlement arriving at a row that ALREADY carries an incident: `incident`, the cost attached once", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await journal.writeTx(() => journal.cas("k1", "open", "expiring"));
+		await journal.writeTx(() => journal.recordIncident("k1", { kind: "expiry_ledger_disagrees" }));
+		expect(await engine.settle("k1", { post: 40, overage: 0 })).toEqual({
+			outcome: "incident",
+			state: "expiring",
+		});
+		await engine.settle("k1", { post: 99, overage: 0 }); // a second caller: the first cost stays
+		expect(journal.get("k1")?.incident).toMatchObject({ unbilled: { actual: 40 } });
+		expect(ledger.count("k1", "late")).toBe(0);
+	});
+
+	it("#185 r1: an intent whose post + overage is not a safe integer is refused at the claim — the row stays open", async () => {
+		const { journal, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await expect(
+			engine.settle("k1", { post: 100, overage: Number.MAX_SAFE_INTEGER }),
+		).rejects.toBeInstanceOf(InvalidSettlementIntentError);
+		expect(journal.get("k1")?.state).toBe("open");
+	});
+});
+
 describe("1c-1: the sweeper", () => {
 	it("expires an `open` hold only PAST ttlAt + grace, by the ledger's answer (`expired`, hold_expired_unsettled), and writes its heartbeat", async () => {
 		const { journal, ledger, engine, clock } = setup();
@@ -766,6 +864,27 @@ describe("1c-1: the sweeper", () => {
 				incident: { kind: "expiry_ledger_disagrees", voided: answer },
 			});
 		}
+	});
+
+	it("#185 r1: the sweep REPORTS what the ledger answered — a void answered posted is under `incidents`, never `expired`; an unconfirmed one under `inFlight`", async () => {
+		const posted = setup();
+		await posted.engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		posted.ledger.releaseAnswer = "posted";
+		posted.clock.now = SWEEPABLE;
+		expect(await posted.engine.sweep()).toMatchObject({
+			expired: [],
+			incidents: ["k1"],
+			inFlight: [],
+		});
+		const unsure = setup();
+		await unsure.engine.reserve({ holdKey: "k2", budgetId: "b", amount: 100 });
+		unsure.ledger.releaseAnswer = "unknown";
+		unsure.clock.now = SWEEPABLE;
+		expect(await unsure.engine.sweep()).toMatchObject({
+			expired: [],
+			incidents: [],
+			inFlight: ["k2"],
+		});
 	});
 
 	it("an unconfirmed void leaves the hold `expiring` (in flight); the next sweep finishes it", async () => {
@@ -811,11 +930,11 @@ describe("1c-1: the sweeper", () => {
 		await expect(engine.settle("k1", { post: 60, overage: 0 })).rejects.toThrow(
 			/died after chargeDebt/,
 		);
-		expect(journal.get("k1")).toMatchObject({ lateAmount: 60, lateCharged: false });
+		expect(journal.get("k1")).toMatchObject({ lateAmount: 60, lateState: "recorded" });
 		expect(journal.lateUncharged().map((r) => r.holdId)).toEqual(["k1"]);
 		const report = await engine.sweep();
 		expect(report.lateCharged).toEqual(["k1"]);
-		expect(journal.get("k1")).toMatchObject({ lateAmount: 60, lateCharged: true });
+		expect(journal.get("k1")).toMatchObject({ lateAmount: 60, lateState: "charged" });
 		expect(ledger.debt.get("b"), "charged once").toBe(60);
 	});
 
@@ -836,6 +955,24 @@ describe("1c-1: the sweeper", () => {
 describe("1c-1: the independent detector", () => {
 	const detector = (journal: HoldJournal, clock: { now: number }) =>
 		new HoldDetector(journal, { sweepIntervalMs: 30_000, now: () => clock.now });
+
+	it("#185 r1: its numbers are validated as the engine's are — NaN, Infinity or a negative grace, or a non-positive / non-finite interval, is refused at construction", () => {
+		const { journal, clock } = setup();
+		for (const g of [Number.NaN, Number.POSITIVE_INFINITY, -1, 1.5]) {
+			expect(
+				() =>
+					new HoldDetector(journal, {
+						sweepIntervalMs: 30_000,
+						expiryGraceMs: g,
+						now: () => clock.now,
+					}),
+				String(g),
+			).toThrow(TypeError);
+		}
+		for (const i of [Number.NaN, Number.POSITIVE_INFINITY, 0, -5]) {
+			expect(() => new HoldDetector(journal, { sweepIntervalMs: i }), String(i)).toThrow(TypeError);
+		}
+	});
 
 	it("an EMPTY journal with a fresh heartbeat reads as readable, zero incidents — distinct from an unreadable one", async () => {
 		const { journal, engine, clock } = setup();

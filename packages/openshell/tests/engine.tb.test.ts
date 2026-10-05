@@ -137,7 +137,11 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 			outcome: "late_settled",
 			state: "expired",
 		});
-		expect(journal.get(k)).toMatchObject({ state: "expired", lateAmount: 60, lateCharged: true });
+		expect(journal.get(k)).toMatchObject({
+			state: "expired",
+			lateAmount: 60,
+			lateState: "charged",
+		});
 		const a = await walletAcct();
 		expect(a?.debits_posted).toBe(0n);
 		expect(a?.debits_pending).toBe(0n);
@@ -213,7 +217,11 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 			outcome: "late_settled",
 			state: "expired",
 		});
-		expect(journal.get(k)).toMatchObject({ state: "expired", lateAmount: 60, lateCharged: true });
+		expect(journal.get(k)).toMatchObject({
+			state: "expired",
+			lateAmount: 60,
+			lateState: "charged",
+		});
 	}, 15_000);
 
 	/** An `open` row whose placement never reached the ledger (the placeHold "succeeded" locally). */
@@ -258,7 +266,7 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 			outcome: "late_settled",
 			state: "expired",
 		});
-		expect(journal.get(k)).toMatchObject({ lateAmount: 60, lateCharged: true });
+		expect(journal.get(k)).toMatchObject({ lateAmount: 60, lateState: "charged" });
 	}, 15_000);
 
 	it("#174 r1 P1: after one not-found void, a second release meets a RETIRED void id — in flight, then voided_not_found past the horizon (reachable)", async () => {
@@ -432,7 +440,7 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		const debtAcct = await tb.ensureEscrowAccount(debtAccountLabel(budgetId));
 		expect((await tb.lookupAccounts([debtAcct]))[0]?.debits_posted).toBe(60n);
 		expect((await walletAcct())?.debits_posted, "never posted").toBe(0n);
-		expect(journal.get(k)).toMatchObject({ lateAmount: 60, lateCharged: true });
+		expect(journal.get(k)).toMatchObject({ lateAmount: 60, lateState: "charged" });
 		expect(journal.debtOf(budgetId)).toBe(60);
 		// A duplicate settles from the STORED amount: nothing more is charged.
 		await engine.settle(k, { post: 60, overage: 0 });
@@ -451,7 +459,11 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		});
 		const debtAcct = await tb.ensureEscrowAccount(debtAccountLabel(budgetId));
 		expect((await tb.lookupAccounts([debtAcct]))[0]?.debits_posted).toBe(45n);
-		expect(journal.get(k)).toMatchObject({ state: "expired", lateAmount: 45, lateCharged: true });
+		expect(journal.get(k)).toMatchObject({
+			state: "expired",
+			lateAmount: 45,
+			lateState: "charged",
+		});
 	}, 30_000);
 
 	it("control: every role's id is distinct and stable for a hold", () => {
