@@ -40,7 +40,7 @@ export default function NonGreenMasthead({
 	return (
 		<header className="flex flex-col gap-4" data-register={register}>
 			<h1
-				className={`font-display text-3xl leading-tight uppercase tracking-[0.06em] sm:text-5xl ${REGISTER_INK[register]}`}
+				className={`font-display text-3xl leading-tight font-medium tracking-[-0.02em] sm:text-5xl ${REGISTER_INK[register]}`}
 			>
 				{word}
 			</h1>

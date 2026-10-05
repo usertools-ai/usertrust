@@ -33,7 +33,7 @@ export default function VerdictMasthead({ rung }: { rung: LadderStatus }) {
 	const reachedIndex = LADDER.indexOf(rung);
 	return (
 		<header className="flex flex-col gap-6">
-			<h1 className="font-display text-4xl leading-none uppercase tracking-[0.08em] text-ut sm:text-6xl">
+			<h1 className="font-display text-4xl leading-none font-medium tracking-[-0.02em] text-ut sm:text-6xl">
 				{RUNG_VERDICT_WORD[rung]}
 			</h1>
 

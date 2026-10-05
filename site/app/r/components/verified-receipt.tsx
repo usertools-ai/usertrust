@@ -23,10 +23,7 @@ export default function VerifiedReceipt({ state }: { state: VerifiedState }) {
 	const card = receiptCardModel(state, claims);
 
 	return (
-		<article
-			className="mx-auto flex max-w-[680px] flex-col gap-8 px-4 py-7 sm:px-6"
-			data-state="verified"
-		>
+		<article className="flex flex-col gap-8 py-7" data-state="verified">
 			<AdvisoryBands advisories={envelope.advisories} />
 			<ReceiptCard model={card} claims={claims} receipt={envelope.receipt} rung={state.rung} />
 			<CheckLedger verification={envelope.verification} membershipNote={claims.membershipNote} />
