@@ -75,3 +75,12 @@ Carried forward from the plan's Global Constraints, unchanged by this task:
 A further set of review-found minors (base58 codec edge cases, a few
 under-asserted copy strings, non-numeric-literal nits) is itemized in this
 route's PR description rather than duplicated here.
+
+## The brand field
+
+The page sits on the usertools dot-lattice, in gold: one wave on load, then
+frozen (a receipt has nothing to watch). `vendor/lattice.js` is a byte-for-byte
+copy of the usertools site kit's lattice, loaded by `components/lattice-field.tsx`
+after mount. Never edit it here: `lattice-vendor.test.tsx` pins its sha256. To
+update, copy the new file and its new hash together. Reduced motion, a missing
+WebGL context and a hidden tab are handled inside the module.
