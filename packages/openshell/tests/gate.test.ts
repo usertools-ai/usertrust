@@ -441,6 +441,32 @@ describe("the request gate: every unmetered shape is DENIED before any hold", ()
 		);
 		expect(r.decision, "an operator rate makes it priced").toBe("allow");
 	});
+	it("an operator rate that is not a finite, non-negative number makes the model UNPRICED — DENIED, never held at it", () => {
+		const call = (model: string, rates: Record<string, unknown>) =>
+			gate(
+				OPENAI,
+				"/v1/chat/completions",
+				{ model, max_tokens: 5, messages: [] },
+				{ ...DEFAULT_GATE_CONFIG, customRates: { [model]: rates as never } },
+			);
+		const bad = [-1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, "1", null];
+		for (const field of ["inputPer1k", "outputPer1k", "cacheReadPer1k", "cacheWritePer1k"]) {
+			for (const v of bad) {
+				const rates = { inputPer1k: 1, outputPer1k: 2, [field]: v };
+				expect(denied(call("op-model", rates)), `${field}=${String(v)}`).toBe("model_unpriced");
+				// A broken override of a TABLE model is not silently replaced by the table's rate.
+				expect(denied(call("gpt-4o", rates)), `gpt-4o ${field}=${String(v)}`).toBe(
+					"model_unpriced",
+				);
+			}
+		}
+		expect(denied(call("op-model", {})), "missing required rates").toBe("model_unpriced");
+		// Zero is a price (free), and the optional cache rates may be absent.
+		expect(call("op-model", { inputPer1k: 0, outputPer1k: 0 }).decision).toBe("allow");
+		expect(
+			call("op-model", { inputPer1k: 1, outputPer1k: 2, cacheReadPer1k: undefined }).decision,
+		).toBe("allow");
+	});
 });
 
 describe("#166 P1: a tool's output is walked like any other content", () => {
