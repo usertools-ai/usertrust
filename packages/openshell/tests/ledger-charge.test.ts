@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { TBTransferError, type TrustTBClient } from "usertrust";
+import { TBTransferError, TrustTBClient } from "usertrust";
 import { describe, expect, it } from "vitest";
-import { TigerBeetleLedger, transferIdFor } from "../src/ledger.js";
+import { debtAccountLabel, TigerBeetleLedger, transferIdFor } from "../src/ledger.js";
 
 /**
  * #177 r1 P1: a PERSISTENT refusal between existing accounts (a closed account,
- * accounts_must_have_the_same_ledger) retires each id it touches. Modelled with a stub client:
- * a real cluster cannot be driven into it after a successful reservation, because the debt
- * account is ensured before placement.
+ * accounts_must_have_the_same_ledger) retires each id it touches. Modelled with a stub client;
+ * the closed-account case also runs on a real cluster (engine.tb.test.ts, #179 / #190).
  */
 function stubClient(refusal: number) {
 	const failed = new Set<string>();
@@ -39,5 +38,33 @@ describe("#177 r1 P1: a debt charge the ledger refuses for good ends TERMINAL, n
 		const ids = [transferIdFor("k1", "overage"), transferIdFor("k1", "overage-retry")].map(String);
 		expect(await charge()).toEqual({ failed: true, role: "overage", transferIds: ids });
 		expect(new Set(calls), "only the two derived ids are ever tried").toEqual(new Set(ids));
+	});
+
+	it("#190: a CLOSED debt account (debit_account_already_closed, 65 — measured on 0.17.9 to retire the id) is `failed` on the FIRST call: role id, read-back, retry id, read-back — never a throw loop across sweeps", async () => {
+		const { tb, calls } = stubClient(65);
+		const ledger = new TigerBeetleLedger(tb, { walletFor: () => 1n, treasuryId: 2n });
+		const ids = [transferIdFor("k1", "overage"), transferIdFor("k1", "overage-retry")].map(String);
+		expect(
+			await ledger.chargeDebt({ budgetId: "b", holdKey: "k1", role: "overage", amount: 20 }),
+		).toEqual({ failed: true, role: "overage", transferIds: ids });
+		expect(calls).toEqual(ids);
+	});
+
+	it("#190: chargeDebt does not re-ensure the debt account (the reservation ensured it): it debits the derived id directly", async () => {
+		const { tb } = stubClient(65);
+		let ensured = 0;
+		const debited: bigint[] = [];
+		const t = tb as unknown as Record<string, unknown>;
+		t.ensureEscrowAccount = async () => {
+			ensured++;
+			return 1n;
+		};
+		t.immediateTransfer = async (p: { debitAccountId: bigint }) => {
+			debited.push(p.debitAccountId);
+		};
+		const ledger = new TigerBeetleLedger(tb, { walletFor: () => 1n, treasuryId: 2n });
+		await ledger.chargeDebt({ budgetId: "b", holdKey: "k1", role: "late", amount: 5 });
+		expect(ensured).toBe(0);
+		expect(debited).toEqual([TrustTBClient.deriveAccountId(debtAccountLabel("b"))]);
 	});
 });
