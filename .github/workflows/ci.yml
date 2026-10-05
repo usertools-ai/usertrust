@@ -230,6 +230,7 @@ jobs:
           npx vitest run
           packages/core/tests/integration/tigerbeetle.tb.test.ts
           packages/core/tests/integration/budget-envelope.tb.test.ts
+          packages/core/tests/integration/replay.tb.test.ts
           packages/openclaw/tests/envelope-integration.test.ts
 
   site-build:

@@ -301,10 +301,11 @@ describe("TrustTBClient", () => {
 			expect(mockCreateTransfers).not.toHaveBeenCalled();
 		});
 
-		// TigerBeetle reports plain `exists` for a post-pending REPLAY whose amount is >= the
-		// pending amount when the original post consumed it all — so `exists` alone does not
-		// prove the stored transfer is THIS intent. A caller-supplied id is verified against
-		// the stored transfer before `exists` counts as success.
+		// A caller-supplied id is verified against the stored transfer before `exists` counts
+		// as success — defence in depth. These rows feed the client a plain `exists` for a
+		// non-identical replay; a real TigerBeetle 0.17.9 refuses that replay itself
+		// (`exists_with_different_amount`, see tests/integration/replay.tb.test.ts), so they
+		// test the client's verification, not the server's rule.
 		const storedPost = (amount: bigint) => ({
 			id: post,
 			debit_account_id: 1n,
@@ -322,7 +323,7 @@ describe("TrustTBClient", () => {
 		});
 
 		it("REGRESSION: post 100, then replay the same id with 150 -> refused, not success", async () => {
-			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]); // TB: plain `exists`
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]); // hypothetical plain `exists`
 			mockLookupTransfers.mockResolvedValueOnce([storedPost(100n)]);
 			await expect(client.postTransfer(held, 150, { transferId: post })).rejects.toThrow(
 				TransferReplayMismatchError,

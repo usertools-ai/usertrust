@@ -37,11 +37,15 @@ export class TBTransferError extends Error {
 
 /**
  * A caller-supplied transfer id was answered `exists`, but the STORED transfer is not the
- * one this call describes. TigerBeetle reports plain `exists` (not
- * `exists_with_different_amount`) for a post-pending replay whose amount is >= the pending
- * amount when the original post consumed it all — so `exists` alone does not prove the
- * replay is the same intent. `field` names the first difference. Extends TBTransferError so
+ * one this call describes. `field` names the first difference. Extends TBTransferError so
  * existing catch sites still match; `code` is `exists`.
+ *
+ * Defence in depth. Measured against a real TigerBeetle 0.17.9
+ * (`tests/integration/replay.tb.test.ts`), the server itself refuses every amount-changing
+ * post replay with `exists_with_different_amount` — including a larger amount after a full
+ * post, and `amount_max` after a partial one. The only amount it answers plain `exists` for
+ * is `amount_max` after a FULL post, which is the same intent. The client still verifies
+ * every `exists` for a caller-supplied id, so success never rests on that server rule alone.
  */
 export class TransferReplayMismatchError extends TBTransferError {
 	constructor(
@@ -356,8 +360,8 @@ export class TrustTBClient {
 	 *
 	 * Three consequences of a derived id, all enforced by the client:
 	 * - `exists` is VERIFIED against the stored transfer before it counts as success
-	 *   ({@link TransferReplayMismatchError}): TigerBeetle answers plain `exists` to some
-	 *   non-identical post-pending replays.
+	 *   ({@link TransferReplayMismatchError}) — defence in depth: TigerBeetle 0.17.9 already
+	 *   refuses an amount-changing replay with `exists_with_different_amount`.
 	 * - A replayed PENDING transfer is never "reserved" ({@link PendingReplayError}): its
 	 *   stored record cannot say whether the hold is still live. Re-reserve under a new role
 	 *   or deny. Post and void replays are unaffected.
