@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import LatticeField from "./components/lattice-field";
 import SiteFooter from "./components/site-footer";
 import "./brand.css";
 
@@ -12,6 +13,7 @@ import "./brand.css";
 export default function ReceiptRouteLayout({ children }: { children: ReactNode }) {
 	return (
 		<div className="ut-r">
+			<LatticeField />
 			<nav className="ut-r-nav" aria-label="usertrust">
 				<a className="brand" href="https://usertrust.ai/" aria-label="usertrust home">
 					<span className="mark" aria-hidden="true">
@@ -21,7 +23,7 @@ export default function ReceiptRouteLayout({ children }: { children: ReactNode }
 				</a>
 				<span className="where">receipt</span>
 			</nav>
-			<div className="mx-auto max-w-[680px] px-4 pb-6 sm:px-6">{children}</div>
+			<div className="ut-r-main mx-auto max-w-[680px] px-4 pb-6 sm:px-6">{children}</div>
 			<SiteFooter />
 		</div>
 	);
