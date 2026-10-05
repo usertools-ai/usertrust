@@ -15,7 +15,11 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { canonicalize } from "../../src/audit/canonical.js";
-import { AuditWriterLockHeldError, createAuditWriter } from "../../src/audit/chain.js";
+import {
+	AuditTailMismatchError,
+	AuditWriterLockHeldError,
+	createAuditWriter,
+} from "../../src/audit/chain.js";
 import { GENESIS_HASH, VAULT_DIR } from "../../src/shared/constants.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
@@ -809,7 +813,7 @@ describe("Audit Chain Writer — getLastEvent edge cases", () => {
 		writer2.release();
 	});
 
-	it("returns genesis hash when JSONL is corrupt and .meta is also corrupt", async () => {
+	it("#191 r2 (…DlfS): a corrupt last line AND a corrupt .meta REFUSES — a corrupt anchor is never read as a missing one", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "trust-audit-all-corrupt-"));
 		const auditDir = join(tempDir, VAULT_DIR, "audit");
 		mkdirSync(auditDir, { recursive: true });
@@ -819,13 +823,23 @@ describe("Audit Chain Writer — getLastEvent edge cases", () => {
 		writeFileSync(`${logPath}.meta`, "ALSO_NOT_VALID_JSON");
 
 		const writer = createAuditWriter(tempDir);
-		const event = await writer.appendEvent({
-			kind: "test.allCorrupt",
-			actor: "sys",
-			data: {},
-		});
+		await expect(
+			writer.appendEvent({ kind: "test.allCorrupt", actor: "sys", data: {} }),
+		).rejects.toBeInstanceOf(AuditTailMismatchError);
+		writer.release();
+	});
 
-		expect(event.previousHash).toBe(GENESIS_HASH);
+	it("#191 r2 (…DlfS): an EMPTY log with a corrupt .meta refuses too", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "trust-audit-empty-corrupt-meta-"));
+		const auditDir = join(tempDir, VAULT_DIR, "audit");
+		mkdirSync(auditDir, { recursive: true });
+		const logPath = join(auditDir, "events.jsonl");
+		writeFileSync(logPath, "");
+		writeFileSync(`${logPath}.meta`, JSON.stringify({ lastHash: 7, sequence: "x" }));
+		const writer = createAuditWriter(tempDir);
+		await expect(
+			writer.appendEvent({ kind: "test.emptyCorrupt", actor: "sys", data: {} }),
+		).rejects.toBeInstanceOf(AuditTailMismatchError);
 		writer.release();
 	});
 });
@@ -1002,5 +1016,83 @@ describe("Audit Chain Writer — degraded state and DLQ", () => {
 
 		chmodSync(logPath, 0o644);
 		writer.release();
+	});
+});
+
+describe("#191: the log's tail must agree with its .meta head anchor before an append", () => {
+	let dir: string;
+	const log = () => join(dir, VAULT_DIR, "audit", "events.jsonl");
+	const meta = () => `${log()}.meta`;
+	beforeEach(async () => {
+		dir = mkdtempSync(join(tmpdir(), "trust-audit-anchor-"));
+		const w = createAuditWriter(dir);
+		for (let i = 0; i < 3; i++) await w.appendEvent({ kind: "test.e", actor: "sys", data: { i } });
+		w.release();
+	});
+	afterEach(() => {
+		rmSync(dir, { recursive: true, force: true });
+	});
+	const appendFresh = async () => {
+		const w = createAuditWriter(dir);
+		try {
+			return await w.appendEvent({ kind: "test.after", actor: "sys", data: {} });
+		} finally {
+			w.release();
+		}
+	};
+	const lines = () => readFileSync(log(), "utf-8").trim().split("\n");
+
+	it("a TRUNCATED log (the anchor is ahead of it) refuses the append — the log and the anchor are untouched, the truncation stays detectable", async () => {
+		writeFileSync(log(), `${lines().slice(0, 2).join("\n")}\n`);
+		const [logBefore, metaBefore] = [readFileSync(log()), readFileSync(meta())];
+		await expect(appendFresh()).rejects.toBeInstanceOf(AuditTailMismatchError);
+		expect(readFileSync(log()).equals(logBefore)).toBe(true);
+		expect(readFileSync(meta()).equals(metaBefore)).toBe(true);
+	});
+
+	it("an anchor at the tail's sequence with a different hash refuses (a rewritten tail)", async () => {
+		const m = JSON.parse(readFileSync(meta(), "utf-8")) as { sequence: number };
+		writeFileSync(meta(), JSON.stringify({ lastHash: "f".repeat(64), sequence: m.sequence }));
+		await expect(appendFresh()).rejects.toBeInstanceOf(AuditTailMismatchError);
+	});
+
+	it("an anchor that does not parse refuses (tampering the anchor must not disable it)", async () => {
+		writeFileSync(meta(), "{not json");
+		await expect(appendFresh()).rejects.toBeInstanceOf(AuditTailMismatchError);
+	});
+
+	it("an anchor EXACTLY ONE behind, at the tail's predecessor (the log fsync'd, the sidecar write failed), is the documented partial success: the append proceeds and the anchor catches up", async () => {
+		const prev = JSON.parse(lines()[1] as string) as { hash: string; sequence: number };
+		writeFileSync(meta(), JSON.stringify({ lastHash: prev.hash, sequence: prev.sequence }));
+		const ev = (await appendFresh()) as { hash: string; sequence: number };
+		expect(ev.sequence).toBe(4);
+		expect(JSON.parse(readFileSync(meta(), "utf-8"))).toEqual({ lastHash: ev.hash, sequence: 4 });
+	});
+
+	it("#191 r2: an anchor SEVERAL events behind (repeated sidecar failures) is accepted when the chain from it to the tail verifies — and the anchor catches up", async () => {
+		const first = JSON.parse(lines()[0] as string) as { hash: string };
+		writeFileSync(meta(), JSON.stringify({ lastHash: first.hash, sequence: 1 }));
+		const ev = (await appendFresh()) as { hash: string; sequence: number };
+		expect(ev.sequence).toBe(4);
+		expect(JSON.parse(readFileSync(meta(), "utf-8"))).toEqual({ lastHash: ev.hash, sequence: 4 });
+	});
+
+	it("#191 r2: an anchor behind whose hash is NOT the event's at that sequence refuses", async () => {
+		writeFileSync(meta(), JSON.stringify({ lastHash: "e".repeat(64), sequence: 1 }));
+		await expect(appendFresh()).rejects.toBeInstanceOf(AuditTailMismatchError);
+	});
+
+	it("#191 r2: an anchor behind with an event between it and the tail REWRITTEN refuses", async () => {
+		const first = JSON.parse(lines()[0] as string) as { hash: string };
+		writeFileSync(meta(), JSON.stringify({ lastHash: first.hash, sequence: 1 }));
+		const ls = lines();
+		ls[1] = (ls[1] as string).replace('"i":1', '"i":7');
+		writeFileSync(log(), `${ls.join("\n")}\n`);
+		await expect(appendFresh()).rejects.toBeInstanceOf(AuditTailMismatchError);
+	});
+
+	it("no anchor at all (a legacy, unanchored vault) appends, as verifyVault allows", async () => {
+		unlinkSync(meta());
+		expect(((await appendFresh()) as { sequence: number }).sequence).toBe(4);
 	});
 });

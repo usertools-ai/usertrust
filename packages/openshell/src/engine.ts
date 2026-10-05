@@ -22,8 +22,12 @@
  * reservation, never strand a posted hold in `settling` with its overage uncharged.
  */
 
+import { type AuditPort, classifyAuditFailure, type HoldEventKind } from "./audit.js";
 import {
+	type AuditReset,
+	type EventSlot,
 	type HoldJournal,
+	type HoldRow,
 	type HoldState,
 	PlacementHorizonError,
 	type Reservation,
@@ -38,6 +42,18 @@ export interface EngineOptions {
 	 * before expiring an `open` hold. Default 60 s.
 	 */
 	expiryGraceMs?: number;
+	/**
+	 * The audit chain (slice 1c-2). With it, every hold records — once each — a `reserved`
+	 * event, its terminal event and any late-settlement correction. Without it, nothing is
+	 * appended (the engine as 1c-1 left it).
+	 */
+	audit?: AuditPort;
+	/**
+	 * How often the sweep re-verifies the WHOLE audit chain up to the journal's checkpoint (ms;
+	 * default one hour, and always at the first sweep). A record verifies only the bytes after
+	 * the checkpoint, so this bounds how long a rewrite of OLDER bytes goes unseen.
+	 */
+	auditFullVerifyMs?: number;
 	now?: () => number;
 }
 
@@ -55,6 +71,15 @@ export interface SweepReport {
 	lateCharged: string[];
 	/** Rows whose step threw, with the error: the next sweep tries them again. */
 	errors: Array<{ holdId: string; error: unknown }>;
+	/** Audit events the sweep recorded (each missing one, once). */
+	events: Array<{ holdId: string; slot: EventSlot }>;
+	/**
+	 * The full chain verification this sweep: `ok`; `broken` (a definite finding — or the chain
+	 * was already broken: the checkpoint is kept, records refuse, the detector raises it, and only
+	 * an operator reset resumes); `error` (not a finding — an I/O error, or the unverified tail:
+	 * retried next sweep, nothing changed); `not_due`; or `no_audit`.
+	 */
+	auditVerify: "ok" | "broken" | "error" | "not_due" | "no_audit";
 }
 
 /**
@@ -206,6 +231,30 @@ function snapshotIntent(i: SettlementIntent): Readonly<SettlementIntent> {
 	return Object.freeze({ post: i.post, overage: i.overage });
 }
 
+/** The chain kind of a hold's event in `slot`, by the row's state. */
+function eventKind(slot: EventSlot, row: HoldRow): HoldEventKind {
+	if (slot === "reserved") return "openshell.hold.reserved";
+	if (slot === "late") return "openshell.hold.late_settlement";
+	return row.state === "settled"
+		? "openshell.hold.settled"
+		: row.state === "voided"
+			? "openshell.hold.voided"
+			: "openshell.hold.expired_unsettled";
+}
+
+/** What a hold's event in `slot` says. */
+function eventData(slot: EventSlot, row: HoldRow): Record<string, unknown> & { holdId: string } {
+	const base = {
+		holdId: row.holdId,
+		budgetId: row.budgetId,
+		amount: row.amount,
+		reservedSeq: row.reservedSeq,
+	};
+	if (slot === "reserved") return { ...base, ttlAt: row.ttlAt, admitBy: row.admitBy };
+	if (slot === "late") return { ...base, lateState: row.lateState, lateAmount: row.lateAmount };
+	return { ...base, state: row.state, terminalKind: row.terminalKind };
+}
+
 export class HoldEngine {
 	private readonly now: () => number;
 
@@ -223,11 +272,21 @@ export class HoldEngine {
 		) {
 			throw new TypeError("hold engine: expiryGraceMs must be a non-negative whole number");
 		}
+		if (
+			opts.auditFullVerifyMs !== undefined &&
+			(!Number.isSafeInteger(opts.auditFullVerifyMs) || opts.auditFullVerifyMs <= 0)
+		) {
+			throw new TypeError("hold engine: auditFullVerifyMs must be a positive whole number");
+		}
 		this.now = opts.now ?? Date.now;
 		this.expiryGraceMs = opts.expiryGraceMs ?? 60_000;
+		this.fullVerifyMs = opts.auditFullVerifyMs ?? 3_600_000;
 	}
 
 	private readonly expiryGraceMs: number;
+	private readonly fullVerifyMs: number;
+	/** This instance's last successful full verification (ms) — in memory ONLY, by design. */
+	private fullVerifiedAt: number | null = null;
 
 	/** The applied-marker id of a hold's late-settlement debt. */
 	private lateId(holdKey: string): string {
@@ -260,7 +319,10 @@ export class HoldEngine {
 		// The ledger charge runs outside any transaction (a no-op unless the row is `recorded` and
 		// carries no incident). Its result is NOT assumed: the answer comes next.
 		await this.chargeLate(holdKey);
-		return this.lateAnswer(holdKey, intent, actual, state, !recorded);
+		return this.afterLate(
+			holdKey,
+			await this.lateAnswer(holdKey, intent, actual, state, !recorded),
+		);
 	}
 
 	/**
@@ -301,6 +363,46 @@ export class HoldEngine {
 			}
 			return { outcome: "in_flight" };
 		});
+	}
+
+	/**
+	 * Record one of a hold's audit events ONCE (the journal's critical section): the chain is
+	 * scanned for it — a VERIFYING chain only — and it is appended only if absent. No audit
+	 * port: nothing to record.
+	 */
+	private async recordEvent(
+		holdKey: string,
+		slot: EventSlot,
+	): Promise<"recorded" | "already" | "not_eligible" | "no_audit"> {
+		const audit = this.opts.audit;
+		if (audit === undefined) return "no_audit";
+		return this.journal.recordEventOnce(holdKey, slot, (row, from) =>
+			audit.record(
+				eventKind(slot, row),
+				slot === "reserved" ? 0 : (row.reservedSeq ?? 0),
+				eventData(slot, row),
+				from,
+			),
+		);
+	}
+
+	/**
+	 * A terminal or late-settlement event right after its transition — BEST-EFFORT here, because
+	 * the hold's outcome has already happened: a failure is left for the sweep, which records
+	 * every missing event, and the detector raises one that stays missing past its deadline.
+	 */
+	private async recordEventSoon(holdKey: string, slot: EventSlot): Promise<void> {
+		try {
+			await this.recordEvent(holdKey, slot);
+		} catch {
+			// recovered by the sweep; detected by HoldDetector if it stays missing
+		}
+	}
+
+	/** A late answer, with its correction event recorded once the late settlement is final. */
+	private async afterLate(holdKey: string, out: SettleOutcome): Promise<SettleOutcome> {
+		if (out.outcome === "late_settled") await this.recordEventSoon(holdKey, "late");
+		return out;
 	}
 
 	/**
@@ -403,9 +505,107 @@ export class HoldEngine {
 				});
 			},
 		});
-		return r.admitted
-			? { admitted: true, existing: r.existing }
-			: { admitted: false, reason: r.reason };
+		if (!r.admitted) return { admitted: false, reason: r.reason };
+		// The `reserved` event is the durable admission registry: an admission completes only once
+		// it is recorded, and an authorized call is never absent from the chain.
+		try {
+			await this.recordEvent(holdKey, "reserved");
+		} catch (err) {
+			// Release ONLY an admission nobody completed: once any caller (a same-key retry) has
+			// recorded the event, the hold is that caller's admitted hold and this claim loses.
+			await this.releaseUnrecorded(holdKey).catch(() => undefined);
+			throw err;
+		}
+		// The admission is decided AGAIN, from a read taken after the await (#191 r1): the row
+		// must still be `open`, with no incident, before `admitBy`, and — with an audit port —
+		// carry its recorded `reserved` event. Anything else is not an admission.
+		const row = this.journal.get(holdKey);
+		const recorded = this.opts.audit === undefined || row?.reservedSeq != null;
+		if (row?.state === "open" && row.incident === null && recorded) {
+			if (this.now() < row.admitBy) return { admitted: true, existing: r.existing };
+			// Past admitBy: no caller can be admitted on this hold any more — release it.
+			await this.release(holdKey).catch(() => undefined);
+			return { admitted: false, reason: "hold_expired" };
+		}
+		return { admitted: false, reason: row?.state === "open" ? "hold_expired" : "not_open" };
+	}
+
+	/**
+	 * The OPERATOR RESET — the only way out of `broken` (see {@link AuditState}). The chain is
+	 * re-verified from genesis to its end (refused if it does not verify: repair it first, e.g.
+	 * `usertrust audit quarantine-tail`); a chained `openshell.audit.reset` event records the
+	 * checkpoint the chain no longer agreed with AND the head now verified; then, in one journal
+	 * transaction, every hold event of the chain is absorbed, the checkpoint set past the reset
+	 * event, the finding cleared, and the reset journaled.
+	 */
+	async resetAuditChain(by: { operator: string; reason: string }): Promise<AuditReset> {
+		const audit = this.opts.audit;
+		if (audit === undefined) throw new Error("hold engine: no audit port to reset");
+		const st = this.journal.auditState();
+		if (st.state !== "broken") {
+			throw new Error(`hold engine: the audit chain is ${st.state}, not broken — nothing to reset`);
+		}
+		const full = await audit.verifyFull(null);
+		// IDEMPOTENT (#191 r2 P3): a reset that died after appending its event and before
+		// journaling it left that event on the chain, after the broken checkpoint. Reuse it — never
+		// append a second reset for the same finding.
+		const after = st.checkpoint?.sequence ?? 0;
+		const orphan = [...full.tail]
+			.reverse()
+			.find((e) => e.kind === "openshell.audit.reset" && e.sequence > after);
+		if (orphan !== undefined) {
+			const reset: AuditReset = {
+				at: this.now(),
+				operator: by.operator,
+				reason: by.reason,
+				previous: st.checkpoint,
+				verifiedHead: full.checkpoint,
+				resetEvent: { hash: orphan.hash, sequence: orphan.sequence },
+			};
+			await this.journal.writeTx(() =>
+				this.journal.applyAuditReset(reset, full.tail, full.checkpoint),
+			);
+			this.fullVerifiedAt = this.now();
+			return reset;
+		}
+		// The writer's cached tail may predate the repair (#191 r2 P2): re-read it before appending.
+		audit.resync();
+		const rec = await audit.record(
+			"openshell.audit.reset",
+			full.checkpoint.sequence,
+			{
+				holdId: "(audit chain)",
+				operator: by.operator,
+				reason: by.reason,
+				previous: st.checkpoint,
+				finding: st.reason,
+				verifiedHead: { sequence: full.checkpoint.sequence, hash: full.checkpoint.hash },
+			},
+			full.checkpoint,
+		);
+		const reset: AuditReset = {
+			at: this.now(),
+			operator: by.operator,
+			reason: by.reason,
+			previous: st.checkpoint,
+			verifiedHead: full.checkpoint,
+			resetEvent: rec.event,
+		};
+		await this.journal.writeTx(() =>
+			this.journal.applyAuditReset(reset, [...full.tail, ...rec.tail], rec.checkpoint),
+		);
+		this.fullVerifiedAt = this.now();
+		return reset;
+	}
+
+	/**
+	 * Release a hold whose admission never completed (its `reserved` event unrecorded): claimed
+	 * by {@link HoldJournal.claimUnrecordedRelease}, then voided like any release. A hold another
+	 * caller has since admitted is left alone.
+	 */
+	private async releaseUnrecorded(holdKey: string): Promise<void> {
+		const won = await this.journal.writeTx(() => this.journal.claimUnrecordedRelease(holdKey));
+		if (won) await this.release(holdKey);
 	}
 
 	/** Settle a hold to the given intent; the loser of the claim acts BY STATE. */
@@ -515,7 +715,11 @@ export class HoldEngine {
 				}
 			});
 			await this.chargeLate(holdKey);
-			return this.lateAnswer(holdKey, intent, actual, "expired", resumed);
+			await this.recordEventSoon(holdKey, "terminal");
+			return this.afterLate(
+				holdKey,
+				await this.lateAnswer(holdKey, intent, actual, "expired", resumed),
+			);
 		}
 		if (posted === "unknown") return { outcome: "in_flight" };
 		if (posted === "voided" || posted === "not_found") {
@@ -544,8 +748,10 @@ export class HoldEngine {
 		const fin = await this.finalTransition(holdKey, "settling", "settled", {
 			terminalKind: "settled",
 		});
-		if (fin === "moved" || fin === "settled")
+		if (fin === "moved" || fin === "settled") {
+			await this.recordEventSoon(holdKey, "terminal");
 			return { outcome: "settled", resumed: fin !== "moved" || resumed };
+		}
 		if (fin === "missing") return { outcome: "incident", state: "missing" };
 		return { outcome: "incident", state: fin === "incident" ? "settling" : fin };
 	}
@@ -577,17 +783,21 @@ export class HoldEngine {
 				if (err instanceof PlacementHorizonError) return { outcome: "in_flight" };
 				throw err;
 			}
-			return fin === "moved" || fin === "voided"
-				? { outcome: "voided" }
-				: { outcome: "incident", state: "voiding" };
+			if (fin === "moved" || fin === "voided") {
+				await this.recordEventSoon(holdKey, "terminal");
+				return { outcome: "voided" };
+			}
+			return { outcome: "incident", state: "voiding" };
 		}
 		// Voided now or before, or expired by the ledger: nothing was charged either way.
 		const fin = await this.finalTransition(holdKey, "voiding", "voided", {
 			terminalKind: voided === "expired" ? "voided_expired" : "voided",
 		});
-		return fin === "moved" || fin === "voided"
-			? { outcome: "voided" }
-			: { outcome: "incident", state: "voiding" };
+		if (fin === "moved" || fin === "voided") {
+			await this.recordEventSoon(holdKey, "terminal");
+			return { outcome: "voided" };
+		}
+		return { outcome: "incident", state: "voiding" };
 	}
 
 	/**
@@ -612,6 +822,8 @@ export class HoldEngine {
 			replayed: [],
 			lateCharged: [],
 			errors: [],
+			events: [],
+			auditVerify: this.opts.audit === undefined ? "no_audit" : "not_due",
 		};
 		await this.journal.writeTx(() => this.journal.recordHeartbeat(now));
 		// Each OBLIGATION of a row is attempted at most once per sweep: a row the expiry step
@@ -620,7 +832,7 @@ export class HoldEngine {
 		// obligations, each attempted once.
 		const touched = new Set<string>();
 		const attempt = async (
-			obligation: "advance" | "late",
+			obligation: "advance" | "late" | `event-${EventSlot}`,
 			holdId: string,
 			step: () => Promise<void>,
 		) => {
@@ -669,6 +881,60 @@ export class HoldEngine {
 				}
 			});
 		}
+		// 5. Every MISSING audit event, once each — reserved first, so a terminal event can name
+		//    its reserved event's sequence. (Without an audit port there is nothing to record.)
+		if (this.opts.audit !== undefined && this.journal.auditState().state !== "broken") {
+			const missing: Array<[EventSlot, HoldRow[]]> = [
+				["reserved", this.journal.reservedWithoutEvent()],
+				["terminal", this.journal.terminalWithoutEvent()],
+				["late", this.journal.lateWithoutEvent()],
+			];
+			for (const [slot, rows] of missing) {
+				for (const row of rows) {
+					await attempt(`event-${slot}`, row.holdId, async () => {
+						if ((await this.recordEvent(row.holdId, slot)) === "recorded") {
+							report.events.push({ holdId: row.holdId, slot });
+						}
+					});
+				}
+			}
+		}
+		// 6. The WHOLE chain from genesis, up to the journal's checkpoint: at this ENGINE
+		//    INSTANCE's first sweep (in memory, never persisted — a restart always re-verifies, so
+		//    bytes rewritten while the process was down are seen), then every `auditFullVerifyMs`.
+		//    A definite finding moves the checkpoint to `broken` (kept, never cleared); anything
+		//    else is retried next sweep and changes nothing.
+		const audit = this.opts.audit;
+		if (audit !== undefined) {
+			const st = this.journal.auditState();
+			if (st.state === "broken") {
+				report.auditVerify = "broken";
+			} else if (this.fullVerifiedAt === null || now - this.fullVerifiedAt >= this.fullVerifyMs) {
+				try {
+					const full = await audit.verifyFull(st.state === "valid" ? st.checkpoint : null);
+					// `unset` → `valid` (#191 r2 P3): a genesis verify that succeeded establishes the
+					// checkpoint, so the first record does not verify from genesis again.
+					if (st.state === "unset") {
+						await this.journal.writeTx(() =>
+							this.journal.establishAuditCheckpoint(full.tail, full.checkpoint),
+						);
+					}
+					this.fullVerifiedAt = now;
+					report.auditVerify = "ok";
+				} catch (error) {
+					// THE classifier: `history` (a finding, or anything not positively transient or
+					// tail) → broken; `tail` / `transient` → `error`, retried, nothing changed.
+					const definite = classifyAuditFailure(error) === "history";
+					if (definite) {
+						await this.journal.writeTx(() =>
+							this.journal.markAuditBroken(error instanceof Error ? error.message : String(error)),
+						);
+					}
+					report.auditVerify = definite ? "broken" : "error";
+					report.errors.push({ holdId: "(audit chain)", error });
+				}
+			}
+		}
 		return report;
 	}
 
@@ -694,6 +960,7 @@ export class HoldEngine {
 		const fin = await this.finalTransition(holdKey, "expiring", "expired", {
 			terminalKind: "hold_expired_unsettled",
 		});
+		// Its terminal event: sweep step 5, later in this same sweep (finishExpiry runs only there).
 		return fin === "moved" || fin === "expired" ? "expired" : "incident";
 	}
 }

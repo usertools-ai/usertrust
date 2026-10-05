@@ -2,6 +2,14 @@
 // Copyright 2026 Usertools, Inc.
 
 export {
+	AuditChainUnverifiableError,
+	type AuditPort,
+	HOLD_EVENT_ACTOR,
+	type HoldEventKind,
+	type RefusalScope,
+	VaultAudit,
+} from "./audit.js";
+export {
 	type DetectorIncident,
 	type DetectorOptions,
 	type DetectorReading,
@@ -34,6 +42,10 @@ export {
 } from "./gate.js";
 export { holdKey } from "./hold-key.js";
 export {
+	AuditChainBrokenError,
+	type AuditReset,
+	type AuditState,
+	type ChainCheckpoint,
 	HoldConflictError,
 	HoldJournal,
 	type HoldRow,
@@ -74,6 +86,7 @@ export {
 	type RouteConfig,
 	type RouteMatch,
 } from "./routes.js";
+export { type OpenshellRuntime, type RuntimeOptions, startRuntime } from "./runtime.js";
 export {
 	type BodyMode,
 	classifyResponse,

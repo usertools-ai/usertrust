@@ -67,6 +67,12 @@ export interface AuditWriter {
 	isDegraded(): boolean;
 	flush(): Promise<void>;
 	release(): void;
+	/**
+	 * Forget the cached tail, so the next append re-reads the log's tail (and re-checks its
+	 * anchor). For a holder of the lock whose chain was repaired or re-verified to a different
+	 * head while it was alive (#191 r2: an operator reset). The lock is kept.
+	 */
+	invalidateTail(): void;
 }
 
 /**
@@ -79,6 +85,18 @@ export class AuditWriterLockHeldError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "AuditWriterLockHeldError";
+	}
+}
+
+/**
+ * The audit log's tail disagrees with its `.meta` head anchor: the log was truncated or
+ * rewritten. Nothing is appended — appending would launder the truncation (the sidecar would
+ * be rewritten to the shortened chain's new head).
+ */
+export class AuditTailMismatchError extends Error {
+	constructor(logPath: string, why: string) {
+		super(`Audit log ${logPath}: ${why}. Refusing to append.`);
+		this.name = "AuditTailMismatchError";
 	}
 }
 
@@ -348,47 +366,132 @@ function getLastEvent(logPath: string, cache: Map<string, CachedTail>): CachedTa
 
 	if (!existsSync(logPath)) return null;
 
-	const content = readFileSync(logPath, "utf-8").trim();
+	const raw = readFileSync(logPath, "utf-8");
+	const content = raw.trim();
+	// EVERY exit reads the anchor strictly (#191 r2 …DlfS): absent is a legacy vault; anything
+	// present must parse and be well-formed, or the append refuses — a corrupt anchor is never
+	// read as a missing one.
+	const anchor = readAnchorStrict(logPath);
 	if (!content) {
-		const metaPath = `${logPath}.meta`;
-		if (existsSync(metaPath)) {
-			try {
-				const meta = JSON.parse(readFileSync(metaPath, "utf-8")) as {
-					lastHash: string;
-					sequence: number;
-				};
-				return { hash: meta.lastHash, sequence: meta.sequence };
-			} catch {
-				/* ignore corrupt meta */
-			}
-		}
-		return null;
+		return anchor === null ? null : { hash: anchor.lastHash, sequence: anchor.sequence };
 	}
 
 	const lines = content.split("\n");
 	const lastLine = lines[lines.length - 1];
 	if (!lastLine) return null;
 
+	let event: (AuditEvent & { sequence?: number }) | undefined;
 	try {
-		const event = JSON.parse(lastLine) as AuditEvent & { sequence?: number };
-		const sequence = typeof event.sequence === "number" ? event.sequence : lines.length;
-		const tail: CachedTail = { hash: event.hash, sequence };
-		cache.set(logPath, tail);
-		return tail;
+		event = JSON.parse(lastLine) as AuditEvent & { sequence?: number };
 	} catch {
-		const metaPath = `${logPath}.meta`;
-		if (existsSync(metaPath)) {
-			try {
-				const meta = JSON.parse(readFileSync(metaPath, "utf-8")) as {
-					lastHash: string;
-					sequence: number;
-				};
-				return { hash: meta.lastHash, sequence: meta.sequence };
-			} catch {
-				/* ignore corrupt meta */
-			}
+		event = undefined;
+	}
+	if (event === undefined || event === null || typeof event !== "object") {
+		return anchor === null ? null : { hash: anchor.lastHash, sequence: anchor.sequence };
+	}
+	const sequence = typeof event.sequence === "number" ? event.sequence : lines.length;
+	if (anchor !== null) reconcileTailWithAnchor(logPath, lines, sequence, anchor);
+	const tail: CachedTail = { hash: event.hash, sequence };
+	cache.set(logPath, tail);
+	return tail;
+}
+
+interface Anchor {
+	lastHash: string;
+	sequence: number;
+}
+
+/** The `.meta` head anchor: `null` when absent (a legacy vault); throws when unreadable as one. */
+function readAnchorStrict(logPath: string): Anchor | null {
+	const metaPath = `${logPath}.meta`;
+	let text: string;
+	try {
+		text = readFileSync(metaPath, "utf-8");
+	} catch (err) {
+		if (err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT") return null;
+		throw err;
+	}
+	let a: unknown;
+	try {
+		a = JSON.parse(text);
+	} catch {
+		throw new AuditTailMismatchError(logPath, "the .meta head anchor does not parse");
+	}
+	const o = a as { lastHash?: unknown; sequence?: unknown } | null;
+	if (
+		o === null ||
+		typeof o !== "object" ||
+		typeof o.lastHash !== "string" ||
+		!Number.isSafeInteger(o.sequence) ||
+		(o.sequence as number) < 0
+	) {
+		throw new AuditTailMismatchError(logPath, "the .meta head anchor is malformed");
+	}
+	return { lastHash: o.lastHash, sequence: o.sequence as number };
+}
+
+/**
+ * The log's tail must agree with its `.meta` head anchor before anything is appended to it.
+ * Without this, a log whose last events were deleted is read from its shortened tail, the next
+ * append chains onto it, and the sidecar is rewritten to the new head — turning a truncation
+ * `verifyVault` would detect into an apparently valid history.
+ *
+ * Agreement, defined positively (#191 r2): the anchor is AT or BEHIND the tail, and the events
+ * from the anchor to the tail form a verified chain — the event at the anchor's sequence carries
+ * the anchor's hash, and every later event links to its predecessor and hashes to its content.
+ * The anchor lags only by appends whose log write landed and whose sidecar write failed (the
+ * documented partial success, possibly repeated); the next append rewrites it forward. An
+ * anchor AHEAD of the tail, or one the chain does not reach, refuses the append.
+ */
+function reconcileTailWithAnchor(
+	logPath: string,
+	lines: string[],
+	tailSequence: number,
+	anchor: Anchor,
+): void {
+	const refuse = (why: string): never => {
+		throw new AuditTailMismatchError(
+			logPath,
+			`the log ends at sequence ${tailSequence} but its .meta head anchor records sequence ${anchor.sequence} (${why})`,
+		);
+	};
+	if (anchor.sequence > tailSequence) refuse("ahead of the log: truncated");
+	const back = tailSequence - anchor.sequence;
+	if (back > lines.length - 1 && anchor.sequence !== 0) refuse("not on the log");
+	let expectedHash: string | null = null; // the hash the NEXT (later) event links back to
+	for (let k = 0; k <= back; k++) {
+		const idx = lines.length - 1 - k;
+		if (anchor.sequence === 0 && k === back) {
+			if (anchor.lastHash !== GENESIS_HASH || expectedHash !== GENESIS_HASH)
+				refuse("not on the log");
+			return;
 		}
-		return null;
+		let e: Record<string, unknown>;
+		try {
+			e = JSON.parse(lines[idx] as string) as Record<string, unknown>;
+		} catch {
+			throw new AuditTailMismatchError(
+				logPath,
+				`the log ends at sequence ${tailSequence} but its .meta head anchor records sequence ${anchor.sequence} (a line between it and the tail does not parse)`,
+			);
+		}
+		if (e === null || typeof e !== "object")
+			refuse("a line between it and the tail is not an event");
+		const { hash, ...rest } = e;
+		if (
+			typeof hash !== "string" ||
+			createHash("sha256").update(canonicalize(rest)).digest("hex") !== hash
+		) {
+			refuse("an event between it and the tail does not hash to its content");
+		}
+		if (expectedHash !== null && hash !== expectedHash)
+			refuse("the chain between it and the tail is broken");
+		if (k === back) {
+			if (hash !== anchor.lastHash) refuse("its hash is not the event's at that sequence");
+			return;
+		}
+		expectedHash = typeof e.previousHash === "string" ? e.previousHash : null;
+		if (expectedHash === null) refuse("an event between it and the tail has no previous hash");
 	}
 }
 
@@ -590,6 +693,7 @@ export function createAuditWriter(
 
 	return {
 		appendEvent,
+		invalidateTail: () => lastEventCache.clear(),
 		getWriteFailures,
 		isDegraded: isDegradedFn,
 		flush,

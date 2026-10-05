@@ -39,6 +39,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import type { DatabaseSync } from "node:sqlite";
+import { classifyAuditFailure } from "./audit.js";
 
 /** The Node version the journal needs (`engines.node` in package.json says the same). */
 export const MIN_NODE_FOR_JOURNAL = "22.13.0";
@@ -135,6 +136,8 @@ export interface HoldRow {
 	 */
 	lateState: LateState;
 	lateAmount: number | null;
+	/** The hash of the late-settlement correction event, once appended (slice 1c-2). */
+	lateEventHash: string | null;
 }
 
 export interface JournalOptions {
@@ -190,7 +193,7 @@ export class PlacementHorizonError extends Error {
  * has an exact shape in {@link SHAPES}; a file at one of the older ones is MIGRATED to this
  * version at open (one transaction). Every other version is refused.
  */
-export const JOURNAL_SCHEMA_VERSION = 3;
+export const JOURNAL_SCHEMA_VERSION = 4;
 
 /** The hold table's columns as the slice-1b code wrote them (schema version 0). */
 const V0_HOLD_COLUMNS: readonly string[] = [
@@ -207,6 +210,117 @@ const V0_HOLD_COLUMNS: readonly string[] = [
 ];
 const V2_HOLD_COLUMNS: readonly string[] = [...V0_HOLD_COLUMNS, "incident_json"];
 const V3_HOLD_COLUMNS: readonly string[] = [...V2_HOLD_COLUMNS, "late_amount", "late_state"];
+/** v4 (slice 1c-2): the hash of the late-settlement correction event, recorded once. */
+const V4_HOLD_COLUMNS: readonly string[] = [...V3_HOLD_COLUMNS, "late_event_hash"];
+
+/** The audit events a hold records once each (slice 1c-2). */
+export type EventSlot = "reserved" | "terminal" | "late";
+
+/** An event on the audit chain: its hash and its sequence number. */
+export interface RecordedEvent {
+	hash: string;
+	sequence: number;
+}
+
+/**
+ * Where the audit chain was last VERIFIED to, held in the journal: the event that ends at byte
+ * `offset` of the log (its line starts at `lineStart`) has this sequence and hash. Every byte
+ * before it was verified, and every hold event before it is reflected in its row's slot.
+ */
+export interface ChainCheckpoint {
+	offset: number;
+	lineStart: number;
+	sequence: number;
+	hash: string;
+}
+
+/** A hold event read from the verified tail of the chain. */
+export interface ChainHoldEvent {
+	kind: string;
+	holdId: string;
+	sequence: number;
+	hash: string;
+}
+
+/**
+ * The audit checkpoint's state, held in the journal (#191 r2). Every state, and every transition:
+ *  - `unset` → `valid`: the first record that verifies the chain from genesis (once).
+ *  - `valid` → `valid`: a record — the tail after the checkpoint verified, its hold events
+ *    absorbed, the checkpoint advanced (one journal transaction).
+ *  - `unset` | `valid` → `broken`: a DEFINITE finding about verified history (a record or the
+ *    sweep's full verification; scope `history`). The checkpoint is KEPT — it is the evidence.
+ *  - `broken` → `valid`: ONLY an operator reset ({@link HoldEngine.resetAuditChain}): the chain
+ *    re-verified from genesis, a chained reset event naming both heads, and a journaled entry.
+ * Nothing else moves it: a refusal in the unverified tail, or an I/O error, changes nothing.
+ * While `broken`, every record is refused at once (no re-verification per record).
+ */
+export type AuditState =
+	| { state: "unset" }
+	| { state: "valid"; checkpoint: ChainCheckpoint }
+	| {
+			state: "broken";
+			checkpoint: ChainCheckpoint | null;
+			reason: string;
+			at: number;
+	  };
+
+/** One operator reset, as journaled. */
+export interface AuditReset {
+	at: number;
+	operator: string;
+	reason: string;
+	/** The checkpoint the chain no longer agreed with (null: none had been established). */
+	previous: ChainCheckpoint | null;
+	/** The head re-verified from genesis, before the reset event. */
+	verifiedHead: ChainCheckpoint;
+	/** The chained reset event. */
+	resetEvent: RecordedEvent;
+}
+
+/** The audit chain is `broken`: nothing is recorded until an operator reset. */
+export class AuditChainBrokenError extends Error {
+	constructor(reason: string) {
+		super(
+			`openshell audit: the audit chain is BROKEN (${reason}) — nothing is recorded until an operator reset (HoldEngine.resetAuditChain)`,
+		);
+		this.name = "AuditChainBrokenError";
+	}
+}
+
+/** What one audit record produced: its event, the verified tail it read, the new checkpoint. */
+export interface ChainRecord {
+	event: RecordedEvent;
+	tail: ChainHoldEvent[];
+	checkpoint: ChainCheckpoint;
+}
+
+/**
+ * The slot a hold event fills, by kind, and the row state that slot needs. Absorbing an event
+ * into its row is defined POSITIVELY: only these kinds, only into an empty slot, only on a row
+ * with no incident, and a terminal or late event only AFTER the row's recorded `reserved` event.
+ */
+const ABSORB: Record<string, { sql: string; value: "sequence" | "hash" }> = {
+	"openshell.hold.reserved": {
+		sql: "UPDATE hold SET reserved_seq = ? WHERE hold_id = ? AND reserved_seq IS NULL AND incident_json IS NULL",
+		value: "sequence",
+	},
+	"openshell.hold.settled": {
+		sql: "UPDATE hold SET terminal_event_hash = ? WHERE hold_id = ? AND terminal_event_hash IS NULL AND incident_json IS NULL AND state = 'settled' AND reserved_seq IS NOT NULL AND reserved_seq < ?",
+		value: "hash",
+	},
+	"openshell.hold.voided": {
+		sql: "UPDATE hold SET terminal_event_hash = ? WHERE hold_id = ? AND terminal_event_hash IS NULL AND incident_json IS NULL AND state = 'voided' AND reserved_seq IS NOT NULL AND reserved_seq < ?",
+		value: "hash",
+	},
+	"openshell.hold.expired_unsettled": {
+		sql: "UPDATE hold SET terminal_event_hash = ? WHERE hold_id = ? AND terminal_event_hash IS NULL AND incident_json IS NULL AND state = 'expired' AND reserved_seq IS NOT NULL AND reserved_seq < ?",
+		value: "hash",
+	},
+	"openshell.hold.late_settlement": {
+		sql: "UPDATE hold SET late_event_hash = ? WHERE hold_id = ? AND late_event_hash IS NULL AND incident_json IS NULL AND late_state IN ('charged','zero') AND reserved_seq IS NOT NULL AND reserved_seq < ?",
+		value: "hash",
+	},
+};
 
 /** A hold's late-settlement disposition (see {@link HoldRow.lateState}). */
 export type LateState = "none" | "recorded" | "charged" | "zero";
@@ -238,6 +352,7 @@ const SHAPE_TRIGGERS: Readonly<Record<number, Readonly<Record<string, string>>>>
 	0: {},
 	2: {},
 	3: V3_TRIGGERS,
+	4: V3_TRIGGERS,
 };
 
 const SHAPES: Readonly<Record<number, Readonly<Record<string, readonly string[]>>>> = {
@@ -245,6 +360,12 @@ const SHAPES: Readonly<Record<number, Readonly<Record<string, readonly string[]>
 	2: { hold: V2_HOLD_COLUMNS, debt: DEBT_COLUMNS, applied: APPLIED_COLUMNS },
 	3: {
 		hold: V3_HOLD_COLUMNS,
+		debt: DEBT_COLUMNS,
+		applied: APPLIED_COLUMNS,
+		meta: ["key", "value"],
+	},
+	4: {
+		hold: V4_HOLD_COLUMNS,
 		debt: DEBT_COLUMNS,
 		applied: APPLIED_COLUMNS,
 		meta: ["key", "value"],
@@ -312,6 +433,7 @@ interface RawRow {
 	incident_json: string | null;
 	late_amount: number | null;
 	late_state: LateState;
+	late_event_hash: string | null;
 }
 
 function toRow(r: RawRow): HoldRow {
@@ -328,6 +450,7 @@ function toRow(r: RawRow): HoldRow {
 		incident: r.incident_json === null ? null : JSON.parse(r.incident_json),
 		lateState: r.late_state,
 		lateAmount: r.late_amount,
+		lateEventHash: r.late_event_hash,
 		reservedSeq: r.reserved_seq,
 	};
 }
@@ -489,7 +612,7 @@ export class HoldJournal {
 	 *   columns ({@link SHAPES}), and exactly its triggers, by name and sql ({@link SHAPE_TRIGGERS}:
 	 *   none before v3; v3's two late-state guards).
 	 */
-	private static classify(db: DatabaseSync): "fresh" | 0 | 2 | 3 {
+	private static classify(db: DatabaseSync): "fresh" | 0 | 2 | 3 | 4 {
 		const version = (db.prepare("PRAGMA user_version").get() as { user_version: number })
 			.user_version;
 		const shape = SHAPES[version];
@@ -536,7 +659,7 @@ export class HoldJournal {
 			triggersExact &&
 			same(tables, Object.keys(shape)) &&
 			tables.every((t) => same(columnsOf(t), shape[t] ?? []));
-		if (exact) return version as 0 | 2 | 3;
+		if (exact) return version as 0 | 2 | 3 | 4;
 		const found = objects.map((o) => (o.type === "table" ? o.name : `trigger ${o.name}`));
 		throw new JournalSchemaError(
 			`schema version ${version} (an unrecognised shape: tables ${found.sort().join(", ")}), this code reads ${JOURNAL_SCHEMA_VERSION}`,
@@ -548,7 +671,7 @@ export class HoldJournal {
 	 * a migration that COMMITS between them cannot see a half-old, half-new file and refuse a
 	 * healthy one. A read transaction takes no write lock and changes nothing on disk.
 	 */
-	private static classifySnapshot(db: DatabaseSync): "fresh" | 0 | 2 | 3 {
+	private static classifySnapshot(db: DatabaseSync): "fresh" | 0 | 2 | 3 | 4 {
 		db.exec("BEGIN");
 		try {
 			return HoldJournal.classify(db);
@@ -606,6 +729,10 @@ export class HoldJournal {
 					CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 				`);
 				for (const sql of Object.values(V3_TRIGGERS)) db.exec(sql);
+			}
+			if (kind === "fresh" || kind === 0 || kind === 2 || kind === 3) {
+				// The audit events (slice 1c-2): the late-settlement correction's hash, once.
+				db.exec("ALTER TABLE hold ADD COLUMN late_event_hash TEXT");
 				db.exec(`PRAGMA user_version = ${JOURNAL_SCHEMA_VERSION}`);
 			}
 			db.exec("COMMIT");
@@ -1076,16 +1203,224 @@ export class HoldJournal {
 		return Number(r.changes) === 1;
 	}
 
-	/** Terminal rows whose terminal event was never recorded. */
+	/** Terminal rows (no incident) whose terminal event was never recorded. */
 	terminalWithoutEvent(): HoldRow[] {
 		return this.read(
 			(db) =>
 				db
 					.prepare(
-						"SELECT * FROM hold WHERE state IN ('settled','voided','expired') AND terminal_event_hash IS NULL",
+						"SELECT * FROM hold WHERE state IN ('settled','voided','expired') AND terminal_event_hash IS NULL AND incident_json IS NULL",
 					)
 					.all() as unknown as RawRow[],
 		).map(toRow);
+	}
+
+	/** Rows (no incident) whose `reserved` event was never recorded. */
+	reservedWithoutEvent(): HoldRow[] {
+		return this.read(
+			(db) =>
+				db
+					.prepare("SELECT * FROM hold WHERE reserved_seq IS NULL AND incident_json IS NULL")
+					.all() as unknown as RawRow[],
+		).map(toRow);
+	}
+
+	/** Late settlements (charged or zero, no incident) whose correction event was never recorded. */
+	lateWithoutEvent(): HoldRow[] {
+		return this.read(
+			(db) =>
+				db
+					.prepare(
+						"SELECT * FROM hold WHERE late_state IN ('charged','zero') AND late_event_hash IS NULL AND incident_json IS NULL",
+					)
+					.all() as unknown as RawRow[],
+		).map(toRow);
+	}
+
+	/**
+	 * Record one of a hold's audit events ONCE, as ONE critical section under the journal's write
+	 * lock (`BEGIN IMMEDIATE` held across `produce`, bounded by the journal's deadline): the row is
+	 * re-read and its slot checked; `produce` verifies the chain from the journal's checkpoint,
+	 * finds the event in the verified tail or appends it; then, in the same transaction, every
+	 * hold event in that tail is ABSORBED into its row's empty slot (so an append that outlived
+	 * its caller is never forgotten once the checkpoint passes it), this event's slot is written,
+	 * and the checkpoint advances. Two recorders can therefore never both see "no event".
+	 *
+	 * Eligibility, defined POSITIVELY per slot (anything else is `not_eligible`, nothing done):
+	 * - `reserved`: the row exists and carries no incident;
+	 * - `terminal`: the row is `settled`, `voided` or `expired`, with no incident, AND its
+	 *   `reserved` event is recorded (a dependent event never precedes its predecessor);
+	 * - `late`: its late settlement is `charged` or `zero`, with no incident, and its `reserved`
+	 *   event is recorded.
+	 * The slot already set is `already` (nothing appended).
+	 */
+	recordEventOnce(
+		holdId: string,
+		slot: EventSlot,
+		produce: (row: HoldRow, from: ChainCheckpoint | null) => Promise<ChainRecord>,
+	): Promise<"recorded" | "already" | "not_eligible"> {
+		// Only a failure of `produce` (the port, or its deadline) is classified: the journal's own
+		// errors (busy, SQLite) say nothing about the chain and never mark it broken.
+		let produceFailure: { err: unknown } | undefined;
+		return this.runTx(async () => {
+			const st = this.auditState();
+			if (st.state === "broken") throw new AuditChainBrokenError(st.reason);
+			const row = this.get(holdId);
+			if (row === undefined || row.incident !== null) return "not_eligible" as const;
+			const set =
+				slot === "reserved"
+					? row.reservedSeq !== null
+					: slot === "terminal"
+						? row.terminalEventHash !== null
+						: row.lateEventHash !== null;
+			if (set) return "already" as const;
+			const predecessor = row.reservedSeq !== null;
+			const eligible =
+				slot === "reserved" ||
+				(slot === "terminal" && predecessor && TERMINAL_STATES.has(row.state)) ||
+				(slot === "late" &&
+					predecessor &&
+					(row.lateState === "charged" || row.lateState === "zero"));
+			if (!eligible) return "not_eligible" as const;
+			let rec: ChainRecord;
+			try {
+				rec = await this.bounded(`audit ${slot} event`, () =>
+					produce(row, st.state === "valid" ? st.checkpoint : null),
+				);
+			} catch (err) {
+				produceFailure = { err };
+				throw err;
+			}
+			for (const e of rec.tail) this.absorb(e);
+			const sql =
+				slot === "reserved"
+					? "UPDATE hold SET reserved_seq = ? WHERE hold_id = ? AND reserved_seq IS NULL"
+					: slot === "terminal"
+						? "UPDATE hold SET terminal_event_hash = ? WHERE hold_id = ? AND terminal_event_hash IS NULL"
+						: "UPDATE hold SET late_event_hash = ? WHERE hold_id = ? AND late_event_hash IS NULL";
+			this.db.prepare(sql).run(slot === "reserved" ? rec.event.sequence : rec.event.hash, holdId);
+			this.setMeta("audit_checkpoint", JSON.stringify(rec.checkpoint));
+			return "recorded" as const;
+		}).catch(async (err: unknown) => {
+			// THE classifier (audit.ts): a `history` reading — a definite finding, or any failure
+			// not positively recognised as transient or tail — moves the checkpoint to `broken`.
+			if (produceFailure?.err === err && classifyAuditFailure(err) === "history") {
+				await this.writeTx(() => this.markAuditBroken((err as Error).message));
+			}
+			throw err;
+		});
+	}
+
+	/** Absorb one verified hold event into its row's empty slot (see {@link ABSORB}). */
+	private absorb(e: ChainHoldEvent): void {
+		const rule = ABSORB[e.kind];
+		if (rule === undefined) return;
+		const value = rule.value === "sequence" ? e.sequence : e.hash;
+		if (e.kind === "openshell.hold.reserved") this.db.prepare(rule.sql).run(value, e.holdId);
+		else this.db.prepare(rule.sql).run(value, e.holdId, e.sequence);
+	}
+
+	/** The audit checkpoint's state (see {@link AuditState}). */
+	auditState(): AuditState {
+		const rows = this.read(
+			(db) =>
+				db
+					.prepare("SELECT key, value FROM meta WHERE key IN ('audit_checkpoint', 'audit_broken')")
+					.all() as Array<{ key: string; value: string }>,
+		);
+		const get = (k: string) => rows.find((r) => r.key === k)?.value;
+		const cpRaw = get("audit_checkpoint");
+		const checkpoint = cpRaw === undefined ? null : (JSON.parse(cpRaw) as ChainCheckpoint);
+		const brokenRaw = get("audit_broken");
+		if (brokenRaw !== undefined) {
+			const b = JSON.parse(brokenRaw) as { reason: string; at: number };
+			return { state: "broken", checkpoint, reason: b.reason, at: b.at };
+		}
+		return checkpoint === null ? { state: "unset" } : { state: "valid", checkpoint };
+	}
+
+	/**
+	 * `unset` | `valid` → `broken` (a definite finding about verified history). The FIRST finding
+	 * is kept; the checkpoint is never touched. Must run inside {@link writeTx}.
+	 */
+	markAuditBroken(reason: string): void {
+		this.requireTx("markAuditBroken");
+		this.db
+			.prepare(
+				"INSERT INTO meta (key, value) VALUES ('audit_broken', ?) ON CONFLICT (key) DO NOTHING",
+			)
+			.run(JSON.stringify({ reason, at: this.now() }));
+	}
+
+	/**
+	 * `unset` → `valid` from a successful FULL verification (#191 r2 P3): the sweep's genesis
+	 * verify establishes the checkpoint, absorbing every hold event, so the first record does not
+	 * verify from genesis again under the write lock. Only while still `unset` (a record may have
+	 * established it meanwhile; `broken` is never left this way). Must run inside {@link writeTx}.
+	 */
+	establishAuditCheckpoint(tail: ChainHoldEvent[], checkpoint: ChainCheckpoint): boolean {
+		this.requireTx("establishAuditCheckpoint");
+		const present = this.db
+			.prepare("SELECT key FROM meta WHERE key IN ('audit_checkpoint', 'audit_broken')")
+			.all();
+		if (present.length > 0) return false;
+		for (const e of tail) this.absorb(e);
+		this.setMeta("audit_checkpoint", JSON.stringify(checkpoint));
+		return true;
+	}
+
+	/**
+	 * `broken` → `valid`, for an operator reset only: every hold event of the re-verified chain is
+	 * absorbed, the checkpoint set past the chained reset event, the finding cleared, and the reset
+	 * journaled. Refused unless the state is `broken`. Must run inside {@link writeTx}.
+	 */
+	applyAuditReset(reset: AuditReset, tail: ChainHoldEvent[], checkpoint: ChainCheckpoint): void {
+		this.requireTx("applyAuditReset");
+		const broken = this.db.prepare("SELECT value FROM meta WHERE key = 'audit_broken'").get();
+		if (broken === undefined) throw new Error("hold journal: an audit reset needs a BROKEN chain");
+		for (const e of tail) this.absorb(e);
+		this.setMeta("audit_checkpoint", JSON.stringify(checkpoint));
+		this.db.prepare("DELETE FROM meta WHERE key = 'audit_broken'").run();
+		const logRaw = this.db.prepare("SELECT value FROM meta WHERE key = 'audit_resets'").get() as
+			| { value: string }
+			| undefined;
+		const log = logRaw === undefined ? [] : (JSON.parse(logRaw.value) as AuditReset[]);
+		this.setMeta("audit_resets", JSON.stringify([...log, reset]));
+	}
+
+	/** Every operator reset, oldest first. */
+	auditResets(): AuditReset[] {
+		const r = this.read(
+			(db) =>
+				db.prepare("SELECT value FROM meta WHERE key = 'audit_resets'").get() as
+					| { value: string }
+					| undefined,
+		);
+		return r === undefined ? [] : (JSON.parse(r.value) as AuditReset[]);
+	}
+
+	/**
+	 * Claim `open → voiding` ONLY for an admission that never completed: the row carries no
+	 * recorded `reserved` event and no incident. A caller whose `reserved` event failed may
+	 * release the hold through this and nothing else — once any caller has recorded the event,
+	 * the hold is an admitted one and this claim loses. Must run inside {@link writeTx}.
+	 */
+	claimUnrecordedRelease(holdId: string): boolean {
+		this.requireTx("claimUnrecordedRelease");
+		const r = this.db
+			.prepare(
+				"UPDATE hold SET state = 'voiding' WHERE hold_id = ? AND state = 'open' AND reserved_seq IS NULL AND incident_json IS NULL",
+			)
+			.run(holdId);
+		return Number(r.changes) === 1;
+	}
+
+	private setMeta(key: string, value: string): void {
+		this.db
+			.prepare(
+				"INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+			)
+			.run(key, value);
 	}
 
 	/** Record the terminal event's hash, once. Must run inside {@link writeTx}. */

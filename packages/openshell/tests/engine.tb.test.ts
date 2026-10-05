@@ -13,12 +13,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	PendingReplayError,
+	readLedgerEvents,
 	TBTransferError,
 	TransferIdRetiredError,
 	TrustTBClient,
+	VAULT_DIR,
+	verifyVault,
 	XFER_SPEND,
 } from "usertrust";
 import { afterEach, describe, expect, it } from "vitest";
+import { type AuditPort, VaultAudit } from "../src/audit.js";
 import { DebtChargeFailedError, HoldEngine } from "../src/engine.js";
 import { HoldJournal } from "../src/journal.js";
 import {
@@ -37,7 +41,12 @@ afterEach(() => {
 async function setup(
 	seed: number,
 	holdTtlSeconds = 900,
-	o: { expirySkewMs?: number; journalNow?: () => number; expiryGraceMs?: number } = {},
+	o: {
+		expirySkewMs?: number;
+		journalNow?: () => number;
+		expiryGraceMs?: number;
+		audit?: AuditPort;
+	} = {},
 ) {
 	const tb = new TrustTBClient({ addresses: [TB_ADDRESS as string], clusterId: 0n });
 	const treasury = await tb.createTreasury();
@@ -61,6 +70,7 @@ async function setup(
 	const engine = new HoldEngine(journal, ledger, {
 		holdTtlSeconds,
 		...(o.expiryGraceMs === undefined ? {} : { expiryGraceMs: o.expiryGraceMs }),
+		...(o.audit === undefined ? {} : { audit: o.audit }),
 	});
 	const walletAcct = async () => (await tb.lookupAccounts([wallet]))[0];
 	return {
@@ -578,6 +588,40 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		expect(await engine.settle(k, intent)).toMatchObject({ outcome: "incident" });
 		expect(calls).toEqual([]);
 	});
+
+	it("1c-2: with the vault's chain as the audit port — a settled hold and a LATE-settled hold each record their events once, on a chain verifyVault accepts", async () => {
+		const vault = mkdtempSync(join(tmpdir(), "openshell-engine-tb-vault-"));
+		const audit = VaultAudit.open(vault);
+		cleanups.push(() => {
+			audit.release();
+			rmSync(vault, { recursive: true, force: true });
+		});
+		const { engine, budgetId, journal, key } = await setup(1_000, 1, { audit });
+		const settled = key();
+		const late = key();
+		await engine.reserve({ holdKey: settled, budgetId, amount: 100 });
+		await engine.settle(settled, { post: 40, overage: 0 });
+		await engine.reserve({ holdKey: late, budgetId, amount: 100 });
+		await new Promise((r) => setTimeout(r, 2_500)); // the ledger's own 1 s timeout passes
+		expect(await engine.settle(late, { post: 60, overage: 0 })).toMatchObject({
+			outcome: "late_settled",
+		});
+		await engine.settle(late, { post: 60, overage: 0 }); // a duplicate records nothing more
+		expect((await engine.sweep()).events, "nothing missing").toEqual([]);
+		const kinds = (k: string) =>
+			readLedgerEvents(join(vault, VAULT_DIR))
+				.filter((e) => (e.data as { holdId?: string }).holdId === k)
+				.map((e) => e.kind);
+		expect(kinds(settled)).toEqual(["openshell.hold.reserved", "openshell.hold.settled"]);
+		expect(kinds(late)).toEqual([
+			"openshell.hold.reserved",
+			"openshell.hold.expired_unsettled",
+			"openshell.hold.late_settlement",
+		]);
+		expect(journal.get(late)).toMatchObject({ lateState: "charged" });
+		expect(journal.get(late)?.lateEventHash).not.toBeNull();
+		expect(verifyVault(join(vault, VAULT_DIR)).valid).toBe(true);
+	}, 15_000);
 
 	it("control: every role's id is distinct and stable for a hold", () => {
 		const roles = [
