@@ -8,9 +8,11 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	HoldConflictError,
 	HoldJournal,
 	JournalBusyError,
 	JournalUnavailableError,
+	LedgerDeadlineError,
 	loadSqlite,
 	MIN_NODE_FOR_JOURNAL,
 } from "../src/journal.js";
@@ -96,7 +98,7 @@ describe("hold journal: the compare-and-set", () => {
 		await expect(j.writeTx(() => j.cas("h1", "settled", "open"))).rejects.toThrow(
 			/illegal transition/,
 		);
-		expect(() => j.cas("h1", "open", "settling")).toThrow(/inside writeTx/);
+		expect(() => j.cas("h1", "open", "settling")).toThrow(/inside its own writeTx/);
 	});
 
 	it("the journal runs in WAL mode", () => {
@@ -145,24 +147,137 @@ describe("hold journal: BUSY is never a lost CAS", () => {
 });
 
 describe("hold journal: one writer inside the process too", () => {
-	it("a transaction held open across an await is not entered by a second in-process transaction", async () => {
+	it("reserve's transaction, held open across its ledger call, is not entered by a second in-process transaction", async () => {
 		const { j } = fresh();
 		await open(j, "h1");
-		await open(j, "h2");
 		const order: string[] = [];
-		const first = j.writeTx(async () => {
-			order.push("1:begin");
-			await new Promise((r) => setTimeout(r, 30));
-			j.cas("h1", "open", "settling");
-			order.push("1:end");
+		const first = j.reserve({
+			holdId: "r1",
+			budgetId: "b",
+			amount: 10,
+			ttlAt: 1_000,
+			availableCredit: () => 1e9,
+			placeHold: async () => {
+				order.push("1:begin");
+				await new Promise((r) => setTimeout(r, 30));
+				order.push("1:end");
+			},
 		});
 		const second = j.writeTx(() => {
 			order.push("2:begin");
-			j.cas("h2", "open", "settling");
+			j.cas("h1", "open", "settling");
 			order.push("2:end");
 		});
 		await Promise.all([first, second]);
 		expect(order).toEqual(["1:begin", "1:end", "2:begin", "2:end"]);
+	});
+
+	it("#167 P2-3: writeTx refuses an ASYNC body (a claim commits before any ledger call) and rolls it back", async () => {
+		const { j } = fresh();
+		await open(j, "h1");
+		await expect(
+			// biome-ignore lint/suspicious/useAwait: the async body IS the case under test
+			j.writeTx(async () => {
+				j.cas("h1", "open", "settling");
+			}),
+		).rejects.toThrow(/SYNCHRONOUS body/);
+		expect(j.get("h1")?.state, "rolled back").toBe("open");
+	});
+
+	it("#167 P2-2: a direct cas / applyDebt / recordTerminalEvent from ANOTHER request while reserve awaits is refused, not run inside its transaction", async () => {
+		const { j } = fresh();
+		await open(j, "h2");
+		let release: () => void = () => {};
+		const parked = new Promise<void>((r) => {
+			release = r;
+		});
+		let entered: () => void = () => {};
+		const inside = new Promise<void>((r) => {
+			entered = r;
+		});
+		const pending = j.reserve({
+			holdId: "r1",
+			budgetId: "b",
+			amount: 10,
+			ttlAt: 1_000,
+			availableCredit: () => 1e9,
+			placeHold: async () => {
+				entered();
+				await parked;
+				throw new Error("placement refused"); // the reservation ROLLS BACK
+			},
+		});
+		await inside;
+		expect(() => j.cas("h2", "open", "settling")).toThrow(/inside its own writeTx/);
+		expect(() => j.applyDebt("b", "t-x", 5)).toThrow(/inside its own writeTx/);
+		expect(() => j.recordTerminalEvent("h2", "e")).toThrow(/inside its own writeTx/);
+		release();
+		await expect(pending).rejects.toThrow("placement refused");
+		expect(j.get("h2")?.state, "h2 untouched").toBe("open");
+		expect(j.debtOf("b")).toBe(0);
+	});
+
+	it("#167 P3: a nested writeTx is refused loudly (it would wait on itself)", async () => {
+		const { j } = fresh();
+		let nested: Promise<unknown> | undefined;
+		await j.reserve({
+			holdId: "r1",
+			budgetId: "b",
+			amount: 10,
+			ttlAt: 1_000,
+			availableCredit: () => 1e9,
+			placeHold: () => {
+				nested = j.writeTx(() => 1);
+			},
+		});
+		await expect(nested).rejects.toThrow(/nested writeTx/);
+	});
+
+	it("#167 P2-4: a ledger call that never answers fails the reservation at the deadline — rolled back, the lock released", async () => {
+		const { j } = fresh({ ledgerTimeoutMs: 50 });
+		await expect(
+			j.reserve({
+				holdId: "r1",
+				budgetId: "b",
+				amount: 10,
+				ttlAt: 1_000,
+				availableCredit: () => 1e9,
+				placeHold: () => new Promise<void>(() => {}),
+			}),
+		).rejects.toBeInstanceOf(LedgerDeadlineError);
+		expect(j.get("r1"), "no row").toBeUndefined();
+		await expect(open(j, "r2"), "the next reservation is not wedged").resolves.toMatchObject({
+			admitted: true,
+		});
+	});
+
+	it("#167 P3: reads outside a transaction see only COMMITTED rows (a separate read connection)", async () => {
+		const { j } = fresh();
+		let release: () => void = () => {};
+		const parked = new Promise<void>((r) => {
+			release = r;
+		});
+		let entered: () => void = () => {};
+		const inside = new Promise<void>((r) => {
+			entered = r;
+		});
+		const pending = j.reserve({
+			holdId: "r1",
+			budgetId: "b",
+			amount: 10,
+			ttlAt: 1_000,
+			availableCredit: () => 1e9,
+			placeHold: async () => {
+				j.applyDebt("b", "t-1", 50); // inside reserve's own transaction: allowed
+				entered();
+				await parked;
+			},
+		});
+		await inside;
+		expect(j.debtOf("b"), "the uncommitted debt is invisible outside the transaction").toBe(0);
+		release();
+		await pending;
+		expect(j.debtOf("b"), "and visible once committed").toBe(50);
 	});
 
 	it("a failed transaction rolls back and does not wedge the next one", async () => {
@@ -276,6 +391,72 @@ describe("hold journal: reservation is atomic with the debt it is checked agains
 	});
 });
 
+describe("#167: reserve's contract — validated input, the same hold only, and its own id", () => {
+	it("invalid input is refused BEFORE any lock or ledger call", async () => {
+		const { j } = fresh();
+		let calls = 0;
+		const base = {
+			holdId: "r1",
+			budgetId: "b",
+			amount: 10,
+			ttlAt: 1_000,
+			availableCredit: () => {
+				calls += 1;
+				return 1e9;
+			},
+			placeHold: () => {
+				calls += 1;
+			},
+		};
+		for (const bad of [
+			{ amount: 0 },
+			{ amount: -1 },
+			{ amount: 1.5 },
+			{ amount: Number.NaN },
+			{ amount: 2 ** 53 },
+			{ holdId: "" },
+			{ budgetId: "" },
+			{ ttlAt: Number.POSITIVE_INFINITY },
+		]) {
+			await expect(j.reserve({ ...base, ...bad }), JSON.stringify(bad)).rejects.toBeInstanceOf(
+				TypeError,
+			);
+		}
+		expect(calls).toBe(0);
+	});
+
+	it("a retry answers from the row only when it is the SAME hold; different fields are a conflict", async () => {
+		const { j } = fresh();
+		await open(j, "h1", "b", 100);
+		await expect(open(j, "h1", "b", 100)).resolves.toEqual({ admitted: true, existing: true });
+		await expect(open(j, "h1", "b", 999)).rejects.toBeInstanceOf(HoldConflictError);
+		await expect(open(j, "h1", "other-budget", 100)).rejects.toBeInstanceOf(HoldConflictError);
+	});
+
+	it("availableCredit is told WHICH hold is reserving (it must exclude that hold's own orphaned transfer)", async () => {
+		const { j } = fresh();
+		const seen: string[] = [];
+		await j.reserve({
+			holdId: "r-42",
+			budgetId: "b",
+			amount: 10,
+			ttlAt: 1_000,
+			availableCredit: (holdId) => {
+				seen.push(holdId);
+				return 1e9;
+			},
+			placeHold: () => {},
+		});
+		expect(seen).toEqual(["r-42"]);
+	});
+});
+
+describe("#167 P3: the journal opens in WAL mode or not at all", () => {
+	it("a database that cannot enter WAL (in-memory) is refused at open", () => {
+		expect(() => HoldJournal.open(":memory:")).toThrow(/did not enter WAL mode/);
+	});
+});
+
 describe("hold journal: debt changes apply exactly once per transfer", () => {
 	it("the applied marker and the debt update commit together; a replay changes nothing", async () => {
 		const { j } = fresh();
@@ -283,7 +464,7 @@ describe("hold journal: debt changes apply exactly once per transfer", () => {
 		expect(await j.writeTx(() => j.applyDebt("b", "overage:h1", 25))).toBe(false);
 		expect(await j.writeTx(() => j.applyDebt("b", "late:h2", 5))).toBe(true);
 		expect(j.debtOf("b")).toBe(30);
-		expect(() => j.applyDebt("b", "x", 1)).toThrow(/inside writeTx/);
+		expect(() => j.applyDebt("b", "x", 1)).toThrow(/inside its own writeTx/);
 	});
 });
 
@@ -329,7 +510,13 @@ describe("hold journal: the sweeper's work lists", () => {
 const RACER = join(__dirname, "fixtures", "journal-racer.ts");
 const REPO_ROOT = join(__dirname, "..", "..", "..");
 
-type RacerResult = { role: string; won: number[]; startedAt: number; endedAt: number };
+type RacerResult = {
+	role: string;
+	won: number[];
+	busy: number;
+	startedAt: number;
+	endedAt: number;
+};
 
 /** Releases both racers only once BOTH are up, then proves their runs overlapped. */
 async function race(dir: string, a: string[], b: string[]): Promise<[RacerResult, RacerResult]> {
@@ -384,6 +571,8 @@ describe("hold journal: two OS processes racing on one file", { timeout: 120_000
 			for (const i of [...ra.won, ...rb.won]) wins.set(i, (wins.get(i) ?? 0) + 1);
 			const notExactlyOne = [...Array(N).keys()].filter((i) => wins.get(i) !== 1);
 			expect(notExactlyOne, "holds without exactly one winner").toEqual([]);
+			// Positive control: with a 2 ms busy timeout BUSY really surfaced, was retried, and was never a lost claim.
+			expect(ra.busy + rb.busy, "BUSY surfaced between the processes").toBeGreaterThan(0);
 			for (let i = 0; i < N; i++) {
 				expect(j.get(`h${i}`)?.state).not.toBe("open");
 			}

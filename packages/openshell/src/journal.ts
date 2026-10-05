@@ -17,7 +17,18 @@
  *   writers across processes; node:sqlite is synchronous, so a transaction held
  *   open across an `await` (a ledger call) would let a second in-process request
  *   run its statements INSIDE it. Every write transaction therefore also takes
- *   an in-process lock.
+ *   an in-process lock, and every in-transaction operation (`cas`, `applyDebt`,
+ *   `recordTerminalEvent`) checks a per-transaction token carried by
+ *   AsyncLocalStorage — a call from ANOTHER request while a transaction awaits is
+ *   refused, never run inside it.
+ * - **Claims COMMIT before any ledger call.** {@link HoldJournal.writeTx} takes a
+ *   SYNCHRONOUS body: a body that returns a promise is rolled back and refused.
+ *   Only {@link HoldJournal.reserve} holds a transaction across a ledger call (its
+ *   debt check must be atomic with the placement), and every such call runs under
+ *   a deadline, so a hung ledger cannot wedge the lock.
+ * - **Reads outside a transaction see only COMMITTED rows**: they use a separate
+ *   read-only connection, never the writer, whose open transaction would show its
+ *   uncommitted changes.
  *
  * Built on `node:sqlite` (Node ≥ 22.13, no dependency; still marked experimental
  * by Node). It is loaded when a journal is OPENED, not at import, so a runtime
@@ -25,6 +36,7 @@
  * an opaque module-resolution failure at load time.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createRequire } from "node:module";
 import type { DatabaseSync } from "node:sqlite";
 
@@ -106,7 +118,33 @@ export interface JournalOptions {
 	busyTimeoutMs?: number;
 	/** Extra `BEGIN IMMEDIATE` attempts after the first is busy. */
 	busyRetries?: number;
+	/**
+	 * The deadline for each ledger call {@link HoldJournal.reserve} makes INSIDE its
+	 * transaction (default 5,000 ms). A call that does not answer fails the
+	 * reservation (rolled back) instead of holding the write lock indefinitely.
+	 */
+	ledgerTimeoutMs?: number;
 }
+
+export class LedgerDeadlineError extends Error {
+	constructor(op: string, ms: number) {
+		super(
+			`hold journal: ${op} did not answer within ${ms} ms (inside the write lock) — reservation rolled back`,
+		);
+		this.name = "LedgerDeadlineError";
+	}
+}
+
+/** A hold id already journaled with DIFFERENT fields: never answered from the existing row. */
+export class HoldConflictError extends Error {
+	constructor(holdId: string, detail: string) {
+		super(`hold journal: ${holdId} already exists with different fields (${detail})`);
+		this.name = "HoldConflictError";
+	}
+}
+
+const isThenable = (v: unknown): v is PromiseLike<unknown> =>
+	typeof (v as { then?: unknown } | null)?.then === "function";
 
 const SQLITE_BUSY = 5;
 const SQLITE_LOCKED = 6;
@@ -152,45 +190,101 @@ export type Reservation =
 	| { admitted: true; existing: boolean }
 	| { admitted: false; reason: "budget_exceeded" | "not_open"; existing: boolean };
 
+/**
+ * A reservation. The ledger calls are made INSIDE the journal's write transaction,
+ * so a crash or a failed COMMIT after {@link placeHold} can leave a ledger hold
+ * with NO journal row (an orphan). The contract that makes a retry safe:
+ */
 export interface ReserveInput {
+	/** Non-empty. The id every ledger transfer of this hold is DERIVED from. */
 	holdId: string;
+	/** Non-empty. */
 	budgetId: string;
+	/** A positive safe integer (usertokens). */
 	amount: number;
+	/** Epoch ms; finite. */
 	ttlAt: number;
-	/** Usertokens the budget can still reserve (the ledger's available credit). */
-	availableCredit: () => Promise<number> | number;
-	/** Place the pending transfer. Throwing rolls the whole reservation back. */
+	/**
+	 * Usertokens the budget can still reserve (the ledger's available credit),
+	 * EXCLUDING any pending transfer this `holdId` already placed — an orphan from
+	 * a lost COMMIT must not count against its own retry.
+	 */
+	availableCredit: (holdId: string) => Promise<number> | number;
+	/**
+	 * Place the pending transfer. MUST use the transfer id derived from `holdId`
+	 * (never a fresh one), so a retry can never place a SECOND hold: a transfer
+	 * already under that id is either confirmed as this same still-pending hold
+	 * (success) or refused (throw). Throwing rolls the whole reservation back.
+	 */
 	placeHold: () => Promise<void> | void;
+}
+
+function validateReserve(input: ReserveInput): void {
+	const bad = (what: string) => new TypeError(`hold journal: reserve: ${what}`);
+	if (typeof input.holdId !== "string" || input.holdId.length === 0)
+		throw bad("holdId must be a non-empty string");
+	if (typeof input.budgetId !== "string" || input.budgetId.length === 0)
+		throw bad("budgetId must be a non-empty string");
+	if (!Number.isSafeInteger(input.amount) || input.amount <= 0)
+		throw bad(`amount must be a positive safe integer, got ${String(input.amount)}`);
+	if (!Number.isFinite(input.ttlAt)) throw bad("ttlAt must be finite");
 }
 
 export class HoldJournal {
 	private tail: Promise<unknown> = Promise.resolve();
-	private inTx = false;
+	private readonly tx = new AsyncLocalStorage<object>();
+	/** The token of the transaction now open, or null. */
+	private active: object | null = null;
 	private readonly retries: number;
+	private readonly ledgerTimeoutMs: number;
 
 	private constructor(
 		private readonly db: DatabaseSync,
+		private readonly reader: DatabaseSync,
 		opts: JournalOptions,
 	) {
 		this.retries = opts.busyRetries ?? 2;
-		db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(opts.busyTimeoutMs ?? 100))}`);
+		this.ledgerTimeoutMs = opts.ledgerTimeoutMs ?? 5_000;
 	}
 
 	static open(path: string, opts: JournalOptions = {}): HoldJournal {
 		const { DatabaseSync: Database } = loadSqlite();
+		const busy = `PRAGMA busy_timeout = ${Math.max(0, Math.floor(opts.busyTimeoutMs ?? 100))}`;
 		const db = new Database(path);
-		db.exec("PRAGMA journal_mode = WAL");
-		const j = new HoldJournal(db, opts);
-		j.migrate();
-		return j;
+		// busy_timeout FIRST: switching to WAL takes a lock and can itself be busy.
+		db.exec(busy);
+		const mode = db.prepare("PRAGMA journal_mode = WAL").get() as
+			| { journal_mode?: unknown }
+			| undefined;
+		if (String(mode?.journal_mode).toLowerCase() !== "wal") {
+			db.close();
+			throw new Error(
+				`hold journal: ${path} did not enter WAL mode (journal_mode = ${String(mode?.journal_mode)}) — the read connection and the cross-process CAS depend on it`,
+			);
+		}
+		HoldJournal.migrate(db);
+		const reader = new Database(path, { readOnly: true });
+		reader.exec(busy);
+		return new HoldJournal(db, reader, opts);
 	}
 
 	close(): void {
+		this.reader.close();
 		this.db.close();
 	}
 
-	private migrate(): void {
-		this.db.exec(`
+	/** The connection a read uses: the writer inside its own transaction, the reader otherwise. */
+	private conn(): DatabaseSync {
+		return this.inThisTx() ? this.db : this.reader;
+	}
+
+	private inThisTx(): boolean {
+		const t = this.tx.getStore();
+		return t !== undefined && t === this.active;
+	}
+
+	private static migrate(db: DatabaseSync): void {
+		db.exec(`
 			CREATE TABLE IF NOT EXISTS hold (
 				hold_id TEXT PRIMARY KEY,
 				budget_id TEXT NOT NULL,
@@ -217,28 +311,72 @@ export class HoldJournal {
 	}
 
 	/**
-	 * One write transaction: the in-process lock, then `BEGIN IMMEDIATE` (retried
-	 * while busy, then {@link JournalBusyError}), then `fn`, then COMMIT. Anything
-	 * `fn` throws rolls the transaction back and rethrows.
+	 * One write transaction with a SYNCHRONOUS body: the in-process lock, then
+	 * `BEGIN IMMEDIATE` (retried while busy, then {@link JournalBusyError}), then
+	 * `fn`, then COMMIT. Anything `fn` throws rolls back and rethrows. A body that
+	 * returns a promise is refused (rolled back): a claim COMMITS before any ledger
+	 * call. A writeTx inside another is refused loudly (it would deadlock).
 	 */
-	writeTx<T>(fn: () => Promise<T> | T): Promise<T> {
+	writeTx<T>(fn: () => T): Promise<T> {
+		return this.runTx(() => {
+			const out = fn();
+			if (isThenable(out)) {
+				throw new Error(
+					"hold journal: writeTx takes a SYNCHRONOUS body — a claim commits before any ledger call; only reserve holds a transaction across one",
+				);
+			}
+			return out;
+		});
+	}
+
+	private runTx<T>(fn: () => Promise<T> | T): Promise<T> {
+		if (this.tx.getStore() !== undefined) {
+			return Promise.reject(
+				new Error(
+					"hold journal: nested writeTx — a transaction cannot open another (it would wait on itself)",
+				),
+			);
+		}
 		const run = async (): Promise<T> => {
 			this.begin();
-			this.inTx = true;
+			const token = {};
+			this.active = token;
 			try {
-				const out = await fn();
+				const out = await this.tx.run(token, fn);
 				this.db.exec("COMMIT");
 				return out;
 			} catch (err) {
-				this.db.exec("ROLLBACK");
+				try {
+					this.db.exec("ROLLBACK");
+				} catch {
+					// A failed ROLLBACK must not mask the error that caused it (often a failed COMMIT).
+				}
 				throw err;
 			} finally {
-				this.inTx = false;
+				this.active = null;
 			}
 		};
 		const next = this.tail.then(run, run);
 		this.tail = next.catch(() => undefined);
 		return next;
+	}
+
+	/** A ledger call made inside reserve's transaction, bounded by the journal's deadline. */
+	private async bounded<T>(op: string, call: () => Promise<T> | T): Promise<T> {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		try {
+			return await Promise.race([
+				Promise.resolve().then(call),
+				new Promise<never>((_, reject) => {
+					timer = setTimeout(
+						() => reject(new LedgerDeadlineError(op, this.ledgerTimeoutMs)),
+						this.ledgerTimeoutMs,
+					);
+				}),
+			]);
+		} finally {
+			if (timer !== undefined) clearTimeout(timer);
+		}
 	}
 
 	private begin(): void {
@@ -253,8 +391,9 @@ export class HoldJournal {
 		}
 	}
 
+	/** Inside THIS caller's own open transaction — not merely while some transaction is open. */
 	private requireTx(op: string): void {
-		if (!this.inTx) throw new Error(`hold journal: ${op} must run inside writeTx`);
+		if (!this.inThisTx()) throw new Error(`hold journal: ${op} must run inside its own writeTx`);
 	}
 
 	/**
@@ -289,14 +428,14 @@ export class HoldJournal {
 	}
 
 	get(holdId: string): HoldRow | undefined {
-		const r = this.db.prepare("SELECT * FROM hold WHERE hold_id = ?").get(holdId) as
+		const r = this.conn().prepare("SELECT * FROM hold WHERE hold_id = ?").get(holdId) as
 			| RawRow
 			| undefined;
 		return r === undefined ? undefined : toRow(r);
 	}
 
 	debtOf(budgetId: string): number {
-		const r = this.db.prepare("SELECT amount FROM debt WHERE budget_id = ?").get(budgetId) as
+		const r = this.conn().prepare("SELECT amount FROM debt WHERE budget_id = ?").get(budgetId) as
 			| { amount: number }
 			| undefined;
 		return r?.amount ?? 0;
@@ -309,19 +448,33 @@ export class HoldJournal {
 	 * same hold places nothing and answers from the existing row.
 	 */
 	reserve(input: ReserveInput): Promise<Reservation> {
-		return this.writeTx(async () => {
+		try {
+			validateReserve(input); // before any lock or ledger call
+		} catch (err) {
+			return Promise.reject(err);
+		}
+		return this.runTx(async () => {
 			const existing = this.get(input.holdId);
 			if (existing !== undefined) {
+				// A retry answers from its row ONLY when it is the same hold.
+				if (existing.budgetId !== input.budgetId || existing.amount !== input.amount) {
+					throw new HoldConflictError(
+						input.holdId,
+						`row: budget ${existing.budgetId}, amount ${existing.amount}; request: budget ${input.budgetId}, amount ${input.amount}`,
+					);
+				}
 				return existing.state === "open"
 					? { admitted: true, existing: true }
 					: { admitted: false, reason: "not_open", existing: true };
 			}
 			const debt = this.debtOf(input.budgetId);
-			const available = await input.availableCredit();
+			const available = await this.bounded("availableCredit", () =>
+				input.availableCredit(input.holdId),
+			);
 			if (available - debt < input.amount) {
 				return { admitted: false, reason: "budget_exceeded", existing: false };
 			}
-			await input.placeHold();
+			await this.bounded("placeHold", () => input.placeHold());
 			this.db
 				.prepare(
 					"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at) VALUES (?, ?, 'open', ?, ?)",
@@ -367,7 +520,7 @@ export class HoldJournal {
 	/** `open` holds whose TTL (plus grace) has passed: the sweeper's work list. */
 	openPast(nowMs: number): HoldRow[] {
 		return (
-			this.db
+			this.conn()
 				.prepare("SELECT * FROM hold WHERE state = 'open' AND ttl_at < ? ORDER BY ttl_at")
 				.all(nowMs) as unknown as RawRow[]
 		).map(toRow);
@@ -376,7 +529,7 @@ export class HoldJournal {
 	/** Rows in a non-terminal, non-open state: a claim whose winner may have crashed. */
 	inFlight(): HoldRow[] {
 		return (
-			this.db
+			this.conn()
 				.prepare("SELECT * FROM hold WHERE state IN ('settling','voiding','expiring')")
 				.all() as unknown as RawRow[]
 		).map(toRow);
@@ -385,7 +538,7 @@ export class HoldJournal {
 	/** Terminal rows whose terminal event was never recorded. */
 	terminalWithoutEvent(): HoldRow[] {
 		return (
-			this.db
+			this.conn()
 				.prepare(
 					"SELECT * FROM hold WHERE state IN ('settled','voided','expired') AND terminal_event_hash IS NULL",
 				)

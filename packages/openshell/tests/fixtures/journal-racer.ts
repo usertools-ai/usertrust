@@ -10,11 +10,24 @@
 
 import { existsSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { HoldJournal } from "../../src/journal.js";
+import { HoldJournal, JournalBusyError } from "../../src/journal.js";
 
 const [mode, dbPath, goFile, role, countArg, ledgerPath] = process.argv.slice(2);
 const count = Number(countArg);
-const journal = HoldJournal.open(dbPath as string, { busyTimeoutMs: 5_000, busyRetries: 5 });
+// A SHORT busy timeout, so BUSY genuinely surfaces between the two processes: it must be RETRIED (it is never a lost
+// claim) and it is counted, so the test can prove it happened.
+const journal = HoldJournal.open(dbPath as string, { busyTimeoutMs: 2, busyRetries: 0 });
+let busy = 0;
+async function untilNotBusy<T>(op: () => Promise<T>): Promise<T> {
+	for (;;) {
+		try {
+			return await op();
+		} catch (err) {
+			if (!(err instanceof JournalBusyError)) throw err;
+			busy += 1;
+		}
+	}
+}
 
 writeFileSync(`${goFile}.${role}.${process.pid}.ready`, "");
 while (!existsSync(goFile as string)) await new Promise((r) => setTimeout(r, 1));
@@ -24,7 +37,7 @@ const won: number[] = [];
 if (mode === "cas") {
 	const to = role === "sweep" ? "expiring" : "settling";
 	for (let i = 0; i < count; i++) {
-		const ok = await journal.writeTx(() => journal.cas(`h${i}`, "open", to));
+		const ok = await untilNotBusy(() => journal.writeTx(() => journal.cas(`h${i}`, "open", to)));
 		if (ok) won.push(i);
 	}
 } else {
@@ -33,24 +46,28 @@ if (mode === "cas") {
 	const ledger = new DatabaseSync(ledgerPath as string);
 	ledger.exec("PRAGMA busy_timeout = 5000");
 	for (let i = 0; i < count; i++) {
-		const r = await journal.reserve({
-			holdId: `${role}-${i}`,
-			budgetId: `b${i}`,
-			amount: 100,
-			ttlAt: 0,
-			availableCredit: () =>
-				(
-					ledger.prepare("SELECT available FROM bal WHERE budget = ?").get(`b${i}`) as {
-						available: number;
-					}
-				).available,
-			placeHold: () => {
-				ledger.prepare("UPDATE bal SET available = available - 100 WHERE budget = ?").run(`b${i}`);
-			},
-		});
+		const r = await untilNotBusy(() =>
+			journal.reserve({
+				holdId: `${role}-${i}`,
+				budgetId: `b${i}`,
+				amount: 100,
+				ttlAt: 0,
+				availableCredit: () =>
+					(
+						ledger.prepare("SELECT available FROM bal WHERE budget = ?").get(`b${i}`) as {
+							available: number;
+						}
+					).available,
+				placeHold: () => {
+					ledger
+						.prepare("UPDATE bal SET available = available - 100 WHERE budget = ?")
+						.run(`b${i}`);
+				},
+			}),
+		);
 		if (r.admitted) won.push(i);
 	}
 }
 const endedAt = performance.timeOrigin + performance.now();
-process.stdout.write(`${JSON.stringify({ role, won, startedAt, endedAt })}\n`);
+process.stdout.write(`${JSON.stringify({ role, won, busy, startedAt, endedAt })}\n`);
 journal.close();
