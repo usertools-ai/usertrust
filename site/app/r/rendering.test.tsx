@@ -459,59 +459,9 @@ test("R28: the display annex renders IFF the envelope served a display member", 
 // R38-R41 — the amount's scope and bound, and the anchored rung's binding
 //
 // These are HONESTY OBLIGATIONS, so the copy is asserted verbatim (a paraphrase
-// that drifts is the defect) and the *absence* of interaction is asserted
-// structurally rather than by eyeballing the component.
+// that drifts is the defect). Since the 2026-10-05 amendment the full sentences
+// are asserted to be inside the one Details, and the label chip outside it.
 // ---------------------------------------------------------------------------
-
-/** HTML tags that never nest, so the ancestor walk below must not push them. */
-const VOID_TAGS = new Set([
-	"area",
-	"base",
-	"br",
-	"col",
-	"embed",
-	"hr",
-	"img",
-	"input",
-	"link",
-	"meta",
-	"param",
-	"source",
-	"track",
-	"wbr",
-	"path",
-	"rect",
-	"circle",
-	"line",
-	"polygon",
-	"polyline",
-	"stop",
-	"use",
-]);
-
-const TAG = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
-
-/**
- * Every OPEN tag still on the stack at `index` — i.e. the ancestor chain of the
- * text at that offset, each as its raw `<tag attrs>` string.
- *
- * This exists because "not behind interaction" is a claim about the DOM, and
- * `!html.includes("<details")` is a claim about the whole document. The first
- * survives someone adding an unrelated `<details>` elsewhere on the page; the
- * second does not, so it would start failing for the wrong reason and get
- * weakened. Walking the ancestors asserts exactly what R40/R41 require.
- */
-function ancestorTags(html: string, index: number): string[] {
-	const stack: string[] = [];
-	TAG.lastIndex = 0;
-	for (let m = TAG.exec(html); m !== null && m.index < index; m = TAG.exec(html)) {
-		const [raw, closing, name, , selfClosing] = m;
-		if (VOID_TAGS.has(name.toLowerCase()) || selfClosing === "/") continue;
-		if (closing === "/") stack.pop();
-		else stack.push(raw);
-	}
-	return stack;
-}
 
 /**
  * A mandated sentence as it appears in the MARKUP, not as it appears in the
@@ -528,33 +478,6 @@ function escapeForMarkup(value: string): string {
 		.replace(/>/g, "&gt;")
 		.replace(/"/g, "&quot;")
 		.replace(/'/g, "&#x27;");
-}
-
-/**
- * R40/R41's negative: the disclosure is in the rendered output with no
- * interaction — not inside a `<details>`, not a tooltip, not a collapsed
- * container, and not carried by a `title` attribute.
- */
-function assertNotBehindInteraction(html: string, plainNeedle: string, why: string): void {
-	const needle = escapeForMarkup(plainNeedle);
-	const index = html.indexOf(needle);
-	assert.notEqual(index, -1, `${why}: the disclosure is not in the rendered output at all`);
-	for (const tag of ancestorTags(html, index)) {
-		const name = tag.slice(1).split(/[\s>]/)[0].toLowerCase();
-		assert.ok(name !== "details" && name !== "summary", `${why}: ancestor ${name} gates it`);
-		assert.ok(!/\stitle=/.test(tag), `${why}: an ancestor carries a title tooltip — ${tag}`);
-		assert.ok(!/\shidden\b/.test(tag), `${why}: an ancestor is hidden — ${tag}`);
-		assert.ok(!/\saria-expanded=/.test(tag), `${why}: an ancestor is a disclosure widget — ${tag}`);
-		assert.ok(!/\srole="tooltip"/.test(tag), `${why}: an ancestor is a tooltip — ${tag}`);
-	}
-	// The disclosure's own text must not be an attribute VALUE either — a `title`
-	// containing the sentence renders nothing a reader sees without hovering.
-	assert.ok(
-		!new RegExp(`title="[^"]*${needle.slice(0, 24).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(
-			html,
-		),
-		`${why}: the sentence is carried by a title attribute`,
-	);
 }
 
 test("R38/R39: every verified render carries the amount's posture LABEL and its per-value framing", () => {
