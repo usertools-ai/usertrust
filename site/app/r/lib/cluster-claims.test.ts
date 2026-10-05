@@ -30,6 +30,7 @@ import {
 	CLUSTER_PROVIDER_SCOPED_CLAIM,
 	CLUSTER_REPO_NOTE,
 	CLUSTER_SIGNED_BYTES_LABEL,
+	CLUSTER_TRANSFER_SET_ROOT_RECOMPUTABLE,
 	clusterComparison,
 	clusterHeadlineClaim,
 	clusterReceiptClaims,
@@ -156,6 +157,10 @@ test("every cluster sentence, pinned character for character", () => {
 		],
 		[CLUSTER_SIGNED_BYTES_LABEL, "Download the signed receipt (its exact bytes)"],
 		[
+			CLUSTER_TRANSFER_SET_ROOT_RECOMPUTABLE,
+			"the recomputable digest of the pair list — recomputed by verification step 8 (the check ledger's DERIVATIONS row), from the pairs this receipt lists.",
+		],
+		[
 			CLUSTER_OFFLINE_VERIFIER_PENDING,
 			"usertrust-verify does not read cluster receipts yet, so there is no offline command to run for this one: the check ledger below is the resolver's verification, and these bytes are exactly what an offline verifier will check.",
 		],
@@ -245,10 +250,16 @@ test("idleThresholdLabel: whole hours → h, whole minutes → min, whole second
 	for (const [ns, expected] of cases) assert.equal(idleThresholdLabel(ns), expected, ns);
 });
 
-test("skippedWindowSpan: HH:MM:SS → HH:MM:SS UTC from ledger nanoseconds", () => {
+test("skippedWindowSpan: the UTC day and HH:MM:SS bounds, from ledger nanoseconds", () => {
 	assert.equal(
 		skippedWindowSpan("1791237986123456789", "1791238106123456789"),
-		"22:06:26 → 22:08:26 UTC",
+		"Oct 5 · 22:06:26 → 22:08:26 UTC",
+	);
+	// A refused window can precede the receipt by days, and can cross midnight:
+	// the day is always stated, never left for the reader to guess.
+	assert.equal(
+		skippedWindowSpan("1791244681000000000", "1791245130000000000"),
+		"Oct 5 23:58:01 → Oct 6 00:05:30 UTC",
 	);
 });
 
@@ -411,21 +422,21 @@ test("CL3 skipped.json: three refused windows, every one listed with its span, d
 			{
 				startUtc: "2026-10-05T22:06:26.123Z",
 				endUtc: "2026-10-05T22:08:26.123Z",
-				span: "22:06:26 → 22:08:26 UTC",
+				span: "Oct 5 · 22:06:26 → 22:08:26 UTC",
 				duration: "2 min",
 				reason: "cluster-void",
 			},
 			{
 				startUtc: "2026-10-05T22:38:26.123Z",
 				endUtc: "2026-10-05T22:39:26.123Z",
-				span: "22:38:26 → 22:39:26 UTC",
+				span: "Oct 5 · 22:38:26 → 22:39:26 UTC",
 				duration: "1 min",
 				reason: "estimated-transfer",
 			},
 			{
 				startUtc: "2026-10-05T23:19:26.123Z",
 				endUtc: "2026-10-05T23:24:26.123Z",
-				span: "23:19:26 → 23:24:26 UTC",
+				span: "Oct 5 · 23:19:26 → 23:24:26 UTC",
 				duration: "5 min",
 				reason: "cluster-void",
 			},
@@ -450,7 +461,7 @@ test("CL4 skipped-overflow.json: 20 refused, 16 listed; no transfer list; custom
 		"20 earlier windows weren’t receipted — the first 16 are listed; windowsRoot commits all 20",
 	);
 	assert.equal(claims.skipped?.windows.length, 16);
-	assert.equal(claims.skipped?.windows[0]?.span, "04:53:20 → 04:56:20 UTC");
+	assert.equal(claims.skipped?.windows[0]?.span, "Oct 5 · 04:53:20 → 04:56:20 UTC");
 	assert.equal(claims.skipped?.windows[0]?.duration, "3 min");
 	assert.equal(claims.skipped?.windows[15]?.reason, "snapshot-not-on-chain");
 	assert.equal(claims.transfers.rootIsCommitment, true);

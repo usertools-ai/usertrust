@@ -245,3 +245,37 @@ test("ogCardRegister: green ONLY for verified; every other kind is neutral/warni
 		assert.equal(register, expect, kind);
 	}
 });
+
+test("the share card's register never disagrees with the page's own plain register", () => {
+	// `ogCardRegister` and `plainState().register` are two spellings of one
+	// decision; a state whose card and page disagreed would broadcast a
+	// different alarm level than the page it links to.
+	const states: PageState[] = [
+		{ kind: "pending", routeParamId: "x", receiptId: "x", status: "reserved" },
+		{ kind: "pending", routeParamId: "x", receiptId: "x", status: "reconciling" },
+		{ kind: "terminalNoReceipt", routeParamId: "x", receiptId: "x", status: "notMinted" },
+		{ kind: "terminalNoReceipt", routeParamId: "x", receiptId: "x", status: "cancelled" },
+		{ kind: "unknownReceipt", routeParamId: "x", receiptId: "x" },
+		{ kind: "invalidId", routeParamId: "x", reason: "x" },
+		{ kind: "verificationUnavailable", routeParamId: "x" },
+		{ kind: "rateLimited", routeParamId: "x" },
+		{
+			kind: "integrityFailure",
+			routeParamId: "x",
+			cause: { source: "page", obligation: "R1", detail: "x" },
+		},
+		{ kind: "protocolError", routeParamId: "x", reason: "schemaInvalid", detail: "x" },
+		{
+			kind: "billedUnfinalized",
+			routeParamId: "x",
+			receiptId: "x",
+			linkedReceiptId: "x",
+			transferSetRoot: "x",
+			linkage: "unchecked",
+		} as unknown as PageState,
+	];
+	for (const state of states) {
+		if (state.kind === "verified") continue;
+		assert.equal(ogCardRegister(state), plainState(state).register, state.kind);
+	}
+});
