@@ -12,6 +12,7 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import AdvisoryBands from "./components/advisory-bands";
@@ -85,6 +86,86 @@ function verification(overrides: Partial<Verification["checks"]> = {}): Verifica
 			...overrides,
 		},
 	};
+}
+
+// ---------------------------------------------------------------------------
+// brand.css, read the way this route resolves it. A class name proves which
+// token a component uses; only the token's value proves the text is legible,
+// so the contrast pins below measure values from the stylesheet itself.
+// ---------------------------------------------------------------------------
+
+const BRAND_RULES = [
+	...readFileSync(new URL("./brand.css", import.meta.url), "utf8")
+		.replace(/\/\*[\s\S]*?\*\//g, "")
+		.matchAll(/([^{}]+)\{([^{}]*)\}/g),
+].map((m) => ({
+	selectors: m[1].split(",").map((s) => s.trim().replace(/\s+/g, " ")),
+	body: m[2],
+}));
+
+/**
+ * What `prop` is on exactly `selector`. Rules with the same selector share a
+ * specificity, so the LAST declaration in source order wins: `.ut-details`
+ * declares two backgrounds, and the glass is the later one.
+ */
+function declared(selector: string, prop: string): string {
+	let value: string | undefined;
+	for (const rule of BRAND_RULES) {
+		if (!rule.selectors.includes(selector)) continue;
+		for (const declaration of rule.body.split(";")) {
+			const colon = declaration.indexOf(":");
+			if (colon !== -1 && declaration.slice(0, colon).trim() === prop) {
+				value = declaration.slice(colon + 1).trim();
+			}
+		}
+	}
+	if (value === undefined) return assert.fail(`brand.css declares no ${prop} on ${selector}`);
+	return value;
+}
+
+/** Follows `var(--token)` through the `.ut-r` token block to a literal. */
+function resolveToken(value: string): string {
+	let current = value;
+	for (let hop = 0; hop < 8; hop++) {
+		const ref = /^var\((--[\w-]+)\)$/.exec(current);
+		if (!ref) return current;
+		current = declared(".ut-r", ref[1]);
+	}
+	return assert.fail(`${value} does not resolve to a literal`);
+}
+
+/** sRGB channels, 0-255. A composite stays fractional; it is never rounded to hex. */
+type Rgb = readonly [number, number, number];
+
+function hexRgb(hex: string): Rgb {
+	const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+	if (!m) return assert.fail(`not a #RRGGBB colour: ${hex}`);
+	return [Number.parseInt(m[1], 16), Number.parseInt(m[2], 16), Number.parseInt(m[3], 16)];
+}
+
+function rgbaOf(value: string): { rgb: Rgb; alpha: number } {
+	const m = /^rgba\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*\)$/.exec(value);
+	if (!m) return assert.fail(`not an rgba() colour: ${value}`);
+	return { rgb: [Number(m[1]), Number(m[2]), Number(m[3])], alpha: Number(m[4]) };
+}
+
+/** `top` at `alpha` over an opaque `under` (source-over). */
+function over(top: Rgb, alpha: number, under: Rgb): Rgb {
+	const mix = (i: 0 | 1 | 2) => top[i] * alpha + under[i] * (1 - alpha);
+	return [mix(0), mix(1), mix(2)];
+}
+
+/** The WCAG 2.x contrast ratio (1 to 21) of two colours, each `#RRGGBB` or channels. */
+function contrast(a: string | Rgb, b: string | Rgb): number {
+	const luminance = (colour: string | Rgb) => {
+		const [r, g, bl] = (typeof colour === "string" ? hexRgb(colour) : colour).map((v) => {
+			const s = v / 255;
+			return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+		});
+		return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+	};
+	const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+	return (hi + 0.05) / (lo + 0.05);
 }
 
 // ---------------------------------------------------------------------------
@@ -239,10 +320,24 @@ test("CheckLedger: failed rows use danger-INK, the sanctioned red for 12-14px te
 	const markup = html(<CheckLedger verification={verification()} />);
 	const failedRow = markup.match(/data-check="anchorEvidence"[\s\S]*?<\/tr>/)?.[0] ?? "";
 	assert.ok(failedRow.includes("text-danger-ink"));
+	// On this route --color-danger and --color-danger-ink both resolve to
+	// --stakes, so the class is not what makes this text legible today. It is
+	// what keeps H2 enforceable if the two tokens ever diverge: small red text
+	// already names the token sanctioned for it.
 	assert.ok(
 		!/text-danger(?!-ink)/.test(failedRow),
-		"full --color-danger measures 3.5:1 at this size and is forbidden as small text",
+		"12-14px red text takes --color-danger-ink; full --color-danger is for 16px and up (H2)",
 	);
+	// Legibility itself, measured: the ink's resolved value on both solid grounds.
+	const ink = resolveToken(declared(".ut-r", "--color-danger-ink"));
+	for (const ground of ["--bg", "--surface"]) {
+		const background = resolveToken(declared(".ut-r", ground));
+		const ratio = contrast(ink, background);
+		assert.ok(
+			ratio >= 4.5,
+			`--color-danger-ink ${ink} on ${ground} ${background}: ${ratio.toFixed(2)}:1, under AA's 4.5:1`,
+		);
+	}
 });
 
 test("CheckLedger: the footer names the trust snapshot, and the membership note is optional", () => {
@@ -703,4 +798,35 @@ test("ReceiptArtifact: no bright dark-ground accent is used as text on paper", (
 			);
 		}
 	}
+});
+
+// ---------------------------------------------------------------------------
+// Details — its summary is 11px text on glass over the lattice
+// ---------------------------------------------------------------------------
+
+test("Details: the summary and its marker clear 4.5:1 on the glass, whatever the lattice draws beneath", () => {
+	const bg = hexRgb(resolveToken(declared(".ut-r", "--bg")));
+	const glass = rgbaOf(declared(".ut-r .ut-details", "background"));
+	const underGlass = (beneath: Rgb) => over(glass.rgb, glass.alpha, beneath);
+	const grounds: Array<[string, Rgb]> = [
+		["the glass on plain --bg", underGlass(bg)],
+		// The case the review flagged: the field's commonest lit grade, gold
+		// rgb(255,203,100), at the shader's 0.95 lit-alpha cap (vendor/lattice.js).
+		["a lit gold dot under the glass", underGlass(over([255, 203, 100], 0.95, bg))],
+		// The bound. The field also draws points lighter than that gold (its
+		// silver-white grade, and near-white unlit points), but nothing brighter
+		// than white at full opacity, so clearing this clears every dot.
+		["full-opacity white under the glass", underGlass([255, 255, 255])],
+	];
+	const failures: string[] = [];
+	for (const selector of [".ut-r .ut-details>summary", ".ut-r .ut-details>summary::before"]) {
+		const ink = resolveToken(declared(selector, "color"));
+		for (const [ground, rgb] of grounds) {
+			const ratio = contrast(ink, rgb);
+			if (ratio < 4.5) {
+				failures.push(`${selector} ${ink} over ${ground}: ${ratio.toFixed(2)}:1, AA needs 4.5:1`);
+			}
+		}
+	}
+	assert.deepEqual(failures, []);
 });

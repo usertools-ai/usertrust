@@ -18,6 +18,9 @@
  * the explanatory copy but are not asserted verbatim, exactly as §7 says of
  * itself: "quoted strings are normative; surrounding copy is free."
  *
+ * One exception: the 404's copy comes from receipt-spec v0.10 §15.13, which
+ * supersedes §7's `unknown` row for every ID. See `UNKNOWN_HEADLINE`.
+ *
  * `INVALID_ID_HEADLINE` / `PROTOCOL_ERROR_HEADLINE` /
  * `VERIFICATION_UNAVAILABLE_HEADLINE` and `shellHeadline` predate this pass
  * (Task 3's transport-only scope) and are UNCHANGED in value — `transport.
@@ -109,14 +112,35 @@ export const BILLED_UNFINALIZED_HEADLINE = "the trailer's claim was never proven
 export const BILLED_UNFINALIZED_REGISTER_NOTE = "this is a failed promise, not a forgery signal.";
 
 // ===========================================================================
-// Loud failures
+// No receipt under this ID yet (404) — receipt-spec v0.10 §15.13
 // ===========================================================================
 
-/** §7: "`unknown` (404) — "This receipt ID was never allocated."". */
-export const UNKNOWN_HEADLINE = "This receipt ID was never allocated.";
+/**
+ * receipt-spec v0.10 §15.13: "a consumer renders every 404 as "no receipt
+ * under this ID yet"". This replaces §7's `unknown` (404) headline ("This
+ * receipt ID was never allocated.") and retires, for every ID, the LOUD
+ * "never allocated — integrity red flag" rendering that went with it.
+ *
+ * Why it is retired: a cluster receipt's ID is derived, so it can be cited
+ * before its receipt exists, and a cluster ID and a session ID share one
+ * format. A 404 alone therefore cannot say whether a receipt is still coming.
+ * The loud rendering would have called every ID cited before its receipt is
+ * minted an integrity red flag, and a green one would certify a receipt nobody
+ * has seen. §15.13 rules out both: a 404 is never forgery, and never green.
+ */
+export const UNKNOWN_HEADLINE = "no receipt under this ID yet";
 
-/** §7, verbatim (resolver's own fail-closed convention). */
-export const UNKNOWN_RED_FLAG_NOTE = "an unknown receipt on a commit is an integrity red flag.";
+/**
+ * §15.13's explanation of when the receipt arrives, and its "never forgery,
+ * never green" rule, in the page's words. Surrounding copy, so not a
+ * verbatim quote; the headline above is the normative string.
+ */
+export const UNKNOWN_NOT_YET_NOTE =
+	"a receipt is minted once its agent key has been idle for the key's idle threshold — 10 minutes by default, on the ledger's clock — and its audit segment has sealed, so an ID can be cited before its receipt exists. A 404 is not evidence of forgery, and it is not a verification.";
+
+// ===========================================================================
+// Loud failures
+// ===========================================================================
 
 /**
  * §7: "`unverifiable` (409) — integrity failure: "proof recomputation failed
@@ -266,10 +290,13 @@ export function ogCardRegister(state: PageState): "green" | "neutral" | "warning
 		case "verificationUnavailable":
 			return "warning";
 		case "billedUnfinalized":
-		case "unknownReceipt":
 		case "integrityFailure":
 		case "protocolError":
 			return "danger";
+		// receipt-spec v0.10 §15.13: a 404 is never forgery and never green. A
+		// danger card would unfurl a cited, not-yet-minted ID as a red flag.
+		case "unknownReceipt":
+			return "neutral";
 		default:
 			return "neutral";
 	}

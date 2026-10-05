@@ -65,7 +65,11 @@ test("every non-verified state leads with a plain word and one line, spec wordin
 	const cases: Array<[string, string, string]> = [
 		["reserved.json", "Pending", "The work behind this receipt hasn't finished yet."],
 		["reconciling.json", "Pending", "This receipt is still settling. Check back shortly."],
-		["unknown.json", "Not found", "This receipt ID was never issued."],
+		[
+			"unknown.json",
+			"No receipt yet",
+			"There's no receipt under this ID yet. Receipts are minted after the agent key goes idle — 10 minutes by default — and its audit segment seals.",
+		],
 		["unverifiable.json", "Not verified", "The proof didn't match the audit log."],
 		["not-minted.json", "No receipt", "No billable work was settled under this ID."],
 		["cancelled.json", "No receipt", "This reservation ended without a receipt."],
