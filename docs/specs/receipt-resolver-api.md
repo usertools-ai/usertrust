@@ -1,6 +1,24 @@
-# Receipt Resolver API — v0.2 (normative companion; adopted authority: receipt-spec v0.9.5)
+# Receipt Resolver API — v0.3 (normative companion; adopted authority: receipt-spec v0.10)
 
-Status: **v0.2 — the SIXTEEN §10 companion updates applied, and the verify
+Status: **v0.3 (2026-10-05) — CLUSTER receipts.** The receipt spec's v0.10
+makes cluster receipts (§15) the issuance model for every new receipt, and
+supersedes the session kind for new issuance. This revision applies its
+companion items §10.17–§10.22:
+
+- clusters are served on the unchanged envelope and ladder;
+- a cluster ID has no 202 and no 410 — it answers 404 until its receipt is
+  minted;
+- 404 caching is unchanged, but its rendering changes;
+- the derived-ID recompute joins identity binding;
+- the failure vocabulary gains two codes;
+- the cluster rendering sentences are added.
+
+The new section **"Cluster receipts — states and identity"** carries it.
+Everything below that was written for reservations is retained as the
+specification of SESSION receipts already issued, which stay valid forever.
+The content-pinned Mint-lifecycle section is untouched (see the banner below).
+
+Earlier status — **v0.2: the SIXTEEN §10 companion updates applied, and the verify
 page's §4 concrete response schema adopted.** All sixteen §10 items now land
 in full: the in-pin corrections that once held §10.13 to a part-landing and
 §10.16 to none have been applied to the pinned section, and the pin
@@ -10,7 +28,10 @@ and any third-party verifier.
 
 **Normative inputs, in authority order:**
 
-1. **`receipt-spec.md` — v0.9.5, the ADOPTED revision** (usertrust). This
+1. **`receipt-spec.md` — v0.10, the ADOPTED revision** (usertrust; v0.3
+   moved it off v0.9.5, because this document now transcribes v0.10's cluster
+   states; everything said below about why v0.6 was too old stays true of
+   v0.9.5's content, which v0.10 contains). This
    document treats the receipt ID as opaque and defers its format, the
    canonical projection, the canonicalization algorithm, and the signature
    scheme to that spec. **Conflicts resolve in its favor, always** — the
@@ -67,6 +88,19 @@ section were all taken at the v0.7 re-pin — the changelog's re-pin bundle row
 records them, and nothing remains deferred. Editing that section is a coordination event with
 the usertrust instance (it forces a version bump and a re-pin on their side),
 never a companion edit.
+
+**v0.3: the pinned section is unchanged, byte for byte, and now governs SESSION
+issuance only.**
+
+- **Superseded for new issuance.** The reserve → work → finalize lifecycle it
+  specifies is superseded for new issuance by the receipt spec's §15.9. It stays
+  pinned and in force as the lifecycle of the session receipts already issued.
+- **The pin still moves.** v0.3 edits only OUTSIDE the pinned section. But the
+  pin covers this whole file, so the receipt spec's v0.10 re-pins it and records
+  the byte-identity check of the section (§6a there).
+
+The same rule continues to hold: an edit INSIDE the section is a coordination
+event, never a companion edit.
 
 ## Purpose
 
@@ -225,6 +259,11 @@ GET https://api.usertools.ai/v1/receipts/{receiptId}
   (the terminal event nests as `terminalEvent.event` in the §4.2 bundle),
   under the same first-write-wins discipline, so that bundle is checkable by
   the same mechanism as a green receipt instead of being self-asserted.
+  **v0.3, cluster receipts:** a cluster ID is not opaque. It is DERIVED from
+  the receipt's own `(proof.chain, accountId, window.start)` (receipt-spec
+  §15.8), and the resolver recomputes it on every read that serves one, in
+  addition to route = body = registry. A stored cluster receipt whose ID does
+  not recompute is a 409 `unverifiable`, never served.
 - **Caching (Codex F3, tightened by round-2 F1):** 200 → `Cache-Control:
   public, no-cache` plus a strong `ETag`; clients revalidate every render.
   **Verification precedes conditional-request evaluation**: the resolver
@@ -235,7 +274,10 @@ GET https://api.usertools.ai/v1/receipts/{receiptId}
   On verification failure the conditional request is answered 409 `no-store`
   like any other. 409 → `Cache-Control: no-store`. 404 → `public,
   no-cache` (round-16 — a cached negative could mask this ID's later
-  allocation). A CDN layer, if ever added, fronts only the
+  allocation). (v0.3: for a derived cluster ID the "later" event is the
+  receipt's MINTING, not an allocation. The same rule covers it unchanged, and
+  it is now the ordinary case: an ID cited before its receipt exists answers
+  404 until it is minted.) A CDN layer, if ever added, fronts only the
   post-verification 304 path.
   **The ETag covers the whole envelope, extension material included**, so a
   status that rises from `verified_checkpoint` to
@@ -1165,7 +1207,9 @@ Three consequences the draft got wrong and v0.2 fixes:
 `"reserved"` is the only 202 this ladder recognizes — a state of the ID
 BEFORE it has a receipt, never a state of a minted proof. (`"reconciling"`
 sits on the same pre-mint side of that line: it is mint-side machinery this
-document owns, and it survives.)
+document owns, and it survives.) (v0.3: both 202s are SESSION-reservation
+states. A cluster ID never answers 202. See "Cluster receipts — states and
+identity".)
 
 ## Display states (never a `status`, never a verdict)
 
@@ -1864,11 +1908,97 @@ finalize A for the commit). Therefore:
   terminal-intent commitment instead. `transferSetRoot` commits the server-derived set, and
   `spend` is computed from it and nothing else.
 
+## Cluster receipts — states and identity (v0.3 — receipt-spec §15)
+
+**What a cluster receipt is.** The receipt spec's v0.10 defines it (§15). It
+covers EVERY ledger transfer of ONE funded ledger account — one agent key —
+over a SYSTEM-DEFINED window: from first activity until the account has been
+idle for at least 35 minutes, judged on the ledger's own timestamps.
+
+- Nobody reserves, and nobody chooses a boundary.
+- Its ID is DERIVED from `(proof.chain, accountId, window.start)` (§15.8), so it
+  can be computed — and cited — the moment the window's first transfer commits.
+- **This section is a transcription; the receipt spec is the authority.** It
+  restates the states the resolver serves for such an ID. Where it and the
+  receipt spec differ, the receipt spec wins, as always.
+
+**The states.**
+
+| Code | Body `status` | When |
+|---|---|---|
+| 200 | `verified_checkpoint` / `verified_checkpoint_history` / `verified_anchored` | A MINTED cluster receipt: the same envelope, the same ladder, the same `apiVersion` as any receipt (§10.17). The signed receipt's shape is governed by `scope`, under the receipt spec's strict schema. |
+| 404 | `"unknown"` | **Any ID with no minted receipt.** For a derived cluster ID that includes a window that is still open, closed but not reconciled, minted but not yet sealed, or unmintable (e.g. no metered spend). Caching is unchanged: `public, no-cache, max-age=0, must-revalidate`. The round-21 reasoning — a fresh cached 404 can never observe the answer that follows — is now the ORDINARY case rather than an edge. |
+| 409 | `"unverifiable"` | As in the Errors table, plus: a stored cluster receipt whose ID does not recompute from its own `(proof.chain, accountId, window.start)` (§10.20). |
+| 503, 304, 429 | as in the Errors table | Unchanged. |
+
+**There is no pre-mint state for a cluster ID.**
+
+- **No 202 `reserved`:** nothing is reserved.
+- **No 202 `reconciling`, and no `"sealing"`.** The ruling is "unminted → 404".
+  Two further reasons support it:
+  1. A pre-mint answer for a DERIVABLE ID is an unauthenticated oracle: anyone
+     holding an account ID could confirm "this account had activity starting at
+     time T".
+  2. With no allocation event, a 202 would have nothing to mean that a 404 does
+     not.
+- **No 410 of any kind.** Nothing is cancelled or expired, and a window that
+  bills nothing simply never has a receipt, so its ID answers 404 forever.
+
+The 202 and 410 rows in the Errors table remain defined for SESSION
+reservations only (superseded issuance).
+
+**What a 404 means, and how it renders — this changes for every ID.** Under
+reservation a 404 meant "never allocated", and the page rendered it LOUDLY as
+an integrity red flag. A 404 now ALSO covers a legitimately cited cluster ID
+whose receipt does not exist yet, and nothing in the ID says which kind it is.
+So a consumer:
+
+- MUST render a 404 as **"no receipt under this ID yet"**, saying that cluster
+  receipts are minted after the agent key has been idle for 35 minutes and its
+  audit segment has sealed;
+- MUST NOT render a 404 as forgery or invalidity;
+- MUST NOT render a 404 green.
+
+This is a verify-page change, tracked as a companion item on that document.
+
+**What the resolver does NOT do for clusters.** It does not perform the
+`ledgerCompleteness` check (receipt-spec §15.10) on the public's behalf. That
+check needs ledger access, so in a public response it is `notApplicable`.
+
+**Failure vocabulary.** The closed vocabulary gains `COMPLETENESS_MISMATCH`
+and `WINDOW_CONFLICT` (§10.21). Neither is ever emitted in a resolver
+`verification` block:
+
+- `COMPLETENESS_MISMATCH` is the owner/auditor check's result;
+- `WINDOW_CONFLICT` is a multi-receipt consumer rule.
+
+Consumers that implement those checks report them.
+
+**Rendering (§10.22).** For `scope: "cluster"`, the claim line is "charged to
+this agent key between `<start>` and `<end>` — $X". The R40 scope line under
+`selfDebitsOnly` is "Charged to this agent key · delegated work bills to the
+delegate". The scoped never-understates sentence is "never understates the
+ledger-POSTed spend of this agent key over this window". Times render the
+ledger nanoseconds as RFC 3339 UTC, by integer division to milliseconds.
+
 ## Errors
 
 Every lifecycle phase has a defined response (round-7 F4) — consumers get
 deterministic rendering/retry behavior, and no cacheable state can mask a
-transition:
+transition.
+
+**v0.3 scope note.**
+
+- **Session-only rows.** The 202 rows and the 410 rows below are
+  SESSION-reservation states, superseded for new issuance by the receipt
+  spec's §15, and retained for session receipts. A cluster ID never answers
+  any of them.
+- **The 404 row** gains the cluster meaning: any unminted ID, including a
+  derived cluster ID cited before its receipt exists. Its rendering changes as
+  "Cluster receipts — states and identity" states. The row's LOUD "integrity
+  red flag" rendering is retired for EVERY ID: the two kinds share one ID
+  format, so a consumer cannot tell which kind a 404 answers.
+- **409 / 503 / 429** are unchanged for both kinds.
 
 | Code | Body `status` | Meaning |
 |---|---|---|
@@ -1877,7 +2007,7 @@ transition:
 | 410 | `"cancelled"` / `"expired"` | Terminal: the reservation was cancelled by its owner or expired server-side — reachable ONLY for reservations with zero admitted intents (round-11 F1); an expiration tombstone persists, so an allocated ID answers 410 forever (round-12). Cacheable ≤1h. Renders as "reservation ended without a receipt" — loud on a commit, expected on abandoned work. Cancellation authorizes against the reservation owner / billing principal (or a delegated orchestrator capability) in the same transaction as the state CAS — reservation IDs are public by design (trailers), and an unauthorized caller receives the 404 shape (review-gate R7). |
 | 410 | `"billedUnfinalized"` | Terminal, NON-GREEN: the reservation billed (≥1 POST) but never finalized; a spend-only session receipt exists under a SEPARATE linked ID referenced in the body (round-14 F2). Loud on a commit — the trailer's claim was never proven. Cacheable ≤1h. **The bundle's ut1 re-expression (§10.15) IS applied** — its concrete amended shape is transcribed from §4.2 under "Non-receipt response bodies", which supersedes the older description still carried in the content-pinned section. |
 | 410 | `"notMinted"` | Terminal: at least one intent was admitted, ALL intents are terminal, and ZERO TigerBeetle transfers POSTed — actual transfers VOIDed; pre-ledger intents may be REJECTED or ABORTED_NOT_SUBMITTED (round-12 definition). Nothing billable settled, nothing to prove, and this can never change (round-8 F4). Cacheable ≤1h. The page renders "no billable work settled under this receipt ID" — distinct from both an error and a green check. |
-| 404 | `"unknown"` | ID never allocated (round-12: allocated IDs that expire answer 410 via the tombstone — the two have opposite integrity semantics). `Cache-Control: public, no-cache, max-age=0, must-revalidate` — storage is acceptable ONLY when every reuse revalidates at the origin; NO freshness allowance (round-21: a fresh cached 404 is served without contacting the origin, so it can never observe the 202 that follows allocation). The spec's §3 makes this meaningful: the ID is CLAIMED atomically at reserve time by an insert-if-absent into the mint-side registry, in the same durable write that creates the reservation, so it exists — unresolvable-but-allocated — before it can be written into any trailer. The page renders this LOUDLY — an unknown receipt on a commit is an integrity red flag, per the fail-closed convention. |
+| 404 | `"unknown"` | **v0.3: also every DERIVED cluster ID with no minted receipt yet — open, closed-unreconciled, minted-unsealed, or unmintable (receipt-spec §15.11); the caching below is unchanged; the rendering is "no receipt under this ID yet", never forgery, never green.** Session-format meaning, unchanged: ID never allocated (round-12: allocated IDs that expire answer 410 via the tombstone — the two have opposite integrity semantics). `Cache-Control: public, no-cache, max-age=0, must-revalidate` — storage is acceptable ONLY when every reuse revalidates at the origin; NO freshness allowance (round-21: a fresh cached 404 is served without contacting the origin, so it can never observe the 202 that follows allocation). The spec's §3 makes this meaningful: the ID is CLAIMED atomically at reserve time by an insert-if-absent into the mint-side registry, in the same durable write that creates the reservation, so it exists — unresolvable-but-allocated — before it can be written into any trailer. The page renders this LOUDLY — an unknown receipt on a commit is an integrity red flag, per the fail-closed convention. (v0.3: that rendering is RETIRED — the page renders every 404 as "no receipt under this ID yet", never forgery and never green, because a cluster ID cited before minting is indistinguishable from an unallocated one.) |
 | 409 | `"unverifiable"` | ID known, but recomputation of the STORED mint-time artifact failed — the event/proof/checkpoint the resolver serves does not verify against itself (§10.4). Never cached. Alerts internally — this should be impossible. A failed EXTENSION check is never a 409: it preserves the base verdict and is reported beside it. |
 | 503 | `"verificationUnavailable"` | A transient dependency prevented the BASE verification — and the list is exactly two: **the key registry or the receipt store being unreachable** (§10.4). An OPERATIONAL condition, not a cryptographic mismatch (round-32: rendering it 409 fakes an integrity incident; rendering a recompute failure as 503 hides one; an unspecified 500 breaks deterministic retry). `Cache-Control: no-store` + `Retry-After`; never a 304, never a fallback to any cached green response. **An anchor or history endpoint is NOT on that list:** anchor and checkpoint-history material are optional EXTENSION inputs, so failing to reach them is a clean 200 at `verified_checkpoint` with the extension reported `unavailable` — never a 503, never a downgrade. |
 | 429 | — | Rate limited. **The one body-less state**, and exempt from the `apiVersion` discipline: consumers derive it from the status code + `Retry-After` alone and never parse the body (§4.2, below). |
@@ -1886,7 +2016,9 @@ transition:
 
 Transcribed from the verify page's §4.2. `receiptBytes`, `receipt`,
 `verification`, and `advisories` exist ONLY where shown: a 202/410/404 has no
-receipt and no verification to report.
+receipt and no verification to report. (v0.3: the 202 and 410 bodies are
+SESSION-reservation bodies. A cluster ID's only non-receipt bodies are the
+404, 409 and 503 below, with their shapes unchanged.)
 
 ```jsonc
 // 202 — Cache-Control: no-store
@@ -2006,7 +2138,10 @@ consumer could not obtain a trustworthy answer at all.
 
 - No list/search endpoints (enumeration of receipts is a different product
   decision — amounts are public per-receipt, not necessarily as a browsable
-  firehose).
+  firehose). v0.3: none is needed for clusters either. An account's owner can
+  compute every window of their own account and DERIVE each ID (receipt-spec
+  §15.5, §15.8), so a missing receipt is detectable one ID at a time, without
+  an index the public could browse.
 - No per-transfer SPEND breakdown endpoint. `spend` is session-aggregate. (The
   transfer ID PAIRS are a different thing and are disclosed by rule, not by
   endpoint: the projection enumerates them at `transferCount ≤ 32` and omits
@@ -2210,6 +2345,22 @@ receipt is compared by IMMUTABLE `providerArtifactId` (numbers and URLs are
 both reusable) — a mismatch there is a transplant and fails, while a newer
 revision of the SAME artifact is the `revisionSuperseded` display state, not
 a failure.
+
+## Changelog — v0.3 (cluster receipts: receipt-spec v0.10, §10.17–§10.22)
+
+Applied against receipt-spec **v0.10**. Each row cites its §10 item; every
+change is OUTSIDE the content-pinned Mint-lifecycle section, which is
+byte-identical to v0.2's (the receipt spec's §6a records the check and its
+command).
+
+| §10 | Applied |
+|---|---|
+| 17 | Minted cluster receipts are served at 200 on the unchanged envelope and ladder; `apiVersion` unchanged (header status; "Cluster receipts — states and identity"). |
+| 18 | 202 `reserved`/`reconciling` and the 410 terminals are SESSION-reservation states. A cluster ID has no 202, no 410, and no pre-mint state ("Cluster receipts"; the Errors scope note; Status ladder; Non-receipt bodies). |
+| 19 | 404 covers every unminted ID, including derived cluster IDs. Caching is unchanged; the 404 rendering changes to "no receipt under this ID yet" (Caching; the Errors 404 row; "Cluster receipts"). |
+| 20 | The derived-ID recompute joins identity binding on every read serving a cluster receipt, and a non-recomputing stored receipt is a 409 (Endpoint, identity binding; "Cluster receipts"). |
+| 21 | The failure vocabulary gains `COMPLETENESS_MISMATCH` and `WINDOW_CONFLICT`, which a resolver response never emits; `ledgerCompleteness` is `notApplicable` in a public response ("Cluster receipts"). |
+| 22 | Cluster rendering sentences: claim line, R40 scope line, scoped never-understates ("Cluster receipts"). |
 
 ## Changelog — v0.2 (sixteen §10 companion updates + the §4 schema adoption)
 
