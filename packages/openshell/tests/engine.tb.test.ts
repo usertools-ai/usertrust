@@ -383,6 +383,19 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		expect((await tb.lookupAccounts([debtAcct]))[0]?.debits_posted).toBe(40n);
 	});
 
+	it("#177 x #180: a chargeDebt REPLAY (a crash after the charge landed) builds the identical transfer — core's now-verified `exists` accepts it, and the debt account is charged once; a replay with another amount is refused as a mismatch", async () => {
+		const { tb, ledger, budgetId, key } = await setup(1_000);
+		const k = key();
+		const charge = (amount: number) =>
+			ledger.chargeDebt({ budgetId, holdKey: k, role: "overage", amount });
+		expect(await charge(40)).toBe("done");
+		expect(await charge(40), "the replay answers `exists`, verified").toBe("done");
+		const debtAcct = await tb.ensureEscrowAccount(debtAccountLabel(budgetId));
+		expect((await tb.lookupAccounts([debtAcct]))[0]?.debits_posted).toBe(40n);
+		await expect(charge(41)).rejects.toThrow();
+		expect((await tb.lookupAccounts([debtAcct]))[0]?.debits_posted, "still charged once").toBe(40n);
+	});
+
 	it("control: every role's id is distinct and stable for a hold", () => {
 		const roles = [
 			"reserve",
