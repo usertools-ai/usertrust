@@ -137,6 +137,10 @@ function transcriptHoldFields(entry) {
 			: [],
 	};
 	for (const key of COUNT_FIELDS) fields[key] = countOf(entry[key]);
+	// A hold authorized under a key also records the key and the agent type its
+	// principal named: what a retry of its settle needs (see transcript.mjs).
+	if (typeof entry.idempotencyKey === "string") fields.idempotencyKey = entry.idempotencyKey;
+	if (typeof entry.agentType === "string") fields.agentType = entry.agentType;
 	return fields;
 }
 
@@ -243,17 +247,79 @@ export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 	}
 }
 
+// ── What the server honours ──
+
+let capabilitiesRead;
+
 /**
- * Abort remaining holds for a session. When agentId is a string, only that
- * agent's holds are aborted (SubagentStop for one subagent); when it is null,
- * every agent's holds are aborted (Stop — the session really is ending).
- * A hold that carries assigned transcript usage is NOT aborted here: it is a
- * settlement, and transcript.mjs settles it. Non-200 abort responses and
- * transport failures are reported to stderr but never thrown. Files are
- * cleared regardless: the session (or subagent) is over, so an unabortable hold
- * is voided server-side by the pending-TTL sweep, and keeping the file would
- * only leak state-dir entries. A hold the hook budget no longer covers is left
- * for the next Stop and the TTL sweep.
+ * The server's published capabilities (`/v1/health` `capabilities`), read once per
+ * hook process; an empty set for a server that publishes none, or cannot be
+ * reached. Never cached on disk: a cache could still claim keys after the server
+ * was downgraded to one that strips them.
+ *
+ * WHY THIS GATES ANYTHING: an older usertrust-server's schemas STRIP request keys
+ * they do not know. It would accept an `idempotencyKey` and drop it in silence —
+ * and a settle retried "safely" under that key would then post twice.
+ */
+export function serverCapabilities() {
+	capabilitiesRead ??= (async () => {
+		const base = process.env.UT_SERVER_URL ?? "http://127.0.0.1:4519";
+		const timeoutMs = Math.min(1_000, timeLeft());
+		if (!(timeoutMs > 0)) return new Set();
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), timeoutMs);
+		try {
+			const response = await fetch(`${base}/v1/health`, { signal: controller.signal });
+			const json = await response.json();
+			const list = Array.isArray(json?.capabilities) ? json.capabilities : [];
+			return new Set(list.filter((c) => typeof c === "string"));
+		} catch {
+			return new Set();
+		} finally {
+			clearTimeout(timeout);
+		}
+	})();
+	return capabilitiesRead;
+}
+
+/**
+ * The server's answer that a key's charge already stands (usertrust #205): from
+ * `/v1/authorize` when an earlier settle under the key landed, and from
+ * `/v1/settle` when another hold already charged it.
+ */
+export function isAlreadySettled(response) {
+	return response.status === 409 && response.json?.error === "already_settled";
+}
+
+/**
+ * Give a hold back WITHOUT calling it a failure: `/v1/release` on a server that
+ * has it, so a hold that simply was not needed records no breaker failure and no
+ * `llm_call_failed` (usertrust #204). An older server has only `/v1/abort`.
+ */
+export async function releaseHold(transferId, reason, { timeoutMs = 5000 } = {}) {
+	const capabilities = await serverCapabilities();
+	return capabilities.has("release")
+		? {
+				route: "release",
+				...(await serverRequest("/v1/release", { transferId, reason }, { timeoutMs })),
+			}
+		: {
+				route: "abort",
+				...(await serverRequest("/v1/abort", { transferId, error: reason }, { timeoutMs })),
+			};
+}
+
+/**
+ * Release remaining holds for a session — they are not failures. When agentId is
+ * a string, only that agent's holds are released (SubagentStop for one subagent);
+ * when it is null, every agent's holds are (Stop — the session really is ending).
+ * A hold that carries assigned transcript usage is NOT released here: it is a
+ * settlement, and transcript.mjs settles it. Non-200 responses and transport
+ * failures are reported to stderr but never thrown. Files are cleared
+ * regardless: the session (or subagent) is over, so a hold that could not be
+ * released is voided server-side by the pending-TTL sweep, and keeping the file
+ * would only leak state-dir entries. A hold the hook budget no longer covers is
+ * left for the next Stop and the TTL sweep.
  */
 export async function cleanup(sessionId, agentId) {
 	for (const entry of await listPending(sessionId, agentId)) {
@@ -264,17 +330,17 @@ export async function cleanup(sessionId, agentId) {
 			return;
 		}
 		try {
-			const response = await serverRequest(
-				"/v1/abort",
-				{ transferId: entry.transferId, error: "session ended with unsettled hold" },
-				{ timeoutMs },
-			);
+			const response = await releaseHold(entry.transferId, "session ended with unsettled hold", {
+				timeoutMs,
+			});
 			if (response.status !== 200) {
-				process.stderr.write(`usertrust: abort ${entry.transferId} returned ${response.status}\n`);
+				process.stderr.write(
+					`usertrust: ${response.route} ${entry.transferId} returned ${response.status}\n`,
+				);
 			}
 		} catch (err) {
 			process.stderr.write(
-				`usertrust: failed to abort ${entry.transferId}: ${err instanceof Error ? err.message : String(err)}\n`,
+				`usertrust: failed to give back ${entry.transferId}: ${err instanceof Error ? err.message : String(err)}\n`,
 			);
 		}
 		await clearPending(sessionId, entry.agentId, entry.entryKey);

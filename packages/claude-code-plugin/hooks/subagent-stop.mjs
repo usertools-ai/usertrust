@@ -5,10 +5,10 @@
 // sweep here would touch the parent's and sibling subagents' in-flight holds.
 // We scope both steps to input.agent_id. When agent_id is absent (older Claude
 // Code that does not emit it), we do NOTHING rather than touch the shared
-// "main" bucket: a false abort of a still-running agent's hold is worse than an
+// "main" bucket: giving back a still-running agent's hold is worse than an
 // orphan, and PostToolUse settles / the Stop sweep (which also posts every
 // subagent's remainder) / the server's pending-TTL sweep are the backstops.
-// Leftover holds follow Stop's rule: settled if usage was assigned, else aborted.
+// Leftover holds follow Stop's rule: settled if usage was assigned, else given back.
 import { cleanup, readStdin, usageMode } from "./lib.mjs";
 import { LEFTOVER_RESERVE_MS, postRemainder, settleAssignedHolds } from "./transcript.mjs";
 

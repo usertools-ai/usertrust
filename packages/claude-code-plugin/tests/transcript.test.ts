@@ -11,6 +11,8 @@
 // is assigned the agent's new complete messages (one model's worth) and
 // PostToolUse SETTLES it at their counts — no abort on the normal path. What no
 // hold picked up is posted by Stop/SubagentStop, one authorize→settle per model.
+
+import { createHash } from "node:crypto";
 import {
 	appendFile,
 	chmod,
@@ -18,6 +20,7 @@ import {
 	mkdtemp,
 	readdir,
 	readFile,
+	rm,
 	utimes,
 	writeFile,
 } from "node:fs/promises";
@@ -67,6 +70,8 @@ let real: UsertrustServer | undefined;
 let port: number;
 let requests: Recorded[];
 let delayMs: number;
+/** What the fake server's /v1/health publishes: none, an older server, unless a test says. */
+let capabilities: string[];
 
 type Responder = (path: string, body: Record<string, unknown>) => { status: number; json: unknown };
 
@@ -83,6 +88,14 @@ const okResponder: Responder = (path) => {
 function startServer(responder: Responder | { forwardTo: string; key: string }): Promise<void> {
 	return new Promise((resolve) => {
 		fake = createServer((req, res) => {
+			if (req.method === "GET" && req.url === "/v1/health") {
+				// What the server honours: answered, never logged.
+				void health(responder).then(({ status, json }) => {
+					res.writeHead(status, { "content-type": "application/json" });
+					res.end(JSON.stringify(json));
+				});
+				return;
+			}
 			// Bound to THIS test's log: a delayed answer must not land in the next test's.
 			const log = requests;
 			const delay = delayMs;
@@ -110,6 +123,11 @@ function startServer(responder: Responder | { forwardTo: string; key: string }):
 				}
 				log.push({ path, body, status: out.status, response: out.json });
 				if (res.destroyed) return;
+				// Status 0: the request was processed, and its answer is lost.
+				if (out.status === 0) {
+					res.destroy();
+					return;
+				}
 				res.writeHead(out.status, { "content-type": "application/json" });
 				res.end(JSON.stringify(out.json));
 			});
@@ -120,6 +138,14 @@ function startServer(responder: Responder | { forwardTo: string; key: string }):
 			resolve();
 		});
 	});
+}
+
+async function health(
+	responder: Responder | { forwardTo: string; key: string },
+): Promise<{ status: number; json: unknown }> {
+	if (typeof responder === "function") return { status: 200, json: { status: "ok", capabilities } };
+	const r = await fetch(`${responder.forwardTo}/v1/health`);
+	return { status: r.status, json: await r.json() };
 }
 
 function run(name: string, input: Record<string, unknown>, env: Record<string, string> = {}) {
@@ -250,6 +276,7 @@ beforeEach(async () => {
 	requests = [];
 	nextTransfer = 0;
 	delayMs = 0;
+	capabilities = [];
 });
 afterEach(async () => {
 	fake?.closeAllConnections();
@@ -654,6 +681,7 @@ describe("idempotency and concurrency", () => {
 		// Reclaimed, then released: no lock and no stale leftovers remain.
 		expect((await readdir(join(stateDir, "transcripts"))).sort()).toEqual([
 			`${SESSION}__main.json`,
+			"claims",
 		]);
 	});
 });
@@ -937,6 +965,457 @@ describe("estimate holds", () => {
 	});
 });
 
+const ALL_CAPABILITIES = ["release", "idempotency-key", "principal", "settlement-unrecoverable"];
+
+/** The key a vehicle of these message ids is authorized under (pinned: a change orphans parked retries). */
+function keyOf(agentId: string, ids: string[]): string {
+	const digest = createHash("sha256")
+		.update(JSON.stringify([SESSION, agentId, [...ids].sort()]))
+		.digest("hex");
+	return `cc:${digest.slice(0, 48)}`;
+}
+
+type SettleFault =
+	| "post-then-500"
+	| "500-before-post"
+	| "post-then-lost"
+	| "404-restarted"
+	| "settled-false"
+	| "409-duplicate"
+	| "400";
+
+/**
+ * A fake that keeps usertrust #205's contract for keys: a replayed authorize of a
+ * key with a live hold gets THAT hold back; a key whose charge stands is 409
+ * `already_settled`, at authorize and at a second settle. `charges` is the ledger:
+ * one entry per posted key. Faults apply to the next settle of the named hold.
+ */
+function keyedServer() {
+	const holds = new Map<string, { key: string | undefined }>();
+	const live = new Map<string, string>();
+	const charged = new Set<string>();
+	const charges: Array<{ key: string | undefined; transferId: string; inputTokens: unknown }> = [];
+	const faults = new Map<string, SettleFault>();
+	/** Set: every authorize answers this status, and nothing is held. */
+	const authorizeFault: { status: number | null } = { status: null };
+	let next = 0;
+	const responder: Responder = (path, body) => {
+		const key = typeof body.idempotencyKey === "string" ? body.idempotencyKey : undefined;
+		if (path === "/v1/authorize") {
+			if (authorizeFault.status !== null) {
+				return { status: authorizeFault.status, json: { error: "unavailable" } };
+			}
+			if (key !== undefined && charged.has(key)) {
+				return { status: 409, json: { error: "already_settled", reason: "already charged" } };
+			}
+			const replay = key === undefined ? undefined : live.get(key);
+			if (replay !== undefined)
+				return { status: 200, json: { transferId: replay, estimatedCost: 1 } };
+			next += 1;
+			const transferId = `tx_${next}`;
+			holds.set(transferId, { key });
+			if (key !== undefined) live.set(key, transferId);
+			return { status: 200, json: { transferId, estimatedCost: 1 } };
+		}
+		const transferId = String(body.transferId);
+		const hold = holds.get(transferId);
+		if (path === "/v1/settle") {
+			const fault = faults.get(transferId);
+			faults.delete(transferId);
+			if (fault === "404-restarted") {
+				// The server restarted: it holds nothing, and remembers no live key.
+				holds.clear();
+				live.clear();
+				return { status: 404, json: { error: "not_found" } };
+			}
+			if (hold === undefined) return { status: 404, json: { error: "not_found" } };
+			if (fault === "500-before-post") return { status: 500, json: { error: "internal" } };
+			if (fault === "400") return { status: 400, json: { error: "bad_request" } };
+			holds.delete(transferId);
+			if (hold.key !== undefined) live.delete(hold.key);
+			if (fault === "settled-false") {
+				// The ledger post is ambiguous: the hold is spent, and nothing is known.
+				return { status: 200, json: { settled: false, transferId } };
+			}
+			if (fault === "409-duplicate" && hold.key !== undefined) charged.add(hold.key);
+			if (hold.key !== undefined && charged.has(hold.key)) {
+				return { status: 409, json: { error: "already_settled", reason: "duplicate" } };
+			}
+			if (hold.key !== undefined) charged.add(hold.key);
+			charges.push({ key: hold.key, transferId, inputTokens: body.inputTokens });
+			if (fault === "post-then-500") return { status: 500, json: { error: "internal" } };
+			if (fault === "post-then-lost") return { status: 0, json: null };
+			return { status: 200, json: { settled: true, transferId } };
+		}
+		// /v1/release, /v1/abort
+		holds.delete(transferId);
+		if (hold?.key !== undefined) live.delete(hold.key);
+		return { status: 200, json: { released: true } };
+	};
+	return { responder, charges, charged, faults, authorizeFault };
+}
+
+interface CursorV2 extends Cursor {
+	unresolved: Record<string, { ids: string[]; inputTokens: number }>;
+}
+
+const releases = () => requests.filter((r) => r.path === "/v1/release");
+
+describe("with a server that honours keys, principal and release (usertrust #205)", () => {
+	beforeEach(() => {
+		capabilities = [...ALL_CAPABILITIES];
+	});
+
+	it("a window's authorize carries its vehicle key and the principal; a settle carries neither", async () => {
+		const server = keyedServer();
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(10, 20, 30, 40)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		expect(authorizes()[0]?.body).toMatchObject({
+			idempotencyKey: keyOf("main", ["msg_a"]),
+			principal: { id: "main", type: "main", origin: `claude-code:${SESSION}` },
+		});
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		expect(settles()[0]?.body).not.toHaveProperty("idempotencyKey");
+		expect(settles()[0]?.body).not.toHaveProperty("principal");
+		// The remainder is keyed by ITS ids, and names its agent too.
+		await appendMain(responseEntries("msg_b", SONNET, u(1, 2)));
+		await writeSubagent("a1", "Explore", responseEntries("msg_s", HAIKU, u(3, 4), sub("a1")));
+		await run("stop.mjs", stopInput());
+		const remainder = authorizes().slice(1);
+		expect(remainder.map((a) => a.body.idempotencyKey).sort()).toEqual(
+			[keyOf("main", ["msg_b"]), keyOf("a1", ["msg_s"])].sort(),
+		);
+		expect(remainder.find((a) => a.body.model === HAIKU)?.body.principal).toEqual({
+			id: "a1",
+			type: "Explore",
+			origin: `claude-code:${SESSION}`,
+		});
+		expect(server.charges.map((c) => c.inputTokens).sort()).toEqual([1, 10, 3].sort());
+	});
+
+	it("an older server gets neither: no key, no principal, no release", async () => {
+		capabilities = [];
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(1, 1)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("pre-tool-use.mjs", preInput("tu_2"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_2"));
+		for (const a of authorizes()) {
+			expect(a.body).not.toHaveProperty("idempotencyKey");
+			expect(a.body).not.toHaveProperty("principal");
+		}
+		// The empty hold is settled at zero, as before: that server cannot release.
+		expect(releases()).toHaveLength(0);
+		expect(settles()).toHaveLength(2);
+	});
+
+	it("parallel tool calls: one window is settled, the empty holds are RELEASED — no 1-unit settles, no aborts", async () => {
+		const server = keyedServer();
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(7, 70, 700, 0)));
+		const ids = ["tu_0", "tu_1", "tu_2", "tu_3", "tu_4"];
+		await Promise.all(ids.map((id) => run("pre-tool-use.mjs", preInput(id))));
+		await Promise.all(ids.map((id) => run("post-tool-use.mjs", postInput(id))));
+		expect(settles()).toHaveLength(1);
+		expect(settles()[0]?.body).toMatchObject({ inputTokens: 7, outputTokens: 70 });
+		expect(releases()).toHaveLength(4);
+		expect(aborts()).toHaveLength(0);
+		expect(server.charges).toHaveLength(1);
+	});
+
+	it("a settle that POSTED but answered 500 is unresolved, and its retry finds the charge: posted once", async () => {
+		const server = keyedServer();
+		server.faults.set("tx_1", "post-then-500");
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		const post = await run("post-tool-use.mjs", postInput("tu_1"));
+		expect(post.stderr).toContain("unresolved");
+		// No hygiene release: the retry needs the hold, if the server still has it.
+		expect(releases()).toHaveLength(0);
+		expect(aborts()).toHaveLength(0);
+		const parked = (await readCursor()) as CursorV2;
+		expect(parked.accounted).toEqual([]);
+		expect(parked.unresolved).toEqual({
+			[keyOf("main", ["msg_a"])]: expect.objectContaining({ ids: ["msg_a"], inputTokens: 5 }),
+		});
+
+		await run("stop.mjs", stopInput());
+		expect(authorizes().at(-1)?.body.idempotencyKey).toBe(keyOf("main", ["msg_a"]));
+		expect(authorizes().at(-1)?.status).toBe(409);
+		expect(server.charges).toHaveLength(1);
+		const done = (await readCursor()) as CursorV2;
+		expect(done.unresolved).toEqual({});
+		expect(done.accounted).toEqual(["msg_a"]);
+		// Resolved for good: a later Stop sends nothing.
+		const before = requests.length;
+		await run("stop.mjs", stopInput());
+		expect(requests).toHaveLength(before);
+	});
+
+	it("a settle that failed BEFORE posting: the retry gets the same hold back by its key and charges it once", async () => {
+		const server = keyedServer();
+		server.faults.set("tx_1", "500-before-post");
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		expect(server.charges).toHaveLength(0);
+		await run("stop.mjs", stopInput());
+		expect(transferOf(authorizes().at(-1))).toBe("tx_1");
+		expect(settles().map((s) => [s.body.transferId, s.status])).toEqual([
+			["tx_1", 500],
+			["tx_1", 200],
+		]);
+		expect(server.charges).toEqual([
+			{ key: keyOf("main", ["msg_a"]), transferId: "tx_1", inputTokens: 5 },
+		]);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+	});
+
+	it("a settle whose answer is LOST is retried, and charges once", async () => {
+		const server = keyedServer();
+		server.faults.set("tx_1", "post-then-lost");
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		expect(Object.keys(((await readCursor()) as CursorV2).unresolved)).toHaveLength(1);
+		await run("stop.mjs", stopInput());
+		expect(server.charges).toHaveLength(1);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+	});
+
+	it("a keyed settle answering 404 (the server restarted) is retried under its key: one fresh hold, one charge", async () => {
+		const server = keyedServer();
+		server.faults.set("tx_1", "404-restarted");
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		await run("stop.mjs", stopInput());
+		expect(server.charges).toEqual([
+			{ key: keyOf("main", ["msg_a"]), transferId: "tx_2", inputTokens: 5 },
+		]);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+	});
+
+	it("a 200 whose receipt says settled: false is unresolved too, and charged once by the retry", async () => {
+		const server = keyedServer();
+		server.faults.set("tx_1", "settled-false");
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		expect(Object.keys(((await readCursor()) as CursorV2).unresolved)).toEqual([
+			keyOf("main", ["msg_a"]),
+		]);
+		await run("stop.mjs", stopInput());
+		expect(server.charges).toEqual([
+			{ key: keyOf("main", ["msg_a"]), transferId: "tx_2", inputTokens: 5 },
+		]);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+	});
+
+	it("a settle answering 409 already_settled is settled at once: the key's charge stands", async () => {
+		const server = keyedServer();
+		server.faults.set("tx_1", "409-duplicate");
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		const post = await run("post-tool-use.mjs", postInput("tu_1"));
+		expect(post.stderr).toBe("");
+		const cursor = (await readCursor()) as CursorV2;
+		expect(cursor.accounted).toEqual(["msg_a"]);
+		expect(cursor.unresolved).toEqual({});
+		await run("stop.mjs", stopInput());
+		expect(authorizes()).toHaveLength(1);
+	});
+
+	it("a retry that fails — authorize 503, or settle 400 — stays unresolved: never released, never re-keyed", async () => {
+		const server = keyedServer();
+		server.faults.set("tx_1", "500-before-post");
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		const key = keyOf("main", ["msg_a"]);
+		server.authorizeFault.status = 503;
+		await run("stop.mjs", stopInput());
+		expect(Object.keys(((await readCursor()) as CursorV2).unresolved)).toEqual([key]);
+		// It answers again, hands the live hold back, and rejects the retry's settle.
+		server.authorizeFault.status = null;
+		server.faults.set("tx_1", "400");
+		await run("stop.mjs", stopInput());
+		expect(settles().map((r) => [r.body.transferId, r.status])).toEqual([
+			["tx_1", 500],
+			["tx_1", 400],
+		]);
+		const parked = (await readCursor()) as CursorV2;
+		expect(Object.keys(parked.unresolved)).toEqual([key]);
+		expect(parked.accounted).toEqual([]);
+		// Never folded into a remainder under another key; charged once when it can be.
+		for (const a of authorizes()) expect(a.body.idempotencyKey).toBe(key);
+		await run("stop.mjs", stopInput());
+		expect(server.charges).toHaveLength(1);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+	});
+
+	it("a window's key is the SORTED ids' key, whatever order the transcript lists them in", async () => {
+		const server = keyedServer();
+		await startServer(server.responder);
+		await writeMain([
+			...responseEntries("msg_z", SONNET, u(1, 1)),
+			...responseEntries("msg_y", SONNET, u(2, 2)),
+		]);
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		expect(authorizes()[0]?.body.idempotencyKey).toBe(keyOf("main", ["msg_y", "msg_z"]));
+		expect(keyOf("main", ["msg_z", "msg_y"])).toBe(keyOf("main", ["msg_y", "msg_z"]));
+	});
+
+	it("a hook that died mid-settle under a key: the stale settle is retried, not lost", async () => {
+		const server = keyedServer();
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		// The hook renamed the hold to .settling, then died before any answer.
+		const live = join(stateDir, `${SESSION}__main__tu_1.json`);
+		const settling = join(stateDir, `${SESSION}__main__tu_1.settling`);
+		await writeFile(settling, await readFile(live, "utf-8"));
+		await rm(live);
+		const old = new Date(Date.now() - 11 * 60_000);
+		await utimes(settling, old, old);
+		await run("stop.mjs", stopInput());
+		expect(server.charges).toEqual([
+			{ key: keyOf("main", ["msg_a"]), transferId: "tx_1", inputTokens: 5 },
+		]);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		expect(await holdFiles()).toEqual([]);
+	});
+
+	it("an unresolved settle waits for a server that honours keys: never retried without one", async () => {
+		const server = keyedServer();
+		server.faults.set("tx_1", "post-then-500");
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		// Downgraded: a key sent now would be stripped, and a retry could post twice.
+		capabilities = [];
+		const stop = await run("stop.mjs", stopInput());
+		expect(stop.stderr).toContain("wait for a server that honours idempotency keys");
+		expect(authorizes()).toHaveLength(1);
+		expect(Object.keys(((await readCursor()) as CursorV2).unresolved)).toHaveLength(1);
+		capabilities = [...ALL_CAPABILITIES];
+		await run("stop.mjs", stopInput());
+		expect(server.charges).toHaveLength(1);
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+	});
+
+	it("an unresolved vehicle is never folded into a new window: new messages get their own key", async () => {
+		const server = keyedServer();
+		server.faults.set("tx_1", "post-then-500");
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		await appendMain(responseEntries("msg_b", SONNET, u(7, 8)));
+		await run("pre-tool-use.mjs", preInput("tu_2"));
+		expect(authorizes().at(-1)?.body).toMatchObject({
+			idempotencyKey: keyOf("main", ["msg_b"]),
+			params: { messages: 1 },
+		});
+		await run("post-tool-use.mjs", postInput("tu_2"));
+		await run("stop.mjs", stopInput());
+		expect(server.charges.map((c) => c.inputTokens).sort()).toEqual([5, 7]);
+		expect(((await readCursor()).accounted as string[]).sort()).toEqual(["msg_a", "msg_b"]);
+	});
+
+	it("PreToolUse: a window whose key is already charged is accounted, and the tool is held alone", async () => {
+		const server = keyedServer();
+		server.charged.add(keyOf("main", ["msg_a"]));
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
+		expect(pre.code).toBe(0);
+		expect(JSON.parse(pre.stdout).hookSpecificOutput.permissionDecision).toBe("allow");
+		expect(authorizes().map((a) => a.status)).toEqual([409, 200]);
+		expect(authorizes()[1]?.body).not.toHaveProperty("idempotencyKey");
+		expect(authorizes()[1]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		await run("stop.mjs", stopInput());
+		expect(settles()).toHaveLength(0);
+		expect(releases().map((r) => r.body.transferId)).toEqual(["tx_1"]);
+	});
+
+	it("Stop RELEASES a leftover hold without usage — not a failure, no abort", async () => {
+		const server = keyedServer();
+		await startServer(server.responder);
+		await writeMain(responseEntries("msg_a", SONNET, u(1, 1), {}, { complete: false }));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("stop.mjs", stopInput());
+		expect(aborts()).toHaveLength(0);
+		expect(releases().map((r) => r.body)).toEqual([
+			{ transferId: "tx_1", reason: "session ended with unsettled hold" },
+		]);
+	});
+});
+
+describe("forked subagents — inherited messages are posted once", () => {
+	const inherited = () => [
+		...responseEntries("msg_a", SONNET, u(100, 1)),
+		...responseEntries("msg_b", SONNET, u(200, 2)),
+	];
+	const forkTranscript = () => [
+		// A fork's transcript starts with its ancestor's entries: same ids, its own agentId.
+		...responseEntries("msg_a", SONNET, u(100, 1), sub("f1")),
+		...responseEntries("msg_b", SONNET, u(200, 2), sub("f1")),
+		...responseEntries("msg_f", SONNET, u(7, 3), sub("f1")),
+	];
+
+	it("the parent posts its own messages; the fork posts only what it added", async () => {
+		await startServer(okResponder);
+		await writeMain(inherited());
+		await writeSubagent("f1", "fork", forkTranscript());
+		await run("stop.mjs", stopInput());
+		const byActor = new Map(
+			authorizes().map((a) => [String(a.body.actor), transferOf(a)] as const),
+		);
+		const settledFor = (actor: string) =>
+			settles().find((s) => s.body.transferId === byActor.get(actor))?.body.inputTokens;
+		expect(settledFor(`claude-code:${SESSION}:main:main`)).toBe(300);
+		expect(settledFor(`claude-code:${SESSION}:fork:f1`)).toBe(7);
+		expect(settles().reduce((sum, s) => sum + Number(s.body.inputTokens), 0)).toBe(307);
+		// The fork's cursor accounts the inherited ids as posted elsewhere.
+		expect((await readCursor("f1")).accounted.sort()).toEqual(["msg_a", "msg_b", "msg_f"]);
+	});
+
+	it("whichever agent claims a message first posts it — never both, in either order", async () => {
+		await startServer(okResponder);
+		await writeMain(inherited());
+		await writeSubagent("f1", "fork", forkTranscript());
+		// The fork stops first and claims the inherited messages.
+		await run("subagent-stop.mjs", { ...stopInput(), agent_id: "f1", agent_type: "fork" });
+		await run("stop.mjs", stopInput());
+		await run("stop.mjs", stopInput());
+		expect(settles().reduce((sum, s) => sum + Number(s.body.inputTokens), 0)).toBe(307);
+		expect((await readCursor()).accounted.sort()).toEqual(["msg_a", "msg_b"]);
+	});
+
+	it("a window never carries a message another agent owns", async () => {
+		await startServer(okResponder);
+		await writeMain(inherited());
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await writeSubagent("f1", "fork", forkTranscript());
+		await run("pre-tool-use.mjs", preInput("tu_2", { agent_id: "f1" }));
+		expect(authorizes()[1]?.body.params).toMatchObject({ agent_id: "f1", messages: 1 });
+		expect(authorizes()[1]?.body.estimatedInputTokens).toBe(7 + TOOL_INPUT_ESTIMATE);
+	});
+});
+
 describe("against a REAL usertrust-server — cache tokens priced separately, never double-counted", () => {
 	it("the receipts' four-tier usage is exactly the transcript's, and the cost reconciles", async () => {
 		const KEY = "ut_plugin_transcript_key";
@@ -946,7 +1425,7 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 				port: 0,
 				stateDir: await mkdtemp(join(tmpdir(), "utcc-tx-srv-")),
 				enforcement: "enforce",
-				pendingTtlMs: 300_000,
+				pendingTtlMs: 240_000,
 				dryRun: true,
 				tenants: [{ id: "t", keyHash: hashKey(KEY), budget: 10_000_000 }],
 			},
@@ -972,8 +1451,22 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 				usageSource: string;
 				usage: Record<string, number>;
 				pricing: { appliedRates: Record<string, number> };
+				principal?: unknown;
 			};
 		});
+		// This server honours keys and principal: each authorize carrying usage went
+		// in under its vehicle key, and every receipt names the agent.
+		for (const a of authorizes()) {
+			expect(a.status).toBe(200);
+			expect(a.body.idempotencyKey).toMatch(/^cc:[0-9a-f]{48}$/);
+		}
+		for (const receipt of receipts) {
+			expect(receipt.principal).toEqual({
+				id: "main",
+				type: "main",
+				origin: `claude-code:${SESSION}`,
+			});
+		}
 		const expected = [
 			{ inputTokens: 150, outputTokens: 1000, cacheReadTokens: 82_000, cacheWriteTokens: 2_000 },
 			{ inputTokens: 5, outputTokens: 60, cacheReadTokens: 44_000, cacheWriteTokens: 1_000 },

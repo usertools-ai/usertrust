@@ -3,12 +3,14 @@
 //
 // 1. REMAINDER. For the parent ("main") and every subagent transcript recorded
 //    for the session — so an agent whose SubagentStop never fired is still
-//    accounted — post the complete messages no hold picked up (another model, a
-//    final answer with no tool call), one authorize→settle per model. An agent
-//    in estimate mode is skipped: its holds already carried its usage.
+//    accounted — first retry each UNRESOLVED settle as itself (see
+//    transcript.mjs), then post the complete messages no hold picked up (another
+//    model, a final answer with no tool call), one authorize→settle per model.
+//    An agent in estimate mode is skipped: its holds already carried its usage.
 // 2. LEFTOVER HOLDS, across all agents (the session really is ending). A hold
 //    with assigned transcript usage was billed even if its tool was interrupted,
-//    so it is SETTLED with its counts; a hold without is aborted, as before.
+//    so it is SETTLED with its counts; a hold without is given back — released,
+//    or aborted on a server that cannot release.
 // The remainder stops early enough to leave time for step 2.
 import { cleanup, readStdin, usageMode } from "./lib.mjs";
 import {

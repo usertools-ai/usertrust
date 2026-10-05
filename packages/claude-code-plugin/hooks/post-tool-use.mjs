@@ -2,19 +2,22 @@
 // executed — this hook must NEVER block or fail closed.
 //
 // Transcript usage mode (the default): the PreToolUse hold is the settlement
-// vehicle (see transcript.mjs). It is SETTLED exactly once — at the counts of
-// the transcript messages assigned to it, or at zero usage (the server's 1-unit
-// floor) when none were — and never aborted on the normal path. Only a failed
-// settle is aborted, for hygiene: 400/404 releases its messages for a later
-// settle point (nothing was posted); a 5xx or no answer keeps them claimed
+// vehicle (see transcript.mjs). A hold with assigned messages is SETTLED exactly
+// once, at their counts, and never aborted on the normal path. One with none is
+// given back: released on a server that can release, else settled at zero usage
+// (that server's 1-unit floor). A failed settle (see transcript.mjs `settleAt`):
+// 400 — or an unkeyed 404 — releases its messages for a later settle point
+// (nothing was posted). Otherwise the outcome is unknown: a hold authorized under
+// its window's key is UNRESOLVED and retried as itself at Stop/SubagentStop (the
+// server charges a key at most once); an unkeyed one keeps its messages claimed
 // (it may have posted, and a message is posted at most once).
 //
 // Estimate mode (UT_CC_USAGE=estimate, or an agent whose transcript could not
 // be read): the hold settles at the per-call estimate, labelled
 // `usageSource: "estimated"`, exactly as the original hook did. The pending
 // file is deleted only AFTER a 200; on any failure it is left in place so
-// Stop/SubagentStop cleanup aborts the hold (and the server's TTL sweep is the
-// final backstop).
+// Stop/SubagentStop cleanup gives the hold back (and the server's TTL sweep is
+// the final backstop).
 import {
 	clearPending,
 	estimateTokens,
@@ -34,7 +37,7 @@ try {
 	const entry = await takePendingEntry(sessionId, agentId, input.tool_use_id ?? null);
 	if (entry?.usage === "transcript") {
 		const result = await settleTranscriptHold(sessionId, entry);
-		if (result.outcome !== "settled") {
+		if (result.outcome !== "settled" && result.outcome !== "returned") {
 			process.stderr.write(
 				`usertrust: transcript hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}\n`,
 			);

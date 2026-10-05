@@ -17,13 +17,24 @@
 // and on a 200 they are assigned to this hold's transferId for PostToolUse to
 // settle. On any other answer they are released: nothing was posted. With no
 // window (nothing new, or another hook holds the agent's lock) the hold is the
-// tool estimate alone, exactly as before, and settles at zero usage.
+// tool estimate alone, and PostToolUse gives it back.
+//
+// On a server that honours them (its /v1/health `capabilities`), a window's
+// authorize carries the window's idempotency key — so the server charges those
+// messages at most once, however often a settle of them is retried — and every
+// transcript-mode authorize carries the agent's `principal`, which the server
+// records. A key whose charge already stands (409 `already_settled`) means an
+// earlier settle of exactly this window landed: it is accounted, and the tool is
+// held alone.
 import {
 	estimateTokens,
+	isAlreadySettled,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
+	releaseHold,
+	serverCapabilities,
 	serverRequest,
 } from "./lib.mjs";
 import { holdInputTokens, prepareWindow, safeName } from "./transcript.mjs";
@@ -69,32 +80,48 @@ try {
 			`usertrust: ${prepared.reason}; this agent now settles at the ESTIMATE for the rest of the session\n`,
 		);
 	}
-	const window = prepared.mode === "transcript" ? prepared.window : null;
-	const model =
-		window?.model ?? prepared.lastModel ?? process.env.UT_CC_MODEL ?? "claude-sonnet-4-6";
 	try {
-		const response = await serverRequest("/v1/authorize", {
-			model,
-			// Both legs: a 1-token output hold under-debited every large tool result
-			// because settle prices the whole response (AUD-004). A window's usage is
-			// ADDED, so the pre-call budget check still covers the upcoming tool.
-			estimatedInputTokens: estimatedInputTokens + (window ? holdInputTokens(window.counts) : 0),
-			maxOutputTokens: MAX_OUTPUT_TOKENS + (window ? Math.max(1, window.counts.outputTokens) : 0),
-			params: window
-				? {
-						hook: "PreToolUse",
-						tool_name: input.tool_name ?? "unknown",
-						usageOrigin: "transcript",
-						agent_id: agentId,
-						agent_type: prepared.agentType,
-						messages: window.ids.length,
-					}
-				: { hook: "PreToolUse", tool_name: input.tool_name ?? "unknown" },
-			actor: window
-				? `claude-code:${sessionId}:${prepared.agentType}:${safeName(agentId, "main")}`
-				: `claude-code:${sessionId}`,
-			messages: [{ role: "user", content }],
-		});
+		const transcriptMode = prepared.mode === "transcript";
+		// What the server honours decides what this hold may carry (see lib.mjs).
+		const capabilities = transcriptMode ? await serverCapabilities() : new Set();
+		const keyed = capabilities.has("idempotency-key");
+		const principal =
+			transcriptMode && capabilities.has("principal") ? prepared.principal : undefined;
+		let window = transcriptMode ? prepared.window : null;
+		const fallbackModel = prepared.lastModel ?? process.env.UT_CC_MODEL ?? "claude-sonnet-4-6";
+		const authorize = () =>
+			serverRequest("/v1/authorize", {
+				model: window?.model ?? fallbackModel,
+				// Both legs: a 1-token output hold under-debited every large tool result
+				// because settle prices the whole response (AUD-004). A window's usage is
+				// ADDED, so the pre-call budget check still covers the upcoming tool.
+				estimatedInputTokens: estimatedInputTokens + (window ? holdInputTokens(window.counts) : 0),
+				maxOutputTokens: MAX_OUTPUT_TOKENS + (window ? Math.max(1, window.counts.outputTokens) : 0),
+				params: window
+					? {
+							hook: "PreToolUse",
+							tool_name: input.tool_name ?? "unknown",
+							usageOrigin: "transcript",
+							agent_id: agentId,
+							agent_type: prepared.agentType,
+							messages: window.ids.length,
+						}
+					: { hook: "PreToolUse", tool_name: input.tool_name ?? "unknown" },
+				actor: window
+					? `claude-code:${sessionId}:${prepared.agentType}:${safeName(agentId, "main")}`
+					: `claude-code:${sessionId}`,
+				messages: [{ role: "user", content }],
+				...(window && keyed ? { idempotencyKey: prepared.key } : {}),
+				...(principal === undefined ? {} : { principal }),
+			});
+		let response = await authorize();
+		if (window && keyed && isAlreadySettled(response)) {
+			// An earlier settle of exactly this window landed, though the cursor never
+			// heard: account it, and hold the tool alone.
+			await prepared.settledElsewhere();
+			window = null;
+			response = await authorize();
+		}
 		const json =
 			response.json && typeof response.json === "object" && !Array.isArray(response.json)
 				? response.json
@@ -114,21 +141,21 @@ try {
 					toolUseId: input.tool_use_id ?? null,
 					transferId: json.transferId,
 					estimatedInputTokens,
-					...(prepared.mode === "transcript"
+					...(transcriptMode
 						? {
 								usage: "transcript",
-								holdModel: model,
+								holdModel: window?.model ?? fallbackModel,
 								assignedIds: window?.ids ?? [],
 								...(window?.counts ?? {}),
+								...(window && keyed
+									? { idempotencyKey: prepared.key, agentType: prepared.agentTypeRaw }
+									: {}),
 							}
 						: {}),
 				});
 			} catch (err) {
-				// Unrecorded, the hold could never be settled: void it now.
-				await serverRequest("/v1/abort", {
-					transferId: json.transferId,
-					error: "pending hold could not be recorded",
-				}).catch(() => {});
+				// Unrecorded, the hold could never be settled: give it back now.
+				await releaseHold(json.transferId, "pending hold could not be recorded").catch(() => {});
 				throw err;
 			}
 			await prepared.commit?.(json.transferId);

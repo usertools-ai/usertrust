@@ -6,14 +6,19 @@
 //    subagent writes <projectDir>/<sessionId>/subagents/agent-<agentId>.jsonl,
 //    beside agent-<agentId>.meta.json (which carries `agentType`). Each
 //    subagent entry repeats the same `agentId` and has `isSidechain: true`; the
-//    parent file carries no subagent usage, so the files never overlap.
+//    parent file carries no subagent usage.
+//  - BUT a FORKED subagent's file begins with a copy of its ancestor's entries:
+//    the same uuids and message ids, with `agentId` rewritten to the fork's own.
+//    Read per agent, that usage would be counted once more per fork; the claims
+//    below make each message id one agent's to post.
 //  - Assistant entries carry `message.{id, model, usage, stop_reason}`. ONE API
 //    response is written as SEVERAL entries sharing `message.id` (one per
 //    content block, and progressively while streaming). Their input and cache
 //    counts are identical; `output_tokens` only grows. A message is complete
 //    once an entry has a non-null `stop_reason`, and one id can have several
 //    complete entries. So an id's usage is the per-field MAX over its entries
-//    (a later entry can never lower it), and an incomplete id waits.
+//    (a later entry can never lower it), and an incomplete id waits. `message.id`
+//    and the entry's `requestId` are one-to-one, so one id is one API request.
 //  - `usage` is the provider's own response block: `input_tokens` (fresh input,
 //    cache EXCLUDED), `cache_read_input_tokens`, `cache_creation_input_tokens`,
 //    `output_tokens`. These four are already disjoint, which is exactly the
@@ -27,28 +32,46 @@
 // was busy) are posted by ONE remainder authorize→settle per model at
 // Stop/SubagentStop.
 //
+// WHAT THE SERVER HONOURS (its /v1/health `capabilities`, read once per hook;
+// an older server strips request keys it does not know, so nothing is assumed):
+//  - `idempotency-key`: every authorize that carries messages carries their
+//    VEHICLE KEY (`vehicleKey`, from the message ids alone), and the server
+//    charges a key at most once. A settle whose outcome is unknown then leaves
+//    its vehicle UNRESOLVED — retried as itself, same key, same ids, same
+//    counts, at the next Stop/SubagentStop — instead of losing it. Settles never
+//    carry the key: a settle the server cannot match stays a plain 404.
+//  - `principal`: every transcript-mode authorize names the agent, its type and
+//    the session; the server records it on everything the hold leaves.
+//  - `release`: a hold with no usage is released (no failure, no charge) rather
+//    than settled at the 1-unit floor or aborted.
+//
 // INVARIANTS:
-//  1. Every hold is terminated EXACTLY ONCE. On the normal path by a SETTLE,
-//     never an abort; an abort happens only for a hold no usage was ever
-//     assigned to that is being cleaned up (an interrupted tool, session end),
-//     or for hygiene after a failed settle.
-//  2. Every transcript message id is posted AT MOST ONCE: it is assigned to one
-//     hold (and settled with it), posted by one remainder settle, or marked
-//     `denied`. An id is CLAIMED in the cursor before anything that could post
+//  1. Every hold is terminated EXACTLY ONCE: settled when usage was assigned to
+//     it, given back when none was. A failed settle's hold is given back for
+//     hygiene, except an unresolved one, which its retry gets back by its key
+//     (or the server's TTL sweep releases).
+//  2. Every transcript message id is posted AT MOST ONCE. Across agents: the
+//     first agent to CLAIM an id (`selectOwn`) is the only one that posts it.
+//     Within the agent: an id is assigned to one hold (and settled with it),
+//     posted by one remainder settle, parked in one unresolved vehicle, or
+//     marked `denied`; it is held in the cursor before anything that could post
 //     it, and released only when the server proved nothing was posted
-//     (authorize failed, or settle answered 400/404). Any ambiguity — a settle
-//     5xx, a transport error, a crash — keeps it claimed: usage can be lost to
-//     an outage, never posted twice.
+//     (authorize failed, or settle answered 400, or an unkeyed 404). Under a key
+//     an ambiguous outcome — a 5xx, no answer, a crash mid-settle — is retried
+//     as the same vehicle: exactly once. Without one it stays claimed: usage can
+//     be lost to an outage, never posted twice.
 //  3. The estimate is used only in estimate mode (UT_CC_USAGE=estimate, or an
 //     agent whose transcript could not be read: sticky, recorded in its cursor),
 //     and never together with real usage for the same agent.
 //
 // STATE, per (session, agent), in <state>/transcripts (private: 0700, ours):
-//   { v: 1, byteOffset, partial, accounted, denied, assigned, estimateMode, lastModel }
+//   { v: 2, byteOffset, partial, accounted, denied, assigned, estimateMode,
+//     lastModel, unresolved }
 //  - byteOffset: the transcript is read incrementally, only up to the last
 //    newline; a file shorter than the offset is re-read from 0 (the id sets
 //    still prevent re-posting).
-//  - partial: every id seen but not yet accounted or denied, with its counts.
+//  - partial: every id seen but not yet accounted or denied, with its counts,
+//    and whether this agent holds its claim.
 //  - accounted / denied: the most recent 10 000 ids each.
 //  - assigned: id → transferId, "remainder" (an in-flight remainder claim) or
 //    "authorizing" (written BEFORE PreToolUse's authorize, with a timestamp in
@@ -56,13 +79,17 @@
 //    unassigned: its authorize never completed. The one residual window is a
 //    crash between authorize 200 and the pending-hold write: nothing records
 //    that hold's transferId, so nothing can settle it — the server's TTL sweep
-//    voids it — and the ids are posted once, later, by another hold. That is a
-//    second RESERVATION for up to the TTL, never a second post.
+//    releases it — and the ids are posted once, later, by another hold. That is
+//    a second RESERVATION for up to the TTL, never a second post.
+//  - unresolved: vehicle key → { ids, model, agentType, counts }.
+// Shared by every agent of every session: <state>/transcripts/claims, one file
+// per claimed message id (named by its SHA-256), naming the agent that owns it.
 // A hold's outcome is journalled beside its pending file (<hold>.settling while
 // in flight, <hold>.done after) so the cursor can be brought up to date by the
 // next hook that gets the lock, even when the settling hook could not.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
+	link,
 	lstat,
 	mkdir,
 	open,
@@ -77,8 +104,11 @@ import {
 import { basename, dirname, join } from "node:path";
 import {
 	clearPending,
+	isAlreadySettled,
 	listPending,
+	releaseHold,
 	sanitize,
+	serverCapabilities,
 	serverRequest,
 	stateFilePath,
 	stateRoot,
@@ -96,7 +126,9 @@ const SYNTHETIC_MODEL = "<synthetic>";
  */
 const CACHE_WRITE_HOLD_FACTOR = 2;
 
-const CURSOR_VERSION = 1;
+const CURSOR_VERSION = 2;
+/** v1 cursors (no `unresolved`) are read as v2 with nothing unresolved. */
+const READABLE_CURSOR_VERSIONS = new Set([1, 2]);
 /** A lock older than this is a crashed holder, not a live one. */
 const STALE_LOCK_MS = 60_000;
 /** An "authorizing" assignment older than this never completed. */
@@ -114,6 +146,12 @@ const AUTHORIZING = "authorizing";
 const REMAINDER = "remainder";
 const AGENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const COUNT_KEYS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
+/** One field of a usertrust `principal`: the server refuses anything else. */
+const PRINCIPAL_FIELD = /^[A-Za-z0-9._:-]{1,128}$/;
+/** What a settle vehicle's key is: the transcript messages it carries, and nothing else. */
+const VEHICLE_KEY = /^cc:[0-9a-f]{48}$/;
+/** Where the cross-agent message claims live, inside the private state dir (see `selectOwn`). */
+const CLAIMS_DIR = "claims";
 
 /** Untrusted strings (model, agent type/id) → [A-Za-z0-9._-], at most 128 chars. */
 export function safeName(value, fallback) {
@@ -147,6 +185,41 @@ function sumCounts(messages) {
 
 function describeCounts(c) {
 	return `input ${c.inputTokens}, output ${c.outputTokens}, cache read ${c.cacheReadTokens}, cache write ${c.cacheWriteTokens}`;
+}
+
+/**
+ * The idempotency key of a SETTLE VEHICLE: the set of transcript messages one
+ * authorize→settle carries, for one agent of one session. Derived from the message
+ * ids alone, sorted — never from which hook or path carries them — so the same
+ * usage can be charged at most once whatever retries it: usertrust posts every
+ * keyed charge under one ledger anchor per key. The raw ids never leave the
+ * machine; the server sees this hash.
+ */
+export function vehicleKey(sessionId, agentId, ids) {
+	const digest = createHash("sha256")
+		.update(JSON.stringify([String(sessionId), String(agentId), [...ids].sort()]))
+		.digest("hex");
+	return `cc:${digest.slice(0, 48)}`;
+}
+
+/** A value forced into a usertrust principal field (`[A-Za-z0-9._:-]{1,128}`). */
+function principalField(value, fallback) {
+	const text =
+		typeof value === "string" ? value.replace(/[^A-Za-z0-9._:-]/g, ".").slice(0, 128) : "";
+	return PRINCIPAL_FIELD.test(text) ? text : fallback;
+}
+
+/**
+ * WHO spent, as usertrust records it on every record the hold leaves: the agent,
+ * its type, and the Claude Code session it ran in. Unlike `actor` and `params`,
+ * which stay on the request, a principal reaches the audit chain.
+ */
+export function principalFor(sessionId, agentId, agentType) {
+	return {
+		id: principalField(agentId, "main"),
+		type: principalField(agentType, "subagent"),
+		origin: principalField(`claude-code:${sessionId}`, "claude-code"),
+	};
 }
 
 /** The hold that covers `counts` at their real cost (see CACHE_WRITE_HOLD_FACTOR). */
@@ -188,20 +261,27 @@ export async function subagentIds(input) {
 		.filter((id) => AGENT_ID.test(id));
 }
 
-/** `agentType` from the subagent's meta file, else the hook's, else "subagent". */
+/**
+ * `agentType` from the subagent's meta file, else the hook's, else "subagent":
+ * `name` made safe for a path or an actor string, and `raw` for the principal
+ * (which keeps characters such as `:` that a path cannot).
+ */
 async function agentTypeFor(transcriptPath, agentId, hinted) {
-	if (agentId === "main") return "main";
+	if (agentId === "main") return { name: "main", raw: "main" };
 	try {
 		const meta = JSON.parse(
 			await readFile(transcriptPath.replace(/\.jsonl$/, ".meta.json"), "utf-8"),
 		);
 		if (typeof meta?.agentType === "string" && meta.agentType !== "") {
-			return safeName(meta.agentType, "subagent");
+			return { name: safeName(meta.agentType, "subagent"), raw: meta.agentType.slice(0, 128) };
 		}
 	} catch {
 		// No meta file — use the hint.
 	}
-	return safeName(hinted, "subagent");
+	return {
+		name: safeName(hinted, "subagent"),
+		raw: typeof hinted === "string" && hinted !== "" ? hinted.slice(0, 128) : "subagent",
+	};
 }
 
 /**
@@ -239,15 +319,16 @@ function emptyCursor() {
 		estimateMode: false,
 		estimateReason: null,
 		lastModel: null,
+		unresolved: new Map(),
 	};
 }
 
 const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const isStringArray = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
 
-/** A v1 cursor, or null if any field is not what this code wrote. */
+/** A v1 or v2 cursor, or null if any field is not what this code wrote. */
 function parseCursor(raw) {
-	if (!isObject(raw) || raw.v !== CURSOR_VERSION) return null;
+	if (!isObject(raw) || !READABLE_CURSOR_VERSIONS.has(raw.v)) return null;
 	if (!Number.isSafeInteger(raw.byteOffset) || raw.byteOffset < 0) return null;
 	if (!isObject(raw.partial) || !isObject(raw.assigned)) return null;
 	if (!isStringArray(raw.accounted) || !isStringArray(raw.denied)) return null;
@@ -261,6 +342,7 @@ function parseCursor(raw) {
 			model: safeName(m.model, "unknown"),
 			synthetic: m.synthetic === true,
 			complete: m.complete === true,
+			claimed: m.claimed === true,
 			inputTokens: count(m.inputTokens),
 			outputTokens: count(m.outputTokens),
 			cacheReadTokens: count(m.cacheReadTokens),
@@ -279,9 +361,63 @@ function parseCursor(raw) {
 	cursor.estimateMode = raw.estimateMode;
 	cursor.estimateReason = typeof raw.estimateReason === "string" ? raw.estimateReason : null;
 	cursor.lastModel = typeof raw.lastModel === "string" ? safeName(raw.lastModel, "unknown") : null;
+	if (raw.v >= 2) {
+		if (!isObject(raw.unresolved)) return null;
+		for (const [key, v] of Object.entries(raw.unresolved)) {
+			const vehicle = parseVehicle(key, v);
+			if (vehicle === null) return null;
+			cursor.unresolved.set(key, vehicle);
+		}
+	}
 	const seqs = [...cursor.partial.values()].map((m) => m.n + 1);
 	cursor.nextSeq = Math.max(Number.isSafeInteger(raw.nextSeq) ? raw.nextSeq : 0, 0, ...seqs);
 	return cursor;
+}
+
+/**
+ * An UNRESOLVED settle vehicle: its outcome is unknown (a settle that answered
+ * 5xx, nothing, or `settled: false`), so it is retried as itself — the same key,
+ * the same ids, the same counts — until the server says it posted (200, or 409
+ * `already_settled`). Never folded into a new window or remainder: a different
+ * set of ids is a different key, and would charge again what may have posted.
+ */
+function parseVehicle(key, v) {
+	if (!VEHICLE_KEY.test(key) || !isObject(v) || !isStringArray(v.ids) || v.ids.length === 0) {
+		return null;
+	}
+	const vehicle = {
+		ids: v.ids,
+		model: safeName(v.model, "unknown"),
+		agentType: typeof v.agentType === "string" ? v.agentType : "subagent",
+	};
+	for (const k of COUNT_KEYS) vehicle[k] = count(v[k]);
+	return vehicle;
+}
+
+/**
+ * The settle vehicle a hold file (or its journal record) describes: its key and
+ * vehicle when it was authorized under a key, else null.
+ */
+function holdVehicle(body) {
+	const key = body?.idempotencyKey;
+	if (typeof key !== "string") return null;
+	const vehicle = parseVehicle(key, {
+		ids: body.assignedIds,
+		model: body.holdModel,
+		agentType: body.agentType,
+		inputTokens: body.inputTokens,
+		outputTokens: body.outputTokens,
+		cacheReadTokens: body.cacheReadTokens,
+		cacheWriteTokens: body.cacheWriteTokens,
+	});
+	return vehicle === null ? null : { key, vehicle };
+}
+
+/** Every id an unresolved vehicle carries: those are retried as that vehicle only. */
+function unresolvedIds(cursor) {
+	const ids = new Set();
+	for (const vehicle of cursor.unresolved.values()) for (const id of vehicle.ids) ids.add(id);
+	return ids;
 }
 
 /**
@@ -328,6 +464,7 @@ async function writeCursor(path, cursor) {
 			estimateMode: cursor.estimateMode,
 			estimateReason: cursor.estimateReason,
 			lastModel: cursor.lastModel,
+			unresolved: Object.fromEntries(cursor.unresolved),
 		}),
 	);
 }
@@ -446,7 +583,7 @@ async function holdJournal(sessionId, agentId) {
 			const ids = isStringArray(body.assignedIds) ? body.assignedIds : [];
 			if (ids.length === 0 && kind === "live") continue;
 			const { mtimeMs } = await stat(path);
-			records.push({ kind, path, ids, outcome: body.outcome, mtimeMs });
+			records.push({ kind, path, ids, outcome: body.outcome, keyed: holdVehicle(body), mtimeMs });
 		} catch {
 			// Corrupt or concurrently removed — skip.
 		}
@@ -466,11 +603,12 @@ async function reconcile(cursor, sessionId, agentId) {
 	for (const record of await holdJournal(sessionId, agentId)) {
 		if (record.kind === "done") {
 			if (record.outcome === "released") releaseIds(cursor, record.ids);
+			else if (record.outcome === "unresolved") holdUnresolved(cursor, record);
 			else accountIds(cursor, record.ids);
 			finished.push(record.path);
 		} else if (record.kind === "settling" && now - record.mtimeMs > STALE_SETTLING_MS) {
-			// Its hook died mid-settle: the outcome is unknown, so the ids stay claimed.
-			accountIds(cursor, record.ids);
+			// Its hook died mid-settle: the outcome is unknown.
+			holdUnresolved(cursor, record);
 			finished.push(record.path);
 		} else {
 			for (const id of record.ids) live.add(id);
@@ -486,6 +624,23 @@ async function reconcile(cursor, sessionId, agentId) {
 		}
 	}
 	return { live, finished };
+}
+
+/**
+ * A hold whose settle may or may not have posted. Authorized under a key, it
+ * becomes an UNRESOLVED vehicle, retried as itself until the server answers (the
+ * key's anchor makes a second charge impossible). Without a key a retry could post
+ * it twice, so its ids stay claimed: accounted, never retried.
+ */
+function holdUnresolved(cursor, record) {
+	if (record.keyed === null) accountIds(cursor, record.ids);
+	else keepUnresolved(cursor, record.keyed.key, record.keyed.vehicle);
+}
+
+/** Park a vehicle as unresolved: assigned to no hold, and kept out of every new window. */
+function keepUnresolved(cursor, key, vehicle) {
+	releaseIds(cursor, vehicle.ids);
+	cursor.unresolved.set(key, vehicle);
 }
 
 async function removeFiles(paths) {
@@ -549,6 +704,7 @@ async function ingest(cursor, path) {
 				model: safeName(rawModel, "unknown"),
 				synthetic: rawModel === SYNTHETIC_MODEL,
 				complete: false,
+				claimed: false,
 				inputTokens: 0,
 				outputTokens: 0,
 				cacheReadTokens: 0,
@@ -575,14 +731,72 @@ async function ingest(cursor, path) {
 function selectNew(cursor, live) {
 	const fresh = [];
 	const free = [];
+	const retried = unresolvedIds(cursor);
 	for (const [id, m] of cursor.partial) {
-		if (!m.complete || cursor.assigned.has(id) || live.has(id)) continue;
+		if (!m.complete || cursor.assigned.has(id) || live.has(id) || retried.has(id)) continue;
 		const total = m.inputTokens + m.outputTokens + m.cacheReadTokens + m.cacheWriteTokens;
 		if (m.synthetic && total === 0) free.push(id);
 		else fresh.push({ id, ...m });
 	}
 	accountIds(cursor, free);
 	return fresh.sort((a, b) => a.n - b.n);
+}
+
+/**
+ * The new messages THIS agent may post. A forked subagent's transcript begins with
+ * a copy of its ancestor's entries — the same message ids, rewritten to the fork's
+ * own agentId (measured) — so a cursor per agent would post that usage once more
+ * per fork. The first agent of any session to claim an id owns it, for good: the
+ * claim is a file published exclusively, named by the id's SHA-256. An id that
+ * another agent owns is accounted here as posted there; one whose claim cannot be
+ * made or read is left for a later settle point, never posted unverified.
+ */
+async function selectOwn(opened) {
+	const { cursor } = opened;
+	const own = [];
+	for (const m of selectNew(cursor, opened.live)) {
+		if (m.claimed) {
+			own.push(m);
+			continue;
+		}
+		const holder = await claimHolder(opened.claimsDir, m.id, opened.owner);
+		if (holder === opened.owner) {
+			const state = cursor.partial.get(m.id);
+			if (state !== undefined) state.claimed = true;
+			own.push(m);
+		} else if (holder !== null) {
+			accountIds(cursor, [m.id]);
+		}
+	}
+	return own;
+}
+
+/**
+ * Who holds the claim on a message id — `owner`, if nobody did — or null when the
+ * claim can be neither made nor read. Published by link(2), which never replaces
+ * an existing name, so a claim is whole the moment it exists.
+ */
+async function claimHolder(claimsDir, id, owner) {
+	const digest = createHash("sha256").update(id).digest("hex");
+	const dir = join(claimsDir, digest.slice(0, 2));
+	const path = join(dir, digest.slice(2));
+	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+	try {
+		await mkdir(dir, { recursive: true, mode: 0o700 });
+		await writeFile(tmp, owner, { mode: 0o600 });
+		await link(tmp, path);
+		return owner;
+	} catch (err) {
+		if (err?.code !== "EEXIST") return null;
+	} finally {
+		await unlink(tmp).catch(() => {});
+	}
+	try {
+		const holder = await readFile(path, "utf-8");
+		return holder === "" ? null : holder;
+	} catch {
+		return null;
+	}
 }
 
 /** Where an agent's transcript and cursor live, or why it has none this run. */
@@ -595,12 +809,16 @@ async function locate({ sessionId, agentId, input }) {
 	return where.ok ? { ...where, transcriptPath } : where;
 }
 
-/** The agent's cursor file inside the private state dir. */
+/** The agent's cursor file, and the message claims, inside the private state dir. */
 async function cursorLocation(sessionId, agentId) {
 	if (!isAgentId(agentId)) return { ok: false, reason: "agent id is not safe in a path" };
 	const dir = await privateStateDir();
 	if (!dir.ok) return { ok: false, reason: dir.reason };
-	return { ok: true, cursorPath: join(dir.dir, `${sanitize(sessionId)}__${agentId}.json`) };
+	return {
+		ok: true,
+		cursorPath: join(dir.dir, `${sanitize(sessionId)}__${agentId}.json`),
+		claimsDir: join(dir.dir, CLAIMS_DIR),
+	};
 }
 
 /**
@@ -632,7 +850,7 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0 }) {
 		if (peek.cursor.estimateMode) {
 			return { kind: "estimate", reason: peek.cursor.estimateReason ?? "transcript unreadable" };
 		}
-		return { kind: "busy", lastModel: peek.cursor.lastModel };
+		return { kind: "busy", lastModel: peek.cursor.lastModel, transcriptPath };
 	}
 	try {
 		const read = await readCursor(cursorPath);
@@ -666,6 +884,8 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0 }) {
 			cursor,
 			live,
 			transcriptPath,
+			claimsDir: where.claimsDir,
+			owner: `${sanitize(sessionId)}/${agentId}`,
 			release,
 			async save() {
 				await writeCursor(cursorPath, cursor);
@@ -700,8 +920,11 @@ async function reconcileAgent(sessionId, agentId) {
 /**
  * Pick this tool call's window and mark it "authorizing" BEFORE the authorize.
  * Returns `{ mode: "estimate", reason, becameSticky }` or `{ mode: "transcript",
- * window: null | { model, ids, counts }, agentType, lastModel, commit,
- * abandon, release }`. With the lock busy, the window is empty.
+ * window: null | { model, ids, counts }, key, agentType, agentTypeRaw, principal,
+ * lastModel, commit, settledElsewhere, abandon, release }`. With the lock busy,
+ * the window is empty. `key` is the window's vehicle key (null without a window);
+ * `agentType` is safe for an actor string, `agentTypeRaw` is what a principal is
+ * built from, and `principal` is what the server may record.
  */
 export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }) {
 	const opened = await openAgent({ sessionId, agentId, input });
@@ -709,19 +932,30 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 		return { mode: "estimate", reason: opened.reason, becameSticky: opened.becameSticky === true };
 	}
 	const none = async () => {};
-	const empty = (lastModel) => ({
+	const empty = (lastModel, agentType) => ({
 		mode: "transcript",
 		window: null,
+		key: null,
+		agentType: agentType.name,
+		agentTypeRaw: agentType.raw,
+		principal: principalFor(sessionId, agentId, agentType.raw),
 		lastModel,
 		commit: none,
+		settledElsewhere: none,
 		abandon: none,
 		release: none,
 	});
-	if (opened.kind === "busy") return empty(opened.lastModel);
+	if (opened.kind === "busy") {
+		return empty(
+			opened.lastModel,
+			await agentTypeFor(opened.transcriptPath, agentId, agentTypeHint),
+		);
+	}
 	const { cursor } = opened;
+	const agentType = await agentTypeFor(opened.transcriptPath, agentId, agentTypeHint);
 	let window = null;
 	try {
-		const fresh = selectNew(cursor, opened.live);
+		const fresh = await selectOwn(opened);
 		if (fresh.length > 0) {
 			const model = fresh[0].model;
 			const messages = fresh.filter((m) => m.model === model);
@@ -736,14 +970,16 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 	} catch (err) {
 		await opened.release();
 		process.stderr.write(`usertrust: transcript window skipped — ${errText(err)}\n`);
-		return empty(cursor.lastModel);
+		return empty(cursor.lastModel, agentType);
 	}
-	const agentType = await agentTypeFor(opened.transcriptPath, agentId, agentTypeHint);
 	let decided = false;
 	return {
 		mode: "transcript",
 		window,
-		agentType,
+		key: window === null ? null : vehicleKey(sessionId, agentId, window.ids),
+		agentType: agentType.name,
+		agentTypeRaw: agentType.raw,
+		principal: principalFor(sessionId, agentId, agentType.raw),
 		lastModel: cursor.lastModel,
 		async commit(transferId) {
 			if (window === null || decided) return;
@@ -754,6 +990,16 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 			}
 			// If this write fails the pending file still names the ids, and the
 			// journal keeps them out of every other window until the hold ends.
+			await opened.save().catch((err) => {
+				process.stderr.write(`usertrust: cursor not updated — ${errText(err)}\n`);
+			});
+		},
+		async settledElsewhere() {
+			// The server answered `already_settled` for the window's key: an earlier
+			// settle of exactly these messages landed, though this cursor never heard.
+			if (window === null || decided) return;
+			decided = true;
+			accountIds(cursor, window.ids);
 			await opened.save().catch((err) => {
 				process.stderr.write(`usertrust: cursor not updated — ${errText(err)}\n`);
 			});
@@ -771,23 +1017,31 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 	};
 }
 
-async function hygieneAbort(transferId, why) {
+/** Give a hold back after a settle that failed: the server re-queues such a hold. */
+async function hygieneRelease(transferId, why) {
 	const timeoutMs = callTimeout();
 	if (timeoutMs < MIN_CALL_MS) return;
 	try {
-		await serverRequest("/v1/abort", { transferId, error: why }, { timeoutMs });
+		await releaseHold(transferId, why, { timeoutMs });
 	} catch {
-		// The server's pending-TTL sweep voids it.
+		// The server's pending-TTL sweep releases it.
 	}
 }
 
 /**
- * Settle a hold at `counts`. Outcomes: `settled`; `released` (400/404 — the
- * server proved nothing posted); `claimed` (5xx or no answer — it may have
- * posted, so its ids are never retried). Every non-settle is aborted for
- * hygiene, since the server re-queues a hold after a failed settle.
+ * Settle a hold at `counts`; `keyed` when it was authorized under a vehicle key.
+ * Outcomes:
+ *  - `settled`: the server charged it — or, keyed, answered `already_settled`:
+ *    the key's charge stands;
+ *  - `released`: the server proved nothing posted (400; 404 when unkeyed);
+ *  - `unresolved` (keyed only): it may or may not have posted — a 404, a 5xx, no
+ *    answer, or a 200 whose receipt says `settled: false`. Retried as itself under
+ *    its key, which the server charges at most once; the hold is left for that
+ *    retry, which gets it back by its key;
+ *  - `claimed` (unkeyed only): it may have posted, so its ids are never retried.
+ * A `released` or `claimed` hold is given back for hygiene.
  */
-async function settleAt(transferId, counts) {
+async function settleAt(transferId, counts, { keyed }) {
 	let settle;
 	try {
 		settle = await serverRequest(
@@ -796,33 +1050,73 @@ async function settleAt(transferId, counts) {
 			{ timeoutMs: callTimeout() },
 		);
 	} catch (err) {
-		await hygieneAbort(transferId, "transcript settle unanswered");
-		return { outcome: "claimed", reason: `settle unreachable: ${errText(err)}` };
+		const reason = `settle unreachable: ${errText(err)}`;
+		if (keyed) return { outcome: "unresolved", reason };
+		await hygieneRelease(transferId, "transcript settle unanswered");
+		return { outcome: "claimed", reason };
 	}
-	if (settle.status === 200) return { outcome: "settled" };
-	await hygieneAbort(transferId, "transcript settle failed");
+	return settleOutcome(transferId, settle, keyed);
+}
+
+async function settleOutcome(transferId, settle, keyed) {
+	if (settle.status === 200) {
+		if (keyed && settle.json?.settled === false) {
+			return { outcome: "unresolved", reason: "the ledger post is ambiguous (settled: false)" };
+		}
+		return { outcome: "settled" };
+	}
+	if (keyed && isAlreadySettled(settle)) return { outcome: "settled" };
+	const reason = `settle returned ${settle.status}`;
+	if (keyed && settle.status !== 400) return { outcome: "unresolved", reason };
+	await hygieneRelease(transferId, "transcript settle failed");
 	const outcome = settle.status === 400 || settle.status === 404 ? "released" : "claimed";
-	return { outcome, reason: `settle returned ${settle.status}` };
+	return { outcome, reason };
 }
 
 /**
- * Terminate a transcript-mode hold by SETTLING it: at its assigned counts, or
- * at zero (the server's 1-unit floor) when nothing was assigned to it. A hold
- * with ids is first claimed by renaming its file, so it is settled at most once
- * even if two hooks reach it; its outcome is journalled and applied to the
- * cursor. Returns `{ outcome, reason? }`; `deferred` means out of time, hold
- * untouched.
+ * A hold no usage was assigned to (a parallel tool call, or nothing new yet)
+ * carries no spend: it is released — no charge, no failure. A server that cannot
+ * release gets the old settle at zero, which costs its 1-unit floor.
+ */
+async function returnEmptyHold(transferId) {
+	if (!(await serverCapabilities()).has("release")) {
+		const zero = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+		return settleAt(transferId, zero, { keyed: false });
+	}
+	try {
+		const response = await releaseHold(
+			transferId,
+			"no transcript usage was assigned to this hold",
+			{ timeoutMs: callTimeout() },
+		);
+		return response.status === 200
+			? { outcome: "returned" }
+			: { outcome: "unreturned", reason: `release returned ${response.status}` };
+	} catch (err) {
+		// The server's pending-TTL sweep releases it.
+		return { outcome: "unreturned", reason: `release unreachable: ${errText(err)}` };
+	}
+}
+
+/**
+ * Terminate a transcript-mode hold. A hold with assigned usage is SETTLED at its
+ * counts: claimed first by renaming its file, so it is settled at most once even
+ * if two hooks reach it, and its outcome journalled and applied to the cursor. A
+ * hold with none is given back — released, on a server that can release; settled
+ * at zero (the server's 1-unit floor) on one that cannot. Returns `{ outcome,
+ * reason? }`; `returned` is an empty hold given back, `deferred` means out of
+ * time, hold untouched.
  */
 export async function settleTranscriptHold(sessionId, entry) {
 	if (callTimeout() < MIN_CALL_MS) return { outcome: "deferred", reason: "out of time" };
 	const ids = entry.assignedIds ?? [];
-	const counts = {};
-	for (const key of COUNT_KEYS) counts[key] = ids.length > 0 ? count(entry[key]) : 0;
 	if (ids.length === 0) {
-		const result = await settleAt(entry.transferId, counts);
+		const result = await returnEmptyHold(entry.transferId);
 		await clearPending(sessionId, entry.agentId, entry.entryKey);
 		return result;
 	}
+	const counts = {};
+	for (const key of COUNT_KEYS) counts[key] = count(entry[key]);
 	const livePath = stateFilePath(sessionId, entry.agentId, entry.entryKey);
 	const base = livePath.slice(0, -".json".length);
 	try {
@@ -830,7 +1124,8 @@ export async function settleTranscriptHold(sessionId, entry) {
 	} catch {
 		return { outcome: "skipped", reason: "another hook is settling this hold" };
 	}
-	const result = await settleAt(entry.transferId, counts);
+	const keyed = typeof entry.idempotencyKey === "string";
+	const result = await settleAt(entry.transferId, counts, { keyed });
 	try {
 		await writeAtomic(
 			`${base}.done`,
@@ -839,6 +1134,15 @@ export async function settleTranscriptHold(sessionId, entry) {
 				transferId: entry.transferId,
 				assignedIds: ids,
 				outcome: result.outcome,
+				// What a retry of an unresolved settle needs: the vehicle, as authorized.
+				...(keyed
+					? {
+							idempotencyKey: entry.idempotencyKey,
+							holdModel: entry.holdModel,
+							agentType: entry.agentType,
+							...counts,
+						}
+					: {}),
 			}),
 		);
 		await unlink(`${base}.settling`).catch(() => {});
@@ -863,10 +1167,11 @@ export async function settleAssignedHolds(sessionId, agentId) {
 }
 
 /**
- * Post one agent's unassigned complete messages, one authorize→settle per
- * model. A group starts only if the budget (less `reserveMs`) still covers
- * authorize + settle + abort. Returns `{ skipped }` or `{ posted, notes,
- * serverDown }`.
+ * Post one agent's usage that no hold carried: first every UNRESOLVED vehicle,
+ * retried exactly as it was; then the unassigned complete messages, one
+ * authorize→settle per model. A call starts only if the budget (less
+ * `reserveMs`) still covers authorize + settle + release. Returns `{ skipped }` or
+ * `{ posted, notes, serverDown }`.
  */
 export async function postRemainder({ sessionId, agentId, agentTypeHint, input, hook, reserveMs }) {
 	const opened = await openAgent({ sessionId, agentId, input });
@@ -874,15 +1179,64 @@ export async function postRemainder({ sessionId, agentId, agentTypeHint, input, 
 	if (opened.kind === "busy") return { skipped: "a concurrent hook holds this agent's lock" };
 	const { cursor } = opened;
 	const summary = { posted: 0, notes: [], serverDown: false };
+	const callBudget = () => Math.min(CALL_TIMEOUT_MS, Math.floor((timeLeft() - reserveMs) / 3));
 	try {
-		const fresh = selectNew(cursor, opened.live);
+		const fresh = await selectOwn(opened);
 		await opened.save();
-		if (fresh.length === 0) return summary;
+		if (fresh.length === 0 && cursor.unresolved.size === 0) return summary;
+		// What the server honours decides what these calls may carry (see lib.mjs).
+		const capabilities = await serverCapabilities();
+		const keyed = capabilities.has("idempotency-key");
+		const principalOf = (rawType) =>
+			capabilities.has("principal") ? principalFor(sessionId, agentId, rawType) : undefined;
 		const agentType = await agentTypeFor(opened.transcriptPath, agentId, agentTypeHint);
+
+		// A retry under a key the server would strip could post twice: unresolved
+		// vehicles wait for a server that honours keys.
+		if (!keyed && cursor.unresolved.size > 0) {
+			summary.notes.push(
+				`${cursor.unresolved.size} unresolved settle(s) wait for a server that honours idempotency keys`,
+			);
+		}
+		for (const [key, vehicle] of keyed ? [...cursor.unresolved] : []) {
+			const timeoutMs = callBudget();
+			if (timeoutMs < MIN_CALL_MS) {
+				summary.notes.push("unresolved settles: deferred to the next settle point (out of time)");
+				return summary;
+			}
+			const counts = vehicleCounts(vehicle);
+			const result = await postGroup({
+				sessionId,
+				agentId,
+				agentType: safeName(vehicle.agentType, "subagent"),
+				hook,
+				model: vehicle.model,
+				ids: vehicle.ids,
+				counts,
+				timeoutMs,
+				key,
+				principal: principalOf(vehicle.agentType),
+				retry: true,
+			});
+			if (result.outcome !== "unresolved") cursor.unresolved.delete(key);
+			if (result.outcome === "settled") {
+				accountIds(cursor, vehicle.ids);
+				summary.posted += vehicle.ids.length;
+			} else if (result.outcome === "denied") {
+				denyIds(cursor, vehicle.ids);
+				reportDenied(agentType.name, agentId, result.reason, vehicle.ids, vehicle.model, counts);
+			} else summary.notes.push(`unresolved ${vehicle.model} settle: ${result.reason}`);
+			await opened.save();
+			if (result.serverDown) {
+				summary.serverDown = true;
+				return summary;
+			}
+		}
+
 		const groups = new Map();
 		for (const m of fresh) groups.set(m.model, [...(groups.get(m.model) ?? []), m]);
 		for (const [model, messages] of groups) {
-			const timeoutMs = Math.min(CALL_TIMEOUT_MS, Math.floor((timeLeft() - reserveMs) / 3));
+			const timeoutMs = callBudget();
 			if (timeoutMs < MIN_CALL_MS) {
 				summary.notes.push(`${model}: deferred to the next settle point (out of time)`);
 				break;
@@ -892,25 +1246,29 @@ export async function postRemainder({ sessionId, agentId, agentTypeHint, input, 
 			for (const id of ids) cursor.assigned.set(id, REMAINDER);
 			await opened.save();
 			const counts = sumCounts(messages);
+			const key = keyed ? vehicleKey(sessionId, agentId, ids) : undefined;
 			const result = await postGroup({
 				sessionId,
 				agentId,
-				agentType,
+				agentType: agentType.name,
 				hook,
 				model,
 				ids,
 				counts,
 				timeoutMs,
+				key,
+				principal: principalOf(agentType.raw),
+				retry: false,
 			});
 			if (result.outcome === "settled" || result.outcome === "claimed") accountIds(cursor, ids);
 			else if (result.outcome === "denied") denyIds(cursor, ids);
-			else releaseIds(cursor, ids);
+			else if (result.outcome === "unresolved" && key !== undefined) {
+				keepUnresolved(cursor, key, { ids, model, agentType: agentType.raw, ...counts });
+			} else releaseIds(cursor, ids);
 			await opened.save();
 			if (result.outcome === "settled") summary.posted += ids.length;
 			else if (result.outcome === "denied") {
-				process.stderr.write(
-					`usertrust: ${agentType}:${agentId} usage NOT recorded — ${result.reason}; ${ids.length} ${model} message(s) (${describeCounts(counts)} tokens) are marked denied and never retried\n`,
-				);
+				reportDenied(agentType.name, agentId, result.reason, ids, model, counts);
 			} else summary.notes.push(`${model}: ${result.outcome} — ${result.reason}`);
 			if (result.serverDown) {
 				summary.serverDown = true;
@@ -923,11 +1281,43 @@ export async function postRemainder({ sessionId, agentId, agentTypeHint, input, 
 	}
 }
 
+function vehicleCounts(vehicle) {
+	const counts = {};
+	for (const key of COUNT_KEYS) counts[key] = count(vehicle[key]);
+	return counts;
+}
+
+function reportDenied(agentType, agentId, reason, ids, model, counts) {
+	process.stderr.write(
+		`usertrust: ${agentType}:${agentId} usage NOT recorded — ${reason}; ${ids.length} ${model} message(s) (${describeCounts(counts)} tokens) are marked denied and never retried\n`,
+	);
+}
+
 /**
- * One authorize→settle for a remainder group. Release ONLY when nothing was
- * posted for certain: authorize failed, or settle answered 400/404.
+ * One authorize→settle for a remainder group, or for an unresolved vehicle's
+ * retry (`retry`). Under a key the server charges a vehicle at most once: a key
+ * whose charge stands is `already_settled`, which settles the vehicle. Release
+ * ONLY when nothing was posted for certain — and never on a retry, whose earlier
+ * settle may have posted: what is not settled or denied stays unresolved.
  */
-async function postGroup({ sessionId, agentId, agentType, hook, model, ids, counts, timeoutMs }) {
+async function postGroup({
+	sessionId,
+	agentId,
+	agentType,
+	hook,
+	model,
+	ids,
+	counts,
+	timeoutMs,
+	key,
+	principal,
+	retry,
+}) {
+	const unsettled = (reason, extra = {}) => ({
+		outcome: retry ? "unresolved" : "released",
+		reason,
+		...extra,
+	});
 	let auth;
 	try {
 		auth = await serverRequest(
@@ -944,18 +1334,17 @@ async function postGroup({ sessionId, agentId, agentType, hook, model, ids, coun
 					messages: ids.length,
 				},
 				actor: `claude-code:${sessionId}:${agentType}:${agentId}`,
+				...(key === undefined ? {} : { idempotencyKey: key }),
+				...(principal === undefined ? {} : { principal }),
 			},
 			{ timeoutMs },
 		);
 	} catch (err) {
 		// No answer: a hold may exist server-side, but nothing settled it; the TTL
-		// sweep voids it. Safe to retry — and pointless to try the next group now.
-		return {
-			outcome: "released",
-			reason: `authorize unreachable: ${errText(err)}`,
-			serverDown: true,
-		};
+		// sweep releases it. Pointless to try the next group now.
+		return unsettled(`authorize unreachable: ${errText(err)}`, { serverDown: true });
 	}
+	if (key !== undefined && isAlreadySettled(auth)) return { outcome: "settled" };
 	if (auth.status === 402 || auth.status === 403 || auth.status === 429) {
 		return {
 			outcome: "denied",
@@ -964,11 +1353,11 @@ async function postGroup({ sessionId, agentId, agentType, hook, model, ids, coun
 	}
 	const transferId = auth.json?.transferId;
 	if (auth.status !== 200 || typeof transferId !== "string" || transferId === "") {
-		const reason =
+		return unsettled(
 			auth.json?.shadow === true
 				? "shadow mode (not recorded)"
-				: `authorize returned ${auth.status}`;
-		return { outcome: "released", reason };
+				: `authorize returned ${auth.status}`,
+		);
 	}
 	let settle;
 	try {
@@ -978,11 +1367,11 @@ async function postGroup({ sessionId, agentId, agentType, hook, model, ids, coun
 			{ timeoutMs },
 		);
 	} catch (err) {
-		await hygieneAbort(transferId, "transcript settle unanswered");
-		return { outcome: "claimed", reason: `settle unreachable: ${errText(err)}` };
+		const reason = `settle unreachable: ${errText(err)}`;
+		if (key !== undefined) return { outcome: "unresolved", reason };
+		await hygieneRelease(transferId, "transcript settle unanswered");
+		return { outcome: "claimed", reason };
 	}
-	if (settle.status === 200) return { outcome: "settled" };
-	await hygieneAbort(transferId, "transcript settle failed");
-	const outcome = settle.status === 400 || settle.status === 404 ? "released" : "claimed";
-	return { outcome, reason: `settle returned ${settle.status}` };
+	const result = await settleOutcome(transferId, settle, key !== undefined);
+	return retry && result.outcome === "released" ? { ...result, outcome: "unresolved" } : result;
 }
