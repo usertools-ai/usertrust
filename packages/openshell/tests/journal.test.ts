@@ -1231,6 +1231,26 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		after.close();
 	});
 
+	it("#181: a file at version 1, or a NEGATIVE version, with NO hold table is refused — never adopted as fresh; bytes untouched, no -wal/-shm", () => {
+		for (const v of [1, -1]) {
+			const dir = mkdtempSync(join(tmpdir(), "openshell-journal-v-other-"));
+			dirs.push(dir);
+			const path = join(dir, "holds.db");
+			const raw = new DatabaseSync(path); // rollback mode, no hold table
+			raw.exec("CREATE TABLE other_schema (x INTEGER)");
+			raw.exec("INSERT INTO other_schema (x) VALUES (42)");
+			raw.exec(`PRAGMA user_version = ${v}`);
+			raw.close();
+			const before = readFileSync(path);
+			expect(() => HoldJournal.open(path), String(v)).toThrow(
+				new RegExp(`schema version ${v}, this code reads 2`),
+			);
+			expect(readFileSync(path).equals(before), `${v}: the bytes are unchanged`).toBe(true);
+			expect(existsSync(`${path}-wal`), String(v)).toBe(false);
+			expect(existsSync(`${path}-shm`), String(v)).toBe(false);
+		}
+	});
+
 	it("(d) a refused ROLLBACK-mode file is left byte-for-byte untouched: no WAL switch, no -wal or -shm files", () => {
 		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-rollback-"));
 		dirs.push(dir);

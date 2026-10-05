@@ -435,6 +435,14 @@ export class HoldJournal {
 				`schema version ${version}, this code reads ${JOURNAL_SCHEMA_VERSION}`,
 			);
 		}
+		// Only version 0 (never stamped) or this version can be adopted as fresh: any OTHER version
+		// (1, or a negative one, which the pragma accepts) is a schema this code does not know,
+		// even with no hold table — adopting it would hide whatever holds or debt it stores.
+		if (version !== 0 && version !== JOURNAL_SCHEMA_VERSION) {
+			throw new JournalSchemaError(
+				`schema version ${version}, this code reads ${JOURNAL_SCHEMA_VERSION}`,
+			);
+		}
 		const cols = (db.prepare("PRAGMA table_info(hold)").all() as Array<{ name: string }>).map(
 			(c) => c.name,
 		);
