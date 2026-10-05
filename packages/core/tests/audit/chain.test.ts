@@ -5,11 +5,14 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
+	symlinkSync,
+	unlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { canonicalize } from "../../src/audit/canonical.js";
 import { AuditWriterLockHeldError, createAuditWriter } from "../../src/audit/chain.js";
@@ -600,8 +603,9 @@ describe("Audit Chain Writer — lockAtCreate (the lock taken in the factory)", 
 		}
 		expect(caught).toBeInstanceOf(AuditWriterLockHeldError);
 		expect(caught).toBeInstanceOf(Error);
+		// The message names the lock by its REAL path (the one every lock key uses).
 		expect(String((caught as Error).message)).toBe(
-			`Audit writer lock held by PID ${process.ppid}. Only one process may write to the audit log. Lock file: ${lockPath()}`,
+			`Audit writer lock held by PID ${process.ppid}. Only one process may write to the audit log. Lock file: ${join(realpathSync(join(tempDir, ".usertrust", "audit")), ".audit-writer.lock")}`,
 		);
 	});
 
@@ -633,6 +637,67 @@ describe("Audit Chain Writer — lockAtCreate (the lock taken in the factory)", 
 		expect(String((err as Error).message)).toContain(
 			`Audit writer lock held by PID ${process.ppid}`,
 		);
+	});
+});
+
+describe("Audit Chain Writer — one vault, many spellings (the lock is keyed on the REAL path)", () => {
+	let tempDir: string;
+	const writers: Array<ReturnType<typeof createAuditWriter>> = [];
+	const lockPath = () => join(tempDir, ".usertrust", "audit", ".audit-writer.lock");
+
+	beforeEach(() => {
+		// tmpdir() on macOS is itself a symlinked spelling (/var → /private/var): exactly the case.
+		tempDir = mkdtempSync(join(tmpdir(), "trust-audit-spell-"));
+	});
+	afterEach(() => {
+		for (const w of writers.splice(0)) w.release();
+		try {
+			unlinkSync(`${tempDir}-link`); // a symlink: unlink, never rm -r through it
+		} catch {
+			/* not created */
+		}
+		rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	const spellings = (): Array<[string, string]> => {
+		const link = `${tempDir}-link`;
+		symlinkSync(tempDir, link);
+		return [
+			["a relative spelling", relative(process.cwd(), tempDir)],
+			["a symlinked spelling", link],
+		];
+	};
+
+	it("a second EAGER writer through another spelling of A's vault is refused — and A's live lock is untouched", () => {
+		writers.push(createAuditWriter(tempDir, { lockAtCreate: true }));
+		const before = readFileSync(lockPath(), "utf-8");
+		for (const [name, spelling] of spellings()) {
+			expect(() => createAuditWriter(spelling, { lockAtCreate: true }), name).toThrow(
+				AuditWriterLockHeldError,
+			);
+			expect(readFileSync(lockPath(), "utf-8"), `${name}: A's lock is still A's`).toBe(before);
+		}
+	});
+
+	it("a LAZY second writer through another spelling is refused at its first append, never reclaiming A's live lock", async () => {
+		const a = createAuditWriter(tempDir, { lockAtCreate: true });
+		writers.push(a);
+		const before = readFileSync(lockPath(), "utf-8");
+		for (const [name, spelling] of spellings()) {
+			const b = createAuditWriter(spelling);
+			writers.push(b);
+			const err = await b
+				.appendEvent({ kind: "test.fork", actor: "sys", data: {} })
+				.catch((e: unknown) => e);
+			expect(err, name).toBeInstanceOf(AuditWriterLockHeldError);
+			expect(readFileSync(lockPath(), "utf-8"), `${name}: A's lock is still A's`).toBe(before);
+		}
+		// A still writes, and nothing forked: one event on the chain.
+		await a.appendEvent({ kind: "test.a", actor: "sys", data: {} });
+		const lines = readFileSync(join(tempDir, ".usertrust", "audit", "events.jsonl"), "utf-8")
+			.trim()
+			.split("\n");
+		expect(lines).toHaveLength(1);
 	});
 });
 

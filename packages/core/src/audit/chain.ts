@@ -18,10 +18,11 @@ import {
 	mkdirSync,
 	openSync,
 	readFileSync,
+	realpathSync,
 	unlinkSync,
 	writeSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
 import { canonicalize } from "./canonical.js";
@@ -190,12 +191,30 @@ function tryCleanStaleLock(candidateLockPath: string, dir: string): boolean {
 	}
 }
 
+/**
+ * The ONE spelling of a vault's audit directory every lock key uses. Two spellings of the same
+ * directory (a relative path, a symlink, macOS's /tmp → /private/tmp) must be the same key, or a
+ * second writer in this process misses the first writer's entry, meets EEXIST, and "reclaims"
+ * the LIVE same-PID lock as stale — two live writers, a silently forked chain (AUD-471's class).
+ * `resolve` only when the directory does not exist yet (nothing can hold a lock in it).
+ */
+function canonicalDir(dir: string): string {
+	try {
+		return realpathSync(dir);
+	} catch (err: unknown) {
+		if (err instanceof Error && "code" in err && (err as { code?: string }).code === "ENOENT") {
+			return resolve(dir);
+		}
+		throw err;
+	}
+}
+
 function acquireProcessLock(
 	logPath: string,
 	locksByDir: Map<string, LockEntry>,
 	writerId: string,
 ): void {
-	const dir = dirname(logPath);
+	const dir = canonicalDir(dirname(logPath));
 	if (locksByDir.has(dir)) return;
 
 	// AUD-471: A live writer already holds this dir in THIS process → refuse.
