@@ -209,6 +209,16 @@ const verified: ClusterVectorExpect = { kind: "verified" };
 
 const documentVectors: ClusterVector[] = [
 	{
+		label: 'document: event.kind = "receipt_voided"',
+		base: "cluster/chained.json",
+		receipt: (r) => {
+			(r.event as Bag).kind = "receipt_voided";
+		},
+		expect: schemaInvalid,
+		rule: 'a cluster receipt\'s mint event is kind "receipt_settled" (§15.10)',
+		detail: /body\.receipt\.event\.kind must be "receipt_settled"/,
+	},
+	{
 		label: "document: an unknown root member",
 		base: "cluster/first.json",
 		receipt: (r) => {

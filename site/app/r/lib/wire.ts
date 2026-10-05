@@ -339,7 +339,7 @@ export interface ChainEnvelope<TKind extends string, TData> {
 
 export type MintEvent = ChainEnvelope<string, Projection>;
 
-export type ClusterMintEvent = ChainEnvelope<string, ClusterProjection>;
+export type ClusterMintEvent = ChainEnvelope<"receipt_settled", ClusterProjection>;
 
 export interface MerkleInclusionProof {
 	version: 1;
@@ -2372,6 +2372,11 @@ function validateClusterReceiptDocument(value: Bag, path: string): string | null
 
 	const envelopeError = validateChainEnvelope(value.event, `${path}.event`);
 	if (envelopeError !== null) return envelopeError;
+	// The mint event's kind (§15.10): any other kind is not a minted receipt,
+	// whatever its data says.
+	if ((value.event as Bag).kind !== "receipt_settled") {
+		return `${path}.event.kind must be "receipt_settled"`;
+	}
 	const data = (value.event as Bag).data;
 	const projectionError = validateClusterProjection(data, `${path}.event.data`);
 	if (projectionError !== null) return projectionError;

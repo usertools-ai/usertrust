@@ -1549,6 +1549,9 @@ function checkClusterSchema(receipt: unknown): AlgebraResult {
 	}
 	const documentWork = checkClusterWork(receipt.work, "receipt.work");
 	if (!documentWork.ok) return documentWork;
+	if ((receipt.event as Rec).kind !== "receipt_settled") {
+		return refuse('event.kind is not "receipt_settled"');
+	}
 
 	const data = (receipt.event as Rec).data;
 	if (!isRec(data)) return refuse("event.data is not an object");
@@ -2018,12 +2021,12 @@ test("cluster vectors: the harness refuses each rejection vector at its named ga
 	}
 });
 
-test("cluster vectors: 140 in all, 42 of them boundary controls that must still verify", () => {
-	assert.equal(clusterVectors.length, 140);
+test("cluster vectors: 141 in all, 42 of them boundary controls that must still verify", () => {
+	assert.equal(clusterVectors.length, 141);
 	assert.equal(clusterVectors.filter((vector) => vector.expect.kind === "verified").length, 42);
 	assert.equal(
 		new Set(clusterVectors.map((vector) => vector.label)).size,
-		140,
+		141,
 		"labels are unique",
 	);
 });
