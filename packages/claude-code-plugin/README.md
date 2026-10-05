@@ -74,16 +74,18 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
 - **What is counted.** One count per API response (`message.id`, which is
   one-to-one with the entry's `requestId`): the largest value of each count across
   its entries, so a response streamed over several entries is never added twice
-  and a later entry can never lower it; a response still streaming waits.
+  and a later entry can never lower it; a response still streaming waits, and one
+  that never completes (an interrupted stream) is never posted.
+  `cacheReadTokens` / `cacheWriteTokens` are sent separately from `inputTokens`, so
+  each tier is priced at its own rate. The counts are the provider's own, so
+  settles are `usageSource: "provider"`; the authorize carries
+  `params.usageOrigin: "transcript"`.
 - **Forked subagents.** A forked subagent's transcript begins with a copy of its
   ancestor's entries — the same response ids — so the plugin posts each response
   id from ONE agent only: the first agent to claim it (a file per id under
   `$UT_CC_STATE_DIR/transcripts/claims`). The fork's own responses are its own;
   what it inherited was posted by the agent that made it — or, if the fork got
-  there first, by the fork, never by both. `cacheReadTokens` / `cacheWriteTokens` are sent separately
-  from `inputTokens`, so each tier is priced at its own rate. The counts are the
-  provider's own, so settles are `usageSource: "provider"`; the authorize carries
-  `params.usageOrigin: "transcript"`.
+  there first, by the fork, never by both.
 - **Attribution.** A transcript authorize's actor is
   `claude-code:<session>:<agentType>:<agentId>` (`main:main` for the parent), with
   `agent_id` / `agent_type` in its params. On a server that records a `principal`,
@@ -113,7 +115,7 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   claimed and the hold is given back for hygiene: an outage can lose usage, but
   never post it twice. A cursor that exists but cannot be read is never treated as
   empty — transcript usage is not posted until it is fixed or removed. Removing it
-  re-posts nothing: the agent's claims (below) still say what it posted.
+  re-posts nothing: the agent's claims still say what it posted.
 - **What the server honours** is read from its unauthenticated `/v1/health`
   `capabilities` once per hook, and never cached on disk: an older server strips
   request fields it does not know, so it would accept a key and silently ignore
@@ -137,8 +139,9 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   **deleting the state dir while transcripts remain re-posts their usage.** A
   message whose claim cannot be made is not posted, and a stderr note says so.
 - **Hook time budget.** Each hook gives up after about 10 seconds (the hooks'
-  timeout is 15), and Stop keeps time back to settle leftover holds; whatever it
-  could not reach is posted at the next settle point.
+  timeout is 15): its calls never run past that, claiming new responses stops
+  early enough to leave them time, and Stop keeps time back to give back holds;
+  whatever a hook could not reach is posted at the next settle point.
 - **Content.** Transcripts are read locally and only token counts, model names and
   agent ids/types are sent to your server — never transcript content.
 
