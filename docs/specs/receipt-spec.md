@@ -1193,11 +1193,17 @@ mechanical guard is a negative assertion: `indeterminate` renders NO floor
 claim.** (Same discipline as §8's inherit-by-default rule, pointed the other
 way: nobody has to remember to suppress it.)
 
-Neither the floor claim nor the scope statement may sit behind interaction —
-not a `<details>`, tooltip, or accordion. *A disclosure that requires a click is
-a defence, not a disclosure.* And the retired unconditional promise must not be
-restated anywhere, **including in order to except it**; floor framing is exactly
-what lets the strong claim hold without resurrecting that sentence.
+**Amended 2026-10-05 (the brief receipt).** The amount's posture LABEL must be
+visible next to the amount; one chip is sufficient, and its `title` may carry
+the one-line meaning. The full scope statement and caption must be on the page,
+one disclosure away: the receipt's single "Details". They are no longer required
+to sit above the fold. This replaces the earlier rule that neither could sit
+behind a `<details>`: receipts are read at a glance, and a page that leads with
+four paragraphs of qualification is read by no one. See
+`receipt-amount-framing.md` for the full amendment, including R41 and R6-R8.
+The retired unconditional promise must not be restated anywhere, **including in
+order to except it**; floor framing is exactly what lets the strong claim hold
+without resurrecting that sentence.
 
 **Conformance carve-out, stated so nothing ships silently.** This clause binds
 the PAGE now (verify-page design R39/R40 at v0.9). `usertrust-verify receipt` is

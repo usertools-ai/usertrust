@@ -19,6 +19,7 @@
 			"!**/site/public/fleet",
 			"!**/.source",
 			"!**/.next",
+			"!**/site/app/r/vendor",
 			"!**/*.css",
 			"!**/*.svg"
 		]

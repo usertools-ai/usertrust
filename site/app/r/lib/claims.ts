@@ -100,8 +100,15 @@ export const RUNG_EARNED_BY: Record<LadderStatus, string> = {
 };
 
 /**
- * R6, VERBATIM IN FORCE (receipt-spec §7, `VERIFIED_CHECKPOINT`). Rendered as
- * the rung's fine print, "not hidden behind interaction" (§7).
+ * The glance card's verdict word. The three rungs stay DISTINCT (R5) in the
+ * level strip beside it; the full ladder, with what would earn each rung, sits
+ * in the card's Details.
+ */
+export const PLAIN_VERDICT_VERIFIED = "Verified";
+
+/**
+ * R6, VERBATIM IN FORCE (receipt-spec §7, `VERIFIED_CHECKPOINT`). Rendered in
+ * full in the card's Details (amended 2026-10-05: not above the fold).
  */
 export const FORK_DISCLAIMER =
 	"this level does NOT prove whole-chain linear consistency, anchor-sequence continuity, or external immutability — a checkpoint signer could sign a fork.";
@@ -388,7 +395,7 @@ export const FALLBACK_SESSION_ORIGIN =
  * this sentence is what stops it.
  */
 export const POSTURES_ARE_ATTESTED_ENUMS =
-	"postures are ATTESTED ENUMS, not verifier-established facts: the verifier checks enum validity and internal agreement — it CANNOT confirm them, because both are defined over per-constituent facts the projection deliberately does not carry.";
+	"postures are ATTESTED ENUMS, not verifier-established facts — the verifier CANNOT confirm them.";
 
 /** One rendered posture: a chain-committed CLAIM, never a re-derived fact. */
 export interface PostureClaim {
@@ -511,11 +518,11 @@ export const DELEGATION_POSTURE_LABEL: Record<DelegationPosture, string> = {
 
 /** R39 — `selfDebitsOnly`: DIRECT / self-account spend, delegated spend out of scope. */
 export const SELF_DEBITS_ONLY_SCOPE =
-	"this amount is DIRECT, self-account spend: it is built ONLY from debits charged to the receipt subject. Delegated spend is OUT OF SCOPE — work this subject caused a delegate to perform was charged to that delegate and is not counted in the figure above.";
+	"this amount is DIRECT, self-account spend, built ONLY from debits charged to the receipt subject; delegated spend is OUT OF SCOPE.";
 
 /** R39 — `includesSomeDelegated`: an INCOMPLETE attributed subtotal, bounding nothing. */
 export const INCLUDES_SOME_DELEGATED_SCOPE =
-	"this amount is an INCOMPLETE ATTRIBUTED SUBTOTAL: some causally attributable delegated debits are included, and coverage is NOT established. How much delegated spend is left out is unquantified, so the figure above bounds nothing and must not be read as the cost of the work this subject caused.";
+	"this amount is an INCOMPLETE ATTRIBUTED SUBTOTAL: some delegated debits are included, coverage is NOT established, and it must not be read as the cost of the work this subject caused.";
 
 /**
  * R39 — `indeterminate`: end-to-end coverage cannot be verified.
@@ -527,7 +534,7 @@ export const INCLUDES_SOME_DELEGATED_SCOPE =
  * hedge the number.
  */
 export const INDETERMINATE_SCOPE =
-	"END-TO-END COVERAGE CANNOT BE VERIFIED for this amount: the minter could not establish which delegated debits, if any, it covers. Unknown coverage supports no bound in either direction — the figure above is neither a floor nor a ceiling on the cost of the work this subject caused.";
+	"END-TO-END COVERAGE CANNOT BE VERIFIED for this amount, which supports no bound in either direction.";
 
 /**
  * R39 — `includesAllDelegated`, the UNEVIDENCED fallback.
@@ -542,7 +549,7 @@ export const INDETERMINATE_SCOPE =
  * total.
  */
 export const INCLUDES_ALL_DELEGATED_UNEVIDENCED =
-	"this receipt claims its amount is the TOTAL COST OF WORK CAUSED BY THE SUBJECT — every causally attributable delegated debit, transitive descendants included, exactly once. That claim may be presented as a total ONLY when signed evidence a verifier can validate accompanies it, and no such evidence format exists in this version — so the claim is UNEVIDENCED, is checkable by no one, and is not presented here as a total.";
+	"this receipt claims its amount is the TOTAL COST OF WORK CAUSED BY THE SUBJECT, but no signed evidence exists to check it — UNEVIDENCED, and not presented as a total.";
 
 /** R39's four framings, by value. */
 export const DELEGATION_POSTURE_SCOPE: Record<DelegationPosture, string> = {
@@ -616,7 +623,7 @@ export function amountScopeCaption(delegationPosture: DelegationPosture): string
  * party would need to apply it is served. Either half alone is not enough.
  */
 export const ANCHOR_BINDING_RESOLVER_ASSERTED =
-	"the anchor binding at this rung is ASSERTED BY THE RESOLVER and, today, independently checkable by no one: no normative binding is defined between a transparency-log entry and this checkpoint's signed payload, so no consumer — this page, the offline CLI, or a third party — can confirm the binding for itself. What is missing is the binding, not merely published evidence. Until that rule exists, this rung reports the resolver's claim and is not verified anchoring.";
+	"the anchor binding is ASSERTED BY THE RESOLVER and, today, independently checkable by no one: no normative binding is defined yet. This rung reports the resolver's claim; it is not verified anchoring.";
 
 /** R24, VERBATIM — the `"custom"` literal renders honestly, never expanded, never hidden. */
 export const CUSTOM_MODEL_MEANING = "one or more non-catalog or custom-rate models";
