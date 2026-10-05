@@ -24,7 +24,7 @@ Earlier status — **v0.2: the SIXTEEN §10 companion updates applied, and the v
 page's §4 concrete response schema adopted.** All sixteen §10 items now land
 in full: the in-pin corrections that once held §10.13 to a part-landing and
 §10.16 to none have been applied to the pinned section, and the pin
-recomputed against this file. Interface owner: stealth (`apps/api`).
+recomputed against this file. Interface owner: the operator (its proxy service).
 Consumer: the public verify page at `usertrust.ai/r/<id>` (usertrust instance)
 and any third-party verifier.
 
@@ -59,7 +59,7 @@ and any third-party verifier.
    §4 EXTENDS §10 rather than contradicting it: `receiptBytes`,
    `verification`, and `advisories` are envelope growth that §5 explicitly
    permits, so §10.1's six-member enumeration is a floor, not a closed set.
-3. This document — the wire contract itself, owned by stealth.
+3. This document — the wire contract itself, owned by the operator.
 
 Where §4 and §10 genuinely disagree, this revision **flags rather than
 reconciles**; the three instances found are recorded under **§4 vs §10:
@@ -620,8 +620,8 @@ shape). Four tiers, and a consumer must not blur them:
         },
         "delegationPosture": "selfDebitsOnly",  // REQUIRED (receipt-spec §2a, v0.9) — WHAT THE
                                          // AMOUNT COVERS with respect to DELEGATED work. a2a
-                                         // delegation holds are always-released (stealth
-                                         // #829), so delegated cost debits the DELEGATE and a
+                                         // delegation holds are always-released, so
+                                         // delegated cost debits the DELEGATE and a
                                          // parent session's amount EXCLUDES work it caused —
                                          // technically correct and universally misread, which
                                          // is why the posture is chain-committed rather than
@@ -1382,8 +1382,8 @@ Design intents behind the shape:
      promotions included — and reject any proof whose supplied siblings
      disagree. Folding the siblings as given is non-conformant, and without
      this equality 4 is forgeable by altering `leafIndex`. (`packages/core`
-     already implements this; the STEALTH half is an open code fix —
-     `merkle-proofs.ts:84` — and it gates this API.) → `PROOF_INVALID`
+     already implements this; the operator's half is an open code fix, in
+     its proxy's Merkle-proof module, and it gates this API.) → `PROOF_INVALID`
   6. **Checkpoint.** `checkpoint.v === 2` (a v1 `PublishedMerkleRoot` in a
      receipt is FAIL), then its signature under a key with role `checkpoint`,
      in a permitting state, and in the rotation lineage pinned by this chain's
@@ -2343,7 +2343,7 @@ spec's `postedUsertokens === assessedUsertokens` rule true by construction:
 every POST carries `amount === actualAmount` under a bound, so a conformant
 ut1 receipt cannot exhibit a settlement shortfall.
 
-**Stealth net-new work that gates the mint endpoint (spec §9-B — ALL SIX are
+**Operator-side net-new work that gates the mint endpoint (spec §9-B — ALL SIX are
 mint blockers, not just the checkpoint pipeline).** Without them no conformant
 receipt can be produced at all:
 
@@ -2355,7 +2355,7 @@ receipt can be produced at all:
    checkpoint history + outbox with crash recovery, a stable public-safe
    `vaultId`, a sealing/checkpoint cadence that cannot indefinitely stall
    low-volume minting, and either a stated single-host writer constraint or a
-   distributed lock. **The genesis decision is stealth's to make and must be
+   distributed lock. **The genesis decision is the operator's to make and must be
    DECLARED in the trust document**, not just in prose: either (a) verified
    backfill — re-issue v2 statements over all prior segments, whose lineage
    edges must be reconstructed from the existing unsigned `MerkleTreeState` —
@@ -2385,7 +2385,7 @@ receipt can be produced at all:
    session open.
 
 Plus one required code fix this API depends on directly:
-**inclusion-path topology validation in stealth's `merkle-proofs.ts:84`** —
+**inclusion-path topology validation in the operator proxy's Merkle-proof module** —
 without it, equality 4 is forgeable by altering `leafIndex`, and every
 verification step above inherits the hole. (`packages/core` already
 implements it.)
@@ -2393,8 +2393,8 @@ implements it.)
 Order: pricing-snapshot ledger migration → §9-B (1–6) → mint endpoint → this
 resolver API → verify page → the swap.
 
-spec+IDs (usertrust) → **mint endpoint (stealth)** → **this API (stealth)** →
-verify page (usertrust) → the swap (stealth). The swap is additionally gated
+spec+IDs (usertrust) → **mint endpoint (the operator)** → **this API (the
+operator)** → verify page (usertrust) → the swap (the operator). The swap is additionally gated
 on this API being live in prod: a trailer that 404s is worse than
 `Co-Authored-By`. Publication is two-stage (round-9 F1 — "no receipt, no
 push" deadlocks against observed membership, since a webhook cannot see an
@@ -2493,7 +2493,7 @@ concrete shape for something §10 described abstractly.
 |---|---|
 | **Cam's ruling, 2026-08-10 (option (b) ratified)** | **Rate limiting: dedicated reader-IP header with service-key authentication.** The verify-page service authenticates with a service key; a valid key from the KNOWN EGRESS unlocks trust in **`Usertrust-Reader-IP`**, and the per-reader limit applies to the address it carries. That header is the ONLY attribution header: inbound `X-Forwarded-For` is now IGNORED ENTIRELY, on every request. An absent header on an authenticated request falls back to a keyed page-service allowance as the floor, and a MALFORMED value (non-single-value or non-IP-literal) degrades to the same floor — **never a rejection; the request is still served.** The page CONSTRUCTS the value from the platform-attested client IP (on Vercel, the platform's own trusted source), never derived from or merged with inbound `X-Forwarded-For`. **Ratification history:** the first form of this ruling forwarded a single-valued `X-Forwarded-For`; option (b) superseded it on the deciding fact that **the page's hosting platform rewrites `X-Forwarded-For` in transit**, putting that header's semantics under infrastructure neither side controls. Header NAME fixed at `Usertrust-Reader-IP` — no `X-` prefix (RFC 6648 deprecates it; matches the `Usertrust-Receipt` convention); the working name `X-Usertrust-Reader-IP` in cross-instance coordination syncs to this. This REPLACES the open coordination item v0.2 raised from verify-page §11/D1 — that item is now closed. Cited, not specified: the service key lands with the mint-key work under the EC2 custody pattern (§9-A H1), and both page-side key handling and header construction are the usertrust verify-page ship-gate addendum. The service key is rate-limit attribution only, never access — the endpoint stays public and the "no auth'd variants" non-goal is intact. |
 
-**Gate round-1 remediation (PR #823) — review findings, distinct from both the
+**Gate round-1 remediation — review findings, distinct from both the
 §10 items and the Cam ruling:**
 
 | Finding | Applied |
@@ -2505,8 +2505,7 @@ concrete shape for something §10 described abstractly.
 | F5 (Medium) | **Advisory kind naming fixed.** The advisory is camelCase `receiptSuperseded` (verify-page §4.1); the underlying chain event is snake_case `receipt_superseded` (receipt-spec §8). Both names now appear with the distinction stated and each cited to the document that defines it, plus the failure mode: the snake_case form on the wire is silently lossy, falling through to the unknown-kind path. |
 | F6 (Medium) | **Allowed response-code set completed** — `200`, `304`, `202`, `410`, `404`, `409`, `503`, `429`, enumerated in full and closed. The code/body-`status` agreement rule is now scoped to BODY-BEARING responses, since `304` and `429` carry no body. |
 
-**Gate round-3 remediation + re-pin bundle (PR #823, the cap round) —
-reviewed at 23fcd3be:**
+**Gate round-3 remediation + re-pin bundle (the cap round):**
 
 | Item | Applied |
 |---|---|
@@ -2518,8 +2517,7 @@ reviewed at 23fcd3be:**
 | R3-F6 (Medium) | **CORS preflight contract added** — OPTIONS with `Allow-Headers: If-None-Match` (+ Methods/Origin/Expose); the closed response-code set scoped to GET. |
 | Re-pin bundle | The Mint-lifecycle section was replaced with the byte-identical section text of the usertrust instance's re-pinned copy (§6a pin `6260043a…`, superseding `4c293c35…`): anchor-clock paragraph retired (§10.13), separate-billing-identities sentence retired (§10.16), both in-pin `claimsHash` residues removed (§10.2). The boundary banner reflects the current pin; the "Deferred: pinned-section collisions" section is DELETED — nothing remains deferred. |
 
-**Gate round-2 remediation (PR #823) — reviewed at c7b95721; findings against
-the round-1 tip:**
+**Gate round-2 remediation — findings against the round-1 tip:**
 
 | Finding | Applied |
 |---|---|
@@ -2533,7 +2531,7 @@ the round-1 tip:**
 
 Also carried through, as consequences rather than separate items: the
 `SegmentCheckpoint` sealed-segment rule (§4a), normative inclusion-path
-topology validation and its open stealth code fix, the four-valued check
+topology validation and its open operator-side code fix, the four-valued check
 results with the one online-check rule, the equivocation non-goal, the spec's
 operationalized public-safety rules, the §9-B mint blockers in Sequencing, and
 the `receiptSuperseded` advisory display state.
@@ -2554,7 +2552,7 @@ gate round-1 escalation, and items 1-3 by the receipt spec's **ERRATA of
 corrected to `terminalEvent.event.hash`; §10.14's anchored trigger phrased as
 jointly cumulative; §10.1's binding-qualifier list completed with the
 `billedUnfinalized` exception" — surfaced by this document's transcription
-gate, stealth PR #823). Each item keeps its original finding and adds its
+gate). Each item keeps its original finding and adds its
 resolution; nothing is deleted, because the record of WHY the two documents
 diverged is what stops the divergence recurring.
 

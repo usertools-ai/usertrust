@@ -1,10 +1,10 @@
-# Receipt Spec + ID Format — DRAFT v0.10 (usertrust drafts, stealth reviews)
+# Receipt Spec + ID Format — DRAFT v0.10 (usertrust drafts, the operator reviews)
 
 Status: **DRAFT v0.10** — the version-history block below is the authority;
 v0.9.2–v0.9.4 amendments were recorded inline before this bump, so the jump
 from the long-standing v0.6 title is history catching up, not versions
 skipped. The v0.6-era narrative that follows stands as history:
-**(post fresh-eyes round) — the stealth v0.3 review's
+**(post fresh-eyes round) — the operator's v0.3 review's
 rulings applied to the v0.5 text (the handoff's "v0.4 actions", executed
 post-v0.5), then the 2026-08-10 fresh-eyes review's rulings (6 Blocking /
 12 Important / 12 Minor), then **Codex round-4's REVISE rulings (7 P1 /
@@ -19,14 +19,14 @@ veto. B2 resolved by adopting the resolver spec's reserve→finalize lifecycle
 as normative (§6), which retires §6a's mint-first ID derivation and demotes
 §3 to a registry rule. H1 (EC2 custody), H2 (breakdown in the unsigned
 envelope), and the §9-A confirmations are folded. Codex round-4 runs on this
-text; the resolver spec (#811) updates AFTER this lands so it churns once.**
+text; the resolver spec updates AFTER this lands so it churns once.**
 
 **ERRATA (2026-08-11, transcription-surfaced, editorial only — no semantic
 movement, no verdict round):** §10.15's binding path corrected to
 `terminalEvent.event.hash`; §10.14's anchored trigger phrased as jointly
 cumulative; §10.1's binding-qualifier list completed with the
-`billedUnfinalized` exception. Surfaced by the resolver transcription gate
-(stealth PR #823), which adopted the correct readings from §4/§7.
+`billedUnfinalized` exception. Surfaced by the resolver transcription gate,
+which adopted the correct readings from §4/§7.
 
 **v0.10 (2026-10-05): CLUSTER receipts (§15) are the ONLY kind issued. The
 session kind is RESERVED — defined, never issued. §6a is re-pinned.**
@@ -223,7 +223,7 @@ or function in `event.data` writes an unparseable line that the reader silently
 skips — the event is accepted, fsync'd, reported durable, then vanishes, and
 the chain reports TAMPERED forever, indistinguishable from real tampering.
 **Scope consequence: correcting canonicalization is its own change across core
-+ verify (+ a proxy fix stealth owns), not a task inside the CLI ship.**
++ verify (+ a proxy fix the operator owns), not a task inside the CLI ship.**
 
 **v0.9 (2026-08-12): `delegationPosture` RULED and normative (§2a, §7); §14
 naming boundary.** The delegated-work gap is closed by a REQUIRED
@@ -249,7 +249,7 @@ NON-CONFORMANCE in `packages/verify/src/canonical.ts` recorded (it renders
 verify copy ships with the `usertrust-verify receipt` CLI, its first ut1
 consumer. (2) §8 records Cam's `genesisChoice: "newVault"` ruling with its
 evidence. **RESOLVED in v0.9 (see below).** Delegated-work posture — since a2a
-delegation holds are always-released (stealth #829), delegated cost debits the
+delegation holds are always-released, delegated cost debits the
 DELEGATE, so a parent session's receipt EXCLUDES it. Cam ruled "the page states
 it" for now; the offline verifier has no page, so unless the posture is
 chain-committed the CLI prints an understated total with no caveat available to
@@ -263,7 +263,7 @@ check — the union previously assigned codes to steps 1–9 and to the two
 extension checks but none to `predecessorLinkage`, so a
 generation-predecessor contradiction (which §9-A.c answers 409) could not
 be schema-validly reported anywhere a `failed` result requires a code.
-Surfaced by the PR #823 transcription gate (round 2), same mechanical
+Surfaced by the resolver transcription gate (round 2), same mechanical
 class as the errata above; the gate independently corroborated the
 verify-page v0.4 registryBinding rule in the same round. (2) §6a's pinned
 companion adoption is RE-PINNED after applying the three deferred in-pin
@@ -274,22 +274,22 @@ mentions removed) — new digest in §6a. No hold-ceiling/§6a lifecycle
 invariant moves.
 
 **§4a HEADLINE (B1 RATIFIED — proxy profile):** receipts prove against the
-**proxy profile** — the stealth proxy's real envelope, per-segment Merkle
+**proxy profile** — the operator's proxy, with its real envelope, per-segment Merkle
 trees, and a VERSIONED, fully-signed checkpoint that extends
 `PublishedMerkleRoot`. Chosen over v0.5's ut-chain profile because it is the
 smaller change that ships sooner: the proxy's leaf/interior/odd-promotion and
 event-hash rules already match the SDK verbatim, so the delta is envelope
 shape, segment-relative indexing, and the checkpoint statement — NOT a
 production audit-layer migration carried as a rider on the mint feature
-(stealth's recommendation; Cam ratified). The ut-chain convergence (v0.5's
+(the operator's recommendation; Cam ratified). The ut-chain convergence (v0.5's
 choice) is LEDGERED as a deliberate future project, not abandoned. Trade-off
 recorded (§11 ship gate): the zero-dep verifier gains a second profile
 (`profile: "proxy-v1"`) instead of validating proxy receipts unchanged — the
 cost B1-(1) accepts for not blocking mint on a chain migration.
 Interface owner: usertrust (`packages/core` + `packages/verify`). Consumers:
-the stealth proxy mint endpoint (`apps/api`), the resolver API
+the operator's proxy mint endpoint, the resolver API
 (`docs/specs/receipt-resolver-api.md`, this repo's copy — the normative
-companion, pinned by §6a; stealth owns the interface), the public
+companion, pinned by §6a; the operator owns the interface), the public
 verify page at `usertrust.ai/r/<id>`, and the commit-trailer convention.
 Conflicts resolve in THIS document's favor. Companion updates required: §10.
 
@@ -347,7 +347,7 @@ so what is not enumerated here cannot be sent.
 {
   "spec": "ut1",
   "scope": "session",            // "call" reserved for ut2 SDK minting
-  "sessionId": "…",              // stealth-defined (§9-A.c)
+  "sessionId": "…",              // operator-defined (§9-A.c)
   "generation": 1,               // integer ≥ 1 — generation 1 attests the COMPLETE
                                  // session; >1 exists only as explicit addenda
                                  // (§6, R3-5) carrying prevGenerationEventHash;
@@ -424,7 +424,7 @@ so what is not enumerated here cannot be sent.
   },
   "delegationPosture": "selfDebitsOnly",   // REQUIRED (v0.9). WHAT THE AMOUNT COVERS with
                                  // respect to DELEGATED work. Since a2a delegation holds are
-                                 // always-released (stealth #829), delegated cost debits the
+                                 // always-released, delegated cost debits the
                                  // DELEGATE — so a parent session's amount excludes it unless
                                  // stated. Four values, defined in §2a; v1 conformant minting
                                  // may emit ONLY "selfDebitsOnly" (§2a's minting rule)
@@ -520,7 +520,7 @@ so what is not enumerated here cannot be sent.
     define, and `ut1` verifiers reject `posted ≠ assessed` outright.
 - **Spend breakdown (H2, settled v0.6):** the signed projection commits
   TOTALS + `roundingAdjustment` + `pricing.tableVersions` only — this
-  spec's model, accepted by stealth. Per-provider/model/tier breakdown rows
+  spec's model, accepted by the operator. Per-provider/model/tier breakdown rows
   are DISPLAY data in the resolver's **unsigned envelope**, under its
   `display` member (§10.1), explicitly labeled not-chain-committed (the
   same honesty mechanism as `anchorEvidence`); the resolver's recompute
@@ -642,8 +642,8 @@ presence rule or a syntax rule, not an intention:
 
 ### 2a. `delegationPosture` — what the amount covers (v0.9, RULED)
 
-The problem this closes: a2a delegation holds are always-released (stealth
-#829), so delegated cost debits the DELEGATE. A parent session's amount
+The problem this closes: a2a delegation holds are always-released, so
+delegated cost debits the DELEGATE. A parent session's amount
 therefore EXCLUDES work it caused — technically correct and universally
 misread. Page copy alone cannot close it, because the OFFLINE verifier has no
 page: absent a chain-committed posture, `usertrust-verify receipt` prints an
@@ -780,18 +780,18 @@ receiptId = "ut1_" + base58btc( random 16 bytes, mint-side namespace )
 ### 4a. The proxy profile (v0.6 — B1 ratified: bind ut1 to proxy formats)
 
 Every claim in this section is defined against ONE chain profile —
-**`profile: "proxy-v1"`, the stealth proxy's real machinery** (its
-audit-chain module) — which the minting chain implements
+**`profile: "proxy-v1"`, the real machinery of the operator's proxy**
+(its audit-chain module) — which the minting chain implements
 TODAY, modulo the checkpoint extension below:
 
 - **Event-hash rule:** `hash = sha256(canonicalize(event − hash))` with
   key-absent (not undefined-valued) exclusion. (Identical on both sides —
-  writer.ts:289-302 ≡ chain.ts; unchanged by B1.)
+  the proxy's audit writer ≡ `chain.ts`; unchanged by B1.)
 - **Proof shape + hashing:** `MerkleInclusionProof` verbatim; raw event hash
   in `leafHash`; leaf = `sha256(0x00 || hexDecode(hash))`; interior =
   `sha256(0x01 || left || right)`; odd nodes promote. (Identical on both
   sides — unchanged by B1.)
-- **Tree scope: ONE TREE PER SEGMENT (proxy reality; merkle-types.ts:8).**
+- **Tree scope: ONE TREE PER SEGMENT (proxy reality).**
   `segmentId` is NORMATIVE and load-bearing; `leafIndex` is
   segment-relative. **Chain-link leaf (v0.9.6):** when a segment is
   sealed, its successor's tree starts with ONE leaf before any event — the
@@ -820,7 +820,7 @@ TODAY, modulo the checkpoint extension below:
   segmentStartPreviousHash, keyId, publishedAt }` — exactly these twelve
   members (v0.9.6 added `segmentStartPreviousHash`; see the version entry),
   `sig` = base64 Ed25519 over `canonicalize(unsigned)`. This closes BOTH
-  pre-existing holes the stealth review named: the root-only signature
+  pre-existing holes the operator's review named: the root-only signature
   (treeSize unauthenticated → leaf-hiding) and the unauthenticated lineage
   edge (`previousSegmentRoot` lived in `MerkleTreeState`, outside the signed
   payload — rewritable while every signature verified). **`vaultId` and
@@ -898,8 +898,8 @@ TODAY, modulo the checkpoint extension below:
   any proof whose supplied siblings disagree — folding the siblings as given
   is non-conformant. (Status corrected round-4: **core already implements
   it** — `packages/core/src/audit/merkle.ts:193`, PR #86 — so only the
-  STEALTH half remains open, `merkle-proofs.ts:84`, tracked as a required
-  code fix there; without it, equality 4 is forgeable by altering
+  operator's half remains open, in its proxy's Merkle-proof module, tracked
+  as a required code fix there; without it, equality 4 is forgeable by altering
   `leafIndex`.)
 
 The receipt embeds the chain's **real** event envelope — **field-complete,
@@ -1132,7 +1132,7 @@ The resolver spec's "Mint lifecycle — normative constraints" section is
 **adopted as normative for §6, by reference and in full** — reserve →
 work → finalize, with every hardening it carries. The adoption is **PINNED
 BY CONTENT HASH (round-4 P1-5)**: it binds that section as of
-**`sha256:b7f8939808466c50a75abecda695c383ab051754f7060e35e786c4e3a4366ddb`**
+**`sha256:b84968568765228f255ff49c8c45e0a3eb91e661ec63b55bd7c84cc4f56e4008`**
 — the COMPLETE digest of `docs/specs/receipt-resolver-api.md`, this
 directory's copy: the v0.3 resolver companion (v0.10's cluster states, all
 OUTSIDE the pinned section), whose pinned section is byte-identical to the v0.2
@@ -1232,7 +1232,7 @@ Consequences fixed here:
   attested. Pages MUST render the
   postures distinctly — identical rendering is forbidden, on the same
   honesty principle that governs every posture field in this spec: distinct
-  postures MUST render distinctly. (The stealth review stated this rule "the
+  postures MUST render distinctly. (The operator's review stated this rule "the
   same as repository membership"; in ut1 that comparison no longer holds —
   membership is `providerVerified`-only and fail-closed, §2/§6a, so there
   are no two membership postures to render.)
@@ -1660,7 +1660,7 @@ non-artifact. A promotion gate still accepts none.
 
 Every verdict above is about the RECEIPT. None of them says the receipt
 belongs to the artifact that showed it to you: a trailer copied into a
-different artifact still resolves green in a vacuum (stealth review's
+different artifact still resolves green in a vacuum (the operator review's
 own-gate Blocking, second half). The rule is therefore **PER KIND** — v0.6
 specified only commits, which left PR and issue trailers transplantable
 through the same hole the commit rule closes (round-4 P1-6). An
@@ -1941,11 +1941,11 @@ them, and both cite this document.
   and online-discoverable via the resolver; it never alters the original's
   cryptographic verdict; the page SHOULD surface it.
 
-## 9. Stealth items (v0.4: pre-review answered what code can answer)
+## 9. Operator-side items (v0.4: pre-review answered what code can answer)
 
-### 9-A. §9 answers — CONFIRMED by the stealth review (2026-08-08), with rulings
+### 9-A. §9 answers — CONFIRMED by the operator's review (2026-08-08), with rulings
 
-Stealth's review confirmed a–c below and added: **(H1) key custody targets
+The operator's review confirmed a–c below and added: **(H1) key custody targets
 the EC2 proxy host, and no other host** (the mint worker, registry and
 chain all live in the proxy service on that host; env-file custody
 consistent with the proxy's existing secrets, or KMS if rotation ceremony is
@@ -2016,15 +2016,15 @@ uniqueness + closure requirements are owned here.
   `generation+1` exists ONLY for work admitted under a SUBSEQUENT
   reservation on the same session scope.
 
-### 9-B. Stealth net-new implementation (ship-gate for proxy minting — from
+### 9-B. Operator-side net-new implementation (ship-gate for proxy minting — from
 pre-review blocking findings; this is work, not integration)
 
 1. **Checkpoint pipeline** (pre-review 1/2/4/5; SHRUNK by B1, revised
    R3-9): emit `SegmentCheckpoint` v2 statements (§4a) over the EXISTING
    per-segment trees — no global-tree build, no `AnchorRecord` port.
-   **The genesis decision stands and is stealth's to make (reinstated):**
+   **The genesis decision stands and is the operator's to make (reinstated):**
    the v2 checkpoint history ROOTS AT A DECLARED GENESIS BOUNDARY, and
-   stealth chooses explicitly between (a) **verified backfill** — re-issue
+   the operator chooses explicitly between (a) **verified backfill** — re-issue
    v2 statements over all prior segments, whose lineage edges must be
    reconstructed from the existing `MerkleTreeState` and are only as good
    as that unsigned state; or (b) **a new `vaultId`** whose genesis IS the
@@ -2307,7 +2307,7 @@ than `Co-Authored-By`).
     and the current §6a pin carries no trace of it — so this item now records
     a completed retirement rather than an override still in force. Its
     normative content stands on its own, independent of what the pin says:
-    the sentence directly contradicted the stealth ruling this spec adopted,
+    the sentence directly contradicted the operator's ruling this spec adopted,
     because separate
     per-job billing identities REOPEN the shopping attack one level up
     (cheap call under key A, expensive work under key B, finalize A). The
@@ -2440,16 +2440,16 @@ Ship gate before mint-endpoint implementation:
       it to this spec): exact byte representation — which fields, UTF-8
       encoding, Unicode normalization, line endings, null-body handling —
       gating pr/issue minting only; the v1 commit path does not need it.
-- [ ] Stealth instance confirms/corrects the pre-review answers (§9-A) and the
-      §4a proxy-profile decision (SETTLED v0.6 — B1 ratified; stealth's confirmation recorded in the 2026-08-08 review).
-- [ ] Stealth 9-B net-new work either scheduled or the profile decision
+- [ ] The operator confirms/corrects the pre-review answers (§9-A) and the
+      §4a proxy-profile decision (SETTLED v0.6 — B1 ratified; the operator's confirmation recorded in the 2026-08-08 review).
+- [ ] The operator's 9-B net-new work either scheduled or the profile decision
       re-opened. **ALL of 9-B.1–9-B.6 are mint blockers (R3-9)** — not only
       checkpoints and durable prerequisites: without the reconciliation
       oracle (§1 has no mintability test), the pricing table version (§2
       unpopulatable), the mint key (§8 rejects), or the sessionId nonce (§6
       unsafe), no conformant receipt can be produced.
 - [ ] Mint worker: takeover states, append-boundary fencing, and fail-closed
-      startup on non-durable stores specified in stealth's implementation
+      startup on non-durable stores specified in the operator's implementation
       plan (R3-6).
 - [ ] Companion updated per §10 (now **sixteen** items: 10.1-10.6 the
       envelope/proof/status/spend reconciliations, 10.7 defer-policy
@@ -2653,8 +2653,8 @@ by `JSON.stringify` on the way in and is therefore untouched by the fix.
 Verified both directions 2026-08-12. Storage-round-tripped values show zero
 divergence between the current and corrected algorithms. And both repositories
 were scanned: **180,270 lines, zero corruption** — usertrust 96,867 (fleet
-journals, receipt logs, published chain: zero unparseable lines) and stealth
-83,403 (EC2 prod `audit.jsonl`, re-canonicalized and re-hashed line by line
+journals, receipt logs, published chain: zero unparseable lines) and the
+operator's implementation 83,403 (its production audit log, re-canonicalized and re-hashed line by line
 with every `previousHash` independently checked: zero unparseable, zero hash
 mismatches, zero chain breaks).
 
