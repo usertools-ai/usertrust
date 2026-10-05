@@ -1095,6 +1095,104 @@ describe("TrustTBClient", () => {
 			).rejects.toThrow("Unknown account/transfer error");
 		});
 
+		it("#178: id_already_failed on a CALLER-SUPPLIED id is TransferIdRetiredError, like the other transfer paths", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 68 }]);
+			const err = await client
+				.immediateTransfer({
+					debitAccountId: 1n,
+					creditAccountId: 2n,
+					amount: 500,
+					code: XFER_PURCHASE,
+					transferId: 777n,
+				})
+				.catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(TransferIdRetiredError);
+			expect(err).toBeInstanceOf(TBTransferError);
+			expect((err as TBTransferError).code).toBe(68);
+		});
+
+		it("#178: a caller-supplied id's `exists` is VERIFIED — a stored transfer that differs is refused", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]);
+			mockLookupTransfers.mockResolvedValueOnce([
+				{
+					id: 777n,
+					debit_account_id: 1n,
+					credit_account_id: 2n,
+					amount: 400n, // the stored transfer moved a DIFFERENT amount
+					pending_id: 0n,
+					user_data_128: 0n,
+					user_data_64: 0n,
+					user_data_32: 0,
+					timeout: 0,
+					ledger: LEDGER_USERTOKENS,
+					code: XFER_PURCHASE,
+					flags: 0,
+					timestamp: 1n,
+				},
+			]);
+			await expect(
+				client.immediateTransfer({
+					debitAccountId: 1n,
+					creditAccountId: 2n,
+					amount: 500,
+					code: XFER_PURCHASE,
+					transferId: 777n,
+				}),
+			).rejects.toThrow(TransferReplayMismatchError);
+		});
+
+		it("#178: a caller-supplied id's `exists` that matches is accepted", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]);
+			mockLookupTransfers.mockResolvedValueOnce([
+				{
+					id: 777n,
+					debit_account_id: 1n,
+					credit_account_id: 2n,
+					amount: 500n,
+					pending_id: 0n,
+					user_data_128: 0n,
+					user_data_64: 0n,
+					user_data_32: 0,
+					timeout: 0,
+					ledger: LEDGER_USERTOKENS,
+					code: XFER_PURCHASE,
+					flags: 0,
+					timestamp: 1n,
+				},
+			]);
+			expect(
+				await client.immediateTransfer({
+					debitAccountId: 1n,
+					creditAccountId: 2n,
+					amount: 500,
+					code: XFER_PURCHASE,
+					transferId: 777n,
+				}),
+			).toBe(777n);
+		});
+
+		it("#178 control: a MINTED id is unchanged — `exists` needs no lookup, and 68 stays a plain TBTransferError", async () => {
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 46 }]);
+			await client.immediateTransfer({
+				debitAccountId: 1n,
+				creditAccountId: 2n,
+				amount: 5,
+				code: XFER_PURCHASE,
+			});
+			expect(mockLookupTransfers).not.toHaveBeenCalled();
+			mockCreateTransfers.mockResolvedValueOnce([{ status: 68 }]);
+			const err = await client
+				.immediateTransfer({
+					debitAccountId: 1n,
+					creditAccountId: 2n,
+					amount: 5,
+					code: XFER_PURCHASE,
+				})
+				.catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(TBTransferError);
+			expect(err).not.toBeInstanceOf(TransferIdRetiredError);
+		});
+
 		it("uses provided transferId when given", async () => {
 			mockCreateTransfers.mockResolvedValueOnce([]);
 			const id = await client.immediateTransfer({
@@ -1146,6 +1244,24 @@ describe("TrustTBClient", () => {
 			mockCreateTransfers
 				.mockRejectedValueOnce(new Error("connection refused"))
 				.mockResolvedValueOnce([{ status: 46 }]);
+			// #178: a caller-supplied id's `exists` is VERIFIED against the stored transfer.
+			mockLookupTransfers.mockResolvedValueOnce([
+				{
+					id: 4242n,
+					debit_account_id: 1n,
+					credit_account_id: 2n,
+					amount: 500n,
+					pending_id: 0n,
+					user_data_128: 0n,
+					user_data_64: 0n,
+					user_data_32: 0,
+					timeout: 0,
+					ledger: LEDGER_USERTOKENS,
+					code: XFER_PURCHASE,
+					flags: 0,
+					timestamp: 1n,
+				},
+			]);
 
 			const id = await client.immediateTransfer({
 				debitAccountId: 1n,
@@ -1156,6 +1272,7 @@ describe("TrustTBClient", () => {
 			});
 
 			expect(id).toBe(4242n);
+			expect(mockLookupTransfers).toHaveBeenCalledOnce();
 			expect(mockCreateTransfers).toHaveBeenCalledTimes(2);
 			// Same id on both attempts — that identity is what makes `exists` proof.
 			expect(mockCreateTransfers.mock.calls[0]?.[0][0].id).toBe(4242n);

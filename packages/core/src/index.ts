@@ -20,6 +20,13 @@ export type {
 	SpendVelocityConfig,
 	TokenRateConfig,
 } from "./anomaly/types.js";
+export {
+	type AppendEventInput,
+	type AuditWriter,
+	AuditWriterLockHeldError,
+	type CreateAuditWriterOptions,
+	createAuditWriter,
+} from "./audit/chain.js";
 export type {
 	MerkleConsistencyProof,
 	MerkleInclusionProof,
