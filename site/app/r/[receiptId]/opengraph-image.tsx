@@ -1,7 +1,9 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { headers } from "next/headers";
 import { ImageResponse } from "next/og";
 import { truncateForDisplay } from "../lib/claims";
+import { readerIpFromPlatformHeaders } from "../lib/reader-attribution";
 import { resolvePageState } from "../lib/resolve";
 import { ogCardRegister, ogCardWord } from "../lib/shell-copy";
 
@@ -47,7 +49,9 @@ interface RouteContext {
 
 export default async function Image({ params }: RouteContext) {
 	const { receiptId } = await params;
-	const state = await resolvePageState(receiptId);
+	const state = await resolvePageState(receiptId, {
+		readerIp: readerIpFromPlatformHeaders(await headers()),
+	});
 	const word = ogCardWord(state).toUpperCase();
 	const ink = REGISTER_INK[ogCardRegister(state)];
 	const { display: idDisplay } = truncateForDisplay(receiptId, 18);

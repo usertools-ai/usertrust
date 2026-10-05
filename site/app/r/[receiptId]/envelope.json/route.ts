@@ -1,3 +1,4 @@
+import { readerIpFromPlatformHeaders } from "../../lib/reader-attribution";
 import { jsonResourceStatus, resolveVerifyPageState } from "../../lib/resolve";
 import { shellHeadline } from "../../lib/shell-copy";
 
@@ -21,9 +22,11 @@ interface RouteContext {
 	params: Promise<{ receiptId: string }>;
 }
 
-export async function GET(_request: Request, context: RouteContext): Promise<Response> {
+export async function GET(request: Request, context: RouteContext): Promise<Response> {
 	const { receiptId } = await context.params;
-	const state = await resolveVerifyPageState(receiptId);
+	const state = await resolveVerifyPageState(receiptId, {
+		readerIp: readerIpFromPlatformHeaders(request.headers),
+	});
 	const status = jsonResourceStatus(state);
 
 	// `Cache-Control: no-store` on every outcome (D1/R35).
