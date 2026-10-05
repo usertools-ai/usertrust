@@ -395,6 +395,11 @@ shape). Four tiers, and a consumer must not blur them:
                                          // inside the projection; the v0.5 minter-asserted
                                          // carve-out is gone
       "kind": "commit",                  // commit | pr | issue | session
+                                         // (receipt-spec v0.9.6: a v1 verifier REFUSES the
+                                         // artifact variants commit, pr and issue; v0.10
+                                         // issues only cluster receipts, whose work is
+                                         // {kind: "cluster"}. This example shows what is
+                                         // recognized in order to be refused)
       "repoId": "github.com:R_kgDOK1x2Yw",  // NORMATIVE scope: immutable provider-scoped ID
                                          // (keyed r1_… form for private repos) — round-12
       "repo": "github.com/usertools-ai/usertools-stealth",  // OPTIONAL display-at-mint
@@ -1314,7 +1319,10 @@ Design intents behind the shape:
      checkpoint.treeSize`, where `offset` is §4a's chain-link offset: `0` iff
      `checkpoint.previousSegmentRoot === "genesis"`, else `1`; and when
      `leafIndex === offset`, `event.previousHash ===
-     checkpoint.segmentStartPreviousHash` — v0.3, per receipt-spec v0.9.6),
+     checkpoint.segmentStartPreviousHash` — v0.3, per receipt-spec v0.9.6,
+     which also binds every proof node the receipt can recompute and
+     requires `treeSize > offset`; this transcription does not restate
+     those),
      equality 8 (`checkpoint.vaultId ===
      proof.chain` and `checkpoint.profile === proof.profile`, read out of the
      CHECKPOINT's own signed payload, THEN cross-checked against the registered
@@ -1338,7 +1346,12 @@ Design intents behind the shape:
      server-side on EVERY read that serves a receipt; offline verifiers report
      it `notApplicable`. A binding to a DIFFERENT event, or a missing binding
      for an ID served as final, is `failed` — never a fallback to (a);
-     (c) equality 3 above, which ties the projection to the event.
+     (c) equality 3 above, which ties the projection to the event;
+     (d) v0.3, cluster receipts — ALWAYS, offline: the document's
+     `receiptId` recomputes from its own `{vaultId: proof.chain, account,
+     windowStart}` (receipt-spec §15.9, its step 3(c)). A mismatch is
+     `failed`. The resolver runs it on every read that serves a cluster
+     receipt, as the Endpoint section requires.
      Together these bind request → document → event without a payload-embedded
      ID. → `ID_MISMATCH`
   4. **Mint signature**, with key role `mint`, the `minterKind` binding, and a
@@ -2425,10 +2438,10 @@ command).
 | 17 | Minted cluster receipts are served at 200 on the unchanged envelope and ladder; `apiVersion` unchanged (header status; "Cluster receipts — states and identity"). |
 | 18 | 202 `reserved`/`reconciling` and the 410 terminals are states of the reserved session kind, never emitted. A cluster ID has no 202, no 410, and no pre-mint state ("Cluster receipts"; the Errors scope note; Status ladder; Non-receipt bodies). |
 | 19 | 404 covers every unminted ID, including derived cluster IDs. Caching is unchanged; the 404 rendering changes to "no receipt under this ID yet" (Caching; the Errors 404 row; "Cluster receipts"). |
-| 20 | The derived-ID recompute joins identity binding on every read serving a cluster receipt, and `predecessorLinkage` checks the account's receipt chain against the registry. A non-recomputing ID is a 409 `ID_MISMATCH`, a broken link a 409 `PREDECESSOR_MISMATCH`; on a 200 the chain check is `passed` or `notApplicable`, never `unavailable` (Endpoint, identity binding; the 200 example; "The verdict algebra"; "Cluster receipts"). |
+| 20 | The derived-ID recompute joins identity binding on every read serving a cluster receipt, and `predecessorLinkage` checks the account's receipt chain against the registry. A non-recomputing ID is a 409 `ID_MISMATCH`, a broken link a 409 `PREDECESSOR_MISMATCH`; on a 200 the chain check is `passed` or `notApplicable`, never `unavailable` (Endpoint, identity binding; the verification steps' step 3 (d); the 200 example; "The verdict algebra"; "Cluster receipts"). |
 | 21 | No failure code is added. `COMPLETENESS_MISMATCH` and `WINDOW_CONFLICT` are results of the receipt spec's completeness audit and of a two-receipt consumer rule, never emitted by a resolver; the four named checks are unchanged, so there is no `ledgerCompleteness` member ("Cluster receipts"). |
 | 22 | Cluster rendering sentences: claim line, R40 scope line, scoped never-understates ("Cluster receipts"). |
-| v0.9.6 | The proof-block transcriptions caught up with receipt-spec v0.9.6, which overrode them and left this correction to the companion's own round. The 200 example's checkpoint carries the twelfth signed member, `segmentStartPreviousHash`. Equality 4 carries the chain-link offset, in the example and in the verification steps. The example's event sequence moves to 8123420 so that its `leafIndex` 21, and with it the sibling sides, stays valid for a non-genesis segment. |
+| v0.9.6 | The proof-block transcriptions caught up with receipt-spec v0.9.6, which overrode them and left this correction to the companion's own round. The 200 example's checkpoint carries the twelfth signed member, `segmentStartPreviousHash`. Equality 4 carries the chain-link offset, in the example and in the verification steps. The example's event sequence moves to 8123420 so that its `leafIndex` 21, and with it the sibling sides, stays valid for a non-genesis segment. The example's `commit` work variant is marked as refused (v0.9.6), and the equality-4 transcription points to v0.9.6's recomputable proof-node bindings and `treeSize > offset`, which it does not restate. |
 
 ## Changelog — v0.2 (sixteen §10 companion updates + the §4 schema adoption)
 

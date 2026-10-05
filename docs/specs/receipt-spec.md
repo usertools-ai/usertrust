@@ -117,7 +117,10 @@ without a reservation:
   overrode the companion's copies of the checkpoint member list and of
   equality 4, and left their correction to the companion's own round. v0.3
   is that round: both now carry the twelfth signed member and the chain-link
-  offset, outside the pinned section.
+  offset, outside the pinned section. The companion also marks the artifact
+  `work` variants as refused. Two v0.9.6 additions it does not restate stay
+  governed by this document: equality 4's recomputable proof-node bindings,
+  and `treeSize > offset`.
 
 **Built on v0.9.6.** This revision sits on top of the v0.9.6 checkpoint
 amendment, the twelfth signed member and the chain-link leaf, and changes none
@@ -1129,7 +1132,7 @@ The resolver spec's "Mint lifecycle — normative constraints" section is
 **adopted as normative for §6, by reference and in full** — reserve →
 work → finalize, with every hardening it carries. The adoption is **PINNED
 BY CONTENT HASH (round-4 P1-5)**: it binds that section as of
-**`sha256:5aa0a7df0bf59a86325f29a409eb7e86658c4b82e2b8d148a1e03471c3c2ff70`**
+**`sha256:f8db57ae69eee35bd1bdb6b60aee6feeeadfa9b36f0935b40d66c07aaed4c073`**
 — the COMPLETE digest of `docs/specs/receipt-resolver-api.md`, this
 directory's copy: the v0.3 resolver companion (v0.10's cluster states, all
 OUTSIDE the pinned section), whose pinned section is byte-identical to the v0.2
@@ -1650,7 +1653,10 @@ never implies "not later superseded" (§8).
 semantic list), so in v1 every receipt a consumer can verify is a `session`
 receipt and a promotion gate — which requires `kind === "commit"` — accepts
 none. The per-kind artifact rules below stand for the version in which an
-evidence format makes those variants verifiable.
+evidence format makes those variants verifiable. **v0.10:** every receipt
+issued is a CLUSTER receipt (§15), and the session kind is reserved, so in
+practice the receipts a consumer meets are cluster receipts, which are
+non-artifact. A promotion gate still accepts none.
 
 Every verdict above is about the RECEIPT. None of them says the receipt
 belongs to the artifact that showed it to you: a trailer copied into a
@@ -3433,9 +3439,14 @@ ledger account ID as 16 big-endian bytes.
 - **`repoId` is OPTIONAL, and key-absent when absent** — never `null`, and
   never `""`. When present it is a property of the ACCOUNT, never of a
   receipt: the repository the operator bound the account to. A minter MUST NOT
-  add, change or omit it per receipt, which would be a chosen scope. The
-  binding does not change once the account has a debit hold, so every receipt
-  of the account carries the same `work` (§15.10).
+  add, change or omit it per receipt, which would be a chosen scope.
+  - **v1 minters omit `work.repoId`.** Every v1 receipt's `work` is exactly
+    `{kind: "cluster"}`.
+  - A future producer that binds an account to a repository MUST make the
+    binding immutable after the account's first debit hold, through the same
+    configuration guard as `θ` (§15.2). Every receipt of the account then
+    carries the same `work` (§15.10).
+  - Readers accept either syntax below whenever `repoId` is present.
 - **Its syntax is decidable from the receipt.** `repoId` matches
   `^(?:[a-z0-9.-]+:[A-Za-z0-9_=-]{1,200}|r1_[A-Za-z0-9_-]{1,200})$`: the
   provider's immutable repository ID as `<provider>:<id>`, or §2's keyed `r1_…`
@@ -3539,9 +3550,10 @@ check them; verifier enforcement is deferred to v0.10.1 (§15.11).
    `idleThresholdNs`. So `predecessorLinkage`'s `prev.idleThresholdNs` and
    `windowDisjointness`'s `θ₁` are both the account's `θ`.
 3. **One `work` per account.** Every receipt of an account carries the same
-   `work`: `repoId` is the same on every receipt, or absent on every
-   receipt. `repoId` is the account's binding, never a receipt's (§15.8), and
-   it does not change once the account has a debit hold.
+   `work`. v1 minters omit `work.repoId`, so every v1 receipt's `work` is
+   exactly `{kind: "cluster"}`. A future producer that binds a repository
+   must fix the binding at the account's first debit hold, through the same
+   guard as `θ` (§15.8).
 
 **`predecessorLinkage` — §7's named check, cluster statement.** A party with
 registry access checks the chain. The resolver does so on every read.
@@ -3723,9 +3735,20 @@ gives its IDs, such as a time prefix, is published with them.
      window, and `transferSetRoot` over its posted pairs;
   4. check each excluded hold's recorded void reason.
 
-  A contradiction is reported as **`COMPLETENESS_MISMATCH`**. This is the only
-  path to INDEPENDENT completeness, and it needs access the public does not
-  have.
+  A contradiction is reported as **`COMPLETENESS_MISMATCH`**. This is the
+  strongest completeness check there is, and it needs access the public does
+  not have.
+
+  **It is still not independent of the operator.** The ledger does not carry
+  two inputs that the partition and the refusals depend on, and the audit
+  takes both from the operator:
+  - the ADMISSION RECORDS that make a hold armed or unarmed (§15.2), which
+    decide the defensive rule and `unarmed-hold`;
+  - the recorded VOID REASONS that make a void pre-provider or not (step 4,
+    §15.5), which decide `cluster-void`.
+
+  A false admission record or void reason misleads the audit exactly as it
+  would mislead the minter.
 
   `COMPLETENESS_MISMATCH` is the AUDIT's result. It is not one of §7's closed
   failure codes, and it never appears in a receipt verification block.
