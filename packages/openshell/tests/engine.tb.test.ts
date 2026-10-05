@@ -466,6 +466,83 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		});
 	}, 30_000);
 
+	/** Close an account: a pending transfer flagged closing_debit (0.17.9 answers `created`). */
+	async function closeForDebits(
+		tbNode: typeof import("tigerbeetle-node"),
+		account: bigint,
+		creditTo: bigint,
+	) {
+		const raw = tbNode.createClient({ cluster_id: 0n, replica_addresses: [TB_ADDRESS as string] });
+		cleanups.push(() => raw.destroy());
+		const [res] = await raw.createTransfers([
+			{
+				id: tbNode.id(),
+				debit_account_id: account,
+				credit_account_id: creditTo,
+				amount: 0n,
+				pending_id: 0n,
+				user_data_128: 0n,
+				user_data_64: 0n,
+				user_data_32: 0,
+				timeout: 0,
+				ledger: 1,
+				code: XFER_SPEND,
+				flags: tbNode.TransferFlags.pending | tbNode.TransferFlags.closing_debit,
+				timestamp: 0n,
+			},
+		]);
+		expect(tbNode.CreateTransferStatus[res?.status ?? -1], "the account is closed").toBe("created");
+	}
+
+	it("#179 (the ledger FACT): a debit from a CLOSED debt account is debit_account_already_closed (65), and that RETIRES the id on 0.17.9 — the role id and the retry id each answer 65 once, then id_already_failed", async () => {
+		const { tb, treasury, budgetId, key } = await setup(1_000);
+		const tbNode = await import("tigerbeetle-node");
+		const debtAcct = await tb.ensureEscrowAccount(debtAccountLabel(budgetId));
+		await closeForDebits(tbNode, debtAcct, treasury);
+		const k = key();
+		const code = async (role: "overage" | "overage-retry") => {
+			try {
+				await tb.immediateTransfer({
+					debitAccountId: debtAcct,
+					creditAccountId: treasury,
+					amount: 5,
+					code: XFER_SPEND,
+					transferId: transferIdFor(k, role),
+				});
+				return "ok";
+			} catch (e) {
+				return tbNode.CreateTransferStatus[(e as { code?: number }).code ?? -1];
+			}
+		};
+		expect([await code("overage"), await code("overage")]).toEqual([
+			"debit_account_already_closed",
+			"id_already_failed",
+		]);
+		expect([await code("overage-retry"), await code("overage-retry")]).toEqual([
+			"debit_account_already_closed",
+			"id_already_failed",
+		]);
+	});
+
+	it("#179 (the ENGINE path): with the debt account closed after a successful reservation, the overage charge fails EARLIER — at chargeDebt's ensureEscrowAccount — and LOUDLY on every attempt: never quiet, never a false success; the hold posts once and the debt account is never charged", async () => {
+		const { tb, treasury, engine, budgetId, journal, walletAcct, key } = await setup(1_000);
+		const tbNode = await import("tigerbeetle-node");
+		const k = key();
+		await engine.reserve({ holdKey: k, budgetId, amount: 100 }); // ensures the debt account
+		const debtAcct = await tb.ensureEscrowAccount(debtAccountLabel(budgetId));
+		await closeForDebits(tbNode, debtAcct, treasury);
+		const intent = { post: 100, overage: 30 };
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			await expect(engine.settle(k, intent), `attempt ${attempt}`).rejects.toThrow(
+				/Failed to create escrow account/,
+			);
+		}
+		expect(journal.get(k)).toMatchObject({ state: "settling", incident: null });
+		expect((await walletAcct())?.debits_posted, "the hold posted once").toBe(100n);
+		expect((await tb.lookupAccounts([debtAcct]))[0]?.debits_posted, "never charged").toBe(0n);
+		expect(journal.debtOf(budgetId), "the debt stays recorded: admission stays bounded").toBe(30);
+	});
+
 	it("control: every role's id is distinct and stable for a hold", () => {
 		const roles = [
 			"reserve",
