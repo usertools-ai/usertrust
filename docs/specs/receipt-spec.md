@@ -37,7 +37,8 @@ session kind is RESERVED — defined, never issued. §6a is re-pinned.**
   over a SYSTEM-DEFINED window: from first activity until the account has been
   idle for its idle threshold, judged on the ledger's own timestamps;
 - the idle threshold is 10 minutes by default, adjustable per agent within
-  60 s to 24 h, and every receipt signs it;
+  60 s to 24 h, and every receipt signs it. In v0.10 it is set before an
+  account's first hold and is immutable after it;
 - nobody reserves anything, and nobody chooses a boundary;
 - the receipt ID is deterministic from the account and the window start;
 - each receipt names the account's previous minted receipt, and discloses
@@ -1434,10 +1435,11 @@ Steps, given receipt + trust-domain key material (§8):
      and `θ`'s bounds, the OFFLINE half of the receipt chain
      (`previousReceiptId` well-formed and not the receipt's own ID;
      `skippedSincePrevious` well-formed and ordered, every listed window
-     before this one), the
-     chain-clock order `startedAt ≤ endedAt ≤ event.timestamp`, §15.8's
-     `work`, and scope-forbidden fields absent. The ONLINE half of the chain is
-     the named `predecessorLinkage` check, reported separately.
+     before this one), `windowTransferCount` an integer of at least `2 ×
+     transferCount`, the chain-clock order `startedAt ≤ endedAt ≤
+     event.timestamp`, §15.8's `work`, and scope-forbidden fields absent. The
+     ONLINE half of the chain is the named `predecessorLinkage` check,
+     reported separately.
    - Any other `scope` value fails step 1: it matches no strict schema.
    - A verifier never applies one scope's list to the other's projection.
 **REQUIRED verifier behavior for `delegationPosture` (v0.9, normative — this
@@ -2390,7 +2392,8 @@ Ship gate before mint-endpoint implementation:
         ledger clock read BEFORE the account's transfers (§15.4);
       - enumeration of the window from the LEDGER, debits and credits, to
         exhaustion (§15.10);
-      - the per-agent `θ` within its bounds, signed into every receipt;
+      - the account's `θ` within its bounds, set before its first debit hold,
+        any later change refused, and signed into every receipt (§15.2);
       - every mintable window minted, strictly in order per account, and
         every refusal disclosed by the next receipt (§15.5, §15.10);
       - new reservations refused.
@@ -2768,7 +2771,8 @@ edit the session text; banners in §2, §3, §6, §6a and §12 point here.
   **ledger's own timestamps**;
 - the idle threshold is **10 minutes by default, adjustable per agent within
   60 s to 24 h**, and every receipt signs the threshold its window was cut
-  with (`idleThresholdNs`);
+  with (`idleThresholdNs`). In v0.10 it is set before the account's first
+  hold and is IMMUTABLE after it (§15.2);
 - **nobody reserves anything and nobody chooses a boundary.** The window is
   COMPLETE: every charge inside it, none selected;
 - the receipt ID is **deterministic** from the account and the window start
@@ -2881,12 +2885,17 @@ fixing the scope BEFORE the work. Clusters achieve it in four ways:
   agent key: `600000000000` ns (10 minutes) by default, adjustable within
   `60000000000 ≤ θ ≤ 86400000000000` ns (60 s to 24 h). It is CONFIGURATION,
   set ahead of the work, never a per-receipt choice:
-  - **a change takes effect at a recorded ledger time** — the ledger clock
-    when the change was made — and binds only windows whose first hold is
-    later;
-  - **every window keeps the `θ` in force at its first hold** for its whole
-    life. So no change of `θ` re-cuts a window that has already opened;
-  - every receipt signs its window's `θ` (`idleThresholdNs`).
+  - **The rule: every window keeps the `θ` in force at its first hold**, for
+    its whole life. No change of configuration re-cuts a window that has
+    opened, whether it is open, closed, refused or waiting;
+  - **v0.10 makes the rule true by construction, from a PRECONDITION:** `θ` is
+    set before the account's first debit hold, and is IMMUTABLE after it. The
+    operator's configuration refuses any later change, so every window of the
+    account is cut with the same `θ`;
+  - every receipt signs its window's `θ` (`idleThresholdNs`);
+  - **a `θ` history is RESERVED for a later version:** changes recorded
+    append-only, each with a ledger-time effective-from, which would allow a
+    change while keeping the rule. v0.10 has none (§15.11).
 
 **Native primitives, checked first.** The window and its closure are built on
 what the ledger already provides, as its own documentation states it. They
@@ -2935,8 +2944,8 @@ configuration. Each is measured on the deployed system (§11), not assumed.
 `W`. Each next hold `h′` then either joins `W` or opens a new window:
 
 - `h′` **opens a new window** iff `ts(h′) − end(W) ≥ θ_W`, where `end(W)` is
-  the activity end of `W`'s holds so far, and `θ_W` is `W`'s own threshold —
-  the one in force at `W`'s first hold (§15.2);
+  the activity end of `W`'s holds so far, and `θ_W` is the `θ` in force at
+  `W`'s first hold (§15.2) — in v0.10, the account's one immutable `θ`;
 - otherwise `h′` joins `W`. In particular, while any hold of `W` is open,
   `end(W)` is unbounded, and every next hold joins.
 
@@ -2944,18 +2953,18 @@ A window's **`windowStart`** is the timestamp of its first hold. Its
 **`windowEnd`** is its activity end, `end(W)`. Its **`idleThresholdNs`** is
 `θ_W`.
 
-**Never re-cut.** Each window's bounds depend only on the ledger and on its own
-`θ_W`, which no later change of configuration moves (§15.2). A window that has
-opened keeps its first hold, and so its ID (§15.9). A minter cuts windows
+**Never re-cut.** Each window's bounds depend only on the ledger and on
+`θ_W`, which v0.10 makes immutable (§15.2). A window that has opened keeps its
+first hold, and so its ID (§15.9). A minter cuts windows
 forward from the end of the account's latest MINTED window, and that yields
 exactly these windows.
 
-**Consequences.** Each one is decidable from the ledger and the recorded
-thresholds.
+**Consequences.** Each one is decidable from the ledger and the account's
+`θ`.
 
-- **A closed window is a pure function of the ledger.** Given the thresholds
-  in force and the timestamps of the holds and their resolutions, the window
-  containing any hold — its members and its bounds — is determined. Nobody
+- **A closed window is a pure function of the ledger.** Given `θ` and the
+  timestamps of the holds and their resolutions, the window containing any
+  hold — its members and its bounds — is determined. Nobody
   reserves or chooses one.
 - **The windows partition `H(A)`.** Every hold belongs to exactly one window.
 - **A logical transfer never straddles two windows.** A hold's post or void
@@ -3079,7 +3088,7 @@ only after every earlier window of the account is minted or refused.
   "windowStart": "1791234567890123456", // ledger ns: ts of the window's FIRST hold
   "windowEnd": "1791234601000000000",   // ledger ns: its ACTIVITY END (§15.3) — the latest
                                         // hold, post or void timestamp in the window
-  "idleThresholdNs": "600000000000",    // θ_W, the window's own threshold (§15.2)
+  "idleThresholdNs": "600000000000",    // θ, the account's threshold (§15.2)
                                         // All three are canonical u64 DECIMAL STRINGS.
                                         // Ledger nanoseconds exceed 2^53, so §13's
                                         // safe-integer rule forbids JSON numbers for the
@@ -3094,7 +3103,8 @@ only after every earlier window of the account is minted or refused.
   },
   "windowTransfersRoot": "…",           // COMPLETENESS commitment: EVERY transfer of the
                                         // account in [windowStart, windowEnd]
-  "windowTransferCount": 3,             // how many transfers that root commits
+  "windowTransferCount": 3,             // a JSON INTEGER, never a decimal string: how
+                                        // many transfers that root commits
   "work": { "kind": "cluster" },        // REQUIRED; `repoId` OPTIONAL and key-ABSENT when
                                         // absent (§15.8)
   "models": ["…"],                      // §2's rules
@@ -3124,7 +3134,7 @@ list = every transfer x with A as its debit OR its credit account, and
          "timestamp": ts(x) as a canonical u64 decimal string }
 windowTransfersRoot = lowercase hex of SHA-256( utf8("usertrust/receipt-window-transfers/v1\n")
                                                 || utf8(canonicalize(list)) )
-windowTransferCount = the length of list
+windowTransferCount = the length of list, as a JSON integer (never a decimal string)
 ```
 
 - **Every transfer, not only charges:** holds, posts, voids, funding credits,
@@ -3133,9 +3143,10 @@ windowTransferCount = the length of list
   receipt. Whoever checks it rebuilds it from the ledger (§15.11), so
   `windowTransfersRoot` is always a COMMITMENT, never recomputable from the
   receipt.
-- **A producer fact, not a v0.10 verifier rule.** Every posted pair puts its
-  hold and its post in the list, so `windowTransferCount ≥ 2 ×
-  spend.transferCount`.
+- **Every posted pair puts its hold AND its post in the list**, because
+  `windowEnd` is the activity end, which includes resolutions (§15.3). So
+  `windowTransferCount ≥ 2 × spend.transferCount`, and step 7 checks it
+  (below).
 
 **Two commitments, deliberately.**
 
@@ -3245,7 +3256,8 @@ decided from the receipt alone, and EXHAUSTIVE for §7 step 7 on this scope.
     windows, ascending, so even a truncated list precedes this window, and
     checking its last member suffices.
 - **`windowTransfersRoot`:** 64 lowercase hex characters.
-  **`windowTransferCount`:** a non-negative integer in §13's safe range.
+  **`windowTransferCount`:** a JSON integer — never a decimal string — in
+  §13's safe range, at least 2, and at least `2 × spend.transferCount`.
 - **`startedAt ≤ endedAt ≤ event.timestamp`.** All three are on ONE clock, the
   chain's: the constituent settlements are recorded before the mint event that
   cites them. (This is not a rule across clocks: it never compares a chain
@@ -3343,7 +3355,7 @@ apply unchanged.
 read the ledger clock L; THEN read the account's transfers after the end of its latest
      MINTED window — both sides, to exhaustion (§15.4's read order). The ledger's
      answer is the input; a store's copy is not a substitute
-  → cut the windows, each with its own θ_W (§15.3), and take them IN ORDER:
+  → cut the windows with the account's θ (§15.2, §15.3); take them IN ORDER:
   → not CLOSED (§15.4) → WAITING: stop; every later window waits too
   → mintability (§15.5): WAITING → stop. REFUSED → add the window to the skip list
      with its reason; go on to the next window
@@ -3484,6 +3496,9 @@ ONE window. It does not claim:
 - **time across clocks:** the order of independently signed timestamps.
   `startedAt`/`endedAt` are chain-clock claims and `windowStart`/`windowEnd`
   are ledger timestamps, and no verifier orders one clock against the other;
+- **θ's history:** that the account's `θ` never changed after its first
+  hold. v0.10 makes it immutable (§15.2), and a history of changes is
+  reserved for a later version;
 - **identity:** which ledger account the handle names.
 
 Those are facts about the operator's ledger and records, which a third party
@@ -3506,8 +3521,9 @@ it as "complete" or "independently complete".
    `windowTransfersRoot`, and no posted hold from the pairs;
 2. that every hold in the window was armed, and every excluded hold was
    voided pre-provider;
-3. that the window's boundaries are §15.3's for the signed `θ_W`, and that it
-   closed on ledger-time evidence (§15.4);
+3. that the window's boundaries are §15.3's for the signed `θ`, that the
+   account's `θ` never changed after its first hold (§15.2), and that the
+   window closed on ledger-time evidence (§15.4);
 4. that `skippedSincePrevious` lists every window since the previous receipt,
    with its true reason;
 5. that the handle names one account, consistently (§15.7);
@@ -3536,9 +3552,9 @@ it as "complete" or "independently complete".
   1. read the ledger clock, then every transfer of the account, both sides, to
      exhaustion (§15.4's read order);
   2. re-derive the windows from the previous receipt's `windowEnd` under
-     §15.3, with each window's recorded `θ_W`. Confirm this window's bounds
-     and its closure, and that every window between the two receipts is
-     disclosed in `skippedSincePrevious`;
+     §15.3, with the account's `θ` as the receipts sign it. Confirm this
+     window's bounds and its closure, and that every window between the two
+     receipts is disclosed in `skippedSincePrevious`;
   3. recompute `windowTransfersRoot` and `windowTransferCount` over the
      window, and `transferSetRoot` over its posted pairs;
   4. check each excluded hold's recorded void reason.
@@ -3687,6 +3703,8 @@ that window (§15.6).
   outside §15.8's syntax;
 - any scope-forbidden field present, or an unlisted key such as an inline list
   of window transfers;
+- `windowTransferCount` as a decimal string, below 2, or below `2 ×
+  spend.transferCount`;
 - `endedAt` before `startedAt`, or after `event.timestamp`;
 - `previousReceiptId` equal to the receipt's own `receiptId`;
 - `skippedSincePrevious` with `count` 0, with `windows` not exactly
