@@ -226,19 +226,36 @@ function canonicalDir(dir: string): string {
 	}
 }
 
+/**
+ * The in-process registry KEY for a vault's audit directory: its IDENTITY, `(st_dev, st_ino)`,
+ * never a spelling (#195 r3 P1 …E-Ng). Spellings fork the registry wherever the path is not
+ * canonical — a case-insensitive volume reached through the JS realpath (which keeps the caller's
+ * case) made `X` and `x` two keys, so the second writer missed the first, read the same-PID lock as
+ * stale and unlinked it: two live writers, a forked chain. The inode pair is the same for every
+ * spelling, case, and symlink, needs no /proc, and an absent directory throws ENOENT here exactly
+ * as the lock's open would (#182.1). bigint stat: ino/dev beyond 2^53 never collide.
+ */
+function dirIdentity(dir: string): string {
+	const st = statSync(dir, { bigint: true });
+	return `${st.dev}:${st.ino}`;
+}
+
 function acquireProcessLock(
 	logPath: string,
 	locksByDir: Map<string, LockEntry>,
 	writerId: string,
 ): void {
+	// The KEY is the directory's identity; the PATH only names the lock file (any spelling of one
+	// directory reaches the same file, so the path need not be canonical — the key must be).
+	const key = dirIdentity(dirname(logPath));
 	const dir = canonicalDir(dirname(logPath));
-	if (locksByDir.has(dir)) return;
+	if (locksByDir.has(key)) return;
 
 	// AUD-471: A live writer already holds this dir in THIS process → refuse.
 	// The advisory lock guarantees exactly one writer per vault per process;
 	// reclaiming a live sibling's lock (same-PID) would fork the chain because
 	// each writer keeps an independent tail cache.
-	if (inProcessLockOwners.has(dir)) {
+	if (inProcessLockOwners.has(key)) {
 		throw new AuditWriterLockHeldError(
 			`Audit writer lock held by another writer in this process (dir ${dir}). Only one writer per vault per process.`,
 		);
@@ -269,8 +286,8 @@ function acquireProcessLock(
 			// AUD-459: Close fd immediately — lock semantics rely on file existence, not open fd
 			closeSync(fd);
 		}
-		locksByDir.set(dir, { path: candidateLockPath, writerId });
-		inProcessLockOwners.set(dir, writerId);
+		locksByDir.set(key, { path: candidateLockPath, writerId });
+		inProcessLockOwners.set(key, writerId);
 		return;
 	} catch (err: unknown) {
 		if (!(err instanceof Error && "code" in err && (err as { code?: string }).code === "EEXIST")) {
@@ -280,7 +297,7 @@ function acquireProcessLock(
 	}
 
 	// Lock file exists — check if it's stale and clean up if so
-	tryCleanStaleLock(candidateLockPath, dir);
+	tryCleanStaleLock(candidateLockPath, key);
 
 	// Second attempt after stale lock cleanup. If another process raced us and
 	// already re-created the lock, EEXIST here means they won — report as held.
@@ -296,8 +313,8 @@ function acquireProcessLock(
 		} finally {
 			closeSync(fd);
 		}
-		locksByDir.set(dir, { path: candidateLockPath, writerId });
-		inProcessLockOwners.set(dir, writerId);
+		locksByDir.set(key, { path: candidateLockPath, writerId });
+		inProcessLockOwners.set(key, writerId);
 	} catch (retryErr: unknown) {
 		if (
 			retryErr instanceof Error &&
