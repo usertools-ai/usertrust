@@ -97,6 +97,12 @@ export interface Hold {
 	/** Usertokens to reserve: a ceiling the call cannot exceed in the normal case. */
 	amount: number;
 	streaming: boolean;
+	/**
+	 * The rates the hold was priced with, SNAPSHOTTED here. Settlement prices the usage
+	 * with these — never by re-resolving the model, whose operator rates may have
+	 * changed (become cheaper) between the reservation and the settlement.
+	 */
+	rates: ModelRates;
 }
 
 export type GateResult =
@@ -516,6 +522,13 @@ function topLevelChecks(route: MeteredRoute, body: Json, w: Walk): string | unde
 			}
 		}
 	}
+	// `stream_options.continuous_usage_stats` makes vLLM-style upstreams report usage on
+	// EVERY chunk. The parser settles on the last usage before [DONE], but a request that
+	// asks for running counts is refused outright rather than relied on.
+	if (isObject(body.stream_options) && "continuous_usage_stats" in body.stream_options) {
+		refuse(w, DenyReason.parameterUnsupported, "stream_options.continuous_usage_stats");
+		return undefined;
+	}
 	const allowed = TOP_LEVEL[route];
 	for (const k of Object.keys(body)) {
 		if (!allowed.has(k)) {
@@ -630,7 +643,7 @@ export function evaluateRequest(
 	};
 	return {
 		decision: "allow",
-		hold: { route: match.route, model, inputTokenBound, maxOutputTokens, amount, streaming },
+		hold: { route: match.route, model, inputTokenBound, maxOutputTokens, amount, streaming, rates },
 		mutations,
 	};
 }
