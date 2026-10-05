@@ -2,6 +2,7 @@
 // Copyright 2026 Usertools, Inc.
 
 import { costFromRates, type ModelRates, type NormalizedUsage } from "usertrust";
+import type { Hold } from "./gate.js";
 
 export interface SettlementAmounts {
 	/** The actual cost of the reported usage, in usertokens. */
@@ -33,4 +34,12 @@ export function settlementAmounts(
 		usage.cacheWriteTokens,
 	);
 	return { actual, post: Math.min(actual, hold), overage: Math.max(0, actual - hold) };
+}
+
+/** Settle a hold to reported usage with the hold's OWN rate snapshot and amount. */
+export function settleHold(
+	hold: Pick<Hold, "rates" | "amount">,
+	usage: NormalizedUsage,
+): SettlementAmounts {
+	return settlementAmounts(hold.rates, usage, hold.amount);
 }

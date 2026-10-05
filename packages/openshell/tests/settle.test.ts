@@ -5,7 +5,7 @@ import { costFromRates, getModelRates } from "usertrust";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_GATE_CONFIG, evaluateRequest } from "../src/gate.js";
 import { classifyResponse } from "../src/settle.js";
-import { settlementAmounts } from "../src/settlement.js";
+import { settleHold, settlementAmounts } from "../src/settlement.js";
 
 const ok = (headers: Record<string, string>, status = 200, method = "POST") =>
 	classifyResponse({ status, headers, method });
@@ -112,6 +112,36 @@ describe("settlement amounts", () => {
 		expect(settled.actual).toBe(costFromRates(held, 1000, 1000));
 		expect(settled.actual).toBeGreaterThan(
 			costFromRates(config.customRates["op-model"], 1000, 1000),
+		);
+	});
+	it("#166 P2: the snapshot is a FROZEN COPY — editing the operator's rate object in place after reserve does not change the settlement", () => {
+		const opRates = { inputPer1k: 10, outputPer1k: 40 };
+		const config = { ...DEFAULT_GATE_CONFIG, customRates: { "op-model": opRates } };
+		const r = evaluateRequest(
+			{
+				method: "POST",
+				host: "api.openai.com",
+				path: "/v1/chat/completions",
+				body: new TextEncoder().encode(
+					JSON.stringify({ model: "op-model", max_tokens: 100, messages: [] }),
+				),
+			},
+			config,
+		);
+		if (r.decision !== "allow") throw new Error(`expected allow: ${JSON.stringify(r)}`);
+		opRates.inputPer1k = 1; // the operator edits the SAME object in place
+		opRates.outputPer1k = 1;
+		expect(r.hold.rates).toEqual({ inputPer1k: 10, outputPer1k: 40 });
+		expect(Object.isFrozen(r.hold.rates)).toBe(true);
+		const u = {
+			inputTokens: 1000,
+			outputTokens: 1000,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			source: "provider" as const,
+		};
+		expect(settleHold(r.hold, u).actual).toBe(
+			costFromRates({ inputPer1k: 10, outputPer1k: 40 }, 1000, 1000),
 		);
 	});
 });

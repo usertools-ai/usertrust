@@ -222,7 +222,14 @@ class SseUsageParser implements UsageParser {
 						? event.usage
 						: undefined;
 			if (isObject(u)) this.usage = { ...(this.usage ?? {}), ...u };
-			if (event.type === "message_delta" && isObject(event.usage)) this.deltaUsage = true;
+			// Final only with a NUMERIC output count: a `usage: {}` delta reports nothing.
+			if (
+				event.type === "message_delta" &&
+				isObject(event.usage) &&
+				typeof event.usage.output_tokens === "number" &&
+				Number.isFinite(event.usage.output_tokens)
+			)
+				this.deltaUsage = true;
 			if (event.type === "message_stop") this.terminal = true;
 		} else if (this.route === "openai.chat") {
 			// Cumulative: the LAST usage before [DONE] wins, never the first.
