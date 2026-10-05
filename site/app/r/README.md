@@ -84,3 +84,26 @@ copy of the usertools site kit's lattice, loaded by `components/lattice-field.ts
 after mount. Never edit it here: `lattice-vendor.test.tsx` pins its sha256. To
 update, copy the new file and its new hash together. Reduced motion, a missing
 WebGL context and a hidden tab are handled inside the module.
+
+## Cluster receipts (receipt-spec v0.10 §15)
+
+A cluster receipt attests every charge to one agent key inside one ledger
+window. `lib/wire.ts` validates the signed document by its own `scope`, and
+`StateView` renders by the same key. The cluster schema is CLOSED: the document
+root, `work` (document and projection), `event.data`, `spend`, `pricing`, each
+`transferSet` pair, `skippedSincePrevious` and each skipped window refuse any
+member they do not list; the shared proof machinery is validated exactly as on
+the session path. On a cluster 200, a named `previousReceiptId` requires
+`predecessorLinkage: passed`, and with none named it is `passed` or
+`notApplicable`, never `unavailable`. Anything else is a protocol error.
+
+`components/cluster-receipt.tsx` keeps the brief layout. The glance carries the
+verdict, the level strip, the amount and its scope chip, the agent handle, the
+window (ledger time, UTC), the governed calls, the previous receipt, and the
+refused windows, which are always visible and never folded. Details holds the
+claim, the raw ledger bounds, the proof ladder, the invoice and postures, the
+window-transfers root (a commitment, never marked passed), the check ledger
+with its four cluster meanings, and the comparison panel. Session receipts
+render exactly as before. `usertrust-verify` does not read cluster receipts
+yet, so the cluster view links the signed bytes (`/r/<id>/receipt.json`)
+instead of printing a command that would fail.

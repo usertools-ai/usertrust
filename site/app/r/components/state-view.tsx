@@ -1,5 +1,6 @@
 import type { PageState } from "../lib/wire";
 import BilledUnfinalizedStateView from "./billed-unfinalized-state";
+import VerifiedClusterReceipt from "./cluster-receipt";
 import IntegrityFailureStateView from "./integrity-failure-state";
 import InvalidIdStateView from "./invalid-id-state";
 import PendingStateView from "./pending-state";
@@ -12,33 +13,24 @@ import VerifiedReceipt from "./verified-receipt";
 
 /**
  * §7's full state matrix, dispatched by `PageState.kind` — the ONE place
- * `/r/<receiptId>` decides which of the ten renderers a resolved state gets.
- * `verified` renders through Task 4's `§6` anatomy (`VerifiedReceipt`); every
- * other kind renders through this task's own component, matching §7's
- * per-state copy and register. The switch is exhaustive over `PageState["kind"]`
+ * `/r/<receiptId>` decides which renderer a resolved state gets.
+ * `verified` renders through the brief receipt card — `VerifiedReceipt` for a
+ * session receipt, `VerifiedClusterReceipt` for a cluster one (receipt-spec
+ * v0.10 §15); every other kind renders through its own component, matching
+ * §7's per-state copy and register. The switch is exhaustive over `PageState["kind"]`
  * — a new kind added to `wire.ts` without a case here fails the BUILD
  * (`never` narrowing), not a silent blank render.
  */
 export default function StateView({ state }: { state: PageState }) {
 	switch (state.kind) {
 		case "verified":
-			if (state.scope === "session") return <VerifiedReceipt state={state} />;
-			// A cluster receipt (receipt-spec v0.10 §15) now PARSES, but there is no
-			// cluster card yet, and the session card would print claims the receipt
-			// never made (a governed session, an association posture). Until the
-			// cluster renderer lands it fails closed into the protocol-error shell —
-			// where the page put every cluster receipt before it could parse one —
-			// never green, and never a thrown render.
-			return (
-				<ProtocolErrorStateView
-					state={{
-						kind: "protocolError",
-						routeParamId: state.routeParamId,
-						reason: "schemaInvalid",
-						detail: "this page cannot render a cluster receipt (receipt-spec v0.10 §15) yet",
-						httpStatus: 200,
-					}}
-				/>
+			// Keyed on the signed document's own `scope`: the session card handed a
+			// cluster receipt would print claims it never made (a governed session,
+			// an association posture), and the reverse would drop a session's.
+			return state.scope === "cluster" ? (
+				<VerifiedClusterReceipt state={state} />
+			) : (
+				<VerifiedReceipt state={state} />
 			);
 		case "pending":
 			return <PendingStateView state={state} />;
