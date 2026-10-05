@@ -3,6 +3,7 @@
 
 import { costFromRates, getModelRates } from "usertrust";
 import { describe, expect, it } from "vitest";
+import { DEFAULT_GATE_CONFIG, evaluateRequest } from "../src/gate.js";
 import { classifyResponse } from "../src/settle.js";
 import { settlementAmounts } from "../src/settlement.js";
 
@@ -65,20 +66,52 @@ describe("settlement amounts", () => {
 		cacheWriteTokens: 300,
 		source: "provider" as const,
 	};
-	const actual = costFromRates(getModelRates("claude-sonnet-4-6"), 1000, 500, 2000, 300);
+	const rates = getModelRates("claude-sonnet-4-6");
+	const actual = costFromRates(rates, 1000, 500, 2000, 300);
 
 	it("prices all four tiers; under the hold it posts the actual and has no overage", () => {
-		expect(settlementAmounts("claude-sonnet-4-6", usage, actual + 50)).toEqual({
+		expect(settlementAmounts(rates, usage, actual + 50)).toEqual({
 			actual,
 			post: actual,
 			overage: 0,
 		});
 	});
 	it("over the hold it posts the hold and the excess is overage", () => {
-		expect(settlementAmounts("claude-sonnet-4-6", usage, actual - 7)).toEqual({
+		expect(settlementAmounts(rates, usage, actual - 7)).toEqual({
 			actual,
 			post: actual - 7,
 			overage: 7,
 		});
+	});
+	it("#166 P1: settles with the HOLD'S rate snapshot — operator rates made cheaper after the reservation do not lower the settlement", () => {
+		const held = { inputPer1k: 10, outputPer1k: 40 };
+		const config = { ...DEFAULT_GATE_CONFIG, customRates: { "op-model": held } };
+		const r = evaluateRequest(
+			{
+				method: "POST",
+				host: "api.openai.com",
+				path: "/v1/chat/completions",
+				body: new TextEncoder().encode(
+					JSON.stringify({ model: "op-model", max_tokens: 100, messages: [] }),
+				),
+			},
+			config,
+		);
+		if (r.decision !== "allow") throw new Error(`expected allow: ${JSON.stringify(r)}`);
+		expect(r.hold.rates).toEqual(held);
+		// The operator lowers the rate between reserve and settle.
+		config.customRates["op-model"] = { inputPer1k: 1, outputPer1k: 1 };
+		const u = {
+			inputTokens: 1000,
+			outputTokens: 1000,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+			source: "provider" as const,
+		};
+		const settled = settlementAmounts(r.hold.rates, u, r.hold.amount);
+		expect(settled.actual).toBe(costFromRates(held, 1000, 1000));
+		expect(settled.actual).toBeGreaterThan(
+			costFromRates(config.customRates["op-model"], 1000, 1000),
+		);
 	});
 });

@@ -43,8 +43,10 @@ The pure core, plus the hold journal. There is no network or ledger wiring yet:
   - **Regional endpoints.** OpenAI regional and FedRAMP endpoints carry a 10% uplift. Only `api.openai.com` is routed by default; an operator adding a regional host takes this on.
 - **The forwarded body is the gate's own parse, re-serialized.** The provider reads exactly the document the gate checked, so duplicate keys cannot be read two ways, and the input bound is counted on those forwarded bytes.
 - **Tool overhead.** A request with tools adds the provider's tool-use system prompt: Anthropic 1,024 tokens, above the largest documented figure of 804. OpenAI documents no fixed overhead; function definitions are billed as input and bounded by their bytes.
+- **Settlement uses the hold's rates.** The hold snapshots the `ModelRates` it was priced with, and settlement prices usage with that snapshot. Operator rates lowered between reserve and settle cannot settle the call below its hold's pricing.
+- **An Anthropic stream needs its final usage.** A `message_stop` with no `message_delta` usage settles at the hold (`no-final-usage`), not on `message_start`'s counts.
 - **Streams must finish.** A stream without its route's terminal event settles at the hold (`usage_unreadable`, `truncated`):
   - Anthropic `message_stop`;
-  - the OpenAI chat usage chunk;
+  - OpenAI chat `data: [DONE]`, settling on the LAST usage before it (an upstream reporting running counts sends cumulative usage, so the first report would under-charge). `stream_options.continuous_usage_stats` is refused;
   - Responses `response.completed`, `.incomplete` or `.failed`. Responses settles on the terminal event's usage whenever that event carries one.
 - **Split invariance** is checked exhaustively over every single cut point, every pair of cut points on a stride, and one-byte units, rather than with a property-testing dependency.

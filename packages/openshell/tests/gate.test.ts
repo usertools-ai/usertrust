@@ -620,3 +620,22 @@ describe("#166 P1-1: a model priced only by PREFIX is unpriced at the gate", () 
 		).toBe("allow");
 	});
 });
+
+describe("#166 MEDIUM: the gate refuses running usage counts", () => {
+	it("P1: stream_options.continuous_usage_stats is refused on both OpenAI routes", () => {
+		expect(denied(chat({ stream: true, stream_options: { continuous_usage_stats: true } }))).toBe(
+			"parameter_unsupported",
+		);
+		expect(
+			denied(responses({ stream: true, stream_options: { continuous_usage_stats: false } })),
+		).toBe("parameter_unsupported");
+	});
+	it("control: an ordinary stream_options still passes", () => {
+		expect(chat({ stream: true, stream_options: { include_usage: true } }).decision).toBe("allow");
+	});
+	it("P1: the hold carries the rates it was priced with", () => {
+		const r = chat();
+		if (r.decision !== "allow") throw new Error("expected allow");
+		expect(r.hold.rates).toEqual(getModelRates("gpt-4o"));
+	});
+});

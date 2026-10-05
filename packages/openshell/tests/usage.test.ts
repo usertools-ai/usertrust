@@ -221,7 +221,7 @@ describe("usage parsers: no complete provider usage → settle at the hold, neve
 					]),
 				),
 			]),
-		).toBe("truncated");
+		).toBe("no-usage");
 	});
 	it("half-reported usage (output only) is not provider usage", () => {
 		const body = sse([
@@ -240,14 +240,17 @@ describe("usage parsers: no complete provider usage → settle at the hold, neve
 		expect(parse("openai.chat", "WHOLE_BODY_BYTES", [big])).toBe("too-large");
 	});
 	it("a non-JSON data line and an event with no data are ignored, not fatal", () => {
-		const body = `event: ping\n\ndata: not json\n\n${sse([[null, { usage: { prompt_tokens: 2, completion_tokens: 3 } }]])}`;
+		const body = `event: ping\n\ndata: not json\n\n${sse([
+			[null, { usage: { prompt_tokens: 2, completion_tokens: 3 } }],
+			[null, "[DONE]"],
+		])}`;
 		expect(parse("openai.chat", "STREAM_BYTES", [enc(body)])).toMatchObject({
 			inputTokens: 2,
 			outputTokens: 3,
 		});
 	});
-	it("the last event is read even without a trailing blank line", () => {
-		const body = `data: ${JSON.stringify({ usage: { prompt_tokens: 2, completion_tokens: 3 } })}`;
+	it("the last event ([DONE]) is read even without a trailing blank line", () => {
+		const body = `data: ${JSON.stringify({ usage: { prompt_tokens: 2, completion_tokens: 3 } })}\n\ndata: [DONE]`;
 		expect(parse("openai.chat", "STREAM_BYTES", [enc(body)])).toMatchObject({
 			inputTokens: 2,
 			outputTokens: 3,
@@ -322,7 +325,10 @@ describe("#166 P1: a TRUNCATED stream settles at the hold, never at the usage se
 });
 
 describe("#166 P2: the SSE bounds do not depend on the split", () => {
-	const usageTail = sse([[null, { usage: { prompt_tokens: 1, completion_tokens: 1 } }]]);
+	const usageTail = sse([
+		[null, { usage: { prompt_tokens: 1, completion_tokens: 1 } }],
+		[null, "[DONE]"],
+	]);
 	const overLine = `data: ${"x".repeat(1024 * 1024 + 10)}\n\n${usageTail}`;
 	const underLine = `data: ${"x".repeat(1024 * 1024 - 100)}\n\n${usageTail}`;
 
@@ -365,5 +371,50 @@ describe("#166 P2: the SSE bounds do not depend on the split", () => {
 	it("one event's data across many short lines is bounded like one line", () => {
 		const many = `${"data: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n".repeat(20_000)}\n${usageTail}`;
 		expect(parse("openai.chat", "STREAM_BYTES", [enc(many)])).toBe("line-too-long");
+	});
+});
+
+describe("#166 MEDIUM: usage is FINAL, never the first report", () => {
+	it("P1: a chat stream reporting usage on EVERY chunk (continuous_usage_stats) settles on the LAST cumulative count, at [DONE]", () => {
+		const body = sse([
+			[
+				null,
+				{
+					choices: [{ delta: { content: "a" } }],
+					usage: { prompt_tokens: 5, completion_tokens: 1 },
+				},
+			],
+			[
+				null,
+				{
+					choices: [{ delta: { content: "b" } }],
+					usage: { prompt_tokens: 5, completion_tokens: 7 },
+				},
+			],
+			[null, { choices: [], usage: { prompt_tokens: 5, completion_tokens: 15 } }],
+			[null, "[DONE]"],
+		]);
+		expect(parse("openai.chat", "STREAM_BYTES", [enc(body)])).toMatchObject({
+			inputTokens: 5,
+			outputTokens: 15,
+		});
+	});
+	it("P1: the same running counts cut before [DONE] settle at the hold", () => {
+		const body = sse([
+			[null, { choices: [], usage: { prompt_tokens: 5, completion_tokens: 1 } }],
+			[null, { choices: [], usage: { prompt_tokens: 5, completion_tokens: 7 } }],
+		]);
+		expect(parse("openai.chat", "STREAM_BYTES", [enc(body)])).toBe("truncated");
+	});
+	it("P2: an Anthropic message_stop with NO message_delta usage settles at the hold, not on message_start's counts", () => {
+		const body = sse([
+			[
+				"message_start",
+				{ type: "message_start", message: { usage: { input_tokens: 25, output_tokens: 1 } } },
+			],
+			["message_delta", { type: "message_delta", delta: { stop_reason: "end_turn" } }],
+			["message_stop", { type: "message_stop" }],
+		]);
+		expect(parse("anthropic.messages", "STREAM_BYTES", [enc(body)])).toBe("no-final-usage");
 	});
 });

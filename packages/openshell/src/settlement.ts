@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { costFromRates, getModelRates, type ModelRates, type NormalizedUsage } from "usertrust";
+import { costFromRates, type ModelRates, type NormalizedUsage } from "usertrust";
 
 export interface SettlementAmounts {
 	/** The actual cost of the reported usage, in usertokens. */
@@ -13,19 +13,20 @@ export interface SettlementAmounts {
 }
 
 /**
- * Prices reported usage on all four tiers and splits it against the hold.
- * TigerBeetle refuses a post above its pending amount, so the post is capped at
- * the hold and any excess is an overage — a finding every time, because it means
- * the ceiling was wrong.
+ * Prices reported usage on all four tiers and splits it against the hold. The rates
+ * are the HOLD'S snapshot (`Hold.rates`), never re-resolved: operator rates that
+ * changed after the reservation must not settle the call below what it was held at.
+ * TigerBeetle refuses a post above its pending amount, so the post is capped at the
+ * hold and any excess is an overage — a finding every time, because it means the
+ * ceiling was wrong.
  */
 export function settlementAmounts(
-	model: string,
+	rates: ModelRates,
 	usage: NormalizedUsage,
 	hold: number,
-	customRates?: Record<string, ModelRates>,
 ): SettlementAmounts {
 	const actual = costFromRates(
-		getModelRates(model, customRates),
+		rates,
 		usage.inputTokens,
 		usage.outputTokens,
 		usage.cacheReadTokens,
