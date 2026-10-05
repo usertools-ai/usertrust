@@ -557,6 +557,26 @@ function maxOutput(route: MeteredRoute, body: Json): number | null {
 	return limits.length === 0 ? null : Math.max(...limits);
 }
 
+const isRate = (v: unknown): boolean => typeof v === "number" && Number.isFinite(v) && v >= 0;
+
+/**
+ * An operator's own rate for this model, if it has one, must be a price: every rate a finite,
+ * non-negative number (the cache rates may be absent). A negative, NaN or infinite rate would
+ * hold a negative, NaN or infinite amount, so the model is UNPRICED — and a broken override of a
+ * table model is never quietly replaced by the table's rate.
+ */
+function operatorRatesValid(model: string, customRates: GateConfig["customRates"]): boolean {
+	if (!customRates || !Object.hasOwn(customRates, model)) return true;
+	const r: unknown = customRates[model];
+	if (typeof r !== "object" || r === null) return false;
+	const rates = r as Record<string, unknown>;
+	if (!isRate(rates.inputPer1k) || !isRate(rates.outputPer1k)) return false;
+	for (const k of ["cacheReadPer1k", "cacheWritePer1k"]) {
+		if (rates[k] !== undefined && !isRate(rates[k])) return false;
+	}
+	return true;
+}
+
 /**
  * Evaluate one request. Throws {@link BodyTooLargeError} past the payload maximum
  * (a middleware failure, so OpenShell's fail-closed default blocks the call).
@@ -595,7 +615,7 @@ export function evaluateRequest(
 	if (maxOutputTokens === null) {
 		return { decision: "deny", reason: DenyReason.maxOutputUnbounded };
 	}
-	if (!isModelPriced(model, config.customRates)) {
+	if (!isModelPriced(model, config.customRates) || !operatorRatesValid(model, config.customRates)) {
 		return { decision: "deny", reason: DenyReason.modelUnpriced, detail: model };
 	}
 
