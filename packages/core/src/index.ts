@@ -101,9 +101,11 @@ export {
 export type { ModelRates, RateResolution } from "./ledger/pricing.js";
 // Pricing
 export {
+	costFromRates,
 	estimateCost,
 	estimateInputTokens,
 	getModelRates,
+	isModelPriced,
 	PRICING_TABLE_VERSION,
 	resolveAppliedRates,
 	resolveRates,

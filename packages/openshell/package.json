@@ -1,0 +1,43 @@
+{
+	"name": "usertrust-openshell",
+	"version": "0.0.0",
+	"private": true,
+	"description": "usertrust spend governance for NVIDIA OpenShell: a supervisor middleware that turns each LLM call a sandbox makes into a two-phase hold and settle, with a receipt.",
+	"license": "Apache-2.0",
+	"author": "Usertools, Inc. <hello@usertools.ai> (https://usertrust.ai)",
+	"homepage": "https://usertrust.ai",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/usertools-ai/usertrust.git",
+		"directory": "packages/openshell"
+	},
+	"bugs": "https://github.com/usertools-ai/usertrust/issues",
+	"keywords": [
+		"openshell",
+		"usertrust",
+		"ai",
+		"governance",
+		"budget",
+		"audit",
+		"llm",
+		"middleware"
+	],
+	"type": "module",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"exports": {
+		".": {
+			"import": "./dist/index.js",
+			"types": "./dist/index.d.ts"
+		}
+	},
+	"scripts": {
+		"build": "tsc -b"
+	},
+	"files": [
+		"dist"
+	],
+	"dependencies": {
+		"usertrust": "*"
+	}
+}

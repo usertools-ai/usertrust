@@ -926,3 +926,45 @@ describe("warnCacheRateMigration (D8 migration warning)", () => {
 		expect(stderrSpy).toHaveBeenCalledTimes(1);
 	});
 });
+
+describe("isModelPriced (a caller that must refuse what it cannot price exactly)", () => {
+	it("is true for an exact table model and a custom rate; false for an unknown model", async () => {
+		const { isModelPriced } = await import("../../src/ledger/pricing.js");
+		expect(isModelPriced("claude-sonnet-4-6")).toBe(true);
+		expect(isModelPriced("my-model", { "my-model": { inputPer1k: 1, outputPer1k: 2 } })).toBe(true);
+		expect(isModelPriced("totally-unknown-model-xyz")).toBe(false);
+		expect(isModelPriced("constructor")).toBe(false); // inherited keys are not rates
+		expect(isModelPriced("__proto__")).toBe(false);
+	});
+
+	it("a PREFIX variant is NOT priced (o3-pro is not o3; -fast is not standard speed)", async () => {
+		const { isModelPriced } = await import("../../src/ledger/pricing.js");
+		expect(isModelPriced("claude-sonnet-4-6-20991231")).toBe(false);
+		expect(isModelPriced("claude-opus-4-6-fast")).toBe(false);
+		expect(isModelPriced("o3-pro-variant")).toBe(false);
+		// …until the operator prices it exactly.
+		expect(
+			isModelPriced("claude-opus-4-6-fast", {
+				"claude-opus-4-6-fast": { inputPer1k: 1, outputPer1k: 2 },
+			}),
+		).toBe(true);
+	});
+
+	it("over the whole table: priced iff an exact key; every variant unpriced; getModelRates unchanged", async () => {
+		const { FALLBACK_RATE, PRICING_TABLE, getModelRates, isModelPriced } = await import(
+			"../../src/ledger/pricing.js"
+		);
+		const keys = Object.keys(PRICING_TABLE);
+		for (const k of keys) {
+			expect(isModelPriced(k), k).toBe(true);
+			const v = `${k}-variant`;
+			if (keys.includes(v)) continue;
+			expect(isModelPriced(v), v).toBe(false);
+			// The public lookup keeps its prefix behaviour (additive-only core).
+			expect(getModelRates(v), v).not.toBe(FALLBACK_RATE);
+		}
+		for (const m of ["", "x", "gpt", "claude", "toString", "hasOwnProperty", "unknown-model"]) {
+			expect(isModelPriced(m), m).toBe(false);
+		}
+	});
+});

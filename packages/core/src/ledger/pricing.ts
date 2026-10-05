@@ -289,6 +289,19 @@ export function getModelRates(model: string, customRates?: Record<string, ModelR
 	return FALLBACK_RATE;
 }
 
+/**
+ * True only when `model` has rates of its OWN: a custom rate or an EXACT table entry.
+ * For a caller that must REFUSE what it cannot price exactly (rather than bill it at
+ * a guess). Stricter than {@link getModelRates} on purpose: its prefix match bills a
+ * variant at its base's row — `o3-pro` at `o3`, a `-fast` tier at standard speed, a
+ * dated snapshot at whatever its base costs today — which can UNDER-charge. Such a
+ * variant is unpriced here until the table or the operator names it.
+ */
+export function isModelPriced(model: string, customRates?: Record<string, ModelRates>): boolean {
+	if (customRates && Object.hasOwn(customRates, model) && customRates[model]) return true;
+	return Object.hasOwn(PRICING_TABLE, model) && PRICING_TABLE[model] !== undefined;
+}
+
 /** Models already warned about — unknownModelPolicy "warn" fires once per model per process. */
 const warnedUnknownModels = new Set<string>();
 
