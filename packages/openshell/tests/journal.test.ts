@@ -1061,3 +1061,116 @@ describe("#177: the journal schema carries a version", () => {
 		expect(() => HoldJournal.open(path)).toThrow(JournalSchemaError);
 	});
 });
+
+describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refused into a recreate", () => {
+	// The exact schema master's #174 journal wrote (admit_by, no incident_json, user_version 0).
+	const SCHEMA_174 = `
+		CREATE TABLE hold (
+			hold_id TEXT PRIMARY KEY,
+			budget_id TEXT NOT NULL,
+			state TEXT NOT NULL CHECK (state IN
+				('open','settling','settled','voiding','voided','expiring','expired')),
+			amount INTEGER NOT NULL CHECK (amount > 0),
+			ttl_at INTEGER NOT NULL,
+			admit_by INTEGER NOT NULL,
+			intent_json TEXT,
+			terminal_kind TEXT,
+			terminal_event_hash TEXT,
+			reserved_seq INTEGER
+		);
+		CREATE INDEX hold_state_ttl ON hold (state, ttl_at);
+		CREATE TABLE debt (budget_id TEXT PRIMARY KEY, amount INTEGER NOT NULL CHECK (amount >= 0));
+		CREATE TABLE applied (transfer_id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, delta INTEGER NOT NULL);
+	`;
+	const file = (setup: (raw: DatabaseSync) => void) => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-v0-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		const raw = new DatabaseSync(path);
+		raw.exec("PRAGMA journal_mode = WAL");
+		setup(raw);
+		raw.close();
+		return path;
+	};
+
+	it("a #174-shaped v0 file opens and migrates to v2 with its debt and its open and settling rows intact", () => {
+		const path = file((raw) => {
+			raw.exec(SCHEMA_174);
+			raw.exec(
+				"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by) VALUES ('h-open', 'b', 'open', 100, 9000, 8000)",
+			);
+			raw.exec(
+				`INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by, intent_json) VALUES ('h-settling', 'b', 'settling', 100, 9000, 8000, '{"post":100,"overage":40}')`,
+			);
+			raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 40)");
+			raw.exec("INSERT INTO applied (transfer_id, budget_id, delta) VALUES ('t-1', 'b', 40)");
+		});
+		const j = HoldJournal.open(path, { now: () => 0 });
+		journals.push(j);
+		expect(j.debtOf("b"), "the recorded debt survives").toBe(40);
+		expect(j.get("h-open")).toMatchObject({
+			state: "open",
+			amount: 100,
+			admitBy: 8000,
+			incident: null,
+		});
+		expect(j.inFlight().map((r) => r.holdId)).toEqual(["h-settling"]);
+		const raw = new DatabaseSync(path);
+		expect(
+			(raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+		).toBe(2);
+		raw.close();
+	});
+
+	it("the migrated file takes an incident (the new column exists)", async () => {
+		const path = file((raw) => {
+			raw.exec(SCHEMA_174);
+			raw.exec(
+				"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by) VALUES ('h1', 'b', 'settling', 100, 9000, 8000)",
+			);
+		});
+		const j = HoldJournal.open(path, { now: () => 0 });
+		journals.push(j);
+		expect(await j.writeTx(() => j.recordIncident("h1", { kind: "x" }))).toBe(true);
+		expect(j.incidents().map((r) => r.holdId)).toEqual(["h1"]);
+	});
+
+	it("a NEWER schema version is refused and the file left untouched; the remedy never advises recreating it", () => {
+		const path = file((raw) => {
+			raw.exec(SCHEMA_174);
+			raw.exec("ALTER TABLE hold ADD COLUMN incident_json TEXT");
+			raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 7)");
+			raw.exec("PRAGMA user_version = 3");
+		});
+		let err: unknown;
+		try {
+			HoldJournal.open(path);
+		} catch (e) {
+			err = e;
+		}
+		expect(err).toBeInstanceOf(JournalSchemaError);
+		const msg = String((err as Error).message);
+		expect(msg).toContain("schema version 3, this code reads 2");
+		expect(msg).toContain(
+			"Do NOT delete or recreate it while it holds open or settling holds or any debt",
+		);
+		expect(msg).not.toMatch(/; recreate the journal file/);
+		const raw = new DatabaseSync(path);
+		expect(
+			(raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
+		).toBe(3);
+		expect(
+			(raw.prepare("SELECT amount FROM debt WHERE budget_id = 'b'").get() as { amount: number })
+				.amount,
+		).toBe(7);
+		raw.close();
+	});
+
+	it("a v0 file that is NOT the #174 shape is refused, not migrated", () => {
+		const path = file((raw) => {
+			raw.exec(SCHEMA_174);
+			raw.exec("ALTER TABLE hold ADD COLUMN incident_json TEXT"); // v0 yet already has it: unknown
+		});
+		expect(() => HoldJournal.open(path)).toThrow(/schema version 0 \(an unrecognised shape\)/);
+	});
+});

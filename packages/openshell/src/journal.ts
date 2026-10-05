@@ -177,13 +177,24 @@ export class PlacementHorizonError extends Error {
 	}
 }
 
-/** The journal file was written by an older schema this code cannot read safely. */
-/** The hold journal's schema version (`PRAGMA user_version`). */
+/**
+ * The hold journal's schema version (`PRAGMA user_version`). Version 0 is a file written before
+ * versioning existed; one in the shape the slice-1b journal wrote (admit_by, no incident_json)
+ * is MIGRATED to this version at open. Every other version is refused.
+ */
 export const JOURNAL_SCHEMA_VERSION = 2;
 
+/**
+ * The journal file was written by a schema this code cannot read safely. The file is LEFT
+ * UNTOUCHED: it may hold open or settling holds and recorded debt, so it must never be deleted
+ * or recreated to get past this — that would forget the debt (admission would over-admit) and
+ * drop every hold still in flight.
+ */
 export class JournalSchemaError extends Error {
 	constructor(why: string) {
-		super(`hold journal: unsupported schema — ${why}; recreate the journal file`);
+		super(
+			`hold journal: unsupported schema — ${why}. The file is left untouched. Do NOT delete or recreate it while it holds open or settling holds or any debt: that forgets the debt (over-admitting) and drops every hold in flight. Run a usertrust-openshell version that reads this schema, or drain the journal first.`,
+		);
 		this.name = "JournalSchemaError";
 	}
 }
@@ -394,18 +405,34 @@ export class HoldJournal {
 		// `open` row by; reading its `ttl_at` (an upper bound) in its place would admit after the
 		// ledger may have released the hold. Refused, never guessed (the package is unreleased).
 		const cols = db.prepare("PRAGMA table_info(hold)").all() as Array<{ name: string }>;
-		if (cols.length > 0 && !cols.some((c) => c.name === "admit_by")) {
+		const has = (name: string) => cols.some((c) => c.name === name);
+		if (cols.length > 0 && !has("admit_by")) {
 			throw new JournalSchemaError("the hold table has no admit_by column");
 		}
-		// From here on the schema carries a version: a file of any other version is refused.
 		const version = (db.prepare("PRAGMA user_version").get() as { user_version: number })
 			.user_version;
 		if (cols.length > 0 && version !== JOURNAL_SCHEMA_VERSION) {
-			throw new JournalSchemaError(
-				`schema version ${version}, this code reads ${JOURNAL_SCHEMA_VERSION}`,
-			);
+			// v0 in the exact shape the slice-1b journal wrote: migrate in ONE transaction (the
+			// column and the version stamp commit together), keeping every row and all debt.
+			if (version === 0 && !has("incident_json")) {
+				db.exec("BEGIN IMMEDIATE");
+				try {
+					db.exec("ALTER TABLE hold ADD COLUMN incident_json TEXT");
+					db.exec(`PRAGMA user_version = ${JOURNAL_SCHEMA_VERSION}`);
+					db.exec("COMMIT");
+				} catch (err) {
+					db.exec("ROLLBACK");
+					throw err;
+				}
+			} else {
+				throw new JournalSchemaError(
+					`schema version ${version}${version === 0 ? " (an unrecognised shape)" : ""}, this code reads ${JOURNAL_SCHEMA_VERSION}`,
+				);
+			}
 		}
-		db.exec(`PRAGMA user_version = ${JOURNAL_SCHEMA_VERSION}`);
+		// Only a FRESH file is stamped here; a migrated one was stamped inside its migration, so a
+		// crash can never leave a half-migrated file (the column without the version).
+		if (cols.length === 0) db.exec(`PRAGMA user_version = ${JOURNAL_SCHEMA_VERSION}`);
 		db.exec(`
 			CREATE TABLE IF NOT EXISTS hold (
 				hold_id TEXT PRIMARY KEY,

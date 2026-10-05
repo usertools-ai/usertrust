@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **openshell: the hold journal's schema is versioned** (`PRAGMA user_version`, now 2). A journal written by the slice-1b code (version 0, with `admit_by` and without `incident_json`) is **migrated at open** in one transaction: the `incident_json` column is added and version 2 is stamped together, and every hold row and all recorded debt are kept. Any other version (newer, or an unrecognised v0) is refused with `JournalSchemaError`, and the file is left untouched. The error never advises recreating a journal: doing so would forget recorded debt and drop holds in flight.
+
 - **`isModelPriced(model, customRates?)`** — true only when a model has rates of
   its OWN: an operator custom rate or an EXACT pricing-table entry. It is for a
   caller that must refuse what it cannot price exactly rather than bill it at a
