@@ -13,6 +13,24 @@ export {
 	type RequestMutations,
 } from "./gate.js";
 export { holdKey } from "./hold-key.js";
+export {
+	HoldConflictError,
+	HoldJournal,
+	type HoldRow,
+	type HoldState,
+	JournalBusyError,
+	type JournalOptions,
+	JournalUnavailableError,
+	LedgerDeadlineError,
+	loadSqlite,
+	MIN_NODE_FOR_JOURNAL,
+	OrphanRiskError,
+	PlacementHorizonError,
+	type Reservation,
+	type ReserveInput,
+	type SettlementClaim,
+	TERMINAL_STATES,
+} from "./journal.js";
 export { DenyReason, REASON_CODE_PATTERN } from "./reasons.js";
 export {
 	DEFAULT_ROUTE_CONFIG,
