@@ -1193,6 +1193,37 @@ describe("TrustTBClient", () => {
 			expect(err).not.toBeInstanceOf(TransferIdRetiredError);
 		});
 
+		it("#183: a caller-supplied id outside (0, 2^128 - 1) throws RangeError before any client call, like its siblings", async () => {
+			for (const transferId of [0n, 2n ** 128n - 1n, -1n, 2n ** 128n]) {
+				await expect(
+					client.immediateTransfer({
+						debitAccountId: 1n,
+						creditAccountId: 2n,
+						amount: 5,
+						code: XFER_PURCHASE,
+						transferId,
+					}),
+					String(transferId),
+				).rejects.toBeInstanceOf(RangeError);
+			}
+			expect(mockCreateTransfers).not.toHaveBeenCalled();
+		});
+
+		it("#183 control: the boundary ids 1 and 2^128 - 2 are accepted", async () => {
+			for (const transferId of [1n, 2n ** 128n - 2n]) {
+				mockCreateTransfers.mockResolvedValueOnce([]);
+				expect(
+					await client.immediateTransfer({
+						debitAccountId: 1n,
+						creditAccountId: 2n,
+						amount: 5,
+						code: XFER_PURCHASE,
+						transferId,
+					}),
+				).toBe(transferId);
+			}
+		});
+
 		it("uses provided transferId when given", async () => {
 			mockCreateTransfers.mockResolvedValueOnce([]);
 			const id = await client.immediateTransfer({
