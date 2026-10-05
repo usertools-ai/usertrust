@@ -1101,14 +1101,36 @@ describe("bindings the corpus cannot express with a commit receipt", () => {
 	});
 
 	it("rejects a leaf beyond the signed tree even when equality 4's arithmetic holds", () => {
-		// leafIndex 7 === sequence 18 − segmentFirstSequence 11, and the segment's
-		// signed treeSize is 7 — so the proof claims a leaf the checkpoint never
-		// covered. The arithmetic half of equality 4 cannot see it.
+		// leafIndex 7 === sequence 17 − segmentFirstSequence 11 + chain-link
+		// offset 1, and the segment's signed treeSize is 7 — so the proof claims a
+		// leaf the checkpoint never covered. The arithmetic half of equality 4
+		// cannot see it.
 		const actual = verifyMinted({
 			event: (e) => ({ ...e, sequence: e.sequence + 4 }),
 			inclusion: (p) => ({ ...p, leafIndex: 7 }),
 		});
 		expect(actual.failure).toMatchObject({ step: "event", code: "EVENT_MISMATCH" });
+		expect(actual.failure?.detail).toMatch(/equality 4: leafIndex 7 is outside \[1, 7\)/);
+	});
+
+	it("rejects a proof at a non-genesis segment's chain-link leaf even when equality 4's arithmetic holds", () => {
+		// leafIndex 0 === sequence 10 − segmentFirstSequence 11 + offset 1. Leaf 0
+		// is the predecessor's root (§4a, v0.9.6), never an event, so equality 4's
+		// range starts at the offset. Asserted on the DETAIL: equality 8's
+		// defensive `sequence ≥ first` would also refuse it with the same code,
+		// one clause later.
+		const actual = verifyMinted({
+			event: (e) => ({ ...e, sequence: e.sequence - 3 }),
+			inclusion: (p) => ({ ...p, leafIndex: 0 }),
+		});
+		expect(actual.failure).toMatchObject({ step: "event", code: "EVENT_MISMATCH" });
+		expect(actual.failure?.detail).toMatch(/equality 4: leafIndex 0 is outside \[1, 7\)/);
+	});
+
+	it("a GENESIS segment's range starts at 0 — it has no chain-link leaf", () => {
+		const actual = verifyMinted({ mintSegmentIndex: 0, mintLeafIndex: 0 });
+		expect(actual.failure).toBeNull();
+		expect(actual.verdict).toBe("VERIFIED_CHECKPOINT");
 	});
 
 	it("rejects a checkpoint with no segmentFirstSequence to bind the leaf against", () => {
@@ -1296,6 +1318,7 @@ describe("step 6 — §4a's member list, asserted where step 1 cannot reach", ()
 			"segmentFirstSequence",
 			"previousSegmentRoot",
 			"previousSegmentId",
+			"segmentStartPreviousHash",
 			"keyId",
 			"publishedAt",
 			"sig",

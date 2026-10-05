@@ -329,6 +329,7 @@ export interface SegmentCheckpoint {
 	segmentFirstSequence: number;
 	previousSegmentRoot: string;
 	previousSegmentId: string;
+	segmentStartPreviousHash: string;
 	keyId: string;
 	publishedAt: string;
 	sig: string;
@@ -406,6 +407,8 @@ export const PROFILE = "proxy-v1";
 export const MINT_EVENT_KIND = "receipt_settled";
 export const TRUST_DOMAIN = "usertrust.ai";
 export const GENESIS_SENTINEL = "genesis";
+/** §4a (v0.9.6): the genesis segment's `segmentStartPreviousHash` — the chain's all-zero genesis. */
+export const GENESIS_START_HASH = "0".repeat(64);
 export const VAULT_ID = "vlt_ut_proxy_prod_1";
 export const MINT_ACTOR: MintActor = {
 	type: "system",
@@ -487,26 +490,39 @@ export interface SegmentSpec {
 }
 
 /**
- * Three real segments. Contiguity is arithmetic, per §7's history walk:
- * `next.segmentFirstSequence === prev.segmentFirstSequence + prev.treeSize`.
+ * §4a (v0.9.6): leaves a segment's tree holds before its first event — the
+ * chain-link leaf (the predecessor's root) at index 0 of every non-genesis
+ * segment. `treeSize` counts it.
+ */
+export function chainLinkOffset(segmentIndex: number): 0 | 1 {
+	return segmentIndex === 0 ? 0 : 1;
+}
+
+/**
+ * Three real segments, shaped the way the proxy builds them: the genesis
+ * segment holds events only, and every later segment holds its chain-link leaf
+ * at index 0 and its events after it. Contiguity is arithmetic, per §7's
+ * history walk: `next.segmentFirstSequence === prev.segmentFirstSequence +
+ * prev.treeSize − offset(prev)` — here 1 + 4 − 0 = 5 and 5 + 7 − 1 = 11.
  * The mint segment is the head and has an ODD leaf count, so the mint event's
  * inclusion path exercises odd-node promotion rather than a perfect tree.
  */
 export const DEFAULT_SEGMENTS: readonly SegmentSpec[] = [
 	{ segmentId: "seg_000001", segmentFirstSequence: 1, treeSize: 4 },
-	{ segmentId: "seg_000002", segmentFirstSequence: 5, treeSize: 6 },
+	{ segmentId: "seg_000002", segmentFirstSequence: 5, treeSize: 7 },
 	{ segmentId: "seg_000003", segmentFirstSequence: 11, treeSize: 7 },
 ];
 
 /** Same three segments with a ONE-SEQUENCE GAP between segment 1 and 2 —
- * §7's `next.first === prev.first + prev.treeSize` contiguity mutant. */
+ * §7's contiguity mutant. */
 export const GAPPED_SEGMENTS: readonly SegmentSpec[] = [
 	{ segmentId: "seg_000001", segmentFirstSequence: 1, treeSize: 4 },
-	{ segmentId: "seg_000002", segmentFirstSequence: 6, treeSize: 6 },
+	{ segmentId: "seg_000002", segmentFirstSequence: 6, treeSize: 7 },
 	{ segmentId: "seg_000003", segmentFirstSequence: 12, treeSize: 7 },
 ];
 
 export const DEFAULT_MINT_SEGMENT_INDEX = 2;
+/** A TREE index. In the non-genesis default segment it is event sequence 11 + 3 − 1 = 13. */
 export const DEFAULT_MINT_LEAF_INDEX = 3;
 
 /** 16 bytes → `"ut1_" + base58btc`, §3. */
@@ -712,6 +728,9 @@ export function mint(options: MintOptions = {}): MintedBundle {
 	const mintSegmentIndex = options.mintSegmentIndex ?? DEFAULT_MINT_SEGMENT_INDEX;
 	const mintLeafIndex = options.mintLeafIndex ?? DEFAULT_MINT_LEAF_INDEX;
 	const mintSegment = segmentSpecs[mintSegmentIndex] as SegmentSpec;
+	if (mintLeafIndex < chainLinkOffset(mintSegmentIndex)) {
+		throw new RangeError("mint: leaf 0 of a non-genesis segment is the chain link, not an event");
+	}
 
 	// 1. Projection.
 	let projection = buildProjection(options.projectionOptions);
@@ -725,7 +744,7 @@ export function mint(options: MintOptions = {}): MintedBundle {
 		kind: MINT_EVENT_KIND,
 		actor: { ...MINT_ACTOR },
 		data: projection,
-		sequence: mintSegment.segmentFirstSequence + mintLeafIndex,
+		sequence: mintSegment.segmentFirstSequence + mintLeafIndex - chainLinkOffset(mintSegmentIndex),
 	};
 	if (options.event) unsignedEvent = options.event(unsignedEvent);
 	let event: EventEnvelope = {
@@ -735,18 +754,24 @@ export function mint(options: MintOptions = {}): MintedBundle {
 	if (options.eventAfterHash) event = options.eventAfterHash(event);
 
 	// 3. Real per-segment Merkle trees. The mint event occupies one leaf of the
-	//    mint segment; every other leaf is an unrelated (but real) event hash.
-	const minted: MintedSegment[] = segmentSpecs.map((spec, segmentIndex) => {
+	//    mint segment; every other leaf is an unrelated (but real) event hash,
+	//    except leaf 0 of a non-genesis segment: the chain link, which is the
+	//    predecessor's root (§4a, v0.9.6) — so the trees are built in order.
+	const minted: MintedSegment[] = [];
+	for (const [segmentIndex, spec] of segmentSpecs.entries()) {
+		const previous = minted[segmentIndex - 1];
 		const leaves: string[] = [];
 		for (let i = 0; i < spec.treeSize; i += 1) {
-			if (segmentIndex === mintSegmentIndex && i === mintLeafIndex) {
+			if (i === 0 && previous !== undefined) {
+				leaves.push(previous.root);
+			} else if (segmentIndex === mintSegmentIndex && i === mintLeafIndex) {
 				leaves.push(options.mintLeaf ? options.mintLeaf(event.hash) : event.hash);
 			} else {
 				leaves.push(fillerLeaf(spec.segmentId, i));
 			}
 		}
-		return { spec, leaves, root: merkleRoot(leaves) };
-	});
+		minted.push({ spec, leaves, root: merkleRoot(leaves) });
+	}
 
 	// 4. Inclusion proof over the mint segment's real tree.
 	const mintTree = minted[mintSegmentIndex] as MintedSegment;
@@ -766,6 +791,11 @@ export function mint(options: MintOptions = {}): MintedBundle {
 			segmentFirstSequence: segment.spec.segmentFirstSequence,
 			previousSegmentRoot: previous === null ? GENESIS_SENTINEL : previous.root,
 			previousSegmentId: previous === null ? GENESIS_SENTINEL : previous.spec.segmentId,
+			// The predecessor's LAST event — its final leaf — or the chain genesis.
+			segmentStartPreviousHash:
+				previous === null
+					? GENESIS_START_HASH
+					: (previous.leaves[previous.leaves.length - 1] as string),
 			keyId: (options.checkpointSigner ? options.checkpointSigner(index) : checkpointKey).keyId,
 			publishedAt: `2026-08-1${index + 1}T00:00:00.000Z`,
 		};

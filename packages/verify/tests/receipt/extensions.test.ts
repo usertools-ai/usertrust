@@ -264,6 +264,43 @@ describe("§7 step 9 — history material the walk must refuse structurally", ()
 		expect(report.checks.checkpointHistory.failure?.code).toBe("HISTORY_INVALID");
 		expect(report.checks.checkpointHistory.failure?.detail).toContain("previousSegmentRoot");
 	});
+
+	// §7 step 9 (v0.9.6): a predecessor that is not a v2 statement STOPS the walk
+	// with a named HISTORY_INVALID — never a silent pass over it, never a bare
+	// failure — and never demotes the base verdict.
+	it("stops at a v1-labelled predecessor with a named result", () => {
+		const bundle = mint();
+		const history = historyOf(bundle);
+		const { sig: _sig, ...unsigned } = history[1] as JsonObject;
+		const v1 = { ...unsigned, v: 1 };
+		const report = runWithHistory(bundle, [
+			history[0] as JsonValue,
+			{ ...v1, sig: signEd25519(CHECKPOINT_KEY, checkpointPreimage(v1)) },
+			history[2] as JsonValue,
+		]);
+		expect(report.verdict).toBe("VERIFIED_CHECKPOINT");
+		expect(report.failure).toBeNull();
+		expect(report.checks.checkpointHistory.failure?.code).toBe("HISTORY_INVALID");
+		expect(report.checks.checkpointHistory.failure?.detail).toMatch(
+			/^history\[1\].*checkpoint\.v is 1, not the v2 statement/,
+		);
+	});
+
+	it("stops at a v0.9.5 eleven-member predecessor, validly signed, naming the missing member", () => {
+		const bundle = mint();
+		const history = historyOf(bundle);
+		const { sig: _sig, segmentStartPreviousHash: _dropped, ...eleven } = history[1] as JsonObject;
+		const report = runWithHistory(bundle, [
+			history[0] as JsonValue,
+			{ ...eleven, sig: signEd25519(CHECKPOINT_KEY, checkpointPreimage(eleven)) },
+			history[2] as JsonValue,
+		]);
+		expect(report.verdict).toBe("VERIFIED_CHECKPOINT");
+		expect(report.checks.checkpointHistory.failure?.code).toBe("HISTORY_INVALID");
+		expect(report.checks.checkpointHistory.failure?.detail).toMatch(
+			/^history\[1\].*carries no segmentStartPreviousHash/,
+		);
+	});
 });
 
 describe("§7 step 9 — the §8 lineage binds every member, not just the receipt's", () => {
@@ -370,7 +407,7 @@ describe("§7 step 9 — contiguity arithmetic", () => {
 		const bundle = mint({
 			segments: [
 				{ segmentId: "seg_000001", segmentFirstSequence: 0, treeSize: 4 },
-				{ segmentId: "seg_000002", segmentFirstSequence: 4, treeSize: 6 },
+				{ segmentId: "seg_000002", segmentFirstSequence: 4, treeSize: 7 },
 				{ segmentId: "seg_000003", segmentFirstSequence: 10, treeSize: 7 },
 			],
 		});
@@ -384,6 +421,12 @@ describe("§7 step 9 — contiguity arithmetic", () => {
 		);
 		const history = JSON.parse(served) as JsonObject[];
 		expect(Object.is(history[0]?.segmentFirstSequence, -0)).toBe(true);
+
+		// Control: the same history served WITHOUT the flip walks clean, so the
+		// refusal below is the `-0` and not the arithmetic.
+		expect(runWithHistory(bundle, asJson(bundle.history)).verdict).toBe(
+			"VERIFIED_CHECKPOINT_HISTORY",
+		);
 
 		const report = runWithHistory(bundle, history as unknown as JsonValue);
 		// The base verdict is untouched — the receipt itself is clean.
