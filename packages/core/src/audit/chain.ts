@@ -22,7 +22,7 @@ import {
 	unlinkSync,
 	writeSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import type { AuditEvent } from "../shared/types.js";
 import { canonicalize } from "./canonical.js";
@@ -196,17 +196,15 @@ function tryCleanStaleLock(candidateLockPath: string, dir: string): boolean {
  * directory (a relative path, a symlink, macOS's /tmp → /private/tmp) must be the same key, or a
  * second writer in this process misses the first writer's entry, meets EEXIST, and "reclaims"
  * the LIVE same-PID lock as stale — two live writers, a silently forked chain (AUD-471's class).
- * `resolve` only when the directory does not exist yet (nothing can hold a lock in it).
+ *
+ * ALWAYS the realpath — no fallback (#182.1). A directory that does not exist cannot hold the lock
+ * file (its open fails ENOENT anyway), so a `resolve()` fallback could only ever key a lock in
+ * the window where ANOTHER process creates the directory between this call and the open — under
+ * a spelling that misses a live writer's realpath key and "reclaims" its lock. An ENOENT here is
+ * thrown, exactly as the open would have thrown it.
  */
 function canonicalDir(dir: string): string {
-	try {
-		return realpathSync(dir);
-	} catch (err: unknown) {
-		if (err instanceof Error && "code" in err && (err as { code?: string }).code === "ENOENT") {
-			return resolve(dir);
-		}
-		throw err;
-	}
+	return realpathSync(dir);
 }
 
 function acquireProcessLock(
