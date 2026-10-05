@@ -20,6 +20,7 @@ import {
 	mkdirSync,
 	openSync,
 	readFileSync,
+	readlinkSync,
 	realpathSync,
 	renameSync,
 	statSync,
@@ -57,7 +58,7 @@ function writeFully(fd: number, data: string): void {
  * half-written anchor after a crash mid-write — one that reads as corrupt and refuses every
  * append and verification. Now the anchor is always the old one or the new one.
  */
-function writeAnchorAtomically(metaPath: string, content: string): void {
+export function writeAnchorAtomically(metaPath: string, content: string): void {
 	const tmp = `${metaPath}.${randomUUID()}.tmp`;
 	const fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
 	try {
@@ -76,16 +77,25 @@ function writeAnchorAtomically(metaPath: string, content: string): void {
 		}
 		throw err;
 	}
+	// The parent-directory fsync makes the RENAME durable. Only an UNSUPPORTED directory fsync
+	// (EINVAL/ENOTSUP/EOPNOTSUPP/EISDIR) is best effort; a genuine failure (EIO, …) propagates into
+	// appendEvent's degraded-append / durable-hash contract instead of reporting a durable anchor a
+	// crash could roll back (#196 r2 P2).
+	let dfd: number | undefined;
 	try {
-		const dfd = openSync(dirname(metaPath), "r");
-		try {
-			fsyncSync(dfd);
-		} finally {
-			closeSync(dfd);
-		}
-	} catch {
-		/* a directory fsync is not supported everywhere; the rename itself is atomic */
+		dfd = openSync(dirname(metaPath), "r");
+		fsyncSync(dfd);
+	} catch (err) {
+		if (!isUnsupportedDirSync(err)) throw err;
+	} finally {
+		if (dfd !== undefined) closeSync(dfd);
 	}
+}
+
+/** A directory fsync the platform does not support — the only directory-sync error that is best effort. */
+export function isUnsupportedDirSync(err: unknown): boolean {
+	const code = err instanceof Error && "code" in err ? (err as { code?: string }).code : undefined;
+	return code === "EINVAL" || code === "ENOTSUP" || code === "EOPNOTSUPP" || code === "EISDIR";
 }
 
 /**
@@ -286,6 +296,21 @@ function tryCleanStaleLock(candidateLockPath: string, dir: string): boolean {
 		return true;
 	}
 	const lockData = reading.lock;
+	if (fromPreviousBoot(lockData)) {
+		// #194.4: a PID recorded before this boot names no process of this boot.
+		console.warn(
+			`[AUDIT] Reclaiming a lock written in a previous boot (PID ${lockData.pid}). Lock file: ${candidateLockPath}`,
+		);
+		unlinkSync(candidateLockPath);
+		return true;
+	}
+	// BEFORE the same-PID branch and the probe (#196 r2 P2): containers often run their writer as
+	// PID 1, so a live writer in ANOTHER namespace can carry this process's own PID.
+	if (fromForeignPidNamespace(lockData as { pidNs?: unknown })) {
+		throw new AuditWriterLockHeldError(
+			`Audit writer lock held by PID ${lockData.pid} in ANOTHER PID namespace (${String((lockData as { pidNs?: unknown }).pidNs)}); this process cannot probe it, so it is never reclaimed. Remove it by hand only if that writer is gone. Lock file: ${candidateLockPath}`,
+		);
+	}
 	if (lockData.pid === process.pid && !inProcessLockOwners.has(dir)) {
 		// Same PID but no live writer registered for this dir → the lock is
 		// from a crashed prior instance (the registry is cleared on release)
@@ -293,14 +318,6 @@ function tryCleanStaleLock(candidateLockPath: string, dir: string): boolean {
 		// guard in acquireProcessLock, which throws before we ever get here.
 		console.warn(
 			`[AUDIT] Reclaiming stale same-PID lock (PID ${process.pid}). Previous process exited without releasing the lock.`,
-		);
-		unlinkSync(candidateLockPath);
-		return true;
-	}
-	if (fromPreviousBoot(lockData)) {
-		// #194.4: a PID recorded before this boot names no process of this boot.
-		console.warn(
-			`[AUDIT] Reclaiming a lock written in a previous boot (PID ${lockData.pid}). Lock file: ${candidateLockPath}`,
 		);
 		unlinkSync(candidateLockPath);
 		return true;
@@ -464,9 +481,9 @@ function createLockAtomically(lockPath: string, content: string, writerId: strin
  * old 30 s tolerance, forking the chain. Read once per process: a boot id cannot change while
  * this process lives.
  */
-let cachedBootId: string | null | undefined;
+let cachedBootId: string | undefined;
 function exactBootId(): string | undefined {
-	if (cachedBootId !== undefined) return cachedBootId ?? undefined;
+	if (cachedBootId !== undefined) return cachedBootId;
 	let id: string | undefined;
 	try {
 		if (process.platform === "linux") {
@@ -482,14 +499,47 @@ function exactBootId(): string | undefined {
 	} catch {
 		id = undefined; // unknown → the PID probe decides (never a time estimate)
 	}
-	cachedBootId = id ?? null;
+	// Cache only a SUCCESSFUL read (#196 r2 P3): a transient failure (a sysctl timeout under load)
+	// must not leave every lock this process writes without a boot id for its whole lifetime.
+	if (id !== undefined) cachedBootId = id;
 	return id;
 }
 
-function bootIdentity(): { bootId?: string; bootTime: number } {
+/**
+ * This process's PID NAMESPACE (#196 r2 P2): containers on one Linux host share `boot_id`, but
+ * `kill(pid, 0)` sees only the caller's own PID namespace — a writer in another container probes as
+ * ESRCH (or as an unrelated process) and its LIVE lock would be reclaimed. Linux: the
+ * `/proc/self/ns/pid` link target (`pid:[<inode>]`); elsewhere none (one namespace).
+ */
+function pidNamespace(): string | undefined {
+	if (process.platform !== "linux") return undefined;
+	try {
+		const ns = readlinkSync("/proc/self/ns/pid");
+		return /^pid:\[\d+\]$/.test(ns) ? ns : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function bootIdentity(): { bootId?: string; bootTime: number; pidNs?: string } {
 	const bootId = exactBootId();
+	const pidNs = pidNamespace();
 	const bootTime = Math.round(Date.now() / 1000 - uptime()); // diagnostic only
-	return bootId === undefined ? { bootTime } : { bootId, bootTime };
+	return {
+		...(bootId === undefined ? {} : { bootId }),
+		bootTime,
+		...(pidNs === undefined ? {} : { pidNs }),
+	};
+}
+
+/**
+ * Was this lock written from ANOTHER PID namespace (in this boot)? Then this process's
+ * `kill(pid, 0)` cannot see its writer, and the lock is HELD — never reclaimed by a probe that is
+ * looking in the wrong namespace. Positive only: both sides carry a namespace and they differ.
+ */
+function fromForeignPidNamespace(lock: { pidNs?: unknown }): boolean {
+	const now = pidNamespace();
+	return typeof lock.pidNs === "string" && now !== undefined && lock.pidNs !== now;
 }
 
 /**
@@ -731,7 +781,16 @@ export function createAuditWriter(
 			const fullEvent = snapshot as unknown as AuditEvent & { sequence: number };
 			fullEvent.hash = hash;
 
-			const fd = openSync(logPath, "a");
+			// O_NOFOLLOW: an append never writes THROUGH a symlinked log into a file outside the
+			// vault (#196 r2 P1's class). Mode as `openSync(path, "a")` created it (0o666 & ~umask).
+			const fd = openSync(
+				logPath,
+				fsConstants.O_WRONLY |
+					fsConstants.O_APPEND |
+					fsConstants.O_CREAT |
+					(fsConstants.O_NOFOLLOW ?? 0),
+				0o666,
+			);
 			try {
 				writeFully(fd, `${persisted}\n`);
 				fsyncSync(fd);

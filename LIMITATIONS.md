@@ -87,8 +87,9 @@ The audit chain is a linear SHA-256 hash chain. Two concurrent writers would
 fork it, which is precisely the tampering the chain exists to make evident — so
 usertrust enforces single-writer semantics with an advisory file lock plus an
 in-process mutex. A second process opening the same vault gets a hard error, not
-a silent fork. Stale locks from crashed processes are reclaimed; live ones are
-never stolen.
+a silent fork. A lock is reclaimed only on positive evidence that its writer is gone
+(rules below); anything this process cannot see — including a writer in another PID
+namespace — is held.
 
 If you need multiple concurrent workers, give each its own vault. Merging or
 centralizing chains is a control-plane concern, not something the core SDK
@@ -100,6 +101,13 @@ boot — judged ONLY by the kernel's exact per-boot id (`/proc/sys/kernel/random
 Linux, `kern.bootsessionuuid` on macOS). Where no exact boot id exists, a lock whose PID is
 alive is held, even if that PID was reused after a reboot: the operator removes it by hand.
 That is the safe direction, because a wrongly reclaimed live lock forks the chain.
+
+**One PID namespace's view is not another's.** Containers on one Linux host share the kernel
+boot id, but `kill(pid, 0)` sees only the caller's own PID namespace — a live writer in another
+container probes as dead (or as an unrelated process, often with the same small PID). The lock
+records the writer's PID namespace (`/proc/self/ns/pid`); a lock from a DIFFERENT namespace in the
+same boot is HELD and never reclaimed. If that writer is truly gone, remove the lock by hand. A
+lock written by an older version (no namespace recorded) is judged by its PID, as before.
 
 **The vault's audit directory must support hard links.** The writer lock is created by
 hard-linking a fully written temp file into place, so no starter ever sees a half-written

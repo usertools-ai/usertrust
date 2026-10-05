@@ -299,3 +299,55 @@ describe("#196 r1 P2: vault-derived text is scrubbed before it reaches the termi
 		expect(controls).toEqual([]);
 	});
 });
+
+describe("#196 r2: the LOG is never followed through a link, and a one-behind anchor is repaired", () => {
+	it("P1: events.jsonl planted as a SYMLINK to an outside file is refused — the target is never cut or written", async () => {
+		const v = await vault(2, null);
+		const outside = join(mkdtempSync(join(tmpdir(), "trust-outside-")), "victim.txt");
+		dirs.push(join(outside, ".."));
+		writeFileSync(outside, "operator file without a newline");
+		rmSync(logOf(v));
+		rmSync(`${logOf(v)}.meta`, { force: true });
+		symlinkSync(outside, logOf(v));
+		await expect(quarantineTornTail(v)).rejects.toBeInstanceOf(AuditQuarantineRefusedError);
+		await expect(quarantineTornTail(v, { dryRun: true })).rejects.toBeInstanceOf(
+			AuditQuarantineRefusedError,
+		);
+		expect(readFileSync(outside, "utf-8")).toBe("operator file without a newline");
+	});
+
+	it("the WRITER never appends through a symlinked log either", async () => {
+		const v = await vault(1, null);
+		const outside = join(mkdtempSync(join(tmpdir(), "trust-outside-")), "victim.jsonl");
+		dirs.push(join(outside, ".."));
+		writeFileSync(outside, readFileSync(logOf(v)));
+		rmSync(logOf(v));
+		symlinkSync(outside, logOf(v));
+		const before = readFileSync(outside, "utf-8");
+		const w = createAuditWriter(v);
+		await expect(w.appendEvent({ kind: "x", actor: "sys", data: {} })).rejects.toThrow();
+		w.release();
+		expect(readFileSync(outside, "utf-8")).toBe(before);
+	});
+
+	it("P2: an event that landed with its .meta ONE BEHIND is repaired by the retry — the anchor reaches the head", async () => {
+		const v = await vault(2);
+		await quarantineTornTail(v); // records the quarantine event; .meta at the head (seq 3)
+		const ls = lines(v);
+		const head = JSON.parse(ls.at(-1) as string) as { previousHash: string; sequence: number };
+		// Simulate the failed .meta update: the anchor one behind the landed record.
+		writeFileSync(
+			`${logOf(v)}.meta`,
+			JSON.stringify({ lastHash: head.previousHash, sequence: head.sequence - 1 }),
+		);
+		expect(verifyVault(join(v, VAULT_DIR)).valid).toBe(false);
+		expect(await quarantineTornTail(v, { dryRun: true })).toMatchObject({
+			anchorAdvanced: true,
+			recorded: [],
+		});
+		const r = await quarantineTornTail(v);
+		expect(r).toMatchObject({ torn: null, recorded: [], anchorAdvanced: true });
+		expect(verifyVault(join(v, VAULT_DIR))).toMatchObject({ valid: true, chainLength: 3 });
+		expect(await quarantineTornTail(v)).toEqual({ dryRun: false, torn: null, recorded: [] });
+	});
+});

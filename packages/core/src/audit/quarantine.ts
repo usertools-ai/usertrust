@@ -21,24 +21,28 @@
  * next run: every quarantine file without its chained event gets one.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
 	closeSync,
 	existsSync,
 	constants as fsConstants,
+	fstatSync,
 	fsyncSync,
 	ftruncateSync,
+	linkSync,
 	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readFileSync,
+	readSync,
+	unlinkSync,
 	writeSync,
 } from "node:fs";
 import { join } from "node:path";
 import { GENESIS_HASH, VAULT_DIR } from "../shared/constants.js";
 import { canonicalize } from "./canonical.js";
-import { createAuditWriter } from "./chain.js";
+import { createAuditWriter, writeAnchorAtomically } from "./chain.js";
 
 export const QUARANTINE_EVENT_KIND = "audit.quarantine.torn_tail";
 const QUARANTINE_ACTOR = "usertrust-cli";
@@ -65,6 +69,9 @@ export interface QuarantineResult {
 	/** Quarantine records appended (or, in a dry run, that would be) — the torn tail's, and any
 	 * left unrecorded by an earlier run that died after truncating. */
 	recorded: string[];
+	/** Present (true) only when a `.meta` anchor left ONE BEHIND the verified head (an event landed,
+	 * its anchor update failed) was advanced to the head (or, in a dry run, would be). */
+	anchorAdvanced?: true;
 }
 
 interface ChainEvent {
@@ -108,8 +115,8 @@ function verifyPrefix(text: string): ChainEvent[] {
 	return events;
 }
 
-function checkAnchor(metaPath: string, events: ChainEvent[]): void {
-	if (!existsSync(metaPath)) return;
+function checkAnchor(metaPath: string, events: ChainEvent[]): "absent" | "head" | "oneBehind" {
+	if (!existsSync(metaPath)) return "absent";
 	let a: { lastHash?: unknown; sequence?: unknown };
 	try {
 		a = JSON.parse(readFileSync(metaPath, "utf-8")) as typeof a;
@@ -126,6 +133,36 @@ function checkAnchor(metaPath: string, events: ChainEvent[]): void {
 			`the .meta head anchor (sequence ${String(a.sequence)}) disagrees with the verified chain (sequence ${headSeq}) — a truncation, not a torn tail`,
 		);
 	}
+	return isHead ? "head" : "oneBehind";
+}
+
+/** The log must be a REGULAR file — never a symlink a hostile vault planted (#196 r2 P1). */
+function assertRegularLog(logPath: string): void {
+	let st: ReturnType<typeof lstatSync>;
+	try {
+		st = lstatSync(logPath);
+	} catch (err) {
+		if (isCode(err, "ENOENT")) return;
+		throw err;
+	}
+	if (st.isSymbolicLink() || !st.isFile()) {
+		throw new AuditQuarantineRefusedError(
+			"audit/events.jsonl is not a regular file (a symlink or other) — refusing to read or cut through it",
+		);
+	}
+}
+
+/** Read every byte of an open fd from offset 0. */
+function readAllFd(fd: number): Buffer {
+	const size = fstatSync(fd).size;
+	const buf = Buffer.alloc(size);
+	let off = 0;
+	while (off < size) {
+		const n = readSync(fd, buf, off, size - off, off);
+		if (n <= 0) break;
+		off += n;
+	}
+	return buf.subarray(0, off);
 }
 
 /** fsync a DIRECTORY. Where the filesystem does not support it (EINVAL/ENOTSUP/EISDIR — as the
@@ -192,34 +229,44 @@ function verifiedEvidence(path: string, sha: string): Buffer {
 	return bytes;
 }
 
-/** Write the torn bytes as NEW evidence: O_EXCL (refuses any existing path, a symlink included) and
- * O_NOFOLLOW. An existing file is accepted only via {@link verifiedEvidence} with the same bytes. */
+/**
+ * Publish the torn bytes as evidence ATOMICALLY (#196 r2 P2): write + fsync a PRIVATE temp file
+ * (O_EXCL|O_NOFOLLOW, 0600) in quarantine/, then hard-link it to `<sha256>.torn` — `link` never
+ * replaces an existing name. A crash or ENOSPC mid-write leaves only a `.tmp` (ignored), never a
+ * partial file under the final name that would block every retry. An existing final file is
+ * accepted only via {@link verifiedEvidence}.
+ */
 function writeEvidence(qPath: string, sha: string, tailBytes: Buffer): void {
-	let qfd: number;
+	const tmp = join(qPath, "..", `.${sha}.${randomUUID()}.tmp`);
+	const tfd = openSync(
+		tmp,
+		fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0),
+		0o600,
+	);
 	try {
-		qfd = openSync(
-			qPath,
-			fsConstants.O_WRONLY |
-				fsConstants.O_CREAT |
-				fsConstants.O_EXCL |
-				(fsConstants.O_NOFOLLOW ?? 0),
-			0o600,
-		);
-	} catch (err) {
-		if (!isCode(err, "EEXIST")) throw err;
-		verifiedEvidence(qPath, sha); // an earlier run's identical evidence — idempotent
-		return;
-	}
-	try {
-		let off = 0;
-		while (off < tailBytes.length) {
-			const n = writeSync(qfd, tailBytes, off, tailBytes.length - off);
-			if (n <= 0) throw new Error("quarantine write made no progress");
-			off += n;
+		try {
+			let off = 0;
+			while (off < tailBytes.length) {
+				const n = writeSync(tfd, tailBytes, off, tailBytes.length - off);
+				if (n <= 0) throw new Error("quarantine write made no progress");
+				off += n;
+			}
+			fsyncSync(tfd);
+		} finally {
+			closeSync(tfd);
 		}
-		fsyncSync(qfd);
+		try {
+			linkSync(tmp, qPath);
+		} catch (err) {
+			if (!isCode(err, "EEXIST")) throw err;
+			verifiedEvidence(qPath, sha); // an earlier run's identical evidence — idempotent
+		}
 	} finally {
-		closeSync(qfd);
+		try {
+			unlinkSync(tmp);
+		} catch {
+			/* already gone */
+		}
 	}
 }
 
@@ -227,10 +274,12 @@ interface Plan {
 	torn: TornTail | null;
 	tailBytes: Buffer;
 	toRecord: string[];
+	anchor: "absent" | "head" | "oneBehind";
+	head: { hash: string; sequence: number } | null;
 }
 
 /** READ-ONLY analysis (no lock, no mkdir, no write) — a dry run is exactly this (#196 r1 P2). */
-function analyse(auditDir: string, logPath: string, qDir: string): Plan {
+function analyse(auditDir: string, logPath: string, qDir: string, logBytes?: Buffer): Plan {
 	if (!existsSync(auditDir)) {
 		throw new AuditQuarantineRefusedError(`there is no audit directory at ${auditDir}`);
 	}
@@ -240,7 +289,8 @@ function analyse(auditDir: string, logPath: string, qDir: string): Plan {
 	if (segments.length > 0) {
 		throw new AuditQuarantineRefusedError(`the chain has other segments (${segments.join(", ")})`);
 	}
-	const bytes = existsSync(logPath) ? readFileSync(logPath) : Buffer.alloc(0);
+	assertRegularLog(logPath);
+	const bytes = logBytes ?? (existsSync(logPath) ? readFileSync(logPath) : Buffer.alloc(0));
 	const cut = bytes.lastIndexOf(0x0a) + 1; // 0 when there is no newline at all
 	const tailBytes = bytes.subarray(cut);
 	let torn: TornTail | null = null;
@@ -260,7 +310,9 @@ function analyse(auditDir: string, logPath: string, qDir: string): Plan {
 		torn = { offset: cut, length: tailBytes.length, sha256, file: `quarantine/${sha256}.torn` };
 	}
 	const events = verifyPrefix(bytes.subarray(0, cut).toString("utf-8"));
-	checkAnchor(`${logPath}.meta`, events);
+	const anchor = checkAnchor(`${logPath}.meta`, events);
+	const last = events.at(-1);
+	const head = last === undefined ? null : { hash: last.hash, sequence: events.length };
 
 	const recordedShas = new Set(
 		events
@@ -289,7 +341,7 @@ function analyse(auditDir: string, logPath: string, qDir: string): Plan {
 		for (const sha of pending) verifiedEvidence(join(qDir, `${sha}.torn`), sha);
 	}
 	const toRecord = torn === null ? pending : [...pending, torn.sha256];
-	return { torn, tailBytes, toRecord };
+	return { torn, tailBytes, toRecord, anchor, head };
 }
 
 /**
@@ -309,32 +361,58 @@ export async function quarantineTornTail(
 	const qDir = join(auditDir, "quarantine");
 	if (dryRun) {
 		const plan = analyse(auditDir, logPath, qDir);
-		return { dryRun, torn: plan.torn, recorded: plan.toRecord };
+		const wouldAdvance = plan.anchor === "oneBehind" && plan.toRecord.length === 0;
+		return {
+			dryRun,
+			torn: plan.torn,
+			recorded: plan.toRecord,
+			...(wouldAdvance ? { anchorAdvanced: true as const } : {}),
+		};
 	}
 	if (!existsSync(auditDir)) {
 		throw new AuditQuarantineRefusedError(`there is no audit directory at ${auditDir}`);
 	}
 	const writer = createAuditWriter(vaultRoot, { lockAtCreate: true });
 	try {
-		const { torn, tailBytes, toRecord } = analyse(auditDir, logPath, qDir);
-		if (torn !== null) {
-			// 1. The torn bytes, aside, byte for byte (idempotent by content name), through a REAL
-			//    directory and an exclusive, no-follow create.
-			ensureRealQuarantineDir(qDir);
-			writeEvidence(join(auditDir, torn.file), torn.sha256, tailBytes);
-			fsyncDir(qDir);
-			// The NEW directory entry must be durable in its parent BEFORE the log is cut: a power
-			// loss after the truncation must never lose the quarantine directory (#196 r1 P2).
-			fsyncDir(auditDir);
-			// 2. The log, cut back to its last complete line.
-			const lfd = openSync(logPath, "r+");
-			try {
-				ftruncateSync(lfd, torn.offset);
-				fsyncSync(lfd);
-			} finally {
-				closeSync(lfd);
+		// ONE no-follow descriptor for the read AND the cut (#196 r2 P1): the bytes analysed are the
+		// bytes truncated, and neither can be redirected through a symlinked log.
+		assertRegularLog(logPath);
+		let lfd: number | undefined;
+		try {
+			lfd = openSync(logPath, fsConstants.O_RDWR | (fsConstants.O_NOFOLLOW ?? 0));
+		} catch (err) {
+			if (!isCode(err, "ENOENT")) {
+				if (isCode(err, "ELOOP")) {
+					throw new AuditQuarantineRefusedError(
+						"audit/events.jsonl is a symlink — refusing to read or cut through it",
+					);
+				}
+				throw err;
 			}
 		}
+		let plan: Plan;
+		try {
+			if (lfd !== undefined && !fstatSync(lfd).isFile()) {
+				throw new AuditQuarantineRefusedError("audit/events.jsonl is not a regular file");
+			}
+			plan = analyse(auditDir, logPath, qDir, lfd === undefined ? Buffer.alloc(0) : readAllFd(lfd));
+			if (plan.torn !== null && lfd !== undefined) {
+				// 1. The torn bytes, aside, byte for byte (idempotent by content name), through a REAL
+				//    directory, published atomically.
+				ensureRealQuarantineDir(qDir);
+				writeEvidence(join(auditDir, plan.torn.file), plan.torn.sha256, plan.tailBytes);
+				fsyncDir(qDir);
+				// The NEW directory entry must be durable in its parent BEFORE the log is cut: a power
+				// loss after the truncation must never lose the quarantine directory (#196 r1 P2).
+				fsyncDir(auditDir);
+				// 2. The log, cut back to its last complete line — on the SAME descriptor.
+				ftruncateSync(lfd, plan.torn.offset);
+				fsyncSync(lfd);
+			}
+		} finally {
+			if (lfd !== undefined) closeSync(lfd);
+		}
+		const { torn, toRecord } = plan;
 		// 3. A chained record per quarantined tail not yet on the chain — length and digest from
 		//    the VERIFIED bytes, never from the filename.
 		for (const sha of toRecord) {
@@ -350,6 +428,16 @@ export async function quarantineTornTail(
 					...(torn !== null && sha === torn.sha256 ? { offset: torn.offset } : {}),
 				},
 			});
+		}
+		// An anchor left ONE BEHIND (an event landed, its `.meta` update failed — e.g. a quarantine
+		// record on an earlier run) is advanced to the verified head when nothing else will write it
+		// (#196 r2 P2): otherwise the retry reports success and verifyVault keeps the mismatch.
+		if (toRecord.length === 0 && plan.anchor === "oneBehind" && plan.head !== null) {
+			writeAnchorAtomically(
+				`${logPath}.meta`,
+				JSON.stringify({ lastHash: plan.head.hash, sequence: plan.head.sequence }),
+			);
+			return { dryRun, torn, recorded: toRecord, anchorAdvanced: true };
 		}
 		return { dryRun, torn, recorded: toRecord };
 	} finally {
