@@ -1,18 +1,20 @@
 // PostToolUse: close this tool call's reservation. The tool has already
 // executed — this hook must NEVER block or fail closed.
 //
-// The PreToolUse hold is an ESTIMATE, sized from tool input/output, and exists
-// so budget enforcement happens before the call. What the call really cost —
-// the model turns around it, context and cache — is in Claude Code's own
-// transcript. So in `transcript` usage mode (the default) this hook first
-// settles the agent's new transcript usage at real token counts, then VOIDS the
-// estimate hold: the real numbers replace it rather than adding to it. Only
-// when the transcript is missing or corrupt does it fall back to settling the
-// hold at the estimate, labelled `usageSource: "estimated"`.
+// Transcript usage mode (the default): the PreToolUse hold is the settlement
+// vehicle (see transcript.mjs). It is SETTLED exactly once — at the counts of
+// the transcript messages assigned to it, or at zero usage (the server's 1-unit
+// floor) when none were — and never aborted on the normal path. Only a failed
+// settle is aborted, for hygiene: 400/404 releases its messages for a later
+// settle point (nothing was posted); a 5xx or no answer keeps them claimed
+// (it may have posted, and a message is posted at most once).
 //
-// The pending file is deleted only AFTER a 200 (settle or abort); on any
-// failure it is left in place so Stop/SubagentStop cleanup aborts the hold
-// (and the server's TTL sweep is the final backstop).
+// Estimate mode (UT_CC_USAGE=estimate, or an agent whose transcript could not
+// be read): the hold settles at the per-call estimate, labelled
+// `usageSource: "estimated"`, exactly as the original hook did. The pending
+// file is deleted only AFTER a 200; on any failure it is left in place so
+// Stop/SubagentStop cleanup aborts the hold (and the server's TTL sweep is the
+// final backstop).
 import {
 	clearPending,
 	estimateTokens,
@@ -22,48 +24,27 @@ import {
 	takePendingEntry,
 	usageMode,
 } from "./lib.mjs";
-import { settleTranscript, transcriptPathFor } from "./transcript.mjs";
+import { estimateReasonFor, settleTranscriptHold } from "./transcript.mjs";
 
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
 	const sessionId = input.session_id ?? "unknown";
 	// Settle only this agent's holds; the session bucket is shared with siblings.
 	const agentId = input.agent_id ?? "main";
-	let fallbackReason = "UT_CC_USAGE=estimate";
-	let reconciled = false;
-	if (usageMode() === "transcript") {
-		const result = await settleTranscript({
-			sessionId,
-			agentId,
-			agentTypeHint: input.agent_type,
-			transcriptPath: transcriptPathFor(input, agentId),
-			hook: "PostToolUse",
-		});
-		if (result.ok) {
-			reconciled = true;
-			for (const failure of result.failures ?? []) {
-				process.stderr.write(`usertrust: transcript settle deferred (${failure})\n`);
-			}
-		} else {
-			fallbackReason = result.reason;
-		}
-	}
 	const entry = await takePendingEntry(sessionId, agentId, input.tool_use_id ?? null);
-	if (entry && reconciled) {
-		const response = await serverRequest("/v1/abort", {
-			transferId: entry.transferId,
-			error: "reconciled: real usage settles from the transcript",
-		});
-		if (response.status === 200) {
-			await clearPending(sessionId, agentId, entry.entryKey);
-		} else {
+	if (entry?.usage === "transcript") {
+		const result = await settleTranscriptHold(sessionId, entry);
+		if (result.outcome !== "settled") {
 			process.stderr.write(
-				`usertrust: void ${entry.transferId} returned ${response.status}; hold kept for Stop cleanup\n`,
+				`usertrust: transcript hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}\n`,
 			);
 		}
 	} else if (entry) {
 		if (usageMode() === "transcript") {
-			process.stderr.write(`usertrust: settling at the ESTIMATE — ${fallbackReason}\n`);
+			const reason = await estimateReasonFor({ sessionId, agentId, input });
+			process.stderr.write(
+				`usertrust: settling at the ESTIMATE — ${reason ?? "the hold was reserved in estimate mode"}\n`,
+			);
 		}
 		// Price both legs. The authorize-time input estimate is persisted on the
 		// pending file; if an older file lacks it, re-estimate from tool_input

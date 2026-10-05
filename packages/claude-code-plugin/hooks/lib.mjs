@@ -13,6 +13,10 @@
 // without touching the parent's or a sibling's in-flight holds. The agent id is
 // also stored inside each file so a whole-session sweep can recover it without
 // re-splitting the (ambiguous, "__"-containing) filename.
+//
+// A transcript-mode hold file also names the transcript messages assigned to
+// it and their counts; transcript.mjs journals its outcome beside it
+// (<hold>.settling, <hold>.done), names listPending never returns.
 import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -56,15 +60,26 @@ const stateDir = stateRoot;
 
 /**
  * Where real usage comes from. `transcript` (default): Claude Code's own
- * session transcript, falling back to the per-call estimate — labelled
- * `estimated` — only when the transcript is missing or corrupt. `estimate`:
+ * session transcript (see transcript.mjs), with the per-call estimate — labelled
+ * `estimated` — only for an agent whose transcript cannot be used. `estimate`:
  * the per-call estimate only.
  */
 export function usageMode() {
 	return process.env.UT_CC_USAGE === "estimate" ? "estimate" : "transcript";
 }
 
-function sanitize(part) {
+// Every hook gets a wall-clock budget well inside hooks.json's 15 s timeout, so
+// a slow server makes a hook give up cleanly instead of being killed mid-write.
+// Module evaluation is the hook's start: each hook is its own node process.
+const HOOK_STARTED_AT = Date.now();
+export const HOOK_BUDGET_MS = 10_000;
+
+/** Milliseconds left in this hook's budget (negative once it is spent). */
+export function timeLeft() {
+	return HOOK_STARTED_AT + HOOK_BUDGET_MS - Date.now();
+}
+
+export function sanitize(part) {
 	return String(part ?? "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
@@ -98,9 +113,31 @@ export async function recordPending(sessionId, agentId, entry) {
 			...(typeof entry.estimatedInputTokens === "number"
 				? { estimatedInputTokens: entry.estimatedInputTokens }
 				: {}),
+			// A transcript-mode hold also records what it will settle: the model it
+			// was authorized at, the transcript message ids assigned to it, and their
+			// summed counts. An estimate-mode hold keeps the original shape exactly.
+			...(entry.usage === "transcript" ? transcriptHoldFields(entry) : {}),
 		}),
 	);
 	await rename(tmp, path);
+}
+
+const COUNT_FIELDS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
+
+function countOf(value) {
+	return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function transcriptHoldFields(entry) {
+	const fields = {
+		usage: "transcript",
+		holdModel: String(entry.holdModel ?? "unknown"),
+		assignedIds: Array.isArray(entry.assignedIds)
+			? entry.assignedIds.filter((id) => typeof id === "string")
+			: [],
+	};
+	for (const key of COUNT_FIELDS) fields[key] = countOf(entry[key]);
+	return fields;
 }
 
 /**
@@ -138,6 +175,7 @@ export async function listPending(sessionId, agentId) {
 				...(typeof parsed.estimatedInputTokens === "number"
 					? { estimatedInputTokens: parsed.estimatedInputTokens }
 					: {}),
+				...(parsed.usage === "transcript" ? transcriptHoldFields(parsed) : {}),
 				mtimeMs,
 			});
 		} catch {
@@ -173,11 +211,16 @@ export async function clearPending(sessionId, agentId, entryKey) {
 	}
 }
 
-export async function serverRequest(path, body) {
+/**
+ * POST to the governance server. `timeoutMs` bounds the whole exchange (5 s
+ * unless the caller passes less); a spent budget throws without a request.
+ */
+export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
 	const base = process.env.UT_SERVER_URL ?? "http://127.0.0.1:4519";
 	const key = process.env.UT_SERVER_KEY ?? "";
+	if (!(timeoutMs > 0)) throw new TransportError("hook time budget spent");
 	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), 5000);
+	const timeout = setTimeout(() => controller.abort(), timeoutMs);
 	try {
 		const response = await fetch(`${base}${path}`, {
 			method: "POST",
@@ -204,18 +247,28 @@ export async function serverRequest(path, body) {
  * Abort remaining holds for a session. When agentId is a string, only that
  * agent's holds are aborted (SubagentStop for one subagent); when it is null,
  * every agent's holds are aborted (Stop — the session really is ending).
- * Non-200 abort responses and transport failures are reported to stderr but
- * never thrown. Files are cleared regardless: the session (or subagent) is over,
- * so an unabortable hold is voided server-side by the pending-TTL sweep, and
- * keeping the file would only leak state-dir entries.
+ * A hold that carries assigned transcript usage is NOT aborted here: it is a
+ * settlement, and transcript.mjs settles it. Non-200 abort responses and
+ * transport failures are reported to stderr but never thrown. Files are
+ * cleared regardless: the session (or subagent) is over, so an unabortable hold
+ * is voided server-side by the pending-TTL sweep, and keeping the file would
+ * only leak state-dir entries. A hold the hook budget no longer covers is left
+ * for the next Stop and the TTL sweep.
  */
 export async function cleanup(sessionId, agentId) {
 	for (const entry of await listPending(sessionId, agentId)) {
+		if ((entry.assignedIds?.length ?? 0) > 0) continue;
+		const timeoutMs = Math.min(5000, timeLeft());
+		if (timeoutMs < 100) {
+			process.stderr.write(`usertrust: out of time; hold ${entry.transferId} left for Stop/TTL\n`);
+			return;
+		}
 		try {
-			const response = await serverRequest("/v1/abort", {
-				transferId: entry.transferId,
-				error: "session ended with unsettled hold",
-			});
+			const response = await serverRequest(
+				"/v1/abort",
+				{ transferId: entry.transferId, error: "session ended with unsettled hold" },
+				{ timeoutMs },
+			);
 			if (response.status !== 200) {
 				process.stderr.write(`usertrust: abort ${entry.transferId} returned ${response.status}\n`);
 			}
