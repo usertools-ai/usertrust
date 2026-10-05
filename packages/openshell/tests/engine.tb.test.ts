@@ -37,7 +37,7 @@ afterEach(() => {
 async function setup(
 	seed: number,
 	holdTtlSeconds = 900,
-	o: { expirySkewMs?: number; journalNow?: () => number } = {},
+	o: { expirySkewMs?: number; journalNow?: () => number; expiryGraceMs?: number } = {},
 ) {
 	const tb = new TrustTBClient({ addresses: [TB_ADDRESS as string], clusterId: 0n });
 	const treasury = await tb.createTreasury();
@@ -58,7 +58,10 @@ async function setup(
 		treasuryId: treasury,
 		...(o.expirySkewMs === undefined ? {} : { expirySkewMs: o.expirySkewMs }),
 	});
-	const engine = new HoldEngine(journal, ledger, { holdTtlSeconds });
+	const engine = new HoldEngine(journal, ledger, {
+		holdTtlSeconds,
+		...(o.expiryGraceMs === undefined ? {} : { expiryGraceMs: o.expiryGraceMs }),
+	});
 	const walletAcct = async () => (await tb.lookupAccounts([wallet]))[0];
 	return {
 		tb,
@@ -130,11 +133,11 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		const k = key();
 		await engine.reserve({ holdKey: k, budgetId, amount: 100 });
 		await new Promise((r) => setTimeout(r, 2_500));
-		expect(await engine.settle(k, { post: 60, overage: 0 })).toEqual({
-			outcome: "late_required",
+		expect(await engine.settle(k, { post: 60, overage: 0 })).toMatchObject({
+			outcome: "late_settled",
 			state: "expired",
 		});
-		expect(journal.get(k)?.state).toBe("expired");
+		expect(journal.get(k)).toMatchObject({ state: "expired", lateAmount: 60, lateCharged: true });
 		const a = await walletAcct();
 		expect(a?.debits_posted).toBe(0n);
 		expect(a?.debits_pending).toBe(0n);
@@ -206,11 +209,11 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		);
 		await new Promise((r) => setTimeout(r, 2_500));
 		expect(await ledger.post({ holdKey: k, amount: 60 }), "the crashed attempt").toBe("expired");
-		expect(await engine.settle(k, { post: 60, overage: 0 })).toEqual({
-			outcome: "late_required",
+		expect(await engine.settle(k, { post: 60, overage: 0 })).toMatchObject({
+			outcome: "late_settled",
 			state: "expired",
 		});
-		expect(journal.get(k)?.state).toBe("expired");
+		expect(journal.get(k)).toMatchObject({ state: "expired", lateAmount: 60, lateCharged: true });
 	}, 15_000);
 
 	/** An `open` row whose placement never reached the ledger (the placeHold "succeeded" locally). */
@@ -251,10 +254,11 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		});
 		expect(journal.get(k)?.state).toBe("settling");
 		await new Promise((r) => setTimeout(r, 2_500));
-		expect(await engine.settle(k, { post: 60, overage: 0 })).toEqual({
-			outcome: "late_required",
+		expect(await engine.settle(k, { post: 60, overage: 0 })).toMatchObject({
+			outcome: "late_settled",
 			state: "expired",
 		});
+		expect(journal.get(k)).toMatchObject({ lateAmount: 60, lateCharged: true });
 	}, 15_000);
 
 	it("#174 r1 P1: after one not-found void, a second release meets a RETIRED void id — in flight, then voided_not_found past the horizon (reachable)", async () => {
@@ -395,6 +399,60 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		await expect(charge(41)).rejects.toThrow();
 		expect((await tb.lookupAccounts([debtAcct]))[0]?.debits_posted, "still charged once").toBe(40n);
 	});
+
+	it("1c-1: the SWEEPER expires a hold the ledger released — the void answers expired, the row is `expired`, nothing pending", async () => {
+		// Grace 0 and a 1 s lifetime: past ttlAt (start + 2 deadlines + 1 s) the sweep claims it.
+		const { engine, budgetId, journal, walletAcct, key } = await setup(1_000, 1, {
+			expiryGraceMs: 0,
+		});
+		const k = key();
+		await engine.reserve({ holdKey: k, budgetId, amount: 100 });
+		expect((await walletAcct())?.debits_pending).toBe(100n);
+		await new Promise((r) => setTimeout(r, 1_000 + 2 * 5_000 + 1_500));
+		const report = await engine.sweep();
+		expect(report.expired).toEqual([k]);
+		expect(journal.get(k)).toMatchObject({
+			state: "expired",
+			terminalKind: "hold_expired_unsettled",
+		});
+		expect((await walletAcct())?.debits_pending).toBe(0n);
+		expect((await walletAcct())?.debits_posted, "nothing was charged").toBe(0n);
+	}, 30_000);
+
+	it("1c-1: a settlement after the ledger expired the hold is LATE-SETTLED — the actual amount charged to the debt account once, never posted", async () => {
+		const { tb, engine, budgetId, journal, walletAcct, key } = await setup(1_000, 1);
+		const k = key();
+		await engine.reserve({ holdKey: k, budgetId, amount: 100 });
+		await new Promise((r) => setTimeout(r, 2_500));
+		expect(await engine.settle(k, { post: 60, overage: 0 })).toEqual({
+			outcome: "late_settled",
+			state: "expired",
+			resumed: false,
+		});
+		const debtAcct = await tb.ensureEscrowAccount(debtAccountLabel(budgetId));
+		expect((await tb.lookupAccounts([debtAcct]))[0]?.debits_posted).toBe(60n);
+		expect((await walletAcct())?.debits_posted, "never posted").toBe(0n);
+		expect(journal.get(k)).toMatchObject({ lateAmount: 60, lateCharged: true });
+		expect(journal.debtOf(budgetId)).toBe(60);
+		// A duplicate settles from the STORED amount: nothing more is charged.
+		await engine.settle(k, { post: 60, overage: 0 });
+		expect((await tb.lookupAccounts([debtAcct]))[0]?.debits_posted).toBe(60n);
+	}, 15_000);
+
+	it("1c-1: the sweeper first, then the settlement: late-settled on the `expired` row, charged once", async () => {
+		const { tb, engine, budgetId, journal, key } = await setup(1_000, 1, { expiryGraceMs: 0 });
+		const k = key();
+		await engine.reserve({ holdKey: k, budgetId, amount: 100 });
+		await new Promise((r) => setTimeout(r, 1_000 + 2 * 5_000 + 1_500));
+		expect((await engine.sweep()).expired).toEqual([k]);
+		expect(await engine.settle(k, { post: 45, overage: 0 })).toMatchObject({
+			outcome: "late_settled",
+			state: "expired",
+		});
+		const debtAcct = await tb.ensureEscrowAccount(debtAccountLabel(budgetId));
+		expect((await tb.lookupAccounts([debtAcct]))[0]?.debits_posted).toBe(45n);
+		expect(journal.get(k)).toMatchObject({ state: "expired", lateAmount: 45, lateCharged: true });
+	}, 30_000);
 
 	it("control: every role's id is distinct and stable for a hold", () => {
 		const roles = [

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
+import { HoldDetector } from "../src/detector.js";
 import {
 	DebtChargeFailedError,
 	HoldEngine,
@@ -36,6 +37,8 @@ class FakeLedger implements LedgerPort {
 	/** Answer the next post / release with this outcome (a retired id's read-back). */
 	postAnswer: PostOutcome | null = null;
 	releaseAnswer: VoidOutcome | null = null;
+	/** Holds whose release throws (a step that fails for ONE row). */
+	releaseThrows = new Set<string>();
 	/** ensureDebtAccount throws this (a debt account the ledger refuses), when set. */
 	debtAccountRefusal: Error | null = null;
 	ensuredDebt: string[] = [];
@@ -93,6 +96,7 @@ class FakeLedger implements LedgerPort {
 		return "done";
 	}
 	async release(p: { holdKey: string }): Promise<VoidOutcome> {
+		if (this.releaseThrows.has(p.holdKey)) throw new Error(`release ${p.holdKey} failed`);
 		if (this.releaseAnswer !== null) return this.releaseAnswer;
 		if (!this.has(p.holdKey, "reserve")) return "not_found";
 		if (this.has(p.holdKey, "post")) return "posted";
@@ -282,29 +286,44 @@ describe("hold engine: settle — exactly one post, exactly one terminal", () =>
 		expect(ledger.debt.get("b")).toBe(25);
 	});
 
-	it("the ledger expired the hold before the post: the one terminal is `expired`, and late settlement is required", async () => {
+	it("the ledger expired the hold before the post: the one terminal is `expired`, and the actual amount is LATE-SETTLED to debt — never a post", async () => {
 		const { journal, ledger, engine } = setup();
 		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
 		ledger.expired.add("k1");
 		expect(await engine.settle("k1", { post: 60, overage: 0 })).toEqual({
-			outcome: "late_required",
+			outcome: "late_settled",
 			state: "expired",
+			resumed: false,
 		});
 		expect(journal.get("k1")).toMatchObject({
 			state: "expired",
 			terminalKind: "hold_expired_unsettled",
+			lateAmount: 60,
+			lateCharged: true,
 		});
 		expect(ledger.count("k1", "post")).toBe(0);
+		expect(ledger.applied.get(transferIdFor("k1", "late").toString())).toBe(60);
+		expect(journal.debtOf("b")).toBe(60);
 	});
-	it("after the sweeper's claim, a settlement takes the late path and never posts", async () => {
+	it("after the sweeper's claim, a settlement takes the late path: never a post, the actual amount late-settled once", async () => {
 		const { journal, ledger, engine } = setup();
 		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
 		await journal.writeTx(() => journal.cas("k1", "open", "expiring"));
 		expect(await engine.settle("k1", { post: 60, overage: 0 })).toEqual({
-			outcome: "late_required",
+			outcome: "late_settled",
 			state: "expiring",
+			resumed: false,
 		});
 		expect(ledger.count("k1", "post")).toBe(0);
+		expect(journal.get("k1")).toMatchObject({ lateAmount: 60, lateCharged: true });
+		// A duplicate acts on the STORED amount: no second charge.
+		expect(await engine.settle("k1", { post: 99, overage: 0 })).toEqual({
+			outcome: "late_settled",
+			state: "expiring",
+			resumed: true,
+		});
+		expect(ledger.applied.get(transferIdFor("k1", "late").toString())).toBe(60);
+		expect(journal.debtOf("b")).toBe(60);
 	});
 	it("a settlement against a voided or unknown hold is an incident with no ledger operation", async () => {
 		const { ledger, engine } = setup();
@@ -407,8 +426,9 @@ describe("#174 r1: the three unbilled-cost paths", () => {
 		expect(journal.get("k1")?.state).toBe("settling");
 		ledger.postAnswer = "expired"; // the read-back confirms it later
 		expect(await engine.settle("k1", { post: 60, overage: 0 })).toEqual({
-			outcome: "late_required",
+			outcome: "late_settled",
 			state: "expired",
+			resumed: true,
 		});
 	});
 
@@ -456,20 +476,24 @@ describe("#174 r1 connector: the overage's debt blocks reservations from the mom
 		expect(ledger.debt.get("b")).toBe(50);
 	});
 
-	it("a confirmed expiry reverses the overage debt recorded with the claim (it was never charged), once", async () => {
+	it("a confirmed expiry reverses the overage debt recorded with the claim (never charged as overage) and records the full actual as the LATE debt, once", async () => {
 		const { journal, ledger, engine } = setup();
 		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
 		ledger.expired.add("k1");
 		expect(await engine.settle("k1", { post: 100, overage: 30 })).toEqual({
-			outcome: "late_required",
+			outcome: "late_settled",
 			state: "expired",
+			resumed: false,
 		});
-		expect(journal.debtOf("b")).toBe(0);
+		expect(journal.debtOf("b"), "overage 30 reversed, late 130 recorded").toBe(130);
 		expect(ledger.count("k1", "overage")).toBe(0);
+		expect(ledger.applied.get(transferIdFor("k1", "late").toString())).toBe(130);
 		expect(await engine.settle("k1", { post: 100, overage: 30 })).toMatchObject({
-			outcome: "late_required",
+			outcome: "late_settled",
+			resumed: true,
 		});
-		expect(journal.debtOf("b"), "a repeat reverses nothing more").toBe(0);
+		expect(journal.debtOf("b"), "a repeat changes nothing").toBe(130);
+		expect(ledger.applied.get(transferIdFor("k1", "late").toString())).toBe(130);
 	});
 });
 
@@ -673,5 +697,242 @@ describe("#177 r6 (A): EVERY completion — a resume of a stored intent included
 			state: "settling",
 		});
 		expect(ledger.count("h1", "post")).toBe(0);
+	});
+});
+
+// reserve at t=1,000 → ttlAt = 1,000 + 50 + 50 + 900,000; the sweeper's default grace is 60 s.
+const TTL_AT = 1_000 + 100 + 900_000;
+const SWEEPABLE = TTL_AT + 60_000 + 1;
+
+describe("1c-1: the late path enforces the same intent contract", () => {
+	it("a broken intent on an `expiring` row is refused — nothing recorded, nothing charged, no debt", async () => {
+		for (const intent of [
+			{ post: 101, overage: 0 },
+			{ post: 60, overage: 30 },
+			{ post: -1, overage: 0 },
+		]) {
+			const { journal, ledger, engine } = setup();
+			await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+			await journal.writeTx(() => journal.cas("k1", "open", "expiring"));
+			await expect(engine.settle("k1", intent), JSON.stringify(intent)).rejects.toBeInstanceOf(
+				InvalidSettlementIntentError,
+			);
+			expect(journal.get("k1"), JSON.stringify(intent)).toMatchObject({
+				state: "expiring",
+				lateAmount: null,
+			});
+			expect(ledger.count("k1", "late"), JSON.stringify(intent)).toBe(0);
+			expect(journal.debtOf("b"), JSON.stringify(intent)).toBe(0);
+		}
+	});
+});
+
+describe("1c-1: the sweeper", () => {
+	it("expires an `open` hold only PAST ttlAt + grace, by the ledger's answer (`expired`, hold_expired_unsettled), and writes its heartbeat", async () => {
+		const { journal, ledger, engine, clock } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		clock.now = TTL_AT + 60_000; // not yet past the grace
+		expect((await engine.sweep()).expired).toEqual([]);
+		expect(journal.get("k1")?.state).toBe("open");
+		expect(journal.heartbeat()).toBe(TTL_AT + 60_000);
+		ledger.expired.add("k1");
+		clock.now = SWEEPABLE;
+		expect((await engine.sweep()).expired).toEqual(["k1"]);
+		expect(journal.get("k1")).toMatchObject({
+			state: "expired",
+			terminalKind: "hold_expired_unsettled",
+		});
+		expect(ledger.count("k1", "post")).toBe(0);
+	});
+
+	it("a settlement that claimed first wins: the sweeper's CAS loses and does nothing", async () => {
+		const { journal, engine, clock } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await engine.settle("k1", { post: 40, overage: 0 });
+		clock.now = SWEEPABLE;
+		expect((await engine.sweep()).expired).toEqual([]);
+		expect(journal.get("k1")?.state).toBe("settled");
+	});
+
+	it("a void the ledger answers POSTED or NOT FOUND for an expiring hold is a terminal incident, never `expired`", async () => {
+		for (const answer of ["posted", "not_found"] as const) {
+			const { journal, ledger, engine, clock } = setup();
+			await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+			ledger.releaseAnswer = answer;
+			clock.now = SWEEPABLE;
+			await engine.sweep();
+			expect(journal.get("k1"), answer).toMatchObject({
+				state: "expiring",
+				incident: { kind: "expiry_ledger_disagrees", voided: answer },
+			});
+		}
+	});
+
+	it("an unconfirmed void leaves the hold `expiring` (in flight); the next sweep finishes it", async () => {
+		const { journal, ledger, engine, clock } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		ledger.releaseAnswer = "unknown";
+		clock.now = SWEEPABLE;
+		await engine.sweep();
+		expect(journal.get("k1")?.state).toBe("expiring");
+		ledger.releaseAnswer = "expired";
+		expect((await engine.sweep()).replayed).toEqual([{ holdId: "k1", outcome: "expired" }]);
+		expect(journal.get("k1")?.state).toBe("expired");
+	});
+
+	it("REPLAY: a `settling` row whose winner crashed after the post is completed by the sweep, from its stored intent", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		ledger.crashAfter = "post";
+		await expect(engine.settle("k1", { post: 70, overage: 0 })).rejects.toThrow(/died after post/);
+		expect((await engine.sweep()).replayed).toEqual([{ holdId: "k1", outcome: "settled" }]);
+		expect(journal.get("k1")?.state).toBe("settled");
+		expect(ledger.applied.get(transferIdFor("k1", "post").toString())).toBe(70);
+	});
+
+	it("REPLAY never resumes a row carrying an INCIDENT", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		ledger.chargeAnswer = { failed: true, role: "overage", transferIds: ["1", "2"] };
+		await expect(engine.settle("k1", { post: 100, overage: 10 })).rejects.toThrow();
+		ledger.chargeAnswer = null;
+		const posts = ledger.count("k1", "post");
+		const report = await engine.sweep();
+		expect(report.replayed).toEqual([]);
+		expect(ledger.count("k1", "post")).toBe(posts);
+		expect(journal.get("k1")?.incident).not.toBeNull();
+	});
+
+	it("REPLAY: a late settlement whose charge landed but was never marked is completed — charged once", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await journal.writeTx(() => journal.cas("k1", "open", "expiring"));
+		ledger.crashAfter = "chargeDebt";
+		await expect(engine.settle("k1", { post: 60, overage: 0 })).rejects.toThrow(
+			/died after chargeDebt/,
+		);
+		expect(journal.get("k1")).toMatchObject({ lateAmount: 60, lateCharged: false });
+		expect(journal.lateUncharged().map((r) => r.holdId)).toEqual(["k1"]);
+		const report = await engine.sweep();
+		expect(report.lateCharged).toEqual(["k1"]);
+		expect(journal.get("k1")).toMatchObject({ lateAmount: 60, lateCharged: true });
+		expect(ledger.debt.get("b"), "charged once").toBe(60);
+	});
+
+	it("one row whose step THROWS is reported and the sweep goes on: the next row is still expired", async () => {
+		const { journal, ledger, engine, clock } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await engine.reserve({ holdKey: "k2", budgetId: "b", amount: 100 });
+		ledger.releaseThrows.add("k1");
+		ledger.expired.add("k2");
+		clock.now = SWEEPABLE;
+		const report = await engine.sweep();
+		expect(report.errors.map((e) => e.holdId)).toEqual(["k1"]);
+		expect(report.expired).toEqual(["k2"]);
+		expect(journal.get("k1")?.state, "claimed; finished by a later sweep").toBe("expiring");
+	});
+});
+
+describe("1c-1: the independent detector", () => {
+	const detector = (journal: HoldJournal, clock: { now: number }) =>
+		new HoldDetector(journal, { sweepIntervalMs: 30_000, now: () => clock.now });
+
+	it("an EMPTY journal with a fresh heartbeat reads as readable, zero incidents — distinct from an unreadable one", async () => {
+		const { journal, engine, clock } = setup();
+		await engine.sweep();
+		expect(detector(journal, clock).check()).toEqual({
+			readable: true,
+			incidents: [],
+			counts: { open: 0, inFlight: 0, lateUncharged: 0, rowIncidents: 0 },
+		});
+	});
+
+	it("an UNREADABLE journal is `readable: false` — never zero counts", () => {
+		const { journal, clock } = setup();
+		journals.splice(journals.indexOf(journal), 1);
+		journal.close();
+		const r = detector(journal, clock).check();
+		expect(r.readable).toBe(false);
+		expect(r).not.toHaveProperty("counts");
+	});
+
+	it("a sweeper that never ran, or whose heartbeat is stale, is an incident", async () => {
+		const { journal, engine, clock } = setup();
+		expect(detector(journal, clock).check()).toMatchObject({
+			incidents: [{ kind: "sweeper_never_ran" }],
+		});
+		await engine.sweep();
+		clock.now += 60_001; // > 2 intervals
+		expect(detector(journal, clock).check()).toMatchObject({
+			incidents: [{ kind: "sweeper_stale", ageMs: 60_001 }],
+		});
+	});
+
+	it("a hold that is merely SWEEPABLE (past ttlAt + grace, within two sweep intervals) is not overdue — no false incident", async () => {
+		const { journal, engine, clock } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		clock.now = SWEEPABLE + 59_000; // < ttlAt + grace + 2 × 30 s
+		await journal.writeTx(() => journal.recordHeartbeat(clock.now));
+		expect(detector(journal, clock).check()).toEqual({
+			readable: true,
+			incidents: [],
+			counts: { open: 0, inFlight: 0, lateUncharged: 0, rowIncidents: 0 },
+		});
+	});
+
+	it("with the sweeper DISABLED, an overdue `open` hold is an incident (not just stale)", async () => {
+		const { journal, engine, clock } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		clock.now = TTL_AT + 60_000 + 60_001;
+		const r = detector(journal, clock).check();
+		expect(r).toMatchObject({ readable: true });
+		if (!r.readable) throw new Error("readable");
+		expect(r.incidents).toContainEqual({ kind: "open_overdue", holdIds: ["k1"] });
+	});
+
+	it("with the sweeper's WRITES FAILING, the detector still raises: no fresh heartbeat, the hold overdue", async () => {
+		const { journal, engine, clock } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await engine.sweep(); // one good heartbeat at t=1,000
+		const realWriteTx = journal.writeTx.bind(journal);
+		journal.writeTx = (() => Promise.reject(new Error("disk full"))) as typeof journal.writeTx;
+		clock.now = TTL_AT + 60_000 + 60_001;
+		await expect(engine.sweep()).rejects.toThrow(/disk full/);
+		journal.writeTx = realWriteTx;
+		const r = detector(journal, clock).check();
+		if (!r.readable) throw new Error("readable");
+		expect(r.incidents.map((i) => i.kind)).toEqual(["sweeper_stale", "open_overdue"]);
+	});
+
+	it("an overdue in-flight row, an overdue uncharged late settlement, and every row incident are each reported", async () => {
+		const { journal, ledger, engine, clock } = setup();
+		await engine.reserve({ holdKey: "s", budgetId: "b", amount: 100 });
+		await engine.reserve({ holdKey: "l", budgetId: "b", amount: 100 });
+		await engine.reserve({ holdKey: "i", budgetId: "b", amount: 100 });
+		ledger.crashAfter = "post"; // s: stuck `settling`
+		await expect(engine.settle("s", { post: 10, overage: 0 })).rejects.toThrow();
+		await journal.writeTx(() => journal.cas("l", "open", "expiring"));
+		ledger.crashAfter = "chargeDebt"; // l: late recorded, its charge never marked
+		await expect(engine.settle("l", { post: 20, overage: 0 })).rejects.toThrow();
+		ledger.chargeAnswer = { failed: true, role: "overage", transferIds: ["1", "2"] };
+		await expect(engine.settle("i", { post: 100, overage: 5 })).rejects.toThrow();
+		// The sweeper is alive (a fresh heartbeat) but has not resolved these: no sweep runs.
+		clock.now = TTL_AT + 60_000 + 60_001;
+		await journal.writeTx(() => journal.recordHeartbeat(clock.now));
+		const r = detector(journal, clock).check();
+		if (!r.readable) throw new Error("readable");
+		const sortIds = (i: (typeof r.incidents)[number]) =>
+			"holdIds" in i ? { ...i, holdIds: [...i.holdIds].sort() } : i;
+		// `l` is `expiring` (in flight) AND carries an uncharged late settlement: both readings.
+		expect(r.incidents.map(sortIds)).toEqual([
+			{ kind: "in_flight_overdue", holdIds: ["l", "s"] },
+			{ kind: "late_uncharged_overdue", holdIds: ["l"] },
+			{
+				kind: "row_incident",
+				holdId: "i",
+				incident: expect.objectContaining({ kind: "debt_charge_failed" }),
+			},
+		]);
+		expect(r.counts).toEqual({ open: 0, inFlight: 2, lateUncharged: 1, rowIncidents: 1 });
 	});
 });
