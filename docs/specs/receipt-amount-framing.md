@@ -18,8 +18,8 @@ delegation posture states what its number covers. None of them qualifies the
 number itself.
 
 **v0.10 — cluster receipts name an agent key and a window, not a session.**
-New receipts are cluster receipts (`receipt-spec.md` §15). A cluster receipt
-covers every ledger transfer of one agent key's account over a system-defined
+Every receipt issued is a cluster receipt (`receipt-spec.md` §15). A cluster
+receipt covers every charge to one agent key's account over a system-defined
 window, so its scope line names the key:
 
 ```
@@ -27,17 +27,17 @@ $0.4820
 Charged to this agent key · delegated work bills to the delegate
 ```
 
-The claim line it accompanies is "charged to this agent key between `<start>`
-and `<end>` — $X", with the window's ledger timestamps rendered as RFC 3339 UTC.
-The scoped never-understates sentence reads "never understates the
-ledger-POSTed spend of this agent key over this window".
+The claim line it accompanies is "charged to this agent key between
+`<windowStart>` and `<windowEnd>` — $X", with the window's ledger timestamps
+rendered as RFC 3339 UTC. The scoped never-understates sentence reads "never
+understates the ledger-POSTed charges to this agent key in this window".
 
 - **The rule does not change.** The number stays unqualified, its scope stays
   named beneath it, and no floor is restored.
-- **The session form above stays in force for session receipts** — the
-  receipts issued before v0.10, which remain valid forever. A page renders each
-  receipt with its own kind's sentence, selected by `scope`, and never one
-  kind's sentence under the other's number.
+- **The session form above belongs to the reserved session kind**, which is
+  defined and never issued. A page renders each receipt with its own kind's
+  sentence, selected by `scope`, and never one kind's sentence under the
+  other's number.
 
 The `indeterminate` bound clause still holds — unknown coverage supports no
 bound in either direction — and lives in the R39 copy, not as an exception to
