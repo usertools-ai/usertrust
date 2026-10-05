@@ -73,7 +73,7 @@ function PostureRow({
 }
 
 /** Filled = attested by a system; outlined = asserted by a human or a fallback. */
-const ATTESTED_CHIP = "border-paper-emerald bg-paper-emerald font-bold text-paper";
+const ATTESTED_CHIP = "border-paper-emerald bg-paper-emerald font-bold text-[#08080A]";
 const ASSERTED_CHIP = "border-paper-steel/60 font-normal text-paper-steel";
 const CAVEATED_CHIP = "border-paper-amber/60 font-normal text-paper-amber";
 

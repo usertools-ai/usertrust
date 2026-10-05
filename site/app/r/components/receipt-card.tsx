@@ -40,19 +40,12 @@ export default function ReceiptCard({
 
 	return (
 		<div className="flex flex-col gap-4" data-testid="receipt-card">
-			<a
-				href="/"
-				className="inline-flex min-h-[44px] w-fit items-center rounded-full border border-white/20 bg-white/[0.012] px-4 py-2.5 text-sm font-medium tracking-tight text-paper/85 shadow-[0_1px_0_rgba(255,255,255,0.05)_inset,0_1px_2px_rgba(0,0,0,0.35),0_6px_16px_rgba(0,0,0,0.28)] transition-all duration-300 hover:-translate-y-px hover:border-ut/50 hover:bg-ut/[0.055] hover:text-ut"
-			>
-				usertrust
-			</a>
-
 			<section
-				className="overflow-hidden rounded-2xl border border-white/14 bg-[#10101f] shadow-[inset_0_1px_0_rgba(255,255,255,0.055),0_1px_2px_rgba(0,0,0,0.5),0_8px_20px_rgba(0,0,0,0.42),0_28px_64px_rgba(0,0,0,0.5)]"
+				className="ut-perf rounded-[0_0_14px_14px] border border-white/[0.11] bg-[#0B0B0F]/80 backdrop-blur-[13px]"
 				data-testid="receipt-card-body"
 			>
-				<header className="flex items-center gap-2.5 border-b border-white/[0.09] bg-[#0c0c22] px-6 py-3.5">
-					<span className="size-[7px] shrink-0 rounded-full bg-ut shadow-[0_0_0_3px_rgba(52,211,153,0.14)]" />
+				<header className="flex items-center gap-2.5 border-b border-white/[0.09] bg-white/[0.03] px-6 py-3.5">
+					<span className="size-[7px] shrink-0 rounded-full bg-ut shadow-[0_0_0_3px_rgba(232,181,75,0.16)]" />
 					<span className="text-[13px] font-semibold tracking-tight text-ut">Receipt</span>
 					<span className="font-mono text-[12.5px] text-paper/60">{model.receiptIdShort}</span>
 					<span className="ml-auto font-mono text-xs text-paper/38">{model.publicUrl}</span>
@@ -79,7 +72,7 @@ export default function ReceiptCard({
 					</h2>
 					<p className="m-0 text-[13.5px] text-paper/62">{model.action.byline}</p>
 					{work.kind === "session" ? (
-						<div className="mt-3 rounded-[10px] bg-paper p-3 text-ink">
+						<div className="mt-3 rounded-[10px] border border-white/[0.11] bg-white/[0.03] p-3 text-ink">
 							<SessionHeadlineScope claims={claims} tone="paper" />
 						</div>
 					) : null}
@@ -116,7 +109,7 @@ export default function ReceiptCard({
 					) : null}
 
 					{model.authority.length > 0 ? (
-						<div className="mt-[22px] rounded-[10px] border border-white/[0.09] bg-[#0c0c22] px-4 py-3.5">
+						<div className="mt-[22px] rounded-[10px] border border-white/[0.09] bg-white/[0.03] px-4 py-3.5">
 							<div className="mb-2.5 text-xs font-medium tracking-[0.15em] text-paper/38 uppercase">
 								Authority
 							</div>
@@ -199,7 +192,7 @@ export default function ReceiptCard({
 					</div>
 				</div>
 
-				<div className="border-t border-white/14 bg-[#0c0c22] px-6 pt-[22px] pb-6 shadow-[inset_0_12px_24px_-14px_rgba(0,0,0,0.75)]">
+				<div className="border-t border-white/14 bg-white/[0.03] px-6 pt-[22px] pb-6">
 					<h3 className="mb-3 text-xs font-medium tracking-[0.15em] text-paper/38 uppercase">
 						Invoice
 					</h3>
@@ -209,7 +202,7 @@ export default function ReceiptCard({
 					>
 						${model.amountUsd}
 					</div>
-					<div className="mt-4 rounded-[10px] bg-paper p-4 text-ink">
+					<div className="mt-4 rounded-[10px] border border-white/[0.11] bg-white/[0.03] p-4 text-ink">
 						<AmountScope claims={claims} />
 						<div className="mt-4">
 							<PostureChips claims={claims} />
@@ -265,7 +258,7 @@ export default function ReceiptCard({
 
 				<div className="border-t border-white/[0.09] px-6 py-[18px] pb-6">
 					<pre
-						className="overflow-x-auto rounded-lg border border-white/[0.09] bg-[#07071a] px-3.5 py-3 font-mono text-xs whitespace-pre text-paper/62"
+						className="overflow-x-auto rounded-lg border border-white/[0.09] bg-black/40 px-3.5 py-3 font-mono text-xs whitespace-pre text-paper/62"
 						data-testid="verify-command"
 					>
 						npx <span className="font-normal text-ut">usertrust-verify</span> receipt{" "}

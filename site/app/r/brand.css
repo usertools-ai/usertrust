@@ -1,0 +1,78 @@
+/*
+ * The /r/<receiptId> brand layer: the usertrust.ai look (ink on #08080A, gold as
+ * the one accent, silver neutrals, Usertools Sans + JetBrains Mono), applied to
+ * this route only.
+ *
+ * It works by re-pointing the design tokens the receipt components already use
+ * (text-ut, text-paper, border-warning, ...) inside `.ut-r`, so the components
+ * keep their class names and the page's logic is untouched. The rest of the
+ * site keeps its own palette.
+ *
+ * Fonts are bundled from this directory (not /public) so they ship under
+ * /_next/static, which usertrust.ai already proxies to this app.
+ */
+@font-face{font-family:'Usertools Sans';src:url('./fonts/UsertoolsSans-Regular.woff2') format('woff2');font-weight:400;font-display:swap}
+@font-face{font-family:'Usertools Sans';src:url('./fonts/UsertoolsSans-Medium.woff2') format('woff2');font-weight:500;font-display:swap}
+@font-face{font-family:'Usertools Sans';src:url('./fonts/UsertoolsSans-Bold.woff2') format('woff2');font-weight:700;font-display:swap}
+@font-face{font-family:'JetBrains Mono';src:url('./fonts/JetBrainsMono-Regular.woff2') format('woff2');font-weight:400;font-display:swap}
+@font-face{font-family:'JetBrains Mono';src:url('./fonts/JetBrainsMono-Medium.woff2') format('woff2');font-weight:500 700;font-display:swap}
+
+.ut-r{
+  --ink:#FFFFFF; --body:#9A9AA2; --line:rgba(255,255,255,.11);
+  --page:#08080A; --line-quiet:rgba(255,255,255,.06); --line-dash:rgba(255,255,255,.20);
+  --gold:#E8B54B; --gold-lo:#B98C2E; --silver:#C8CCD4; --silver-lo:#7E8490;
+
+  /* the site-wide tokens, re-pointed */
+  --color-brand-bg:#08080A;
+  --color-terminal:#0B0B0F;
+  --color-ut:#E8B54B;            /* the accent: a reached rung, a passed check */
+  --color-tim:#C8CCD4;
+  --color-tim-ink:#C8CCD4;
+  --color-warning:#FF7A2F;
+  --color-paper:#FFFFFF;         /* text on the dark ground */
+  --color-ink:#C8CCD4;           /* secondary text inside panels */
+  --color-paper-emerald:#E8B54B;
+  --color-paper-amber:#FF9A5C;
+  --color-paper-red:#F87171;
+  --color-paper-steel:#C8CCD4;
+  --font-sans:'Usertools Sans','Geist Variable',-apple-system,BlinkMacSystemFont,sans-serif;
+  --font-mono:'JetBrains Mono',ui-monospace,'SF Mono',SFMono-Regular,Menlo,monospace;
+  --font-display:var(--font-sans);
+
+  min-height:100vh;
+  color:#fff;
+  font-family:var(--font-sans);
+  font-size:15px;
+  line-height:1.6;
+  background:
+    radial-gradient(118% 78% at 50% -6%,rgba(232,181,75,.10) 0%,rgba(232,181,75,0) 62%),
+    radial-gradient(88% 66% at 12% 104%,rgba(200,204,212,.05) 0%,rgba(200,204,212,0) 66%),
+    linear-gradient(180deg,#0B0B10 0%,#08080A 56%,#0A0A11 100%);
+}
+
+/* ── the mark. Cloned from usertrust.ai's nav: Usertools Sans 700 in a pill,
+      26px box, 18.5px glyph, -.045em, a .7px same-colour stroke with
+      paint-order:stroke fill. Not rebuilt by eye. ───────────────────────── */
+.ut-r .brand{display:inline-flex;align-items:center;gap:9px}
+.ut-r .brand .mark{width:26px;height:26px;border-radius:7px;background:var(--gold);color:#08080A;
+             display:grid;place-items:center;
+             font:700 18.5px/1 'Usertools Sans',system-ui,sans-serif;letter-spacing:-.045em;
+             -webkit-text-stroke:.7px currentColor;paint-order:stroke fill}
+.ut-r .brand .word{font-size:16px;font-weight:500;letter-spacing:-.01em}
+.ut-r-nav{display:flex;align-items:center;justify-content:space-between;gap:24px;
+          height:70px;max-width:680px;margin:0 auto;padding:0 16px}
+@media(min-width:640px){.ut-r-nav{padding:0 24px}}
+.ut-r-nav a{color:inherit;text-decoration:none}
+.ut-r-nav .where{font:500 10.5px/1 var(--font-mono);letter-spacing:.14em;
+                 text-transform:uppercase;color:var(--silver-lo)}
+
+/* the receipt's torn top edge, drawn not pictured (usertrust.ai .receipt::before) */
+.ut-r .ut-perf{position:relative;margin-top:9px}
+.ut-r .ut-perf::before{content:'';position:absolute;left:-1px;right:-1px;top:-6px;height:7px;
+  background:radial-gradient(circle at 8px 0,transparent 0 5px,var(--line) 5px 5.9px,transparent 6px) repeat-x;
+  background-size:16px 7px}
+
+/* the copy chip's tooltip was a light chip on paper; keep it dark here */
+.ut-r .chit{background:#16161c;color:#EDEDF2;border:1px solid var(--line)}
+.ut-r a{text-underline-offset:2px}
+.ut-r ::selection{background:rgba(232,181,75,.35)}
