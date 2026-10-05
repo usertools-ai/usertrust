@@ -40,6 +40,12 @@ export type DetectorIncident =
 	| { kind: "in_flight_overdue"; holdIds: string[] }
 	/** Recorded late settlements overdue and still uncharged. */
 	| { kind: "late_uncharged_overdue"; holdIds: string[] }
+	/**
+	 * The audit chain is BROKEN (a definite finding about verified history): every record is
+	 * refused — admission included — until an operator reset. Raised on every check while it
+	 * lasts, whatever `auditEvents` says.
+	 */
+	| { kind: "audit_chain_broken"; reason: string; at: number; checkpointSequence: number | null }
 	/** Audit events overdue and still missing: the sweep did not record them. */
 	| { kind: "event_missing_overdue"; slot: "reserved" | "terminal" | "late"; holdIds: string[] }
 	/** A row carrying a recorded terminal incident: an operator must act on it. */
@@ -90,6 +96,7 @@ export class HoldDetector {
 		let late: HoldRow[];
 		let rowIncidents: HoldRow[];
 		let heartbeat: number | null;
+		let audit: ReturnType<HoldJournal["auditState"]>;
 		let missing: Array<["reserved" | "terminal" | "late", HoldRow[]]> = [];
 		try {
 			open = this.journal.openPast(overdueBefore);
@@ -97,6 +104,7 @@ export class HoldDetector {
 			late = this.journal.lateUncharged().filter((r) => r.ttlAt < overdueBefore);
 			rowIncidents = this.journal.incidents();
 			heartbeat = this.journal.heartbeat();
+			audit = this.journal.auditState();
 			if (this.auditEvents) {
 				const overdue = (rows: HoldRow[]) => rows.filter((r) => r.ttlAt < overdueBefore);
 				missing = [
@@ -120,6 +128,14 @@ export class HoldDetector {
 		}
 		if (late.length > 0) {
 			incidents.push({ kind: "late_uncharged_overdue", holdIds: late.map((r) => r.holdId) });
+		}
+		if (audit.state === "broken") {
+			incidents.push({
+				kind: "audit_chain_broken",
+				reason: audit.reason,
+				at: audit.at,
+				checkpointSequence: audit.checkpoint?.sequence ?? null,
+			});
 		}
 		for (const [slot, rows] of missing) {
 			if (rows.length > 0) {

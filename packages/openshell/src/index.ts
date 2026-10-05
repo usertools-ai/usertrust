@@ -6,6 +6,7 @@ export {
 	type AuditPort,
 	HOLD_EVENT_ACTOR,
 	type HoldEventKind,
+	type RefusalScope,
 	VaultAudit,
 } from "./audit.js";
 export {
@@ -41,6 +42,10 @@ export {
 } from "./gate.js";
 export { holdKey } from "./hold-key.js";
 export {
+	AuditChainBrokenError,
+	type AuditReset,
+	type AuditState,
+	type ChainCheckpoint,
 	HoldConflictError,
 	HoldJournal,
 	type HoldRow,

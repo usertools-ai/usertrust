@@ -241,11 +241,65 @@ export interface ChainHoldEvent {
 	hash: string;
 }
 
+/**
+ * The audit checkpoint's state, held in the journal (#191 r2). Every state, and every transition:
+ *  - `unset` → `valid`: the first record that verifies the chain from genesis (once).
+ *  - `valid` → `valid`: a record — the tail after the checkpoint verified, its hold events
+ *    absorbed, the checkpoint advanced (one journal transaction).
+ *  - `unset` | `valid` → `broken`: a DEFINITE finding about verified history (a record or the
+ *    sweep's full verification; scope `history`). The checkpoint is KEPT — it is the evidence.
+ *  - `broken` → `valid`: ONLY an operator reset ({@link HoldEngine.resetAuditChain}): the chain
+ *    re-verified from genesis, a chained reset event naming both heads, and a journaled entry.
+ * Nothing else moves it: a refusal in the unverified tail, or an I/O error, changes nothing.
+ * While `broken`, every record is refused at once (no re-verification per record).
+ */
+export type AuditState =
+	| { state: "unset" }
+	| { state: "valid"; checkpoint: ChainCheckpoint }
+	| {
+			state: "broken";
+			checkpoint: ChainCheckpoint | null;
+			reason: string;
+			at: number;
+	  };
+
+/** One operator reset, as journaled. */
+export interface AuditReset {
+	at: number;
+	operator: string;
+	reason: string;
+	/** The checkpoint the chain no longer agreed with (null: none had been established). */
+	previous: ChainCheckpoint | null;
+	/** The head re-verified from genesis, before the reset event. */
+	verifiedHead: ChainCheckpoint;
+	/** The chained reset event. */
+	resetEvent: RecordedEvent;
+}
+
+/** The audit chain is `broken`: nothing is recorded until an operator reset. */
+export class AuditChainBrokenError extends Error {
+	constructor(reason: string) {
+		super(
+			`openshell audit: the audit chain is BROKEN (${reason}) — nothing is recorded until an operator reset (HoldEngine.resetAuditChain)`,
+		);
+		this.name = "AuditChainBrokenError";
+	}
+}
+
 /** What one audit record produced: its event, the verified tail it read, the new checkpoint. */
 export interface ChainRecord {
 	event: RecordedEvent;
 	tail: ChainHoldEvent[];
 	checkpoint: ChainCheckpoint;
+}
+
+/** A refusal whose scope is `history` (see audit.ts's RefusalScope), recognised structurally. */
+function isHistoryRefusal(err: unknown): boolean {
+	return (
+		err instanceof Error &&
+		err.name === "AuditChainUnverifiableError" &&
+		(err as Error & { scope?: unknown }).scope === "history"
+	);
 }
 
 /**
@@ -1214,6 +1268,8 @@ export class HoldJournal {
 		produce: (row: HoldRow, from: ChainCheckpoint | null) => Promise<ChainRecord>,
 	): Promise<"recorded" | "already" | "not_eligible"> {
 		return this.runTx(async () => {
+			const st = this.auditState();
+			if (st.state === "broken") throw new AuditChainBrokenError(st.reason);
 			const row = this.get(holdId);
 			if (row === undefined || row.incident !== null) return "not_eligible" as const;
 			const set =
@@ -1232,7 +1288,7 @@ export class HoldJournal {
 					(row.lateState === "charged" || row.lateState === "zero"));
 			if (!eligible) return "not_eligible" as const;
 			const rec = await this.bounded(`audit ${slot} event`, () =>
-				produce(row, this.auditCheckpoint()),
+				produce(row, st.state === "valid" ? st.checkpoint : null),
 			);
 			for (const e of rec.tail) this.absorb(e);
 			const sql =
@@ -1244,6 +1300,12 @@ export class HoldJournal {
 			this.db.prepare(sql).run(slot === "reserved" ? rec.event.sequence : rec.event.hash, holdId);
 			this.setMeta("audit_checkpoint", JSON.stringify(rec.checkpoint));
 			return "recorded" as const;
+		}).catch(async (err: unknown) => {
+			// A DEFINITE finding about verified history: the checkpoint goes `broken` (kept).
+			if (isHistoryRefusal(err)) {
+				await this.writeTx(() => this.markAuditBroken((err as Error).message));
+			}
+			throw err;
 		});
 	}
 
@@ -1256,41 +1318,66 @@ export class HoldJournal {
 		else this.db.prepare(rule.sql).run(value, e.holdId, e.sequence);
 	}
 
-	/** The chain checkpoint, or null when the chain has never been verified for this journal. */
-	auditCheckpoint(): ChainCheckpoint | null {
-		const r = this.read(
+	/** The audit checkpoint's state (see {@link AuditState}). */
+	auditState(): AuditState {
+		const rows = this.read(
 			(db) =>
-				db.prepare("SELECT value FROM meta WHERE key = 'audit_checkpoint'").get() as
-					| { value: string }
-					| undefined,
+				db
+					.prepare("SELECT key, value FROM meta WHERE key IN ('audit_checkpoint', 'audit_broken')")
+					.all() as Array<{ key: string; value: string }>,
 		);
-		return r === undefined ? null : (JSON.parse(r.value) as ChainCheckpoint);
+		const get = (k: string) => rows.find((r) => r.key === k)?.value;
+		const cpRaw = get("audit_checkpoint");
+		const checkpoint = cpRaw === undefined ? null : (JSON.parse(cpRaw) as ChainCheckpoint);
+		const brokenRaw = get("audit_broken");
+		if (brokenRaw !== undefined) {
+			const b = JSON.parse(brokenRaw) as { reason: string; at: number };
+			return { state: "broken", checkpoint, reason: b.reason, at: b.at };
+		}
+		return checkpoint === null ? { state: "unset" } : { state: "valid", checkpoint };
 	}
 
 	/**
-	 * Forget the checkpoint (a full verification failed): the next record verifies the WHOLE
-	 * chain again, and refuses if it still does not verify. Must run inside {@link writeTx}.
+	 * `unset` | `valid` → `broken` (a definite finding about verified history). The FIRST finding
+	 * is kept; the checkpoint is never touched. Must run inside {@link writeTx}.
 	 */
-	clearAuditCheckpoint(): void {
-		this.requireTx("clearAuditCheckpoint");
-		this.db.prepare("DELETE FROM meta WHERE key = 'audit_checkpoint'").run();
+	markAuditBroken(reason: string): void {
+		this.requireTx("markAuditBroken");
+		this.db
+			.prepare(
+				"INSERT INTO meta (key, value) VALUES ('audit_broken', ?) ON CONFLICT (key) DO NOTHING",
+			)
+			.run(JSON.stringify({ reason, at: this.now() }));
 	}
 
-	/** When the whole chain was last fully verified (ms), or null. */
-	auditVerifiedAt(): number | null {
+	/**
+	 * `broken` → `valid`, for an operator reset only: every hold event of the re-verified chain is
+	 * absorbed, the checkpoint set past the chained reset event, the finding cleared, and the reset
+	 * journaled. Refused unless the state is `broken`. Must run inside {@link writeTx}.
+	 */
+	applyAuditReset(reset: AuditReset, tail: ChainHoldEvent[], checkpoint: ChainCheckpoint): void {
+		this.requireTx("applyAuditReset");
+		const broken = this.db.prepare("SELECT value FROM meta WHERE key = 'audit_broken'").get();
+		if (broken === undefined) throw new Error("hold journal: an audit reset needs a BROKEN chain");
+		for (const e of tail) this.absorb(e);
+		this.setMeta("audit_checkpoint", JSON.stringify(checkpoint));
+		this.db.prepare("DELETE FROM meta WHERE key = 'audit_broken'").run();
+		const logRaw = this.db.prepare("SELECT value FROM meta WHERE key = 'audit_resets'").get() as
+			| { value: string }
+			| undefined;
+		const log = logRaw === undefined ? [] : (JSON.parse(logRaw.value) as AuditReset[]);
+		this.setMeta("audit_resets", JSON.stringify([...log, reset]));
+	}
+
+	/** Every operator reset, oldest first. */
+	auditResets(): AuditReset[] {
 		const r = this.read(
 			(db) =>
-				db.prepare("SELECT value FROM meta WHERE key = 'audit_verified_at'").get() as
+				db.prepare("SELECT value FROM meta WHERE key = 'audit_resets'").get() as
 					| { value: string }
 					| undefined,
 		);
-		return r === undefined ? null : Number(r.value);
-	}
-
-	/** Record a full-verification attempt's time. Must run inside {@link writeTx}. */
-	recordAuditVerifiedAt(atMs: number): void {
-		this.requireTx("recordAuditVerifiedAt");
-		this.setMeta("audit_verified_at", String(atMs));
+		return r === undefined ? [] : (JSON.parse(r.value) as AuditReset[]);
 	}
 
 	/**

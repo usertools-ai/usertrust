@@ -48,7 +48,9 @@ export type HoldEventKind =
 	| "openshell.hold.settled"
 	| "openshell.hold.voided"
 	| "openshell.hold.expired_unsettled"
-	| "openshell.hold.late_settlement";
+	| "openshell.hold.late_settlement"
+	/** An operator reset of a broken chain (not a hold event: never absorbed into a row). */
+	| "openshell.audit.reset";
 
 export interface AuditPort {
 	/**
@@ -69,15 +71,33 @@ export interface AuditPort {
 		from: ChainCheckpoint | null,
 	): Promise<ChainRecord>;
 	/**
-	 * Verify the WHOLE chain from genesis up to `checkpoint` (or to its end, without one), and
-	 * that the checkpoint's event is on it. Throws {@link AuditChainUnverifiableError}.
+	 * Verify the WHOLE chain from genesis: up to `checkpoint` (and that the checkpoint's event is
+	 * on it), or, without one, to its end — returning the checkpoint at the end and every hold
+	 * event on the way (for an operator reset to absorb). Throws
+	 * {@link AuditChainUnverifiableError} with scope `history`.
 	 */
-	verifyFull(checkpoint: ChainCheckpoint | null): Promise<void>;
+	verifyFull(
+		checkpoint: ChainCheckpoint | null,
+	): Promise<{ checkpoint: ChainCheckpoint; tail: ChainHoldEvent[] }>;
 }
+
+/**
+ * Where a refusal lies, defined positively:
+ *  - `history`: bytes already VERIFIED are no longer as verified (the checkpoint's line is gone
+ *    or changed, the log is shorter than it, or a verification from genesis fails) — a definite
+ *    finding. The journal's checkpoint goes `broken` and stays so until an operator reset.
+ *  - `tail`: the bytes AFTER the checkpoint do not verify yet (a torn line, a bad link, an anchor
+ *    disagreement past the checkpoint, another segment) — this record is refused; the
+ *    checkpoint is untouched and the next record re-reads from it.
+ */
+export type RefusalScope = "history" | "tail";
 
 /** The chain could not be read in full, or does not verify: nothing may be appended on it. */
 export class AuditChainUnverifiableError extends Error {
-	constructor(why: string) {
+	constructor(
+		why: string,
+		readonly scope: RefusalScope,
+	) {
 		super(`openshell audit: the audit chain cannot be trusted as "absent" — ${why}`);
 		this.name = "AuditChainUnverifiableError";
 	}
@@ -90,20 +110,25 @@ type ChainEvent = Record<string, unknown> & {
 };
 
 /** One event verified as the successor of (`prevHash`, `prevSeq`): its link, sequence and hash. */
-function verifyLink(raw: string, prevHash: string, prevSeq: number): ChainEvent {
+function verifyLink(
+	raw: string,
+	prevHash: string,
+	prevSeq: number,
+	scope: RefusalScope,
+): ChainEvent {
 	const where = `sequence ${prevSeq + 1}`;
 	let e: Record<string, unknown>;
 	try {
 		e = JSON.parse(raw) as Record<string, unknown>;
 	} catch {
-		throw new AuditChainUnverifiableError(`${where} does not parse`);
+		throw new AuditChainUnverifiableError(`${where} does not parse`, scope);
 	}
 	const { hash, ...rest } = e;
 	if (typeof hash !== "string" || e.previousHash !== prevHash || e.sequence !== prevSeq + 1) {
-		throw new AuditChainUnverifiableError(`${where} does not follow sequence ${prevSeq}`);
+		throw new AuditChainUnverifiableError(`${where} does not follow sequence ${prevSeq}`, scope);
 	}
 	if (createHash("sha256").update(canonicalize(rest)).digest("hex") !== hash) {
-		throw new AuditChainUnverifiableError(`${where}: its hash does not match its content`);
+		throw new AuditChainUnverifiableError(`${where}: its hash does not match its content`, scope);
 	}
 	return e as ChainEvent;
 }
@@ -164,7 +189,12 @@ export class VaultAudit implements AuditPort {
 	): Promise<ChainRecord> {
 		this.refuseSegments();
 		const read = this.readFrom(from);
-		this.checkAnchor(read.checkpoint, read.headPrev);
+		// Without a checkpoint this read IS the verification of history; past one, it is the tail.
+		this.checkAnchor(
+			read.checkpoint,
+			read.headPrev,
+			from === null || from.sequence === 0 ? "history" : "tail",
+		);
 		this.lastScanned = read.events.length;
 		const tail = read.events.map(holdEvent).filter((e) => e !== null);
 		const found = tail.find(
@@ -182,7 +212,10 @@ export class VaultAudit implements AuditPort {
 		const after = this.readFrom(read.checkpoint);
 		const [line, ...extra] = after.events;
 		if (line === undefined || extra.length > 0 || line.hash !== appended.hash) {
-			throw new AuditChainUnverifiableError("the appended event is not the chain's next event");
+			throw new AuditChainUnverifiableError(
+				"the appended event is not the chain's next event",
+				"tail",
+			);
 		}
 		const own = holdEvent(line);
 		return {
@@ -226,19 +259,23 @@ export class VaultAudit implements AuditPort {
 			if (!ok) {
 				throw new AuditChainUnverifiableError(
 					`the verified checkpoint (sequence ${cp.sequence}) is no longer on the chain — truncated or rewritten`,
+					"history",
 				);
 			}
 			pos = nl + 1;
 		}
+		// From genesis, every line is history being verified; past a checkpoint, the tail.
+		const scope: RefusalScope = cp === GENESIS ? "history" : "tail";
 		const events: ChainEvent[] = [];
 		let checkpoint = cp;
 		while (pos < buf.length) {
 			const nl = buf.indexOf(0x0a, pos);
-			if (nl < 0) throw new AuditChainUnverifiableError("the log ends in a torn line");
+			if (nl < 0) throw new AuditChainUnverifiableError("the log ends in a torn line", "tail");
 			const e = verifyLink(
 				buf.subarray(pos, nl).toString("utf-8"),
 				checkpoint.hash,
 				checkpoint.sequence,
+				scope,
 			);
 			events.push(e);
 			headPrev = checkpoint.hash;
@@ -259,14 +296,14 @@ export class VaultAudit implements AuditPort {
 	 * log fsync'd, the sidecar write failed). No anchor: a legacy vault, as `verifyVault` allows.
 	 * An anchor ahead of the head is a truncation and refuses.
 	 */
-	private checkAnchor(head: ChainCheckpoint, headPrev: string | null): void {
+	private checkAnchor(head: ChainCheckpoint, headPrev: string | null, scope: RefusalScope): void {
 		const metaPath = `${this.logPath}.meta`;
 		if (!existsSync(metaPath)) return;
 		let a: { lastHash?: unknown; sequence?: unknown };
 		try {
 			a = JSON.parse(readFileSync(metaPath, "utf-8")) as typeof a;
 		} catch {
-			throw new AuditChainUnverifiableError("the .meta head anchor does not parse");
+			throw new AuditChainUnverifiableError("the .meta head anchor does not parse", scope);
 		}
 		const isHead = a.sequence === head.sequence && a.lastHash === head.hash;
 		const oneBehind =
@@ -274,47 +311,74 @@ export class VaultAudit implements AuditPort {
 		if (!isHead && !oneBehind) {
 			throw new AuditChainUnverifiableError(
 				`the .meta head anchor (sequence ${String(a.sequence)}) disagrees with the verified head (sequence ${head.sequence}) — truncated or rewritten`,
+				scope,
 			);
 		}
 	}
 
-	async verifyFull(checkpoint: ChainCheckpoint | null): Promise<void> {
+	async verifyFull(
+		checkpoint: ChainCheckpoint | null,
+	): Promise<{ checkpoint: ChainCheckpoint; tail: ChainHoldEvent[] }> {
 		this.refuseSegments();
 		const cp = checkpoint === null || checkpoint.sequence === 0 ? null : checkpoint;
+		const tail: ChainHoldEvent[] = [];
 		if (!existsSync(this.logPath)) {
-			if (cp !== null) throw new AuditChainUnverifiableError("the log is gone");
-			return;
+			if (cp !== null) throw new AuditChainUnverifiableError("the log is gone", "history");
+			return { checkpoint: GENESIS, tail };
 		}
 		// Up to the checkpoint: those bytes are immutable while this port holds the lock, so a
-		// concurrent record (which appends after them) cannot race this read. Streamed, so the
-		// event loop is never held for the whole chain.
+		// concurrent record (which appends after them) cannot race this read. Without one, to the
+		// end as it is now. Streamed, so the event loop is never held for the whole chain.
 		const end = cp === null ? sizeOf(this.logPath) : cp.offset;
-		if (end === 0) return;
-		let prevHash = GENESIS_HASH;
-		let prevSeq = 0;
+		let reached: ChainCheckpoint = GENESIS;
 		let offset = 0;
 		let carry: Buffer = Buffer.alloc(0);
-		for await (const chunk of createReadStream(this.logPath, { start: 0, end: end - 1 })) {
-			carry = carry.length === 0 ? (chunk as Buffer) : Buffer.concat([carry, chunk as Buffer]);
-			let pos = 0;
-			for (let nl = carry.indexOf(0x0a); nl >= 0; nl = carry.indexOf(0x0a, pos)) {
-				const e = verifyLink(carry.subarray(pos, nl).toString("utf-8"), prevHash, prevSeq);
-				prevHash = e.hash;
-				prevSeq = e.sequence;
-				offset += nl + 1 - pos;
-				pos = nl + 1;
+		if (end > 0) {
+			for await (const chunk of createReadStream(this.logPath, { start: 0, end: end - 1 })) {
+				carry = carry.length === 0 ? (chunk as Buffer) : Buffer.concat([carry, chunk as Buffer]);
+				let pos = 0;
+				for (let nl = carry.indexOf(0x0a); nl >= 0; nl = carry.indexOf(0x0a, pos)) {
+					const e = verifyLink(
+						carry.subarray(pos, nl).toString("utf-8"),
+						reached.hash,
+						reached.sequence,
+						"history",
+					);
+					if (cp === null) {
+						const h = holdEvent(e);
+						if (h !== null) tail.push(h);
+					}
+					reached = {
+						offset: offset + nl + 1 - pos,
+						lineStart: offset,
+						sequence: e.sequence,
+						hash: e.hash,
+					};
+					offset += nl + 1 - pos;
+					pos = nl + 1;
+				}
+				carry = carry.subarray(pos);
 			}
-			carry = carry.subarray(pos);
 		}
-		if (carry.length > 0) throw new AuditChainUnverifiableError("the log ends in a torn line");
-		if (offset !== end) {
-			throw new AuditChainUnverifiableError("the log is shorter than the verified checkpoint");
-		}
-		if (cp !== null && (prevHash !== cp.hash || prevSeq !== cp.sequence)) {
+		if (carry.length > 0) {
 			throw new AuditChainUnverifiableError(
-				`the verified checkpoint (sequence ${cp.sequence}) is no longer on the chain — rewritten`,
+				"the log ends in a torn line",
+				cp === null ? "tail" : "history",
 			);
 		}
+		if (offset !== end) {
+			throw new AuditChainUnverifiableError(
+				"the log is shorter than the verified checkpoint",
+				"history",
+			);
+		}
+		if (cp !== null && (reached.hash !== cp.hash || reached.sequence !== cp.sequence)) {
+			throw new AuditChainUnverifiableError(
+				`the verified checkpoint (sequence ${cp.sequence}) is no longer on the chain — rewritten`,
+				"history",
+			);
+		}
+		return { checkpoint: cp ?? reached, tail };
 	}
 
 	/** Release the vault's audit lock. */
@@ -331,20 +395,24 @@ export class VaultAudit implements AuditPort {
 		if (other.length > 0) {
 			throw new AuditChainUnverifiableError(
 				`the chain has other segments (${other.join(", ")}), which this middleware does not verify`,
+				"tail",
 			);
 		}
 	}
 
 	private readBytes(start: number): Buffer {
 		if (!existsSync(this.logPath)) {
-			if (start > 0) throw new AuditChainUnverifiableError("the log is gone");
+			if (start > 0) throw new AuditChainUnverifiableError("the log is gone", "history");
 			return Buffer.alloc(0);
 		}
 		const fd = openSync(this.logPath, "r");
 		try {
 			const size = fstatSync(fd).size;
 			if (size < start) {
-				throw new AuditChainUnverifiableError("the log is shorter than the verified checkpoint");
+				throw new AuditChainUnverifiableError(
+					"the log is shorter than the verified checkpoint",
+					"history",
+				);
 			}
 			const buf = Buffer.alloc(size - start);
 			let got = 0;

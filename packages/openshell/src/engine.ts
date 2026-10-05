@@ -22,8 +22,9 @@
  * reservation, never strand a posted hold in `settling` with its overage uncharged.
  */
 
-import type { AuditPort, HoldEventKind } from "./audit.js";
+import { AuditChainUnverifiableError, type AuditPort, type HoldEventKind } from "./audit.js";
 import {
+	type AuditReset,
 	type EventSlot,
 	type HoldJournal,
 	type HoldRow,
@@ -73,10 +74,12 @@ export interface SweepReport {
 	/** Audit events the sweep recorded (each missing one, once). */
 	events: Array<{ holdId: string; slot: EventSlot }>;
 	/**
-	 * The full chain verification this sweep: `ok`, `failed` (the checkpoint is cleared, so every
-	 * record re-verifies from genesis and refuses), `not_due`, or `no_audit`.
+	 * The full chain verification this sweep: `ok`; `broken` (a definite finding — or the chain
+	 * was already broken: the checkpoint is kept, records refuse, the detector raises it, and only
+	 * an operator reset resumes); `error` (not a finding — an I/O error, or the unverified tail:
+	 * retried next sweep, nothing changed); `not_due`; or `no_audit`.
 	 */
-	auditVerify: "ok" | "failed" | "not_due" | "no_audit";
+	auditVerify: "ok" | "broken" | "error" | "not_due" | "no_audit";
 }
 
 /**
@@ -282,6 +285,8 @@ export class HoldEngine {
 
 	private readonly expiryGraceMs: number;
 	private readonly fullVerifyMs: number;
+	/** This instance's last successful full verification (ms) — in memory ONLY, by design. */
+	private fullVerifiedAt: number | null = null;
 
 	/** The applied-marker id of a hold's late-settlement debt. */
 	private lateId(holdKey: string): string {
@@ -523,6 +528,50 @@ export class HoldEngine {
 			return { admitted: false, reason: "hold_expired" };
 		}
 		return { admitted: false, reason: row?.state === "open" ? "hold_expired" : "not_open" };
+	}
+
+	/**
+	 * The OPERATOR RESET — the only way out of `broken` (see {@link AuditState}). The chain is
+	 * re-verified from genesis to its end (refused if it does not verify: repair it first, e.g.
+	 * `usertrust audit quarantine-tail`); a chained `openshell.audit.reset` event records the
+	 * checkpoint the chain no longer agreed with AND the head now verified; then, in one journal
+	 * transaction, every hold event of the chain is absorbed, the checkpoint set past the reset
+	 * event, the finding cleared, and the reset journaled.
+	 */
+	async resetAuditChain(by: { operator: string; reason: string }): Promise<AuditReset> {
+		const audit = this.opts.audit;
+		if (audit === undefined) throw new Error("hold engine: no audit port to reset");
+		const st = this.journal.auditState();
+		if (st.state !== "broken") {
+			throw new Error(`hold engine: the audit chain is ${st.state}, not broken — nothing to reset`);
+		}
+		const full = await audit.verifyFull(null);
+		const rec = await audit.record(
+			"openshell.audit.reset",
+			full.checkpoint.sequence,
+			{
+				holdId: "(audit chain)",
+				operator: by.operator,
+				reason: by.reason,
+				previous: st.checkpoint,
+				finding: st.reason,
+				verifiedHead: { sequence: full.checkpoint.sequence, hash: full.checkpoint.hash },
+			},
+			full.checkpoint,
+		);
+		const reset: AuditReset = {
+			at: this.now(),
+			operator: by.operator,
+			reason: by.reason,
+			previous: st.checkpoint,
+			verifiedHead: full.checkpoint,
+			resetEvent: rec.event,
+		};
+		await this.journal.writeTx(() =>
+			this.journal.applyAuditReset(reset, [...full.tail, ...rec.tail], rec.checkpoint),
+		);
+		this.fullVerifiedAt = this.now();
+		return reset;
 	}
 
 	/**
@@ -810,7 +859,7 @@ export class HoldEngine {
 		}
 		// 5. Every MISSING audit event, once each — reserved first, so a terminal event can name
 		//    its reserved event's sequence. (Without an audit port there is nothing to record.)
-		if (this.opts.audit !== undefined) {
+		if (this.opts.audit !== undefined && this.journal.auditState().state !== "broken") {
 			const missing: Array<[EventSlot, HoldRow[]]> = [
 				["reserved", this.journal.reservedWithoutEvent()],
 				["terminal", this.journal.terminalWithoutEvent()],
@@ -826,21 +875,30 @@ export class HoldEngine {
 				}
 			}
 		}
-		// 6. The WHOLE chain, up to the journal's checkpoint, re-verified at the first sweep and then
-		//    every `auditFullVerifyMs`: a record verifies only the bytes after the checkpoint, so
-		//    this bounds how long a rewrite of older bytes goes unseen. A failure clears the
-		//    checkpoint — every record then verifies from genesis, and refuses.
+		// 6. The WHOLE chain from genesis, up to the journal's checkpoint: at this ENGINE
+		//    INSTANCE's first sweep (in memory, never persisted — a restart always re-verifies, so
+		//    bytes rewritten while the process was down are seen), then every `auditFullVerifyMs`.
+		//    A definite finding moves the checkpoint to `broken` (kept, never cleared); anything
+		//    else is retried next sweep and changes nothing.
 		const audit = this.opts.audit;
-		const last = this.journal.auditVerifiedAt();
-		if (audit !== undefined && (last === null || now - last >= this.fullVerifyMs)) {
-			await this.journal.writeTx(() => this.journal.recordAuditVerifiedAt(now));
-			try {
-				await audit.verifyFull(this.journal.auditCheckpoint());
-				report.auditVerify = "ok";
-			} catch (error) {
-				await this.journal.writeTx(() => this.journal.clearAuditCheckpoint());
-				report.auditVerify = "failed";
-				report.errors.push({ holdId: "(audit chain)", error });
+		if (audit !== undefined) {
+			const st = this.journal.auditState();
+			if (st.state === "broken") {
+				report.auditVerify = "broken";
+			} else if (this.fullVerifiedAt === null || now - this.fullVerifiedAt >= this.fullVerifyMs) {
+				try {
+					await audit.verifyFull(st.state === "valid" ? st.checkpoint : null);
+					this.fullVerifiedAt = now;
+					report.auditVerify = "ok";
+				} catch (error) {
+					const definite =
+						error instanceof AuditChainUnverifiableError && error.scope === "history";
+					if (definite) {
+						await this.journal.writeTx(() => this.journal.markAuditBroken(error.message));
+					}
+					report.auditVerify = definite ? "broken" : "error";
+					report.errors.push({ holdId: "(audit chain)", error });
+				}
 			}
 		}
 		return report;

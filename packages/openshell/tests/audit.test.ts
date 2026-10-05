@@ -28,12 +28,15 @@ import {
 	type AuditPort,
 	HOLD_EVENT_ACTOR,
 	type HoldEventKind,
+	type RefusalScope,
 	VaultAudit,
 } from "../src/audit.js";
 import { HoldDetector } from "../src/detector.js";
 import { HoldEngine } from "../src/engine.js";
 import {
+	AuditChainBrokenError,
 	type ChainCheckpoint,
+	type ChainHoldEvent,
 	type ChainRecord,
 	HoldJournal,
 	type RecordedEvent,
@@ -56,6 +59,11 @@ class FakeAudit implements AuditPort {
 	failNext: "refuse" | "die_after" | null = null;
 	/** The chain does not verify: every record and full verify throws, nothing is appended. */
 	broken = false;
+	/** The scope a `broken` record refuses with (a full verify always refuses as `history`). */
+	brokenScope: RefusalScope = "history";
+	/** The next full verify throws this (e.g. an I/O error), once. */
+	verifyThrowsOnce: Error | null = null;
+	records = 0;
 	/** While set, an append waits on it. */
 	gate: Promise<void> | null = null;
 	/** Runs just before an append (e.g. the clock moving during the audit await). */
@@ -78,7 +86,10 @@ class FakeAudit implements AuditPort {
 		from: ChainCheckpoint | null,
 	): Promise<ChainRecord> {
 		const run = async (): Promise<ChainRecord> => {
-			if (this.broken) throw new AuditChainUnverifiableError("the chain breaks at index 0");
+			this.records++;
+			if (this.broken) {
+				throw new AuditChainUnverifiableError("the chain breaks at index 0", this.brokenScope);
+			}
 			const since = from?.sequence ?? 0;
 			const visible = this.events.filter((e) => e.sequence > since);
 			const tail = visible.map((e) => ({
@@ -118,9 +129,27 @@ class FakeAudit implements AuditPort {
 		return next;
 	}
 
-	async verifyFull(): Promise<void> {
+	async verifyFull(
+		checkpoint: ChainCheckpoint | null,
+	): Promise<{ checkpoint: ChainCheckpoint; tail: ChainHoldEvent[] }> {
 		this.verifies++;
-		if (this.broken) throw new AuditChainUnverifiableError("the chain breaks at index 0");
+		const once = this.verifyThrowsOnce;
+		this.verifyThrowsOnce = null;
+		if (once !== null) throw once;
+		if (this.broken)
+			throw new AuditChainUnverifiableError("the chain breaks at index 0", "history");
+		if (checkpoint !== null) return { checkpoint, tail: [] };
+		return {
+			checkpoint: this.cp(this.events.length),
+			tail: this.events
+				.filter((e) => e.kind.startsWith("openshell.hold."))
+				.map((e) => ({
+					kind: e.kind,
+					holdId: String(e.data.holdId),
+					sequence: e.sequence,
+					hash: e.hash,
+				})),
+		};
 	}
 
 	of(holdId: string, kind: HoldEventKind) {
@@ -464,7 +493,7 @@ describe("#191 r1 B: the checkpoint — every hold event before it is absorbed i
 		expect(journal.get("k1")?.terminalEventHash, "absorbed").toBe(
 			audit.of("k1", "openshell.hold.settled")[0]?.hash,
 		);
-		expect(journal.auditCheckpoint()?.sequence).toBe(3);
+		expect(journal.auditState()).toMatchObject({ state: "valid", checkpoint: { sequence: 3 } });
 		expect((await engine.sweep()).events).toEqual([]);
 		expect(audit.of("k1", "openshell.hold.settled")).toHaveLength(1);
 	});
@@ -487,15 +516,110 @@ describe("#191 r1 B: the sweep re-verifies the WHOLE chain — at the first swee
 		expect(audit.verifies).toBe(2);
 	});
 
-	it("a failed full verification clears the checkpoint and is reported — every record then verifies from genesis", async () => {
-		const { journal, audit, engine } = setup();
+	it("#191 r2: a failed full verification KEEPS the checkpoint and goes `broken`: every record refused at once (the port is not even asked), the detector raises it, the operator reset resumes", async () => {
+		const { journal, ledger, audit, engine, clock } = setup();
 		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
-		expect(journal.auditCheckpoint()).not.toBeNull();
+		const before = journal.auditState();
+		expect(before).toMatchObject({ state: "valid" });
 		audit.broken = true;
 		const r = await engine.sweep();
-		expect(r.auditVerify).toBe("failed");
-		expect(r.errors.map((e) => e.holdId)).toContain("(audit chain)");
-		expect(journal.auditCheckpoint()).toBeNull();
+		expect(r.auditVerify).toBe("broken");
+		const st = journal.auditState();
+		expect(st).toMatchObject({ state: "broken" });
+		expect(st.state === "broken" && st.checkpoint, "the evidence is kept").toEqual(
+			before.state === "valid" && before.checkpoint,
+		);
+		// Records refuse at once — no re-verification, no port call — and admission fails closed.
+		audit.broken = false; // even a chain that would now verify: broken stays broken
+		const asked = audit.records;
+		await expect(
+			engine.reserve({ holdKey: "k2", budgetId: "b", amount: 10 }),
+		).rejects.toBeInstanceOf(AuditChainBrokenError);
+		expect(audit.records, "the port is never asked while broken").toBe(asked);
+		expect(ledger.count("k2", "void"), "the unrecorded admission is released").toBe(1);
+		const det = new HoldDetector(journal, {
+			sweepIntervalMs: 10_000,
+			now: () => clock.now,
+		}).check();
+		expect(det.readable && det.incidents.map((i) => i.kind)).toContain("audit_chain_broken");
+		const again = await engine.sweep();
+		expect(again.auditVerify, "stays broken").toBe("broken");
+		expect(again.errors, "no record is even attempted while broken").toEqual([]);
+		// The ONLY way out: the operator reset, journaled with both heads, chained.
+		const reset = await engine.resetAuditChain({ operator: "ops@example", reason: "investigated" });
+		expect(reset).toMatchObject({
+			operator: "ops@example",
+			previous: before.state === "valid" ? before.checkpoint : null,
+			verifiedHead: { sequence: audit.events.length - 1 },
+		});
+		expect(audit.events.at(-1)).toMatchObject({ kind: "openshell.audit.reset" });
+		expect(journal.auditResets()).toEqual([reset]);
+		expect(journal.auditState()).toMatchObject({
+			state: "valid",
+			checkpoint: { sequence: audit.events.length },
+		});
+		expect(await engine.reserve({ holdKey: "k3", budgetId: "b", amount: 10 })).toMatchObject({
+			admitted: true,
+		});
+	});
+
+	it("#191 r2: the operator reset is refused unless the chain is broken, and refused (still broken) while it does not verify from genesis", async () => {
+		const { journal, audit, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await expect(engine.resetAuditChain({ operator: "o", reason: "r" })).rejects.toThrow(
+			/not broken/,
+		);
+		audit.broken = true;
+		await engine.sweep();
+		// ONLY the genesis verification fails (a record would succeed): the reset must rest on it.
+		audit.broken = false;
+		audit.verifyThrowsOnce = new AuditChainUnverifiableError(
+			"sequence 1 does not parse",
+			"history",
+		);
+		await expect(engine.resetAuditChain({ operator: "o", reason: "r" })).rejects.toBeInstanceOf(
+			AuditChainUnverifiableError,
+		);
+		expect(
+			audit.events.map((e) => e.kind),
+			"no reset event",
+		).not.toContain("openshell.audit.reset");
+		expect(journal.auditState()).toMatchObject({ state: "broken" });
+		expect(journal.auditResets()).toEqual([]);
+	});
+
+	it("#191 r2: NOT a finding changes nothing — an I/O error in the full verify (`error`, retried next sweep) and a TAIL refusal in a record", async () => {
+		const { journal, audit, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		audit.verifyThrowsOnce = Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" });
+		expect((await engine.sweep()).auditVerify).toBe("error");
+		expect(journal.auditState()).toMatchObject({ state: "valid" });
+		expect(
+			(await engine.sweep()).auditVerify,
+			"retried at once: never verified this instance",
+		).toBe("ok");
+		audit.broken = true;
+		audit.brokenScope = "tail";
+		await expect(
+			engine.reserve({ holdKey: "k2", budgetId: "b", amount: 10 }),
+		).rejects.toBeInstanceOf(AuditChainUnverifiableError);
+		expect(journal.auditState()).toMatchObject({ state: "valid" });
+		audit.broken = false;
+		expect(await engine.reserve({ holdKey: "k3", budgetId: "b", amount: 10 })).toMatchObject({
+			admitted: true,
+		});
+	});
+
+	it("#191 r2: the first full verify is per ENGINE INSTANCE (in memory): a restart within the interval verifies again", async () => {
+		const { journal, ledger, audit, clock } = setup();
+		const make = () =>
+			new HoldEngine(journal, ledger, { holdTtlSeconds: 900, now: () => clock.now, audit });
+		expect((await make().sweep()).auditVerify).toBe("ok");
+		clock.now += 1_000; // well inside the hour
+		expect((await make().sweep()).auditVerify, "a new instance verifies at its first sweep").toBe(
+			"ok",
+		);
+		expect(audit.verifies).toBe(2);
 	});
 });
 
@@ -852,6 +976,82 @@ describe("#191 r1 B: VaultAudit verifies from the checkpoint — and refuses a c
 		}
 		expect(cp.sequence).toBe(100_005);
 		expect(verifyVault(join(v, VAULT_DIR)).valid).toBe(true);
+	});
+});
+
+/** Rewrite the WHOLE chain consistently: edit events, recompute every hash, re-anchor .meta. */
+function rewriteConsistently(v: string, edit: (e: Record<string, unknown>) => void) {
+	let prev = GENESIS_HASH;
+	const out: string[] = [];
+	let seq = 0;
+	for (const raw of lines(v)) {
+		const { hash: _old, ...e } = JSON.parse(raw) as Record<string, unknown>;
+		edit(e);
+		e.previousHash = prev;
+		e.sequence = ++seq;
+		const hash = createHash("sha256").update(canonicalize(e)).digest("hex");
+		out.push(canonicalize({ ...e, hash }));
+		prev = hash;
+	}
+	writeFileSync(eventsFile(v), `${out.join("\n")}\n`);
+	writeFileSync(`${eventsFile(v)}.meta`, JSON.stringify({ lastHash: prev, sequence: seq }));
+}
+
+describe("#191 r2 (reviewer2's P1): a CONSISTENT rewrite of verified history is found, kept, refused, raised", () => {
+	it("every hash recomputed and .meta re-anchored — it verifies from genesis, but not against the KEPT checkpoint: broken, refused, raised", async () => {
+		const v = vault();
+		const a = VaultAudit.open(v);
+		closers.push(() => a.release());
+		const path = join(tmp("openshell-r2-"), "holds.db");
+		const clock = { now: 1_000 };
+		const journal = openJournal(path, clock);
+		const ledger = new FakeLedger();
+		ledger.balances.set("b", 1_000);
+		const make = () =>
+			new HoldEngine(journal, ledger, { holdTtlSeconds: 900, now: () => clock.now, audit: a });
+		await make().reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await make().reserve({ holdKey: "k2", budgetId: "b", amount: 50 });
+		rewriteConsistently(v, (e) => {
+			const d = e.data as { amount?: number };
+			if (d.amount === 100) d.amount = 1; // the reservation's amount, rewritten
+		});
+		expect(verifyVault(join(v, VAULT_DIR)).valid, "the rewrite verifies on its own").toBe(true);
+		const restarted = make(); // a new instance: its first sweep verifies in full
+		expect((await restarted.sweep()).auditVerify).toBe("broken");
+		expect(journal.auditState()).toMatchObject({ state: "broken", checkpoint: { sequence: 2 } });
+		await expect(
+			restarted.reserve({ holdKey: "k3", budgetId: "b", amount: 10 }),
+		).rejects.toBeInstanceOf(AuditChainBrokenError);
+		const det = new HoldDetector(journal, {
+			sweepIntervalMs: 10_000,
+			now: () => clock.now,
+		}).check();
+		expect(det.readable && det.incidents.map((i) => i.kind)).toContain("audit_chain_broken");
+	});
+
+	it("the same rewrite reached by a RECORD (not the sweep): the checkpoint line no longer matches — broken, not re-verified from genesis", async () => {
+		const v = vault();
+		const a = VaultAudit.open(v);
+		closers.push(() => a.release());
+		const journal = openJournal(join(tmp("openshell-r2-"), "holds.db"), { now: 1_000 });
+		const ledger = new FakeLedger();
+		ledger.balances.set("b", 1_000);
+		const engine = new HoldEngine(journal, ledger, {
+			holdTtlSeconds: 900,
+			now: () => 1_000,
+			audit: a,
+		});
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		rewriteConsistently(v, (e) => {
+			(e.data as { amount?: number }).amount = 1;
+		});
+		await expect(engine.settle("k1", { post: 1, overage: 0 })).resolves.toMatchObject({
+			outcome: "settled", // the settlement stands; its event is what is refused
+		});
+		expect(journal.auditState()).toMatchObject({ state: "broken" });
+		await expect(
+			engine.reserve({ holdKey: "k2", budgetId: "b", amount: 10 }),
+		).rejects.toBeInstanceOf(AuditChainBrokenError);
 	});
 });
 
