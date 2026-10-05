@@ -18,6 +18,7 @@ const COMMANDS = [
 	"secret",
 	"skill",
 	"ui",
+	"audit",
 ] as const;
 
 const argv = process.argv.slice(2);
@@ -125,6 +126,11 @@ switch (command) {
 	case "ui": {
 		const rest = argv.slice(argv.indexOf("ui") + 1).filter((a) => a !== "--json");
 		await import("./ui.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
+		break;
+	}
+	case "audit": {
+		const rest = argv.slice(argv.indexOf("audit") + 1).filter((a) => a !== "--json");
+		await import("./audit.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
 		break;
 	}
 	default: {

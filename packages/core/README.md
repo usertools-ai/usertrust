@@ -115,6 +115,7 @@ usertrust health        # Entropy diagnostics (6 signals, 0-100 score)
 usertrust verify        # Verify audit chain integrity (+ external anchors)
 usertrust anchor        # External anchoring: init|now|status|doctor|export|export-bundle|rotate|resume
 usertrust snapshot      # Checkpoint/restore vault state
+usertrust audit quarantine-tail [--dry-run]  # Move a TORN final log line aside, recorded on the chain
 usertrust tb            # TigerBeetle process management
 usertrust completions   # Shell completions (bash, zsh, fish)
 ```
