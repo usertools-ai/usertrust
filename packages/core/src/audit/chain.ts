@@ -82,6 +82,18 @@ export class AuditWriterLockHeldError extends Error {
 	}
 }
 
+/**
+ * The audit log's tail disagrees with its `.meta` head anchor: the log was truncated or
+ * rewritten. Nothing is appended — appending would launder the truncation (the sidecar would
+ * be rewritten to the shortened chain's new head).
+ */
+export class AuditTailMismatchError extends Error {
+	constructor(logPath: string, why: string) {
+		super(`Audit log ${logPath}: ${why}. Refusing to append.`);
+		this.name = "AuditTailMismatchError";
+	}
+}
+
 export interface CreateAuditWriterOptions {
 	/**
 	 * Take the vault's advisory lock NOW, in the factory, instead of at the first append.
@@ -369,13 +381,13 @@ function getLastEvent(logPath: string, cache: Map<string, CachedTail>): CachedTa
 	const lastLine = lines[lines.length - 1];
 	if (!lastLine) return null;
 
+	let event: (AuditEvent & { sequence?: number }) | undefined;
 	try {
-		const event = JSON.parse(lastLine) as AuditEvent & { sequence?: number };
-		const sequence = typeof event.sequence === "number" ? event.sequence : lines.length;
-		const tail: CachedTail = { hash: event.hash, sequence };
-		cache.set(logPath, tail);
-		return tail;
+		event = JSON.parse(lastLine) as AuditEvent & { sequence?: number };
 	} catch {
+		event = undefined;
+	}
+	if (event === undefined) {
 		const metaPath = `${logPath}.meta`;
 		if (existsSync(metaPath)) {
 			try {
@@ -389,6 +401,51 @@ function getLastEvent(logPath: string, cache: Map<string, CachedTail>): CachedTa
 			}
 		}
 		return null;
+	}
+	const sequence = typeof event.sequence === "number" ? event.sequence : lines.length;
+	reconcileTailWithAnchor(logPath, event, sequence);
+	const tail: CachedTail = { hash: event.hash, sequence };
+	cache.set(logPath, tail);
+	return tail;
+}
+
+/**
+ * The log's tail must agree with its `.meta` head anchor before anything is appended to it.
+ * Without this, a log whose last events were deleted is read from its shortened tail, the next
+ * append chains onto it, and the sidecar is rewritten to the new head — turning a truncation
+ * `verifyVault` would detect into an apparently valid history.
+ *
+ * Agreement, defined positively, as the two states `appendEvent` itself can leave:
+ *  - the anchor IS the tail (same sequence and hash) — every completed append; or
+ *  - the anchor is EXACTLY ONE event behind and is that event's predecessor — the log was
+ *    fsync'd and the sidecar write then failed (the documented partial success; the next
+ *    append rewrites the sidecar).
+ * No anchor: a legacy, unanchored vault (as `verifyVault` allows). Anything else — an anchor
+ * ahead of the tail, a different hash, or an unreadable anchor — refuses the append.
+ */
+function reconcileTailWithAnchor(
+	logPath: string,
+	tail: AuditEvent & { sequence?: number },
+	sequence: number,
+): void {
+	const metaPath = `${logPath}.meta`;
+	if (!existsSync(metaPath)) return;
+	let anchor: { lastHash?: unknown; sequence?: unknown };
+	try {
+		anchor = JSON.parse(readFileSync(metaPath, "utf-8")) as typeof anchor;
+	} catch {
+		throw new AuditTailMismatchError(logPath, "the .meta head anchor does not parse");
+	}
+	if (typeof anchor.lastHash !== "string" || typeof anchor.sequence !== "number") {
+		throw new AuditTailMismatchError(logPath, "the .meta head anchor is malformed");
+	}
+	const isTail = anchor.sequence === sequence && anchor.lastHash === tail.hash;
+	const oneBehind = anchor.sequence === sequence - 1 && anchor.lastHash === tail.previousHash;
+	if (!isTail && !oneBehind) {
+		throw new AuditTailMismatchError(
+			logPath,
+			`the log ends at sequence ${sequence} but its .meta head anchor records sequence ${anchor.sequence} (truncated or rewritten)`,
+		);
 	}
 }
 

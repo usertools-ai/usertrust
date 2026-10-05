@@ -20,8 +20,10 @@ export type {
 	SpendVelocityConfig,
 	TokenRateConfig,
 } from "./anomaly/types.js";
+export { canonicalize } from "./audit/canonical.js";
 export {
 	type AppendEventInput,
+	AuditTailMismatchError,
 	type AuditWriter,
 	AuditWriterLockHeldError,
 	type CreateAuditWriterOptions,
@@ -142,7 +144,7 @@ export { detectPII } from "./policy/pii.js";
 export type { CircuitBreakerSnapshot } from "./resilience/circuit.js";
 // Circuit breaker
 export { CircuitBreaker, CircuitBreakerRegistry, CircuitOpenError } from "./resilience/circuit.js";
-export { VAULT_DIR } from "./shared/constants.js";
+export { GENESIS_HASH, VAULT_DIR } from "./shared/constants.js";
 // Denial audit events — the kinds a consumer filters on, and the correlation
 // metadata a caught denial carries. A handle a caller cannot NAME is not a
 // handle, so the metadata shape is exported alongside the errors themselves.

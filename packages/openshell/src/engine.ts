@@ -47,6 +47,12 @@ export interface EngineOptions {
 	 * appended (the engine as 1c-1 left it).
 	 */
 	audit?: AuditPort;
+	/**
+	 * How often the sweep re-verifies the WHOLE audit chain up to the journal's checkpoint (ms;
+	 * default one hour, and always at the first sweep). A record verifies only the bytes after
+	 * the checkpoint, so this bounds how long a rewrite of OLDER bytes goes unseen.
+	 */
+	auditFullVerifyMs?: number;
 	now?: () => number;
 }
 
@@ -66,6 +72,11 @@ export interface SweepReport {
 	errors: Array<{ holdId: string; error: unknown }>;
 	/** Audit events the sweep recorded (each missing one, once). */
 	events: Array<{ holdId: string; slot: EventSlot }>;
+	/**
+	 * The full chain verification this sweep: `ok`, `failed` (the checkpoint is cleared, so every
+	 * record re-verifies from genesis and refuses), `not_due`, or `no_audit`.
+	 */
+	auditVerify: "ok" | "failed" | "not_due" | "no_audit";
 }
 
 /**
@@ -258,11 +269,19 @@ export class HoldEngine {
 		) {
 			throw new TypeError("hold engine: expiryGraceMs must be a non-negative whole number");
 		}
+		if (
+			opts.auditFullVerifyMs !== undefined &&
+			(!Number.isSafeInteger(opts.auditFullVerifyMs) || opts.auditFullVerifyMs <= 0)
+		) {
+			throw new TypeError("hold engine: auditFullVerifyMs must be a positive whole number");
+		}
 		this.now = opts.now ?? Date.now;
 		this.expiryGraceMs = opts.expiryGraceMs ?? 60_000;
+		this.fullVerifyMs = opts.auditFullVerifyMs ?? 3_600_000;
 	}
 
 	private readonly expiryGraceMs: number;
+	private readonly fullVerifyMs: number;
 
 	/** The applied-marker id of a hold's late-settlement debt. */
 	private lateId(holdKey: string): string {
@@ -352,11 +371,12 @@ export class HoldEngine {
 	): Promise<"recorded" | "already" | "not_eligible" | "no_audit"> {
 		const audit = this.opts.audit;
 		if (audit === undefined) return "no_audit";
-		return this.journal.recordEventOnce(holdKey, slot, (row) =>
+		return this.journal.recordEventOnce(holdKey, slot, (row, from) =>
 			audit.record(
 				eventKind(slot, row),
 				slot === "reserved" ? 0 : (row.reservedSeq ?? 0),
 				eventData(slot, row),
+				from,
 			),
 		);
 	}
@@ -481,16 +501,38 @@ export class HoldEngine {
 			},
 		});
 		if (!r.admitted) return { admitted: false, reason: r.reason };
-		// The `reserved` event is the durable admission registry: an admitted hold whose event
-		// cannot be recorded is RELEASED and the reservation fails closed — an authorized call is
-		// never absent from the chain.
+		// The `reserved` event is the durable admission registry: an admission completes only once
+		// it is recorded, and an authorized call is never absent from the chain.
 		try {
 			await this.recordEvent(holdKey, "reserved");
 		} catch (err) {
-			await this.release(holdKey).catch(() => undefined);
+			// Release ONLY an admission nobody completed: once any caller (a same-key retry) has
+			// recorded the event, the hold is that caller's admitted hold and this claim loses.
+			await this.releaseUnrecorded(holdKey).catch(() => undefined);
 			throw err;
 		}
-		return { admitted: true, existing: r.existing };
+		// The admission is decided AGAIN, from a read taken after the await (#191 r1): the row
+		// must still be `open`, with no incident, before `admitBy`, and — with an audit port —
+		// carry its recorded `reserved` event. Anything else is not an admission.
+		const row = this.journal.get(holdKey);
+		const recorded = this.opts.audit === undefined || row?.reservedSeq != null;
+		if (row?.state === "open" && row.incident === null && recorded) {
+			if (this.now() < row.admitBy) return { admitted: true, existing: r.existing };
+			// Past admitBy: no caller can be admitted on this hold any more — release it.
+			await this.release(holdKey).catch(() => undefined);
+			return { admitted: false, reason: "hold_expired" };
+		}
+		return { admitted: false, reason: row?.state === "open" ? "hold_expired" : "not_open" };
+	}
+
+	/**
+	 * Release a hold whose admission never completed (its `reserved` event unrecorded): claimed
+	 * by {@link HoldJournal.claimUnrecordedRelease}, then voided like any release. A hold another
+	 * caller has since admitted is left alone.
+	 */
+	private async releaseUnrecorded(holdKey: string): Promise<void> {
+		const won = await this.journal.writeTx(() => this.journal.claimUnrecordedRelease(holdKey));
+		if (won) await this.release(holdKey);
 	}
 
 	/** Settle a hold to the given intent; the loser of the claim acts BY STATE. */
@@ -708,6 +750,7 @@ export class HoldEngine {
 			lateCharged: [],
 			errors: [],
 			events: [],
+			auditVerify: this.opts.audit === undefined ? "no_audit" : "not_due",
 		};
 		await this.journal.writeTx(() => this.journal.recordHeartbeat(now));
 		// Each OBLIGATION of a row is attempted at most once per sweep: a row the expiry step
@@ -781,6 +824,23 @@ export class HoldEngine {
 						}
 					});
 				}
+			}
+		}
+		// 6. The WHOLE chain, up to the journal's checkpoint, re-verified at the first sweep and then
+		//    every `auditFullVerifyMs`: a record verifies only the bytes after the checkpoint, so
+		//    this bounds how long a rewrite of older bytes goes unseen. A failure clears the
+		//    checkpoint — every record then verifies from genesis, and refuses.
+		const audit = this.opts.audit;
+		const last = this.journal.auditVerifiedAt();
+		if (audit !== undefined && (last === null || now - last >= this.fullVerifyMs)) {
+			await this.journal.writeTx(() => this.journal.recordAuditVerifiedAt(now));
+			try {
+				await audit.verifyFull(this.journal.auditCheckpoint());
+				report.auditVerify = "ok";
+			} catch (error) {
+				await this.journal.writeTx(() => this.journal.clearAuditCheckpoint());
+				report.auditVerify = "failed";
+				report.errors.push({ holdId: "(audit chain)", error });
 			}
 		}
 		return report;

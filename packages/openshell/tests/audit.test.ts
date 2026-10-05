@@ -2,11 +2,26 @@
 // Copyright 2026 Usertools, Inc.
 
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+	appendFileSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { AuditWriterLockHeldError, VAULT_DIR, verifyVault } from "usertrust";
+import {
+	AuditWriterLockHeldError,
+	canonicalize,
+	GENESIS_HASH,
+	VAULT_DIR,
+	verifyVault,
+} from "usertrust";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	AuditChainUnverifiableError,
@@ -17,37 +32,73 @@ import {
 } from "../src/audit.js";
 import { HoldDetector } from "../src/detector.js";
 import { HoldEngine } from "../src/engine.js";
-import { HoldJournal, type RecordedEvent } from "../src/journal.js";
+import {
+	type ChainCheckpoint,
+	type ChainRecord,
+	HoldJournal,
+	type RecordedEvent,
+} from "../src/journal.js";
 import { startRuntime } from "../src/runtime.js";
 import { FakeLedger } from "./fixtures/fake-ledger.js";
 
 /**
- * An audit port with {@link AuditPort.record}'s contract — scan, then append if absent, one
+ * An audit port with {@link AuditPort.record}'s contract — verify from the checkpoint, find the
+ * event in the TAIL after it or append it, return that tail and the new checkpoint; one
  * operation serialized against every other record — and the failures the engine must survive.
+ * Like the real port, it sees only the tail after the journal's checkpoint: an event before the
+ * checkpoint is "absent" unless the journal absorbed it into its row.
  */
 class FakeAudit implements AuditPort {
 	events: Array<RecordedEvent & { kind: HoldEventKind; data: Record<string, unknown> }> = [];
 	appends = 0;
+	verifies = 0;
 	/** The next append throws before writing (`refuse`) or after writing (`die_after`). */
 	failNext: "refuse" | "die_after" | null = null;
-	/** The chain does not verify: every record throws, nothing is appended. */
+	/** The chain does not verify: every record and full verify throws, nothing is appended. */
 	broken = false;
 	/** While set, an append waits on it. */
 	gate: Promise<void> | null = null;
+	/** Runs just before an append (e.g. the clock moving during the audit await). */
+	beforeAppend: (() => void) | null = null;
 	private tail: Promise<unknown> = Promise.resolve();
+
+	private cp(sequence: number): ChainCheckpoint {
+		return {
+			offset: sequence,
+			lineStart: Math.max(0, sequence - 1),
+			sequence,
+			hash: `h${sequence}`,
+		};
+	}
 
 	record(
 		kind: HoldEventKind,
 		afterSequence: number,
 		data: Record<string, unknown> & { holdId: string },
-	): Promise<RecordedEvent> {
-		const run = async (): Promise<RecordedEvent> => {
+		from: ChainCheckpoint | null,
+	): Promise<ChainRecord> {
+		const run = async (): Promise<ChainRecord> => {
 			if (this.broken) throw new AuditChainUnverifiableError("the chain breaks at index 0");
-			const found = this.events.find(
+			const since = from?.sequence ?? 0;
+			const visible = this.events.filter((e) => e.sequence > since);
+			const tail = visible.map((e) => ({
+				kind: e.kind,
+				holdId: String(e.data.holdId),
+				sequence: e.sequence,
+				hash: e.hash,
+			}));
+			const found = visible.find(
 				(e) => e.kind === kind && e.data.holdId === data.holdId && e.sequence > afterSequence,
 			);
-			if (found !== undefined) return { hash: found.hash, sequence: found.sequence };
+			if (found !== undefined) {
+				return {
+					event: { hash: found.hash, sequence: found.sequence },
+					tail,
+					checkpoint: this.cp(this.events.length),
+				};
+			}
 			if (this.gate !== null) await this.gate;
+			this.beforeAppend?.();
 			const fail = this.failNext;
 			this.failNext = null;
 			if (fail === "refuse") throw new Error("audit append refused");
@@ -56,11 +107,20 @@ class FakeAudit implements AuditPort {
 			this.events.push(ev);
 			this.appends++;
 			if (fail === "die_after") throw new Error("process died after the append");
-			return { hash: ev.hash, sequence };
+			return {
+				event: { hash: ev.hash, sequence },
+				tail: [...tail, { kind, holdId: data.holdId, sequence, hash: ev.hash }],
+				checkpoint: this.cp(sequence),
+			};
 		};
 		const next = this.tail.then(run, run);
 		this.tail = next.catch(() => undefined);
 		return next;
+	}
+
+	async verifyFull(): Promise<void> {
+		this.verifies++;
+		if (this.broken) throw new AuditChainUnverifiableError("the chain breaks at index 0");
 	}
 
 	of(holdId: string, kind: HoldEventKind) {
@@ -319,11 +379,162 @@ describe("1c-2: a missing event is recovered by the sweep — once", () => {
 	});
 });
 
+describe("#191 r1 A: the admission is decided AFTER the audit await, and only its own admitter may release it", () => {
+	it("admitBy passing DURING the audit await: not admitted (hold_expired), and the hold is released — never an authorization past admitBy", async () => {
+		const { journal, ledger, audit, engine, clock } = setup();
+		audit.beforeAppend = () => {
+			clock.now = 1_000 + 900_000; // exactly admitBy: no longer admissible
+		};
+		expect(await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 })).toEqual({
+			admitted: false,
+			reason: "hold_expired",
+		});
+		expect(ledger.count("k1", "void"), "released").toBe(1);
+		expect(journal.get("k1")?.state).toBe("voided");
+	});
+
+	it("a same-key retry ADMITTED while the first caller's audit failed: the first caller's cleanup leaves the hold ALIVE", async () => {
+		const { journal, ledger, audit, engine } = setup();
+		let retryDone: () => void = () => {};
+		const retried = new Promise<void>((r) => {
+			retryDone = r;
+		});
+		// The scheduler delays the first caller's cleanup until the retry has finished (the
+		// interleaving the review describes), made explicit here.
+		const e = engine as unknown as { releaseUnrecorded: (k: string) => Promise<void> };
+		const cleanup = e.releaseUnrecorded.bind(engine);
+		e.releaseUnrecorded = async (k) => {
+			await retried;
+			return cleanup(k);
+		};
+		audit.failNext = "refuse";
+		const first = engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		const firstResult = first.catch((err: unknown) => err);
+		await new Promise((r) => setTimeout(r, 5));
+		const retry = await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		retryDone();
+		expect(retry).toEqual({ admitted: true, existing: true });
+		expect(await firstResult).toBeInstanceOf(Error);
+		expect(ledger.count("k1", "void"), "the admitted hold is never released").toBe(0);
+		expect(journal.get("k1")).toMatchObject({ state: "open" });
+		expect(journal.get("k1")?.reservedSeq).not.toBeNull();
+	});
+
+	it("the failed caller's cleanup landing BETWEEN a retry's reserve and its record: the retry is NOT admitted (the row it re-reads is no longer open)", async () => {
+		const { journal, ledger, audit, engine } = setup();
+		const orig = journal.recordEventOnce.bind(journal);
+		let calls = 0;
+		journal.recordEventOnce = (async (...args: Parameters<typeof orig>) => {
+			calls++;
+			if (calls === 2) {
+				// The first caller's cleanup: its admission never completed, so it may claim.
+				expect(await journal.writeTx(() => journal.claimUnrecordedRelease("k1"))).toBe(true);
+			}
+			return orig(...args);
+		}) as typeof journal.recordEventOnce;
+		audit.failNext = "refuse";
+		const e = engine as unknown as { releaseUnrecorded: (k: string) => Promise<void> };
+		e.releaseUnrecorded = async () => {}; // the first caller's cleanup is the one above
+		await expect(engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 })).rejects.toThrow(
+			/refused/,
+		);
+		expect(await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 })).toEqual({
+			admitted: false,
+			reason: "not_open",
+		});
+		expect(ledger.count("k1", "void")).toBe(0); // voiding, its release left to the release path
+	});
+
+	it("the release claim of a failed admission LOSES once the `reserved` event is recorded (the journal primitive)", async () => {
+		const { journal, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		expect(await journal.writeTx(() => journal.claimUnrecordedRelease("k1"))).toBe(false);
+		expect(journal.get("k1")?.state).toBe("open");
+	});
+});
+
+describe("#191 r1 B: the checkpoint — every hold event before it is absorbed into its row", () => {
+	it("an append that landed but whose caller died, PASSED by the checkpoint of a later record: absorbed into its row, never appended again", async () => {
+		const { journal, audit, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		audit.failNext = "die_after";
+		await engine.settle("k1", { post: 40, overage: 0 }); // `settled` lands; its slot is not set
+		expect(journal.get("k1")?.terminalEventHash).toBeNull();
+		await engine.reserve({ holdKey: "k2", budgetId: "b", amount: 10 }); // the checkpoint passes it
+		expect(journal.get("k1")?.terminalEventHash, "absorbed").toBe(
+			audit.of("k1", "openshell.hold.settled")[0]?.hash,
+		);
+		expect(journal.auditCheckpoint()?.sequence).toBe(3);
+		expect((await engine.sweep()).events).toEqual([]);
+		expect(audit.of("k1", "openshell.hold.settled")).toHaveLength(1);
+	});
+});
+
+describe("#191 r1 B: the sweep re-verifies the WHOLE chain — at the first sweep, then on its interval", () => {
+	it("first sweep `ok`; then `not_due` until auditFullVerifyMs has passed; then `ok` again", async () => {
+		const { journal, ledger, audit, clock } = setup();
+		const engine = new HoldEngine(journal, ledger, {
+			holdTtlSeconds: 900,
+			now: () => clock.now,
+			audit,
+			auditFullVerifyMs: 10_000,
+		});
+		expect((await engine.sweep()).auditVerify).toBe("ok");
+		clock.now += 9_999;
+		expect((await engine.sweep()).auditVerify).toBe("not_due");
+		clock.now += 1;
+		expect((await engine.sweep()).auditVerify).toBe("ok");
+		expect(audit.verifies).toBe(2);
+	});
+
+	it("a failed full verification clears the checkpoint and is reported — every record then verifies from genesis", async () => {
+		const { journal, audit, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		expect(journal.auditCheckpoint()).not.toBeNull();
+		audit.broken = true;
+		const r = await engine.sweep();
+		expect(r.auditVerify).toBe("failed");
+		expect(r.errors.map((e) => e.holdId)).toContain("(audit chain)");
+		expect(journal.auditCheckpoint()).toBeNull();
+	});
+});
+
+describe("#191 r1 C: a dependent event never precedes its `reserved` predecessor", () => {
+	it("a reservation whose `reserved` event failed is released WITHOUT a `voided` event; the sweep then records `reserved` FIRST, then `voided`, each once", async () => {
+		const { journal, audit, engine } = setup();
+		audit.failNext = "refuse";
+		await expect(engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 })).rejects.toThrow();
+		expect(journal.get("k1")?.state).toBe("voided");
+		expect(audit.events, "nothing on the chain before its predecessor").toEqual([]);
+		expect((await engine.sweep()).events).toEqual([
+			{ holdId: "k1", slot: "reserved" },
+			{ holdId: "k1", slot: "terminal" },
+		]);
+		const [reserved] = audit.of("k1", "openshell.hold.reserved");
+		const [voided] = audit.of("k1", "openshell.hold.voided");
+		expect((reserved?.sequence ?? 0) < (voided?.sequence ?? 0)).toBe(true);
+		expect(audit.events).toHaveLength(2);
+	});
+});
+
 describe("1c-2: recordEventOnce eligibility, defined positively per slot", () => {
+	it("#191 r1 C: a terminal or late event is NOT eligible before its `reserved` predecessor is recorded — even on a settled row", async () => {
+		const { journal, engine } = setup(false);
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		await engine.settle("k1", { post: 1, overage: 0 });
+		const never = () => Promise.reject(new Error("never produced"));
+		expect(await journal.recordEventOnce("k1", "terminal", never)).toBe("not_eligible");
+	});
+
 	it("terminal only for settled / voided / expired; late only for charged / zero; an absent row is not eligible", async () => {
 		const { journal, engine } = setup(false);
 		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
-		const ev = () => Promise.resolve({ hash: "x", sequence: 1 });
+		const ev = () =>
+			Promise.resolve({
+				event: { hash: "x", sequence: 1 },
+				tail: [],
+				checkpoint: { offset: 1, lineStart: 0, sequence: 1, hash: "x" },
+			});
 		expect(await journal.recordEventOnce("k1", "terminal", ev)).toBe("not_eligible");
 		expect(await journal.recordEventOnce("k1", "late", ev)).toBe("not_eligible");
 		expect(await journal.recordEventOnce("nope", "reserved", ev)).toBe("not_eligible");
@@ -418,8 +629,12 @@ describe("1c-2: VaultAudit on a real usertrust chain", () => {
 		const v = vault();
 		const a = VaultAudit.open(v);
 		closers.push(() => a.release());
-		const first = await a.record("openshell.hold.reserved", 0, { holdId: "k1", amount: 100 });
-		const again = await a.record("openshell.hold.reserved", 0, { holdId: "k1", amount: 100 });
+		const first = (
+			await a.record("openshell.hold.reserved", 0, { holdId: "k1", amount: 100 }, null)
+		).event;
+		const again = (
+			await a.record("openshell.hold.reserved", 0, { holdId: "k1", amount: 100 }, null)
+		).event;
 		expect(again).toEqual(first);
 		expect(lines(v)).toHaveLength(1);
 		expect(JSON.parse(lines(v)[0] as string)).toMatchObject({
@@ -437,10 +652,10 @@ describe("1c-2: VaultAudit on a real usertrust chain", () => {
 		const a = VaultAudit.open(v);
 		closers.push(() => a.release());
 		const [x, y] = await Promise.all([
-			a.record("openshell.hold.settled", 0, { holdId: "k1" }),
-			a.record("openshell.hold.settled", 0, { holdId: "k1" }),
+			a.record("openshell.hold.settled", 0, { holdId: "k1" }, null),
+			a.record("openshell.hold.settled", 0, { holdId: "k1" }, null),
 		]);
-		expect(x).toEqual(y);
+		expect(x.event).toEqual(y.event);
 		expect(lines(v)).toHaveLength(1);
 	});
 
@@ -448,8 +663,9 @@ describe("1c-2: VaultAudit on a real usertrust chain", () => {
 		const v = vault();
 		const a = VaultAudit.open(v);
 		closers.push(() => a.release());
-		const old = await a.record("openshell.hold.settled", 0, { holdId: "k1" });
-		const fresh = await a.record("openshell.hold.settled", old.sequence, { holdId: "k1" });
+		const old = (await a.record("openshell.hold.settled", 0, { holdId: "k1" }, null)).event;
+		const fresh = (await a.record("openshell.hold.settled", old.sequence, { holdId: "k1" }, null))
+			.event;
 		expect(fresh.sequence).toBeGreaterThan(old.sequence);
 		expect(lines(v)).toHaveLength(2);
 	});
@@ -458,12 +674,12 @@ describe("1c-2: VaultAudit on a real usertrust chain", () => {
 		const v = vault();
 		const a = VaultAudit.open(v);
 		closers.push(() => a.release());
-		await a.record("openshell.hold.reserved", 0, { holdId: "k1" });
+		await a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null);
 		appendFileSync(eventsFile(v), "{not json\n");
 		const before = readFileSync(eventsFile(v));
-		await expect(a.record("openshell.hold.settled", 0, { holdId: "k1" })).rejects.toBeInstanceOf(
-			AuditChainUnverifiableError,
-		);
+		await expect(
+			a.record("openshell.hold.settled", 0, { holdId: "k1" }, null),
+		).rejects.toBeInstanceOf(AuditChainUnverifiableError);
 		expect(readFileSync(eventsFile(v)).equals(before)).toBe(true);
 	});
 
@@ -471,13 +687,13 @@ describe("1c-2: VaultAudit on a real usertrust chain", () => {
 		const v = vault();
 		const a = VaultAudit.open(v);
 		closers.push(() => a.release());
-		await a.record("openshell.hold.reserved", 0, { holdId: "k1" });
+		await a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null);
 		const tampered = (lines(v)[0] as string).replace('"k1"', '"k2"');
 		const { writeFileSync } = await import("node:fs");
 		writeFileSync(eventsFile(v), `${tampered}\n`);
-		await expect(a.record("openshell.hold.reserved", 0, { holdId: "k2" })).rejects.toBeInstanceOf(
-			AuditChainUnverifiableError,
-		);
+		await expect(
+			a.record("openshell.hold.reserved", 0, { holdId: "k2" }, null),
+		).rejects.toBeInstanceOf(AuditChainUnverifiableError);
 		expect(lines(v)).toHaveLength(1);
 	});
 
@@ -487,6 +703,155 @@ describe("1c-2: VaultAudit on a real usertrust chain", () => {
 		expect(() => VaultAudit.open(v)).toThrow(AuditWriterLockHeldError);
 		a.release();
 		VaultAudit.open(v).release();
+	});
+});
+
+/** A chain written directly, linked and hashed as core's writer does (canonical bytes). */
+function writeChain(
+	v: string,
+	n: number,
+	extra: (i: number) => Record<string, unknown> = () => ({}),
+) {
+	const dir = join(v, VAULT_DIR, "audit");
+	mkdirSync(dir, { recursive: true });
+	const out: string[] = [];
+	let prev = GENESIS_HASH;
+	for (let i = 1; i <= n; i++) {
+		const event = {
+			id: `e${i}`,
+			timestamp: "2026-10-05T00:00:00.000Z",
+			previousHash: prev,
+			kind: "test.filler",
+			actor: "sys",
+			data: { i, ...extra(i) },
+			sequence: i,
+		};
+		const hash = createHash("sha256").update(canonicalize(event)).digest("hex");
+		out.push(canonicalize({ ...event, hash }));
+		prev = hash;
+	}
+	writeFileSync(join(dir, "events.jsonl"), out.length === 0 ? "" : `${out.join("\n")}\n`);
+	writeFileSync(join(dir, "events.jsonl.meta"), JSON.stringify({ lastHash: prev, sequence: n }));
+}
+/** Append one forged event, chained and hashed correctly, and move the anchor to it. */
+function forgeAppend(v: string) {
+	const ls = lines(v);
+	const last = JSON.parse(ls[ls.length - 1] as string) as { hash: string; sequence: number };
+	const event = {
+		id: "forged",
+		timestamp: "2026-10-05T00:00:00.000Z",
+		previousHash: last.hash,
+		kind: "test.forged",
+		actor: "sys",
+		data: {},
+		sequence: last.sequence + 1,
+	};
+	const hash = createHash("sha256").update(canonicalize(event)).digest("hex");
+	appendFileSync(eventsFile(v), `${canonicalize({ ...event, hash })}\n`);
+	writeFileSync(
+		`${eventsFile(v)}.meta`,
+		JSON.stringify({ lastHash: hash, sequence: event.sequence }),
+	);
+}
+
+describe("#191 r1 B: VaultAudit verifies from the checkpoint — and refuses a chain that lost what it verified", () => {
+	it("a TRUNCATED chain (the .meta anchor ahead of the log) is refused, nothing appended", async () => {
+		const v = vault();
+		writeChain(v, 3);
+		writeFileSync(eventsFile(v), `${lines(v).slice(0, 2).join("\n")}\n`);
+		const a = VaultAudit.open(v);
+		closers.push(() => a.release());
+		await expect(
+			a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null),
+		).rejects.toBeInstanceOf(AuditChainUnverifiableError);
+		expect(lines(v)).toHaveLength(2);
+	});
+
+	it("truncated, then a valid event APPENDED with a consistent anchor: the journal's checkpoint is no longer on the chain — refused", async () => {
+		const v = vault();
+		writeChain(v, 2);
+		const a = VaultAudit.open(v);
+		closers.push(() => a.release());
+		const rec = await a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null);
+		expect(rec.checkpoint.sequence).toBe(3);
+		writeFileSync(eventsFile(v), `${lines(v).slice(0, 2).join("\n")}\n`);
+		forgeAppend(v); // a different sequence-3 event, chained and anchored consistently
+		await expect(
+			a.record("openshell.hold.settled", 3, { holdId: "k1" }, rec.checkpoint),
+		).rejects.toThrow(/no longer on the chain/);
+		expect(lines(v)).toHaveLength(3);
+	});
+
+	it("the anchor exactly ONE behind at the head's predecessor (the sidecar write failed) is accepted; any other disagreement refuses", async () => {
+		const v = vault();
+		writeChain(v, 3);
+		const second = JSON.parse(lines(v)[1] as string) as { hash: string };
+		writeFileSync(`${eventsFile(v)}.meta`, JSON.stringify({ lastHash: second.hash, sequence: 2 }));
+		const a = VaultAudit.open(v);
+		closers.push(() => a.release());
+		expect(
+			(await a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null)).event.sequence,
+		).toBe(4);
+		writeFileSync(`${eventsFile(v)}.meta`, JSON.stringify({ lastHash: second.hash, sequence: 2 }));
+		await expect(
+			a.record("openshell.hold.reserved", 0, { holdId: "k2" }, null),
+		).rejects.toBeInstanceOf(AuditChainUnverifiableError);
+	});
+
+	it("a TORN final line (no newline) refuses", async () => {
+		const v = vault();
+		writeChain(v, 2);
+		appendFileSync(eventsFile(v), '{"id":"half');
+		const a = VaultAudit.open(v);
+		closers.push(() => a.release());
+		await expect(a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null)).rejects.toThrow(
+			/torn/,
+		);
+	});
+
+	it("a same-size REWRITE of an old line, before the checkpoint: the per-record read cannot see it, verifyFull does", async () => {
+		const v = vault();
+		writeChain(v, 3, (i) => ({ tag: `t${i}` }));
+		const a = VaultAudit.open(v);
+		closers.push(() => a.release());
+		const rec = await a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null);
+		const ls = lines(v);
+		ls[0] = (ls[0] as string).replace('"t1"', '"t9"');
+		writeFileSync(eventsFile(v), `${ls.join("\n")}\n`);
+		await a.record("openshell.hold.settled", 4, { holdId: "k1" }, rec.checkpoint); // not seen here
+		await expect(a.verifyFull(rec.checkpoint)).rejects.toBeInstanceOf(AuditChainUnverifiableError);
+	});
+
+	it("verifyFull accepts an intact chain up to the checkpoint, and refuses a checkpoint that is not on it", async () => {
+		const v = vault();
+		writeChain(v, 5);
+		const a = VaultAudit.open(v);
+		closers.push(() => a.release());
+		const rec = await a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null);
+		await a.verifyFull(rec.checkpoint);
+		await expect(a.verifyFull({ ...rec.checkpoint, hash: "f".repeat(64) })).rejects.toBeInstanceOf(
+			AuditChainUnverifiableError,
+		);
+	});
+
+	it("a 100k-event chain: the first record verifies it all; every record after it reads only what is new — O(new), not O(chain)", {
+		timeout: 120_000,
+	}, async () => {
+		const v = vault();
+		writeChain(v, 100_000);
+		const a = VaultAudit.open(v);
+		closers.push(() => a.release());
+		const first = await a.record("openshell.hold.reserved", 0, { holdId: "k1" }, null);
+		expect(a.lastScanned).toBe(100_000);
+		let cp = first.checkpoint;
+		for (let i = 2; i <= 5; i++) {
+			const r = await a.record("openshell.hold.reserved", 0, { holdId: `k${i}` }, cp);
+			expect(a.lastScanned, `record ${i}`).toBe(0);
+			expect(r.tail.map((e) => e.holdId)).toEqual([`k${i}`]);
+			cp = r.checkpoint;
+		}
+		expect(cp.sequence).toBe(100_005);
+		expect(verifyVault(join(v, VAULT_DIR)).valid).toBe(true);
 	});
 });
 

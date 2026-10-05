@@ -221,6 +221,61 @@ export interface RecordedEvent {
 	sequence: number;
 }
 
+/**
+ * Where the audit chain was last VERIFIED to, held in the journal: the event that ends at byte
+ * `offset` of the log (its line starts at `lineStart`) has this sequence and hash. Every byte
+ * before it was verified, and every hold event before it is reflected in its row's slot.
+ */
+export interface ChainCheckpoint {
+	offset: number;
+	lineStart: number;
+	sequence: number;
+	hash: string;
+}
+
+/** A hold event read from the verified tail of the chain. */
+export interface ChainHoldEvent {
+	kind: string;
+	holdId: string;
+	sequence: number;
+	hash: string;
+}
+
+/** What one audit record produced: its event, the verified tail it read, the new checkpoint. */
+export interface ChainRecord {
+	event: RecordedEvent;
+	tail: ChainHoldEvent[];
+	checkpoint: ChainCheckpoint;
+}
+
+/**
+ * The slot a hold event fills, by kind, and the row state that slot needs. Absorbing an event
+ * into its row is defined POSITIVELY: only these kinds, only into an empty slot, only on a row
+ * with no incident, and a terminal or late event only AFTER the row's recorded `reserved` event.
+ */
+const ABSORB: Record<string, { sql: string; value: "sequence" | "hash" }> = {
+	"openshell.hold.reserved": {
+		sql: "UPDATE hold SET reserved_seq = ? WHERE hold_id = ? AND reserved_seq IS NULL AND incident_json IS NULL",
+		value: "sequence",
+	},
+	"openshell.hold.settled": {
+		sql: "UPDATE hold SET terminal_event_hash = ? WHERE hold_id = ? AND terminal_event_hash IS NULL AND incident_json IS NULL AND state = 'settled' AND reserved_seq IS NOT NULL AND reserved_seq < ?",
+		value: "hash",
+	},
+	"openshell.hold.voided": {
+		sql: "UPDATE hold SET terminal_event_hash = ? WHERE hold_id = ? AND terminal_event_hash IS NULL AND incident_json IS NULL AND state = 'voided' AND reserved_seq IS NOT NULL AND reserved_seq < ?",
+		value: "hash",
+	},
+	"openshell.hold.expired_unsettled": {
+		sql: "UPDATE hold SET terminal_event_hash = ? WHERE hold_id = ? AND terminal_event_hash IS NULL AND incident_json IS NULL AND state = 'expired' AND reserved_seq IS NOT NULL AND reserved_seq < ?",
+		value: "hash",
+	},
+	"openshell.hold.late_settlement": {
+		sql: "UPDATE hold SET late_event_hash = ? WHERE hold_id = ? AND late_event_hash IS NULL AND incident_json IS NULL AND late_state IN ('charged','zero') AND reserved_seq IS NOT NULL AND reserved_seq < ?",
+		value: "hash",
+	},
+};
+
 /** A hold's late-settlement disposition (see {@link HoldRow.lateState}). */
 export type LateState = "none" | "recorded" | "charged" | "zero";
 
@@ -1138,21 +1193,25 @@ export class HoldJournal {
 
 	/**
 	 * Record one of a hold's audit events ONCE, as ONE critical section under the journal's write
-	 * lock (`BEGIN IMMEDIATE` held across `produce`, bounded by the journal's deadline): the row
-	 * is re-read, its slot checked, `produce` run (it scans the chain, then appends if the event
-	 * is absent), and the result written to the slot in the same transaction. Two sweepers, or a
-	 * sweeper and a settlement, can therefore never both see "no event" and both append.
+	 * lock (`BEGIN IMMEDIATE` held across `produce`, bounded by the journal's deadline): the row is
+	 * re-read and its slot checked; `produce` verifies the chain from the journal's checkpoint,
+	 * finds the event in the verified tail or appends it; then, in the same transaction, every
+	 * hold event in that tail is ABSORBED into its row's empty slot (so an append that outlived
+	 * its caller is never forgotten once the checkpoint passes it), this event's slot is written,
+	 * and the checkpoint advances. Two recorders can therefore never both see "no event".
 	 *
 	 * Eligibility, defined POSITIVELY per slot (anything else is `not_eligible`, nothing done):
 	 * - `reserved`: the row exists and carries no incident;
-	 * - `terminal`: the row is `settled`, `voided` or `expired`, with no incident;
-	 * - `late`: its late settlement is `charged` or `zero`, with no incident.
+	 * - `terminal`: the row is `settled`, `voided` or `expired`, with no incident, AND its
+	 *   `reserved` event is recorded (a dependent event never precedes its predecessor);
+	 * - `late`: its late settlement is `charged` or `zero`, with no incident, and its `reserved`
+	 *   event is recorded.
 	 * The slot already set is `already` (nothing appended).
 	 */
 	recordEventOnce(
 		holdId: string,
 		slot: EventSlot,
-		produce: (row: HoldRow) => Promise<RecordedEvent>,
+		produce: (row: HoldRow, from: ChainCheckpoint | null) => Promise<ChainRecord>,
 	): Promise<"recorded" | "already" | "not_eligible"> {
 		return this.runTx(async () => {
 			const row = this.get(holdId);
@@ -1164,21 +1223,98 @@ export class HoldJournal {
 						? row.terminalEventHash !== null
 						: row.lateEventHash !== null;
 			if (set) return "already" as const;
+			const predecessor = row.reservedSeq !== null;
 			const eligible =
 				slot === "reserved" ||
-				(slot === "terminal" && TERMINAL_STATES.has(row.state)) ||
-				(slot === "late" && (row.lateState === "charged" || row.lateState === "zero"));
+				(slot === "terminal" && predecessor && TERMINAL_STATES.has(row.state)) ||
+				(slot === "late" &&
+					predecessor &&
+					(row.lateState === "charged" || row.lateState === "zero"));
 			if (!eligible) return "not_eligible" as const;
-			const ev = await this.bounded(`audit ${slot} event`, () => produce(row));
+			const rec = await this.bounded(`audit ${slot} event`, () =>
+				produce(row, this.auditCheckpoint()),
+			);
+			for (const e of rec.tail) this.absorb(e);
 			const sql =
 				slot === "reserved"
 					? "UPDATE hold SET reserved_seq = ? WHERE hold_id = ? AND reserved_seq IS NULL"
 					: slot === "terminal"
 						? "UPDATE hold SET terminal_event_hash = ? WHERE hold_id = ? AND terminal_event_hash IS NULL"
 						: "UPDATE hold SET late_event_hash = ? WHERE hold_id = ? AND late_event_hash IS NULL";
-			this.db.prepare(sql).run(slot === "reserved" ? ev.sequence : ev.hash, holdId);
+			this.db.prepare(sql).run(slot === "reserved" ? rec.event.sequence : rec.event.hash, holdId);
+			this.setMeta("audit_checkpoint", JSON.stringify(rec.checkpoint));
 			return "recorded" as const;
 		});
+	}
+
+	/** Absorb one verified hold event into its row's empty slot (see {@link ABSORB}). */
+	private absorb(e: ChainHoldEvent): void {
+		const rule = ABSORB[e.kind];
+		if (rule === undefined) return;
+		const value = rule.value === "sequence" ? e.sequence : e.hash;
+		if (e.kind === "openshell.hold.reserved") this.db.prepare(rule.sql).run(value, e.holdId);
+		else this.db.prepare(rule.sql).run(value, e.holdId, e.sequence);
+	}
+
+	/** The chain checkpoint, or null when the chain has never been verified for this journal. */
+	auditCheckpoint(): ChainCheckpoint | null {
+		const r = this.read(
+			(db) =>
+				db.prepare("SELECT value FROM meta WHERE key = 'audit_checkpoint'").get() as
+					| { value: string }
+					| undefined,
+		);
+		return r === undefined ? null : (JSON.parse(r.value) as ChainCheckpoint);
+	}
+
+	/**
+	 * Forget the checkpoint (a full verification failed): the next record verifies the WHOLE
+	 * chain again, and refuses if it still does not verify. Must run inside {@link writeTx}.
+	 */
+	clearAuditCheckpoint(): void {
+		this.requireTx("clearAuditCheckpoint");
+		this.db.prepare("DELETE FROM meta WHERE key = 'audit_checkpoint'").run();
+	}
+
+	/** When the whole chain was last fully verified (ms), or null. */
+	auditVerifiedAt(): number | null {
+		const r = this.read(
+			(db) =>
+				db.prepare("SELECT value FROM meta WHERE key = 'audit_verified_at'").get() as
+					| { value: string }
+					| undefined,
+		);
+		return r === undefined ? null : Number(r.value);
+	}
+
+	/** Record a full-verification attempt's time. Must run inside {@link writeTx}. */
+	recordAuditVerifiedAt(atMs: number): void {
+		this.requireTx("recordAuditVerifiedAt");
+		this.setMeta("audit_verified_at", String(atMs));
+	}
+
+	/**
+	 * Claim `open → voiding` ONLY for an admission that never completed: the row carries no
+	 * recorded `reserved` event and no incident. A caller whose `reserved` event failed may
+	 * release the hold through this and nothing else — once any caller has recorded the event,
+	 * the hold is an admitted one and this claim loses. Must run inside {@link writeTx}.
+	 */
+	claimUnrecordedRelease(holdId: string): boolean {
+		this.requireTx("claimUnrecordedRelease");
+		const r = this.db
+			.prepare(
+				"UPDATE hold SET state = 'voiding' WHERE hold_id = ? AND state = 'open' AND reserved_seq IS NULL AND incident_json IS NULL",
+			)
+			.run(holdId);
+		return Number(r.changes) === 1;
+	}
+
+	private setMeta(key: string, value: string): void {
+		this.db
+			.prepare(
+				"INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+			)
+			.run(key, value);
 	}
 
 	/** Record the terminal event's hash, once. Must run inside {@link writeTx}. */
