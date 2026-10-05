@@ -2,6 +2,7 @@ import {
 	EXTENSION_FAILURE_MEANING,
 	LEDGER_ROWS,
 	LEDGER_SHOWS_THE_INPUTS,
+	type LedgerRow,
 	NOT_APPLICABLE_MEANING,
 	RESULT_GLYPH,
 	RESULT_LABEL,
@@ -72,14 +73,22 @@ function resultNote(name: StepName | CheckName, entry: CheckEntry): string | nul
 export default function CheckLedger({
 	verification,
 	membershipNote,
+	rows = LEDGER_ROWS,
 }: {
 	verification: Verification;
 	/** R26 — the minter's committed observation, when the work variant has one. */
 	membershipNote?: string;
+	/**
+	 * The thirteen rows with the meanings for THIS receipt's kind. A cluster
+	 * receipt's ID is derived, not issued, and its predecessor is the agent
+	 * key's previous receipt, not a generation; printing the session meanings
+	 * beside its results would explain checks the resolver did not run.
+	 */
+	rows?: readonly LedgerRow[];
 }) {
 	return (
 		<section
-			className="lift-1 rounded-xl border border-white/10 bg-white/[0.02]"
+			className="lift-1 rounded-xl border border-white/10 bg-[var(--surface,#101012)]"
 			data-testid="check-ledger"
 			aria-labelledby="check-ledger-title"
 		>
@@ -121,7 +130,7 @@ export default function CheckLedger({
 					</tr>
 				</thead>
 				<tbody>
-					{LEDGER_ROWS.map((row) => {
+					{rows.map((row) => {
 						const entry =
 							row.group === "steps"
 								? verification.steps[row.name as StepName]

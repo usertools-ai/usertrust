@@ -75,3 +75,58 @@ Carried forward from the plan's Global Constraints, unchanged by this task:
 A further set of review-found minors (base58 codec edge cases, a few
 under-asserted copy strings, non-numeric-literal nits) is itemized in this
 route's PR description rather than duplicated here.
+
+## The brand field
+
+The page sits on the usertools dot-lattice, in gold. **No brand asset lives in
+this repository.** The lattice script and the fonts are loaded at runtime from
+the brand site's kit (`https://usertrust.ai/kit/lattice.js`,
+`https://usertrust.ai/kit/fonts/*.woff2`, served with
+`access-control-allow-origin: *`): `components/lattice-field.tsx` appends the
+script after mount with `data-theme="usertrust"` (gold; without it the kit draws
+its multi-colour settlement spectrum), pinned by Subresource Integrity
+(`LATTICE_INTEGRITY`, a sha384, fetched with `crossOrigin="anonymous"`), and
+`brand.css` points `@font-face` at the kit with `font-display: swap` and system
+fallbacks. The script runs on the page that shows the verdict, so any other
+bytes are refused and the field fails closed; a kit update is a reviewed change
+to that one constant.
+
+The kit's fonts dress the chrome only (the nav and the footer). CSS cannot pin
+a font, and a replaced font could remap glyphs so the verdict or the amount
+looks unlike the text the page renders, so everything inside the receipt
+renders in system stacks (`--verify-sans`, `--verify-mono`, tabular figures)
+that load nothing. `verify-typography.test.tsx` enumerates every external URL
+the route names and fails on any that is not a pinned script, a chrome-only
+font, a link, or the server-side resolver read, and on any brand family that
+reaches a selector outside the chrome. If the kit is
+unreachable the page renders on its plain ground in system fonts.
+`brand-assets.test.tsx` fails if a font file or a lattice copy is ever added
+under `site/app/r/`.
+
+The kit's current lattice animates while the tab is visible (a still frame
+under reduced motion, stopped while hidden). The canvas also carries
+`data-accent="gold"` and `data-mode="wave-once"`, which later kit versions read
+to wave once and then freeze; the page picks that up with no change here.
+
+## Cluster receipts (receipt-spec v0.10 §15)
+
+A cluster receipt attests every charge to one agent key inside one ledger
+window. `lib/wire.ts` validates the signed document by its own `scope`, and
+`StateView` renders by the same key. The cluster schema is CLOSED: the document
+root, `work` (document and projection), `event.data`, `spend`, `pricing`, each
+`transferSet` pair, `skippedSincePrevious` and each skipped window refuse any
+member they do not list; the shared proof machinery is validated exactly as on
+the session path. On a cluster 200, a named `previousReceiptId` requires
+`predecessorLinkage: passed`, and with none named it is `passed` or
+`notApplicable`, never `unavailable`. Anything else is a protocol error.
+
+`components/cluster-receipt.tsx` keeps the brief layout. The glance carries the
+verdict, the level strip, the amount and its scope chip, the agent handle, the
+window (ledger time, UTC), the governed calls, the previous receipt, and the
+refused windows, which are always visible and never folded. Details holds the
+claim, the raw ledger bounds, the proof ladder, the invoice and postures, the
+window-transfers root (a commitment, never marked passed), the check ledger
+with its four cluster meanings, and the comparison panel. Session receipts
+render exactly as before. `usertrust-verify` does not read cluster receipts
+yet, so the cluster view links the signed bytes (`/r/<id>/receipt.json`)
+instead of printing a command that would fail.

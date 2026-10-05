@@ -31,6 +31,8 @@ import {
 	CHECK_ROWS,
 	CUSTOM_MODEL_MEANING,
 	catalogRendering,
+	DELEGATION_POSTURE_SCOPE,
+	DELEGATION_POSTURE_SHORT,
 	DISPLAY_ANNEX_LABEL,
 	delegationScopeClaim,
 	EQUIVOCATION_CAVEAT,
@@ -775,5 +777,38 @@ test("every advisory band states that it is advisory-only", () => {
 	];
 	for (const advisory of advisories) {
 		assert.ok(advisoryBand(advisory).body.includes(ADVISORY_NEVER_ALTERS_VERDICT));
+	}
+});
+
+// ===========================================================================
+// The brief card's SHORT forms (amended 2026-10-05) — a fold, never a cut
+// ===========================================================================
+
+test("DELEGATION_POSTURE_SHORT: one short line per posture, each keeping its load-bearing clause", () => {
+	assert.deepEqual(
+		Object.keys(DELEGATION_POSTURE_SHORT).sort(),
+		Object.keys(DELEGATION_POSTURE_SCOPE).sort(),
+		"one short form for every posture the full sentences cover",
+	);
+	for (const [posture, short] of Object.entries(DELEGATION_POSTURE_SHORT) as [
+		keyof typeof DELEGATION_POSTURE_SHORT,
+		string,
+	][]) {
+		assert.ok(
+			short.length < DELEGATION_POSTURE_SCOPE[posture].length,
+			`${posture}: the short form is shorter than the full sentence it folds`,
+		);
+	}
+	assert.match(DELEGATION_POSTURE_SHORT.selfDebitsOnly, /DIRECT, self-account spend/);
+	assert.match(DELEGATION_POSTURE_SHORT.selfDebitsOnly, /delegated spend is OUT OF SCOPE/);
+	assert.match(DELEGATION_POSTURE_SHORT.includesSomeDelegated, /INCOMPLETE ATTRIBUTED SUBTOTAL/);
+	assert.match(DELEGATION_POSTURE_SHORT.includesSomeDelegated, /coverage is NOT established/);
+	assert.match(DELEGATION_POSTURE_SHORT.indeterminate, /END-TO-END COVERAGE CANNOT BE VERIFIED/);
+	assert.match(DELEGATION_POSTURE_SHORT.indeterminate, /no bound in either direction/);
+	assert.match(DELEGATION_POSTURE_SHORT.includesAllDelegated, /UNEVIDENCED/);
+	assert.match(DELEGATION_POSTURE_SHORT.includesAllDelegated, /not presented as a total/);
+	// The retired floor never returns, in either form.
+	for (const short of Object.values(DELEGATION_POSTURE_SHORT)) {
+		assert.doesNotMatch(short, /at least \$/);
 	}
 });
