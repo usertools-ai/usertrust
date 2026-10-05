@@ -33,7 +33,28 @@ import { debtAccountLabel, type LedgerPort, transferIdFor } from "./ledger.js";
 export interface EngineOptions {
 	/** The hold's lifetime, in whole seconds: the TigerBeetle pending timeout. */
 	holdTtlSeconds: number;
+	/**
+	 * How far past a hold's `ttlAt` (the LATEST the ledger can release it) the sweeper waits
+	 * before expiring an `open` hold. Default 60 s.
+	 */
+	expiryGraceMs?: number;
 	now?: () => number;
+}
+
+/** What one {@link HoldEngine.sweep} did. A row whose step threw is reported, never fatal. */
+export interface SweepReport {
+	/** Holds the sweeper moved `open → expiring → expired`. */
+	expired: string[];
+	/** Holds the sweeper claimed whose void the ledger answered posted or not found: incidents. */
+	incidents: string[];
+	/** Holds the sweeper claimed whose void it cannot confirm yet: left `expiring`, in flight. */
+	inFlight: string[];
+	/** In-flight rows replayed (`settling`, `voiding`, `expiring`), with what each returned. */
+	replayed: Array<{ holdId: string; outcome: string }>;
+	/** Recorded late settlements the ledger took this sweep. */
+	lateCharged: string[];
+	/** Rows whose step threw, with the error: the next sweep tries them again. */
+	errors: Array<{ holdId: string; error: unknown }>;
 }
 
 /**
@@ -87,10 +108,12 @@ export type SettleOutcome =
 	/** A duplicate settlement of a hold already settled: no ledger operation. */
 	| { outcome: "duplicate" }
 	/**
-	 * The hold expired first (the sweeper claimed it, or the ledger's own timeout
-	 * passed): the actual usage must take the late-settlement path, never a post.
+	 * The hold expired first (the sweeper claimed it, or the ledger confirmed its own timeout
+	 * passed): never a post — the full ACTUAL amount was recorded as the hold's late settlement
+	 * (its debt counted with it) and charged to the debt account (an actual amount of zero records
+	 * and charges nothing). `resumed`: the late settlement was already recorded.
 	 */
-	| { outcome: "late_required"; state: HoldState }
+	| { outcome: "late_settled"; state: "expiring" | "expired"; resumed: boolean }
 	/**
 	 * The ledger cannot yet confirm the post's outcome (its id is retired and the read-back is
 	 * inconclusive): the hold stays `settling`; settle again later — never a throw loop.
@@ -153,6 +176,10 @@ function numbersProblem(i: unknown): string | null {
 	if (!isUsertokens(post) || !isUsertokens(overage)) {
 		return `post and overage must be safe non-negative integers, got ${String(post)} / ${String(overage)}`;
 	}
+	// The actual cost (post + overage) is charged as one amount: it must be one too.
+	if (!Number.isSafeInteger((post as number) + (overage as number))) {
+		return `post + overage must be a safe integer, got ${String(post)} + ${String(overage)}`;
+	}
 	return null;
 }
 
@@ -190,7 +217,141 @@ export class HoldEngine {
 		if (!Number.isSafeInteger(opts.holdTtlSeconds) || opts.holdTtlSeconds <= 0) {
 			throw new TypeError("hold engine: holdTtlSeconds must be a positive whole number");
 		}
+		if (
+			opts.expiryGraceMs !== undefined &&
+			(!Number.isSafeInteger(opts.expiryGraceMs) || opts.expiryGraceMs < 0)
+		) {
+			throw new TypeError("hold engine: expiryGraceMs must be a non-negative whole number");
+		}
 		this.now = opts.now ?? Date.now;
+		this.expiryGraceMs = opts.expiryGraceMs ?? 60_000;
+	}
+
+	private readonly expiryGraceMs: number;
+
+	/** The applied-marker id of a hold's late-settlement debt. */
+	private lateId(holdKey: string): string {
+		return transferIdFor(holdKey, "late").toString();
+	}
+
+	/**
+	 * A settlement that LOST to an expiry (the row is `expiring` or `expired`). Never a post: the
+	 * full actual amount is recorded once as the hold's late settlement, its debt counted in the
+	 * same transaction, then charged to the debt account. A duplicate acts on the STORED amount.
+	 * The intent passes the same contract as any settlement first.
+	 */
+	private async settleLate(
+		holdKey: string,
+		intent: Readonly<SettlementIntent>,
+		state: "expiring" | "expired",
+	): Promise<SettleOutcome> {
+		const row = this.journal.get(holdKey);
+		if (row === undefined) return { outcome: "incident", state: "missing" };
+		const problem = intentProblem(intent, row.amount);
+		if (problem !== null) throw new InvalidSettlementIntentError(problem);
+		const actual = intent.post + intent.overage;
+		// Recorded FIRST, zero included (a terminal `zero`, no transfer): whichever disposition is
+		// recorded first is final, so a later, conflicting settlement can never charge it.
+		const recorded = await this.journal.writeTx(() => {
+			if (!this.journal.recordLate(holdKey, actual)) return false;
+			if (actual > 0) this.journal.applyDebt(row.budgetId, this.lateId(holdKey), actual);
+			return true;
+		});
+		// The ledger charge runs outside any transaction (a no-op unless the row is `recorded` and
+		// carries no incident). Its result is NOT assumed: the answer comes next.
+		await this.chargeLate(holdKey);
+		return this.lateAnswer(holdKey, intent, actual, state, !recorded);
+	}
+
+	/**
+	 * THE answer to a late settlement, from ONE transaction's view of the row, read AFTER the
+	 * charge attempt. THE RULE (for every outcome in this engine): an INCIDENT OUTRANKS EVERY
+	 * SUCCESS — it is checked first.
+	 * - an incident on the row → `incident`, with the late settlement attached in the same
+	 *   transaction (`unbilled`: the intent, the actual amount, whether a late amount was
+	 *   recorded, and whether the ledger took the charge), for an operator;
+	 * - else `charged` or `zero` → `late_settled` (billed, or nothing to bill);
+	 * - else (recorded, the charge did not complete) → `in_flight`, for the sweep.
+	 */
+	private lateAnswer(
+		holdKey: string,
+		intent: Readonly<SettlementIntent>,
+		actual: number,
+		state: "expiring" | "expired",
+		resumed: boolean,
+	): Promise<SettleOutcome> {
+		return this.journal.writeTx((): SettleOutcome => {
+			const now = this.journal.get(holdKey);
+			if (now === undefined) return { outcome: "incident", state: "missing" };
+			if (now.incident !== null) {
+				const onLedger =
+					typeof now.incident === "object" &&
+					(now.incident as Record<string, unknown>).late_charged_on_ledger !== undefined;
+				this.journal.recordUnbilled(holdKey, {
+					kind: "late_settlement",
+					intent,
+					actual,
+					lateRecorded: now.lateState !== "none",
+					lateCharged: now.lateState === "charged" || onLedger,
+				});
+				return { outcome: "incident", state: now.state };
+			}
+			if (now.lateState === "charged" || now.lateState === "zero") {
+				return { outcome: "late_settled", state, resumed };
+			}
+			return { outcome: "in_flight" };
+		});
+	}
+
+	/**
+	 * A terminal transition decided by ONE transaction's view of the final row, the incident
+	 * FIRST: `moved` when the row moved `from → to`; `incident` when the row carries one (the
+	 * journal's CAS never moves an incident row); otherwise the state another writer left it in.
+	 */
+	private finalTransition(
+		holdKey: string,
+		from: HoldState,
+		to: HoldState,
+		set: { terminalKind: string },
+	): Promise<"moved" | "incident" | HoldState | "missing"> {
+		return this.journal.writeTx(() => {
+			const row = this.journal.get(holdKey);
+			if (row === undefined) return "missing";
+			if (row.incident !== null) return "incident";
+			return this.journal.cas(holdKey, from, to, set) ? "moved" : row.state;
+		});
+	}
+
+	/**
+	 * Charge a RECORDED late settlement to the debt account (`late`, or `late-retry` if that id
+	 * was retired), then mark it charged. Acts only on the stored amount; nothing recorded, or
+	 * already charged, is a no-op. Both ids retired and nothing landed: a terminal incident.
+	 */
+	private async chargeLate(holdKey: string): Promise<void> {
+		const row = this.journal.get(holdKey);
+		// Only a `recorded` late settlement is charged: `none`, `charged` and the terminal `zero`
+		// have nothing to send.
+		if (row === undefined || row.lateState !== "recorded" || row.lateAmount === null) return;
+		if (row.incident !== null) return;
+		const amount = row.lateAmount;
+		const charged = await within("chargeDebt", this.ms, () =>
+			this.ledger.chargeDebt({ budgetId: row.budgetId, holdKey, role: "late", amount }),
+		);
+		if (charged !== "done") {
+			const incident = { kind: "debt_charge_failed", ...charged, amount };
+			await this.journal.writeTx(() => this.journal.recordIncident(holdKey, incident));
+			throw new DebtChargeFailedError(holdKey, charged.role, charged.transferIds);
+		}
+		// The ledger TOOK the charge. Marked `charged` — unless the row became an incident
+		// meanwhile (markLateCharged never moves an incident row): then the fact is written onto
+		// the incident, never lost.
+		await this.journal.writeTx(() => {
+			if (!this.journal.markLateCharged(holdKey)) {
+				if (this.journal.get(holdKey)?.incident !== null) {
+					this.journal.recordLedgerChargedOnIncident(holdKey, amount);
+				}
+			}
+		});
 	}
 
 	/** The applied-marker id of a hold's overage debt: the ledger transfer it records. */
@@ -289,7 +450,7 @@ export class HoldEngine {
 				return { outcome: "duplicate" };
 			case "expiring":
 			case "expired":
-				return { outcome: "late_required", state: claim.state };
+				return this.settleLate(holdKey, intent, claim.state);
 			default:
 				// open (cannot lose a claim from open), voiding, voided, or missing.
 				return { outcome: "incident", state: claim.state };
@@ -330,19 +491,31 @@ export class HoldEngine {
 			// A CONFIRMED expiry from the ledger: the hold's one terminal is `expired`, and
 			// the actual usage goes through the late-settlement path. The overage debt recorded
 			// with the claim was never charged: it is reversed in the same transaction (once).
+			// In the SAME transaction as `expired`: the overage debt recorded with the claim is
+			// reversed (it will never be charged as overage), and the full ACTUAL amount is recorded
+			// as the late settlement with its debt — durable before any ledger call, so a crash
+			// after this is completed by the sweeper's replay, never lost.
+			const actual = intent.post + intent.overage;
 			await this.journal.writeTx(() => {
 				const moved = this.journal.cas(holdKey, "settling", "expired", {
 					terminalKind: "hold_expired_unsettled",
 				});
-				if (moved && intent.overage > 0) {
+				if (!moved) return;
+				if (intent.overage > 0) {
 					this.journal.applyDebt(
 						row.budgetId,
 						`${this.overageId(holdKey)}:reversed`,
 						-intent.overage,
 					);
 				}
+				// Any actual amount is recorded, zero included (a terminal `zero`): the first
+				// recorded disposition wins, so no later settlement can charge this hold.
+				if (this.journal.recordLate(holdKey, actual) && actual > 0) {
+					this.journal.applyDebt(row.budgetId, this.lateId(holdKey), actual);
+				}
 			});
-			return { outcome: "late_required", state: "expired" };
+			await this.chargeLate(holdKey);
+			return this.lateAnswer(holdKey, intent, actual, "expired", resumed);
 		}
 		if (posted === "unknown") return { outcome: "in_flight" };
 		if (posted === "voided" || posted === "not_found") {
@@ -368,10 +541,13 @@ export class HoldEngine {
 				throw new DebtChargeFailedError(holdKey, charged.role, charged.transferIds);
 			}
 		}
-		await this.journal.writeTx(() =>
-			this.journal.cas(holdKey, "settling", "settled", { terminalKind: "settled" }),
-		);
-		return { outcome: "settled", resumed };
+		const fin = await this.finalTransition(holdKey, "settling", "settled", {
+			terminalKind: "settled",
+		});
+		if (fin === "moved" || fin === "settled")
+			return { outcome: "settled", resumed: fin !== "moved" || resumed };
+		if (fin === "missing") return { outcome: "incident", state: "missing" };
+		return { outcome: "incident", state: fin === "incident" ? "settling" : fin };
 	}
 
 	/**
@@ -392,22 +568,132 @@ export class HoldEngine {
 		if (voided === "not_found") {
 			// Never placed — or an abandoned placement not landed YET. The journal finalizes
 			// `voided_not_found` only past ttlAt + its placement grace (the horizon rule).
+			let fin: "moved" | "incident" | HoldState | "missing";
 			try {
-				await this.journal.writeTx(() =>
-					this.journal.cas(holdKey, "voiding", "voided", { terminalKind: "voided_not_found" }),
-				);
+				fin = await this.finalTransition(holdKey, "voiding", "voided", {
+					terminalKind: "voided_not_found",
+				});
 			} catch (err) {
 				if (err instanceof PlacementHorizonError) return { outcome: "in_flight" };
 				throw err;
 			}
-			return { outcome: "voided" };
+			return fin === "moved" || fin === "voided"
+				? { outcome: "voided" }
+				: { outcome: "incident", state: "voiding" };
 		}
 		// Voided now or before, or expired by the ledger: nothing was charged either way.
-		await this.journal.writeTx(() =>
-			this.journal.cas(holdKey, "voiding", "voided", {
-				terminalKind: voided === "expired" ? "voided_expired" : "voided",
-			}),
-		);
-		return { outcome: "voided" };
+		const fin = await this.finalTransition(holdKey, "voiding", "voided", {
+			terminalKind: voided === "expired" ? "voided_expired" : "voided",
+		});
+		return fin === "moved" || fin === "voided"
+			? { outcome: "voided" }
+			: { outcome: "incident", state: "voiding" };
+	}
+
+	/**
+	 * One sweep: the work the plan gives the sweeper, run on a timer and once at start (which
+	 * covers a crash). Each step acts BY STATE on rows read from the journal — no in-memory map:
+	 *   1. the heartbeat (the independent detector reads it);
+	 *   2. every `open` hold past `ttlAt + grace` (the ledger has released it by then) is claimed
+	 *      `open → expiring` and finished (below);
+	 *   3. every in-flight row (`settling`, `voiding`, `expiring`; rows carrying an INCIDENT are
+	 *      never in flight, so never resumed) is replayed — a `settling` row from its stored
+	 *      intent, through the same contract choke point as any settlement;
+	 *   4. every recorded, uncharged late settlement is charged.
+	 * A step that throws for one row is reported in {@link SweepReport.errors} and the sweep goes
+	 * on: one bad row never stops the others.
+	 */
+	async sweep(): Promise<SweepReport> {
+		const now = this.now();
+		const report: SweepReport = {
+			expired: [],
+			incidents: [],
+			inFlight: [],
+			replayed: [],
+			lateCharged: [],
+			errors: [],
+		};
+		await this.journal.writeTx(() => this.journal.recordHeartbeat(now));
+		// Each OBLIGATION of a row is attempted at most once per sweep: a row the expiry step
+		// claimed (and failed to finish) is not replayed again in the same sweep — the next sweep
+		// tries it. Advancing a row's state and charging its late settlement are separate
+		// obligations, each attempted once.
+		const touched = new Set<string>();
+		const attempt = async (
+			obligation: "advance" | "late",
+			holdId: string,
+			step: () => Promise<void>,
+		) => {
+			const key = `${obligation}:${holdId}`;
+			if (touched.has(key)) return;
+			touched.add(key);
+			try {
+				await step();
+			} catch (error) {
+				report.errors.push({ holdId, error });
+			}
+		};
+		for (const row of this.journal.openPast(now - this.expiryGraceMs)) {
+			await attempt("advance", row.holdId, async () => {
+				const won = await this.journal.writeTx(() =>
+					this.journal.cas(row.holdId, "open", "expiring"),
+				);
+				if (!won) return; // a settlement or a release claimed it first: theirs
+				// Reported by what the ledger answered — never `expired` unless it expired.
+				const outcome = await this.finishExpiry(row.holdId);
+				if (outcome === "expired") report.expired.push(row.holdId);
+				else if (outcome === "incident") report.incidents.push(row.holdId);
+				else report.inFlight.push(row.holdId);
+			});
+		}
+		for (const row of this.journal.inFlight()) {
+			await attempt("advance", row.holdId, async () => {
+				let outcome: string;
+				if (row.state === "settling") {
+					outcome = (
+						await this.completeSettlement(row.holdId, row.intent as SettlementIntent, true)
+					).outcome;
+				} else if (row.state === "voiding") {
+					outcome = (await this.release(row.holdId)).outcome;
+				} else {
+					outcome = await this.finishExpiry(row.holdId);
+				}
+				report.replayed.push({ holdId: row.holdId, outcome });
+			});
+		}
+		for (const row of this.journal.lateUncharged()) {
+			await attempt("late", row.holdId, async () => {
+				await this.chargeLate(row.holdId);
+				if (this.journal.get(row.holdId)?.lateState === "charged") {
+					report.lateCharged.push(row.holdId);
+				}
+			});
+		}
+		return report;
+	}
+
+	/**
+	 * Finish an `expiring` hold by what the ledger answers when its pending transfer is voided:
+	 * - voided now or before, or already expired by the ledger → `expired`
+	 *   (`hold_expired_unsettled`): nothing was charged;
+	 * - POSTED, or NOT FOUND (an `open` row's reserve transfer was confirmed placed, and an
+	 *   expired one answers "expired", not "not found") → a terminal incident: the ledger and the
+	 *   journal disagree, and an operator must look;
+	 * - unconfirmed (a retired void id the read-back cannot settle yet) → left `expiring`, in
+	 *   flight for the next sweep.
+	 */
+	private async finishExpiry(holdKey: string): Promise<"expired" | "incident" | "in_flight"> {
+		const voided = await within("release", this.ms, () => this.ledger.release({ holdKey }));
+		if (voided === "unknown") return "in_flight";
+		if (voided === "posted" || voided === "not_found") {
+			await this.journal.writeTx(() =>
+				this.journal.recordIncident(holdKey, { kind: "expiry_ledger_disagrees", voided }),
+			);
+			return "incident";
+		}
+		const fin = await this.finalTransition(holdKey, "expiring", "expired", {
+			terminalKind: "hold_expired_unsettled",
+		});
+		return fin === "moved" || fin === "expired" ? "expired" : "incident";
 	}
 }

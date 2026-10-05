@@ -1094,7 +1094,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		return path;
 	};
 
-	it("a #174-shaped v0 file opens and migrates to v2 with its debt and its open and settling rows intact", () => {
+	it("a #174-shaped v0 file opens and migrates to v3 with its debt and its open and settling rows intact", () => {
 		const path = file((raw) => {
 			raw.exec(SCHEMA_174);
 			raw.exec(
@@ -1119,7 +1119,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		const raw = new DatabaseSync(path);
 		expect(
 			(raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
-		).toBe(2);
+		).toBe(3);
 		raw.close();
 	});
 
@@ -1141,7 +1141,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 			raw.exec(SCHEMA_174);
 			raw.exec("ALTER TABLE hold ADD COLUMN incident_json TEXT");
 			raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 7)");
-			raw.exec("PRAGMA user_version = 3");
+			raw.exec("PRAGMA user_version = 4");
 		});
 		let err: unknown;
 		try {
@@ -1151,7 +1151,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		}
 		expect(err).toBeInstanceOf(JournalSchemaError);
 		const msg = String((err as Error).message);
-		expect(msg).toContain("schema version 3, this code reads 2");
+		expect(msg).toContain("schema version 4, this code reads 3");
 		expect(msg).toContain(
 			"Do NOT delete or recreate it while it holds open or settling holds or any debt",
 		);
@@ -1159,7 +1159,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		const raw = new DatabaseSync(path);
 		expect(
 			(raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
-		).toBe(3);
+		).toBe(4);
 		expect(
 			(raw.prepare("SELECT amount FROM debt WHERE budget_id = 'b'").get() as { amount: number })
 				.amount,
@@ -1215,18 +1215,18 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		}
 	}, 120_000);
 
-	it("(c) a NEWER version is refused even with NO hold table — never stamped down to 2 and given tables", () => {
+	it("(c) a NEWER version is refused even with NO hold table — never stamped down to 3 and given tables", () => {
 		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-v3-"));
 		dirs.push(dir);
 		const path = join(dir, "holds.db");
 		const raw = new DatabaseSync(path);
-		raw.exec("PRAGMA user_version = 3");
+		raw.exec("PRAGMA user_version = 4");
 		raw.close();
-		expect(() => HoldJournal.open(path)).toThrow(/schema version 3, this code reads 2/);
+		expect(() => HoldJournal.open(path)).toThrow(/schema version 4, this code reads 3/);
 		const after = new DatabaseSync(path);
 		expect(
 			(after.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
-		).toBe(3);
+		).toBe(4);
 		expect(after.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()).toEqual([]);
 		after.close();
 	});
@@ -1243,7 +1243,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 			raw.close();
 			const before = readFileSync(path);
 			expect(() => HoldJournal.open(path), String(v)).toThrow(
-				new RegExp(`schema version ${v}, this code reads 2`),
+				new RegExp(`schema version ${v}, this code reads 3`),
 			);
 			expect(readFileSync(path).equals(before), `${v}: the bytes are unchanged`).toBe(true);
 			expect(existsSync(`${path}-wal`), String(v)).toBe(false);
@@ -1294,7 +1294,7 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 		const raw = new DatabaseSync(path); // default rollback (delete) journal mode
 		raw.exec(SCHEMA_174);
 		raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 7)");
-		raw.exec("PRAGMA user_version = 3");
+		raw.exec("PRAGMA user_version = 4");
 		raw.close();
 		const before = readFileSync(path);
 		expect(() => HoldJournal.open(path)).toThrow(JournalSchemaError);
@@ -1317,5 +1317,165 @@ describe("#177 (c): a v0 journal written by #174's code is MIGRATED, never refus
 			raw.exec("ALTER TABLE hold ADD COLUMN incident_json TEXT"); // v0 yet already has it: unknown
 		});
 		expect(() => HoldJournal.open(path)).toThrow(/schema version 0 \(an unrecognised shape/);
+	});
+});
+
+describe("1c-1: schema v3 — the v2 migration and the exact-shape classifier (#184)", () => {
+	// The v2 schema #177 wrote.
+	const SCHEMA_V2 = `
+		CREATE TABLE hold (
+			hold_id TEXT PRIMARY KEY, budget_id TEXT NOT NULL,
+			state TEXT NOT NULL CHECK (state IN ('open','settling','settled','voiding','voided','expiring','expired')),
+			amount INTEGER NOT NULL CHECK (amount > 0), ttl_at INTEGER NOT NULL, admit_by INTEGER NOT NULL,
+			intent_json TEXT, terminal_kind TEXT, terminal_event_hash TEXT, reserved_seq INTEGER, incident_json TEXT
+		);
+		CREATE INDEX hold_state_ttl ON hold (state, ttl_at);
+		CREATE TABLE debt (budget_id TEXT PRIMARY KEY, amount INTEGER NOT NULL CHECK (amount >= 0));
+		CREATE TABLE applied (transfer_id TEXT PRIMARY KEY, budget_id TEXT NOT NULL, delta INTEGER NOT NULL);
+		PRAGMA user_version = 2;
+	`;
+	// The v0 schema #174 wrote: v2 without incident_json, never stamped.
+	const SCHEMA_V0 = SCHEMA_V2.replace(", incident_json TEXT\n", "\n").replace(
+		"PRAGMA user_version = 2;",
+		"",
+	);
+	const dbFile = (setup: (raw: DatabaseSync) => void, wal = true) => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-v3-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		const raw = new DatabaseSync(path);
+		if (wal) raw.exec("PRAGMA journal_mode = WAL");
+		setup(raw);
+		raw.close();
+		return path;
+	};
+	const version = (path: string) => {
+		const raw = new DatabaseSync(path);
+		const v = (raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+		raw.close();
+		return v;
+	};
+
+	it("a #177-shaped v2 file migrates to v3: rows, debt and incidents intact, the late columns empty", () => {
+		const path = dbFile((raw) => {
+			raw.exec(SCHEMA_V2);
+			raw.exec(
+				`INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by, incident_json) VALUES ('h1', 'b', 'settling', 100, 9000, 8000, '{"kind":"x"}'), ('h2', 'b', 'open', 50, 9000, 8000, NULL)`,
+			);
+			raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 12)");
+		});
+		const j = HoldJournal.open(path, { now: () => 0 });
+		journals.push(j);
+		expect(version(path)).toBe(3);
+		expect(j.debtOf("b")).toBe(12);
+		expect(j.get("h1")).toMatchObject({
+			incident: { kind: "x" },
+			lateAmount: null,
+			lateState: "none",
+		});
+		expect(j.get("h2")).toMatchObject({ state: "open", lateAmount: null });
+		expect(j.heartbeat()).toBeNull();
+	});
+
+	it("a v0 file migrates straight through to v3", () => {
+		const path = dbFile((raw) => {
+			raw.exec(SCHEMA_V0);
+			raw.exec("INSERT INTO debt (budget_id, amount) VALUES ('b', 3)");
+		});
+		const j = HoldJournal.open(path, { now: () => 0 });
+		journals.push(j);
+		expect(version(path)).toBe(3);
+		expect(j.debtOf("b")).toBe(3);
+	});
+
+	it("#184.1: SQLite's own internals are not part of the shape — a v3 journal after ANALYZE (sqlite_stat1) opens normally", () => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-analyze-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		HoldJournal.open(path).close();
+		const raw = new DatabaseSync(path);
+		raw.exec("ANALYZE");
+		expect(
+			raw.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name = 'sqlite_stat1'").get(),
+		).toEqual({ n: 1 });
+		raw.close();
+		const j = HoldJournal.open(path);
+		journals.push(j);
+		expect(j.heartbeat()).toBeNull();
+	});
+
+	it("#184.2: EVERY table's columns are checked — a v0 file whose `debt` differs is refused, never classified v0", () => {
+		const changed = SCHEMA_V0.replace(
+			"CREATE TABLE debt (budget_id TEXT PRIMARY KEY, amount INTEGER NOT NULL CHECK (amount >= 0));",
+			"CREATE TABLE debt (budget_id TEXT PRIMARY KEY, owed INTEGER NOT NULL);",
+		);
+		expect(changed, "the fixture really differs").not.toBe(SCHEMA_V0);
+		const path = dbFile((raw) => raw.exec(changed), false);
+		const before = readFileSync(path);
+		expect(() => HoldJournal.open(path)).toThrow(/an unrecognised shape/);
+		expect(readFileSync(path).equals(before)).toBe(true);
+	});
+
+	it("#184.3: a TRIGGER is part of the shape — a foreign trigger on hold is refused", () => {
+		const path = dbFile((raw) => {
+			raw.exec(SCHEMA_V2);
+			raw.exec("CREATE TRIGGER sneaky AFTER UPDATE ON hold BEGIN SELECT 1; END");
+		}, false);
+		const before = readFileSync(path);
+		expect(() => HoldJournal.open(path)).toThrow(/trigger sneaky/);
+		expect(readFileSync(path).equals(before)).toBe(true);
+	});
+});
+
+describe("#185 r1: the DATABASE enforces the legal late-settlement states (v3's triggers)", () => {
+	const fresh3 = () => {
+		const dir = mkdtempSync(join(tmpdir(), "openshell-journal-late-"));
+		dirs.push(dir);
+		const path = join(dir, "holds.db");
+		HoldJournal.open(path).close();
+		const raw = new DatabaseSync(path);
+		raw.exec(
+			"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by) VALUES ('h1', 'b', 'expired', 100, 9000, 8000)",
+		);
+		return { path, raw };
+	};
+
+	it("an illegal pair is aborted by the database — charged or recorded without an amount, zero with an amount, none with an amount", () => {
+		const { raw } = fresh3();
+		for (const [state, amount] of [
+			["charged", "NULL"],
+			["recorded", "NULL"],
+			["zero", "5"],
+			["none", "5"],
+			["recorded", "0"],
+		] as const) {
+			expect(
+				() =>
+					raw.exec(
+						`UPDATE hold SET late_state = '${state}', late_amount = ${amount} WHERE hold_id = 'h1'`,
+					),
+				`${state}/${amount}`,
+			).toThrow(/illegal late settlement state/);
+		}
+		expect(() =>
+			raw.exec(
+				"INSERT INTO hold (hold_id, budget_id, state, amount, ttl_at, admit_by, late_state) VALUES ('h2', 'b', 'expired', 1, 1, 1, 'charged')",
+			),
+		).toThrow(/illegal late settlement state/);
+		// The legal ones pass.
+		raw.exec("UPDATE hold SET late_state = 'zero', late_amount = 0 WHERE hold_id = 'h1'");
+		raw.exec("UPDATE hold SET late_state = 'none', late_amount = NULL WHERE hold_id = 'h1'");
+		raw.exec("UPDATE hold SET late_state = 'recorded', late_amount = 7 WHERE hold_id = 'h1'");
+		raw.close();
+	});
+
+	it("the triggers are part of v3's exact shape: one of them altered is refused at open", () => {
+		const { path, raw } = fresh3();
+		raw.exec("DROP TRIGGER hold_late_legal_update");
+		raw.exec(
+			"CREATE TRIGGER hold_late_legal_update BEFORE UPDATE OF late_state, late_amount ON hold BEGIN SELECT 1; END",
+		);
+		raw.close();
+		expect(() => HoldJournal.open(path)).toThrow(/an unrecognised shape/);
 	});
 });

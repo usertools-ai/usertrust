@@ -2,6 +2,12 @@
 // Copyright 2026 Usertools, Inc.
 
 export {
+	type DetectorIncident,
+	type DetectorOptions,
+	type DetectorReading,
+	HoldDetector,
+} from "./detector.js";
+export {
 	DebtChargeFailedError,
 	type EngineOptions,
 	HoldEngine,
@@ -12,6 +18,7 @@ export {
 	type ReserveOutcome,
 	type SettlementIntent,
 	type SettleOutcome,
+	type SweepReport,
 } from "./engine.js";
 export {
 	BodyTooLargeError,

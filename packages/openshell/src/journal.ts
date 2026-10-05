@@ -127,6 +127,14 @@ export interface HoldRow {
 	 */
 	incident: unknown;
 	reservedSeq: number | null;
+	/**
+	 * The late settlement of an expiring or expired hold, a POSITIVE state recorded once:
+	 * `none` (no late settlement yet; amount null), `recorded` (amount > 0: its debt counted, the
+	 * ledger charge pending), `charged` (amount > 0, the ledger took it), or `zero` (amount 0: a
+	 * zero-cost late settlement, terminal, no transfer). The first recorded disposition wins.
+	 */
+	lateState: LateState;
+	lateAmount: number | null;
 }
 
 export interface JournalOptions {
@@ -178,14 +186,11 @@ export class PlacementHorizonError extends Error {
 }
 
 /**
- * The hold journal's schema version (`PRAGMA user_version`). Version 0 is a file written before
- * versioning existed; one in the shape the slice-1b journal wrote (admit_by, no incident_json)
- * is MIGRATED to this version at open. Every other version is refused.
+ * The hold journal's schema version (`PRAGMA user_version`). Every version this code can READ
+ * has an exact shape in {@link SHAPES}; a file at one of the older ones is MIGRATED to this
+ * version at open (one transaction). Every other version is refused.
  */
-export const JOURNAL_SCHEMA_VERSION = 2;
-
-/** The journal's tables, in both schema versions. */
-const JOURNAL_TABLES: readonly string[] = ["hold", "debt", "applied"];
+export const JOURNAL_SCHEMA_VERSION = 3;
 
 /** The hold table's columns as the slice-1b code wrote them (schema version 0). */
 const V0_HOLD_COLUMNS: readonly string[] = [
@@ -200,9 +205,51 @@ const V0_HOLD_COLUMNS: readonly string[] = [
 	"terminal_event_hash",
 	"reserved_seq",
 ];
-
-/** The hold table's columns at this version (2): v0's plus the incident. */
 const V2_HOLD_COLUMNS: readonly string[] = [...V0_HOLD_COLUMNS, "incident_json"];
+const V3_HOLD_COLUMNS: readonly string[] = [...V2_HOLD_COLUMNS, "late_amount", "late_state"];
+
+/** A hold's late-settlement disposition (see {@link HoldRow.lateState}). */
+export type LateState = "none" | "recorded" | "charged" | "zero";
+
+/**
+ * The legal (late_state, late_amount) pairs, enforced by the DATABASE. ADD COLUMN cannot add a
+ * cross-column CHECK, so the v3 schema carries these two triggers; they are part of its exact
+ * shape (name AND sql), so no other trigger is ever adopted.
+ */
+// Written so it is always TRUE or FALSE, never NULL: SQL's three-valued logic makes
+// `NULL > 0` NULL, and a trigger whose WHEN is NULL does not fire — so every amount comparison
+// is guarded by an explicit IS NOT NULL.
+const LATE_LEGAL =
+	"(NEW.late_state = 'none' AND NEW.late_amount IS NULL) OR (NEW.late_state IN ('recorded', 'charged') AND NEW.late_amount IS NOT NULL AND NEW.late_amount > 0) OR (NEW.late_state = 'zero' AND NEW.late_amount IS NOT NULL AND NEW.late_amount = 0)";
+const V3_TRIGGERS: Readonly<Record<string, string>> = {
+	hold_late_legal_insert: `CREATE TRIGGER hold_late_legal_insert BEFORE INSERT ON hold WHEN NOT (${LATE_LEGAL}) BEGIN SELECT RAISE(ABORT, 'hold journal: illegal late settlement state'); END`,
+	hold_late_legal_update: `CREATE TRIGGER hold_late_legal_update BEFORE UPDATE OF late_state, late_amount ON hold WHEN NOT (${LATE_LEGAL}) BEGIN SELECT RAISE(ABORT, 'hold journal: illegal late settlement state'); END`,
+};
+const DEBT_COLUMNS: readonly string[] = ["budget_id", "amount"];
+const APPLIED_COLUMNS: readonly string[] = ["transfer_id", "budget_id", "delta"];
+
+/**
+ * The EXACT shape of every version this code reads: each table and its columns (#184: every
+ * table's columns, not only hold's). A file is one of these, or it is fresh (no objects at all),
+ * or it is refused.
+ */
+/** The triggers each version's exact shape carries (name → its sql, as stored). */
+const SHAPE_TRIGGERS: Readonly<Record<number, Readonly<Record<string, string>>>> = {
+	0: {},
+	2: {},
+	3: V3_TRIGGERS,
+};
+
+const SHAPES: Readonly<Record<number, Readonly<Record<string, readonly string[]>>>> = {
+	0: { hold: V0_HOLD_COLUMNS, debt: DEBT_COLUMNS, applied: APPLIED_COLUMNS },
+	2: { hold: V2_HOLD_COLUMNS, debt: DEBT_COLUMNS, applied: APPLIED_COLUMNS },
+	3: {
+		hold: V3_HOLD_COLUMNS,
+		debt: DEBT_COLUMNS,
+		applied: APPLIED_COLUMNS,
+		meta: ["key", "value"],
+	},
+};
 
 /**
  * The journal file was written by a schema this code cannot read safely. The file is LEFT
@@ -263,6 +310,8 @@ interface RawRow {
 	terminal_event_hash: string | null;
 	reserved_seq: number | null;
 	incident_json: string | null;
+	late_amount: number | null;
+	late_state: LateState;
 }
 
 function toRow(r: RawRow): HoldRow {
@@ -277,6 +326,8 @@ function toRow(r: RawRow): HoldRow {
 		terminalKind: r.terminal_kind,
 		terminalEventHash: r.terminal_event_hash,
 		incident: r.incident_json === null ? null : JSON.parse(r.incident_json),
+		lateState: r.late_state,
+		lateAmount: r.late_amount,
 		reservedSeq: r.reserved_seq,
 	};
 }
@@ -428,59 +479,76 @@ export class HoldJournal {
 	}
 
 	/**
-	 * What the file is, read-only — each answer defined POSITIVELY, and everything else refused
-	 * ({@link JournalSchemaError}):
-	 * - `fresh`: version 0 or this version AND no tables at all (a new, empty file);
-	 * - `current`: this version, exactly this code's tables, and exactly its hold columns;
-	 * - `v0`: version 0, exactly the slice-1b tables, and exactly its hold columns.
-	 * So a file holding ANY other tables (another application's, a foreign schema) is never
-	 * adopted as fresh, whatever the version says, and no unknown shape is ever migrated.
+	 * What the file is, read-only — each answer defined POSITIVELY, everything else refused
+	 * ({@link JournalSchemaError}). The primitive is the file's VERSION and its OBJECTS: every
+	 * table and trigger in `sqlite_master`, except SQLite's own `sqlite_*` internals (e.g. the
+	 * `sqlite_stat1` an operator's ANALYZE adds; that prefix is reserved, so no user table takes
+	 * it). Indexes are not part of the shape.
+	 * - `fresh`: a readable version and NO objects at all (a new, empty file);
+	 * - a version number (`0`, `2`, `3`): exactly that version's tables, each with exactly its
+	 *   columns ({@link SHAPES}), and exactly its triggers, by name and sql ({@link SHAPE_TRIGGERS}:
+	 *   none before v3; v3's two late-state guards).
 	 */
-	private static classify(db: DatabaseSync): "fresh" | "current" | "v0" {
+	private static classify(db: DatabaseSync): "fresh" | 0 | 2 | 3 {
 		const version = (db.prepare("PRAGMA user_version").get() as { user_version: number })
 			.user_version;
-		// Only version 0 (never stamped) or this version is readable at all: any OTHER version (a
-		// newer one, 1, or a negative one, which the pragma accepts) is a schema this code does not
-		// know, whatever tables the file has.
-		if (version !== 0 && version !== JOURNAL_SCHEMA_VERSION) {
+		const shape = SHAPES[version];
+		// Only a version with a known shape is readable at all: any OTHER version (a newer one, 1,
+		// or a negative one, which the pragma accepts) is a schema this code does not know,
+		// whatever objects the file holds.
+		if (shape === undefined) {
 			throw new JournalSchemaError(
 				`schema version ${version}, this code reads ${JOURNAL_SCHEMA_VERSION}`,
 			);
 		}
-		const tables = (
-			db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{
-				name: string;
-			}>
-		).map((t) => t.name);
-		if (tables.length === 0) return "fresh";
-		const cols = (db.prepare("PRAGMA table_info(hold)").all() as Array<{ name: string }>).map(
-			(c) => c.name,
-		);
+		const objects = db
+			.prepare(
+				"SELECT type, name, sql FROM sqlite_master WHERE type IN ('table', 'trigger') AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'",
+			)
+			.all() as Array<{ type: string; name: string; sql: string | null }>;
+		if (objects.length === 0) return "fresh";
+		const columnsOf = (table: string) =>
+			(
+				db.prepare(`PRAGMA table_info("${table.replaceAll('"', '""')}")`).all() as Array<{
+					name: string;
+				}>
+			).map((c) => c.name);
 		// A journal written before the admission deadline existed has no `admit_by` to judge an
 		// `open` row by; reading its `ttl_at` (an upper bound) in its place would admit after the
 		// ledger may have released the hold. Refused, never guessed.
-		if (cols.length > 0 && !cols.includes("admit_by")) {
+		const hold = columnsOf("hold");
+		if (hold.length > 0 && !hold.includes("admit_by")) {
 			throw new JournalSchemaError("the hold table has no admit_by column");
 		}
 		const same = (a: readonly string[], b: readonly string[]) =>
 			[...a].sort().join(",") === [...b].sort().join(",");
-		const tablesMatch = same(tables, JOURNAL_TABLES);
-		if (version === JOURNAL_SCHEMA_VERSION && tablesMatch && same(cols, V2_HOLD_COLUMNS)) {
-			return "current";
-		}
-		if (version === 0 && tablesMatch && same(cols, V0_HOLD_COLUMNS)) return "v0";
+		const triggers = objects.filter((o) => o.type === "trigger");
+		const tables = objects.filter((o) => o.type === "table").map((o) => o.name);
+		// Triggers: EXACTLY this version's (name and stored sql) — so a foreign trigger, or one
+		// of ours altered, is never adopted.
+		const expectedTriggers = SHAPE_TRIGGERS[version] ?? {};
+		const triggersExact =
+			same(
+				triggers.map((t) => t.name),
+				Object.keys(expectedTriggers),
+			) && triggers.every((t) => t.sql === expectedTriggers[t.name]);
+		const exact =
+			triggersExact &&
+			same(tables, Object.keys(shape)) &&
+			tables.every((t) => same(columnsOf(t), shape[t] ?? []));
+		if (exact) return version as 0 | 2 | 3;
+		const found = objects.map((o) => (o.type === "table" ? o.name : `trigger ${o.name}`));
 		throw new JournalSchemaError(
-			`schema version ${version} (an unrecognised shape: tables ${[...tables].sort().join(", ")}), this code reads ${JOURNAL_SCHEMA_VERSION}`,
+			`schema version ${version} (an unrecognised shape: tables ${found.sort().join(", ")}), this code reads ${JOURNAL_SCHEMA_VERSION}`,
 		);
 	}
 
 	/**
-	 * {@link classify} under ONE read transaction: its two reads (the version, then the columns)
-	 * see one snapshot, so an opener racing a migration that COMMITS between them cannot see a
-	 * v0 version with the v2 column and refuse a healthy file. A read transaction takes no write
-	 * lock and changes nothing on disk.
+	 * {@link classify} under ONE read transaction: its reads see one snapshot, so an opener racing
+	 * a migration that COMMITS between them cannot see a half-old, half-new file and refuse a
+	 * healthy one. A read transaction takes no write lock and changes nothing on disk.
 	 */
-	private static classifySnapshot(db: DatabaseSync): "fresh" | "current" | "v0" {
+	private static classifySnapshot(db: DatabaseSync): "fresh" | 0 | 2 | 3 {
 		db.exec("BEGIN");
 		try {
 			return HoldJournal.classify(db);
@@ -491,43 +559,55 @@ export class HoldJournal {
 
 	/**
 	 * Create or migrate the schema in ONE write transaction, re-deciding INSIDE it: a second
-	 * opener that raced the first one waits on the lock, then finds the file already current
-	 * and does nothing (never a "duplicate column"). A v0 file gains `incident_json` and its
-	 * version stamp together, so a crash cannot leave it half-migrated; every row and all debt
-	 * are kept.
+	 * opener that raced the first one waits on the lock, then finds the file already current and
+	 * does nothing (never a "duplicate column"). Each step's columns and its version stamp commit
+	 * together, so a crash can never leave a file half-migrated; every row and all debt are kept.
+	 * v0 → (incident_json) → v2 → (late_amount, late_state, meta, the late-state triggers) → v3.
 	 */
 	private static migrate(db: DatabaseSync): void {
 		db.exec("BEGIN IMMEDIATE");
 		try {
 			const kind = HoldJournal.classify(db);
-			if (kind === "v0") db.exec("ALTER TABLE hold ADD COLUMN incident_json TEXT");
-			db.exec(`
-				CREATE TABLE IF NOT EXISTS hold (
-					hold_id TEXT PRIMARY KEY,
-					budget_id TEXT NOT NULL,
-					state TEXT NOT NULL CHECK (state IN
-						('open','settling','settled','voiding','voided','expiring','expired')),
-					amount INTEGER NOT NULL CHECK (amount > 0),
-					ttl_at INTEGER NOT NULL,
-					admit_by INTEGER NOT NULL,
-					intent_json TEXT,
-					terminal_kind TEXT,
-					terminal_event_hash TEXT,
-					reserved_seq INTEGER,
-					incident_json TEXT
-				);
-				CREATE INDEX IF NOT EXISTS hold_state_ttl ON hold (state, ttl_at);
-				CREATE TABLE IF NOT EXISTS debt (
-					budget_id TEXT PRIMARY KEY,
-					amount INTEGER NOT NULL CHECK (amount >= 0)
-				);
-				CREATE TABLE IF NOT EXISTS applied (
-					transfer_id TEXT PRIMARY KEY,
-					budget_id TEXT NOT NULL,
-					delta INTEGER NOT NULL
-				);
-			`);
-			if (kind !== "current") db.exec(`PRAGMA user_version = ${JOURNAL_SCHEMA_VERSION}`);
+			if (kind === "fresh") {
+				db.exec(`
+					CREATE TABLE hold (
+						hold_id TEXT PRIMARY KEY,
+						budget_id TEXT NOT NULL,
+						state TEXT NOT NULL CHECK (state IN
+							('open','settling','settled','voiding','voided','expiring','expired')),
+						amount INTEGER NOT NULL CHECK (amount > 0),
+						ttl_at INTEGER NOT NULL,
+						admit_by INTEGER NOT NULL,
+						intent_json TEXT,
+						terminal_kind TEXT,
+						terminal_event_hash TEXT,
+						reserved_seq INTEGER,
+						incident_json TEXT
+					);
+					CREATE INDEX hold_state_ttl ON hold (state, ttl_at);
+					CREATE TABLE debt (
+						budget_id TEXT PRIMARY KEY,
+						amount INTEGER NOT NULL CHECK (amount >= 0)
+					);
+					CREATE TABLE applied (
+						transfer_id TEXT PRIMARY KEY,
+						budget_id TEXT NOT NULL,
+						delta INTEGER NOT NULL
+					);
+				`);
+			}
+			if (kind === 0) db.exec("ALTER TABLE hold ADD COLUMN incident_json TEXT");
+			if (kind === "fresh" || kind === 0 || kind === 2) {
+				// The late settlement (slice 1c-1): its amount, recorded once on an expiring or
+				// expired row, and whether the ledger has taken it.
+				db.exec(`
+					ALTER TABLE hold ADD COLUMN late_amount INTEGER CHECK (late_amount IS NULL OR late_amount >= 0);
+					ALTER TABLE hold ADD COLUMN late_state TEXT NOT NULL DEFAULT 'none' CHECK (late_state IN ('none', 'recorded', 'charged', 'zero'));
+					CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+				`);
+				for (const sql of Object.values(V3_TRIGGERS)) db.exec(sql);
+				db.exec(`PRAGMA user_version = ${JOURNAL_SCHEMA_VERSION}`);
+			}
 			db.exec("COMMIT");
 		} catch (err) {
 			db.exec("ROLLBACK");
@@ -631,6 +711,11 @@ export class HoldJournal {
 	 * THE compare-and-set. Must run inside {@link writeTx}. Returns true only when
 	 * exactly one row moved `from → to`.
 	 */
+	/**
+	 * The compare-and-set every transition uses: `from → to` only when the row is in `from`
+	 * AND CARRIES NO INCIDENT. An incident is terminal: no transition from it is legal, so the
+	 * rule lives here, once, rather than at each caller. False when nothing changed.
+	 */
 	cas(
 		holdId: string,
 		from: HoldState,
@@ -656,7 +741,7 @@ export class HoldJournal {
 				`UPDATE hold SET state = ?,
 					intent_json = COALESCE(?, intent_json),
 					terminal_kind = COALESCE(?, terminal_kind)
-				 WHERE hold_id = ? AND state = ?`,
+				 WHERE hold_id = ? AND state = ? AND incident_json IS NULL`,
 			)
 			.run(
 				to,
@@ -886,6 +971,100 @@ export class HoldJournal {
 					.prepare("SELECT * FROM hold WHERE incident_json IS NOT NULL")
 					.all() as unknown as RawRow[],
 		).map(toRow);
+	}
+
+	/**
+	 * Record the LATE settlement of a hold the ledger released before it could be posted: its
+	 * full actual amount, once: `none → recorded` (amount > 0) or `none → zero` (amount 0, a
+	 * terminal disposition with no transfer). Only an `expiring` or `expired` row without an
+	 * incident takes it (anything else is not late), and only from `none`, so the FIRST recorded
+	 * disposition wins, zero included. Must run inside {@link writeTx}; the caller records the
+	 * debt of a non-zero amount in the same transaction. False when nothing changed.
+	 */
+	recordLate(holdId: string, amount: number): boolean {
+		this.requireTx("recordLate");
+		if (!Number.isSafeInteger(amount) || amount < 0) {
+			throw new TypeError(
+				`hold journal: recordLate: amount must be a non-negative safe integer, got ${String(amount)}`,
+			);
+		}
+		const r = this.db
+			.prepare(
+				"UPDATE hold SET late_amount = ?, late_state = ? WHERE hold_id = ? AND late_state = 'none' AND incident_json IS NULL AND state IN ('expiring','expired')",
+			)
+			.run(amount, amount > 0 ? "recorded" : "zero", holdId);
+		return Number(r.changes) === 1;
+	}
+
+	/** The ledger took a recorded late settlement: `recorded → charged`, once. Inside {@link writeTx}. */
+	markLateCharged(holdId: string): boolean {
+		this.requireTx("markLateCharged");
+		const r = this.db
+			.prepare(
+				"UPDATE hold SET late_state = 'charged' WHERE hold_id = ? AND late_state = 'recorded' AND incident_json IS NULL",
+			)
+			.run(holdId);
+		return Number(r.changes) === 1;
+	}
+
+	/** Recorded late settlements the ledger has not taken yet (rows with an incident excluded). */
+	lateUncharged(): HoldRow[] {
+		return this.read(
+			(db) =>
+				db
+					.prepare("SELECT * FROM hold WHERE late_state = 'recorded' AND incident_json IS NULL")
+					.all() as unknown as RawRow[],
+		).map(toRow);
+	}
+
+	/** The sweeper's heartbeat: the clock reading of its latest run. Inside {@link writeTx}. */
+	recordHeartbeat(atMs: number): void {
+		this.requireTx("recordHeartbeat");
+		this.db
+			.prepare(
+				"INSERT INTO meta (key, value) VALUES ('sweeper_heartbeat', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+			)
+			.run(String(atMs));
+	}
+
+	/** The sweeper's latest heartbeat, or null if it has never run. */
+	heartbeat(): number | null {
+		const r = this.read(
+			(db) =>
+				db.prepare("SELECT value FROM meta WHERE key = 'sweeper_heartbeat'").get() as
+					| { value: string }
+					| undefined,
+		);
+		return r === undefined ? null : Number(r.value);
+	}
+
+	/**
+	 * Attach the actual cost of a settlement that could NOT be recorded (the row already carries
+	 * an incident) to that incident, once, so an operator can bill it. Inside {@link writeTx}.
+	 */
+	recordUnbilled(holdId: string, unbilled: unknown): boolean {
+		this.requireTx("recordUnbilled");
+		const r = this.db
+			.prepare(
+				"UPDATE hold SET incident_json = json_set(incident_json, '$.unbilled', json(?)) WHERE hold_id = ? AND incident_json IS NOT NULL AND json_extract(incident_json, '$.unbilled') IS NULL",
+			)
+			.run(JSON.stringify(unbilled), holdId);
+		return Number(r.changes) === 1;
+	}
+
+	/**
+	 * The ledger TOOK a late charge for a row that became an incident meanwhile (so the row could
+	 * not be marked `charged`): record that fact on the incident, once, so it is never lost — the
+	 * operator sees "charged on the ledger" next to the incident. Inside {@link writeTx}.
+	 */
+	recordLedgerChargedOnIncident(holdId: string, amount: number): boolean {
+		this.requireTx("recordLedgerChargedOnIncident");
+		const r = this.db
+			.prepare(
+				"UPDATE hold SET incident_json = json_set(incident_json, '$.late_charged_on_ledger', ?) WHERE hold_id = ? AND incident_json IS NOT NULL AND json_extract(incident_json, '$.late_charged_on_ledger') IS NULL",
+			)
+			.run(amount, holdId);
+		return Number(r.changes) === 1;
 	}
 
 	/** Record a terminal incident on a row, once. Must run inside {@link writeTx}. */
