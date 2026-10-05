@@ -311,6 +311,16 @@ describe.skipIf(!TB_ADDRESS)("real TigerBeetle — the hold engine", () => {
 		await expect(tb.ensureEscrowAccount("openshell-debt.team::a")).rejects.toThrow(/reserved/);
 	});
 
+	it("#174 r2 P1: an ordinary wallet already at the debt label's account id refuses the RESERVATION — nothing placed — never a post that can never charge its overage", async () => {
+		const { tb, engine, budgetId, walletAcct, key } = await setup(1_000);
+		// Escrow labels and wallet names share core's account-id space.
+		await tb.createUserWallet(debtAccountLabel(budgetId));
+		await expect(engine.reserve({ holdKey: key(), budgetId, amount: 10 })).rejects.toThrow(
+			/exists_with_different_flags/,
+		);
+		expect((await walletAcct())?.debits_pending, "nothing placed").toBe(0n);
+	});
+
 	it("control: every role's id is distinct and stable for a hold", () => {
 		const roles = ["reserve", "post", "void", "overage", "late"] as const;
 		const ids = roles.map((r) => transferIdFor("k", r));

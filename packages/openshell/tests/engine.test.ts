@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { HoldEngine } from "../src/engine.js";
+import { HoldEngine, PlacementWindowError } from "../src/engine.js";
 import { HoldJournal, LedgerDeadlineError } from "../src/journal.js";
 import {
 	BudgetIdError,
@@ -29,6 +29,11 @@ class FakeLedger implements LedgerPort {
 	/** Answer the next post / release with this outcome (a retired id's read-back). */
 	postAnswer: PostOutcome | null = null;
 	releaseAnswer: VoidOutcome | null = null;
+	/** ensureDebtAccount throws this (a debt account the ledger refuses), when set. */
+	debtAccountRefusal: Error | null = null;
+	ensuredDebt: string[] = [];
+	/** Runs inside available(): a slow balance lookup (advances the test clock). */
+	onAvailable: (() => void) | null = null;
 	/** While set, chargeDebt waits on it: the gap between the claim and the ledger charge. */
 	chargeGate: Promise<void> | null = null;
 	hang: "placeHold" | null = null;
@@ -48,8 +53,13 @@ class FakeLedger implements LedgerPort {
 	private has(holdKey: string, role: Parameters<typeof transferIdFor>[1]): boolean {
 		return this.applied.has(transferIdFor(holdKey, role).toString());
 	}
+	async ensureDebtAccount(budgetId: string): Promise<void> {
+		if (this.debtAccountRefusal !== null) throw this.debtAccountRefusal;
+		this.ensuredDebt.push(budgetId);
+	}
 	/** Like the TigerBeetle port: the hold's OWN reserve amount is added back. */
 	async available(budgetId: string, holdKey: string): Promise<number> {
+		this.onAvailable?.();
 		const own = this.applied.get(transferIdFor(holdKey, "reserve").toString()) ?? 0;
 		return (this.balances.get(budgetId) ?? 0) + own;
 	}
@@ -129,7 +139,7 @@ describe("hold engine: reserve", () => {
 		expect(journal.get("k1")).toMatchObject({
 			state: "open",
 			amount: 200,
-			ttlAt: 1_000 + 900_000 + 50,
+			ttlAt: 1_000 + 900_000 + 100, // placeBy (start + one deadline) + one deadline + lifetime
 		});
 	});
 	it("refuses over budget (debt included) and places nothing", async () => {
@@ -323,7 +333,7 @@ describe("hold engine: release (a non-2xx response)", () => {
 			outcome: "in_flight",
 		});
 		expect(journal.get("k1")?.state).toBe("voiding");
-		clock.now = 1_000 + 900_000 + 50 + GRACE; // ttlAt + grace
+		clock.now = 1_000 + 900_000 + 100 + GRACE; // ttlAt + grace
 		expect(await engine.release("k1")).toEqual({ outcome: "voided" });
 		expect(journal.get("k1")).toMatchObject({ state: "voided", terminalKind: "voided_not_found" });
 	});
@@ -354,7 +364,7 @@ describe("#174 r1: the three unbilled-cost paths", () => {
 		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 10 });
 		expect(journal.get("k1")).toMatchObject({
 			admitBy: 1_000 + 900_000,
-			ttlAt: 1_000 + 900_000 + 50,
+			ttlAt: 1_000 + 900_000 + 100, // placeBy (start + one deadline) + one deadline + lifetime
 		});
 		clock.now = 1_000 + 900_000 + 10; // the ledger may already have released it
 		expect(await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 10 })).toEqual({
@@ -443,5 +453,47 @@ describe("#174 r1 connector: the overage's debt blocks reservations from the mom
 			outcome: "late_required",
 		});
 		expect(journal.debtOf("b"), "a repeat reverses nothing more").toBe(0);
+	});
+});
+
+describe("#174 r2: every account a settlement touches is ensured before placement; one shared placement deadline", () => {
+	it("a debt account the ledger refuses refuses the RESERVATION — nothing placed, no row", async () => {
+		const { journal, ledger, engine } = setup();
+		ledger.debtAccountRefusal = new Error("exists_with_different_flags");
+		await expect(engine.reserve({ holdKey: "k1", budgetId: "b", amount: 10 })).rejects.toThrow(
+			/exists_with_different_flags/,
+		);
+		expect(ledger.count("k1", "reserve")).toBe(0);
+		expect(journal.get("k1")).toBeUndefined();
+	});
+
+	it("the debt account is ensured before the placement on every reservation", async () => {
+		const { ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 10 });
+		expect(ledger.ensuredDebt).toEqual(["b"]);
+		expect(ledger.count("k1", "reserve")).toBe(1);
+	});
+
+	it("a placement that would START after the shared window (a slow balance lookup ate it) is not placed: ttlAt stays an upper bound", async () => {
+		const { journal, ledger, engine, clock } = setup();
+		ledger.onAvailable = () => {
+			clock.now += 51; // past placeBy (start + 50)
+		};
+		await expect(
+			engine.reserve({ holdKey: "k1", budgetId: "b", amount: 10 }),
+		).rejects.toBeInstanceOf(PlacementWindowError);
+		expect(ledger.count("k1", "reserve"), "nothing placed").toBe(0);
+		expect(journal.get("k1")?.state, "the release path finalizes it").toBe("voiding");
+	});
+
+	it("control: a balance lookup inside the window still places", async () => {
+		const { ledger, engine, clock } = setup();
+		ledger.onAvailable = () => {
+			clock.now += 50; // exactly at placeBy
+		};
+		expect(await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 10 })).toEqual({
+			admitted: true,
+			existing: false,
+		});
 	});
 });

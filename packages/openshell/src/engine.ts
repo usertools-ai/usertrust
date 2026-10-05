@@ -15,6 +15,11 @@
  *      journal transaction — a crash replays it (same id, verified);
  *   4. `settling → settled`.
  * The receipt event (step 5) and the late-settlement path are the next slice.
+ *
+ * STRUCTURAL RULE: every ledger account a settlement might touch is ensured BEFORE the hold is
+ * placed. A settlement runs after the post, when nothing can be refused any more: an account
+ * that cannot be named (`::`) or created (a colliding ordinary wallet) must refuse the
+ * reservation, never strand a posted hold in `settling` with its overage uncharged.
  */
 
 import {
@@ -29,6 +34,18 @@ export interface EngineOptions {
 	/** The hold's lifetime, in whole seconds: the TigerBeetle pending timeout. */
 	holdTtlSeconds: number;
 	now?: () => number;
+}
+
+/**
+ * The placement did not START within the reservation's one shared placement window (the lock
+ * wait and the balance lookup took it): nothing was placed. The journal commits the row
+ * `voiding`; it is finalized by the release path.
+ */
+export class PlacementWindowError extends Error {
+	constructor(lateByMs: number) {
+		super(`hold engine: the placement window closed ${lateByMs} ms before the hold was placed`);
+		this.name = "PlacementWindowError";
+	}
 }
 
 /** A ledger call made OUTSIDE the journal's lock did not answer within the journal's deadline. */
@@ -129,27 +146,34 @@ export class HoldEngine {
 	 * a busy journal or a ledger failure: the request path fails closed on any throw.
 	 */
 	async reserve(p: { holdKey: string; budgetId: string; amount: number }): Promise<ReserveOutcome> {
-		debtAccountLabel(p.budgetId); // throws before anything is placed
-		// The ledger's timeout starts when the placement COMMITS — somewhere in
-		// [now, now + the journal's placement deadline]. So the hold can be released by the
-		// ledger as EARLY as admitBy (now + lifetime): admission is judged against it. ttlAt is
-		// the LATEST (for a placement that lands in time): the sweeper's deadline and the
-		// placement horizon's base (a later landing is what the placement grace covers).
-		const admitBy = this.now() + this.opts.holdTtlSeconds * 1000;
+		// The structural rule: every account a settlement might touch, before any placement.
+		debtAccountLabel(p.budgetId); // a name the ledger cannot give a debt account: throws
+		await within("ensureDebtAccount", this.ms, () => this.ledger.ensureDebtAccount(p.budgetId));
+		// ONE shared placement deadline, from ONE clock read: the placement must START by
+		// placeBy (the lock wait and the balance lookup included), and it then commits within
+		// one more deadline. The ledger's timeout starts at that commit, so the hold can be
+		// released by the ledger no EARLIER than admitBy (admission is judged against it) and
+		// no LATER than ttlAt (the sweeper's deadline and the placement horizon's base).
+		const start = this.now();
+		const lifetime = this.opts.holdTtlSeconds * 1000;
+		const placeBy = start + this.ms;
 		const r = await this.journal.reserve({
 			holdId: p.holdKey,
 			budgetId: p.budgetId,
 			amount: p.amount,
-			admitBy,
-			ttlAt: admitBy + this.ms,
+			admitBy: start + lifetime,
+			ttlAt: placeBy + this.ms + lifetime,
 			availableCredit: (holdId) => this.ledger.available(p.budgetId, holdId),
-			placeHold: () =>
-				this.ledger.placeHold({
+			placeHold: () => {
+				const late = this.now() - placeBy;
+				if (late > 0) throw new PlacementWindowError(late);
+				return this.ledger.placeHold({
 					budgetId: p.budgetId,
 					holdKey: p.holdKey,
 					amount: p.amount,
 					timeoutSeconds: this.opts.holdTtlSeconds,
-				}),
+				});
+			},
 		});
 		return r.admitted
 			? { admitted: true, existing: r.existing }

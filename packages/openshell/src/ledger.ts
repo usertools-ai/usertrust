@@ -53,6 +53,12 @@ export interface LedgerPort {
 	 * retry — the journal's `availableCredit` contract).
 	 */
 	available(budgetId: string, holdKey: string): Promise<number>;
+	/**
+	 * Ensure the budget's DEBT account exists and is usable (idempotent). Called by reserve()
+	 * BEFORE any placement, so an account a settlement could never charge refuses the
+	 * reservation up front rather than failing after the post.
+	 */
+	ensureDebtAccount(budgetId: string): Promise<void>;
 	/** Place the pending hold with the `reserve` id and a TigerBeetle timeout. */
 	placeHold(p: {
 		budgetId: string;
@@ -168,6 +174,15 @@ export class TigerBeetleLedger implements LedgerPort {
 			this.tb.lookupTransfer(transferIdFor(holdKey, "reserve")),
 		]);
 		return balance.available + (own === null ? 0 : Number(own.amount));
+	}
+
+	/**
+	 * An ordinary wallet that happens to sit at this label's account id (escrow labels and
+	 * wallet names share core's id space) answers `exists_with_different_flags` here: refused
+	 * at reservation, not after a post.
+	 */
+	async ensureDebtAccount(budgetId: string): Promise<void> {
+		await this.tb.ensureEscrowAccount(debtAccountLabel(budgetId));
 	}
 
 	async placeHold(p: {

@@ -5,6 +5,7 @@ export {
 	type EngineOptions,
 	HoldEngine,
 	LedgerTimeoutError,
+	PlacementWindowError,
 	type ReleaseOutcome,
 	type ReserveOutcome,
 	type SettlementIntent,
