@@ -68,7 +68,7 @@ export default function VerifiedClusterReceipt({ state }: { state: VerifiedClust
 
 	return (
 		<article className="flex flex-col gap-8 py-7" data-state="verified" data-scope="cluster">
-			<AdvisoryBands advisories={envelope.advisories} />
+			<AdvisoryBands advisories={envelope.advisories} withholdIdentifiers />
 			<ClusterReceiptCard receiptId={state.receiptId} claims={claims} rung={state.rung} />
 			<Details>
 				<div className="flex flex-col gap-8">

@@ -868,7 +868,7 @@ const envelopeVectors: ClusterVector[] = [
 			checksOf(b).predecessorLinkage = { result: "unavailable" };
 		},
 		expect: verdictAlgebra,
-		rule: "with no predecessor named, a cluster 200 says passed or notApplicable — never unavailable",
+		rule: "with no predecessor named, a cluster 200 says notApplicable (§15.10) — never unavailable",
 		detail: /"predecessorLinkage" is "unavailable" on a cluster 200/,
 	},
 	{
@@ -1022,13 +1022,14 @@ const boundaryVectors: ClusterVector[] = [
 		rule: "a leading '1' IS a zero byte, counted exactly — legal when the total is 16",
 	},
 	{
-		label: "boundary: CL1 (no predecessor named) with predecessorLinkage passed",
+		label: "algebra: CL1 names no predecessor, predecessorLinkage passed",
 		base: "cluster/first.json",
 		envelope: (b) => {
 			checksOf(b).predecessorLinkage = { result: "passed" };
 		},
-		expect: verified,
-		rule: "with no predecessor named, passed is as legal as notApplicable",
+		expect: verdictAlgebra,
+		rule: "with no predecessor named, the result is exactly notApplicable (§15.10): passed would claim a check of a predecessor that does not exist",
+		detail: /"predecessorLinkage" is "passed" on a cluster 200 that names no previousReceiptId/,
 	},
 	{
 		label: "boundary: skippedSincePrevious count 16 with all 16 windows listed",

@@ -192,6 +192,18 @@ test("ledgerWindowSpan: #199's time-span style, in UTC — one day, or a midnigh
 			"Oct 5 23:58 → Oct 6 00:03 UTC",
 		],
 		[nsAt("2026-10-05T09:00:00.000Z"), nsAt("2026-10-05T09:00:00.000Z"), "Oct 5 · 09:00–09:00 UTC"],
+		// Across a year boundary both ends name their year.
+		[
+			nsAt("2025-12-31T23:58:00.000Z"),
+			nsAt("2026-01-01T00:03:00.000Z"),
+			"Dec 31, 2025 23:58 → Jan 1, 2026 00:03 UTC",
+		],
+		// A year apart on the same month and day is never "one day".
+		[
+			nsAt("2025-10-05T14:02:00.000Z"),
+			nsAt("2026-10-05T14:19:00.000Z"),
+			"Oct 5, 2025 14:02 → Oct 5, 2026 14:19 UTC",
+		],
 	];
 	for (const [start, end, expected] of cases) {
 		assert.equal(ledgerWindowSpan(start, end), expected, `${start} → ${end}`);
@@ -316,7 +328,7 @@ test("CLUSTER_LEDGER_ROWS keeps the ledger's rows and order, and differs in EXAC
 });
 
 // ---------------------------------------------------------------------------
-// The derived view model, on the four conforming fixtures
+// The derived view model, on the conforming fixtures
 // ---------------------------------------------------------------------------
 
 function claimsOf(file: string) {

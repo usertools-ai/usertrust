@@ -1665,13 +1665,13 @@ function checkClusterSchema(receipt: unknown): AlgebraResult {
 
 /**
  * The cluster half of §4.1 rule 2: a named predecessor must be `passed`; with
- * none named, `passed` or `notApplicable`; never `unavailable` on a 200.
+ * none named, exactly `notApplicable` (§15.10); never `unavailable` on a 200.
  */
 function checkClusterPredecessorAlgebra(body: Rec): AlgebraResult {
 	const result = (body.verification as Verification).checks.predecessorLinkage.result;
 	const data = ((body.receipt as Rec).event as Rec).data as Rec;
 	const named = "previousReceiptId" in data;
-	const legal = named ? result === "passed" : result === "passed" || result === "notApplicable";
+	const legal = named ? result === "passed" : result === "notApplicable";
 	return legal
 		? { ok: true }
 		: refuse(`predecessorLinkage "${result}" with previousReceiptId ${named ? "named" : "absent"}`);
@@ -1758,13 +1758,13 @@ function loadClusterFixture(file: string): { routeParamId: string; httpStatus: n
 	};
 }
 
-test("cluster manifest: CL1-CL4 — exactly 4 rows, 4 files on disk, every route a canonical ut1 ID", () => {
+test("cluster manifest: CL1-CL5 — exactly 5 rows, 5 files on disk, every route a canonical ut1 ID", () => {
 	assert.deepEqual(
 		clusterConformingFixtures.map((entry) => entry.id),
-		["CL1", "CL2", "CL3", "CL4"],
+		["CL1", "CL2", "CL3", "CL4", "CL5"],
 	);
 	const files = clusterConformingFixtures.flatMap((entry) => entry.files);
-	assert.equal(files.length, 4, "one file per row");
+	assert.equal(files.length, 5, "one file per row");
 	for (const file of files) {
 		assert.doesNotThrow(() => readFileSync(join(DIR, file)), `missing file ${file}`);
 		const { routeParamId } = loadClusterFixture(file);
@@ -2021,9 +2021,9 @@ test("cluster vectors: the harness refuses each rejection vector at its named ga
 	}
 });
 
-test("cluster vectors: 141 in all, 42 of them boundary controls that must still verify", () => {
+test("cluster vectors: 141 in all, 41 of them boundary controls that must still verify", () => {
 	assert.equal(clusterVectors.length, 141);
-	assert.equal(clusterVectors.filter((vector) => vector.expect.kind === "verified").length, 42);
+	assert.equal(clusterVectors.filter((vector) => vector.expect.kind === "verified").length, 41);
 	assert.equal(
 		new Set(clusterVectors.map((vector) => vector.label)).size,
 		141,

@@ -390,7 +390,7 @@ export const rejectionVectors: RejectionVectorEntry[] = [
 	},
 ];
 
-export type ClusterConformingFixtureId = "CL1" | "CL2" | "CL3" | "CL4";
+export type ClusterConformingFixtureId = "CL1" | "CL2" | "CL3" | "CL4" | "CL5";
 
 export interface ClusterConformingFixtureEntry {
 	id: ClusterConformingFixtureId;
@@ -427,5 +427,11 @@ export const clusterConformingFixtures: ClusterConformingFixtureEntry[] = [
 		files: ["cluster/skipped-overflow.json"],
 		exercises:
 			"another key's FIRST receipt with skippedSincePrevious count 20 (16 listed, windowsRoot a commitment), transferCount 40 (transferSet ABSENT, derivations notApplicable), the custom model literal, conservative pricing, a 1-hour idle threshold",
+	},
+	{
+		id: "CL5",
+		files: ["cluster/superseded.json"],
+		exercises:
+			"CL2's receipt with three UNSIGNED advisories that name another receipt or a revision (receiptSuperseded, generationAddendum, revisionSuperseded): the page keeps each notice and names none of them",
 	},
 ];

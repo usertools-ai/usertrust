@@ -971,6 +971,13 @@ export interface AdvisoryBand {
  */
 export const ADVISORY_FIELD_NOT_SERVED = "(not served)";
 
+/**
+ * What a band says in place of another receipt's ID, or a revision, on a page
+ * that withholds them: a cluster receipt's public page ties the receipt to no
+ * other receipt and no repository, advisories included.
+ */
+export const OTHER_RECEIPT_WITHHELD = "This public page names no other receipt.";
+
 function advisoryText(advisory: Advisory, key: string): string {
 	return str(advisory as Bag, key) ?? ADVISORY_FIELD_NOT_SERVED;
 }
@@ -985,7 +992,11 @@ function advisoryLink(advisory: Advisory, key: string): string | undefined {
  * an unknown kind "renders as a generic advisory notice naming the kind (never
  * silently dropped, never verdict-affecting)".
  */
-export function advisoryBand(advisory: Advisory): AdvisoryBand {
+export function advisoryBand(
+	advisory: Advisory,
+	options: { withholdIdentifiers?: boolean } = {},
+): AdvisoryBand {
+	if (options.withholdIdentifiers) return withheldAdvisoryBand(advisory);
 	switch (advisory.kind) {
 		case "revisionSuperseded":
 			return {
@@ -1015,6 +1026,41 @@ export function advisoryBand(advisory: Advisory): AdvisoryBand {
 				title: "ADVISORY",
 				body: `this resolver reported an advisory of kind "${advisory.kind}", which this page does not know how to expand. ${ADVISORY_NEVER_ALTERS_VERDICT}`,
 			};
+	}
+}
+
+/**
+ * The same notices with every advisory-supplied identifier withheld: no other
+ * receipt's ID (as text or as a link) and no revision. The notice itself, its
+ * kind and the chain event's hash stay, so the advisory is never dropped.
+ */
+function withheldAdvisoryBand(advisory: Advisory): AdvisoryBand {
+	switch (advisory.kind) {
+		case "revisionSuperseded":
+			return {
+				kind: advisory.kind,
+				title: "REVISION SUPERSEDED",
+				body: `the artifact this receipt attests has since changed. ${OTHER_RECEIPT_WITHHELD} A display state, never a status: not a failure, not a downgrade, and never silently a plain green check.`,
+			};
+		case "receiptSuperseded":
+			return {
+				kind: advisory.kind,
+				title: "RECEIPT SUPERSEDED",
+				body: `a later receipt_superseded chain event supersedes this receipt (event hash ${advisoryText(advisory, "eventHash")}). ${OTHER_RECEIPT_WITHHELD} ${ADVISORY_NEVER_ALTERS_VERDICT}`,
+			};
+		case "generationAddendum": {
+			const generation = num(advisory as Bag, "generation");
+			return {
+				kind: advisory.kind,
+				title: "GENERATION ADDENDUM",
+				body: `generation ${generation ?? ADVISORY_FIELD_NOT_SERVED} was minted as a separate receipt. ${OTHER_RECEIPT_WITHHELD} ${ADVISORY_NEVER_ALTERS_VERDICT}`,
+			};
+		}
+		default: {
+			// An unknown kind's band names only its kind; it never carries a link.
+			const { kind, title, body } = advisoryBand(advisory);
+			return { kind, title, body };
+		}
 	}
 }
 

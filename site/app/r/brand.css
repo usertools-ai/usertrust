@@ -143,8 +143,10 @@
       states' thermal-paper stub, behind Details) that would paint silver on
       white, about 1.6:1. Inside paper the site's own paper values return: ink
       on paper, with the paper accents its contrast gate validated (globals.css
-      :root, mirrored here; components.test.tsx pins the two equal). */
-.ut-r .paper-surface{
+      :root, mirrored here; components.test.tsx pins the two equal). A
+      terminal stub's stamp sits on the paper but outside .paper-surface, so
+      .ut-paper-ink, the stub's wrapper, carries the same inks for both. */
+.ut-r .paper-surface,.ut-r .ut-paper-ink{
   --color-paper:#f2efe6; --color-ink:#16161e;
   --color-paper-emerald:#0b6b4f; --color-paper-amber:#7a4d00;
   --color-paper-red:#a11212; --color-paper-steel:#33566e;

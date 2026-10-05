@@ -4,7 +4,7 @@
  * predecessor algebra, and the `scope` discriminant on a verified state.
  *
  * The contract is two-sided, as in `wire.test.ts`:
- *   - every conforming cluster fixture (CL1-CL4), and every BOUNDARY control
+ *   - every conforming cluster fixture (CL1-CL5), and every BOUNDARY control
  *     in `fixtures/cluster-vectors.ts`, must reach a verified CLUSTER state;
  *   - every rejection vector there must fail CLOSED into exactly its named
  *     state — the protocol-error shell or an integrity failure on a named
@@ -80,7 +80,7 @@ function describe(state: PageState): string {
 }
 
 // ===========================================================================
-// The four conforming cluster fixtures
+// The conforming cluster fixtures
 // ===========================================================================
 
 for (const entry of clusterConformingFixtures) {
@@ -193,12 +193,12 @@ test("validateAccountHandle: an a1_ prefix, then §12's 16-byte canonical decode
 	assert.equal(validateReceiptId("a1_LaVASNboDGARWVkgiqzrkF").valid, false);
 });
 
-test("checkClusterPredecessorLinkage: a named predecessor must be passed; none named, passed or notApplicable", () => {
+test("checkClusterPredecessorLinkage: a named predecessor must be passed; none named, exactly notApplicable", () => {
 	const chained = verifiedClusterFixtureState("cluster/chained.json").envelope;
 	const named: ClusterProjection = chained.receipt.event.data;
 	const unnamed: ClusterProjection = structuredClone(named);
 	delete unnamed.previousReceiptId;
-	const legal = new Set(["named/passed", "unnamed/passed", "unnamed/notApplicable"]);
+	const legal = new Set(["named/passed", "unnamed/notApplicable"]);
 	for (const [label, projection] of [
 		["named", named],
 		["unnamed", unnamed],

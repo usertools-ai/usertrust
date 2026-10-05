@@ -23,9 +23,10 @@ import HashValue from "./components/hash-value";
 import PostureChips, { AmountScope } from "./components/posture-chips";
 import ReceiptArtifact from "./components/receipt-artifact";
 import { timeSpan } from "./components/receipt-card";
+import StateView from "./components/state-view";
 import VerdictMasthead from "./components/verdict-masthead";
 import WorkClaims from "./components/work-claims";
-import { verifiedFixtureState } from "./fixture-harness";
+import { fixtureState, loadFixture, verifiedFixtureState } from "./fixture-harness";
 import {
 	ADVISORY_NEVER_ALTERS_VERDICT,
 	ANCHOR_BINDING_RESOLVER_ASSERTED,
@@ -870,6 +871,34 @@ test("paper surfaces keep the paper palette: ink on paper ≥ 4.5:1, mirrored fr
 			const accent = contrast(declared(".ut-r .paper-surface", token), paper);
 			assert.ok(accent >= 4.5, `${token} on paper: ${accent.toFixed(2)}:1`);
 		}
+	}
+});
+
+test("a terminal stub's stamp takes the paper inks: it sits inside .ut-paper-ink, ≥ 3:1 on paper", () => {
+	// The stamp is drawn on the paper but outside .paper-surface, so the stub's
+	// wrapper carries the paper inks. With the route's dark-ground tokens the
+	// stamp measured about 2.3:1 (VOID) and 2.7:1 (UNPROVEN) on paper.
+	const paper = declared(".ut-r .ut-paper-ink", "--color-paper");
+	const cases: Array<[string, string, string]> = [
+		["cancelled.json", "VOID", "steel"],
+		["expired.json", "VOID", "steel"],
+		["billed-unfinalized.json", "UNPROVEN", "red"],
+	];
+	for (const [file, word, accent] of cases) {
+		const markup = renderToStaticMarkup(<StateView state={fixtureState(loadFixture(file))} />);
+		const at = markup.indexOf('<div class="ut-paper-ink relative">');
+		assert.ok(at !== -1, `${file}: the stub's wrapper carries the paper inks`);
+		const stub = markup.slice(at);
+		const stamp = stub.indexOf(`text-paper-${accent}`);
+		assert.ok(
+			stamp !== -1 && stamp < stub.indexOf("paper-surface"),
+			`${file}: the stamp is inside it`,
+		);
+		assert.ok(stub.includes(word), `${file}: ${word}`);
+		const ink = declared(".ut-r .ut-paper-ink", `--color-paper-${accent}`);
+		assert.equal(ink, declared(".ut-r .paper-surface", `--color-paper-${accent}`));
+		const ratio = contrast(ink, paper);
+		assert.ok(ratio >= 3, `${file}: ${word} ${ink} on paper ${paper}: ${ratio.toFixed(2)}:1`);
 	}
 });
 

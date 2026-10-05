@@ -1542,11 +1542,13 @@ export function checkVerdictAlgebra(
 }
 
 /**
- * The cluster half of §4.1 rule 2 (resolver companion v0.3). An account's
- * receipts form ONE chain in the resolver's own registry, so on a 200 the
- * check is never `unavailable`; a named `previousReceiptId` must be `passed`
- * (the page renders it as a link, and a link nobody checked is an unbacked
- * claim); `notApplicable` is legal only when no predecessor is named.
+ * The cluster half of §4.1 rule 2 (resolver companion v0.3; receipt-spec
+ * §15.10's cluster statement). An account's receipts form ONE chain in the
+ * resolver's own registry, so on a 200 the check is never `unavailable`. A
+ * named `previousReceiptId` must be `passed`: a predecessor nobody checked is
+ * an unbacked claim. With none named the account has no earlier receipt, and
+ * the result is exactly `notApplicable`; `passed` would claim a check of a
+ * predecessor that does not exist.
  */
 export function checkClusterPredecessorLinkage(
 	verification: Verification,
@@ -1561,11 +1563,11 @@ export function checkClusterPredecessorLinkage(
 					reason: `"predecessorLinkage" is "${result}", but the receipt names a previousReceiptId — on a cluster 200 a named predecessor must be "passed"`,
 				};
 	}
-	return result === "passed" || result === "notApplicable"
+	return result === "notApplicable"
 		? { ok: true }
 		: {
 				ok: false,
-				reason: `"predecessorLinkage" is "${result}" on a cluster 200 — the account's receipts are one chain in the resolver's own registry, so it is "passed", or "notApplicable" with no predecessor named`,
+				reason: `"predecessorLinkage" is "${result}" on a cluster 200 that names no previousReceiptId — an account's first receipt is "notApplicable" (§15.10)`,
 			};
 }
 

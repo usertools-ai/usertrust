@@ -20,12 +20,19 @@ import type { Advisory } from "../lib/wire";
  * lives in `advisoryBand`, so a future resolver member surfaces here on the day
  * it ships rather than on the day this component learns about it.
  */
-export default function AdvisoryBands({ advisories }: { advisories: Advisory[] }) {
+export default function AdvisoryBands({
+	advisories,
+	withholdIdentifiers = false,
+}: {
+	advisories: Advisory[];
+	/** A cluster page's: no other receipt's ID and no revision, as text or link. */
+	withholdIdentifiers?: boolean;
+}) {
 	if (advisories.length === 0) return null;
 	return (
 		<div className="flex flex-col gap-3" data-testid="advisory-bands">
 			{advisories.map((advisory) => {
-				const band = advisoryBand(advisory);
+				const band = advisoryBand(advisory, { withholdIdentifiers });
 				return (
 					<aside
 						// Advisory arrays legitimately repeat a KIND (two generation addenda

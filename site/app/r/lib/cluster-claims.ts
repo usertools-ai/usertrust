@@ -126,15 +126,19 @@ const utcSecond = (date: Date) => `${utcMinute(date)}:${pad2(date.getUTCSeconds(
 /**
  * The glance card's window, in the session card's time-span style: "Oct 5 ·
  * 14:02–14:19 UTC" within one UTC day, "Oct 5 23:58 → Oct 6 00:03 UTC" across
- * midnight. UTC, never the reader's zone: the page renders on the server, and
- * a zone it guessed would be a claim nobody made.
+ * midnight, and "Dec 31, 2025 23:58 → Jan 1, 2026 00:03 UTC" across a year,
+ * which names both years. UTC, never the reader's zone: the page renders on
+ * the server, and a zone it guessed would be a claim nobody made.
  */
 export function ledgerWindowSpan(windowStart: string, windowEnd: string): string {
 	const start = ledgerDate(windowStart);
 	const end = ledgerDate(windowEnd);
+	const crossesYear = start.getUTCFullYear() !== end.getUTCFullYear();
+	const day = (date: Date) =>
+		crossesYear ? `${utcDay(date)}, ${date.getUTCFullYear()}` : utcDay(date);
 	return start.toISOString().slice(0, 10) === end.toISOString().slice(0, 10)
-		? `${utcDay(start)} · ${utcMinute(start)}–${utcMinute(end)} UTC`
-		: `${utcDay(start)} ${utcMinute(start)} → ${utcDay(end)} ${utcMinute(end)} UTC`;
+		? `${day(start)} · ${utcMinute(start)}–${utcMinute(end)} UTC`
+		: `${day(start)} ${utcMinute(start)} → ${day(end)} ${utcMinute(end)} UTC`;
 }
 
 /**

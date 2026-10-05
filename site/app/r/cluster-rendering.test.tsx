@@ -1,15 +1,16 @@
 /**
  * The verified CLUSTER receipt (receipt-spec v0.10 §15), rendered through the
- * page's own dispatch (`StateView`) from the four conforming fixtures CL1-CL4
- * — through the real parser, never hand-built props.
+ * page's own dispatch (`StateView`) from the conforming fixtures CL1-CL5 —
+ * through the real parser, never hand-built props.
  *
  * What is pinned is the brief layout's SPLIT and the cluster kind's honesty
  * rules: the glance card up front (verdict, level strip, amount and its scope
- * chip, agent, window, coverage, the previous receipt, and the refused windows
- * ALWAYS visible), everything else folded behind the page's ONE Details; no
- * session sentence the receipt never made; `windowTransfersRoot` never marked
- * passed; and no `usertrust-verify receipt` command, which cannot read a
- * cluster receipt yet.
+ * chip, window, coverage, and the refused windows ALWAYS visible), everything
+ * else folded behind the page's ONE Details; no session sentence the receipt
+ * never made; `windowTransfersRoot` never marked passed; no
+ * `usertrust-verify receipt` command, which cannot read a cluster receipt yet;
+ * and PRIVACY: nothing rendered ties the receipt to whoever it charged or to
+ * any other receipt (no handle, no other receipt's ID, no repository).
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -23,6 +24,7 @@ import {
 	FORK_DISCLAIMER,
 	LEDGER_ROWS,
 	NEVER_ARTIFACT_VERIFIED,
+	OTHER_RECEIPT_WITHHELD,
 	PLAIN_VERDICT_VERIFIED,
 	PROVIDER_SCOPED_CLAIM,
 } from "./lib/claims";
@@ -101,7 +103,7 @@ function receiptOf(fixture: WireFixture): ClusterReceiptDocument {
 }
 
 // ---------------------------------------------------------------------------
-// The four conforming fixtures
+// The conforming fixtures (CL5 is CL2's receipt with advisories)
 // ---------------------------------------------------------------------------
 
 interface ClusterCase {
@@ -127,6 +129,15 @@ const CASES: ClusterCase[] = [
 	{
 		id: "CL2",
 		file: "cluster/chained.json",
+		amount: "$12.0000",
+		window: "Oct 5 · 21:39–21:51 UTC 12 min 7 s · closes after 10 min idle",
+		covers: "3 governed calls",
+		claim:
+			"charged to this agent key between 2026-10-05T21:39:19.123Z and 2026-10-05T21:51:26.123Z — $12.0000",
+	},
+	{
+		id: "CL5",
+		file: "cluster/superseded.json",
 		amount: "$12.0000",
 		window: "Oct 5 · 21:39–21:51 UTC 12 min 7 s · closes after 10 min idle",
 		covers: "3 governed calls",
@@ -303,6 +314,29 @@ for (const c of CASES) {
 			),
 		);
 		assert.ok(!/ut1_/.test(row), "the predecessor row names no receipt");
+		// Advisories (unsigned, rendered above the card): each notice stays, and
+		// none names another receipt or a revision, as text or as a link.
+		const advisories = (fixture.wire.body as { advisories: Array<Record<string, unknown>> })
+			.advisories;
+		for (const advisory of advisories) {
+			assert.ok(html.includes(`data-advisory="${advisory.kind}"`), `${advisory.kind} is shown`);
+			for (const key of [
+				"supersededByReceiptId",
+				"receiptId",
+				"observedRevision",
+				"currentRevision",
+			]) {
+				const value = advisory[key];
+				if (typeof value === "string") assert.ok(!html.includes(value), `${advisory.kind}.${key}`);
+			}
+		}
+		if (advisories.length > 0) {
+			assert.ok(textOf(html).includes(OTHER_RECEIPT_WITHHELD), "each band says what it withholds");
+			assert.ok(
+				!/href="\/r\/ut1_/.test(html.split(`href="/r/${receipt.receiptId}`).join("")),
+				"no link to another receipt",
+			);
+		}
 		// The share card: the verdict word and the amount, nothing else.
 		const state = fixtureState(fixture);
 		for (const line of [ogCardWord(state), ogCardAmount(state) ?? ""]) {
