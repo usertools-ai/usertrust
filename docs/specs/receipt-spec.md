@@ -2408,8 +2408,9 @@ Ship gate before mint-endpoint implementation:
       - RA-3, every governed charge a debit hold — each measured on the
         deployed ledger, not asserted;
       - RA-4, no unarmed hold with `timeout = 0`. It is a convention, so it
-        is measured but not enforced, and the minter carries §15.2's
-        defensive rule, reading admission records after the account's
+        is measured but not enforced. The minter carries §15.2's defensive
+        rule: the resolution is final, a later post or void refuses the window
+        it lands in, and admission records are read after the account's
         transfers.
 - [ ] **`packages/verify`:**
       - the cluster schema, selected by `scope` (§15.6);
@@ -2879,24 +2880,32 @@ fixing the scope BEFORE the work. Clusters achieve it in four ways:
     reached its expiry instant, `ts(h) + timeout × 10^9` (the timeout is in
     seconds). The ledger then accepts no post or void for it, and records no
     transfer for the expiry.
-  - **Defensive rule: an UNARMED hold with `timeout = 0` that is neither
-    posted nor voided counts as RESOLVED at its own timestamp.** It cannot
-    expire, and nothing tracks it to a post or a void, so without this rule it
-    would hold its window open, and with it the account's chain, forever.
+  - **Defensive rule: an UNARMED hold with `timeout = 0` counts as RESOLVED
+    at its own timestamp for windowing — ALWAYS, whether or not the ledger
+    ever posts or voids it.** It cannot expire, and nothing tracks it to a
+    post or a void, so without this rule it would hold its window open, and
+    with it the account's chain, forever.
+    - **The resolution is FINAL.** A post or void of such a hold is a
+      NON-boundary transfer at its own timestamp, like a funding credit, and
+      it moves no window's activity end. Inside a window's span, it refuses
+      that window (`unarmed-hold`, §15.5). In an idle gap, it belongs to no
+      window. Either way the hold's own window, refused in any case, is what
+      discloses the hold.
+    - **So it can never touch a minted window.** A minted window was closed
+      at a ledger clock `L ≥ windowEnd + θ`, and anything committed later is
+      timestamped above `L`, so it lands outside that window's span. The
+      partition stays a pure function of the ledger.
     - Whether a hold is armed MUST be read AFTER the account's transfers. An
       admission record is written BEFORE its hold exists, so in that order an
       armed hold is never taken for unarmed.
-    - This resolution is an assumption, not a ledger fact. If such a hold is
-      posted or voided later, windows not yet minted are re-cut with that
-      resolution. Minted windows never are (§15.3).
     - No current producer path creates such a hold, but nothing enforces
-      that (RA-4). The rule is defense in depth, and its window is refused in
-      any case (§15.5).
+      that (RA-4). The rule is defense in depth.
   - A hold is **open** until it is posted, voided or expired, or the
     defensive rule resolves it. `res(h)` is the post or void that resolved
     `h`. It names `h` (`pending_id`) and carries `h`'s accounts, so it is
     itself a transfer of `A`. For an expired hold, `ts(res(h))` means its
-    expiry instant. For a hold the defensive rule resolves, it means `ts(h)`.
+    expiry instant. For a hold the defensive rule resolves, it means `ts(h)`,
+    and an actual post or void of that hold is never `res(h)`.
 - **Activity end `end(W)`** of a set of holds `W`: the latest of their
   timestamps and their resolutions' timestamps,
   `max over h ∈ W of max(ts(h), ts(res(h)))`. It is UNBOUNDED while any member
@@ -3003,7 +3012,10 @@ exactly these windows.
 - **The windows partition `H(A)`.** Every hold belongs to exactly one window.
 - **A logical transfer never straddles two windows.** A hold's post or void
   lies inside its hold's window, because `windowEnd` is at least its
-  timestamp. No boundary can fall while a hold is in flight.
+  timestamp. No boundary can fall while a hold is in flight. The one
+  exception is the post or void of a hold that §15.2's defensive rule
+  resolves. It is a non-boundary transfer, and any window it lands in is
+  refused (§15.5).
 - **Consecutive windows are disjoint, and at least the EARLIER window's `θ`
   apart:** `windowStart₂ ≥ windowEnd₁ + θ₁`. §15.10's chain rule and §15.12
   rely on this.
@@ -3035,10 +3047,8 @@ window from that later read.
 
 **(b) makes closure irrevocable.** Ledger timestamps strictly increase in
 commit order. So a closed window can never gain a member, and its activity end
-can never move. Its completeness is a fixed fact, not a race. The one
-exception is a hold that §15.2's defensive rule resolved and the ledger later
-resolves for real. That window is refused either way, and only windows not
-yet minted are re-cut.
+can never move. Its completeness is a fixed fact, not a race. This holds
+without exception: the defensive rule's resolution is final (§15.2).
 
 - **The minter's clock never decides closure.** It decides only WHEN to look.
 - **No heartbeat in v1.** An idle LEDGER does not advance `L`. A window then
@@ -3064,9 +3074,10 @@ A CLOSED window is **MINTABLE** iff every condition below holds. They are
 checked in this order, and the first one that fails names the window's single
 refusal reason. Within a condition, holds are taken in timestamp order.
 
-1. **Every hold is ARMED** (§15.2). An unarmed hold went through no
-   settlement path, so there is no settlement record to price it from or to
-   wait for. Otherwise → `unarmed-hold`.
+1. **Every hold is ARMED** (§15.2), and no post or void of a hold that
+   §15.2's defensive rule resolves lies inside the window's span. An unarmed
+   hold went through no settlement path, so there is no settlement record to
+   price it from or to wait for. Otherwise → `unarmed-hold`.
 2. **Every hold is POSTED, or VOIDED pre-provider** (§15.2).
    - A pre-provider void is excluded from the pairs, but is still a member: it
      moved the boundaries like any hold.
@@ -3346,7 +3357,9 @@ ledger account ID as 16 big-endian bytes.
 - **`repoId` is OPTIONAL, and key-absent when absent** — never `null`, and
   never `""`. When present it is a property of the ACCOUNT, never of a
   receipt: the repository the operator bound the account to. A minter MUST NOT
-  add, change or omit it per receipt, which would be a chosen scope.
+  add, change or omit it per receipt, which would be a chosen scope. The
+  binding does not change once the account has a debit hold, so every receipt
+  of the account carries the same `work` (§15.10).
 - **Its syntax is decidable from the receipt.** `repoId` matches
   `^(?:[a-z0-9.-]+:[A-Za-z0-9_=-]{1,200}|r1_[A-Za-z0-9_-]{1,200})$`: the
   provider's immutable repository ID as `<provider>:<id>`, or §2's keyed `r1_…`
@@ -3434,6 +3447,25 @@ read the ledger clock L; THEN read the account's transfers after the end of its 
   refused after its `receipt_settled` event was appended leaves that event in
   the chain. It has no registry row, so the resolver never serves it, and its
   ID answers 404 (§15.13).
+
+**Producer guarantees: true by construction in v0.10, not yet checked by a
+verifier.** The minter makes each of these true, because `θ` is immutable
+(§15.2) and every window, refused or minted, comes from one partition
+(§15.3). v0.10's step 7, `predecessorLinkage` and `windowDisjointness` do not
+check them; verifier enforcement is deferred to v0.10.1 (§15.11).
+
+1. **The idle gap around skipped windows.** Consecutive listed skipped windows
+   are at least `θ` apart (`next.windowStart ≥ windowEnd + θ`), and the last
+   listed one ends at least `θ` before this receipt's `windowStart`. The
+   verifier checks only their order and that they precede this window
+   (§15.6).
+2. **One `θ` per account.** Every receipt of an account carries the same
+   `idleThresholdNs`. So `predecessorLinkage`'s `prev.idleThresholdNs` and
+   `windowDisjointness`'s `θ₁` are both the account's `θ`.
+3. **One `work` per account.** Every receipt of an account carries the same
+   `work`: `repoId` is the same on every receipt, or absent on every
+   receipt. `repoId` is the account's binding, never a receipt's (§15.8), and
+   it does not change once the account has a debit hold.
 
 **`predecessorLinkage` — §7's named check, cluster statement.** A party with
 registry access checks the chain. The resolver does so on every read.
@@ -3544,6 +3576,10 @@ ONE window. It does not claim:
 - **unarmed holds with no timeout:** that none exists. RA-4 is a producer
   convention that nothing enforces, and §15.2's defensive rule keeps the
   account's chain moving if one does;
+- **the producer guarantees of §15.10:** the `θ` idle gap around listed
+  skipped windows, one `θ` per account, and one `work` per account. The
+  minter makes them true, and no v0.10 verifier checks them; enforcement is
+  deferred to v0.10.1;
 - **identity:** which ledger account the handle names.
 
 Those are facts about the operator's ledger and records, which a third party
@@ -3623,7 +3659,8 @@ gives its IDs, such as a time prefix, is published with them.
 A consumer holding two cluster receipts with equal `(proof.chain, account)` MUST
 check that their windows are disjoint and at least the earlier window's `θ`
 apart: ordered by `windowStart`, `windowEnd₁ + idleThresholdNs₁ ≤
-windowStart₂`. Equal starts are already one ID (§15.9).
+windowStart₂`. Equal starts are already one ID (§15.9). In v0.10 both
+receipts carry the account's one `θ`, which is a producer guarantee (§15.10).
 
 - **A violation means the two signed windows cannot both be windows of one
   ledger.** Either the operator equivocated about the partition, or a window
@@ -3743,6 +3780,30 @@ the canonical bytes exactly as hashed after the domain line — is
 `count` 2. The two windows are ascending and disjoint, and both end well
 before the first row's `windowStart`, so the list is valid on a receipt of
 that window (§15.6).
+
+**Partition vectors — §15.2's defensive rule.** These are for the minter's
+corpus. They use `θ = 600000000000` (10 minutes) and `T =
+1791234000000000000`.
+
+- **Setup.**
+  - `h₁` is an UNARMED hold with `timeout = 0` at `T`. The defensive rule
+    resolves it at `T`, so `W₁ = [T, T]`, refused as `unarmed-hold`.
+  - `h₂` is an armed hold at `1791234900000000000` (`T` + 900 s), posted at
+    `1791234960000000000` (`T` + 960 s). It is 900 s ≥ `θ` after `W₁`'s end,
+    so `W₂ = [1791234900000000000, 1791234960000000000]`.
+- **A late post inside a later window.** The ledger posts `h₁` at
+  `1791234930000000000` (`T` + 930 s), which is inside `W₂`'s span.
+  - `W₂` is refused as `unarmed-hold`. `W₁` stays `[T, T]` and `W₂` keeps its
+    bounds.
+  - The negative case: had the post counted as `res(h₁)`, `W₁`'s end would
+    become `T` + 930 s, `h₂` would join `W₁`, and `W₂` would not exist. That
+    is the falsification §15.2's FINAL resolution forbids.
+- **A late post in an idle gap.** The ledger posts `h₁` instead at
+  `1791237000000000000` (`T` + 3000 s), and the account's next hold `h₃` is at
+  `1791239000000000000` (`T` + 5000 s).
+  - The post lies between `W₂`'s end and `h₃`, so it is in no window.
+  - `W₂` is unaffected and mintable on its own merits. `W₁`'s refusal,
+    disclosed by the next receipt, covers `h₁`.
 
 **Negative vectors** the corpus MUST also carry:
 
