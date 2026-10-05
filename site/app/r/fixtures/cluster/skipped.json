@@ -1,0 +1,200 @@
+{
+	"routeParamId": "ut1_2pivN24X4aooW7f27ErNTy",
+	"wire": {
+		"httpStatus": 200,
+		"headers": {
+			"cache-control": "public, no-cache"
+		},
+		"body": {
+			"apiVersion": "1",
+			"receiptId": "ut1_2pivN24X4aooW7f27ErNTy",
+			"status": "verified_checkpoint",
+			"receiptBytes": "eyJldmVudCI6eyJhY3RvciI6eyJpZCI6InJlY2VpcHQtbWludGVyIiwibmFtZSI6InJlY2VpcHQtbWludGVyIiwidHlwZSI6InN5c3RlbSJ9LCJkYXRhIjp7ImFjY291bnQiOiJhMV9MYVZBU05ib0RHQVJXVmtnaXF6cmtGIiwiZGVsZWdhdGlvblBvc3R1cmUiOiJzZWxmRGViaXRzT25seSIsImVuZGVkQXQiOiIyMDI2LTEwLTA1VDIzOjQ1OjE0LjEyM1oiLCJpZGxlVGhyZXNob2xkTnMiOiI2MDAwMDAwMDAwMDAiLCJtb2RlbHMiOlsiY2xhdWRlLWhhaWt1LTQtNSJdLCJwcmV2aW91c1JlY2VpcHRJZCI6InV0MV8zb012Z21NVWtONFROejJoaVZFaVJkIiwicHJpY2luZyI6eyJ0YWJsZVZlcnNpb25zIjpbIjIwMjYtMTAtMDEiXX0sInByb3ZpZGVycyI6WyJhbnRocm9waWMiXSwic2NvcGUiOiJjbHVzdGVyIiwic2tpcHBlZFNpbmNlUHJldmlvdXMiOnsiY291bnQiOjMsIndpbmRvd3MiOlt7InJlYXNvbiI6ImNsdXN0ZXItdm9pZCIsIndpbmRvd0VuZCI6IjE3OTEyMzgxMDYxMjM0NTY3ODkiLCJ3aW5kb3dTdGFydCI6IjE3OTEyMzc5ODYxMjM0NTY3ODkifSx7InJlYXNvbiI6ImVzdGltYXRlZC10cmFuc2ZlciIsIndpbmRvd0VuZCI6IjE3OTEyMzk5NjYxMjM0NTY3ODkiLCJ3aW5kb3dTdGFydCI6IjE3OTEyMzk5MDYxMjM0NTY3ODkifSx7InJlYXNvbiI6ImNsdXN0ZXItdm9pZCIsIndpbmRvd0VuZCI6IjE3OTEyNDI2NjYxMjM0NTY3ODkiLCJ3aW5kb3dTdGFydCI6IjE3OTEyNDIzNjYxMjM0NTY3ODkifV0sIndpbmRvd3NSb290IjoiYjA4NTgxNzY0ZDY2OTI1ZGY1YTgwYWNlMzkyMDNiMTAxOGQ2YmY2Mjk4ZDBkYzQ1MTQ3OWRjOGI2ZGE4NGZjMCJ9LCJzcGVjIjoidXQxIiwic3BlbmQiOnsiYXNzZXNzZWRVc2VydG9rZW5zIjozMTUwLCJwb3N0ZWRVc2VydG9rZW5zIjozMTUwLCJwcmljaW5nUG9zdHVyZSI6ImV4YWN0Iiwicm91bmRpbmdBZGp1c3RtZW50IjowLCJ0cmFuc2ZlckNvdW50IjoxLCJ1c2FnZVBvc3R1cmUiOiJwcm92aWRlciJ9LCJzdGFydGVkQXQiOiIyMDI2LTEwLTA1VDIzOjQ0OjI3LjM3M1oiLCJ0cmFuc2ZlclNldCI6W3siYXV0aG9yaXphdGlvblRyYW5zZmVySWQiOiIzNDdhZDEyMmRlZDRjMThhM2U2NGM4OTBlYTU3ODI0MiIsInNldHRsZW1lbnRUcmFuc2ZlcklkIjoiNzhlYjQxYjI0N2ZkZDMyNzA4OTkwZDQ4YTVhMzNmYjkifV0sInRyYW5zZmVyU2V0Um9vdCI6Ijc3NDVjZmY1Yzc5ODY2YjI5OTc4NGM1YjQzYTVjYTY1YTY5YTQ3NWRlMDFlNmQ4YmE3MzhjMDc3N2I5Njk5Y2MiLCJ3aW5kb3dFbmQiOiIxNzkxMjQzOTE0MTIzNDU2Nzg5Iiwid2luZG93U3RhcnQiOiIxNzkxMjQzODY2MTIzNDU2Nzg5Iiwid2luZG93VHJhbnNmZXJDb3VudCI6Miwid2luZG93VHJhbnNmZXJzUm9vdCI6ImQ0YWY5ZWNmZWI1NzBlNGVjZDU3MmNiODE0MjJlMzMzMWRhNTBlYzkwNTc0MTQwYzgwM2Q1NjA3ZDZiZTVjYjUiLCJ3b3JrIjp7ImtpbmQiOiJjbHVzdGVyIiwicmVwb0lkIjoiZ2l0aHViLmNvbTpSX2tnRE9LMXgyWXcifX0sImhhc2giOiJhOTQ0OTczNWE5ODZmMTE3MGM5NjExYjY2Y2JmMzQwYjM1N2RjZmIzNjEwOTlkMWRlYWUzMmZiMjZlMjM2YWE2IiwiaWQiOiJlMWJjNWRiOWM4MmI4YzFiZWJjNWZlOGIxMzkyNDBjYSIsImtpbmQiOiJyZWNlaXB0X3NldHRsZWQiLCJwcmV2aW91c0hhc2giOiIwNDFhNjI5YTliY2JlYzAyYTJjNWQzZmQyYWYyZWU4NTQ1OGZjZWM5NGUxNjA1NTk4MGNhNGVhOTIxOTBmZmI3Iiwic2VxdWVuY2UiOjg0MTk1NDcsInRpbWVzdGFtcCI6IjIwMjYtMTAtMDVUMjM6NTc6MTQuMTIzWiJ9LCJtaW50ZWRBdCI6IjIwMjYtMTAtMDZUMDA6MDI6MTUuMTIzWiIsIm1pbnRlciI6eyJrZXlJZCI6Im1pbnQta2V5LTIwMjYtMTAiLCJraW5kIjoicHJveHkiLCJ0cnVzdERvbWFpbiI6InVzZXJ0cnVzdC5haSJ9LCJwcm9vZiI6eyJjaGFpbiI6InZhdWx0X2V4YW1wbGUiLCJjaGVja3BvaW50Ijp7ImtleUlkIjoiY2hlY2twb2ludC1rZXktMjAyNi0xMCIsInByZXZpb3VzU2VnbWVudElkIjoic2VnLTA0MTkiLCJwcmV2aW91c1NlZ21lbnRSb290IjoiNzQ2NjA1MGQxN2UyYmQ5ODAyYzBiNmJkYmFhNDQzYWZkMzc2OGM0MDVlODcxYmNhNDk3ZWE3OGIwMTNiMGNmNCIsInByb2ZpbGUiOiJwcm94eS12MSIsInB1Ymxpc2hlZEF0IjoiMjAyNi0xMC0wNlQwMDowMjoxNC4xMjNaIiwicm9vdCI6Ijk3NTY1OWNmYjg5YjJkYWNkZjA0NWNmYmMwNGU5YWZhYWJiOWRjYzI5NmE1MWJmODlhZjhkMThmNjY1NGM2YjUiLCJzZWdtZW50Rmlyc3RTZXF1ZW5jZSI6ODQxOTU0NCwic2VnbWVudElkIjoic2VnLTA0MjAiLCJzZWdtZW50U3RhcnRQcmV2aW91c0hhc2giOiIzNTJiNDk3ZGJlNzM5ZmI0MzU1MzUwNmYzZWM4MTYzNDY1NTYwZWIxMThlOTBjOTM2OGJjYzAwMjdhZDA4OWM5Iiwic2lnIjoiWTI5V1lqS3J6aWc5NjE3UzZWZHd3NW5UamdZK1NiT0FaYmFTd2VHTHFSekp4ZklPYjVBSC9WZDlGYUE1MzB1dDRPSTdvbkIxcGVnWithNjRVQkZsc1E9PSIsInRyZWVTaXplIjo5LCJ2IjoyLCJ2YXVsdElkIjoidmF1bHRfZXhhbXBsZSJ9LCJpbmNsdXNpb24iOnsibGVhZkhhc2giOiJhOTQ0OTczNWE5ODZmMTE3MGM5NjExYjY2Y2JmMzQwYjM1N2RjZmIzNjEwOTlkMWRlYWUzMmZiMjZlMjM2YWE2IiwibGVhZkluZGV4Ijo0LCJyb290IjoiOTc1NjU5Y2ZiODliMmRhY2RmMDQ1Y2ZiYzA0ZTlhZmFhYmI5ZGNjMjk2YTUxYmY4OWFmOGQxOGY2NjU0YzZiNSIsInNlZ21lbnRJZCI6InNlZy0wNDIwIiwic2libGluZ3MiOlt7Imhhc2giOiIxY2E3YTgwODUwMWE5N2YxNGFmNTFhNDJkNGEyMGE1M2Q2ZDk4N2I1ZTM4MWMzOTA3Y2IwNmNjOTg4Yzk0NjU2IiwicG9zaXRpb24iOiJyaWdodCJ9LHsiaGFzaCI6ImIyZGI1NzhmODg5MDQ4ZDUwZmY5Nzc5YzQ4MTI3MDhjYzE3M2VlMjAxNmI5MmQyYTE4MzI3NjFlYTIzZTFhNGYiLCJwb3NpdGlvbiI6InJpZ2h0In0seyJoYXNoIjoiYmVkZWEzYjI1NmE0ZjBjZTBiNDE4NjJlZmRlYTM3MWNkMWEyODQ3ZWIzM2IyN2YwYTNkZGQ3MjJmODA0ZjI3YSIsInBvc2l0aW9uIjoibGVmdCJ9LHsiaGFzaCI6ImRmNWRmOGQ4NWJlNGI5ZDAxMDYyODliOWQyNDhmOGUyM2RiZGI1NTEyY2U4ODIyMjNkOThkZThlODUxZTAxMzMiLCJwb3NpdGlvbiI6InJpZ2h0In1dLCJ0cmVlU2l6ZSI6OSwidmVyc2lvbiI6MX0sIm1pbnRFdmVudEhhc2giOiJhOTQ0OTczNWE5ODZmMTE3MGM5NjExYjY2Y2JmMzQwYjM1N2RjZmIzNjEwOTlkMWRlYWUzMmZiMjZlMjM2YWE2IiwicHJvZmlsZSI6InByb3h5LXYxIn0sInJlY2VpcHRJZCI6InV0MV8ycGl2TjI0WDRhb29XN2YyN0VyTlR5Iiwic2NvcGUiOiJjbHVzdGVyIiwic2lnbmF0dXJlIjp7ImFsZyI6ImVkMjU1MTkiLCJrZXlJZCI6Im1pbnQta2V5LTIwMjYtMTAiLCJzaWciOiJnZkRDRFBXb0tSNTZLYTd3OWszV0xxYWd5WmJ5M2NUZ3hMT0szQ1RDVTh3Um43c3lwZ1lWRndJQWd2NFhBY1JoVVZtbnB4cjBnTEswZGg4VlVnMnVydz09In0sInNwZWMiOiJ1dDEiLCJ3b3JrIjp7ImtpbmQiOiJjbHVzdGVyIiwicmVwb0lkIjoiZ2l0aHViLmNvbTpSX2tnRE9LMXgyWXcifX0=",
+			"receipt": {
+				"spec": "ut1",
+				"receiptId": "ut1_2pivN24X4aooW7f27ErNTy",
+				"scope": "cluster",
+				"mintedAt": "2026-10-06T00:02:15.123Z",
+				"minter": {
+					"kind": "proxy",
+					"keyId": "mint-key-2026-10",
+					"trustDomain": "usertrust.ai"
+				},
+				"work": {
+					"kind": "cluster",
+					"repoId": "github.com:R_kgDOK1x2Yw"
+				},
+				"event": {
+					"id": "e1bc5db9c82b8c1bebc5fe8b139240ca",
+					"timestamp": "2026-10-05T23:57:14.123Z",
+					"previousHash": "041a629a9bcbec02a2c5d3fd2af2ee85458fcec94e16055980ca4ea92190ffb7",
+					"kind": "receipt_settled",
+					"actor": {
+						"type": "system",
+						"id": "receipt-minter",
+						"name": "receipt-minter"
+					},
+					"data": {
+						"spec": "ut1",
+						"scope": "cluster",
+						"account": "a1_LaVASNboDGARWVkgiqzrkF",
+						"windowStart": "1791243866123456789",
+						"windowEnd": "1791243914123456789",
+						"idleThresholdNs": "600000000000",
+						"previousReceiptId": "ut1_3oMvgmMUkN4TNz2hiVEiRd",
+						"skippedSincePrevious": {
+							"count": 3,
+							"windows": [
+								{
+									"windowStart": "1791237986123456789",
+									"windowEnd": "1791238106123456789",
+									"reason": "cluster-void"
+								},
+								{
+									"windowStart": "1791239906123456789",
+									"windowEnd": "1791239966123456789",
+									"reason": "estimated-transfer"
+								},
+								{
+									"windowStart": "1791242366123456789",
+									"windowEnd": "1791242666123456789",
+									"reason": "cluster-void"
+								}
+							],
+							"windowsRoot": "b08581764d66925df5a80ace39203b1018d6bf6298d0dc451479dc8b6da84fc0"
+						},
+						"windowTransfersRoot": "d4af9ecfeb570e4ecd572cb81422e3331da50ec90574140c803d5607d6be5cb5",
+						"windowTransferCount": 2,
+						"work": {
+							"kind": "cluster",
+							"repoId": "github.com:R_kgDOK1x2Yw"
+						},
+						"models": ["claude-haiku-4-5"],
+						"providers": ["anthropic"],
+						"startedAt": "2026-10-05T23:44:27.373Z",
+						"endedAt": "2026-10-05T23:45:14.123Z",
+						"spend": {
+							"assessedUsertokens": 3150,
+							"postedUsertokens": 3150,
+							"roundingAdjustment": 0,
+							"usagePosture": "provider",
+							"pricingPosture": "exact",
+							"transferCount": 1
+						},
+						"delegationPosture": "selfDebitsOnly",
+						"pricing": {
+							"tableVersions": ["2026-10-01"]
+						},
+						"transferSet": [
+							{
+								"authorizationTransferId": "347ad122ded4c18a3e64c890ea578242",
+								"settlementTransferId": "78eb41b247fdd32708990d48a5a33fb9"
+							}
+						],
+						"transferSetRoot": "7745cff5c79866b299784c5b43a5ca65a69a475de01e6d8ba738c0777b9699cc"
+					},
+					"sequence": 8419547,
+					"hash": "a9449735a986f1170c9611b66cbf340b357dcfb361099d1deae32fb26e236aa6"
+				},
+				"proof": {
+					"profile": "proxy-v1",
+					"chain": "vault_example",
+					"mintEventHash": "a9449735a986f1170c9611b66cbf340b357dcfb361099d1deae32fb26e236aa6",
+					"inclusion": {
+						"version": 1,
+						"leafHash": "a9449735a986f1170c9611b66cbf340b357dcfb361099d1deae32fb26e236aa6",
+						"leafIndex": 4,
+						"treeSize": 9,
+						"root": "975659cfb89b2dacdf045cfbc04e9afaabb9dcc296a51bf89af8d18f6654c6b5",
+						"siblings": [
+							{
+								"hash": "1ca7a808501a97f14af51a42d4a20a53d6d987b5e381c3907cb06cc988c94656",
+								"position": "right"
+							},
+							{
+								"hash": "b2db578f889048d50ff9779c4812708cc173ee2016b92d2a1832761ea23e1a4f",
+								"position": "right"
+							},
+							{
+								"hash": "bedea3b256a4f0ce0b41862efdea371cd1a2847eb33b27f0a3ddd722f804f27a",
+								"position": "left"
+							},
+							{
+								"hash": "df5df8d85be4b9d0106289b9d248f8e23dbdb5512ce882223d98de8e851e0133",
+								"position": "right"
+							}
+						],
+						"segmentId": "seg-0420"
+					},
+					"checkpoint": {
+						"v": 2,
+						"vaultId": "vault_example",
+						"profile": "proxy-v1",
+						"root": "975659cfb89b2dacdf045cfbc04e9afaabb9dcc296a51bf89af8d18f6654c6b5",
+						"treeSize": 9,
+						"segmentId": "seg-0420",
+						"segmentFirstSequence": 8419544,
+						"previousSegmentRoot": "7466050d17e2bd9802c0b6bdbaa443afd3768c405e871bca497ea78b013b0cf4",
+						"previousSegmentId": "seg-0419",
+						"segmentStartPreviousHash": "352b497dbe739fb43553506f3ec8163465560eb118e90c9368bcc0027ad089c9",
+						"keyId": "checkpoint-key-2026-10",
+						"publishedAt": "2026-10-06T00:02:14.123Z",
+						"sig": "Y29WYjKrzig9617S6Vdww5nTjgY+SbOAZbaSweGLqRzJxfIOb5AH/Vd9FaA530ut4OI7onB1pegZ+a64UBFlsQ=="
+					}
+				},
+				"signature": {
+					"alg": "ed25519",
+					"keyId": "mint-key-2026-10",
+					"sig": "gfDCDPWoKR56Ka7w9k3WLqagyZby3cTgxLOK3CTCU8wRn7sypgYVFwIAgv4XAcRhUVmnpxr0gLK0dh8VUg2urw=="
+				}
+			},
+			"verification": {
+				"trustSnapshotId": "usertrust-verify@2026-10-05T00:00:00Z",
+				"steps": {
+					"schema": {
+						"result": "passed"
+					},
+					"event": {
+						"result": "passed"
+					},
+					"registry": {
+						"result": "passed"
+					},
+					"signature": {
+						"result": "passed"
+					},
+					"inclusion": {
+						"result": "passed"
+					},
+					"checkpoint": {
+						"result": "passed"
+					},
+					"semantics": {
+						"result": "passed"
+					},
+					"derivations": {
+						"result": "passed"
+					},
+					"extensions": {
+						"result": "notApplicable"
+					}
+				},
+				"checks": {
+					"registryBinding": {
+						"result": "passed"
+					},
+					"predecessorLinkage": {
+						"result": "passed"
+					},
+					"checkpointHistory": {
+						"result": "unavailable"
+					},
+					"anchorEvidence": {
+						"result": "notApplicable"
+					}
+				}
+			},
+			"advisories": []
+		}
+	}
+}

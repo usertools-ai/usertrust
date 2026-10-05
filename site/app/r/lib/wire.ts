@@ -5,10 +5,13 @@
  * Sources, in authority order (verify-page design spec §0's own ordering):
  *   1. `docs/specs/receipt-spec.md` v0.7 — §3/§12 (the ID rule), §7 (the nine
  *      steps, the four named online checks, the closed failure vocabulary),
- *      §2/§5 (the projection and the receipt document).
+ *      §2/§5 (the projection and the receipt document); and v0.10 §15 (cluster
+ *      receipts — the CLOSED `scope: "cluster"` document validated below).
  *   2. `docs/specs/2026-08-11-verify-page-design.md` v0.5 — §3 (the wire
  *      table), §4.1/§4.2 (the concrete `apiVersion: "1"` union + the verdict
  *      algebra), §5 R1-R4 and R37 (identity, byte authority, fail-closed).
+ *   3. `docs/specs/receipt-resolver-api.md` v0.3 — the resolver companion's
+ *      cluster statement of `predecessorLinkage` on a 200.
  *
  * Three rules govern everything below.
  *
@@ -152,6 +155,19 @@ export interface SessionWork {
 
 export type Work = CommitWork | PrIssueWork | SessionWork;
 
+/**
+ * receipt-spec v0.10 §15.8 — a cluster receipt's work claim, CLOSED to these two
+ * members. `repoId` is a property of the agent key's account, never of one
+ * receipt: when present, the provider's `provider:opaqueId` or the keyed `r1_`
+ * form; key-ABSENT when the account is bound to no repository. `null` and `""`
+ * are refused, because "absent" and "present but empty" would otherwise render
+ * as two different claims about the same account.
+ */
+export interface ClusterWork {
+	kind: "cluster";
+	repoId?: string;
+}
+
 export interface Spend {
 	assessedUsertokens: number;
 	postedUsertokens: number;
@@ -214,6 +230,102 @@ export interface Projection {
 	transferSetRoot: string;
 }
 
+const SKIP_REASON_LIST = [
+	"cluster-void",
+	"snapshot-missing",
+	"snapshot-not-on-chain",
+	"snapshot-unverifiable",
+	"unknown-provider",
+	"posted-amount-mismatch",
+	"empty-cluster",
+	"bad-account",
+	"bad-window",
+	"bad-repo-id",
+	"estimated-transfer",
+	"non-exact-rate",
+	"posted-assessed-mismatch",
+	"duplicate-transfer",
+	"bad-transfer-id",
+	"bad-amount",
+	"rounding-out-of-bounds",
+	"duplicate-mint-event",
+	"mint-event-mismatch",
+	"anchor-mismatch",
+	"evidence-inconsistent",
+	"consumed-by-another-receipt",
+	"unarmed-hold",
+] as const;
+
+/**
+ * receipt-spec v0.10 §15.6 — why the minter refused to mint a window: its own
+ * refusal reasons, a CLOSED list of 23. The page renders each code verbatim
+ * beside the window it explains, so a code outside the list is refused rather
+ * than shown as if the page knew what it meant.
+ */
+export type SkipReason = (typeof SKIP_REASON_LIST)[number];
+
+/** The 23 skip reasons, in the contract's order (one list, so the type and the check cannot drift). */
+export const SKIP_REASONS: readonly SkipReason[] = SKIP_REASON_LIST;
+
+/** One refused window — ledger nanoseconds as canonical u64 decimal strings. */
+export interface SkippedWindow {
+	windowStart: string;
+	windowEnd: string;
+	reason: SkipReason;
+}
+
+/**
+ * receipt-spec v0.10 §15.6 — the windows refused since the account's previous
+ * minted receipt, so "the agent key was idle" and "the agent key spent, but got
+ * no receipt" are distinguishable. `windows` is the FIRST `min(count, 16)`;
+ * `windowsRoot` commits all `count` of them.
+ */
+export interface SkippedSincePrevious {
+	count: number;
+	windows: SkippedWindow[];
+	windowsRoot: string;
+}
+
+/**
+ * The mint event's `data` for a CLUSTER receipt — receipt-spec v0.10 §15.6.
+ * Every charge to one agent key's account inside one ledger window; it carries
+ * none of the session kind's members (`sessionId`, `generation`,
+ * `sessionAssociation`, `workloadId`, `prevGenerationEventHash`).
+ */
+export interface ClusterProjection {
+	spec: "ut1";
+	scope: "cluster";
+	/** The account's opaque `a1_` handle (§15.7) — never a ledger ID, format-checked only. */
+	account: string;
+	/**
+	 * Ledger nanoseconds as canonical u64 DECIMAL STRINGS: they exceed 2^53, so
+	 * §13's safe-integer rule forbids carrying them as JSON numbers.
+	 */
+	windowStart: string;
+	windowEnd: string;
+	/** The idle gap that closed the window, in ns — same encoding as the bounds. */
+	idleThresholdNs: string;
+	/** The account's previous MINTED receipt; key-ABSENT on its first. */
+	previousReceiptId?: Ut1ReceiptId;
+	/** Key-ABSENT when nothing was refused since the previous receipt. */
+	skippedSincePrevious?: SkippedSincePrevious;
+	/** A COMMITMENT to every ledger transfer of the account in the window — never recomputable here. */
+	windowTransfersRoot: string;
+	windowTransferCount: number;
+	work: ClusterWork;
+	models: string[];
+	providers: string[];
+	startedAt: string;
+	endedAt: string;
+	spend: Spend;
+	/** REQUIRED (§2a), exactly as on a session projection — R38 binds both kinds. */
+	delegationPosture: DelegationPosture;
+	pricing: { tableVersions: string[] };
+	/** Present iff `transferCount <= 32`. */
+	transferSet?: TransferPair[];
+	transferSetRoot: string;
+}
+
 export interface ChainEnvelope<TKind extends string, TData> {
 	id: string;
 	timestamp: string;
@@ -226,6 +338,8 @@ export interface ChainEnvelope<TKind extends string, TData> {
 }
 
 export type MintEvent = ChainEnvelope<string, Projection>;
+
+export type ClusterMintEvent = ChainEnvelope<string, ClusterProjection>;
 
 export interface MerkleInclusionProof {
 	version: 1;
@@ -271,6 +385,25 @@ export interface ReceiptDocument {
 	minter: { kind: string; keyId: string; trustDomain: string };
 	work: Work;
 	event: MintEvent;
+	proof: Proof;
+	signature: { alg: string; keyId: string; sig: string };
+}
+
+/**
+ * The §5 receipt wire document for a CLUSTER receipt (receipt-spec v0.10 §15).
+ * The signed artifact keeps §5's shape; only `scope`, `work` and the projection
+ * change, so the proof machinery (`event`, `proof`, `minter`, `signature`) is
+ * validated exactly as the session kind's.
+ */
+export interface ClusterReceiptDocument {
+	spec: "ut1";
+	receiptId: Ut1ReceiptId;
+	scope: "cluster";
+	/** The ONLY minter-asserted clock claim (R27). */
+	mintedAt: string;
+	minter: { kind: string; keyId: string; trustDomain: string };
+	work: ClusterWork;
+	event: ClusterMintEvent;
 	proof: Proof;
 	signature: { alg: string; keyId: string; sig: string };
 }
@@ -336,21 +469,27 @@ export interface Display {
 	execution?: { agent?: boolean; interactive?: boolean };
 }
 
-/** 200 — all three ladder statuses share this shape. */
-export interface SuccessEnvelope {
+/**
+ * 200 — all three ladder statuses share this shape, for both receipt kinds: a
+ * cluster receipt changes what is INSIDE the signed document, never the
+ * envelope around it (receipt-spec v0.10 §15.13).
+ */
+export interface SuccessEnvelope<TReceipt = ReceiptDocument> {
 	apiVersion: "1";
 	receiptId: Ut1ReceiptId;
 	status: LadderStatus;
 	/** The PERSISTED signed receipt bytes VERBATIM — byte-authoritative. */
 	receiptBytes: string;
 	/** Parsed CONVENIENCE copy of `receiptBytes` — for rendering, never authority. */
-	receipt: ReceiptDocument;
+	receipt: TReceipt;
 	verification: Verification;
 	advisories: Advisory[];
 	anchorEvidence?: AnchorEvidence;
 	checkpointHistory?: SegmentCheckpointV2[];
 	display?: Display;
 }
+
+export type ClusterSuccessEnvelope = SuccessEnvelope<ClusterReceiptDocument>;
 
 export interface PendingEnvelope {
 	apiVersion: "1";
@@ -404,6 +543,7 @@ export interface ServiceUnavailableEnvelope {
 
 export type ResolverEnvelope =
 	| SuccessEnvelope
+	| ClusterSuccessEnvelope
 	| PendingEnvelope
 	| TerminalNoReceiptEnvelope
 	| BilledUnfinalizedEnvelope
@@ -468,10 +608,31 @@ export interface InvalidIdState {
 
 export interface VerifiedState {
 	kind: "verified";
+	/** Which signed document this is — the renderer's dispatch key. */
+	scope: "session";
 	routeParamId: string;
 	receiptId: Ut1ReceiptId;
 	rung: LadderStatus;
 	envelope: SuccessEnvelope;
+	/** The decoded, R4-validated `receiptBytes` as UTF-8 text. */
+	receiptBytesText: string;
+}
+
+/**
+ * A verified CLUSTER receipt (receipt-spec v0.10 §15). The same `kind` as a
+ * session receipt — it earned the same verdict through the same R1/R4/§4.1
+ * gates — but a different signed document, which is what `scope` keys: a
+ * session renderer reading a cluster projection would print session claims
+ * (a governed session, an association posture) the receipt never made.
+ */
+export interface VerifiedClusterState {
+	kind: "verified";
+	/** Which signed document this is — the renderer's dispatch key. */
+	scope: "cluster";
+	routeParamId: string;
+	receiptId: Ut1ReceiptId;
+	rung: LadderStatus;
+	envelope: ClusterSuccessEnvelope;
 	/** The decoded, R4-validated `receiptBytes` as UTF-8 text. */
 	receiptBytesText: string;
 }
@@ -546,6 +707,7 @@ export interface ProtocolErrorState {
 export type PageState =
 	| InvalidIdState
 	| VerifiedState
+	| VerifiedClusterState
 	| PendingState
 	| TerminalNoReceiptState
 	| BilledUnfinalizedState
@@ -635,7 +797,16 @@ export function validateReceiptId(routeParamId: string): ReceiptIdValidation {
 			reason: 'does not match the "ut1_" + 16-22 base58 (Bitcoin alphabet) grammar',
 		};
 	}
-	const encoded = match[1];
+	return checkCanonical16(match[1]);
+}
+
+/**
+ * §12's two decode rules, after a grammar has matched: EXACTLY 16 bytes, then
+ * a byte-identical re-encode. One copy for both prefixed forms that carry
+ * them — the receipt ID and the cluster account handle — so the handle can
+ * never be checked by a looser decoder than the ID it feeds.
+ */
+function checkCanonical16(encoded: string): ReceiptIdValidation {
 	const decoded = base58Decode(encoded);
 	if (decoded === null) {
 		return { valid: false, reason: "contains a character outside the base58 alphabet" };
@@ -650,6 +821,26 @@ export function validateReceiptId(routeParamId: string): ReceiptIdValidation {
 		return { valid: false, reason: "is a non-canonical encoding (does not re-encode identically)" };
 	}
 	return { valid: true };
+}
+
+/** `"a1_"` + 16–22 base58 characters: the cluster receipt's opaque account handle (v0.10 §15). */
+const ACCOUNT_HANDLE_GRAMMAR = /^a1_([1-9A-HJ-NP-Za-km-z]{16,22})$/;
+
+/**
+ * receipt-spec v0.10 §15 — the account handle is FORMAT-checked only: an `a1_`
+ * prefix and §12's two decode rules (exactly 16 bytes, canonical re-encode).
+ * Nobody without the operator's handle key can recompute one, and nothing on
+ * this page tries to.
+ */
+export function validateAccountHandle(value: string): ReceiptIdValidation {
+	const match = ACCOUNT_HANDLE_GRAMMAR.exec(value);
+	if (!match) {
+		return {
+			valid: false,
+			reason: 'does not match the "a1_" + 16-22 base58 (Bitcoin alphabet) grammar',
+		};
+	}
+	return checkCanonical16(match[1]);
 }
 
 // ===========================================================================
@@ -1351,6 +1542,34 @@ export function checkVerdictAlgebra(
 }
 
 /**
+ * The cluster half of §4.1 rule 2 (resolver companion v0.3). An account's
+ * receipts form ONE chain in the resolver's own registry, so on a 200 the
+ * check is never `unavailable`; a named `previousReceiptId` must be `passed`
+ * (the page renders it as a link, and a link nobody checked is an unbacked
+ * claim); `notApplicable` is legal only when no predecessor is named.
+ */
+export function checkClusterPredecessorLinkage(
+	verification: Verification,
+	projection: ClusterProjection,
+): AlgebraResult {
+	const result = verification.checks.predecessorLinkage.result;
+	if (Object.hasOwn(projection, "previousReceiptId")) {
+		return result === "passed"
+			? { ok: true }
+			: {
+					ok: false,
+					reason: `"predecessorLinkage" is "${result}", but the receipt names a previousReceiptId — on a cluster 200 a named predecessor must be "passed"`,
+				};
+	}
+	return result === "passed" || result === "notApplicable"
+		? { ok: true }
+		: {
+				ok: false,
+				reason: `"predecessorLinkage" is "${result}" on a cluster 200 — the account's receipts are one chain in the resolver's own registry, so it is "passed", or "notApplicable" with no predecessor named`,
+			};
+}
+
+/**
  * The highest rung this `verification` warrants — R5's "which rungs exist
  * above". A function of the check results AND the evidence members: the rung
  * an envelope could claim is never higher than what it actually served.
@@ -1643,20 +1862,7 @@ function validateProjection(value: unknown, path: string): string | null {
 	if (pricingError !== null) return pricingError;
 
 	const spend = value.spend as Bag;
-	const spendErrors = first(
-		requireIntegerAtLeast(spend, `${path}.spend`, "assessedUsertokens", 1),
-		requireIntegerAtLeast(spend, `${path}.spend`, "postedUsertokens", 1),
-		requireIntegerAtLeast(spend, `${path}.spend`, "roundingAdjustment", 0),
-		requireIntegerAtLeast(spend, `${path}.spend`, "transferCount", 1),
-		spend.usagePosture === "provider" ||
-			spend.usagePosture === "mixed" ||
-			spend.usagePosture === "estimated"
-			? null
-			: `${path}.spend.usagePosture must be provider|mixed|estimated`,
-		spend.pricingPosture === "exact" || spend.pricingPosture === "conservative"
-			? null
-			: `${path}.spend.pricingPosture must be exact|conservative`,
-	);
+	const spendErrors = validateSpend(spend, `${path}.spend`);
 	if (spendErrors !== null) return spendErrors;
 
 	// The three §2 presence/exclusion rules the page's own rendering depends
@@ -1673,21 +1879,8 @@ function validateProjection(value: unknown, path: string): string | null {
 	if (attested && !isNonEmptyString(value.workloadId)) {
 		return `${path}.workloadId must be a non-empty string`;
 	}
-	// R38 — the page NEVER renders an amount without its posture label, so a
-	// missing or unrecognized `delegationPosture` fails closed to the
-	// protocol-error shell rather than rendering a total whose scope the reader
-	// would supply from assumption. It is a step-7 SEMANTIC_INVALID upstream
-	// (§2a/§7), and the page must not out-render its own verifier.
-	//
-	// Unrecognized-rather-than-missing is the forward-compatibility half: a v1
-	// page meeting a value a later spec adds fails closed here instead of
-	// rendering an amount whose coverage it cannot interpret.
-	if (!Object.hasOwn(value, "delegationPosture")) {
-		return `${path}.delegationPosture is REQUIRED (§2a) — an amount may not render without its posture`;
-	}
-	if (!DELEGATION_POSTURES.includes(value.delegationPosture as string)) {
-		return `${path}.delegationPosture must be one of §2a's four values`;
-	}
+	const posture = validateDelegationPosture(value, path);
+	if (posture !== null) return posture;
 
 	const generation = value.generation as number;
 	if (generation > 1 !== Object.hasOwn(value, "prevGenerationEventHash")) {
@@ -1697,13 +1890,63 @@ function validateProjection(value: unknown, path: string): string | null {
 		const linkage = requireHex64(value, path, "prevGenerationEventHash");
 		if (linkage !== null) return linkage;
 	}
-	const transferCount = spend.transferCount as number;
+	return validateTransferSet(value, path, spend.transferCount as number);
+}
+
+/**
+ * §2's six per-field `spend` rules, shared by both receipt kinds (v0.10 §15.6
+ * adopts the block unchanged). `path` names the `spend` object itself.
+ */
+function validateSpend(spend: Bag, path: string): string | null {
+	return first(
+		requireIntegerAtLeast(spend, path, "assessedUsertokens", 1),
+		requireIntegerAtLeast(spend, path, "postedUsertokens", 1),
+		requireIntegerAtLeast(spend, path, "roundingAdjustment", 0),
+		requireIntegerAtLeast(spend, path, "transferCount", 1),
+		spend.usagePosture === "provider" ||
+			spend.usagePosture === "mixed" ||
+			spend.usagePosture === "estimated"
+			? null
+			: `${path}.usagePosture must be provider|mixed|estimated`,
+		spend.pricingPosture === "exact" || spend.pricingPosture === "conservative"
+			? null
+			: `${path}.pricingPosture must be exact|conservative`,
+	);
+}
+
+/**
+ * R38 — the page NEVER renders an amount without its posture label, so a
+ * missing or unrecognized `delegationPosture` fails closed to the
+ * protocol-error shell rather than rendering a total whose scope the reader
+ * would supply from assumption. It is a step-7 SEMANTIC_INVALID upstream
+ * (§2a/§7), and the page must not out-render its own verifier.
+ *
+ * Unrecognized-rather-than-missing is the forward-compatibility half: a v1
+ * page meeting a value a later spec adds fails closed here instead of
+ * rendering an amount whose coverage it cannot interpret. `value` is the
+ * projection; both receipt kinds carry the field and the rule.
+ */
+function validateDelegationPosture(value: Bag, path: string): string | null {
+	if (!Object.hasOwn(value, "delegationPosture")) {
+		return `${path}.delegationPosture is REQUIRED (§2a) — an amount may not render without its posture`;
+	}
+	if (!DELEGATION_POSTURES.includes(value.delegationPosture as string)) {
+		return `${path}.delegationPosture must be one of §2a's four values`;
+	}
+	return null;
+}
+
+/**
+ * §2's list-vs-commitment split (R25): the pair list is present iff
+ * `transferCount <= 32`, and each listed pair is two transfer-ID strings —
+ * R25 renders the list itself, one line per pair. `value` is the projection.
+ */
+function validateTransferSet(value: Bag, path: string, transferCount: number): string | null {
 	if (transferCount <= 32 !== Object.hasOwn(value, "transferSet")) {
 		return `${path}.transferSet must be present iff spend.transferCount <= 32`;
 	}
 	if (Object.hasOwn(value, "transferSet")) {
 		if (!Array.isArray(value.transferSet)) return `${path}.transferSet must be an array`;
-		// R25 renders the pair list itself, one line per pair.
 		for (const [index, pair] of value.transferSet.entries()) {
 			const pairPath = `${path}.transferSet[${index}]`;
 			if (!isBag(pair)) return `${pairPath} must be an object`;
@@ -1766,10 +2009,11 @@ function validateChainEnvelope(value: unknown, path: string): string | null {
 
 function validateReceiptDocument(value: unknown, path: string): string | null {
 	if (!isBag(value)) return `${path} must be an object`;
+	if (value.scope === "cluster") return validateClusterReceiptDocument(value, path);
 	const scalars = first(
 		value.spec === "ut1" ? null : `${path}.spec must be "ut1"`,
 		requireString(value, path, "receiptId"),
-		value.scope === "session" ? null : `${path}.scope must be "session"`,
+		value.scope === "session" ? null : `${path}.scope must be "session" or "cluster"`,
 		requireString(value, path, "mintedAt"),
 		requireBag(value, path, "minter"),
 		requireBag(value, path, "event"),
@@ -1784,6 +2028,19 @@ function validateReceiptDocument(value: unknown, path: string): string | null {
 	const projectionError = validateProjection((value.event as Bag).data, `${path}.event.data`);
 	if (projectionError !== null) return projectionError;
 
+	return validateProofAndSigners(value, path);
+}
+
+/**
+ * The proof machinery both receipt kinds share — the proof's three scalars,
+ * inclusion, the embedded checkpoint, and the two key IDs the page names.
+ * `value` is the receipt document, already known to carry `proof`, `minter`
+ * and `signature` objects. Deliberately NOT closed on the cluster path: the
+ * machinery did not change with §15, and a closed copy would have to list
+ * members this module has never needed to read — the embedded checkpoint's
+ * `segmentStartPreviousHash` among them, which every cluster receipt carries.
+ */
+function validateProofAndSigners(value: Bag, path: string): string | null {
 	const proof = value.proof as Bag;
 	return first(
 		requireString(proof, `${path}.proof`, "profile"),
@@ -1794,6 +2051,344 @@ function validateReceiptDocument(value: unknown, path: string): string | null {
 		requireString(value.minter as Bag, `${path}.minter`, "keyId"),
 		requireString(value.signature as Bag, `${path}.signature`, "sig"),
 	);
+}
+
+// ===========================================================================
+// receipt-spec v0.10 §15 — the cluster receipt (`scope: "cluster"`)
+// ===========================================================================
+
+// CLOSED where the session path is open. Every object §15 introduces or
+// re-scopes refuses a member it does not list, so a session member arriving
+// under a cluster scope (`sessionId`, `generation`, `workloadId`) is refused
+// rather than carried, unrendered, inside a receipt shown as verified — and a
+// member a later spec adds fails closed instead of being silently dropped.
+// The shared proof machinery is the declared exception (`validateProofAndSigners`).
+const CLUSTER_DOCUMENT_KEYS: readonly string[] = [
+	"spec",
+	"receiptId",
+	"scope",
+	"mintedAt",
+	"minter",
+	"work",
+	"event",
+	"proof",
+	"signature",
+];
+const CLUSTER_WORK_KEYS: readonly string[] = ["kind", "repoId"];
+const CLUSTER_PROJECTION_KEYS: readonly string[] = [
+	"spec",
+	"scope",
+	"account",
+	"windowStart",
+	"windowEnd",
+	"idleThresholdNs",
+	"windowTransfersRoot",
+	"windowTransferCount",
+	"work",
+	"models",
+	"providers",
+	"startedAt",
+	"endedAt",
+	"spend",
+	"delegationPosture",
+	"pricing",
+	"transferSetRoot",
+	// The three optional members; each one's presence is itself a claim.
+	"transferSet",
+	"previousReceiptId",
+	"skippedSincePrevious",
+];
+const SPEND_KEYS: readonly string[] = [
+	"assessedUsertokens",
+	"postedUsertokens",
+	"roundingAdjustment",
+	"transferCount",
+	"usagePosture",
+	"pricingPosture",
+];
+const PRICING_KEYS: readonly string[] = ["tableVersions"];
+const TRANSFER_PAIR_KEYS: readonly string[] = ["authorizationTransferId", "settlementTransferId"];
+const SKIPPED_SINCE_PREVIOUS_KEYS: readonly string[] = ["count", "windows", "windowsRoot"];
+const SKIPPED_WINDOW_KEYS: readonly string[] = ["windowStart", "windowEnd", "reason"];
+const SKIP_REASON_SET: ReadonlySet<string> = new Set<string>(SKIP_REASONS);
+
+/** The most refused windows a receipt lists inline; `windowsRoot` commits the rest (§15.6). */
+const SKIPPED_WINDOWS_LISTED_MAX = 16;
+
+/**
+ * The first member `bag` carries that `allowed` does not list. One stranger,
+ * by name: the protocol-error detail then says exactly what the receipt
+ * carried that §15 does not define.
+ */
+function closedKeys(bag: Bag, path: string, allowed: readonly string[]): string | null {
+	for (const key of Object.keys(bag)) {
+		if (!allowed.includes(key)) {
+			return `${path}.${key} is not a member of this closed object (receipt-spec v0.10 §15)`;
+		}
+	}
+	return null;
+}
+
+/** Digits only, no sign, no leading zero, at most 20 digits; the range is checked separately. */
+const U64_DECIMAL = /^(0|[1-9][0-9]{0,19})$/;
+const U64_MAX = BigInt("18446744073709551615");
+
+/**
+ * Ledger nanoseconds exceed 2^53, so they travel as decimal STRINGS and are
+ * compared as BigInt — never as a float, which every JS consumer would round,
+ * and never lexically, where "9" sorts after "10". The canonical form is the
+ * rule because a leading zero would give one instant two spellings, and
+ * `windowStart` feeds the receipt ID.
+ */
+function isCanonicalU64(value: unknown): value is string {
+	return typeof value === "string" && U64_DECIMAL.test(value) && BigInt(value) <= U64_MAX;
+}
+
+function requireU64Decimal(bag: Bag, path: string, key: string): string | null {
+	return isCanonicalU64(bag[key])
+		? null
+		: `${path}.${key} must be a canonical u64 decimal string (digits only, no leading zero, at most 18446744073709551615)`;
+}
+
+const IDLE_THRESHOLD_MIN_NS = BigInt("60000000000");
+const IDLE_THRESHOLD_MAX_NS = BigInt("86400000000000");
+
+/**
+ * The idle gap that closed the window is SIGNED, and the page renders it as the
+ * rule this receipt was cut by — so a value outside the minter's own bounds
+ * (60 s to 24 h) is a receipt the minter could not have produced, not a
+ * setting to display.
+ */
+function requireIdleThreshold(bag: Bag, path: string, key: string): string | null {
+	const format = requireU64Decimal(bag, path, key);
+	if (format !== null) return format;
+	const ns = BigInt(bag[key] as string);
+	return ns >= IDLE_THRESHOLD_MIN_NS && ns <= IDLE_THRESHOLD_MAX_NS
+		? null
+		: `${path}.${key} must be between 60000000000 (60 s) and 86400000000000 (24 h)`;
+}
+
+function requireAccountHandle(bag: Bag, path: string, key: string): string | null {
+	const value = bag[key];
+	if (typeof value !== "string") return `${path}.${key} must be an "a1_" account handle string`;
+	const handle = validateAccountHandle(value);
+	return handle.valid ? null : `${path}.${key} ${handle.reason}`;
+}
+
+/** The provider's immutable ID or the keyed r1_ form, and no URL syntax — so a public receipt can never carry `?token=…`, `#…`, `@…` or control characters. */
+const CLUSTER_REPO_ID = /^(?:[a-z0-9.-]+:[A-Za-z0-9_=-]{1,200}|r1_[A-Za-z0-9_-]{1,200})$/;
+
+/** §15.8's closed `{kind: "cluster", repoId?}` — see {@link ClusterWork} for why absent is not empty. */
+function validateClusterWork(value: unknown, path: string): string | null {
+	if (!isBag(value)) return `${path} must be an object`;
+	const stranger = closedKeys(value, path, CLUSTER_WORK_KEYS);
+	if (stranger !== null) return stranger;
+	if (value.kind !== "cluster") return `${path}.kind must be "cluster"`;
+	if (
+		Object.hasOwn(value, "repoId") &&
+		!(typeof value.repoId === "string" && CLUSTER_REPO_ID.test(value.repoId))
+	) {
+		return `${path}.repoId, when present, must be "<provider>:<opaqueId>" or a keyed "r1_<id>" (key-absent when unbound — never null, "" or a URL)`;
+	}
+	return null;
+}
+
+/**
+ * §15.6's refused-window list. The page renders every listed window as an
+ * EARLIER burst that got no receipt, so the contract requires each one to end
+ * before this receipt's own `windowStart`, whatever the `count` — a rule
+ * bounded only for a complete list (`count <= 16`) would leave a truncated
+ * one unbounded in time, and the page would present a burst that is not
+ * earlier as if it were.
+ *
+ * NOT checked here: that the FIRST window starts at least one idle threshold
+ * after the predecessor's `windowEnd`. That needs the predecessor's own row,
+ * which only the resolver has; the page relies on its `predecessorLinkage`
+ * result instead (see {@link checkClusterPredecessorLinkage}).
+ */
+function validateSkippedSincePrevious(
+	value: unknown,
+	path: string,
+	windowStart: bigint,
+): string | null {
+	if (!isBag(value)) {
+		return `${path} must be an object — key-absent when nothing was skipped, never null`;
+	}
+	const fields = first(
+		closedKeys(value, path, SKIPPED_SINCE_PREVIOUS_KEYS),
+		requireIntegerAtLeast(value, path, "count", 1),
+		Array.isArray(value.windows) ? null : `${path}.windows must be an array`,
+		requireHex64(value, path, "windowsRoot"),
+	);
+	if (fields !== null) return fields;
+	const windows = value.windows as unknown[];
+	const listed = Math.min(value.count as number, SKIPPED_WINDOWS_LISTED_MAX);
+	if (windows.length !== listed) {
+		return `${path}.windows must list exactly min(count, 16) = ${listed} windows, not ${windows.length}`;
+	}
+	let previousEnd: bigint | null = null;
+	for (const [index, entry] of windows.entries()) {
+		const at = `${path}.windows[${index}]`;
+		if (!isBag(entry)) return `${at} must be an object`;
+		const entryFields = first(
+			closedKeys(entry, at, SKIPPED_WINDOW_KEYS),
+			requireU64Decimal(entry, at, "windowStart"),
+			requireU64Decimal(entry, at, "windowEnd"),
+			typeof entry.reason === "string" && SKIP_REASON_SET.has(entry.reason)
+				? null
+				: `${at}.reason must be one of the 23 skip reasons (receipt-spec v0.10 §15.6)`,
+		);
+		if (entryFields !== null) return entryFields;
+		const start = BigInt(entry.windowStart as string);
+		const end = BigInt(entry.windowEnd as string);
+		if (end < start) return `${at}.windowEnd must be >= ${at}.windowStart`;
+		if (previousEnd !== null && !(previousEnd < start)) {
+			return `${at}.windowStart must be after the previous window's windowEnd (the windows are ascending and disjoint)`;
+		}
+		if (!(end < windowStart)) {
+			return `${at}.windowEnd must be before the receipt's own windowStart (a skipped burst is EARLIER activity)`;
+		}
+		previousEnd = end;
+	}
+	return null;
+}
+
+/**
+ * The cluster projection (§15.6). Order: the closed key set, then every
+ * member's own format, then the rules that relate two members — so each
+ * refusal names the first thing wrong, never a relation over a malformed side.
+ * `models`, `providers`, `startedAt`, `endedAt`, `spend`, `delegationPosture`,
+ * `pricing.tableVersions` and the transfer set take EXACTLY the session path's
+ * rules (§15.6 adopts them unchanged), plus closed keys on the three objects.
+ */
+function validateClusterProjection(value: unknown, path: string): string | null {
+	if (!isBag(value)) return `${path} must be an object`;
+	const stranger = closedKeys(value, path, CLUSTER_PROJECTION_KEYS);
+	if (stranger !== null) return stranger;
+	const formats = first(
+		value.spec === "ut1" ? null : `${path}.spec must be "ut1"`,
+		value.scope === "cluster" ? null : `${path}.scope must be "cluster"`,
+		requireAccountHandle(value, path, "account"),
+		requireU64Decimal(value, path, "windowStart"),
+		requireU64Decimal(value, path, "windowEnd"),
+		requireIdleThreshold(value, path, "idleThresholdNs"),
+		requireHex64(value, path, "windowTransfersRoot"),
+		requireInteger(value, path, "windowTransferCount"),
+		validateClusterWork(value.work, `${path}.work`),
+		requireStringArray(value, path, "models"),
+		requireStringArray(value, path, "providers"),
+		requireString(value, path, "startedAt"),
+		requireString(value, path, "endedAt"),
+		requireBag(value, path, "spend"),
+		requireBag(value, path, "pricing"),
+		requireHex64(value, path, "transferSetRoot"),
+	);
+	if (formats !== null) return formats;
+
+	// `>=`, not `>`: the resolver's own rule admits an instant-long window, and
+	// a page stricter than its resolver turns a receipt it serves green into a
+	// protocol error. A reversed window is not a window at all.
+	const windowStart = BigInt(value.windowStart as string);
+	if (BigInt(value.windowEnd as string) < windowStart) {
+		return `${path}.windowEnd must be >= ${path}.windowStart`;
+	}
+
+	const pricing = value.pricing as Bag;
+	const pricingError = first(
+		closedKeys(pricing, `${path}.pricing`, PRICING_KEYS),
+		requireStringArray(pricing, `${path}.pricing`, "tableVersions"),
+	);
+	if (pricingError !== null) return pricingError;
+
+	const spend = value.spend as Bag;
+	const spendError = first(
+		closedKeys(spend, `${path}.spend`, SPEND_KEYS),
+		validateSpend(spend, `${path}.spend`),
+	);
+	if (spendError !== null) return spendError;
+
+	const posture = validateDelegationPosture(value, path);
+	if (posture !== null) return posture;
+
+	const transferCount = spend.transferCount as number;
+	const transferSetError = validateTransferSet(value, path, transferCount);
+	if (transferSetError !== null) return transferSetError;
+	if (Array.isArray(value.transferSet)) {
+		for (const [index, pair] of value.transferSet.entries()) {
+			const pairError = closedKeys(
+				pair as Bag,
+				`${path}.transferSet[${index}]`,
+				TRANSFER_PAIR_KEYS,
+			);
+			if (pairError !== null) return pairError;
+		}
+	}
+
+	// Every posted pair is two ledger transfers inside the window (its hold and
+	// its post), so a smaller completeness count contradicts the receipt's own
+	// spend before anyone opens the ledger.
+	if ((value.windowTransferCount as number) < 2 * transferCount) {
+		return `${path}.windowTransferCount must be >= 2 × spend.transferCount`;
+	}
+
+	// Rendered as a link to another receipt, so it must be an ID the page could
+	// itself be asked about. Absent on an account's first receipt — `null` would
+	// be a third state the contract does not have.
+	if (Object.hasOwn(value, "previousReceiptId")) {
+		const previous = value.previousReceiptId;
+		if (typeof previous !== "string" || !validateReceiptId(previous).valid) {
+			return `${path}.previousReceiptId, when present, must be a canonical ut1 receipt ID (key-absent on an account's first receipt, never null)`;
+		}
+	}
+
+	if (Object.hasOwn(value, "skippedSincePrevious")) {
+		return validateSkippedSincePrevious(
+			value.skippedSincePrevious,
+			`${path}.skippedSincePrevious`,
+			windowStart,
+		);
+	}
+	return null;
+}
+
+/**
+ * The cluster document (§5's shape, §15's scope). `value.scope` is already
+ * `"cluster"` — that is how {@link validateReceiptDocument} dispatched here.
+ */
+function validateClusterReceiptDocument(value: Bag, path: string): string | null {
+	const stranger = closedKeys(value, path, CLUSTER_DOCUMENT_KEYS);
+	if (stranger !== null) return stranger;
+	const scalars = first(
+		value.spec === "ut1" ? null : `${path}.spec must be "ut1"`,
+		requireString(value, path, "receiptId"),
+		requireString(value, path, "mintedAt"),
+		requireBag(value, path, "minter"),
+		requireBag(value, path, "event"),
+		requireBag(value, path, "proof"),
+		requireBag(value, path, "signature"),
+		validateClusterWork(value.work, `${path}.work`),
+	);
+	if (scalars !== null) return scalars;
+
+	const envelopeError = validateChainEnvelope(value.event, `${path}.event`);
+	if (envelopeError !== null) return envelopeError;
+	const data = (value.event as Bag).data;
+	const projectionError = validateClusterProjection(data, `${path}.event.data`);
+	if (projectionError !== null) return projectionError;
+	const projection = data as Bag;
+
+	// Equality 9 (§4): the page renders the repository line from the document's
+	// `work` and reads the projection's too. Unequal, a `repoId` only the
+	// signature covers would render as if the chain committed it.
+	if (!structurallyEqual(value.work, projection.work)) {
+		return `${path}.work must equal ${path}.event.data.work (equality 9)`;
+	}
+	// A receipt that names itself as its predecessor would render a "previous
+	// receipt" link back to this very page: a chain of one shown as a chain.
+	if (projection.previousReceiptId === value.receiptId) {
+		return `${path}.event.data.previousReceiptId must not name this receipt itself`;
+	}
+	return validateProofAndSigners(value, path);
 }
 
 function validateAdvisories(value: unknown, path: string): string | null {
@@ -2103,7 +2698,7 @@ function parseSuccess(
 	if (schemaError !== null) {
 		return protocolError(routeParamId, "schemaInvalid", schemaError, httpStatus);
 	}
-	const envelope = body as unknown as SuccessEnvelope;
+	const envelope = body as unknown as SuccessEnvelope | ClusterSuccessEnvelope;
 
 	// The closed failure-code union first: an unknown or misplaced code is a
 	// schema failure (§4.1), and the algebra's reasons are only meaningful
@@ -2118,6 +2713,15 @@ function parseSuccess(
 	const algebra = checkVerdictAlgebra(status, envelope.verification, envelope);
 	if (!algebra.ok) {
 		return protocolError(routeParamId, "verdictAlgebra", algebra.reason, httpStatus);
+	}
+	if (isClusterEnvelope(envelope)) {
+		const linkage = checkClusterPredecessorLinkage(
+			envelope.verification,
+			envelope.receipt.event.data,
+		);
+		if (!linkage.ok) {
+			return protocolError(routeParamId, "verdictAlgebra", linkage.reason, httpStatus);
+		}
 	}
 
 	// R1 — the ut1 identity chain: route === envelope.receiptId === receipt.receiptId.
@@ -2180,14 +2784,38 @@ function parseSuccess(
 		);
 	}
 
+	if (isClusterEnvelope(envelope)) {
+		return {
+			kind: "verified",
+			scope: "cluster",
+			routeParamId,
+			receiptId: envelope.receiptId,
+			rung: status,
+			envelope,
+			receiptBytesText: agreement.text,
+		};
+	}
 	return {
 		kind: "verified",
+		scope: "session",
 		routeParamId,
 		receiptId: envelope.receiptId,
 		rung: status,
 		envelope,
 		receiptBytesText: agreement.text,
 	};
+}
+
+/**
+ * Which document a schema-validated 200 carries. Keyed on the signed
+ * document's own `scope` — the field `validateReceiptDocument` dispatched on —
+ * so the state's `scope` can never disagree with the rules the document was
+ * checked against.
+ */
+function isClusterEnvelope(
+	envelope: SuccessEnvelope | ClusterSuccessEnvelope,
+): envelope is ClusterSuccessEnvelope {
+	return envelope.receipt.scope === "cluster";
 }
 
 function parseUnverifiable(

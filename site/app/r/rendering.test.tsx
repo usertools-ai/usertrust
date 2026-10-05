@@ -346,7 +346,7 @@ test("R10/R37: hostile UNSIGNED members never crash the render and never demote 
 		fixture.wire.body = { ...body, ...graft };
 		const state = fixtureState(fixture);
 		assert.equal(state.kind, "verified", `unsigned junk must not demote: ${JSON.stringify(graft)}`);
-		if (state.kind !== "verified") continue;
+		if (state.kind !== "verified" || state.scope !== "session") continue;
 		const markup = render(state);
 		assert.ok(
 			markup.includes('data-rung="verified_checkpoint" data-rung-state="reached"'),
@@ -404,7 +404,7 @@ test("R37: NOTHING the wire accepts as verified can throw the render — every p
 				}
 				cases += 1;
 				const state = fixtureState(fixture);
-				if (state.kind !== "verified") continue;
+				if (state.kind !== "verified" || state.scope !== "session") continue;
 				stillVerified += 1;
 				render(state);
 			}
