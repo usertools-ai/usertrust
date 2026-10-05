@@ -19,6 +19,7 @@ import {
 	openSync,
 	readFileSync,
 	realpathSync,
+	statSync,
 	unlinkSync,
 	writeSync,
 } from "node:fs";
@@ -207,7 +208,22 @@ function canonicalDir(dir: string): string {
 	// `.native` (realpath(3)): it also returns the filesystem's own CASE. The JS realpath
 	// resolves symlinks but keeps the caller's case, so on a case-insensitive volume (APFS's
 	// default) `Vault` and `vault` were two keys for one directory (#195 r1).
-	return realpathSync.native(dir);
+	try {
+		return realpathSync.native(dir);
+	} catch {
+		// A directory that really is absent throws HERE (ENOENT), exactly as the lock's open
+		// would — never a resolve() spelling (#182.1).
+		statSync(dir);
+		// It exists. Either it was created since (#182.1's window: native now answers), or
+		// native cannot answer at all — musl without /proc (Alpine, procfs-less sandboxes) fails
+		// realpath(3) on every call (#195 r2). Only then the JS realpath: it resolves symlinks,
+		// and the platforms where native is unavailable are case-sensitive, so its key is unique.
+		try {
+			return realpathSync.native(dir);
+		} catch {
+			return realpathSync(dir);
+		}
+	}
 }
 
 function acquireProcessLock(
