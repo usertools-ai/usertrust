@@ -660,7 +660,7 @@ describe("#166 MEDIUM: the gate refuses running usage counts", () => {
 	});
 	it("control: an ordinary stream_options still passes", () => {
 		expect(chat({ stream: true, stream_options: { include_usage: true } }).decision).toBe("allow");
-		expect(chat({ stream: true, stream_options: null }).decision, "null = absent").toBe("allow");
+		expect(chat({ stream: true }).decision, "absent").toBe("allow");
 	});
 	it("#168: only allowlisted stream_options keys are forwarded — any other key, or a non-object, is DENIED", () => {
 		for (const r of [chat, responses]) {
@@ -669,7 +669,8 @@ describe("#166 MEDIUM: the gate refuses running usage counts", () => {
 				expect(denied(out), JSON.stringify(so)).toBe("parameter_unsupported");
 				if (out.decision === "deny") expect(out.detail).toMatch(/^stream_options\./);
 			}
-			for (const so of ["x", 1, [], true]) {
+			// null too: a key that is present is checked; when not streaming it would be forwarded.
+			for (const so of [null, "x", 1, [], true]) {
 				// Not streaming, so nothing replaces it: it would have been forwarded as sent.
 				expect(denied(r({ stream_options: so })), JSON.stringify(so)).toBe("parameter_unsupported");
 			}

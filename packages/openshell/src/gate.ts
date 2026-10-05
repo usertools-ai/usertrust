@@ -87,22 +87,26 @@ export interface RequestMutations {
 	body?: Uint8Array;
 }
 
+/**
+ * A priced hold. Read-only to the type checker, deeply (#173): it is frozen at runtime too,
+ * so a write fails to compile rather than throwing in strict code.
+ */
 export interface Hold {
-	route: MeteredRoute;
-	model: string;
+	readonly route: MeteredRoute;
+	readonly model: string;
 	/** The conservative input-token bound the hold was priced on. */
-	inputTokenBound: number;
+	readonly inputTokenBound: number;
 	/** The request's own output limit. */
-	maxOutputTokens: number;
+	readonly maxOutputTokens: number;
 	/** Usertokens to reserve: a ceiling the call cannot exceed in the normal case. */
-	amount: number;
-	streaming: boolean;
+	readonly amount: number;
+	readonly streaming: boolean;
 	/**
 	 * The rates the hold was priced with, SNAPSHOTTED here. Settlement prices the usage
 	 * with these — never by re-resolving the model, whose operator rates may have
 	 * changed (become cheaper) between the reservation and the settlement.
 	 */
-	rates: ModelRates;
+	readonly rates: Readonly<ModelRates>;
 }
 
 export type GateResult =
@@ -557,7 +561,7 @@ function topLevelChecks(route: MeteredRoute, body: Json, w: Walk): string | unde
 	// `continuous_usage_stats`, which reports usage on EVERY chunk) could change how, or
 	// whether, the stream reports the usage the hold settles from — refused until reviewed.
 	// A non-object is refused too: when not streaming it would be forwarded as sent.
-	if (body.stream_options != null) {
+	if (Object.hasOwn(body, "stream_options")) {
 		if (!isObject(body.stream_options)) {
 			refuse(w, DenyReason.parameterUnsupported, "stream_options.type");
 			return undefined;

@@ -14,7 +14,7 @@
 		"evidence:test": "node --import tsx --test scripts/capture-evidence.test.mts",
 		"fleet:collect": "tsx scripts/fleet-collector.mts",
 		"fleet:test": "node --import tsx --test scripts/fleet/*.test.mts",
-		"typecheck": "tsc -b && tsc -p packages/core/tsconfig.type-tests.json && tsc -p packages/openclaw/tsconfig.type-tests.json",
+		"typecheck": "tsc -b && tsc -p packages/core/tsconfig.type-tests.json && tsc -p packages/openclaw/tsconfig.type-tests.json && tsc -p packages/openshell/tsconfig.type-tests.json",
 		"typecheck:types": "tsc -p packages/core/tsconfig.type-tests.json"
 	},
 	"devDependencies": {
