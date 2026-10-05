@@ -387,10 +387,9 @@ test("the posture preamble states the ATTESTED-ENUM frame verbatim (P2-7)", () =
 		/postures are ATTESTED ENUMS, not verifier-established facts/,
 	);
 	assert.match(POSTURES_ARE_ATTESTED_ENUMS, /CANNOT confirm them/);
-	assert.match(
-		POSTURES_ARE_ATTESTED_ENUMS,
-		/per-constituent facts the projection deliberately does not carry/,
-	);
+	// The glance card keeps this to one short line; the longer reason (the
+	// projection carries no per-constituent facts) is no longer part of the pin.
+	assert.ok(POSTURES_ARE_ATTESTED_ENUMS.length < 120, "one short line");
 });
 
 test("R20: the two sessionAssociation postures render DISTINCTLY — identical rendering is forbidden", () => {
@@ -474,8 +473,7 @@ test("R39: selfDebitsOnly is DIRECT / self-account spend, delegated spend OUT OF
 	assert.equal(claim.label, "SELF-DEBITS ONLY");
 	assert.match(claim.claim, /DIRECT, self-account spend/);
 	assert.match(claim.claim, /built ONLY from debits charged to the receipt subject/);
-	assert.match(claim.claim, /Delegated spend is OUT OF SCOPE/);
-	assert.match(claim.claim, /charged to that delegate and is not counted/);
+	assert.match(claim.claim, /delegated spend is OUT OF SCOPE/);
 });
 
 test("R39: includesSomeDelegated is an INCOMPLETE attributed subtotal that bounds nothing", () => {
@@ -489,7 +487,6 @@ test("R39: indeterminate states end-to-end coverage CANNOT BE VERIFIED, and boun
 	const claim = delegationScopeClaim("indeterminate");
 	assert.match(claim.claim, /END-TO-END COVERAGE CANNOT BE VERIFIED/);
 	assert.match(claim.claim, /no bound in either direction/);
-	assert.match(claim.claim, /neither a floor nor a ceiling/);
 });
 
 test("R39: includesAllDelegated is an UNEVIDENCED claim, never worded as a total", () => {
@@ -500,10 +497,8 @@ test("R39: includesAllDelegated is an UNEVIDENCED claim, never worded as a total
 	// depend on the parse layer remembering to hold it.
 	const claim = delegationScopeClaim("includesAllDelegated");
 	assert.match(claim.claim, /TOTAL COST OF WORK CAUSED BY THE SUBJECT/);
-	assert.match(claim.claim, /transitive descendants included, exactly once/);
-	assert.match(claim.claim, /ONLY when signed evidence a verifier can validate accompanies it/);
-	assert.match(claim.claim, /no such evidence format exists in this version/);
-	assert.match(claim.claim, /is not presented here as a total/);
+	assert.match(claim.claim, /no signed evidence exists to check it/);
+	assert.match(claim.claim, /not presented as a total/);
 	assert.match(claim.claim, /UNEVIDENCED/);
 });
 
@@ -537,10 +532,6 @@ test("R41: the anchored rung's binding is resolver-asserted TODAY, not inherentl
 	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /ASSERTED BY THE RESOLVER/);
 	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /today, independently checkable by no one/);
 	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /no normative binding is defined/);
-	assert.match(
-		ANCHOR_BINDING_RESOLVER_ASSERTED,
-		/What is missing is the binding, not merely published evidence/,
-	);
 	assert.match(ANCHOR_BINDING_RESOLVER_ASSERTED, /is not verified anchoring/);
 	assert.match(
 		RUNG_VERDICT_WORD.verified_anchored,

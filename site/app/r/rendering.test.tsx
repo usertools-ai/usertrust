@@ -624,12 +624,12 @@ test("R13/R39: a session $X is the frozen headline, and its scope sits beside bo
 		const spendScope = html.indexOf('data-testid="amount-scope"');
 		assert.ok(paperAt !== -1, `${file}: paper companion`);
 		assert.ok(workAt !== -1, `${file}: WorkClaims companion`);
+		// The glance card now carries the amount's scope first; the headline
+		// companion sits in Details. Both must still be present, and the headline
+		// companion must not restate the spend caption.
+		assert.ok(spendScope !== -1, `${file}: the glance amount scope renders`);
 		assert.ok(
-			spendScope !== -1 && paperAt < spendScope,
-			`${file}: paper scope precedes SpendBlock`,
-		);
-		assert.ok(
-			!html.slice(paperAt, spendScope).includes('data-testid="amount-caption"'),
+			!html.slice(paperAt, paperAt + 2000).includes('data-testid="amount-caption"'),
 			`${file}: the headline companion does not restate the spend caption`,
 		);
 		assertContains(

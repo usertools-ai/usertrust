@@ -1,5 +1,7 @@
+import { plainState } from "../lib/plain-copy";
 import { BILLED_UNFINALIZED_HEADLINE, BILLED_UNFINALIZED_REGISTER_NOTE } from "../lib/shell-copy";
 import type { BilledUnfinalizedState } from "../lib/wire";
+import Details from "./details";
 import HashValue from "./hash-value";
 import NonGreenMasthead from "./nongreen-masthead";
 import TerminalPaperStub from "./terminal-paper-stub";
@@ -26,88 +28,92 @@ import TerminalPaperStub from "./terminal-paper-stub";
  */
 export default function BilledUnfinalizedStateView({ state }: { state: BilledUnfinalizedState }) {
 	const { terminalEvent } = state.envelope;
+	const plain = plainState(state);
 	return (
 		<section
 			data-state="billedUnfinalized"
 			data-linkage={state.linkage}
 			className="flex flex-col gap-6"
 		>
-			<NonGreenMasthead word={BILLED_UNFINALIZED_HEADLINE} register="danger">
-				<p className="text-[13px] leading-relaxed text-white/70">
-					{BILLED_UNFINALIZED_REGISTER_NOTE}
-				</p>
+			<NonGreenMasthead word={plain.word} register={plain.register}>
+				<p className="text-[13px] leading-relaxed text-white/70">{plain.line}</p>
 			</NonGreenMasthead>
-
-			<TerminalPaperStub
-				receiptId={state.receiptId}
-				statusWord="BILLED — UNFINALIZED"
-				stamp={{ word: "UNPROVEN", colorClassName: "text-paper-red" }}
-			/>
-
-			<div
-				className="lift-1 flex flex-col gap-3 rounded-xl border border-white/10 bg-white/[0.02] p-4"
-				data-testid="terminal-event-proof"
-			>
-				<p className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
-					terminal-event proof summary
-				</p>
-				<dl className="grid gap-3 sm:grid-cols-2">
-					<div className="flex flex-col gap-1">
-						<dt className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
-							chain
-						</dt>
-						<dd className="font-mono text-[13px] text-white/85">{terminalEvent.chain}</dd>
-					</div>
-					<div className="flex flex-col gap-1">
-						<dt className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
-							profile
-						</dt>
-						<dd className="font-mono text-[13px] text-white/85">{terminalEvent.profile}</dd>
-					</div>
-					<div className="flex flex-col gap-1 sm:col-span-2">
-						<dt className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
-							event hash
-						</dt>
-						<dd>
-							<HashValue value={terminalEvent.event.hash} label="terminal event hash" />
-						</dd>
-					</div>
-					<div className="flex flex-col gap-1 sm:col-span-2">
-						<dt className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
-							transfer-set root
-						</dt>
-						<dd>
-							<HashValue value={state.transferSetRoot} label="transfer-set root" />
-						</dd>
-					</div>
-					<div className="flex flex-col gap-1">
-						<dt className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
-							segment / tree size
-						</dt>
-						<dd className="font-mono text-[13px] text-white/85">
-							{terminalEvent.checkpoint.segmentId} · {terminalEvent.checkpoint.treeSize}
-						</dd>
-					</div>
-					<div className="flex flex-col gap-1">
-						<dt className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
-							checkpoint published
-						</dt>
-						<dd className="font-mono text-[13px] text-white/85">
-							{terminalEvent.checkpoint.publishedAt}
-						</dd>
-					</div>
-				</dl>
-			</div>
 
 			{state.linkage === "verified" ? (
 				<p className="text-[13px] leading-relaxed text-white/70" data-testid="fallback-link">
-					this reservation billed but was never finalized into a receipt of its own. the same spend
-					is recorded on a spend-only fallback session receipt:{" "}
+					Its spend is recorded on this fallback receipt:{" "}
 					<a className="ut-link focus-ring" href={`/r/${state.linkedReceiptId}`}>
 						{state.linkedReceiptId}
 					</a>
 				</p>
 			) : null}
+
+			<Details>
+				<p className="text-white/85">{BILLED_UNFINALIZED_HEADLINE}</p>
+				<p className="text-[13px] leading-relaxed text-white/70">
+					{BILLED_UNFINALIZED_REGISTER_NOTE}
+				</p>
+				<TerminalPaperStub
+					receiptId={state.receiptId}
+					statusWord="BILLED — UNFINALIZED"
+					stamp={{ word: "UNPROVEN", colorClassName: "text-paper-red" }}
+				/>
+
+				<div
+					className="lift-1 flex flex-col gap-3 rounded-xl border border-white/10 bg-white/[0.02] p-4"
+					data-testid="terminal-event-proof"
+				>
+					<p className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+						terminal-event proof summary
+					</p>
+					<dl className="grid gap-3 sm:grid-cols-2">
+						<div className="flex flex-col gap-1">
+							<dt className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+								chain
+							</dt>
+							<dd className="font-mono text-[13px] text-white/85">{terminalEvent.chain}</dd>
+						</div>
+						<div className="flex flex-col gap-1">
+							<dt className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+								profile
+							</dt>
+							<dd className="font-mono text-[13px] text-white/85">{terminalEvent.profile}</dd>
+						</div>
+						<div className="flex flex-col gap-1 sm:col-span-2">
+							<dt className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+								event hash
+							</dt>
+							<dd>
+								<HashValue value={terminalEvent.event.hash} label="terminal event hash" />
+							</dd>
+						</div>
+						<div className="flex flex-col gap-1 sm:col-span-2">
+							<dt className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+								transfer-set root
+							</dt>
+							<dd>
+								<HashValue value={state.transferSetRoot} label="transfer-set root" />
+							</dd>
+						</div>
+						<div className="flex flex-col gap-1">
+							<dt className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+								segment / tree size
+							</dt>
+							<dd className="font-mono text-[13px] text-white/85">
+								{terminalEvent.checkpoint.segmentId} · {terminalEvent.checkpoint.treeSize}
+							</dd>
+						</div>
+						<div className="flex flex-col gap-1">
+							<dt className="font-mono text-[12px] uppercase tracking-[0.12em] text-white/70">
+								checkpoint published
+							</dt>
+							<dd className="font-mono text-[13px] text-white/85">
+								{terminalEvent.checkpoint.publishedAt}
+							</dd>
+						</div>
+					</dl>
+				</div>
+			</Details>
 		</section>
 	);
 }
