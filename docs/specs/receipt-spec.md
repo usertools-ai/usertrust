@@ -113,6 +113,11 @@ without a reservation:
 - **Re-read, and its finding.** The section was verified byte-identical, with
   the command shown in §6a. Nothing inside the pin moved, and the pinned section
   now describes the reserved session kind only.
+- **The companion's v0.9.5 transcriptions are corrected too.** v0.9.6
+  overrode the companion's copies of the checkpoint member list and of
+  equality 4, and left their correction to the companion's own round. v0.3
+  is that round: both now carry the twelfth signed member and the chain-link
+  offset, outside the pinned section.
 
 **Built on v0.9.6.** This revision sits on top of the v0.9.6 checkpoint
 amendment, the twelfth signed member and the chain-link leaf, and changes none
@@ -1061,7 +1066,7 @@ The resolver spec's "Mint lifecycle — normative constraints" section is
 **adopted as normative for §6, by reference and in full** — reserve →
 work → finalize, with every hardening it carries. The adoption is **PINNED
 BY CONTENT HASH (round-4 P1-5)**: it binds that section as of
-**`sha256:310f0d6bd045ad51e24338ed31abed98d36b8c219b34a31f525f5f8bebe4c070`**
+**`sha256:5aa0a7df0bf59a86325f29a409eb7e86658c4b82e2b8d148a1e03471c3c2ff70`**
 — the COMPLETE digest of `docs/specs/receipt-resolver-api.md`, this
 directory's copy: the v0.3 resolver companion (v0.10's cluster states, all
 OUTSIDE the pinned section), whose pinned section is byte-identical to the v0.2
@@ -2892,6 +2897,10 @@ fixing the scope BEFORE the work. Clusters achieve it in four ways:
     set before the account's first debit hold, and is IMMUTABLE after it. The
     operator's configuration refuses any later change, so every window of the
     account is cut with the same `θ`;
+  - **so the governing `θ` is simply the account's configured value once it
+    has a debit hold.** Changes made before the first hold bind no window.
+    Two changes therefore never compete for a window, and nothing needs a
+    tie-break;
   - every receipt signs its window's `θ` (`idleThresholdNs`);
   - **a `θ` history is RESERVED for a later version:** changes recorded
     append-only, each with a ledger-time effective-from, which would allow a
@@ -3284,7 +3293,10 @@ not the mint key, and not the checkpoint key. `u128be(ledgerAccountId)` is the
 ledger account ID as 16 big-endian bytes.
 
 - **Keyed, deliberately.** A receipt never publishes a ledger account ID, and
-  nobody without `S` can link a handle to a ledger account.
+  nobody without `S` can link a handle to a ledger account FROM THE HANDLE.
+  Ledger TRANSFER IDs are another matter: `transferSet` publishes them,
+  unkeyed (§2, inherited), so a party that can query the ledger can resolve a
+  listed transfer, and with it the account (§15.11).
 - **Stable.** One account has one handle, forever. Because `S` is not a signing
   key, rotating the signing keys (§8) changes no handle.
 - **Rotating `S` is an incident action, never routine.** It would change every
@@ -3506,6 +3518,13 @@ cannot see. **A third party without ledger access TRUSTS THE OPERATOR'S
 SIGNED SET for completeness.** This spec says so plainly, and so must every
 verifier: output that reports a cluster receipt as verified MUST NOT describe
 it as "complete" or "independently complete".
+
+**Declared, too: what a receipt discloses beyond its claim.** When
+`transferCount ≤ 32`, `transferSet` publishes the posted pairs' ledger
+transfer IDs, unkeyed. This is inherited from §2, and is unlike `account`
+(§15.7). They name the transfers to anyone who can query the ledger, which
+then also names the account they debit. Whatever structure the operator
+gives its IDs, such as a time prefix, is published with them.
 
 **WHAT THE SIGNATURE DOES BUY.** The trust is not blind:
 

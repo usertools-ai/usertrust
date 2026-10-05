@@ -671,7 +671,7 @@ shape). Four tiers, and a consumer must not blur them:
                                          // unchanged from the draft; the spec renamed ITS
                                          // field to match (§10.12)
       },
-      "sequence": 8123421,
+      "sequence": 8123420,
       "hash": "…"                        // = sha256(canonicalize(event − hash)), key-absent
                                          // exclusion. The verifier RECOMPUTES it from the
                                          // embedded envelope
@@ -694,8 +694,12 @@ shape). Four tiers, and a consumer must not blur them:
                                          // interior = sha256(0x01 ‖ left ‖ right) over
                                          // DECODED bytes, odd nodes promoting
         "leafIndex": 21,                 // = event.sequence − checkpoint.segmentFirstSequence
-                                         // = 8123421 − 8123400 (equality 4), and
-                                         // 0 ≤ leafIndex < treeSize
+                                         //   + offset = 8123420 − 8123400 + 1 (equality 4,
+                                         // v0.9.6), and offset ≤ leafIndex < treeSize. The
+                                         // offset is 1 because this segment is not genesis:
+                                         // its leaf 0 is the CHAIN-LINK leaf (the sealed
+                                         // predecessor's root), so its first event is leaf 1
+                                         // and treeSize counts the link
         "treeSize": 32,
         "root": "…",
         "siblings": [                    // Example kept internally VALID (round-4 F6, now
@@ -732,6 +736,11 @@ shape). Four tiers, and a consumer must not blur them:
                                          // retirement-boundary input for §8's key states
         "previousSegmentRoot": "…",      // the SIGNED lineage edge. Genesis: both fields are
         "previousSegmentId": "seg-000411",   // the fixed string "genesis" for the first segment
+        "segmentStartPreviousHash": "…", // SIGNED (v0.9.6, the twelfth member): the
+                                         // previousHash this segment's first event carries,
+                                         // i.e. the predecessor's final event hash; for the
+                                         // genesis segment, 64 "0" characters. Equality 4
+                                         // binds it when the receipt's event is leaf `offset`
         "keyId": "usertools-audit-root-2026a",
         "publishedAt": "2026-08-09T02:11:04.000Z",   // a signed input, and NOT a trusted clock
         "sig": "base64…"                 // Ed25519 over canonicalize(unsigned payload)
@@ -1266,9 +1275,11 @@ Design intents behind the shape:
   prefixes, RFC 6962 §2.1), odd-leaf promotion (CVE-2012-2459), one tree per
   JSONL segment, and Ed25519-signed roots. What is NET-NEW is the checkpoint
   STATEMENT: `SegmentCheckpoint` v2 (§4a), a versioned extension whose signed
-  payload covers `{ v, vaultId, profile, root, treeSize, segmentId,
-  segmentFirstSequence, previousSegmentRoot, previousSegmentId, keyId,
-  publishedAt }`. The receipt attests exactly ONE leaf — the `receipt_settled`
+  payload covers exactly twelve members, `{ v, vaultId, profile, root,
+  treeSize, segmentId, segmentFirstSequence, previousSegmentRoot,
+  previousSegmentId, segmentStartPreviousHash, keyId, publishedAt }` (v0.3:
+  receipt-spec v0.9.6 added `segmentStartPreviousHash`; with `sig` the
+  embedded checkpoint has thirteen keys). The receipt attests exactly ONE leaf — the `receipt_settled`
   mint event — so the proof is a standard `MerkleInclusionProof` against that
   checkpoint.
   **Segments are SEALED by their checkpoint — exactly ONE checkpoint per
@@ -1299,7 +1310,12 @@ Design intents behind the shape:
      byte-identically to the projection the receipt claims; they are the same
      object, not duplicate copies), equality 4
      (`inclusion.leafIndex === event.sequence −
-     checkpoint.segmentFirstSequence`), equality 8 (`checkpoint.vaultId ===
+     checkpoint.segmentFirstSequence + offset`, with `offset ≤ leafIndex <
+     checkpoint.treeSize`, where `offset` is §4a's chain-link offset: `0` iff
+     `checkpoint.previousSegmentRoot === "genesis"`, else `1`; and when
+     `leafIndex === offset`, `event.previousHash ===
+     checkpoint.segmentStartPreviousHash` — v0.3, per receipt-spec v0.9.6),
+     equality 8 (`checkpoint.vaultId ===
      proof.chain` and `checkpoint.profile === proof.profile`, read out of the
      CHECKPOINT's own signed payload, THEN cross-checked against the registered
      `chains[]` entry), and equality 9
@@ -2412,6 +2428,7 @@ command).
 | 20 | The derived-ID recompute joins identity binding on every read serving a cluster receipt, and `predecessorLinkage` checks the account's receipt chain against the registry. A non-recomputing ID is a 409 `ID_MISMATCH`, a broken link a 409 `PREDECESSOR_MISMATCH`; on a 200 the chain check is `passed` or `notApplicable`, never `unavailable` (Endpoint, identity binding; the 200 example; "The verdict algebra"; "Cluster receipts"). |
 | 21 | No failure code is added. `COMPLETENESS_MISMATCH` and `WINDOW_CONFLICT` are results of the receipt spec's completeness audit and of a two-receipt consumer rule, never emitted by a resolver; the four named checks are unchanged, so there is no `ledgerCompleteness` member ("Cluster receipts"). |
 | 22 | Cluster rendering sentences: claim line, R40 scope line, scoped never-understates ("Cluster receipts"). |
+| v0.9.6 | The proof-block transcriptions caught up with receipt-spec v0.9.6, which overrode them and left this correction to the companion's own round. The 200 example's checkpoint carries the twelfth signed member, `segmentStartPreviousHash`. Equality 4 carries the chain-link offset, in the example and in the verification steps. The example's event sequence moves to 8123420 so that its `leafIndex` 21, and with it the sibling sides, stays valid for a non-genesis segment. |
 
 ## Changelog — v0.2 (sixteen §10 companion updates + the §4 schema adoption)
 
