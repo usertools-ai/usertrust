@@ -32,6 +32,9 @@ class FakeLedger implements LedgerPort {
 	/** ensureDebtAccount throws this (a debt account the ledger refuses), when set. */
 	debtAccountRefusal: Error | null = null;
 	ensuredDebt: string[] = [];
+	/** Run while ensureDebtAccount / post is pending: a caller mutating its own object. */
+	onEnsure: (() => void) | null = null;
+	onPost: (() => void) | null = null;
 	/** Runs inside available(): a slow balance lookup (advances the test clock). */
 	onAvailable: (() => void) | null = null;
 	/** While set, chargeDebt waits on it: the gap between the claim and the ledger charge. */
@@ -54,6 +57,8 @@ class FakeLedger implements LedgerPort {
 		return this.applied.has(transferIdFor(holdKey, role).toString());
 	}
 	async ensureDebtAccount(budgetId: string): Promise<void> {
+		this.onEnsure?.();
+		await Promise.resolve();
 		if (this.debtAccountRefusal !== null) throw this.debtAccountRefusal;
 		this.ensuredDebt.push(budgetId);
 	}
@@ -71,6 +76,7 @@ class FakeLedger implements LedgerPort {
 		this.balances.set(p.budgetId, (this.balances.get(p.budgetId) ?? 0) - p.amount);
 	}
 	async post(p: { holdKey: string; amount: number }): Promise<PostOutcome> {
+		this.onPost?.();
 		if (this.postAnswer !== null) return this.postAnswer;
 		if (this.expired.has(p.holdKey)) return "expired";
 		this.once(transferIdFor(p.holdKey, "post"), p.amount);
@@ -495,5 +501,37 @@ describe("#174 r2: every account a settlement touches is ensured before placemen
 			admitted: true,
 			existing: false,
 		});
+	});
+});
+
+describe("#174 r3: the caller's objects are snapshotted before any await", () => {
+	it("a reservation whose caller mutates budgetId and amount while the ensure is pending: the ensure, the row and the placement all use the ORIGINAL values", async () => {
+		const { journal, ledger, engine } = setup(1_000);
+		ledger.balances.set("other", 1_000);
+		const p = { holdKey: "k1", budgetId: "b", amount: 10 };
+		ledger.onEnsure = () => {
+			p.budgetId = "other";
+			p.amount = 999;
+		};
+		expect(await engine.reserve(p)).toEqual({ admitted: true, existing: false });
+		expect(ledger.ensuredDebt).toEqual(["b"]);
+		expect(journal.get("k1")).toMatchObject({ budgetId: "b", amount: 10 });
+		expect(ledger.applied.get(transferIdFor("k1", "reserve").toString())).toBe(10);
+		expect(ledger.balances.get("b"), "placed on the original budget").toBe(990);
+		expect(ledger.balances.get("other")).toBe(1_000);
+	});
+
+	it("a settlement whose caller mutates the intent's overage mid-post: the ledger charge equals the debt recorded with the claim", async () => {
+		const { journal, ledger, engine } = setup();
+		await engine.reserve({ holdKey: "k1", budgetId: "b", amount: 100 });
+		const intent = { post: 100, overage: 25 };
+		ledger.onPost = () => {
+			intent.overage = 500;
+			intent.post = 1;
+		};
+		expect(await engine.settle("k1", intent)).toEqual({ outcome: "settled", resumed: false });
+		expect(journal.debtOf("b")).toBe(25);
+		expect(ledger.debt.get("b"), "charged what was recorded").toBe(25);
+		expect(ledger.applied.get(transferIdFor("k1", "post").toString())).toBe(100);
 	});
 });

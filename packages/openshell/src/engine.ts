@@ -115,6 +115,11 @@ export type ReleaseOutcome =
 	/** The ledger says the hold was POSTED: no void, and the row is left for an operator. */
 	| { outcome: "incident"; state: "voiding" };
 
+/** A frozen copy of the two numbers a settlement acts on. */
+function snapshotIntent(i: SettlementIntent): Readonly<SettlementIntent> {
+	return Object.freeze({ post: i.post, overage: i.overage });
+}
+
 export class HoldEngine {
 	private readonly now: () => number;
 
@@ -146,9 +151,12 @@ export class HoldEngine {
 	 * a busy journal or a ledger failure: the request path fails closed on any throw.
 	 */
 	async reserve(p: { holdKey: string; budgetId: string; amount: number }): Promise<ReserveOutcome> {
+		// Snapshotted BEFORE any await: a caller that mutates `p` while the ensure or the
+		// journal is pending must not ensure one budget and place another (#174 r3).
+		const { holdKey, budgetId, amount } = p;
 		// The structural rule: every account a settlement might touch, before any placement.
-		debtAccountLabel(p.budgetId); // a name the ledger cannot give a debt account: throws
-		await within("ensureDebtAccount", this.ms, () => this.ledger.ensureDebtAccount(p.budgetId));
+		debtAccountLabel(budgetId); // a name the ledger cannot give a debt account: throws
+		await within("ensureDebtAccount", this.ms, () => this.ledger.ensureDebtAccount(budgetId));
 		// ONE shared placement deadline, from ONE clock read: the placement must START by
 		// placeBy (the lock wait and the balance lookup included), and it then commits within
 		// one more deadline. The ledger's timeout starts at that commit, so the hold can be
@@ -158,19 +166,19 @@ export class HoldEngine {
 		const lifetime = this.opts.holdTtlSeconds * 1000;
 		const placeBy = start + this.ms;
 		const r = await this.journal.reserve({
-			holdId: p.holdKey,
-			budgetId: p.budgetId,
-			amount: p.amount,
+			holdId: holdKey,
+			budgetId,
+			amount,
 			admitBy: start + lifetime,
 			ttlAt: placeBy + this.ms + lifetime,
-			availableCredit: (holdId) => this.ledger.available(p.budgetId, holdId),
+			availableCredit: (holdId) => this.ledger.available(budgetId, holdId),
 			placeHold: () => {
 				const late = this.now() - placeBy;
 				if (late > 0) throw new PlacementWindowError(late);
 				return this.ledger.placeHold({
-					budgetId: p.budgetId,
-					holdKey: p.holdKey,
-					amount: p.amount,
+					budgetId,
+					holdKey,
+					amount,
 					timeoutSeconds: this.opts.holdTtlSeconds,
 				});
 			},
@@ -181,7 +189,10 @@ export class HoldEngine {
 	}
 
 	/** Settle a hold to the given intent; the loser of the claim acts BY STATE. */
-	async settle(holdKey: string, intent: SettlementIntent): Promise<SettleOutcome> {
+	async settle(holdKey: string, given: SettlementIntent): Promise<SettleOutcome> {
+		// Snapshotted BEFORE any await (#174 r3): the claim writes it after the lock wait, and the
+		// debt recorded and the overage charged must be the same number.
+		const intent = snapshotIntent(given);
 		// The claim and the overage's DEBT commit together: from the moment the overage is
 		// known, the next reservation sees it — never after the ledger charge (#174 r1: a
 		// reservation in that gap read the old debt and admitted past the budget).
@@ -220,9 +231,10 @@ export class HoldEngine {
 	/** Steps 2–4, from a claimed `settling` row. */
 	private async completeSettlement(
 		holdKey: string,
-		intent: SettlementIntent,
+		stored: SettlementIntent,
 		resumed: boolean,
 	): Promise<SettleOutcome> {
+		const intent = snapshotIntent(stored); // nothing outside this call can change it now
 		const row = this.journal.get(holdKey);
 		if (row === undefined) return { outcome: "incident", state: "missing" };
 		if (row.state === "settled") return { outcome: "duplicate" };
