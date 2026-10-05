@@ -58,7 +58,7 @@ describe("HTTP control plane", () => {
 	it("health names the capabilities a client must not assume an older server has", async () => {
 		// An older server strips unknown request keys, so a client that retried a
 		// settle under an idempotencyKey that server silently dropped would post twice.
-		const { base } = await start();
+		const { base } = await start({ dryRun: false });
 		const body = (await (await fetch(`${base}/v1/health`)).json()) as { capabilities: string[] };
 		expect(body.capabilities).toEqual([
 			"release",
@@ -66,6 +66,12 @@ describe("HTTP control plane", () => {
 			"principal",
 			"settlement-unrecoverable",
 		]);
+	});
+
+	it("a dryRun server does not claim idempotency-key: with no ledger anchor, a retry after a settle charges again", async () => {
+		const { base } = await start({ dryRun: true });
+		const body = (await (await fetch(`${base}/v1/health`)).json()) as { capabilities: string[] };
+		expect(body.capabilities).toEqual(["release", "principal", "settlement-unrecoverable"]);
 	});
 
 	it("rejects missing or wrong bearer key with 401", async () => {

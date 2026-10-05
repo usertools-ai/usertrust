@@ -50,6 +50,15 @@ const SERVER_CAPABILITIES = Object.freeze([
 	"principal",
 	"settlement-unrecoverable",
 ]);
+/**
+ * A dryRun server has no ledger, so no post anchor: it honours a key only while the
+ * key's hold is live in this process (an in-process replay), and a retry after the
+ * key's settle — a lost reply, a restart — would charge again. It does not claim
+ * `idempotency-key`, so a client keeps its own at-most-once rule.
+ */
+const DRY_RUN_CAPABILITIES = Object.freeze(
+	SERVER_CAPABILITIES.filter((capability) => capability !== "idempotency-key"),
+);
 
 interface PendingEntry {
 	auth: Authorization;
@@ -455,7 +464,7 @@ export function createUsertrustServer(opts: {
 				ok: true,
 				name: SERVER_NAME,
 				version: SERVER_VERSION,
-				capabilities: SERVER_CAPABILITIES,
+				capabilities: config.dryRun ? DRY_RUN_CAPABILITIES : SERVER_CAPABILITIES,
 				// A count, never a tenant id or a key: this endpoint is unauthenticated.
 				settlementsUnrecoverable,
 			});

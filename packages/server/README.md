@@ -80,6 +80,10 @@ never share keys, and a restarted server still recognises the keys it charged.
 - A replay while the first hold is live answers with the same `transferId` — never a second hold.
 - A key whose charge already posted is `409 already_settled`, at authorize or at settle; the
   ledger allows at most one charge per key, across restarts.
+- **`dryRun` does not claim `idempotency-key`.** With no ledger there is no post anchor: a key is
+  honoured only while its hold is live in this process, and a retry after its settle would charge
+  again. A dryRun server still accepts keys (for the in-process replay), but leaves the capability
+  out, so a client keeps its own at-most-once rule.
 - `principal` labels every record the hold leaves (and the receipt). It never selects a wallet
   and never enters the policy gate.
 
