@@ -1,0 +1,9 @@
+{
+	"//": "For child processes run with tsx (TSX_TSCONFIG_PATH): resolve `usertrust` to its SOURCE, as vitest.config.ts's alias does for the tests themselves. CI's test job does not build core's dist/, so a child resolving the package's `exports` would fail to load.",
+	"compilerOptions": {
+		"baseUrl": ".",
+		"paths": {
+			"usertrust": ["../../../core/src/index.ts"]
+		}
+	}
+}

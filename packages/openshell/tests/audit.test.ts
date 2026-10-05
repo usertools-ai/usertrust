@@ -543,14 +543,16 @@ describe("1c-2: one process per vault, enforced at START", () => {
 		});
 		const second = join(tmp("openshell-rt-"), "holds.db");
 		const held = await starter(v, second);
-		expect(held).toMatchObject({ code: 3, out: { started: false } });
+		expect(held, held.err).toMatchObject({ code: 3, out: { started: false } });
 		expect(existsSync(second), "the second process never opened its journal").toBe(false);
 		rt.close();
-		expect(await starter(v, second)).toMatchObject({ code: 0, out: { started: true } });
+		const after = await starter(v, second);
+		expect(after, after.err).toMatchObject({ code: 0, out: { started: true } });
 	});
 });
 
 const STARTER = join(__dirname, "fixtures", "runtime-starter.ts");
+const CHILD_TSCONFIG = join(__dirname, "fixtures", "tsconfig.child.json");
 const REPO_ROOT = join(__dirname, "..", "..", "..");
 function starter(
 	vaultPath: string,
@@ -560,7 +562,11 @@ function starter(
 		const child = spawn(
 			process.execPath,
 			["--no-warnings", "--import", "tsx", STARTER, vaultPath, journalPath],
-			{ cwd: REPO_ROOT },
+			{
+				cwd: REPO_ROOT,
+				// `usertrust` → core's source, as vitest's alias: CI does not build dist/ for tests.
+				env: { ...process.env, TSX_TSCONFIG_PATH: CHILD_TSCONFIG },
+			},
 		);
 		let out = "";
 		let err = "";
