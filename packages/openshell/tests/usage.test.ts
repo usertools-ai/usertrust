@@ -418,3 +418,21 @@ describe("#166 MEDIUM: usage is FINAL, never the first report", () => {
 		expect(parse("anthropic.messages", "STREAM_BYTES", [enc(body)])).toBe("no-final-usage");
 	});
 });
+
+describe("#166 P2: the Anthropic final report must carry a NUMERIC output count", () => {
+	it("a message_delta with `usage: {}` (or a non-numeric output_tokens) is not final: settles at the hold", () => {
+		for (const usage of [{}, { output_tokens: "15" }, { output_tokens: null }]) {
+			const body = sse([
+				[
+					"message_start",
+					{ type: "message_start", message: { usage: { input_tokens: 25, output_tokens: 1 } } },
+				],
+				["message_delta", { type: "message_delta", usage }],
+				["message_stop", { type: "message_stop" }],
+			]);
+			expect(parse("anthropic.messages", "STREAM_BYTES", [enc(body)]), JSON.stringify(usage)).toBe(
+				"no-final-usage",
+			);
+		}
+	});
+});

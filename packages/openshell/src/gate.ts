@@ -628,7 +628,9 @@ export function evaluateRequest(
 		w.inlineBytes +
 		w.images * perImage +
 		(hasTools(body) ? config.toolOverheadTokens[match.provider] : 0);
-	const rates = getModelRates(model, config.customRates);
+	// A FROZEN COPY: getModelRates returns the operator's own object, and an in-place edit after
+	// authorize must not change what this hold settles at. ModelRates is flat numbers.
+	const rates: ModelRates = Object.freeze({ ...getModelRates(model, config.customRates) });
 	// Priced at the DEARER of the input and cache-write tiers: a prompt the provider
 	// writes to its cache bills above plain input.
 	const amount = Math.max(
