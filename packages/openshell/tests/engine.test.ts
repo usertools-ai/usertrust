@@ -860,7 +860,7 @@ describe("#185 r1 P1: `late_settled` only when a late disposition is POSITIVELY 
 		await engine.settle("k1", { post: 99, overage: 0 });
 		await engine.settle("k1", { post: 40, overage: 0 });
 		await engine.settle("k1", { post: 99, overage: 0 });
-		const unbilled = (journal.get("k1")?.incident as { unbilled: unknown[] }).unbilled;
+		const unbilled = (journal.get("k1")?.incident as { unbilled: unknown[] } | undefined)?.unbilled;
 		expect(unbilled).toHaveLength(2);
 		expect(unbilled).toMatchObject([
 			{ actual: 40, intent: { post: 40 } },
@@ -1295,10 +1295,9 @@ describe("#188.2: unbilled is a LIST — every different lost settlement kept", 
 			}),
 		);
 		await engine.settle("k1", { post: 70, overage: 0 });
-		expect((journal.get("k1")?.incident as { unbilled: unknown }).unbilled).toMatchObject([
-			{ actual: 10 },
-			{ actual: 70 },
-		]);
+		expect(
+			(journal.get("k1")?.incident as { unbilled: unknown } | undefined)?.unbilled,
+		).toMatchObject([{ actual: 10 }, { actual: 70 }]);
 	});
 });
 
