@@ -5,15 +5,20 @@
 //
 // The transcript is written asynchronously, so the turn's final response may not
 // be in it yet: with the input's `last_assistant_message`, Stop first waits —
-// boundedly — for it to arrive (`awaitFinalResponse`). A response that arrives
-// later still is posted by SessionEnd, or by the next Stop.
+// boundedly — for it to arrive (`awaitFinalResponse`), and says so when it gives
+// up. A response that arrives later still is left for SessionEnd, or the next Stop.
 import { readStdin, usageMode } from "./lib.mjs";
 import { awaitFinalResponse, settleSession } from "./transcript.mjs";
 
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
 	if (usageMode() === "transcript") {
-		await awaitFinalResponse(input.transcript_path, input.last_assistant_message);
+		const waited = await awaitFinalResponse(input.transcript_path, input.last_assistant_message);
+		if (waited === "not flushed") {
+			process.stderr.write(
+				"usertrust: the turn's final response was not in the transcript by the end of the wait — left for SessionEnd or the next Stop\n",
+			);
+		}
 	}
 	await settleSession({ input, hook: "Stop" });
 } catch (err) {

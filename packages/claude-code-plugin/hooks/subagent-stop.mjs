@@ -12,11 +12,12 @@
 // Leftover holds follow Stop's rule and order: settled first if usage was
 // assigned (an unresolved one is then retried by the remainder step), else given
 // back last. Like Stop, it first waits — boundedly — for the subagent's final
-// response (its input's `last_assistant_message`) to reach its transcript.
+// response (its input's `last_assistant_message`) to reach its transcript, and
+// says so when it gives up.
 import { cleanup, readStdin, usageMode } from "./lib.mjs";
 import {
 	awaitFinalResponse,
-	CLEANUP_RESERVE_MS,
+	cleanupReserve,
 	postRemainder,
 	settleAssignedHolds,
 	transcriptPathFor,
@@ -29,7 +30,15 @@ try {
 	if (typeof agentId === "string" && agentId !== "") {
 		await settleAssignedHolds(sessionId, agentId);
 		if (usageMode() === "transcript") {
-			await awaitFinalResponse(transcriptPathFor(input, agentId), input.last_assistant_message);
+			const waited = await awaitFinalResponse(
+				transcriptPathFor(input, agentId),
+				input.last_assistant_message,
+			);
+			if (waited === "not flushed") {
+				process.stderr.write(
+					`usertrust: ${agentId}'s final response was not in its transcript by the end of the wait — left for Stop\n`,
+				);
+			}
 			try {
 				const result = await postRemainder({
 					sessionId,
@@ -37,7 +46,7 @@ try {
 					agentTypeHint: input.agent_type,
 					input,
 					hook: "SubagentStop",
-					reserveMs: CLEANUP_RESERVE_MS,
+					reserveMs: cleanupReserve(),
 				});
 				if (result.skipped !== undefined) {
 					process.stderr.write(

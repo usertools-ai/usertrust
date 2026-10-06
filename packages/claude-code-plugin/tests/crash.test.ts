@@ -195,6 +195,10 @@ function hook(
 					UT_CC_STATE_DIR: world.stateDir,
 					UT_SERVER_URL: `http://127.0.0.1:${world.port}`,
 					UT_SERVER_KEY: "k",
+					// The most time Claude Code can give SessionEnd: this harness is about
+					// kills, not SessionEnd's budget (transcript.test.ts), and eight replays
+					// at once must not run it out of time.
+					CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "10000",
 					...(crash ? { UT_CC_CRASH: crash.spec, UT_CC_CRASH_LOG: crash.log } : {}),
 				},
 				stdio: ["pipe", "ignore", "ignore"],
