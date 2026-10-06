@@ -32,7 +32,7 @@ const SERVER_VERSION = (createRequire(import.meta.url)("../package.json") as { v
  * the call is recorded as nobody's: a client checks this list before sending one.
  * A later capability is APPENDED here; the name and shape never change.
  */
-const SERVER_CAPABILITIES = Object.freeze(["principal"]);
+const SERVER_CAPABILITIES = Object.freeze(["principal", "authorize-cache-tiers"]);
 /**
  * A dryRun server has no ledger, so it writes no `user_data` tags — but it records
  * the principal on every audit record exactly as a ledger-backed server does, so it

@@ -46,7 +46,13 @@ passes through to `receipt.meter.computeMs` and is not a pricing input.
 `{ "id": "…", "type": "…", "origin": "…", "unit": "…", "role": "…" }`, every field optional and each
 1–128 characters of `[A-Za-z0-9._:-]`. **Check `/v1/health` `capabilities` first:** an older server
 strips request keys it does not know, so it would accept a `principal` and silently record the call as
-nobody's. A server that honours it lists `"principal"`. Any other key, or an invalid field, is a `400`. Both are recorded on
+nobody's. A server that honours it lists `"principal"`.
+
+`/v1/authorize` also accepts `estimatedCacheReadTokens` and `estimatedCacheWriteTokens` (optional,
+non-negative integers). With them, each cache tier is held at its own rate and `estimatedInputTokens`
+should be the fresh input only. Without them, all estimated input is held at the higher of the input
+and cache-write rates. A server that honours them lists `"authorize-cache-tiers"` in `capabilities`.
+An older server strips them, so a client checks the list before relying on a smaller hold. Any other key, or an invalid field, is a `400`. Both are recorded on
 the call's audit records, and the principal's `id`/`unit`/`role` become TigerBeetle `user_data` tags
 on its ledger transfers for roll-ups. A principal never changes which wallet pays.
 
