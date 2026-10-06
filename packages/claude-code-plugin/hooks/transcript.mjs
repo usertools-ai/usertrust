@@ -41,7 +41,8 @@
 //    counts, at the next Stop/SubagentStop — instead of losing it. Settles never
 //    carry the key: a settle the server cannot match stays a plain 404.
 //  - `principal`: every transcript-mode authorize names the agent, its type and
-//    the session; the server records it on everything the hold leaves.
+//    the session; the server records it on every audit record the call leaves
+//    (and, ledger-backed, as tags on its transfers).
 //  - `release`: a hold with no usage is released (no failure, no charge) rather
 //    than settled at the 1-unit floor or aborted.
 //
@@ -60,16 +61,21 @@
 //     an ambiguous outcome — a 5xx, no answer, a crash mid-settle — is retried
 //     as the same vehicle: exactly once. Without one it stays claimed: usage can
 //     be lost to an outage, never posted twice.
-//  3. The estimate is used only in estimate mode (UT_CC_USAGE=estimate, or an
-//     agent whose transcript could not be read: sticky, recorded in its cursor),
-//     and never together with real usage for the same agent.
+//  3. An estimate is SETTLED only where it is the agent's only record: in
+//     estimate mode (UT_CC_USAGE=estimate, or an agent whose transcript could not
+//     be read: sticky, recorded in its cursor), or for an agent whose transcript
+//     is never read (an id unsafe in a path, no transcript path) — never together
+//     with real usage for the same agent. While the transcript state cannot be
+//     used (the state dir, a corrupt cursor), a hold is given back instead: the
+//     transcript still holds that usage, for the first settle point that can.
 //
 // STATE, per (session, agent), in <state>/transcripts (private: 0700, ours):
 //   { v: 2, byteOffset, partial, accounted, denied, assigned, estimateMode,
 //     lastModel, unresolved }
-//  - byteOffset: the transcript is read incrementally, only up to the last
-//    newline; a file shorter than the offset is re-read from 0 (the id sets
-//    still prevent re-posting).
+//  - byteOffset: the transcript is read incrementally, a bounded chunk at a
+//    time, and only past complete lines — at most about 64 MiB per hook, the
+//    next one reading on; a file shorter than the offset is re-read from 0 (the
+//    id sets still prevent re-posting).
 //  - partial: every id seen but not yet accounted or denied, with its counts,
 //    and whether this agent holds its claim.
 //  - accounted / denied: the most recent 10 000 ids each.
@@ -120,6 +126,15 @@ import {
 
 /** Never priced when its usage is all zero: Claude Code's local placeholder. */
 const SYNTHETIC_MODEL = "<synthetic>";
+/** A message no entry names a model for. */
+const UNKNOWN_MODEL = "unknown";
+/**
+ * A model id as the transcript wrote it: 1 to 256 characters, none of them a
+ * control, format or separator character. Pricing looks the id up VERBATIM (the
+ * server's table and an operator's `customRates`), so an id is never rewritten:
+ * one outside this rule is sent as `unknown`, never as a different id.
+ */
+const MODEL_ID = /^[^\p{C}\p{Z}]{1,256}$/u;
 
 /**
  * Holds sized from transcript usage count cache writes twice: they are priced
@@ -139,6 +154,17 @@ const AUTHORIZING_TTL_MS = 5 * 60_000;
 const STALE_SETTLING_MS = 10 * 60_000;
 const ID_HISTORY = 10_000;
 const MAX_ID_CHARS = 256;
+/** A transcript is read a chunk of this size at a time: a hook's memory stays bounded. */
+const READ_CHUNK_BYTES = 1 << 20;
+/** One hook reads on until this much is behind it; the next settle point reads on from there. */
+const MAX_READ_BYTES = 64 << 20;
+/**
+ * A line longer than this is skipped unread. No entry with usage comes near it:
+ * each holds one content block of one response, bounded by its output tokens.
+ */
+const MAX_LINE_BYTES = 16 << 20;
+/** Only a line with this in it can carry usage. */
+const USAGE_FIELD = Buffer.from('"usage"');
 const CALL_TIMEOUT_MS = 3_000;
 const MIN_CALL_MS = 250;
 /** Stop/SubagentStop keep this much of the budget for giving back holds without usage. */
@@ -157,11 +183,19 @@ const VEHICLE_KEY = /^cc:[0-9a-f]{48}$/;
 /** Where the cross-agent message claims live, inside the private state dir (see `selectOwn`). */
 const CLAIMS_DIR = "claims";
 
-/** Untrusted strings (model, agent type/id) → [A-Za-z0-9._-], at most 128 chars. */
+/**
+ * Untrusted strings in a path or an actor string (agent type/id) →
+ * [A-Za-z0-9._-], at most 128 chars. Never a model id: see `modelId`.
+ */
 export function safeName(value, fallback) {
 	const text =
 		typeof value === "string" ? value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 128) : "";
 	return text === "" ? fallback : text;
+}
+
+/** The transcript's model id, exactly as written, or null (see MODEL_ID). */
+function modelId(value) {
+	return typeof value === "string" && MODEL_ID.test(value) ? value : null;
 }
 
 function count(value) {
@@ -343,7 +377,7 @@ function parseCursor(raw) {
 		if (!isObject(m) || !Number.isSafeInteger(m.n)) return null;
 		cursor.partial.set(id, {
 			n: m.n,
-			model: safeName(m.model, "unknown"),
+			model: modelId(m.model) ?? UNKNOWN_MODEL,
 			synthetic: m.synthetic === true,
 			complete: m.complete === true,
 			claimed: m.claimed === true,
@@ -365,7 +399,7 @@ function parseCursor(raw) {
 	cursor.denied = new Set(raw.denied);
 	cursor.estimateMode = raw.estimateMode;
 	cursor.estimateReason = typeof raw.estimateReason === "string" ? raw.estimateReason : null;
-	cursor.lastModel = typeof raw.lastModel === "string" ? safeName(raw.lastModel, "unknown") : null;
+	cursor.lastModel = modelId(raw.lastModel);
 	if (raw.v >= 2) {
 		if (!isObject(raw.unresolved)) return null;
 		for (const [key, v] of Object.entries(raw.unresolved)) {
@@ -392,7 +426,7 @@ function parseVehicle(key, v) {
 	}
 	const vehicle = {
 		ids: v.ids,
-		model: safeName(v.model, "unknown"),
+		model: modelId(v.model) ?? UNKNOWN_MODEL,
 		agentType: typeof v.agentType === "string" ? v.agentType : "subagent",
 	};
 	for (const k of COUNT_KEYS) vehicle[k] = count(v[k]);
@@ -698,9 +732,13 @@ async function removeFiles(paths) {
 }
 
 /**
- * Read the transcript from the cursor's byte offset to its last complete line,
- * folding each message id's entries into `cursor.partial` (per-field max; the
- * model of the first entry seen). Only an I/O failure is "unreadable".
+ * Read the transcript on from the cursor's byte offset, a chunk at a time, and
+ * fold each complete line into `cursor.partial` (`foldLine`). The offset only
+ * ever moves past a complete line, so a line still being written is read whole
+ * next time; a file shorter than the offset is read again from 0. Memory holds
+ * one chunk and one line: a line over MAX_LINE_BYTES is skipped unread
+ * (`longLines`). A call stops at the first line end MAX_READ_BYTES past where it
+ * started — the next settle point reads on. Only an I/O failure is "unreadable".
  */
 async function ingest(cursor, path) {
 	let handle;
@@ -709,69 +747,103 @@ async function ingest(cursor, path) {
 	} catch (err) {
 		return { ok: false, reason: `transcript unreadable (${err?.code ?? "error"})` };
 	}
-	let text = "";
+	const result = { ok: true, badLines: 0, longLines: 0 };
 	try {
 		const { size } = await handle.stat();
-		let offset = cursor.byteOffset;
-		if (size < offset) offset = 0; // truncated or replaced: start over
-		const length = size - offset;
-		const buffer = Buffer.alloc(length);
-		let filled = 0;
-		while (filled < length) {
-			const { bytesRead } = await handle.read(buffer, filled, length - filled, offset + filled);
+		if (size < cursor.byteOffset) cursor.byteOffset = 0; // truncated or replaced: start over
+		const start = cursor.byteOffset;
+		const chunk = Buffer.alloc(Math.min(READ_CHUNK_BYTES, size - start));
+		let position = start;
+		let line = []; // the line so far, as copies: `chunk` is reused
+		let lineBytes = 0;
+		let skipping = false; // the line is over MAX_LINE_BYTES
+		while (position < size && cursor.byteOffset - start < MAX_READ_BYTES) {
+			const want = Math.min(chunk.length, size - position);
+			const { bytesRead } = await handle.read(chunk, 0, want, position);
 			if (bytesRead === 0) break;
-			filled += bytesRead;
+			const view = chunk.subarray(0, bytesRead);
+			let from = 0;
+			for (let end = view.indexOf(0x0a); end !== -1; end = view.indexOf(0x0a, from)) {
+				const tail = view.subarray(from, end);
+				if (skipping) result.longLines += 1;
+				else if (!foldLine(cursor, line.length === 0 ? tail : Buffer.concat([...line, tail]))) {
+					result.badLines += 1;
+				}
+				line = [];
+				lineBytes = 0;
+				skipping = false;
+				from = end + 1;
+				cursor.byteOffset = position + from;
+				if (cursor.byteOffset - start >= MAX_READ_BYTES) break;
+			}
+			position += bytesRead;
+			lineBytes += bytesRead - from;
+			if (lineBytes > MAX_LINE_BYTES) {
+				skipping = true;
+				line = [];
+			} else if (from < bytesRead) {
+				line.push(Buffer.from(view.subarray(from)));
+			}
 		}
-		const end = filled === 0 ? -1 : buffer.lastIndexOf(0x0a, filled - 1);
-		cursor.byteOffset = offset + end + 1;
-		if (end >= 0) text = buffer.toString("utf-8", 0, end + 1);
 	} catch (err) {
 		return { ok: false, reason: `transcript unreadable (${err?.code ?? "error"})` };
 	} finally {
 		await handle.close().catch(() => {});
 	}
-	let badLines = 0;
-	for (const line of text.split("\n")) {
-		if (!line.includes('"usage"')) continue;
-		let entry;
-		try {
-			entry = JSON.parse(line);
-		} catch {
-			badLines += 1;
-			continue;
-		}
-		const message = entry?.message;
-		const usage = message?.usage;
-		const id = message?.id;
-		if (typeof id !== "string" || id === "" || id.length > MAX_ID_CHARS) continue;
-		if (!isObject(usage)) continue;
-		if (cursor.accounted.has(id) || cursor.denied.has(id)) continue;
-		const rawModel = typeof message.model === "string" ? message.model : "";
-		let m = cursor.partial.get(id);
-		if (m === undefined) {
-			m = {
-				n: cursor.nextSeq,
-				model: safeName(rawModel, "unknown"),
-				synthetic: rawModel === SYNTHETIC_MODEL,
-				complete: false,
-				claimed: false,
-				claiming: false,
-				inputTokens: 0,
-				outputTokens: 0,
-				cacheReadTokens: 0,
-				cacheWriteTokens: 0,
-			};
-			cursor.nextSeq += 1;
-			cursor.partial.set(id, m);
-		}
-		m.inputTokens = Math.max(m.inputTokens, count(usage.input_tokens));
-		m.outputTokens = Math.max(m.outputTokens, count(usage.output_tokens));
-		m.cacheReadTokens = Math.max(m.cacheReadTokens, count(usage.cache_read_input_tokens));
-		m.cacheWriteTokens = Math.max(m.cacheWriteTokens, count(usage.cache_creation_input_tokens));
-		if (message.stop_reason != null) m.complete = true;
-		if (rawModel !== "" && rawModel !== SYNTHETIC_MODEL) cursor.lastModel = safeName(rawModel);
+	return result;
+}
+
+/**
+ * Fold one transcript line into `cursor.partial`: per message id, the per-field
+ * max of its entries' counts, and the first model an entry names (over a
+ * placeholder). False when the line is not JSON.
+ */
+function foldLine(cursor, bytes) {
+	if (!bytes.includes(USAGE_FIELD)) return true;
+	let entry;
+	try {
+		entry = JSON.parse(bytes.toString("utf-8"));
+	} catch {
+		return false;
 	}
-	return { ok: true, badLines };
+	const message = entry?.message;
+	const usage = message?.usage;
+	const id = message?.id;
+	if (typeof id !== "string" || id === "" || id.length > MAX_ID_CHARS) return true;
+	if (!isObject(usage)) return true;
+	if (cursor.accounted.has(id) || cursor.denied.has(id)) return true;
+	const model = modelId(message.model);
+	// A model that generated tokens, not the placeholder.
+	const named = model !== null && model !== SYNTHETIC_MODEL;
+	let m = cursor.partial.get(id);
+	if (m === undefined) {
+		m = {
+			n: cursor.nextSeq,
+			model: model ?? UNKNOWN_MODEL,
+			synthetic: model === SYNTHETIC_MODEL,
+			complete: false,
+			claimed: false,
+			claiming: false,
+			inputTokens: 0,
+			outputTokens: 0,
+			cacheReadTokens: 0,
+			cacheWriteTokens: 0,
+		};
+		cursor.nextSeq += 1;
+		cursor.partial.set(id, m);
+	} else if (named && (m.synthetic || m.model === UNKNOWN_MODEL)) {
+		// First seen as a placeholder (`<synthetic>`, or no model): its usage is
+		// the named model's, and is priced as that model's.
+		m.model = model;
+		m.synthetic = false;
+	}
+	m.inputTokens = Math.max(m.inputTokens, count(usage.input_tokens));
+	m.outputTokens = Math.max(m.outputTokens, count(usage.output_tokens));
+	m.cacheReadTokens = Math.max(m.cacheReadTokens, count(usage.cache_read_input_tokens));
+	m.cacheWriteTokens = Math.max(m.cacheWriteTokens, count(usage.cache_creation_input_tokens));
+	if (message.stop_reason != null) m.complete = true;
+	if (named) cursor.lastModel = model;
+	return true;
 }
 
 /**
@@ -916,7 +988,12 @@ async function claimHolder(claimsDir, id, owner) {
 	}
 }
 
-/** Where an agent's transcript and cursor live, or why it has none this run. */
+/**
+ * Where an agent's transcript and cursor live, or why it has none this run. The
+ * first three reasons hold for every hook of the agent — no transcript of it is
+ * ever read (Claude Code sends `transcript_path` on every hook, or on none) — so
+ * its estimate is its only record; one marked `unavailable` may clear later.
+ */
 async function locate({ sessionId, agentId, input }) {
 	if (usageMode() === "estimate") return { ok: false, reason: "UT_CC_USAGE=estimate" };
 	if (!isAgentId(agentId)) return { ok: false, reason: "agent id is not safe in a path" };
@@ -930,7 +1007,7 @@ async function locate({ sessionId, agentId, input }) {
 async function cursorLocation(sessionId, agentId) {
 	if (!isAgentId(agentId)) return { ok: false, reason: "agent id is not safe in a path" };
 	const dir = await privateStateDir();
-	if (!dir.ok) return { ok: false, reason: dir.reason };
+	if (!dir.ok) return { ok: false, reason: dir.reason, unavailable: true };
 	return {
 		ok: true,
 		cursorPath: join(dir.dir, `${sanitize(sessionId)}__${agentId}.json`),
@@ -952,18 +1029,26 @@ export async function estimateReasonFor({ sessionId, agentId, input }) {
 
 /**
  * Open an agent's transcript state: lock, cursor, journal reconcile, then an
- * incremental read. Returns `{ kind: "estimate", reason }` (no transcript
- * accounting for this agent now — sticky when its transcript was unreadable),
- * `{ kind: "busy", lastModel }`, or `{ kind: "ready", ... }` holding the lock.
+ * incremental read. Returns one of:
+ *  - `{ kind: "estimate", reason }`: the agent's usage is settled at the
+ *    estimate, because nothing of its transcript is ever posted — see `locate`,
+ *    or a cursor that records estimate mode (sticky: its transcript could not be
+ *    read);
+ *  - `{ kind: "unavailable", reason }`: its transcript state cannot be used
+ *    NOW (the state dir, a corrupt cursor, an error). Nothing is posted, and
+ *    nothing may be settled at the estimate either: the transcript still holds
+ *    that usage, and the first settle point that can use the state posts it;
+ *  - `{ kind: "busy", lastModel }`, or `{ kind: "ready", ... }` holding the lock.
  */
 async function openAgent({ sessionId, agentId, input, waitMs = 0 }) {
 	const where = await locate({ sessionId, agentId, input });
-	if (!where.ok) return { kind: "estimate", reason: where.reason };
+	if (!where.ok)
+		return { kind: where.unavailable ? "unavailable" : "estimate", reason: where.reason };
 	const { cursorPath, transcriptPath } = where;
 	const release = await acquireLock(cursorPath, { waitMs });
 	if (release === null) {
 		const peek = await readCursor(cursorPath);
-		if (!peek.ok) return { kind: "estimate", reason: peek.reason };
+		if (!peek.ok) return { kind: "unavailable", reason: peek.reason };
 		if (peek.cursor.estimateMode) {
 			return { kind: "estimate", reason: peek.cursor.estimateReason ?? "transcript unreadable" };
 		}
@@ -972,9 +1057,9 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0 }) {
 	try {
 		const read = await readCursor(cursorPath);
 		if (!read.ok) {
-			// DEGRADED: post nothing, leave the cursor exactly as it is.
+			// Post nothing, and leave the cursor exactly as it is.
 			await release();
-			return { kind: "estimate", reason: read.reason, degraded: true };
+			return { kind: "unavailable", reason: read.reason };
 		}
 		const { cursor } = read;
 		if (cursor.estimateMode) {
@@ -996,6 +1081,11 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0 }) {
 				`usertrust: skipped ${ingested.badLines} unparseable transcript line(s)\n`,
 			);
 		}
+		if (ingested.longLines > 0) {
+			process.stderr.write(
+				`usertrust: skipped ${ingested.longLines} transcript line(s) over ${MAX_LINE_BYTES >> 20} MiB, unread\n`,
+			);
+		}
 		return {
 			kind: "ready",
 			cursor,
@@ -1011,7 +1101,7 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0 }) {
 		};
 	} catch (err) {
 		await release();
-		return { kind: "estimate", reason: `transcript state unavailable (${errText(err)})` };
+		return { kind: "unavailable", reason: `transcript state unavailable (${errText(err)})` };
 	}
 }
 
@@ -1036,7 +1126,8 @@ async function reconcileAgent(sessionId, agentId) {
 
 /**
  * Pick this tool call's window and mark it "authorizing" BEFORE the authorize.
- * Returns `{ mode: "estimate", reason, becameSticky }` or `{ mode: "transcript",
+ * Returns `{ mode: "estimate" | "unavailable", reason, becameSticky }` (see
+ * `openAgent`) or `{ mode: "transcript",
  * window: null | { model, ids, counts }, key, agentType, agentTypeRaw, principal,
  * lastModel, commit, settledElsewhere, abandon, release }`. With the lock busy,
  * the window is empty. `key` is the window's vehicle key (null without a window);
@@ -1045,8 +1136,8 @@ async function reconcileAgent(sessionId, agentId) {
  */
 export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }) {
 	const opened = await openAgent({ sessionId, agentId, input });
-	if (opened.kind === "estimate") {
-		return { mode: "estimate", reason: opened.reason, becameSticky: opened.becameSticky === true };
+	if (opened.kind === "estimate" || opened.kind === "unavailable") {
+		return { mode: opened.kind, reason: opened.reason, becameSticky: opened.becameSticky === true };
 	}
 	const none = async () => {};
 	const empty = (lastModel, agentType) => ({
@@ -1337,7 +1428,9 @@ export async function settleAssignedHolds(sessionId, agentId) {
  */
 export async function postRemainder({ sessionId, agentId, agentTypeHint, input, hook, reserveMs }) {
 	const opened = await openAgent({ sessionId, agentId, input });
-	if (opened.kind === "estimate") return { skipped: opened.reason };
+	if (opened.kind === "estimate" || opened.kind === "unavailable") {
+		return { skipped: opened.reason };
+	}
 	if (opened.kind === "busy") return { skipped: "a concurrent hook holds this agent's lock" };
 	const { cursor } = opened;
 	const summary = { posted: 0, notes: [], serverDown: false };

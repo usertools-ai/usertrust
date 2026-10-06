@@ -19,6 +19,7 @@ import {
 	chmod,
 	mkdir,
 	mkdtemp,
+	open,
 	readdir,
 	readFile,
 	rm,
@@ -236,6 +237,27 @@ async function writeMain(lines: string[]) {
 
 async function appendMain(lines: string[]) {
 	await appendFile(mainTranscript, `${lines.join("\n")}\n`);
+}
+
+/**
+ * The main transcript with `count` lines of `bytes` NULs each before `lines` — a
+ * SPARSE file: the NULs are holes, so a long transcript costs no real I/O.
+ */
+async function writeSparseMain(count: number, bytes: number, lines: string[]) {
+	const handle = await open(mainTranscript, "w");
+	try {
+		const head = `${userLine}\n`;
+		await handle.write(head, 0);
+		let position = head.length;
+		for (let i = 0; i < count; i += 1) {
+			position += bytes - 1;
+			await handle.write("\n", position);
+			position += 1;
+		}
+		await handle.write(`${lines.join("\n")}\n`, position);
+	} finally {
+		await handle.close();
+	}
 }
 
 async function writeSubagent(agentId: string, agentType: string | null, lines: string[]) {
@@ -627,13 +649,70 @@ describe("estimate mode and the cursor", () => {
 		expect(stop.code).toBe(0);
 		expect(stop.stderr).toContain("corrupt");
 		expect(requests).toEqual([]);
-		// PreToolUse still governs the tool — at the estimate, with no window.
-		await run("pre-tool-use.mjs", preInput("tu_1"));
+		// PreToolUse still governs the tool, with no window; its hold is given back
+		// (an older server: settled at zero), never settled at the estimate.
+		const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
+		expect(pre.stderr).toContain("corrupt");
 		expect(authorizes()[0]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
 		await run("post-tool-use.mjs", postInput("tu_1"));
-		expect(settles()[0]?.body.usageSource).toBe("estimated");
+		expect(settles().map((s) => [s.body.usageSource, s.body.inputTokens])).toEqual([
+			["provider", 0],
+		]);
 		expect(await readFile(cursorPath(), "utf-8")).toBe(corrupt);
 	});
+
+	it.each([
+		[
+			"a state dir writable by others",
+			async () => {
+				await mkdir(join(stateDir, "transcripts"));
+				await chmod(join(stateDir, "transcripts"), 0o777);
+			},
+			() => chmod(join(stateDir, "transcripts"), 0o700),
+		],
+		[
+			"a corrupt cursor",
+			async () => {
+				await mkdir(join(stateDir, "transcripts"), { mode: 0o700 });
+				await writeFile(cursorPath(), "{");
+			},
+			() => rm(cursorPath()),
+		],
+		[
+			"a corrupt cursor, seen while another hook holds its lock",
+			async () => {
+				await mkdir(join(stateDir, "transcripts"), { mode: 0o700 });
+				await writeFile(cursorPath(), "{");
+				await mkdir(`${cursorPath()}.lock`);
+				await writeFile(join(`${cursorPath()}.lock`, "owner"), "another-hook");
+			},
+			async () => {
+				await rm(`${cursorPath()}.lock`, { recursive: true });
+				await rm(cursorPath());
+			},
+		],
+	])(
+		"%s, repaired later in the session: the usage is posted ONCE — the tool's hold was given back, not settled at the estimate",
+		async (_cause, breakState, repair) => {
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
+			await breakState();
+			const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(pre.code).toBe(0);
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await repair();
+			await run("stop.mjs", stopInput());
+			// The hold back at zero (an older server), then msg_a at its real counts.
+			// Settled at the estimate as well, msg_a's usage would be charged twice.
+			expect(
+				settles().map((s) => [s.body.usageSource, s.body.inputTokens, s.body.outputTokens]),
+			).toEqual([
+				["provider", 0, 0],
+				["provider", 5, 5],
+			]);
+			expect(pre.stderr).toContain("given back");
+		},
+	);
 
 	it("a cursor of an unknown version is corrupt too, not empty", async () => {
 		await startServer(okResponder);
@@ -760,7 +839,7 @@ describe("hardening", () => {
 		).toEqual([1, 2]);
 	}, 60_000);
 
-	it("a state dir writable by others is not trusted: estimate behaviour", async () => {
+	it("a state dir writable by others is not trusted: nothing is posted, nothing settled at the estimate", async () => {
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
 		const dir = join(stateDir, "transcripts");
@@ -768,12 +847,14 @@ describe("hardening", () => {
 		await chmod(dir, 0o777);
 		const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
 		expect(pre.code).toBe(0);
+		expect(pre.stderr).toContain("writable by group or others");
 		expect(authorizes()[0]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
-		const post = await run("post-tool-use.mjs", postInput("tu_1"));
-		expect(post.stderr).toContain("writable by group or others");
+		await run("post-tool-use.mjs", postInput("tu_1"));
 		const stop = await run("stop.mjs", stopInput());
 		expect(stop.stderr).toContain("writable by group or others");
-		expect(settles().map((s) => s.body.usageSource)).toEqual(["estimated"]);
+		expect(settles().map((s) => [s.body.usageSource, s.body.inputTokens])).toEqual([
+			["provider", 0],
+		]);
 		expect(await readdir(dir)).toEqual([]);
 	});
 
@@ -841,7 +922,78 @@ describe("hardening", () => {
 			...responseEntries("msg_x", SONNET, u(6, 6), {}, { partials: 0 }),
 		]);
 		await run("stop.mjs", stopInput());
+		expect(authorizes()[0]?.body.model).toBe(SONNET);
 		expect(settles()[0]?.body).toMatchObject({ inputTokens: 6, outputTokens: 6 });
+	});
+
+	it("a message first seen as <synthetic>, or with no model, is priced under the REAL model a later entry names — window and remainder, across hooks", async () => {
+		await startServer(okResponder);
+		const placeholder = (id: string, model?: string) =>
+			JSON.stringify({
+				type: "assistant",
+				message: { id, model, stop_reason: null, usage: { input_tokens: 0 } },
+			});
+		// One hook sees only the placeholders: nothing is complete, nothing is posted.
+		await writeMain([placeholder("msg_x", "<synthetic>"), placeholder("msg_y")]);
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		expect((await readCursor()).partial).toMatchObject({
+			msg_x: { model: "<synthetic>", synthetic: true },
+			msg_y: { model: "unknown", synthetic: false },
+		});
+		// A later hook reads the real entries: the window is SONNET's, the remainder HAIKU's.
+		await appendMain([
+			...responseEntries("msg_x", SONNET, u(6, 6), {}, { partials: 0 }),
+			...responseEntries("msg_y", HAIKU, u(7, 7), {}, { partials: 0 }),
+		]);
+		await run("pre-tool-use.mjs", preInput("tu_2"));
+		await run("post-tool-use.mjs", postInput("tu_2"));
+		await run("stop.mjs", stopInput());
+		// The authorizes that carried messages: model, and how many.
+		const carried = authorizes()
+			.map((a) => [a.body.model, (a.body.params as { messages?: number }).messages])
+			.filter(([, messages]) => messages !== undefined);
+		expect(carried).toEqual([
+			[SONNET, 1],
+			[HAIKU, 1],
+		]);
+		expect(
+			settles()
+				.filter((s) => s.body.inputTokens !== 0)
+				.map((s) => s.body.inputTokens),
+		).toEqual([6, 7]);
+	});
+
+	it("the model id is sent EXACTLY as the transcript wrote it: pricing looks it up verbatim", async () => {
+		await startServer(okResponder);
+		const LOCAL = "llama3.3:70b";
+		const VERTEX = "claude-sonnet-4@20250514";
+		const ROUTED = "meta-llama/Llama-3.3-70B-Instruct";
+		await writeMain([
+			...responseEntries("msg_a", LOCAL, u(3, 3)),
+			...responseEntries("msg_b", VERTEX, u(4, 4)),
+			...responseEntries("msg_c", ROUTED, u(5, 5)),
+		]);
+		// The window (msg_a), then the remainder per model (msg_b, msg_c) — each
+		// read back from the cursor the earlier hook saved.
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		await run("stop.mjs", stopInput());
+		// A tool-only hold is authorized at the agent's last model.
+		await run("pre-tool-use.mjs", preInput("tu_2"));
+		expect(authorizes().map((a) => a.body.model)).toEqual([LOCAL, VERTEX, ROUTED, ROUTED]);
+		expect((await readCursor()).lastModel).toBe(ROUTED);
+	});
+
+	it("a model id that is not printable text is sent as `unknown` — never rewritten into another id", async () => {
+		await startServer(okResponder);
+		await writeMain([
+			...responseEntries("msg_a", "claude-sonnet-4-6\u001b[2K", u(3, 3)),
+			...responseEntries("msg_b", `m${"x".repeat(256)}`, u(4, 4)),
+		]);
+		await run("stop.mjs", stopInput());
+		expect(authorizes().map((a) => a.body.model)).toEqual(["unknown"]);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([7]);
 	});
 
 	it("never prices Claude Code's synthetic placeholder messages", async () => {
@@ -875,6 +1027,26 @@ describe("hardening", () => {
 		expect((await readFile(mainTranscript)).length).toBeLessThan(size);
 		await run("stop.mjs", stopInput());
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([1, 2, 3]);
+	});
+
+	it("a long unread tail is read in bounded steps: each hook reads on from where the last stopped", async () => {
+		await startServer(okResponder);
+		await writeSparseMain(70, 1 << 20, responseEntries("msg_a", SONNET, u(5, 5)));
+		await run("stop.mjs", stopInput());
+		// The first hook stopped at the first line end 64 MiB in: msg_a is unread.
+		expect(settles()).toEqual([]);
+		expect((await readCursor()).byteOffset).toBe(userLine.length + 1 + 64 * (1 << 20));
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([5]);
+		expect((await readCursor()).byteOffset).toBe((await stat(mainTranscript)).size);
+	});
+
+	it("a line over 16 MiB is skipped unread, with a note; the lines after it are read", async () => {
+		await startServer(okResponder);
+		await writeSparseMain(1, 17 << 20, responseEntries("msg_a", SONNET, u(5, 5)));
+		const stop = await run("stop.mjs", stopInput());
+		expect(stop.stderr).toContain("skipped 1 transcript line(s) over 16 MiB, unread");
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([5]);
 	});
 
 	it("leaves a message that is still streaming for the next settle point", async () => {
@@ -1199,7 +1371,9 @@ describe("with a server that honours keys, principal and release (usertrust #205
 		const server = keyedServer();
 		server.faults.set("tx_1", "500-before-post");
 		await startServer(server.responder);
-		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		// A model id a path-safe rewrite would change: the retried vehicle keeps it exactly.
+		const LOCAL = "llama3.3:70b";
+		await writeMain(responseEntries("msg_a", LOCAL, u(5, 6)));
 		await run("pre-tool-use.mjs", preInput("tu_1"));
 		await run("post-tool-use.mjs", postInput("tu_1"));
 		expect(server.charges).toHaveLength(0);
@@ -1209,6 +1383,7 @@ describe("with a server that honours keys, principal and release (usertrust #205
 			["tx_1", 500],
 			["tx_2", 200],
 		]);
+		expect(authorizes().map((a) => a.body.model)).toEqual([LOCAL, LOCAL]);
 		expect(server.charges).toEqual([
 			{ key: keyOf("main", ["msg_a"]), transferId: "tx_2", inputTokens: 5 },
 		]);

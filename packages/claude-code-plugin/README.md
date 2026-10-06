@@ -80,6 +80,12 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   each tier is priced at its own rate. The counts are the provider's own, so
   settles are `usageSource: "provider"`; the authorize carries
   `params.usageOrigin: "transcript"`.
+- **The model, exactly as written.** The authorize names the response's model id
+  verbatim (`llama3.3:70b`, `claude-sonnet-4@20250514`), because the server prices
+  it by exact lookup — your `customRates` included. A response first written as
+  Claude Code's `<synthetic>` placeholder is priced as the model a later entry of
+  it names. An id that is not printable text (control or format characters,
+  spaces, over 256 characters) is sent as `unknown`, never rewritten into another.
 - **Forked subagents.** A forked subagent's transcript begins with a copy of its
   ancestor's entries — the same response ids — so the plugin posts each response
   id from ONE agent only: the first agent to claim it (a file per id under
@@ -90,8 +96,9 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   `claude-code:<session>:<agentType>:<agentId>` (`main:main` for the parent), with
   `agent_id` / `agent_type` in its params. On a server that records a `principal`,
   every transcript-mode authorize also carries `{ id: <agentId>, type:
-  <agentType>, origin: "claude-code:<session>" }`, which the server writes onto
-  every record the hold leaves and onto its receipt. An older server keeps the
+  <agentType>, origin: "claude-code:<session>" }`, which the server records on
+  every audit record the call leaves (and, ledger-backed, as tags on its
+  transfers); it is not echoed in the settle response. An older server keeps the
   attribution request-side only.
 - **Exactly once, on a server that honours idempotency keys.** Every authorize
   that carries responses goes in under the VEHICLE KEY of exactly those responses
@@ -114,7 +121,8 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   key, a settle that answers 5xx or not at all may have posted, so its ids stay
   claimed and the hold is given back for hygiene: an outage can lose usage, but
   never post it twice. A cursor that exists but cannot be read is never treated as
-  empty — transcript usage is not posted until it is fixed or removed. Removing it
+  empty — transcript usage is not posted until it is fixed or removed, and tool
+  holds are given back meanwhile, not settled at the estimate. Removing it
   never posts anything twice: the agent's claims still say which responses it took
   on, and those are not posted again — any of them it had not yet posted
   (including unresolved settles) is written off, with a note.
@@ -123,8 +131,8 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   request fields it does not know, so it would accept a key and silently ignore
   it. When the read fails, nothing is assumed either way: no key or principal is
   sent, and a hold is still released — falling back to abort only on a server
-  that has no release route — with a note on stderr. **No released
-  usertrust-server publishes these capabilities yet:** until one does, the plugin
+  that has no release route — with a note on stderr. **Today's usertrust-server
+  publishes `principal` only:** until one publishes `idempotency-key`, the plugin
   runs the at-most-once path above — it never posts usage twice, and a settle lost
   to an outage can go unrecorded.
 - **Denied usage.** If the remainder's authorize is refused (402 budget, 403
@@ -134,11 +142,16 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   that agent switches to the per-call estimate for the rest of the session —
   settled as `usageSource: "estimated"`, with a stderr note giving the reason — and
   its transcript is never read again, so no usage is ever counted both as an
-  estimate and as real. `UT_CC_USAGE=estimate` does the same for every agent.
+  estimate and as real. `UT_CC_USAGE=estimate` does the same for every agent. A
+  hold is settled at the estimate ONLY then (and for a host that sends no
+  `transcript_path`): when the plugin's own state is unusable for now, the hold is
+  given back instead, because the transcript still holds that usage.
 - **Private, durable state.** Cursors and claims live in
   `$UT_CC_STATE_DIR/transcripts/`, created `0700`; if that directory is not a real
   directory owned by you without group or other write access, transcript
-  accounting is off for that run and holds settle at the estimate. The default is
+  accounting waits: nothing is posted, and holds are given back rather than
+  settled at the estimate — the first settle point that can use the directory
+  posts that usage, once. The default is
   `~/.claude/usertrust-cc` (`$CLAUDE_CONFIG_DIR/usertrust-cc` when that is set),
   beside Claude Code's own transcripts — not a temp dir, which the OS may purge:
   **deleting the state dir while transcripts remain re-posts their usage.** A
@@ -147,13 +160,18 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   timeout is 15): its calls never run past that, claiming new responses stops
   early enough to leave them time, and Stop keeps time back to give back holds;
   whatever a hook could not reach is posted at the next settle point.
+- **Bounded reads.** A transcript is read 1 MiB at a time, and one hook reads at
+  most about 64 MiB of it — a long unread tail is read on by the next hooks. A
+  line over 16 MiB is skipped unread, with a note (an entry with usage never comes
+  near that size).
 - **Content.** Transcripts are read locally and only token counts, model names and
   agent ids/types are sent to your server — never transcript content.
 
 **Declared costs.** On a server without `/v1/release`, every hold is settled, so a
 tool call with an empty window costs that server's 1-unit settle floor: a
-deliberate over-count of at most one unit per extra parallel tool call, never an
-under-count. Responses of a second model cost one extra authorize→settle at the
+deliberate over-count of at most one unit per extra parallel tool call (and per
+tool call while the plugin's state is unusable), never an under-count.
+Responses of a second model cost one extra authorize→settle at the
 next Stop. On an older server, attribution is request-side only and an outage can
 lose usage, as above.
 
