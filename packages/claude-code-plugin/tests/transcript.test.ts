@@ -767,6 +767,32 @@ describe("estimate mode and the cursor", () => {
 		expect(pre.stderr).toContain("no transcript path; this agent now settles at the ESTIMATE");
 	});
 
+	it("a sticky agent whose lock another hook HOLDS still settles at the estimate, and posts no transcript usage", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
+		// Sticky by a hook that named no transcript: only the marker records it, no cursor.
+		const { transcript_path: _path, ...noPath } = preInput("tu_1");
+		await run("pre-tool-use.mjs", noPath);
+		const { transcript_path: _post, ...noPathPost } = postInput("tu_1");
+		await run("post-tool-use.mjs", noPathPost);
+		// Another hook holds the agent's lock for the whole next tool call: the marker
+		// is read before the lock is tried, so the busy lock changes nothing.
+		const lock = `${cursorPath()}.lock`;
+		await mkdir(lock);
+		await writeFile(join(lock, "owner"), "another-hook");
+		await run("pre-tool-use.mjs", preInput("tu_2"));
+		await run("post-tool-use.mjs", postInput("tu_2"));
+		await rm(lock, { recursive: true, force: true });
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => [s.body.usageSource, s.body.inputTokens])).toEqual([
+			["estimated", TOOL_INPUT_ESTIMATE],
+			["estimated", TOOL_INPUT_ESTIMATE],
+		]);
+		for (const a of authorizes()) {
+			expect(a.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+		}
+	});
+
 	it.each([
 		["its directory cannot be made", "estimate"],
 		["its name is taken by something that does not read back", `estimate/${SESSION}__main`],
