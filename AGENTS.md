@@ -536,6 +536,47 @@ hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not m
 per-model rates by design; per-call `ceil` + 1-UT floor differs from provider-side aggregation.
 Estimates never model cache state.
 
+**A principal is a label, never a payer.** `AuthorizeParams.principal`
+(`{ id?, type?, origin?, unit?, role? }`, `shared/principal.ts`) says WHO the work was for: the agent
+instance and kind, where it came from (a client and its session), the business unit, and the role. It never selects the account a hold debits and never enters the policy gate — that is
+`withCostCenter`'s job, and the two stay separate fields on purpose. A `unit` that should also be a
+budget is a deliberate `withCostCenter` scope beside it, never an implicit one.
+*Prevents:* a reporting label moving money — routing a hold to an envelope nobody funded, or
+gating a call against a balance that was never allocated to it.
+
+*Captured once, read from the capture.* `authorize` reads `actor` and `principal` exactly once —
+the principal through `capturePrincipal`, which validates each field (1–128 characters of
+`[A-Za-z0-9._:-]`, `principalFieldRefusal`), rebuilds and freezes the object, and throws a
+`TypeError` before any I/O — and stores both on the governor's own `activeAuths` capture. Every
+headless record then names `capture.actor` and spreads `principal` (key ABSENT when there is none):
+`policy_denied`, `ledger_rejected`, `llm_call`, `llm_call_failed`, `settlement_ambiguous`,
+`settlement_shortfall`, and the rotated receipt. `packages/server` validates the wire field with the
+same `principalFieldRefusal` and refuses an unknown key rather than stripping it, and publishes
+`"principal"` in `/v1/health` `capabilities`: an older server strips the key, so a client sends a
+principal only to a server that lists it.
+*Prevents:* the settle-side records hard-coding `actor: "local"` — which threw away who did the
+work exactly where the money was recorded — and a caller relabelling a spend between the two phases
+through its own object or the handle.
+
+*The principal's ledger tags are an INDEX, not an identity.* The PENDING hold carries
+`principalLedgerTags(principal)`: `id` → `user_data_128`, `unit` → `user_data_64`, `role` →
+`user_data_32` (the slot widths follow the dimensions' cardinality; `type` and `origin` stay in the
+chain only).
+Each tag is the leading bytes of `SHA-256("usertrust/ledger-tag/v1\n" ‖ dimension ‖ "\n" ‖ value)`,
+with zero mapped to 1. The post and void deliberately write ZERO `user_data`: TigerBeetle then
+copies the pending transfer's values onto them, so the settlement inherits the tags natively and the
+post path is unchanged (`tests/integration/principal-tags.tb.test.ts` pins this against a real
+cluster). `query_transfers` filters on the tags (intersection), so work can be rolled up by agent,
+unit and role from the ledger alone. A tag query returns the PENDING hold AND its post or void, so a
+SPEND roll-up sums only the posted transfers (`post_pending_transfer`) — summing every match counts
+each settled call twice and a voided reserve as spend. And a tag is a hash: the label is in the audit chain, and a
+ledger roll-up is a candidate set to confirm there (the 32-bit role slot is the most exposed to
+collisions). An untagged call passes no `userData`, so its hold is created exactly as before.
+*Scope:* the headless governor (and so `packages/server`). `trust()` has no `AuthorizeParams`
+surface and still records `actor: "local"`. `ledger/engine.ts` — which has no production importer
+(see Known drift) — predates this scheme with its own `deriveUserId64`/`fnv1a32` tags; if it is ever
+wired in, it must adopt `principalLedgerTags`, or one ledger will carry two incompatible schemes.
+
 ### Audit
 
 **Persist the canonical bytes, not `JSON.stringify` output.** The hash pre-image is

@@ -23,7 +23,10 @@
 // and on a 200 they are assigned to this hold's transferId for PostToolUse to
 // settle. On any other answer they are released: nothing was posted. With no
 // window (nothing new, or another hook holds the agent's lock) the hold is the
-// tool estimate alone, and PostToolUse gives it back.
+// tool estimate alone, and PostToolUse gives it back. So it is, too, while the
+// agent's transcript state cannot be used (the state dir, a corrupt cursor):
+// that usage stays in the transcript for a later settle point, and a hold
+// settled at the estimate would charge it twice.
 //
 // On a server that honours them (its /v1/health `capabilities`), a window's
 // authorize carries the window's idempotency key — so the server charges those
@@ -111,8 +114,16 @@ try {
 			`usertrust: ${prepared.reason}; this agent now settles at the ESTIMATE for the rest of the session\n`,
 		);
 	}
+	if (prepared.mode === "unavailable") {
+		process.stderr.write(
+			`usertrust: transcript usage unavailable for now (${prepared.reason}); this tool's hold is given back, not settled at the estimate — the usage stays in the transcript for a later settle point\n`,
+		);
+	}
 	try {
 		const transcriptMode = prepared.mode === "transcript";
+		// Only an estimate-mode hold settles at the estimate. Every other one is a
+		// transcript hold: settled at its window's counts, or given back.
+		const settlesAtEstimate = prepared.mode === "estimate";
 		// What the server honours decides what this hold may carry (see lib.mjs).
 		// Unknown (a failed probe) reads as absent here: a key is sent only to a server
 		// known to honour it, and a principal — on either path, in one shape — only to
@@ -184,8 +195,9 @@ try {
 					toolUseId: input.tool_use_id ?? null,
 					transferId: json.transferId,
 					estimatedInputTokens,
-					...(transcriptMode
-						? {
+					...(settlesAtEstimate
+						? {}
+						: {
 								usage: "transcript",
 								holdModel: window?.model ?? fallbackModel,
 								assignedIds: window?.ids ?? [],
@@ -193,8 +205,7 @@ try {
 								...(window && keyed
 									? { idempotencyKey: prepared.key, agentType: prepared.agentTypeRaw }
 									: {}),
-							}
-						: {}),
+							}),
 				});
 			} catch (err) {
 				// Unrecorded, the hold could never be settled: give it back now.

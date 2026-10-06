@@ -33,6 +33,7 @@ import {
 	InsufficientBalanceError,
 	PolicyDeniedError,
 } from "../shared/errors.js";
+import type { Principal } from "../shared/principal.js";
 import { type AuditWriter, readDurableEventHash } from "./chain.js";
 
 /** Both denial kinds carry this, so a reader can tell old records from new. */
@@ -94,6 +95,11 @@ export interface DenialEventFields {
 	promptParts?: unknown;
 	/** The hold amount the ledger refused — `ledger_rejected` only. */
 	estimatedCost?: number | undefined;
+	/**
+	 * Who the refused call was for — the governor's frozen capture, never caller
+	 * input read at the boundary. Absent (no key) when the call named no principal.
+	 */
+	principal?: Principal | undefined;
 }
 
 export interface AppendDenialEventArgs {
@@ -211,6 +217,7 @@ function buildPolicyDeniedData(
 		// The algorithm tag rides with the hash and never without it.
 		...(promptHash !== undefined ? { promptHash, promptHashAlg: PROMPT_HASH_ALG } : {}),
 		...(fields.costCenter !== undefined ? { costCenter: fields.costCenter } : {}),
+		...(fields.principal !== undefined ? { principal: fields.principal } : {}),
 		...(fields.endpointClass !== undefined ? { endpointClass: fields.endpointClass } : {}),
 		error: safeErrorText(error.message),
 		...(fields.transferId !== undefined ? { transferId: fields.transferId } : {}),
@@ -236,6 +243,7 @@ function buildLedgerRejectedData(
 		...(fields.transferId !== undefined ? { transferId: fields.transferId } : {}),
 		...(fields.estimatedCost !== undefined ? { estimatedCost: fields.estimatedCost } : {}),
 		...(fields.costCenter !== undefined ? { costCenter: fields.costCenter } : {}),
+		...(fields.principal !== undefined ? { principal: fields.principal } : {}),
 		...(fields.endpointClass !== undefined ? { endpointClass: fields.endpointClass } : {}),
 		error: safeErrorText(error.message),
 	};
