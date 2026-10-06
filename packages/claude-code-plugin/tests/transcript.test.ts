@@ -733,6 +733,42 @@ describe("estimate mode and the cursor", () => {
 		expect(settles().map((s) => s.body.usageSource)).toEqual(["estimated"]);
 	});
 
+	it("estimate mode recorded while a hook waits for the lock: once it holds the lock, it posts nothing", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
+		// Another hook records this agent's estimate mode just as this one takes the
+		// lock: after its first check, before anything it could post.
+		const marker = join(stateDir, "transcripts", "estimate", `${SESSION}__main`);
+		const pre = await run("pre-tool-use.mjs", preInput("tu_1"), {
+			NODE_OPTIONS: `--import=${join(import.meta.dirname, "helpers", "crash-at.mjs")}`,
+			UT_CC_CRASH: "create|1|after",
+			UT_CC_CRASH_ACTION: `write ${marker}`,
+		});
+		expect(pre.code).toBe(0);
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.usageSource)).toEqual(["estimated"]);
+		expect(authorizes()[0]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+	});
+
+	it("NO transcript path while another hook holds the agent's lock: nothing is recorded, the hold is given back", async () => {
+		await startServer(okResponder);
+		await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
+		await mkdir(`${cursorPath()}.lock`);
+		await writeFile(join(`${cursorPath()}.lock`, "owner"), "another-hook");
+		const { transcript_path: _path, ...noPath } = preInput("tu_1");
+		const pre = await run("pre-tool-use.mjs", noPath);
+		const { transcript_path: _post, ...noPathPost } = postInput("tu_1");
+		await run("post-tool-use.mjs", noPathPost);
+		expect(settles().map((s) => [s.body.usageSource, s.body.inputTokens])).toEqual([
+			["provider", 0],
+		]);
+		expect(pre.stderr).toContain("another hook holds the agent's lock");
+		await expect(readdir(join(stateDir, "transcripts", "estimate"))).rejects.toMatchObject({
+			code: "ENOENT",
+		});
+	});
+
 	it("a STICKY agent stays sticky when its cursor is lost: the estimate marker lives outside the cursor", async () => {
 		await startServer(okResponder);
 		// No transcript file yet: sticky at the first hook.
