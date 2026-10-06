@@ -45,9 +45,13 @@ async function step(op, call) {
 	note(op);
 	const hit = op === target && n === k;
 	if (hit && when === "before") fire(op, n);
-	const result = await call();
-	if (hit && when === "after") fire(op, n);
-	return result;
+	// "After" holds for an operation that failed too (a claim's link that found the
+	// name taken): the hook is killed before it handles the error.
+	try {
+		return await call();
+	} finally {
+		if (hit && when === "after") fire(op, n);
+	}
 }
 
 const { link, rename, writeFile } = fsp;
