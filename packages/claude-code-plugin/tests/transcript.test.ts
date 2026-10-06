@@ -1521,8 +1521,10 @@ describe("estimate holds", () => {
 			usageSource: "estimated",
 		});
 		// The transcript is never read, and no cursor made: the state holds only the
-		// record that this agent settles at the estimate, written before it did.
-		expect(pre.stderr).toBe("");
+		// record that this agent settles at the estimate, written before it did. The
+		// one stderr line is watch mode's (the default) reason for letting the call
+		// through, which lands in Claude Code's debug log; there is no other note.
+		expect(pre.stderr).toBe("usertrust: reserved tx_1 (1 ut)\n");
 		expect((await readdir(join(stateDir, "transcripts"))).sort()).toEqual(["estimate", "since"]);
 		expect(
 			await readFile(join(stateDir, "transcripts", "estimate", `${SESSION}__main`), "utf-8"),
