@@ -103,11 +103,14 @@ export default function CheckLedger({
 				{LEDGER_SHOWS_THE_INPUTS}
 			</p>
 
-			<table className="mt-3 w-full border-collapse text-left">
+			{/* Below 640px each row stacks (check, result, meaning) and the column
+			    headers are hidden: three columns of long mono names do not fit a
+			    phone, and the page must never scroll sideways. */}
+			<table className="mt-3 w-full border-collapse text-left max-sm:block">
 				<caption className="sr-only">
 					every verification step and named online check, with its four-valued result
 				</caption>
-				<thead>
+				<thead className="max-sm:hidden">
 					<tr className="border-b border-white/[0.06]">
 						<th
 							scope="col"
@@ -129,7 +132,7 @@ export default function CheckLedger({
 						</th>
 					</tr>
 				</thead>
-				<tbody>
+				<tbody className="max-sm:block">
 					{rows.map((row) => {
 						const entry =
 							row.group === "steps"
@@ -141,16 +144,16 @@ export default function CheckLedger({
 								key={row.name}
 								id={`check-${row.name}`}
 								data-check={row.name}
-								className="scroll-mt-6 border-b border-white/[0.04] align-top target:bg-white/[0.06]"
+								className="scroll-mt-6 border-b border-white/[0.04] align-top target:bg-white/[0.06] max-sm:block max-sm:py-2"
 							>
 								<th
 									scope="row"
-									className="px-4 py-3 font-mono text-[12px] font-normal uppercase tracking-[0.12em] text-white/70"
+									className="px-4 py-3 font-mono text-[12px] font-normal uppercase tracking-[0.12em] text-white/70 [overflow-wrap:anywhere] max-sm:block max-sm:pt-1 max-sm:pb-0"
 								>
 									{row.label}
 								</th>
 								<td
-									className={`px-4 py-3 font-mono text-[12px] tracking-[0.12em] ${RESULT_INK[entry.result]}`}
+									className={`px-4 py-3 font-mono text-[12px] tracking-[0.12em] max-sm:block max-sm:py-1 ${RESULT_INK[entry.result]}`}
 								>
 									<span aria-hidden="true">{RESULT_GLYPH[entry.result]} </span>
 									<span data-result={entry.result}>{RESULT_LABEL[entry.result]}</span>
@@ -160,7 +163,7 @@ export default function CheckLedger({
 										</span>
 									) : null}
 								</td>
-								<td className="px-4 py-3 text-[13px] leading-relaxed text-white/85">
+								<td className="px-4 py-3 text-[13px] leading-relaxed text-white/85 max-sm:block max-sm:pt-0">
 									{row.meaning}
 									{note ? <span className="mt-1 block text-white/70">{note}</span> : null}
 								</td>

@@ -87,7 +87,10 @@
       paint-order:stroke fill. Not rebuilt by eye. ───────────────────────── */
 /* the chrome is the only place the brand fonts render */
 .ut-r .ut-r-nav,.ut-r footer.site{font-family:var(--sans)}
-.ut-r .ut-r-main{font-variant-numeric:tabular-nums}
+/* no unbreakable token (a hash, a trust-snapshot name) may push the page
+   sideways on a phone: it wraps instead. Text that must stay whole opts out
+   with white-space:nowrap. */
+.ut-r .ut-r-main{font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
 .ut-r .brand{display:inline-flex;align-items:center;gap:9px}
 .ut-r .brand .mark{width:26px;height:26px;border-radius:var(--r-mark);background:var(--brand);color:var(--brand-on);
              display:grid;place-items:center;
