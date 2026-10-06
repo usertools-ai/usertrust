@@ -2195,9 +2195,8 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 			capabilities?: string[];
 		};
 		expect(health.capabilities).toContain("principal");
-		// Per-tier hold estimates come with their own server change: until it is
-		// merged, the plain sum.
-		const tiered = health.capabilities?.includes("authorize-cache-tiers") === true;
+		// And since #231 it sizes a hold per cache tier, and says so.
+		expect(health.capabilities).toContain("authorize-cache-tiers");
 		await startServer({ forwardTo: `http://127.0.0.1:${realPort}`, key: KEY });
 		// Two responses before the tool call: the hold carries them.
 		await writeMain([
@@ -2236,23 +2235,32 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 		);
 		expect(calls).toHaveLength(2);
 		for (const call of calls) expect(call.data).toMatchObject({ principal });
-		// What the server held for the window — never under its real cost, and
-		// priced per tier where the server can.
+		// What the server held for the window: each cache tier at its own rate, as the
+		// window's authorize gave them apart — never under the window's real cost.
+		expect(authorizes()[0]?.body).toMatchObject({
+			estimatedInputTokens: 150 + TOOL_INPUT_ESTIMATE,
+			estimatedCacheReadTokens: 82_000,
+			estimatedCacheWriteTokens: 2_000,
+			maxOutputTokens: 1000 + TOOL_OUTPUT_HOLD,
+		});
 		const rates = getModelRates(SONNET);
 		const holdRates = {
 			...rates,
 			inputPer1k: Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates)),
 		};
-		const windowHold = tiered
-			? costFromRates(holdRates, 150 + TOOL_INPUT_ESTIMATE, 1000 + TOOL_OUTPUT_HOLD, 82_000, 2_000)
-			: costFromRates(
-					holdRates,
-					150 + 82_000 + 2_000 + TOOL_INPUT_ESTIMATE,
-					1000 + TOOL_OUTPUT_HOLD,
-				);
+		const hold = costFromRates(
+			holdRates,
+			150 + TOOL_INPUT_ESTIMATE,
+			1000 + TOOL_OUTPUT_HOLD,
+			82_000,
+			2_000,
+		);
 		const windowAuth = authorizes()[0]?.response as { estimatedCost?: number } | undefined;
-		expect(windowAuth?.estimatedCost).toBe(windowHold);
-		expect(windowHold).toBeGreaterThanOrEqual(receipts[0]?.cost ?? Number.POSITIVE_INFINITY);
+		expect(windowAuth?.estimatedCost).toBe(hold);
+		// The window's own part of it, less the tool call's estimate: 477, against a
+		// real cost of 476 (it held 3 381 with the cache writes doubled).
+		expect(costFromRates(holdRates, 150, 1000, 82_000, 2_000)).toBe(477);
+		expect(receipts[0]?.cost).toBe(476);
 		const expected = [
 			{ inputTokens: 150, outputTokens: 1000, cacheReadTokens: 82_000, cacheWriteTokens: 2_000 },
 			{ inputTokens: 5, outputTokens: 60, cacheReadTokens: 44_000, cacheWriteTokens: 1_000 },
