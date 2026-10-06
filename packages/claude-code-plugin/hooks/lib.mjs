@@ -151,15 +151,45 @@ export async function recordWatchEvent(event) {
 	}
 }
 
-// Every hook gets a wall-clock budget well inside hooks.json's 15 s timeout, so
-// a slow server makes a hook give up cleanly instead of being killed mid-write.
+// Every hook gets a wall-clock budget inside the time Claude Code gives it, so a
+// slow server makes a hook give up cleanly instead of being killed mid-write.
 // Module evaluation is the hook's start: each hook is its own node process.
 const HOOK_STARTED_AT = Date.now();
+/** Every hook's budget but SessionEnd's: well inside hooks.json's 15 s timeout. */
 export const HOOK_BUDGET_MS = 10_000;
+let hookBudgetMs = HOOK_BUDGET_MS;
+
+const SESSION_END_DEFAULT_MS = 1_500;
+/** What node takes to start the hook before its budget starts, and to exit. */
+const SESSION_END_MARGIN_MS = 300;
+
+/**
+ * SessionEnd's budget. Claude Code gives SessionEnd hooks far less time than any
+ * other: "SessionEnd hooks have a default timeout of 1.5 seconds", "Timeouts set
+ * on plugin-provided hooks don't raise the budget", and
+ * `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`, in milliseconds, overrides it
+ * (https://code.claude.com/docs/en/hooks#sessionend). Less the start-up margin,
+ * and never more than any other hook's budget.
+ */
+export function sessionEndBudgetMs(env = process.env) {
+	const raw = env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS ?? "";
+	const configured = /^[0-9]{1,9}$/.test(raw) ? Number(raw) : SESSION_END_DEFAULT_MS;
+	return Math.max(0, Math.min(configured, HOOK_BUDGET_MS) - SESSION_END_MARGIN_MS);
+}
+
+/** This hook's budget, counted from its start (SessionEnd: `sessionEndBudgetMs`). */
+export function useHookBudget(ms) {
+	hookBudgetMs = ms;
+}
+
+/** A share of this hook's budget: the time limits of its steps scale with it. */
+export function budgetShare(fraction) {
+	return Math.floor(hookBudgetMs * fraction);
+}
 
 /** Milliseconds left in this hook's budget (negative once it is spent). */
 export function timeLeft() {
-	return HOOK_STARTED_AT + HOOK_BUDGET_MS - Date.now();
+	return HOOK_STARTED_AT + hookBudgetMs - Date.now();
 }
 
 export function sanitize(part) {
@@ -350,7 +380,7 @@ let capabilitiesRead;
 export function serverCapabilities() {
 	capabilitiesRead ??= (async () => {
 		const base = process.env.UT_SERVER_URL ?? "http://127.0.0.1:4519";
-		const timeoutMs = Math.min(2_000, timeLeft());
+		const timeoutMs = Math.min(2_000, budgetShare(0.2), timeLeft());
 		const unknown = (why) => {
 			process.stderr.write(
 				`usertrust: the server's capabilities are unknown (${why}) — this hook sends no idempotency key or principal\n`,

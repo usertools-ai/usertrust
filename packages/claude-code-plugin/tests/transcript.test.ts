@@ -768,6 +768,32 @@ describe("estimate mode and the cursor", () => {
 		expect(pre.stderr).toContain("no transcript path; this agent now settles at the ESTIMATE");
 	});
 
+	it("a sticky agent whose lock another hook HOLDS still settles at the estimate, and posts no transcript usage", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
+		// Sticky by a hook that named no transcript: only the marker records it, no cursor.
+		const { transcript_path: _path, ...noPath } = preInput("tu_1");
+		await run("pre-tool-use.mjs", noPath);
+		const { transcript_path: _post, ...noPathPost } = postInput("tu_1");
+		await run("post-tool-use.mjs", noPathPost);
+		// Another hook holds the agent's lock for the whole next tool call: the marker
+		// is read before the lock is tried, so the busy lock changes nothing.
+		const lock = `${cursorPath()}.lock`;
+		await mkdir(lock);
+		await writeFile(join(lock, "owner"), "another-hook");
+		await run("pre-tool-use.mjs", preInput("tu_2"));
+		await run("post-tool-use.mjs", postInput("tu_2"));
+		await rm(lock, { recursive: true, force: true });
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => [s.body.usageSource, s.body.inputTokens])).toEqual([
+			["estimated", TOOL_INPUT_ESTIMATE],
+			["estimated", TOOL_INPUT_ESTIMATE],
+		]);
+		for (const a of authorizes()) {
+			expect(a.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+		}
+	});
+
 	it.each([
 		["its directory cannot be made", "estimate"],
 		["its name is taken by something that does not read back", `estimate/${SESSION}__main`],
@@ -1346,30 +1372,42 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 		hook_event_name: "SessionEnd",
 		reason: "prompt_input_exit",
 	});
+	// SessionEnd's budget is Claude Code's (lib.mjs `sessionEndBudgetMs`). These
+	// tests always set it, so a value in the runner's own environment cannot change
+	// them: unset (the 1.5 s default) unless a test gives it more.
+	const DEFAULT_BUDGET = { CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "" };
+	const end = (env: Record<string, string> = DEFAULT_BUDGET) =>
+		run("session-end.mjs", endInput(), env);
+	const STOP_GAVE_UP = "the turn's final response was not in the transcript by the end of the wait";
 
 	it("hooks.json registers SessionEnd, beside the five hooks before it", async () => {
 		const hooks = JSON.parse(await readFile(join(HOOKS, "hooks.json"), "utf-8")) as {
-			hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+			hooks: Record<string, Array<{ hooks: Array<{ command: string; timeout?: number }> }>>;
 		};
 		// SessionStart announces the mode (see mode.test.ts).
 		expect(Object.keys(hooks.hooks).sort()).toEqual(
 			["PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "SubagentStop"].sort(),
 		);
-		expect(hooks.hooks.SessionEnd?.[0]?.hooks[0]?.command).toContain("hooks/session-end.mjs");
+		const sessionEnd = hooks.hooks.SessionEnd?.[0]?.hooks[0];
+		expect(sessionEnd?.command).toContain("hooks/session-end.mjs");
+		// Its own timeout does not raise Claude Code's SessionEnd budget. It bounds the
+		// hook once CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS has raised that, so it must
+		// not cut into the most the plugin uses of it (10 s).
+		expect(sessionEnd?.timeout).toBeGreaterThanOrEqual(10);
 	});
 
-	it("a final answer the transcript did not yet hold at Stop is posted at SessionEnd — once", async () => {
+	it("a final answer the transcript did not yet hold at Stop is posted at SessionEnd — once, within the default budget", async () => {
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
 		await run("stop.mjs", stopInput());
 		// The last turn's answer reaches the transcript only after Stop has run: no
 		// later turn will ever pick it up.
 		await appendMain(responseEntries("msg_final", SONNET, u(7, 7), {}, { text: "all done" }));
-		const end = await run("session-end.mjs", endInput());
-		expect(end.code).toBe(0);
+		const ended = await end();
+		expect(ended.code).toBe(0);
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
 		// Nothing is posted twice: not by another SessionEnd, nor by a Stop.
-		await run("session-end.mjs", endInput());
+		await end();
 		await run("stop.mjs", stopInput());
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
 	});
@@ -1381,14 +1419,16 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 		const stop = run("stop.mjs", { ...stopInput(), last_assistant_message: "all done" });
 		await new Promise((resolve) => setTimeout(resolve, 1_000));
 		await appendMain(responseEntries("msg_final", SONNET, u(7, 7), {}, { text: "all done" }));
-		expect((await stop).code).toBe(0);
+		const stopped = await stop;
+		expect(stopped.code).toBe(0);
+		expect(stopped.stderr).not.toContain(STOP_GAVE_UP);
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
 		// SessionEnd then finds nothing new: no second post.
-		await run("session-end.mjs", endInput());
+		await end();
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
 	});
 
-	it("the wait is bounded: a final response that never arrives costs Stop about 2 s, then it goes on", async () => {
+	it("the wait is bounded: a final response that never arrives costs Stop about 2 s, then it goes on — and says so", async () => {
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
 		const started = Date.now();
@@ -1397,6 +1437,7 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 		expect(stop.code).toBe(0);
 		expect(took).toBeGreaterThanOrEqual(1_900);
 		expect(took).toBeLessThan(8_000);
+		expect(stop.stderr).toContain(STOP_GAVE_UP);
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([3]);
 	});
 
@@ -1415,11 +1456,29 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 			join(projectDir, SESSION, "subagents", "agent-a1.jsonl"),
 			`${responseEntries("msg_s2", SONNET, u(5, 5), sub("a1"), { text: "plan ready" }).join("\n")}\n`,
 		);
-		expect((await stop).code).toBe(0);
+		const stopped = await stop;
+		expect(stopped.code).toBe(0);
+		expect(stopped.stderr).not.toContain("final response was not in");
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([2, 5]);
 	});
 
-	it("SessionEnd waits for a lock a finishing Stop still holds", async () => {
+	it("SubagentStop says so when the subagent's final response never arrives", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		await writeSubagent("a1", "Plan", responseEntries("msg_s1", SONNET, u(2, 2), sub("a1")));
+		const stop = await run("subagent-stop.mjs", {
+			...stopInput(),
+			agent_id: "a1",
+			last_assistant_message: "never written",
+		});
+		expect(stop.code).toBe(0);
+		expect(stop.stderr).toContain(
+			"a1's final response was not in its transcript by the end of the wait",
+		);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([2]);
+	});
+
+	it("SessionEnd waits, within its budget, for a lock a finishing Stop still holds", async () => {
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
 		await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
@@ -1429,10 +1488,78 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 		const released = new Promise((resolve) =>
 			setTimeout(() => void rm(lock, { recursive: true, force: true }).then(resolve), 800),
 		);
-		const end = await run("session-end.mjs", endInput());
+		// A budget raised to 10 s: a fifth of it outlasts the 800 ms hold.
+		const ended = await end({ CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "10000" });
 		await released;
-		expect(end.code).toBe(0);
+		expect(ended.code).toBe(0);
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([3]);
+	});
+
+	it("…but only a fifth of its budget: under the default, a lock held longer is left to the next Stop", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
+		await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
+		const lock = `${cursorPath()}.lock`;
+		await mkdir(lock);
+		await writeFile(join(lock, "owner"), "a-finishing-stop");
+		const released = new Promise((resolve) =>
+			setTimeout(() => void rm(lock, { recursive: true, force: true }).then(resolve), 1_500),
+		);
+		const started = Date.now();
+		const ended = await end();
+		const took = Date.now() - started;
+		expect(ended.code).toBe(0);
+		// Not the 3 s it used to wait: the budget is 1.5 s in all.
+		expect(took).toBeLessThan(2_500);
+		expect(ended.stderr).toContain("a concurrent hook holds this agent's lock");
+		expect(settles()).toEqual([]);
+		await released;
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3]);
+	});
+
+	it("SessionEnd keeps to its budget: against a server too slow for it, it gives up cleanly — and CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS gives it the time", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
+		await run("stop.mjs", stopInput());
+		await appendMain(responseEntries("msg_final", SONNET, u(7, 7), {}, { text: "all done" }));
+		// Every authorize and settle now takes 500 ms: more than a call may take
+		// within 1.5 s, which holds a probe, an authorize, a settle and a reserve.
+		delayMs = 500;
+		const started = Date.now();
+		const tight = await end();
+		const took = Date.now() - started;
+		expect(tight.code).toBe(0);
+		expect(took).toBeLessThan(2_500);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3]);
+		// The same session, with the budget the variable gives: posted, once.
+		const roomy = await end({ CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "6000" });
+		expect(roomy.code).toBe(0);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
+	});
+});
+
+describe("the remainder's grouping by model", () => {
+	it("is linear: a 50 000-message backlog is grouped in well under a hook's budget, in order", async () => {
+		// @ts-expect-error TS7016: the hooks are plain .mjs, without type declarations.
+		const { groupByModel } = await import("../hooks/transcript.mjs");
+		// A long outage's claimed-but-unposted backlog: one model, a few of another.
+		const backlog = Array.from({ length: 50_000 }, (_, i) => ({
+			id: `msg_${i}`,
+			model: i % 1_000 === 999 ? HAIKU : SONNET,
+		}));
+		const started = performance.now();
+		const groups = groupByModel(backlog) as Map<string, Array<{ id: string }>>;
+		const took = performance.now() - started;
+		// Appending in place takes milliseconds. Copying a model's array for every
+		// message, as the remainder once did, takes seconds at this size: every settle
+		// point would spend its budget here before posting anything.
+		expect(took).toBeLessThan(200);
+		expect([...groups.keys()]).toEqual([SONNET, HAIKU]);
+		expect(groups.get(SONNET)?.length).toBe(49_950);
+		expect(groups.get(SONNET)?.[1_000]?.id).toBe("msg_1001");
+		const haiku = groups.get(HAIKU)?.map((m) => m.id) ?? [];
+		expect(haiku.slice(0, 2)).toEqual(["msg_999", "msg_1999"]);
 	});
 });
 

@@ -5,7 +5,7 @@ authorization against a [usertrust-server](../server) you host, and the session'
 REAL token usage — per model, per subagent — is settled from Claude Code's own
 transcripts. PreToolUse reserves a hold that covers the usage recorded since the
 last one plus the upcoming tool, PostToolUse settles that hold at the real counts,
-and Stop/SubagentStop — and SessionEnd, once the transcript is final — post
+and Stop/SubagentStop — and SessionEnd, when the session ends — post
 whatever no hold carried and terminate anything left hanging. Nothing is routed
 through usertrust: it only reads what Claude Code already recorded.
 
@@ -89,11 +89,23 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   Stop the turn's final response may not be in it yet — and after the last turn
   no later hook would ever post it. So Stop and SubagentStop first wait, at most
   about 2 seconds, until the transcript holds the response their input names
-  (`last_assistant_message`), and SessionEnd — whose transcript Claude Code
-  finalizes — scans once more. Every post goes through the same claims, so what
-  Stop posted is never posted again. A response that reaches the transcript only
-  after that wait, in a session that never fires SessionEnd (a crash, a kill), is
-  not posted.
+  (`last_assistant_message`), and say so on stderr when they give up; SessionEnd
+  then scans once more. Every post goes through the same claims, so what Stop
+  posted is never posted again. A response that reaches the transcript only after
+  that wait is not posted in a session that never fires SessionEnd (a crash, a
+  kill), or whose SessionEnd runs out of its budget first (below).
+- **SessionEnd has 1.5 seconds.** Claude Code gives SessionEnd hooks a 1.5 s
+  budget by default, and a plugin's own hook `timeout` does not raise it
+  ([hooks reference](https://code.claude.com/docs/en/hooks#sessionend)). The
+  plugin sizes SessionEnd's work to that budget — its calls, its claims, and its
+  wait for a Stop still holding an agent's lock (a fifth of the budget) — and
+  gives up cleanly instead of being killed mid-write. Against a slow server it may
+  post nothing, and a final answer that Stop could not find then goes unposted:
+  an under-count, never a double charge. `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`
+  (milliseconds) raises the budget, and the plugin uses up to 10 s of it. The
+  `timeout` in hooks.json does not raise the budget: it bounds the hook once the
+  variable has (before Claude Code v2.1.268, a hook without its own timeout kept
+  1.5 s even then).
 - **Empty holds are given back.** A hold no usage was assigned to (a parallel tool
   call in the same response, say) is RELEASED at PostToolUse: no charge, and not a
   failure. A server without `/v1/release` gets the old settle at zero usage, which
@@ -219,9 +231,10 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   file per response. A message whose claim cannot be made is not posted, and a
   stderr note says so.
 - **Hook time budget.** Each hook gives up after about 10 seconds (the hooks'
-  timeout is 15): its calls never run past that, claiming new responses stops
-  early enough to leave them time, and Stop keeps time back to give back holds;
-  whatever a hook could not reach is posted at the next settle point.
+  timeout is 15), SessionEnd after its own budget (above): its calls never run
+  past that, claiming new responses stops early enough to leave them time, and
+  Stop keeps time back to give back holds; whatever a hook could not reach is
+  posted at the next settle point.
 - **Bounded reads.** A transcript is read 1 MiB at a time, and one hook reads at
   most about 64 MiB of it — a long unread tail is read on by the next hooks. A
   line over 16 MiB is skipped unread, with a note (an entry with usage never comes

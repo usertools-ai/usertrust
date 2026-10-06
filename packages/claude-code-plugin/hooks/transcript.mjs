@@ -121,6 +121,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
+	budgetShare,
 	cleanup,
 	clearPending,
 	isAlreadySettled,
@@ -174,8 +175,6 @@ const MAX_READ_BYTES = 64 << 20;
 const MAX_LINE_BYTES = 16 << 20;
 /** Only a line with this in it can carry usage. */
 const USAGE_FIELD = Buffer.from('"usage"');
-const CALL_TIMEOUT_MS = 3_000;
-const MIN_CALL_MS = 250;
 /** How long a hook that names no transcript waits for its agent's lock to record that. */
 const NO_PATH_LOCK_WAIT_MS = 500;
 /**
@@ -185,12 +184,21 @@ const NO_PATH_LOCK_WAIT_MS = 500;
  */
 const FLUSH_WAIT_MS = 2_000;
 const FLUSH_TAIL_BYTES = 256 << 10;
-/** How long SessionEnd waits for an agent's lock that a finishing Stop still holds. */
-export const SESSION_END_LOCK_WAIT_MS = 3_000;
-/** Stop/SubagentStop keep this much of the budget for giving back holds without usage. */
-export const CLEANUP_RESERVE_MS = 3_000;
+/*
+ * The time limits of a hook's steps are shares of its budget (lib.mjs
+ * `budgetShare`), so SessionEnd's short one still holds every step. At the 10 s
+ * budget of every other hook: a transcript request takes at most 3 s, none starts
+ * with less than 250 ms, 3 s are kept for giving back holds, and no claim is made
+ * with less than 6 s left.
+ */
+const callTimeoutCap = () => budgetShare(0.3);
+const minCall = () => budgetShare(0.025);
+/** Stop, SubagentStop and SessionEnd keep this much for giving back holds without usage. */
+export const cleanupReserve = () => budgetShare(0.3);
 /** Claiming new message ids stops while less than this is left of the hook's budget. */
-const CLAIM_FLOOR_MS = 6_000;
+const claimFloor = () => budgetShare(0.6);
+/** How long SessionEnd waits for an agent's lock that a finishing Stop still holds. */
+export const sessionEndLockWait = () => budgetShare(0.2);
 
 const AUTHORIZING = "authorizing";
 const REMAINDER = "remainder";
@@ -234,15 +242,31 @@ function sleep(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Per-call timeout for a transcript request: at most 3 s, and never past the budget. */
+/** Per-call timeout for a transcript request: at most its cap, and never past the budget. */
 function callTimeout(reserveMs = 0) {
-	return Math.min(CALL_TIMEOUT_MS, timeLeft() - reserveMs);
+	return Math.min(callTimeoutCap(), timeLeft() - reserveMs);
 }
 
 function sumCounts(messages) {
 	const sum = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 	for (const m of messages) for (const key of COUNT_KEYS) sum[key] += m[key];
 	return sum;
+}
+
+/**
+ * Messages by model, each model's in their order, the models in first-seen order:
+ * one authorize→settle per model. Appended in place — linear in the backlog, which
+ * after a long outage can be tens of thousands of messages, every one of them
+ * waiting on this before any settle.
+ */
+export function groupByModel(messages) {
+	const groups = new Map();
+	for (const m of messages) {
+		const group = groups.get(m.model);
+		if (group === undefined) groups.set(m.model, [m]);
+		else group.push(m);
+	}
+	return groups;
 }
 
 function describeCounts(c) {
@@ -996,7 +1020,7 @@ async function selectOwn(opened) {
 			continue;
 		}
 		// Each claim is file I/O: never let them eat the time the calls need.
-		if (timeLeft() < CLAIM_FLOOR_MS) {
+		if (timeLeft() < claimFloor()) {
 			deferred += 1;
 			continue;
 		}
@@ -1503,7 +1527,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 /** Give a hold back after a settle that failed: the server re-queues such a hold. */
 async function hygieneRelease(transferId, why) {
 	const timeoutMs = callTimeout();
-	if (timeoutMs < MIN_CALL_MS) return;
+	if (timeoutMs < minCall()) return;
 	try {
 		await releaseHold(transferId, why, { timeoutMs });
 	} catch {
@@ -1601,7 +1625,7 @@ async function returnEmptyHold(transferId) {
  * time, hold untouched.
  */
 export async function settleTranscriptHold(sessionId, entry) {
-	if (callTimeout() < MIN_CALL_MS) return { outcome: "deferred", reason: "out of time" };
+	if (callTimeout() < minCall()) return { outcome: "deferred", reason: "out of time" };
 	const ids = entry.assignedIds ?? [];
 	if (ids.length === 0) {
 		const result = await returnEmptyHold(entry.transferId);
@@ -1678,15 +1702,16 @@ export async function settleAssignedHolds(sessionId, agentId) {
 }
 
 /**
- * Stop and SubagentStop fire as a turn ends, and Claude Code writes the
- * transcript asynchronously: the turn's final response may not be in it yet — after
- * the LAST turn, nothing would ever post it. Their input's `last_assistant_message`
- * is "The final assistant message text that Claude just produced" (hooks
- * reference, "Stop input" / "SubagentStop input"), the field to use "rather than
- * reading the transcript", since the transcript "may lag". So, given that text,
- * wait — at most FLUSH_WAIT_MS, and never into the time the hook keeps back — until
- * the transcript's last complete assistant entry carries it; then go on either
- * way. SessionEnd, whose transcript "is finalized at session end", scans again.
+ * Stop and SubagentStop fire as a turn ends, and the turn's final response may
+ * not be in the transcript yet — after the LAST turn, nothing would ever post it.
+ * The hooks reference (https://code.claude.com/docs/en/hooks) says: "The
+ * transcript file is written asynchronously and may lag the in-memory
+ * conversation", and, of Stop's `last_assistant_message`, "use this field rather
+ * than reading `transcript_path`: the transcript file isn't guaranteed to include
+ * the final message at Stop time on all versions". So, given that text, wait — at
+ * most FLUSH_WAIT_MS, and never into the time the hook keeps back — until the
+ * transcript's last complete assistant entry carries it; then go on either way:
+ * "not flushed" leaves the response for SessionEnd or a later Stop.
  */
 export async function awaitFinalResponse(transcriptPath, lastMessage, waitMs = FLUSH_WAIT_MS) {
 	const want = typeof lastMessage === "string" ? lastMessage.trim() : "";
@@ -1694,7 +1719,7 @@ export async function awaitFinalResponse(transcriptPath, lastMessage, waitMs = F
 		return "nothing to wait for";
 	}
 	// Never so long that the remainder could not claim what it then reads.
-	const until = Date.now() + Math.min(waitMs, timeLeft() - CLAIM_FLOOR_MS - 1_000);
+	const until = Date.now() + Math.min(waitMs, timeLeft() - claimFloor() - budgetShare(0.1));
 	for (;;) {
 		const text = await lastCompleteText(transcriptPath);
 		if (text !== null && text !== "" && (text === want || want.endsWith(text))) return "flushed";
@@ -1767,7 +1792,7 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
 					agentId,
 					input,
 					hook,
-					reserveMs: CLEANUP_RESERVE_MS,
+					reserveMs: cleanupReserve(),
 					lockWaitMs,
 				});
 				if (result.skipped !== undefined) {
@@ -1820,7 +1845,7 @@ export async function postRemainder({
 	if (opened.kind === "busy") return { skipped: "a concurrent hook holds this agent's lock" };
 	const { cursor } = opened;
 	const summary = { posted: 0, notes: [], serverDown: false };
-	const callBudget = () => Math.min(CALL_TIMEOUT_MS, Math.floor((timeLeft() - reserveMs) / 3));
+	const callBudget = () => Math.min(callTimeoutCap(), Math.floor((timeLeft() - reserveMs) / 3));
 	try {
 		const fresh = await selectOwn(opened);
 		await opened.save();
@@ -1844,7 +1869,7 @@ export async function postRemainder({
 		}
 		for (const [key, vehicle] of keyed ? [...cursor.unresolved] : []) {
 			const timeoutMs = callBudget();
-			if (timeoutMs < MIN_CALL_MS) {
+			if (timeoutMs < minCall()) {
 				summary.notes.push("unresolved settles: deferred to the next settle point (out of time)");
 				return summary;
 			}
@@ -1878,11 +1903,9 @@ export async function postRemainder({
 			}
 		}
 
-		const groups = new Map();
-		for (const m of fresh) groups.set(m.model, [...(groups.get(m.model) ?? []), m]);
-		for (const [model, messages] of groups) {
+		for (const [model, messages] of groupByModel(fresh)) {
 			const timeoutMs = callBudget();
-			if (timeoutMs < MIN_CALL_MS) {
+			if (timeoutMs < minCall()) {
 				summary.notes.push(`${model}: deferred to the next settle point (out of time)`);
 				break;
 			}
