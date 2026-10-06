@@ -176,8 +176,11 @@ describe("watch (the default) never blocks a tool call, and never approves one",
 		});
 		expectNoDecision(result);
 		expect(result.stderr).toContain("reserved tx_1");
-		// The hold is recorded for PostToolUse to settle, exactly as in enforce mode.
-		expect(await readdir(stateDir)).toEqual(["sess1__main__tu_1.json"]);
+		// The hold is recorded for PostToolUse to settle, exactly as in enforce mode
+		// (transcripts/ holds the record that this agent settles at the estimate).
+		expect((await readdir(stateDir)).filter((name) => name !== "transcripts")).toEqual([
+			"sess1__main__tu_1.json",
+		]);
 		expect(await watchRecords()).toEqual([]);
 	});
 

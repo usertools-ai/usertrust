@@ -191,9 +191,14 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   is recorded OUTSIDE the agent's cursor (`$UT_CC_STATE_DIR/transcripts/estimate/`)
   before any estimate is settled, so losing the cursor cannot undo it; if it
   cannot be recorded, the hold is given back instead. `UT_CC_USAGE=estimate` uses
-  the estimate for every agent. A hold is settled at the estimate ONLY in these
-  cases: when the plugin's own state is unusable for now, the hold is given back,
-  because the transcript still holds that usage.
+  the estimate for every agent, and records that the same way, so a session
+  resumed without it posts nothing it already settled at the estimate. A subagent
+  inherits the estimate mode of any agent of its session: a forked subagent's
+  transcript begins with a copy of its ancestor's responses, which an agent in
+  estimate mode never claims, and which agent a fork copied is recorded nowhere. A
+  hold is settled at the estimate ONLY in these cases: when the plugin's own state
+  is unusable for now, the hold is given back, because the transcript still holds
+  that usage.
 - **Private, durable state.** Cursors, claims and estimate-mode records live in
   `$UT_CC_STATE_DIR/transcripts/`, created `0700`; if that directory is not a real
   directory owned by you without group or other write access, transcript
@@ -206,7 +211,10 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   entry written before that is never posted: a session resumed after upgrading
   from the estimate-only plugin, or after the state dir was deleted, does not post
   its history again (entries carry Claude Code's timestamp; one without a
-  timestamp counts as after it). **Restoring an older copy of the state dir can
+  timestamp counts as after it). After a host crash or power loss (not a process
+  crash), usage posted in the moments before it can be posted again, because the
+  plugin's state files are not fsynced. Idempotency keys on the server (#205) are
+  the fix. **Restoring an older copy of the state dir can
   re-post what was posted after that copy was made.** The claim files are never
   pruned, and they are what keeps a message from being posted twice: one small
   file per response. A message whose claim cannot be made is not posted, and a

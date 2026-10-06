@@ -80,8 +80,11 @@ const stateDir = stateRoot;
 /**
  * Where real usage comes from. `transcript` (default): Claude Code's own
  * session transcript (see transcript.mjs), with the per-call estimate — labelled
- * `estimated` — only for an agent whose transcript cannot be used. `estimate`:
- * the per-call estimate only.
+ * `estimated` — only for an agent in estimate mode (its transcript cannot be
+ * used, or a subagent inherits it: transcript.mjs `inheritedEstimate`).
+ * `estimate`: the per-call estimate only, and each agent's estimate mode is
+ * recorded (transcript.mjs `stickToEstimate`), so a session resumed without it
+ * posts nothing it settled at the estimate.
  */
 export function usageMode() {
 	return process.env.UT_CC_USAGE === "estimate" ? "estimate" : "transcript";
