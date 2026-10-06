@@ -38,6 +38,11 @@ export const AuthorizeRequestSchema = z.object({
 	model: z.string().min(1),
 	estimatedInputTokens: z.number().int().nonnegative().optional(),
 	maxOutputTokens: z.number().int().positive().optional(),
+	// Per-tier estimates (spec D4 tiers, at authorize): without them a window that is
+	// mostly cache READS is reserved at the cache-WRITE rate. Same integer rule as the
+	// settle-side tiers; omitted → 0, the pre-existing hold.
+	estimatedCacheReadTokens: z.number().int().nonnegative().optional(),
+	estimatedCacheWriteTokens: z.number().int().nonnegative().optional(),
 	messages: z.array(z.unknown()).optional(),
 	params: z.record(z.string(), z.unknown()).optional(),
 	actor: z.string().optional(),

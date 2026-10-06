@@ -114,6 +114,12 @@ function startServer(responder: Responder | { forwardTo: string; key: string }):
 				const path = req.url ?? "";
 				const body = JSON.parse(raw || "{}") as Record<string, unknown>;
 				if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+				// An answer that outlived its test: the next test has its own log and its
+				// own transfer ids (`nextTransfer`), which this responder must not touch.
+				if (log !== requests) {
+					res.destroy();
+					return;
+				}
 				let out: { status: number; json: unknown };
 				if (typeof responder === "function") {
 					out = responder(path, body);
@@ -174,10 +180,11 @@ function responseEntries(
 	model: string,
 	u: Usage,
 	extra: Record<string, unknown> = {},
-	options: { partials?: number; complete?: boolean } = {},
+	options: { partials?: number; complete?: boolean; text?: string } = {},
 ): string[] {
 	const lines: string[] = [];
 	const partials = options.partials ?? 2;
+	const content = [{ type: "text", text: options.text ?? "synthetic" }];
 	const usage = (output: number) => ({
 		input_tokens: u.input,
 		cache_creation_input_tokens: u.cacheWrite,
@@ -199,7 +206,7 @@ function responseEntries(
 					role: "assistant",
 					type: "message",
 					stop_reason: null,
-					content: [{ type: "text", text: "synthetic" }],
+					content,
 					usage: usage(Math.max(1, Math.floor((u.output * (i + 1)) / (partials + 2)))),
 				},
 			}),
@@ -218,7 +225,7 @@ function responseEntries(
 					role: "assistant",
 					type: "message",
 					stop_reason: "end_turn",
-					content: [{ type: "text", text: "synthetic" }],
+					content,
 					usage: { ...usage(u.output), iterations: [{ type: "message" }] },
 				},
 			}),
@@ -388,26 +395,27 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 		expect(requests).toHaveLength(2);
 	});
 
-	it("a hold is sized at each tier's own rate where the server can (≈327 for this window's input side), and never under the real cost where it can't", async () => {
+	it("a hold is sized at each tier's own rate where the server can (477 for the real-server window), and never under the real cost where it can't", async () => {
 		// The real-server test's first window: 150 in, 82 000 cache read, 2 000 cache
 		// write, 1 000 out. Priced as usertrust prices a hold — the estimated input at
 		// the higher of the input and cache-write rates, each cache tier given apart at
-		// its own (the pinned `authorize-cache-tiers` contract) — at today's Sonnet rates.
+		// its own (the `authorize-cache-tiers` contract, #231) — at today's Sonnet rates.
 		const rates = getModelRates(SONNET);
 		const holdRates = {
 			...rates,
 			inputPer1k: Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates)),
 		};
-		const inputSide = (body: Record<string, unknown>) =>
+		// The window's part of a hold: the fields, less the tool call's own estimate.
+		const windowHold = (body: Record<string, unknown>) =>
 			costFromRates(
 				holdRates,
-				Number(body.estimatedInputTokens),
-				0,
+				Number(body.estimatedInputTokens) - TOOL_INPUT_ESTIMATE,
+				Number(body.maxOutputTokens) - TOOL_OUTPUT_HOLD,
 				Number(body.estimatedCacheReadTokens ?? 0),
 				Number(body.estimatedCacheWriteTokens ?? 0),
 			);
-		const realInputSide = costFromRates(rates, 150, 0, 82_000, 2_000);
-		expect(realInputSide).toBe(326);
+		const realCost = costFromRates(rates, 150, 1_000, 82_000, 2_000);
+		expect(realCost).toBe(476);
 		const window = [
 			...responseEntries("msg_a", SONNET, u(120, 800, 40_000, 2_000)),
 			...responseEntries("msg_b", SONNET, u(30, 200, 42_000, 0)),
@@ -428,7 +436,8 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 			estimatedCacheWriteTokens: 2_000,
 			maxOutputTokens: 1_000 + TOOL_OUTPUT_HOLD,
 		});
-		expect(inputSide(tiered as Record<string, unknown>)).toBe(327);
+		// The server side's own hand count for this window, at each tier's rate.
+		expect(windowHold(tiered as Record<string, unknown>)).toBe(477);
 		expect(tieredRemainder).toMatchObject({
 			estimatedInputTokens: 5,
 			estimatedCacheReadTokens: 44_000,
@@ -449,10 +458,37 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 		const plain = authorizes()[0]?.body as Record<string, unknown>;
 		expect(plain).not.toHaveProperty("estimatedCacheReadTokens");
 		expect(plain.estimatedInputTokens).toBe(150 + 82_000 + 2_000 + TOOL_INPUT_ESTIMATE);
-		// (Doubling the cache writes, as before, held 3 231.)
-		expect(inputSide(plain)).toBe(3_156);
-		expect(inputSide(plain)).toBeGreaterThanOrEqual(realInputSide);
+		// (Doubling the cache writes, as before, held 3 381.)
+		expect(windowHold(plain)).toBe(3_306);
+		expect(windowHold(plain)).toBeGreaterThanOrEqual(realCost);
 	});
+
+	it.each([
+		["an older server (no `authorize-cache-tiers`)", []],
+		["a server whose capabilities are unknown", null],
+	] as const)(
+		"%s never gets the cache tiers apart: it would strip them and hold too little",
+		async (_server, published) => {
+			capabilities = published === null ? null : [...published];
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, u(10, 20, 3_000, 400)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await appendMain(responseEntries("msg_b", SONNET, u(5, 6, 700, 80)));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const carried = authorizes().filter(
+				(a) => (a.body.params as { usageOrigin?: string }).usageOrigin === "transcript",
+			);
+			expect(carried.map((a) => a.body.estimatedInputTokens)).toEqual([
+				10 + 3_000 + 400 + TOOL_INPUT_ESTIMATE,
+				5 + 700 + 80,
+			]);
+			for (const a of carried) {
+				expect(a.body).not.toHaveProperty("estimatedCacheReadTokens");
+				expect(a.body).not.toHaveProperty("estimatedCacheWriteTokens");
+			}
+		},
+	);
 
 	it("parallel tool calls: one hold gets the window, the rest settle at zero — 0 aborts in 5", async () => {
 		await startServer(okResponder);
@@ -1056,6 +1092,29 @@ describe("hardening", () => {
 		).toEqual([1, 2]);
 	}, 60_000);
 
+	it("a delayed answer that outlives its test never reaches the responder: the next test's transfer ids stay its own", async () => {
+		let answered = 0;
+		delayMs = 300;
+		await startServer((path, body) => {
+			answered += 1;
+			return okResponder(path, body);
+		});
+		// A request still waiting out its delay when its test ends...
+		const late = fetch(`http://127.0.0.1:${port}/v1/authorize`, {
+			method: "POST",
+			body: "{}",
+		}).catch(() => null);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		// ...and what the next test's beforeEach does meanwhile: a new log, ids from 1.
+		requests = [];
+		nextTransfer = 0;
+		delayMs = 0;
+		await late;
+		expect(answered).toBe(0);
+		expect(nextTransfer).toBe(0);
+		expect(requests).toEqual([]);
+	});
+
 	it("a state dir writable by others is not trusted: nothing is posted, nothing settled at the estimate", async () => {
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
@@ -1278,6 +1337,101 @@ describe("hardening", () => {
 		await appendMain(responseEntries("msg_b", SONNET, u(2, 99), {}, { partials: 0 }));
 		await run("stop.mjs", stopInput());
 		expect(settles().map((s) => s.body.outputTokens)).toEqual([10, 99]);
+	});
+});
+
+describe("the final response, written after Stop — SessionEnd and a bounded wait", () => {
+	const endInput = () => ({
+		...stopInput(),
+		hook_event_name: "SessionEnd",
+		reason: "prompt_input_exit",
+	});
+
+	it("hooks.json registers SessionEnd, beside the four hooks before it", async () => {
+		const hooks = JSON.parse(await readFile(join(HOOKS, "hooks.json"), "utf-8")) as {
+			hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+		};
+		expect(Object.keys(hooks.hooks).sort()).toEqual(
+			["PostToolUse", "PreToolUse", "SessionEnd", "Stop", "SubagentStop"].sort(),
+		);
+		expect(hooks.hooks.SessionEnd?.[0]?.hooks[0]?.command).toContain("hooks/session-end.mjs");
+	});
+
+	it("a final answer the transcript did not yet hold at Stop is posted at SessionEnd — once", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
+		await run("stop.mjs", stopInput());
+		// The last turn's answer reaches the transcript only after Stop has run: no
+		// later turn will ever pick it up.
+		await appendMain(responseEntries("msg_final", SONNET, u(7, 7), {}, { text: "all done" }));
+		const end = await run("session-end.mjs", endInput());
+		expect(end.code).toBe(0);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
+		// Nothing is posted twice: not by another SessionEnd, nor by a Stop.
+		await run("session-end.mjs", endInput());
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
+	});
+
+	it("Stop waits — boundedly — for the final response its input names, and posts it itself", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
+		await run("stop.mjs", stopInput());
+		const stop = run("stop.mjs", { ...stopInput(), last_assistant_message: "all done" });
+		await new Promise((resolve) => setTimeout(resolve, 1_000));
+		await appendMain(responseEntries("msg_final", SONNET, u(7, 7), {}, { text: "all done" }));
+		expect((await stop).code).toBe(0);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
+		// SessionEnd then finds nothing new: no second post.
+		await run("session-end.mjs", endInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
+	});
+
+	it("the wait is bounded: a final response that never arrives costs Stop about 2 s, then it goes on", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
+		const started = Date.now();
+		const stop = await run("stop.mjs", { ...stopInput(), last_assistant_message: "never written" });
+		const took = Date.now() - started;
+		expect(stop.code).toBe(0);
+		expect(took).toBeGreaterThanOrEqual(1_900);
+		expect(took).toBeLessThan(8_000);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3]);
+	});
+
+	it("SubagentStop waits for the subagent's final response the same way", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		await writeSubagent("a1", "Plan", responseEntries("msg_s1", SONNET, u(2, 2), sub("a1")));
+		await run("subagent-stop.mjs", { ...stopInput(), agent_id: "a1" });
+		const stop = run("subagent-stop.mjs", {
+			...stopInput(),
+			agent_id: "a1",
+			last_assistant_message: "plan ready",
+		});
+		await new Promise((resolve) => setTimeout(resolve, 1_000));
+		await appendFile(
+			join(projectDir, SESSION, "subagents", "agent-a1.jsonl"),
+			`${responseEntries("msg_s2", SONNET, u(5, 5), sub("a1"), { text: "plan ready" }).join("\n")}\n`,
+		);
+		expect((await stop).code).toBe(0);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([2, 5]);
+	});
+
+	it("SessionEnd waits for a lock a finishing Stop still holds", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
+		await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
+		const lock = `${cursorPath()}.lock`;
+		await mkdir(lock);
+		await writeFile(join(lock, "owner"), "a-finishing-stop");
+		const released = new Promise((resolve) =>
+			setTimeout(() => void rm(lock, { recursive: true, force: true }).then(resolve), 800),
+		);
+		const end = await run("session-end.mjs", endInput());
+		await released;
+		expect(end.code).toBe(0);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3]);
 	});
 });
 
@@ -2309,9 +2463,8 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 			capabilities?: string[];
 		};
 		expect(health.capabilities).toContain("principal");
-		// Per-tier hold estimates come with their own server change: until it is
-		// merged, the plain sum.
-		const tiered = health.capabilities?.includes("authorize-cache-tiers") === true;
+		// And since #231 it sizes a hold per cache tier, and says so.
+		expect(health.capabilities).toContain("authorize-cache-tiers");
 		await startServer({ forwardTo: `http://127.0.0.1:${realPort}`, key: KEY });
 		// Two responses before the tool call: the hold carries them.
 		await writeMain([
@@ -2350,23 +2503,32 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 		);
 		expect(calls).toHaveLength(2);
 		for (const call of calls) expect(call.data).toMatchObject({ principal });
-		// What the server held for the window — never under its real cost, and
-		// priced per tier where the server can.
+		// What the server held for the window: each cache tier at its own rate, as the
+		// window's authorize gave them apart — never under the window's real cost.
+		expect(authorizes()[0]?.body).toMatchObject({
+			estimatedInputTokens: 150 + TOOL_INPUT_ESTIMATE,
+			estimatedCacheReadTokens: 82_000,
+			estimatedCacheWriteTokens: 2_000,
+			maxOutputTokens: 1000 + TOOL_OUTPUT_HOLD,
+		});
 		const rates = getModelRates(SONNET);
 		const holdRates = {
 			...rates,
 			inputPer1k: Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates)),
 		};
-		const windowHold = tiered
-			? costFromRates(holdRates, 150 + TOOL_INPUT_ESTIMATE, 1000 + TOOL_OUTPUT_HOLD, 82_000, 2_000)
-			: costFromRates(
-					holdRates,
-					150 + 82_000 + 2_000 + TOOL_INPUT_ESTIMATE,
-					1000 + TOOL_OUTPUT_HOLD,
-				);
+		const hold = costFromRates(
+			holdRates,
+			150 + TOOL_INPUT_ESTIMATE,
+			1000 + TOOL_OUTPUT_HOLD,
+			82_000,
+			2_000,
+		);
 		const windowAuth = authorizes()[0]?.response as { estimatedCost?: number } | undefined;
-		expect(windowAuth?.estimatedCost).toBe(windowHold);
-		expect(windowHold).toBeGreaterThanOrEqual(receipts[0]?.cost ?? Number.POSITIVE_INFINITY);
+		expect(windowAuth?.estimatedCost).toBe(hold);
+		// The window's own part of it, less the tool call's estimate: 477, against a
+		// real cost of 476 (it held 3 381 with the cache writes doubled).
+		expect(costFromRates(holdRates, 150, 1000, 82_000, 2_000)).toBe(477);
+		expect(receipts[0]?.cost).toBe(476);
 		const expected = [
 			{ inputTokens: 150, outputTokens: 1000, cacheReadTokens: 82_000, cacheWriteTokens: 2_000 },
 			{ inputTokens: 5, outputTokens: 60, cacheReadTokens: 44_000, cacheWriteTokens: 1_000 },

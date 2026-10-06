@@ -120,6 +120,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
+	cleanup,
 	clearPending,
 	isAlreadySettled,
 	isUnknownRoute,
@@ -176,6 +177,15 @@ const CALL_TIMEOUT_MS = 3_000;
 const MIN_CALL_MS = 250;
 /** How long a hook that names no transcript waits for its agent's lock to record that. */
 const NO_PATH_LOCK_WAIT_MS = 500;
+/**
+ * How long Stop and SubagentStop wait for the turn's final response to reach the
+ * transcript (`awaitFinalResponse`), and how much of the transcript's tail they
+ * read to find it.
+ */
+const FLUSH_WAIT_MS = 2_000;
+const FLUSH_TAIL_BYTES = 256 << 10;
+/** How long SessionEnd waits for an agent's lock that a finishing Stop still holds. */
+export const SESSION_END_LOCK_WAIT_MS = 3_000;
 /** Stop/SubagentStop keep this much of the budget for giving back holds without usage. */
 export const CLEANUP_RESERVE_MS = 3_000;
 /** Claiming new message ids stops while less than this is left of the hook's budget. */
@@ -1619,14 +1629,142 @@ export async function settleAssignedHolds(sessionId, agentId) {
 }
 
 /**
+ * Stop and SubagentStop fire as a turn ends, and Claude Code writes the
+ * transcript asynchronously: the turn's final response may not be in it yet — after
+ * the LAST turn, nothing would ever post it. Their input's `last_assistant_message`
+ * is "The final assistant message text that Claude just produced" (hooks
+ * reference, "Stop input" / "SubagentStop input"), the field to use "rather than
+ * reading the transcript", since the transcript "may lag". So, given that text,
+ * wait — at most FLUSH_WAIT_MS, and never into the time the hook keeps back — until
+ * the transcript's last complete assistant entry carries it; then go on either
+ * way. SessionEnd, whose transcript "is finalized at session end", scans again.
+ */
+export async function awaitFinalResponse(transcriptPath, lastMessage, waitMs = FLUSH_WAIT_MS) {
+	const want = typeof lastMessage === "string" ? lastMessage.trim() : "";
+	if (want === "" || typeof transcriptPath !== "string" || transcriptPath === "") {
+		return "nothing to wait for";
+	}
+	// Never so long that the remainder could not claim what it then reads.
+	const until = Date.now() + Math.min(waitMs, timeLeft() - CLAIM_FLOOR_MS - 1_000);
+	for (;;) {
+		const text = await lastCompleteText(transcriptPath);
+		if (text !== null && text !== "" && (text === want || want.endsWith(text))) return "flushed";
+		if (Date.now() >= until) return "not flushed";
+		await sleep(100);
+	}
+}
+
+/** The text of the transcript's last complete assistant entry, or null. */
+async function lastCompleteText(path) {
+	let handle;
+	try {
+		handle = await open(path, "r");
+		const { size } = await handle.stat();
+		const length = Math.min(size, FLUSH_TAIL_BYTES);
+		const buffer = Buffer.alloc(length);
+		const { bytesRead } = await handle.read(buffer, 0, length, size - length);
+		const lines = buffer.toString("utf-8", 0, bytesRead).split("\n");
+		for (let i = lines.length - 1; i >= 0; i -= 1) {
+			const line = lines[i] ?? "";
+			if (!line.includes('"stop_reason"')) continue;
+			let entry;
+			try {
+				entry = JSON.parse(line);
+			} catch {
+				continue;
+			}
+			const message = entry?.message;
+			if (entry?.type !== "assistant" || message?.stop_reason == null) continue;
+			const blocks = Array.isArray(message.content) ? message.content : [];
+			return blocks
+				.filter((b) => b?.type === "text" && typeof b.text === "string")
+				.map((b) => b.text)
+				.join("")
+				.trim();
+		}
+		return null;
+	} catch {
+		return null;
+	} finally {
+		await handle?.close().catch(() => {});
+	}
+}
+
+/**
+ * The end of a turn of the session (Stop) or of the session itself (SessionEnd):
+ *  1. LEFTOVER HOLDS, across all agents. A hold with assigned transcript usage was
+ *     billed even if its tool was interrupted, so it is SETTLED with its counts —
+ *     first, so that one whose settle is UNRESOLVED is retried by step 2.
+ *  2. REMAINDER. For the parent ("main") and every subagent transcript recorded for
+ *     the session — so an agent whose SubagentStop never fired is still accounted —
+ *     first retry each unresolved settle as itself, then post the complete messages
+ *     no hold picked up (another model, a final answer with no tool call), one
+ *     authorize→settle per model, through `selectOwn` like every post. An agent in
+ *     estimate mode is skipped: its holds already carried its usage.
+ *  3. What is left holds no usage: it is given back — released, or aborted on a
+ *     server that cannot release.
+ * The remainder stops early enough to leave time for step 3. `lockWaitMs`: how long
+ * to wait for an agent's lock another hook holds (SessionEnd is the last chance).
+ */
+export async function settleSession({ input, hook, lockWaitMs = 0 }) {
+	const sessionId = input.session_id ?? "unknown";
+	await settleAssignedHolds(sessionId, null);
+	if (usageMode() === "transcript") {
+		const agents = ["main", ...(await subagentIds(input))];
+		for (const [index, agentId] of agents.entries()) {
+			try {
+				const result = await postRemainder({
+					sessionId,
+					agentId,
+					input,
+					hook,
+					reserveMs: CLEANUP_RESERVE_MS,
+					lockWaitMs,
+				});
+				if (result.skipped !== undefined) {
+					process.stderr.write(
+						`usertrust: no transcript usage for ${agentId} — ${result.skipped}\n`,
+					);
+				}
+				for (const note of result.notes ?? []) {
+					process.stderr.write(`usertrust: transcript usage for ${agentId}: ${note}\n`);
+				}
+				if (result.serverDown) {
+					const rest = agents.slice(index + 1);
+					if (rest.length > 0) {
+						process.stderr.write(
+							`usertrust: server unreachable — transcript usage of ${rest.join(", ")} left for the next settle point\n`,
+						);
+					}
+					break;
+				}
+			} catch (err) {
+				process.stderr.write(
+					`usertrust: transcript usage failed for ${agentId}: ${errText(err)}\n`,
+				);
+			}
+		}
+	}
+	await cleanup(sessionId, null);
+}
+
+/**
  * Post one agent's usage that no hold carried: first every UNRESOLVED vehicle,
  * retried exactly as it was; then the unassigned complete messages, one
  * authorize→settle per model. A call starts only if the budget (less
  * `reserveMs`) still covers authorize + settle + release. Returns `{ skipped }` or
  * `{ posted, notes, serverDown }`.
  */
-export async function postRemainder({ sessionId, agentId, agentTypeHint, input, hook, reserveMs }) {
-	const opened = await openAgent({ sessionId, agentId, input });
+export async function postRemainder({
+	sessionId,
+	agentId,
+	agentTypeHint,
+	input,
+	hook,
+	reserveMs,
+	lockWaitMs = 0,
+}) {
+	const opened = await openAgent({ sessionId, agentId, input, waitMs: lockWaitMs });
 	if (opened.kind === "estimate" || opened.kind === "unavailable") {
 		return { skipped: opened.reason };
 	}
