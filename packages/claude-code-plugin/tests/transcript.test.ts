@@ -30,6 +30,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { readLedgerEvents } from "usertrust";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { hashKey } from "../../server/src/config.js";
 import { createUsertrustServer, type UsertrustServer } from "../../server/src/server.js";
@@ -1640,11 +1641,12 @@ describe("forked subagents — inherited messages are posted once", () => {
 describe("against a REAL usertrust-server — cache tokens priced separately, never double-counted", () => {
 	it("the receipts' four-tier usage is exactly the transcript's, and the cost reconciles", async () => {
 		const KEY = "ut_plugin_transcript_key";
+		const serverState = await mkdtemp(join(tmpdir(), "utcc-tx-srv-"));
 		real = createUsertrustServer({
 			config: {
 				host: "127.0.0.1",
 				port: 0,
-				stateDir: await mkdtemp(join(tmpdir(), "utcc-tx-srv-")),
+				stateDir: serverState,
 				enforcement: "enforce",
 				pendingTtlMs: 240_000,
 				dryRun: true,
@@ -1653,11 +1655,12 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 		});
 		const { port: realPort } = await real.listen();
 		// What THIS server honours decides what the plugin sends: today's server
-		// publishes no capabilities, so the plugin takes its at-most-once path.
+		// publishes `principal` (#227) and no `idempotency-key`, so settles take the
+		// at-most-once path.
 		const health = (await (await fetch(`http://127.0.0.1:${realPort}/v1/health`)).json()) as {
 			capabilities?: string[];
 		};
-		const recordsPrincipal = health.capabilities?.includes("principal") === true;
+		expect(health.capabilities).toContain("principal");
 		await startServer({ forwardTo: `http://127.0.0.1:${realPort}`, key: KEY });
 		// Two responses before the tool call: the hold carries them.
 		await writeMain([
@@ -1678,23 +1681,24 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 				usageSource: string;
 				usage: Record<string, number>;
 				pricing: { appliedRates: Record<string, number> };
-				principal?: unknown;
 			};
 		});
-		// No key is sent: a server without capabilities claims no `idempotency-key`,
-		// and neither does a dryRun one (it has no ledger anchor). A principal is
-		// sent, and recorded on every receipt, only by a server that publishes it.
+		// No key is sent: this server claims no `idempotency-key`. The principal is
+		// sent on every authorize, and the server records it on the call's AUDIT
+		// records (not in the settle response).
 		const principal = { id: "main", type: "main", origin: `claude-code:${SESSION}` };
 		for (const a of authorizes()) {
 			expect(a.status).toBe(200);
 			expect(a.body).not.toHaveProperty("idempotencyKey");
-			if (recordsPrincipal) expect(a.body.principal).toEqual(principal);
-			else expect(a.body).not.toHaveProperty("principal");
+			expect(a.body.principal).toEqual(principal);
 		}
-		for (const receipt of receipts) {
-			if (recordsPrincipal) expect(receipt.principal).toEqual(principal);
-			else expect(receipt).not.toHaveProperty("principal");
-		}
+		await real.close();
+		real = undefined;
+		const calls = readLedgerEvents(join(serverState, "t", ".usertrust")).filter(
+			(e) => e.kind === "llm_call",
+		);
+		expect(calls).toHaveLength(2);
+		for (const call of calls) expect(call.data).toMatchObject({ principal });
 		const expected = [
 			{ inputTokens: 150, outputTokens: 1000, cacheReadTokens: 82_000, cacheWriteTokens: 2_000 },
 			{ inputTokens: 5, outputTokens: 60, cacheReadTokens: 44_000, cacheWriteTokens: 1_000 },
