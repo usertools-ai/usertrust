@@ -1212,7 +1212,34 @@ describe("with a server that honours keys, principal and release (usertrust #205
 			}
 		});
 
-		it("no principal — so no unit or role anywhere — on a server that does not advertise it, or on the estimate path", async () => {
+		it("on the estimate path (no transcript): the same gate, the same principal shape", async () => {
+			await startServer(keyedServer().responder);
+			const estimate = { ...attribution, UT_CC_USAGE: "estimate" };
+			await run("pre-tool-use.mjs", preInput("tu_1"), estimate);
+			await run(
+				"pre-tool-use.mjs",
+				preInput("tu_2", { agent_id: "a1", agent_type: "Explore" }),
+				estimate,
+			);
+			await run("pre-tool-use.mjs", preInput("tu_3", { agent_id: "a2" }), estimate);
+			const attributed = { origin, unit: "platform", role: "release-engineer" };
+			expect(authorizes().map((a) => [a.body.params, a.body.principal])).toEqual([
+				[
+					{ hook: "PreToolUse", tool_name: "Bash" },
+					{ id: "main", type: "main", ...attributed },
+				],
+				[
+					{ hook: "PreToolUse", tool_name: "Bash" },
+					{ id: "a1", type: "Explore", ...attributed },
+				],
+				[
+					{ hook: "PreToolUse", tool_name: "Bash" },
+					{ id: "a2", type: "subagent", ...attributed },
+				],
+			]);
+		});
+
+		it("no principal — so no unit or role anywhere — on a server that does not advertise it, on either path", async () => {
 			capabilities = ["release", "idempotency-key"];
 			await startServer(keyedServer().responder);
 			await writeMain(responseEntries("msg_a", SONNET, u(1, 1)));

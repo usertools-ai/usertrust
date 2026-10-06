@@ -268,6 +268,22 @@ export function principalFor(sessionId, agentId, agentType) {
 	};
 }
 
+/**
+ * The principal for an authorize on the ESTIMATE path, where no transcript (and
+ * no subagent meta file) is read: the same shape as `principalFor`, with the type
+ * taken the way `agentTypeFor` takes it without a meta file — `main` for the
+ * parent, else the hook's own `agent_type` hint, else `subagent`.
+ */
+export function estimatePrincipalFor(sessionId, agentId, agentTypeHint) {
+	const type =
+		agentId === "main"
+			? "main"
+			: typeof agentTypeHint === "string" && agentTypeHint !== ""
+				? agentTypeHint.slice(0, 128)
+				: "subagent";
+	return principalFor(sessionId, agentId, type);
+}
+
 /** The hold that covers `counts` at their real cost (see CACHE_WRITE_HOLD_FACTOR). */
 export function holdInputTokens(counts) {
 	return (
