@@ -61,14 +61,18 @@ const DRIFT_HINT =
 	"do not relax this test.";
 
 describe("engine factory parity — govern.ts and headless.ts stay in lockstep", () => {
-	it.each(["createTBEngine", "isTBInsufficientBalance", "isTBDebitAccountNotFound"])(
-		"keeps %s identical in both governors",
-		(name) => {
-			expect(extractFunction(headlessSourcePath, name), DRIFT_HINT).toBe(
-				extractFunction(governSourcePath, name),
-			);
-		},
-	);
+	it.each([
+		"createTBEngine",
+		"isTBInsufficientBalance",
+		"isTBDebitAccountNotFound",
+		// The keyed post's "already charged" cue: a one-sided edit would let one
+		// governor post a duplicate the other refuses.
+		"isTBExistsWithDifferent",
+	])("keeps %s identical in both governors", (name) => {
+		expect(extractFunction(headlessSourcePath, name), DRIFT_HINT).toBe(
+			extractFunction(governSourcePath, name),
+		);
+	});
 
 	it("still finds a real function body to compare (guards the extractor itself)", () => {
 		const body = extractFunction(governSourcePath, "createTBEngine");

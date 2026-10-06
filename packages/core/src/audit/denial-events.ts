@@ -33,6 +33,7 @@ import {
 	InsufficientBalanceError,
 	PolicyDeniedError,
 } from "../shared/errors.js";
+import type { Principal } from "../shared/types.js";
 import { type AuditWriter, readDurableEventHash } from "./chain.js";
 
 /** Both denial kinds carry this, so a reader can tell old records from new. */
@@ -94,6 +95,13 @@ export interface DenialEventFields {
 	promptParts?: unknown;
 	/** The hold amount the ledger refused — `ledger_rejected` only. */
 	estimatedCost?: number | undefined;
+	/**
+	 * Headless only: WHO was refused, already rebuilt from validated scalars by the
+	 * governor (never the caller's object). `trust()` has no principal and passes none.
+	 */
+	principal?: Principal | undefined;
+	/** Headless only: a keyed call's SHA-256 key hash — never the key itself. */
+	idempotencyKeyHash?: string | undefined;
 }
 
 export interface AppendDenialEventArgs {
@@ -214,6 +222,17 @@ function buildPolicyDeniedData(
 		...(fields.endpointClass !== undefined ? { endpointClass: fields.endpointClass } : {}),
 		error: safeErrorText(error.message),
 		...(fields.transferId !== undefined ? { transferId: fields.transferId } : {}),
+		...labelFields(fields),
+	};
+}
+
+/** The principal and key hash, each present only when given — `trust()` gives neither. */
+function labelFields(fields: DenialEventFields): Record<string, unknown> {
+	return {
+		...(fields.principal !== undefined ? { principal: fields.principal } : {}),
+		...(fields.idempotencyKeyHash !== undefined
+			? { idempotencyKeyHash: fields.idempotencyKeyHash }
+			: {}),
 	};
 }
 
@@ -238,6 +257,7 @@ function buildLedgerRejectedData(
 		...(fields.costCenter !== undefined ? { costCenter: fields.costCenter } : {}),
 		...(fields.endpointClass !== undefined ? { endpointClass: fields.endpointClass } : {}),
 		error: safeErrorText(error.message),
+		...labelFields(fields),
 	};
 }
 

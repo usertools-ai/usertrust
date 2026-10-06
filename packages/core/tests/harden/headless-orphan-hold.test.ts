@@ -22,7 +22,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuditWriter } from "../../src/audit/chain.js";
 import type { TrustEngine } from "../../src/govern.js";
-import type { Authorization } from "../../src/headless.js";
+import type { Authorization, SettleParams } from "../../src/headless.js";
 import { createGovernor } from "../../src/headless.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 
@@ -156,25 +156,32 @@ describe("AUD-001 headless claimed-but-unposted holds", () => {
 		});
 	}
 
+	/** Settle params whose first read throws — a throw AFTER settle's claim, before its POST. */
+	function throwingUsage(): SettleParams {
+		return {
+			get inputTokens(): number {
+				throw new Error("persistSpend-like throw after claim");
+			},
+		};
+	}
+
 	it("abort voids the pending hold when settle throws after claiming the auth", async () => {
 		// persistSpend used to run after the claim and before POST. A throw
 		// there (or any throw after delete-from-activeAuths) left abort() a
-		// silent no-op because the capture was gone. The first property settle
-		// reads after the claim is `auth.model` — a throwing getter is the
-		// persistSpend-after-claim hole without depending on persistSpendLedger
-		// (which swallows write failures on purpose).
+		// silent no-op because the capture was gone. The first CALLER value settle
+		// reads after the claim is its SettleParams — the model, endpoint scope and
+		// hold amount come from the governor's own capture — so a throwing getter
+		// there is the persistSpend-after-claim hole without depending on
+		// persistSpendLedger (which swallows write failures on purpose).
 		const engine = makeTrackingEngine();
 		const gov = await governorWith(engine);
 
 		const auth = await gov.authorize(AUTHORIZE);
 		const handle = snapshotAuth(auth);
-		Object.defineProperty(auth, "model", {
-			get(): string {
-				throw new Error("persistSpend-like throw after claim");
-			},
-		});
 
-		await expect(gov.settle(auth, USAGE)).rejects.toThrow("persistSpend-like throw after claim");
+		await expect(gov.settle(auth, throwingUsage())).rejects.toThrow(
+			"persistSpend-like throw after claim",
+		);
 		expect(engine.posted).toEqual([]);
 		expect(engine.voided).toEqual([]);
 
@@ -196,13 +203,10 @@ describe("AUD-001 headless claimed-but-unposted holds", () => {
 
 		const auth = await gov.authorize(AUTHORIZE);
 		const transferId = auth.transferId;
-		Object.defineProperty(auth, "model", {
-			get(): string {
-				throw new Error("persistSpend-like throw after claim");
-			},
-		});
 
-		await expect(gov.settle(auth, USAGE)).rejects.toThrow("persistSpend-like throw after claim");
+		await expect(gov.settle(auth, throwingUsage())).rejects.toThrow(
+			"persistSpend-like throw after claim",
+		);
 		expect(engine.pending.has(transferId)).toBe(true);
 
 		await gov.destroy();
@@ -309,12 +313,9 @@ describe("AUD-001 headless claimed-but-unposted holds", () => {
 		const first = await gov.authorize(AUTHORIZE);
 		const second = await gov.authorize(AUTHORIZE);
 		for (const auth of [first, second]) {
-			Object.defineProperty(auth, "model", {
-				get(): string {
-					throw new Error("persistSpend-like throw after claim");
-				},
-			});
-			await expect(gov.settle(auth, USAGE)).rejects.toThrow("persistSpend-like throw after claim");
+			await expect(gov.settle(auth, throwingUsage())).rejects.toThrow(
+				"persistSpend-like throw after claim",
+			);
 		}
 		expect(engine.pending.size).toBe(2);
 		expect(readPersistedSpend(vaultBase)).toBeUndefined();

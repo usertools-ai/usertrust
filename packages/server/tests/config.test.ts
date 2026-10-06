@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { hashKey, loadServerConfig, resolveTenant } from "../src/config.js";
+import { hashKey, loadServerConfig, MAX_PENDING_TTL_MS, resolveTenant } from "../src/config.js";
 
 const KEY = "ut_srv_test_key_1";
 
@@ -25,8 +25,24 @@ describe("loadServerConfig", () => {
 		expect(config.port).toBe(4519);
 		expect(config.host).toBe("127.0.0.1");
 		expect(config.enforcement).toBe("enforce");
-		expect(config.pendingTtlMs).toBe(300_000);
+		// Inside the ledger's own 300 s pending timeout by a full sweep interval.
+		expect(config.pendingTtlMs).toBe(240_000);
 		expect(config.tenants[0]?.id).toBe("acme");
+	});
+
+	it("refuses a pendingTtlMs the sweep could not honour before the ledger expires the hold", async () => {
+		// 300 s is the ledger's pending timeout; the sweep runs every 30 s, so a hold
+		// with this TTL could still be pending here when TigerBeetle voids it.
+		await expect(loadServerConfig(await writeConfig({ pendingTtlMs: 300_000 }))).rejects.toThrow();
+		// A full sweep interval to claim the hold, and a second one of margin.
+		expect(MAX_PENDING_TTL_MS).toBe(300_000 - 2 * 30_000);
+		await expect(loadServerConfig(await writeConfig({ pendingTtlMs: 269_999 }))).rejects.toThrow();
+		await expect(
+			loadServerConfig(await writeConfig({ pendingTtlMs: MAX_PENDING_TTL_MS })),
+		).resolves.toBeDefined();
+		await expect(
+			loadServerConfig(await writeConfig({ pendingTtlMs: MAX_PENDING_TTL_MS + 1 })),
+		).rejects.toThrow();
 	});
 
 	it("rejects invalid enforcement mode", async () => {

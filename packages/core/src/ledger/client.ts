@@ -143,6 +143,15 @@ const COST_CENTER_DOMAIN_TAG = Buffer.from("usertrust:cost-center:v1", "utf8");
 // and account ids already live in separate TigerBeetle namespaces. The KAT suite pins it.
 const TRANSFER_ID_DOMAIN_TAG = Buffer.from("usertrust:transfer:v1", "utf8");
 
+/**
+ * How long an unsettled PENDING hold lives before TigerBeetle voids it on its own
+ * (`create_transfers` `timeout`, in seconds) — the restart backstop for every hold
+ * the governors place. Exported because a control plane that sweeps its own pending
+ * holds must sweep BEFORE this, or a settle can reach a hold the ledger already
+ * expired (usertrust-server bounds its TTL by it).
+ */
+export const DEFAULT_PENDING_TIMEOUT_SECONDS = 300;
+
 // TigerBeetle reserves 0 and 2^128 - 1; a transfer may use neither as its id.
 const MAX_TRANSFER_ID = (1n << 128n) - 1n;
 
@@ -781,7 +790,7 @@ export class TrustTBClient {
 			user_data_128: p.userData128 ?? 0n,
 			user_data_64: p.userData64 ?? 0n,
 			user_data_32: p.userData32 ?? 0,
-			timeout: p.timeoutSeconds ?? 300,
+			timeout: p.timeoutSeconds ?? DEFAULT_PENDING_TIMEOUT_SECONDS,
 			ledger: LEDGER_USERTOKENS,
 			code: p.code,
 			flags: TransferFlags.pending,

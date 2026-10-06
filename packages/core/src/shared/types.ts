@@ -70,6 +70,21 @@ export interface ReceiptUsage {
 }
 
 // ── Trust Receipt ──
+/**
+ * WHO spent — a label carried onto every record a hold leaves, never into the
+ * wallet. Each field is 1–128 characters of `[A-Za-z0-9._:-]`
+ * (`PRINCIPAL_FIELD_PATTERN`).
+ *
+ * Not "attribution": core spends that word on cost-center envelopes, which DO
+ * select the account a hold debits. A principal never selects an account and never
+ * enters the policy gate.
+ */
+export interface Principal {
+	id: string;
+	type: string;
+	origin?: string | undefined;
+}
+
 export interface TrustReceipt {
 	transferId: string;
 	cost: number;
@@ -179,6 +194,13 @@ export interface TrustReceipt {
 		/** Omitted when the scope carried no `allocated` metadata (D4). */
 		fraction?: number;
 	};
+	/**
+	 * Who spent, as captured at authorize (headless `AuthorizeParams.principal`).
+	 * A ROOT field for the reason `pricing` is one: receipt.v1 closes `meter` and
+	 * leaves the root open. Absent — the key, not an `undefined` value — when the
+	 * caller gave none, so an unlabelled receipt keeps its pre-principal shape.
+	 */
+	principal?: Principal;
 }
 
 // ── TrustedResponse — returned by every governed LLM call ──

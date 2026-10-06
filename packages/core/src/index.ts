@@ -93,13 +93,22 @@ export { exportMarkdown } from "./export/markdown.js";
 export type { TrustedClient, TrustOpts } from "./govern.js";
 // Core
 export { trust } from "./govern.js";
-export type { Authorization, AuthorizeParams, Governor, SettleParams } from "./headless.js";
+export type {
+	Authorization,
+	AuthorizeParams,
+	Governor,
+	GovernorOpts,
+	SettleParams,
+	UnheldSettlementOutcome,
+	UnheldSettlementParams,
+} from "./headless.js";
 // Headless governance (non-SDK integrations)
-export { createGovernor } from "./headless.js";
+export { createGovernor, sanitizeReleaseReason } from "./headless.js";
 // The ledger client is the required first argument of every budget entry point
 // above. Without it at the root those functions can be imported but never
 // called: the argument is unnameable and unconstructible outside this package.
 export {
+	DEFAULT_PENDING_TIMEOUT_SECONDS,
 	PendingReplayError,
 	TBTransferError,
 	TransferIdRetiredError,
@@ -150,6 +159,7 @@ export type { DenialAuditMetadata } from "./shared/errors.js";
 // Errors
 export {
 	AccountNotFoundError,
+	AlreadySettledError,
 	AnomalyError,
 	AuditDegradedError,
 	CredentialAccessDeniedError,
@@ -168,7 +178,10 @@ export {
 // pattern outside this package is a rule that drifts silently: it would accept an
 // id `createGovernor()` then rejects, or (worse) admit a `::` parent whose account
 // derivation lands on stranded pre-v3 cost-center money.
-export { parentUserIdRefusal } from "./shared/ids.js";
+// The same, for the two caller inputs headless `authorize()` validates: an
+// integration that checks a key or a principal on its own wire (usertrust-server
+// does) refuses exactly what the governor would, instead of a copy that drifts.
+export { idempotencyKeyRefusal, parentUserIdRefusal, principalFieldRefusal } from "./shared/ids.js";
 // Types
 export type {
 	ActionDescriptor,
@@ -193,6 +206,7 @@ export type {
 	PolicyEnforcement,
 	PolicyRule,
 	PolicySeverity,
+	Principal,
 	RateSource,
 	ReceiptUsage,
 	SkillManifest,

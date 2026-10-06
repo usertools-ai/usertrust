@@ -143,6 +143,64 @@ error and abort listener must route through it.
 *Prevents:* six stream consumption modes plus abort/error/end paths double-settling, or
 settle-then-void leaving the ledger holding a debit its accounting does not.
 
+**Headless: exactly one terminal per hold — settle | abort | release.** `createGovernor()` has no
+`finalizeOnce`; its gate is the claim out of `activeAuths` (then the claimed-but-never-POSTed
+`unpostedHolds`), with `settling` making every other terminal a silent no-op while a POST is in
+flight. `abort` means the call FAILED: a breaker failure and `llm_call_failed`. `release` means the
+hold outlived its use — a TTL sweep, a shutdown, a call not made, a keyed duplicate: the same void,
+the neutral `hold_released`, and no breaker failure. Every terminal reads the governor's capture —
+model, endpoint scope, hold amount, attribution, principal — and never the caller's handle.
+*Prevents:* #204, where the server booked every expired hold as an LLM failure and five in a row
+opened the breaker on a healthy provider; and a caller re-rating its own settle by assigning a
+cheaper `auth.model` or `class: "local"` to the handle after the hold was placed.
+
+**A caller idempotency key has exactly ONE ledger anchor: its post.** The post goes in under
+`deriveTransferId(scope ‖ 0x00 ‖ key, "post")` — restart-stable, so at most one charge per key
+ever commits, across processes and restarts. The RESERVE stays minted: a derived reserve id would
+turn a release-then-retry (`PendingReplayError`), a top-up-then-retry (`exceeds_credits` retires
+the id) and a lost reply on a reserve that landed (a deny plus an orphan hold) into failures, and it
+is not the anchor anyway. At authorize, a post stored under the anchor is `AlreadySettledError`, and
+an anchor that cannot be read is `LedgerUnavailableError` — never "not charged". At settle, an
+`exists_with_different_*` answer is decided by looking the anchor up: a stored post naming another
+pending transfer means another hold already charged the key, so this hold is released,
+`settlement_duplicate` is recorded, and the settle throws `AlreadySettledError` — never a second
+post. A replay of a key whose hold can still be settled answers that same handle; one whose
+settle is mid-POST is WAITED out and asked again — its outcome is not known until the POST lands.
+"Can still be settled" includes the LEDGER's clock: past the hold's pending timeout (a deadline the
+governor reads on a monotonic clock, taken before the reserve's I/O, from the same constant the
+reserve passes explicitly), the ledger has voided it, so the key authorizes afresh. A key's slot
+leaves when its hold meets its terminal, and only while the slot still names that hold.
+The key's SHA-256 — never the key — is on every record a keyed hold leaves. The derivation scope is
+`idempotencyScope` (operator input, like `parentUserId`) or, by default, a random id the VAULT
+persists in `.usertrust/idempotency-scope` on its first keyed call — hard-linked into place so two
+processes agree, and refused, never replaced, when unreadable. Not a path, and not a tenant id:
+containers mounting different vaults at one path, or two servers that each serve an `acme`, would
+otherwise share every key on a shared ledger cluster.
+*Prevents:* a retried or concurrent call charging twice, and one deployment's keys colliding with
+another's.
+
+**Real spend that no settle can charge is recorded, never dropped.** A keyed settle for a hold the
+governor no longer holds — a TTL release, a restart — goes to `recordUnheldSettlement`: `"held"`
+(with that hold's transferId) when the key can still be settled, an authorize or POST in flight
+waited out first, `AlreadySettledError` when its charge stands, and otherwise a
+`settlement_unrecoverable` record (key hash, principal, reported usage) whose append failure is
+thrown, never swallowed; an exact in-process retry is answered without a second record — one that
+arrives while the first is still being appended waits for it and shares its outcome, and one whose
+first record reached the chain though its append then failed is remembered too. The governor
+remembers the last 10 000 recorded settles: an exact retry of an older one is recorded again — a
+duplicate record, never a lost one.
+usertrust-server answers 410 and counts it on `/v1/health`, and bounds its TTL so the sweep always
+releases a hold BEFORE the ledger's own pending timeout expires it — a settle that reaches an
+expired hold is recorded only as ambiguous. The TTL clock starts when the authorize request
+arrives, before any ledger I/O, and a replay only ever moves it earlier: a slow or retried
+authorize cannot start it after the ledger's. A hold whose authorize returns only after its TTL
+(or whose reserve returns after its ledger deadline) is released at once and refused as
+retryable, never exposed. The server's own sweep reads ages on a monotonic clock, so a wall-clock
+step cannot move a deadline. A keyless unknown settle stays a 404: without the key's
+anchor, a late settle cannot be told from a retry of one that already charged.
+*Prevents:* provider spend vanishing into a 404 after a TTL sweep or a restart, with nothing on the
+chain to say it happened.
+
 **The settle/void asymmetry is deliberate. Do not "make it consistent."**
 - Usage-extraction failure *after a successful provider call* settles at the estimate, never voids.
 - A clean SSE close with no `message_stop` settles at the estimate rather than dangling.
@@ -397,10 +455,13 @@ accounting, matching the numbers its policy gate saw.
 *Every audit record an attributed call emits carries `costCenter`, from that same capture* — not
 from params, and on the failure terminals as well as the settle ones (`llm_call`, `<action.kind>`,
 `llm_call_failed`, `<action.kind>_failed`, `stream_partial_delivery`, `settlement_ambiguous`,
-`settlement_shortfall`, `injection_detected`, `anomaly_detected`, `policy_denied`,
-`ledger_rejected`). An attributed hold must leave an attributed forensic trail whichever way it
-ends — including the way where it never became a hold at all. Unattributed calls spread an empty
-object, so their records stay byte-identical to what they were before envelopes existed.
+`settlement_shortfall`, `hold_released`, `settlement_duplicate`, `injection_detected`,
+`anomaly_detected`, `policy_denied`, `ledger_rejected`). An attributed hold must leave an
+attributed forensic trail whichever way it ends — including the way where it never became a hold at
+all. Unattributed calls spread an empty object, so their records stay byte-identical to what they
+were before envelopes existed. A headless `principal` follows the same rule on every record a call
+leaves, its denials included: rebuilt from the scalars validated at authorize, the key absent when
+none was given.
 
 *One field, two spellings, deliberately.* The policy context spells it `cost_center` — snake_case,
 beside `estimated_cost`, `budget_remaining` and `action_kind`, because a rule file is what reads it
@@ -892,7 +953,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **fourteen** sanitizers, in two variants: **eight** neutralise C1 and **six** do not. Do
+There are **fifteen** sanitizers, in two variants: **nine** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -975,6 +1036,13 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   to the *inventory*, not the newest code: it predates the guard that failed to see it. **Scope a
   source-wide assertion by what SHIPS, not by the directory layout the other packages happen to
   use** — that is the same lesson as the worktree note above, one level out.
+- The stronger variant on a STORED record rather than a terminal: `sanitizeReleaseReason` in
+  `core/src/headless.ts`. `release()`'s reason is caller text — over HTTP, a remote tenant's
+  `/v1/release` body — and it is written into the hash chain as `hold_released.reason`, where an
+  auditor's tooling later prints it. C0/DEL/C1 are stripped first and the result clipped to 200
+  code points second. It STRIPS rather than substitutes because the record is data, not a render: a
+  `?` would read as part of the reason. `verify --tx` still scrubs the field again when it prints it,
+  and usertrust-server imports this same function for its `released` SSE event rather than a copy.
 
 **THE INVENTORY'S SCOPE IS DECLARED HERE, and the guard matches this sentence.** It covers
 `packages/*/src` — the TypeScript build inputs, which are what `files: ["dist"]` publishes — plus
@@ -1290,7 +1358,8 @@ Real, verified, and worth knowing before you touch the surrounding code.
   that is **duplicated** between `govern.ts` and `headless.ts` — change both in lockstep.
   `createLedgerEngine`, promised in comments in both files, does not exist anywhere in the repo.
   That lockstep is now mechanically pinned: `tests/harden/engine-factory-parity.test.ts` extracts
-  `createTBEngine`, `isTBInsufficientBalance` and `isTBDebitAccountNotFound` from both files, strips
+  `createTBEngine`, `isTBInsufficientBalance`, `isTBDebitAccountNotFound` and
+  `isTBExistsWithDifferent` from both files, strips
   comments and blank lines (the two copies carry deliberately different prose), and requires the
   code to be identical. Fix a failure there by copying the edit across, never by relaxing the test.
 - **`packages/core/bin/govern.ts` is dead code** — outside `include: ["src"]` and outside

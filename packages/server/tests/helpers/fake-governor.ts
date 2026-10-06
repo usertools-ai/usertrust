@@ -5,35 +5,60 @@ import type {
 	Governor,
 	SettleParams,
 	TrustReceipt,
+	UnheldSettlementOutcome,
+	UnheldSettlementParams,
 } from "usertrust";
-import { InsufficientBalanceError, PolicyDeniedError } from "usertrust";
+import { AlreadySettledError, InsufficientBalanceError, PolicyDeniedError } from "usertrust";
 
 export interface FakeGovernorHandle {
 	governor: Governor;
 	calls: {
 		authorized: string[];
+		authorizeParams: AuthorizeParams[];
 		settled: string[];
 		aborted: string[];
+		released: Array<{ transferId: string; reason: string | undefined }>;
 		settleParams: Array<SettleParams | undefined>;
+		unheld: UnheldSettlementParams[];
 	};
 }
 
 export function createFakeGovernor(
-	opts: { budget?: number; denyReason?: string } = {},
+	opts: {
+		budget?: number;
+		denyReason?: string;
+		/**
+		 * What `recordUnheldSettlement` answers: `"retry"` is an exact retry the governor
+		 * had already recorded; `"already_settled"` throws AlreadySettledError.
+		 */
+		unheld?: "unrecoverable" | "retry" | "held" | "already_settled";
+	} = {},
 ): FakeGovernorHandle {
 	let budget = opts.budget ?? 10_000;
 	let seq = 0;
 	const pending = new Map<string, Authorization>();
+	// The real governor's in-process replay: a key with a live hold answers with it.
+	const keyed = new Map<string, Authorization>();
 	const calls = {
 		authorized: [] as string[],
+		authorizeParams: [] as AuthorizeParams[],
 		settled: [] as string[],
 		aborted: [] as string[],
+		released: [] as Array<{ transferId: string; reason: string | undefined }>,
 		settleParams: [] as Array<SettleParams | undefined>,
+		unheld: [] as UnheldSettlementParams[],
+	};
+	const forget = (auth: Authorization): void => {
+		for (const [key, held] of keyed) if (held === auth) keyed.delete(key);
 	};
 
 	const governor: Governor = {
 		async authorize(params: AuthorizeParams): Promise<Authorization> {
+			calls.authorizeParams.push(params);
 			if (opts.denyReason) throw new PolicyDeniedError(opts.denyReason);
+			const live =
+				params.idempotencyKey !== undefined ? keyed.get(params.idempotencyKey) : undefined;
+			if (live !== undefined) return live;
 			const estimatedCost = (params.estimatedInputTokens ?? 100) + (params.maxOutputTokens ?? 4096);
 			if (estimatedCost > budget) {
 				throw new InsufficientBalanceError("fake", estimatedCost, budget);
@@ -47,11 +72,13 @@ export function createFakeGovernor(
 			};
 			budget -= estimatedCost;
 			pending.set(auth.transferId, auth);
+			if (params.idempotencyKey !== undefined) keyed.set(params.idempotencyKey, auth);
 			calls.authorized.push(auth.transferId);
 			return auth;
 		},
 		async settle(auth: Authorization, params?: SettleParams): Promise<TrustReceipt> {
 			pending.delete(auth.transferId);
+			forget(auth);
 			const cost = (params?.inputTokens ?? 0) + (params?.outputTokens ?? 0) || auth.estimatedCost;
 			budget += auth.estimatedCost - cost;
 			calls.settled.push(auth.transferId);
@@ -71,8 +98,21 @@ export function createFakeGovernor(
 		},
 		async abort(auth: Authorization): Promise<void> {
 			pending.delete(auth.transferId);
+			forget(auth);
 			budget += auth.estimatedCost;
 			calls.aborted.push(auth.transferId);
+		},
+		async release(auth: Authorization, reason?: string): Promise<void> {
+			if (!pending.delete(auth.transferId)) return;
+			forget(auth);
+			budget += auth.estimatedCost;
+			calls.released.push({ transferId: auth.transferId, reason });
+		},
+		async recordUnheldSettlement(params: UnheldSettlementParams): Promise<UnheldSettlementOutcome> {
+			calls.unheld.push(params);
+			if (opts.unheld === "already_settled") throw new AlreadySettledError();
+			if (opts.unheld === "held") return { outcome: "held", transferId: "tx_live_hold" };
+			return { outcome: "unrecoverable", recorded: opts.unheld !== "retry" };
 		},
 		async destroy(): Promise<void> {
 			pending.clear();

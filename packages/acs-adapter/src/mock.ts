@@ -7,6 +7,7 @@ import type {
 	EnvelopeStatus,
 	Governor,
 	SettleParams,
+	UnheldSettlementOutcome,
 } from "usertrust/headless";
 import type { PolicyDecider } from "./composite.js";
 import { CompositeEvaluator } from "./composite.js";
@@ -70,6 +71,18 @@ export function createMockGovernor(opts: { budget?: number } = {}): { governor: 
 			if (holds.delete(auth.transferId)) {
 				budget += auth.estimatedCost;
 			}
+		},
+		// The mock has no breaker and no chain, so a release returns the hold exactly
+		// as an abort does; the difference between the two lives in the real governor.
+		async release(auth: Authorization): Promise<void> {
+			if (holds.delete(auth.transferId)) {
+				budget += auth.estimatedCost;
+			}
+		},
+		// No keys are tracked and there is no chain to record on: every late settle
+		// is reported unrecoverable, and nothing is written anywhere.
+		async recordUnheldSettlement(): Promise<UnheldSettlementOutcome> {
+			return { outcome: "unrecoverable", recorded: false };
 		},
 		async destroy(): Promise<void> {
 			for (const auth of holds.values()) {

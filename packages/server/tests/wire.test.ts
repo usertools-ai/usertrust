@@ -1,8 +1,15 @@
-import { AnomalyError, InsufficientBalanceError, PolicyDeniedError } from "usertrust";
+import {
+	AlreadySettledError,
+	AnomalyError,
+	InsufficientBalanceError,
+	LedgerUnavailableError,
+	PolicyDeniedError,
+} from "usertrust";
 import { describe, expect, it } from "vitest";
 import {
 	AbortRequestSchema,
 	AuthorizeRequestSchema,
+	ReleaseRequestSchema,
 	SettleRequestSchema,
 	toHttpError,
 } from "../src/wire.js";
@@ -127,5 +134,59 @@ describe("toHttpError", () => {
 		expect(mapped.status).toBe(500);
 		expect(mapped.body.error).toBe("internal");
 		expect(JSON.stringify(mapped.body)).not.toContain("sk-ant");
+	});
+});
+
+describe("#205 wire: keys, principal, release, and the two new error mappings", () => {
+	it("accepts a legal key and principal, and strips extra principal keys", () => {
+		const parsed = AuthorizeRequestSchema.parse({
+			model: "m",
+			idempotencyKey: "!~".repeat(128),
+			principal: { id: "user-42", type: "human", origin: "cli:session.7", extra: "x" },
+		});
+		expect(parsed.idempotencyKey).toHaveLength(256);
+		expect(parsed.principal).toEqual({ id: "user-42", type: "human", origin: "cli:session.7" });
+	});
+
+	it.each([
+		["", "an empty key"],
+		["k".repeat(257), "a 257-character key"],
+		["call 1", "a space"],
+		[`call${String.fromCharCode(0x07)}`, "a control character"],
+		["cäll", "non-ASCII"],
+	])("refuses %j (%s) as a key — the governor's own rule", (idempotencyKey) => {
+		expect(AuthorizeRequestSchema.safeParse({ model: "m", idempotencyKey }).success).toBe(false);
+		expect(SettleRequestSchema.safeParse({ transferId: "t", idempotencyKey }).success).toBe(false);
+	});
+
+	it("refuses an illegal principal field", () => {
+		for (const principal of [
+			{ id: "a b", type: "human" },
+			{ id: "a", type: "human/admin" },
+			{ id: "a", type: "human", origin: "" },
+			{ id: "x".repeat(129), type: "human" },
+			{ id: "a" },
+		]) {
+			expect(AuthorizeRequestSchema.safeParse({ model: "m", principal }).success).toBe(false);
+		}
+	});
+
+	it("release takes a transferId and an optional reason", () => {
+		expect(ReleaseRequestSchema.parse({ transferId: "tx_1" })).toEqual({ transferId: "tx_1" });
+		expect(ReleaseRequestSchema.parse({ transferId: "tx_1", reason: "r" }).reason).toBe("r");
+		expect(ReleaseRequestSchema.safeParse({ transferId: "" }).success).toBe(false);
+	});
+
+	it("maps AlreadySettledError to 409 already_settled", () => {
+		const mapped = toHttpError(new AlreadySettledError());
+		expect(mapped.status).toBe(409);
+		expect(mapped.body.error).toBe("already_settled");
+	});
+
+	it("maps LedgerUnavailableError to 503, with a fixed reason that leaks nothing", () => {
+		const mapped = toHttpError(new LedgerUnavailableError("connect ECONNREFUSED 10.0.0.7:3000"));
+		expect(mapped.status).toBe(503);
+		expect(mapped.body.error).toBe("ledger_unavailable");
+		expect(mapped.body.reason).not.toContain("10.0.0.7");
 	});
 });

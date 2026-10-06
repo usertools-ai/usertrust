@@ -32,7 +32,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { CreateTransferStatus } from "tigerbeetle-node";
+import { CreateTransferStatus, type Transfer } from "tigerbeetle-node";
 import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
 import {
 	appendDenialEvent,
@@ -46,7 +46,12 @@ import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
-import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
+import {
+	DEFAULT_PENDING_TIMEOUT_SECONDS,
+	TBTransferError,
+	TrustTBClient,
+	XFER_SPEND,
+} from "./ledger/client.js";
 import {
 	copyAppliedRates,
 	costFromRates,
@@ -87,6 +92,7 @@ const VERIFY_URL_BASE = "https://verify.usertrust.dev";
 
 import { createAnomalyDetector } from "./anomaly/detector.js";
 import {
+	AlreadySettledError,
 	AnomalyError,
 	AuditDegradedError,
 	InsufficientBalanceError,
@@ -202,10 +208,27 @@ export interface TrustEngine {
 	 * `settlement_shortfall`. Omitting `actualAmount` posts the full pending
 	 * amount. An engine that returns `void` (injected test engines) is treated as
 	 * posted-in-full with zero shortfall.
+	 *
+	 * `postTransferId` is a keyed call's post ANCHOR — an ID, derived by the
+	 * governor from the key alone (`deriveTransferId(key, "post")`), restart-stable,
+	 * so at most one post per key can ever commit. `exists` is success (a replay of
+	 * THIS post). Any `exists_with_different_*` is resolved by looking the id up:
+	 * a stored post against a DIFFERENT pending transfer means the key was already
+	 * charged by another hold, and the engine throws `AlreadySettledError` with this
+	 * hold still pending; anything else stays a hard failure. Omitted → a minted id.
+	 *
+	 * The POST is the only keyed transfer. A keyed call's RESERVE is minted like any
+	 * other: it is not the at-most-once anchor, and a derived reserve id would turn
+	 * three ordinary paths into failures — a release and re-authorize of the same key
+	 * (the replayed id is a `PendingReplayError`), a top-up after an
+	 * `exceeds_credits` refusal (the refused id is retired), and a lost reply on a
+	 * reserve that landed (a deny plus an orphan hold), where a minted id's `exists`
+	 * is that reserve landing.
 	 */
 	postPendingSpend(
 		transferId: string,
 		actualAmount?: number,
+		postTransferId?: bigint,
 		// biome-ignore lint/suspicious/noConfusingVoidType: load-bearing — an injected engine declaring `Promise<void>` must stay assignable, and `void` is the only member type that accepts it; `undefined` would reject every one.
 	): Promise<{ posted: number; shortfall: number } | void>;
 	voidPendingSpend(transferId: string): Promise<void>;
@@ -234,6 +257,17 @@ export interface TrustEngine {
 	 * never came from.
 	 */
 	lookupBalances?(accountIds: bigint[]): Promise<Map<bigint, number>>;
+	/**
+	 * Read one transfer by id, or `null` when TigerBeetle has none — delegated
+	 * verbatim to `TrustTBClient.lookupTransfer` in both factories. The governor
+	 * reads a keyed call's post ANCHOR through it before reserving: a post already
+	 * stored under the key's post id means the key was charged, and the call is
+	 * refused with `AlreadySettledError` rather than holding funds for a post that
+	 * can never land. An early answer only — the anchor's own uniqueness at settle is
+	 * the guarantee. OPTIONAL like `lookupBalances`, for injected test engines; a
+	 * KEYED authorize on an engine without it is refused as ledger-unavailable.
+	 */
+	lookupTransfer?(transferId: bigint): Promise<Transfer | null>;
 	destroy?(): void;
 }
 
@@ -3686,6 +3720,17 @@ function isTBDebitAccountNotFound(err: unknown): boolean {
 }
 
 /**
+ * Any of TigerBeetle's `exists_with_different_*` answers: the submitted id already
+ * names a transfer, and some field differs. Matched by the status NAME, so a field
+ * the server adds to that comparison later is covered without a list to keep in
+ * step. On a keyed post this is the cue to look the id up — never the decision.
+ */
+function isTBExistsWithDifferent(err: unknown): boolean {
+	if (!(err instanceof TBTransferError)) return false;
+	return CreateTransferStatus[err.code]?.startsWith("exists_with_different_") === true;
+}
+
+/**
  * Create a balance-enforcing TrustEngine backed by a real TigerBeetle client.
  *
  * P1-LEDGER-ENFORCE: the holding account is created with
@@ -3755,6 +3800,9 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					creditAccountId: treasury,
 					amount: params.amount,
 					code: XFER_SPEND,
+					// Explicit, never the client's default: a governor's hold deadline and
+					// usertrust-server's TTL cap are both derived from this same constant.
+					timeoutSeconds: DEFAULT_PENDING_TIMEOUT_SECONDS,
 				});
 				pendingMap.set(params.transferId, { tbId: tbTransferId, heldAmount: params.amount });
 				return { transferId: params.transferId };
@@ -3825,9 +3873,17 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			return await tbClient.lookupBalances(accountIds);
 		},
 
+		// Delegated verbatim, like lookupBalances: the governor's only way to ask
+		// whether a keyed call's post anchor already exists, and so it is exercised
+		// through THIS factory by the idempotency suite rather than only on mocks.
+		async lookupTransfer(transferId: bigint): Promise<Transfer | null> {
+			return await tbClient.lookupTransfer(transferId);
+		},
+
 		async postPendingSpend(
 			transferId: string,
 			actualAmount?: number,
+			postTransferId?: bigint,
 			// biome-ignore lint/suspicious/noConfusingVoidType: matches the TrustEngine interface, where `void` is load-bearing (see the declaration in govern.ts).
 		): Promise<{ posted: number; shortfall: number } | void> {
 			const entry = pendingMap.get(transferId);
@@ -3839,7 +3895,29 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			// the full pending amount (amount_max), unchanged.
 			const posted =
 				actualAmount != null ? Math.min(actualAmount, entry.heldAmount) : entry.heldAmount;
-			await tbClient.postTransfer(entry.tbId, actualAmount != null ? posted : undefined);
+			const postOpts = postTransferId !== undefined ? { transferId: postTransferId } : undefined;
+			try {
+				await tbClient.postTransfer(
+					entry.tbId,
+					actualAmount != null ? posted : undefined,
+					postOpts,
+				);
+			} catch (err) {
+				// A keyed post's id is the key's at-most-once ANCHOR. `exists` already
+				// returned above as success (a replay of THIS post). Any
+				// `exists_with_different_*` is decided by what is STORED under the id,
+				// never by which field the server happened to compare first: a post
+				// against a DIFFERENT pending transfer means another hold already charged
+				// this key. This hold is still pending and still in pendingMap, so the
+				// governor can release it. Every other answer stays a hard failure.
+				if (postTransferId !== undefined && isTBExistsWithDifferent(err)) {
+					const stored = await tbClient.lookupTransfer(postTransferId);
+					if (stored !== null && stored.pending_id !== entry.tbId) {
+						throw new AlreadySettledError();
+					}
+				}
+				throw err;
+			}
 			pendingMap.delete(transferId);
 			return { posted, shortfall: actualAmount != null ? actualAmount - posted : 0 };
 		},

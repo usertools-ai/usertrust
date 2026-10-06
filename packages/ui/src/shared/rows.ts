@@ -104,8 +104,21 @@ export function toLedgerRows(
  */
 const DENIAL_KINDS = new Set(["policy_denied", "ledger_rejected"]);
 
-export function statusOf(row: LedgerRow): "settled" | "pending" | "failed" | "denied" {
+/**
+ * Holds given back with nothing charged and nothing failed — a TTL sweep, a
+ * shutdown, a keyed duplicate. They carry no `settled` field, so without this arm
+ * they read "pending": a hold that can never settle, shown as one that might.
+ * Mirrors packages/verify's RELEASED arm.
+ */
+const RELEASE_KINDS = new Set(["hold_released", "settlement_duplicate"]);
+
+export type RowStatus = "settled" | "pending" | "failed" | "denied" | "released" | "unrecoverable";
+
+export function statusOf(row: LedgerRow): RowStatus {
 	if (DENIAL_KINDS.has(row.kind)) return "denied";
+	// Real spend that no settle could charge (its hold was gone). Loud on purpose.
+	if (row.kind === "settlement_unrecoverable") return "unrecoverable";
+	if (RELEASE_KINDS.has(row.kind)) return "released";
 	if (row.kind === "llm_call_failed" || row.error !== undefined) return "failed";
 	if (row.settled === true) return "settled";
 	return "pending";
