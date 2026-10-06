@@ -1,11 +1,15 @@
 // PreToolUse: authorize a spend reservation before the tool executes.
 //
+// The plugin NEVER grants permission: it can only deny. A call it does not block
+// gets no permission decision at all (see `proceed`), so Claude Code's own
+// permission flow decides it; a hook's `allow` would skip the user's permission
+// prompt, a power a budget tool was never given.
+//
 // Watch-only by default (`guardMode` in lib.mjs): this hook NEVER blocks a tool
-// call, and never approves one — it makes no permission decision at all (see
-// `proceed`). A 402/403 denial is written down as a `would_block` record; a call
-// that could not be metered (the server is unreachable, or answers with
-// something unusable) is written down as a `gap` record. With UT_CC_MODE=enforce
-// it blocks: a denial is enforced, and a failed authorization fails closed
+// call. A 402/403 denial is written down as a `would_block` record; a call that
+// could not be metered (the server is unreachable, or answers with something
+// unusable) is written down as a `gap` record. With UT_CC_MODE=enforce it
+// blocks: a denial is enforced (`deny`), and a failed authorization fails closed
 // (exit 2) unless UT_FAIL_OPEN=1, which lets the call through and records the
 // gap. Output contract adapted from the AGT Claude Code plugin's stdin-JSON
 // permissionDecision convention (MIT — see repository NOTICE).
@@ -57,12 +61,13 @@ function sanitizeReason(value, fallback = "unspecified") {
 	return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
 }
 
-function emit(decision, reason) {
+/** Block the call: the one permission decision this hook ever makes. */
+function deny(reason) {
 	process.stdout.write(
 		JSON.stringify({
 			hookSpecificOutput: {
 				hookEventName: "PreToolUse",
-				permissionDecision: decision,
+				permissionDecision: "deny",
 				permissionDecisionReason: reason.slice(0, MAX_REASON_CHARS),
 			},
 		}),
@@ -72,17 +77,15 @@ function emit(decision, reason) {
 const mode = guardMode();
 
 /**
- * Let the call through. Enforce answers `allow`, as earlier releases did. Watch
- * makes NO decision — exit 0 with nothing on stdout, which Claude Code reads as
- * "no decision": the call goes through the user's normal permission flow. An
- * `allow` would skip the permission prompt
- * (https://code.claude.com/docs/en/hooks#pretooluse-decision-control), which a
- * watch-only plugin must never do. The reason goes to stderr: on exit 0, Claude
- * Code's debug log, which is also where an `allow` reason goes.
+ * Let the call through, in either mode, with NO decision: exit 0 with nothing on
+ * stdout, which Claude Code reads as "no decision" — the call goes through the
+ * user's normal permission flow. Never `allow`: that skips the permission prompt
+ * (https://code.claude.com/docs/en/hooks#pretooluse-decision-control). The reason
+ * goes to stderr: on exit 0, Claude Code's debug log, which is where an `allow`
+ * reason went too.
  */
 function proceed(reason) {
-	if (mode === "enforce") emit("allow", reason);
-	else process.stderr.write(`${reason.slice(0, MAX_REASON_CHARS)}\n`);
+	process.stderr.write(`${reason.slice(0, MAX_REASON_CHARS)}\n`);
 }
 
 // Known before anything can fail, so a gap record can always say whose call it was.
@@ -209,7 +212,7 @@ try {
 			const error = sanitizeReason(json?.error, "denied");
 			const reason = sanitizeReason(json?.reason);
 			if (mode === "enforce") {
-				emit("deny", `usertrust ${error}: ${reason}`);
+				deny(`usertrust ${error}: ${reason}`);
 			} else {
 				await recordWatchEvent({
 					kind: "would_block",

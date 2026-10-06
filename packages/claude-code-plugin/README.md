@@ -9,12 +9,13 @@ and Stop/SubagentStop post whatever no hold carried and terminate anything left
 hanging. Nothing is routed through usertrust: it only reads what Claude Code
 already recorded.
 
-**Watch-only by default.** Installed, the plugin never blocks a tool call, and
-never approves one either: Claude Code's own permission settings apply exactly as
-they would without it. A call the server refuses (over budget, or denied by
-policy) is written down as one that would have been blocked, and a call that
-could not be metered (the server is unreachable, say) as a gap. Set
-`UT_CC_MODE=enforce` to block — see [Modes](#modes-watch-only-by-default).
+**Watch-only by default.** Installed, the plugin never blocks a tool call. A call
+the server refuses (over budget, or denied by policy) is written down as one that
+would have been blocked, and a call that could not be metered (the server is
+unreachable, say) as a gap. Set `UT_CC_MODE=enforce` to block — see
+[Modes](#modes-watch-only-by-default). **In no mode does it approve a call:** it
+can only deny, so Claude Code's own permission settings decide every call it lets
+through, exactly as they would without it.
 
 ## Install
 
@@ -194,36 +195,39 @@ both modes.
 
 | The server's answer at PreToolUse | watch (the default) | enforce (`UT_CC_MODE=enforce`) |
 | --- | --- | --- |
-| A reservation (200) | No decision: your permission settings apply | `allow` |
+| A reservation (200) | No decision: your permission settings apply | No decision |
 | Over budget or denied by policy (402/403) | No decision, and a `would_block` record | `deny`: the call is blocked |
-| No usable answer: unreachable, a timeout, any other status, a malformed body | No decision, and a `gap` record | Blocked (exit 2). With `UT_FAIL_OPEN=1`: `allow`, and a `gap` record |
-| A shadow answer from an `evaluate_only` server | No decision | `allow` |
+| No usable answer: unreachable, a timeout, any other status, a malformed body | No decision, and a `gap` record | Blocked (exit 2). With `UT_FAIL_OPEN=1`: no decision, and a `gap` record |
+| A shadow answer from an `evaluate_only` server | No decision | No decision |
 
-**Watch** never blocks a tool call, and never approves one: PreToolUse exits 0
-without a permission decision, which Claude Code reads as "no decision" — the call
-goes through its normal permission flow. A hook's `allow` would skip the
-permission prompt
-([PreToolUse decision control](https://code.claude.com/docs/en/hooks#pretooluse-decision-control)),
-so watch never sends one. `UT_FAIL_OPEN` has no effect in watch mode. What the
-plugin would have said goes to stderr, which Claude Code keeps in its
-[debug log](https://code.claude.com/docs/en/hooks#debug-hooks). Watch changes what
-the plugin decides, not what the server records: past the budget the server still
-refuses to authorize, so that usage is not on the ledger (the remainder posted at
-Stop is refused too — see *Denied usage* above), and the `would_block` records
-are where it shows.
+**No decision** means PreToolUse exits 0 with nothing on stdout, which Claude
+Code reads as "no decision": the call goes through its normal permission flow.
+The plugin never answers `allow`, in either mode, because a hook's `allow` skips
+the permission prompt
+([PreToolUse decision control](https://code.claude.com/docs/en/hooks#pretooluse-decision-control))
+— a power a budget tool was never given. The only decision it ever makes is
+`deny`. What it would have said goes to stderr, which Claude Code keeps in its
+[debug log](https://code.claude.com/docs/en/hooks#debug-hooks). **Upgrading from
+v1.3.0 or earlier:** those releases answered `allow` on every call they let
+through, so the permission prompts your settings call for were silently skipped;
+you will now see them.
+
+**Watch** never blocks a tool call, and `UT_FAIL_OPEN` has no effect in it. Watch
+changes what the plugin decides, not what the server records: past the budget the
+server still refuses to authorize, so that usage is not on the ledger (the
+remainder posted at Stop is refused too — see *Denied usage* above), and the
+`would_block` records are where it shows.
 
 **Enforce** blocks, as earlier releases did by default. A budget (402) or policy
 (403) denial blocks the call, whatever `UT_FAIL_OPEN` says. If the server cannot
 answer usably, the hook exits 2 and the call is **blocked** — unless
-`UT_FAIL_OPEN=1`: then the call proceeds, answered `allow` with a "proceeding
-ungoverned" reason, and the miss is written down as a `gap` record.
-`UT_FAIL_OPEN=1` suits interactive sessions where availability matters more than
-enforcement — a stopped server then never blocks your session, and the usage it
-misses stays in the transcript to be posted at a later settle point. Leave it
-unset when the budget must be enforced. A reservation, and a shadow answer, are
-answered `allow`, which skips Claude Code's permission prompt for that call.
-Upgrading from a release where blocking was the default: set
-`UT_CC_MODE=enforce` to keep it.
+`UT_FAIL_OPEN=1`: then the call proceeds (no decision, and a "proceeding
+ungoverned" reason in the debug log), and the miss is written down as a `gap`
+record. `UT_FAIL_OPEN=1` suits interactive sessions where availability matters
+more than enforcement — a stopped server then never blocks your session, and the
+usage it misses stays in the transcript to be posted at a later settle point.
+Leave it unset when the budget must be enforced. Upgrading from a release where
+blocking was the default: set `UT_CC_MODE=enforce` to keep it.
 
 In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran;
 an estimate hold whose settle fails is left on disk for Stop cleanup, and the

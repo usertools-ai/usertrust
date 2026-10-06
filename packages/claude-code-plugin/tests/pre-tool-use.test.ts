@@ -58,7 +58,7 @@ interface HookOutput {
 }
 
 describe("pre-tool-use hook", () => {
-	it("allows and records the reservation as a per-hold state file on 200", async () => {
+	it("lets a 200 through with NO decision, and records the reservation as a per-hold state file", async () => {
 		const port = await startFake((body) => {
 			expect((body as { model: string }).model).toBe("claude-sonnet-4-6");
 			expect((body as { params: { tool_name: string } }).params.tool_name).toBe("Bash");
@@ -72,9 +72,9 @@ describe("pre-tool-use hook", () => {
 			UT_SERVER_URL: `http://127.0.0.1:${port}`,
 		});
 		expect(result.code).toBe(0);
-		const output = JSON.parse(result.stdout) as HookOutput;
-		expect(output.hookSpecificOutput.permissionDecision).toBe("allow");
-		expect(output.hookSpecificOutput.permissionDecisionReason).toContain("tx_1");
+		// No decision: an `allow` would skip the user's permission prompt.
+		expect(result.stdout).toBe("");
+		expect(result.stderr).toContain("tx_1");
 		// No agent_id in the payload → the parent's "main" bucket.
 		const files = await readdir(stateDir);
 		expect(files).toEqual(["sess1__main__tu_1.json"]);
@@ -187,19 +187,18 @@ describe("pre-tool-use hook", () => {
 		expect(await readdir(stateDir)).toEqual([]);
 	});
 
-	it("UT_FAIL_OPEN=1 allows with a warning when the server is unreachable", async () => {
+	it("UT_FAIL_OPEN=1 lets the call through with NO decision, and a warning, when the server is unreachable", async () => {
 		const result = await runHook(HOOK, PAYLOAD, {
 			...baseEnv,
 			UT_SERVER_URL: "http://127.0.0.1:9",
 			UT_FAIL_OPEN: "1",
 		});
 		expect(result.code).toBe(0);
-		const output = JSON.parse(result.stdout) as HookOutput;
-		expect(output.hookSpecificOutput.permissionDecision).toBe("allow");
-		expect(output.hookSpecificOutput.permissionDecisionReason).toContain("ungoverned");
+		expect(result.stdout).toBe("");
+		expect(result.stderr).toContain("ungoverned");
 	});
 
-	it("shadow response allows and records nothing", async () => {
+	it("a shadow response lets the call through with NO decision, and records nothing", async () => {
 		const port = await startFake(() => ({
 			status: 200,
 			json: { shadow: true, shadowId: "shadow_1", decision: "would_deny", reason: "rule" },
@@ -209,9 +208,8 @@ describe("pre-tool-use hook", () => {
 			UT_SERVER_URL: `http://127.0.0.1:${port}`,
 		});
 		expect(result.code).toBe(0);
-		const output = JSON.parse(result.stdout) as HookOutput;
-		expect(output.hookSpecificOutput.permissionDecision).toBe("allow");
-		expect(output.hookSpecificOutput.permissionDecisionReason).toContain("shadow");
+		expect(result.stdout).toBe("");
+		expect(result.stderr).toContain("shadow");
 		expect(await readdir(stateDir)).toEqual([]);
 	});
 

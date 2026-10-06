@@ -88,8 +88,8 @@ export function usageMode() {
 }
 
 /**
- * Whether the plugin may block a tool call. `watch` (the default) NEVER blocks,
- * and makes no permission decision at all (see `proceed` in pre-tool-use.mjs): an
+ * Whether the plugin may block a tool call. It never grants one, in either mode
+ * (see `proceed` in pre-tool-use.mjs). `watch` (the default) NEVER blocks: an
  * over-budget or policy denial (402/403) is written down as a `would_block`
  * record, and a call that could not be metered (the server is unreachable, times
  * out, or answers something unusable) as a `gap` record — missed metering is
