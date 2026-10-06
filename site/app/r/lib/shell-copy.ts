@@ -268,15 +268,17 @@ export function shellHeadline(state: PageState): string {
 }
 
 // ===========================================================================
-// The OG/share card (§12 open question 1, default (b): "verdict-only card,
-// amount on the page" — NO dollar amount, ever, on the card).
+// The OG/share card (components/share-card.tsx): the verdict word and, on a
+// verified receipt, the amount — never an ID or a handle (decided 2026-10-05,
+// replacing §12 open question 1's verdict-only default; see
+// docs/specs/receipt-amount-framing.md).
 // ===========================================================================
 
 /**
- * The share card's one line of text: the same plain word the page leads with
- * ("Verified", "Not verified", "Pending", ...). Open question 1's default is
- * "verdict-only": no kind, no `$` amount, no work claim. The spec's longer
- * headline for a state sits in that state's Details on the page, not on the card.
+ * The share card's verdict word: the same plain word the page leads with
+ * ("Verified", "Not verified", "Pending", ...). It never carries a kind, a `$`
+ * amount (that is `ogCardAmount`'s own line) or a work claim. The spec's
+ * longer headline for a state sits in that state's Details on the page.
  */
 export function ogCardWord(state: PageState): string {
 	return state.kind === "verified" ? PLAIN_VERDICT_VERIFIED : plainState(state).word;
