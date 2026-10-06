@@ -10,6 +10,7 @@
  *     480px (its accessible name keeps it).
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import StateView from "./components/state-view";
@@ -153,4 +154,15 @@ test("the check ledger stacks its rows below 640px, so Details never scrolls sid
 			assert.match(cls, /\[overflow-wrap:anywhere\]/, `${name}: a long check name may wrap`);
 		}
 	}
+});
+
+test("no unbreakable token may push the receipt sideways: the receipt wraps anywhere it must", () => {
+	// Measured on the first live receipt at 320px with Details open: the trust
+	// snapshot's long name overflowed its section by ~340px until this rule.
+	const css = readFileSync(new URL("./brand.css", import.meta.url), "utf8").replace(
+		/\/\*[\s\S]*?\*\//g,
+		"",
+	);
+	const main = /\.ut-r \.ut-r-main\{([^}]*)\}/.exec(css)?.[1] ?? "";
+	assert.match(main, /overflow-wrap:anywhere/);
 });
