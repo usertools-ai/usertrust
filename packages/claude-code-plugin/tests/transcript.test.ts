@@ -180,10 +180,11 @@ function responseEntries(
 	model: string,
 	u: Usage,
 	extra: Record<string, unknown> = {},
-	options: { partials?: number; complete?: boolean } = {},
+	options: { partials?: number; complete?: boolean; text?: string } = {},
 ): string[] {
 	const lines: string[] = [];
 	const partials = options.partials ?? 2;
+	const content = [{ type: "text", text: options.text ?? "synthetic" }];
 	const usage = (output: number) => ({
 		input_tokens: u.input,
 		cache_creation_input_tokens: u.cacheWrite,
@@ -205,7 +206,7 @@ function responseEntries(
 					role: "assistant",
 					type: "message",
 					stop_reason: null,
-					content: [{ type: "text", text: "synthetic" }],
+					content,
 					usage: usage(Math.max(1, Math.floor((u.output * (i + 1)) / (partials + 2)))),
 				},
 			}),
@@ -224,7 +225,7 @@ function responseEntries(
 					role: "assistant",
 					type: "message",
 					stop_reason: "end_turn",
-					content: [{ type: "text", text: "synthetic" }],
+					content,
 					usage: { ...usage(u.output), iterations: [{ type: "message" }] },
 				},
 			}),
@@ -1335,6 +1336,101 @@ describe("hardening", () => {
 		await appendMain(responseEntries("msg_b", SONNET, u(2, 99), {}, { partials: 0 }));
 		await run("stop.mjs", stopInput());
 		expect(settles().map((s) => s.body.outputTokens)).toEqual([10, 99]);
+	});
+});
+
+describe("the final response, written after Stop — SessionEnd and a bounded wait", () => {
+	const endInput = () => ({
+		...stopInput(),
+		hook_event_name: "SessionEnd",
+		reason: "prompt_input_exit",
+	});
+
+	it("hooks.json registers SessionEnd, beside the four hooks before it", async () => {
+		const hooks = JSON.parse(await readFile(join(HOOKS, "hooks.json"), "utf-8")) as {
+			hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+		};
+		expect(Object.keys(hooks.hooks).sort()).toEqual(
+			["PostToolUse", "PreToolUse", "SessionEnd", "Stop", "SubagentStop"].sort(),
+		);
+		expect(hooks.hooks.SessionEnd?.[0]?.hooks[0]?.command).toContain("hooks/session-end.mjs");
+	});
+
+	it("a final answer the transcript did not yet hold at Stop is posted at SessionEnd — once", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
+		await run("stop.mjs", stopInput());
+		// The last turn's answer reaches the transcript only after Stop has run: no
+		// later turn will ever pick it up.
+		await appendMain(responseEntries("msg_final", SONNET, u(7, 7), {}, { text: "all done" }));
+		const end = await run("session-end.mjs", endInput());
+		expect(end.code).toBe(0);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
+		// Nothing is posted twice: not by another SessionEnd, nor by a Stop.
+		await run("session-end.mjs", endInput());
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
+	});
+
+	it("Stop waits — boundedly — for the final response its input names, and posts it itself", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
+		await run("stop.mjs", stopInput());
+		const stop = run("stop.mjs", { ...stopInput(), last_assistant_message: "all done" });
+		await new Promise((resolve) => setTimeout(resolve, 1_000));
+		await appendMain(responseEntries("msg_final", SONNET, u(7, 7), {}, { text: "all done" }));
+		expect((await stop).code).toBe(0);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
+		// SessionEnd then finds nothing new: no second post.
+		await run("session-end.mjs", endInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
+	});
+
+	it("the wait is bounded: a final response that never arrives costs Stop about 2 s, then it goes on", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
+		const started = Date.now();
+		const stop = await run("stop.mjs", { ...stopInput(), last_assistant_message: "never written" });
+		const took = Date.now() - started;
+		expect(stop.code).toBe(0);
+		expect(took).toBeGreaterThanOrEqual(1_900);
+		expect(took).toBeLessThan(8_000);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3]);
+	});
+
+	it("SubagentStop waits for the subagent's final response the same way", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		await writeSubagent("a1", "Plan", responseEntries("msg_s1", SONNET, u(2, 2), sub("a1")));
+		await run("subagent-stop.mjs", { ...stopInput(), agent_id: "a1" });
+		const stop = run("subagent-stop.mjs", {
+			...stopInput(),
+			agent_id: "a1",
+			last_assistant_message: "plan ready",
+		});
+		await new Promise((resolve) => setTimeout(resolve, 1_000));
+		await appendFile(
+			join(projectDir, SESSION, "subagents", "agent-a1.jsonl"),
+			`${responseEntries("msg_s2", SONNET, u(5, 5), sub("a1"), { text: "plan ready" }).join("\n")}\n`,
+		);
+		expect((await stop).code).toBe(0);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([2, 5]);
+	});
+
+	it("SessionEnd waits for a lock a finishing Stop still holds", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
+		await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
+		const lock = `${cursorPath()}.lock`;
+		await mkdir(lock);
+		await writeFile(join(lock, "owner"), "a-finishing-stop");
+		const released = new Promise((resolve) =>
+			setTimeout(() => void rm(lock, { recursive: true, force: true }).then(resolve), 800),
+		);
+		const end = await run("session-end.mjs", endInput());
+		await released;
+		expect(end.code).toBe(0);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3]);
 	});
 });
 

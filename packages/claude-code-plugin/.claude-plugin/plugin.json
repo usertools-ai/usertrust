@@ -1,6 +1,6 @@
 {
 	"name": "usertrust-claude-code",
-	"description": "Ledger-backed governance for Claude Code: PreToolUse authorization with fail-closed deny, real per-model and per-subagent usage settled from Claude Code transcripts, Stop/SubagentStop cleanup",
+	"description": "Ledger-backed governance for Claude Code: PreToolUse authorization with fail-closed deny, real per-model and per-subagent usage settled from Claude Code transcripts, a remainder scan at Stop, SubagentStop and SessionEnd",
 	"version": "1.3.0",
 	"author": { "name": "usertrust" },
 	"repository": "https://github.com/usertools-ai/usertrust",

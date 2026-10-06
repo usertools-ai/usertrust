@@ -5,9 +5,9 @@ authorization against a [usertrust-server](../server) you host, and the session'
 REAL token usage — per model, per subagent — is settled from Claude Code's own
 transcripts. PreToolUse reserves a hold that covers the usage recorded since the
 last one plus the upcoming tool, PostToolUse settles that hold at the real counts,
-and Stop/SubagentStop post whatever no hold carried and terminate anything left
-hanging. Nothing is routed through usertrust: it only reads what Claude Code
-already recorded.
+and Stop/SubagentStop — and SessionEnd, once the transcript is final — post
+whatever no hold carried and terminate anything left hanging. Nothing is routed
+through usertrust: it only reads what Claude Code already recorded.
 
 ## Install
 
@@ -71,6 +71,15 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   accounted), one authorize→settle per model. Before that, Stop SETTLES a leftover
   hold that has usage assigned (its tool was interrupted, but the model turn was
   billed); after it, Stop gives back the holds that have none.
+- **The final answer.** Claude Code writes the transcript asynchronously, so at
+  Stop the turn's final response may not be in it yet — and after the last turn
+  no later hook would ever post it. So Stop and SubagentStop first wait, at most
+  about 2 seconds, until the transcript holds the response their input names
+  (`last_assistant_message`), and SessionEnd — whose transcript Claude Code
+  finalizes — scans once more. Every post goes through the same claims, so what
+  Stop posted is never posted again. A response that reaches the transcript only
+  after that wait, in a session that never fires SessionEnd (a crash, a kill), is
+  not posted.
 - **Empty holds are given back.** A hold no usage was assigned to (a parallel tool
   call in the same response, say) is RELEASED at PostToolUse: no charge, and not a
   failure. A server without `/v1/release` gets the old settle at zero usage, which

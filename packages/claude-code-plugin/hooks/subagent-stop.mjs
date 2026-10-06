@@ -11,9 +11,16 @@
 // subagent's remainder) / the server's pending-TTL sweep are the backstops.
 // Leftover holds follow Stop's rule and order: settled first if usage was
 // assigned (an unresolved one is then retried by the remainder step), else given
-// back last.
+// back last. Like Stop, it first waits — boundedly — for the subagent's final
+// response (its input's `last_assistant_message`) to reach its transcript.
 import { cleanup, readStdin, usageMode } from "./lib.mjs";
-import { CLEANUP_RESERVE_MS, postRemainder, settleAssignedHolds } from "./transcript.mjs";
+import {
+	awaitFinalResponse,
+	CLEANUP_RESERVE_MS,
+	postRemainder,
+	settleAssignedHolds,
+	transcriptPathFor,
+} from "./transcript.mjs";
 
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
@@ -22,6 +29,7 @@ try {
 	if (typeof agentId === "string" && agentId !== "") {
 		await settleAssignedHolds(sessionId, agentId);
 		if (usageMode() === "transcript") {
+			await awaitFinalResponse(transcriptPathFor(input, agentId), input.last_assistant_message);
 			try {
 				const result = await postRemainder({
 					sessionId,
