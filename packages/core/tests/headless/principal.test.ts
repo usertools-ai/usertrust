@@ -352,7 +352,12 @@ describe("headless records carry the caller's actor and principal", () => {
 		const engine = makeEngine();
 		const gov = await governor(engine, audit, { budget: 100_000, unknownModelPolicy: "deny" });
 		await expect(
-			gov.authorize({ ...AUTHORIZE, model: "no-such-model-xyz", actor: ACTOR, principal: PRINCIPAL }),
+			gov.authorize({
+				...AUTHORIZE,
+				model: "no-such-model-xyz",
+				actor: ACTOR,
+				principal: PRINCIPAL,
+			}),
 		).rejects.toBeInstanceOf(PolicyDeniedError);
 
 		const denied = record(audit, "policy_denied");
