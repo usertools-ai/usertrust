@@ -9,7 +9,9 @@ permissions:
 
 jobs:
   dco:
-    runs-on: ubuntu-latest
+    # Same-repo branches and pushes run on Blacksmith; a FORK pull request stays on a
+    # GitHub-hosted runner (fork workflows still need maintainer approval per repo policy).
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'blacksmith-4vcpu-ubuntu-2204' || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
         with:

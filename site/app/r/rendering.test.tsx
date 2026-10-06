@@ -38,6 +38,7 @@ import {
 	CUSTOM_MODEL_MEANING,
 	DELEGATION_POSTURE_LABEL,
 	DELEGATION_POSTURE_SCOPE,
+	DELEGATION_POSTURE_SHORT,
 	DISPLAY_ANNEX_LABEL,
 	DISPLAY_NOT_ATTESTED,
 	EQUIVOCATION_CAVEAT,
@@ -346,7 +347,7 @@ test("R10/R37: hostile UNSIGNED members never crash the render and never demote 
 		fixture.wire.body = { ...body, ...graft };
 		const state = fixtureState(fixture);
 		assert.equal(state.kind, "verified", `unsigned junk must not demote: ${JSON.stringify(graft)}`);
-		if (state.kind !== "verified") continue;
+		if (state.kind !== "verified" || state.scope !== "session") continue;
 		const markup = render(state);
 		assert.ok(
 			markup.includes('data-rung="verified_checkpoint" data-rung-state="reached"'),
@@ -404,7 +405,7 @@ test("R37: NOTHING the wire accepts as verified can throw the render — every p
 				}
 				cases += 1;
 				const state = fixtureState(fixture);
-				if (state.kind !== "verified") continue;
+				if (state.kind !== "verified" || state.scope !== "session") continue;
 				stillVerified += 1;
 				render(state);
 			}
@@ -459,59 +460,9 @@ test("R28: the display annex renders IFF the envelope served a display member", 
 // R38-R41 — the amount's scope and bound, and the anchored rung's binding
 //
 // These are HONESTY OBLIGATIONS, so the copy is asserted verbatim (a paraphrase
-// that drifts is the defect) and the *absence* of interaction is asserted
-// structurally rather than by eyeballing the component.
+// that drifts is the defect). Since the 2026-10-05 amendment the full sentences
+// are asserted to be inside the one Details, and the label chip outside it.
 // ---------------------------------------------------------------------------
-
-/** HTML tags that never nest, so the ancestor walk below must not push them. */
-const VOID_TAGS = new Set([
-	"area",
-	"base",
-	"br",
-	"col",
-	"embed",
-	"hr",
-	"img",
-	"input",
-	"link",
-	"meta",
-	"param",
-	"source",
-	"track",
-	"wbr",
-	"path",
-	"rect",
-	"circle",
-	"line",
-	"polygon",
-	"polyline",
-	"stop",
-	"use",
-]);
-
-const TAG = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)((?:[^>"']|"[^"]*"|'[^']*')*?)(\/?)>/g;
-
-/**
- * Every OPEN tag still on the stack at `index` — i.e. the ancestor chain of the
- * text at that offset, each as its raw `<tag attrs>` string.
- *
- * This exists because "not behind interaction" is a claim about the DOM, and
- * `!html.includes("<details")` is a claim about the whole document. The first
- * survives someone adding an unrelated `<details>` elsewhere on the page; the
- * second does not, so it would start failing for the wrong reason and get
- * weakened. Walking the ancestors asserts exactly what R40/R41 require.
- */
-function ancestorTags(html: string, index: number): string[] {
-	const stack: string[] = [];
-	TAG.lastIndex = 0;
-	for (let m = TAG.exec(html); m !== null && m.index < index; m = TAG.exec(html)) {
-		const [raw, closing, name, , selfClosing] = m;
-		if (VOID_TAGS.has(name.toLowerCase()) || selfClosing === "/") continue;
-		if (closing === "/") stack.pop();
-		else stack.push(raw);
-	}
-	return stack;
-}
 
 /**
  * A mandated sentence as it appears in the MARKUP, not as it appears in the
@@ -528,33 +479,6 @@ function escapeForMarkup(value: string): string {
 		.replace(/>/g, "&gt;")
 		.replace(/"/g, "&quot;")
 		.replace(/'/g, "&#x27;");
-}
-
-/**
- * R40/R41's negative: the disclosure is in the rendered output with no
- * interaction — not inside a `<details>`, not a tooltip, not a collapsed
- * container, and not carried by a `title` attribute.
- */
-function assertNotBehindInteraction(html: string, plainNeedle: string, why: string): void {
-	const needle = escapeForMarkup(plainNeedle);
-	const index = html.indexOf(needle);
-	assert.notEqual(index, -1, `${why}: the disclosure is not in the rendered output at all`);
-	for (const tag of ancestorTags(html, index)) {
-		const name = tag.slice(1).split(/[\s>]/)[0].toLowerCase();
-		assert.ok(name !== "details" && name !== "summary", `${why}: ancestor ${name} gates it`);
-		assert.ok(!/\stitle=/.test(tag), `${why}: an ancestor carries a title tooltip — ${tag}`);
-		assert.ok(!/\shidden\b/.test(tag), `${why}: an ancestor is hidden — ${tag}`);
-		assert.ok(!/\saria-expanded=/.test(tag), `${why}: an ancestor is a disclosure widget — ${tag}`);
-		assert.ok(!/\srole="tooltip"/.test(tag), `${why}: an ancestor is a tooltip — ${tag}`);
-	}
-	// The disclosure's own text must not be an attribute VALUE either — a `title`
-	// containing the sentence renders nothing a reader sees without hovering.
-	assert.ok(
-		!new RegExp(`title="[^"]*${needle.slice(0, 24).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(
-			html,
-		),
-		`${why}: the sentence is carried by a title attribute`,
-	);
 }
 
 test("R38/R39: every verified render carries the amount's posture LABEL and its per-value framing", () => {
@@ -593,20 +517,54 @@ test("R39/R40: the scope block sits BESIDE the amount — no spend field or post
 	}
 });
 
-test("R39/R40: neither the scope statement nor the caption is behind interaction", () => {
+/**
+ * The amended R38-R41 rule (Cam's "brief receipt" ruling): the amount's posture
+ * LABEL is one chip, visible next to the figure; the full sentences are in the
+ * card's single Details disclosure, one click away. A sentence "in Details" is
+ * inside a `<details>`; the chip must not be.
+ */
+function assertInDetails(html: string, plainNeedle: string, why: string): void {
+	const open = html.indexOf("<details");
+	assert.ok(open !== -1, `${why}: the page has no Details disclosure`);
+	assert.ok(
+		html.slice(open).includes(escapeForMarkup(plainNeedle)),
+		`${why}: expected inside the Details disclosure`,
+	);
+}
+
+test("R38-R40 (amended): the scope CHIP is visible beside the amount; the full sentences are in Details", () => {
 	for (const row of conformingVerifiedRows()) {
 		const { html, state } = renderFixture(row.file);
-		const projection = state.envelope.receipt.event.data;
-		assertNotBehindInteraction(
-			html,
-			DELEGATION_POSTURE_SCOPE[projection.delegationPosture],
-			`${row.id}: R39's scope statement`,
+		const posture = state.envelope.receipt.event.data.delegationPosture;
+		const amount = html.indexOf('data-testid="amount-usd"');
+		const chip = html.indexOf('data-testid="amount-scope-chip"');
+		const details = html.indexOf("<details");
+		assert.ok(
+			amount !== -1 && chip > amount && chip < details,
+			`${row.id}: chip beside the amount, above the fold`,
 		);
-		assertNotBehindInteraction(
-			html,
-			amountScopeCaption(projection.delegationPosture),
-			`${row.id}: R40's scope caption`,
+		assert.ok(!html.slice(amount, chip).includes("<details"), `${row.id}: nothing gates the chip`);
+		const chipTag = html.slice(chip, html.indexOf("</span>", chip));
+		assert.ok(
+			chipTag.includes(`>${DELEGATION_POSTURE_LABEL[posture]}`),
+			`${row.id}: R38 — the chip IS the posture label`,
 		);
+		assert.ok(
+			chipTag.includes(`title="${escapeForMarkup(DELEGATION_POSTURE_SHORT[posture])}"`),
+			`${row.id}: the chip's title is the one-line SHORT meaning`,
+		);
+		// The short form is a fold, not a cut: the FULL R39 sentence (with its
+		// bound clause) is still on the page, one disclosure away.
+		assert.ok(
+			DELEGATION_POSTURE_SCOPE[posture].length > DELEGATION_POSTURE_SHORT[posture].length,
+			`${row.id}: the chip carries the short form, Details the full one`,
+		);
+		assertInDetails(
+			html,
+			DELEGATION_POSTURE_SCOPE[posture],
+			`${row.id}: R39's FULL scope statement`,
+		);
+		assertInDetails(html, amountScopeCaption(posture), `${row.id}: R40's scope caption`);
 	}
 });
 
@@ -624,12 +582,12 @@ test("R13/R39: a session $X is the frozen headline, and its scope sits beside bo
 		const spendScope = html.indexOf('data-testid="amount-scope"');
 		assert.ok(paperAt !== -1, `${file}: paper companion`);
 		assert.ok(workAt !== -1, `${file}: WorkClaims companion`);
+		// The glance card now carries the amount's scope first; the headline
+		// companion sits in Details. Both must still be present, and the headline
+		// companion must not restate the spend caption.
+		assert.ok(spendScope !== -1, `${file}: the glance amount scope renders`);
 		assert.ok(
-			spendScope !== -1 && paperAt < spendScope,
-			`${file}: paper scope precedes SpendBlock`,
-		);
-		assert.ok(
-			!html.slice(paperAt, spendScope).includes('data-testid="amount-caption"'),
+			!html.slice(paperAt, paperAt + 2000).includes('data-testid="amount-caption"'),
 			`${file}: the headline companion does not restate the spend caption`,
 		);
 		assertContains(
@@ -719,28 +677,36 @@ test("R40 NEGATIVE GUARD — C28 includesSomeDelegated does not hedge the figure
 	);
 });
 
-test("R41: every verified render states the anchored rung's binding is resolver-asserted, beside the rung", () => {
+test("R41 (amended): the anchored rung is tagged resolver-asserted in the glance; the full sentence is in Details", () => {
 	for (const row of conformingVerifiedRows()) {
 		const { html, text } = renderFixture(row.file);
 		assertContains(text, ANCHOR_BINDING_RESOLVER_ASSERTED, `${row.id}: R41's disclosure`);
-		assertNotBehindInteraction(html, ANCHOR_BINDING_RESOLVER_ASSERTED, `${row.id}: R41`);
-		// "Beside the rung" — inside the ANCHORED ladder item, not floating in the
-		// masthead. The rung's own `<li>` opens at `data-rung="verified_anchored"`
-		// and the disclosure must fall before the next rung boundary or the ladder's
-		// close, whichever comes first.
+		assertInDetails(html, ANCHOR_BINDING_RESOLVER_ASSERTED, `${row.id}: R41's full sentence`);
+		// The glance's level strip: the anchored item names it, before Details.
 		const rung = html.indexOf('data-rung="verified_anchored"');
-		const disclosure = html.indexOf('data-anchor-binding="resolver-asserted"');
-		assert.ok(rung !== -1 && disclosure !== -1, `${row.id}: anchored rung anatomy missing`);
-		assert.ok(rung < disclosure, `${row.id}: the disclosure must sit inside the anchored rung`);
+		const details = html.indexOf("<details");
+		assert.ok(rung !== -1 && rung < details, `${row.id}: the anchored level is in the glance`);
+		const item = html.slice(rung, html.indexOf("</li>", rung));
 		assert.ok(
-			!html.slice(rung, disclosure).includes("</li>"),
-			`${row.id}: the disclosure escaped the anchored rung's own item`,
+			item.includes("resolver-asserted"),
+			`${row.id}: the glance item says resolver-asserted`,
 		);
-		// Exactly ONE site — a sentence rendered twice is two copies that drift.
+		// Exactly ONE site for the full sentence.
 		assert.equal(
 			html.split('data-anchor-binding="resolver-asserted"').length - 1,
 			1,
-			`${row.id}: R41's disclosure must render at exactly one site`,
+			`${row.id}: R41's full sentence must render at exactly one site`,
+		);
+		// ...and it sits inside the anchored ladder item in Details.
+		const proven = html.indexOf('data-rung="verified_anchored"', details);
+		const full = html.indexOf('data-anchor-binding="resolver-asserted"');
+		assert.ok(
+			proven !== -1 && proven < full,
+			`${row.id}: the sentence sits inside the anchored rung`,
+		);
+		assert.ok(
+			!html.slice(proven, full).includes("</li>"),
+			`${row.id}: the sentence escaped the anchored rung's own item`,
 		);
 	}
 });

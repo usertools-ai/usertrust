@@ -630,3 +630,110 @@ export interface IdVector {
 	expected: "valid" | "invalid";
 	reason: string;
 }
+
+// ---------------------------------------------------------------------------
+// receipt-spec v0.10 §15 — cluster receipts (`scope: "cluster"`)
+// ---------------------------------------------------------------------------
+
+/** CLOSED to these two members; `repoId` key-ABSENT when unbound — never `null`, never `""` (§15.8). */
+export interface ClusterWork {
+	kind: "cluster";
+	/** `provider:opaqueId` (1-200 ID characters) or the keyed `r1_` form — no URL syntax */
+	repoId?: string;
+}
+
+/** The minter's own refusal reasons — a CLOSED list of 23 (§15.6). */
+export type SkipReason =
+	| "cluster-void"
+	| "snapshot-missing"
+	| "snapshot-not-on-chain"
+	| "snapshot-unverifiable"
+	| "unknown-provider"
+	| "posted-amount-mismatch"
+	| "empty-cluster"
+	| "bad-account"
+	| "bad-window"
+	| "bad-repo-id"
+	| "estimated-transfer"
+	| "non-exact-rate"
+	| "posted-assessed-mismatch"
+	| "duplicate-transfer"
+	| "bad-transfer-id"
+	| "bad-amount"
+	| "rounding-out-of-bounds"
+	| "duplicate-mint-event"
+	| "mint-event-mismatch"
+	| "anchor-mismatch"
+	| "evidence-inconsistent"
+	| "consumed-by-another-receipt"
+	| "unarmed-hold";
+
+export interface SkippedWindow {
+	/** canonical u64 decimal string — ledger nanoseconds */
+	windowStart: string;
+	/** canonical u64 decimal string, >= windowStart */
+	windowEnd: string;
+	reason: SkipReason;
+}
+
+export interface SkippedSincePrevious {
+	/** integer >= 1 — every window refused since the previous minted receipt */
+	count: number;
+	/** the FIRST min(count, 16), ascending and disjoint, each ending before the receipt's windowStart */
+	windows: SkippedWindow[];
+	/** commits ALL `count` windows — recomputable from the receipt only when count <= 16 */
+	windowsRoot: HexString;
+}
+
+/** The mint event's `data` for a cluster receipt — receipt-spec v0.10 §15.6. CLOSED. */
+export interface ClusterProjection {
+	spec: "ut1";
+	scope: "cluster";
+	/** "a1_" + base58btc(16 bytes): a keyed handle, never a ledger ID (§15.7) */
+	account: string;
+	/** canonical u64 decimal strings — ledger nanoseconds exceed 2^53 */
+	windowStart: string;
+	windowEnd: string;
+	/** canonical u64 decimal string, 60000000000 <= n <= 86400000000000 */
+	idleThresholdNs: string;
+	/** key-ABSENT on an account's first receipt */
+	previousReceiptId?: Ut1ReceiptId;
+	/** key-ABSENT when nothing was refused since the previous receipt */
+	skippedSincePrevious?: SkippedSincePrevious;
+	/** a commitment over every ledger transfer of the account in the window — never recomputable from the receipt */
+	windowTransfersRoot: HexString;
+	/** integer >= 2 × spend.transferCount */
+	windowTransferCount: number;
+	work: ClusterWork;
+	models: string[];
+	providers: string[];
+	startedAt: Iso8601Utc;
+	endedAt: Iso8601Utc;
+	spend: Spend;
+	delegationPosture: DelegationPosture;
+	pricing: { tableVersions: string[] };
+	/** present iff transferCount <= 32 */
+	transferSet?: TransferPair[];
+	transferSetRoot: HexString;
+}
+
+export type ClusterMintEvent = ChainEnvelope<"receipt_settled", ClusterProjection>;
+
+/** The §5 receipt wire document for a cluster receipt — §5's shape, §15's scope. */
+export interface ClusterReceiptDocument {
+	spec: "ut1";
+	receiptId: Ut1ReceiptId;
+	scope: "cluster";
+	mintedAt: Iso8601Utc;
+	minter: Minter;
+	/** equality-checked mirror of event.data.work (equality 9) */
+	work: ClusterWork;
+	event: ClusterMintEvent;
+	proof: Proof;
+	signature: Signature;
+}
+
+/** 200 carrying a cluster receipt — the envelope is unchanged; only the signed document differs (§15.13). */
+export interface ClusterSuccessEnvelope extends Omit<SuccessEnvelope, "receipt"> {
+	receipt: ClusterReceiptDocument;
+}

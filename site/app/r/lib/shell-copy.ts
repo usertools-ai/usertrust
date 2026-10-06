@@ -18,13 +18,17 @@
  * the explanatory copy but are not asserted verbatim, exactly as §7 says of
  * itself: "quoted strings are normative; surrounding copy is free."
  *
+ * One exception: the 404's copy comes from receipt-spec v0.10 §15.13, which
+ * supersedes §7's `unknown` row for every ID. See `UNKNOWN_HEADLINE`.
+ *
  * `INVALID_ID_HEADLINE` / `PROTOCOL_ERROR_HEADLINE` /
  * `VERIFICATION_UNAVAILABLE_HEADLINE` and `shellHeadline` predate this pass
  * (Task 3's transport-only scope) and are UNCHANGED in value — `transport.
  * test.ts` asserts them directly, and D1/R37's "the two never share copy"
  * rule is a property of these three exact strings.
  */
-import { LEDGER_ROWS } from "./claims";
+import { amountUsdFromUsertokens, LEDGER_ROWS, PLAIN_VERDICT_VERIFIED } from "./claims";
+import { plainState } from "./plain-copy";
 import type { CheckName, IntegrityCause, PageState, RetryAfter, StepName } from "./wire";
 
 // ===========================================================================
@@ -108,14 +112,35 @@ export const BILLED_UNFINALIZED_HEADLINE = "the trailer's claim was never proven
 export const BILLED_UNFINALIZED_REGISTER_NOTE = "this is a failed promise, not a forgery signal.";
 
 // ===========================================================================
-// Loud failures
+// No receipt under this ID yet (404) — receipt-spec v0.10 §15.13
 // ===========================================================================
 
-/** §7: "`unknown` (404) — "This receipt ID was never allocated."". */
-export const UNKNOWN_HEADLINE = "This receipt ID was never allocated.";
+/**
+ * receipt-spec v0.10 §15.13: "a consumer renders every 404 as "no receipt
+ * under this ID yet"". This replaces §7's `unknown` (404) headline ("This
+ * receipt ID was never allocated.") and retires, for every ID, the LOUD
+ * "never allocated — integrity red flag" rendering that went with it.
+ *
+ * Why it is retired: a cluster receipt's ID is derived, so it can be cited
+ * before its receipt exists, and a cluster ID and a session ID share one
+ * format. A 404 alone therefore cannot say whether a receipt is still coming.
+ * The loud rendering would have called every ID cited before its receipt is
+ * minted an integrity red flag, and a green one would certify a receipt nobody
+ * has seen. §15.13 rules out both: a 404 is never forgery, and never green.
+ */
+export const UNKNOWN_HEADLINE = "no receipt under this ID yet";
 
-/** §7, verbatim (resolver's own fail-closed convention). */
-export const UNKNOWN_RED_FLAG_NOTE = "an unknown receipt on a commit is an integrity red flag.";
+/**
+ * §15.13's explanation of when the receipt arrives, and its "never forgery,
+ * never green" rule, in the page's words. Surrounding copy, so not a
+ * verbatim quote; the headline above is the normative string.
+ */
+export const UNKNOWN_NOT_YET_NOTE =
+	"a receipt is minted once its agent key has been idle for the key's idle threshold — 10 minutes by default, on the ledger's clock — and its audit segment has sealed, so an ID can be cited before its receipt exists. A 404 is not evidence of forgery, and it is not a verification.";
+
+// ===========================================================================
+// Loud failures
+// ===========================================================================
 
 /**
  * §7: "`unverifiable` (409) — integrity failure: "proof recomputation failed
@@ -243,19 +268,32 @@ export function shellHeadline(state: PageState): string {
 }
 
 // ===========================================================================
-// The OG/share card (§12 open question 1, default (b): "verdict-only card,
-// amount on the page" — NO dollar amount, ever, on the card).
+// The OG/share card (components/share-card.tsx): the verdict word and, on a
+// verified receipt, the amount — never an ID or a handle (decided 2026-10-05,
+// replacing §12 open question 1's verdict-only default; see
+// docs/specs/receipt-amount-framing.md).
 // ===========================================================================
 
 /**
- * The share card's one line of text — deliberately `shellHeadline` itself,
- * not a second, shorter re-spelling. Open question 1's default is
- * "verdict-only": no kind, no `$` amount, no work claim, just the same word
- * (or §7 headline) the page itself renders as the verdict — one string, one
- * source, so the card can never say something the page underneath does not.
+ * The share card's verdict word: the same plain word the page leads with
+ * ("Verified", "Not verified", "Pending", ...). It never carries a kind, a `$`
+ * amount (that is `ogCardAmount`'s own line) or a work claim. The spec's
+ * longer headline for a state sits in that state's Details on the page.
  */
 export function ogCardWord(state: PageState): string {
-	return shellHeadline(state);
+	return state.kind === "verified" ? PLAIN_VERDICT_VERIFIED : plainState(state).word;
+}
+
+/**
+ * The share card's second line, on a VERIFIED receipt only: the amount, the
+ * same `$X.XXXX` the page derives (R23), and nothing else — no receipt ID, no
+ * account handle, no other receipt's ID. Decided 2026-10-05: a share card
+ * carries the verdict and the amount, and nothing that ties the receipt back
+ * to whoever it charged.
+ */
+export function ogCardAmount(state: PageState): string | undefined {
+	if (state.kind !== "verified") return undefined;
+	return `$${amountUsdFromUsertokens(state.envelope.receipt.event.data.spend.assessedUsertokens)}`;
 }
 
 /** The card's register, mirroring the page's own (never green for a non-`verified` state). */
@@ -266,10 +304,13 @@ export function ogCardRegister(state: PageState): "green" | "neutral" | "warning
 		case "verificationUnavailable":
 			return "warning";
 		case "billedUnfinalized":
-		case "unknownReceipt":
 		case "integrityFailure":
 		case "protocolError":
 			return "danger";
+		// receipt-spec v0.10 §15.13: a 404 is never forgery and never green. A
+		// danger card would unfurl a cited, not-yet-minted ID as a red flag.
+		case "unknownReceipt":
+			return "neutral";
 		default:
 			return "neutral";
 	}
