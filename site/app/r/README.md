@@ -68,9 +68,14 @@ Carried forward from the plan's Global Constraints, unchanged by this task:
   (`packages/verify`, separate tier-0/1 ship). Because of this, the verify
   panel's v1 copy uses the download-affordance wording only, never a command
   invocation string.
-- **OG dollar-amount and in-browser re-verification** — both left at their
-  spec-default answers (verdict-only share card, no in-page re-verify; no
-  dollar amount on the OG card) pending Cam's override.
+- **In-browser re-verification** — left at its spec-default answer (no
+  in-page re-verify). The share card's amount was decided on 2026-10-05: the
+  card (`components/share-card.tsx`) carries the verdict word and, on a
+  verified receipt, the amount, never an ID or a handle. It is drawn in the
+  page's brand (the mark, the wordmark, the black ground and a still lattice)
+  in the image renderer's default font, and fetches nothing: the kit serves
+  its fonts as woff2, which the renderer cannot read, and no unpinned remote
+  font may draw the verdict or the amount. `share-card.test.tsx` pins its text.
 
 A further set of review-found minors (base58 codec edge cases, a few
 under-asserted copy strings, non-numeric-literal nits) is itemized in this
