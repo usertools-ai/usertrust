@@ -212,8 +212,12 @@ describe("post-tool-use hook", () => {
 		expect(settleBody.inputTokens).toBe(4);
 		expect(settleBody.outputTokens).toBe(1);
 		expect(settleBody.usageSource).toBe("estimated");
-		// main's hold is still present; only agent-A's was settled and cleared.
-		expect(await readdir(stateDir)).toEqual(["sess__main__tu_main.json"]);
+		// main's hold is still present; only agent-A's was settled and cleared. (Beside
+		// the holds, transcripts/ records that agent-A, which named no transcript,
+		// settles at the estimate for good.)
+		expect((await readdir(stateDir)).filter((n) => n !== "transcripts")).toEqual([
+			"sess__main__tu_main.json",
+		]);
 	});
 
 	it("a content-cap settle does not exceed the reserved hold on either leg", async () => {

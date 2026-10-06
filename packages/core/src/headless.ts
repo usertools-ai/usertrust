@@ -115,6 +115,12 @@ import {
 	SpendLedgerUnreadableError,
 } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
+import {
+	capturePrincipal,
+	type Principal,
+	type PrincipalLedgerTags,
+	principalLedgerTags,
+} from "./shared/principal.js";
 import type { EndpointInfo, TrustConfig, TrustReceipt } from "./shared/types.js";
 import { TrustConfigSchema } from "./shared/types.js";
 
@@ -125,6 +131,11 @@ import { TrustConfigSchema } from "./shared/types.js";
 // package entry point in its own right, and a plugin should not have to reach into
 // the root export for the argument type of a method it can already see here.
 export type { EnvelopeDescriptor, EnvelopeStatus } from "./budget/context.js";
+// Same reason for the principal: an integration that passes `principal` to
+// `authorize()` gets its type, its field rule and its ledger tags from the entry
+// point it already imports — the tags are what a `query_transfers` roll-up filters on.
+export type { Principal, PrincipalLedgerTags } from "./shared/principal.js";
+export { principalFieldRefusal, principalLedgerTags } from "./shared/principal.js";
 
 /**
  * Options for createGovernor(): TrustOpts plus a governor-wide default
@@ -198,6 +209,10 @@ export interface Authorization {
  */
 interface AuthorizationCapture {
 	readonly proxyTransferId: string | undefined;
+	/** The actor read ONCE at authorize; every terminal record names this, never "local". */
+	readonly actor: string;
+	/** The frozen principal captured at authorize, or `undefined` when none was given. */
+	readonly principal: Principal | undefined;
 	/** The scope's cost center, or `undefined` for an unattributed call. */
 	readonly costCenter: string | undefined;
 	/**
@@ -255,8 +270,22 @@ export interface AuthorizeParams {
 	messages?: unknown[] | undefined;
 	/** Additional parameters for policy evaluation. */
 	params?: Record<string, unknown> | undefined;
-	/** Actor identity. Defaults to "local". */
+	/**
+	 * Actor identity, recorded as sent on every audit record this call emits —
+	 * denials, `llm_call`, the failure and settlement terminals, and the rotated
+	 * receipt. Captured at authorize, so settle/abort never re-read it. Defaults to
+	 * "local".
+	 */
 	actor?: string | undefined;
+	/**
+	 * Who the work is for — agent `id`/`type`, business `unit`, `role` (see
+	 * {@link Principal}). Validated and frozen at authorize, before any I/O: an
+	 * invalid field throws a `TypeError`. Recorded on the same audit records as
+	 * `actor`, and written as `user_data` tags on the call's ledger transfers
+	 * (`principalLedgerTags`). Reporting only: it never selects the account that
+	 * pays and never enters the policy gate — that is `withCostCenter`'s job.
+	 */
+	principal?: Principal | undefined;
 	/**
 	 * Per-call endpoint scope override — wins over the governor-wide default
 	 * (A3). The effective scope is captured on the Authorization and governs
@@ -653,6 +682,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			transferId: string;
 			amount: number;
 			debitAccountId?: bigint | undefined;
+			userData?: PrincipalLedgerTags | undefined;
 		}): Promise<{ transferId: string }> {
 			// An ATTRIBUTED hold names its own debit account — the cost-center
 			// envelope the governor derived at authorize. Unattributed holds keep
@@ -664,6 +694,14 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					creditAccountId: treasury,
 					amount: params.amount,
 					code: XFER_SPEND,
+					// The principal's roll-up tags ride the hold; post/void inherit them.
+					...(params.userData !== undefined
+						? {
+								userData128: params.userData.userData128,
+								userData64: params.userData.userData64,
+								userData32: params.userData.userData32,
+							}
+						: {}),
 				});
 				pendingMap.set(params.transferId, { tbId: tbTransferId, heldAmount: params.amount });
 				return { transferId: params.transferId };
@@ -950,6 +988,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 			const model = params.model;
 			const actor = params.actor ?? "local";
+			// Read ONCE, rebuilt and frozen, before any I/O: an invalid principal is a
+			// TypeError here, and nothing the caller does to its object afterwards can
+			// reach a record or the ledger tags.
+			const principal = capturePrincipal(params.principal);
+			const principalAudit: { principal?: Principal } =
+				principal === undefined ? {} : { principal };
 			const messages = params.messages ?? [];
 
 			// Per-invocation denial evidence, filled by the throw sites and read by
@@ -997,6 +1041,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							endpointClass: endpoint.class,
 							promptParts: messages,
 							...costCenterAudit,
+							...principalAudit,
 						},
 					});
 					throw unknownModelDenial;
@@ -1198,6 +1243,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 								// session holding wallet) is reached by exactly the path it was
 								// before envelopes existed.
 								...(envelope !== undefined ? { debitAccountId: envelope.accountId } : {}),
+								// Roll-up tags only; an untagged call omits the key, so its hold
+								// is created exactly as before.
+								...(principal !== undefined ? { userData: principalLedgerTags(principal) } : {}),
 							});
 						} catch (holdErr) {
 							// P1-LEDGER-ENFORCE: an over-budget reservation is rejected
@@ -1251,6 +1299,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							estimatedCost: estCost,
 							promptParts: messages,
 							...costCenterAudit,
+							...principalAudit,
 						},
 					});
 				}
@@ -1295,6 +1344,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				transferId,
 				Object.freeze({
 					proxyTransferId,
+					actor,
+					principal,
 					costCenter: captured?.attribution.costCenter,
 					envelope: captured,
 					sessionAccounted: !envelopeDebited,
@@ -1337,6 +1388,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// payloads stay byte-identical to what they were before envelopes.
 			const costCenterAudit: { costCenter?: string } =
 				capture.costCenter === undefined ? {} : { costCenter: capture.costCenter };
+			// The same discipline for WHO: the actor and principal captured at
+			// authorize, never the caller's handle or `SettleParams`. No principal →
+			// no key, so an untagged call's records keep their shape.
+			const principalAudit: { principal?: Principal } =
+				capture.principal === undefined ? {} : { principal: capture.principal };
 
 			// A3: settlement meters with the endpoint scope CAPTURED AT AUTHORIZE —
 			// SettleParams carries no endpoint field by design.
@@ -1443,7 +1499,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					await audit
 						.appendEvent({
 							kind: "settlement_ambiguous",
-							actor: "local",
+							actor: capture.actor,
 							data: {
 								model,
 								cost: actualCost,
@@ -1453,6 +1509,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 										? postErr.message.slice(0, 200)
 										: String(postErr).slice(0, 200),
 								...costCenterAudit,
+								...principalAudit,
 							},
 						})
 						.catch(() => {
@@ -1481,7 +1538,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					await audit
 						.appendEvent({
 							kind: "settlement_ambiguous",
-							actor: "local",
+							actor: capture.actor,
 							data: {
 								model,
 								cost: actualCost,
@@ -1491,6 +1548,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 										? postErr.message.slice(0, 200)
 										: String(postErr).slice(0, 200),
 								...costCenterAudit,
+								...principalAudit,
 							},
 						})
 						.catch(() => {
@@ -1529,7 +1587,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			try {
 				const auditEvent = await audit.appendEvent({
 					kind: "llm_call",
-					actor: "local",
+					actor: capture.actor,
 					data: {
 						model,
 						cost: actualCost,
@@ -1553,6 +1611,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
 						source: "headless",
 						...costCenterAudit,
+						...principalAudit,
 					},
 				});
 				auditHash = auditEvent.hash;
@@ -1568,7 +1627,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				await audit
 					.appendEvent({
 						kind: "settlement_shortfall",
-						actor: "local",
+						actor: capture.actor,
 						data: {
 							model,
 							actual: actualCost,
@@ -1576,6 +1635,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							shortfall: shortfallRecord.shortfall,
 							transferId: auth.transferId,
 							...costCenterAudit,
+							...principalAudit,
 						},
 					})
 					.catch(() => {
@@ -1590,13 +1650,14 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					{
 						kind: "llm_call",
 						subsystem: "headless",
-						actor: "local",
+						actor: capture.actor,
 						data: {
 							model,
 							cost: actualCost,
 							settled,
 							transferId: auth.transferId,
 							...costCenterAudit,
+							...principalAudit,
 						},
 					},
 					config.audit.indexLimit,
@@ -1751,7 +1812,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			await audit
 				.appendEvent({
 					kind: "llm_call_failed",
-					actor: "local",
+					actor: capture.actor,
 					data: {
 						model: auth.model,
 						transferId: auth.transferId,
@@ -1763,6 +1824,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 									: "aborted",
 						source: "headless",
 						...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
+						...(capture.principal === undefined ? {} : { principal: capture.principal }),
 					},
 				})
 				.catch(() => {});

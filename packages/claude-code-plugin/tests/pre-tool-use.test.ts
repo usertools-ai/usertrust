@@ -52,6 +52,14 @@ afterEach(() => {
 	server = undefined;
 });
 
+/**
+ * The pending-hold files. A hook that names no transcript also records, under
+ * transcripts/, that its agent settles at the estimate for good.
+ */
+async function holdFiles() {
+	return (await readdir(stateDir)).filter((name) => name !== "transcripts");
+}
+
 const PAYLOAD = {
 	session_id: "sess1",
 	tool_name: "Bash",
@@ -82,8 +90,9 @@ describe("pre-tool-use hook", () => {
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toContain("tx_1");
 		// No agent_id in the payload → the parent's "main" bucket.
-		const files = await readdir(stateDir);
-		expect(files).toEqual(["sess1__main__tu_1.json"]);
+		expect(await holdFiles()).toEqual(["sess1__main__tu_1.json"]);
+		// No transcript_path: the agent's estimate mode is recorded before its hold is.
+		expect(await readdir(join(stateDir, "transcripts", "estimate"))).toEqual(["sess1__main"]);
 		const entry = JSON.parse(await readFile(join(stateDir, "sess1__main__tu_1.json"), "utf-8")) as {
 			toolUseId: string;
 			transferId: string;
@@ -110,7 +119,7 @@ describe("pre-tool-use hook", () => {
 			{ ...baseEnv, UT_SERVER_URL: `http://127.0.0.1:${port}` },
 		);
 		expect(result.code).toBe(0);
-		expect(await readdir(stateDir)).toEqual(["sess1__agent-A__tu_1.json"]);
+		expect(await holdFiles()).toEqual(["sess1__agent-A__tu_1.json"]);
 		const entry = JSON.parse(
 			await readFile(join(stateDir, "sess1__agent-A__tu_1.json"), "utf-8"),
 		) as { agentId: string };
@@ -180,7 +189,7 @@ describe("pre-tool-use hook", () => {
 		});
 		expect(result.code).toBe(2);
 		expect(result.stderr).toContain("usertrust");
-		expect(await readdir(stateDir)).toEqual([]);
+		expect(await holdFiles()).toEqual([]);
 	});
 
 	it("fails closed (exit 2) on a 200 missing transferId", async () => {
@@ -190,7 +199,7 @@ describe("pre-tool-use hook", () => {
 			UT_SERVER_URL: `http://127.0.0.1:${port}`,
 		});
 		expect(result.code).toBe(2);
-		expect(await readdir(stateDir)).toEqual([]);
+		expect(await holdFiles()).toEqual([]);
 	});
 
 	it("UT_FAIL_OPEN=1 lets the call through with NO decision, and a warning, when the server is unreachable", async () => {
@@ -216,7 +225,7 @@ describe("pre-tool-use hook", () => {
 		expect(result.code).toBe(0);
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toContain("shadow");
-		expect(await readdir(stateDir)).toEqual([]);
+		expect(await holdFiles()).toEqual([]);
 	});
 
 	it("truncates tool_input at 16 KiB for both content and token estimation", async () => {
