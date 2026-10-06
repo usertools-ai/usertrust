@@ -129,8 +129,9 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   principal has the same shape, its `type` being `main` for the parent, else the
   hook's `agent_type`, else `subagent`. An older server keeps the attribution
   request-side only. The principal also carries `unit` and `role` from
-  `UT_CC_UNIT` / `UT_CC_ROLE` — on PreToolUse's authorize and on the remainder's
-  at Stop/SubagentStop — when each is a valid principal field: 1 to 128
+  `UT_CC_UNIT` / `UT_CC_ROLE` — on PreToolUse's authorize and on every
+  remainder's, at Stop, SubagentStop and SessionEnd — when each is a valid
+  principal field: 1 to 128
   characters of `A-Z a-z 0-9 . _ : -` (so `release-engineer`, not `release
   engineer`). A value that is empty or invalid is left out, with a note on
   stderr, and never sent: a strict server refuses the whole authorize over one

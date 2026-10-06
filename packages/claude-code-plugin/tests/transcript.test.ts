@@ -1680,7 +1680,7 @@ describe("with a server that honours keys, principal and release (usertrust #205
 		const origin = `claude-code:${SESSION}`;
 		const attribution = { UT_CC_UNIT: "platform", UT_CC_ROLE: "release-engineer" };
 
-		it("ride INSIDE the principal on every authorize — a window's, and the remainders' at SubagentStop and Stop — never as params", async () => {
+		it("ride INSIDE the principal on every authorize — a window's, and the remainders' at SubagentStop, Stop and SessionEnd — never as params", async () => {
 			const server = keyedServer();
 			await startServer(server.responder);
 			await writeMain(responseEntries("msg_a", SONNET, u(10, 20)));
@@ -1691,6 +1691,13 @@ describe("with a server that honours keys, principal and release (usertrust #205
 			// A final answer with no tool call after it: no hold carries it, so Stop posts it.
 			await appendMain(responseEntries("msg_b", SONNET, u(1, 2)));
 			await run("stop.mjs", stopInput(), attribution);
+			// The last turn's answer, written after Stop: SessionEnd posts it.
+			await appendMain(responseEntries("msg_c", SONNET, u(3, 4)));
+			await run(
+				"session-end.mjs",
+				{ ...stopInput(), hook_event_name: "SessionEnd", reason: "prompt_input_exit" },
+				attribution,
+			);
 			expect(authorizes().map((a) => [a.body.params, a.body.principal])).toEqual([
 				[
 					{
@@ -1716,6 +1723,16 @@ describe("with a server that honours keys, principal and release (usertrust #205
 				[
 					{
 						hook: "Stop",
+						usageOrigin: "transcript",
+						agent_id: "main",
+						agent_type: "main",
+						messages: 1,
+					},
+					{ id: "main", type: "main", origin, unit: "platform", role: "release-engineer" },
+				],
+				[
+					{
+						hook: "SessionEnd",
 						usageOrigin: "transcript",
 						agent_id: "main",
 						agent_type: "main",
