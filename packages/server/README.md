@@ -42,6 +42,12 @@ in `AGENTS.md` — omitting the fields is not the same as reporting zero cache a
 duration in milliseconds, as reported by local runtimes (e.g. Ollama `eval_duration`). It
 passes through to `receipt.meter.computeMs` and is not a pricing input.
 
+`/v1/authorize` also accepts `actor` (a string) and `principal` (optional) — who the work is for:
+`{ "id": "…", "type": "…", "unit": "…", "role": "…" }`, every field optional and each 1–128
+characters of `[A-Za-z0-9._:-]`. Any other key, or an invalid field, is a `400`. Both are recorded on
+the call's audit records, and the principal's `id`/`unit`/`role` become TigerBeetle `user_data` tags
+on its ledger transfers for roll-ups. A principal never changes which wallet pays.
+
 ## Endpoints
 
 | Method | Path            | Auth   | Purpose                                             |

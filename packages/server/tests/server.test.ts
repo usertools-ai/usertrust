@@ -92,6 +92,40 @@ describe("HTTP control plane", () => {
 		expect(fake.calls.settled).toHaveLength(1);
 	});
 
+	it("forwards the actor and the principal to governor.authorize()", async () => {
+		// Without `principal` on the wire schema, zod strips it and the request still
+		// returns 200: the D4 silent-strip failure, for WHO did the work.
+		const { base, fake } = await start();
+		const principal = { id: "a7f3", type: "Explore", unit: "receipts", role: "reviewer" };
+		const res = await post(base, "/v1/authorize", {
+			model: "m",
+			estimatedInputTokens: 1,
+			maxOutputTokens: 1,
+			actor: "claude-code:s-1:Explore:a7f3",
+			principal,
+		});
+		expect(res.status).toBe(200);
+		expect(fake.calls.authorizeParams[0]).toMatchObject({
+			actor: "claude-code:s-1:Explore:a7f3",
+			principal,
+		});
+	});
+
+	it("a principal the governor would refuse is a 400 BEFORE the governor is asked", async () => {
+		const { base, fake } = await start();
+		for (const principal of [
+			{ unit: "has space" },
+			{ role: "" },
+			{ id: "x".repeat(129) },
+			{ unit: "receipts", extra: "never silently stripped" },
+			"receipts",
+		]) {
+			const res = await post(base, "/v1/authorize", { model: "m", principal });
+			expect(res.status).toBe(400);
+		}
+		expect(fake.calls.authorizeParams).toHaveLength(0);
+	});
+
 	it("forwards computeMs from the settle body to governor.settle()", async () => {
 		const { base, fake } = await start();
 		const auth = (await (

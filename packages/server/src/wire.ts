@@ -1,8 +1,37 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Usertools, Inc.
 
-import { AnomalyError, InsufficientBalanceError, PolicyDeniedError } from "usertrust";
+import {
+	AnomalyError,
+	InsufficientBalanceError,
+	PolicyDeniedError,
+	principalFieldRefusal,
+} from "usertrust";
 import { z } from "zod";
+
+/**
+ * One principal field, under core's own rule (`principalFieldRefusal`) — the wire
+ * never restates the pattern, so the server cannot accept what the governor would
+ * refuse, or refuse what it would accept.
+ */
+const PrincipalField = z.string().superRefine((value, ctx) => {
+	const refusal = principalFieldRefusal(value);
+	if (refusal !== undefined) ctx.addIssue({ code: "custom", message: refusal });
+});
+
+/**
+ * Who the work is for. STRICT: an unknown key is a 400, not a silent strip — the
+ * same failure the D4 cache tiers had, where a field the caller sent vanished on
+ * the wire and the request still returned 200.
+ */
+export const PrincipalSchema = z
+	.object({
+		id: PrincipalField.optional(),
+		type: PrincipalField.optional(),
+		unit: PrincipalField.optional(),
+		role: PrincipalField.optional(),
+	})
+	.strict();
 
 export const AuthorizeRequestSchema = z.object({
 	model: z.string().min(1),
@@ -11,6 +40,7 @@ export const AuthorizeRequestSchema = z.object({
 	messages: z.array(z.unknown()).optional(),
 	params: z.record(z.string(), z.unknown()).optional(),
 	actor: z.string().optional(),
+	principal: PrincipalSchema.optional(),
 });
 
 export const SettleRequestSchema = z.object({

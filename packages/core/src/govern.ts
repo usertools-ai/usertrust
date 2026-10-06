@@ -95,6 +95,7 @@ import {
 	SpendLedgerUnreadableError,
 } from "./shared/errors.js";
 import { trustId } from "./shared/ids.js";
+import type { PrincipalLedgerTags } from "./shared/principal.js";
 import type {
 	ActionDescriptor,
 	EndpointInfo,
@@ -194,6 +195,13 @@ export interface TrustEngine {
 		transferId: string;
 		amount: number;
 		debitAccountId?: bigint | undefined;
+		/**
+		 * The principal's `user_data` tags (`principalLedgerTags`), written on the
+		 * PENDING hold. TigerBeetle copies a zero `user_data` on post/void from the
+		 * pending transfer, so the settlement inherits them natively. Reporting only:
+		 * they never select an account. Omitted → all zero, exactly as before.
+		 */
+		userData?: PrincipalLedgerTags | undefined;
 	}): Promise<{ transferId: string }>;
 	/**
 	 * Settle a PENDING hold. `actualAmount` is CAPPED at the reserved amount —
@@ -3744,6 +3752,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			transferId: string;
 			amount: number;
 			debitAccountId?: bigint | undefined;
+			userData?: PrincipalLedgerTags | undefined;
 		}): Promise<{ transferId: string }> {
 			// An ATTRIBUTED hold names its own debit account — the cost-center
 			// envelope the governor derived at authorize. Unattributed holds keep
@@ -3755,6 +3764,14 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					creditAccountId: treasury,
 					amount: params.amount,
 					code: XFER_SPEND,
+					// The principal's roll-up tags ride the hold; post/void inherit them.
+					...(params.userData !== undefined
+						? {
+								userData128: params.userData.userData128,
+								userData64: params.userData.userData64,
+								userData32: params.userData.userData32,
+							}
+						: {}),
 				});
 				pendingMap.set(params.transferId, { tbId: tbTransferId, heldAmount: params.amount });
 				return { transferId: params.transferId };
