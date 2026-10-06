@@ -138,3 +138,19 @@ test("the session card's header uses the same one-row form", () => {
 	assert.match(header, /min-w-0 truncate/);
 	assert.match(header, /max-\[479px\]:hidden/);
 });
+
+test("the check ledger stacks its rows below 640px, so Details never scrolls sideways", () => {
+	for (const [name, state] of states()) {
+		const ledger = element(renderToStaticMarkup(<StateView state={state} />), "check-ledger");
+		assert.match(ledger, /<table class="[^"]*\bmax-sm:block\b/, `${name}: the table stacks`);
+		assert.match(ledger, /<thead class="max-sm:hidden">/, `${name}: the column headers hide`);
+		assert.match(ledger, /<tbody class="max-sm:block">/, `${name}: the body stacks`);
+		const rows = [...ledger.matchAll(/<tr [^>]*data-check="[^"]+"[^>]*class="([^"]*)"/g)];
+		assert.ok(rows.length > 0, `${name}: rows found`);
+		for (const [, cls] of rows) assert.match(cls, /\bmax-sm:block\b/, `${name}: each row stacks`);
+		const names = [...ledger.matchAll(/<th scope="row" class="([^"]*)"/g)];
+		for (const [, cls] of names) {
+			assert.match(cls, /\[overflow-wrap:anywhere\]/, `${name}: a long check name may wrap`);
+		}
+	}
+});
