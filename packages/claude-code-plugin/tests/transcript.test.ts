@@ -114,6 +114,12 @@ function startServer(responder: Responder | { forwardTo: string; key: string }):
 				const path = req.url ?? "";
 				const body = JSON.parse(raw || "{}") as Record<string, unknown>;
 				if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+				// An answer that outlived its test: the next test has its own log and its
+				// own transfer ids (`nextTransfer`), which this responder must not touch.
+				if (log !== requests) {
+					res.destroy();
+					return;
+				}
 				let out: { status: number; json: unknown };
 				if (typeof responder === "function") {
 					out = responder(path, body);
@@ -1083,6 +1089,29 @@ describe("hardening", () => {
 				.sort(),
 		).toEqual([1, 2]);
 	}, 60_000);
+
+	it("a delayed answer that outlives its test never reaches the responder: the next test's transfer ids stay its own", async () => {
+		let answered = 0;
+		delayMs = 300;
+		await startServer((path, body) => {
+			answered += 1;
+			return okResponder(path, body);
+		});
+		// A request still waiting out its delay when its test ends...
+		const late = fetch(`http://127.0.0.1:${port}/v1/authorize`, {
+			method: "POST",
+			body: "{}",
+		}).catch(() => null);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		// ...and what the next test's beforeEach does meanwhile: a new log, ids from 1.
+		requests = [];
+		nextTransfer = 0;
+		delayMs = 0;
+		await late;
+		expect(answered).toBe(0);
+		expect(nextTransfer).toBe(0);
+		expect(requests).toEqual([]);
+	});
 
 	it("a state dir writable by others is not trusted: nothing is posted, nothing settled at the estimate", async () => {
 		await startServer(okResponder);
