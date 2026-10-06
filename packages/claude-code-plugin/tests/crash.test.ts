@@ -268,6 +268,32 @@ const ONE_AGENT: Scenario = {
 };
 
 /**
+ * One agent whose last answer reaches the transcript only after Stop — the async
+ * write the hooks reference warns of — so SessionEnd is what posts it.
+ */
+const FINAL_AFTER_STOP: Scenario = {
+	messages: 3,
+	setup: async (world) => {
+		await writeFile(world.main, "");
+		await append(world.main, [...response("msg_1", SONNET, 1), ...response("msg_2", SONNET, 10)]);
+	},
+	steps: [
+		{ calls: [{ hook: "pre-tool-use.mjs", input: pre("tu_1") }] },
+		{ calls: [{ hook: "post-tool-use.mjs", input: post("tu_1") }] },
+		{ calls: [{ hook: "stop.mjs", input: base }] },
+		{
+			before: (world) => append(world.main, response("msg_3", SONNET, 100)),
+			calls: [
+				{
+					hook: "session-end.mjs",
+					input: (world) => ({ ...base(world), reason: "prompt_input_exit" }),
+				},
+			],
+		},
+	],
+};
+
+/**
  * One agent whose first hooks name no transcript (they settle at the estimate),
  * and whose later hooks do: its real usage must never be charged as well.
  */
@@ -482,6 +508,7 @@ describe("at most once — killed at every boundary, the session goes on, nothin
 			[ONE_AGENT, false],
 			[ONE_AGENT, true],
 			[FORKED, false],
+			[FINAL_AFTER_STOP, false],
 		] as const) {
 			const clean = await play(scenario, keyed);
 			expect(clean.counts).toEqual(Array(scenario.messages).fill(1));
@@ -547,6 +574,35 @@ describe("at most once — killed at every boundary, the session goes on, nothin
 		60_000,
 	);
 
+	// The final answer, written after Stop: SessionEnd posts it — once, whatever kills it.
+	it.each([
+		// [what, boundary in SessionEnd (step 3), charges for msg_1, msg_2, msg_3]
+		[
+			"SessionEnd killed after its settle went out: charged once",
+			"fetch /v1/settle|1|after",
+			[1, 1, 1],
+		],
+		[
+			"SessionEnd killed between the answer's binding and its settle: never posted",
+			"fetch /v1/settle|1|before",
+			[1, 1, 0],
+		],
+		[
+			"SessionEnd killed before claiming the answer: the next Stop posts it once",
+			"link|1|before",
+			[1, 1, 1],
+		],
+	] as const)(
+		"a final answer written after Stop — %s",
+		async (_what, spec, charges) => {
+			const result = await play(FINAL_AFTER_STOP, false, { step: 3, call: 0, spec });
+			expect(result.crashed).toBe(true);
+			expect(result.counts).toEqual(charges);
+			expect(result.excess).toBe(0);
+		},
+		60_000,
+	);
+
 	it.each([
 		["one agent, an older server", ONE_AGENT, false, false],
 		["one agent, its cursor lost just before the killed hook (H4)", ONE_AGENT, false, "before"],
@@ -555,6 +611,8 @@ describe("at most once — killed at every boundary, the session goes on, nothin
 		["a parent and its fork at once", FORKED, false, false],
 		["a parent and its fork at once, their cursors lost just before", FORKED, false, "before"],
 		["one agent at the estimate first, then with its transcript", ESTIMATE_FIRST, false, false],
+		["a final answer written after Stop, posted at SessionEnd", FINAL_AFTER_STOP, false, false],
+		["the same, its cursor lost just before the killed hook", FINAL_AFTER_STOP, false, "before"],
 		["the same, its cursor lost just after the killed hook", ESTIMATE_FIRST, false, "after"],
 	] as const)(
 		"%s",

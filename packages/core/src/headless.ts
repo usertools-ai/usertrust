@@ -266,6 +266,20 @@ export interface AuthorizeParams {
 	estimatedInputTokens?: number | undefined;
 	/** Max output tokens for cost estimation. Defaults to 4096. */
 	maxOutputTokens?: number | undefined;
+	/**
+	 * Estimated cache-READ prompt tokens, priced at the model's resolved
+	 * `cacheReadPer1k` — the same resolution settle uses (an absent rate falls back
+	 * to `inputPer1k`, never to free). With the two cache tiers given,
+	 * `estimatedInputTokens` should be the FRESH input only. Omitted → 0, which sizes
+	 * the hold exactly as before this field existed. A non-negative integer; anything
+	 * else is a `TypeError` before any I/O.
+	 */
+	estimatedCacheReadTokens?: number | undefined;
+	/**
+	 * Estimated cache-WRITE (creation) prompt tokens, priced at the model's resolved
+	 * `cacheWritePer1k`. Same rules as `estimatedCacheReadTokens`.
+	 */
+	estimatedCacheWriteTokens?: number | undefined;
 	/** Messages array for PII detection and input token estimation. */
 	messages?: unknown[] | undefined;
 	/** Additional parameters for policy evaluation. */
@@ -828,6 +842,18 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
  * lifecycle. This is designed for systems like OpenClaw that make raw
  * LLM calls via streaming libraries (pi-ai) rather than SDK clients.
  */
+/**
+ * An optional per-tier token estimate from `AuthorizeParams`: omitted is 0;
+ * otherwise a non-negative safe integer, or a `TypeError` naming the field.
+ */
+function estimateTier(value: unknown, field: string): number {
+	if (value === undefined) return 0;
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+		throw new TypeError(`${field} must be a non-negative integer`);
+	}
+	return value;
+}
+
 export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// 1. Load config
 	const vaultBase = opts?.vaultBase ?? process.cwd();
@@ -994,6 +1020,17 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const principal = capturePrincipal(params.principal);
 			const principalAudit: { principal?: Principal } =
 				principal === undefined ? {} : { principal };
+			// Per-tier estimates, read ONCE and validated before any I/O, like the
+			// principal: a hold sized from a NaN or a negative count would either reach
+			// the ledger as garbage or silently reserve less than the call can cost.
+			const estCacheReadTokens = estimateTier(
+				params.estimatedCacheReadTokens,
+				"estimatedCacheReadTokens",
+			);
+			const estCacheWriteTokens = estimateTier(
+				params.estimatedCacheWriteTokens,
+				"estimatedCacheWriteTokens",
+			);
 			const messages = params.messages ?? [];
 
 			// Per-invocation denial evidence, filled by the throw sites and read by
@@ -1056,6 +1093,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			const transferId = trustId("tx");
 			const estInputTokens = params.estimatedInputTokens ?? estimateInputTokens(messages);
 			const maxOutputTokens = params.maxOutputTokens ?? 4096;
+			// The two cache tiers were already read ONCE and validated at the top of
+			// authorize (`estCacheReadTokens` / `estCacheWriteTokens`); omitted is 0.
 			// D3: size the ESTIMATED-input half of the hold at
 			// max(inputPer1k, effective cacheWritePer1k) — see the identical
 			// govern.ts hold-sizing comment for the full rationale. Settle-time
@@ -1064,10 +1103,26 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				rateInfo.rates.inputPer1k,
 				effectiveCacheWriteRate(rateInfo.rates),
 			);
+			// Per-tier hold: each cache tier at ITS OWN rate, resolved from the
+			// UN-inflated rates exactly as settle resolves them (`resolveAppliedRates`).
+			// Only the FRESH-input estimate keeps the D3 write premium — it is the half
+			// of the estimate that cannot know which of its tokens the provider will
+			// write to cache. Resolving the cache tiers first matters: a model with no
+			// published cache-read rate falls back to `inputPer1k`, and that must be the
+			// REAL input rate here, not the inflated hold rate. Tiers omitted → 0, so an
+			// old client's hold is exactly what it was.
+			const appliedForHold = resolveAppliedRates(rateInfo.rates);
 			const estCost = costFromRates(
-				{ ...rateInfo.rates, inputPer1k: holdInputRate },
+				{
+					...rateInfo.rates,
+					cacheReadPer1k: appliedForHold.cacheReadPer1k,
+					cacheWritePer1k: appliedForHold.cacheWritePer1k,
+					inputPer1k: holdInputRate,
+				},
 				estInputTokens,
 				maxOutputTokens,
+				estCacheReadTokens,
+				estCacheWriteTokens,
 			);
 			// FIX (review finding, D3 scope): `estCost` above is the
 			// write-premium-INFLATED HOLD — correct for the PENDING reservation
@@ -1082,7 +1137,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// estimate (plain `inputPer1k`, unmodified rates), carried on the
 			// internal capture (never the public handle) and is the ONLY value
 			// settle()'s "no usage reported" fallback may use.
-			const meteredEstimate = costFromRates(rateInfo.rates, estInputTokens, maxOutputTokens);
+			const meteredEstimate = costFromRates(
+				rateInfo.rates,
+				estInputTokens,
+				maxOutputTokens,
+				estCacheReadTokens,
+				estCacheWriteTokens,
+			);
 
 			// Acquire mutex for budget atomicity (AUD-453). The attributed-envelope
 			// preflight read is taken INSIDE this lock (top of the try below) so a

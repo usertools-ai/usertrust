@@ -528,6 +528,19 @@ and the headless authorize estimate — reserve the input leg at
 (cache-hit-heavy) workloads settle far below the hold and release the difference back, so this is
 conservative, not a leak. A warm-but-cold-held call can see `budget_remaining_after` over-deny —
 the fail-safe trade the invariant above already accepts.
+*A headless caller that KNOWS its cache split says so.* `AuthorizeParams.estimatedCacheReadTokens`
+/ `estimatedCacheWriteTokens` (and the same keys on `/v1/authorize`, advertised as the
+`authorize-cache-tiers` capability) size each cache tier at its OWN rate. Only the fresh-input
+estimate keeps the write premium above, because it is the one half of the estimate that cannot know
+which of its tokens will be written to cache. The cache tiers resolve from the UN-inflated rates via
+`resolveAppliedRates`, the same resolution settle meters with: a model with no published cache-read
+rate holds its reads at the real `inputPer1k` (D1), never at the inflated hold rate. The un-inflated
+`meteredEstimate` uses the same four tiers. Omitted tiers are 0, so an old client's hold is
+unchanged. The hold is still ONE pending transfer of the computed amount
+(`tests/integration/authorize-cache-tiers.tb.test.ts`).
+*Prevents:* a mostly-cache-READ window (a Claude Code session) being reserved at the cache-WRITE
+rate. On Sonnet, 84,150 prompt tokens held at 37.5/1k is 3,156 usertokens against an input side
+that costs ~327, which is a false 402 near a budget.
 
 **Documented pricing approximations — verbatim, also published at `/docs/api/pricing`:**
 Per-TTL write premium collapsed (1h = 2× billed as 1.25×; `customRates` override for 1h-heavy

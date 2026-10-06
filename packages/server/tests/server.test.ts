@@ -99,7 +99,7 @@ describe("HTTP control plane", () => {
 		for (const dryRun of [true, false]) {
 			const { base } = await start({ dryRun });
 			const body = (await (await fetch(`${base}/v1/health`)).json()) as { capabilities?: unknown };
-			expect(body.capabilities).toEqual(["principal"]);
+			expect(body.capabilities).toEqual(["principal", "authorize-cache-tiers"]);
 			await server?.close();
 			server = undefined;
 		}
@@ -121,6 +121,33 @@ describe("HTTP control plane", () => {
 			plugin,
 			{ ...plugin, unit: "receipts", role: "reviewer" },
 		]);
+	});
+
+	it("forwards the per-tier estimates to governor.authorize(), and refuses invalid counts with a 400", async () => {
+		// Without the two fields on the wire schema, zod strips them and a mostly-cache-read
+		// window is held at the cache-WRITE rate — a false 402 near a budget.
+		const { base, fake } = await start();
+		const res = await post(base, "/v1/authorize", {
+			model: "m",
+			estimatedInputTokens: 150,
+			estimatedCacheReadTokens: 82_000,
+			estimatedCacheWriteTokens: 2_000,
+			maxOutputTokens: 1_000,
+		});
+		expect(res.status).toBe(200);
+		expect(fake.calls.authorizeParams[0]).toMatchObject({
+			estimatedInputTokens: 150,
+			estimatedCacheReadTokens: 82_000,
+			estimatedCacheWriteTokens: 2_000,
+			maxOutputTokens: 1_000,
+		});
+		for (const bad of [-1, 1.5, "82000"]) {
+			for (const field of ["estimatedCacheReadTokens", "estimatedCacheWriteTokens"]) {
+				const r = await post(base, "/v1/authorize", { model: "m", [field]: bad });
+				expect(r.status).toBe(400);
+			}
+		}
+		expect(fake.calls.authorizeParams).toHaveLength(1);
 	});
 
 	it("forwards the actor and the principal to governor.authorize()", async () => {
