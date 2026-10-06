@@ -32,8 +32,8 @@
 // On a server that honours them (its /v1/health `capabilities`), a window's
 // authorize carries the window's idempotency key — so the server charges those
 // messages at most once, however often a settle of them is retried — and every
-// transcript-mode authorize carries the agent's `principal`, which the server
-// records. A key whose charge already stands (409 `already_settled`) means an
+// authorize, on the transcript path or the estimate path, carries the agent's
+// `principal`, which the server records. A key whose charge already stands (409 `already_settled`) means an
 // earlier settle of exactly this window landed: it is accounted, and the tool is
 // held alone.
 import {
@@ -50,7 +50,7 @@ import {
 	serverRequest,
 	timeLeft,
 } from "./lib.mjs";
-import { holdInputTokens, prepareWindow, safeName } from "./transcript.mjs";
+import { estimatePrincipalFor, holdInputTokens, prepareWindow, safeName } from "./transcript.mjs";
 
 const MAX_REASON_CHARS = 500;
 
@@ -118,10 +118,15 @@ try {
 		const transcriptMode = prepared.mode === "transcript";
 		// What the server honours decides what this hold may carry (see lib.mjs).
 		// Unknown (a failed probe) reads as absent here: a key is sent only to a server
-		// known to honour it.
-		const capabilities = transcriptMode ? await serverCapabilities() : null;
+		// known to honour it, and a principal — on either path, in one shape — only to
+		// a server that records one.
+		const capabilities = await serverCapabilities();
 		const keyed = capabilities?.has("idempotency-key") ?? false;
-		const principal = capabilities?.has("principal") ? prepared.principal : undefined;
+		const principal = !capabilities?.has("principal")
+			? undefined
+			: transcriptMode
+				? prepared.principal
+				: estimatePrincipalFor(sessionId, agentId, input.agent_type);
 		let window = transcriptMode ? prepared.window : null;
 		const fallbackModel = prepared.lastModel ?? process.env.UT_CC_MODEL ?? "claude-sonnet-4-6";
 		// Never past the hook's own budget: a hook killed mid-call leaves the tool

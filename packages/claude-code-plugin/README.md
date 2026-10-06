@@ -104,17 +104,18 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
 - **Attribution.** A transcript authorize's actor is
   `claude-code:<session>:<agentType>:<agentId>` (`main:main` for the parent), with
   `agent_id` / `agent_type` in its params. On a server that records a `principal`,
-  every transcript-mode authorize also carries `{ id: <agentId>, type:
-  <agentType>, origin: "claude-code:<session>" }`, which the server writes onto
-  every record the hold leaves and onto its receipt. An older server keeps the
-  attribution request-side only. The principal also carries `unit` and `role`
-  from `UT_CC_UNIT` / `UT_CC_ROLE` — on PreToolUse's authorize and on the
-  remainder's at Stop/SubagentStop — when each is a valid principal field: 1 to
-  128 characters of `A-Z a-z 0-9 . _ : -` (so `release-engineer`, not `release
+  every authorize also carries `{ id: <agentId>, type: <agentType>, origin:
+  "claude-code:<session>" }`, which the server writes onto every record the hold
+  leaves and onto its receipt. On the estimate path, where no transcript is read,
+  the principal has the same shape, its `type` being `main` for the parent, else
+  the hook's `agent_type`, else `subagent`. An older server keeps the attribution
+  request-side only. The principal also carries `unit` and `role` from
+  `UT_CC_UNIT` / `UT_CC_ROLE` — on PreToolUse's authorize and on the remainder's
+  at Stop/SubagentStop — when each is a valid principal field: 1 to 128
+  characters of `A-Z a-z 0-9 . _ : -` (so `release-engineer`, not `release
   engineer`). A value that is empty or invalid is left out, with a note on
   stderr, and never sent: a strict server refuses the whole authorize over one
-  bad field. Where no principal is sent (that older server, or the estimate
-  path), neither is.
+  bad field. Where no principal is sent (that older server), neither is.
 - **Exactly once, on a server that honours idempotency keys.** Every authorize
   that carries responses goes in under the VEHICLE KEY of exactly those responses
   (`cc:` + 48 hex, a hash of the session, the agent and the sorted response ids —

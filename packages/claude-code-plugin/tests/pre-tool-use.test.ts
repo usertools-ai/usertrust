@@ -21,6 +21,12 @@ function startFake(handler: (body: unknown) => { status: number; json: unknown }
 				raw += c;
 			});
 			req.on("end", () => {
+				// An older server: health answers, with no capabilities (no principal is sent).
+				if (req.method === "GET" && req.url === "/v1/health") {
+					res.writeHead(200, { "content-type": "application/json" });
+					res.end(JSON.stringify({ status: "ok" }));
+					return;
+				}
 				const body = JSON.parse(raw) as unknown;
 				requests.push(body);
 				const out = handler(body);
