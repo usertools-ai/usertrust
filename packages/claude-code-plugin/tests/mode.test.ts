@@ -88,6 +88,10 @@ const UNREACHABLE = "http://127.0.0.1:9";
 // biome-ignore lint/suspicious/noControlCharactersInRegex: detecting control chars is the point
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/;
 const HOSTILE = "\u001b[2J\u001b]0;pwned\u0007\u007f\u009b";
+/** HOSTILE once its control characters are spaces. */
+const HOSTILE_SANITIZED = " [2J ]0;pwned   ";
+/** lib.mjs `MAX_NOTE_CHARS`: the longest line `say` or `announce` writes. */
+const MAX_NOTE_CHARS = 2000;
 
 describe("the mode: watch-only unless UT_CC_MODE=enforce", () => {
 	// Driven through the hooks themselves (each is its own node process reading the
@@ -336,10 +340,21 @@ describe("the mode is announced to the user at session start", () => {
 		}
 	});
 
-	it("an unrecognised UT_CC_MODE carrying ESC, DEL and C1 is named without them", async () => {
-		const message = await announce({ UT_CC_MODE: `enforcing${HOSTILE}` });
-		expect(message).toContain("is not a mode");
-		expect(message).toContain("enforcing");
+	it("an unrecognised UT_CC_MODE carrying ESC, DEL and C1 is named without them: each is a space, and 40 characters of that are shown", async () => {
+		const message = await announce({ UT_CC_MODE: `enforcing${HOSTILE}${"x".repeat(60)}` });
+		const shown = `enforcing${HOSTILE_SANITIZED}${"x".repeat(15)}`;
+		expect(shown).toHaveLength(40);
+		expect(message).toContain(`UT_CC_MODE=${JSON.stringify(shown)} is not a mode`);
+		expect(message).not.toMatch(CONTROL);
+	});
+
+	it("an announcement past the bound is clipped to it, with no control character in what is left", async () => {
+		// 200 path segments, each carrying ESC, BEL, DEL and C1: far past the bound.
+		const hostileDir = join(stateDir, ...Array.from({ length: 200 }, (_, i) => `d${i}${HOSTILE}`));
+		expect(hostileDir.length).toBeGreaterThan(MAX_NOTE_CHARS);
+		const message = await announce({ UT_CC_STATE_DIR: hostileDir });
+		expect(message.startsWith("usertrust: watch-only — nothing is blocked")).toBe(true);
+		expect(message).toHaveLength(MAX_NOTE_CHARS);
 		expect(message).not.toMatch(CONTROL);
 	});
 

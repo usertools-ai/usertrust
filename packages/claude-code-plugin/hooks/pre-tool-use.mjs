@@ -2,8 +2,8 @@
 //
 // Watch-only by default (`guardMode` in lib.mjs): this hook NEVER blocks a tool
 // call, and never approves one — it makes no permission decision at all (see
-// `proceed`). A 402/403 denial is written down as a `would_block` record; a call
-// that could not be metered (the server is unreachable, or answers with
+// `proceed`). A 402/403/429 refusal is written down as a `would_block` record;
+// a call that could not be metered (the server is unreachable, or answers with
 // something unusable) is written down as a `gap` record. With UT_CC_MODE=enforce
 // it blocks: a denial is enforced, and a failed authorization fails closed
 // (exit 2) unless UT_FAIL_OPEN=1, which lets the call through and records the

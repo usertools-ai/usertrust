@@ -102,28 +102,37 @@ export function sanitizeReason(value, fallback = "unspecified") {
 	return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
 }
 
-/** The longest line `say` writes; anything longer is clipped, after sanitizing. */
+/** The longest line `say` or `announce` writes; anything longer is clipped, after sanitizing. */
 export const MAX_NOTE_CHARS = 2000;
+
+/**
+ * Control characters out FIRST (`sanitizeReason`: C0, DEL and C1 become spaces),
+ * clipped AFTER: the order AGENTS.md requires of untrusted text bound for a
+ * terminal.
+ */
+function sanitizeThenClip(text, max) {
+	return sanitizeReason(String(text), "").slice(0, max);
+}
 
 /**
  * The ONE way a hook writes to stderr — Claude Code's debug log, and the terminal
  * of whoever reads it. Everything a note carries is untrusted: server answers,
  * transcript ids, operator paths, error messages that quote them. So the line is
- * control-character sanitized FIRST (C0, DEL, C1: `sanitizeReason`) and clipped
- * AFTER, the order AGENTS.md requires, then written with its newline.
+ * control-character sanitized first and clipped after (`sanitizeThenClip`), then
+ * written with its newline.
  * tests/terminal-sinks.test.ts fails on any other stderr write in hooks/*.mjs.
  */
 export function say(text, max = MAX_NOTE_CHARS) {
-	process.stderr.write(`${sanitizeReason(String(text), "").slice(0, max)}\n`);
+	process.stderr.write(`${sanitizeThenClip(text, max)}\n`);
 }
 
 /**
  * The ONE way a hook speaks to the user: hook JSON output whose `systemMessage`
- * (shown in the user's terminal) is control-character sanitized text. JSON
- * escaping alone would leave DEL and C1 (U+007F-U+009F) raw.
+ * (shown in the user's terminal) is sanitized, then clipped, as `say`'s lines are.
+ * JSON escaping alone would leave DEL and C1 (U+007F-U+009F) raw.
  */
-export function announce(text) {
-	process.stdout.write(JSON.stringify({ systemMessage: sanitizeReason(String(text), "") }));
+export function announce(text, max = MAX_NOTE_CHARS) {
+	process.stdout.write(JSON.stringify({ systemMessage: sanitizeThenClip(text, max) }));
 }
 
 /**
@@ -136,14 +145,14 @@ export function defaultModel() {
 
 /**
  * Whether the plugin may block a tool call. `watch` (the default) NEVER blocks,
- * and makes no permission decision at all (see `proceed` in pre-tool-use.mjs): an
- * over-budget or policy denial (402/403) is written down as a `would_block`
- * record, and a call that could not be metered (the server is unreachable, times
- * out, or answers something unusable) as a `gap` record — missed metering is
- * visible, never silent. `UT_CC_MODE=enforce` opts in to blocking: denials are
- * enforced, and a failed authorization blocks the call unless `UT_FAIL_OPEN=1`.
- * Any other value runs watch-only, and the session-start announcement names the
- * value it ignored.
+ * and makes no permission decision at all (see `proceed` in pre-tool-use.mjs): a
+ * budget, policy or anomaly refusal (402/403/429) is written down as a
+ * `would_block` record, and a call that could not be metered (the server is
+ * unreachable, times out, or answers something unusable) as a `gap` record —
+ * missed metering is visible, never silent. `UT_CC_MODE=enforce` opts in to
+ * blocking: denials are enforced, and a failed authorization blocks the call
+ * unless `UT_FAIL_OPEN=1`. Any other value runs watch-only, and the
+ * session-start announcement names the value it ignored.
  */
 export function guardMode() {
 	return (process.env.UT_CC_MODE ?? "").trim().toLowerCase() === "enforce" ? "enforce" : "watch";
@@ -165,9 +174,10 @@ export function watchLogPath() {
  * surprise: a watch-only plugin must not look like it is enforcing.
  */
 export function modeAnnouncement() {
-	// Raw on purpose: it reaches the user only through `announce`, which sanitizes
-	// all of it — the path (the operator's UT_CC_STATE_DIR / CLAUDE_CONFIG_DIR) and
-	// an unrecognised UT_CC_MODE value alike.
+	// The path (the operator's UT_CC_STATE_DIR / CLAUDE_CONFIG_DIR) is raw on
+	// purpose: it reaches the user only through `announce`, which sanitizes all of
+	// the message, then clips it. An unrecognised UT_CC_MODE value is clipped HERE,
+	// so it is sanitized here first.
 	const records = watchLogPath();
 	if (guardMode() === "enforce") {
 		return process.env.UT_FAIL_OPEN === "1"
@@ -178,7 +188,7 @@ export function modeAnnouncement() {
 	const note =
 		ignored === undefined
 			? "Set UT_CC_MODE=enforce to block over-budget calls."
-			: `UT_CC_MODE=${JSON.stringify(ignored.slice(0, 40))} is not a mode: use UT_CC_MODE=enforce to block over-budget calls.`;
+			: `UT_CC_MODE=${JSON.stringify(sanitizeThenClip(ignored, 40))} is not a mode: use UT_CC_MODE=enforce to block over-budget calls.`;
 	return `usertrust: watch-only — nothing is blocked. Calls that would have been blocked, and calls that could not be metered, are recorded in ${records}. ${note}`;
 }
 
