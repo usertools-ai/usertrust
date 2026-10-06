@@ -24,6 +24,22 @@ const SERVER_NAME = "usertrust-server";
  * version can never drift from the published package again (Addendum D5). */
 const SERVER_VERSION = (createRequire(import.meta.url)("../package.json") as { version: string })
 	.version;
+
+/**
+ * What this server honours beyond the base two-phase API, published on /v1/health
+ * for a client that must not assume it. An older server's request schemas STRIP
+ * unknown keys, so a `principal` it does not understand is dropped in silence and
+ * the call is recorded as nobody's: a client checks this list before sending one.
+ * A later capability is APPENDED here; the name and shape never change.
+ */
+const SERVER_CAPABILITIES = Object.freeze(["principal"]);
+/**
+ * A dryRun server has no ledger, so it writes no `user_data` tags — but it records
+ * the principal on every audit record exactly as a ledger-backed server does, so it
+ * honours the same list today. Kept as its own constant because a capability that
+ * needs the ledger must be left out of it.
+ */
+const DRY_RUN_CAPABILITIES = Object.freeze([...SERVER_CAPABILITIES]);
 const SWEEP_INTERVAL_MS = 30_000;
 /** Max concurrent SSE streams a single tenant may hold open at once. */
 const MAX_SSE_PER_TENANT = 8;
@@ -283,7 +299,12 @@ export function createUsertrustServer(opts: {
 	async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
 		const url = req.url ?? "/";
 		if (req.method === "GET" && url === "/v1/health") {
-			sendJson(res, 200, { ok: true, name: SERVER_NAME, version: SERVER_VERSION });
+			sendJson(res, 200, {
+				ok: true,
+				name: SERVER_NAME,
+				version: SERVER_VERSION,
+				capabilities: config.dryRun ? DRY_RUN_CAPABILITIES : SERVER_CAPABILITIES,
+			});
 			return;
 		}
 		const key = bearerKey(req);

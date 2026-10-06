@@ -42,6 +42,14 @@ in `AGENTS.md` — omitting the fields is not the same as reporting zero cache a
 duration in milliseconds, as reported by local runtimes (e.g. Ollama `eval_duration`). It
 passes through to `receipt.meter.computeMs` and is not a pricing input.
 
+`/v1/authorize` also accepts `actor` (a string) and `principal` (optional) — who the work is for:
+`{ "id": "…", "type": "…", "origin": "…", "unit": "…", "role": "…" }`, every field optional and each
+1–128 characters of `[A-Za-z0-9._:-]`. **Check `/v1/health` `capabilities` first:** an older server
+strips request keys it does not know, so it would accept a `principal` and silently record the call as
+nobody's. A server that honours it lists `"principal"`. Any other key, or an invalid field, is a `400`. Both are recorded on
+the call's audit records, and the principal's `id`/`unit`/`role` become TigerBeetle `user_data` tags
+on its ledger transfers for roll-ups. A principal never changes which wallet pays.
+
 ## Endpoints
 
 | Method | Path            | Auth   | Purpose                                             |
@@ -51,7 +59,7 @@ passes through to `receipt.meter.computeMs` and is not a pricing input.
 | POST   | `/v1/abort`     | Bearer | Phase 2b: void the hold for a failed call           |
 | GET    | `/v1/budget`    | Bearer | Remaining tenant budget                             |
 | GET    | `/v1/events`    | Bearer | SSE stream of tenant governance events              |
-| GET    | `/v1/health`    | none   | Liveness                                            |
+| GET    | `/v1/health`    | none   | Liveness and `capabilities`                         |
 
 Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthorized`,
 `404 not_found` (unknown/already-settled transferId), `413 too_large` (1 MiB body cap).
