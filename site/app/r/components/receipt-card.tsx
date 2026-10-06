@@ -92,11 +92,14 @@ export default function ReceiptCard({
 	return (
 		<div data-testid="receipt-card">
 			<section className="ut-card" data-testid="receipt-card-body">
-				<header className="flex items-center gap-2.5 border-b border-white/[0.09] bg-white/[0.03] px-6 py-3.5">
+				<header className="flex items-center gap-2.5 border-b border-white/[0.09] bg-white/[0.03] px-4 py-3.5 sm:px-6">
 					<span className="size-[7px] shrink-0 rounded-full bg-ut shadow-[0_0_0_3px_rgba(48,209,88,0.16)]" />
-					<span className="text-[13px] font-semibold tracking-tight text-ut">Receipt</span>
-					<span className="ml-auto font-mono text-[12.5px]" data-testid="receipt-short-id">
-						<HashValue value={model.receiptId} label="receipt ID" head={10} />
+					<span className="shrink-0 text-[13px] font-semibold tracking-tight text-ut">Receipt</span>
+					<span
+						className="ml-auto flex min-w-0 font-mono text-[12.5px]"
+						data-testid="receipt-short-id"
+					>
+						<HashValue value={model.receiptId} label="receipt ID" head={10} compact />
 					</span>
 				</header>
 

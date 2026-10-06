@@ -229,8 +229,22 @@ export function coversLine(transferCount: number): string {
  * so the page can omit the row instead of printing a blank.
  */
 export function modelsLine(models: string[]): string {
+	return modelTokens(models)
+		.map((token) => token.text)
+		.join(" · ");
+}
+
+/** One item of a `·`-separated list; a NAME never breaks across lines, prose may. */
+export interface ListToken {
+	text: string;
+	name: boolean;
+}
+
+/** `modelsLine`'s items: each catalog name, then the custom literal's explanation. */
+export function modelTokens(models: string[]): ListToken[] {
 	const { catalog, hasCustom } = catalogRendering(models);
-	return (hasCustom ? [...catalog, CUSTOM_MODEL_MEANING] : catalog).join(" · ");
+	const names = catalog.map((text) => ({ text, name: true }));
+	return hasCustom ? [...names, { text: CUSTOM_MODEL_MEANING, name: false }] : names;
 }
 
 /**
@@ -358,7 +372,10 @@ export interface ClusterReceiptClaims {
 	covers: string;
 	/** `modelsLine` — "" when the receipt names none. */
 	models: string;
+	/** The same, item by item, for a rendering that wraps only BETWEEN names. */
+	modelTokens: ListToken[];
 	providers: string;
+	providerTokens: ListToken[];
 	/** Present iff `skippedSincePrevious` is: the listed windows only, never the unlisted rest. */
 	skipped?: { headline: string; windows: SkippedWindowView[] };
 	usage: PostureClaim;
@@ -409,7 +426,9 @@ export function clusterReceiptClaims(
 		headline: clusterHeadlineClaim(windowStartUtc, windowEndUtc, amountUsd),
 		covers: coversLine(spend.transferCount),
 		models: modelsLine(projection.models),
+		modelTokens: modelTokens(projection.models),
 		providers: projection.providers.join(" · "),
+		providerTokens: projection.providers.map((text) => ({ text, name: true })),
 		skipped:
 			skipped === undefined
 				? undefined

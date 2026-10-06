@@ -13,9 +13,16 @@ export default function CopyChip({
 	text,
 	label,
 	tone = "dark",
+	compact = false,
 }: {
 	text: string;
 	label?: string;
+	/**
+	 * Opt-in, for a chip beside a value in a tight row: below 480px the label
+	 * text is hidden (the button's aria-label still names it) and the chip
+	 * keeps its "$" prompt and "copy". Every existing call site is unchanged.
+	 */
+	compact?: boolean;
 	/**
 	 * "dark" (default) is the original dark-ground styling (white/near-white
 	 * on a translucent white fill) — every pre-existing call site (hero,
@@ -74,7 +81,7 @@ export default function CopyChip({
 			<span aria-hidden="true" className={isPaper ? "text-ink/64" : "text-ut/80"}>
 				$
 			</span>
-			<span>{label ?? text}</span>
+			<span className={compact ? "max-[479px]:hidden" : undefined}>{label ?? text}</span>
 			<span
 				aria-hidden="true"
 				className={

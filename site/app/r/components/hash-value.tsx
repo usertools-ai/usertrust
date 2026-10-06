@@ -26,6 +26,7 @@ export default function HashValue({
 	head,
 	tone = "dark",
 	copy = true,
+	compact = false,
 }: {
 	value: string;
 	/** What this value IS — used as the copy affordance's accessible label. */
@@ -38,16 +39,28 @@ export default function HashValue({
 	 * R17's obligation is discharged by the value being there at all.
 	 */
 	copy?: boolean;
+	/**
+	 * For a header row: the value and its chip on ONE line at any width. The
+	 * value ellipsizes rather than wrapping above its chip, and the chip drops
+	 * its label text on narrow screens (its accessible name keeps it). The full
+	 * value stays in the title, the screen-reader text and the copy.
+	 */
+	compact?: boolean;
 }) {
 	const { full, display, truncated } = truncateForDisplay(value, head);
 	const ink = tone === "paper" ? "text-ink" : "text-white/85";
 	return (
-		<span className="inline-flex flex-wrap items-center gap-2 align-middle">
-			<code className={`font-mono text-[13px] break-all ${ink}`} title={full}>
+		<span
+			className={`inline-flex items-center gap-2 align-middle ${compact ? "min-w-0 flex-nowrap" : "flex-wrap"}`}
+		>
+			<code
+				className={`font-mono text-[13px] ${compact ? "min-w-0 truncate" : "break-all"} ${ink}`}
+				title={full}
+			>
 				{display}
 			</code>
 			{truncated ? <span className="sr-only">{`${label}, in full: ${full}`}</span> : null}
-			{copy ? <CopyChip text={full} label={label} tone={tone} /> : null}
+			{copy ? <CopyChip text={full} label={label} tone={tone} compact={compact} /> : null}
 		</span>
 	);
 }
