@@ -92,8 +92,10 @@ is a plain `404` — unless it carries its `idempotencyKey`. Then the usage it r
 recorded on the tenant's chain as `settlement_unrecoverable` and the answer is
 `410 settlement_unrecoverable` (or `409 already_settled` when the key's charge stands, or
 `409 hold_active` — naming the live hold's `transferId` — when the key has a live hold under another
-`transferId`). A settle still in flight for the key is waited out first. To charge the usage,
-authorize again under the same key and settle.
+`transferId`). A settle still in flight for the key is waited out first. An exact retry of a late
+settle (same key, same usage) is answered 410 without a second record or count — within the last
+10 000 such settles the tenant's governor recorded; an older one is recorded and counted again. To
+charge the usage, authorize again under the same key and settle.
 
 In `evaluate_only` mode only governance decisions (402, 403, 429) become shadow allows; a ledger
 outage (`503`) or an already-charged key (`409`) is returned as is.

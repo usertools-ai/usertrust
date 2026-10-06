@@ -63,7 +63,10 @@ const DRY_RUN_CAPABILITIES = Object.freeze(
 interface PendingEntry {
 	auth: Authorization;
 	tenantId: string;
+	/** When the authorize request arrived: epoch ms, for a caller's explicit `sweepExpired(now)`. */
 	createdAt: number;
+	/** The same moment on the monotonic clock the server's own sweep reads. */
+	startedMono: number;
 }
 
 export interface UsertrustServer {
@@ -159,6 +162,7 @@ export function createUsertrustServer(opts: {
 		// long before a slow (or retried) authorize returns. Started after it, the
 		// sweep could come due only after the ledger had already expired the hold.
 		const requestedAt = Date.now();
+		const requestedMono = performance.now();
 		const governor = await pool.get(tenant);
 		try {
 			const auth = await governor.authorize(parsed.data);
@@ -168,8 +172,14 @@ export function createUsertrustServer(opts: {
 				// TTL clock nor announces a second hold. Its clock only ever moves EARLIER
 				// — the request that started this hold may be the one answering second.
 				held.createdAt = Math.min(held.createdAt, requestedAt);
+				held.startedMono = Math.min(held.startedMono, requestedMono);
 			} else if (!terminating.has(auth.transferId)) {
-				pending.set(auth.transferId, { auth, tenantId: tenant.id, createdAt: requestedAt });
+				pending.set(auth.transferId, {
+					auth,
+					tenantId: tenant.id,
+					createdAt: requestedAt,
+					startedMono: requestedMono,
+				});
 				bus.publish(tenant.id, {
 					type: "authorized",
 					transferId: auth.transferId,
@@ -543,7 +553,15 @@ export function createUsertrustServer(opts: {
 		}
 	}
 
-	async function sweepExpired(now: number = Date.now()): Promise<number> {
+	/**
+	 * Release every pending hold older than `pendingTtlMs`. The server's own sweep
+	 * (no argument) reads ages on a MONOTONIC clock: a backward wall-clock step must
+	 * not let the ledger expire a hold before the sweep claims it. An explicit `now`
+	 * is epoch ms, read against each hold's arrival on the wall clock, as always.
+	 */
+	async function sweepExpired(now?: number): Promise<number> {
+		const age = (entry: PendingEntry): number =>
+			now === undefined ? performance.now() - entry.startedMono : now - entry.createdAt;
 		// CLAIM the whole due batch first, synchronously: from here no settle can reach
 		// these holds (a late one takes the unheld path), so none of them can be POSTed
 		// after the ledger's own timeout has expired it. Then release them CONCURRENTLY:
@@ -552,7 +570,7 @@ export function createUsertrustServer(opts: {
 		// leaves before that timeout.
 		const due: Array<[string, PendingEntry]> = [];
 		for (const [transferId, entry] of pending) {
-			if (now - entry.createdAt < config.pendingTtlMs) continue;
+			if (age(entry) < config.pendingTtlMs) continue;
 			pending.delete(transferId);
 			terminating.add(transferId);
 			due.push([transferId, entry]);

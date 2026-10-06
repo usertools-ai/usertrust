@@ -44,7 +44,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { link, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { CreateTransferStatus, type Transfer } from "tigerbeetle-node";
-import { type AuditWriter, createAuditWriter } from "./audit/chain.js";
+import { type AuditWriter, createAuditWriter, readDurableEventHash } from "./audit/chain.js";
 import {
 	appendDenialEvent,
 	classifyPolicyDenial,
@@ -83,7 +83,12 @@ import {
 	type TrustEngine,
 	type TrustOpts,
 } from "./govern.js";
-import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
+import {
+	DEFAULT_PENDING_TIMEOUT_SECONDS,
+	TBTransferError,
+	TrustTBClient,
+	XFER_SPEND,
+} from "./ledger/client.js";
 import {
 	copyAppliedRates,
 	costFromRates,
@@ -172,6 +177,18 @@ export interface GovernorOpts extends TrustOpts {
 	 * keys.
 	 */
 	idempotencyScope?: string | undefined;
+	/**
+	 * The monotonic clock a hold's ledger deadline is read on (default
+	 * `performance.now`). Test environments only.
+	 * @internal
+	 */
+	_now?: () => number;
+	/**
+	 * The in-process key slots, injected so a test can see what they retain. Test
+	 * environments only.
+	 * @internal
+	 */
+	_keySlots?: Map<string, unknown>;
 }
 
 /** Handle returned by authorize(), passed to settle(), abort() or release(). */
@@ -283,6 +300,12 @@ interface AuthorizationCapture {
 	readonly principal: Readonly<Principal> | undefined;
 	/** A keyed call's derived identity, or `undefined` for an unkeyed call. */
 	readonly idempotency: KeyedCall | undefined;
+	/**
+	 * When the LEDGER voids this hold on its own pending timeout, on the governor's
+	 * monotonic clock, taken BEFORE the reserve's I/O: never later than the ledger's
+	 * own. `undefined` under dryRun, which has no ledger to expire anything.
+	 */
+	readonly ledgerDeadline: number | undefined;
 }
 
 /**
@@ -510,7 +533,9 @@ export interface Governor {
 	 *    An exact in-process retry (same key, same usage) is answered with
 	 *    `recorded: false` and no second record — also one that arrives while the
 	 *    first record is still being appended: it waits for that append and shares
-	 *    its outcome, a failure included.
+	 *    its outcome, a failure included. The governor remembers the last 10 000
+	 *    recorded settles: an exact retry of an older one is recorded again (a
+	 *    duplicate record, never a lost one).
 	 *
 	 * The charge itself is still recoverable by the caller: a fresh `authorize()`
 	 * under the same key, then `settle()`, posts under the key's anchor. This records
@@ -1083,6 +1108,9 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					creditAccountId: treasury,
 					amount: params.amount,
 					code: XFER_SPEND,
+					// Explicit, never the client's default: a governor's hold deadline and
+					// usertrust-server's TTL cap are both derived from this same constant.
+					timeoutSeconds: DEFAULT_PENDING_TIMEOUT_SECONDS,
 				});
 				pendingMap.set(params.transferId, { tbId: tbTransferId, heldAmount: params.amount });
 				return { transferId: params.transferId };
@@ -1368,11 +1396,27 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// Caller idempotency keys with an authorize in flight or a hold placed, in THIS
 	// governor — keyed by the derived key. In memory only, on purpose: what must
 	// survive a restart is "already charged", and the ledger's post anchor is that
-	// record.
-	const keyedAuths = new Map<string, KeyedSlot>();
+	// record. A slot leaves when its hold meets its terminal (`forgetKey`).
+	const keyedAuths =
+		(isTestEnv ? (opts?._keySlots as Map<string, KeyedSlot> | undefined) : undefined) ??
+		new Map<string, KeyedSlot>();
+	// The monotonic clock a hold's ledger deadline is read on: a wall-clock step must
+	// never move it.
+	const now = (isTestEnv ? opts?._now : undefined) ?? (() => performance.now());
 	// Fingerprints of the late settles `recordUnheldSettlement` has recorded, so an
 	// exact retry is not recorded twice. In-process, and bounded.
 	const recordedUnheld = new Set<string>();
+	/**
+	 * Bounded, oldest first out (`RECORDED_UNHELD_MAX`): a forgotten fingerprint
+	 * costs one duplicate record of an old loss, never a lost one.
+	 */
+	function rememberUnheld(fingerprint: string): void {
+		if (recordedUnheld.size >= RECORDED_UNHELD_MAX) {
+			const oldest = recordedUnheld.values().next().value;
+			if (oldest !== undefined) recordedUnheld.delete(oldest);
+		}
+		recordedUnheld.add(fingerprint);
+	}
 	// The same fingerprints while their record is still being appended: a retry
 	// that arrives meanwhile waits for that append and shares its outcome. Bounded
 	// by the appends in flight; each entry leaves when its append settles.
@@ -1403,11 +1447,32 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		const slot = keyedAuths.get(derivedKey);
 		if (slot === undefined || slot.state === "authorizing") return slot;
 		const transferId = slot.auth.transferId;
-		if (activeAuths.has(transferId)) return slot;
+		const capture = activeAuths.get(transferId);
+		if (capture !== undefined) {
+			// Past the ledger's own pending timeout, the ledger has voided this hold
+			// (or is about to): it can no longer be settled, so a replay must not hand
+			// it back as a reservation. The key authorizes afresh, under its anchor.
+			if (capture.ledgerDeadline === undefined || now() < capture.ledgerDeadline) return slot;
+			keyedAuths.delete(derivedKey);
+			return undefined;
+		}
 		const done = postsInFlight.get(transferId);
 		if (done !== undefined) return { state: "posting", done };
 		keyedAuths.delete(derivedKey);
 		return undefined;
+	}
+
+	/**
+	 * A keyed hold has met its terminal: its slot goes, so a long-lived governor
+	 * with unique keys keeps none of its finished calls. Only while the slot still
+	 * names THIS hold — a later hold under the same key keeps its own.
+	 */
+	function forgetKey(transferId: string, capture: AuthorizationCapture): void {
+		if (capture.idempotency === undefined) return;
+		const slot = keyedAuths.get(capture.idempotency.derivedKey);
+		if (slot?.state === "held" && slot.auth.transferId === transferId) {
+			keyedAuths.delete(capture.idempotency.derivedKey);
+		}
 	}
 
 	/**
@@ -1475,6 +1540,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		capture: AuthorizationCapture,
 		reason: string,
 	): Promise<void> {
+		forgetKey(transferId, capture);
 		// Exactly what authorize added, and only when authorize added it — an
 		// attributed hold never touched the session's in-flight total.
 		if (capture.sessionAccounted) {
@@ -1638,6 +1704,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		// gate — see the note there.
 		const releaseBudgetLock = await budgetMutex.acquire();
 		let proxyTransferId: string | undefined;
+		// Taken before the reserve's I/O, so it can only be EARLIER than the moment the
+		// ledger starts the hold's pending timeout (`DEFAULT_PENDING_TIMEOUT_SECONDS`,
+		// which the engine passes explicitly). dryRun has no ledger: no deadline.
+		const ledgerDeadline = isDryRun ? undefined : now() + DEFAULT_PENDING_TIMEOUT_SECONDS * 1000;
 		// Set below, at the point the hold actually lands on the envelope wallet.
 		// Deliberately NOT `envelope !== undefined`: a dry-run or engine-less
 		// attributed call places no envelope hold at all, so the session numbers
@@ -1902,6 +1972,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				holdAmount: estCost,
 				principal,
 				idempotency: keyed,
+				ledgerDeadline,
 			}),
 		);
 		return auth;
@@ -2212,6 +2283,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					endPost();
 				}
 			}
+			// The POST is over, whatever it did: a replay now asks the ledger's anchor.
+			forgetKey(auth.transferId, capture);
 
 			// A concurrent duplicate ends here: released, recorded, refused. Never a
 			// second post, never `llm_call`, and no session charge — the release already
@@ -2451,6 +2524,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			if (settling.has(auth.transferId)) {
 				return;
 			}
+			forgetKey(auth.transferId, capture);
 
 			// Only the session wallet's own in-flight exposure is released here; an
 			// attributed hold never added to it (see authorize), and the VOID below is
@@ -2660,16 +2734,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			recordingUnheld.set(fingerprint, append);
 			try {
 				await append;
+			} catch (err) {
+				// The event reached the chain though the append failed after it (its
+				// sidecar write): the loss IS recorded, so an exact retry must not record
+				// it again — and the caller still hears about the failure.
+				if (readDurableEventHash(err) !== undefined) rememberUnheld(fingerprint);
+				throw err;
 			} finally {
 				recordingUnheld.delete(fingerprint);
 			}
-			// Bounded, oldest first out: a forgotten fingerprint costs one duplicate
-			// record, never a lost one.
-			if (recordedUnheld.size >= RECORDED_UNHELD_MAX) {
-				const oldest = recordedUnheld.values().next().value;
-				if (oldest !== undefined) recordedUnheld.delete(oldest);
-			}
-			recordedUnheld.add(fingerprint);
+			rememberUnheld(fingerprint);
 			return { outcome: "unrecoverable", recorded: true };
 		},
 

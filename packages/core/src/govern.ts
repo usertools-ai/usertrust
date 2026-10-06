@@ -46,7 +46,12 @@ import { costCenterUserId } from "./budget/allocation.js";
 import { type CostCenterAttribution, getCurrentCostCenter } from "./budget/attribution.js";
 import { computeRunway, runwayHours } from "./budget/runway.js";
 import { classifyEndpoint, detectClientKind } from "./detect.js";
-import { TBTransferError, TrustTBClient, XFER_SPEND } from "./ledger/client.js";
+import {
+	DEFAULT_PENDING_TIMEOUT_SECONDS,
+	TBTransferError,
+	TrustTBClient,
+	XFER_SPEND,
+} from "./ledger/client.js";
 import {
 	copyAppliedRates,
 	costFromRates,
@@ -3795,6 +3800,9 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					creditAccountId: treasury,
 					amount: params.amount,
 					code: XFER_SPEND,
+					// Explicit, never the client's default: a governor's hold deadline and
+					// usertrust-server's TTL cap are both derived from this same constant.
+					timeoutSeconds: DEFAULT_PENDING_TIMEOUT_SECONDS,
 				});
 				pendingMap.set(params.transferId, { tbId: tbTransferId, heldAmount: params.amount });
 				return { transferId: params.transferId };

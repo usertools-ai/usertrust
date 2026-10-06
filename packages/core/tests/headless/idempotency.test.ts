@@ -284,7 +284,11 @@ vi.mock("tigerbeetle-node", async (importOriginal) => {
 
 import { createTBEngine, type TrustEngine } from "../../src/govern.js";
 import { createGovernor, type Governor, type GovernorOpts } from "../../src/headless.js";
-import { TBTransferError, TrustTBClient } from "../../src/ledger/client.js";
+import {
+	DEFAULT_PENDING_TIMEOUT_SECONDS,
+	TBTransferError,
+	TrustTBClient,
+} from "../../src/ledger/client.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
 import {
 	AlreadySettledError,
@@ -1030,6 +1034,71 @@ describe("createGovernor — caller idempotency keys", () => {
 		expect(posts()).toHaveLength(0);
 	});
 
+	describe("a hold's ledger deadline, and a key's slot", () => {
+		const TIMEOUT_MS = DEFAULT_PENDING_TIMEOUT_SECONDS * 1000;
+
+		it("the reserve carries the ledger timeout the deadline is reckoned from — explicitly", async () => {
+			const { gov } = await governor();
+			await gov.authorize({ ...AUTHORIZE, idempotencyKey: "call-1" });
+			expect(pendings().map((t) => t.timeout)).toEqual([DEFAULT_PENDING_TIMEOUT_SECONDS]);
+		});
+
+		it("a keyed replay PAST the hold's ledger deadline reserves anew, and the unheld path no longer answers held", async () => {
+			// No server sweep here: a direct createGovernor() keeps an expired hold in
+			// memory, and a replay must not hand it back as a reservation.
+			let clock = 1_000;
+			const { gov } = await governor({ _now: () => clock });
+			const first = await gov.authorize({ ...AUTHORIZE, idempotencyKey: "call-1" });
+			clock += TIMEOUT_MS - 1;
+			expect(await gov.authorize({ ...AUTHORIZE, idempotencyKey: "call-1" })).toBe(first);
+			await expect(
+				gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }),
+			).resolves.toEqual({ outcome: "held", transferId: first.transferId });
+
+			clock += 1;
+			await expect(
+				gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }),
+			).resolves.toEqual({ outcome: "unrecoverable", recorded: true });
+			const again = await gov.authorize({ ...AUTHORIZE, idempotencyKey: "call-1" });
+			expect(again.transferId).not.toBe(first.transferId);
+			expect(pendings()).toHaveLength(2);
+		});
+
+		it("dryRun has no ledger to expire a hold: its replay is the same hold, however late", async () => {
+			let clock = 1_000;
+			const { gov } = await governor({ dryRun: true, _now: () => clock });
+			const first = await gov.authorize({ ...AUTHORIZE, idempotencyKey: "call-1" });
+			clock += 10 * TIMEOUT_MS;
+			expect(await gov.authorize({ ...AUTHORIZE, idempotencyKey: "call-1" })).toBe(first);
+		});
+
+		it("a key's slot leaves when its hold meets its terminal — settle, abort or release", async () => {
+			const slots = new Map<string, unknown>();
+			const { gov } = await governor({ _keySlots: slots });
+			await gov.settle(await gov.authorize({ ...AUTHORIZE, idempotencyKey: "k-settle" }), USAGE);
+			await gov.abort(
+				await gov.authorize({ ...AUTHORIZE, idempotencyKey: "k-abort" }),
+				new Error("provider down"),
+			);
+			await gov.release(await gov.authorize({ ...AUTHORIZE, idempotencyKey: "k-release" }), "done");
+			expect(slots.size).toBe(0);
+			await gov.authorize({ ...AUTHORIZE, idempotencyKey: "k-live" });
+			expect(slots.size).toBe(1);
+		});
+
+		it("an expired hold's terminal never removes the slot of the newer hold under its key", async () => {
+			let clock = 1_000;
+			const slots = new Map<string, unknown>();
+			const { gov } = await governor({ _now: () => clock, _keySlots: slots });
+			const expired = await gov.authorize({ ...AUTHORIZE, idempotencyKey: "call-1" });
+			clock += TIMEOUT_MS;
+			const newer = await gov.authorize({ ...AUTHORIZE, idempotencyKey: "call-1" });
+			await gov.abort(expired, new Error("too late"));
+			expect(slots.size).toBe(1);
+			expect(await gov.authorize({ ...AUTHORIZE, idempotencyKey: "call-1" })).toBe(newer);
+		});
+	});
+
 	describe("recordUnheldSettlement — a settle whose hold is gone is recorded, never lost", () => {
 		const PRINCIPAL = { id: "user-42", type: "human", origin: "cli" };
 		const FOUR_TIERS = {
@@ -1277,6 +1346,27 @@ describe("createGovernor — caller idempotency keys", () => {
 			await expect(
 				gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }),
 			).resolves.toEqual({ outcome: "unrecoverable", recorded: true });
+			expect(audit.events.map((e) => e.kind)).toEqual(["settlement_unrecoverable"]);
+		});
+
+		it("a loss record that reached the chain though its append failed after it is remembered: no second record", async () => {
+			// The event is fsynced to the log, then the `.meta` sidecar write fails: the
+			// writer rejects, with the durable event's hash on the error.
+			const { gov, audit } = await governor();
+			const sidecarFailed = Object.assign(new Error("audit: meta sidecar write failed"), {
+				[Symbol.for("usertrust.audit.durableEventHash")]: "f".repeat(64),
+			});
+			vi.mocked(audit.appendEvent).mockImplementationOnce(async (input) => {
+				audit.events.push(input);
+				throw sidecarFailed;
+			});
+
+			await expect(
+				gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }),
+			).rejects.toThrow("sidecar");
+			await expect(
+				gov.recordUnheldSettlement({ idempotencyKey: "call-1", usage: USAGE }),
+			).resolves.toEqual({ outcome: "unrecoverable", recorded: false });
 			expect(audit.events.map((e) => e.kind)).toEqual(["settlement_unrecoverable"]);
 		});
 

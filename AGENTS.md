@@ -166,6 +166,10 @@ pending transfer means another hold already charged the key, so this hold is rel
 `settlement_duplicate` is recorded, and the settle throws `AlreadySettledError` — never a second
 post. A replay of a key whose hold can still be settled answers that same handle; one whose
 settle is mid-POST is WAITED out and asked again — its outcome is not known until the POST lands.
+"Can still be settled" includes the LEDGER's clock: past the hold's pending timeout (a deadline the
+governor reads on a monotonic clock, taken before the reserve's I/O, from the same constant the
+reserve passes explicitly), the ledger has voided it, so the key authorizes afresh. A key's slot
+leaves when its hold meets its terminal, and only while the slot still names that hold.
 The key's SHA-256 — never the key — is on every record a keyed hold leaves. The derivation scope is
 `idempotencyScope` (operator input, like `parentUserId`) or, by default, a random id the VAULT
 persists in `.usertrust/idempotency-scope` on its first keyed call — hard-linked into place so two
@@ -181,12 +185,16 @@ governor no longer holds — a TTL release, a restart — goes to `recordUnheldS
 waited out first, `AlreadySettledError` when its charge stands, and otherwise a
 `settlement_unrecoverable` record (key hash, principal, reported usage) whose append failure is
 thrown, never swallowed; an exact in-process retry is answered without a second record — one that
-arrives while the first is still being appended waits for it and shares its outcome.
+arrives while the first is still being appended waits for it and shares its outcome, and one whose
+first record reached the chain though its append then failed is remembered too. The governor
+remembers the last 10 000 recorded settles: an exact retry of an older one is recorded again — a
+duplicate record, never a lost one.
 usertrust-server answers 410 and counts it on `/v1/health`, and bounds its TTL so the sweep always
 releases a hold BEFORE the ledger's own pending timeout expires it — a settle that reaches an
 expired hold is recorded only as ambiguous. The TTL clock starts when the authorize request
 arrives, before any ledger I/O, and a replay only ever moves it earlier: a slow or retried
-authorize cannot start it after the ledger's. A keyless unknown settle stays a 404: without the key's
+authorize cannot start it after the ledger's. The server's own sweep reads ages on a monotonic
+clock, so a wall-clock step cannot move a deadline. A keyless unknown settle stays a 404: without the key's
 anchor, a late settle cannot be told from a retry of one that already charged.
 *Prevents:* provider spend vanishing into a 404 after a TTL sweep or a restart, with nothing on the
 chain to say it happened.

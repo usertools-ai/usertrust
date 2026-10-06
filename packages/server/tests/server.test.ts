@@ -702,6 +702,18 @@ describe("caller idempotency keys and principal (#205)", () => {
 		expect(await server.sweepExpired(sent + 1_050)).toBe(1);
 	});
 
+	it("the server's own sweep reads ages on a MONOTONIC clock: a wall-clock jump expires nothing", async () => {
+		const { base } = await start({ pendingTtlMs: 1_000 });
+		await post(base, "/v1/authorize", { model: "m" });
+		const jumped = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 600_000);
+		try {
+			expect(await server?.sweepExpired()).toBe(0);
+		} finally {
+			jumped.mockRestore();
+		}
+		expect(server?.pendingCount()).toBe(1);
+	});
+
 	it("an already-charged key is 409 already_settled at authorize", async () => {
 		const fake = createFakeGovernor();
 		fake.governor.authorize = async () => {
