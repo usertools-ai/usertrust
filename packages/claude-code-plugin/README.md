@@ -303,8 +303,9 @@ Upgrading from a release where blocking was the default: set
 `UT_CC_MODE=enforce` to keep it.
 
 In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran;
-an estimate hold whose settle fails is left on disk for Stop cleanup, and the
-server's pending-TTL sweep voids anything orphaned. A call can wait at Claude
+an estimate hold is marked settle-attempted (`.settling`) before its one settle,
+and one whose settle goes unanswered is given back at Stop — never settled again —
+and the server's pending-TTL sweep voids anything orphaned. A call can wait at Claude
 Code's permission prompt for longer than the server keeps a hold (five minutes).
 A transcript hold whose settle then answers 404 gives its window back to a later
 settle point. An estimate hold is charged once, on a fresh hold of its own — but
@@ -315,6 +316,12 @@ re-authorized. A call denied at the prompt never reaches PostToolUse: its hold
 is given back at Stop (or by the TTL sweep), uncharged. If the server runs in
 `evaluate_only` mode, denials come back as shadow responses: nothing is reserved
 or settled for them, and the would_deny reason goes to the debug log.
+
+**Nothing a hook writes can drive your terminal.** Every line the plugin writes to
+stderr (Claude Code's debug log) and the session-start message go through one
+writer that replaces control characters (C0, DEL, C1) before it clips. That
+covers server answers, transcript ids, your paths and error text alike, and a
+test fails on any hook that writes around it.
 
 **The mode is announced.** At every session start, including a resume, `/clear`
 and a compaction, the plugin shows you which mode it runs in as a hook

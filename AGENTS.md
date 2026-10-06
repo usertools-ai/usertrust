@@ -1022,10 +1022,13 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   the terminal scrubber inside the loader corrupted the JSON diagnostic in exactly that way before
   it was moved.
 - The stronger variant in a SHIPPED HOOK rather than a `src/` tree: `sanitizeReason` in
-  `claude-code-plugin/hooks/lib.mjs`, which strips C0/DEL/C1 from server-provided text before it
-  becomes a permission-decision reason or a debug-log line, and from the operator's state path
-  before the session-start announcement shows it to the user, and clips afterwards. This one was invisible to
-  the count guard for its entire existence, because the traversal walked `packages/*/src` and that
+  `claude-code-plugin/hooks/lib.mjs`. It is the one sanitizer behind that package's ONE writer:
+  `say` for every stderr line and `announce` for the session-start `systemMessage`, both
+  sanitize-then-clip, plus the permission-decision reason. `tests/terminal-sinks.test.ts` walks
+  every shipped `hooks/*.mjs` and fails on any other write to stderr, stdout or a `systemMessage`,
+  with an injected raw write as its positive control. The writer replaced per-site sanitizing
+  after review found the same class six times across two rounds. `sanitizeReason` was invisible
+  to the count guard for its entire existence, because the traversal walked `packages/*/src` and that
   package has no `src/` — it ships `hooks/*.mjs`. It is listed last because it is the newest entry
   to the *inventory*, not the newest code: it predates the guard that failed to see it. **Scope a
   source-wide assertion by what SHIPS, not by the directory layout the other packages happen to

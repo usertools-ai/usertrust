@@ -17,21 +17,24 @@
 // named none, or, for a subagent, another agent of its session is in estimate
 // mode): the hold
 // settles at the per-call estimate, labelled `usageSource: "estimated"`,
-// exactly as the original hook did. The pending
-// file is deleted only AFTER a 200; on any failure it is left in place so
-// Stop/SubagentStop cleanup gives the hold back (and the server's TTL sweep is
-// the final backstop). One failure is not ambiguous: a 404 `unknown transferId`
+// exactly as the original hook did. The hold is marked settle-attempted
+// (.json → .settling) BEFORE its one settle, and removed only AFTER a 200; on any
+// other outcome it is left .settling, so Stop/SubagentStop cleanup gives it back
+// and nothing settles it again (the server's TTL sweep is the final backstop).
+// One failure is not ambiguous: a 404 `unknown transferId`
 // means the hold is gone unposted — the server voids a pending hold after five
 // minutes, and a call can wait that long at Claude Code's permission prompt — so
 // the call is charged once on a fresh hold of its own (`settleEstimateHold`).
+import { unlink } from "node:fs/promises";
 import {
-	clearPending,
+	claimForSettle,
 	defaultModel,
 	estimateTokens,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
+	say,
 	serverCapabilities,
 	serverRequest,
 	takePendingEntry,
@@ -52,40 +55,47 @@ function holdIsGone(response) {
 function noteIfAmbiguous(response, transferId) {
 	if (response.json?.settled === false) {
 		// The server's ledger post was ambiguous: the hold is spent either way.
-		process.stderr.write(
-			`usertrust: settle ${transferId} — the ledger post is ambiguous (settled: false); the usage may be unrecorded\n`,
+		say(
+			`usertrust: settle ${transferId} — the ledger post is ambiguous (settled: false); the usage may be unrecorded`,
 		);
 	}
 }
 
 /**
- * Settle an estimate hold at `usage`, ONCE. Every outcome but one keeps today's
- * at-most-once handling: a 200 clears the hold; no answer, a timeout, a 5xx or
- * any other status may mean the settle POSTED with its answer lost, so the hold
- * is kept for Stop cleanup (which only ever gives holds back) and is never
- * re-authorized or settled again.
+ * Settle an estimate hold at `usage`, ONCE. The hold is first marked
+ * settle-attempted (`claimForSettle`: its .json becomes .settling), so no later
+ * hook can pick it again. Every outcome but one keeps today's at-most-once
+ * handling: a 200 retires the hold; no answer, a timeout, a 5xx or any other
+ * status may mean the settle POSTED with its answer lost, so the hold is left
+ * .settling for Stop, which only gives it back, and it is never re-authorized or
+ * settled again.
  *
  * The one exception is a 404 `unknown transferId`, and it is safe only because
  * of an INVARIANT: this plugin settles each transferId AT MOST ONCE. PostToolUse
- * is the only settler of an estimate hold and this is its one settle, Stop and
- * SubagentStop only release holds, and a transcript hold's settle is gated by its
- * .json→.settling rename. The server keeps no record of settled ids (a second
- * settle of a posted id would also answer 404), so it is that invariant that
- * makes this 404 mean the hold is gone UNPOSTED: voided by the pending-TTL sweep
- * while the call waited at a permission prompt, or released. The call is then
- * charged once, on a fresh hold of its own, settled once; the old transferId is
- * never settled again.
+ * is the only settler of an estimate hold, and settles it once, past its
+ * .settling gate. Stop and SubagentStop only release holds, and a transcript hold's
+ * settle is gated by the same rename. The server keeps no record of settled ids (a
+ * second settle of a posted id would also answer 404), so it is that invariant
+ * that makes this 404 mean the hold is gone UNPOSTED: voided by the pending-TTL
+ * sweep while the call waited at a permission prompt, or released. The call is
+ * then charged once, on a fresh hold of its own — marked .settling from birth and
+ * settled once; the old transferId is never settled again.
  */
 async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
+	const claimed = await claimForSettle(sessionId, agentId, entry.entryKey);
+	if (claimed === null) {
+		say(`usertrust: hold ${entry.transferId} is being settled by another hook`);
+		return;
+	}
 	const response = await serverRequest("/v1/settle", { transferId: entry.transferId, ...usage });
 	if (response.status === 200) {
 		noteIfAmbiguous(response, entry.transferId);
-		await clearPending(sessionId, agentId, entry.entryKey);
+		await unlink(claimed).catch(() => {});
 		return;
 	}
 	if (!holdIsGone(response)) {
-		process.stderr.write(
-			`usertrust: settle ${entry.transferId} returned ${response.status}; hold kept for Stop cleanup\n`,
+		say(
+			`usertrust: settle ${entry.transferId} returned ${response.status}; hold kept for Stop cleanup`,
 		);
 		return;
 	}
@@ -112,33 +122,37 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		typeof transferId !== "string" ||
 		transferId === ""
 	) {
-		await clearPending(sessionId, agentId, entry.entryKey);
-		process.stderr.write(
-			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold was not granted (${auth.status}); this call's estimate is not recorded\n`,
+		await unlink(claimed).catch(() => {});
+		say(
+			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold was not granted (${auth.status}); this call's estimate is not recorded`,
 		);
 		return;
 	}
-	// The fresh hold takes the expired one's place, so a settle of it that goes
-	// unanswered leaves it to Stop cleanup, exactly as the first would have.
-	await recordPending(sessionId, agentId, {
-		toolUseId: entry.toolUseId,
-		transferId,
-		...(typeof entry.estimatedInputTokens === "number"
-			? { estimatedInputTokens: entry.estimatedInputTokens }
-			: {}),
-	});
-	if (entry.toolUseId == null) await clearPending(sessionId, agentId, entry.entryKey);
-	process.stderr.write(
-		`usertrust: hold ${entry.transferId} expired before its settle (a long permission prompt?); charging this call once on ${transferId}\n`,
+	// The fresh hold is settle-attempted from birth: it replaces the expired one's
+	// marker, so a settle of it that goes unanswered leaves it to Stop, never to a
+	// second settle.
+	const fresh = await recordPending(
+		sessionId,
+		agentId,
+		{
+			toolUseId: entry.toolUseId,
+			transferId,
+			...(typeof entry.estimatedInputTokens === "number"
+				? { estimatedInputTokens: entry.estimatedInputTokens }
+				: {}),
+		},
+		{ settling: true },
+	);
+	if (fresh !== claimed) await unlink(claimed).catch(() => {});
+	say(
+		`usertrust: hold ${entry.transferId} expired before its settle (a long permission prompt?); charging this call once on ${transferId}`,
 	);
 	const settle = await serverRequest("/v1/settle", { transferId, ...usage });
 	if (settle.status === 200) {
 		noteIfAmbiguous(settle, transferId);
-		await clearPending(sessionId, agentId, entry.toolUseId ?? transferId);
+		await unlink(fresh).catch(() => {});
 	} else {
-		process.stderr.write(
-			`usertrust: settle ${transferId} returned ${settle.status}; hold kept for Stop cleanup\n`,
-		);
+		say(`usertrust: settle ${transferId} returned ${settle.status}; hold kept for Stop cleanup`);
 	}
 }
 
@@ -151,15 +165,15 @@ try {
 	if (entry?.usage === "transcript") {
 		const result = await settleTranscriptHold(sessionId, entry);
 		if (result.outcome !== "settled" && result.outcome !== "returned") {
-			process.stderr.write(
-				`usertrust: transcript hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}\n`,
+			say(
+				`usertrust: transcript hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}`,
 			);
 		}
 	} else if (entry) {
 		if (usageMode() === "transcript") {
 			const reason = await estimateReasonFor({ sessionId, agentId, input });
-			process.stderr.write(
-				`usertrust: settling at the ESTIMATE — ${reason ?? "the hold was reserved in estimate mode"}\n`,
+			say(
+				`usertrust: settling at the ESTIMATE — ${reason ?? "the hold was reserved in estimate mode"}`,
 			);
 		}
 		// Price both legs. The authorize-time input estimate is persisted on the
@@ -183,7 +197,7 @@ try {
 		await settleEstimateHold({ sessionId, agentId, entry, usage, input });
 	}
 } catch (err) {
-	process.stderr.write(
-		`usertrust: settle failed (non-blocking): ${err instanceof Error ? err.message : String(err)}\n`,
+	say(
+		`usertrust: settle failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`,
 	);
 }

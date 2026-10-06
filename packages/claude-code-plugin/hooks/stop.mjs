@@ -7,7 +7,7 @@
 // be in it yet: with the input's `last_assistant_message`, Stop first waits —
 // boundedly — for it to arrive (`awaitFinalResponse`), and says so when it gives
 // up. A response that arrives later still is left for SessionEnd, or the next Stop.
-import { readStdin, usageMode } from "./lib.mjs";
+import { readStdin, say, usageMode } from "./lib.mjs";
 import { awaitFinalResponse, settleSession } from "./transcript.mjs";
 
 try {
@@ -15,14 +15,12 @@ try {
 	if (usageMode() === "transcript") {
 		const waited = await awaitFinalResponse(input.transcript_path, input.last_assistant_message);
 		if (waited === "not flushed") {
-			process.stderr.write(
-				"usertrust: the turn's final response was not in the transcript by the end of the wait — left for SessionEnd or the next Stop\n",
+			say(
+				"usertrust: the turn's final response was not in the transcript by the end of the wait — left for SessionEnd or the next Stop",
 			);
 		}
 	}
 	await settleSession({ input, hook: "Stop" });
 } catch (err) {
-	process.stderr.write(
-		`usertrust: stop cleanup failed: ${err instanceof Error ? err.message : String(err)}\n`,
-	);
+	say(`usertrust: stop cleanup failed: ${err instanceof Error ? err.message : String(err)}`);
 }

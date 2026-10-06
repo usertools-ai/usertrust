@@ -49,6 +49,7 @@ import {
 	recordWatchEvent,
 	releaseHold,
 	sanitizeReason,
+	say,
 	serverCapabilities,
 	serverRequest,
 	timeLeft,
@@ -63,7 +64,7 @@ function emit(decision, reason) {
 			hookSpecificOutput: {
 				hookEventName: "PreToolUse",
 				permissionDecision: decision,
-				permissionDecisionReason: reason.slice(0, MAX_REASON_CHARS),
+				permissionDecisionReason: sanitizeReason(reason).slice(0, MAX_REASON_CHARS),
 			},
 		}),
 	);
@@ -82,7 +83,7 @@ const mode = guardMode();
  */
 function proceed(reason) {
 	if (mode === "enforce") emit("allow", reason);
-	else process.stderr.write(`${reason.slice(0, MAX_REASON_CHARS)}\n`);
+	else say(reason, MAX_REASON_CHARS);
 }
 
 // Known before anything can fail, so a gap record can always say whose call it was.
@@ -107,13 +108,13 @@ try {
 		input,
 	});
 	if (prepared.becameSticky) {
-		process.stderr.write(
-			`usertrust: ${prepared.reason}; this agent now settles at the ESTIMATE for the rest of the session\n`,
+		say(
+			`usertrust: ${prepared.reason}; this agent now settles at the ESTIMATE for the rest of the session`,
 		);
 	}
 	if (prepared.mode === "unavailable") {
-		process.stderr.write(
-			`usertrust: transcript usage unavailable for now (${prepared.reason}); this tool's hold is given back, not settled at the estimate — the usage stays in the transcript for a later settle point\n`,
+		say(
+			`usertrust: transcript usage unavailable for now (${prepared.reason}); this tool's hold is given back, not settled at the estimate — the usage stays in the transcript for a later settle point`,
 		);
 	}
 	try {
@@ -211,16 +212,16 @@ try {
 				await releaseHold(json.transferId, "pending hold could not be recorded", {
 					timeoutMs: Math.max(250, callTimeout()),
 				}).catch((giveBack) => {
-					process.stderr.write(
-						`usertrust: hold ${json.transferId} could not be given back (${giveBack instanceof Error ? giveBack.message : String(giveBack)}); the server's TTL sweep releases it\n`,
+					say(
+						`usertrust: hold ${json.transferId} could not be given back (${giveBack instanceof Error ? giveBack.message : String(giveBack)}); the server's TTL sweep releases it`,
 					);
 				});
 				throw err;
 			}
 			await prepared.commit?.(json.transferId);
-			proceed(
-				`usertrust: reserved ${sanitizeReason(json.transferId)} (${sanitizeReason(String(json.estimatedCost))} ut)`,
-			);
+			// Server text, raw here: `proceed` writes it only through `say` or `emit`,
+			// which sanitize it.
+			proceed(`usertrust: reserved ${json.transferId} (${json.estimatedCost} ut)`);
 		} else if (response.status === 402 || response.status === 403 || response.status === 429) {
 			// A refusal — budget (402), policy (403) or an anomaly cutoff (429) — is a
 			// governance decision, not an outage: enforce denies it whatever UT_FAIL_OPEN
@@ -273,9 +274,7 @@ try {
 				: `usertrust unavailable — proceeding ungoverned (UT_FAIL_OPEN=1): ${why}`,
 		);
 	} else {
-		process.stderr.write(
-			`usertrust governance blocked this tool call because authorization failed closed: ${why}\n`,
-		);
+		say(`usertrust governance blocked this tool call because authorization failed closed: ${why}`);
 		process.exit(2);
 	}
 }

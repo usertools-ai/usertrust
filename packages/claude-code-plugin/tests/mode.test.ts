@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -162,6 +162,22 @@ describe("watch (the default) never blocks a tool call, and never approves one",
 		expect((await stat(join(stateDir, "watch.jsonl"))).mode & 0o777).toBe(0o600);
 	});
 
+	it("a watch record that cannot be written is reported without control characters: path, error and line", async () => {
+		// The state root is a FILE, so no record can be written. Its name, and the
+		// session id inside the record line (where JSON leaves DEL and C1 raw), carry
+		// ESC, DEL and C1.
+		const blocked = join(stateDir, `state${HOSTILE}`);
+		await writeFile(blocked, "not a directory");
+		const result = await runHook(
+			PRE,
+			{ ...PAYLOAD, session_id: `sess${HOSTILE}` },
+			{ ...baseEnv, UT_CC_STATE_DIR: blocked, UT_SERVER_URL: UNREACHABLE },
+		);
+		expectNoDecision(result);
+		expect(result.stderr).toContain("could not write a watch record");
+		expect(result.stderr).not.toMatch(CONTROL);
+	});
+
 	it("an unusable answer (a 200 without a transferId) makes no decision and is recorded as a gap", async () => {
 		const port = await startFake(200, { estimatedCost: 3 });
 		const result = await runHook(PRE, PAYLOAD, {
@@ -318,6 +334,13 @@ describe("the mode is announced to the user at session start", () => {
 			expect(message).toContain(`${stateDir}/state`);
 			expect(message, JSON.stringify(env)).not.toMatch(CONTROL);
 		}
+	});
+
+	it("an unrecognised UT_CC_MODE carrying ESC, DEL and C1 is named without them", async () => {
+		const message = await announce({ UT_CC_MODE: `enforcing${HOSTILE}` });
+		expect(message).toContain("is not a mode");
+		expect(message).toContain("enforcing");
+		expect(message).not.toMatch(CONTROL);
 	});
 
 	it("an unrecognised UT_CC_MODE is named, so a typo never looks like enforcement", async () => {

@@ -12,7 +12,7 @@
 // v2.1.268 a hook without its own timeout kept 1.5 s even then). Every step is
 // sized to the budget, a Stop still finishing included: its lock is waited for
 // only a fifth of it. SessionEnd cannot block, and never fails a session.
-import { readStdin, sessionEndBudgetMs, useHookBudget } from "./lib.mjs";
+import { readStdin, say, sessionEndBudgetMs, useHookBudget } from "./lib.mjs";
 import { sessionEndLockWait, settleSession } from "./transcript.mjs";
 
 useHookBudget(sessionEndBudgetMs());
@@ -21,7 +21,5 @@ try {
 	const input = JSON.parse((await readStdin()) || "{}");
 	await settleSession({ input, hook: "SessionEnd", lockWaitMs: sessionEndLockWait() });
 } catch (err) {
-	process.stderr.write(
-		`usertrust: session-end settle failed: ${err instanceof Error ? err.message : String(err)}\n`,
-	);
+	say(`usertrust: session-end settle failed: ${err instanceof Error ? err.message : String(err)}`);
 }
