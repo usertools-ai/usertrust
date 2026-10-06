@@ -1916,23 +1916,60 @@ describe("state that is lost, slow or unwritable", () => {
 		expect(cursor.accounted).toEqual(["msg_a"]);
 	});
 
-	it("an already-settled window is journalled beside the cursor, and the next lock holder applies the record", async () => {
+	it("an already-settled window is accounted at once, and never posted", async () => {
 		capabilities = [...ALL_CAPABILITIES];
 		const server = keyedServer();
 		server.charged.add(keyOf("main", ["msg_a"]));
 		await startServer(server.responder);
 		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
 		await run("pre-tool-use.mjs", preInput("tu_1"));
-		const journal = (await readdir(stateDir)).filter((n) => n.endsWith(".done"));
-		expect(journal).toHaveLength(1);
-		expect(JSON.parse(await readFile(join(stateDir, journal[0] ?? ""), "utf-8"))).toMatchObject({
-			agentId: "main",
-			assignedIds: ["msg_a"],
-			outcome: "settled",
-		});
-		// The next lock holder applies and removes it.
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
 		await run("stop.mjs", stopInput());
-		expect((await readdir(stateDir)).filter((n) => n.endsWith(".done"))).toEqual([]);
+		expect(server.charges).toEqual([]);
+		expect(settles().map((s) => s.body.inputTokens)).not.toContain(5);
+	});
+
+	it("a binding whose outcome nothing recorded — 'authorizing', its hook gone — is never posted again", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		// What a PreToolUse killed after binding its window leaves: the claim, and
+		// the window "authorizing" in the cursor. Its authorize may have gone out,
+		// and nothing recorded what came back.
+		const digest = createHash("sha256").update("msg_a").digest("hex");
+		const claims = join(stateDir, "transcripts", "claims", digest.slice(0, 2));
+		await mkdir(claims, { recursive: true, mode: 0o700 });
+		await writeFile(join(claims, digest.slice(2)), `${SESSION}/main`);
+		await writeFile(
+			cursorPath(),
+			JSON.stringify({
+				v: 2,
+				byteOffset: (await readFile(mainTranscript)).length,
+				nextSeq: 1,
+				partial: {
+					msg_a: {
+						n: 0,
+						model: SONNET,
+						synthetic: false,
+						complete: true,
+						claimed: true,
+						inputTokens: 5,
+						outputTokens: 6,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+					},
+				},
+				accounted: [],
+				denied: [],
+				assigned: { msg_a: "authorizing" },
+				estimateMode: false,
+				estimateReason: null,
+				lastModel: SONNET,
+				unresolved: {},
+			}),
+		);
+		await run("stop.mjs", stopInput());
+		// At most once: possibly posted, so never posted again — an under-count.
+		expect(settles()).toEqual([]);
 		expect((await readCursor()).accounted).toEqual(["msg_a"]);
 	});
 });

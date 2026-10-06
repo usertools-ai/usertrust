@@ -84,14 +84,14 @@
 //  - partial: every id seen but not yet accounted or denied, with its counts,
 //    and whether this agent holds its claim.
 //  - accounted / denied: the most recent 10 000 ids each.
-//  - assigned: id → transferId, "remainder" (an in-flight remainder claim) or
-//    "authorizing" (written BEFORE PreToolUse's authorize, with a timestamp in
-//    authorizingAt). An "authorizing" entry older than 5 minutes is treated as
-//    unassigned: its authorize never completed. The one residual window is a
-//    crash between authorize 200 and the pending-hold write: nothing records
-//    that hold's transferId, so nothing can settle it — the server's TTL sweep
-//    releases it — and the ids are posted once, later, by another hold. That is
-//    a second RESERVATION for up to the TTL, never a second post.
+//  - assigned: id → the vehicle it is BOUND to — a transferId, "remainder" (a
+//    remainder in flight) or "authorizing" (written BEFORE PreToolUse's
+//    authorize) — each recorded before any call that could post it. A binding
+//    whose outcome nothing recorded — its hold gone, no journal naming it — may
+//    have posted, so its ids are NEVER posted again (`reconcile`): a crash after
+//    a settle went out is charged once, and a crash before is an under-count. A
+//    hold such a crash left behind is never settled: the server's TTL sweep, and
+//    TigerBeetle's own timeout, void it.
 //  - unresolved: vehicle key → { ids, model, agentType, counts }.
 // Shared by every agent of every session: <state>/transcripts/claims, one file
 // per claimed message id (named by its SHA-256), naming the agent that owns it.
@@ -155,8 +155,6 @@ const CURSOR_VERSION = 2;
 const READABLE_CURSOR_VERSIONS = new Set([1, 2]);
 /** A lock older than this is a crashed holder, not a live one. */
 const STALE_LOCK_MS = 60_000;
-/** An "authorizing" assignment older than this never completed. */
-const AUTHORIZING_TTL_MS = 5 * 60_000;
 /** A hold left "settling" this long belongs to a crashed hook. */
 const STALE_SETTLING_MS = 10 * 60_000;
 const ID_HISTORY = 10_000;
@@ -364,7 +362,6 @@ function emptyCursor() {
 		accounted: new Set(),
 		denied: new Set(),
 		assigned: new Map(),
-		authorizingAt: new Map(),
 		estimateMode: false,
 		estimateReason: null,
 		lastModel: null,
@@ -401,9 +398,6 @@ function parseCursor(raw) {
 	for (const [id, value] of Object.entries(raw.assigned)) {
 		if (typeof value !== "string" || value === "") return null;
 		cursor.assigned.set(id, value);
-	}
-	for (const [id, at] of Object.entries(isObject(raw.authorizingAt) ? raw.authorizingAt : {})) {
-		if (Number.isFinite(at)) cursor.authorizingAt.set(id, at);
 	}
 	cursor.accounted = new Set(raw.accounted);
 	cursor.denied = new Set(raw.denied);
@@ -509,7 +503,6 @@ async function writeCursor(path, cursor) {
 			accounted: [...cursor.accounted].slice(-ID_HISTORY),
 			denied: [...cursor.denied].slice(-ID_HISTORY),
 			assigned: Object.fromEntries(cursor.assigned),
-			authorizingAt: Object.fromEntries(cursor.authorizingAt),
 			estimateMode: cursor.estimateMode,
 			estimateReason: cursor.estimateReason,
 			lastModel: cursor.lastModel,
@@ -521,7 +514,6 @@ async function writeCursor(path, cursor) {
 function accountIds(cursor, ids) {
 	for (const id of ids) {
 		cursor.assigned.delete(id);
-		cursor.authorizingAt.delete(id);
 		cursor.partial.delete(id);
 		cursor.accounted.add(id);
 	}
@@ -530,14 +522,12 @@ function accountIds(cursor, ids) {
 function releaseIds(cursor, ids) {
 	for (const id of ids) {
 		cursor.assigned.delete(id);
-		cursor.authorizingAt.delete(id);
 	}
 }
 
 function denyIds(cursor, ids) {
 	for (const id of ids) {
 		cursor.assigned.delete(id);
-		cursor.authorizingAt.delete(id);
 		cursor.partial.delete(id);
 		cursor.denied.add(id);
 	}
@@ -708,14 +698,12 @@ async function reconcile(cursor, sessionId, agentId) {
 			for (const id of record.ids) live.add(id);
 		}
 	}
-	for (const [id, value] of cursor.assigned) {
-		if (value === AUTHORIZING) {
-			if (now - (cursor.authorizingAt.get(id) ?? 0) > AUTHORIZING_TTL_MS) releaseIds(cursor, [id]);
-		} else if (!live.has(id)) {
-			// Its hold is gone without a journalled outcome (a crash after posting
-			// could look exactly like this): at most once, so it stays claimed.
-			accountIds(cursor, [id]);
-		}
+	for (const [id] of cursor.assigned) {
+		// A binding — AUTHORIZING, REMAINDER, or a hold — whose outcome nothing
+		// recorded: its hold is gone and no journal names it. A crash after a settle
+		// went out looks exactly like this, so it may have posted: at most once, its
+		// ids are never posted again.
+		if (!live.has(id)) accountIds(cursor, [id]);
 	}
 	return { live, finished };
 }
@@ -1252,11 +1240,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 		if (fresh.length > 0) {
 			const model = fresh[0].model;
 			const messages = fresh.filter((m) => m.model === model);
-			const now = Date.now();
-			for (const m of messages) {
-				cursor.assigned.set(m.id, AUTHORIZING);
-				cursor.authorizingAt.set(m.id, now);
-			}
+			for (const m of messages) cursor.assigned.set(m.id, AUTHORIZING);
 			window = { model, ids: messages.map((m) => m.id), counts: sumCounts(messages) };
 		}
 		await opened.save();
@@ -1278,10 +1262,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 		async commit(transferId) {
 			if (window === null || decided) return;
 			decided = true;
-			for (const id of window.ids) {
-				cursor.assigned.set(id, transferId);
-				cursor.authorizingAt.delete(id);
-			}
+			for (const id of window.ids) cursor.assigned.set(id, transferId);
 			// If this write fails the pending file still names the ids, and the
 			// journal keeps them out of every other window until the hold ends.
 			await opened.save().catch((err) => {
@@ -1291,27 +1272,13 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 		async settledElsewhere() {
 			// The server answered `already_settled` for the window's key: an earlier
 			// settle of exactly these messages landed, though this cursor never heard.
+			// If this write fails they stay "authorizing", a binding with no recorded
+			// outcome, which the next lock holder writes off all the same.
 			if (window === null || decided) return;
 			decided = true;
-			// Journalled first, like a settled hold, so the next lock holder accounts
-			// these ids even if the cursor write below fails: left "authorizing", they
-			// would be released after five minutes into a window under another key.
-			const journal = join(
-				stateRoot(),
-				`${sanitize(sessionId)}__${sanitize(agentId)}__${sanitize(key)}.done`,
-			);
-			const record = { agentId, assignedIds: window.ids, outcome: "settled" };
-			const journalled = await writeAtomic(journal, JSON.stringify(record)).then(
-				() => true,
-				() => false,
-			);
 			accountIds(cursor, window.ids);
 			await opened.save().catch((err) => {
-				process.stderr.write(
-					journalled
-						? `usertrust: cursor not updated — ${errText(err)}\n`
-						: `usertrust: ${window.ids.length} message(s) already charged could be posted again: neither the journal nor the cursor could be written (${errText(err)})\n`,
-				);
+				process.stderr.write(`usertrust: cursor not updated — ${errText(err)}\n`);
 			});
 		},
 		async abandon() {
