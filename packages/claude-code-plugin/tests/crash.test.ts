@@ -334,7 +334,7 @@ const FORKED: Scenario = {
 	],
 };
 
-/** Time passes: locks, in-flight settles and unfinished authorizes all go stale. */
+/** Time passes: locks and in-flight settles go stale. */
 async function age(world: World) {
 	const long = new Date(Date.now() - 20 * 60_000);
 	for (const name of await readdir(world.stateDir)) {
@@ -342,17 +342,7 @@ async function age(world: World) {
 	}
 	const dir = join(world.stateDir, "transcripts");
 	for (const name of await readdir(dir).catch(() => [] as string[])) {
-		const path = join(dir, name);
-		if (name.endsWith(".lock")) await utimes(path, long, long);
-		else if (name.endsWith(".json")) {
-			const cursor = JSON.parse(await readFile(path, "utf-8")) as {
-				authorizingAt?: Record<string, number>;
-			};
-			for (const id of Object.keys(cursor.authorizingAt ?? {})) {
-				(cursor.authorizingAt as Record<string, number>)[id] = long.getTime();
-			}
-			await writeFile(path, JSON.stringify(cursor));
-		}
+		if (name.endsWith(".lock")) await utimes(join(dir, name), long, long);
 	}
 }
 
@@ -503,6 +493,59 @@ describe("at most once — killed at every boundary, the session goes on, nothin
 		expect(estimated.estimated).toBe(2);
 		expect(estimated.real).toBe(0);
 	}, 60_000);
+
+	// A binding (AUTHORIZING, REMAINDER, a hold) whose outcome nothing recorded may
+	// have posted, so its messages are NEVER posted again: charged once if the
+	// settle went out, never if it did not — the under-count side, by design.
+	it.each([
+		// [what, step (0 pre tu_1, 1 post tu_1, 2 pre tu_2, 3 post tu_2, 4 stop), boundary, charges]
+		[
+			"PostToolUse killed after its settle went out, before anything recorded the outcome: charged once",
+			1,
+			"fetch /v1/settle|1|after",
+			[1, 1, 1, 1, 1],
+		],
+		[
+			"PostToolUse killed after the outcome journal, before the cursor took it: charged once",
+			1,
+			"rename|2|after",
+			[1, 1, 1, 1, 1],
+		],
+		[
+			"PostToolUse killed with its hold claimed for settling, before the settle went out: never posted",
+			1,
+			"fetch /v1/settle|1|before",
+			[0, 0, 1, 1, 1],
+		],
+		[
+			"PreToolUse killed after its window's authorize, before the hold was recorded: never posted",
+			0,
+			"fetch /v1/authorize|1|after",
+			[0, 0, 1, 1, 1],
+		],
+		[
+			"Stop killed after a remainder settle went out, before the cursor saved it: charged once",
+			4,
+			"fetch /v1/settle|1|after",
+			[1, 1, 1, 1, 1],
+		],
+		[
+			"Stop killed between a remainder's binding and its settle: never posted",
+			4,
+			"fetch /v1/settle|1|before",
+			[1, 1, 1, 0, 0],
+		],
+	] as const)(
+		"a binding with no recorded outcome — %s",
+		async (_what, step, spec, charges) => {
+			const result = await play(ONE_AGENT, false, { step, call: 0, spec });
+			expect(result.crashed).toBe(true);
+			expect(result.counts).toEqual(charges);
+			expect(result.excess).toBe(0);
+			expect(result.estimated).toBe(0);
+		},
+		60_000,
+	);
 
 	it.each([
 		["one agent, an older server", ONE_AGENT, false, false],

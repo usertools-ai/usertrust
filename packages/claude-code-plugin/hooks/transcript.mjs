@@ -85,19 +85,21 @@
 //  - partial: every id seen but not yet accounted or denied, with its counts,
 //    and whether this agent holds its claim.
 //  - accounted / denied: the most recent 10 000 ids each.
-//  - assigned: id → transferId, "remainder" (an in-flight remainder claim) or
-//    "authorizing" (written BEFORE PreToolUse's authorize, with a timestamp in
-//    authorizingAt). An "authorizing" entry older than 5 minutes is treated as
-//    unassigned: its authorize never completed. The one residual window is a
-//    crash between authorize 200 and the pending-hold write: nothing records
-//    that hold's transferId, so nothing can settle it — the server's TTL sweep
-//    releases it — and the ids are posted once, later, by another hold. That is
-//    a second RESERVATION for up to the TTL, never a second post.
+//  - assigned: id → the vehicle it is BOUND to — a transferId, "remainder" (a
+//    remainder in flight) or "authorizing" (written BEFORE PreToolUse's
+//    authorize) — each recorded before any call that could post it. A binding
+//    whose outcome nothing recorded — its hold gone, no journal naming it — may
+//    have posted, so its ids are NEVER posted again (`reconcile`): a crash after
+//    a settle went out is charged once, and a crash before is an under-count. A
+//    hold such a crash left behind is never settled: the server's TTL sweep, and
+//    TigerBeetle's own timeout, void it.
 //  - unresolved: vehicle key → { ids, model, agentType, counts }.
 // Shared by every agent of every session: <state>/transcripts/claims, one file
 // per claimed message id (named by its SHA-256), naming the agent that owns it.
 // Per (session, agent), OUTSIDE the cursor: <state>/transcripts/estimate/
-// <session>__<agent>, the agent's recorded estimate mode.
+// <session>__<agent>, the agent's recorded estimate mode. And once:
+// <state>/transcripts/since, when this state was first made — a transcript entry
+// written before it is never posted (see `firstRun`).
 // A hold's outcome is journalled beside its pending file (<hold>.settling while
 // in flight, <hold>.done after) so the cursor can be brought up to date by the
 // next hook that gets the lock, even when the settling hook could not.
@@ -145,19 +147,16 @@ const UNKNOWN_MODEL = "unknown";
 const MODEL_ID = /^[^\p{C}\p{Z}]{1,256}$/u;
 
 /**
- * Holds sized from transcript usage count cache writes twice: they are priced
- * above fresh input (up to 2x for the 1-hour tier), and a hold below the real
- * cost would cap the posted amount (shortfall) instead of recording it.
+ * The capability of a server that sizes a hold per cache tier, from
+ * `estimatedCacheReadTokens` / `estimatedCacheWriteTokens` (see `holdEstimate`).
  */
-const CACHE_WRITE_HOLD_FACTOR = 2;
+const CACHE_TIERS = "authorize-cache-tiers";
 
 const CURSOR_VERSION = 2;
 /** v1 cursors (no `unresolved`) are read as v2 with nothing unresolved. */
 const READABLE_CURSOR_VERSIONS = new Set([1, 2]);
 /** A lock older than this is a crashed holder, not a live one. */
 const STALE_LOCK_MS = 60_000;
-/** An "authorizing" assignment older than this never completed. */
-const AUTHORIZING_TTL_MS = 5 * 60_000;
 /** A hold left "settling" this long belongs to a crashed hook. */
 const STALE_SETTLING_MS = 10 * 60_000;
 const ID_HISTORY = 10_000;
@@ -194,6 +193,8 @@ const VEHICLE_KEY = /^cc:[0-9a-f]{48}$/;
 const CLAIMS_DIR = "claims";
 /** Where an agent's estimate mode is recorded, outside its cursor (see `stickToEstimate`). */
 const ESTIMATE_DIR = "estimate";
+/** When this plugin's transcript state was first made (see `firstRun`). */
+const SINCE_FILE = "since";
 
 /**
  * Untrusted strings in a path or an actor string (agent type/id) →
@@ -328,11 +329,35 @@ export function estimatePrincipalFor(sessionId, agentId, agentTypeHint) {
 	return principalFor(sessionId, agentId, type);
 }
 
-/** The hold that covers `counts` at their real cost (see CACHE_WRITE_HOLD_FACTOR). */
-export function holdInputTokens(counts) {
-	return (
-		counts.inputTokens + counts.cacheReadTokens + CACHE_WRITE_HOLD_FACTOR * counts.cacheWriteTokens
-	);
+/**
+ * The authorize fields that size a hold for transcript `counts`, on top of a tool
+ * call's own estimate (`toolInput` tokens in, `toolOutput` out). A hold below the
+ * real cost would cap what its settle can post (a shortfall), and one far above it
+ * can be refused near the budget — and a refused window is usage already spent,
+ * marked denied. So:
+ *  - a server that publishes `authorize-cache-tiers` (`capabilities`) prices each
+ *    cache tier at its own rate, as settle does: the tiers go separately;
+ *  - any other server prices every estimated input token at the higher of its
+ *    input and cache-write rates, which covers each tier's price already (cache
+ *    reads are the cheapest tier): the counts go in as one plain sum, never
+ *    weighted again. A rate table whose cache-read rate tops both would be
+ *    under-held there.
+ */
+export function holdEstimate(counts, capabilities, { toolInput = 0, toolOutput = 0 } = {}) {
+	const maxOutputTokens = toolOutput + Math.max(1, counts.outputTokens);
+	if (capabilities?.has(CACHE_TIERS)) {
+		return {
+			estimatedInputTokens: toolInput + counts.inputTokens,
+			estimatedCacheReadTokens: counts.cacheReadTokens,
+			estimatedCacheWriteTokens: counts.cacheWriteTokens,
+			maxOutputTokens,
+		};
+	}
+	return {
+		estimatedInputTokens:
+			toolInput + counts.inputTokens + counts.cacheReadTokens + counts.cacheWriteTokens,
+		maxOutputTokens,
+	};
 }
 
 function isAgentId(agentId) {
@@ -421,7 +446,6 @@ function emptyCursor() {
 		accounted: new Set(),
 		denied: new Set(),
 		assigned: new Map(),
-		authorizingAt: new Map(),
 		estimateMode: false,
 		estimateReason: null,
 		lastModel: null,
@@ -458,9 +482,6 @@ function parseCursor(raw) {
 	for (const [id, value] of Object.entries(raw.assigned)) {
 		if (typeof value !== "string" || value === "") return null;
 		cursor.assigned.set(id, value);
-	}
-	for (const [id, at] of Object.entries(isObject(raw.authorizingAt) ? raw.authorizingAt : {})) {
-		if (Number.isFinite(at)) cursor.authorizingAt.set(id, at);
 	}
 	cursor.accounted = new Set(raw.accounted);
 	cursor.denied = new Set(raw.denied);
@@ -566,7 +587,6 @@ async function writeCursor(path, cursor) {
 			accounted: [...cursor.accounted].slice(-ID_HISTORY),
 			denied: [...cursor.denied].slice(-ID_HISTORY),
 			assigned: Object.fromEntries(cursor.assigned),
-			authorizingAt: Object.fromEntries(cursor.authorizingAt),
 			estimateMode: cursor.estimateMode,
 			estimateReason: cursor.estimateReason,
 			lastModel: cursor.lastModel,
@@ -578,7 +598,6 @@ async function writeCursor(path, cursor) {
 function accountIds(cursor, ids) {
 	for (const id of ids) {
 		cursor.assigned.delete(id);
-		cursor.authorizingAt.delete(id);
 		cursor.partial.delete(id);
 		cursor.accounted.add(id);
 	}
@@ -587,14 +606,12 @@ function accountIds(cursor, ids) {
 function releaseIds(cursor, ids) {
 	for (const id of ids) {
 		cursor.assigned.delete(id);
-		cursor.authorizingAt.delete(id);
 	}
 }
 
 function denyIds(cursor, ids) {
 	for (const id of ids) {
 		cursor.assigned.delete(id);
-		cursor.authorizingAt.delete(id);
 		cursor.partial.delete(id);
 		cursor.denied.add(id);
 	}
@@ -765,14 +782,12 @@ async function reconcile(cursor, sessionId, agentId) {
 			for (const id of record.ids) live.add(id);
 		}
 	}
-	for (const [id, value] of cursor.assigned) {
-		if (value === AUTHORIZING) {
-			if (now - (cursor.authorizingAt.get(id) ?? 0) > AUTHORIZING_TTL_MS) releaseIds(cursor, [id]);
-		} else if (!live.has(id)) {
-			// Its hold is gone without a journalled outcome (a crash after posting
-			// could look exactly like this): at most once, so it stays claimed.
-			accountIds(cursor, [id]);
-		}
+	for (const [id] of cursor.assigned) {
+		// A binding — AUTHORIZING, REMAINDER, or a hold — whose outcome nothing
+		// recorded: its hold is gone and no journal names it. A crash after a settle
+		// went out looks exactly like this, so it may have posted: at most once, its
+		// ids are never posted again.
+		if (!live.has(id)) accountIds(cursor, [id]);
 	}
 	return { live, finished };
 }
@@ -807,7 +822,7 @@ async function removeFiles(paths) {
  * (`longLines`). A call stops at the first line end MAX_READ_BYTES past where it
  * started — the next settle point reads on. Only an I/O failure is "unreadable".
  */
-async function ingest(cursor, path) {
+async function ingest(cursor, path, since) {
 	let handle;
 	try {
 		handle = await open(path, "r");
@@ -833,7 +848,9 @@ async function ingest(cursor, path) {
 			for (let end = view.indexOf(0x0a); end !== -1; end = view.indexOf(0x0a, from)) {
 				const tail = view.subarray(from, end);
 				if (skipping) result.longLines += 1;
-				else if (!foldLine(cursor, line.length === 0 ? tail : Buffer.concat([...line, tail]))) {
+				else if (
+					!foldLine(cursor, line.length === 0 ? tail : Buffer.concat([...line, tail]), since)
+				) {
 					result.badLines += 1;
 				}
 				line = [];
@@ -863,9 +880,10 @@ async function ingest(cursor, path) {
 /**
  * Fold one transcript line into `cursor.partial`: per message id, the per-field
  * max of its entries' counts, and the first model an entry names (over a
- * placeholder). False when the line is not JSON.
+ * placeholder) — skipping an entry written before `since`. False when the line is
+ * not JSON.
  */
-function foldLine(cursor, bytes) {
+function foldLine(cursor, bytes, since) {
 	if (!bytes.includes(USAGE_FIELD)) return true;
 	let entry;
 	try {
@@ -873,6 +891,8 @@ function foldLine(cursor, bytes) {
 	} catch {
 		return false;
 	}
+	// Written before this plugin's state was first made: never posted (`firstRun`).
+	if (Date.parse(entry?.timestamp) < since) return true;
 	const message = entry?.message;
 	const usage = message?.usage;
 	const id = message?.id;
@@ -1068,13 +1088,71 @@ async function cursorLocation(sessionId, agentId) {
 	if (!isAgentId(agentId)) return { ok: false, reason: "agent id is not safe in a path" };
 	const dir = await privateStateDir();
 	if (!dir.ok) return { ok: false, reason: dir.reason, unavailable: true };
+	let since;
+	try {
+		since = await firstRun(dir.dir);
+	} catch (err) {
+		return {
+			ok: false,
+			reason: `first-run time unreadable (${err?.code ?? errText(err)})`,
+			unavailable: true,
+		};
+	}
 	const name = `${sanitize(sessionId)}__${agentId}`;
 	return {
 		ok: true,
 		cursorPath: join(dir.dir, `${name}.json`),
 		claimsDir: join(dir.dir, CLAIMS_DIR),
 		estimatePath: join(dir.dir, ESTIMATE_DIR, name),
+		since,
 	};
+}
+
+/**
+ * When this plugin's transcript state was first made, in ms: published once, whole
+ * (`publishOnce`), and never moved. A transcript entry written before it is never
+ * posted: usage from before this state existed — a session resumed after an upgrade
+ * from the estimate plugin, or after the state dir was deleted and remade — may have
+ * been settled another way, and at most once means an under-count there. An entry
+ * with no readable timestamp counts as after it. One that cannot be read leaves the
+ * state unavailable: nothing is posted, and nothing settled at the estimate.
+ */
+async function firstRun(dir) {
+	const path = join(dir, SINCE_FILE);
+	const read = () =>
+		readFile(path, "utf-8").catch((err) => {
+			if (err?.code === "ENOENT") return null;
+			throw err;
+		});
+	let text = await read();
+	if (text === null) {
+		await publishOnce(path, new Date().toISOString());
+		text = await read();
+	}
+	const at = Date.parse(text ?? "");
+	if (!Number.isFinite(at)) throw new Error("not a time");
+	return at;
+}
+
+/**
+ * Publish `content` at `path` unless something is there already: by link(2), which
+ * never replaces a name, so it is whole the moment it exists — on a filesystem
+ * without hard links, by an exclusive create.
+ */
+async function publishOnce(path, content) {
+	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+	try {
+		await writeFile(tmp, content, { mode: 0o600 });
+		await link(tmp, path);
+	} catch (err) {
+		if (err?.code === "EEXIST") return;
+		if (!LINKLESS.has(err?.code)) throw err;
+		await writeFile(path, content, { flag: "wx", mode: 0o600 }).catch((exclusive) => {
+			if (exclusive?.code !== "EEXIST") throw exclusive;
+		});
+	} finally {
+		await unlink(tmp).catch(() => {});
+	}
 }
 
 /**
@@ -1206,7 +1284,7 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			return stickToEstimate(where, cursor.estimateReason ?? "transcript unreadable", false);
 		}
 		const { live, finished } = await reconcile(cursor, sessionId, agentId);
-		const ingested = await ingest(cursor, transcriptPath);
+		const ingested = await ingest(cursor, transcriptPath, where.since);
 		if (!ingested.ok) {
 			const sticky = await stickToEstimate(where, ingested.reason, true);
 			if (sticky.kind === "estimate") {
@@ -1309,11 +1387,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 		if (fresh.length > 0) {
 			const model = fresh[0].model;
 			const messages = fresh.filter((m) => m.model === model);
-			const now = Date.now();
-			for (const m of messages) {
-				cursor.assigned.set(m.id, AUTHORIZING);
-				cursor.authorizingAt.set(m.id, now);
-			}
+			for (const m of messages) cursor.assigned.set(m.id, AUTHORIZING);
 			window = { model, ids: messages.map((m) => m.id), counts: sumCounts(messages) };
 		}
 		await opened.save();
@@ -1335,10 +1409,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 		async commit(transferId) {
 			if (window === null || decided) return;
 			decided = true;
-			for (const id of window.ids) {
-				cursor.assigned.set(id, transferId);
-				cursor.authorizingAt.delete(id);
-			}
+			for (const id of window.ids) cursor.assigned.set(id, transferId);
 			// If this write fails the pending file still names the ids, and the
 			// journal keeps them out of every other window until the hold ends.
 			await opened.save().catch((err) => {
@@ -1348,27 +1419,13 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 		async settledElsewhere() {
 			// The server answered `already_settled` for the window's key: an earlier
 			// settle of exactly these messages landed, though this cursor never heard.
+			// If this write fails they stay "authorizing", a binding with no recorded
+			// outcome, which the next lock holder writes off all the same.
 			if (window === null || decided) return;
 			decided = true;
-			// Journalled first, like a settled hold, so the next lock holder accounts
-			// these ids even if the cursor write below fails: left "authorizing", they
-			// would be released after five minutes into a window under another key.
-			const journal = join(
-				stateRoot(),
-				`${sanitize(sessionId)}__${sanitize(agentId)}__${sanitize(key)}.done`,
-			);
-			const record = { agentId, assignedIds: window.ids, outcome: "settled" };
-			const journalled = await writeAtomic(journal, JSON.stringify(record)).then(
-				() => true,
-				() => false,
-			);
 			accountIds(cursor, window.ids);
 			await opened.save().catch((err) => {
-				process.stderr.write(
-					journalled
-						? `usertrust: cursor not updated — ${errText(err)}\n`
-						: `usertrust: ${window.ids.length} message(s) already charged could be posted again: neither the journal nor the cursor could be written (${errText(err)})\n`,
-				);
+				process.stderr.write(`usertrust: cursor not updated — ${errText(err)}\n`);
 			});
 		},
 		async abandon() {
@@ -1616,6 +1673,7 @@ export async function postRemainder({ sessionId, agentId, agentTypeHint, input, 
 				timeoutMs,
 				key,
 				principal: principalOf(vehicle.agentType),
+				capabilities,
 				retry: true,
 			});
 			if (result.outcome !== "unresolved") cursor.unresolved.delete(key);
@@ -1661,6 +1719,7 @@ export async function postRemainder({ sessionId, agentId, agentTypeHint, input, 
 				timeoutMs,
 				key,
 				principal: principalOf(agentType.raw),
+				capabilities,
 				retry: false,
 			});
 			// An unresolved vehicle stays parked; any other outcome is final for it.
@@ -1714,6 +1773,7 @@ async function postGroup({
 	timeoutMs,
 	key,
 	principal,
+	capabilities,
 	retry,
 }) {
 	const unsettled = (reason, extra = {}) => ({
@@ -1727,8 +1787,7 @@ async function postGroup({
 			"/v1/authorize",
 			{
 				model,
-				estimatedInputTokens: holdInputTokens(counts),
-				maxOutputTokens: Math.max(1, counts.outputTokens),
+				...holdEstimate(counts, capabilities),
 				params: {
 					hook,
 					usageOrigin: "transcript",

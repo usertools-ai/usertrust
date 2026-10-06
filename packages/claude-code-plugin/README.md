@@ -70,12 +70,16 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
 
 - **The hold is the settlement vehicle.** At PreToolUse the agent's new complete
   responses — those of the earliest one's model, the *window* — are assigned to the
-  hold being authorized. The hold is sized to cover them (cache writes counted
-  twice, so it never caps the real cost) PLUS the usual tool estimate, so the
-  budget check before the call still covers the call. PostToolUse then SETTLES
-  that hold, exactly once, at the window's real counts — on the normal path no
-  hold is ever aborted. A tool call whose window is empty (a parallel call in the
-  same response, say) is given back (below).
+  hold being authorized. The hold is sized to cover them PLUS the usual tool
+  estimate, so the budget check before the call still covers the call — and never
+  below their real cost, which would cap what the settle can post. On a server
+  that publishes `authorize-cache-tiers`, each cache tier is estimated apart and
+  held at its own rate, as settle prices it. On any other, the counts go in as one
+  sum, held at the server's higher input/cache-write rate: never under the real
+  cost, but well over it for a window heavy in cache reads (below). PostToolUse
+  then SETTLES that hold, exactly once, at the window's real counts — on the
+  normal path no hold is ever aborted. A tool call whose window is empty (a
+  parallel call in the same response, say) is given back (below).
 - **The remainder.** What no hold carried — another model's responses, a final
   answer with no tool call — is posted at SubagentStop (that subagent) and Stop
   (the parent and every subagent, so one whose SubagentStop never fired is still
@@ -144,9 +148,13 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   another agent, this agent under a cursor since removed or reset, or a hook that
   died between claiming and saving. Nothing about such a claim says whether it was
   posted, so the worst a lost record does is under-count, with a note. Per
-  (session, agent) a cursor records which response ids are assigned, accounted or
-  denied; an id is released only when the server proved nothing was posted (the
-  authorize failed, or the settle answered 400 — or 404, without a key). Without a
+  (session, agent) a cursor records which response ids are bound to a hold or a
+  remainder, accounted or denied — bound BEFORE any call that could post them. A
+  binding whose outcome was never recorded (a hook killed just after its settle
+  went out, or just before) may have posted, so its responses are never posted
+  again: charged once, or not at all. An id is released only when the server
+  proved nothing was posted (the authorize failed, or the settle answered 400 — or
+  404, without a key). Without a
   key, a settle that answers 5xx or not at all may have posted, so its ids stay
   claimed and the hold is given back for hygiene: an outage can lose usage, but
   never post it twice. A cursor that exists but cannot be read is never treated as
@@ -183,10 +191,16 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   settled at the estimate — the first settle point that can use the directory
   posts that usage, once. The default is
   `~/.claude/usertrust-cc` (`$CLAUDE_CONFIG_DIR/usertrust-cc` when that is set),
-  beside Claude Code's own transcripts — not a temp dir, which the OS may purge:
-  **deleting the state dir while transcripts remain re-posts their usage** (and
-  so can restoring an older copy of it). A message whose claim cannot be made is
-  not posted, and a stderr note says so.
+  beside Claude Code's own transcripts — not a temp dir, which the OS may purge.
+  The state records when it was first made (`transcripts/since`), and a transcript
+  entry written before that is never posted: a session resumed after upgrading
+  from the estimate-only plugin, or after the state dir was deleted, does not post
+  its history again (entries carry Claude Code's timestamp; one without a
+  timestamp counts as after it). **Restoring an older copy of the state dir can
+  re-post what was posted after that copy was made.** The claim files are never
+  pruned, and they are what keeps a message from being posted twice: one small
+  file per response. A message whose claim cannot be made is not posted, and a
+  stderr note says so.
 - **Hook time budget.** Each hook gives up after about 10 seconds (the hooks'
   timeout is 15): its calls never run past that, claiming new responses stops
   early enough to leave them time, and Stop keeps time back to give back holds;
@@ -204,7 +218,10 @@ deliberate over-count of at most one unit per extra parallel tool call (and per
 tool call while the plugin's state is unusable), never an under-count.
 Responses of a second model cost one extra authorize→settle at the
 next Stop. On an older server, attribution is request-side only and an outage can
-lose usage, as above.
+lose usage, as above. On a server without `authorize-cache-tiers`, a window's hold
+reserves its cache reads at the cache-write rate (about 10x a typical window's
+real input-side cost): near the budget that hold can be refused (402), and a
+refused window is usage already spent, marked denied.
 
 **Live totals.** The plugin settles at tool boundaries and at Stop. For a live
 running total, Claude Code's own OpenTelemetry metrics are the source; a collector

@@ -32,8 +32,9 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { readLedgerEvents } from "usertrust";
+import { costFromRates, getModelRates, readLedgerEvents } from "usertrust";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { effectiveCacheWriteRate } from "../../core/src/ledger/pricing.js";
 import { hashKey } from "../../server/src/config.js";
 import { createUsertrustServer, type UsertrustServer } from "../../server/src/server.js";
 import { runHook } from "./helpers/run-hook.js";
@@ -347,8 +348,9 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 		const auth = authorizes()[0];
 		expect(auth?.body).toMatchObject({
 			model: SONNET,
-			// The window held at real cost (cache writes 2x) PLUS the tool estimate.
-			estimatedInputTokens: 10 + 5000 + 2 * 300 + TOOL_INPUT_ESTIMATE,
+			// The window PLUS the tool estimate, as one sum: this (older) server prices
+			// every estimated input token at its higher input/cache-write rate.
+			estimatedInputTokens: 10 + 5000 + 300 + TOOL_INPUT_ESTIMATE,
 			maxOutputTokens: 200 + TOOL_OUTPUT_HOLD,
 			params: {
 				hook: "PreToolUse",
@@ -362,6 +364,8 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 			// The tool input is still sent for the PII scan.
 			messages: [{ role: "user", content: '{"command":"ls"}' }],
 		});
+		expect(auth?.body).not.toHaveProperty("estimatedCacheReadTokens");
+		expect(auth?.body).not.toHaveProperty("estimatedCacheWriteTokens");
 		expect((await readCursor()).assigned).toEqual({ msg_a: "tx_1" });
 
 		const post = await run("post-tool-use.mjs", postInput("tu_1"));
@@ -382,6 +386,72 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 		// Nothing is left for Stop: no remainder, no leftover hold.
 		await run("stop.mjs", stopInput());
 		expect(requests).toHaveLength(2);
+	});
+
+	it("a hold is sized at each tier's own rate where the server can (≈327 for this window's input side), and never under the real cost where it can't", async () => {
+		// The real-server test's first window: 150 in, 82 000 cache read, 2 000 cache
+		// write, 1 000 out. Priced as usertrust prices a hold — the estimated input at
+		// the higher of the input and cache-write rates, each cache tier given apart at
+		// its own (the pinned `authorize-cache-tiers` contract) — at today's Sonnet rates.
+		const rates = getModelRates(SONNET);
+		const holdRates = {
+			...rates,
+			inputPer1k: Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates)),
+		};
+		const inputSide = (body: Record<string, unknown>) =>
+			costFromRates(
+				holdRates,
+				Number(body.estimatedInputTokens),
+				0,
+				Number(body.estimatedCacheReadTokens ?? 0),
+				Number(body.estimatedCacheWriteTokens ?? 0),
+			);
+		const realInputSide = costFromRates(rates, 150, 0, 82_000, 2_000);
+		expect(realInputSide).toBe(326);
+		const window = [
+			...responseEntries("msg_a", SONNET, u(120, 800, 40_000, 2_000)),
+			...responseEntries("msg_b", SONNET, u(30, 200, 42_000, 0)),
+		];
+		const remainder = responseEntries("msg_c", SONNET, u(5, 60, 44_000, 1_000));
+
+		capabilities = ["authorize-cache-tiers"];
+		await startServer(okResponder);
+		await writeMain(window);
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await appendMain(remainder);
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		await run("stop.mjs", stopInput());
+		const [tiered, tieredRemainder] = authorizes().map((a) => a.body);
+		expect(tiered).toMatchObject({
+			estimatedInputTokens: 150 + TOOL_INPUT_ESTIMATE,
+			estimatedCacheReadTokens: 82_000,
+			estimatedCacheWriteTokens: 2_000,
+			maxOutputTokens: 1_000 + TOOL_OUTPUT_HOLD,
+		});
+		expect(inputSide(tiered as Record<string, unknown>)).toBe(327);
+		expect(tieredRemainder).toMatchObject({
+			estimatedInputTokens: 5,
+			estimatedCacheReadTokens: 44_000,
+			estimatedCacheWriteTokens: 1_000,
+			maxOutputTokens: 60,
+		});
+
+		// A server without the capability would strip the tiers and hold too little:
+		// one sum, priced at the higher rate — never under the real cost, never doubled.
+		fake?.closeAllConnections();
+		fake?.close();
+		capabilities = [];
+		requests = [];
+		await rm(join(stateDir, "transcripts"), { recursive: true, force: true });
+		await startServer(okResponder);
+		await writeMain(window);
+		await run("pre-tool-use.mjs", preInput("tu_2"));
+		const plain = authorizes()[0]?.body as Record<string, unknown>;
+		expect(plain).not.toHaveProperty("estimatedCacheReadTokens");
+		expect(plain.estimatedInputTokens).toBe(150 + 82_000 + 2_000 + TOOL_INPUT_ESTIMATE);
+		// (Doubling the cache writes, as before, held 3 231.)
+		expect(inputSide(plain)).toBe(3_156);
+		expect(inputSide(plain)).toBeGreaterThanOrEqual(realInputSide);
 	});
 
 	it("parallel tool calls: one hold gets the window, the rest settle at zero — 0 aborts in 5", async () => {
@@ -915,6 +985,7 @@ describe("idempotency and concurrency", () => {
 		expect((await readdir(join(stateDir, "transcripts"))).sort()).toEqual([
 			`${SESSION}__main.json`,
 			"claims",
+			"since",
 		]);
 	});
 
@@ -1868,6 +1939,52 @@ describe("with a server that honours keys, principal and release (usertrust #205
 });
 
 describe("state that is lost, slow or unwritable", () => {
+	it("history written before this state was first made is never posted (an upgrade, a resumed session); what follows is", async () => {
+		await startServer(okResponder);
+		// Settled by the estimate plugin a minute ago, perhaps: from before this state.
+		const before = new Date(Date.now() - 60_000).toISOString();
+		await writeMain(responseEntries("msg_old", SONNET, u(9, 9), { timestamp: before }));
+		await run("stop.mjs", stopInput());
+		expect(settles()).toEqual([]);
+		const since = Date.parse(await readFile(join(stateDir, "transcripts", "since"), "utf-8"));
+		expect(since).toBeGreaterThan(Date.parse(before));
+		// Written after it, if only just: posted, once.
+		const after = new Date(since + 1).toISOString();
+		await appendMain(responseEntries("msg_new", SONNET, u(4, 4), { timestamp: after }));
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([4]);
+		// Fixed once made: a later hook reads the same time.
+		expect(Date.parse(await readFile(join(stateDir, "transcripts", "since"), "utf-8"))).toBe(since);
+	});
+
+	it("a DELETED state dir no longer re-posts its history: the first-run time is made again, past it", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		await run("stop.mjs", stopInput());
+		const since = Date.parse(await readFile(join(stateDir, "transcripts", "since"), "utf-8"));
+		const at = new Date(since + 1).toISOString();
+		await appendMain(responseEntries("msg_a", SONNET, u(6, 6), { timestamp: at }));
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([6]);
+		await rm(join(stateDir, "transcripts"), { recursive: true });
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([6]);
+	});
+
+	it("a first-run time that cannot be read posts nothing and settles nothing at the estimate", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(6, 6)));
+		await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
+		await writeFile(join(stateDir, "transcripts", "since"), "not a time");
+		const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => [s.body.usageSource, s.body.inputTokens])).toEqual([
+			["provider", 0],
+		]);
+		expect(pre.stderr).toContain("first-run time unreadable");
+	});
+
 	it("a REMOVED cursor re-posts nothing: this agent's claims say what it already posted", async () => {
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(4, 4)));
@@ -2059,23 +2176,60 @@ describe("state that is lost, slow or unwritable", () => {
 		expect(cursor.accounted).toEqual(["msg_a"]);
 	});
 
-	it("an already-settled window is journalled beside the cursor, and the next lock holder applies the record", async () => {
+	it("an already-settled window is accounted at once, and never posted", async () => {
 		capabilities = [...ALL_CAPABILITIES];
 		const server = keyedServer();
 		server.charged.add(keyOf("main", ["msg_a"]));
 		await startServer(server.responder);
 		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
 		await run("pre-tool-use.mjs", preInput("tu_1"));
-		const journal = (await readdir(stateDir)).filter((n) => n.endsWith(".done"));
-		expect(journal).toHaveLength(1);
-		expect(JSON.parse(await readFile(join(stateDir, journal[0] ?? ""), "utf-8"))).toMatchObject({
-			agentId: "main",
-			assignedIds: ["msg_a"],
-			outcome: "settled",
-		});
-		// The next lock holder applies and removes it.
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
 		await run("stop.mjs", stopInput());
-		expect((await readdir(stateDir)).filter((n) => n.endsWith(".done"))).toEqual([]);
+		expect(server.charges).toEqual([]);
+		expect(settles().map((s) => s.body.inputTokens)).not.toContain(5);
+	});
+
+	it("a binding whose outcome nothing recorded — 'authorizing', its hook gone — is never posted again", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+		// What a PreToolUse killed after binding its window leaves: the claim, and
+		// the window "authorizing" in the cursor. Its authorize may have gone out,
+		// and nothing recorded what came back.
+		const digest = createHash("sha256").update("msg_a").digest("hex");
+		const claims = join(stateDir, "transcripts", "claims", digest.slice(0, 2));
+		await mkdir(claims, { recursive: true, mode: 0o700 });
+		await writeFile(join(claims, digest.slice(2)), `${SESSION}/main`);
+		await writeFile(
+			cursorPath(),
+			JSON.stringify({
+				v: 2,
+				byteOffset: (await readFile(mainTranscript)).length,
+				nextSeq: 1,
+				partial: {
+					msg_a: {
+						n: 0,
+						model: SONNET,
+						synthetic: false,
+						complete: true,
+						claimed: true,
+						inputTokens: 5,
+						outputTokens: 6,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+					},
+				},
+				accounted: [],
+				denied: [],
+				assigned: { msg_a: "authorizing" },
+				estimateMode: false,
+				estimateReason: null,
+				lastModel: SONNET,
+				unresolved: {},
+			}),
+		);
+		await run("stop.mjs", stopInput());
+		// At most once: possibly posted, so never posted again — an under-count.
+		expect(settles()).toEqual([]);
 		expect((await readCursor()).accounted).toEqual(["msg_a"]);
 	});
 });
@@ -2155,6 +2309,9 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 			capabilities?: string[];
 		};
 		expect(health.capabilities).toContain("principal");
+		// Per-tier hold estimates come with their own server change: until it is
+		// merged, the plain sum.
+		const tiered = health.capabilities?.includes("authorize-cache-tiers") === true;
 		await startServer({ forwardTo: `http://127.0.0.1:${realPort}`, key: KEY });
 		// Two responses before the tool call: the hold carries them.
 		await writeMain([
@@ -2193,6 +2350,23 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 		);
 		expect(calls).toHaveLength(2);
 		for (const call of calls) expect(call.data).toMatchObject({ principal });
+		// What the server held for the window — never under its real cost, and
+		// priced per tier where the server can.
+		const rates = getModelRates(SONNET);
+		const holdRates = {
+			...rates,
+			inputPer1k: Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates)),
+		};
+		const windowHold = tiered
+			? costFromRates(holdRates, 150 + TOOL_INPUT_ESTIMATE, 1000 + TOOL_OUTPUT_HOLD, 82_000, 2_000)
+			: costFromRates(
+					holdRates,
+					150 + 82_000 + 2_000 + TOOL_INPUT_ESTIMATE,
+					1000 + TOOL_OUTPUT_HOLD,
+				);
+		const windowAuth = authorizes()[0]?.response as { estimatedCost?: number } | undefined;
+		expect(windowAuth?.estimatedCost).toBe(windowHold);
+		expect(windowHold).toBeGreaterThanOrEqual(receipts[0]?.cost ?? Number.POSITIVE_INFINITY);
 		const expected = [
 			{ inputTokens: 150, outputTokens: 1000, cacheReadTokens: 82_000, cacheWriteTokens: 2_000 },
 			{ inputTokens: 5, outputTokens: 60, cacheReadTokens: 44_000, cacheWriteTokens: 1_000 },
