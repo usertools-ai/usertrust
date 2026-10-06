@@ -186,7 +186,7 @@ export default function CheckLedger({
 			    says which one (receipt-spec §8). */}
 			<p
 				data-testid="trust-snapshot"
-				className="border-t border-white/[0.06] px-4 py-3 font-mono text-[12px] tracking-wide text-white/70"
+				className="border-t border-white/[0.06] px-4 py-3 font-mono text-[12px] tracking-wide text-white/70 [overflow-wrap:anywhere]"
 			>
 				{trustSnapshotLine(verification.trustSnapshotId)}
 			</p>

@@ -66,14 +66,30 @@ for (const file of FIXTURES) {
 	});
 }
 
-test("no unbreakable token may push the receipt sideways: the receipt wraps anywhere it must", () => {
-	// Measured on a live receipt at 320px with Details open: the trust
-	// snapshot's long name overflowed its section by about 340px until this rule.
+test("only the overflowing line wraps anywhere; the receipt as a whole does not, so a large amount stays on one line", () => {
+	// The trust snapshot's long name overflowed the ledger by about 270px on a
+	// phone. It alone may break anywhere.
+	const html = renderToStaticMarkup(
+		<StateView state={fixtureState(loadFixture("cluster/skipped-overflow.json"))} />,
+	);
+	assert.match(element(html, "trust-snapshot"), /^<p [^>]*class="[^"]*\[overflow-wrap:anywhere\]/);
+	// A container-wide `overflow-wrap: anywhere` lowers min-content widths, so a
+	// flex-wrapped amount like "$12345.6789" would split across two lines at
+	// 320px. The receipt's container must not carry it, and neither may the amount.
 	const css = readFileSync(new URL("./brand.css", import.meta.url), "utf8").replace(
 		/\/\*[\s\S]*?\*\//g,
 		"",
 	);
 	const main = /\.ut-r \.ut-r-main\{([^}]*)\}/.exec(css)?.[1] ?? "";
-	assert.match(main, /overflow-wrap:anywhere/);
 	assert.match(main, /font-variant-numeric:tabular-nums/, "the existing rule is kept");
+	assert.doesNotMatch(
+		css,
+		/\.ut-r-main[^{]*\{[^}]*overflow-wrap/,
+		"no wrap-anywhere on the receipt as a whole",
+	);
+	assert.doesNotMatch(
+		element(html, "amount-usd"),
+		/overflow-wrap|break-all|break-words/,
+		"the amount never breaks",
+	);
 });
