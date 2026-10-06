@@ -892,7 +892,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **fourteen** sanitizers, in two variants: **eight** neutralise C1 and **six** do not. Do
+There are **fifteen** sanitizers, in two variants: **nine** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -971,10 +971,14 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   `claude-code-plugin/hooks/pre-tool-use.mjs`, which strips C0/DEL/C1 from server-provided text
   before it becomes a permission-decision reason, and clips afterwards. This one was invisible to
   the count guard for its entire existence, because the traversal walked `packages/*/src` and that
-  package has no `src/` — it ships `hooks/*.mjs`. It is listed last because it is the newest entry
-  to the *inventory*, not the newest code: it predates the guard that failed to see it. **Scope a
-  source-wide assertion by what SHIPS, not by the directory layout the other packages happen to
-  use** — that is the same lesson as the worktree note above, one level out.
+  package has no `src/` — it ships `hooks/*.mjs`. It came late to the *inventory*, not as new
+  code: it predates the guard that failed to see it. **Scope a source-wide assertion by what SHIPS,
+  not by the directory layout the other packages happen to use** — that is the same lesson as the
+  worktree note above, one level out.
+- The stronger variant once more, in the same shipped plugin: `attributionParams` in
+  `claude-code-plugin/hooks/lib.mjs`. It turns C0/DEL/C1 into spaces in the optional
+  `UT_CC_UNIT` / `UT_CC_ROLE` labels, then clips at 128, before they ride on every authorize as
+  `params.unit` / `params.role` — operator-set text that a server may show back to an operator.
 
 **THE INVENTORY'S SCOPE IS DECLARED HERE, and the guard matches this sentence.** It covers
 `packages/*/src` — the TypeScript build inputs, which are what `files: ["dist"]` publishes — plus

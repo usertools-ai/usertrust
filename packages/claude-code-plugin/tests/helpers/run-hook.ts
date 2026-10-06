@@ -9,16 +9,22 @@ export interface HookRunResult {
 /**
  * Run a hook script the way Claude Code does: spawn node, write the JSON
  * payload to stdin, collect stdout/stderr and the exit code. Promisified
- * execFile has no `input` option, hence spawn.
+ * execFile has no `input` option, hence spawn. The plugin's own `UT_*`
+ * variables are never inherited from the shell running the tests (a developer
+ * with `UT_CC_MODE=enforce` exported would otherwise flip every mode-dependent
+ * test): each test passes the ones it means.
  */
 export function runHook(
 	hookPath: string,
 	input: unknown,
 	env: Record<string, string>,
 ): Promise<HookRunResult> {
+	const inherited = Object.fromEntries(
+		Object.entries(process.env).filter(([name]) => !name.startsWith("UT_")),
+	);
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, [hookPath], {
-			env: { ...process.env, ...env },
+			env: { ...inherited, ...env },
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		let stdout = "";

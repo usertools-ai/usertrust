@@ -104,6 +104,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
+	attributionParams,
 	clearPending,
 	isAlreadySettled,
 	isUnknownRoute,
@@ -1500,6 +1501,7 @@ async function postGroup({
 					agent_id: agentId,
 					agent_type: agentType,
 					messages: ids.length,
+					...attributionParams(),
 				},
 				actor: `claude-code:${sessionId}:${agentType}:${agentId}`,
 				...(key === undefined ? {} : { idempotencyKey: key }),

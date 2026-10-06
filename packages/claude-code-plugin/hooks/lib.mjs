@@ -17,7 +17,16 @@
 // A transcript-mode hold file also names the transcript messages assigned to
 // it and their counts; transcript.mjs journals its outcome beside it
 // (<hold>.settling, <hold>.done), names listPending never returns.
-import { mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import {
+	appendFile,
+	mkdir,
+	readdir,
+	readFile,
+	rename,
+	stat,
+	unlink,
+	writeFile,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -76,6 +85,88 @@ const stateDir = stateRoot;
  */
 export function usageMode() {
 	return process.env.UT_CC_USAGE === "estimate" ? "estimate" : "transcript";
+}
+
+/**
+ * Whether the plugin may block a tool call. `watch` (the default) NEVER blocks,
+ * and makes no permission decision at all (see `proceed` in pre-tool-use.mjs): an
+ * over-budget or policy denial (402/403) is written down as a `would_block`
+ * record, and a call that could not be metered (the server is unreachable, times
+ * out, or answers something unusable) as a `gap` record — missed metering is
+ * visible, never silent. `UT_CC_MODE=enforce` opts in to blocking: denials are
+ * enforced, and a failed authorization blocks the call unless `UT_FAIL_OPEN=1`.
+ * Any other value runs watch-only, and the session-start announcement names the
+ * value it ignored.
+ */
+export function guardMode() {
+	return (process.env.UT_CC_MODE ?? "").trim().toLowerCase() === "enforce" ? "enforce" : "watch";
+}
+
+/** The `UT_CC_MODE` value that was set but is not a mode, if any. */
+function unrecognizedMode() {
+	const raw = (process.env.UT_CC_MODE ?? "").trim();
+	return raw === "" || ["watch", "enforce"].includes(raw.toLowerCase()) ? undefined : raw;
+}
+
+/** Where watch records go: one JSON object per line, beside the plugin's other state. */
+export function watchLogPath() {
+	return join(stateRoot(), "watch.jsonl");
+}
+
+/**
+ * The one line the session-start hook shows the user, so the mode is never a
+ * surprise: a watch-only plugin must not look like it is enforcing.
+ */
+export function modeAnnouncement() {
+	if (guardMode() === "enforce") {
+		return process.env.UT_FAIL_OPEN === "1"
+			? `usertrust: ENFORCING — over-budget tool calls are blocked. While the server is unreachable, calls proceed unmetered (UT_FAIL_OPEN=1), each recorded as a gap in ${watchLogPath()}.`
+			: "usertrust: ENFORCING — over-budget tool calls are blocked, and so is every tool call while the usertrust server is unreachable (UT_FAIL_OPEN=1 lets those through).";
+	}
+	const ignored = unrecognizedMode();
+	const note =
+		ignored === undefined
+			? "Set UT_CC_MODE=enforce to block over-budget calls."
+			: `UT_CC_MODE=${JSON.stringify(ignored.slice(0, 40))} is not a mode: use UT_CC_MODE=enforce to block over-budget calls.`;
+	return `usertrust: watch-only — nothing is blocked. Calls that would have been blocked, and calls that could not be metered, are recorded in ${watchLogPath()}. ${note}`;
+}
+
+/**
+ * Append one watch record (`would_block` or `gap`) as a JSON line, with the time,
+ * session, agent and tool. Never throws: a record that cannot be written is said
+ * on stderr, and the tool call proceeds either way.
+ */
+export async function recordWatchEvent(event) {
+	const line = JSON.stringify({ at: new Date().toISOString(), ...event });
+	try {
+		await mkdir(stateRoot(), { recursive: true });
+		await appendFile(watchLogPath(), `${line}\n`, { mode: 0o600 });
+	} catch (err) {
+		process.stderr.write(
+			`usertrust: could not write a watch record to ${watchLogPath()} (${err instanceof Error ? err.message : String(err)}): ${line}\n`,
+		);
+	}
+}
+
+/**
+ * Optional attribution sent in every authorize's params: the organisational unit
+ * and the role this Claude Code runs as, from `UT_CC_UNIT` / `UT_CC_ROLE`. C0/DEL/C1
+ * control characters become spaces BEFORE the clip at 128 (a label a server may
+ * show back to an operator); unset or blank values are not sent.
+ */
+export function attributionParams() {
+	const params = {};
+	for (const [key, variable] of [
+		["unit", "UT_CC_UNIT"],
+		["role", "UT_CC_ROLE"],
+	]) {
+		const raw = String(process.env[variable] ?? "");
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: replacing control chars is the point
+		const spaced = raw.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+		const value = spaced.trim().slice(0, 128);
+		if (value !== "") params[key] = value;
+	}
+	return params;
 }
 
 // Every hook gets a wall-clock budget well inside hooks.json's 15 s timeout, so

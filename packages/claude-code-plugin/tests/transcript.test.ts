@@ -313,12 +313,45 @@ const TOOL_INPUT_ESTIMATE = 4;
 const TOOL_OUTPUT_HOLD = 4096;
 
 describe("the normal path — the hold is the settlement vehicle", () => {
+	it("UT_CC_UNIT / UT_CC_ROLE ride on every authorize: a window's, and the remainder's at Stop", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(10, 200)));
+		const attribution = { UT_CC_UNIT: "platform", UT_CC_ROLE: "reviewer" };
+		const pre = await run("pre-tool-use.mjs", preInput("tu_1"), attribution);
+		expect(pre.code).toBe(0);
+		expect(authorizes()[0]?.body.params).toEqual({
+			hook: "PreToolUse",
+			tool_name: "Bash",
+			usageOrigin: "transcript",
+			agent_id: "main",
+			agent_type: "main",
+			messages: 1,
+			unit: "platform",
+			role: "reviewer",
+		});
+		expect((await run("post-tool-use.mjs", postInput("tu_1"), attribution)).code).toBe(0);
+		// A final answer with no tool call after it: no hold carries it, so Stop posts it.
+		await appendMain(responseEntries("msg_b", SONNET, u(3, 30)));
+		expect((await run("stop.mjs", stopInput(), attribution)).code).toBe(0);
+		expect(authorizes()).toHaveLength(2);
+		expect(authorizes()[1]?.body.params).toEqual({
+			hook: "Stop",
+			usageOrigin: "transcript",
+			agent_id: "main",
+			agent_type: "main",
+			messages: 1,
+			unit: "platform",
+			role: "reviewer",
+		});
+	});
+
 	it("PreToolUse assigns the window; PostToolUse settles THAT hold at its exact counts, no abort", async () => {
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(10, 200, 5000, 300)));
 		const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
 		expect(pre.code).toBe(0);
-		expect(JSON.parse(pre.stdout).hookSpecificOutput.permissionDecision).toBe("allow");
+		// Watch (the default) lets the call through with no permission decision.
+		expect(pre.stdout).toBe("");
 		const auth = authorizes()[0];
 		expect(auth?.body).toMatchObject({
 			model: SONNET,
@@ -492,7 +525,7 @@ describe("the remainder and leftover holds", () => {
 			return okResponder(path, body);
 		});
 		await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
-		const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
+		const pre = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
 		expect(pre.code).toBe(2);
 		expect((await readCursor()).assigned).toEqual({});
 		denyPre = false;
@@ -1379,7 +1412,7 @@ describe("with a server that honours keys, principal and release (usertrust #205
 		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
 		const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
 		expect(pre.code).toBe(0);
-		expect(JSON.parse(pre.stdout).hookSpecificOutput.permissionDecision).toBe("allow");
+		expect(pre.stdout).toBe("");
 		expect(authorizes().map((a) => a.status)).toEqual([409, 200]);
 		expect(authorizes()[1]?.body).not.toHaveProperty("idempotencyKey");
 		expect(authorizes()[1]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });

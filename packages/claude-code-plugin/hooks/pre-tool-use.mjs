@@ -1,7 +1,13 @@
 // PreToolUse: authorize a spend reservation before the tool executes.
-// Fail-closed: if governance cannot be reached (or answers with a malformed
-// body), the tool call is blocked (exit 2) unless UT_FAIL_OPEN=1. Output
-// contract adapted from the AGT Claude Code plugin's stdin-JSON
+//
+// Watch-only by default (`guardMode` in lib.mjs): this hook NEVER blocks a tool
+// call, and never approves one — it makes no permission decision at all (see
+// `proceed`). A 402/403 denial is written down as a `would_block` record; a call
+// that could not be metered (the server is unreachable, or answers with
+// something unusable) is written down as a `gap` record. With UT_CC_MODE=enforce
+// it blocks: a denial is enforced, and a failed authorization fails closed
+// (exit 2) unless UT_FAIL_OPEN=1, which lets the call through and records the
+// gap. Output contract adapted from the AGT Claude Code plugin's stdin-JSON
 // permissionDecision convention (MIT — see repository NOTICE).
 //
 // Content minimization: tool_input is truncated at 16 KiB before it is sent
@@ -27,12 +33,15 @@
 // earlier settle of exactly this window landed: it is accounted, and the tool is
 // held alone.
 import {
+	attributionParams,
 	estimateTokens,
+	guardMode,
 	isAlreadySettled,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
+	recordWatchEvent,
 	releaseHold,
 	serverCapabilities,
 	serverRequest,
@@ -61,12 +70,34 @@ function emit(decision, reason) {
 	);
 }
 
+const mode = guardMode();
+
+/**
+ * Let the call through. Enforce answers `allow`, as earlier releases did. Watch
+ * makes NO decision — exit 0 with nothing on stdout, which Claude Code reads as
+ * "no decision": the call goes through the user's normal permission flow. An
+ * `allow` would skip the permission prompt
+ * (https://code.claude.com/docs/en/hooks#pretooluse-decision-control), which a
+ * watch-only plugin must never do. The reason goes to stderr: on exit 0, Claude
+ * Code's debug log, which is also where an `allow` reason goes.
+ */
+function proceed(reason) {
+	if (mode === "enforce") emit("allow", reason);
+	else process.stderr.write(`${reason.slice(0, MAX_REASON_CHARS)}\n`);
+}
+
+// Known before anything can fail, so a gap record can always say whose call it was.
+let sessionId = "unknown";
+let agentId = "main";
+let toolName = "unknown";
+
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
-	const sessionId = input.session_id ?? "unknown";
+	sessionId = input.session_id ?? "unknown";
 	// session_id is shared across the parent and all subagents; agent_id (absent
 	// on older Claude Code) is what scopes a hold to the agent that made it.
-	const agentId = input.agent_id ?? "main";
+	agentId = input.agent_id ?? "main";
+	toolName = input.tool_name ?? "unknown";
 	const toolInput = JSON.stringify(input.tool_input ?? {}).slice(0, MAX_CONTENT_CHARS);
 	const content = process.env.UT_CC_SEND_CONTENT === "0" ? '{"redacted":true}' : toolInput;
 	const estimatedInputTokens = estimateTokens(toolInput);
@@ -109,13 +140,14 @@ try {
 					params: window
 						? {
 								hook: "PreToolUse",
-								tool_name: input.tool_name ?? "unknown",
+								tool_name: toolName,
 								usageOrigin: "transcript",
 								agent_id: agentId,
 								agent_type: prepared.agentType,
 								messages: window.ids.length,
+								...attributionParams(),
 							}
-						: { hook: "PreToolUse", tool_name: input.tool_name ?? "unknown" },
+						: { hook: "PreToolUse", tool_name: toolName, ...attributionParams() },
 					actor: window
 						? `claude-code:${sessionId}:${prepared.agentType}:${safeName(agentId, "main")}`
 						: `claude-code:${sessionId}`,
@@ -139,10 +171,7 @@ try {
 				: null;
 		if (response.status === 200 && json?.shadow === true) {
 			await prepared.abandon?.();
-			emit(
-				"allow",
-				`usertrust shadow mode: would_deny (${sanitizeReason(json.reason)}) — not enforced`,
-			);
+			proceed(`usertrust shadow mode: would_deny (${sanitizeReason(json.reason)}) — not enforced`);
 		} else if (response.status === 200) {
 			if (typeof json?.transferId !== "string" || json.transferId === "") {
 				throw new Error("malformed authorize response from governance server");
@@ -176,13 +205,25 @@ try {
 				throw err;
 			}
 			await prepared.commit?.(json.transferId);
-			emit("allow", `usertrust: reserved ${json.transferId} (${json.estimatedCost} ut)`);
+			proceed(`usertrust: reserved ${json.transferId} (${json.estimatedCost} ut)`);
 		} else if (response.status === 402 || response.status === 403) {
 			await prepared.abandon?.();
-			emit(
-				"deny",
-				`usertrust ${sanitizeReason(json?.error, "denied")}: ${sanitizeReason(json?.reason)}`,
-			);
+			const error = sanitizeReason(json?.error, "denied");
+			const reason = sanitizeReason(json?.reason);
+			if (mode === "enforce") {
+				emit("deny", `usertrust ${error}: ${reason}`);
+			} else {
+				await recordWatchEvent({
+					kind: "would_block",
+					session: sessionId,
+					agent: agentId,
+					tool: toolName,
+					status: response.status,
+					error: error.slice(0, MAX_REASON_CHARS),
+					reason: reason.slice(0, MAX_REASON_CHARS),
+				});
+				proceed(`usertrust watch-only: would have blocked (${error}: ${reason}) — not enforced`);
+			}
 		} else {
 			throw new Error(`unexpected governance response ${response.status}`);
 		}
@@ -194,14 +235,28 @@ try {
 		await prepared.release?.();
 	}
 } catch (err) {
-	if (process.env.UT_FAIL_OPEN === "1") {
-		emit(
-			"allow",
-			`usertrust unavailable — proceeding ungoverned (UT_FAIL_OPEN=1): ${err instanceof Error ? err.message : String(err)}`,
+	const why = sanitizeReason(err instanceof Error ? err.message : String(err)).slice(
+		0,
+		MAX_REASON_CHARS,
+	);
+	if (mode === "watch" || process.env.UT_FAIL_OPEN === "1") {
+		// The call proceeds unmetered: say so durably, so the gap is never silent.
+		await recordWatchEvent({
+			kind: "gap",
+			mode,
+			session: sessionId,
+			agent: agentId,
+			tool: toolName,
+			reason: why,
+		});
+		proceed(
+			mode === "watch"
+				? `usertrust watch-only: this call is not metered (${why}) — recorded as a gap`
+				: `usertrust unavailable — proceeding ungoverned (UT_FAIL_OPEN=1): ${why}`,
 		);
 	} else {
 		process.stderr.write(
-			`usertrust governance blocked this tool call because authorization failed closed: ${err instanceof Error ? err.message : String(err)}\n`,
+			`usertrust governance blocked this tool call because authorization failed closed: ${why}\n`,
 		);
 		process.exit(2);
 	}

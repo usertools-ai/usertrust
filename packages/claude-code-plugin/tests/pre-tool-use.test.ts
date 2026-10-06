@@ -37,7 +37,9 @@ function startFake(handler: (body: unknown) => { status: number; json: unknown }
 
 beforeEach(async () => {
 	stateDir = await mkdtemp(join(tmpdir(), "utcc-hook-"));
-	baseEnv = { UT_CC_STATE_DIR: stateDir, UT_SERVER_KEY: "k" };
+	// These tests pin the blocking contract, so they run in UT_CC_MODE=enforce; the
+	// watch-only default is pinned in mode.test.ts.
+	baseEnv = { UT_CC_STATE_DIR: stateDir, UT_SERVER_KEY: "k", UT_CC_MODE: "enforce" };
 });
 afterEach(() => {
 	server?.close();

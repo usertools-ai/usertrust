@@ -1,0 +1,334 @@
+import { mkdtemp, readdir, readFile, stat } from "node:fs/promises";
+import { createServer, type Server } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { runHook } from "./helpers/run-hook.js";
+
+const HOOKS = join(import.meta.dirname, "..", "hooks");
+const PRE = join(HOOKS, "pre-tool-use.mjs");
+const SESSION_START = join(HOOKS, "session-start.mjs");
+
+let server: Server | undefined;
+let stateDir: string;
+let baseEnv: Record<string, string>;
+let requests: Array<{ params?: Record<string, unknown> }>;
+
+function startFake(status: number, json: unknown): Promise<number> {
+	requests = [];
+	return new Promise((resolve) => {
+		server = createServer((req, res) => {
+			let raw = "";
+			req.on("data", (chunk) => {
+				raw += chunk;
+			});
+			req.on("end", () => {
+				requests.push(JSON.parse(raw) as { params?: Record<string, unknown> });
+				res.writeHead(status, { "content-type": "application/json" });
+				res.end(JSON.stringify(json));
+			});
+		});
+		server.listen(0, "127.0.0.1", () => {
+			const address = server?.address();
+			resolve(typeof address === "object" && address !== null ? address.port : 0);
+		});
+	});
+}
+
+beforeEach(async () => {
+	stateDir = await mkdtemp(join(tmpdir(), "utcc-mode-"));
+	// UT_CC_MODE, UT_FAIL_OPEN, UT_CC_UNIT and UT_CC_ROLE stay unset unless a test sets
+	// them (runHook inherits no UT_* variable); the estimate path keeps these runs off
+	// the transcript.
+	baseEnv = {
+		UT_CC_STATE_DIR: stateDir,
+		UT_SERVER_KEY: "k",
+		UT_CC_USAGE: "estimate",
+	};
+});
+afterEach(() => {
+	server?.close();
+	server = undefined;
+});
+
+const PAYLOAD = {
+	session_id: "sess1",
+	tool_name: "Bash",
+	tool_use_id: "tu_1",
+	tool_input: { command: "ls" },
+};
+
+interface HookOutput {
+	hookSpecificOutput: { permissionDecision: string; permissionDecisionReason: string };
+}
+
+const decision = (stdout: string) => (JSON.parse(stdout) as HookOutput).hookSpecificOutput;
+
+/**
+ * Watch's "let it through": exit 0 and NOTHING on stdout, which Claude Code reads
+ * as no decision (its normal permission flow applies). Never an `allow`, which
+ * would skip the user's permission prompt; never exit 2, which would block.
+ */
+function expectNoDecision(result: { code: number; stdout: string }) {
+	expect(result.code).toBe(0);
+	expect(result.stdout).toBe("");
+}
+
+/** Every watch record written so far, parsed; [] when the log does not exist. */
+async function watchRecords(): Promise<Array<Record<string, unknown>>> {
+	try {
+		const text = await readFile(join(stateDir, "watch.jsonl"), "utf-8");
+		return text
+			.split("\n")
+			.filter((line) => line !== "")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+	} catch {
+		return [];
+	}
+}
+
+const UNREACHABLE = "http://127.0.0.1:9";
+
+describe("the mode: watch-only unless UT_CC_MODE=enforce", () => {
+	// Driven through the hooks themselves (each is its own node process reading the
+	// environment), the way Claude Code runs them.
+	const modeOf = async (value: string | undefined) => {
+		const env = { ...baseEnv };
+		if (value !== undefined) env.UT_CC_MODE = value;
+		const result = await runHook(SESSION_START, {}, env);
+		const message = (JSON.parse(result.stdout) as { systemMessage: string }).systemMessage;
+		return message.startsWith("usertrust: ENFORCING")
+			? "enforce"
+			: message.startsWith("usertrust: watch-only")
+				? "watch"
+				: message;
+	};
+
+	it("the default is watch: unset, empty or any other value; enforce only for 'enforce'", async () => {
+		for (const value of [undefined, "", "watch", "enforcing", "block", "1"]) {
+			expect(await modeOf(value), String(value)).toBe("watch");
+		}
+		for (const value of ["enforce", " Enforce "]) {
+			expect(await modeOf(value), value).toBe("enforce");
+		}
+	});
+});
+
+describe("watch (the default) never blocks a tool call, and never approves one", () => {
+	for (const status of [402, 403]) {
+		it(`a ${status} denial makes no decision, never exit 2, and is recorded as would_block`, async () => {
+			const port = await startFake(status, { error: "budget_exceeded", reason: "need 10, have 2" });
+			const result = await runHook(PRE, PAYLOAD, {
+				...baseEnv,
+				UT_SERVER_URL: `http://127.0.0.1:${port}`,
+			});
+			expectNoDecision(result);
+			expect(result.stderr).toContain("would have blocked");
+			const records = await watchRecords();
+			expect(records).toHaveLength(1);
+			expect(records[0]).toMatchObject({
+				kind: "would_block",
+				session: "sess1",
+				agent: "main",
+				tool: "Bash",
+				status,
+				error: "budget_exceeded",
+				reason: "need 10, have 2",
+			});
+			expect(Date.parse(String(records[0]?.at))).not.toBeNaN();
+		});
+	}
+
+	it("an unreachable server makes no decision, never exit 2, and is recorded as a gap: time, session, agent, tool", async () => {
+		const result = await runHook(
+			PRE,
+			{ ...PAYLOAD, agent_id: "agent-A" },
+			{ ...baseEnv, UT_SERVER_URL: UNREACHABLE },
+		);
+		expectNoDecision(result);
+		expect(result.stderr).toContain("recorded as a gap");
+		const records = await watchRecords();
+		expect(records).toHaveLength(1);
+		expect(records[0]).toMatchObject({
+			kind: "gap",
+			mode: "watch",
+			session: "sess1",
+			agent: "agent-A",
+			tool: "Bash",
+		});
+		expect(Date.parse(String(records[0]?.at))).not.toBeNaN();
+		expect(String(records[0]?.reason)).not.toBe("");
+		// Private, like the rest of the plugin's durable state.
+		expect((await stat(join(stateDir, "watch.jsonl"))).mode & 0o777).toBe(0o600);
+	});
+
+	it("an unusable answer (a 200 without a transferId) makes no decision and is recorded as a gap", async () => {
+		const port = await startFake(200, { estimatedCost: 3 });
+		const result = await runHook(PRE, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expectNoDecision(result);
+		expect(await watchRecords()).toMatchObject([{ kind: "gap", tool: "Bash" }]);
+	});
+
+	it("a 200 reservation is held and recorded as usual, with NO decision: an allow would skip the permission prompt", async () => {
+		const port = await startFake(200, { transferId: "tx_1", estimatedCost: 3 });
+		const result = await runHook(PRE, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expectNoDecision(result);
+		expect(result.stderr).toContain("reserved tx_1");
+		// The hold is recorded for PostToolUse to settle, exactly as in enforce mode.
+		expect(await readdir(stateDir)).toEqual(["sess1__main__tu_1.json"]);
+		expect(await watchRecords()).toEqual([]);
+	});
+
+	it("a shadow answer (an evaluate_only server) makes no decision either", async () => {
+		const port = await startFake(200, { shadow: true, reason: "budget_exceeded" });
+		const result = await runHook(PRE, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expectNoDecision(result);
+		expect(result.stderr).toContain("would_deny");
+	});
+});
+
+describe("UT_CC_MODE=enforce still blocks", () => {
+	it("a 200 reservation is answered allow, as before", async () => {
+		const port = await startFake(200, { transferId: "tx_1", estimatedCost: 3 });
+		const result = await runHook(PRE, PAYLOAD, {
+			...baseEnv,
+			UT_CC_MODE: "enforce",
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expect(result.code).toBe(0);
+		expect(decision(result.stdout).permissionDecision).toBe("allow");
+		expect(decision(result.stdout).permissionDecisionReason).toContain("tx_1");
+	});
+
+	it("a 402 is denied, and nothing is recorded", async () => {
+		const port = await startFake(402, { error: "budget_exceeded", reason: "need 10, have 2" });
+		const result = await runHook(PRE, PAYLOAD, {
+			...baseEnv,
+			UT_CC_MODE: "enforce",
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expect(decision(result.stdout).permissionDecision).toBe("deny");
+		expect(await watchRecords()).toEqual([]);
+	});
+
+	it("an unreachable server blocks the call (exit 2) and writes no gap", async () => {
+		const result = await runHook(PRE, PAYLOAD, {
+			...baseEnv,
+			UT_CC_MODE: "enforce",
+			UT_SERVER_URL: UNREACHABLE,
+		});
+		expect(result.code).toBe(2);
+		expect(result.stderr).toContain("failed closed");
+		expect(await watchRecords()).toEqual([]);
+	});
+
+	it("with UT_FAIL_OPEN=1 an unreachable server lets the call through, recorded as a gap", async () => {
+		const result = await runHook(PRE, PAYLOAD, {
+			...baseEnv,
+			UT_CC_MODE: "enforce",
+			UT_FAIL_OPEN: "1",
+			UT_SERVER_URL: UNREACHABLE,
+		});
+		expect(result.code).toBe(0);
+		expect(decision(result.stdout).permissionDecisionReason).toContain("ungoverned");
+		expect(await watchRecords()).toMatchObject([{ kind: "gap", mode: "enforce", tool: "Bash" }]);
+	});
+});
+
+describe("the mode is announced to the user at session start", () => {
+	const announce = async (env: Record<string, string>) => {
+		const result = await runHook(
+			SESSION_START,
+			{ hook_event_name: "SessionStart", source: "startup" },
+			{
+				...baseEnv,
+				...env,
+			},
+		);
+		expect(result.code).toBe(0);
+		return (JSON.parse(result.stdout) as { systemMessage: string }).systemMessage;
+	};
+
+	it("hooks.json runs session-start.mjs on SessionStart", async () => {
+		const manifest = JSON.parse(await readFile(join(HOOKS, "hooks.json"), "utf-8")) as {
+			hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+		};
+		const commands = (manifest.hooks.SessionStart ?? []).flatMap((entry) =>
+			entry.hooks.map((hook) => hook.command),
+		);
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: Claude Code expands ${CLAUDE_PLUGIN_ROOT} itself
+		expect(commands).toEqual(['node "${CLAUDE_PLUGIN_ROOT}/hooks/session-start.mjs"']);
+	});
+
+	it("watch (default): 'nothing is blocked', where the records go, and how to enforce", async () => {
+		const message = await announce({});
+		expect(message).toContain("usertrust: watch-only — nothing is blocked");
+		expect(message).toContain(join(stateDir, "watch.jsonl"));
+		expect(message).toContain("UT_CC_MODE=enforce");
+		expect(message).not.toContain("ENFORCING");
+	});
+
+	it("an unrecognised UT_CC_MODE is named, so a typo never looks like enforcement", async () => {
+		const message = await announce({ UT_CC_MODE: "enforcing" });
+		expect(message).toContain("watch-only — nothing is blocked");
+		expect(message).toContain('UT_CC_MODE="enforcing" is not a mode');
+	});
+
+	it("enforce: ENFORCING, and what an outage does with and without UT_FAIL_OPEN", async () => {
+		const strict = await announce({ UT_CC_MODE: "enforce" });
+		expect(strict).toContain("usertrust: ENFORCING");
+		expect(strict).toContain("every tool call while the usertrust server is unreachable");
+		const failOpen = await announce({ UT_CC_MODE: "enforce", UT_FAIL_OPEN: "1" });
+		expect(failOpen).toContain("usertrust: ENFORCING");
+		expect(failOpen).toContain("UT_FAIL_OPEN=1");
+		expect(failOpen).not.toContain("watch-only");
+	});
+});
+
+describe("attribution: unit and role", () => {
+	it("are sent in the authorize params when UT_CC_UNIT / UT_CC_ROLE are set", async () => {
+		const port = await startFake(200, { transferId: "tx_1", estimatedCost: 3 });
+		const result = await runHook(PRE, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+			UT_CC_UNIT: "platform",
+			UT_CC_ROLE: "release\nengineer",
+		});
+		expect(result.code).toBe(0);
+		expect(requests[0]?.params).toMatchObject({
+			hook: "PreToolUse",
+			tool_name: "Bash",
+			unit: "platform",
+			role: "release engineer",
+		});
+	});
+
+	it("are absent when unset or blank", async () => {
+		const port = await startFake(200, { transferId: "tx_1", estimatedCost: 3 });
+		await runHook(PRE, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+			UT_CC_ROLE: "   ",
+		});
+		expect(requests[0]?.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+	});
+
+	it("each value is bounded at 128 characters", async () => {
+		const port = await startFake(200, { transferId: "tx_1", estimatedCost: 3 });
+		await runHook(PRE, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+			UT_CC_UNIT: "u".repeat(500),
+		});
+		expect(requests[0]?.params?.unit).toBe("u".repeat(128));
+	});
+});

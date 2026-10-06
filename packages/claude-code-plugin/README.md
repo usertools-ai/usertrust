@@ -9,6 +9,13 @@ and Stop/SubagentStop post whatever no hold carried and terminate anything left
 hanging. Nothing is routed through usertrust: it only reads what Claude Code
 already recorded.
 
+**Watch-only by default.** Installed, the plugin never blocks a tool call, and
+never approves one either: Claude Code's own permission settings apply exactly as
+they would without it. A call the server refuses (over budget, or denied by
+policy) is written down as one that would have been blocked, and a call that
+could not be metered (the server is unreachable, say) as a gap. Set
+`UT_CC_MODE=enforce` to block — see [Modes](#modes-watch-only-by-default).
+
 ## Install
 
 ```
@@ -28,17 +35,24 @@ export UT_SERVER_URL="http://127.0.0.1:4519"
 export UT_SERVER_KEY="<the key from step 1>"
 ```
 
+4. Start Claude Code. Each session opens with a line naming the mode, for example
+   `usertrust: watch-only — nothing is blocked. …`. To block over-budget tool
+   calls instead, also `export UT_CC_MODE=enforce` before launching it.
+
 ## Environment variables
 
 | Variable             | Default                  | Meaning                                          |
 | -------------------- | ------------------------ | ------------------------------------------------ |
 | `UT_SERVER_URL`      | `http://127.0.0.1:4519`  | Base URL of your usertrust-server                |
 | `UT_SERVER_KEY`      | (empty)                  | Tenant bearer key                                |
+| `UT_CC_MODE`         | `watch`                  | `enforce` blocks over-budget calls; any other value is watch-only (see [Modes](#modes-watch-only-by-default)) |
+| `UT_CC_UNIT`         | unset                    | Sent as `params.unit` on every authorize         |
+| `UT_CC_ROLE`         | unset                    | Sent as `params.role` on every authorize         |
 | `UT_CC_MODEL`        | `claude-sonnet-4-6`      | Model for an estimate hold before any transcript model is known |
 | `UT_CC_USAGE`        | `transcript`             | `estimate` settles per-call estimates only       |
 | `UT_CC_STATE_DIR`    | `~/.claude/usertrust-cc` | Pending holds, and what was already posted (keep it; see below) |
 | `UT_CC_SEND_CONTENT` | `1`                      | `0` sends `{"redacted":true}` instead of content |
-| `UT_FAIL_OPEN`       | unset                    | `1` allows tool calls when governance is down (see below) |
+| `UT_FAIL_OPEN`       | unset                    | Enforce mode only: `1` lets tool calls through when governance is down |
 
 > **Caution:** `UT_SERVER_URL` and `UT_SERVER_KEY` are read from the environment,
 > and every PreToolUse authorization sends the tenant key (and tool input as
@@ -92,7 +106,10 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   every transcript-mode authorize also carries `{ id: <agentId>, type:
   <agentType>, origin: "claude-code:<session>" }`, which the server writes onto
   every record the hold leaves and onto its receipt. An older server keeps the
-  attribution request-side only.
+  attribution request-side only. `UT_CC_UNIT` and `UT_CC_ROLE`, when set, ride on
+  every authorize — PreToolUse's, and the remainder's at Stop/SubagentStop — as
+  `params.unit` and `params.role`: control characters become spaces, each is cut
+  at 128 characters, and a blank value is not sent.
 - **Exactly once, on a server that honours idempotency keys.** Every authorize
   that carries responses goes in under the VEHICLE KEY of exactly those responses
   (`cc:` + 48 hex, a hash of the session, the agent and the sorted response ids —
@@ -165,23 +182,78 @@ for them is a separate piece, not part of this plugin.
 usertrust governs cooperative agents on a machine you control; it is not a
 sandbox against a process that wants to rewrite its own transcript.
 
-## Fail-closed semantics
+## Modes: watch-only by default
 
-If the governance server is unreachable, times out, answers 5xx, or returns a
-malformed body, the PreToolUse hook exits 2 and the tool call is **blocked**.
-Set `UT_FAIL_OPEN=1` to invert this: the call proceeds with an explicit
-"proceeding ungoverned" warning. `UT_FAIL_OPEN=1` is recommended for interactive
-sessions where availability matters more than enforcement — a stopped server then
-never blocks your session, and the usage it misses stays in the transcript to be
-posted at a later settle point. Leave it unset when the budget must be enforced.
-Policy (403) and budget (402) denials are always enforced denials, not failures.
-PostToolUse/Stop/SubagentStop never block — the tool already ran; an estimate hold
-whose settle fails is left on disk for Stop cleanup, and the server's pending-TTL
-sweep voids anything orphaned.
+`UT_CC_MODE` decides what PreToolUse — the one hook that can block — does with the
+server's answer. Reservations, settlement and everything above work the same in
+both modes.
 
-If the server runs in `evaluate_only` mode, denials come back as shadow
-responses: the hook allows the call and surfaces a "would_deny" reason —
-nothing is reserved or settled for shadow decisions.
+| The server's answer at PreToolUse | watch (the default) | enforce (`UT_CC_MODE=enforce`) |
+| --- | --- | --- |
+| A reservation (200) | No decision: your permission settings apply | `allow` |
+| Over budget or denied by policy (402/403) | No decision, and a `would_block` record | `deny`: the call is blocked |
+| No usable answer: unreachable, a timeout, any other status, a malformed body | No decision, and a `gap` record | Blocked (exit 2). With `UT_FAIL_OPEN=1`: `allow`, and a `gap` record |
+| A shadow answer from an `evaluate_only` server | No decision | `allow` |
+
+**Watch** never blocks a tool call, and never approves one: PreToolUse exits 0
+without a permission decision, which Claude Code reads as "no decision" — the call
+goes through its normal permission flow. A hook's `allow` would skip the
+permission prompt
+([PreToolUse decision control](https://code.claude.com/docs/en/hooks#pretooluse-decision-control)),
+so watch never sends one. `UT_FAIL_OPEN` has no effect in watch mode. What the
+plugin would have said goes to stderr, which Claude Code keeps in its
+[debug log](https://code.claude.com/docs/en/hooks#debug-hooks). Watch changes what
+the plugin decides, not what the server records: past the budget the server still
+refuses to authorize, so that usage is not on the ledger (the remainder posted at
+Stop is refused too — see *Denied usage* above), and the `would_block` records
+are where it shows.
+
+**Enforce** blocks, as earlier releases did by default. A budget (402) or policy
+(403) denial blocks the call, whatever `UT_FAIL_OPEN` says. If the server cannot
+answer usably, the hook exits 2 and the call is **blocked** — unless
+`UT_FAIL_OPEN=1`: then the call proceeds, answered `allow` with a "proceeding
+ungoverned" reason, and the miss is written down as a `gap` record.
+`UT_FAIL_OPEN=1` suits interactive sessions where availability matters more than
+enforcement — a stopped server then never blocks your session, and the usage it
+misses stays in the transcript to be posted at a later settle point. Leave it
+unset when the budget must be enforced. A reservation, and a shadow answer, are
+answered `allow`, which skips Claude Code's permission prompt for that call.
+Upgrading from a release where blocking was the default: set
+`UT_CC_MODE=enforce` to keep it.
+
+In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran;
+an estimate hold whose settle fails is left on disk for Stop cleanup, and the
+server's pending-TTL sweep voids anything orphaned. If the server runs in
+`evaluate_only` mode, denials come back as shadow responses: nothing is reserved
+or settled for them, and the would_deny reason goes to the debug log.
+
+**The mode is announced.** At every session start, including a resume, `/clear`
+and a compaction, the plugin shows you which mode it runs in as a hook
+`systemMessage`, the field Claude Code shows to the user. For example:
+
+```
+usertrust: watch-only — nothing is blocked. Calls that would have been blocked, and calls that could not be metered, are recorded in /Users/you/.claude/usertrust-cc/watch.jsonl. Set UT_CC_MODE=enforce to block over-budget calls.
+```
+
+A `UT_CC_MODE` value that is not a mode (`enforcing`, say) runs watch-only, and the
+announcement names it, so a typo never looks like enforcement.
+
+**The records** go to `watch.jsonl` in the state dir (`$UT_CC_STATE_DIR`, by
+default `~/.claude/usertrust-cc`), one JSON object per line, appended and never
+trimmed:
+
+```json
+{"at":"2026-10-06T10:00:00.000Z","kind":"would_block","session":"<session id>","agent":"main","tool":"Bash","status":402,"error":"budget_exceeded","reason":"<the server's reason>"}
+{"at":"2026-10-06T10:00:05.000Z","kind":"gap","mode":"watch","session":"<session id>","agent":"main","tool":"Bash","reason":"fetch failed"}
+```
+
+`agent` is the subagent's id (`main` for the parent); a `gap` written in enforce
+mode (only with `UT_FAIL_OPEN=1`) says `"mode":"enforce"`. In transcript mode a gap
+loses no usage by itself: the responses the hold would have carried stay in the
+transcript to be posted at a later settle point. In estimate mode
+(`UT_CC_USAGE=estimate`) the call's estimate is not recorded. A record that cannot
+be written goes to stderr instead, and the call proceeds either way. Nothing reads
+the file back, so deleting it is safe — unlike the rest of the state dir.
 
 ## Content flow and audit
 
