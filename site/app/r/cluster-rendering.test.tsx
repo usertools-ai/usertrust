@@ -544,9 +544,12 @@ function classesAt(html: string, attr: string): string[] {
 }
 
 /**
- * A " · " list's wrap contract: every name is one nowrap span carrying its
- * trailing separator, and the ONLY text outside those spans is the single
- * space after each "·" — so the browser can break between names and nowhere else.
+ * A " · " list's wrap contract: every name is one atomic inline-block carrying
+ * its trailing separator, and the ONLY text outside those units is the single
+ * space after each "·" — so a line breaks between names, and a name moves to
+ * the next line whole. A name wider than the whole column wraps inside itself
+ * (`max-w-full` + `overflow-wrap: anywhere`) instead of overflowing the card,
+ * which a nowrap unit cannot do.
  */
 function assertUnbreakableList(
 	dd: string,
@@ -555,11 +558,15 @@ function assertUnbreakableList(
 	where: string,
 ) {
 	const units = [...dd.matchAll(/<span class="([^"]*)" data-list-unit="">([^<]*)<\/span>/g)];
-	assert.equal(units.length, names.length, `${where}: one nowrap unit per name`);
+	assert.equal(units.length, names.length, `${where}: one atomic unit per name`);
 	units.forEach((unit, index) => {
+		const classes = unit[1].split(/\s+/);
+		for (const rule of ["inline-block", "max-w-full", "[overflow-wrap:anywhere]"]) {
+			assert.ok(classes.includes(rule), `${where}: unit ${index} has ${rule}`);
+		}
 		assert.ok(
-			unit[1].split(/\s+/).includes("whitespace-nowrap"),
-			`${where}: unit ${index} is nowrap`,
+			!classes.includes("whitespace-nowrap"),
+			`${where}: unit ${index} is not nowrap (a nowrap unit has no narrow fallback)`,
 		);
 		const more = index < names.length - 1 || tail !== undefined;
 		assert.equal(unit[2], more ? `${names[index]} ·` : names[index], `${where}: unit ${index}`);
@@ -597,7 +604,11 @@ test("MOBILE: each model and provider name is an unbreakable unit; wrapping only
 		const tail = data.models.includes("custom") ? CUSTOM_MODEL_MEANING : undefined;
 		if (data.models.length > 0) {
 			const dd = element(before, testid("models"));
-			assert.ok(!/break-all|break-words|wrap-anywhere/.test(dd), `${id}: no forced mid-word break`);
+			const own = classesAt(dd, testid("models")).join(" ");
+			assert.ok(
+				!/break-all|break-words|wrap-anywhere|overflow-wrap/.test(own),
+				`${id}: the list itself forces no break`,
+			);
 			assertUnbreakableList(dd, catalog, tail, `${id} models`);
 			assert.equal(textOf(dd), modelsLine(data.models), `${id}: still reads as modelsLine`);
 		}
@@ -609,7 +620,7 @@ test("MOBILE: each model and provider name is an unbreakable unit; wrapping only
 	}
 });
 
-test("MOBILE: the custom-model sentence stays prose and wraps; only catalog names are nowrap", () => {
+test("MOBILE: the custom-model sentence stays prose and wraps; only catalog names are atomic units", () => {
 	const live = applyClusterVector({
 		...LIVE_SHAPED_CLUSTER_VECTOR,
 		receipt: (r) => {
