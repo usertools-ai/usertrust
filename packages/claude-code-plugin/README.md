@@ -1,8 +1,13 @@
 # usertrust-claude-code
 
 Ledger-backed governance for Claude Code: every tool call gets a two-phase spend
-authorization against a [usertrust-server](../server) you host. PreToolUse reserves,
-PostToolUse settles, Stop/SubagentStop abort anything left hanging.
+authorization against a [usertrust-server](../server) you host, and the session's
+REAL token usage — per model, per subagent — is settled from Claude Code's own
+transcripts. PreToolUse reserves a hold that covers the usage recorded since the
+last one plus the upcoming tool, PostToolUse settles that hold at the real counts,
+and Stop/SubagentStop — and SessionEnd, when the session ends — post
+whatever no hold carried and terminate anything left hanging. Nothing is routed
+through usertrust: it only reads what Claude Code already recorded.
 
 ## Install
 
@@ -29,25 +34,223 @@ export UT_SERVER_KEY="<the key from step 1>"
 | -------------------- | ------------------------ | ------------------------------------------------ |
 | `UT_SERVER_URL`      | `http://127.0.0.1:4519`  | Base URL of your usertrust-server                |
 | `UT_SERVER_KEY`      | (empty)                  | Tenant bearer key                                |
-| `UT_CC_MODEL`        | `claude-sonnet-4-6`      | Model name used for cost estimation              |
-| `UT_CC_STATE_DIR`    | `$TMPDIR/usertrust-cc`   | Directory for pending-hold state files           |
+| `UT_CC_MODEL`        | `claude-sonnet-4-6`      | Model for an estimate hold before any transcript model is known |
+| `UT_CC_USAGE`        | `transcript`             | `estimate` settles per-call estimates only       |
+| `UT_CC_STATE_DIR`    | `~/.claude/usertrust-cc` | Pending holds, and what was already posted (keep it; see below) |
 | `UT_CC_SEND_CONTENT` | `1`                      | `0` sends `{"redacted":true}` instead of content |
-| `UT_FAIL_OPEN`       | unset                    | `1` allows tool calls when governance is down    |
+| `UT_FAIL_OPEN`       | unset                    | `1` allows tool calls when governance is down (see below) |
 
 > **Caution:** `UT_SERVER_URL` and `UT_SERVER_KEY` are read from the environment,
 > and every PreToolUse authorization sends the tenant key (and tool input as
 > message content) to that URL — point them only at a `usertrust-server` you host
 > and control, never a third-party or untrusted endpoint.
 
+## Real usage: what is settled, and how
+
+Claude Code records every API response's `usage` block (fresh input, cache read,
+cache write, output — four disjoint counts) and its model in the session
+transcript it passes to hooks as `transcript_path`. Subagents write their own
+transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
+`.meta.json` naming the agent type.
+
+- **The hold is the settlement vehicle.** At PreToolUse the agent's new complete
+  responses — those of the earliest one's model, the *window* — are assigned to the
+  hold being authorized. The hold is sized to cover them PLUS the usual tool
+  estimate, so the budget check before the call still covers the call — and never
+  below their real cost, which would cap what the settle can post. On a server
+  that publishes `authorize-cache-tiers`, each cache tier is estimated apart and
+  held at its own rate, as settle prices it. On any other, the counts go in as one
+  sum, held at the server's higher input/cache-write rate: never under the real
+  cost, but well over it for a window heavy in cache reads (below). PostToolUse
+  then SETTLES that hold, exactly once, at the window's real counts — on the
+  normal path no hold is ever aborted. A tool call whose window is empty (a
+  parallel call in the same response, say) is given back (below).
+- **The remainder.** What no hold carried — another model's responses, a final
+  answer with no tool call — is posted at SubagentStop (that subagent) and Stop
+  (the parent and every subagent, so one whose SubagentStop never fired is still
+  accounted), one authorize→settle per model. Before that, Stop SETTLES a leftover
+  hold that has usage assigned (its tool was interrupted, but the model turn was
+  billed); after it, Stop gives back the holds that have none.
+- **The final answer.** Claude Code writes the transcript asynchronously, so at
+  Stop the turn's final response may not be in it yet — and after the last turn
+  no later hook would ever post it. So Stop and SubagentStop first wait, at most
+  about 2 seconds, until the transcript holds the response their input names
+  (`last_assistant_message`), and say so on stderr when they give up; SessionEnd
+  then scans once more. Every post goes through the same claims, so what Stop
+  posted is never posted again. A response that reaches the transcript only after
+  that wait is not posted in a session that never fires SessionEnd (a crash, a
+  kill), or whose SessionEnd runs out of its budget first (below).
+- **SessionEnd has 1.5 seconds.** Claude Code gives SessionEnd hooks a 1.5 s
+  budget by default, and a plugin's own hook `timeout` does not raise it
+  ([hooks reference](https://code.claude.com/docs/en/hooks#sessionend)). The
+  plugin sizes SessionEnd's work to that budget — its calls, its claims, and its
+  wait for a Stop still holding an agent's lock (a fifth of the budget) — and
+  gives up cleanly instead of being killed mid-write. Against a slow server it may
+  post nothing, and a final answer that Stop could not find then goes unposted:
+  an under-count, never a double charge. `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`
+  (milliseconds) raises the budget, and the plugin uses up to 10 s of it. The
+  `timeout` in hooks.json does not raise the budget: it bounds the hook once the
+  variable has (before Claude Code v2.1.268, a hook without its own timeout kept
+  1.5 s even then).
+- **Empty holds are given back.** A hold no usage was assigned to (a parallel tool
+  call in the same response, say) is RELEASED at PostToolUse: no charge, and not a
+  failure. A server without `/v1/release` gets the old settle at zero usage, which
+  costs its 1-unit settle floor.
+- **What is counted.** One count per API response (`message.id`, which is
+  one-to-one with the entry's `requestId`): the largest value of each count across
+  its entries, so a response streamed over several entries is never added twice
+  and a later entry can never lower it; a response still streaming waits, and one
+  that never completes (an interrupted stream) is never posted.
+  `cacheReadTokens` / `cacheWriteTokens` are sent separately from `inputTokens`, so
+  each tier is priced at its own rate. The counts are the provider's own, so
+  settles are `usageSource: "provider"`; the authorize carries
+  `params.usageOrigin: "transcript"`.
+- **The model, exactly as written.** The authorize names the response's model id
+  verbatim (`llama3.3:70b`, `claude-sonnet-4@20250514`), because the server prices
+  it by exact lookup — your `customRates` included. A response first written as
+  Claude Code's `<synthetic>` placeholder is priced as the model a later entry of
+  it names. An id that is not printable text (control or format characters,
+  spaces, over 256 characters) is sent as `unknown`, never rewritten into another.
+- **Forked subagents.** A forked subagent's transcript begins with a copy of its
+  ancestor's entries — the same response ids — so the plugin posts each response
+  id from ONE agent only: the first agent to claim it (a file per id under
+  `$UT_CC_STATE_DIR/transcripts/claims`). The fork's own responses are its own;
+  what it inherited was posted by the agent that made it — or, if the fork got
+  there first, by the fork, never by both.
+- **Attribution.** A transcript authorize's actor is
+  `claude-code:<session>:<agentType>:<agentId>` (`main:main` for the parent), with
+  `agent_id` / `agent_type` in its params. On a server that records a `principal`,
+  every transcript-mode authorize also carries `{ id: <agentId>, type:
+  <agentType>, origin: "claude-code:<session>" }`, which the server records on
+  every audit record the call leaves (and, ledger-backed, as tags on its
+  transfers); it is not echoed in the settle response. An older server keeps the
+  attribution request-side only.
+- **Exactly once, on a server that honours idempotency keys.** Every authorize
+  that carries responses goes in under the VEHICLE KEY of exactly those responses
+  (`cc:` + 48 hex, a hash of the session, the agent and the sorted response ids —
+  the ids themselves never leave the machine), and the server charges a key at
+  most once. A settle whose outcome is unknown — a 5xx, no answer, a `404` after a
+  server restart, a receipt that says `settled: false`, a hook that died mid-settle
+  — leaves its responses UNRESOLVED: the next Stop/SubagentStop retries them as
+  the same vehicle (same key, same responses, same counts). The server answers
+  `409 already_settled` if the first settle landed, or charges them now; it never
+  charges them twice. An unresolved vehicle is never folded into a new window, and
+  waits for a server that honours keys rather than be retried without one. A
+  remainder is parked this way before its call, so a hook killed mid-call leaves
+  it to be retried too. A `dryRun` server does not claim keys (it has no ledger to
+  anchor them), so against one the plugin keeps the at-most-once rule below.
+- **At most once, otherwise.** Every way a response can be posted — a tool call's
+  hold, the remainder — takes its responses from ONE function, which posts a
+  response only under a claim it has just made (or that this cursor recorded
+  making). A claim that already exists is never posted again, whoever made it:
+  another agent, this agent under a cursor since removed or reset, or a hook that
+  died between claiming and saving. Nothing about such a claim says whether it was
+  posted, so the worst a lost record does is under-count, with a note. Per
+  (session, agent) a cursor records which response ids are bound to a hold or a
+  remainder, accounted or denied — bound BEFORE any call that could post them. A
+  binding whose outcome was never recorded (a hook killed just after its settle
+  went out, or just before) may have posted, so its responses are never posted
+  again: charged once, or not at all. An id is released only when the server
+  proved nothing was posted (the authorize failed, or the settle answered 400 — or
+  404, without a key). Without a
+  key, a settle that answers 5xx or not at all may have posted, so its ids stay
+  claimed and the hold is given back for hygiene: an outage can lose usage, but
+  never post it twice. A cursor that exists but cannot be read is never treated as
+  empty — transcript usage is not posted until it is fixed or removed, and tool
+  holds are given back meanwhile, not settled at the estimate. Removing it never
+  posts anything twice: the agent's claims still stand.
+- **What the server honours** is read from its unauthenticated `/v1/health`
+  `capabilities` once per hook, and never cached on disk: an older server strips
+  request fields it does not know, so it would accept a key and silently ignore
+  it. When the read fails, nothing is assumed either way: no key or principal is
+  sent, and a hold is still released — falling back to abort only on a server
+  that has no release route — with a note on stderr. **Today's usertrust-server
+  publishes `principal` only:** until one publishes `idempotency-key`, the plugin
+  runs the at-most-once path above — it never posts usage twice, and a settle lost
+  to an outage can go unrecorded.
+- **Denied usage.** If the remainder's authorize is refused (402 budget, 403
+  policy, 429 anomaly), those responses are marked `denied` and never retried, and
+  a stderr note gives the token counts that could not be recorded.
+- **Sticky estimate mode.** If an agent's transcript cannot be read at any hook,
+  or a hook names no `transcript_path`, that agent switches to the per-call
+  estimate for the rest of the session — settled as `usageSource: "estimated"`,
+  with a stderr note giving the reason — and its transcript is never posted
+  again, so no usage is ever counted both as an estimate and as real. The switch
+  is recorded OUTSIDE the agent's cursor (`$UT_CC_STATE_DIR/transcripts/estimate/`)
+  before any estimate is settled, so losing the cursor cannot undo it; if it
+  cannot be recorded, the hold is given back instead. `UT_CC_USAGE=estimate` uses
+  the estimate for every agent, and records that the same way, so a session
+  resumed without it posts nothing it already settled at the estimate. A subagent
+  inherits the estimate mode of any agent of its session: a forked subagent's
+  transcript begins with a copy of its ancestor's responses, which an agent in
+  estimate mode never claims, and which agent a fork copied is recorded nowhere. A
+  hold is settled at the estimate ONLY in these cases: when the plugin's own state
+  is unusable for now, the hold is given back, because the transcript still holds
+  that usage.
+- **Private, durable state.** Cursors, claims and estimate-mode records live in
+  `$UT_CC_STATE_DIR/transcripts/`, created `0700`; if that directory is not a real
+  directory owned by you without group or other write access, transcript
+  accounting waits: nothing is posted, and holds are given back rather than
+  settled at the estimate — the first settle point that can use the directory
+  posts that usage, once. The default is
+  `~/.claude/usertrust-cc` (`$CLAUDE_CONFIG_DIR/usertrust-cc` when that is set),
+  beside Claude Code's own transcripts — not a temp dir, which the OS may purge.
+  The state records when it was first made (`transcripts/since`), and a transcript
+  entry written before that is never posted: a session resumed after upgrading
+  from the estimate-only plugin, or after the state dir was deleted, does not post
+  its history again (entries carry Claude Code's timestamp; one without a
+  timestamp counts as after it). After a host crash or power loss (not a process
+  crash), usage posted in the moments before it can be posted again, because the
+  plugin's state files are not fsynced. Idempotency keys on the server (#205) are
+  the fix. **Restoring an older copy of the state dir can
+  re-post what was posted after that copy was made.** The claim files are never
+  pruned, and they are what keeps a message from being posted twice: one small
+  file per response. A message whose claim cannot be made is not posted, and a
+  stderr note says so.
+- **Hook time budget.** Each hook gives up after about 10 seconds (the hooks'
+  timeout is 15), SessionEnd after its own budget (above): its calls never run
+  past that, claiming new responses stops early enough to leave them time, and
+  Stop keeps time back to give back holds; whatever a hook could not reach is
+  posted at the next settle point.
+- **Bounded reads.** A transcript is read 1 MiB at a time, and one hook reads at
+  most about 64 MiB of it — a long unread tail is read on by the next hooks. A
+  line over 16 MiB is skipped unread, with a note (an entry with usage never comes
+  near that size).
+- **Content.** Transcripts are read locally and only token counts, model names and
+  agent ids/types are sent to your server — never transcript content.
+
+**Declared costs.** On a server without `/v1/release`, every hold is settled, so a
+tool call with an empty window costs that server's 1-unit settle floor: a
+deliberate over-count of at most one unit per extra parallel tool call (and per
+tool call while the plugin's state is unusable), never an under-count.
+Responses of a second model cost one extra authorize→settle at the
+next Stop. On an older server, attribution is request-side only and an outage can
+lose usage, as above. On a server without `authorize-cache-tiers`, a window's hold
+reserves its cache reads at the cache-write rate (about 10x a typical window's
+real input-side cost): near the budget that hold can be refused (402), and a
+refused window is usage already spent, marked denied.
+
+**Live totals.** The plugin settles at tool boundaries and at Stop. For a live
+running total, Claude Code's own OpenTelemetry metrics are the source; a collector
+for them is a separate piece, not part of this plugin.
+
+**Trust.** Transcript mode prices files that the same OS user can edit.
+usertrust governs cooperative agents on a machine you control; it is not a
+sandbox against a process that wants to rewrite its own transcript.
+
 ## Fail-closed semantics
 
 If the governance server is unreachable, times out, answers 5xx, or returns a
 malformed body, the PreToolUse hook exits 2 and the tool call is **blocked**.
 Set `UT_FAIL_OPEN=1` to invert this: the call proceeds with an explicit
-"proceeding ungoverned" warning. Policy (403) and budget (402) denials are
-always enforced denials, not failures. PostToolUse/Stop/SubagentStop never
-block — the tool already ran; failed settlements leave the hold on disk for
-Stop cleanup, and the server's pending-TTL sweep voids anything orphaned.
+"proceeding ungoverned" warning. `UT_FAIL_OPEN=1` is recommended for interactive
+sessions where availability matters more than enforcement — a stopped server then
+never blocks your session, and the usage it misses stays in the transcript to be
+posted at a later settle point. Leave it unset when the budget must be enforced.
+Policy (403) and budget (402) denials are always enforced denials, not failures.
+PostToolUse/Stop/SubagentStop never block — the tool already ran; an estimate hold
+whose settle fails is left on disk for Stop cleanup, and the server's pending-TTL
+sweep voids anything orphaned.
 
 If the server runs in `evaluate_only` mode, denials come back as shadow
 responses: the hook allows the call and surfaces a "would_deny" reason —

@@ -1,8 +1,26 @@
-// PostToolUse: settle the reservation at estimated actual usage. The tool has
-// already executed — this hook must NEVER block or fail closed. The pending
-// file is deleted only AFTER a 200 settle; on any failure (transport or
-// non-200) it is left in place so Stop/SubagentStop cleanup aborts the hold
-// (and the server's TTL sweep is the final backstop).
+// PostToolUse: close this tool call's reservation. The tool has already
+// executed — this hook must NEVER block or fail closed.
+//
+// Transcript usage mode (the default): the PreToolUse hold is the settlement
+// vehicle (see transcript.mjs). A hold with assigned messages is SETTLED exactly
+// once, at their counts, and never aborted on the normal path. One with none is
+// given back: released on a server that can release, else settled at zero usage
+// (that server's 1-unit floor). A failed settle (see transcript.mjs `settleAt`):
+// 400 — or an unkeyed 404 — releases its messages for a later settle point
+// (nothing was posted). Otherwise the outcome is unknown: a hold authorized under
+// its window's key is UNRESOLVED and retried as itself at Stop/SubagentStop (the
+// server charges a key at most once); an unkeyed one keeps its messages claimed
+// (it may have posted, and a message is posted at most once).
+//
+// Estimate mode (an agent id unsafe in a path, or an agent whose estimate mode
+// is recorded — UT_CC_USAGE=estimate, its transcript could not be read, a hook
+// named none, or, for a subagent, another agent of its session is in estimate
+// mode): the hold
+// settles at the per-call estimate, labelled `usageSource: "estimated"`,
+// exactly as the original hook did. The pending
+// file is deleted only AFTER a 200; on any failure it is left in place so
+// Stop/SubagentStop cleanup gives the hold back (and the server's TTL sweep is
+// the final backstop).
 import {
 	clearPending,
 	estimateTokens,
@@ -10,7 +28,9 @@ import {
 	readStdin,
 	serverRequest,
 	takePendingEntry,
+	usageMode,
 } from "./lib.mjs";
+import { estimateReasonFor, OUTCOME_NOTES, settleTranscriptHold } from "./transcript.mjs";
 
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
@@ -18,7 +38,20 @@ try {
 	// Settle only this agent's holds; the session bucket is shared with siblings.
 	const agentId = input.agent_id ?? "main";
 	const entry = await takePendingEntry(sessionId, agentId, input.tool_use_id ?? null);
-	if (entry) {
+	if (entry?.usage === "transcript") {
+		const result = await settleTranscriptHold(sessionId, entry);
+		if (result.outcome !== "settled" && result.outcome !== "returned") {
+			process.stderr.write(
+				`usertrust: transcript hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}\n`,
+			);
+		}
+	} else if (entry) {
+		if (usageMode() === "transcript") {
+			const reason = await estimateReasonFor({ sessionId, agentId, input });
+			process.stderr.write(
+				`usertrust: settling at the ESTIMATE — ${reason ?? "the hold was reserved in estimate mode"}\n`,
+			);
+		}
 		// Price both legs. The authorize-time input estimate is persisted on the
 		// pending file; if an older file lacks it, re-estimate from tool_input
 		// when the host still sends it (AUD-004).
@@ -39,6 +72,12 @@ try {
 			usageSource: "estimated",
 		});
 		if (response.status === 200) {
+			if (response.json?.settled === false) {
+				// The server's ledger post was ambiguous: the hold is spent either way.
+				process.stderr.write(
+					`usertrust: settle ${entry.transferId} — the ledger post is ambiguous (settled: false); the usage may be unrecorded\n`,
+				);
+			}
 			await clearPending(sessionId, agentId, entry.entryKey);
 		} else {
 			process.stderr.write(

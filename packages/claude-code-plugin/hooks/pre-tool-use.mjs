@@ -9,14 +9,39 @@
 // the content with {"redacted":true} while keeping the size-based estimate.
 // The output hold uses that same 16 KiB bound so a large tool_response cannot
 // price above the reservation (AUD-004).
+//
+// Transcript usage mode (the default): this hold is also the SETTLEMENT VEHICLE
+// for the agent's new complete transcript messages — one model's worth, the
+// "window" (see transcript.mjs). They are marked "authorizing" in the cursor
+// before the authorize, the hold is sized to cover them PLUS the upcoming tool,
+// and on a 200 they are assigned to this hold's transferId for PostToolUse to
+// settle. On any other answer they are released: nothing was posted. With no
+// window (nothing new, or another hook holds the agent's lock) the hold is the
+// tool estimate alone, and PostToolUse gives it back. So it is, too, while the
+// agent's transcript state cannot be used (the state dir, a corrupt cursor):
+// that usage stays in the transcript for a later settle point, and a hold
+// settled at the estimate would charge it twice.
+//
+// On a server that honours them (its /v1/health `capabilities`), a window's
+// authorize carries the window's idempotency key — so the server charges those
+// messages at most once, however often a settle of them is retried — and every
+// transcript-mode authorize carries the agent's `principal`, which the server
+// records. A key whose charge already stands (409 `already_settled`) means an
+// earlier settle of exactly this window landed: it is accounted, and the tool is
+// held alone.
 import {
 	estimateTokens,
+	isAlreadySettled,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
+	releaseHold,
+	serverCapabilities,
 	serverRequest,
+	timeLeft,
 } from "./lib.mjs";
+import { holdEstimate, prepareWindow, safeName } from "./transcript.mjs";
 
 const MAX_REASON_CHARS = 500;
 
@@ -48,42 +73,138 @@ try {
 	const toolInput = JSON.stringify(input.tool_input ?? {}).slice(0, MAX_CONTENT_CHARS);
 	const content = process.env.UT_CC_SEND_CONTENT === "0" ? '{"redacted":true}' : toolInput;
 	const estimatedInputTokens = estimateTokens(toolInput);
-	const response = await serverRequest("/v1/authorize", {
-		model: process.env.UT_CC_MODEL ?? "claude-sonnet-4-6",
-		estimatedInputTokens,
-		// Both legs: a 1-token output hold under-debited every large tool result
-		// because settle prices the whole response (AUD-004).
-		maxOutputTokens: MAX_OUTPUT_TOKENS,
-		params: { hook: "PreToolUse", tool_name: input.tool_name ?? "unknown" },
-		actor: `claude-code:${sessionId}`,
-		messages: [{ role: "user", content }],
+	const prepared = await prepareWindow({
+		sessionId,
+		agentId,
+		agentTypeHint: input.agent_type,
+		input,
 	});
-	const json =
-		response.json && typeof response.json === "object" && !Array.isArray(response.json)
-			? response.json
-			: null;
-	if (response.status === 200 && json?.shadow === true) {
-		emit(
-			"allow",
-			`usertrust shadow mode: would_deny (${sanitizeReason(json.reason)}) — not enforced`,
+	if (prepared.becameSticky) {
+		process.stderr.write(
+			`usertrust: ${prepared.reason}; this agent now settles at the ESTIMATE for the rest of the session\n`,
 		);
-	} else if (response.status === 200) {
-		if (typeof json?.transferId !== "string" || json.transferId === "") {
-			throw new Error("malformed authorize response from governance server");
+	}
+	if (prepared.mode === "unavailable") {
+		process.stderr.write(
+			`usertrust: transcript usage unavailable for now (${prepared.reason}); this tool's hold is given back, not settled at the estimate — the usage stays in the transcript for a later settle point\n`,
+		);
+	}
+	try {
+		const transcriptMode = prepared.mode === "transcript";
+		// Only an estimate-mode hold settles at the estimate. Every other one is a
+		// transcript hold: settled at its window's counts, or given back.
+		const settlesAtEstimate = prepared.mode === "estimate";
+		// What the server honours decides what this hold may carry (see lib.mjs).
+		// Unknown (a failed probe) reads as absent here: a key is sent only to a server
+		// known to honour it.
+		const capabilities = transcriptMode ? await serverCapabilities() : null;
+		const keyed = capabilities?.has("idempotency-key") ?? false;
+		const principal = capabilities?.has("principal") ? prepared.principal : undefined;
+		let window = transcriptMode ? prepared.window : null;
+		const fallbackModel = prepared.lastModel ?? process.env.UT_CC_MODEL ?? "claude-sonnet-4-6";
+		// Never past the hook's own budget: a hook killed mid-call leaves the tool
+		// ungoverned and this agent's lock held.
+		const callTimeout = () => Math.min(5_000, timeLeft() - 500);
+		const authorize = () =>
+			serverRequest(
+				"/v1/authorize",
+				{
+					model: window?.model ?? fallbackModel,
+					// Both legs: a 1-token output hold under-debited every large tool result
+					// because settle prices the whole response (AUD-004). A window's usage is
+					// ADDED, so the pre-call budget check still covers the upcoming tool.
+					...(window
+						? holdEstimate(window.counts, capabilities, {
+								toolInput: estimatedInputTokens,
+								toolOutput: MAX_OUTPUT_TOKENS,
+							})
+						: { estimatedInputTokens, maxOutputTokens: MAX_OUTPUT_TOKENS }),
+					params: window
+						? {
+								hook: "PreToolUse",
+								tool_name: input.tool_name ?? "unknown",
+								usageOrigin: "transcript",
+								agent_id: agentId,
+								agent_type: prepared.agentType,
+								messages: window.ids.length,
+							}
+						: { hook: "PreToolUse", tool_name: input.tool_name ?? "unknown" },
+					actor: window
+						? `claude-code:${sessionId}:${prepared.agentType}:${safeName(agentId, "main")}`
+						: `claude-code:${sessionId}`,
+					messages: [{ role: "user", content }],
+					...(window && keyed ? { idempotencyKey: prepared.key } : {}),
+					...(principal === undefined ? {} : { principal }),
+				},
+				{ timeoutMs: callTimeout() },
+			);
+		let response = await authorize();
+		if (window && keyed && isAlreadySettled(response)) {
+			// An earlier settle of exactly this window landed, though the cursor never
+			// heard: account it, and hold the tool alone.
+			await prepared.settledElsewhere();
+			window = null;
+			response = await authorize();
 		}
-		await recordPending(sessionId, agentId, {
-			toolUseId: input.tool_use_id ?? null,
-			transferId: json.transferId,
-			estimatedInputTokens,
-		});
-		emit("allow", `usertrust: reserved ${json.transferId} (${json.estimatedCost} ut)`);
-	} else if (response.status === 402 || response.status === 403) {
-		emit(
-			"deny",
-			`usertrust ${sanitizeReason(json?.error, "denied")}: ${sanitizeReason(json?.reason)}`,
-		);
-	} else {
-		throw new Error(`unexpected governance response ${response.status}`);
+		const json =
+			response.json && typeof response.json === "object" && !Array.isArray(response.json)
+				? response.json
+				: null;
+		if (response.status === 200 && json?.shadow === true) {
+			await prepared.abandon?.();
+			emit(
+				"allow",
+				`usertrust shadow mode: would_deny (${sanitizeReason(json.reason)}) — not enforced`,
+			);
+		} else if (response.status === 200) {
+			if (typeof json?.transferId !== "string" || json.transferId === "") {
+				throw new Error("malformed authorize response from governance server");
+			}
+			try {
+				await recordPending(sessionId, agentId, {
+					toolUseId: input.tool_use_id ?? null,
+					transferId: json.transferId,
+					estimatedInputTokens,
+					...(settlesAtEstimate
+						? {}
+						: {
+								usage: "transcript",
+								holdModel: window?.model ?? fallbackModel,
+								assignedIds: window?.ids ?? [],
+								...(window?.counts ?? {}),
+								...(window && keyed
+									? { idempotencyKey: prepared.key, agentType: prepared.agentTypeRaw }
+									: {}),
+							}),
+				});
+			} catch (err) {
+				// Unrecorded, the hold could never be settled: give it back now.
+				await releaseHold(json.transferId, "pending hold could not be recorded", {
+					timeoutMs: Math.max(250, callTimeout()),
+				}).catch((giveBack) => {
+					process.stderr.write(
+						`usertrust: hold ${json.transferId} could not be given back (${giveBack instanceof Error ? giveBack.message : String(giveBack)}); the server's TTL sweep releases it\n`,
+					);
+				});
+				throw err;
+			}
+			await prepared.commit?.(json.transferId);
+			emit("allow", `usertrust: reserved ${json.transferId} (${json.estimatedCost} ut)`);
+		} else if (response.status === 402 || response.status === 403) {
+			await prepared.abandon?.();
+			emit(
+				"deny",
+				`usertrust ${sanitizeReason(json?.error, "denied")}: ${sanitizeReason(json?.reason)}`,
+			);
+		} else {
+			throw new Error(`unexpected governance response ${response.status}`);
+		}
+	} catch (err) {
+		// Nothing was posted for the window: release it before failing closed (or open).
+		await prepared.abandon?.();
+		throw err;
+	} finally {
+		await prepared.release?.();
 	}
 } catch (err) {
 	if (process.env.UT_FAIL_OPEN === "1") {

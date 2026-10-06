@@ -144,6 +144,24 @@ describe("pending state store (one file per hold)", () => {
 	});
 });
 
+describe("SessionEnd's budget (Claude Code's, not hooks.json's)", () => {
+	it("is 1.5 s by default, CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS when set, never over 10 s — less node's start-up", async () => {
+		// @ts-expect-error TS7016: lib.mjs has no type declarations, as for every import here (baselined).
+		const { HOOK_BUDGET_MS, sessionEndBudgetMs } = await import("../hooks/lib.mjs");
+		const budget = (value?: string) =>
+			sessionEndBudgetMs(
+				value === undefined ? {} : { CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: value },
+			);
+		expect(budget()).toBe(1_200);
+		expect(budget("5000")).toBe(4_700);
+		// No more than any other hook's budget, whatever the variable says.
+		expect(budget("60000")).toBe(HOOK_BUDGET_MS - 300);
+		// Not a whole number of milliseconds: the default.
+		for (const odd of ["", "abc", "-5", "1.5", "2e3", " 5000"]) expect(budget(odd)).toBe(1_200);
+		expect(budget("0")).toBe(0);
+	});
+});
+
 describe("estimateTokens", () => {
 	it("is ceil(len/4) with a floor of 1", async () => {
 		const { estimateTokens } = await import("../hooks/lib.mjs");

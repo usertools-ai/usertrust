@@ -1,11 +1,26 @@
-// Stop: void every unsettled hold for this session. The whole-session sweep
-// (agentId null) is correct here — the session really is ending, so any hold
-// left by the parent or any subagent should be aborted.
-import { cleanup, readStdin } from "./lib.mjs";
+// Stop: post the session's remaining transcript usage, then terminate every
+// hold left for the session (`settleSession` in transcript.mjs: leftover holds
+// with usage settled first, then every agent's remainder, then the rest given
+// back).
+//
+// The transcript is written asynchronously, so the turn's final response may not
+// be in it yet: with the input's `last_assistant_message`, Stop first waits —
+// boundedly — for it to arrive (`awaitFinalResponse`), and says so when it gives
+// up. A response that arrives later still is left for SessionEnd, or the next Stop.
+import { readStdin, usageMode } from "./lib.mjs";
+import { awaitFinalResponse, settleSession } from "./transcript.mjs";
 
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
-	await cleanup(input.session_id ?? "unknown", null);
+	if (usageMode() === "transcript") {
+		const waited = await awaitFinalResponse(input.transcript_path, input.last_assistant_message);
+		if (waited === "not flushed") {
+			process.stderr.write(
+				"usertrust: the turn's final response was not in the transcript by the end of the wait — left for SessionEnd or the next Stop\n",
+			);
+		}
+	}
+	await settleSession({ input, hook: "Stop" });
 } catch (err) {
 	process.stderr.write(
 		`usertrust: stop cleanup failed: ${err instanceof Error ? err.message : String(err)}\n`,
