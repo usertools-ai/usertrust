@@ -18,9 +18,11 @@ import { test } from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import StateView from "./components/state-view";
 import { fixtureState, loadFixture, type WireFixture } from "./fixture-harness";
+import { applyClusterVector, LIVE_SHAPED_CLUSTER_VECTOR } from "./fixtures/cluster-vectors";
 import {
 	AMOUNT_SCOPE_CAPTION,
 	amountUsdFromUsertokens,
+	CUSTOM_MODEL_MEANING,
 	FORK_DISCLAIMER,
 	LEDGER_ROWS,
 	NEVER_ARTIFACT_VERIFIED,
@@ -37,6 +39,7 @@ import {
 	CLUSTER_PROVIDER_SCOPED_CLAIM,
 	CLUSTER_SIGNED_BYTES_LABEL,
 	LEDGER_TIME_NOTE,
+	modelsLine,
 	SETTLEMENT_TIMES_NOTE,
 	SKIPPED_NOTE,
 	WINDOW_TRANSFERS_ROOT_MEANING,
@@ -508,5 +511,184 @@ test("EDGE: both cards wear the clean edge — 12px radius, neutral hairline, no
 		const { html } = render(file);
 		assert.equal(occurrences(html, 'class="ut-card"'), 1, `${file}: one card, on the clean edge`);
 		assert.doesNotMatch(html, /ut-perf/, file);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// MOBILE (320-420px). Measured on the live receipt ut1_EjdnKqFWFoGxnansQuSsBj
+// at 360px: the Models line broke "claude-opus-" / "5-5" mid-name, and at
+// 360/390px the header's ID floated ABOVE its "receipt ID copy" chip. These
+// tests run with no layout engine, so they pin the CSS CONTRACT that makes
+// both impossible rather than a measured box.
+// ---------------------------------------------------------------------------
+
+/** CL1-CL5 plus the live receipt's shape, every one through the real parser. */
+function mobileCases(): { id: string; fixture: WireFixture }[] {
+	const live = applyClusterVector(LIVE_SHAPED_CLUSTER_VECTOR);
+	return [
+		...CASES.map((c) => ({ id: c.id, fixture: loadFixture(c.file) })),
+		{
+			id: "live-shaped",
+			fixture: {
+				routeParamId: live.routeParamId,
+				wire: { httpStatus: live.httpStatus, headers: live.headers, body: live.body },
+			},
+		},
+	];
+}
+
+/** The class list of the opening tag that carries `attr`. */
+function classesAt(html: string, attr: string): string[] {
+	const open = element(html, attr).match(/^<[^>]*>/)?.[0] ?? "";
+	return (open.match(/\bclass="([^"]*)"/)?.[1] ?? "").split(/\s+/).filter(Boolean);
+}
+
+/**
+ * A " · " list's wrap contract: every name is one nowrap span carrying its
+ * trailing separator, and the ONLY text outside those spans is the single
+ * space after each "·" — so the browser can break between names and nowhere else.
+ */
+function assertUnbreakableList(
+	dd: string,
+	names: string[],
+	tail: string | undefined,
+	where: string,
+) {
+	const units = [...dd.matchAll(/<span class="([^"]*)" data-list-unit="">([^<]*)<\/span>/g)];
+	assert.equal(units.length, names.length, `${where}: one nowrap unit per name`);
+	units.forEach((unit, index) => {
+		assert.ok(
+			unit[1].split(/\s+/).includes("whitespace-nowrap"),
+			`${where}: unit ${index} is nowrap`,
+		);
+		const more = index < names.length - 1 || tail !== undefined;
+		assert.equal(unit[2], more ? `${names[index]} ·` : names[index], `${where}: unit ${index}`);
+	});
+	const between = dd
+		.replace(/^<dd[^>]*>|<\/dd>$/g, "")
+		.replace(/<span class="[^"]*" data-list-unit="">[^<]*<\/span>/g, "|")
+		.replace(/<span data-list-tail="">[^<]*<\/span>/g, "T");
+	const gaps = names.length - 1 + (tail === undefined ? 0 : 1);
+	const expected = [...names.map(() => "|"), ...(tail === undefined ? [] : ["T"])].join(" ");
+	assert.equal(between, expected, `${where}: breaks only between names`);
+	assert.equal(occurrences(between, " "), gaps, `${where}: one break point per separator`);
+	if (tail !== undefined)
+		assert.ok(dd.includes(`<span data-list-tail="">${tail}</span>`), `${where}: tail`);
+}
+
+test("MOBILE: the live-shaped fixture verifies and reads like the live receipt", () => {
+	const { fixture } = mobileCases().at(-1) ?? assert.fail("no live-shaped case");
+	const state = fixtureState(fixture);
+	assert.ok(state.kind === "verified" && state.scope === "cluster", "a verified cluster receipt");
+	const { before } = renderWire(fixture);
+	assert.equal(textOf(element(before, testid("covers"))), "14 governed calls");
+	assert.equal(
+		textOf(element(before, testid("models"))),
+		"claude-haiku-4-5 · claude-opus-5-5",
+		"the Models line, word for word",
+	);
+});
+
+test("MOBILE: each model and provider name is an unbreakable unit; wrapping only BETWEEN names", () => {
+	for (const { id, fixture } of mobileCases()) {
+		const { before } = renderWire(fixture);
+		const data = receiptOf(fixture).event.data;
+		const catalog = data.models.filter((model) => model !== "custom");
+		const tail = data.models.includes("custom") ? CUSTOM_MODEL_MEANING : undefined;
+		if (data.models.length > 0) {
+			const dd = element(before, testid("models"));
+			assert.ok(!/break-all|break-words|wrap-anywhere/.test(dd), `${id}: no forced mid-word break`);
+			assertUnbreakableList(dd, catalog, tail, `${id} models`);
+			assert.equal(textOf(dd), modelsLine(data.models), `${id}: still reads as modelsLine`);
+		}
+		if (data.providers.length > 0) {
+			const dd = element(before, testid("providers"));
+			assertUnbreakableList(dd, data.providers, undefined, `${id} providers`);
+			assert.equal(textOf(dd), data.providers.join(" · "), `${id}: still the providers join`);
+		}
+	}
+});
+
+test("MOBILE: the custom-model sentence stays prose and wraps; only catalog names are nowrap", () => {
+	const live = applyClusterVector({
+		...LIVE_SHAPED_CLUSTER_VECTOR,
+		receipt: (r) => {
+			LIVE_SHAPED_CLUSTER_VECTOR.receipt?.(r);
+			((r.event as Record<string, unknown>).data as Record<string, unknown>).models = [
+				"claude-opus-5-5",
+				"custom",
+			];
+		},
+	});
+	const fixture: WireFixture = {
+		routeParamId: live.routeParamId,
+		wire: { httpStatus: live.httpStatus, headers: live.headers, body: live.body },
+	};
+	const dd = element(renderWire(fixture).before, testid("models"));
+	assertUnbreakableList(dd, ["claude-opus-5-5"], CUSTOM_MODEL_MEANING, "custom");
+	assert.equal(textOf(dd), `claude-opus-5-5 · ${CUSTOM_MODEL_MEANING}`);
+});
+
+test("MOBILE: the header keeps the ID and its copy chip on ONE row, ellipsizing the ID inside the chip", () => {
+	for (const { id, fixture } of mobileCases()) {
+		const { before } = renderWire(fixture);
+		const receiptId = receiptOf(fixture).receiptId;
+		const header = element(before, testid("card-header"));
+
+		// The row: flex, never wraps; the label never shrinks.
+		const row = classesAt(before, testid("card-header"));
+		for (const rule of ["flex", "flex-nowrap", "items-center"]) {
+			assert.ok(row.includes(rule), `${id}: header row has ${rule}`);
+		}
+		assert.ok(!row.includes("flex-wrap"), `${id}: header row never wraps`);
+		assert.ok(
+			/<span class="[^"]*\bshrink-0\b[^"]*">Receipt<\/span>/.test(header),
+			`${id}: the "Receipt" label never shrinks`,
+		);
+
+		// Every box from the row down to the ID may shrink (min-w-0) and none wraps.
+		const slot = classesAt(header, testid("receipt-short-id"));
+		const wrap = classesAt(header, "data-hash-chip");
+		const chip = (header.match(/<button[^>]*class="([^"]*)"/)?.[1] ?? "").split(/\s+/);
+		for (const [name, classes] of [
+			["ID slot", slot],
+			["chip row", wrap],
+			["copy chip", chip],
+		] as const) {
+			assert.ok(classes.includes("min-w-0"), `${id}: ${name} has min-w-0`);
+			assert.ok(!classes.includes("flex-wrap"), `${id}: ${name} never wraps`);
+		}
+		assert.ok(wrap.includes("flex-nowrap"), `${id}: chip row is nowrap`);
+		assert.ok(chip.includes("max-w-full"), `${id}: the chip never outgrows its slot`);
+
+		// The ID is INSIDE the chip and ellipsizes there; the chip's glyphs do not.
+		const button = element(header, "<button");
+		const shown = button.match(/<span class="([^"]*)" data-copy-display="">([^<]*)<\/span>/);
+		assert.ok(shown, `${id}: the ID renders inside the copy chip`);
+		assert.ok(shown[1].split(/\s+/).includes("truncate"), `${id}: the ID ellipsizes (truncate)`);
+		assert.ok(shown[1].split(/\s+/).includes("min-w-0"), `${id}: the ID can shrink below its text`);
+		assert.equal(shown[2], `${receiptId.slice(0, 10)}…`, `${id}: the R17 head`);
+		for (const glyph of ["$", "copy"]) {
+			assert.ok(
+				new RegExp(`class="[^"]*\\bshrink-0\\b[^"]*">${glyph.replace("$", "\\$")}</span>`).test(
+					button,
+				),
+				`${id}: "${glyph}" never shrinks`,
+			);
+		}
+		assert.ok(!/break-all/.test(header), `${id}: nothing in the header breaks mid-ID`);
+		assert.equal(
+			occurrences(header, "<code"),
+			0,
+			`${id}: no ID outside the chip to float above it`,
+		);
+
+		// R17 still holds: the full value on hover, to a screen reader, and on copy.
+		assert.ok(header.includes(`title="${receiptId}"`), `${id}: full ID in the title`);
+		assert.ok(
+			textOf(header).includes(`receipt ID, in full: ${receiptId}`),
+			`${id}: full ID, sr-only`,
+		);
+		assert.ok(button.includes('aria-label="Copy receipt ID"'), `${id}: the copy affordance`);
 	}
 });
