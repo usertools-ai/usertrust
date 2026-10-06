@@ -51,7 +51,7 @@ import {
 	serverRequest,
 	timeLeft,
 } from "./lib.mjs";
-import { estimatePrincipalFor, holdInputTokens, prepareWindow, safeName } from "./transcript.mjs";
+import { estimatePrincipalFor, holdEstimate, prepareWindow, safeName } from "./transcript.mjs";
 
 const MAX_REASON_CHARS = 500;
 
@@ -150,10 +150,12 @@ try {
 					// Both legs: a 1-token output hold under-debited every large tool result
 					// because settle prices the whole response (AUD-004). A window's usage is
 					// ADDED, so the pre-call budget check still covers the upcoming tool.
-					estimatedInputTokens:
-						estimatedInputTokens + (window ? holdInputTokens(window.counts) : 0),
-					maxOutputTokens:
-						MAX_OUTPUT_TOKENS + (window ? Math.max(1, window.counts.outputTokens) : 0),
+					...(window
+						? holdEstimate(window.counts, capabilities, {
+								toolInput: estimatedInputTokens,
+								toolOutput: MAX_OUTPUT_TOKENS,
+							})
+						: { estimatedInputTokens, maxOutputTokens: MAX_OUTPUT_TOKENS }),
 					params: window
 						? {
 								hook: "PreToolUse",
