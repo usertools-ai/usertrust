@@ -46,8 +46,8 @@ export UT_SERVER_KEY="<the key from step 1>"
 | `UT_SERVER_URL`      | `http://127.0.0.1:4519`  | Base URL of your usertrust-server                |
 | `UT_SERVER_KEY`      | (empty)                  | Tenant bearer key                                |
 | `UT_CC_MODE`         | `watch`                  | `enforce` blocks over-budget calls; any other value is watch-only (see [Modes](#modes-watch-only-by-default)) |
-| `UT_CC_UNIT`         | unset                    | Sent as `params.unit` on every authorize         |
-| `UT_CC_ROLE`         | unset                    | Sent as `params.role` on every authorize         |
+| `UT_CC_UNIT`         | unset                    | The principal's `unit`, e.g. `platform` (see *Attribution*) |
+| `UT_CC_ROLE`         | unset                    | The principal's `role`, e.g. `release-engineer` (see *Attribution*) |
 | `UT_CC_MODEL`        | `claude-sonnet-4-6`      | Model for an estimate hold before any transcript model is known |
 | `UT_CC_USAGE`        | `transcript`             | `estimate` settles per-call estimates only       |
 | `UT_CC_STATE_DIR`    | `~/.claude/usertrust-cc` | Pending holds, and what was already posted (keep it; see below) |
@@ -106,10 +106,14 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   every transcript-mode authorize also carries `{ id: <agentId>, type:
   <agentType>, origin: "claude-code:<session>" }`, which the server writes onto
   every record the hold leaves and onto its receipt. An older server keeps the
-  attribution request-side only. `UT_CC_UNIT` and `UT_CC_ROLE`, when set, ride on
-  every authorize — PreToolUse's, and the remainder's at Stop/SubagentStop — as
-  `params.unit` and `params.role`: control characters become spaces, each is cut
-  at 128 characters, and a blank value is not sent.
+  attribution request-side only. The principal also carries `unit` and `role`
+  from `UT_CC_UNIT` / `UT_CC_ROLE` — on PreToolUse's authorize and on the
+  remainder's at Stop/SubagentStop — when each is a valid principal field: 1 to
+  128 characters of `A-Z a-z 0-9 . _ : -` (so `release-engineer`, not `release
+  engineer`). A value that is empty or invalid is left out, with a note on
+  stderr, and never sent: a strict server refuses the whole authorize over one
+  bad field. Where no principal is sent (that older server, or the estimate
+  path), neither is.
 - **Exactly once, on a server that honours idempotency keys.** Every authorize
   that carries responses goes in under the VEHICLE KEY of exactly those responses
   (`cc:` + 48 hex, a hash of the session, the agent and the sorted response ids —

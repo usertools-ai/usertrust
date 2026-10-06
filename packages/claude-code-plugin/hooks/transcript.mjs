@@ -41,7 +41,9 @@
 //    counts, at the next Stop/SubagentStop — instead of losing it. Settles never
 //    carry the key: a settle the server cannot match stays a plain 404.
 //  - `principal`: every transcript-mode authorize names the agent, its type and
-//    the session; the server records it on everything the hold leaves.
+//    the session — and the `unit` / `role` from UT_CC_UNIT / UT_CC_ROLE when they
+//    are valid principal fields; the server records it on everything the hold
+//    leaves.
 //  - `release`: a hold with no usage is released (no failure, no charge) rather
 //    than settled at the 1-unit floor or aborted.
 //
@@ -104,7 +106,6 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
-	attributionParams,
 	clearPending,
 	isAlreadySettled,
 	isUnknownRoute,
@@ -214,16 +215,56 @@ function principalField(value, fallback) {
 	return PRINCIPAL_FIELD.test(text) ? text : fallback;
 }
 
+/** The attribution variables a note was already written for, in this hook. */
+const attributionNoted = new Set();
+
+/**
+ * The optional `unit` and `role` a principal carries, from UT_CC_UNIT /
+ * UT_CC_ROLE. Each is sent only as it is, and only if it is a valid principal
+ * field: a strict server refuses a principal with anything else — a 400, which is
+ * a gap in watch mode and a BLOCK in enforce mode — so a value that is empty or
+ * invalid is never sent, nor forced into shape (it would attribute the spend to a
+ * name nobody chose). It is left out, with one note on stderr per hook.
+ */
+function principalAttribution() {
+	const fields = {};
+	for (const [key, variable] of [
+		["unit", "UT_CC_UNIT"],
+		["role", "UT_CC_ROLE"],
+	]) {
+		const value = process.env[variable];
+		if (value === undefined) continue;
+		if (PRINCIPAL_FIELD.test(value)) {
+			fields[key] = value;
+		} else if (!attributionNoted.has(variable)) {
+			attributionNoted.add(variable);
+			const why =
+				value === ""
+					? "it is empty"
+					: value.length > 128
+						? `it is ${value.length} characters long`
+						: "it has a character outside that set";
+			process.stderr.write(
+				`usertrust: ${variable} is not sent — a principal ${key} must be 1-128 characters of [A-Za-z0-9._:-], and ${why}\n`,
+			);
+		}
+	}
+	return fields;
+}
+
 /**
  * WHO spent, as usertrust records it on every record the hold leaves: the agent,
- * its type, and the Claude Code session it ran in. Unlike `actor` and `params`,
- * which stay on the request, a principal reaches the audit chain.
+ * its type, the Claude Code session it ran in, and — when set and valid — the
+ * organisational `unit` and `role` (`principalAttribution`). Unlike `actor` and
+ * `params`, which stay on the request, a principal reaches the audit chain; it is
+ * sent only to a server that advertises the `principal` capability.
  */
 export function principalFor(sessionId, agentId, agentType) {
 	return {
 		id: principalField(agentId, "main"),
 		type: principalField(agentType, "subagent"),
 		origin: principalField(`claude-code:${sessionId}`, "claude-code"),
+		...principalAttribution(),
 	};
 }
 
@@ -1501,7 +1542,6 @@ async function postGroup({
 					agent_id: agentId,
 					agent_type: agentType,
 					messages: ids.length,
-					...attributionParams(),
 				},
 				actor: `claude-code:${sessionId}:${agentType}:${agentId}`,
 				...(key === undefined ? {} : { idempotencyKey: key }),

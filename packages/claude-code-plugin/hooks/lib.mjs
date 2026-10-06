@@ -148,27 +148,6 @@ export async function recordWatchEvent(event) {
 	}
 }
 
-/**
- * Optional attribution sent in every authorize's params: the organisational unit
- * and the role this Claude Code runs as, from `UT_CC_UNIT` / `UT_CC_ROLE`. C0/DEL/C1
- * control characters become spaces BEFORE the clip at 128 (a label a server may
- * show back to an operator); unset or blank values are not sent.
- */
-export function attributionParams() {
-	const params = {};
-	for (const [key, variable] of [
-		["unit", "UT_CC_UNIT"],
-		["role", "UT_CC_ROLE"],
-	]) {
-		const raw = String(process.env[variable] ?? "");
-		// biome-ignore lint/suspicious/noControlCharactersInRegex: replacing control chars is the point
-		const spaced = raw.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
-		const value = spaced.trim().slice(0, 128);
-		if (value !== "") params[key] = value;
-	}
-	return params;
-}
-
 // Every hook gets a wall-clock budget well inside hooks.json's 15 s timeout, so
 // a slow server makes a hook give up cleanly instead of being killed mid-write.
 // Module evaluation is the hook's start: each hook is its own node process.

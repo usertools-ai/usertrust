@@ -313,38 +313,6 @@ const TOOL_INPUT_ESTIMATE = 4;
 const TOOL_OUTPUT_HOLD = 4096;
 
 describe("the normal path — the hold is the settlement vehicle", () => {
-	it("UT_CC_UNIT / UT_CC_ROLE ride on every authorize: a window's, and the remainder's at Stop", async () => {
-		await startServer(okResponder);
-		await writeMain(responseEntries("msg_a", SONNET, u(10, 200)));
-		const attribution = { UT_CC_UNIT: "platform", UT_CC_ROLE: "reviewer" };
-		const pre = await run("pre-tool-use.mjs", preInput("tu_1"), attribution);
-		expect(pre.code).toBe(0);
-		expect(authorizes()[0]?.body.params).toEqual({
-			hook: "PreToolUse",
-			tool_name: "Bash",
-			usageOrigin: "transcript",
-			agent_id: "main",
-			agent_type: "main",
-			messages: 1,
-			unit: "platform",
-			role: "reviewer",
-		});
-		expect((await run("post-tool-use.mjs", postInput("tu_1"), attribution)).code).toBe(0);
-		// A final answer with no tool call after it: no hold carries it, so Stop posts it.
-		await appendMain(responseEntries("msg_b", SONNET, u(3, 30)));
-		expect((await run("stop.mjs", stopInput(), attribution)).code).toBe(0);
-		expect(authorizes()).toHaveLength(2);
-		expect(authorizes()[1]?.body.params).toEqual({
-			hook: "Stop",
-			usageOrigin: "transcript",
-			agent_id: "main",
-			agent_type: "main",
-			messages: 1,
-			unit: "platform",
-			role: "reviewer",
-		});
-	});
-
 	it("PreToolUse assigns the window; PostToolUse settles THAT hold at its exact counts, no abort", async () => {
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(10, 200, 5000, 300)));
@@ -1163,6 +1131,103 @@ describe("with a server that honours keys, principal and release (usertrust #205
 			origin: `claude-code:${SESSION}`,
 		});
 		expect(server.charges.map((c) => c.inputTokens).sort()).toEqual([1, 10, 3].sort());
+	});
+
+	describe("UT_CC_UNIT / UT_CC_ROLE: attribution inside the principal", () => {
+		const origin = `claude-code:${SESSION}`;
+		const attribution = { UT_CC_UNIT: "platform", UT_CC_ROLE: "release-engineer" };
+
+		it("ride INSIDE the principal on every authorize — a window's, and the remainders' at SubagentStop and Stop — never as params", async () => {
+			const server = keyedServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(10, 20)));
+			expect((await run("pre-tool-use.mjs", preInput("tu_1"), attribution)).code).toBe(0);
+			await run("post-tool-use.mjs", postInput("tu_1"), attribution);
+			await writeSubagent("a1", "Explore", responseEntries("msg_s", HAIKU, u(3, 4), sub("a1")));
+			await run("subagent-stop.mjs", { ...stopInput(), agent_id: "a1" }, attribution);
+			// A final answer with no tool call after it: no hold carries it, so Stop posts it.
+			await appendMain(responseEntries("msg_b", SONNET, u(1, 2)));
+			await run("stop.mjs", stopInput(), attribution);
+			expect(authorizes().map((a) => [a.body.params, a.body.principal])).toEqual([
+				[
+					{
+						hook: "PreToolUse",
+						tool_name: "Bash",
+						usageOrigin: "transcript",
+						agent_id: "main",
+						agent_type: "main",
+						messages: 1,
+					},
+					{ id: "main", type: "main", origin, unit: "platform", role: "release-engineer" },
+				],
+				[
+					{
+						hook: "SubagentStop",
+						usageOrigin: "transcript",
+						agent_id: "a1",
+						agent_type: "Explore",
+						messages: 1,
+					},
+					{ id: "a1", type: "Explore", origin, unit: "platform", role: "release-engineer" },
+				],
+				[
+					{
+						hook: "Stop",
+						usageOrigin: "transcript",
+						agent_id: "main",
+						agent_type: "main",
+						messages: 1,
+					},
+					{ id: "main", type: "main", origin, unit: "platform", role: "release-engineer" },
+				],
+			]);
+		});
+
+		it("a value that is empty, too long or has a character outside [A-Za-z0-9._:-] is left out, with a note — never sent, nor forced into shape", async () => {
+			const server = keyedServer();
+			await startServer(server.responder);
+			// A principal rides on every transcript-mode authorize, window or not.
+			await writeMain(responseEntries("msg_a", SONNET, u(1, 1)));
+			for (const [unit, why] of [
+				["release engineer", "a character outside that set"],
+				["", "it is empty"],
+				["u".repeat(129), "129 characters long"],
+				["plat\nform", "a character outside that set"],
+			] as const) {
+				const pre = await run("pre-tool-use.mjs", preInput("tu_1"), {
+					UT_CC_UNIT: unit,
+					UT_CC_ROLE: "release-engineer",
+				});
+				expect(pre.code, JSON.stringify(unit)).toBe(0);
+				expect(authorizes().at(-1)?.body.principal, JSON.stringify(unit)).toEqual({
+					id: "main",
+					type: "main",
+					origin,
+					role: "release-engineer",
+				});
+				expect(pre.stderr, JSON.stringify(unit)).toContain("UT_CC_UNIT is not sent");
+				expect(pre.stderr, JSON.stringify(unit)).toContain(why);
+				expect(pre.stderr).not.toContain("UT_CC_ROLE");
+				await run("post-tool-use.mjs", postInput("tu_1"));
+			}
+		});
+
+		it("no principal — so no unit or role anywhere — on a server that does not advertise it, or on the estimate path", async () => {
+			capabilities = ["release", "idempotency-key"];
+			await startServer(keyedServer().responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(1, 1)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), attribution);
+			await run("post-tool-use.mjs", postInput("tu_1"), attribution);
+			await appendMain(responseEntries("msg_b", SONNET, u(2, 2)));
+			await run("stop.mjs", stopInput(), attribution);
+			await run("pre-tool-use.mjs", preInput("tu_2"), { ...attribution, UT_CC_USAGE: "estimate" });
+			expect(authorizes()).toHaveLength(3);
+			for (const a of authorizes()) {
+				expect(a.body).not.toHaveProperty("principal");
+				expect(JSON.stringify(a.body)).not.toContain("platform");
+				expect(JSON.stringify(a.body)).not.toContain("release-engineer");
+			}
+		});
 	});
 
 	it("an older server gets neither: no key, no principal, no release", async () => {

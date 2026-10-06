@@ -12,18 +12,13 @@ const SESSION_START = join(HOOKS, "session-start.mjs");
 let server: Server | undefined;
 let stateDir: string;
 let baseEnv: Record<string, string>;
-let requests: Array<{ params?: Record<string, unknown> }>;
 
+/** A server that answers every request with `status` and `json`. */
 function startFake(status: number, json: unknown): Promise<number> {
-	requests = [];
 	return new Promise((resolve) => {
 		server = createServer((req, res) => {
-			let raw = "";
-			req.on("data", (chunk) => {
-				raw += chunk;
-			});
+			req.resume();
 			req.on("end", () => {
-				requests.push(JSON.parse(raw) as { params?: Record<string, unknown> });
 				res.writeHead(status, { "content-type": "application/json" });
 				res.end(JSON.stringify(json));
 			});
@@ -37,9 +32,9 @@ function startFake(status: number, json: unknown): Promise<number> {
 
 beforeEach(async () => {
 	stateDir = await mkdtemp(join(tmpdir(), "utcc-mode-"));
-	// UT_CC_MODE, UT_FAIL_OPEN, UT_CC_UNIT and UT_CC_ROLE stay unset unless a test sets
-	// them (runHook inherits no UT_* variable); the estimate path keeps these runs off
-	// the transcript.
+	// UT_CC_MODE and UT_FAIL_OPEN stay unset unless a test sets them (runHook
+	// inherits no UT_* variable); the estimate path keeps these runs off the
+	// transcript.
 	baseEnv = {
 		UT_CC_STATE_DIR: stateDir,
 		UT_SERVER_KEY: "k",
@@ -291,44 +286,5 @@ describe("the mode is announced to the user at session start", () => {
 		expect(failOpen).toContain("usertrust: ENFORCING");
 		expect(failOpen).toContain("UT_FAIL_OPEN=1");
 		expect(failOpen).not.toContain("watch-only");
-	});
-});
-
-describe("attribution: unit and role", () => {
-	it("are sent in the authorize params when UT_CC_UNIT / UT_CC_ROLE are set", async () => {
-		const port = await startFake(200, { transferId: "tx_1", estimatedCost: 3 });
-		const result = await runHook(PRE, PAYLOAD, {
-			...baseEnv,
-			UT_SERVER_URL: `http://127.0.0.1:${port}`,
-			UT_CC_UNIT: "platform",
-			UT_CC_ROLE: "release\nengineer",
-		});
-		expect(result.code).toBe(0);
-		expect(requests[0]?.params).toMatchObject({
-			hook: "PreToolUse",
-			tool_name: "Bash",
-			unit: "platform",
-			role: "release engineer",
-		});
-	});
-
-	it("are absent when unset or blank", async () => {
-		const port = await startFake(200, { transferId: "tx_1", estimatedCost: 3 });
-		await runHook(PRE, PAYLOAD, {
-			...baseEnv,
-			UT_SERVER_URL: `http://127.0.0.1:${port}`,
-			UT_CC_ROLE: "   ",
-		});
-		expect(requests[0]?.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
-	});
-
-	it("each value is bounded at 128 characters", async () => {
-		const port = await startFake(200, { transferId: "tx_1", estimatedCost: 3 });
-		await runHook(PRE, PAYLOAD, {
-			...baseEnv,
-			UT_SERVER_URL: `http://127.0.0.1:${port}`,
-			UT_CC_UNIT: "u".repeat(500),
-		});
-		expect(requests[0]?.params?.unit).toBe("u".repeat(128));
 	});
 });

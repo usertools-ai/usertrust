@@ -33,7 +33,6 @@
 // earlier settle of exactly this window landed: it is accounted, and the tool is
 // held alone.
 import {
-	attributionParams,
 	estimateTokens,
 	guardMode,
 	isAlreadySettled,
@@ -145,9 +144,8 @@ try {
 								agent_id: agentId,
 								agent_type: prepared.agentType,
 								messages: window.ids.length,
-								...attributionParams(),
 							}
-						: { hook: "PreToolUse", tool_name: toolName, ...attributionParams() },
+						: { hook: "PreToolUse", tool_name: toolName },
 					actor: window
 						? `claude-code:${sessionId}:${prepared.agentType}:${safeName(agentId, "main")}`
 						: `claude-code:${sessionId}`,
