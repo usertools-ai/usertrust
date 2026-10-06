@@ -31,10 +31,12 @@
 // On a server that honours them (its /v1/health `capabilities`), a window's
 // authorize carries the window's idempotency key — so the server charges those
 // messages at most once, however often a settle of them is retried — and every
-// authorize, on the transcript path or the estimate path, carries the agent's
-// `principal`, which the server records. A key whose charge already stands (409 `already_settled`) means an
-// earlier settle of exactly this window landed: it is accounted, and the tool is
-// held alone.
+// authorize carries the agent's `principal`, which the server records: built
+// from the transcript on the transcript path, and from the hook's own input
+// (`estimatePrincipalFor`) when no transcript is read — the estimate path, or
+// while transcript state is unavailable. A key whose charge already stands (409
+// `already_settled`) means an earlier settle of exactly this window landed: it
+// is accounted, and the tool is held alone.
 import {
 	estimateTokens,
 	guardMode,

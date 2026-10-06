@@ -1521,6 +1521,24 @@ describe("with a server that honours keys, principal and release (usertrust #205
 			]);
 		});
 
+		it("while transcript state is unavailable: the same gate, the same principal shape", async () => {
+			await startServer(keyedServer().responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
+			const dir = join(stateDir, "transcripts");
+			await mkdir(dir);
+			await chmod(dir, 0o777);
+			const pre = await run("pre-tool-use.mjs", preInput("tu_1"), attribution);
+			expect(pre.stderr).toContain("writable by group or others");
+			expect(authorizes()[0]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+			expect(authorizes()[0]?.body.principal).toEqual({
+				id: "main",
+				type: "main",
+				origin,
+				unit: "platform",
+				role: "release-engineer",
+			});
+		});
+
 		it("no principal — so no unit or role anywhere — on a server that does not advertise it, on either path", async () => {
 			capabilities = ["release", "idempotency-key"];
 			await startServer(keyedServer().responder);
