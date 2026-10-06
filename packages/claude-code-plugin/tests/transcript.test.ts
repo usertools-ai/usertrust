@@ -1347,12 +1347,13 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 		reason: "prompt_input_exit",
 	});
 
-	it("hooks.json registers SessionEnd, beside the four hooks before it", async () => {
+	it("hooks.json registers SessionEnd, beside the five hooks before it", async () => {
 		const hooks = JSON.parse(await readFile(join(HOOKS, "hooks.json"), "utf-8")) as {
 			hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
 		};
+		// SessionStart announces the mode (see mode.test.ts).
 		expect(Object.keys(hooks.hooks).sort()).toEqual(
-			["PostToolUse", "PreToolUse", "SessionEnd", "Stop", "SubagentStop"].sort(),
+			["PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "SubagentStop"].sort(),
 		);
 		expect(hooks.hooks.SessionEnd?.[0]?.hooks[0]?.command).toContain("hooks/session-end.mjs");
 	});
