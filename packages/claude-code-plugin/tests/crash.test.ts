@@ -24,7 +24,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -33,8 +33,13 @@ const CRASH_AT = join(import.meta.dirname, "helpers", "crash-at.mjs");
 const SESSION = "22222222-3333-4444-8555-666666666666";
 const SONNET = "claude-sonnet-4-6";
 const HAIKU = "claude-haiku-4-5";
-/** How many crash runs go at once: each has its own state dir, transcript and server. */
-const PARALLEL = 8;
+/**
+ * How many crash runs go at once: each has its own state dir, transcript and
+ * server. Half the machine's cores, at least 2 and at most 8, so the replays do
+ * not starve the suite's other workers. Fewer at once changes only how long it
+ * takes: every boundary is still listed and killed.
+ */
+const PARALLEL = Math.min(8, Math.max(2, Math.floor(availableParallelism() / 2)));
 
 interface World {
 	stateDir: string;
