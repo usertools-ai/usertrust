@@ -12,8 +12,10 @@
 // server charges a key at most once); an unkeyed one keeps its messages claimed
 // (it may have posted, and a message is posted at most once).
 //
-// Estimate mode (UT_CC_USAGE=estimate, or an agent whose estimate mode is
-// recorded — its transcript could not be read, or a hook named none): the hold
+// Estimate mode (an agent id unsafe in a path, or an agent whose estimate mode
+// is recorded — UT_CC_USAGE=estimate, its transcript could not be read, a hook
+// named none, or, for a subagent, another agent of its session is in estimate
+// mode): the hold
 // settles at the per-call estimate, labelled `usageSource: "estimated"`,
 // exactly as the original hook did. The pending
 // file is deleted only AFTER a 200; on any failure it is left in place so

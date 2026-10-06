@@ -1518,8 +1518,29 @@ describe("estimate holds", () => {
 			outputTokens: 3,
 			usageSource: "estimated",
 		});
-		// The transcript is never read and no transcript state is created.
-		expect(await readdir(stateDir)).toEqual([]);
+		// The transcript is never read, and no cursor made: the state holds only the
+		// record that this agent settles at the estimate, written before it did.
+		expect(pre.stderr).toBe("");
+		expect((await readdir(join(stateDir, "transcripts"))).sort()).toEqual(["estimate", "since"]);
+		expect(
+			await readFile(join(stateDir, "transcripts", "estimate", `${SESSION}__main`), "utf-8"),
+		).toBe("UT_CC_USAGE=estimate");
+	});
+
+	it("a session settled under UT_CC_USAGE=estimate, resumed in transcript mode, posts nothing from it", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+		const env = { UT_CC_USAGE: "estimate" };
+		await run("pre-tool-use.mjs", preInput("tu_1"), env);
+		await run("post-tool-use.mjs", postInput("tu_1"), env);
+		// Resumed without the setting: the estimate already stood for msg_a.
+		await run("pre-tool-use.mjs", preInput("tu_2"));
+		await run("post-tool-use.mjs", postInput("tu_2"));
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => [s.body.usageSource, s.body.inputTokens])).toEqual([
+			["estimated", TOOL_INPUT_ESTIMATE],
+			["estimated", TOOL_INPUT_ESTIMATE],
+		]);
 	});
 
 	it("an estimate settle whose receipt says settled: false says the usage may be unrecorded", async () => {
@@ -2294,6 +2315,45 @@ describe("forked subagents — inherited messages are posted once", () => {
 		await run("pre-tool-use.mjs", preInput("tu_2", { agent_id: "f1" }));
 		expect(authorizes()[1]?.body.params).toMatchObject({ agent_id: "f1", messages: 1 });
 		expect(authorizes()[1]?.body.estimatedInputTokens).toBe(7 + TOOL_INPUT_ESTIMATE);
+	});
+
+	it("a parent's estimate mode recorded just as its fork takes its lock: the fork still inherits it", async () => {
+		await startServer(okResponder);
+		await writeMain(inherited());
+		await writeSubagent("f1", "fork", forkTranscript());
+		// The parent's record lands after the fork's first check, before anything it
+		// could post: at its lock.
+		const marker = join(stateDir, "transcripts", "estimate", `${SESSION}__main`);
+		const pre = await run("pre-tool-use.mjs", preInput("tu_f", { agent_id: "f1" }), {
+			NODE_OPTIONS: `--import=${join(import.meta.dirname, "helpers", "crash-at.mjs")}`,
+			UT_CC_CRASH: "create|1|after",
+			UT_CC_CRASH_ACTION: `write ${marker}`,
+		});
+		expect(pre.code).toBe(0);
+		await run("post-tool-use.mjs", postInput("tu_f", { agent_id: "f1" }));
+		expect(settles().map((s) => s.body.usageSource)).toEqual(["estimated"]);
+		expect(authorizes()[0]?.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+	});
+
+	it("a fork of a parent in estimate mode posts none of what it inherited: it inherits the estimate mode", async () => {
+		await startServer(okResponder);
+		// The parent's transcript cannot be read at its first hook: it settles at the
+		// estimate for the rest of the session, and claims none of its responses.
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		await writeMain(inherited());
+		// Its fork's transcript begins with a copy of them.
+		await writeSubagent("f1", "fork", forkTranscript());
+		const pre = await run("pre-tool-use.mjs", preInput("tu_f", { agent_id: "f1" }));
+		await run("post-tool-use.mjs", postInput("tu_f", { agent_id: "f1" }));
+		await run("subagent-stop.mjs", { ...stopInput(), agent_id: "f1", agent_type: "fork" });
+		await run("stop.mjs", stopInput());
+		// Nothing for real: msg_a and msg_b were the parent's estimates already.
+		expect(settles().map((s) => s.body.usageSource)).toEqual(["estimated", "estimated"]);
+		expect(pre.stderr).toContain("main of this session settles at the estimate");
+		expect(
+			await readFile(join(stateDir, "transcripts", "estimate", `${SESSION}__f1`), "utf-8"),
+		).toContain("main of this session settles at the estimate");
 	});
 });
 

@@ -319,6 +319,60 @@ function unnamed(input: Record<string, unknown>) {
 	return rest;
 }
 
+/**
+ * A parent whose transcript cannot be read at its first hook — so it settles at
+ * the estimate from then on, and claims none of its responses — and, at once, its
+ * fork, whose transcript begins with a copy of them: none of that usage may be
+ * charged for real as well.
+ */
+const FORK_OF_STICKY: Scenario = {
+	messages: 3,
+	estimates: true,
+	setup: async (world) => {
+		await mkdir(join(world.projectDir, SESSION, "subagents"), { recursive: true });
+	},
+	steps: [
+		{ calls: [{ hook: "pre-tool-use.mjs", input: pre("tu_1") }] },
+		{ calls: [{ hook: "post-tool-use.mjs", input: post("tu_1") }] },
+		{
+			before: async (world) => {
+				await writeFile(world.main, "");
+				await append(world.main, [
+					...response("msg_1", SONNET, 1),
+					...response("msg_2", SONNET, 10),
+				]);
+				const copied = { agentId: "f1", isSidechain: true };
+				await writeFile(fork(world), "");
+				await append(fork(world), [
+					...response("msg_1", SONNET, 1, copied),
+					...response("msg_2", SONNET, 10, copied),
+					...response("msg_f", SONNET, 100, copied),
+				]);
+				await writeFile(
+					join(world.projectDir, SESSION, "subagents", "agent-f1.meta.json"),
+					JSON.stringify({ agentType: "fork" }),
+				);
+			},
+			calls: [
+				{ hook: "pre-tool-use.mjs", input: pre("tu_2") },
+				{ hook: "pre-tool-use.mjs", input: pre("tu_f", "f1") },
+			],
+		},
+		{
+			calls: [
+				{ hook: "post-tool-use.mjs", input: post("tu_2") },
+				{ hook: "post-tool-use.mjs", input: post("tu_f", "f1") },
+			],
+		},
+		{
+			calls: [
+				{ hook: "subagent-stop.mjs", input: (world) => ({ ...base(world), agent_id: "f1" }) },
+				{ hook: "stop.mjs", input: base },
+			],
+		},
+	],
+};
+
 /** A parent and its fork, whose transcript begins with a copy of the parent's messages. */
 const FORKED: Scenario = {
 	messages: 3,
@@ -442,25 +496,44 @@ async function play(scenario: Scenario, keyed: boolean, crash?: Crash, loss: Los
 	}
 }
 
-/** Every boundary of every hook in the scenario, from one clean run that logs them. */
-async function boundaries(scenario: Scenario, keyed: boolean): Promise<Crash[]> {
+/**
+ * Every boundary of every hook in the scenario: each operation a hook logged in a
+ * clean run, killed right before and right after it. With the cursors lost just
+ * before the kill, each step's boundaries come from a run that loses them just
+ * before that step too: those are the operations the killed hook performs.
+ */
+async function boundaries(scenario: Scenario, keyed: boolean, loss: Loss): Promise<Crash[]> {
+	if (loss !== "before") return logged(scenario, keyed);
+	const crashes: Crash[] = [];
+	for (const at of scenario.steps.keys()) crashes.push(...(await logged(scenario, keyed, at)));
+	return crashes;
+}
+
+/** One clean run, logging every step's hooks; with `lostAt`, only that step's, its cursors lost just before it. */
+async function logged(scenario: Scenario, keyed: boolean, lostAt?: number): Promise<Crash[]> {
 	const world = await newWorld(keyed);
 	const crashes: Crash[] = [];
 	try {
 		await scenario.setup(world);
 		for (const [index, step] of scenario.steps.entries()) {
+			if (lostAt !== undefined && index > lostAt) break;
 			await step.before?.(world);
+			if (index === lostAt) await loseCursors(world);
+			const logging = lostAt === undefined || index === lostAt;
 			const logs = step.calls.map((_, which) =>
 				join(world.projectDir, `step-${index}-${which}.log`),
 			);
 			await Promise.all(
 				step.calls.map((call, which) =>
-					hook(world, call.hook, call.input(world), {
-						spec: "",
-						log: logs[which] as string,
-					}),
+					hook(
+						world,
+						call.hook,
+						call.input(world),
+						logging ? { spec: "", log: logs[which] as string } : undefined,
+					),
 				),
 			);
+			if (!logging) continue;
 			for (const [which, path] of logs.entries()) {
 				const seen = new Map<string, number>();
 				for (const op of (await readFile(path, "utf-8").catch(() => "")).split("\n")) {
@@ -480,27 +553,29 @@ async function boundaries(scenario: Scenario, keyed: boolean): Promise<Crash[]> 
 }
 
 async function everyCrash(scenario: Scenario, keyed: boolean, loss: Loss) {
-	const crashes = await boundaries(scenario, keyed);
+	const crashes = await boundaries(scenario, keyed, loss);
 	const doubled: string[] = [];
-	let reached = 0;
+	const unreached: Crash[] = [];
 	for (let i = 0; i < crashes.length; i += PARALLEL) {
 		await Promise.all(
 			crashes.slice(i, i + PARALLEL).map(async (crash) => {
 				const result = await play(scenario, keyed, crash, loss);
-				if (result.crashed) reached += 1;
+				if (!result.crashed) unreached.push(crash);
 				const both = scenario.estimates
 					? result.estimated > 0 && result.real > 0
 					: result.estimated > 0;
 				if (result.excess !== 0 || both || result.counts.some((n) => n > 1)) {
 					doubled.push(
-						`step ${crash.step}.${crash.call} at "${crash.spec}": charges per message ${JSON.stringify(result.counts)}, at the estimate ${result.estimated}`,
+						`${where(crash)}: charges per message ${JSON.stringify(result.counts)}, at the estimate ${result.estimated}`,
 					);
 				}
 			}),
 		);
 	}
-	return { crashes: crashes.length, reached, doubled };
+	return { crashes, unreached, doubled };
 }
+
+const where = (crash: Crash) => `step ${crash.step}.${crash.call} at "${crash.spec}"`;
 
 describe("at most once — killed at every boundary, the session goes on, nothing is charged twice", () => {
 	it("the scenarios are what they claim: a clean run charges every message exactly once", async () => {
@@ -519,6 +594,10 @@ describe("at most once — killed at every boundary, the session goes on, nothin
 		const estimated = await play(ESTIMATE_FIRST, false);
 		expect(estimated.estimated).toBe(2);
 		expect(estimated.real).toBe(0);
+		// A fork of a parent in estimate mode: the fork too, so nothing for real.
+		const forked = await play(FORK_OF_STICKY, false);
+		expect(forked.estimated).toBe(3);
+		expect(forked.real).toBe(0);
 	}, 60_000);
 
 	// A binding (AUTHORIZING, REMAINDER, a hold) whose outcome nothing recorded may
@@ -611,18 +690,40 @@ describe("at most once — killed at every boundary, the session goes on, nothin
 		["a parent and its fork at once", FORKED, false, false],
 		["a parent and its fork at once, their cursors lost just before", FORKED, false, "before"],
 		["one agent at the estimate first, then with its transcript", ESTIMATE_FIRST, false, false],
+		[
+			"one agent at the estimate first, its cursor lost just after the killed hook",
+			ESTIMATE_FIRST,
+			false,
+			"after",
+		],
 		["a final answer written after Stop, posted at SessionEnd", FINAL_AFTER_STOP, false, false],
-		["the same, its cursor lost just before the killed hook", FINAL_AFTER_STOP, false, "before"],
-		["the same, its cursor lost just after the killed hook", ESTIMATE_FIRST, false, "after"],
+		[
+			"a final answer written after Stop, its cursor lost just before the killed hook",
+			FINAL_AFTER_STOP,
+			false,
+			"before",
+		],
+		["a fork of a parent in estimate mode, at once", FORK_OF_STICKY, false, false],
 	] as const)(
 		"%s",
 		async (_name, scenario, keyed, loss) => {
-			const { crashes, reached, doubled } = await everyCrash(scenario, keyed, loss);
+			const { crashes, unreached, doubled } = await everyCrash(scenario, keyed, loss);
 			expect(doubled, `charged twice:\n${doubled.join("\n")}`).toEqual([]);
-			// The harness reached the boundaries it listed (a concurrent run may take a
-			// path that never gets to some of them).
-			expect(crashes).toBeGreaterThanOrEqual(10);
-			expect(reached).toBeGreaterThan(crashes * 0.8);
+			expect(crashes.length).toBeGreaterThanOrEqual(10);
+			// Up to the first step that runs two hooks at once, a killed hook takes
+			// exactly the path its enumerating run logged, so EVERY boundary listed
+			// there is reached.
+			const raced = scenario.steps.findIndex((step) => step.calls.length > 1);
+			const solo = (crash: Crash) => raced === -1 || crash.step < raced;
+			expect(unreached.filter(solo).map(where)).toEqual([]);
+			// From that step on, which hook publishes the first-run time or claims a
+			// shared message first, or finds a lock held, is the scheduler's choice. A
+			// replay that resolves a race the other way than the enumerating run takes
+			// another path, and some boundaries listed for it never come (a soak saw 56
+			// of 70). At least half of them must.
+			const racing = crashes.filter((crash) => !solo(crash));
+			const missed = unreached.filter((crash) => !solo(crash));
+			expect(racing.length - missed.length).toBeGreaterThanOrEqual(Math.ceil(racing.length / 2));
 		},
 		300_000,
 	);

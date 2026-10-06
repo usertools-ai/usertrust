@@ -65,14 +65,15 @@
 //     be lost to an outage, never posted twice.
 //  3. An estimate is SETTLED only where it is the agent's only record, so a
 //     period settled at an estimate never has its real usage posted as well:
-//     with UT_CC_USAGE=estimate or an agent id unsafe in a path (no transcript of
-//     the agent is ever read), or once the agent's estimate mode is RECORDED —
-//     its transcript could not be read, or a hook named none — by a marker
-//     outside its cursor (`stickToEstimate`), written before any estimate is
-//     settled, so losing the cursor cannot undo it. While the transcript state
-//     cannot be used (the state dir, a corrupt cursor) or the marker cannot be
-//     written, a hold is given back instead: the transcript still holds that
-//     usage, for the first settle point that can.
+//     with an agent id unsafe in a path (no transcript of it is ever read), or
+//     once the agent's estimate mode is RECORDED — UT_CC_USAGE=estimate, its
+//     transcript could not be read, a hook named none, or (for a subagent)
+//     another agent of its session is in estimate mode, since a fork copies its
+//     ancestor's responses — by a marker outside its cursor (`stickToEstimate`),
+//     written before any estimate is settled, so losing the cursor cannot undo
+//     it. While the transcript state cannot be used (the state dir, a corrupt
+//     cursor) or the marker cannot be written, a hold is given back instead: the
+//     transcript still holds that usage, for the first settle point that can.
 //
 // STATE, per (session, agent), in <state>/transcripts (private: 0700, ours):
 //   { v: 2, byteOffset, partial, accounted, denied, assigned, estimateMode,
@@ -1019,21 +1020,55 @@ async function claimHolder(claimsDir, id, owner) {
 
 /**
  * Where an agent's transcript, cursor, claims and estimate marker live, or why it
- * has none this run. With UT_CC_USAGE=estimate, or an agent id unsafe in a path,
- * no transcript of the agent is ever read: its estimate is its only record.
- * `unavailable`: the state dir cannot be used now. A hook that names no transcript
- * gets `transcriptPath: undefined` when it `mayEstimate` (see `openAgent`), and is
- * turned away before the state dir is touched when it does not.
+ * has none this run. With an agent id unsafe in a path, no transcript of the agent
+ * is ever read: its estimate is its only record. `unavailable`: the state dir
+ * cannot be used now. A hook that reads no transcript — under UT_CC_USAGE=estimate,
+ * or naming none — gets `transcriptPath: undefined` and the reason in `unread`
+ * when it `mayEstimate`, so its estimate is recorded before it settles (see
+ * `openAgent`); one that does not is turned away before the state dir is touched.
  */
 async function locate({ sessionId, agentId, input, mayEstimate }) {
-	if (usageMode() === "estimate") return { ok: false, reason: "UT_CC_USAGE=estimate" };
+	const configured = usageMode() === "estimate";
+	if (configured && !mayEstimate) return { ok: false, reason: "UT_CC_USAGE=estimate" };
 	if (!isAgentId(agentId)) return { ok: false, reason: "agent id is not safe in a path" };
-	const transcriptPath = transcriptPathFor(input, agentId);
+	const transcriptPath = configured ? undefined : transcriptPathFor(input, agentId);
 	if (transcriptPath === undefined && !mayEstimate) {
 		return { ok: false, reason: "no transcript path" };
 	}
 	const where = await cursorLocation(sessionId, agentId);
-	return where.ok ? { ...where, transcriptPath } : where;
+	if (!where.ok) return where;
+	return {
+		...where,
+		transcriptPath,
+		unread: configured ? "UT_CC_USAGE=estimate" : "no transcript path",
+	};
+}
+
+/**
+ * A SUBAGENT inherits the estimate mode of any agent of its session: a forked
+ * subagent's transcript begins with a copy of its ancestor's responses, and an
+ * agent in estimate mode never claims its responses, so the fork would post them
+ * — usage its ancestor already settled at the estimate. Which agent a fork copied
+ * is not recorded anywhere, so every subagent of such a session settles at the
+ * estimate too. The parent ("main") copies no one: it inherits nothing. Returns why,
+ * or null; a marker dir that cannot be read throws.
+ */
+async function inheritedEstimate(where, agentId) {
+	if (agentId === "main") return null;
+	const dir = dirname(where.estimatePath);
+	const own = basename(where.estimatePath);
+	const prefix = own.slice(0, own.length - agentId.length);
+	let names;
+	try {
+		names = await readdir(dir);
+	} catch (err) {
+		if (err?.code === "ENOENT") return null;
+		throw err;
+	}
+	const other = names.find((name) => name !== own && name.startsWith(prefix));
+	return other === undefined
+		? null
+		: `${other.slice(prefix.length)} of this session settles at the estimate (a fork copies its ancestor's responses)`;
 }
 
 /** The agent's cursor, its estimate marker and the message claims, in the private state dir. */
@@ -1170,8 +1205,9 @@ export async function estimateReasonFor({ sessionId, agentId, input }) {
  * incremental read. Returns one of:
  *  - `{ kind: "estimate", reason }`: the agent's usage is settled at the
  *    estimate, and nothing of its transcript is ever posted: see `locate`, or its
- *    recorded estimate mode (`stickToEstimate`: its transcript could not be read,
- *    or a hook that `mayEstimate` named none);
+ *    recorded estimate mode (`stickToEstimate`: UT_CC_USAGE=estimate, its
+ *    transcript could not be read, a hook that `mayEstimate` named none, or one it
+ *    inherited, `inheritedEstimate`);
  *  - `{ kind: "unavailable", reason }`: its transcript state cannot be used NOW
  *    (the state dir, a corrupt cursor, an error). Nothing is posted, and nothing
  *    may be settled at the estimate either: the transcript still holds that
@@ -1190,19 +1226,26 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 		return { kind: "unavailable", reason: `estimate marker unreadable (${err?.code ?? "error"})` };
 	}
 	if (recorded !== null) return { kind: "estimate", reason: recorded };
+	let inherited;
+	try {
+		inherited = await inheritedEstimate(where, agentId);
+	} catch (err) {
+		return { kind: "unavailable", reason: `estimate markers unreadable (${err?.code ?? "error"})` };
+	}
 	const { cursorPath, transcriptPath } = where;
-	// Nothing of this agent can be read now, and a hold may settle at the estimate:
-	// recorded first, so no later hook posts the same usage for real.
-	if (transcriptPath === undefined) {
+	// Nothing of this agent is read now (UT_CC_USAGE=estimate, no transcript path),
+	// or its session's estimate mode is its own (`inheritedEstimate`), and a hold
+	// may settle at the estimate: recorded first, so no later hook posts the same
+	// usage for real.
+	if (transcriptPath === undefined || inherited !== null) {
+		const reason = inherited ?? where.unread;
 		const held = await acquireLock(cursorPath, { waitMs: Math.max(waitMs, NO_PATH_LOCK_WAIT_MS) });
 		if (held === null) {
-			return {
-				kind: "unavailable",
-				reason: "no transcript path, and another hook holds the agent's lock",
-			};
+			return { kind: "unavailable", reason: `${reason}, and another hook holds the agent's lock` };
 		}
 		try {
-			return await stickToEstimate(where, "no transcript path", true);
+			// UT_CC_USAGE=estimate is the user's own setting: nothing to announce.
+			return await stickToEstimate(where, reason, reason !== "UT_CC_USAGE=estimate");
 		} finally {
 			await held();
 		}
@@ -1224,6 +1267,12 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 		if (marked !== null) {
 			await release();
 			return { kind: "estimate", reason: marked };
+		}
+		const inheritedNow = await inheritedEstimate(where, agentId);
+		if (inheritedNow !== null) {
+			const sticky = await stickToEstimate(where, inheritedNow, true);
+			await release();
+			return sticky;
 		}
 		const read = await readCursor(cursorPath);
 		if (!read.ok) {
