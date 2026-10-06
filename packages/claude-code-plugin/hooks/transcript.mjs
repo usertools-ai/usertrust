@@ -174,6 +174,8 @@ const MAX_LINE_BYTES = 16 << 20;
 const USAGE_FIELD = Buffer.from('"usage"');
 const CALL_TIMEOUT_MS = 3_000;
 const MIN_CALL_MS = 250;
+/** How long a hook that names no transcript waits for its agent's lock to record that. */
+const NO_PATH_LOCK_WAIT_MS = 500;
 /** Stop/SubagentStop keep this much of the budget for giving back holds without usage. */
 export const CLEANUP_RESERVE_MS = 3_000;
 /** Claiming new message ids stops while less than this is left of the hook's budget. */
@@ -1036,9 +1038,12 @@ async function estimateMarker(path) {
  * Make an agent's estimate mode DURABLE — a marker outside its cursor, so losing
  * the cursor cannot undo it — BEFORE any of its holds settles at the estimate: a
  * period settled at an estimate must never have its real usage posted as well.
- * From then on `openAgent` turns the agent away from every post path. A marker
- * that cannot be written leaves the agent `unavailable`: the hold is given back,
- * never settled at the estimate.
+ * From then on `openAgent` turns the agent away from every post path. It is
+ * recorded while holding the agent's lock, as every post is made, so no hook posts
+ * while it is being recorded — except to back-fill a cursor that already records
+ * estimate mode, whose agent posts nothing anyway. A marker that cannot be written
+ * leaves the agent `unavailable`: the hold is given back, never settled at the
+ * estimate.
  */
 async function stickToEstimate(where, reason, announce) {
 	const unrecorded = (code) => ({
@@ -1097,12 +1102,23 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 		return { kind: "unavailable", reason: `estimate marker unreadable (${err?.code ?? "error"})` };
 	}
 	if (recorded !== null) return { kind: "estimate", reason: recorded };
+	const { cursorPath, transcriptPath } = where;
 	// Nothing of this agent can be read now, and a hold may settle at the estimate:
 	// recorded first, so no later hook posts the same usage for real.
-	if (where.transcriptPath === undefined) {
-		return stickToEstimate(where, "no transcript path", true);
+	if (transcriptPath === undefined) {
+		const held = await acquireLock(cursorPath, { waitMs: Math.max(waitMs, NO_PATH_LOCK_WAIT_MS) });
+		if (held === null) {
+			return {
+				kind: "unavailable",
+				reason: "no transcript path, and another hook holds the agent's lock",
+			};
+		}
+		try {
+			return await stickToEstimate(where, "no transcript path", true);
+		} finally {
+			await held();
+		}
 	}
-	const { cursorPath, transcriptPath } = where;
 	const release = await acquireLock(cursorPath, { waitMs });
 	if (release === null) {
 		const peek = await readCursor(cursorPath);
@@ -1114,6 +1130,13 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 		return { kind: "busy", lastModel: peek.cursor.lastModel, transcriptPath };
 	}
 	try {
+		// Again under the lock: a hook that recorded estimate mode since the check
+		// above did so holding it (`stickToEstimate`), so it is done.
+		const marked = await estimateMarker(where.estimatePath);
+		if (marked !== null) {
+			await release();
+			return { kind: "estimate", reason: marked };
+		}
 		const read = await readCursor(cursorPath);
 		if (!read.ok) {
 			// Post nothing, and leave the cursor exactly as it is.
