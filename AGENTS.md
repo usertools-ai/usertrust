@@ -567,7 +567,9 @@ with zero mapped to 1. The post and void deliberately write ZERO `user_data`: Ti
 copies the pending transfer's values onto them, so the settlement inherits the tags natively and the
 post path is unchanged (`tests/integration/principal-tags.tb.test.ts` pins this against a real
 cluster). `query_transfers` filters on the tags (intersection), so work can be rolled up by agent,
-unit and role from the ledger alone — but a tag is a hash: the label is in the audit chain, and a
+unit and role from the ledger alone. A tag query returns the PENDING hold AND its post or void, so a
+SPEND roll-up sums only the posted transfers (`post_pending_transfer`) — summing every match counts
+each settled call twice and a voided reserve as spend. And a tag is a hash: the label is in the audit chain, and a
 ledger roll-up is a candidate set to confirm there (the 32-bit role slot is the most exposed to
 collisions). An untagged call passes no `userData`, so its hold is created exactly as before.
 *Scope:* the headless governor (and so `packages/server`). `trust()` has no `AuthorizeParams`

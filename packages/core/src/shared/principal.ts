@@ -118,6 +118,11 @@ export function ledgerTag(
  * `type` and `origin` stay in the audit chain only — the three native slots go to the three
  * roll-up dimensions. Query with TigerBeetle's `query_transfers`, filtering on
  * the same values (`principalLedgerTags({ unit: "acme" }).userData64`).
+ *
+ * A tag query returns EVERY transfer of a tagged call: the PENDING hold (the
+ * reserve) AND its post or void, which inherit the tags. To total SPEND, sum only
+ * the posted transfers (`flags.post_pending_transfer`); summing every match
+ * double-counts each settled call and counts voided reserves as spend.
  */
 export function principalLedgerTags(principal: Principal | undefined): PrincipalLedgerTags {
 	return {
