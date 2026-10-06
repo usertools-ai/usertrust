@@ -1652,6 +1652,12 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 			},
 		});
 		const { port: realPort } = await real.listen();
+		// What THIS server honours decides what the plugin sends: today's server
+		// publishes no capabilities, so the plugin takes its at-most-once path.
+		const health = (await (await fetch(`http://127.0.0.1:${realPort}/v1/health`)).json()) as {
+			capabilities?: string[];
+		};
+		const recordsPrincipal = health.capabilities?.includes("principal") === true;
 		await startServer({ forwardTo: `http://127.0.0.1:${realPort}`, key: KEY });
 		// Two responses before the tool call: the hold carries them.
 		await writeMain([
@@ -1675,24 +1681,19 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 				principal?: unknown;
 			};
 		});
-		// A dryRun server claims no `idempotency-key` (no ledger anchor: a retry after
-		// a settle would charge again), so no key is sent; it records the principal,
-		// on every receipt.
+		// No key is sent: a server without capabilities claims no `idempotency-key`,
+		// and neither does a dryRun one (it has no ledger anchor). A principal is
+		// sent, and recorded on every receipt, only by a server that publishes it.
+		const principal = { id: "main", type: "main", origin: `claude-code:${SESSION}` };
 		for (const a of authorizes()) {
 			expect(a.status).toBe(200);
 			expect(a.body).not.toHaveProperty("idempotencyKey");
-			expect(a.body.principal).toEqual({
-				id: "main",
-				type: "main",
-				origin: `claude-code:${SESSION}`,
-			});
+			if (recordsPrincipal) expect(a.body.principal).toEqual(principal);
+			else expect(a.body).not.toHaveProperty("principal");
 		}
 		for (const receipt of receipts) {
-			expect(receipt.principal).toEqual({
-				id: "main",
-				type: "main",
-				origin: `claude-code:${SESSION}`,
-			});
+			if (recordsPrincipal) expect(receipt.principal).toEqual(principal);
+			else expect(receipt).not.toHaveProperty("principal");
 		}
 		const expected = [
 			{ inputTokens: 150, outputTokens: 1000, cacheReadTokens: 82_000, cacheWriteTokens: 2_000 },

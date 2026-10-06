@@ -123,7 +123,10 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   request fields it does not know, so it would accept a key and silently ignore
   it. When the read fails, nothing is assumed either way: no key or principal is
   sent, and a hold is still released — falling back to abort only on a server
-  that has no release route — with a note on stderr.
+  that has no release route — with a note on stderr. **No released
+  usertrust-server publishes these capabilities yet:** until one does, the plugin
+  runs the at-most-once path above — it never posts usage twice, and a settle lost
+  to an outage can go unrecorded.
 - **Denied usage.** If the remainder's authorize is refused (402 budget, 403
   policy, 429 anomaly), those responses are marked `denied` and never retried, and
   a stderr note gives the token counts that could not be recorded.
