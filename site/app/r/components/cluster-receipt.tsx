@@ -193,12 +193,15 @@ function ClusterReceiptCard({
 }
 
 /**
- * A " · "-joined list whose names never break inside themselves: a hyphenated
- * model name is not one word to the browser, and at 360px "claude-opus-5-5"
- * split as "claude-opus-" / "5-5". Each name rides in a nowrap span WITH its
- * trailing separator, so the only break opportunity is the plain space after
- * a "·". `tail` (R24's custom-model sentence) is prose and wraps normally.
- * Reads exactly as `modelsLine` / the providers join.
+ * A " · "-joined list whose names stay whole: a hyphenated model name is not
+ * one word to the browser, and at 360px "claude-opus-5-5" split as
+ * "claude-opus-" / "5-5". Each name rides in an atomic inline-block WITH its
+ * trailing separator, so a line breaks at the plain space after a "·" and a
+ * name moves to the next line whole. Only a name wider than the whole column
+ * (a long dated id on a narrow phone) wraps inside itself (`max-w-full` plus
+ * `overflow-wrap: anywhere`) rather than overflowing the card; a nowrap span
+ * would have pushed past it. `tail` (R24's custom-model sentence) is prose and
+ * wraps normally. Reads exactly as `modelsLine` / the providers join.
  */
 function UnbreakableList({ items, tail }: { items: string[]; tail?: string | undefined }) {
 	return (
@@ -207,7 +210,7 @@ function UnbreakableList({ items, tail }: { items: string[]; tail?: string | und
 				const more = index < items.length - 1 || tail !== undefined;
 				return (
 					<Fragment key={item}>
-						<span className="whitespace-nowrap" data-list-unit="">
+						<span className="inline-block max-w-full [overflow-wrap:anywhere]" data-list-unit="">
 							{more ? `${item} ·` : item}
 						</span>
 						{more ? " " : null}
