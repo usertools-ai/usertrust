@@ -24,6 +24,7 @@ import {
 	readFile,
 	rm,
 	stat,
+	symlink,
 	utimes,
 	writeFile,
 } from "node:fs/promises";
@@ -637,6 +638,114 @@ describe("estimate mode and the cursor", () => {
 		for (const a of authorizes())
 			expect(a.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
 		expect((await readCursor()).accounted).toEqual([]);
+	});
+
+	it("NO transcript path: the estimate is made sticky FIRST — a later hook that has the path never posts that agent's usage", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
+		const { transcript_path: _path, ...noPath } = preInput("tu_1");
+		const pre = await run("pre-tool-use.mjs", noPath);
+		const { transcript_path: _post, ...noPathPost } = postInput("tu_1");
+		await run("post-tool-use.mjs", noPathPost);
+		// Later hooks DO name the transcript: its usage was already settled at the estimate.
+		await run("pre-tool-use.mjs", preInput("tu_2"));
+		await run("post-tool-use.mjs", postInput("tu_2"));
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => [s.body.usageSource, s.body.inputTokens])).toEqual([
+			["estimated", TOOL_INPUT_ESTIMATE],
+			["estimated", TOOL_INPUT_ESTIMATE],
+		]);
+		for (const a of authorizes()) {
+			expect(a.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+		}
+		expect(pre.stderr).toContain("no transcript path; this agent now settles at the ESTIMATE");
+	});
+
+	it.each([
+		["its directory cannot be made", "estimate"],
+		["its name is taken by something that does not read back", `estimate/${SESSION}__main`],
+	])(
+		"estimate mode that cannot be RECORDED (%s) settles nothing at the estimate: the hold is given back",
+		async (_why, dangling) => {
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
+			// A dangling symlink: it reads as absent, and no marker can be written there.
+			await mkdir(join(stateDir, "transcripts", "estimate"), { recursive: true, mode: 0o700 });
+			await rm(join(stateDir, "transcripts", dangling), { recursive: true, force: true });
+			await symlink(join(stateDir, "nowhere", "at-all"), join(stateDir, "transcripts", dangling));
+			const { transcript_path: _path, ...noPath } = preInput("tu_1");
+			const pre = await run("pre-tool-use.mjs", noPath);
+			const { transcript_path: _post, ...noPathPost } = postInput("tu_1");
+			await run("post-tool-use.mjs", noPathPost);
+			// Settled at the estimate, this hold's usage could be posted again for real.
+			expect(settles().map((s) => [s.body.usageSource, s.body.inputTokens])).toEqual([
+				["provider", 0],
+			]);
+			expect(pre.stderr).toContain("estimate mode could not be recorded");
+			expect(pre.stderr).toContain("given back");
+		},
+	);
+
+	it("a recorded estimate mode that cannot be READ posts nothing and settles nothing at the estimate", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
+		// Not a file: the marker can be neither read nor ruled out.
+		await mkdir(join(stateDir, "transcripts", "estimate", `${SESSION}__main`), {
+			recursive: true,
+			mode: 0o700,
+		});
+		const pre = await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => [s.body.usageSource, s.body.inputTokens])).toEqual([
+			["provider", 0],
+		]);
+		expect(pre.stderr).toContain("estimate marker unreadable");
+	});
+
+	it("a cursor that records estimate mode without its marker gets one: losing the cursor later changes nothing", async () => {
+		await startServer(okResponder);
+		// Sticky the old way: in the cursor only.
+		await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
+		await writeFile(
+			cursorPath(),
+			JSON.stringify({
+				v: 2,
+				byteOffset: 0,
+				nextSeq: 0,
+				partial: {},
+				accounted: [],
+				denied: [],
+				assigned: {},
+				authorizingAt: {},
+				estimateMode: true,
+				estimateReason: "transcript unreadable (EACCES)",
+				lastModel: null,
+				unresolved: {},
+			}),
+		);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		await rm(cursorPath());
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.usageSource)).toEqual(["estimated"]);
+	});
+
+	it("a STICKY agent stays sticky when its cursor is lost: the estimate marker lives outside the cursor", async () => {
+		await startServer(okResponder);
+		// No transcript file yet: sticky at the first hook.
+		await run("pre-tool-use.mjs", preInput("tu_1"));
+		await run("post-tool-use.mjs", postInput("tu_1"));
+		expect((await readCursor()).estimateMode).toBe(true);
+		await rm(cursorPath());
+		// The transcript appears, holding the usage the estimate already stood for.
+		await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+		await run("pre-tool-use.mjs", preInput("tu_2"));
+		await run("post-tool-use.mjs", postInput("tu_2"));
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.usageSource)).toEqual(["estimated", "estimated"]);
+		expect(settles().map((s) => s.body.inputTokens)).not.toContain(9);
 	});
 
 	it("a CORRUPT cursor posts nothing and is left byte-identical", async () => {
@@ -1594,49 +1703,80 @@ describe("state that is lost, slow or unwritable", () => {
 		);
 	});
 
-	it("a claim made just before the hook died is still this agent's to post: the cursor recorded the intent first", async () => {
+	it("a claim made by a hook that died before saving is never posted: nothing can say it was not", async () => {
 		await startServer(okResponder);
-		await writeMain(responseEntries("msg_a", SONNET, u(4, 4)));
-		// The state a hook killed right after claiming leaves: the cursor knows msg_a
-		// as `claiming`, and the claim file names this agent.
-		const dir = join(stateDir, "transcripts");
-		await mkdir(dir, { recursive: true, mode: 0o700 });
-		await writeFile(
-			cursorPath(),
-			JSON.stringify({
-				v: 2,
-				byteOffset: (await readFile(mainTranscript)).length,
-				nextSeq: 1,
-				partial: {
-					msg_a: {
-						n: 0,
-						model: SONNET,
-						synthetic: false,
-						complete: true,
-						claimed: false,
-						claiming: true,
-						inputTokens: 4,
-						outputTokens: 4,
-						cacheReadTokens: 0,
-						cacheWriteTokens: 0,
-					},
-				},
-				accounted: [],
-				denied: [],
-				assigned: {},
-				authorizingAt: {},
-				estimateMode: false,
-				estimateReason: null,
-				lastModel: SONNET,
-				unresolved: {},
-			}),
-		);
+		await writeMain([]);
+		await run("stop.mjs", stopInput());
+		// The state a hook killed right after claiming msg_a leaves: the claim names
+		// this agent, and the cursor has no record of it.
+		await appendMain(responseEntries("msg_a", SONNET, u(4, 4)));
 		const digest = createHash("sha256").update("msg_a").digest("hex");
-		await mkdir(join(dir, "claims", digest.slice(0, 2)), { recursive: true, mode: 0o700 });
-		await writeFile(join(dir, "claims", digest.slice(0, 2), digest.slice(2)), `${SESSION}/main`);
+		const claims = join(stateDir, "transcripts", "claims");
+		await mkdir(join(claims, digest.slice(0, 2)), { recursive: true, mode: 0o700 });
+		await writeFile(join(claims, digest.slice(0, 2), digest.slice(2)), `${SESSION}/main`);
 		const stop = await run("stop.mjs", stopInput());
-		expect(settles().map((s) => s.body.inputTokens)).toEqual([4]);
-		expect(stop.stderr).not.toContain("before its cursor");
+		// At most once: an under-count, said on stderr, never a second charge.
+		expect(settles()).toEqual([]);
+		expect(stop.stderr).toContain("or by a hook that died before saving");
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
+	});
+
+	it("a message re-read after its id left the cursor's history is never posted again: its claim already exists", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(6, 6)));
+		await run("stop.mjs", stopInput());
+		// Ten thousand ids later msg_a has left `accounted`, and the transcript is
+		// replaced by a shorter file holding it: read again from 0.
+		const cursor = await readCursor();
+		await writeFile(cursorPath(), JSON.stringify({ ...cursor, accounted: [] }));
+		await writeFile(
+			mainTranscript,
+			`${responseEntries("msg_a", SONNET, u(6, 6), {}, { partials: 0 }).join("\n")}\n`,
+		);
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([6]);
+	});
+
+	it("H4: a lost cursor's recovered claim INTENT never re-posts a message already charged", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(7, 9)));
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => [s.body.inputTokens, s.body.outputTokens])).toEqual([[7, 9]]);
+		// The cursor is lost, and the hook that re-read the history recorded its intent
+		// to claim msg_a, then deferred it (out of time) or died: the state that leaves.
+		const lost = {
+			v: 2,
+			byteOffset: (await readFile(mainTranscript)).length,
+			nextSeq: 1,
+			partial: {
+				msg_a: {
+					n: 0,
+					model: SONNET,
+					synthetic: false,
+					complete: true,
+					claimed: false,
+					claiming: true,
+					inputTokens: 7,
+					outputTokens: 9,
+					cacheReadTokens: 0,
+					cacheWriteTokens: 0,
+				},
+			},
+			accounted: [],
+			denied: [],
+			assigned: {},
+			authorizingAt: {},
+			estimateMode: false,
+			estimateReason: null,
+			lastModel: SONNET,
+			unresolved: {},
+		};
+		await writeFile(cursorPath(), JSON.stringify(lost));
+		const again = await run("stop.mjs", stopInput());
+		// The claim on msg_a is this agent's, but not this cursor's: never posted again.
+		expect(settles().map((s) => [s.body.inputTokens, s.body.outputTokens])).toEqual([[7, 9]]);
+		expect(again.stderr).toContain("before its cursor was removed or reset");
+		expect((await readCursor()).accounted).toEqual(["msg_a"]);
 	});
 
 	it("a message whose claim cannot be made is NOT posted, says so, and posts once it can", async () => {

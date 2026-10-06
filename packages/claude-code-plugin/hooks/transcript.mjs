@@ -51,23 +51,28 @@
 //     it, given back when none was. A failed settle's hold is given back for
 //     hygiene (the server's TTL sweep is the backstop). An unresolved vehicle's
 //     retry is a new authorize under its key, not the old hold.
-//  2. Every transcript message id is posted AT MOST ONCE. Across agents: the
-//     first agent to CLAIM an id (`selectOwn`) is the only one that posts it.
-//     Within the agent: an id is assigned to one hold (and settled with it),
-//     posted by one remainder settle, parked in one unresolved vehicle, or
-//     marked `denied`; it is held in the cursor before anything that could post
-//     it, and released only when the server proved nothing was posted
+//  2. Every transcript message id is posted AT MOST ONCE, decided in ONE place:
+//     every post path takes its ids from `selectOwn`, which returns an id only
+//     under a CLAIM this cursor made and recorded — published exclusively before
+//     anything could post it. A claim that already exists, whoever made it, is
+//     never posted again. Within the agent: an id is assigned to one hold (and
+//     settled with it), posted by one remainder settle, parked in one unresolved
+//     vehicle, or marked `denied`; it is held in the cursor before anything that
+//     could post it, and released only when the server proved nothing was posted
 //     (authorize failed, or settle answered 400, or an unkeyed 404). Under a key
 //     an ambiguous outcome — a 5xx, no answer, a crash mid-settle — is retried
 //     as the same vehicle: exactly once. Without one it stays claimed: usage can
 //     be lost to an outage, never posted twice.
-//  3. An estimate is SETTLED only where it is the agent's only record: in
-//     estimate mode (UT_CC_USAGE=estimate, or an agent whose transcript could not
-//     be read: sticky, recorded in its cursor), or for an agent whose transcript
-//     is never read (an id unsafe in a path, no transcript path) — never together
-//     with real usage for the same agent. While the transcript state cannot be
-//     used (the state dir, a corrupt cursor), a hold is given back instead: the
-//     transcript still holds that usage, for the first settle point that can.
+//  3. An estimate is SETTLED only where it is the agent's only record, so a
+//     period settled at an estimate never has its real usage posted as well:
+//     with UT_CC_USAGE=estimate or an agent id unsafe in a path (no transcript of
+//     the agent is ever read), or once the agent's estimate mode is RECORDED —
+//     its transcript could not be read, or a hook named none — by a marker
+//     outside its cursor (`stickToEstimate`), written before any estimate is
+//     settled, so losing the cursor cannot undo it. While the transcript state
+//     cannot be used (the state dir, a corrupt cursor) or the marker cannot be
+//     written, a hold is given back instead: the transcript still holds that
+//     usage, for the first settle point that can.
 //
 // STATE, per (session, agent), in <state>/transcripts (private: 0700, ours):
 //   { v: 2, byteOffset, partial, accounted, denied, assigned, estimateMode,
@@ -90,6 +95,8 @@
 //  - unresolved: vehicle key → { ids, model, agentType, counts }.
 // Shared by every agent of every session: <state>/transcripts/claims, one file
 // per claimed message id (named by its SHA-256), naming the agent that owns it.
+// Per (session, agent), OUTSIDE the cursor: <state>/transcripts/estimate/
+// <session>__<agent>, the agent's recorded estimate mode.
 // A hold's outcome is journalled beside its pending file (<hold>.settling while
 // in flight, <hold>.done after) so the cursor can be brought up to date by the
 // next hook that gets the lock, even when the settling hook could not.
@@ -182,6 +189,8 @@ const PRINCIPAL_FIELD = /^[A-Za-z0-9._:-]{1,128}$/;
 const VEHICLE_KEY = /^cc:[0-9a-f]{48}$/;
 /** Where the cross-agent message claims live, inside the private state dir (see `selectOwn`). */
 const CLAIMS_DIR = "claims";
+/** Where an agent's estimate mode is recorded, outside its cursor (see `stickToEstimate`). */
+const ESTIMATE_DIR = "estimate";
 
 /**
  * Untrusted strings in a path or an actor string (agent type/id) →
@@ -381,7 +390,6 @@ function parseCursor(raw) {
 			synthetic: m.synthetic === true,
 			complete: m.complete === true,
 			claimed: m.claimed === true,
-			claiming: m.claiming === true,
 			inputTokens: count(m.inputTokens),
 			outputTokens: count(m.outputTokens),
 			cacheReadTokens: count(m.cacheReadTokens),
@@ -823,7 +831,6 @@ function foldLine(cursor, bytes) {
 			synthetic: model === SYNTHETIC_MODEL,
 			complete: false,
 			claimed: false,
-			claiming: false,
 			inputTokens: 0,
 			outputTokens: 0,
 			cacheReadTokens: 0,
@@ -866,39 +873,29 @@ function selectNew(cursor, live) {
 }
 
 /**
- * The new messages THIS agent may post. A forked subagent's transcript begins with
- * a copy of its ancestor's entries — the same message ids, rewritten to the fork's
- * own agentId (measured) — so a cursor per agent would post that usage once more
- * per fork. The first agent of any session to claim an id owns it, for good: the
- * claim is a file published exclusively, named by the id's SHA-256. An id another
- * agent owns is accounted here as posted there.
+ * THE CHOKE POINT: the new messages THIS agent may post. Every post path takes its
+ * messages from here — a window (`prepareWindow`) and a remainder (`postRemainder`)
+ * — so "a message is settled at most once" is decided here and nowhere else. (Both
+ * reach it through `openAgent`, which turns away an agent whose estimate mode is
+ * recorded: its usage is never posted.)
  *
- * The cursor records the INTENT to claim (`claiming`) before any claim file
- * exists, so this agent always knows its own claims — a hook killed, or a cursor
- * write failed, between the claim and the cursor's next save loses nothing. A
- * claim that names this agent but that the cursor has no record of was made by a
- * cursor since removed or reset: what it posted then is not posted again, and
- * what it had not is written off, with a note — never posted twice. An id whose
- * claim cannot be made or read, or that the hook's time no longer covers, is left
- * for a later settle point, never posted unverified.
+ * A message is this agent's to post only under a CLAIM this cursor made and
+ * recorded (`claimed`): a file per message id (named by its SHA-256), published
+ * exclusively — link(2), which never replaces a name — BEFORE anything can post
+ * it. A claim that ALREADY exists is never posted again, whoever made it:
+ *  - another agent (a fork's copy of its ancestor's messages): posted there, and
+ *    accounted here;
+ *  - this agent, with no record of it in this cursor — a cursor since removed or
+ *    reset, a hook killed between claiming and saving, or a message re-read after
+ *    its id left the cursor's history: posted then, or written off with a note.
+ * Nothing about such a claim can say whether it was posted, so it never is again:
+ * the worst a lost record does is under-count. An id whose claim cannot be made or
+ * read, or that the hook's time no longer covers, is left for a later settle
+ * point, never posted unverified.
  */
 async function selectOwn(opened) {
 	const { cursor } = opened;
 	const fresh = selectNew(cursor, opened.live);
-	const knew = new Set();
-	let marked = false;
-	for (const m of fresh) {
-		if (m.claimed) continue;
-		const state = cursor.partial.get(m.id);
-		if (state === undefined) continue;
-		if (state.claiming) knew.add(m.id);
-		else {
-			state.claiming = true;
-			marked = true;
-		}
-	}
-	if (marked) await opened.save();
-
 	const own = [];
 	const failed = new Map();
 	let deferred = 0;
@@ -914,7 +911,7 @@ async function selectOwn(opened) {
 			continue;
 		}
 		const claim = await claimHolder(opened.claimsDir, m.id, opened.owner);
-		if (claim.holder === opened.owner && (claim.created || knew.has(m.id))) {
+		if (claim.created) {
 			const state = cursor.partial.get(m.id);
 			if (state !== undefined) state.claimed = true;
 			own.push(m);
@@ -941,7 +938,7 @@ async function selectOwn(opened) {
 	}
 	if (writtenOff > 0) {
 		process.stderr.write(
-			`usertrust: ${writtenOff} transcript message(s) were claimed by this agent before its cursor was removed or reset — not posted again (any of them not yet posted is written off)\n`,
+			`usertrust: ${writtenOff} transcript message(s) were claimed by this agent before its cursor was removed or reset, or by a hook that died before saving — not posted again (any of them not yet posted is written off)\n`,
 		);
 	}
 	return own;
@@ -989,68 +986,130 @@ async function claimHolder(claimsDir, id, owner) {
 }
 
 /**
- * Where an agent's transcript and cursor live, or why it has none this run. The
- * first three reasons hold for every hook of the agent — no transcript of it is
- * ever read (Claude Code sends `transcript_path` on every hook, or on none) — so
- * its estimate is its only record; one marked `unavailable` may clear later.
+ * Where an agent's transcript, cursor, claims and estimate marker live, or why it
+ * has none this run. With UT_CC_USAGE=estimate, or an agent id unsafe in a path,
+ * no transcript of the agent is ever read: its estimate is its only record.
+ * `unavailable`: the state dir cannot be used now. A hook that names no transcript
+ * gets `transcriptPath: undefined` when it `mayEstimate` (see `openAgent`), and is
+ * turned away before the state dir is touched when it does not.
  */
-async function locate({ sessionId, agentId, input }) {
+async function locate({ sessionId, agentId, input, mayEstimate }) {
 	if (usageMode() === "estimate") return { ok: false, reason: "UT_CC_USAGE=estimate" };
 	if (!isAgentId(agentId)) return { ok: false, reason: "agent id is not safe in a path" };
 	const transcriptPath = transcriptPathFor(input, agentId);
-	if (transcriptPath === undefined) return { ok: false, reason: "no transcript path" };
+	if (transcriptPath === undefined && !mayEstimate) {
+		return { ok: false, reason: "no transcript path" };
+	}
 	const where = await cursorLocation(sessionId, agentId);
 	return where.ok ? { ...where, transcriptPath } : where;
 }
 
-/** The agent's cursor file, and the message claims, inside the private state dir. */
+/** The agent's cursor, its estimate marker and the message claims, in the private state dir. */
 async function cursorLocation(sessionId, agentId) {
 	if (!isAgentId(agentId)) return { ok: false, reason: "agent id is not safe in a path" };
 	const dir = await privateStateDir();
 	if (!dir.ok) return { ok: false, reason: dir.reason, unavailable: true };
+	const name = `${sanitize(sessionId)}__${agentId}`;
 	return {
 		ok: true,
-		cursorPath: join(dir.dir, `${sanitize(sessionId)}__${agentId}.json`),
+		cursorPath: join(dir.dir, `${name}.json`),
 		claimsDir: join(dir.dir, CLAIMS_DIR),
+		estimatePath: join(dir.dir, ESTIMATE_DIR, name),
 	};
 }
 
 /**
- * Why an agent is in estimate mode right now, or null if it is not. Read
- * without the lock (cursor writes are atomic).
+ * Why an agent's estimate mode is recorded, or null when it is not. A marker that
+ * cannot be read throws: an agent that may be in estimate mode posts nothing.
  */
+async function estimateMarker(path) {
+	try {
+		const text = await readFile(path, "utf-8");
+		return text === "" ? "estimate mode" : text;
+	} catch (err) {
+		if (err?.code === "ENOENT") return null;
+		throw err;
+	}
+}
+
+/**
+ * Make an agent's estimate mode DURABLE — a marker outside its cursor, so losing
+ * the cursor cannot undo it — BEFORE any of its holds settles at the estimate: a
+ * period settled at an estimate must never have its real usage posted as well.
+ * From then on `openAgent` turns the agent away from every post path. A marker
+ * that cannot be written leaves the agent `unavailable`: the hold is given back,
+ * never settled at the estimate.
+ */
+async function stickToEstimate(where, reason, announce) {
+	const unrecorded = (code) => ({
+		kind: "unavailable",
+		reason: `${reason}, and estimate mode could not be recorded (${code})`,
+	});
+	try {
+		await mkdir(dirname(where.estimatePath), { recursive: true, mode: 0o700 });
+		await writeFile(where.estimatePath, reason, { flag: "wx", mode: 0o600 });
+	} catch (err) {
+		if (err?.code !== "EEXIST") return unrecorded(err?.code ?? errText(err));
+		// Recorded already, by a hook that got here first — if it reads back.
+		const recorded = await estimateMarker(where.estimatePath).catch(() => null);
+		return recorded === null ? unrecorded("EEXIST") : { kind: "estimate", reason: recorded };
+	}
+	return { kind: "estimate", reason, becameSticky: announce };
+}
+
+/** Why an agent's hold settles at the estimate, for PostToolUse's note; null when unknown. */
 export async function estimateReasonFor({ sessionId, agentId, input }) {
-	const where = await locate({ sessionId, agentId, input });
-	if (!where.ok) return where.reason;
-	const read = await readCursor(where.cursorPath);
-	if (!read.ok) return read.reason;
-	return read.cursor.estimateMode ? (read.cursor.estimateReason ?? "transcript unreadable") : null;
+	if (usageMode() === "estimate") return "UT_CC_USAGE=estimate";
+	if (!isAgentId(agentId)) return "agent id is not safe in a path";
+	const marker = join(
+		stateRoot(),
+		"transcripts",
+		ESTIMATE_DIR,
+		`${sanitize(sessionId)}__${agentId}`,
+	);
+	const recorded = await estimateMarker(marker).catch(() => null);
+	if (recorded !== null) return recorded;
+	return transcriptPathFor(input, agentId) === undefined ? "no transcript path" : null;
 }
 
 /**
  * Open an agent's transcript state: lock, cursor, journal reconcile, then an
  * incremental read. Returns one of:
  *  - `{ kind: "estimate", reason }`: the agent's usage is settled at the
- *    estimate, because nothing of its transcript is ever posted — see `locate`,
- *    or a cursor that records estimate mode (sticky: its transcript could not be
- *    read);
- *  - `{ kind: "unavailable", reason }`: its transcript state cannot be used
- *    NOW (the state dir, a corrupt cursor, an error). Nothing is posted, and
- *    nothing may be settled at the estimate either: the transcript still holds
- *    that usage, and the first settle point that can use the state posts it;
+ *    estimate, and nothing of its transcript is ever posted: see `locate`, or its
+ *    recorded estimate mode (`stickToEstimate`: its transcript could not be read,
+ *    or a hook that `mayEstimate` named none);
+ *  - `{ kind: "unavailable", reason }`: its transcript state cannot be used NOW
+ *    (the state dir, a corrupt cursor, an error). Nothing is posted, and nothing
+ *    may be settled at the estimate either: the transcript still holds that
+ *    usage, and the first settle point that can use the state posts it;
  *  - `{ kind: "busy", lastModel }`, or `{ kind: "ready", ... }` holding the lock.
  */
-async function openAgent({ sessionId, agentId, input, waitMs = 0 }) {
-	const where = await locate({ sessionId, agentId, input });
-	if (!where.ok)
+async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = false }) {
+	const where = await locate({ sessionId, agentId, input, mayEstimate });
+	if (!where.ok) {
 		return { kind: where.unavailable ? "unavailable" : "estimate", reason: where.reason };
+	}
+	let recorded;
+	try {
+		recorded = await estimateMarker(where.estimatePath);
+	} catch (err) {
+		return { kind: "unavailable", reason: `estimate marker unreadable (${err?.code ?? "error"})` };
+	}
+	if (recorded !== null) return { kind: "estimate", reason: recorded };
+	// Nothing of this agent can be read now, and a hold may settle at the estimate:
+	// recorded first, so no later hook posts the same usage for real.
+	if (where.transcriptPath === undefined) {
+		return stickToEstimate(where, "no transcript path", true);
+	}
 	const { cursorPath, transcriptPath } = where;
 	const release = await acquireLock(cursorPath, { waitMs });
 	if (release === null) {
 		const peek = await readCursor(cursorPath);
 		if (!peek.ok) return { kind: "unavailable", reason: peek.reason };
 		if (peek.cursor.estimateMode) {
-			return { kind: "estimate", reason: peek.cursor.estimateReason ?? "transcript unreadable" };
+			// A cursor from before the marker: record it now.
+			return stickToEstimate(where, peek.cursor.estimateReason ?? "transcript unreadable", false);
 		}
 		return { kind: "busy", lastModel: peek.cursor.lastModel, transcriptPath };
 	}
@@ -1064,17 +1123,20 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0 }) {
 		const { cursor } = read;
 		if (cursor.estimateMode) {
 			await release();
-			return { kind: "estimate", reason: cursor.estimateReason ?? "transcript unreadable" };
+			return stickToEstimate(where, cursor.estimateReason ?? "transcript unreadable", false);
 		}
 		const { live, finished } = await reconcile(cursor, sessionId, agentId);
 		const ingested = await ingest(cursor, transcriptPath);
 		if (!ingested.ok) {
-			cursor.estimateMode = true;
-			cursor.estimateReason = ingested.reason;
-			await writeCursor(cursorPath, cursor);
-			await removeFiles(finished);
+			const sticky = await stickToEstimate(where, ingested.reason, true);
+			if (sticky.kind === "estimate") {
+				cursor.estimateMode = true;
+				cursor.estimateReason = ingested.reason;
+				await writeCursor(cursorPath, cursor);
+				await removeFiles(finished);
+			}
 			await release();
-			return { kind: "estimate", reason: ingested.reason, becameSticky: true };
+			return sticky;
 		}
 		if (ingested.badLines > 0) {
 			process.stderr.write(
@@ -1135,7 +1197,7 @@ async function reconcileAgent(sessionId, agentId) {
  * built from, and `principal` is what the server may record.
  */
 export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }) {
-	const opened = await openAgent({ sessionId, agentId, input });
+	const opened = await openAgent({ sessionId, agentId, input, mayEstimate: true });
 	if (opened.kind === "estimate" || opened.kind === "unavailable") {
 		return { mode: opened.kind, reason: opened.reason, becameSticky: opened.becameSticky === true };
 	}

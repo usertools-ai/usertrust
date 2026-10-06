@@ -114,18 +114,22 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   remainder is parked this way before its call, so a hook killed mid-call leaves
   it to be retried too. A `dryRun` server does not claim keys (it has no ledger to
   anchor them), so against one the plugin keeps the at-most-once rule below.
-- **At most once, otherwise.** Per (session, agent) a cursor records which
-  response ids are assigned, accounted or denied. An id is claimed before anything
-  could post it and released only when the server proved nothing was posted (the
+- **At most once, otherwise.** Every way a response can be posted — a tool call's
+  hold, the remainder — takes its responses from ONE function, which posts a
+  response only under a claim it has just made (or that this cursor recorded
+  making). A claim that already exists is never posted again, whoever made it:
+  another agent, this agent under a cursor since removed or reset, or a hook that
+  died between claiming and saving. Nothing about such a claim says whether it was
+  posted, so the worst a lost record does is under-count, with a note. Per
+  (session, agent) a cursor records which response ids are assigned, accounted or
+  denied; an id is released only when the server proved nothing was posted (the
   authorize failed, or the settle answered 400 — or 404, without a key). Without a
   key, a settle that answers 5xx or not at all may have posted, so its ids stay
   claimed and the hold is given back for hygiene: an outage can lose usage, but
   never post it twice. A cursor that exists but cannot be read is never treated as
   empty — transcript usage is not posted until it is fixed or removed, and tool
-  holds are given back meanwhile, not settled at the estimate. Removing it
-  never posts anything twice: the agent's claims still say which responses it took
-  on, and those are not posted again — any of them it had not yet posted
-  (including unresolved settles) is written off, with a note.
+  holds are given back meanwhile, not settled at the estimate. Removing it never
+  posts anything twice: the agent's claims still stand.
 - **What the server honours** is read from its unauthenticated `/v1/health`
   `capabilities` once per hook, and never cached on disk: an older server strips
   request fields it does not know, so it would accept a key and silently ignore
@@ -139,14 +143,17 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   policy, 429 anomaly), those responses are marked `denied` and never retried, and
   a stderr note gives the token counts that could not be recorded.
 - **Sticky estimate mode.** If an agent's transcript cannot be read at any hook,
-  that agent switches to the per-call estimate for the rest of the session —
-  settled as `usageSource: "estimated"`, with a stderr note giving the reason — and
-  its transcript is never read again, so no usage is ever counted both as an
-  estimate and as real. `UT_CC_USAGE=estimate` does the same for every agent. A
-  hold is settled at the estimate ONLY then (and for a host that sends no
-  `transcript_path`): when the plugin's own state is unusable for now, the hold is
-  given back instead, because the transcript still holds that usage.
-- **Private, durable state.** Cursors and claims live in
+  or a hook names no `transcript_path`, that agent switches to the per-call
+  estimate for the rest of the session — settled as `usageSource: "estimated"`,
+  with a stderr note giving the reason — and its transcript is never posted
+  again, so no usage is ever counted both as an estimate and as real. The switch
+  is recorded OUTSIDE the agent's cursor (`$UT_CC_STATE_DIR/transcripts/estimate/`)
+  before any estimate is settled, so losing the cursor cannot undo it; if it
+  cannot be recorded, the hold is given back instead. `UT_CC_USAGE=estimate` uses
+  the estimate for every agent. A hold is settled at the estimate ONLY in these
+  cases: when the plugin's own state is unusable for now, the hold is given back,
+  because the transcript still holds that usage.
+- **Private, durable state.** Cursors, claims and estimate-mode records live in
   `$UT_CC_STATE_DIR/transcripts/`, created `0700`; if that directory is not a real
   directory owned by you without group or other write access, transcript
   accounting waits: nothing is posted, and holds are given back rather than
@@ -154,8 +161,9 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   posts that usage, once. The default is
   `~/.claude/usertrust-cc` (`$CLAUDE_CONFIG_DIR/usertrust-cc` when that is set),
   beside Claude Code's own transcripts — not a temp dir, which the OS may purge:
-  **deleting the state dir while transcripts remain re-posts their usage.** A
-  message whose claim cannot be made is not posted, and a stderr note says so.
+  **deleting the state dir while transcripts remain re-posts their usage** (and
+  so can restoring an older copy of it). A message whose claim cannot be made is
+  not posted, and a stderr note says so.
 - **Hook time budget.** Each hook gives up after about 10 seconds (the hooks'
   timeout is 15): its calls never run past that, claiming new responses stops
   early enough to leave them time, and Stop keeps time back to give back holds;
