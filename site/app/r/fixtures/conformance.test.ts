@@ -2021,12 +2021,12 @@ test("cluster vectors: the harness refuses each rejection vector at its named ga
 	}
 });
 
-test("cluster vectors: 141 in all, 41 of them boundary controls that must still verify", () => {
-	assert.equal(clusterVectors.length, 141);
-	assert.equal(clusterVectors.filter((vector) => vector.expect.kind === "verified").length, 41);
+test("cluster vectors: 142 in all, 42 of them boundary controls that must still verify", () => {
+	assert.equal(clusterVectors.length, 142);
+	assert.equal(clusterVectors.filter((vector) => vector.expect.kind === "verified").length, 42);
 	assert.equal(
 		new Set(clusterVectors.map((vector) => vector.label)).size,
-		141,
+		142,
 		"labels are unique",
 	);
 });

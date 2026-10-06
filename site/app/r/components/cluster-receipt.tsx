@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { proofRungs } from "../lib/card-model";
 import {
 	ANCHOR_BINDING_RESOLVER_ASSERTED,
@@ -102,11 +103,18 @@ function ClusterReceiptCard({
 	return (
 		<div data-testid="cluster-receipt-card">
 			<section className="ut-card">
-				<header className="flex items-center gap-2.5 border-b border-white/[0.09] bg-white/[0.03] px-6 py-3.5">
+				{/* One row from 320px up: the label never shrinks, the ID sits inside its copy chip and ellipsizes there. */}
+				<header
+					className="flex flex-nowrap items-center gap-2.5 border-b border-white/[0.09] bg-white/[0.03] px-6 py-3.5"
+					data-testid="card-header"
+				>
 					<span className="size-[7px] shrink-0 rounded-full bg-ut shadow-[0_0_0_3px_rgba(48,209,88,0.16)]" />
-					<span className="text-[13px] font-semibold tracking-tight text-ut">Receipt</span>
-					<span className="ml-auto font-mono text-[12.5px]" data-testid="receipt-short-id">
-						<HashValue value={receiptId} label="receipt ID" head={10} />
+					<span className="shrink-0 text-[13px] font-semibold tracking-tight text-ut">Receipt</span>
+					<span
+						className="ml-auto flex min-w-0 font-mono text-[12.5px]"
+						data-testid="receipt-short-id"
+					>
+						<HashValue value={receiptId} label="receipt ID" head={10} variant="chip" />
 					</span>
 				</header>
 
@@ -153,7 +161,12 @@ function ClusterReceiptCard({
 						{claims.models !== "" ? (
 							<div className="flex items-baseline justify-between gap-4">
 								<dt className="shrink-0 text-paper/38">Models</dt>
-								<dd className="m-0 text-right text-paper">{claims.models}</dd>
+								<dd className="m-0 text-right text-paper" data-testid="models">
+									<UnbreakableList
+										items={claims.catalog.catalog}
+										tail={claims.catalog.customMeaning}
+									/>
+								</dd>
 							</div>
 						) : null}
 						{providerCount > 0 ? (
@@ -161,7 +174,9 @@ function ClusterReceiptCard({
 								<dt className="shrink-0 text-paper/38">
 									{providerCount === 1 ? "Provider" : "Providers"}
 								</dt>
-								<dd className="m-0 text-right text-paper">{claims.providers}</dd>
+								<dd className="m-0 text-right text-paper" data-testid="providers">
+									<UnbreakableList items={claims.projection.providers} />
+								</dd>
 							</div>
 						) : null}
 					</dl>
@@ -174,6 +189,33 @@ function ClusterReceiptCard({
 				</div>
 			</section>
 		</div>
+	);
+}
+
+/**
+ * A " · "-joined list whose names never break inside themselves: a hyphenated
+ * model name is not one word to the browser, and at 360px "claude-opus-5-5"
+ * split as "claude-opus-" / "5-5". Each name rides in a nowrap span WITH its
+ * trailing separator, so the only break opportunity is the plain space after
+ * a "·". `tail` (R24's custom-model sentence) is prose and wraps normally.
+ * Reads exactly as `modelsLine` / the providers join.
+ */
+function UnbreakableList({ items, tail }: { items: string[]; tail?: string | undefined }) {
+	return (
+		<>
+			{items.map((item, index) => {
+				const more = index < items.length - 1 || tail !== undefined;
+				return (
+					<Fragment key={item}>
+						<span className="whitespace-nowrap" data-list-unit="">
+							{more ? `${item} ·` : item}
+						</span>
+						{more ? " " : null}
+					</Fragment>
+				);
+			})}
+			{tail === undefined ? null : <span data-list-tail="">{tail}</span>}
+		</>
 	);
 }
 

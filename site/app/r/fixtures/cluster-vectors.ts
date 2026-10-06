@@ -18,6 +18,7 @@
  * `conformance.test.ts` (the independent harness) and `lib/wire-cluster.test.ts`
  * (the page) both walk this list, and neither imports the other.
  */
+import { createHash } from "node:crypto";
 import chainedFixture from "./cluster/chained.json";
 import firstFixture from "./cluster/first.json";
 import skippedFixture from "./cluster/skipped.json";
@@ -926,6 +927,45 @@ function sixteenEarlierWindows(receipt: Bag): Bag[] {
 	});
 }
 
+/** §7 step 8's digest of a disclosed pair list — the same recompute the harness runs. */
+function transferSetRootOf(pairs: Bag[]): string {
+	return createHash("sha256")
+		.update(
+			Buffer.concat([
+				Buffer.from("usertrust/receipt-transfers/v1\n", "utf-8"),
+				Buffer.from(JSON.stringify(pairs)),
+			]),
+		)
+		.digest("hex");
+}
+
+/**
+ * The shape of the live receipt `ut1_EjdnKqFWFoGxnansQuSsBj`: two hyphenated
+ * Anthropic models and 14 governed calls. Its Models line is what broke a model
+ * name mid-token ("claude-opus-" / "5-5") in a 360px viewport, so the rendering
+ * tests pin the glance's wrap contract against it as well as CL1-CL5. The pair
+ * list is honest — 14 pairs, root recomputed — so it verifies through both doors.
+ */
+export const LIVE_SHAPED_CLUSTER_VECTOR: ClusterVector = {
+	label: "boundary: the live-receipt shape (claude-haiku-4-5 + claude-opus-5-5, 14 governed calls)",
+	base: "cluster/chained.json",
+	receipt: (r) => {
+		const data = dataOf(r);
+		data.models = ["claude-haiku-4-5", "claude-opus-5-5"];
+		data.providers = ["anthropic"];
+		const pairs = Array.from({ length: 14 }, (_, index) => ({
+			authorizationTransferId: createHash("md5").update(`auth-${index}`).digest("hex"),
+			settlementTransferId: createHash("md5").update(`settle-${index}`).digest("hex"),
+		}));
+		data.transferSet = pairs;
+		data.transferSetRoot = transferSetRootOf(pairs);
+		data.windowTransferCount = 28;
+		spendOf(r).transferCount = 14;
+	},
+	expect: { kind: "verified" },
+	rule: "a two-model, 14-call window is an ordinary verified cluster receipt",
+};
+
 const boundaryVectors: ClusterVector[] = [
 	{
 		label: "boundary: windowEnd === windowStart (an instant-long window)",
@@ -1105,6 +1145,7 @@ const boundaryVectors: ClusterVector[] = [
 		expect: verified,
 		rule: "nothing in the contract is stricter than what the resolver serves",
 	},
+	LIVE_SHAPED_CLUSTER_VECTOR,
 	...CONTRACT_SKIP_REASONS.map(
 		(reason): ClusterVector => ({
 			label: `boundary: skip reason "${reason}" on CL3's middle window`,
