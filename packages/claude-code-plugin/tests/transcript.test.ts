@@ -387,26 +387,27 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 		expect(requests).toHaveLength(2);
 	});
 
-	it("a hold is sized at each tier's own rate where the server can (≈327 for this window's input side), and never under the real cost where it can't", async () => {
+	it("a hold is sized at each tier's own rate where the server can (477 for the real-server window), and never under the real cost where it can't", async () => {
 		// The real-server test's first window: 150 in, 82 000 cache read, 2 000 cache
 		// write, 1 000 out. Priced as usertrust prices a hold — the estimated input at
 		// the higher of the input and cache-write rates, each cache tier given apart at
-		// its own (the pinned `authorize-cache-tiers` contract) — at today's Sonnet rates.
+		// its own (the `authorize-cache-tiers` contract, #231) — at today's Sonnet rates.
 		const rates = getModelRates(SONNET);
 		const holdRates = {
 			...rates,
 			inputPer1k: Math.max(rates.inputPer1k, effectiveCacheWriteRate(rates)),
 		};
-		const inputSide = (body: Record<string, unknown>) =>
+		// The window's part of a hold: the fields, less the tool call's own estimate.
+		const windowHold = (body: Record<string, unknown>) =>
 			costFromRates(
 				holdRates,
-				Number(body.estimatedInputTokens),
-				0,
+				Number(body.estimatedInputTokens) - TOOL_INPUT_ESTIMATE,
+				Number(body.maxOutputTokens) - TOOL_OUTPUT_HOLD,
 				Number(body.estimatedCacheReadTokens ?? 0),
 				Number(body.estimatedCacheWriteTokens ?? 0),
 			);
-		const realInputSide = costFromRates(rates, 150, 0, 82_000, 2_000);
-		expect(realInputSide).toBe(326);
+		const realCost = costFromRates(rates, 150, 1_000, 82_000, 2_000);
+		expect(realCost).toBe(476);
 		const window = [
 			...responseEntries("msg_a", SONNET, u(120, 800, 40_000, 2_000)),
 			...responseEntries("msg_b", SONNET, u(30, 200, 42_000, 0)),
@@ -427,7 +428,8 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 			estimatedCacheWriteTokens: 2_000,
 			maxOutputTokens: 1_000 + TOOL_OUTPUT_HOLD,
 		});
-		expect(inputSide(tiered as Record<string, unknown>)).toBe(327);
+		// The server side's own hand count for this window, at each tier's rate.
+		expect(windowHold(tiered as Record<string, unknown>)).toBe(477);
 		expect(tieredRemainder).toMatchObject({
 			estimatedInputTokens: 5,
 			estimatedCacheReadTokens: 44_000,
@@ -448,10 +450,37 @@ describe("the normal path — the hold is the settlement vehicle", () => {
 		const plain = authorizes()[0]?.body as Record<string, unknown>;
 		expect(plain).not.toHaveProperty("estimatedCacheReadTokens");
 		expect(plain.estimatedInputTokens).toBe(150 + 82_000 + 2_000 + TOOL_INPUT_ESTIMATE);
-		// (Doubling the cache writes, as before, held 3 231.)
-		expect(inputSide(plain)).toBe(3_156);
-		expect(inputSide(plain)).toBeGreaterThanOrEqual(realInputSide);
+		// (Doubling the cache writes, as before, held 3 381.)
+		expect(windowHold(plain)).toBe(3_306);
+		expect(windowHold(plain)).toBeGreaterThanOrEqual(realCost);
 	});
+
+	it.each([
+		["an older server (no `authorize-cache-tiers`)", []],
+		["a server whose capabilities are unknown", null],
+	] as const)(
+		"%s never gets the cache tiers apart: it would strip them and hold too little",
+		async (_server, published) => {
+			capabilities = published === null ? null : [...published];
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, u(10, 20, 3_000, 400)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await appendMain(responseEntries("msg_b", SONNET, u(5, 6, 700, 80)));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			const carried = authorizes().filter(
+				(a) => (a.body.params as { usageOrigin?: string }).usageOrigin === "transcript",
+			);
+			expect(carried.map((a) => a.body.estimatedInputTokens)).toEqual([
+				10 + 3_000 + 400 + TOOL_INPUT_ESTIMATE,
+				5 + 700 + 80,
+			]);
+			for (const a of carried) {
+				expect(a.body).not.toHaveProperty("estimatedCacheReadTokens");
+				expect(a.body).not.toHaveProperty("estimatedCacheWriteTokens");
+			}
+		},
+	);
 
 	it("parallel tool calls: one hold gets the window, the rest settle at zero — 0 aborts in 5", async () => {
 		await startServer(okResponder);
