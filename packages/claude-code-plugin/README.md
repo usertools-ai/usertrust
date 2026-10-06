@@ -143,9 +143,13 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   another agent, this agent under a cursor since removed or reset, or a hook that
   died between claiming and saving. Nothing about such a claim says whether it was
   posted, so the worst a lost record does is under-count, with a note. Per
-  (session, agent) a cursor records which response ids are assigned, accounted or
-  denied; an id is released only when the server proved nothing was posted (the
-  authorize failed, or the settle answered 400 — or 404, without a key). Without a
+  (session, agent) a cursor records which response ids are bound to a hold or a
+  remainder, accounted or denied — bound BEFORE any call that could post them. A
+  binding whose outcome was never recorded (a hook killed just after its settle
+  went out, or just before) may have posted, so its responses are never posted
+  again: charged once, or not at all. An id is released only when the server
+  proved nothing was posted (the authorize failed, or the settle answered 400 — or
+  404, without a key). Without a
   key, a settle that answers 5xx or not at all may have posted, so its ids stay
   claimed and the hold is given back for hygiene: an outage can lose usage, but
   never post it twice. A cursor that exists but cannot be read is never treated as
