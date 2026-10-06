@@ -98,9 +98,12 @@ describe("pre-tool-use hook", () => {
 			transferId: string;
 			agentId: string;
 			estimatedInputTokens: number;
+			gate: 1;
 		};
-		// JSON.stringify({command:"ls"}) is 16 chars -> 4 estimated tokens.
+		// JSON.stringify({command:"ls"}) is 16 chars -> 4 estimated tokens. `gate: 1`:
+		// recorded under the settle-attempt gate, so a 404 to its settle means it expired.
 		expect(entry).toEqual({
+			gate: 1,
 			toolUseId: "tu_1",
 			transferId: "tx_1",
 			agentId: "main",

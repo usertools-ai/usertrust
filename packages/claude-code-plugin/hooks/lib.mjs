@@ -266,6 +266,8 @@ export function stateFilePath(sessionId, agentId, entryKey) {
  * Record a pending hold as its own file (atomic: tmp + rename). The entry key
  * is the toolUseId when present, else the transferId. The agent id is stored in
  * the file body so a whole-session sweep can recover which agent owns the hold.
+ * Every hold is marked `gate: 1` (`isGated`) in this same atomic write, never
+ * later.
  */
 export async function recordPending(sessionId, agentId, entry, { settling = false } = {}) {
 	const entryKey = entry.toolUseId ?? entry.transferId;
@@ -276,6 +278,7 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 	await writeFile(
 		tmp,
 		JSON.stringify({
+			gate: 1,
 			toolUseId: entry.toolUseId ?? null,
 			transferId: entry.transferId,
 			agentId: String(agentId ?? "main"),
@@ -287,12 +290,27 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				: {}),
 			// A transcript-mode hold also records what it will settle: the model it
 			// was authorized at, the transcript message ids assigned to it, and their
-			// summed counts. An estimate-mode hold keeps the original shape exactly.
+			// summed counts.
 			...(entry.usage === "transcript" ? transcriptHoldFields(entry) : {}),
 		}),
 	);
 	await rename(tmp, path);
 	return path;
+}
+
+/**
+ * Whether a hold was recorded under the settle-attempt gate: its file carries
+ * `gate: 1`. Such a hold's settle is claimed (`.json` → `.settling`) before it is
+ * sent, so it is settled at most once. A hold an earlier release recorded has no
+ * mark. That release kept a hold whose settle posted and lost its answer as a
+ * pending `.json`, so the hold may have been charged already. Any other value,
+ * including a later format's, is treated the same way. Such a hold is never
+ * paired with a call by a host that sends no tool_use_id (`takePendingEntry`) and
+ * never re-authorized after a 404 (post-tool-use.mjs `settleEstimateHold`): Stop
+ * only gives it back.
+ */
+export function isGated(entry) {
+	return entry?.gate === 1;
 }
 
 /** A pending hold's settle-attempted path: `<hold>.settling` beside `<hold>.json`. */
@@ -409,6 +427,8 @@ export async function listPending(sessionId, agentId) {
 				...(typeof parsed.estimatedInputTokens === "number"
 					? { estimatedInputTokens: parsed.estimatedInputTokens }
 					: {}),
+				// The mark as written, whatever its value: `isGated` judges it.
+				...(Object.hasOwn(parsed, "gate") ? { gate: parsed.gate } : {}),
 				...(parsed.usage === "transcript" ? transcriptHoldFields(parsed) : {}),
 				mtimeMs,
 			});
@@ -424,16 +444,19 @@ export async function listPending(sessionId, agentId) {
  * Find the pending hold for a tool call within one agent's holds. A non-empty
  * toolUseId matches that row or returns null — it must NOT fall through to
  * another tool's reservation (AUD-005). The oldest-entry fallback is only for
- * hosts that omit tool_use_id (missing/null/empty). Does NOT delete — the
- * caller clears the file only after a successful settle (clearPending), so a
- * failed settle leaves the hold for Stop cleanup.
+ * hosts that omit tool_use_id (missing/null/empty), and it takes the oldest hold
+ * recorded under the settle-attempt gate (`isGated`). An unmarked hold, an
+ * earlier release's, may have been charged already, so it is never paired with a
+ * call: Stop gives it back. Does NOT delete — the caller clears the file only
+ * after a successful settle (clearPending), so a failed settle leaves the hold
+ * for Stop cleanup.
  */
 export async function takePendingEntry(sessionId, agentId, toolUseId) {
 	const entries = await listPending(sessionId, agentId);
 	if (typeof toolUseId === "string" && toolUseId !== "") {
 		return entries.find((entry) => entry.toolUseId === toolUseId) ?? null;
 	}
-	return entries[0] ?? null;
+	return entries.find(isGated) ?? null;
 }
 
 /** Delete one pending-hold file. Idempotent — a missing file is fine. */

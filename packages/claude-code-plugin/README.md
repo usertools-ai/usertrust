@@ -312,10 +312,14 @@ settle point. An estimate hold is charged once, on a fresh hold of its own — b
 only on a clean 404 `unknown transferId` to its one settle. The plugin settles
 each transferId at most once, so that 404 means the hold is gone unposted. A
 timeout, no answer, a 5xx or `settled: false` may have posted, and is never
-re-authorized. A call denied at the prompt never reaches PostToolUse: its hold
-is given back at Stop (or by the TTL sweep), uncharged. If the server runs in
-`evaluate_only` mode, denials come back as shadow responses: nothing is reserved
-or settled for them, and the would_deny reason goes to the debug log.
+re-authorized. Neither is a 404 to a hold an earlier release recorded (its file
+has no `gate` mark): that release kept a hold whose settle went unanswered, so
+the hold may have been charged already. Such a hold is only given back at Stop,
+and a host that sends no tool_use_id never pairs a call with it. A call denied
+at the prompt never reaches PostToolUse: its hold is given back at Stop (or by
+the TTL sweep), uncharged. If the server runs in `evaluate_only` mode, denials
+come back as shadow responses: nothing is reserved or settled for them, and the
+would_deny reason goes to the debug log.
 
 **Nothing a hook writes can drive your terminal.** Every line the plugin writes to
 stderr (Claude Code's debug log) and the session-start message go through one

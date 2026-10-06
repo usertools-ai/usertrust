@@ -24,12 +24,16 @@
 // One failure is not ambiguous: a 404 `unknown transferId`
 // means the hold is gone unposted — the server voids a pending hold after five
 // minutes, and a call can wait that long at Claude Code's permission prompt — so
-// the call is charged once on a fresh hold of its own (`settleEstimateHold`).
+// the call is charged once on a fresh hold of its own (`settleEstimateHold`). That
+// holds only for a hold recorded under the settle-attempt gate (lib.mjs
+// `isGated`). One an earlier release recorded is never re-authorized: Stop only
+// gives it back.
 import { unlink } from "node:fs/promises";
 import {
 	claimForSettle,
 	defaultModel,
 	estimateTokens,
+	isGated,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
@@ -80,6 +84,12 @@ function noteIfAmbiguous(response, transferId) {
  * sweep while the call waited at a permission prompt, or released. The call is
  * then charged once, on a fresh hold of its own — marked .settling from birth and
  * settled once; the old transferId is never settled again.
+ *
+ * The invariant covers only holds recorded under it: those whose file carries
+ * `gate: 1` (lib.mjs `isGated`). An earlier release kept a hold whose settle
+ * posted and lost its answer as a pending .json, so an unmarked hold's 404 may
+ * mean it was charged already. Such a hold is kept .settling for Stop, which only
+ * gives it back. It is never re-authorized.
  */
 async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	const claimed = await claimForSettle(sessionId, agentId, entry.entryKey);
@@ -96,6 +106,12 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	if (!holdIsGone(response)) {
 		say(
 			`usertrust: settle ${entry.transferId} returned ${response.status}; hold kept for Stop cleanup`,
+		);
+		return;
+	}
+	if (!isGated(entry)) {
+		say(
+			`usertrust: settle ${entry.transferId} returned 404, but the hold was not recorded under the settle-attempt gate, so it may have been charged already; hold kept for Stop cleanup`,
 		);
 		return;
 	}

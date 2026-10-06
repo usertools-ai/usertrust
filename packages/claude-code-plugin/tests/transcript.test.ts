@@ -1796,6 +1796,133 @@ describe("estimate holds", () => {
 			expect(await holdStateFiles()).toEqual([]);
 		});
 
+		/**
+		 * A hold file as an earlier release wrote it: no `gate` mark (or `mark`, when a
+		 * test gives one), an input estimate of 5 000, and older than any hold the test
+		 * records, so it heads the queue.
+		 */
+		async function seedLegacyHold(transferId: string, toolUseId: string | null, mark?: unknown) {
+			const path = join(stateDir, `${SESSION}__main__${toolUseId ?? transferId}.json`);
+			await writeFile(
+				path,
+				JSON.stringify({
+					...(mark === undefined ? {} : { gate: mark }),
+					toolUseId,
+					transferId,
+					agentId: "main",
+					estimatedInputTokens: 5000,
+				}),
+			);
+			const minuteAgo = new Date(Date.now() - 60_000);
+			await utimes(path, minuteAgo, minuteAgo);
+		}
+
+		for (const [mark, what] of [
+			[undefined, "no mark"],
+			[2, "gate: 2, a later format"],
+		] as const) {
+			for (const calls of [1, 2]) {
+				it(`after an upgrade, with no tool_use_id: an earlier release's POSTED hold (${what}) is never paired, settled again or re-authorized; ${calls} call(s), each charged once at its OWN estimate`, async () => {
+					// The earlier release settled tx_L. The settle POSTED and its answer was
+					// lost, so that release kept the .json. The server has forgotten tx_L, so
+					// any settle or release of it answers 404.
+					const pending = new Set<string>();
+					const charged: Array<{ id: string; inputTokens: unknown; outputTokens: unknown }> = [];
+					await startServer((path, body) => {
+						if (path === "/v1/authorize") {
+							nextTransfer += 1;
+							pending.add(`tx_${nextTransfer}`);
+							return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+						}
+						const id = String(body.transferId);
+						if (!pending.delete(id)) return notFound;
+						if (path === "/v1/settle") {
+							charged.push({ id, inputTokens: body.inputTokens, outputTokens: body.outputTokens });
+							return { status: 200, json: { settled: true, transferId: id } };
+						}
+						return { status: 200, json: { released: true, aborted: true } };
+					});
+					await seedLegacyHold("tx_L", null, mark);
+					await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+					const command = (k: number) => "x".repeat(40 * k);
+					const response = (k: number) => "y".repeat(100 * k);
+					const tokens = (text: string) => Math.max(1, Math.ceil(text.length / 4));
+					for (let k = 1; k <= calls; k += 1) {
+						await run(
+							"pre-tool-use.mjs",
+							{ ...stopInput(), tool_name: "Bash", tool_input: { command: command(k) } },
+							env,
+						);
+						await run(
+							"post-tool-use.mjs",
+							{ ...stopInput(), tool_name: "Bash", tool_response: response(k) },
+							env,
+						);
+					}
+					await run("stop.mjs", stopInput(), env);
+					// One charge per call, each at that call's own input and output estimates:
+					// the legacy 5 000 is never billed, and no input estimate is billed twice.
+					expect(charged).toEqual(
+						Array.from({ length: calls }, (_, i) => ({
+							id: `tx_${i + 1}`,
+							inputTokens: tokens(JSON.stringify({ command: command(i + 1) })),
+							outputTokens: tokens(JSON.stringify(response(i + 1))),
+						})),
+					);
+					expect(authorizes()).toHaveLength(calls);
+					// tx_L is never settled again, only given back at Stop (that 404 is fine).
+					expect(requests.filter((r) => r.body.transferId === "tx_L").map((r) => r.path)).toEqual([
+						expect.stringMatching(/^\/v1\/(release|abort)$/),
+					]);
+					expect(await holdStateFiles()).toEqual([]);
+				});
+			}
+		}
+
+		for (const [mark, what, reauthorized] of [
+			[1, "gate: 1, this release's mark", true],
+			[undefined, "no mark", false],
+			[2, "gate: 2, a later format", false],
+			["1", 'gate: "1", malformed', false],
+			[true, "gate: true, malformed", false],
+		] as const) {
+			it(`a matched hold (${what}) whose settle answers 404 is ${reauthorized ? "re-authorized once: the expired-hold recovery" : "never re-authorized, only given back at Stop"}`, async () => {
+				// A hold its own PreToolUse recorded, settled by its own PostToolUse: the
+				// 404 says the server no longer has it. Only this release's mark makes that
+				// 404 mean "expired, never posted".
+				const charged: string[] = [];
+				await startServer((path, body) => {
+					if (path === "/v1/authorize") {
+						nextTransfer += 1;
+						return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+					}
+					const id = String(body.transferId);
+					if (id === "tx_L") return notFound;
+					if (path === "/v1/settle") charged.push(id);
+					return { status: 200, json: { settled: true, released: true, transferId: id } };
+				});
+				await seedLegacyHold("tx_L", "tu_L", mark);
+				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+				const post = await run("post-tool-use.mjs", postInput("tu_L", { tool_name: "Bash" }), env);
+				await run("stop.mjs", stopInput(), env);
+				expect(authorizes()).toHaveLength(reauthorized ? 1 : 0);
+				expect(settles().map((s) => s.body.transferId)).toEqual(
+					reauthorized ? ["tx_L", "tx_1"] : ["tx_L"],
+				);
+				expect(charged).toEqual(reauthorized ? ["tx_1"] : []);
+				if (reauthorized) {
+					expect(post.stderr).toContain("charging this call once on tx_1");
+				} else {
+					expect(post.stderr).toContain("may have been charged already");
+					expect(requests.filter((r) => r.body.transferId === "tx_L").map((r) => r.path)).toEqual([
+						"/v1/settle",
+						expect.stringMatching(/^\/v1\/(release|abort)$/),
+					]);
+				}
+				expect(await holdStateFiles()).toEqual([]);
+			});
+		}
+
 		it("the fresh hold is settle-attempted from birth: a later FIFO pick never takes it, even when its settle went unanswered", async () => {
 			// No tool_use_id. Call 1's hold expired (404); its fresh hold tx_2 posts, and
 			// that answer is lost. Call 2's PostToolUse must take call 2's own hold.
@@ -1829,6 +1956,14 @@ describe("estimate holds", () => {
 					{ ...stopInput(), tool_name: "Bash", tool_response: `r${k}` },
 					env,
 				);
+				if (k === 1) {
+					// The fresh hold carries the gate's mark from the write that created it.
+					const fresh = join(stateDir, `${SESSION}__main__tx_2.settling`);
+					expect(JSON.parse(await readFile(fresh, "utf-8"))).toMatchObject({
+						gate: 1,
+						transferId: "tx_2",
+					});
+				}
 			}
 			await run("stop.mjs", stopInput(), env);
 			// tx_1 expired; tx_2 (call 1's fresh hold) posted once; tx_3 is call 2's.
@@ -1910,7 +2045,13 @@ describe("estimate holds", () => {
 		});
 		expect(
 			JSON.parse(await readFile(join(stateDir, `${SESSION}__main__tu_1.json`), "utf-8")),
-		).toEqual({ toolUseId: "tu_1", transferId: "tx_1", agentId: "main", estimatedInputTokens: 4 });
+		).toEqual({
+			gate: 1,
+			toolUseId: "tu_1",
+			transferId: "tx_1",
+			agentId: "main",
+			estimatedInputTokens: 4,
+		});
 		const post = await run("post-tool-use.mjs", postInput("tu_1"), env);
 		expect(post.stderr).toBe("");
 		await run("stop.mjs", stopInput(), env);
