@@ -11,8 +11,9 @@ through usertrust: it only reads what Claude Code already recorded.
 
 **Watch-only by default.** Installed, the plugin never blocks a tool call, and
 never approves one either: Claude Code's own permission settings apply exactly as
-they would without it. A call the server refuses (over budget, or denied by
-policy) is written down as one that would have been blocked, and a call that
+they would without it. A call the server refuses (over budget, denied by policy,
+or cut off as an anomaly) is written down as one that would have been blocked,
+and a call that
 could not be metered (the server is unreachable, say) as a gap. Set
 `UT_CC_MODE=enforce` to block — see [Modes](#modes-watch-only-by-default).
 
@@ -270,7 +271,7 @@ both modes.
 | The server's answer at PreToolUse | watch (the default) | enforce (`UT_CC_MODE=enforce`) |
 | --- | --- | --- |
 | A reservation (200) | No decision: your permission settings apply | `allow` |
-| Over budget or denied by policy (402/403) | No decision, and a `would_block` record | `deny`: the call is blocked |
+| Refused: over budget (402), denied by policy (403), an anomaly cutoff (429) | No decision, and a `would_block` record | `deny`: the call is blocked |
 | No usable answer: unreachable, a timeout, any other status, a malformed body | No decision, and a `gap` record | Blocked (exit 2). With `UT_FAIL_OPEN=1`: `allow`, and a `gap` record |
 | A shadow answer from an `evaluate_only` server | No decision | `allow` |
 
@@ -287,8 +288,9 @@ refuses to authorize, so that usage is not on the ledger (the remainder posted a
 Stop is refused too — see *Denied usage* above), and the `would_block` records
 are where it shows.
 
-**Enforce** blocks, as earlier releases did by default. A budget (402) or policy
-(403) denial blocks the call, whatever `UT_FAIL_OPEN` says. If the server cannot
+**Enforce** blocks, as earlier releases did by default. A budget (402), policy
+(403) or anomaly (429) refusal blocks the call, whatever `UT_FAIL_OPEN` says: it is
+a decision, not an outage. If the server cannot
 answer usably, the hook exits 2 and the call is **blocked** — unless
 `UT_FAIL_OPEN=1`: then the call proceeds, answered `allow` with a "proceeding
 ungoverned" reason, and the miss is written down as a `gap` record.
@@ -302,7 +304,15 @@ Upgrading from a release where blocking was the default: set
 
 In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran;
 an estimate hold whose settle fails is left on disk for Stop cleanup, and the
-server's pending-TTL sweep voids anything orphaned. If the server runs in
+server's pending-TTL sweep voids anything orphaned. A call can wait at Claude
+Code's permission prompt for longer than the server keeps a hold (five minutes).
+A transcript hold whose settle then answers 404 gives its window back to a later
+settle point. An estimate hold is charged once, on a fresh hold of its own — but
+only on a clean 404 `unknown transferId` to its one settle. The plugin settles
+each transferId at most once, so that 404 means the hold is gone unposted. A
+timeout, no answer, a 5xx or `settled: false` may have posted, and is never
+re-authorized. A call denied at the prompt never reaches PostToolUse: its hold
+is given back at Stop (or by the TTL sweep), uncharged. If the server runs in
 `evaluate_only` mode, denials come back as shadow responses: nothing is reserved
 or settled for them, and the would_deny reason goes to the debug log.
 
@@ -326,7 +336,8 @@ trimmed:
 {"at":"2026-10-06T10:00:05.000Z","kind":"gap","mode":"watch","session":"<session id>","agent":"main","tool":"Bash","reason":"fetch failed"}
 ```
 
-`agent` is the subagent's id (`main` for the parent); a `gap` written in enforce
+`agent` is the subagent's id (`main` for the parent), and a `would_block`'s
+`status` is the refusal's: 402, 403 or 429. A `gap` written in enforce
 mode (only with `UT_FAIL_OPEN=1`) says `"mode":"enforce"`. In transcript mode a gap
 loses no usage by itself: the responses the hold would have carried stay in the
 transcript to be posted at a later settle point. In estimate mode

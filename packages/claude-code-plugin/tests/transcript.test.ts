@@ -318,6 +318,16 @@ beforeEach(async () => {
 	capabilities = [];
 });
 afterEach(async () => {
+	// The invariant a settle's 404 rests on (post-tool-use.mjs `settleEstimateHold`):
+	// across every path these tests drive — estimate, transcript window, remainder,
+	// retries, faults — the plugin never sends a second settle for any transferId.
+	const settled = requests
+		.filter((r) => r.path === "/v1/settle")
+		.map((r) => String(r.body.transferId));
+	expect(
+		settled.filter((id, i) => settled.indexOf(id) !== i),
+		"a transferId was settled twice",
+	).toEqual([]);
 	fake?.closeAllConnections();
 	fake?.close();
 	fake = undefined;
@@ -1609,6 +1619,95 @@ describe("estimate holds", () => {
 			JSON.stringify({ toolUseId, transferId, agentId, estimatedInputTokens: 4 }),
 		);
 	}
+
+	describe("a settle that cannot reach its hold: a clean 404 is charged once afresh; anything ambiguous never is", () => {
+		const env = { UT_CC_USAGE: "estimate" };
+		const notFound = { status: 404, json: { error: "not_found", reason: "unknown transferId" } };
+		/** A ledger: an authorize mints tx_N; `fault` answers the FIRST settle of tx_1, posted or not. */
+		function ledger(
+			fault: "expired" | "posted-then-lost" | "posted-then-500" | "unposted-500" | "settled-false",
+		) {
+			const charged: string[] = [];
+			const responder: Responder = (path, body) => {
+				if (path === "/v1/authorize") {
+					nextTransfer += 1;
+					return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+				}
+				const id = String(body.transferId);
+				if (path === "/v1/settle") {
+					if (id === "tx_1" && fault === "expired") return notFound;
+					if (id === "tx_1" && fault === "unposted-500")
+						return { status: 500, json: { error: "internal" } };
+					charged.push(id);
+					if (id === "tx_1" && fault === "posted-then-lost") return { status: 0, json: null };
+					if (id === "tx_1" && fault === "posted-then-500")
+						return { status: 500, json: { error: "internal" } };
+					if (id === "tx_1" && fault === "settled-false")
+						return { status: 200, json: { settled: false, transferId: id } };
+					return { status: 200, json: { settled: true, transferId: id } };
+				}
+				return { status: 200, json: { released: true, aborted: true } };
+			};
+			return { responder, charged };
+		}
+		const play = async () => {
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			const post = await run("post-tool-use.mjs", postInput("tu_1", { tool_name: "Bash" }), env);
+			await run("stop.mjs", stopInput(), env);
+			return post;
+		};
+
+		it("a 404 `unknown transferId` (the hold expired at a permission prompt) is charged exactly once, on a fresh hold", async () => {
+			const { responder, charged } = ledger("expired");
+			await startServer(responder);
+			const post = await play();
+			expect(requests.map((r) => [r.path, r.body.transferId ?? null, r.status])).toEqual([
+				["/v1/authorize", null, 200],
+				["/v1/settle", "tx_1", 404],
+				["/v1/authorize", null, 200],
+				["/v1/settle", "tx_2", 200],
+			]);
+			expect(authorizes()[1]?.body).toMatchObject({
+				model: SONNET,
+				estimatedInputTokens: TOOL_INPUT_ESTIMATE,
+				maxOutputTokens: TOOL_OUTPUT_HOLD,
+				params: { hook: "PostToolUse", tool_name: "Bash", replaces: "tx_1" },
+				actor: `claude-code:${SESSION}`,
+			});
+			expect(settles()[1]?.body).toEqual({
+				transferId: "tx_2",
+				inputTokens: 4,
+				outputTokens: 3,
+				usageSource: "estimated",
+			});
+			expect(charged).toEqual(["tx_2"]);
+			expect(post.stderr).toContain("charging this call once on tx_2");
+			expect(await holdFiles()).toEqual([]);
+		});
+
+		for (const [fault, what] of [
+			["posted-then-lost", "posted, its answer lost (no answer, a timeout)"],
+			["posted-then-500", "posted, then answered 500"],
+			["unposted-500", "not posted, answered 500"],
+			["settled-false", "answered settled: false"],
+		] as const) {
+			it(`a settle ${what} is never re-authorized and never settled again — charged at most once`, async () => {
+				const { responder, charged } = ledger(fault);
+				await startServer(responder);
+				await play();
+				expect(authorizes()).toHaveLength(1);
+				expect(settles().map((s) => s.body.transferId)).toEqual(["tx_1"]);
+				expect(charged.length).toBeLessThanOrEqual(1);
+			});
+		}
+
+		it("a settle that succeeds never re-authorizes", async () => {
+			await startServer(okResponder);
+			await play();
+			expect(requests.map((r) => r.path)).toEqual(["/v1/authorize", "/v1/settle"]);
+		});
+	});
 
 	it("Stop posts the remainder, then aborts an estimate hold that is left", async () => {
 		await startServer(okResponder);

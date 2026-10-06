@@ -91,6 +91,25 @@ export function usageMode() {
 }
 
 /**
+ * Server- or operator-provided text goes through here before it reaches a
+ * permission-decision reason, the debug log or the user's terminal: C0/DEL/C1
+ * control characters become spaces (callers clip afterwards).
+ */
+export function sanitizeReason(value, fallback = "unspecified") {
+	const text = typeof value === "string" && value !== "" ? value : fallback;
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control chars is the point
+	return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+}
+
+/**
+ * The model an authorize names when no transcript says one: every estimate hold,
+ * and a transcript hold before its first model is known.
+ */
+export function defaultModel() {
+	return process.env.UT_CC_MODEL ?? "claude-sonnet-4-6";
+}
+
+/**
  * Whether the plugin may block a tool call. `watch` (the default) NEVER blocks,
  * and makes no permission decision at all (see `proceed` in pre-tool-use.mjs): an
  * over-budget or policy denial (402/403) is written down as a `would_block`
@@ -121,9 +140,12 @@ export function watchLogPath() {
  * surprise: a watch-only plugin must not look like it is enforcing.
  */
 export function modeAnnouncement() {
+	// The path comes from the operator's UT_CC_STATE_DIR / CLAUDE_CONFIG_DIR: no
+	// control character in it may reach the terminal that shows this message.
+	const records = sanitizeReason(watchLogPath());
 	if (guardMode() === "enforce") {
 		return process.env.UT_FAIL_OPEN === "1"
-			? `usertrust: ENFORCING — over-budget tool calls are blocked. While the server is unreachable, calls proceed unmetered (UT_FAIL_OPEN=1), each recorded as a gap in ${watchLogPath()}.`
+			? `usertrust: ENFORCING — over-budget tool calls are blocked. While the server is unreachable, calls proceed unmetered (UT_FAIL_OPEN=1), each recorded as a gap in ${records}.`
 			: "usertrust: ENFORCING — over-budget tool calls are blocked, and so is every tool call while the usertrust server is unreachable (UT_FAIL_OPEN=1 lets those through).";
 	}
 	const ignored = unrecognizedMode();
@@ -131,7 +153,7 @@ export function modeAnnouncement() {
 		ignored === undefined
 			? "Set UT_CC_MODE=enforce to block over-budget calls."
 			: `UT_CC_MODE=${JSON.stringify(ignored.slice(0, 40))} is not a mode: use UT_CC_MODE=enforce to block over-budget calls.`;
-	return `usertrust: watch-only — nothing is blocked. Calls that would have been blocked, and calls that could not be metered, are recorded in ${watchLogPath()}. ${note}`;
+	return `usertrust: watch-only — nothing is blocked. Calls that would have been blocked, and calls that could not be metered, are recorded in ${records}. ${note}`;
 }
 
 /**

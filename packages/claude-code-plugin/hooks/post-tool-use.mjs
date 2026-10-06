@@ -20,17 +20,127 @@
 // exactly as the original hook did. The pending
 // file is deleted only AFTER a 200; on any failure it is left in place so
 // Stop/SubagentStop cleanup gives the hold back (and the server's TTL sweep is
-// the final backstop).
+// the final backstop). One failure is not ambiguous: a 404 `unknown transferId`
+// means the hold is gone unposted — the server voids a pending hold after five
+// minutes, and a call can wait that long at Claude Code's permission prompt — so
+// the call is charged once on a fresh hold of its own (`settleEstimateHold`).
 import {
 	clearPending,
+	defaultModel,
 	estimateTokens,
 	MAX_CONTENT_CHARS,
+	MAX_OUTPUT_TOKENS,
 	readStdin,
+	recordPending,
+	serverCapabilities,
 	serverRequest,
 	takePendingEntry,
 	usageMode,
 } from "./lib.mjs";
-import { estimateReasonFor, OUTCOME_NOTES, settleTranscriptHold } from "./transcript.mjs";
+import {
+	estimatePrincipalFor,
+	estimateReasonFor,
+	OUTCOME_NOTES,
+	settleTranscriptHold,
+} from "./transcript.mjs";
+
+/** A settle's answer that its hold does not exist on the server (not an unknown route). */
+function holdIsGone(response) {
+	return response.status === 404 && response.json?.reason === "unknown transferId";
+}
+
+function noteIfAmbiguous(response, transferId) {
+	if (response.json?.settled === false) {
+		// The server's ledger post was ambiguous: the hold is spent either way.
+		process.stderr.write(
+			`usertrust: settle ${transferId} — the ledger post is ambiguous (settled: false); the usage may be unrecorded\n`,
+		);
+	}
+}
+
+/**
+ * Settle an estimate hold at `usage`, ONCE. Every outcome but one keeps today's
+ * at-most-once handling: a 200 clears the hold; no answer, a timeout, a 5xx or
+ * any other status may mean the settle POSTED with its answer lost, so the hold
+ * is kept for Stop cleanup (which only ever gives holds back) and is never
+ * re-authorized or settled again.
+ *
+ * The one exception is a 404 `unknown transferId`, and it is safe only because
+ * of an INVARIANT: this plugin settles each transferId AT MOST ONCE. PostToolUse
+ * is the only settler of an estimate hold and this is its one settle, Stop and
+ * SubagentStop only release holds, and a transcript hold's settle is gated by its
+ * .json→.settling rename. The server keeps no record of settled ids (a second
+ * settle of a posted id would also answer 404), so it is that invariant that
+ * makes this 404 mean the hold is gone UNPOSTED: voided by the pending-TTL sweep
+ * while the call waited at a permission prompt, or released. The call is then
+ * charged once, on a fresh hold of its own, settled once; the old transferId is
+ * never settled again.
+ */
+async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
+	const response = await serverRequest("/v1/settle", { transferId: entry.transferId, ...usage });
+	if (response.status === 200) {
+		noteIfAmbiguous(response, entry.transferId);
+		await clearPending(sessionId, agentId, entry.entryKey);
+		return;
+	}
+	if (!holdIsGone(response)) {
+		process.stderr.write(
+			`usertrust: settle ${entry.transferId} returned ${response.status}; hold kept for Stop cleanup\n`,
+		);
+		return;
+	}
+	const capabilities = await serverCapabilities();
+	const principal = capabilities?.has("principal")
+		? estimatePrincipalFor(sessionId, agentId, input.agent_type)
+		: undefined;
+	const auth = await serverRequest("/v1/authorize", {
+		model: defaultModel(),
+		...(typeof usage.inputTokens === "number" ? { estimatedInputTokens: usage.inputTokens } : {}),
+		maxOutputTokens: MAX_OUTPUT_TOKENS,
+		params: {
+			hook: "PostToolUse",
+			tool_name: input.tool_name ?? "unknown",
+			replaces: entry.transferId,
+		},
+		actor: `claude-code:${sessionId}`,
+		...(principal === undefined ? {} : { principal }),
+	});
+	const transferId = auth.json?.transferId;
+	if (
+		auth.status !== 200 ||
+		auth.json?.shadow === true ||
+		typeof transferId !== "string" ||
+		transferId === ""
+	) {
+		await clearPending(sessionId, agentId, entry.entryKey);
+		process.stderr.write(
+			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold was not granted (${auth.status}); this call's estimate is not recorded\n`,
+		);
+		return;
+	}
+	// The fresh hold takes the expired one's place, so a settle of it that goes
+	// unanswered leaves it to Stop cleanup, exactly as the first would have.
+	await recordPending(sessionId, agentId, {
+		toolUseId: entry.toolUseId,
+		transferId,
+		...(typeof entry.estimatedInputTokens === "number"
+			? { estimatedInputTokens: entry.estimatedInputTokens }
+			: {}),
+	});
+	if (entry.toolUseId == null) await clearPending(sessionId, agentId, entry.entryKey);
+	process.stderr.write(
+		`usertrust: hold ${entry.transferId} expired before its settle (a long permission prompt?); charging this call once on ${transferId}\n`,
+	);
+	const settle = await serverRequest("/v1/settle", { transferId, ...usage });
+	if (settle.status === 200) {
+		noteIfAmbiguous(settle, transferId);
+		await clearPending(sessionId, agentId, entry.toolUseId ?? transferId);
+	} else {
+		process.stderr.write(
+			`usertrust: settle ${transferId} returned ${settle.status}; hold kept for Stop cleanup\n`,
+		);
+	}
+}
 
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
@@ -61,8 +171,7 @@ try {
 				: input.tool_input != null
 					? estimateTokens(JSON.stringify(input.tool_input).slice(0, MAX_CONTENT_CHARS))
 					: undefined;
-		const response = await serverRequest("/v1/settle", {
-			transferId: entry.transferId,
+		const usage = {
 			...(inputTokens != null ? { inputTokens } : {}),
 			// Same 16 KiB cap as the output hold so a content-cap result cannot
 			// price above the reservation (AUD-004).
@@ -70,20 +179,8 @@ try {
 				JSON.stringify(input.tool_response ?? "").slice(0, MAX_CONTENT_CHARS),
 			),
 			usageSource: "estimated",
-		});
-		if (response.status === 200) {
-			if (response.json?.settled === false) {
-				// The server's ledger post was ambiguous: the hold is spent either way.
-				process.stderr.write(
-					`usertrust: settle ${entry.transferId} — the ledger post is ambiguous (settled: false); the usage may be unrecorded\n`,
-				);
-			}
-			await clearPending(sessionId, agentId, entry.entryKey);
-		} else {
-			process.stderr.write(
-				`usertrust: settle ${entry.transferId} returned ${response.status}; hold kept for Stop cleanup\n`,
-			);
-		}
+		};
+		await settleEstimateHold({ sessionId, agentId, entry, usage, input });
 	}
 } catch (err) {
 	process.stderr.write(

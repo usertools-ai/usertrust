@@ -84,6 +84,11 @@ async function watchRecords(): Promise<Array<Record<string, unknown>>> {
 
 const UNREACHABLE = "http://127.0.0.1:9";
 
+/** C0 (ESC, BEL), DEL and C1 (CSI) — anything a terminal could act on. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: detecting control chars is the point
+const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/;
+const HOSTILE = "\u001b[2J\u001b]0;pwned\u0007\u007f\u009b";
+
 describe("the mode: watch-only unless UT_CC_MODE=enforce", () => {
 	// Driven through the hooks themselves (each is its own node process reading the
 	// environment), the way Claude Code runs them.
@@ -110,8 +115,8 @@ describe("the mode: watch-only unless UT_CC_MODE=enforce", () => {
 });
 
 describe("watch (the default) never blocks a tool call, and never approves one", () => {
-	for (const status of [402, 403]) {
-		it(`a ${status} denial makes no decision, never exit 2, and is recorded as would_block`, async () => {
+	for (const status of [402, 403, 429]) {
+		it(`a ${status} refusal makes no decision, never exit 2, and is recorded as would_block`, async () => {
 			const port = await startFake(status, { error: "budget_exceeded", reason: "need 10, have 2" });
 			const result = await runHook(PRE, PAYLOAD, {
 				...baseEnv,
@@ -183,6 +188,20 @@ describe("watch (the default) never blocks a tool call, and never approves one",
 		expect(await watchRecords()).toEqual([]);
 	});
 
+	it("a reservation's transferId and estimatedCost reach the debug log without control characters", async () => {
+		const port = await startFake(200, {
+			transferId: `tx_1${HOSTILE}`,
+			estimatedCost: `3${HOSTILE}`,
+		});
+		const result = await runHook(PRE, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expectNoDecision(result);
+		expect(result.stderr).toContain("usertrust: reserved tx_1");
+		expect(result.stderr).not.toMatch(CONTROL);
+	});
+
 	it("a shadow answer (an evaluate_only server) makes no decision either", async () => {
 		const port = await startFake(200, { shadow: true, reason: "budget_exceeded" });
 		const result = await runHook(PRE, PAYLOAD, {
@@ -215,6 +234,22 @@ describe("UT_CC_MODE=enforce still blocks", () => {
 			UT_SERVER_URL: `http://127.0.0.1:${port}`,
 		});
 		expect(decision(result.stdout).permissionDecision).toBe("deny");
+		expect(await watchRecords()).toEqual([]);
+	});
+
+	it("a 429 anomaly cutoff is denied like a 402/403 — even with UT_FAIL_OPEN=1, which is for outages", async () => {
+		for (const failOpen of ["", "1"]) {
+			const port = await startFake(429, { error: "anomaly", reason: "spend velocity" });
+			const result = await runHook(PRE, PAYLOAD, {
+				...baseEnv,
+				UT_CC_MODE: "enforce",
+				...(failOpen === "" ? {} : { UT_FAIL_OPEN: failOpen }),
+				UT_SERVER_URL: `http://127.0.0.1:${port}`,
+			});
+			expect(decision(result.stdout).permissionDecision, failOpen).toBe("deny");
+			expect(decision(result.stdout).permissionDecisionReason).toContain("anomaly");
+			server?.close();
+		}
 		expect(await watchRecords()).toEqual([]);
 	});
 
@@ -273,6 +308,16 @@ describe("the mode is announced to the user at session start", () => {
 		expect(message).toContain(join(stateDir, "watch.jsonl"));
 		expect(message).toContain("UT_CC_MODE=enforce");
 		expect(message).not.toContain("ENFORCING");
+	});
+
+	it("control characters in the state path never reach the terminal, in either message that names it", async () => {
+		const hostileDir = join(stateDir, `state${HOSTILE}dir`);
+		for (const env of [{}, { UT_CC_MODE: "enforce", UT_FAIL_OPEN: "1" }]) {
+			const message = await announce({ ...env, UT_CC_STATE_DIR: hostileDir });
+			expect(message).toContain("watch.jsonl");
+			expect(message).toContain(`${stateDir}/state`);
+			expect(message, JSON.stringify(env)).not.toMatch(CONTROL);
+		}
 	});
 
 	it("an unrecognised UT_CC_MODE is named, so a typo never looks like enforcement", async () => {

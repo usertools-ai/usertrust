@@ -82,6 +82,14 @@ beforeEach(async () => {
 	requests = [];
 });
 afterEach(() => {
+	// The invariant a settle's 404 rests on: no transferId is ever settled twice.
+	const settled = requests
+		.filter((r) => r.path === "/v1/settle")
+		.map((r) => String((r.body as { transferId?: unknown }).transferId));
+	expect(
+		settled.filter((id, i) => settled.indexOf(id) !== i),
+		"a transferId was settled twice",
+	).toEqual([]);
 	server?.close();
 	server = undefined;
 });

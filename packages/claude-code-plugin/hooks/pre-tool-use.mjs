@@ -38,6 +38,7 @@
 // `already_settled`) means an earlier settle of exactly this window landed: it
 // is accounted, and the tool is held alone.
 import {
+	defaultModel,
 	estimateTokens,
 	guardMode,
 	isAlreadySettled,
@@ -47,6 +48,7 @@ import {
 	recordPending,
 	recordWatchEvent,
 	releaseHold,
+	sanitizeReason,
 	serverCapabilities,
 	serverRequest,
 	timeLeft,
@@ -54,13 +56,6 @@ import {
 import { estimatePrincipalFor, holdEstimate, prepareWindow, safeName } from "./transcript.mjs";
 
 const MAX_REASON_CHARS = 500;
-
-/** Server-provided text goes through here: strip control chars, bound length. */
-function sanitizeReason(value, fallback = "unspecified") {
-	const text = typeof value === "string" && value !== "" ? value : fallback;
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control chars is the point
-	return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
-}
 
 function emit(decision, reason) {
 	process.stdout.write(
@@ -138,7 +133,7 @@ try {
 				? prepared.principal
 				: estimatePrincipalFor(sessionId, agentId, input.agent_type);
 		let window = transcriptMode ? prepared.window : null;
-		const fallbackModel = prepared.lastModel ?? process.env.UT_CC_MODEL ?? "claude-sonnet-4-6";
+		const fallbackModel = prepared.lastModel ?? defaultModel();
 		// Never past the hook's own budget: a hook killed mid-call leaves the tool
 		// ungoverned and this agent's lock held.
 		const callTimeout = () => Math.min(5_000, timeLeft() - 500);
@@ -223,8 +218,13 @@ try {
 				throw err;
 			}
 			await prepared.commit?.(json.transferId);
-			proceed(`usertrust: reserved ${json.transferId} (${json.estimatedCost} ut)`);
-		} else if (response.status === 402 || response.status === 403) {
+			proceed(
+				`usertrust: reserved ${sanitizeReason(json.transferId)} (${sanitizeReason(String(json.estimatedCost))} ut)`,
+			);
+		} else if (response.status === 402 || response.status === 403 || response.status === 429) {
+			// A refusal — budget (402), policy (403) or an anomaly cutoff (429) — is a
+			// governance decision, not an outage: enforce denies it whatever UT_FAIL_OPEN
+			// says, and watch records what it would have blocked.
 			await prepared.abandon?.();
 			const error = sanitizeReason(json?.error, "denied");
 			const reason = sanitizeReason(json?.reason);

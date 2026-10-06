@@ -204,8 +204,13 @@ const AUTHORIZING = "authorizing";
 const REMAINDER = "remainder";
 const AGENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const COUNT_KEYS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
-/** One field of a usertrust `principal`: the server refuses anything else. */
-const PRINCIPAL_FIELD = /^[A-Za-z0-9._:-]{1,128}$/;
+/**
+ * One field of a usertrust `principal`: the server refuses anything else. It must
+ * equal core's PRINCIPAL_FIELD_PATTERN — a tightening there would turn every
+ * attributed authorize into a 400 (a BLOCK in enforce mode); tests/principal-pattern
+ * pins the two together.
+ */
+export const PRINCIPAL_FIELD = /^[A-Za-z0-9._:-]{1,128}$/;
 /** What a settle vehicle's key is: the transcript messages it carries, and nothing else. */
 const VEHICLE_KEY = /^cc:[0-9a-f]{48}$/;
 /** Where the cross-agent message claims live, inside the private state dir (see `selectOwn`). */
