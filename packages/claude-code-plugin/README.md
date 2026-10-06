@@ -115,7 +115,9 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   claimed and the hold is given back for hygiene: an outage can lose usage, but
   never post it twice. A cursor that exists but cannot be read is never treated as
   empty — transcript usage is not posted until it is fixed or removed. Removing it
-  re-posts nothing: the agent's claims still say what it posted.
+  never posts anything twice: the agent's claims still say which responses it took
+  on, and those are not posted again — any of them it had not yet posted
+  (including unresolved settles) is written off, with a note.
 - **What the server honours** is read from its unauthenticated `/v1/health`
   `capabilities` once per hook, and never cached on disk: an older server strips
   request fields it does not know, so it would accept a key and silently ignore

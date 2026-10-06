@@ -1410,9 +1410,57 @@ describe("state that is lost, slow or unwritable", () => {
 		await run("stop.mjs", stopInput());
 		await rm(cursorPath());
 		await appendMain(responseEntries("msg_b", SONNET, u(5, 5)));
-		await run("stop.mjs", stopInput());
+		const stop = await run("stop.mjs", stopInput());
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([4, 5]);
 		expect((await readCursor()).accounted.sort()).toEqual(["msg_a", "msg_b"]);
+		expect(stop.stderr).toContain(
+			"1 transcript message(s) were claimed by this agent before its cursor",
+		);
+	});
+
+	it("a claim made just before the hook died is still this agent's to post: the cursor recorded the intent first", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(4, 4)));
+		// The state a hook killed right after claiming leaves: the cursor knows msg_a
+		// as `claiming`, and the claim file names this agent.
+		const dir = join(stateDir, "transcripts");
+		await mkdir(dir, { recursive: true, mode: 0o700 });
+		await writeFile(
+			cursorPath(),
+			JSON.stringify({
+				v: 2,
+				byteOffset: (await readFile(mainTranscript)).length,
+				nextSeq: 1,
+				partial: {
+					msg_a: {
+						n: 0,
+						model: SONNET,
+						synthetic: false,
+						complete: true,
+						claimed: false,
+						claiming: true,
+						inputTokens: 4,
+						outputTokens: 4,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+					},
+				},
+				accounted: [],
+				denied: [],
+				assigned: {},
+				authorizingAt: {},
+				estimateMode: false,
+				estimateReason: null,
+				lastModel: SONNET,
+				unresolved: {},
+			}),
+		);
+		const digest = createHash("sha256").update("msg_a").digest("hex");
+		await mkdir(join(dir, "claims", digest.slice(0, 2)), { recursive: true, mode: 0o700 });
+		await writeFile(join(dir, "claims", digest.slice(0, 2), digest.slice(2)), `${SESSION}/main`);
+		const stop = await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([4]);
+		expect(stop.stderr).not.toContain("before its cursor");
 	});
 
 	it("a message whose claim cannot be made is NOT posted, says so, and posts once it can", async () => {
@@ -1516,7 +1564,7 @@ describe("state that is lost, slow or unwritable", () => {
 		expect(cursor.accounted).toEqual(["msg_a"]);
 	});
 
-	it("an already-settled window is journalled before the cursor: the record survives a failed cursor write", async () => {
+	it("an already-settled window is journalled beside the cursor, and the next lock holder applies the record", async () => {
 		capabilities = [...ALL_CAPABILITIES];
 		const server = keyedServer();
 		server.charged.add(keyOf("main", ["msg_a"]));

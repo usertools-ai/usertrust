@@ -302,11 +302,6 @@ export function serverCapabilities() {
 	return capabilitiesRead;
 }
 
-/** True only when the server published the capability; unknown reads as false. */
-export async function serverHonours(capability) {
-	return (await serverCapabilities())?.has(capability) ?? false;
-}
-
 /** A server's answer that it has no such route at all: an older server, not a refusal. */
 export function isUnknownRoute(response) {
 	return response.status === 404 && response.json?.reason === "unknown route";

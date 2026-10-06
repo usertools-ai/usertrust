@@ -347,6 +347,7 @@ function parseCursor(raw) {
 			synthetic: m.synthetic === true,
 			complete: m.complete === true,
 			claimed: m.claimed === true,
+			claiming: m.claiming === true,
 			inputTokens: count(m.inputTokens),
 			outputTokens: count(m.outputTokens),
 			cacheReadTokens: count(m.cacheReadTokens),
@@ -754,6 +755,7 @@ async function ingest(cursor, path) {
 				synthetic: rawModel === SYNTHETIC_MODEL,
 				complete: false,
 				claimed: false,
+				claiming: false,
 				inputTokens: 0,
 				outputTokens: 0,
 				cacheReadTokens: 0,
@@ -797,28 +799,56 @@ function selectNew(cursor, live) {
  * own agentId (measured) — so a cursor per agent would post that usage once more
  * per fork. The first agent of any session to claim an id owns it, for good: the
  * claim is a file published exclusively, named by the id's SHA-256. An id another
- * agent owns is accounted here as posted there, and so is one this agent claimed
- * that its cursor has no record of claiming: the cursor was reset or removed since,
- * and the id was posted then (or lost with it) — never again. An id whose claim
- * cannot be made or read is left for a later settle point, never posted
- * unverified, and said so on stderr.
+ * agent owns is accounted here as posted there.
+ *
+ * The cursor records the INTENT to claim (`claiming`) before any claim file
+ * exists, so this agent always knows its own claims — a hook killed, or a cursor
+ * write failed, between the claim and the cursor's next save loses nothing. A
+ * claim that names this agent but that the cursor has no record of was made by a
+ * cursor since removed or reset: what it posted then is not posted again, and
+ * what it had not is written off, with a note — never posted twice. An id whose
+ * claim cannot be made or read, or that the hook's time no longer covers, is left
+ * for a later settle point, never posted unverified.
  */
 async function selectOwn(opened) {
 	const { cursor } = opened;
+	const fresh = selectNew(cursor, opened.live);
+	const knew = new Set();
+	let marked = false;
+	for (const m of fresh) {
+		if (m.claimed) continue;
+		const state = cursor.partial.get(m.id);
+		if (state === undefined) continue;
+		if (state.claiming) knew.add(m.id);
+		else {
+			state.claiming = true;
+			marked = true;
+		}
+	}
+	if (marked) await opened.save();
+
 	const own = [];
 	const failed = new Map();
-	for (const m of selectNew(cursor, opened.live)) {
+	let deferred = 0;
+	let writtenOff = 0;
+	for (const m of fresh) {
 		if (m.claimed) {
 			own.push(m);
 			continue;
 		}
 		// Each claim is file I/O: never let them eat the time the calls need.
-		if (timeLeft() < CLAIM_FLOOR_MS) continue;
+		if (timeLeft() < CLAIM_FLOOR_MS) {
+			deferred += 1;
+			continue;
+		}
 		const claim = await claimHolder(opened.claimsDir, m.id, opened.owner);
-		if (claim.holder === opened.owner && claim.created) {
+		if (claim.holder === opened.owner && (claim.created || knew.has(m.id))) {
 			const state = cursor.partial.get(m.id);
 			if (state !== undefined) state.claimed = true;
 			own.push(m);
+		} else if (claim.holder === opened.owner) {
+			accountIds(cursor, [m.id]);
+			writtenOff += 1;
 		} else if (claim.holder !== null) {
 			accountIds(cursor, [m.id]);
 		} else {
@@ -830,6 +860,16 @@ async function selectOwn(opened) {
 		const codes = [...failed.keys()].join(", ");
 		process.stderr.write(
 			`usertrust: ${total} transcript message(s) could not be claimed (${codes}) — NOT posted; tried again at the next settle point\n`,
+		);
+	}
+	if (deferred > 0) {
+		process.stderr.write(
+			`usertrust: ${deferred} transcript message(s) not claimed this time (out of time) — posted at a later settle point\n`,
+		);
+	}
+	if (writtenOff > 0) {
+		process.stderr.write(
+			`usertrust: ${writtenOff} transcript message(s) were claimed by this agent before its cursor was removed or reset — not posted again (any of them not yet posted is written off)\n`,
 		);
 	}
 	return own;
@@ -1223,6 +1263,11 @@ export async function settleTranscriptHold(sessionId, entry) {
 	for (const key of COUNT_KEYS) counts[key] = count(entry[key]);
 	const livePath = stateFilePath(sessionId, entry.agentId, entry.entryKey);
 	const base = livePath.slice(0, -".json".length);
+	// A rename keeps the hold's own mtime: from authorize, maybe long ago. The
+	// journal reads a .settling file's age as how long a settle has been in flight,
+	// so the file is touched first — the .settling file is never born old.
+	const now = new Date();
+	await utimes(livePath, now, now).catch(() => {});
 	try {
 		await rename(livePath, `${base}.settling`);
 	} catch (err) {
@@ -1231,10 +1276,6 @@ export async function settleTranscriptHold(sessionId, entry) {
 		}
 		return { outcome: "deferred", reason: `hold could not be claimed (${err?.code ?? "error"})` };
 	}
-	// A rename keeps the hold's own mtime: from authorize, maybe long ago. The
-	// journal reads a .settling file's age as how long a settle has been in flight.
-	const now = new Date();
-	await utimes(`${base}.settling`, now, now).catch(() => {});
 	const keyed = typeof entry.idempotencyKey === "string";
 	const result = await settleAt(entry.transferId, counts, { keyed });
 	try {
