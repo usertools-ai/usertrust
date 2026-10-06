@@ -536,9 +536,9 @@ hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not m
 per-model rates by design; per-call `ceil` + 1-UT floor differs from provider-side aggregation.
 Estimates never model cache state.
 
-**A principal is a label, never a payer.** `AuthorizeParams.principal` (`{ id?, type?, unit?, role? }`,
-`shared/principal.ts`) says WHO the work was for: the agent instance and kind, the business unit,
-and the role. It never selects the account a hold debits and never enters the policy gate — that is
+**A principal is a label, never a payer.** `AuthorizeParams.principal`
+(`{ id?, type?, origin?, unit?, role? }`, `shared/principal.ts`) says WHO the work was for: the agent
+instance and kind, where it came from (a client and its session), the business unit, and the role. It never selects the account a hold debits and never enters the policy gate — that is
 `withCostCenter`'s job, and the two stay separate fields on purpose. A `unit` that should also be a
 budget is a deliberate `withCostCenter` scope beside it, never an implicit one.
 *Prevents:* a reporting label moving money — routing a hold to an envelope nobody funded, or
@@ -551,14 +551,17 @@ the principal through `capturePrincipal`, which validates each field (1–128 ch
 headless record then names `capture.actor` and spreads `principal` (key ABSENT when there is none):
 `policy_denied`, `ledger_rejected`, `llm_call`, `llm_call_failed`, `settlement_ambiguous`,
 `settlement_shortfall`, and the rotated receipt. `packages/server` validates the wire field with the
-same `principalFieldRefusal` and refuses an unknown key rather than stripping it.
+same `principalFieldRefusal` and refuses an unknown key rather than stripping it, and publishes
+`"principal"` in `/v1/health` `capabilities`: an older server strips the key, so a client sends a
+principal only to a server that lists it.
 *Prevents:* the settle-side records hard-coding `actor: "local"` — which threw away who did the
 work exactly where the money was recorded — and a caller relabelling a spend between the two phases
 through its own object or the handle.
 
 *The principal's ledger tags are an INDEX, not an identity.* The PENDING hold carries
 `principalLedgerTags(principal)`: `id` → `user_data_128`, `unit` → `user_data_64`, `role` →
-`user_data_32` (the slot widths follow the dimensions' cardinality; `type` stays in the chain only).
+`user_data_32` (the slot widths follow the dimensions' cardinality; `type` and `origin` stay in the
+chain only).
 Each tag is the leading bytes of `SHA-256("usertrust/ledger-tag/v1\n" ‖ dimension ‖ "\n" ‖ value)`,
 with zero mapped to 1. The post and void deliberately write ZERO `user_data`: TigerBeetle then
 copies the pending transfer's values onto them, so the settlement inherits the tags natively and the

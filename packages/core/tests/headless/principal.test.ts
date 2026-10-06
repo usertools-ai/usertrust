@@ -59,7 +59,14 @@ vi.mock("tigerbeetle-node", () => ({
 const MODEL = "claude-sonnet-4-6";
 const AUTHORIZE = { model: MODEL, estimatedInputTokens: 100, maxOutputTokens: 50 };
 const ACTOR = "claude-code:s-1:Explore:a7f3";
-const PRINCIPAL = { id: "a7f3", type: "Explore", unit: "receipts", role: "reviewer" } as const;
+// The Claude Code plugin's shape ({ id, type, origin }) plus the org placement (unit, role).
+const PRINCIPAL = {
+	id: "a7f3",
+	type: "Explore",
+	origin: "claude-code:s-1",
+	unit: "receipts",
+	role: "reviewer",
+} as const;
 
 interface EngineHandle extends TrustEngine {
 	spendPending: Mock<TrustEngine["spendPending"]>;
@@ -136,7 +143,7 @@ describe("capturePrincipal", () => {
 		expect(capturePrincipal({ id: undefined })).toBeUndefined();
 	});
 
-	it("rebuilds the four fields, frozen, and drops anything else", () => {
+	it("rebuilds the five fields, frozen, and drops anything else", () => {
 		const out = capturePrincipal({ ...PRINCIPAL, secret: "x", nested: { a: 1 } });
 		expect(out).toEqual(PRINCIPAL);
 		expect(Object.isFrozen(out)).toBe(true);
@@ -191,6 +198,14 @@ describe("principalLedgerTags", () => {
 		expect(tags.userData64).toBe(expectedTag("unit", "receipts", 8));
 		expect(principalLedgerTags({ unit: "receipts" }).userData64).toBe(tags.userData64);
 		expect(ledgerTag("unit", "receipts", 8)).toBe(tags.userData64);
+	});
+
+	it("type and origin never reach the ledger: a principal of only those has no tags", () => {
+		expect(principalLedgerTags({ type: "Explore", origin: "claude-code:s-1" })).toEqual({
+			userData128: 0n,
+			userData64: 0n,
+			userData32: 0,
+		});
 	});
 
 	it("an absent field (or principal) is ZERO — TigerBeetle's 'no tag'", () => {

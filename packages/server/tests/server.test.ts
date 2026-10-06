@@ -92,6 +92,37 @@ describe("HTTP control plane", () => {
 		expect(fake.calls.settled).toHaveLength(1);
 	});
 
+	it("/v1/health advertises the principal capability — in dryRun AND with a ledger", async () => {
+		// A client sends `principal` only to a server that lists it (an older server
+		// strips the key and records the call as nobody's), so a missing entry here
+		// silently loses all attribution.
+		for (const dryRun of [true, false]) {
+			const { base } = await start({ dryRun });
+			const body = (await (await fetch(`${base}/v1/health`)).json()) as { capabilities?: unknown };
+			expect(body.capabilities).toEqual(["principal"]);
+			await server?.close();
+			server = undefined;
+		}
+	});
+
+	it("a plugin-shaped principal ({ id, type, origin }) is accepted and forwarded, alone or with unit and role", async () => {
+		const { base, fake } = await start();
+		const plugin = { id: "a7f3", type: "Explore", origin: "claude-code:0b9e-4c11" };
+		for (const principal of [plugin, { ...plugin, unit: "receipts", role: "reviewer" }]) {
+			const res = await post(base, "/v1/authorize", {
+				model: "m",
+				estimatedInputTokens: 1,
+				maxOutputTokens: 1,
+				principal,
+			});
+			expect(res.status).toBe(200);
+		}
+		expect(fake.calls.authorizeParams.map((p) => p.principal)).toEqual([
+			plugin,
+			{ ...plugin, unit: "receipts", role: "reviewer" },
+		]);
+	});
+
 	it("forwards the actor and the principal to governor.authorize()", async () => {
 		// Without `principal` on the wire schema, zod strips it and the request still
 		// returns 200: the D4 silent-strip failure, for WHO did the work.
@@ -118,6 +149,8 @@ describe("HTTP control plane", () => {
 			{ role: "" },
 			{ id: "x".repeat(129) },
 			{ unit: "receipts", extra: "never silently stripped" },
+			{ id: "a7f3", type: "Explore", origin: "claude-code:s-1", session: "unknown key" },
+			{ origin: "has space" },
 			"receipts",
 		]) {
 			const res = await post(base, "/v1/authorize", { model: "m", principal });

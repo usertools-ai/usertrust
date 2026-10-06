@@ -84,7 +84,14 @@ describe("integration: real governor in dryRun mode", () => {
 		const { port } = await server.listen();
 		const base = `http://127.0.0.1:${port}`;
 		const headers = { "content-type": "application/json", authorization: `Bearer ${KEY}` };
-		const principal = { id: "a7f3", type: "Explore", unit: "receipts", role: "reviewer" };
+		// The plugin's { id, type, origin } plus unit and role, end to end.
+		const principal = {
+			id: "a7f3",
+			type: "Explore",
+			origin: "claude-code:0b9e-4c11",
+			unit: "receipts",
+			role: "reviewer",
+		};
 		const auth = (await (
 			await fetch(`${base}/v1/authorize`, {
 				method: "POST",

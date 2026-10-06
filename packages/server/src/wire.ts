@@ -28,6 +28,7 @@ export const PrincipalSchema = z
 	.object({
 		id: PrincipalField.optional(),
 		type: PrincipalField.optional(),
+		origin: PrincipalField.optional(),
 		unit: PrincipalField.optional(),
 		role: PrincipalField.optional(),
 	})

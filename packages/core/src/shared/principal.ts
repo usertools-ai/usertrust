@@ -17,6 +17,8 @@ import { createHash } from "node:crypto";
  * - `id`   — the agent instance (e.g. a subagent id). Make it globally unique if
  *            per-agent roll-ups should not merge agents that share an id.
  * - `type` — the agent kind (e.g. "Explore").
+ * - `origin` — where the work came from (e.g. a client and its session,
+ *              "claude-code:<session>").
  * - `unit` — the business unit the work is for.
  * - `role` — the role the agent was acting in.
  */
@@ -25,12 +27,13 @@ export interface Principal {
 	// assignable under exactOptionalPropertyTypes; `capturePrincipal` drops it.
 	readonly id?: string | undefined;
 	readonly type?: string | undefined;
+	readonly origin?: string | undefined;
 	readonly unit?: string | undefined;
 	readonly role?: string | undefined;
 }
 
 /** The principal's fields, in record order. */
-export const PRINCIPAL_FIELDS = ["id", "type", "unit", "role"] as const;
+export const PRINCIPAL_FIELDS = ["id", "type", "origin", "unit", "role"] as const;
 
 /** 1–128 characters of `[A-Za-z0-9._:-]`: safe in a log line, a path segment and a URL. */
 export const PRINCIPAL_FIELD_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -62,7 +65,8 @@ export function capturePrincipal(input: unknown): Principal | undefined {
 		throw new TypeError("principal must be an object");
 	}
 	const source = input as Record<string, unknown>;
-	const captured: { id?: string; type?: string; unit?: string; role?: string } = {};
+	const captured: { id?: string; type?: string; origin?: string; unit?: string; role?: string } =
+		{};
 	for (const field of PRINCIPAL_FIELDS) {
 		const value = source[field];
 		if (value === undefined) continue;
@@ -111,7 +115,7 @@ export function ledgerTag(
 /**
  * The ledger tags for a captured principal: `id` → `user_data_128`, `unit` →
  * `user_data_64`, `role` → `user_data_32`; an absent field (or principal) is 0.
- * `type` stays in the audit chain only — the three native slots go to the three
+ * `type` and `origin` stay in the audit chain only — the three native slots go to the three
  * roll-up dimensions. Query with TigerBeetle's `query_transfers`, filtering on
  * the same values (`principalLedgerTags({ unit: "acme" }).userData64`).
  */
