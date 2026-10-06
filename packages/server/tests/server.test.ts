@@ -714,6 +714,27 @@ describe("caller idempotency keys and principal (#205)", () => {
 		expect(server?.pendingCount()).toBe(1);
 	});
 
+	it("an authorize that returns only after the hold's TTL is refused, and its hold released — never exposed", async () => {
+		const fake = createFakeGovernor();
+		const place = fake.governor.authorize.bind(fake.governor);
+		fake.governor.authorize = async (params) => {
+			const auth = await place(params);
+			await new Promise((resolve) => setTimeout(resolve, 300));
+			return auth;
+		};
+		server = createUsertrustServer({
+			config: config({ pendingTtlMs: 200 }),
+			factory: async () => fake.governor,
+		});
+		const { port } = await server.listen();
+		const res = await post(`http://127.0.0.1:${port}`, "/v1/authorize", { model: "m" });
+
+		expect(res.status).toBe(503);
+		expect(((await res.json()) as { error: string }).error).toBe("ledger_unavailable");
+		expect(fake.calls.released.map((r) => r.transferId)).toEqual(["tx_fake_1"]);
+		expect(server.pendingCount()).toBe(0);
+	});
+
 	it("an already-charged key is 409 already_settled at authorize", async () => {
 		const fake = createFakeGovernor();
 		fake.governor.authorize = async () => {

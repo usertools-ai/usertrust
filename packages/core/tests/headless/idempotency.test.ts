@@ -1064,6 +1064,17 @@ describe("createGovernor — caller idempotency keys", () => {
 			expect(pendings()).toHaveLength(2);
 		});
 
+		it("a reserve that returns only after the hold's ledger deadline is released and refused — never handed out", async () => {
+			// The deadline is read before the reserve; the next read, after it, is past.
+			let reads = 0;
+			const { gov, audit } = await governor({
+				_now: () => (reads++ === 0 ? 1_000 : 1_000 + TIMEOUT_MS),
+			});
+			await expect(gov.authorize({ ...AUTHORIZE })).rejects.toBeInstanceOf(LedgerUnavailableError);
+			expect(audit.events.map((e) => e.kind)).toContain("hold_released");
+			expect([...ledger.resolved.values()]).toEqual(["voided"]);
+		});
+
 		it("dryRun has no ledger to expire a hold: its replay is the same hold, however late", async () => {
 			let clock = 1_000;
 			const { gov } = await governor({ dryRun: true, _now: () => clock });

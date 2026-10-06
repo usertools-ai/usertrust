@@ -193,8 +193,10 @@ usertrust-server answers 410 and counts it on `/v1/health`, and bounds its TTL s
 releases a hold BEFORE the ledger's own pending timeout expires it — a settle that reaches an
 expired hold is recorded only as ambiguous. The TTL clock starts when the authorize request
 arrives, before any ledger I/O, and a replay only ever moves it earlier: a slow or retried
-authorize cannot start it after the ledger's. The server's own sweep reads ages on a monotonic
-clock, so a wall-clock step cannot move a deadline. A keyless unknown settle stays a 404: without the key's
+authorize cannot start it after the ledger's. A hold whose authorize returns only after its TTL
+(or whose reserve returns after its ledger deadline) is released at once and refused as
+retryable, never exposed. The server's own sweep reads ages on a monotonic clock, so a wall-clock
+step cannot move a deadline. A keyless unknown settle stays a 404: without the key's
 anchor, a late settle cannot be told from a retry of one that already charged.
 *Prevents:* provider spend vanishing into a 404 after a TTL sweep or a restart, with nothing on the
 chain to say it happened.

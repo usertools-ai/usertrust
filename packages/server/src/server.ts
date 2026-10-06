@@ -174,6 +174,19 @@ export function createUsertrustServer(opts: {
 				held.createdAt = Math.min(held.createdAt, requestedAt);
 				held.startedMono = Math.min(held.startedMono, requestedMono);
 			} else if (!terminating.has(auth.transferId)) {
+				// An authorize that returned only after this hold's TTL had run out (a slow
+				// or retried reserve) would expose a hold the sweep might not reach before
+				// the ledger's own timeout. It is released now, and the client retries.
+				if (performance.now() - requestedMono >= config.pendingTtlMs) {
+					await governor
+						.release(auth, "the authorize returned after the hold's pending TTL")
+						.catch(() => {});
+					sendJson(res, 503, {
+						error: "ledger_unavailable",
+						reason: "the authorize returned after the hold's pending TTL; retry",
+					});
+					return;
+				}
 				pending.set(auth.transferId, {
 					auth,
 					tenantId: tenant.id,

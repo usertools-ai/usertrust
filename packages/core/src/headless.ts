@@ -1975,6 +1975,23 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				ledgerDeadline,
 			}),
 		);
+		// A reserve that came back only after the hold's ledger deadline (a lost or
+		// delayed reply) placed a hold the ledger has voided, or is about to: it is
+		// never handed out. Released, and the call refused as retryable.
+		if (ledgerDeadline !== undefined && now() >= ledgerDeadline) {
+			const expired = activeAuths.get(transferId);
+			activeAuths.delete(transferId);
+			if (expired !== undefined) {
+				await releaseClaimedHold(
+					transferId,
+					expired,
+					"the reserve returned after the hold's pending timeout",
+				);
+			}
+			throw new LedgerUnavailableError(
+				"the reserve returned after the hold's pending timeout; retry",
+			);
+		}
 		return auth;
 	}
 
