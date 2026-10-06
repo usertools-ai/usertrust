@@ -15,6 +15,7 @@ export interface FakeGovernorHandle {
 		settled: string[];
 		aborted: string[];
 		settleParams: Array<SettleParams | undefined>;
+		authorizeParams: AuthorizeParams[];
 	};
 }
 
@@ -29,10 +30,12 @@ export function createFakeGovernor(
 		settled: [] as string[],
 		aborted: [] as string[],
 		settleParams: [] as Array<SettleParams | undefined>,
+		authorizeParams: [] as AuthorizeParams[],
 	};
 
 	const governor: Governor = {
 		async authorize(params: AuthorizeParams): Promise<Authorization> {
+			calls.authorizeParams.push(params);
 			if (opts.denyReason) throw new PolicyDeniedError(opts.denyReason);
 			const estimatedCost = (params.estimatedInputTokens ?? 100) + (params.maxOutputTokens ?? 4096);
 			if (estimatedCost > budget) {
