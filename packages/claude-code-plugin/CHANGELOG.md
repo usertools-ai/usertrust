@@ -30,9 +30,10 @@ npm, and its version is its own: the `usertrust` packages and their
   - The call is refused while that hold is not resolved: a `.settling` record left
     by a hook killed mid-settle, or a hold another hook is ending at that moment.
     Enforce mode denies it, whatever `UT_FAIL_OPEN` says, and watch mode records a
-    gap. A record the transcript journal can decide (one that carries usage and is
-    stale) is decided first, and the call then reserves afresh. The model's retry
-    is a new tool call, which reserves as usual.
+    gap. A stale transcript-mode record is decided by the transcript journal first,
+    and the call then reserves afresh. Only the hook whose reconcile removed the
+    record reserves; another resumed beside it is refused. The model's retry is a
+    new tool call, which reserves as usual.
 
 ## [1.4.0] - 2026-10-07
 

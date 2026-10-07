@@ -205,18 +205,21 @@ async function abandon(entry) {
 }
 
 /**
- * Whether the journal has decided this call's `.settling` record, and removed it.
- * Only a record that carries a transcript window can be decided: the journal reads
- * one as abandoned once it is stale (transcript.mjs `STALE_SETTLING_MS`), parks it
- * for a retry under its key or accounts its ids (at most once), and deletes its file.
- * A fresh one may still be in flight, and a record without a window has nothing the
- * journal could settle. True only once the file is GONE: a fresh hold's record would
- * share its path.
+ * Whether THIS hook's reconcile decided this call's `.settling` record, and removed
+ * it. Only a transcript hold's record can be decided: the journal reads one as
+ * abandoned once it is stale (transcript.mjs `STALE_SETTLING_MS`), parks its window
+ * for a retry under its key or accounts its ids (at most once), and deletes its
+ * file. A transcript record with no window (a `retire` cut off before its unlink)
+ * is decided the same way. An estimate hold's record is not: its settle may have
+ * charged the call. A fresh record may still be in flight.
+ * True only when this hook's reconcile removed the record AND the call now has none.
+ * Two hooks resumed together may both see the same stale record, and only the one
+ * whose reconcile removed it reserves afresh: the other is refused.
  */
 async function journalDecides(entry, toolUseId) {
-	if (entry.assignedIds.length === 0) return false;
-	await reconcileAgent(sessionId, agentId);
-	return (await holdOfCall(sessionId, agentId, toolUseId)) === null;
+	if (!entry.transcript) return false;
+	const removed = await reconcileAgent(sessionId, agentId);
+	return removed.includes(entry.path) && (await holdOfCall(sessionId, agentId, toolUseId)) === null;
 }
 
 /**

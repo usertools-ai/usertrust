@@ -382,8 +382,9 @@ again, and the plugin finds the hold the call already has.
   that hold, leaving its `.settling` record; or another hook can be ending it at
   that moment. The resumed call is then refused until that resolves: in enforce
   mode it is denied, whatever `UT_FAIL_OPEN` says, and in watch mode it is
-  recorded as a gap. A stale record that carries transcript usage is decided by
-  the journal first, and the call then reserves afresh.
+  recorded as a gap. A stale transcript-mode record is decided by the journal
+  first, and the call then reserves afresh: only the hook whose reconcile removed
+  the record does so.
 
 In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran;
 an estimate hold is marked settle-attempted (`.settling`) before its one settle,

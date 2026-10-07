@@ -1422,24 +1422,28 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 }
 
 /**
- * Apply journalled hold outcomes to one agent's cursor, if its lock is free soon.
- * PreToolUse runs it before it decides what a `.settling` record of the same tool
- * call still blocks: the journal decides a stale one (`STALE_SETTLING_MS`) and
- * removes its file.
+ * Apply journalled hold outcomes to one agent's cursor, if its lock is free soon, and
+ * return the hold files this reconcile finished and removed (none when it could not
+ * run). PreToolUse runs it before it decides what a `.settling` record of the same
+ * tool call still blocks: the journal decides a stale one (`STALE_SETTLING_MS`) and
+ * removes its file. Under the agent's lock, only one reconcile can remove a given
+ * file, so the hook whose reconcile removed it is the one that may reserve afresh.
  */
 export async function reconcileAgent(sessionId, agentId) {
 	const where = await cursorLocation(sessionId, agentId);
-	if (!where.ok) return;
+	if (!where.ok) return [];
 	const release = await acquireLock(where.cursorPath, { waitMs: 300 });
-	if (release === null) return; // the next lock holder reconciles
+	if (release === null) return []; // the next lock holder reconciles
 	try {
 		const read = await readCursor(where.cursorPath);
-		if (!read.ok) return;
+		if (!read.ok) return [];
 		const { finished } = await reconcile(read.cursor, sessionId, agentId);
 		await writeCursor(where.cursorPath, read.cursor);
+		const removed = [...finished];
 		await removeFiles(finished);
+		return removed;
 	} catch {
-		// Left for the next lock holder.
+		return []; // Left for the next lock holder.
 	} finally {
 		await release();
 	}

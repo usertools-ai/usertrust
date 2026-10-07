@@ -3371,6 +3371,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 	const SESSION_END_BUDGET = { CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "" };
 	const notFound = { status: 404, json: { error: "not_found", reason: "unknown transferId" } };
 	const LOSE_CLAIM = join(import.meta.dirname, "helpers", "lose-claim.mjs");
+	const LOSE_RECONCILE = join(import.meta.dirname, "helpers", "lose-reconcile.mjs");
 
 	/**
 	 * A server that holds what it authorizes, forgets what `expire` names, logs
@@ -3949,6 +3950,54 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				{ key: keyOf("main", ["msg_a"]), transferId: "tx_1", inputTokens: 5 },
 			]);
 			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		});
+
+		it("two hooks resumed together over one STALE record: only the one whose reconcile removed it may reserve; this one is refused", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			await claimed();
+			await stale();
+			// The other hook's reconcile removes the record just before this hook's own runs:
+			// the record is gone, but this hook did not decide it.
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
+				UT_CC_MODE: "enforce",
+				NODE_OPTIONS: `--import=${LOSE_RECONCILE}`,
+				UT_CC_TAKEN: join(stateDir, SETTLING),
+			});
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(authorizes()).toHaveLength(1);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("a STALE transcript `.settling` with no window (a retire cut off before its unlink) is decided too, and the resume reserves afresh", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain([]);
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			const first = await record();
+			expect(first.usage).toBe("transcript");
+			expect(first.assignedIds).toEqual([]);
+			await claimed();
+			await stale();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			expect(again.stdout).toBe("");
+			expect(again.stderr).toContain("reserved tx_2");
+			expect(authorizes()).toHaveLength(2);
+			expect(await holdStateFiles()).toEqual([RECORD]);
+		});
+
+		it("control: a FRESH transcript `.settling` with no window is refused: a retire may still be ending it", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain([]);
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			await claimed();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(authorizes()).toHaveLength(1);
+			expect(await holdStateFiles()).toEqual([SETTLING]);
 		});
 
 		it("a STALE transcript `.settling` the journal cannot reach (its lock is held): no fresh hold beside it, and enforce DENIES", async () => {

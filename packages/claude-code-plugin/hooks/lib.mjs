@@ -331,7 +331,8 @@ export function isGated(entry) {
  * later"), and PreToolUse then ends that hold before it reserves afresh. Returns
  * `{ state: "pending", entry }` for its pending record, the entry as `listPending`
  * gives it; `{ state: "settling", entry }` when its settle is under way or was cut
- * off unanswered (`.settling`; the entry is `{ transferId, assignedIds }`); or null,
+ * off unanswered (`.settling`; the entry is `{ transferId, assignedIds, transcript,
+ * path }`); or null,
  * also when the call has no `tool_use_id`.
  * A record counts only if the ids it STORES are this call's. State-file names join
  * ids with "__", so two calls can share one (agent `a__b` with tool `c`, and agent
@@ -343,17 +344,20 @@ export async function holdOfCall(sessionId, agentId, toolUseId) {
 	if (typeof toolUseId !== "string" || toolUseId === "") return null;
 	const entry = await takePendingEntry(sessionId, agentId, toolUseId);
 	if (entry !== null) return { state: "pending", entry };
+	const path = settlingPath(stateFilePath(sessionId, agentId, toolUseId));
 	try {
-		const body = JSON.parse(
-			await readFile(settlingPath(stateFilePath(sessionId, agentId, toolUseId)), "utf-8"),
-		);
+		const body = JSON.parse(await readFile(path, "utf-8"));
 		if (
 			typeof body?.transferId === "string" &&
 			body.toolUseId === toolUseId &&
 			sanitize(body.agentId ?? "main") === sanitize(agentId)
 		) {
 			const assignedIds = Array.isArray(body.assignedIds) ? body.assignedIds : [];
-			return { state: "settling", entry: { transferId: body.transferId, assignedIds } };
+			const transcript = body.usage === "transcript";
+			return {
+				state: "settling",
+				entry: { transferId: body.transferId, assignedIds, transcript, path },
+			};
 		}
 	} catch {
 		// Not there, or unreadable: no hold of this call is being settled.
