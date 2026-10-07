@@ -129,6 +129,7 @@ import {
 	clearPending,
 	isAlreadySettled,
 	isUnknownRoute,
+	isUnknownTransfer,
 	listPending,
 	releaseHold,
 	sanitize,
@@ -1563,13 +1564,16 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 }
 
 /** Give a hold back after a settle that failed: the server re-queues such a hold. */
+/** Give a hold back for hygiene; say whether the server confirmed it is gone. */
 async function hygieneRelease(transferId, why) {
 	const timeoutMs = callTimeout();
-	if (timeoutMs < minCall()) return;
+	if (timeoutMs < minCall()) return false;
 	try {
-		await releaseHold(transferId, why, { timeoutMs });
+		const response = await releaseHold(transferId, why, { timeoutMs });
+		return response.status === 200 || isUnknownTransfer(response);
 	} catch {
 		// The server's pending-TTL sweep releases it.
+		return false;
 	}
 }
 
@@ -1596,10 +1600,11 @@ async function settleAt(transferId, counts, { keyed }) {
 			{ timeoutMs: callTimeout() },
 		);
 	} catch (err) {
-		await hygieneRelease(transferId, "transcript settle unanswered");
+		const holdEnded = await hygieneRelease(transferId, "transcript settle unanswered");
 		return {
 			outcome: keyed ? "unresolved" : "claimed",
 			reason: `settle unreachable: ${errText(err)}`,
+			holdEnded,
 		};
 	}
 	return settleOutcome(transferId, settle, keyed);
@@ -1612,17 +1617,20 @@ async function settleOutcome(transferId, settle, keyed) {
 		if (settle.json?.settled === false) {
 			const reason = "the ledger post is ambiguous (settled: false)";
 			return keyed
-				? { outcome: "unresolved", reason }
-				: { outcome: "claimed", reason: `${reason}; the usage may be unrecorded` };
+				? { outcome: "unresolved", reason, holdEnded: true }
+				: { outcome: "claimed", reason: `${reason}; the usage may be unrecorded`, holdEnded: true };
 		}
-		return { outcome: "settled" };
+		return { outcome: "settled", holdEnded: true };
 	}
-	if (keyed && isAlreadySettled(settle)) return { outcome: "settled" };
-	await hygieneRelease(transferId, "transcript settle failed");
+	if (keyed && isAlreadySettled(settle)) return { outcome: "settled", holdEnded: true };
+	// The hold is known gone only when the server says so: this settle's 404
+	// `unknown transferId`, or a confirmed hygiene release.
+	const released = await hygieneRelease(transferId, "transcript settle failed");
+	const holdEnded = released || isUnknownTransfer(settle);
 	const reason = `settle returned ${settle.status}`;
-	if (settle.status === 400) return { outcome: "released", reason };
-	if (keyed) return { outcome: "unresolved", reason };
-	return { outcome: settle.status === 404 ? "released" : "claimed", reason };
+	if (settle.status === 400) return { outcome: "released", reason, holdEnded };
+	if (keyed) return { outcome: "unresolved", reason, holdEnded };
+	return { outcome: settle.status === 404 ? "released" : "claimed", reason, holdEnded };
 }
 
 /**
@@ -1659,8 +1667,10 @@ async function returnEmptyHold(transferId) {
  * if two hooks reach it, and its outcome journalled and applied to the cursor. A
  * hold with none is given back — released, on a server that can release; settled
  * at zero (the server's 1-unit floor) on one that cannot. Returns `{ outcome,
- * reason? }`; `returned` is an empty hold given back, `deferred` means out of
- * time, hold untouched.
+ * reason?, holdEnded? }`; `returned` is an empty hold given back, `deferred` means
+ * out of time, hold untouched. A windowed hold's `holdEnded` says whether the
+ * server is known to hold it no more: settled or spent, a 404 `unknown
+ * transferId`, or a confirmed release. Otherwise it may still be live.
  */
 export async function settleTranscriptHold(sessionId, entry) {
 	if (callTimeout() < minCall()) return { outcome: "deferred", reason: "out of time" };

@@ -370,7 +370,10 @@ again, and the plugin finds the hold the call already has.
   budget is checked at every resume: one more authorize per resume. Whether a held
   reservation is still live, and still this server's and key's, cannot be known
   from the record, so the plugin does not rely on it.
-  - A hold carrying transcript usage is settled once, at its counts.
+  - A hold carrying transcript usage is settled once, at its counts. If that
+    settle fails and the server does not confirm the hold is gone (its release
+    unconfirmed too), the hold may be live: no fresh hold is made beside it, and
+    the call fails as a failed authorization does.
   - Any other hold is given back only through a `release` the server advertises,
     and never aborted. On a server without `release`, it counts against the budget
     until the server's pending-hold sweep voids it, which is one of the aborts

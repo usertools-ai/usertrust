@@ -4504,6 +4504,44 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			},
 		);
 
+		it.each<[string, { status: number; json: unknown } | null, boolean]>([
+			["its release a 503", { status: 503, json: { error: "unavailable" } }, false],
+			["its release confirmed", null, true],
+		])(
+			"transcript: the first window's settle fails (500) and %s: the resume reserves afresh only once the server confirms the hold is gone",
+			async (_, release, reserves) => {
+				capabilities = ["release"];
+				const server = holdingServer();
+				await startServer((path, body) => {
+					if (body.transferId === "tx_1" && path === "/v1/settle") {
+						return { status: 500, json: { error: "ledger unavailable" } };
+					}
+					if (body.transferId === "tx_1" && path === "/v1/release" && release !== null) {
+						return release;
+					}
+					return server.responder(path, body);
+				});
+				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+				await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+				const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+				if (reserves) {
+					expect(again.stdout).toBe("");
+					expect(again.stderr).toContain("reserved tx_2");
+					expect(authorizes()).toHaveLength(2);
+				} else {
+					// It fails as a failed authorization does: no fresh hold beside a hold that
+					// may be live.
+					expect(again.code).toBe(2);
+					expect(again.stderr).toContain("the server has not confirmed it is gone");
+					expect(authorizes()).toHaveLength(1);
+				}
+				// Either way the window's outcome is journalled once. Unkeyed, it is `claimed`:
+				// its ids are accounted, never posted again.
+				expect((await readCursor()).accounted).toEqual(["msg_a"]);
+				expect(server.charges).toEqual([]);
+			},
+		);
+
 		it("a 404 `unknown transferId` to the release: the server holds it no more, so the call reserves afresh", async () => {
 			capabilities = ["release"];
 			const server = holdingServer();

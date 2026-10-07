@@ -15,7 +15,10 @@ npm, and its version is its own: the `usertrust` packages and their
   it already has, by the ids its record stores. It never reuses that hold: it ends
   it, then reserves afresh, so the budget is checked at every resume and enforce
   mode denies on a 402.
-  - A hold that carries transcript usage is settled once, at its counts.
+  - A hold that carries transcript usage is settled once, at its counts. If that
+    settle fails and the server does not confirm the hold is gone (its release
+    unconfirmed too), no fresh hold is made beside it, and the call fails as a
+    failed authorization does.
   - Any other hold is given back only through a `release` the server advertises,
     and never aborted. On a server without `release` it counts against the budget
     until the server's pending-hold sweep voids it, which can only refuse a call

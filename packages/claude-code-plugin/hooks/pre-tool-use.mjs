@@ -53,6 +53,7 @@ import {
 	holdOfCall,
 	isAlreadySettled,
 	isTransferId,
+	isUnknownTransfer,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
@@ -271,7 +272,9 @@ async function unsettled(
  *   PostToolUse would have given it (`settleTranscriptHold`), failure handling
  *   included. Live, it is charged once, at the window's counts. Gone (a 404), its
  *   window is released for the fresh hold to carry (no key), or retried under its
- *   key at the next Stop.
+ *   key at the next Stop. A settle that fails while the server does not confirm the
+ *   hold is gone (`holdEnded`: its release unconfirmed, too) leaves it possibly
+ *   live.
  * - Any other hold (an estimate, or an empty window) carries no usage: the call
  *   has not run. Its record is dropped. It is given back only through a `release`
  *   the server advertises; otherwise a hold the server still has is left to the
@@ -294,6 +297,14 @@ async function retire(entry) {
 		if (result.outcome !== "settled") {
 			say(
 				`usertrust: hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}`,
+			);
+		}
+		if (result.holdEnded !== true) {
+			// Its window's outcome is journalled as for any settle, but the hold itself
+			// may still be live: no fresh hold is made beside it. The server's sweep
+			// ends it.
+			throw new Error(
+				`hold ${entry.transferId} ${result.outcome}, and the server has not confirmed it is gone; no fresh hold is made beside it`,
 			);
 		}
 		return true;
@@ -331,8 +342,7 @@ async function releaseUnconfirmed(transferId) {
 	} catch (err) {
 		return `release ${transferId} failed (${err instanceof Error ? err.message : String(err)})`;
 	}
-	if (response.status === 200) return null;
-	if (response.status === 404 && response.json?.reason === "unknown transferId") return null;
+	if (response.status === 200 || isUnknownTransfer(response)) return null;
 	return `release ${transferId} returned ${response.status}`;
 }
 

@@ -692,6 +692,15 @@ export function isUnknownRoute(response) {
 }
 
 /**
+ * A server's answer that it holds no such transfer: the hold is gone (expired, or
+ * ended by another hook). Only the body says so: a bare 404, an older server's
+ * unknown route or a proxy's, does not.
+ */
+export function isUnknownTransfer(response) {
+	return response.status === 404 && response.json?.reason === "unknown transferId";
+}
+
+/**
  * The server's answer that a key's charge already stands (usertrust #205): from
  * `/v1/authorize` when an earlier settle under the key landed, and from
  * `/v1/settle` when another hold already charged it.
