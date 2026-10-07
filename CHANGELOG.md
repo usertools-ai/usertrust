@@ -478,10 +478,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Headless: calls that overlap `destroy()`** (addresses #243). From `destroy()` on, a hold is `destroy()`'s to end, and the calls that would race it are refused before they claim anything:
+- **Headless: calls that overlap `destroy()`** (addresses #243). The calls that would race `destroy()` for a hold are refused before they claim anything:
   - an `authorize()` still reserving when `destroy()` begins registers no hold. One could finish afterwards and hand back a live hold on the destroyed governor, which a later terminal could end after the audit writer was released. It now voids its own reservation (best-effort; the engine sweep or the ledger's timeout covers a failure) and throws `Governor has been destroyed`, as an `authorize()` called after `destroy()` already did;
-  - a `release()` or `abort()` called once `destroy()` has begun answers `{ released: false }` / `{ aborted: false }`, with no void and no record: `destroy()` voids and records that hold itself;
-  - a `settle()` still runs while `destroy()` waits for terminals, because it carries a charge for a call that ran, and `destroy()` waits for it. Once `destroy()` has taken the remaining holds at its deadline, it fails with `Governor has been destroyed`.
+  - a `release()`, `abort()` or `settle()` called once `destroy()` has taken the remaining holds at its deadline is refused: `release()` and `abort()` answer `{ released: false }` / `{ aborted: false }`, with no void and no record, and `settle()` throws `Governor has been destroyed`. `destroy()` voids and records those holds itself. While `destroy()` waits for terminals, these calls run as before and are waited for: a settle started then still posts its charge, once.
 
 - **`Governor.abort()` answers what it did, as `release()` does: a breaking change for `Governor` implementers** (addresses #240). It returns an `AbortOutcome` (exported from `usertrust` and `usertrust/headless`): `{ aborted: true }` only when that call ended the hold, and `{ aborted: false }` when the governor no longer held it (its settle in flight, or already settled, aborted, released or destroyed). A void the ledger refused still ends the hold and is named in `voidError` by `release()`'s fixed codes, on the answer and on the `llm_call_failed` record, never by the error's text; usertrust-verify prints it under FAILED as it does a release's. Callers that ignore the result are unaffected. An implementation of `Governor` must return an `AbortOutcome`.
 

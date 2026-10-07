@@ -23,8 +23,8 @@
  *  - destroy() takes every remaining hold in one synchronous step at its deadline, before
  *    its first await: a release, an abort or a settle called while it records a terminal
  *    still in flight is refused, and nothing is appended after the writer is released;
- *  - from destroy() on, release() and abort() refuse (the hold is destroy()'s to end),
- *    while a settle, which carries a charge, still posts while destroy() drains;
+ *  - while destroy() drains, a release, an abort or a settle runs as before and is waited
+ *    for: a settle started then is billed once;
  *  - against the real audit writer, nothing appends after destroy() released it: an
  *    append there lands, and takes the vault's lock again for the life of the process.
  */
@@ -524,114 +524,117 @@ describe("every hold destroy() ends itself is recorded", () => {
 });
 
 describe("claims first: destroy() takes every remaining hold before its first await", () => {
-	it("a release, an abort and a settle on other holds, called while destroy() records a terminal still in flight: each refused, nothing voided twice, nothing appended after the writer is released, one record per hold", {
-		timeout: 5_000,
-	}, async () => {
-		const voids = gate();
-		const appends = gate();
-		const { engine, mutations, voidRequests } = ledgerEngine({ void: voids.wait });
-		const gov = await governor(engine, BOUND_MS);
-		const parked = await hold(gov, "session");
-		const others = [
-			await hold(gov, "session"),
-			await hold(gov, "attributed"),
-			await hold(gov, "session"),
-		] as const;
-		const [released, aborted, settled] = others;
-		const ending = end(gov, parked, "release");
-		events.length = 0;
-		// destroy()'s first append (its record for the parked release) parks: destroy() is
-		// then mid-append, past its deadline.
-		writer.nextAppendWaits = appends.wait;
-		const destroying = gov.destroy();
-		await sleep(BOUND_MS + 150);
-		expect(events).toEqual([]);
-
-		expect(await gov.release(released, "given back")).toEqual({ released: false });
-		expect(await gov.abort(aborted, new Error("provider 500"))).toEqual({ aborted: false });
-		await expect(gov.settle(settled, { inputTokens: 10, outputTokens: 10 })).rejects.toThrow(
-			"Governor has been destroyed",
-		);
-
-		appends.open();
-		voids.open();
-		await destroying;
-		await ending;
-		// No POST, and each hold voided exactly once.
-		expect(mutations.filter((m) => m.startsWith("post:"))).toEqual([]);
-		for (const auth of [parked, ...others]) {
-			expect([auth.transferId, mutations.filter((m) => m === `void:${auth.transferId}`)]).toEqual([
-				auth.transferId,
-				[`void:${auth.transferId}`],
-			]);
-			expect(voidRequests.filter((r) => r.transferId === auth.transferId && r.taken)).toHaveLength(
-				1,
+	type Late = "release" | "abort" | "settle";
+	/** A terminal on another hold, started from INSIDE destroy()'s record for a stray. */
+	function lateCall(gov: Governor, auth: Authorization, terminal: Late): Promise<unknown> {
+		if (terminal === "settle") {
+			return gov.settle(auth, { inputTokens: 10, outputTokens: 10 }).then(
+				(receipt) => receipt,
+				(err: unknown) => err,
 			);
 		}
-		// One record per hold, each destroy()'s, and nothing after the writer was released.
-		expect(recordsOf(parked.transferId)).toEqual([
-			destroyRecord(parked, "session", STILL_IN_FLIGHT),
-		]);
-		expect(recordsOf(released.transferId)).toEqual([
-			destroyRecord(released, "session", "governor destroyed"),
-		]);
-		expect(recordsOf(aborted.transferId)).toEqual([
-			destroyRecord(aborted, "attributed", "governor destroyed"),
-		]);
-		expect(recordsOf(settled.transferId)).toEqual([
-			destroyRecord(settled, "session", "governor destroyed"),
-		]);
-		expect(writer.lateAppends).toEqual([]);
-	});
+		return end(gov, auth, terminal);
+	}
+
+	for (const terminal of ["release", "abort", "settle"] as const) {
+		it(`${terminal}() on another hold, started while destroy() records a terminal still in flight: refused; that hold voided once and recorded once, by destroy(); nothing appended after the writer is released`, {
+			timeout: 5_000,
+		}, async () => {
+			const voids = gate();
+			const appends = gate();
+			const { engine, mutations, voidRequests } = ledgerEngine({ void: voids.wait });
+			const gov = await governor(engine, BOUND_MS);
+			const parked = await hold(gov, "session");
+			const other = await hold(gov, "session");
+			const ending = end(gov, parked, "release");
+			events.length = 0;
+			// destroy()'s first append, its record for the parked release, parks: destroy() is
+			// then inside that append, past its deadline and its claim.
+			writer.nextAppendWaits = appends.wait;
+			const destroying = gov.destroy();
+			await sleep(BOUND_MS + 150);
+			expect(events).toEqual([]);
+
+			const answer = await lateCall(gov, other, terminal);
+			if (terminal === "settle") {
+				expect(answer).toBeInstanceOf(Error);
+				expect((answer as Error).message).toBe("Governor has been destroyed");
+			} else {
+				expect(answer).toEqual(terminal === "release" ? { released: false } : { aborted: false });
+			}
+
+			appends.open();
+			voids.open();
+			await destroying;
+			await ending;
+			// One ledger mutation for the other hold: the walk's void. No POST.
+			expect(mutations.filter((m) => m.endsWith(other.transferId))).toEqual([
+				`void:${other.transferId}`,
+			]);
+			expect(voidRequests.filter((r) => r.transferId === other.transferId)).toEqual([
+				{ transferId: other.transferId, via: "voidPendingSpend", taken: true },
+			]);
+			// One record each, destroy()'s, and nothing after the writer was released.
+			expect(recordsOf(other.transferId)).toEqual([
+				destroyRecord(other, "session", "governor destroyed"),
+			]);
+			expect(recordsOf(parked.transferId)).toEqual([
+				destroyRecord(parked, "session", STILL_IN_FLIGHT),
+			]);
+			expect(writer.lateAppends).toEqual([]);
+		});
+	}
 });
 
-describe("from destroy() on, a hold is destroy()'s to end; a settle still posts while it drains", () => {
-	it("a release or an abort called while destroy() drains is refused: the hold is voided and recorded once, by destroy()", async () => {
-		const voids = gate();
-		const { engine, voidRequests } = ledgerEngine({ void: voids.wait });
-		const gov = await governor(engine);
-		const parked = await hold(gov, "session");
-		const other = await hold(gov, "attributed");
-		const ending = end(gov, parked, "release");
-		events.length = 0;
-		const destroying = gov.destroy();
-		await sleep(50);
-		// destroy() is draining: it waits for the parked release.
-		const released = gov.release(other, "given back");
-		const aborted = gov.abort(other, new Error("provider 500"));
-		voids.open();
-		expect(await released).toEqual({ released: false });
-		expect(await aborted).toEqual({ aborted: false });
-		expect(await ending).toEqual({ released: true });
-		await destroying;
-		expect(recordsOf(other.transferId)).toEqual([
-			destroyRecord(other, "attributed", "governor destroyed"),
-		]);
-		expect(voidRequests.filter((r) => r.transferId === other.transferId)).toEqual([
-			{ transferId: other.transferId, via: "voidPendingSpend", taken: true },
-		]);
-	});
+describe("while destroy() drains, terminals run as before and are waited for", () => {
+	for (const terminal of ["release", "abort"] as const) {
+		it(`${terminal}() on another hold, started while destroy() drains: it lands its own void and record, and destroy() waits for it`, async () => {
+			const voids = gate();
+			const { engine, voidRequests } = ledgerEngine({ void: voids.wait });
+			const gov = await governor(engine);
+			const parked = await hold(gov, "session");
+			const other = await hold(gov, "attributed");
+			const ending = end(gov, parked, "release");
+			events.length = 0;
+			const destroying = gov.destroy();
+			await sleep(50);
+			// destroy() is draining: it waits for the parked release, and for this one too.
+			const late = end(gov, other, terminal);
+			voids.open();
+			expect(await late).toEqual(terminal === "release" ? { released: true } : { aborted: true });
+			expect(await ending).toEqual({ released: true });
+			await destroying;
+			// Its own record, not destroy()'s, and its own void: the walk found nothing.
+			const records = recordsOf(other.transferId);
+			expect(records.map((e) => e.kind)).toEqual([RECORD[terminal]]);
+			expect(records[0]?.data).toMatchObject(
+				terminal === "release" ? { reason: "given back" } : { error: "provider 500" },
+			);
+			expect(voidRequests.filter((r) => r.transferId === other.transferId)).toEqual([
+				{ transferId: other.transferId, via: "voidPendingSpend", taken: true },
+			]);
+		});
+	}
 
-	it("a settle called while destroy() drains still posts its charge, and destroy() waits for it", async () => {
+	it("a settle started while destroy() drains is billed once: it POSTs, destroy() waits for it, and its only record is llm_call", async () => {
 		const voids = gate();
 		const { engine, mutations } = ledgerEngine({ void: voids.wait });
-		const gov = await governor(engine);
+		const gov = await governor(engine, BOUND_MS);
 		const parked = await hold(gov, "session");
 		const other = await hold(gov, "session");
 		const ending = end(gov, parked, "release");
 		events.length = 0;
 		const destroying = gov.destroy();
-		await sleep(50);
+		// The parked release holds the drain open; the call behind this settle finished just
+		// as shutdown began.
+		await sleep(60);
 		const receipt = await gov.settle(other, { inputTokens: 10, outputTokens: 10 });
 		expect(receipt.settled).toBe(true);
 		voids.open();
 		await ending;
 		await destroying;
-		expect(mutations).toContain(`post:${other.transferId}`);
-		expect(mutations).not.toContain(`void:${other.transferId}`);
-		const kinds = recordsOf(other.transferId).map((e) => e.kind);
-		expect(kinds).toContain("llm_call");
-		expect(kinds).not.toContain("hold_released");
+		expect(mutations).toEqual([`post:${other.transferId}`, `void:${parked.transferId}`]);
+		expect(recordsOf(other.transferId).map((e) => e.kind)).toEqual(["llm_call"]);
 	});
 });
 

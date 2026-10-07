@@ -119,11 +119,11 @@ Grepping `catch (denialErr)` therefore finds four, not five. Payloads and ration
 settle's POST, an abort or release parked on its void). At the deadline it takes every remaining
 hold in ONE synchronous step, before its first await: it records each abort or release still in
 flight, and voids and records (`hold_released`, `governor destroyed`) each hold still held. Then it
-voids the engine's remaining pending transfers, and flushes and releases the audit writer. From
-`destroy()` on, `release()` and `abort()` refuse at entry (the hold is destroy()'s), and an
-`authorize()` still reserving registers no hold (it voids its reservation and fails). A `settle()`
-still runs while destroy() drains, since it carries a charge, and finds no hold once destroy() has
-taken them. **Callers must call it** or the process hangs on the TigerBeetle client.
+voids the engine's remaining pending transfers, and flushes and releases the audit writer. An
+`authorize()` refuses from destroy()'s start, and one still reserving registers no hold (it voids
+its reservation and fails). While destroy() drains, a `settle()`, `abort()` or `release()` runs as
+before and is waited for (a settle carries a charge); from the claim at its deadline (`sweeping`)
+they refuse at entry. **Callers must call it** or the process hangs on the TigerBeetle client.
 A `process.on("beforeExit")` handler calls it too, but that is a net, not a substitute: `beforeExit`
 fires only once the event loop drains, and an open TigerBeetle client is precisely what keeps it
 from draining. The net catches a governor whose client is already closed; it cannot catch the case
