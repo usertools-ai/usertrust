@@ -102,6 +102,19 @@ export class TransferIdRetiredError extends TBTransferError {
 	}
 }
 
+/**
+ * This ledger client was destroyed. An operation on it fails rather than reconnecting:
+ * a reconnect would build a native client that nothing destroys, and an open TigerBeetle
+ * client keeps the process alive (#249). An operation that was in flight at `destroy()`
+ * fails with its own error; one started after it fails with this.
+ */
+export class LedgerClientClosedError extends Error {
+	constructor() {
+		super("TigerBeetle client was destroyed");
+		this.name = "LedgerClientClosedError";
+	}
+}
+
 // Ledger ID: all usertokens live on ledger 1
 export const LEDGER_USERTOKENS = 1;
 
@@ -211,6 +224,11 @@ export class TrustTBClient {
 	private onAlert?: (message: string, meta: Record<string, unknown>) => void;
 	private healthCheckInterval: ReturnType<typeof setInterval> | null = null;
 	private reconnectPromise: Promise<void> | null = null;
+	// Set first by destroy(); from then on this client never reconnects (#249). The native
+	// client cannot say so itself: its ERR_CLIENT_CLOSED does not tell a destroy() from our
+	// own reconnect, which closes the old client too, and an operation in flight on THAT one
+	// must still retry on the new client. Only this wrapper knows it was destroyed.
+	private closed = false;
 
 	constructor(opts: TrustTBClientOptions) {
 		this.opts = {
@@ -275,6 +293,9 @@ export class TrustTBClient {
 	private async _doReconnect(): Promise<void> {
 		const maxRetries = 5;
 		for (let attempt = 0; attempt < maxRetries; attempt++) {
+			// destroy() may have landed while this waited out its backoff: build no client.
+			// createClient is synchronous below, so one check per attempt covers it.
+			if (this.closed) throw new LedgerClientClosedError();
 			try {
 				console.log(`[TB] Reconnection attempt ${attempt + 1}/${maxRetries}`);
 				try {
@@ -305,9 +326,16 @@ export class TrustTBClient {
 	}
 
 	private async withReconnect<T>(fn: () => Promise<T>): Promise<T> {
+		// Destroyed: fail fast, without touching the closed native client.
+		if (this.closed) throw new LedgerClientClosedError();
 		try {
 			return await fn();
 		} catch (err) {
+			// Destroyed while this was in flight: its own error stands, and no reconnect.
+			// A POST that committed but lost its reply here would, by reconnecting, have been
+			// answered `exists` on a fresh client: a success, on a client nothing destroys.
+			// It now fails (a settle records `settlement_ambiguous`); its charge stands.
+			if (this.closed) throw err;
 			if (this.isConnectionError(err)) {
 				await this.reconnect();
 				return await fn();
@@ -1050,6 +1078,8 @@ export class TrustTBClient {
 	}
 
 	destroy(): void {
+		// First: an operation the native destroy below rejects must already see it.
+		this.closed = true;
 		if (this.healthCheckInterval) {
 			clearInterval(this.healthCheckInterval);
 			this.healthCheckInterval = null;

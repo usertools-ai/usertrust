@@ -14,8 +14,11 @@
  * for the same pending transfer has landed, and is then sent on the still-open client, so
  * both reach the real ledger. The unit suite (`tests/headless/destroy-terminals.test.ts`)
  * pins the same flow against a fake ledger, with the release's void landing after
- * destroy() returns. Self-skips (via `describe.skipIf`) whenever `USERTRUST_TB_ADDRESS` is
- * unset.
+ * destroy() returns.
+ *
+ * And a reserve still on its way when destroy() closes the client (#249): it fails, and no
+ * native client is built after destroy(), so none is left open to keep the process alive.
+ * Self-skips (via `describe.skipIf`) whenever `USERTRUST_TB_ADDRESS` is unset.
  */
 
 import { randomUUID } from "node:crypto";
@@ -24,11 +27,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-/** The void flow through the client: the parked release void, and every void's answer. */
+/**
+ * The flow through the client: the parked release void and every void's answer; a reserve
+ * held back on its way to the cluster; and every native client built and destroyed.
+ */
 const flow = vi.hoisted(() => ({
 	armed: false,
 	parked: undefined as undefined | { pendingId: bigint; send: () => void; done: Promise<void> },
 	voids: [] as Array<{ by: "release" | "sweep" | "other"; status: string }>,
+	holdReserve: undefined as undefined | Promise<void>,
+	clients: { created: 0, destroyed: new Set<number>() },
 }));
 
 vi.mock("tigerbeetle-node", async (importOriginal) => {
@@ -42,8 +50,22 @@ vi.mock("tigerbeetle-node", async (importOriginal) => {
 		...actual,
 		createClient: (args: Parameters<typeof actual.createClient>[0]) => {
 			const client = actual.createClient(args);
+			flow.clients.created += 1;
+			const clientId = flow.clients.created;
+			const destroy = (): void => {
+				flow.clients.destroyed.add(clientId);
+				client.destroy();
+			};
 			const createTransfers = async (batch: Batch) => {
 				const transfer = batch[0];
+				const isReserve =
+					transfer !== undefined && (transfer.flags & actual.TransferFlags.pending) !== 0;
+				if (isReserve && flow.holdReserve !== undefined) {
+					// One reserve, held back on its way to the cluster until the test lets it go.
+					const hold = flow.holdReserve;
+					flow.holdReserve = undefined;
+					await hold;
+				}
 				const isVoid =
 					transfer !== undefined &&
 					(transfer.flags & actual.TransferFlags.void_pending_transfer) !== 0;
@@ -78,7 +100,9 @@ vi.mock("tigerbeetle-node", async (importOriginal) => {
 			};
 			return new Proxy(client, {
 				get(target, prop, receiver) {
-					return prop === "createTransfers" ? createTransfers : Reflect.get(target, prop, receiver);
+					if (prop === "createTransfers") return createTransfers;
+					if (prop === "destroy") return destroy;
+					return Reflect.get(target, prop, receiver);
 				},
 			});
 		},
@@ -87,6 +111,7 @@ vi.mock("tigerbeetle-node", async (importOriginal) => {
 
 import { createGovernor } from "../../src/headless.js";
 import { VAULT_DIR } from "../../src/shared/constants.js";
+import { LedgerUnavailableError } from "../../src/shared/errors.js";
 
 const TB_ADDRESS = process.env.USERTRUST_TB_ADDRESS;
 const AUTHORIZE = { model: "claude-sonnet-4-6", estimatedInputTokens: 2_000, maxOutputTokens: 500 };
@@ -96,7 +121,21 @@ beforeEach(() => {
 	flow.armed = false;
 	flow.parked = undefined;
 	flow.voids.length = 0;
+	flow.holdReserve = undefined;
+	flow.clients = { created: 0, destroyed: new Set<number>() };
 });
+
+/** A vault whose governor reaches the real cluster. */
+function ledgerVault(): string {
+	const dir = join(tmpdir(), `tb-destroy-${randomUUID()}`);
+	mkdirSync(join(dir, VAULT_DIR), { recursive: true });
+	writeFileSync(
+		join(dir, VAULT_DIR, "usertrust.config.json"),
+		JSON.stringify({ budget: 10_000_000, tigerbeetle: { addresses: [TB_ADDRESS], clusterId: 0 } }),
+	);
+	cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
+	return dir;
+}
 afterEach(async () => {
 	for (const fn of cleanup.splice(0)) await fn();
 });
@@ -147,6 +186,27 @@ describe.skipIf(!TB_ADDRESS)(
 					undefined,
 				],
 			]);
+		}, 15_000);
+
+		it("a reserve still on its way when destroy() closes the client fails, and every ledger client built is destroyed (#249)", async () => {
+			const gov = await createGovernor({ vaultBase: ledgerVault(), _destroyDrainMs: 300 });
+			cleanup.push(() => gov.destroy());
+			let letGo = (): void => {};
+			flow.holdReserve = new Promise<void>((resolve) => {
+				letGo = resolve;
+			});
+			const late = gov.authorize(AUTHORIZE).then(
+				() => "granted",
+				(err: unknown) => err,
+			);
+			await new Promise((r) => setTimeout(r, 50));
+			await gov.destroy();
+			// The reserve now reaches a destroyed client. It fails as a ledger outage, and
+			// nothing reconnects: no client is built after destroy(), so none is left open.
+			letGo();
+			expect(await late).toBeInstanceOf(LedgerUnavailableError);
+			expect(flow.clients.created).toBe(1);
+			expect([...flow.clients.destroyed]).toEqual([1]);
 		}, 15_000);
 	},
 );
