@@ -195,17 +195,20 @@ export function modeAnnouncement() {
 /**
  * Append one watch record (`would_block` or `gap`) as a JSON line, with the time,
  * session, agent and tool. Never throws: a record that cannot be written is said
- * on stderr, and the tool call proceeds either way.
+ * on stderr, and the tool call proceeds either way. Returns whether the record was
+ * written, so no note claims a record that is not there.
  */
 export async function recordWatchEvent(event) {
 	const line = JSON.stringify({ at: new Date().toISOString(), ...event });
 	try {
 		await mkdir(stateRoot(), { recursive: true });
 		await appendFile(watchLogPath(), `${line}\n`, { mode: 0o600 });
+		return true;
 	} catch (err) {
 		say(
 			`usertrust: could not write a watch record to ${watchLogPath()} (${err instanceof Error ? err.message : String(err)}): ${line}`,
 		);
+		return false;
 	}
 }
 
@@ -583,6 +586,31 @@ export async function releaseHold(transferId, reason, { timeoutMs = 5000 } = {})
 		route: "abort",
 		...(await serverRequest("/v1/abort", { transferId, error: reason }, { timeoutMs })),
 	};
+}
+
+/**
+ * Give back a hold a remediation path cannot keep (its record could not be
+ * written), and say only what the server confirmed. `releaseHold` resolves on any
+ * answer, so the status decides: a 200 is the one answer that means "given back";
+ * any other is reported as refused, with its route, status and reason; a request
+ * that throws is reported as thrown. A hold not given back is released by the
+ * server's pending-TTL sweep. Never throws. Returns whether the give-back was
+ * confirmed.
+ */
+export async function giveBack(transferId, reason, timeoutMs) {
+	try {
+		const response = await releaseHold(transferId, reason, { timeoutMs });
+		if (response.status === 200) return true;
+		const why = response.json?.reason ?? response.json?.error;
+		say(
+			`usertrust: ${response.route} ${transferId} was refused (${response.status}${typeof why === "string" ? `: ${why}` : ""}); the server's TTL sweep releases the hold`,
+		);
+	} catch (err) {
+		say(
+			`usertrust: hold ${transferId} could not be given back (${err instanceof Error ? err.message : String(err)}); the server's TTL sweep releases it`,
+		);
+	}
+	return false;
 }
 
 /**
