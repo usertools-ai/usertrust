@@ -101,7 +101,7 @@ describe("renderReceipt: a released hold", () => {
 	});
 });
 
-describe("a release whose ledger void failed shows its evidence", () => {
+describe("a terminal whose ledger void failed shows its evidence", () => {
 	it("prints the fixed `voidError` under RELEASED, scrubbed like the reason", () => {
 		const output = render(released({ reason: "given back", voidError: "ledger_unavailable" }));
 		expect(output).toContain("RELEASED");
@@ -132,6 +132,68 @@ describe("a release whose ledger void failed shows its evidence", () => {
 		expect(result.receipt).toContain("RELEASED");
 		expect(result.receipt).not.toContain("Void error");
 	});
+
+	it("an abort's: the fixed `voidError` under FAILED, after its error", () => {
+		const failed = {
+			...released({ error: "provider 500", voidError: "pending_transfer_not_found" }),
+			kind: "llm_call_failed",
+		};
+		const output = render(failed);
+		expect(output).toContain("FAILED");
+		expect(output).toContain("Error: provider 500");
+		expect(output).toContain("Void error: pending_transfer_not_found");
+		const clean = { ...released({ error: "provider 500" }), kind: "llm_call_failed" };
+		expect(render(clean)).toContain("FAILED");
+		expect(render(clean)).not.toContain("Void error");
+	});
+
+	it("verifyTransaction carries an abort's `voidError` from the chain to the receipt", () => {
+		const result = verifyChainOf(
+			[
+				{
+					kind: "llm_call_failed",
+					data: {
+						model: "m",
+						transferId: "tx_1",
+						error: "provider 500",
+						voidError: "ledger_unavailable",
+					},
+				},
+			],
+			"tx_1",
+		);
+		expect(result.receipt).toContain("FAILED");
+		expect(result.receipt).toContain("Void error: ledger_unavailable");
+	});
+
+	it("no other record's `voidError` is rendered: only a release's and an abort's void", () => {
+		const ambiguous = {
+			...released({ cost: 50, error: "post failed", voidError: "ledger_unavailable" }),
+			kind: "settlement_ambiguous",
+		};
+		expect(render(ambiguous)).toContain("AMBIGUOUS");
+		expect(render(ambiguous)).not.toContain("Void error");
+	});
+});
+
+describe("a hold the governor's destroy() ended: a record with no model", () => {
+	// destroy() records each hold it ends from the governor's own capture, which holds no
+	// model, so its `hold_released` names none.
+	for (const reason of ["governor destroyed", "governor destroyed (terminal still in flight)"]) {
+		it(`"${reason}" renders RELEASED with its reason, and no \`undefined\` anywhere`, () => {
+			const result = verifyChainOf(
+				[{ kind: "hold_released", data: { transferId: "tx_1", reason, source: "headless" } }],
+				"tx_1",
+			);
+			expect(result.found).toBe(true);
+			expect(result.receipt).toContain("RELEASED");
+			expect(result.receipt).toContain("Reason: governor destroyed");
+			if (reason.endsWith("in flight)")) expect(result.receipt).toContain("in flight)");
+			expect(result.receipt).toContain("unknown");
+			expect(result.receipt).not.toContain("undefined");
+			expect(result.receipt).not.toContain("PENDING");
+		});
+	}
 });
 
 describe("verifyTransaction: a released hold is a conclusive terminal", () => {

@@ -25,7 +25,7 @@ export interface TransactionEvent {
 		readonly message?: string;
 		/** Why a hold was given back — `hold_released` writes `reason`. */
 		readonly reason?: string;
-		/** The fixed code of a release whose ledger void failed (`hold_released`). */
+		/** The fixed code of a ledger void that failed (`hold_released`, `llm_call_failed`). */
 		readonly voidError?: string;
 		readonly transferId?: string | undefined;
 	};
@@ -366,7 +366,8 @@ export function renderReceipt(data: ReceiptData): string {
 
 	lines.push(row(`${dotted("  Status", status, WIDTH - 1)} `));
 
-	const voidError = isReleased ? event.data.voidError : undefined;
+	const voidError =
+		isReleased || event.kind === "llm_call_failed" ? event.data.voidError : undefined;
 	if ((isFailed || isDenied || isDetection || isReleased) && (reason || voidError)) {
 		lines.push(blank());
 	}
@@ -387,8 +388,8 @@ export function renderReceipt(data: ReceiptData): string {
 			lines.push(row(pad(`${prefix}${wrapped[i] as string}`)));
 		}
 	}
-	// A release whose ledger void failed: its fixed code is the evidence that the funds
-	// may stay held until the ledger's own timeout. Chain data, so scrubbed like the reason.
+	// A release or abort whose ledger void failed: its fixed code is the evidence that the
+	// funds may stay held until the ledger's own timeout. Chain data, scrubbed like the reason.
 	if (voidError) {
 		const prefix = "  Void error: ";
 		const wrapped = wordWrap(forDisplay(voidError), WIDTH - prefix.length - 2);

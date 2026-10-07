@@ -94,6 +94,7 @@ export type { TrustedClient, TrustOpts } from "./govern.js";
 // Core
 export { trust } from "./govern.js";
 export type {
+	AbortOutcome,
 	Authorization,
 	AuthorizeParams,
 	Governor,
