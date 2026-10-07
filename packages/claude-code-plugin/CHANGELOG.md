@@ -7,6 +7,8 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-10-07
+
 ### Fixed
 
 - **A tool call that is deferred and then resumed keeps one hold** (1.4.0's known
