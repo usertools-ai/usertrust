@@ -202,17 +202,6 @@ closure, so a reconnect retry resubmits the same id and TigerBeetle deduplicates
 moved — then voiding an already-posted transfer. The converse is the likelier mistake: mint the
 transfer id *inside* the `withReconnect` closure and a retry submits a **fresh** id, TigerBeetle has
 nothing to deduplicate against, and the caller double-spends.
-
-**A destroyed ledger client stays destroyed.** `TrustTBClient.destroy()` sets `closed` first, and
-from then on nothing reconnects. An operation in flight at `destroy()` fails with its own error, one
-started after it fails with `LedgerClientClosedError` before reaching the native client, and
-`_doReconnect()` checks `closed` before every attempt, so a reconnect waiting out its backoff builds
-nothing. The native client cannot make this call: its `ERR_CLIENT_CLOSED` also comes from our own
-reconnect, which closes the old client, and an operation in flight on THAT one must still retry.
-*Prevents:* a reconnect after shutdown building a native client nothing destroys, which keeps the
-process alive (#249). A POST that committed but lost its reply at `destroy()` is therefore no longer
-retried into an `exists` success: it fails, and a settle records `settlement_ambiguous`. Its charge
-stands on the ledger.
 *Caller-supplied ids extend this across restarts.* `createPendingTransfer({ transferId })`,
 `postTransfer(id, amount, { transferId })` and `voidTransfer(id, { transferId })` accept an id the
 caller derives from its own durable key — `TrustTBClient.deriveTransferId(key, role)`, which hashes
@@ -253,6 +242,19 @@ wallet.
 *Corollary:* never wrap `createUserWallet` in a blanket `try/catch` "to handle already exists" — a
 broad catch swallows `exists_with_different_flags`, i.e. an account missing its
 `debits_must_not_exceed_credits` enforcement. No catch is strictly better than a broad one.
+
+**A destroyed ledger client stays destroyed.** `TrustTBClient.destroy()` sets `closed` first, and
+from then on nothing reconnects. An operation in flight at `destroy()` fails with its own error, one
+started after it fails with `LedgerClientClosedError` before reaching the native client (a shortcut
+that answers without the ledger, such as a cached wallet id, included; `ping()` reports unhealthy;
+`reconnect()` is refused even while a finished reconnect is still cached), and `_doReconnect()`
+checks `closed` before every attempt, so a reconnect waiting out its backoff builds nothing. The
+native client cannot make this call: its `ERR_CLIENT_CLOSED` also comes from our own reconnect, which
+closes the old client, and an operation in flight on THAT one must still retry.
+*Prevents:* a reconnect after shutdown building a native client nothing destroys, which keeps the
+process alive (#249). A POST that committed but lost its reply at `destroy()` is therefore no longer
+retried into an `exists` success: it fails, and a settle records `settlement_ambiguous`. Its charge
+stands on the ledger.
 
 **Ordinary wallet ids and escrow labels share one namespace, and collide only safely.**
 `deriveAccountId(userId)` is `SHA-256("wallet:" + userId)`, read as a u128 from the digest's first 16

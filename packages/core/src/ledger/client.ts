@@ -283,6 +283,10 @@ export class TrustTBClient {
 	}
 
 	async reconnect(): Promise<void> {
+		// Refused once destroyed, BEFORE the dedup. A reconnect that just finished stays
+		// cached until its cleanup runs, and handing it back would answer success for a
+		// client destroy() has closed.
+		if (this.closed) throw new LedgerClientClosedError();
 		if (this.reconnectPromise) return this.reconnectPromise;
 		this.reconnectPromise = this._doReconnect().finally(() => {
 			this.reconnectPromise = null;
@@ -451,6 +455,9 @@ export class TrustTBClient {
 			);
 		}
 
+		// A cached id is still an answer that the wallet exists: refused once destroyed, as
+		// every operation that reaches the ledger is (withReconnect()).
+		if (this.closed) throw new LedgerClientClosedError();
 		const existing = this.accountMap.get(userId);
 		if (existing) return existing;
 
@@ -1054,6 +1061,8 @@ export class TrustTBClient {
 	 * before any I/O — there is nothing to look up and no reason to open a round trip.
 	 */
 	async lookupBalances(accountIds: bigint[]): Promise<Map<bigint, number>> {
+		// Refused once destroyed, before the empty-input shortcut, like every lookup.
+		if (this.closed) throw new LedgerClientClosedError();
 		if (accountIds.length === 0) return new Map();
 		const uniqueIds = [...new Set(accountIds)];
 		const accounts = await this.withReconnect(() => this.client.lookupAccounts(uniqueIds));
@@ -1065,6 +1074,8 @@ export class TrustTBClient {
 	}
 
 	async ping(): Promise<boolean> {
+		// A destroyed client is not healthy, its start-up grace period included.
+		if (this.closed) return false;
 		try {
 			if (!this.initialized || !this.treasuryId) {
 				return Date.now() - this.startedAt < this.initGraceMs;

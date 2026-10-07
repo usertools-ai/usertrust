@@ -20,6 +20,10 @@
  *    that reconnect fails with LedgerClientClosedError;
  *  - a health-check ping in flight at `destroy()` does not reconnect;
  *  - a native `destroy()` that throws still leaves the client closed (the flag is set first);
+ *  - EVERY public ledger operation fails after `destroy()`, the ones with a shortcut that
+ *    never reaches the ledger included (a cached wallet id, an empty lookup); `ping()`
+ *    reports unhealthy, its start-up grace period included; and `reconnect()` is refused,
+ *    even while a reconnect that just finished is still cached;
  *  - CONTROLS: without `destroy()`, a lost connection still reconnects and retries, and an
  *    operation on a client closed by OUR OWN reconnect still retries on the new one.
  */
@@ -213,6 +217,58 @@ describe("after destroy(), the client never reconnects", () => {
 		client.destroy();
 		await expect(client.reconnect()).rejects.toBeInstanceOf(LedgerClientClosedError);
 		expect(native.created).toBe(1);
+	});
+});
+
+describe("every entry path honours destroy(), shortcuts included", () => {
+	const OPERATIONS: Array<[string, (c: TrustTBClient) => Promise<unknown>]> = [
+		["createUserWallet, cached id", (c) => c.createUserWallet("cached-user")],
+		["createUserWallet", (c) => c.createUserWallet("new-user")],
+		["createCostCenterWallet", (c) => c.createCostCenterWallet("acme", "billing")],
+		["createTreasury", (c) => c.createTreasury()],
+		["ensureEscrowAccount", (c) => c.ensureEscrowAccount("escrow")],
+		["createFundedBudgetWallet", (c) => c.createFundedBudgetWallet(100)],
+		[
+			"createPendingTransfer",
+			(c) =>
+				c.createPendingTransfer({ debitAccountId: 1n, creditAccountId: 2n, amount: 10, code: 1 }),
+		],
+		["postTransfer", (c) => c.postTransfer(1n, 10)],
+		["voidTransfer", (c) => c.voidTransfer(1n)],
+		[
+			"immediateTransfer",
+			(c) => c.immediateTransfer({ debitAccountId: 1n, creditAccountId: 2n, amount: 10, code: 1 }),
+		],
+		["lookupTransfer", (c) => c.lookupTransfer(1n)],
+		["lookupAccounts", (c) => c.lookupAccounts([1n])],
+		["lookupBalance", (c) => c.lookupBalance(1n)],
+		["lookupBalances", (c) => c.lookupBalances([1n])],
+		["lookupBalances, no ids", (c) => c.lookupBalances([])],
+	];
+	for (const [name, op] of OPERATIONS) {
+		it(`${name} after destroy() fails with LedgerClientClosedError and never reaches the native client`, async () => {
+			// In-memory state a shortcut could answer from.
+			client.setAccountMapping("cached-user", 7n);
+			client.setTreasuryId(5n);
+			client.destroy();
+			await expect(op(client)).rejects.toBeInstanceOf(LedgerClientClosedError);
+			expect(native.calls).toEqual([]);
+		});
+	}
+
+	it("ping() after destroy() reports unhealthy, its start-up grace period included", async () => {
+		client.destroy();
+		expect(await client.ping()).toBe(false);
+		expect(native.calls).toEqual([]);
+	});
+
+	it("reconnect() right after destroy(), while a reconnect that just finished is still cached, is refused", async () => {
+		// This reconnect completes synchronously; its cleanup is still queued.
+		const finished = client.reconnect();
+		client.destroy();
+		await expect(client.reconnect()).rejects.toBeInstanceOf(LedgerClientClosedError);
+		await finished;
+		expect(alive()).toBe(0);
 	});
 });
 
