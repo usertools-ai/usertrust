@@ -116,12 +116,14 @@ Grepping `catch (denialErr)` therefore finds four, not five. Payloads and ration
 `audit/denial-events.ts`.
 
 `destroy()` waits up to 5s, one deadline for all of them, for the terminals still working (a
-settle's POST, an abort or release parked on its void). It records an abort or release still in
-flight at the deadline, then claims, voids and records (`hold_released`, `governor destroyed`)
-every hold still held, voids the engine's remaining pending transfers, and flushes and releases the
-audit writer. An `authorize()` still reserving when it begins registers no hold: it voids its
-reservation and fails, so no hold outlives the governor. **Callers must call it** or the process
-hangs on the TigerBeetle client.
+settle's POST, an abort or release parked on its void). At the deadline it takes every remaining
+hold in ONE synchronous step, before its first await: it records each abort or release still in
+flight, and voids and records (`hold_released`, `governor destroyed`) each hold still held. Then it
+voids the engine's remaining pending transfers, and flushes and releases the audit writer. From
+`destroy()` on, `release()` and `abort()` refuse at entry (the hold is destroy()'s), and an
+`authorize()` still reserving registers no hold (it voids its reservation and fails). A `settle()`
+still runs while destroy() drains, since it carries a charge, and finds no hold once destroy() has
+taken them. **Callers must call it** or the process hangs on the TigerBeetle client.
 A `process.on("beforeExit")` handler calls it too, but that is a net, not a substitute: `beforeExit`
 fires only once the event loop drains, and an open TigerBeetle client is precisely what keeps it
 from draining. The net catches a governor whose client is already closed; it cannot catch the case

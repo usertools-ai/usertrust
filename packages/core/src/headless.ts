@@ -408,7 +408,8 @@ export interface Governor {
 	 *
 	 * Answers `{ aborted: true }` only when THIS call ended the hold, and
 	 * `{ aborted: false }` when the governor no longer held it (a settle owns it, or it
-	 * was already settled, aborted, released or destroyed), as `release()` does. A void
+	 * was already settled, aborted or released) or `destroy()` has begun (destroy() ends
+	 * the hold itself), as `release()` does. A void
 	 * the ledger refused still ends the hold here and is named in `voidError`, a fixed
 	 * code, never the error's text.
 	 */
@@ -423,8 +424,9 @@ export interface Governor {
 	 * call that failed.
 	 *
 	 * Answers `{ released: true }` only when THIS call ended the hold, and
-	 * `{ released: false }` when the governor no longer held it: its settle is mid-POST,
-	 * or it was already settled, aborted, released or destroyed. A void the ledger
+	 * `{ released: false }` when the governor no longer held it (its settle is mid-POST,
+	 * or it was already settled, aborted or released) or `destroy()` has begun (destroy()
+	 * ends the hold itself). A void the ledger
 	 * refused still ends the hold here (its accounting is released, and the ledger's
 	 * pending timeout returns the funds) and is named in `voidError`: a fixed code for
 	 * its cause, never the error's text. A hold the ledger had already expired is
@@ -1595,9 +1597,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// record, so liveness and provenance cannot disagree. Semantics are
 			// unchanged — the first terminal claims the entry, every later one is
 			// refused.
+			// Not refused while destroy() drains: a settle carries a charge for a call that ran,
+			// and destroy() waits for it. Once destroy() has taken the holds at its deadline
+			// there is none to claim, and the refusal names why.
 			const capture = activeAuths.get(transferId);
 			if (capture === undefined) {
-				throw new Error(`Authorization ${transferId} is not active (already settled or aborted)`);
+				throw new Error(
+					destroyed
+						? "Governor has been destroyed"
+						: `Authorization ${transferId} is not active (already settled or aborted)`,
+				);
 			}
 			activeAuths.delete(transferId);
 			// Claimed. Still PENDING. Pre-POST throw leaves the id here so
@@ -1973,6 +1982,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		async abort(auth: Authorization, error?: unknown): Promise<AbortOutcome> {
 			// The handle's id, read ONCE and FIRST (see settle()).
 			const transferId = auth.transferId;
+			// From destroy() on, a hold is destroy()'s to end: it voids and records every hold
+			// still held, and waits for one a terminal claimed before it began. Ending one here
+			// as well would race its sweep. Refused before any claim: no void, no record.
+			if (destroyed) {
+				return { aborted: false };
+			}
 			// Same lookup as settle, and the same reason: liveness and attribution come
 			// from one internal record. Still idempotent-silent, unlike settle.
 			// A settle owns this hold (from its claim to its end; see `settling`):
@@ -2081,6 +2096,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		async release(auth: Authorization, reason?: string): Promise<ReleaseOutcome> {
 			// The handle's id, read ONCE and FIRST (see settle()).
 			const transferId = auth.transferId;
+			// From destroy() on, refused before any claim, as abort() is.
+			if (destroyed) {
+				return { released: false };
+			}
 			// abort()'s claim discipline, step for step and for the same reasons: a hold a
 			// settle owns (see `settling`) belongs to settle; a hold whose settle failed
 			// before its POST is releasable again; a miss in both is already resolved. Only
@@ -2169,22 +2188,37 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 			// Never void a hold a terminal is still working on: a settle's POST, or an abort
 			// or release parked on the budget lock or its own void. ONE deadline for both
-			// (trust()'s 5 s bound), never one per set.
+			// (trust()'s 5 s bound), never one per set. From here on release() and abort()
+			// refuse at entry, so only those already claimed are waited for; a settle may still
+			// start (it carries a charge, see settle()), and it is waited for too.
 			const deadline = Date.now() + destroyDrainMs;
 			while ((settling.size > 0 || inFlight.size > 0) && Date.now() < deadline) {
 				await new Promise<void>((r) => setTimeout(r, 50));
 			}
 
-			// An abort or release still in flight at the deadline has not recorded its hold,
-			// and its own record would land after the writer closes below. Taken out of
-			// `inFlight` at once, it writes none (see abort()), and its record is this one.
-			// Its void is its own, or the engine sweep's below (which also reaches this hold:
-			// its engine entry goes only when its own void returns), and the ledger takes one
-			// of the two: one mutation either way. The record says only what destroy() knows,
-			// that the void had not completed. It names no `voidError`: there was no outcome
-			// yet. The terminal still answers its caller from its own void.
+			// At the deadline, destroy() takes every hold that is still the governor's, in ONE
+			// synchronous step, before its first await: no terminal can claim one of them
+			// while destroy() records another, and every terminal called from here on finds
+			// nothing to end (release() and abort() refuse at entry; settle() finds no hold).
+			//  - An abort or release still in flight has not recorded its hold, and its own
+			//    record would land after the writer closes below. Taken out of `inFlight`, it
+			//    writes none (see abort()); its record is destroy()'s.
+			//  - Every hold still held: still active, or handed back by a settle that threw
+			//    before its POST. A settle still posting is in neither map (it leaves
+			//    `unpostedHolds` before its POST, its first await), and neither is a
+			//    transport-ambiguous POST, which already has its record (`settlement_ambiguous`).
 			const stillInFlight = [...inFlight];
 			inFlight.clear();
+			const leftovers = [...activeAuths, ...unpostedHolds];
+			activeAuths.clear();
+			unpostedHolds.clear();
+
+			// A terminal still in flight: its void is its own, or the engine sweep's below
+			// (which also reaches this hold: its engine entry goes only when its own void
+			// returns), and the ledger takes one of the two: one mutation either way. The record
+			// says only what destroy() knows, that the void had not completed. It names no
+			// `voidError`: there was no outcome yet. The terminal still answers its caller from
+			// its own void.
 			for (const [txId, capture] of stillInFlight) {
 				await audit
 					.appendEvent({
@@ -2201,15 +2235,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					.catch(() => {});
 			}
 
-			// Every hold still held (still active, or handed back by a settle that threw before
-			// its POST), claimed at once as a terminal claims one: a terminal called from here
-			// on finds nothing to end. Each is voided and recorded, so destroy() ends no hold
-			// without a record. A settle still posting is in neither map (it leaves
-			// `unpostedHolds` before its POST, its first await), and neither is a
-			// transport-ambiguous POST, which already has its record (`settlement_ambiguous`).
-			const leftovers = [...activeAuths, ...unpostedHolds];
-			activeAuths.clear();
-			unpostedHolds.clear();
+			// Every hold still held: voided and recorded, so destroy() ends no hold without a
+			// record.
 			for (const [txId, capture] of leftovers) {
 				let voidError: string | undefined;
 				if (proxyConn != null && !isDryRun) {
