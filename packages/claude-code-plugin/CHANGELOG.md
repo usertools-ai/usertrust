@@ -10,7 +10,8 @@ npm, and its version is its own: the `usertrust` packages and their
 ### Fixed
 
 - **A tool call that is deferred and then resumed keeps one hold** (1.4.0's known
-  issue). When the resumed call fires PreToolUse again, the plugin finds the hold
+  issue; two resumes of the same call running at once can leave two, below). When
+  the resumed call fires PreToolUse again, the plugin finds the hold
   it already has, by the ids its record stores. It never reuses that hold: it ends
   it, then reserves afresh, so the budget is checked at every resume and enforce
   mode denies on a 402.
@@ -50,11 +51,17 @@ npm, and its version is its own: the `usertrust` packages and their
     name (two ids could then share one): the hold is given back through `release`
     (on a server without it, left to its sweep), and the call fails as a failed
     authorization does. A name too long for the filesystem fails the same way.
+  - Two resumes of the same call running at once can leave it two holds, each with
+    its own record: the call's PostToolUse settles one and Stop ends the other, so
+    it is charged once, while the budget counts both until then. On a server
+    without `release`, Stop gives the extra one back by an abort.
   - With `release` advertised, the call reserves afresh only once the earlier hold
     is released (a 200), or the server answers that it holds it no more (404
     `unknown transferId`). Any other answer, or none, leaves the hold possibly live:
     no fresh hold is made beside it, its record is kept for Stop to give back, and
-    the call fails as a failed authorization does.
+    the call fails as a failed authorization does. A 404 from a server that has
+    restarted leaves the ledger's hold pending until its timeout (300 s at most):
+    the budget counts it twice until then, the safe direction.
 
 ## [1.4.0] - 2026-10-07
 

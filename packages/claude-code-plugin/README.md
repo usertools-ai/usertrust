@@ -358,7 +358,8 @@ not affected: the plugin gives every hold back through `/v1/release`, which coun
 as neither a failure nor a success, and the server's own sweep releases expired
 holds the same way ([#238](https://github.com/usertools-ai/usertrust/issues/238)).
 
-**A tool call that is deferred and then resumed keeps one hold.** In a
+**A tool call that is deferred and then resumed keeps one hold** (two resumes of
+the same call running at once are the exception, below). In a
 `claude -p` run, another PreToolUse hook can
 [defer a tool call](https://code.claude.com/docs/en/hooks#defer-a-tool-call-for-later)
 (this plugin never does, and interactive sessions ignore `defer`). The call does
@@ -377,7 +378,9 @@ again, and the plugin finds the hold the call already has.
     does not confirm (no answer, or an answer other than a 200 or `unknown
     transferId`) leaves the hold possibly live: no fresh hold is made beside it,
     its record is kept for Stop to give back, and the call fails as a failed
-    authorization does.
+    authorization does. A 404 `unknown transferId` from a server that has
+    restarted does not end the ledger's hold: it stays pending until its timeout
+    (300 s at most), and the budget counts it twice until then, the safe direction.
   - **Each hold has its own files,** named by its transfer as well as its call
     (`<session>__<agent>__<call>.<transferId>.json`, with its `.settling` and
     `.done`), so the earlier hold and the fresh one never share a file. A hook
@@ -399,6 +402,13 @@ again, and the plugin finds the hold the call already has.
     and the new server is told nothing about the old hold. The old hold is left to
     its own server's sweep. In transcript mode the usage it carried goes
     unrecorded: an under-count, never charged to the new tenant.
+- **Two resumes of one call at once** (two `claude -p --resume` of one session,
+  say) can leave the call two holds: one resume can reserve while the other is
+  between ending the earlier hold and recording its fresh one. Each hold has its
+  own record, so nothing is overwritten or orphaned. The call's PostToolUse
+  settles one, and Stop ends the other, so the call is charged once. Until then
+  the budget counts both. On a server without `release`, Stop gives that extra
+  hold back by an abort, one of the aborts above.
 - **An unresolved hold refuses the call.** A hook can be killed while settling
   that hold, leaving its `.settling` record; or another hook can be ending it at
   that moment. The resumed call is then refused until that resolves: in enforce

@@ -4033,14 +4033,21 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 	});
 
 	describe("each hold has its own files (by transfer): a hook acting on an earlier listing never touches a later hold's", () => {
+		/** Every paused hook's resume: each is resumed after its test, even a failed one. */
+		const resumes: Array<() => Promise<unknown>> = [];
+		afterEach(async () => {
+			for (const resume of resumes.splice(0)) await resume();
+		});
+
 		/**
-		 * Start `hook` and let it run until it has listed the holds and is about to claim
-		 * (`claim`) or delete (`clear`) the first one; it waits there until `resume`.
+		 * Start `hook` and let it run until it is about to claim (`claim`), delete
+		 * (`clear`) or publish (`publish`) its first hold record; it waits there until
+		 * `resume` (tests/helpers/pause-at.mjs).
 		 */
 		async function pausedAt(
 			hook: string,
 			input: Record<string, unknown>,
-			at: "claim" | "clear",
+			at: "claim" | "clear" | "publish",
 			env: Record<string, string> = {},
 		) {
 			const flags = await mkdtemp(join(tmpdir(), "utcc-pause-"));
@@ -4062,13 +4069,12 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				await new Promise((r) => setTimeout(r, 10));
 			}
 			const wasPaused = await isPaused();
-			return {
-				wasPaused,
-				resume: async () => {
-					await writeFile(go, "");
-					return running;
-				},
+			const resume = async () => {
+				await writeFile(go, "");
+				return running;
 			};
+			resumes.push(resume);
+			return { wasPaused, resume };
 		}
 		/** The transfer ids the pending records store, whatever their names. */
 		async function pendingTransfers() {
@@ -4160,6 +4166,40 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			await run("post-tool-use.mjs", postInput("tu_1"), env);
 			expect(server.charges.map((c) => c.transferId)).toEqual(["tx_2"]);
 		});
+
+		it.each<[string, string[], string]>([
+			["with release", ["release"], "/v1/release"],
+			["without release (the declared fallback: an abort)", [], "/v1/abort"],
+		])(
+			"two resumes of one call at once (%s): a second hook reserves while the first is between ending tx_1 and recording tx_2. Two holds, each its own record, nothing overwritten; charged once, and the extra ended at Stop",
+			async (_, offered, extraEndedBy) => {
+				capabilities = offered;
+				const env = { UT_CC_USAGE: "estimate" };
+				const server = holdingServer();
+				await startServer(server.responder);
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				// The first resume ends tx_1, is granted tx_2, and waits before recording it.
+				const first = await pausedAt("pre-tool-use.mjs", preInput("tu_1"), "publish", env);
+				expect(first.wasPaused).toBe(true);
+				expect(await pendingTransfers()).toEqual([]);
+				// The second resume finds no hold at all, and reserves its own.
+				const second = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(second.stderr).toContain("reserved tx_3");
+				expect((await first.resume()).stderr).toContain("reserved tx_2");
+				expect((await pendingTransfers()).sort()).toEqual(["tx_2", "tx_3"]);
+				// One execution settles one hold; Stop ends the other.
+				await run("post-tool-use.mjs", postInput("tu_1"), env);
+				expect(server.charges).toHaveLength(1);
+				await run("stop.mjs", stopInput(), env);
+				expect(server.charges).toHaveLength(1);
+				const settled = server.charges[0]?.transferId;
+				const extra = settled === "tx_2" ? "tx_3" : "tx_2";
+				expect(requests.filter((r) => r.body.transferId === extra).map((r) => r.path)).toEqual([
+					extraEndedBy,
+				]);
+				expect(await holdStateFiles()).toEqual([]);
+			},
+		);
 
 		describe("a 1.4.0 record (a per-call name, no binding) present at upgrade is found by its stored ids, and ended once, through its own name", () => {
 			const LEGACY = `${SESSION}__main__tu_1.json`;
@@ -4280,9 +4320,10 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			const first = await run("pre-tool-use.mjs", preInput("tu_1"), env);
 			expect(first.stdout).toBe("");
 			expect(first.stderr).toContain("reserved tx_1");
-			// Named for another call, but it stores tu_2's ids: tu_2's settle is in flight.
+			// Named for another call and another transfer, but it stores tu_2's ids and
+			// tx_8: tu_2's settle of tx_8 is in flight.
 			await writeFile(
-				join(stateDir, holdFile("tu_other", "tx_8", "settling")),
+				join(stateDir, holdFile("tu_other", "tx_5", "settling")),
 				stored("tu_2", "tx_8"),
 			);
 			const second = await run("pre-tool-use.mjs", preInput("tu_2"), env);
@@ -4291,6 +4332,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			expect(decision.permissionDecisionReason).toContain(
 				"tx_8 has a settle that is not resolved yet",
 			);
+			expect(decision.permissionDecisionReason).not.toContain("tx_5");
 			expect(authorizes()).toHaveLength(1);
 		});
 
@@ -4424,6 +4466,11 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				{ UT_CC_MODE: "enforce", UT_FAIL_OPEN: "1" },
 			],
 			["a 503, watch", { status: 503, json: { error: "unavailable" } }, {}],
+			[
+				"a 404 for an unknown ROUTE (an older server, or a proxy), enforce",
+				{ status: 404, json: { error: "not_found", reason: "unknown route" } },
+				{ UT_CC_MODE: "enforce" },
+			],
 		])(
 			"%s: nothing is reserved, and the hold is kept for Stop to give back",
 			async (_, answer, mode) => {
