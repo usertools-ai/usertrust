@@ -15,7 +15,8 @@ npm, and its version is its own: the `usertrust` packages and their
   `UT_FAIL_OPEN=1`, a call whose authorization failed (the server unreachable, a
   429, any other unusable answer). A hook's `allow` skips the permission prompt
   Claude Code would otherwise show (your deny and ask rules still apply), so with
-  1.3.0 installed, calls that no permission rule covers ran without asking you.
+  1.3.0 installed, nearly every call no permission rule covers ran without asking
+  you.
   In 1.4.0 the plugin never answers `allow`. In enforce mode it denies a refused
   call (402, 403 or 429) and blocks a call it could not authorize (unless
   `UT_FAIL_OPEN=1`); every other call gets no decision and goes through your own
@@ -59,9 +60,10 @@ npm, and its version is its own: the `usertrust` packages and their
     pending. Transcript entries written before the plugin's state was first made
     are never posted, so upgrading does not post your history.
 - **Who spent it.** On a server that publishes `principal` (today's
-  usertrust-server does), every authorize now carries a principal: the agent's
-  id and type, with the session as its origin, plus an optional `unit` and `role`
-  from `UT_CC_UNIT` and `UT_CC_ROLE`. 1.3.0 sent none.
+  usertrust-server does), every authorize now carries a principal whenever the
+  hook can read the server's capabilities: the agent's id and type, with the
+  session as its origin, plus an optional `unit` and `role` from `UT_CC_UNIT` and
+  `UT_CC_ROLE`. 1.3.0 sent none.
 - **Each estimate hold is settled at most once.** It is marked settle-attempted
   before its one settle, so a settle whose answer is lost is never sent again:
   that hold is given back at Stop. A hold an earlier release recorded carries no
@@ -83,29 +85,37 @@ npm, and its version is its own: the `usertrust` packages and their
 
 - **A call that does not complete keeps its reservation for a while.** No hook
   the plugin registers fires for a tool call that does not complete successfully
-  after PreToolUse reserved for it: one that fails (a command that exits
-  non-zero, say), one you reject at the permission prompt, or one denied by a
+  after PreToolUse reserved for it: one that fails (most commands that exit
+  non-zero), one you reject at the permission prompt, or one denied by a
   permission rule, another hook or auto mode. Its hold stays pending until a
   later Stop, SubagentStop or SessionEnd gives it back (settling it at its real
-  counts if it carries transcript usage), or the server's pending-hold TTL voids
-  it (five minutes by default). Until then it counts against the budget: in
-  enforce mode, near the budget, a later call can be refused (402) although the
-  budget would cover it. In watch mode nothing is blocked; this only adds
-  `would_block` records. Nothing is charged twice, and in estimate mode
-  (`UT_CC_USAGE=estimate`) such a call's estimate is never charged.
+  counts if it carries transcript usage), and at most until the server's
+  pending-hold TTL voids it (`pendingTtlMs`, 300 000 ms by default). Stop may not
+  run at the end of that very turn: it does not run after a user interrupt. Until
+  then the hold counts against the budget: in enforce mode, near the budget, a
+  later call can be refused (402) although the budget would cover it. In watch
+  mode nothing is blocked; this only adds `would_block` records. Nothing is
+  charged twice, and in estimate mode (`UT_CC_USAGE=estimate`) such a call's
+  estimate is never charged. A fix for failed calls is tracked in #234 (item 9).
+  Rejected and denied calls fire no hook at all.
 - **On today's server, giving holds back can briefly fail every call.** The
-  usertrust-server has no release route, so the plugin gives a hold back by
-  aborting it, and the server counts each abort as a failure. Five in a row (its
-  circuit breaker's default), as when a Stop gives back five or more leftover
-  holds, make it fail that tenant's authorizations for about a minute. Each call
-  is then a `gap` in watch mode, and in enforce mode it is blocked unless
-  `UT_FAIL_OPEN=1`.
+  usertrust-server has no release route, so the plugin gives back by aborting:
+  leftover holds at Stop, SubagentStop and SessionEnd, and the cleanups after a
+  failure. PostToolUse gives an empty hold back by settling it at zero instead.
+  The server counts each abort as a failure, and five in a row (its circuit
+  breaker's default) open the breaker. That happens when a Stop gives back five
+  or more leftover holds, and also when five holds expire together and the
+  server's own TTL sweep aborts them, about five minutes later. The tenant's
+  authorizations then fail (500) for at least a minute after the last abort.
+  After that minute they are let through again, and two successful settles close
+  the breaker. Meanwhile each call is a `gap` in watch mode, and in enforce mode
+  it is blocked unless `UT_FAIL_OPEN=1`. Tracked in #238; see also #204 and #205.
 
 ## [1.3.0] - 2026-07-18
 
 The plugin's first version in this repository: PreToolUse authorization against
 a usertrust-server, PostToolUse settlement at a per-call estimate, and
-Stop/SubagentStop cleanup. Its code changed once more without a version bump
-(2026-08-15): a hold's output leg was sized to the 16 KiB content cap and both
+Stop/SubagentStop cleanup. Its behaviour changed once more without a version
+bump (2026-08-15): a hold's output leg was sized to the 16 KiB content cap and both
 legs were priced at settle, and a call that names its `tool_use_id` stopped
 settling another call's hold.

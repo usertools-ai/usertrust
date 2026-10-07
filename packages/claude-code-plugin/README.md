@@ -47,7 +47,7 @@ export UT_SERVER_KEY="<the key from step 1>"
 | -------------------- | ------------------------ | ------------------------------------------------ |
 | `UT_SERVER_URL`      | `http://127.0.0.1:4519`  | Base URL of your usertrust-server                |
 | `UT_SERVER_KEY`      | (empty)                  | Tenant bearer key                                |
-| `UT_CC_MODE`         | `watch`                  | `enforce` (in any case) blocks over-budget calls; any other value is watch-only (see [Modes](#modes-watch-only-by-default)) |
+| `UT_CC_MODE`         | `watch`                  | `enforce` (matched case-insensitively) blocks over-budget calls; any other value is watch-only (see [Modes](#modes-watch-only-by-default)) |
 | `UT_CC_UNIT`         | unset                    | The principal's `unit`, e.g. `platform` (see *Attribution*) |
 | `UT_CC_ROLE`         | unset                    | The principal's `role`, e.g. `release-engineer` (see *Attribution*) |
 | `UT_CC_MODEL`        | `claude-sonnet-4-6`      | Model for an estimate hold before any transcript model is known |
@@ -244,8 +244,9 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
 - **Content.** Transcripts are read locally and only token counts, model names and
   agent ids/types are sent to your server — never transcript content.
 
-**Declared costs.** On a server without `/v1/release`, every hold is settled, so a
-tool call with an empty window costs that server's 1-unit settle floor: a
+**Declared costs.** On a server without `/v1/release`, PostToolUse gives an empty
+hold back by settling it at zero, so a tool call with an empty window costs that
+server's 1-unit settle floor: a
 deliberate over-count of at most one unit per extra parallel tool call (and per
 tool call while the plugin's state is unusable), never an under-count.
 Responses of a second model cost one extra authorize→settle at the
@@ -285,9 +286,9 @@ the permission prompt
 `deny`. What it would have said goes to stderr, which Claude Code keeps in its
 [debug log](https://code.claude.com/docs/en/hooks#debug-hooks). **Upgrading from
 v1.3.0 or earlier:** those releases answered `allow` on every call they let
-through, so a call no permission rule covers ran without the prompt Claude Code
-would otherwise show (deny and ask rules still applied); you will now see those
-prompts.
+through, so nearly every call no permission rule covers ran without the prompt
+Claude Code would otherwise show (deny and ask rules still applied); you will now
+see those prompts.
 
 **Watch** never blocks a tool call, and `UT_FAIL_OPEN` has no effect in it. Watch
 changes what the plugin decides, not what the server records: past the budget the
@@ -310,27 +311,40 @@ blocking was the default: set `UT_CC_MODE=enforce` to keep it.
 **Known limitation: a call that does not complete keeps its reservation for a
 while.** PostToolUse, the hook that closes a call's hold,
 [runs only after a tool completes successfully](https://code.claude.com/docs/en/hooks#posttooluse),
-and the plugin registers no other hook that sees the call end. So a call that
-PreToolUse reserved for and that then fails (a command that exits non-zero,
-which Claude Code reports through
-[PostToolUseFailure](https://code.claude.com/docs/en/hooks#posttoolusefailure)),
-that you reject at the permission prompt, or that a permission rule, another
-hook or auto mode denies, keeps its hold pending until a later Stop, SubagentStop
-or SessionEnd gives it back (settling it at its real counts if it carries
-transcript usage), or until the server's pending-hold TTL voids it
-(`pendingTtlMs`, five minutes by default). Until then it counts against the
-budget: in enforce mode, near the budget, a later call can be refused (402)
-although the budget would cover it. In watch mode nothing is blocked; this only
-adds `would_block` records. Nothing is charged twice, and in estimate mode such a
-call's estimate is never charged.
+and the plugin registers no other hook that sees the call end. That leaves:
+- a call that fails, which Claude Code reports through
+  [PostToolUseFailure](https://code.claude.com/docs/en/hooks#posttoolusefailure).
+  That covers most commands that exit non-zero: exit 1 is a result, not a
+  failure, only for `grep`, `rg`, `egrep`, `fgrep`, `find`, `diff`, `test`, `[`,
+  `git diff` and `git grep` ([tools reference](https://code.claude.com/docs/en/tools-reference));
+- a call you reject at the permission prompt;
+- a call a permission rule, another hook or auto mode denies.
+
+Each keeps its hold pending until a later Stop, SubagentStop or SessionEnd gives
+it back (settling it at its real counts if it carries transcript usage). At the
+latest, the server's pending-hold TTL voids it (`pendingTtlMs`, 300 000 ms by
+default). Stop may not run at the end of that very turn: it does not run after a
+user interrupt. Until then the hold counts against the budget: in enforce mode,
+near the budget, a later call can be refused (402) although the budget would
+cover it. In watch mode nothing is blocked; this only adds `would_block` records.
+Nothing is charged twice, and in estimate mode such a call's estimate is never
+charged. A fix for failed calls is tracked in
+[#234](https://github.com/usertools-ai/usertrust/issues/234) (item 9); rejected
+and denied calls fire no hook at all.
 
 **Known limitation: on today's server, giving holds back can briefly fail every
 call.** The usertrust-server has no release route, so the plugin gives a hold
-back by aborting it, and the server counts each abort as a failure. Five in a
-row (its circuit breaker's default), as when a Stop gives back five or more
-leftover holds, make it fail that tenant's authorizations for about a minute.
-Each call is then a `gap` in watch mode, and in enforce mode it is blocked unless
-`UT_FAIL_OPEN=1`.
+back by aborting it in two places: leftover holds at Stop, SubagentStop and
+SessionEnd, and the cleanups after a failure (an unanswered transcript settle, a
+hold record that could not be written). The server counts each abort as a failure.
+Five in a row (its circuit breaker's default) open the breaker. That happens when
+a Stop gives back five or more leftover holds, and also when five holds expire
+together and the server's own TTL sweep aborts them, about five minutes later. The
+tenant's authorizations then fail (500) for at least a minute after the last
+abort. After that minute they are let through again, and two successful settles
+close the breaker. Meanwhile each call is a `gap` in watch mode, and in enforce
+mode it is blocked unless `UT_FAIL_OPEN=1`.
+Tracked in [#238](https://github.com/usertools-ai/usertrust/issues/238).
 
 In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran;
 an estimate hold is marked settle-attempted (`.settling`) before its one settle,
@@ -422,8 +436,8 @@ misconfigured setup does is write a record, not stop your session.
    Before enforcing near a tight budget, read the known limitations in
    [Modes](#modes-watch-only-by-default).
 
-To go back to watching, unset `UT_CC_MODE` (any value other than `enforce`, in any
-case, runs watch-only) and relaunch Claude Code.
+To go back to watching, unset `UT_CC_MODE` (`enforce` is matched
+case-insensitively; any other value runs watch-only) and relaunch Claude Code.
 
 ## Content flow and audit
 
