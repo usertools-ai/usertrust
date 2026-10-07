@@ -7,6 +7,8 @@ npm, and its version is its own: the `usertrust` packages and their
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-10-07
+
 ### Fixed
 
 - **A tool call that is deferred and then resumed keeps one hold** (1.4.0's known
@@ -75,9 +77,11 @@ npm, and its version is its own: the `usertrust` packages and their
   Any hook other than a resumed call's PreToolUse still reconciles a stale
   `.settling` record from another tenant like its own, as 1.4.0 does. If the
   record is keyed, the next Stop can retry its window through the current server
-  and key, charging this tenant for the other's usage. This needs
-  `UT_SERVER_URL` or `UT_SERVER_KEY` to change while such a record is
-  unresolved. Tracked in [#246](https://github.com/usertools-ai/usertrust/issues/246).
+  and key, charging this tenant for the other's usage. It also applies to a hold
+  still pending at Stop or SubagentStop: Stop settles it through the current
+  server and key. This needs `UT_SERVER_URL` or `UT_SERVER_KEY` to change while
+  such a record or hold is unresolved. Tracked in
+  [#246](https://github.com/usertools-ai/usertrust/issues/246).
 - **If a settle fails and its release also fails, the old hold may stay live until
   the server's sweep.** A later re-fire of the same call reserves a replacement,
   double-counting the budget until then: an early refusal, never an overspend.

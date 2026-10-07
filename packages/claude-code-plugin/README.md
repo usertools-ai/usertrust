@@ -412,8 +412,9 @@ again, and the plugin finds the hold the call already has.
     resumed call either. While fresh, the call is refused. Once stale, the record
     is abandoned through its own name: its usage goes unrecorded, and is never
     parked for a retry through the new server. Any other hook that reconciles is
-    still blind to the tenant, as in 1.4.0
-    ([#246](https://github.com/usertools-ai/usertrust/issues/246)).
+    still blind to the tenant, as in 1.4.0, and so is Stop's (or SubagentStop's)
+    settle of a hold still pending then: it settles that hold through the current
+    server and key ([#246](https://github.com/usertools-ai/usertrust/issues/246)).
 - **Two resumes of one call at once** (two `claude -p --resume` of one session,
   say) can leave the call two holds: one resume can reserve while the other is
   between ending the earlier hold and recording its fresh one. Each hold has its
