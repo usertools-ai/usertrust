@@ -4022,7 +4022,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 		const KEY = "ut_plugin_resume_key";
 		const env = { UT_CC_USAGE: "estimate" };
 
-		it("a re-fire ends the first hold and reserves afresh; the real server settles the fresh hold once", async () => {
+		it("a re-fire RELEASES the first hold and reserves afresh; the real server settles the fresh hold once", async () => {
 			real = createUsertrustServer({
 				config: {
 					host: "127.0.0.1",
@@ -4044,6 +4044,17 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
 			expect(again.stderr).toContain("earlier hold");
 			expect(authorizes()).toHaveLength(2);
+			// The real server publishes `release` (#238): the first hold is given back through
+			// it, answered 200, before the fresh one is asked for, and nothing is aborted.
+			expect(releases().map((r) => [r.body.transferId, r.status])).toEqual([
+				[transferOf(authorizes()[0]), 200],
+			]);
+			expect(requests.map((r) => r.path)).toEqual([
+				"/v1/authorize",
+				"/v1/release",
+				"/v1/authorize",
+			]);
+			expect(aborts()).toEqual([]);
 			expect((await run("post-tool-use.mjs", postInput("tu_1"), env)).code).toBe(0);
 			expect(settles().map((s) => [s.body.transferId, s.status])).toEqual([
 				[transferOf(authorizes()[1]), 200],
