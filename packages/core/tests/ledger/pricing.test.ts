@@ -21,8 +21,8 @@ function makeCloudConfig(): TrustConfig {
 }
 
 describe("PRICING_TABLE", () => {
-	it("contains 41 models", () => {
-		expect(Object.keys(PRICING_TABLE)).toHaveLength(41);
+	it("contains 42 models", () => {
+		expect(Object.keys(PRICING_TABLE)).toHaveLength(42);
 	});
 
 	it("all rates are positive", () => {
@@ -47,11 +47,11 @@ describe("FALLBACK_RATE", () => {
 		expect(FALLBACK_RATE.cacheWritePer1k).toBe(maxWrite);
 	});
 
-	it("pins the literal fallback (150 / 750 / write 187.5)", () => {
+	it("pins the literal fallback (250 / 1250 / write 312.5)", () => {
 		expect(FALLBACK_RATE).toStrictEqual({
-			inputPer1k: 150,
-			outputPer1k: 750,
-			cacheWritePer1k: 187.5,
+			inputPer1k: 250,
+			outputPer1k: 1250,
+			cacheWritePer1k: 312.5,
 		});
 	});
 });
@@ -120,10 +120,10 @@ describe("estimateCost", () => {
 	});
 
 	it("uses fallback rate for unknown model", () => {
-		// fallback (dearest known): 150 input, 750 output
-		// 1000 input * 150/1k + 1000 output * 750/1k = 150 + 750 = 900
+		// fallback (dearest known): 250 input, 1250 output
+		// 1000 input * 250/1k + 1000 output * 1250/1k = 250 + 1250 = 1500
 		const cost = estimateCost("unknown-model", 1000, 1000);
-		expect(cost).toBe(900);
+		expect(cost).toBe(1500);
 	});
 
 	it("returns integer (ceiling)", () => {
@@ -541,6 +541,16 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 		cacheReadPer1k: 0.5,
 		cacheWritePer1k: 6.25,
 	},
+	// Deprecated but callable. $25 / $125 per MTok for Project Glasswing participants
+	// (anthropic.com/project/glasswing; status per the model-deprecations page; both
+	// retrieved 2026-10-07). Cache tiers: the pricing page's multipliers for models
+	// without an exception (read 0.1x, 5m write 1.25x).
+	"claude-mythos-preview": {
+		inputPer1k: 250,
+		outputPer1k: 1250,
+		cacheReadPer1k: 25,
+		cacheWritePer1k: 312.5,
+	},
 	"claude-3-5-haiku": { inputPer1k: 8, outputPer1k: 40, cacheReadPer1k: 0.8, cacheWritePer1k: 10 },
 	"claude-opus-4-7": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
 	"claude-opus-4-5": { inputPer1k: 50, outputPer1k: 250, cacheReadPer1k: 5, cacheWritePer1k: 62.5 },
@@ -637,6 +647,7 @@ describe("PRICING_TABLE rates audit (D1)", () => {
 		"claude-mythos-5",
 		"claude-mythos-5-1",
 		"claude-haiku-5-5",
+		"claude-mythos-preview",
 		"claude-opus-4-8",
 	]) {
 		it(`resolves ${model} to a table entry, not the fallback`, () => {
@@ -739,7 +750,7 @@ describe("PRICING_TABLE rates audit (D1)", () => {
 		// tier stays absent (D1 prices it at inputPer1k, dearer than any published
 		// read rate); the write tier carries the dearest published write rate.
 		expect(FALLBACK_RATE.cacheReadPer1k).toBeUndefined();
-		expect(FALLBACK_RATE.cacheWritePer1k).toBe(187.5);
+		expect(FALLBACK_RATE.cacheWritePer1k).toBe(312.5);
 	});
 });
 
@@ -1138,5 +1149,31 @@ describe("dated-snapshot canonicalization (F2)", () => {
 		const r = resolveRates(id, "cloud", makeCloudConfig());
 		expect(r.rateSource).toBe("table");
 		expect(r.unknown).toBe(false);
+	});
+});
+
+describe("claude-mythos-preview (deprecated, still callable)", () => {
+	// Project Glasswing participants still call it; without its own row it fell to the
+	// fallback and, before the fallback tracked the table maximum, to a rate 40% BELOW
+	// its published $25/$125.
+	it("has its own exact row at the published $25 / $125", () => {
+		const r = resolveRates("claude-mythos-preview", "cloud", makeCloudConfig());
+		expect(r.rates).toBe(PRICING_TABLE["claude-mythos-preview"]);
+		expect(r.rateSource).toBe("table");
+		expect(r.unknown).toBe(false);
+		expect(r.rates.inputPer1k).toBe(250);
+		expect(r.rates.outputPer1k).toBe(1250);
+	});
+
+	it("carries the page's standard cache multipliers: read 0.1x, 5m write 1.25x", () => {
+		const preview = PRICING_TABLE["claude-mythos-preview"];
+		expect(preview?.cacheReadPer1k).toBe(25);
+		expect(preview?.cacheWritePer1k).toBe(312.5);
+	});
+
+	it("is the dearest row, so it sets the fallback", () => {
+		const preview = PRICING_TABLE["claude-mythos-preview"];
+		expect(FALLBACK_RATE.inputPer1k).toBe(preview?.inputPer1k);
+		expect(FALLBACK_RATE.outputPer1k).toBe(preview?.outputPer1k);
 	});
 });

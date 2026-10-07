@@ -56,7 +56,7 @@ describe("token-rate anomaly signal", () => {
 				tokenRate: { thresholdTokPerSec: 500, windowMs: 2_000, consecutiveWindows: 3 },
 			},
 			// A KNOWN model: with no model the chunks price at the dearest-known fallback
-			// (150/750), whose 2000 output tokens in 2s ($4.50/min) trip spend_velocity
+			// (250/1250), whose 2000 output tokens in 2s ($7.50/min) trip spend_velocity
 			// — a different signal from the token_rate one this test is about.
 			{ now: () => nowMs, model: "claude-sonnet-5" },
 		);

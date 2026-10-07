@@ -73,6 +73,11 @@ export const LIST_USD_PER_MTOK: Record<string, { input: number; output: number }
 	"claude-fable-5-1": { input: 10, output: 50 },
 	"claude-fable-5": { input: 10, output: 50 },
 	"claude-mythos-5-1": { input: 10, output: 50 },
+	// Deprecated but callable; $25 / $125 for Project Glasswing participants
+	// (anthropic.com/project/glasswing, retrieved 2026-10-07). Cache tiers follow the
+	// pricing page's multipliers for models without an exception: read 0.1x (the default
+	// here), 5m write 1.25x.
+	"claude-mythos-preview": { input: 25, output: 125 },
 	"claude-mythos-5": { input: 10, output: 50 },
 	"claude-opus-5-5": { input: 4, output: 20 },
 	"claude-opus-5": { input: 5, output: 25 },

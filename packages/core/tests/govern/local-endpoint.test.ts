@@ -550,7 +550,7 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 			);
 			const governed = await trust(client, { dryRun: true, budget: 1000, vaultBase: tmpVault });
 
-			// A small max_tokens keeps the fallback-priced (150/750) hold inside the 1000-UT
+			// A small max_tokens keeps the fallback-priced (250/1250) hold inside the 1000-UT
 			// budget, so this stays a test of the warn policy, not of the hold size. The
 			// hold size is pinned by "an unknown id's default-max_tokens hold ..." below.
 			const r1 = await call(governed, {
@@ -603,8 +603,8 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 		});
 
 		// The CONSEQUENCE of "fail dearest", pinned rather than absorbed. An unknown id
-		// holds at the dearest published rate (150/750), so the default max_tokens (4096)
-		// alone reserves ~3,072 UT and a 1000-UT budget refuses the call before the
+		// holds at the dearest known rate (250/1250), so the default max_tokens (4096)
+		// alone reserves ~5,120 UT and a 1000-UT budget refuses the call before the
 		// provider is reached. A known model on the same budget and call is admitted.
 		it("an unknown id's default-max_tokens hold is fallback-priced and denied at a 1000 budget", async () => {
 			const respond = {

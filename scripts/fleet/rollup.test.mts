@@ -341,6 +341,8 @@ test("list-price math matches hand-computed fixture values", () => {
 	assert.deepStrictEqual(listRatesForModel("claude-sonnet-5-5-20261001"), { input: 2, output: 10 });
 	assert.deepStrictEqual(listRatesForModel("claude-fable-5-1"), { input: 10, output: 50 });
 	assert.deepStrictEqual(listRatesForModel("claude-mythos-5"), { input: 10, output: 50 });
+	// Deprecated but callable (Project Glasswing): $25 / $125 per MTok.
+	assert.deepStrictEqual(listRatesForModel("claude-mythos-preview"), { input: 25, output: 125 });
 	assert.deepStrictEqual(listRatesForModel("claude-haiku-5-5"), { input: 0.5, output: 2.5 });
 	assert.throws(() => listRatesForModel("claude-opus-5-fast"), /no published list rate/);
 	assert.throws(() => listRatesForModel("claude-opus-5-2026010"), /no published list rate/);

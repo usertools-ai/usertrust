@@ -136,6 +136,21 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 		cacheReadPer1k: 2.5,
 		cacheWritePer1k: 125,
 	},
+	// Deprecated 2026-06-09 (retirement date "to be announced") but still callable by
+	// Project Glasswing participants, so it needs its own row or it falls to the
+	// fallback. $25 in / $125 out per MTok: https://www.anthropic.com/project/glasswing
+	// ("available to participants of Project Glasswing at $25/$125 per million
+	// input/output tokens"); status: platform.claude.com/docs/en/about-claude/model-deprecations;
+	// both retrieved 2026-10-07. The pricing page has no row for it, so its cache tiers
+	// are the page's published multipliers for models without an exception ("All
+	// other models use the standard 0.1x multiplier"; 5m write 1.25x, 1h write 2x):
+	// read 25, 5m write 312.5.
+	"claude-mythos-preview": {
+		inputPer1k: 250,
+		outputPer1k: 1250,
+		cacheReadPer1k: 25,
+		cacheWritePer1k: 312.5,
+	},
 	// Limited availability; same rates as Fable 5 / Fable 5.1.
 	"claude-mythos-5": {
 		inputPer1k: 100,
@@ -246,7 +261,7 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	"mistral-large": { inputPer1k: 5, outputPer1k: 15 },
 	// The published alias that resolves to Mistral Large 3. Exact, not a prefix: an
 	// alias the row above documents pricing must not fall to the fail-dearest
-	// fallback (150/750) now that prefix matching is gone.
+	// dearest-known fallback now that prefix matching is gone.
 	"mistral-large-latest": { inputPer1k: 5, outputPer1k: 15 },
 
 	// ── DeepSeek ──
@@ -321,7 +336,7 @@ function lookupTableRates(model: string): ModelRates | undefined {
  * Fallback rate for unknown models: the HIGHEST rate the table publishes ("fail
  * dearest"). An unknown id over-counts visibly (`rateSource: "fallback"`,
  * `unknown: true`) instead of under-counting silently. input/output are the table
- * maxima (today the retired Opus 4 / 4.1 rows, $15 / $75); the cache-write tier is
+ * maxima (today claude-mythos-preview, $25 / $125); the cache-write tier is
  * the dearest effective write rate. The cache-READ
  * tier is left absent on purpose: D1 prices it at inputPer1k, which is dearer than
  * any published read rate, and an unknown model is not known to be Anthropic-shaped.
@@ -329,9 +344,9 @@ function lookupTableRates(model: string): ModelRates | undefined {
  * the maxima from PRICING_TABLE, so a dearer row added later fails until this moves.
  */
 export const FALLBACK_RATE: ModelRates = {
-	inputPer1k: 150,
-	outputPer1k: 750,
-	cacheWritePer1k: 187.5,
+	inputPer1k: 250,
+	outputPer1k: 1250,
+	cacheWritePer1k: 312.5,
 };
 
 /** Maps provider names to their model key prefixes in PRICING_TABLE. */

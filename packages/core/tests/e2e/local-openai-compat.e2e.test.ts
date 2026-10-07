@@ -267,13 +267,18 @@ describe("local OpenAI-compat endpoint — e2e over HTTP (M2)", () => {
 
 		const result = await call(governed, {
 			model: "llama3.3:70b",
+			// A small max_tokens keeps the fallback-priced (250/1250) hold inside the 5000-ut
+			// budget: at the default 4096 the hold alone is ~5,120 ut and the call is refused
+			// pre-spend. That consequence is pinned in govern/local-endpoint.test.ts; this
+			// test is about how the call is METERED.
+			max_tokens: 100,
 			messages: [{ role: "user", content: "Explain governance briefly" }],
 		});
 
 		expect(result.receipt.endpoint).toEqual({ class: "cloud", runtime: "unknown" });
 		expect(result.receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "fallback" });
-		// FALLBACK_RATE {150, 750}: (100/1000)*150 + (50/1000)*750 = 15 + 37.5 → ceil = 53.
-		expect(result.receipt.cost).toBe(53);
+		// FALLBACK_RATE {250, 1250}: (100/1000)*250 + (50/1000)*1250 = 25 + 62.5 → ceil = 88.
+		expect(result.receipt.cost).toBe(88);
 		// Default unknownModelPolicy "warn" surfaces the fallback footgun.
 		expect(
 			warnSpy.mock.calls.filter((c) => String(c[0]).includes("llama3.3:70b")).length,

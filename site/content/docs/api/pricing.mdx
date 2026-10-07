@@ -11,7 +11,7 @@ A budget of `100_000` UT equals $10.00. A budget of `1_000_000` UT equals $100.0
 
 ## Pricing Table
 
-The SDK includes a 41-model pricing table in `ledger/pricing.ts`, current as of
+The SDK includes a 42-model pricing table in `ledger/pricing.ts`, current as of
 `PRICING_TABLE_VERSION = "2026-10-07"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
 Rates are in usertokens per 1,000 LLM tokens, across **four tiers**: input (fresh prompt tokens),
 output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation prompt tokens). A
@@ -32,6 +32,7 @@ output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation pr
 | `claude-opus-4-7` | 50 | 250 | 5 | 62.5 |
 | `claude-opus-4-6` | 50 | 250 | 5 | 62.5 |
 | `claude-opus-4-5` | 50 | 250 | 5 | 62.5 |
+| `claude-mythos-preview` (deprecated; Project Glasswing) | 250 | 1250 | 25 | 312.5 |
 | `claude-opus-4-1` (retired) | 150 | 750 | 15 | 187.5 |
 | `claude-opus-4` (retired) | 150 | 750 | 15 | 187.5 |
 | `claude-sonnet-5-5` | 20 | 100 | 1 | 25 |
@@ -147,16 +148,16 @@ dearest"). An unknown id over-counts visibly instead of under-counting silently:
 
 | Direction | Rate (per 1K tokens) |
 |-----------|---------------------|
-| Input | 150 UT |
-| Output | 750 UT |
-| Cache write | 187.5 UT |
-| Cache read | 150 UT (the input rate; no cache discount is assumed) |
+| Input | 250 UT |
+| Output | 1250 UT |
+| Cache write | 312.5 UT |
+| Cache read | 250 UT (the input rate; no cache discount is assumed) |
 
-These are the maxima over the table (today the retired Opus 4 / 4.1 rows); a test recomputes them,
+These are the maxima over the table (today `claude-mythos-preview`, $25 / $125); a test recomputes them,
 so a dearer row cannot be added without raising the fallback. A fallback-priced record carries
 `rateSource: "fallback"` and `unknown: true`. An unrecognized model isn't known to be
 Anthropic-shaped, so no cache-read discount is attached. Set `unknownModelPolicy: "deny"` to refuse
-an unknown model instead of metering it.
+an unknown model instead of metering it. The fallback is the dearest rate the table KNOWS; it cannot bound a model the table does not list that costs more than every row in it (`claude-mythos-preview` was exactly that case before it got its own row). For a hard budget, `unknownModelPolicy: "deny"` is the guarantee.
 
 ## Model Matching
 
@@ -185,7 +186,7 @@ getModelRates("claude-fable-5-20260301")  // dated snapshot → claude-fable-5 �
 getModelRates("gpt-4o-2024-08-06")        // dated snapshot → gpt-4o → { 25, 100 }
 getModelRates("gpt-4o-2024-05-13")        // exact row, priced above its alias → { 50, 150 }
 getModelRates("claude-fable-5-1")         // its own row → { 100, 500, cache read 2.5 }
-getModelRates("claude-opus-5-fast")       // unknown → fallback → { 150, 750 }
+getModelRates("claude-opus-5-fast")       // unknown → fallback → { 250, 1250 }
 ```
 
 ## Functions
