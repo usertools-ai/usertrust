@@ -233,6 +233,159 @@ describe("a SettleParams getter runs BEFORE the claim: the hold it ends is ended
 	});
 });
 
+/** The terminal records a hold can leave. Exactly one may exist per hold. */
+const TERMINALS = new Set(["llm_call", "hold_released", "llm_call_failed"]);
+const terminalRecords = () => kinds().filter((k) => TERMINALS.has(k));
+
+/**
+ * The hold's budget was given back exactly once: a settle charged its cost and released
+ * its in-flight hold; a release or abort released it without a charge. An attributed hold
+ * never touched the session's numbers at all.
+ */
+function givenBackOnce(gov: Governor, before: number, kind: Hold, cost: number | undefined): void {
+	const settled = terminalRecords()[0] === "llm_call";
+	const expected = kind === "attributed" ? before : before - (settled ? (cost ?? 0) : 0);
+	expect(gov.budgetRemaining()).toBe(expected);
+}
+
+/** The same hold, through a handle whose `transferId` getter runs `during` on its Nth read. */
+function idCalling(auth: Authorization, nth: number, during: () => unknown): Authorization {
+	let reads = 0;
+	return Object.create(auth, {
+		transferId: {
+			get(): string {
+				reads += 1;
+				if (reads === nth) during();
+				return auth.transferId;
+			},
+		},
+	}) as Authorization;
+}
+
+describe("every terminal reads the handle's transferId ONCE: the id it claims is the id it marks", () => {
+	it("settle(), release() and abort() each read it exactly once", async () => {
+		const gov = await governor();
+		for (const call of ["settle", "release", "abort"] as const) {
+			const auth = await gov.authorize(AUTHORIZE);
+			let reads = 0;
+			const counted = Object.create(auth, {
+				transferId: {
+					get(): string {
+						reads += 1;
+						return auth.transferId;
+					},
+				},
+			}) as Authorization;
+			if (call === "settle") await gov.settle(counted, { inputTokens: 10, outputTokens: 10 });
+			else await end(gov, counted, call);
+			expect([call, reads]).toEqual([call, 1]);
+		}
+	});
+
+	for (const [kind, withLedger] of [
+		["session", true],
+		["attributed", true],
+		["session", false],
+	] as const) {
+		const where = `${kind} hold, ${withLedger ? "with a ledger" : "in dry run"}`;
+		for (const terminal of ["release", "abort"] as const) {
+			it(`${where}: ${terminal}() from the id getter on its 2nd, 3rd or 4th read never fires; one terminal, one give-back`, async () => {
+				for (const nth of [2, 3, 4]) {
+					const gov = await governor(withLedger);
+					const before = gov.budgetRemaining();
+					const auth = await hold(gov, kind);
+					events.length = 0;
+					ledger = { posts: [], voids: [] };
+					let fired = false;
+					const receipt = await gov.settle(
+						idCalling(auth, nth, () => {
+							fired = true;
+							void end(gov, auth, terminal);
+						}),
+						{ inputTokens: 10, outputTokens: 10 },
+					);
+					// Read once, at entry: the read that would have fed the claim or the marker
+					// never happens, so the getter never gets to end the hold.
+					expect([nth, fired]).toEqual([nth, false]);
+					expect([nth, terminalRecords()]).toEqual([nth, ["llm_call"]]);
+					if (withLedger) expect(ledger).toEqual({ posts: [auth.transferId], voids: [] });
+					givenBackOnce(gov, before, kind, receipt.cost);
+				}
+			});
+		}
+	}
+
+	for (const terminal of ["release", "abort"] as const) {
+		it(`${terminal}(): settle() from the id getter, on any read, leaves exactly one ledger mutation`, async () => {
+			for (let nth = 1; nth <= 6; nth += 1) {
+				const gov = await governor();
+				const auth = await gov.authorize(AUTHORIZE);
+				ledger = { posts: [], voids: [] };
+				let inner: Promise<unknown> | undefined;
+				await end(
+					gov,
+					idCalling(auth, nth, () => {
+						inner = gov.settle(auth, { inputTokens: 10, outputTokens: 10 }).catch(() => undefined);
+					}),
+					terminal,
+				);
+				await inner;
+				expect([nth, ledger.posts.length + ledger.voids.length]).toEqual([nth, 1]);
+			}
+		});
+
+		it(`${terminal}() on a handle whose id changes after the first read ends that first hold, only`, async () => {
+			const gov = await governor();
+			const first = await gov.authorize(AUTHORIZE);
+			const second = await gov.authorize(AUTHORIZE);
+			let reads = 0;
+			const shifting = Object.create(first, {
+				transferId: {
+					get(): string {
+						reads += 1;
+						return reads === 1 ? first.transferId : second.transferId;
+					},
+				},
+			}) as Authorization;
+			await end(gov, shifting, terminal);
+			expect(ledger).toEqual({ posts: [], voids: [first.transferId] });
+			// The second hold was never touched: it settles normally.
+			await gov.settle(second, { inputTokens: 10, outputTokens: 10 });
+			expect(ledger).toEqual({ posts: [second.transferId], voids: [first.transferId] });
+		});
+	}
+});
+
+describe("the class: a Proxy that tries to end the hold on EVERY property read", () => {
+	for (const withLedger of [true, false]) {
+		for (const terminal of ["release", "abort"] as const) {
+			it(`${withLedger ? "with a ledger" : "in dry run"}, ${terminal}() on every read of the handle and the params: one mutation, one record, one give-back`, async () => {
+				const gov = await governor(withLedger);
+				const before = gov.budgetRemaining();
+				const auth = await gov.authorize(AUTHORIZE);
+				events.length = 0;
+				const attempts: Array<Promise<unknown>> = [];
+				const trap = <T extends object>(target: T): T =>
+					new Proxy(target, {
+						get(t, prop, receiver) {
+							attempts.push(end(gov, auth, terminal));
+							return Reflect.get(t, prop, receiver);
+						},
+					});
+				const receipt = await gov
+					.settle(trap(auth), trap({ inputTokens: 10, outputTokens: 10 }))
+					.catch(() => undefined);
+				await Promise.all(attempts);
+				// Whichever terminal came first won; there is exactly one of it.
+				expect(attempts.length).toBeGreaterThan(0);
+				expect(terminalRecords()).toHaveLength(1);
+				if (withLedger) expect(ledger.posts.length + ledger.voids.length).toBe(1);
+				givenBackOnce(gov, before, "session", receipt?.cost);
+			});
+		}
+	}
+});
+
 describe("a getter on the HANDLE runs after the claim: settle owns the hold, and wins", () => {
 	for (const kind of ["session", "attributed"] as const) {
 		for (const terminal of ["release", "abort"] as const) {

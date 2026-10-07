@@ -1521,6 +1521,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		},
 
 		async settle(auth: Authorization, params?: SettleParams): Promise<TrustReceipt> {
+			// The handle's id, read ONCE and FIRST: a getter on it runs here, before any state
+			// changes, and every claim, lookup and record below uses this one value.
+			const transferId = auth.transferId;
 			// Caller input, read ONCE and FIRST: every SettleParams field, into a plain
 			// local, before this call claims anything. A getter runs here, before any state
 			// changes: one that throws leaves the hold untouched (live, still settleable),
@@ -1540,25 +1543,23 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// record, so liveness and provenance cannot disagree. Semantics are
 			// unchanged — the first terminal claims the entry, every later one is
 			// refused.
-			const capture = activeAuths.get(auth.transferId);
+			const capture = activeAuths.get(transferId);
 			if (capture === undefined) {
-				throw new Error(
-					`Authorization ${auth.transferId} is not active (already settled or aborted)`,
-				);
+				throw new Error(`Authorization ${transferId} is not active (already settled or aborted)`);
 			}
-			activeAuths.delete(auth.transferId);
+			activeAuths.delete(transferId);
 			// Claimed. Still PENDING. Pre-POST throw leaves the id here so
 			// abort()/destroy() can void a hold that never reached POST. The id
 			// leaves this set when POST begins and is never put back after a POST
 			// attempt — success or transport-ambiguous.
-			unpostedHolds.set(auth.transferId, capture);
+			unpostedHolds.set(transferId, capture);
 			// And OWNED, synchronously, from this claim (AGENTS.md: exactly one ledger
 			// mutation per hold, claimed synchronously). Everything below reads caller
 			// input, the SettleParams fields and the handle's, and any of it can be a
 			// getter that calls release() or abort() on this very hold. Marked
 			// `settling`, they stay out until this attempt is over: posted, or failed
 			// before its POST, when the `finally` hands the hold back.
-			settling.add(auth.transferId);
+			settling.add(transferId);
 			try {
 				const model = auth.model;
 				let callAuditDegraded = false;
@@ -1673,10 +1674,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// Leave the pre-POST cleanup set BEFORE the await. A transport-ambiguous
 				// POST must not remain abort-voidable, and deleting after `settling`
 				// drops would open a window where abort voids a hold mid-commit.
-				unpostedHolds.delete(auth.transferId);
+				unpostedHolds.delete(transferId);
 				if (proxyConn != null && !isDryRun) {
 					try {
-						await proxyConn.settle(auth.proxyTransferId ?? auth.transferId, actualCost);
+						await proxyConn.settle(auth.proxyTransferId ?? transferId, actualCost);
 					} catch (postErr) {
 						settled = false;
 						await audit
@@ -1686,7 +1687,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 								data: {
 									model,
 									cost: actualCost,
-									transferId: auth.transferId,
+									transferId,
 									error:
 										postErr instanceof Error
 											? postErr.message.slice(0, 200)
@@ -1703,7 +1704,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					try {
 						// Post the ACTUAL consumed cost (RECON #3), capped by the engine at
 						// the reserved hold; a truncation comes back as `shortfall`.
-						const postResult = await engine.postPendingSpend(auth.transferId, actualCost);
+						const postResult = await engine.postPendingSpend(transferId, actualCost);
 						if (postResult != null && postResult.shortfall > 0) {
 							postedCost = postResult.posted;
 							// EVENT ORDER: captured here, APPENDED after `llm_call` below.
@@ -1722,7 +1723,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 								data: {
 									model,
 									cost: actualCost,
-									transferId: auth.transferId,
+									transferId,
 									error:
 										postErr instanceof Error
 											? postErr.message.slice(0, 200)
@@ -1760,7 +1761,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				}
 
 				// Audit event
-				const syntheticHash = createHash("sha256").update(auth.transferId).digest("hex");
+				const syntheticHash = createHash("sha256").update(transferId).digest("hex");
 				let auditHash = syntheticHash;
 				try {
 					const auditEvent = await audit.appendEvent({
@@ -1770,7 +1771,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							model,
 							cost: actualCost,
 							settled,
-							transferId: auth.transferId,
+							transferId,
 							usageSource,
 							// D5: the durable record. The receipt is a return value the
 							// caller may drop on the floor; THIS is what an auditor reads,
@@ -1811,7 +1812,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 								actual: actualCost,
 								posted: shortfallRecord.posted,
 								shortfall: shortfallRecord.shortfall,
-								transferId: auth.transferId,
+								transferId,
 								...costCenterAudit,
 								...principalAudit,
 							},
@@ -1833,7 +1834,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 								model,
 								cost: actualCost,
 								settled,
-								transferId: auth.transferId,
+								transferId,
 								...costCenterAudit,
 								...principalAudit,
 							},
@@ -1844,7 +1845,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 				// Pattern memory
 				if (config.patterns.enabled) {
-					const promptHash = createHash("sha256").update(auth.transferId).digest("hex");
+					const promptHash = createHash("sha256").update(transferId).digest("hex");
 					await recordPattern({
 						promptHash,
 						model,
@@ -1873,12 +1874,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					: undefined;
 
 				const receipt: TrustReceipt = {
-					transferId: auth.transferId,
+					transferId,
 					cost: actualCost,
 					budgetRemaining: config.budget - budgetSpent - inFlightHoldTotal,
 					auditHash,
 					chainPath: join(VAULT_DIR, "audit"),
-					receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${auth.transferId}` : null,
+					receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${transferId}` : null,
 					settled,
 					model,
 					provider: "headless",
@@ -1913,18 +1914,20 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 				return receipt;
 			} finally {
-				settling.delete(auth.transferId);
+				settling.delete(transferId);
 			}
 		},
 
 		async abort(auth: Authorization, error?: unknown): Promise<void> {
+			// The handle's id, read ONCE and FIRST (see settle()).
+			const transferId = auth.transferId;
 			// Same lookup as settle, and the same reason: liveness and attribution come
 			// from one internal record. Still idempotent-silent, unlike settle.
 			// A settle owns this hold (from its claim to its end; see `settling`):
 			// first terminal is settle. A concurrent abort must not void (TB may be
 			// committing) and must not recordFailure / llm_call_failed — that would
 			// trip the provider circuit for a call that is settling, not failing.
-			if (settling.has(auth.transferId)) {
+			if (settling.has(transferId)) {
 				return;
 			}
 			// AUD-001: a settle that threw BEFORE POST has already claimed the
@@ -1934,18 +1937,18 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// (counted fail-closed, already wrote settlement_ambiguous + llm_call)
 			// — a cleanup abort must not throw, double-void, or look like an LLM
 			// failure.
-			let capture = activeAuths.get(auth.transferId);
+			let capture = activeAuths.get(transferId);
 			if (capture !== undefined) {
-				activeAuths.delete(auth.transferId);
+				activeAuths.delete(transferId);
 			} else {
-				capture = unpostedHolds.get(auth.transferId);
+				capture = unpostedHolds.get(transferId);
 				if (capture === undefined) {
 					return;
 				}
-				unpostedHolds.delete(auth.transferId);
+				unpostedHolds.delete(transferId);
 			}
 			// Re-check: settle may have entered POST after we read unpostedHolds.
-			if (settling.has(auth.transferId)) {
+			if (settling.has(transferId)) {
 				return;
 			}
 
@@ -1969,13 +1972,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// VOID the pending hold
 			if (proxyConn != null && !isDryRun) {
 				try {
-					await proxyConn.void(auth.proxyTransferId ?? auth.transferId);
+					await proxyConn.void(auth.proxyTransferId ?? transferId);
 				} catch {
 					// Best-effort void
 				}
 			} else if (engine != null && !isDryRun) {
 				try {
-					await engine.voidPendingSpend(auth.transferId);
+					await engine.voidPendingSpend(transferId);
 				} catch {
 					// Best-effort void
 				}
@@ -1994,7 +1997,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					actor: capture.actor,
 					data: {
 						model: auth.model,
-						transferId: auth.transferId,
+						transferId,
 						error:
 							error instanceof Error
 								? error.message.slice(0, 200)
@@ -2010,25 +2013,27 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		},
 
 		async release(auth: Authorization, reason?: string): Promise<ReleaseOutcome> {
+			// The handle's id, read ONCE and FIRST (see settle()).
+			const transferId = auth.transferId;
 			// abort()'s claim discipline, step for step and for the same reasons: a hold a
 			// settle owns (see `settling`) belongs to settle; a hold whose settle failed
 			// before its POST is releasable again; a miss in both is already resolved. Only
 			// the terminal's MEANING differs, and this one says whether it ended the hold.
-			if (settling.has(auth.transferId)) {
+			if (settling.has(transferId)) {
 				return { released: false };
 			}
-			let capture = activeAuths.get(auth.transferId);
+			let capture = activeAuths.get(transferId);
 			if (capture !== undefined) {
-				activeAuths.delete(auth.transferId);
+				activeAuths.delete(transferId);
 			} else {
-				capture = unpostedHolds.get(auth.transferId);
+				capture = unpostedHolds.get(transferId);
 				if (capture === undefined) {
 					return { released: false };
 				}
-				unpostedHolds.delete(auth.transferId);
+				unpostedHolds.delete(transferId);
 			}
 			// Re-check: settle may have entered POST after we read unpostedHolds.
-			if (settling.has(auth.transferId)) {
+			if (settling.has(transferId)) {
 				return { released: false };
 			}
 
@@ -2052,7 +2057,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			let voidError: string | undefined;
 			if (proxyConn != null && !isDryRun) {
 				try {
-					await proxyConn.void(capture.proxyTransferId ?? auth.transferId);
+					await proxyConn.void(capture.proxyTransferId ?? transferId);
 				} catch {
 					// A proxy's failure carries no cause this governor can read, an expiry
 					// included. (Proxy mode is removed, AUD-456: `proxyConn` is always null.)
@@ -2060,7 +2065,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				}
 			} else if (engine != null && !isDryRun) {
 				try {
-					await engine.voidPendingSpend(auth.transferId);
+					await engine.voidPendingSpend(transferId);
 				} catch (err) {
 					voidError = releaseVoidError(err);
 				}
@@ -2074,7 +2079,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					actor: capture.actor,
 					data: {
 						model: auth.model,
-						transferId: auth.transferId,
+						transferId,
 						reason: sanitizeReleaseReason(reason),
 						source: "headless",
 						...(voidError === undefined ? {} : { voidError }),
