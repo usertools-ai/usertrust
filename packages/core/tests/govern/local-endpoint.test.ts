@@ -548,7 +548,9 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				},
 				{ baseURL: null },
 			);
-			const governed = await trust(client, { dryRun: true, budget: 1000, vaultBase: tmpVault });
+			// 10_000, not 1000: an unknown model now meters at the dearest-known fallback
+			// (150/750), so the default max_tokens hold alone exceeds a 1000-UT budget.
+			const governed = await trust(client, { dryRun: true, budget: 10_000, vaultBase: tmpVault });
 
 			const r1 = await call(governed, {
 				model: "made-up-model-warn-1",
@@ -569,7 +571,8 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 		});
 
 		it("fallback: silent — no warn, receipt still marked fallback", async () => {
-			writeVaultConfig(tmpVault, { budget: 1000, unknownModelPolicy: "fallback" });
+			// 10_000: see the warn case above; the fallback hold is now 150/750 per 1k.
+			writeVaultConfig(tmpVault, { budget: 10_000, unknownModelPolicy: "fallback" });
 			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 			const { client } = makeJsonClient(
 				{

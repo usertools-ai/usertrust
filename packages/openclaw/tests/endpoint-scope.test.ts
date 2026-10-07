@@ -118,9 +118,9 @@ describe("UsertrustPluginConfig.endpoint threading (F1)", () => {
 			// drain
 		}
 
-		// Cloud scope: unknown model → sonnet-class FALLBACK_RATE {30,150}.
-		// ceil(26/1000*30 + 298/1000*150) = ceil(45.48) = 46 usertokens.
-		expect(BUDGET - governor.budgetRemaining()).toBe(46);
+		// Cloud scope: unknown model → dearest-known FALLBACK_RATE {150,750}.
+		// ceil(26/1000*150 + 298/1000*750) = ceil(227.4) = 228 usertokens.
+		expect(BUDGET - governor.budgetRemaining()).toBe(228);
 		// Cloud unknown model warns once per model string (default unknownModelPolicy "warn").
 		const modelWarns = warnSpy.mock.calls.filter((c) => String(c[0]).includes("llama3.3:70b"));
 		expect(modelWarns.length).toBeGreaterThanOrEqual(1);

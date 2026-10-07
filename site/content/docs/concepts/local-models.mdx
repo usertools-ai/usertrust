@@ -71,7 +71,7 @@ Only cloud-scope calls can hit an unknown model -- local scope always resolves t
 
 | Policy | Behavior |
 |--------|----------|
-| `"fallback"` | Silent sonnet-class fallback rate (legacy behavior) |
+| `"fallback"` | Silent dearest-known fallback rate (the pricing-table maximum) |
 | `"warn"` (default) | Same rate, one-time console warning per model per process, `meter.rateSource: "fallback"` on the receipt |
 | `"deny"` | `PolicyDeniedError` thrown before any PENDING hold is placed |
 

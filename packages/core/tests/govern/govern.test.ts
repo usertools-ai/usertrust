@@ -968,9 +968,9 @@ describe("trust()", () => {
 				messages: [{ role: "user", content: "Hello" }],
 			});
 
-			// Fallback rate: input 30/1k, output 150/1k
-			// (100/1000)*30 + (50/1000)*150 = 3 + 7.5 = ceil(10.5) = 11
-			expect(result.receipt.cost).toBe(11);
+			// Fallback rate (dearest known): input 150/1k, output 750/1k
+			// (100/1000)*150 + (50/1000)*750 = 15 + 37.5 = ceil(52.5) = 53
+			expect(result.receipt.cost).toBe(53);
 
 			await governed.destroy();
 		});

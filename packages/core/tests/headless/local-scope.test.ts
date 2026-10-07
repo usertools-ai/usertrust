@@ -274,8 +274,8 @@ describe("headless governor — M2 endpoint scope", () => {
 			// Receipt marker is set on EVERY receipt, regardless of warn dedup (A5).
 			expect(r1.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "fallback" });
 			expect(r2.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "fallback" });
-			// FALLBACK_RATE (sonnet-class): 30 in + 150 out per 1k → 180.
-			expect(r1.cost).toBe(180);
+			// FALLBACK_RATE (dearest known, 2026-10-07): 150 in + 750 out per 1k → 900.
+			expect(r1.cost).toBe(900);
 
 			await gov.destroy();
 		} finally {
@@ -297,7 +297,7 @@ describe("headless governor — M2 endpoint scope", () => {
 			);
 			expect(silentModelWarns).toHaveLength(0);
 			expect(receipt.meter).toMatchObject({ costBasis: "usd-proxy", rateSource: "fallback" });
-			expect(receipt.cost).toBe(30);
+			expect(receipt.cost).toBe(150);
 
 			await gov.destroy();
 		} finally {
