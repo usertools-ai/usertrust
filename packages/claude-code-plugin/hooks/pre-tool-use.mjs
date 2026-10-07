@@ -56,6 +56,7 @@ import {
 	readStdin,
 	recordPending,
 	recordWatchEvent,
+	releaseHold,
 	sanitizeReason,
 	say,
 	serverCapabilities,
@@ -272,11 +273,14 @@ async function unsettled(
  * - Any other hold (an estimate, or an empty window) carries no usage: the call
  *   has not run. Its record is dropped. It is given back only through a `release`
  *   the server advertises; otherwise a hold the server still has is left to the
- *   server's TTL sweep.
+ *   server's TTL sweep. A release that answers neither 200 nor that the hold is gone
+ *   leaves it possibly live: its record is kept settle-attempted, for Stop to give
+ *   back.
  * Returns false when another hook claimed the hold first (its record renamed away):
  * that hook is ending it, and this call must not reserve beside it. A hold that
- * cannot be ended now (out of time, or its claim fails) throws: no fresh hold is
- * made beside it, and the call fails as a failed authorization does.
+ * cannot be ended now (out of time, its claim fails, or its release is not
+ * confirmed) throws: no fresh hold is made beside it, and the call fails as a failed
+ * authorization does.
  */
 async function retire(entry) {
 	if ((entry.assignedIds?.length ?? 0) > 0) {
@@ -296,14 +300,38 @@ async function retire(entry) {
 	if (claimed === null) return false;
 	const capabilities = await serverCapabilities();
 	if (capabilities?.has("release")) {
-		await giveBack(
-			entry.transferId,
-			"a resumed tool call's earlier hold",
-			Math.min(5000, timeLeft()),
-		);
+		const unconfirmed = await releaseUnconfirmed(entry.transferId);
+		if (unconfirmed !== null) {
+			// The hold may still be live: no fresh hold is made beside it. Its record
+			// stays settle-attempted (`.settling`), so Stop gives it back, and the call
+			// fails as a failed authorization does.
+			throw new Error(
+				`${unconfirmed}; the hold may be live, so it is kept for Stop to give back, and no fresh hold is made beside it`,
+			);
+		}
 	}
 	await unlink(claimed).catch(() => {});
 	return true;
+}
+
+/**
+ * Give a resumed call's earlier hold back through `release`, and say why the hold
+ * may still be live: null once it is GONE, released (200) or no longer held by the
+ * server (a 404 `unknown transferId`: it expired, or another hook ended it). Any
+ * other answer, or none, leaves it possibly live.
+ */
+async function releaseUnconfirmed(transferId) {
+	let response;
+	try {
+		response = await releaseHold(transferId, "a resumed tool call's earlier hold", {
+			timeoutMs: Math.min(5000, timeLeft()),
+		});
+	} catch (err) {
+		return `release ${transferId} failed (${err instanceof Error ? err.message : String(err)})`;
+	}
+	if (response.status === 200) return null;
+	if (response.status === 404 && response.json?.reason === "unknown transferId") return null;
+	return `release ${transferId} returned ${response.status}`;
 }
 
 /**

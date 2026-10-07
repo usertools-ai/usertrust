@@ -4294,6 +4294,76 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 		});
 	});
 
+	describe("a release the server does not confirm: no fresh hold beside a hold that may be live", () => {
+		const env = { UT_CC_USAGE: "estimate" };
+
+		it.each<[string, { status: number; json: unknown }, Record<string, string>]>([
+			[
+				"a 503, enforce",
+				{ status: 503, json: { error: "unavailable" } },
+				{ UT_CC_MODE: "enforce" },
+			],
+			[
+				"no answer (the connection drops), enforce",
+				{ status: 0, json: null },
+				{ UT_CC_MODE: "enforce" },
+			],
+			[
+				"a 503, enforce with UT_FAIL_OPEN=1",
+				{ status: 503, json: { error: "unavailable" } },
+				{ UT_CC_MODE: "enforce", UT_FAIL_OPEN: "1" },
+			],
+			["a 503, watch", { status: 503, json: { error: "unavailable" } }, {}],
+		])(
+			"%s: nothing is reserved, and the hold is kept for Stop to give back",
+			async (_, answer, mode) => {
+				capabilities = ["release"];
+				const server = holdingServer();
+				let refusing = true;
+				await startServer((path, body) =>
+					refusing && path === "/v1/release" && body.transferId === "tx_1"
+						? answer
+						: server.responder(path, body),
+				);
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				const again = await run("pre-tool-use.mjs", preInput("tu_1"), { ...env, ...mode });
+				expect(again.stderr).toContain("the hold may be live");
+				if (mode.UT_CC_MODE === "enforce" && mode.UT_FAIL_OPEN !== "1") {
+					// It fails as a failed authorization does: an outage, not a known state.
+					expect(again.code).toBe(2);
+					expect(again.stderr).toContain("authorization failed closed");
+				} else {
+					expect(again.code).toBe(0);
+					expect(again.stdout).toBe("");
+				}
+				expect(again.stderr).not.toContain("is ended");
+				expect(authorizes()).toHaveLength(1);
+				expect(await holdStateFiles()).toEqual([SETTLING]);
+				// Stop gives it back.
+				refusing = false;
+				await run("stop.mjs", stopInput(), env);
+				expect(aboutTx1().map((r) => r.path)).toEqual(["/v1/release", "/v1/release"]);
+				expect(await holdStateFiles()).toEqual([]);
+			},
+		);
+
+		it("a 404 `unknown transferId` to the release: the server holds it no more, so the call reserves afresh", async () => {
+			capabilities = ["release"];
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			server.expire("tx_1");
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
+				...env,
+				UT_CC_MODE: "enforce",
+			});
+			expect(again.stdout).toBe("");
+			expect(again.stderr).toContain("reserved tx_2");
+			expect(aboutTx1().map((r) => [r.path, r.status])).toEqual([["/v1/release", 404]]);
+			expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_2")]);
+		});
+	});
+
 	describe("end to end: the real hooks against a REAL usertrust-server", () => {
 		const KEY = "ut_plugin_resume_key";
 		const env = { UT_CC_USAGE: "estimate" };

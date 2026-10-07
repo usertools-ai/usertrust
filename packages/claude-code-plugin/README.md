@@ -373,7 +373,11 @@ again, and the plugin finds the hold the call already has.
   - Any other hold is given back only through a `release` the server advertises,
     and never aborted. On a server without `release`, it counts against the budget
     until the server's pending-hold sweep voids it, which is one of the aborts
-    above: a call can be refused early, never overspend.
+    above: a call can be refused early, never overspend. A release the server
+    does not confirm (no answer, or an answer other than a 200 or `unknown
+    transferId`) leaves the hold possibly live: no fresh hold is made beside it,
+    its record is kept for Stop to give back, and the call fails as a failed
+    authorization does.
   - **Each hold has its own files,** named by its transfer as well as its call
     (`<session>__<agent>__<call>.<transferId>.json`, with its `.settling` and
     `.done`), so the earlier hold and the fresh one never share a file. A hook

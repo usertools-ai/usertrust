@@ -45,6 +45,11 @@ npm, and its version is its own: the `usertrust` packages and their
     whatever `UT_FAIL_OPEN` says; watch mode records a gap). A 1.4.0 record keeps
     its per-call name: hooks find it by the ids it stores, and end it once, through
     that name.
+  - With `release` advertised, the call reserves afresh only once the earlier hold
+    is released (a 200), or the server answers that it holds it no more (404
+    `unknown transferId`). Any other answer, or none, leaves the hold possibly live:
+    no fresh hold is made beside it, its record is kept for Stop to give back, and
+    the call fails as a failed authorization does.
 
 ## [1.4.0] - 2026-10-07
 
