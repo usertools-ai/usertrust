@@ -38,10 +38,12 @@ import {
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
+	releaseHold,
 	say,
 	serverCapabilities,
 	serverRequest,
 	takePendingEntry,
+	timeLeft,
 	usageMode,
 } from "./lib.mjs";
 import {
@@ -50,6 +52,11 @@ import {
 	OUTCOME_NOTES,
 	settleTranscriptHold,
 } from "./transcript.mjs";
+
+/** One request of the expired-hold chain: 5 s at most, and never past the hook's budget. */
+function withinBudget() {
+	return { timeoutMs: Math.min(5000, timeLeft()) };
+}
 
 /** A settle's answer that its hold does not exist on the server (not an unknown route). */
 function holdIsGone(response) {
@@ -90,6 +97,11 @@ function noteIfAmbiguous(response, transferId) {
  * posted and lost its answer as a pending .json, so an unmarked hold's 404 may
  * mean it was charged already. Such a hold is kept .settling for Stop, which only
  * gives it back. It is never re-authorized.
+ *
+ * Every request in the chain (the settle, the fresh authorize, the fresh settle)
+ * is capped at the time the hook has left (`withinBudget`), so the chain never
+ * runs past the hook's budget into Claude Code's kill. A request the budget cuts
+ * off leaves its hold .settling, and Stop gives it back.
  */
 async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	const claimed = await claimForSettle(sessionId, agentId, entry.entryKey);
@@ -97,7 +109,11 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		say(`usertrust: hold ${entry.transferId} is being settled by another hook`);
 		return;
 	}
-	const response = await serverRequest("/v1/settle", { transferId: entry.transferId, ...usage });
+	const response = await serverRequest(
+		"/v1/settle",
+		{ transferId: entry.transferId, ...usage },
+		withinBudget(),
+	);
 	if (response.status === 200) {
 		noteIfAmbiguous(response, entry.transferId);
 		await unlink(claimed).catch(() => {});
@@ -119,18 +135,22 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	const principal = capabilities?.has("principal")
 		? estimatePrincipalFor(sessionId, agentId, input.agent_type)
 		: undefined;
-	const auth = await serverRequest("/v1/authorize", {
-		model: defaultModel(),
-		...(typeof usage.inputTokens === "number" ? { estimatedInputTokens: usage.inputTokens } : {}),
-		maxOutputTokens: MAX_OUTPUT_TOKENS,
-		params: {
-			hook: "PostToolUse",
-			tool_name: input.tool_name ?? "unknown",
-			replaces: entry.transferId,
+	const auth = await serverRequest(
+		"/v1/authorize",
+		{
+			model: defaultModel(),
+			...(typeof usage.inputTokens === "number" ? { estimatedInputTokens: usage.inputTokens } : {}),
+			maxOutputTokens: MAX_OUTPUT_TOKENS,
+			params: {
+				hook: "PostToolUse",
+				tool_name: input.tool_name ?? "unknown",
+				replaces: entry.transferId,
+			},
+			actor: `claude-code:${sessionId}`,
+			...(principal === undefined ? {} : { principal }),
 		},
-		actor: `claude-code:${sessionId}`,
-		...(principal === undefined ? {} : { principal }),
-	});
+		withinBudget(),
+	);
 	const transferId = auth.json?.transferId;
 	if (
 		auth.status !== 200 ||
@@ -147,23 +167,44 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	// The fresh hold is settle-attempted from birth: it replaces the expired one's
 	// marker, so a settle of it that goes unanswered leaves it to Stop, never to a
 	// second settle.
-	const fresh = await recordPending(
-		sessionId,
-		agentId,
-		{
-			toolUseId: entry.toolUseId,
-			transferId,
-			...(typeof entry.estimatedInputTokens === "number"
-				? { estimatedInputTokens: entry.estimatedInputTokens }
-				: {}),
-		},
-		{ settling: true },
-	);
+	let fresh;
+	try {
+		fresh = await recordPending(
+			sessionId,
+			agentId,
+			{
+				toolUseId: entry.toolUseId,
+				transferId,
+				...(typeof entry.estimatedInputTokens === "number"
+					? { estimatedInputTokens: entry.estimatedInputTokens }
+					: {}),
+			},
+			{ settling: true },
+		);
+	} catch (err) {
+		// Unrecorded, the fresh hold could never be settled, and Stop could not find
+		// it: give it back now, as PreToolUse does on the same failure, rather than
+		// leave its reservation held until the server's TTL sweep. This call's
+		// estimate goes unrecorded: an under-count, never a second charge. The expired
+		// hold's claim goes too, since its 404 said the server has no such hold.
+		await releaseHold(transferId, "replacement hold could not be recorded", {
+			timeoutMs: Math.max(250, Math.min(5000, timeLeft())),
+		}).catch((giveBack) => {
+			say(
+				`usertrust: hold ${transferId} could not be given back (${giveBack instanceof Error ? giveBack.message : String(giveBack)}); the server's TTL sweep releases it`,
+			);
+		});
+		await unlink(claimed).catch(() => {});
+		say(
+			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold ${transferId} could not be recorded (${err instanceof Error ? err.message : String(err)}); ${transferId} was given back, and this call's estimate is not recorded`,
+		);
+		return;
+	}
 	if (fresh !== claimed) await unlink(claimed).catch(() => {});
 	say(
 		`usertrust: hold ${entry.transferId} expired before its settle (a long permission prompt?); charging this call once on ${transferId}`,
 	);
-	const settle = await serverRequest("/v1/settle", { transferId, ...usage });
+	const settle = await serverRequest("/v1/settle", { transferId, ...usage }, withinBudget());
 	if (settle.status === 200) {
 		noteIfAmbiguous(settle, transferId);
 		await unlink(fresh).catch(() => {});

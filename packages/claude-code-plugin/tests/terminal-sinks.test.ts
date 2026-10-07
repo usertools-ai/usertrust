@@ -8,14 +8,14 @@ const HOOKS = join(import.meta.dirname, "..", "hooks");
 /**
  * Where a hook may write to a terminal sink. Everything else goes through these:
  * `say` (stderr, lib.mjs) and `announce` (the SessionStart `systemMessage`,
- * lib.mjs) sanitize C0/DEL/C1 and then clip; `emit` writes PreToolUse's decision
- * JSON, whose reason it sanitizes the same way.
+ * lib.mjs) sanitize C0/DEL/C1 and then clip; `deny` writes PreToolUse's one
+ * decision JSON, whose reason it sanitizes the same way.
  */
 const ALLOWED: Record<string, Array<{ file: string; fn: string }>> = {
 	"process.stderr.write": [{ file: "lib.mjs", fn: "say" }],
 	"process.stdout.write": [
 		{ file: "lib.mjs", fn: "announce" },
-		{ file: "pre-tool-use.mjs", fn: "emit" },
+		{ file: "pre-tool-use.mjs", fn: "deny" },
 	],
 	systemMessage: [{ file: "lib.mjs", fn: "announce" }],
 };
@@ -78,21 +78,21 @@ const hookSinks = () =>
 		.flatMap((name) => sinksIn(name, readFileSync(join(HOOKS, name), "utf-8")));
 
 describe("terminal sinks: one sanitizing writer, and nothing else writes", () => {
-	it("no hook writes to stderr, stdout or a systemMessage except through say / announce / emit", () => {
+	it("no hook writes to stderr, stdout or a systemMessage except through say / announce / deny", () => {
 		const raw = rawSinks(hookSinks());
 		expect(raw.map((s) => `${s.file}:${s.line} ${s.sink} in ${s.fn ?? "module scope"}`)).toEqual(
 			[],
 		);
 	});
 
-	it("the allowances are not vacuous: say, announce and emit each hold their one sink", () => {
+	it("the allowances are not vacuous: say, announce and deny each hold their one sink", () => {
 		const sinks = hookSinks();
 		const held = (file: string, fn: string, sink: string) =>
 			sinks.filter((s) => s.file === file && s.fn === fn && s.sink === sink).length;
 		expect(held("lib.mjs", "say", "process.stderr.write")).toBe(1);
 		expect(held("lib.mjs", "announce", "process.stdout.write")).toBe(1);
 		expect(held("lib.mjs", "announce", "systemMessage")).toBe(1);
-		expect(held("pre-tool-use.mjs", "emit", "process.stdout.write")).toBe(1);
+		expect(held("pre-tool-use.mjs", "deny", "process.stdout.write")).toBe(1);
 	});
 
 	it("positive control: a raw write injected anywhere makes the guard fire", () => {

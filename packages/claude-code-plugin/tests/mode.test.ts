@@ -60,9 +60,10 @@ interface HookOutput {
 const decision = (stdout: string) => (JSON.parse(stdout) as HookOutput).hookSpecificOutput;
 
 /**
- * Watch's "let it through": exit 0 and NOTHING on stdout, which Claude Code reads
- * as no decision (its normal permission flow applies). Never an `allow`, which
- * would skip the user's permission prompt; never exit 2, which would block.
+ * How the plugin lets a call through, in either mode: exit 0 and NOTHING on
+ * stdout, which Claude Code reads as no decision (its normal permission flow
+ * applies). Never an `allow`, which would skip the user's permission prompt;
+ * never exit 2, which would block.
  */
 function expectNoDecision(result: { code: number; stdout: string }) {
 	expect(result.code).toBe(0);
@@ -234,16 +235,15 @@ describe("watch (the default) never blocks a tool call, and never approves one",
 });
 
 describe("UT_CC_MODE=enforce still blocks", () => {
-	it("a 200 reservation is answered allow, as before", async () => {
+	it("a 200 reservation makes NO decision either: enforcing blocks, it never grants", async () => {
 		const port = await startFake(200, { transferId: "tx_1", estimatedCost: 3 });
 		const result = await runHook(PRE, PAYLOAD, {
 			...baseEnv,
 			UT_CC_MODE: "enforce",
 			UT_SERVER_URL: `http://127.0.0.1:${port}`,
 		});
-		expect(result.code).toBe(0);
-		expect(decision(result.stdout).permissionDecision).toBe("allow");
-		expect(decision(result.stdout).permissionDecisionReason).toContain("tx_1");
+		expectNoDecision(result);
+		expect(result.stderr).toContain("reserved tx_1");
 	});
 
 	it("a 402 is denied, and nothing is recorded", async () => {
@@ -291,10 +291,39 @@ describe("UT_CC_MODE=enforce still blocks", () => {
 			UT_FAIL_OPEN: "1",
 			UT_SERVER_URL: UNREACHABLE,
 		});
-		expect(result.code).toBe(0);
-		expect(decision(result.stdout).permissionDecisionReason).toContain("ungoverned");
+		expectNoDecision(result);
+		expect(result.stderr).toContain("ungoverned");
 		expect(await watchRecords()).toMatchObject([{ kind: "gap", mode: "enforce", tool: "Bash" }]);
 	});
+});
+
+describe("the plugin never grants permission: deny or nothing, in either mode, on every path", () => {
+	const answers: Array<[string, number, unknown]> = [
+		["a reservation", 200, { transferId: "tx_1", estimatedCost: 3 }],
+		["a shadow answer", 200, { shadow: true, reason: "rule" }],
+		["a budget denial", 402, { error: "budget_exceeded", reason: "need 10, have 2" }],
+		["a policy denial", 403, { error: "pii", reason: "rule" }],
+		["an unusable answer", 200, { estimatedCost: 3 }],
+		["a 500", 500, { error: "internal" }],
+		["no server", 0, null],
+	];
+	const modes: Array<[string, Record<string, string>]> = [
+		["watch", {}],
+		["enforce", { UT_CC_MODE: "enforce" }],
+		["enforce + UT_FAIL_OPEN=1", { UT_CC_MODE: "enforce", UT_FAIL_OPEN: "1" }],
+	];
+	for (const [modeName, modeEnv] of modes) {
+		for (const [what, status, json] of answers) {
+			it(`${modeName}, ${what}: never allow`, async () => {
+				const url =
+					status === 0 ? UNREACHABLE : `http://127.0.0.1:${await startFake(status, json)}`;
+				const result = await runHook(PRE, PAYLOAD, { ...baseEnv, ...modeEnv, UT_SERVER_URL: url });
+				const decided =
+					result.stdout === "" ? "nothing" : decision(result.stdout).permissionDecision;
+				expect(["nothing", "deny"]).toContain(decided);
+			});
+		}
+	}
 });
 
 describe("the mode is announced to the user at session start", () => {

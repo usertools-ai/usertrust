@@ -1977,6 +1977,104 @@ describe("estimate holds", () => {
 			await play();
 			expect(requests.map((r) => r.path)).toEqual(["/v1/authorize", "/v1/settle"]);
 		});
+
+		it("the expired-hold chain stays inside the hook's budget: each of its requests is capped at the time left", async () => {
+			// Every answer but /v1/health takes 4.3 s. Uncapped (5 s each), the settle's
+			// 404, the fresh authorize and the fresh settle would all be answered, ~13 s
+			// in: past the 10 s budget, close to Claude Code's 15 s kill. Capped, the
+			// fresh settle gets only what is left of the budget, and is cut off.
+			const pending = new Set<string>();
+			const charged: string[] = [];
+			await startServer((path, body) => {
+				if (path === "/v1/authorize") {
+					nextTransfer += 1;
+					if (nextTransfer !== 1) pending.add(`tx_${nextTransfer}`);
+					return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+				}
+				const id = String(body.transferId);
+				if (!pending.delete(id)) return notFound;
+				if (path === "/v1/settle") {
+					charged.push(id);
+					return { status: 200, json: { settled: true, transferId: id } };
+				}
+				return { status: 200, json: { released: true, aborted: true } };
+			});
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			delayMs = 4_300;
+			const started = Date.now();
+			const post = await run("post-tool-use.mjs", postInput("tu_1", { tool_name: "Bash" }), env);
+			const elapsed = Date.now() - started;
+			delayMs = 0;
+			await run("stop.mjs", stopInput(), env);
+			expect(post.code).toBe(0);
+			// The 10 s budget, plus node's start and exit.
+			expect(elapsed).toBeLessThan(11_750);
+			// The fresh hold tx_2 was authorized and its settle cut off by the budget...
+			expect(authorizes().map(transferOf)).toEqual(["tx_1", "tx_2"]);
+			expect(post.stderr).toContain("charging this call once on tx_2");
+			expect(post.stderr).toContain("settle failed (non-blocking)");
+			// ...so it was left settle-attempted, and Stop gave it back: at most one
+			// charge (the cut-off settle may still post), never two.
+			expect(
+				requests
+					.filter((r) => r.body.transferId === "tx_2" && r.path !== "/v1/settle")
+					.map((r) => r.path),
+			).toEqual([expect.stringMatching(/^\/v1\/(release|abort)$/)]);
+			expect(charged.length).toBeLessThanOrEqual(1);
+			expect(await holdStateFiles()).toEqual([]);
+		}, 30_000);
+
+		it("a fresh hold whose record cannot be written is given back at once: one give-back, no settle, nothing left", async () => {
+			// No tool_use_id, so the fresh hold's file is named by its own transferId. A
+			// directory squats on that name, so the record's write fails, as on a full disk.
+			const pending = new Set<string>();
+			const charged: string[] = [];
+			await startServer((path, body) => {
+				if (path === "/v1/authorize") {
+					nextTransfer += 1;
+					if (nextTransfer !== 1) pending.add(`tx_${nextTransfer}`);
+					return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+				}
+				const id = String(body.transferId);
+				if (!pending.delete(id)) return notFound;
+				if (path === "/v1/settle") {
+					charged.push(id);
+					return { status: 200, json: { settled: true, transferId: id } };
+				}
+				return { status: 200, json: { released: true, aborted: true } };
+			});
+			const squat = `${SESSION}__main__tx_2.settling`;
+			await mkdir(join(stateDir, squat, "x"), { recursive: true });
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run(
+				"pre-tool-use.mjs",
+				{ ...stopInput(), tool_name: "Bash", tool_input: { command: "ls" } },
+				env,
+			);
+			const post = await run(
+				"post-tool-use.mjs",
+				{ ...stopInput(), tool_name: "Bash", tool_response: "eight ch" },
+				env,
+			);
+			await run("stop.mjs", stopInput(), env);
+			expect(post.code).toBe(0);
+			expect(post.stderr).toContain("its fresh hold tx_2 could not be recorded");
+			expect(post.stderr).toContain("this call's estimate is not recorded");
+			// tx_2 was authorized, never settled, and given back exactly once: its
+			// reservation is not left held until the server's TTL sweep.
+			expect(requests.filter((r) => r.body.transferId === "tx_2").map((r) => r.path)).toEqual([
+				expect.stringMatching(/^\/v1\/(release|abort)$/),
+			]);
+			// This call's estimate goes unrecorded: an under-count, never a second charge.
+			expect(charged).toEqual([]);
+			// tx_1's 404 said it is gone: one settle, and it is not given back afterwards.
+			expect(requests.filter((r) => r.body.transferId === "tx_1").map((r) => r.path)).toEqual([
+				"/v1/settle",
+			]);
+			// Nothing is left but the squatter: no hold, no claim, no partial write.
+			expect((await readdir(stateDir)).filter((n) => n !== "transcripts")).toEqual([squat]);
+		});
 	});
 
 	describe("an estimate hold's .settling in the transcript journal (it carries no ids)", () => {

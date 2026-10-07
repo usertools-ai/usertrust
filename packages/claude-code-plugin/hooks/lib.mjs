@@ -144,8 +144,8 @@ export function defaultModel() {
 }
 
 /**
- * Whether the plugin may block a tool call. `watch` (the default) NEVER blocks,
- * and makes no permission decision at all (see `proceed` in pre-tool-use.mjs): a
+ * Whether the plugin may block a tool call. It never grants one, in either mode
+ * (see `proceed` in pre-tool-use.mjs). `watch` (the default) NEVER blocks: a
  * budget, policy or anomaly refusal (402/403/429) is written down as a
  * `would_block` record, and a call that could not be metered (the server is
  * unreachable, times out, or answers something unusable) as a `gap` record —
@@ -275,26 +275,32 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 	const path = settling ? settlingPath(live) : live;
 	await mkdir(stateDir(), { recursive: true });
 	const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
-	await writeFile(
-		tmp,
-		JSON.stringify({
-			gate: 1,
-			toolUseId: entry.toolUseId ?? null,
-			transferId: entry.transferId,
-			agentId: String(agentId ?? "main"),
-			// Persist the authorize-time input estimate so settle can price both
-			// legs. Without it, post-tool-use sent only outputTokens and a large
-			// result priced above the 1-token hold (AUD-004).
-			...(typeof entry.estimatedInputTokens === "number"
-				? { estimatedInputTokens: entry.estimatedInputTokens }
-				: {}),
-			// A transcript-mode hold also records what it will settle: the model it
-			// was authorized at, the transcript message ids assigned to it, and their
-			// summed counts.
-			...(entry.usage === "transcript" ? transcriptHoldFields(entry) : {}),
-		}),
-	);
-	await rename(tmp, path);
+	try {
+		await writeFile(
+			tmp,
+			JSON.stringify({
+				gate: 1,
+				toolUseId: entry.toolUseId ?? null,
+				transferId: entry.transferId,
+				agentId: String(agentId ?? "main"),
+				// Persist the authorize-time input estimate so settle can price both
+				// legs. Without it, post-tool-use sent only outputTokens and a large
+				// result priced above the 1-token hold (AUD-004).
+				...(typeof entry.estimatedInputTokens === "number"
+					? { estimatedInputTokens: entry.estimatedInputTokens }
+					: {}),
+				// A transcript-mode hold also records what it will settle: the model it
+				// was authorized at, the transcript message ids assigned to it, and their
+				// summed counts.
+				...(entry.usage === "transcript" ? transcriptHoldFields(entry) : {}),
+			}),
+		);
+		await rename(tmp, path);
+	} catch (err) {
+		// A record that could not be written (ENOSPC, say) leaves no partial file.
+		await unlink(tmp).catch(() => {});
+		throw err;
+	}
 	return path;
 }
 
