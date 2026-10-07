@@ -99,15 +99,19 @@ describe("pre-tool-use hook", () => {
 			agentId: string;
 			estimatedInputTokens: number;
 			gate: 1;
+			reservedAt: number;
 		};
 		// JSON.stringify({command:"ls"}) is 16 chars -> 4 estimated tokens. `gate: 1`:
 		// recorded under the settle-attempt gate, so a 404 to its settle means it expired.
+		// `reservedAt`: when the authorize was sent, which bounds how long a tool call
+		// fired again may reuse the hold.
 		expect(entry).toEqual({
 			gate: 1,
 			toolUseId: "tu_1",
 			transferId: "tx_1",
 			agentId: "main",
 			estimatedInputTokens: 4,
+			reservedAt: expect.any(Number),
 		});
 	});
 

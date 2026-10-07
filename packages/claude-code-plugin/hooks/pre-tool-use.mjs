@@ -41,7 +41,9 @@
 // while transcript state is unavailable. A key whose charge already stands (409
 // `already_settled`) means an earlier settle of exactly this window landed: it
 // is accounted, and the tool is held alone.
+import { unlink } from "node:fs/promises";
 import {
+	claimForSettle,
 	defaultModel,
 	estimateTokens,
 	giveBack,
@@ -59,9 +61,31 @@ import {
 	serverRequest,
 	timeLeft,
 } from "./lib.mjs";
-import { estimatePrincipalFor, holdEstimate, prepareWindow, safeName } from "./transcript.mjs";
+import {
+	estimatePrincipalFor,
+	holdEstimate,
+	OUTCOME_NOTES,
+	prepareWindow,
+	safeName,
+	settleTranscriptHold,
+} from "./transcript.mjs";
 
 const MAX_REASON_CHARS = 500;
+
+/**
+ * How long after its reservation a tool call fired again may REUSE its hold. The
+ * hold may be gone after the server's pending TTL (`pendingTtlMs`, 300 s by
+ * default) or the ledger's pending timeout (300 s in core). Neither reaches the
+ * plugin: the authorize answer carries no expiry, and `/v1/health` names none. So
+ * the bound is the plugin's own, a fifth of those defaults, counted from the
+ * record's `reservedAt`: this machine's clock just BEFORE the authorize was sent,
+ * so no later than the hold's own start. On the defaults, at least 240 s of the
+ * TTL is left for the tool to run before PostToolUse settles. Reusing a hold that
+ * may be gone would skip the budget check the resumed call needs: in enforce mode,
+ * a call over budget would run, and then go uncharged when PostToolUse's
+ * re-authorize is refused.
+ */
+const REUSE_WITHIN_MS = 60_000;
 
 /** Block the call: the one permission decision this hook ever makes. */
 function deny(reason) {
@@ -104,20 +128,27 @@ try {
 	toolName = input.tool_name ?? "unknown";
 	// A deferred call's resume fires PreToolUse again for the SAME tool call (hooks
 	// reference, "Defer a tool call for later"), and so might any repeat. That call
-	// already has its hold: reuse it. A second authorize would reserve a second hold,
-	// and its record, keyed by the same tool_use_id, would overwrite the first's:
-	// the first hold stranded until the server's TTL and, in transcript mode, its
-	// window written off. A hold whose settle is under way or unanswered
-	// (`.settling`) gets no second hold either: the call could be charged twice.
+	// already has its hold. A second authorize alone would reserve a second hold, and
+	// its record, keyed by the same tool_use_id, would overwrite the first's: the
+	// first hold stranded until the server's TTL and, in transcript mode, its window
+	// written off. So a hold young enough to be live is reused; an older one is ended
+	// first (`retire`), and the call then reserves afresh, its budget checked again.
+	// A hold whose settle is under way or unanswered (`.settling`) gets no second
+	// hold: the call could be charged twice.
 	const held = await holdOfCall(sessionId, agentId, input.tool_use_id);
 	if (held === null) {
 		await reserve(input);
-	} else if (held.state === "pending") {
+	} else if (held.state === "settling") {
 		proceed(
-			`usertrust: this tool call already holds ${held.transferId}; reusing it, no second hold`,
+			`usertrust: this tool call's hold ${held.entry.transferId} is being settled; no second hold`,
+		);
+	} else if (mayReuse(held.entry)) {
+		proceed(
+			`usertrust: this tool call already holds ${held.entry.transferId}; reusing it, no second hold`,
 		);
 	} else {
-		proceed(`usertrust: this tool call's hold ${held.transferId} is being settled; no second hold`);
+		await retire(held.entry);
+		await reserve(input);
 	}
 } catch (err) {
 	const why = sanitizeReason(err instanceof Error ? err.message : String(err)).slice(
@@ -146,9 +177,66 @@ try {
 }
 
 /**
+ * Whether a pending hold is young enough to reuse: reserved less than
+ * `REUSE_WITHIN_MS` ago by this machine's clock. A record without that time
+ * (written before the plugin recorded it) is not, and nor is one that reads as
+ * reserved in the future: the clock was set back, so its age is unknown.
+ */
+function mayReuse(entry) {
+	const age = Date.now() - (entry.reservedAt ?? Number.NaN);
+	return age >= 0 && age < REUSE_WITHIN_MS;
+}
+
+/**
+ * End a pending hold too old to reuse (`mayReuse`) before the call reserves
+ * afresh. The hold may be gone, or still live. It is ended once, by a path that
+ * adds no abort (the server counts an abort as a breaker failure):
+ * - A hold with a transcript window carries real usage. It gets the one settle
+ *   PostToolUse would have given it (`settleTranscriptHold`), failure handling
+ *   included. Live, it is charged once, at the window's counts. Gone (a 404), its
+ *   window is released for the fresh hold to carry (no key), or retried under its
+ *   key at the next Stop.
+ * - Any other hold (an estimate, or an empty window) carries no usage: the call
+ *   has not run. Its record is dropped. It is given back only through a `release`
+ *   the server advertises; otherwise a hold the server still has is left to the
+ *   server's TTL sweep.
+ * A hold that cannot be ended now (out of time, or its record cannot be claimed)
+ * stops the fresh reserve, which would overwrite its record: the call then fails
+ * as a failed authorization does.
+ */
+async function retire(entry) {
+	say(
+		`usertrust: this tool call's hold ${entry.transferId} is too old to reuse (it may have expired); ending it and reserving afresh`,
+	);
+	if ((entry.assignedIds?.length ?? 0) > 0) {
+		const result = await settleTranscriptHold(sessionId, entry);
+		if (result.outcome === "deferred") {
+			throw new Error(`hold ${entry.transferId} could not be ended (${result.reason})`);
+		}
+		if (result.outcome !== "settled") {
+			say(
+				`usertrust: hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}`,
+			);
+		}
+		return;
+	}
+	const claimed = await claimForSettle(sessionId, agentId, entry.entryKey);
+	if (claimed === null) return; // Another hook took it first.
+	const capabilities = await serverCapabilities();
+	if (capabilities?.has("release")) {
+		await giveBack(
+			entry.transferId,
+			"a resumed tool call's hold, too old to reuse",
+			Math.min(5000, timeLeft()),
+		);
+	}
+	await unlink(claimed).catch(() => {});
+}
+
+/**
  * Reserve this tool call's hold: the window (transcript mode), the authorize, and
- * the record PostToolUse settles. Called once per tool call: a call that already
- * has a hold reuses it (`holdOfCall` above).
+ * the record PostToolUse settles. A call that already has a hold reuses it while
+ * it is young enough (`mayReuse`), and otherwise ends it first (`retire`).
  */
 async function reserve(input) {
 	const toolInput = JSON.stringify(input.tool_input ?? {}).slice(0, MAX_CONTENT_CHARS);
@@ -224,6 +312,8 @@ async function reserve(input) {
 				},
 				{ timeoutMs: callTimeout() },
 			);
+		// Taken before the authorize, so never later than the hold's own start.
+		const reservedAt = Date.now();
 		let response = await authorize();
 		if (window && keyed && isAlreadySettled(response)) {
 			// An earlier settle of exactly this window landed, though the cursor never
@@ -248,6 +338,7 @@ async function reserve(input) {
 					toolUseId: input.tool_use_id ?? null,
 					transferId: json.transferId,
 					estimatedInputTokens,
+					reservedAt,
 					...(settlesAtEstimate
 						? {}
 						: {

@@ -292,6 +292,9 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				...(typeof entry.estimatedInputTokens === "number"
 					? { estimatedInputTokens: entry.estimatedInputTokens }
 					: {}),
+				// When its authorize was sent, by this machine's clock: how long a tool call
+				// fired again may reuse the hold (pre-tool-use.mjs `REUSE_WITHIN_MS`).
+				...(typeof entry.reservedAt === "number" ? { reservedAt: entry.reservedAt } : {}),
 				// A transcript-mode hold also records what it will settle: the model it
 				// was authorized at, the transcript message ids assigned to it, and their
 				// summed counts.
@@ -323,26 +326,35 @@ export function isGated(entry) {
 }
 
 /**
- * The hold a tool call already has, keyed by its `tool_use_id`: its record pending
- * (`.json`, state "pending") or its settle under way or unanswered (`.settling`,
- * state "settling"). Claude Code fires PreToolUse again for the SAME tool call when
- * a deferred call resumes (hooks reference, "Defer a tool call for later"), and
- * PreToolUse then reuses this hold rather than reserve a second one. Null when the
- * call has no `tool_use_id`, no such record, or one that cannot be read.
+ * The hold a tool call already has. Claude Code fires PreToolUse again for the SAME
+ * tool call when a deferred call resumes (hooks reference, "Defer a tool call for
+ * later"), and PreToolUse then decides what that hold is still good for. Returns
+ * `{ state: "pending", entry }` for its pending record, the entry as `listPending`
+ * gives it; `{ state: "settling", entry }` when its settle is under way or was cut
+ * off unanswered (`.settling`); or null, also when the call has no `tool_use_id`.
+ * A record counts only if the ids it STORES are this call's. State-file names join
+ * ids with "__", so two calls can share one (agent `a__b` with tool `c`, and agent
+ * `a` with tool `b__c`). The pending record is found exactly as PostToolUse finds
+ * the hold it settles (`takePendingEntry`), so PreToolUse reuses only a hold this
+ * call's PostToolUse would settle.
  */
 export async function holdOfCall(sessionId, agentId, toolUseId) {
 	if (typeof toolUseId !== "string" || toolUseId === "") return null;
-	const live = stateFilePath(sessionId, agentId, toolUseId);
-	for (const [path, state] of [
-		[live, "pending"],
-		[settlingPath(live), "settling"],
-	]) {
-		try {
-			const body = JSON.parse(await readFile(path, "utf-8"));
-			if (typeof body?.transferId === "string") return { transferId: body.transferId, state };
-		} catch {
-			// Not there, or unreadable: try the other.
+	const entry = await takePendingEntry(sessionId, agentId, toolUseId);
+	if (entry !== null) return { state: "pending", entry };
+	try {
+		const body = JSON.parse(
+			await readFile(settlingPath(stateFilePath(sessionId, agentId, toolUseId)), "utf-8"),
+		);
+		if (
+			typeof body?.transferId === "string" &&
+			body.toolUseId === toolUseId &&
+			sanitize(body.agentId ?? "main") === sanitize(agentId)
+		) {
+			return { state: "settling", entry: { transferId: body.transferId } };
 		}
+	} catch {
+		// Not there, or unreadable: no hold of this call is being settled.
 	}
 	return null;
 }
@@ -463,6 +475,7 @@ export async function listPending(sessionId, agentId) {
 					: {}),
 				// The mark as written, whatever its value: `isGated` judges it.
 				...(Object.hasOwn(parsed, "gate") ? { gate: parsed.gate } : {}),
+				...(typeof parsed.reservedAt === "number" ? { reservedAt: parsed.reservedAt } : {}),
 				...(parsed.usage === "transcript" ? transcriptHoldFields(parsed) : {}),
 				mtimeMs,
 			});

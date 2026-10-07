@@ -2220,6 +2220,7 @@ describe("estimate holds", () => {
 			transferId: "tx_1",
 			agentId: "main",
 			estimatedInputTokens: 4,
+			reservedAt: expect.any(Number),
 		});
 		const post = await run("post-tool-use.mjs", postInput("tu_1"), env);
 		expect(post.stderr).toBe("");
@@ -3365,12 +3366,19 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 	const SESSION_END_BUDGET = { CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "" };
 	const notFound = { status: 404, json: { error: "not_found", reason: "unknown transferId" } };
 
-	/** A server that holds what it authorizes, forgets what `expire` names, and logs charges. */
+	/**
+	 * A server that holds what it authorizes, forgets what `expire` names, logs
+	 * charges, and refuses every authorize after `refuse` (a budget 402).
+	 */
 	function holdingServer() {
 		const pending = new Set<string>();
 		const charges: Array<{ transferId: string; inputTokens: unknown; outputTokens: unknown }> = [];
+		let refusing = false;
 		const responder: Responder = (path, body) => {
 			if (path === "/v1/authorize") {
+				if (refusing) {
+					return { status: 402, json: { error: "budget_exceeded", reason: "need 9, have 1" } };
+				}
 				nextTransfer += 1;
 				pending.add(`tx_${nextTransfer}`);
 				return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
@@ -3387,7 +3395,29 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 			}
 			return { status: 200, json: { released: true, aborted: true } };
 		};
-		return { responder, charges, expire: (id: string) => pending.delete(id) };
+		return {
+			responder,
+			charges,
+			expire: (id: string) => pending.delete(id),
+			refuse: () => {
+				refusing = true;
+			},
+		};
+	}
+
+	const RECORD = `${SESSION}__main__tu_1.json`;
+	/** Past the reuse bound: pre-tool-use.mjs `REUSE_WITHIN_MS` is 60 s. */
+	const TOO_OLD = 61_000;
+	/**
+	 * Make a pending record read as reserved `ms` ago (negative: in the future), or,
+	 * with null, as a record without its reservation time.
+	 */
+	async function reservedAgo(ms: number | null, file = RECORD) {
+		const path = join(stateDir, file);
+		const body = JSON.parse(await readFile(path, "utf-8")) as Record<string, unknown>;
+		if (ms === null) delete body.reservedAt;
+		else body.reservedAt = Date.now() - ms;
+		await writeFile(path, JSON.stringify(body));
 	}
 
 	describe("estimate mode", () => {
@@ -3396,7 +3426,11 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 		it("PreToolUse, then PreToolUse again for the same call: ONE authorize, one hold, settled once at its estimate", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);
+			const before = Date.now();
 			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			const { reservedAt } = JSON.parse(await readFile(join(stateDir, RECORD), "utf-8"));
+			expect(reservedAt).toBeGreaterThanOrEqual(before);
+			expect(reservedAt).toBeLessThanOrEqual(Date.now());
 			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
 			expect(again.code).toBe(0);
 			expect(again.stdout).toBe("");
@@ -3432,7 +3466,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 			expect(await holdStateFiles()).toEqual([]);
 		});
 
-		it("the first hold expired during the deferral: the reused hold's settle meets a 404, and #228's gated re-authorize charges the call once", async () => {
+		it("the first hold vanished within the reuse bound (a server restart): the reused hold's settle meets a 404, and #228's gated re-authorize charges the call once", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);
 			await run("pre-tool-use.mjs", preInput("tu_1"), env);
@@ -3499,7 +3533,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 			expect(await holdStateFiles()).toEqual([]);
 		});
 
-		it("the first hold expired during the deferral: the unkeyed 404 releases its window, and Stop posts it once", async () => {
+		it("the first hold vanished within the reuse bound (a server restart): the unkeyed 404 releases its window, and Stop posts it once", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);
 			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
@@ -3537,7 +3571,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 			expect(await holdStateFiles()).toEqual([]);
 		});
 
-		it("the first hold expired during the deferral: the keyed 404 is retried under its key at Stop, charged once", async () => {
+		it("the first hold vanished within the reuse bound (the server restarted): the keyed 404 is retried under its key at Stop, charged once", async () => {
 			const server = keyedServer();
 			server.faults.set("tx_1", "404-restarted");
 			await startServer(server.responder);
@@ -3550,6 +3584,215 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 				{ key: keyOf("main", ["msg_a"]), transferId: "tx_2", inputTokens: 5 },
 			]);
 			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		});
+	});
+
+	describe("a hold too old to reuse is ended, and the call reserves afresh: its budget is checked again", () => {
+		const env = { UT_CC_USAGE: "estimate" };
+		/** Requests about tx_1 after its authorize: a settle, a release or an abort. */
+		const aboutTx1 = () => requests.filter((r) => r.body.transferId === "tx_1");
+
+		it("enforce mode: a budget refusal (402) at the resume DENIES the call", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			const enforce = { ...env, UT_CC_MODE: "enforce" };
+			await run("pre-tool-use.mjs", preInput("tu_1"), enforce);
+			await reservedAgo(TOO_OLD);
+			server.refuse();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), enforce);
+			expect(again.code).toBe(0);
+			const decision = JSON.parse(again.stdout).hookSpecificOutput;
+			expect(decision.permissionDecision).toBe("deny");
+			expect(decision.permissionDecisionReason).toContain("budget_exceeded");
+			expect(authorizes()).toHaveLength(2);
+			// The old hold's record is dropped, and nothing is aborted: no release here.
+			expect(aboutTx1()).toEqual([]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("enforce mode, transcript usage: the old hold's window is settled once, then the refused resume is DENIED", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			await reservedAgo(TOO_OLD);
+			server.refuse();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(server.charges).toEqual([{ transferId: "tx_1", inputTokens: 9, outputTokens: 9 }]);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("estimate mode: the old hold's record is dropped with no abort (this server has no release), and the resume's own hold is settled once", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await reservedAgo(TOO_OLD);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(again.stderr).toContain("hold tx_1 is too old to reuse");
+			expect(again.stderr).toContain("reserved tx_2");
+			await run("post-tool-use.mjs", postInput("tu_1"), env);
+			await run("stop.mjs", stopInput(), env);
+			expect(authorizes()).toHaveLength(2);
+			expect(server.charges).toEqual([
+				{ transferId: "tx_2", inputTokens: TOOL_INPUT_ESTIMATE, outputTokens: 3 },
+			]);
+			expect(aboutTx1()).toEqual([]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("estimate mode, on a server with release: the old hold is RELEASED, never aborted", async () => {
+			capabilities = ["release"];
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await reservedAgo(TOO_OLD);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await run("post-tool-use.mjs", postInput("tu_1"), env);
+			await run("stop.mjs", stopInput(), env);
+			expect(aboutTx1().map((r) => [r.path, r.status])).toEqual([["/v1/release", 200]]);
+			expect(aborts()).toEqual([]);
+			expect(server.charges).toEqual([
+				{ transferId: "tx_2", inputTokens: TOOL_INPUT_ESTIMATE, outputTokens: 3 },
+			]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it.each<[string, number | null]>([
+			["a record without its reservation time", null],
+			["a reservation time in the future (the clock was set back)", -TOO_OLD],
+		])("%s is too old to reuse", async (_, ago) => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await reservedAgo(ago);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(again.stderr).toContain("hold tx_1 is too old to reuse");
+			expect(authorizes()).toHaveLength(2);
+		});
+
+		it("transcript mode: a LIVE old hold's window is settled once at its counts, and the resume holds afresh", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await reservedAgo(TOO_OLD);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			expect(authorizes()).toHaveLength(2);
+			// The resume's own hold carries no window: given back or settled at zero, as
+			// any empty hold is.
+			expect(server.charges.filter((c) => c.inputTokens !== 0)).toEqual([
+				{ transferId: "tx_1", inputTokens: 9, outputTokens: 9 },
+			]);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("transcript mode: an EXPIRED old hold's window is released, and the fresh hold carries it, charged once", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			server.expire("tx_1");
+			await reservedAgo(TOO_OLD);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			expect(server.charges.filter((c) => c.inputTokens !== 0)).toEqual([
+				{ transferId: "tx_2", inputTokens: 9, outputTokens: 9 },
+			]);
+			// tx_2 carried the window: Stop had no remainder to authorize.
+			expect(authorizes()).toHaveLength(2);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("transcript mode, keyed: an expired old hold's window is retried under its key at Stop, charged once", async () => {
+			capabilities = [...ALL_CAPABILITIES];
+			const server = keyedServer();
+			server.faults.set("tx_1", "404-restarted");
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await reservedAgo(TOO_OLD);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(again.stderr).toContain("hold tx_1 unresolved");
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			expect(server.charges).toEqual([
+				{ key: keyOf("main", ["msg_a"]), transferId: "tx_3", inputTokens: 5 },
+			]);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		});
+
+		it.each<[string, Record<string, string>]>([
+			["estimate", env],
+			["transcript", {}],
+		])(
+			"%s mode: an old hold that cannot be ended stops the fresh reserve, and enforce fails closed",
+			async (_, usage) => {
+				const server = holdingServer();
+				await startServer(server.responder);
+				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+				await run("pre-tool-use.mjs", preInput("tu_1"), usage);
+				await reservedAgo(TOO_OLD);
+				// A directory where the claim renames the record to: it cannot be claimed.
+				await mkdir(join(stateDir, `${SESSION}__main__tu_1.settling`));
+				const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
+					...usage,
+					UT_CC_MODE: "enforce",
+				});
+				expect(again.code).toBe(2);
+				expect(again.stderr).toContain("authorization failed closed");
+				expect(authorizes()).toHaveLength(1);
+				expect(server.charges).toEqual([]);
+				// tx_1's record is kept, never overwritten by a fresh hold's.
+				expect((await readdir(stateDir)).filter((n) => n.endsWith(".json"))).toEqual([RECORD]);
+			},
+		);
+	});
+
+	describe("a record that names another call is no hold of this one (state-file names can collide)", () => {
+		const env = { UT_CC_USAGE: "estimate" };
+		// Agent `a__b` with tool `c`, and agent `a` with tool `b__c`: one file name.
+		const first = () => preInput("c", { agent_id: "a__b" });
+		const second = () => preInput("b__c", { agent_id: "a" });
+		const SHARED = `${SESSION}__a__b__c`;
+
+		it("control: the first call itself, fired again, reuses its hold", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", first(), env);
+			const again = await run("pre-tool-use.mjs", first(), env);
+			expect(again.stderr).toContain(
+				"this tool call already holds tx_1; reusing it, no second hold",
+			);
+			expect(authorizes()).toHaveLength(1);
+		});
+
+		it("pending: the other call reserves its own hold, and never reuses the first's", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", first(), env);
+			expect(await holdStateFiles()).toEqual([`${SHARED}.json`]);
+			const again = await run("pre-tool-use.mjs", second(), env);
+			expect(again.stderr).not.toContain("tx_1");
+			expect(again.stderr).toContain("reserved tx_2");
+			expect(authorizes()).toHaveLength(2);
+		});
+
+		it(".settling: the other call reserves its own hold, and is never told the first's is being settled", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", first(), env);
+			await rename(join(stateDir, `${SHARED}.json`), join(stateDir, `${SHARED}.settling`));
+			const again = await run("pre-tool-use.mjs", second(), env);
+			expect(again.stderr).not.toContain("tx_1");
+			expect(again.stderr).toContain("reserved tx_2");
+			expect(authorizes()).toHaveLength(2);
 		});
 	});
 });
