@@ -3784,6 +3784,79 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			expect(other.posts()).toEqual([]);
 			expect(await holdStateFiles()).toEqual([SETTLING]);
 		});
+
+		/** The call's record, as a settle cut off before any answer leaves it: `.settling`. */
+		async function cutOff({ stale }: { stale: boolean }) {
+			await rename(join(stateDir, RECORD), join(stateDir, SETTLING));
+			if (stale) {
+				const then = new Date(Date.now() - 11 * 60_000);
+				await utimes(join(stateDir, SETTLING), then, then);
+			}
+		}
+
+		it("a STALE `.settling` made under another server and key never reaches this tenant's journal: nothing about it is sent, its keyed window is never parked for a retry here, and goes unrecorded", async () => {
+			capabilities = [...ALL_CAPABILITIES];
+			const server = keyedServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(await record()).toHaveProperty("idempotencyKey");
+			await cutOff({ stale: true });
+			other = await otherServer([...ALL_CAPABILITIES]);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), other.env);
+			expect(again.stderr).toContain("hold tx_1 was made under another server or key");
+			expect(again.stderr).toContain("reserved tx_other");
+			expect(other.aboutTx1()).toEqual([]);
+			expect(other.posts()).toEqual(["/v1/authorize Bearer k2"]);
+			// Abandoned through its own name; the fresh hold carries no window of the old one.
+			expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_other")]);
+			expect((await record()).assignedIds).toEqual([]);
+			const cursor = (await readCursor()) as unknown as {
+				accounted: string[];
+				unresolved: Record<string, unknown>;
+			};
+			expect(cursor.accounted).toEqual(["msg_a"]);
+			expect(cursor.unresolved).toEqual({});
+			// A Stop under the new tenant retries nothing of the old one's.
+			await run("stop.mjs", stopInput(), other.env);
+			expect(other.posts().filter((post) => !post.startsWith("/v1/release"))).toEqual([
+				"/v1/authorize Bearer k2",
+			]);
+			expect(server.charges).toEqual([]);
+		});
+
+		it("a FRESH `.settling` made under another server or key is refused: its settle may be in flight, and nothing about it is sent", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await cutOff({ stale: false });
+			other = await otherServer([]);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
+				...env,
+				...other.env,
+				UT_CC_MODE: "enforce",
+			});
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(other.posts()).toEqual([]);
+			expect(await holdStateFiles()).toEqual([SETTLING]);
+		});
+
+		it("a STALE `.settling` made under another server or key that another hook abandons first: this call reserves nothing", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await cutOff({ stale: true });
+			other = await otherServer([]);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
+				...env,
+				...other.env,
+				UT_CC_MODE: "enforce",
+				NODE_OPTIONS: `--import=${LOSE_CLAIM}`,
+			});
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(again.stderr).not.toContain("goes unrecorded");
+			expect(other.posts()).toEqual([]);
+		});
 	});
 
 	describe("a first hold another hook ends, or that cannot be ended: no fresh hold beside it", () => {

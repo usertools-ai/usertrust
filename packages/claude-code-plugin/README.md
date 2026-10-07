@@ -404,7 +404,13 @@ again, and the plugin finds the hold the call already has.
     key). On a mismatch, or for a record written before this, the record is dropped
     and the new server is told nothing about the old hold. The old hold is left to
     its own server's sweep. In transcript mode the usage it carried goes
-    unrecorded: an under-count, never charged to the new tenant.
+    unrecorded: an under-count, never charged to the new tenant. A `.settling`
+    record made under another server or key never reaches the journal through the
+    resumed call either. While fresh, the call is refused. Once stale, the record
+    is abandoned through its own name: its usage goes unrecorded, and is never
+    parked for a retry through the new server. Any other hook that reconciles is
+    still blind to the tenant, as in 1.4.0
+    ([#246](https://github.com/usertools-ai/usertrust/issues/246)).
 - **Two resumes of one call at once** (two `claude -p --resume` of one session,
   say) can leave the call two holds: one resume can reserve while the other is
   between ending the earlier hold and recording its fresh one. Each hold has its

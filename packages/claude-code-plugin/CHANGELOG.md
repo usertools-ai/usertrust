@@ -30,7 +30,10 @@ npm, and its version is its own: the `usertrust` packages and their
     mismatch, or for a record from before this change, the record is dropped and
     nothing about the old hold is sent to the new server. The old hold is left to
     its own server's sweep, and any transcript usage it carried goes unrecorded,
-    an under-count. It is never charged to the new tenant.
+    an under-count. It is never charged to the new tenant. The same holds for a
+    `.settling` record made under another server or key: the resumed call is
+    refused while it is fresh, and abandons it through its own name once it is
+    stale, its usage unrecorded, never parked for a retry through the new server.
   - The call is refused while that hold is not resolved: a `.settling` record left
     by a hook killed mid-settle, or a hold another hook is ending at that moment.
     Enforce mode denies it, whatever `UT_FAIL_OPEN` says, and watch mode records a
@@ -65,6 +68,16 @@ npm, and its version is its own: the `usertrust` packages and their
     the call fails as a failed authorization does. A 404 from a server that has
     restarted leaves the ledger's hold pending until its timeout (300 s at most):
     the budget counts it twice until then, the safe direction.
+
+### Known issues
+
+- **The transcript journal does not check which server and key made a hold.**
+  Any hook other than a resumed call's PreToolUse still reconciles a stale
+  `.settling` record from another tenant like its own, as 1.4.0 does. If the
+  record is keyed, the next Stop can retry its window through the current server
+  and key, charging this tenant for the other's usage. This needs
+  `UT_SERVER_URL` or `UT_SERVER_KEY` to change while such a record is
+  unresolved. Tracked in [#246](https://github.com/usertools-ai/usertrust/issues/246).
 
 ## [1.4.0] - 2026-10-07
 

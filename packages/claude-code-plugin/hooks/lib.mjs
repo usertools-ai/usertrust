@@ -387,7 +387,7 @@ export function isGated(entry) {
  * `{ state: "pending", entry }` for its pending record, the entry as `listPending`
  * gives it; `{ state: "settling", entry }` when its settle is under way or was cut
  * off unanswered (`.settling`; the entry is `{ transferId, assignedIds, transcript,
- * path }`); or null,
+ * path, mtimeMs }`, with the record's tenant binding when it has one); or null,
  * also when the call has no `tool_use_id`.
  * A record counts only if the ids it STORES are this call's: it is found by its
  * body, never by its name. State-file names join ids with "__", so two calls can
@@ -404,8 +404,8 @@ export async function holdOfCall(sessionId, agentId, toolUseId) {
 		(record) => record.toolUseId === toolUseId,
 	);
 	if (settling === undefined) return null;
-	const { transferId, assignedIds, transcript, path } = settling;
-	return { state: "settling", entry: { transferId, assignedIds, transcript, path } };
+	const { toolUseId: _call, ...record } = settling;
+	return { state: "settling", entry: record };
 }
 
 /** A pending hold's settle-attempted path: `<hold>.settling` beside `<hold>.json`. */
@@ -458,12 +458,18 @@ async function settlingRecords(sessionId, agentId) {
 			const body = JSON.parse(await readFile(path, "utf-8"));
 			if (typeof body?.transferId !== "string") continue;
 			if (wantAgent !== null && sanitize(body.agentId ?? "main") !== wantAgent) continue;
+			const { mtimeMs } = await stat(path);
 			held.push({
 				path,
 				transferId: body.transferId,
 				toolUseId: body.toolUseId ?? null,
 				assignedIds: Array.isArray(body.assignedIds) ? body.assignedIds : [],
 				transcript: body.usage === "transcript",
+				// Which server and tenant made the hold (`tenantBinding`), as written.
+				...(typeof body.serverUrl === "string" ? { serverUrl: body.serverUrl } : {}),
+				...(typeof body.keyHash === "string" ? { keyHash: body.keyHash } : {}),
+				// How long its settle has been in flight: a claim touches the file first.
+				mtimeMs,
 			});
 		} catch {
 			// Corrupt or concurrently removed — skip.

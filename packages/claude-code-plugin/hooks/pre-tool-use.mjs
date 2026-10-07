@@ -41,7 +41,7 @@
 // while transcript state is unavailable. A key whose charge already stands (409
 // `already_settled`) means an earlier settle of exactly this window landed: it
 // is accounted, and the tool is held alone.
-import { unlink } from "node:fs/promises";
+import { rename, unlink } from "node:fs/promises";
 import {
 	claimForSettle,
 	defaultModel,
@@ -73,6 +73,7 @@ import {
 	OUTCOME_NOTES,
 	prepareWindow,
 	reconcileAgent,
+	STALE_SETTLING_MS,
 	safeName,
 	settleTranscriptHold,
 } from "./transcript.mjs";
@@ -133,7 +134,13 @@ try {
 	if (held === null) {
 		await reserve(input);
 	} else if (held.state === "settling") {
-		if (await journalDecides(held.entry, input.tool_use_id)) await reserve(input);
+		// One made under another server or key never reaches this tenant's journal,
+		// which would retry a keyed window through this server: this tenant charged
+		// for the other's usage.
+		if (!sameTenant(held.entry)) {
+			if (await abandonSettling(held.entry)) await reserve(input);
+			else await unsettled(held.entry);
+		} else if (await journalDecides(held.entry, input.tool_use_id)) await reserve(input);
 		else await unsettled(held.entry);
 	} else {
 		// A hold made under another server or key is never touched through this one.
@@ -214,6 +221,32 @@ async function abandon(entry) {
 		await unlink(claimed).catch(() => {});
 	}
 	return claimed !== null;
+}
+
+/**
+ * End a `.settling` record made under ANOTHER server or key, or an unknown one,
+ * without this tenant's journal ever deciding it. Only a STALE one
+ * (`STALE_SETTLING_MS`) is ended: a fresh one's settle may still be in flight, so
+ * the call is refused instead. It is abandoned through its own name: claimed by an
+ * exclusive rename, then deleted. Nothing about it is sent to this hook's server,
+ * and nothing is parked for a retry. Any window it carried is accounted by the
+ * journal as unrecorded (assigned ids whose hold is gone): an under-count of the
+ * other tenant, never charged to this one. Returns false when the record is fresh,
+ * or another hook took it first.
+ */
+async function abandonSettling(entry) {
+	if (!(Date.now() - entry.mtimeMs > STALE_SETTLING_MS)) return false;
+	const taken = `${entry.path}.abandoned.${process.pid}.${Math.random().toString(36).slice(2)}`;
+	try {
+		await rename(entry.path, taken);
+	} catch {
+		return false;
+	}
+	say(
+		`usertrust: this tool call's earlier hold ${entry.transferId} was made under another server or key, and its settle never resolved; nothing about it is sent here, and any usage it carried goes unrecorded`,
+	);
+	await unlink(taken).catch(() => {});
+	return true;
 }
 
 /**
