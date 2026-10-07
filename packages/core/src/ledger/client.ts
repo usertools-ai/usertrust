@@ -106,7 +106,8 @@ export class TransferIdRetiredError extends TBTransferError {
  * This ledger client was destroyed. An operation on it fails rather than reconnecting:
  * a reconnect would build a native client that nothing destroys, and an open TigerBeetle
  * client keeps the process alive (#249). An operation that was in flight at `destroy()`
- * fails with its own error; one started after it fails with this.
+ * fails with its own error; one started after it fails with this, before any check of its
+ * arguments, as does a later step of one in flight.
  */
 export class LedgerClientClosedError extends Error {
 	constructor() {
@@ -282,11 +283,21 @@ export class TrustTBClient {
 		);
 	}
 
+	/**
+	 * Every public ledger operation calls this FIRST, before its own input checks and any
+	 * shortcut, so one started after destroy() fails with LedgerClientClosedError whatever its
+	 * arguments: a caller can tell shutdown from a refused input. withReconnect() calls it
+	 * again, for a later step of an operation that destroy() reached mid-way.
+	 */
+	private assertOpen(): void {
+		if (this.closed) throw new LedgerClientClosedError();
+	}
+
 	async reconnect(): Promise<void> {
 		// Refused once destroyed, BEFORE the dedup. A reconnect that just finished stays
 		// cached until its cleanup runs, and handing it back would answer success for a
 		// client destroy() has closed.
-		if (this.closed) throw new LedgerClientClosedError();
+		this.assertOpen();
 		if (this.reconnectPromise) return this.reconnectPromise;
 		this.reconnectPromise = this._doReconnect().finally(() => {
 			this.reconnectPromise = null;
@@ -299,7 +310,7 @@ export class TrustTBClient {
 		for (let attempt = 0; attempt < maxRetries; attempt++) {
 			// destroy() may have landed while this waited out its backoff: build no client.
 			// createClient is synchronous below, so one check per attempt covers it.
-			if (this.closed) throw new LedgerClientClosedError();
+			this.assertOpen();
 			try {
 				console.log(`[TB] Reconnection attempt ${attempt + 1}/${maxRetries}`);
 				try {
@@ -330,8 +341,9 @@ export class TrustTBClient {
 	}
 
 	private async withReconnect<T>(fn: () => Promise<T>): Promise<T> {
-		// Destroyed: fail fast, without touching the closed native client.
-		if (this.closed) throw new LedgerClientClosedError();
+		// Destroyed since the operation began (a later step of it): fail fast, without touching
+		// the closed native client.
+		this.assertOpen();
 		try {
 			return await fn();
 		} catch (err) {
@@ -449,15 +461,13 @@ export class TrustTBClient {
 	 * it is punctuated, and whatever flag accompanies it — is a preimage of one.
 	 */
 	async createUserWallet(userId: string): Promise<bigint> {
+		this.assertOpen();
 		if (userId.includes(LEGACY_COST_CENTER_SEPARATOR)) {
 			throw new Error(
 				`Invalid userId: "${LEGACY_COST_CENTER_SEPARATOR}" is reserved for pre-v3 cost-center accounts and may not name a wallet`,
 			);
 		}
 
-		// A cached id is still an answer that the wallet exists: refused once destroyed, as
-		// every operation that reaches the ledger is (withReconnect()).
-		if (this.closed) throw new LedgerClientClosedError();
 		const existing = this.accountMap.get(userId);
 		if (existing) return existing;
 
@@ -523,6 +533,7 @@ export class TrustTBClient {
 	 * the quarantined `::` namespace, or when TigerBeetle refuses.
 	 */
 	async createCostCenterWallet(parentUserId: string, costCenter: string): Promise<bigint> {
+		this.assertOpen();
 		const parentRefusal = parentUserIdRefusal(parentUserId);
 		if (parentRefusal !== null) {
 			throw new Error(`Invalid parentUserId: ${parentRefusal}`);
@@ -569,6 +580,7 @@ export class TrustTBClient {
 	}
 
 	async createTreasury(): Promise<bigint> {
+		this.assertOpen();
 		if (this.treasuryId) {
 			const tid = this.treasuryId;
 			const accounts = await this.withReconnect(() => this.client.lookupAccounts([tid]));
@@ -631,6 +643,7 @@ export class TrustTBClient {
 	 * legal — `escrow:session-1` is an ordinary label.
 	 */
 	async ensureEscrowAccount(label: string): Promise<bigint> {
+		this.assertOpen();
 		if (label.includes(LEGACY_COST_CENTER_SEPARATOR)) {
 			throw new Error(
 				`Invalid escrow label: "${LEGACY_COST_CENTER_SEPARATOR}" is reserved for pre-v3 cost-center accounts and may not name an escrow account`,
@@ -683,6 +696,7 @@ export class TrustTBClient {
 	 * account (which would inflate the enforced budget on every restart).
 	 */
 	async createFundedBudgetWallet(seedCredits: number): Promise<bigint> {
+		this.assertOpen();
 		const treasury = this.getTreasuryId(); // throws if treasury not initialized
 		const accountId = tbId();
 		const account: Account = {
@@ -803,6 +817,7 @@ export class TrustTBClient {
 		/** Caller-supplied id for cross-restart idempotency; minted fresh when omitted. */
 		transferId?: bigint;
 	}): Promise<bigint> {
+		this.assertOpen();
 		// Decided ONCE, synchronously, before any await: re-reading `p.transferId` after the
 		// await would let a caller that mutates its options mid-call skip verification.
 		const callerSupplied = p.transferId !== undefined;
@@ -864,6 +879,7 @@ export class TrustTBClient {
 		amount?: number,
 		opts?: { transferId?: bigint },
 	): Promise<bigint> {
+		this.assertOpen();
 		const callerSupplied = opts?.transferId !== undefined; // decided before any await
 		const postId = transferIdOrFresh(opts?.transferId);
 		const transfer: Transfer = {
@@ -912,6 +928,7 @@ export class TrustTBClient {
 	}
 
 	async voidTransfer(pendingId: bigint, opts?: { transferId?: bigint }): Promise<bigint> {
+		this.assertOpen();
 		const callerSupplied = opts?.transferId !== undefined; // decided before any await
 		const voidId = transferIdOrFresh(opts?.transferId);
 		const transfer: Transfer = {
@@ -970,6 +987,7 @@ export class TrustTBClient {
 		userData64?: bigint;
 		userData32?: number;
 	}): Promise<bigint> {
+		this.assertOpen();
 		// Decided ONCE, synchronously, before any await (as on the other transfer paths).
 		const callerSupplied = p.transferId !== undefined;
 		// The same range check as the sibling transfer paths (#183): 0, 2^128 - 1 and anything
@@ -1021,11 +1039,13 @@ export class TrustTBClient {
 	}
 
 	async lookupTransfer(transferId: bigint): Promise<Transfer | null> {
+		this.assertOpen();
 		const transfers = await this.withReconnect(() => this.client.lookupTransfers([transferId]));
 		return transfers.length > 0 ? (transfers[0] as Transfer) : null;
 	}
 
 	async lookupAccounts(accountIds: bigint[]): Promise<Account[]> {
+		this.assertOpen();
 		return await this.withReconnect(() => this.client.lookupAccounts(accountIds));
 	}
 
@@ -1034,6 +1054,7 @@ export class TrustTBClient {
 		pending: number;
 		total: number;
 	}> {
+		this.assertOpen();
 		const accounts = await this.withReconnect(() => this.client.lookupAccounts([accountId]));
 		if (accounts.length === 0) throw new Error(`Account not found: ${accountId}`);
 		return accountBalance(accounts[0] as Account);
@@ -1061,8 +1082,7 @@ export class TrustTBClient {
 	 * before any I/O — there is nothing to look up and no reason to open a round trip.
 	 */
 	async lookupBalances(accountIds: bigint[]): Promise<Map<bigint, number>> {
-		// Refused once destroyed, before the empty-input shortcut, like every lookup.
-		if (this.closed) throw new LedgerClientClosedError();
+		this.assertOpen();
 		if (accountIds.length === 0) return new Map();
 		const uniqueIds = [...new Set(accountIds)];
 		const accounts = await this.withReconnect(() => this.client.lookupAccounts(uniqueIds));

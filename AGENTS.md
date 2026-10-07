@@ -244,13 +244,19 @@ broad catch swallows `exists_with_different_flags`, i.e. an account missing its
 `debits_must_not_exceed_credits` enforcement. No catch is strictly better than a broad one.
 
 **A destroyed ledger client stays destroyed.** `TrustTBClient.destroy()` sets `closed` first, and
-from then on nothing reconnects. An operation in flight at `destroy()` fails with its own error, one
-started after it fails with `LedgerClientClosedError` before reaching the native client (a shortcut
-that answers without the ledger, such as a cached wallet id, included; `ping()` reports unhealthy;
-`reconnect()` is refused even while a finished reconnect is still cached), and `_doReconnect()`
-checks `closed` before every attempt, so a reconnect waiting out its backoff builds nothing. The
-native client cannot make this call: its `ERR_CLIENT_CLOSED` also comes from our own reconnect, which
-closes the old client, and an operation in flight on THAT one must still retry.
+from then on nothing reconnects. An operation in flight at `destroy()` fails with its own error. One
+started after it fails with `LedgerClientClosedError` before reaching the native client, whatever its
+arguments: every public ledger operation's first statement is `assertOpen()`, before its own input
+checks and any shortcut that answers without the ledger (a cached wallet id), so a caller can tell
+shutdown from a refused input. `withReconnect()` checks again, for a later step of an operation
+`destroy()` reached mid-way; `ping()` reports unhealthy; `reconnect()` is refused even while a
+finished reconnect is still cached; and `_doReconnect()` checks before every attempt, so a reconnect
+waiting out its backoff builds nothing. A test parses `client.ts` and fails when a public async method
+other than `ping()` does not open with `this.assertOpen()`. The synchronous accessors
+(`setTreasuryId`, `setAccountMapping`, `getAccountId`, `getTreasuryId`) touch only this object's
+memory and are not refused. The native client cannot make this call: its `ERR_CLIENT_CLOSED` also
+comes from our own reconnect, which closes the old client, and an operation in flight on THAT one
+must still retry.
 *Prevents:* a reconnect after shutdown building a native client nothing destroys, which keeps the
 process alive (#249). A POST that committed but lost its reply at `destroy()` is therefore no longer
 retried into an `exists` success: it fails, and a settle records `settlement_ambiguous`. Its charge

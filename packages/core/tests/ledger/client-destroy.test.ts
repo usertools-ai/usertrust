@@ -20,14 +20,23 @@
  *    that reconnect fails with LedgerClientClosedError;
  *  - a health-check ping in flight at `destroy()` does not reconnect;
  *  - a native `destroy()` that throws still leaves the client closed (the flag is set first);
+ *  - a later step of an operation that `destroy()` reached mid-way is refused the same way;
  *  - EVERY public ledger operation fails after `destroy()`, the ones with a shortcut that
  *    never reaches the ledger included (a cached wallet id, an empty lookup); `ping()`
  *    reports unhealthy, its start-up grace period included; and `reconnect()` is refused,
  *    even while a reconnect that just finished is still cached;
- *  - CONTROLS: without `destroy()`, a lost connection still reconnects and retries, and an
- *    operation on a client closed by OUR OWN reconnect still retries on the new one.
+ *  - each one refuses BEFORE its own input checks, so whatever its arguments (a reserved
+ *    name, a transfer id out of range, a fractional amount, a treasury never set) an
+ *    operation started after `destroy()` fails with LedgerClientClosedError. The first
+ *    statement of every public async method but `ping()` is `this.assertOpen()`, which a
+ *    check of the source pins;
+ *  - CONTROLS: without `destroy()`, a lost connection still reconnects and retries, an
+ *    operation on a client closed by OUR OWN reconnect still retries on the new one, and
+ *    every refused input above is refused by its own check.
  */
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type Respond = (client: number, op: string, batch: unknown[]) => Promise<unknown[]>;
@@ -218,6 +227,23 @@ describe("after destroy(), the client never reconnects", () => {
 		await expect(client.reconnect()).rejects.toBeInstanceOf(LedgerClientClosedError);
 		expect(native.created).toBe(1);
 	});
+
+	it("destroy() between two steps of one operation: the later step is refused before the native client", async () => {
+		// createTreasury() looks its treasury up, then creates it when the lookup finds none.
+		// destroy() lands between the two steps, as the lookup's answer is read.
+		client.setTreasuryId(5n);
+		const noneThenDestroy = {
+			get length() {
+				client.destroy();
+				return 0;
+			},
+		} as unknown as unknown[];
+		native.respond = async (_id, op) => (op === "lookupAccounts" ? noneThenDestroy : []);
+		await expect(client.createTreasury()).rejects.toBeInstanceOf(LedgerClientClosedError);
+		expect(native.calls).toEqual(["client1:lookupAccounts"]);
+		expect(native.created).toBe(1);
+		expect(alive()).toBe(0);
+	});
 });
 
 describe("every entry path honours destroy(), shortcuts included", () => {
@@ -256,6 +282,45 @@ describe("every entry path honours destroy(), shortcuts included", () => {
 		});
 	}
 
+	// 30 s: it imports `typescript`, which under a loaded suite can outlast vitest's default 5 s.
+	it("every public async method but ping() opens with this.assertOpen(), and each is in the table above", async () => {
+		const ts = (await import("typescript")).default;
+		const path = fileURLToPath(new URL("../../src/ledger/client.ts", import.meta.url));
+		const source = ts.createSourceFile(
+			path,
+			readFileSync(path, "utf-8"),
+			ts.ScriptTarget.Latest,
+			true,
+		);
+		const opens: string[] = [];
+		const doesNot: string[] = [];
+		const visit = (node: import("typescript").Node): void => {
+			if (ts.isClassDeclaration(node) && node.name?.text === "TrustTBClient") {
+				for (const member of node.members) {
+					if (!ts.isMethodDeclaration(member) || !member.body) continue;
+					const kinds = (ts.getModifiers(member) ?? []).map((m) => m.kind);
+					if (!kinds.includes(ts.SyntaxKind.AsyncKeyword)) continue;
+					if (kinds.includes(ts.SyntaxKind.PrivateKeyword)) continue;
+					if (kinds.includes(ts.SyntaxKind.StaticKeyword)) continue;
+					const first = member.body.statements[0];
+					const checksFirst =
+						first !== undefined &&
+						ts.isExpressionStatement(first) &&
+						first.expression.getText(source) === "this.assertOpen()";
+					(checksFirst ? opens : doesNot).push(member.name.getText(source));
+				}
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(source);
+		// ping() answers `false` instead (pinned below).
+		expect(doesNot).toEqual(["ping"]);
+		// A new operation fails this until it has a row above, so its refusal is pinned by
+		// behaviour too, not only by its first line.
+		const tabled = new Set(OPERATIONS.map(([name]) => name.split(",")[0]));
+		expect(opens.sort()).toEqual([...tabled, "reconnect"].sort());
+	}, 30_000);
+
 	it("ping() after destroy() reports unhealthy, its start-up grace period included", async () => {
 		client.destroy();
 		expect(await client.ping()).toBe(false);
@@ -270,6 +335,64 @@ describe("every entry path honours destroy(), shortcuts included", () => {
 		await finished;
 		expect(alive()).toBe(0);
 	});
+});
+
+describe("after destroy(), an operation is refused before its own input checks", () => {
+	const TRANSFER = { debitAccountId: 1n, creditAccountId: 2n, amount: 10, code: 1 };
+	// Each is refused by the operation's own check, before it reaches withReconnect(): a name
+	// reserved for pre-v3 cost centers, a transfer id outside (0, 2^128 - 1), an amount
+	// BigInt() refuses, or a treasury this client was never given.
+	const REFUSED_INPUTS: Array<[string, (c: TrustTBClient) => Promise<unknown>]> = [
+		["createUserWallet, a reserved id", (c) => c.createUserWallet("acme::billing")],
+		[
+			"createCostCenterWallet, a reserved parent",
+			(c) => c.createCostCenterWallet("acme::x", "billing"),
+		],
+		[
+			"createCostCenterWallet, an invalid cost center",
+			(c) => c.createCostCenterWallet("acme", "bill ing"),
+		],
+		["ensureEscrowAccount, a reserved label", (c) => c.ensureEscrowAccount("acme::billing")],
+		["createFundedBudgetWallet, no treasury", (c) => c.createFundedBudgetWallet(100)],
+		[
+			"createPendingTransfer, transfer id 0",
+			(c) => c.createPendingTransfer({ ...TRANSFER, transferId: 0n }),
+		],
+		[
+			"createPendingTransfer, a fractional amount",
+			(c) => c.createPendingTransfer({ ...TRANSFER, amount: 1.5 }),
+		],
+		["postTransfer, transfer id 0", (c) => c.postTransfer(1n, 10, { transferId: 0n })],
+		["postTransfer, a fractional amount", (c) => c.postTransfer(1n, 1.5)],
+		["voidTransfer, transfer id 0", (c) => c.voidTransfer(1n, { transferId: 0n })],
+		[
+			"immediateTransfer, transfer id 0",
+			(c) => c.immediateTransfer({ ...TRANSFER, transferId: 0n }),
+		],
+		[
+			"immediateTransfer, a fractional amount",
+			(c) => c.immediateTransfer({ ...TRANSFER, amount: 1.5 }),
+		],
+	];
+	for (const [name, op] of REFUSED_INPUTS) {
+		it(`${name}: LedgerClientClosedError, not the input's own error`, async () => {
+			client.destroy();
+			await expect(op(client)).rejects.toBeInstanceOf(LedgerClientClosedError);
+			expect(native.calls).toEqual([]);
+		});
+
+		// CONTROL: on an open client the input is refused by its own check, so the case above
+		// reaches that check.
+		it(`control: ${name}, on an open client, fails with its own error before the native client`, async () => {
+			const err = await op(client).then(
+				() => undefined,
+				(e: unknown) => e,
+			);
+			expect(err).toBeInstanceOf(Error);
+			expect(err).not.toBeInstanceOf(LedgerClientClosedError);
+			expect(native.calls).toEqual([]);
+		});
+	}
 });
 
 describe("controls: without destroy(), the client still reconnects", () => {
