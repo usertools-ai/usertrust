@@ -91,6 +91,7 @@ import {
 	AuditDegradedError,
 	InsufficientBalanceError,
 	LedgerUnavailableError,
+	PendingEntryNotFoundError,
 	PolicyDeniedError,
 	SpendLedgerUnreadableError,
 } from "./shared/errors.js";
@@ -3867,7 +3868,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 		async voidPendingSpend(transferId: string): Promise<void> {
 			const entry = pendingMap.get(transferId);
 			if (entry === undefined) {
-				throw new Error(`No pending transfer found for ${transferId}`);
+				throw new PendingEntryNotFoundError(transferId);
 			}
 			try {
 				await tbClient.voidTransfer(entry.tbId);

@@ -491,22 +491,24 @@ export function createUsertrustServer(opts: {
 	 * End a hold the control plane gives up on itself (its life is spent, or the server
 	 * is shutting down) through the governor's RELEASE terminal. Nothing failed, so it
 	 * is no circuit-breaker failure and no `llm_call_failed` record (#238, #204).
+	 * Answers what the governor did, or `undefined` when it could not be asked.
 	 */
 	async function releaseEntry(
 		transferId: string,
 		entry: PendingEntry,
 		reason: string,
-	): Promise<void> {
+	): Promise<ReleaseOutcome | undefined> {
 		const tenant = config.tenants.find((t) => t.id === entry.tenantId);
 		if (tenant) {
 			try {
 				const governor = await pool.get(tenant);
-				await governor.release(entry.auth, reason);
+				return await governor.release(entry.auth, reason);
 			} catch {
 				// Best-effort — the Governor's own destroy()/reconciliation voids
 				// anything the control plane fails to release here.
 			}
 		}
+		return undefined;
 	}
 
 	async function sweepExpired(now?: number): Promise<number> {
@@ -567,7 +569,10 @@ export function createUsertrustServer(opts: {
 			const remaining = [...pending.entries()];
 			pending.clear();
 			for (const [transferId, entry] of remaining) {
-				await releaseEntry(transferId, entry, "server shutdown");
+				const outcome = await releaseEntry(transferId, entry, "server shutdown");
+				// Announced only when the governor says it released the hold: one it no
+				// longer held, or could not be asked about, was not released here.
+				if (outcome?.released !== true) continue;
 				bus.publish(entry.tenantId, {
 					type: "released",
 					transferId,

@@ -111,6 +111,7 @@ import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/cons
 import {
 	InsufficientBalanceError,
 	LedgerUnavailableError,
+	PendingEntryNotFoundError,
 	PolicyDeniedError,
 	SpendLedgerUnreadableError,
 } from "./shared/errors.js";
@@ -412,8 +413,9 @@ export interface Governor {
 	 * `{ released: false }` when the governor no longer held it: its settle is mid-POST,
 	 * or it was already settled, aborted, released or destroyed. A void the ledger
 	 * refused still ends the hold here (its accounting is released, and the ledger's
-	 * pending timeout returns the funds) and is named in `voidError`: a fixed code,
-	 * never the error's text. A hold the ledger had already expired is released cleanly.
+	 * pending timeout returns the funds) and is named in `voidError`: a fixed code for
+	 * its cause, never the error's text. A hold the ledger had already expired is
+	 * released cleanly.
 	 *
 	 * `reason` is caller text, recorded through {@link sanitizeReleaseReason}.
 	 */
@@ -503,11 +505,14 @@ export function sanitizeReleaseReason(reason: unknown): string {
 }
 
 /**
- * The fixed code a release whose void failed records and answers: the ledger's own
- * name for a transfer it refused, else `ledger_unavailable` (the ledger could not be
- * asked, say). Never the error's text, which can carry a ledger address or a path.
+ * The fixed code a release whose engine void failed records and answers, named by
+ * its cause: the ledger's own status name for a transfer it refused,
+ * `no_pending_entry` when the engine held no record of the hold, and otherwise
+ * `ledger_unavailable` (the ledger could not be asked, say). Never the error's text,
+ * which can carry a ledger address or a path.
  */
 function releaseVoidError(err: unknown): string {
+	if (err instanceof PendingEntryNotFoundError) return "no_pending_entry";
 	if (err instanceof TBTransferError) {
 		const name = CreateTransferStatus[err.code];
 		return typeof name === "string" ? name : "ledger_rejected";
@@ -890,7 +895,7 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 		async voidPendingSpend(transferId: string): Promise<void> {
 			const entry = pendingMap.get(transferId);
 			if (entry === undefined) {
-				throw new Error(`No pending transfer found for ${transferId}`);
+				throw new PendingEntryNotFoundError(transferId);
 			}
 			try {
 				await tbClient.voidTransfer(entry.tbId);
@@ -2031,8 +2036,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			if (proxyConn != null && !isDryRun) {
 				try {
 					await proxyConn.void(capture.proxyTransferId ?? auth.transferId);
-				} catch (err) {
-					voidError = releaseVoidError(err);
+				} catch {
+					// A proxy's failure carries no cause this governor can read, an expiry
+					// included. (Proxy mode is removed, AUD-456: `proxyConn` is always null.)
+					voidError = "proxy_void_failed";
 				}
 			} else if (engine != null && !isDryRun) {
 				try {

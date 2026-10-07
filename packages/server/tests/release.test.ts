@@ -312,6 +312,22 @@ describe("the 200 is earned: it says the governor ended the hold", () => {
 		});
 	});
 
+	it("close(): a hold the governor no longer held is NOT announced as released", async () => {
+		for (const notHeld of [true, false]) {
+			const { base, fake } = await startFake({ notHeld });
+			const transferId = await hold(base);
+			const events: ServerEvent[] = [];
+			server?.bus.subscribe("acme", (event) => events.push(event));
+			await server?.close();
+			server = undefined;
+			expect(fake.calls.releaseReasons).toEqual(["server shutdown"]);
+			// Control: the same shutdown announces a hold the governor did release.
+			expect(events.filter((e) => e.type === "released").map((e) => e.transferId)).toEqual(
+				notHeld ? [] : [transferId],
+			);
+		}
+	});
+
 	it("a governor that THROWS: the entry is put back, so the release stays retryable", async () => {
 		const { base } = await startFake({ throws: true });
 		const transferId = await hold(base);

@@ -27,6 +27,7 @@ import type { TrustEngine } from "../../src/govern.js";
 import { createGovernor, type Governor, sanitizeReleaseReason } from "../../src/headless.js";
 import { TBTransferError } from "../../src/ledger/client.js";
 import { CircuitOpenError } from "../../src/resilience/circuit.js";
+import { PendingEntryNotFoundError } from "../../src/shared/errors.js";
 import type { AuditEvent } from "../../src/shared/types.js";
 
 // tigerbeetle-node is a native module and is never loaded in unit tests. The status
@@ -237,6 +238,18 @@ describe("a void the ledger refused still ends the hold, named by a fixed code",
 		});
 		expect(gov.budgetRemaining()).toBe(before);
 		expect(audit.events[0]?.data).toMatchObject({ voidError: "pending_transfer_not_found" });
+	});
+
+	it("an engine that holds no record of the hold: `no_pending_entry`, by type, not by text", async () => {
+		const gov = await engineGovernor(
+			makeEngine(async (transferId) => {
+				throw new PendingEntryNotFoundError(transferId);
+			}),
+		);
+		expect(await gov.release(await gov.authorize(AUTHORIZE))).toEqual({
+			released: true,
+			voidError: "no_pending_entry",
+		});
 	});
 
 	it("any other failure is `ledger_unavailable`, and its text is never recorded or answered", async () => {
