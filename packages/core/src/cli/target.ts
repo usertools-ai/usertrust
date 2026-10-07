@@ -37,12 +37,17 @@ export function toSafeJson(value: unknown): string {
 	);
 }
 
+/** Flags `main.ts` accepts for every command. */
+const GLOBAL_FLAGS = ["--json", "--skip-verify", "--reconfigure"];
+
 /**
- * Refuse a positional argument to a command that takes no path. Returns true if it refused (the
- * caller must then do nothing else); the exit code is set here.
+ * Refuse an argument a path-less command has no use for. Returns true if it refused (the caller
+ * must then do nothing else); the exit code is set here.
  *
- * `args` are the arguments AFTER the command word. Anything not starting with `-` is a positional;
- * `valueFlags` names flags whose next argument is their value and so not a positional.
+ * `args` are the arguments AFTER the command word. A positional is refused ("takes no path"), and
+ * so is any dash token that is neither a global flag nor one of `valueFlags` (the command's own
+ * flags, each taking the next argument as its value): there are no short flags, and skipping an
+ * unknown dash token as "probably a flag" is how `-vault` slipped past.
  */
 export function refuseStrayPositional(
 	command: string,
@@ -50,21 +55,23 @@ export function refuseStrayPositional(
 	json: boolean,
 	valueFlags: readonly string[] = [],
 ): boolean {
-	const stray: string[] = [];
+	let message: string | undefined;
 	// `--json` is global and main.ts removes it before dispatch, so it must not be taken as the
 	// value of a preceding value flag (`export --markdown --json out`) here either.
 	const rest = args.filter((a) => a !== "--json");
-	for (let i = 0; i < rest.length; i++) {
+	for (let i = 0; i < rest.length && message === undefined; i++) {
 		const a = rest[i] as string;
 		if (valueFlags.includes(a)) {
 			i++;
-		} else if (!a.startsWith("-")) {
-			stray.push(a);
+		} else if (a.startsWith("-")) {
+			if (!GLOBAL_FLAGS.includes(a)) {
+				message = `\`usertrust ${command}\` has no option "${scrubForTerminal(a)}".`;
+			}
+		} else {
+			message = `\`usertrust ${command}\` takes no path (got "${scrubForTerminal(a)}"). It reports on the vault in the current directory; run it from there.`;
 		}
 	}
-	if (stray.length === 0) return false;
-
-	const message = `\`usertrust ${command}\` takes no path (got "${scrubForTerminal(stray[0] as string)}"). It reports on the vault in the current directory; run it from there.`;
+	if (message === undefined) return false;
 	if (json) {
 		console.log(JSON.stringify({ command, success: false, data: { message } }));
 	} else {

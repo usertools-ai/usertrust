@@ -30,7 +30,14 @@ interface Out {
 }
 
 function cli(cwd: string, ...args: string[]): Out {
-	const r = spawnSync(TSX, [MAIN, ...args], { cwd, encoding: "utf-8", timeout: 60_000 });
+	// CI forces colour on; these assertions are about raw control bytes, which colour would add.
+	const { FORCE_COLOR: _force, ...env } = process.env;
+	const r = spawnSync(TSX, [MAIN, ...args], {
+		cwd,
+		encoding: "utf-8",
+		timeout: 60_000,
+		env: { ...env, NO_COLOR: "1" },
+	});
 	return { stdout: r.stdout, stderr: r.stderr, code: r.status };
 }
 
@@ -92,6 +99,20 @@ describe("verify <path> verifies that path", () => {
 		expect(out.stdout).not.toContain("link-to-a");
 	}, 60_000);
 
+	it("T1c: a `.usertrust` that is itself a symlink reports the vault actually read", () => {
+		const proj = join(tmp, "proj-with-linked-vault");
+		mkdirSync(proj);
+		symlinkSync(join(vaultA, ".usertrust"), join(proj, ".usertrust"));
+		const out = cli(vaultB, "verify", proj);
+		expect(out.code).toBe(0);
+		expect(out.stdout).toContain("3 events");
+		expect(out.stdout).toContain(`Vault: ${join(vaultA, ".usertrust")}`);
+		expect(out.stdout).not.toContain("proj-with-linked-vault");
+		expect(json(cli(vaultB, "verify", proj, "--json")).data.vaultPath).toBe(
+			join(vaultA, ".usertrust"),
+		);
+	}, 60_000);
+
 	it("T2: from an empty directory, `verify vault-a` verifies vault-a", () => {
 		const out = cli(empty, "verify", vaultA);
 		expect(out.code).toBe(0);
@@ -134,6 +155,23 @@ describe("verify <path> verifies that path", () => {
 			expect(out.stdout, args.join(" ")).toMatch(re);
 			expect(out.stdout, args.join(" ")).not.toContain("Chain verified");
 		}
+	}, 120_000);
+
+	it("T4b: a dash-prefixed token is an error (exit 2), never ignored as a maybe-flag", async () => {
+		// `verify -vault` once ignored the token and verified the cwd: the false PASS, one
+		// character away from the path that was asked for.
+		for (const tok of ["-vault", "-x", "-", ""]) {
+			const out = cli(vaultB, "verify", tok);
+			expect(out.code, tok).toBe(2);
+			expect(out.stdout, tok).not.toContain("Chain verified");
+			expect(out.stdout, tok).toContain(tok);
+		}
+		// The escape hatch the message names works: a vault directory literally called `-vault`.
+		const dashed = join(tmp, "-vault");
+		await makeVault(dashed, 2);
+		const ok = cli(tmp, "verify", "./-vault");
+		expect(ok.code).toBe(0);
+		expect(ok.stdout).toContain("2 events");
 	}, 120_000);
 
 	it("T5: a flag's value is never mistaken for the path, in either order", () => {
@@ -218,6 +256,18 @@ describe("commands that take no path refuse one", () => {
 		expect(j.data.message).toContain("takes no path");
 	}, 120_000);
 
+	it("T7d: a stray dash token is refused on every swept command, not skipped as a flag", () => {
+		for (const cmd of NO_PATH) {
+			const extra = cmd === "export" ? ["--markdown", join(tmp, "out-x")] : [];
+			const out = cli(vaultB, cmd, "-vault", ...extra);
+			expect(out.code, cmd).toBe(2);
+			expect(out.stdout, cmd).toContain("-vault");
+			// An unknown long flag is the same class and gets the same answer.
+			const long = cli(vaultB, cmd, "--no-such-flag", ...extra);
+			expect(long.code, `${cmd} --no-such-flag`).toBe(2);
+		}
+	}, 120_000);
+
 	it("T7b: nothing ran: `init <path>` did not initialise the cwd, `export <path>` wrote nothing", () => {
 		const fresh = join(tmp, "fresh");
 		mkdirSync(fresh);
@@ -226,6 +276,15 @@ describe("commands that take no path refuse one", () => {
 		expect(() => realpathSync(join(fresh, ".usertrust"))).toThrow();
 		expect(() => realpathSync(join(tmp, "never"))).toThrow();
 	}, 60_000);
+
+	it("T8b: the global flags main.ts accepts for every command are still accepted", () => {
+		for (const flag of ["--json", "--skip-verify", "--reconfigure"]) {
+			for (const cmd of ["inspect", "health", "pricing"]) {
+				const out = cli(vaultA, cmd, flag);
+				expect(out.code, `${cmd} ${flag}: ${out.stdout}`).not.toBe(2);
+			}
+		}
+	}, 120_000);
 
 	it("T8: a bare invocation still works (no behaviour change for correct use)", () => {
 		const fresh = join(tmp, "fresh2");

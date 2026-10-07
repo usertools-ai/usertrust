@@ -47,6 +47,8 @@ interface AnchorFlags {
 	 * runner, the runner's own arguments, none of which name a vault.
 	 */
 	targets: string[];
+	/** Single-dash tokens: there are no short flags, so each one is an error. */
+	dashTokens: string[];
 	anchorMode: boolean;
 	params: AnchorVerifyParams;
 	requireAnchor: boolean;
@@ -180,6 +182,7 @@ function fetchAnchorUrl(url: string): Promise<{ ok: boolean; body?: string; erro
 
 async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promise<AnchorFlags> {
 	const targets: string[] = [];
+	const dashTokens: string[] = [];
 	const anchorFiles: string[] = [];
 	const rekorReceiptFiles: string[] = [];
 	const rekorPubkeyFiles: string[] = [];
@@ -234,9 +237,11 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
 			// Reject unknown flags rather than silently ignoring them — a typoed
 			// --require-anchro must not quietly weaken a CI gate.
 			throw new Error(`Unknown flag: ${arg}`);
-		} else if (collectTargets && !arg.startsWith("-")) {
-			// Flag values were consumed by `next()` above, so a bare argument left here is a path.
-			targets.push(arg);
+		} else if (collectTargets && !arg.startsWith("--")) {
+			// Flag values were consumed by `next()` above, so what is left here is a path, or a
+			// single-dash token. That token is NEVER skipped as a maybe-flag: `verify -vault`
+			// ignored it and verified the cwd, the false PASS one character from the path asked for.
+			(arg.startsWith("-") ? dashTokens : targets).push(arg);
 		}
 	}
 	const externalAnchorsRaw = anchorFiles.map(readArtifact);
@@ -288,6 +293,7 @@ async function parseAnchorFlags(argv: string[], collectTargets: boolean): Promis
 			: undefined;
 	return {
 		targets,
+		dashTokens,
 		anchorMode,
 		requireAnchor,
 		requireExternalAnchor,
@@ -336,6 +342,14 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 
 	// An argument shape the command cannot honour: refuse, exit 2. Taking the first and ignoring
 	// the rest would verify one vault while the operator asked about two.
+	const dash = flags.dashTokens[0];
+	if (dash !== undefined) {
+		fail(
+			`Unknown option "${scrubForTerminal(dash)}": usertrust verify has no short flags. A path that begins with "-" must be written ./${scrubForTerminal(dash)}.`,
+			2,
+		);
+		return;
+	}
 	if (flags.targets.length > 1) {
 		fail(
 			`usertrust verify takes one path, got ${flags.targets.length}: ${flags.targets
@@ -350,7 +364,12 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 	// `usertrust verify <vault-a>` run inside vault-b into vault-b's chain presented as a verdict
 	// on vault-a.
 	const given = flags.targets[0];
-	let root = rootDir ?? (given !== undefined ? resolve(given) : process.cwd());
+	if (given === "") {
+		// resolve("") is the cwd: an empty argument must not become the silent fallback.
+		fail("usertrust verify: the path is empty.", 2);
+		return;
+	}
+	const root = rootDir ?? (given !== undefined ? resolve(given) : process.cwd());
 	if (given !== undefined && rootDir === undefined) {
 		const shown = scrubForTerminal(root);
 		let isDir = false;
@@ -395,8 +414,9 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 
 	// Name the vault the verdict is about, by the directory actually read: a symlinked argument
 	// shows its target. Resolved after the existence checks, so it cannot throw on a missing path.
-	root = realpathSync(root);
-	const verifiedVault = join(root, VAULT_DIR);
+	// The `.usertrust` itself can be a symlink to another vault, so resolve IT, not just the
+	// project directory: the subject named is the vault actually read.
+	const verifiedVault = realpathSync(join(root, VAULT_DIR));
 	if (!json) console.log(`Vault: ${scrubForTerminal(verifiedVault)}`);
 
 	const verifiedAt = new Date().toISOString();

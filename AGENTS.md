@@ -1139,9 +1139,9 @@ value turning its own error message into a terminal-repaint on the operator who 
 
 **A CLI command uses an argument or refuses it — it never ignores one.** `usertrust verify <path>`
 verifies THAT path (the project root, as the cwd is), names the real directory it read
-(`Vault: <abs>`, `data.vaultPath`), and refuses a path it cannot use instead of falling back to the
-cwd. Commands that take no path (`inspect`, `health`, `pricing`, `init`, `export`) refuse a stray
-positional through `refuseStrayPositional` (`cli/target.ts`), called per command in `main.ts`; a
+(`Vault: <abs>`, `data.vaultPath`, the REAL path of the `.usertrust` read, symlinks resolved), and refuses a path it cannot use instead of falling back to the
+cwd. A single-dash token is an error (exit 2), never "probably a flag": there are no short flags, and `verify -vault` once ignored it and verified the cwd. Commands that take no path (`inspect`, `health`, `pricing`, `init`, `export`) refuse a stray
+positional — or any dash token that is not a global flag or the command's own flag — through `refuseStrayPositional` (`cli/target.ts`), called per command in `main.ts`; a
 new such command needs the same line. Exit codes: a path that cannot be used is 1 (as "No trust vault
 found" always was), an argument of the wrong shape is 2. `tests/cli/verify-target.test.ts` drives the
 real entry point from a cwd that is itself a valid vault.
