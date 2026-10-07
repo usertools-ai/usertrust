@@ -25,6 +25,7 @@ import {
 	rename,
 	stat,
 	unlink,
+	utimes,
 	writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -91,15 +92,67 @@ export function usageMode() {
 }
 
 /**
+ * Server- or operator-provided text goes through here before it reaches a
+ * permission-decision reason, the debug log or the user's terminal: C0/DEL/C1
+ * control characters become spaces (callers clip afterwards).
+ */
+export function sanitizeReason(value, fallback = "unspecified") {
+	const text = typeof value === "string" && value !== "" ? value : fallback;
+	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control chars is the point
+	return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+}
+
+/** The longest line `say` or `announce` writes; anything longer is clipped, after sanitizing. */
+export const MAX_NOTE_CHARS = 2000;
+
+/**
+ * Control characters out FIRST (`sanitizeReason`: C0, DEL and C1 become spaces),
+ * clipped AFTER: the order AGENTS.md requires of untrusted text bound for a
+ * terminal.
+ */
+function sanitizeThenClip(text, max) {
+	return sanitizeReason(String(text), "").slice(0, max);
+}
+
+/**
+ * The ONE way a hook writes to stderr — Claude Code's debug log, and the terminal
+ * of whoever reads it. Everything a note carries is untrusted: server answers,
+ * transcript ids, operator paths, error messages that quote them. So the line is
+ * control-character sanitized first and clipped after (`sanitizeThenClip`), then
+ * written with its newline.
+ * tests/terminal-sinks.test.ts fails on any other stderr write in hooks/*.mjs.
+ */
+export function say(text, max = MAX_NOTE_CHARS) {
+	process.stderr.write(`${sanitizeThenClip(text, max)}\n`);
+}
+
+/**
+ * The ONE way a hook speaks to the user: hook JSON output whose `systemMessage`
+ * (shown in the user's terminal) is sanitized, then clipped, as `say`'s lines are.
+ * JSON escaping alone would leave DEL and C1 (U+007F-U+009F) raw.
+ */
+export function announce(text, max = MAX_NOTE_CHARS) {
+	process.stdout.write(JSON.stringify({ systemMessage: sanitizeThenClip(text, max) }));
+}
+
+/**
+ * The model an authorize names when no transcript says one: every estimate hold,
+ * and a transcript hold before its first model is known.
+ */
+export function defaultModel() {
+	return process.env.UT_CC_MODEL ?? "claude-sonnet-4-6";
+}
+
+/**
  * Whether the plugin may block a tool call. It never grants one, in either mode
- * (see `proceed` in pre-tool-use.mjs). `watch` (the default) NEVER blocks: an
- * over-budget or policy denial (402/403) is written down as a `would_block`
- * record, and a call that could not be metered (the server is unreachable, times
- * out, or answers something unusable) as a `gap` record — missed metering is
- * visible, never silent. `UT_CC_MODE=enforce` opts in to blocking: denials are
- * enforced, and a failed authorization blocks the call unless `UT_FAIL_OPEN=1`.
- * Any other value runs watch-only, and the session-start announcement names the
- * value it ignored.
+ * (see `proceed` in pre-tool-use.mjs). `watch` (the default) NEVER blocks: a
+ * budget, policy or anomaly refusal (402/403/429) is written down as a
+ * `would_block` record, and a call that could not be metered (the server is
+ * unreachable, times out, or answers something unusable) as a `gap` record —
+ * missed metering is visible, never silent. `UT_CC_MODE=enforce` opts in to
+ * blocking: denials are enforced, and a failed authorization blocks the call
+ * unless `UT_FAIL_OPEN=1`. Any other value runs watch-only, and the
+ * session-start announcement names the value it ignored.
  */
 export function guardMode() {
 	return (process.env.UT_CC_MODE ?? "").trim().toLowerCase() === "enforce" ? "enforce" : "watch";
@@ -121,17 +174,22 @@ export function watchLogPath() {
  * surprise: a watch-only plugin must not look like it is enforcing.
  */
 export function modeAnnouncement() {
+	// The path (the operator's UT_CC_STATE_DIR / CLAUDE_CONFIG_DIR) is raw on
+	// purpose: it reaches the user only through `announce`, which sanitizes all of
+	// the message, then clips it. An unrecognised UT_CC_MODE value is clipped HERE,
+	// so it is sanitized here first.
+	const records = watchLogPath();
 	if (guardMode() === "enforce") {
 		return process.env.UT_FAIL_OPEN === "1"
-			? `usertrust: ENFORCING — over-budget tool calls are blocked. While the server is unreachable, calls proceed unmetered (UT_FAIL_OPEN=1), each recorded as a gap in ${watchLogPath()}.`
+			? `usertrust: ENFORCING — over-budget tool calls are blocked. While the server is unreachable, calls proceed unmetered (UT_FAIL_OPEN=1), each recorded as a gap in ${records}.`
 			: "usertrust: ENFORCING — over-budget tool calls are blocked, and so is every tool call while the usertrust server is unreachable (UT_FAIL_OPEN=1 lets those through).";
 	}
 	const ignored = unrecognizedMode();
 	const note =
 		ignored === undefined
 			? "Set UT_CC_MODE=enforce to block over-budget calls."
-			: `UT_CC_MODE=${JSON.stringify(ignored.slice(0, 40))} is not a mode: use UT_CC_MODE=enforce to block over-budget calls.`;
-	return `usertrust: watch-only — nothing is blocked. Calls that would have been blocked, and calls that could not be metered, are recorded in ${watchLogPath()}. ${note}`;
+			: `UT_CC_MODE=${JSON.stringify(sanitizeThenClip(ignored, 40))} is not a mode: use UT_CC_MODE=enforce to block over-budget calls.`;
+	return `usertrust: watch-only — nothing is blocked. Calls that would have been blocked, and calls that could not be metered, are recorded in ${records}. ${note}`;
 }
 
 /**
@@ -145,21 +203,51 @@ export async function recordWatchEvent(event) {
 		await mkdir(stateRoot(), { recursive: true });
 		await appendFile(watchLogPath(), `${line}\n`, { mode: 0o600 });
 	} catch (err) {
-		process.stderr.write(
-			`usertrust: could not write a watch record to ${watchLogPath()} (${err instanceof Error ? err.message : String(err)}): ${line}\n`,
+		say(
+			`usertrust: could not write a watch record to ${watchLogPath()} (${err instanceof Error ? err.message : String(err)}): ${line}`,
 		);
 	}
 }
 
-// Every hook gets a wall-clock budget well inside hooks.json's 15 s timeout, so
-// a slow server makes a hook give up cleanly instead of being killed mid-write.
+// Every hook gets a wall-clock budget inside the time Claude Code gives it, so a
+// slow server makes a hook give up cleanly instead of being killed mid-write.
 // Module evaluation is the hook's start: each hook is its own node process.
 const HOOK_STARTED_AT = Date.now();
+/** Every hook's budget but SessionEnd's: well inside hooks.json's 15 s timeout. */
 export const HOOK_BUDGET_MS = 10_000;
+let hookBudgetMs = HOOK_BUDGET_MS;
+
+const SESSION_END_DEFAULT_MS = 1_500;
+/** What node takes to start the hook before its budget starts, and to exit. */
+const SESSION_END_MARGIN_MS = 300;
+
+/**
+ * SessionEnd's budget. Claude Code gives SessionEnd hooks far less time than any
+ * other: "SessionEnd hooks have a default timeout of 1.5 seconds", "Timeouts set
+ * on plugin-provided hooks don't raise the budget", and
+ * `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`, in milliseconds, overrides it
+ * (https://code.claude.com/docs/en/hooks#sessionend). Less the start-up margin,
+ * and never more than any other hook's budget.
+ */
+export function sessionEndBudgetMs(env = process.env) {
+	const raw = env.CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS ?? "";
+	const configured = /^[0-9]{1,9}$/.test(raw) ? Number(raw) : SESSION_END_DEFAULT_MS;
+	return Math.max(0, Math.min(configured, HOOK_BUDGET_MS) - SESSION_END_MARGIN_MS);
+}
+
+/** This hook's budget, counted from its start (SessionEnd: `sessionEndBudgetMs`). */
+export function useHookBudget(ms) {
+	hookBudgetMs = ms;
+}
+
+/** A share of this hook's budget: the time limits of its steps scale with it. */
+export function budgetShare(fraction) {
+	return Math.floor(hookBudgetMs * fraction);
+}
 
 /** Milliseconds left in this hook's budget (negative once it is spent). */
 export function timeLeft() {
-	return HOOK_STARTED_AT + HOOK_BUDGET_MS - Date.now();
+	return HOOK_STARTED_AT + hookBudgetMs - Date.now();
 }
 
 export function sanitize(part) {
@@ -178,15 +266,19 @@ export function stateFilePath(sessionId, agentId, entryKey) {
  * Record a pending hold as its own file (atomic: tmp + rename). The entry key
  * is the toolUseId when present, else the transferId. The agent id is stored in
  * the file body so a whole-session sweep can recover which agent owns the hold.
+ * Every hold is marked `gate: 1` (`isGated`) in this same atomic write, never
+ * later.
  */
-export async function recordPending(sessionId, agentId, entry) {
+export async function recordPending(sessionId, agentId, entry, { settling = false } = {}) {
 	const entryKey = entry.toolUseId ?? entry.transferId;
-	const path = stateFilePath(sessionId, agentId, entryKey);
+	const live = stateFilePath(sessionId, agentId, entryKey);
+	const path = settling ? settlingPath(live) : live;
 	await mkdir(stateDir(), { recursive: true });
 	const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
 	await writeFile(
 		tmp,
 		JSON.stringify({
+			gate: 1,
 			toolUseId: entry.toolUseId ?? null,
 			transferId: entry.transferId,
 			agentId: String(agentId ?? "main"),
@@ -198,11 +290,84 @@ export async function recordPending(sessionId, agentId, entry) {
 				: {}),
 			// A transcript-mode hold also records what it will settle: the model it
 			// was authorized at, the transcript message ids assigned to it, and their
-			// summed counts. An estimate-mode hold keeps the original shape exactly.
+			// summed counts.
 			...(entry.usage === "transcript" ? transcriptHoldFields(entry) : {}),
 		}),
 	);
 	await rename(tmp, path);
+	return path;
+}
+
+/**
+ * Whether a hold was recorded under the settle-attempt gate: its file carries
+ * `gate: 1`. Such a hold's settle is claimed (`.json` → `.settling`) before it is
+ * sent, so it is settled at most once. A hold an earlier release recorded has no
+ * mark. That release kept a hold whose settle posted and lost its answer as a
+ * pending `.json`, so the hold may have been charged already. Any other value,
+ * including a later format's, is treated the same way. Such a hold is never
+ * paired with a call by a host that sends no tool_use_id (`takePendingEntry`) and
+ * never re-authorized after a 404 (post-tool-use.mjs `settleEstimateHold`): Stop
+ * only gives it back.
+ */
+export function isGated(entry) {
+	return entry?.gate === 1;
+}
+
+/** A pending hold's settle-attempted path: `<hold>.settling` beside `<hold>.json`. */
+function settlingPath(livePath) {
+	return `${livePath.slice(0, -".json".length)}.settling`;
+}
+
+/**
+ * Mark an estimate hold settle-attempted BEFORE its one settle: touch it, then
+ * rename its `.json` to `.settling` atomically — the gate a transcript hold's
+ * settle already passes (transcript.mjs `settleTranscriptHold`). `listPending`
+ * lists `.json` only, so no later hook can pick the hold again: not even a
+ * PostToolUse whose host sent no tool_use_id, which takes the OLDEST hold. Stop
+ * only gives a `.settling` estimate hold back (`cleanup`); nothing settles it
+ * again. Returns the `.settling` path, or null when another hook took it first.
+ */
+export async function claimForSettle(sessionId, agentId, entryKey) {
+	const live = stateFilePath(sessionId, agentId, entryKey);
+	const now = new Date();
+	await utimes(live, now, now).catch(() => {});
+	try {
+		await rename(live, settlingPath(live));
+	} catch (err) {
+		if (err?.code === "ENOENT") return null;
+		throw err;
+	}
+	return settlingPath(live);
+}
+
+/**
+ * The estimate holds of a session (or of one agent) whose one settle was
+ * attempted and never answered: `.settling` files without transcript usage. A
+ * transcript hold's `.settling` belongs to the transcript journal instead.
+ */
+async function settlingEstimates(sessionId, agentId) {
+	const prefix = `${sanitize(sessionId)}__`;
+	const wantAgent = agentId == null ? null : sanitize(agentId);
+	let names;
+	try {
+		names = await readdir(stateDir());
+	} catch {
+		return [];
+	}
+	const held = [];
+	for (const name of names) {
+		if (!name.startsWith(prefix) || !name.endsWith(".settling")) continue;
+		const path = join(stateDir(), name);
+		try {
+			const body = JSON.parse(await readFile(path, "utf-8"));
+			if (body?.usage === "transcript" || typeof body?.transferId !== "string") continue;
+			if (wantAgent !== null && sanitize(body.agentId ?? "main") !== wantAgent) continue;
+			held.push({ path, transferId: body.transferId });
+		} catch {
+			// Corrupt or concurrently removed — skip.
+		}
+	}
+	return held;
 }
 
 const COUNT_FIELDS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
@@ -262,6 +427,8 @@ export async function listPending(sessionId, agentId) {
 				...(typeof parsed.estimatedInputTokens === "number"
 					? { estimatedInputTokens: parsed.estimatedInputTokens }
 					: {}),
+				// The mark as written, whatever its value: `isGated` judges it.
+				...(Object.hasOwn(parsed, "gate") ? { gate: parsed.gate } : {}),
 				...(parsed.usage === "transcript" ? transcriptHoldFields(parsed) : {}),
 				mtimeMs,
 			});
@@ -277,16 +444,19 @@ export async function listPending(sessionId, agentId) {
  * Find the pending hold for a tool call within one agent's holds. A non-empty
  * toolUseId matches that row or returns null — it must NOT fall through to
  * another tool's reservation (AUD-005). The oldest-entry fallback is only for
- * hosts that omit tool_use_id (missing/null/empty). Does NOT delete — the
- * caller clears the file only after a successful settle (clearPending), so a
- * failed settle leaves the hold for Stop cleanup.
+ * hosts that omit tool_use_id (missing/null/empty), and it takes the oldest hold
+ * recorded under the settle-attempt gate (`isGated`). An unmarked hold, an
+ * earlier release's, may have been charged already, so it is never paired with a
+ * call: Stop gives it back. Does NOT delete — the caller clears the file only
+ * after a successful settle (clearPending), so a failed settle leaves the hold
+ * for Stop cleanup.
  */
 export async function takePendingEntry(sessionId, agentId, toolUseId) {
 	const entries = await listPending(sessionId, agentId);
 	if (typeof toolUseId === "string" && toolUseId !== "") {
 		return entries.find((entry) => entry.toolUseId === toolUseId) ?? null;
 	}
-	return entries[0] ?? null;
+	return entries.find(isGated) ?? null;
 }
 
 /** Delete one pending-hold file. Idempotent — a missing file is fine. */
@@ -350,10 +520,10 @@ let capabilitiesRead;
 export function serverCapabilities() {
 	capabilitiesRead ??= (async () => {
 		const base = process.env.UT_SERVER_URL ?? "http://127.0.0.1:4519";
-		const timeoutMs = Math.min(2_000, timeLeft());
+		const timeoutMs = Math.min(2_000, budgetShare(0.2), timeLeft());
 		const unknown = (why) => {
-			process.stderr.write(
-				`usertrust: the server's capabilities are unknown (${why}) — this hook sends no idempotency key or principal\n`,
+			say(
+				`usertrust: the server's capabilities are unknown (${why}) — this hook sends no idempotency key or principal`,
 			);
 			return null;
 		};
@@ -419,14 +589,16 @@ export async function releaseHold(transferId, reason, { timeoutMs = 5000 } = {})
  * regardless: the session (or subagent) is over, so a hold that could not be
  * released is voided server-side by the pending-TTL sweep, and keeping the file
  * would only leak state-dir entries. A hold the hook budget no longer covers is
- * left for the next Stop and the TTL sweep.
+ * left for the next Stop and the TTL sweep. An estimate hold left settle-attempted
+ * (`.settling`: its one settle went unanswered) is given back the same way and
+ * then forgotten — never settled again.
  */
 export async function cleanup(sessionId, agentId) {
 	for (const entry of await listPending(sessionId, agentId)) {
 		if ((entry.assignedIds?.length ?? 0) > 0) continue;
 		const timeoutMs = Math.min(5000, timeLeft());
 		if (timeoutMs < 100) {
-			process.stderr.write(`usertrust: out of time; hold ${entry.transferId} left for Stop/TTL\n`);
+			say(`usertrust: out of time; hold ${entry.transferId} left for Stop/TTL`);
 			return;
 		}
 		try {
@@ -434,15 +606,40 @@ export async function cleanup(sessionId, agentId) {
 				timeoutMs,
 			});
 			if (response.status !== 200) {
-				process.stderr.write(
-					`usertrust: ${response.route} ${entry.transferId} returned ${response.status}\n`,
-				);
+				say(`usertrust: ${response.route} ${entry.transferId} returned ${response.status}`);
 			}
 		} catch (err) {
-			process.stderr.write(
-				`usertrust: failed to give back ${entry.transferId}: ${err instanceof Error ? err.message : String(err)}\n`,
+			say(
+				`usertrust: failed to give back ${entry.transferId}: ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
 		await clearPending(sessionId, entry.agentId, entry.entryKey);
+	}
+	for (const held of await settlingEstimates(sessionId, agentId)) {
+		// An estimate hold whose one settle went unanswered: it may have posted, so
+		// it is NEVER settled again — only given back (a 404 here means it posted or
+		// expired), then forgotten.
+		const timeoutMs = Math.min(5000, timeLeft());
+		if (timeoutMs < 100) {
+			say(`usertrust: out of time; hold ${held.transferId} left for Stop/TTL`);
+			return;
+		}
+		try {
+			const response = await releaseHold(
+				held.transferId,
+				"session ended after an unanswered settle",
+				{
+					timeoutMs,
+				},
+			);
+			if (response.status !== 200 && response.status !== 404) {
+				say(`usertrust: ${response.route} ${held.transferId} returned ${response.status}`);
+			}
+		} catch (err) {
+			say(
+				`usertrust: failed to give back ${held.transferId}: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+		await unlink(held.path).catch(() => {});
 	}
 }

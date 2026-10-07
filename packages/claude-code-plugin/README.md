@@ -5,17 +5,17 @@ authorization against a [usertrust-server](../server) you host, and the session'
 REAL token usage — per model, per subagent — is settled from Claude Code's own
 transcripts. PreToolUse reserves a hold that covers the usage recorded since the
 last one plus the upcoming tool, PostToolUse settles that hold at the real counts,
-and Stop/SubagentStop — and SessionEnd, once the transcript is final — post
+and Stop/SubagentStop — and SessionEnd, when the session ends — post
 whatever no hold carried and terminate anything left hanging. Nothing is routed
 through usertrust: it only reads what Claude Code already recorded.
 
 **Watch-only by default.** Installed, the plugin never blocks a tool call. A call
-the server refuses (over budget, or denied by policy) is written down as one that
-would have been blocked, and a call that could not be metered (the server is
-unreachable, say) as a gap. Set `UT_CC_MODE=enforce` to block — see
-[Modes](#modes-watch-only-by-default). **In no mode does it approve a call:** it
-can only deny, so Claude Code's own permission settings decide every call it lets
-through, exactly as they would without it.
+the server refuses (over budget, denied by policy, or cut off as an anomaly) is
+written down as one that would have been blocked, and a call that could not be
+metered (the server is unreachable, say) as a gap. Set `UT_CC_MODE=enforce` to
+block — see [Modes](#modes-watch-only-by-default). **In no mode does it approve a
+call:** it can only deny, so Claude Code's own permission settings decide every
+call it lets through, exactly as they would without it.
 
 ## Install
 
@@ -90,11 +90,23 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   Stop the turn's final response may not be in it yet — and after the last turn
   no later hook would ever post it. So Stop and SubagentStop first wait, at most
   about 2 seconds, until the transcript holds the response their input names
-  (`last_assistant_message`), and SessionEnd — whose transcript Claude Code
-  finalizes — scans once more. Every post goes through the same claims, so what
-  Stop posted is never posted again. A response that reaches the transcript only
-  after that wait, in a session that never fires SessionEnd (a crash, a kill), is
-  not posted.
+  (`last_assistant_message`), and say so on stderr when they give up; SessionEnd
+  then scans once more. Every post goes through the same claims, so what Stop
+  posted is never posted again. A response that reaches the transcript only after
+  that wait is not posted in a session that never fires SessionEnd (a crash, a
+  kill), or whose SessionEnd runs out of its budget first (below).
+- **SessionEnd has 1.5 seconds.** Claude Code gives SessionEnd hooks a 1.5 s
+  budget by default, and a plugin's own hook `timeout` does not raise it
+  ([hooks reference](https://code.claude.com/docs/en/hooks#sessionend)). The
+  plugin sizes SessionEnd's work to that budget — its calls, its claims, and its
+  wait for a Stop still holding an agent's lock (a fifth of the budget) — and
+  gives up cleanly instead of being killed mid-write. Against a slow server it may
+  post nothing, and a final answer that Stop could not find then goes unposted:
+  an under-count, never a double charge. `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`
+  (milliseconds) raises the budget, and the plugin uses up to 10 s of it. The
+  `timeout` in hooks.json does not raise the budget: it bounds the hook once the
+  variable has (before Claude Code v2.1.268, a hook without its own timeout kept
+  1.5 s even then).
 - **Empty holds are given back.** A hold no usage was assigned to (a parallel tool
   call in the same response, say) is RELEASED at PostToolUse: no charge, and not a
   failure. A server without `/v1/release` gets the old settle at zero usage, which
@@ -220,9 +232,10 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   file per response. A message whose claim cannot be made is not posted, and a
   stderr note says so.
 - **Hook time budget.** Each hook gives up after about 10 seconds (the hooks'
-  timeout is 15): its calls never run past that, claiming new responses stops
-  early enough to leave them time, and Stop keeps time back to give back holds;
-  whatever a hook could not reach is posted at the next settle point.
+  timeout is 15), SessionEnd after its own budget (above): its calls never run
+  past that, claiming new responses stops early enough to leave them time, and
+  Stop keeps time back to give back holds; whatever a hook could not reach is
+  posted at the next settle point.
 - **Bounded reads.** A transcript is read 1 MiB at a time, and one hook reads at
   most about 64 MiB of it — a long unread tail is read on by the next hooks. A
   line over 16 MiB is skipped unread, with a note (an entry with usage never comes
@@ -258,7 +271,7 @@ both modes.
 | The server's answer at PreToolUse | watch (the default) | enforce (`UT_CC_MODE=enforce`) |
 | --- | --- | --- |
 | A reservation (200) | No decision: your permission settings apply | No decision |
-| Over budget or denied by policy (402/403) | No decision, and a `would_block` record | `deny`: the call is blocked |
+| Refused: over budget (402), denied by policy (403), an anomaly cutoff (429) | No decision, and a `would_block` record | `deny`: the call is blocked |
 | No usable answer: unreachable, a timeout, any other status, a malformed body | No decision, and a `gap` record | Blocked (exit 2). With `UT_FAIL_OPEN=1`: no decision, and a `gap` record |
 | A shadow answer from an `evaluate_only` server | No decision | No decision |
 
@@ -280,8 +293,9 @@ server still refuses to authorize, so that usage is not on the ledger (the
 remainder posted at Stop is refused too — see *Denied usage* above), and the
 `would_block` records are where it shows.
 
-**Enforce** blocks, as earlier releases did by default. A budget (402) or policy
-(403) denial blocks the call, whatever `UT_FAIL_OPEN` says. If the server cannot
+**Enforce** blocks, as earlier releases did by default. A budget (402), policy
+(403) or anomaly (429) refusal blocks the call, whatever `UT_FAIL_OPEN` says: it is
+a decision, not an outage. If the server cannot
 answer usably, the hook exits 2 and the call is **blocked** — unless
 `UT_FAIL_OPEN=1`: then the call proceeds (no decision, and a "proceeding
 ungoverned" reason in the debug log), and the miss is written down as a `gap`
@@ -292,10 +306,29 @@ Leave it unset when the budget must be enforced. Upgrading from a release where
 blocking was the default: set `UT_CC_MODE=enforce` to keep it.
 
 In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran;
-an estimate hold whose settle fails is left on disk for Stop cleanup, and the
-server's pending-TTL sweep voids anything orphaned. If the server runs in
-`evaluate_only` mode, denials come back as shadow responses: nothing is reserved
-or settled for them, and the would_deny reason goes to the debug log.
+an estimate hold is marked settle-attempted (`.settling`) before its one settle,
+and one whose settle goes unanswered is given back at Stop — never settled again —
+and the server's pending-TTL sweep voids anything orphaned. A call can wait at Claude
+Code's permission prompt for longer than the server keeps a hold (five minutes).
+A transcript hold whose settle then answers 404 gives its window back to a later
+settle point. An estimate hold is charged once, on a fresh hold of its own — but
+only on a clean 404 `unknown transferId` to its one settle. The plugin settles
+each transferId at most once, so that 404 means the hold is gone unposted. A
+timeout, no answer, a 5xx or `settled: false` may have posted, and is never
+re-authorized. Neither is a 404 to a hold an earlier release recorded (its file
+has no `gate` mark): that release kept a hold whose settle went unanswered, so
+the hold may have been charged already. Such a hold is only given back at Stop,
+and a host that sends no tool_use_id never pairs a call with it. A call denied
+at the prompt never reaches PostToolUse: its hold is given back at Stop (or by
+the TTL sweep), uncharged. If the server runs in `evaluate_only` mode, denials
+come back as shadow responses: nothing is reserved or settled for them, and the
+would_deny reason goes to the debug log.
+
+**Nothing a hook writes can drive your terminal.** Every line the plugin writes to
+stderr (Claude Code's debug log) and the session-start message go through one
+writer that replaces control characters (C0, DEL, C1) before it clips. That
+covers server answers, transcript ids, your paths and error text alike, and a
+test fails on any hook that writes around it.
 
 **The mode is announced.** At every session start, including a resume, `/clear`
 and a compaction, the plugin shows you which mode it runs in as a hook
@@ -317,7 +350,8 @@ trimmed:
 {"at":"2026-10-06T10:00:05.000Z","kind":"gap","mode":"watch","session":"<session id>","agent":"main","tool":"Bash","reason":"fetch failed"}
 ```
 
-`agent` is the subagent's id (`main` for the parent); a `gap` written in enforce
+`agent` is the subagent's id (`main` for the parent), and a `would_block`'s
+`status` is the refusal's: 402, 403 or 429. A `gap` written in enforce
 mode (only with `UT_FAIL_OPEN=1`) says `"mode":"enforce"`. In transcript mode a gap
 loses no usage by itself: the responses the hold would have carried stay in the
 transcript to be posted at a later settle point. In estimate mode

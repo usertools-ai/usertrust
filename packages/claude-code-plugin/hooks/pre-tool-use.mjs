@@ -6,10 +6,10 @@
 // prompt, a power a budget tool was never given.
 //
 // Watch-only by default (`guardMode` in lib.mjs): this hook NEVER blocks a tool
-// call. A 402/403 denial is written down as a `would_block` record; a call that
-// could not be metered (the server is unreachable, or answers with something
-// unusable) is written down as a `gap` record. With UT_CC_MODE=enforce it
-// blocks: a denial is enforced (`deny`), and a failed authorization fails closed
+// call. A 402/403/429 refusal is written down as a `would_block` record; a call
+// that could not be metered (the server is unreachable, or answers with
+// something unusable) is written down as a `gap` record. With UT_CC_MODE=enforce
+// it blocks: a denial is enforced (`deny`), and a failed authorization fails closed
 // (exit 2) unless UT_FAIL_OPEN=1, which lets the call through and records the
 // gap. Output contract adapted from the AGT Claude Code plugin's stdin-JSON
 // permissionDecision convention (MIT — see repository NOTICE).
@@ -42,6 +42,7 @@
 // `already_settled`) means an earlier settle of exactly this window landed: it
 // is accounted, and the tool is held alone.
 import {
+	defaultModel,
 	estimateTokens,
 	guardMode,
 	isAlreadySettled,
@@ -51,6 +52,8 @@ import {
 	recordPending,
 	recordWatchEvent,
 	releaseHold,
+	sanitizeReason,
+	say,
 	serverCapabilities,
 	serverRequest,
 	timeLeft,
@@ -59,13 +62,6 @@ import { estimatePrincipalFor, holdEstimate, prepareWindow, safeName } from "./t
 
 const MAX_REASON_CHARS = 500;
 
-/** Server-provided text goes through here: strip control chars, bound length. */
-function sanitizeReason(value, fallback = "unspecified") {
-	const text = typeof value === "string" && value !== "" ? value : fallback;
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control chars is the point
-	return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
-}
-
 /** Block the call: the one permission decision this hook ever makes. */
 function deny(reason) {
 	process.stdout.write(
@@ -73,7 +69,7 @@ function deny(reason) {
 			hookSpecificOutput: {
 				hookEventName: "PreToolUse",
 				permissionDecision: "deny",
-				permissionDecisionReason: reason.slice(0, MAX_REASON_CHARS),
+				permissionDecisionReason: sanitizeReason(reason).slice(0, MAX_REASON_CHARS),
 			},
 		}),
 	);
@@ -90,7 +86,7 @@ const mode = guardMode();
  * reason went too.
  */
 function proceed(reason) {
-	process.stderr.write(`${reason.slice(0, MAX_REASON_CHARS)}\n`);
+	say(reason, MAX_REASON_CHARS);
 }
 
 // Known before anything can fail, so a gap record can always say whose call it was.
@@ -115,13 +111,13 @@ try {
 		input,
 	});
 	if (prepared.becameSticky) {
-		process.stderr.write(
-			`usertrust: ${prepared.reason}; this agent now settles at the ESTIMATE for the rest of the session\n`,
+		say(
+			`usertrust: ${prepared.reason}; this agent now settles at the ESTIMATE for the rest of the session`,
 		);
 	}
 	if (prepared.mode === "unavailable") {
-		process.stderr.write(
-			`usertrust: transcript usage unavailable for now (${prepared.reason}); this tool's hold is given back, not settled at the estimate — the usage stays in the transcript for a later settle point\n`,
+		say(
+			`usertrust: transcript usage unavailable for now (${prepared.reason}); this tool's hold is given back, not settled at the estimate — the usage stays in the transcript for a later settle point`,
 		);
 	}
 	try {
@@ -141,7 +137,7 @@ try {
 				? prepared.principal
 				: estimatePrincipalFor(sessionId, agentId, input.agent_type);
 		let window = transcriptMode ? prepared.window : null;
-		const fallbackModel = prepared.lastModel ?? process.env.UT_CC_MODEL ?? "claude-sonnet-4-6";
+		const fallbackModel = prepared.lastModel ?? defaultModel();
 		// Never past the hook's own budget: a hook killed mid-call leaves the tool
 		// ungoverned and this agent's lock held.
 		const callTimeout = () => Math.min(5_000, timeLeft() - 500);
@@ -219,15 +215,20 @@ try {
 				await releaseHold(json.transferId, "pending hold could not be recorded", {
 					timeoutMs: Math.max(250, callTimeout()),
 				}).catch((giveBack) => {
-					process.stderr.write(
-						`usertrust: hold ${json.transferId} could not be given back (${giveBack instanceof Error ? giveBack.message : String(giveBack)}); the server's TTL sweep releases it\n`,
+					say(
+						`usertrust: hold ${json.transferId} could not be given back (${giveBack instanceof Error ? giveBack.message : String(giveBack)}); the server's TTL sweep releases it`,
 					);
 				});
 				throw err;
 			}
 			await prepared.commit?.(json.transferId);
+			// Server text, raw here: `proceed` writes it only through `say`, which
+			// sanitizes it.
 			proceed(`usertrust: reserved ${json.transferId} (${json.estimatedCost} ut)`);
-		} else if (response.status === 402 || response.status === 403) {
+		} else if (response.status === 402 || response.status === 403 || response.status === 429) {
+			// A refusal — budget (402), policy (403) or an anomaly cutoff (429) — is a
+			// governance decision, not an outage: enforce denies it whatever UT_FAIL_OPEN
+			// says, and watch records what it would have blocked.
 			await prepared.abandon?.();
 			const error = sanitizeReason(json?.error, "denied");
 			const reason = sanitizeReason(json?.reason);
@@ -276,9 +277,7 @@ try {
 				: `usertrust unavailable — proceeding ungoverned (UT_FAIL_OPEN=1): ${why}`,
 		);
 	} else {
-		process.stderr.write(
-			`usertrust governance blocked this tool call because authorization failed closed: ${why}\n`,
-		);
+		say(`usertrust governance blocked this tool call because authorization failed closed: ${why}`);
 		process.exit(2);
 	}
 }

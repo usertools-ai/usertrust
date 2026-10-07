@@ -82,6 +82,14 @@ beforeEach(async () => {
 	requests = [];
 });
 afterEach(() => {
+	// The invariant a settle's 404 rests on: no transferId is ever settled twice.
+	const settled = requests
+		.filter((r) => r.path === "/v1/settle")
+		.map((r) => String((r.body as { transferId?: unknown }).transferId));
+	expect(
+		settled.filter((id, i) => settled.indexOf(id) !== i),
+		"a transferId was settled twice",
+	).toEqual([]);
 	server?.close();
 	server = undefined;
 });
@@ -158,8 +166,8 @@ describe("post-tool-use hook", () => {
 		);
 		expect(result.code).toBe(0);
 		expect(result.stderr).toContain("settle");
-		// The hold survives for Stop/SubagentStop cleanup (A10).
-		expect(await readdir(stateDir)).toEqual(["s1__main__tu_1.json"]);
+		// The hold survives for Stop/SubagentStop cleanup (A10), marked settle-attempted.
+		expect(await readdir(stateDir)).toEqual(["s1__main__tu_1.settling"]);
 	});
 
 	it("keeps the pending file on a non-200 settle response", async () => {
@@ -173,7 +181,9 @@ describe("post-tool-use hook", () => {
 		expect(result.code).toBe(0);
 		expect(result.stderr).toContain("settle");
 		expect(result.stderr).toContain("500");
-		expect(await readdir(stateDir)).toEqual(["s1__main__tu_1.json"]);
+		// Kept for Stop cleanup, marked settle-attempted: it may have posted, so no
+		// later hook settles it again (Stop only gives it back).
+		expect(await readdir(stateDir)).toEqual(["s1__main__tu_1.settling"]);
 	});
 
 	it("post-tool-use from agent A settles A's hold and never a sibling's (pre→post scoping)", async () => {

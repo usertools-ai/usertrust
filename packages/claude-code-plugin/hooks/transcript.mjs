@@ -121,6 +121,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import {
+	budgetShare,
 	cleanup,
 	clearPending,
 	isAlreadySettled,
@@ -128,6 +129,7 @@ import {
 	listPending,
 	releaseHold,
 	sanitize,
+	say,
 	serverCapabilities,
 	serverRequest,
 	stateFilePath,
@@ -174,8 +176,6 @@ const MAX_READ_BYTES = 64 << 20;
 const MAX_LINE_BYTES = 16 << 20;
 /** Only a line with this in it can carry usage. */
 const USAGE_FIELD = Buffer.from('"usage"');
-const CALL_TIMEOUT_MS = 3_000;
-const MIN_CALL_MS = 250;
 /** How long a hook that names no transcript waits for its agent's lock to record that. */
 const NO_PATH_LOCK_WAIT_MS = 500;
 /**
@@ -185,19 +185,33 @@ const NO_PATH_LOCK_WAIT_MS = 500;
  */
 const FLUSH_WAIT_MS = 2_000;
 const FLUSH_TAIL_BYTES = 256 << 10;
-/** How long SessionEnd waits for an agent's lock that a finishing Stop still holds. */
-export const SESSION_END_LOCK_WAIT_MS = 3_000;
-/** Stop/SubagentStop keep this much of the budget for giving back holds without usage. */
-export const CLEANUP_RESERVE_MS = 3_000;
+/*
+ * The time limits of a hook's steps are shares of its budget (lib.mjs
+ * `budgetShare`), so SessionEnd's short one still holds every step. At the 10 s
+ * budget of every other hook: a transcript request takes at most 3 s, none starts
+ * with less than 250 ms, 3 s are kept for giving back holds, and no claim is made
+ * with less than 6 s left.
+ */
+const callTimeoutCap = () => budgetShare(0.3);
+const minCall = () => budgetShare(0.025);
+/** Stop, SubagentStop and SessionEnd keep this much for giving back holds without usage. */
+export const cleanupReserve = () => budgetShare(0.3);
 /** Claiming new message ids stops while less than this is left of the hook's budget. */
-const CLAIM_FLOOR_MS = 6_000;
+const claimFloor = () => budgetShare(0.6);
+/** How long SessionEnd waits for an agent's lock that a finishing Stop still holds. */
+export const sessionEndLockWait = () => budgetShare(0.2);
 
 const AUTHORIZING = "authorizing";
 const REMAINDER = "remainder";
 const AGENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const COUNT_KEYS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
-/** One field of a usertrust `principal`: the server refuses anything else. */
-const PRINCIPAL_FIELD = /^[A-Za-z0-9._:-]{1,128}$/;
+/**
+ * One field of a usertrust `principal`: the server refuses anything else. It must
+ * equal core's PRINCIPAL_FIELD_PATTERN — a tightening there would turn every
+ * attributed authorize into a 400 (a BLOCK in enforce mode); tests/principal-pattern
+ * pins the two together.
+ */
+export const PRINCIPAL_FIELD = /^[A-Za-z0-9._:-]{1,128}$/;
 /** What a settle vehicle's key is: the transcript messages it carries, and nothing else. */
 const VEHICLE_KEY = /^cc:[0-9a-f]{48}$/;
 /** Where the cross-agent message claims live, inside the private state dir (see `selectOwn`). */
@@ -234,15 +248,31 @@ function sleep(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Per-call timeout for a transcript request: at most 3 s, and never past the budget. */
+/** Per-call timeout for a transcript request: at most its cap, and never past the budget. */
 function callTimeout(reserveMs = 0) {
-	return Math.min(CALL_TIMEOUT_MS, timeLeft() - reserveMs);
+	return Math.min(callTimeoutCap(), timeLeft() - reserveMs);
 }
 
 function sumCounts(messages) {
 	const sum = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
 	for (const m of messages) for (const key of COUNT_KEYS) sum[key] += m[key];
 	return sum;
+}
+
+/**
+ * Messages by model, each model's in their order, the models in first-seen order:
+ * one authorize→settle per model. Appended in place — linear in the backlog, which
+ * after a long outage can be tens of thousands of messages, every one of them
+ * waiting on this before any settle.
+ */
+export function groupByModel(messages) {
+	const groups = new Map();
+	for (const m of messages) {
+		const group = groups.get(m.model);
+		if (group === undefined) groups.set(m.model, [m]);
+		else group.push(m);
+	}
+	return groups;
 }
 
 function describeCounts(c) {
@@ -300,8 +330,8 @@ function principalAttribution() {
 					: value.length > 128
 						? `it is ${value.length} characters long`
 						: "it has a character outside that set";
-			process.stderr.write(
-				`usertrust: ${variable} is not sent — a principal ${key} must be 1-128 characters of [A-Za-z0-9._:-], and ${why}\n`,
+			say(
+				`usertrust: ${variable} is not sent — a principal ${key} must be 1-128 characters of [A-Za-z0-9._:-], and ${why}`,
 			);
 		}
 	}
@@ -786,7 +816,10 @@ async function reconcile(cursor, sessionId, agentId) {
 			else accountIds(cursor, record.ids);
 			finished.push(record.path);
 		} else if (record.kind === "settling" && now - record.mtimeMs > STALE_SETTLING_MS) {
-			// Its hook died mid-settle: the outcome is unknown.
+			// Its hook died mid-settle: the outcome is unknown. An ESTIMATE hold's
+			// .settling lands here too, with no ids: fresh, it adds nothing to `live`;
+			// stale, its hold is long past the server's five-minute TTL, so clearing the
+			// file is all there is left to do.
 			holdUnresolved(cursor, record);
 			finished.push(record.path);
 		} else {
@@ -996,7 +1029,7 @@ async function selectOwn(opened) {
 			continue;
 		}
 		// Each claim is file I/O: never let them eat the time the calls need.
-		if (timeLeft() < CLAIM_FLOOR_MS) {
+		if (timeLeft() < claimFloor()) {
 			deferred += 1;
 			continue;
 		}
@@ -1017,18 +1050,18 @@ async function selectOwn(opened) {
 	if (failed.size > 0) {
 		const total = [...failed.values()].reduce((sum, n) => sum + n, 0);
 		const codes = [...failed.keys()].join(", ");
-		process.stderr.write(
-			`usertrust: ${total} transcript message(s) could not be claimed (${codes}) — NOT posted; tried again at the next settle point\n`,
+		say(
+			`usertrust: ${total} transcript message(s) could not be claimed (${codes}) — NOT posted; tried again at the next settle point`,
 		);
 	}
 	if (deferred > 0) {
-		process.stderr.write(
-			`usertrust: ${deferred} transcript message(s) not claimed this time (out of time) — posted at a later settle point\n`,
+		say(
+			`usertrust: ${deferred} transcript message(s) not claimed this time (out of time) — posted at a later settle point`,
 		);
 	}
 	if (writtenOff > 0) {
-		process.stderr.write(
-			`usertrust: ${writtenOff} transcript message(s) were claimed by this agent before its cursor was removed or reset, or by a hook that died before saving — not posted again (any of them not yet posted is written off)\n`,
+		say(
+			`usertrust: ${writtenOff} transcript message(s) were claimed by this agent before its cursor was removed or reset, or by a hook that died before saving — not posted again (any of them not yet posted is written off)`,
 		);
 	}
 	return own;
@@ -1356,13 +1389,11 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			return sticky;
 		}
 		if (ingested.badLines > 0) {
-			process.stderr.write(
-				`usertrust: skipped ${ingested.badLines} unparseable transcript line(s)\n`,
-			);
+			say(`usertrust: skipped ${ingested.badLines} unparseable transcript line(s)`);
 		}
 		if (ingested.longLines > 0) {
-			process.stderr.write(
-				`usertrust: skipped ${ingested.longLines} transcript line(s) over ${MAX_LINE_BYTES >> 20} MiB, unread\n`,
+			say(
+				`usertrust: skipped ${ingested.longLines} transcript line(s) over ${MAX_LINE_BYTES >> 20} MiB, unread`,
 			);
 		}
 		return {
@@ -1452,7 +1483,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 		await opened.save();
 	} catch (err) {
 		await opened.release();
-		process.stderr.write(`usertrust: transcript window skipped — ${errText(err)}\n`);
+		say(`usertrust: transcript window skipped — ${errText(err)}`);
 		return empty(cursor.lastModel, agentType);
 	}
 	let decided = false;
@@ -1472,7 +1503,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 			// If this write fails the pending file still names the ids, and the
 			// journal keeps them out of every other window until the hold ends.
 			await opened.save().catch((err) => {
-				process.stderr.write(`usertrust: cursor not updated — ${errText(err)}\n`);
+				say(`usertrust: cursor not updated — ${errText(err)}`);
 			});
 		},
 		async settledElsewhere() {
@@ -1484,7 +1515,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 			decided = true;
 			accountIds(cursor, window.ids);
 			await opened.save().catch((err) => {
-				process.stderr.write(`usertrust: cursor not updated — ${errText(err)}\n`);
+				say(`usertrust: cursor not updated — ${errText(err)}`);
 			});
 		},
 		async abandon() {
@@ -1493,7 +1524,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 			decided = true;
 			releaseIds(cursor, window.ids);
 			await opened.save().catch((err) => {
-				process.stderr.write(`usertrust: cursor not updated — ${errText(err)}\n`);
+				say(`usertrust: cursor not updated — ${errText(err)}`);
 			});
 		},
 		release: opened.release,
@@ -1503,7 +1534,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 /** Give a hold back after a settle that failed: the server re-queues such a hold. */
 async function hygieneRelease(transferId, why) {
 	const timeoutMs = callTimeout();
-	if (timeoutMs < MIN_CALL_MS) return;
+	if (timeoutMs < minCall()) return;
 	try {
 		await releaseHold(transferId, why, { timeoutMs });
 	} catch {
@@ -1601,7 +1632,7 @@ async function returnEmptyHold(transferId) {
  * time, hold untouched.
  */
 export async function settleTranscriptHold(sessionId, entry) {
-	if (callTimeout() < MIN_CALL_MS) return { outcome: "deferred", reason: "out of time" };
+	if (callTimeout() < minCall()) return { outcome: "deferred", reason: "out of time" };
 	const ids = entry.assignedIds ?? [];
 	if (ids.length === 0) {
 		const result = await returnEmptyHold(entry.transferId);
@@ -1650,8 +1681,8 @@ export async function settleTranscriptHold(sessionId, entry) {
 	} catch (err) {
 		// The .settling file stays: once stale, its settle reads as unknown — retried
 		// under its key, or (unkeyed) its ids stay claimed.
-		process.stderr.write(
-			`usertrust: hold ${entry.transferId} ${result.outcome}, but the outcome could not be journalled (${err?.code ?? errText(err)}); a later settle point treats it as unknown\n`,
+		say(
+			`usertrust: hold ${entry.transferId} ${result.outcome}, but the outcome could not be journalled (${err?.code ?? errText(err)}); a later settle point treats it as unknown`,
 		);
 	}
 	await reconcileAgent(sessionId, entry.agentId);
@@ -1670,23 +1701,24 @@ export async function settleAssignedHolds(sessionId, agentId) {
 		if ((entry.assignedIds?.length ?? 0) === 0) continue;
 		const result = await settleTranscriptHold(sessionId, entry);
 		if (result.outcome !== "settled") {
-			process.stderr.write(
-				`usertrust: leftover hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}\n`,
+			say(
+				`usertrust: leftover hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}`,
 			);
 		}
 	}
 }
 
 /**
- * Stop and SubagentStop fire as a turn ends, and Claude Code writes the
- * transcript asynchronously: the turn's final response may not be in it yet — after
- * the LAST turn, nothing would ever post it. Their input's `last_assistant_message`
- * is "The final assistant message text that Claude just produced" (hooks
- * reference, "Stop input" / "SubagentStop input"), the field to use "rather than
- * reading the transcript", since the transcript "may lag". So, given that text,
- * wait — at most FLUSH_WAIT_MS, and never into the time the hook keeps back — until
- * the transcript's last complete assistant entry carries it; then go on either
- * way. SessionEnd, whose transcript "is finalized at session end", scans again.
+ * Stop and SubagentStop fire as a turn ends, and the turn's final response may
+ * not be in the transcript yet — after the LAST turn, nothing would ever post it.
+ * The hooks reference (https://code.claude.com/docs/en/hooks) says: "The
+ * transcript file is written asynchronously and may lag the in-memory
+ * conversation", and, of Stop's `last_assistant_message`, "use this field rather
+ * than reading `transcript_path`: the transcript file isn't guaranteed to include
+ * the final message at Stop time on all versions". So, given that text, wait — at
+ * most FLUSH_WAIT_MS, and never into the time the hook keeps back — until the
+ * transcript's last complete assistant entry carries it; then go on either way:
+ * "not flushed" leaves the response for SessionEnd or a later Stop.
  */
 export async function awaitFinalResponse(transcriptPath, lastMessage, waitMs = FLUSH_WAIT_MS) {
 	const want = typeof lastMessage === "string" ? lastMessage.trim() : "";
@@ -1694,7 +1726,7 @@ export async function awaitFinalResponse(transcriptPath, lastMessage, waitMs = F
 		return "nothing to wait for";
 	}
 	// Never so long that the remainder could not claim what it then reads.
-	const until = Date.now() + Math.min(waitMs, timeLeft() - CLAIM_FLOOR_MS - 1_000);
+	const until = Date.now() + Math.min(waitMs, timeLeft() - claimFloor() - budgetShare(0.1));
 	for (;;) {
 		const text = await lastCompleteText(transcriptPath);
 		if (text !== null && text !== "" && (text === want || want.endsWith(text))) return "flushed";
@@ -1767,30 +1799,26 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
 					agentId,
 					input,
 					hook,
-					reserveMs: CLEANUP_RESERVE_MS,
+					reserveMs: cleanupReserve(),
 					lockWaitMs,
 				});
 				if (result.skipped !== undefined) {
-					process.stderr.write(
-						`usertrust: no transcript usage for ${agentId} — ${result.skipped}\n`,
-					);
+					say(`usertrust: no transcript usage for ${agentId} — ${result.skipped}`);
 				}
 				for (const note of result.notes ?? []) {
-					process.stderr.write(`usertrust: transcript usage for ${agentId}: ${note}\n`);
+					say(`usertrust: transcript usage for ${agentId}: ${note}`);
 				}
 				if (result.serverDown) {
 					const rest = agents.slice(index + 1);
 					if (rest.length > 0) {
-						process.stderr.write(
-							`usertrust: server unreachable — transcript usage of ${rest.join(", ")} left for the next settle point\n`,
+						say(
+							`usertrust: server unreachable — transcript usage of ${rest.join(", ")} left for the next settle point`,
 						);
 					}
 					break;
 				}
 			} catch (err) {
-				process.stderr.write(
-					`usertrust: transcript usage failed for ${agentId}: ${errText(err)}\n`,
-				);
+				say(`usertrust: transcript usage failed for ${agentId}: ${errText(err)}`);
 			}
 		}
 	}
@@ -1820,7 +1848,7 @@ export async function postRemainder({
 	if (opened.kind === "busy") return { skipped: "a concurrent hook holds this agent's lock" };
 	const { cursor } = opened;
 	const summary = { posted: 0, notes: [], serverDown: false };
-	const callBudget = () => Math.min(CALL_TIMEOUT_MS, Math.floor((timeLeft() - reserveMs) / 3));
+	const callBudget = () => Math.min(callTimeoutCap(), Math.floor((timeLeft() - reserveMs) / 3));
 	try {
 		const fresh = await selectOwn(opened);
 		await opened.save();
@@ -1844,7 +1872,7 @@ export async function postRemainder({
 		}
 		for (const [key, vehicle] of keyed ? [...cursor.unresolved] : []) {
 			const timeoutMs = callBudget();
-			if (timeoutMs < MIN_CALL_MS) {
+			if (timeoutMs < minCall()) {
 				summary.notes.push("unresolved settles: deferred to the next settle point (out of time)");
 				return summary;
 			}
@@ -1878,11 +1906,9 @@ export async function postRemainder({
 			}
 		}
 
-		const groups = new Map();
-		for (const m of fresh) groups.set(m.model, [...(groups.get(m.model) ?? []), m]);
-		for (const [model, messages] of groups) {
+		for (const [model, messages] of groupByModel(fresh)) {
 			const timeoutMs = callBudget();
-			if (timeoutMs < MIN_CALL_MS) {
+			if (timeoutMs < minCall()) {
 				summary.notes.push(`${model}: deferred to the next settle point (out of time)`);
 				break;
 			}
@@ -1937,8 +1963,8 @@ function vehicleCounts(vehicle) {
 }
 
 function reportDenied(agentType, agentId, reason, ids, model, counts) {
-	process.stderr.write(
-		`usertrust: ${agentType}:${agentId} usage NOT recorded — ${reason}; ${ids.length} ${model} message(s) (${describeCounts(counts)} tokens) are marked denied and never retried\n`,
+	say(
+		`usertrust: ${agentType}:${agentId} usage NOT recorded — ${reason}; ${ids.length} ${model} message(s) (${describeCounts(counts)} tokens) are marked denied and never retried`,
 	);
 }
 

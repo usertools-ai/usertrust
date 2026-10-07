@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile, stat } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -85,6 +85,15 @@ async function watchRecords(): Promise<Array<Record<string, unknown>>> {
 
 const UNREACHABLE = "http://127.0.0.1:9";
 
+/** C0 (ESC, BEL), DEL and C1 (CSI) — anything a terminal could act on. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: detecting control chars is the point
+const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/;
+const HOSTILE = "\u001b[2J\u001b]0;pwned\u0007\u007f\u009b";
+/** HOSTILE once its control characters are spaces. */
+const HOSTILE_SANITIZED = " [2J ]0;pwned   ";
+/** lib.mjs `MAX_NOTE_CHARS`: the longest line `say` or `announce` writes. */
+const MAX_NOTE_CHARS = 2000;
+
 describe("the mode: watch-only unless UT_CC_MODE=enforce", () => {
 	// Driven through the hooks themselves (each is its own node process reading the
 	// environment), the way Claude Code runs them.
@@ -111,8 +120,8 @@ describe("the mode: watch-only unless UT_CC_MODE=enforce", () => {
 });
 
 describe("watch (the default) never blocks a tool call, and never approves one", () => {
-	for (const status of [402, 403]) {
-		it(`a ${status} denial makes no decision, never exit 2, and is recorded as would_block`, async () => {
+	for (const status of [402, 403, 429]) {
+		it(`a ${status} refusal makes no decision, never exit 2, and is recorded as would_block`, async () => {
 			const port = await startFake(status, { error: "budget_exceeded", reason: "need 10, have 2" });
 			const result = await runHook(PRE, PAYLOAD, {
 				...baseEnv,
@@ -158,6 +167,22 @@ describe("watch (the default) never blocks a tool call, and never approves one",
 		expect((await stat(join(stateDir, "watch.jsonl"))).mode & 0o777).toBe(0o600);
 	});
 
+	it("a watch record that cannot be written is reported without control characters: path, error and line", async () => {
+		// The state root is a FILE, so no record can be written. Its name, and the
+		// session id inside the record line (where JSON leaves DEL and C1 raw), carry
+		// ESC, DEL and C1.
+		const blocked = join(stateDir, `state${HOSTILE}`);
+		await writeFile(blocked, "not a directory");
+		const result = await runHook(
+			PRE,
+			{ ...PAYLOAD, session_id: `sess${HOSTILE}` },
+			{ ...baseEnv, UT_CC_STATE_DIR: blocked, UT_SERVER_URL: UNREACHABLE },
+		);
+		expectNoDecision(result);
+		expect(result.stderr).toContain("could not write a watch record");
+		expect(result.stderr).not.toMatch(CONTROL);
+	});
+
 	it("an unusable answer (a 200 without a transferId) makes no decision and is recorded as a gap", async () => {
 		const port = await startFake(200, { estimatedCost: 3 });
 		const result = await runHook(PRE, PAYLOAD, {
@@ -182,6 +207,20 @@ describe("watch (the default) never blocks a tool call, and never approves one",
 			"sess1__main__tu_1.json",
 		]);
 		expect(await watchRecords()).toEqual([]);
+	});
+
+	it("a reservation's transferId and estimatedCost reach the debug log without control characters", async () => {
+		const port = await startFake(200, {
+			transferId: `tx_1${HOSTILE}`,
+			estimatedCost: `3${HOSTILE}`,
+		});
+		const result = await runHook(PRE, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expectNoDecision(result);
+		expect(result.stderr).toContain("usertrust: reserved tx_1");
+		expect(result.stderr).not.toMatch(CONTROL);
 	});
 
 	it("a shadow answer (an evaluate_only server) makes no decision either", async () => {
@@ -215,6 +254,22 @@ describe("UT_CC_MODE=enforce still blocks", () => {
 			UT_SERVER_URL: `http://127.0.0.1:${port}`,
 		});
 		expect(decision(result.stdout).permissionDecision).toBe("deny");
+		expect(await watchRecords()).toEqual([]);
+	});
+
+	it("a 429 anomaly cutoff is denied like a 402/403 — even with UT_FAIL_OPEN=1, which is for outages", async () => {
+		for (const failOpen of ["", "1"]) {
+			const port = await startFake(429, { error: "anomaly", reason: "spend velocity" });
+			const result = await runHook(PRE, PAYLOAD, {
+				...baseEnv,
+				UT_CC_MODE: "enforce",
+				...(failOpen === "" ? {} : { UT_FAIL_OPEN: failOpen }),
+				UT_SERVER_URL: `http://127.0.0.1:${port}`,
+			});
+			expect(decision(result.stdout).permissionDecision, failOpen).toBe("deny");
+			expect(decision(result.stdout).permissionDecisionReason).toContain("anomaly");
+			server?.close();
+		}
 		expect(await watchRecords()).toEqual([]);
 	});
 
@@ -302,6 +357,34 @@ describe("the mode is announced to the user at session start", () => {
 		expect(message).toContain(join(stateDir, "watch.jsonl"));
 		expect(message).toContain("UT_CC_MODE=enforce");
 		expect(message).not.toContain("ENFORCING");
+	});
+
+	it("control characters in the state path never reach the terminal, in either message that names it", async () => {
+		const hostileDir = join(stateDir, `state${HOSTILE}dir`);
+		for (const env of [{}, { UT_CC_MODE: "enforce", UT_FAIL_OPEN: "1" }]) {
+			const message = await announce({ ...env, UT_CC_STATE_DIR: hostileDir });
+			expect(message).toContain("watch.jsonl");
+			expect(message).toContain(`${stateDir}/state`);
+			expect(message, JSON.stringify(env)).not.toMatch(CONTROL);
+		}
+	});
+
+	it("an unrecognised UT_CC_MODE carrying ESC, DEL and C1 is named without them: each is a space, and 40 characters of that are shown", async () => {
+		const message = await announce({ UT_CC_MODE: `enforcing${HOSTILE}${"x".repeat(60)}` });
+		const shown = `enforcing${HOSTILE_SANITIZED}${"x".repeat(15)}`;
+		expect(shown).toHaveLength(40);
+		expect(message).toContain(`UT_CC_MODE=${JSON.stringify(shown)} is not a mode`);
+		expect(message).not.toMatch(CONTROL);
+	});
+
+	it("an announcement past the bound is clipped to it, with no control character in what is left", async () => {
+		// 200 path segments, each carrying ESC, BEL, DEL and C1: far past the bound.
+		const hostileDir = join(stateDir, ...Array.from({ length: 200 }, (_, i) => `d${i}${HOSTILE}`));
+		expect(hostileDir.length).toBeGreaterThan(MAX_NOTE_CHARS);
+		const message = await announce({ UT_CC_STATE_DIR: hostileDir });
+		expect(message.startsWith("usertrust: watch-only — nothing is blocked")).toBe(true);
+		expect(message).toHaveLength(MAX_NOTE_CHARS);
+		expect(message).not.toMatch(CONTROL);
 	});
 
 	it("an unrecognised UT_CC_MODE is named, so a typo never looks like enforcement", async () => {

@@ -318,6 +318,16 @@ beforeEach(async () => {
 	capabilities = [];
 });
 afterEach(async () => {
+	// The invariant a settle's 404 rests on (post-tool-use.mjs `settleEstimateHold`):
+	// across every path these tests drive — estimate, transcript window, remainder,
+	// retries, faults — the plugin never sends a second settle for any transferId.
+	const settled = requests
+		.filter((r) => r.path === "/v1/settle")
+		.map((r) => String(r.body.transferId));
+	expect(
+		settled.filter((id, i) => settled.indexOf(id) !== i),
+		"a transferId was settled twice",
+	).toEqual([]);
 	fake?.closeAllConnections();
 	fake?.close();
 	fake = undefined;
@@ -339,6 +349,16 @@ const postInput = (toolUseId: string, extra: Record<string, unknown> = {}) => ({
 	tool_response: "eight ch",
 	...extra,
 });
+
+/** C0 (ESC, BEL), DEL and C1 (CSI) — anything a terminal could act on. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: detecting control chars is the point
+const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/;
+const HOSTILE = "\u001b[2J\u001b]0;pwned\u0007\u007f\u009b";
+
+/** Every hold-state file left: pending (`.json`) and settle-attempted (`.settling`). */
+async function holdStateFiles() {
+	return (await readdir(stateDir)).filter((n) => n.endsWith(".json") || n.endsWith(".settling"));
+}
 
 /** JSON.stringify({command:"ls"}) is 16 chars → 4 estimated tokens; the output hold is 4096. */
 const TOOL_INPUT_ESTIMATE = 4;
@@ -766,6 +786,32 @@ describe("estimate mode and the cursor", () => {
 			expect(a.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
 		}
 		expect(pre.stderr).toContain("no transcript path; this agent now settles at the ESTIMATE");
+	});
+
+	it("a sticky agent whose lock another hook HOLDS still settles at the estimate, and posts no transcript usage", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
+		// Sticky by a hook that named no transcript: only the marker records it, no cursor.
+		const { transcript_path: _path, ...noPath } = preInput("tu_1");
+		await run("pre-tool-use.mjs", noPath);
+		const { transcript_path: _post, ...noPathPost } = postInput("tu_1");
+		await run("post-tool-use.mjs", noPathPost);
+		// Another hook holds the agent's lock for the whole next tool call: the marker
+		// is read before the lock is tried, so the busy lock changes nothing.
+		const lock = `${cursorPath()}.lock`;
+		await mkdir(lock);
+		await writeFile(join(lock, "owner"), "another-hook");
+		await run("pre-tool-use.mjs", preInput("tu_2"));
+		await run("post-tool-use.mjs", postInput("tu_2"));
+		await rm(lock, { recursive: true, force: true });
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => [s.body.usageSource, s.body.inputTokens])).toEqual([
+			["estimated", TOOL_INPUT_ESTIMATE],
+			["estimated", TOOL_INPUT_ESTIMATE],
+		]);
+		for (const a of authorizes()) {
+			expect(a.body.params).toEqual({ hook: "PreToolUse", tool_name: "Bash" });
+		}
 	});
 
 	it.each([
@@ -1346,30 +1392,42 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 		hook_event_name: "SessionEnd",
 		reason: "prompt_input_exit",
 	});
+	// SessionEnd's budget is Claude Code's (lib.mjs `sessionEndBudgetMs`). These
+	// tests always set it, so a value in the runner's own environment cannot change
+	// them: unset (the 1.5 s default) unless a test gives it more.
+	const DEFAULT_BUDGET = { CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "" };
+	const end = (env: Record<string, string> = DEFAULT_BUDGET) =>
+		run("session-end.mjs", endInput(), env);
+	const STOP_GAVE_UP = "the turn's final response was not in the transcript by the end of the wait";
 
 	it("hooks.json registers SessionEnd, beside the five hooks before it", async () => {
 		const hooks = JSON.parse(await readFile(join(HOOKS, "hooks.json"), "utf-8")) as {
-			hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+			hooks: Record<string, Array<{ hooks: Array<{ command: string; timeout?: number }> }>>;
 		};
 		// SessionStart announces the mode (see mode.test.ts).
 		expect(Object.keys(hooks.hooks).sort()).toEqual(
 			["PostToolUse", "PreToolUse", "SessionEnd", "SessionStart", "Stop", "SubagentStop"].sort(),
 		);
-		expect(hooks.hooks.SessionEnd?.[0]?.hooks[0]?.command).toContain("hooks/session-end.mjs");
+		const sessionEnd = hooks.hooks.SessionEnd?.[0]?.hooks[0];
+		expect(sessionEnd?.command).toContain("hooks/session-end.mjs");
+		// Its own timeout does not raise Claude Code's SessionEnd budget. It bounds the
+		// hook once CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS has raised that, so it must
+		// not cut into the most the plugin uses of it (10 s).
+		expect(sessionEnd?.timeout).toBeGreaterThanOrEqual(10);
 	});
 
-	it("a final answer the transcript did not yet hold at Stop is posted at SessionEnd — once", async () => {
+	it("a final answer the transcript did not yet hold at Stop is posted at SessionEnd — once, within the default budget", async () => {
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
 		await run("stop.mjs", stopInput());
 		// The last turn's answer reaches the transcript only after Stop has run: no
 		// later turn will ever pick it up.
 		await appendMain(responseEntries("msg_final", SONNET, u(7, 7), {}, { text: "all done" }));
-		const end = await run("session-end.mjs", endInput());
-		expect(end.code).toBe(0);
+		const ended = await end();
+		expect(ended.code).toBe(0);
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
 		// Nothing is posted twice: not by another SessionEnd, nor by a Stop.
-		await run("session-end.mjs", endInput());
+		await end();
 		await run("stop.mjs", stopInput());
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
 	});
@@ -1381,14 +1439,16 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 		const stop = run("stop.mjs", { ...stopInput(), last_assistant_message: "all done" });
 		await new Promise((resolve) => setTimeout(resolve, 1_000));
 		await appendMain(responseEntries("msg_final", SONNET, u(7, 7), {}, { text: "all done" }));
-		expect((await stop).code).toBe(0);
+		const stopped = await stop;
+		expect(stopped.code).toBe(0);
+		expect(stopped.stderr).not.toContain(STOP_GAVE_UP);
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
 		// SessionEnd then finds nothing new: no second post.
-		await run("session-end.mjs", endInput());
+		await end();
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
 	});
 
-	it("the wait is bounded: a final response that never arrives costs Stop about 2 s, then it goes on", async () => {
+	it("the wait is bounded: a final response that never arrives costs Stop about 2 s, then it goes on — and says so", async () => {
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
 		const started = Date.now();
@@ -1397,6 +1457,7 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 		expect(stop.code).toBe(0);
 		expect(took).toBeGreaterThanOrEqual(1_900);
 		expect(took).toBeLessThan(8_000);
+		expect(stop.stderr).toContain(STOP_GAVE_UP);
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([3]);
 	});
 
@@ -1415,11 +1476,29 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 			join(projectDir, SESSION, "subagents", "agent-a1.jsonl"),
 			`${responseEntries("msg_s2", SONNET, u(5, 5), sub("a1"), { text: "plan ready" }).join("\n")}\n`,
 		);
-		expect((await stop).code).toBe(0);
+		const stopped = await stop;
+		expect(stopped.code).toBe(0);
+		expect(stopped.stderr).not.toContain("final response was not in");
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([2, 5]);
 	});
 
-	it("SessionEnd waits for a lock a finishing Stop still holds", async () => {
+	it("SubagentStop says so when the subagent's final response never arrives", async () => {
+		await startServer(okResponder);
+		await writeMain([]);
+		await writeSubagent("a1", "Plan", responseEntries("msg_s1", SONNET, u(2, 2), sub("a1")));
+		const stop = await run("subagent-stop.mjs", {
+			...stopInput(),
+			agent_id: "a1",
+			last_assistant_message: "never written",
+		});
+		expect(stop.code).toBe(0);
+		expect(stop.stderr).toContain(
+			"a1's final response was not in its transcript by the end of the wait",
+		);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([2]);
+	});
+
+	it("SessionEnd waits, within its budget, for a lock a finishing Stop still holds", async () => {
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
 		await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
@@ -1429,10 +1508,78 @@ describe("the final response, written after Stop — SessionEnd and a bounded wa
 		const released = new Promise((resolve) =>
 			setTimeout(() => void rm(lock, { recursive: true, force: true }).then(resolve), 800),
 		);
-		const end = await run("session-end.mjs", endInput());
+		// A budget raised to 10 s: a fifth of it outlasts the 800 ms hold.
+		const ended = await end({ CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "10000" });
 		await released;
-		expect(end.code).toBe(0);
+		expect(ended.code).toBe(0);
 		expect(settles().map((s) => s.body.inputTokens)).toEqual([3]);
+	});
+
+	it("…but only a fifth of its budget: under the default, a lock held longer is left to the next Stop", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
+		await mkdir(join(stateDir, "transcripts"), { recursive: true, mode: 0o700 });
+		const lock = `${cursorPath()}.lock`;
+		await mkdir(lock);
+		await writeFile(join(lock, "owner"), "a-finishing-stop");
+		const released = new Promise((resolve) =>
+			setTimeout(() => void rm(lock, { recursive: true, force: true }).then(resolve), 1_500),
+		);
+		const started = Date.now();
+		const ended = await end();
+		const took = Date.now() - started;
+		expect(ended.code).toBe(0);
+		// Not the 3 s it used to wait: the budget is 1.5 s in all.
+		expect(took).toBeLessThan(2_500);
+		expect(ended.stderr).toContain("a concurrent hook holds this agent's lock");
+		expect(settles()).toEqual([]);
+		await released;
+		await run("stop.mjs", stopInput());
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3]);
+	});
+
+	it("SessionEnd keeps to its budget: against a server too slow for it, it gives up cleanly — and CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS gives it the time", async () => {
+		await startServer(okResponder);
+		await writeMain(responseEntries("msg_a", SONNET, u(3, 3)));
+		await run("stop.mjs", stopInput());
+		await appendMain(responseEntries("msg_final", SONNET, u(7, 7), {}, { text: "all done" }));
+		// Every authorize and settle now takes 500 ms: more than a call may take
+		// within 1.5 s, which holds a probe, an authorize, a settle and a reserve.
+		delayMs = 500;
+		const started = Date.now();
+		const tight = await end();
+		const took = Date.now() - started;
+		expect(tight.code).toBe(0);
+		expect(took).toBeLessThan(2_500);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3]);
+		// The same session, with the budget the variable gives: posted, once.
+		const roomy = await end({ CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "6000" });
+		expect(roomy.code).toBe(0);
+		expect(settles().map((s) => s.body.inputTokens)).toEqual([3, 7]);
+	});
+});
+
+describe("the remainder's grouping by model", () => {
+	it("is linear: a 50 000-message backlog is grouped in well under a hook's budget, in order", async () => {
+		// @ts-expect-error TS7016: the hooks are plain .mjs, without type declarations.
+		const { groupByModel } = await import("../hooks/transcript.mjs");
+		// A long outage's claimed-but-unposted backlog: one model, a few of another.
+		const backlog = Array.from({ length: 50_000 }, (_, i) => ({
+			id: `msg_${i}`,
+			model: i % 1_000 === 999 ? HAIKU : SONNET,
+		}));
+		const started = performance.now();
+		const groups = groupByModel(backlog) as Map<string, Array<{ id: string }>>;
+		const took = performance.now() - started;
+		// Appending in place takes milliseconds. Copying a model's array for every
+		// message, as the remainder once did, takes seconds at this size: every settle
+		// point would spend its budget here before posting anything.
+		expect(took).toBeLessThan(200);
+		expect([...groups.keys()]).toEqual([SONNET, HAIKU]);
+		expect(groups.get(SONNET)?.length).toBe(49_950);
+		expect(groups.get(SONNET)?.[1_000]?.id).toBe("msg_1001");
+		const haiku = groups.get(HAIKU)?.map((m) => m.id) ?? [];
+		expect(haiku.slice(0, 2)).toEqual(["msg_999", "msg_1999"]);
 	});
 });
 
@@ -1483,6 +1630,395 @@ describe("estimate holds", () => {
 		);
 	}
 
+	describe("a settle that cannot reach its hold: a clean 404 is charged once afresh; anything ambiguous never is", () => {
+		const env = { UT_CC_USAGE: "estimate" };
+		const notFound = { status: 404, json: { error: "not_found", reason: "unknown transferId" } };
+		/** A ledger: an authorize mints tx_N; `fault` answers the FIRST settle of tx_1, posted or not. */
+		function ledger(
+			fault: "expired" | "posted-then-lost" | "posted-then-500" | "unposted-500" | "settled-false",
+		) {
+			const charged: string[] = [];
+			const responder: Responder = (path, body) => {
+				if (path === "/v1/authorize") {
+					nextTransfer += 1;
+					return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+				}
+				const id = String(body.transferId);
+				if (path === "/v1/settle") {
+					if (id === "tx_1" && fault === "expired") return notFound;
+					if (id === "tx_1" && fault === "unposted-500")
+						return { status: 500, json: { error: "internal" } };
+					charged.push(id);
+					if (id === "tx_1" && fault === "posted-then-lost") return { status: 0, json: null };
+					if (id === "tx_1" && fault === "posted-then-500")
+						return { status: 500, json: { error: "internal" } };
+					if (id === "tx_1" && fault === "settled-false")
+						return { status: 200, json: { settled: false, transferId: id } };
+					return { status: 200, json: { settled: true, transferId: id } };
+				}
+				return { status: 200, json: { released: true, aborted: true } };
+			};
+			return { responder, charged };
+		}
+		const play = async () => {
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			const post = await run("post-tool-use.mjs", postInput("tu_1", { tool_name: "Bash" }), env);
+			await run("stop.mjs", stopInput(), env);
+			return post;
+		};
+
+		it("a 404 `unknown transferId` (the hold expired at a permission prompt) is charged exactly once, on a fresh hold", async () => {
+			const { responder, charged } = ledger("expired");
+			await startServer(responder);
+			const post = await play();
+			expect(requests.map((r) => [r.path, r.body.transferId ?? null, r.status])).toEqual([
+				["/v1/authorize", null, 200],
+				["/v1/settle", "tx_1", 404],
+				["/v1/authorize", null, 200],
+				["/v1/settle", "tx_2", 200],
+			]);
+			expect(authorizes()[1]?.body).toMatchObject({
+				model: SONNET,
+				estimatedInputTokens: TOOL_INPUT_ESTIMATE,
+				maxOutputTokens: TOOL_OUTPUT_HOLD,
+				params: { hook: "PostToolUse", tool_name: "Bash", replaces: "tx_1" },
+				actor: `claude-code:${SESSION}`,
+			});
+			expect(settles()[1]?.body).toEqual({
+				transferId: "tx_2",
+				inputTokens: 4,
+				outputTokens: 3,
+				usageSource: "estimated",
+			});
+			expect(charged).toEqual(["tx_2"]);
+			expect(post.stderr).toContain("charging this call once on tx_2");
+			expect(await holdFiles()).toEqual([]);
+		});
+
+		for (const [fault, what] of [
+			["posted-then-lost", "posted, its answer lost (no answer, a timeout)"],
+			["posted-then-500", "posted, then answered 500"],
+			["unposted-500", "not posted, answered 500"],
+			["settled-false", "answered settled: false"],
+		] as const) {
+			it(`a settle ${what} is never re-authorized and never settled again — charged at most once`, async () => {
+				const { responder, charged } = ledger(fault);
+				await startServer(responder);
+				await play();
+				expect(authorizes()).toHaveLength(1);
+				expect(settles().map((s) => s.body.transferId)).toEqual(["tx_1"]);
+				expect(charged.length).toBeLessThanOrEqual(1);
+				// Left settle-attempted (.settling) by PostToolUse, then given back at Stop —
+				// released, never settled — and forgotten: no hold file outlives the session.
+				const givenBack = requests.filter(
+					(r) =>
+						(r.path === "/v1/release" || r.path === "/v1/abort") && r.body.transferId === "tx_1",
+				);
+				expect(givenBack).toHaveLength(fault === "settled-false" ? 0 : 1);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+		}
+
+		it("its diagnostics never carry a control character from the server's transferIds", async () => {
+			let minted = 0;
+			const gone = new Set<string>();
+			await startServer((path, body) => {
+				if (path === "/v1/authorize") {
+					minted += 1;
+					return { status: 200, json: { transferId: `tx_${minted}${HOSTILE}`, estimatedCost: 1 } };
+				}
+				const id = String(body.transferId);
+				if (path === "/v1/settle" && id.startsWith("tx_1") && !gone.has(id)) {
+					gone.add(id);
+					return notFound;
+				}
+				return { status: 200, json: { settled: true, transferId: id } };
+			});
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			const pre = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			const post = await run("post-tool-use.mjs", postInput("tu_1", { tool_name: "Bash" }), env);
+			expect(post.stderr).toContain("charging this call once on tx_2");
+			expect(`${pre.stderr}${post.stderr}`).not.toMatch(CONTROL);
+		});
+
+		it("a host that sends no tool_use_id: a hold whose settle went unanswered is never taken again — each call charged once, at ITS OWN usage", async () => {
+			// Like the server: a settle posts a pending hold and forgets it; one it does
+			// not know is a 404. tx_1's settle posts, and its answer is lost.
+			const pending = new Set<string>();
+			const charged: Array<{ id: string; inputTokens: unknown; outputTokens: unknown }> = [];
+			await startServer((path, body) => {
+				if (path === "/v1/authorize") {
+					nextTransfer += 1;
+					pending.add(`tx_${nextTransfer}`);
+					return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+				}
+				const id = String(body.transferId);
+				if (!pending.delete(id)) return notFound;
+				if (path === "/v1/settle") {
+					charged.push({ id, inputTokens: body.inputTokens, outputTokens: body.outputTokens });
+					return id === "tx_1"
+						? { status: 0, json: null }
+						: { status: 200, json: { settled: true, transferId: id } };
+				}
+				return { status: 200, json: { released: true, aborted: true } };
+			});
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			const command = (k: number) => "x".repeat(40 * k);
+			const response = (k: number) => "y".repeat(100 * k);
+			const tokens = (text: string) => Math.max(1, Math.ceil(text.length / 4));
+			for (const k of [1, 2, 3]) {
+				await run(
+					"pre-tool-use.mjs",
+					{ ...stopInput(), tool_name: "Bash", tool_input: { command: command(k) } },
+					env,
+				);
+				await run(
+					"post-tool-use.mjs",
+					{ ...stopInput(), tool_name: "Bash", tool_response: response(k) },
+					env,
+				);
+			}
+			await run("stop.mjs", stopInput(), env);
+			expect(authorizes()).toHaveLength(3);
+			expect(charged).toEqual(
+				[1, 2, 3].map((k) => ({
+					id: `tx_${k}`,
+					inputTokens: tokens(JSON.stringify({ command: command(k) })),
+					outputTokens: tokens(JSON.stringify(response(k))),
+				})),
+			);
+			// tx_1 was given back at Stop (a 404: it posted), never settled again.
+			expect(requests.filter((r) => r.body.transferId === "tx_1").map((r) => r.path)).toEqual([
+				"/v1/settle",
+				expect.stringMatching(/^\/v1\/(release|abort)$/),
+			]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		/**
+		 * A hold file as an earlier release wrote it: no `gate` mark (or `mark`, when a
+		 * test gives one), an input estimate of 5 000, and older than any hold the test
+		 * records, so it heads the queue.
+		 */
+		async function seedLegacyHold(transferId: string, toolUseId: string | null, mark?: unknown) {
+			const path = join(stateDir, `${SESSION}__main__${toolUseId ?? transferId}.json`);
+			await writeFile(
+				path,
+				JSON.stringify({
+					...(mark === undefined ? {} : { gate: mark }),
+					toolUseId,
+					transferId,
+					agentId: "main",
+					estimatedInputTokens: 5000,
+				}),
+			);
+			const minuteAgo = new Date(Date.now() - 60_000);
+			await utimes(path, minuteAgo, minuteAgo);
+		}
+
+		for (const [mark, what] of [
+			[undefined, "no mark"],
+			[2, "gate: 2, a later format"],
+		] as const) {
+			for (const calls of [1, 2]) {
+				it(`after an upgrade, with no tool_use_id: an earlier release's POSTED hold (${what}) is never paired, settled again or re-authorized; ${calls} call(s), each charged once at its OWN estimate`, async () => {
+					// The earlier release settled tx_L. The settle POSTED and its answer was
+					// lost, so that release kept the .json. The server has forgotten tx_L, so
+					// any settle or release of it answers 404.
+					const pending = new Set<string>();
+					const charged: Array<{ id: string; inputTokens: unknown; outputTokens: unknown }> = [];
+					await startServer((path, body) => {
+						if (path === "/v1/authorize") {
+							nextTransfer += 1;
+							pending.add(`tx_${nextTransfer}`);
+							return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+						}
+						const id = String(body.transferId);
+						if (!pending.delete(id)) return notFound;
+						if (path === "/v1/settle") {
+							charged.push({ id, inputTokens: body.inputTokens, outputTokens: body.outputTokens });
+							return { status: 200, json: { settled: true, transferId: id } };
+						}
+						return { status: 200, json: { released: true, aborted: true } };
+					});
+					await seedLegacyHold("tx_L", null, mark);
+					await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+					const command = (k: number) => "x".repeat(40 * k);
+					const response = (k: number) => "y".repeat(100 * k);
+					const tokens = (text: string) => Math.max(1, Math.ceil(text.length / 4));
+					for (let k = 1; k <= calls; k += 1) {
+						await run(
+							"pre-tool-use.mjs",
+							{ ...stopInput(), tool_name: "Bash", tool_input: { command: command(k) } },
+							env,
+						);
+						await run(
+							"post-tool-use.mjs",
+							{ ...stopInput(), tool_name: "Bash", tool_response: response(k) },
+							env,
+						);
+					}
+					await run("stop.mjs", stopInput(), env);
+					// One charge per call, each at that call's own input and output estimates:
+					// the legacy 5 000 is never billed, and no input estimate is billed twice.
+					expect(charged).toEqual(
+						Array.from({ length: calls }, (_, i) => ({
+							id: `tx_${i + 1}`,
+							inputTokens: tokens(JSON.stringify({ command: command(i + 1) })),
+							outputTokens: tokens(JSON.stringify(response(i + 1))),
+						})),
+					);
+					expect(authorizes()).toHaveLength(calls);
+					// tx_L is never settled again, only given back at Stop (that 404 is fine).
+					expect(requests.filter((r) => r.body.transferId === "tx_L").map((r) => r.path)).toEqual([
+						expect.stringMatching(/^\/v1\/(release|abort)$/),
+					]);
+					expect(await holdStateFiles()).toEqual([]);
+				});
+			}
+		}
+
+		for (const [mark, what, reauthorized] of [
+			[1, "gate: 1, this release's mark", true],
+			[undefined, "no mark", false],
+			[2, "gate: 2, a later format", false],
+			["1", 'gate: "1", malformed', false],
+			[true, "gate: true, malformed", false],
+		] as const) {
+			it(`a matched hold (${what}) whose settle answers 404 is ${reauthorized ? "re-authorized once: the expired-hold recovery" : "never re-authorized, only given back at Stop"}`, async () => {
+				// A hold its own PreToolUse recorded, settled by its own PostToolUse: the
+				// 404 says the server no longer has it. Only this release's mark makes that
+				// 404 mean "expired, never posted".
+				const charged: string[] = [];
+				await startServer((path, body) => {
+					if (path === "/v1/authorize") {
+						nextTransfer += 1;
+						return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+					}
+					const id = String(body.transferId);
+					if (id === "tx_L") return notFound;
+					if (path === "/v1/settle") charged.push(id);
+					return { status: 200, json: { settled: true, released: true, transferId: id } };
+				});
+				await seedLegacyHold("tx_L", "tu_L", mark);
+				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+				const post = await run("post-tool-use.mjs", postInput("tu_L", { tool_name: "Bash" }), env);
+				await run("stop.mjs", stopInput(), env);
+				expect(authorizes()).toHaveLength(reauthorized ? 1 : 0);
+				expect(settles().map((s) => s.body.transferId)).toEqual(
+					reauthorized ? ["tx_L", "tx_1"] : ["tx_L"],
+				);
+				expect(charged).toEqual(reauthorized ? ["tx_1"] : []);
+				if (reauthorized) {
+					expect(post.stderr).toContain("charging this call once on tx_1");
+				} else {
+					expect(post.stderr).toContain("may have been charged already");
+					expect(requests.filter((r) => r.body.transferId === "tx_L").map((r) => r.path)).toEqual([
+						"/v1/settle",
+						expect.stringMatching(/^\/v1\/(release|abort)$/),
+					]);
+				}
+				expect(await holdStateFiles()).toEqual([]);
+			});
+		}
+
+		it("the fresh hold is settle-attempted from birth: a later FIFO pick never takes it, even when its settle went unanswered", async () => {
+			// No tool_use_id. Call 1's hold expired (404); its fresh hold tx_2 posts, and
+			// that answer is lost. Call 2's PostToolUse must take call 2's own hold.
+			const pending = new Set<string>();
+			const charged: string[] = [];
+			await startServer((path, body) => {
+				if (path === "/v1/authorize") {
+					nextTransfer += 1;
+					if (nextTransfer !== 1) pending.add(`tx_${nextTransfer}`);
+					return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+				}
+				const id = String(body.transferId);
+				if (!pending.delete(id)) return notFound;
+				if (path === "/v1/settle") {
+					charged.push(id);
+					return id === "tx_2"
+						? { status: 0, json: null }
+						: { status: 200, json: { settled: true, transferId: id } };
+				}
+				return { status: 200, json: { released: true, aborted: true } };
+			});
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			for (const k of [1, 2]) {
+				await run(
+					"pre-tool-use.mjs",
+					{ ...stopInput(), tool_name: "Bash", tool_input: { command: "ls" } },
+					env,
+				);
+				await run(
+					"post-tool-use.mjs",
+					{ ...stopInput(), tool_name: "Bash", tool_response: `r${k}` },
+					env,
+				);
+				if (k === 1) {
+					// The fresh hold carries the gate's mark from the write that created it.
+					const fresh = join(stateDir, `${SESSION}__main__tx_2.settling`);
+					expect(JSON.parse(await readFile(fresh, "utf-8"))).toMatchObject({
+						gate: 1,
+						transferId: "tx_2",
+					});
+				}
+			}
+			await run("stop.mjs", stopInput(), env);
+			// tx_1 expired; tx_2 (call 1's fresh hold) posted once; tx_3 is call 2's.
+			expect(charged).toEqual(["tx_2", "tx_3"]);
+			expect(authorizes()).toHaveLength(3);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("a settle that succeeds never re-authorizes", async () => {
+			await startServer(okResponder);
+			await play();
+			expect(requests.map((r) => r.path)).toEqual(["/v1/authorize", "/v1/settle"]);
+		});
+	});
+
+	describe("an estimate hold's .settling in the transcript journal (it carries no ids)", () => {
+		const marker = () => join(stateDir, `${SESSION}__main__tu_est.settling`);
+		const writeMarker = () =>
+			writeFile(
+				marker(),
+				JSON.stringify({
+					toolUseId: "tu_est",
+					transferId: "tx_est",
+					agentId: "main",
+					estimatedInputTokens: 4,
+				}),
+			);
+
+		it("fresh, it is never live for transcript ids, and the journal leaves it alone", async () => {
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
+			await writeMarker();
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(authorizes()[0]?.body.params).toMatchObject({
+				usageOrigin: "transcript",
+				messages: 1,
+			});
+			expect(await readdir(stateDir)).toContain(`${SESSION}__main__tu_est.settling`);
+		});
+
+		it("stale (past the server's hold TTL twice over), the journal clears it, and no id is affected", async () => {
+			await startServer(okResponder);
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 5)));
+			await writeMarker();
+			const old = new Date(Date.now() - 11 * 60_000);
+			await utimes(marker(), old, old);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(authorizes()[0]?.body.params).toMatchObject({
+				usageOrigin: "transcript",
+				messages: 1,
+			});
+			expect(await readdir(stateDir)).not.toContain(`${SESSION}__main__tu_est.settling`);
+		});
+	});
+
 	it("Stop posts the remainder, then aborts an estimate hold that is left", async () => {
 		await startServer(okResponder);
 		await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
@@ -1509,7 +2045,13 @@ describe("estimate holds", () => {
 		});
 		expect(
 			JSON.parse(await readFile(join(stateDir, `${SESSION}__main__tu_1.json`), "utf-8")),
-		).toEqual({ toolUseId: "tu_1", transferId: "tx_1", agentId: "main", estimatedInputTokens: 4 });
+		).toEqual({
+			gate: 1,
+			toolUseId: "tu_1",
+			transferId: "tx_1",
+			agentId: "main",
+			estimatedInputTokens: 4,
+		});
 		const post = await run("post-tool-use.mjs", postInput("tu_1"), env);
 		expect(post.stderr).toBe("");
 		await run("stop.mjs", stopInput(), env);
