@@ -66,6 +66,7 @@ import {
 	holdEstimate,
 	OUTCOME_NOTES,
 	prepareWindow,
+	reconcileAgent,
 	safeName,
 	settleTranscriptHold,
 } from "./transcript.mjs";
@@ -73,19 +74,18 @@ import {
 const MAX_REASON_CHARS = 500;
 
 /**
- * How long after its reservation a tool call fired again may REUSE its hold. The
- * hold may be gone after the server's pending TTL (`pendingTtlMs`, 300 s by
- * default) or the ledger's pending timeout (300 s in core). Neither reaches the
- * plugin: the authorize answer carries no expiry, and `/v1/health` names none. So
- * the bound is the plugin's own, a fifth of those defaults, counted from the
- * record's `reservedAt`: this machine's clock just BEFORE the authorize was sent,
- * so no later than the hold's own start. On the defaults, at least 240 s of the
- * TTL is left for the tool to run before PostToolUse settles. Reusing a hold that
- * may be gone would skip the budget check the resumed call needs: in enforce mode,
- * a call over budget would run, and then go uncharged when PostToolUse's
- * re-authorize is refused.
+ * The share of a hold's stated life within which a tool call fired again may REUSE
+ * it. A server that advertises `hold-expiry` answers each authorize with
+ * `expiresInMs`: the hold's remaining life, the shorter of its pending TTL and the
+ * ledger's own timeout. Counted from the record's `reservedAt` (this machine's clock
+ * just BEFORE the authorize was sent, so no later than the server's own start), the
+ * first fifth of it may reuse the hold. The other four-fifths are kept for the tool
+ * to run and PostToolUse to settle, so a reused hold has at least 80% of the life
+ * the server stated when it answered. Reusing a hold that may be gone would skip the
+ * budget check the resumed call needs: in enforce mode, a call over budget would run,
+ * and then go uncharged when PostToolUse's re-authorize is refused.
  */
-const REUSE_WITHIN_MS = 60_000;
+const REUSE_SHARE = 1 / 5;
 
 /** Block the call: the one permission decision this hook ever makes. */
 function deny(reason) {
@@ -131,17 +131,16 @@ try {
 	// already has its hold. A second authorize alone would reserve a second hold, and
 	// its record, keyed by the same tool_use_id, would overwrite the first's: the
 	// first hold stranded until the server's TTL and, in transcript mode, its window
-	// written off. So a hold young enough to be live is reused; an older one is ended
-	// first (`retire`), and the call then reserves afresh, its budget checked again.
-	// A hold whose settle is under way or unanswered (`.settling`) gets no second
-	// hold: the call could be charged twice.
+	// written off. So a hold within the first fifth of its stated life is reused; any
+	// other is ended first (`retire`), and the call then reserves afresh, its budget
+	// checked again. A hold whose settle is under way or unanswered (`.settling`) is
+	// never reused: the call is refused until that settle resolves (`unsettled`).
 	const held = await holdOfCall(sessionId, agentId, input.tool_use_id);
 	if (held === null) {
 		await reserve(input);
 	} else if (held.state === "settling") {
-		proceed(
-			`usertrust: this tool call's hold ${held.entry.transferId} is being settled; no second hold`,
-		);
+		if (await journalDecides(held.entry, input.tool_use_id)) await reserve(input);
+		else await unsettled(held.entry);
 	} else if (mayReuse(held.entry)) {
 		proceed(
 			`usertrust: this tool call already holds ${held.entry.transferId}; reusing it, no second hold`,
@@ -177,18 +176,63 @@ try {
 }
 
 /**
- * Whether a pending hold is young enough to reuse: reserved less than
- * `REUSE_WITHIN_MS` ago by this machine's clock. A record without that time
- * (written before the plugin recorded it) is not, and nor is one that reads as
- * reserved in the future: the clock was set back, so its age is unknown.
+ * Whether a pending hold may be reused: the server stated its life (`expiresInMs`),
+ * and it was reserved, by this machine's clock, within the first fifth of that life
+ * (`REUSE_SHARE`). A record without a stated life (from a server without
+ * `hold-expiry`, or written before the plugin kept it) is not, and nor is one
+ * without its reservation time, or with one in the future: the clock was set back,
+ * so its age is unknown.
  */
 function mayReuse(entry) {
+	if (typeof entry.expiresInMs !== "number") return false;
 	const age = Date.now() - (entry.reservedAt ?? Number.NaN);
-	return age >= 0 && age < REUSE_WITHIN_MS;
+	return age >= 0 && age < entry.expiresInMs * REUSE_SHARE;
 }
 
 /**
- * End a pending hold too old to reuse (`mayReuse`) before the call reserves
+ * Whether the journal has decided this call's `.settling` record, and removed it.
+ * Only a record that carries a transcript window can be decided: the journal reads
+ * one as abandoned once it is stale (transcript.mjs `STALE_SETTLING_MS`), parks it
+ * for a retry under its key or accounts its ids (at most once), and deletes its file.
+ * A fresh one may still be in flight, and a record without a window has nothing the
+ * journal could settle. True only once the file is GONE: a fresh hold's record would
+ * share its path.
+ */
+async function journalDecides(entry, toolUseId) {
+	if (entry.assignedIds.length === 0) return false;
+	await reconcileAgent(sessionId, agentId);
+	return (await holdOfCall(sessionId, agentId, toolUseId)) === null;
+}
+
+/**
+ * Refuse a tool call whose earlier hold has a settle that is not resolved: under way,
+ * or cut off unanswered. No fresh hold is made beside it: the two would share one
+ * record path, and that settle may already have charged the call. Enforce mode
+ * denies, UT_FAIL_OPEN or not: the server is not unreachable, the state is known. A
+ * later call (a new `tool_use_id`) reserves as usual. Watch mode lets the call
+ * through unmetered, and records the gap.
+ */
+async function unsettled(entry) {
+	const why = `this tool call's earlier hold ${entry.transferId} has a settle that is not resolved yet; it is refused until that settle resolves`;
+	if (mode === "enforce") {
+		deny(`usertrust: ${why}`);
+		return;
+	}
+	const recorded = await recordWatchEvent({
+		kind: "gap",
+		mode,
+		session: sessionId,
+		agent: agentId,
+		tool: toolName,
+		reason: why,
+	});
+	proceed(
+		`usertrust watch-only: this call is not metered (${why}) — ${recorded ? "recorded as a gap" : "and its gap record could not be written (see above)"}`,
+	);
+}
+
+/**
+ * End a pending hold that may not be reused (`mayReuse`) before the call reserves
  * afresh. The hold may be gone, or still live. It is ended once, by a path that
  * adds no abort (the server counts an abort as a breaker failure):
  * - A hold with a transcript window carries real usage. It gets the one settle
@@ -206,7 +250,7 @@ function mayReuse(entry) {
  */
 async function retire(entry) {
 	say(
-		`usertrust: this tool call's hold ${entry.transferId} is too old to reuse (it may have expired); ending it and reserving afresh`,
+		`usertrust: this tool call's hold ${entry.transferId} may not be reused (its stated life is too far spent, or unknown); ending it and reserving afresh`,
 	);
 	if ((entry.assignedIds?.length ?? 0) > 0) {
 		const result = await settleTranscriptHold(sessionId, entry);
@@ -236,7 +280,7 @@ async function retire(entry) {
 /**
  * Reserve this tool call's hold: the window (transcript mode), the authorize, and
  * the record PostToolUse settles. A call that already has a hold reuses it while
- * it is young enough (`mayReuse`), and otherwise ends it first (`retire`).
+ * it may (`mayReuse`), and otherwise ends it first (`retire`).
  */
 async function reserve(input) {
 	const toolInput = JSON.stringify(input.tool_input ?? {}).slice(0, MAX_CONTENT_CHARS);
@@ -339,6 +383,8 @@ async function reserve(input) {
 					transferId: json.transferId,
 					estimatedInputTokens,
 					reservedAt,
+					// The hold's stated life, when the server states one (`hold-expiry`).
+					expiresInMs: json.expiresInMs,
 					...(settlesAtEstimate
 						? {}
 						: {

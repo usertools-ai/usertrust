@@ -2328,12 +2328,15 @@ function keyedServer() {
 			}
 			const replay = key === undefined ? undefined : live.get(key);
 			if (replay !== undefined)
-				return { status: 200, json: { transferId: replay, estimatedCost: 1 } };
+				return {
+					status: 200,
+					json: { transferId: replay, estimatedCost: 1, expiresInMs: 300_000 },
+				};
 			next += 1;
 			const transferId = `tx_${next}`;
 			holds.set(transferId, { key });
 			if (key !== undefined) live.set(key, transferId);
-			return { status: 200, json: { transferId, estimatedCost: 1 } };
+			return { status: 200, json: { transferId, estimatedCost: 1, expiresInMs: 300_000 } };
 		}
 		const transferId = String(body.transferId);
 		const hold = holds.get(transferId);
@@ -3368,9 +3371,11 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 
 	/**
 	 * A server that holds what it authorizes, forgets what `expire` names, logs
-	 * charges, and refuses every authorize after `refuse` (a budget 402).
+	 * charges, and refuses every authorize after `refuse` (a budget 402). Each answer
+	 * states the hold's life (`expiresInMs`, `hold-expiry`): `life`, 300 s unless a
+	 * test says. With `life` null the field is absent, as from an older server.
 	 */
-	function holdingServer() {
+	function holdingServer(life: unknown = 300_000) {
 		const pending = new Set<string>();
 		const charges: Array<{ transferId: string; inputTokens: unknown; outputTokens: unknown }> = [];
 		let refusing = false;
@@ -3381,7 +3386,14 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 				}
 				nextTransfer += 1;
 				pending.add(`tx_${nextTransfer}`);
-				return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+				return {
+					status: 200,
+					json: {
+						transferId: `tx_${nextTransfer}`,
+						estimatedCost: 1,
+						...(life === null ? {} : { expiresInMs: life }),
+					},
+				};
 			}
 			const id = String(body.transferId);
 			if (!pending.delete(id)) return notFound;
@@ -3406,7 +3418,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 	}
 
 	const RECORD = `${SESSION}__main__tu_1.json`;
-	/** Past the reuse bound: pre-tool-use.mjs `REUSE_WITHIN_MS` is 60 s. */
+	/** Past the first fifth (pre-tool-use.mjs `REUSE_SHARE`) of the default 300 s life. */
 	const TOO_OLD = 61_000;
 	/**
 	 * Make a pending record read as reserved `ms` ago (negative: in the future), or,
@@ -3418,6 +3430,10 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 		if (ms === null) delete body.reservedAt;
 		else body.reservedAt = Date.now() - ms;
 		await writeFile(path, JSON.stringify(body));
+	}
+	/** The pending record as written. */
+	async function record(file = RECORD): Promise<Record<string, unknown>> {
+		return JSON.parse(await readFile(join(stateDir, file), "utf-8")) as Record<string, unknown>;
 	}
 
 	describe("estimate mode", () => {
@@ -3482,14 +3498,24 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 			expect(await holdStateFiles()).toEqual([]);
 		});
 
-		it("a hold whose settle is under way (.settling) gets no second hold either", async () => {
+		it("a hold whose settle is under way (.settling) gets no second hold, and watch mode records the gap", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);
 			await run("pre-tool-use.mjs", preInput("tu_1"), env);
 			const live = join(stateDir, `${SESSION}__main__tu_1.json`);
 			await rename(live, `${live.slice(0, -".json".length)}.settling`);
 			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
-			expect(again.stderr).toContain("this tool call's hold tx_1 is being settled; no second hold");
+			expect(again.code).toBe(0);
+			expect(again.stdout).toBe("");
+			expect(again.stderr).toContain("this call is not metered");
+			expect(again.stderr).toContain("tx_1 has a settle that is not resolved yet");
+			expect(again.stderr).toContain("recorded as a gap");
+			const gaps = (await readFile(join(stateDir, "watch.jsonl"), "utf-8"))
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line) as { kind: string; reason: string });
+			expect(gaps.map((g) => g.kind)).toEqual(["gap"]);
+			expect(gaps[0]?.reason).toContain("tx_1 has a settle that is not resolved yet");
 			expect(authorizes()).toHaveLength(1);
 			expect(await holdStateFiles()).toEqual([`${SESSION}__main__tu_1.settling`]);
 		});
@@ -3587,7 +3613,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 		});
 	});
 
-	describe("a hold too old to reuse is ended, and the call reserves afresh: its budget is checked again", () => {
+	describe("a hold that may not be reused is ended, and the call reserves afresh: its budget is checked again", () => {
 		const env = { UT_CC_USAGE: "estimate" };
 		/** Requests about tx_1 after its authorize: a settle, a release or an abort. */
 		const aboutTx1 = () => requests.filter((r) => r.body.transferId === "tx_1");
@@ -3630,7 +3656,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 			await run("pre-tool-use.mjs", preInput("tu_1"), env);
 			await reservedAgo(TOO_OLD);
 			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
-			expect(again.stderr).toContain("hold tx_1 is too old to reuse");
+			expect(again.stderr).toContain("hold tx_1 may not be reused");
 			expect(again.stderr).toContain("reserved tx_2");
 			await run("post-tool-use.mjs", postInput("tu_1"), env);
 			await run("stop.mjs", stopInput(), env);
@@ -3662,13 +3688,13 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 		it.each<[string, number | null]>([
 			["a record without its reservation time", null],
 			["a reservation time in the future (the clock was set back)", -TOO_OLD],
-		])("%s is too old to reuse", async (_, ago) => {
+		])("%s may not be reused", async (_, ago) => {
 			const server = holdingServer();
 			await startServer(server.responder);
 			await run("pre-tool-use.mjs", preInput("tu_1"), env);
 			await reservedAgo(ago);
 			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
-			expect(again.stderr).toContain("hold tx_1 is too old to reuse");
+			expect(again.stderr).toContain("hold tx_1 may not be reused");
 			expect(authorizes()).toHaveLength(2);
 		});
 
@@ -3755,6 +3781,214 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 		);
 	});
 
+	describe("the life the server states (`hold-expiry`) bounds reuse", () => {
+		const env = { UT_CC_USAGE: "estimate" };
+		const enforce = { ...env, UT_CC_MODE: "enforce" };
+
+		it("a SHORT life (10 s): a re-fire within its first fifth reuses the hold", async () => {
+			const server = holdingServer(10_000);
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect((await record()).expiresInMs).toBe(10_000);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(again.stderr).toContain(
+				"this tool call already holds tx_1; reusing it, no second hold",
+			);
+			expect(authorizes()).toHaveLength(1);
+		});
+
+		it("a SHORT life (10 s): 3 s on, past its first fifth, the hold is ended, and a 402 DENIES the resume", async () => {
+			const server = holdingServer(10_000);
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), enforce);
+			await reservedAgo(3_000);
+			server.refuse();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), enforce);
+			expect(again.stderr).toContain("hold tx_1 may not be reused");
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(authorizes()).toHaveLength(2);
+		});
+
+		it("an OLDER server (no `expiresInMs`): even an immediate re-fire ends the hold and reserves afresh, and a 402 DENIES it", async () => {
+			const server = holdingServer(null);
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), enforce);
+			expect(Object.hasOwn(await record(), "expiresInMs")).toBe(false);
+			server.refuse();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), enforce);
+			expect(again.stderr).toContain("hold tx_1 may not be reused");
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(authorizes()).toHaveLength(2);
+			// No release on this server, so nothing is sent about the old hold: it is left
+			// to the server's TTL sweep.
+			expect(requests.filter((r) => r.body.transferId === "tx_1")).toEqual([]);
+		});
+
+		it.each<[string, unknown]>([
+			["a string", "300000"],
+			["a fraction", 1.5],
+			["a negative", -1],
+			["beyond a safe integer", 1e20],
+		])(
+			"an answer that is %s is no life: it is not recorded, and the hold is never reused",
+			async (_, life) => {
+				const server = holdingServer(life);
+				await startServer(server.responder);
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(Object.hasOwn(await record(), "expiresInMs")).toBe(false);
+				const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(again.stderr).toContain("hold tx_1 may not be reused");
+				expect(authorizes()).toHaveLength(2);
+			},
+		);
+
+		it("a life of 0 is recorded, and leaves nothing to reuse", async () => {
+			const server = holdingServer(0);
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect((await record()).expiresInMs).toBe(0);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(authorizes()).toHaveLength(2);
+		});
+
+		it.each<[string, unknown]>([
+			["beyond a safe integer", 1e20],
+			["a string", "300000"],
+		])("a record whose stored life is %s is read as no life: never reused", async (_, life) => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await writeFile(
+				join(stateDir, RECORD),
+				JSON.stringify({ ...(await record()), expiresInMs: life }),
+			);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(again.stderr).toContain("hold tx_1 may not be reused");
+			expect(authorizes()).toHaveLength(2);
+		});
+	});
+
+	describe("a `.settling` record of the same call is never reused: the call is refused until that settle resolves", () => {
+		const SETTLING = `${SESSION}__main__tu_1.settling`;
+		/** The call's pending record, renamed as a settling hook's claim leaves it. */
+		async function claimed() {
+			await rename(join(stateDir, RECORD), join(stateDir, SETTLING));
+		}
+		/** The claim, aged past the journal's staleness rule (`STALE_SETTLING_MS`, 10 min). */
+		async function stale() {
+			const then = new Date(Date.now() - 11 * 60_000);
+			await utimes(join(stateDir, SETTLING), then, then);
+		}
+
+		it.each<[string, Record<string, string>]>([
+			["enforce mode", { UT_CC_USAGE: "estimate", UT_CC_MODE: "enforce" }],
+			[
+				"enforce mode with UT_FAIL_OPEN=1 (not an outage)",
+				{ UT_CC_USAGE: "estimate", UT_CC_MODE: "enforce", UT_FAIL_OPEN: "1" },
+			],
+		])(
+			"an estimate hold's `.settling` (its settle attempted, or a retire cut off before its unlink): %s DENIES the resume",
+			async (_, env) => {
+				const server = holdingServer();
+				await startServer(server.responder);
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				await claimed();
+				await stale(); // Even stale: the journal cannot decide a record without a window.
+				const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(again.code).toBe(0);
+				const decision = JSON.parse(again.stdout).hookSpecificOutput;
+				expect(decision.permissionDecision).toBe("deny");
+				expect(decision.permissionDecisionReason).toContain(
+					"tx_1 has a settle that is not resolved yet",
+				);
+				expect(authorizes()).toHaveLength(1);
+				expect(await holdStateFiles()).toEqual([SETTLING]);
+			},
+		);
+
+		it("a FRESH transcript `.settling` (its settle may be in flight): enforce DENIES, and the journal leaves it alone", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			await claimed();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(authorizes()).toHaveLength(1);
+			expect(await holdStateFiles()).toEqual([SETTLING]);
+			expect((await readCursor()).accounted).toEqual([]);
+		});
+
+		it("a STALE transcript `.settling`, no key: the journal decides it first (its ids accounted, at most once), then the resume reserves afresh, and a 402 DENIES it", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			await claimed();
+			await stale();
+			server.refuse();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(authorizes()).toHaveLength(2);
+			expect(await holdStateFiles()).toEqual([]);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+			expect(server.charges).toEqual([]);
+		});
+
+		it("a STALE transcript `.settling`: the fresh hold's window leaves the old ids out, and carries only what is new", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await claimed();
+			await stale();
+			await appendMain(responseEntries("msg_b", SONNET, u(4, 4)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(await holdStateFiles()).toEqual([RECORD]);
+			const fresh = await record();
+			expect(fresh.transferId).toBe("tx_2");
+			expect(fresh.assignedIds).toEqual(["msg_b"]);
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			// msg_a was accounted by the journal and is never posted; msg_b is charged once.
+			expect(server.charges).toEqual([{ transferId: "tx_2", inputTokens: 4, outputTokens: 4 }]);
+		});
+
+		it("a STALE transcript `.settling`, keyed: parked for a retry under its key, and charged once at Stop", async () => {
+			capabilities = [...ALL_CAPABILITIES];
+			const server = keyedServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await claimed();
+			await stale();
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			expect(server.charges).toEqual([
+				{ key: keyOf("main", ["msg_a"]), transferId: "tx_1", inputTokens: 5 },
+			]);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		});
+
+		it("a STALE transcript `.settling` the journal cannot reach (its lock is held): no fresh hold beside it, and enforce DENIES", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			await claimed();
+			await stale();
+			const lock = `${cursorPath()}.lock`;
+			await mkdir(lock);
+			await writeFile(join(lock, "owner"), "another-hook");
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			await rm(lock, { recursive: true });
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(authorizes()).toHaveLength(1);
+			expect(await holdStateFiles()).toEqual([SETTLING]);
+		});
+	});
+
 	describe("a record that names another call is no hold of this one (state-file names can collide)", () => {
 		const env = { UT_CC_USAGE: "estimate" };
 		// Agent `a__b` with tool `c`, and agent `a` with tool `b__c`: one file name.
@@ -3794,5 +4028,57 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 			expect(again.stderr).toContain("reserved tx_2");
 			expect(authorizes()).toHaveLength(2);
 		});
+
+		// Each half of the identity, on its own. The TOOL id: one agent, tool ids that
+		// sanitize alike (`x.y` and `x_y`). The AGENT: one tool id, and two sessions
+		// whose names collide with the agents' (`s` with agent `x__y`, and `s__x` with
+		// agent `y`): one file name, and only the stored agent tells them apart.
+		const sameAgent = (tool: string) => preInput(tool);
+		const crossSession = (session: string, agent: string) =>
+			preInput("tu_9", { session_id: session, agent_id: agent });
+		const toolShared = `${SESSION}__main__x_y`;
+		const agentShared = "s__x__y__tu_9";
+
+		it.each<[string, boolean]>([
+			["pending", false],
+			[".settling", true],
+		])("the tool id alone (%s): `x_y` is no hold of `x.y`", async (_, settling) => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", sameAgent("x.y"), env);
+			if (settling) {
+				await rename(
+					join(stateDir, `${toolShared}.json`),
+					join(stateDir, `${toolShared}.settling`),
+				);
+			}
+			const again = await run("pre-tool-use.mjs", sameAgent("x_y"), env);
+			expect(again.stderr).not.toContain("tx_1");
+			expect(again.stderr).toContain("reserved tx_2");
+			expect(authorizes()).toHaveLength(2);
+		});
+
+		it.each<[string, boolean]>([
+			["pending", false],
+			[".settling", true],
+		])(
+			"the agent alone (%s): agent `y` of session `s__x` has no hold of agent `x__y` of session `s`",
+			async (_, settling) => {
+				const server = holdingServer();
+				await startServer(server.responder);
+				await run("pre-tool-use.mjs", crossSession("s", "x__y"), env);
+				expect(await holdStateFiles()).toEqual([`${agentShared}.json`]);
+				if (settling) {
+					await rename(
+						join(stateDir, `${agentShared}.json`),
+						join(stateDir, `${agentShared}.settling`),
+					);
+				}
+				const again = await run("pre-tool-use.mjs", crossSession("s__x", "y"), env);
+				expect(again.stderr).not.toContain("tx_1");
+				expect(again.stderr).toContain("reserved tx_2");
+				expect(authorizes()).toHaveLength(2);
+			},
+		);
 	});
 });

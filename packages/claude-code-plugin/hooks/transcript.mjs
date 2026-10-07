@@ -1415,8 +1415,13 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 	}
 }
 
-/** Apply journalled hold outcomes to one agent's cursor, if its lock is free soon. */
-async function reconcileAgent(sessionId, agentId) {
+/**
+ * Apply journalled hold outcomes to one agent's cursor, if its lock is free soon.
+ * PreToolUse runs it before it decides what a `.settling` record of the same tool
+ * call still blocks: the journal decides a stale one (`STALE_SETTLING_MS`) and
+ * removes its file.
+ */
+export async function reconcileAgent(sessionId, agentId) {
 	const where = await cursorLocation(sessionId, agentId);
 	if (!where.ok) return;
 	const release = await acquireLock(where.cursorPath, { waitMs: 300 });
