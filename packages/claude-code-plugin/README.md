@@ -81,7 +81,7 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   then SETTLES that hold, exactly once, at the window's real counts — on the
   normal path no hold is ever aborted. A call that does not complete, and one
   that is deferred and then resumed, leave that path: see the known limitation
-  and the known issue in [Modes](#modes-watch-only-by-default). A tool call whose
+  and the note on deferred calls in [Modes](#modes-watch-only-by-default). A tool call whose
   window is empty (a parallel call in the same response, say) is given back
   (below).
 - **The remainder.** What no hold carried — another model's responses, a final
@@ -355,21 +355,28 @@ close the breaker. Meanwhile each call is a `gap` in watch mode, and in enforce
 mode it is blocked unless `UT_FAIL_OPEN=1`.
 Tracked in [#238](https://github.com/usertools-ai/usertrust/issues/238).
 
-**Known issue: a tool call that is deferred and then resumed is reserved twice.**
-In a `claude -p` run, another PreToolUse hook can
+**A tool call that is deferred and then resumed keeps one hold.** In a
+`claude -p` run, another PreToolUse hook can
 [defer a tool call](https://code.claude.com/docs/en/hooks#defer-a-tool-call-for-later)
 (this plugin never does, and interactive sessions ignore `defer`). The call does
 not run, so it keeps its hold like a call that does not complete (above). When
 the session is resumed (`claude -p --resume`), the same call fires PreToolUse
-again, and the plugin reserves a second hold and overwrites its record of the
-first. The first hold can then stay pending until the server's pending-hold TTL
-voids it, counting against the budget until then; on today's server its expiry
-is one of the aborts above. In transcript mode the usage it carried can go
-unrecorded, silently: an under-count, never a double charge. In estimate mode
-the call is still charged once, on the second hold. Each further deferral of the
-same call repeats this. Only flows that defer a tool call and resume it are
-affected. The fix is tracked in
-[#234](https://github.com/usertools-ai/usertrust/issues/234) (item 10).
+again, and the plugin finds the hold the call already has.
+- **Reuse.** It reuses that hold only within the first fifth of the life the
+  server stated for it: `expiresInMs` on the authorize answer, from a server that
+  advertises `hold-expiry`. The other four-fifths are kept for the tool to run.
+- **Otherwise it ends the hold and reserves afresh**, so the budget is checked
+  again. A server that states no life never has a hold reused.
+  - A hold carrying transcript usage is settled once, at its counts.
+  - Any other hold is given back only through a `release` the server advertises,
+    and never aborted. On a server without `release`, it waits for the server's
+    pending-hold sweep.
+- **An unresolved settle refuses the call.** A hook can be killed while settling
+  that hold, leaving its `.settling` record. The resumed call is then refused until
+  that settle resolves: in enforce mode it is denied, whatever `UT_FAIL_OPEN` says,
+  and in watch mode it is recorded as a gap. A stale record that carries
+  transcript usage is decided by the journal first, and the call then reserves
+  afresh.
 
 In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran;
 an estimate hold is marked settle-attempted (`.settling`) before its one settle,

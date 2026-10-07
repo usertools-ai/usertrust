@@ -92,8 +92,18 @@ const okResponder: Responder = (path) => {
 	return { status: 200, json: { settled: true, aborted: true } };
 };
 
+/**
+ * A pass-through to a real usertrust-server. `strip` takes keys out of its answers, as
+ * an older server would never have sent them.
+ */
+interface Forward {
+	forwardTo: string;
+	key: string;
+	strip?: string[];
+}
+
 /** A recording server: a fixed responder, or a pass-through to a real usertrust-server. */
-function startServer(responder: Responder | { forwardTo: string; key: string }): Promise<void> {
+function startServer(responder: Responder | Forward): Promise<void> {
 	return new Promise((resolve) => {
 		fake = createServer((req, res) => {
 			if (req.method === "GET" && req.url === "/v1/health") {
@@ -133,7 +143,11 @@ function startServer(responder: Responder | { forwardTo: string; key: string }):
 						},
 						body: raw,
 					});
-					out = { status: r.status, json: await r.json() };
+					const json = (await r.json()) as unknown;
+					if (json !== null && typeof json === "object") {
+						for (const key of responder.strip ?? []) delete (json as Record<string, unknown>)[key];
+					}
+					out = { status: r.status, json };
 				}
 				log.push({ path, body, status: out.status, response: out.json });
 				if (res.destroyed) return;
@@ -154,9 +168,7 @@ function startServer(responder: Responder | { forwardTo: string; key: string }):
 	});
 }
 
-async function health(
-	responder: Responder | { forwardTo: string; key: string },
-): Promise<{ status: number; json: unknown }> {
+async function health(responder: Responder | Forward): Promise<{ status: number; json: unknown }> {
 	if (typeof responder === "function") {
 		return capabilities === null
 			? { status: 503, json: { error: "unavailable" } }
@@ -3986,6 +3998,66 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) keeps its o
 			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
 			expect(authorizes()).toHaveLength(1);
 			expect(await holdStateFiles()).toEqual([SETTLING]);
+		});
+	});
+
+	describe("end to end: the real hooks against a REAL usertrust-server that states each hold's life (`hold-expiry`)", () => {
+		// Unit tests against fake servers cannot show that the plugin and the server agree
+		// on the wire: the field's name, its type, and that it is the remaining life.
+		const KEY = "ut_plugin_hold_expiry_key";
+		const env = { UT_CC_USAGE: "estimate" };
+		async function realServer(): Promise<string> {
+			real = createUsertrustServer({
+				config: {
+					host: "127.0.0.1",
+					port: 0,
+					stateDir: await mkdtemp(join(tmpdir(), "utcc-tx-srv-")),
+					enforcement: "enforce",
+					pendingTtlMs: 300_000,
+					dryRun: true,
+					tenants: [{ id: "t", keyHash: hashKey(KEY), budget: 10_000_000 }],
+				},
+			});
+			const { port: realPort } = await real.listen();
+			return `http://127.0.0.1:${realPort}`;
+		}
+
+		it("a re-fire within the first fifth of the stated life reuses the hold (ONE authorize); past it, the call reserves afresh", async () => {
+			const base = await realServer();
+			const health = (await (await fetch(`${base}/v1/health`)).json()) as {
+				capabilities?: string[];
+			};
+			expect(health.capabilities).toContain("hold-expiry");
+			await startServer({ forwardTo: base, key: KEY });
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			const life = (authorizes()[0]?.response as { expiresInMs?: unknown } | undefined)
+				?.expiresInMs;
+			expect(Number.isSafeInteger(life)).toBe(true);
+			expect(life as number).toBeGreaterThan(290_000);
+			expect(life as number).toBeLessThanOrEqual(300_000);
+			expect((await record()).expiresInMs).toBe(life);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(again.stderr).toContain("this tool call already holds");
+			expect(authorizes()).toHaveLength(1);
+			await reservedAgo(TOO_OLD);
+			const later = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(later.stderr).toContain("may not be reused");
+			expect(authorizes()).toHaveLength(2);
+			expect((await run("post-tool-use.mjs", postInput("tu_1"), env)).code).toBe(0);
+			// The fresh hold is the one settled, once, by the real server.
+			expect(settles().map((s) => [s.body.transferId, s.status])).toEqual([
+				[transferOf(authorizes()[1]), 200],
+			]);
+		});
+
+		it("the same answer with `expiresInMs` taken out (an older server): even an immediate re-fire reserves afresh", async () => {
+			const base = await realServer();
+			await startServer({ forwardTo: base, key: KEY, strip: ["expiresInMs"] });
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(Object.hasOwn(await record(), "expiresInMs")).toBe(false);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(again.stderr).toContain("may not be reused");
+			expect(authorizes()).toHaveLength(2);
 		});
 	});
 

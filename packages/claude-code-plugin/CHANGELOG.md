@@ -5,6 +5,27 @@ plugin marketplace (`/plugin marketplace add usertools-ai/usertrust`), not from
 npm, and its version is its own: the `usertrust` packages and their
 [changelog](../../CHANGELOG.md) are versioned separately.
 
+## [Unreleased]
+
+### Fixed
+
+- **A tool call that is deferred and then resumed keeps one hold** (1.4.0's known
+  issue). When the resumed call fires PreToolUse again, the plugin finds the hold
+  it already has, by the ids its record stores, and:
+  - reuses that hold within the first fifth of the life the server stated for it.
+    The life is `expiresInMs` on the authorize answer, from a usertrust-server that
+    advertises `hold-expiry`. A server that states no life never has a hold reused;
+  - otherwise ends it first and reserves afresh, so the budget is checked again,
+    and enforce mode denies on a 402. A hold that carries transcript usage is
+    settled once at its counts. Any other is given back only through a `release`
+    the server advertises, never aborted;
+  - refuses the call while that hold's settle is unresolved: a `.settling` record
+    left by a hook killed mid-settle. Enforce mode denies it, whatever
+    `UT_FAIL_OPEN` says, and watch mode records a gap. A record the transcript
+    journal can decide (one that carries usage and is stale) is decided first,
+    and the call then reserves afresh. The model's retry is a new tool call, which
+    reserves as usual.
+
 ## [1.4.0] - 2026-10-07
 
 ### Security
