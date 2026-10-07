@@ -1081,10 +1081,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// Holds an abort() or release() has CLAIMED and not yet recorded: parked on the
 	// budget lock or on its ledger void, and in neither map. destroy() waits for these
 	// as it does for `settling`, so a parked terminal lands its own void before the sweep.
-	// A terminal leaves here as its record starts; that append is then queued on the
-	// audit writer ahead of destroy()'s flush. One still here at destroy()'s deadline is
-	// taken out and recorded by destroy() itself (the capture is kept for its actor), and
-	// that terminal, finding itself gone, writes no second record.
+	// A terminal leaves here in the same synchronous step that calls `appendEvent`, and
+	// the writer queues an append when it is CALLED (its mutex's `acquire()` swaps the
+	// queue before its first await; chain.test.ts pins this), so that record lands
+	// before destroy()'s `flush()` and `release()`. One still here at destroy()'s
+	// deadline is taken out and recorded by destroy() itself (the capture is kept for
+	// its actor), and that terminal, finding itself gone, writes no second record.
 	const inFlight = new Map<string, AuthorizationCapture>();
 
 	// Finding-2 (RECON #4): serialized, monotonic spend-ledger persistence.
@@ -1529,6 +1531,29 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// or transports it.
 				...(captured !== undefined ? { costCenter: captured.attribution.costCenter } : {}),
 			};
+			// destroy() may have begun while this call awaited (the budget lock, the policy,
+			// the reserve). It claims every hold registered before it, and a hold registered
+			// after would outlive the governor: a terminal could end it after the audit
+			// writer is released. So it is never registered: its reservation is given back
+			// (best-effort; the engine sweep or the ledger's timeout covers a failure) and the
+			// call fails as one made after destroy() does. Nothing awaits between this check
+			// and the registration below.
+			if (destroyed) {
+				if (proxyConn != null && !isDryRun) {
+					try {
+						await proxyConn.void(proxyTransferId ?? transferId);
+					} catch {
+						// Best-effort: the ledger's timeout returns the funds.
+					}
+				} else if (engine != null && !isDryRun) {
+					try {
+						await engine.voidPendingSpend(transferId);
+					} catch {
+						// Best-effort: the engine sweep, or the ledger's timeout, returns the funds.
+					}
+				}
+				throw new Error("Governor has been destroyed");
+			}
 			// The GOVERNOR's record. Keyed by transferId and unreachable from caller
 			// code, so `settle()`/`abort()` can never be handed a different cost center
 			// than the one the hold was placed against.
@@ -2016,9 +2041,6 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 				const outcome: AbortOutcome =
 					voidError === undefined ? { aborted: true } : { aborted: true, voidError };
-				// Out of `inFlight` as the record starts. Already gone means destroy() reached
-				// its deadline first and recorded this hold: no second record.
-				if (!inFlight.delete(transferId)) return outcome;
 
 				// Audit the failure.
 				// A1: an attributed hold leaves an attributed record on the VOID terminal
@@ -2027,6 +2049,9 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// the ones that settled. Read from the capture, like settle: abort commonly
 				// runs from a `catch` block outside the `withCostCenter` scope entirely, and
 				// the handle it is handed there is caller-owned.
+				// Out of `inFlight` in the same step as the append. Already gone means
+				// destroy() reached its deadline first and recorded this hold: no second record.
+				if (!inFlight.delete(transferId)) return outcome;
 				await audit
 					.appendEvent({
 						kind: "llm_call_failed",
@@ -2112,11 +2137,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 				const outcome: ReleaseOutcome =
 					voidError === undefined ? { released: true } : { released: true, voidError };
-				// Out of `inFlight` as the record starts (see abort()).
-				if (!inFlight.delete(transferId)) return outcome;
 
 				// A neutral terminal record (#204): what ended the hold and why, attributed
-				// from the capture like every other terminal.
+				// from the capture like every other terminal. Out of `inFlight` in the same
+				// step as the append (see abort()).
+				if (!inFlight.delete(transferId)) return outcome;
 				await audit
 					.appendEvent({
 						kind: "hold_released",
@@ -2153,7 +2178,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// An abort or release still in flight at the deadline has not recorded its hold,
 			// and its own record would land after the writer closes below. Taken out of
 			// `inFlight` at once, it writes none (see abort()), and its record is this one.
-			// Its void is its own, or the engine sweep's below: one ledger mutation either way.
+			// Its void is its own, or the engine sweep's below (which also reaches this hold:
+			// its engine entry goes only when its own void returns), and the ledger takes one
+			// of the two: one mutation either way. The record says only what destroy() knows,
+			// that the void had not completed. It names no `voidError`: there was no outcome
+			// yet. The terminal still answers its caller from its own void.
 			const stillInFlight = [...inFlight];
 			inFlight.clear();
 			for (const [txId, capture] of stillInFlight) {
@@ -2163,7 +2192,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						actor: capture.actor,
 						data: {
 							transferId: txId,
-							reason: "governor destroyed (terminal still in flight)",
+							reason: "governor destroyed (terminal still in flight: its void had not completed)",
 							source: "headless",
 							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
 							...(capture.principal === undefined ? {} : { principal: capture.principal }),

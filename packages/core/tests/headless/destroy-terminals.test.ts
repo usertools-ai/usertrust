@@ -18,7 +18,8 @@
  *    and one ledger void, and keeps them when the parked void finally lands;
  *  - every hold destroy() ends itself is recorded, attributed, with the void's fixed code
  *    when the ledger refused it, and no model (the capture holds none);
- *  - a terminal called while destroy() is ending holds finds nothing to end;
+ *  - a terminal called while destroy() is ending holds finds nothing to end, and an
+ *    authorize still reserving when destroy() began registers no hold;
  *  - against the real audit writer, nothing appends after destroy() released it: an
  *    append there lands, and takes the vault's lock again for the life of the process.
  */
@@ -69,6 +70,8 @@ const AUTHORIZE = { model: MODEL, estimatedInputTokens: 100, maxOutputTokens: 10
 const SCOPE_OPTS = { allocated: 10_000, periodStartMs: Date.UTC(2026, 9, 1, 0, 0, 0) };
 /** destroy()'s drain bound, shortened for the tests that run it out. */
 const BOUND_MS = 300;
+/** destroy()'s record for a terminal still in flight at its deadline: what it knew, no more. */
+const STILL_IN_FLIGHT = "governor destroyed (terminal still in flight: its void had not completed)";
 
 type Hold = "session" | "attributed";
 type Terminal = "release" | "abort";
@@ -120,24 +123,47 @@ function gate(): { wait: Promise<void>; open: () => void } {
 }
 
 /**
- * A ledger with the engine's own shape: the engine's entries (what `voidAllPending`
- * sweeps), the ledger's pending transfers, and every mutation that happened. A void or
- * POST of a transfer no longer pending is refused, as TigerBeetle refuses a second void.
- * A gate parks the call after the entry lookup, where the real engine awaits the ledger.
+ * A ledger with the engine's own shape. The engine keeps an entry per hold, which
+ * `voidAllPending` sweeps; the ledger keeps the pending transfers, and refuses a void or a
+ * POST of one no longer pending, as TigerBeetle refuses a second void. Every void request
+ * that reaches the ledger is logged, by the engine call that sent it and whether the
+ * ledger took it; every mutation the ledger took is logged on its own.
+ *
+ * As in the real engine, a hold's entry goes only when its own void (or POST) returns. So
+ * `voidAllPending` also reaches a hold whose terminal is parked on its void: a second void
+ * request for one pending transfer. A gate parks a call where the real engine awaits the
+ * ledger: a void or POST after its entry lookup, a reserve before the ledger has the hold.
+ * `gates` is read at call time, so a test can arm one later.
  */
-function ledgerEngine(gates: { void?: Promise<void>; post?: Promise<void> } = {}): {
+function ledgerEngine(
+	gates: { void?: Promise<void>; post?: Promise<void>; reserve?: Promise<void> } = {},
+): {
 	engine: TrustEngine;
 	mutations: string[];
+	voidRequests: Array<{
+		transferId: string;
+		via: "voidPendingSpend" | "voidAllPending";
+		taken: boolean;
+	}>;
+	reserved: string[];
 	refuseVoids: () => void;
 } {
 	const entries = new Set<string>();
 	const pending = new Set<string>();
 	const mutations: string[] = [];
+	const voidRequests: Array<{
+		transferId: string;
+		via: "voidPendingSpend" | "voidAllPending";
+		taken: boolean;
+	}> = [];
+	const reserved: string[] = [];
 	let refuse = false;
 	const engine: TrustEngine = {
 		spendPending: vi.fn(async (p: { transferId: string }) => {
-			entries.add(p.transferId);
+			await gates.reserve;
 			pending.add(p.transferId);
+			entries.add(p.transferId);
+			reserved.push(p.transferId);
 			return { transferId: p.transferId };
 		}),
 		postPendingSpend: vi.fn(async (transferId: string) => {
@@ -152,8 +178,13 @@ function ledgerEngine(gates: { void?: Promise<void>; post?: Promise<void> } = {}
 		voidPendingSpend: vi.fn(async (transferId: string) => {
 			if (!entries.has(transferId)) throw new PendingEntryNotFoundError(transferId);
 			await gates.void;
-			if (refuse) throw new TBTransferError(25, "Void transfer failed: pending_transfer_not_found");
-			if (!pending.delete(transferId)) {
+			if (refuse) {
+				voidRequests.push({ transferId, via: "voidPendingSpend", taken: false });
+				throw new TBTransferError(25, "Void transfer failed: pending_transfer_not_found");
+			}
+			const taken = pending.delete(transferId);
+			voidRequests.push({ transferId, via: "voidPendingSpend", taken });
+			if (!taken) {
 				throw new TBTransferError(34, "Void transfer failed: pending_transfer_already_voided");
 			}
 			mutations.push(`void:${transferId}`);
@@ -161,7 +192,9 @@ function ledgerEngine(gates: { void?: Promise<void>; post?: Promise<void> } = {}
 		}),
 		voidAllPending: vi.fn(async () => {
 			for (const transferId of [...entries]) {
-				if (pending.delete(transferId)) mutations.push(`void:${transferId}`);
+				const taken = pending.delete(transferId);
+				voidRequests.push({ transferId, via: "voidAllPending", taken });
+				if (taken) mutations.push(`void:${transferId}`);
 				entries.delete(transferId);
 			}
 		}),
@@ -171,6 +204,8 @@ function ledgerEngine(gates: { void?: Promise<void>; post?: Promise<void> } = {}
 	return {
 		engine,
 		mutations,
+		voidRequests,
+		reserved,
 		refuseVoids: () => {
 			refuse = true;
 		},
@@ -226,7 +261,7 @@ describe("destroy() waits for an abort or release still in flight", () => {
 		for (const terminal of ["release", "abort"] as const) {
 			it(`${kind} hold, ${terminal}() parked on its void: it lands its own void and record first`, async () => {
 				const voids = gate();
-				const { engine, mutations } = ledgerEngine({ void: voids.wait });
+				const { engine, mutations, voidRequests } = ledgerEngine({ void: voids.wait });
 				const gov = await governor(engine);
 				const auth = await hold(gov, kind);
 				const ending = end(gov, auth, terminal);
@@ -243,8 +278,11 @@ describe("destroy() waits for an abort or release still in flight", () => {
 					terminal === "release" ? { released: true } : { aborted: true },
 				);
 				await destroying;
-				// One void, the terminal's own: the sweep found nothing left.
+				// One void, the terminal's own; the sweep found nothing left to ask about.
 				expect(mutations).toEqual([`void:${auth.transferId}`]);
+				expect(voidRequests).toEqual([
+					{ transferId: auth.transferId, via: "voidPendingSpend", taken: true },
+				]);
 				// One record, the terminal's own, with its reason and no voidError.
 				const records = recordsOf(auth.transferId);
 				expect(records.map((e) => e.kind)).toEqual([RECORD[terminal]]);
@@ -263,7 +301,7 @@ describe("ONE deadline: what never finishes holds destroy() no longer than its b
 			timeout: 3_000,
 		}, async () => {
 			const voids = gate();
-			const { engine, mutations } = ledgerEngine({ void: voids.wait });
+			const { engine, mutations, voidRequests } = ledgerEngine({ void: voids.wait });
 			const gov = await governor(engine, BOUND_MS);
 			const auth = await hold(gov, "session");
 			const ending = end(gov, auth, terminal);
@@ -273,20 +311,28 @@ describe("ONE deadline: what never finishes holds destroy() no longer than its b
 			expect(elapsed).toBeGreaterThanOrEqual(BOUND_MS - 5);
 			expect(elapsed).toBeLessThan(BOUND_MS + 700);
 			// destroy() recorded the hold its terminal had not, and took the record from it.
-			expect(recordsOf(auth.transferId)).toEqual([
-				destroyRecord(auth, "session", "governor destroyed (terminal still in flight)"),
+			// The record names no voidError: the void had no outcome yet.
+			expect(recordsOf(auth.transferId)).toEqual([destroyRecord(auth, "session", STILL_IN_FLIGHT)]);
+			// The engine sweep reached the parked hold (its entry goes only when its own void
+			// returns), and the ledger took that void.
+			expect(voidRequests).toEqual([
+				{ transferId: auth.transferId, via: "voidAllPending", taken: true },
 			]);
-			// One ledger void: the engine sweep's.
 			expect(mutations).toEqual([`void:${auth.transferId}`]);
 
-			// The parked void lands at last. The ledger refuses a second void, and the
-			// terminal, its record taken, writes none.
+			// The parked void lands at last: a SECOND void request for the one pending
+			// transfer, which the ledger refuses. The terminal answers from its own void, and,
+			// its record taken, writes none.
 			voids.open();
 			expect(await ending).toEqual(
 				terminal === "release"
 					? { released: true, voidError: "pending_transfer_already_voided" }
 					: { aborted: true, voidError: "pending_transfer_already_voided" },
 			);
+			expect(voidRequests).toEqual([
+				{ transferId: auth.transferId, via: "voidAllPending", taken: true },
+				{ transferId: auth.transferId, via: "voidPendingSpend", taken: false },
+			]);
 			expect(mutations).toEqual([`void:${auth.transferId}`]);
 			expect(recordsOf(auth.transferId)).toHaveLength(1);
 		});
@@ -312,7 +358,7 @@ describe("ONE deadline: what never finishes holds destroy() no longer than its b
 		expect(elapsed).toBeLessThan(bound * 2 - 200);
 		// The release's hold is recorded by destroy(); the settle's is its settle's own.
 		expect(recordsOf(releasing.transferId)).toEqual([
-			destroyRecord(releasing, "session", "governor destroyed (terminal still in flight)"),
+			destroyRecord(releasing, "session", STILL_IN_FLIGHT),
 		]);
 		expect(recordsOf(posting.transferId).filter((e) => e.kind === "hold_released")).toEqual([]);
 	});
@@ -358,7 +404,7 @@ describe("every hold destroy() ends itself is recorded", () => {
 	});
 
 	it("a void the ledger refused: recorded with its fixed code, never the error's text", async () => {
-		const { engine, refuseVoids } = ledgerEngine();
+		const { engine, mutations, voidRequests, refuseVoids } = ledgerEngine();
 		const gov = await governor(engine);
 		const auth = await hold(gov, "attributed");
 		refuseVoids();
@@ -367,6 +413,13 @@ describe("every hold destroy() ends itself is recorded", () => {
 		expect(events).toEqual([
 			destroyRecord(auth, "attributed", "governor destroyed", "pending_transfer_not_found"),
 		]);
+		// Declared residue: a refused void leaves the engine entry, and the engine sweep
+		// voids it again, unrecorded. The record says what ITS void did.
+		expect(voidRequests).toEqual([
+			{ transferId: auth.transferId, via: "voidPendingSpend", taken: false },
+			{ transferId: auth.transferId, via: "voidAllPending", taken: true },
+		]);
+		expect(mutations).toEqual([`void:${auth.transferId}`]);
 	});
 
 	it("dry run: recorded, with no void to fail", async () => {
@@ -376,6 +429,54 @@ describe("every hold destroy() ends itself is recorded", () => {
 		await gov.destroy();
 		expect(events).toEqual([destroyRecord(auth, "session", "governor destroyed")]);
 	});
+
+	for (const when of ["while destroy() is ending holds", "after destroy() returned"] as const) {
+		it(`an authorize that finishes reserving ${when} registers no hold, and gives its reservation back itself`, async () => {
+			const voids = gate();
+			const reserves = gate();
+			const gates: { void?: Promise<void>; reserve?: Promise<void> } = { void: voids.wait };
+			const { engine, mutations, voidRequests, reserved } = ledgerEngine(gates);
+			const gov = await governor(engine);
+			const first = await hold(gov, "session");
+			// The next reserve is still on its way to the ledger when destroy() begins.
+			gates.reserve = reserves.wait;
+			const late = gov.authorize(AUTHORIZE).then(
+				(auth) => auth,
+				(err: unknown) => err,
+			);
+			events.length = 0;
+			const destroying = gov.destroy();
+			if (when === "while destroy() is ending holds") {
+				// destroy() is parked on the first hold's void; the late reserve lands now.
+				await sleep(50);
+				reserves.open();
+				await sleep(50);
+				voids.open();
+				await destroying;
+			} else {
+				voids.open();
+				await destroying;
+				reserves.open();
+			}
+			const outcome = await late;
+			expect(outcome).toBeInstanceOf(Error);
+			expect((outcome as Error).message).toBe("Governor has been destroyed");
+			expect(reserved).toHaveLength(2);
+			const lateId = reserved[1] as string;
+			// The authorize voided its own reservation (not left to the engine sweep, which
+			// runs before a reserve that lands late), and nothing recorded a hold that was never
+			// registered.
+			expect(voidRequests.filter((r) => r.transferId === lateId)).toEqual([
+				{ transferId: lateId, via: "voidPendingSpend", taken: true },
+			]);
+			expect(mutations.sort()).toEqual([`void:${first.transferId}`, `void:${lateId}`].sort());
+			expect(events).toEqual([destroyRecord(first, "session", "governor destroyed")]);
+			// Nothing survived destroy(): the late hold is no one's to end.
+			expect(await gov.release({ ...first, transferId: lateId }, "given back")).toEqual({
+				released: false,
+			});
+		});
+	}
 
 	it("a terminal called while destroy() is ending holds finds nothing to end", async () => {
 		const voids = gate();
@@ -433,7 +534,7 @@ describe("with the real audit writer: nothing appends after destroy() releases i
 		// The late release took no lock: the writer released it, and nothing took it again.
 		expect(existsSync(join(auditDir(), ".audit-writer.lock"))).toBe(false);
 		expect(chainOf(parked.transferId)).toEqual([
-			{ kind: "hold_released", reason: "governor destroyed (terminal still in flight)" },
+			{ kind: "hold_released", reason: STILL_IN_FLIGHT },
 		]);
 
 		// So the next governor on this vault, in this process, records as it should.

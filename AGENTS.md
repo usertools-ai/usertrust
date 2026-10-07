@@ -119,7 +119,9 @@ Grepping `catch (denialErr)` therefore finds four, not five. Payloads and ration
 settle's POST, an abort or release parked on its void). It records an abort or release still in
 flight at the deadline, then claims, voids and records (`hold_released`, `governor destroyed`)
 every hold still held, voids the engine's remaining pending transfers, and flushes and releases the
-audit writer. **Callers must call it** or the process hangs on the TigerBeetle client.
+audit writer. An `authorize()` still reserving when it begins registers no hold: it voids its
+reservation and fails, so no hold outlives the governor. **Callers must call it** or the process
+hangs on the TigerBeetle client.
 A `process.on("beforeExit")` handler calls it too, but that is a net, not a substitute: `beforeExit`
 fires only once the event loop drains, and an open TigerBeetle client is precisely what keeps it
 from draining. The net catches a governor whose client is already closed; it cannot catch the case

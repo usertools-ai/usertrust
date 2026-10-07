@@ -179,7 +179,10 @@ describe("a terminal whose ledger void failed shows its evidence", () => {
 describe("a hold the governor's destroy() ended: a record with no model", () => {
 	// destroy() records each hold it ends from the governor's own capture, which holds no
 	// model, so its `hold_released` names none.
-	for (const reason of ["governor destroyed", "governor destroyed (terminal still in flight)"]) {
+	for (const reason of [
+		"governor destroyed",
+		"governor destroyed (terminal still in flight: its void had not completed)",
+	]) {
 		it(`"${reason}" renders RELEASED with its reason, and no \`undefined\` anywhere`, () => {
 			const result = verifyChainOf(
 				[{ kind: "hold_released", data: { transferId: "tx_1", reason, source: "headless" } }],
@@ -188,7 +191,8 @@ describe("a hold the governor's destroy() ended: a record with no model", () => 
 			expect(result.found).toBe(true);
 			expect(result.receipt).toContain("RELEASED");
 			expect(result.receipt).toContain("Reason: governor destroyed");
-			if (reason.endsWith("in flight)")) expect(result.receipt).toContain("in flight)");
+			// The long reason wraps; its last word is still on the receipt.
+			if (reason.endsWith("completed)")) expect(result.receipt).toContain("completed)");
 			expect(result.receipt).toContain("unknown");
 			expect(result.receipt).not.toContain("undefined");
 			expect(result.receipt).not.toContain("PENDING");
