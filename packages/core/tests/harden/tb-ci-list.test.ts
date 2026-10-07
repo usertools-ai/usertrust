@@ -14,12 +14,18 @@
  * real-ledger suite on disk, and requires each to appear in the list.
  *
  * WHAT COUNTS AS A REAL-LEDGER SUITE: a file named `*.tb.test.ts`, OR any test file that
- * carries the gating construct every current suite uses, a line-leading binding of the env
- * key (`const TB_ADDRESS = process.env.USERTRUST_TB_ADDRESS;`). The second rule is what
- * catches `openclaw/tests/envelope-integration.test.ts`, which lives outside any
- * `integration/` folder and has no `.tb` in its name. The match is on that construct, never
- * on the bare key: this file reads the key out of the YAML, and a bare-key match would make
- * the guard demand its own place in the list. It is also excluded by path.
+ * READS the env key from `process.env` (every current suite does, as
+ * `const TB_ADDRESS = process.env.USERTRUST_TB_ADDRESS;`, but any spelling counts: an inline
+ * `describe.skipIf(!process.env.…)`, an `export const`, a destructuring). The second rule is
+ * what catches `openclaw/tests/envelope-integration.test.ts`, which lives outside any
+ * `integration/` folder and has no `.tb` in its name. Matching the READ rather than one
+ * binding shape is what keeps a differently-gated future suite from escaping silently.
+ * Comment lines do not count, the guard's own path is excluded (it names the key to parse
+ * the YAML), and `NOT_SUITES` is the explicit exemption list for anything else.
+ *
+ * Declared residue: a suite that reaches the env through a helper (`const env = process.env`
+ * then `env.K`, or an imported gate function) cannot be found by text; none exists today.
+ * And the workflow check is that the key is SET on the step, not that its value is non-empty.
  *
  * The root is derived from this file's own location, so the guard compares a tree's suites
  * against that tree's workflow, never a sibling worktree's.
@@ -36,8 +42,24 @@ const GUARD = "packages/core/tests/harden/tb-ci-list.test.ts";
 const JOB = "tb-integration";
 const ENV_KEY = "USERTRUST_TB_ADDRESS";
 
-/** The gating construct: a binding of the env key at the START of a line (not a comment). */
-const GATE = /^[ \t]*(?:const|let|var)[ \t]+\w+[ \t]*=[ \t]*process\.env\.USERTRUST_TB_ADDRESS\b/m;
+/**
+ * A READ of the env key from `process.env`, in any spelling: `process.env.K`,
+ * `process.env["K"]`, or `{ K } = process.env` (the destructuring may span lines). A suite
+ * gated any way other than today's `const TB_ADDRESS = ...` binding (an inline
+ * `describe.skipIf(!process.env.K)`, an `export const`) is therefore still discovered, so
+ * it fails loud when unlisted instead of escaping silently.
+ */
+const READS_KEY =
+	/process\.env(?:\.USERTRUST_TB_ADDRESS\b|\[\s*["'`]USERTRUST_TB_ADDRESS["'`]\s*\])|\{[^}]*\bUSERTRUST_TB_ADDRESS\b[^}]*\}\s*=\s*process\.env\b/;
+
+/** Comment lines are prose, not reads: a doc block quoting the key must not make a suite. */
+const COMMENT_LINE = /^\s*(?:\*|\/\/|\/\*)/;
+
+/**
+ * Files that read the key without being a gated suite. Empty today; an entry is a decision
+ * to exempt a file from CI, so add one only with a reason beside it.
+ */
+const NOT_SUITES: ReadonlySet<string> = new Set();
 
 interface SourceFile {
 	rel: string;
@@ -63,10 +85,20 @@ function listedSuites(workflowYaml: string): string[] {
 }
 
 /** Every real-ledger suite among `files`, never counting the guard itself. */
-function discoverSuites(files: SourceFile[]): string[] {
+function discoverSuites(
+	files: SourceFile[],
+	notSuites: ReadonlySet<string> = NOT_SUITES,
+): string[] {
+	const readsKey = (source: string): boolean =>
+		READS_KEY.test(
+			source
+				.split("\n")
+				.filter((line) => !COMMENT_LINE.test(line))
+				.join("\n"),
+		);
 	return files
-		.filter((f) => f.rel !== GUARD)
-		.filter((f) => f.rel.endsWith(".tb.test.ts") || GATE.test(f.source))
+		.filter((f) => f.rel !== GUARD && !notSuites.has(f.rel))
+		.filter((f) => f.rel.endsWith(".tb.test.ts") || readsKey(f.source))
 		.map((f) => f.rel)
 		.sort();
 }
@@ -150,19 +182,39 @@ describe("the guard itself", () => {
 		expect(missingFrom(found, listed)).toEqual(["packages/x/tests/new.tb.test.ts"]);
 	});
 
-	it("catches an unlisted non-.tb suite that carries the gating construct", () => {
-		const found = discoverSuites([fixture("packages/x/tests/odd.test.ts", gated)]);
-		expect(missingFrom(found, listed)).toEqual(["packages/x/tests/odd.test.ts"]);
-	});
+	// Every spelling of "this file reads the env key from process.env" must be discovered; a
+	// suite gated any other way than today's binding would otherwise escape silently.
+	const readForms: Record<string, string> = {
+		"a binding": gated,
+		"an inline skipIf": `describe.skipIf(!process.env.${ENV_KEY})("x", () => {});\n`,
+		"an export const": `export const TB = process.env.${ENV_KEY};\n`,
+		"a destructuring": `const { ${ENV_KEY}: addr } = process.env;\n`,
+		"a bracket read": `const a = process.env["${ENV_KEY}"];\n`,
+		"an indented read": `\tif (process.env.${ENV_KEY}) run();\n`,
+	};
+	for (const [name, source] of Object.entries(readForms)) {
+		it(`catches an unlisted non-.tb suite gated by ${name}`, () => {
+			const found = discoverSuites([fixture("packages/x/tests/odd.test.ts", source)]);
+			expect(missingFrom(found, listed)).toEqual(["packages/x/tests/odd.test.ts"]);
+		});
+	}
 
 	it("does not demand a suite that merely mentions the env key", () => {
 		const prose = ` * Self-skips without \`${ENV_KEY}\`.\n`;
+		const commented = ` * e.g. process.env.${ENV_KEY}\n// process.env.${ENV_KEY}\n`;
 		const read = `const v = parse(x).env.${ENV_KEY};\n`;
-		expect(discoverSuites([fixture("packages/x/tests/a.test.ts", prose + read)])).toEqual([]);
+		const src = prose + commented + read;
+		expect(discoverSuites([fixture("packages/x/tests/a.test.ts", src)])).toEqual([]);
 	});
 
-	it("does not discover the guard path even when it carries the gating construct", () => {
+	it("does not discover the guard path even when it reads the key", () => {
 		expect(discoverSuites([fixture(GUARD, gated)])).toEqual([]);
+	});
+
+	it("honours an explicit allowlist for a file that reads the key without being a suite", () => {
+		const f = fixture("packages/x/tests/helper.test.ts", gated);
+		expect(discoverSuites([f], new Set())).toEqual(["packages/x/tests/helper.test.ts"]);
+		expect(discoverSuites([f], new Set(["packages/x/tests/helper.test.ts"]))).toEqual([]);
 	});
 
 	it("catches a listed path that does not exist", () => {
