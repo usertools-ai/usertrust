@@ -21,8 +21,8 @@ function makeCloudConfig(): TrustConfig {
 }
 
 describe("PRICING_TABLE", () => {
-	it("contains 39 models", () => {
-		expect(Object.keys(PRICING_TABLE)).toHaveLength(39);
+	it("contains 40 models", () => {
+		expect(Object.keys(PRICING_TABLE)).toHaveLength(40);
 	});
 
 	it("all rates are positive", () => {
@@ -598,6 +598,7 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 
 	// No published cache pricing for these models — both cache fields omitted.
 	"mistral-large": { inputPer1k: 5, outputPer1k: 15 },
+	"mistral-large-latest": { inputPer1k: 5, outputPer1k: 15 },
 	"deepseek-chat": { inputPer1k: 2.8, outputPer1k: 4.2 },
 	"deepseek-reasoner": { inputPer1k: 2.8, outputPer1k: 4.2 },
 	"grok-3": { inputPer1k: 30, outputPer1k: 150 },

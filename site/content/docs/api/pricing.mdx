@@ -11,7 +11,7 @@ A budget of `100_000` UT equals $10.00. A budget of `1_000_000` UT equals $100.0
 
 ## Pricing Table
 
-The SDK includes a 39-model pricing table in `ledger/pricing.ts`, current as of
+The SDK includes a 40-model pricing table in `ledger/pricing.ts`, current as of
 `PRICING_TABLE_VERSION = "2026-10-07"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
 Rates are in usertokens per 1,000 LLM tokens, across **four tiers**: input (fresh prompt tokens),
 output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation prompt tokens). A
@@ -103,6 +103,7 @@ the input rate.
 | Model | Provider | Input | Output |
 |-------|----------|------:|-------:|
 | `mistral-large` | Mistral | 5 | 15 |
+| `mistral-large-latest` (alias) | Mistral | 5 | 15 |
 | `deepseek-chat` | DeepSeek | 2.8 | 4.2 |
 | `deepseek-reasoner` | DeepSeek | 2.8 | 4.2 |
 | `grok-3` | xAI | 30 | 150 |

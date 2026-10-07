@@ -328,12 +328,21 @@ test("list-price math matches hand-computed fixture values", () => {
 		{ sessionHash: "cccccccccccc", calls: 1, usertokens: 200, sidechainShare: 0 },
 	]);
 
-	// Model resolution mirrors getModelRates (exact, then longest prefix) but
-	// THROWS where the kernel would fall back — no silent list-price guess.
+	// Model resolution mirrors getModelRates (exact, after one -YYYYMMDD strip; no
+	// prefix match) but THROWS where the kernel would fall back — no silent
+	// list-price guess.
 	assert.deepStrictEqual(listRatesForModel("claude-opus-5"), { input: 5, output: 25 });
 	assert.deepStrictEqual(listRatesForModel("claude-opus-5-20260901"), { input: 5, output: 25 });
-	// Introductory published rate, through 2026-08-31 (see LIST_USD_PER_MTOK).
+	// $2/$10 is the standard published rate (see LIST_USD_PER_MTOK).
 	assert.deepStrictEqual(listRatesForModel("claude-sonnet-5"), { input: 2, output: 10 });
+	// Every current id has its OWN row; none rides a shorter sibling's prefix.
+	assert.deepStrictEqual(listRatesForModel("claude-opus-5-5"), { input: 4, output: 20 });
+	assert.deepStrictEqual(listRatesForModel("claude-sonnet-5-5-20261001"), { input: 2, output: 10 });
+	assert.deepStrictEqual(listRatesForModel("claude-fable-5-1"), { input: 10, output: 50 });
+	assert.deepStrictEqual(listRatesForModel("claude-mythos-5"), { input: 10, output: 50 });
+	assert.deepStrictEqual(listRatesForModel("claude-haiku-5-5"), { input: 0.5, output: 2.5 });
+	assert.throws(() => listRatesForModel("claude-opus-5-fast"), /no published list rate/);
+	assert.throws(() => listRatesForModel("claude-opus-5-2026010"), /no published list rate/);
 	assert.throws(() => listRatesForModel("totally-unknown-model-x"), /no published list rate/);
 });
 

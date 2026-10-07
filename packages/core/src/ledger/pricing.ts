@@ -239,6 +239,10 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	// quoted in the marketing FAQ is the retired Large 2 rate — do not use it.)
 	// No caching discount published.
 	"mistral-large": { inputPer1k: 5, outputPer1k: 15 },
+	// The published alias that resolves to Mistral Large 3. Exact, not a prefix: an
+	// alias the row above documents pricing must not fall to the fail-dearest
+	// fallback (150/750) now that prefix matching is gone.
+	"mistral-large-latest": { inputPer1k: 5, outputPer1k: 15 },
 
 	// ── DeepSeek ──
 	// No cache pricing resolvable for these alias keys (see task report).

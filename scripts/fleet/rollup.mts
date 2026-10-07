@@ -58,43 +58,50 @@ export const CACHE_WRITE_1H_MULT = 2;
 export const CACHE_READ_MULT = 0.1;
 
 /**
- * Published base-input / output $/MTok per model — the SAME page Task 1 cited
- * for the kernel's PRICING_TABLE rows, so the two bases share one source.
+ * Published base-input / output $/MTok per model — the SAME page the kernel's
+ * PRICING_TABLE rows cite, so the two bases share one source.
  * Source: https://platform.claude.com/docs/en/about-claude/pricing
- * (model-pricing table, retrieved 2026-08-10). claude-sonnet-5 is entered at
- * the published rate for the published window: the $2/$10 INTRODUCTORY rate,
- * in effect through 2026-08-31 (standard $3/$15 after). The kernel's
- * PRICING_TABLE deliberately keeps the standard rate (Task 1 / D1), so that
- * drift is residual cause #2 — real only because the two bases differ here.
- * LEDGERED: the September republish must flip this row to standard $3/$15;
- * the occurrence-date-aware fix is an accepted spec residual.
+ * (model-pricing table, retrieved 2026-10-07). claude-sonnet-5 is $2/$10: the
+ * page (footnote 3) says the introductory price is now the standard price and
+ * the announced 2026-09-01 increase to $3/$15 will not occur, so the kernel and
+ * this table agree on it. claude-haiku-5-5 is priced by prompt length ($0.10/$0.50
+ * up to 100k tokens, $0.50/$2.50 above); the kernel row holds the over-100k tier,
+ * so that is the tier entered here, and the two bases agree on it.
  */
 export const LIST_USD_PER_MTOK: Record<string, { input: number; output: number }> = {
-	"claude-sonnet-4-6": { input: 3, output: 15 },
-	"claude-haiku-4-5": { input: 1, output: 5 },
-	"claude-opus-4-6": { input: 5, output: 25 },
+	"claude-fable-5-1": { input: 10, output: 50 },
 	"claude-fable-5": { input: 10, output: 50 },
+	"claude-mythos-5-1": { input: 10, output: 50 },
+	"claude-mythos-5": { input: 10, output: 50 },
+	"claude-opus-5-5": { input: 4, output: 20 },
 	"claude-opus-5": { input: 5, output: 25 },
-	"claude-sonnet-5": { input: 2, output: 10 },
 	"claude-opus-4-8": { input: 5, output: 25 },
+	"claude-opus-4-7": { input: 5, output: 25 },
+	"claude-opus-4-6": { input: 5, output: 25 },
+	"claude-opus-4-5": { input: 5, output: 25 },
+	"claude-opus-4-1": { input: 15, output: 75 },
+	"claude-opus-4": { input: 15, output: 75 },
+	"claude-sonnet-5-5": { input: 2, output: 10 },
+	"claude-sonnet-5": { input: 2, output: 10 },
+	"claude-sonnet-4-6": { input: 3, output: 15 },
+	"claude-sonnet-4-5": { input: 3, output: 15 },
+	"claude-sonnet-4": { input: 3, output: 15 },
+	"claude-haiku-5-5": { input: 0.5, output: 2.5 },
+	"claude-haiku-4-5": { input: 1, output: 5 },
+	"claude-3-5-haiku": { input: 0.8, output: 4 },
 };
-
-/** Longest-first for prefix matching, mirroring pricing.ts's SORTED_TABLE. */
-const SORTED_LIST_KEYS = Object.keys(LIST_USD_PER_MTOK).sort((a, b) => b.length - a.length);
 
 /**
  * Resolve a model's published list rates the way `getModelRates` resolves
- * kernel rates (exact key, then longest prefix) — but THROW where the kernel
- * would fall back. A silent sonnet-class guess in the reconciliation block
- * would be exactly the unlabeled-basis mixing spec §6 forbids.
+ * kernel rates — an exact key, after stripping exactly ONE trailing `-YYYYMMDD`
+ * dated-snapshot suffix, and NEVER a prefix match (`claude-opus-5-5` is not
+ * `claude-opus-5`) — but THROW where the kernel would fall back. A silent
+ * guess in the reconciliation block would be exactly the unlabeled-basis
+ * mixing spec §6 forbids.
  */
 export function listRatesForModel(model: string): { input: number; output: number } {
-	if (Object.hasOwn(LIST_USD_PER_MTOK, model)) {
-		const exact = LIST_USD_PER_MTOK[model];
-		if (exact) return exact;
-	}
-	for (const key of SORTED_LIST_KEYS) {
-		if (model.startsWith(key)) {
+	for (const key of [model, model.replace(/-\d{8}$/, "")]) {
+		if (Object.hasOwn(LIST_USD_PER_MTOK, key)) {
 			const rates = LIST_USD_PER_MTOK[key];
 			if (rates) return rates;
 		}
