@@ -21,8 +21,8 @@ function makeCloudConfig(): TrustConfig {
 }
 
 describe("PRICING_TABLE", () => {
-	it("contains 40 models", () => {
-		expect(Object.keys(PRICING_TABLE)).toHaveLength(40);
+	it("contains 41 models", () => {
+		expect(Object.keys(PRICING_TABLE)).toHaveLength(41);
 	});
 
 	it("all rates are positive", () => {
@@ -81,11 +81,12 @@ describe("getModelRates", () => {
 	});
 
 	it("does NOT prefix match: a longer id is a different model (#143)", () => {
-		// Hyphenated OpenAI dates are not -YYYYMMDD, and prefix matching is gone,
-		// so these fall to the dearest-known fallback instead of the base row.
+		// Not a date suffix, and prefix matching is gone, so these fall to the
+		// dearest-known fallback instead of a base row.
 		expect(getModelRates("gpt-4o-mini-2025")).toBe(FALLBACK_RATE);
-		expect(getModelRates("gpt-4o-2025-01-01")).toBe(FALLBACK_RATE);
+		expect(getModelRates("gpt-4o-2025-01")).toBe(FALLBACK_RATE);
 		expect(getModelRates("o3-pro")).toBe(FALLBACK_RATE);
+		expect(getModelRates("gemini-2.5-pro-preview-06-05")).toBe(FALLBACK_RATE);
 	});
 
 	it("handles empty string gracefully (falls back)", () => {
@@ -575,6 +576,9 @@ const AUDITED_RATES: Record<string, ModelRates> = {
 	// cache-WRITE rate (writes bill at standard input), so cacheWritePer1k is omitted
 	// and the D1 fallback reproduces the published behaviour exactly.
 	"gpt-4o": { inputPer1k: 25, outputPer1k: 100, cacheReadPer1k: 12.5 },
+	// Dated snapshot priced differently from its alias: $5 / $15 per MTok, no cached
+	// input. developers.openai.com/api/docs/pricing, retrieved 2026-10-07.
+	"gpt-4o-2024-05-13": { inputPer1k: 50, outputPer1k: 150 },
 	"gpt-4o-mini": { inputPer1k: 1.5, outputPer1k: 6, cacheReadPer1k: 0.75 },
 	"gpt-5.4": { inputPer1k: 25, outputPer1k: 150, cacheReadPer1k: 2.5 },
 	o3: { inputPer1k: 20, outputPer1k: 80, cacheReadPer1k: 5 },
@@ -1058,6 +1062,35 @@ describe("isModelPriced (a caller that must refuse what it cannot price exactly)
 });
 
 describe("dated-snapshot canonicalization (F2)", () => {
+	it("strips exactly one trailing -YYYY-MM-DD and nothing else", () => {
+		expect(canonicalModelId("gpt-4o-2024-08-06")).toBe("gpt-4o");
+		expect(canonicalModelId("o3-2025-04-16")).toBe("o3");
+		expect(canonicalModelId("gpt-4o-2024-08-06-2024-08-06")).toBe("gpt-4o-2024-08-06");
+		expect(canonicalModelId("gpt-4o-2024-8-06")).toBe("gpt-4o-2024-8-06");
+		expect(canonicalModelId("gemini-2.5-pro-preview-06-05")).toBe("gemini-2.5-pro-preview-06-05");
+	});
+
+	it("a hyphenated-date snapshot resolves to its alias row", () => {
+		expect(getModelRates("gpt-4o-2024-08-06")).toBe(PRICING_TABLE["gpt-4o"]);
+		expect(getModelRates("gpt-4o-mini-2024-07-18")).toBe(PRICING_TABLE["gpt-4o-mini"]);
+		expect(getModelRates("o3-2025-04-16")).toBe(PRICING_TABLE.o3);
+		expect(getModelRates("o4-mini-2025-04-16")).toBe(PRICING_TABLE["o4-mini"]);
+		const r = resolveRates("gpt-4o-2024-08-06", "cloud", makeCloudConfig());
+		expect(r.rateSource).toBe("table");
+		expect(r.unknown).toBe(false);
+	});
+
+	// EXACT FIRST. gpt-4o-2024-05-13 is $5/$15 against gpt-4o's $2.50/$10, so reducing
+	// it to its alias would under-price every call 2x, silently, as a table hit.
+	it("exact-first: a snapshot with its own row is NOT reduced to its cheaper alias", () => {
+		const snap = getModelRates("gpt-4o-2024-05-13");
+		expect(snap).toBe(PRICING_TABLE["gpt-4o-2024-05-13"]);
+		expect(snap).not.toBe(PRICING_TABLE["gpt-4o"]);
+		expect(snap.inputPer1k).toBe(50);
+		expect(snap.outputPer1k).toBe(150);
+		expect(resolveRates("gpt-4o-2024-05-13", "cloud", makeCloudConfig()).rates).toBe(snap);
+	});
+
 	it("strips exactly one trailing -YYYYMMDD and nothing else", () => {
 		expect(canonicalModelId("claude-haiku-4-5-20251001")).toBe("claude-haiku-4-5");
 		expect(canonicalModelId("claude-sonnet-5-5")).toBe("claude-sonnet-5-5");

@@ -11,7 +11,7 @@ A budget of `100_000` UT equals $10.00. A budget of `1_000_000` UT equals $100.0
 
 ## Pricing Table
 
-The SDK includes a 40-model pricing table in `ledger/pricing.ts`, current as of
+The SDK includes a 41-model pricing table in `ledger/pricing.ts`, current as of
 `PRICING_TABLE_VERSION = "2026-10-07"` (see [PRICING_TABLE_VERSION](#pricing_table_version)).
 Rates are in usertokens per 1,000 LLM tokens, across **four tiers**: input (fresh prompt tokens),
 output, cache-read (cache-hit prompt tokens), and cache-write (cache-creation prompt tokens). A
@@ -59,6 +59,7 @@ approximations](#documented-approximations) — operators with 1h-heavy workload
 | Model | Input | Output | Cache Read | Cache Write |
 |-------|------:|-------:|-----------:|------------:|
 | `gpt-4o` | 25 | 100 | 12.5 | — |
+| `gpt-4o-2024-05-13` (snapshot priced above its alias) | 50 | 150 | — | — |
 | `gpt-4o-mini` | 1.5 | 6 | 0.75 | — |
 | `gpt-5.4` | 25 | 150 | 2.5 | — |
 | `o3` | 20 | 80 | 5 | — |
@@ -159,19 +160,30 @@ an unknown model instead of metering it.
 
 ## Model Matching
 
-`getModelRates()` matches a model id **exactly** against the pricing table. There is no prefix
-matching: `claude-sonnet-5-5` is a different, separately priced model from `claude-sonnet-5`, and a
-longer id that merely begins with a table key used to be billed at that key's row while the receipt
-claimed an exact table match. The one normalization is a dated snapshot: exactly one trailing
-`-YYYYMMDD` (eight digits) is stripped before the lookup. Anything else — `-fast`, a seven-digit
-suffix, a Bedrock `anthropic.…:0` or Vertex `…@…` id — is unknown and priced at the fallback rate.
-`isModelPriced()` is stricter on purpose: it checks for an exact key (or custom rate) only, so a
-dated snapshot meters at its base row but is not "priced" for a caller that must refuse what it
-cannot price exactly.
+`getModelRates()` resolves a model id in this order:
+
+1. an **exact** row;
+2. the id with exactly one trailing date suffix stripped — `-YYYYMMDD` (`claude-haiku-4-5-20251001`)
+   or `-YYYY-MM-DD` (`gpt-4o-2024-08-06`) — then exact;
+3. the fallback rate, flagged `rateSource: "fallback"`, `unknown: true`.
+
+There is no prefix matching: `claude-sonnet-5-5` is a different, separately priced model from
+`claude-sonnet-5`, and a longer id that merely begins with a table key used to be billed at that
+key's row while the receipt claimed an exact table match. The exact row is tried first because a
+dated snapshot can cost **more** than its alias: `gpt-4o-2024-05-13` is $5 / $15 per MTok against
+`gpt-4o`'s $2.50 / $10, so it has its own row and is never reduced to the alias. A dated snapshot
+with no row of its own is metered at its base row, which assumes it is priced like its alias.
+
+**Residue (priced at the fallback, flagged):** Gemini `…-preview-MM-DD` ids, a seven-digit or
+non-numeric suffix, `-fast`, and Bedrock `anthropic.…:0` / Vertex `…@…` ids. `isModelPriced()` is
+stricter on purpose: it checks for an exact key (or custom rate) only, so a dated snapshot meters
+at its base row but is not "priced" for a caller that must refuse what it cannot price exactly.
 
 ```typescript
 getModelRates("claude-fable-5")           // exact match → { 100, 500 }
 getModelRates("claude-fable-5-20260301")  // dated snapshot → claude-fable-5 → { 100, 500 }
+getModelRates("gpt-4o-2024-08-06")        // dated snapshot → gpt-4o → { 25, 100 }
+getModelRates("gpt-4o-2024-05-13")        // exact row, priced above its alias → { 50, 150 }
 getModelRates("claude-fable-5-1")         // its own row → { 100, 500, cache read 2.5 }
 getModelRates("claude-opus-5-fast")       // unknown → fallback → { 150, 750 }
 ```

@@ -93,14 +93,14 @@ export const LIST_USD_PER_MTOK: Record<string, { input: number; output: number }
 
 /**
  * Resolve a model's published list rates the way `getModelRates` resolves
- * kernel rates — an exact key, after stripping exactly ONE trailing `-YYYYMMDD`
- * dated-snapshot suffix, and NEVER a prefix match (`claude-opus-5-5` is not
+ * kernel rates — an exact key, then (exact-first) the key after stripping exactly
+ * ONE trailing `-YYYYMMDD` / `-YYYY-MM-DD` dated-snapshot suffix, and NEVER a prefix match (`claude-opus-5-5` is not
  * `claude-opus-5`) — but THROW where the kernel would fall back. A silent
  * guess in the reconciliation block would be exactly the unlabeled-basis
  * mixing spec §6 forbids.
  */
 export function listRatesForModel(model: string): { input: number; output: number } {
-	for (const key of [model, model.replace(/-\d{8}$/, "")]) {
+	for (const key of [model, model.replace(/-(?:\d{8}|\d{4}-\d{2}-\d{2})$/, "")]) {
 		if (Object.hasOwn(LIST_USD_PER_MTOK, key)) {
 			const rates = LIST_USD_PER_MTOK[key];
 			if (rates) return rates;

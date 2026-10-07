@@ -548,16 +548,19 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				},
 				{ baseURL: null },
 			);
-			// 10_000, not 1000: an unknown model now meters at the dearest-known fallback
-			// (150/750), so the default max_tokens hold alone exceeds a 1000-UT budget.
-			const governed = await trust(client, { dryRun: true, budget: 10_000, vaultBase: tmpVault });
+			const governed = await trust(client, { dryRun: true, budget: 1000, vaultBase: tmpVault });
 
+			// A small max_tokens keeps the fallback-priced (150/750) hold inside the 1000-UT
+			// budget, so this stays a test of the warn policy, not of the hold size. The
+			// hold size is pinned by "an unknown id's default-max_tokens hold ..." below.
 			const r1 = await call(governed, {
 				model: "made-up-model-warn-1",
+				max_tokens: 50,
 				messages: [{ role: "user", content: "hi" }],
 			});
 			const r2 = await call(governed, {
 				model: "made-up-model-warn-1",
+				max_tokens: 50,
 				messages: [{ role: "user", content: "hi" }],
 			});
 
@@ -571,8 +574,7 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 		});
 
 		it("fallback: silent — no warn, receipt still marked fallback", async () => {
-			// 10_000: see the warn case above; the fallback hold is now 150/750 per 1k.
-			writeVaultConfig(tmpVault, { budget: 10_000, unknownModelPolicy: "fallback" });
+			writeVaultConfig(tmpVault, { budget: 1000, unknownModelPolicy: "fallback" });
 			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 			const { client } = makeJsonClient(
 				{
@@ -586,6 +588,7 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 
 			const result = await call(governed, {
 				model: "made-up-model-silent-1",
+				max_tokens: 50, // keeps the fallback-priced hold inside the 1000-UT budget
 				messages: [{ role: "user", content: "hi" }],
 			});
 			const unknownModelWarns = warnSpy.mock.calls.filter((c) =>
@@ -597,6 +600,40 @@ describe("M2 local endpoint governance (govern.ts + streaming.ts)", () => {
 				rateSource: "fallback",
 			});
 			await destroy(governed);
+		});
+
+		// The CONSEQUENCE of "fail dearest", pinned rather than absorbed. An unknown id
+		// holds at the dearest published rate (150/750), so the default max_tokens (4096)
+		// alone reserves ~3,072 UT and a 1000-UT budget refuses the call before the
+		// provider is reached. A known model on the same budget and call is admitted.
+		it("an unknown id's default-max_tokens hold is fallback-priced and denied at a 1000 budget", async () => {
+			const respond = {
+				id: "x",
+				choices: [{ message: { role: "assistant", content: "hi" } }],
+				usage: { prompt_tokens: 10, completion_tokens: 5 },
+			};
+			const { client: unknownClient } = makeJsonClient(respond, { baseURL: null });
+			const unknown = await trust(unknownClient, {
+				dryRun: true,
+				budget: 1000,
+				vaultBase: tmpVault,
+			});
+			await expect(
+				call(unknown, {
+					model: "made-up-model-hold-1",
+					messages: [{ role: "user", content: "hi" }],
+				}),
+			).rejects.toThrow(PolicyDeniedError);
+			await destroy(unknown);
+
+			const { client: knownClient } = makeJsonClient(respond, { baseURL: null });
+			const known = await trust(knownClient, { dryRun: true, budget: 1000, vaultBase: tmpVault });
+			const ok = await call(known, {
+				model: "claude-sonnet-5",
+				messages: [{ role: "user", content: "hi" }],
+			});
+			expect(ok.receipt.meter).toMatchObject({ rateSource: "table" });
+			await destroy(known);
 		});
 	});
 

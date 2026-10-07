@@ -202,6 +202,11 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 	// gpt-5.6+ entry added here MUST carry an explicit cacheWritePer1k, or its
 	// writes will silently misprice at the (now wrong) inputPer1k fallback.
 	"gpt-4o": { inputPer1k: 25, outputPer1k: 100, cacheReadPer1k: 12.5 },
+	// A dated snapshot priced differently from its alias, so it needs its OWN exact
+	// row (an exact id is looked up before any date is stripped). $5 in / $15 out
+	// per MTok, no cached-input price published (omitted: it prices at inputPer1k,
+	// D1). Source: developers.openai.com/api/docs/pricing, retrieved 2026-10-07.
+	"gpt-4o-2024-05-13": { inputPer1k: 50, outputPer1k: 150 },
 	"gpt-4o-mini": { inputPer1k: 1.5, outputPer1k: 6, cacheReadPer1k: 0.75 },
 	"gpt-5.4": { inputPer1k: 25, outputPer1k: 150, cacheReadPer1k: 2.5 },
 	o3: { inputPer1k: 20, outputPer1k: 80, cacheReadPer1k: 5 },
@@ -277,21 +282,31 @@ export const PRICING_TABLE: Record<string, ModelRates> = {
 export const PRICING_TABLE_VERSION = "2026-10-07";
 
 /**
- * Reduce a model id to its table key. Strips EXACTLY ONE trailing `-YYYYMMDD`
- * (eight digits) — the dated-snapshot form providers publish
- * (`claude-haiku-4-5-20251001`) — and nothing else. This is deliberately NOT
- * prefix matching: `claude-sonnet-5-5` does not reduce to `claude-sonnet-5`, a
- * seven-digit or non-numeric suffix is left alone, and `-fast` is left alone.
- * Prefix matching priced every variant at its base row and reported
- * `rateSource: "table"` (#143), which under-prices whenever the variant is dearer.
- * Other id shapes (Bedrock `anthropic.…:0`, Vertex `@…`) are not reduced; they
- * resolve to FALLBACK_RATE, flagged `unknown`.
+ * Reduce a model id to its base table key. Strips EXACTLY ONE trailing date
+ * suffix, in one of the two forms providers publish a dated snapshot in:
+ * `-YYYYMMDD` (`claude-haiku-4-5-20251001`) or `-YYYY-MM-DD`
+ * (`gpt-4o-2024-08-06`). Nothing else is reduced. This is deliberately NOT prefix
+ * matching: `claude-sonnet-5-5` does not reduce to `claude-sonnet-5`, a
+ * seven-digit or non-numeric suffix is left alone, `-fast` is left alone, and a
+ * Gemini `MM-DD` preview suffix is left alone. Prefix matching priced every
+ * variant at its base row and reported `rateSource: "table"` (#143), which
+ * under-prices whenever the variant is dearer. Other id shapes (Bedrock
+ * `anthropic.…:0`, Vertex `@…`) are not reduced; they resolve to FALLBACK_RATE,
+ * flagged `unknown`.
+ *
+ * CALLED SECOND, never first: a dated snapshot can cost MORE than its alias
+ * (`gpt-4o-2024-05-13` is $5/$15 against `gpt-4o`'s $2.50/$10), so
+ * `lookupTableRates` tries the exact id before it reduces anything.
  */
 export function canonicalModelId(model: string): string {
-	return model.replace(/-\d{8}$/, "");
+	return model.replace(/-(?:\d{8}|\d{4}-\d{2}-\d{2})$/, "");
 }
 
-/** Exact-key table lookup, via the dated-snapshot canonical form. Own keys only. */
+/**
+ * Table lookup, in this order: (1) the EXACT id, (2) the id with one date suffix
+ * stripped, then exact. Own keys only. Exact-first is load-bearing: a snapshot
+ * with its own row must never be reduced to its alias's cheaper row.
+ */
 function lookupTableRates(model: string): ModelRates | undefined {
 	for (const key of [model, canonicalModelId(model)]) {
 		if (Object.hasOwn(PRICING_TABLE, key)) {
