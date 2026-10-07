@@ -795,8 +795,8 @@ describe("headless settle and abort read an INTERNAL capture, not the caller's h
 		await expect(gov.settle(auth, { inputTokens: 80, outputTokens: 200 })).rejects.toThrow(
 			/is not active/,
 		);
-		// abort stays idempotent-silent rather than throwing.
-		await expect(gov.abort(auth)).resolves.toBeUndefined();
+		// abort stays silent rather than throwing, and says it ended nothing.
+		await expect(gov.abort(auth)).resolves.toEqual({ aborted: false });
 		expect(engine.postPendingSpend).toHaveBeenCalledOnce();
 		expect(engine.voidPendingSpend).not.toHaveBeenCalled();
 

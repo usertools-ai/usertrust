@@ -187,7 +187,7 @@ describe("a SettleParams getter runs BEFORE the claim: the hold it ends is ended
 					),
 				).rejects.toThrow("is not active");
 				const answer = await inner;
-				if (terminal === "release") expect(answer).toEqual({ released: true });
+				expect(answer).toEqual(terminal === "release" ? { released: true } : { aborted: true });
 				expect(ledger).toEqual({ posts: [], voids: [auth.transferId] });
 				expect(kinds()).toEqual([RECORD[terminal]]);
 				// The hold's budget came back once, never twice.
@@ -402,7 +402,7 @@ describe("a getter on the HANDLE runs after the claim: settle owns the hold, and
 					{ inputTokens: 10, outputTokens: 10 },
 				);
 				const answer = await inner;
-				if (terminal === "release") expect(answer).toEqual({ released: false });
+				expect(answer).toEqual(terminal === "release" ? { released: false } : { aborted: false });
 				expect(ledger).toEqual({ posts: [auth.transferId], voids: [] });
 				expect(kinds().filter((k) => k !== "settlement_shortfall")).toEqual(["llm_call"]);
 				// A session hold is charged once and given back once; an attributed one

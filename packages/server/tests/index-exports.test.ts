@@ -11,6 +11,7 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import {
 	AbortRequestSchema,
+	type AbortResponse,
 	AuthorizeRequestSchema,
 	type ReleaseRequest,
 	ReleaseRequestSchema,
@@ -33,6 +34,12 @@ describe("the package index exports every route's wire contract", () => {
 		expectTypeOf(request).toEqualTypeOf<ReleaseRequest>();
 		expectTypeOf<ReleaseResponse>().toEqualTypeOf<{
 			released: true;
+			transferId: string;
+			voidError?: string;
+		}>();
+		// Abort's 200 has release's shape: it says THIS request ended the hold.
+		expectTypeOf<AbortResponse>().toEqualTypeOf<{
+			aborted: true;
 			transferId: string;
 			voidError?: string;
 		}>();

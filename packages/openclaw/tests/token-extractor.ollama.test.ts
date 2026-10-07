@@ -267,7 +267,7 @@ function fakeGovernor(): { governor: Governor; settle: ReturnType<typeof vi.fn> 
 		budgetRemaining: () => 1_000,
 		authorize: vi.fn(async () => auth),
 		settle,
-		abort: vi.fn(async () => {}),
+		abort: vi.fn(async () => ({ aborted: true as const })),
 	} as unknown as Governor;
 	return { governor, settle };
 }

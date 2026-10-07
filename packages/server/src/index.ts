@@ -10,6 +10,7 @@ export { GovernorPool } from "./pool.js";
 export type { UsertrustServer } from "./server.js";
 export { createUsertrustServer } from "./server.js";
 export type {
+	AbortResponse,
 	AuthorizeRequest,
 	AuthorizeResponse,
 	ReleaseRequest,

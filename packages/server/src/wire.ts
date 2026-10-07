@@ -100,6 +100,17 @@ export interface ReleaseResponse {
 	voidError?: string;
 }
 
+/**
+ * `POST /v1/abort`'s 200, by release's rule: THIS request ended the hold. A hold the
+ * governor no longer held (a settle owns it, or it already ended) is a 404 `unknown
+ * transferId`, never a 200. `voidError` names a ledger void that failed, as a fixed code.
+ */
+export interface AbortResponse {
+	aborted: true;
+	transferId: string;
+	voidError?: string;
+}
+
 export interface AuthorizeResponse {
 	transferId: string;
 	estimatedCost: number;

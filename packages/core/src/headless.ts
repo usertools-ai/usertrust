@@ -160,6 +160,13 @@ export interface GovernorOpts extends TrustOpts {
 	 * budget/customRates: whoever sets it already controls billing entirely.
 	 */
 	endpoint?: Partial<EndpointInfo> | undefined;
+	/**
+	 * How long destroy() waits for terminals still working (settles, and aborts and
+	 * releases in flight) before it sweeps. Default 5 000 ms. For tests: ignored outside a
+	 * test environment.
+	 * @internal
+	 */
+	_destroyDrainMs?: number;
 }
 
 /** Handle returned by authorize(), passed to settle() or abort(). */
@@ -398,8 +405,15 @@ export interface Governor {
 	 * VOIDs the pending hold, writes failure audit.
 	 *
 	 * Attribution comes from the handle here too — see settle().
+	 *
+	 * Answers `{ aborted: true }` only when THIS call ended the hold, and
+	 * `{ aborted: false }` when the governor no longer held it (a settle owns it, or it
+	 * was already settled, aborted or released) or `destroy()` has taken the remaining
+	 * holds (it ends them itself), as `release()` does. A void
+	 * the ledger refused still ends the hold here and is named in `voidError`, a fixed
+	 * code, never the error's text.
 	 */
-	abort(auth: Authorization, error?: unknown): Promise<void>;
+	abort(auth: Authorization, error?: unknown): Promise<AbortOutcome>;
 
 	/**
 	 * Phase 2c: Give back a hold that did not fail: a reservation the caller no longer
@@ -410,8 +424,9 @@ export interface Governor {
 	 * call that failed.
 	 *
 	 * Answers `{ released: true }` only when THIS call ended the hold, and
-	 * `{ released: false }` when the governor no longer held it: its settle is mid-POST,
-	 * or it was already settled, aborted, released or destroyed. A void the ledger
+	 * `{ released: false }` when the governor no longer held it (its settle is mid-POST,
+	 * or it was already settled, aborted or released) or `destroy()` has taken the
+	 * remaining holds (it ends them itself). A void the ledger
 	 * refused still ends the hold here (its accounting is released, and the ledger's
 	 * pending timeout returns the funds) and is named in `voidError`: a fixed code for
 	 * its cause, never the error's text. A hold the ledger had already expired is
@@ -464,6 +479,11 @@ export interface Governor {
 	/** The loaded configuration. */
 	readonly config: Readonly<TrustConfig>;
 }
+
+/** What `Governor.abort()` did: see there. */
+export type AbortOutcome =
+	| { readonly aborted: true; readonly voidError?: string }
+	| { readonly aborted: false };
 
 /** What `Governor.release()` did: see there. */
 export type ReleaseOutcome =
@@ -981,6 +1001,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	const defaultEndpoint = normalizeEndpoint(opts?.endpoint);
 	const isDryRun = opts?.dryRun ?? process.env.USERTRUST_DRY_RUN === "true";
 	const isTestEnv = process.env.USERTRUST_TEST === "1" || process.env.NODE_ENV === "test";
+	const destroyDrainMs = (isTestEnv ? opts?._destroyDrainMs : undefined) ?? 5_000;
 
 	// 2. Initialize subsystems
 	const vaultPath = vaultBase;
@@ -1039,6 +1060,11 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 
 	// 5. State
 	let destroyed = false;
+	// Set by destroy() in the same synchronous step that takes every remaining hold, at its
+	// deadline. From then on settle(), abort() and release() refuse at entry, before any
+	// claim. Not `destroyed`, which is set when destroy() BEGINS: while it drains, a terminal
+	// still runs and is waited for (a settle carries a charge for a call that ran).
+	let sweeping = false;
 	const budgetMutex = new AsyncMutex();
 	let inFlightHoldTotal = 0;
 	// Keyed by transferId, holding the GOVERNOR's capture — not the caller's handle.
@@ -1059,6 +1085,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// destroy() waits for this set to drain before voidAllPending(), matching
 	// trust()'s 5s in-flight wait — never void a hold a settle is still working on.
 	const settling = new Set<string>();
+	// Holds an abort() or release() has CLAIMED and not yet recorded: parked on the
+	// budget lock or on its ledger void, and in neither map. destroy() waits for these
+	// as it does for `settling`, so a parked terminal lands its own void before the sweep.
+	// A terminal leaves here in the same synchronous step that calls `appendEvent`, and
+	// the writer queues an append when it is CALLED (its mutex's `acquire()` swaps the
+	// queue before its first await; chain.test.ts pins this), so that record lands
+	// before destroy()'s `flush()` and `release()`. One still here at destroy()'s
+	// deadline is taken out and recorded by destroy() itself (the capture is kept for
+	// its actor), and that terminal, finding itself gone, writes no second record.
+	const inFlight = new Map<string, AuthorizationCapture>();
 
 	// Finding-2 (RECON #4): serialized, monotonic spend-ledger persistence.
 	// budgetSpent only ever increases (settle adds actualCost >= 0; authorize and
@@ -1502,6 +1538,33 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// or transports it.
 				...(captured !== undefined ? { costCenter: captured.attribution.costCenter } : {}),
 			};
+			// destroy() may have begun while this call awaited (the budget lock, the policy,
+			// the reserve). It claims every hold registered before it, and a hold registered
+			// after would outlive the governor: a terminal could end it after the audit
+			// writer is released. So it is never registered, and the call fails as one made
+			// after destroy() does. Nothing awaits between this check and the registration
+			// below.
+			//  - Its session accounting is given back, under the budget lock as abort() and
+			//    release() give theirs back: a settle destroy() is still draining reads it for
+			//    its receipt.
+			//  - Its reservation is NOT voided here. This void would be work destroy() does not
+			//    wait for, and destroy() may already have closed the ledger client; a void then
+			//    rebuilds a client that nothing destroys (#249). The ledger's pending timeout
+			//    releases it within 300 s of its reserve (`LEDGER_HOLD_TIMEOUT_MS`), unless the
+			//    engine sweep, which voids every reservation that landed before it, did first.
+			//  - No record: a granted authorize writes none, and this one never became a hold
+			//    the governor owned.
+			if (destroyed) {
+				if (!envelopeDebited) {
+					const releaseLock = await budgetMutex.acquire();
+					try {
+						inFlightHoldTotal -= estCost;
+					} finally {
+						releaseLock();
+					}
+				}
+				throw new Error("Governor has been destroyed");
+			}
 			// The GOVERNOR's record. Keyed by transferId and unreachable from caller
 			// code, so `settle()`/`abort()` can never be handed a different cost center
 			// than the one the hold was placed against.
@@ -1524,6 +1587,12 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// The handle's id, read ONCE and FIRST: a getter on it runs here, before any state
 			// changes, and every claim, lookup and record below uses this one value.
 			const transferId = auth.transferId;
+			// Refused once destroy() has taken the remaining holds (see `sweeping`). NOT while
+			// it drains: a settle carries a charge for a call that ran, and destroy() waits for
+			// it, so refusing it there would void that call's cost.
+			if (sweeping) {
+				throw new Error("Governor has been destroyed");
+			}
 			// Caller input, read ONCE and FIRST: every SettleParams field, into a plain
 			// local, before this call claims anything. A getter runs here, before any state
 			// changes: one that throws leaves the hold untouched (live, still settleable),
@@ -1918,9 +1987,15 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			}
 		},
 
-		async abort(auth: Authorization, error?: unknown): Promise<void> {
+		async abort(auth: Authorization, error?: unknown): Promise<AbortOutcome> {
 			// The handle's id, read ONCE and FIRST (see settle()).
 			const transferId = auth.transferId;
+			// Refused once destroy() has taken the remaining holds (see `sweeping`): the hold is
+			// destroy()'s to end, and it voids and records it. Before any claim: no void, no
+			// record. While destroy() drains, an abort runs as before and is waited for.
+			if (sweeping) {
+				return { aborted: false };
+			}
 			// Same lookup as settle, and the same reason: liveness and attribution come
 			// from one internal record. Still idempotent-silent, unlike settle.
 			// A settle owns this hold (from its claim to its end; see `settling`):
@@ -1928,7 +2003,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// committing) and must not recordFailure / llm_call_failed — that would
 			// trip the provider circuit for a call that is settling, not failing.
 			if (settling.has(transferId)) {
-				return;
+				return { aborted: false };
 			}
 			// AUD-001: a settle that threw BEFORE POST has already claimed the
 			// auth (deleted from activeAuths) but left the transfer PENDING.
@@ -1943,78 +2018,96 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			} else {
 				capture = unpostedHolds.get(transferId);
 				if (capture === undefined) {
-					return;
+					return { aborted: false };
 				}
 				unpostedHolds.delete(transferId);
 			}
-			// Re-check: settle may have entered POST after we read unpostedHolds.
-			if (settling.has(transferId)) {
-				return;
-			}
-
-			// Only the session wallet's own in-flight exposure is released here; an
-			// attributed hold never added to it (see authorize), and the VOID below is
-			// what returns the envelope's funds.
-			if (capture.sessionAccounted) {
-				// AUD-453: Acquire mutex for budget atomicity
-				const releaseLock = await budgetMutex.acquire();
-				try {
-					inFlightHoldTotal -= auth.estimatedCost;
-				} finally {
-					releaseLock();
+			// Claimed, and in flight until its record starts: destroy() waits for it (see
+			// `inFlight`). No second `settling` check here: nothing above awaits and settle()
+			// marks its hold at its own claim, so it could never be true, and a return here
+			// would orphan the claimed hold. No return from here on skips the void.
+			inFlight.set(transferId, capture);
+			try {
+				// Only the session wallet's own in-flight exposure is released here; an
+				// attributed hold never added to it (see authorize), and the VOID below is
+				// what returns the envelope's funds.
+				if (capture.sessionAccounted) {
+					// AUD-453: Acquire mutex for budget atomicity
+					const releaseLock = await budgetMutex.acquire();
+					try {
+						inFlightHoldTotal -= auth.estimatedCost;
+					} finally {
+						releaseLock();
+					}
 				}
-			}
 
-			// Circuit breaker: failure
-			const cb = breaker.get("headless" as never);
-			cb.recordFailure();
+				// Circuit breaker: failure
+				const cb = breaker.get("headless" as never);
+				cb.recordFailure();
 
-			// VOID the pending hold
-			if (proxyConn != null && !isDryRun) {
-				try {
-					await proxyConn.void(auth.proxyTransferId ?? transferId);
-				} catch {
-					// Best-effort void
+				// VOID the pending hold. A failed void is named, never thrown: the hold's
+				// accounting is released above, and the ledger's timeout returns its funds.
+				let voidError: string | undefined;
+				if (proxyConn != null && !isDryRun) {
+					try {
+						await proxyConn.void(auth.proxyTransferId ?? transferId);
+					} catch {
+						voidError = "proxy_void_failed";
+					}
+				} else if (engine != null && !isDryRun) {
+					try {
+						await engine.voidPendingSpend(transferId);
+					} catch (err) {
+						voidError = releaseVoidError(err);
+					}
 				}
-			} else if (engine != null && !isDryRun) {
-				try {
-					await engine.voidPendingSpend(transferId);
-				} catch {
-					// Best-effort void
-				}
-			}
 
-			// Audit the failure.
-			// A1: an attributed hold leaves an attributed record on the VOID terminal
-			// too — forensic continuity, so an auditor reconstructing a cost center's
-			// history sees the calls that were held against it and released, not only
-			// the ones that settled. Read from the capture, like settle: abort commonly
-			// runs from a `catch` block outside the `withCostCenter` scope entirely, and
-			// the handle it is handed there is caller-owned.
-			await audit
-				.appendEvent({
-					kind: "llm_call_failed",
-					actor: capture.actor,
-					data: {
-						model: auth.model,
-						transferId,
-						error:
-							error instanceof Error
-								? error.message.slice(0, 200)
-								: error != null
-									? String(error).slice(0, 200)
-									: "aborted",
-						source: "headless",
-						...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
-						...(capture.principal === undefined ? {} : { principal: capture.principal }),
-					},
-				})
-				.catch(() => {});
+				const outcome: AbortOutcome =
+					voidError === undefined ? { aborted: true } : { aborted: true, voidError };
+
+				// Audit the failure.
+				// A1: an attributed hold leaves an attributed record on the VOID terminal
+				// too — forensic continuity, so an auditor reconstructing a cost center's
+				// history sees the calls that were held against it and released, not only
+				// the ones that settled. Read from the capture, like settle: abort commonly
+				// runs from a `catch` block outside the `withCostCenter` scope entirely, and
+				// the handle it is handed there is caller-owned.
+				// Out of `inFlight` in the same step as the append. Already gone means
+				// destroy() reached its deadline first and recorded this hold: no second record.
+				if (!inFlight.delete(transferId)) return outcome;
+				await audit
+					.appendEvent({
+						kind: "llm_call_failed",
+						actor: capture.actor,
+						data: {
+							model: auth.model,
+							transferId,
+							error:
+								error instanceof Error
+									? error.message.slice(0, 200)
+									: error != null
+										? String(error).slice(0, 200)
+										: "aborted",
+							source: "headless",
+							...(voidError === undefined ? {} : { voidError }),
+							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
+							...(capture.principal === undefined ? {} : { principal: capture.principal }),
+						},
+					})
+					.catch(() => {});
+				return outcome;
+			} finally {
+				inFlight.delete(transferId);
+			}
 		},
 
 		async release(auth: Authorization, reason?: string): Promise<ReleaseOutcome> {
 			// The handle's id, read ONCE and FIRST (see settle()).
 			const transferId = auth.transferId;
+			// Refused once destroy() has taken the remaining holds, before any claim, as abort() is.
+			if (sweeping) {
+				return { released: false };
+			}
 			// abort()'s claim discipline, step for step and for the same reasons: a hold a
 			// settle owns (see `settling`) belongs to settle; a hold whose settle failed
 			// before its POST is releasable again; a miss in both is already resolved. Only
@@ -2032,107 +2125,167 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				}
 				unpostedHolds.delete(transferId);
 			}
-			// Re-check: settle may have entered POST after we read unpostedHolds.
-			if (settling.has(transferId)) {
-				return { released: false };
-			}
-
-			// Exactly what abort() gives back, the same way: only the session wallet's own
-			// in-flight exposure. An attributed hold never added to it.
-			if (capture.sessionAccounted) {
-				const releaseLock = await budgetMutex.acquire();
-				try {
-					inFlightHoldTotal -= auth.estimatedCost;
-				} finally {
-					releaseLock();
+			// Claimed, and in flight until its record starts (see abort()).
+			inFlight.set(transferId, capture);
+			try {
+				// Exactly what abort() gives back, the same way: only the session wallet's own
+				// in-flight exposure. An attributed hold never added to it.
+				if (capture.sessionAccounted) {
+					const releaseLock = await budgetMutex.acquire();
+					try {
+						inFlightHoldTotal -= auth.estimatedCost;
+					} finally {
+						releaseLock();
+					}
 				}
-			}
 
-			// No circuit-breaker call, deliberately: a give-back is neither a failure nor a
-			// success (see the interface).
+				// No circuit-breaker call, deliberately: a give-back is neither a failure nor a
+				// success (see the interface).
 
-			// VOID the pending hold. A hold the ledger already expired is done (the engine
-			// says so). Any other refusal is recorded, never thrown: the hold's accounting
-			// is released above, and the ledger's pending timeout returns its funds.
-			let voidError: string | undefined;
-			if (proxyConn != null && !isDryRun) {
-				try {
-					await proxyConn.void(capture.proxyTransferId ?? transferId);
-				} catch {
-					// A proxy's failure carries no cause this governor can read, an expiry
-					// included. (Proxy mode is removed, AUD-456: `proxyConn` is always null.)
-					voidError = "proxy_void_failed";
+				// VOID the pending hold. A hold the ledger already expired is done (the engine
+				// says so). Any other refusal is recorded, never thrown: the hold's accounting
+				// is released above, and the ledger's pending timeout returns its funds.
+				let voidError: string | undefined;
+				if (proxyConn != null && !isDryRun) {
+					try {
+						await proxyConn.void(capture.proxyTransferId ?? transferId);
+					} catch {
+						// A proxy's failure carries no cause this governor can read, an expiry
+						// included. (Proxy mode is removed, AUD-456: `proxyConn` is always null.)
+						voidError = "proxy_void_failed";
+					}
+				} else if (engine != null && !isDryRun) {
+					try {
+						await engine.voidPendingSpend(transferId);
+					} catch (err) {
+						voidError = releaseVoidError(err);
+					}
 				}
-			} else if (engine != null && !isDryRun) {
-				try {
-					await engine.voidPendingSpend(transferId);
-				} catch (err) {
-					voidError = releaseVoidError(err);
-				}
-			}
 
-			// A neutral terminal record (#204): what ended the hold and why, attributed
-			// from the capture like every other terminal.
-			await audit
-				.appendEvent({
-					kind: "hold_released",
-					actor: capture.actor,
-					data: {
-						model: auth.model,
-						transferId,
-						reason: sanitizeReleaseReason(reason),
-						source: "headless",
-						...(voidError === undefined ? {} : { voidError }),
-						...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
-						...(capture.principal === undefined ? {} : { principal: capture.principal }),
-					},
-				})
-				.catch(() => {});
-			return voidError === undefined ? { released: true } : { released: true, voidError };
+				const outcome: ReleaseOutcome =
+					voidError === undefined ? { released: true } : { released: true, voidError };
+
+				// A neutral terminal record (#204): what ended the hold and why, attributed
+				// from the capture like every other terminal. Out of `inFlight` in the same
+				// step as the append (see abort()).
+				if (!inFlight.delete(transferId)) return outcome;
+				await audit
+					.appendEvent({
+						kind: "hold_released",
+						actor: capture.actor,
+						data: {
+							model: auth.model,
+							transferId,
+							reason: sanitizeReleaseReason(reason),
+							source: "headless",
+							...(voidError === undefined ? {} : { voidError }),
+							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
+							...(capture.principal === undefined ? {} : { principal: capture.principal }),
+						},
+					})
+					.catch(() => {});
+				return outcome;
+			} finally {
+				inFlight.delete(transferId);
+			}
 		},
 
 		async destroy(): Promise<void> {
 			if (destroyed) return;
 			destroyed = true;
 
-			// Never void a hold whose POST is in flight. Wait for settling to
-			// drain (same 5s bound as trust()) before sweeping leftovers.
-			const deadline = Date.now() + 5_000;
-			while (settling.size > 0 && Date.now() < deadline) {
+			// Never void a hold a terminal is still working on: a settle's POST, or an abort
+			// or release parked on the budget lock or its own void. ONE deadline for both
+			// (trust()'s 5 s bound), never one per set. A terminal that starts while this
+			// drains (a settle, an abort, a release) runs as before and is waited for too; they
+			// refuse only from the claim below (`sweeping`).
+			const deadline = Date.now() + destroyDrainMs;
+			while ((settling.size > 0 || inFlight.size > 0) && Date.now() < deadline) {
 				await new Promise<void>((r) => setTimeout(r, 50));
 			}
 
-			// Void leftover authorizations (still-active + claimed-but-never-POSTed).
-			// The per-id walk is what the proxy path has; the engine sweep below
-			// is what trust() does. Walking claimed holds is what keeps abort's
-			// sibling from losing the void path after a pre-POST throw. A
-			// transport-ambiguous POST is NOT in unpostedHolds — do not treat
-			// it as a hold to void.
-			for (const [txId, capture] of [...activeAuths, ...unpostedHolds]) {
+			// At the deadline, destroy() takes every hold that is still the governor's, in ONE
+			// synchronous step, before its first await: no terminal can claim one of them
+			// while destroy() records another, and every terminal called from here on refuses
+			// at entry (`sweeping`), before any claim.
+			//  - An abort or release still in flight has not recorded its hold, and its own
+			//    record would land after the writer closes below. Taken out of `inFlight`, it
+			//    writes none (see abort()); its record is destroy()'s.
+			//  - Every hold still held: still active, or handed back by a settle that threw
+			//    before its POST. A settle still posting is in neither map (it leaves
+			//    `unpostedHolds` before its POST, its first await), and neither is a
+			//    transport-ambiguous POST, which already has its record (`settlement_ambiguous`).
+			const stillInFlight = [...inFlight];
+			inFlight.clear();
+			sweeping = true;
+			const leftovers = [...activeAuths, ...unpostedHolds];
+			activeAuths.clear();
+			unpostedHolds.clear();
+
+			// A terminal still in flight: its void is its own, or the engine sweep's below
+			// (which also reaches this hold: its engine entry goes only when its own void
+			// returns), and the ledger takes one of the two: one mutation either way. The record
+			// says only what destroy() knows, that the void had not completed. It names no
+			// `voidError`: there was no outcome yet. The terminal still answers its caller from
+			// its own void.
+			for (const [txId, capture] of stillInFlight) {
+				await audit
+					.appendEvent({
+						kind: "hold_released",
+						actor: capture.actor,
+						data: {
+							transferId: txId,
+							reason: "governor destroyed (terminal still in flight: its void had not completed)",
+							source: "headless",
+							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
+							...(capture.principal === undefined ? {} : { principal: capture.principal }),
+						},
+					})
+					.catch(() => {});
+			}
+
+			// Every hold still held: voided and recorded, so destroy() ends no hold without a
+			// record.
+			for (const [txId, capture] of leftovers) {
+				let voidError: string | undefined;
 				if (proxyConn != null && !isDryRun) {
 					try {
 						await proxyConn.void(capture.proxyTransferId ?? txId);
 					} catch {
-						// Best-effort void
+						voidError = "proxy_void_failed";
 					}
 				} else if (engine != null && !isDryRun) {
 					try {
 						await engine.voidPendingSpend(txId);
-					} catch {
-						// Best-effort void
+					} catch (err) {
+						voidError = releaseVoidError(err);
 					}
 				}
+				// The capture carries no model (#205), so this record names none.
+				await audit
+					.appendEvent({
+						kind: "hold_released",
+						actor: capture.actor,
+						data: {
+							transferId: txId,
+							reason: "governor destroyed",
+							source: "headless",
+							...(voidError === undefined ? {} : { voidError }),
+							...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
+							...(capture.principal === undefined ? {} : { principal: capture.principal }),
+						},
+					})
+					.catch(() => {});
 			}
-			activeAuths.clear();
-			unpostedHolds.clear();
 
-			// AUD-001 / AUD-461: same sweep trust() runs. pendingMap leftovers
-			// (a pre-POST claim that never made unpostedHolds, or a factory
-			// entry whose POST threw after TB committed) are best-effort: void
-			// of an already-posted transfer fails closed in the catch. This is
-			// NOT "void the hold" for an ambiguous POST — abort already refused
-			// that path. Then close the client: a voidAllPending throw must not
-			// skip destroy() and hang the process on the open TigerBeetle socket.
+			// AUD-001 / AUD-461: same sweep trust() runs, best-effort, and it writes no
+			// record. What it can still find has one already: a settle whose POST threw
+			// (`settlement_ambiguous`; a void of a transfer TB did post fails closed in the
+			// catch), an abort or release whose own void failed (its record names the
+			// `voidError`, though this sweep may yet return the funds), a terminal still in
+			// flight above (recorded there), and a settle still posting past the deadline (its
+			// own records). Then close the client: a voidAllPending throw must not skip
+			// destroy() and hang the process on the open TigerBeetle socket.
 			if (engine != null && typeof engine.voidAllPending === "function") {
 				try {
 					await engine.voidAllPending();
