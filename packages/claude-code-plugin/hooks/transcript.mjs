@@ -103,7 +103,10 @@
 // written before it is never posted (see `firstRun`).
 // A hold's outcome is journalled beside its pending file (<hold>.settling while
 // in flight, <hold>.done after) so the cursor can be brought up to date by the
-// next hook that gets the lock, even when the settling hook could not.
+// next hook that gets the lock, even when the settling hook could not. Each name
+// is the hold's own, keyed by its transfer (lib.mjs `holdFilePath`): a stale
+// settler of an earlier hold of the same call finds only that hold's file, and
+// one hold's outcome never lands in another's journal.
 import { createHash, randomBytes } from "node:crypto";
 import {
 	link,
@@ -126,13 +129,15 @@ import {
 	clearPending,
 	isAlreadySettled,
 	isUnknownRoute,
+	isUnknownTransfer,
+	LINKLESS,
 	listPending,
+	publishExclusive,
 	releaseHold,
 	sanitize,
 	say,
 	serverCapabilities,
 	serverRequest,
-	stateFilePath,
 	stateRoot,
 	timeLeft,
 	usageMode,
@@ -1073,9 +1078,6 @@ async function selectOwn(opened) {
 	return own;
 }
 
-/** Errors that mean the state dir's filesystem cannot make hard links. */
-const LINKLESS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK"]);
-
 /**
  * The claim on a message id: `{ holder, created }` — `created` when this call made
  * it — or `{ holder: null, code }` when it can be neither made nor read. Published
@@ -1421,20 +1423,29 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 	}
 }
 
-/** Apply journalled hold outcomes to one agent's cursor, if its lock is free soon. */
-async function reconcileAgent(sessionId, agentId) {
+/**
+ * Apply journalled hold outcomes to one agent's cursor, if its lock is free soon, and
+ * return the hold files this reconcile finished and removed (none when it could not
+ * run). PreToolUse runs it before it decides what a `.settling` record of the same
+ * tool call still blocks: the journal decides a stale one (`STALE_SETTLING_MS`) and
+ * removes its file. Under the agent's lock, only one reconcile can remove a given
+ * file, so the hook whose reconcile removed it is the one that may reserve afresh.
+ */
+export async function reconcileAgent(sessionId, agentId) {
 	const where = await cursorLocation(sessionId, agentId);
-	if (!where.ok) return;
+	if (!where.ok) return [];
 	const release = await acquireLock(where.cursorPath, { waitMs: 300 });
-	if (release === null) return; // the next lock holder reconciles
+	if (release === null) return []; // the next lock holder reconciles
 	try {
 		const read = await readCursor(where.cursorPath);
-		if (!read.ok) return;
+		if (!read.ok) return [];
 		const { finished } = await reconcile(read.cursor, sessionId, agentId);
 		await writeCursor(where.cursorPath, read.cursor);
+		const removed = [...finished];
 		await removeFiles(finished);
+		return removed;
 	} catch {
-		// Left for the next lock holder.
+		return []; // Left for the next lock holder.
 	} finally {
 		await release();
 	}
@@ -1538,13 +1549,16 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 }
 
 /** Give a hold back after a settle that failed: the server re-queues such a hold. */
+/** Give a hold back for hygiene; say whether the server confirmed it is gone. */
 async function hygieneRelease(transferId, why) {
 	const timeoutMs = callTimeout();
-	if (timeoutMs < minCall()) return;
+	if (timeoutMs < minCall()) return false;
 	try {
-		await releaseHold(transferId, why, { timeoutMs });
+		const response = await releaseHold(transferId, why, { timeoutMs });
+		return response.status === 200 || isUnknownTransfer(response);
 	} catch {
 		// The server's pending-TTL sweep releases it.
+		return false;
 	}
 }
 
@@ -1571,10 +1585,11 @@ async function settleAt(transferId, counts, { keyed }) {
 			{ timeoutMs: callTimeout() },
 		);
 	} catch (err) {
-		await hygieneRelease(transferId, "transcript settle unanswered");
+		const holdEnded = await hygieneRelease(transferId, "transcript settle unanswered");
 		return {
 			outcome: keyed ? "unresolved" : "claimed",
 			reason: `settle unreachable: ${errText(err)}`,
+			holdEnded,
 		};
 	}
 	return settleOutcome(transferId, settle, keyed);
@@ -1587,17 +1602,20 @@ async function settleOutcome(transferId, settle, keyed) {
 		if (settle.json?.settled === false) {
 			const reason = "the ledger post is ambiguous (settled: false)";
 			return keyed
-				? { outcome: "unresolved", reason }
-				: { outcome: "claimed", reason: `${reason}; the usage may be unrecorded` };
+				? { outcome: "unresolved", reason, holdEnded: true }
+				: { outcome: "claimed", reason: `${reason}; the usage may be unrecorded`, holdEnded: true };
 		}
-		return { outcome: "settled" };
+		return { outcome: "settled", holdEnded: true };
 	}
-	if (keyed && isAlreadySettled(settle)) return { outcome: "settled" };
-	await hygieneRelease(transferId, "transcript settle failed");
+	if (keyed && isAlreadySettled(settle)) return { outcome: "settled", holdEnded: true };
+	// The hold is known gone only when the server says so: this settle's 404
+	// `unknown transferId`, or a confirmed hygiene release.
+	const released = await hygieneRelease(transferId, "transcript settle failed");
+	const holdEnded = released || isUnknownTransfer(settle);
 	const reason = `settle returned ${settle.status}`;
-	if (settle.status === 400) return { outcome: "released", reason };
-	if (keyed) return { outcome: "unresolved", reason };
-	return { outcome: settle.status === 404 ? "released" : "claimed", reason };
+	if (settle.status === 400) return { outcome: "released", reason, holdEnded };
+	if (keyed) return { outcome: "unresolved", reason, holdEnded };
+	return { outcome: settle.status === 404 ? "released" : "claimed", reason, holdEnded };
 }
 
 /**
@@ -1634,20 +1652,24 @@ async function returnEmptyHold(transferId) {
  * if two hooks reach it, and its outcome journalled and applied to the cursor. A
  * hold with none is given back — released, on a server that can release; settled
  * at zero (the server's 1-unit floor) on one that cannot. Returns `{ outcome,
- * reason? }`; `returned` is an empty hold given back, `deferred` means out of
- * time, hold untouched.
+ * reason?, holdEnded? }`; `returned` is an empty hold given back, `deferred` means
+ * out of time, hold untouched. A windowed hold's `holdEnded` says whether the
+ * server is known to hold it no more: settled or spent, a 404 `unknown
+ * transferId`, or a confirmed release. Otherwise it may still be live.
  */
 export async function settleTranscriptHold(sessionId, entry) {
 	if (callTimeout() < minCall()) return { outcome: "deferred", reason: "out of time" };
 	const ids = entry.assignedIds ?? [];
 	if (ids.length === 0) {
 		const result = await returnEmptyHold(entry.transferId);
-		await clearPending(sessionId, entry.agentId, entry.entryKey);
+		await clearPending(entry.path);
 		return result;
 	}
 	const counts = {};
 	for (const key of COUNT_KEYS) counts[key] = count(entry[key]);
-	const livePath = stateFilePath(sessionId, entry.agentId, entry.entryKey);
+	// The hold's own file, as its listing found it: never whatever file the call's
+	// name holds now, which may be a later hold's.
+	const livePath = entry.path;
 	const base = livePath.slice(0, -".json".length);
 	// A rename keeps the hold's own mtime: from authorize, maybe long ago. The
 	// journal reads a .settling file's age as how long a settle has been in flight,
@@ -1665,7 +1687,11 @@ export async function settleTranscriptHold(sessionId, entry) {
 	const keyed = typeof entry.idempotencyKey === "string";
 	const result = await settleAt(entry.transferId, counts, { keyed });
 	try {
-		await writeAtomic(
+		// Exclusive: an outcome never lands over another hold's. Only a 1.4.0 per-call
+		// name can already be taken (two holds of one call shared it then). That leaves
+		// this hold `.settling`, which the journal reads as unknown once stale: retried
+		// under its key, or (unkeyed) its ids accounted, at most once.
+		await publishExclusive(
 			`${base}.done`,
 			JSON.stringify({
 				agentId: entry.agentId,
@@ -1682,6 +1708,7 @@ export async function settleTranscriptHold(sessionId, entry) {
 						}
 					: {}),
 			}),
+			{ mode: 0o600 },
 		);
 		await unlink(`${base}.settling`).catch(() => {});
 	} catch (err) {

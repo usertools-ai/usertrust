@@ -41,24 +41,42 @@
 // while transcript state is unavailable. A key whose charge already stands (409
 // `already_settled`) means an earlier settle of exactly this window landed: it
 // is accounted, and the tool is held alone.
+import { rename, unlink } from "node:fs/promises";
 import {
+	claimForSettle,
 	defaultModel,
 	estimateTokens,
 	giveBack,
+	giveBackInvalid,
 	guardMode,
+	HoldNameTaken,
+	holdOfCall,
 	isAlreadySettled,
+	isTransferId,
+	isUnknownTransfer,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
 	recordWatchEvent,
+	releaseHold,
 	sanitizeReason,
 	say,
 	serverCapabilities,
 	serverRequest,
+	tenantBinding,
 	timeLeft,
 } from "./lib.mjs";
-import { estimatePrincipalFor, holdEstimate, prepareWindow, safeName } from "./transcript.mjs";
+import {
+	estimatePrincipalFor,
+	holdEstimate,
+	OUTCOME_NOTES,
+	prepareWindow,
+	reconcileAgent,
+	STALE_SETTLING_MS,
+	safeName,
+	settleTranscriptHold,
+} from "./transcript.mjs";
 
 const MAX_REASON_CHARS = 500;
 
@@ -101,6 +119,272 @@ try {
 	// on older Claude Code) is what scopes a hold to the agent that made it.
 	agentId = input.agent_id ?? "main";
 	toolName = input.tool_name ?? "unknown";
+	// A deferred call's resume fires PreToolUse again for the SAME tool call (hooks
+	// reference, "Defer a tool call for later"), and so might any repeat. That call
+	// already has its hold. A second authorize alone would leave the first hold live
+	// beside it: counting against the budget and, in transcript mode, its window
+	// unsettled, until a Stop. A hold is never REUSED either: whether it is still
+	// live, and still the current server's and tenant's, cannot be known from here,
+	// and a reused hold skips the budget check. So the earlier hold is ended first
+	// (`retire`), and the call then reserves afresh, its budget checked again. A hold
+	// whose settle is under way or unanswered (`.settling`), or that another hook ends
+	// first, gets no fresh hold beside it: the call is refused until that resolves
+	// (`unsettled`).
+	const held = await holdOfCall(sessionId, agentId, input.tool_use_id);
+	if (held === null) {
+		await reserve(input);
+	} else if (held.state === "settling") {
+		// One made under another server or key never reaches this tenant's journal,
+		// which would retry a keyed window through this server: this tenant charged
+		// for the other's usage.
+		if (!sameTenant(held.entry)) {
+			if (await abandonSettling(held.entry)) await reserve(input);
+			else await unsettled(held.entry);
+		} else if (await journalDecides(held.entry, input.tool_use_id)) await reserve(input);
+		else await unsettled(held.entry);
+	} else {
+		// A hold made under another server or key is never touched through this one.
+		const ended = sameTenant(held.entry) ? await retire(held.entry) : await abandon(held.entry);
+		if (ended) {
+			say(
+				`usertrust: this tool call's earlier hold ${held.entry.transferId} is ended: a resumed call never reuses a hold, so it reserves afresh`,
+			);
+			await reserve(input);
+		} else {
+			await unsettled(
+				held.entry,
+				`another hook is ending this tool call's earlier hold ${held.entry.transferId}; it is refused until that hold is resolved`,
+			);
+		}
+	}
+} catch (err) {
+	const why = sanitizeReason(err instanceof Error ? err.message : String(err)).slice(
+		0,
+		MAX_REASON_CHARS,
+	);
+	if (err instanceof HoldNameTaken) {
+		// A known state, not an outage: `reserve` did not keep the fresh hold, and the
+		// call is refused rather than write over another hold's file, UT_FAIL_OPEN or not.
+		await unsettled(
+			null,
+			`${why}: the fresh hold is not kept, and the call is refused rather than write over that file`,
+		);
+	} else if (mode === "watch" || process.env.UT_FAIL_OPEN === "1") {
+		// The call proceeds unmetered: say so durably, so the gap is never silent.
+		const recorded = await recordWatchEvent({
+			kind: "gap",
+			mode,
+			session: sessionId,
+			agent: agentId,
+			tool: toolName,
+			reason: why,
+		});
+		proceed(
+			mode === "watch"
+				? `usertrust watch-only: this call is not metered (${why}) — ${recorded ? "recorded as a gap" : "and its gap record could not be written (see above)"}`
+				: `usertrust unavailable — proceeding ungoverned (UT_FAIL_OPEN=1): ${why}`,
+		);
+	} else {
+		say(`usertrust governance blocked this tool call because authorization failed closed: ${why}`);
+		process.exit(2);
+	}
+}
+
+/**
+ * Whether a pending record was made under the server and key this hook talks to
+ * (lib.mjs `tenantBinding`). A record without a binding (written before the plugin
+ * kept one) is not: its tenant is unknown.
+ */
+function sameTenant(entry) {
+	const here = tenantBinding();
+	return entry.serverUrl === here.serverUrl && entry.keyHash === here.keyHash;
+}
+
+/**
+ * End an earlier hold made under ANOTHER server or key, or an unknown one, without
+ * sending this hook's server anything about it. That server does not know the hold:
+ * a settle there answers 404, and the unkeyed path would hand the old window to the
+ * fresh hold, so this tenant would pay for the other's usage. The record is claimed
+ * and dropped instead.
+ * - A window it carried is then accounted by the journal as unrecorded (assigned ids
+ *   whose hold is gone), never carried into the fresh hold: an under-count of the
+ *   other tenant.
+ * - The hold itself is left to its own server's sweep, or the ledger's timeout.
+ * Returns false when another hook claimed the record first.
+ */
+async function abandon(entry) {
+	const claimed = await claimForSettle(entry.path);
+	if (claimed !== null) {
+		say(
+			`usertrust: this tool call's earlier hold ${entry.transferId} was made under another server or key; nothing about it is sent here, and any usage it carried goes unrecorded`,
+		);
+		await unlink(claimed).catch(() => {});
+	}
+	return claimed !== null;
+}
+
+/**
+ * End a `.settling` record made under ANOTHER server or key, or an unknown one,
+ * without this tenant's journal ever deciding it. Only a STALE one
+ * (`STALE_SETTLING_MS`) is ended: a fresh one's settle may still be in flight, so
+ * the call is refused instead. It is abandoned through its own name: claimed by an
+ * exclusive rename, then deleted. Nothing about it is sent to this hook's server,
+ * and nothing is parked for a retry. Any window it carried is accounted by the
+ * journal as unrecorded (assigned ids whose hold is gone): an under-count of the
+ * other tenant, never charged to this one. Returns false when the record is fresh,
+ * or another hook took it first.
+ */
+async function abandonSettling(entry) {
+	if (!(Date.now() - entry.mtimeMs > STALE_SETTLING_MS)) return false;
+	const taken = `${entry.path}.abandoned.${process.pid}.${Math.random().toString(36).slice(2)}`;
+	try {
+		await rename(entry.path, taken);
+	} catch {
+		return false;
+	}
+	say(
+		`usertrust: this tool call's earlier hold ${entry.transferId} was made under another server or key, and its settle never resolved; nothing about it is sent here, and any usage it carried goes unrecorded`,
+	);
+	await unlink(taken).catch(() => {});
+	return true;
+}
+
+/**
+ * Whether THIS hook's reconcile decided this call's `.settling` record, and removed
+ * it. Only a transcript hold's record can be decided: the journal reads one as
+ * abandoned once it is stale (transcript.mjs `STALE_SETTLING_MS`), parks its window
+ * for a retry under its key or accounts its ids (at most once), and deletes its
+ * file. A transcript record with no window (a `retire` cut off before its unlink)
+ * is decided the same way. An estimate hold's record is not: its settle may have
+ * charged the call. A fresh record may still be in flight.
+ * True only when this hook's reconcile removed the record AND the call now has none.
+ * Two hooks resumed together may both see the same stale record, and only the one
+ * whose reconcile removed it reserves afresh: the other is refused.
+ */
+async function journalDecides(entry, toolUseId) {
+	if (!entry.transcript) return false;
+	const removed = await reconcileAgent(sessionId, agentId);
+	return removed.includes(entry.path) && (await holdOfCall(sessionId, agentId, toolUseId)) === null;
+}
+
+/**
+ * Refuse a tool call whose hold is not resolved: its earlier hold's settle is under
+ * way, or was cut off unanswered (`.settling`), or another hook is ending it; or its
+ * fresh hold's file name is another hold's (`HoldNameTaken`), and that hold was not
+ * kept. No fresh hold is made beside an earlier one: that settle may already have
+ * charged the call. Enforce mode denies, UT_FAIL_OPEN or not: the server is not
+ * unreachable, the state is known. A later call (a new `tool_use_id`) reserves as
+ * usual. Watch mode lets the call through unmetered, and records the gap.
+ */
+async function unsettled(
+	entry,
+	why = `this tool call's earlier hold ${entry.transferId} has a settle that is not resolved yet; it is refused until that settle resolves`,
+) {
+	if (mode === "enforce") {
+		deny(`usertrust: ${why}`);
+		return;
+	}
+	const recorded = await recordWatchEvent({
+		kind: "gap",
+		mode,
+		session: sessionId,
+		agent: agentId,
+		tool: toolName,
+		reason: why,
+	});
+	proceed(
+		`usertrust watch-only: this call is not metered (${why}) — ${recorded ? "recorded as a gap" : "and its gap record could not be written (see above)"}`,
+	);
+}
+
+/**
+ * End this tool call's earlier pending hold before the call reserves afresh, and say
+ * whether THIS hook ended it. The hold may be gone, or still live, and is ended once,
+ * by a path that adds no abort (the server counts an abort as a breaker failure):
+ * - A hold with a transcript window carries real usage. It gets the one settle
+ *   PostToolUse would have given it (`settleTranscriptHold`), failure handling
+ *   included. Live, it is charged once, at the window's counts. Gone (a 404), its
+ *   window is released for the fresh hold to carry (no key), or retried under its
+ *   key at the next Stop. A settle that fails while the server does not confirm the
+ *   hold is gone (`holdEnded`: its release unconfirmed, too) leaves it possibly
+ *   live.
+ * - Any other hold (an estimate, or an empty window) carries no usage: the call
+ *   has not run. Its record is dropped. It is given back only through a `release`
+ *   the server advertises; otherwise a hold the server still has is left to the
+ *   server's TTL sweep. A release that answers neither 200 nor that the hold is gone
+ *   leaves it possibly live: its record is kept settle-attempted, for Stop to give
+ *   back.
+ * Returns false when another hook claimed the hold first (its record renamed away):
+ * that hook is ending it, and this call must not reserve beside it. A hold that
+ * cannot be ended now (out of time, its claim fails, or its release is not
+ * confirmed) throws: no fresh hold is made beside it, and the call fails as a failed
+ * authorization does.
+ */
+async function retire(entry) {
+	if ((entry.assignedIds?.length ?? 0) > 0) {
+		const result = await settleTranscriptHold(sessionId, entry);
+		if (result.outcome === "deferred") {
+			throw new Error(`hold ${entry.transferId} could not be ended (${result.reason})`);
+		}
+		if (result.outcome === "skipped") return false;
+		if (result.outcome !== "settled") {
+			say(
+				`usertrust: hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}`,
+			);
+		}
+		if (result.holdEnded !== true) {
+			// Its window's outcome is journalled as for any settle, but the hold itself
+			// may still be live: no fresh hold is made beside it. The server's sweep
+			// ends it.
+			throw new Error(
+				`hold ${entry.transferId} ${result.outcome}, and the server has not confirmed it is gone; no fresh hold is made beside it`,
+			);
+		}
+		return true;
+	}
+	const claimed = await claimForSettle(entry.path);
+	if (claimed === null) return false;
+	const capabilities = await serverCapabilities();
+	if (capabilities?.has("release")) {
+		const unconfirmed = await releaseUnconfirmed(entry.transferId);
+		if (unconfirmed !== null) {
+			// The hold may still be live: no fresh hold is made beside it. Its record
+			// stays settle-attempted (`.settling`), so Stop gives it back, and the call
+			// fails as a failed authorization does.
+			throw new Error(
+				`${unconfirmed}; the hold may be live, so it is kept for Stop to give back, and no fresh hold is made beside it`,
+			);
+		}
+	}
+	await unlink(claimed).catch(() => {});
+	return true;
+}
+
+/**
+ * Give a resumed call's earlier hold back through `release`, and say why the hold
+ * may still be live: null once it is GONE, released (200) or no longer held by the
+ * server (a 404 `unknown transferId`: it expired, or another hook ended it). Any
+ * other answer, or none, leaves it possibly live.
+ */
+async function releaseUnconfirmed(transferId) {
+	let response;
+	try {
+		response = await releaseHold(transferId, "a resumed tool call's earlier hold", {
+			timeoutMs: Math.min(5000, timeLeft()),
+		});
+	} catch (err) {
+		return `release ${transferId} failed (${err instanceof Error ? err.message : String(err)})`;
+	}
+	if (response.status === 200 || isUnknownTransfer(response)) return null;
+	return `release ${transferId} returned ${response.status}`;
+}
+
+/**
+ * Reserve this tool call's hold: the window (transcript mode), the authorize, and
+ * the record PostToolUse settles. A call that already has a hold ends it first
+ * (`retire`): a hold is never reused.
+ */
+async function reserve(input) {
 	const toolInput = JSON.stringify(input.tool_input ?? {}).slice(0, MAX_CONTENT_CHARS);
 	const content = process.env.UT_CC_SEND_CONTENT === "0" ? '{"redacted":true}' : toolInput;
 	const estimatedInputTokens = estimateTokens(toolInput);
@@ -190,8 +474,13 @@ try {
 			await prepared.abandon?.();
 			proceed(`usertrust shadow mode: would_deny (${sanitizeReason(json.reason)}) — not enforced`);
 		} else if (response.status === 200) {
-			if (typeof json?.transferId !== "string" || json.transferId === "") {
-				throw new Error("malformed authorize response from governance server");
+			if (!isTransferId(json?.transferId)) {
+				// The id would name the hold's file, as it is (lib.mjs `isTransferId`). A hold
+				// it names is given back, through `release` only, and the call fails closed.
+				await giveBackInvalid(json?.transferId, Math.max(250, callTimeout()));
+				throw new Error(
+					"malformed authorize response from governance server: its transferId is not a valid id",
+				);
 			}
 			try {
 				await recordPending(sessionId, agentId, {
@@ -254,29 +543,5 @@ try {
 		throw err;
 	} finally {
 		await prepared.release?.();
-	}
-} catch (err) {
-	const why = sanitizeReason(err instanceof Error ? err.message : String(err)).slice(
-		0,
-		MAX_REASON_CHARS,
-	);
-	if (mode === "watch" || process.env.UT_FAIL_OPEN === "1") {
-		// The call proceeds unmetered: say so durably, so the gap is never silent.
-		const recorded = await recordWatchEvent({
-			kind: "gap",
-			mode,
-			session: sessionId,
-			agent: agentId,
-			tool: toolName,
-			reason: why,
-		});
-		proceed(
-			mode === "watch"
-				? `usertrust watch-only: this call is not metered (${why}) — ${recorded ? "recorded as a gap" : "and its gap record could not be written (see above)"}`
-				: `usertrust unavailable — proceeding ungoverned (UT_FAIL_OPEN=1): ${why}`,
-		);
-	} else {
-		say(`usertrust governance blocked this tool call because authorization failed closed: ${why}`);
-		process.exit(2);
 	}
 }

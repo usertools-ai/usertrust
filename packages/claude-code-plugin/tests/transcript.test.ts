@@ -22,6 +22,7 @@ import {
 	open,
 	readdir,
 	readFile,
+	rename,
 	rm,
 	stat,
 	symlink,
@@ -354,6 +355,14 @@ const postInput = (toolUseId: string, extra: Record<string, unknown> = {}) => ({
 // biome-ignore lint/suspicious/noControlCharactersInRegex: detecting control chars is the point
 const CONTROL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/;
 const HOSTILE = "\u001b[2J\u001b]0;pwned\u0007\u007f\u009b";
+
+/**
+ * A hold's file name (lib.mjs `holdFilePath`): by its call (the tool_use_id, or the
+ * transferId when the host sends none) AND its transfer.
+ */
+function holdFile(call: string, transferId: string, kind = "json", agentId = "main") {
+	return `${SESSION}__${agentId}__${call}.${transferId}.${kind}`;
+}
 
 /** Every hold-state file left: pending (`.json`) and settle-attempted (`.settling`). */
 async function holdStateFiles() {
@@ -1720,26 +1729,27 @@ describe("estimate holds", () => {
 			});
 		}
 
-		it("its diagnostics never carry a control character from the server's transferIds", async () => {
+		it("its diagnostics never carry a control character from the server's transferIds: an id carrying one is refused, never echoed", async () => {
 			let minted = 0;
-			const gone = new Set<string>();
-			await startServer((path, body) => {
+			await startServer((path) => {
 				if (path === "/v1/authorize") {
 					minted += 1;
-					return { status: 200, json: { transferId: `tx_${minted}${HOSTILE}`, estimatedCost: 1 } };
+					// tx_1 is a valid id; every later one carries control characters.
+					const transferId = minted === 1 ? "tx_1" : `tx_${minted}${HOSTILE}`;
+					return { status: 200, json: { transferId, estimatedCost: 1 } };
 				}
-				const id = String(body.transferId);
-				if (path === "/v1/settle" && id.startsWith("tx_1") && !gone.has(id)) {
-					gone.add(id);
-					return notFound;
-				}
-				return { status: 200, json: { settled: true, transferId: id } };
+				// tx_1 expired before its settle, so PostToolUse asks for a fresh hold.
+				if (path === "/v1/settle") return notFound;
+				return { status: 200, json: { released: true } };
 			});
 			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
 			const pre = await run("pre-tool-use.mjs", preInput("tu_1"), env);
 			const post = await run("post-tool-use.mjs", postInput("tu_1", { tool_name: "Bash" }), env);
-			expect(post.stderr).toContain("charging this call once on tx_2");
-			expect(`${pre.stderr}${post.stderr}`).not.toMatch(CONTROL);
+			expect(post.stderr).toContain("its fresh hold's transferId is not a valid id");
+			const next = await run("pre-tool-use.mjs", preInput("tu_2"), env);
+			expect(next.stderr).toContain("its transferId is not a valid id");
+			expect(`${pre.stderr}${post.stderr}${next.stderr}`).not.toMatch(CONTROL);
+			expect(await holdStateFiles()).toEqual([]);
 		});
 
 		it("a host that sends no tool_use_id: a hold whose settle went unanswered is never taken again — each call charged once, at ITS OWN usage", async () => {
@@ -1958,7 +1968,7 @@ describe("estimate holds", () => {
 				);
 				if (k === 1) {
 					// The fresh hold carries the gate's mark from the write that created it.
-					const fresh = join(stateDir, `${SESSION}__main__tx_2.settling`);
+					const fresh = join(stateDir, holdFile("tx_2", "tx_2", "settling"));
 					expect(JSON.parse(await readFile(fresh, "utf-8"))).toMatchObject({
 						gate: 1,
 						transferId: "tx_2",
@@ -2059,7 +2069,7 @@ describe("estimate holds", () => {
 					}
 					return { status: 200, json: { released: true, aborted: true } };
 				});
-				const squat = `${SESSION}__main__tx_2.settling`;
+				const squat = holdFile("tx_2", "tx_2", "settling");
 				await mkdir(join(stateDir, squat, "x"), { recursive: true });
 				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
 				await run(
@@ -2121,7 +2131,7 @@ describe("estimate holds", () => {
 					return giveBackAnswer(answer);
 				});
 				// A directory squats on the hold's file name, so its record's write fails.
-				const squat = `${SESSION}__main__tu_1.json`;
+				const squat = holdFile("tu_1", "tx_1");
 				await mkdir(join(stateDir, squat, "x"), { recursive: true });
 				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
 				const pre = await run("pre-tool-use.mjs", preInput("tu_1"), env);
@@ -2211,14 +2221,14 @@ describe("estimate holds", () => {
 			actor: `claude-code:${SESSION}`,
 			messages: [{ role: "user", content: '{"command":"ls"}' }],
 		});
-		expect(
-			JSON.parse(await readFile(join(stateDir, `${SESSION}__main__tu_1.json`), "utf-8")),
-		).toEqual({
+		expect(JSON.parse(await readFile(join(stateDir, holdFile("tu_1", "tx_1")), "utf-8"))).toEqual({
 			gate: 1,
 			toolUseId: "tu_1",
 			transferId: "tx_1",
 			agentId: "main",
 			estimatedInputTokens: 4,
+			serverUrl: `http://127.0.0.1:${port}`,
+			keyHash: createHash("sha256").update("k").digest("hex").slice(0, 16),
 		});
 		const post = await run("post-tool-use.mjs", postInput("tu_1"), env);
 		expect(post.stderr).toBe("");
@@ -2326,12 +2336,15 @@ function keyedServer() {
 			}
 			const replay = key === undefined ? undefined : live.get(key);
 			if (replay !== undefined)
-				return { status: 200, json: { transferId: replay, estimatedCost: 1 } };
+				return {
+					status: 200,
+					json: { transferId: replay, estimatedCost: 1, expiresInMs: 300_000 },
+				};
 			next += 1;
 			const transferId = `tx_${next}`;
 			holds.set(transferId, { key });
 			if (key !== undefined) live.set(key, transferId);
-			return { status: 200, json: { transferId, estimatedCost: 1 } };
+			return { status: 200, json: { transferId, estimatedCost: 1, expiresInMs: 300_000 } };
 		}
 		const transferId = String(body.transferId);
 		const hold = holds.get(transferId);
@@ -2760,8 +2773,8 @@ describe("with a server that honours keys, principal and release (usertrust #205
 		await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
 		await run("pre-tool-use.mjs", preInput("tu_1"));
 		// The hook renamed the hold to .settling, then died before any answer.
-		const live = join(stateDir, `${SESSION}__main__tu_1.json`);
-		const settling = join(stateDir, `${SESSION}__main__tu_1.settling`);
+		const live = join(stateDir, holdFile("tu_1", "tx_1"));
+		const settling = join(stateDir, holdFile("tu_1", "tx_1", "settling"));
 		await writeFile(settling, await readFile(live, "utf-8"));
 		await rm(live);
 		const old = new Date(Date.now() - 11 * 60_000);
@@ -3026,12 +3039,12 @@ describe("state that is lost, slow or unwritable", () => {
 		await writeMain(responseEntries("msg_a", SONNET, u(4, 4)));
 		await run("pre-tool-use.mjs", preInput("tu_1"));
 		// The tool ran for 11 minutes.
-		const hold = join(stateDir, `${SESSION}__main__tu_1.json`);
+		const hold = join(stateDir, holdFile("tu_1", "tx_1"));
 		const old = new Date(Date.now() - 11 * 60_000);
 		await utimes(hold, old, old);
 		delayMs = 1_500;
 		const posting = run("post-tool-use.mjs", postInput("tu_1"));
-		const settling = join(stateDir, `${SESSION}__main__tu_1.settling`);
+		const settling = join(stateDir, holdFile("tu_1", "tx_1", "settling"));
 		let age = Number.NaN;
 		for (let i = 0; i < 100 && Number.isNaN(age); i += 1) {
 			age = await stat(settling).then(
@@ -3351,5 +3364,1455 @@ describe("against a REAL usertrust-server — cache tokens priced separately, ne
 			// The hold was large enough: the full cost was posted, no shortfall cap.
 			expect(receipt.postedCost ?? receipt.cost).toBe(receipt.cost);
 		});
+	});
+});
+
+describe("a tool call whose PreToolUse fires again (a resumed defer) never reuses its hold, and never keeps two", () => {
+	// Claude Code fires PreToolUse again for the SAME tool call when a deferred call
+	// resumes (hooks reference, "Defer a tool call for later"). 1.4.0 reserved a second
+	// hold and overwrote the first's record: the first hold was stranded until the
+	// server's TTL, and in transcript mode its window was written off, never charged.
+	// Now every re-fire ends the call's earlier hold first (`retire`), then reserves
+	// afresh, so the budget is checked at every resume: a hold is never reused.
+	const endInput = () => ({ ...stopInput(), hook_event_name: "SessionEnd", reason: "other" });
+	const SESSION_END_BUDGET = { CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS: "" };
+	const notFound = { status: 404, json: { error: "not_found", reason: "unknown transferId" } };
+	const LOSE_CLAIM = join(import.meta.dirname, "helpers", "lose-claim.mjs");
+	const LOSE_RECONCILE = join(import.meta.dirname, "helpers", "lose-reconcile.mjs");
+	const PAUSE_AT = join(import.meta.dirname, "helpers", "pause-at.mjs");
+
+	/**
+	 * A server that holds what it authorizes, forgets what `expire` names, logs
+	 * charges, and refuses every authorize after `refuse` (a budget 402). Each answer
+	 * states a fresh 300 s life (`expiresInMs`, `hold-expiry`), which the plugin does
+	 * not consult: it never reuses a hold however much life one has left.
+	 */
+	function holdingServer() {
+		const pending = new Set<string>();
+		const charges: Array<{ transferId: string; inputTokens: unknown; outputTokens: unknown }> = [];
+		let refusing = false;
+		const responder: Responder = (path, body) => {
+			if (path === "/v1/authorize") {
+				if (refusing) {
+					return { status: 402, json: { error: "budget_exceeded", reason: "need 9, have 1" } };
+				}
+				nextTransfer += 1;
+				pending.add(`tx_${nextTransfer}`);
+				return {
+					status: 200,
+					json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1, expiresInMs: 300_000 },
+				};
+			}
+			const id = String(body.transferId);
+			if (!pending.delete(id)) return notFound;
+			if (path === "/v1/settle") {
+				charges.push({
+					transferId: id,
+					inputTokens: body.inputTokens,
+					outputTokens: body.outputTokens,
+				});
+				return { status: 200, json: { settled: true, transferId: id } };
+			}
+			return { status: 200, json: { released: true, aborted: true } };
+		};
+		return {
+			responder,
+			charges,
+			expire: (id: string) => pending.delete(id),
+			refuse: () => {
+				refusing = true;
+			},
+		};
+	}
+
+	/** The first hold's files: each hold of the call has its own (by transfer). */
+	const RECORD = holdFile("tu_1", "tx_1");
+	const SETTLING = holdFile("tu_1", "tx_1", "settling");
+	/** The call's one pending record as written, whichever hold it is. */
+	async function record(): Promise<Record<string, unknown>> {
+		const pending = (await holdStateFiles()).filter((name) => name.endsWith(".json"));
+		expect(pending).toHaveLength(1);
+		return JSON.parse(await readFile(join(stateDir, pending[0] ?? ""), "utf-8")) as Record<
+			string,
+			unknown
+		>;
+	}
+	/** Requests about tx_1 after its authorize: a settle, a release or an abort. */
+	const aboutTx1 = () => requests.filter((r) => r.body.transferId === "tx_1");
+	/** The gap records in watch.jsonl. */
+	async function gaps(): Promise<Array<{ kind: string; reason: string }>> {
+		return (await readFile(join(stateDir, "watch.jsonl"), "utf-8"))
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as { kind: string; reason: string });
+	}
+
+	describe("estimate mode", () => {
+		const env = { UT_CC_USAGE: "estimate" };
+		const enforce = { ...env, UT_CC_MODE: "enforce" };
+
+		it("an immediate re-fire ends the first hold, then reserves afresh: one authorize per fire, and the fresh hold settled once", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(authorizes()).toHaveLength(1);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(again.code).toBe(0);
+			expect(again.stdout).toBe("");
+			expect(again.stderr).toContain("this tool call's earlier hold tx_1 is ended");
+			expect(again.stderr).toContain("reserved tx_2");
+			expect(authorizes()).toHaveLength(2);
+			// No release on this server, so nothing is sent about the first hold: its record
+			// is dropped, and the hold is left to the server's sweep. It is never aborted.
+			expect(aboutTx1()).toEqual([]);
+			expect((await record()).transferId).toBe("tx_2");
+			await run("post-tool-use.mjs", postInput("tu_1"), env);
+			await run("stop.mjs", stopInput(), env);
+			expect(server.charges).toEqual([
+				{ transferId: "tx_2", inputTokens: TOOL_INPUT_ESTIMATE, outputTokens: 3 },
+			]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("on a server with release, the first hold is RELEASED before the second is asked for, and never aborted", async () => {
+			capabilities = ["release"];
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(requests.map((r) => [r.path, r.body.transferId ?? transferOf(r)])).toEqual([
+				["/v1/authorize", "tx_1"],
+				["/v1/release", "tx_1"],
+				["/v1/authorize", "tx_2"],
+			]);
+			expect(aborts()).toEqual([]);
+		});
+
+		it("enforce mode: a budget refusal (402) at the resume DENIES the call", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), enforce);
+			server.refuse();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), enforce);
+			expect(again.code).toBe(0);
+			const decision = JSON.parse(again.stdout).hookSpecificOutput;
+			expect(decision.permissionDecision).toBe("deny");
+			expect(decision.permissionDecisionReason).toContain("budget_exceeded");
+			expect(authorizes()).toHaveLength(2);
+			expect(aboutTx1()).toEqual([]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it.each<[string, number]>([
+			["just now", 0],
+			["in the future (the clock was set back an hour)", -3_600_000],
+			["an hour ago (the clock was set forward)", 3_600_000],
+		])(
+			"a record a reuse-era plugin wrote, reserved %s with a 300 s life, is still ended: no clock and no stated life is read",
+			async (_, ago) => {
+				const server = holdingServer();
+				await startServer(server.responder);
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				await writeFile(
+					join(stateDir, RECORD),
+					JSON.stringify({
+						...(await record()),
+						reservedAt: Date.now() - ago,
+						expiresInMs: 300_000,
+					}),
+				);
+				const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(again.stderr).toContain("this tool call's earlier hold tx_1 is ended");
+				expect(authorizes()).toHaveLength(2);
+			},
+		);
+
+		it("control: SessionEnd at the deferred exit ends the first hold, and the resume reserves its own", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await run("session-end.mjs", endInput(), { ...env, ...SESSION_END_BUDGET });
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await run("post-tool-use.mjs", postInput("tu_1"), env);
+			await run("stop.mjs", stopInput(), env);
+			expect(authorizes()).toHaveLength(2);
+			expect(requests.filter((r) => r.body.transferId === "tx_1").map((r) => r.path)).toEqual([
+				expect.stringMatching(/^\/v1\/(release|abort)$/),
+			]);
+			expect(server.charges.map((c) => c.transferId)).toEqual(["tx_2"]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+	});
+
+	describe("transcript mode", () => {
+		it("no key: an immediate re-fire settles the first hold's window ONCE at its counts, then holds afresh; nothing written off", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(again.stderr).toContain("this tool call's earlier hold tx_1 is ended");
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			expect(authorizes()).toHaveLength(2);
+			// The fresh hold carries no window: given back or settled at zero, as any empty
+			// hold is.
+			expect(server.charges.filter((c) => c.inputTokens !== 0)).toEqual([
+				{ transferId: "tx_1", inputTokens: 9, outputTokens: 9 },
+			]);
+			const cursor = await readCursor();
+			expect(cursor.accounted).toEqual(["msg_a"]);
+			expect(cursor.assigned).toEqual({});
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("no key: an EXPIRED first hold's window is released, and the fresh hold carries it, charged once", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			server.expire("tx_1");
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect((await record()).assignedIds).toEqual(["msg_a"]);
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			expect(server.charges.filter((c) => c.inputTokens !== 0)).toEqual([
+				{ transferId: "tx_2", inputTokens: 9, outputTokens: 9 },
+			]);
+			// tx_2 carried the window: Stop had no remainder to authorize.
+			expect(authorizes()).toHaveLength(2);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("keyed: an immediate re-fire settles the first hold's window once, under its key", async () => {
+			capabilities = [...ALL_CAPABILITIES];
+			const server = keyedServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			expect(authorizes()).toHaveLength(2);
+			expect(server.charges).toEqual([
+				{ key: keyOf("main", ["msg_a"]), transferId: "tx_1", inputTokens: 5 },
+			]);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("keyed: an expired first hold's window is retried under its key at Stop, charged once", async () => {
+			capabilities = [...ALL_CAPABILITIES];
+			const server = keyedServer();
+			server.faults.set("tx_1", "404-restarted");
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(again.stderr).toContain("hold tx_1 unresolved");
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			expect(server.charges).toEqual([
+				{ key: keyOf("main", ["msg_a"]), transferId: "tx_3", inputTokens: 5 },
+			]);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		});
+
+		it("enforce mode: the first hold's window is settled once, then the refused resume is DENIED", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			server.refuse();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(server.charges).toEqual([{ transferId: "tx_1", inputTokens: 9, outputTokens: 9 }]);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("control: SessionEnd at the deferred exit settles the first hold's window, once", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("session-end.mjs", endInput(), SESSION_END_BUDGET);
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			// msg_a is charged once, on tx_1, by SessionEnd. The resume's own hold, tx_2,
+			// carries no window and is given back or settled at zero, as any empty hold is.
+			expect(server.charges.filter((c) => c.inputTokens !== 0)).toEqual([
+				{ transferId: "tx_1", inputTokens: 9, outputTokens: 9 },
+			]);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+	});
+
+	describe("a resume under ANOTHER server or key: the earlier hold is never touched through the new one", () => {
+		// Each record carries the server's URL and a hash of the key that made it. Under
+		// another server or key, a settle of the old hold at the new server would answer
+		// 404, and the unkeyed path would hand the old window to the fresh hold: the new
+		// tenant would pay for the old one's usage. So the record is dropped, nothing about
+		// the old hold is sent to the new server, and a window it carried goes unrecorded.
+		const env = { UT_CC_USAGE: "estimate" };
+		let other: Awaited<ReturnType<typeof otherServer>> | undefined;
+		afterEach(() => {
+			other?.close();
+			other = undefined;
+		});
+
+		/** A second server, another tenant: records what it is sent, and advertises `capabilities`. */
+		async function otherServer(capabilities: string[]) {
+			const seen: Array<{
+				method: string;
+				path: string;
+				auth: string;
+				body: Record<string, unknown>;
+			}> = [];
+			const server = createServer((req, res) => {
+				let raw = "";
+				req.on("data", (chunk) => {
+					raw += chunk;
+				});
+				req.on("end", () => {
+					const path = req.url ?? "";
+					seen.push({
+						method: req.method ?? "",
+						path,
+						auth: req.headers.authorization ?? "",
+						body: JSON.parse(raw || "{}") as Record<string, unknown>,
+					});
+					const json =
+						path === "/v1/health"
+							? { status: "ok", capabilities }
+							: path === "/v1/authorize"
+								? { transferId: "tx_other", estimatedCost: 1 }
+								: path === "/v1/settle"
+									? { settled: true }
+									: { released: true };
+					res.writeHead(200, { "content-type": "application/json" });
+					res.end(JSON.stringify(json));
+				});
+			});
+			await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+			const address = server.address();
+			const otherPort = typeof address === "object" && address !== null ? address.port : 0;
+			return {
+				env: { UT_SERVER_URL: `http://127.0.0.1:${otherPort}`, UT_SERVER_KEY: "k2" },
+				posts: () => seen.filter((r) => r.method === "POST").map((r) => `${r.path} ${r.auth}`),
+				aboutTx1: () => seen.filter((r) => r.body.transferId === "tx_1"),
+				close: () => {
+					server.closeAllConnections();
+					server.close();
+				},
+			};
+		}
+
+		it("estimate: another server and key, with release, gets only the fresh authorize, never a word about the old hold", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			other = await otherServer(["release"]);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { ...env, ...other.env });
+			expect(again.stderr).toContain("hold tx_1 was made under another server or key");
+			expect(again.stderr).toContain("reserved tx_other");
+			expect(other.posts()).toEqual(["/v1/authorize Bearer k2"]);
+			expect(other.aboutTx1()).toEqual([]);
+			// The first server is not told either, and the record now names the new hold and
+			// its tenant.
+			expect(authorizes()).toHaveLength(1);
+			const fresh = await record();
+			expect(fresh.transferId).toBe("tx_other");
+			expect(fresh.serverUrl).toBe(other.env.UT_SERVER_URL);
+			expect(fresh.keyHash).toBe(createHash("sha256").update("k2").digest("hex").slice(0, 16));
+		});
+
+		it("transcript: the old hold's window is NOT carried into the new tenant's hold; it goes unrecorded", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			other = await otherServer([]);
+			await run("pre-tool-use.mjs", preInput("tu_1"), other.env);
+			expect(other.aboutTx1()).toEqual([]);
+			expect(other.posts()).toEqual(["/v1/authorize Bearer k2"]);
+			const fresh = await record();
+			expect(fresh.transferId).toBe("tx_other");
+			expect(fresh.assignedIds).toEqual([]);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+			expect(server.charges).toEqual([]);
+		});
+
+		it("the same server under another key, with release: nothing about the old hold is sent", async () => {
+			capabilities = ["release"];
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await run("pre-tool-use.mjs", preInput("tu_1"), { ...env, UT_SERVER_KEY: "k2" });
+			expect(aboutTx1()).toEqual([]);
+			expect(authorizes()).toHaveLength(2);
+		});
+
+		it("a record without a binding (written before the plugin kept one) is treated as another tenant's", async () => {
+			capabilities = ["release"];
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			const { serverUrl: _url, keyHash: _hash, ...legacy } = await record();
+			await writeFile(join(stateDir, RECORD), JSON.stringify(legacy));
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(again.stderr).toContain("hold tx_1 was made under another server or key");
+			expect(aboutTx1()).toEqual([]);
+			expect(authorizes()).toHaveLength(2);
+		});
+
+		it("a LOST claim under another server: the call reserves nothing there, and enforce denies", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			other = await otherServer([]);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
+				...env,
+				...other.env,
+				UT_CC_MODE: "enforce",
+				NODE_OPTIONS: `--import=${LOSE_CLAIM}`,
+			});
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(other.posts()).toEqual([]);
+			expect(await holdStateFiles()).toEqual([SETTLING]);
+		});
+
+		/** The call's record, as a settle cut off before any answer leaves it: `.settling`. */
+		async function cutOff({ stale }: { stale: boolean }) {
+			await rename(join(stateDir, RECORD), join(stateDir, SETTLING));
+			if (stale) {
+				const then = new Date(Date.now() - 11 * 60_000);
+				await utimes(join(stateDir, SETTLING), then, then);
+			}
+		}
+
+		it("a STALE `.settling` made under another server and key never reaches this tenant's journal: nothing about it is sent, its keyed window is never parked for a retry here, and goes unrecorded", async () => {
+			capabilities = [...ALL_CAPABILITIES];
+			const server = keyedServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(await record()).toHaveProperty("idempotencyKey");
+			await cutOff({ stale: true });
+			other = await otherServer([...ALL_CAPABILITIES]);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), other.env);
+			expect(again.stderr).toContain("hold tx_1 was made under another server or key");
+			expect(again.stderr).toContain("reserved tx_other");
+			expect(other.aboutTx1()).toEqual([]);
+			expect(other.posts()).toEqual(["/v1/authorize Bearer k2"]);
+			// Abandoned through its own name; the fresh hold carries no window of the old one.
+			expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_other")]);
+			expect((await record()).assignedIds).toEqual([]);
+			const cursor = (await readCursor()) as unknown as {
+				accounted: string[];
+				unresolved: Record<string, unknown>;
+			};
+			expect(cursor.accounted).toEqual(["msg_a"]);
+			expect(cursor.unresolved).toEqual({});
+			// A Stop under the new tenant retries nothing of the old one's.
+			await run("stop.mjs", stopInput(), other.env);
+			expect(other.posts().filter((post) => !post.startsWith("/v1/release"))).toEqual([
+				"/v1/authorize Bearer k2",
+			]);
+			expect(server.charges).toEqual([]);
+		});
+
+		it("a FRESH `.settling` made under another server or key is refused: its settle may be in flight, and nothing about it is sent", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await cutOff({ stale: false });
+			other = await otherServer([]);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
+				...env,
+				...other.env,
+				UT_CC_MODE: "enforce",
+			});
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(other.posts()).toEqual([]);
+			expect(await holdStateFiles()).toEqual([SETTLING]);
+		});
+
+		it("a STALE `.settling` made under another server or key that another hook abandons first: this call reserves nothing", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await cutOff({ stale: true });
+			other = await otherServer([]);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
+				...env,
+				...other.env,
+				UT_CC_MODE: "enforce",
+				NODE_OPTIONS: `--import=${LOSE_CLAIM}`,
+			});
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(again.stderr).not.toContain("goes unrecorded");
+			expect(other.posts()).toEqual([]);
+		});
+	});
+
+	describe("a first hold another hook ends, or that cannot be ended: no fresh hold beside it", () => {
+		it.each<[string, Record<string, string>, boolean]>([
+			["estimate, enforce", { UT_CC_USAGE: "estimate", UT_CC_MODE: "enforce" }, false],
+			["estimate, watch", { UT_CC_USAGE: "estimate" }, false],
+			["transcript, enforce", { UT_CC_MODE: "enforce" }, true],
+		])(
+			"a LOST claim (%s): another hook claimed the first hold first, so the call reserves nothing",
+			async (_, env, transcript) => {
+				const server = holdingServer();
+				await startServer(server.responder);
+				if (transcript) await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
+					...env,
+					NODE_OPTIONS: `--import=${LOSE_CLAIM}`,
+				});
+				expect(again.code).toBe(0);
+				// Nothing claims this hook ended the hold: another hook did.
+				expect(again.stderr).not.toContain("is ended");
+				const why = "another hook is ending this tool call's earlier hold tx_1";
+				if (env.UT_CC_MODE === "enforce") {
+					const decision = JSON.parse(again.stdout).hookSpecificOutput;
+					expect(decision.permissionDecision).toBe("deny");
+					expect(decision.permissionDecisionReason).toContain(why);
+				} else {
+					expect(again.stdout).toBe("");
+					expect((await gaps())[0]?.reason).toContain(why);
+				}
+				expect(authorizes()).toHaveLength(1);
+				// The record is the other hook's claim; nothing was written beside it.
+				expect(await holdStateFiles()).toEqual([SETTLING]);
+			},
+		);
+
+		it.each<[string, Record<string, string>]>([
+			["estimate", { UT_CC_USAGE: "estimate" }],
+			["transcript", {}],
+		])(
+			"%s mode: a first hold that cannot be ended stops the fresh reserve, and enforce fails closed",
+			async (_, usage) => {
+				const server = holdingServer();
+				await startServer(server.responder);
+				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+				await run("pre-tool-use.mjs", preInput("tu_1"), usage);
+				// A directory where the claim renames the record to: it cannot be claimed.
+				await mkdir(join(stateDir, SETTLING));
+				const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
+					...usage,
+					UT_CC_MODE: "enforce",
+				});
+				expect(again.code).toBe(2);
+				expect(again.stderr).toContain("authorization failed closed");
+				expect(authorizes()).toHaveLength(1);
+				expect(server.charges).toEqual([]);
+				// tx_1's record is kept, never overwritten by a fresh hold's.
+				expect((await readdir(stateDir)).filter((n) => n.endsWith(".json"))).toEqual([RECORD]);
+			},
+		);
+	});
+
+	describe("a `.settling` record of the same call: the call is refused until that settle resolves", () => {
+		/** The call's pending record, renamed as a settling hook's claim leaves it. */
+		async function claimed() {
+			await rename(join(stateDir, RECORD), join(stateDir, SETTLING));
+		}
+		/** The claim, aged past the journal's staleness rule (`STALE_SETTLING_MS`, 10 min). */
+		async function stale() {
+			const then = new Date(Date.now() - 11 * 60_000);
+			await utimes(join(stateDir, SETTLING), then, then);
+		}
+
+		it("watch mode: no second hold, and the gap is recorded", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_USAGE: "estimate" });
+			await claimed();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_USAGE: "estimate" });
+			expect(again.code).toBe(0);
+			expect(again.stdout).toBe("");
+			expect(again.stderr).toContain("this call is not metered");
+			expect(again.stderr).toContain("tx_1 has a settle that is not resolved yet");
+			expect(again.stderr).toContain("recorded as a gap");
+			const recorded = await gaps();
+			expect(recorded.map((g) => g.kind)).toEqual(["gap"]);
+			expect(recorded[0]?.reason).toContain("tx_1 has a settle that is not resolved yet");
+			expect(authorizes()).toHaveLength(1);
+			expect(await holdStateFiles()).toEqual([SETTLING]);
+		});
+
+		it.each<[string, Record<string, string>]>([
+			["enforce mode", { UT_CC_USAGE: "estimate", UT_CC_MODE: "enforce" }],
+			[
+				"enforce mode with UT_FAIL_OPEN=1 (not an outage)",
+				{ UT_CC_USAGE: "estimate", UT_CC_MODE: "enforce", UT_FAIL_OPEN: "1" },
+			],
+		])(
+			"an estimate hold's `.settling` (its settle attempted, or a retire cut off before its unlink): %s DENIES the resume",
+			async (_, env) => {
+				const server = holdingServer();
+				await startServer(server.responder);
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				await claimed();
+				await stale(); // Even stale: the journal cannot decide a record without a window.
+				const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(again.code).toBe(0);
+				const decision = JSON.parse(again.stdout).hookSpecificOutput;
+				expect(decision.permissionDecision).toBe("deny");
+				expect(decision.permissionDecisionReason).toContain(
+					"tx_1 has a settle that is not resolved yet",
+				);
+				expect(authorizes()).toHaveLength(1);
+				expect(await holdStateFiles()).toEqual([SETTLING]);
+			},
+		);
+
+		it("a FRESH transcript `.settling` (its settle may be in flight): enforce DENIES, and the journal leaves it alone", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			await claimed();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(authorizes()).toHaveLength(1);
+			expect(await holdStateFiles()).toEqual([SETTLING]);
+			expect((await readCursor()).accounted).toEqual([]);
+		});
+
+		it("a STALE transcript `.settling`, no key: the journal decides it first (its ids accounted, at most once), then the resume reserves afresh, and a 402 DENIES it", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			await claimed();
+			await stale();
+			server.refuse();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(authorizes()).toHaveLength(2);
+			expect(await holdStateFiles()).toEqual([]);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+			expect(server.charges).toEqual([]);
+		});
+
+		it("a STALE transcript `.settling`: the fresh hold's window leaves the old ids out, and carries only what is new", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await claimed();
+			await stale();
+			await appendMain(responseEntries("msg_b", SONNET, u(4, 4)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_2")]);
+			const fresh = await record();
+			expect(fresh.transferId).toBe("tx_2");
+			expect(fresh.assignedIds).toEqual(["msg_b"]);
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			// msg_a was accounted by the journal and is never posted; msg_b is charged once.
+			expect(server.charges).toEqual([{ transferId: "tx_2", inputTokens: 4, outputTokens: 4 }]);
+		});
+
+		it("a STALE transcript `.settling`, keyed: parked for a retry under its key, and charged once at Stop", async () => {
+			capabilities = [...ALL_CAPABILITIES];
+			const server = keyedServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(5, 6)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await claimed();
+			await stale();
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			await run("stop.mjs", stopInput());
+			expect(server.charges).toEqual([
+				{ key: keyOf("main", ["msg_a"]), transferId: "tx_1", inputTokens: 5 },
+			]);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+		});
+
+		it("two hooks resumed together over one STALE record: only the one whose reconcile removed it may reserve; this one is refused", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			await claimed();
+			await stale();
+			// The other hook's reconcile removes the record just before this hook's own runs:
+			// the record is gone, but this hook did not decide it.
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
+				UT_CC_MODE: "enforce",
+				NODE_OPTIONS: `--import=${LOSE_RECONCILE}`,
+				UT_CC_TAKEN: join(stateDir, SETTLING),
+			});
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(authorizes()).toHaveLength(1);
+			expect(await holdStateFiles()).toEqual([]);
+		});
+
+		it("a STALE transcript `.settling` with no window (a retire cut off before its unlink) is decided too, and the resume reserves afresh", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain([]);
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			const first = await record();
+			expect(first.usage).toBe("transcript");
+			expect(first.assignedIds).toEqual([]);
+			await claimed();
+			await stale();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			expect(again.stdout).toBe("");
+			expect(again.stderr).toContain("reserved tx_2");
+			expect(authorizes()).toHaveLength(2);
+			expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_2")]);
+		});
+
+		it("control: a FRESH transcript `.settling` with no window is refused: a retire may still be ending it", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain([]);
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			await claimed();
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(authorizes()).toHaveLength(1);
+			expect(await holdStateFiles()).toEqual([SETTLING]);
+		});
+
+		it("a STALE transcript `.settling` the journal cannot reach (its lock is held): no fresh hold beside it, and enforce DENIES", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			await claimed();
+			await stale();
+			const lock = `${cursorPath()}.lock`;
+			await mkdir(lock);
+			await writeFile(join(lock, "owner"), "another-hook");
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+			await rm(lock, { recursive: true });
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(authorizes()).toHaveLength(1);
+			expect(await holdStateFiles()).toEqual([SETTLING]);
+		});
+	});
+
+	describe("each hold has its own files (by transfer): a hook acting on an earlier listing never touches a later hold's", () => {
+		/** Every paused hook's resume: each is resumed after its test, even a failed one. */
+		const resumes: Array<() => Promise<unknown>> = [];
+		afterEach(async () => {
+			for (const resume of resumes.splice(0)) await resume();
+		});
+
+		/**
+		 * Start `hook` and let it run until it is about to claim (`claim`), delete
+		 * (`clear`) or publish (`publish`) its first hold record; it waits there until
+		 * `resume` (tests/helpers/pause-at.mjs).
+		 */
+		async function pausedAt(
+			hook: string,
+			input: Record<string, unknown>,
+			at: "claim" | "clear" | "publish",
+			env: Record<string, string> = {},
+		) {
+			const flags = await mkdtemp(join(tmpdir(), "utcc-pause-"));
+			const pausedFlag = join(flags, "paused");
+			const go = join(flags, "go");
+			const running = run(hook, input, {
+				...env,
+				NODE_OPTIONS: `--import=${PAUSE_AT}`,
+				UT_CC_PAUSE: at,
+				UT_CC_PAUSED: pausedFlag,
+				UT_CC_GO: go,
+			});
+			const isPaused = () =>
+				stat(pausedFlag).then(
+					() => true,
+					() => false,
+				);
+			for (let i = 0; i < 500 && !(await isPaused()); i += 1) {
+				await new Promise((r) => setTimeout(r, 10));
+			}
+			const wasPaused = await isPaused();
+			const resume = async () => {
+				await writeFile(go, "");
+				return running;
+			};
+			resumes.push(resume);
+			return { wasPaused, resume };
+		}
+		/** The transfer ids the pending records store, whatever their names. */
+		async function pendingTransfers() {
+			const ids: unknown[] = [];
+			for (const name of await holdStateFiles()) {
+				if (!name.endsWith(".json")) continue;
+				ids.push(JSON.parse(await readFile(join(stateDir, name), "utf-8")).transferId);
+			}
+			return ids;
+		}
+		/** Each journalled outcome, by the transfer it stores, whatever its file's name. */
+		async function outcomes() {
+			const found: Record<string, unknown> = {};
+			for (const name of await readdir(stateDir)) {
+				if (!name.endsWith(".done")) continue;
+				const body = JSON.parse(await readFile(join(stateDir, name), "utf-8"));
+				found[String(body.transferId)] = body.outcome;
+			}
+			return found;
+		}
+
+		it("the interleave that double-charged: a Stop that listed the first hold before a re-fire settled it finds that hold's own file gone, so the window is charged ONCE and its `settled` is never written over", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			// The cursor lock stays held, as a busy hook holds it: nothing is reconciled, so
+			// tx_1's journal entry waits on disk while the stale Stop runs.
+			const lock = `${cursorPath()}.lock`;
+			await mkdir(lock);
+			await writeFile(join(lock, "owner"), "another-hook");
+			const stop = await pausedAt("stop.mjs", stopInput(), "claim");
+			expect(stop.wasPaused).toBe(true);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect(again.stderr).toContain("this tool call's earlier hold tx_1 is ended");
+			expect(await outcomes()).toEqual({ tx_1: "settled" });
+			expect(await pendingTransfers()).toEqual(["tx_2"]);
+			expect((await stop.resume()).code).toBe(0);
+			// The stale Stop re-posted nothing, and wrote nothing over tx_1's `settled`.
+			expect(settles().map((r) => r.body.transferId)).toEqual(["tx_1"]);
+			expect(await outcomes()).toEqual({ tx_1: "settled" });
+			await rm(lock, { recursive: true });
+			// The journal then applies `settled`: msg_a is accounted, never released to be
+			// charged again.
+			await run("stop.mjs", stopInput());
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+			expect(server.charges.filter((c) => c.inputTokens !== 0)).toEqual([
+				{ transferId: "tx_1", inputTokens: 9, outputTokens: 9 },
+			]);
+		});
+
+		it("a Stop that listed the first hold before a re-fire never claims the fresh hold's record: it survives, and each window is charged once", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			const stop = await pausedAt("stop.mjs", stopInput(), "claim");
+			expect(stop.wasPaused).toBe(true);
+			await appendMain(responseEntries("msg_b", SONNET, u(4, 4)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			expect((await record()).assignedIds).toEqual(["msg_b"]);
+			await stop.resume();
+			expect(await pendingTransfers()).toEqual(["tx_2"]);
+			expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_2")]);
+			await run("post-tool-use.mjs", postInput("tu_1"));
+			expect(settles().map((r) => r.body.transferId)).toEqual(["tx_1", "tx_2"]);
+			expect(server.charges).toEqual([
+				{ transferId: "tx_1", inputTokens: 9, outputTokens: 9 },
+				{ transferId: "tx_2", inputTokens: 4, outputTokens: 4 },
+			]);
+		});
+
+		it("estimate: a Stop that listed the first hold before a re-fire never deletes the fresh hold's record", async () => {
+			capabilities = ["release"];
+			const env = { UT_CC_USAGE: "estimate" };
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			// Stop gives tx_1 back, then waits before it deletes tx_1's record.
+			const stop = await pausedAt("stop.mjs", stopInput(), "clear", env);
+			expect(stop.wasPaused).toBe(true);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			// tx_1's release answers that the server holds it no more: gone, so the call
+			// reserves afresh.
+			expect(again.stderr).toContain("reserved tx_2");
+			await stop.resume();
+			expect(await pendingTransfers()).toEqual(["tx_2"]);
+			expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_2")]);
+			await run("post-tool-use.mjs", postInput("tu_1"), env);
+			expect(server.charges.map((c) => c.transferId)).toEqual(["tx_2"]);
+		});
+
+		it.each<[string, string[], string]>([
+			["with release", ["release"], "/v1/release"],
+			["without release (the declared fallback: an abort)", [], "/v1/abort"],
+		])(
+			"two resumes of one call at once (%s): a second hook reserves while the first is between ending tx_1 and recording tx_2. Two holds, each its own record, nothing overwritten; charged once, and the extra ended at Stop",
+			async (_, offered, extraEndedBy) => {
+				capabilities = offered;
+				const env = { UT_CC_USAGE: "estimate" };
+				const server = holdingServer();
+				await startServer(server.responder);
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				// The first resume ends tx_1, is granted tx_2, and waits before recording it.
+				const first = await pausedAt("pre-tool-use.mjs", preInput("tu_1"), "publish", env);
+				expect(first.wasPaused).toBe(true);
+				expect(await pendingTransfers()).toEqual([]);
+				// The second resume finds no hold at all, and reserves its own.
+				const second = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(second.stderr).toContain("reserved tx_3");
+				expect((await first.resume()).stderr).toContain("reserved tx_2");
+				expect((await pendingTransfers()).sort()).toEqual(["tx_2", "tx_3"]);
+				// One execution settles one hold; Stop ends the other.
+				await run("post-tool-use.mjs", postInput("tu_1"), env);
+				expect(server.charges).toHaveLength(1);
+				await run("stop.mjs", stopInput(), env);
+				expect(server.charges).toHaveLength(1);
+				const settled = server.charges[0]?.transferId;
+				const extra = settled === "tx_2" ? "tx_3" : "tx_2";
+				expect(requests.filter((r) => r.body.transferId === extra).map((r) => r.path)).toEqual([
+					extraEndedBy,
+				]);
+				expect(await holdStateFiles()).toEqual([]);
+			},
+		);
+
+		describe("a 1.4.0 record (a per-call name, no binding) present at upgrade is found by its stored ids, and ended once, through its own name", () => {
+			const LEGACY = `${SESSION}__main__tu_1.json`;
+			/** Turn the call's record into what 1.4.0 wrote: its per-call name, no binding. */
+			async function asLegacy() {
+				const { serverUrl: _url, keyHash: _hash, ...body } = await record();
+				await writeFile(join(stateDir, LEGACY), JSON.stringify(body));
+				await rm(join(stateDir, RECORD));
+			}
+
+			it("estimate: PostToolUse settles it once", async () => {
+				const env = { UT_CC_USAGE: "estimate" };
+				const server = holdingServer();
+				await startServer(server.responder);
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				await asLegacy();
+				await run("post-tool-use.mjs", postInput("tu_1"), env);
+				expect(server.charges.map((c) => c.transferId)).toEqual(["tx_1"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+
+			it("transcript: Stop settles its window once, and the journal accounts it", async () => {
+				const server = holdingServer();
+				await startServer(server.responder);
+				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+				await run("pre-tool-use.mjs", preInput("tu_1"));
+				await asLegacy();
+				await run("stop.mjs", stopInput());
+				expect(server.charges).toEqual([{ transferId: "tx_1", inputTokens: 9, outputTokens: 9 }]);
+				expect((await readCursor()).accounted).toEqual(["msg_a"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+
+			it("a re-fire: the record is ended (dropped, its tenant unknown), and the fresh hold gets its own file beside nothing", async () => {
+				const env = { UT_CC_USAGE: "estimate" };
+				const server = holdingServer();
+				await startServer(server.responder);
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				await asLegacy();
+				const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(again.stderr).toContain("hold tx_1 was made under another server or key");
+				expect(again.stderr).toContain("reserved tx_2");
+				expect(aboutTx1()).toEqual([]);
+				expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_2")]);
+			});
+		});
+
+		it.each<[string, Record<string, string>]>([
+			["enforce", { UT_CC_MODE: "enforce" }],
+			["enforce, UT_FAIL_OPEN=1 (not an outage)", { UT_CC_MODE: "enforce", UT_FAIL_OPEN: "1" }],
+			["watch", {}],
+		])(
+			"a file already at the fresh hold's name is never written over (%s): the hold is given back, and the call refused",
+			async (_, mode) => {
+				capabilities = ["release"];
+				const env = { UT_CC_USAGE: "estimate", ...mode };
+				const server = holdingServer();
+				await startServer(server.responder);
+				// Another call's record, under the very name tx_1's record will get.
+				const squatter = JSON.stringify({
+					gate: 1,
+					toolUseId: "tu_other",
+					transferId: "tx_other",
+					agentId: "main",
+				});
+				await writeFile(join(stateDir, RECORD), squatter);
+				const pre = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(pre.code).toBe(0);
+				const why = "already has this hold's name";
+				if (mode.UT_CC_MODE === "enforce") {
+					const decision = JSON.parse(pre.stdout).hookSpecificOutput;
+					expect(decision.permissionDecision).toBe("deny");
+					expect(decision.permissionDecisionReason).toContain(why);
+				} else {
+					expect(pre.stdout).toBe("");
+					expect((await gaps())[0]?.reason).toContain(why);
+				}
+				// tx_1 was given back, and the file already there is byte for byte as it was.
+				expect(aboutTx1().map((r) => r.path)).toEqual(["/v1/release"]);
+				expect(await readFile(join(stateDir, RECORD), "utf-8")).toBe(squatter);
+				expect(await holdStateFiles()).toEqual([RECORD]);
+			},
+		);
+
+		it("an outcome is never journalled over a file already at its name: the entry already there is the one the journal applies", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			await writeFile(
+				join(stateDir, holdFile("tu_1", "tx_1", "done")),
+				JSON.stringify({
+					agentId: "main",
+					transferId: "tx_other",
+					assignedIds: ["msg_z"],
+					outcome: "settled",
+				}),
+			);
+			const post = await run("post-tool-use.mjs", postInput("tu_1"));
+			expect(post.stderr).toContain("could not be journalled");
+			expect(server.charges).toEqual([{ transferId: "tx_1", inputTokens: 9, outputTokens: 9 }]);
+			// tx_1's outcome stays in flight (`.settling`), for the journal to decide later.
+			expect((await readCursor()).accounted).toEqual(["msg_z"]);
+			expect(await holdStateFiles()).toEqual([SETTLING]);
+		});
+
+		it("a record is read by the ids it stores, never by its name: a `.settling` named for this call but storing another's is not this call's, and the reverse is", async () => {
+			const env = { UT_CC_USAGE: "estimate", UT_CC_MODE: "enforce" };
+			const server = holdingServer();
+			await startServer(server.responder);
+			const stored = (toolUseId: string, transferId: string) =>
+				JSON.stringify({ gate: 1, toolUseId, transferId, agentId: "main" });
+			// Named for tu_1, but it stores another call's ids: tu_1 reserves as usual.
+			await writeFile(
+				join(stateDir, holdFile("tu_1", "tx_9", "settling")),
+				stored("tu_other", "tx_9"),
+			);
+			const first = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(first.stdout).toBe("");
+			expect(first.stderr).toContain("reserved tx_1");
+			// Named for another call and another transfer, but it stores tu_2's ids and
+			// tx_8: tu_2's settle of tx_8 is in flight.
+			await writeFile(
+				join(stateDir, holdFile("tu_other", "tx_5", "settling")),
+				stored("tu_2", "tx_8"),
+			);
+			const second = await run("pre-tool-use.mjs", preInput("tu_2"), env);
+			const decision = JSON.parse(second.stdout).hookSpecificOutput;
+			expect(decision.permissionDecision).toBe("deny");
+			expect(decision.permissionDecisionReason).toContain(
+				"tx_8 has a settle that is not resolved yet",
+			);
+			expect(decision.permissionDecisionReason).not.toContain("tx_5");
+			expect(authorizes()).toHaveLength(1);
+		});
+
+		describe("a state dir on a filesystem without hard links: each publish falls back to an exclusive create", () => {
+			const NO_LINKS = join(import.meta.dirname, "helpers", "no-hard-links.mjs");
+			const linkless = { NODE_OPTIONS: `--import=${NO_LINKS}` };
+
+			it("estimate: a hold is still recorded, settled once, and nothing is left", async () => {
+				const env = { UT_CC_USAGE: "estimate", ...linkless };
+				const server = holdingServer();
+				await startServer(server.responder);
+				const pre = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(pre.stderr).toContain("reserved tx_1");
+				expect(await holdStateFiles()).toEqual([RECORD]);
+				await run("post-tool-use.mjs", postInput("tu_1"), env);
+				expect(server.charges.map((c) => c.transferId)).toEqual(["tx_1"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+
+			it("transcript: the window is settled once, and its outcome journalled and applied", async () => {
+				const server = holdingServer();
+				await startServer(server.responder);
+				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+				await run("pre-tool-use.mjs", preInput("tu_1"), linkless);
+				await run("post-tool-use.mjs", postInput("tu_1"), linkless);
+				expect(server.charges).toEqual([{ transferId: "tx_1", inputTokens: 9, outputTokens: 9 }]);
+				expect((await readCursor()).accounted).toEqual(["msg_a"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+
+			it("a file already at the fresh hold's name is still never written over", async () => {
+				capabilities = ["release"];
+				await startServer(holdingServer().responder);
+				const squatter = JSON.stringify({
+					gate: 1,
+					toolUseId: "tu_other",
+					transferId: "tx_other",
+					agentId: "main",
+				});
+				await writeFile(join(stateDir, RECORD), squatter);
+				const pre = await run("pre-tool-use.mjs", preInput("tu_1"), {
+					UT_CC_USAGE: "estimate",
+					UT_CC_MODE: "enforce",
+					...linkless,
+				});
+				expect(JSON.parse(pre.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+				expect(await readFile(join(stateDir, RECORD), "utf-8")).toBe(squatter);
+			});
+		});
+
+		describe("a server's transferId names a hold's file only as it is: any other id is refused, never sanitized", () => {
+			const env = { UT_CC_USAGE: "estimate" };
+			/** A server that grants `id` at every authorize, and confirms every release. */
+			const granting = (id: unknown) => (path: string) =>
+				path === "/v1/authorize"
+					? { status: 200, json: { transferId: id, estimatedCost: 1 } }
+					: { status: 200, json: { released: true } };
+			const releasedIds = () =>
+				requests.filter((r) => r.path === "/v1/release").map((r) => r.body.transferId);
+
+			it.each<[string, string]>([
+				["a path (`../x`)", "../x"],
+				["a dot (`a.b`)", "a.b"],
+				["129 characters", "x".repeat(129)],
+				["an empty id", ""],
+			])(
+				"%s: enforce refuses the call, the hold is given back, and nothing is written",
+				async (_, id) => {
+					capabilities = ["release"];
+					await startServer(granting(id));
+					// The state dir one level down, so that a write outside it would show.
+					const root = await mkdtemp(join(tmpdir(), "utcc-tx-root-"));
+					const state = join(root, "state");
+					const pre = await run("pre-tool-use.mjs", preInput("tu_1"), {
+						...env,
+						UT_CC_MODE: "enforce",
+						UT_CC_STATE_DIR: state,
+					});
+					expect(pre.code).toBe(2);
+					expect(pre.stderr).toContain("authorization failed closed");
+					expect(pre.stderr).toContain("its transferId is not a valid id");
+					// Given back through `release`, under the id as the server sent it. An empty
+					// id names no hold.
+					expect(releasedIds()).toEqual(id === "" ? [] : [id]);
+					expect((await readdir(root)).filter((name) => name !== "state")).toEqual([]);
+					const written = await readdir(state).catch(() => [] as string[]);
+					expect(written.filter((name) => /\.(json|settling|done|tmp)$/.test(name))).toEqual([]);
+				},
+			);
+
+			it("on a server without release, the hold is left to its sweep: never aborted, which counts as a breaker failure", async () => {
+				capabilities = [];
+				await startServer(granting("a.b"));
+				const pre = await run("pre-tool-use.mjs", preInput("tu_1"), {
+					...env,
+					UT_CC_MODE: "enforce",
+				});
+				expect(pre.code).toBe(2);
+				expect(pre.stderr).toContain("left to the server's pending-hold sweep");
+				expect(requests.map((r) => r.path)).toEqual(["/v1/authorize"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+
+			it("watch mode: the call goes through unmetered, as a gap", async () => {
+				capabilities = ["release"];
+				await startServer(granting("a.b"));
+				const pre = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(pre.code).toBe(0);
+				expect(pre.stdout).toBe("");
+				expect((await gaps())[0]?.reason).toContain("its transferId is not a valid id");
+				expect(releasedIds()).toEqual(["a.b"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+
+			it("control: a 128-character id is valid, and names its hold's file as it is", async () => {
+				const id = `tx_${"x".repeat(125)}`;
+				await startServer(granting(id));
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(await holdStateFiles()).toEqual([holdFile("tu_1", id)]);
+			});
+
+			it("PostToolUse: a fresh hold with an invalid id is given back and never recorded; the call's estimate goes unrecorded", async () => {
+				capabilities = ["release"];
+				let granted = 0;
+				await startServer((path) => {
+					if (path === "/v1/authorize") {
+						granted += 1;
+						const transferId = granted === 1 ? "tx_1" : "a.b";
+						return { status: 200, json: { transferId, estimatedCost: 1 } };
+					}
+					// tx_1 expired before its settle: the fresh hold the 404 brings is "a.b".
+					if (path === "/v1/settle") return notFound;
+					return { status: 200, json: { released: true } };
+				});
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				const post = await run("post-tool-use.mjs", postInput("tu_1"), env);
+				expect(post.code).toBe(0);
+				expect(post.stderr).toContain("its fresh hold's transferId is not a valid id");
+				expect(post.stderr).toContain("this call's estimate is not recorded");
+				expect(releasedIds()).toEqual(["a.b"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+
+			it("a name too long for the filesystem (ENAMETOOLONG): the hold is given back, and enforce fails closed", async () => {
+				capabilities = ["release"];
+				const server = holdingServer();
+				await startServer(server.responder);
+				const pre = await run("pre-tool-use.mjs", preInput("t".repeat(300)), {
+					...env,
+					UT_CC_MODE: "enforce",
+				});
+				expect(pre.code).toBe(2);
+				expect(pre.stderr).toContain("authorization failed closed");
+				expect(pre.stderr).toContain("ENAMETOOLONG");
+				expect(aboutTx1().map((r) => r.path)).toEqual(["/v1/release"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+		});
+	});
+
+	describe("a release the server does not confirm: no fresh hold beside a hold that may be live", () => {
+		const env = { UT_CC_USAGE: "estimate" };
+
+		it.each<[string, { status: number; json: unknown }, Record<string, string>]>([
+			[
+				"a 503, enforce",
+				{ status: 503, json: { error: "unavailable" } },
+				{ UT_CC_MODE: "enforce" },
+			],
+			[
+				"no answer (the connection drops), enforce",
+				{ status: 0, json: null },
+				{ UT_CC_MODE: "enforce" },
+			],
+			[
+				"a 503, enforce with UT_FAIL_OPEN=1",
+				{ status: 503, json: { error: "unavailable" } },
+				{ UT_CC_MODE: "enforce", UT_FAIL_OPEN: "1" },
+			],
+			["a 503, watch", { status: 503, json: { error: "unavailable" } }, {}],
+			[
+				"a 404 for an unknown ROUTE (an older server, or a proxy), enforce",
+				{ status: 404, json: { error: "not_found", reason: "unknown route" } },
+				{ UT_CC_MODE: "enforce" },
+			],
+		])(
+			"%s: nothing is reserved, and the hold is kept for Stop to give back",
+			async (_, answer, mode) => {
+				capabilities = ["release"];
+				const server = holdingServer();
+				let refusing = true;
+				await startServer((path, body) =>
+					refusing && path === "/v1/release" && body.transferId === "tx_1"
+						? answer
+						: server.responder(path, body),
+				);
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				const again = await run("pre-tool-use.mjs", preInput("tu_1"), { ...env, ...mode });
+				expect(again.stderr).toContain("the hold may be live");
+				if (mode.UT_CC_MODE === "enforce" && mode.UT_FAIL_OPEN !== "1") {
+					// It fails as a failed authorization does: an outage, not a known state.
+					expect(again.code).toBe(2);
+					expect(again.stderr).toContain("authorization failed closed");
+				} else {
+					expect(again.code).toBe(0);
+					expect(again.stdout).toBe("");
+				}
+				expect(again.stderr).not.toContain("is ended");
+				expect(authorizes()).toHaveLength(1);
+				expect(await holdStateFiles()).toEqual([SETTLING]);
+				// Stop gives it back.
+				refusing = false;
+				await run("stop.mjs", stopInput(), env);
+				expect(aboutTx1().map((r) => r.path)).toEqual(["/v1/release", "/v1/release"]);
+				expect(await holdStateFiles()).toEqual([]);
+			},
+		);
+
+		it.each<[string, { status: number; json: unknown } | null, boolean]>([
+			["its release a 503", { status: 503, json: { error: "unavailable" } }, false],
+			["its release confirmed", null, true],
+		])(
+			"transcript: the first window's settle fails (500) and %s: the resume reserves afresh only once the server confirms the hold is gone",
+			async (_, release, reserves) => {
+				capabilities = ["release"];
+				const server = holdingServer();
+				await startServer((path, body) => {
+					if (body.transferId === "tx_1" && path === "/v1/settle") {
+						return { status: 500, json: { error: "ledger unavailable" } };
+					}
+					if (body.transferId === "tx_1" && path === "/v1/release" && release !== null) {
+						return release;
+					}
+					return server.responder(path, body);
+				});
+				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+				await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+				const again = await run("pre-tool-use.mjs", preInput("tu_1"), { UT_CC_MODE: "enforce" });
+				if (reserves) {
+					expect(again.stdout).toBe("");
+					expect(again.stderr).toContain("reserved tx_2");
+					expect(authorizes()).toHaveLength(2);
+				} else {
+					// It fails as a failed authorization does: no fresh hold beside a hold that
+					// may be live.
+					expect(again.code).toBe(2);
+					expect(again.stderr).toContain("the server has not confirmed it is gone");
+					expect(authorizes()).toHaveLength(1);
+				}
+				// Either way the window's outcome is journalled once. Unkeyed, it is `claimed`:
+				// its ids are accounted, never posted again.
+				expect((await readCursor()).accounted).toEqual(["msg_a"]);
+				expect(server.charges).toEqual([]);
+			},
+		);
+
+		it("a 404 `unknown transferId` to the release: the server holds it no more, so the call reserves afresh", async () => {
+			capabilities = ["release"];
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			server.expire("tx_1");
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
+				...env,
+				UT_CC_MODE: "enforce",
+			});
+			expect(again.stdout).toBe("");
+			expect(again.stderr).toContain("reserved tx_2");
+			expect(aboutTx1().map((r) => [r.path, r.status])).toEqual([["/v1/release", 404]]);
+			expect(await holdStateFiles()).toEqual([holdFile("tu_1", "tx_2")]);
+		});
+	});
+
+	describe("end to end: the real hooks against a REAL usertrust-server", () => {
+		const KEY = "ut_plugin_resume_key";
+		const env = { UT_CC_USAGE: "estimate" };
+
+		it("a re-fire RELEASES the first hold and reserves afresh; the real server settles the fresh hold once", async () => {
+			real = createUsertrustServer({
+				config: {
+					host: "127.0.0.1",
+					port: 0,
+					stateDir: await mkdtemp(join(tmpdir(), "utcc-tx-srv-")),
+					enforcement: "enforce",
+					pendingTtlMs: 300_000,
+					dryRun: true,
+					tenants: [{ id: "t", keyHash: hashKey(KEY), budget: 10_000_000 }],
+				},
+			});
+			const { port: realPort } = await real.listen();
+			await startServer({ forwardTo: `http://127.0.0.1:${realPort}`, key: KEY });
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			// The server states the hold's life (#239), and the plugin does not keep it: it
+			// never reuses a hold, so it has no use for one.
+			expect(authorizes()[0]?.response).toHaveProperty("expiresInMs");
+			expect(Object.hasOwn(await record(), "expiresInMs")).toBe(false);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(again.stderr).toContain("earlier hold");
+			expect(authorizes()).toHaveLength(2);
+			// The real server publishes `release` (#238): the first hold is given back through
+			// it, answered 200, before the fresh one is asked for, and nothing is aborted.
+			expect(releases().map((r) => [r.body.transferId, r.status])).toEqual([
+				[transferOf(authorizes()[0]), 200],
+			]);
+			expect(requests.map((r) => r.path)).toEqual([
+				"/v1/authorize",
+				"/v1/release",
+				"/v1/authorize",
+			]);
+			expect(aborts()).toEqual([]);
+			expect((await run("post-tool-use.mjs", postInput("tu_1"), env)).code).toBe(0);
+			expect(settles().map((s) => [s.body.transferId, s.status])).toEqual([
+				[transferOf(authorizes()[1]), 200],
+			]);
+		});
+	});
+
+	describe("a record that names another call is no hold of this one (state-file names can collide)", () => {
+		const env = { UT_CC_USAGE: "estimate" };
+		// Agent `a__b` with tool `c`, and agent `a` with tool `b__c`: one call name, so
+		// each file differs only by its transfer, and only the stored ids tell the calls
+		// apart.
+		const first = () => preInput("c", { agent_id: "a__b" });
+		const second = () => preInput("b__c", { agent_id: "a" });
+		const SHARED = `${SESSION}__a__b__c.tx_1`;
+
+		it("control: the first call itself, fired again, ends its hold and reserves afresh", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", first(), env);
+			const again = await run("pre-tool-use.mjs", first(), env);
+			expect(again.stderr).toContain("this tool call's earlier hold tx_1 is ended");
+			expect(authorizes()).toHaveLength(2);
+		});
+
+		it("pending: the other call reserves its own hold, and never ends the first's", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", first(), env);
+			expect(await holdStateFiles()).toEqual([`${SHARED}.json`]);
+			const again = await run("pre-tool-use.mjs", second(), env);
+			expect(again.stderr).not.toContain("tx_1");
+			expect(again.stderr).toContain("reserved tx_2");
+			expect(authorizes()).toHaveLength(2);
+		});
+
+		it(".settling: the other call reserves its own hold, and is never told the first's is being settled", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", first(), env);
+			await rename(join(stateDir, `${SHARED}.json`), join(stateDir, `${SHARED}.settling`));
+			const again = await run("pre-tool-use.mjs", second(), env);
+			expect(again.stderr).not.toContain("tx_1");
+			expect(again.stderr).toContain("reserved tx_2");
+			expect(authorizes()).toHaveLength(2);
+		});
+
+		// Each half of the identity, on its own. The TOOL id: one agent, tool ids that
+		// sanitize alike (`x.y` and `x_y`). The AGENT: one tool id, and two sessions
+		// whose names collide with the agents' (`s` with agent `x__y`, and `s__x` with
+		// agent `y`): one call name, and only the stored agent tells them apart.
+		const sameAgent = (tool: string) => preInput(tool);
+		const crossSession = (session: string, agent: string) =>
+			preInput("tu_9", { session_id: session, agent_id: agent });
+		const toolShared = `${SESSION}__main__x_y.tx_1`;
+		const agentShared = "s__x__y__tu_9.tx_1";
+
+		it.each<[string, boolean]>([
+			["pending", false],
+			[".settling", true],
+		])("the tool id alone (%s): `x_y` is no hold of `x.y`", async (_, settling) => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", sameAgent("x.y"), env);
+			if (settling) {
+				await rename(
+					join(stateDir, `${toolShared}.json`),
+					join(stateDir, `${toolShared}.settling`),
+				);
+			}
+			const again = await run("pre-tool-use.mjs", sameAgent("x_y"), env);
+			expect(again.stderr).not.toContain("tx_1");
+			expect(again.stderr).toContain("reserved tx_2");
+			expect(authorizes()).toHaveLength(2);
+		});
+
+		it.each<[string, boolean]>([
+			["pending", false],
+			[".settling", true],
+		])(
+			"the agent alone (%s): agent `y` of session `s__x` has no hold of agent `x__y` of session `s`",
+			async (_, settling) => {
+				const server = holdingServer();
+				await startServer(server.responder);
+				await run("pre-tool-use.mjs", crossSession("s", "x__y"), env);
+				expect(await holdStateFiles()).toEqual([`${agentShared}.json`]);
+				if (settling) {
+					await rename(
+						join(stateDir, `${agentShared}.json`),
+						join(stateDir, `${agentShared}.settling`),
+					);
+				}
+				const again = await run("pre-tool-use.mjs", crossSession("s__x", "y"), env);
+				expect(again.stderr).not.toContain("tx_1");
+				expect(again.stderr).toContain("reserved tx_2");
+				expect(authorizes()).toHaveLength(2);
+			},
+		);
 	});
 });

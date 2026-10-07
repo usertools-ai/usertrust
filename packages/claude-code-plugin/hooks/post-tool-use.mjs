@@ -34,7 +34,9 @@ import {
 	defaultModel,
 	estimateTokens,
 	giveBack,
+	giveBackInvalid,
 	isGated,
+	isTransferId,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
@@ -104,7 +106,7 @@ function noteIfAmbiguous(response, transferId) {
  * off leaves its hold .settling, and Stop gives it back.
  */
 async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
-	const claimed = await claimForSettle(sessionId, agentId, entry.entryKey);
+	const claimed = await claimForSettle(entry.path);
 	if (claimed === null) {
 		say(`usertrust: hold ${entry.transferId} is being settled by another hook`);
 		return;
@@ -161,6 +163,16 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		await unlink(claimed).catch(() => {});
 		say(
 			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold was not granted (${auth.status}); this call's estimate is not recorded`,
+		);
+		return;
+	}
+	if (!isTransferId(transferId)) {
+		// It would name the fresh hold's file, as it is (lib.mjs `isTransferId`): the
+		// hold is given back, through `release` only, and never recorded.
+		await giveBackInvalid(transferId, Math.max(250, Math.min(5000, timeLeft())));
+		await unlink(claimed).catch(() => {});
+		say(
+			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold's transferId is not a valid id, so it is not kept; this call's estimate is not recorded`,
 		);
 		return;
 	}

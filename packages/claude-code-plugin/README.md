@@ -81,7 +81,7 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   then SETTLES that hold, exactly once, at the window's real counts — on the
   normal path no hold is ever aborted. A call that does not complete, and one
   that is deferred and then resumed, leave that path: see the known limitation
-  and the known issue in [Modes](#modes-watch-only-by-default). A tool call whose
+  and the note on deferred calls in [Modes](#modes-watch-only-by-default). A tool call whose
   window is empty (a parallel call in the same response, say) is given back
   (below).
 - **The remainder.** What no hold carried — another model's responses, a final
@@ -358,21 +358,76 @@ not affected: the plugin gives every hold back through `/v1/release`, which coun
 as neither a failure nor a success, and the server's own sweep releases expired
 holds the same way ([#238](https://github.com/usertools-ai/usertrust/issues/238)).
 
-**Known issue: a tool call that is deferred and then resumed is reserved twice.**
-In a `claude -p` run, another PreToolUse hook can
+**A tool call that is deferred and then resumed keeps one hold** (two resumes of
+the same call running at once are the exception, below). In a
+`claude -p` run, another PreToolUse hook can
 [defer a tool call](https://code.claude.com/docs/en/hooks#defer-a-tool-call-for-later)
 (this plugin never does, and interactive sessions ignore `defer`). The call does
 not run, so it keeps its hold like a call that does not complete (above). When
 the session is resumed (`claude -p --resume`), the same call fires PreToolUse
-again, and the plugin reserves a second hold and overwrites its record of the
-first. The first hold can then stay pending until the server's pending-hold TTL
-voids it, counting against the budget until then; on a server without `release` its expiry
-is one of the aborts above. In transcript mode the usage it carried can go
-unrecorded, silently: an under-count, never a double charge. In estimate mode
-the call is still charged once, on the second hold. Each further deferral of the
-same call repeats this. Only flows that defer a tool call and resume it are
-affected. The fix is tracked in
-[#234](https://github.com/usertools-ai/usertrust/issues/234) (item 10).
+again, and the plugin finds the hold the call already has.
+- **It never reuses that hold.** It ends the hold, then reserves afresh, so the
+  budget is checked at every resume: one more authorize per resume. Whether a held
+  reservation is still live, and still this server's and key's, cannot be known
+  from the record, so the plugin does not rely on it.
+  - A hold carrying transcript usage is settled once, at its counts. If that
+    settle fails and the server does not confirm the hold is gone (its release
+    unconfirmed too), the hold may be live: no fresh hold is made beside it, and
+    the call fails as a failed authorization does. A later re-fire of the call no
+    longer finds that hold, though. It reserves a replacement, and the budget
+    counts both until the server's sweep ends the original: an early refusal,
+    never an overspend ([#248](https://github.com/usertools-ai/usertrust/issues/248)).
+  - Any other hold is given back only through a `release` the server advertises,
+    and never aborted. On a server without `release`, it counts against the budget
+    until the server's pending-hold sweep voids it, which is one of the aborts
+    above: a call can be refused early, never overspend. A release the server
+    does not confirm (no answer, or an answer other than a 200 or `unknown
+    transferId`) leaves the hold possibly live: no fresh hold is made beside it,
+    its record is kept for Stop to give back, and the call fails as a failed
+    authorization does. A 404 `unknown transferId` from a server that has
+    restarted does not end the ledger's hold: it stays pending until its timeout
+    (300 s at most), and the budget counts it twice until then, the safe direction.
+  - **Each hold has its own files,** named by its transfer as well as its call
+    (`<session>__<agent>__<call>.<transferId>.json`, with its `.settling` and
+    `.done`), so the earlier hold and the fresh one never share a file. A hook
+    still acting on an earlier listing, such as a Stop that listed the earlier hold
+    before the resume ended it, finds only that hold's file: it never claims,
+    settles, journals over or deletes the fresh hold's. No hold file is ever
+    written over another. A record from 1.4.0 keeps its per-call name, and is
+    found by the ids it stores and ended once, through that name. The transfer id
+    goes into a name only as the server sent it, and only if it is 1 to 128 of
+    `A-Z a-z 0-9 _ -` (the server mints `tx_<time>_<8 hex>`). Any other id is
+    refused, never rewritten: the hold is given back through `release` (on a
+    server without it, left to its sweep), and the call fails as a failed
+    authorization does. So does a name too long for the filesystem, after the
+    hold is given back.
+  - **Another server or key.** A call resumed under another server or key
+    (`UT_SERVER_URL`, `UT_SERVER_KEY`) never touches its earlier hold through the
+    new one. Each record carries the server's URL and a hash of the key (never the
+    key). On a mismatch, or for a record written before this, the record is dropped
+    and the new server is told nothing about the old hold. The old hold is left to
+    its own server's sweep. In transcript mode the usage it carried goes
+    unrecorded: an under-count, never charged to the new tenant. A `.settling`
+    record made under another server or key never reaches the journal through the
+    resumed call either. While fresh, the call is refused. Once stale, the record
+    is abandoned through its own name: its usage goes unrecorded, and is never
+    parked for a retry through the new server. Any other hook that reconciles is
+    still blind to the tenant, as in 1.4.0
+    ([#246](https://github.com/usertools-ai/usertrust/issues/246)).
+- **Two resumes of one call at once** (two `claude -p --resume` of one session,
+  say) can leave the call two holds: one resume can reserve while the other is
+  between ending the earlier hold and recording its fresh one. Each hold has its
+  own record, so nothing is overwritten or orphaned. The call's PostToolUse
+  settles one, and Stop ends the other, so the call is charged once. Until then
+  the budget counts both. On a server without `release`, Stop gives that extra
+  hold back by an abort, one of the aborts above.
+- **An unresolved hold refuses the call.** A hook can be killed while settling
+  that hold, leaving its `.settling` record; or another hook can be ending it at
+  that moment. The resumed call is then refused until that resolves: in enforce
+  mode it is denied, whatever `UT_FAIL_OPEN` says, and in watch mode it is
+  recorded as a gap. A stale transcript-mode record is decided by the journal
+  first, and the call then reserves afresh: only the hook whose reconcile removed
+  the record does so.
 
 In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran;
 an estimate hold is marked settle-attempted (`.settling`) before its one settle,
