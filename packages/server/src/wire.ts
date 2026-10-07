@@ -83,12 +83,15 @@ export interface AuthorizeResponse {
 	/** Epoch ms on the server's clock, when the hold was made. For display, not for timing. */
 	createdAt: number;
 	/**
-	 * The hold's remaining life in ms when the answer was sent: the shorter of the
-	 * server's `pendingTtlMs` sweep and the ledger's pending timeout (`hold-expiry`).
-	 * A duration: added to the client's own clock reading taken before it sent the
-	 * request, it gives a time no later than the hold's real expiry.
+	 * The longest the hold can still be pending, in ms, when the answer was sent: the
+	 * shorter of the server's `pendingTtlMs` sweep and the ledger's pending timeout
+	 * (`hold-expiry`). No expiry ends it sooner; a settle, a void or a server restart
+	 * can. A duration: added to the client's own clock reading taken before it sent the
+	 * request, it gives a time no later than the hold's last moment. Absent when the
+	 * server cannot state the life (a ledger hold without its timeout): a client must
+	 * then treat the hold as one it cannot reuse.
 	 */
-	expiresInMs: number;
+	expiresInMs?: number;
 }
 
 /**

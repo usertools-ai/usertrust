@@ -593,8 +593,12 @@ wired in, it must adopt `principalLedgerTags`, or one ledger will carry two inco
 **A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass
 `LEDGER_HOLD_TIMEOUT_MS` as the pending transfer's `timeout` explicitly, and a headless
 `Authorization` publishes the same value as `holdTimeoutMs` (absent in dry run).
-`usertrust-server` answers every authorize with `expiresInMs` (capability `hold-expiry`): the shorter
-of its `pendingTtlMs` sweep and that timeout, minus the hold's age (`remainingLifeMs`).
+`usertrust-server` answers every authorize with `expiresInMs` (capability `hold-expiry`): the longest
+the hold can still be pending, the shorter of its `pendingTtlMs` sweep and that timeout, minus the
+hold's age (`remainingLifeMs`). A settle, a void or a restart can end the hold sooner; no expiry can.
+- The sweep ends a hold when that life reaches 0, so the sweep and the answer are one rule.
+- A ledger hold whose handle does not state its timeout gets NO `expiresInMs` (an absence is never read
+  as "no limit"), and the sweep falls back to `pendingTtlMs` for it.
 - The server reads a hold's age on ONE monotonic clock: `startedMono`, read as the request arrives and
   so before the reserve. Its own sweep reads the same field.
 - Only durations leave the process (`expiresInMs`, `holdTimeoutMs`). The answer's `createdAt` is a

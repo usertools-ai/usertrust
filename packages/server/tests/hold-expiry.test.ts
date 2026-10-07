@@ -12,7 +12,11 @@
  *    has left, never its total;
  *  - the server reads a hold's age on ONE monotonic clock, which its sweep reads too,
  *    so a wall-clock step back neither lengthens the advertised life nor keeps a hold
- *    from being swept.
+ *    from being swept;
+ *  - the sweep ends a hold when its advertised life runs out, the ledger's timeout
+ *    included, so the two are one rule;
+ *  - a ledger hold whose handle does not state its timeout advertises NO life, and is
+ *    swept at `pendingTtlMs`, as before.
  */
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -71,6 +75,15 @@ describe("an authorize answers the hold's remaining life (`expiresInMs`)", () =>
 		expect(Number.isSafeInteger(expiresInMs)).toBe(true);
 		expect(expiresInMs).toBeLessThanOrEqual(300_000);
 		expect(expiresInMs).toBeGreaterThan(290_000);
+	});
+
+	it("a ledger hold whose handle does not state its timeout advertises NO life", async () => {
+		// An absence is never read as "no limit": a client must then treat the hold as one
+		// it cannot reuse.
+		const base = await start({ pendingTtlMs: 300_000, dryRun: false });
+		const answer = await authorize(base);
+		expect(Object.hasOwn(answer, "expiresInMs")).toBe(false);
+		expect(answer.transferId).toBe("tx_fake_1");
 	});
 
 	it("a short pendingTtlMs is the life, below the ledger's timeout", async () => {
@@ -138,6 +151,31 @@ describe("the sweep reads the same monotonic clock", () => {
 		expect(await server?.sweepExpired()).toBe(0);
 		expect(server?.pendingCount()).toBe(1);
 	});
+
+	it("a ledger timeout shorter than pendingTtlMs ends the hold at the ledger's timeout", async () => {
+		// The ledger has expired the hold by then: kept until pendingTtlMs, its budget would
+		// stay reserved in the governor, and later calls could be refused for it.
+		const base = await start({ pendingTtlMs: 300_000, dryRun: false }, { holdTimeoutMs: 50 });
+		await authorize(base);
+		await new Promise((r) => setTimeout(r, 80));
+		expect(await server?.sweepExpired()).toBe(1);
+		expect(server?.pendingCount()).toBe(0);
+	});
+
+	it("control: a hold within its ledger timeout is left alone", async () => {
+		const base = await start({ pendingTtlMs: 300_000, dryRun: false }, { holdTimeoutMs: 60_000 });
+		await authorize(base);
+		await new Promise((r) => setTimeout(r, 80));
+		expect(await server?.sweepExpired()).toBe(0);
+	});
+
+	it("a ledger hold with no stated timeout is swept at pendingTtlMs, and not before", async () => {
+		const base = await start({ pendingTtlMs: 50, dryRun: false });
+		await authorize(base);
+		expect(await server?.sweepExpired()).toBe(0);
+		await new Promise((r) => setTimeout(r, 80));
+		expect(await server?.sweepExpired()).toBe(1);
+	});
 });
 
 describe("remainingLifeMs", () => {
@@ -146,27 +184,34 @@ describe("remainingLifeMs", () => {
 		auth: holdTimeoutMs === undefined ? {} : { holdTimeoutMs },
 	});
 
+	const ledger = (pendingTtlMs: number) => ({ pendingTtlMs, dryRun: false });
+	const dry = (pendingTtlMs: number) => ({ pendingTtlMs, dryRun: true });
+
 	it("is the shorter of the sweep and the ledger timeout, at the start", () => {
-		expect(remainingLifeMs(hold(1_000, 300_000), 300_000, 1_000)).toBe(300_000);
-		expect(remainingLifeMs(hold(1_000, 300_000), 10_000, 1_000)).toBe(10_000);
-		expect(remainingLifeMs(hold(1_000, 5_000), 300_000, 1_000)).toBe(5_000);
+		expect(remainingLifeMs(hold(1_000, 300_000), ledger(300_000), 1_000)).toBe(300_000);
+		expect(remainingLifeMs(hold(1_000, 300_000), ledger(10_000), 1_000)).toBe(10_000);
+		expect(remainingLifeMs(hold(1_000, 5_000), ledger(300_000), 1_000)).toBe(5_000);
 		// Dry run: no ledger hold, so the sweep alone.
-		expect(remainingLifeMs(hold(1_000), 300_000, 1_000)).toBe(300_000);
+		expect(remainingLifeMs(hold(1_000), dry(300_000), 1_000)).toBe(300_000);
+	});
+
+	it("is UNKNOWN (null) for a ledger hold whose handle does not state its timeout", () => {
+		expect(remainingLifeMs(hold(1_000), ledger(300_000), 1_000)).toBeNull();
 	});
 
 	it("is what is LEFT, never the total: a hold 100 s old has 200 s of 300", () => {
-		expect(remainingLifeMs(hold(0, 300_000), 300_000, 100_000)).toBe(200_000);
-		expect(remainingLifeMs(hold(0), 300_000, 100_000)).toBe(200_000);
+		expect(remainingLifeMs(hold(0, 300_000), ledger(300_000), 100_000)).toBe(200_000);
+		expect(remainingLifeMs(hold(0), dry(300_000), 100_000)).toBe(200_000);
 	});
 
 	it("is whole milliseconds, and never negative", () => {
-		expect(remainingLifeMs(hold(0, 300_000), 300_000, 0.4)).toBe(299_999);
-		expect(remainingLifeMs(hold(0, 300_000), 300_000, 300_000)).toBe(0);
-		expect(remainingLifeMs(hold(0, 300_000), 300_000, 900_000)).toBe(0);
+		expect(remainingLifeMs(hold(0, 300_000), ledger(300_000), 0.4)).toBe(299_999);
+		expect(remainingLifeMs(hold(0, 300_000), ledger(300_000), 300_000)).toBe(0);
+		expect(remainingLifeMs(hold(0, 300_000), ledger(300_000), 900_000)).toBe(0);
 	});
 
 	it("reads anything unusable as no life left", () => {
-		expect(remainingLifeMs(hold(0, Number.NaN), 300_000, 0)).toBe(0);
-		expect(remainingLifeMs(hold(Number.NaN, 300_000), 300_000, 0)).toBe(0);
+		expect(remainingLifeMs(hold(0, Number.NaN), ledger(300_000), 0)).toBe(0);
+		expect(remainingLifeMs(hold(Number.NaN, 300_000), ledger(300_000), 0)).toBe(0);
 	});
 });
