@@ -42,6 +42,7 @@ import {
 	serverCapabilities,
 	serverRequest,
 	takePendingEntry,
+	timeLeft,
 	usageMode,
 } from "./lib.mjs";
 import {
@@ -50,6 +51,11 @@ import {
 	OUTCOME_NOTES,
 	settleTranscriptHold,
 } from "./transcript.mjs";
+
+/** One request of the expired-hold chain: 5 s at most, and never past the hook's budget. */
+function withinBudget() {
+	return { timeoutMs: Math.min(5000, timeLeft()) };
+}
 
 /** A settle's answer that its hold does not exist on the server (not an unknown route). */
 function holdIsGone(response) {
@@ -90,6 +96,11 @@ function noteIfAmbiguous(response, transferId) {
  * posted and lost its answer as a pending .json, so an unmarked hold's 404 may
  * mean it was charged already. Such a hold is kept .settling for Stop, which only
  * gives it back. It is never re-authorized.
+ *
+ * Every request in the chain (the settle, the fresh authorize, the fresh settle)
+ * is capped at the time the hook has left (`withinBudget`), so the chain never
+ * runs past the hook's budget into Claude Code's kill. A request the budget cuts
+ * off leaves its hold .settling, and Stop gives it back.
  */
 async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	const claimed = await claimForSettle(sessionId, agentId, entry.entryKey);
@@ -97,7 +108,11 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		say(`usertrust: hold ${entry.transferId} is being settled by another hook`);
 		return;
 	}
-	const response = await serverRequest("/v1/settle", { transferId: entry.transferId, ...usage });
+	const response = await serverRequest(
+		"/v1/settle",
+		{ transferId: entry.transferId, ...usage },
+		withinBudget(),
+	);
 	if (response.status === 200) {
 		noteIfAmbiguous(response, entry.transferId);
 		await unlink(claimed).catch(() => {});
@@ -119,18 +134,22 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	const principal = capabilities?.has("principal")
 		? estimatePrincipalFor(sessionId, agentId, input.agent_type)
 		: undefined;
-	const auth = await serverRequest("/v1/authorize", {
-		model: defaultModel(),
-		...(typeof usage.inputTokens === "number" ? { estimatedInputTokens: usage.inputTokens } : {}),
-		maxOutputTokens: MAX_OUTPUT_TOKENS,
-		params: {
-			hook: "PostToolUse",
-			tool_name: input.tool_name ?? "unknown",
-			replaces: entry.transferId,
+	const auth = await serverRequest(
+		"/v1/authorize",
+		{
+			model: defaultModel(),
+			...(typeof usage.inputTokens === "number" ? { estimatedInputTokens: usage.inputTokens } : {}),
+			maxOutputTokens: MAX_OUTPUT_TOKENS,
+			params: {
+				hook: "PostToolUse",
+				tool_name: input.tool_name ?? "unknown",
+				replaces: entry.transferId,
+			},
+			actor: `claude-code:${sessionId}`,
+			...(principal === undefined ? {} : { principal }),
 		},
-		actor: `claude-code:${sessionId}`,
-		...(principal === undefined ? {} : { principal }),
-	});
+		withinBudget(),
+	);
 	const transferId = auth.json?.transferId;
 	if (
 		auth.status !== 200 ||
@@ -163,7 +182,7 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	say(
 		`usertrust: hold ${entry.transferId} expired before its settle (a long permission prompt?); charging this call once on ${transferId}`,
 	);
-	const settle = await serverRequest("/v1/settle", { transferId, ...usage });
+	const settle = await serverRequest("/v1/settle", { transferId, ...usage }, withinBudget());
 	if (settle.status === 200) {
 		noteIfAmbiguous(settle, transferId);
 		await unlink(fresh).catch(() => {});
