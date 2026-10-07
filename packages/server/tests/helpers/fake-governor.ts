@@ -3,6 +3,7 @@ import type {
 	AuthorizeParams,
 	EnvelopeStatus,
 	Governor,
+	ReleaseOutcome,
 	SettleParams,
 	TrustReceipt,
 } from "usertrust";
@@ -14,6 +15,8 @@ export interface FakeGovernorHandle {
 		authorized: string[];
 		settled: string[];
 		aborted: string[];
+		released: string[];
+		releaseReasons: Array<string | undefined>;
 		settleParams: Array<SettleParams | undefined>;
 		authorizeParams: AuthorizeParams[];
 	};
@@ -27,6 +30,12 @@ export function createFakeGovernor(
 		holdTimeoutMs?: number;
 		/** Runs inside `authorize`, after the server's request has arrived: a clock step, say. */
 		duringAuthorize?: () => void;
+		/**
+		 * How `release` answers. By default it ends the hold. `notHeld` answers as a governor
+		 * that no longer holds it; `voidError` as one whose ledger void failed; `throws` as
+		 * one that failed outright.
+		 */
+		release?: { notHeld?: boolean; voidError?: string; throws?: boolean };
 	} = {},
 ): FakeGovernorHandle {
 	let budget = opts.budget ?? 10_000;
@@ -36,6 +45,8 @@ export function createFakeGovernor(
 		authorized: [] as string[],
 		settled: [] as string[],
 		aborted: [] as string[],
+		released: [] as string[],
+		releaseReasons: [] as Array<string | undefined>,
 		settleParams: [] as Array<SettleParams | undefined>,
 		authorizeParams: [] as AuthorizeParams[],
 	};
@@ -85,6 +96,16 @@ export function createFakeGovernor(
 			pending.delete(auth.transferId);
 			budget += auth.estimatedCost;
 			calls.aborted.push(auth.transferId);
+		},
+		async release(auth: Authorization, reason?: string): Promise<ReleaseOutcome> {
+			calls.releaseReasons.push(reason);
+			if (opts.release?.throws === true) throw new Error("fake release failed");
+			if (opts.release?.notHeld === true) return { released: false };
+			pending.delete(auth.transferId);
+			budget += auth.estimatedCost;
+			calls.released.push(auth.transferId);
+			const voidError = opts.release?.voidError;
+			return voidError === undefined ? { released: true } : { released: true, voidError };
 		},
 		async destroy(): Promise<void> {
 			pending.clear();

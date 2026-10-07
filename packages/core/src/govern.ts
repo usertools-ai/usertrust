@@ -3869,7 +3869,17 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			if (entry === undefined) {
 				throw new Error(`No pending transfer found for ${transferId}`);
 			}
-			await tbClient.voidTransfer(entry.tbId);
+			try {
+				await tbClient.voidTransfer(entry.tbId);
+			} catch (err) {
+				// The ledger already ended this hold at its pending timeout and returned its
+				// funds, which is what the void was for: like `exists`, that outcome stands.
+				// Thrown, it left this entry behind, one per expired hold, until destroy().
+				const expired =
+					err instanceof TBTransferError &&
+					err.code === CreateTransferStatus.pending_transfer_expired;
+				if (!expired) throw err;
+			}
 			pendingMap.delete(transferId);
 		},
 

@@ -6,6 +6,7 @@ import type {
 	AuthorizeParams,
 	EnvelopeStatus,
 	Governor,
+	ReleaseOutcome,
 	SettleParams,
 } from "usertrust/headless";
 import type { PolicyDecider } from "./composite.js";
@@ -70,6 +71,14 @@ export function createMockGovernor(opts: { budget?: number } = {}): { governor: 
 			if (holds.delete(auth.transferId)) {
 				budget += auth.estimatedCost;
 			}
+		},
+		// The mock has no breaker and no chain, so a release returns the hold exactly as an
+		// abort does; the difference between the two lives in the real governor. It still
+		// says whether it ended the hold, as the real one does.
+		async release(auth: Authorization): Promise<ReleaseOutcome> {
+			if (!holds.delete(auth.transferId)) return { released: false };
+			budget += auth.estimatedCost;
+			return { released: true };
 		},
 		async destroy(): Promise<void> {
 			for (const auth of holds.values()) {

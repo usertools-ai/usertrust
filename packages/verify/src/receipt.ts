@@ -23,6 +23,8 @@ export interface TransactionEvent {
 		readonly error?: string;
 		/** The anomaly detector's reason — `anomaly_detected` writes `message`, not `error`. */
 		readonly message?: string;
+		/** Why a hold was given back — `hold_released` writes `reason`. */
+		readonly reason?: string;
 		readonly transferId?: string | undefined;
 	};
 	readonly sequence?: number | undefined;
@@ -268,6 +270,13 @@ const DENIAL_KINDS = new Set(["policy_denied", "ledger_rejected"]);
  */
 const DETECTION_KINDS = new Set(["anomaly_detected"]);
 
+/**
+ * A hold given back with nothing charged and nothing failed: a client's release, a
+ * TTL sweep, a shutdown. It carries no `settled` field, so without this arm it read
+ * PENDING forever, for a hold that can never settle.
+ */
+export const RELEASE_KINDS = new Set(["hold_released"]);
+
 function resolveStatus(event: TransactionEvent): string {
 	if (DENIAL_KINDS.has(event.kind)) return "DENIED";
 	// `stream_partial_delivery` is a FAILURE TERMINAL (AGENTS.md): the hold was
@@ -283,6 +292,7 @@ function resolveStatus(event: TransactionEvent): string {
 	if (event.kind === "settlement_ambiguous") return "AMBIGUOUS";
 	if (event.kind === "stream_partial_delivery") return "FAILED";
 	if (event.kind === "llm_call_failed") return "FAILED";
+	if (RELEASE_KINDS.has(event.kind)) return "RELEASED";
 	if (event.data.settled === true) return "SETTLED";
 	return "PENDING";
 }
@@ -324,7 +334,10 @@ export function renderReceipt(data: ReceiptData): string {
 	// later unrelated failure would have been captioned with the detector's
 	// message and read as anomaly-caused. Correlation is not causation, and a
 	// receipt that names the wrong cause is worse than one that names none.
-	const reason = event.data.error ?? (isDetection ? event.data.message : undefined);
+	const isReleased = RELEASE_KINDS.has(event.kind);
+	const reason =
+		event.data.error ??
+		(isDetection ? event.data.message : isReleased ? event.data.reason : undefined);
 	const allVerified = chainVerified && merkleVerified;
 
 	const lines: string[] = [];
@@ -351,7 +364,7 @@ export function renderReceipt(data: ReceiptData): string {
 
 	lines.push(row(`${dotted("  Status", status, WIDTH - 1)} `));
 
-	if ((isFailed || isDenied || isDetection) && reason) {
+	if ((isFailed || isDenied || isDetection || isReleased) && reason) {
 		lines.push(blank());
 		// The label describes THIS EVENT, and nothing else. `isDetection` alone —
 		// deliberately not `|| detectionReason !== undefined`, which labelled a
@@ -360,7 +373,7 @@ export function renderReceipt(data: ReceiptData): string {
 		// as the detector's observation while the real detector message printed
 		// separately below. The correlated detection has its own line; it does not
 		// get to rename someone else's error.
-		const errPrefix = isDetection ? "  Anomaly: " : "  Error: ";
+		const errPrefix = isDetection ? "  Anomaly: " : isReleased ? "  Reason: " : "  Error: ";
 		const indent = " ".repeat(errPrefix.length);
 		const maxW = WIDTH - indent.length - 2;
 		const wrapped = wordWrap(forDisplay(reason), maxW);

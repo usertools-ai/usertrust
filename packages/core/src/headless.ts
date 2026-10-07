@@ -400,6 +400,25 @@ export interface Governor {
 	 */
 	abort(auth: Authorization, error?: unknown): Promise<void>;
 
+	/**
+	 * Phase 2c: Give back a hold that did not fail: a reservation the caller no longer
+	 * needs, or one an integration ends itself (an expired hold, a shutdown). VOIDs the
+	 * pending hold and writes a neutral `hold_released` record. It is NOT a
+	 * circuit-breaker failure, and not a success either: give-backs can neither open the
+	 * breaker nor close one that real failures opened. `abort()` keeps its meaning, a
+	 * call that failed.
+	 *
+	 * Answers `{ released: true }` only when THIS call ended the hold, and
+	 * `{ released: false }` when the governor no longer held it: its settle is mid-POST,
+	 * or it was already settled, aborted, released or destroyed. A void the ledger
+	 * refused still ends the hold here (its accounting is released, and the ledger's
+	 * pending timeout returns the funds) and is named in `voidError`: a fixed code,
+	 * never the error's text. A hold the ledger had already expired is released cleanly.
+	 *
+	 * `reason` is caller text, recorded through {@link sanitizeReleaseReason}.
+	 */
+	release(auth: Authorization, reason?: string): Promise<ReleaseOutcome>;
+
 	/** Graceful shutdown — voids all pending holds, flushes audit. */
 	destroy(): Promise<void>;
 
@@ -442,6 +461,58 @@ export interface Governor {
 
 	/** The loaded configuration. */
 	readonly config: Readonly<TrustConfig>;
+}
+
+/** What `Governor.release()` did: see there. */
+export type ReleaseOutcome =
+	| { readonly released: true; readonly voidError?: string }
+	| { readonly released: false };
+
+/** The longest `hold_released` reason the chain records, in characters (code points). */
+const RELEASE_REASON_MAX = 200;
+
+/**
+ * The reason a `hold_released` record carries. It is caller text (a client's
+ * `/v1/release` body, say) and lands on the audit chain, which a verifier later
+ * prints at an auditor's terminal. So every control character is stripped (C0, DEL
+ * and C1), and only then is it clipped: sanitize first, clip second (AGENTS.md), so a
+ * run of controls can neither survive the clip nor eat into the 200 characters a real
+ * reason gets. Iterating a string yields code points, so the clip never splits a
+ * surrogate pair. Stripped rather than substituted, because this is a stored record,
+ * not a terminal render: a `?` would read as part of the reason.
+ *
+ * Non-string input (an untyped caller) and a reason that strips to nothing both
+ * record the default, so the record always says something true.
+ *
+ * Exported so an integration that echoes the reason elsewhere (usertrust-server's
+ * `released` event) sends exactly what the chain recorded, never a second rule.
+ */
+export function sanitizeReleaseReason(reason: unknown): string {
+	if (typeof reason !== "string") return "released";
+	let out = "";
+	let kept = 0;
+	for (const ch of reason) {
+		const code = ch.codePointAt(0) as number;
+		const safe = code <= 0x1f || (code >= 0x7f && code <= 0x9f) ? "" : ch;
+		if (safe === "") continue;
+		out += safe;
+		kept += 1;
+		if (kept === RELEASE_REASON_MAX) break;
+	}
+	return out === "" ? "released" : out;
+}
+
+/**
+ * The fixed code a release whose void failed records and answers: the ledger's own
+ * name for a transfer it refused, else `ledger_unavailable` (the ledger could not be
+ * asked, say). Never the error's text, which can carry a ledger address or a path.
+ */
+function releaseVoidError(err: unknown): string {
+	if (err instanceof TBTransferError) {
+		const name = CreateTransferStatus[err.code];
+		return typeof name === "string" ? name : "ledger_rejected";
+	}
+	return "ledger_unavailable";
 }
 
 // ── Verify URL base ──
@@ -821,7 +892,17 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 			if (entry === undefined) {
 				throw new Error(`No pending transfer found for ${transferId}`);
 			}
-			await tbClient.voidTransfer(entry.tbId);
+			try {
+				await tbClient.voidTransfer(entry.tbId);
+			} catch (err) {
+				// The ledger already ended this hold at its pending timeout and returned its
+				// funds, which is what the void was for: like `exists`, that outcome stands.
+				// Thrown, it left this entry behind, one per expired hold, until destroy().
+				const expired =
+					err instanceof TBTransferError &&
+					err.code === CreateTransferStatus.pending_transfer_expired;
+				if (!expired) throw err;
+			}
 			pendingMap.delete(transferId);
 		},
 
@@ -1904,6 +1985,81 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					},
 				})
 				.catch(() => {});
+		},
+
+		async release(auth: Authorization, reason?: string): Promise<ReleaseOutcome> {
+			// abort()'s claim discipline, step for step and for the same reasons: a hold
+			// whose POST is in flight belongs to settle; a claimed-but-never-POSTed hold is
+			// still releasable; a miss in both is already resolved. Only the terminal's
+			// MEANING differs, and this one says whether it ended the hold.
+			if (settling.has(auth.transferId)) {
+				return { released: false };
+			}
+			let capture = activeAuths.get(auth.transferId);
+			if (capture !== undefined) {
+				activeAuths.delete(auth.transferId);
+			} else {
+				capture = unpostedHolds.get(auth.transferId);
+				if (capture === undefined) {
+					return { released: false };
+				}
+				unpostedHolds.delete(auth.transferId);
+			}
+			// Re-check: settle may have entered POST after we read unpostedHolds.
+			if (settling.has(auth.transferId)) {
+				return { released: false };
+			}
+
+			// Exactly what abort() gives back, the same way: only the session wallet's own
+			// in-flight exposure. An attributed hold never added to it.
+			if (capture.sessionAccounted) {
+				const releaseLock = await budgetMutex.acquire();
+				try {
+					inFlightHoldTotal -= auth.estimatedCost;
+				} finally {
+					releaseLock();
+				}
+			}
+
+			// No circuit-breaker call, deliberately: a give-back is neither a failure nor a
+			// success (see the interface).
+
+			// VOID the pending hold. A hold the ledger already expired is done (the engine
+			// says so). Any other refusal is recorded, never thrown: the hold's accounting
+			// is released above, and the ledger's pending timeout returns its funds.
+			let voidError: string | undefined;
+			if (proxyConn != null && !isDryRun) {
+				try {
+					await proxyConn.void(capture.proxyTransferId ?? auth.transferId);
+				} catch (err) {
+					voidError = releaseVoidError(err);
+				}
+			} else if (engine != null && !isDryRun) {
+				try {
+					await engine.voidPendingSpend(auth.transferId);
+				} catch (err) {
+					voidError = releaseVoidError(err);
+				}
+			}
+
+			// A neutral terminal record (#204): what ended the hold and why, attributed
+			// from the capture like every other terminal.
+			await audit
+				.appendEvent({
+					kind: "hold_released",
+					actor: capture.actor,
+					data: {
+						model: auth.model,
+						transferId: auth.transferId,
+						reason: sanitizeReleaseReason(reason),
+						source: "headless",
+						...(voidError === undefined ? {} : { voidError }),
+						...(capture.costCenter === undefined ? {} : { costCenter: capture.costCenter }),
+						...(capture.principal === undefined ? {} : { principal: capture.principal }),
+					},
+				})
+				.catch(() => {});
+			return voidError === undefined ? { released: true } : { released: true, voidError };
 		},
 
 		async destroy(): Promise<void> {

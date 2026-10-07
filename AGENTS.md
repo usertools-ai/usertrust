@@ -151,6 +151,17 @@ settle-then-void leaving the ledger holding a debit its accounting does not.
 - A governance anomaly cutoff voids.
 - A post-commit `failClosed` throw must **not** void an already-posted transfer.
 
+**A give-back is not a failure, and not a success either.** Headless has three terminals: `settle`
+(a circuit-breaker success), `abort` (a failed call: a breaker failure and `llm_call_failed`), and
+`release` (a hold given back: neither, and a `hold_released` record). usertrust-server's TTL sweep
+and shutdown release; `POST /v1/release` (capability `release`) exposes it, and answers 200 only
+when the governor says it ended the hold (`{ released: true }`), else 404 `unknown transferId`. A
+void that TigerBeetle answers `pending_transfer_expired` is a success in both `createTBEngine`
+factories: the ledger has already returned the funds.
+*Prevents:* routine give-backs and expiries opening a tenant's breaker (#238) and reading as failed
+calls on the chain (#204); a release counted as a success closing a breaker that real failures
+opened; an expired hold's engine entry staying behind until `destroy()`.
+
 **Settle never exceeds the hold — and never silently fails because of it.** The hold's input side
 is a chars/4 × 1.5 heuristic (`pricing.ts`), so real usage CAN price above the reserve. Both
 `createTBEngine` factories cap the post at the reserved amount (`pendingMap` carries
@@ -397,8 +408,8 @@ accounting, matching the numbers its policy gate saw.
 *Every audit record an attributed call emits carries `costCenter`, from that same capture* — not
 from params, and on the failure terminals as well as the settle ones (`llm_call`, `<action.kind>`,
 `llm_call_failed`, `<action.kind>_failed`, `stream_partial_delivery`, `settlement_ambiguous`,
-`settlement_shortfall`, `injection_detected`, `anomaly_detected`, `policy_denied`,
-`ledger_rejected`). An attributed hold must leave an attributed forensic trail whichever way it
+`settlement_shortfall`, `hold_released`, `injection_detected`, `anomaly_detected`,
+`policy_denied`, `ledger_rejected`). An attributed hold must leave an attributed forensic trail whichever way it
 ends — including the way where it never became a hold at all. Unattributed calls spread an empty
 object, so their records stay byte-identical to what they were before envelopes existed.
 
@@ -562,8 +573,8 @@ the principal through `capturePrincipal`, which validates each field (1–128 ch
 `[A-Za-z0-9._:-]`, `principalFieldRefusal`), rebuilds and freezes the object, and throws a
 `TypeError` before any I/O — and stores both on the governor's own `activeAuths` capture. Every
 headless record then names `capture.actor` and spreads `principal` (key ABSENT when there is none):
-`policy_denied`, `ledger_rejected`, `llm_call`, `llm_call_failed`, `settlement_ambiguous`,
-`settlement_shortfall`, and the rotated receipt. `packages/server` validates the wire field with the
+`policy_denied`, `ledger_rejected`, `llm_call`, `llm_call_failed`, `hold_released`,
+`settlement_ambiguous`, `settlement_shortfall`, and the rotated receipt. `packages/server` validates the wire field with the
 same `principalFieldRefusal` and refuses an unknown key rather than stripping it, and publishes
 `"principal"` in `/v1/health` `capabilities`: an older server strips the key, so a client sends a
 principal only to a server that lists it.
@@ -975,7 +986,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **fourteen** sanitizers, in two variants: **eight** neutralise C1 and **six** do not. Do
+There are **fifteen** sanitizers, in two variants: **nine** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -1062,6 +1073,11 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   to the *inventory*, not the newest code: it predates the guard that failed to see it. **Scope a
   source-wide assertion by what SHIPS, not by the directory layout the other packages happen to
   use** — that is the same lesson as the worktree note above, one level out.
+- The stronger variant for a STORED record: `sanitizeReleaseReason` in `core/src/headless.ts`.
+  A `hold_released` record's `reason` is caller text (a `/v1/release` body), and the `--tx`
+  receipt later prints it at an auditor. It STRIPS C0, DEL and C1 rather than substituting `?`,
+  because a stored reason is data, not a render, and then clips at 200 code points. It is
+  exported so usertrust-server's `released` event carries exactly the text the chain recorded.
 
 **THE INVENTORY'S SCOPE IS DECLARED HERE, and the guard matches this sentence.** It covers
 `packages/*/src` — the TypeScript build inputs, which are what `files: ["dist"]` publishes — plus

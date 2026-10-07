@@ -5,7 +5,8 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import type { Authorization } from "usertrust";
+import type { Authorization, ReleaseOutcome } from "usertrust";
+import { sanitizeReleaseReason } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
 import { resolveTenant } from "./config.js";
 import { EventBus } from "./events.js";
@@ -14,6 +15,7 @@ import { GovernorPool } from "./pool.js";
 import {
 	AbortRequestSchema,
 	AuthorizeRequestSchema,
+	ReleaseRequestSchema,
 	SettleRequestSchema,
 	toHttpError,
 } from "./wire.js";
@@ -32,8 +34,15 @@ const SERVER_VERSION = (createRequire(import.meta.url)("../package.json") as { v
  * the call is recorded as nobody's: a client checks this list before sending one.
  * A later capability is APPENDED here; the name and shape never change.
  * `hold-expiry`: an authorize answer carries `expiresInMs`, the hold's remaining life.
+ * `release`: `POST /v1/release` gives a hold back without a failure: no circuit-breaker
+ * failure, and a `hold_released` record rather than `llm_call_failed`.
  */
-const SERVER_CAPABILITIES = Object.freeze(["principal", "authorize-cache-tiers", "hold-expiry"]);
+const SERVER_CAPABILITIES = Object.freeze([
+	"principal",
+	"authorize-cache-tiers",
+	"hold-expiry",
+	"release",
+]);
 /**
  * A dryRun server has no ledger, so it writes no `user_data` tags — but it records
  * the principal on every audit record exactly as a ledger-backed server does, so it
@@ -315,6 +324,58 @@ export function createUsertrustServer(opts: {
 		sendJson(res, 200, { aborted: true, transferId });
 	}
 
+	async function handleRelease(
+		tenant: TenantConfig,
+		body: unknown,
+		res: ServerResponse,
+	): Promise<void> {
+		const parsed = ReleaseRequestSchema.safeParse(body);
+		if (!parsed.success) {
+			sendJson(res, 400, { error: "bad_request", reason: "invalid release request" });
+			return;
+		}
+		const { transferId, reason } = parsed.data;
+		const entry = pending.get(transferId);
+		if (!entry || entry.tenantId !== tenant.id) {
+			// "unknown transferId", never "unknown route": a client that could not read this
+			// server's capabilities falls back to /v1/abort only on an unknown route.
+			sendJson(res, 404, { error: "not_found", reason: "unknown transferId" });
+			return;
+		}
+		// Abort's claim: the first caller wins, and a governor that THROWS puts the entry
+		// back, so the release stays retryable.
+		pending.delete(transferId);
+		let outcome: ReleaseOutcome;
+		try {
+			const governor = await pool.get(tenant);
+			outcome = await governor.release(entry.auth, reason);
+		} catch (err) {
+			pending.set(transferId, entry);
+			const mapped = toHttpError(err);
+			sendJson(res, mapped.status, mapped.body);
+			return;
+		}
+		if (!outcome.released) {
+			// The governor no longer held it (its settle is in flight, or it already
+			// ended), so this request released nothing and must not say it did. The entry
+			// stays out: a hold the governor does not own is not the sweep's to meet again.
+			sendJson(res, 404, { error: "not_found", reason: "unknown transferId" });
+			return;
+		}
+		bus.publish(tenant.id, {
+			type: "released",
+			transferId,
+			// What the chain recorded, by the governor's own rule: never the raw body.
+			reason: sanitizeReleaseReason(reason),
+			at: new Date().toISOString(),
+		});
+		sendJson(res, 200, {
+			released: true,
+			transferId,
+			...(outcome.voidError === undefined ? {} : { voidError: outcome.voidError }),
+		});
+	}
+
 	function handleEvents(tenant: TenantConfig, req: IncomingMessage, res: ServerResponse): void {
 		// Per-tenant fan-out cap: a tenant opening unbounded SSE streams would pin
 		// memory and file descriptors. Reject past the cap; the slot is released
@@ -397,7 +458,10 @@ export function createUsertrustServer(opts: {
 		}
 		if (
 			req.method === "POST" &&
-			(url === "/v1/authorize" || url === "/v1/settle" || url === "/v1/abort")
+			(url === "/v1/authorize" ||
+				url === "/v1/settle" ||
+				url === "/v1/abort" ||
+				url === "/v1/release")
 		) {
 			const raw = await readBody(req);
 			if (raw === null) {
@@ -416,13 +480,19 @@ export function createUsertrustServer(opts: {
 			}
 			if (url === "/v1/authorize") await handleAuthorize(tenant, body, res);
 			else if (url === "/v1/settle") await handleSettle(tenant, body, res);
-			else await handleAbort(tenant, body, res);
+			else if (url === "/v1/abort") await handleAbort(tenant, body, res);
+			else await handleRelease(tenant, body, res);
 			return;
 		}
 		sendJson(res, 404, { error: "not_found", reason: "unknown route" });
 	}
 
-	async function abortEntry(
+	/**
+	 * End a hold the control plane gives up on itself (its life is spent, or the server
+	 * is shutting down) through the governor's RELEASE terminal. Nothing failed, so it
+	 * is no circuit-breaker failure and no `llm_call_failed` record (#238, #204).
+	 */
+	async function releaseEntry(
 		transferId: string,
 		entry: PendingEntry,
 		reason: string,
@@ -431,10 +501,10 @@ export function createUsertrustServer(opts: {
 		if (tenant) {
 			try {
 				const governor = await pool.get(tenant);
-				await governor.abort(entry.auth, reason);
+				await governor.release(entry.auth, reason);
 			} catch {
 				// Best-effort — the Governor's own destroy()/reconciliation voids
-				// anything the control plane fails to abort here.
+				// anything the control plane fails to release here.
 			}
 		}
 	}
@@ -454,7 +524,7 @@ export function createUsertrustServer(opts: {
 			if (!due(entry)) continue;
 			pending.delete(transferId);
 			swept += 1;
-			await abortEntry(transferId, entry, "pending TTL expired");
+			await releaseEntry(transferId, entry, "pending TTL expired");
 			bus.publish(entry.tenantId, {
 				type: "pending_expired",
 				transferId,
@@ -491,15 +561,15 @@ export function createUsertrustServer(opts: {
 		},
 		async close(): Promise<void> {
 			if (sweeper) clearInterval(sweeper);
-			// Abort every remaining pending hold (best-effort) so the control plane
+			// Release every remaining pending hold (best-effort) so the control plane
 			// and the ledger stay consistent; Governor.destroy() voids at the ledger
 			// layer as the backstop.
 			const remaining = [...pending.entries()];
 			pending.clear();
 			for (const [transferId, entry] of remaining) {
-				await abortEntry(transferId, entry, "server shutdown");
+				await releaseEntry(transferId, entry, "server shutdown");
 				bus.publish(entry.tenantId, {
-					type: "aborted",
+					type: "released",
 					transferId,
 					reason: "server shutdown",
 					at: new Date().toISOString(),
