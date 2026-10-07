@@ -180,6 +180,9 @@ describe("watch (the default) never blocks a tool call, and never approves one",
 		);
 		expectNoDecision(result);
 		expect(result.stderr).toContain("could not write a watch record");
+		// And no note claims the record that was not written.
+		expect(result.stderr).not.toContain("recorded as a gap");
+		expect(result.stderr).toContain("and its gap record could not be written");
 		expect(result.stderr).not.toMatch(CONTROL);
 	});
 

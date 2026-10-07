@@ -2025,56 +2025,126 @@ describe("estimate holds", () => {
 			expect(await holdStateFiles()).toEqual([]);
 		}, 30_000);
 
-		it("a fresh hold whose record cannot be written is given back at once: one give-back, no settle, nothing left", async () => {
-			// No tool_use_id, so the fresh hold's file is named by its own transferId. A
-			// directory squats on that name, so the record's write fails, as on a full disk.
-			const pending = new Set<string>();
-			const charged: string[] = [];
-			await startServer((path, body) => {
-				if (path === "/v1/authorize") {
-					nextTransfer += 1;
-					if (nextTransfer !== 1) pending.add(`tx_${nextTransfer}`);
-					return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+		/** How the give-back of an unrecorded hold is answered: confirmed, refused or never. */
+		const GIVE_BACK_ANSWERS = [
+			["200", "confirmed (200)"],
+			["500", "refused (500)"],
+			["throw", "unanswered (the connection drops)"],
+		] as const;
+		const giveBackAnswer = (answer: (typeof GIVE_BACK_ANSWERS)[number][0]) =>
+			answer === "200"
+				? { status: 200, json: { released: true, aborted: true } }
+				: answer === "500"
+					? { status: 500, json: { error: "internal", reason: "ledger unavailable" } }
+					: { status: 0, json: null };
+
+		for (const [answer, what] of GIVE_BACK_ANSWERS) {
+			it(`a fresh hold whose record cannot be written is given back at once, and its note says only what the give-back confirmed: ${what}`, async () => {
+				// No tool_use_id, so the fresh hold's file is named by its own transferId. A
+				// directory squats on that name, so the record's write fails, as on a full disk.
+				const pending = new Set<string>();
+				const charged: string[] = [];
+				await startServer((path, body) => {
+					if (path === "/v1/authorize") {
+						nextTransfer += 1;
+						if (nextTransfer !== 1) pending.add(`tx_${nextTransfer}`);
+						return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+					}
+					const id = String(body.transferId);
+					if (path !== "/v1/settle" && id === "tx_2") return giveBackAnswer(answer);
+					if (!pending.delete(id)) return notFound;
+					if (path === "/v1/settle") {
+						charged.push(id);
+						return { status: 200, json: { settled: true, transferId: id } };
+					}
+					return { status: 200, json: { released: true, aborted: true } };
+				});
+				const squat = `${SESSION}__main__tx_2.settling`;
+				await mkdir(join(stateDir, squat, "x"), { recursive: true });
+				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+				await run(
+					"pre-tool-use.mjs",
+					{ ...stopInput(), tool_name: "Bash", tool_input: { command: "ls" } },
+					env,
+				);
+				const post = await run(
+					"post-tool-use.mjs",
+					{ ...stopInput(), tool_name: "Bash", tool_response: "eight ch" },
+					env,
+				);
+				await run("stop.mjs", stopInput(), env);
+				expect(post.code).toBe(0);
+				expect(post.stderr).toContain("its fresh hold tx_2 could not be recorded");
+				expect(post.stderr).toContain("this call's estimate is not recorded");
+				// The note says "given back" only when the server confirmed it.
+				if (answer === "200") {
+					expect(post.stderr).toContain("tx_2 was given back");
+					expect(post.stderr).not.toMatch(/was refused|could not be given back/);
+				} else {
+					expect(post.stderr).not.toContain("was given back");
+					expect(post.stderr).toContain("tx_2 is left to the server's TTL sweep");
+					expect(post.stderr).toContain(
+						answer === "500"
+							? "abort tx_2 was refused (500: ledger unavailable)"
+							: "hold tx_2 could not be given back",
+					);
 				}
-				const id = String(body.transferId);
-				if (!pending.delete(id)) return notFound;
-				if (path === "/v1/settle") {
-					charged.push(id);
-					return { status: 200, json: { settled: true, transferId: id } };
-				}
-				return { status: 200, json: { released: true, aborted: true } };
+				// tx_2 was authorized, never settled, and given back exactly once: its
+				// reservation is not left held until the server's TTL sweep unless the server
+				// refused, or never answered, that one give-back.
+				expect(requests.filter((r) => r.body.transferId === "tx_2").map((r) => r.path)).toEqual([
+					expect.stringMatching(/^\/v1\/(release|abort)$/),
+				]);
+				// This call's estimate goes unrecorded: an under-count, never a second charge.
+				expect(charged).toEqual([]);
+				// tx_1's 404 said it is gone: one settle, and it is not given back afterwards.
+				expect(requests.filter((r) => r.body.transferId === "tx_1").map((r) => r.path)).toEqual([
+					"/v1/settle",
+				]);
+				// Nothing is left but the squatter: no hold, no claim, no partial write.
+				expect((await readdir(stateDir)).filter((n) => n !== "transcripts")).toEqual([squat]);
 			});
-			const squat = `${SESSION}__main__tx_2.settling`;
-			await mkdir(join(stateDir, squat, "x"), { recursive: true });
-			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
-			await run(
-				"pre-tool-use.mjs",
-				{ ...stopInput(), tool_name: "Bash", tool_input: { command: "ls" } },
-				env,
-			);
-			const post = await run(
-				"post-tool-use.mjs",
-				{ ...stopInput(), tool_name: "Bash", tool_response: "eight ch" },
-				env,
-			);
-			await run("stop.mjs", stopInput(), env);
-			expect(post.code).toBe(0);
-			expect(post.stderr).toContain("its fresh hold tx_2 could not be recorded");
-			expect(post.stderr).toContain("this call's estimate is not recorded");
-			// tx_2 was authorized, never settled, and given back exactly once: its
-			// reservation is not left held until the server's TTL sweep.
-			expect(requests.filter((r) => r.body.transferId === "tx_2").map((r) => r.path)).toEqual([
-				expect.stringMatching(/^\/v1\/(release|abort)$/),
-			]);
-			// This call's estimate goes unrecorded: an under-count, never a second charge.
-			expect(charged).toEqual([]);
-			// tx_1's 404 said it is gone: one settle, and it is not given back afterwards.
-			expect(requests.filter((r) => r.body.transferId === "tx_1").map((r) => r.path)).toEqual([
-				"/v1/settle",
-			]);
-			// Nothing is left but the squatter: no hold, no claim, no partial write.
-			expect((await readdir(stateDir)).filter((n) => n !== "transcripts")).toEqual([squat]);
-		});
+		}
+
+		for (const [answer, what] of GIVE_BACK_ANSWERS) {
+			it(`PreToolUse: a hold whose record cannot be written is given back, and nothing claims more than the give-back confirmed: ${what}`, async () => {
+				const charged: string[] = [];
+				await startServer((path, body) => {
+					if (path === "/v1/authorize") {
+						nextTransfer += 1;
+						return { status: 200, json: { transferId: `tx_${nextTransfer}`, estimatedCost: 1 } };
+					}
+					if (path === "/v1/settle") {
+						charged.push(String(body.transferId));
+						return { status: 200, json: { settled: true, transferId: body.transferId } };
+					}
+					return giveBackAnswer(answer);
+				});
+				// A directory squats on the hold's file name, so its record's write fails.
+				const squat = `${SESSION}__main__tu_1.json`;
+				await mkdir(join(stateDir, squat, "x"), { recursive: true });
+				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+				const pre = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				// Watch, the default: the call proceeds with no decision, as a gap.
+				expect(pre.code).toBe(0);
+				expect(pre.stdout).toBe("");
+				expect(pre.stderr).toContain("this call is not metered");
+				expect(pre.stderr).not.toContain("was given back");
+				if (answer === "200") {
+					expect(pre.stderr).not.toMatch(/was refused|could not be given back/);
+				} else {
+					expect(pre.stderr).toContain(
+						answer === "500"
+							? "abort tx_1 was refused (500: ledger unavailable)"
+							: "hold tx_1 could not be given back",
+					);
+				}
+				expect(requests.filter((r) => r.body.transferId === "tx_1").map((r) => r.path)).toEqual([
+					expect.stringMatching(/^\/v1\/(release|abort)$/),
+				]);
+				expect(charged).toEqual([]);
+			});
+		}
 	});
 
 	describe("an estimate hold's .settling in the transcript journal (it carries no ids)", () => {
