@@ -4409,6 +4409,53 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			expect(authorizes()).toHaveLength(1);
 		});
 
+		describe("a state dir on a filesystem without hard links: each publish falls back to an exclusive create", () => {
+			const NO_LINKS = join(import.meta.dirname, "helpers", "no-hard-links.mjs");
+			const linkless = { NODE_OPTIONS: `--import=${NO_LINKS}` };
+
+			it("estimate: a hold is still recorded, settled once, and nothing is left", async () => {
+				const env = { UT_CC_USAGE: "estimate", ...linkless };
+				const server = holdingServer();
+				await startServer(server.responder);
+				const pre = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(pre.stderr).toContain("reserved tx_1");
+				expect(await holdStateFiles()).toEqual([RECORD]);
+				await run("post-tool-use.mjs", postInput("tu_1"), env);
+				expect(server.charges.map((c) => c.transferId)).toEqual(["tx_1"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+
+			it("transcript: the window is settled once, and its outcome journalled and applied", async () => {
+				const server = holdingServer();
+				await startServer(server.responder);
+				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+				await run("pre-tool-use.mjs", preInput("tu_1"), linkless);
+				await run("post-tool-use.mjs", postInput("tu_1"), linkless);
+				expect(server.charges).toEqual([{ transferId: "tx_1", inputTokens: 9, outputTokens: 9 }]);
+				expect((await readCursor()).accounted).toEqual(["msg_a"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+
+			it("a file already at the fresh hold's name is still never written over", async () => {
+				capabilities = ["release"];
+				await startServer(holdingServer().responder);
+				const squatter = JSON.stringify({
+					gate: 1,
+					toolUseId: "tu_other",
+					transferId: "tx_other",
+					agentId: "main",
+				});
+				await writeFile(join(stateDir, RECORD), squatter);
+				const pre = await run("pre-tool-use.mjs", preInput("tu_1"), {
+					UT_CC_USAGE: "estimate",
+					UT_CC_MODE: "enforce",
+					...linkless,
+				});
+				expect(JSON.parse(pre.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+				expect(await readFile(join(stateDir, RECORD), "utf-8")).toBe(squatter);
+			});
+		});
+
 		describe("a server's transferId names a hold's file only as it is: any other id is refused, never sanitized", () => {
 			const env = { UT_CC_USAGE: "estimate" };
 			/** A server that grants `id` at every authorize, and confirms every release. */

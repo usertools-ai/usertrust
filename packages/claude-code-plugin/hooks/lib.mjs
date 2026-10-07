@@ -316,10 +316,10 @@ export class HoldNameTaken extends Error {
 }
 
 /**
- * Record a pending hold as its own file (`holdFilePath`), atomic AND exclusive:
- * written in full under a temporary name, then published with link(), which never
- * replaces a file already there (a rename would). A name already taken throws
- * `HoldNameTaken`, and that file is left untouched. The agent id is stored in the
+ * Record a pending hold as its own file (`holdFilePath`), atomic AND exclusive
+ * (`publishExclusive`: link(), which never replaces a file already there, as a
+ * rename would; an exclusive create on a filesystem without hard links). A name
+ * already taken throws `HoldNameTaken`, and that file is left untouched. The agent id is stored in the
  * file body so a whole-session sweep can recover which agent owns the hold.
  * Every hold is marked `gate: 1` (`isGated`) in this same atomic write, never
  * later.
@@ -328,10 +328,9 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 	const live = holdFilePath(sessionId, agentId, entry);
 	const path = settling ? settlingPath(live) : live;
 	await mkdir(stateDir(), { recursive: true });
-	const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
 	try {
-		await writeFile(
-			tmp,
+		await publishExclusive(
+			path,
 			JSON.stringify({
 				gate: 1,
 				toolUseId: entry.toolUseId ?? null,
@@ -351,18 +350,38 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				...(entry.usage === "transcript" ? transcriptHoldFields(entry) : {}),
 			}),
 		);
+	} catch (err) {
+		if (err?.code === "EEXIST") throw new HoldNameTaken(path);
+		throw err;
+	}
+	return path;
+}
+
+/** Errors that mean the state dir's filesystem cannot make hard links. */
+export const LINKLESS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK"]);
+
+/**
+ * Publish `content` at `path` unless a file is there already (EEXIST, thrown): written
+ * in full under a temporary name, then linked into place by link(2), which never
+ * replaces a name, so it is whole the moment it exists. On a filesystem without hard
+ * links (`LINKLESS`), by an exclusive create instead: still never over another file.
+ * Published or not, the temporary name goes, so a write that fails (ENOSPC, say, or
+ * a name already taken) leaves no partial file.
+ */
+export async function publishExclusive(path, content, { mode } = {}) {
+	const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+	const options = mode === undefined ? {} : { mode };
+	try {
+		await writeFile(tmp, content, options);
 		try {
 			await link(tmp, path);
 		} catch (err) {
-			if (err?.code === "EEXIST") throw new HoldNameTaken(path);
-			throw err;
+			if (!LINKLESS.has(err?.code)) throw err;
+			await writeFile(path, content, { ...options, flag: "wx" });
 		}
 	} finally {
-		// Published or not, the temporary name goes: a record that could not be
-		// written (ENOSPC, say, or a name already taken) leaves no partial file.
 		await unlink(tmp).catch(() => {});
 	}
-	return path;
 }
 
 /**

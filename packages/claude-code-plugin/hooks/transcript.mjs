@@ -130,7 +130,9 @@ import {
 	isAlreadySettled,
 	isUnknownRoute,
 	isUnknownTransfer,
+	LINKLESS,
 	listPending,
+	publishExclusive,
 	releaseHold,
 	sanitize,
 	say,
@@ -626,20 +628,6 @@ async function writeAtomic(path, text) {
 	await rename(tmp, path);
 }
 
-/**
- * `writeAtomic`, but EXCLUSIVE: published with link(), which never replaces a file
- * already there (EEXIST), where a rename would.
- */
-async function writeExclusive(path, text) {
-	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-	await writeFile(tmp, text, { mode: 0o600 });
-	try {
-		await link(tmp, path);
-	} finally {
-		await unlink(tmp).catch(() => {});
-	}
-}
-
 async function writeCursor(path, cursor) {
 	await writeAtomic(
 		path,
@@ -1089,9 +1077,6 @@ async function selectOwn(opened) {
 	}
 	return own;
 }
-
-/** Errors that mean the state dir's filesystem cannot make hard links. */
-const LINKLESS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EXDEV", "EMLINK"]);
 
 /**
  * The claim on a message id: `{ holder, created }` — `created` when this call made
@@ -1706,7 +1691,7 @@ export async function settleTranscriptHold(sessionId, entry) {
 		// name can already be taken (two holds of one call shared it then). That leaves
 		// this hold `.settling`, which the journal reads as unknown once stale: retried
 		// under its key, or (unkeyed) its ids accounted, at most once.
-		await writeExclusive(
+		await publishExclusive(
 			`${base}.done`,
 			JSON.stringify({
 				agentId: entry.agentId,
@@ -1723,6 +1708,7 @@ export async function settleTranscriptHold(sessionId, entry) {
 						}
 					: {}),
 			}),
+			{ mode: 0o600 },
 		);
 		await unlink(`${base}.settling`).catch(() => {});
 	} catch (err) {
