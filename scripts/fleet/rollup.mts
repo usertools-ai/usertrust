@@ -51,7 +51,8 @@ export const CACHE_WRITE_5M_MULT = 1.25;
 export const CACHE_WRITE_1H_MULT = 2;
 
 /**
- * Cache hits (reads) bill at 0.1x base input.
+ * Cache hits (reads) bill at 0.1x base input — the default; four models publish a
+ * lower multiplier, see CACHE_READ_MULT_BY_MODEL.
  * Source: https://platform.claude.com/docs/en/about-claude/pricing
  * ("Prompt caching pricing", retrieved 2026-08-10).
  */
@@ -91,6 +92,33 @@ export const LIST_USD_PER_MTOK: Record<string, { input: number; output: number }
 	"claude-3-5-haiku": { input: 0.8, output: 4 },
 };
 
+/** The table key a model id resolves to (exact, then one date suffix stripped), or undefined. */
+function listKeyFor(model: string): string | undefined {
+	for (const key of [model, model.replace(/-(?:\d{8}|\d{4}-\d{2}-\d{2})$/, "")]) {
+		if (Object.hasOwn(LIST_USD_PER_MTOK, key) && LIST_USD_PER_MTOK[key]) return key;
+	}
+	return undefined;
+}
+
+/**
+ * Published cache-read multipliers that differ from the 0.1x default
+ * (platform.claude.com/docs/en/about-claude/pricing, footnotes 1 and 2, retrieved
+ * 2026-10-07): 0.05x on Opus 5.5 / Sonnet 5.5, 0.025x on Fable 5.1 / Mythos 5.1.
+ * A flat 0.1x overstates those models' cache reads 2x / 4x in the list-price block.
+ */
+const CACHE_READ_MULT_BY_MODEL: Record<string, number> = {
+	"claude-opus-5-5": 0.05,
+	"claude-sonnet-5-5": 0.05,
+	"claude-fable-5-1": 0.025,
+	"claude-mythos-5-1": 0.025,
+};
+
+/** Cache-read multiplier of a model's list price: its published override, else {@link CACHE_READ_MULT}. */
+export function cacheReadMultFor(model: string): number {
+	const key = listKeyFor(model);
+	return (key !== undefined ? CACHE_READ_MULT_BY_MODEL[key] : undefined) ?? CACHE_READ_MULT;
+}
+
 /**
  * Resolve a model's published list rates the way `getModelRates` resolves
  * kernel rates — an exact key, then (exact-first) the key after stripping exactly
@@ -100,12 +128,9 @@ export const LIST_USD_PER_MTOK: Record<string, { input: number; output: number }
  * mixing spec §6 forbids.
  */
 export function listRatesForModel(model: string): { input: number; output: number } {
-	for (const key of [model, model.replace(/-(?:\d{8}|\d{4}-\d{2}-\d{2})$/, "")]) {
-		if (Object.hasOwn(LIST_USD_PER_MTOK, key)) {
-			const rates = LIST_USD_PER_MTOK[key];
-			if (rates) return rates;
-		}
-	}
+	const key = listKeyFor(model);
+	const rates = key === undefined ? undefined : LIST_USD_PER_MTOK[key];
+	if (rates) return rates;
 	throw new Error(
 		`fleet rollup: no published list rate for model "${model}" — add its $/MTok row ` +
 			`(with a source-URL comment) to LIST_USD_PER_MTOK before rolling up`,
@@ -311,7 +336,7 @@ function listPriceUsdFor(line: FleetStoreLine): number {
 	return (
 		(usage.inputTokens * rates.input +
 			usage.outputTokens * rates.output +
-			usage.cacheReadTokens * rates.input * CACHE_READ_MULT +
+			usage.cacheReadTokens * rates.input * cacheReadMultFor(line.receipt.model) +
 			tiers.m5 * rates.input * CACHE_WRITE_5M_MULT +
 			tiers.h1 * rates.input * CACHE_WRITE_1H_MULT) /
 		1e6

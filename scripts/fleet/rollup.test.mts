@@ -48,6 +48,7 @@ import {
 	CACHE_READ_MULT,
 	CACHE_WRITE_1H_MULT,
 	CACHE_WRITE_5M_MULT,
+	cacheReadMultFor,
 	type FleetStoreLine,
 	listRatesForModel,
 	RESIDUAL_CAUSES,
@@ -344,6 +345,51 @@ test("list-price math matches hand-computed fixture values", () => {
 	assert.throws(() => listRatesForModel("claude-opus-5-fast"), /no published list rate/);
 	assert.throws(() => listRatesForModel("claude-opus-5-2026010"), /no published list rate/);
 	assert.throws(() => listRatesForModel("totally-unknown-model-x"), /no published list rate/);
+});
+
+test("list-price cache reads use the PER-MODEL multiplier (0.05x / 0.025x), not a flat 0.1x", () => {
+	// Published cache-read multipliers (platform.claude.com/docs/en/about-claude/pricing,
+	// footnotes 1 and 2): 0.05x on Opus 5.5 / Sonnet 5.5, 0.025x on Fable 5.1 / Mythos 5.1,
+	// 0.1x on every other model. Each line is 1000 fresh input + 10000 cache-read tokens:
+	//  sonnet-5-5 ($2):  (1000x2  + 10000x2x0.05)  / 1e6 = 0.003
+	//  opus-5-5   ($4):  (1000x4  + 10000x4x0.05)  / 1e6 = 0.006
+	//  fable-5-1  ($10): (1000x10 + 10000x10x0.025)/ 1e6 = 0.0125
+	//  mythos-5-1 ($10): (1000x10 + 10000x10x0.025)/ 1e6 = 0.0125
+	//  opus-5     ($5):  (1000x5  + 10000x5x0.1)   / 1e6 = 0.01   (control: the 0.1x default)
+	const models = [
+		"claude-sonnet-5-5",
+		"claude-opus-5-5",
+		"claude-fable-5-1",
+		"claude-mythos-5-1",
+		"claude-opus-5",
+	];
+	const lines = models.map((model, i) =>
+		storeLine({
+			messageId: `msg_cr_${i}`,
+			model,
+			sessionHash: "dddddddddddd",
+			occurredAt: "2026-07-18T12:00:00.000Z",
+			isSidechain: false,
+			cost: 10,
+			auditHash: String(i + 1).repeat(64),
+			usage: { inputTokens: 1000, outputTokens: 0, cacheReadTokens: 10_000, cacheWriteTokens: 0 },
+			tiers: { m5: 0, h1: 0 },
+		}),
+	);
+	const summary = buildFleetSummary({
+		...summaryOpts(lines),
+		chainHashes: new Set(lines.map((l) => l.receipt.auditHash)),
+	});
+	assert.ok(
+		Math.abs(summary.month.listPriceUsd - 0.044) < 1e-12,
+		`expected 0.044, got ${summary.month.listPriceUsd}`,
+	);
+	assert.equal(cacheReadMultFor("claude-sonnet-5-5"), 0.05);
+	assert.equal(cacheReadMultFor("claude-opus-5-5-20261001"), 0.05);
+	assert.equal(cacheReadMultFor("claude-fable-5-1"), 0.025);
+	assert.equal(cacheReadMultFor("claude-mythos-5-1"), 0.025);
+	assert.equal(cacheReadMultFor("claude-opus-5"), CACHE_READ_MULT);
+	assert.equal(cacheReadMultFor("claude-fable-5"), CACHE_READ_MULT);
 });
 
 test("bySession folds everything beyond the top 8 into 'other'", () => {

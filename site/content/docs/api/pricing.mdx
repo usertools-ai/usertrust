@@ -196,7 +196,7 @@ getModelRates("claude-opus-5-fast")       // unknown → fallback → { 150, 750
 function getModelRates(model: string): ModelRates
 ```
 
-Look up the four-tier rates for a model. Falls back to prefix matching, then to the fallback rate.
+Look up the four-tier rates for a model. Resolves an exact row, then the id with one date suffix stripped, then the fallback rate (never a prefix match).
 
 ### costFromRates()
 

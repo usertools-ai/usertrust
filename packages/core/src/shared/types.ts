@@ -354,7 +354,7 @@ export const TrustConfigSchema = z.object({
 		.prefault({}),
 	/**
 	 * Cloud-scope policy when a model misses customRates and PRICING_TABLE (an exact key, or
-	 * a dated `-YYYYMMDD` snapshot of one; there is no prefix match).
+	 * a dated `-YYYYMMDD` / `-YYYY-MM-DD` snapshot of one; there is no prefix match).
 	 * "fallback" = silent dearest-known rate (the table maximum) · "warn" = same rate + one-time warn +
 	 * receipt.meter.rateSource "fallback" · "deny" = PolicyDeniedError before the PENDING hold.
 	 */

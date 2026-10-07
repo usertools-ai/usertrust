@@ -67,7 +67,7 @@ For GPU showback, set `local.rateClass: "amortized-usd"` and per-model rates in 
 
 ## unknownModelPolicy
 
-Only cloud-scope calls can hit an unknown model -- local scope always resolves to local rates. When a model misses `customRates`, the pricing table, and prefix matching, `unknownModelPolicy` decides:
+Only cloud-scope calls can hit an unknown model -- local scope always resolves to local rates. When a model misses `customRates` and the pricing table (an exact id, or the id with one trailing `-YYYYMMDD` / `-YYYY-MM-DD` date stripped; there is no prefix matching), `unknownModelPolicy` decides:
 
 | Policy | Behavior |
 |--------|----------|
