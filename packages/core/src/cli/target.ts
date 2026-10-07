@@ -51,8 +51,11 @@ export function refuseStrayPositional(
 	valueFlags: readonly string[] = [],
 ): boolean {
 	const stray: string[] = [];
-	for (let i = 0; i < args.length; i++) {
-		const a = args[i] as string;
+	// `--json` is global and main.ts removes it before dispatch, so it must not be taken as the
+	// value of a preceding value flag (`export --markdown --json out`) here either.
+	const rest = args.filter((a) => a !== "--json");
+	for (let i = 0; i < rest.length; i++) {
+		const a = rest[i] as string;
 		if (valueFlags.includes(a)) {
 			i++;
 		} else if (!a.startsWith("-")) {

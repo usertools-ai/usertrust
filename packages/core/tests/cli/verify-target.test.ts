@@ -177,10 +177,33 @@ describe("verify <path> verifies that path", () => {
 		expect(raw).not.toContain(C1);
 		expect(json({ stdout: raw, stderr: "", code: 0 }).data.vaultPath).toBe(join(odd, ".usertrust"));
 	}, 60_000);
+
+	it("T6c: an error that embeds the selected path is scrubbed too (vault dir without audit/)", () => {
+		const ESC = String.fromCodePoint(0x1b);
+		const C1 = String.fromCodePoint(0x9b);
+		const broken = join(tmp, `broken-${ESC}[2J-${C1}`);
+		mkdirSync(join(broken, ".usertrust"), { recursive: true });
+		// Plain mode and anchor mode print their errors at different sites.
+		for (const extra of [[], ["--require-anchor"]]) {
+			const out = cli(empty, "verify", broken, ...extra);
+			expect(out.code, extra.join(" ")).toBe(1);
+			expect(out.stdout, extra.join(" ")).toContain("Audit directory not found");
+			expect(out.stdout, extra.join(" ")).not.toContain(ESC);
+			expect(out.stdout, extra.join(" ")).not.toContain(C1);
+		}
+	}, 60_000);
 });
 
 describe("commands that take no path refuse one", () => {
 	const NO_PATH = ["inspect", "health", "pricing", "init", "export"] as const;
+
+	it("T7c: global flags in any position don't change what is a positional (export --markdown --json out)", () => {
+		const out = join(tmp, "out-json-order");
+		const r = cli(vaultA, "export", "--markdown", "--json", out);
+		expect(r.code, r.stdout).not.toBe(2);
+		expect(r.stdout).not.toContain("takes no path");
+		expect(realpathSync(out)).toBeTruthy();
+	}, 60_000);
 
 	it("T7: a stray positional is refused (exit 2), never answered from the cwd", () => {
 		for (const cmd of NO_PATH) {

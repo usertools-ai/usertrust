@@ -432,7 +432,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		} else {
 			console.log(pc.red(`Chain verification FAILED: ${result.errors.length} error(s) found.`));
 			for (const err of result.errors) {
-				console.log(pc.red(`  - ${err}`));
+				console.log(pc.red(`  - ${scrubForTerminal(err)}`));
 			}
 		}
 		console.log(`Anchor state: ${result.anchorState} (source: ${result.anchoring.anchorSource})`);
@@ -499,7 +499,7 @@ export async function run(rootDir?: string, opts?: CliOptions, args?: string[]):
 		console.log(pc.red(`Chain verification FAILED: ${result.errors.length} error(s) found.`));
 		console.log(`Events checked: ${result.chainLength}`);
 		for (const err of result.errors) {
-			console.log(pc.red(`  - ${err}`));
+			console.log(pc.red(`  - ${scrubForTerminal(err)}`));
 		}
 		// Use process.exitCode (not process.exit) so buffered stdout flushes.
 		process.exitCode = 1;
