@@ -48,6 +48,7 @@ import {
 	estimateTokens,
 	giveBack,
 	guardMode,
+	HoldNameTaken,
 	holdOfCall,
 	isAlreadySettled,
 	MAX_CONTENT_CHARS,
@@ -115,15 +116,15 @@ try {
 	toolName = input.tool_name ?? "unknown";
 	// A deferred call's resume fires PreToolUse again for the SAME tool call (hooks
 	// reference, "Defer a tool call for later"), and so might any repeat. That call
-	// already has its hold. A second authorize alone would reserve a second hold, and
-	// its record, keyed by the same tool_use_id, would overwrite the first's: the
-	// first hold stranded until the server's TTL and, in transcript mode, its window
-	// written off. A hold is never REUSED either: whether it is still live, and still
-	// the current server's and tenant's, cannot be known from here, and a reused hold
-	// skips the budget check. So the earlier hold is ended first (`retire`), and the
-	// call then reserves afresh, its budget checked again. A hold whose settle is under
-	// way or unanswered (`.settling`), or that another hook ends first, gets no fresh
-	// hold beside it: the call is refused until that resolves (`unsettled`).
+	// already has its hold. A second authorize alone would leave the first hold live
+	// beside it: counting against the budget and, in transcript mode, its window
+	// unsettled, until a Stop. A hold is never REUSED either: whether it is still
+	// live, and still the current server's and tenant's, cannot be known from here,
+	// and a reused hold skips the budget check. So the earlier hold is ended first
+	// (`retire`), and the call then reserves afresh, its budget checked again. A hold
+	// whose settle is under way or unanswered (`.settling`), or that another hook ends
+	// first, gets no fresh hold beside it: the call is refused until that resolves
+	// (`unsettled`).
 	const held = await holdOfCall(sessionId, agentId, input.tool_use_id);
 	if (held === null) {
 		await reserve(input);
@@ -150,7 +151,14 @@ try {
 		0,
 		MAX_REASON_CHARS,
 	);
-	if (mode === "watch" || process.env.UT_FAIL_OPEN === "1") {
+	if (err instanceof HoldNameTaken) {
+		// A known state, not an outage: `reserve` did not keep the fresh hold, and the
+		// call is refused rather than write over another hold's file, UT_FAIL_OPEN or not.
+		await unsettled(
+			null,
+			`${why}: the fresh hold is not kept, and the call is refused rather than write over that file`,
+		);
+	} else if (mode === "watch" || process.env.UT_FAIL_OPEN === "1") {
 		// The call proceeds unmetered: say so durably, so the gap is never silent.
 		const recorded = await recordWatchEvent({
 			kind: "gap",
@@ -194,7 +202,7 @@ function sameTenant(entry) {
  * Returns false when another hook claimed the record first.
  */
 async function abandon(entry) {
-	const claimed = await claimForSettle(sessionId, agentId, entry.entryKey);
+	const claimed = await claimForSettle(entry.path);
 	if (claimed !== null) {
 		say(
 			`usertrust: this tool call's earlier hold ${entry.transferId} was made under another server or key; nothing about it is sent here, and any usage it carried goes unrecorded`,
@@ -223,10 +231,11 @@ async function journalDecides(entry, toolUseId) {
 }
 
 /**
- * Refuse a tool call whose earlier hold is not resolved: its settle is under way, or
- * was cut off unanswered (`.settling`), or another hook is ending it. No fresh hold is
- * made beside it: the two would share one record path, and that settle may already
- * have charged the call. Enforce mode denies, UT_FAIL_OPEN or not: the server is not
+ * Refuse a tool call whose hold is not resolved: its earlier hold's settle is under
+ * way, or was cut off unanswered (`.settling`), or another hook is ending it; or its
+ * fresh hold's file name is another hold's (`HoldNameTaken`), and that hold was not
+ * kept. No fresh hold is made beside an earlier one: that settle may already have
+ * charged the call. Enforce mode denies, UT_FAIL_OPEN or not: the server is not
  * unreachable, the state is known. A later call (a new `tool_use_id`) reserves as
  * usual. Watch mode lets the call through unmetered, and records the gap.
  */
@@ -266,9 +275,8 @@ async function unsettled(
  *   server's TTL sweep.
  * Returns false when another hook claimed the hold first (its record renamed away):
  * that hook is ending it, and this call must not reserve beside it. A hold that
- * cannot be ended now (out of time, or its claim fails) throws: the fresh reserve,
- * which would overwrite its record, is not made, and the call fails as a failed
- * authorization does.
+ * cannot be ended now (out of time, or its claim fails) throws: no fresh hold is
+ * made beside it, and the call fails as a failed authorization does.
  */
 async function retire(entry) {
 	if ((entry.assignedIds?.length ?? 0) > 0) {
@@ -284,7 +292,7 @@ async function retire(entry) {
 		}
 		return true;
 	}
-	const claimed = await claimForSettle(sessionId, agentId, entry.entryKey);
+	const claimed = await claimForSettle(entry.path);
 	if (claimed === null) return false;
 	const capabilities = await serverCapabilities();
 	if (capabilities?.has("release")) {

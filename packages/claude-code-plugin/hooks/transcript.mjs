@@ -103,7 +103,10 @@
 // written before it is never posted (see `firstRun`).
 // A hold's outcome is journalled beside its pending file (<hold>.settling while
 // in flight, <hold>.done after) so the cursor can be brought up to date by the
-// next hook that gets the lock, even when the settling hook could not.
+// next hook that gets the lock, even when the settling hook could not. Each name
+// is the hold's own, keyed by its transfer (lib.mjs `holdFilePath`): a stale
+// settler of an earlier hold of the same call finds only that hold's file, and
+// one hold's outcome never lands in another's journal.
 import { createHash, randomBytes } from "node:crypto";
 import {
 	link,
@@ -132,7 +135,6 @@ import {
 	say,
 	serverCapabilities,
 	serverRequest,
-	stateFilePath,
 	stateRoot,
 	timeLeft,
 	usageMode,
@@ -621,6 +623,20 @@ async function writeAtomic(path, text) {
 	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
 	await writeFile(tmp, text, { mode: 0o600 });
 	await rename(tmp, path);
+}
+
+/**
+ * `writeAtomic`, but EXCLUSIVE: published with link(), which never replaces a file
+ * already there (EEXIST), where a rename would.
+ */
+async function writeExclusive(path, text) {
+	const tmp = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+	await writeFile(tmp, text, { mode: 0o600 });
+	try {
+		await link(tmp, path);
+	} finally {
+		await unlink(tmp).catch(() => {});
+	}
 }
 
 async function writeCursor(path, cursor) {
@@ -1651,12 +1667,14 @@ export async function settleTranscriptHold(sessionId, entry) {
 	const ids = entry.assignedIds ?? [];
 	if (ids.length === 0) {
 		const result = await returnEmptyHold(entry.transferId);
-		await clearPending(sessionId, entry.agentId, entry.entryKey);
+		await clearPending(entry.path);
 		return result;
 	}
 	const counts = {};
 	for (const key of COUNT_KEYS) counts[key] = count(entry[key]);
-	const livePath = stateFilePath(sessionId, entry.agentId, entry.entryKey);
+	// The hold's own file, as its listing found it: never whatever file the call's
+	// name holds now, which may be a later hold's.
+	const livePath = entry.path;
 	const base = livePath.slice(0, -".json".length);
 	// A rename keeps the hold's own mtime: from authorize, maybe long ago. The
 	// journal reads a .settling file's age as how long a settle has been in flight,
@@ -1674,7 +1692,11 @@ export async function settleTranscriptHold(sessionId, entry) {
 	const keyed = typeof entry.idempotencyKey === "string";
 	const result = await settleAt(entry.transferId, counts, { keyed });
 	try {
-		await writeAtomic(
+		// Exclusive: an outcome never lands over another hold's. Only a 1.4.0 per-call
+		// name can already be taken (two holds of one call shared it then). That leaves
+		// this hold `.settling`, which the journal reads as unknown once stale: retried
+		// under its key, or (unkeyed) its ids accounted, at most once.
+		await writeExclusive(
 			`${base}.done`,
 			JSON.stringify({
 				agentId: entry.agentId,

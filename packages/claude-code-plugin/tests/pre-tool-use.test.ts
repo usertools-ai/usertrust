@@ -90,11 +90,12 @@ describe("pre-tool-use hook", () => {
 		// No decision: an `allow` would skip the user's permission prompt.
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toContain("tx_1");
-		// No agent_id in the payload → the parent's "main" bucket.
-		expect(await holdFiles()).toEqual(["sess1__main__tu_1.json"]);
+		// No agent_id in the payload → the parent's "main" bucket. One file per hold: its
+		// call (tu_1) and its transfer (tx_1).
+		expect(await holdFiles()).toEqual(["sess1__main__tu_1.tx_1.json"]);
 		// No transcript_path: the agent's estimate mode is recorded before its hold is.
 		expect(await readdir(join(stateDir, "transcripts", "estimate"))).toEqual(["sess1__main"]);
-		const raw = await readFile(join(stateDir, "sess1__main__tu_1.json"), "utf-8");
+		const raw = await readFile(join(stateDir, "sess1__main__tu_1.tx_1.json"), "utf-8");
 		const entry = JSON.parse(raw) as {
 			toolUseId: string;
 			transferId: string;
@@ -130,9 +131,9 @@ describe("pre-tool-use hook", () => {
 			{ ...baseEnv, UT_SERVER_URL: `http://127.0.0.1:${port}` },
 		);
 		expect(result.code).toBe(0);
-		expect(await holdFiles()).toEqual(["sess1__agent-A__tu_1.json"]);
+		expect(await holdFiles()).toEqual(["sess1__agent-A__tu_1.tx_sub.json"]);
 		const entry = JSON.parse(
-			await readFile(join(stateDir, "sess1__agent-A__tu_1.json"), "utf-8"),
+			await readFile(join(stateDir, "sess1__agent-A__tu_1.tx_sub.json"), "utf-8"),
 		) as { agentId: string };
 		expect(entry.agentId).toBe("agent-A");
 	});

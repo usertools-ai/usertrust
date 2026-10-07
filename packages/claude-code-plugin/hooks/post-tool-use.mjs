@@ -104,7 +104,7 @@ function noteIfAmbiguous(response, transferId) {
  * off leaves its hold .settling, and Stop gives it back.
  */
 async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
-	const claimed = await claimForSettle(sessionId, agentId, entry.entryKey);
+	const claimed = await claimForSettle(entry.path);
 	if (claimed === null) {
 		say(`usertrust: hold ${entry.transferId} is being settled by another hook`);
 		return;

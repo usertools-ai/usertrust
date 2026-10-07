@@ -34,6 +34,17 @@ npm, and its version is its own: the `usertrust` packages and their
     and the call then reserves afresh. Only the hook whose reconcile removed the
     record reserves; another resumed beside it is refused. The model's retry is a
     new tool call, which reserves as usual.
+  - Each hold has its own files, named by its transfer as well as its call
+    (`<session>__<agent>__<call>.<transferId>.json`, with its `.settling` and
+    `.done` beside it), so a resumed call's earlier hold and its fresh one never
+    share a file. A hook still acting on an earlier listing (a Stop that listed the
+    earlier hold before the resume ended it) finds only that hold's file: it never
+    claims, settles, journals over or deletes the fresh hold's. No hold file is
+    written over another: a file already under a fresh hold's name is left as it
+    is, the fresh hold is given back, and the call is refused (enforce denies it,
+    whatever `UT_FAIL_OPEN` says; watch mode records a gap). A 1.4.0 record keeps
+    its per-call name: hooks find it by the ids it stores, and end it once, through
+    that name.
 
 ## [1.4.0] - 2026-10-07
 

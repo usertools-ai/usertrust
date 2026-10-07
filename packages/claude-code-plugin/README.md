@@ -374,6 +374,14 @@ again, and the plugin finds the hold the call already has.
     and never aborted. On a server without `release`, it counts against the budget
     until the server's pending-hold sweep voids it, which is one of the aborts
     above: a call can be refused early, never overspend.
+  - **Each hold has its own files,** named by its transfer as well as its call
+    (`<session>__<agent>__<call>.<transferId>.json`, with its `.settling` and
+    `.done`), so the earlier hold and the fresh one never share a file. A hook
+    still acting on an earlier listing, such as a Stop that listed the earlier hold
+    before the resume ended it, finds only that hold's file: it never claims,
+    settles, journals over or deletes the fresh hold's. No hold file is ever
+    written over another. A record from 1.4.0 keeps its per-call name, and is
+    found by the ids it stores and ended once, through that name.
   - **Another server or key.** A call resumed under another server or key
     (`UT_SERVER_URL`, `UT_SERVER_KEY`) never touches its earlier hold through the
     new one. Each record carries the server's URL and a hash of the key (never the

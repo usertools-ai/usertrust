@@ -1,11 +1,14 @@
 // Shared runtime for usertrust Claude Code hooks. Zero dependencies — node
 // built-ins only, because hooks execute without an install step.
 //
-// State store design: each pending hold lives in its OWN file
-// (<stateDir>/<safeSession>__<safeAgent>__<safeEntryKey>.json). Hooks for the
-// same session can run concurrently; because there is no shared file to
-// read-modify-write, no locking is needed — concurrent-hook safety holds by
-// construction.
+// State store design: each pending hold lives in its OWN file, named by its call
+// AND its transfer (<stateDir>/<safeSession>__<safeAgent>__<safeCall>.<safeTransferId>.json,
+// the call being the tool_use_id, or the transferId when the host sends none:
+// `holdFilePath`). Hooks for the same session can run concurrently; because there
+// is no shared file to read-modify-write, no locking is needed — concurrent-hook
+// safety holds by construction. Two holds of one call (an earlier one being ended
+// while a fresh one is made) never share a file, and a record is never written
+// over another file: it is published with an exclusive link (`recordPending`).
 //
 // The agent dimension matters because Claude Code reuses one session_id across
 // the parent and EVERY subagent (only agent_id is per-subagent). Keying holds
@@ -17,9 +20,16 @@
 // A transcript-mode hold file also names the transcript messages assigned to
 // it and their counts; transcript.mjs journals its outcome beside it
 // (<hold>.settling, <hold>.done), names listPending never returns.
+//
+// Every reader finds a hold by the ids its file STORES, never by its name: the
+// "__" joins are ambiguous, and a 1.4.0 record still carries a per-call name
+// (<safeSession>__<safeAgent>__<safeCall>.json). Each hold is then claimed,
+// settled, journalled and cleared through the path its listing found, so a 1.4.0
+// record is ended through its own name, once.
 import { createHash } from "node:crypto";
 import {
 	appendFile,
+	link,
 	mkdir,
 	readdir,
 	readFile,
@@ -30,7 +40,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 export class TransportError extends Error {
 	constructor(message) {
@@ -258,24 +268,46 @@ export function sanitize(part) {
 	return String(part ?? "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
-/** Path of the pending-hold file for one (session, agent, entry) triple. */
-export function stateFilePath(sessionId, agentId, entryKey) {
+/**
+ * Path of one hold's pending file: `<session>__<agent>__<call>.<transferId>.json`,
+ * the call being the toolUseId, or the transferId when the host sends none. It is
+ * keyed by the TRANSFER, not the call alone: a call can have two holds at once (a
+ * resumed call's earlier hold, being ended, and its fresh one), and each claim,
+ * settle and journal entry must belong to exactly one of them. The `.` before the
+ * transfer id is a character `sanitize` never emits, so no such name can equal a
+ * 1.4.0 per-call name (`<session>__<agent>__<call>.json`).
+ */
+export function holdFilePath(sessionId, agentId, entry) {
+	const call = entry.toolUseId ?? entry.transferId;
 	return join(
 		stateDir(),
-		`${sanitize(sessionId)}__${sanitize(agentId)}__${sanitize(entryKey)}.json`,
+		`${sanitize(sessionId)}__${sanitize(agentId)}__${sanitize(call)}.${sanitize(entry.transferId)}.json`,
 	);
 }
 
 /**
- * Record a pending hold as its own file (atomic: tmp + rename). The entry key
- * is the toolUseId when present, else the transferId. The agent id is stored in
- * the file body so a whole-session sweep can recover which agent owns the hold.
+ * A name another hold's file already has. A record is never written over another
+ * file: the fresh hold is given back instead, and the call refused.
+ */
+export class HoldNameTaken extends Error {
+	constructor(path) {
+		super(`another hold's file already has this hold's name (${basename(path)})`);
+		this.name = "HoldNameTaken";
+		this.code = "EEXIST";
+	}
+}
+
+/**
+ * Record a pending hold as its own file (`holdFilePath`), atomic AND exclusive:
+ * written in full under a temporary name, then published with link(), which never
+ * replaces a file already there (a rename would). A name already taken throws
+ * `HoldNameTaken`, and that file is left untouched. The agent id is stored in the
+ * file body so a whole-session sweep can recover which agent owns the hold.
  * Every hold is marked `gate: 1` (`isGated`) in this same atomic write, never
  * later.
  */
 export async function recordPending(sessionId, agentId, entry, { settling = false } = {}) {
-	const entryKey = entry.toolUseId ?? entry.transferId;
-	const live = stateFilePath(sessionId, agentId, entryKey);
+	const live = holdFilePath(sessionId, agentId, entry);
 	const path = settling ? settlingPath(live) : live;
 	await mkdir(stateDir(), { recursive: true });
 	const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
@@ -301,11 +333,16 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				...(entry.usage === "transcript" ? transcriptHoldFields(entry) : {}),
 			}),
 		);
-		await rename(tmp, path);
-	} catch (err) {
-		// A record that could not be written (ENOSPC, say) leaves no partial file.
+		try {
+			await link(tmp, path);
+		} catch (err) {
+			if (err?.code === "EEXIST") throw new HoldNameTaken(path);
+			throw err;
+		}
+	} finally {
+		// Published or not, the temporary name goes: a record that could not be
+		// written (ENOSPC, say, or a name already taken) leaves no partial file.
 		await unlink(tmp).catch(() => {});
-		throw err;
 	}
 	return path;
 }
@@ -334,35 +371,23 @@ export function isGated(entry) {
  * off unanswered (`.settling`; the entry is `{ transferId, assignedIds, transcript,
  * path }`); or null,
  * also when the call has no `tool_use_id`.
- * A record counts only if the ids it STORES are this call's. State-file names join
- * ids with "__", so two calls can share one (agent `a__b` with tool `c`, and agent
- * `a` with tool `b__c`). The pending record is found exactly as PostToolUse finds
- * the hold it settles (`takePendingEntry`), so PreToolUse ends only a hold this
- * call's PostToolUse would settle.
+ * A record counts only if the ids it STORES are this call's: it is found by its
+ * body, never by its name. State-file names join ids with "__", so two calls can
+ * share a call name (agent `a__b` with tool `c`, and agent `a` with tool `b__c`),
+ * and a 1.4.0 record carries a per-call name. The pending record is found exactly as
+ * PostToolUse finds the hold it settles (`takePendingEntry`), so PreToolUse ends
+ * only a hold this call's PostToolUse would settle.
  */
 export async function holdOfCall(sessionId, agentId, toolUseId) {
 	if (typeof toolUseId !== "string" || toolUseId === "") return null;
 	const entry = await takePendingEntry(sessionId, agentId, toolUseId);
 	if (entry !== null) return { state: "pending", entry };
-	const path = settlingPath(stateFilePath(sessionId, agentId, toolUseId));
-	try {
-		const body = JSON.parse(await readFile(path, "utf-8"));
-		if (
-			typeof body?.transferId === "string" &&
-			body.toolUseId === toolUseId &&
-			sanitize(body.agentId ?? "main") === sanitize(agentId)
-		) {
-			const assignedIds = Array.isArray(body.assignedIds) ? body.assignedIds : [];
-			const transcript = body.usage === "transcript";
-			return {
-				state: "settling",
-				entry: { transferId: body.transferId, assignedIds, transcript, path },
-			};
-		}
-	} catch {
-		// Not there, or unreadable: no hold of this call is being settled.
-	}
-	return null;
+	const settling = (await settlingRecords(sessionId, agentId)).find(
+		(record) => record.toolUseId === toolUseId,
+	);
+	if (settling === undefined) return null;
+	const { transferId, assignedIds, transcript, path } = settling;
+	return { state: "settling", entry: { transferId, assignedIds, transcript, path } };
 }
 
 /** A pending hold's settle-attempted path: `<hold>.settling` beside `<hold>.json`. */
@@ -377,10 +402,11 @@ function settlingPath(livePath) {
  * lists `.json` only, so no later hook can pick the hold again: not even a
  * PostToolUse whose host sent no tool_use_id, which takes the OLDEST hold. Stop
  * only gives a `.settling` estimate hold back (`cleanup`); nothing settles it
- * again. Returns the `.settling` path, or null when another hook took it first.
+ * again. `live` is the pending file as its listing found it (`entry.path`): the
+ * claim names one hold, never whatever file a call's name holds now. Returns the
+ * `.settling` path, or null when another hook took it first.
  */
-export async function claimForSettle(sessionId, agentId, entryKey) {
-	const live = stateFilePath(sessionId, agentId, entryKey);
+export async function claimForSettle(live) {
 	const now = new Date();
 	await utimes(live, now, now).catch(() => {});
 	try {
@@ -393,11 +419,11 @@ export async function claimForSettle(sessionId, agentId, entryKey) {
 }
 
 /**
- * The estimate holds of a session (or of one agent) whose one settle was
- * attempted and never answered: `.settling` files without transcript usage. A
- * transcript hold's `.settling` belongs to the transcript journal instead.
+ * The `.settling` records of a session (or of one agent): holds whose one settle
+ * was attempted, in flight or cut off unanswered. Each is identified by the ids
+ * its body stores, never by its name.
  */
-async function settlingEstimates(sessionId, agentId) {
+async function settlingRecords(sessionId, agentId) {
 	const prefix = `${sanitize(sessionId)}__`;
 	const wantAgent = agentId == null ? null : sanitize(agentId);
 	let names;
@@ -412,14 +438,29 @@ async function settlingEstimates(sessionId, agentId) {
 		const path = join(stateDir(), name);
 		try {
 			const body = JSON.parse(await readFile(path, "utf-8"));
-			if (body?.usage === "transcript" || typeof body?.transferId !== "string") continue;
+			if (typeof body?.transferId !== "string") continue;
 			if (wantAgent !== null && sanitize(body.agentId ?? "main") !== wantAgent) continue;
-			held.push({ path, transferId: body.transferId });
+			held.push({
+				path,
+				transferId: body.transferId,
+				toolUseId: body.toolUseId ?? null,
+				assignedIds: Array.isArray(body.assignedIds) ? body.assignedIds : [],
+				transcript: body.usage === "transcript",
+			});
 		} catch {
 			// Corrupt or concurrently removed — skip.
 		}
 	}
 	return held;
+}
+
+/**
+ * The estimate holds of a session (or of one agent) whose one settle was
+ * attempted and never answered: `.settling` files without transcript usage. A
+ * transcript hold's `.settling` belongs to the transcript journal instead.
+ */
+async function settlingEstimates(sessionId, agentId) {
+	return (await settlingRecords(sessionId, agentId)).filter((record) => !record.transcript);
 }
 
 const COUNT_FIELDS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
@@ -473,6 +514,9 @@ export async function listPending(sessionId, agentId) {
 			const { mtimeMs } = await stat(path);
 			entries.push({
 				entryKey: sanitize(parsed.toolUseId ?? parsed.transferId),
+				// The file as found: every claim, settle and clear of this hold goes
+				// through it (a 1.4.0 record keeps its per-call name).
+				path,
 				agentId: entryAgent,
 				toolUseId: parsed.toolUseId ?? null,
 				transferId: parsed.transferId,
@@ -513,10 +557,14 @@ export async function takePendingEntry(sessionId, agentId, toolUseId) {
 	return entries.find(isGated) ?? null;
 }
 
-/** Delete one pending-hold file. Idempotent — a missing file is fine. */
-export async function clearPending(sessionId, agentId, entryKey) {
+/**
+ * Delete one pending-hold file, by the path its listing found (`entry.path`), so a
+ * hook acting on an earlier listing never deletes another hold's file. Idempotent
+ * — a missing file is fine.
+ */
+export async function clearPending(path) {
 	try {
-		await unlink(stateFilePath(sessionId, agentId, entryKey));
+		await unlink(path);
 	} catch {
 		// Already cleared.
 	}
@@ -713,7 +761,7 @@ export async function cleanup(sessionId, agentId) {
 				`usertrust: failed to give back ${entry.transferId}: ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
-		await clearPending(sessionId, entry.agentId, entry.entryKey);
+		await clearPending(entry.path);
 	}
 	for (const held of await settlingEstimates(sessionId, agentId)) {
 		// An estimate hold whose one settle went unanswered: it may have posted, so
