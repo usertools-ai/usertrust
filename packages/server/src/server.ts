@@ -50,33 +50,38 @@ const MAX_SSE_BUFFER_BYTES = 1024 * 1024;
 interface PendingEntry {
 	auth: Authorization;
 	tenantId: string;
-	/** When the authorize request arrived: epoch ms, for a caller's explicit `sweepExpired(now)`. */
+	/**
+	 * When the authorize request arrived, in epoch ms: the wall-clock half of the
+	 * sweep's age (`sweepAge`), and what an explicit `sweepExpired(now)` reads.
+	 */
 	createdAt: number;
 	/**
-	 * The same moment on the MONOTONIC clock (`performance.now()`): what the server's
-	 * own sweep and `remainingLifeMs` read. Process-local; it never leaves the process.
-	 * A later keyed replay (#205) must keep this field as it is, never overwrite it with
-	 * its own request's. And it must answer from the LARGER of the hold's monotonic and
-	 * wall-clock ages: the monotonic clock stops while the host sleeps, the ledger's
-	 * timeout does not, and an answer given long after the hold began would otherwise
-	 * state more life than the hold has.
+	 * The same moment on the MONOTONIC clock (`performance.now()`): the age an authorize
+	 * answers from, and the monotonic half of the sweep's age. Process-local; it never
+	 * leaves the process. A later keyed replay (#205) must keep this field as it is, never
+	 * overwrite it with its own request's. And it must answer from the LARGER of the
+	 * hold's monotonic and wall-clock ages: the monotonic clock stops while the host
+	 * sleeps, the ledger's timeout does not, and an answer given long after the hold began
+	 * would otherwise state more life than the hold has.
 	 */
 	startedMono: number;
 }
 
 /**
- * The longest a pending hold can still be pending, in whole ms, never negative: the
- * shorter of the server's own sweep (`pendingTtlMs`) and the ledger's pending timeout
- * (`auth.holdTimeoutMs`), both counted from `startedMono`, which was read before the
- * hold was reserved. No expiry ends the hold sooner; a settle, a void or a server
- * restart can. `nowMono` is read on the same monotonic clock, so a wall-clock step can
- * never lengthen the answer.
+ * The longest a pending hold can still be pending once it is `ageMs` old, in whole ms,
+ * never negative: the shorter of the server's own sweep (`pendingTtlMs`) and the
+ * ledger's pending timeout (`auth.holdTimeoutMs`), less that age. Both lives count from
+ * the request's arrival, which comes before the hold was reserved. No expiry ends the
+ * hold sooner; a settle, a void or a server restart can.
  *
- * An authorize answers it as `expiresInMs`: a DURATION, so a client on another machine
- * adds it to its own clock reading taken before it sent the request, and gets a time no
- * later than the hold's last moment whatever the offset between the two clocks. The
- * server's own sweep ends the hold when it reaches 0, so the sweep and the answer are
- * one rule.
+ * One rule, read at two ages:
+ * - An authorize answers it as `expiresInMs`, at the hold's MONOTONIC age, so a
+ *   wall-clock step can never lengthen the answer. The answer is a DURATION: a client
+ *   on another machine adds it to its own clock reading taken before it sent the
+ *   request, and gets a time no later than the hold's last moment whatever the offset
+ *   between the two clocks.
+ * - The server's own sweep ends the hold when it reaches 0 at the SWEEP age: the larger
+ *   of the monotonic and wall-clock ages (`sweepAge`).
  *
  * Null when the life is UNKNOWN: a ledger-backed hold whose handle does not state the
  * ledger's timeout. Nothing is advertised then, so a client never reuses the hold, and
@@ -84,14 +89,14 @@ interface PendingEntry {
  * the sweep alone is the life.
  */
 export function remainingLifeMs(
-	entry: { startedMono: number; auth: { holdTimeoutMs?: number | undefined } },
+	auth: { holdTimeoutMs?: number | undefined },
 	config: { pendingTtlMs: number; dryRun: boolean },
-	nowMono: number,
+	ageMs: number,
 ): number | null {
-	const ledger = entry.auth.holdTimeoutMs;
+	const ledger = auth.holdTimeoutMs;
 	if (ledger === undefined && !config.dryRun) return null;
 	const life = Math.min(config.pendingTtlMs, ledger ?? Number.POSITIVE_INFINITY);
-	const left = Math.floor(life - (nowMono - entry.startedMono));
+	const left = Math.floor(life - ageMs);
 	// Anything unusable reads as no life left: a client then never reuses the hold.
 	return Number.isSafeInteger(left) && left > 0 ? left : 0;
 }
@@ -108,9 +113,10 @@ export interface UsertrustServer {
 	readonly pool: GovernorPool;
 	pendingCount(): number;
 	/**
-	 * Release every pending hold older than `pendingTtlMs`. With no argument (the
-	 * server's own sweep), ages are read on the monotonic clock. An explicit `now` is
-	 * epoch ms, read against each hold's arrival on the wall clock.
+	 * Release every pending hold whose life is spent (`remainingLifeMs`), or, for a hold
+	 * of unknown life, that is `pendingTtlMs` old. With no argument (the server's own
+	 * sweep), a hold's age is `sweepAge`: the larger of its monotonic and wall-clock
+	 * ages. An explicit `now` is epoch ms, read against each hold's arrival.
 	 */
 	sweepExpired(now?: number): Promise<number>;
 }
@@ -123,6 +129,18 @@ export function createUsertrustServer(opts: {
 	const bus = new EventBus();
 	const pool = opts.factory ? new GovernorPool(config, opts.factory) : new GovernorPool(config);
 	const pending = new Map<string, PendingEntry>();
+	/** A hold's age on the monotonic clock: what its authorize answer is read at. */
+	const monoAge = (entry: PendingEntry): number => performance.now() - entry.startedMono;
+	/**
+	 * A hold's age as the server's own sweep reads it: the LARGER of its monotonic and
+	 * wall-clock ages. The monotonic clock does not count a host's sleep, and the
+	 * ledger's timeout does: read alone, it would keep a hold the ledger has expired,
+	 * its budget still reserved, for as long as the host slept. The wall clock alone
+	 * could be stepped back. Declared: a wall clock stepped FORWARD by most of a hold's
+	 * life sweeps it early, which is rarer than a sleep.
+	 */
+	const sweepAge = (entry: PendingEntry): number =>
+		Math.max(monoAge(entry), Date.now() - entry.createdAt);
 	// Live SSE stream count per tenant id, enforcing MAX_SSE_PER_TENANT.
 	const sseCounts = new Map<string, number>();
 	let httpServer: Server | undefined;
@@ -202,7 +220,7 @@ export function createUsertrustServer(opts: {
 				estimatedCost: auth.estimatedCost,
 				model: auth.model,
 				createdAt: auth.createdAt,
-				...expiresIn(remainingLifeMs(entry, config, performance.now())),
+				...expiresIn(remainingLifeMs(auth, config, monoAge(entry))),
 			});
 		} catch (err) {
 			const mapped = toHttpError(err);
@@ -427,16 +445,14 @@ export function createUsertrustServer(opts: {
 	}
 
 	async function sweepExpired(now?: number): Promise<number> {
-		// The server's own sweep reads the monotonic clock, as `remainingLifeMs` does, and
-		// ends a hold when the life it was advertised with runs out: the ledger's timeout,
-		// when that comes before `pendingTtlMs`, frees the hold's budget then. A wall-clock
-		// step can neither keep a hold past that life nor release it early.
+		// One rule for every sweep: a hold is due when the life it was advertised with is
+		// spent at its age, so the ledger's timeout, when it comes before `pendingTtlMs`,
+		// frees the hold's budget then. A hold of unknown life is due at `pendingTtlMs`.
+		// The server's own sweep reads the age as `sweepAge`; an explicit `now` is epoch ms.
 		const due = (entry: PendingEntry): boolean => {
-			if (now !== undefined) return now - entry.createdAt >= config.pendingTtlMs;
-			const left = remainingLifeMs(entry, config, performance.now());
-			return left === null
-				? performance.now() - entry.startedMono >= config.pendingTtlMs
-				: left === 0;
+			const age = now === undefined ? sweepAge(entry) : now - entry.createdAt;
+			const left = remainingLifeMs(entry.auth, config, age);
+			return left === null ? age >= config.pendingTtlMs : left === 0;
 		};
 		let swept = 0;
 		for (const [transferId, entry] of pending) {

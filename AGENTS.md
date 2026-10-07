@@ -599,8 +599,11 @@ hold's age (`remainingLifeMs`). A settle, a void or a restart can end the hold s
 - The sweep ends a hold when that life reaches 0, so the sweep and the answer are one rule.
 - A ledger hold whose handle does not state its timeout gets NO `expiresInMs` (an absence is never read
   as "no limit"), and the sweep falls back to `pendingTtlMs` for it.
-- The server reads a hold's age on ONE monotonic clock: `startedMono`, read as the request arrives and
-  so before the reserve. Its own sweep reads the same field.
+- The answer reads a hold's age on the MONOTONIC clock: `startedMono`, read as the request arrives and
+  so before the reserve. A wall-clock step cannot lengthen it.
+- The sweep reads the LARGER of that age and the wall-clock age (`createdAt`): the monotonic clock does
+  not count a host's sleep, and the ledger's timeout does. A wall clock stepped forward by most of a
+  hold's life can sweep it early; that is declared, and rarer than a sleep.
 - Only durations leave the process (`expiresInMs`, `holdTimeoutMs`). The answer's `createdAt` is a
   wall-clock time for display.
 - A client adds `expiresInMs` to its own clock reading taken before it sent the request. That is never
