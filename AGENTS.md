@@ -590,6 +590,35 @@ surface and still records `actor: "local"`. `ledger/engine.ts` — which has no 
 (see Known drift) — predates this scheme with its own `deriveUserId64`/`fnv1a32` tags; if it is ever
 wired in, it must adopt `principalLedgerTags`, or one ledger will carry two incompatible schemes.
 
+**A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass
+`LEDGER_HOLD_TIMEOUT_MS` as the pending transfer's `timeout` explicitly, and a headless
+`Authorization` publishes the same value as `holdTimeoutMs` (absent in dry run).
+`usertrust-server` answers every authorize with `expiresInMs` (capability `hold-expiry`): the longest
+the hold can still be pending, the shorter of its `pendingTtlMs` sweep and that timeout, minus the
+hold's age (`remainingLifeMs`). A settle, a void or a restart can end the hold sooner; no expiry can.
+- The sweep ends a hold when that life reaches 0, so the sweep and the answer are one rule.
+- A ledger hold whose handle does not state its timeout gets NO `expiresInMs` (an absence is never read
+  as "no limit"), and the sweep falls back to `pendingTtlMs` for it.
+- The answer and the sweep read a hold's age on the MONOTONIC clock: `startedMono`, read as the request
+  arrives and so before the reserve. No wall-clock step moves either, so the sweep never voids a hold
+  before its advertised life. That is the unsafe direction: a hold still in use would get a 404, and in
+  enforce mode its re-authorize could be refused after the work ran.
+- Declared: the monotonic clock does not count a host's sleep, and the ledger's timeout does. A hold
+  of life L, aged a when a sleep of length D begins, keeps counting past its real end for min(D, L − a)
+  after wake: at most one hold life (L ≤ T, 300 s by default), plus up to one sweep interval (30 s).
+  Meanwhile it counts against the budget, which in enforce mode can mean false denials: the safe
+  direction, since nothing is charged and the ledger releases the funds on time. Two clocks cannot tell
+  a sleep from a forward step. A TigerBeetle-state probe for this case is a follow-up (#241).
+- Only durations leave the process (`expiresInMs`, `holdTimeoutMs`). The answer's `createdAt` is a
+  wall-clock time for display.
+- A client adds `expiresInMs` to its own clock reading taken before it sent the request. That is never
+  later than the real expiry, whatever the offset between the clocks.
+- `tests/integration/hold-timeout.tb.test.ts` reads the stored `timeout` back from a real cluster.
+
+*Prevents:* a client guessing a hold's life from the defaults (under a short `pendingTtlMs` it would
+reuse a swept hold, and an enforce-mode call would run unchecked). It also prevents a wall-clock step
+on the server from lengthening an advertised life or delaying the sweep.
+
 ### Audit
 
 **Persist the canonical bytes, not `JSON.stringify` output.** The hash pre-image is

@@ -20,7 +20,14 @@ export interface FakeGovernorHandle {
 }
 
 export function createFakeGovernor(
-	opts: { budget?: number; denyReason?: string } = {},
+	opts: {
+		budget?: number;
+		denyReason?: string;
+		/** Stamped on every handle, as a ledger-backed governor does (`LEDGER_HOLD_TIMEOUT_MS`). */
+		holdTimeoutMs?: number;
+		/** Runs inside `authorize`, after the server's request has arrived: a clock step, say. */
+		duringAuthorize?: () => void;
+	} = {},
 ): FakeGovernorHandle {
 	let budget = opts.budget ?? 10_000;
 	let seq = 0;
@@ -36,6 +43,7 @@ export function createFakeGovernor(
 	const governor: Governor = {
 		async authorize(params: AuthorizeParams): Promise<Authorization> {
 			calls.authorizeParams.push(params);
+			opts.duringAuthorize?.();
 			if (opts.denyReason) throw new PolicyDeniedError(opts.denyReason);
 			const estimatedCost = (params.estimatedInputTokens ?? 100) + (params.maxOutputTokens ?? 4096);
 			if (estimatedCost > budget) {
@@ -47,6 +55,7 @@ export function createFakeGovernor(
 				estimatedCost,
 				model: params.model,
 				createdAt: Date.now(),
+				...(opts.holdTimeoutMs !== undefined ? { holdTimeoutMs: opts.holdTimeoutMs } : {}),
 			};
 			budget -= estimatedCost;
 			pending.set(auth.transferId, auth);
