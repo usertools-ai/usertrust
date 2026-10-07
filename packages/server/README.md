@@ -56,6 +56,13 @@ An older server strips them, so a client checks the list before relying on a sma
 the call's audit records, and the principal's `id`/`unit`/`role` become TigerBeetle `user_data` tags
 on its ledger transfers for roll-ups. A principal never changes which wallet pays.
 
+A `200` from `/v1/authorize` carries `expiresInMs`: the hold's remaining life in whole milliseconds,
+the shorter of `pendingTtlMs` and the ledger's pending timeout (5 min; in dryRun, `pendingTtlMs` alone),
+counted from when the request arrived. It is a duration: add it to your own clock reading taken BEFORE you sent the request, and you
+get a time no later than the hold's real expiry, whatever the offset between your clock and the
+server's. (`createdAt` in the same answer is the server's wall-clock time, for display only.) A server
+that sends it lists `"hold-expiry"` in `capabilities`; an older one omits the field.
+
 ## Endpoints
 
 | Method | Path            | Auth   | Purpose                                             |
@@ -69,7 +76,8 @@ on its ledger transfers for roll-ups. A principal never changes which wallet pay
 
 Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthorized`,
 `404 not_found` (unknown/already-settled transferId), `413 too_large` (1 MiB body cap).
-Pending holds not settled within `pendingTtlMs` (default 5 min) are swept and aborted.
+Pending holds not settled within `pendingTtlMs` (default 5 min) are swept and aborted. The sweep reads
+hold ages on a monotonic clock, so a wall-clock step does not move it.
 
 ## Keys
 

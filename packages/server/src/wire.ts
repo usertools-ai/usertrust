@@ -80,7 +80,15 @@ export interface AuthorizeResponse {
 	transferId: string;
 	estimatedCost: number;
 	model: string;
+	/** Epoch ms on the server's clock, when the hold was made. For display, not for timing. */
 	createdAt: number;
+	/**
+	 * The hold's remaining life in ms when the answer was sent: the shorter of the
+	 * server's `pendingTtlMs` sweep and the ledger's pending timeout (`hold-expiry`).
+	 * A duration: added to the client's own clock reading taken before it sent the
+	 * request, it gives a time no later than the hold's real expiry.
+	 */
+	expiresInMs: number;
 }
 
 /**

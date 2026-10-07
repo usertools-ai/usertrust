@@ -80,7 +80,7 @@ import { detectInjection } from "./policy/injection.js";
 import { detectPII, redactPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
-import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
+import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
 
 /** Base URL for receipt verification links (used in proxy mode). */
 const VERIFY_URL_BASE = "https://verify.usertrust.dev";
@@ -3764,6 +3764,9 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					creditAccountId: treasury,
 					amount: params.amount,
 					code: XFER_SPEND,
+					// Named, not the client's default: the ledger expires the hold at this
+					// timeout, and a headless handle publishes it (`holdTimeoutMs`).
+					timeoutSeconds: LEDGER_HOLD_TIMEOUT_MS / 1000,
 					// The principal's roll-up tags ride the hold; post/void inherit them.
 					...(params.userData !== undefined
 						? {

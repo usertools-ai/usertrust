@@ -590,6 +590,23 @@ surface and still records `actor: "local"`. `ledger/engine.ts` — which has no 
 (see Known drift) — predates this scheme with its own `deriveUserId64`/`fnv1a32` tags; if it is ever
 wired in, it must adopt `principalLedgerTags`, or one ledger will carry two incompatible schemes.
 
+**A hold's life is published, as a duration on one clock.** Both `createTBEngine` factories pass
+`LEDGER_HOLD_TIMEOUT_MS` as the pending transfer's `timeout` explicitly, and a headless
+`Authorization` publishes the same value as `holdTimeoutMs` (absent in dry run).
+`usertrust-server` answers every authorize with `expiresInMs` (capability `hold-expiry`): the shorter
+of its `pendingTtlMs` sweep and that timeout, minus the hold's age (`remainingLifeMs`).
+- The server reads a hold's age on ONE monotonic clock: `startedMono`, read as the request arrives and
+  so before the reserve. Its own sweep reads the same field.
+- Only durations leave the process (`expiresInMs`, `holdTimeoutMs`). The answer's `createdAt` is a
+  wall-clock time for display.
+- A client adds `expiresInMs` to its own clock reading taken before it sent the request. That is never
+  later than the real expiry, whatever the offset between the clocks.
+- `tests/integration/hold-timeout.tb.test.ts` reads the stored `timeout` back from a real cluster.
+
+*Prevents:* a client guessing a hold's life from the defaults (under a short `pendingTtlMs` it would
+reuse a swept hold, and an enforce-mode call would run unchecked). It also prevents a wall-clock step
+on the server from lengthening an advertised life or delaying the sweep.
+
 ### Audit
 
 **Persist the canonical bytes, not `JSON.stringify` output.** The hash pre-image is

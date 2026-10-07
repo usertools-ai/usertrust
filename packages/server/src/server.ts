@@ -31,8 +31,9 @@ const SERVER_VERSION = (createRequire(import.meta.url)("../package.json") as { v
  * unknown keys, so a `principal` it does not understand is dropped in silence and
  * the call is recorded as nobody's: a client checks this list before sending one.
  * A later capability is APPENDED here; the name and shape never change.
+ * `hold-expiry`: an authorize answer carries `expiresInMs`, the hold's remaining life.
  */
-const SERVER_CAPABILITIES = Object.freeze(["principal", "authorize-cache-tiers"]);
+const SERVER_CAPABILITIES = Object.freeze(["principal", "authorize-cache-tiers", "hold-expiry"]);
 /**
  * A dryRun server has no ledger, so it writes no `user_data` tags — but it records
  * the principal on every audit record exactly as a ledger-backed server does, so it
@@ -49,7 +50,34 @@ const MAX_SSE_BUFFER_BYTES = 1024 * 1024;
 interface PendingEntry {
 	auth: Authorization;
 	tenantId: string;
+	/** When the authorize request arrived: epoch ms, for a caller's explicit `sweepExpired(now)`. */
 	createdAt: number;
+	/**
+	 * The same moment on the MONOTONIC clock (`performance.now()`): what the server's
+	 * own sweep and `remainingLifeMs` read. Process-local; it never leaves the process.
+	 */
+	startedMono: number;
+}
+
+/**
+ * How long a pending hold is still guaranteed to be pending, in whole ms, never
+ * negative: the shorter of the server's own sweep (`pendingTtlMs`) and the ledger's
+ * pending timeout (`auth.holdTimeoutMs`; absent in dry run), both counted from
+ * `startedMono`, which was read before the hold was reserved. `nowMono` is read on
+ * the same monotonic clock, so a wall-clock step can never lengthen the answer. An
+ * authorize answers it as `expiresInMs`: a DURATION, so a client on another machine
+ * adds it to its own clock reading taken before it sent the request, and gets a time
+ * no later than the real expiry whatever the offset between the two clocks.
+ */
+export function remainingLifeMs(
+	entry: { startedMono: number; auth: { holdTimeoutMs?: number | undefined } },
+	pendingTtlMs: number,
+	nowMono: number,
+): number {
+	const life = Math.min(pendingTtlMs, entry.auth.holdTimeoutMs ?? Number.POSITIVE_INFINITY);
+	const left = Math.floor(life - (nowMono - entry.startedMono));
+	// Anything unusable reads as no life left: a client then never reuses the hold.
+	return Number.isSafeInteger(left) && left > 0 ? left : 0;
 }
 
 export interface UsertrustServer {
@@ -58,6 +86,11 @@ export interface UsertrustServer {
 	readonly bus: EventBus;
 	readonly pool: GovernorPool;
 	pendingCount(): number;
+	/**
+	 * Release every pending hold older than `pendingTtlMs`. With no argument (the
+	 * server's own sweep), ages are read on the monotonic clock. An explicit `now` is
+	 * epoch ms, read against each hold's arrival on the wall clock.
+	 */
 	sweepExpired(now?: number): Promise<number>;
 }
 
@@ -127,10 +160,15 @@ export function createUsertrustServer(opts: {
 			});
 			return;
 		}
+		// The hold's clock starts NOW, before any ledger I/O this request causes: the
+		// ledger's own pending timeout starts when the reserve commits, which is later.
+		const createdAt = Date.now();
+		const startedMono = performance.now();
 		const governor = await pool.get(tenant);
 		try {
 			const auth = await governor.authorize(parsed.data);
-			pending.set(auth.transferId, { auth, tenantId: tenant.id, createdAt: Date.now() });
+			const entry: PendingEntry = { auth, tenantId: tenant.id, createdAt, startedMono };
+			pending.set(auth.transferId, entry);
 			bus.publish(tenant.id, {
 				type: "authorized",
 				transferId: auth.transferId,
@@ -143,6 +181,7 @@ export function createUsertrustServer(opts: {
 				estimatedCost: auth.estimatedCost,
 				model: auth.model,
 				createdAt: auth.createdAt,
+				expiresInMs: remainingLifeMs(entry, config.pendingTtlMs, performance.now()),
 			});
 		} catch (err) {
 			const mapped = toHttpError(err);
@@ -366,10 +405,15 @@ export function createUsertrustServer(opts: {
 		}
 	}
 
-	async function sweepExpired(now: number = Date.now()): Promise<number> {
+	async function sweepExpired(now?: number): Promise<number> {
+		// The server's own sweep reads the monotonic clock, as `remainingLifeMs` does: a
+		// wall-clock step can neither keep a hold past the life it was advertised with
+		// nor release it early.
+		const age = (entry: PendingEntry): number =>
+			now === undefined ? performance.now() - entry.startedMono : now - entry.createdAt;
 		let swept = 0;
 		for (const [transferId, entry] of pending) {
-			if (now - entry.createdAt < config.pendingTtlMs) continue;
+			if (age(entry) < config.pendingTtlMs) continue;
 			pending.delete(transferId);
 			swept += 1;
 			await abortEntry(transferId, entry, "pending TTL expired");
