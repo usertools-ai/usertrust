@@ -154,10 +154,16 @@ function gate(): { wait: Promise<void>; open: () => void } {
  * `voidAllPending` also reaches a hold whose terminal is parked on its void: a second void
  * request for one pending transfer. A gate parks a call where the real engine awaits the
  * ledger: a void or POST after its entry lookup, a reserve before the ledger has the hold.
- * `gates` is read at call time, so a test can arm one later.
+ * `voidOnly` parks the void of one hold alone. `gates` is read at call time, so a test can
+ * arm one later.
  */
 function ledgerEngine(
-	gates: { void?: Promise<void>; post?: Promise<void>; reserve?: Promise<void> } = {},
+	gates: {
+		void?: Promise<void>;
+		voidOnly?: { transferId: string; wait: Promise<void> };
+		post?: Promise<void>;
+		reserve?: Promise<void>;
+	} = {},
 ): {
 	engine: TrustEngine;
 	mutations: string[];
@@ -199,6 +205,7 @@ function ledgerEngine(
 		voidPendingSpend: vi.fn(async (transferId: string) => {
 			if (!entries.has(transferId)) throw new PendingEntryNotFoundError(transferId);
 			await gates.void;
+			if (gates.voidOnly?.transferId === transferId) await gates.voidOnly.wait;
 			if (refuse) {
 				voidRequests.push({ transferId, via: "voidPendingSpend", taken: false });
 				throw new TBTransferError(25, "Void transfer failed: pending_transfer_not_found");
@@ -498,6 +505,47 @@ describe("every hold destroy() ends itself is recorded", () => {
 			});
 		});
 	}
+
+	it("a refused late authorize gives back its session accounting: budgetRemaining(), and a settle destroy() is still draining, are untouched by it", async () => {
+		const parkA = gate();
+		const reserves = gate();
+		const gates: {
+			voidOnly?: { transferId: string; wait: Promise<void> };
+			reserve?: Promise<void>;
+		} = {};
+		const { engine, mutations } = ledgerEngine(gates);
+		const gov = await governor(engine);
+		const a = await hold(gov, "session");
+		const b = await hold(gov, "session");
+		// A's release parks on its own void, after giving back its accounting: it holds
+		// destroy()'s drain open.
+		gates.voidOnly = { transferId: a.transferId, wait: parkA.wait };
+		const endingA = end(gov, a, "release");
+		await sleep(20);
+		const before = gov.budgetRemaining();
+		// A session-wallet authorize is still reserving when destroy() begins.
+		gates.reserve = reserves.wait;
+		const late = gov.authorize(AUTHORIZE).then(
+			(auth) => auth,
+			(err: unknown) => err,
+		);
+		const destroying = gov.destroy();
+		await sleep(20);
+		reserves.open();
+		const refused = await late;
+		expect(refused).toBeInstanceOf(Error);
+		expect((refused as Error).message).toBe("Governor has been destroyed");
+		// What it took is back: the session's numbers are as they were.
+		expect(gov.budgetRemaining()).toBe(before);
+		// A settle destroy() is still draining reports them right.
+		const receipt = await gov.settle(b, { inputTokens: 10, outputTokens: 10 });
+		expect(receipt.budgetRemaining).toBe(before + b.estimatedCost - receipt.cost);
+		expect(gov.budgetRemaining()).toBe(receipt.budgetRemaining);
+		parkA.open();
+		await endingA;
+		await destroying;
+		expect(mutations).toContain(`post:${b.transferId}`);
+	});
 
 	it("a terminal called while destroy() is ending holds finds nothing to end", async () => {
 		const voids = gate();

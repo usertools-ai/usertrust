@@ -1541,11 +1541,21 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// destroy() may have begun while this call awaited (the budget lock, the policy,
 			// the reserve). It claims every hold registered before it, and a hold registered
 			// after would outlive the governor: a terminal could end it after the audit
-			// writer is released. So it is never registered: its reservation is given back
-			// (best-effort; the engine sweep or the ledger's timeout covers a failure) and the
-			// call fails as one made after destroy() does. Nothing awaits between this check
-			// and the registration below.
+			// writer is released. So it is never registered: what this call took is given
+			// back, and it fails as one made after destroy() does. Its session accounting
+			// first, under the budget lock as abort() and release() give theirs back: a
+			// settle destroy() is still draining reads it for its receipt. Then its
+			// reservation (best-effort; the engine sweep or the ledger's timeout covers a
+			// failure). Nothing awaits between this check and the registration below.
 			if (destroyed) {
+				if (!envelopeDebited) {
+					const releaseLock = await budgetMutex.acquire();
+					try {
+						inFlightHoldTotal -= estCost;
+					} finally {
+						releaseLock();
+					}
+				}
 				if (proxyConn != null && !isDryRun) {
 					try {
 						await proxyConn.void(proxyTransferId ?? transferId);
