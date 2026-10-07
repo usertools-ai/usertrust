@@ -315,8 +315,8 @@ workloads); long-context, service-tier, regional, modality, and cache-STORAGE ch
 hourly storage, prompt-size-dependent rates; GPT-5.4 long-context uplifts) not modeled — fixed
 per-model rates by design (`claude-haiku-5-5` is priced at its over-100,000-token tier, which
 overstates every shorter prompt 5×); fast mode is not priced (Opus 5.5 fast is $8 / $40, Opus 5 and
-Opus 4.8 fast $10 / $50; `speed` is a usage field, not a model id); per-call `ceil` + 1-UT floor differs from provider-side aggregation.
-Estimates never model cache state.
+Opus 4.8 fast $10 / $50; `speed` is a usage field, not a model id); per-call `ceil` + 1-UT floor
+differs from provider-side aggregation. Estimates never model cache state.
 
 ## Cost Estimation Flow
 
