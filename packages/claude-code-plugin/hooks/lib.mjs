@@ -2,9 +2,9 @@
 // built-ins only, because hooks execute without an install step.
 //
 // State store design: each pending hold lives in its OWN file, named by its call
-// AND its transfer (<stateDir>/<safeSession>__<safeAgent>__<safeCall>.<safeTransferId>.json,
-// the call being the tool_use_id, or the transferId when the host sends none:
-// `holdFilePath`). Hooks for the same session can run concurrently; because there
+// AND its transfer (<stateDir>/<safeSession>__<safeAgent>__<safeCall>.<transferId>.json,
+// the call being the tool_use_id, or the transferId when the host sends none; the
+// transferId as the server sent it, which must be a valid id: `holdFilePath`). Hooks for the same session can run concurrently; because there
 // is no shared file to read-modify-write, no locking is needed — concurrent-hook
 // safety holds by construction. Two holds of one call (an earlier one being ended
 // while a fresh one is made) never share a file, and a record is never written
@@ -268,20 +268,38 @@ export function sanitize(part) {
 	return String(part ?? "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
 }
 
+/** What a server's transferId must be to name a hold's file (`isTransferId`). */
+const TRANSFER_ID = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * Whether a server's transferId can name a hold's file AS IT IS: 1 to 128 of
+ * `A-Z a-z 0-9 _ -` (usertrust-server mints `tx_<base36 time>_<8 hex>`). It is
+ * checked at every authorize answer, and a hold whose id fails it is never
+ * recorded. Never sanitized into a name instead: a lossy mapping would let two
+ * ids share one hold's file.
+ */
+export function isTransferId(value) {
+	return typeof value === "string" && TRANSFER_ID.test(value);
+}
+
 /**
  * Path of one hold's pending file: `<session>__<agent>__<call>.<transferId>.json`,
  * the call being the toolUseId, or the transferId when the host sends none. It is
  * keyed by the TRANSFER, not the call alone: a call can have two holds at once (a
  * resumed call's earlier hold, being ended, and its fresh one), and each claim,
- * settle and journal entry must belong to exactly one of them. The `.` before the
- * transfer id is a character `sanitize` never emits, so no such name can equal a
- * 1.4.0 per-call name (`<session>__<agent>__<call>.json`).
+ * settle and journal entry must belong to exactly one of them. The transfer id
+ * goes in as it is (`isTransferId`, or this throws), and the `.` before it is a
+ * character neither it nor `sanitize` ever contains: no two holds share a name,
+ * and no such name can equal a 1.4.0 per-call name (`<session>__<agent>__<call>.json`).
  */
 export function holdFilePath(sessionId, agentId, entry) {
+	if (!isTransferId(entry.transferId)) {
+		throw new Error("a transferId that is not a valid id cannot name a hold's file");
+	}
 	const call = entry.toolUseId ?? entry.transferId;
 	return join(
 		stateDir(),
-		`${sanitize(sessionId)}__${sanitize(agentId)}__${sanitize(call)}.${sanitize(entry.transferId)}.json`,
+		`${sanitize(sessionId)}__${sanitize(agentId)}__${sanitize(call)}.${entry.transferId}.json`,
 	);
 }
 
@@ -700,6 +718,39 @@ export async function releaseHold(transferId, reason, { timeoutMs = 5000 } = {})
 		route: "abort",
 		...(await serverRequest("/v1/abort", { transferId, error: reason }, { timeoutMs })),
 	};
+}
+
+/**
+ * Give back a hold whose transferId cannot name a file (`isTransferId`), through a
+ * `release` the server advertises and nothing else: never an abort, which counts
+ * as a breaker failure. Without `release`, the hold is left to the server's
+ * pending-hold sweep. Never throws; never echoes the id, which may be anything.
+ */
+export async function giveBackInvalid(transferId, timeoutMs) {
+	if (typeof transferId !== "string" || transferId === "") return;
+	const capabilities = await serverCapabilities();
+	if (!capabilities?.has("release")) {
+		say(
+			"usertrust: a hold whose transferId is not a valid id is left to the server's pending-hold sweep (no release)",
+		);
+		return;
+	}
+	try {
+		const response = await serverRequest(
+			"/v1/release",
+			{ transferId, reason: "its transferId is not a valid id" },
+			{ timeoutMs },
+		);
+		if (response.status !== 200) {
+			say(
+				`usertrust: the release of a hold whose transferId is not a valid id returned ${response.status}; the server's sweep releases it`,
+			);
+		}
+	} catch (err) {
+		say(
+			`usertrust: a hold whose transferId is not a valid id could not be released (${err instanceof Error ? err.message : String(err)}); the server's sweep releases it`,
+		);
+	}
 }
 
 /**

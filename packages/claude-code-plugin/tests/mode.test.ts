@@ -212,11 +212,8 @@ describe("watch (the default) never blocks a tool call, and never approves one",
 		expect(await watchRecords()).toEqual([]);
 	});
 
-	it("a reservation's transferId and estimatedCost reach the debug log without control characters", async () => {
-		const port = await startFake(200, {
-			transferId: `tx_1${HOSTILE}`,
-			estimatedCost: `3${HOSTILE}`,
-		});
+	it("a reservation's estimatedCost reaches the debug log without control characters", async () => {
+		const port = await startFake(200, { transferId: "tx_1", estimatedCost: `3${HOSTILE}` });
 		const result = await runHook(PRE, PAYLOAD, {
 			...baseEnv,
 			UT_SERVER_URL: `http://127.0.0.1:${port}`,
@@ -224,6 +221,18 @@ describe("watch (the default) never blocks a tool call, and never approves one",
 		expectNoDecision(result);
 		expect(result.stderr).toContain("usertrust: reserved tx_1");
 		expect(result.stderr).not.toMatch(CONTROL);
+	});
+
+	it("a transferId carrying control characters is refused, never echoed: no decision, a gap", async () => {
+		const port = await startFake(200, { transferId: `tx_1${HOSTILE}`, estimatedCost: 3 });
+		const result = await runHook(PRE, PAYLOAD, {
+			...baseEnv,
+			UT_SERVER_URL: `http://127.0.0.1:${port}`,
+		});
+		expectNoDecision(result);
+		expect(result.stderr).toContain("its transferId is not a valid id");
+		expect(result.stderr).not.toMatch(CONTROL);
+		expect(await watchRecords()).toEqual([expect.objectContaining({ kind: "gap" })]);
 	});
 
 	it("a shadow answer (an evaluate_only server) makes no decision either", async () => {

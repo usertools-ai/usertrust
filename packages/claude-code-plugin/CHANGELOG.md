@@ -45,6 +45,11 @@ npm, and its version is its own: the `usertrust` packages and their
     whatever `UT_FAIL_OPEN` says; watch mode records a gap). A 1.4.0 record keeps
     its per-call name: hooks find it by the ids it stores, and end it once, through
     that name.
+  - The server's transferId names a file only as it was sent, and only if it is
+    1 to 128 of `A-Z a-z 0-9 _ -`. Any other id is refused, never rewritten into a
+    name (two ids could then share one): the hold is given back through `release`
+    (on a server without it, left to its sweep), and the call fails as a failed
+    authorization does. A name too long for the filesystem fails the same way.
   - With `release` advertised, the call reserves afresh only once the earlier hold
     is released (a 200), or the server answers that it holds it no more (404
     `unknown transferId`). Any other answer, or none, leaves the hold possibly live:

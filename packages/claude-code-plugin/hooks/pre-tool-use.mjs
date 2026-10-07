@@ -47,10 +47,12 @@ import {
 	defaultModel,
 	estimateTokens,
 	giveBack,
+	giveBackInvalid,
 	guardMode,
 	HoldNameTaken,
 	holdOfCall,
 	isAlreadySettled,
+	isTransferId,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
@@ -429,8 +431,13 @@ async function reserve(input) {
 			await prepared.abandon?.();
 			proceed(`usertrust shadow mode: would_deny (${sanitizeReason(json.reason)}) — not enforced`);
 		} else if (response.status === 200) {
-			if (typeof json?.transferId !== "string" || json.transferId === "") {
-				throw new Error("malformed authorize response from governance server");
+			if (!isTransferId(json?.transferId)) {
+				// The id would name the hold's file, as it is (lib.mjs `isTransferId`). A hold
+				// it names is given back, through `release` only, and the call fails closed.
+				await giveBackInvalid(json?.transferId, Math.max(250, callTimeout()));
+				throw new Error(
+					"malformed authorize response from governance server: its transferId is not a valid id",
+				);
 			}
 			try {
 				await recordPending(sessionId, agentId, {

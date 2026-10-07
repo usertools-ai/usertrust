@@ -1729,26 +1729,27 @@ describe("estimate holds", () => {
 			});
 		}
 
-		it("its diagnostics never carry a control character from the server's transferIds", async () => {
+		it("its diagnostics never carry a control character from the server's transferIds: an id carrying one is refused, never echoed", async () => {
 			let minted = 0;
-			const gone = new Set<string>();
-			await startServer((path, body) => {
+			await startServer((path) => {
 				if (path === "/v1/authorize") {
 					minted += 1;
-					return { status: 200, json: { transferId: `tx_${minted}${HOSTILE}`, estimatedCost: 1 } };
+					// tx_1 is a valid id; every later one carries control characters.
+					const transferId = minted === 1 ? "tx_1" : `tx_${minted}${HOSTILE}`;
+					return { status: 200, json: { transferId, estimatedCost: 1 } };
 				}
-				const id = String(body.transferId);
-				if (path === "/v1/settle" && id.startsWith("tx_1") && !gone.has(id)) {
-					gone.add(id);
-					return notFound;
-				}
-				return { status: 200, json: { settled: true, transferId: id } };
+				// tx_1 expired before its settle, so PostToolUse asks for a fresh hold.
+				if (path === "/v1/settle") return notFound;
+				return { status: 200, json: { released: true } };
 			});
 			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
 			const pre = await run("pre-tool-use.mjs", preInput("tu_1"), env);
 			const post = await run("post-tool-use.mjs", postInput("tu_1", { tool_name: "Bash" }), env);
-			expect(post.stderr).toContain("charging this call once on tx_2");
-			expect(`${pre.stderr}${post.stderr}`).not.toMatch(CONTROL);
+			expect(post.stderr).toContain("its fresh hold's transferId is not a valid id");
+			const next = await run("pre-tool-use.mjs", preInput("tu_2"), env);
+			expect(next.stderr).toContain("its transferId is not a valid id");
+			expect(`${pre.stderr}${post.stderr}${next.stderr}`).not.toMatch(CONTROL);
+			expect(await holdStateFiles()).toEqual([]);
 		});
 
 		it("a host that sends no tool_use_id: a hold whose settle went unanswered is never taken again — each call charged once, at ITS OWN usage", async () => {
@@ -4291,6 +4292,115 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				"tx_8 has a settle that is not resolved yet",
 			);
 			expect(authorizes()).toHaveLength(1);
+		});
+
+		describe("a server's transferId names a hold's file only as it is: any other id is refused, never sanitized", () => {
+			const env = { UT_CC_USAGE: "estimate" };
+			/** A server that grants `id` at every authorize, and confirms every release. */
+			const granting = (id: unknown) => (path: string) =>
+				path === "/v1/authorize"
+					? { status: 200, json: { transferId: id, estimatedCost: 1 } }
+					: { status: 200, json: { released: true } };
+			const releasedIds = () =>
+				requests.filter((r) => r.path === "/v1/release").map((r) => r.body.transferId);
+
+			it.each<[string, string]>([
+				["a path (`../x`)", "../x"],
+				["a dot (`a.b`)", "a.b"],
+				["129 characters", "x".repeat(129)],
+				["an empty id", ""],
+			])(
+				"%s: enforce refuses the call, the hold is given back, and nothing is written",
+				async (_, id) => {
+					capabilities = ["release"];
+					await startServer(granting(id));
+					// The state dir one level down, so that a write outside it would show.
+					const root = await mkdtemp(join(tmpdir(), "utcc-tx-root-"));
+					const state = join(root, "state");
+					const pre = await run("pre-tool-use.mjs", preInput("tu_1"), {
+						...env,
+						UT_CC_MODE: "enforce",
+						UT_CC_STATE_DIR: state,
+					});
+					expect(pre.code).toBe(2);
+					expect(pre.stderr).toContain("authorization failed closed");
+					expect(pre.stderr).toContain("its transferId is not a valid id");
+					// Given back through `release`, under the id as the server sent it. An empty
+					// id names no hold.
+					expect(releasedIds()).toEqual(id === "" ? [] : [id]);
+					expect((await readdir(root)).filter((name) => name !== "state")).toEqual([]);
+					const written = await readdir(state).catch(() => [] as string[]);
+					expect(written.filter((name) => /\.(json|settling|done|tmp)$/.test(name))).toEqual([]);
+				},
+			);
+
+			it("on a server without release, the hold is left to its sweep: never aborted, which counts as a breaker failure", async () => {
+				capabilities = [];
+				await startServer(granting("a.b"));
+				const pre = await run("pre-tool-use.mjs", preInput("tu_1"), {
+					...env,
+					UT_CC_MODE: "enforce",
+				});
+				expect(pre.code).toBe(2);
+				expect(pre.stderr).toContain("left to the server's pending-hold sweep");
+				expect(requests.map((r) => r.path)).toEqual(["/v1/authorize"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+
+			it("watch mode: the call goes through unmetered, as a gap", async () => {
+				capabilities = ["release"];
+				await startServer(granting("a.b"));
+				const pre = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(pre.code).toBe(0);
+				expect(pre.stdout).toBe("");
+				expect((await gaps())[0]?.reason).toContain("its transferId is not a valid id");
+				expect(releasedIds()).toEqual(["a.b"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+
+			it("control: a 128-character id is valid, and names its hold's file as it is", async () => {
+				const id = `tx_${"x".repeat(125)}`;
+				await startServer(granting(id));
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				expect(await holdStateFiles()).toEqual([holdFile("tu_1", id)]);
+			});
+
+			it("PostToolUse: a fresh hold with an invalid id is given back and never recorded; the call's estimate goes unrecorded", async () => {
+				capabilities = ["release"];
+				let granted = 0;
+				await startServer((path) => {
+					if (path === "/v1/authorize") {
+						granted += 1;
+						const transferId = granted === 1 ? "tx_1" : "a.b";
+						return { status: 200, json: { transferId, estimatedCost: 1 } };
+					}
+					// tx_1 expired before its settle: the fresh hold the 404 brings is "a.b".
+					if (path === "/v1/settle") return notFound;
+					return { status: 200, json: { released: true } };
+				});
+				await run("pre-tool-use.mjs", preInput("tu_1"), env);
+				const post = await run("post-tool-use.mjs", postInput("tu_1"), env);
+				expect(post.code).toBe(0);
+				expect(post.stderr).toContain("its fresh hold's transferId is not a valid id");
+				expect(post.stderr).toContain("this call's estimate is not recorded");
+				expect(releasedIds()).toEqual(["a.b"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
+
+			it("a name too long for the filesystem (ENAMETOOLONG): the hold is given back, and enforce fails closed", async () => {
+				capabilities = ["release"];
+				const server = holdingServer();
+				await startServer(server.responder);
+				const pre = await run("pre-tool-use.mjs", preInput("t".repeat(300)), {
+					...env,
+					UT_CC_MODE: "enforce",
+				});
+				expect(pre.code).toBe(2);
+				expect(pre.stderr).toContain("authorization failed closed");
+				expect(pre.stderr).toContain("ENAMETOOLONG");
+				expect(aboutTx1().map((r) => r.path)).toEqual(["/v1/release"]);
+				expect(await holdStateFiles()).toEqual([]);
+			});
 		});
 	});
 

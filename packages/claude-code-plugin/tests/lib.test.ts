@@ -21,10 +21,16 @@ describe("pending state store (one file per hold)", () => {
 		const sessionId = "sess/../../evil";
 		const hostile = holdFilePath(sessionId, "ag/../1", {
 			toolUseId: "tu/../1",
-			transferId: "tx/../1",
+			transferId: "tx_1",
 		});
 		expect(hostile).not.toContain("..");
 		expect(hostile.slice(stateDir.length + 1)).not.toContain("/");
+		// The transferId is never sanitized: one that is not a valid id names no file.
+		for (const transferId of ["tx/../1", "a.b", "", "x".repeat(129)]) {
+			expect(() => holdFilePath(sessionId, "main", { toolUseId: "tu_1", transferId })).toThrow(
+				"not a valid id",
+			);
+		}
 		const path = await recordPending(sessionId, "main", { toolUseId: "tu_1", transferId: "tx_1" });
 		// One file per hold: named by its call AND its transfer.
 		expect(path).toBe(join(stateDir, "sess_______evil__main__tu_1.tx_1.json"));

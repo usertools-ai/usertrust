@@ -385,7 +385,13 @@ again, and the plugin finds the hold the call already has.
     before the resume ended it, finds only that hold's file: it never claims,
     settles, journals over or deletes the fresh hold's. No hold file is ever
     written over another. A record from 1.4.0 keeps its per-call name, and is
-    found by the ids it stores and ended once, through that name.
+    found by the ids it stores and ended once, through that name. The transfer id
+    goes into a name only as the server sent it, and only if it is 1 to 128 of
+    `A-Z a-z 0-9 _ -` (the server mints `tx_<time>_<8 hex>`). Any other id is
+    refused, never rewritten: the hold is given back through `release` (on a
+    server without it, left to its sweep), and the call fails as a failed
+    authorization does. So does a name too long for the filesystem, after the
+    hold is given back.
   - **Another server or key.** A call resumed under another server or key
     (`UT_SERVER_URL`, `UT_SERVER_KEY`) never touches its earlier hold through the
     new one. Each record carries the server's URL and a hash of the key (never the
