@@ -33,12 +33,12 @@ import {
 	claimForSettle,
 	defaultModel,
 	estimateTokens,
+	giveBack,
 	isGated,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
-	releaseHold,
 	say,
 	serverCapabilities,
 	serverRequest,
@@ -187,16 +187,14 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 		// leave its reservation held until the server's TTL sweep. This call's
 		// estimate goes unrecorded: an under-count, never a second charge. The expired
 		// hold's claim goes too, since its 404 said the server has no such hold.
-		await releaseHold(transferId, "replacement hold could not be recorded", {
-			timeoutMs: Math.max(250, Math.min(5000, timeLeft())),
-		}).catch((giveBack) => {
-			say(
-				`usertrust: hold ${transferId} could not be given back (${giveBack instanceof Error ? giveBack.message : String(giveBack)}); the server's TTL sweep releases it`,
-			);
-		});
+		const givenBack = await giveBack(
+			transferId,
+			"replacement hold could not be recorded",
+			Math.max(250, Math.min(5000, timeLeft())),
+		);
 		await unlink(claimed).catch(() => {});
 		say(
-			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold ${transferId} could not be recorded (${err instanceof Error ? err.message : String(err)}); ${transferId} was given back, and this call's estimate is not recorded`,
+			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold ${transferId} could not be recorded (${err instanceof Error ? err.message : String(err)}); ${givenBack ? `${transferId} was given back` : `${transferId} is left to the server's TTL sweep`}, and this call's estimate is not recorded`,
 		);
 		return;
 	}

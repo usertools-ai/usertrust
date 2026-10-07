@@ -44,6 +44,7 @@
 import {
 	defaultModel,
 	estimateTokens,
+	giveBack,
 	guardMode,
 	isAlreadySettled,
 	MAX_CONTENT_CHARS,
@@ -51,7 +52,6 @@ import {
 	readStdin,
 	recordPending,
 	recordWatchEvent,
-	releaseHold,
 	sanitizeReason,
 	say,
 	serverCapabilities,
@@ -117,7 +117,7 @@ try {
 	}
 	if (prepared.mode === "unavailable") {
 		say(
-			`usertrust: transcript usage unavailable for now (${prepared.reason}); this tool's hold is given back, not settled at the estimate — the usage stays in the transcript for a later settle point`,
+			`usertrust: transcript usage unavailable for now (${prepared.reason}); this tool's hold will be given back, not settled at the estimate — the usage stays in the transcript for a later settle point`,
 		);
 	}
 	try {
@@ -211,14 +211,13 @@ try {
 							}),
 				});
 			} catch (err) {
-				// Unrecorded, the hold could never be settled: give it back now.
-				await releaseHold(json.transferId, "pending hold could not be recorded", {
-					timeoutMs: Math.max(250, callTimeout()),
-				}).catch((giveBack) => {
-					say(
-						`usertrust: hold ${json.transferId} could not be given back (${giveBack instanceof Error ? giveBack.message : String(giveBack)}); the server's TTL sweep releases it`,
-					);
-				});
+				// Unrecorded, the hold could never be settled: give it back now. `giveBack`
+				// reports a refused or failed give-back; the error below says the rest.
+				await giveBack(
+					json.transferId,
+					"pending hold could not be recorded",
+					Math.max(250, callTimeout()),
+				);
 				throw err;
 			}
 			await prepared.commit?.(json.transferId);
@@ -263,7 +262,7 @@ try {
 	);
 	if (mode === "watch" || process.env.UT_FAIL_OPEN === "1") {
 		// The call proceeds unmetered: say so durably, so the gap is never silent.
-		await recordWatchEvent({
+		const recorded = await recordWatchEvent({
 			kind: "gap",
 			mode,
 			session: sessionId,
@@ -273,7 +272,7 @@ try {
 		});
 		proceed(
 			mode === "watch"
-				? `usertrust watch-only: this call is not metered (${why}) — recorded as a gap`
+				? `usertrust watch-only: this call is not metered (${why}) — ${recorded ? "recorded as a gap" : "and its gap record could not be written (see above)"}`
 				: `usertrust unavailable — proceeding ungoverned (UT_FAIL_OPEN=1): ${why}`,
 		);
 	} else {
