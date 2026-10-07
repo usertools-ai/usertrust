@@ -80,10 +80,12 @@ one you cannot reuse.
 Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthorized`,
 `404 not_found` (unknown/already-settled transferId), `413 too_large` (1 MiB body cap).
 Pending holds are swept and aborted when their advertised life runs out: `pendingTtlMs` (default 5 min),
-or the ledger's pending timeout when that comes first. The sweep reads a hold's age as the larger of its
-monotonic and wall-clock ages: a wall clock stepped back cannot keep an expired hold, and a host's sleep,
-which the monotonic clock does not count, is counted. A wall clock stepped forward by most of a hold's
-life can sweep it early.
+or the ledger's pending timeout when that comes first. The sweep reads hold ages on a monotonic clock, so
+no wall-clock step moves it, and it never ends a hold before its advertised life. Declared: after the host
+sleeps, a hold that was pending across the sleep can keep counting against the budget for at most one hold
+life (T, 300 s by default) plus up to one sweep interval (30 s) after wake. In enforce mode that can mean
+false denials. It's the safe direction: nothing is charged and the ledger releases the funds on time.
+A TigerBeetle-state probe for this case is a follow-up (#241).
 
 ## Keys
 

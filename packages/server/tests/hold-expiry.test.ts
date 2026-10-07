@@ -10,10 +10,9 @@
  *    pending timeout (`Authorization.holdTimeoutMs`; absent in dry run);
  *  - it is the REMAINING life: a hold already some way into its life answers what it
  *    has left, never its total;
- *  - the answer reads a hold's age on the monotonic clock, so a wall-clock step back
- *    does not lengthen it; the sweep reads the LARGER of the monotonic and wall-clock
- *    ages, so a wall clock stepped back keeps no expired hold, and a host's sleep (which
- *    the monotonic clock does not count) is counted;
+ *  - the answer and the sweep read a hold's age on the monotonic clock: a wall clock
+ *    stepped back neither lengthens the answer nor keeps an expired hold, and a wall
+ *    clock stepped FORWARD never sweeps a hold before its advertised life;
  *  - the sweep ends a hold when its advertised life runs out, the ledger's timeout
  *    included, so the two are one rule;
  *  - a ledger hold whose handle does not state its timeout advertises NO life, and is
@@ -135,7 +134,7 @@ describe("an authorize answers the hold's remaining life (`expiresInMs`)", () =>
 	});
 });
 
-describe("the sweep reads the larger of the monotonic and wall-clock ages", () => {
+describe("the sweep reads the same monotonic clock", () => {
 	it("a wall clock stepped back an hour does not keep an expired hold from being swept", async () => {
 		const base = await start({ pendingTtlMs: 50 });
 		await authorize(base);
@@ -153,17 +152,17 @@ describe("the sweep reads the larger of the monotonic and wall-clock ages", () =
 		expect(server?.pendingCount()).toBe(1);
 	});
 
-	it("a host's sleep is counted: the wall clock run past the life, the monotonic clock held, sweeps the hold", async () => {
-		// A sleeping host stops the monotonic clock; the ledger's timeout runs on. Read on the
-		// monotonic clock alone, the hold would be kept, its budget reserved, for the whole
-		// sleep. (A wall clock stepped forward as far reads the same, and sweeps early:
-		// declared.)
+	it("a wall clock stepped FORWARD past the life (the monotonic clock held) does NOT sweep the hold", async () => {
+		// A forward step and a host's sleep look alike from inside the process. Sweeping on
+		// the wall clock would void a hold before its advertised life: a client reusing it,
+		// or a tool still running, would get a 404. So the sweep waits for the monotonic
+		// clock, and after a real sleep it comes late (declared).
 		const base = await start({ pendingTtlMs: 60_000 });
 		await authorize(base);
 		const realNow = Date.now.bind(Date);
 		vi.spyOn(Date, "now").mockImplementation(() => realNow() + 61_000);
-		expect(await server?.sweepExpired()).toBe(1);
-		expect(server?.pendingCount()).toBe(0);
+		expect(await server?.sweepExpired()).toBe(0);
+		expect(server?.pendingCount()).toBe(1);
 	});
 
 	it("a ledger timeout shorter than pendingTtlMs ends the hold at the ledger's timeout", async () => {
