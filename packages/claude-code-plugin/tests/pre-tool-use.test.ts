@@ -21,6 +21,12 @@ function startFake(handler: (body: unknown) => { status: number; json: unknown }
 				raw += c;
 			});
 			req.on("end", () => {
+				// An older server: health answers, with no capabilities (no principal is sent).
+				if (req.method === "GET" && req.url === "/v1/health") {
+					res.writeHead(200, { "content-type": "application/json" });
+					res.end(JSON.stringify({ status: "ok" }));
+					return;
+				}
 				const body = JSON.parse(raw) as unknown;
 				requests.push(body);
 				const out = handler(body);
@@ -37,7 +43,9 @@ function startFake(handler: (body: unknown) => { status: number; json: unknown }
 
 beforeEach(async () => {
 	stateDir = await mkdtemp(join(tmpdir(), "utcc-hook-"));
-	baseEnv = { UT_CC_STATE_DIR: stateDir, UT_SERVER_KEY: "k" };
+	// These tests pin the blocking contract, so they run in UT_CC_MODE=enforce; the
+	// watch-only default is pinned in mode.test.ts.
+	baseEnv = { UT_CC_STATE_DIR: stateDir, UT_SERVER_KEY: "k", UT_CC_MODE: "enforce" };
 });
 afterEach(() => {
 	server?.close();
@@ -90,9 +98,12 @@ describe("pre-tool-use hook", () => {
 			transferId: string;
 			agentId: string;
 			estimatedInputTokens: number;
+			gate: 1;
 		};
-		// JSON.stringify({command:"ls"}) is 16 chars -> 4 estimated tokens.
+		// JSON.stringify({command:"ls"}) is 16 chars -> 4 estimated tokens. `gate: 1`:
+		// recorded under the settle-attempt gate, so a 404 to its settle means it expired.
 		expect(entry).toEqual({
+			gate: 1,
 			toolUseId: "tu_1",
 			transferId: "tx_1",
 			agentId: "main",

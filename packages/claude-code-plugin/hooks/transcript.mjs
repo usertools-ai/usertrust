@@ -41,8 +41,9 @@
 //    counts, at the next Stop/SubagentStop — instead of losing it. Settles never
 //    carry the key: a settle the server cannot match stays a plain 404.
 //  - `principal`: every transcript-mode authorize names the agent, its type and
-//    the session; the server records it on every audit record the call leaves
-//    (and, ledger-backed, as tags on its transfers).
+//    the session — and the `unit` / `role` from UT_CC_UNIT / UT_CC_ROLE when they
+//    are valid principal fields; the server records it on every audit record the
+//    call leaves (and, ledger-backed, as tags on its transfers).
 //  - `release`: a hold with no usage is released (no failure, no charge) rather
 //    than settled at the 1-unit floor or aborted.
 //
@@ -128,6 +129,7 @@ import {
 	listPending,
 	releaseHold,
 	sanitize,
+	say,
 	serverCapabilities,
 	serverRequest,
 	stateFilePath,
@@ -203,8 +205,13 @@ const AUTHORIZING = "authorizing";
 const REMAINDER = "remainder";
 const AGENT_ID = /^[A-Za-z0-9_-]{1,128}$/;
 const COUNT_KEYS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens"];
-/** One field of a usertrust `principal`: the server refuses anything else. */
-const PRINCIPAL_FIELD = /^[A-Za-z0-9._:-]{1,128}$/;
+/**
+ * One field of a usertrust `principal`: the server refuses anything else. It must
+ * equal core's PRINCIPAL_FIELD_PATTERN — a tightening there would turn every
+ * attributed authorize into a 400 (a BLOCK in enforce mode); tests/principal-pattern
+ * pins the two together.
+ */
+export const PRINCIPAL_FIELD = /^[A-Za-z0-9._:-]{1,128}$/;
 /** What a settle vehicle's key is: the transcript messages it carries, and nothing else. */
 const VEHICLE_KEY = /^cc:[0-9a-f]{48}$/;
 /** Where the cross-agent message claims live, inside the private state dir (see `selectOwn`). */
@@ -294,17 +301,73 @@ function principalField(value, fallback) {
 	return PRINCIPAL_FIELD.test(text) ? text : fallback;
 }
 
+/** The attribution variables a note was already written for, in this hook. */
+const attributionNoted = new Set();
+
+/**
+ * The optional `unit` and `role` a principal carries, from UT_CC_UNIT /
+ * UT_CC_ROLE. Each is sent only as it is, and only if it is a valid principal
+ * field: a strict server refuses a principal with anything else — a 400, which is
+ * a gap in watch mode and a BLOCK in enforce mode — so a value that is empty or
+ * invalid is never sent, nor forced into shape (it would attribute the spend to a
+ * name nobody chose). It is left out, with one note on stderr per hook.
+ */
+function principalAttribution() {
+	const fields = {};
+	for (const [key, variable] of [
+		["unit", "UT_CC_UNIT"],
+		["role", "UT_CC_ROLE"],
+	]) {
+		const value = process.env[variable];
+		if (value === undefined) continue;
+		if (PRINCIPAL_FIELD.test(value)) {
+			fields[key] = value;
+		} else if (!attributionNoted.has(variable)) {
+			attributionNoted.add(variable);
+			const why =
+				value === ""
+					? "it is empty"
+					: value.length > 128
+						? `it is ${value.length} characters long`
+						: "it has a character outside that set";
+			say(
+				`usertrust: ${variable} is not sent — a principal ${key} must be 1-128 characters of [A-Za-z0-9._:-], and ${why}`,
+			);
+		}
+	}
+	return fields;
+}
+
 /**
  * WHO spent, as usertrust records it on every record the hold leaves: the agent,
- * its type, and the Claude Code session it ran in. Unlike `actor` and `params`,
- * which stay on the request, a principal reaches the audit chain.
+ * its type, the Claude Code session it ran in, and — when set and valid — the
+ * organisational `unit` and `role` (`principalAttribution`). Unlike `actor` and
+ * `params`, which stay on the request, a principal reaches the audit chain; it is
+ * sent only to a server that advertises the `principal` capability.
  */
 export function principalFor(sessionId, agentId, agentType) {
 	return {
 		id: principalField(agentId, "main"),
 		type: principalField(agentType, "subagent"),
 		origin: principalField(`claude-code:${sessionId}`, "claude-code"),
+		...principalAttribution(),
 	};
+}
+
+/**
+ * The principal for an authorize on the ESTIMATE path, where no transcript (and
+ * no subagent meta file) is read: the same shape as `principalFor`, with the type
+ * taken the way `agentTypeFor` takes it without a meta file — `main` for the
+ * parent, else the hook's own `agent_type` hint, else `subagent`.
+ */
+export function estimatePrincipalFor(sessionId, agentId, agentTypeHint) {
+	const type =
+		agentId === "main"
+			? "main"
+			: typeof agentTypeHint === "string" && agentTypeHint !== ""
+				? agentTypeHint.slice(0, 128)
+				: "subagent";
+	return principalFor(sessionId, agentId, type);
 }
 
 /**
@@ -753,7 +816,10 @@ async function reconcile(cursor, sessionId, agentId) {
 			else accountIds(cursor, record.ids);
 			finished.push(record.path);
 		} else if (record.kind === "settling" && now - record.mtimeMs > STALE_SETTLING_MS) {
-			// Its hook died mid-settle: the outcome is unknown.
+			// Its hook died mid-settle: the outcome is unknown. An ESTIMATE hold's
+			// .settling lands here too, with no ids: fresh, it adds nothing to `live`;
+			// stale, its hold is long past the server's five-minute TTL, so clearing the
+			// file is all there is left to do.
 			holdUnresolved(cursor, record);
 			finished.push(record.path);
 		} else {
@@ -984,18 +1050,18 @@ async function selectOwn(opened) {
 	if (failed.size > 0) {
 		const total = [...failed.values()].reduce((sum, n) => sum + n, 0);
 		const codes = [...failed.keys()].join(", ");
-		process.stderr.write(
-			`usertrust: ${total} transcript message(s) could not be claimed (${codes}) — NOT posted; tried again at the next settle point\n`,
+		say(
+			`usertrust: ${total} transcript message(s) could not be claimed (${codes}) — NOT posted; tried again at the next settle point`,
 		);
 	}
 	if (deferred > 0) {
-		process.stderr.write(
-			`usertrust: ${deferred} transcript message(s) not claimed this time (out of time) — posted at a later settle point\n`,
+		say(
+			`usertrust: ${deferred} transcript message(s) not claimed this time (out of time) — posted at a later settle point`,
 		);
 	}
 	if (writtenOff > 0) {
-		process.stderr.write(
-			`usertrust: ${writtenOff} transcript message(s) were claimed by this agent before its cursor was removed or reset, or by a hook that died before saving — not posted again (any of them not yet posted is written off)\n`,
+		say(
+			`usertrust: ${writtenOff} transcript message(s) were claimed by this agent before its cursor was removed or reset, or by a hook that died before saving — not posted again (any of them not yet posted is written off)`,
 		);
 	}
 	return own;
@@ -1323,13 +1389,11 @@ async function openAgent({ sessionId, agentId, input, waitMs = 0, mayEstimate = 
 			return sticky;
 		}
 		if (ingested.badLines > 0) {
-			process.stderr.write(
-				`usertrust: skipped ${ingested.badLines} unparseable transcript line(s)\n`,
-			);
+			say(`usertrust: skipped ${ingested.badLines} unparseable transcript line(s)`);
 		}
 		if (ingested.longLines > 0) {
-			process.stderr.write(
-				`usertrust: skipped ${ingested.longLines} transcript line(s) over ${MAX_LINE_BYTES >> 20} MiB, unread\n`,
+			say(
+				`usertrust: skipped ${ingested.longLines} transcript line(s) over ${MAX_LINE_BYTES >> 20} MiB, unread`,
 			);
 		}
 		return {
@@ -1419,7 +1483,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 		await opened.save();
 	} catch (err) {
 		await opened.release();
-		process.stderr.write(`usertrust: transcript window skipped — ${errText(err)}\n`);
+		say(`usertrust: transcript window skipped — ${errText(err)}`);
 		return empty(cursor.lastModel, agentType);
 	}
 	let decided = false;
@@ -1439,7 +1503,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 			// If this write fails the pending file still names the ids, and the
 			// journal keeps them out of every other window until the hold ends.
 			await opened.save().catch((err) => {
-				process.stderr.write(`usertrust: cursor not updated — ${errText(err)}\n`);
+				say(`usertrust: cursor not updated — ${errText(err)}`);
 			});
 		},
 		async settledElsewhere() {
@@ -1451,7 +1515,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 			decided = true;
 			accountIds(cursor, window.ids);
 			await opened.save().catch((err) => {
-				process.stderr.write(`usertrust: cursor not updated — ${errText(err)}\n`);
+				say(`usertrust: cursor not updated — ${errText(err)}`);
 			});
 		},
 		async abandon() {
@@ -1460,7 +1524,7 @@ export async function prepareWindow({ sessionId, agentId, agentTypeHint, input }
 			decided = true;
 			releaseIds(cursor, window.ids);
 			await opened.save().catch((err) => {
-				process.stderr.write(`usertrust: cursor not updated — ${errText(err)}\n`);
+				say(`usertrust: cursor not updated — ${errText(err)}`);
 			});
 		},
 		release: opened.release,
@@ -1617,8 +1681,8 @@ export async function settleTranscriptHold(sessionId, entry) {
 	} catch (err) {
 		// The .settling file stays: once stale, its settle reads as unknown — retried
 		// under its key, or (unkeyed) its ids stay claimed.
-		process.stderr.write(
-			`usertrust: hold ${entry.transferId} ${result.outcome}, but the outcome could not be journalled (${err?.code ?? errText(err)}); a later settle point treats it as unknown\n`,
+		say(
+			`usertrust: hold ${entry.transferId} ${result.outcome}, but the outcome could not be journalled (${err?.code ?? errText(err)}); a later settle point treats it as unknown`,
 		);
 	}
 	await reconcileAgent(sessionId, entry.agentId);
@@ -1637,8 +1701,8 @@ export async function settleAssignedHolds(sessionId, agentId) {
 		if ((entry.assignedIds?.length ?? 0) === 0) continue;
 		const result = await settleTranscriptHold(sessionId, entry);
 		if (result.outcome !== "settled") {
-			process.stderr.write(
-				`usertrust: leftover hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}\n`,
+			say(
+				`usertrust: leftover hold ${entry.transferId} ${result.outcome} — ${result.reason ?? ""}${OUTCOME_NOTES.get(result.outcome) ?? ""}`,
 			);
 		}
 	}
@@ -1739,26 +1803,22 @@ export async function settleSession({ input, hook, lockWaitMs = 0 }) {
 					lockWaitMs,
 				});
 				if (result.skipped !== undefined) {
-					process.stderr.write(
-						`usertrust: no transcript usage for ${agentId} — ${result.skipped}\n`,
-					);
+					say(`usertrust: no transcript usage for ${agentId} — ${result.skipped}`);
 				}
 				for (const note of result.notes ?? []) {
-					process.stderr.write(`usertrust: transcript usage for ${agentId}: ${note}\n`);
+					say(`usertrust: transcript usage for ${agentId}: ${note}`);
 				}
 				if (result.serverDown) {
 					const rest = agents.slice(index + 1);
 					if (rest.length > 0) {
-						process.stderr.write(
-							`usertrust: server unreachable — transcript usage of ${rest.join(", ")} left for the next settle point\n`,
+						say(
+							`usertrust: server unreachable — transcript usage of ${rest.join(", ")} left for the next settle point`,
 						);
 					}
 					break;
 				}
 			} catch (err) {
-				process.stderr.write(
-					`usertrust: transcript usage failed for ${agentId}: ${errText(err)}\n`,
-				);
+				say(`usertrust: transcript usage failed for ${agentId}: ${errText(err)}`);
 			}
 		}
 	}
@@ -1903,8 +1963,8 @@ function vehicleCounts(vehicle) {
 }
 
 function reportDenied(agentType, agentId, reason, ids, model, counts) {
-	process.stderr.write(
-		`usertrust: ${agentType}:${agentId} usage NOT recorded — ${reason}; ${ids.length} ${model} message(s) (${describeCounts(counts)} tokens) are marked denied and never retried\n`,
+	say(
+		`usertrust: ${agentType}:${agentId} usage NOT recorded — ${reason}; ${ids.length} ${model} message(s) (${describeCounts(counts)} tokens) are marked denied and never retried`,
 	);
 }
 

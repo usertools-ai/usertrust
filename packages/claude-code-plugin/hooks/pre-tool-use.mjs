@@ -1,7 +1,13 @@
 // PreToolUse: authorize a spend reservation before the tool executes.
-// Fail-closed: if governance cannot be reached (or answers with a malformed
-// body), the tool call is blocked (exit 2) unless UT_FAIL_OPEN=1. Output
-// contract adapted from the AGT Claude Code plugin's stdin-JSON
+//
+// Watch-only by default (`guardMode` in lib.mjs): this hook NEVER blocks a tool
+// call, and never approves one — it makes no permission decision at all (see
+// `proceed`). A 402/403/429 refusal is written down as a `would_block` record;
+// a call that could not be metered (the server is unreachable, or answers with
+// something unusable) is written down as a `gap` record. With UT_CC_MODE=enforce
+// it blocks: a denial is enforced, and a failed authorization fails closed
+// (exit 2) unless UT_FAIL_OPEN=1, which lets the call through and records the
+// gap. Output contract adapted from the AGT Claude Code plugin's stdin-JSON
 // permissionDecision convention (MIT — see repository NOTICE).
 //
 // Content minimization: tool_input is truncated at 16 KiB before it is sent
@@ -25,32 +31,32 @@
 // On a server that honours them (its /v1/health `capabilities`), a window's
 // authorize carries the window's idempotency key — so the server charges those
 // messages at most once, however often a settle of them is retried — and every
-// transcript-mode authorize carries the agent's `principal`, which the server
-// records. A key whose charge already stands (409 `already_settled`) means an
-// earlier settle of exactly this window landed: it is accounted, and the tool is
-// held alone.
+// authorize carries the agent's `principal`, which the server records: built
+// from the transcript on the transcript path, and from the hook's own input
+// (`estimatePrincipalFor`) when no transcript is read — the estimate path, or
+// while transcript state is unavailable. A key whose charge already stands (409
+// `already_settled`) means an earlier settle of exactly this window landed: it
+// is accounted, and the tool is held alone.
 import {
+	defaultModel,
 	estimateTokens,
+	guardMode,
 	isAlreadySettled,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
+	recordWatchEvent,
 	releaseHold,
+	sanitizeReason,
+	say,
 	serverCapabilities,
 	serverRequest,
 	timeLeft,
 } from "./lib.mjs";
-import { holdEstimate, prepareWindow, safeName } from "./transcript.mjs";
+import { estimatePrincipalFor, holdEstimate, prepareWindow, safeName } from "./transcript.mjs";
 
 const MAX_REASON_CHARS = 500;
-
-/** Server-provided text goes through here: strip control chars, bound length. */
-function sanitizeReason(value, fallback = "unspecified") {
-	const text = typeof value === "string" && value !== "" ? value : fallback;
-	// biome-ignore lint/suspicious/noControlCharactersInRegex: stripping control chars is the point
-	return text.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
-}
 
 function emit(decision, reason) {
 	process.stdout.write(
@@ -58,18 +64,40 @@ function emit(decision, reason) {
 			hookSpecificOutput: {
 				hookEventName: "PreToolUse",
 				permissionDecision: decision,
-				permissionDecisionReason: reason.slice(0, MAX_REASON_CHARS),
+				permissionDecisionReason: sanitizeReason(reason).slice(0, MAX_REASON_CHARS),
 			},
 		}),
 	);
 }
 
+const mode = guardMode();
+
+/**
+ * Let the call through. Enforce answers `allow`, as earlier releases did. Watch
+ * makes NO decision — exit 0 with nothing on stdout, which Claude Code reads as
+ * "no decision": the call goes through the user's normal permission flow. An
+ * `allow` would skip the permission prompt
+ * (https://code.claude.com/docs/en/hooks#pretooluse-decision-control), which a
+ * watch-only plugin must never do. The reason goes to stderr: on exit 0, Claude
+ * Code's debug log, which is also where an `allow` reason goes.
+ */
+function proceed(reason) {
+	if (mode === "enforce") emit("allow", reason);
+	else say(reason, MAX_REASON_CHARS);
+}
+
+// Known before anything can fail, so a gap record can always say whose call it was.
+let sessionId = "unknown";
+let agentId = "main";
+let toolName = "unknown";
+
 try {
 	const input = JSON.parse((await readStdin()) || "{}");
-	const sessionId = input.session_id ?? "unknown";
+	sessionId = input.session_id ?? "unknown";
 	// session_id is shared across the parent and all subagents; agent_id (absent
 	// on older Claude Code) is what scopes a hold to the agent that made it.
-	const agentId = input.agent_id ?? "main";
+	agentId = input.agent_id ?? "main";
+	toolName = input.tool_name ?? "unknown";
 	const toolInput = JSON.stringify(input.tool_input ?? {}).slice(0, MAX_CONTENT_CHARS);
 	const content = process.env.UT_CC_SEND_CONTENT === "0" ? '{"redacted":true}' : toolInput;
 	const estimatedInputTokens = estimateTokens(toolInput);
@@ -80,13 +108,13 @@ try {
 		input,
 	});
 	if (prepared.becameSticky) {
-		process.stderr.write(
-			`usertrust: ${prepared.reason}; this agent now settles at the ESTIMATE for the rest of the session\n`,
+		say(
+			`usertrust: ${prepared.reason}; this agent now settles at the ESTIMATE for the rest of the session`,
 		);
 	}
 	if (prepared.mode === "unavailable") {
-		process.stderr.write(
-			`usertrust: transcript usage unavailable for now (${prepared.reason}); this tool's hold is given back, not settled at the estimate — the usage stays in the transcript for a later settle point\n`,
+		say(
+			`usertrust: transcript usage unavailable for now (${prepared.reason}); this tool's hold is given back, not settled at the estimate — the usage stays in the transcript for a later settle point`,
 		);
 	}
 	try {
@@ -96,12 +124,17 @@ try {
 		const settlesAtEstimate = prepared.mode === "estimate";
 		// What the server honours decides what this hold may carry (see lib.mjs).
 		// Unknown (a failed probe) reads as absent here: a key is sent only to a server
-		// known to honour it.
-		const capabilities = transcriptMode ? await serverCapabilities() : null;
+		// known to honour it, and a principal — on either path, in one shape — only to
+		// a server that records one.
+		const capabilities = await serverCapabilities();
 		const keyed = capabilities?.has("idempotency-key") ?? false;
-		const principal = capabilities?.has("principal") ? prepared.principal : undefined;
+		const principal = !capabilities?.has("principal")
+			? undefined
+			: transcriptMode
+				? prepared.principal
+				: estimatePrincipalFor(sessionId, agentId, input.agent_type);
 		let window = transcriptMode ? prepared.window : null;
-		const fallbackModel = prepared.lastModel ?? process.env.UT_CC_MODEL ?? "claude-sonnet-4-6";
+		const fallbackModel = prepared.lastModel ?? defaultModel();
 		// Never past the hook's own budget: a hook killed mid-call leaves the tool
 		// ungoverned and this agent's lock held.
 		const callTimeout = () => Math.min(5_000, timeLeft() - 500);
@@ -122,13 +155,13 @@ try {
 					params: window
 						? {
 								hook: "PreToolUse",
-								tool_name: input.tool_name ?? "unknown",
+								tool_name: toolName,
 								usageOrigin: "transcript",
 								agent_id: agentId,
 								agent_type: prepared.agentType,
 								messages: window.ids.length,
 							}
-						: { hook: "PreToolUse", tool_name: input.tool_name ?? "unknown" },
+						: { hook: "PreToolUse", tool_name: toolName },
 					actor: window
 						? `claude-code:${sessionId}:${prepared.agentType}:${safeName(agentId, "main")}`
 						: `claude-code:${sessionId}`,
@@ -152,10 +185,7 @@ try {
 				: null;
 		if (response.status === 200 && json?.shadow === true) {
 			await prepared.abandon?.();
-			emit(
-				"allow",
-				`usertrust shadow mode: would_deny (${sanitizeReason(json.reason)}) — not enforced`,
-			);
+			proceed(`usertrust shadow mode: would_deny (${sanitizeReason(json.reason)}) — not enforced`);
 		} else if (response.status === 200) {
 			if (typeof json?.transferId !== "string" || json.transferId === "") {
 				throw new Error("malformed authorize response from governance server");
@@ -182,20 +212,37 @@ try {
 				await releaseHold(json.transferId, "pending hold could not be recorded", {
 					timeoutMs: Math.max(250, callTimeout()),
 				}).catch((giveBack) => {
-					process.stderr.write(
-						`usertrust: hold ${json.transferId} could not be given back (${giveBack instanceof Error ? giveBack.message : String(giveBack)}); the server's TTL sweep releases it\n`,
+					say(
+						`usertrust: hold ${json.transferId} could not be given back (${giveBack instanceof Error ? giveBack.message : String(giveBack)}); the server's TTL sweep releases it`,
 					);
 				});
 				throw err;
 			}
 			await prepared.commit?.(json.transferId);
-			emit("allow", `usertrust: reserved ${json.transferId} (${json.estimatedCost} ut)`);
-		} else if (response.status === 402 || response.status === 403) {
+			// Server text, raw here: `proceed` writes it only through `say` or `emit`,
+			// which sanitize it.
+			proceed(`usertrust: reserved ${json.transferId} (${json.estimatedCost} ut)`);
+		} else if (response.status === 402 || response.status === 403 || response.status === 429) {
+			// A refusal — budget (402), policy (403) or an anomaly cutoff (429) — is a
+			// governance decision, not an outage: enforce denies it whatever UT_FAIL_OPEN
+			// says, and watch records what it would have blocked.
 			await prepared.abandon?.();
-			emit(
-				"deny",
-				`usertrust ${sanitizeReason(json?.error, "denied")}: ${sanitizeReason(json?.reason)}`,
-			);
+			const error = sanitizeReason(json?.error, "denied");
+			const reason = sanitizeReason(json?.reason);
+			if (mode === "enforce") {
+				emit("deny", `usertrust ${error}: ${reason}`);
+			} else {
+				await recordWatchEvent({
+					kind: "would_block",
+					session: sessionId,
+					agent: agentId,
+					tool: toolName,
+					status: response.status,
+					error: error.slice(0, MAX_REASON_CHARS),
+					reason: reason.slice(0, MAX_REASON_CHARS),
+				});
+				proceed(`usertrust watch-only: would have blocked (${error}: ${reason}) — not enforced`);
+			}
 		} else {
 			throw new Error(`unexpected governance response ${response.status}`);
 		}
@@ -207,15 +254,27 @@ try {
 		await prepared.release?.();
 	}
 } catch (err) {
-	if (process.env.UT_FAIL_OPEN === "1") {
-		emit(
-			"allow",
-			`usertrust unavailable — proceeding ungoverned (UT_FAIL_OPEN=1): ${err instanceof Error ? err.message : String(err)}`,
+	const why = sanitizeReason(err instanceof Error ? err.message : String(err)).slice(
+		0,
+		MAX_REASON_CHARS,
+	);
+	if (mode === "watch" || process.env.UT_FAIL_OPEN === "1") {
+		// The call proceeds unmetered: say so durably, so the gap is never silent.
+		await recordWatchEvent({
+			kind: "gap",
+			mode,
+			session: sessionId,
+			agent: agentId,
+			tool: toolName,
+			reason: why,
+		});
+		proceed(
+			mode === "watch"
+				? `usertrust watch-only: this call is not metered (${why}) — recorded as a gap`
+				: `usertrust unavailable — proceeding ungoverned (UT_FAIL_OPEN=1): ${why}`,
 		);
 	} else {
-		process.stderr.write(
-			`usertrust governance blocked this tool call because authorization failed closed: ${err instanceof Error ? err.message : String(err)}\n`,
-		);
+		say(`usertrust governance blocked this tool call because authorization failed closed: ${why}`);
 		process.exit(2);
 	}
 }
