@@ -79,8 +79,11 @@ transcripts under `<session>/subagents/agent-<agentId>.jsonl`, beside a
   sum, held at the server's higher input/cache-write rate: never under the real
   cost, but well over it for a window heavy in cache reads (below). PostToolUse
   then SETTLES that hold, exactly once, at the window's real counts — on the
-  normal path no hold is ever aborted. A tool call whose window is empty (a
-  parallel call in the same response, say) is given back (below).
+  normal path no hold is ever aborted. A call that does not complete, and one
+  that is deferred and then resumed, leave that path: see the known limitation
+  and the known issue in [Modes](#modes-watch-only-by-default). A tool call whose
+  window is empty (a parallel call in the same response, say) is given back
+  (below).
 - **The remainder.** What no hold carried — another model's responses, a final
   answer with no tool call — is posted at SubagentStop (that subagent) and Stop
   (the parent and every subagent, so one whose SubagentStop never fired is still
@@ -346,6 +349,22 @@ close the breaker. Meanwhile each call is a `gap` in watch mode, and in enforce
 mode it is blocked unless `UT_FAIL_OPEN=1`.
 Tracked in [#238](https://github.com/usertools-ai/usertrust/issues/238).
 
+**Known issue: a tool call that is deferred and then resumed is reserved twice.**
+In a `claude -p` run, another PreToolUse hook can
+[defer a tool call](https://code.claude.com/docs/en/hooks#defer-a-tool-call-for-later)
+(this plugin never does, and interactive sessions ignore `defer`). The call does
+not run, so it keeps its hold like a call that does not complete (above). When
+the session is resumed (`claude -p --resume`), the same call fires PreToolUse
+again, and the plugin reserves a second hold and overwrites its record of the
+first. The first hold can then stay pending until the server's pending-hold TTL
+voids it, counting against the budget until then; on today's server its expiry
+is one of the aborts above. In transcript mode the usage it carried can go
+unrecorded, silently: an under-count, never a double charge. In estimate mode
+the call is still charged once, on the second hold. Each further deferral of the
+same call repeats this. Only flows that defer a tool call and resume it are
+affected. The fix is tracked in
+[#234](https://github.com/usertools-ai/usertrust/issues/234) (item 10).
+
 In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran;
 an estimate hold is marked settle-attempted (`.settling`) before its one settle,
 and one whose settle goes unanswered is given back at Stop — never settled again —
@@ -433,8 +452,8 @@ misconfigured setup does is write a record, not stop your session.
    - `UT_FAIL_OPEN=1`: while the server cannot answer, calls proceed unmetered,
      and each is recorded as a `gap`. Use this where availability matters more.
 
-   Before enforcing near a tight budget, read the known limitations in
-   [Modes](#modes-watch-only-by-default).
+   Before enforcing near a tight budget, read the known limitations and the
+   known issue in [Modes](#modes-watch-only-by-default).
 
 To go back to watching, unset `UT_CC_MODE` (`enforce` is matched
 case-insensitively; any other value runs watch-only) and relaunch Claude Code.
