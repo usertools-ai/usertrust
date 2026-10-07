@@ -19,6 +19,7 @@
  *  - a `destroy()` during a reconnect's backoff builds nothing, and every operation awaiting
  *    that reconnect fails with LedgerClientClosedError;
  *  - a health-check ping in flight at `destroy()` does not reconnect;
+ *  - a native `destroy()` that throws still leaves the client closed (the flag is set first);
  *  - CONTROLS: without `destroy()`, a lost connection still reconnects and retries, and an
  *    operation on a client closed by OUR OWN reconnect still retries on the new one.
  */
@@ -34,6 +35,8 @@ const native = vi.hoisted(() => ({
 	calls: [] as string[],
 	/** Upcoming createClient calls that throw (a failed reconnect attempt). */
 	failCreate: 0,
+	/** The next native destroy() throws, before it closes anything (as a throwing deinit would). */
+	destroyThrows: false,
 	respond: (async () => []) as Respond,
 }));
 
@@ -75,6 +78,10 @@ vi.mock("tigerbeetle-node", () => {
 				lookupAccounts: request("lookupAccounts"),
 				lookupTransfers: request("lookupTransfers"),
 				destroy: () => {
+					if (native.destroyThrows) {
+						native.destroyThrows = false;
+						throw new Error("deinit failed");
+					}
 					if (!open) return;
 					open = false;
 					native.destroyed.add(id);
@@ -107,6 +114,7 @@ beforeEach(() => {
 	native.destroyed = new Set();
 	native.calls = [];
 	native.failCreate = 0;
+	native.destroyThrows = false;
 	native.respond = async () => [];
 	vi.spyOn(console, "log").mockImplementation(() => {});
 	vi.spyOn(console, "error").mockImplementation(() => {});
@@ -191,6 +199,14 @@ describe("after destroy(), the client never reconnects", () => {
 		expect(await ping).toBe(false);
 		expect(native.created).toBe(1);
 		expect(alive()).toBe(0);
+	});
+
+	it("a native destroy() that throws still leaves the client closed: nothing reaches the native client after it", async () => {
+		native.destroyThrows = true;
+		expect(() => client.destroy()).toThrow("deinit failed");
+		await expect(client.lookupBalances([1n])).rejects.toBeInstanceOf(LedgerClientClosedError);
+		expect(native.calls).toEqual([]);
+		expect(native.created).toBe(1);
 	});
 
 	it("reconnect() itself is refused once destroyed", async () => {

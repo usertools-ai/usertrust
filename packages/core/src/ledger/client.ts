@@ -1078,7 +1078,9 @@ export class TrustTBClient {
 	}
 
 	destroy(): void {
-		// First: an operation the native destroy below rejects must already see it.
+		// First, so this client is closed even if the native destroy below throws: it is native
+		// and unguarded, and a throw there leaves the native client open. The rejections it
+		// causes for requests in flight reach withReconnect() only later, as promise reactions.
 		this.closed = true;
 		if (this.healthCheckInterval) {
 			clearInterval(this.healthCheckInterval);
