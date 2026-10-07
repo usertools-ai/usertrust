@@ -157,10 +157,14 @@ settle-then-void leaving the ledger holding a debit its accounting does not.
 and shutdown release; `POST /v1/release` (capability `release`) exposes it, and answers 200 only
 when the governor says it ended the hold (`{ released: true }`), else 404 `unknown transferId`. A
 void that TigerBeetle answers `pending_transfer_expired` is a success in both `createTBEngine`
-factories: the ledger has already returned the funds.
+factories: the ledger has already returned the funds. `settle()` OWNS its hold from its synchronous
+claim to its end (`settling`): what it reads after the claim is caller input, so a getter there
+that calls `release()` or `abort()` on the same hold gets a no-op, and a settle that throws before
+its POST hands the hold back, voidable again.
 *Prevents:* routine give-backs and expiries opening a tenant's breaker (#238) and reading as failed
 calls on the chain (#204); a release counted as a success closing a breaker that real failures
-opened; an expired hold's engine entry staying behind until `destroy()`.
+opened; an expired hold's engine entry staying behind until `destroy()`; a POST and a VOID for one
+hold when a `SettleParams` getter released or aborted it mid-settle.
 
 **Settle never exceeds the hold — and never silently fails because of it.** The hold's input side
 is a chars/4 × 1.5 heuristic (`pricing.ts`), so real usage CAN price above the reserve. Both

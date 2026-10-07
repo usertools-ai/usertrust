@@ -1051,10 +1051,13 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 	// NOT left here: TB may have committed, so abort must not void and session
 	// spend is counted fail-closed (next run seeds `max(0, budget − budgetSpent)`).
 	const unpostedHolds = new Map<string, AuthorizationCapture>();
-	// Holds whose POST is in flight. abort() is a silent no-op for these
-	// (does not void, does not recordFailure, does not write llm_call_failed).
+	// Holds a settle() attempt OWNS: from its synchronous claim until it returns.
+	// abort() and release() are silent no-ops for these (no void, no breaker call, no
+	// record): everything settle reads after its claim is caller input, and a getter
+	// there can call them on the very hold being settled. A settle that throws before
+	// its POST leaves this set with its hold still in `unpostedHolds`, voidable again.
 	// destroy() waits for this set to drain before voidAllPending(), matching
-	// trust()'s 5s in-flight wait — never void a hold whose POST is in flight.
+	// trust()'s 5s in-flight wait — never void a hold a settle is still working on.
 	const settling = new Set<string>();
 
 	// Finding-2 (RECON #4): serialized, monotonic spend-ledger persistence.
@@ -1532,381 +1535,385 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			activeAuths.delete(auth.transferId);
 			// Claimed. Still PENDING. Pre-POST throw leaves the id here so
 			// abort()/destroy() can void a hold that never reached POST. The id
-			// moves off this path when POST begins (`settling`) and is never put
-			// back after a POST attempt — success or transport-ambiguous.
+			// leaves this set when POST begins and is never put back after a POST
+			// attempt — success or transport-ambiguous.
 			unpostedHolds.set(auth.transferId, capture);
-
-			const model = auth.model;
-			let callAuditDegraded = false;
-
-			// A1 — forensic continuity: an attributed hold leaves an attributed record
-			// on every terminal, so this spreads onto BOTH `settlement_ambiguous`
-			// records, the `llm_call` event and the rotated receipt below. It comes from
-			// the GOVERNOR'S CAPTURE — never from a store read, never from `params`, and
-			// never from the handle: by the time settle runs there is usually no
-			// `withCostCenter` scope at all, and everything the caller can reach
-			// (`auth`, `SettleParams`) is caller input that must not be able to relabel a
-			// spend after the fact. Unattributed calls spread an empty object, so those
-			// payloads stay byte-identical to what they were before envelopes.
-			const costCenterAudit: { costCenter?: string } =
-				capture.costCenter === undefined ? {} : { costCenter: capture.costCenter };
-			// The same discipline for WHO: the actor and principal captured at
-			// authorize, never the caller's handle or `SettleParams`. No principal →
-			// no key, so an untagged call's records keep their shape.
-			const principalAudit: { principal?: Principal } =
-				capture.principal === undefined ? {} : { principal: capture.principal };
-
-			// A3: settlement meters with the endpoint scope CAPTURED AT AUTHORIZE —
-			// SettleParams carries no endpoint field by design.
-			const endpoint = auth.endpoint ?? defaultEndpoint;
-			const rateInfo = resolveRates(model, endpoint.class, config);
-
-			// D5 — read the caller's object ONCE, into a local. The presence check
-			// below and the counts that get priced and recorded then come from the
-			// same read, so a caller whose `SettleParams` is a live object (a proxy,
-			// a getter over a running accumulator) cannot have "reported?" answered
-			// off one value and the money computed off another.
-			const reportedCounts = {
-				inputTokens: params?.inputTokens,
-				outputTokens: params?.outputTokens,
-				cacheReadTokens: params?.cacheReadTokens,
-				cacheWriteTokens: params?.cacheWriteTokens,
-			};
-			// D4/D5: the reported-usage condition is WIDENED to the cache tiers. It
-			// read only input/output, so a settle carrying nothing but cache counts
-			// looked like "nothing reported" and silently fell back to the pre-call
-			// estimate — discarding real billable tokens at the one boundary
-			// (openclaw, and every non-SDK integration) that has them.
-			const usageReported =
-				reportedCounts.inputTokens != null ||
-				reportedCounts.outputTokens != null ||
-				reportedCounts.cacheReadTokens != null ||
-				reportedCounts.cacheWriteTokens != null;
-
-			// D5 — THE ONE SNAPSHOT. Both the cost below and the `usage` record on
-			// the chain event and the receipt derive from THIS object; nothing
-			// downstream re-reads `params`. Omitted counts collapse to 0 at this
-			// operator boundary: when a caller reported some of the four, the ones
-			// it left out are zero (the same "absent cache fields mean zero" rule
-			// D5 states for providers), not an invitation to re-estimate half the
-			// call. `sanitizeUsage` then clamps every count to a finite integer >= 0
-			// — the reason a NaN from a caller's arithmetic cannot reach audit
-			// canonicalization, which throws on non-finite — and downgrades a
-			// "provider" label whose input/output is unusable.
-			const usageSnapshot = sanitizeUsage({
-				inputTokens: reportedCounts.inputTokens ?? 0,
-				outputTokens: reportedCounts.outputTokens ?? 0,
-				cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
-				cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
-				source: usageReported ? (params?.usageSource ?? "provider") : "estimated",
-			});
-			// Present IFF provider-sourced (D5) — the single rule, in one place.
-			const usageRecord = publishableUsage(usageSnapshot);
-			const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
-
-			// Determine actual cost
-			let actualCost: number;
-			const usageSource: "provider" | "estimated" = usageSnapshot.source;
-			if (usageReported) {
-				actualCost = costFromRates(
-					rateInfo.rates,
-					usageSnapshot.inputTokens,
-					usageSnapshot.outputTokens,
-					usageSnapshot.cacheReadTokens,
-					usageSnapshot.cacheWriteTokens,
-				);
-			} else {
-				// FIX: the un-inflated metering estimate, never the fattened hold
-				// carried on `auth.estimatedCost` (see the `meteredEstimate`
-				// comment on `AuthorizationCapture`).
-				actualCost = capture.meteredEstimate;
-			}
-
-			// D5 — the rates the money was computed with, published so the record is
-			// self-sufficient: `ceil(sum(counts x appliedRates / 1000))` floored at 1
-			// reproduces `cost` exactly. RESOLVED rates, so the D1 cache fallback is
-			// visible as the number it actually charges rather than as a hole.
-			const appliedRates = resolveAppliedRates(rateInfo.rates);
-
-			// SESSION accounting waits until after the POST attempt below. A
-			// pre-POST throw must not increment: the hold is still PENDING and
-			// abort/destroy will void it. A transport-ambiguous POST MUST
-			// increment (fail-closed): TB may have committed after retries, and
-			// treating that as unspent reseeds the next run too large.
-
-			// Circuit breaker: success
-			const cb = breaker.get("headless" as never);
-			cb.recordSuccess();
-
-			// POST settlement
-			let settled = true;
-			// D4: set only when the engine capped the post at the reserved hold.
-			let postedCost: number | undefined;
-			// D4 event-order buffer: the truncation is learned at POST time but the
-			// `settlement_shortfall` event may only be appended AFTER this call's
-			// `llm_call`, so it is parked here and drained below.
-			let shortfallRecord: { posted: number; shortfall: number } | undefined;
-			// Leave the pre-POST cleanup set BEFORE the await. A transport-ambiguous
-			// POST must not remain abort-voidable, and deleting after `settling`
-			// drops would open a window where abort voids a hold mid-commit.
-			unpostedHolds.delete(auth.transferId);
-			if (proxyConn != null && !isDryRun) {
-				// First terminal is settle. Park the id so concurrent abort() is a
-				// silent no-op and destroy() waits, rather than voiding mid-POST.
-				settling.add(auth.transferId);
-				try {
-					await proxyConn.settle(auth.proxyTransferId ?? auth.transferId, actualCost);
-				} catch (postErr) {
-					settled = false;
-					await audit
-						.appendEvent({
-							kind: "settlement_ambiguous",
-							actor: capture.actor,
-							data: {
-								model,
-								cost: actualCost,
-								transferId: auth.transferId,
-								error:
-									postErr instanceof Error
-										? postErr.message.slice(0, 200)
-										: String(postErr).slice(0, 200),
-								...costCenterAudit,
-								...principalAudit,
-							},
-						})
-						.catch(() => {
-							callAuditDegraded = true;
-						});
-				} finally {
-					settling.delete(auth.transferId);
-				}
-			} else if (engine != null && !isDryRun) {
-				settling.add(auth.transferId);
-				try {
-					// Post the ACTUAL consumed cost (RECON #3), capped by the engine at
-					// the reserved hold; a truncation comes back as `shortfall`.
-					const postResult = await engine.postPendingSpend(auth.transferId, actualCost);
-					if (postResult != null && postResult.shortfall > 0) {
-						postedCost = postResult.posted;
-						// EVENT ORDER: captured here, APPENDED after `llm_call` below.
-						// `verifyTransaction` resolves a transfer by the FIRST chain event whose
-						// `data.transferId` matches, so a shortfall written ahead of its
-						// `llm_call` would render this settled call as PENDING with no cost. The
-						// correction must annotate the settlement, never precede it.
-						shortfallRecord = { posted: postResult.posted, shortfall: postResult.shortfall };
-					}
-				} catch (postErr) {
-					settled = false;
-					await audit
-						.appendEvent({
-							kind: "settlement_ambiguous",
-							actor: capture.actor,
-							data: {
-								model,
-								cost: actualCost,
-								transferId: auth.transferId,
-								error:
-									postErr instanceof Error
-										? postErr.message.slice(0, 200)
-										: String(postErr).slice(0, 200),
-								...costCenterAudit,
-								...principalAudit,
-							},
-						})
-						.catch(() => {
-							callAuditDegraded = true;
-						});
-				} finally {
-					settling.delete(auth.transferId);
-				}
-			}
-
-			// SESSION accounting, skipped in full when the ENVELOPE paid: this hold was
-			// never counted into `inFlightHoldTotal`, so releasing it here would drive
-			// that counter negative, and `budgetSpent` must not absorb envelope money it
-			// would then persist into the next run's holding-wallet seed. The flag is the
-			// authorize-time record, so the release can never be asymmetric with the
-			// increment. Counted after a POST *attempt*, not only a confirmed success:
-			// a transport-ambiguous POST is treated as spent (fail-closed) so the next
-			// run cannot reseed as if the money never moved.
-			if (capture.sessionAccounted) {
-				// AUD-453: Acquire mutex for budget atomicity — prevents concurrent
-				// settle() calls from corrupting inFlightHoldTotal or budgetSpent.
-				const releaseLock = await budgetMutex.acquire();
-				try {
-					inFlightHoldTotal -= auth.estimatedCost;
-					budgetSpent += actualCost;
-				} finally {
-					releaseLock();
-				}
-				// Finding-2 (RECON #4): serialized monotonic persist — never regresses.
-				await persistSpend();
-			}
-
-			// Audit event
-			const syntheticHash = createHash("sha256").update(auth.transferId).digest("hex");
-			let auditHash = syntheticHash;
+			// And OWNED, synchronously, from this claim (AGENTS.md: exactly one ledger
+			// mutation per hold, claimed synchronously). Everything below reads caller
+			// input, the SettleParams fields and the handle's, and any of it can be a
+			// getter that calls release() or abort() on this very hold. Marked
+			// `settling`, they stay out until this attempt is over: posted, or failed
+			// before its POST, when the `finally` hands the hold back.
+			settling.add(auth.transferId);
 			try {
-				const auditEvent = await audit.appendEvent({
-					kind: "llm_call",
-					actor: capture.actor,
-					data: {
-						model,
-						cost: actualCost,
-						settled,
-						transferId: auth.transferId,
-						usageSource,
-						// D5: the durable record. The receipt is a return value the
-						// caller may drop on the floor; THIS is what an auditor reads,
-						// so the four tiers and the rates that priced them belong here
-						// too — a chain event that cannot be repriced is a number to
-						// trust, not a reconciliation surface. Mirrors the receipt
-						// exactly: same snapshot, same resolution.
-						...usageAudit,
-						// P1-1: the chain event keeps its FLAT shape — audit-event.v1
-						// documents `data` as open and it already flattens the receipt's
-						// meter. The receipt-side relocation was forced by receipt.v1's
-						// CLOSED `meter` object, which has no counterpart here.
-						// P1-2: its own frozen copy.
-						appliedRates: copyAppliedRates(appliedRates),
-						pricingTableVersion: PRICING_TABLE_VERSION,
-						...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
-						source: "headless",
-						...costCenterAudit,
-						...principalAudit,
-					},
+				const model = auth.model;
+				let callAuditDegraded = false;
+
+				// A1 — forensic continuity: an attributed hold leaves an attributed record
+				// on every terminal, so this spreads onto BOTH `settlement_ambiguous`
+				// records, the `llm_call` event and the rotated receipt below. It comes from
+				// the GOVERNOR'S CAPTURE — never from a store read, never from `params`, and
+				// never from the handle: by the time settle runs there is usually no
+				// `withCostCenter` scope at all, and everything the caller can reach
+				// (`auth`, `SettleParams`) is caller input that must not be able to relabel a
+				// spend after the fact. Unattributed calls spread an empty object, so those
+				// payloads stay byte-identical to what they were before envelopes.
+				const costCenterAudit: { costCenter?: string } =
+					capture.costCenter === undefined ? {} : { costCenter: capture.costCenter };
+				// The same discipline for WHO: the actor and principal captured at
+				// authorize, never the caller's handle or `SettleParams`. No principal →
+				// no key, so an untagged call's records keep their shape.
+				const principalAudit: { principal?: Principal } =
+					capture.principal === undefined ? {} : { principal: capture.principal };
+
+				// A3: settlement meters with the endpoint scope CAPTURED AT AUTHORIZE —
+				// SettleParams carries no endpoint field by design.
+				const endpoint = auth.endpoint ?? defaultEndpoint;
+				const rateInfo = resolveRates(model, endpoint.class, config);
+
+				// D5 — read the caller's object ONCE, into a local. The presence check
+				// below and the counts that get priced and recorded then come from the
+				// same read, so a caller whose `SettleParams` is a live object (a proxy,
+				// a getter over a running accumulator) cannot have "reported?" answered
+				// off one value and the money computed off another.
+				const reportedCounts = {
+					inputTokens: params?.inputTokens,
+					outputTokens: params?.outputTokens,
+					cacheReadTokens: params?.cacheReadTokens,
+					cacheWriteTokens: params?.cacheWriteTokens,
+				};
+				// D4/D5: the reported-usage condition is WIDENED to the cache tiers. It
+				// read only input/output, so a settle carrying nothing but cache counts
+				// looked like "nothing reported" and silently fell back to the pre-call
+				// estimate — discarding real billable tokens at the one boundary
+				// (openclaw, and every non-SDK integration) that has them.
+				const usageReported =
+					reportedCounts.inputTokens != null ||
+					reportedCounts.outputTokens != null ||
+					reportedCounts.cacheReadTokens != null ||
+					reportedCounts.cacheWriteTokens != null;
+
+				// D5 — THE ONE SNAPSHOT. Both the cost below and the `usage` record on
+				// the chain event and the receipt derive from THIS object; nothing
+				// downstream re-reads `params`. Omitted counts collapse to 0 at this
+				// operator boundary: when a caller reported some of the four, the ones
+				// it left out are zero (the same "absent cache fields mean zero" rule
+				// D5 states for providers), not an invitation to re-estimate half the
+				// call. `sanitizeUsage` then clamps every count to a finite integer >= 0
+				// — the reason a NaN from a caller's arithmetic cannot reach audit
+				// canonicalization, which throws on non-finite — and downgrades a
+				// "provider" label whose input/output is unusable.
+				const usageSnapshot = sanitizeUsage({
+					inputTokens: reportedCounts.inputTokens ?? 0,
+					outputTokens: reportedCounts.outputTokens ?? 0,
+					cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
+					cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
+					source: usageReported ? (params?.usageSource ?? "provider") : "estimated",
 				});
-				auditHash = auditEvent.hash;
-			} catch {
-				callAuditDegraded = true;
-			}
+				// Present IFF provider-sourced (D5) — the single rule, in one place.
+				const usageRecord = publishableUsage(usageSnapshot);
+				const usageAudit = usageRecord === undefined ? {} : { usage: usageRecord };
 
-			// D4: the truncation correction, appended AFTER the `llm_call` it annotates
-			// (see the capture at the POST above). Still advisory — a chain that cannot
-			// take it degrades the receipt and NEVER unwinds a settlement that already
-			// committed.
-			if (shortfallRecord !== undefined) {
-				await audit
-					.appendEvent({
-						kind: "settlement_shortfall",
-						actor: capture.actor,
-						data: {
-							model,
-							actual: actualCost,
-							posted: shortfallRecord.posted,
-							shortfall: shortfallRecord.shortfall,
-							transferId: auth.transferId,
-							...costCenterAudit,
-							...principalAudit,
-						},
-					})
-					.catch(() => {
-						callAuditDegraded = true;
-					});
-			}
+				// Determine actual cost
+				let actualCost: number;
+				const usageSource: "provider" | "estimated" = usageSnapshot.source;
+				if (usageReported) {
+					actualCost = costFromRates(
+						rateInfo.rates,
+						usageSnapshot.inputTokens,
+						usageSnapshot.outputTokens,
+						usageSnapshot.cacheReadTokens,
+						usageSnapshot.cacheWriteTokens,
+					);
+				} else {
+					// FIX: the un-inflated metering estimate, never the fattened hold
+					// carried on `auth.estimatedCost` (see the `meteredEstimate`
+					// comment on `AuthorizationCapture`).
+					actualCost = capture.meteredEstimate;
+				}
 
-			// Daily-rotated receipt
-			if (config.audit.rotation !== "none") {
-				writeReceipt(
-					vaultPath,
-					{
+				// D5 — the rates the money was computed with, published so the record is
+				// self-sufficient: `ceil(sum(counts x appliedRates / 1000))` floored at 1
+				// reproduces `cost` exactly. RESOLVED rates, so the D1 cache fallback is
+				// visible as the number it actually charges rather than as a hole.
+				const appliedRates = resolveAppliedRates(rateInfo.rates);
+
+				// SESSION accounting waits until after the POST attempt below. A
+				// pre-POST throw must not increment: the hold is still PENDING and
+				// abort/destroy will void it. A transport-ambiguous POST MUST
+				// increment (fail-closed): TB may have committed after retries, and
+				// treating that as unspent reseeds the next run too large.
+
+				// Circuit breaker: success
+				const cb = breaker.get("headless" as never);
+				cb.recordSuccess();
+
+				// POST settlement
+				let settled = true;
+				// D4: set only when the engine capped the post at the reserved hold.
+				let postedCost: number | undefined;
+				// D4 event-order buffer: the truncation is learned at POST time but the
+				// `settlement_shortfall` event may only be appended AFTER this call's
+				// `llm_call`, so it is parked here and drained below.
+				let shortfallRecord: { posted: number; shortfall: number } | undefined;
+				// Leave the pre-POST cleanup set BEFORE the await. A transport-ambiguous
+				// POST must not remain abort-voidable, and deleting after `settling`
+				// drops would open a window where abort voids a hold mid-commit.
+				unpostedHolds.delete(auth.transferId);
+				if (proxyConn != null && !isDryRun) {
+					try {
+						await proxyConn.settle(auth.proxyTransferId ?? auth.transferId, actualCost);
+					} catch (postErr) {
+						settled = false;
+						await audit
+							.appendEvent({
+								kind: "settlement_ambiguous",
+								actor: capture.actor,
+								data: {
+									model,
+									cost: actualCost,
+									transferId: auth.transferId,
+									error:
+										postErr instanceof Error
+											? postErr.message.slice(0, 200)
+											: String(postErr).slice(0, 200),
+									...costCenterAudit,
+									...principalAudit,
+								},
+							})
+							.catch(() => {
+								callAuditDegraded = true;
+							});
+					}
+				} else if (engine != null && !isDryRun) {
+					try {
+						// Post the ACTUAL consumed cost (RECON #3), capped by the engine at
+						// the reserved hold; a truncation comes back as `shortfall`.
+						const postResult = await engine.postPendingSpend(auth.transferId, actualCost);
+						if (postResult != null && postResult.shortfall > 0) {
+							postedCost = postResult.posted;
+							// EVENT ORDER: captured here, APPENDED after `llm_call` below.
+							// `verifyTransaction` resolves a transfer by the FIRST chain event whose
+							// `data.transferId` matches, so a shortfall written ahead of its
+							// `llm_call` would render this settled call as PENDING with no cost. The
+							// correction must annotate the settlement, never precede it.
+							shortfallRecord = { posted: postResult.posted, shortfall: postResult.shortfall };
+						}
+					} catch (postErr) {
+						settled = false;
+						await audit
+							.appendEvent({
+								kind: "settlement_ambiguous",
+								actor: capture.actor,
+								data: {
+									model,
+									cost: actualCost,
+									transferId: auth.transferId,
+									error:
+										postErr instanceof Error
+											? postErr.message.slice(0, 200)
+											: String(postErr).slice(0, 200),
+									...costCenterAudit,
+									...principalAudit,
+								},
+							})
+							.catch(() => {
+								callAuditDegraded = true;
+							});
+					}
+				}
+
+				// SESSION accounting, skipped in full when the ENVELOPE paid: this hold was
+				// never counted into `inFlightHoldTotal`, so releasing it here would drive
+				// that counter negative, and `budgetSpent` must not absorb envelope money it
+				// would then persist into the next run's holding-wallet seed. The flag is the
+				// authorize-time record, so the release can never be asymmetric with the
+				// increment. Counted after a POST *attempt*, not only a confirmed success:
+				// a transport-ambiguous POST is treated as spent (fail-closed) so the next
+				// run cannot reseed as if the money never moved.
+				if (capture.sessionAccounted) {
+					// AUD-453: Acquire mutex for budget atomicity — prevents concurrent
+					// settle() calls from corrupting inFlightHoldTotal or budgetSpent.
+					const releaseLock = await budgetMutex.acquire();
+					try {
+						inFlightHoldTotal -= auth.estimatedCost;
+						budgetSpent += actualCost;
+					} finally {
+						releaseLock();
+					}
+					// Finding-2 (RECON #4): serialized monotonic persist — never regresses.
+					await persistSpend();
+				}
+
+				// Audit event
+				const syntheticHash = createHash("sha256").update(auth.transferId).digest("hex");
+				let auditHash = syntheticHash;
+				try {
+					const auditEvent = await audit.appendEvent({
 						kind: "llm_call",
-						subsystem: "headless",
 						actor: capture.actor,
 						data: {
 							model,
 							cost: actualCost,
 							settled,
 							transferId: auth.transferId,
+							usageSource,
+							// D5: the durable record. The receipt is a return value the
+							// caller may drop on the floor; THIS is what an auditor reads,
+							// so the four tiers and the rates that priced them belong here
+							// too — a chain event that cannot be repriced is a number to
+							// trust, not a reconciliation surface. Mirrors the receipt
+							// exactly: same snapshot, same resolution.
+							...usageAudit,
+							// P1-1: the chain event keeps its FLAT shape — audit-event.v1
+							// documents `data` as open and it already flattens the receipt's
+							// meter. The receipt-side relocation was forced by receipt.v1's
+							// CLOSED `meter` object, which has no counterpart here.
+							// P1-2: its own frozen copy.
+							appliedRates: copyAppliedRates(appliedRates),
+							pricingTableVersion: PRICING_TABLE_VERSION,
+							...(params?.chunksDelivered != null
+								? { chunksDelivered: params.chunksDelivered }
+								: {}),
+							source: "headless",
 							...costCenterAudit,
 							...principalAudit,
 						},
-					},
-					config.audit.indexLimit,
-				);
-			}
+					});
+					auditHash = auditEvent.hash;
+				} catch {
+					callAuditDegraded = true;
+				}
 
-			// Pattern memory
-			if (config.patterns.enabled) {
-				const promptHash = createHash("sha256").update(auth.transferId).digest("hex");
-				await recordPattern({
-					promptHash,
-					model,
+				// D4: the truncation correction, appended AFTER the `llm_call` it annotates
+				// (see the capture at the POST above). Still advisory — a chain that cannot
+				// take it degrades the receipt and NEVER unwinds a settlement that already
+				// committed.
+				if (shortfallRecord !== undefined) {
+					await audit
+						.appendEvent({
+							kind: "settlement_shortfall",
+							actor: capture.actor,
+							data: {
+								model,
+								actual: actualCost,
+								posted: shortfallRecord.posted,
+								shortfall: shortfallRecord.shortfall,
+								transferId: auth.transferId,
+								...costCenterAudit,
+								...principalAudit,
+							},
+						})
+						.catch(() => {
+							callAuditDegraded = true;
+						});
+				}
+
+				// Daily-rotated receipt
+				if (config.audit.rotation !== "none") {
+					writeReceipt(
+						vaultPath,
+						{
+							kind: "llm_call",
+							subsystem: "headless",
+							actor: capture.actor,
+							data: {
+								model,
+								cost: actualCost,
+								settled,
+								transferId: auth.transferId,
+								...costCenterAudit,
+								...principalAudit,
+							},
+						},
+						config.audit.indexLimit,
+					);
+				}
+
+				// Pattern memory
+				if (config.patterns.enabled) {
+					const promptHash = createHash("sha256").update(auth.transferId).digest("hex");
+					await recordPattern({
+						promptHash,
+						model,
+						cost: actualCost,
+						success: true,
+					}).catch(() => {});
+				}
+
+				// D7: the envelope snapshot is read AFTER the POST, so it reports what the
+				// cost center actually holds now rather than in-memory arithmetic that
+				// drifts the moment another process spends from the same envelope. It
+				// observes; it never decides. A read that fails OMITS the block — this runs
+				// after the money committed, and a report must never unwind or re-decide a
+				// settlement. Both arguments come from the governor's capture, which is why
+				// a settle running outside every `withCostCenter` scope — the normal case for
+				// this governor — still names the right envelope, and why a caller cannot
+				// point this read at an account their call never touched. It is a
+				// POST-SETTLEMENT observation, so it is attached ONLY when `settled` — an
+				// ambiguous settlement (POST rejected) leaves the transfer possibly still
+				// pending, so the balance is transient; we do not even read the ledger then.
+				const settledBudget = settled
+					? envelopeReceiptBudget(
+							capture.envelope,
+							await snapshotEnvelopeRemaining(engine, isDryRun, capture.envelope),
+						)
+					: undefined;
+
+				const receipt: TrustReceipt = {
+					transferId: auth.transferId,
 					cost: actualCost,
-					success: true,
-				}).catch(() => {});
+					budgetRemaining: config.budget - budgetSpent - inFlightHoldTotal,
+					auditHash,
+					chainPath: join(VAULT_DIR, "audit"),
+					receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${auth.transferId}` : null,
+					settled,
+					model,
+					provider: "headless",
+					timestamp: new Date().toISOString(),
+					usageSource,
+					// D5: present IFF provider-sourced — same snapshot the cost came from.
+					...usageAudit,
+					// M2: endpoint classification + metering provenance (A6: computeMs is
+					// OMITTED, never undefined, when absent/invalid).
+					endpoint: { class: endpoint.class, runtime: endpoint.runtime },
+					meter: {
+						costBasis: rateInfo.costBasis,
+						rateSource: rateInfo.rateSource,
+						...(params?.computeMs != null &&
+						Number.isFinite(params.computeMs) &&
+						params.computeMs >= 0
+							? { computeMs: params.computeMs }
+							: {}),
+					},
+					// D5: what the rates WERE, beside where they came from. Only this makes
+					// a custom/local-model cost independently recomputable. A SIBLING of
+					// `meter`, not a member of it — receipt.v1 closed `meter` to additions
+					// (P1-1). P1-2: its own frozen copy.
+					pricing: {
+						appliedRates: copyAppliedRates(appliedRates),
+						tableVersion: PRICING_TABLE_VERSION,
+					},
+					...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
+					...(postedCost !== undefined ? { postedCost } : {}),
+					...(settledBudget !== undefined ? { budget: settledBudget } : {}),
+					...(callAuditDegraded ? { auditDegraded: true as const } : {}),
+					...(proxyConn != null ? { proxyStub: true as const } : {}),
+				};
+
+				return receipt;
+			} finally {
+				settling.delete(auth.transferId);
 			}
-
-			// D7: the envelope snapshot is read AFTER the POST, so it reports what the
-			// cost center actually holds now rather than in-memory arithmetic that
-			// drifts the moment another process spends from the same envelope. It
-			// observes; it never decides. A read that fails OMITS the block — this runs
-			// after the money committed, and a report must never unwind or re-decide a
-			// settlement. Both arguments come from the governor's capture, which is why
-			// a settle running outside every `withCostCenter` scope — the normal case for
-			// this governor — still names the right envelope, and why a caller cannot
-			// point this read at an account their call never touched. It is a
-			// POST-SETTLEMENT observation, so it is attached ONLY when `settled` — an
-			// ambiguous settlement (POST rejected) leaves the transfer possibly still
-			// pending, so the balance is transient; we do not even read the ledger then.
-			const settledBudget = settled
-				? envelopeReceiptBudget(
-						capture.envelope,
-						await snapshotEnvelopeRemaining(engine, isDryRun, capture.envelope),
-					)
-				: undefined;
-
-			const receipt: TrustReceipt = {
-				transferId: auth.transferId,
-				cost: actualCost,
-				budgetRemaining: config.budget - budgetSpent - inFlightHoldTotal,
-				auditHash,
-				chainPath: join(VAULT_DIR, "audit"),
-				receiptUrl: opts?.proxy != null ? `${VERIFY_URL_BASE}/${auth.transferId}` : null,
-				settled,
-				model,
-				provider: "headless",
-				timestamp: new Date().toISOString(),
-				usageSource,
-				// D5: present IFF provider-sourced — same snapshot the cost came from.
-				...usageAudit,
-				// M2: endpoint classification + metering provenance (A6: computeMs is
-				// OMITTED, never undefined, when absent/invalid).
-				endpoint: { class: endpoint.class, runtime: endpoint.runtime },
-				meter: {
-					costBasis: rateInfo.costBasis,
-					rateSource: rateInfo.rateSource,
-					...(params?.computeMs != null &&
-					Number.isFinite(params.computeMs) &&
-					params.computeMs >= 0
-						? { computeMs: params.computeMs }
-						: {}),
-				},
-				// D5: what the rates WERE, beside where they came from. Only this makes
-				// a custom/local-model cost independently recomputable. A SIBLING of
-				// `meter`, not a member of it — receipt.v1 closed `meter` to additions
-				// (P1-1). P1-2: its own frozen copy.
-				pricing: {
-					appliedRates: copyAppliedRates(appliedRates),
-					tableVersion: PRICING_TABLE_VERSION,
-				},
-				...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
-				...(postedCost !== undefined ? { postedCost } : {}),
-				...(settledBudget !== undefined ? { budget: settledBudget } : {}),
-				...(callAuditDegraded ? { auditDegraded: true as const } : {}),
-				...(proxyConn != null ? { proxyStub: true as const } : {}),
-			};
-
-			return receipt;
 		},
 
 		async abort(auth: Authorization, error?: unknown): Promise<void> {
 			// Same lookup as settle, and the same reason: liveness and attribution come
 			// from one internal record. Still idempotent-silent, unlike settle.
-			// In-flight POST: first terminal is settle. A concurrent abort must
-			// not void (TB may be committing) and must not recordFailure /
-			// llm_call_failed — that would trip the provider circuit for a call
-			// that is settling, not failing.
+			// A settle owns this hold (from its claim to its end; see `settling`):
+			// first terminal is settle. A concurrent abort must not void (TB may be
+			// committing) and must not recordFailure / llm_call_failed — that would
+			// trip the provider circuit for a call that is settling, not failing.
 			if (settling.has(auth.transferId)) {
 				return;
 			}
@@ -1993,10 +2000,10 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		},
 
 		async release(auth: Authorization, reason?: string): Promise<ReleaseOutcome> {
-			// abort()'s claim discipline, step for step and for the same reasons: a hold
-			// whose POST is in flight belongs to settle; a claimed-but-never-POSTed hold is
-			// still releasable; a miss in both is already resolved. Only the terminal's
-			// MEANING differs, and this one says whether it ended the hold.
+			// abort()'s claim discipline, step for step and for the same reasons: a hold a
+			// settle owns (see `settling`) belongs to settle; a hold whose settle failed
+			// before its POST is releasable again; a miss in both is already resolved. Only
+			// the terminal's MEANING differs, and this one says whether it ended the hold.
 			if (settling.has(auth.transferId)) {
 				return { released: false };
 			}
