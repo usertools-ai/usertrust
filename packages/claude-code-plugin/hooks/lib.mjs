@@ -292,11 +292,6 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				...(typeof entry.estimatedInputTokens === "number"
 					? { estimatedInputTokens: entry.estimatedInputTokens }
 					: {}),
-				// When its authorize was sent, by this machine's clock, and the life the
-				// server stated for the hold then (`expiresInMs`): how long a tool call fired
-				// again may reuse it (pre-tool-use.mjs `mayReuse`).
-				...(typeof entry.reservedAt === "number" ? { reservedAt: entry.reservedAt } : {}),
-				...(isLife(entry.expiresInMs) ? { expiresInMs: entry.expiresInMs } : {}),
 				// A transcript-mode hold also records what it will settle: the model it
 				// was authorized at, the transcript message ids assigned to it, and their
 				// summed counts.
@@ -328,18 +323,9 @@ export function isGated(entry) {
 }
 
 /**
- * Whether a value is a hold's stated life (`expiresInMs` from a server that
- * advertises `hold-expiry`): a non-negative safe integer of milliseconds. Anything
- * else is no life at all, and a hold without one is never reused.
- */
-function isLife(value) {
-	return Number.isSafeInteger(value) && value >= 0;
-}
-
-/**
  * The hold a tool call already has. Claude Code fires PreToolUse again for the SAME
  * tool call when a deferred call resumes (hooks reference, "Defer a tool call for
- * later"), and PreToolUse then decides what that hold is still good for. Returns
+ * later"), and PreToolUse then ends that hold before it reserves afresh. Returns
  * `{ state: "pending", entry }` for its pending record, the entry as `listPending`
  * gives it; `{ state: "settling", entry }` when its settle is under way or was cut
  * off unanswered (`.settling`; the entry is `{ transferId, assignedIds }`); or null,
@@ -347,7 +333,7 @@ function isLife(value) {
  * A record counts only if the ids it STORES are this call's. State-file names join
  * ids with "__", so two calls can share one (agent `a__b` with tool `c`, and agent
  * `a` with tool `b__c`). The pending record is found exactly as PostToolUse finds
- * the hold it settles (`takePendingEntry`), so PreToolUse reuses only a hold this
+ * the hold it settles (`takePendingEntry`), so PreToolUse ends only a hold this
  * call's PostToolUse would settle.
  */
 export async function holdOfCall(sessionId, agentId, toolUseId) {
@@ -488,8 +474,6 @@ export async function listPending(sessionId, agentId) {
 					: {}),
 				// The mark as written, whatever its value: `isGated` judges it.
 				...(Object.hasOwn(parsed, "gate") ? { gate: parsed.gate } : {}),
-				...(typeof parsed.reservedAt === "number" ? { reservedAt: parsed.reservedAt } : {}),
-				...(isLife(parsed.expiresInMs) ? { expiresInMs: parsed.expiresInMs } : {}),
 				...(parsed.usage === "transcript" ? transcriptHoldFields(parsed) : {}),
 				mtimeMs,
 			});

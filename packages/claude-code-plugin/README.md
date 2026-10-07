@@ -362,21 +362,21 @@ Tracked in [#238](https://github.com/usertools-ai/usertrust/issues/238).
 not run, so it keeps its hold like a call that does not complete (above). When
 the session is resumed (`claude -p --resume`), the same call fires PreToolUse
 again, and the plugin finds the hold the call already has.
-- **Reuse.** It reuses that hold only within the first fifth of the life the
-  server stated for it: `expiresInMs` on the authorize answer, from a server that
-  advertises `hold-expiry`. The other four-fifths are kept for the tool to run.
-- **Otherwise it ends the hold and reserves afresh**, so the budget is checked
-  again. A server that states no life never has a hold reused.
+- **It never reuses that hold.** It ends the hold, then reserves afresh, so the
+  budget is checked at every resume: one more authorize per resume. Whether a held
+  reservation is still live, and still this server's and key's, cannot be known
+  from the record, so the plugin does not rely on it.
   - A hold carrying transcript usage is settled once, at its counts.
   - Any other hold is given back only through a `release` the server advertises,
-    and never aborted. On a server without `release`, it waits for the server's
-    pending-hold sweep.
-- **An unresolved settle refuses the call.** A hook can be killed while settling
-  that hold, leaving its `.settling` record. The resumed call is then refused until
-  that settle resolves: in enforce mode it is denied, whatever `UT_FAIL_OPEN` says,
-  and in watch mode it is recorded as a gap. A stale record that carries
-  transcript usage is decided by the journal first, and the call then reserves
-  afresh.
+    and never aborted. On a server without `release`, it counts against the budget
+    until the server's pending-hold sweep voids it: a call can be refused early,
+    never overspend.
+- **An unresolved hold refuses the call.** A hook can be killed while settling
+  that hold, leaving its `.settling` record; or another hook can be ending it at
+  that moment. The resumed call is then refused until that resolves: in enforce
+  mode it is denied, whatever `UT_FAIL_OPEN` says, and in watch mode it is
+  recorded as a gap. A stale record that carries transcript usage is decided by
+  the journal first, and the call then reserves afresh.
 
 In both modes PostToolUse/Stop/SubagentStop never block — the tool already ran;
 an estimate hold is marked settle-attempted (`.settling`) before its one settle,
