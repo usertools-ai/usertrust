@@ -25,6 +25,8 @@ export interface TransactionEvent {
 		readonly message?: string;
 		/** Why a hold was given back — `hold_released` writes `reason`. */
 		readonly reason?: string;
+		/** The fixed code of a release whose ledger void failed (`hold_released`). */
+		readonly voidError?: string;
 		readonly transferId?: string | undefined;
 	};
 	readonly sequence?: number | undefined;
@@ -364,8 +366,11 @@ export function renderReceipt(data: ReceiptData): string {
 
 	lines.push(row(`${dotted("  Status", status, WIDTH - 1)} `));
 
-	if ((isFailed || isDenied || isDetection || isReleased) && reason) {
+	const voidError = isReleased ? event.data.voidError : undefined;
+	if ((isFailed || isDenied || isDetection || isReleased) && (reason || voidError)) {
 		lines.push(blank());
+	}
+	if ((isFailed || isDenied || isDetection || isReleased) && reason) {
 		// The label describes THIS EVENT, and nothing else. `isDetection` alone —
 		// deliberately not `|| detectionReason !== undefined`, which labelled a
 		// TERMINAL's error "Anomaly:" whenever a detection happened to correlate,
@@ -380,6 +385,16 @@ export function renderReceipt(data: ReceiptData): string {
 		for (let i = 0; i < wrapped.length; i++) {
 			const prefix = i === 0 ? errPrefix : indent;
 			lines.push(row(pad(`${prefix}${wrapped[i] as string}`)));
+		}
+	}
+	// A release whose ledger void failed: its fixed code is the evidence that the funds
+	// may stay held until the ledger's own timeout. Chain data, so scrubbed like the reason.
+	if (voidError) {
+		const prefix = "  Void error: ";
+		const wrapped = wordWrap(forDisplay(voidError), WIDTH - prefix.length - 2);
+		for (let i = 0; i < wrapped.length; i++) {
+			const lead = i === 0 ? prefix : " ".repeat(prefix.length);
+			lines.push(row(pad(`${lead}${wrapped[i] as string}`)));
 		}
 	}
 

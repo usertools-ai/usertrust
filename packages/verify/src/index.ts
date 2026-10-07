@@ -688,6 +688,7 @@ function normalizeEvent(raw: unknown): TransactionEvent {
 	const error = str(d.error);
 	const message = str(d.message);
 	const reason = str(d.reason);
+	const voidError = str(d.voidError);
 
 	return {
 		id: str(o.id) ?? "",
@@ -703,6 +704,7 @@ function normalizeEvent(raw: unknown): TransactionEvent {
 			...(error !== undefined ? { error } : { error: undefined }),
 			...(message !== undefined ? { message } : { message: undefined }),
 			...(reason !== undefined ? { reason } : { reason: undefined }),
+			...(voidError !== undefined ? { voidError } : { voidError: undefined }),
 			// PRESERVED for the same reason, and a sharper one: defaulting to ""
 			// mapped every event WITHOUT a transferId onto the same empty id, so
 			// `--tx ""` (an unset shell variable) matched them and returned

@@ -101,6 +101,39 @@ describe("renderReceipt: a released hold", () => {
 	});
 });
 
+describe("a release whose ledger void failed shows its evidence", () => {
+	it("prints the fixed `voidError` under RELEASED, scrubbed like the reason", () => {
+		const output = render(released({ reason: "given back", voidError: "ledger_unavailable" }));
+		expect(output).toContain("RELEASED");
+		expect(output).toContain("Reason: given back");
+		expect(output).toContain("Void error: ledger_unavailable");
+		const hostile = render(released({ voidError: `x${ESC}[2Jy` }));
+		expect(hostile).toContain("Void error: x");
+		expect(hostile).not.toContain(ESC);
+	});
+
+	it("a clean release prints no void-error line", () => {
+		expect(render(released({ reason: "given back" }))).not.toContain("Void error");
+	});
+
+	it("verifyTransaction carries `voidError` from the chain to the receipt", () => {
+		const result = verifyChainOf(
+			[{ ...RELEASE, data: { ...RELEASE.data, voidError: "pending_transfer_not_found" } }],
+			"tx_1",
+		);
+		expect(result.receipt).toContain("Void error: pending_transfer_not_found");
+	});
+
+	it("a `voidError` that is not a string (a hostile chain) is dropped, never rendered", () => {
+		const result = verifyChainOf(
+			[{ ...RELEASE, data: { ...RELEASE.data, voidError: { injected: true } } }],
+			"tx_1",
+		);
+		expect(result.receipt).toContain("RELEASED");
+		expect(result.receipt).not.toContain("Void error");
+	});
+});
+
 describe("verifyTransaction: a released hold is a conclusive terminal", () => {
 	it("a hold whose only record is hold_released resolves RELEASED", () => {
 		const result = verifyChainOf([RELEASE], "tx_1");
