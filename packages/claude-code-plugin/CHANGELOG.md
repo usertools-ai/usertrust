@@ -20,6 +20,13 @@ npm, and its version is its own: the `usertrust` packages and their
     until the server's pending-hold sweep voids it, which can only refuse a call
     early, never overspend.
   - The cost is one more authorize per resume.
+  - A call resumed under another server or key (`UT_SERVER_URL`, `UT_SERVER_KEY`)
+    never touches its earlier hold through the new one. Each record carries the
+    server's URL and a hash of the key that made it, never the key itself. On a
+    mismatch, or for a record from before this change, the record is dropped and
+    nothing about the old hold is sent to the new server. The old hold is left to
+    its own server's sweep, and any transcript usage it carried goes unrecorded,
+    an under-count. It is never charged to the new tenant.
   - The call is refused while that hold is not resolved: a `.settling` record left
     by a hook killed mid-settle, or a hold another hook is ending at that moment.
     Enforce mode denies it, whatever `UT_FAIL_OPEN` says, and watch mode records a

@@ -59,6 +59,7 @@ import {
 	say,
 	serverCapabilities,
 	serverRequest,
+	tenantBinding,
 	timeLeft,
 } from "./lib.mjs";
 import {
@@ -129,16 +130,20 @@ try {
 	} else if (held.state === "settling") {
 		if (await journalDecides(held.entry, input.tool_use_id)) await reserve(input);
 		else await unsettled(held.entry);
-	} else if (await retire(held.entry)) {
-		say(
-			`usertrust: this tool call's earlier hold ${held.entry.transferId} is ended: a resumed call never reuses a hold, so it reserves afresh`,
-		);
-		await reserve(input);
 	} else {
-		await unsettled(
-			held.entry,
-			`another hook is ending this tool call's earlier hold ${held.entry.transferId}; it is refused until that hold is resolved`,
-		);
+		// A hold made under another server or key is never touched through this one.
+		const ended = sameTenant(held.entry) ? await retire(held.entry) : await abandon(held.entry);
+		if (ended) {
+			say(
+				`usertrust: this tool call's earlier hold ${held.entry.transferId} is ended: a resumed call never reuses a hold, so it reserves afresh`,
+			);
+			await reserve(input);
+		} else {
+			await unsettled(
+				held.entry,
+				`another hook is ending this tool call's earlier hold ${held.entry.transferId}; it is refused until that hold is resolved`,
+			);
+		}
 	}
 } catch (err) {
 	const why = sanitizeReason(err instanceof Error ? err.message : String(err)).slice(
@@ -164,6 +169,39 @@ try {
 		say(`usertrust governance blocked this tool call because authorization failed closed: ${why}`);
 		process.exit(2);
 	}
+}
+
+/**
+ * Whether a pending record was made under the server and key this hook talks to
+ * (lib.mjs `tenantBinding`). A record without a binding (written before the plugin
+ * kept one) is not: its tenant is unknown.
+ */
+function sameTenant(entry) {
+	const here = tenantBinding();
+	return entry.serverUrl === here.serverUrl && entry.keyHash === here.keyHash;
+}
+
+/**
+ * End an earlier hold made under ANOTHER server or key, or an unknown one, without
+ * sending this hook's server anything about it. That server does not know the hold:
+ * a settle there answers 404, and the unkeyed path would hand the old window to the
+ * fresh hold, so this tenant would pay for the other's usage. The record is claimed
+ * and dropped instead.
+ * - A window it carried is then accounted by the journal as unrecorded (assigned ids
+ *   whose hold is gone), never carried into the fresh hold: an under-count of the
+ *   other tenant.
+ * - The hold itself is left to its own server's sweep, or the ledger's timeout.
+ * Returns false when another hook claimed the record first.
+ */
+async function abandon(entry) {
+	const claimed = await claimForSettle(sessionId, agentId, entry.entryKey);
+	if (claimed !== null) {
+		say(
+			`usertrust: this tool call's earlier hold ${entry.transferId} was made under another server or key; nothing about it is sent here, and any usage it carried goes unrecorded`,
+		);
+		await unlink(claimed).catch(() => {});
+	}
+	return claimed !== null;
 }
 
 /**

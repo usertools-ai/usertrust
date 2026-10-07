@@ -371,6 +371,13 @@ again, and the plugin finds the hold the call already has.
     and never aborted. On a server without `release`, it counts against the budget
     until the server's pending-hold sweep voids it: a call can be refused early,
     never overspend.
+  - **Another server or key.** A call resumed under another server or key
+    (`UT_SERVER_URL`, `UT_SERVER_KEY`) never touches its earlier hold through the
+    new one. Each record carries the server's URL and a hash of the key (never the
+    key). On a mismatch, or for a record written before this, the record is dropped
+    and the new server is told nothing about the old hold. The old hold is left to
+    its own server's sweep. In transcript mode the usage it carried goes
+    unrecorded: an under-count, never charged to the new tenant.
 - **An unresolved hold refuses the call.** A hook can be killed while settling
   that hold, leaving its `.settling` record; or another hook can be ending it at
   that moment. The resumed call is then refused until that resolves: in enforce

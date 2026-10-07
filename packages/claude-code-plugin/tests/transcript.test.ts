@@ -2220,6 +2220,8 @@ describe("estimate holds", () => {
 			transferId: "tx_1",
 			agentId: "main",
 			estimatedInputTokens: 4,
+			serverUrl: `http://127.0.0.1:${port}`,
+			keyHash: createHash("sha256").update("k").digest("hex").slice(0, 16),
 		});
 		const post = await run("post-tool-use.mjs", postInput("tu_1"), env);
 		expect(post.stderr).toBe("");
@@ -3510,48 +3512,6 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			},
 		);
 
-		it("a resume under ANOTHER server and key reserves there: the first tenant's hold is never reused", async () => {
-			const server = holdingServer();
-			await startServer(server.responder);
-			await run("pre-tool-use.mjs", preInput("tu_1"), env);
-			const seen: string[] = [];
-			const other = createServer((req, res) => {
-				req.resume();
-				req.on("end", () => {
-					seen.push(`${req.method} ${req.url} ${req.headers.authorization ?? ""}`);
-					const json =
-						req.url === "/v1/health"
-							? { status: "ok", capabilities: [] }
-							: req.url === "/v1/authorize"
-								? { transferId: "tx_other", estimatedCost: 1 }
-								: { settled: true };
-					res.writeHead(200, { "content-type": "application/json" });
-					res.end(JSON.stringify(json));
-				});
-			});
-			await new Promise<void>((resolve) => other.listen(0, "127.0.0.1", () => resolve()));
-			const address = other.address();
-			const otherPort = typeof address === "object" && address !== null ? address.port : 0;
-			try {
-				const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
-					...env,
-					UT_SERVER_URL: `http://127.0.0.1:${otherPort}`,
-					UT_SERVER_KEY: "k2",
-				});
-				expect(again.stderr).toContain("this tool call's earlier hold tx_1 is ended");
-				expect(again.stderr).toContain("reserved tx_other");
-				expect(seen.filter((line) => line.startsWith("POST"))).toEqual([
-					"POST /v1/authorize Bearer k2",
-				]);
-				// The first server saw only its own authorize, and the record names the new hold.
-				expect(authorizes()).toHaveLength(1);
-				expect((await record()).transferId).toBe("tx_other");
-			} finally {
-				other.closeAllConnections();
-				other.close();
-			}
-		});
-
 		it("control: SessionEnd at the deferred exit ends the first hold, and the resume reserves its own", async () => {
 			const server = holdingServer();
 			await startServer(server.responder);
@@ -3673,6 +3633,141 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			]);
 			expect((await readCursor()).accounted).toEqual(["msg_a"]);
 			expect(await holdStateFiles()).toEqual([]);
+		});
+	});
+
+	describe("a resume under ANOTHER server or key: the earlier hold is never touched through the new one", () => {
+		// Each record carries the server's URL and a hash of the key that made it. Under
+		// another server or key, a settle of the old hold at the new server would answer
+		// 404, and the unkeyed path would hand the old window to the fresh hold: the new
+		// tenant would pay for the old one's usage. So the record is dropped, nothing about
+		// the old hold is sent to the new server, and a window it carried goes unrecorded.
+		const env = { UT_CC_USAGE: "estimate" };
+		let other: Awaited<ReturnType<typeof otherServer>> | undefined;
+		afterEach(() => {
+			other?.close();
+			other = undefined;
+		});
+
+		/** A second server, another tenant: records what it is sent, and advertises `capabilities`. */
+		async function otherServer(capabilities: string[]) {
+			const seen: Array<{
+				method: string;
+				path: string;
+				auth: string;
+				body: Record<string, unknown>;
+			}> = [];
+			const server = createServer((req, res) => {
+				let raw = "";
+				req.on("data", (chunk) => {
+					raw += chunk;
+				});
+				req.on("end", () => {
+					const path = req.url ?? "";
+					seen.push({
+						method: req.method ?? "",
+						path,
+						auth: req.headers.authorization ?? "",
+						body: JSON.parse(raw || "{}") as Record<string, unknown>,
+					});
+					const json =
+						path === "/v1/health"
+							? { status: "ok", capabilities }
+							: path === "/v1/authorize"
+								? { transferId: "tx_other", estimatedCost: 1 }
+								: path === "/v1/settle"
+									? { settled: true }
+									: { released: true };
+					res.writeHead(200, { "content-type": "application/json" });
+					res.end(JSON.stringify(json));
+				});
+			});
+			await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+			const address = server.address();
+			const otherPort = typeof address === "object" && address !== null ? address.port : 0;
+			return {
+				env: { UT_SERVER_URL: `http://127.0.0.1:${otherPort}`, UT_SERVER_KEY: "k2" },
+				posts: () => seen.filter((r) => r.method === "POST").map((r) => `${r.path} ${r.auth}`),
+				aboutTx1: () => seen.filter((r) => r.body.transferId === "tx_1"),
+				close: () => {
+					server.closeAllConnections();
+					server.close();
+				},
+			};
+		}
+
+		it("estimate: another server and key, with release, gets only the fresh authorize, never a word about the old hold", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			other = await otherServer(["release"]);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), { ...env, ...other.env });
+			expect(again.stderr).toContain("hold tx_1 was made under another server or key");
+			expect(again.stderr).toContain("reserved tx_other");
+			expect(other.posts()).toEqual(["/v1/authorize Bearer k2"]);
+			expect(other.aboutTx1()).toEqual([]);
+			// The first server is not told either, and the record now names the new hold and
+			// its tenant.
+			expect(authorizes()).toHaveLength(1);
+			const fresh = await record();
+			expect(fresh.transferId).toBe("tx_other");
+			expect(fresh.serverUrl).toBe(other.env.UT_SERVER_URL);
+			expect(fresh.keyHash).toBe(createHash("sha256").update("k2").digest("hex").slice(0, 16));
+		});
+
+		it("transcript: the old hold's window is NOT carried into the new tenant's hold; it goes unrecorded", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
+			await run("pre-tool-use.mjs", preInput("tu_1"));
+			other = await otherServer([]);
+			await run("pre-tool-use.mjs", preInput("tu_1"), other.env);
+			expect(other.aboutTx1()).toEqual([]);
+			expect(other.posts()).toEqual(["/v1/authorize Bearer k2"]);
+			const fresh = await record();
+			expect(fresh.transferId).toBe("tx_other");
+			expect(fresh.assignedIds).toEqual([]);
+			expect((await readCursor()).accounted).toEqual(["msg_a"]);
+			expect(server.charges).toEqual([]);
+		});
+
+		it("the same server under another key, with release: nothing about the old hold is sent", async () => {
+			capabilities = ["release"];
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			await run("pre-tool-use.mjs", preInput("tu_1"), { ...env, UT_SERVER_KEY: "k2" });
+			expect(aboutTx1()).toEqual([]);
+			expect(authorizes()).toHaveLength(2);
+		});
+
+		it("a record without a binding (written before the plugin kept one) is treated as another tenant's", async () => {
+			capabilities = ["release"];
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			const { serverUrl: _url, keyHash: _hash, ...legacy } = await record();
+			await writeFile(join(stateDir, RECORD), JSON.stringify(legacy));
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			expect(again.stderr).toContain("hold tx_1 was made under another server or key");
+			expect(aboutTx1()).toEqual([]);
+			expect(authorizes()).toHaveLength(2);
+		});
+
+		it("a LOST claim under another server: the call reserves nothing there, and enforce denies", async () => {
+			const server = holdingServer();
+			await startServer(server.responder);
+			await run("pre-tool-use.mjs", preInput("tu_1"), env);
+			other = await otherServer([]);
+			const again = await run("pre-tool-use.mjs", preInput("tu_1"), {
+				...env,
+				...other.env,
+				UT_CC_MODE: "enforce",
+				NODE_OPTIONS: `--import=${LOSE_CLAIM}`,
+			});
+			expect(JSON.parse(again.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+			expect(other.posts()).toEqual([]);
+			expect(await holdStateFiles()).toEqual([SETTLING]);
 		});
 	});
 

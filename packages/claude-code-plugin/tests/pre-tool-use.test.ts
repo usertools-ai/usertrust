@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, readdir, readFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
@@ -93,22 +94,29 @@ describe("pre-tool-use hook", () => {
 		expect(await holdFiles()).toEqual(["sess1__main__tu_1.json"]);
 		// No transcript_path: the agent's estimate mode is recorded before its hold is.
 		expect(await readdir(join(stateDir, "transcripts", "estimate"))).toEqual(["sess1__main"]);
-		const entry = JSON.parse(await readFile(join(stateDir, "sess1__main__tu_1.json"), "utf-8")) as {
+		const raw = await readFile(join(stateDir, "sess1__main__tu_1.json"), "utf-8");
+		const entry = JSON.parse(raw) as {
 			toolUseId: string;
 			transferId: string;
 			agentId: string;
 			estimatedInputTokens: number;
 			gate: 1;
+			serverUrl: string;
+			keyHash: string;
 		};
 		// JSON.stringify({command:"ls"}) is 16 chars -> 4 estimated tokens. `gate: 1`:
 		// recorded under the settle-attempt gate, so a 404 to its settle means it expired.
+		// `serverUrl` / `keyHash`: which server and tenant made the hold, never the key.
 		expect(entry).toEqual({
 			gate: 1,
 			toolUseId: "tu_1",
 			transferId: "tx_1",
 			agentId: "main",
 			estimatedInputTokens: 4,
+			serverUrl: `http://127.0.0.1:${port}`,
+			keyHash: createHash("sha256").update("k").digest("hex").slice(0, 16),
 		});
+		expect(raw).not.toContain('"k"');
 	});
 
 	it("records a subagent's reservation under its own agent_id bucket", async () => {

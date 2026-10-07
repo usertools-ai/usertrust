@@ -17,6 +17,7 @@
 // A transcript-mode hold file also names the transcript messages assigned to
 // it and their counts; transcript.mjs journals its outcome beside it
 // (<hold>.settling, <hold>.done), names listPending never returns.
+import { createHash } from "node:crypto";
 import {
 	appendFile,
 	mkdir,
@@ -292,6 +293,8 @@ export async function recordPending(sessionId, agentId, entry, { settling = fals
 				...(typeof entry.estimatedInputTokens === "number"
 					? { estimatedInputTokens: entry.estimatedInputTokens }
 					: {}),
+				// Which server and tenant made the hold: never the key itself.
+				...tenantBinding(),
 				// A transcript-mode hold also records what it will settle: the model it
 				// was authorized at, the transcript message ids assigned to it, and their
 				// summed counts.
@@ -474,6 +477,8 @@ export async function listPending(sessionId, agentId) {
 					: {}),
 				// The mark as written, whatever its value: `isGated` judges it.
 				...(Object.hasOwn(parsed, "gate") ? { gate: parsed.gate } : {}),
+				...(typeof parsed.serverUrl === "string" ? { serverUrl: parsed.serverUrl } : {}),
+				...(typeof parsed.keyHash === "string" ? { keyHash: parsed.keyHash } : {}),
 				...(parsed.usage === "transcript" ? transcriptHoldFields(parsed) : {}),
 				mtimeMs,
 			});
@@ -513,12 +518,33 @@ export async function clearPending(sessionId, agentId, entryKey) {
 	}
 }
 
+/** The governance server this hook talks to (`UT_SERVER_URL`). */
+function serverBase() {
+	return process.env.UT_SERVER_URL ?? "http://127.0.0.1:4519";
+}
+
+/**
+ * Which server and tenant this hook talks to, without the key itself: the server's
+ * URL, and the first 16 hex digits of the key's SHA-256 (`UT_SERVER_KEY`). Every
+ * pending record carries it, so a tool call resumed under another server or key
+ * never takes the earlier hold for one of its own (pre-tool-use.mjs `sameTenant`).
+ */
+export function tenantBinding() {
+	return {
+		serverUrl: serverBase(),
+		keyHash: createHash("sha256")
+			.update(process.env.UT_SERVER_KEY ?? "")
+			.digest("hex")
+			.slice(0, 16),
+	};
+}
+
 /**
  * POST to the governance server. `timeoutMs` bounds the whole exchange (5 s
  * unless the caller passes less); a spent budget throws without a request.
  */
 export async function serverRequest(path, body, { timeoutMs = 5000 } = {}) {
-	const base = process.env.UT_SERVER_URL ?? "http://127.0.0.1:4519";
+	const base = serverBase();
 	const key = process.env.UT_SERVER_KEY ?? "";
 	if (!(timeoutMs > 0)) throw new TransportError("hook time budget spent");
 	const controller = new AbortController();
@@ -564,7 +590,7 @@ let capabilitiesRead;
  */
 export function serverCapabilities() {
 	capabilitiesRead ??= (async () => {
-		const base = process.env.UT_SERVER_URL ?? "http://127.0.0.1:4519";
+		const base = serverBase();
 		const timeoutMs = Math.min(2_000, budgetShare(0.2), timeLeft());
 		const unknown = (why) => {
 			say(
