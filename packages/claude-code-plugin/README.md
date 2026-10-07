@@ -332,8 +332,14 @@ near the budget, a later call can be refused (402) although the budget would
 cover it. In watch mode nothing is blocked; this only adds `would_block` records.
 Nothing is charged twice, and in estimate mode such a call's estimate is never
 charged. A fix for failed calls is tracked in
-[#234](https://github.com/usertools-ai/usertrust/issues/234) (item 9); rejected
-and denied calls fire no hook at all.
+[#234](https://github.com/usertools-ai/usertrust/issues/234) (item 9). A call
+auto mode denies fires
+[PermissionDenied](https://code.claude.com/docs/en/hooks#permissiondenied), whose
+input names the call's `tool_use_id`, but the plugin does not register it yet;
+the same item notes that registering it would cover auto mode's denials, and
+nothing else. A call you reject at the prompt, or one a permission rule or
+another hook denies, fires none of PostToolUse, PostToolUseFailure and
+PermissionDenied.
 
 **Known limitation: on today's server, giving holds back can briefly fail every
 call.** The usertrust-server has no release route, so the plugin gives a hold

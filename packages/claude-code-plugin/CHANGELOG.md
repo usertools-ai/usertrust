@@ -100,7 +100,10 @@ npm, and its version is its own: the `usertrust` packages and their
   mode nothing is blocked; this only adds `would_block` records. Nothing is
   charged twice, and in estimate mode (`UT_CC_USAGE=estimate`) such a call's
   estimate is never charged. A fix for failed calls is tracked in #234 (item 9).
-  Rejected and denied calls fire no hook at all.
+  A call auto mode denies fires `PermissionDenied`, which the plugin does not
+  register yet; item 9 notes that registering it would cover those denials. A
+  call you reject at the prompt, or one a permission rule or another hook
+  denies, fires none of PostToolUse, PostToolUseFailure and PermissionDenied.
 - **On today's server, giving holds back can briefly fail every call.** The
   usertrust-server has no release route, so the plugin gives back by aborting:
   leftover holds at Stop, SubagentStop and SessionEnd, and the cleanups after a
