@@ -19,7 +19,9 @@
  *  - every hold destroy() ends itself is recorded, attributed, with the void's fixed code
  *    when the ledger refused it, and no model (the capture holds none);
  *  - a terminal called while destroy() is ending holds finds nothing to end, and an
- *    authorize still reserving when destroy() began registers no hold;
+ *    authorize still reserving when destroy() began registers no hold, sends no void of its
+ *    own (the sweep or the ledger's timeout releases its reservation) and gives back its
+ *    accounting;
  *  - destroy() takes every remaining hold in one synchronous step at its deadline, before
  *    its first await: a release, an abort or a settle called while it records a terminal
  *    still in flight is refused, and nothing is appended after the writer is released;
@@ -458,8 +460,13 @@ describe("every hold destroy() ends itself is recorded", () => {
 		expect(events).toEqual([destroyRecord(auth, "session", "governor destroyed")]);
 	});
 
-	for (const when of ["while destroy() is ending holds", "after destroy() returned"] as const) {
-		it(`an authorize that finishes reserving ${when} registers no hold, and gives its reservation back itself`, async () => {
+	// The branch that refuses a late authorize sends no void of its own (it would be work
+	// destroy() does not wait for, on a client destroy() may have closed). A reservation that
+	// landed before the engine sweep took its snapshot is voided by that sweep; one that
+	// landed after is released by the ledger's pending timeout. Both orders are pinned, and
+	// in both the call gives back its session accounting.
+	for (const when of ["before the engine sweep", "after destroy() returned"] as const) {
+		it(`an authorize whose reserve lands ${when} registers no hold, sends no void of its own, and gives back its accounting`, async () => {
 			const voids = gate();
 			const reserves = gate();
 			const gates: { void?: Promise<void>; reserve?: Promise<void> } = { void: voids.wait };
@@ -474,9 +481,12 @@ describe("every hold destroy() ends itself is recorded", () => {
 			);
 			events.length = 0;
 			const destroying = gov.destroy();
-			if (when === "while destroy() is ending holds") {
-				// destroy() is parked on the first hold's void; the late reserve lands now.
+			let before: number;
+			if (when === "before the engine sweep") {
+				// destroy() is parked on the first hold's void, before its engine sweep: the
+				// late reserve lands now.
 				await sleep(50);
+				before = gov.budgetRemaining();
 				reserves.open();
 				await sleep(50);
 				voids.open();
@@ -484,20 +494,27 @@ describe("every hold destroy() ends itself is recorded", () => {
 			} else {
 				voids.open();
 				await destroying;
+				before = gov.budgetRemaining();
 				reserves.open();
 			}
 			const outcome = await late;
 			expect(outcome).toBeInstanceOf(Error);
 			expect((outcome as Error).message).toBe("Governor has been destroyed");
+			// What it added to the session's numbers is back.
+			expect(gov.budgetRemaining()).toBe(before);
 			expect(reserved).toHaveLength(2);
 			const lateId = reserved[1] as string;
-			// The authorize voided its own reservation (not left to the engine sweep, which
-			// runs before a reserve that lands late), and nothing recorded a hold that was never
-			// registered.
-			expect(voidRequests.filter((r) => r.transferId === lateId)).toEqual([
-				{ transferId: lateId, via: "voidPendingSpend", taken: true },
-			]);
-			expect(mutations.sort()).toEqual([`void:${first.transferId}`, `void:${lateId}`].sort());
+			// No void from the branch. Before the sweep's snapshot: ONE void, the sweep's.
+			// After it: none; the ledger's pending timeout releases the reservation.
+			expect(voidRequests.filter((r) => r.transferId === lateId)).toEqual(
+				when === "before the engine sweep"
+					? [{ transferId: lateId, via: "voidAllPending", taken: true }]
+					: [],
+			);
+			expect(mutations.filter((m) => m.endsWith(lateId))).toEqual(
+				when === "before the engine sweep" ? [`void:${lateId}`] : [],
+			);
+			// No record for a hold that was never registered.
 			expect(events).toEqual([destroyRecord(first, "session", "governor destroyed")]);
 			// Nothing survived destroy(): the late hold is no one's to end.
 			expect(await gov.release({ ...first, transferId: lateId }, "given back")).toEqual({

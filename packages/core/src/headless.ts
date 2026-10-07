@@ -1541,12 +1541,19 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// destroy() may have begun while this call awaited (the budget lock, the policy,
 			// the reserve). It claims every hold registered before it, and a hold registered
 			// after would outlive the governor: a terminal could end it after the audit
-			// writer is released. So it is never registered: what this call took is given
-			// back, and it fails as one made after destroy() does. Its session accounting
-			// first, under the budget lock as abort() and release() give theirs back: a
-			// settle destroy() is still draining reads it for its receipt. Then its
-			// reservation (best-effort; the engine sweep or the ledger's timeout covers a
-			// failure). Nothing awaits between this check and the registration below.
+			// writer is released. So it is never registered, and the call fails as one made
+			// after destroy() does. Nothing awaits between this check and the registration
+			// below.
+			//  - Its session accounting is given back, under the budget lock as abort() and
+			//    release() give theirs back: a settle destroy() is still draining reads it for
+			//    its receipt.
+			//  - Its reservation is NOT voided here. This void would be work destroy() does not
+			//    wait for, and destroy() may already have closed the ledger client; a void then
+			//    rebuilds a client that nothing destroys (#249). The ledger's pending timeout
+			//    releases it within 300 s of its reserve (`LEDGER_HOLD_TIMEOUT_MS`), unless the
+			//    engine sweep, which voids every reservation that landed before it, did first.
+			//  - No record: a granted authorize writes none, and this one never became a hold
+			//    the governor owned.
 			if (destroyed) {
 				if (!envelopeDebited) {
 					const releaseLock = await budgetMutex.acquire();
@@ -1554,19 +1561,6 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						inFlightHoldTotal -= estCost;
 					} finally {
 						releaseLock();
-					}
-				}
-				if (proxyConn != null && !isDryRun) {
-					try {
-						await proxyConn.void(proxyTransferId ?? transferId);
-					} catch {
-						// Best-effort: the ledger's timeout returns the funds.
-					}
-				} else if (engine != null && !isDryRun) {
-					try {
-						await engine.voidPendingSpend(transferId);
-					} catch {
-						// Best-effort: the engine sweep, or the ledger's timeout, returns the funds.
 					}
 				}
 				throw new Error("Governor has been destroyed");
