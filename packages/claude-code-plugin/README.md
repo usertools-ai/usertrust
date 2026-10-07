@@ -341,8 +341,9 @@ nothing else. A call you reject at the prompt, or one a permission rule or
 another hook denies, fires none of PostToolUse, PostToolUseFailure and
 PermissionDenied.
 
-**Known limitation: on today's server, giving holds back can briefly fail every
-call.** The usertrust-server has no release route, so the plugin gives a hold
+**Known limitation: on a server without `release`, giving holds back can briefly
+fail every call.** A usertrust-server that does not publish `release` in its
+capabilities (3.4.0 and earlier) has no release route, so the plugin gives a hold
 back by aborting it in two places: leftover holds at Stop, SubagentStop and
 SessionEnd, and the cleanups after a failure (an unanswered transcript settle, a
 hold record that could not be written). The server counts each abort as a failure.
@@ -352,8 +353,10 @@ together and the server's own TTL sweep aborts them, about five minutes later. T
 tenant's authorizations then fail (500) for at least a minute after the last
 abort. After that minute they are let through again, and two successful settles
 close the breaker. Meanwhile each call is a `gap` in watch mode, and in enforce
-mode it is blocked unless `UT_FAIL_OPEN=1`.
-Tracked in [#238](https://github.com/usertools-ai/usertrust/issues/238).
+mode it is blocked unless `UT_FAIL_OPEN=1`. A server that publishes `release` is
+not affected: the plugin gives every hold back through `/v1/release`, which counts
+as neither a failure nor a success, and the server's own sweep releases expired
+holds the same way ([#238](https://github.com/usertools-ai/usertrust/issues/238)).
 
 **Known issue: a tool call that is deferred and then resumed is reserved twice.**
 In a `claude -p` run, another PreToolUse hook can
@@ -363,7 +366,7 @@ not run, so it keeps its hold like a call that does not complete (above). When
 the session is resumed (`claude -p --resume`), the same call fires PreToolUse
 again, and the plugin reserves a second hold and overwrites its record of the
 first. The first hold can then stay pending until the server's pending-hold TTL
-voids it, counting against the budget until then; on today's server its expiry
+voids it, counting against the budget until then; on a server without `release` its expiry
 is one of the aborts above. In transcript mode the usage it carried can go
 unrecorded, silently: an under-count, never a double charge. In estimate mode
 the call is still charged once, on the second hold. Each further deferral of the

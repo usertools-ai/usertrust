@@ -73,19 +73,39 @@ one you cannot reuse.
 | POST   | `/v1/authorize` | Bearer | Phase 1: policy gate + PENDING budget hold          |
 | POST   | `/v1/settle`    | Bearer | Phase 2a: post actual usage, returns a TrustReceipt |
 | POST   | `/v1/abort`     | Bearer | Phase 2b: void the hold for a failed call           |
+| POST   | `/v1/release`   | Bearer | Phase 2c: give back a hold that did not fail        |
 | GET    | `/v1/budget`    | Bearer | Remaining tenant budget                             |
 | GET    | `/v1/events`    | Bearer | SSE stream of tenant governance events              |
 | GET    | `/v1/health`    | none   | Liveness and `capabilities`                         |
 
 Errors: `403 policy_denied`, `402 budget_exceeded`, `429 anomaly`, `401 unauthorized`,
 `404 not_found` (unknown/already-settled transferId), `413 too_large` (1 MiB body cap).
-Pending holds are swept and aborted when their advertised life runs out: `pendingTtlMs` (default 5 min),
+Pending holds are swept and released when their advertised life runs out: `pendingTtlMs` (default 5 min),
 or the ledger's pending timeout when that comes first. The sweep reads hold ages on a monotonic clock, so
 no wall-clock step moves it, and it never ends a hold before its advertised life. Declared: after the host
 sleeps, a hold that was pending across the sleep can keep counting against the budget for at most one hold
 life (T, 300 s by default) plus up to one sweep interval (30 s) after wake. In enforce mode that can mean
 false denials. It's the safe direction: nothing is charged and the ledger releases the funds on time.
 A TigerBeetle-state probe for this case is a follow-up (#241).
+
+### Giving a hold back: `/v1/release`, not `/v1/abort`
+
+`/v1/abort` means the call FAILED: it counts as a failure on the tenant's circuit breaker and records
+`llm_call_failed`, and five in a row open the breaker, after which every authorize answers `500` for at
+least a minute. To give back a hold you no longer need, call `/v1/release` with
+`{ "transferId": "…", "reason": "…" }` (`reason` optional; servers that support it list `"release"` in
+`capabilities`). It voids the hold and records a neutral `hold_released`, and it touches the breaker not
+at all: not a failure, and not a success that could close a breaker real failures opened. The reason is
+stored with control characters stripped and clipped to 200 characters, never refused.
+
+It answers `200 { "released": true, "transferId": "…" }` only when that request ended the hold, plus
+`voidError` (a fixed code) when the ledger refused the void: the hold is still ended, and the ledger's
+pending timeout returns its funds. An unknown id, another tenant's id, or a hold that was already settled,
+aborted or released is `404 { "error": "not_found", "reason": "unknown transferId" }`. An unknown ROUTE
+is `404` with `"reason": "unknown route"` instead, which is how a client that could not read
+`capabilities` tells an older server apart. The sweep and shutdown release, too: an expired hold is not a
+failure. The SSE stream announces each release as `released` (shutdown included), with the reason the
+chain recorded.
 
 ## Keys
 

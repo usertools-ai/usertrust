@@ -72,9 +72,33 @@ export const AbortRequestSchema = z.object({
 	error: z.string().optional(),
 });
 
+/**
+ * `POST /v1/release` (capability `release`): give back a hold that did not fail. The
+ * field is `reason`, not abort's `error`, because nothing failed. Any string is
+ * accepted and CLIPPED, never refused: the governor records it through
+ * `sanitizeReleaseReason`, and the `released` event carries that same text.
+ */
+export const ReleaseRequestSchema = z.object({
+	transferId: z.string().min(1),
+	reason: z.string().optional(),
+});
+
 export type AuthorizeRequest = z.infer<typeof AuthorizeRequestSchema>;
 export type SettleRequest = z.infer<typeof SettleRequestSchema>;
 export type AbortRequest = z.infer<typeof AbortRequestSchema>;
+export type ReleaseRequest = z.infer<typeof ReleaseRequestSchema>;
+
+/**
+ * `POST /v1/release`'s 200: THIS request ended the hold. A hold the governor no
+ * longer held is a 404 `unknown transferId`, never a 200. `voidError` names a ledger
+ * void that failed, as a fixed code: the hold is still ended, and the ledger's pending
+ * timeout returns its funds.
+ */
+export interface ReleaseResponse {
+	released: true;
+	transferId: string;
+	voidError?: string;
+}
 
 export interface AuthorizeResponse {
 	transferId: string;
