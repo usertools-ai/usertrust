@@ -70,16 +70,29 @@ function suggestCommand(input: string): string | undefined {
 
 export { COMMANDS, levenshtein, suggestCommand };
 
+/**
+ * A command that takes no path must refuse one, not ignore it: ignoring it answers about the cwd's
+ * vault while reading as an answer about the one the operator named. `valueFlags` are flags whose
+ * next argument is their value, not a positional.
+ */
+async function refusedStray(cmd: string, valueFlags?: readonly string[]): Promise<boolean> {
+	const { refuseStrayPositional } = await import("./target.js");
+	return refuseStrayPositional(cmd, argv.slice(argv.indexOf(cmd) + 1), jsonFlag, valueFlags);
+}
+
 switch (command) {
 	case "init":
+		if (await refusedStray("init")) break;
 		await import("./init.js").then((m) =>
 			m.run(undefined, { json: jsonFlag, skipVerify, reconfigure }),
 		);
 		break;
 	case "inspect":
+		if (await refusedStray("inspect")) break;
 		await import("./inspect.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
 	case "health":
+		if (await refusedStray("health")) break;
 		await import("./health.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
 	case "policy": {
@@ -88,9 +101,14 @@ switch (command) {
 		break;
 	}
 	case "verify":
-		await import("./verify.js").then((m) => m.run(undefined, { json: jsonFlag }));
+		// The arguments after `verify` go to verify.ts, which owns which of them is a flag value
+		// and which is the path. Dropping them here is how `verify <path>` verified the cwd.
+		await import("./verify.js").then((m) =>
+			m.run(undefined, { json: jsonFlag }, argv.slice(argv.indexOf("verify") + 1)),
+		);
 		break;
 	case "export": {
+		if (await refusedStray("export", ["--markdown"])) break;
 		const rest = argv.slice(argv.indexOf("export") + 1).filter((a) => a !== "--json");
 		await import("./export.js").then((m) => m.run(undefined, { json: jsonFlag }, rest));
 		break;
@@ -105,6 +123,7 @@ switch (command) {
 		await import("./tb.js").then((m) => m.run({ json: jsonFlag }));
 		break;
 	case "pricing":
+		if (await refusedStray("pricing")) break;
 		await import("./pricing.js").then((m) => m.run(undefined, { json: jsonFlag }));
 		break;
 	case "budget": {

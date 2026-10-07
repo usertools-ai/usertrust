@@ -1007,7 +1007,7 @@ first, clip second.
 repaint the terminal of the auditor running the command — forging a passing verdict, which is the
 entire product for a verification tool.
 
-There are **fifteen** sanitizers, in two variants: **nine** neutralise C1 and **six** do not. Do
+There are **sixteen** sanitizers, in two variants: **ten** neutralise C1 and **six** do not. Do
 not consolidate them onto the weaker one — and note that the two counts are pinned SEPARATELY,
 because swapping a stronger sanitizer for a weaker one moves both by one and leaves the total
 untouched. A total is not an inventory.
@@ -1094,6 +1094,12 @@ stopped matching the count. Adding a sanitizer means: add a bullet, and update t
   to the *inventory*, not the newest code: it predates the guard that failed to see it. **Scope a
   source-wide assertion by what SHIPS, not by the directory layout the other packages happen to
   use** — that is the same lesson as the worktree note above, one level out.
+- The stronger variant again: `scrubForTerminal` in `core/src/cli/target.ts`. `usertrust verify <path>`
+  prints the absolute path of the vault it verified, and every command that takes no path echoes
+  the stray argument it refused — both are argv or a resolved path reaching an operator's terminal.
+  It substitutes `?` and does **not** clip: a clipped path is not the path that was verified, and
+  naming the subject of a verdict is the point. The `--json` side escapes C1 as `\uXXXX` after
+  serialization (`toSafeJson`, same file) instead, so `data.vaultPath` parses back to the real path.
 - The stronger variant for a STORED record: `sanitizeReleaseReason` in `core/src/headless.ts`.
   A `hold_released` record's `reason` is caller text (a `/v1/release` body), and the `--tx`
   receipt later prints it at an auditor. It STRIPS C0, DEL and C1 rather than substituting `?`,
@@ -1130,6 +1136,18 @@ picocolors adds SGR codes without sanitizing anything it wraps.
 *Prevents:* `--parent -x` silently reporting on the cost center `-x::research`; `--period-start 0`
 passing `Date.parse` as Jan 2000 and turning a one-hour window into 26 years; and a rejected flag
 value turning its own error message into a terminal-repaint on the operator who typed it.
+
+**A CLI command uses an argument or refuses it — it never ignores one.** `usertrust verify <path>`
+verifies THAT path (the project root, as the cwd is), names the real directory it read
+(`Vault: <abs>`, `data.vaultPath`), and refuses a path it cannot use instead of falling back to the
+cwd. Commands that take no path (`inspect`, `health`, `pricing`, `init`, `export`) refuse a stray
+positional through `refuseStrayPositional` (`cli/target.ts`), called per command in `main.ts`; a
+new such command needs the same line. Exit codes: a path that cannot be used is 1 (as "No trust vault
+found" always was), an argument of the wrong shape is 2. `tests/cli/verify-target.test.ts` drives the
+real entry point from a cwd that is itself a valid vault.
+*Prevents:* `verify <vault-a>` run inside vault-b printing vault-b's chain as the verdict —
+`run(undefined, …)` dropped the argument and `rootDir ?? process.cwd()` answered for the wrong vault,
+exit 0. A verifier that certifies the wrong subject is the worst failure it can have.
 
 ### Client detection
 
