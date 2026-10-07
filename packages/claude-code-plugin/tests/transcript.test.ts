@@ -3893,12 +3893,14 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 			},
 		);
 
-		it.each<[string, Record<string, string>]>([
-			["estimate", { UT_CC_USAGE: "estimate" }],
-			["transcript", {}],
+		it.each<[string, Record<string, string>, string | null]>([
+			["estimate", { UT_CC_USAGE: "estimate" }, null],
+			// The settle's claim fails (`deferred`): refused as a hold that could not be
+			// ended, before any settle of it is attempted.
+			["transcript", {}, "could not be ended"],
 		])(
 			"%s mode: a first hold that cannot be ended stops the fresh reserve, and enforce fails closed",
-			async (_, usage) => {
+			async (_, usage, reason) => {
 				const server = holdingServer();
 				await startServer(server.responder);
 				await writeMain(responseEntries("msg_a", SONNET, u(9, 9)));
@@ -3911,6 +3913,7 @@ describe("a tool call whose PreToolUse fires again (a resumed defer) never reuse
 				});
 				expect(again.code).toBe(2);
 				expect(again.stderr).toContain("authorization failed closed");
+				if (reason !== null) expect(again.stderr).toContain(reason);
 				expect(authorizes()).toHaveLength(1);
 				expect(server.charges).toEqual([]);
 				// tx_1's record is kept, never overwritten by a fresh hold's.
