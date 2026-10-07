@@ -46,6 +46,7 @@ import {
 	estimateTokens,
 	giveBack,
 	guardMode,
+	holdOfCall,
 	isAlreadySettled,
 	MAX_CONTENT_CHARS,
 	MAX_OUTPUT_TOKENS,
@@ -101,6 +102,55 @@ try {
 	// on older Claude Code) is what scopes a hold to the agent that made it.
 	agentId = input.agent_id ?? "main";
 	toolName = input.tool_name ?? "unknown";
+	// A deferred call's resume fires PreToolUse again for the SAME tool call (hooks
+	// reference, "Defer a tool call for later"), and so might any repeat. That call
+	// already has its hold: reuse it. A second authorize would reserve a second hold,
+	// and its record, keyed by the same tool_use_id, would overwrite the first's:
+	// the first hold stranded until the server's TTL and, in transcript mode, its
+	// window written off. A hold whose settle is under way or unanswered
+	// (`.settling`) gets no second hold either: the call could be charged twice.
+	const held = await holdOfCall(sessionId, agentId, input.tool_use_id);
+	if (held === null) {
+		await reserve(input);
+	} else if (held.state === "pending") {
+		proceed(
+			`usertrust: this tool call already holds ${held.transferId}; reusing it, no second hold`,
+		);
+	} else {
+		proceed(`usertrust: this tool call's hold ${held.transferId} is being settled; no second hold`);
+	}
+} catch (err) {
+	const why = sanitizeReason(err instanceof Error ? err.message : String(err)).slice(
+		0,
+		MAX_REASON_CHARS,
+	);
+	if (mode === "watch" || process.env.UT_FAIL_OPEN === "1") {
+		// The call proceeds unmetered: say so durably, so the gap is never silent.
+		const recorded = await recordWatchEvent({
+			kind: "gap",
+			mode,
+			session: sessionId,
+			agent: agentId,
+			tool: toolName,
+			reason: why,
+		});
+		proceed(
+			mode === "watch"
+				? `usertrust watch-only: this call is not metered (${why}) — ${recorded ? "recorded as a gap" : "and its gap record could not be written (see above)"}`
+				: `usertrust unavailable — proceeding ungoverned (UT_FAIL_OPEN=1): ${why}`,
+		);
+	} else {
+		say(`usertrust governance blocked this tool call because authorization failed closed: ${why}`);
+		process.exit(2);
+	}
+}
+
+/**
+ * Reserve this tool call's hold: the window (transcript mode), the authorize, and
+ * the record PostToolUse settles. Called once per tool call: a call that already
+ * has a hold reuses it (`holdOfCall` above).
+ */
+async function reserve(input) {
 	const toolInput = JSON.stringify(input.tool_input ?? {}).slice(0, MAX_CONTENT_CHARS);
 	const content = process.env.UT_CC_SEND_CONTENT === "0" ? '{"redacted":true}' : toolInput;
 	const estimatedInputTokens = estimateTokens(toolInput);
@@ -254,29 +304,5 @@ try {
 		throw err;
 	} finally {
 		await prepared.release?.();
-	}
-} catch (err) {
-	const why = sanitizeReason(err instanceof Error ? err.message : String(err)).slice(
-		0,
-		MAX_REASON_CHARS,
-	);
-	if (mode === "watch" || process.env.UT_FAIL_OPEN === "1") {
-		// The call proceeds unmetered: say so durably, so the gap is never silent.
-		const recorded = await recordWatchEvent({
-			kind: "gap",
-			mode,
-			session: sessionId,
-			agent: agentId,
-			tool: toolName,
-			reason: why,
-		});
-		proceed(
-			mode === "watch"
-				? `usertrust watch-only: this call is not metered (${why}) — ${recorded ? "recorded as a gap" : "and its gap record could not be written (see above)"}`
-				: `usertrust unavailable — proceeding ungoverned (UT_FAIL_OPEN=1): ${why}`,
-		);
-	} else {
-		say(`usertrust governance blocked this tool call because authorization failed closed: ${why}`);
-		process.exit(2);
 	}
 }

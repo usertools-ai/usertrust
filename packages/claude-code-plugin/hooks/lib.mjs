@@ -322,6 +322,31 @@ export function isGated(entry) {
 	return entry?.gate === 1;
 }
 
+/**
+ * The hold a tool call already has, keyed by its `tool_use_id`: its record pending
+ * (`.json`, state "pending") or its settle under way or unanswered (`.settling`,
+ * state "settling"). Claude Code fires PreToolUse again for the SAME tool call when
+ * a deferred call resumes (hooks reference, "Defer a tool call for later"), and
+ * PreToolUse then reuses this hold rather than reserve a second one. Null when the
+ * call has no `tool_use_id`, no such record, or one that cannot be read.
+ */
+export async function holdOfCall(sessionId, agentId, toolUseId) {
+	if (typeof toolUseId !== "string" || toolUseId === "") return null;
+	const live = stateFilePath(sessionId, agentId, toolUseId);
+	for (const [path, state] of [
+		[live, "pending"],
+		[settlingPath(live), "settling"],
+	]) {
+		try {
+			const body = JSON.parse(await readFile(path, "utf-8"));
+			if (typeof body?.transferId === "string") return { transferId: body.transferId, state };
+		} catch {
+			// Not there, or unreadable: try the other.
+		}
+	}
+	return null;
+}
+
 /** A pending hold's settle-attempted path: `<hold>.settling` beside `<hold>.json`. */
 function settlingPath(livePath) {
 	return `${livePath.slice(0, -".json".length)}.settling`;
