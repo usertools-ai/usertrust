@@ -244,19 +244,38 @@ broad catch swallows `exists_with_different_flags`, i.e. an account missing its
 `debits_must_not_exceed_credits` enforcement. No catch is strictly better than a broad one.
 
 **A destroyed ledger client stays destroyed.** `TrustTBClient.destroy()` sets `closed` first, and
-from then on nothing reconnects. An operation in flight at `destroy()` fails with its own error. One
-started after it fails with `LedgerClientClosedError` before reaching the native client, whatever its
-arguments: every public ledger operation's first statement is `assertOpen()`, before its own input
-checks and any shortcut that answers without the ledger (a cached wallet id), so a caller can tell
-shutdown from a refused input. `withReconnect()` checks again, for a later step of an operation
-`destroy()` reached mid-way; `ping()` reports unhealthy; `reconnect()` is refused even while a
-finished reconnect is still cached; and `_doReconnect()` checks before every attempt, so a reconnect
-waiting out its backoff builds nothing. A test parses `client.ts` and fails when a public async method
-other than `ping()` does not open with `this.assertOpen()`. The synchronous accessors
-(`setTreasuryId`, `setAccountMapping`, `getAccountId`, `getTreasuryId`) touch only this object's
-memory and are not refused. The native client cannot make this call: its `ERR_CLIENT_CLOSED` also
-comes from our own reconnect, which closes the old client, and an operation in flight on THAT one
-must still retry.
+from then on nothing reconnects and no request reaches a native client. An operation in flight at
+`destroy()` fails with its own error. Two checks do the rest, and they have different jobs:
+- **At an operation's entry**, `assertOpen()` is every public ledger operation's first statement. It
+  runs before the operation's own input checks and before any shortcut that answers without the
+  ledger (a cached wallet id), so an operation started after `destroy()` fails with
+  `LedgerClientClosedError` whatever its arguments. A caller can tell shutdown from a refused input.
+- **At each request**, `native()` checks `closed` at the moment the request is made, because an
+  await lets `destroy()` land between an operation's steps, or between a reconnect and its retry.
+  Only `withReconnect()` calls `native()`, for the request and for its retry. It hands the client
+  to a closure that makes its one request at once. A native destroy that throws leaves its client
+  open, and this check is what keeps requests off it.
+
+The rest of the closed state:
+- `ping()` reports unhealthy.
+- `reconnect()` is refused, even while a finished reconnect is still cached.
+- `_doReconnect()` checks before every attempt, so a reconnect waiting out its backoff builds nothing.
+- Once the native destroy returns, `destroy()` replaces the native client with `CLOSED_CLIENT`,
+  which refuses every request. If the native destroy throws, the client stays in place, for a second
+  `destroy()` to retry.
+- The synchronous accessors (`setTreasuryId`, `setAccountMapping`, `getAccountId`, `getTreasuryId`)
+  touch only this object's memory and are not refused.
+
+The tests hold this. Two parse `client.ts` and fail in any of these cases:
+- a public async method other than `ping()` does not open with `this.assertOpen()`;
+- anything but the constructor, `native()`, `_doReconnect()` and `destroy()` reads the native client;
+- anything but `withReconnect()` calls `native()`;
+- a request closure is anything but `(native) => native.<request>(…)`.
+
+Another set runs every operation with `destroy()` landing at each of its await boundaries.
+
+The native client cannot make this call: its `ERR_CLIENT_CLOSED` also comes from our own reconnect,
+which closes the old client, and an operation in flight on THAT one must still retry.
 *Prevents:* a reconnect after shutdown building a native client nothing destroys, which keeps the
 process alive (#249). A POST that committed but lost its reply at `destroy()` is therefore no longer
 retried into an `exists` success: it fails, and a settle records `settlement_ambiguous`. Its charge

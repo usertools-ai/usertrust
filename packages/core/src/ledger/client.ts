@@ -8,7 +8,7 @@
  */
 
 import { createHash } from "node:crypto";
-import type { Account, Transfer } from "tigerbeetle-node";
+import type { Account, Client, Transfer } from "tigerbeetle-node";
 import {
 	AccountFlags,
 	amount_max,
@@ -107,7 +107,7 @@ export class TransferIdRetiredError extends TBTransferError {
  * a reconnect would build a native client that nothing destroys, and an open TigerBeetle
  * client keeps the process alive (#249). An operation that was in flight at `destroy()`
  * fails with its own error; one started after it fails with this, before any check of its
- * arguments, as does a later step of one in flight.
+ * arguments, as does any request a later step or a retry would have made.
  */
 export class LedgerClientClosedError extends Error {
 	constructor() {
@@ -115,6 +115,25 @@ export class LedgerClientClosedError extends Error {
 		this.name = "LedgerClientClosedError";
 	}
 }
+
+const refuseClosed = (): Promise<never> => Promise.reject(new LedgerClientClosedError());
+
+/**
+ * What a TrustTBClient holds in place of its native client once destroy() has closed it:
+ * every request is refused, so even a read of the field fails closed, and destroying it
+ * again is a no-op.
+ */
+const CLOSED_CLIENT: Client = {
+	createAccounts: refuseClosed,
+	createTransfers: refuseClosed,
+	lookupAccounts: refuseClosed,
+	lookupTransfers: refuseClosed,
+	getAccountTransfers: refuseClosed,
+	getAccountBalances: refuseClosed,
+	queryAccounts: refuseClosed,
+	queryTransfers: refuseClosed,
+	destroy: () => {},
+};
 
 // Ledger ID: all usertokens live on ledger 1
 export const LEDGER_USERTOKENS = 1;
@@ -215,7 +234,10 @@ export interface TrustTBClientOptions {
 }
 
 export class TrustTBClient {
-	private client: ReturnType<typeof createClient>;
+	// The native client, and CLOSED_CLIENT once destroy() has closed it. Read only by the
+	// constructor, native(), _doReconnect() and destroy(): every request goes through
+	// native(). A test parses this file to hold that.
+	private client: Client;
 	private accountMap = new Map<string, bigint>();
 	private treasuryId: bigint | undefined;
 	private initialized = false;
@@ -286,11 +308,23 @@ export class TrustTBClient {
 	/**
 	 * Every public ledger operation calls this FIRST, before its own input checks and any
 	 * shortcut, so one started after destroy() fails with LedgerClientClosedError whatever its
-	 * arguments: a caller can tell shutdown from a refused input. withReconnect() calls it
-	 * again, for a later step of an operation that destroy() reached mid-way.
+	 * arguments: a caller can tell shutdown from a refused input.
 	 */
 	private assertOpen(): void {
 		if (this.closed) throw new LedgerClientClosedError();
+	}
+
+	/**
+	 * The native client, for ONE request made right now. The check is here, at the moment
+	 * of each request, and not only at an operation's entry: an await lets destroy() land
+	 * between an operation's steps, and between a reconnect and its retry. A native destroy
+	 * that threw leaves its client open, and this check is all that stands in the way.
+	 * Only withReconnect() calls this, and it passes the client to a closure that makes its
+	 * one request synchronously, so no native reference outlives an await.
+	 */
+	private native(): Client {
+		this.assertOpen();
+		return this.client;
 	}
 
 	async reconnect(): Promise<void> {
@@ -340,21 +374,20 @@ export class TrustTBClient {
 		}
 	}
 
-	private async withReconnect<T>(fn: () => Promise<T>): Promise<T> {
-		// Destroyed since the operation began (a later step of it): fail fast, without touching
-		// the closed native client.
-		this.assertOpen();
+	private async withReconnect<T>(request: (native: Client) => Promise<T>): Promise<T> {
 		try {
-			return await fn();
+			return await request(this.native());
 		} catch (err) {
 			// Destroyed while this was in flight: its own error stands, and no reconnect.
 			// A POST that committed but lost its reply here would, by reconnecting, have been
 			// answered `exists` on a fresh client: a success, on a client nothing destroys.
 			// It now fails (a settle records `settlement_ambiguous`); its charge stands.
+			// native()'s own LedgerClientClosedError is rethrown here too.
 			if (this.closed) throw err;
 			if (this.isConnectionError(err)) {
 				await this.reconnect();
-				return await fn();
+				// native() again: destroy() may have landed while the reconnect settled.
+				return await request(this.native());
 			}
 			throw err;
 		}
@@ -488,7 +521,7 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const results = await this.withReconnect(() => this.client.createAccounts([account]));
+		const results = await this.withReconnect((native) => native.createAccounts([account]));
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
@@ -559,7 +592,7 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const results = await this.withReconnect(() => this.client.createAccounts([account]));
+		const results = await this.withReconnect((native) => native.createAccounts([account]));
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
@@ -583,7 +616,7 @@ export class TrustTBClient {
 		this.assertOpen();
 		if (this.treasuryId) {
 			const tid = this.treasuryId;
-			const accounts = await this.withReconnect(() => this.client.lookupAccounts([tid]));
+			const accounts = await this.withReconnect((native) => native.lookupAccounts([tid]));
 			if (accounts.length > 0) return this.treasuryId;
 		}
 
@@ -604,7 +637,7 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const results = await this.withReconnect(() => this.client.createAccounts([account]));
+		const results = await this.withReconnect((native) => native.createAccounts([account]));
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
@@ -667,7 +700,7 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const results = await this.withReconnect(() => this.client.createAccounts([account]));
+		const results = await this.withReconnect((native) => native.createAccounts([account]));
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
@@ -714,7 +747,7 @@ export class TrustTBClient {
 			flags: AccountFlags.debits_must_not_exceed_credits | AccountFlags.history,
 			timestamp: 0n,
 		};
-		const results = await this.withReconnect(() => this.client.createAccounts([account]));
+		const results = await this.withReconnect((native) => native.createAccounts([account]));
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
@@ -838,7 +871,7 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const results = await this.withReconnect(() => this.client.createTransfers([transfer]));
+		const results = await this.withReconnect((native) => native.createTransfers([transfer]));
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
@@ -898,7 +931,7 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const results = await this.withReconnect(() => this.client.createTransfers([transfer]));
+		const results = await this.withReconnect((native) => native.createTransfers([transfer]));
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
@@ -947,7 +980,7 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const results = await this.withReconnect(() => this.client.createTransfers([transfer]));
+		const results = await this.withReconnect((native) => native.createTransfers([transfer]));
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
@@ -1009,7 +1042,7 @@ export class TrustTBClient {
 			timestamp: 0n,
 		};
 
-		const results = await this.withReconnect(() => this.client.createTransfers([transfer]));
+		const results = await this.withReconnect((native) => native.createTransfers([transfer]));
 		if (results.length > 0) {
 			const res = results[0];
 			if (!res) throw new Error("Unknown account/transfer error");
@@ -1040,13 +1073,13 @@ export class TrustTBClient {
 
 	async lookupTransfer(transferId: bigint): Promise<Transfer | null> {
 		this.assertOpen();
-		const transfers = await this.withReconnect(() => this.client.lookupTransfers([transferId]));
+		const transfers = await this.withReconnect((native) => native.lookupTransfers([transferId]));
 		return transfers.length > 0 ? (transfers[0] as Transfer) : null;
 	}
 
 	async lookupAccounts(accountIds: bigint[]): Promise<Account[]> {
 		this.assertOpen();
-		return await this.withReconnect(() => this.client.lookupAccounts(accountIds));
+		return await this.withReconnect((native) => native.lookupAccounts(accountIds));
 	}
 
 	async lookupBalance(accountId: bigint): Promise<{
@@ -1055,7 +1088,7 @@ export class TrustTBClient {
 		total: number;
 	}> {
 		this.assertOpen();
-		const accounts = await this.withReconnect(() => this.client.lookupAccounts([accountId]));
+		const accounts = await this.withReconnect((native) => native.lookupAccounts([accountId]));
 		if (accounts.length === 0) throw new Error(`Account not found: ${accountId}`);
 		return accountBalance(accounts[0] as Account);
 	}
@@ -1085,7 +1118,7 @@ export class TrustTBClient {
 		this.assertOpen();
 		if (accountIds.length === 0) return new Map();
 		const uniqueIds = [...new Set(accountIds)];
-		const accounts = await this.withReconnect(() => this.client.lookupAccounts(uniqueIds));
+		const accounts = await this.withReconnect((native) => native.lookupAccounts(uniqueIds));
 		const balances = new Map<bigint, number>();
 		for (const acct of accounts as Account[]) {
 			balances.set(acct.id, accountBalance(acct).available);
@@ -1101,7 +1134,7 @@ export class TrustTBClient {
 				return Date.now() - this.startedAt < this.initGraceMs;
 			}
 			const tid = this.treasuryId;
-			const accounts = await this.withReconnect(() => this.client.lookupAccounts([tid]));
+			const accounts = await this.withReconnect((native) => native.lookupAccounts([tid]));
 			return accounts.length > 0;
 		} catch {
 			return false;
@@ -1118,5 +1151,9 @@ export class TrustTBClient {
 			this.healthCheckInterval = null;
 		}
 		this.client.destroy();
+		// Only once that returned. A native destroy that throws leaves its client here, refused
+		// by native(), for a second destroy() to retry. Past this line nothing in this object
+		// holds the native client.
+		this.client = CLOSED_CLIENT;
 	}
 }
