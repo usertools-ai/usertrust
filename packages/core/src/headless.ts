@@ -1521,6 +1521,20 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 		},
 
 		async settle(auth: Authorization, params?: SettleParams): Promise<TrustReceipt> {
+			// Caller input, read ONCE and FIRST: every SettleParams field, into a plain
+			// local, before this call claims anything. A getter runs here, before any state
+			// changes: one that throws leaves the hold untouched (live, still settleable),
+			// and one that ends the hold itself (release, abort) is the first terminal, so
+			// the claim below refuses this settle. Nothing below re-reads `params`.
+			const input = {
+				inputTokens: params?.inputTokens,
+				outputTokens: params?.outputTokens,
+				cacheReadTokens: params?.cacheReadTokens,
+				cacheWriteTokens: params?.cacheWriteTokens,
+				usageSource: params?.usageSource,
+				chunksDelivered: params?.chunksDelivered,
+				computeMs: params?.computeMs,
+			};
 			// One `get` where there used to be `has` + a read off the caller's object:
 			// the presence check and the attribution now come from the same internal
 			// record, so liveness and provenance cannot disagree. Semantics are
@@ -1571,16 +1585,16 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				const endpoint = auth.endpoint ?? defaultEndpoint;
 				const rateInfo = resolveRates(model, endpoint.class, config);
 
-				// D5 — read the caller's object ONCE, into a local. The presence check
-				// below and the counts that get priced and recorded then come from the
-				// same read, so a caller whose `SettleParams` is a live object (a proxy,
+				// D5 — the caller's object was read ONCE, into `input`, at entry. The
+				// presence check below and the counts that get priced and recorded then
+				// come from that read, so a caller whose `SettleParams` is a live object (a proxy,
 				// a getter over a running accumulator) cannot have "reported?" answered
 				// off one value and the money computed off another.
 				const reportedCounts = {
-					inputTokens: params?.inputTokens,
-					outputTokens: params?.outputTokens,
-					cacheReadTokens: params?.cacheReadTokens,
-					cacheWriteTokens: params?.cacheWriteTokens,
+					inputTokens: input.inputTokens,
+					outputTokens: input.outputTokens,
+					cacheReadTokens: input.cacheReadTokens,
+					cacheWriteTokens: input.cacheWriteTokens,
 				};
 				// D4/D5: the reported-usage condition is WIDENED to the cache tiers. It
 				// read only input/output, so a settle carrying nothing but cache counts
@@ -1608,7 +1622,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					outputTokens: reportedCounts.outputTokens ?? 0,
 					cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
 					cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
-					source: usageReported ? (params?.usageSource ?? "provider") : "estimated",
+					source: usageReported ? (input.usageSource ?? "provider") : "estimated",
 				});
 				// Present IFF provider-sourced (D5) — the single rule, in one place.
 				const usageRecord = publishableUsage(usageSnapshot);
@@ -1772,9 +1786,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 							// P1-2: its own frozen copy.
 							appliedRates: copyAppliedRates(appliedRates),
 							pricingTableVersion: PRICING_TABLE_VERSION,
-							...(params?.chunksDelivered != null
-								? { chunksDelivered: params.chunksDelivered }
-								: {}),
+							...(input.chunksDelivered != null ? { chunksDelivered: input.chunksDelivered } : {}),
 							source: "headless",
 							...costCenterAudit,
 							...principalAudit,
@@ -1880,10 +1892,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 					meter: {
 						costBasis: rateInfo.costBasis,
 						rateSource: rateInfo.rateSource,
-						...(params?.computeMs != null &&
-						Number.isFinite(params.computeMs) &&
-						params.computeMs >= 0
-							? { computeMs: params.computeMs }
+						...(input.computeMs != null && Number.isFinite(input.computeMs) && input.computeMs >= 0
+							? { computeMs: input.computeMs }
 							: {}),
 					},
 					// D5: what the rates WERE, beside where they came from. Only this makes
@@ -1894,7 +1904,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						appliedRates: copyAppliedRates(appliedRates),
 						tableVersion: PRICING_TABLE_VERSION,
 					},
-					...(params?.chunksDelivered != null ? { chunksDelivered: params.chunksDelivered } : {}),
+					...(input.chunksDelivered != null ? { chunksDelivered: input.chunksDelivered } : {}),
 					...(postedCost !== undefined ? { postedCost } : {}),
 					...(settledBudget !== undefined ? { budget: settledBudget } : {}),
 					...(callAuditDegraded ? { auditDegraded: true as const } : {}),

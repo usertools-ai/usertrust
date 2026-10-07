@@ -4,18 +4,22 @@
 /**
  * Exactly one ledger mutation per hold, claimed synchronously (AGENTS.md, Money).
  *
- * `settle()` claims its hold and then reads caller input: the `SettleParams` fields,
- * and the handle's own. Any of those can be a getter, and a getter can call
- * `release()` or `abort()` on the very hold being settled, synchronously, before
- * settle has started its POST. Both terminals then found the hold in
- * `unpostedHolds` (settle's "claimed, not yet POSTed" set, there so a settle that
- * throws before its POST leaves a voidable hold) and claimed it, and the ledger saw a
- * POST and a VOID for one hold: two terminal records, and the in-flight budget given
- * back twice.
+ * `settle()` used to claim its hold and only then read caller input: the
+ * `SettleParams` fields, and the handle's own. Any of those can be a getter, and a
+ * getter can call `release()` or `abort()` on the very hold being settled. Both
+ * terminals then found the hold in `unpostedHolds` (settle's "claimed, not yet
+ * POSTed" set) and claimed it too, and the ledger got a POST and a VOID for one hold:
+ * two terminal records, and the in-flight budget given back twice. It was
+ * pre-existing in `abort()`; `release()` inherited it.
  *
- * A settle attempt now OWNS its hold from the claim: `release()` and `abort()` stay
- * out (`released: false`, a silent abort) until that attempt has either posted, or
- * failed before posting, at which point the hold is theirs again.
+ * Two rules close it, and each has its own tests here:
+ *  - `settle()` reads every `SettleParams` field ONCE, FIRST, before it claims the
+ *    hold. A getter that ends the hold is then the first terminal, and settle is
+ *    refused. A getter that throws fails before any state change.
+ *  - `settle()` OWNS the hold from its claim to its end (`settling`). What it still
+ *    reads afterwards, the handle's own fields, cannot end the hold under it, for a
+ *    session hold or an attributed one (which takes no budget lock, so nothing but
+ *    ownership can stop it). A settle that throws before its POST hands the hold back.
  */
 
 import { randomUUID } from "node:crypto";
@@ -24,6 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppendEventInput, AuditWriter } from "../../src/audit/chain.js";
+import { withCostCenter } from "../../src/budget/attribution.js";
 import type { TrustEngine } from "../../src/govern.js";
 import {
 	type Authorization,
@@ -50,6 +55,10 @@ vi.mock("tigerbeetle-node", () => ({
 
 const MODEL = "claude-sonnet-4-6";
 const AUTHORIZE = { model: MODEL, estimatedInputTokens: 100, maxOutputTokens: 100 };
+const SCOPE_OPTS = { allocated: 10_000, periodStartMs: Date.UTC(2026, 9, 1, 0, 0, 0) };
+
+type Hold = "session" | "attributed";
+type Terminal = "release" | "abort";
 
 let vaultBase: string;
 let events: AppendEventInput[];
@@ -89,7 +98,7 @@ function audit(): AuditWriter {
 	};
 }
 
-/** An engine that records every POST and VOID it is asked for. */
+/** An engine that records every POST and VOID, and funds any envelope it is asked about. */
 function engine(): TrustEngine {
 	return {
 		spendPending: vi.fn(async (p: { transferId: string }) => ({ transferId: p.transferId })),
@@ -100,14 +109,16 @@ function engine(): TrustEngine {
 			ledger.voids.push(transferId);
 		}),
 		voidAllPending: vi.fn(async () => {}),
+		lookupBalances: vi.fn(async (ids: bigint[]) => new Map(ids.map((id) => [id, 5_000]))),
 		destroy: vi.fn(),
 	};
 }
 
-async function governor(withLedger: boolean): Promise<Governor> {
+async function governor(withLedger = true): Promise<Governor> {
 	const gov = await createGovernor({
 		budget: 1_000_000,
 		vaultBase,
+		parentUserId: "acme",
 		_audit: audit(),
 		...(withLedger ? { _engine: engine() } : { dryRun: true }),
 	});
@@ -115,7 +126,20 @@ async function governor(withLedger: boolean): Promise<Governor> {
 	return gov;
 }
 
-/** SettleParams whose first field read runs `during` against the hold being settled. */
+/** A session hold, or one attributed to a cost-center envelope (no budget lock on its terminals). */
+function hold(gov: Governor, kind: Hold): Promise<Authorization> {
+	return kind === "session"
+		? gov.authorize(AUTHORIZE)
+		: withCostCenter("research", () => gov.authorize(AUTHORIZE), SCOPE_OPTS);
+}
+
+function end(gov: Governor, auth: Authorization, terminal: Terminal): Promise<unknown> {
+	return terminal === "release"
+		? gov.release(auth, "from a getter")
+		: gov.abort(auth, new Error("from a getter"));
+}
+
+/** SettleParams whose first field read runs `during`. */
 function paramsCalling(during: () => unknown): SettleParams {
 	return {
 		get inputTokens(): number {
@@ -126,73 +150,75 @@ function paramsCalling(during: () => unknown): SettleParams {
 	};
 }
 
-const terminals = () => events.map((e) => e.kind).filter((k) => k !== "settlement_shortfall");
+/** The same hold, through a handle whose `model` getter runs `during` (read after the claim). */
+function handleCalling(auth: Authorization, during: () => unknown): Authorization {
+	let ran = false;
+	return Object.create(auth, {
+		model: {
+			get(): string {
+				if (!ran) {
+					ran = true;
+					during();
+				}
+				return auth.model;
+			},
+		},
+	}) as Authorization;
+}
 
-describe("a getter inside settle() cannot end the hold settle owns", () => {
-	for (const withLedger of [true, false]) {
-		const where = withLedger ? "with a ledger" : "in dry run";
+const kinds = () => events.map((e) => e.kind);
+const RECORD: Record<Terminal, string> = { release: "hold_released", abort: "llm_call_failed" };
 
-		it(`${where}: release() from a SettleParams getter answers released: false; one POST, one record`, async () => {
-			const gov = await governor(withLedger);
-			const before = gov.budgetRemaining();
-			const auth = await gov.authorize(AUTHORIZE);
-			let inner: Promise<unknown> | undefined;
-			const receipt = await gov.settle(
-				auth,
-				paramsCalling(() => {
-					inner = gov.release(auth, "from a getter");
-				}),
-			);
-			expect(await inner).toEqual({ released: false });
-			expect(ledger).toEqual(
-				withLedger ? { posts: [auth.transferId], voids: [] } : { posts: [], voids: [] },
-			);
-			expect(terminals()).toEqual(["llm_call"]);
-			// The hold's budget came back once: what is left is the budget less the charge.
-			expect(gov.budgetRemaining()).toBe(before - receipt.cost);
-		});
-
-		it(`${where}: abort() from a SettleParams getter is silent; one POST, one record`, async () => {
-			const gov = await governor(withLedger);
-			const before = gov.budgetRemaining();
-			const auth = await gov.authorize(AUTHORIZE);
-			let inner: Promise<unknown> | undefined;
-			const receipt = await gov.settle(
-				auth,
-				paramsCalling(() => {
-					inner = gov.abort(auth, new Error("from a getter"));
-				}),
-			);
-			await inner;
-			expect(ledger).toEqual(
-				withLedger ? { posts: [auth.transferId], voids: [] } : { posts: [], voids: [] },
-			);
-			expect(terminals()).toEqual(["llm_call"]);
-			expect(gov.budgetRemaining()).toBe(before - receipt.cost);
-		});
+describe("a SettleParams getter runs BEFORE the claim: the hold it ends is ended once", () => {
+	for (const kind of ["session", "attributed"] as const) {
+		for (const terminal of ["release", "abort"] as const) {
+			it(`${kind} hold, ${terminal}() from the getter: one VOID, no POST, and settle is refused`, async () => {
+				const gov = await governor();
+				const before = gov.budgetRemaining();
+				const auth = await hold(gov, kind);
+				events.length = 0;
+				let inner: Promise<unknown> | undefined;
+				await expect(
+					gov.settle(
+						auth,
+						paramsCalling(() => {
+							inner = end(gov, auth, terminal);
+						}),
+					),
+				).rejects.toThrow("is not active");
+				const answer = await inner;
+				if (terminal === "release") expect(answer).toEqual({ released: true });
+				expect(ledger).toEqual({ posts: [], voids: [auth.transferId] });
+				expect(kinds()).toEqual([RECORD[terminal]]);
+				// The hold's budget came back once, never twice.
+				expect(gov.budgetRemaining()).toBe(before);
+			});
+		}
 	}
 
-	it("a getter on the HANDLE is held off the same way", async () => {
-		const gov = await governor(true);
-		const auth = await gov.authorize(AUTHORIZE);
-		let inner: Promise<unknown> | undefined;
-		const handle: Authorization = Object.create(auth, {
-			model: {
-				get(): string {
-					inner ??= gov.release(handle, "from the handle");
-					return MODEL;
-				},
-			},
-		});
-		await gov.settle(handle, { inputTokens: 10, outputTokens: 10 });
-		expect(await inner).toEqual({ released: false });
-		expect(ledger).toEqual({ posts: [auth.transferId], voids: [] });
-		expect(terminals()).toEqual(["llm_call"]);
+	it("dry run, the same: one record, and the budget back once", async () => {
+		for (const terminal of ["release", "abort"] as const) {
+			const gov = await governor(false);
+			const before = gov.budgetRemaining();
+			const auth = await gov.authorize(AUTHORIZE);
+			events.length = 0;
+			let inner: Promise<unknown> | undefined;
+			await expect(
+				gov.settle(
+					auth,
+					paramsCalling(() => {
+						inner = end(gov, auth, terminal);
+					}),
+				),
+			).rejects.toThrow("is not active");
+			await inner;
+			expect(kinds()).toEqual([RECORD[terminal]]);
+			expect(gov.budgetRemaining()).toBe(before);
+		}
 	});
 
-	it("a settle that throws before its POST hands the hold back: release() then ends it, once", async () => {
-		const gov = await governor(true);
-		const before = gov.budgetRemaining();
+	it("a SettleParams getter that THROWS fails before any state change: the hold is still live", async () => {
+		const gov = await governor();
 		const auth = await gov.authorize(AUTHORIZE);
 		const throwing = {
 			get inputTokens(): number {
@@ -200,9 +226,56 @@ describe("a getter inside settle() cannot end the hold settle owns", () => {
 			},
 		};
 		await expect(gov.settle(auth, throwing)).rejects.toThrow("caller getter threw");
+		// Never claimed, so it settles normally afterwards.
+		const receipt = await gov.settle(auth, { inputTokens: 10, outputTokens: 10 });
+		expect(receipt.settled).toBe(true);
+		expect(ledger).toEqual({ posts: [auth.transferId], voids: [] });
+	});
+});
+
+describe("a getter on the HANDLE runs after the claim: settle owns the hold, and wins", () => {
+	for (const kind of ["session", "attributed"] as const) {
+		for (const terminal of ["release", "abort"] as const) {
+			it(`${kind} hold, ${terminal}() from the handle: one POST, no VOID, no ${RECORD[terminal]}`, async () => {
+				const gov = await governor();
+				const before = gov.budgetRemaining();
+				const auth = await hold(gov, kind);
+				events.length = 0;
+				let inner: Promise<unknown> | undefined;
+				const receipt = await gov.settle(
+					handleCalling(auth, () => {
+						inner = end(gov, auth, terminal);
+					}),
+					{ inputTokens: 10, outputTokens: 10 },
+				);
+				const answer = await inner;
+				if (terminal === "release") expect(answer).toEqual({ released: false });
+				expect(ledger).toEqual({ posts: [auth.transferId], voids: [] });
+				expect(kinds().filter((k) => k !== "settlement_shortfall")).toEqual(["llm_call"]);
+				// A session hold is charged once and given back once; an attributed one
+				// never touched the session's numbers.
+				expect(gov.budgetRemaining()).toBe(kind === "session" ? before - receipt.cost : before);
+			});
+		}
+	}
+
+	it("a settle that throws AFTER its claim, before its POST, hands the hold back: release() ends it once", async () => {
+		const gov = await governor();
+		const before = gov.budgetRemaining();
+		const auth = await gov.authorize(AUTHORIZE);
+		const throwing = Object.create(auth, {
+			model: {
+				get(): string {
+					throw new Error("handle getter threw");
+				},
+			},
+		}) as Authorization;
+		await expect(gov.settle(throwing, { inputTokens: 10, outputTokens: 10 })).rejects.toThrow(
+			"handle getter threw",
+		);
 		expect(await gov.release(auth, "settle failed")).toEqual({ released: true });
 		expect(ledger).toEqual({ posts: [], voids: [auth.transferId] });
-		expect(terminals()).toEqual(["hold_released"]);
+		expect(kinds().filter((k) => k !== "policy_denied")).toEqual(["hold_released"]);
 		expect(gov.budgetRemaining()).toBe(before);
 	});
 });
