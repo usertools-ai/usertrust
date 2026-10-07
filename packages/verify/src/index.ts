@@ -25,6 +25,7 @@ import {
 import { canonicalize } from "./canonical.js";
 import { GENESIS_HASH } from "./constants.js";
 import {
+	RELEASE_KINDS,
 	type ReceiptData,
 	renderNotFound,
 	renderReceipt,
@@ -686,6 +687,8 @@ function normalizeEvent(raw: unknown): TransactionEvent {
 	const cost = num(d.cost);
 	const error = str(d.error);
 	const message = str(d.message);
+	const reason = str(d.reason);
+	const voidError = str(d.voidError);
 
 	return {
 		id: str(o.id) ?? "",
@@ -700,6 +703,8 @@ function normalizeEvent(raw: unknown): TransactionEvent {
 			...(typeof d.settled === "boolean" ? { settled: d.settled } : { settled: undefined }),
 			...(error !== undefined ? { error } : { error: undefined }),
 			...(message !== undefined ? { message } : { message: undefined }),
+			...(reason !== undefined ? { reason } : { reason: undefined }),
+			...(voidError !== undefined ? { voidError } : { voidError: undefined }),
 			// PRESERVED for the same reason, and a sharper one: defaulting to ""
 			// mapped every event WITHOUT a transferId onto the same empty id, so
 			// `--tx ""` (an unset shell variable) matched them and returned
@@ -818,6 +823,9 @@ export function verifyTransaction(
 	// money and will never settle, which is exactly what "terminal" means here.
 	const isDenialTerminal = (e: TransactionEvent): boolean =>
 		e.kind === "policy_denied" || e.kind === "ledger_rejected";
+	// A RELEASE is conclusive at the failure tier: a hold given back moved no money and
+	// will never settle, so a later appended `settled: true` must not rewrite it.
+	const isReleaseTerminal = (e: TransactionEvent): boolean => RELEASE_KINDS.has(e.kind);
 	// `settlement_ambiguous` is CONCLUSIVE and comes FIRST. The producer appends it
 	// BEFORE the `llm_call` it corrects (`headless.ts:1425` then `:1484`;
 	// `govern.ts:1798` then `:1887`), so a crash or a failed second append can
@@ -830,6 +838,7 @@ export function verifyTransaction(
 		e.data.settled !== undefined ||
 		isFailureTerminal(e) ||
 		isDenialTerminal(e) ||
+		isReleaseTerminal(e) ||
 		e.kind === "settlement_ambiguous";
 
 	// FIRST TERMINAL IN CHAIN ORDER WINS. Not the best-TYPED terminal anywhere in
@@ -873,7 +882,8 @@ export function verifyTransaction(
 		firstTerminal !== undefined &&
 		firstTerminal.data.settled !== undefined &&
 		!isFailureTerminal(firstTerminal) &&
-		!isDenialTerminal(firstTerminal);
+		!isDenialTerminal(firstTerminal) &&
+		!isReleaseTerminal(firstTerminal);
 	const targetEvent =
 		ambiguity !== undefined && (firstTerminal === undefined || firstIsSettlement)
 			? ambiguity

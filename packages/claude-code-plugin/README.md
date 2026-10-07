@@ -341,8 +341,9 @@ nothing else. A call you reject at the prompt, or one a permission rule or
 another hook denies, fires none of PostToolUse, PostToolUseFailure and
 PermissionDenied.
 
-**Known limitation: on today's server, giving holds back can briefly fail every
-call.** The usertrust-server has no release route, so the plugin gives a hold
+**Known limitation: on a server without `release`, giving holds back can briefly
+fail every call.** A usertrust-server that does not publish `release` in its
+capabilities (3.4.0 and earlier) has no release route, so the plugin gives a hold
 back by aborting it in two places: leftover holds at Stop, SubagentStop and
 SessionEnd, and the cleanups after a failure (an unanswered transcript settle, a
 hold record that could not be written). The server counts each abort as a failure.
@@ -352,8 +353,10 @@ together and the server's own TTL sweep aborts them, about five minutes later. T
 tenant's authorizations then fail (500) for at least a minute after the last
 abort. After that minute they are let through again, and two successful settles
 close the breaker. Meanwhile each call is a `gap` in watch mode, and in enforce
-mode it is blocked unless `UT_FAIL_OPEN=1`.
-Tracked in [#238](https://github.com/usertools-ai/usertrust/issues/238).
+mode it is blocked unless `UT_FAIL_OPEN=1`. A server that publishes `release` is
+not affected: the plugin gives every hold back through `/v1/release`, which counts
+as neither a failure nor a success, and the server's own sweep releases expired
+holds the same way ([#238](https://github.com/usertools-ai/usertrust/issues/238)).
 
 **A tool call that is deferred and then resumed keeps one hold.** In a
 `claude -p` run, another PreToolUse hook can
@@ -369,8 +372,8 @@ again, and the plugin finds the hold the call already has.
   - A hold carrying transcript usage is settled once, at its counts.
   - Any other hold is given back only through a `release` the server advertises,
     and never aborted. On a server without `release`, it counts against the budget
-    until the server's pending-hold sweep voids it: a call can be refused early,
-    never overspend.
+    until the server's pending-hold sweep voids it, which is one of the aborts
+    above: a call can be refused early, never overspend.
   - **Another server or key.** A call resumed under another server or key
     (`UT_SERVER_URL`, `UT_SERVER_KEY`) never touches its earlier hold through the
     new one. Each record carries the server's URL and a hash of the key (never the

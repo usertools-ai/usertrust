@@ -9,10 +9,18 @@ export type { GovernorFactory } from "./pool.js";
 export { GovernorPool } from "./pool.js";
 export type { UsertrustServer } from "./server.js";
 export { createUsertrustServer } from "./server.js";
-export type { AuthorizeRequest, AuthorizeResponse, SettleRequest, ShadowResponse } from "./wire.js";
+export type {
+	AuthorizeRequest,
+	AuthorizeResponse,
+	ReleaseRequest,
+	ReleaseResponse,
+	SettleRequest,
+	ShadowResponse,
+} from "./wire.js";
 export {
 	AbortRequestSchema,
 	AuthorizeRequestSchema,
+	ReleaseRequestSchema,
 	SettleRequestSchema,
 	toHttpError,
 } from "./wire.js";

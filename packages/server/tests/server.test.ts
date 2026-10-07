@@ -99,7 +99,12 @@ describe("HTTP control plane", () => {
 		for (const dryRun of [true, false]) {
 			const { base } = await start({ dryRun });
 			const body = (await (await fetch(`${base}/v1/health`)).json()) as { capabilities?: unknown };
-			expect(body.capabilities).toEqual(["principal", "authorize-cache-tiers", "hold-expiry"]);
+			expect(body.capabilities).toEqual([
+				"principal",
+				"authorize-cache-tiers",
+				"hold-expiry",
+				"release",
+			]);
 			await server?.close();
 			server = undefined;
 		}
@@ -270,14 +275,16 @@ describe("HTTP control plane", () => {
 		expect(server.pendingCount()).toBe(0);
 	});
 
-	it("close() aborts remaining pending holds", async () => {
+	it("close() RELEASES remaining pending holds: a shutdown is no failure", async () => {
 		const { base, fake } = await start();
 		const auth = (await (
 			await post(base, "/v1/authorize", { model: "m", estimatedInputTokens: 1, maxOutputTokens: 1 })
 		).json()) as { transferId: string };
 		expect(server?.pendingCount()).toBe(1);
 		await server?.close();
-		expect(fake.calls.aborted).toEqual([auth.transferId]);
+		expect(fake.calls.released).toEqual([auth.transferId]);
+		expect(fake.calls.releaseReasons).toEqual(["server shutdown"]);
+		expect(fake.calls.aborted).toEqual([]);
 		expect(server?.pendingCount()).toBe(0);
 		server = undefined;
 	});

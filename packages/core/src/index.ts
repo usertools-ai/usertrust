@@ -93,7 +93,13 @@ export { exportMarkdown } from "./export/markdown.js";
 export type { TrustedClient, TrustOpts } from "./govern.js";
 // Core
 export { trust } from "./govern.js";
-export type { Authorization, AuthorizeParams, Governor, SettleParams } from "./headless.js";
+export type {
+	Authorization,
+	AuthorizeParams,
+	Governor,
+	ReleaseOutcome,
+	SettleParams,
+} from "./headless.js";
 // Headless governance (non-SDK integrations)
 export {
 	createGovernor,
@@ -101,6 +107,7 @@ export {
 	type PrincipalLedgerTags,
 	principalFieldRefusal,
 	principalLedgerTags,
+	sanitizeReleaseReason,
 } from "./headless.js";
 // The ledger client is the required first argument of every budget entry point
 // above. Without it at the root those functions can be imported but never
