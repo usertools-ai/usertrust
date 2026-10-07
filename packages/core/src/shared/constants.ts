@@ -13,7 +13,8 @@ export const DEFAULT_HOLD_TTL_MS = 5 * 60 * 1000; // 5 minutes
  * process remembers. A headless handle publishes it as `Authorization.holdTimeoutMs`,
  * a duration, and usertrust-server derives each hold's advertised remaining life
  * from it (`expiresInMs`). A client that decides a hold is abandoned must wait
- * longer than this.
+ * longer than this: the Claude Code plugin's `STALE_SETTLING_MS` does, pinned by its
+ * `tests/stale-settling.test.ts`.
  */
 export const LEDGER_HOLD_TIMEOUT_MS = 5 * 60 * 1000;
 export const DEFAULT_BUDGET = 50_000;
