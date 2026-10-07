@@ -92,14 +92,14 @@ describe("HTTP control plane", () => {
 		expect(fake.calls.settled).toHaveLength(1);
 	});
 
-	it("/v1/health advertises the principal capability — in dryRun AND with a ledger", async () => {
+	it("/v1/health advertises its capabilities — in dryRun AND with a ledger", async () => {
 		// A client sends `principal` only to a server that lists it (an older server
 		// strips the key and records the call as nobody's), so a missing entry here
 		// silently loses all attribution.
 		for (const dryRun of [true, false]) {
 			const { base } = await start({ dryRun });
 			const body = (await (await fetch(`${base}/v1/health`)).json()) as { capabilities?: unknown };
-			expect(body.capabilities).toEqual(["principal", "authorize-cache-tiers"]);
+			expect(body.capabilities).toEqual(["principal", "authorize-cache-tiers", "hold-expiry"]);
 			await server?.close();
 			server = undefined;
 		}

@@ -161,8 +161,14 @@ const CURSOR_VERSION = 2;
 const READABLE_CURSOR_VERSIONS = new Set([1, 2]);
 /** A lock older than this is a crashed holder, not a live one. */
 const STALE_LOCK_MS = 60_000;
-/** A hold left "settling" this long belongs to a crashed hook. */
-const STALE_SETTLING_MS = 10 * 60_000;
+/**
+ * A hold left "settling" this long belongs to a crashed hook. It must stay ABOVE the
+ * ledger's pending timeout (core's `LEDGER_HOLD_TIMEOUT_MS`, 5 min): the journal then
+ * clears a stale record without giving its hold back, which strands nothing only
+ * because the ledger has expired that hold by then. Pinned by
+ * `tests/stale-settling.test.ts`.
+ */
+export const STALE_SETTLING_MS = 10 * 60_000;
 const ID_HISTORY = 10_000;
 const MAX_ID_CHARS = 256;
 /** A transcript is read a chunk of this size at a time: a hook's memory stays bounded. */
@@ -818,8 +824,8 @@ async function reconcile(cursor, sessionId, agentId) {
 		} else if (record.kind === "settling" && now - record.mtimeMs > STALE_SETTLING_MS) {
 			// Its hook died mid-settle: the outcome is unknown. An ESTIMATE hold's
 			// .settling lands here too, with no ids: fresh, it adds nothing to `live`;
-			// stale, its hold is long past the server's five-minute TTL, so clearing the
-			// file is all there is left to do.
+			// stale, its hold is past the ledger's pending timeout (STALE_SETTLING_MS), so
+			// clearing the file is all there is left to do.
 			holdUnresolved(cursor, record);
 			finished.push(record.path);
 		} else {

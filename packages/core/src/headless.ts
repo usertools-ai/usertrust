@@ -107,7 +107,7 @@ import {
 import { detectPII } from "./policy/pii.js";
 import type { ProxyConnection } from "./proxy.js";
 import { CircuitBreakerRegistry } from "./resilience/circuit.js";
-import { DEFAULT_BUDGET, VAULT_DIR } from "./shared/constants.js";
+import { DEFAULT_BUDGET, LEDGER_HOLD_TIMEOUT_MS, VAULT_DIR } from "./shared/constants.js";
 import {
 	InsufficientBalanceError,
 	LedgerUnavailableError,
@@ -195,6 +195,14 @@ export interface Authorization {
 	 * `settle()`/`abort()` never need the account from here anyway.
 	 */
 	costCenter?: string | undefined;
+	/**
+	 * The ledger's pending timeout this call's hold was reserved with, in ms
+	 * (`LEDGER_HOLD_TIMEOUT_MS`): TigerBeetle expires the hold on its own that long
+	 * after creating it. Absent when no ledger hold was made (dry run). A DURATION,
+	 * never a clock reading, so it means the same wherever the handle is logged or
+	 * sent. usertrust-server derives each hold's remaining life from it.
+	 */
+	holdTimeoutMs?: number | undefined;
 }
 
 /**
@@ -708,6 +716,9 @@ async function createTBEngine(config: TrustConfig, seedBudget: number): Promise<
 					creditAccountId: treasury,
 					amount: params.amount,
 					code: XFER_SPEND,
+					// Named, not the client's default: the ledger expires the hold at this
+					// timeout, and a headless handle publishes it (`holdTimeoutMs`).
+					timeoutSeconds: LEDGER_HOLD_TIMEOUT_MS / 1000,
 					// The principal's roll-up tags ride the hold; post/void inherit them.
 					...(params.userData !== undefined
 						? {
@@ -1157,6 +1168,8 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 			// remain the only — and the honest — accounting for it, exactly as they are
 			// the only numbers its policy gate saw.
 			let envelopeDebited = false;
+			// Set once the ledger hold lands: its pending timeout, for the handle.
+			let ledgerHoldTimeoutMs: number | undefined;
 
 			// ── Denial boundary 2 of 2: the whole budget-mutex section ──
 			// Catch OUTSIDE the lock-releasing finally, so the append never holds
@@ -1330,6 +1343,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 						// The hold landed. Record WHICH wallet it debited, for the session
 						// accounting below and for the release on settle/abort.
 						envelopeDebited = envelope !== undefined;
+						ledgerHoldTimeoutMs = LEDGER_HOLD_TIMEOUT_MS;
 					}
 
 					// SESSION accounting tracks SESSION-WALLET money only. An attributed hold
@@ -1388,6 +1402,7 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				proxyTransferId,
 				createdAt: Date.now(),
 				endpoint,
+				...(ledgerHoldTimeoutMs !== undefined ? { holdTimeoutMs: ledgerHoldTimeoutMs } : {}),
 				// Spread-omitted so an unattributed handle keeps exactly the shape it had
 				// before envelopes (exactOptionalPropertyTypes: writing
 				// `costCenter: undefined` is a DIFFERENT type from omitting the key).
