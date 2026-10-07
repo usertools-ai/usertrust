@@ -78,6 +78,10 @@ npm, and its version is its own: the `usertrust` packages and their
   and key, charging this tenant for the other's usage. This needs
   `UT_SERVER_URL` or `UT_SERVER_KEY` to change while such a record is
   unresolved. Tracked in [#246](https://github.com/usertools-ai/usertrust/issues/246).
+- **If a settle fails and its release also fails, the old hold may stay live until
+  the server's sweep.** A later re-fire of the same call reserves a replacement,
+  double-counting the budget until then: an early refusal, never an overspend.
+  Tracked in [#248](https://github.com/usertools-ai/usertrust/issues/248).
 
 ## [1.4.0] - 2026-10-07
 

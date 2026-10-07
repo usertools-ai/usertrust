@@ -373,7 +373,10 @@ again, and the plugin finds the hold the call already has.
   - A hold carrying transcript usage is settled once, at its counts. If that
     settle fails and the server does not confirm the hold is gone (its release
     unconfirmed too), the hold may be live: no fresh hold is made beside it, and
-    the call fails as a failed authorization does.
+    the call fails as a failed authorization does. A later re-fire of the call no
+    longer finds that hold, though. It reserves a replacement, and the budget
+    counts both until the server's sweep ends the original: an early refusal,
+    never an overspend ([#248](https://github.com/usertools-ai/usertrust/issues/248)).
   - Any other hold is given back only through a `release` the server advertises,
     and never aborted. On a server without `release`, it counts against the budget
     until the server's pending-hold sweep voids it, which is one of the aborts
