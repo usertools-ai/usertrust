@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
-import type { Authorization, ReleaseOutcome } from "usertrust";
+import type { AbortOutcome, Authorization, ReleaseOutcome } from "usertrust";
 import { sanitizeReleaseReason } from "usertrust";
 import type { ServerConfig, TenantConfig } from "./config.js";
 import { resolveTenant } from "./config.js";
@@ -306,13 +306,20 @@ export function createUsertrustServer(opts: {
 		}
 		// Atomic claim with re-insert on failure (same contract as settle).
 		pending.delete(transferId);
+		let outcome: AbortOutcome;
 		try {
 			const governor = await pool.get(tenant);
-			await governor.abort(entry.auth, parsed.data.error);
+			outcome = await governor.abort(entry.auth, parsed.data.error);
 		} catch (err) {
 			pending.set(transferId, entry);
 			const mapped = toHttpError(err);
 			sendJson(res, mapped.status, mapped.body);
+			return;
+		}
+		if (!outcome.aborted) {
+			// Release's rule: the governor no longer held it, so this request aborted nothing
+			// and must not say it did, and the entry stays out.
+			sendJson(res, 404, { error: "not_found", reason: "unknown transferId" });
 			return;
 		}
 		bus.publish(tenant.id, {
@@ -321,7 +328,11 @@ export function createUsertrustServer(opts: {
 			reason: parsed.data.error ?? "aborted",
 			at: new Date().toISOString(),
 		});
-		sendJson(res, 200, { aborted: true, transferId });
+		sendJson(res, 200, {
+			aborted: true,
+			transferId,
+			...(outcome.voidError === undefined ? {} : { voidError: outcome.voidError }),
+		});
 	}
 
 	async function handleRelease(

@@ -759,8 +759,8 @@ describe("headless governor", () => {
 		const auth = await gov.authorize({ model: "claude-sonnet-4-6" });
 		await gov.destroy();
 
-		// settle should throw because auth was voided during destroy
-		await expect(gov.settle(auth)).rejects.toThrow("not active");
+		// settle should throw because auth was voided during destroy, and say why
+		await expect(gov.settle(auth)).rejects.toThrow("Governor has been destroyed");
 	});
 
 	it("abort is no-op after governor is destroyed", async () => {
@@ -773,8 +773,8 @@ describe("headless governor", () => {
 		const auth = await gov.authorize({ model: "claude-sonnet-4-6" });
 		await gov.destroy();
 
-		// abort should be idempotent (auth was voided during destroy)
-		await gov.abort(auth, new Error("test"));
+		// abort should be idempotent (auth was voided during destroy): it ended nothing
+		expect(await gov.abort(auth, new Error("test"))).toEqual({ aborted: false });
 	});
 
 	// ── Config loading from file ──

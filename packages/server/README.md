@@ -107,6 +107,11 @@ is `404` with `"reason": "unknown route"` instead, which is how a client that co
 failure. The SSE stream announces each release as `released` (shutdown included), with the reason the
 chain recorded.
 
+`/v1/abort` keeps the same rule: `200 { "aborted": true, "transferId": "…" }` (plus `voidError`) only
+when that request ended the hold, and the `aborted` event only then. A hold the governor no longer held
+(its settle in flight, or already settled, aborted or released) is `404 { "error": "not_found", "reason":
+"unknown transferId" }`.
+
 ## Keys
 
 Tenant keys are generated high-entropy secrets (`openssl rand -hex 32`), never passwords.

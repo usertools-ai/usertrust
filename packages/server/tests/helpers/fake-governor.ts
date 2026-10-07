@@ -1,4 +1,5 @@
 import type {
+	AbortOutcome,
 	Authorization,
 	AuthorizeParams,
 	EnvelopeStatus,
@@ -36,6 +37,8 @@ export function createFakeGovernor(
 		 * one that failed outright.
 		 */
 		release?: { notHeld?: boolean; voidError?: string; throws?: boolean };
+		/** How `abort` answers, by the same three options as `release`. */
+		abort?: { notHeld?: boolean; voidError?: string; throws?: boolean };
 	} = {},
 ): FakeGovernorHandle {
 	let budget = opts.budget ?? 10_000;
@@ -92,10 +95,14 @@ export function createFakeGovernor(
 				timestamp: new Date().toISOString(),
 			};
 		},
-		async abort(auth: Authorization): Promise<void> {
+		async abort(auth: Authorization): Promise<AbortOutcome> {
+			if (opts.abort?.throws === true) throw new Error("fake abort failed");
+			if (opts.abort?.notHeld === true) return { aborted: false };
 			pending.delete(auth.transferId);
 			budget += auth.estimatedCost;
 			calls.aborted.push(auth.transferId);
+			const voidError = opts.abort?.voidError;
+			return voidError === undefined ? { aborted: true } : { aborted: true, voidError };
 		},
 		async release(auth: Authorization, reason?: string): Promise<ReleaseOutcome> {
 			calls.releaseReasons.push(reason);

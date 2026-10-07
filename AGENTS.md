@@ -115,8 +115,16 @@ unconditional `throw` because the throw is right there and needs no catch to int
 Grepping `catch (denialErr)` therefore finds four, not five. Payloads and rationale live in
 `audit/denial-events.ts`.
 
-`destroy()` waits up to 5s for in-flight work, voids all remaining pending transfers, flushes and
-releases the audit writer. **Callers must call it** or the process hangs on the TigerBeetle client.
+`destroy()` waits up to 5s, one deadline for all of them, for the terminals still working (a
+settle's POST, an abort or release parked on its void). At the deadline it takes every remaining
+hold in ONE synchronous step, before its first await: it records each abort or release still in
+flight, and voids and records (`hold_released`, `governor destroyed`) each hold still held. Then it
+voids the engine's remaining pending transfers, and flushes and releases the audit writer. An
+`authorize()` refuses from destroy()'s start, and one still reserving registers no hold: it gives
+back its accounting and fails, and sends no void (the engine sweep, or the ledger's pending timeout
+within 300 s of its reserve, releases the reservation). While destroy() drains, a `settle()`, `abort()` or `release()` runs as
+before and is waited for (a settle carries a charge); from the claim at its deadline (`sweeping`)
+they refuse at entry. **Callers must call it** or the process hangs on the TigerBeetle client.
 A `process.on("beforeExit")` handler calls it too, but that is a net, not a substitute: `beforeExit`
 fires only once the event loop drains, and an open TigerBeetle client is precisely what keeps it
 from draining. The net catches a governor whose client is already closed; it cannot catch the case
@@ -155,7 +163,11 @@ settle-then-void leaving the ledger holding a debit its accounting does not.
 (a circuit-breaker success), `abort` (a failed call: a breaker failure and `llm_call_failed`), and
 `release` (a hold given back: neither, and a `hold_released` record). usertrust-server's TTL sweep
 and shutdown release; `POST /v1/release` (capability `release`) exposes it, and answers 200 only
-when the governor says it ended the hold (`{ released: true }`), else 404 `unknown transferId`. A
+when the governor says it ended the hold (`{ released: true }`), else 404 `unknown transferId`.
+`abort()` answers the same way (`{ aborted: true }` or `{ aborted: false }`, a refused void named in
+`voidError`), and `POST /v1/abort` keeps the same 200/404 rule. An abort or release is in flight
+from its synchronous claim until its record starts (`inFlight`): `destroy()` waits for it, and
+records one still in flight at its deadline, taking the record from it so it writes no second. A
 void that TigerBeetle answers `pending_transfer_expired` is a success in both `createTBEngine`
 factories: the ledger has already returned the funds. `settle()` reads every `SettleParams`
 field ONCE, FIRST, before it claims the hold, so a getter that ends the hold is the first terminal
@@ -167,7 +179,9 @@ hold takes no lock, and a fast POST can drop `settling` before the lock is acqui
 *Prevents:* routine give-backs and expiries opening a tenant's breaker (#238) and reading as failed
 calls on the chain (#204); a release counted as a success closing a breaker that real failures
 opened; an expired hold's engine entry staying behind until `destroy()`; a POST and a VOID for one
-hold when a `SettleParams` getter released or aborted it mid-settle.
+hold when a `SettleParams` getter released or aborted it mid-settle; `/v1/abort` answering 200 for a
+hold it did not abort (#240); `destroy()` voiding a hold under a terminal parked on it, or ending a
+hold with no record (#243).
 
 **Settle never exceeds the hold — and never silently fails because of it.** The hold's input side
 is a chars/4 × 1.5 heuristic (`pricing.ts`), so real usage CAN price above the reserve. Both
