@@ -432,7 +432,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- **usertrust-claude-code no longer auto-approves tool calls; permission prompts return to Claude Code's normal flow.** Its PreToolUse hook answered `allow` on every call it let through (a reservation, a shadow answer, and a call let through by `UT_FAIL_OPEN=1`), and a hook's `allow` skips Claude Code's permission prompt, so installing a budget plugin silently turned off the user's prompts. The plugin now never grants permission. The only decision it makes is `deny`; every call it does not block gets no decision and goes through the user's own permission settings. Users who installed v1.3.0 (or earlier) will see the permission prompts it had been silently skipping.
+- **usertrust-claude-code no longer auto-approves tool calls; permission prompts return to Claude Code's normal flow.** Its PreToolUse hook answered `allow` on every call it let through (a reservation, a shadow answer, and a call let through by `UT_FAIL_OPEN=1`), and a hook's `allow` skips the permission prompt Claude Code would otherwise show (deny and ask rules still apply), so installing a budget plugin silently approved every call no permission rule covered. The plugin now never grants permission. The only decision it makes is `deny`; every call it does not block gets no decision and goes through the user's own permission settings. Users who installed v1.3.0 (or earlier) will see the permission prompts it had been silently skipping.
 
 - **Merkle inclusion proofs now validate PATH TOPOLOGY against
   `(leafIndex, treeSize)`.** `verifyInclusionProof` previously folded whatever
