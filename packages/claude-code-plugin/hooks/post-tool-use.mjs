@@ -38,6 +38,7 @@ import {
 	MAX_OUTPUT_TOKENS,
 	readStdin,
 	recordPending,
+	releaseHold,
 	say,
 	serverCapabilities,
 	serverRequest,
@@ -166,18 +167,39 @@ async function settleEstimateHold({ sessionId, agentId, entry, usage, input }) {
 	// The fresh hold is settle-attempted from birth: it replaces the expired one's
 	// marker, so a settle of it that goes unanswered leaves it to Stop, never to a
 	// second settle.
-	const fresh = await recordPending(
-		sessionId,
-		agentId,
-		{
-			toolUseId: entry.toolUseId,
-			transferId,
-			...(typeof entry.estimatedInputTokens === "number"
-				? { estimatedInputTokens: entry.estimatedInputTokens }
-				: {}),
-		},
-		{ settling: true },
-	);
+	let fresh;
+	try {
+		fresh = await recordPending(
+			sessionId,
+			agentId,
+			{
+				toolUseId: entry.toolUseId,
+				transferId,
+				...(typeof entry.estimatedInputTokens === "number"
+					? { estimatedInputTokens: entry.estimatedInputTokens }
+					: {}),
+			},
+			{ settling: true },
+		);
+	} catch (err) {
+		// Unrecorded, the fresh hold could never be settled, and Stop could not find
+		// it: give it back now, as PreToolUse does on the same failure, rather than
+		// leave its reservation held until the server's TTL sweep. This call's
+		// estimate goes unrecorded: an under-count, never a second charge. The expired
+		// hold's claim goes too, since its 404 said the server has no such hold.
+		await releaseHold(transferId, "replacement hold could not be recorded", {
+			timeoutMs: Math.max(250, Math.min(5000, timeLeft())),
+		}).catch((giveBack) => {
+			say(
+				`usertrust: hold ${transferId} could not be given back (${giveBack instanceof Error ? giveBack.message : String(giveBack)}); the server's TTL sweep releases it`,
+			);
+		});
+		await unlink(claimed).catch(() => {});
+		say(
+			`usertrust: hold ${entry.transferId} expired before its settle, and its fresh hold ${transferId} could not be recorded (${err instanceof Error ? err.message : String(err)}); ${transferId} was given back, and this call's estimate is not recorded`,
+		);
+		return;
+	}
 	if (fresh !== claimed) await unlink(claimed).catch(() => {});
 	say(
 		`usertrust: hold ${entry.transferId} expired before its settle (a long permission prompt?); charging this call once on ${transferId}`,
