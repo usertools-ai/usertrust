@@ -619,7 +619,10 @@ Only a row that EXPLICITLY publishes a 1-hour rate holds it, so a TABLE model wi
 holds as before; the exception is OPERATOR-OWNED rates (a customRates row, a local rate, the
 fallback, i.e. `rateSource !== "table"`) with no explicit 1-hour rate, which hold the derived 2x input
 because settlement meters their 1-hour tokens at that derived rate
-(`holdInputRate(rates, include1h, operatorOwned)`). *Prevents:* a 1-hour write settling above its hold and being capped, which under-debits.
+(`holdInputRate(rates, include1h, operatorOwned)`). ONE predicate, `supportsCacheWrite1h`, decides
+both halves: a built-in table row with no explicit 1-hour rate is a model with NO such tier, so its
+hold reserves none AND settlement IGNORES a reported 1-hour share (`withSupported1hTier`: the write
+total prices at the single write rate and no `cacheWrite1h` is recorded), so the two cannot disagree. *Prevents:* a 1-hour write settling above its hold and being capped, which under-debits.
 *Documented consequence:* holds on headless Anthropic calls run ~60% fatter on the input leg, so a
 402 near the budget comes sooner; the same trade as below.
 *Documented consequence:* holds on cache-writing workloads run ~25% fatter than before; warm

@@ -420,6 +420,35 @@ describe("1-hour cache writes: governed paths", () => {
 		await gov.destroy();
 	});
 
+	it("a model with NO 1-hour tier (gpt-4o): a reported 1h share is ignored, so the hold covers the settle", async () => {
+		const engine = makeCappingEngine();
+		const gov = await createGovernor({
+			budget: 10_000_000,
+			vaultBase: tmpVault,
+			_engine: asEngine(engine),
+		});
+		const auth = await gov.authorize({
+			model: "gpt-4o",
+			estimatedInputTokens: 10_000,
+			maxOutputTokens: 1,
+		});
+		const held = heldAmount(engine);
+		const receipt = await gov.settle(auth, {
+			inputTokens: 0,
+			outputTokens: 1,
+			cacheWriteTokens: 10_000,
+			cacheWrite1hTokens: 10_000,
+			usageSource: "provider",
+		});
+		// gpt-4o has one write rate (its input rate, 25/1k): 10,000 x 25 / 1000 + 0.1 -> 251. Not 2x input.
+		expect(receipt.cost).toBe(251);
+		expect(receipt.cost).toBeLessThanOrEqual(held);
+		expect(receipt.postedCost).toBeUndefined();
+		expect(receipt.cacheWrite1h).toBeUndefined();
+		expect(receipt.usage?.cacheWriteTokens).toBe(10_000);
+		await gov.destroy();
+	});
+
 	it("headless authorize() holds the worst case: input leg and stated writes at the 1h rate", async () => {
 		const engine = makeCappingEngine();
 		const gov = await createGovernor({

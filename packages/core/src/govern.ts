@@ -67,6 +67,7 @@ import {
 	publishableUsageFields,
 	sanitizeUsage,
 	type UsageWireShape,
+	withSupported1hTier,
 } from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
@@ -1849,14 +1850,18 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 				// a "provider" label survives only when input AND output are usable
 				// counts, so a stream that reported neither cannot be published as
 				// provider-sourced.
-				const usageSnapshot = sanitizeUsage({
-					inputTokens: completion.usage.inputTokens,
-					outputTokens: completion.usage.outputTokens,
-					cacheReadTokens: completion.usage.cacheReadTokens,
-					cacheWriteTokens: completion.usage.cacheWriteTokens,
-					cacheWrite1hTokens: completion.usage.cacheWrite1hTokens,
-					source: completion.usageReported ? "provider" : "estimated",
-				});
+				const usageSnapshot = withSupported1hTier(
+					sanitizeUsage({
+						inputTokens: completion.usage.inputTokens,
+						outputTokens: completion.usage.outputTokens,
+						cacheReadTokens: completion.usage.cacheReadTokens,
+						cacheWriteTokens: completion.usage.cacheWriteTokens,
+						cacheWrite1hTokens: completion.usage.cacheWrite1hTokens,
+						source: completion.usageReported ? "provider" : "estimated",
+					}),
+					rateResolution.rates,
+					rateResolution.rateSource !== "table",
+				);
 				// D5: the record half of the SAME snapshot the cost comes from —
 				// present iff provider-sourced, omitted (never zero-filled) otherwise.
 				const usageAudit = publishableUsageFields(usageSnapshot, rateResolution.rates);
@@ -2575,7 +2580,11 @@ export async function trust<T>(client: T, opts?: TrustOpts): Promise<TrustedClie
 							: surfaceKind === "openai-responses"
 								? "openai-responses"
 								: "openai-completions";
-				const usageSnapshot = fromProviderResponse(response, usageShape);
+				const usageSnapshot = withSupported1hTier(
+					fromProviderResponse(response, usageShape),
+					rateResolution.rates,
+					rateResolution.rateSource !== "table",
+				);
 				// FIX: the un-inflated metering estimate, never the fattened hold
 				// (see the `meteredEstimateCost` comment at the hold-sizing site).
 				let actualCost = meteredEstimateCost;

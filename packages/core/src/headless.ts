@@ -95,7 +95,7 @@ import {
 	warnCacheRateMigration,
 	warnUnknownModel,
 } from "./ledger/pricing.js";
-import { publishableUsageFields, sanitizeUsage } from "./ledger/usage.js";
+import { publishableUsageFields, sanitizeUsage, withSupported1hTier } from "./ledger/usage.js";
 import { recordPattern } from "./memory/patterns.js";
 import { DEFAULT_RULES, mergePolicies } from "./policy/default-rules.js";
 import {
@@ -1704,14 +1704,18 @@ export async function createGovernor(opts?: GovernorOpts): Promise<Governor> {
 				// — the reason a NaN from a caller's arithmetic cannot reach audit
 				// canonicalization, which throws on non-finite — and downgrades a
 				// "provider" label whose input/output is unusable.
-				const usageSnapshot = sanitizeUsage({
-					inputTokens: reportedCounts.inputTokens ?? 0,
-					outputTokens: reportedCounts.outputTokens ?? 0,
-					cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
-					cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
-					cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
-					source: usageReported ? (input.usageSource ?? "provider") : "estimated",
-				});
+				const usageSnapshot = withSupported1hTier(
+					sanitizeUsage({
+						inputTokens: reportedCounts.inputTokens ?? 0,
+						outputTokens: reportedCounts.outputTokens ?? 0,
+						cacheReadTokens: reportedCounts.cacheReadTokens ?? 0,
+						cacheWriteTokens: reportedCounts.cacheWriteTokens ?? 0,
+						cacheWrite1hTokens: reportedCounts.cacheWrite1hTokens ?? 0,
+						source: usageReported ? (input.usageSource ?? "provider") : "estimated",
+					}),
+					rateInfo.rates,
+					rateInfo.rateSource !== "table",
+				);
 				// Present IFF provider-sourced (D5) — the single rule, in one place.
 				const usageAudit = publishableUsageFields(usageSnapshot, rateInfo.rates);
 

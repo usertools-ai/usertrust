@@ -589,9 +589,22 @@ export function effectiveCacheWrite1hRate(rates: ModelRates): number {
  * so those hold exactly as before.
  */
 function hold1hWriteRate(rates: ModelRates, operatorOwned: boolean): number {
+	return supportsCacheWrite1h(rates, operatorOwned) ? effectiveCacheWrite1hRate(rates) : 0;
+}
+
+/**
+ * Whether these rates HAVE a 1-hour cache-write tier: the row publishes an explicit rate,
+ * or the rates are operator-owned (`operatorOwned`: not a built-in table row), where the
+ * operator may be pricing an Anthropic-shaped model and a silent row means "derive it".
+ * A built-in TABLE row with no explicit 1-hour rate (Mistral, Gemini, OpenAI, ...) is a
+ * model with NO such tier. This ONE predicate decides both halves: a hold reserves the
+ * 1-hour rate only when it is true, and settlement counts a reported 1-hour share only
+ * when it is true (`withSupported1hTier`), so the two can never disagree. A share reported
+ * for a model without the tier is ignored, not priced at an invented 2x input.
+ */
+export function supportsCacheWrite1h(rates: ModelRates, operatorOwned: boolean): boolean {
 	const r = rates.cacheWrite1hPer1k;
-	if (r !== undefined && Number.isFinite(r) && r >= 0) return r;
-	return operatorOwned ? effectiveCacheWrite1hRate(rates) : 0;
+	return (r !== undefined && Number.isFinite(r) && r >= 0) || operatorOwned;
 }
 
 /**

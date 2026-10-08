@@ -6,12 +6,14 @@ import {
 	type ModelRates,
 	PRICING_TABLE,
 	requestDeclares1hCache,
+	supportsCacheWrite1h,
 } from "../../src/ledger/pricing.js";
 import {
 	fromAnthropicUsage,
 	fromOpenAICompletionsUsage,
 	publishableUsageFields,
 	sanitizeUsage,
+	withSupported1hTier,
 } from "../../src/ledger/usage.js";
 import { TrustConfigSchema } from "../../src/shared/types.js";
 
@@ -184,5 +186,40 @@ describe("customRates keeps an operator's 1h write rate", () => {
 				customRates: { m: { inputPer1k: 1, outputPer1k: 1, cacheWrite1hPer1k: -1 } },
 			}),
 		).toThrow();
+	});
+});
+
+describe("a model with no 1-hour tier ignores a reported 1-hour share", () => {
+	const gpt = PRICING_TABLE["gpt-4o"] as ModelRates;
+	const snap = sanitizeUsage({
+		inputTokens: 1,
+		outputTokens: 1,
+		cacheWriteTokens: 100,
+		cacheWrite1hTokens: 60,
+		source: "provider",
+	});
+
+	it("supportsCacheWrite1h: an explicit rate, or operator-owned rates; a built-in row without one is NO tier", () => {
+		expect(supportsCacheWrite1h(SONNET, false)).toBe(true);
+		expect(supportsCacheWrite1h(gpt, false)).toBe(false);
+		expect(supportsCacheWrite1h(gpt, true)).toBe(true); // an operator row for it may be Anthropic-shaped
+		expect(
+			supportsCacheWrite1h({ inputPer1k: 1, outputPer1k: 1, cacheWrite1hPer1k: Number.NaN }, false),
+		).toBe(false);
+	});
+
+	it("withSupported1hTier drops the share (keeping the write TOTAL) only when there is no tier", () => {
+		const dropped = withSupported1hTier(snap, gpt, false);
+		expect("cacheWrite1hTokens" in dropped).toBe(false);
+		expect(dropped.cacheWriteTokens).toBe(100);
+		expect(withSupported1hTier(snap, SONNET, false)).toBe(snap);
+		expect(withSupported1hTier(snap, gpt, true)).toBe(snap);
+		const none = sanitizeUsage({
+			inputTokens: 1,
+			outputTokens: 1,
+			cacheWriteTokens: 100,
+			source: "provider",
+		});
+		expect(withSupported1hTier(none, gpt, false)).toBe(none);
 	});
 });

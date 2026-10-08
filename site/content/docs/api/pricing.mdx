@@ -64,7 +64,8 @@ explicitly (the page's "1h cache writes" column). `cacheWriteTokens` is the TOTA
 count, and the 1-hour tokens are a **subset** of it (never added to it): the 5-minute term is
 `cacheWriteTokens - cacheWrite1hTokens`. A 1-hour count above the total is clamped to it, and a
 1-hour count with no write total prices nothing at the 1-hour rate; sent alone to a headless
-`settle()` it is not reported usage, so the settle meters at the pre-call estimate. A custom row that omits `cacheWrite1hPer1k`
+`settle()` it is not reported usage, so the settle meters at the pre-call estimate. A reported 1-hour share for a model whose built-in row publishes no 1-hour rate (Mistral, Gemini,
+OpenAI) is ignored: it has no such tier, so the whole write total prices at its single write rate. A custom row that omits `cacheWrite1hPer1k`
 resolves, in one place (`effectiveCacheWrite1hRate`), to the dearer of its 5-minute write rate and
 2x `inputPer1k`: a silent row is never billed below 2x input.
 

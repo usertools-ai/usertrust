@@ -35,7 +35,7 @@
  */
 
 import type { CacheWrite1h, ReceiptUsage } from "../shared/types.js";
-import { type ModelRates, resolveCacheWrite1h } from "./pricing.js";
+import { type ModelRates, resolveCacheWrite1h, supportsCacheWrite1h } from "./pricing.js";
 
 /**
  * A sanitized, four-tier, disjoint usage snapshot.
@@ -202,6 +202,25 @@ export function publishableUsage(snapshot: NormalizedUsage): ReceiptUsage | unde
 		cacheReadTokens: snapshot.cacheReadTokens,
 		cacheWriteTokens: snapshot.cacheWriteTokens,
 	};
+}
+
+/**
+ * The snapshot with its 1-hour share DROPPED when these rates have no 1-hour tier
+ * (`supportsCacheWrite1h`). The write TOTAL stays: it prices at the single write rate.
+ * Applied to every snapshot a governor meters from, before the cost and the records, so
+ * a model with no 1-hour tier is never billed (or recorded) at an invented 2x input
+ * because a caller reported a share for it.
+ */
+export function withSupported1hTier(
+	snapshot: NormalizedUsage,
+	rates: ModelRates,
+	operatorOwned: boolean,
+): NormalizedUsage {
+	if (snapshot.cacheWrite1hTokens === undefined || supportsCacheWrite1h(rates, operatorOwned)) {
+		return snapshot;
+	}
+	const { cacheWrite1hTokens: _dropped, ...rest } = snapshot;
+	return rest;
 }
 
 /**
