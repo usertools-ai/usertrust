@@ -472,7 +472,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A committed Claude Code settings file may hold only `$schema`, and `permissions` that
     tighten (`deny`, `ask`).
   - The guard and its allowlist are read from the base, so a change cannot allowlist itself.
-  - `.github/CODEOWNERS` names the owner of `.github/`, where the check and its allowlist live.
+  - `.github/CODEOWNERS` names an owner for the check's launcher and allowlist (`.github/`),
+    and for the guard and its tests (`scripts/agent-config-guard.mjs`, `.test.mjs`).
 
 - **usertrust-claude-code no longer auto-approves tool calls; permission prompts return to Claude Code's normal flow.** Its PreToolUse hook answered `allow` on every call it let through (a reservation, a shadow answer, and a call let through by `UT_FAIL_OPEN=1`), and a hook's `allow` skips the permission prompt Claude Code would otherwise show (deny and ask rules still apply), so installing a budget plugin silently approved every call no permission rule covered. The plugin now never grants permission. The only decision it makes is `deny`; every call it does not block gets no decision and goes through the user's own permission settings. Users who installed v1.3.0 (or earlier) will see the permission prompts it had been silently skipping.
 

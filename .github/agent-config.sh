@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The agent-config check (ci.yml's `agent-config` job), run as the BASE has it.
+# The agent-config check (the `agent-config` job), run as the BASE has it.
 #
 # A change is never graded by its own rules. The guard (scripts/agent-config-guard.mjs)
 # and its allowlist (.github/agent-config-allowlist.json) are read from the base: a pull
@@ -11,9 +11,10 @@
 #   change's copy.
 # A pull request is checked from where it branched; a push, tip to tip (the guard's
 # `--event`).
-# This file and ci.yml run from the change itself, as every workflow does: CODEOWNERS
-# names their owner, whose review a change to either needs. As this file passes its own
-# arguments to the BASE's guard, a new argument lands in the guard first, on its own.
+# This file and the workflow that runs it come from the change itself, as every workflow
+# does: CODEOWNERS names their owner, whose review a change to either needs. As this file
+# passes its own arguments to the BASE's guard, a new argument lands in the guard first, on
+# its own.
 #
 # Usage: agent-config.sh <pull_request|push> <base> <head>
 set -euo pipefail
@@ -27,8 +28,14 @@ base=$2
 head=$3
 guard=scripts/agent-config-guard.mjs
 
+present() { git rev-parse --verify --quiet "$1^{commit}" >/dev/null; }
 for commit in "$base" "$head"; do
-	if ! git rev-parse --verify --quiet "$commit^{commit}" >/dev/null; then
+	# A push that rewrote the branch leaves its old tip on no ref, so a clone of every ref lacks
+	# it: it is fetched once, by its sha. One that cannot be had either way cannot be checked.
+	if ! present "$commit" && [[ $commit =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+		git fetch --quiet --no-tags origin "$commit" 2>/dev/null || true
+	fi
+	if ! present "$commit"; then
 		echo "agent-config: CANNOT CHECK: $commit is not a commit here" >&2
 		exit 2
 	fi

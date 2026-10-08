@@ -1,11 +1,12 @@
 // The agent-config guard (agent-config-guard.mjs) and its launcher (.github/agent-config.sh),
 // run against fixture repositories: each commit is built from a full file map through a
 // temporary index, so no working tree is ever checked out. Run with
-// `node --test scripts/agent-config-guard.test.mjs`; CI runs it before the guard itself.
+// `node --test scripts/agent-config-guard.test.mjs`; CI runs it AFTER the guard itself, as
+// the workflow tests below pin: these tests are the change's own code.
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -523,5 +524,115 @@ describe("the launcher runs the guard and its allowlist as the BASE has them", (
 		const { status, out } = launch(repo, base, base, "merge_group");
 		assert.equal(status, 2, out);
 		assert.match(out, /usage: agent-config\.sh <pull_request\|push> <base> <head>/);
+	});
+
+	/** `origin` holding a pinned file the old tip had, the branch rewritten, and a clone of its refs. */
+	function rewritten() {
+		const origin = fixture();
+		const fork = origin.commit({
+			"README.md": "x",
+			...guardFiles([{ path: ".grok/sandbox.toml", why: "test", sha256: sha256("v1") }]),
+		});
+		const before = origin.commit({ ".grok/sandbox.toml": "v1" }, fork);
+		const after = origin.commit({ "README.md": "rewritten" }, fork);
+		const git = (cwd, ...args) => execFileSync("git", args, { cwd, env: ENV, encoding: "utf-8" });
+		git(origin.root, "update-ref", "refs/heads/master", after);
+		git(origin.root, "config", "uploadpack.allowAnySHA1InWant", "true");
+		const clone = mkdtempSync(join(scratch, "clone-"));
+		git(scratch, "clone", "--quiet", "--no-local", origin.root, clone);
+		const has = (sha) =>
+			spawnSync("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd: clone, env: ENV }).status ===
+			0;
+		return { clone: { root: clone }, before, after, has };
+	}
+
+	test("a push whose old tip is on no ref is fetched from origin by its sha, then checked tip to tip", () => {
+		const { clone, before, after, has } = rewritten();
+		// Control: the clone lacks the old tip, as a checkout of every ref does after the rewrite.
+		assert.equal(has(before), false);
+		fails(
+			launch(clone, before, after, "push"),
+			".grok/sandbox.toml",
+			"is pinned by the allowlist, and the change removes it",
+		);
+		assert.equal(has(before), true);
+	});
+
+	test("a commit that origin does not have either cannot be checked: exit 2", () => {
+		const { clone, after } = rewritten();
+		const missing = "1".repeat(40);
+		const { status, out } = launch(clone, missing, after, "push");
+		assert.equal(status, 2, out);
+		assert.match(out, new RegExp(`CANNOT CHECK: ${missing} is not a commit here`));
+	});
+});
+
+describe("the workflow runs the guard before any code of the change, and only for a change", () => {
+	const WORKFLOWS = join(import.meta.dirname, "..", ".github", "workflows");
+	const literal = (text) => text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+
+	/** The `agent-config` job's lines, from whichever workflow defines it: exactly one does. */
+	function job() {
+		const found = [];
+		for (const name of readdirSync(WORKFLOWS).filter((n) => /\.ya?ml$/u.test(n))) {
+			const lines = readFileSync(join(WORKFLOWS, name), "utf-8").split("\n");
+			const start = lines.indexOf("  agent-config:");
+			if (start === -1) continue;
+			const next = lines.findIndex((line, i) => i > start && /^ {2}[A-Za-z0-9_-]+:/u.test(line));
+			found.push({ name, lines: lines.slice(start, next === -1 ? lines.length : next) });
+		}
+		assert.equal(
+			found.length,
+			1,
+			`workflows defining an agent-config job: ${found.map((f) => f.name)}`,
+		);
+		return found[0].lines;
+	}
+
+	/** The job's steps, in order, each as its text. */
+	function steps(lines) {
+		const all = [];
+		for (const line of lines) {
+			if (line.startsWith("      - ")) all.push([line]);
+			else if (all.length > 0 && line.startsWith("        ")) all.at(-1).push(line);
+		}
+		return all.map((step) => step.join("\n"));
+	}
+
+	test("only the checkout and the node setup run before the guard, and the guard's tests after it", () => {
+		const all = steps(job());
+		const guard = all.findIndex((step) => step.includes("bash .github/agent-config.sh"));
+		assert.ok(guard > 0, `no guard step:\n${all.join("\n")}`);
+		for (const step of all.slice(0, guard)) {
+			assert.match(step, /^ {6}(- | {2})uses: actions\/(checkout|setup-node)@v\d+$/mu, step);
+			assert.doesNotMatch(step, /^ {8}run:/mu, step);
+		}
+		const tests = all.findIndex((step) => step.includes("node --test"));
+		assert.ok(tests > guard, `the tests run before the guard:\n${all.join("\n")}`);
+	});
+
+	test("an event that is not a change checks nothing, under a name branch protection does not require", () => {
+		const lines = job();
+		const change = "github.event_name == 'pull_request' || github.event_name == 'push'";
+		assert.ok(
+			lines.includes(
+				`    name: \${{ (${change}) && 'agent-config' || 'agent-config (no change to check)' }}`,
+			),
+			lines.join("\n"),
+		);
+		const guard = steps(lines).find((step) => step.includes("bash .github/agent-config.sh"));
+		assert.match(guard, new RegExp(`^        if: ${literal(change)}$`, "mu"), guard);
+	});
+
+	test("CODEOWNERS names an owner for the launcher, the allowlist, the guard and its tests", () => {
+		const owners = readFileSync(join(import.meta.dirname, "..", ".github", "CODEOWNERS"), "utf-8");
+		for (const path of [
+			"/.github/",
+			"/.github/agent-config-allowlist.json",
+			"/scripts/agent-config-guard.mjs",
+			"/scripts/agent-config-guard.test.mjs",
+		]) {
+			assert.match(owners, new RegExp(`^${literal(path)} @\\S+`, "mu"), path);
+		}
 	});
 });
