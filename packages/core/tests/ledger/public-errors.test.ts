@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import * as pkg from "../../src/index.js";
 import {
+	LedgerClientClosedError,
 	PendingReplayError,
 	TBTransferError,
 	TransferIdRetiredError,
@@ -22,6 +23,10 @@ describe("ledger replay errors are exported from the package entry", () => {
 		expect(pkg.TBTransferError).toBe(TBTransferError);
 		expect(new pkg.TransferIdRetiredError(1n)).toBeInstanceOf(pkg.TBTransferError);
 		expect(pkg.XFER_SPEND).toBe(XFER_SPEND);
+	});
+	it("re-exports LedgerClientClosedError: an operation on a destroyed client is told apart by type (#249)", () => {
+		expect(pkg.LedgerClientClosedError).toBe(LedgerClientClosedError);
+		expect(new pkg.LedgerClientClosedError()).toBeInstanceOf(Error);
 	});
 });
 

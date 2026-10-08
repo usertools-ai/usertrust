@@ -114,6 +114,7 @@ export {
 // above. Without it at the root those functions can be imported but never
 // called: the argument is unnameable and unconstructible outside this package.
 export {
+	LedgerClientClosedError,
 	PendingReplayError,
 	TBTransferError,
 	TransferIdRetiredError,
