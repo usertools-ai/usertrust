@@ -179,25 +179,15 @@ The settings are kept in a pin: `.local/state/usertrust/sessions/<session id>.js
 under your home as the passwd database gives it.
 - It is a regular file of yours with no group or other permission bits, in
   directories that are yours and writable by no one else.
-- A session configured through the environment whose passwd home cannot hold its
-  pin (a container user with no passwd entry, say, or a home that fails these
-  checks) keeps it in a per-user fallback instead: `/tmp/usertrust-<uid>/sessions/`
-  (`/tmp` by its real path, never `TMPDIR`), checked the same way. It is derived
-  from your uid alone, so no setting can move it, and every hook looks there after
-  the passwd home, whatever its settings now say. A configured session never makes
-  a pin there: its pin stays under the passwd home, where no environment can move it.
-  - A session has one pin, in one of the two places. A pin is made only once both
-    are known to hold none: a look at the pin's name there finds nothing. A place
-    whose directories fail these checks is looked in all the same, and a pin found
-    there is never used, nor made again elsewhere: the hook is refused. So is a hook
-    that cannot look in a place (a permission error, say), or that finds a pin in both.
-  - A fallback pin removed by the system's own cleanup of `/tmp` (after days unused
-    on macOS, at boot on many Linux systems) is made again, from the settings then
-    current, as after the sweep.
-  - A `/tmp/usertrust-<uid>` that another user made first holds none of your pins,
-    and is never looked into: a session whose passwd home can hold its pin is
-    unaffected, and one that needs the fallback is refused. One that is a link is
-    refused. A refused session runs as a pin that cannot be used does, below.
+- It has no other place. A session whose passwd home cannot hold its pin is refused,
+  below, whether it is configured through a file or the environment: a pin kept
+  anywhere else could be the session's second, and charge its usage twice. That covers
+  a user with no passwd entry (a container user, say), a passwd lookup that fails, a
+  home that does not exist, and directories that fail these checks.
+  - A lookup that fails for a moment refuses only the hooks that run meanwhile: the
+    next one finds the session's pin again.
+  - A pin is made only once a read of its name finds nothing there. A pin that is
+    there but cannot be read refuses the hook, and is never made again.
 - A configured session's pin holds the file's settings, key included: the key is in
   the config file already.
 - An environment session's pin holds the key's hash, never the key. Each hook reads
@@ -209,20 +199,18 @@ under your home as the passwd database gives it.
 - A config file that is refused is not pinned: the next hook reads it again.
 
 **A pin that cannot be used runs the hook key-less: it sends nothing, and records a
-gap.** That covers a session id that is not a safe file name, a directory or file
-that fails these checks, a corrupt pin, a place that cannot be looked in, a pin in
-both places, and a filesystem without hard links. The reason is one of
-`pin: session id refused`, `pin: dir refused (<what>)`,
-`pin: fallback dir refused (<what>)`, `pin: dir unreadable`,
-`pin: fallback dir unreadable`, `pin: in both places`, `pin: unreadable`,
-`pin: corrupt`, `pin: unwritable`, `pin: fallback dir unwritable`,
-`pin: no hard links` and `pin: fallback dir has no hard links`; for an environment
-session whose passwd home and fallback both failed, both, separated by `; `. The
-hook never reads the settings afresh in its place, which could move the state dir.
-- **Its mode is still the session's,** as its environment or config file says now,
-  or as its pin says for `pin: key changed`. An enforce session blocks every tool
-  call (with `failOpen`, lets each through as a gap) and says so at session start: it
-  never silently stops enforcing.
+gap.** That covers a session id that is not a safe file name, a passwd home that
+cannot hold the pin, a directory or file that fails these checks, a corrupt pin, and
+a filesystem without hard links. The reason is one of `pin: session id refused`,
+`pin: dir refused (<what>)` (`home` when there is no passwd home, or it cannot be
+resolved), `pin: unreadable`, `pin: corrupt`, `pin: unwritable` and
+`pin: no hard links`. The hook never sends with settings read afresh in the pin's
+place, which could move the state dir.
+- **Its mode is still the session's:** as the hook itself read it when the failure
+  came after that read (a pin that could not be written, say), else as its
+  environment or config file says now, or as its pin says for `pin: key changed`. An
+  enforce session blocks every tool call (with `failOpen`, lets each through as a
+  gap) and says so at session start: it never silently stops enforcing.
 - **A refused config file names no mode,** so its session runs watch-only.
 
 ## Real usage: what is settled, and how
